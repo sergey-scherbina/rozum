@@ -1,5 +1,11 @@
 # Changelog
 
+## tui-arrow-scroll — Arrow Up/Down always scrolls the transcript
+Completed: 2026-06-06
+Dropped the `textarea.lines().len() <= 1` guard so the Up/Down arrows scroll
+transcript history even when the input area is multi-line. Textarea cursor
+navigation moves to `Ctrl+Arrow` / `Home` / `End`. Per operator request.
+
 ## tui-autosize-input — TUI input area grows with multi-line composition
 Completed: 2026-06-06
 Replaced fixed `Constraint::Length(3)` with a dynamic
