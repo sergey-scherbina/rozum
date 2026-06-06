@@ -168,13 +168,13 @@ pub async fn run_tui(
                         app.transcript_scroll_from_bottom =
                             app.transcript_scroll_from_bottom.saturating_sub(10);
                     }
-                    // Up/Down scroll history when input is single-line; for
-                    // multi-line input they fall through to textarea cursor nav.
-                    KeyCode::Up if !ctrl && !alt && textarea.lines().len() <= 1 => {
+                    // Up/Down always scroll history; cursor navigation in the
+                    // input area uses Ctrl+Arrow / Home / End.
+                    KeyCode::Up if !ctrl && !alt => {
                         app.transcript_scroll_from_bottom =
                             app.transcript_scroll_from_bottom.saturating_add(1);
                     }
-                    KeyCode::Down if !ctrl && !alt && textarea.lines().len() <= 1 => {
+                    KeyCode::Down if !ctrl && !alt => {
                         app.transcript_scroll_from_bottom =
                             app.transcript_scroll_from_bottom.saturating_sub(1);
                     }
