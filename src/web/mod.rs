@@ -36,13 +36,13 @@ const TRANSCRIPT_CAP: usize = 2000;
 
 #[derive(Clone)]
 struct AppState {
-    conn: Arc<Mutex<RoomConnection>>,
     broadcast_tx: broadcast::Sender<String>,
     transcript: Arc<Mutex<Vec<Value>>>,
-    /// Active web users counted by their authenticated alias. Multiple tabs
-    /// from the same alias share a refcount so we only emit `joined` /
-    /// `left` for the first and last tab respectively.
-    web_users: Arc<Mutex<HashMap<String, usize>>>,
+    /// Path to the room's Unix-domain socket. Each WS connection opens its
+    /// own MCP `RoomConnection` against this socket so the authenticated
+    /// alias appears in the room as a first-class participant (visible in
+    /// the TUI participant list).
+    socket_path: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -114,12 +114,10 @@ pub async fn run_bridge_with(
         );
     }
     let transcript = Arc::new(Mutex::new(initial));
-    let web_users = Arc::new(Mutex::new(HashMap::new()));
     let state = AppState {
-        conn: Arc::clone(&conn),
         broadcast_tx: broadcast_tx.clone(),
         transcript: Arc::clone(&transcript),
-        web_users: Arc::clone(&web_users),
+        socket_path: socket_path.clone(),
     };
 
     let auth_cfg = AuthConfig {
@@ -266,35 +264,61 @@ async fn auth_layer(
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState, user: AuthUser) {
+    // Open a per-WS room connection so this web user is a first-class
+    // participant in the room (visible in TUI, agents, etc.) with their
+    // authenticated alias as the display name. Outgoing messages from this
+    // browser go through this connection, so the room knows the real
+    // speaker — no `[<alias>]: ` content prefix is needed.
+    let mut user_conn =
+        match RoomConnection::connect(&state.socket_path, &user.0, Duration::from_secs(5)).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[web-bridge] user conn for '{}': {e}", user.0);
+                return;
+            }
+        };
+    let join_result = match user_conn
+        .call_tool(
+            "_join_internal",
+            json!({ "client_info_name": user.0, "kind": "web" }),
+            Duration::from_secs(5),
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[web-bridge] join for '{}': {e}", user.0);
+            return;
+        }
+    };
+    let user_pid = tool_result_text_json(&join_result)
+        .and_then(|p| p["participant_id"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| user.0.clone());
+
     // Subscribe before snapshotting so we don't miss messages that arrive
     // between snapshot and the start of forwarding. Client deduplicates by
     // seq (any overlap is harmless).
     let mut rx = state.broadcast_tx.subscribe();
     // Tell the client which authenticated alias to display itself as. The
-    // client uses this in `me`-styled log entries; the server still enforces
-    // the same alias on every outbound submit, so a tampered client cannot
-    // post under a different name.
+    // client uses this in `me`-styled log entries.
     let hello = json!({ "kind": "hello", "name": user.0 });
     if socket.send(Message::text(hello.to_string())).await.is_err() {
+        let _ = user_conn
+            .call_tool("meeting.leave", json!({}), Duration::from_secs(2))
+            .await;
         return;
     }
 
-    // Mark this alias as online — emit `joined` only when the refcount goes
-    // from 0 to 1 so additional tabs from the same alias are quiet.
-    let alias_pid = format!("web:{}", user.0);
-    {
-        let mut users = state.web_users.lock().await;
-        let count = users.entry(user.0.clone()).or_insert(0);
-        *count += 1;
-        if *count == 1 {
-            let env = json!({
-                "kind": "joined",
-                "participant_id": alias_pid,
-                "display_name": user.0,
-            });
-            state.broadcast_tx.send(env.to_string()).ok();
-        }
-    }
+    // Web users do not call wait_my_turn (the central bridge does that on
+    // their behalf), so the room's polling array never lists them. Emit a
+    // synthetic `joined` envelope so the web UI sees them in the header
+    // chips immediately.
+    let joined = json!({
+        "kind": "joined",
+        "participant_id": user_pid,
+        "display_name": user.0,
+    });
+    state.broadcast_tx.send(joined.to_string()).ok();
     {
         let transcript = state.transcript.lock().await;
         let take = transcript.len().min(200);
@@ -317,14 +341,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, user: AuthUser) {
                             text
                         };
                         if content.is_empty() { continue; }
-                        // Always stamp with the authenticated alias — never trust
-                        // the client-supplied `name` field.
-                        let payload = format!("[{}]: {}", user.0, content);
-                        let mut conn = state.conn.lock().await;
-                        let _ = conn
+                        // Submit via the per-WS connection so the message is
+                        // attributed to the authenticated alias by the room.
+                        let _ = user_conn
                             .call_tool(
                                 "meeting.submit",
-                                serde_json::json!({ "content": payload }),
+                                serde_json::json!({ "content": content }),
                                 Duration::from_secs(5),
                             )
                             .await;
@@ -341,20 +363,19 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, user: AuthUser) {
         }
     }
 
-    // Tab closed: decrement refcount and emit `left` for the last tab.
-    let mut users = state.web_users.lock().await;
-    if let Some(count) = users.get_mut(&user.0) {
-        *count = count.saturating_sub(1);
-        if *count == 0 {
-            users.remove(&user.0);
-            let env = json!({
-                "kind": "left",
-                "participant_id": alias_pid,
-                "display_name": user.0,
-            });
-            state.broadcast_tx.send(env.to_string()).ok();
-        }
-    }
+    // WS closed: leave the room as this user so the participant disappears
+    // from the TUI and agents immediately. Also broadcast a synthetic
+    // `left` envelope so other web clients update their UI without waiting
+    // for the central polling-based detection.
+    let _ = user_conn
+        .call_tool("meeting.leave", json!({}), Duration::from_secs(2))
+        .await;
+    let env = json!({
+        "kind": "left",
+        "participant_id": user_pid,
+        "display_name": user.0,
+    });
+    state.broadcast_tx.send(env.to_string()).ok();
 }
 
 /// Listen for new transcript entries and presence changes via wait_my_turn

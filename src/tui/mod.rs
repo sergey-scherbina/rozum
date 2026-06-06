@@ -82,6 +82,7 @@ pub async fn run_tui(
             participants: m
                 .participants
                 .iter()
+                .filter(|p| !p.is_bridge())
                 .map(|p| ParticipantView {
                     name: p.display_name().to_owned(),
                     is_human: p.is_human(),
