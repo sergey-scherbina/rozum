@@ -331,10 +331,12 @@ fn apply_event(app: &mut AppState, evt: MeetingEvent) {
 fn draw_ui(f: &mut ratatui::Frame, app: &AppState, textarea: &TextArea) {
     let area = f.area();
 
-    let input_lines = textarea.lines().len().max(1) as u16;
+    // Inner width = full chunk width minus the rounded block borders.
+    let inner_width = area.width.saturating_sub(2);
+    let visual_lines = count_visual_lines(textarea.lines(), inner_width);
     let max_input_h = (area.height / 3).max(3);
     // +2 for the rounded border around the textarea block (top + bottom row).
-    let input_h = (input_lines + 2).clamp(3, max_input_h);
+    let input_h = (visual_lines + 2).clamp(3, max_input_h);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -352,8 +354,72 @@ fn draw_ui(f: &mut ratatui::Frame, app: &AppState, textarea: &TextArea) {
     draw_separator(f, chunks[1]);
     draw_transcript(f, app, chunks[2]);
     draw_typing_separator(f, app, chunks[3]);
-    f.render_widget(textarea, chunks[4]);
+    draw_input(f, textarea, chunks[4]);
     draw_hints(f, app, chunks[5]);
+}
+
+/// Soft-wrap one logical line into visual rows of `width` chars each.
+/// An empty logical line still consumes one visual row.
+fn count_visual_lines(lines: &[String], width: u16) -> u16 {
+    let w = width.max(1) as usize;
+    let mut total: usize = 0;
+    for line in lines {
+        let len = line.chars().count();
+        total += if len == 0 { 1 } else { line.chars().count().div_ceil(w) };
+    }
+    total.max(1) as u16
+}
+
+/// Render the input area as a bordered block whose contents are the textarea's
+/// logical lines, soft-wrapped at the block's inner width. Cursor is placed
+/// manually because we no longer let `tui_textarea` render itself (it does not
+/// wrap; it scrolls horizontally).
+fn draw_input(f: &mut ratatui::Frame, textarea: &TextArea, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(" message ", Style::default().fg(MUTED_COLOR)))
+        .border_style(Style::default().fg(BORDER_COLOR));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let width = inner.width.max(1) as usize;
+    let lines = textarea.lines();
+    let mut wrapped: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    for line in lines {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
+            wrapped.push(Line::from(""));
+        } else {
+            let mut i = 0;
+            while i < chars.len() {
+                let end = (i + width).min(chars.len());
+                let chunk: String = chars[i..end].iter().collect();
+                wrapped.push(Line::from(chunk));
+                i = end;
+            }
+        }
+    }
+    f.render_widget(
+        Paragraph::new(Text::from(wrapped)).style(Style::default().fg(Color::White)),
+        inner,
+    );
+
+    let (cur_row, cur_col) = textarea.cursor();
+    let mut visual_row: u16 = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if i >= cur_row {
+            break;
+        }
+        let len = line.chars().count();
+        let rows = if len == 0 { 1 } else { len.div_ceil(width) };
+        visual_row = visual_row.saturating_add(rows as u16);
+    }
+    visual_row = visual_row.saturating_add((cur_col / width) as u16);
+    let visual_col = (cur_col % width) as u16;
+    if visual_row < inner.height {
+        f.set_cursor_position((inner.x + visual_col, inner.y + visual_row));
+    }
 }
 
 fn draw_typing_separator(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
