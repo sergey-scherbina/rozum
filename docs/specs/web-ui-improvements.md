@@ -238,10 +238,12 @@ is passed to `rozum web` (default: on).
       (`20vh` on `max-width:480px`) as the user types; the transcript
       shrinks to fit.
 - [x] `Enter` sends; `Shift+Enter` inserts a newline; `Esc` clears.
-- [ ] The TUI input area grows from 1 line up to `max(3, area.height/3)`
+- [x] The TUI input area grows from 1 line up to `max(3, area.height/3)`
       lines; transcript shrinks to fit. `Alt+Enter` inserts a newline;
-      `Enter` sends; `Esc` cancels. Long input lines wrap inside the
-      input area and never scroll horizontally.
+      `Enter` sends; `Esc` cancels.
+- [ ] Long input lines wrap inside the input area and never scroll
+      horizontally. *(open — tui-textarea 0.7 lacks soft-wrap; pending
+      decision on `tui-soft-wrap` slug.)*
 - [ ] `mcp-proxy` agents that never call `mark_responding` themselves
       still appear as typing in both web and TUI for the entire
       duration of their reply.

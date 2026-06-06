@@ -1,5 +1,14 @@
 # Changelog
 
+## tui-autosize-input — TUI input area grows with multi-line composition
+Completed: 2026-06-06
+Replaced fixed `Constraint::Length(3)` with a dynamic
+`(textarea.lines().len() + 2).clamp(3, max(3, area.height/3))` so the input
+area grows upward when the user enters multi-line content via `Alt+Enter`.
+Up/Down arrows now scroll the transcript history (in addition to PgUp/PgDn).
+Soft-wrap of a single overflowing line is **not** in this slug — split into
+`tui-soft-wrap` because `tui-textarea 0.7` has no native wrap.
+
 ## web-scrollback-sticky — sticky-bottom scroll, "↓ N new" pill, long-message collapse
 Completed: 2026-06-06
 `#log` now tracks `data-stick` on scroll; new messages auto-scroll only when

@@ -51,11 +51,10 @@ Current sprint focus: make Rozum a reliable local meeting room for live agents a
   - Scrolling within 60 px of `#log` top fetches the next chunk and prepends without moving viewport.
   - Spec: `docs/specs/web-ui-improvements.md` (slug `web-transcript-history`).
 
-- [ ] tui-autosize-input - Make the TUI input area grow to fit multi-line composition.
-  - Replace `Constraint::Length(3)` with `clamp(1, max(3, area.height/3))` based on textarea line count.
-  - `Alt+Enter` newline, `Enter` sends, `Esc` cancels.
-  - Long input lines wrap inside the input area and never scroll horizontally.
-  - Spec: `docs/specs/web-ui-improvements.md` (slug `tui-autosize-input`).
+- [ ] tui-soft-wrap - Wrap long input lines inside the TUI input area instead of horizontal scroll.
+  - `tui-textarea 0.7` has no `set_wrap`; pick approach (custom rendering via Paragraph::wrap, fork the crate, or auto-insert newlines on overflow).
+  - Carved out from `tui-autosize-input` after the autosize part landed but the wrap part proved blocked by the upstream crate.
+  - Spec: `docs/specs/web-ui-improvements.md` (slug `tui-soft-wrap`).
 
 - [ ] mcp-proxy-auto-mark - Auto-emit `mark_responding` from mcp-proxy.
   - When the proxy returns `your_turn:true` from `wait_my_turn`, also call `meeting.mark_responding` on the agent's behalf.

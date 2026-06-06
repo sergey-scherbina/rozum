@@ -1,6 +1,0 @@
-feature/tui-autosize-input 2026-06-06T17:58:00Z
-agent: claude-code-2
-heartbeat: 2026-06-06T17:58:00Z
-status: in-progress
-done-so-far: dynamic input constraint based on textarea.lines().len(); Alt+Enter newline; cargo build green
-next: verify with sergiy then bookkeeping
