@@ -45,12 +45,6 @@ Current sprint focus: make Rozum a reliable local meeting room for live agents a
   - Verify `Hello! How are you?` still produces a sensible response.
   - Spec first: `docs/specs/smollm2-chat-template.md`.
 
-- [ ] web-scrollback-sticky - Make web scrollback usable while messages arrive.
-  - `data-stick` heuristic keeps viewport put when user is scrolled away from bottom.
-  - "↓ N new" pill appears and increments while not stuck; click snaps and re-enables stick.
-  - Long messages (>6 lines or >600 chars) render collapsed with `[expand ▾]`.
-  - Spec: `docs/specs/web-ui-improvements.md` (slug `web-scrollback-sticky`).
-
 - [ ] web-transcript-history - Replay transcript on connect and lazy-paginate older history.
   - `GET /transcript?from_seq=<n>&limit=<n>` REST endpoint on the bridge.
   - On WebSocket connect the bridge sends a `history` envelope with the last 200 entries.

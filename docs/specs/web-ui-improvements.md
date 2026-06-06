@@ -224,13 +224,13 @@ is passed to `rozum web` (default: on).
       `PollingChanged` event, using the four glyphs `✏️ ⏳ ● ○`.
 - [ ] A participant whose last poll is older than 60 s shows as
       disconnected (grey `○`) until the next poll arrives.
-- [ ] When the user is scrolled to the bottom, a new `msg` event
+- [x] When the user is scrolled to the bottom, a new `msg` event
       auto-scrolls. When scrolled away, the viewport stays put and a
       "↓ N new" pill appears, counting unread `msg` events.
 - [ ] Scrolling within 60 px of `#log` top triggers
       `GET /transcript?from_seq=<oldest_seen-1>&limit=200`; results
       are prepended without moving the viewport.
-- [ ] Messages whose body exceeds 6 lines OR 600 chars render with the
+- [x] Messages whose body exceeds 6 lines OR 600 chars render with the
       first 4 lines visible and a `[expand ▾]` toggle.
 - [ ] On `joined`/`left` envelopes the page renders one dim system
       line in `#log` and updates the header participant chips.

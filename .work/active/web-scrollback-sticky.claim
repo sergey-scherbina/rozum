@@ -1,6 +1,0 @@
-feature/web-scrollback-sticky 2026-06-06T18:00:50Z
-agent: claude-code
-heartbeat: 2026-06-06T18:00:50Z
-status: in-progress
-done-so-far: claim
-next: data-stick attribute + ↓N new pill + long-message collapse in src/web/index.html
