@@ -17,6 +17,20 @@
       min-height: 100vh;
       min-height: 100dvh;
     }
+    #header {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 6px;
+      font-size: 12px;
+      color: #555;
+      min-height: 18px;
+    }
+    #header .chip {
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      padding: 1px 8px;
+      background: #fafafa;
+    }
     #log {
       flex: 1;
       min-height: 0;
@@ -27,6 +41,21 @@
       white-space: pre-wrap;
       word-wrap: break-word;
       overflow-wrap: anywhere;
+    }
+    #presence {
+      font-size: 12px;
+      color: #666;
+      min-height: 16px;
+      padding: 0 2px;
+    }
+    #presence:empty { display: none; }
+    #presence .glyph {
+      font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace;
+      margin-right: 2px;
+    }
+    .system {
+      color: #999;
+      font-style: italic;
     }
     #controls { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-end; }
     #name { width: 100px; }
@@ -59,7 +88,9 @@
   </style>
 </head>
 <body>
+<div id="header"></div>
 <div id="log"></div>
+<div id="presence"></div>
 <div id="controls">
   <input id="name" placeholder="your name" value="web">
   <textarea id="msg" rows="1" placeholder="message..."></textarea>
@@ -67,15 +98,90 @@
 </div>
 <script>
 const log = document.getElementById('log');
+const header = document.getElementById('header');
+const presence = document.getElementById('presence');
 const ws = new WebSocket(`ws://${location.host}/ws`);
 
-ws.onopen = () => append('--- connected ---', '');
-ws.onclose = () => append('--- disconnected ---', '');
+// participant_id -> display_name
+const participants = new Map();
+// participant_id -> { kind: 'typing'|'waiting' }
+const presenceState = new Map();
+
+const GLYPH = { typing: '✏️', waiting: '⏳' };
+const VERB  = { typing: 'is typing…', waiting: 'is waiting' };
+
+ws.onopen = () => append('--- connected ---', 'system');
+ws.onclose = () => append('--- disconnected ---', 'system');
 ws.onmessage = e => {
-  const d = JSON.parse(e.data);
-  const cls = d.injected ? 'injected' : '';
-  append(`[${d.speaker}]: ${d.content}`, cls);
+  const env = JSON.parse(e.data);
+  switch (env.kind) {
+    case 'msg':      onMsg(env); break;
+    case 'presence': onPresence(env); break;
+    case 'joined':   onJoined(env); break;
+    case 'left':     onLeft(env); break;
+  }
 };
+
+function onMsg(env) {
+  const cls = env.injected ? 'injected' : '';
+  append(`[${env.speaker}]: ${env.content}`, cls);
+}
+
+function onPresence(env) {
+  presenceState.clear();
+  for (const e of (env.responding || [])) {
+    presenceState.set(e.participant_id, { kind: 'typing', name: e.display_name });
+  }
+  for (const e of (env.polling || [])) {
+    if (presenceState.has(e.participant_id)) continue;
+    presenceState.set(e.participant_id, { kind: 'waiting', name: e.display_name });
+  }
+  renderPresence();
+}
+
+function onJoined(env) {
+  if (!participants.has(env.participant_id)) {
+    participants.set(env.participant_id, env.display_name);
+    append(`--- ${env.display_name} joined ---`, 'system');
+    renderHeader();
+  }
+}
+
+function onLeft(env) {
+  if (participants.has(env.participant_id)) {
+    participants.delete(env.participant_id);
+    presenceState.delete(env.participant_id);
+    append(`--- ${env.display_name} left ---`, 'system');
+    renderHeader();
+    renderPresence();
+  }
+}
+
+function renderHeader() {
+  header.replaceChildren();
+  for (const name of participants.values()) {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.textContent = name;
+    header.appendChild(chip);
+  }
+}
+
+function renderPresence() {
+  const myName = (document.getElementById('name').value || 'web').trim();
+  presence.replaceChildren();
+  let first = true;
+  for (const [, s] of presenceState) {
+    if (s.name === myName) continue;
+    if (!first) presence.appendChild(document.createTextNode(' · '));
+    const glyph = document.createElement('span');
+    glyph.className = 'glyph';
+    glyph.textContent = GLYPH[s.kind];
+    presence.appendChild(glyph);
+    presence.appendChild(document.createTextNode(`${s.name} ${VERB[s.kind]}`));
+    first = false;
+  }
+}
 
 function append(text, cls) {
   const el = document.createElement('div');
