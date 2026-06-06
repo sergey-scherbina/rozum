@@ -6,7 +6,6 @@ use std::{
 use tokio::sync::{Notify, broadcast};
 
 use super::budget::BudgetGuard;
-use super::moderator::{Moderator, NextChoice};
 use super::participant::{Participant, ParticipantId};
 
 // ── Events ──────────────────────────────────────────────────────────────────
@@ -26,14 +25,6 @@ pub enum MeetingEvent {
     ParticipantLeft {
         display_name: String,
     },
-    WaitingFor {
-        display_name: String,
-        timeout_ms: u64,
-        turn_id: Option<u64>,
-    },
-    ModeChanged {
-        new_mode: String,
-    },
     BudgetWarning {
         chars_used: usize,
     },
@@ -44,7 +35,27 @@ pub enum MeetingEvent {
         old_name: String,
         new_name: String,
     },
+    RespondingChanged {
+        participant_id: ParticipantId,
+        display_name: String,
+        started: bool,
+    },
+    PollingChanged {
+        participant_id: ParticipantId,
+        display_name: String,
+        started: bool,
+    },
 }
+
+/// Stale window after which a `responding` marker is considered abandoned
+/// and filtered out at read time. Keeps a crashed agent from appearing as
+/// "typing" forever without needing a background reaper.
+pub const RESPONDING_STALE_SECS: u64 = 30;
+
+/// Stale window for `polling` markers — slightly longer than the 25 s
+/// long-poll timeout so a marker that wasn't cleared because the connection
+/// dropped mid-call still drains naturally.
+pub const POLLING_STALE_SECS: u64 = 30;
 
 // ── Transcript ───────────────────────────────────────────────────────────────
 
@@ -67,17 +78,7 @@ pub enum Phase {
     Ended,
 }
 
-// ── ActiveTurn ───────────────────────────────────────────────────────────────
-
-#[derive(Clone, Debug)]
-pub struct ActiveTurn {
-    pub participant_id: ParticipantId,
-    pub turn_id: u64,
-    pub started_at: u64,
-    pub deadline_at: Option<u64>,
-    pub response_started_at: Option<u64>,
-    pub sampling_started: bool,
-}
+// ── Liveness ─────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct ParticipantLiveness {
@@ -104,20 +105,25 @@ pub struct Meeting {
     pub participants: Vec<Participant>,
     pub transcript: Vec<Turn>,
     pub phase: Phase,
-    pub moderator: Box<dyn Moderator>,
-    pub moderator_name: String,
     pub budget: BudgetGuard,
-    pub active_turn: Option<ActiveTurn>,
-    pub waiting_for_operator: bool,
-    pub agent_turn_timeout_secs: u64,
-    pub human_turn_timeout_secs: u64,
-    pub next_turn_id: u64,
     pub participant_liveness: HashMap<ParticipantId, ParticipantLiveness>,
+    /// Participants currently marked as composing a response. Stale entries
+    /// (older than `RESPONDING_STALE_SECS`) are filtered at read time.
+    pub responding: HashMap<ParticipantId, u64>,
+    /// Participants whose `wait_my_turn` long-poll is currently in flight.
+    /// Cleared when the poll returns (any path) or on `leave`.
+    pub polling: HashMap<ParticipantId, u64>,
 
-    // Notified whenever turn state changes (unblocks wait_my_turn pollers).
-    pub turn_notify: std::sync::Arc<Notify>,
+    /// Notified whenever the transcript grows or the phase changes — wakes
+    /// long-poll subscribers (wait_my_turn, TUI watchers, etc.).
+    pub transcript_notify: std::sync::Arc<Notify>,
 
-    // Broadcast for TUI and any future subscribers.
+    /// If set, every submitted Turn is appended to this file as one JSON
+    /// line, and the file is loaded back into `transcript` when
+    /// `enable_persistence` is called. None disables persistence
+    /// (e.g. for tests, --no-persist runs, and proxy-internal rooms).
+    pub persist_path: Option<std::path::PathBuf>,
+
     pub events: broadcast::Sender<MeetingEvent>,
 }
 
@@ -126,11 +132,9 @@ impl Meeting {
         name: impl Into<String>,
         topic: impl Into<String>,
         human_display_name: impl Into<String>,
-        moderator: Box<dyn Moderator>,
         budget: BudgetGuard,
         events: broadcast::Sender<MeetingEvent>,
     ) -> Self {
-        let moderator_name = moderator.name().to_owned();
         let now = unix_ts();
         let human = Participant::human(human_display_name.into());
         let mut participant_liveness = HashMap::new();
@@ -141,23 +145,76 @@ impl Meeting {
             participants: vec![human],
             transcript: vec![],
             phase: Phase::Active,
-            moderator,
-            moderator_name,
             budget,
-            active_turn: None,
-            waiting_for_operator: false,
-            agent_turn_timeout_secs: 60,
-            human_turn_timeout_secs: 90,
-            next_turn_id: 1,
             participant_liveness,
-            turn_notify: std::sync::Arc::new(Notify::new()),
+            responding: HashMap::new(),
+            polling: HashMap::new(),
+            transcript_notify: std::sync::Arc::new(Notify::new()),
+            persist_path: None,
             events,
         }
+    }
+
+    /// Turn on disk persistence for this meeting: load any existing transcript
+    /// from `path` into memory (skipping malformed lines), and remember the
+    /// path so future submits are appended.
+    ///
+    /// Idempotent: calling twice with the same path is harmless. Calling with
+    /// a different path is not (the caller is responsible for not doing that
+    /// during a meeting's lifetime).
+    pub fn enable_persistence(&mut self, path: std::path::PathBuf) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            let mut loaded = 0usize;
+            for line in contents.lines() {
+                if line.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<Turn>(line) {
+                    Ok(mut turn) => {
+                        // Re-number on load so that seq is always
+                        // monotonic from 0, even if the file was edited.
+                        turn.seq = self.transcript.len();
+                        self.transcript.push(turn);
+                        loaded += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = ?e,
+                            path = %path.display(),
+                            "skipping malformed persisted transcript line"
+                        );
+                    }
+                }
+            }
+            if loaded > 0 {
+                tracing::info!(
+                    loaded,
+                    path = %path.display(),
+                    "loaded persisted transcript entries"
+                );
+            }
+        }
+        self.persist_path = Some(path);
     }
 
     // ── Participant management ────────────────────────────────────────────────
 
     pub fn join_mcp(&mut self, client_info_name: impl Into<String>) -> ParticipantId {
+        self.join_non_human(client_info_name, false)
+    }
+
+    pub fn join_bridge(&mut self, client_info_name: impl Into<String>) -> ParticipantId {
+        self.join_non_human(client_info_name, true)
+    }
+
+    fn join_non_human(
+        &mut self,
+        client_info_name: impl Into<String>,
+        bridge: bool,
+    ) -> ParticipantId {
         let name = client_info_name.into();
         let now = unix_ts();
 
@@ -187,13 +244,16 @@ impl Meeting {
             })
             .map(|p| p.id.clone());
 
-        // Add new participant first (keeps count >= 2), then evict the stale one.
         let final_name = if stale_id.is_some() {
-            name.clone() // Reclaim the exact name since we'll remove the stale entry.
+            name.clone()
         } else {
             self.unique_name(name)
         };
-        let p = Participant::mcp(&final_name);
+        let p = if bridge {
+            Participant::bridge(&final_name)
+        } else {
+            Participant::mcp(&final_name)
+        };
         let id = p.id.clone();
         self.participants.push(p);
         self.participant_liveness
@@ -204,16 +264,9 @@ impl Meeting {
                 let dn = self.participants[pos].display_name().to_owned();
                 self.participants.remove(pos);
                 self.participant_liveness.remove(&sid);
-                let _ = self.events.send(MeetingEvent::ParticipantLeft { display_name: dn });
-                // If the evicted participant was the active speaker, clear the turn.
-                if self
-                    .active_turn
-                    .as_ref()
-                    .map_or(false, |t| t.participant_id == sid)
-                {
-                    self.active_turn = None;
-                    self.turn_notify.notify_waiters();
-                }
+                let _ = self
+                    .events
+                    .send(MeetingEvent::ParticipantLeft { display_name: dn });
             }
         }
 
@@ -229,48 +282,175 @@ impl Meeting {
             let display_name = self.participants[pos].display_name().to_owned();
             self.participants.remove(pos);
             self.participant_liveness.remove(id);
+            self.clear_responding(id);
+            self.unmark_polling(id);
             let _ = self.events.send(MeetingEvent::ParticipantLeft {
                 display_name: display_name.clone(),
             });
-            // End meeting if fewer than 2 participants remain.
             if self.participants.len() < 2 {
                 self.end_with_reason("insufficient-participants");
-            }
-            // Clear active turn if the leaver was active.
-            if self
-                .active_turn
-                .as_ref()
-                .map_or(false, |t| &t.participant_id == id)
-            {
-                self.active_turn = None;
-                self.turn_notify.notify_waiters();
             }
         }
     }
 
-    // ── Turns ─────────────────────────────────────────────────────────────────
+    // ── Responding ───────────────────────────────────────────────────────────
 
+    /// Mark a participant as currently composing a response. Idempotent —
+    /// re-marking refreshes the timestamp but only emits an event the first
+    /// time. Cleared by `submit`, `leave`, or `RESPONDING_STALE_SECS` expiry.
+    pub fn mark_responding(&mut self, id: &ParticipantId) {
+        if !self.participants.iter().any(|p| &p.id == id) {
+            return;
+        }
+        let now = unix_ts();
+        let newly_inserted = self.responding.insert(id.clone(), now).is_none();
+        if newly_inserted {
+            let display_name = self
+                .participants
+                .iter()
+                .find(|p| &p.id == id)
+                .map(|p| p.display_name().to_owned())
+                .unwrap_or_else(|| id.0.clone());
+            let _ = self.events.send(MeetingEvent::RespondingChanged {
+                participant_id: id.clone(),
+                display_name,
+                started: true,
+            });
+            self.transcript_notify.notify_waiters();
+        }
+    }
+
+    /// Clear a participant's responding marker. No-op if absent.
+    pub fn clear_responding(&mut self, id: &ParticipantId) {
+        if self.responding.remove(id).is_some() {
+            let display_name = self
+                .participants
+                .iter()
+                .find(|p| &p.id == id)
+                .map(|p| p.display_name().to_owned())
+                .unwrap_or_else(|| id.0.clone());
+            let _ = self.events.send(MeetingEvent::RespondingChanged {
+                participant_id: id.clone(),
+                display_name,
+                started: false,
+            });
+            self.transcript_notify.notify_waiters();
+        }
+    }
+
+    /// Snapshot of currently responding participants, with stale entries
+    /// filtered out. Returns `(participant_id, display_name, started_at,
+    /// age_ms)`.
+    pub fn active_responding(&self) -> Vec<(ParticipantId, String, u64, u64)> {
+        let now = unix_ts();
+        self.responding
+            .iter()
+            .filter(|&(_, &ts)| now.saturating_sub(ts) <= RESPONDING_STALE_SECS)
+            .filter_map(|(id, &ts)| {
+                let display = self
+                    .participants
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .map(|p| p.display_name().to_owned())?;
+                let age_ms = now.saturating_sub(ts) * 1000;
+                Some((id.clone(), display, ts, age_ms))
+            })
+            .collect()
+    }
+
+    /// Mark a participant as currently waiting on a `wait_my_turn` long-poll.
+    /// Idempotent; only emits an event the first time.
+    pub fn mark_polling(&mut self, id: &ParticipantId) {
+        if !self.participants.iter().any(|p| &p.id == id) {
+            return;
+        }
+        let now = unix_ts();
+        let newly_inserted = self.polling.insert(id.clone(), now).is_none();
+        if newly_inserted {
+            let display_name = self
+                .participants
+                .iter()
+                .find(|p| &p.id == id)
+                .map(|p| p.display_name().to_owned())
+                .unwrap_or_else(|| id.0.clone());
+            let _ = self.events.send(MeetingEvent::PollingChanged {
+                participant_id: id.clone(),
+                display_name,
+                started: true,
+            });
+            self.transcript_notify.notify_waiters();
+        }
+    }
+
+    /// Clear a participant's polling marker. No-op if absent.
+    pub fn unmark_polling(&mut self, id: &ParticipantId) {
+        if self.polling.remove(id).is_some() {
+            let display_name = self
+                .participants
+                .iter()
+                .find(|p| &p.id == id)
+                .map(|p| p.display_name().to_owned())
+                .unwrap_or_else(|| id.0.clone());
+            let _ = self.events.send(MeetingEvent::PollingChanged {
+                participant_id: id.clone(),
+                display_name,
+                started: false,
+            });
+            self.transcript_notify.notify_waiters();
+        }
+    }
+
+    /// Snapshot of participants currently mid-poll. Stale entries
+    /// (>`POLLING_STALE_SECS`) are filtered at read time.
+    pub fn active_polling(&self) -> Vec<(ParticipantId, String, u64, u64)> {
+        let now = unix_ts();
+        self.polling
+            .iter()
+            .filter(|&(_, &ts)| now.saturating_sub(ts) <= POLLING_STALE_SECS)
+            .filter_map(|(id, &ts)| {
+                let display = self
+                    .participants
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .map(|p| p.display_name().to_owned())?;
+                let age_ms = now.saturating_sub(ts) * 1000;
+                Some((id.clone(), display, ts, age_ms))
+            })
+            .collect()
+    }
+
+    pub fn kick(&mut self, id: &ParticipantId) {
+        self.leave(id);
+    }
+
+    // ── Submit ────────────────────────────────────────────────────────────────
+
+    /// Anyone can submit at any time. Messages are always posted immediately;
+    /// there are no turns and no buffering.
     pub fn submit(
         &mut self,
         participant_id: &ParticipantId,
         content: String,
-        expected_turn_id: Option<u64>,
     ) -> Result<usize, String> {
         if self.phase == Phase::Ended {
             return Err("meeting-ended".into());
         }
-        match &self.active_turn {
-            Some(t) if &t.participant_id != participant_id => {
-                return Err("not-your-turn".into());
-            }
-            Some(t) if expected_turn_id.is_some_and(|turn_id| turn_id != t.turn_id) => {
-                return Err("stale-turn".into());
-            }
-            None if expected_turn_id.is_some() => {
-                return Err("stale-turn".into());
-            }
-            _ => {}
+        if !self.participants.iter().any(|p| &p.id == participant_id) {
+            return Err("not-joined".into());
         }
+        self.clear_responding(participant_id);
+        Ok(self.post_submission(participant_id, content))
+    }
+
+    /// Submit from the TUI human (kept as a thin wrapper for ergonomics).
+    pub fn submit_human(&mut self, content: String) {
+        if let Some(id) = self.human_participant_id() {
+            let _ = self.submit(&id, content);
+        }
+    }
+
+    /// Append a submission to the transcript and run budget bookkeeping.
+    fn post_submission(&mut self, participant_id: &ParticipantId, content: String) -> usize {
         let (warn, exceeded) = self.budget.record_turn(&content);
         let seq = self.transcript.len();
         let display_name = self
@@ -279,19 +459,30 @@ impl Meeting {
             .find(|p| &p.id == participant_id)
             .map(|p| p.display_name().to_owned())
             .unwrap_or_else(|| participant_id.0.clone());
-        self.transcript.push(Turn {
+        let turn = Turn {
             seq,
             participant_id: participant_id.0.clone(),
             display_name: display_name.clone(),
             content: content.clone(),
             ts: unix_ts(),
             injected: false,
-        });
+        };
+        if let Some(path) = &self.persist_path {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                if let Ok(line) = serde_json::to_string(&turn) {
+                    let _ = writeln!(f, "{}", line);
+                }
+            }
+        }
+        self.transcript.push(turn);
         if let Some(liveness) = self.participant_liveness.get_mut(participant_id) {
             liveness.last_submit_at = Some(unix_ts());
         }
-        self.active_turn = None;
-        self.waiting_for_operator = false;
         let _ = self.events.send(MeetingEvent::TurnAdded {
             participant_id: participant_id.clone(),
             display_name,
@@ -306,72 +497,8 @@ impl Meeting {
         if exceeded {
             self.end_with_reason("budget");
         }
-        self.turn_notify.notify_waiters();
-        Ok(seq)
-    }
-
-    /// Human turn submitted directly from TUI (not through MCP).
-    /// If it's not the human's turn, falls back to interject so the message
-    /// still reaches agents via transcript_delta without interrupting the
-    /// active speaker's turn.
-    pub fn submit_human(&mut self, content: String) {
-        let human_id = self.human_participant_id();
-        let Some(id) = human_id else { return };
-        let is_human_turn = self
-            .active_turn
-            .as_ref()
-            .map_or(true, |t| t.participant_id == id);
-        if is_human_turn {
-            let _ = self.submit(&id, content, None);
-        } else {
-            self.interject(content);
-        }
-    }
-
-    /// Inserts a human interject turn before the next scheduled speaker.
-    pub fn interject(&mut self, content: String) {
-        let human_id = self
-            .participants
-            .iter()
-            .find(|p| p.is_human())
-            .map(|p| p.id.clone());
-        let display_name = self
-            .participants
-            .iter()
-            .find(|p| p.is_human())
-            .map(|p| p.display_name().to_owned())
-            .unwrap_or_else(|| "user".into());
-        if let Some(id) = human_id {
-            let (warn, exceeded) = self.budget.record_turn(&content);
-            let seq = self.transcript.len();
-            self.transcript.push(Turn {
-                seq,
-                participant_id: id.0.clone(),
-                display_name: display_name.clone(),
-                content: content.clone(),
-                ts: unix_ts(),
-                injected: true,
-            });
-            let _ = self.events.send(MeetingEvent::TurnAdded {
-                participant_id: id.clone(),
-                display_name,
-                content,
-                seq,
-            });
-            if let Some(liveness) = self.participant_liveness.get_mut(&id) {
-                liveness.last_submit_at = Some(unix_ts());
-            }
-            if warn {
-                let _ = self.events.send(MeetingEvent::BudgetWarning {
-                    chars_used: self.budget.total_chars(),
-                });
-            }
-            if exceeded {
-                self.end_with_reason("budget");
-            }
-            self.waiting_for_operator = false;
-            self.turn_notify.notify_waiters();
-        }
+        self.transcript_notify.notify_waiters();
+        seq
     }
 
     // ── Control ───────────────────────────────────────────────────────────────
@@ -385,8 +512,7 @@ impl Meeting {
     pub fn resume(&mut self) {
         if self.phase == Phase::Paused {
             self.phase = Phase::Active;
-            self.waiting_for_operator = false;
-            self.turn_notify.notify_waiters();
+            self.transcript_notify.notify_waiters();
         }
     }
 
@@ -400,160 +526,8 @@ impl Meeting {
             let _ = self.events.send(MeetingEvent::MeetingEnded {
                 reason: reason.to_owned(),
             });
-            self.turn_notify.notify_waiters();
+            self.transcript_notify.notify_waiters();
         }
-    }
-
-    pub fn kick(&mut self, id: &ParticipantId) {
-        self.leave(id);
-    }
-
-    pub fn skip_turn(&mut self) -> Option<usize> {
-        self.skip_active_turn("operator")
-    }
-
-    pub fn skip_active_turn(&mut self, reason: &str) -> Option<usize> {
-        let active = self.active_turn.take()?;
-        let display_name = self.display_name_for(&active.participant_id);
-        let content = format!(
-            "turn skipped for {display_name} (turn #{}, {reason})",
-            active.turn_id
-        );
-        let seq = self.transcript.len();
-        self.transcript.push(Turn {
-            seq,
-            participant_id: "system".to_owned(),
-            display_name: "system".to_owned(),
-            content: content.clone(),
-            ts: unix_ts(),
-            injected: true,
-        });
-        self.waiting_for_operator = false;
-        let _ = self.events.send(MeetingEvent::TurnAdded {
-            participant_id: ParticipantId::new("system"),
-            display_name: "system".to_owned(),
-            content,
-            seq,
-        });
-        self.turn_notify.notify_waiters();
-        Some(seq)
-    }
-
-    pub fn expire_active_turn_if_due(&mut self) -> bool {
-        if self.phase != Phase::Active {
-            return false;
-        }
-        let Some(active) = &self.active_turn else {
-            return false;
-        };
-        let Some(deadline_at) = active.deadline_at else {
-            return false;
-        };
-        if deadline_at > unix_ts() {
-            return false;
-        }
-        self.skip_active_turn("timeout");
-        true
-    }
-
-    pub fn start_active_turn_response(
-        &mut self,
-        participant_id: &ParticipantId,
-        expected_turn_id: Option<u64>,
-    ) -> Result<u64, String> {
-        if self.phase == Phase::Ended {
-            return Err("meeting-ended".into());
-        }
-        let now = unix_ts();
-        match &mut self.active_turn {
-            Some(t) if &t.participant_id != participant_id => Err("not-your-turn".into()),
-            Some(t) if expected_turn_id.is_some_and(|turn_id| turn_id != t.turn_id) => {
-                Err("stale-turn".into())
-            }
-            Some(t) => {
-                t.deadline_at = None;
-                t.response_started_at.get_or_insert(now);
-                let turn_id = t.turn_id;
-                self.turn_notify.notify_waiters();
-                Ok(turn_id)
-            }
-            None => Err("no-active-turn".into()),
-        }
-    }
-
-    pub fn resume_active_turn_timeout(
-        &mut self,
-        participant_id: &ParticipantId,
-        expected_turn_id: Option<u64>,
-    ) -> Result<u64, String> {
-        if self.phase == Phase::Ended {
-            return Err("meeting-ended".into());
-        }
-        let timeout_secs = self.timeout_secs_for(participant_id);
-        let now = unix_ts();
-        match &mut self.active_turn {
-            Some(t) if &t.participant_id != participant_id => Err("not-your-turn".into()),
-            Some(t) if expected_turn_id.is_some_and(|turn_id| turn_id != t.turn_id) => {
-                Err("stale-turn".into())
-            }
-            Some(t) => {
-                t.deadline_at = Some(now + timeout_secs);
-                t.response_started_at = None;
-                let turn_id = t.turn_id;
-                self.turn_notify.notify_waiters();
-                Ok(turn_id)
-            }
-            None => Err("no-active-turn".into()),
-        }
-    }
-
-    pub fn record_poll(&mut self, id: &ParticipantId) {
-        let now = unix_ts();
-        self.participant_liveness
-            .entry(id.clone())
-            .or_insert_with(|| ParticipantLiveness::new(now))
-            .last_poll_at = Some(now);
-    }
-
-    pub fn switch_mode(&mut self, moderator: Box<dyn Moderator>) {
-        let name = moderator.name().to_owned();
-        self.moderator = moderator;
-        self.moderator_name = name.clone();
-        self.waiting_for_operator = false;
-        let _ = self
-            .events
-            .send(MeetingEvent::ModeChanged { new_mode: name });
-    }
-
-    pub fn choose_next_speaker(&mut self, selector: &str) -> Result<ParticipantId, String> {
-        if self.phase != Phase::Active {
-            return Err("meeting-not-active".into());
-        }
-        let selector = selector.trim();
-        if selector.is_empty() {
-            return Err("missing-participant".into());
-        }
-        let Some((id, display_name)) = self
-            .participants
-            .iter()
-            .find(|p| {
-                p.id.0.eq_ignore_ascii_case(selector)
-                    || p.display_name().eq_ignore_ascii_case(selector)
-            })
-            .map(|p| (p.id.clone(), p.display_name().to_owned()))
-        else {
-            return Err(format!("participant-not-found: {selector}"));
-        };
-
-        let active = self.start_turn_for(id.clone());
-        self.waiting_for_operator = false;
-        let _ = self.events.send(MeetingEvent::WaitingFor {
-            display_name,
-            timeout_ms: self.timeout_secs_for(&id) * 1000,
-            turn_id: Some(active.turn_id),
-        });
-        self.turn_notify.notify_waiters();
-        Ok(id)
     }
 
     pub fn rename(&mut self, new_name: impl Into<String>) {
@@ -562,6 +536,14 @@ impl Meeting {
             old_name,
             new_name: self.name.clone(),
         });
+    }
+
+    pub fn record_poll(&mut self, id: &ParticipantId) {
+        let now = unix_ts();
+        self.participant_liveness
+            .entry(id.clone())
+            .or_insert_with(|| ParticipantLiveness::new(now))
+            .last_poll_at = Some(now);
     }
 
     // ── Queries ───────────────────────────────────────────────────────────────
@@ -582,53 +564,24 @@ impl Meeting {
         &self.transcript[start..]
     }
 
-    // ── Moderator step ────────────────────────────────────────────────────────
+    pub fn is_human(&self, participant_id: &ParticipantId) -> bool {
+        self.participants
+            .iter()
+            .any(|p| &p.id == participant_id && p.is_human())
+    }
 
-    /// Choose the next speaker and set active_turn. Returns None if ended/paused.
-    pub fn advance_turn(&mut self) -> Option<ParticipantId> {
-        if self.phase != Phase::Active || self.active_turn.is_some() {
-            return None;
-        }
-        let ids = self.participant_ids();
-        let last = self
-            .transcript
-            .last()
-            .map(|t| ParticipantId::new(&t.participant_id));
-        match self.moderator.next_speaker(&ids, last.as_ref()) {
-            NextChoice::Speaker(id) => {
-                self.waiting_for_operator = false;
-                let display_name = self.display_name_for(&id);
-                let active = self.start_turn_for(id.clone());
-                let _ = self.events.send(MeetingEvent::WaitingFor {
-                    display_name,
-                    timeout_ms: self.timeout_secs_for(&id) * 1000,
-                    turn_id: Some(active.turn_id),
-                });
-                self.turn_notify.notify_waiters();
-                Some(id)
-            }
-            NextChoice::WaitForHuman => {
-                if !self.waiting_for_operator {
-                    let display_name = self
-                        .participants
-                        .iter()
-                        .find(|p| p.is_human())
-                        .map(|p| p.display_name().to_owned())
-                        .unwrap_or_else(|| "operator".into());
-                    let _ = self.events.send(MeetingEvent::WaitingFor {
-                        display_name,
-                        timeout_ms: self.human_turn_timeout_secs * 1000,
-                        turn_id: None,
-                    });
-                    self.waiting_for_operator = true;
-                }
-                None
-            }
-            NextChoice::End => {
-                self.end_with_reason("moderator-ended");
-                None
-            }
-        }
+    pub fn is_bridge(&self, participant_id: &ParticipantId) -> bool {
+        self.participants
+            .iter()
+            .any(|p| &p.id == participant_id && p.is_bridge())
+    }
+
+    pub fn display_name_for(&self, participant_id: &ParticipantId) -> String {
+        self.participants
+            .iter()
+            .find(|p| &p.id == participant_id)
+            .map(|p| p.display_name().to_owned())
+            .unwrap_or_else(|| participant_id.0.clone())
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -650,42 +603,6 @@ impl Meeting {
         }
         unreachable!()
     }
-
-    fn start_turn_for(&mut self, participant_id: ParticipantId) -> ActiveTurn {
-        let now = unix_ts();
-        let timeout_secs = self.timeout_secs_for(&participant_id);
-        let active = ActiveTurn {
-            participant_id,
-            turn_id: self.next_turn_id,
-            started_at: now,
-            deadline_at: Some(now + timeout_secs),
-            response_started_at: None,
-            sampling_started: false,
-        };
-        self.next_turn_id += 1;
-        self.active_turn = Some(active.clone());
-        active
-    }
-
-    pub fn timeout_secs_for(&self, participant_id: &ParticipantId) -> u64 {
-        if self
-            .participants
-            .iter()
-            .any(|p| &p.id == participant_id && p.is_human())
-        {
-            self.human_turn_timeout_secs
-        } else {
-            self.agent_turn_timeout_secs
-        }
-    }
-
-    pub fn display_name_for(&self, participant_id: &ParticipantId) -> String {
-        self.participants
-            .iter()
-            .find(|p| &p.id == participant_id)
-            .map(|p| p.display_name().to_owned())
-            .unwrap_or_else(|| participant_id.0.clone())
-    }
 }
 
 pub(crate) fn unix_ts() -> u64 {
@@ -698,151 +615,120 @@ pub(crate) fn unix_ts() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meeting::moderator::manual::Manual;
-    use crate::meeting::moderator::round_robin::RoundRobin;
 
-    fn manual_meeting() -> Meeting {
+    fn fresh_meeting() -> Meeting {
         let (events, _) = broadcast::channel(16);
         Meeting::new(
             "test-room",
             "test topic",
             "operator",
-            Box::new(Manual::new()),
-            BudgetGuard::default(),
-            events,
-        )
-    }
-
-    fn round_robin_meeting() -> Meeting {
-        let (events, _) = broadcast::channel(16);
-        Meeting::new(
-            "test-room",
-            "test topic",
-            "operator",
-            Box::new(RoundRobin::new()),
             BudgetGuard::default(),
             events,
         )
     }
 
     #[test]
-    fn operator_can_choose_next_speaker_by_display_name() {
-        let mut meeting = manual_meeting();
-        let participant_id = meeting.join_mcp("codex");
+    fn anyone_can_submit_any_time() {
+        let mut meeting = fresh_meeting();
+        let agent = meeting.join_mcp("codex");
+        let human = meeting.human_participant_id().unwrap();
 
-        let chosen = meeting.choose_next_speaker("codex").unwrap();
+        meeting.submit(&agent, "hi".to_owned()).unwrap();
+        meeting.submit(&human, "hello".to_owned()).unwrap();
+        meeting.submit(&agent, "again".to_owned()).unwrap();
 
-        assert_eq!(chosen, participant_id);
-        assert_eq!(
-            meeting
-                .active_turn
-                .as_ref()
-                .map(|turn| &turn.participant_id),
-            Some(&participant_id)
-        );
-        assert!(!meeting.waiting_for_operator);
+        assert_eq!(meeting.transcript.len(), 3);
+        assert_eq!(meeting.transcript[0].content, "hi");
+        assert_eq!(meeting.transcript[1].content, "hello");
+        assert_eq!(meeting.transcript[2].content, "again");
     }
 
     #[test]
-    fn operator_choice_reports_unknown_participant() {
-        let mut meeting = manual_meeting();
-
-        assert_eq!(
-            meeting.choose_next_speaker("missing").unwrap_err(),
-            "participant-not-found: missing"
-        );
+    fn submit_from_unknown_participant_errors() {
+        let mut meeting = fresh_meeting();
+        let phantom = ParticipantId::new("nobody");
+        assert!(meeting.submit(&phantom, "x".into()).is_err());
     }
 
     #[test]
-    fn active_turn_ids_are_monotonic() {
-        let mut meeting = round_robin_meeting();
-        meeting.join_mcp("codex");
-
-        meeting.advance_turn();
-        assert_eq!(meeting.active_turn.as_ref().map(|t| t.turn_id), Some(1));
-
-        meeting.skip_turn();
-        meeting.advance_turn();
-        assert_eq!(meeting.active_turn.as_ref().map(|t| t.turn_id), Some(2));
+    fn leaving_below_two_ends_meeting() {
+        let mut meeting = fresh_meeting();
+        let agent = meeting.join_mcp("codex");
+        assert_eq!(meeting.phase, Phase::Active);
+        meeting.leave(&agent);
+        assert_eq!(meeting.phase, Phase::Ended);
     }
 
     #[test]
-    fn submit_rejects_stale_turn_id() {
-        let mut meeting = manual_meeting();
-        let participant_id = meeting.join_mcp("codex");
-        meeting.choose_next_speaker("codex").unwrap();
-        let turn_id = meeting.active_turn.as_ref().unwrap().turn_id;
+    fn responding_marker_lifecycle() {
+        let mut meeting = fresh_meeting();
+        let agent = meeting.join_mcp("codex");
 
-        assert_eq!(
-            meeting
-                .submit(&participant_id, "late".to_owned(), Some(turn_id + 1))
-                .unwrap_err(),
-            "stale-turn"
-        );
+        assert!(meeting.active_responding().is_empty());
 
-        assert!(
-            meeting
-                .submit(&participant_id, "on time".to_owned(), Some(turn_id))
-                .is_ok()
-        );
+        meeting.mark_responding(&agent);
+        let active = meeting.active_responding();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0, agent);
+
+        // Submit clears the marker.
+        meeting.submit(&agent, "done".to_owned()).unwrap();
+        assert!(meeting.active_responding().is_empty());
     }
 
     #[test]
-    fn expired_turn_adds_system_skip_turn() {
-        let mut meeting = manual_meeting();
-        meeting.agent_turn_timeout_secs = 0;
-        meeting.join_mcp("codex");
-        meeting.choose_next_speaker("codex").unwrap();
+    fn responding_marker_cleared_on_leave() {
+        let mut meeting = fresh_meeting();
+        let a = meeting.join_mcp("codex");
+        let b = meeting.join_mcp("claude");
+        meeting.mark_responding(&a);
+        meeting.mark_responding(&b);
+        assert_eq!(meeting.active_responding().len(), 2);
 
-        assert!(meeting.expire_active_turn_if_due());
-        assert!(meeting.active_turn.is_none());
-        assert_eq!(meeting.transcript.len(), 1);
-        assert_eq!(meeting.transcript[0].display_name, "system");
-        assert!(meeting.transcript[0].content.contains("timeout"));
+        meeting.leave(&a);
+        let active = meeting.active_responding();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0, b);
     }
 
     #[test]
-    fn started_response_stops_turn_timeout() {
-        let mut meeting = manual_meeting();
-        meeting.agent_turn_timeout_secs = 0;
-        let participant_id = meeting.join_mcp("codex");
-        meeting.choose_next_speaker("codex").unwrap();
-        let turn_id = meeting.active_turn.as_ref().unwrap().turn_id;
-
-        assert!(
-            meeting
-                .start_active_turn_response(&participant_id, Some(turn_id))
-                .is_ok()
-        );
-
-        let active = meeting.active_turn.as_ref().unwrap();
-        assert_eq!(active.deadline_at, None);
-        assert!(active.response_started_at.is_some());
-        assert!(!meeting.expire_active_turn_if_due());
-        assert!(meeting.active_turn.is_some());
-        assert!(meeting.transcript.is_empty());
+    fn responding_marker_ignores_unknown_participant() {
+        let mut meeting = fresh_meeting();
+        let phantom = ParticipantId::new("nobody");
+        meeting.mark_responding(&phantom);
+        assert!(meeting.active_responding().is_empty());
     }
 
     #[test]
-    fn resumed_response_timeout_can_expire_again() {
-        let mut meeting = manual_meeting();
-        meeting.agent_turn_timeout_secs = 0;
-        let participant_id = meeting.join_mcp("codex");
-        meeting.choose_next_speaker("codex").unwrap();
-        let turn_id = meeting.active_turn.as_ref().unwrap().turn_id;
-        meeting
-            .start_active_turn_response(&participant_id, Some(turn_id))
-            .unwrap();
+    fn responding_marker_filters_stale_at_read_time() {
+        let mut meeting = fresh_meeting();
+        let agent = meeting.join_mcp("codex");
+        // Hand-insert a stale timestamp older than the threshold.
+        let stale_ts = unix_ts().saturating_sub(RESPONDING_STALE_SECS + 5);
+        meeting.responding.insert(agent.clone(), stale_ts);
+        assert!(meeting.active_responding().is_empty());
+        // Map still holds the entry — cleanup is lazy.
+        assert!(meeting.responding.contains_key(&agent));
+    }
 
-        assert!(
-            meeting
-                .resume_active_turn_timeout(&participant_id, Some(turn_id))
-                .is_ok()
-        );
+    #[test]
+    fn polling_marker_lifecycle_and_leave_cleanup() {
+        let mut meeting = fresh_meeting();
+        let a = meeting.join_mcp("codex");
+        let b = meeting.join_mcp("claude");
 
-        assert!(meeting.expire_active_turn_if_due());
-        assert!(meeting.active_turn.is_none());
-        assert_eq!(meeting.transcript[0].display_name, "system");
-        assert!(meeting.transcript[0].content.contains("timeout"));
+        assert!(meeting.active_polling().is_empty());
+
+        meeting.mark_polling(&a);
+        meeting.mark_polling(&b);
+        assert_eq!(meeting.active_polling().len(), 2);
+
+        meeting.unmark_polling(&a);
+        let active = meeting.active_polling();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0, b);
+
+        meeting.leave(&b);
+        assert!(meeting.active_polling().is_empty());
     }
 }

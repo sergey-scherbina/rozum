@@ -21,6 +21,11 @@ struct Cli {
     /// Start web interface on this port (e.g. --web-port 8080)
     #[arg(long)]
     web_port: Option<u16>,
+
+    /// Disable on-disk transcript persistence for the room
+    /// ($XDG_STATE_HOME/rozum/rooms/<name>/room-transcript.jsonl).
+    #[arg(long)]
+    no_persist: bool,
 }
 
 #[derive(Subcommand)]
@@ -90,7 +95,7 @@ async fn main() {
     match cli.command {
         None => {
             // Default: launch meeting room.
-            run_room(cli.room, &cli.topic, cli.r#as, cli.web_port).await;
+            run_room(cli.room, &cli.topic, cli.r#as, cli.web_port, !cli.no_persist).await;
         }
         Some(Command::List) => {
             let rooms = rozum::meeting::list_rooms().await;
@@ -174,6 +179,7 @@ async fn run_room(
     topic: &str,
     display_name: Option<String>,
     web_port: Option<u16>,
+    persist: bool,
 ) {
     use rozum::meeting::app::RoomConfig;
 
@@ -194,6 +200,7 @@ async fn run_room(
         human_display_name: username,
         budget: rozum::meeting::budget::BudgetGuard::default(),
         web_url: web_url.clone(),
+        persist,
     };
 
     if let Some(port) = web_port {
