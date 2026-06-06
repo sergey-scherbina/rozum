@@ -1,0 +1,6 @@
+feature/web-autosize-input 2026-06-06T17:44:04Z
+agent: claude-code-2
+heartbeat: 2026-06-06T17:44:04Z
+status: not-started
+done-so-far:
+next: replace input#msg with textarea, wire autosize JS
