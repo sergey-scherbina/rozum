@@ -287,9 +287,9 @@ impl Meeting {
             let _ = self.events.send(MeetingEvent::ParticipantLeft {
                 display_name: display_name.clone(),
             });
-            if self.participants.len() < 2 {
-                self.end_with_reason("insufficient-participants");
-            }
+            // The room stays alive even if everyone leaves. Agents and humans
+            // can rejoin later and pick up the same transcript. The room ends
+            // only on explicit `/stop` (operator) or process exit.
         }
     }
 
@@ -651,12 +651,18 @@ mod tests {
     }
 
     #[test]
-    fn leaving_below_two_ends_meeting() {
+    fn leaving_keeps_the_meeting_alive() {
         let mut meeting = fresh_meeting();
         let agent = meeting.join_mcp("codex");
+        let operator_id = meeting.participants[0].id.clone();
         assert_eq!(meeting.phase, Phase::Active);
+        // Drop the agent first: 1 participant left, used to auto-end.
         meeting.leave(&agent);
-        assert_eq!(meeting.phase, Phase::Ended);
+        assert_eq!(meeting.phase, Phase::Active);
+        // Drop the operator too: 0 participants, room still alive.
+        meeting.leave(&operator_id);
+        assert_eq!(meeting.phase, Phase::Active);
+        assert!(meeting.participants.is_empty());
     }
 
     #[test]
