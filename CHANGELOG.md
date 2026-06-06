@@ -1,5 +1,16 @@
 # Changelog
 
+## web-transcript-history — transcript replay on connect + lazy older-history paging
+Completed: 2026-06-06
+The web bridge keeps a bounded in-memory transcript ring (cap 2000). A new
+`GET /transcript?from_seq=&limit=` REST endpoint returns slices for paging.
+On WebSocket connect the bridge sends a `kind:"history"` envelope with the
+last 200 entries; the client replays them through the normal append path with
+seq-based deduplication. Scrolling within 60 px of the log top triggers a
+fetch of the next older 200 entries and prepends them while preserving the
+viewport. `web-transcript-persist` (separate slug) will lift the in-memory
+2000 cap by reading from `transcript.jsonl`.
+
 ## tui-arrow-scroll — Arrow Up/Down always scrolls the transcript
 Completed: 2026-06-06
 Dropped the `textarea.lines().len() <= 1` guard so the Up/Down arrows scroll

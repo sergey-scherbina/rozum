@@ -45,12 +45,6 @@ Current sprint focus: make Rozum a reliable local meeting room for live agents a
   - Verify `Hello! How are you?` still produces a sensible response.
   - Spec first: `docs/specs/smollm2-chat-template.md`.
 
-- [ ] web-transcript-history - Replay transcript on connect and lazy-paginate older history.
-  - `GET /transcript?from_seq=<n>&limit=<n>` REST endpoint on the bridge.
-  - On WebSocket connect the bridge sends a `history` envelope with the last 200 entries.
-  - Scrolling within 60 px of `#log` top fetches the next chunk and prepends without moving viewport.
-  - Spec: `docs/specs/web-ui-improvements.md` (slug `web-transcript-history`).
-
 - [ ] tui-soft-wrap - Wrap long input lines inside the TUI input area instead of horizontal scroll.
   - `tui-textarea 0.7` has no `set_wrap`; pick approach (custom rendering via Paragraph::wrap, fork the crate, or auto-insert newlines on overflow).
   - Carved out from `tui-autosize-input` after the autosize part landed but the wrap part proved blocked by the upstream crate.
