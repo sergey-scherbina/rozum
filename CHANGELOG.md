@@ -1,5 +1,15 @@
 # Changelog
 
+## mcp-proxy-reconnect — transparent reconnect of mcp-proxy after rozum restart
+Completed: 2026-06-06
+`ProxyState` remembers the joined room name; `call_room_tool` now
+catches transport failures and calls a new `try_reconnect_current_room`
+that sleeps a capped backoff (`200ms…5s`, ~18 s total) waiting for the
+Unix socket to reappear, reconnects, re-issues `_join_internal` with
+the same display name, and retries the original tool call. The agent's
+MCP session no longer sees `Transport closed` during a `rozum --room R`
+restart.
+
 ## room-transcript-persist — room transcript persisted across rozum restarts
 Completed: 2026-06-06
 `Meeting` gained `persist_path: Option<PathBuf>` and an

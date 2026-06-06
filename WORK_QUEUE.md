@@ -56,12 +56,6 @@ Current sprint focus: make Rozum a reliable local meeting room for live agents a
   - Backwards compatible: explicit calls from the agent still work and refresh identically.
   - Spec: `docs/specs/web-ui-improvements.md` (slug `mcp-proxy-auto-mark`).
 
-- [ ] mcp-proxy-reconnect - Transparent reconnect of mcp-proxy after rozum restart.
-  - On Transport closed / BrokenPipe, retry the Unix socket with capped backoff (10 attempts, 200ms..5s, total ≤ 18s).
-  - Re-issue `_join_internal` with the same display name on reconnect; resume forwarding seamlessly.
-  - Optional `rozum mcp-proxy --room <name>` flag to pin a room across reconnects.
-  - Spec: `docs/specs/rozum-restart-resilience.md` (slug `mcp-proxy-reconnect`).
-
 
 ## Done Criteria
 

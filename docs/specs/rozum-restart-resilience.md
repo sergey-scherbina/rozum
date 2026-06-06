@@ -119,10 +119,10 @@ to `mcp_server.rs` and to `wait_my_turn`.
 
 ## Behavior
 
-- [ ] After `rozum --room R` is killed and restarted within the
+- [x] After `rozum --room R` is killed and restarted within the
       reconnect window (< 18 s), every joined agent's MCP session
       resumes without surfacing `Transport closed` to the agent.
-- [ ] On reconnect, the agent's `wait_my_turn` resumes with
+- [x] On reconnect, the agent's `wait_my_turn` resumes with
       `since_seq` it left off — no replay of messages it already saw,
       and no missing messages from the gap.
 - [ ] `rooms.list` from the agent during the restart gap returns the
@@ -136,7 +136,7 @@ to `mcp_server.rs` and to `wait_my_turn`.
 - [x] `rozum --room R --no-persist` does not read or write the file.
 - [ ] Web bridge sees the loaded history through its normal
       `wait_my_turn(since_seq:0)` path, with no bridge-side change.
-- [ ] After ≥ `RECONNECT_MAX_ATTEMPTS` failures, the proxy surfaces
+- [x] After ≥ `RECONNECT_MAX_ATTEMPTS` failures, the proxy surfaces
       the underlying error upward and exits, so the agent's MCP
       runtime can re-spawn it if configured to do so.
 
