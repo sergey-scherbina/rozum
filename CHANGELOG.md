@@ -1,5 +1,15 @@
 # Changelog
 
+## web-basic-auth — HTTP Basic Auth on the web bridge
+Completed: 2026-06-06
+The web bridge now requires HTTP Basic Auth for `/`, `/ws`, and `/transcript`.
+The password must equal the room name; the username is unconstrained and is
+used as the participant's alias in the chat. The server stamps every outgoing
+`meeting.submit` with the authenticated alias regardless of any client-supplied
+`name` field, so a tampered client cannot post under a different name. The
+auth username is sent to the client via a new `{kind:"hello",name:...}` WS
+envelope right after connect; the page-side name input is removed.
+
 ## tui-soft-wrap — soft-wrap long input lines in the TUI
 Completed: 2026-06-06
 Custom render of the input area: `tui-textarea 0.7` still holds the data and

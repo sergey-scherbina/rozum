@@ -87,7 +87,6 @@
       margin: 2px 0;
     }
     #controls { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-end; }
-    #name { width: 100px; }
     #msg {
       flex: 1;
       min-width: 0;
@@ -111,7 +110,6 @@
     @media (max-width: 480px) {
       body { padding: 8px; gap: 6px; }
       #controls { gap: 4px; }
-      #name { width: 100%; flex-basis: 100%; }
       #msg { flex: 1 1 auto; max-height: 20vh; }
     }
   </style>
@@ -122,7 +120,6 @@
 <button id="newpill" type="button">↓ 0 new</button>
 <div id="presence"></div>
 <div id="controls">
-  <input id="name" placeholder="your name" value="web">
   <textarea id="msg" rows="1" placeholder="message..."></textarea>
   <button onclick="send()">Send</button>
 </div>
@@ -131,6 +128,9 @@ const log = document.getElementById('log');
 const header = document.getElementById('header');
 const presence = document.getElementById('presence');
 const ws = new WebSocket(`ws://${location.host}/ws`);
+// Set by the server's hello envelope right after WS connect; used as the
+// alias for every outgoing message.
+let myName = 'web';
 
 // participant_id -> display_name
 const participants = new Map();
@@ -153,6 +153,7 @@ ws.onclose = () => append('--- disconnected ---', 'system');
 ws.onmessage = e => {
   const env = JSON.parse(e.data);
   switch (env.kind) {
+    case 'hello':    if (env.name) myName = env.name; break;
     case 'msg':      onMsg(env); break;
     case 'presence': onPresence(env); break;
     case 'joined':   onJoined(env); break;
@@ -254,7 +255,6 @@ function renderHeader() {
 }
 
 function renderPresence() {
-  const myName = (document.getElementById('name').value || 'web').trim();
   presence.replaceChildren();
   let first = true;
   for (const [, s] of presenceState) {
@@ -340,10 +340,9 @@ function autosize() {
 }
 
 function send() {
-  const name = document.getElementById('name');
   if (!msgEl.value.trim()) return;
-  ws.send(JSON.stringify({ name: name.value || 'web', content: msgEl.value.trim() }));
-  append(`[${name.value || 'web'}]: ${msgEl.value.trim()}`, 'me');
+  ws.send(JSON.stringify({ name: myName, content: msgEl.value.trim() }));
+  append(`[${myName}]: ${msgEl.value.trim()}`, 'me');
   msgEl.value = '';
   msgEl.style.height = 'auto';
 }

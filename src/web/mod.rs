@@ -6,14 +6,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    Router,
+    Extension, Router,
     extract::{
         Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    response::{Html, IntoResponse, Json},
+    http::{StatusCode, header},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Json, Response},
     routing::{any, get},
 };
+use base64::Engine;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, broadcast};
@@ -48,6 +51,15 @@ struct TranscriptQuery {
 
 pub async fn run_bridge(room: &str, display_name: &str, port: u16) -> BridgeResult<()> {
     run_bridge_with(room, display_name, port, true).await
+}
+
+#[derive(Clone)]
+struct AuthUser(String);
+
+#[derive(Clone)]
+struct AuthConfig {
+    password: String,
+    realm: String,
 }
 
 pub async fn run_bridge_with(
@@ -104,10 +116,16 @@ pub async fn run_bridge_with(
         transcript: Arc::clone(&transcript),
     };
 
+    let auth_cfg = AuthConfig {
+        password: room.to_owned(),
+        realm: format!("rozum/{room}"),
+    };
+
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/ws", any(ws_handler))
         .route("/transcript", get(transcript_handler))
+        .layer(middleware::from_fn_with_state(auth_cfg, auth_layer))
         .with_state(state.clone());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -184,15 +202,76 @@ async fn index_handler() -> Html<&'static str> {
     Html(include_str!("index.html"))
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_socket(socket, state, user))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState) {
+/// Verify HTTP Basic Auth on every request. Username can be anything (it
+/// becomes the participant's alias in the chat); password must equal the
+/// room name. Authenticated requests carry the username forward via an
+/// `Extension<AuthUser>` so the WS handler can stamp every submitted
+/// message with the authenticated alias.
+async fn auth_layer(
+    State(cfg): State<AuthConfig>,
+    mut req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let unauthorized = |realm: &str| -> Response {
+        (
+            StatusCode::UNAUTHORIZED,
+            [(
+                header::WWW_AUTHENTICATE,
+                format!("Basic realm=\"{realm}\""),
+            )],
+            "401 Unauthorized\n",
+        )
+            .into_response()
+    };
+
+    let Some(raw) = req.headers().get(header::AUTHORIZATION) else {
+        return unauthorized(&cfg.realm);
+    };
+    let Ok(s) = raw.to_str() else {
+        return unauthorized(&cfg.realm);
+    };
+    let Some(b64) = s.strip_prefix("Basic ").or_else(|| s.strip_prefix("basic ")) else {
+        return unauthorized(&cfg.realm);
+    };
+    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
+        return unauthorized(&cfg.realm);
+    };
+    let Ok(creds) = std::str::from_utf8(&decoded) else {
+        return unauthorized(&cfg.realm);
+    };
+    let Some((user, pass)) = creds.split_once(':') else {
+        return unauthorized(&cfg.realm);
+    };
+    if pass != cfg.password {
+        return unauthorized(&cfg.realm);
+    }
+    let user = user.trim();
+    let user = if user.is_empty() { "web" } else { user };
+    req.extensions_mut().insert(AuthUser(user.to_owned()));
+    next.run(req).await
+}
+
+async fn handle_socket(mut socket: WebSocket, state: AppState, user: AuthUser) {
     // Subscribe before snapshotting so we don't miss messages that arrive
     // between snapshot and the start of forwarding. Client deduplicates by
     // seq (any overlap is harmless).
     let mut rx = state.broadcast_tx.subscribe();
+    // Tell the client which authenticated alias to display itself as. The
+    // client uses this in `me`-styled log entries; the server still enforces
+    // the same alias on every outbound submit, so a tampered client cannot
+    // post under a different name.
+    let hello = json!({ "kind": "hello", "name": user.0 });
+    if socket.send(Message::text(hello.to_string())).await.is_err() {
+        return;
+    }
     {
         let transcript = state.transcript.lock().await;
         let take = transcript.len().min(200);
@@ -209,17 +288,15 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     Some(Ok(Message::Text(text))) => {
                         let text = text.as_str().trim().to_owned();
                         if text.is_empty() { continue; }
-                        let (sender, content) =
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                                (
-                                    v["name"].as_str().unwrap_or("web").to_owned(),
-                                    v["content"].as_str().unwrap_or("").to_owned(),
-                                )
-                            } else {
-                                ("web".to_owned(), text)
-                            };
+                        let content = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                            v["content"].as_str().unwrap_or("").to_owned()
+                        } else {
+                            text
+                        };
                         if content.is_empty() { continue; }
-                        let payload = format!("[{}]: {}", sender, content);
+                        // Always stamp with the authenticated alias — never trust
+                        // the client-supplied `name` field.
+                        let payload = format!("[{}]: {}", user.0, content);
                         let mut conn = state.conn.lock().await;
                         let _ = conn
                             .call_tool(
