@@ -234,10 +234,10 @@ is passed to `rozum web` (default: on).
       first 4 lines visible and a `[expand ▾]` toggle.
 - [ ] On `joined`/`left` envelopes the page renders one dim system
       line in `#log` and updates the header participant chips.
-- [ ] The web `#msg` textarea grows from 1 line up to `30vh`
+- [x] The web `#msg` textarea grows from 1 line up to `30vh`
       (`20vh` on `max-width:480px`) as the user types; the transcript
       shrinks to fit.
-- [ ] `Enter` sends; `Shift+Enter` inserts a newline; `Esc` clears.
+- [x] `Enter` sends; `Shift+Enter` inserts a newline; `Esc` clears.
 - [ ] The TUI input area grows from 1 line up to `max(3, area.height/3)`
       lines; transcript shrinks to fit. `Alt+Enter` inserts a newline;
       `Enter` sends; `Esc` cancels. Long input lines wrap inside the

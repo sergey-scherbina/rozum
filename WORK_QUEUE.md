@@ -45,12 +45,6 @@ Current sprint focus: make Rozum a reliable local meeting room for live agents a
   - Verify `Hello! How are you?` still produces a sensible response.
   - Spec first: `docs/specs/smollm2-chat-template.md`.
 
-- [ ] web-autosize-input - Replace web input with a Claude-style autosizing textarea.
-  - `<textarea>` grows on `input` up to `30vh` desktop / `20vh` mobile.
-  - `Enter` sends, `Shift+Enter` newline, `Esc` clears, no horizontal scroll.
-  - Collapses back to 1 row after send.
-  - Spec: `docs/specs/web-ui-improvements.md` (slug `web-autosize-input`).
-
 - [ ] web-scrollback-sticky - Make web scrollback usable while messages arrive.
   - `data-stick` heuristic keeps viewport put when user is scrolled away from bottom.
   - "↓ N new" pill appears and increments while not stuck; click snaps and re-enables stick.
