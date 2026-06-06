@@ -6,12 +6,13 @@ use std::time::Duration;
 use axum::{
     Router,
     extract::{
-        State, WebSocketUpgrade,
+        Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    response::{Html, IntoResponse},
+    response::{Html, IntoResponse, Json},
     routing::{any, get},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, broadcast};
 
@@ -20,10 +21,27 @@ use crate::meeting::room_path::room_socket;
 
 type BridgeResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// In-memory transcript ring kept by the bridge. Each entry is a `msg`
+/// envelope (the same shape clients receive over WebSocket). Bounded so
+/// long-running rooms do not grow without limit; older entries fall off
+/// the front. `web-transcript-persist` (separate slug) lifts this bound
+/// by reading from `transcript.jsonl` when the in-memory window is
+/// exhausted.
+const TRANSCRIPT_CAP: usize = 2000;
+
 #[derive(Clone)]
 struct AppState {
     conn: Arc<Mutex<RoomConnection>>,
     broadcast_tx: broadcast::Sender<String>,
+    transcript: Arc<Mutex<Vec<Value>>>,
+}
+
+#[derive(Deserialize)]
+struct TranscriptQuery {
+    /// Return entries with `seq >= from_seq`. Omit for "from the start".
+    from_seq: Option<u64>,
+    /// Maximum number of entries to return. Defaults to 200.
+    limit: Option<usize>,
 }
 
 pub async fn run_bridge(room: &str, display_name: &str, port: u16) -> BridgeResult<()> {
@@ -56,14 +74,17 @@ pub async fn run_bridge(room: &str, display_name: &str, port: u16) -> BridgeResu
 
     let (broadcast_tx, _) = broadcast::channel::<String>(64);
     let conn = Arc::new(Mutex::new(conn));
+    let transcript = Arc::new(Mutex::new(Vec::<Value>::new()));
     let state = AppState {
         conn: Arc::clone(&conn),
         broadcast_tx: broadcast_tx.clone(),
+        transcript: Arc::clone(&transcript),
     };
 
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/ws", any(ws_handler))
+        .route("/transcript", get(transcript_handler))
         .with_state(state.clone());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -73,11 +94,27 @@ pub async fn run_bridge(room: &str, display_name: &str, port: u16) -> BridgeResu
         result = axum::serve(listener, app) => {
             result.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         }
-        result = room_loop(conn, broadcast_tx) => {
+        result = room_loop(conn, broadcast_tx, transcript) => {
             result?;
         }
     }
     Ok(())
+}
+
+async fn transcript_handler(
+    State(state): State<AppState>,
+    Query(q): Query<TranscriptQuery>,
+) -> Json<Value> {
+    let from_seq = q.from_seq.unwrap_or(0);
+    let limit = q.limit.unwrap_or(200).clamp(1, TRANSCRIPT_CAP);
+    let transcript = state.transcript.lock().await;
+    let messages: Vec<Value> = transcript
+        .iter()
+        .filter(|m| m["seq"].as_u64().unwrap_or(0) >= from_seq)
+        .take(limit)
+        .cloned()
+        .collect();
+    Json(json!({ "messages": messages }))
 }
 
 async fn index_handler() -> Html<&'static str> {
@@ -89,7 +126,19 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
+    // Subscribe before snapshotting so we don't miss messages that arrive
+    // between snapshot and the start of forwarding. Client deduplicates by
+    // seq (any overlap is harmless).
     let mut rx = state.broadcast_tx.subscribe();
+    {
+        let transcript = state.transcript.lock().await;
+        let take = transcript.len().min(200);
+        let messages: Vec<Value> = transcript[transcript.len() - take..].to_vec();
+        let env = json!({ "kind": "history", "messages": messages });
+        if socket.send(Message::text(env.to_string())).await.is_err() {
+            return;
+        }
+    }
     loop {
         tokio::select! {
             msg = socket.recv() => {
@@ -144,6 +193,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 async fn room_loop(
     conn: Arc<Mutex<RoomConnection>>,
     broadcast_tx: broadcast::Sender<String>,
+    transcript: Arc<Mutex<Vec<Value>>>,
 ) -> BridgeResult<()> {
     let mut since_seq: usize = 0;
     let mut last_polling: HashSet<String> = HashSet::new();
@@ -266,7 +316,8 @@ async fn room_loop(
             last_responding = new_responding;
         }
 
-        // Emit `msg` for each transcript delta entry.
+        // Emit `msg` for each transcript delta entry, and append to the
+        // in-memory transcript so later WebSocket connects can replay it.
         for entry in transcript_delta {
             let content = entry["content"].as_str().unwrap_or("").trim();
             if content.is_empty() {
@@ -280,6 +331,14 @@ async fn room_loop(
                 "seq":       entry["seq"].as_u64().unwrap_or(0),
                 "ts":        entry["ts"].as_u64().unwrap_or(0),
             });
+            {
+                let mut t = transcript.lock().await;
+                t.push(env.clone());
+                if t.len() > TRANSCRIPT_CAP {
+                    let excess = t.len() - TRANSCRIPT_CAP;
+                    t.drain(0..excess);
+                }
+            }
             broadcast_tx.send(env.to_string()).ok();
         }
     }

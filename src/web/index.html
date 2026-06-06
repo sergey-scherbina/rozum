@@ -136,6 +136,11 @@ const ws = new WebSocket(`ws://${location.host}/ws`);
 const participants = new Map();
 // participant_id -> { kind: 'typing'|'waiting' }
 const presenceState = new Map();
+// seq -> true; deduplicates msgs that appear in both history and broadcast
+const seenSeqs = new Set();
+// lowest seq currently rendered in #log; used to lazy-fetch older history
+let minSeq = Infinity;
+let topFetchInFlight = false;
 
 const GLYPH = { typing: '✏️', waiting: '⏳' };
 const VERB  = { typing: 'is typing…', waiting: 'is waiting' };
@@ -149,12 +154,58 @@ ws.onmessage = e => {
     case 'presence': onPresence(env); break;
     case 'joined':   onJoined(env); break;
     case 'left':     onLeft(env); break;
+    case 'history':  onHistory(env); break;
   }
 };
 
 function onMsg(env) {
+  if (typeof env.seq === 'number') {
+    if (seenSeqs.has(env.seq)) return;
+    seenSeqs.add(env.seq);
+    if (env.seq < minSeq) minSeq = env.seq;
+  }
   const cls = env.injected ? 'injected' : '';
   append(`[${env.speaker}]: ${env.content}`, cls);
+}
+
+function onHistory(env) {
+  const msgs = env.messages || [];
+  for (const m of msgs) {
+    if (typeof m.seq === 'number' && seenSeqs.has(m.seq)) continue;
+    if (typeof m.seq === 'number') {
+      seenSeqs.add(m.seq);
+      if (m.seq < minSeq) minSeq = m.seq;
+    }
+    const cls = m.injected ? 'injected' : '';
+    append(`[${m.speaker}]: ${m.content}`, cls);
+  }
+}
+
+async function fetchOlder() {
+  if (topFetchInFlight || !Number.isFinite(minSeq) || minSeq <= 0) return;
+  topFetchInFlight = true;
+  try {
+    const from = Math.max(0, minSeq - 200);
+    const resp = await fetch(`/transcript?from_seq=${from}&limit=200`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const msgs = (data.messages || []).filter(m => !seenSeqs.has(m.seq) && m.seq < minSeq);
+    if (msgs.length === 0) return;
+    // Prepend in seq order, preserving the current viewport.
+    const prevHeight = log.scrollHeight;
+    const prevTop = log.scrollTop;
+    msgs.sort((a, b) => a.seq - b.seq);
+    const frag = document.createDocumentFragment();
+    for (const m of msgs) {
+      seenSeqs.add(m.seq);
+      if (m.seq < minSeq) minSeq = m.seq;
+      frag.appendChild(makeMsgEl(`[${m.speaker}]: ${m.content}`, m.injected ? 'injected' : ''));
+    }
+    log.insertBefore(frag, log.firstChild);
+    log.scrollTop = prevTop + (log.scrollHeight - prevHeight);
+  } finally {
+    topFetchInFlight = false;
+  }
 }
 
 function onPresence(env) {
@@ -233,6 +284,7 @@ function setUnread(n) {
 log.addEventListener('scroll', () => {
   if (atBottom()) setUnread(0);
   log.dataset.stick = atBottom() ? 'true' : 'false';
+  if (log.scrollTop < 60) fetchOlder();
 });
 
 newpill.addEventListener('click', () => {
@@ -240,7 +292,7 @@ newpill.addEventListener('click', () => {
   setUnread(0);
 });
 
-function append(text, cls) {
+function makeMsgEl(text, cls) {
   const el = document.createElement('div');
   if (cls) el.className = cls;
   const body = document.createElement('div');
@@ -261,6 +313,11 @@ function append(text, cls) {
     });
     el.appendChild(btn);
   }
+  return el;
+}
+
+function append(text, cls) {
+  const el = makeMsgEl(text, cls);
   const wasStick = atBottom();
   log.appendChild(el);
   if (wasStick) {
