@@ -48,6 +48,8 @@ bridges, hotkeys, and slash commands.
 ## Documentation
 
 - **[INSTALL.md](INSTALL.md)** — prerequisites, build, optional features.
+- **[TUTORIAL.md](TUTORIAL.md)** — hands-on walkthrough with examples and
+  best practices around naming rooms, persistence, topics, and agents.
 - **[USER_MANUAL.md](USER_MANUAL.md)** — running rooms, TUI controls, MCP
   proxy setup, bridges, persistence, environment variables.
 - **[SPEC.md](SPEC.md)** — global project spec (runtime contract, invariants).
