@@ -12,6 +12,8 @@ Read `vendor/agent-plugins/multi-agent/commands/multi-agent.md` for the multi-ag
 
 Read `vendor/agent-plugins/spec-dev/commands/spec-dev.md` for the spec-driven development workflow.
 
+Read `vendor/agent-plugins/rozum/commands/rozum.md` whenever you join a `rozum` meeting room. It covers polling cadence, submit etiquette, co-agent coordination, and the `working:` / `done:` convention.
+
 ## Meeting-room conventions
 
 When you are joined to a `rozum` meeting room and need to leave the room for

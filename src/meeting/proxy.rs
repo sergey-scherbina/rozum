@@ -435,9 +435,15 @@ impl ServerHandler for ProxyServer {
             ))
             .with_instructions(
                 "Use rooms.list to see active meeting rooms, then rooms.join(name) to join one. \
-                 After joining, loop: meeting.wait_my_turn (25s long-poll) → meeting.submit if you \
-                 have something to add. There are no turns: anyone may submit any time. \
-                 Use meeting.leave when done.",
+                 After joining, loop: meeting.wait_my_turn (25s long-poll, retry immediately on \
+                 still_waiting) → meeting.submit if you have something to add. Anyone may submit \
+                 any time — there are no turns. \
+                 Before composing, check the responding[] array: if a sibling agent is already \
+                 typing the same reply, wait. Keep replies short. \
+                 For long offline work, post 'working: <what>' before going dark and 'done: \
+                 <result>' on return so other participants see your status. \
+                 Call meeting.leave when finished. \
+                 Full etiquette: see vendor/agent-plugins/rozum/commands/rozum.md.",
             ))
     }
 }
