@@ -1,6 +1,6 @@
-feature/web-presence-row 2026-06-06T17:43:32Z
+feature/web-presence-row 2026-06-06T17:43:49Z
 agent: claude-code
-heartbeat: 2026-06-06T17:43:32Z
-status: not-started
-done-so-far:
-next: read src/web/mod.rs room_loop; design presence envelope diff
+heartbeat: 2026-06-06T17:43:49Z
+status: in-progress
+done-so-far: claim+worktree created
+next: refactor src/web/mod.rs room_loop to emit tagged envelopes (msg/presence/joined/left)
