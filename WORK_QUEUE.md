@@ -45,12 +45,6 @@ Current sprint focus: make Rozum a reliable local meeting room for live agents a
   - Verify `Hello! How are you?` still produces a sensible response.
   - Spec first: `docs/specs/smollm2-chat-template.md`.
 
-- [ ] web-presence-row - Surface room presence in the web client.
-  - Bridge forwards `presence` (responding/polling) and `joined`/`left` envelopes from `room_loop` to all WebSocket clients.
-  - Page renders a presence line above the input and participant chips in the header using `✏️ ⏳ ● ○` glyph map.
-  - Disconnected = poll age > 60 s; idle = present but no poll/respond.
-  - Spec: `docs/specs/web-ui-improvements.md` (slug `web-presence-row`).
-
 - [ ] web-autosize-input - Replace web input with a Claude-style autosizing textarea.
   - `<textarea>` grows on `input` up to `30vh` desktop / `20vh` mobile.
   - `Enter` sends, `Shift+Enter` newline, `Esc` clears, no horizontal scroll.
