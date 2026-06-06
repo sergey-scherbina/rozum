@@ -5,6 +5,37 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>rozum</title>
   <style>
+    /* Theme tokens. Light values are the defaults; the prefers-color-scheme
+       media query overrides them for dark mode. */
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --fg: #111;
+      --muted: #555;
+      --muted-2: #666;
+      --muted-3: #999;
+      --border: #ccc;
+      --chip-bg: #fafafa;
+      --chip-border: #ddd;
+      --accent: #00a;
+      --accent-fg: #ffffff;
+      --injected: #999;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #15171a;
+        --fg: #e6e6e6;
+        --muted: #aab;
+        --muted-2: #99a;
+        --muted-3: #778;
+        --border: #2c3036;
+        --chip-bg: #1d2126;
+        --chip-border: #2c3036;
+        --accent: #6cf;
+        --accent-fg: #0a0c10;
+        --injected: #7a7f86;
+      }
+    }
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; }
     body {
@@ -16,27 +47,29 @@
       gap: 8px;
       min-height: 100vh;
       min-height: 100dvh;
+      background: var(--bg);
+      color: var(--fg);
     }
     #header {
       display: flex;
       flex-wrap: wrap;
       gap: 4px 6px;
       font-size: 12px;
-      color: #555;
+      color: var(--muted);
       min-height: 18px;
     }
     #header .chip {
-      border: 1px solid #ddd;
+      border: 1px solid var(--chip-border);
       border-radius: 10px;
       padding: 1px 8px;
-      background: #fafafa;
+      background: var(--chip-bg);
     }
     #log {
       flex: 1;
       min-height: 0;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
-      border: 1px solid #ccc;
+      border: 1px solid var(--border);
       padding: 8px;
       white-space: pre-wrap;
       word-wrap: break-word;
@@ -49,7 +82,7 @@
     }
     #presence {
       font-size: 12px;
-      color: #666;
+      color: var(--muted-2);
       min-height: 16px;
       padding: 0 2px;
     }
@@ -59,7 +92,7 @@
       margin-right: 2px;
     }
     .system {
-      color: #999;
+      color: var(--muted-3);
       font-style: italic;
     }
     .msg-collapsible.collapsed > .body {
@@ -71,7 +104,7 @@
     .expand {
       background: none;
       border: none;
-      color: #00a;
+      color: var(--accent);
       cursor: pointer;
       font: inherit;
       font-size: 12px;
@@ -81,8 +114,8 @@
     #newpill {
       align-self: center;
       display: none;
-      background: #00a;
-      color: white;
+      background: var(--accent);
+      color: var(--accent-fg);
       border: none;
       border-radius: 14px;
       padding: 3px 12px;
@@ -102,6 +135,10 @@
       word-break: break-word;
       line-height: 1.4;
       font-family: inherit;
+      background: var(--bg);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
     }
     #controls input, #controls textarea, #controls button {
       font: inherit;
@@ -109,9 +146,16 @@
       padding: 8px 10px;
       min-height: 40px;
     }
-    #controls button { flex-shrink: 0; }
-    .injected { color: #999; }
-    .me { color: #00a; }
+    #controls button {
+      flex-shrink: 0;
+      background: var(--accent);
+      color: var(--accent-fg);
+      border: 1px solid var(--accent);
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .injected { color: var(--injected); }
+    .me { color: var(--accent); }
     @media (max-width: 480px) {
       body { padding: 8px; gap: 6px; }
       #controls { gap: 4px; }
