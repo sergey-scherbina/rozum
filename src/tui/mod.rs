@@ -323,7 +323,8 @@ fn draw_ui(f: &mut ratatui::Frame, app: &AppState, textarea: &TextArea) {
 
     let input_lines = textarea.lines().len().max(1) as u16;
     let max_input_h = (area.height / 3).max(3);
-    let input_h = input_lines.clamp(1, max_input_h);
+    // +2 for the rounded border around the textarea block (top + bottom row).
+    let input_h = (input_lines + 2).clamp(3, max_input_h);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
