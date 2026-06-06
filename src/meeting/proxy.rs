@@ -28,6 +28,11 @@ use super::room_path::room_socket;
 struct ProxyState {
     /// Live room connection for this proxy MCP session.
     current_room: Option<RoomConn>,
+    /// Name of the room we are currently joined to (or last attempted).
+    /// Remembered so `try_reconnect_current_room` can re-establish the
+    /// same connection after the underlying Unix socket dies — e.g. when
+    /// the operator restarts the `rozum --room <name>` process.
+    current_room_name: Option<String>,
     /// The agent's self-reported name from MCP initialize.
     client_info_name: String,
     upstream_peer: Option<Peer<RoleServer>>,
@@ -36,6 +41,11 @@ struct ProxyState {
     /// while the agent holds an active turn. Aborted on submit/leave/new turn.
     heartbeat_task: Option<tokio::task::JoinHandle<()>>,
 }
+
+/// Capped exponential backoff schedule used by `try_reconnect_current_room`.
+/// Sum ≈ 18 s — long enough to cover a typical `cargo build && rerun` of
+/// `rozum`, short enough not to hide a genuine failure.
+const RECONNECT_DELAYS_MS: &[u64] = &[200, 200, 500, 500, 1000, 1000, 2000, 2000, 5000, 5000];
 
 struct RoomConn {
     service: RunningService<RoleClient, RoomProxyClient>,
@@ -73,13 +83,94 @@ impl ProxyServer {
             room.service.peer().clone()
         };
 
-        match call_room_tool_via_peer(&peer, tool_name, params).await {
+        match call_room_tool_via_peer(&peer, tool_name, params.clone()).await {
             Ok(result) => result,
-            Err(e) => {
+            Err(_) => {
+                // Underlying Unix socket likely died (e.g. operator restarted
+                // `rozum`). Try to re-establish the same room transparently
+                // before surfacing the failure to the agent.
                 self.state.lock().await.current_room = None;
-                err_result(&format!("room-error: {e}"))
+                match self.try_reconnect_current_room().await {
+                    Ok(new_peer) => match call_room_tool_via_peer(&new_peer, tool_name, params).await {
+                        Ok(result) => result,
+                        Err(e) => err_result(&format!("room-error: {e}")),
+                    },
+                    Err(e) => err_result(&format!("room-error: {e}")),
+                }
             }
         }
+    }
+
+    /// Re-establish the current room connection after a transport failure.
+    /// Uses `RECONNECT_DELAYS_MS` for capped backoff between attempts. On
+    /// success, stores the new `RoomConn` in `state.current_room` and
+    /// returns the new peer for the caller to retry the failed tool call.
+    async fn try_reconnect_current_room(
+        &self,
+    ) -> Result<Peer<RoleClient>, Box<dyn std::error::Error + Send + Sync>> {
+        let (name, client_info_name, upstream_peer, upstream_supports_sampling) = {
+            let s = self.state.lock().await;
+            let name = s
+                .current_room_name
+                .clone()
+                .ok_or("no current room name to reconnect to")?;
+            (
+                name,
+                client_name_or_default(&s.client_info_name),
+                s.upstream_peer.clone(),
+                s.upstream_supports_sampling,
+            )
+        };
+
+        let socket_path = room_socket(&name);
+        for (attempt, delay_ms) in RECONNECT_DELAYS_MS.iter().enumerate() {
+            tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+            if !socket_path.exists() {
+                continue;
+            }
+            let stream = match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                UnixStream::connect(&socket_path),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => stream,
+                _ => continue,
+            };
+            let room_client = RoomProxyClient {
+                client_info_name: client_info_name.clone(),
+                upstream_peer: upstream_peer.clone(),
+                upstream_supports_sampling,
+            };
+            use rmcp::ServiceExt;
+            let service = match room_client.serve(stream).await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let join_result = call_room_tool_via_peer(
+                service.peer(),
+                "_join_internal",
+                serde_json::json!({ "client_info_name": client_info_name.clone() }),
+            )
+            .await;
+            if !matches!(&join_result, Ok(r) if r.is_error != Some(true)) {
+                continue;
+            }
+            let peer = service.peer().clone();
+            tracing::info!(
+                room = %name,
+                attempt = attempt + 1,
+                "mcp-proxy reconnected to room"
+            );
+            self.state.lock().await.current_room = Some(RoomConn { service });
+            return Ok(peer);
+        }
+        Err(format!(
+            "reconnect failed after {} attempts; room '{}' did not return",
+            RECONNECT_DELAYS_MS.len(),
+            name
+        )
+        .into())
     }
 }
 
@@ -188,7 +279,9 @@ impl ProxyServer {
 
         match join_result {
             Ok(r) if r.is_error != Some(true) => {
-                self.state.lock().await.current_room = Some(RoomConn { service });
+                let mut s = self.state.lock().await;
+                s.current_room = Some(RoomConn { service });
+                s.current_room_name = Some(name);
                 r
             }
             Ok(r) => r,
@@ -238,7 +331,9 @@ impl ProxyServer {
         let result = self
             .call_room_tool("meeting.leave", serde_json::json!({}))
             .await;
-        self.state.lock().await.current_room = None;
+        let mut s = self.state.lock().await;
+        s.current_room = None;
+        s.current_room_name = None;
         result
     }
 
