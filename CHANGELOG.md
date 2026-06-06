@@ -1,5 +1,23 @@
 # Changelog
 
+## tui-soft-wrap — soft-wrap long input lines in the TUI
+Completed: 2026-06-06
+Custom render of the input area: `tui-textarea 0.7` still holds the data and
+processes input events, but its renderer is bypassed. `draw_input` builds
+visual rows by wrapping each logical line at `inner_width` and places the
+cursor manually via `f.set_cursor_position`. Autosize now counts wrapped
+visual rows, so a single long line grows the input chunk upward instead of
+scrolling horizontally.
+
+## mcp-proxy-auto-mark — auto-emit mark_responding from mcp-proxy
+Completed: 2026-06-06
+`ProxyState` gained a `heartbeat_task` handle. When `meeting.wait_my_turn`
+returns `your_turn:true`, the proxy fires an immediate `meeting.mark_responding`
+and spawns a background task that refreshes it every 15 s. The task is aborted
+on the agent's next `submit`/`leave` and on a fresh `your_turn:true` (which
+restarts the heartbeat). Manual `meeting.mark_responding` calls from the agent
+still work and refresh the timer identically.
+
 ## mcp-proxy-reconnect — transparent reconnect of mcp-proxy after rozum restart
 Completed: 2026-06-06
 `ProxyState` remembers the joined room name; `call_room_tool` now

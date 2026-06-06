@@ -45,17 +45,6 @@ Current sprint focus: make Rozum a reliable local meeting room for live agents a
   - Verify `Hello! How are you?` still produces a sensible response.
   - Spec first: `docs/specs/smollm2-chat-template.md`.
 
-- [ ] tui-soft-wrap - Wrap long input lines inside the TUI input area instead of horizontal scroll.
-  - `tui-textarea 0.7` has no `set_wrap`; pick approach (custom rendering via Paragraph::wrap, fork the crate, or auto-insert newlines on overflow).
-  - Carved out from `tui-autosize-input` after the autosize part landed but the wrap part proved blocked by the upstream crate.
-  - Spec: `docs/specs/web-ui-improvements.md` (slug `tui-soft-wrap`).
-
-- [ ] mcp-proxy-auto-mark - Auto-emit `mark_responding` from mcp-proxy.
-  - When the proxy returns `your_turn:true` from `wait_my_turn`, also call `meeting.mark_responding` on the agent's behalf.
-  - Refresh every 15 s until next `meeting.submit` / `meeting.leave` / process exit.
-  - Backwards compatible: explicit calls from the agent still work and refresh identically.
-  - Spec: `docs/specs/web-ui-improvements.md` (slug `mcp-proxy-auto-mark`).
-
 
 ## Done Criteria
 

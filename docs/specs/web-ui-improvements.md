@@ -241,10 +241,12 @@ is passed to `rozum web` (default: on).
 - [x] The TUI input area grows from 1 line up to `max(3, area.height/3)`
       lines; transcript shrinks to fit. `Alt+Enter` inserts a newline;
       `Enter` sends; `Esc` cancels.
-- [ ] Long input lines wrap inside the input area and never scroll
-      horizontally. *(open — tui-textarea 0.7 lacks soft-wrap; pending
-      decision on `tui-soft-wrap` slug.)*
-- [ ] `mcp-proxy` agents that never call `mark_responding` themselves
+- [x] Long input lines wrap inside the input area and never scroll
+      horizontally. *(Landed via custom render in `tui-soft-wrap`:
+      `draw_input` wraps logical lines into visual rows and places the
+      cursor manually; tui-textarea 0.7 stays as the data + input
+      handler but its renderer is bypassed.)*
+- [x] `mcp-proxy` agents that never call `mark_responding` themselves
       still appear as typing in both web and TUI for the entire
       duration of their reply.
 - [x] With persistence on, `transcript.jsonl` contains every turn in

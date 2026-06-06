@@ -1,6 +1,0 @@
-feature/mcp-proxy-auto-mark 2026-06-06T18:15:00Z
-agent: claude-code-2
-heartbeat: 2026-06-06T18:15:00Z
-status: in-progress
-done-so-far: heartbeat task in proxy: auto mark_responding on your_turn:true, refresh 15s, cancel on submit/leave
-next: commit, then verify with sergiy
