@@ -1,0 +1,6 @@
+feature/mcp-proxy-reconnect 2026-06-06T18:59:32Z
+agent: claude-code
+heartbeat: 2026-06-06T18:59:32Z
+status: in-progress
+done-so-far: claim
+next: read src/meeting/proxy.rs, find forwarding loop, add retry+backoff on transport failure
