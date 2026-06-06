@@ -57,6 +57,35 @@
       color: #999;
       font-style: italic;
     }
+    .msg-collapsible.collapsed > .body {
+      display: -webkit-box;
+      -webkit-line-clamp: 4;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .expand {
+      background: none;
+      border: none;
+      color: #00a;
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      padding: 0;
+      margin-top: 2px;
+    }
+    #newpill {
+      align-self: center;
+      display: none;
+      background: #00a;
+      color: white;
+      border: none;
+      border-radius: 14px;
+      padding: 3px 12px;
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      margin: 2px 0;
+    }
     #controls { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-end; }
     #name { width: 100px; }
     #msg {
@@ -90,6 +119,7 @@
 <body>
 <div id="header"></div>
 <div id="log"></div>
+<button id="newpill" type="button">↓ 0 new</button>
 <div id="presence"></div>
 <div id="controls">
   <input id="name" placeholder="your name" value="web">
@@ -183,12 +213,61 @@ function renderPresence() {
   }
 }
 
+const newpill = document.getElementById('newpill');
+let unread = 0;
+
+function atBottom() {
+  return log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
+}
+
+function setUnread(n) {
+  unread = n;
+  if (unread > 0 && !atBottom()) {
+    newpill.firstChild.nodeValue = `↓ ${unread} new`;
+    newpill.style.display = '';
+  } else {
+    newpill.style.display = 'none';
+  }
+}
+
+log.addEventListener('scroll', () => {
+  if (atBottom()) setUnread(0);
+  log.dataset.stick = atBottom() ? 'true' : 'false';
+});
+
+newpill.addEventListener('click', () => {
+  log.scrollTop = log.scrollHeight;
+  setUnread(0);
+});
+
 function append(text, cls) {
   const el = document.createElement('div');
   if (cls) el.className = cls;
-  el.textContent = text;
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.textContent = text;
+  const lineCount = (text.match(/\n/g) || []).length + 1;
+  const isLong = lineCount > 6 || text.length > 600;
+  el.appendChild(body);
+  if (isLong) {
+    el.classList.add('msg-collapsible', 'collapsed');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'expand';
+    btn.textContent = '[expand ▾]';
+    btn.addEventListener('click', () => {
+      const collapsed = el.classList.toggle('collapsed');
+      btn.textContent = collapsed ? '[expand ▾]' : '[collapse ▴]';
+    });
+    el.appendChild(btn);
+  }
+  const wasStick = atBottom();
   log.appendChild(el);
-  log.scrollTop = log.scrollHeight;
+  if (wasStick) {
+    log.scrollTop = log.scrollHeight;
+  } else {
+    setUnread(unread + 1);
+  }
 }
 
 const msgEl = document.getElementById('msg');
