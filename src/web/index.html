@@ -41,6 +41,11 @@
       white-space: pre-wrap;
       word-wrap: break-word;
       overflow-wrap: anywhere;
+      /* Newest message at the visual top, oldest at the bottom. Append at
+         end of DOM still pushes new content to the top visually; browsers
+         keep scrollTop=0 ("at newest") stable across appends. */
+      display: flex;
+      flex-direction: column-reverse;
     }
     #presence {
       font-size: 12px;
@@ -116,13 +121,13 @@
 </head>
 <body>
 <div id="header"></div>
-<div id="log"></div>
-<button id="newpill" type="button">↓ 0 new</button>
-<div id="presence"></div>
 <div id="controls">
   <textarea id="msg" rows="1" placeholder="message..."></textarea>
   <button onclick="send()">Send</button>
 </div>
+<div id="presence"></div>
+<button id="newpill" type="button">↑ 0 new</button>
+<div id="log"></div>
 <script>
 const log = document.getElementById('log');
 const header = document.getElementById('header');
@@ -197,9 +202,10 @@ async function fetchOlder() {
     const data = await resp.json();
     const msgs = (data.messages || []).filter(m => !seenIds.has(idOf(m)) && m.seq < minSeq);
     if (msgs.length === 0) return;
-    // Prepend in seq order, preserving the current viewport.
-    const prevHeight = log.scrollHeight;
-    const prevTop = log.scrollTop;
+    // Older messages go at the DOM start (= visual bottom in column-reverse).
+    // The browser keeps the user's existing content where it is on screen;
+    // they can continue scrolling down to reach the newly loaded older
+    // entries.
     msgs.sort((a, b) => a.seq - b.seq);
     const frag = document.createDocumentFragment();
     for (const m of msgs) {
@@ -208,7 +214,6 @@ async function fetchOlder() {
       frag.appendChild(makeMsgEl(`[${m.speaker}]: ${m.content}`, m.injected ? 'injected' : ''));
     }
     log.insertBefore(frag, log.firstChild);
-    log.scrollTop = prevTop + (log.scrollHeight - prevHeight);
   } finally {
     topFetchInFlight = false;
   }
@@ -272,14 +277,22 @@ function renderPresence() {
 const newpill = document.getElementById('newpill');
 let unread = 0;
 
-function atBottom() {
-  return log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
+// With #log using flex-direction: column-reverse, the visual TOP of the log
+// (newest message) is scrollTop === 0; scrolling DOWN moves toward older
+// content. "atNewest" replaces the old "atBottom" for the same role: are we
+// looking at the most recent message?
+function atNewest() {
+  return log.scrollTop <= 40;
+}
+
+function nearOldest() {
+  return log.scrollTop + log.clientHeight >= log.scrollHeight - 60;
 }
 
 function setUnread(n) {
   unread = n;
-  if (unread > 0 && !atBottom()) {
-    newpill.firstChild.nodeValue = `↓ ${unread} new`;
+  if (unread > 0 && !atNewest()) {
+    newpill.firstChild.nodeValue = `↑ ${unread} new`;
     newpill.style.display = '';
   } else {
     newpill.style.display = 'none';
@@ -287,13 +300,13 @@ function setUnread(n) {
 }
 
 log.addEventListener('scroll', () => {
-  if (atBottom()) setUnread(0);
-  log.dataset.stick = atBottom() ? 'true' : 'false';
-  if (log.scrollTop < 60) fetchOlder();
+  if (atNewest()) setUnread(0);
+  log.dataset.stick = atNewest() ? 'true' : 'false';
+  if (nearOldest()) fetchOlder();
 });
 
 newpill.addEventListener('click', () => {
-  log.scrollTop = log.scrollHeight;
+  log.scrollTop = 0;
   setUnread(0);
 });
 
@@ -323,10 +336,12 @@ function makeMsgEl(text, cls) {
 
 function append(text, cls) {
   const el = makeMsgEl(text, cls);
-  const wasStick = atBottom();
+  const wasStick = atNewest();
+  // With column-reverse, the last DOM child is the visual top. Browsers
+  // preserve scrollTop=0 across appends when stuck to the top.
   log.appendChild(el);
   if (wasStick) {
-    log.scrollTop = log.scrollHeight;
+    log.scrollTop = 0;
   } else {
     setUnread(unread + 1);
   }
