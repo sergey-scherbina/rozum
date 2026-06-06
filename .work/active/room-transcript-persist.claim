@@ -1,6 +1,0 @@
-feature/room-transcript-persist 2026-06-06T18:55:25Z
-agent: claude-code
-heartbeat: 2026-06-06T18:55:25Z
-status: in-progress
-done-so-far: claim
-next: read src/meeting/state.rs, src/meeting/app.rs to find Meeting::new/submit; add persist_path field + load + append

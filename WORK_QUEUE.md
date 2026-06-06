@@ -62,12 +62,6 @@ Current sprint focus: make Rozum a reliable local meeting room for live agents a
   - Optional `rozum mcp-proxy --room <name>` flag to pin a room across reconnects.
   - Spec: `docs/specs/rozum-restart-resilience.md` (slug `mcp-proxy-reconnect`).
 
-- [ ] room-transcript-persist - Persist the room transcript across rozum restarts.
-  - `Meeting` loads `$XDG_STATE_HOME/rozum/rooms/<name>/room-transcript.jsonl` into `transcript` on construction.
-  - Every `submit` appends one JSON line; seq counter continues from where the file left off.
-  - `rozum --no-persist` disables both load and append (independent of the existing `rozum web --no-persist`).
-  - Spec: `docs/specs/rozum-restart-resilience.md` (slug `room-transcript-persist`).
-
 
 ## Done Criteria
 

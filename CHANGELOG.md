@@ -1,5 +1,17 @@
 # Changelog
 
+## room-transcript-persist — room transcript persisted across rozum restarts
+Completed: 2026-06-06
+`Meeting` gained `persist_path: Option<PathBuf>` and an
+`enable_persistence` method that loads
+`$XDG_STATE_HOME/rozum/rooms/<name>/room-transcript.jsonl` on
+construction and re-numbers seq. `post_submission` appends every Turn
+as one JSON line. A new top-level `--no-persist` flag disables both
+(independent of the existing `rozum web --no-persist`). Web bridges
+pick up the loaded history through their normal
+`wait_my_turn(since_seq:0)` path. With `rozum --room R` the same room
+name reopened after a restart resumes with full transcript intact.
+
 ## web-transcript-persist — bridge transcript persisted to disk
 Completed: 2026-06-06
 The web bridge now appends every `msg` envelope to

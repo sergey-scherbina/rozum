@@ -128,12 +128,12 @@ to `mcp_server.rs` and to `wait_my_turn`.
 - [ ] `rooms.list` from the agent during the restart gap returns the
       proxy's last-known room name (so a manual rejoin still works
       even before auto-reconnect succeeds).
-- [ ] `rozum --room R` started after a previous run with the same
+- [x] `rozum --room R` started after a previous run with the same
       name reads `room-transcript.jsonl` into memory and continues
       the seq counter from where it left off.
-- [ ] Every `meeting.submit` appends one JSON line to
+- [x] Every `meeting.submit` appends one JSON line to
       `room-transcript.jsonl`; lines round-trip parseable.
-- [ ] `rozum --room R --no-persist` does not read or write the file.
+- [x] `rozum --room R --no-persist` does not read or write the file.
 - [ ] Web bridge sees the loaded history through its normal
       `wait_my_turn(since_seq:0)` path, with no bridge-side change.
 - [ ] After ≥ `RECONNECT_MAX_ATTEMPTS` failures, the proxy surfaces
