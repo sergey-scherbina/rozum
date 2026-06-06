@@ -1,0 +1,6 @@
+feature/tui-soft-wrap 2026-06-06T18:25:00Z
+agent: claude-code-2
+heartbeat: 2026-06-06T18:25:00Z
+status: in-progress
+done-so-far:
+next: custom render of textarea content with Paragraph::wrap; manual cursor placement
