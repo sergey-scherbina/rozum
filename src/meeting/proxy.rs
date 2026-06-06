@@ -558,11 +558,19 @@ fn your_turn_in_result(result: &CallToolResult) -> bool {
 
 fn client_name_or_default(client_info_name: &str) -> String {
     let name = client_info_name.trim();
-    if name.is_empty() {
-        "rozum-proxy".to_owned()
-    } else {
-        name.to_owned()
+    let base = if name.is_empty() { "agent" } else { name };
+    match project_name() {
+        Some(p) if !p.is_empty() => format!("{p}-{base}"),
+        _ => base.to_owned(),
     }
+}
+
+/// Basename of the current working directory. Used to scope agent display
+/// names so different projects' agents do not collide in a shared room.
+fn project_name() -> Option<String> {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| cwd.file_name().and_then(|s| s.to_str()).map(str::to_owned))
 }
 
 fn client_supports_sampling(capabilities: &ClientCapabilities) -> bool {
