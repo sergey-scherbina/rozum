@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>rozum</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: monospace;
+      padding: 12px;
+      padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 100vh;
+      min-height: 100dvh;
+    }
+    #log {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      border: 1px solid #ccc;
+      padding: 8px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      overflow-wrap: anywhere;
+    }
+    #controls { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-end; }
+    #name { width: 100px; }
+    #msg {
+      flex: 1;
+      min-width: 0;
+      max-height: 30vh;
+      resize: none;
+      overflow-y: auto;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      line-height: 1.4;
+      font-family: inherit;
+    }
+    #controls input, #controls textarea, #controls button {
+      font: inherit;
+      font-size: 16px;
+      padding: 8px 10px;
+      min-height: 40px;
+    }
+    #controls button { flex-shrink: 0; }
+    .injected { color: #999; }
+    .me { color: #00a; }
+    @media (max-width: 480px) {
+      body { padding: 8px; gap: 6px; }
+      #controls { gap: 4px; }
+      #name { width: 100%; flex-basis: 100%; }
+      #msg { flex: 1 1 auto; max-height: 20vh; }
+    }
+  </style>
+</head>
+<body>
+<div id="log"></div>
+<div id="controls">
+  <input id="name" placeholder="your name" value="web">
+  <textarea id="msg" rows="1" placeholder="message..."></textarea>
+  <button onclick="send()">Send</button>
+</div>
+<script>
+const log = document.getElementById('log');
+const ws = new WebSocket(`ws://${location.host}/ws`);
+
+ws.onopen = () => append('--- connected ---', '');
+ws.onclose = () => append('--- disconnected ---', '');
+ws.onmessage = e => {
+  const d = JSON.parse(e.data);
+  const cls = d.injected ? 'injected' : '';
+  append(`[${d.speaker}]: ${d.content}`, cls);
+};
+
+function append(text, cls) {
+  const el = document.createElement('div');
+  if (cls) el.className = cls;
+  el.textContent = text;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+
+const msgEl = document.getElementById('msg');
+
+function autosize() {
+  msgEl.style.height = 'auto';
+  msgEl.style.height = msgEl.scrollHeight + 'px';
+}
+
+function send() {
+  const name = document.getElementById('name');
+  if (!msgEl.value.trim()) return;
+  ws.send(JSON.stringify({ name: name.value || 'web', content: msgEl.value.trim() }));
+  append(`[${name.value || 'web'}]: ${msgEl.value.trim()}`, 'me');
+  msgEl.value = '';
+  msgEl.style.height = 'auto';
+}
+
+msgEl.addEventListener('input', autosize);
+msgEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  } else if (e.key === 'Escape') {
+    msgEl.value = '';
+    msgEl.style.height = 'auto';
+  }
+});
+</script>
+</body>
+</html>
