@@ -18,9 +18,9 @@ struct Cli {
     #[arg(long)]
     r#as: Option<String>,
 
-    /// Moderator mode: round-robin or manual
-    #[arg(long, default_value = "round-robin")]
-    moderator: String,
+    /// Start web interface on this port (e.g. --web-port 8080)
+    #[arg(long)]
+    web_port: Option<u16>,
 }
 
 #[derive(Subcommand)]
@@ -42,16 +42,55 @@ enum Command {
         #[arg(long, default_value = "telegram")]
         name: String,
     },
+
+    /// Bridge a Discord channel to a rozum room
+    Discord {
+        /// Room name to join (must be running)
+        #[arg(long)]
+        room: String,
+
+        /// Display name in the room
+        #[arg(long, default_value = "discord")]
+        name: String,
+    },
+
+    /// Expose a rozum room over HTTP/WebSocket for web clients
+    Web {
+        /// Room name to join (must be running)
+        #[arg(long)]
+        room: String,
+
+        /// Display name in the room
+        #[arg(long, default_value = "web")]
+        name: String,
+
+        /// Port to listen on
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+
+        /// Disable transcript persistence to disk
+        /// ($XDG_STATE_HOME/rozum/rooms/<room>/transcript.jsonl)
+        #[arg(long)]
+        no_persist: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let cli = Cli::parse();
 
     match cli.command {
         None => {
             // Default: launch meeting room.
-            run_room(cli.room, &cli.topic, cli.r#as, &cli.moderator).await;
+            run_room(cli.room, &cli.topic, cli.r#as, cli.web_port).await;
         }
         Some(Command::List) => {
             let rooms = rozum::meeting::list_rooms().await;
@@ -77,6 +116,33 @@ async fn main() {
         Some(Command::McpProxy) => {
             if let Err(e) = rozum::meeting::run_proxy().await {
                 eprintln!("proxy error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Web {
+            room,
+            name,
+            port,
+            no_persist,
+        }) => {
+            if let Err(e) =
+                rozum::web::run_bridge_with(&room, &name, port, !no_persist).await
+            {
+                eprintln!("web bridge error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Discord { room, name }) => {
+            let token = std::env::var("DISCORD_BOT_TOKEN").unwrap_or_else(|_| {
+                eprintln!("error: DISCORD_BOT_TOKEN not set");
+                std::process::exit(1);
+            });
+            let channel_id = std::env::var("DISCORD_CHANNEL_ID").unwrap_or_else(|_| {
+                eprintln!("error: DISCORD_CHANNEL_ID not set");
+                std::process::exit(1);
+            });
+            if let Err(e) = rozum::discord::run_bridge(&room, &name, token, channel_id).await {
+                eprintln!("discord bridge error: {e}");
                 std::process::exit(1);
             }
         }
@@ -107,7 +173,7 @@ async fn run_room(
     room: Option<String>,
     topic: &str,
     display_name: Option<String>,
-    moderator_mode: &str,
+    web_port: Option<u16>,
 ) {
     use rozum::meeting::app::RoomConfig;
 
@@ -115,26 +181,52 @@ async fn run_room(
     let username =
         display_name.unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "user".into()));
 
-    let moderator: Box<dyn rozum::meeting::moderator::Moderator> = match moderator_mode {
-        "manual" => Box::new(rozum::meeting::moderator::manual::Manual::new()),
-        "round-robin" | "" => Box::new(rozum::meeting::moderator::round_robin::RoundRobin::new()),
-        other => {
-            eprintln!("unknown moderator mode '{other}'; using round-robin");
-            Box::new(rozum::meeting::moderator::round_robin::RoundRobin::new())
-        }
-    };
+    let web_url = web_port.map(|port| {
+        let host = local_ip()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "localhost".to_owned());
+        format!("http://{host}:{port}")
+    });
 
     let config = RoomConfig {
         name: name.clone(),
         topic: topic.to_owned(),
         human_display_name: username,
-        moderator,
         budget: rozum::meeting::budget::BudgetGuard::default(),
+        web_url: web_url.clone(),
     };
+
+    if let Some(port) = web_port {
+        let room_name = name.clone();
+        let url = web_url.unwrap_or_default();
+        tokio::spawn(async move {
+            start_web_bridge(room_name, port, url).await;
+        });
+    }
 
     println!("rozum room '{name}' starting...");
     if let Err(e) = rozum::meeting::run_room(config, false).await {
         eprintln!("room error: {e}");
         std::process::exit(1);
+    }
+}
+
+fn local_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    Some(socket.local_addr().ok()?.ip())
+}
+
+async fn start_web_bridge(room_name: String, port: u16, url: String) {
+    let socket_path = rozum::meeting::room_path::room_socket(&room_name);
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    eprintln!("[web-bridge] starting at {url}");
+    if let Err(e) = rozum::web::run_bridge(&room_name, "web", port).await {
+        eprintln!("[web-bridge] {e}");
     }
 }

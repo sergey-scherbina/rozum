@@ -136,8 +136,11 @@ const ws = new WebSocket(`ws://${location.host}/ws`);
 const participants = new Map();
 // participant_id -> { kind: 'typing'|'waiting' }
 const presenceState = new Map();
-// seq -> true; deduplicates msgs that appear in both history and broadcast
-const seenSeqs = new Set();
+// `${seq}_${ts}` -> true; deduplicates msgs that appear in both history and
+// broadcast. (seq, ts) is used instead of seq alone so that persisted history
+// from previous rozum sessions — where seq numbering restarts — does not
+// collide with the current session.
+const seenIds = new Set();
 // lowest seq currently rendered in #log; used to lazy-fetch older history
 let minSeq = Infinity;
 let topFetchInFlight = false;
@@ -158,12 +161,15 @@ ws.onmessage = e => {
   }
 };
 
+function idOf(m) {
+  return `${m.seq ?? 0}_${m.ts ?? 0}`;
+}
+
 function onMsg(env) {
-  if (typeof env.seq === 'number') {
-    if (seenSeqs.has(env.seq)) return;
-    seenSeqs.add(env.seq);
-    if (env.seq < minSeq) minSeq = env.seq;
-  }
+  const id = idOf(env);
+  if (seenIds.has(id)) return;
+  seenIds.add(id);
+  if (typeof env.seq === 'number' && env.seq < minSeq) minSeq = env.seq;
   const cls = env.injected ? 'injected' : '';
   append(`[${env.speaker}]: ${env.content}`, cls);
 }
@@ -171,11 +177,10 @@ function onMsg(env) {
 function onHistory(env) {
   const msgs = env.messages || [];
   for (const m of msgs) {
-    if (typeof m.seq === 'number' && seenSeqs.has(m.seq)) continue;
-    if (typeof m.seq === 'number') {
-      seenSeqs.add(m.seq);
-      if (m.seq < minSeq) minSeq = m.seq;
-    }
+    const id = idOf(m);
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+    if (typeof m.seq === 'number' && m.seq < minSeq) minSeq = m.seq;
     const cls = m.injected ? 'injected' : '';
     append(`[${m.speaker}]: ${m.content}`, cls);
   }
@@ -189,7 +194,7 @@ async function fetchOlder() {
     const resp = await fetch(`/transcript?from_seq=${from}&limit=200`);
     if (!resp.ok) return;
     const data = await resp.json();
-    const msgs = (data.messages || []).filter(m => !seenSeqs.has(m.seq) && m.seq < minSeq);
+    const msgs = (data.messages || []).filter(m => !seenIds.has(idOf(m)) && m.seq < minSeq);
     if (msgs.length === 0) return;
     // Prepend in seq order, preserving the current viewport.
     const prevHeight = log.scrollHeight;
@@ -197,8 +202,8 @@ async function fetchOlder() {
     msgs.sort((a, b) => a.seq - b.seq);
     const frag = document.createDocumentFragment();
     for (const m of msgs) {
-      seenSeqs.add(m.seq);
-      if (m.seq < minSeq) minSeq = m.seq;
+      seenIds.add(idOf(m));
+      if (typeof m.seq === 'number' && m.seq < minSeq) minSeq = m.seq;
       frag.appendChild(makeMsgEl(`[${m.speaker}]: ${m.content}`, m.injected ? 'injected' : ''));
     }
     log.insertBefore(frag, log.firstChild);

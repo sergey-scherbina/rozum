@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,6 +47,15 @@ struct TranscriptQuery {
 }
 
 pub async fn run_bridge(room: &str, display_name: &str, port: u16) -> BridgeResult<()> {
+    run_bridge_with(room, display_name, port, true).await
+}
+
+pub async fn run_bridge_with(
+    room: &str,
+    display_name: &str,
+    port: u16,
+    persist: bool,
+) -> BridgeResult<()> {
     let socket_path = room_socket(room);
     if !socket_path.exists() {
         return Err(format!("room not found: {room}").into());
@@ -74,7 +85,19 @@ pub async fn run_bridge(room: &str, display_name: &str, port: u16) -> BridgeResu
 
     let (broadcast_tx, _) = broadcast::channel::<String>(64);
     let conn = Arc::new(Mutex::new(conn));
-    let transcript = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let persist_path = if persist { Some(transcript_path(room)) } else { None };
+    let initial = match &persist_path {
+        Some(p) => load_persisted_transcript(p),
+        None => Vec::new(),
+    };
+    if !initial.is_empty() {
+        eprintln!(
+            "[web-bridge] loaded {} persisted transcript entries from {}",
+            initial.len(),
+            persist_path.as_ref().unwrap().display()
+        );
+    }
+    let transcript = Arc::new(Mutex::new(initial));
     let state = AppState {
         conn: Arc::clone(&conn),
         broadcast_tx: broadcast_tx.clone(),
@@ -94,11 +117,51 @@ pub async fn run_bridge(room: &str, display_name: &str, port: u16) -> BridgeResu
         result = axum::serve(listener, app) => {
             result.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         }
-        result = room_loop(conn, broadcast_tx, transcript) => {
+        result = room_loop(conn, broadcast_tx, transcript, persist_path) => {
             result?;
         }
     }
     Ok(())
+}
+
+fn transcript_path(room: &str) -> PathBuf {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".local/state"))
+                .unwrap_or_else(|| PathBuf::from(".local/state"))
+        });
+    base.join("rozum").join("rooms").join(room).join("transcript.jsonl")
+}
+
+fn load_persisted_transcript(path: &PathBuf) -> Vec<Value> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<Value> = contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    if out.len() > TRANSCRIPT_CAP {
+        let drop = out.len() - TRANSCRIPT_CAP;
+        out.drain(0..drop);
+    }
+    out
+}
+
+fn append_persisted(path: &PathBuf, env: &Value) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{}", env);
+    }
 }
 
 async fn transcript_handler(
@@ -194,6 +257,7 @@ async fn room_loop(
     conn: Arc<Mutex<RoomConnection>>,
     broadcast_tx: broadcast::Sender<String>,
     transcript: Arc<Mutex<Vec<Value>>>,
+    persist_path: Option<PathBuf>,
 ) -> BridgeResult<()> {
     let mut since_seq: usize = 0;
     let mut last_polling: HashSet<String> = HashSet::new();
@@ -338,6 +402,9 @@ async fn room_loop(
                     let excess = t.len() - TRANSCRIPT_CAP;
                     t.drain(0..excess);
                 }
+            }
+            if let Some(p) = &persist_path {
+                append_persisted(p, &env);
             }
             broadcast_tx.send(env.to_string()).ok();
         }
