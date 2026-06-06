@@ -1,0 +1,3 @@
+[submodule "vendor/agent-plugins"]
+	path = vendor/agent-plugins
+	url = git@github.com:sergey-scherbina/agent-plugins.git
