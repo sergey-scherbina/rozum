@@ -21,9 +21,11 @@ pub enum MeetingEvent {
     ParticipantJoined {
         display_name: String,
         is_human: bool,
+        is_bridge: bool,
     },
     ParticipantLeft {
         display_name: String,
+        is_bridge: bool,
     },
     BudgetWarning {
         chars_used: usize,
@@ -262,17 +264,20 @@ impl Meeting {
         if let Some(sid) = stale_id {
             if let Some(pos) = self.participants.iter().position(|p| p.id == sid) {
                 let dn = self.participants[pos].display_name().to_owned();
+                let was_bridge = self.participants[pos].is_bridge();
                 self.participants.remove(pos);
                 self.participant_liveness.remove(&sid);
-                let _ = self
-                    .events
-                    .send(MeetingEvent::ParticipantLeft { display_name: dn });
+                let _ = self.events.send(MeetingEvent::ParticipantLeft {
+                    display_name: dn,
+                    is_bridge: was_bridge,
+                });
             }
         }
 
         let _ = self.events.send(MeetingEvent::ParticipantJoined {
             display_name: final_name,
             is_human: false,
+            is_bridge: bridge,
         });
         id
     }
@@ -280,12 +285,14 @@ impl Meeting {
     pub fn leave(&mut self, id: &ParticipantId) {
         if let Some(pos) = self.participants.iter().position(|p| &p.id == id) {
             let display_name = self.participants[pos].display_name().to_owned();
+            let was_bridge = self.participants[pos].is_bridge();
             self.participants.remove(pos);
             self.participant_liveness.remove(id);
             self.clear_responding(id);
             self.unmark_polling(id);
             let _ = self.events.send(MeetingEvent::ParticipantLeft {
                 display_name: display_name.clone(),
+                is_bridge: was_bridge,
             });
             // The room stays alive even if everyone leaves. Agents and humans
             // can rejoin later and pick up the same transcript. The room ends

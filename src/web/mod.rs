@@ -95,8 +95,11 @@ pub async fn run_bridge_with(
         .as_str()
         .unwrap_or(display_name)
         .to_owned();
-    eprintln!(
-        "[web-bridge] joined room '{room}' as '{my_id}', listening on http://localhost:{port}"
+    tracing::info!(
+        room = %room,
+        my_id = %my_id,
+        port,
+        "web-bridge joined room"
     );
 
     let (broadcast_tx, _) = broadcast::channel::<String>(64);
@@ -107,10 +110,10 @@ pub async fn run_bridge_with(
         None => Vec::new(),
     };
     if !initial.is_empty() {
-        eprintln!(
-            "[web-bridge] loaded {} persisted transcript entries from {}",
-            initial.len(),
-            persist_path.as_ref().unwrap().display()
+        tracing::info!(
+            count = initial.len(),
+            path = %persist_path.as_ref().unwrap().display(),
+            "web-bridge loaded persisted transcript entries"
         );
     }
     let transcript = Arc::new(Mutex::new(initial));
@@ -273,7 +276,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, user: AuthUser) {
         match RoomConnection::connect(&state.socket_path, &user.0, Duration::from_secs(5)).await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[web-bridge] user conn for '{}': {e}", user.0);
+                tracing::error!(error = %e, user = %user.0, "web-bridge user conn failed");
                 return;
             }
         };
@@ -287,7 +290,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, user: AuthUser) {
     {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[web-bridge] join for '{}': {e}", user.0);
+            tracing::error!(error = %e, user = %user.0, "web-bridge join failed");
             return;
         }
     };
@@ -419,7 +422,7 @@ async fn room_loop(
         let payload = tool_result_text_json(&result).ok_or("invalid wait_my_turn response")?;
 
         if payload["ended"].as_bool() == Some(true) {
-            eprintln!("[web-bridge] room ended");
+            tracing::info!("web-bridge room ended");
             return Ok(());
         }
 

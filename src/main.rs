@@ -92,15 +92,24 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     let cli = Cli::parse();
+
+    // The default subcommand launches a TUI. Anything written to stderr
+    // (tracing output, stray eprintln!) corrupts the terminal because
+    // ratatui owns the screen in raw mode. Route logs to a file in that
+    // case; keep stderr for non-TUI subcommands.
+    let writes_to_stderr = cli.command.is_some();
+    if writes_to_stderr {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            )
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        init_tui_logging();
+    }
 
     match cli.command {
         None => {
@@ -236,9 +245,9 @@ async fn run_room(
         });
     }
 
-    println!("rozum room '{name}' starting...");
+    tracing::info!(room = %name, "rozum room starting");
     if let Err(e) = rozum::meeting::run_room(config, false).await {
-        eprintln!("room error: {e}");
+        tracing::error!(error = %e, "room error");
         std::process::exit(1);
     }
 }
@@ -257,8 +266,44 @@ async fn start_web_bridge(room_name: String, port: u16, url: String) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    eprintln!("[web-bridge] starting at {url}");
+    tracing::info!(url = %url, "starting web-bridge");
     if let Err(e) = rozum::web::run_bridge(&room_name, "web", port).await {
-        eprintln!("[web-bridge] {e}");
+        tracing::error!(error = %e, "web-bridge exited");
+    }
+}
+
+/// Send tracing output to a log file under `$XDG_STATE_HOME/rozum/log/`
+/// instead of stderr so the TUI keeps a clean screen. The file is
+/// truncated on each launch — useful for debugging the most recent run
+/// without accumulating noise across sessions.
+fn init_tui_logging() {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".local/state"))
+                .unwrap_or_else(|| std::path::PathBuf::from(".local/state"))
+        });
+    let log_dir = base.join("rozum").join("log");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("rozum.log");
+    match std::fs::File::create(&log_path) {
+        Ok(file) => {
+            let writer = std::sync::Mutex::new(file);
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                )
+                .with_writer(writer)
+                .with_ansi(false)
+                .init();
+        }
+        Err(_) => {
+            // Silent fallback: drop tracing entirely. Stderr stays clean.
+            let _ = tracing_subscriber::fmt()
+                .with_writer(std::io::sink)
+                .try_init();
+        }
     }
 }

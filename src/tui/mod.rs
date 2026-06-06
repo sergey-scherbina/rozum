@@ -218,6 +218,7 @@ pub async fn run_tui(
             app.participants = m
                 .participants
                 .iter()
+                .filter(|p| !p.is_bridge())
                 .map(|p| ParticipantView {
                     name: p.display_name().to_owned(),
                     is_human: p.is_human(),
@@ -234,11 +235,13 @@ pub async fn run_tui(
             app.responding = m
                 .active_responding()
                 .into_iter()
+                .filter(|(id, _, _, _)| !m.is_bridge(id))
                 .map(|(_, name, _, _)| name)
                 .collect();
             app.polling = m
                 .active_polling()
                 .into_iter()
+                .filter(|(id, _, _, _)| !m.is_bridge(id))
                 .map(|(_, name, _, _)| name)
                 .collect();
             if m.phase == Phase::Ended && !app.ended {
@@ -292,7 +295,11 @@ fn apply_event(app: &mut AppState, evt: MeetingEvent) {
         MeetingEvent::ParticipantJoined {
             display_name,
             is_human,
+            is_bridge,
         } => {
+            if is_bridge {
+                return;
+            }
             app.transcript
                 .push(TranscriptEntry::System(format!("{display_name} joined")));
             app.participants.push(ParticipantView {
@@ -301,7 +308,13 @@ fn apply_event(app: &mut AppState, evt: MeetingEvent) {
                 last_poll_age_secs: None,
             });
         }
-        MeetingEvent::ParticipantLeft { display_name } => {
+        MeetingEvent::ParticipantLeft {
+            display_name,
+            is_bridge,
+        } => {
+            if is_bridge {
+                return;
+            }
             app.transcript
                 .push(TranscriptEntry::System(format!("{display_name} left")));
             app.participants.retain(|p| p.name != display_name);
