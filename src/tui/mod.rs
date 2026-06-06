@@ -77,8 +77,28 @@ pub async fn run_tui(
 
     let mut app = {
         let m = meeting.lock().await;
+        // Mirror any persisted transcript that was loaded into the meeting at
+        // startup so the TUI shows yesterday's history immediately instead of
+        // starting blank.
+        let transcript = m
+            .transcript
+            .iter()
+            .map(|t| {
+                let is_human = m
+                    .participants
+                    .iter()
+                    .find(|p| p.display_name() == t.display_name)
+                    .map(|p| p.is_human())
+                    .unwrap_or(false);
+                TranscriptEntry::Turn {
+                    display_name: t.display_name.clone(),
+                    content: t.content.clone(),
+                    is_human,
+                }
+            })
+            .collect();
         AppState {
-            transcript: vec![],
+            transcript,
             participants: m
                 .participants
                 .iter()

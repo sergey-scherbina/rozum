@@ -26,6 +26,16 @@ struct Cli {
     /// ($XDG_STATE_HOME/rozum/rooms/<name>/room-transcript.jsonl).
     #[arg(long)]
     no_persist: bool,
+
+    /// Hard cap on total transcript characters before the room auto-ends
+    /// with reason "budget". Unlimited if not set.
+    #[arg(long)]
+    budget: Option<usize>,
+
+    /// Per-turn soft warning threshold (in tokens; chars are budgeted at
+    /// roughly 4× this number). No warning if not set.
+    #[arg(long)]
+    per_turn_budget: Option<usize>,
 }
 
 #[derive(Subcommand)]
@@ -95,7 +105,16 @@ async fn main() {
     match cli.command {
         None => {
             // Default: launch meeting room.
-            run_room(cli.room, &cli.topic, cli.r#as, cli.web_port, !cli.no_persist).await;
+            run_room(
+                cli.room,
+                &cli.topic,
+                cli.r#as,
+                cli.web_port,
+                !cli.no_persist,
+                cli.budget,
+                cli.per_turn_budget,
+            )
+            .await;
         }
         Some(Command::List) => {
             let rooms = rozum::meeting::list_rooms().await;
@@ -180,6 +199,8 @@ async fn run_room(
     display_name: Option<String>,
     web_port: Option<u16>,
     persist: bool,
+    budget: Option<usize>,
+    per_turn_budget: Option<usize>,
 ) {
     use rozum::meeting::app::RoomConfig;
 
@@ -194,11 +215,15 @@ async fn run_room(
         format!("http://{host}:{port}")
     });
 
+    let budget_guard = rozum::meeting::budget::BudgetGuard::new(
+        per_turn_budget.unwrap_or(usize::MAX),
+        budget.unwrap_or(usize::MAX),
+    );
     let config = RoomConfig {
         name: name.clone(),
         topic: topic.to_owned(),
         human_display_name: username,
-        budget: rozum::meeting::budget::BudgetGuard::default(),
+        budget: budget_guard,
         web_url: web_url.clone(),
         persist,
     };
