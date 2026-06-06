@@ -39,6 +39,10 @@ struct AppState {
     conn: Arc<Mutex<RoomConnection>>,
     broadcast_tx: broadcast::Sender<String>,
     transcript: Arc<Mutex<Vec<Value>>>,
+    /// Active web users counted by their authenticated alias. Multiple tabs
+    /// from the same alias share a refcount so we only emit `joined` /
+    /// `left` for the first and last tab respectively.
+    web_users: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 #[derive(Deserialize)]
@@ -110,10 +114,12 @@ pub async fn run_bridge_with(
         );
     }
     let transcript = Arc::new(Mutex::new(initial));
+    let web_users = Arc::new(Mutex::new(HashMap::new()));
     let state = AppState {
         conn: Arc::clone(&conn),
         broadcast_tx: broadcast_tx.clone(),
         transcript: Arc::clone(&transcript),
+        web_users: Arc::clone(&web_users),
     };
 
     let auth_cfg = AuthConfig {
@@ -135,7 +141,7 @@ pub async fn run_bridge_with(
         result = axum::serve(listener, app) => {
             result.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         }
-        result = room_loop(conn, broadcast_tx, transcript, persist_path) => {
+        result = room_loop(conn, broadcast_tx, transcript, persist_path, my_id.clone(), display_name.to_owned()) => {
             result?;
         }
     }
@@ -272,6 +278,23 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, user: AuthUser) {
     if socket.send(Message::text(hello.to_string())).await.is_err() {
         return;
     }
+
+    // Mark this alias as online — emit `joined` only when the refcount goes
+    // from 0 to 1 so additional tabs from the same alias are quiet.
+    let alias_pid = format!("web:{}", user.0);
+    {
+        let mut users = state.web_users.lock().await;
+        let count = users.entry(user.0.clone()).or_insert(0);
+        *count += 1;
+        if *count == 1 {
+            let env = json!({
+                "kind": "joined",
+                "participant_id": alias_pid,
+                "display_name": user.0,
+            });
+            state.broadcast_tx.send(env.to_string()).ok();
+        }
+    }
     {
         let transcript = state.transcript.lock().await;
         let take = transcript.len().min(200);
@@ -317,6 +340,21 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, user: AuthUser) {
             }
         }
     }
+
+    // Tab closed: decrement refcount and emit `left` for the last tab.
+    let mut users = state.web_users.lock().await;
+    if let Some(count) = users.get_mut(&user.0) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            users.remove(&user.0);
+            let env = json!({
+                "kind": "left",
+                "participant_id": alias_pid,
+                "display_name": user.0,
+            });
+            state.broadcast_tx.send(env.to_string()).ok();
+        }
+    }
 }
 
 /// Listen for new transcript entries and presence changes via wait_my_turn
@@ -335,6 +373,8 @@ async fn room_loop(
     broadcast_tx: broadcast::Sender<String>,
     transcript: Arc<Mutex<Vec<Value>>>,
     persist_path: Option<PathBuf>,
+    bridge_pid: String,
+    bridge_display_name: String,
 ) -> BridgeResult<()> {
     let mut since_seq: usize = 0;
     let mut last_polling: HashSet<String> = HashSet::new();
@@ -402,12 +442,16 @@ async fn room_loop(
             .collect();
 
         // Refresh last_seen for anyone currently active. Emit `joined` the
-        // first time we see a participant.
+        // first time we see a participant. Skip the bridge's own
+        // participant — it is a transport, not a user.
         for entry in polling_arr.iter().chain(responding_arr.iter()) {
             let pid = match entry["participant_id"].as_str() {
                 Some(s) => s.to_owned(),
                 None => continue,
             };
+            if pid == bridge_pid {
+                continue;
+            }
             let name = entry["display_name"]
                 .as_str()
                 .unwrap_or(&pid)
@@ -445,12 +489,22 @@ async fn room_loop(
             last_seen.remove(&pid);
         }
 
-        // Emit `presence` only when polling/responding diff.
+        // Emit `presence` only when polling/responding diff. The bridge's
+        // own participant is filtered out so the web UI never sees "web"
+        // as typing or waiting.
         if new_polling != last_polling || new_responding != last_responding {
             let env = json!({
                 "kind": "presence",
-                "responding": responding_arr.iter().map(presence_entry).collect::<Vec<_>>(),
-                "polling":    polling_arr.iter().map(presence_entry).collect::<Vec<_>>(),
+                "responding": responding_arr
+                    .iter()
+                    .filter(|e| e["participant_id"].as_str() != Some(bridge_pid.as_str()))
+                    .map(presence_entry)
+                    .collect::<Vec<_>>(),
+                "polling": polling_arr
+                    .iter()
+                    .filter(|e| e["participant_id"].as_str() != Some(bridge_pid.as_str()))
+                    .map(presence_entry)
+                    .collect::<Vec<_>>(),
             });
             broadcast_tx.send(env.to_string()).ok();
             last_polling = new_polling;
@@ -460,13 +514,24 @@ async fn room_loop(
         // Emit `msg` for each transcript delta entry, and append to the
         // in-memory transcript so later WebSocket connects can replay it.
         for entry in transcript_delta {
-            let content = entry["content"].as_str().unwrap_or("").trim();
-            if content.is_empty() {
+            let raw_speaker = entry["display_name"].as_str().unwrap_or("?");
+            let raw_content = entry["content"].as_str().unwrap_or("").trim();
+            if raw_content.is_empty() {
                 continue;
             }
+            // Messages submitted by the bridge carry a `[<alias>]: ` prefix
+            // identifying the web user. Promote the alias to `speaker` so
+            // the UI shows the human's name instead of the bridge's name.
+            let (speaker, content) = if raw_speaker == bridge_display_name {
+                strip_alias_prefix(raw_content)
+                    .map(|(a, b)| (a.to_owned(), b.to_owned()))
+                    .unwrap_or_else(|| (raw_speaker.to_owned(), raw_content.to_owned()))
+            } else {
+                (raw_speaker.to_owned(), raw_content.to_owned())
+            };
             let env = json!({
                 "kind":      "msg",
-                "speaker":   entry["display_name"].as_str().unwrap_or("?"),
+                "speaker":   speaker,
                 "content":   content,
                 "injected":  entry["injected"].as_bool().unwrap_or(false),
                 "seq":       entry["seq"].as_u64().unwrap_or(0),
@@ -486,6 +551,19 @@ async fn room_loop(
             broadcast_tx.send(env.to_string()).ok();
         }
     }
+}
+
+/// Parse a `[<alias>]: <body>` prefix into `(alias, body)`. Returns `None`
+/// if the content does not start with `[`, lacks `]: `, or `alias` is empty.
+fn strip_alias_prefix(content: &str) -> Option<(&str, &str)> {
+    let rest = content.strip_prefix('[')?;
+    let close = rest.find("]: ")?;
+    let alias = &rest[..close];
+    if alias.is_empty() {
+        return None;
+    }
+    let body = &rest[close + 3..];
+    Some((alias, body))
 }
 
 fn presence_entry(v: &Value) -> Value {
