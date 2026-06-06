@@ -1,0 +1,6 @@
+feature/web-transcript-persist 2026-06-06T18:21:54Z
+agent: claude-code
+heartbeat: 2026-06-06T18:21:54Z
+status: in-progress
+done-so-far: claim
+next: add persist flag + jsonl append + bootstrap load to src/web/mod.rs; wire --no-persist into src/main.rs
