@@ -1,0 +1,6 @@
+feature/web-transcript-history 2026-06-06T18:16:06Z
+agent: claude-code
+heartbeat: 2026-06-06T18:16:06Z
+status: in-progress
+done-so-far: research mcp_server.rs meeting.status returns only last 20; plan to keep in-memory transcript on bridge
+next: add transcript Arc<Mutex<Vec>> + GET /transcript endpoint + history envelope on WS connect + client lazy load
