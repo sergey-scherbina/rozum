@@ -168,6 +168,16 @@ pub async fn run_tui(
                         app.transcript_scroll_from_bottom =
                             app.transcript_scroll_from_bottom.saturating_sub(10);
                     }
+                    // Up/Down scroll history when input is single-line; for
+                    // multi-line input they fall through to textarea cursor nav.
+                    KeyCode::Up if !ctrl && !alt && textarea.lines().len() <= 1 => {
+                        app.transcript_scroll_from_bottom =
+                            app.transcript_scroll_from_bottom.saturating_add(1);
+                    }
+                    KeyCode::Down if !ctrl && !alt && textarea.lines().len() <= 1 => {
+                        app.transcript_scroll_from_bottom =
+                            app.transcript_scroll_from_bottom.saturating_sub(1);
+                    }
                     KeyCode::Home if ctrl => {
                         app.transcript_scroll_from_bottom = u16::MAX;
                     }
@@ -509,7 +519,7 @@ fn draw_hints(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
     let text = if app.ended {
         " Ctrl+C  quit".to_owned()
     } else {
-        " Enter  send  ·  Ctrl+P  pause  ·  Ctrl+C  quit  ·  PgUp/Dn  scroll  ·  /name /kick /pause /resume /stop".to_owned()
+        " Enter  send  ·  Ctrl+P  pause  ·  Ctrl+C  quit  ·  ↑/↓ or PgUp/Dn  scroll  ·  /name /kick /pause /resume /stop".to_owned()
     };
     f.render_widget(
         Paragraph::new(text).style(Style::default().fg(MUTED_COLOR)),
