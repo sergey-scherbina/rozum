@@ -1,5 +1,16 @@
 # Changelog
 
+## web-transcript-persist — bridge transcript persisted to disk
+Completed: 2026-06-06
+The web bridge now appends every `msg` envelope to
+`$XDG_STATE_HOME/rozum/rooms/<room>/transcript.jsonl` (one JSON line per
+turn). On startup the bridge loads the last `TRANSCRIPT_CAP=2000` lines back
+into the in-memory ring so a page reload after a rozum restart still shows
+recent history. A new `--no-persist` flag on `rozum web` disables both the
+write and the load. Client-side deduplication now keys on `(seq, ts)` so
+persisted entries from earlier sessions — where seq numbering restarts — do
+not collide with current-session entries.
+
 ## web-transcript-history — transcript replay on connect + lazy older-history paging
 Completed: 2026-06-06
 The web bridge keeps a bounded in-memory transcript ring (cap 2000). A new

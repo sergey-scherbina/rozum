@@ -56,12 +56,6 @@ Current sprint focus: make Rozum a reliable local meeting room for live agents a
   - Backwards compatible: explicit calls from the agent still work and refresh identically.
   - Spec: `docs/specs/web-ui-improvements.md` (slug `mcp-proxy-auto-mark`).
 
-- [ ] web-transcript-persist - Persist transcript to disk for the web bridge.
-  - Append every transcript entry to `$XDG_STATE_HOME/rozum/rooms/<room>/transcript.jsonl`.
-  - `GET /transcript` reads from the file when the in-memory window is exhausted.
-  - `--no-persist` CLI flag disables both the write and the read fallback.
-  - blockedBy: `web-transcript-history` (requires the REST endpoint and the in-memory window contract it defines).
-  - Spec: `docs/specs/web-ui-improvements.md` (slug `web-transcript-persist`).
 
 ## Done Criteria
 

@@ -247,7 +247,7 @@ is passed to `rozum web` (default: on).
 - [ ] `mcp-proxy` agents that never call `mark_responding` themselves
       still appear as typing in both web and TUI for the entire
       duration of their reply.
-- [ ] With persistence on, `transcript.jsonl` contains every turn in
+- [x] With persistence on, `transcript.jsonl` contains every turn in
       order; relaunching the room and reloading the page replays the
       same content. `--no-persist` disables both the write and the
       read fallback.
