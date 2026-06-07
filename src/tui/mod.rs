@@ -36,6 +36,7 @@ enum TranscriptEntry {
         display_name: String,
         content: String,
         is_human: bool,
+        ts: u64,
     },
     System(String),
 }
@@ -94,6 +95,7 @@ pub async fn run_tui(
                     display_name: t.display_name.clone(),
                     content: t.content.clone(),
                     is_human,
+                    ts: t.ts,
                 }
             })
             .collect();
@@ -280,6 +282,7 @@ fn apply_event(app: &mut AppState, evt: MeetingEvent) {
         MeetingEvent::TurnAdded {
             display_name,
             content,
+            ts,
             ..
         } => {
             let is_human = app
@@ -290,6 +293,7 @@ fn apply_event(app: &mut AppState, evt: MeetingEvent) {
                 display_name,
                 content,
                 is_human,
+                ts,
             });
         }
         MeetingEvent::ParticipantJoined {
@@ -580,12 +584,19 @@ fn draw_transcript(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
                 display_name,
                 content,
                 is_human,
+                ts,
             } => {
                 let name_color = if *is_human { HUMAN_COLOR } else { AI_COLOR };
-                lines.push(Line::from(Span::styled(
-                    format!(" {display_name}"),
-                    Style::default().fg(name_color).add_modifier(Modifier::BOLD),
-                )));
+                let stamp = fmt_local_ts(*ts);
+                lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(
+                        display_name.clone(),
+                        Style::default().fg(name_color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(stamp, Style::default().fg(MUTED_COLOR)),
+                ]));
                 for wrapped in wrap_words(content, width.saturating_sub(1)) {
                     lines.push(Line::from(format!(" {wrapped}")));
                 }
@@ -659,6 +670,27 @@ fn fmt_chars(n: usize) -> String {
         format!("{:.1}k chars", n as f64 / 1000.0)
     } else {
         format!("{n} chars")
+    }
+}
+
+/// Local-time stamp for a unix timestamp (seconds). Compact: HH:MM today,
+/// MM-DD HH:MM same-year, YYYY-MM-DD HH:MM otherwise.
+fn fmt_local_ts(ts: u64) -> String {
+    use chrono::{DateTime, Datelike, Local, TimeZone};
+    if ts == 0 {
+        return String::new();
+    }
+    let dt: DateTime<Local> = match Local.timestamp_opt(ts as i64, 0) {
+        chrono::LocalResult::Single(d) => d,
+        _ => return String::new(),
+    };
+    let now = Local::now();
+    if dt.year() == now.year() && dt.ordinal() == now.ordinal() {
+        dt.format("%H:%M").to_string()
+    } else if dt.year() == now.year() {
+        dt.format("%m-%d %H:%M").to_string()
+    } else {
+        dt.format("%Y-%m-%d %H:%M").to_string()
     }
 }
 

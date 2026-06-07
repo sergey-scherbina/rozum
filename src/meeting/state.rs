@@ -17,6 +17,7 @@ pub enum MeetingEvent {
         display_name: String,
         content: String,
         seq: usize,
+        ts: u64,
     },
     ParticipantJoined {
         display_name: String,
@@ -486,6 +487,7 @@ impl Meeting {
                 }
             }
         }
+        let ts = turn.ts;
         self.transcript.push(turn);
         if let Some(liveness) = self.participant_liveness.get_mut(participant_id) {
             liveness.last_submit_at = Some(unix_ts());
@@ -495,6 +497,7 @@ impl Meeting {
             display_name,
             content,
             seq,
+            ts,
         });
         if warn {
             let _ = self.events.send(MeetingEvent::BudgetWarning {

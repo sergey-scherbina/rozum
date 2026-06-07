@@ -215,13 +215,27 @@ function idOf(m) {
   return `${m.seq ?? 0}_${m.ts ?? 0}`;
 }
 
+// Format a unix timestamp (seconds) compactly: HH:MM for today, MM-DD HH:MM
+// for any other day in the current year, YYYY-MM-DD HH:MM otherwise.
+function fmtTs(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (d.toDateString() === now.toDateString()) return hm;
+  const md = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  if (d.getFullYear() === now.getFullYear()) return `${md} ${hm}`;
+  return `${d.getFullYear()}-${md} ${hm}`;
+}
+
 function onMsg(env) {
   const id = idOf(env);
   if (seenIds.has(id)) return;
   seenIds.add(id);
   if (typeof env.seq === 'number' && env.seq < minSeq) minSeq = env.seq;
   const cls = env.injected ? 'injected' : '';
-  append(`[${env.speaker}]: ${env.content}`, cls);
+  append(`${fmtTs(env.ts)} [${env.speaker}]: ${env.content}`, cls);
 }
 
 function onHistory(env) {
@@ -232,7 +246,7 @@ function onHistory(env) {
     seenIds.add(id);
     if (typeof m.seq === 'number' && m.seq < minSeq) minSeq = m.seq;
     const cls = m.injected ? 'injected' : '';
-    append(`[${m.speaker}]: ${m.content}`, cls);
+    append(`${fmtTs(m.ts)} [${m.speaker}]: ${m.content}`, cls);
   }
 }
 
@@ -255,7 +269,7 @@ async function fetchOlder() {
     for (const m of msgs) {
       seenIds.add(idOf(m));
       if (typeof m.seq === 'number' && m.seq < minSeq) minSeq = m.seq;
-      frag.appendChild(makeMsgEl(`[${m.speaker}]: ${m.content}`, m.injected ? 'injected' : ''));
+      frag.appendChild(makeMsgEl(`${fmtTs(m.ts)} [${m.speaker}]: ${m.content}`, m.injected ? 'injected' : ''));
     }
     log.insertBefore(frag, log.firstChild);
   } finally {
@@ -401,7 +415,7 @@ function autosize() {
 function send() {
   if (!msgEl.value.trim()) return;
   ws.send(JSON.stringify({ name: myName, content: msgEl.value.trim() }));
-  append(`[${myName}]: ${msgEl.value.trim()}`, 'me');
+  append(`${fmtTs(Math.floor(Date.now() / 1000))} [${myName}]: ${msgEl.value.trim()}`, 'me');
   msgEl.value = '';
   msgEl.style.height = 'auto';
 }

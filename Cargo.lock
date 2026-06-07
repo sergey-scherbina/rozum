@@ -2267,6 +2267,7 @@ dependencies = [
  "base64 0.22.1",
  "candle-core",
  "candle-transformers",
+ "chrono",
  "clap",
  "crossterm",
  "futures-util",
