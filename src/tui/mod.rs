@@ -2,10 +2,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{Event, EventStream, KeyCode, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use futures_util::StreamExt;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -137,119 +138,107 @@ pub async fn run_tui(
 
     let mut textarea = TextArea::default();
     apply_textarea_style(&mut textarea);
+    let mut event_stream = EventStream::new();
+
+    let mut presence_ticker = tokio::time::interval(std::time::Duration::from_millis(100));
+    presence_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    terminal.draw(|f| {
+        draw_ui(f, &app, &textarea);
+    })?;
 
     loop {
+        tokio::select! {
+            result = events_rx.recv() => {
+                match result {
+                    Ok(evt) => {
+                        apply_event(&mut app, evt);
+                        while let Ok(evt) = events_rx.try_recv() {
+                            apply_event(&mut app, evt);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            result = event_stream.next() => {
+                match result {
+                    Some(Ok(Event::Key(key))) => {
+                        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                        let alt = key.modifiers.contains(KeyModifiers::ALT);
+                        match key.code {
+                            KeyCode::Enter if !shift && !alt => {
+                                let text = textarea.lines().join("\n");
+                                let text = text.trim().to_owned();
+                                if !text.is_empty() {
+                                    let mut m = meeting.lock().await;
+                                    handle_input_text(&text, &mut app, &mut m);
+                                }
+                                textarea = TextArea::default();
+                                apply_textarea_style(&mut textarea);
+                            }
+
+                            KeyCode::Esc => {
+                                textarea = TextArea::default();
+                                apply_textarea_style(&mut textarea);
+                            }
+
+                            KeyCode::Char('c') if ctrl => {
+                                meeting.lock().await.end_with_reason("user-quit");
+                                break;
+                            }
+                            KeyCode::Char('p') if ctrl => {
+                                let mut m = meeting.lock().await;
+                                if m.phase == Phase::Paused {
+                                    m.resume();
+                                } else {
+                                    m.pause();
+                                }
+                            }
+
+                            KeyCode::PageUp => {
+                                app.transcript_scroll_from_bottom =
+                                    app.transcript_scroll_from_bottom.saturating_add(10);
+                            }
+                            KeyCode::PageDown => {
+                                app.transcript_scroll_from_bottom =
+                                    app.transcript_scroll_from_bottom.saturating_sub(10);
+                            }
+                            // Up/Down always scroll history; cursor navigation in the
+                            // input area uses Ctrl+Arrow / Home / End.
+                            KeyCode::Up if !ctrl && !alt => {
+                                app.transcript_scroll_from_bottom =
+                                    app.transcript_scroll_from_bottom.saturating_add(1);
+                            }
+                            KeyCode::Down if !ctrl && !alt => {
+                                app.transcript_scroll_from_bottom =
+                                    app.transcript_scroll_from_bottom.saturating_sub(1);
+                            }
+                            KeyCode::Home if ctrl => {
+                                app.transcript_scroll_from_bottom = u16::MAX;
+                            }
+                            KeyCode::End if ctrl => {
+                                app.transcript_scroll_from_bottom = 0;
+                            }
+
+                            _ => {
+                                textarea.input(key);
+                            }
+                        }
+                    }
+                    Some(Ok(_)) => {
+                    }
+                    Some(Err(_)) | None => break,
+                }
+            }
+            _ = presence_ticker.tick() => {
+            }
+        }
+
+        refresh_from_meeting(&meeting, &mut app).await;
         terminal.draw(|f| {
             draw_ui(f, &app, &textarea);
         })?;
-
-        while let Ok(evt) = events_rx.try_recv() {
-            apply_event(&mut app, evt);
-        }
-
-        if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-
-                let alt = key.modifiers.contains(KeyModifiers::ALT);
-                match key.code {
-                    KeyCode::Enter if !shift && !alt => {
-                        let text = textarea.lines().join("\n");
-                        let text = text.trim().to_owned();
-                        if !text.is_empty() {
-                            let mut m = meeting.lock().await;
-                            handle_input_text(&text, &mut app, &mut m);
-                        }
-                        textarea = TextArea::default();
-                        apply_textarea_style(&mut textarea);
-                    }
-
-                    KeyCode::Esc => {
-                        textarea = TextArea::default();
-                        apply_textarea_style(&mut textarea);
-                    }
-
-                    KeyCode::Char('c') if ctrl => {
-                        meeting.lock().await.end_with_reason("user-quit");
-                        break;
-                    }
-                    KeyCode::Char('p') if ctrl => {
-                        let mut m = meeting.lock().await;
-                        if m.phase == Phase::Paused {
-                            m.resume();
-                        } else {
-                            m.pause();
-                        }
-                    }
-
-                    KeyCode::PageUp => {
-                        app.transcript_scroll_from_bottom =
-                            app.transcript_scroll_from_bottom.saturating_add(10);
-                    }
-                    KeyCode::PageDown => {
-                        app.transcript_scroll_from_bottom =
-                            app.transcript_scroll_from_bottom.saturating_sub(10);
-                    }
-                    // Up/Down always scroll history; cursor navigation in the
-                    // input area uses Ctrl+Arrow / Home / End.
-                    KeyCode::Up if !ctrl && !alt => {
-                        app.transcript_scroll_from_bottom =
-                            app.transcript_scroll_from_bottom.saturating_add(1);
-                    }
-                    KeyCode::Down if !ctrl && !alt => {
-                        app.transcript_scroll_from_bottom =
-                            app.transcript_scroll_from_bottom.saturating_sub(1);
-                    }
-                    KeyCode::Home if ctrl => {
-                        app.transcript_scroll_from_bottom = u16::MAX;
-                    }
-                    KeyCode::End if ctrl => {
-                        app.transcript_scroll_from_bottom = 0;
-                    }
-
-                    _ => {
-                        textarea.input(key);
-                    }
-                }
-            }
-        }
-
-        {
-            let m = meeting.lock().await;
-            app.participants = m
-                .participants
-                .iter()
-                .filter(|p| !p.is_bridge())
-                .map(|p| ParticipantView {
-                    name: p.display_name().to_owned(),
-                    is_human: p.is_human(),
-                    last_poll_age_secs: m
-                        .participant_liveness
-                        .get(&p.id)
-                        .and_then(|l| l.last_poll_at)
-                        .map(|ts| crate::meeting::state::unix_ts().saturating_sub(ts)),
-                })
-                .collect();
-            app.budget_total = m.budget.total_chars();
-            app.budget_max = m.budget.max_total_chars;
-            app.room_name = m.name.clone();
-            app.responding = m
-                .active_responding()
-                .into_iter()
-                .filter(|(id, _, _, _)| !m.is_bridge(id))
-                .map(|(_, name, _, _)| name)
-                .collect();
-            app.polling = m
-                .active_polling()
-                .into_iter()
-                .filter(|(id, _, _, _)| !m.is_bridge(id))
-                .map(|(_, name, _, _)| name)
-                .collect();
-            if m.phase == Phase::Ended && !app.ended {
-                app.ended = true;
-            }
-        }
     }
 
     disable_raw_mode()?;
@@ -272,6 +261,42 @@ fn handle_input_text(text: &str, app: &mut AppState, m: &mut Meeting) {
         m.end();
     } else {
         m.submit_human(text.to_owned());
+    }
+}
+
+async fn refresh_from_meeting(meeting: &Arc<Mutex<Meeting>>, app: &mut AppState) {
+    let m = meeting.lock().await;
+    app.participants = m
+        .participants
+        .iter()
+        .filter(|p| !p.is_bridge())
+        .map(|p| ParticipantView {
+            name: p.display_name().to_owned(),
+            is_human: p.is_human(),
+            last_poll_age_secs: m
+                .participant_liveness
+                .get(&p.id)
+                .and_then(|l| l.last_poll_at)
+                .map(|ts| crate::meeting::state::unix_ts().saturating_sub(ts)),
+        })
+        .collect();
+    app.budget_total = m.budget.total_chars();
+    app.budget_max = m.budget.max_total_chars;
+    app.room_name = m.name.clone();
+    app.responding = m
+        .active_responding()
+        .into_iter()
+        .filter(|(id, _, _, _)| !m.is_bridge(id))
+        .map(|(_, name, _, _)| name)
+        .collect();
+    app.polling = m
+        .active_polling()
+        .into_iter()
+        .filter(|(id, _, _, _)| !m.is_bridge(id))
+        .map(|(_, name, _, _)| name)
+        .collect();
+    if m.phase == Phase::Ended && !app.ended {
+        app.ended = true;
     }
 }
 
