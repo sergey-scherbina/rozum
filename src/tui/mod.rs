@@ -60,7 +60,6 @@ struct AppState {
 struct ParticipantView {
     name: String,
     is_human: bool,
-    last_poll_age_secs: Option<u64>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -109,11 +108,6 @@ pub async fn run_tui(
                 .map(|p| ParticipantView {
                     name: p.display_name().to_owned(),
                     is_human: p.is_human(),
-                    last_poll_age_secs: m
-                        .participant_liveness
-                        .get(&p.id)
-                        .and_then(|l| l.last_poll_at)
-                        .map(|ts| crate::meeting::state::unix_ts().saturating_sub(ts)),
                 })
                 .collect(),
             budget_total: 0,
@@ -140,14 +134,12 @@ pub async fn run_tui(
     apply_textarea_style(&mut textarea);
     let mut event_stream = EventStream::new();
 
-    let mut presence_ticker = tokio::time::interval(std::time::Duration::from_millis(100));
-    presence_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
     terminal.draw(|f| {
         draw_ui(f, &app, &textarea);
     })?;
 
     loop {
+        let mut needs_state_sync = false;
         tokio::select! {
             result = events_rx.recv() => {
                 match result {
@@ -156,6 +148,7 @@ pub async fn run_tui(
                         while let Ok(evt) = events_rx.try_recv() {
                             apply_event(&mut app, evt);
                         }
+                        needs_state_sync = true;
                     }
                     Err(_) => break,
                 }
@@ -173,6 +166,7 @@ pub async fn run_tui(
                                 if !text.is_empty() {
                                     let mut m = meeting.lock().await;
                                     handle_input_text(&text, &mut app, &mut m);
+                                    needs_state_sync = true;
                                 }
                                 textarea = TextArea::default();
                                 apply_textarea_style(&mut textarea);
@@ -194,6 +188,7 @@ pub async fn run_tui(
                                 } else {
                                     m.pause();
                                 }
+                                needs_state_sync = true;
                             }
 
                             KeyCode::PageUp => {
@@ -226,16 +221,16 @@ pub async fn run_tui(
                             }
                         }
                     }
-                    Some(Ok(_)) => {
-                    }
+                    Some(Ok(_)) => {}
                     Some(Err(_)) | None => break,
                 }
             }
-            _ = presence_ticker.tick() => {
-            }
         }
 
-        refresh_from_meeting(&meeting, &mut app).await;
+        if needs_state_sync {
+            refresh_from_meeting(&meeting, &mut app).await;
+        }
+
         terminal.draw(|f| {
             draw_ui(f, &app, &textarea);
         })?;
@@ -266,18 +261,13 @@ fn handle_input_text(text: &str, app: &mut AppState, m: &mut Meeting) {
 
 async fn refresh_from_meeting(meeting: &Arc<Mutex<Meeting>>, app: &mut AppState) {
     let m = meeting.lock().await;
-    app.participants = m
+            app.participants = m
         .participants
         .iter()
         .filter(|p| !p.is_bridge())
         .map(|p| ParticipantView {
             name: p.display_name().to_owned(),
             is_human: p.is_human(),
-            last_poll_age_secs: m
-                .participant_liveness
-                .get(&p.id)
-                .and_then(|l| l.last_poll_at)
-                .map(|ts| crate::meeting::state::unix_ts().saturating_sub(ts)),
         })
         .collect();
     app.budget_total = m.budget.total_chars();
@@ -334,7 +324,6 @@ fn apply_event(app: &mut AppState, evt: MeetingEvent) {
             app.participants.push(ParticipantView {
                 name: display_name,
                 is_human,
-                last_poll_age_secs: None,
             });
         }
         MeetingEvent::ParticipantLeft {
@@ -549,7 +538,7 @@ fn draw_status_bar(f: &mut ratatui::Frame, app: &AppState, area: Rect) {
 
     for p in &app.participants {
         spans.push(Span::raw("  "));
-        let (color, icon) = participant_chip(p);
+        let (color, icon) = participant_chip(app, p);
         spans.push(Span::styled(
             format!("{icon} {}", p.name),
             Style::default().fg(color),
@@ -680,10 +669,10 @@ fn apply_textarea_style(textarea: &mut TextArea) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn participant_chip(p: &ParticipantView) -> (Color, &'static str) {
+fn participant_chip(app: &AppState, p: &ParticipantView) -> (Color, &'static str) {
     if p.is_human {
         (HUMAN_COLOR, "◈")
-    } else if p.last_poll_age_secs.map_or(false, |a| a <= 30) {
+    } else if app.polling.contains(&p.name) {
         (AI_COLOR, "○")
     } else {
         (MUTED_COLOR, "○")
