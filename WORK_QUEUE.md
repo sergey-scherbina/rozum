@@ -46,7 +46,7 @@ Current sprint focus: make Rozum a reliable local meeting room for live agents a
   - Spec first: `docs/specs/smollm2-chat-template.md`.
 
 
-- [ ] idle-cpu-reduction - Eliminate busy-polling in TUI and room loops so rozum uses near-zero CPU when idle.
+- [x] idle-cpu-reduction - Eliminate busy-polling in TUI and room loops so rozum uses near-zero CPU when idle.
   - TUI render loop currently `poll(50ms)` + `try_recv` every 50 ms regardless of activity — replace with a select on `events_rx`, crossterm events, and a 100ms ticker for the presence timeout only.
   - Room/app loop: audit for any spin-loops or short-sleep busywaits; replace with async `tokio::select!` on actual wakeup sources (transcript_notify, broadcast channel, Unix accept).
   - Web bridge `room_loop`: already blocks on `wait_my_turn` (35 s timeout), verify no additional spin path.
