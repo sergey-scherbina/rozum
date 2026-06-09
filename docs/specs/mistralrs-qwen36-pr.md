@@ -101,6 +101,55 @@ Revised down sharply after discovering the qwen3_next re-use:
 
 The original estimate assumed adding a new linear-attention layer module from scratch. After confirming mistralrs already has all of that in `qwen3_next.rs`, the work collapses to plumbing.
 
-## Results
+## Results — WIP local patch
 
-(Filled in after PR lands and rozum picks up the new version.)
+Day-1 work committed as `patches/mistralrs-qwen36-afq-wip.patch` (see
+`patches/README.md` for how to apply on top of `EricLBuehler/mistral.rs` master).
+
+What lands in this patch:
+
+1. `GdnInProj` enum (`Merged` legacy path + new `SplitAfq { qkv, z, b, a }` path).
+   Each `in_proj_*` loads as its own `AfqLayer::afq_linear_b`; combined on the
+   activation side in `GdnInProj::forward` to preserve the downstream
+   `GdnProjection::from_packed` layout.
+2. `conv1d.weight` MLX layout fallback: tries native `(out, in=1, kernel)` first,
+   permutes from MLX `(out, kernel, in=1)` if the first load fails.
+3. Custom `Deserialize` on `vision_models/qwen3_5_moe/config::Config` that
+   propagates top-level `quantization_config` into `text_config.quantization_config`
+   so `GdnConfig::quantization_config()` sees the AFQ settings.
+4. ISQ collection skips `SplitAfq` (already quantised).
+
+Smoke-test progress against `mlx-community/Qwen3.6-35B-A3B-4bit`:
+- Before patch: fails immediately on `linear_attn.in_proj_qkv.weight`.
+- After patch: progresses through `linear_attn` (in_proj + conv1d), fails next
+  on `mlp.gate.weight` with shape `(256, 512)` (8-bit packed) vs expected
+  `(256, 2048)` (4-bit packed).
+
+### Remaining blocker — per-layer quantization override
+
+Qwen3.6's MLX checkpoint runs the MoE router (`mlp.gate.weight`) at **8-bit**
+AFQ while the rest of the model is **4-bit**. MLX config encodes this via
+per-layer key overrides:
+
+```jsonc
+"quantization_config": {
+  "group_size": 64,
+  "bits": 4,
+  "language_model.model.layers.0.mlp.gate":          { "group_size": 64, "bits": 8 },
+  "language_model.model.layers.0.mlp.shared_expert_gate": { "group_size": 64, "bits": 8 },
+  ...
+}
+```
+
+`mistralrs::QuantizedConfig::Afq { bits, group_size }` is a single model-wide
+value with no per-tensor override mechanism. Adding it would touch:
+
+1. `mistralrs-quant/src/lib.rs::QuantizedConfig` deserializer — keep base
+   `bits` + `group_size`, also store a `HashMap<String, (bits, group_size)>`
+   of full-path overrides parsed from sibling map entries.
+2. Every call site that uses `AfqLayer::afq_linear_b` — pass the current
+   tensor's full path so the layer can look up the override before falling
+   back to the model-wide default.
+
+This is a multi-day extension. Spec keeps the task open; production use of
+Qwen3.6 today goes through the `lmstudio-http-backend` path.
