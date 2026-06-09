@@ -131,6 +131,29 @@ enum Command {
         #[arg(trailing_var_arg = true, required = true)]
         program: Vec<String>,
     },
+
+    /// Inspect installed and recommended local LLM models
+    Models {
+        #[command(subcommand)]
+        action: ModelsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelsAction {
+    /// List installed models (default), or `--remote` for the curated download list
+    List {
+        /// Show curated download recommendations instead of installed models
+        #[arg(long)]
+        remote: bool,
+    },
+
+    /// Show details for a model spec (works for installed and non-installed)
+    Info {
+        /// Model spec: `mlx-community:...`, `hf:<user>/<repo>`, `<ollama-tag>`,
+        /// `lmstudio:<repo>`, or an absolute path
+        spec: String,
+    },
 }
 
 #[tokio::main]
@@ -235,6 +258,9 @@ async fn main() {
             program,
         }) => {
             run_launch(model, port, n_ctx, program).await;
+        }
+        Some(Command::Models { action }) => {
+            run_models(action).await;
         }
         Some(Command::Telegram { room, name }) => {
             let token = std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_else(|_| {
@@ -490,6 +516,151 @@ async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: u32, program: 
         }
     };
     std::process::exit(code);
+}
+
+async fn run_models(action: ModelsAction) {
+    use rozum::models;
+
+    match action {
+        ModelsAction::List { remote: false } => {
+            let installed = models::scan_all_installed();
+            if installed.is_empty() {
+                println!("No local models found.");
+                println!();
+                println!("Cache directories scanned:");
+                println!("  ~/.cache/huggingface/hub/      (mistralrs / hf-hub)");
+                println!("  ~/.ollama/models/blobs/        (via Ollama)");
+                println!("  ~/.cache/lm-studio/models/     (via LMStudio)");
+                println!();
+                println!("See `rozum models list --remote` for recommended models to download.");
+                return;
+            }
+            println!(
+                "{:<10}  {:>10}  {}",
+                "SOURCE", "SIZE", "SPEC (pass to --model)"
+            );
+            for m in &installed {
+                println!(
+                    "{:<10}  {:>10}  {}",
+                    m.source.label(),
+                    models::format_size(m.size_bytes),
+                    m.spec
+                );
+            }
+            let total: u64 = installed.iter().map(|m| m.size_bytes).sum();
+            println!();
+            println!(
+                "{} models, {} total",
+                installed.len(),
+                models::format_size(total)
+            );
+        }
+
+        ModelsAction::List { remote: true } => {
+            println!("Curated download recommendations (Apple Silicon 24-36 GB):");
+            println!();
+            println!("{:<55} {:>7}  {}", "SPEC", "SIZE", "NOTES");
+            for m in models::RECOMMENDED {
+                println!(
+                    "{:<55} {:>4.1} GB  {}",
+                    m.spec, m.approx_size_gb, m.display_name
+                );
+                println!("{:<55} {:>7}  {}", "", "", m.notes);
+            }
+            println!();
+            println!("Install by launching with any of these specs, e.g.:");
+            println!("  rozum launch --model mlx-community:Qwen3-4B-4bit claude");
+            println!("Search more on HuggingFace: https://huggingface.co/mlx-community");
+        }
+
+        ModelsAction::Info { spec } => {
+            run_info(&spec).await;
+        }
+    }
+}
+
+async fn run_info(spec: &str) {
+    use rozum::models;
+
+    println!("Model spec:  {spec}");
+    println!();
+
+    let installed = models::scan_all_installed();
+    let local = installed.iter().find(|m| m.spec == spec);
+    match local {
+        Some(m) => {
+            println!("Status:      installed locally");
+            println!("Source:      {}", m.source.label());
+            println!("Size:        {}", models::format_size(m.size_bytes));
+            println!("Path:        {}", m.path.display());
+            println!();
+            println!("Run with:    rozum launch --model {spec} claude");
+        }
+        None => {
+            println!("Status:      not installed locally");
+            // Try HuggingFace metadata if the spec maps to an HF repo
+            if let Some(hf_id) = models::spec_to_hf_id(spec) {
+                println!("Fetching HuggingFace metadata for '{hf_id}' ...");
+                println!();
+                match models::fetch_hf_info(&hf_id).await {
+                    Ok(info) => {
+                        println!("HuggingFace:  https://huggingface.co/{}", info.id);
+                        if let Some(a) = &info.author {
+                            println!("Author:       {a}");
+                        }
+                        if let Some(p) = &info.pipeline_tag {
+                            println!("Pipeline:     {p}");
+                        }
+                        if let Some(l) = &info.license {
+                            println!("License:      {l}");
+                        }
+                        if let Some(d) = info.downloads {
+                            println!("Downloads:    {d}");
+                        }
+                        if let Some(l) = info.likes {
+                            println!("Likes:        {l}");
+                        }
+                        if info.total_bytes > 0 {
+                            println!(
+                                "Total size:   {} ({} files)",
+                                models::format_size(info.total_bytes),
+                                info.files.len()
+                            );
+                        } else {
+                            println!("Files:        {}", info.files.len());
+                        }
+                        if !info.tags.is_empty() {
+                            let tags = info
+                                .tags
+                                .iter()
+                                .take(10)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            println!("Tags:         {tags}");
+                        }
+                        println!();
+                        println!("Install by running:");
+                        println!("  rozum launch --model {spec} claude");
+                        println!("First launch will download into ~/.cache/huggingface/hub/");
+                    }
+                    Err(e) => {
+                        println!("HuggingFace lookup failed: {e}");
+                    }
+                }
+            } else {
+                println!();
+                println!("Spec form not recognised as a HuggingFace repo.");
+                println!("Known forms:");
+                println!("  mlx-community:<repo>");
+                println!("  hf:<owner>/<repo>");
+                println!("  <owner>/<repo>          (bare HuggingFace id)");
+                println!("  <name>[:<tag>]          (Ollama-style — must be already pulled)");
+                println!("  lmstudio:<owner>/<repo>");
+                println!("  /absolute/path.gguf");
+            }
+        }
+    }
 }
 
 /// Try to build a real backend for `model_spec`. Returns `None` if nothing
