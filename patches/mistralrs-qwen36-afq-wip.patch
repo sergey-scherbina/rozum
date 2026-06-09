@@ -53,7 +53,7 @@ index a5f6f1f..b857fd0 100644
 -pub use weights::GdnWeightMode;
 +pub use weights::{GdnInProj, GdnWeightMode};
 diff --git a/mistralrs-core/src/gdn/weights.rs b/mistralrs-core/src/gdn/weights.rs
-index d0e992f..825b9f2 100644
+index d0e992f..b15a5cb 100644
 --- a/mistralrs-core/src/gdn/weights.rs
 +++ b/mistralrs-core/src/gdn/weights.rs
 @@ -1,6 +1,9 @@
@@ -92,7 +92,7 @@ index d0e992f..825b9f2 100644
      pub conv1d_weight: Tensor,
      pub dt_bias: Tensor,
      pub a_log: Tensor,
-@@ -22,6 +40,127 @@ pub struct GdnWeights {
+@@ -22,6 +40,87 @@ pub struct GdnWeights {
      pub out_proj: Arc<dyn QuantMethod>,
  }
  
@@ -115,62 +115,22 @@ index d0e992f..825b9f2 100644
 +        match self {
 +            GdnInProj::Merged(inner) => inner.forward(x),
 +            GdnInProj::SplitAfq { qkv, z, b, a } => {
-+                // The merged-weight Merged path stores W with a per-head
-+                // interleaved layout (see load_split_qkvz below) so a single
-+                // matmul produces output that is *already* per-head sequential
-+                // — GdnProjection::from_packed can then reshape to
-+                // (..., num_k_heads, group_size) and slice.
-+                //
-+                // The SplitAfq path runs four independent matmuls instead, so
-+                // each output is "flat" — qkv_out has layout
-+                // [q_all_heads ‖ k_all_heads ‖ v_all_heads], NOT per-head.
-+                // We split, reshape each piece into per-head form, concatenate
-+                // along the last axis, then flatten back, to reproduce the
-+                // same per-head layout the merged path would have produced.
-+                let qkv_out = qkv.forward(x)?; // (..., key_dim*2 + value_dim)
-+                let z_out = z.forward(x)?; // (..., value_dim)
-+                let b_out = b.forward(x)?; // (..., num_v_heads)
-+                let a_out = a.forward(x)?; // (..., num_v_heads)
-+
-+                let last = qkv_out.dims().len() - 1;
-+                let q_flat = qkv_out.narrow(last, 0, dims.key_dim)?;
-+                let k_flat = qkv_out.narrow(last, dims.key_dim, dims.key_dim)?;
-+                let v_flat = qkv_out.narrow(last, 2 * dims.key_dim, dims.value_dim)?;
-+
-+                let lead: Vec<usize> = x.dims().iter().take(x.dims().len() - 1).copied().collect();
-+                let q_shape: Vec<usize> = lead
-+                    .iter()
-+                    .copied()
-+                    .chain([dims.num_k_heads, dims.head_k_dim])
-+                    .collect();
-+                let v_shape: Vec<usize> = lead
-+                    .iter()
-+                    .copied()
-+                    .chain([dims.num_k_heads, dims.v_per_group * dims.head_v_dim])
-+                    .collect();
-+                let ba_shape: Vec<usize> = lead
-+                    .iter()
-+                    .copied()
-+                    .chain([dims.num_k_heads, dims.v_per_group])
-+                    .collect();
-+
-+                let q_g = q_flat.reshape(q_shape.as_slice())?;
-+                let k_g = k_flat.reshape(q_shape.as_slice())?;
-+                let v_g = v_flat.reshape(v_shape.as_slice())?;
-+                let z_g = z_out.reshape(v_shape.as_slice())?;
-+                let b_g = b_out.reshape(ba_shape.as_slice())?;
-+                let a_g = a_out.reshape(ba_shape.as_slice())?;
-+
-+                let qkvz = candle_core::Tensor::cat(&[q_g, k_g, v_g, z_g], D::Minus1)?;
-+                let ba = candle_core::Tensor::cat(&[b_g, a_g], D::Minus1)?;
-+
-+                let qkvz_flat_shape: Vec<usize> =
-+                    lead.iter().copied().chain([dims.qkvz_out_dim()]).collect();
-+                let ba_flat_shape: Vec<usize> =
-+                    lead.iter().copied().chain([dims.ba_out_dim()]).collect();
-+                let qkvz = qkvz.contiguous()?.reshape(qkvz_flat_shape)?;
-+                let ba = ba.contiguous()?.reshape(ba_flat_shape)?;
-+                candle_core::Tensor::cat(&[qkvz, ba], D::Minus1)
++                // Diagnostic path: dequantize each AfqLayer's weight to
++                // full precision, build the merged weight tensor with the
++                // same per-head interleaving the merged-load path uses,
++                // run one matmul. Slow (full-precision weight materialised
++                // every forward) but mathematically identical to the
++                // Merged path — any numerical drift after switching to
++                // this branch is the dequantise step itself, not our
++                // activation-side layout code.
++                let (qkvz_w, ba_w) = self.dequantize_concat(dims)?;
++                // Cast weights to the activation dtype so matmul typechecks.
++                let qkvz_w = qkvz_w.to_dtype(x.dtype())?;
++                let ba_w = ba_w.to_dtype(x.dtype())?;
++                let in_proj_w = candle_core::Tensor::cat(&[qkvz_w, ba_w], 0)?;
++                // x @ W^T
++                let w_t = in_proj_w.transpose(0, 1)?.contiguous()?;
++                x.broadcast_matmul(&w_t)
 +            }
 +        }
 +    }
@@ -220,7 +180,7 @@ index d0e992f..825b9f2 100644
  pub struct GdnWeightLoadCtx<'a> {
      pub cfg: &'a dyn GdnConfig,
      pub dims: &'a GdnDims,
-@@ -50,20 +189,61 @@ impl GdnWeights {
+@@ -50,20 +149,61 @@ impl GdnWeights {
          };
          let vb_la = mapper.set_device(layer_idx, vb.pp("linear_attn"), loading_isq);
  
@@ -476,10 +436,10 @@ index 715b556..526ea96 100644
                  }
              }
 diff --git a/mistralrs-quant/src/afq/mod.rs b/mistralrs-quant/src/afq/mod.rs
-index 9076075..6f5175e 100644
+index 9076075..70a7228 100644
 --- a/mistralrs-quant/src/afq/mod.rs
 +++ b/mistralrs-quant/src/afq/mod.rs
-@@ -279,9 +279,15 @@ impl AfqLayer {
+@@ -279,9 +279,22 @@ impl AfqLayer {
          bias: bool,
          vb: ShardedVarBuilder,
      ) -> Result<Arc<dyn QuantMethod>> {
@@ -494,10 +454,17 @@ index 9076075..6f5175e 100644
 +        let (bits, group_size) = config
 +            .afq_params_for_path(&path)
 +            .expect("afq_params_for_path returned None for an Afq config");
++        // Debug instrumentation while we chase the MLX numerical drift.
++        if std::env::var("ROZUM_AFQ_DEBUG").is_ok() {
++            eprintln!(
++                "afq_linear_b: path='{}' in={} out={} bits={} group={}",
++                path, in_dim, out_dim, bits, group_size
++            );
++        }
  
          let w_q = vb.get_with_hints_dtype(
              (out_dim, in_dim * bits / 32),
-@@ -305,8 +311,8 @@ impl AfqLayer {
+@@ -305,8 +318,8 @@ impl AfqLayer {
              scales,
              bias,
              biases,
@@ -508,7 +475,7 @@ index 9076075..6f5175e 100644
          }))
      }
  
-@@ -318,9 +324,13 @@ impl AfqLayer {
+@@ -318,9 +331,13 @@ impl AfqLayer {
          bias: bool,
          vb: ShardedVarBuilder,
      ) -> Result<Arc<dyn QuantMethod>> {
@@ -524,7 +491,7 @@ index 9076075..6f5175e 100644
  
          let w_q = vb.get_with_hints_dtype(
              (num_local_experts, out_dim, in_dim * bits / 32),
-@@ -350,8 +360,8 @@ impl AfqLayer {
+@@ -350,8 +367,8 @@ impl AfqLayer {
              scales,
              bias,
              biases,

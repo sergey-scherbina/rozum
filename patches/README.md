@@ -129,6 +129,58 @@ prompt through both, and dump intermediate tensors at every layer boundary
 (post-embed, post-linear_attn, post-MoE, post-norm, pre-lm_head, post-lm_head).
 First divergence point pinpoints the bug. Estimated 4-8 hours focused.
 
-Until that lands, production Qwen3.6 use goes through the
-`lmstudio-http-backend` path in `rozum launch` (already shipped, no further
-work needed).
+### Day 4 results: bug is NOT in our patches
+
+Direct test through `cargo run -p mistralrs --bin mistralrs -- run -m
+mlx-community/Qwen3.6-35B-A3B-4bit` (CLI, bypassing our gateway):
+
+- Model loads cleanly.
+- Generates tokens at **66 tok/s on M4 Max** — clearly using Metal.
+- **Output is multilingual garbage** (Korean / Chinese / Cyrillic / English /
+  emoji randomly interleaved) — text-grammar nonsense at every position.
+
+This rules out:
+- Our chat-template path (we bypassed our gateway).
+- Our split-then-reshape `SplitAfq.forward` (we also tried a
+  dequantise-then-merge variant — same garbage).
+- Weight-loading errors (debug instrumentation confirms every AfqLayer
+  loads with the right path / bits / group_size, including the 8-bit
+  overrides for `mlp.gate` and `mlp.shared_expert_gate`, and the fused
+  experts under `switch_mlp.{gate_proj,up_proj,down_proj}`).
+
+What remains: the bug is in mistralrs's **forward computation** for
+Qwen3.6, not in our load-time patches. Candidates:
+
+1. **mrope_section: [11, 11, 10]** — 3D multimodal RoPE applied incorrectly
+   in text-only path. mistralrs's `Qwen3VLRotaryEmbedding` (used by
+   `vision_models/qwen3_5_moe`) may not handle the text-only case the way
+   the MLX Python reference does.
+2. **gated_delta_update** SSM kernel — numerical edge case.
+3. **MoE expert routing** — fused `switch_mlp` path may have a layout drift
+   we can't see from outside.
+
+Resolution path requires **Python side-by-side instrumentation**:
+1. `pip install mlx-lm`
+2. Load the same model in Python: `from mlx_lm import load, generate`
+3. Tap intermediate activations at every layer boundary.
+4. Run the same single-token prompt through our patched mistralrs binary
+   with `eprintln!` taps at the matching boundaries.
+5. First divergence point pinpoints the bug.
+
+Estimated 1-2 day project for a focused session with the Python env ready.
+
+### Production Qwen3.6 today
+
+The patch in this directory is **not** ready to use for inference. For real
+work, route through LM Studio (already shipped as `lmstudio-http-backend`):
+
+```bash
+# In LM Studio app:
+#   - Search tab → install mlx-community/Qwen3.6-35B-A3B-4bit
+#   - Developer tab → start server on port 1234
+rozum launch --model qwen/qwen3.6-35b-a3b claude
+```
+
+LM Studio's native MLX runtime handles Qwen3.6 correctly because it shares
+the mlx_lm Python forward path. rozum auto-detects port 1234 and proxies
+to it.
