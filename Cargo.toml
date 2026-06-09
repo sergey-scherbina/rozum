@@ -47,3 +47,11 @@ futures-util = "0.3"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# Use the patched vendored mistralrs (`.vendor/mistral-rs`) until the Qwen3.6
+# RMSNorm fix and MLX-AFQ support land upstream. The vendored crate is 0.8.3,
+# which satisfies the `^0.8.1` requirement above, so cargo transparently swaps
+# the registry build for the local one. See patches/README.md and
+# docs/specs/mlx-weight-layout-and-afq.md section 13.
+[patch.crates-io]
+mistralrs = { path = ".vendor/mistral-rs/mistralrs" }

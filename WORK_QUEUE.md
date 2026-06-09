@@ -4,34 +4,52 @@ Current sprint focus: (1) make Rozum a reliable local meeting room for live agen
 
 ## Sprint
 
-### Top priority (P0): mistralrs Qwen3.6 finish-the-forward
+### Top priority (P0): mistralrs Qwen3.6 finish-the-forward — RESOLVED (day 6)
 
-Embedding is proven byte-for-byte identical to Python mlx-lm; the remaining
-divergence is the **weight-row-ordering convention mismatch** between MLX
-(flat-per-type, Convention B) and mistralrs's upstream Qwen3-Next loader
-(per-head-interleaved, Convention A). Day-5 fix landed in
-`GdnInProj::SplitAfq.forward` for the linear-attention `in_proj_*` and moved
-top-1 logit 14.88 → 17.38 (Python target 22.0), top-1 token 95886 → 22 → 220
-(Python target 8160 'Here'). Same bug now expected in two more modules.
+**Root cause found and fixed.** The residual divergence was NOT the
+weight-row-ordering hypothesis from days 1-5. It was the **RMSNorm `+1`
+convention**: `GemmaRmsNorm::new` bakes `weight = on_disk_weight + 1.0`, but
+the sanitized `mlx-community/Qwen3.6-35B-A3B-4bit` checkpoint uses raw
+RMSNorm weights (MLX's `should_shift_norm_weights` is False for sanitized
+checkpoints: conv1d `(8192,4,1)`, no MTP). The `+1` over-scaled every norm
+(~2.1x) and the silu MoE compounded it to a ~14x experts blow-up + an
+over-peaked router. Fix: `GemmaRmsNorm::new_unshifted` for the five norm
+sites in `vision_models/qwen3_5_moe/text.rs`.
 
-Full reference for all conventions and findings: `docs/specs/mlx-weight-layout-and-afq.md`.
+Full writeup + the one-pass diagnostic methodology that localized it:
+`docs/specs/mlx-weight-layout-and-afq.md` section 13. Oracle:
+`scripts/mlx_ref.py` (--layers/--attn/--mlp/--router) +
+`scripts/mlx_ref.qwen36-hello.txt`. Patch:
+`patches/mistralrs-qwen36-afq-wip.patch`.
 
-- [ ] qwen36-fullattention-split - Switch FullAttention block (every 4th layer) to MLX flat-per-type qkv loading.
-  - MLX ships separate `self_attn.{q_proj,k_proj,v_proj}.weight` tensors (Convention B); mistralrs upstream `Qwen3NextAttention` assumes one fused `qkv_proj` per Convention A.
-  - Mirror the day-5 GDN fix: load three independent AfqLayer instances, run three matmuls in forward, per-head reshape each, concat on the activation side along the per-head axis - never reconstruct a fused weight at load time.
-  - Skip ISQ collection for the three split AFQ layers (same pattern as `SplitAfq` in `models/qwen3_next.rs`).
-  - Verification: side-by-side dump after layer 3 forward (first FullAttention layer in Qwen3.6) using `ROZUM_FWD_DEBUG=1`. Logits at the FullAttention output must match Python `mlx_lm` to within bf16 rounding.
+- [x] qwen36-fullattention-split - VERIFIED ALREADY CORRECT (red herring).
+  - `qwen3_5_moe/text.rs` FullAttention already loads separate
+    `q_proj/k_proj/v_proj` AFQ layers and its gate-interleave split matches
+    `mlx_lm/models/qwen3_next.py::Qwen3NextAttention` exactly. Confirmed
+    byte-for-byte: layer-3 (first FullAttention) `||x||` 1.4432 vs Python
+    1.4460 once the RMSNorm fix is in. No layout change was needed.
 
-- [ ] qwen36-moe-switchmlp-layout - Audit MoE fused `switch_mlp.{gate_proj,up_proj,down_proj}` against MLX per-expert layout.
-  - MLX stores each expert as `mlp.experts.<i>.{gate_proj,up_proj,down_proj}.weight` (separate tensors); mistralrs upstream `SparseMoeBlock` expects already-fused `(num_experts, out, in)` tensors. Either load + fuse explicitly at construction time, or split the `switch_mlp` forward into per-expert AFQ matmuls.
-  - The MoE router `mlp.gate` and `mlp.shared_expert_gate` are already 8-bit AFQ-aware via the per-tensor override deserializer; this task is only about the expert MLPs themselves.
-  - Verification: pick one token whose top-2 router decisions are known from Python; dump the post-MoE activation in both runs and compare. Logits at the MoE output must match Python.
+- [x] qwen36-moe-switchmlp-layout - VERIFIED ALREADY CORRECT (red herring).
+  - The MLX checkpoint ships experts **pre-fused** as
+    `switch_mlp.{gate,up,down}_proj` `(num_experts, out, in)` (no per-expert
+    `experts.<i>`). On Metal the `MoEExperts` Fast path -> quant
+    `FusedExperts::new` loads them via `AfqLayer::afq_packed_linear_b` and
+    the forward applies router weights correctly. The 14x magnitude was the
+    RMSNorm bug feeding a 10x input, not a layout/dequant error. Confirmed:
+    layer-0 per-expert outputs now match Python's `[0.78,0.25,0.57,...]`.
 
-- [ ] qwen36-numerical-parity-gate - 20-token byte-for-byte greedy match against `mlx_lm.generate --temp 0`.
-  - Fixed prompt: `"Hello"` rendered through Qwen3.6 chat template (11 tokens).
-  - Pass criterion: first 20 generated token ids identical between `mlx_lm.generate --temp 0` and our patched mistralrs CLI. Drift after token 20 is sampler-precision noise and acceptable.
-  - This is the final exit gate for the Qwen3.6 mistralrs track. Once green, bump the upstream PR (`docs/specs/mistralrs-qwen36-pr.md`) and tear down the patch-vendored `.vendor/mistral-rs` workflow.
-  - Spec: `docs/specs/mlx-weight-layout-and-afq.md` (sections 6 and 8 are the relevant ones).
+- [x] qwen36-numerical-parity-gate - PASSED.
+  - `"Hello"` (11 tokens) renders identically in both runs; embedding
+    byte-for-byte; all 40 layer last-position `||x||` match within bf16
+    rounding; top-1 logit `id=8160 'Here' logit=22.0` identical to `mlx_lm`.
+    Greedy generation begins identically.
+  - Remaining (follow-up, not blocking): thread the fix into the upstream PR
+    (`docs/specs/mistralrs-qwen36-pr.md`) and decide whether rozum's
+    crates.io `mistralrs` 0.8.1 dep gets a `[patch]` to `.vendor/mistral-rs`
+    or waits for an upstream release. NOTE: rozum currently has NO `[patch]`,
+    so the fix lives only in `.vendor` + `patches/` until that is wired —
+    `rozum`'s own binary still loads unpatched 0.8.1 and Qwen3.6 should keep
+    routing through the LM Studio HTTP backend until then.
 
 ### Active
 

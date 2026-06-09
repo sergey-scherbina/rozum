@@ -53,7 +53,7 @@ index a5f6f1f..b857fd0 100644
 -pub use weights::GdnWeightMode;
 +pub use weights::{GdnInProj, GdnWeightMode};
 diff --git a/mistralrs-core/src/gdn/weights.rs b/mistralrs-core/src/gdn/weights.rs
-index d0e992f..979790b 100644
+index d0e992f..7eeface 100644
 --- a/mistralrs-core/src/gdn/weights.rs
 +++ b/mistralrs-core/src/gdn/weights.rs
 @@ -1,6 +1,9 @@
@@ -92,7 +92,7 @@ index d0e992f..979790b 100644
      pub conv1d_weight: Tensor,
      pub dt_bias: Tensor,
      pub a_log: Tensor,
-@@ -22,6 +40,143 @@ pub struct GdnWeights {
+@@ -22,6 +40,135 @@ pub struct GdnWeights {
      pub out_proj: Arc<dyn QuantMethod>,
  }
  
@@ -201,16 +201,8 @@ index d0e992f..979790b 100644
 +                let q_w = qkv_w.narrow(0, 0, dims.key_dim)?;
 +                let k_w = qkv_w.narrow(0, dims.key_dim, dims.key_dim)?;
 +                let v_w = qkv_w.narrow(0, dims.key_dim * 2, dims.value_dim)?;
-+                let q_g = q_w.reshape((
-+                    dims.num_k_heads,
-+                    dims.head_k_dim,
-+                    dims.hidden_size,
-+                ))?;
-+                let k_g = k_w.reshape((
-+                    dims.num_k_heads,
-+                    dims.head_k_dim,
-+                    dims.hidden_size,
-+                ))?;
++                let q_g = q_w.reshape((dims.num_k_heads, dims.head_k_dim, dims.hidden_size))?;
++                let k_g = k_w.reshape((dims.num_k_heads, dims.head_k_dim, dims.hidden_size))?;
 +                let v_g = v_w.reshape((
 +                    dims.num_k_heads,
 +                    dims.v_per_group * dims.head_v_dim,
@@ -236,7 +228,7 @@ index d0e992f..979790b 100644
  pub struct GdnWeightLoadCtx<'a> {
      pub cfg: &'a dyn GdnConfig,
      pub dims: &'a GdnDims,
-@@ -50,20 +205,61 @@ impl GdnWeights {
+@@ -50,20 +197,66 @@ impl GdnWeights {
          };
          let vb_la = mapper.set_device(layer_idx, vb.pp("linear_attn"), loading_isq);
  
@@ -302,16 +294,48 @@ index d0e992f..979790b 100644
 +        // MLX-AFQ ships conv1d.weight transposed: (out, kernel, in=1) instead
 +        // of candle's (out, in=1, kernel). Try the native layout first; fall
 +        // back to a permuted load for MLX checkpoints.
-+        let conv1d_weight = match vb_la.get((dims.conv_dim, 1, dims.conv_kernel_size), "conv1d.weight") {
++        let conv1d_weight = match vb_la
++            .get((dims.conv_dim, 1, dims.conv_kernel_size), "conv1d.weight")
++        {
 +            Ok(t) => move_to_target(t, isq_target_device.as_ref())?,
 +            Err(_) => {
 +                let raw = vb_la.get((dims.conv_dim, dims.conv_kernel_size, 1), "conv1d.weight")?;
-+                move_to_target(raw.permute((0, 2, 1))?.contiguous()?, isq_target_device.as_ref())?
++                move_to_target(
++                    raw.permute((0, 2, 1))?.contiguous()?,
++                    isq_target_device.as_ref(),
++                )?
 +            }
 +        };
          let dt_bias = move_to_target(
              vb_la.get(dims.num_v_heads, "dt_bias")?,
              isq_target_device.as_ref(),
+diff --git a/mistralrs-core/src/layers.rs b/mistralrs-core/src/layers.rs
+index d46cdb2..94a6651 100644
+--- a/mistralrs-core/src/layers.rs
++++ b/mistralrs-core/src/layers.rs
+@@ -428,6 +428,22 @@ impl GemmaRmsNorm {
+         })
+     }
+ 
++    // RMSNorm with the on-disk weight used verbatim (no `+1` Gemma shift). MLX
++    // checkpoints only pre-shift norm weights for *unsanitized* exports
++    // (`should_shift_norm_weights`: multi-token-prediction weights present, or
++    // conv1d stored as (out, kernel, in) with last dim != 1). The shipping
++    // mlx-community Qwen3.6 checkpoints are sanitized, so their input/post/q/k
++    // and final norms use raw weights; applying `+1` here over-scales every
++    // RMSNorm and blows the forward up (~10x at the MoE experts).
++    pub fn new_unshifted(size: usize, eps: f64, vb: ShardedVarBuilder) -> Result<Self> {
++        let original_weight = vb.get(size, "weight")?;
++        Ok(Self {
++            eps,
++            weight: original_weight.clone(),
++            original_weight,
++        })
++    }
++
+     pub fn weight(&self) -> &Tensor {
+         &self.weight
+     }
 diff --git a/mistralrs-core/src/models/qwen3_next.rs b/mistralrs-core/src/models/qwen3_next.rs
 index 12a2ac8..d0a3361 100644
 --- a/mistralrs-core/src/models/qwen3_next.rs
@@ -385,10 +409,23 @@ index 92b1d9b..37e196b 100644
 +    }
 +}
 diff --git a/mistralrs-core/src/vision_models/qwen3_5_moe/text.rs b/mistralrs-core/src/vision_models/qwen3_5_moe/text.rs
-index 715b556..fe0b50d 100644
+index 715b556..b15c761 100644
 --- a/mistralrs-core/src/vision_models/qwen3_5_moe/text.rs
 +++ b/mistralrs-core/src/vision_models/qwen3_5_moe/text.rs
-@@ -287,11 +287,28 @@ impl SparseMoeBlock {
+@@ -131,8 +131,10 @@ impl FullAttention {
+         )?;
+ 
+         let vb_sa_norms = mapper.set_device(layer_idx, vb.pp("self_attn"), false);
+-        let q_norm = GemmaRmsNorm::new(head_dim, cfg.rms_norm_eps, vb_sa_norms.pp("q_norm"))?;
+-        let k_norm = GemmaRmsNorm::new(head_dim, cfg.rms_norm_eps, vb_sa_norms.pp("k_norm"))?;
++        let q_norm =
++            GemmaRmsNorm::new_unshifted(head_dim, cfg.rms_norm_eps, vb_sa_norms.pp("q_norm"))?;
++        let k_norm =
++            GemmaRmsNorm::new_unshifted(head_dim, cfg.rms_norm_eps, vb_sa_norms.pp("k_norm"))?;
+ 
+         Ok(Self {
+             q_proj,
+@@ -287,11 +289,28 @@ impl SparseMoeBlock {
              .cloned()
              .unwrap_or(real_device);
  
@@ -422,7 +459,7 @@ index 715b556..fe0b50d 100644
  
          let moe_cfg = MoEExpertsConfig {
              num_experts: cfg.num_experts,
-@@ -319,13 +336,28 @@ impl SparseMoeBlock {
+@@ -319,13 +338,28 @@ impl SparseMoeBlock {
              comm,
          )?;
  
@@ -458,7 +495,29 @@ index 715b556..fe0b50d 100644
  
          Ok(Self {
              gate,
-@@ -604,12 +636,20 @@ impl Qwen3_5MoeTextModel {
+@@ -561,12 +595,12 @@ impl Qwen3_5MoeTextModel {
+                 )?),
+             };
+ 
+-            let input_layernorm = GemmaRmsNorm::new(
++            let input_layernorm = GemmaRmsNorm::new_unshifted(
+                 cfg.hidden_size,
+                 cfg.rms_norm_eps,
+                 mapper.set_device(layer_idx, vb_l.pp(layer_idx).pp("input_layernorm"), false),
+             )?;
+-            let post_attention_layernorm = GemmaRmsNorm::new(
++            let post_attention_layernorm = GemmaRmsNorm::new_unshifted(
+                 cfg.hidden_size,
+                 cfg.rms_norm_eps,
+                 mapper.set_device(
+@@ -598,18 +632,26 @@ impl Qwen3_5MoeTextModel {
+             })
+         })?;
+ 
+-        let norm = GemmaRmsNorm::new(
++        let norm = GemmaRmsNorm::new_unshifted(
+             cfg.hidden_size,
+             cfg.rms_norm_eps,
              mapper.set_nm_device(vb_m.pp("norm"), false),
          )?;
          let lm_head = if !tie {
@@ -480,13 +539,36 @@ index 715b556..fe0b50d 100644
              )?
          } else {
              ReplicatedLayer::from_linear(candle_nn::Linear::new(
-@@ -753,6 +793,29 @@ impl Qwen3_5MoeTextModel {
+@@ -683,6 +725,13 @@ impl Qwen3_5MoeTextModel {
+     }
+ 
+     pub fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
++        if std::env::var("ROZUM_FWD_DEBUG").is_ok() {
++            let flat = input_ids.flatten_all()?.to_dtype(candle_core::DType::U32)?;
++            let ids: Vec<u32> = flat.to_vec1()?;
++            if ids.len() > 1 {
++                eprintln!("INPUT_IDS ({}) = {:?}", ids.len(), ids);
++            }
++        }
+         self.embed_tokens.forward(input_ids)
+     }
+ 
+@@ -697,6 +746,9 @@ impl Qwen3_5MoeTextModel {
+         visual_pos_masks: Option<&Tensor>,
+         deepstack_visual_embeds: Option<&[Tensor]>,
+     ) -> Result<Tensor> {
++        // Prefill-only debug gate (seq_len > 1) captured before the layer loop
++        // so decode-step forwards don't pollute the side-by-side dumps.
++        let fwd_dbg = std::env::var("ROZUM_FWD_DEBUG").is_ok() && xs.dim(1)? > 1;
+         let mut hybrid_cache = self.cache.hybrid();
+         let recurrent_metadata = ctx.recurrent_metadata().cloned();
+         if self
+@@ -753,6 +805,28 @@ impl Qwen3_5MoeTextModel {
              None
          };
  
-+        if std::env::var("ROZUM_FWD_DEBUG").is_ok() {
-+            // Dump first 5 values of embed output at the last position so we
-+            // can diff against the Python reference.
++        if fwd_dbg {
++            // Prefill-only embed dump at the last position.
 +            let last_pos = xs.dim(1)? - 1;
 +            let row = xs
 +                .narrow(1, last_pos, 1)?
@@ -510,13 +592,42 @@ index 715b556..fe0b50d 100644
          for (i, layer) in self.layers.iter().enumerate() {
              xs = self.mapper.map(xs, i)?;
  
-@@ -820,7 +883,23 @@ impl Qwen3_5MoeTextModel {
+@@ -816,11 +890,52 @@ impl Qwen3_5MoeTextModel {
+                     xs = self.deepstack_process(xs, idx, idx_expanded, &deepstack[i])?;
+                 }
+             }
++
++            // Per-layer last-position dump for side-by-side diffing against
++            // scripts/mlx_ref.py --layers. The first layer whose head/norm
++            // diverges from the Python oracle localizes the next layout bug.
++            if fwd_dbg {
++                let last_pos = xs.dim(1)? - 1;
++                let row = xs
++                    .narrow(1, last_pos, 1)?
++                    .squeeze(1)?
++                    .squeeze(0)?
++                    .to_dtype(candle_core::DType::F32)?;
++                let v: Vec<f32> = row.to_vec1()?;
++                let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
++                let kind = match &self.layer_types[i] {
++                    LayerType::FullAttention => "FULL  ",
++                    LayerType::LinearAttention => "linear",
++                };
++                eprintln!(
++                    "layer {i:>2} [{kind}] ||x||={norm:9.4} head={:?}",
++                    v.iter()
++                        .take(8)
++                        .map(|x| (x * 1e6).round() / 1e6)
++                        .collect::<Vec<_>>()
++                );
++            }
+         }
          let xs = xs.to_device(&self.device)?;
          let xs = xs.apply(&self.norm)?;
          let xs = ctx.logits(&xs)?;
 -        self.lm_head.forward(&xs)
 +        let logits = self.lm_head.forward(&xs)?;
-+        if std::env::var("ROZUM_FWD_DEBUG").is_ok() {
++        if fwd_dbg {
 +            let last_pos = logits.dim(1)? - 1;
 +            let lp = logits
 +                .narrow(1, last_pos, 1)?
@@ -535,7 +646,7 @@ index 715b556..fe0b50d 100644
      }
  
      fn deepstack_process(
-@@ -869,7 +948,9 @@ impl IsqModel for Qwen3_5MoeTextModel {
+@@ -869,7 +984,9 @@ impl IsqModel for Qwen3_5MoeTextModel {
                      tensors.push((&mut attn.o_proj, Some(i)));
                  }
                  LayerImpl::LinearAttention(gdn) => {
@@ -547,7 +658,7 @@ index 715b556..fe0b50d 100644
                  }
              }
 diff --git a/mistralrs-quant/src/afq/mod.rs b/mistralrs-quant/src/afq/mod.rs
-index 9076075..a713aad 100644
+index 9076075..d763279 100644
 --- a/mistralrs-quant/src/afq/mod.rs
 +++ b/mistralrs-quant/src/afq/mod.rs
 @@ -279,9 +279,24 @@ impl AfqLayer {
@@ -572,8 +683,8 @@ index 9076075..a713aad 100644
 +                path, in_dim, out_dim, bits, group_size
 +            );
 +        }
-+        let dump_embed = std::env::var("ROZUM_AFQ_DUMP_EMBED").is_ok()
-+            && path.ends_with("embed_tokens");
++        let dump_embed =
++            std::env::var("ROZUM_AFQ_DUMP_EMBED").is_ok() && path.ends_with("embed_tokens");
  
          let w_q = vb.get_with_hints_dtype(
              (out_dim, in_dim * bits / 32),
@@ -655,7 +766,7 @@ index 9076075..a713aad 100644
      }
  }
 diff --git a/mistralrs-quant/src/lib.rs b/mistralrs-quant/src/lib.rs
-index 62e164b..2175266 100644
+index 62e164b..697d993 100644
 --- a/mistralrs-quant/src/lib.rs
 +++ b/mistralrs-quant/src/lib.rs
 @@ -311,6 +311,13 @@ pub enum QuantizedConfig {
@@ -672,16 +783,20 @@ index 62e164b..2175266 100644
      },
      MXFP4 {},
  }
-@@ -326,13 +333,32 @@ struct RawConfig {
+@@ -326,13 +333,36 @@ struct RawConfig {
      bnb_4bit_quant_type: Option<String>,
  }
  
 +// MLX configs put per-tensor AFQ overrides as sibling keys at the same level
 +// as `bits`/`group_size`. Scan the raw JSON object for object-valued siblings
 +// and pull `(bits, group_size)` out of each.
-+fn collect_afq_overrides(value: &serde_json::Value) -> std::collections::HashMap<String, (usize, usize)> {
++fn collect_afq_overrides(
++    value: &serde_json::Value,
++) -> std::collections::HashMap<String, (usize, usize)> {
 +    let mut out = std::collections::HashMap::new();
-+    let Some(obj) = value.as_object() else { return out };
++    let Some(obj) = value.as_object() else {
++        return out;
++    };
 +    for (k, v) in obj {
 +        let Some(inner) = v.as_object() else { continue };
 +        let bits = inner.get("bits").and_then(|x| x.as_u64());
@@ -701,12 +816,12 @@ index 62e164b..2175266 100644
      {
 -        let raw = RawConfig::deserialize(deserializer)?;
 +        let value = serde_json::Value::deserialize(deserializer)?;
-+        let raw: RawConfig = serde_json::from_value(value.clone())
-+            .map_err(serde::de::Error::custom)?;
++        let raw: RawConfig =
++            serde_json::from_value(value.clone()).map_err(serde::de::Error::custom)?;
  
          match &raw.quant_method {
              Some(m) if m == "gptq" || m == "awq" => {
-@@ -365,7 +391,11 @@ impl<'de> Deserialize<'de> for QuantizedConfig {
+@@ -365,7 +395,11 @@ impl<'de> Deserialize<'de> for QuantizedConfig {
                  let group_size = raw
                      .group_size
                      .ok_or_else(|| serde::de::Error::missing_field("group_size"))?;
@@ -719,7 +834,7 @@ index 62e164b..2175266 100644
              }
              Some(m) if m == "mxfp4" => {
                  Ok(QuantizedConfig::MXFP4 {  })
-@@ -377,7 +407,11 @@ impl<'de> Deserialize<'de> for QuantizedConfig {
+@@ -377,7 +411,11 @@ impl<'de> Deserialize<'de> for QuantizedConfig {
                  let group_size = raw
                      .group_size
                      .ok_or_else(|| serde::de::Error::missing_field("group_size"))?;
@@ -732,7 +847,7 @@ index 62e164b..2175266 100644
              }
              Some(unknown_method) => {
                  Err(serde::de::Error::custom(format!(
-@@ -389,6 +423,15 @@ impl<'de> Deserialize<'de> for QuantizedConfig {
+@@ -389,6 +427,24 @@ impl<'de> Deserialize<'de> for QuantizedConfig {
  }
  
  impl QuantizedConfig {
@@ -740,8 +855,17 @@ index 62e164b..2175266 100644
 +    // per-tensor override map first, falling back to the model-wide defaults.
 +    // `path` is typically `vb.prefix()` of the AfqLayer being loaded.
 +    pub fn afq_params_for_path(&self, path: &str) -> Option<(usize, usize)> {
-+        let Self::Afq { bits, group_size, overrides } = self else { return None };
-+        if let Some(&(b, g)) = overrides.get(path) { return Some((b, g)); }
++        let Self::Afq {
++            bits,
++            group_size,
++            overrides,
++        } = self
++        else {
++            return None;
++        };
++        if let Some(&(b, g)) = overrides.get(path) {
++            return Some((b, g));
++        }
 +        Some((*bits, *group_size))
 +    }
 +

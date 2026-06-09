@@ -539,3 +539,67 @@ These remain unverified and are the obvious next experiments:
 
 Each of these is a candidate divergence point and should be the next
 focus of the side-by-side dump methodology in section 8.
+
+---
+
+## 13. ACTUAL ROOT CAUSE (resolved): the RMSNorm `+1` convention
+
+The day-1..5 hypothesis in section 6 (weight-row-ordering for fused QKV /
+MoE projections) turned out **not** to be the residual bug. After building
+the side-by-side oracle `scripts/mlx_ref.py --layers/--attn/--mlp/--router`
+and the matching `ROZUM_FWD_DEBUG` per-layer dumps in
+`vision_models/qwen3_5_moe/text.rs`, the divergence was localized in one
+pass:
+
+- INPUT_IDS and the embedding matched byte-for-byte (section 7 still holds).
+- **Layer 0 already diverged**: full output `||x||` 4.857 vs Python 0.624,
+  with an identical embedding input. The first FullAttention layer is layer
+  3, so FullAttention/MoE-ordering were ruled out as the *first* bug.
+- Decomposing layer 0: GDN attn output 0.56 vs 0.36 (mildly off), MoE output
+  **4.81 vs 0.349 (~14x)**; shared expert fine. The router selected 7/8 of
+  the same experts but with a much more peaked weight distribution.
+- Per-expert outputs were each ~10x Python; the dequantized expert weights
+  were correct (absmax ~0.1). Since RMSNorm output magnitude is set by its
+  *weight* (not its input), a ~10x MoE input had to come from the norm.
+
+**Root cause.** `mistralrs`'s `GemmaRmsNorm::new` bakes `weight =
+on_disk_weight + 1.0` (Gemma's centered-weight convention) and the
+Qwen3.6 loader used it for `input_layernorm`, `post_attention_layernorm`,
+`q_norm`, `k_norm`, and the final `norm`. MLX `mlx_lm` only pre-shifts those
+exact norm weights by `+1` when the checkpoint is **unsanitized**
+(`should_shift_norm_weights = has_mtp_weights OR has_unsanitized_conv1d`,
+where unsanitized means `conv1d.weight.shape[-1] != 1`). The shipping
+`mlx-community/Qwen3.6-35B-A3B-4bit` checkpoint is **sanitized** (conv1d
+`(8192, 4, 1)`, no MTP weights), so MLX uses the raw weights with a standard
+`nn.RMSNorm`. Applying `+1` over-scales every RMSNorm (post-attn weight mean
+0.895 -> 1.895, ~2.1x), and the silu MoE compounds that to the ~10-14x
+expert blow-up and the over-peaked router.
+
+**Fix.** `GemmaRmsNorm::new_unshifted` (raw on-disk weight, no `+1`), used
+for all five norm sites in `vision_models/qwen3_5_moe/text.rs`. The GDN's
+own `RmsNormGated` is a separate type and was already correct (not in MLX's
+`norm_keys`, so never shifted). A future loader that must also accept
+*unsanitized* MLX checkpoints should detect `should_shift_norm_weights` and
+pick the constructor per MLX's rule; the current loader targets sanitized
+checkpoints, which is what every `mlx-community` / `lmstudio-community`
+Qwen3.6 export is.
+
+**Result.** With the fix baked in (no env override), the patched
+`mistralrs` CLI matches `mlx_lm` for `"Hello"`: every layer's last-position
+`||x||` matches within bf16 rounding (layer 0: 0.6242 vs 0.6244; layer 39:
+10.69 vs 10.53), and the top-1 logit is `id=8160 'Here' logit=22.0`,
+identical to the oracle. Greedy generation begins identically
+(`"Here's a thinking process:\n1. **Analyze User Input:**"`).
+
+### 13.1 Lesson for the next MLX integration
+
+Audit the **norm convention first**, before chasing fused-projection layout.
+A `(weight + 1)` vs `weight` RMSNorm mismatch is invisible at load time (no
+shape error, weights dequantize correctly) and presents *exactly* like a
+layout bug: garbage tokens, wrong-but-deterministic output, top logits in
+the in-between range. The discriminator is cheap: dump per-layer
+last-position `||x||` against `mlx_lm` and check whether **layer 0** already
+diverges with an identical embedding input. If it does and the embedding is
+correct, the suspects are (in order): the input RMSNorm convention, the
+attention sub-block, the MLP. Replicate MLX's `sanitize()` precisely,
+including `should_shift_norm_weights`.

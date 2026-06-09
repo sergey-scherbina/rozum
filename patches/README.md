@@ -1,5 +1,29 @@
 # Local patches awaiting upstream
 
+## STATUS: Qwen3.6 forward is NUMERICALLY CORRECT (day 6)
+
+The multi-day blocker is resolved. The residual divergence after day 5 was
+**not** the weight-row-ordering hypothesis (that code was already correct).
+The actual root cause was the **RMSNorm `+1` convention**: `GemmaRmsNorm::new`
+bakes `weight = on_disk_weight + 1.0`, but the sanitized
+`mlx-community/Qwen3.6-35B-A3B-4bit` checkpoint uses raw RMSNorm weights
+(MLX's `should_shift_norm_weights` is False: conv1d `(8192,4,1)`, no MTP).
+The `+1` over-scaled every norm and the silu MoE compounded it to a ~14x
+experts blow-up. Fix: `GemmaRmsNorm::new_unshifted` for the five norm sites
+in `vision_models/qwen3_5_moe/text.rs`.
+
+It was localized in a single pass with the new oracle `scripts/mlx_ref.py`
+(`--layers/--attn/--mlp/--router`, ground truth in
+`scripts/mlx_ref.qwen36-hello.txt`) + `ROZUM_FWD_DEBUG=1` per-layer dumps:
+layer 0 already diverged (`||x||` 4.86 vs 0.62) with an identical embedding;
+decomposition showed the MoE experts ~14x; per-expert outputs ~10x with
+correct dequantized weights; therefore the norm. Full writeup:
+`docs/specs/mlx-weight-layout-and-afq.md` section 13.
+
+Verification (no env override): every layer's last-position `||x||` matches
+`mlx_lm` within bf16 rounding; top-1 `id=8160 'Here' logit=22.0` identical;
+greedy text begins `"Here's a thinking process:\n1. **Analyze User Input:**"`.
+
 ## `mistralrs-qwen36-afq-wip.patch`
 
 Work-in-progress patch against `EricLBuehler/mistral.rs` master
