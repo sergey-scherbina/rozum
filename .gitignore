@@ -2,3 +2,4 @@
 /.tools
 /models/*.gguf
 /models/*.part
+.vendor/

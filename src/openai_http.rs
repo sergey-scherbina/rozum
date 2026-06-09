@@ -383,6 +383,21 @@ pub async fn try_mlx_server(model_spec: &str) -> Option<Arc<dyn ChatBackend>> {
     }
 }
 
+/// Try LM Studio's local server at the default port (`http://localhost:1234/v1`).
+/// LM Studio bundles native MLX runtime and can serve Qwen3.6 MLX models which
+/// our in-process mistralrs path cannot load yet.
+pub async fn try_lmstudio_http(model_spec: &str) -> Option<Arc<dyn ChatBackend>> {
+    let url = std::env::var("ROZUM_LMSTUDIO_HTTP")
+        .unwrap_or_else(|_| "http://localhost:1234/v1".to_owned());
+    let b = OpenAiHttpBackend::new(&url, model_spec);
+    if b.probe().await {
+        eprintln!("backend: LM Studio at {url} (model: {model_spec})");
+        Some(Arc::new(b))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

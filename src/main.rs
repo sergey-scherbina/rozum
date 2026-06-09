@@ -679,7 +679,13 @@ async fn build_gateway_backend(
         return Some(b);
     }
 
-    // 3. Try mlx_lm.server (Python, for MLX-format models)
+    // 3. Try LM Studio's local server (native MLX runtime; covers Qwen3.6 MLX
+    //    today, ahead of mistralrs AFQ support)
+    if let Some(b) = rozum::openai_http::try_lmstudio_http(model_spec).await {
+        return Some(b);
+    }
+
+    // 4. Try mlx_lm.server (Python, for MLX-format models)
     if let Some(b) = rozum::openai_http::try_mlx_server(model_spec).await {
         return Some(b);
     }
@@ -713,6 +719,12 @@ fn print_no_backend_hints(model_spec: &str) {
     eprintln!("  in-process native MLX (mistralrs, on by default, Metal, safetensors):");
     eprintln!("    rozum launch --model mlx-community:Qwen3.6-35B-A3B-4bit claude");
     eprintln!("    rozum launch --model hf:Qwen/Qwen3-4B claude");
+    eprintln!();
+    eprintln!("  LM Studio (GUI app, native MLX runtime, covers Qwen3.6 today):");
+    eprintln!("    1. Download LM Studio: https://lmstudio.ai");
+    eprintln!("    2. Inside LM Studio, install the model (Search tab → mlx-community/Qwen3.6...)");
+    eprintln!("    3. Start the local server (Developer tab → Status: Running)");
+    eprintln!("    4. rozum launch --model <model-id-shown-in-lmstudio>  claude");
     eprintln!();
     eprintln!("  mlx_lm.server (Python, native MLX safetensors):");
     eprintln!("    pip install mlx-lm");

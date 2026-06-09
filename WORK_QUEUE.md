@@ -42,6 +42,13 @@ soon as any single track succeeds.
 
 ### Done
 
+- [x] lmstudio-http-backend - Auto-detect LM Studio's local OpenAI-compatible server at `http://localhost:1234/v1`.
+  - Unlocks Qwen3.6 (and any LM Studio MLX model) on Apple Silicon today, ahead of in-process mistralrs AFQ work.
+  - Inserts above `mlx_lm.server` in the `build_gateway_backend` priority chain.
+  - Reuses the existing `OpenAiHttpBackend` SSE parser; no new dependencies.
+  - Env: `ROZUM_LMSTUDIO_HTTP=http://host:port/v1` to override the default endpoint.
+  - Spec: `docs/specs/lmstudio-http-backend.md`.
+
 - [x] idle-cpu-reduction - Event-driven TUI / room loops; ~0% CPU when idle.
   - Spec: `docs/specs/idle-cpu-reduction.md`.
 
