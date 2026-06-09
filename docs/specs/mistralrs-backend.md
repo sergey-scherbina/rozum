@@ -112,4 +112,51 @@ mistralrs is gated behind the `mistralrs` feature so default build remains uncha
 
 ## Results
 
-(Filled in after implementation)
+Implemented in `src/mistralrs_backend.rs` with the minimum surface needed for
+in-process MLX inference. Wired into `build_gateway_backend` priority chain
+between in-process GGUF and mlx_lm.server HTTP.
+
+- `cargo check` (default): ✓ — no new hard deps.
+- `cargo test --lib mistralrs::tests`: 3/3 pass (`normalize_spec` helper).
+- `cargo check --features mistralrs`: **requires full Xcode** (not just
+  Command Line Tools) because `mistralrs-paged-attn-0.8.1/build.rs` shells out
+  to `xcrun metal` to compile Metal kernels. The error message looks like:
+
+  ```
+  xcrun: error: unable to find utility "metal", not a developer tool or in PATH
+  ```
+
+  Install full Xcode from the App Store, then:
+  ```bash
+  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+  cargo build --features mistralrs
+  ```
+
+### Known limitations (deliberate, follow-up items)
+
+- ISQ (in-situ quantisation) options not exposed yet — uses mistralrs defaults
+  per model. Add when the API surface stabilises across mistralrs minor
+  versions.
+- Sampling param customisation (`temperature`/`top_p`/`top_k`/`max_tokens`)
+  not forwarded yet — uses mistralrs defaults.
+- `Role::Tool` is mapped to `User` text content; proper tool-result wiring is
+  a follow-up alongside the `gguf-tool-use-non-qwen` task.
+- Tool-use parsing: not yet reused from `gguf::ToolUseParser`. When enabled,
+  the same hermes-style `<tool_call>` detection will apply.
+
+### Usage
+
+```bash
+cargo build --features mistralrs
+rozum launch --model mlx-community:Qwen2.5-Coder-32B-Instruct-4bit claude
+rozum launch --model hf:Qwen/Qwen3-4B claude
+rozum launch --model /path/to/local/safetensors-dir claude
+```
+
+The backend is selected automatically when:
+- the spec is not a filesystem path,
+- the spec does not start with `lmstudio:`,
+- the build was compiled with `--features mistralrs`.
+
+If selection fails (e.g. download fails, model not supported), the chain falls
+through to mlx_lm.server HTTP and ROZUM_BACKEND_URL.

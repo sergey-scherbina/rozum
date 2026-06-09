@@ -3,6 +3,7 @@ pub mod discord;
 pub mod gateway;
 pub mod gguf;
 pub mod meeting;
+pub mod mistralrs_backend;
 pub mod openai_http;
 pub mod telegram;
 pub mod tui;

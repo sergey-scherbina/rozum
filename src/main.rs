@@ -493,12 +493,17 @@ async fn build_gateway_backend(
     model_spec: &str,
     n_ctx: u32,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
-    // 1. Try in-process GGUF (fastest, most efficient, needs --features gguf)
+    // 1. Try in-process GGUF (fastest for GGUF files, needs --features gguf)
     if let Some(b) = try_build_gguf_backend(model_spec, n_ctx) {
         return Some(b);
     }
 
-    // 2. Try mlx_lm.server (Python, for MLX-format models)
+    // 2. Try in-process native MLX via mistralrs (needs --features mistralrs)
+    if let Some(b) = try_build_mistralrs_backend(model_spec, n_ctx).await {
+        return Some(b);
+    }
+
+    // 3. Try mlx_lm.server (Python, for MLX-format models)
     if let Some(b) = rozum::openai_http::try_mlx_server(model_spec).await {
         return Some(b);
     }
@@ -520,7 +525,7 @@ fn print_no_backend_hints(model_spec: &str) {
     eprintln!("rozum needs an in-process model or an HTTP server to talk to.");
     eprintln!("Pick one:");
     eprintln!();
-    eprintln!("  in-process GGUF (recommended; Metal on Apple Silicon):");
+    eprintln!("  in-process GGUF (Metal on Apple Silicon, .gguf files):");
     eprintln!("    brew install cmake");
     eprintln!("    cargo build --features gguf");
     eprintln!("    rozum launch --model /path/to/model.gguf       claude");
@@ -528,6 +533,11 @@ fn print_no_backend_hints(model_spec: &str) {
     eprintln!(
         "    rozum launch --model '<ollama-name>:<tag>'      claude   # reads ~/.ollama/models/blobs/"
     );
+    eprintln!();
+    eprintln!("  in-process native MLX (mistralrs crate, Metal, safetensors):");
+    eprintln!("    cargo build --features mistralrs");
+    eprintln!("    rozum launch --model mlx-community:Qwen2.5-Coder-32B-Instruct-4bit claude");
+    eprintln!("    rozum launch --model hf:Qwen/Qwen3-4B claude");
     eprintln!();
     eprintln!("  mlx_lm.server (Python, native MLX safetensors):");
     eprintln!("    pip install mlx-lm");
@@ -560,6 +570,41 @@ fn try_build_gguf_backend(
 
 #[cfg(not(feature = "gguf"))]
 fn try_build_gguf_backend(
+    _model_spec: &str,
+    _n_ctx: u32,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    None
+}
+
+#[cfg(feature = "mistralrs")]
+async fn try_build_mistralrs_backend(
+    model_spec: &str,
+    n_ctx: u32,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    use rozum::mistralrs_backend::{MistralrsBackend, MistralrsOptions, normalize_spec};
+    // Filesystem paths and `lmstudio:` specs belong to the GGUF backend.
+    if std::path::Path::new(model_spec).exists() || model_spec.starts_with("lmstudio:") {
+        return None;
+    }
+    let id = normalize_spec(model_spec);
+    let opts = MistralrsOptions {
+        n_ctx,
+        ..MistralrsOptions::default()
+    };
+    match MistralrsBackend::new(&id, opts).await {
+        Ok(b) => {
+            eprintln!("backend: mistralrs (in-process, Metal) — model: {id}");
+            Some(std::sync::Arc::new(b))
+        }
+        Err(e) => {
+            eprintln!("warning: mistralrs load failed: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "mistralrs"))]
+async fn try_build_mistralrs_backend(
     _model_spec: &str,
     _n_ctx: u32,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {

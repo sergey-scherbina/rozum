@@ -92,7 +92,7 @@ Current sprint focus: (1) make Rozum a reliable local meeting room for live agen
   - Listener bound before child spawn — no startup race.
   - Spec: `docs/specs/launch-wrapper.md`.
 
-- [ ] mistralrs-backend - In-process native-MLX backend via the `mistralrs` Rust crate.
+- [x] mistralrs-backend - In-process native-MLX backend via the `mistralrs` Rust crate.
   - New crate feature `mistralrs` with the `mistralrs` dep + Metal kernels on Apple Silicon.
   - Removes Ollama and Python (`mlx_lm.server`) from the runtime for MLX-format models.
   - Loads MLX safetensors directly: `mlx-community:<repo>` and `hf:<user>/<repo>` specs, auto-download via `hf-hub`.
