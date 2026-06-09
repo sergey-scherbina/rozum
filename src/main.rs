@@ -145,8 +145,13 @@ async fn main() {
     if writes_to_stderr {
         tracing_subscriber::fmt()
             .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+                tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                    // Default: warn everywhere, but info for hf-hub and mistralrs
+                    // so the user sees download progress and load events.
+                    tracing_subscriber::EnvFilter::new(
+                        "warn,hf_hub=info,mistralrs=info,mistralrs_core=info",
+                    )
+                }),
             )
             .with_writer(std::io::stderr)
             .init();

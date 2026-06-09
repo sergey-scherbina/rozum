@@ -50,10 +50,19 @@ mod inner {
         /// `model_id` is anything `ModelBuilder::new` accepts: a HuggingFace
         /// repo (`<user>/<repo>`) or a local safetensors directory.
         pub async fn new(model_id: &str, opts: MistralrsOptions) -> ModelResult<Self> {
-            let model = ModelBuilder::new(model_id).build().await.map_err(|e| {
-                ModelError::BackendUnavailable(format!("mistralrs: failed to load {model_id}: {e}"))
-            })?;
-            tracing::info!(model = %model_id, n_ctx = opts.n_ctx, "MistralrsBackend loaded");
+            eprintln!(
+                "mistralrs: loading '{model_id}' (first run downloads weights from HuggingFace into ~/.cache/huggingface/hub/)"
+            );
+            let model = ModelBuilder::new(model_id)
+                .with_logging() // enables hf-hub progress bars during download
+                .build()
+                .await
+                .map_err(|e| {
+                    ModelError::BackendUnavailable(format!(
+                        "mistralrs: failed to load {model_id}: {e}"
+                    ))
+                })?;
+            eprintln!("mistralrs: '{model_id}' ready");
             Ok(Self {
                 model: Arc::new(model),
                 opts,
