@@ -19,7 +19,7 @@ candle = { package = "candle-core", version = "0.10.2", optional = true }
 candle-transformers = { version = "0.10.2", optional = true }
 tokenizers = { version = "0.22.0", features = ["onig"], optional = true }
 llama-cpp-2 = { version = ">=0.1.100", features = ["metal"], optional = true }
-mistralrs = { version = "0.8", features = ["metal"], optional = true }
+mistralrs = { version = "0.8.1", features = ["metal"], optional = true }
 
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

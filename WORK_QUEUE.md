@@ -102,6 +102,32 @@ Current sprint focus: (1) make Rozum a reliable local meeting room for live agen
   - CLI: `rozum gateway --model mlx-community:Qwen2.5-Coder-32B-Instruct-4bit`.
   - Spec: `docs/specs/mistralrs-backend.md`.
 
+### Qwen3.6 unblocking track (three escalating upstream fixes)
+
+Ordered cheapest → most strategic. Pick up the first one that lands; downstream
+ones still pay off long-term but the user-facing Qwen3.6 problem is solved as
+soon as any single track succeeds.
+
+- [ ] llamacpp-qwen36-patch - Upstream PR to llama.cpp accepting `qwen35moe.rope.dimension_sections` length 3.
+  - Single hyperparam loader fix (~50 LoC). Concrete error logged with Qwen3.6 GGUF from `unsloth/Qwen3.6-35B-A3B-GGUF`.
+  - Patched llama.cpp → patched llama-cpp-2 version bump → `cargo update` in rozum and `--features gguf` works for Qwen3.6.
+  - Estimated effort: ~1 week active + upstream review cycle.
+  - Spec: `docs/specs/llamacpp-qwen36-patch.md`.
+
+- [ ] mistralrs-qwen36-pr - Upstream PR to mistralrs adding Qwen3.6 hybrid linear-attention support.
+  - Adds one new layer module (linear-attention / state-space) and a per-block dispatch in the Qwen3 model.
+  - Reference: `mlx_lm/models/qwen35moe.py`. Correctness gate: byte-for-byte token match against Python at `temperature=0`.
+  - Highest-leverage: every Rust project that uses mistralrs picks up Qwen3.x.
+  - Estimated effort: ~2-3 weeks active.
+  - Spec: `docs/specs/mistralrs-qwen36-pr.md`.
+
+- [ ] mlx-native-port - Native MLX runtime in rozum on top of `mlx-rs`, porting `mlx_lm` Python piece by piece.
+  - Phased: Phase 0 (bootstrap) → Phase 1 (Qwen3-4B dense) → Phase 2 (Qwen3 MoE) → Phase 3 (Qwen3.6 hybrid). Each phase has a numerical-match exit criterion.
+  - Removes our dependency on mistralrs / llama-cpp-2 release cycles entirely; new model families become ~3-5 day port tasks instead of "wait for upstream".
+  - New crate feature `mlx-native` (off by default — heavy compile, big code surface).
+  - Estimated effort: ~5-8 calendar weeks for parity with current mistralrs scope.
+  - Spec: `docs/specs/mlx-native-port.md`.
+
 ## Done Criteria
 
 - `cargo fmt --check` passes.
