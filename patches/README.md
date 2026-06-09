@@ -87,10 +87,48 @@ in `GdnInProj::forward`'s SplitAfq branch — the four AFQ matmuls give the
 right shapes but the cat/reshape order may not match the merged-weight
 layout that `GdnProjection::from_packed` expects to slice).
 
-Day 3 plan: dump activations of `GdnInProj::forward` for both paths on a
-random input + the same model, diff. The merged path produces correct
-logits (verified with non-MLX 4-bit GPTQ models earlier in mistralrs's
-own test suite), so the SplitAfq path needs to match it tensor-equal.
+### Day 3: layout fix in SplitAfq.forward (still EOS-on-first-token)
 
-Until day 3 lands, production Qwen3.6 use goes through the
-`lmstudio-http-backend` path in `rozum launch`.
+Tried a layout fix in `GdnInProj::SplitAfq.forward`: the four per-AFQ-layer
+matmuls produce **flat** outputs (`[q_all_heads ‖ k_all_heads ‖ v_all_heads]`),
+not the per-head sequential layout the merged-weight path produces. The fix
+splits qkv into q/k/v, reshapes each into per-head form, and concatenates
+along the last axis so `GdnProjection::from_packed` downstream sees the same
+layout it would have seen from the merged matmul.
+
+The Python reference (`mlx_lm/models/qwen3_5.py`) confirms qkv flat layout:
+```python
+qkv = self.in_proj_qkv(inputs)       # (B, S, key_dim*2 + value_dim) flat
+...
+q, k, v = [t.reshape(B, S, h, d) for t in mx.split(qkv, [key_dim, 2*key_dim], -1)]
+```
+
+After applying the layout fix, the model still picks EOS on the first
+generated token (empty `content`, `completion_tokens=0`). The numerical bug
+is somewhere else. Verified shapes against the actual safetensors:
+- `linear_attn.conv1d.weight` is `[8192, 4, 1] BF16` (MLX layout, permute fix correct)
+- `linear_attn.in_proj_qkv.weight` is `[8192, 256] U32` (4-bit packed, `out × in*bits/32`)
+- `mlp.gate.weight` is `[256, 512] U32` (8-bit packed, our per-tensor override correct)
+- `embed_tokens.weight` is `[248320, 256] U32` (4-bit packed, `layers::embedding` is AFQ-aware)
+
+Likely remaining culprits (in decreasing order of suspicion):
+- **mrope_section**: Qwen3.6's `rope_parameters.mrope_section: [11, 11, 10]`
+  describes a 3D positional embedding for multimodal text+image+video. Our
+  text-only path may apply 1D RoPE when the model expects multi-section.
+- **gated_delta_update**: the SSM-style recurrent update path may have its
+  own numerical edge case when the inputs come from `GdnInProj::SplitAfq`.
+- **chat template**: Qwen3.6 uses a "thinking-mode" template; if the template
+  applier sends the wrong system prompt, the model may emit EOS expecting
+  no user turn.
+
+### Day 4 plan
+
+*Instrumented activation diff.* The cleanest probe is to load the same model
+via Python `mlx_lm` and our patched mistralrs, run the same single-token
+prompt through both, and dump intermediate tensors at every layer boundary
+(post-embed, post-linear_attn, post-MoE, post-norm, pre-lm_head, post-lm_head).
+First divergence point pinpoints the bug. Estimated 4-8 hours focused.
+
+Until that lands, production Qwen3.6 use goes through the
+`lmstudio-http-backend` path in `rozum launch` (already shipped, no further
+work needed).

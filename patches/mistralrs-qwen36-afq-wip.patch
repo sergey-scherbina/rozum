@@ -53,7 +53,7 @@ index a5f6f1f..b857fd0 100644
 -pub use weights::GdnWeightMode;
 +pub use weights::{GdnInProj, GdnWeightMode};
 diff --git a/mistralrs-core/src/gdn/weights.rs b/mistralrs-core/src/gdn/weights.rs
-index d0e992f..7659ee7 100644
+index d0e992f..825b9f2 100644
 --- a/mistralrs-core/src/gdn/weights.rs
 +++ b/mistralrs-core/src/gdn/weights.rs
 @@ -1,6 +1,9 @@
@@ -92,7 +92,7 @@ index d0e992f..7659ee7 100644
      pub conv1d_weight: Tensor,
      pub dt_bias: Tensor,
      pub a_log: Tensor,
-@@ -22,6 +40,108 @@ pub struct GdnWeights {
+@@ -22,6 +40,127 @@ pub struct GdnWeights {
      pub out_proj: Arc<dyn QuantMethod>,
  }
  
@@ -115,42 +115,61 @@ index d0e992f..7659ee7 100644
 +        match self {
 +            GdnInProj::Merged(inner) => inner.forward(x),
 +            GdnInProj::SplitAfq { qkv, z, b, a } => {
-+                let qkv_out = qkv.forward(x)?;
-+                let z_out = z.forward(x)?;
-+                let b_out = b.forward(x)?;
-+                let a_out = a.forward(x)?;
-+                let _ = D::Minus1; // silence unused if everything below uses path
++                // The merged-weight Merged path stores W with a per-head
++                // interleaved layout (see load_split_qkvz below) so a single
++                // matmul produces output that is *already* per-head sequential
++                // — GdnProjection::from_packed can then reshape to
++                // (..., num_k_heads, group_size) and slice.
++                //
++                // The SplitAfq path runs four independent matmuls instead, so
++                // each output is "flat" — qkv_out has layout
++                // [q_all_heads ‖ k_all_heads ‖ v_all_heads], NOT per-head.
++                // We split, reshape each piece into per-head form, concatenate
++                // along the last axis, then flatten back, to reproduce the
++                // same per-head layout the merged path would have produced.
++                let qkv_out = qkv.forward(x)?; // (..., key_dim*2 + value_dim)
++                let z_out = z.forward(x)?; // (..., value_dim)
++                let b_out = b.forward(x)?; // (..., num_v_heads)
++                let a_out = a.forward(x)?; // (..., num_v_heads)
++
++                let last = qkv_out.dims().len() - 1;
++                let q_flat = qkv_out.narrow(last, 0, dims.key_dim)?;
++                let k_flat = qkv_out.narrow(last, dims.key_dim, dims.key_dim)?;
++                let v_flat = qkv_out.narrow(last, 2 * dims.key_dim, dims.value_dim)?;
++
 +                let lead: Vec<usize> = x.dims().iter().take(x.dims().len() - 1).copied().collect();
-+                let qkv_g_shape: Vec<usize> = lead
++                let q_shape: Vec<usize> = lead
 +                    .iter()
 +                    .copied()
-+                    .chain([
-+                        dims.num_k_heads,
-+                        2 * dims.head_k_dim + dims.v_per_group * dims.head_v_dim,
-+                    ])
++                    .chain([dims.num_k_heads, dims.head_k_dim])
 +                    .collect();
-+                let z_g_shape: Vec<usize> = lead
++                let v_shape: Vec<usize> = lead
 +                    .iter()
 +                    .copied()
 +                    .chain([dims.num_k_heads, dims.v_per_group * dims.head_v_dim])
 +                    .collect();
-+                let ba_g_shape: Vec<usize> = lead
++                let ba_shape: Vec<usize> = lead
 +                    .iter()
 +                    .copied()
 +                    .chain([dims.num_k_heads, dims.v_per_group])
 +                    .collect();
-+                let qkv_g = qkv_out.reshape(qkv_g_shape)?;
-+                let z_g = z_out.reshape(z_g_shape.as_slice())?;
-+                let b_g = b_out.reshape(ba_g_shape.as_slice())?;
-+                let a_g = a_out.reshape(ba_g_shape.as_slice())?;
-+                let qkvz = candle_core::Tensor::cat(&[qkv_g, z_g], D::Minus1)?;
++
++                let q_g = q_flat.reshape(q_shape.as_slice())?;
++                let k_g = k_flat.reshape(q_shape.as_slice())?;
++                let v_g = v_flat.reshape(v_shape.as_slice())?;
++                let z_g = z_out.reshape(v_shape.as_slice())?;
++                let b_g = b_out.reshape(ba_shape.as_slice())?;
++                let a_g = a_out.reshape(ba_shape.as_slice())?;
++
++                let qkvz = candle_core::Tensor::cat(&[q_g, k_g, v_g, z_g], D::Minus1)?;
 +                let ba = candle_core::Tensor::cat(&[b_g, a_g], D::Minus1)?;
++
 +                let qkvz_flat_shape: Vec<usize> =
 +                    lead.iter().copied().chain([dims.qkvz_out_dim()]).collect();
 +                let ba_flat_shape: Vec<usize> =
 +                    lead.iter().copied().chain([dims.ba_out_dim()]).collect();
-+                let qkvz = qkvz.reshape(qkvz_flat_shape)?;
-+                let ba = ba.reshape(ba_flat_shape)?;
++                let qkvz = qkvz.contiguous()?.reshape(qkvz_flat_shape)?;
++                let ba = ba.contiguous()?.reshape(ba_flat_shape)?;
 +                candle_core::Tensor::cat(&[qkvz, ba], D::Minus1)
 +            }
 +        }
@@ -201,7 +220,7 @@ index d0e992f..7659ee7 100644
  pub struct GdnWeightLoadCtx<'a> {
      pub cfg: &'a dyn GdnConfig,
      pub dims: &'a GdnDims,
-@@ -50,20 +170,61 @@ impl GdnWeights {
+@@ -50,20 +189,61 @@ impl GdnWeights {
          };
          let vb_la = mapper.set_device(layer_idx, vb.pp("linear_attn"), loading_isq);
  
