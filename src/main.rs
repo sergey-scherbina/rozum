@@ -323,7 +323,13 @@ async fn start_web_bridge(room_name: String, port: u16, url: String) {
 }
 
 async fn run_gateway(port: u16, model_spec: String, n_ctx: u32) {
-    let backend = build_gateway_backend(&model_spec, n_ctx).await;
+    let backend = build_gateway_backend(&model_spec, n_ctx)
+        .await
+        .unwrap_or_else(|| {
+            print_no_backend_hints(&model_spec);
+            eprintln!("  falling back to HelloBackend (echo server)");
+            std::sync::Arc::new(rozum::HelloBackend::new())
+        });
     eprintln!("rozum gateway  http://127.0.0.1:{port}");
     eprintln!("  model:              {model_spec}");
     eprintln!();
@@ -405,7 +411,17 @@ async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: u32, program: 
             .unwrap_or(8089)
     });
 
-    let backend = build_gateway_backend(&model_spec, n_ctx).await;
+    let backend = match build_gateway_backend(&model_spec, n_ctx).await {
+        Some(b) => b,
+        None => {
+            print_no_backend_hints(&model_spec);
+            eprintln!();
+            eprintln!(
+                "rozum launch: refusing to start child with HelloBackend (would just echo 'hello!')."
+            );
+            std::process::exit(1);
+        }
+    };
 
     // Bind the listener before forking off the child so it can connect
     // immediately without racing the gateway startup.
@@ -473,43 +489,51 @@ async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: u32, program: 
     std::process::exit(code);
 }
 
+/// Try to build a real backend for `model_spec`. Returns `None` if nothing
+/// is reachable; caller decides whether to fall back to Hello or fail.
 async fn build_gateway_backend(
     model_spec: &str,
     n_ctx: u32,
-) -> std::sync::Arc<dyn rozum::ChatBackend> {
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
     // 1. Try in-process GGUF (fastest, most efficient, needs --features gguf)
     if let Some(b) = try_build_gguf_backend(model_spec, n_ctx) {
-        return b;
+        return Some(b);
     }
 
     // 2. Try Ollama HTTP (works with GGUF, MLX, and any Ollama-supported format)
     if let Some(b) = rozum::openai_http::try_ollama(model_spec).await {
-        return b;
+        return Some(b);
     }
 
     // 3. Try mlx_lm.server at default port (for MLX models run separately)
     if let Some(b) = rozum::openai_http::try_mlx_server(model_spec).await {
-        return b;
+        return Some(b);
     }
 
     // 4. Try user-specified URL via env
     if let Ok(url) = std::env::var("ROZUM_BACKEND_URL") {
-        eprintln!("using HTTP backend at {url}");
-        return std::sync::Arc::new(rozum::openai_http::OpenAiHttpBackend::new(url, model_spec));
+        eprintln!("backend: custom HTTP at {url}");
+        return Some(std::sync::Arc::new(
+            rozum::openai_http::OpenAiHttpBackend::new(url, model_spec),
+        ));
     }
 
+    None
+}
+
+fn print_no_backend_hints(model_spec: &str) {
     let bare = model_spec
         .strip_prefix("ollama:")
         .or_else(|| model_spec.strip_prefix("mlx:"))
-        .unwrap_or(&model_spec);
-    eprintln!("warning: no backend found for '{model_spec}'");
+        .unwrap_or(model_spec);
+    eprintln!("no backend found for '{model_spec}'");
     eprintln!("  tried: in-process GGUF, Ollama (localhost:11434), mlx_lm.server (localhost:8080)");
     eprintln!("  hints:");
-    eprintln!("    ollama serve && ollama pull {bare}");
+    eprintln!("    ollama serve     # in another terminal, then:");
+    eprintln!("    ollama pull {bare}");
+    eprintln!("  alternatives:");
     eprintln!("    python -m mlx_lm.server --model <mlx-model-id>");
-    eprintln!("    ROZUM_BACKEND_URL=http://your-server/v1 rozum gateway ...");
-    eprintln!("  falling back to HelloBackend (echo server)");
-    std::sync::Arc::new(rozum::HelloBackend::new())
+    eprintln!("    ROZUM_BACKEND_URL=http://your-server/v1 rozum launch ...");
 }
 
 #[cfg(feature = "gguf")]
