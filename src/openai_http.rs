@@ -370,36 +370,13 @@ impl ChatBackend for OpenAiHttpBackend {
 
 // ─── Auto-detect helpers ──────────────────────────────────────────────────────
 
-/// Try to build a backend that connects to a running Ollama server at the
-/// default port (`http://localhost:11434/v1`) using `model_spec` as the model
-/// name. Returns `None` if Ollama is not reachable.
-///
-/// Strips a leading `ollama:` prefix from the model spec since the prefix is
-/// for rozum-side dispatch, not for Ollama itself.
-pub async fn try_ollama(model_spec: &str) -> Option<Arc<dyn ChatBackend>> {
-    let ollama_url = std::env::var("ROZUM_OLLAMA_HTTP")
-        .unwrap_or_else(|_| "http://localhost:11434/v1".to_owned());
-    let model = model_spec.strip_prefix("ollama:").unwrap_or(model_spec);
-    let b = OpenAiHttpBackend::new(&ollama_url, model);
-    // Use Ollama's native /api/version probe — it's cheaper than /v1/models
-    // and present in every Ollama version, while /v1/models is OpenAI-compat
-    // and only available in recent builds.
-    if b.probe_path("/api/version").await {
-        eprintln!("backend: Ollama HTTP at {ollama_url} (model: {model})");
-        Some(Arc::new(b))
-    } else {
-        None
-    }
-}
-
 /// Try `mlx_lm.server` at the default port (`http://localhost:8080/v1`).
 pub async fn try_mlx_server(model_spec: &str) -> Option<Arc<dyn ChatBackend>> {
     let mlx_url =
         std::env::var("ROZUM_MLX_HTTP").unwrap_or_else(|_| "http://localhost:8080/v1".to_owned());
-    let model = model_spec.strip_prefix("mlx:").unwrap_or(model_spec);
-    let b = OpenAiHttpBackend::new(&mlx_url, model);
+    let b = OpenAiHttpBackend::new(&mlx_url, model_spec);
     if b.probe().await {
-        eprintln!("backend: mlx_lm.server at {mlx_url} (model: {model})");
+        eprintln!("backend: mlx_lm.server at {mlx_url} (model: {model_spec})");
         Some(Arc::new(b))
     } else {
         None

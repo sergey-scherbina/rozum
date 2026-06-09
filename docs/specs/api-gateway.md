@@ -20,7 +20,7 @@ rozum gateway [OPTIONS]
 Options:
   --port <PORT>     Listen port on 127.0.0.1 [default: 8089]
   --model <SPEC>    Model spec passed to BackendConfig::gguf or other backend
-                    (e.g. "ollama:qwen2.5-coder:32b" or "/path/to/model.gguf")
+                    (e.g. "/path/to/model.gguf" or "lmstudio:<user>/<repo>")
   --n-ctx <N>       Context size forwarded to the backend [default: 32768]
 
 Environment:
@@ -112,7 +112,7 @@ data: {"type":"message_stop"}
 
 ## Behavior
 
-- [x] `rozum gateway --port 8089 --model "ollama:qwen2.5-coder:32b"` starts an HTTP server on `127.0.0.1:8089` with the specified backend loaded.
+- [x] `rozum gateway --port 8089 --model "/path/to/model.gguf"` starts an HTTP server on `127.0.0.1:8089` with the specified backend loaded.
 - [x] `GET /v1/models` returns `{"object":"list","data":[{"id":"<backend-id>","object":"model"},...]}`.
 - [x] `POST /v1/chat/completions` with `"stream":true` returns an SSE stream as described above.
 - [x] `POST /v1/chat/completions` with `"stream":false` returns a non-streaming JSON completion object.
@@ -124,7 +124,7 @@ data: {"type":"message_stop"}
 - [x] `ROZUM_GATEWAY_TOKEN` → 401 if missing or wrong; no auth if env var absent.
 - [x] Binds only to `127.0.0.1`.
 - [x] Unit tests: SSE stream lengths verified (6 tests pass), message/tool/system parsing, context overflow estimate.
-- [ ] E2E with real GGUF model (requires `--features gguf` + cmake + ollama pull).
+- [ ] E2E with real GGUF model (requires `--features gguf` + cmake + a local .gguf file).
 - [ ] E2E Claude Code / Codex (requires real GGUF loaded).
 
 ## Out of scope
@@ -176,8 +176,9 @@ rozum gateway --port 8089 --model hello
 **Production use** (with GGUF model):
 ```bash
 cargo build --features gguf  # requires brew install cmake
-ollama pull qwen2.5-coder:32b
-./target/debug/rozum gateway --port 8089 --model ollama:qwen2.5-coder:32b
+huggingface-cli download Qwen/Qwen2.5-Coder-32B-Instruct-GGUF \
+  qwen2.5-coder-32b-instruct-q4_k_m.gguf --local-dir ~/models
+./target/debug/rozum gateway --port 8089 --model ~/models/qwen2.5-coder-32b-instruct-q4_k_m.gguf
 
 export ANTHROPIC_BASE_URL=http://localhost:8089
 export ANTHROPIC_API_KEY=dummy

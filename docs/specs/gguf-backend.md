@@ -2,12 +2,12 @@
 
 ## Goal
 
-Run GGUF models natively in the rozum process using Metal GPU acceleration on Apple Silicon. The backend must support tool-use, long context (≥ 32 K tokens), prompt-prefix caching, real token-by-token streaming, and per-token cancellation — all required for Claude Code and Codex as consumers. It reads GGUF files directly from LMStudio and Ollama download directories without involving those applications' runtimes.
+Run GGUF models natively in the rozum process using Metal GPU acceleration on Apple Silicon. The backend must support tool-use, long context (≥ 32 K tokens), prompt-prefix caching, real token-by-token streaming, and per-token cancellation — all required for Claude Code and Codex as consumers. It reads GGUF files from absolute paths or from the LMStudio download directory.
 
 ## Scope
 
 - `src/gguf.rs` — `GgufBackend` struct + `impl ChatBackend`.
-- `src/gguf.rs` — path resolvers (`resolve_model_path`, `resolve_lmstudio_model`, `resolve_ollama_model`).
+- `src/gguf.rs` — path resolvers (`resolve_model_path`, `resolve_lmstudio_model`).
 - `Cargo.toml` — optional crate feature `gguf` that adds `llama-cpp-2` (with Metal) as a dependency.
 - `src/backend.rs` — `BackendEngine::Gguf`, `BackendConfig::gguf(...)`, branch in `BackendRegistry::from_configs`.
 
@@ -41,7 +41,6 @@ pub fn resolve_model_path(spec: &str) -> Option<PathBuf>;
 // spec forms:
 //   "/absolute/path/to/model.gguf"
 //   "lmstudio:<user>/<repo>"      e.g. "lmstudio:Qwen/Qwen2.5-Coder-32B-Instruct-GGUF"
-//   "ollama:<name>:<tag>"          e.g. "ollama:qwen2.5-coder:32b"
 
 // BackendConfig convenience constructor
 impl BackendConfig {
@@ -52,7 +51,7 @@ impl BackendConfig {
 
 ## Behavior
 
-- [x] Path resolvers (`resolve_model_path`, `resolve_lmstudio_model`, `resolve_ollama_model`) are implemented in `src/gguf.rs` and tested with 5 unit tests.
+- [x] Path resolvers (`resolve_model_path`, `resolve_lmstudio_model`) are implemented in `src/gguf.rs` and tested with unit tests.
 - [x] `GgufBackend::new` loads the model from the resolved path exactly once per instance. Subsequent `chat()` calls reuse the loaded weights.
 - [ ] `GgufBackend::new` uses `n_gpu_layers = i32::MAX` by default, placing all layers on Metal.
 - [ ] `GgufBackend::new` enables flash attention (`flash_attn = true`) to reduce KV-cache memory.
@@ -68,12 +67,10 @@ impl BackendConfig {
 - [ ] `ToolUseStart { id, name }` is emitted before the first `ToolUseDelta` of each tool call. The `name` is extracted from the opening JSON fragment.
 - [ ] Prompt-prefix cache: when `req.session_id` is `Some`, the backend stores the KV state keyed by session id after each request. On the next request for the same session, only the divergent suffix is re-prefilled (the common prefix is preserved in the KV cache).
 - [ ] `resolve_model_path("lmstudio:Qwen/Qwen2.5-Coder-32B-Instruct-GGUF")` returns the first GGUF file under `~/.cache/lm-studio/models/Qwen/Qwen2.5-Coder-32B-Instruct-GGUF/` that matches `ROZUM_GGUF_QUANT_PREF` (default `Q4_K_M`); falls back to the largest-K quantization available if the preferred one is absent.
-- [ ] `resolve_model_path("ollama:qwen2.5-coder:32b")` parses `~/.ollama/models/manifests/registry.ollama.ai/library/qwen2.5-coder/32b`, locates the layer with `mediaType = "application/vnd.ollama.image.model"`, and returns `~/.ollama/models/blobs/sha256-<digest>`.
-- [ ] If the Ollama manifest cannot be parsed, `resolve_model_path` returns `None` and logs a clear error: `"could not resolve ollama model: <reason>. Specify an absolute path instead."`.
-- [ ] `BackendConfig::gguf("id", "ollama:qwen2.5-coder:32b")` in `BackendRegistry::from_configs` calls `resolve_model_path`, creates `GgufBackend::new`, and returns a `PlaceholderBackend` with a diagnostic message if resolution or load fails.
+- [x] `BackendConfig::gguf("id", "/abs/path.gguf")` or `"lmstudio:<repo>"` in `BackendRegistry::from_configs` calls `resolve_model_path`, creates `GgufBackend::new`, and returns a `PlaceholderBackend` with a diagnostic message if resolution or load fails.
 - [ ] `cargo check --features gguf` succeeds (requires cmake and clang for llama-cpp-2).
 - [ ] `cargo check` (no flags) succeeds; the default build does not reference `llama-cpp-2`.
-- [ ] Unit tests for path resolvers pass against a temporary directory tree mimicking LMStudio and Ollama layouts.
+- [x] Unit tests for path resolvers pass against a temporary directory tree mimicking the LMStudio layout.
 - [ ] Unit test for tool-use token parser passes on synthetic Qwen-hermes token sequences without a real GPU.
 - [ ] Integration smoke test (under `#[ignore]`) loads a real GGUF on an M-series Mac and measures: load time ≤ 15 s, RSS ≤ model-size + 25%, ≥ 25 tok/s.
 
@@ -105,15 +102,15 @@ The tool-use parser is a state machine over raw token text, not over decoded JSO
 
 | Model | Spec | Size (Q4_K_M) | Notes |
 |-------|------|---------------|-------|
-| Qwen2.5-Coder-32B-Instruct | `lmstudio:Qwen/Qwen2.5-Coder-32B-Instruct-GGUF` or `ollama:qwen2.5-coder:32b` | ~19 GB | Best open coding model; native tool-use |
-| Qwen3-30B-A3B-Instruct (MoE) | `lmstudio:Qwen/Qwen3-30B-A3B-Instruct-GGUF` or `ollama:qwen3:30b-a3b` | ~17 GB | MoE activates ~3B params/token; faster decode |
+| Qwen2.5-Coder-32B-Instruct | `lmstudio:Qwen/Qwen2.5-Coder-32B-Instruct-GGUF` | ~19 GB | Best open coding model; native tool-use |
+| Qwen3-30B-A3B-Instruct (MoE) | `lmstudio:Qwen/Qwen3-30B-A3B-Instruct-GGUF` | ~17 GB | MoE activates ~3B params/token; faster decode |
 
 Both fit comfortably in 36 GB unified memory on M4 Pro with 32 K context.
 
 ## Results
 
 `src/gguf.rs` implemented with:
-- Path resolvers for absolute path / `lmstudio:<repo>` / `ollama:<name>:<tag>` — 5 unit tests pass.
+- Path resolvers for absolute path and `lmstudio:<repo>` — unit tests pass.
 - `ToolUseParser` state machine for Qwen-hermes `<tool_call>…</tool_call>` format — 3 unit tests pass.
 - `format_qwen_prompt` chat template formatter — 2 unit tests pass.
 - `GgufBackend` struct and `impl ChatBackend` (under `#[cfg(feature = "gguf")]`) using `llama-cpp-2 >=0.1.100` with Metal feature.

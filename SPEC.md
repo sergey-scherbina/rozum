@@ -52,4 +52,4 @@ agents through MCP, and lets the human participate directly through the TUI.
 
 - `rozum gateway` exposes the active `ChatBackend` as a local HTTP server speaking OpenAI Chat Completions and Anthropic Messages dialects on `127.0.0.1`. Spec: `docs/specs/api-gateway.md`.
 - `rozum launch <program>` starts a gateway, sets `ANTHROPIC_*` and `OPENAI_*` env vars on the child, and runs the agent CLI (Claude Code, Codex, aider) already connected to a local model — without touching the user's OAuth credentials. Spec: `docs/specs/launch-wrapper.md`.
-- Default model resolution chain (highest first): in-process GGUF (`--features gguf`), in-process MLX via `mistralrs` (`--features mistralrs`, planned), Ollama HTTP, mlx_lm.server HTTP, `ROZUM_BACKEND_URL` env, HelloBackend.
+- Default model resolution chain for `rozum gateway` / `rozum launch` (highest first): in-process GGUF (`--features gguf`), in-process MLX via `mistralrs` (`--features mistralrs`, planned), mlx_lm.server HTTP, `ROZUM_BACKEND_URL` env. If none reachable, both subcommands exit with code 1 rather than serving a placeholder.

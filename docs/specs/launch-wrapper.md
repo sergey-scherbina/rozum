@@ -24,8 +24,8 @@ Options:
   --n-ctx <N>       Context window in tokens (default 32768)
 
 Examples:
-  rozum launch --model ollama:qwen3.5:9b-mlx claude
-  rozum launch claude --model ollama:qwen3.5:9b-mlx           # same — known flags
+  rozum launch --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit claude
+  rozum launch claude --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit           # same — known flags
                                                               # are reordered automatically
   rozum launch --model qwen2.5-coder:32b -- aider --no-auto-commits
                                                               # `--` passes the rest
@@ -77,7 +77,7 @@ The `claude-` prefix is required because Claude Code's gateway-discovery filter 
 - [x] Claude Code shows `Auth token: ANTHROPIC_AUTH_TOKEN` and the local model id in `/status` — OAuth credentials in `~/.claude/.credentials.json` are not touched.
 - [x] Claude Code starts on the local model: `/status` `Model:` field is `claude-rozum-<sanitized-spec>`.
 - [x] The local model also appears in the `/model` picker labelled "From gateway" with the original spec as display name.
-- [x] Works against any backend the underlying `gateway` subcommand supports: in-process GGUF (`--features gguf`), Ollama HTTP, mlx_lm.server HTTP, `ROZUM_BACKEND_URL`, or HelloBackend fallback.
+- [x] Works against any backend the underlying `gateway` subcommand supports: in-process GGUF (`--features gguf`), mlx_lm.server HTTP, or `ROZUM_BACKEND_URL`. If no real backend is reachable, `rozum launch` exits with code 1 instead of starting the child against a placeholder.
 
 ## Out of scope
 
@@ -155,7 +155,7 @@ Implemented in `src/main.rs` (`Launch` subcommand + `run_launch` + `reorder_laun
 Verified manually with:
 
 ```
-cargo run -- launch --model ollama:qwen3.5:9b-mlx claude
+cargo run -- launch --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit claude
 ```
 
-Claude Code starts on `claude-rozum-ollama-qwen3-5-9b-mlx`, `/status` reports `Auth token: ANTHROPIC_AUTH_TOKEN` and `Anthropic base URL: http://127.0.0.1:<port>`, requests appear in the launcher's stderr as `← POST /v1/messages`. No `Auth conflict` warning; user's OAuth login is preserved.
+Claude Code starts on `claude-rozum-<sanitized-spec>`, `/status` reports `Auth token: ANTHROPIC_AUTH_TOKEN` and `Anthropic base URL: http://127.0.0.1:<port>`, requests appear in the launcher's stderr as `← POST /v1/messages`. No `Auth conflict` warning; user's OAuth login is preserved.

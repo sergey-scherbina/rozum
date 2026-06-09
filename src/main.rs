@@ -99,7 +99,8 @@ enum Command {
         #[arg(long, default_value_t = 8089)]
         port: u16,
 
-        /// Model spec: absolute .gguf path, "ollama:<name>", or "lmstudio:<repo>"
+        /// Model spec: absolute .gguf path, "lmstudio:<repo>", or any model id
+        /// understood by mlx_lm.server / ROZUM_BACKEND_URL
         #[arg(long)]
         model: String,
 
@@ -110,7 +111,8 @@ enum Command {
 
     /// Start the gateway and launch a program with ANTHROPIC_/OPENAI_ env vars set.
     ///
-    /// Example: rozum launch --model qwen3.5:9b-mlx claude
+    /// Example: rozum launch --model /path/to/qwen-coder.gguf claude
+    /// Example: rozum launch --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit claude
     /// Example: rozum launch --model qwen2.5-coder:32b -- aider --no-auto-commits
     Launch {
         /// Model spec (same as `gateway --model`)
@@ -323,13 +325,13 @@ async fn start_web_bridge(room_name: String, port: u16, url: String) {
 }
 
 async fn run_gateway(port: u16, model_spec: String, n_ctx: u32) {
-    let backend = build_gateway_backend(&model_spec, n_ctx)
-        .await
-        .unwrap_or_else(|| {
+    let backend = match build_gateway_backend(&model_spec, n_ctx).await {
+        Some(b) => b,
+        None => {
             print_no_backend_hints(&model_spec);
-            eprintln!("  falling back to HelloBackend (echo server)");
-            std::sync::Arc::new(rozum::HelloBackend::new())
-        });
+            std::process::exit(1);
+        }
+    };
     eprintln!("rozum gateway  http://127.0.0.1:{port}");
     eprintln!("  model:              {model_spec}");
     eprintln!();
@@ -415,10 +417,6 @@ async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: u32, program: 
         Some(b) => b,
         None => {
             print_no_backend_hints(&model_spec);
-            eprintln!();
-            eprintln!(
-                "rozum launch: refusing to start child with HelloBackend (would just echo 'hello!')."
-            );
             std::process::exit(1);
         }
     };
@@ -490,7 +488,7 @@ async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: u32, program: 
 }
 
 /// Try to build a real backend for `model_spec`. Returns `None` if nothing
-/// is reachable; caller decides whether to fall back to Hello or fail.
+/// is reachable; caller exits with an error if it returns None.
 async fn build_gateway_backend(
     model_spec: &str,
     n_ctx: u32,
@@ -500,17 +498,12 @@ async fn build_gateway_backend(
         return Some(b);
     }
 
-    // 2. Try Ollama HTTP (works with GGUF, MLX, and any Ollama-supported format)
-    if let Some(b) = rozum::openai_http::try_ollama(model_spec).await {
-        return Some(b);
-    }
-
-    // 3. Try mlx_lm.server at default port (for MLX models run separately)
+    // 2. Try mlx_lm.server (Python, for MLX-format models)
     if let Some(b) = rozum::openai_http::try_mlx_server(model_spec).await {
         return Some(b);
     }
 
-    // 4. Try user-specified URL via env
+    // 3. Try user-specified URL via env (any OpenAI-compatible server)
     if let Ok(url) = std::env::var("ROZUM_BACKEND_URL") {
         eprintln!("backend: custom HTTP at {url}");
         return Some(std::sync::Arc::new(
@@ -522,18 +515,24 @@ async fn build_gateway_backend(
 }
 
 fn print_no_backend_hints(model_spec: &str) {
-    let bare = model_spec
-        .strip_prefix("ollama:")
-        .or_else(|| model_spec.strip_prefix("mlx:"))
-        .unwrap_or(model_spec);
     eprintln!("no backend found for '{model_spec}'");
-    eprintln!("  tried: in-process GGUF, Ollama (localhost:11434), mlx_lm.server (localhost:8080)");
-    eprintln!("  hints:");
-    eprintln!("    ollama serve     # in another terminal, then:");
-    eprintln!("    ollama pull {bare}");
-    eprintln!("  alternatives:");
-    eprintln!("    python -m mlx_lm.server --model <mlx-model-id>");
-    eprintln!("    ROZUM_BACKEND_URL=http://your-server/v1 rozum launch ...");
+    eprintln!();
+    eprintln!("rozum needs an in-process model or an HTTP server to talk to.");
+    eprintln!("Pick one:");
+    eprintln!();
+    eprintln!("  in-process GGUF (recommended; Metal on Apple Silicon):");
+    eprintln!("    brew install cmake");
+    eprintln!("    cargo build --features gguf");
+    eprintln!("    rozum launch --model /path/to/model.gguf      claude");
+    eprintln!("    rozum launch --model 'lmstudio:<user>/<repo>'  claude");
+    eprintln!();
+    eprintln!("  mlx_lm.server (Python, native MLX safetensors):");
+    eprintln!("    pip install mlx-lm");
+    eprintln!("    python -m mlx_lm.server --model mlx-community/<repo> &");
+    eprintln!("    rozum launch --model mlx-community/<repo>  claude");
+    eprintln!();
+    eprintln!("  any OpenAI-compatible HTTP server:");
+    eprintln!("    ROZUM_BACKEND_URL=http://your-server/v1 rozum launch --model <id> claude");
 }
 
 #[cfg(feature = "gguf")]

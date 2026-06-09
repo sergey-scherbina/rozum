@@ -2,7 +2,7 @@
 
 ## Goal
 
-In-process backend that loads MLX-format safetensors directly into the rozum process via the [`mistralrs`](https://crates.io/crates/mistralrs) Rust crate. Removes Ollama and Python (`mlx_lm.server`) from the runtime path for models distributed in MLX format. Targets equivalent or better throughput vs Ollama-MLX on Apple Silicon while keeping the existing `ChatBackend` SPI from `chat-backend-spi.md` unchanged.
+In-process backend that loads MLX-format safetensors directly into the rozum process via the [`mistralrs`](https://crates.io/crates/mistralrs) Rust crate. Removes Python (`mlx_lm.server`) from the runtime path for models distributed in MLX format. Targets equivalent or better throughput vs other Apple-Silicon MLX runtimes while keeping the existing `ChatBackend` SPI from `chat-backend-spi.md` unchanged.
 
 ## Scope
 
@@ -62,10 +62,8 @@ rozum launch --model mlx-community:Qwen2.5-Coder-32B-Instruct-4bit claude
 - [ ] In `build_gateway_backend`, the priority chain becomes:
   1. In-process GGUF (`--features gguf`)
   2. **In-process mistralrs (`--features mistralrs`)** ← NEW
-  3. Ollama HTTP
-  4. mlx_lm.server HTTP
-  5. `ROZUM_BACKEND_URL` env
-  6. HelloBackend fallback
+  3. mlx_lm.server HTTP
+  4. `ROZUM_BACKEND_URL` env
 - [ ] `cargo check` (default): unchanged, no new hard deps.
 - [ ] `cargo check --features mistralrs`: builds with Metal feature on aarch64-apple-darwin.
 - [ ] Unit tests pass: model-spec parsing, sampling param mapping, tool-use parser reuse.
@@ -94,7 +92,7 @@ mistralrs is gated behind the `mistralrs` feature so default build remains uncha
 ## Decisions
 
 - **mistralrs over hand-rolled mlx-rs port** — chosen because mistralrs already implements Qwen2/Qwen3/Llama/Mistral forward passes, KV-cache, chat templates, and sampling. A hand-rolled port via `mlx-rs` core ops would require thousands of lines per model family and ongoing maintenance.
-- **In-process over subprocess** — chosen to eliminate Python and Ollama from the runtime path for users who want a single-binary deployment. Subprocess Ollama remains available as a fallback path in the gateway chain.
+- **In-process over subprocess** — chosen to eliminate Python from the runtime path for users who want a single-binary deployment.
 - **Reuse `gguf::ToolUseParser`** — chosen because the model-side tool-call format is engine-independent; duplicating the parser would create drift.
 - **Optional feature** — chosen because mistralrs is a heavy dependency (compiles llama.cpp-style Metal kernels) that should not bloat the default build.
 
