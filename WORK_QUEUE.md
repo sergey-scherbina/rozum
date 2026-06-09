@@ -25,11 +25,12 @@ soon as any single track succeeds.
   - Estimated effort: ~1 week active + upstream review cycle.
   - Spec: `docs/specs/llamacpp-qwen36-patch.md`.
 
-- [ ] mistralrs-qwen36-pr - Upstream PR to mistralrs adding Qwen3.6 hybrid linear-attention support.
-  - Adds one new layer module (linear-attention / state-space) and a per-block dispatch in the Qwen3 model.
-  - Reference: `mlx_lm/models/qwen35moe.py`. Correctness gate: byte-for-byte token match against Python at `temperature=0`.
-  - Highest-leverage: every Rust project that uses mistralrs picks up Qwen3.x.
-  - Estimated effort: ~2-3 weeks active.
+- [ ] mistralrs-qwen36-pr - Upstream PR to mistralrs registering Qwen3.5/3.6 as an alias of the existing `qwen3_next` model.
+  - Discovery: mistralrs already has all the hybrid linear-attention layer code in `qwen3_next.rs` (GatedDeltaNet, full-attention, SparseMoeBlock, MoE routing). mlx-lm's `qwen3_5.py` re-uses `qwen3_next.py` classes verbatim — same architecture.
+  - The PR is therefore not new layer code; it's: (a) register `model_type: "qwen3_5_moe"` and `architectures: ["Qwen3_5MoeForConditionalGeneration"]` to dispatch to the existing `Qwen3NextLoader`; (b) tolerate the nested `text_config` block + explicit `layer_types` array in the config parser; (c) handle `attn_output_gate` if it changes behaviour.
+  - Correctness gate: byte-for-byte token match against `mlx_lm.generate --temp 0`.
+  - Highest-leverage: every Rust project that uses mistralrs picks up Qwen3.5/3.6.
+  - Estimated effort: ~1 week active (down from 2-3 weeks after the qwen3_next discovery).
   - Spec: `docs/specs/mistralrs-qwen36-pr.md`.
 
 - [ ] mlx-native-port - Native MLX runtime in rozum on top of `mlx-rs`, porting `mlx_lm` Python piece by piece.
