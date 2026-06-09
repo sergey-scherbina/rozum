@@ -53,7 +53,7 @@ index a5f6f1f..b857fd0 100644
 -pub use weights::GdnWeightMode;
 +pub use weights::{GdnInProj, GdnWeightMode};
 diff --git a/mistralrs-core/src/gdn/weights.rs b/mistralrs-core/src/gdn/weights.rs
-index d0e992f..b15a5cb 100644
+index d0e992f..979790b 100644
 --- a/mistralrs-core/src/gdn/weights.rs
 +++ b/mistralrs-core/src/gdn/weights.rs
 @@ -1,6 +1,9 @@
@@ -92,7 +92,7 @@ index d0e992f..b15a5cb 100644
      pub conv1d_weight: Tensor,
      pub dt_bias: Tensor,
      pub a_log: Tensor,
-@@ -22,6 +40,87 @@ pub struct GdnWeights {
+@@ -22,6 +40,143 @@ pub struct GdnWeights {
      pub out_proj: Arc<dyn QuantMethod>,
  }
  
@@ -115,22 +115,63 @@ index d0e992f..b15a5cb 100644
 +        match self {
 +            GdnInProj::Merged(inner) => inner.forward(x),
 +            GdnInProj::SplitAfq { qkv, z, b, a } => {
-+                // Diagnostic path: dequantize each AfqLayer's weight to
-+                // full precision, build the merged weight tensor with the
-+                // same per-head interleaving the merged-load path uses,
-+                // run one matmul. Slow (full-precision weight materialised
-+                // every forward) but mathematically identical to the
-+                // Merged path — any numerical drift after switching to
-+                // this branch is the dequantise step itself, not our
-+                // activation-side layout code.
-+                let (qkvz_w, ba_w) = self.dequantize_concat(dims)?;
-+                // Cast weights to the activation dtype so matmul typechecks.
-+                let qkvz_w = qkvz_w.to_dtype(x.dtype())?;
-+                let ba_w = ba_w.to_dtype(x.dtype())?;
-+                let in_proj_w = candle_core::Tensor::cat(&[qkvz_w, ba_w], 0)?;
-+                // x @ W^T
-+                let w_t = in_proj_w.transpose(0, 1)?.contiguous()?;
-+                x.broadcast_matmul(&w_t)
++                // MLX-style activation path: each AfqLayer matmul produces
++                // a flat per-type output, then we split / per-head reshape /
++                // concat on the activation side. Mathematically matches the
++                // Python `mlx_lm/models/qwen3_5.py` GatedDeltaNet code:
++                //
++                //   qkv = self.in_proj_qkv(x)         # (B, S, key_dim*2 + value_dim) flat
++                //   z   = self.in_proj_z(x)           # (B, S, value_dim) flat
++                //   ...
++                //   q, k, v = split(qkv, [key_dim, 2*key_dim])
++                //            each then reshape(B, S, num_*_heads, *_head_dim)
++                //
++                // After concat-along-last we re-flatten to the per-head
++                // interleaved layout `GdnProjection::from_packed` expects.
++                let qkv_out = qkv.forward(x)?; // (..., key_dim*2 + value_dim)
++                let z_out = z.forward(x)?; // (..., value_dim)
++                let b_out = b.forward(x)?; // (..., num_v_heads)
++                let a_out = a.forward(x)?; // (..., num_v_heads)
++
++                let last = qkv_out.dims().len() - 1;
++                let q_flat = qkv_out.narrow(last, 0, dims.key_dim)?;
++                let k_flat = qkv_out.narrow(last, dims.key_dim, dims.key_dim)?;
++                let v_flat = qkv_out.narrow(last, 2 * dims.key_dim, dims.value_dim)?;
++
++                let lead: Vec<usize> = x.dims().iter().take(x.dims().len() - 1).copied().collect();
++                let q_shape: Vec<usize> = lead
++                    .iter()
++                    .copied()
++                    .chain([dims.num_k_heads, dims.head_k_dim])
++                    .collect();
++                let v_shape: Vec<usize> = lead
++                    .iter()
++                    .copied()
++                    .chain([dims.num_k_heads, dims.v_per_group * dims.head_v_dim])
++                    .collect();
++                let ba_shape: Vec<usize> = lead
++                    .iter()
++                    .copied()
++                    .chain([dims.num_k_heads, dims.v_per_group])
++                    .collect();
++
++                let q_g = q_flat.reshape(q_shape.as_slice())?;
++                let k_g = k_flat.reshape(q_shape.as_slice())?;
++                let v_g = v_flat.reshape(v_shape.as_slice())?;
++                let z_g = z_out.reshape(v_shape.as_slice())?;
++                let b_g = b_out.reshape(ba_shape.as_slice())?;
++                let a_g = a_out.reshape(ba_shape.as_slice())?;
++
++                let qkvz = candle_core::Tensor::cat(&[q_g, k_g, v_g, z_g], D::Minus1)?;
++                let ba = candle_core::Tensor::cat(&[b_g, a_g], D::Minus1)?;
++
++                let qkvz_flat_shape: Vec<usize> =
++                    lead.iter().copied().chain([dims.qkvz_out_dim()]).collect();
++                let ba_flat_shape: Vec<usize> =
++                    lead.iter().copied().chain([dims.ba_out_dim()]).collect();
++                let qkvz = qkvz.contiguous()?.reshape(qkvz_flat_shape)?;
++                let ba = ba.contiguous()?.reshape(ba_flat_shape)?;
++                candle_core::Tensor::cat(&[qkvz, ba], D::Minus1)
 +            }
 +        }
 +    }
@@ -150,14 +191,29 @@ index d0e992f..b15a5cb 100644
 +                Ok((qkvz, ba))
 +            }
 +            GdnInProj::SplitAfq { qkv, z, b, a } => {
-+                use candle_core::D;
++                // Mirror exactly what load_split_qkvz does: split the flat
++                // [q | k | v] qkv weight into q, k, v slices first, THEN
++                // per-head reshape each piece. Same for b/a.
 +                let qkv_w = qkv.dequantize_w()?; // (key_dim*2 + value_dim, hidden_size)
 +                let z_w = z.dequantize_w()?; // (value_dim, hidden_size)
 +                let b_w = b.dequantize_w()?; // (num_v_heads, hidden_size)
 +                let a_w = a.dequantize_w()?; // (num_v_heads, hidden_size)
-+                let qkv_g = qkv_w.reshape((
++                let q_w = qkv_w.narrow(0, 0, dims.key_dim)?;
++                let k_w = qkv_w.narrow(0, dims.key_dim, dims.key_dim)?;
++                let v_w = qkv_w.narrow(0, dims.key_dim * 2, dims.value_dim)?;
++                let q_g = q_w.reshape((
 +                    dims.num_k_heads,
-+                    2 * dims.head_k_dim + dims.v_per_group * dims.head_v_dim,
++                    dims.head_k_dim,
++                    dims.hidden_size,
++                ))?;
++                let k_g = k_w.reshape((
++                    dims.num_k_heads,
++                    dims.head_k_dim,
++                    dims.hidden_size,
++                ))?;
++                let v_g = v_w.reshape((
++                    dims.num_k_heads,
++                    dims.v_per_group * dims.head_v_dim,
 +                    dims.hidden_size,
 +                ))?;
 +                let z_g = z_w.reshape((
@@ -167,7 +223,7 @@ index d0e992f..b15a5cb 100644
 +                ))?;
 +                let b_g = b_w.reshape((dims.num_k_heads, dims.v_per_group, dims.hidden_size))?;
 +                let a_g = a_w.reshape((dims.num_k_heads, dims.v_per_group, dims.hidden_size))?;
-+                let qkvz = candle_core::Tensor::cat(&[qkv_g, z_g], 1)?
++                let qkvz = candle_core::Tensor::cat(&[q_g, k_g, v_g, z_g], 1)?
 +                    .reshape((dims.qkvz_out_dim(), dims.hidden_size))?;
 +                let ba = candle_core::Tensor::cat(&[b_g, a_g], 1)?
 +                    .reshape((dims.ba_out_dim(), dims.hidden_size))?;
@@ -180,7 +236,7 @@ index d0e992f..b15a5cb 100644
  pub struct GdnWeightLoadCtx<'a> {
      pub cfg: &'a dyn GdnConfig,
      pub dims: &'a GdnDims,
-@@ -50,20 +149,61 @@ impl GdnWeights {
+@@ -50,20 +205,61 @@ impl GdnWeights {
          };
          let vb_la = mapper.set_device(layer_idx, vb.pp("linear_attn"), loading_isq);
  
@@ -329,7 +385,7 @@ index 92b1d9b..37e196b 100644
 +    }
 +}
 diff --git a/mistralrs-core/src/vision_models/qwen3_5_moe/text.rs b/mistralrs-core/src/vision_models/qwen3_5_moe/text.rs
-index 715b556..526ea96 100644
+index 715b556..fe0b50d 100644
 --- a/mistralrs-core/src/vision_models/qwen3_5_moe/text.rs
 +++ b/mistralrs-core/src/vision_models/qwen3_5_moe/text.rs
 @@ -287,11 +287,28 @@ impl SparseMoeBlock {
@@ -424,7 +480,62 @@ index 715b556..526ea96 100644
              )?
          } else {
              ReplicatedLayer::from_linear(candle_nn::Linear::new(
-@@ -869,7 +909,9 @@ impl IsqModel for Qwen3_5MoeTextModel {
+@@ -753,6 +793,29 @@ impl Qwen3_5MoeTextModel {
+             None
+         };
+ 
++        if std::env::var("ROZUM_FWD_DEBUG").is_ok() {
++            // Dump first 5 values of embed output at the last position so we
++            // can diff against the Python reference.
++            let last_pos = xs.dim(1)? - 1;
++            let row = xs
++                .narrow(1, last_pos, 1)?
++                .squeeze(1)?
++                .squeeze(0)?
++                .to_dtype(candle_core::DType::F32)?;
++            let v: Vec<f32> = row.to_vec1()?;
++            eprintln!(
++                "EMBED last-pos[0..8] = {:?}",
++                v.iter().take(8).collect::<Vec<_>>()
++            );
++            eprintln!(
++                "EMBED last-pos stats: min={:.4} max={:.4} mean={:.4} ||x||={:.4}",
++                v.iter().cloned().fold(f32::INFINITY, f32::min),
++                v.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
++                v.iter().sum::<f32>() / v.len() as f32,
++                v.iter().map(|x| x * x).sum::<f32>().sqrt(),
++            );
++        }
++
+         for (i, layer) in self.layers.iter().enumerate() {
+             xs = self.mapper.map(xs, i)?;
+ 
+@@ -820,7 +883,23 @@ impl Qwen3_5MoeTextModel {
+         let xs = xs.to_device(&self.device)?;
+         let xs = xs.apply(&self.norm)?;
+         let xs = ctx.logits(&xs)?;
+-        self.lm_head.forward(&xs)
++        let logits = self.lm_head.forward(&xs)?;
++        if std::env::var("ROZUM_FWD_DEBUG").is_ok() {
++            let last_pos = logits.dim(1)? - 1;
++            let lp = logits
++                .narrow(1, last_pos, 1)?
++                .squeeze(1)?
++                .squeeze(0)?
++                .to_dtype(candle_core::DType::F32)?;
++            let v: Vec<f32> = lp.to_vec1()?;
++            let mut idx: Vec<(usize, f32)> = v.into_iter().enumerate().collect();
++            idx.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
++            eprintln!("=== last-position top-10 ===");
++            for (rank, (id, val)) in idx.iter().take(10).enumerate() {
++                eprintln!("  {rank}: id={id} logit={val:.4}");
++            }
++        }
++        Ok(logits)
+     }
+ 
+     fn deepstack_process(
+@@ -869,7 +948,9 @@ impl IsqModel for Qwen3_5MoeTextModel {
                      tensors.push((&mut attn.o_proj, Some(i)));
                  }
                  LayerImpl::LinearAttention(gdn) => {
@@ -436,10 +547,10 @@ index 715b556..526ea96 100644
                  }
              }
 diff --git a/mistralrs-quant/src/afq/mod.rs b/mistralrs-quant/src/afq/mod.rs
-index 9076075..70a7228 100644
+index 9076075..a713aad 100644
 --- a/mistralrs-quant/src/afq/mod.rs
 +++ b/mistralrs-quant/src/afq/mod.rs
-@@ -279,9 +279,22 @@ impl AfqLayer {
+@@ -279,9 +279,24 @@ impl AfqLayer {
          bias: bool,
          vb: ShardedVarBuilder,
      ) -> Result<Arc<dyn QuantMethod>> {
@@ -461,10 +572,51 @@ index 9076075..70a7228 100644
 +                path, in_dim, out_dim, bits, group_size
 +            );
 +        }
++        let dump_embed = std::env::var("ROZUM_AFQ_DUMP_EMBED").is_ok()
++            && path.ends_with("embed_tokens");
  
          let w_q = vb.get_with_hints_dtype(
              (out_dim, in_dim * bits / 32),
-@@ -305,8 +318,8 @@ impl AfqLayer {
+@@ -294,6 +309,38 @@ impl AfqLayer {
+         let biases =
+             vb.get_with_hints((out_dim, in_dim / group_size), "biases", Default::default())?;
+ 
++        if dump_embed {
++            // Dump first 5 scales/biases of row 198 to compare with Python.
++            let s_f = scales
++                .narrow(0, 198, 1)?
++                .squeeze(0)?
++                .to_dtype(candle_core::DType::F32)?;
++            let b_f = biases
++                .narrow(0, 198, 1)?
++                .squeeze(0)?
++                .to_dtype(candle_core::DType::F32)?;
++            let sv: Vec<f32> = s_f.to_vec1()?;
++            let bv: Vec<f32> = b_f.to_vec1()?;
++            eprintln!(
++                "AFQ_EMBED scales[198,:5] = {:?}",
++                sv.iter().take(5).collect::<Vec<_>>()
++            );
++            eprintln!(
++                "AFQ_EMBED biases[198,:5] = {:?}",
++                bv.iter().take(5).collect::<Vec<_>>()
++            );
++            // Dump first 5 packed weight uint32 values of row 198
++            let w_u32 = w_q
++                .narrow(0, 198, 1)?
++                .squeeze(0)?
++                .to_dtype(candle_core::DType::U32)?;
++            let wv: Vec<u32> = w_u32.to_vec1()?;
++            eprintln!(
++                "AFQ_EMBED w_q[198,:5] = {:?}",
++                wv.iter().take(5).collect::<Vec<_>>()
++            );
++        }
++
+         let bias = if bias {
+             Some(vb.get((out_dim,), "bias")?)
+         } else {
+@@ -305,8 +352,8 @@ impl AfqLayer {
              scales,
              bias,
              biases,
@@ -475,7 +627,7 @@ index 9076075..70a7228 100644
          }))
      }
  
-@@ -318,9 +331,13 @@ impl AfqLayer {
+@@ -318,9 +365,13 @@ impl AfqLayer {
          bias: bool,
          vb: ShardedVarBuilder,
      ) -> Result<Arc<dyn QuantMethod>> {
@@ -491,7 +643,7 @@ index 9076075..70a7228 100644
  
          let w_q = vb.get_with_hints_dtype(
              (num_local_experts, out_dim, in_dim * bits / 32),
-@@ -350,8 +367,8 @@ impl AfqLayer {
+@@ -350,8 +401,8 @@ impl AfqLayer {
              scales,
              bias,
              biases,

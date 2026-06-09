@@ -169,6 +169,57 @@ Resolution path requires **Python side-by-side instrumentation**:
 
 Estimated 1-2 day project for a focused session with the Python env ready.
 
+### Day 5: Python side-by-side, embed proven correct, root cause identified
+
+Python side-by-side run via `scripts/mlx_ref.py` against the same model:
+
+- Dumped `w_q`, `scales`, `biases` for `embed_tokens.weight` row 198 in both
+  Python (mlx-lm) and our patched mistralrs (`ROZUM_AFQ_DUMP_EMBED` env var on
+  `AfqLayer::afq_linear_b`). All three tensors match **byte-for-byte**.
+- Dumped the embedding output for the actual 11-token chat-template prompt in
+  both runs. **Identical**:
+  `EMBED last-pos[0..8] = [-3.05e-5, -3.05e-5, -0.003, 0.0014, -3.05e-5, -0.0015, -3.05e-5, -3.05e-5]`
+  with stats `min=-0.2275 max=0.1533 mean=0.0000 ||x||=0.3230`.
+
+The loading and AFQ dequantization paths in this patch are correct. The bug is
+in the **forward computation**, in the layout assumed by the rest of mistralrs
+when reading these dequantized weights.
+
+### Root cause: weight-row ordering convention mismatch
+
+The Merged-load path in `qwen3_next.rs`'s `load_split_qkvz` reshapes the
+linear-attention input projections into a **per-head-interleaved** layout
+`[h0_q, h0_k, h0_v, h0_z, h1_q, ...]` because the upstream Qwen3-Next
+non-MLX checkpoints store them that way. `GdnProjection::from_packed` then
+slices on the per-head axis.
+
+MLX safetensors store the **same** logical weights but in **flat per-type**
+layout: `in_proj_qkv` has rows `[q for all heads | k for all heads | v for all heads]`,
+and `in_proj_z` is a separate tensor. The Python reference `mlx_lm/models/qwen3_5.py`
+does flat matmul, then `mx.split` by type, then per-head `reshape` on the
+activation side - never an interleaved weight layout.
+
+The day-5 patch in `gdn/weights.rs` switches `GdnInProj::SplitAfq.forward` to
+mirror the Python flat-then-split-then-reshape path exactly:
+
+1. Run four independent AFQ matmuls (qkv, z, b, a) on the activation.
+2. Split the qkv output by type into q / k / v.
+3. Per-head reshape each of q, k, v, z, b, a.
+4. Concatenate along the last (per-head dim) axis.
+5. Flatten back to the per-head-interleaved layout `from_packed` expects.
+
+Result: top-1 prediction changed from `id=95886` (day-4 broken merged dequant)
+to `id=22` (day-4 wrong merge order) to `id=220` (day-5 correct split path).
+Top-1 logit grew from 14.88 to 17.38, approaching the Python reference
+`id=8160 'Here' logit=22.0`.
+
+Magnitudes are still ~5 logits below Python, and the predicted token is wrong.
+This points to the **same row-ordering bug repeating** in another module that
+also assumes per-head-interleaved layout - most likely the FullAttention block's
+qkv projection (every fourth layer is FullAttention) and/or the MoE fused
+`switch_mlp.{gate_proj,up_proj,down_proj}` which packs `(num_experts, out, in)`.
+Each of those needs the same flat-vs-interleaved audit.
+
 ### Production Qwen3.6 today
 
 The patch in this directory is **not** ready to use for inference. For real
