@@ -10,7 +10,6 @@ mod inner {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use futures::StreamExt as _;
 
     use crate::backend::{
         ChatBackend, ChatEvent, ChatRequest, ChatStream, ContentBlock, Message, ModelError,
@@ -103,15 +102,23 @@ mod inner {
             let request = self.build_request(&req);
             let model = Arc::clone(&self.model);
 
-            let mut stream = model.stream_chat_request(request).await.map_err(|e| {
-                ModelError::BackendUnavailable(format!("mistralrs: stream_chat_request: {e}"))
-            })?;
-
+            // Move `model` into the stream so the upstream borrow it holds is
+            // bounded by the stream's lifetime, not by this function call.
             let chat_stream: ChatStream = Box::pin(async_stream::stream! {
+                let mut upstream = match model.stream_chat_request(request).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        yield Err(ModelError::BackendUnavailable(format!(
+                            "mistralrs: stream_chat_request: {e}"
+                        )));
+                        return;
+                    }
+                };
+
                 let mut output_tokens: u32 = 0;
                 let mut done_sent = false;
 
-                while let Some(item) = stream.next().await {
+                while let Some(item) = upstream.next().await {
                     if cancel.is_cancelled() {
                         yield Ok(ChatEvent::Done {
                             input_tokens: 0,
@@ -149,9 +156,8 @@ mod inner {
                             }
                         }
                     }
-                    // Other Response variants (Done, Errors, etc.) are
-                    // intentionally ignored — the final Done is emitted
-                    // by the loop's natural end below.
+                    // Other Response variants (Done, Errors, etc.) ignored —
+                    // the final Done is emitted by the natural loop end.
                 }
 
                 if !done_sent {
@@ -161,6 +167,9 @@ mod inner {
                         stop_reason: StopReason::EndTurn,
                     });
                 }
+
+                // Keep `model` alive for the entire stream lifetime.
+                drop(model);
             });
 
             Ok(chat_stream)
