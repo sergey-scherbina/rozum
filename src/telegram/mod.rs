@@ -1,6 +1,5 @@
 mod bot;
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,14 +30,13 @@ pub async fn run_bridge(
     let join_result = conn
         .call_tool(
             "_join_internal",
-            serde_json::json!({ "client_info_name": display_name }),
+            serde_json::json!({ "client_info_name": display_name, "kind": "bridge" }),
             Duration::from_secs(5),
         )
         .await
         .map_err(|e| format!("join room: {e}"))?;
 
-    let join_payload =
-        tool_result_text_json(&join_result).ok_or("invalid join response")?;
+    let join_payload = tool_result_text_json(&join_result).ok_or("invalid join response")?;
     let my_id = join_payload["participant_id"]
         .as_str()
         .unwrap_or(display_name)
@@ -46,26 +44,29 @@ pub async fn run_bridge(
     eprintln!("[telegram-bridge] joined room '{room}' as '{my_id}'");
 
     let bot = Arc::new(TelegramBot::new(token, chat_id));
-    let queue: Arc<Mutex<VecDeque<IncomingMessage>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let conn = Arc::new(Mutex::new(conn));
 
+    // Telegram → room: forward each incoming Telegram message as a submit.
     let poller_bot = Arc::clone(&bot);
-    let poller_queue = Arc::clone(&queue);
+    let poller_conn = Arc::clone(&conn);
     tokio::spawn(async move {
-        telegram_poller(poller_bot, poller_queue).await;
+        telegram_poller(poller_bot, poller_conn).await;
     });
 
-    room_loop(&mut conn, &bot, &queue, &my_id).await
+    // Room → Telegram: forward each new transcript entry from non-self speakers.
+    room_loop(conn, bot, my_id).await
 }
 
-async fn telegram_poller(
-    bot: Arc<TelegramBot>,
-    queue: Arc<Mutex<VecDeque<IncomingMessage>>>,
-) {
+async fn telegram_poller(bot: Arc<TelegramBot>, conn: Arc<Mutex<RoomConnection>>) {
+    const MIN_POLL_ERROR_SECS: u64 = 5;
+    const MAX_POLL_ERROR_SECS: u64 = 60;
+    let mut poll_error_delay_secs = MIN_POLL_ERROR_SECS;
+
     let mut offset: i64 = 0;
     loop {
         match bot.get_updates(offset, 30).await {
             Ok(updates) => {
+                poll_error_delay_secs = MIN_POLL_ERROR_SECS;
                 for update in &updates {
                     offset = update.update_id + 1;
                     if let Some(msg) = TelegramBot::extract_message(update) {
@@ -74,36 +75,51 @@ async fn telegram_poller(
                             .as_ref()
                             .map_or(false, |m| m.chat.id == bot.chat_id);
                         if from_target_chat {
-                            queue.lock().await.push_back(msg);
+                            submit_to_room(&conn, &msg).await;
                         }
                     }
                 }
             }
             Err(e) => {
                 eprintln!("[telegram-bridge] getUpdates error: {e}");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(poll_error_delay_secs)).await;
+                poll_error_delay_secs =
+                    (poll_error_delay_secs.saturating_mul(2)).min(MAX_POLL_ERROR_SECS);
             }
         }
     }
 }
 
+async fn submit_to_room(conn: &Arc<Mutex<RoomConnection>>, msg: &IncomingMessage) {
+    let content = format!("[{}]: {}", msg.sender_name, msg.text);
+    let mut c = conn.lock().await;
+    let _ = c
+        .call_tool(
+            "meeting.submit",
+            serde_json::json!({ "content": content }),
+            Duration::from_secs(5),
+        )
+        .await;
+}
+
 async fn room_loop(
-    conn: &mut RoomConnection,
-    bot: &TelegramBot,
-    queue: &Arc<Mutex<VecDeque<IncomingMessage>>>,
-    my_id: &str,
+    conn: Arc<Mutex<RoomConnection>>,
+    bot: Arc<TelegramBot>,
+    my_id: String,
 ) -> BridgeResult<()> {
     let mut since_seq: usize = 0;
 
     loop {
-        let result = conn
-            .call_tool(
+        let result = {
+            let mut c = conn.lock().await;
+            c.call_tool(
                 "meeting.wait_my_turn",
                 serde_json::json!({ "since_seq": since_seq }),
                 Duration::from_secs(35),
             )
             .await
-            .map_err(|e| format!("wait_my_turn: {e}"))?;
+            .map_err(|e| format!("wait_my_turn: {e}"))?
+        };
 
         let payload = tool_result_text_json(&result).ok_or("invalid wait_my_turn response")?;
 
@@ -124,7 +140,6 @@ async fn room_loop(
             since_seq = seq as usize;
         }
 
-        // Forward new turns to Telegram.
         if let Some(delta) = turn["transcript_delta"].as_array() {
             for entry in delta {
                 let speaker = entry["display_name"].as_str().unwrap_or("?");
@@ -135,31 +150,6 @@ async fn room_loop(
                         eprintln!("[telegram-bridge] send_message error: {e}");
                     }
                 }
-            }
-        }
-
-        // Handle our turn.
-        if turn["your_turn"].as_bool() == Some(true) {
-            let turn_id = turn["turn_id"].as_u64();
-            let messages: Vec<IncomingMessage> = queue.lock().await.drain(..).collect();
-
-            if messages.is_empty() {
-                conn.call_tool("meeting.skip", serde_json::json!({}), Duration::from_secs(5))
-                    .await
-                    .ok();
-            } else {
-                let content = messages
-                    .iter()
-                    .map(|m| format!("[{}]: {}", m.sender_name, m.text))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                conn.call_tool(
-                    "meeting.submit",
-                    serde_json::json!({ "content": content, "turn_id": turn_id }),
-                    Duration::from_secs(5),
-                )
-                .await
-                .ok();
             }
         }
     }

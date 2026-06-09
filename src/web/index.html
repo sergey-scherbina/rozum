@@ -176,9 +176,6 @@
 const log = document.getElementById('log');
 const header = document.getElementById('header');
 const presence = document.getElementById('presence');
-const ws = new WebSocket(`ws://${location.host}/ws`);
-// Set by the server's hello envelope right after WS connect; used as the
-// alias for every outgoing message.
 let myName = 'web';
 
 // participant_id -> display_name
@@ -197,19 +194,51 @@ let topFetchInFlight = false;
 const GLYPH = { typing: '✏️', waiting: '⏳' };
 const VERB  = { typing: 'is typing…', waiting: 'is waiting' };
 
-ws.onopen = () => append('--- connected ---', 'system');
-ws.onclose = () => append('--- disconnected ---', 'system');
-ws.onmessage = e => {
-  const env = JSON.parse(e.data);
-  switch (env.kind) {
-    case 'hello':    if (env.name) myName = env.name; break;
-    case 'msg':      onMsg(env); break;
-    case 'presence': onPresence(env); break;
-    case 'joined':   onJoined(env); break;
-    case 'left':     onLeft(env); break;
-    case 'history':  onHistory(env); break;
-  }
-};
+let ws = null;
+// True once server sends 'hello' (auth OK). We only auto-reconnect if we
+// successfully authenticated at least once, to avoid a rapid-fire loop when
+// credentials are wrong.
+let authenticated = false;
+let reconnectDelay = 1000;
+const MAX_RECONNECT_DELAY = 30000;
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+
+  ws.onopen = () => {
+    reconnectDelay = 1000;
+    append('--- connected ---', 'system');
+  };
+
+  ws.onclose = () => {
+    append('--- disconnected ---', 'system');
+    presenceState.clear();
+    renderPresence();
+    if (!authenticated) return; // auth failure — don't loop
+    setTimeout(() => {
+      append('--- reconnecting… ---', 'system');
+      connect();
+    }, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+  };
+
+  ws.onmessage = e => {
+    const env = JSON.parse(e.data);
+    switch (env.kind) {
+      case 'hello':
+        authenticated = true;
+        if (env.name) myName = env.name;
+        break;
+      case 'msg':      onMsg(env); break;
+      case 'presence': onPresence(env); break;
+      case 'joined':   onJoined(env); break;
+      case 'left':     onLeft(env); break;
+      case 'history':  onHistory(env); break;
+    }
+  };
+}
+
+connect();
 
 function idOf(m) {
   return `${m.seq ?? 0}_${m.ts ?? 0}`;
@@ -414,6 +443,10 @@ function autosize() {
 
 function send() {
   if (!msgEl.value.trim()) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    append('--- not connected, message not sent ---', 'system');
+    return;
+  }
   ws.send(JSON.stringify({ name: myName, content: msgEl.value.trim() }));
   append(`${fmtTs(Math.floor(Date.now() / 1000))} [${myName}]: ${msgEl.value.trim()}`, 'me');
   msgEl.value = '';

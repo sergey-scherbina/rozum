@@ -1,0 +1,7 @@
+# Add this section to your Codex configuration file.
+# rozum mcp-proxy discovers active meeting rooms automatically.
+
+[mcp_servers.rozum]
+command = "rozum"
+args = ["mcp-proxy"]
+description = "rozum meeting-room agent. Use rooms.list to discover active rooms, then rooms.join(name) to join."

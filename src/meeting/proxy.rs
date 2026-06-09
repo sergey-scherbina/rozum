@@ -46,6 +46,7 @@ struct ProxyState {
 /// Sum ≈ 18 s — long enough to cover a typical `cargo build && rerun` of
 /// `rozum`, short enough not to hide a genuine failure.
 const RECONNECT_DELAYS_MS: &[u64] = &[200, 200, 500, 500, 1000, 1000, 2000, 2000, 5000, 5000];
+const HEARTBEAT_INTERVAL_SECS: u64 = 30;
 
 struct RoomConn {
     service: RunningService<RoleClient, RoomProxyClient>,
@@ -91,10 +92,12 @@ impl ProxyServer {
                 // before surfacing the failure to the agent.
                 self.state.lock().await.current_room = None;
                 match self.try_reconnect_current_room().await {
-                    Ok(new_peer) => match call_room_tool_via_peer(&new_peer, tool_name, params).await {
-                        Ok(result) => result,
-                        Err(e) => err_result(&format!("room-error: {e}")),
-                    },
+                    Ok(new_peer) => {
+                        match call_room_tool_via_peer(&new_peer, tool_name, params).await {
+                            Ok(result) => result,
+                            Err(e) => err_result(&format!("room-error: {e}")),
+                        }
+                    }
                     Err(e) => err_result(&format!("room-error: {e}")),
                 }
             }
@@ -377,23 +380,23 @@ impl ProxyServer {
 
         // Fire one immediate mark so the typing indicator appears without a
         // 15 s wait. Ignore failures: the loop below will retry.
-        let _ = call_room_tool_via_peer(
-            &peer,
-            "meeting.mark_responding",
-            serde_json::json!({}),
-        )
-        .await;
+        let _ =
+            call_room_tool_via_peer(&peer, "meeting.mark_responding", serde_json::json!({})).await;
 
         let peer_for_loop = peer;
         let task = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                let _ = call_room_tool_via_peer(
+                tokio::time::sleep(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS)).await;
+                if call_room_tool_via_peer(
                     &peer_for_loop,
                     "meeting.mark_responding",
                     serde_json::json!({}),
                 )
-                .await;
+                .await
+                .is_err()
+                {
+                    break;
+                }
             }
         });
         self.state.lock().await.heartbeat_task = Some(task);

@@ -7,13 +7,20 @@ license = "Apache-2.0"
 [features]
 default = []
 local-models = ["dep:candle", "dep:candle-transformers", "dep:tokenizers"]
+gguf = ["dep:llama-cpp-2"]
 
 [dependencies]
 candle = { package = "candle-core", version = "0.10.2", optional = true }
 candle-transformers = { version = "0.10.2", optional = true }
 tokenizers = { version = "0.22.0", features = ["onig"], optional = true }
+llama-cpp-2 = { version = ">=0.1.100", features = ["metal"], optional = true }
 
 tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+tokio-util = "0.7"
+async-stream = "0.3"
+futures = "0.3"
+tokio-stream = "0.1"
 rmcp = { version = "1.7", features = ["server", "client", "transport-io"] }
 schemars = "1.0"
 ratatui = "0.29"
@@ -28,7 +35,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
 tempfile = "3"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
 axum = { version = "0.8", features = ["ws"] }

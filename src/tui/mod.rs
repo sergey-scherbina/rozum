@@ -261,7 +261,7 @@ fn handle_input_text(text: &str, app: &mut AppState, m: &mut Meeting) {
 
 async fn refresh_from_meeting(meeting: &Arc<Mutex<Meeting>>, app: &mut AppState) {
     let m = meeting.lock().await;
-            app.participants = m
+    app.participants = m
         .participants
         .iter()
         .filter(|p| !p.is_bridge())
@@ -417,7 +417,11 @@ fn count_visual_lines(lines: &[String], width: u16) -> u16 {
     let mut total: usize = 0;
     for line in lines {
         let len = line.chars().count();
-        total += if len == 0 { 1 } else { line.chars().count().div_ceil(w) };
+        total += if len == 0 {
+            1
+        } else {
+            line.chars().count().div_ceil(w)
+        };
     }
     total.max(1) as u16
 }

@@ -1,16 +1,22 @@
 mod backend;
+pub mod discord;
+pub mod gateway;
+pub mod gguf;
 pub mod meeting;
+pub mod openai_http;
 pub mod telegram;
 pub mod tui;
+pub mod web;
 
 #[cfg(feature = "local-models")]
 pub use backend::CandleBackend;
 pub use backend::{
     BackendAttempt, BackendConfig, BackendEngine, BackendOrchestrator, BackendPolicy,
-    BackendRegistry, GEMMA_3_270M_IT_Q2_K, GenerationResponse, GgufModelSpec, HelloBackend,
-    InferenceBackend, LlamaGgufCommandBackend, ModelError, ModelResult, ModelRuntimeConfig,
-    PlaceholderBackend, QWEN3_06B_Q4_K_M, SMOLLM2_135M_INSTRUCT_Q2_K, SMOLLM2_135M_INSTRUCT_Q4_K_M,
-    TINY_GGUF_MODELS,
+    BackendRegistry, ChatBackend, ChatEvent, ChatRequest, ChatStream, ContentBlock,
+    GEMMA_3_270M_IT_Q2_K, GenerationResponse, GgufModelSpec, HelloBackend, LlamaGgufCommandBackend,
+    Message, ModelError, ModelResult, ModelRuntimeConfig, PlaceholderBackend, QWEN3_06B_Q4_K_M,
+    Role, SMOLLM2_135M_INSTRUCT_Q2_K, SMOLLM2_135M_INSTRUCT_Q4_K_M, SamplingParams, StopReason,
+    TINY_GGUF_MODELS, ToolDef, collect_to_string,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -46,9 +52,11 @@ impl<B> AiModel<B> {
     }
 }
 
-impl<B: InferenceBackend> AiModel<B> {
-    pub fn generate(&self, input: &str) -> ModelResult<String> {
-        self.backend.generate(input)
+impl<B: ChatBackend> AiModel<B> {
+    pub async fn generate(&self, input: &str) -> ModelResult<String> {
+        let req = ChatRequest::simple(input);
+        let stream = self.backend.chat(req).await?;
+        collect_to_string(stream).await
     }
 }
 
@@ -63,24 +71,21 @@ mod tests {
     #[test]
     fn responds_with_hello() {
         let model = AiModel::new();
-
         assert_eq!(model.respond(""), "hello!");
         assert_eq!(model.respond("anything"), "hello!");
     }
 
-    #[test]
-    fn generates_with_default_backend() {
+    #[tokio::test]
+    async fn generates_with_default_backend() {
         let model = AiModel::new();
-
-        assert_eq!(model.generate("").unwrap(), "hello!");
-        assert_eq!(model.generate("anything").unwrap(), "hello!");
+        assert_eq!(model.generate("").await.unwrap(), "hello!");
+        assert_eq!(model.generate("anything").await.unwrap(), "hello!");
     }
 
-    #[test]
-    fn can_construct_from_backend() {
+    #[tokio::test]
+    async fn can_construct_from_backend() {
         let model = AiModel::from_backend(HelloBackend::new());
-
-        assert_eq!(model.generate("test").unwrap(), "hello!");
+        assert_eq!(model.generate("test").await.unwrap(), "hello!");
     }
 
     #[test]
@@ -95,27 +100,20 @@ mod tests {
     #[test]
     fn model_specs_build_download_urls() {
         let url = SMOLLM2_135M_INSTRUCT_Q4_K_M.download_url();
-
         assert!(url.starts_with("https://huggingface.co/"));
         assert!(url.ends_with("/SmolLM2-135M-Instruct-Q4_K_M.gguf"));
     }
 
-    #[test]
-    fn default_orchestrator_uses_hello_backend() {
+    #[tokio::test]
+    async fn default_orchestrator_uses_hello_backend() {
         let model = AiModel::from_runtime_config(ModelRuntimeConfig::default());
-
-        assert_eq!(model.generate("test").unwrap(), "hello!");
+        assert_eq!(model.generate("test").await.unwrap(), "hello!");
     }
 
     #[test]
     fn preview_config_declares_multiple_backend_engines() {
         let config = ModelRuntimeConfig::tiny_multi_backend_preview();
-        let engines: Vec<_> = config
-            .backends
-            .iter()
-            .map(|backend| backend.engine)
-            .collect();
-
+        let engines: Vec<_> = config.backends.iter().map(|b| b.engine).collect();
         assert_eq!(
             engines,
             vec![
@@ -131,8 +129,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fallback_policy_returns_first_successful_backend() {
+    #[tokio::test]
+    async fn fallback_policy_returns_first_successful_backend() {
         let orchestrator = BackendOrchestrator::from_config(ModelRuntimeConfig {
             backends: vec![
                 BackendConfig::new("candle", BackendEngine::Candle),
@@ -140,14 +138,13 @@ mod tests {
             ],
             policy: BackendPolicy::fallback(vec!["candle".to_owned(), "hello".to_owned()]),
         });
-        let response = orchestrator.generate_detailed("test").unwrap();
-
+        let response = orchestrator.generate_detailed("test").await.unwrap();
         assert_eq!(response.backend_id, "hello");
         assert_eq!(response.output, "hello!");
     }
 
-    #[test]
-    fn fanout_policy_exposes_all_backend_attempts() {
+    #[tokio::test]
+    async fn fanout_policy_exposes_all_backend_attempts() {
         let orchestrator = BackendOrchestrator::from_config(ModelRuntimeConfig {
             backends: vec![
                 BackendConfig::new("candle", BackendEngine::Candle),
@@ -162,8 +159,7 @@ mod tests {
                 "hello".to_owned(),
             ]),
         });
-        let attempts = orchestrator.generate_all("test");
-
+        let attempts = orchestrator.generate_all("test").await;
         assert_eq!(attempts.len(), 4);
         assert_eq!(attempts[0].backend_id, "candle");
         assert!(!attempts[0].succeeded());
@@ -175,16 +171,15 @@ mod tests {
         assert!(attempts[3].succeeded());
     }
 
-    #[test]
-    fn missing_backend_id_is_reported_clearly() {
+    #[tokio::test]
+    async fn missing_backend_id_is_reported_clearly() {
         let config = ModelRuntimeConfig {
             backends: vec![BackendConfig::hello("hello")],
             policy: BackendPolicy::single("missing"),
         };
         let orchestrator = BackendOrchestrator::from_config(config);
-
         assert_eq!(
-            orchestrator.generate_detailed("test").unwrap_err(),
+            orchestrator.generate_detailed("test").await.unwrap_err(),
             ModelError::BackendNotFound("missing".to_owned())
         );
     }

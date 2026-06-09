@@ -104,7 +104,11 @@ pub async fn run_bridge_with(
 
     let (broadcast_tx, _) = broadcast::channel::<String>(64);
     let conn = Arc::new(Mutex::new(conn));
-    let persist_path = if persist { Some(transcript_path(room)) } else { None };
+    let persist_path = if persist {
+        Some(transcript_path(room))
+    } else {
+        None
+    };
     let initial = match &persist_path {
         Some(p) => load_persisted_transcript(p),
         None => Vec::new(),
@@ -157,7 +161,10 @@ fn transcript_path(room: &str) -> PathBuf {
                 .map(|h| PathBuf::from(h).join(".local/state"))
                 .unwrap_or_else(|| PathBuf::from(".local/state"))
         });
-    base.join("rozum").join("rooms").join(room).join("transcript.jsonl")
+    base.join("rozum")
+        .join("rooms")
+        .join(room)
+        .join("transcript.jsonl")
 }
 
 fn load_persisted_transcript(path: &PathBuf) -> Vec<Value> {
@@ -230,10 +237,7 @@ async fn auth_layer(
     let unauthorized = |realm: &str| -> Response {
         (
             StatusCode::UNAUTHORIZED,
-            [(
-                header::WWW_AUTHENTICATE,
-                format!("Basic realm=\"{realm}\""),
-            )],
+            [(header::WWW_AUTHENTICATE, format!("Basic realm=\"{realm}\""))],
             "401 Unauthorized\n",
         )
             .into_response()
@@ -245,7 +249,10 @@ async fn auth_layer(
     let Ok(s) = raw.to_str() else {
         return unauthorized(&cfg.realm);
     };
-    let Some(b64) = s.strip_prefix("Basic ").or_else(|| s.strip_prefix("basic ")) else {
+    let Some(b64) = s
+        .strip_prefix("Basic ")
+        .or_else(|| s.strip_prefix("basic "))
+    else {
         return unauthorized(&cfg.realm);
     };
     let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
@@ -430,7 +437,10 @@ async fn room_loop(
             if payload["still_waiting"].as_bool() == Some(true) {
                 (
                     payload["polling"].as_array().cloned().unwrap_or_default(),
-                    payload["responding"].as_array().cloned().unwrap_or_default(),
+                    payload["responding"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
                     payload["seq"].as_u64(),
                     Vec::new(),
                 )
@@ -476,10 +486,7 @@ async fn room_loop(
             if pid == bridge_pid {
                 continue;
             }
-            let name = entry["display_name"]
-                .as_str()
-                .unwrap_or(&pid)
-                .to_owned();
+            let name = entry["display_name"].as_str().unwrap_or(&pid).to_owned();
             let first_seen = !last_seen.contains_key(&pid);
             last_seen.insert(pid.clone(), (name.clone(), now));
             if first_seen {
