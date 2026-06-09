@@ -42,23 +42,27 @@ impl Default for GgufOptions {
 
 /// Resolve a model spec to a concrete GGUF file path.
 ///
-/// Supported forms:
-/// - Absolute path: `/path/to/model.gguf`
-/// - `lmstudio:<user>/<repo>` — searches `~/.cache/lm-studio/models/<user>/<repo>/`
+/// Resolution order (first match wins):
+/// 1. Absolute / relative filesystem path that exists.
+/// 2. `lmstudio:<user>/<repo>` — search `~/.cache/lm-studio/models/<user>/<repo>/`.
+/// 3. Bare `<name>[:<tag>]` interpreted as an Ollama model whose blob already
+///    sits in `~/.ollama/models/blobs/` (we use the cached file directly — no
+///    HTTP call to a running `ollama serve`).
 ///
-/// Returns `None` and logs a warning if the path cannot be determined.
+/// Returns `None` and logs a warning if no path can be determined.
 pub fn resolve_model_path(spec: &str) -> Option<PathBuf> {
     if let Some(repo) = spec.strip_prefix("lmstudio:") {
-        resolve_lmstudio_model(repo)
-    } else {
-        let path = PathBuf::from(spec);
-        if path.exists() {
-            Some(path)
-        } else {
-            tracing::warn!(spec = %spec, "gguf: path does not exist");
-            None
-        }
+        return resolve_lmstudio_model(repo);
     }
+    let path = PathBuf::from(spec);
+    if path.exists() {
+        return Some(path);
+    }
+    if let Some(blob) = resolve_ollama_blob(spec) {
+        return Some(blob);
+    }
+    tracing::warn!(spec = %spec, "gguf: could not resolve spec to a file path");
+    None
 }
 
 fn lmstudio_home() -> PathBuf {
@@ -70,6 +74,68 @@ fn lmstudio_home() -> PathBuf {
                 .unwrap_or_else(|| PathBuf::from("."));
             home.join(".cache/lm-studio")
         })
+}
+
+fn ollama_home() -> PathBuf {
+    std::env::var_os("ROZUM_OLLAMA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            home.join(".ollama")
+        })
+}
+
+/// Read the Ollama manifest for `<name>[:<tag>]` (default tag `latest`) and
+/// return the cached GGUF blob path. Ollama itself does not have to be running
+/// — we only touch files on disk.
+pub fn resolve_ollama_blob(spec: &str) -> Option<PathBuf> {
+    let (name, tag) = match spec.rsplit_once(':') {
+        Some((n, t)) if !n.is_empty() && !t.is_empty() => (n, t),
+        _ => (spec, "latest"),
+    };
+
+    let base = ollama_home().join("models");
+    // Ollama keeps manifests under registry.ollama.ai/library/<name>/<tag> for
+    // models pulled from the default registry; namespaced models live under
+    // registry.ollama.ai/<user>/<name>/<tag>.
+    let library = base
+        .join("manifests")
+        .join("registry.ollama.ai")
+        .join("library")
+        .join(name)
+        .join(tag);
+    let manifest_path = if library.is_file() {
+        library
+    } else {
+        // Try one extra layer of nesting for namespaced repos like
+        // hf.co/<user>/<repo> that some tools rewrite into the manifest tree.
+        let alt = base
+            .join("manifests")
+            .join("registry.ollama.ai")
+            .join(name)
+            .join(tag);
+        if alt.is_file() {
+            alt
+        } else {
+            return None;
+        }
+    };
+
+    let manifest_text = std::fs::read_to_string(&manifest_path).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text).ok()?;
+    let layers = manifest["layers"].as_array()?;
+    let digest = layers.iter().find_map(|layer| {
+        if layer["mediaType"].as_str() == Some("application/vnd.ollama.image.model") {
+            layer["digest"].as_str().map(str::to_owned)
+        } else {
+            None
+        }
+    })?;
+    let blob_name = digest.replace(':', "-");
+    let blob_path = base.join("blobs").join(blob_name);
+    blob_path.is_file().then_some(blob_path)
 }
 
 /// Search `~/.cache/lm-studio/models/<repo>/` for a GGUF file.
@@ -817,6 +883,55 @@ mod tests {
             std::env::remove_var("ROZUM_LMSTUDIO_HOME");
         }
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_ollama_blob_finds_cached_file() {
+        // Set up a fake Ollama tree: manifests/.../qwen3.5/9b-mlx + blobs/sha256-…
+        let dir = TempDir::new().unwrap();
+        let models = dir.path().join("models");
+        let manifest_dir = models
+            .join("manifests")
+            .join("registry.ollama.ai")
+            .join("library")
+            .join("qwen3.5");
+        let blobs_dir = models.join("blobs");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+
+        let digest = "sha256:deadbeef";
+        let blob_name = digest.replace(':', "-");
+        std::fs::write(blobs_dir.join(&blob_name), b"fake").unwrap();
+        let manifest = serde_json::json!({
+            "layers": [
+                { "mediaType": "application/vnd.ollama.image.model", "digest": digest }
+            ]
+        });
+        std::fs::write(
+            manifest_dir.join("9b-mlx"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("ROZUM_OLLAMA_HOME", dir.path());
+        }
+        // Note: bare model spec, no `ollama:` prefix.
+        let bare = resolve_model_path("qwen3.5:9b-mlx");
+        let default_tag = resolve_model_path("qwen3.5"); // should NOT match — no `latest` tag
+        unsafe {
+            std::env::remove_var("ROZUM_OLLAMA_HOME");
+        }
+
+        assert!(
+            bare.is_some(),
+            "expected to resolve qwen3.5:9b-mlx, got None"
+        );
+        assert!(bare.unwrap().file_name().unwrap() == blob_name.as_str());
+        assert!(
+            default_tag.is_none(),
+            "should not resolve to default :latest when not present"
+        );
     }
 
     // ── Tool-use parser tests ──

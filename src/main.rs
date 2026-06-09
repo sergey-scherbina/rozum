@@ -523,8 +523,11 @@ fn print_no_backend_hints(model_spec: &str) {
     eprintln!("  in-process GGUF (recommended; Metal on Apple Silicon):");
     eprintln!("    brew install cmake");
     eprintln!("    cargo build --features gguf");
-    eprintln!("    rozum launch --model /path/to/model.gguf      claude");
-    eprintln!("    rozum launch --model 'lmstudio:<user>/<repo>'  claude");
+    eprintln!("    rozum launch --model /path/to/model.gguf       claude");
+    eprintln!("    rozum launch --model 'lmstudio:<user>/<repo>'   claude");
+    eprintln!(
+        "    rozum launch --model '<ollama-name>:<tag>'      claude   # reads ~/.ollama/models/blobs/"
+    );
     eprintln!();
     eprintln!("  mlx_lm.server (Python, native MLX safetensors):");
     eprintln!("    pip install mlx-lm");
