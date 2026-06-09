@@ -350,10 +350,102 @@ index 92b1d9b..37e196b 100644
 +    }
 +}
 diff --git a/mistralrs-core/src/vision_models/qwen3_5_moe/text.rs b/mistralrs-core/src/vision_models/qwen3_5_moe/text.rs
-index 715b556..7350cad 100644
+index 715b556..526ea96 100644
 --- a/mistralrs-core/src/vision_models/qwen3_5_moe/text.rs
 +++ b/mistralrs-core/src/vision_models/qwen3_5_moe/text.rs
-@@ -869,7 +869,9 @@ impl IsqModel for Qwen3_5MoeTextModel {
+@@ -287,11 +287,28 @@ impl SparseMoeBlock {
+             .cloned()
+             .unwrap_or(real_device);
+ 
+-        let gate = layers::linear_no_bias(
+-            cfg.hidden_size,
+-            cfg.num_experts,
+-            vb.pp("gate").set_device(layer_device.clone()),
+-        )?;
++        // MLX-AFQ checkpoints quantise the MoE router (`gate`,
++        // `shared_expert_gate`); if a quantization config is present, load
++        // via ColumnParallelLayer so the per-tensor AFQ override applies.
++        // Otherwise fall back to plain linear (Qwen3-Next style).
++        let gate: candle_nn::Linear = match &cfg.quantization_config {
++            Some(qc) => {
++                let qm = mistralrs_quant::ColumnParallelLayer::new(
++                    cfg.hidden_size,
++                    cfg.num_experts,
++                    &Some(qc.clone()),
++                    false,
++                    comm,
++                    vb.pp("gate").set_device(layer_device.clone()),
++                )?;
++                candle_nn::Linear::new(qm.dequantize_w()?, None)
++            }
++            None => layers::linear_no_bias(
++                cfg.hidden_size,
++                cfg.num_experts,
++                vb.pp("gate").set_device(layer_device.clone()),
++            )?,
++        };
+ 
+         let moe_cfg = MoEExpertsConfig {
+             num_experts: cfg.num_experts,
+@@ -319,13 +336,28 @@ impl SparseMoeBlock {
+             comm,
+         )?;
+ 
+-        let mut seg_w = vb
+-            .pp("shared_expert_gate")
+-            .get((1, cfg.hidden_size), "weight")?;
+-        if loading_isq {
+-            seg_w = seg_w.to_device(&layer_device)?;
+-        }
+-        let shared_expert_gate = Linear::new(seg_w, None);
++        let shared_expert_gate = match &cfg.quantization_config {
++            Some(qc) => {
++                let qm = mistralrs_quant::ColumnParallelLayer::new(
++                    cfg.hidden_size,
++                    1,
++                    &Some(qc.clone()),
++                    false,
++                    comm,
++                    vb.pp("shared_expert_gate").set_device(layer_device.clone()),
++                )?;
++                Linear::new(qm.dequantize_w()?, None)
++            }
++            None => {
++                let mut seg_w = vb
++                    .pp("shared_expert_gate")
++                    .get((1, cfg.hidden_size), "weight")?;
++                if loading_isq {
++                    seg_w = seg_w.to_device(&layer_device)?;
++                }
++                Linear::new(seg_w, None)
++            }
++        };
+ 
+         Ok(Self {
+             gate,
+@@ -604,12 +636,20 @@ impl Qwen3_5MoeTextModel {
+             mapper.set_nm_device(vb_m.pp("norm"), false),
+         )?;
+         let lm_head = if !tie {
++            // MLX checkpoints store lm_head as `language_model.lm_head.*`
++            // (a sibling of `language_model.model.*`). Pick the prefix that
++            // actually exists in the checkpoint.
++            let lm_head_vb = if vb.contains_tensor("language_model.lm_head.weight") {
++                vb.pp("language_model").pp("lm_head")
++            } else {
++                vb.pp("lm_head")
++            };
+             ReplicatedLayer::new(
+                 cfg.hidden_size,
+                 cfg.vocab_size,
+                 &cfg.quantization_config,
+                 false,
+-                mapper.set_nm_device(vb.pp("lm_head"), normal_loading_metadata.loading_isq),
++                mapper.set_nm_device(lm_head_vb, normal_loading_metadata.loading_isq),
+             )?
+         } else {
+             ReplicatedLayer::from_linear(candle_nn::Linear::new(
+@@ -869,7 +909,9 @@ impl IsqModel for Qwen3_5MoeTextModel {
                      tensors.push((&mut attn.o_proj, Some(i)));
                  }
                  LayerImpl::LinearAttention(gdn) => {
@@ -364,3 +456,157 @@ index 715b556..7350cad 100644
                      tensors.push((&mut gdn.out_proj, Some(i)));
                  }
              }
+diff --git a/mistralrs-quant/src/afq/mod.rs b/mistralrs-quant/src/afq/mod.rs
+index 9076075..6f5175e 100644
+--- a/mistralrs-quant/src/afq/mod.rs
++++ b/mistralrs-quant/src/afq/mod.rs
+@@ -279,9 +279,15 @@ impl AfqLayer {
+         bias: bool,
+         vb: ShardedVarBuilder,
+     ) -> Result<Arc<dyn QuantMethod>> {
+-        let QuantizedConfig::Afq { bits, group_size } = config else {
++        if !matches!(config, QuantizedConfig::Afq { .. }) {
+             candle_core::bail!("Unexpected quantization config.")
+-        };
++        }
++        // Look up per-tensor overrides (MLX checkpoints carry these for the
++        // MoE router which runs at 8-bit while the rest stays at 4-bit).
++        let path = vb.prefix();
++        let (bits, group_size) = config
++            .afq_params_for_path(&path)
++            .expect("afq_params_for_path returned None for an Afq config");
+ 
+         let w_q = vb.get_with_hints_dtype(
+             (out_dim, in_dim * bits / 32),
+@@ -305,8 +311,8 @@ impl AfqLayer {
+             scales,
+             bias,
+             biases,
+-            bits: AfqBits::try_from(*bits)?,
+-            group_size: AfqGroupSize::try_from(*group_size)?,
++            bits: AfqBits::try_from(bits)?,
++            group_size: AfqGroupSize::try_from(group_size)?,
+         }))
+     }
+ 
+@@ -318,9 +324,13 @@ impl AfqLayer {
+         bias: bool,
+         vb: ShardedVarBuilder,
+     ) -> Result<Arc<dyn QuantMethod>> {
+-        let QuantizedConfig::Afq { bits, group_size } = config else {
++        if !matches!(config, QuantizedConfig::Afq { .. }) {
+             candle_core::bail!("Unexpected quantization config.")
+-        };
++        }
++        let path = vb.prefix();
++        let (bits, group_size) = config
++            .afq_params_for_path(&path)
++            .expect("afq_params_for_path returned None for an Afq config");
+ 
+         let w_q = vb.get_with_hints_dtype(
+             (num_local_experts, out_dim, in_dim * bits / 32),
+@@ -350,8 +360,8 @@ impl AfqLayer {
+             scales,
+             bias,
+             biases,
+-            bits: AfqBits::try_from(*bits)?,
+-            group_size: AfqGroupSize::try_from(*group_size)?,
++            bits: AfqBits::try_from(bits)?,
++            group_size: AfqGroupSize::try_from(group_size)?,
+         }))
+     }
+ }
+diff --git a/mistralrs-quant/src/lib.rs b/mistralrs-quant/src/lib.rs
+index 62e164b..2175266 100644
+--- a/mistralrs-quant/src/lib.rs
++++ b/mistralrs-quant/src/lib.rs
+@@ -311,6 +311,13 @@ pub enum QuantizedConfig {
+     Afq {
+         bits: usize,
+         group_size: usize,
++        // MLX AFQ checkpoints carry per-tensor overrides as sibling keys of
++        // the top-level config (e.g. mlx-community/Qwen3.6-* runs the MoE
++        // router at 8-bit while the rest of the model is 4-bit). Maps the
++        // full tensor path (without the trailing field) to (bits, group_size).
++        // Empty for non-MLX or uniformly-quantised checkpoints.
++        #[serde(default, skip)]
++        overrides: std::collections::HashMap<String, (usize, usize)>,
+     },
+     MXFP4 {},
+ }
+@@ -326,13 +333,32 @@ struct RawConfig {
+     bnb_4bit_quant_type: Option<String>,
+ }
+ 
++// MLX configs put per-tensor AFQ overrides as sibling keys at the same level
++// as `bits`/`group_size`. Scan the raw JSON object for object-valued siblings
++// and pull `(bits, group_size)` out of each.
++fn collect_afq_overrides(value: &serde_json::Value) -> std::collections::HashMap<String, (usize, usize)> {
++    let mut out = std::collections::HashMap::new();
++    let Some(obj) = value.as_object() else { return out };
++    for (k, v) in obj {
++        let Some(inner) = v.as_object() else { continue };
++        let bits = inner.get("bits").and_then(|x| x.as_u64());
++        let gs = inner.get("group_size").and_then(|x| x.as_u64());
++        if let (Some(b), Some(g)) = (bits, gs) {
++            out.insert(k.clone(), (b as usize, g as usize));
++        }
++    }
++    out
++}
++
+ // Custom deserializer implementation
+ impl<'de> Deserialize<'de> for QuantizedConfig {
+     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+     where
+         D: Deserializer<'de>,
+     {
+-        let raw = RawConfig::deserialize(deserializer)?;
++        let value = serde_json::Value::deserialize(deserializer)?;
++        let raw: RawConfig = serde_json::from_value(value.clone())
++            .map_err(serde::de::Error::custom)?;
+ 
+         match &raw.quant_method {
+             Some(m) if m == "gptq" || m == "awq" => {
+@@ -365,7 +391,11 @@ impl<'de> Deserialize<'de> for QuantizedConfig {
+                 let group_size = raw
+                     .group_size
+                     .ok_or_else(|| serde::de::Error::missing_field("group_size"))?;
+-                Ok(QuantizedConfig::Afq { bits, group_size })
++                Ok(QuantizedConfig::Afq {
++                    bits,
++                    group_size,
++                    overrides: collect_afq_overrides(&value),
++                })
+             }
+             Some(m) if m == "mxfp4" => {
+                 Ok(QuantizedConfig::MXFP4 {  })
+@@ -377,7 +407,11 @@ impl<'de> Deserialize<'de> for QuantizedConfig {
+                 let group_size = raw
+                     .group_size
+                     .ok_or_else(|| serde::de::Error::missing_field("group_size"))?;
+-                Ok(QuantizedConfig::Afq { bits, group_size })
++                Ok(QuantizedConfig::Afq {
++                    bits,
++                    group_size,
++                    overrides: collect_afq_overrides(&value),
++                })
+             }
+             Some(unknown_method) => {
+                 Err(serde::de::Error::custom(format!(
+@@ -389,6 +423,15 @@ impl<'de> Deserialize<'de> for QuantizedConfig {
+ }
+ 
+ impl QuantizedConfig {
++    // Return (bits, group_size) for an AFQ layer at `path`. Looks up the MLX
++    // per-tensor override map first, falling back to the model-wide defaults.
++    // `path` is typically `vb.prefix()` of the AfqLayer being loaded.
++    pub fn afq_params_for_path(&self, path: &str) -> Option<(usize, usize)> {
++        let Self::Afq { bits, group_size, overrides } = self else { return None };
++        if let Some(&(b, g)) = overrides.get(path) { return Some((b, g)); }
++        Some((*bits, *group_size))
++    }
++
+     pub fn name(&self) -> &'static str {
+         match self {
+             Self::GptqAwq { .. } => "gptq",

@@ -121,7 +121,7 @@ What lands in this patch:
 
 Smoke-test progress against `mlx-community/Qwen3.6-35B-A3B-4bit`:
 - Before patch: fails immediately on `linear_attn.in_proj_qkv.weight`.
-- After patch: progresses through `linear_attn` (in_proj + conv1d), fails next
+- After patch: progresses through `linear_attn` (in_proj + conv1d), fails on lm_head.weight (MLX uses language_model.lm_head.* path), per-tensor 8-bit override on mlp.gate.weight (MLX puts MoE router at 8-bit while rest is 4-bit), and lm_head AFQ-aware loading. Day-2 patches add all three; model now loads end-to-end. Day-3 work is debugging the SplitAfq activation path which produces empty completions today (model picks EOS immediately).
   on `mlp.gate.weight` with shape `(256, 512)` (8-bit packed) vs expected
   `(256, 2048)` (4-bit packed).
 
