@@ -539,9 +539,8 @@ fn print_no_backend_hints(model_spec: &str) {
         "    rozum launch --model '<ollama-name>:<tag>'      claude   # reads ~/.ollama/models/blobs/"
     );
     eprintln!();
-    eprintln!("  in-process native MLX (mistralrs crate, Metal, safetensors):");
-    eprintln!("    cargo build --features mistralrs");
-    eprintln!("    rozum launch --model mlx-community:Qwen2.5-Coder-32B-Instruct-4bit claude");
+    eprintln!("  in-process native MLX (mistralrs, on by default, Metal, safetensors):");
+    eprintln!("    rozum launch --model mlx-community:Qwen3.6-35B-A3B-4bit claude");
     eprintln!("    rozum launch --model hf:Qwen/Qwen3-4B claude");
     eprintln!();
     eprintln!("  mlx_lm.server (Python, native MLX safetensors):");

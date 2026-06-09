@@ -87,14 +87,14 @@ Model spec resolution lives in `MistralrsBackend::new`:
 - `/abs/path/to/dir`: directly pass to mistralrs's local-model loader.
 - `hf:<repo>` or `mlx-community:<repo>`: use mistralrs's HF auto-download or call `hf-hub` directly to materialise files under `~/.cache/huggingface/hub/<repo>/`.
 
-mistralrs is gated behind the `mistralrs` feature so default build remains unchanged. Apple Silicon Metal kernels activate via mistralrs's `metal` feature, requested when building `--features mistralrs` on aarch64-apple-darwin.
+The `mistralrs` feature is **enabled by default** so `cargo build` produces a binary that can already run local MLX models on Apple Silicon. Users who only need the meeting-room runtime — or who don't have the Metal Toolchain installed — can drop the dependency with `cargo build --no-default-features`. Apple Silicon Metal kernels activate via mistralrs's `metal` feature on aarch64-apple-darwin.
 
 ## Decisions
 
 - **mistralrs over hand-rolled mlx-rs port** — chosen because mistralrs already implements Qwen2/Qwen3/Llama/Mistral forward passes, KV-cache, chat templates, and sampling. A hand-rolled port via `mlx-rs` core ops would require thousands of lines per model family and ongoing maintenance.
 - **In-process over subprocess** — chosen to eliminate Python from the runtime path for users who want a single-binary deployment.
 - **Reuse `gguf::ToolUseParser`** — chosen because the model-side tool-call format is engine-independent; duplicating the parser would create drift.
-- **Optional feature** — chosen because mistralrs is a heavy dependency (compiles llama.cpp-style Metal kernels) that should not bloat the default build.
+- **On by default** — chosen because the primary product use case is now "rozum hosts a local LLM for Claude Code / Codex", and asking every user to remember `--features mistralrs` defeated that. The Metal Toolchain requirement is a one-time setup; users without it can opt out via `--no-default-features`.
 
 ## Risks / sharp edges
 

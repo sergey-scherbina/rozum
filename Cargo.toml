@@ -5,7 +5,11 @@ edition = "2024"
 license = "Apache-2.0"
 
 [features]
-default = []
+# mistralrs is on by default so `cargo build` produces a binary that can run
+# local MLX models out of the box on Apple Silicon. Override with
+# `cargo build --no-default-features` if you only need the meeting-room
+# runtime and want to skip the Metal Toolchain requirement.
+default = ["mistralrs"]
 local-models = ["dep:candle", "dep:candle-transformers", "dep:tokenizers"]
 gguf = ["dep:llama-cpp-2"]
 mistralrs = ["dep:mistralrs"]
