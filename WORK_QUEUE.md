@@ -53,7 +53,7 @@ Current sprint focus: (1) make Rozum a reliable local meeting room for live agen
   - Goal: `top`/`Activity Monitor` shows `rozum` at ~0% CPU when no messages arrive, no agents are polling, and no keys are pressed.
   - Spec first: `docs/specs/idle-cpu-reduction.md`.
 
-- [ ] chat-backend-spi - Replace sync InferenceBackend with async streaming ChatBackend (tools, sampling, cancel).
+- [x] chat-backend-spi - Replace sync InferenceBackend with async streaming ChatBackend (tools, sampling, cancel).
   - New trait `ChatBackend` with `chat(req) -> Stream<ChatEvent>` and `context_window() -> u32`.
   - Content blocks (`Text` / `ToolUse` / `ToolResult`) so tool-use lives in the SPI from day 1.
   - `CancellationToken` in `ChatRequest`; drop-of-stream stops backend work.
@@ -63,7 +63,7 @@ Current sprint focus: (1) make Rozum a reliable local meeting room for live agen
   - Delete the old sync trait; migrate all `.generate(` call-sites to `chat().await + collect_to_string`.
   - Spec: `docs/specs/chat-backend-spi.md`.
 
-- [ ] gguf-backend - In-process GGUF inference on Metal via llama-cpp-2 (replaces llama-gguf-command).
+- [x] gguf-backend - In-process GGUF inference on Metal via llama-cpp-2 (replaces llama-gguf-command).
   - New crate feature `gguf` with `llama-cpp-2` (metal) dep; default build unaffected.
   - `GgufBackend` loads model once; `chat()` prefill+decode with sampling, tool-use parser, cancel between tokens.
   - Prompt-cache: reuse KV by `session_id` (trim only divergent tail on prefix match).
@@ -73,7 +73,7 @@ Current sprint focus: (1) make Rozum a reliable local meeting room for live agen
   - Integration test under `#[ignore]` runs against a real GGUF on M-series.
   - Spec: `docs/specs/gguf-backend.md`.
 
-- [ ] api-gateway - Outward HTTP gateway (OpenAI + Anthropic dialects) for Claude Code and Codex.
+- [x] api-gateway - Outward HTTP gateway (OpenAI + Anthropic dialects) for Claude Code and Codex.
   - `axum` server, bind 127.0.0.1, optional bearer via `ROZUM_GATEWAY_TOKEN`.
   - `GET /v1/models`, `POST /v1/chat/completions` (OpenAI SSE with tool_calls), `POST /v1/messages` (Anthropic event-stream with tool_use blocks).
   - Tool-use mapping in both directions (Anthropic ↔ internal, OpenAI ↔ internal).
@@ -91,6 +91,12 @@ Current sprint focus: (1) make Rozum a reliable local meeting room for live agen
   - Argument reordering pre-parser supports both `rozum launch --model X claude` and `rozum launch claude --model X`; `--` separator forwards remaining args verbatim to the child.
   - Listener bound before child spawn — no startup race.
   - Spec: `docs/specs/launch-wrapper.md`.
+
+- [x] models-cli - `rozum models {list, list --remote, info <spec>}` for discovering and inspecting local LLM models.
+  - Scans HuggingFace, Ollama (GGUF + MLX-tensor layouts), and LMStudio caches without needing those runtimes running.
+  - `list --remote` prints a curated download list optimised for 24-36 GB Apple Silicon unified memory.
+  - `info <spec>` fetches HuggingFace metadata for not-installed models (author, downloads, license, total size, tags) and prints the install command.
+  - Module `src/models.rs`. Output columns: SOURCE | SIZE | SPEC.
 
 - [x] mistralrs-backend - In-process native-MLX backend via the `mistralrs` Rust crate.
   - New crate feature `mistralrs` with the `mistralrs` dep + Metal kernels on Apple Silicon.
