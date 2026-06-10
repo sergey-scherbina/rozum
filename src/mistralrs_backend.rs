@@ -17,9 +17,10 @@ mod inner {
     };
 
     use mistralrs::{
-        CalledFunction, ChatCompletionChunkResponse, ChunkChoice, Function, MemoryGpuConfig, Model,
-        ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder, Response, TextMessageRole, Tool,
-        ToolCallResponse, ToolCallType, ToolChoice, ToolType,
+        AutoDeviceMapParams, CalledFunction, ChatCompletionChunkResponse, ChunkChoice,
+        DeviceMapSetting, Function, MemoryGpuConfig, Model, ModelBuilder, PagedAttentionMetaBuilder,
+        RequestBuilder, Response, TextMessageRole, Tool, ToolCallResponse, ToolCallType, ToolChoice,
+        ToolType,
     };
 
     /// Cap on generated tokens when the request does not specify one, so a
@@ -68,39 +69,65 @@ mod inner {
     impl MistralrsBackend {
         /// `model_id` is anything `ModelBuilder::new` accepts: a HuggingFace
         /// repo (`<user>/<repo>`) or a local safetensors directory.
-        pub async fn new(model_id: &str, opts: MistralrsOptions) -> ModelResult<Self> {
+        pub async fn new(model_id: &str, mut opts: MistralrsOptions) -> ModelResult<Self> {
             eprintln!(
                 "mistralrs: loading '{model_id}' (first run downloads weights from HuggingFace into ~/.cache/huggingface/hub/)"
             );
-            let mut builder = ModelBuilder::new(model_id)
-                .with_logging() // enables hf-hub progress bars during download
-                .with_max_num_seqs(opts.max_num_seqs);
-            // PagedAttention computes attention block-wise (no full seq*seq score
-            // matrix) and pools the KV cache, which bounds the prefill memory peak
-            // for long prompts. Without it, a single ~2.4k-token prompt on a 27B
-            // model OOMs the Metal command buffer; with it, two such prompts run
-            // back-to-back fine. On by default; disable with ROZUM_MISTRALRS_PAGED=0.
-            if std::env::var("ROZUM_MISTRALRS_PAGED").as_deref() != Ok("0") {
-                match PagedAttentionMetaBuilder::default()
-                    .with_gpu_memory(MemoryGpuConfig::ContextSize(opts.n_ctx as usize))
-                    .build()
-                {
-                    Ok(cfg) => {
+            // Smallest context to retry down to before giving up.
+            const N_CTX_FLOOR: u32 = 8_192;
+            // The device-map fit check runs before weights load, so a too-big
+            // context fails fast and we can retry smaller. Step down by this much.
+            const N_CTX_STEP: u32 = 4_096;
+            let paged = std::env::var("ROZUM_MISTRALRS_PAGED").as_deref() != Ok("0");
+            let model = loop {
+                let mut builder = ModelBuilder::new(model_id)
+                    .with_logging() // enables hf-hub progress bars during download
+                    .with_max_num_seqs(opts.max_num_seqs)
+                    // The auto device-map defaults max_seq_len to 4096, which caps
+                    // the KV cache (and the PagedAttention pool) regardless of
+                    // n_ctx — long prompts get rejected as "too long". Raise it.
+                    .with_device_mapping(DeviceMapSetting::Auto(AutoDeviceMapParams::Text {
+                        max_seq_len: opts.n_ctx as usize,
+                        max_batch_size: opts.max_num_seqs.max(1),
+                    }));
+                // PagedAttention computes attention block-wise (no full seq*seq
+                // score matrix) and pools the KV cache, bounding the prefill memory
+                // peak for long prompts. Without it a single ~2.4k-token prompt on
+                // a 27B OOMs the Metal command buffer. Disable with ROZUM_MISTRALRS_PAGED=0.
+                if paged {
+                    if let Ok(cfg) = PagedAttentionMetaBuilder::default()
+                        .with_gpu_memory(MemoryGpuConfig::ContextSize(opts.n_ctx as usize))
+                        .build()
+                    {
                         eprintln!("mistralrs: PagedAttention enabled (ctx {})", opts.n_ctx);
                         builder = builder.with_paged_attn(cfg);
                     }
-                    Err(e) => eprintln!("mistralrs: PagedAttention config failed, using default: {e}"),
                 }
-            }
-            let model = builder
-                .build()
-                .await
-                .map_err(|e| {
-                    ModelError::BackendUnavailable(format!(
-                        "mistralrs: failed to load {model_id}: {e}"
-                    ))
-                })?;
-            eprintln!("mistralrs: '{model_id}' ready");
+                match builder.build().await {
+                    Ok(model) => break model,
+                    Err(e) => {
+                        // The device mapper refuses (before loading weights) when
+                        // model + KV cache exceeds Metal's working-set budget;
+                        // retry with a smaller context instead of failing outright.
+                        let msg = e.to_string();
+                        let too_big = msg.contains("does not fit")
+                            || msg.contains("exceeds total capacity");
+                        if too_big && opts.n_ctx > N_CTX_FLOOR {
+                            let reduced = opts.n_ctx.saturating_sub(N_CTX_STEP).max(N_CTX_FLOOR);
+                            eprintln!(
+                                "mistralrs: context {} exceeds device memory, retrying at {}",
+                                opts.n_ctx, reduced
+                            );
+                            opts.n_ctx = reduced;
+                            continue;
+                        }
+                        return Err(ModelError::BackendUnavailable(format!(
+                            "mistralrs: failed to load {model_id}: {e}"
+                        )));
+                    }
+                }
+            };
+            eprintln!("mistralrs: '{model_id}' ready (context {})", opts.n_ctx);
             Ok(Self {
                 model: Arc::new(model),
                 opts,

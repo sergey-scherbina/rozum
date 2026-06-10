@@ -808,11 +808,10 @@ fn try_build_gguf_backend(
 
 /// Context window when the model's max is unknown (non-HF path, no config.json).
 const N_CTX_FALLBACK: u32 = 32_768;
-/// Never auto-pick a context below this.
-const N_CTX_FLOOR: u32 = 8_192;
-/// Cap the auto context so the PagedAttention KV pool stays within this fraction
-/// of total RAM (the pool is pre-allocated up front, sized by n_ctx).
-const KV_BUDGET_FRAC: f64 = 0.10;
+/// Practical cap for the auto context. Models advertise huge maxes (Qwen3.6:
+/// 262144) whose KV pool won't fit in RAM; 32k covers large agent prompts
+/// (Claude Code tokenizes to ~24k) and fits a ~16-20 GB model on a 32 GB+ Mac.
+const N_CTX_AUTO_CAP: u32 = 32_768;
 
 /// Resolve the effective context window: an explicit `--n-ctx` wins; otherwise
 /// pick the model's max context capped by [`auto_n_ctx`].
@@ -825,27 +824,21 @@ fn resolve_n_ctx(model_spec: &str, requested: Option<u32>) -> u32 {
     n
 }
 
-/// The model's `max_position_embeddings`, capped so its KV cache fits a fraction
-/// of RAM. Falls back to [`N_CTX_FALLBACK`] when the config can't be read.
+/// The model's `max_position_embeddings` (from config.json), capped at
+/// [`N_CTX_AUTO_CAP`]; falls back to [`N_CTX_FALLBACK`] when the config can't
+/// be read. The KV cache is what actually scales with this, so the cap keeps the
+/// pre-allocated PagedAttention pool bounded; lower it (or raise it) with `--n-ctx`.
 #[cfg(feature = "mistralrs")]
 fn auto_n_ctx(model_spec: &str) -> u32 {
     let id = rozum::mistralrs_backend::normalize_spec(model_spec);
-    let Some(model_max) = cached_config_json(&id).and_then(|cfg| {
-        let t = cfg.get("text_config").cloned().unwrap_or(cfg);
-        t.get("max_position_embeddings")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-    }) else {
-        return N_CTX_FALLBACK;
-    };
-    let by_mem = match (kv_cache_bytes(&id, 1), total_ram_bytes()) {
-        (Some(kv_per_tok), Some(total)) if kv_per_tok > 0 => {
-            ((total as f64 * KV_BUDGET_FRAC) as u64 / kv_per_tok) as u32
-        }
-        _ => model_max,
-    };
-    let n = model_max.min(by_mem).max(N_CTX_FLOOR);
-    (n / 4096).max(1) * 4096 // round down to a clean multiple
+    cached_config_json(&id)
+        .and_then(|cfg| {
+            let t = cfg.get("text_config").cloned().unwrap_or(cfg);
+            t.get("max_position_embeddings")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+        })
+        .map_or(N_CTX_FALLBACK, |model_max| model_max.min(N_CTX_AUTO_CAP))
 }
 
 #[cfg(not(feature = "mistralrs"))]
@@ -938,12 +931,11 @@ fn cached_config_json(model_id: &str) -> Option<serde_json::Value> {
     None
 }
 
-/// Estimate the KV-cache size (bytes) for `n_ctx` tokens, read from the model's
-/// `config.json`. Only **full-attention** layers hold a context-sized KV cache:
-/// hybrid models (e.g. Qwen3.6's `qwen3_5_moe`) interleave linear-attention
-/// layers whose recurrent state is fixed-size and negligible here, so counting
-/// all layers (the old flat heuristic) over-estimated the cache by 4x. KV is
-/// assumed bf16 (2 bytes/elem). `None` if the config is missing required fields.
+/// Estimate the KV-cache size (bytes) for `n_ctx` tokens, from the model's
+/// `config.json`. Only **full-attention** layers hold a context-sized KV cache
+/// (hybrid models like Qwen3.6 interleave linear-attention layers with fixed
+/// state). A rough guard for the memory preflight, not mistralrs's exact paged
+/// allocation. KV is bf16 (2 bytes/elem). `None` if required fields are missing.
 #[cfg(feature = "mistralrs")]
 fn kv_cache_bytes(model_id: &str, n_ctx: u32) -> Option<u64> {
     kv_cache_bytes_from_config(&cached_config_json(model_id)?, n_ctx)
@@ -1156,8 +1148,7 @@ mod tests {
     use serde_json::json;
 
     // Qwen3.6-35B-A3B: 40 layers, 1-in-4 full attention (10), 2 KV heads,
-    // head_dim 256. KV at 32k must be sub-GB, not the ~8 GB the old flat x1.4
-    // assumed — full vs. linear-attention layers is the whole point of the fix.
+    // head_dim 256. Only full-attention layers count toward the context KV cache.
     #[test]
     fn kv_cache_counts_only_full_attention_layers() {
         let mut layer_types = Vec::new();
@@ -1173,9 +1164,8 @@ mod tests {
             }
         });
         let kv = kv_cache_bytes_from_config(&cfg, 32_768).unwrap();
-        // 2(K+V) * 10 full layers * 2 heads * 256 * 2 bytes * 32768 tokens
+        // 2(K+V) * 10 full layers * 2 kv_heads * 256 * 2 bytes * 32768 tokens
         assert_eq!(kv, 2 * 10 * 2 * 256 * 2 * 32_768);
-        assert!(kv < 1_000_000_000, "KV at 32k should be < 1 GB, got {kv}");
     }
 
     // Dense model with no layer_types: every layer attends, head_dim derived.
