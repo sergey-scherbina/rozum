@@ -1,5 +1,24 @@
 # Upstream PR: mistralrs Qwen3.6 support
 
+> **Status update (2026-06-10).** The plan below was written assuming mistralrs
+> had no Qwen3.5/3.6 module and we'd add an *alias* to `qwen3_next`. That is now
+> **obsolete**: the vendored mistralrs is at commit `e1dd7c8 feat(qwen3.5): ...
+> (#2196)`, which already ships `vision_models/qwen3_5_moe/`. So **Blocker 1
+> (alias registration) is moot** — our diff modifies the existing upstream
+> module instead. The real upstream PR = our `.vendor/mistral-rs` working diff,
+> made clean and general. Remaining homework, now done:
+> - **Blocker 2 (RMSNorm convention):** `qwen3_5_moe/text.rs` no longer hardcodes
+>   `new_unshifted`. `checkpoint_shifts_norm_weights()` mirrors mlx_lm
+>   `qwen3_5.py::sanitize` (`should_shift_norm_weights = has_mtp_weights or
+>   has_unsanitized_conv1d`), detected via the conv1d layout, and is threaded
+>   through all five norm sites. Sanitized MLX checkpoints -> unshifted; HF/
+>   unsanitized -> `+1` (same as the `qwen3_next` sibling).
+> - **Blocker 3 (per-tensor AFQ override):** `QuantizedConfig::Afq` carries an
+>   `overrides` map (`collect_afq_overrides`), `afq_params_for_path()` applies
+>   it in `AfqLayer::afq_linear_b`/experts, and `config.rs` propagates the
+>   top-level `quantization_config` into `text_config`. Debug scaffolding
+>   (`ROZUM_FWD_DEBUG`, `ROZUM_AFQ_*`) has been removed for upstream.
+
 ## Goal
 
 Add Qwen3.6 (35B-A3B MoE + 27B dense + future variants) to `EricLBuehler/mistral.rs` so that rozum's in-process MLX backend (already wired up via `--features mistralrs`, on by default) can load native MLX safetensors directly — no Python, no Ollama, no llama.cpp.

@@ -252,13 +252,43 @@ pub fn meter(
 ) -> crate::backend::ChatStream {
     use crate::backend::{ChatEvent, StopReason};
     use futures_util::StreamExt as _;
+
+    // The SSE encoder stops polling at the `Done` event and drops this stream
+    // without draining it, so any code after the `while` loop never runs. Put
+    // the finalization in a Drop guard so request_done fires exactly once on
+    // normal completion AND on early drop (client disconnect / cancellation).
+    struct FinishGuard {
+        obs: Arc<Observer>,
+        id: u64,
+        start: Instant,
+        out_tokens: u32,
+        stop: &'static str,
+        had_tool: bool,
+    }
+    impl Drop for FinishGuard {
+        fn drop(&mut self) {
+            self.obs.request_finish(
+                self.id,
+                self.start.elapsed().as_millis() as u64,
+                self.out_tokens,
+                self.stop,
+                self.had_tool,
+            );
+        }
+    }
+
     Box::pin(async_stream::stream! {
         let start = Instant::now();
         let id = obs.request_start(&meta);
+        let mut guard = FinishGuard {
+            obs: obs.clone(),
+            id,
+            start,
+            out_tokens: 0,
+            stop: "incomplete",
+            had_tool: false,
+        };
         let mut ttft_seen = false;
-        let mut out_tokens: u32 = 0;
-        let mut had_tool = false;
-        let mut stop = "incomplete".to_string();
         let mut inner = inner;
         while let Some(ev) = inner.next().await {
             if let Ok(e) = &ev {
@@ -268,11 +298,11 @@ pub fn meter(
                             ttft_seen = true;
                             obs.first_token(id, start.elapsed().as_millis() as u64);
                         }
-                        out_tokens += 1;
+                        guard.out_tokens += 1;
                         obs.bump_token(id);
                     }
                     ChatEvent::ToolUseStart { .. } => {
-                        had_tool = true;
+                        guard.had_tool = true;
                         if !ttft_seen {
                             ttft_seen = true;
                             obs.first_token(id, start.elapsed().as_millis() as u64);
@@ -280,21 +310,19 @@ pub fn meter(
                     }
                     ChatEvent::Done { output_tokens, stop_reason, .. } => {
                         if *output_tokens > 0 {
-                            out_tokens = *output_tokens;
+                            guard.out_tokens = *output_tokens;
                         }
-                        stop = match stop_reason {
+                        guard.stop = match stop_reason {
                             StopReason::EndTurn => "end_turn",
                             StopReason::MaxTokens => "max_tokens",
                             StopReason::ToolUse => "tool_use",
                             StopReason::Cancelled => "cancelled",
-                        }
-                        .to_string();
+                        };
                     }
                     _ => {}
                 }
             }
             yield ev;
         }
-        obs.request_finish(id, start.elapsed().as_millis() as u64, out_tokens, &stop, had_tool);
     })
 }

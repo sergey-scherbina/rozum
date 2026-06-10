@@ -17,9 +17,9 @@ mod inner {
     };
 
     use mistralrs::{
-        CalledFunction, ChatCompletionChunkResponse, ChunkChoice, Function, Model, ModelBuilder,
-        RequestBuilder, Response, TextMessageRole, Tool, ToolCallResponse, ToolCallType,
-        ToolChoice, ToolType,
+        CalledFunction, ChatCompletionChunkResponse, ChunkChoice, Function, MemoryGpuConfig, Model,
+        ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder, Response, TextMessageRole, Tool,
+        ToolCallResponse, ToolCallType, ToolChoice, ToolType,
     };
 
     /// Cap on generated tokens when the request does not specify one, so a
@@ -35,6 +35,11 @@ mod inner {
     pub struct MistralrsOptions {
         /// Context window (used by `context_window()`).
         pub n_ctx: u32,
+        /// Max sequences the engine batches concurrently. mistralrs defaults to
+        /// 32; on a memory-constrained Mac that lets two large prompt prefills
+        /// (e.g. Claude Code's parallel requests) run at once and OOM the Metal
+        /// command buffer. 1 serialises them, matching Ollama/LM Studio.
+        pub max_num_seqs: usize,
     }
 
     impl Default for MistralrsOptions {
@@ -43,7 +48,15 @@ mod inner {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(32_768);
-            Self { n_ctx }
+            let max_num_seqs = std::env::var("ROZUM_MISTRALRS_MAX_SEQS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&n| n >= 1)
+                .unwrap_or(1);
+            Self {
+                n_ctx,
+                max_num_seqs,
+            }
         }
     }
 
@@ -59,8 +72,27 @@ mod inner {
             eprintln!(
                 "mistralrs: loading '{model_id}' (first run downloads weights from HuggingFace into ~/.cache/huggingface/hub/)"
             );
-            let model = ModelBuilder::new(model_id)
+            let mut builder = ModelBuilder::new(model_id)
                 .with_logging() // enables hf-hub progress bars during download
+                .with_max_num_seqs(opts.max_num_seqs);
+            // PagedAttention computes attention block-wise (no full seq*seq score
+            // matrix) and pools the KV cache, which bounds the prefill memory peak
+            // for long prompts. Without it, a single ~2.4k-token prompt on a 27B
+            // model OOMs the Metal command buffer; with it, two such prompts run
+            // back-to-back fine. On by default; disable with ROZUM_MISTRALRS_PAGED=0.
+            if std::env::var("ROZUM_MISTRALRS_PAGED").as_deref() != Ok("0") {
+                match PagedAttentionMetaBuilder::default()
+                    .with_gpu_memory(MemoryGpuConfig::ContextSize(opts.n_ctx as usize))
+                    .build()
+                {
+                    Ok(cfg) => {
+                        eprintln!("mistralrs: PagedAttention enabled (ctx {})", opts.n_ctx);
+                        builder = builder.with_paged_attn(cfg);
+                    }
+                    Err(e) => eprintln!("mistralrs: PagedAttention config failed, using default: {e}"),
+                }
+            }
+            let model = builder
                 .build()
                 .await
                 .map_err(|e| {
