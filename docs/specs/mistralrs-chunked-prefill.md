@@ -159,3 +159,45 @@ If it works, this is a strong upstream contribution (mistralrs lacks text chunke
 prefill entirely). Land it on a branch, prove the gates, then propose upstream
 separately from the already-merged-ready correctness fixes
 (`docs/specs/mistralrs-qwen36-pr.md`).
+
+## Implementation log (v2 — rebuilt on the post-#2200 fixes)
+
+Branch `qwen36-chunked-prefill-v2` + worktree `.vendor/mistral-rs-chunked`, off the
+latest `qwen36-fixes` tip (Qwen3.6 + zero-buffer + cancellation fixes). The old
+`qwen36-chunked-prefill` (old upstream base) is abandoned.
+
+### Mechanism reverse-engineered against the current tree
+The prompt forward processes the token range `[prefix_cache_len, get_toks().len())`
+at **absolute** positions (`token_offset`), with already-done KV living in the paged
+pool. This is exactly the prefix-cache-resume path and it is **not** multimodal-gated,
+so it works for plain text. A prefill chunk `[start, end)` is therefore:
+
+- `prefill_prompt_toks = tokens[0 .. end]` (the view caps `get_toks().len()` to `end`)
+- `prefix_cache_len = start` (skips the already-prefilled prefix; its KV is in the pool)
+- positions are absolute, so RoPE/mask are correct with no extra work
+- full-attention layers append the chunk's KV to the pool; GatedDeltaNet carries its
+  recurrent state across chunks (the engine already snapshots recurrent state at block
+  boundaries, see `engine/mod.rs` hybrid snapshot block)
+
+`is_chunked_prefill_view()` stays `false` for text (`mm_features` empty), so the
+multimodal per-span attention-policy paths (sequence.rs:1431/1465/1504) are untouched.
+
+### Exact edit points
+1. `paged_attention/scheduler.rs`
+   - [done] `DEFAULT_PREFILL_CHUNK = 2048` + `prefill_chunk_size()` (env `MISTRALRS_PREFILL_CHUNK`, `0` disables).
+   - [todo] in `schedule()` prompt path (after `allocate_slots` succeeds, ~line 334):
+     when text and `num_tokens - chunk_start > CHUNK`, set the chunk view
+     (`prefill_prompt_toks = tokens[0..chunk_start+CHUNK]`, `prefix_cache_len = chunk_start`)
+     and keep the seq schedulable (do not let the engine treat it as a finished prompt).
+2. `sequence.rs`
+   - [todo] track prefill progress (reuse `prefix_cache_len`/`token_offset`; add a
+     `prefill_total`/`is_last_chunk` helper) so the engine knows when the last chunk runs.
+3. `engine/mod.rs` PagedAttention arm (after `pipeline.step`)
+   - [todo] if the seq is on a non-final chunk: **do not sample**, advance the chunk
+     start by `CHUNK`, reset the view to the next chunk, re-queue as a running prompt.
+   - on the final chunk: behave exactly as today (sample, transition to completion).
+
+### Gate to hit first
+Force `MISTRALRS_PREFILL_CHUNK=8` on a short prompt and assert **byte-identical**
+output vs unset (single-pass). This catches position/mask/KV-offset bugs immediately;
+bail/revert if it fails before touching the memory gate.
