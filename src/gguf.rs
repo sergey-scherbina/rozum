@@ -712,6 +712,10 @@ mod inner {
         fn context_window(&self) -> u32 {
             self.opts.n_ctx
         }
+
+        fn label(&self) -> &'static str {
+            "gguf"
+        }
     }
 
     pub use GgufBackend as Export;

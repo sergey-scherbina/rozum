@@ -287,6 +287,10 @@ mod inner {
         fn context_window(&self) -> u32 {
             self.opts.n_ctx
         }
+
+        fn label(&self) -> &'static str {
+            "mistralrs"
+        }
     }
 
     pub use MistralrsBackend as Export;

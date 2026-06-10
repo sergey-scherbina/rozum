@@ -104,7 +104,9 @@ enum Command {
         #[arg(long)]
         model: String,
 
-        /// Context window size in tokens (forwarded to GGUF backend)
+        /// Context window size in tokens. Sizes the GGUF context and the
+        /// mistralrs KV-cache RAM estimate — lower it to fit a big model in
+        /// less free RAM.
         #[arg(long, default_value_t = 32768)]
         n_ctx: u32,
     },
@@ -123,7 +125,9 @@ enum Command {
         #[arg(long)]
         port: Option<u16>,
 
-        /// Context window size in tokens
+        /// Context window size in tokens. Sizes the GGUF context and the
+        /// mistralrs KV-cache RAM estimate — lower it to fit a big model in
+        /// less free RAM.
         #[arg(long, default_value_t = 32768)]
         n_ctx: u32,
 
@@ -669,43 +673,80 @@ async fn build_gateway_backend(
     model_spec: &str,
     n_ctx: u32,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    rozum::obs::log_event(serde_json::json!({
+        "event": "backend_select_start", "model": model_spec, "n_ctx": n_ctx,
+    }));
+
     // 1. Try in-process GGUF (fastest for GGUF files, needs --features gguf)
     if let Some(b) = try_build_gguf_backend(model_spec, n_ctx) {
+        rozum::obs::log_event(
+            serde_json::json!({"event":"backend_selected","backend":"gguf","model":model_spec}),
+        );
         return Some(b);
     }
 
     // 2. Try in-process native MLX via mistralrs (needs --features mistralrs)
     if let Some(b) = try_build_mistralrs_backend(model_spec, n_ctx).await {
+        rozum::obs::log_event(
+            serde_json::json!({"event":"backend_selected","backend":"mistralrs","model":model_spec}),
+        );
         return Some(b);
     }
 
     // 3. Try LM Studio's local server (native MLX runtime; covers Qwen3.6 MLX
     //    today, ahead of mistralrs AFQ support)
     if let Some(b) = rozum::openai_http::try_lmstudio_http(model_spec).await {
+        rozum::obs::log_event(
+            serde_json::json!({"event":"backend_selected","backend":"lmstudio-http","model":model_spec}),
+        );
         return Some(b);
     }
 
     // 4. Try mlx_lm.server (Python, for MLX-format models)
     if let Some(b) = rozum::openai_http::try_mlx_server(model_spec).await {
+        rozum::obs::log_event(
+            serde_json::json!({"event":"backend_selected","backend":"mlx-server-http","model":model_spec}),
+        );
         return Some(b);
     }
 
     // 3. Try user-specified URL via env (any OpenAI-compatible server)
     if let Ok(url) = std::env::var("ROZUM_BACKEND_URL") {
         eprintln!("backend: custom HTTP at {url}");
+        rozum::obs::log_event(
+            serde_json::json!({"event":"backend_selected","backend":"custom-http","url":url,"model":model_spec}),
+        );
         return Some(std::sync::Arc::new(
             rozum::openai_http::OpenAiHttpBackend::new(url, model_spec),
         ));
     }
 
+    rozum::obs::log_event(serde_json::json!({
+        "event": "backend_select_failed", "model": model_spec,
+        "note": "no backend: no local file, mistralrs load failed, no LM Studio/mlx_lm.server, ROZUM_BACKEND_URL unset",
+    }));
     None
 }
 
 fn print_no_backend_hints(model_spec: &str) {
     eprintln!("no backend found for '{model_spec}'");
     eprintln!();
-    eprintln!("rozum needs an in-process model or an HTTP server to talk to.");
-    eprintln!("Pick one:");
+    // If the in-process load was skipped for a concrete reason (RAM preflight),
+    // that is the actual cause — surface it first so the user is not left
+    // guessing why a backend that is compiled in still did not run.
+    if let Some(reason) = skip_reason_slot().lock().unwrap().take() {
+        eprintln!("The in-process MLX model (mistralrs) is available but was NOT loaded:");
+        eprintln!("  {reason}");
+        eprintln!();
+        eprintln!("To run it anyway despite low free RAM:");
+        eprintln!("  ROZUM_FORCE_MISTRALRS=1 rozum launch --model {model_spec} claude");
+        eprintln!("Or free memory (close other apps) and relaunch.");
+        eprintln!();
+        eprintln!("Other ways to get a backend:");
+    } else {
+        eprintln!("rozum needs an in-process model or an HTTP server to talk to.");
+        eprintln!("Pick one:");
+    }
     eprintln!();
     eprintln!("  in-process GGUF (Metal on Apple Silicon, .gguf files):");
     eprintln!("    brew install cmake");
@@ -763,6 +804,226 @@ fn try_build_gguf_backend(
     None
 }
 
+/// Total physical RAM in bytes (macOS `sysctl hw.memsize`).
+#[cfg(feature = "mistralrs")]
+fn total_ram_bytes() -> Option<u64> {
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Currently available RAM in bytes (macOS `vm_stat`: free + inactive +
+/// speculative + purgeable pages, i.e. what can be handed out without swapping).
+#[cfg(feature = "mistralrs")]
+fn available_ram_bytes() -> Option<u64> {
+    let out = std::process::Command::new("vm_stat").output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let page_size = s
+        .lines()
+        .next()
+        .and_then(|l| l.split("page size of ").nth(1))
+        .and_then(|r| r.split(' ').next())
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or(16384);
+    let mut pages = 0u64;
+    for line in s.lines() {
+        for label in ["Pages free:", "Pages inactive:", "Pages speculative:", "Pages purgeable:"] {
+            if let Some(rest) = line.strip_prefix(label) {
+                if let Ok(v) = rest.trim().trim_end_matches('.').parse::<u64>() {
+                    pages += v;
+                }
+            }
+        }
+    }
+    (pages > 0).then(|| pages * page_size)
+}
+
+/// Sum of `*.safetensors` blob sizes for a HuggingFace repo in the local cache,
+/// following symlinks to the blobs. `None` if the repo isn't cached yet.
+#[cfg(feature = "mistralrs")]
+fn cached_weights_bytes(model_id: &str) -> Option<u64> {
+    let (org, repo) = model_id.split_once('/')?;
+    let home = std::env::var("HOME").ok()?;
+    let snapshots = std::path::Path::new(&home)
+        .join(".cache/huggingface/hub")
+        .join(format!("models--{org}--{repo}"))
+        .join("snapshots");
+    let mut total = 0u64;
+    for snap in std::fs::read_dir(&snapshots).ok()?.flatten() {
+        for entry in std::fs::read_dir(snap.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let p = entry.path();
+            if p.extension().is_some_and(|e| e == "safetensors") {
+                // metadata() follows the symlink to the actual blob.
+                if let Ok(meta) = std::fs::metadata(&p) {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    (total > 0).then_some(total)
+}
+
+/// Parse the model's `config.json` from the local HuggingFace cache, if present.
+#[cfg(feature = "mistralrs")]
+fn cached_config_json(model_id: &str) -> Option<serde_json::Value> {
+    let (org, repo) = model_id.split_once('/')?;
+    let home = std::env::var("HOME").ok()?;
+    let snapshots = std::path::Path::new(&home)
+        .join(".cache/huggingface/hub")
+        .join(format!("models--{org}--{repo}"))
+        .join("snapshots");
+    for snap in std::fs::read_dir(&snapshots).ok()?.flatten() {
+        let cfg = snap.path().join("config.json");
+        if let Ok(bytes) = std::fs::read(&cfg) {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Estimate the KV-cache size (bytes) for `n_ctx` tokens, read from the model's
+/// `config.json`. Only **full-attention** layers hold a context-sized KV cache:
+/// hybrid models (e.g. Qwen3.6's `qwen3_5_moe`) interleave linear-attention
+/// layers whose recurrent state is fixed-size and negligible here, so counting
+/// all layers (the old flat heuristic) over-estimated the cache by 4x. KV is
+/// assumed bf16 (2 bytes/elem). `None` if the config is missing required fields.
+#[cfg(feature = "mistralrs")]
+fn kv_cache_bytes(model_id: &str, n_ctx: u32) -> Option<u64> {
+    kv_cache_bytes_from_config(&cached_config_json(model_id)?, n_ctx)
+}
+
+/// Pure KV-cache math, split out so it can be unit-tested without the HF cache.
+#[cfg(feature = "mistralrs")]
+fn kv_cache_bytes_from_config(cfg: &serde_json::Value, n_ctx: u32) -> Option<u64> {
+    // Vision/omni checkpoints nest the LM under `text_config`; dense models are flat.
+    let t = cfg.get("text_config").unwrap_or(cfg);
+    let u = |k: &str| t.get(k).and_then(|v| v.as_u64());
+    let num_layers = u("num_hidden_layers")?;
+    let kv_heads = u("num_key_value_heads").or_else(|| u("num_attention_heads"))?;
+    let head_dim = u("head_dim").or_else(|| Some(u("hidden_size")? / u("num_attention_heads")?))?;
+    // How many layers keep a context-sized KV cache.
+    let full_layers = match t.get("layer_types").and_then(|v| v.as_array()) {
+        Some(types) => types
+            .iter()
+            .filter(|v| v.as_str() == Some("full_attention"))
+            .count() as u64,
+        None => match u("full_attention_interval") {
+            Some(interval) if interval > 0 => num_layers / interval,
+            _ => num_layers, // dense model: every layer attends
+        },
+    };
+    const KV_DTYPE_BYTES: u64 = 2; // bf16 keys + values
+    Some(2 * full_layers * kv_heads * head_dim * KV_DTYPE_BYTES * n_ctx as u64)
+}
+
+/// Estimate resident RAM (bytes) to run `model_id` at `n_ctx`: weights + a
+/// context-sized KV cache (from `config.json`) + ~5% for activations and Metal
+/// scratch buffers. When the config is unavailable (non-HF path, or a checkpoint
+/// without `config.json`) we can't size the KV cache from architecture, so we
+/// fall back to [`blind_footprint_bytes`] — still context-aware, just coarser.
+#[cfg(feature = "mistralrs")]
+fn runtime_footprint_bytes(model_id: &str, weights: u64, n_ctx: u32) -> u64 {
+    match kv_cache_bytes(model_id, n_ctx) {
+        Some(kv) => weights + kv + weights / 20,
+        None => blind_footprint_bytes(weights, n_ctx),
+    }
+}
+
+/// Footprint estimate without a model config. We can't compute the KV cache from
+/// architecture, so we keep the historical `weights x 1.4` heuristic but make it
+/// move with `n_ctx`: decompose `1.4` into `1.0` weights + `0.1` fixed overhead +
+/// `0.3` KV, where the `0.3` was implicitly calibrated at 32k context. Scaling
+/// only the KV part by `n_ctx / 32k` keeps the 32k value at exactly the old `1.4`
+/// (no regression) while letting smaller/larger contexts shrink/grow the estimate.
+#[cfg(feature = "mistralrs")]
+fn blind_footprint_bytes(weights: u64, n_ctx: u32) -> u64 {
+    const CALIB_CTX: f64 = 32_768.0; // context the historical x1.4 was tuned at
+    const OVERHEAD_FRAC: f64 = 0.1; // activations + Metal scratch, context-independent
+    const KV_FRAC_AT_CALIB: f64 = 0.3; // KV/weights for a dense model at CALIB_CTX
+    let kv_frac = KV_FRAC_AT_CALIB * (n_ctx as f64 / CALIB_CTX);
+    (weights as f64 * (1.0 + OVERHEAD_FRAC + kv_frac)) as u64
+}
+
+/// When the in-process load is skipped for a concrete, user-actionable reason
+/// (currently: the RAM preflight), the message is stashed here so the final
+/// "no backend found" output can lead with *why* instead of a generic list.
+/// `eprintln!` from the gateway is easy to miss (the agent TUI scrolls it away),
+/// so the reason must reappear at the end, right where the user is looking.
+fn skip_reason_slot() -> &'static std::sync::Mutex<Option<String>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Warn (and by default refuse) to load an in-process model that won't fit in
+/// the RAM currently available, instead of letting it swap-thrash the machine
+/// into an unkillable hang. Runtime footprint is `weights + KV cache + ~10%
+/// overhead`, with the KV cache sized from the model's own `config.json` and the
+/// requested `n_ctx` (see [`runtime_footprint_bytes`]). The check compares
+/// against *available* RAM, not total, since the agent + IDE are already
+/// resident. Override with `ROZUM_FORCE_MISTRALRS=1`.
+#[cfg(feature = "mistralrs")]
+fn memory_preflight_ok(model_id: &str, n_ctx: u32) -> bool {
+    let Some(weights) = cached_weights_bytes(model_id) else {
+        return true; // not cached yet (will download): can't measure, don't block
+    };
+    let total = total_ram_bytes().unwrap_or(0);
+    let available = available_ram_bytes().unwrap_or(total);
+    let est_runtime = runtime_footprint_bytes(model_id, weights, n_ctx);
+    let kv = kv_cache_bytes(model_id, n_ctx);
+    let gb = |b: u64| ((b as f64 / 1e9) * 10.0).round() / 10.0;
+    rozum::obs::log_event(serde_json::json!({
+        "event": "memory_preflight", "model": model_id, "n_ctx": n_ctx,
+        "weights_gb": gb(weights), "kv_cache_gb": kv.map(gb),
+        "est_runtime_gb": gb(est_runtime),
+        "available_gb": gb(available), "total_ram_gb": gb(total),
+    }));
+    // Fits if it leaves a little headroom in what's actually free right now.
+    if est_runtime as f64 <= available as f64 * 0.9 {
+        return true;
+    }
+    let forced = std::env::var("ROZUM_FORCE_MISTRALRS").is_ok();
+    let kv_note = match kv {
+        Some(k) => format!(
+            "{:.0} GB weights + ~{:.1} GB KV cache at n_ctx={n_ctx}",
+            gb(weights),
+            gb(k)
+        ),
+        None => format!("{:.0} GB weights + KV estimated at n_ctx={n_ctx} (no config.json)", gb(weights)),
+    };
+    let msg = format!(
+        "model '{model_id}' needs ~{:.0} GB resident ({kv_note}) but only ~{:.0} GB RAM is free \
+         right now ({:.0} GB total). Loading it in-process will swap-thrash and hang. {} \
+         Lower --n-ctx to shrink the KV cache, free memory, or pick a smaller 4-bit model \
+         (e.g. mlx-community:Qwen3-8B-4bit, or a 7-14B coder).",
+        gb(est_runtime),
+        gb(available),
+        gb(total),
+        if forced {
+            "ROZUM_FORCE_MISTRALRS set: loading anyway."
+        } else {
+            "Skipping in-process load (set ROZUM_FORCE_MISTRALRS=1 to force)."
+        },
+    );
+    eprintln!("WARNING: {msg}");
+    tracing::warn!("{msg}");
+    rozum::obs::log_event(serde_json::json!({
+        "event": "memory_warning", "model": model_id, "forced": forced, "message": msg,
+    }));
+    if !forced {
+        *skip_reason_slot().lock().unwrap() = Some(msg);
+    }
+    forced
+}
+
 #[cfg(feature = "mistralrs")]
 async fn try_build_mistralrs_backend(
     model_spec: &str,
@@ -774,6 +1035,9 @@ async fn try_build_mistralrs_backend(
         return None;
     }
     let id = normalize_spec(model_spec);
+    if !memory_preflight_ok(&id, n_ctx) {
+        return None;
+    }
     let opts = MistralrsOptions {
         n_ctx,
         ..MistralrsOptions::default()
@@ -785,6 +1049,9 @@ async fn try_build_mistralrs_backend(
         }
         Err(e) => {
             eprintln!("warning: mistralrs load failed: {e}");
+            rozum::obs::log_event(serde_json::json!({
+                "event": "backend_load_failed", "backend": "mistralrs", "model": id, "error": e.to_string(),
+            }));
             None
         }
     }
@@ -831,5 +1098,57 @@ fn init_tui_logging() {
                 .with_writer(std::io::sink)
                 .try_init();
         }
+    }
+}
+
+#[cfg(all(test, feature = "mistralrs"))]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Qwen3.6-35B-A3B: 40 layers, 1-in-4 full attention (10), 2 KV heads,
+    // head_dim 256. KV at 32k must be sub-GB, not the ~8 GB the old flat x1.4
+    // assumed — full vs. linear-attention layers is the whole point of the fix.
+    #[test]
+    fn kv_cache_counts_only_full_attention_layers() {
+        let mut layer_types = Vec::new();
+        for i in 0..40 {
+            layer_types.push(if i % 4 == 3 { "full_attention" } else { "linear_attention" });
+        }
+        let cfg = json!({
+            "text_config": {
+                "num_hidden_layers": 40,
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "layer_types": layer_types,
+            }
+        });
+        let kv = kv_cache_bytes_from_config(&cfg, 32_768).unwrap();
+        // 2(K+V) * 10 full layers * 2 heads * 256 * 2 bytes * 32768 tokens
+        assert_eq!(kv, 2 * 10 * 2 * 256 * 2 * 32_768);
+        assert!(kv < 1_000_000_000, "KV at 32k should be < 1 GB, got {kv}");
+    }
+
+    // Dense model with no layer_types: every layer attends, head_dim derived.
+    #[test]
+    fn kv_cache_dense_model_uses_all_layers() {
+        let cfg = json!({
+            "num_hidden_layers": 32,
+            "num_key_value_heads": 8,
+            "hidden_size": 4096,
+            "num_attention_heads": 32, // head_dim = 128
+        });
+        let kv = kv_cache_bytes_from_config(&cfg, 4096).unwrap();
+        assert_eq!(kv, 2 * 32 * 8 * 128 * 2 * 4096);
+    }
+
+    // Blind fallback must equal the historical x1.4 at the 32k calibration point
+    // (no regression) and move monotonically with context.
+    #[test]
+    fn blind_footprint_calibrates_to_old_heuristic_and_scales() {
+        let w = 20_000_000_000u64;
+        assert_eq!(blind_footprint_bytes(w, 32_768), (w as f64 * 1.4) as u64);
+        assert!(blind_footprint_bytes(w, 4_096) < blind_footprint_bytes(w, 32_768));
+        assert!(blind_footprint_bytes(w, 131_072) > blind_footprint_bytes(w, 32_768));
     }
 }

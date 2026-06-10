@@ -366,6 +366,10 @@ impl ChatBackend for OpenAiHttpBackend {
         // Let the server enforce its own limit; use a large sentinel.
         u32::MAX
     }
+
+    fn label(&self) -> &'static str {
+        "openai-http"
+    }
 }
 
 // ─── Auto-detect helpers ──────────────────────────────────────────────────────

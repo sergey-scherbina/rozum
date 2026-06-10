@@ -43,6 +43,8 @@ struct GatewayState {
     auth_token: Option<String>,
     /// Advertised model name (used in response envelopes).
     model_id: String,
+    /// Per-request metrics + JSONL event log.
+    observer: Arc<crate::obs::Observer>,
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -796,6 +798,18 @@ async fn anthropic_collect(
 
 // ─── Route handlers ───────────────────────────────────────────────────────────
 
+async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let mut snap = state.observer.snapshot();
+    if let Value::Object(ref mut m) = snap {
+        m.insert("model".into(), json!(state.model_id));
+        m.insert(
+            "context_window".into(),
+            json!(state.backend.context_window()),
+        );
+    }
+    axum::Json(snap)
+}
+
 async fn models_handler(State(state): State<GatewayState>) -> impl IntoResponse {
     tracing::debug!("GET /v1/models");
     // Claude Code's gateway discovery only adds models whose id starts with
@@ -859,6 +873,7 @@ async fn oai_chat_handler(
         );
     }
 
+    let (n_messages, n_tools) = (messages.len(), tools.len());
     let cancel = CancellationToken::new();
     let chat_req = ChatRequest {
         messages,
@@ -878,12 +893,25 @@ async fn oai_chat_handler(
     let stream_mode = req.stream.unwrap_or(true);
 
     match state.backend.chat(chat_req).await {
-        Err(e) => error_json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &e.to_string(),
-            "backend_error",
-        ),
+        Err(e) => {
+            crate::obs::log_event(json!({
+                "event": "request_error", "endpoint": "/v1/chat/completions", "error": e.to_string(),
+            }));
+            error_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+                "backend_error",
+            )
+        }
         Ok(chat_stream) => {
+            let meta = crate::obs::ReqMeta {
+                endpoint: "/v1/chat/completions",
+                model: model.clone(),
+                n_messages,
+                n_tools,
+                est_prompt_tokens: est,
+            };
+            let chat_stream = crate::obs::meter(chat_stream, state.observer.clone(), meta);
             if stream_mode {
                 Sse::new(oai_sse_stream(chat_stream, cancel, model)).into_response()
             } else {
@@ -919,6 +947,7 @@ async fn anthropic_handler(
         );
     }
 
+    let (n_messages, n_tools) = (messages.len(), tools.len());
     let cancel = CancellationToken::new();
     let chat_req = ChatRequest {
         messages,
@@ -936,12 +965,25 @@ async fn anthropic_handler(
     let stream_mode = req.stream.unwrap_or(true);
 
     match state.backend.chat(chat_req).await {
-        Err(e) => error_json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &e.to_string(),
-            "api_error",
-        ),
+        Err(e) => {
+            crate::obs::log_event(json!({
+                "event": "request_error", "endpoint": "/v1/messages", "error": e.to_string(),
+            }));
+            error_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+                "api_error",
+            )
+        }
         Ok(chat_stream) => {
+            let meta = crate::obs::ReqMeta {
+                endpoint: "/v1/messages",
+                model: model.clone(),
+                n_messages,
+                n_tools,
+                est_prompt_tokens: est,
+            };
+            let chat_stream = crate::obs::meter(chat_stream, state.observer.clone(), meta);
             if stream_mode {
                 Sse::new(anthropic_sse_stream(chat_stream, cancel, model)).into_response()
             } else {
@@ -992,14 +1034,24 @@ pub async fn serve_on(
     listener: tokio::net::TcpListener,
     model_id: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let observer = crate::obs::Observer::new();
+    observer.set_backend_label(backend.label());
+    crate::obs::log_event(serde_json::json!({
+        "event": "gateway_listening",
+        "addr": listener.local_addr().ok().map(|a| a.to_string()),
+        "backend": backend.label(),
+        "model": model_id,
+    }));
     let state = GatewayState {
         backend,
         auth_token: std::env::var("ROZUM_GATEWAY_TOKEN").ok(),
         model_id,
+        observer,
     };
 
     let app = Router::new()
         .route("/v1/models", get(models_handler))
+        .route("/stats", get(stats_handler))
         .route("/v1/chat/completions", post(oai_chat_handler))
         .route("/v1/messages", post(anthropic_handler))
         .layer(middleware::from_fn_with_state(state.clone(), auth_layer))

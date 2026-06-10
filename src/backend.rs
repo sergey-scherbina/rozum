@@ -210,6 +210,10 @@ pub trait ChatBackend: Send + Sync {
     async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream>;
     /// Maximum context length in tokens this backend accepts.
     fn context_window(&self) -> u32;
+    /// Short identifier for observability (`GET /stats`, the JSONL log).
+    fn label(&self) -> &'static str {
+        "backend"
+    }
 }
 
 /// Drain a `ChatStream` to a plain text string (text deltas only).
