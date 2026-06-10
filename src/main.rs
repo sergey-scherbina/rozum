@@ -104,11 +104,11 @@ enum Command {
         #[arg(long)]
         model: String,
 
-        /// Context window size in tokens. Sizes the GGUF context and the
-        /// mistralrs KV-cache RAM estimate — lower it to fit a big model in
-        /// less free RAM.
-        #[arg(long, default_value_t = 32768)]
-        n_ctx: u32,
+        /// Context window in tokens. Default: the model's max context (from its
+        /// config.json), capped so the KV cache stays within a fraction of RAM;
+        /// falls back to 32768 if the model max is unknown. Lower it to save RAM.
+        #[arg(long)]
+        n_ctx: Option<u32>,
     },
 
     /// Start the gateway and launch a program with ANTHROPIC_/OPENAI_ env vars set.
@@ -125,11 +125,11 @@ enum Command {
         #[arg(long)]
         port: Option<u16>,
 
-        /// Context window size in tokens. Sizes the GGUF context and the
-        /// mistralrs KV-cache RAM estimate — lower it to fit a big model in
-        /// less free RAM.
-        #[arg(long, default_value_t = 32768)]
-        n_ctx: u32,
+        /// Context window in tokens. Default: the model's max context (from its
+        /// config.json), capped so the KV cache stays within a fraction of RAM;
+        /// falls back to 32768 if the model max is unknown. Lower it to save RAM.
+        #[arg(long)]
+        n_ctx: Option<u32>,
 
         /// Program to launch and its arguments
         #[arg(trailing_var_arg = true, required = true)]
@@ -359,7 +359,8 @@ async fn start_web_bridge(room_name: String, port: u16, url: String) {
     }
 }
 
-async fn run_gateway(port: u16, model_spec: String, n_ctx: u32) {
+async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>) {
+    let n_ctx = resolve_n_ctx(&model_spec, n_ctx);
     let backend = match build_gateway_backend(&model_spec, n_ctx).await {
         Some(b) => b,
         None => {
@@ -432,9 +433,10 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
     args
 }
 
-async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: u32, program: Vec<String>) {
+async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: Option<u32>, program: Vec<String>) {
     use std::process::Command as StdCommand;
 
+    let n_ctx = resolve_n_ctx(&model_spec, n_ctx);
     let (program_name, args) = program
         .split_first()
         .expect("clap requires at least one arg");
@@ -802,6 +804,53 @@ fn try_build_gguf_backend(
     _n_ctx: u32,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
     None
+}
+
+/// Context window when the model's max is unknown (non-HF path, no config.json).
+const N_CTX_FALLBACK: u32 = 32_768;
+/// Never auto-pick a context below this.
+const N_CTX_FLOOR: u32 = 8_192;
+/// Cap the auto context so the PagedAttention KV pool stays within this fraction
+/// of total RAM (the pool is pre-allocated up front, sized by n_ctx).
+const KV_BUDGET_FRAC: f64 = 0.10;
+
+/// Resolve the effective context window: an explicit `--n-ctx` wins; otherwise
+/// pick the model's max context capped by [`auto_n_ctx`].
+fn resolve_n_ctx(model_spec: &str, requested: Option<u32>) -> u32 {
+    let n = requested.unwrap_or_else(|| auto_n_ctx(model_spec));
+    eprintln!(
+        "context window: {n} tokens{}",
+        if requested.is_some() { "" } else { " (auto)" }
+    );
+    n
+}
+
+/// The model's `max_position_embeddings`, capped so its KV cache fits a fraction
+/// of RAM. Falls back to [`N_CTX_FALLBACK`] when the config can't be read.
+#[cfg(feature = "mistralrs")]
+fn auto_n_ctx(model_spec: &str) -> u32 {
+    let id = rozum::mistralrs_backend::normalize_spec(model_spec);
+    let Some(model_max) = cached_config_json(&id).and_then(|cfg| {
+        let t = cfg.get("text_config").cloned().unwrap_or(cfg);
+        t.get("max_position_embeddings")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+    }) else {
+        return N_CTX_FALLBACK;
+    };
+    let by_mem = match (kv_cache_bytes(&id, 1), total_ram_bytes()) {
+        (Some(kv_per_tok), Some(total)) if kv_per_tok > 0 => {
+            ((total as f64 * KV_BUDGET_FRAC) as u64 / kv_per_tok) as u32
+        }
+        _ => model_max,
+    };
+    let n = model_max.min(by_mem).max(N_CTX_FLOOR);
+    (n / 4096).max(1) * 4096 // round down to a clean multiple
+}
+
+#[cfg(not(feature = "mistralrs"))]
+fn auto_n_ctx(_model_spec: &str) -> u32 {
+    N_CTX_FALLBACK
 }
 
 /// Total physical RAM in bytes (macOS `sysctl hw.memsize`).
