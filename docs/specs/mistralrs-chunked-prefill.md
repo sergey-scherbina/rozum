@@ -44,7 +44,38 @@ should prefill on the 27B/35B without exceeding the Metal working-set budget,
 matching llama.cpp behaviour, while producing byte-identical output to the
 whole-prompt prefill.
 
-## Why it is feasible at the model-forward level (no scheduler rewrite)
+## Implementation level (decided after exploring the code)
+
+**Decision: do it at the scheduler level, NOT inside the model forward.**
+
+`Qwen3_5MoeTextModel::forward_embeds` builds `cos_sin`, the causal mask, and the
+PagedAttention metadata (`ctx`: block tables, slot mapping, recurrent metadata)
+for the *whole* sequence at once. Chunking inside the forward (the original plan
+below) would require rebuilding all of that paged metadata per chunk by hand —
+fragile. So instead: chunk at the **scheduler/engine** level so each chunk is a
+normal forward step (like decode but multi-token), the pipeline builds a correct
+`ctx` per chunk, and the paged KV accumulates across steps. **The model forward
+stays unchanged.**
+
+mistralrs already has the partial-prefill machinery: `Sequence::prefill_prompt_toks`
+(`Option<Vec<u32>>`), `set_prefill_toks` / `reset_prefill_toks` / `has_prefill_toks`,
+and `is_chunked_prefill_view()`. **Caveat:** today it is gated to multimodal —
+`is_chunked_prefill_view() = prefill_prompt_toks.is_some() && !mm_features().is_empty()`,
+and the scheduler/sequence chunk around media spans with per-span attention
+policies (`sequence.rs:930,1431,1465,1504`, `paged_attention/scheduler.rs`). The
+work is to add a **uniform text** chunking path alongside the media one:
+
+1. Trigger: when a prompt seq has no media and `prompt_len > CHUNK`, drive it
+   through `prefill_prompt_toks` in `CHUNK`-sized steps.
+2. Relax the `!mm_features().is_empty()` gates to also accept the text path
+   (without disturbing the media attention-policy logic).
+3. Engine: don't sample / emit a token until the final prefill chunk; advance
+   the sequence's token offset by `CHUNK` each step so positions + paged slots
+   are correct.
+
+This keeps `forward_embeds` untouched and reuses the per-step `ctx` building.
+
+### (Original model-forward sketch — superseded by the above)
 
 The two ingredients for chunk N to be correct are already present:
 
