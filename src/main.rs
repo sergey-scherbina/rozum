@@ -506,6 +506,22 @@ async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: Option<u32>, p
     cmd.env("OPENAI_API_KEY", "rozum-local");
     cmd.env("ROZUM_GATEWAY_URL", &base);
 
+    // Trim Claude Code's system prompt (bundled skills, git instructions, CLAUDE.md)
+    // and non-essential background calls so its large prompts fit the local model's
+    // smaller context window. Defaults only: a value the user already exported wins.
+    for (k, v) in [
+        ("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS", "1"),
+        ("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS", "1"),
+        ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1"),
+        ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+        ("DISABLE_NON_ESSENTIAL_MODEL_CALLS", "1"),
+    ] {
+        if std::env::var_os(k).is_none() {
+            cmd.env(k, v);
+        }
+    }
+
     // Run the child synchronously in a blocking task so we can wait on its exit code.
     let status = tokio::task::spawn_blocking(move || cmd.status())
         .await
