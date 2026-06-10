@@ -266,16 +266,25 @@ mod inner {
                 let mut output_tokens: u32 = 0;
                 let mut done_sent = false;
 
-                while let Some(item) = upstream.next().await {
-                    if cancel.is_cancelled() {
-                        yield Ok(ChatEvent::Done {
-                            input_tokens: 0,
-                            output_tokens,
-                            stop_reason: StopReason::Cancelled,
-                        });
-                        done_sent = true;
-                        break;
-                    }
+                loop {
+                    // Race the next chunk against cancellation so a client disconnect is
+                    // honored immediately, even mid-prefill (when upstream yields nothing
+                    // for a long time). Dropping `upstream` on break tears down the
+                    // mistralrs request so it stops holding the single sequence slot.
+                    let item = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            yield Ok(ChatEvent::Done {
+                                input_tokens: 0,
+                                output_tokens,
+                                stop_reason: StopReason::Cancelled,
+                            });
+                            done_sent = true;
+                            break;
+                        }
+                        item = upstream.next() => item,
+                    };
+                    let Some(item) = item else { break };
 
                     if let Response::Chunk(ChatCompletionChunkResponse { choices, .. }) = item {
                         if let Some(ChunkChoice { delta, finish_reason, .. }) = choices.first() {
