@@ -17,9 +17,15 @@ mod inner {
     };
 
     use mistralrs::{
-        ChatCompletionChunkResponse, ChunkChoice, Delta, Model, ModelBuilder, RequestBuilder,
-        Response, TextMessageRole,
+        CalledFunction, ChatCompletionChunkResponse, ChunkChoice, Function, Model, ModelBuilder,
+        RequestBuilder, Response, TextMessageRole, Tool, ToolCallResponse, ToolCallType,
+        ToolChoice, ToolType,
     };
+
+    /// Cap on generated tokens when the request does not specify one, so a
+    /// reasoning model (e.g. Qwen3.6 with its `<think>` block) can't run away
+    /// unbounded the way it did before sampler limits were wired through.
+    const DEFAULT_MAX_TOKENS: usize = 4096;
 
     /// Knobs that map to mistralrs's `ModelBuilder` options.
     /// Sampling-detail knobs intentionally omitted for now — mistralrs's
@@ -69,18 +75,7 @@ mod inner {
             })
         }
 
-        fn role_to_mistralrs(role: &Role) -> TextMessageRole {
-            match role {
-                Role::System => TextMessageRole::System,
-                Role::User => TextMessageRole::User,
-                Role::Assistant => TextMessageRole::Assistant,
-                // mistralrs may name this differently; map Tool to User as a
-                // safe fallback (a follow-up issue tracks proper tool support).
-                Role::Tool => TextMessageRole::User,
-            }
-        }
-
-        fn message_to_text(msg: &Message) -> String {
+        fn message_text(msg: &Message) -> String {
             msg.content
                 .iter()
                 .filter_map(|b| match b {
@@ -91,14 +86,99 @@ mod inner {
                 .join("")
         }
 
+        /// Assistant `tool_use` blocks -> mistralrs `ToolCallResponse`s so the
+        /// model sees its own prior calls in conversation history.
+        fn message_tool_calls(msg: &Message) -> Vec<ToolCallResponse> {
+            msg.content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolUse { id, name, input } => Some(ToolCallResponse {
+                        index: 0,
+                        id: id.clone(),
+                        tp: ToolCallType::Function,
+                        function: CalledFunction {
+                            name: name.clone(),
+                            arguments: input.to_string(),
+                        },
+                    }),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn tool_def_to_mistralrs(def: &crate::backend::ToolDef) -> Tool {
+            let parameters = def
+                .input_schema
+                .as_object()
+                .map(|m| m.clone().into_iter().collect());
+            Tool {
+                tp: ToolType::Function,
+                function: Function {
+                    name: def.name.clone(),
+                    description: Some(def.description.clone()),
+                    parameters,
+                    strict: None,
+                },
+            }
+        }
+
         fn build_request(&self, req: &ChatRequest) -> RequestBuilder {
             let mut rb = RequestBuilder::new();
             for msg in &req.messages {
-                let role = Self::role_to_mistralrs(&msg.role);
-                let text = Self::message_to_text(msg);
-                if !text.is_empty() {
-                    rb = rb.add_message(role, text);
+                match msg.role {
+                    Role::System => {
+                        rb = rb.add_message(TextMessageRole::System, Self::message_text(msg))
+                    }
+                    Role::User => {
+                        rb = rb.add_message(TextMessageRole::User, Self::message_text(msg))
+                    }
+                    Role::Assistant => {
+                        let tool_calls = Self::message_tool_calls(msg);
+                        let text = Self::message_text(msg);
+                        rb = if tool_calls.is_empty() {
+                            rb.add_message(TextMessageRole::Assistant, text)
+                        } else {
+                            rb.add_message_with_tool_call(
+                                TextMessageRole::Assistant,
+                                text,
+                                tool_calls,
+                            )
+                        };
+                    }
+                    Role::Tool => {
+                        for b in &msg.content {
+                            if let ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                ..
+                            } = b
+                            {
+                                rb = rb.add_tool_message(content.clone(), tool_use_id.clone());
+                            }
+                        }
+                    }
                 }
+            }
+
+            if !req.tools.is_empty() {
+                let tools = req.tools.iter().map(Self::tool_def_to_mistralrs).collect();
+                rb = rb.set_tools(tools).set_tool_choice(ToolChoice::Auto);
+            }
+
+            let s = &req.sampling;
+            let max_len = s
+                .max_tokens
+                .map(|m| m as usize)
+                .unwrap_or(DEFAULT_MAX_TOKENS);
+            rb = rb.set_sampler_max_len(max_len);
+            if let Some(t) = s.temperature {
+                rb = rb.set_sampler_temperature(t as f64);
+            }
+            if let Some(p) = s.top_p {
+                rb = rb.set_sampler_topp(p as f64);
+            }
+            if let Some(k) = s.top_k {
+                rb = rb.set_sampler_topk(k as usize);
             }
             rb
         }
@@ -139,15 +219,35 @@ mod inner {
                     }
 
                     if let Response::Chunk(ChatCompletionChunkResponse { choices, .. }) = item {
-                        if let Some(ChunkChoice {
-                            delta: Delta { content: Some(content), .. },
-                            finish_reason,
-                            ..
-                        }) = choices.first()
-                        {
-                            if !content.is_empty() {
-                                output_tokens += 1;
-                                yield Ok(ChatEvent::TextDelta { text: content.clone() });
+                        if let Some(ChunkChoice { delta, finish_reason, .. }) = choices.first() {
+                            // Stream the model's `<think>` reasoning as text too,
+                            // otherwise a reasoning-only chunk yields nothing and
+                            // the client sees an empty response.
+                            if let Some(reasoning) = &delta.reasoning_content {
+                                if !reasoning.is_empty() {
+                                    yield Ok(ChatEvent::TextDelta { text: reasoning.clone() });
+                                }
+                            }
+                            if let Some(content) = &delta.content {
+                                if !content.is_empty() {
+                                    output_tokens += 1;
+                                    yield Ok(ChatEvent::TextDelta { text: content.clone() });
+                                }
+                            }
+                            // mistralrs emits the parsed tool call(s) whole, with
+                            // the full argument JSON already assembled.
+                            if let Some(tool_calls) = &delta.tool_calls {
+                                for tc in tool_calls {
+                                    yield Ok(ChatEvent::ToolUseStart {
+                                        id: tc.id.clone(),
+                                        name: tc.function.name.clone(),
+                                    });
+                                    yield Ok(ChatEvent::ToolUseDelta {
+                                        id: tc.id.clone(),
+                                        input_json_delta: tc.function.arguments.clone(),
+                                    });
+                                    yield Ok(ChatEvent::ToolUseEnd { id: tc.id.clone() });
+                                }
                             }
                             if let Some(reason) = finish_reason {
                                 let stop_reason = match reason.as_str() {

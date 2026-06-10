@@ -797,7 +797,7 @@ async fn anthropic_collect(
 // ─── Route handlers ───────────────────────────────────────────────────────────
 
 async fn models_handler(State(state): State<GatewayState>) -> impl IntoResponse {
-    eprintln!("← GET /v1/models");
+    tracing::debug!("GET /v1/models");
     // Claude Code's gateway discovery only adds models whose id starts with
     // "claude" or "anthropic" to its /model picker. Expose an alias so the
     // real model name still appears in display_name.
@@ -837,12 +837,12 @@ async fn oai_chat_handler(
     State(state): State<GatewayState>,
     axum::Json(req): axum::Json<OaiChatReq>,
 ) -> Response {
-    eprintln!(
-        "← POST /v1/chat/completions  (model={}, msgs={}, tools={}, stream={})",
-        req.model.as_deref().unwrap_or("?"),
-        req.messages.len(),
-        req.tools.len(),
-        req.stream.unwrap_or(true)
+    tracing::debug!(
+        model = req.model.as_deref().unwrap_or("?"),
+        msgs = req.messages.len(),
+        tools = req.tools.len(),
+        stream = req.stream.unwrap_or(true),
+        "POST /v1/chat/completions"
     );
     let messages = oai_messages_to_internal(&req.messages);
     let tools = oai_tools_to_internal(&req.tools);
@@ -897,12 +897,12 @@ async fn anthropic_handler(
     State(state): State<GatewayState>,
     axum::Json(req): axum::Json<AnthropicReq>,
 ) -> Response {
-    eprintln!(
-        "← POST /v1/messages  (model={}, msgs={}, tools={}, stream={})",
-        req.model.as_deref().unwrap_or("?"),
-        req.messages.len(),
-        req.tools.len(),
-        req.stream.unwrap_or(true)
+    tracing::debug!(
+        model = req.model.as_deref().unwrap_or("?"),
+        msgs = req.messages.len(),
+        tools = req.tools.len(),
+        stream = req.stream.unwrap_or(true),
+        "POST /v1/messages"
     );
     let messages = anthropic_messages_to_internal(req.system.as_ref(), &req.messages);
     let tools = anthropic_tools_to_internal(&req.tools);
