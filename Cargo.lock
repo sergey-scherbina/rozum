@@ -627,7 +627,7 @@ dependencies = [
 [[package]]
 name = "candle-core"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
+source = "git+https://github.com/huggingface/candle.git?rev=65ecb58#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
 dependencies = [
  "byteorder",
  "candle-metal-kernels",
@@ -635,6 +635,7 @@ dependencies = [
  "float8",
  "gemm 0.19.0",
  "half",
+ "libc",
  "libm",
  "memmap2",
  "num-traits",
@@ -654,7 +655,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
+source = "git+https://github.com/huggingface/candle.git?rev=65ecb58#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
 dependencies = [
  "block2",
  "half",
@@ -685,9 +686,9 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
+source = "git+https://github.com/huggingface/candle.git?rev=65ecb58#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
 dependencies = [
- "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5404348)",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=65ecb58)",
  "candle-metal-kernels",
  "half",
  "libc",
@@ -721,7 +722,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
+source = "git+https://github.com/huggingface/candle.git?rev=65ecb58#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
 dependencies = [
  "ug",
  "ug-metal",
@@ -3226,8 +3227,8 @@ name = "mistralrs"
 version = "0.8.3"
 dependencies = [
  "anyhow",
- "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5404348)",
- "candle-nn 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5404348)",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=65ecb58)",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle.git?rev=65ecb58)",
  "clap",
  "either",
  "futures",
@@ -3271,9 +3272,9 @@ dependencies = [
  "bm25",
  "bytemuck",
  "bytemuck_derive",
- "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5404348)",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=65ecb58)",
  "candle-metal-kernels",
- "candle-nn 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5404348)",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle.git?rev=65ecb58)",
  "cfgrammar",
  "chrono",
  "clap",
@@ -3390,7 +3391,7 @@ name = "mistralrs-paged-attn"
 version = "0.8.3"
 dependencies = [
  "anyhow",
- "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5404348)",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=65ecb58)",
  "candle-metal-kernels",
  "dispatch2",
  "float8",
@@ -3405,15 +3406,16 @@ name = "mistralrs-quant"
 version = "0.8.3"
 dependencies = [
  "byteorder",
- "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5404348)",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=65ecb58)",
  "candle-metal-kernels",
- "candle-nn 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5404348)",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle.git?rev=65ecb58)",
  "dispatch2",
  "float8",
  "half",
  "hf-hub",
  "indicatif 0.18.4",
  "lazy_static",
+ "libc",
  "memmap2",
  "objc2-foundation",
  "objc2-metal",
@@ -3449,7 +3451,7 @@ dependencies = [
 name = "mistralrs-vision"
 version = "0.8.3"
 dependencies = [
- "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=5404348)",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=65ecb58)",
  "image",
  "rayon",
 ]

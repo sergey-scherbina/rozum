@@ -54,4 +54,4 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # the registry build for the local one. See patches/README.md and
 # docs/specs/mlx-weight-layout-and-afq.md section 13.
 [patch.crates-io]
-mistralrs = { path = ".vendor/mistral-rs/mistralrs" }
+mistralrs = { path = ".vendor/mistral-rs-fixes/mistralrs" }
