@@ -177,12 +177,12 @@ Spec: `docs/specs/shared-gateway.md`.
 - [x] shared-gateway-proxy - Launch-local model-free reverse proxy in the request
   path (agent → proxy → daemon), mirroring `mcp-proxy`. Foundation for replay /
   poison / transparent swap. Re-points the agent at the proxy's local port. **DONE.**
-- [ ] shared-gateway-replay-retry - Buffer + replay a request when the daemon dies
+- [x] shared-gateway-replay-retry - Buffer + replay a request when the daemon dies
   **before the first streamed token**; mid-stream failures surface. Smart retry:
   backoff + jitter, attempt cap, wait-for-health. **Two-tier admission**: daemon
-  advertises room (headers + `GET /v1/admit`); each proxy holds its client's
-  requests in its own `concurrency::AdmissionScheduler` (SJF + fast lane) and only
-  forwards within the daemon's window — prompts wait at the edge, not bounced.
+  advertises room (`GET /v1/admit`); each proxy holds its client's requests in its
+  own `concurrency::AdmissionScheduler` (SJF + fast lane) and only forwards within
+  the daemon's window — prompts wait at the edge, not bounced. **DONE.**
 - [ ] shared-gateway-poison - Soft/graduated: per-fingerprint crash count;
   degrade-then-retry (serialize) first; refuse 422 only after `ROZUM_POISON_MAX`
   (default 3); share to TTL'd `poison.json` (default 1 h, decay-on-success) only

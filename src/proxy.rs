@@ -30,6 +30,8 @@ use axum::{
 };
 use futures::StreamExt as _;
 
+use crate::concurrency::{AdmissionConfig, AdmissionScheduler, AdmitGuard, RequestCost};
+
 /// Max request body we buffer before forwarding (agent chat requests are JSON,
 /// well under this). Buffering is also what makes a request replayable later.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -90,6 +92,12 @@ pub struct ProxyState {
     /// re-point the proxy at a respawned daemon without rebuilding the router.
     daemon_port: Arc<AtomicU16>,
     retry: RetryPolicy,
+    /// Tier-2 of the two-tier admission: this proxy's *own* scheduler over the
+    /// single agent's (possibly parallel) requests — shortest-job-first + a
+    /// reserved fast lane, so a quick follow-up can overtake a big context read
+    /// queued at the edge. The daemon's scheduler is the global tier-1 authority
+    /// (`/v1/admit`); this just orders + caps what this client pushes.
+    admit: AdmissionScheduler,
 }
 
 impl ProxyState {
@@ -102,11 +110,37 @@ impl ProxyState {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             daemon_port: Arc::new(AtomicU16::new(daemon_port)),
             retry: RetryPolicy::from_env(),
+            admit: AdmissionScheduler::new(proxy_admit_config()),
         }
     }
 
     pub fn daemon_port(&self) -> u16 {
         self.daemon_port.load(Ordering::Relaxed)
+    }
+}
+
+/// Local-scheduler config for a launch's proxy. `ROZUM_PROXY_ADMIT` caps how many
+/// of the agent's requests this proxy forwards concurrently (default 4);
+/// `ROZUM_PROXY_FASTLANE_TOKENS` reserves a slot for small requests (default
+/// 1024, `0` off). The queue is unbounded — a proxy never sheds its *own* client;
+/// it holds and orders. The global limit is enforced by the daemon.
+fn proxy_admit_config() -> AdmissionConfig {
+    let env_usize = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
+    AdmissionConfig {
+        limit: env_usize("ROZUM_PROXY_ADMIT").unwrap_or(4).max(1),
+        fastlane_tokens: env_usize("ROZUM_PROXY_FASTLANE_TOKENS").unwrap_or(1024),
+        queue_max: 0,
+    }
+}
+
+/// Cheap per-request cost for the proxy's SJF ordering, taken straight from the
+/// buffered body size (~4 chars/token) — no JSON parse. `max_tokens` is left at 0;
+/// the body length alone separates a quick follow-up from a big context read,
+/// which is all the fast lane needs.
+fn estimate_cost(body: &[u8]) -> RequestCost {
+    RequestCost {
+        prompt_tokens: body.len() / 4,
+        max_tokens: 0,
     }
 }
 
@@ -153,6 +187,14 @@ async fn forward(State(state): State<ProxyState>, req: Request) -> Response {
     let url = format!("http://127.0.0.1:{port}{path_and_query}");
     let policy = &state.retry;
 
+    // Tier-2: order this request among the agent's own in-flight requests (SJF +
+    // fast lane). `queue_max = 0`, so this never sheds — at worst it parks until a
+    // local slot frees. Held for the whole request (passed into the stream below).
+    let admit_guard = state.admit.admit(estimate_cost(&body_bytes)).await.ok();
+    // Tier-1: don't fire into a daemon that has no room — wait at the edge until
+    // it advertises a free slot (bounded; fail-open).
+    wait_for_window(&state, port).await;
+
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
@@ -172,10 +214,12 @@ async fn forward(State(state): State<ProxyState>, req: Request) -> Response {
             {
                 let wait = retry_after(&resp).unwrap_or_else(|| policy.backoff(attempt));
                 tokio::time::sleep(wait).await;
+                // Re-check the window before re-firing, so we don't busy-bounce.
+                wait_for_window(&state, port).await;
             }
             // Headers received: from here on the response is committed to the
             // agent, so we stream it through and never replay.
-            Ok(resp) => return stream_back(resp),
+            Ok(resp) => return stream_back(resp, admit_guard),
             // Connection failed before any byte reached the agent → safe to
             // replay. After the attempt cap, surface a clean 502.
             Err(e) => {
@@ -191,19 +235,63 @@ async fn forward(State(state): State<ProxyState>, req: Request) -> Response {
 }
 
 /// Stream a received upstream response back to the agent verbatim (SSE token
-/// streams included), dropping framing headers so hyper re-frames the body.
-fn stream_back(resp: reqwest::Response) -> Response {
+/// streams included), dropping framing headers so hyper re-frames the body. The
+/// local admission `guard` is held for the whole stream so the proxy's
+/// concurrency cap reflects requests actually streaming (not just connecting); it
+/// frees when the agent finishes reading or disconnects.
+fn stream_back(resp: reqwest::Response, guard: Option<AdmitGuard>) -> Response {
     let status = resp.status();
     let mut response = Response::builder().status(status);
     if let Some(headers) = response.headers_mut() {
         copy_response_headers(resp.headers(), headers);
     }
-    let stream = resp
-        .bytes_stream()
-        .map(|chunk| chunk.map_err(std::io::Error::other));
+    let stream = async_stream::stream! {
+        let _guard = guard;
+        let mut bytes = resp.bytes_stream();
+        while let Some(chunk) = bytes.next().await {
+            yield chunk.map_err(std::io::Error::other);
+        }
+    };
     response
         .body(Body::from_stream(stream))
         .unwrap_or_else(|e| bad_gateway(&format!("failed building response: {e}")))
+}
+
+/// Tier-1 edge gate: hold until the daemon advertises a free slot via
+/// `GET /v1/admit`, bounded by the health-wait budget. Fail-open on any probe
+/// failure (older daemon, auth token, network) — the daemon's `429`/`Retry-After`
+/// remains the backstop, so backpressure is an optimization, not a correctness
+/// dependency.
+async fn wait_for_window(state: &ProxyState, port: u16) {
+    let deadline = Instant::now() + state.retry.health_wait;
+    loop {
+        match query_free_slots(&state.client, port).await {
+            Some(0) => {
+                if Instant::now() >= deadline {
+                    return;
+                }
+                tokio::time::sleep(jitter(Duration::from_millis(100))).await;
+            }
+            _ => return, // free > 0, or unknown → fail open
+        }
+    }
+}
+
+/// `Some(free)` from the daemon's `/v1/admit`, or `None` if the probe didn't
+/// yield a usable answer (caller fails open).
+async fn query_free_slots(client: &reqwest::Client, port: u16) -> Option<usize> {
+    let url = format!("http://127.0.0.1:{port}/v1/admit");
+    let resp = client
+        .get(&url)
+        .timeout(Duration::from_secs(1))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: serde_json::Value = resp.json().await.ok()?;
+    v.get("free").and_then(|f| f.as_u64()).map(|n| n as usize)
 }
 
 /// Back off (exp + jitter), then wait — bounded — for the daemon to answer health
@@ -318,8 +406,20 @@ mod tests {
                 client: reqwest::Client::new(),
                 daemon_port: Arc::new(AtomicU16::new(daemon_port)),
                 retry,
+                admit: AdmissionScheduler::new(proxy_admit_config()),
             }
         }
+    }
+
+    #[test]
+    fn cost_scales_with_body_size_for_fast_lane() {
+        // A short follow-up is cheaper than a big context read, so the proxy's
+        // fast lane (weight < 1024 tokens ≈ 4 KB) lets it overtake.
+        let small = estimate_cost(b"{\"q\":\"hi\"}");
+        let big = estimate_cost(&vec![b'x'; 40_000]);
+        assert!(small.weight() < big.weight());
+        assert!(small.weight() < 1024, "tiny body lands in the fast lane");
+        assert!(big.weight() >= 1024, "big body does not");
     }
 
     /// One shot, no replay — for asserting the terminal 502.
@@ -554,5 +654,67 @@ mod tests {
             "request should replay through to upstream"
         );
         assert_eq!(resp.text().await.unwrap(), r#"{"q":"replay me"}"#);
+    }
+
+    // Tier-1 edge gate: the daemon reports no free slots at first, then opens up.
+    // The proxy must poll `/v1/admit` and hold the request until there is room,
+    // rather than firing into a full daemon.
+    #[tokio::test]
+    async fn holds_at_edge_until_daemon_advertises_room() {
+        use axum::routing::{get, post};
+        use std::sync::atomic::AtomicUsize;
+
+        let probes = Arc::new(AtomicUsize::new(0));
+        let up = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let up_port = up.local_addr().unwrap().port();
+        let probes_for_handler = Arc::clone(&probes);
+        tokio::spawn(async move {
+            async fn echo(req: Request) -> Response {
+                let body = axum::body::to_bytes(req.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
+                (StatusCode::OK, body).into_response()
+            }
+            let app = Router::new()
+                .route(
+                    "/v1/admit",
+                    get(move || {
+                        let p = Arc::clone(&probes_for_handler);
+                        async move {
+                            // Free only from the 3rd probe onward.
+                            let free = usize::from(p.fetch_add(1, Ordering::SeqCst) >= 2);
+                            axum::Json(serde_json::json!({ "free": free }))
+                        }
+                    }),
+                )
+                .route("/v1/messages", post(echo));
+            axum::serve(up, app).await.unwrap();
+        });
+
+        let px = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let px_port = px.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            serve_with(px, ProxyState::with_retry(up_port, fast_retry()))
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{px_port}/v1/messages"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert!(
+            probes.load(Ordering::SeqCst) >= 3,
+            "proxy should poll the window until the daemon opens it (got {})",
+            probes.load(Ordering::SeqCst)
+        );
     }
 }

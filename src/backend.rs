@@ -208,6 +208,27 @@ pub enum ChatEvent {
 
 pub type ChatStream = Pin<Box<dyn futures::Stream<Item = ModelResult<ChatEvent>> + Send>>;
 
+/// A live snapshot of a backend's admission state. The shared gateway exposes it
+/// over `GET /v1/admit` so a launch-local proxy can hold its client's requests at
+/// the edge and only forward within the daemon's free window (two-tier
+/// backpressure — `shared-gateway.md`).
+#[derive(Clone, Copy, Debug)]
+pub struct AdmissionSnapshot {
+    /// Current live admission limit (the circuit breaker can move this).
+    pub limit: usize,
+    /// Slots currently occupied by in-flight requests.
+    pub in_use: usize,
+    /// Requests queued waiting for a slot.
+    pub waiting: usize,
+}
+
+impl AdmissionSnapshot {
+    /// Free slots right now (never below zero).
+    pub fn free(&self) -> usize {
+        self.limit.saturating_sub(self.in_use)
+    }
+}
+
 #[async_trait::async_trait]
 pub trait ChatBackend: Send + Sync {
     async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream>;
@@ -222,6 +243,12 @@ pub trait ChatBackend: Send + Sync {
     /// backend untouched — the right default for remote / self-serializing
     /// backends. In-process backends that know a safe limit return `Some(n)`.
     fn concurrency_capacity(&self) -> Option<usize> {
+        None
+    }
+    /// Live admission state, if this backend is admission-controlled. `None`
+    /// (default) means ungated — the gateway reports "always room" to proxies.
+    /// Only [`crate::concurrency::AdmittingBackend`] returns `Some`.
+    fn admission_stats(&self) -> Option<AdmissionSnapshot> {
         None
     }
 }

@@ -196,17 +196,22 @@ The daemon owns the **global** admission limit; the proxy holds its client's
 requests in a **local priority queue** and only forwards what the daemon has room
 for — so prompts wait at the edge instead of bouncing off a full daemon.
 
-- [ ] The daemon advertises its admission state to proxies — current free slots /
-      queue depth / `Retry-After` — via response headers on each call and a cheap
-      `GET /v1/admit` (or `/health`) probe. The proxy uses this as a **forwarding
-      window**: it does not send a queued request until the daemon signals room
-      (and always backs off on `429` + `Retry-After`).
-- [ ] Each proxy runs its **own** `concurrency::AdmissionScheduler` over the
+- [x] The daemon advertises its admission state to proxies — current free slots /
+      queue depth — via a cheap `GET /v1/admit` probe (`admit_handler` in
+      `gateway.rs`, fed by `ChatBackend::admission_stats()` →
+      `AdmittingBackend`); `429` + `Retry-After` remains the in-band response
+      signal. The proxy uses `/v1/admit` as a **forwarding window**
+      (`wait_for_window`): it holds a queued request until the daemon signals room
+      and always backs off on `429`/`Retry-After`. Fail-open if the probe can't be
+      read (older daemon / auth), so the 429 backstop still applies.
+- [x] Each proxy runs its **own** `concurrency::AdmissionScheduler` over the
       requests from its single agent (which can fire parallel tool/sub-agent
-      calls): shortest-job-first by `RequestCost`, with the reserved fast lane —
-      so a small request *may* jump ahead of a big one queued at the proxy ("if it
-      gets lucky"), exactly as in the central scheduler. Reuses the same module.
-- [ ] Net effect: two cooperating tiers — proxy-local ordering (per client) +
+      calls): shortest-job-first by `RequestCost` (estimated from body size), with
+      the reserved fast lane — so a small request *may* jump ahead of a big one
+      queued at the proxy. Reuses the same module (`proxy_admit_config`,
+      `ROZUM_PROXY_ADMIT`/`_FASTLANE_TOKENS`, unbounded queue — a proxy never sheds
+      its own client). The guard is held for the whole stream.
+- [x] Net effect: two cooperating tiers — proxy-local ordering (per client) +
       daemon-central limit (global) — keep the daemon at its budgeted concurrency
       without premature sends, and keep each client's quick turns responsive.
 
@@ -534,3 +539,35 @@ method/path/query/body/header pass-through and streamed body; dead-daemon 502);
 Deferred to `-replay-retry`/`-poison`: replay-before-first-token, smart retry,
 two-tier admission, and poison fingerprinting all build on this buffered-body
 forward path.
+
+### `shared-gateway-replay-retry` (done)
+
+**Replay before first token + smart retry** (`src/proxy.rs`). `forward` buffers
+the request body once and runs a retry loop: a connection failure *before any
+response byte reaches the agent* (i.e. before a `Response` is returned, which
+commits status+headers) is safe to replay — the proxy waits for re-election to
+bring the daemon back on the same stable port (`wait_for_health`) and re-sends
+the buffered body. Once streaming starts, a death surfaces as a stream error
+(no un-sending tokens). Retries use capped exponential backoff + ±50% jitter (no
+`rand` — wall-clock nanos), a per-request attempt cap, wait-for-health between
+tries, and honor `429`/`Retry-After` by holding and retrying rather than
+bouncing. Tunables: `ROZUM_PROXY_MAX_ATTEMPTS` (6), `ROZUM_PROXY_BACKOFF_MS`
+(150), `ROZUM_PROXY_HEALTH_WAIT_SECS` (60).
+
+**Two-tier admission.** Tier-1 (global): the daemon exposes its admission state
+via `GET /v1/admit` (`gateway.rs::admit_handler` ← new
+`ChatBackend::admission_stats()` → `AdmissionSnapshot`, implemented by
+`concurrency::AdmittingBackend`); ungated backends report an always-free window.
+Tier-2 (per client): each proxy holds its own `concurrency::AdmissionScheduler`
+(`proxy_admit_config`, `ROZUM_PROXY_ADMIT` default 4, `ROZUM_PROXY_FASTLANE_TOKENS`
+default 1024, unbounded queue) over its single agent's parallel requests —
+SJF + fast lane, cost estimated from body size, the guard held for the whole
+stream. Before forwarding, `wait_for_window` polls `/v1/admit` and holds the
+request at the edge until the daemon signals room (bounded by the health-wait
+budget; **fail-open** on any probe failure so the `429` backstop still applies).
+Reuses the one `concurrency` module at both tiers.
+
+Verification: `cargo fmt --check` clean; 77 lib tests (proxy backoff math, cost /
+fast-lane, end-to-end replay-after-daemon-returns, end-to-end edge-gating until
+the daemon opens the window; `admission_stats` snapshot); `--features mistralrs`
+check clean. No new deps.

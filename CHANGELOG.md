@@ -1,5 +1,21 @@
 # Changelog
 
+## shared-gateway-replay-retry (part 2) — two-tier admission
+Completed: 2026-06-11
+The daemon now advertises its admission state and each launch's proxy holds its
+client's requests at the edge instead of bouncing them off a full daemon.
+Tier-1 (global): `GET /v1/admit` reports `{limit,in_use,waiting,free}` from the
+daemon's `AdmittingBackend` via a new defaulted `ChatBackend::admission_stats()`
+(ungated backends report an always-free window). Tier-2 (per client): each proxy
+runs its own `concurrency::AdmissionScheduler` (SJF + reserved fast lane, cost
+estimated from body size, unbounded queue — a proxy never sheds its own client)
+over the single agent's parallel requests, and `wait_for_window` polls `/v1/admit`
+to hold a queued request until the daemon signals room (bounded; fail-open on a
+probe failure, so the `429`/`Retry-After` backstop still applies). The local
+admission guard is held for the whole stream. Env: `ROZUM_PROXY_ADMIT` (4),
+`ROZUM_PROXY_FASTLANE_TOKENS` (1024). Reuses the one `concurrency` module at both
+tiers. Completes `shared-gateway-replay-retry`. No new deps.
+
 ## shared-gateway-replay-retry (part 1) — replay before first token + smart retry
 Completed: 2026-06-11
 The launch-local proxy now makes a daemon crash transparent to the agent. The

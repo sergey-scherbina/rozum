@@ -537,6 +537,15 @@ impl ChatBackend for AdmittingBackend {
     fn concurrency_capacity(&self) -> Option<usize> {
         self.inner.concurrency_capacity()
     }
+
+    fn admission_stats(&self) -> Option<crate::backend::AdmissionSnapshot> {
+        let (in_use, waiting, limit) = self.scheduler.stats();
+        Some(crate::backend::AdmissionSnapshot {
+            limit,
+            in_use,
+            waiting,
+        })
+    }
 }
 
 /// Wrap `inner` with admission control **iff** it advertises a concurrency
@@ -832,5 +841,25 @@ mod tests {
             0,
             "slot released after the stream"
         );
+    }
+
+    #[tokio::test]
+    async fn admission_stats_reports_free_window() {
+        let inner: Arc<dyn ChatBackend> = Arc::new(FakeBackend { capacity: Some(2) });
+        let backend = AdmittingBackend::new(
+            inner,
+            AdmissionConfig {
+                limit: 2,
+                fastlane_tokens: 0,
+                queue_max: 32,
+            },
+        );
+        let s = backend.admission_stats().expect("admission-controlled");
+        assert_eq!((s.limit, s.in_use, s.waiting), (2, 0, 0));
+        assert_eq!(s.free(), 2);
+
+        // A plain backend reports no admission state (ungated).
+        let plain: Arc<dyn ChatBackend> = Arc::new(FakeBackend { capacity: None });
+        assert!(plain.admission_stats().is_none());
     }
 }

@@ -850,6 +850,22 @@ async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
     axum::Json(snap)
 }
 
+/// Cheap admission probe for the two-tier backpressure: a launch-local proxy
+/// reads this to learn the daemon's free window and decide whether to forward a
+/// queued request now or hold it at the edge. Ungated backends report a generous
+/// always-free window so the proxy fails open. (`shared-gateway.md`.)
+async fn admit_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    match state.backend.admission_stats() {
+        Some(s) => axum::Json(json!({
+            "limit": s.limit,
+            "in_use": s.in_use,
+            "waiting": s.waiting,
+            "free": s.free(),
+        })),
+        None => axum::Json(json!({ "free": 1, "unlimited": true })),
+    }
+}
+
 async fn models_handler(State(state): State<GatewayState>) -> impl IntoResponse {
     tracing::debug!("GET /v1/models");
     // Claude Code's gateway discovery only adds models whose id starts with
@@ -1150,6 +1166,7 @@ pub async fn serve_on(
 
     let app = Router::new()
         .route("/v1/models", get(models_handler))
+        .route("/v1/admit", get(admit_handler))
         .route("/stats", get(stats_handler))
         .route("/v1/chat/completions", post(oai_chat_handler))
         .route("/v1/messages", post(anthropic_handler))
