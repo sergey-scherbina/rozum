@@ -18,9 +18,9 @@ mod inner {
 
     use mistralrs::{
         AutoDeviceMapParams, CalledFunction, ChatCompletionChunkResponse, ChunkChoice,
-        DeviceMapSetting, Function, MemoryGpuConfig, Model, ModelBuilder, PagedAttentionMetaBuilder,
-        RequestBuilder, Response, TextMessageRole, Tool, ToolCallResponse, ToolCallType, ToolChoice,
-        ToolType,
+        DeviceMapSetting, Function, MemoryGpuConfig, Model, ModelBuilder,
+        PagedAttentionMetaBuilder, RequestBuilder, Response, TextMessageRole, Tool,
+        ToolCallResponse, ToolCallType, ToolChoice, ToolType,
     };
 
     /// Cap on generated tokens when the request does not specify one, so a
@@ -39,7 +39,11 @@ mod inner {
         /// Max sequences the engine batches concurrently. mistralrs defaults to
         /// 32; on a memory-constrained Mac that lets two large prompt prefills
         /// (e.g. Claude Code's parallel requests) run at once and OOM the Metal
-        /// command buffer. 1 serialises them, matching Ollama/LM Studio.
+        /// command buffer. The load-time caller budgets this from the model
+        /// footprint vs available memory (`crate::concurrency::budgeted_max_num_seqs`,
+        /// driven from `main.rs`); `Default` is a safe serialised floor of `1`.
+        /// This is also reported via `concurrency_capacity()` so the generic
+        /// admission decorator gates at the same number.
         pub max_num_seqs: usize,
     }
 
@@ -49,14 +53,11 @@ mod inner {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(32_768);
-            let max_num_seqs = std::env::var("ROZUM_MISTRALRS_MAX_SEQS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|&n| n >= 1)
-                .unwrap_or(1);
+            // Serialised floor; the load-time caller (main.rs) sets the budgeted
+            // value via `budgeted_max_num_seqs`.
             Self {
                 n_ctx,
-                max_num_seqs,
+                max_num_seqs: 1,
             }
         }
     }
@@ -110,8 +111,8 @@ mod inner {
                         // model + KV cache exceeds Metal's working-set budget;
                         // retry with a smaller context instead of failing outright.
                         let msg = e.to_string();
-                        let too_big = msg.contains("does not fit")
-                            || msg.contains("exceeds total capacity");
+                        let too_big =
+                            msg.contains("does not fit") || msg.contains("exceeds total capacity");
                         if too_big && opts.n_ctx > N_CTX_FLOOR {
                             let reduced = opts.n_ctx.saturating_sub(N_CTX_STEP).max(N_CTX_FLOOR);
                             eprintln!(
@@ -250,6 +251,10 @@ mod inner {
             let request = self.build_request(&req);
             let model = Arc::clone(&self.model);
 
+            // Admission control (concurrency limit, backpressure, circuit breaker)
+            // is layered on generically by `concurrency::AdmittingBackend` —
+            // see `concurrency_capacity()` below. This backend just runs the model.
+            //
             // Move `model` into the stream so the upstream borrow it holds is
             // bounded by the stream's lifetime, not by this function call.
             let chat_stream: ChatStream = Box::pin(async_stream::stream! {
@@ -358,6 +363,13 @@ mod inner {
 
         fn label(&self) -> &'static str {
             "mistralrs"
+        }
+
+        /// The engine's budgeted batch size doubles as the safe in-process
+        /// concurrency capacity, so `concurrency::admit_wrap` gates admissions at
+        /// the same number the engine can actually batch.
+        fn concurrency_capacity(&self) -> Option<usize> {
+            Some(self.opts.max_num_seqs)
         }
     }
 

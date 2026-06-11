@@ -1,5 +1,169 @@
 # Changelog
 
+## shared-gateway-proxy — launch-local reverse proxy in the request path
+Completed: 2026-06-11
+New `src/proxy.rs`: a model-free launch-local reverse HTTP proxy (gateway analog
+of the mcp-proxy). `proxy::serve` forwards every request to the shared daemon's
+stable port and streams the response back verbatim (SSE token streams included),
+buffering the request body (the seed for future replay), stripping hop-by-hop and
+framing headers both ways, with a no-timeout client. An unreachable daemon yields
+a clean 502; `daemon_port` lives in an AtomicU16 so a later phase can re-point it
+at a respawned daemon. `rozum launch` (`start_launch_proxy`) binds an ephemeral
+loopback port, spawns the proxy, and points the agent at it (failover watchdog +
+lease heartbeat still target the daemon); falls back to the daemon directly if the
+proxy can't bind. Foundation for replay / poison / two-tier backpressure /
+transparent swap. 5 new tests incl. two real end-to-end tokio tests. No new deps.
+
+## models-rm — delete a cached model from disk
+Completed: 2026-06-11
+`rozum models rm <spec> [-y]` frees disk by deleting a cached model. It
+exact-matches the spec against `scan_all_installed()`, refuses if it is the
+active gateway model (reads `active.json` + health-probes), prints what will be
+freed, and confirms (`--yes`/`-y` skips; a non-TTY without `--yes` is refused).
+HuggingFace (`models--owner--name`) and LMStudio (the repo dir holding the
+`.gguf`) directories are removed directly; Ollama is delegated to `ollama rm`
+(its blobs are content-addressed and shared) and refused if the binary is absent.
+Dependency-free `which` helper added. No new deps.
+
+## launch-model-picker — optional --model, interactive picker, takeover-if-idle
+Completed: 2026-06-11
+`rozum launch --model` is now optional. `resolve_launch_model`: given → use it;
+omitted + a healthy gateway running → reuse its model (`using running model: …`);
+omitted + nothing running on a TTY → interactive `pick_model_interactive` (cached
+models first, `(cached, size)`; then not-cached `RECOMMENDED`, `(not cached, ~GB)`;
+a not-cached pick re-confirms the download); omitted + non-TTY → error. Model
+mismatch now does **takeover-if-idle** in `ensure_shared_gateway`: a different
+running model with no live client leases is SIGTERM'd and replaced on the same
+port; with live leases it is reused-with-warning (don't steal a live session).
+`--dedicated` still bypasses sharing. No new deps.
+
+## shared-gateway-leases — client leases drive daemon lifetime + status/stop
+Completed: 2026-06-11
+Third phase of `shared-gateway`. Each launch holds a `leases/<pid>` file
+heartbeated every 15s (mtime = liveness); `share::live_lease_count` counts fresh
+leases and reaps dead ones. The daemon's idle watchdog now stays up while any
+lease is fresh OR a request is in flight OR there was recent HTTP, and idle-exits
+(ROZUM_GATEWAY_IDLE_SECS, default 900) only when all are quiet — so leases, not
+raw HTTP traffic, are the primary keep-alive for launch clients, while a manually
+run `rozum gateway` is still kept alive by traffic. Added `rozum gateway status`
+(model/port/pid/n_ctx/uptime/clients) and `rozum gateway stop [--force]` (SIGTERM,
+refused while clients attached); `gateway --model` is now optional (required only
+to run the daemon). No new deps.
+
+## shared-gateway-failover — respawn the shared daemon on death
+Completed: 2026-06-11
+Second phase of `shared-gateway`. `share::try_spawn_lock` adds an O_EXCL
+`spawn.lock` with stale-steal + drop-release (best-effort anti-stampede; the TCP
+bind remains the hard single-owner guarantee). `spawn_failover_watchdog` runs in
+each launch alongside the agent: it polls the daemon every 5s and, after two
+consecutive misses, respawns it on the same port under the spawn lock (rechecking
+health first), waiting up to 120s. Simultaneous watchdogs are damped by the lock
+and deduped by the port bind, so a crashed/killed daemon comes back without the
+user relaunching; the agent reconnects over the brief gap via its own retry (same
+stable URL). No new deps.
+
+## shared-gateway-mvp — share one model daemon across launches
+Completed: 2026-06-11
+First phase of `shared-gateway`. `rozum launch` no longer always loads its own
+in-process model (two launches → two models → OOM). New `src/share.rs` registry
+(`active.json` under `$XDG_STATE_HOME/rozum/gateway/`, atomic write +
+remove-if-mine, `health_ok` probe, `is_reusable`, stable `DEFAULT_GATEWAY_PORT`
+8089). `rozum gateway` publishes the registry and idle-exits after
+`ROZUM_GATEWAY_IDLE_SECS` (default 900) when nothing is in flight (in-flight-aware
+via an Activity counter in the auth layer, so long generations don't trip it).
+`rozum launch` reuses a healthy running gateway (or a different-model one with a
+warning), else spawns a detached `rozum gateway` (own process group, stdio →
+gateway.log) and waits for health; the TCP-port bind is the single-owner
+guarantee. `--dedicated` keeps the old private in-process gateway. Deferred to
+later phases: flock anti-stampede + crash re-election, client-pid leases, the
+launch-local proxy / replay / poison / two-tier backpressure, switch/reload/
+unload, gateway status/stop, the model picker, and `models rm`. 3 share unit
+tests (no Xcode); fmt + feature build clean.
+
+## concurrency-backend-abstraction — generic admission for any backend
+Completed: 2026-06-11
+Lifted the concurrency machinery (scheduler, memory budget, fast lane,
+backpressure, circuit breaker) out of the mistralrs modules into a generic
+`src/concurrency` module (renamed from `mistralrs_admission`), and re-applied it
+as a decorator. `ChatBackend` gained an optional `concurrency_capacity() ->
+Option<usize>` hook (default `None`); `concurrency::admit_wrap` wraps a backend in
+`AdmittingBackend` iff it advertises a capacity, and passes remote / self-
+serializing backends through untouched (the safe default). `MistralrsBackend`
+now reports `Some(max_num_seqs)` and its `chat()` is plain inference again — the
+decorator owns admission. The budget math (`budgeted_max_num_seqs`,
+`ConcurrencyBudget`, `per_seq_prefill_peak`) moved to `concurrency` and is reusable
+by any in-process backend. Admission env renamed to generic `ROZUM_ADMIT` /
+`ROZUM_ADMIT_FASTLANE_TOKENS` / `ROZUM_ADMIT_QUEUE_MAX`. `build_gateway_backend`
+routes every selected backend through `admit_wrap`. 13 concurrency unit tests on
+the default build (no Xcode); feature build + fmt clean. The new mlx-rs backend is
+the first intended consumer: implement inference + return a capacity, get
+admission/fast-lane/backpressure/breaker for free.
+
+## concurrency-load-shedding — backpressure + OOM circuit breaker (Phase D)
+Completed: 2026-06-11
+Final phase of `mistralrs-concurrency-scheduling`. `AdmissionScheduler.admit`
+now returns `Result<AdmitGuard, AdmitError>`: a full wait queue
+(`ROZUM_MISTRALRS_QUEUE_MAX`, default 32, 0=unbounded) sheds with `Overloaded`.
+`MistralrsBackend::chat()` acquires the slot before returning the stream, so an
+overloaded backend surfaces as a genuine HTTP 429 + `Retry-After` (new
+`ModelError::Overloaded`, mapped in the gateway for both the OpenAI and Anthropic
+dialects). Circuit breaker: `trip()` lowers the live admission limit (floor 1) on
+a detected Metal allocation failure and a 30 s cooldown `recover_step()` raises
+it back toward capacity; the OOM'd request is surfaced (not auto-retried, to
+avoid re-OOM) and detection is best-effort substring matching. Per-class
+`max_tokens` was dropped as redundant (cost already weights `max_tokens`). 7
+scheduler unit tests (no Xcode); feature build + fmt clean. This completes the
+concurrency feature (A+B+C+D); follow-ups — chiefly `concurrency-engine-yield`
+for true mid-prefill interleaving — are in BACKLOG.
+
+## concurrency-admission — admission scheduler + fast lane (Phase B+C)
+Completed: 2026-06-11
+Second phase of `mistralrs-concurrency-scheduling`. New engine-agnostic
+`src/mistralrs_admission.rs`: an `AdmissionScheduler` that gates actual
+concurrency in front of the static engine `max_num_seqs`, with a runtime
+`set_limit` (for Phase D), shortest-job-first queue ordering, and one reserved
+fast-lane slot so short interactive requests jump ahead of queued big ones.
+`admit(RequestCost) -> AdmitGuard`; the guard is held for the whole `chat()`
+stream and releases the slot on completion/disconnect, waking the next waiter
+(dead/cancelled waiters are skipped and their slot reclaimed). Config from
+`ROZUM_MISTRALRS_ADMIT` (limit ≤ capacity) and `ROZUM_MISTRALRS_FASTLANE_TOKENS`
+(default 1024, 0 off). 5 async unit tests, no Xcode needed; feature build clean.
+
+Finding recorded: the fork does **not** yield between prefill chunks (chunking
+is internal to `pipeline::step`), so the fast lane gives admission-order
+responsiveness but not mid-big-prefill preemption — engine-yield filed as
+`concurrency-engine-yield` in BACKLOG. Phase D (backpressure + circuit breaker)
+remains.
+
+## concurrency-budget — load-time budgeted engine max_num_seqs (Phase A)
+Completed: 2026-06-11
+First phase of `mistralrs-concurrency-scheduling`. Replaces the total-`hw.memsize`
+1/2 ladder with a footprint budget: `budgeted_max_num_seqs(ConcurrencyBudget)`
+(pure, in the lib) returns `clamp((0.8·available − weights − kv_pool) /
+per_seq_peak, 1, ceiling)`, where `per_seq_peak = prefill_chunk × ~465 KB/token`
+(constant under chunked prefill) and `ceiling` defaults to 8 (Metal is one GPU —
+past a handful of concurrent prefills you gain tail latency, not throughput).
+`resolve_max_num_seqs` in `main.rs` gathers the footprint from the existing
+preflight helpers and applies env overrides (`ROZUM_MISTRALRS_MAX_SEQS` forces,
+`ROZUM_MISTRALRS_SEQS_CEILING` caps, `MISTRALRS_PREFILL_CHUNK` sizes the per-slot
+cost), logging a `concurrency_budget` obs event. `MistralrsOptions::default()`
+now carries a plain serialised floor of 1. 6 lib unit tests (no Xcode), feature
+build clean. Phases B+C (admission scheduler + fast lane) and D (backpressure +
+circuit breaker) remain in SPRINT.md.
+
+## mistralrs-adaptive-concurrency — memory-adaptive default for max_num_seqs
+Completed: 2026-06-11
+The mistralrs backend's concurrent-prefill cap (`max_num_seqs`) default is no
+longer a fixed `1`. A new pure `default_max_num_seqs(total_ram)` policy keeps
+the serialised `1` floor on the 24–36 GB Apple Silicon target band (where two
+concurrent large-prompt prefills can OOM the Metal command buffer) and lifts it
+to `2` on machines with ≥ 48 GB total unified memory, where PagedAttention +
+chunked prefill + the disconnected-seq reaping fix make real concurrency safe.
+The gate is on total `hw.memsize` rather than instantaneous free memory (which
+over-predicts runtime headroom at load time). `ROZUM_MISTRALRS_MAX_SEQS`
+overrides. Rationale + trade-offs documented in
+`docs/specs/mistralrs-backend.md`.
+
 ## web-basic-auth — HTTP Basic Auth on the web bridge
 Completed: 2026-06-06
 The web bridge now requires HTTP Basic Auth for `/`, `/ws`, and `/transcript`.

@@ -233,7 +233,7 @@ mark + refresh timer is small and contained.
 
 ## Sprint plan
 
-Tasks to add to `WORK_QUEUE.md` (in priority order; each is a single claim):
+Tasks to add to `SPRINT.md` (in priority order; each is a single claim):
 
 1. **`web-presence-row`** — bridge forwards `responding`/`polling`; web
    renders typing/waiting/idle/disconnected glyphs. Touches:

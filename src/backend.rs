@@ -21,6 +21,8 @@ pub enum ModelError {
     BackendUnavailable(String),
     BackendNotFound(String),
     NoBackendSucceeded(Vec<String>),
+    /// The backend is at capacity and shedding load — maps to HTTP 429.
+    Overloaded(String),
 }
 
 impl fmt::Display for ModelError {
@@ -35,6 +37,7 @@ impl fmt::Display for ModelError {
                 }
                 Ok(())
             }
+            Self::Overloaded(msg) => write!(f, "overloaded: {msg}"),
         }
     }
 }
@@ -213,6 +216,13 @@ pub trait ChatBackend: Send + Sync {
     /// Short identifier for observability (`GET /stats`, the JSONL log).
     fn label(&self) -> &'static str {
         "backend"
+    }
+    /// A backend's self-assessed safe concurrent-request capacity. `None`
+    /// (default) means "don't gate me": `concurrency::admit_wrap` leaves the
+    /// backend untouched — the right default for remote / self-serializing
+    /// backends. In-process backends that know a safe limit return `Some(n)`.
+    fn concurrency_capacity(&self) -> Option<usize> {
+        None
     }
 }
 

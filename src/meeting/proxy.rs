@@ -833,10 +833,14 @@ mod tests {
         .await?;
         assert_ne!(join.is_error, Some(true));
 
+        // The proxy scopes agent display names with the cwd basename
+        // (`client_name_or_default`), so the registered participant id is the
+        // prefixed name, not the bare client_info name.
+        let expected_id = ParticipantId::new(client_name_or_default("codex-test"));
         let room_peer = peer_registry
             .lock()
             .await
-            .get(&ParticipantId::new("codex-test"))
+            .get(&expected_id)
             .cloned()
             .expect("proxy should register room-side peer for the joined client");
         assert!(

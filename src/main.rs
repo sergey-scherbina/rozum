@@ -100,15 +100,20 @@ enum Command {
         port: u16,
 
         /// Model spec: absolute .gguf path, "lmstudio:<repo>", or any model id
-        /// understood by mlx_lm.server / ROZUM_BACKEND_URL
+        /// understood by mlx_lm.server / ROZUM_BACKEND_URL. Required to run the
+        /// daemon; not needed for `status` / `stop`.
         #[arg(long)]
-        model: String,
+        model: Option<String>,
 
         /// Context window in tokens. Default: the model's max context (from its
         /// config.json), capped so the KV cache stays within a fraction of RAM;
         /// falls back to 32768 if the model max is unknown. Lower it to save RAM.
         #[arg(long)]
         n_ctx: Option<u32>,
+
+        /// `status` or `stop` the shared gateway; omit to run the daemon.
+        #[command(subcommand)]
+        action: Option<GatewayAction>,
     },
 
     /// Start the gateway and launch a program with ANTHROPIC_/OPENAI_ env vars set.
@@ -117,9 +122,11 @@ enum Command {
     /// Example: rozum launch --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit claude
     /// Example: rozum launch --model qwen2.5-coder:32b -- aider --no-auto-commits
     Launch {
-        /// Model spec (same as `gateway --model`)
+        /// Model spec (same as `gateway --model`). Optional: if omitted and a
+        /// shared gateway is already running, reuse its model; if nothing is
+        /// running on a TTY, show an interactive picker (cached models first).
         #[arg(long)]
-        model: String,
+        model: Option<String>,
 
         /// Port for the gateway (auto-picks a free port if not specified)
         #[arg(long)]
@@ -131,6 +138,12 @@ enum Command {
         #[arg(long)]
         n_ctx: Option<u32>,
 
+        /// Bypass the shared gateway: run a private in-process model just for
+        /// this launch (the pre-sharing behaviour). Use when you intentionally
+        /// want a second model resident and own the memory cost.
+        #[arg(long)]
+        dedicated: bool,
+
         /// Program to launch and its arguments
         #[arg(trailing_var_arg = true, required = true)]
         program: Vec<String>,
@@ -140,6 +153,17 @@ enum Command {
     Models {
         #[command(subcommand)]
         action: ModelsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum GatewayAction {
+    /// Show the active shared gateway (model, port, pid, uptime, clients).
+    Status,
+    /// Stop the active shared gateway (refused if clients are attached, unless --force).
+    Stop {
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -157,6 +181,18 @@ enum ModelsAction {
         /// Model spec: `mlx-community:...`, `hf:<user>/<repo>`, `<ollama-tag>`,
         /// `lmstudio:<repo>`, or an absolute path
         spec: String,
+    },
+
+    /// Delete a cached model (frees disk). Refused if it is the active gateway
+    /// model. HuggingFace/LMStudio dirs are removed directly; Ollama is delegated
+    /// to `ollama rm` (its blobs are content-addressed and shared).
+    Rm {
+        /// Spec of an installed model, exactly as shown by `rozum models list`
+        spec: String,
+
+        /// Skip the confirmation prompt (required for non-interactive use)
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 }
 
@@ -252,16 +288,30 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Command::Gateway { port, model, n_ctx }) => {
-            run_gateway(port, model, n_ctx).await;
-        }
+        Some(Command::Gateway {
+            port,
+            model,
+            n_ctx,
+            action,
+        }) => match action {
+            None => {
+                let Some(model) = model else {
+                    eprintln!("rozum gateway: --model is required to run the daemon");
+                    std::process::exit(2);
+                };
+                run_gateway(port, model, n_ctx).await;
+            }
+            Some(GatewayAction::Status) => run_gateway_status().await,
+            Some(GatewayAction::Stop { force }) => run_gateway_stop(force),
+        },
         Some(Command::Launch {
             model,
             port,
             n_ctx,
+            dedicated,
             program,
         }) => {
-            run_launch(model, port, n_ctx, program).await;
+            run_launch(model, port, n_ctx, dedicated, program).await;
         }
         Some(Command::Models { action }) => {
             run_models(action).await;
@@ -378,7 +428,18 @@ async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>) {
     eprintln!("  # OpenAI Codex / aider:");
     eprintln!("  export OPENAI_BASE_URL=http://127.0.0.1:{port}/v1");
     eprintln!("  export OPENAI_API_KEY=rozum-local");
-    if let Err(e) = rozum::gateway::run(backend, port, model_spec).await {
+    // Run as a shareable daemon: publish the registry so `rozum launch` clients
+    // discover & reuse this model, and idle-exit to free RAM when unused.
+    // ROZUM_GATEWAY_IDLE_SECS=0 keeps it up indefinitely (default 900s).
+    let idle_secs = std::env::var("ROZUM_GATEWAY_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(900);
+    let cfg = rozum::gateway::ServeConfig {
+        idle_secs: (idle_secs > 0).then_some(idle_secs),
+        register_n_ctx: Some(n_ctx),
+    };
+    if let Err(e) = rozum::gateway::run(backend, port, model_spec, cfg).await {
         eprintln!("gateway error: {e}");
         std::process::exit(1);
     }
@@ -433,23 +494,207 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
     args
 }
 
-async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: Option<u32>, program: Vec<String>) {
-    use std::process::Command as StdCommand;
-
+async fn run_launch(
+    model: Option<String>,
+    port: Option<u16>,
+    n_ctx: Option<u32>,
+    dedicated: bool,
+    program: Vec<String>,
+) {
+    let Some(model_spec) = resolve_launch_model(model).await else {
+        // No model and none resolvable (non-TTY without --model, or cancelled).
+        std::process::exit(2);
+    };
     let n_ctx = resolve_n_ctx(&model_spec, n_ctx);
-    let (program_name, args) = program
-        .split_first()
-        .expect("clap requires at least one arg");
 
-    // Pick a free port if not specified.
+    if dedicated {
+        run_launch_dedicated(model_spec, port, n_ctx, program).await;
+        return; // unreachable: the dedicated path execs + exits
+    }
+
+    // Shared path: discover & reuse a running gateway, or spawn a detached daemon.
+    let (gw_port, effective_model) = match ensure_shared_gateway(&model_spec, n_ctx, port).await {
+        Some(x) => x,
+        None => std::process::exit(1),
+    };
+    // Hold a lease so the daemon knows a client is using it (and idle-exits only
+    // when none remain). The lease goes stale and is reaped after we exit.
+    let me_pid = std::process::id();
+    rozum::share::touch_lease(me_pid);
+    spawn_lease_heartbeat(me_pid);
+
+    // Failover: while the agent runs, keep the shared daemon alive — if it dies,
+    // one launch respawns it on the same port. Spec: shared-gateway-failover.
+    spawn_failover_watchdog(effective_model.clone(), n_ctx, gw_port);
+
+    // Launch-local reverse proxy: the agent talks to a per-launch loopback port
+    // that forwards to the shared daemon. This is the path later phases use for
+    // transparent replay / poison handling / model-swap holds; here it is a
+    // transparent pass-through. Spec: shared-gateway-proxy.
+    let agent_port = match start_launch_proxy(gw_port).await {
+        Some(p) => p,
+        None => {
+            // Couldn't bind a local proxy port — fall back to pointing the agent
+            // straight at the daemon (loses replay/poison, but still works).
+            eprintln!("rozum launch: proxy unavailable; pointing agent directly at the daemon.");
+            gw_port
+        }
+    };
+    exec_agent(program, &effective_model, agent_port).await
+}
+
+/// Bind an ephemeral loopback port, start the launch-local reverse proxy on it
+/// (forwarding to the shared daemon on `daemon_port`), and return the proxy's
+/// port. The proxy task dies with this process when the agent exits.
+async fn start_launch_proxy(daemon_port: u16) -> Option<u16> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.ok()?;
+    let port = listener.local_addr().ok()?.port();
+    tokio::spawn(async move {
+        if let Err(e) = rozum::proxy::serve(listener, daemon_port).await {
+            eprintln!("rozum launch: proxy exited: {e}");
+        }
+    });
+    eprintln!("rozum launch: proxy on :{port} → shared gateway :{daemon_port}");
+    Some(port)
+}
+
+/// Resolve which model `rozum launch` should use when `--model` may be omitted:
+///
+/// - `--model X` given → use `X` (mismatch with a running gateway is handled in
+///   `ensure_shared_gateway`: takeover-if-idle, else reuse-with-warning).
+/// - omitted + a healthy gateway already running → reuse its model.
+/// - omitted + nothing running, on a TTY → interactive picker.
+/// - omitted + nothing running, not a TTY → error (scripted launches must pass
+///   `--model`).
+///
+/// Returns `None` to abort (non-TTY without a model, or the user cancelled).
+async fn resolve_launch_model(model: Option<String>) -> Option<String> {
+    use std::io::IsTerminal;
+
+    if let Some(m) = model {
+        return Some(m);
+    }
+
+    // Omitted: reuse a healthy running gateway's model if there is one.
+    if let Some(active) = rozum::share::read_active() {
+        if rozum::share::health_ok(active.port).await {
+            eprintln!("rozum launch: using running model: {}", active.model);
+            return Some(active.model);
+        }
+    }
+
+    // Nothing running. A picker only makes sense on an interactive terminal.
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        eprintln!(
+            "rozum launch: no --model given and no gateway running. Pass --model, \
+             e.g. `rozum launch --model mlx-community:Qwen3-4B-4bit claude`."
+        );
+        return None;
+    }
+
+    pick_model_interactive()
+}
+
+/// Interactive model picker (TTY only). Lists locally-cached models first
+/// (annotated `(cached, <size>)`), then curated downloadable models (annotated
+/// `(not cached, ~<size>)`). Selecting a not-cached model re-confirms the
+/// download. Returns the chosen spec, or `None` if cancelled.
+fn pick_model_interactive() -> Option<String> {
+    use rozum::models;
+    use std::io::Write as _;
+
+    struct Choice {
+        spec: String,
+        label: String,
+        cached: bool,
+    }
+
+    let installed = models::scan_all_installed();
+    let cached: std::collections::HashSet<&str> =
+        installed.iter().map(|m| m.spec.as_str()).collect();
+
+    let mut choices: Vec<Choice> = Vec::new();
+    for m in &installed {
+        choices.push(Choice {
+            spec: m.spec.clone(),
+            label: format!(
+                "{}  (cached, {})",
+                m.spec,
+                models::format_size(m.size_bytes)
+            ),
+            cached: true,
+        });
+    }
+    for r in models::RECOMMENDED {
+        if !cached.contains(r.spec) {
+            choices.push(Choice {
+                spec: r.spec.to_owned(),
+                label: format!(
+                    "{}  (not cached, ~{:.1} GB)  — {}",
+                    r.spec, r.approx_size_gb, r.display_name
+                ),
+                cached: false,
+            });
+        }
+    }
+    if choices.is_empty() {
+        eprintln!("rozum launch: no models available. See `rozum models list --remote`.");
+        return None;
+    }
+
+    eprintln!("Select a model to launch:");
+    for (i, c) in choices.iter().enumerate() {
+        eprintln!("  {:>2}) {}", i + 1, c.label);
+    }
+    eprint!("Enter number [1-{}] (q to cancel): ", choices.len());
+    let _ = std::io::stderr().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return None;
+    }
+    let line = line.trim();
+    if line.is_empty() || line.eq_ignore_ascii_case("q") {
+        eprintln!("cancelled.");
+        return None;
+    }
+    let Some(idx) = line
+        .parse::<usize>()
+        .ok()
+        .filter(|&n| n >= 1 && n <= choices.len())
+    else {
+        eprintln!("rozum launch: '{line}' is not a valid choice.");
+        return None;
+    };
+    let chosen = &choices[idx - 1];
+
+    if !chosen.cached {
+        eprint!("Download {} now and use it? [y/N]: ", chosen.spec);
+        let _ = std::io::stderr().flush();
+        let mut yn = String::new();
+        let _ = std::io::stdin().read_line(&mut yn);
+        if !yn.trim().eq_ignore_ascii_case("y") {
+            eprintln!("cancelled.");
+            return None;
+        }
+    }
+    Some(chosen.spec.clone())
+}
+
+/// Pre-sharing behaviour: load a private model in-process for just this launch.
+async fn run_launch_dedicated(
+    model_spec: String,
+    port: Option<u16>,
+    n_ctx: u32,
+    program: Vec<String>,
+) {
     let port = port.unwrap_or_else(|| {
         std::net::TcpListener::bind("127.0.0.1:0")
             .ok()
             .and_then(|l| l.local_addr().ok())
             .map(|a| a.port())
-            .unwrap_or(8089)
+            .unwrap_or(rozum::share::DEFAULT_GATEWAY_PORT)
     });
-
     let backend = match build_gateway_backend(&model_spec, n_ctx).await {
         Some(b) => b,
         None => {
@@ -457,9 +702,6 @@ async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: Option<u32>, p
             std::process::exit(1);
         }
     };
-
-    // Bind the listener before forking off the child so it can connect
-    // immediately without racing the gateway startup.
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -468,36 +710,278 @@ async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: Option<u32>, p
             std::process::exit(1);
         }
     };
-
-    eprintln!("rozum launch  gateway=http://127.0.0.1:{port}  model={model_spec}");
-    eprintln!("  → running: {} {}", program_name, args.join(" "));
-
-    // Compute the claude-prefixed alias before moving model_spec into the gateway task.
-    let claude_alias = rozum::gateway::claude_model_alias(&model_spec);
-
-    // Start the gateway in a background task.
-    let gateway_handle = tokio::spawn(async move {
-        if let Err(e) = rozum::gateway::serve_on(backend, listener, model_spec).await {
+    eprintln!("rozum launch  (dedicated)  gateway=http://127.0.0.1:{port}  model={model_spec}");
+    let model_for_task = model_spec.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            rozum::gateway::serve_on(backend, listener, model_for_task, Default::default()).await
+        {
             eprintln!("gateway error: {e}");
         }
     });
+    // The in-process gateway dies with this process on exec_agent's exit.
+    exec_agent(program, &model_spec, port).await
+}
 
-    // Build the child command with both API conventions set.
-    // Claude Code precedence: ANTHROPIC_AUTH_TOKEN > ANTHROPIC_API_KEY > OAuth.
-    // Using ANTHROPIC_AUTH_TOKEN AND explicitly clearing ANTHROPIC_API_KEY avoids
-    // the "Auth conflict" warning while still leaving the user's global OAuth
-    // login intact (no `claude /logout` required).
+/// Reuse a healthy running shared gateway, else spawn a detached `rozum gateway`
+/// daemon and wait for it to come up. Returns `(port, effective_model)` — the
+/// effective model may differ from `model_spec` if a gateway for another model is
+/// already running (MVP: reuse it with a warning rather than load a second model).
+async fn ensure_shared_gateway(
+    model_spec: &str,
+    n_ctx: u32,
+    port: Option<u16>,
+) -> Option<(u16, String)> {
+    use rozum::share;
+    let want_port = port.unwrap_or(share::DEFAULT_GATEWAY_PORT);
+
+    // 1/2. A healthy running gateway → reuse it, or take it over if it serves a
+    //      different model and no other client is attached (idle).
+    if let Some(active) = share::read_active() {
+        if share::health_ok(active.port).await {
+            if share::is_reusable(&active, model_spec) {
+                eprintln!(
+                    "rozum launch: reusing shared gateway on :{} (model {})",
+                    active.port, active.model
+                );
+                return Some((active.port, active.model));
+            }
+            // Different model. Takeover only when no other launch holds a lease —
+            // a single resident model can't host two, and stealing a model out
+            // from under a live client would break their session.
+            let clients = share::live_lease_count(share::LEASE_FRESH_SECS);
+            if clients == 0 {
+                eprintln!(
+                    "rozum launch: gateway on :{} is idle (model '{}'); taking it over for '{}'…",
+                    active.port, active.model, model_spec
+                );
+                let _ = std::process::Command::new("kill")
+                    .arg(active.pid.to_string())
+                    .status();
+                share::remove_active_if_mine(active.pid);
+                // Wait for the port to free before respawning on it.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                while share::health_ok(active.port).await {
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                // fall through to the spawn path below
+            } else {
+                eprintln!(
+                    "rozum launch: gateway already running model '{}' for {clients} client(s); \
+                     using it and ignoring '{}'. Use --dedicated for a private model, or \
+                     `rozum gateway switch`.",
+                    active.model, model_spec
+                );
+                return Some((active.port, active.model));
+            }
+        }
+    }
+
+    // 3. Nothing usable → spawn a detached daemon and wait for health.
+    eprintln!("rozum launch: starting shared gateway for '{model_spec}' on :{want_port}…");
+    let mut child = match spawn_detached_gateway(model_spec, want_port, n_ctx) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rozum launch: failed to spawn gateway daemon: {e}");
+            return None;
+        }
+    };
+    // Poll for health; fail fast if the daemon process exits (load error).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        if share::health_ok(want_port).await {
+            return Some((want_port, model_spec.to_string()));
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            eprintln!(
+                "rozum launch: gateway daemon exited before becoming ready ({status}); \
+                 see {}",
+                share::gateway_dir().join("gateway.log").display()
+            );
+            return None;
+        }
+        if std::time::Instant::now() >= deadline {
+            eprintln!(
+                "rozum launch: gateway not ready after 300s (still downloading?); \
+                 see {}",
+                share::gateway_dir().join("gateway.log").display()
+            );
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+async fn run_gateway_status() {
+    use rozum::share;
+    let Some(active) = share::read_active() else {
+        println!("no shared gateway running");
+        return;
+    };
+    let healthy = share::health_ok(active.port).await;
+    let uptime = share::now_unix().saturating_sub(active.started_at);
+    let clients = share::live_lease_count(share::LEASE_FRESH_SECS);
+    println!(
+        "shared gateway: {}",
+        if healthy {
+            "running"
+        } else {
+            "STALE (not responding)"
+        }
+    );
+    println!("  model:   {}", active.model);
+    println!("  port:    {}", active.port);
+    println!("  pid:     {}", active.pid);
+    println!("  n_ctx:   {}", active.n_ctx);
+    println!("  uptime:  {uptime}s");
+    println!("  clients: {clients}");
+}
+
+fn run_gateway_stop(force: bool) {
+    use rozum::share;
+    let Some(active) = share::read_active() else {
+        println!("no shared gateway running");
+        return;
+    };
+    let clients = share::live_lease_count(share::LEASE_FRESH_SECS);
+    if clients > 0 && !force {
+        eprintln!(
+            "rozum gateway stop: {clients} client(s) attached; refusing. Use --force to stop anyway."
+        );
+        std::process::exit(1);
+    }
+    // SIGTERM via `kill`; the daemon's stale registry is harmless (health probe
+    // treats a dead port as "none running").
+    let status = std::process::Command::new("kill")
+        .arg(active.pid.to_string())
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            share::remove_active_if_mine(active.pid);
+            println!("stopped shared gateway (pid {})", active.pid);
+        }
+        _ => {
+            eprintln!("rozum gateway stop: failed to signal pid {}", active.pid);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Heartbeat this launch's lease so the shared daemon counts it as a live client.
+fn spawn_lease_heartbeat(pid: u32) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            rozum::share::touch_lease(pid);
+        }
+    });
+}
+
+/// Background failover: watch the shared gateway and respawn it if it dies, so
+/// clients only see a brief reconnect window. A spawn lock keeps simultaneous
+/// watchdogs from each respawning (port-bind dedups them anyway). Dies with this
+/// process when the agent exits.
+fn spawn_failover_watchdog(model: String, n_ctx: u32, port: u16) {
+    use rozum::share;
+    use std::time::{Duration, Instant};
+    tokio::spawn(async move {
+        let mut misses = 0u32;
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if share::health_ok(port).await {
+                misses = 0;
+                continue;
+            }
+            misses += 1;
+            if misses < 2 {
+                continue; // tolerate a transient blip before acting
+            }
+            // Daemon looks down. Coordinate a single respawn; others wait.
+            match share::try_spawn_lock(120) {
+                Some(_lock) => {
+                    if share::health_ok(port).await {
+                        misses = 0;
+                        continue; // recovered under the lock
+                    }
+                    eprintln!("rozum launch: shared gateway down — respawning on :{port}…");
+                    match spawn_detached_gateway(&model, port, n_ctx) {
+                        Ok(mut child) => {
+                            let deadline = Instant::now() + Duration::from_secs(120);
+                            while !share::health_ok(port).await {
+                                if matches!(child.try_wait(), Ok(Some(_)))
+                                    || Instant::now() >= deadline
+                                {
+                                    break; // died or timed out — next loop retries
+                                }
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            }
+                        }
+                        Err(e) => eprintln!("rozum launch: respawn failed: {e}"),
+                    }
+                }
+                None => { /* another launch is respawning — wait and re-poll */ }
+            }
+            misses = 0;
+        }
+    });
+}
+
+/// Spawn `rozum gateway --model … --port … --n-ctx …` as a detached process that
+/// outlives this launch (own process group, stdio to a log file).
+fn spawn_detached_gateway(
+    model_spec: &str,
+    port: u16,
+    n_ctx: u32,
+) -> std::io::Result<std::process::Child> {
+    use std::process::{Command as StdCommand, Stdio};
+    let exe = std::env::current_exe()?;
+    let _ = rozum::share::ensure_dir();
+    let log = rozum::share::gateway_dir().join("gateway.log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)?;
+    let mut cmd = StdCommand::new(exe);
+    cmd.arg("gateway")
+        .arg("--model")
+        .arg(model_spec)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--n-ctx")
+        .arg(n_ctx.to_string())
+        .stdin(Stdio::null())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file);
+    // Own process group so a Ctrl-C / terminal close on the launch doesn't kill
+    // the shared daemon.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn()
+}
+
+/// Build the agent child command (env wiring) and exec it, exiting with its code.
+/// `model_for_alias` is the model the gateway is actually serving.
+async fn exec_agent(program: Vec<String>, model_for_alias: &str, port: u16) -> ! {
+    use std::process::Command as StdCommand;
+    let (program_name, args) = program
+        .split_first()
+        .expect("clap requires at least one arg");
+    let claude_alias = rozum::gateway::claude_model_alias(model_for_alias);
+    eprintln!("  → running: {} {}", program_name, args.join(" "));
+
     let base = format!("http://127.0.0.1:{port}");
     let mut cmd = StdCommand::new(program_name);
     cmd.args(args);
     cmd.env("ANTHROPIC_BASE_URL", &base);
     cmd.env("ANTHROPIC_AUTH_TOKEN", "rozum-local");
     cmd.env_remove("ANTHROPIC_API_KEY");
-    // Ask Claude Code to query our /v1/models endpoint so the local model
-    // shows up in the /model picker.
     cmd.env("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
-    // Pre-select our model so Claude Code starts on it without the user
-    // having to open /model and pick it manually.
     cmd.env("ANTHROPIC_MODEL", &claude_alias);
     cmd.env("ANTHROPIC_DEFAULT_OPUS_MODEL", &claude_alias);
     cmd.env("ANTHROPIC_DEFAULT_SONNET_MODEL", &claude_alias);
@@ -506,9 +990,6 @@ async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: Option<u32>, p
     cmd.env("OPENAI_API_KEY", "rozum-local");
     cmd.env("ROZUM_GATEWAY_URL", &base);
 
-    // Trim Claude Code's system prompt (bundled skills, git instructions, CLAUDE.md)
-    // and non-essential background calls so its large prompts fit the local model's
-    // smaller context window. Defaults only: a value the user already exported wins.
     for (k, v) in [
         ("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS", "1"),
         ("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS", "1"),
@@ -522,18 +1003,15 @@ async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: Option<u32>, p
         }
     }
 
-    // Run the child synchronously in a blocking task so we can wait on its exit code.
+    let name = program_name.clone();
     let status = tokio::task::spawn_blocking(move || cmd.status())
         .await
         .ok()
         .and_then(|r| r.ok());
-
-    // Tear down the gateway and exit with the child's code.
-    gateway_handle.abort();
     let code = match status {
         Some(s) => s.code().unwrap_or(1),
         None => {
-            eprintln!("rozum launch: failed to spawn '{program_name}'");
+            eprintln!("rozum launch: failed to spawn '{name}'");
             127
         }
     };
@@ -598,7 +1076,141 @@ async fn run_models(action: ModelsAction) {
         ModelsAction::Info { spec } => {
             run_info(&spec).await;
         }
+
+        ModelsAction::Rm { spec, yes } => {
+            run_models_rm(&spec, yes).await;
+        }
     }
+}
+
+/// Delete a cached model. Resolves `spec` to an installed model (exact match on
+/// the spec shown by `models list`), refuses if it is the active gateway model,
+/// confirms, then removes it: HuggingFace/LMStudio directories directly, Ollama
+/// via `ollama rm` (its blobs are content-addressed and shared).
+async fn run_models_rm(spec: &str, yes: bool) {
+    use rozum::models::{self, ModelSource};
+
+    let installed = models::scan_all_installed();
+    let Some(m) = installed.iter().find(|m| m.spec == spec) else {
+        eprintln!(
+            "rozum models rm: '{spec}' is not installed. Run `rozum models list` for installed specs."
+        );
+        std::process::exit(1);
+    };
+
+    // Refuse to delete the model a live gateway is serving.
+    if let Some(active) = rozum::share::read_active() {
+        if active.model == spec && rozum::share::health_ok(active.port).await {
+            eprintln!(
+                "rozum models rm: '{spec}' is the active gateway model (pid {}); stop it first \
+                 with `rozum gateway stop`.",
+                active.pid
+            );
+            std::process::exit(1);
+        }
+    }
+
+    println!("Will delete this {} model:", m.source.label());
+    println!("  spec: {}", m.spec);
+    println!("  path: {}", m.path.display());
+    println!("  size: {}", models::format_size(m.size_bytes));
+
+    match m.source {
+        ModelSource::Ollama => {
+            // Ollama blobs are content-addressed and shared between models, so a
+            // direct `rm` could corrupt others. Delegate to `ollama rm`.
+            if which("ollama").is_none() {
+                eprintln!(
+                    "rozum models rm: this is an Ollama model and the `ollama` binary was not \
+                     found. Its blobs are shared/content-addressed — not removing directly. \
+                     Install Ollama and run `ollama rm {spec}`."
+                );
+                std::process::exit(1);
+            }
+            if !confirm_delete(yes) {
+                return;
+            }
+            let status = std::process::Command::new("ollama")
+                .arg("rm")
+                .arg(spec)
+                .status();
+            match status {
+                Ok(s) if s.success() => println!("deleted (ollama rm {spec})"),
+                _ => {
+                    eprintln!("rozum models rm: `ollama rm {spec}` failed");
+                    std::process::exit(1);
+                }
+            }
+        }
+        ModelSource::HuggingFace => {
+            // `m.path` is the `models--owner--name` cache directory.
+            if !confirm_delete(yes) {
+                return;
+            }
+            if let Err(e) = std::fs::remove_dir_all(&m.path) {
+                eprintln!(
+                    "rozum models rm: failed to delete {}: {e}",
+                    m.path.display()
+                );
+                std::process::exit(1);
+            }
+            println!(
+                "deleted {}, freed {}",
+                m.spec,
+                models::format_size(m.size_bytes)
+            );
+        }
+        ModelSource::LMStudio => {
+            // `m.path` is the .gguf file; remove its containing repo directory.
+            let dir = m.path.parent().unwrap_or(&m.path).to_path_buf();
+            println!("  (removing directory {})", dir.display());
+            if !confirm_delete(yes) {
+                return;
+            }
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                eprintln!("rozum models rm: failed to delete {}: {e}", dir.display());
+                std::process::exit(1);
+            }
+            println!(
+                "deleted {}, freed {}",
+                m.spec,
+                models::format_size(m.size_bytes)
+            );
+        }
+    }
+}
+
+/// Confirm a destructive delete. `yes` skips the prompt; otherwise a TTY is
+/// prompted (`y` to proceed) and a non-TTY is refused (must pass `--yes`).
+fn confirm_delete(yes: bool) -> bool {
+    use std::io::{IsTerminal, Write as _};
+    if yes {
+        return true;
+    }
+    if !std::io::stdin().is_terminal() {
+        eprintln!("rozum models rm: refusing to delete without confirmation; pass --yes.");
+        return false;
+    }
+    eprint!("Delete this model? [y/N]: ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    if line.trim().eq_ignore_ascii_case("y") {
+        true
+    } else {
+        eprintln!("cancelled.");
+        false
+    }
+}
+
+/// Is `bin` on `PATH`? (dependency-free `which`.)
+fn which(bin: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(bin))
+        .find(|p| p.is_file())
 }
 
 async fn run_info(spec: &str) {
@@ -700,7 +1312,7 @@ async fn build_gateway_backend(
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"gguf","model":model_spec}),
         );
-        return Some(b);
+        return Some(rozum::concurrency::admit_wrap(b));
     }
 
     // 2. Try in-process native MLX via mistralrs (needs --features mistralrs)
@@ -708,7 +1320,7 @@ async fn build_gateway_backend(
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"mistralrs","model":model_spec}),
         );
-        return Some(b);
+        return Some(rozum::concurrency::admit_wrap(b));
     }
 
     // 3. Try LM Studio's local server (native MLX runtime; covers Qwen3.6 MLX
@@ -717,7 +1329,7 @@ async fn build_gateway_backend(
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"lmstudio-http","model":model_spec}),
         );
-        return Some(b);
+        return Some(rozum::concurrency::admit_wrap(b));
     }
 
     // 4. Try mlx_lm.server (Python, for MLX-format models)
@@ -725,7 +1337,7 @@ async fn build_gateway_backend(
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"mlx-server-http","model":model_spec}),
         );
-        return Some(b);
+        return Some(rozum::concurrency::admit_wrap(b));
     }
 
     // 3. Try user-specified URL via env (any OpenAI-compatible server)
@@ -734,9 +1346,9 @@ async fn build_gateway_backend(
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"custom-http","url":url,"model":model_spec}),
         );
-        return Some(std::sync::Arc::new(
+        return Some(rozum::concurrency::admit_wrap(std::sync::Arc::new(
             rozum::openai_http::OpenAiHttpBackend::new(url, model_spec),
-        ));
+        )));
     }
 
     rozum::obs::log_event(serde_json::json!({
@@ -887,7 +1499,12 @@ fn available_ram_bytes() -> Option<u64> {
         .unwrap_or(16384);
     let mut pages = 0u64;
     for line in s.lines() {
-        for label in ["Pages free:", "Pages inactive:", "Pages speculative:", "Pages purgeable:"] {
+        for label in [
+            "Pages free:",
+            "Pages inactive:",
+            "Pages speculative:",
+            "Pages purgeable:",
+        ] {
             if let Some(rest) = line.strip_prefix(label) {
                 if let Ok(v) = rest.trim().trim_end_matches('.').parse::<u64>() {
                     pages += v;
@@ -1015,8 +1632,7 @@ fn blind_footprint_bytes(weights: u64, n_ctx: u32) -> u64 {
 /// `eprintln!` from the gateway is easy to miss (the agent TUI scrolls it away),
 /// so the reason must reappear at the end, right where the user is looking.
 fn skip_reason_slot() -> &'static std::sync::Mutex<Option<String>> {
-    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
-        std::sync::OnceLock::new();
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<String>>> = std::sync::OnceLock::new();
     SLOT.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -1054,7 +1670,10 @@ fn memory_preflight_ok(model_id: &str, n_ctx: u32) -> bool {
             gb(weights),
             gb(k)
         ),
-        None => format!("{:.0} GB weights + KV estimated at n_ctx={n_ctx} (no config.json)", gb(weights)),
+        None => format!(
+            "{:.0} GB weights + KV estimated at n_ctx={n_ctx} (no config.json)",
+            gb(weights)
+        ),
     };
     let msg = format!(
         "model '{model_id}' needs ~{:.0} GB resident ({kv_note}) but only ~{:.0} GB RAM is free \
@@ -1081,6 +1700,50 @@ fn memory_preflight_ok(model_id: &str, n_ctx: u32) -> bool {
     forced
 }
 
+/// Budget the engine's `max_num_seqs` at load time from the actual model
+/// footprint vs the RAM free right now. `ROZUM_MISTRALRS_MAX_SEQS` forces an
+/// exact value; otherwise `budgeted_max_num_seqs` clamps to `[1, ceiling]`
+/// (`ROZUM_MISTRALRS_SEQS_CEILING`, default 8). Per-slot cost tracks the prefill
+/// chunk (`MISTRALRS_PREFILL_CHUNK`). Spec:
+/// docs/specs/mistralrs-concurrency-scheduling.md (Phase A).
+#[cfg(feature = "mistralrs")]
+fn resolve_max_num_seqs(model_id: &str, n_ctx: u32) -> usize {
+    use rozum::concurrency::{
+        ConcurrencyBudget, DEFAULT_SEQS_CEILING, budgeted_max_num_seqs, per_seq_prefill_peak,
+    };
+    let env_usize = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
+    if let Some(n) = env_usize("ROZUM_MISTRALRS_MAX_SEQS").filter(|&n| n >= 1) {
+        return n;
+    }
+    let ceiling = env_usize("ROZUM_MISTRALRS_SEQS_CEILING")
+        .filter(|&n| n >= 1)
+        .unwrap_or(DEFAULT_SEQS_CEILING);
+    // Prefill chunk drives the per-slot peak; mirror the engine's paged default.
+    let chunk = env_usize("MISTRALRS_PREFILL_CHUNK")
+        .filter(|&n| n >= 1)
+        .unwrap_or(4096);
+    let budget = ConcurrencyBudget {
+        available_ram: available_ram_bytes(),
+        weights: cached_weights_bytes(model_id),
+        kv_pool: kv_cache_bytes(model_id, n_ctx),
+        per_seq_peak: per_seq_prefill_peak(chunk),
+        ceiling,
+    };
+    let n = budgeted_max_num_seqs(&budget);
+    let gb = |b: u64| ((b as f64 / 1e9) * 10.0).round() / 10.0;
+    rozum::obs::log_event(serde_json::json!({
+        "event": "concurrency_budget", "model": model_id, "n_ctx": n_ctx,
+        "max_num_seqs": n, "ceiling": ceiling, "prefill_chunk": chunk,
+        "available_gb": budget.available_ram.map(gb),
+        "weights_gb": budget.weights.map(gb),
+        "kv_pool_gb": budget.kv_pool.map(gb),
+    }));
+    if n > 1 {
+        eprintln!("mistralrs: concurrency budget → max_num_seqs={n} (ceiling {ceiling})");
+    }
+    n
+}
+
 #[cfg(feature = "mistralrs")]
 async fn try_build_mistralrs_backend(
     model_spec: &str,
@@ -1097,7 +1760,7 @@ async fn try_build_mistralrs_backend(
     }
     let opts = MistralrsOptions {
         n_ctx,
-        ..MistralrsOptions::default()
+        max_num_seqs: resolve_max_num_seqs(&id, n_ctx),
     };
     match MistralrsBackend::new(&id, opts).await {
         Ok(b) => {
@@ -1169,7 +1832,11 @@ mod tests {
     fn kv_cache_counts_only_full_attention_layers() {
         let mut layer_types = Vec::new();
         for i in 0..40 {
-            layer_types.push(if i % 4 == 3 { "full_attention" } else { "linear_attention" });
+            layer_types.push(if i % 4 == 3 {
+                "full_attention"
+            } else {
+                "linear_attention"
+            });
         }
         let cfg = json!({
             "text_config": {

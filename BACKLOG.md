@@ -55,6 +55,47 @@ default CLI startup, meeting rooms, round-robin moderation, or manual moderation
   - Keep embeddings/backend choice configurable.
   - Start with small text documents and lexical fallback.
 
+### Concurrency & scheduling (follow-ups to `mistralrs-concurrency-scheduling`)
+
+Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
+`docs/specs/mistralrs-concurrency-scheduling.md` (Out of scope).
+
+- [ ] concurrency-engine-yield - Make the fork yield between prefill chunks so a
+  long prefill does not monopolise an engine step. Today chunking is internal to
+  `pipeline::step` (commit `698bccf1f`) — memory-bounded but not preemptible — so
+  the Phase B+C fast lane only reorders *admission*, not in-flight progress.
+  Moving the chunk loop up to the scheduler (re-queue the seq as a running prompt
+  after each chunk) would let an admitted fast request interleave with a big
+  prefill. Upstreamable into `mistralrs-chunked-prefill`.
+
+- [ ] concurrency-preemption - Preempt/swap-out a running sequence to admit a
+  higher-priority one (vLLM-style). Needs mistralrs engine support it does not
+  currently expose — revisit if SJF + fast lane prove insufficient for tail latency.
+
+- [ ] concurrency-cost-tokenizer - Tokenizer-accurate `RequestCost` instead of the
+  char/word heuristic, if class boundaries (interactive vs bulk) turn out fuzzy.
+
+- [ ] concurrency-multi-instance - Size-class routing across more than one loaded
+  model (e.g. a small fast model lane + a big model lane), with a shared memory
+  budget. Heavy; only if a single-model fast lane is not enough.
+
+- [ ] concurrency-cross-process - Coordinate the concurrency budget across several
+  `rozum` processes sharing one GPU (e.g. a host-wide semaphore), instead of each
+  process budgeting in isolation.
+
+- [ ] concurrency-observability - Expose queue depth, admission limit, fast-lane
+  hits, and shed/429 counts via `obs` so the scheduler is tunable from data.
+
+- [ ] shared-gateway-multislot - Allow more than one resident model behind the
+  shared gateway when memory permits, gating a second model on `ConcurrencyBudget`
+  (Phase A) saying both fit. Keys the registry/port by model. Follow-up to
+  `shared-gateway` (which keeps a single resident model). See
+  `docs/specs/shared-gateway.md` (Out of scope).
+
+- [ ] shared-gateway-service - Optionally install the shared gateway as a
+  launchd/systemd service for always-warm startup, instead of lazy spawn +
+  idle-exit. Follow-up to `shared-gateway`.
+
 ## Model Quality
 
 - [ ] model-catalog-refresh - Expand and verify tiny model catalog.

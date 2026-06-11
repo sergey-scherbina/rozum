@@ -1,4 +1,5 @@
 mod backend;
+pub mod concurrency;
 pub mod discord;
 pub mod gateway;
 pub mod gguf;
@@ -7,6 +8,8 @@ pub mod mistralrs_backend;
 pub mod models;
 pub mod obs;
 pub mod openai_http;
+pub mod proxy;
+pub mod share;
 pub mod telegram;
 pub mod tui;
 pub mod web;
