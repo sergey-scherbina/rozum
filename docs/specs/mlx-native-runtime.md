@@ -335,3 +335,48 @@ Config-driven AFQ quantization on load; single-file safetensors fallback; the
 `.inner.weight` key remap; **the `nn::Rope` L=1 reshape bug**; the no-mask/sinks
 null-array fix; KV-cache slot init. Still TODO: top_p/top_k/rep-penalty sampler,
 EOS-from-config, hf-hub download.
+
+## Performance
+
+### Measured (Qwen3.6-27B-4bit, M-series; oracle = pip mlx_lm 22 t/s decode)
+
+| prompt | prefill (ops) | prefill (kernel) | decode |
+|--------|---------------|------------------|--------|
+| 128    | 4.8s          | 1.3s             | ~7 t/s |
+| 512    | 8.9s          | 3.4s             | ~7 t/s |
+| 1024   | 20.9s         | 7.1s (**2.9x**)  | ~7 t/s |
+
+A 4-bit 27B reads ~15 GB/token, so ~27 t/s is the memory-bandwidth ceiling and
+Python's 22 t/s is near-optimal. Our 7 t/s decode is **overhead-bound** (kernel
+launches / syncs), not bandwidth-bound.
+
+### Done: GatedDeltaNet Metal kernel (prefill ~2.9x)
+
+The Qwen3.6 linear-attention scan was the prefill bottleneck (O(T) ops scan).
+Bound `mx.fast.metal_kernel` in mlx-rs (`fast::MetalKernel` + `TemplateArg`, over
+the mlx-c `mlx_fast_metal_kernel_*` API) and ported the Python gated-delta kernel
+verbatim (`models::gated_delta::gated_delta_kernel`): the whole T-step scan in one
+GPU dispatch. Default path; `ROZUM_GD_OPS=1` forces the ops reference. Greedy
+output stays byte-identical to Python on 27B + 35B-A3B.
+
+**Known bug (drives the decode gap):** the custom-kernel primitive returns garbage
+unless each call's outputs are **blocking-`eval`'d immediately**; any deferral
+(`async_eval`, batched eval, per-token eval only) corrupts. Python's same kernel
+works deferred, so this is an MLX/mlx-c deferred-custom-kernel issue or a binding
+gap, not a lifetime bug (ruled out: shared kernel object, input lifetime, config
+lifetime, fresh-per-call). The blocking eval is correct but costs ~half the decode
+throughput; fixing it unlocks the `async_eval` path (~17 t/s decode).
+
+### TODO (see SPRINT `mlx-native-perf` + BACKLOG)
+
+1. **Decode-bug dig** — diff the `MetalKernel::apply` binding vs Python
+   `mx.fast.metal_kernel` (row-contiguity, output↔input graph linkage, init
+   values); build a minimal repro (N tiny custom kernels, deferred eval). Unlocks
+   ~17 t/s decode.
+2. **mx.compile the forward + small-op fusion** — the deeper decode lever; blocked
+   on (1) (the custom kernel inside a compiled graph) and the stateful caches.
+3. **Chunked prefill** (port mistralrs `f7efae2`) — bound the full-attention
+   `[T,T]` activation peak so large prompts don't OOM.
+4. **Large-context memory bounding** — KV-pool bound / preflight (analog of the
+   mistralrs RAM preflight + context budgeting); native `ConcatKeyValueCache`
+   grows unbounded.

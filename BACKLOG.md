@@ -24,6 +24,40 @@ default CLI startup, meeting rooms, round-robin moderation, or manual moderation
 - [ ] candle-real-streaming - Stream tokens from Candle via `TokenOutputStream` instead of one-shot.
   - Low priority: Candle-Metal is slower than llama-cpp-2 on the target models.
 
+## Native MLX runtime — performance (ports from the mistralrs work)
+
+The native MLX runtime (`docs/specs/mlx-native-runtime.md`) shipped correctness +
+the GatedDeltaNet prefill kernel. These carry over optimizations proven in the
+mistralrs backend that the native runtime does NOT yet have. (Concurrency,
+admission, backpressure and the OOM circuit breaker already apply generically
+through `concurrency::admit_wrap`, so they are not relisted.)
+
+- [ ] mlx-native-chunked-prefill - port mistralrs `f7efae2` ("chunked prefill on
+  Metal, bound large-prompt activation peak"). The native forward runs the whole
+  `[1, T]` prompt in one pass; the 16 full-attention layers compute full `[T, T]`
+  scores, so a 10k+ token Claude Code prompt can blow the Metal command-buffer /
+  activation peak. Process the prompt in chunks (advance the KV/conv/recurrent
+  caches per chunk) to bound the peak. The GatedDeltaNet kernel is already O(1)
+  memory, so only the full-attention layers need chunking. Gate by prompt length.
+
+- [ ] mlx-native-mem-bound - large-context memory bounding (analog of the
+  mistralrs RAM preflight + context budgeting + PagedAttention). Native uses
+  `ConcatKeyValueCache`, which grows unbounded with context; add a KV-pool bound
+  and/or a preflight against unified memory, and surface a clear "lower --n-ctx"
+  message instead of an OOM. `context_window()` already reports the model's
+  `max_position_embeddings`; cap the effective pool.
+
+- [ ] mlx-native-decode-bug - dig the custom-kernel deferred-eval correctness bug
+  (the custom kernel needs a blocking `eval` per call or it returns garbage;
+  Python's same kernel works deferred). Fixing it unlocks the `async_eval` decode
+  path (~7 -> ~17 t/s on 27B). See the SPRINT `mlx-native-perf` notes for the
+  ruled-out hypotheses.
+
+- [ ] mlx-native-compile - `mx.compile` the decode forward + fuse small ops (the
+  3x decode gap vs Python is overhead/launch-bound, not bandwidth-bound). Blocked
+  on the decode-bug dig (the custom kernel inside a compiled graph would hit the
+  same deferred issue); also needs the stateful caches threaded through a pure fn.
+
 - [ ] gguf-tool-use-non-qwen - Extend GgufBackend tool-use parser to Llama-3.1 and Mistral chat-template formats.
 
 - [ ] ui-streaming-ws-tui - Propagate `ChatEvent` stream to web WebSocket and TUI for partial token rendering.

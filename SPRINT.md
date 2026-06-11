@@ -164,6 +164,42 @@ is 100% MLX, candle only as external oracle.
   the fork (`sergey-scherbina/mlx-rs` branch `rozum-mlx-native`) and switch to a
   git-rev pin (like the mistralrs `[patch.crates-io]`) so the default builds
   off-tree.
+- [~] mlx-native-perf - Phase 5: throughput. Spec section: `docs/specs/mlx-native-runtime.md`
+  "Performance".
+  - **DONE — GatedDeltaNet Metal kernel (~2.9x Qwen3.6 prefill)** (master `a001e90`,
+    fork `738a4419`). Bound `mx.fast.metal_kernel` in mlx-rs (`fast::MetalKernel`)
+    + ported the Python gated-delta kernel: the whole T-step scan in one GPU
+    dispatch. 27B 1024-tok prefill 20.9s->7.1s; greedy still byte-exact on 27B +
+    35B-A3B. Caveat: the custom kernel needs a BLOCKING `eval` per call (see the
+    bug below), so each call syncs.
+  - **IN PROGRESS — decode bug dig (`mlx-native-decode-bug`).** Decode ~7 t/s on
+    27B vs Python mlx_lm **22 t/s** (3x gap; memory ceiling ~27 t/s, so we are
+    overhead-bound). Decode is NOT the GatedDeltaNet (ops and kernel decode both
+    ~7). The kernel's fast deferred path (`async_eval`) hits ~17 t/s but is WRONG:
+    the custom-kernel primitive corrupts unless each call is blocking-eval'd
+    immediately. Ruled out (each tested, still garbage): shared OnceLock kernel,
+    input-array lifetime (leaked), config lifetime (leaked), fresh-kernel-per-call,
+    eval-batching (also not faster). Likely an MLX/mlx-c deferred-custom-kernel
+    issue or a binding gap (Python's same kernel works deferred). FIX UNLOCKS ~17
+    t/s decode. NEXT: diff my mlx-rs `MetalKernel` apply against Python
+    `mx.fast.metal_kernel` (contiguity, output linkage, init); minimal repro
+    (N tiny kernels, deferred eval) to isolate.
+  - [ ] **mx.compile the forward + small-op fusion** (`mlx-native-compile`). The
+    deeper decode lever: fuse the many small ops/launches. Risks: stateful caches
+    (KV + conv + recurrent state must be threaded in/out of a pure fn) and the
+    custom kernel inside (would hit the same deferred bug in a compiled graph).
+    Attempt after the kernel bug is understood.
+- [ ] mlx-native-chunked-prefill - port `f7efae2` (mistralrs "chunked prefill on
+  Metal") to the native runtime: process the prompt in chunks to BOUND the
+  activation/attention peak so large Claude Code prompts (10k+ tok) don't OOM the
+  Metal command buffer. The native forward currently runs the whole `[1,T]` prompt
+  at once (full `[T,T]` attention in the 16 full-attn layers = the memory peak;
+  the GatedDeltaNet kernel is already O(1) memory). See BACKLOG.
+- [ ] mlx-native-mem-bound - large-context memory bounding for the native runtime:
+  the analog of mistralrs's RAM preflight + context budgeting + PagedAttention.
+  Native uses `ConcatKeyValueCache` (grows unbounded with context); bound the KV
+  pool / preflight against unified memory. (Concurrency/admission is already
+  generic via `admit_wrap`; `concurrency_capacity()=1` for native.) See BACKLOG.
 
 #### SUPERSEDED: mistralrs-mlx-direct — targeted candle->MLX quant-op bridge
 
