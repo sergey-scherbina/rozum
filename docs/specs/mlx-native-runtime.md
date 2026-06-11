@@ -391,11 +391,12 @@ bounded (kernel + chunking + last-position projection, all byte-identical). Deco
 (~12 vs Python ~22 t/s) is **mlx-rs per-op/per-call FFI-overhead bound** — both
 obvious levers were tested and rejected: removing the custom-kernel per-call eval is
 a no-op (decode isn't sync-bound), and `mx.compile` is net-negative in this binding
-(probe below). What to do next, in order: (1) **`mlx-native-mem-bound`** — KV
-preflight + "lower --n-ctx" instead of OOM (the high-value Claude Code item;
-robustness, not throughput); (2) **SDPA `Causal` mode** in prefill (drop the explicit
-mask); (3) decode throughput is HARD and deprioritized (needs hand-written fused
-Metal kernels or fork-level work to cut mlx-rs per-op overhead). Details below.
+(probe below). What's done / next: (1) **`mlx-native-mem-bound`** — DONE (KV
+preflight rejects an over-large context with a clear "lower --n-ctx" message instead
+of OOM); (2) **SDPA `Causal` mode** in prefill (drop the explicit mask) — the top
+remaining perf item, small/low-risk; (3) decode throughput is HARD and deprioritized
+(needs hand-written fused Metal kernels or fork-level work to cut mlx-rs per-op
+overhead). Details below.
 
 ### Measured (Qwen3.6-27B-4bit, M-series; oracle = pip mlx_lm 22 t/s decode)
 
@@ -471,16 +472,28 @@ as a compile prerequisite) is therefore NOT pursued. Reviving compile would requ
 fork-level work to cache the param list / avoid re-sorting and to hold one `Compiled`
 across calls — uncertain payoff; deferred.
 
+### Done: large-context KV preflight (`mlx-native-mem-bound`)
+
+`run_job` estimates the request's KV growth — `kv_bytes_per_position * (prompt_len +
+max_tokens)`, where `kv_bytes_per_position = 2 (k+v) * full_attn_layers * n_kv_heads *
+head_dim * 2 (bf16)` parsed from `config.json` (`text_config` for the hybrid wrapper;
+only the full-attention layers hold KV — `full_attention_interval` selects them — the
+GatedDeltaNet conv/recurrent state is O(1) in context). If it exceeds
+`KV_SAFETY_FRAC=0.75` of `available_ram_bytes()` (macOS `vm_stat`), the request is
+rejected with a clear `ModelError` ("context too large … lower --n-ctx / max_tokens …
+fits ~N tokens now") instead of letting `ConcatKeyValueCache` grow into a Metal OOM.
+Skipped when either term is unknown (no false negatives). Unit test
+`kv_bytes_per_position_estimate`. FOLLOW-UP: a bounded/rotating KV cache to actually
+cap resident KV for very long sessions (only worthwhile if the preflight isn't enough;
+the fixed-size-cache redesign is otherwise moot — `mx.compile` is a dead end).
+
 ### TODO (see SPRINT `mlx-native-perf` + BACKLOG)
 
-1. **Large-context memory bounding** (`mlx-native-mem-bound`) — the high-value
-   remaining item for the Claude Code use case: KV-pool bound / preflight against
-   unified memory + a clear "lower --n-ctx" message instead of an OOM (analog of the
-   mistralrs RAM preflight + context budgeting). `ConcatKeyValueCache` grows unbounded.
-2. **SDPA `Causal` mode in prefill** — drop the explicit `[chunk, ctx]` mask array
+1. **SDPA `Causal` mode in prefill** — drop the explicit `[chunk, ctx]` mask array
    (use the fused causal fast-path) to shrink the prefill peak further; helps
-   single-pass too. (Last-position-only projection: DONE, see above.)
-3. **Decode (~12 t/s) is FFI-overhead-bound** — no cheap lever found (eval-removal:
+   single-pass too. (Last-position-only projection: DONE, see above.) The top
+   remaining perf item.
+2. **Decode (~12 t/s) is FFI-overhead-bound** — no cheap lever found (eval-removal:
    free/no-op; mx.compile: net-negative). A real decode win would need manual op
    fusion into custom Metal kernels (like the gated-delta kernel) to cut the ~450
    dispatches/token, or reducing mlx-rs per-op marshalling overhead — both large.
