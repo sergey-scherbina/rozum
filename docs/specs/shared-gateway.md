@@ -155,20 +155,49 @@ This is what lets clients "not notice" a daemon crash/restart/swap.
 - [ ] **Mid-stream is not replayable:** once tokens have been forwarded, a daemon
       death surfaces an error to the agent (we can't un-send tokens); the agent
       decides whether to retry the whole turn. Documented, not hidden.
-- [ ] **Poison-prompt protection:** the proxy fingerprints each request; if the
-      daemon dies while this request is the likely cause (in-flight, attributed)
-      it increments that fingerprint's attempt count. After `ROZUM_POISON_MAX`
-      (default 2) crash-attributed attempts the proxy **refuses** the request
-      (HTTP 422, clear message) instead of retrying — so one bad prompt can't
-      crash-loop the daemon for everyone.
-- [ ] The poison fingerprint is written to a shared, TTL'd `poison.json`; a
-      (re)started daemon loads it and **fast-refuses** known-poison requests
-      before processing, protecting all clients. Entries are advisory and expire
-      (`ROZUM_POISON_TTL_SECS`, default 86400) to bound false positives.
+- [ ] **Poison-prompt protection (soft, graduated):** the proxy fingerprints each
+      request and counts crash-attributed attempts. The escalation is gentle, not
+      a hair-trigger ban:
+      1. **Degrade-then-retry first.** A first crash-attributed retry goes out
+         under the most conservative settings (serialized: admission limit 1, so
+         no neighbour competes for memory). Many "poison" prompts are just
+         big-prompt OOMs that succeed once nothing else is resident.
+      2. **Refuse only after `ROZUM_POISON_MAX` (default 3) crash-attributed
+         attempts**, with a clear, *soft* 422 ("this request keeps crashing the
+         model; refused for now — retry later"). It is per-fingerprint, not a
+         blanket block.
+- [ ] **Shared persistence only on high-confidence attribution.** A fingerprint is
+      written to the shared, TTL'd `poison.json` only when the daemon died with
+      this request as the **sole in-flight** one (unambiguous cause). Ambiguous
+      cases (concurrent in-flight requests) are counted **locally at the proxy
+      only** — never shared — so a coincidental crash can't ban a good prompt for
+      everyone. A restarted daemon loads `poison.json` and fast-refuses confirmed
+      entries; they are advisory and expire (`ROZUM_POISON_TTL_SECS`, default
+      3600, shortened from the earlier 24 h) and decay on the next clean success.
 - [ ] **Smart retry policy:** retries use exponential backoff + jitter, a per-
       request attempt cap, wait-for-health (don't fire at a warming daemon), and
-      honor `429` + `Retry-After` from the admission layer's backpressure — so a
-      crowd of reconnecting proxies doesn't stampede the fresh daemon.
+      honor the daemon's backpressure (below) — so a crowd of reconnecting proxies
+      doesn't stampede the fresh daemon.
+
+### Two-tier admission: daemon backpressure → proxy queue
+
+The daemon owns the **global** admission limit; the proxy holds its client's
+requests in a **local priority queue** and only forwards what the daemon has room
+for — so prompts wait at the edge instead of bouncing off a full daemon.
+
+- [ ] The daemon advertises its admission state to proxies — current free slots /
+      queue depth / `Retry-After` — via response headers on each call and a cheap
+      `GET /v1/admit` (or `/health`) probe. The proxy uses this as a **forwarding
+      window**: it does not send a queued request until the daemon signals room
+      (and always backs off on `429` + `Retry-After`).
+- [ ] Each proxy runs its **own** `concurrency::AdmissionScheduler` over the
+      requests from its single agent (which can fire parallel tool/sub-agent
+      calls): shortest-job-first by `RequestCost`, with the reserved fast lane —
+      so a small request *may* jump ahead of a big one queued at the proxy ("if it
+      gets lucky"), exactly as in the central scheduler. Reuses the same module.
+- [ ] Net effect: two cooperating tiers — proxy-local ordering (per client) +
+      daemon-central limit (global) — keep the daemon at its budgeted concurrency
+      without premature sends, and keep each client's quick turns responsive.
 
 ### Transparent model / backend switch
 
@@ -272,24 +301,40 @@ the agent. On a daemon-side failure:
 - **>0 bytes forwarded** → not replayable (tokens already streamed); surface the
   error.
 
-Poison: a request fingerprint (hash of the normalized messages + sampling) gets a
-crash-attributed attempt counter. Attribution is conservative — only blame a
-request that was in-flight when the daemon died and (ideally) was the sole/large
-in-flight request, since with backpressure concurrency is low. After
-`ROZUM_POISON_MAX` attempts the proxy refuses (422) and records the fingerprint
-in `poison.json` (shared, TTL'd). A restarted daemon loads `poison.json` and
-fast-refuses known-poison **before** running the model, so the protection is
-machine-wide and survives the very crash it's guarding against. TTL + advisory
-status bound false positives (a coincidental crash shouldn't permanently ban a
-good prompt).
+Poison handling is deliberately **soft and graduated** (a crash-attributed prompt
+is more often a transient big-prompt OOM than a truly malformed input):
+1. **Degrade-then-retry**: the first crash-attributed retry runs serialized
+   (admission limit 1) so no neighbour competes for memory — this alone clears
+   most cases.
+2. **Refuse only after `ROZUM_POISON_MAX` (default 3)** crash-attributed attempts,
+   with a soft, retryable 422 — per-fingerprint, never a blanket block.
+3. **Share only on high confidence**: write to `poison.json` (machine-wide,
+   TTL'd) only when the daemon died with this request as the **sole in-flight**
+   one. Ambiguous cases (concurrent in-flight) stay local to the proxy, so a
+   coincidental crash can't ban a good prompt for everyone. Entries are advisory,
+   short-TTL (default 1 h), and decay on the next clean success. A restarted
+   daemon loads them to fast-refuse before running the model — protection that
+   survives the very crash it guards against, without being a hair-trigger.
 
-### Retry policy
+Fingerprint = hash of normalized messages + sampling params.
+
+### Retry & two-tier admission
 
 Reconnect/replay uses capped exponential backoff + jitter (the `mcp-proxy`
-backoff idiom), waits for daemon health before firing (don't hit a warming
-model), caps attempts per request, and obeys `429`/`Retry-After` from the
-admission layer — so a thundering herd of proxies after a crash spreads out
-instead of re-crashing or overloading the fresh daemon.
+idiom), waits for daemon health before firing, and caps attempts per request.
+
+Backpressure is **two-tier and daemon-driven**:
+- The **daemon** is the global authority on concurrency (its
+  `concurrency::AdmissionScheduler`). It exposes free-slots / queue-depth /
+  `Retry-After` (response headers + a cheap `GET /v1/admit`).
+- Each **proxy** keeps its client's requests in its **own**
+  `concurrency::AdmissionScheduler` (SJF + fast lane) and only forwards within the
+  window the daemon advertises — prompts wait *at the proxy*, ordered so a small
+  request can overtake a big one, rather than being fired early and bounced. On
+  `429`/`Retry-After` the proxy shrinks its window and parks.
+
+Reusing the same `concurrency` module at both tiers keeps one implementation of
+SJF/fast-lane/limits; the proxy tier is just a second instance with a small window.
 
 ### Transparent switch / reload / unload
 
@@ -337,9 +382,19 @@ the daemon. This feature is what finally makes that multi-client path real.
   (loses all of the above; resilience reduced to the agent's behaviour).
 - **Replay only before the first streamed token** — once tokens are sent we can't
   un-send them, so mid-stream failures are surfaced, not silently retried.
-- **Poison set is advisory + TTL'd, attribution conservative** — a permanent ban
-  on any prompt seen during a crash would mis-fire on coincidental/OOM-from-a-
-  neighbour crashes. Threshold + TTL + "was it the likely cause" keeps it safe.
+- **Soft, graduated poison policy** — degrade-then-retry (serialize) first, refuse
+  only after a higher threshold (3), share machine-wide only on sole-in-flight
+  high confidence, short TTL + decay-on-success. A big-prompt OOM usually clears
+  once serialized, so we don't ban legitimate prompts; the shared set is reserved
+  for genuinely reproducible, unambiguous crashers. Rejected: the earlier
+  hair-trigger (threshold 2, 24 h machine-wide on any in-flight) — too eager.
+- **Two-tier, daemon-driven backpressure** — the daemon is the single global
+  authority on concurrency and advertises room; proxies hold their client's
+  requests in a local SJF/fast-lane queue and only forward within that window, so
+  prompts wait at the edge (ordered, small-can-overtake) instead of being fired
+  early and bounced. Reuses the one `concurrency` module at both tiers. Rejected:
+  proxies fire freely and rely only on the daemon's 429 (wasteful round-trips,
+  stampedes, no edge ordering).
 - **In-place sequential swap, not blue/green** — two models don't fit in memory,
   so a swap accepts a short drain+reload gap (proxies hold requests) rather than
   doubling RAM.

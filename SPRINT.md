@@ -178,10 +178,14 @@ Spec: `docs/specs/shared-gateway.md`.
   poison / transparent swap. Re-points the agent at the proxy's local port.
 - [ ] shared-gateway-replay-retry - Buffer + replay a request when the daemon dies
   **before the first streamed token**; mid-stream failures surface. Smart retry:
-  backoff + jitter, attempt cap, wait-for-health, honor 429/`Retry-After`.
-- [ ] shared-gateway-poison - Per-request fingerprint + conservative crash
-  attribution; after `ROZUM_POISON_MAX` (default 2) → refuse 422; persist to a
-  TTL'd `poison.json` that a restarted daemon loads to fast-refuse machine-wide.
+  backoff + jitter, attempt cap, wait-for-health. **Two-tier admission**: daemon
+  advertises room (headers + `GET /v1/admit`); each proxy holds its client's
+  requests in its own `concurrency::AdmissionScheduler` (SJF + fast lane) and only
+  forwards within the daemon's window — prompts wait at the edge, not bounced.
+- [ ] shared-gateway-poison - Soft/graduated: per-fingerprint crash count;
+  degrade-then-retry (serialize) first; refuse 422 only after `ROZUM_POISON_MAX`
+  (default 3); share to TTL'd `poison.json` (default 1 h, decay-on-success) only
+  on sole-in-flight high confidence — ambiguous stays local to the proxy.
 - [ ] gateway-switch - `rozum gateway switch --model Y [--backend B]` / `reload` /
   `unload`: in-place drain (admission limit → 0) → unload → load → resume; proxies
   hold requests across the gap. Transparent model/backend swap + binary upgrade.
