@@ -58,21 +58,21 @@ Engine-internal knobs stay mistralrs-specific: `ROZUM_MISTRALRS_MAX_SEQS`
 
 ## Behavior
 
-- [ ] `concurrency` module compiles and unit-tests with **no** features (no Xcode):
-      scheduler + budget tests move over and still pass.
-- [ ] `AdmittingBackend::chat` admits before delegating: `Overloaded` → `Err(ModelError::Overloaded)`
+- [x] `concurrency` module compiles and unit-tests with **no** features (no Xcode):
+      scheduler + budget + decorator tests (13) pass on the default build.
+- [x] `AdmittingBackend::chat` admits before delegating: `Overloaded` → `Err(ModelError::Overloaded)`
       (→ gateway 429); otherwise holds the `AdmitGuard` for the inner stream's
-      lifetime and trips the breaker on a resource-exhaustion error from the inner stream.
-- [ ] `AdmittingBackend` delegates `context_window`, `label`, and `concurrency_capacity`
+      lifetime and trips the breaker (`note_backend_error`) on a resource-exhaustion error.
+- [x] `AdmittingBackend` delegates `context_window`, `label`, and `concurrency_capacity`
       to the inner backend.
-- [ ] `admit_wrap` wraps iff `inner.concurrency_capacity().is_some()`; a `None`-capacity
-      backend (remote HTTP, hello, gguf-as-is) is returned unchanged.
-- [ ] mistralrs implements `concurrency_capacity() -> Some(engine max_num_seqs)`; its
+- [x] `admit_wrap` wraps iff `inner.concurrency_capacity().is_some()`; a `None`-capacity
+      backend (remote HTTP, hello, gguf-as-is) is returned unchanged (Arc::ptr_eq verified).
+- [x] mistralrs implements `concurrency_capacity() -> Some(engine max_num_seqs)`; its
       `chat()` no longer does inline admission (the decorator owns it). The engine's
       internal `max_num_seqs` budget (Phase A) is unchanged.
-- [ ] `build_gateway_backend` routes every selected backend through `admit_wrap`, so
+- [x] `build_gateway_backend` routes every selected backend through `admit_wrap`, so
       mistralrs (and the future mlx backend) are gated while remote/hello pass through.
-- [ ] Fallback: a backend that advertises capacity but whose budget inputs are unknown
+- [x] Fallback: a backend that advertises capacity but whose budget inputs are unknown
       still gets a safe serialized limit of `1` (via `budgeted_max_num_seqs`'s floor).
 
 ## Out of scope
@@ -113,4 +113,26 @@ that number is both the engine's batch size and the value it reports via
 
 ## Results
 
-(Filled after implementation.)
+Done. `src/mistralrs_admission.rs` → `src/concurrency.rs` (git rename); the
+budget math (`ConcurrencyBudget`, `budgeted_max_num_seqs`, `per_seq_prefill_peak`,
+`PREFILL_PEAK_BYTES_PER_TOKEN`, `DEFAULT_SEQS_CEILING`) moved in from
+`mistralrs_backend.rs`. Added `estimate_cost`, `note_backend_error`,
+`AdmittingBackend`, and `admit_wrap`. Admission env renamed to generic
+`ROZUM_ADMIT` / `ROZUM_ADMIT_FASTLANE_TOKENS` / `ROZUM_ADMIT_QUEUE_MAX`
+(`ROZUM_MISTRALRS_MAX_SEQS` / `ROZUM_MISTRALRS_SEQS_CEILING` stay — they tune the
+mistralrs engine batch budget).
+
+`ChatBackend` gained `fn concurrency_capacity(&self) -> Option<usize>` (default
+`None`). `MistralrsBackend` now returns `Some(max_num_seqs)` and its `chat()` is
+back to plain inference — the decorator owns admission. `build_gateway_backend`
+routes every selected backend through `admit_wrap` (no-op for the `None`-capacity
+remote/hello backends).
+
+Verification: 13 `concurrency` unit tests on the default build (no Xcode),
+`cargo check --features mistralrs` clean, `cargo fmt --check` clean, full lib
+suite 64 passing.
+
+**For the new mlx-rs backend:** implement `ChatBackend` for inference only, then
+return `Some(budgeted_max_num_seqs(ConcurrencyBudget { .. }))` from
+`concurrency_capacity()` (or `Some(1)` to start). `admit_wrap` at the build site
+gives it admission, fast lane, backpressure, and the breaker for free.

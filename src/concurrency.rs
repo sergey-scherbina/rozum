@@ -1,24 +1,32 @@
-//! Admission scheduling in front of the mistralrs engine.
+//! Backend-agnostic concurrency control: admission scheduling, a memory budget,
+//! and a circuit breaker that any `ChatBackend` can opt into.
 //!
-//! Phase B+C of `docs/specs/mistralrs-concurrency-scheduling.md`. The engine's
-//! `max_num_seqs` is fixed at build time (Phase A budgets it); this layer gates
-//! the *actual* concurrency with a runtime-adjustable semaphore so we can add
-//! priority, a reserved fast lane, and (Phase D) backpressure — none of which
-//! the static engine knob can express.
+//! Specs: `concurrency-backend-abstraction.md` (this generic layer) and
+//! `mistralrs-concurrency-scheduling.md` (the original mistralrs design + the
+//! per-phase rationale).
 //!
-//! Responsiveness scope: this controls **admission order** — a short request is
-//! admitted as soon as a slot frees, ahead of queued big requests, and never
-//! waits for a big request's full generation. It does **not** preempt an
-//! in-flight engine step: the fork runs a prompt's chunked prefill within one
-//! `pipeline::step` (it does not yield between chunks), so mid-big-prefill
-//! preemption would need an engine-side change (see the spec's escalation note).
+//! The pieces:
+//! - [`AdmissionScheduler`] — a runtime-adjustable concurrency gate with
+//!   shortest-job-first ordering, a reserved fast lane, bounded-queue
+//!   backpressure, and a trip/recover circuit breaker.
+//! - [`budgeted_max_num_seqs`] — derive a safe concurrent-prefill count from a
+//!   model's memory footprint vs available RAM.
+//! - [`AdmittingBackend`] — a decorator that bolts the above onto any backend;
+//!   [`admit_wrap`] applies it iff the backend advertises a capacity.
 //!
-//! The component is engine-agnostic (no `mistralrs` types), so it builds and is
-//! unit-tested without the `mistralrs` feature.
+//! Responsiveness scope: admission controls *ordering* — a short request runs as
+//! soon as a slot frees, ahead of queued big requests, and never waits for a big
+//! request's full generation. It does not preempt an in-flight engine step
+//! (see `concurrency-engine-yield` in BACKLOG). Nothing here depends on any
+//! backend feature, so it builds and unit-tests with no features (no Xcode).
 
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
+use futures::StreamExt as _;
 use tokio::sync::oneshot;
+
+use crate::backend::{ChatBackend, ChatRequest, ChatStream, ModelError, ModelResult};
 
 /// Estimated cost of a request, used for shortest-job-first ordering and fast-
 /// lane classification. Cheap heuristic — see `weight`.
@@ -66,18 +74,19 @@ pub struct AdmissionConfig {
 }
 
 impl AdmissionConfig {
-    /// Build from the engine capacity and env overrides:
-    /// `ROZUM_MISTRALRS_ADMIT` (admission limit, default = capacity, clamped to
-    /// capacity) and `ROZUM_MISTRALRS_FASTLANE_TOKENS` (default 1024, `0` off).
-    pub fn from_engine_capacity(engine_capacity: usize) -> Self {
-        let cap = engine_capacity.max(1);
+    /// Build from a backend's advertised capacity and the generic admission env
+    /// overrides: `ROZUM_ADMIT` (limit, default = capacity, clamped to capacity),
+    /// `ROZUM_ADMIT_FASTLANE_TOKENS` (default 1024, `0` off),
+    /// `ROZUM_ADMIT_QUEUE_MAX` (default 32, `0` unbounded).
+    pub fn for_capacity(capacity: usize) -> Self {
+        let cap = capacity.max(1);
         let env_usize = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
-        let limit = env_usize("ROZUM_MISTRALRS_ADMIT")
+        let limit = env_usize("ROZUM_ADMIT")
             .filter(|&n| n >= 1)
             .unwrap_or(cap)
             .min(cap);
-        let fastlane_tokens = env_usize("ROZUM_MISTRALRS_FASTLANE_TOKENS").unwrap_or(1024);
-        let queue_max = env_usize("ROZUM_MISTRALRS_QUEUE_MAX").unwrap_or(32);
+        let fastlane_tokens = env_usize("ROZUM_ADMIT_FASTLANE_TOKENS").unwrap_or(1024);
+        let queue_max = env_usize("ROZUM_ADMIT_QUEUE_MAX").unwrap_or(32);
         Self {
             limit,
             fastlane_tokens,
@@ -338,6 +347,211 @@ impl Drop for AdmitGuard {
     }
 }
 
+// ── Memory budget (any in-process backend can use it to size its capacity) ──────
+
+/// Prefill activation peak per token (`mistralrs-chunked-prefill.md`: ~465 KB,
+/// one hidden-state-sized tensor per token). With chunked prefill the peak is
+/// bounded by the chunk size, so each concurrent prefill slot costs a *constant*
+/// `chunk * this` regardless of prompt length — which makes a memory budget over
+/// slots meaningful.
+pub const PREFILL_PEAK_BYTES_PER_TOKEN: u64 = 465 * 1024;
+
+/// Compute sweet-spot ceiling on budgeted concurrency. A single GPU saturates
+/// past a handful of concurrent prefills, so extra slots only add tail latency.
+pub const DEFAULT_SEQS_CEILING: usize = 8;
+
+/// Fraction of currently-available RAM we commit, leaving slack for the OS and
+/// for transient spikes the per-seq estimate doesn't capture.
+const BUDGET_SAFETY_FRAC: f64 = 0.8;
+
+/// Transient memory of one concurrent prefill slot: `chunk_tokens` × the
+/// per-token peak.
+pub fn per_seq_prefill_peak(chunk_tokens: usize) -> u64 {
+    chunk_tokens as u64 * PREFILL_PEAK_BYTES_PER_TOKEN
+}
+
+/// Inputs to the concurrency budget, gathered at load time from the actual model.
+/// All memory terms in bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct ConcurrencyBudget {
+    /// RAM free right now, before weights load.
+    pub available_ram: Option<u64>,
+    /// Model weights that become resident on load.
+    pub weights: Option<u64>,
+    /// Paged KV pool, sized from the context window.
+    pub kv_pool: Option<u64>,
+    /// Transient cost of one concurrent prefill ([`per_seq_prefill_peak`]).
+    pub per_seq_peak: u64,
+    /// Compute sweet-spot cap.
+    pub ceiling: usize,
+}
+
+/// Budgeted concurrent capacity: how many concurrent prefills fit in the RAM left
+/// after the resident model, clamped to `[1, ceiling]`.
+///
+/// `slots = floor((safety·available − weights − kv_pool) / per_seq_peak)`.
+/// Floors at `1` (one request must always run; the preflight decides whether it
+/// fits at all). Falls back to the `1` floor when any memory term is unknown
+/// (e.g. weights not cached yet on first run) — the **safe stub** for a backend
+/// that advertises capacity but can't yet size its footprint.
+pub fn budgeted_max_num_seqs(b: &ConcurrencyBudget) -> usize {
+    let (Some(available), Some(weights), Some(kv_pool)) = (b.available_ram, b.weights, b.kv_pool)
+    else {
+        return 1;
+    };
+    if b.per_seq_peak == 0 || b.ceiling == 0 {
+        return 1;
+    }
+    let headroom = available as f64 * BUDGET_SAFETY_FRAC - weights as f64 - kv_pool as f64;
+    if headroom <= 0.0 {
+        return 1;
+    }
+    let slots = (headroom / b.per_seq_peak as f64).floor() as usize;
+    slots.clamp(1, b.ceiling)
+}
+
+// ── Cost estimation (shared, backend-independent) ───────────────────────────────
+
+/// Cheap cost estimate for admission ordering: ~4 chars/token over the rendered
+/// message text plus the requested generation budget. Only needs to separate a
+/// "quick follow-up" from a "large context read".
+pub fn estimate_cost(req: &ChatRequest) -> RequestCost {
+    use crate::backend::ContentBlock;
+    let chars: usize = req
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .map(|b| match b {
+            ContentBlock::Text { text } => text.len(),
+            ContentBlock::ToolResult { content, .. } => content.len(),
+            _ => 0,
+        })
+        .sum();
+    let max_tokens = req.sampling.max_tokens.map(|m| m as usize).unwrap_or(4096);
+    RequestCost {
+        prompt_tokens: chars / 4,
+        max_tokens,
+    }
+}
+
+// ── Circuit-breaker trip on a backend's resource-exhaustion error ───────────────
+
+/// Best-effort: if `err` looks like a runtime allocation failure, trip the
+/// breaker (lower the live limit) and schedule a one-step recovery after a
+/// cooldown. Detection is substring-based — runtime OOM (esp. on Metal) is often
+/// fatal, so the load-time budget is the primary defence and this is a secondary
+/// guard that calms concurrency after a near miss.
+pub fn note_backend_error(scheduler: &AdmissionScheduler, err: &ModelError) {
+    const OOM_COOLDOWN_SECS: u64 = 30;
+    let m = err.to_string().to_lowercase();
+    let looks_like_oom = m.contains("out of memory")
+        || m.contains("oom")
+        || m.contains("failed to allocate")
+        || m.contains("insufficient memory")
+        || m.contains("exceeds total capacity");
+    if !looks_like_oom {
+        return;
+    }
+    let limit = scheduler.trip();
+    eprintln!("concurrency: allocation failure → admission limit lowered to {limit}");
+    crate::obs::log_event(serde_json::json!({
+        "event": "admission_circuit_trip", "new_limit": limit, "reason": err.to_string(),
+    }));
+    let s = scheduler.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(OOM_COOLDOWN_SECS)).await;
+        let restored = s.recover_step();
+        crate::obs::log_event(serde_json::json!({
+            "event": "admission_circuit_recover", "new_limit": restored,
+        }));
+    });
+}
+
+// ── AdmittingBackend: the decorator ─────────────────────────────────────────────
+
+/// Wraps any [`ChatBackend`] with admission control, backpressure, and the
+/// circuit breaker. Construct directly, or use [`admit_wrap`] to apply it only to
+/// backends that advertise a capacity.
+pub struct AdmittingBackend {
+    inner: Arc<dyn ChatBackend>,
+    scheduler: AdmissionScheduler,
+}
+
+impl AdmittingBackend {
+    pub fn new(inner: Arc<dyn ChatBackend>, cfg: AdmissionConfig) -> Self {
+        Self {
+            inner,
+            scheduler: AdmissionScheduler::new(cfg),
+        }
+    }
+}
+
+#[async_trait]
+impl ChatBackend for AdmittingBackend {
+    async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream> {
+        // Admit before delegating, so an overloaded queue surfaces as a real
+        // HTTP 429 (the gateway maps `Overloaded`) rather than an in-band error
+        // after the response has started. A non-overloaded request parks here
+        // until a slot frees; a client disconnect drops this future and the
+        // queued waiter self-cleans.
+        let guard = match self.scheduler.admit(estimate_cost(&req)).await {
+            Ok(g) => g,
+            Err(AdmitError::Overloaded) => {
+                return Err(ModelError::Overloaded(
+                    "backend at capacity; retry shortly".into(),
+                ));
+            }
+        };
+        let inner = Arc::clone(&self.inner);
+        let scheduler = self.scheduler.clone();
+        let stream: ChatStream = Box::pin(async_stream::stream! {
+            // Hold the slot for the whole stream; dropping it on
+            // completion/disconnect frees the slot and wakes the next waiter.
+            let _guard = guard;
+            let mut inner_stream = match inner.chat(req).await {
+                Ok(s) => s,
+                Err(e) => {
+                    note_backend_error(&scheduler, &e);
+                    yield Err(e);
+                    return;
+                }
+            };
+            while let Some(item) = inner_stream.next().await {
+                if let Err(e) = &item {
+                    note_backend_error(&scheduler, e);
+                }
+                yield item;
+            }
+        });
+        Ok(stream)
+    }
+
+    fn context_window(&self) -> u32 {
+        self.inner.context_window()
+    }
+
+    fn label(&self) -> &'static str {
+        self.inner.label()
+    }
+
+    fn concurrency_capacity(&self) -> Option<usize> {
+        self.inner.concurrency_capacity()
+    }
+}
+
+/// Wrap `inner` with admission control **iff** it advertises a concurrency
+/// capacity; otherwise return it unchanged. Remote / self-serializing backends
+/// (which return `None`) pass through untouched — the safe default.
+pub fn admit_wrap(inner: Arc<dyn ChatBackend>) -> Arc<dyn ChatBackend> {
+    match inner.concurrency_capacity() {
+        Some(cap) => Arc::new(AdmittingBackend::new(
+            inner,
+            AdmissionConfig::for_capacity(cap),
+        )),
+        None => inner,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,5 +721,116 @@ mod tests {
         let _g2 = waiter.await.unwrap();
         assert_eq!(s.recover_step(), 3);
         assert_eq!(s.recover_step(), 3, "recovery caps at capacity");
+    }
+
+    // ── Budget math ─────────────────────────────────────────────────────────
+
+    const GB: u64 = 1 << 30;
+
+    /// 4-bit ~20 GB model + ~4 GB KV pool, 4096-token chunk (~1.82 GiB/slot).
+    fn budget(available_gb: u64) -> ConcurrencyBudget {
+        ConcurrencyBudget {
+            available_ram: Some(available_gb * GB),
+            weights: Some(20 * GB),
+            kv_pool: Some(4 * GB),
+            per_seq_peak: per_seq_prefill_peak(4096),
+            ceiling: DEFAULT_SEQS_CEILING,
+        }
+    }
+
+    #[test]
+    fn budget_serialises_when_no_headroom_for_a_second_prefill() {
+        assert_eq!(budgeted_max_num_seqs(&budget(32)), 1);
+        assert_eq!(budgeted_max_num_seqs(&budget(36)), 2);
+    }
+
+    #[test]
+    fn budget_scales_with_memory_up_to_the_ceiling() {
+        assert_eq!(budgeted_max_num_seqs(&budget(48)), 7);
+        assert_eq!(budgeted_max_num_seqs(&budget(64)), DEFAULT_SEQS_CEILING);
+    }
+
+    #[test]
+    fn budget_floors_to_one_on_unknown_or_overcommitted_memory() {
+        let mut b = budget(64);
+        b.weights = None; // first run, weights not cached → safe stub
+        assert_eq!(budgeted_max_num_seqs(&b), 1);
+        assert_eq!(budgeted_max_num_seqs(&budget(16)), 1);
+    }
+
+    // ── Decorator ───────────────────────────────────────────────────────────
+
+    use crate::backend::{ChatEvent, StopReason};
+
+    /// A trivial backend that yields one Done event, with a configurable capacity.
+    struct FakeBackend {
+        capacity: Option<usize>,
+    }
+
+    #[async_trait]
+    impl ChatBackend for FakeBackend {
+        async fn chat(&self, _req: ChatRequest) -> ModelResult<ChatStream> {
+            Ok(Box::pin(async_stream::stream! {
+                yield Ok(ChatEvent::Done {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    stop_reason: StopReason::EndTurn,
+                });
+            }))
+        }
+        fn context_window(&self) -> u32 {
+            4096
+        }
+        fn concurrency_capacity(&self) -> Option<usize> {
+            self.capacity
+        }
+    }
+
+    #[test]
+    fn admit_wrap_passes_through_when_no_capacity() {
+        let inner: Arc<dyn ChatBackend> = Arc::new(FakeBackend { capacity: None });
+        let wrapped = admit_wrap(Arc::clone(&inner));
+        // Not wrapped: same allocation behind the Arc.
+        assert!(Arc::ptr_eq(&inner, &wrapped));
+    }
+
+    #[test]
+    fn admit_wrap_wraps_when_capacity_advertised() {
+        let inner: Arc<dyn ChatBackend> = Arc::new(FakeBackend { capacity: Some(2) });
+        let wrapped = admit_wrap(Arc::clone(&inner));
+        assert!(!Arc::ptr_eq(&inner, &wrapped));
+        assert_eq!(wrapped.context_window(), 4096, "delegates context_window");
+        assert_eq!(
+            wrapped.concurrency_capacity(),
+            Some(2),
+            "delegates capacity"
+        );
+    }
+
+    #[tokio::test]
+    async fn admitting_backend_streams_through_and_releases() {
+        let inner: Arc<dyn ChatBackend> = Arc::new(FakeBackend { capacity: Some(2) });
+        let backend = AdmittingBackend::new(
+            inner,
+            AdmissionConfig {
+                limit: 2,
+                fastlane_tokens: 0,
+                queue_max: 32,
+            },
+        );
+
+        // Drive a request end-to-end: the inner Done event flows through.
+        let mut stream = backend.chat(ChatRequest::simple("hi")).await.unwrap();
+        let first = stream.next().await.expect("an event").unwrap();
+        assert!(matches!(first, ChatEvent::Done { .. }));
+        assert!(stream.next().await.is_none(), "stream ends after Done");
+        drop(stream);
+
+        // The slot was released on stream drop: capacity is free again.
+        assert_eq!(
+            backend.scheduler.stats().0,
+            0,
+            "slot released after the stream"
+        );
     }
 }

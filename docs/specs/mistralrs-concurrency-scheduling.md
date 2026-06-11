@@ -1,5 +1,14 @@
 # mistralrs Concurrency & Scheduling
 
+> **Update (2026-06-11):** the machinery described here was subsequently
+> **generalized** into a backend-agnostic `src/concurrency` module + an
+> `AdmittingBackend` decorator — see `concurrency-backend-abstraction.md`. The
+> code paths named below as `src/mistralrs_admission.rs` now live in
+> `src/concurrency.rs`, and the admission env knobs `ROZUM_MISTRALRS_{ADMIT,
+> FASTLANE_TOKENS,QUEUE_MAX}` were renamed to the generic `ROZUM_ADMIT*`. The
+> per-phase design and rationale below are still accurate; only the home and the
+> env prefix moved.
+
 ## Overview
 
 The in-process mistralrs backend currently serves requests under a single blunt

@@ -1,9 +1,9 @@
 mod backend;
+pub mod concurrency;
 pub mod discord;
 pub mod gateway;
 pub mod gguf;
 pub mod meeting;
-pub mod mistralrs_admission;
 pub mod mistralrs_backend;
 pub mod models;
 pub mod obs;

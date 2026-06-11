@@ -15,9 +15,6 @@ mod inner {
         ChatBackend, ChatEvent, ChatRequest, ChatStream, ContentBlock, Message, ModelError,
         ModelResult, Role, StopReason,
     };
-    use crate::mistralrs_admission::{
-        AdmissionConfig, AdmissionScheduler, AdmitError, RequestCost,
-    };
 
     use mistralrs::{
         AutoDeviceMapParams, CalledFunction, ChatCompletionChunkResponse, ChunkChoice,
@@ -43,8 +40,10 @@ mod inner {
         /// 32; on a memory-constrained Mac that lets two large prompt prefills
         /// (e.g. Claude Code's parallel requests) run at once and OOM the Metal
         /// command buffer. The load-time caller budgets this from the model
-        /// footprint vs available memory (see [`super::budgeted_max_num_seqs`]
-        /// and `main.rs`); `Default` is a safe serialised floor of `1`.
+        /// footprint vs available memory (`crate::concurrency::budgeted_max_num_seqs`,
+        /// driven from `main.rs`); `Default` is a safe serialised floor of `1`.
+        /// This is also reported via `concurrency_capacity()` so the generic
+        /// admission decorator gates at the same number.
         pub max_num_seqs: usize,
     }
 
@@ -66,9 +65,6 @@ mod inner {
     pub struct MistralrsBackend {
         model: Arc<Model>,
         opts: MistralrsOptions,
-        /// Admission gate in front of the engine (Phase B+C): runtime-adjustable
-        /// concurrency limit, SJF + reserved fast lane.
-        scheduler: AdmissionScheduler,
     }
 
     impl MistralrsBackend {
@@ -133,35 +129,10 @@ mod inner {
                 }
             };
             eprintln!("mistralrs: '{model_id}' ready (context {})", opts.n_ctx);
-            // The engine capacity (opts.max_num_seqs) was budgeted by the caller;
-            // the admission limit defaults to it (ROZUM_MISTRALRS_ADMIT overrides).
-            let scheduler =
-                AdmissionScheduler::new(AdmissionConfig::from_engine_capacity(opts.max_num_seqs));
             Ok(Self {
                 model: Arc::new(model),
                 opts,
-                scheduler,
             })
-        }
-
-        /// Cheap cost estimate for admission ordering: ~4 chars/token over the
-        /// rendered messages plus the requested generation budget. Only needs to
-        /// separate "quick follow-up" from "large context read".
-        fn estimate_cost(&self, req: &ChatRequest) -> RequestCost {
-            let chars: usize = req
-                .messages
-                .iter()
-                .map(|m| Self::message_text(m).len())
-                .sum();
-            let max_tokens = req
-                .sampling
-                .max_tokens
-                .map(|m| m as usize)
-                .unwrap_or(DEFAULT_MAX_TOKENS);
-            RequestCost {
-                prompt_tokens: chars / 4,
-                max_tokens,
-            }
         }
 
         fn message_text(msg: &Message) -> String {
@@ -273,75 +244,25 @@ mod inner {
         }
     }
 
-    /// Best-effort circuit breaker: a runtime Metal allocation failure trips the
-    /// admission limit down one step and schedules a one-step recovery after a
-    /// cooldown. Detection is by message substring — runtime OOM on Metal is
-    /// often fatal, so the load-time budget (Phase A) is the primary defence and
-    /// this is a secondary guard that lowers concurrency after a near miss.
-    fn trip_breaker_if_oom(scheduler: &AdmissionScheduler, msg: &str) {
-        const OOM_COOLDOWN_SECS: u64 = 30;
-        let m = msg.to_lowercase();
-        let looks_like_oom = m.contains("out of memory")
-            || m.contains("oom")
-            || m.contains("failed to allocate")
-            || m.contains("insufficient memory")
-            || m.contains("exceeds total capacity");
-        if !looks_like_oom {
-            return;
-        }
-        let limit = scheduler.trip();
-        eprintln!("mistralrs: allocation failure → admission limit lowered to {limit}");
-        crate::obs::log_event(serde_json::json!({
-            "event": "admission_circuit_trip", "new_limit": limit, "reason": msg,
-        }));
-        let s = scheduler.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(OOM_COOLDOWN_SECS)).await;
-            let restored = s.recover_step();
-            crate::obs::log_event(serde_json::json!({
-                "event": "admission_circuit_recover", "new_limit": restored,
-            }));
-        });
-    }
-
     #[async_trait]
     impl ChatBackend for MistralrsBackend {
         async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream> {
-            let cost = self.estimate_cost(&req);
-            // Admit *before* returning a stream, so an overloaded queue surfaces
-            // as a real HTTP 429 (the gateway maps `Overloaded`) instead of an
-            // in-band error after the response has already started. Waiting here
-            // parks the request until a slot frees (fast lane / SJF); if the
-            // client disconnects, this future is dropped and the queued waiter
-            // cleans itself up.
-            let guard = match self.scheduler.admit(cost).await {
-                Ok(g) => g,
-                Err(AdmitError::Overloaded) => {
-                    return Err(ModelError::Overloaded(
-                        "in-process model at capacity; retry shortly".into(),
-                    ));
-                }
-            };
-
             let cancel = req.cancel.clone();
-            let scheduler = self.scheduler.clone();
             let request = self.build_request(&req);
             let model = Arc::clone(&self.model);
 
+            // Admission control (concurrency limit, backpressure, circuit breaker)
+            // is layered on generically by `concurrency::AdmittingBackend` —
+            // see `concurrency_capacity()` below. This backend just runs the model.
+            //
             // Move `model` into the stream so the upstream borrow it holds is
             // bounded by the stream's lifetime, not by this function call.
             let chat_stream: ChatStream = Box::pin(async_stream::stream! {
-                // Hold the admission slot for the whole stream; dropping it on
-                // completion/disconnect frees the slot and wakes the next waiter.
-                let _admit = guard;
-
                 let mut upstream = match model.stream_chat_request(request).await {
                     Ok(s) => s,
                     Err(e) => {
-                        let msg = e.to_string();
-                        trip_breaker_if_oom(&scheduler, &msg);
                         yield Err(ModelError::BackendUnavailable(format!(
-                            "mistralrs: stream_chat_request: {msg}"
+                            "mistralrs: stream_chat_request: {e}"
                         )));
                         return;
                     }
@@ -443,6 +364,13 @@ mod inner {
         fn label(&self) -> &'static str {
             "mistralrs"
         }
+
+        /// The engine's budgeted batch size doubles as the safe in-process
+        /// concurrency capacity, so `concurrency::admit_wrap` gates admissions at
+        /// the same number the engine can actually batch.
+        fn concurrency_capacity(&self) -> Option<usize> {
+            Some(self.opts.max_num_seqs)
+        }
     }
 
     pub use MistralrsBackend as Export;
@@ -471,75 +399,9 @@ pub fn normalize_spec(spec: &str) -> String {
     }
 }
 
-// ── Phase A: budgeted engine concurrency ───────────────────────────────────────
-// Spec: docs/specs/mistralrs-concurrency-scheduling.md
-
-/// Prefill activation peak per token (`mistralrs-chunked-prefill.md`: ~465 KB,
-/// one hidden-state-sized tensor per token). With chunked prefill the peak is
-/// bounded by the chunk size, so each concurrent prefill slot costs a *constant*
-/// `chunk * this`, regardless of prompt length — which is what makes a memory
-/// budget over slots meaningful.
-pub const PREFILL_PEAK_BYTES_PER_TOKEN: u64 = 465 * 1024;
-
-/// Compute sweet-spot ceiling on budgeted concurrency. Metal is a single device:
-/// past a handful of concurrent prefills the GPU saturates, so extra slots only
-/// add tail latency, not throughput. Override via `ROZUM_MISTRALRS_SEQS_CEILING`.
-pub const DEFAULT_SEQS_CEILING: usize = 8;
-
-/// Fraction of currently-available RAM we commit, leaving slack for the OS and
-/// for transient spikes the per-seq estimate doesn't capture.
-const BUDGET_SAFETY_FRAC: f64 = 0.8;
-
-/// Transient memory of one concurrent prefill slot: `chunk_tokens` × the
-/// per-token peak.
-pub fn per_seq_prefill_peak(chunk_tokens: usize) -> u64 {
-    chunk_tokens as u64 * PREFILL_PEAK_BYTES_PER_TOKEN
-}
-
-/// Inputs to the concurrency budget, gathered at load time from the actual model
-/// (see `main.rs` footprint helpers). All memory terms in bytes.
-#[derive(Clone, Copy, Debug)]
-pub struct ConcurrencyBudget {
-    /// RAM free right now, before weights load.
-    pub available_ram: Option<u64>,
-    /// Model weights that become resident on load.
-    pub weights: Option<u64>,
-    /// Paged KV pool, sized from `n_ctx`.
-    pub kv_pool: Option<u64>,
-    /// Transient cost of one concurrent prefill ([`per_seq_prefill_peak`]).
-    pub per_seq_peak: u64,
-    /// Compute sweet-spot cap.
-    pub ceiling: usize,
-}
-
-/// Budgeted engine `max_num_seqs`: how many concurrent prefills fit in the RAM
-/// left after the resident model, clamped to `[1, ceiling]`.
-///
-/// `slots = floor((safety·available − weights − kv_pool) / per_seq_peak)`.
-/// The floor is `1` (one request must always run; whether it fits at all is the
-/// preflight's job). The value only reaches `≥2` when there is headroom for a
-/// second concurrent prefill — i.e. when a reserved fast lane (Phase B+C) is
-/// physically possible. Falls back to the `1` floor when any memory term is
-/// unknown (e.g. weights not cached yet on first run).
-pub fn budgeted_max_num_seqs(b: &ConcurrencyBudget) -> usize {
-    let (Some(available), Some(weights), Some(kv_pool)) = (b.available_ram, b.weights, b.kv_pool)
-    else {
-        return 1;
-    };
-    if b.per_seq_peak == 0 || b.ceiling == 0 {
-        return 1;
-    }
-    let headroom = available as f64 * BUDGET_SAFETY_FRAC - weights as f64 - kv_pool as f64;
-    if headroom <= 0.0 {
-        return 1;
-    }
-    let slots = (headroom / b.per_seq_peak as f64).floor() as usize;
-    slots.clamp(1, b.ceiling)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ConcurrencyBudget, budgeted_max_num_seqs, normalize_spec, per_seq_prefill_peak};
+    use super::normalize_spec;
 
     #[test]
     fn normalize_mlx_community_prefix() {
@@ -558,49 +420,5 @@ mod tests {
     fn normalize_bare_passthrough() {
         assert_eq!(normalize_spec("Qwen/Qwen3-4B"), "Qwen/Qwen3-4B");
         assert_eq!(normalize_spec("/abs/path"), "/abs/path");
-    }
-
-    const GB: u64 = 1 << 30;
-
-    /// A 4-bit ~20 GB model with a ~4 GB KV pool and a 4096-token chunk
-    /// (~1.9 GB/slot) on machines of varying size.
-    fn budget(available_gb: u64) -> ConcurrencyBudget {
-        ConcurrencyBudget {
-            available_ram: Some(available_gb * GB),
-            weights: Some(20 * GB),
-            kv_pool: Some(4 * GB),
-            per_seq_peak: per_seq_prefill_peak(4096), // ~1.9 GB
-            ceiling: super::DEFAULT_SEQS_CEILING,
-        }
-    }
-
-    // All GiB (1<<30); one slot at chunk 4096 ≈ 1.82 GiB.
-    #[test]
-    fn budget_serialises_when_no_headroom_for_a_second_prefill() {
-        // 32 GiB: 0.8·32 − 24 ≈ 1.7 GiB headroom < one slot → floor 1.
-        assert_eq!(budgeted_max_num_seqs(&budget(32)), 1);
-        // 36 GiB: 0.8·36 − 24 ≈ 4.8 GiB ≈ 2 slots.
-        assert_eq!(budgeted_max_num_seqs(&budget(36)), 2);
-    }
-
-    #[test]
-    fn budget_scales_with_memory_up_to_the_ceiling() {
-        // 48 GiB: 0.8·48 − 24 ≈ 14.4 GiB / 1.82 ≈ 7 slots.
-        assert_eq!(budgeted_max_num_seqs(&budget(48)), 7);
-        // 64 GiB: ≈ 27 GiB / 1.82 ≈ 14 → clamped to the ceiling (8).
-        assert_eq!(
-            budgeted_max_num_seqs(&budget(64)),
-            super::DEFAULT_SEQS_CEILING
-        );
-    }
-
-    #[test]
-    fn budget_floors_to_one_on_unknown_or_overcommitted_memory() {
-        let mut b = budget(64);
-        b.weights = None; // first run, weights not cached → can't budget
-        assert_eq!(budgeted_max_num_seqs(&b), 1);
-
-        // Model bigger than available → no headroom → floor 1, not 0.
-        assert_eq!(budgeted_max_num_seqs(&budget(16)), 1);
     }
 }

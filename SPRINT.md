@@ -142,6 +142,11 @@ per-prefill cost from `mistralrs-chunked-prefill.md` (~465 KB/token × chunk).
 **`mistralrs-concurrency-scheduling` complete (A + B+C + D).** Follow-ups in BACKLOG;
 the big one is `concurrency-engine-yield` (true mid-prefill interleaving).
 
+- [x] concurrency-backend-abstraction - Lift the admission machinery out of mistralrs into a generic `src/concurrency` module + `AdmittingBackend` decorator. **DONE.**
+  - `ChatBackend::concurrency_capacity() -> Option<usize>` (default None); `admit_wrap` gates iff `Some`, passthrough otherwise (safe default for remote backends).
+  - mistralrs reports `Some(max_num_seqs)`; its `chat()` is plain inference again. Generic `ROZUM_ADMIT*` env. The new mlx-rs backend gets admission/fast-lane/backpressure/breaker for free by returning a capacity.
+  - Spec: `docs/specs/concurrency-backend-abstraction.md`.
+
 - [ ] runtime-config - Load backend policy and backend list from `rozum.toml`.
   - Support `single`, `fallback`, and `fanout` policies.
   - Support every `BackendEngine` defined in code (`Hello`, `Candle`, `LlamaGguf`, `NativeRust`, `ExternalCommand`, `Gguf`, plus the `mistralrs`/`openai-http` shapes once we settle on their config schema).

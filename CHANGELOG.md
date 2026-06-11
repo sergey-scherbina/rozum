@@ -1,5 +1,24 @@
 # Changelog
 
+## concurrency-backend-abstraction — generic admission for any backend
+Completed: 2026-06-11
+Lifted the concurrency machinery (scheduler, memory budget, fast lane,
+backpressure, circuit breaker) out of the mistralrs modules into a generic
+`src/concurrency` module (renamed from `mistralrs_admission`), and re-applied it
+as a decorator. `ChatBackend` gained an optional `concurrency_capacity() ->
+Option<usize>` hook (default `None`); `concurrency::admit_wrap` wraps a backend in
+`AdmittingBackend` iff it advertises a capacity, and passes remote / self-
+serializing backends through untouched (the safe default). `MistralrsBackend`
+now reports `Some(max_num_seqs)` and its `chat()` is plain inference again — the
+decorator owns admission. The budget math (`budgeted_max_num_seqs`,
+`ConcurrencyBudget`, `per_seq_prefill_peak`) moved to `concurrency` and is reusable
+by any in-process backend. Admission env renamed to generic `ROZUM_ADMIT` /
+`ROZUM_ADMIT_FASTLANE_TOKENS` / `ROZUM_ADMIT_QUEUE_MAX`. `build_gateway_backend`
+routes every selected backend through `admit_wrap`. 13 concurrency unit tests on
+the default build (no Xcode); feature build + fmt clean. The new mlx-rs backend is
+the first intended consumer: implement inference + return a capacity, get
+admission/fast-lane/backpressure/breaker for free.
+
 ## concurrency-load-shedding — backpressure + OOM circuit breaker (Phase D)
 Completed: 2026-06-11
 Final phase of `mistralrs-concurrency-scheduling`. `AdmissionScheduler.admit`

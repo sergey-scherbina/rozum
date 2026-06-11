@@ -705,7 +705,7 @@ async fn build_gateway_backend(
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"gguf","model":model_spec}),
         );
-        return Some(b);
+        return Some(rozum::concurrency::admit_wrap(b));
     }
 
     // 2. Try in-process native MLX via mistralrs (needs --features mistralrs)
@@ -713,7 +713,7 @@ async fn build_gateway_backend(
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"mistralrs","model":model_spec}),
         );
-        return Some(b);
+        return Some(rozum::concurrency::admit_wrap(b));
     }
 
     // 3. Try LM Studio's local server (native MLX runtime; covers Qwen3.6 MLX
@@ -722,7 +722,7 @@ async fn build_gateway_backend(
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"lmstudio-http","model":model_spec}),
         );
-        return Some(b);
+        return Some(rozum::concurrency::admit_wrap(b));
     }
 
     // 4. Try mlx_lm.server (Python, for MLX-format models)
@@ -730,7 +730,7 @@ async fn build_gateway_backend(
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"mlx-server-http","model":model_spec}),
         );
-        return Some(b);
+        return Some(rozum::concurrency::admit_wrap(b));
     }
 
     // 3. Try user-specified URL via env (any OpenAI-compatible server)
@@ -739,9 +739,9 @@ async fn build_gateway_backend(
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"custom-http","url":url,"model":model_spec}),
         );
-        return Some(std::sync::Arc::new(
+        return Some(rozum::concurrency::admit_wrap(std::sync::Arc::new(
             rozum::openai_http::OpenAiHttpBackend::new(url, model_spec),
-        ));
+        )));
     }
 
     rozum::obs::log_event(serde_json::json!({
@@ -1101,7 +1101,7 @@ fn memory_preflight_ok(model_id: &str, n_ctx: u32) -> bool {
 /// docs/specs/mistralrs-concurrency-scheduling.md (Phase A).
 #[cfg(feature = "mistralrs")]
 fn resolve_max_num_seqs(model_id: &str, n_ctx: u32) -> usize {
-    use rozum::mistralrs_backend::{
+    use rozum::concurrency::{
         ConcurrencyBudget, DEFAULT_SEQS_CEILING, budgeted_max_num_seqs, per_seq_prefill_peak,
     };
     let env_usize = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());

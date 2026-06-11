@@ -217,6 +217,13 @@ pub trait ChatBackend: Send + Sync {
     fn label(&self) -> &'static str {
         "backend"
     }
+    /// A backend's self-assessed safe concurrent-request capacity. `None`
+    /// (default) means "don't gate me": `concurrency::admit_wrap` leaves the
+    /// backend untouched — the right default for remote / self-serializing
+    /// backends. In-process backends that know a safe limit return `Some(n)`.
+    fn concurrency_capacity(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// Drain a `ChatStream` to a plain text string (text deltas only).
