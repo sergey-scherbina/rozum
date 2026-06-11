@@ -952,6 +952,9 @@ fn spawn_detached_gateway(
         .arg(port.to_string())
         .arg("--n-ctx")
         .arg(n_ctx.to_string())
+        // Born from a `rozum launch`: shut down immediately once the last client
+        // lease drops, even if the watchdog never polled while a lease was live.
+        .env("ROZUM_GATEWAY_LAUNCH_MANAGED", "1")
         .stdin(Stdio::null())
         .stdout(log_file.try_clone()?)
         .stderr(log_file);
@@ -1015,6 +1018,10 @@ async fn exec_agent(program: Vec<String>, model_for_alias: &str, port: u16) -> !
             127
         }
     };
+    // Drop our lease immediately on exit so the shared daemon shuts down right
+    // away when we were the last client, instead of waiting for the lease to go
+    // stale (LEASE_FRESH_SECS) or for the idle timeout.
+    rozum::share::remove_lease(std::process::id());
     std::process::exit(code);
 }
 
