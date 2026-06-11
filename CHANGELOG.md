@@ -1,5 +1,18 @@
 # Changelog
 
+## shared-gateway-leases — client leases drive daemon lifetime + status/stop
+Completed: 2026-06-11
+Third phase of `shared-gateway`. Each launch holds a `leases/<pid>` file
+heartbeated every 15s (mtime = liveness); `share::live_lease_count` counts fresh
+leases and reaps dead ones. The daemon's idle watchdog now stays up while any
+lease is fresh OR a request is in flight OR there was recent HTTP, and idle-exits
+(ROZUM_GATEWAY_IDLE_SECS, default 900) only when all are quiet — so leases, not
+raw HTTP traffic, are the primary keep-alive for launch clients, while a manually
+run `rozum gateway` is still kept alive by traffic. Added `rozum gateway status`
+(model/port/pid/n_ctx/uptime/clients) and `rozum gateway stop [--force]` (SIGTERM,
+refused while clients attached); `gateway --model` is now optional (required only
+to run the daemon). No new deps.
+
 ## shared-gateway-failover — respawn the shared daemon on death
 Completed: 2026-06-11
 Second phase of `shared-gateway`. `share::try_spawn_lock` adds an O_EXCL

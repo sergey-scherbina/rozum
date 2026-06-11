@@ -1128,7 +1128,14 @@ pub async fn serve_on(
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 let idle_for = crate::share::now_unix()
                     .saturating_sub(activity.last_active.load(Ordering::Relaxed));
-                if activity.in_flight.load(Ordering::Relaxed) == 0 && idle_for >= idle {
+                // Stay up while any launch holds a fresh lease OR a request is in
+                // flight OR there was recent HTTP traffic (covers manual `rozum
+                // gateway` use). Exit only when all are quiet for `idle`.
+                let live_leases = crate::share::live_lease_count(crate::share::LEASE_FRESH_SECS);
+                if activity.in_flight.load(Ordering::Relaxed) == 0
+                    && live_leases == 0
+                    && idle_for >= idle
+                {
                     crate::obs::log_event(serde_json::json!({
                         "event": "gateway_idle_exit", "idle_secs": idle_for,
                     }));

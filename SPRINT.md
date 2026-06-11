@@ -166,8 +166,8 @@ Spec: `docs/specs/shared-gateway.md`.
 - [x] shared-gateway-failover - Launch-side watchdog respawns the daemon on death
   (same port), anti-stampede via `share::try_spawn_lock` (O_EXCL stale-steal),
   port-bind backstop. Agent reconnects over the brief gap via its own retry. **DONE.**
-- [ ] shared-gateway-leases - Lease-refcount lifetime (`leases/<pid>` heartbeat,
-  reap dead pids) replacing the coarse idle-timeout; `rozum gateway status`/`stop`.
+- [x] shared-gateway-leases - Lease-refcount lifetime (`leases/<pid>` heartbeat,
+  mtime-reap) keeps the daemon up while clients are live; `rozum gateway status`/`stop`. **DONE.**
 - [ ] launch-model-picker - `--model` optional: omitted+running → reuse (print
   model); omitted+none on a TTY → interactive picker (cached first with
   `(cached, size)` / `(not cached, ~size)` annotations; non-cached → download

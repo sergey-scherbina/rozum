@@ -85,6 +85,59 @@ pub fn is_reusable(active: &ActiveGateway, want_model: &str) -> bool {
     active.model == want_model
 }
 
+// ── Client leases ───────────────────────────────────────────────────────────
+// Each `rozum launch` writes leases/<pid> and heartbeats it (rewrites → bumps
+// mtime). The daemon counts leases whose mtime is fresh as "a client is using
+// me", and idle-exits only when none remain. A launch that exits without cleanup
+// (process::exit) simply lets its lease go stale and be reaped.
+
+/// A lease is "live" if heartbeated within this window.
+pub const LEASE_FRESH_SECS: u64 = 60;
+
+pub fn leases_dir() -> PathBuf {
+    gateway_dir().join("leases")
+}
+
+pub fn lease_path(pid: u32) -> PathBuf {
+    leases_dir().join(pid.to_string())
+}
+
+/// Create/refresh this client's lease (rewrite bumps mtime).
+pub fn touch_lease(pid: u32) {
+    if std::fs::create_dir_all(leases_dir()).is_ok() {
+        let _ = std::fs::write(lease_path(pid), now_unix().to_string());
+    }
+}
+
+pub fn remove_lease(pid: u32) {
+    let _ = std::fs::remove_file(lease_path(pid));
+}
+
+/// Count leases heartbeated within `fresh_secs`, reaping clearly-dead ones
+/// (mtime older than 10× the freshness window).
+pub fn live_lease_count(fresh_secs: u64) -> usize {
+    let mut live = 0;
+    let Ok(entries) = std::fs::read_dir(leases_dir()) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let age = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|e| e.as_secs());
+        match age {
+            Some(secs) if secs <= fresh_secs => live += 1,
+            Some(secs) if secs > fresh_secs * 10 => {
+                let _ = std::fs::remove_file(entry.path()); // reap stale
+            }
+            _ => {}
+        }
+    }
+    live
+}
+
 pub fn spawn_lock_path() -> PathBuf {
     gateway_dir().join("spawn.lock")
 }

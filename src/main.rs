@@ -100,15 +100,20 @@ enum Command {
         port: u16,
 
         /// Model spec: absolute .gguf path, "lmstudio:<repo>", or any model id
-        /// understood by mlx_lm.server / ROZUM_BACKEND_URL
+        /// understood by mlx_lm.server / ROZUM_BACKEND_URL. Required to run the
+        /// daemon; not needed for `status` / `stop`.
         #[arg(long)]
-        model: String,
+        model: Option<String>,
 
         /// Context window in tokens. Default: the model's max context (from its
         /// config.json), capped so the KV cache stays within a fraction of RAM;
         /// falls back to 32768 if the model max is unknown. Lower it to save RAM.
         #[arg(long)]
         n_ctx: Option<u32>,
+
+        /// `status` or `stop` the shared gateway; omit to run the daemon.
+        #[command(subcommand)]
+        action: Option<GatewayAction>,
     },
 
     /// Start the gateway and launch a program with ANTHROPIC_/OPENAI_ env vars set.
@@ -146,6 +151,17 @@ enum Command {
     Models {
         #[command(subcommand)]
         action: ModelsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum GatewayAction {
+    /// Show the active shared gateway (model, port, pid, uptime, clients).
+    Status,
+    /// Stop the active shared gateway (refused if clients are attached, unless --force).
+    Stop {
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -258,9 +274,22 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Command::Gateway { port, model, n_ctx }) => {
-            run_gateway(port, model, n_ctx).await;
-        }
+        Some(Command::Gateway {
+            port,
+            model,
+            n_ctx,
+            action,
+        }) => match action {
+            None => {
+                let Some(model) = model else {
+                    eprintln!("rozum gateway: --model is required to run the daemon");
+                    std::process::exit(2);
+                };
+                run_gateway(port, model, n_ctx).await;
+            }
+            Some(GatewayAction::Status) => run_gateway_status().await,
+            Some(GatewayAction::Stop { force }) => run_gateway_stop(force),
+        },
         Some(Command::Launch {
             model,
             port,
@@ -470,6 +499,12 @@ async fn run_launch(
         Some(x) => x,
         None => std::process::exit(1),
     };
+    // Hold a lease so the daemon knows a client is using it (and idle-exits only
+    // when none remain). The lease goes stale and is reaped after we exit.
+    let me_pid = std::process::id();
+    rozum::share::touch_lease(me_pid);
+    spawn_lease_heartbeat(me_pid);
+
     // Failover: while the agent runs, keep the shared daemon alive — if it dies,
     // one launch respawns it on the same port (the agent's own retry then
     // reconnects). Spec: shared-gateway-failover.
@@ -583,6 +618,71 @@ async fn ensure_shared_gateway(
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
+}
+
+async fn run_gateway_status() {
+    use rozum::share;
+    let Some(active) = share::read_active() else {
+        println!("no shared gateway running");
+        return;
+    };
+    let healthy = share::health_ok(active.port).await;
+    let uptime = share::now_unix().saturating_sub(active.started_at);
+    let clients = share::live_lease_count(share::LEASE_FRESH_SECS);
+    println!(
+        "shared gateway: {}",
+        if healthy {
+            "running"
+        } else {
+            "STALE (not responding)"
+        }
+    );
+    println!("  model:   {}", active.model);
+    println!("  port:    {}", active.port);
+    println!("  pid:     {}", active.pid);
+    println!("  n_ctx:   {}", active.n_ctx);
+    println!("  uptime:  {uptime}s");
+    println!("  clients: {clients}");
+}
+
+fn run_gateway_stop(force: bool) {
+    use rozum::share;
+    let Some(active) = share::read_active() else {
+        println!("no shared gateway running");
+        return;
+    };
+    let clients = share::live_lease_count(share::LEASE_FRESH_SECS);
+    if clients > 0 && !force {
+        eprintln!(
+            "rozum gateway stop: {clients} client(s) attached; refusing. Use --force to stop anyway."
+        );
+        std::process::exit(1);
+    }
+    // SIGTERM via `kill`; the daemon's stale registry is harmless (health probe
+    // treats a dead port as "none running").
+    let status = std::process::Command::new("kill")
+        .arg(active.pid.to_string())
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            share::remove_active_if_mine(active.pid);
+            println!("stopped shared gateway (pid {})", active.pid);
+        }
+        _ => {
+            eprintln!("rozum gateway stop: failed to signal pid {}", active.pid);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Heartbeat this launch's lease so the shared daemon counts it as a live client.
+fn spawn_lease_heartbeat(pid: u32) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            rozum::share::touch_lease(pid);
+        }
+    });
 }
 
 /// Background failover: watch the shared gateway and respawn it if it dies, so

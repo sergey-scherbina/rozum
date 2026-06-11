@@ -99,17 +99,13 @@ Stable port: the shared gateway uses a fixed port (default 8089, `--port`/`ROZUM
 
 ### Lifetime (idle shutdown)
 
-- [~] **MVP**: the daemon idle-exits after `ROZUM_GATEWAY_IDLE_SECS` (default
-      900) with zero in-flight requests and no new arrivals (request-activity
-      based, in-flight-aware so a long generation can't trip it). Lease-by-client
-      (`leases/<pid>`) is the `shared-gateway-leases` phase; until then the timer
-      is HTTP-activity, not client-liveness. (Original wording:) Each launch
-      client maintains a lease (`leases/<pid>`, heartbeated). The
-      gateway reaps leases whose pid is dead; when **no live lease** remains for
-      `ROZUM_GATEWAY_IDLE_SECS` (default 300) it shuts down gracefully, freeing
-      the port and the model. `--no-idle-timeout` keeps it up indefinitely.
-- [ ] `rozum gateway stop` exits the daemon (refused while clients are attached
-      unless `--force`); `rozum gateway status` prints model/pid/port/clients/uptime.
+- [x] Each launch holds a lease (`leases/<pid>`, heartbeated every 15 s; mtime =
+      liveness). The daemon stays up while any lease is fresh (`LEASE_FRESH_SECS`
+      60), a request is in flight, OR there was HTTP within `ROZUM_GATEWAY_IDLE_SECS`
+      (default 900) — and idle-exits only when all are quiet, freeing
+      the port and the model. `ROZUM_GATEWAY_IDLE_SECS=0` keeps it up indefinitely.
+- [x] `rozum gateway stop` SIGTERMs the daemon (refused while clients are attached
+      unless `--force`); `rozum gateway status` prints model/pid/port/n_ctx/uptime/clients.
 
 ### Model resolution when `--model` is omitted
 
@@ -459,7 +455,18 @@ under the spawn lock (rechecking health under the lock first), waiting up to 120
 for it to come back. Simultaneous watchdogs are damped by the lock and deduped by
 the port bind. Transparent to the agent modulo its own retry over the brief gap.
 
-Deferred (later phases): client-pid leases (`shared-gateway-leases`); the
+### `shared-gateway-leases` (done)
+
+`share`: `leases/<pid>` (touch = rewrite → bump mtime), `live_lease_count(fresh)`
+(counts mtime-fresh leases, reaps clearly-dead ones), `LEASE_FRESH_SECS=60`.
+Launch heartbeats its lease every 15 s (`spawn_lease_heartbeat`). The daemon's
+idle watchdog now stays up while `live_lease_count>0 || in_flight>0 || recent
+HTTP`, exiting only when all quiet — so leases (not raw HTTP) are the primary
+keep-alive, while a manually-run `rozum gateway` is still kept by HTTP traffic.
+`rozum gateway status` / `stop [--force]` added (`Gateway` gained an optional
+`status`/`stop` subcommand; `--model` is now optional, required only to run).
+
+Deferred (later phases): the
 launch-local proxy, replay, poison, two-tier backpressure
 (`shared-gateway-proxy`/`-replay-retry`/`-poison`); `switch`/`reload`/`unload`,
 `gateway status`/`stop`, the picker, and `models rm` (their own tasks).
