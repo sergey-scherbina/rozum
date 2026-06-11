@@ -163,8 +163,9 @@ Spec: `docs/specs/shared-gateway.md`.
   gateway and reuses it, else spawns one (port-bind dedup; flock deferred to
   failover) and waits for health, then execs the agent. `--dedicated` keeps the
   old in-process behaviour. **DONE.**
-- [ ] shared-gateway-failover - Re-election on gateway death: a failed request →
-  re-discover → exactly one respawn on the same port; client reconnect window.
+- [x] shared-gateway-failover - Launch-side watchdog respawns the daemon on death
+  (same port), anti-stampede via `share::try_spawn_lock` (O_EXCL stale-steal),
+  port-bind backstop. Agent reconnects over the brief gap via its own retry. **DONE.**
 - [ ] shared-gateway-leases - Lease-refcount lifetime (`leases/<pid>` heartbeat,
   reap dead pids) replacing the coarse idle-timeout; `rozum gateway status`/`stop`.
 - [ ] launch-model-picker - `--model` optional: omitted+running → reuse (print

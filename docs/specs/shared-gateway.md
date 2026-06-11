@@ -77,10 +77,10 @@ Stable port: the shared gateway uses a fixed port (default 8089, `--port`/`ROZUM
 
 ### Single-owner election & spawn
 
-- [~] When no usable gateway is found the launch spawns a detached `rozum gateway
-      --model X --port P` and waits for health. **MVP: no `spawn.lock` yet** —
-      relies on the TCP bind below for correctness; the flock anti-stampede is
-      the `shared-gateway-failover` phase.
+- [x] When no usable gateway is found the launch spawns a detached `rozum gateway
+      --model X --port P` and waits for health. Concurrent (re)spawns are damped by
+      `share::try_spawn_lock` (O_EXCL anti-stampede with stale-steal); the TCP bind
+      below is the hard correctness guarantee.
 - [x] Concurrent spawners are deduplicated by the TCP bind: exactly one `rozum
       gateway` binds the port; the rest fail `EADDRINUSE` and exit, then all
       launches discover the survivor via the health poll.
@@ -89,11 +89,13 @@ Stable port: the shared gateway uses a fixed port (default 8089, `--port`/`ROZUM
 
 ### Failover
 
-- [ ] If an in-flight agent request fails because the gateway died, the next
-      launch (or a relaunch) re-runs discovery → election → exactly one respawn
-      on the **same** port. No thundering herd (flock + bind both bound it to one).
-- [ ] Because the port is stable, a respawned gateway is transparent to an
-      already-connected agent after a brief reconnect window.
+- [x] While the agent runs, each launch runs a background watchdog that polls the
+      daemon; on death it respawns on the **same** port. A `share::try_spawn_lock`
+      (O_EXCL, stale-steal) keeps simultaneous watchdogs from each respawning;
+      the TCP bind dedups any that slip through. (`spawn_failover_watchdog`.)
+- [x] Because the port is stable, the respawned gateway is transparent to the
+      already-connected agent after a brief reconnect window (the agent's own
+      retry reconnects to the same URL).
 
 ### Lifetime (idle shutdown)
 
@@ -447,8 +449,17 @@ fast if the daemon exits during load; 300 s cap otherwise). `--dedicated` keeps
 the old private in-process gateway. `exec_agent` factors the agent env wiring and
 points `ANTHROPIC_MODEL` at the *effective* model.
 
-Deferred (later phases): `spawn.lock` anti-stampede + crash re-election
-(`shared-gateway-failover`); client-pid leases (`shared-gateway-leases`); the
+### `shared-gateway-failover` (done)
+
+`share::try_spawn_lock(stale_secs)` — O_EXCL `spawn.lock` with stale-steal +
+drop-release (best-effort anti-stampede; the TCP bind is the real guarantee).
+`spawn_failover_watchdog(model, n_ctx, port)` runs in the launch alongside the
+agent: polls health every 5 s, and after 2 consecutive misses respawns the daemon
+under the spawn lock (rechecking health under the lock first), waiting up to 120 s
+for it to come back. Simultaneous watchdogs are damped by the lock and deduped by
+the port bind. Transparent to the agent modulo its own retry over the brief gap.
+
+Deferred (later phases): client-pid leases (`shared-gateway-leases`); the
 launch-local proxy, replay, poison, two-tier backpressure
 (`shared-gateway-proxy`/`-replay-retry`/`-poison`); `switch`/`reload`/`unload`,
 `gateway status`/`stop`, the picker, and `models rm` (their own tasks).

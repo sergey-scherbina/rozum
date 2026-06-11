@@ -470,6 +470,10 @@ async fn run_launch(
         Some(x) => x,
         None => std::process::exit(1),
     };
+    // Failover: while the agent runs, keep the shared daemon alive — if it dies,
+    // one launch respawns it on the same port (the agent's own retry then
+    // reconnects). Spec: shared-gateway-failover.
+    spawn_failover_watchdog(effective_model.clone(), n_ctx, gw_port);
     exec_agent(program, &effective_model, gw_port).await
 }
 
@@ -579,6 +583,55 @@ async fn ensure_shared_gateway(
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
+}
+
+/// Background failover: watch the shared gateway and respawn it if it dies, so
+/// clients only see a brief reconnect window. A spawn lock keeps simultaneous
+/// watchdogs from each respawning (port-bind dedups them anyway). Dies with this
+/// process when the agent exits.
+fn spawn_failover_watchdog(model: String, n_ctx: u32, port: u16) {
+    use rozum::share;
+    use std::time::{Duration, Instant};
+    tokio::spawn(async move {
+        let mut misses = 0u32;
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if share::health_ok(port).await {
+                misses = 0;
+                continue;
+            }
+            misses += 1;
+            if misses < 2 {
+                continue; // tolerate a transient blip before acting
+            }
+            // Daemon looks down. Coordinate a single respawn; others wait.
+            match share::try_spawn_lock(120) {
+                Some(_lock) => {
+                    if share::health_ok(port).await {
+                        misses = 0;
+                        continue; // recovered under the lock
+                    }
+                    eprintln!("rozum launch: shared gateway down — respawning on :{port}…");
+                    match spawn_detached_gateway(&model, port, n_ctx) {
+                        Ok(mut child) => {
+                            let deadline = Instant::now() + Duration::from_secs(120);
+                            while !share::health_ok(port).await {
+                                if matches!(child.try_wait(), Ok(Some(_)))
+                                    || Instant::now() >= deadline
+                                {
+                                    break; // died or timed out — next loop retries
+                                }
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            }
+                        }
+                        Err(e) => eprintln!("rozum launch: respawn failed: {e}"),
+                    }
+                }
+                None => { /* another launch is respawning — wait and re-poll */ }
+            }
+            misses = 0;
+        }
+    });
 }
 
 /// Spawn `rozum gateway --model … --port … --n-ctx …` as a detached process that

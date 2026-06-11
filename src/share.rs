@@ -85,6 +85,61 @@ pub fn is_reusable(active: &ActiveGateway, want_model: &str) -> bool {
     active.model == want_model
 }
 
+pub fn spawn_lock_path() -> PathBuf {
+    gateway_dir().join("spawn.lock")
+}
+
+/// Best-effort anti-stampede lock for (re)spawning the daemon, so a crowd of
+/// launches that all notice the daemon is down don't each spawn one. Correctness
+/// does NOT depend on it — the TCP-port bind already guarantees a single daemon;
+/// this just avoids wasted spawns. Held via O_EXCL create; a lock older than
+/// `stale_secs` is treated as abandoned and stolen. The guard removes the file on
+/// drop. `None` = someone else holds a fresh lock (let them spawn).
+pub struct SpawnLock {
+    _priv: (),
+}
+
+impl Drop for SpawnLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(spawn_lock_path());
+    }
+}
+
+fn create_lock_excl() -> Option<SpawnLock> {
+    use std::io::Write as _;
+    let _ = ensure_dir();
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(spawn_lock_path())
+    {
+        Ok(mut f) => {
+            let _ = f.write_all(now_unix().to_string().as_bytes());
+            Some(SpawnLock { _priv: () })
+        }
+        Err(_) => None,
+    }
+}
+
+pub fn try_spawn_lock(stale_secs: u64) -> Option<SpawnLock> {
+    if let Some(lock) = create_lock_excl() {
+        return Some(lock);
+    }
+    // Exists — steal it only if it looks abandoned (older than stale_secs).
+    let stale = std::fs::metadata(spawn_lock_path())
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|e| e.as_secs() > stale_secs)
+        .unwrap_or(true);
+    if stale {
+        let _ = std::fs::remove_file(spawn_lock_path());
+        create_lock_excl()
+    } else {
+        None
+    }
+}
+
 /// Does a gateway answer on this port? The authoritative liveness signal (a stale
 /// registry whose process is gone simply won't respond).
 pub async fn health_ok(port: u16) -> bool {

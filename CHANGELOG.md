@@ -1,5 +1,17 @@
 # Changelog
 
+## shared-gateway-failover — respawn the shared daemon on death
+Completed: 2026-06-11
+Second phase of `shared-gateway`. `share::try_spawn_lock` adds an O_EXCL
+`spawn.lock` with stale-steal + drop-release (best-effort anti-stampede; the TCP
+bind remains the hard single-owner guarantee). `spawn_failover_watchdog` runs in
+each launch alongside the agent: it polls the daemon every 5s and, after two
+consecutive misses, respawns it on the same port under the spawn lock (rechecking
+health first), waiting up to 120s. Simultaneous watchdogs are damped by the lock
+and deduped by the port bind, so a crashed/killed daemon comes back without the
+user relaunching; the agent reconnects over the brief gap via its own retry (same
+stable URL). No new deps.
+
 ## shared-gateway-mvp — share one model daemon across launches
 Completed: 2026-06-11
 First phase of `shared-gateway`. `rozum launch` no longer always loads its own
