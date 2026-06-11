@@ -90,19 +90,20 @@ pub struct RequestCost { pub prompt_tokens: usize, pub max_tokens: usize }
 
 ### Phase A — budgeted engine capacity (`concurrency-budget`)
 
-- [ ] `budgeted_max_num_seqs` returns `clamp(headroom / per_seq_peak, 1, ceiling)`
+- [x] `budgeted_max_num_seqs` returns `clamp(headroom / per_seq_peak, 1, ceiling)`
       where `headroom = safety_frac * available - weights - kv_pool`.
-- [ ] `per_seq_peak` is derived from the active prefill chunk size × ~465 KB/token
-      (the measured chunked-prefill activation cost), so the per-slot cost is
-      ~constant regardless of prompt length.
-- [ ] The floor is `1`; the value lifts to `≥2` only when headroom covers at
+- [x] `per_seq_peak` is derived from the active prefill chunk size × ~465 KB/token
+      (`PREFILL_PEAK_BYTES_PER_TOKEN`, via `per_seq_prefill_peak(chunk)`), so the
+      per-slot cost is ~constant regardless of prompt length.
+- [x] The floor is `1`; the value lifts to `≥2` only when headroom covers at
       least one extra `per_seq_peak` (so a fast lane is physically possible).
-- [ ] `ROZUM_MISTRALRS_MAX_SEQS` overrides the budgeted value exactly;
+- [x] `ROZUM_MISTRALRS_MAX_SEQS` overrides the budgeted value exactly;
       `ROZUM_MISTRALRS_SEQS_CEILING` caps it (default 8).
-- [ ] Decision is made at load time from the *actual* model (reuses
-      `main.rs` footprint helpers: weights, kv_cache_bytes, available_ram_bytes),
-      not a machine-class guess. Replaces the 24–36 GB → 1 / ≥48 GB → 2 ladder.
-- [ ] Unit-tested across (available, weights, kv, per_seq, ceiling) tuples with
+- [x] Decision is made at load time from the *actual* model (`resolve_max_num_seqs`
+      in `main.rs` reuses `cached_weights_bytes` / `kv_cache_bytes` /
+      `available_ram_bytes`), not a machine-class guess. Replaces the
+      24–36 GB → 1 / ≥48 GB → 2 ladder.
+- [x] Unit-tested across (available, weights, kv, per_seq, ceiling) tuples with
       no `mistralrs` feature / no Xcode (pure function).
 
 ### Phase B + C — admission scheduler + fast lane (`concurrency-admission`)
@@ -274,7 +275,35 @@ read", which is all the scheduler needs.
 
 ## Results
 
-(Per phase. Phase A records the budget formula's chosen `safety_frac`,
-`per_seq_peak` constant, and `ceiling`; Phase B+C records the verified
-interleaving behaviour of the fork; Phase D records the circuit-breaker
-recovery behaviour under an induced allocation failure.)
+### Phase A — budgeted engine capacity (done)
+
+Constants chosen (`src/mistralrs_backend.rs`):
+- `PREFILL_PEAK_BYTES_PER_TOKEN = 465 KiB` (from `mistralrs-chunked-prefill.md`).
+- `BUDGET_SAFETY_FRAC = 0.8` (commit 20% of free RAM to OS/slack/spikes).
+- `DEFAULT_SEQS_CEILING = 8`; per-slot cost at the paged default chunk (4096)
+  ≈ 1.82 GiB.
+
+`budgeted_max_num_seqs(ConcurrencyBudget)` is pure and lives in the lib;
+`resolve_max_num_seqs(model_id, n_ctx)` in `main.rs` gathers the footprint
+(reusing the preflight helpers) and applies the env overrides
+(`ROZUM_MISTRALRS_MAX_SEQS` force, `ROZUM_MISTRALRS_SEQS_CEILING` cap,
+`MISTRALRS_PREFILL_CHUNK` for the per-slot cost). The decision is logged as a
+`concurrency_budget` obs event. `MistralrsOptions::default()` now carries a
+plain serialised floor of `1`; the budgeted value is set at the load-time call
+site. Worked examples (20 GiB weights + 4 GiB KV, chunk 4096):
+
+| available | headroom (0.8·avail − 24 GiB) | slots | result |
+|-----------|-------------------------------|-------|--------|
+| 32 GiB    | ~1.6 GiB                      | 0→1   | 1 (serialised) |
+| 36 GiB    | ~4.8 GiB                      | 2     | 2 (fast lane possible) |
+| 48 GiB    | ~14.4 GiB                     | 7     | 7 |
+| 64 GiB    | ~27 GiB                       | 14    | 8 (ceiling) |
+
+Verification: 6 lib unit tests green without the `mistralrs` feature (no Xcode);
+`cargo check --features mistralrs` clean; `cargo fmt --check` clean.
+
+### Phase B+C / D
+
+(Phase B+C records the verified interleaving behaviour of the fork; Phase D
+records the circuit-breaker recovery behaviour under an induced allocation
+failure.)

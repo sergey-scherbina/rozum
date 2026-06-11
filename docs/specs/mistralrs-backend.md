@@ -19,13 +19,13 @@ In-process backend that loads MLX-format safetensors directly into the rozum pro
 
 pub struct MistralrsOptions {
     pub n_ctx: u32,           // default 32_768; env ROZUM_MISTRALRS_N_CTX
-    pub max_num_seqs: usize,  // concurrent-prefill cap; adaptive default
-                              // (1, or 2 on >=48 GB unified memory);
-                              // env ROZUM_MISTRALRS_MAX_SEQS
+    pub max_num_seqs: usize,  // concurrent-prefill cap; budgeted at load time
+                              // (see mistralrs-concurrency-scheduling.md);
+                              // env ROZUM_MISTRALRS_MAX_SEQS forces it
 }
 
-// Concurrency policy (pure, unit-tested):
-pub fn default_max_num_seqs(total_ram: Option<u64>) -> usize;
+// Concurrency budget (pure, unit-tested) — see mistralrs-concurrency-scheduling.md:
+pub fn budgeted_max_num_seqs(b: &ConcurrencyBudget) -> usize;
 
 pub struct MistralrsBackend { /* private */ }
 
@@ -59,7 +59,7 @@ rozum launch --model mlx-community:Qwen2.5-Coder-32B-Instruct-4bit claude
 - [ ] Auto-download via `hf-hub` if the model is specified as `hf:<repo>` or `mlx-community:<repo>` and not already cached.
 - [ ] Streaming via mistralrs's native streaming API; events mapped to `ChatEvent::TextDelta` and `ChatEvent::Done` (`EndTurn`/`MaxTokens`/`Cancelled`).
 - [ ] Per-token cancel via `req.cancel`: checked between decoded tokens; backend stops within one decode step.
-- [x] Concurrent requests are capped by `max_num_seqs`. The default is **adaptive**: `1` (serialised, one prefill at a time) on the 24–36 GB target band, raised to `2` on machines with ≥48 GB total unified memory. `ROZUM_MISTRALRS_MAX_SEQS` overrides; excess requests queue in mistralrs's scheduler rather than running extra concurrent prefills. Unknown memory falls back to the `1` floor.
+- [x] Concurrent requests are capped by `max_num_seqs`, **budgeted at load time** from the model footprint vs available memory (`budgeted_max_num_seqs`), clamped to `[1, ceiling]`. `ROZUM_MISTRALRS_MAX_SEQS` forces it; excess requests queue in mistralrs's scheduler. Unknown footprint falls back to the `1` floor. Full design: `mistralrs-concurrency-scheduling.md`.
 - [ ] Tool-use: pass `req.tools` into the model prompt via the chat template; reuse `crate::gguf::ToolUseParser` to detect `<tool_call>` blocks for Qwen-family models. Emit `ToolUseStart`/`ToolUseDelta`/`ToolUseEnd` events.
 - [ ] System prompt block from `ChatRequest.messages` is forwarded to mistralrs's chat template.
 - [ ] Sampling params (`temperature`, `top_p`, `top_k`, `max_tokens`) map to mistralrs's sampling configuration.
@@ -116,29 +116,27 @@ How necessary is `1`? It is the safe **floor**, not a hard requirement:
   that was fixed (disconnected-sequence reaping in the engine + `select!` cancel
   in the backend), so raising the cap is now safe where memory allows.
 
-The default is **adaptive** (`default_max_num_seqs`): `1` everywhere, lifted to
-`2` when total unified memory is ≥ 48 GB (covering 48/64/96/128 GB Macs). The
-gate is on **total** `hw.memsize`, not instantaneous free memory, deliberately:
-free memory is high at load time (weights not yet resident) and would
-over-predict the headroom available once the model is paging through the Metal
-working set during decode. The existing model-fit retry loop in
-`MistralrsBackend::new` handles the dynamic "does it actually fit" question by
-stepping `n_ctx` down, so this default only needs to pick a safe machine-class
-concurrency. `ROZUM_MISTRALRS_MAX_SEQS` overrides the whole policy for users who
-want to push concurrency higher (or force `1`) explicitly.
+The default value is **budgeted at load time** from the actual model footprint
+(`budgeted_max_num_seqs` / `resolve_max_num_seqs`): how many concurrent prefill
+slots — each costing a constant `prefill_chunk × ~465 KB/token` — fit in the RAM
+free after the resident model (weights + KV pool), clamped to `[1, ceiling]`.
+This supersedes the earlier total-`hw.memsize` 1/2 ladder: budgeting against
+*available* memory minus the explicit weights+KV cost is more precise than a
+machine-class guess, and the model-fit retry loop in `MistralrsBackend::new`
+still backstops the dynamic fit. `ROZUM_MISTRALRS_MAX_SEQS` forces an exact
+value; `ROZUM_MISTRALRS_SEQS_CEILING` caps it (default 8). Full design (plus the
+admission scheduler, fast lane, and backpressure layered on top) lives in
+`mistralrs-concurrency-scheduling.md`.
 
 ## Decisions
 
-- **Serialised by default, adaptive to memory** — chosen because the dominant
-  deployment is a single memory-constrained Mac serving Claude Code, where
-  concurrent large-prompt prefills OOM the Metal command buffer; `1` matches
-  Ollama/LM Studio and is the safe floor. Lifting to `2` only at ≥48 GB total
-  RAM buys real concurrency where there is headroom without risking the target
-  24–36 GB band. Rejected: a fixed `1` (leaves throughput on the table on big
-  Macs); gating on instantaneous free memory (over-predicts runtime headroom,
-  since weights are not resident at the decision point); scaling above `2`
-  by default (the OOM risk/throughput trade-off past two concurrent prefills is
-  unmeasured — left to the explicit env override).
+- **Serialised floor, budgeted concurrency** — `1` is the safe floor (matches
+  Ollama/LM Studio; concurrent large-prompt prefills OOM the Metal command
+  buffer on the 24–36 GB target band), and the value is budgeted up from there
+  against the model footprint vs free RAM. The original total-`hw.memsize` 1/2
+  ladder was superseded by this budget — rationale and the full layered design
+  (admission scheduler, fast lane, backpressure) live in
+  `mistralrs-concurrency-scheduling.md`.
 - **mistralrs over hand-rolled mlx-rs port** — chosen because mistralrs already implements Qwen2/Qwen3/Llama/Mistral forward passes, KV-cache, chat templates, and sampling. A hand-rolled port via `mlx-rs` core ops would require thousands of lines per model family and ongoing maintenance.
 - **In-process over subprocess** — chosen to eliminate Python from the runtime path for users who want a single-binary deployment.
 - **Reuse `gguf::ToolUseParser`** — chosen because the model-side tool-call format is engine-independent; duplicating the parser would create drift.
@@ -182,13 +180,15 @@ between in-process GGUF and mlx_lm.server HTTP.
 
 ### Adaptive request concurrency (2026-06-11)
 
-`max_num_seqs` default is now adaptive (`default_max_num_seqs`): `1` (serialised)
-on the 24–36 GB target band, `2` on machines with ≥ 48 GB total unified memory.
-Gated on total `hw.memsize` (not instantaneous free memory — see Design for the
-rationale); `ROZUM_MISTRALRS_MAX_SEQS` still overrides. The disconnected-seq
-reaping fix (see `project-mistralrs-large-prompt-stall`) makes raising the cap
-safe. Pure policy fn is unit-tested without the `mistralrs` feature (no Xcode
-needed); the gated `mistralrs` lib path compiles clean.
+`max_num_seqs` is no longer a fixed value. **Initial step (superseded):** a
+total-`hw.memsize` 1/2 ladder (`1`, or `2` at ≥48 GB). **Current:** budgeted at
+load time from the model footprint vs free RAM (`budgeted_max_num_seqs` /
+`resolve_max_num_seqs`), clamped to `[1, ceiling]` — Phase A of
+`mistralrs-concurrency-scheduling.md`. `ROZUM_MISTRALRS_MAX_SEQS` forces it;
+`ROZUM_MISTRALRS_SEQS_CEILING` caps it. The disconnected-seq reaping fix (see
+`project-mistralrs-large-prompt-stall`) makes raising the cap safe. Pure budget
+fn is unit-tested without the `mistralrs` feature (no Xcode); the gated path
+compiles clean.
 
 ### Known limitations (deliberate, follow-up items)
 

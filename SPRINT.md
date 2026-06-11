@@ -116,7 +116,7 @@ floor to 2 so a fast lane is physically possible).
 Spec: `docs/specs/mistralrs-concurrency-scheduling.md`. Builds on the constant
 per-prefill cost from `mistralrs-chunked-prefill.md` (~465 KB/token × chunk).
 
-- [ ] concurrency-budget - Phase A: load-time budgeted engine `max_num_seqs`.
+- [x] concurrency-budget - Phase A: load-time budgeted engine `max_num_seqs`. **DONE.**
   - `budgeted_max_num_seqs(ConcurrencyBudget)` = `clamp(headroom/per_seq, 1, ceiling)`,
     `headroom = safety_frac*available - weights - kv_pool`, `per_seq = prefill_chunk * ~465KB`.
   - Reuse `main.rs` footprint helpers (weights, kv_cache_bytes, available_ram_bytes).

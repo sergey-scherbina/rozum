@@ -39,9 +39,9 @@ mod inner {
         /// Max sequences the engine batches concurrently. mistralrs defaults to
         /// 32; on a memory-constrained Mac that lets two large prompt prefills
         /// (e.g. Claude Code's parallel requests) run at once and OOM the Metal
-        /// command buffer. 1 serialises them, matching Ollama/LM Studio; the
-        /// default is lifted to 2 on machines with ample unified memory (see
-        /// [`super::default_max_num_seqs`]). Override via `ROZUM_MISTRALRS_MAX_SEQS`.
+        /// command buffer. The load-time caller budgets this from the model
+        /// footprint vs available memory (see [`super::budgeted_max_num_seqs`]
+        /// and `main.rs`); `Default` is a safe serialised floor of `1`.
         pub max_num_seqs: usize,
     }
 
@@ -51,14 +51,11 @@ mod inner {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(32_768);
-            let max_num_seqs = std::env::var("ROZUM_MISTRALRS_MAX_SEQS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|&n| n >= 1)
-                .unwrap_or_else(|| super::default_max_num_seqs(super::total_ram_bytes()));
+            // Serialised floor; the load-time caller (main.rs) sets the budgeted
+            // value via `budgeted_max_num_seqs`.
             Self {
                 n_ctx,
-                max_num_seqs,
+                max_num_seqs: 1,
             }
         }
     }
@@ -389,43 +386,75 @@ pub fn normalize_spec(spec: &str) -> String {
     }
 }
 
-/// Total physical RAM in bytes (macOS `sysctl hw.memsize`). Mirrors the
-/// preflight reader in `main.rs`; duplicated here so the lib's default policy is
-/// self-contained — the `rozum` lib cannot call into the binary crate.
-#[cfg(feature = "mistralrs")]
-fn total_ram_bytes() -> Option<u64> {
-    let out = std::process::Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+// ── Phase A: budgeted engine concurrency ───────────────────────────────────────
+// Spec: docs/specs/mistralrs-concurrency-scheduling.md
+
+/// Prefill activation peak per token (`mistralrs-chunked-prefill.md`: ~465 KB,
+/// one hidden-state-sized tensor per token). With chunked prefill the peak is
+/// bounded by the chunk size, so each concurrent prefill slot costs a *constant*
+/// `chunk * this`, regardless of prompt length — which is what makes a memory
+/// budget over slots meaningful.
+pub const PREFILL_PEAK_BYTES_PER_TOKEN: u64 = 465 * 1024;
+
+/// Compute sweet-spot ceiling on budgeted concurrency. Metal is a single device:
+/// past a handful of concurrent prefills the GPU saturates, so extra slots only
+/// add tail latency, not throughput. Override via `ROZUM_MISTRALRS_SEQS_CEILING`.
+pub const DEFAULT_SEQS_CEILING: usize = 8;
+
+/// Fraction of currently-available RAM we commit, leaving slack for the OS and
+/// for transient spikes the per-seq estimate doesn't capture.
+const BUDGET_SAFETY_FRAC: f64 = 0.8;
+
+/// Transient memory of one concurrent prefill slot: `chunk_tokens` × the
+/// per-token peak.
+pub fn per_seq_prefill_peak(chunk_tokens: usize) -> u64 {
+    chunk_tokens as u64 * PREFILL_PEAK_BYTES_PER_TOKEN
 }
 
-/// Default concurrent-prefill cap (`max_num_seqs`), adaptive to machine memory.
+/// Inputs to the concurrency budget, gathered at load time from the actual model
+/// (see `main.rs` footprint helpers). All memory terms in bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct ConcurrencyBudget {
+    /// RAM free right now, before weights load.
+    pub available_ram: Option<u64>,
+    /// Model weights that become resident on load.
+    pub weights: Option<u64>,
+    /// Paged KV pool, sized from `n_ctx`.
+    pub kv_pool: Option<u64>,
+    /// Transient cost of one concurrent prefill ([`per_seq_prefill_peak`]).
+    pub per_seq_peak: u64,
+    /// Compute sweet-spot cap.
+    pub ceiling: usize,
+}
+
+/// Budgeted engine `max_num_seqs`: how many concurrent prefills fit in the RAM
+/// left after the resident model, clamped to `[1, ceiling]`.
 ///
-/// `1` serialises requests — one prefill at a time — the safe floor on
-/// memory-constrained Apple Silicon, where two concurrent large-prompt prefills
-/// can each peak the Metal working set and OOM. PagedAttention + chunked prefill
-/// bound a *single* prefill's peak, but N concurrent prefills still cost ~N× that
-/// transient peak, so the cap only lifts to `2` when the machine has clear
-/// headroom. The signal is **total** unified memory (`hw.memsize`), a stable
-/// machine-class indicator: instantaneous free memory is high at load time
-/// (weights not yet resident) and over-predicts runtime headroom, and the
-/// model-fit retry loop in `MistralrsBackend::new` already handles the dynamic
-/// "does it actually fit" question by stepping `n_ctx` down. The
-/// `ROZUM_MISTRALRS_MAX_SEQS` env var overrides this entirely.
-pub fn default_max_num_seqs(total_ram: Option<u64>) -> usize {
-    const GB: u64 = 1 << 30;
-    // ≥48 GB covers the 48/64/96/128 GB configs; 16/24/32/36 GB stay serialised.
-    match total_ram {
-        Some(bytes) if bytes >= 48 * GB => 2,
-        _ => 1,
+/// `slots = floor((safety·available − weights − kv_pool) / per_seq_peak)`.
+/// The floor is `1` (one request must always run; whether it fits at all is the
+/// preflight's job). The value only reaches `≥2` when there is headroom for a
+/// second concurrent prefill — i.e. when a reserved fast lane (Phase B+C) is
+/// physically possible. Falls back to the `1` floor when any memory term is
+/// unknown (e.g. weights not cached yet on first run).
+pub fn budgeted_max_num_seqs(b: &ConcurrencyBudget) -> usize {
+    let (Some(available), Some(weights), Some(kv_pool)) = (b.available_ram, b.weights, b.kv_pool)
+    else {
+        return 1;
+    };
+    if b.per_seq_peak == 0 || b.ceiling == 0 {
+        return 1;
     }
+    let headroom = available as f64 * BUDGET_SAFETY_FRAC - weights as f64 - kv_pool as f64;
+    if headroom <= 0.0 {
+        return 1;
+    }
+    let slots = (headroom / b.per_seq_peak as f64).floor() as usize;
+    slots.clamp(1, b.ceiling)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{default_max_num_seqs, normalize_spec};
+    use super::{ConcurrencyBudget, budgeted_max_num_seqs, normalize_spec, per_seq_prefill_peak};
 
     #[test]
     fn normalize_mlx_community_prefix() {
@@ -448,20 +477,45 @@ mod tests {
 
     const GB: u64 = 1 << 30;
 
+    /// A 4-bit ~20 GB model with a ~4 GB KV pool and a 4096-token chunk
+    /// (~1.9 GB/slot) on machines of varying size.
+    fn budget(available_gb: u64) -> ConcurrencyBudget {
+        ConcurrencyBudget {
+            available_ram: Some(available_gb * GB),
+            weights: Some(20 * GB),
+            kv_pool: Some(4 * GB),
+            per_seq_peak: per_seq_prefill_peak(4096), // ~1.9 GB
+            ceiling: super::DEFAULT_SEQS_CEILING,
+        }
+    }
+
+    // All GiB (1<<30); one slot at chunk 4096 ≈ 1.82 GiB.
     #[test]
-    fn max_num_seqs_serialises_on_small_or_unknown_memory() {
-        // 16/24/32/36 GB machines (the 24-36 GB target band) stay serialised.
-        assert_eq!(default_max_num_seqs(Some(16 * GB)), 1);
-        assert_eq!(default_max_num_seqs(Some(32 * GB)), 1);
-        assert_eq!(default_max_num_seqs(Some(36 * GB)), 1);
-        // Unknown total → safe floor.
-        assert_eq!(default_max_num_seqs(None), 1);
+    fn budget_serialises_when_no_headroom_for_a_second_prefill() {
+        // 32 GiB: 0.8·32 − 24 ≈ 1.7 GiB headroom < one slot → floor 1.
+        assert_eq!(budgeted_max_num_seqs(&budget(32)), 1);
+        // 36 GiB: 0.8·36 − 24 ≈ 4.8 GiB ≈ 2 slots.
+        assert_eq!(budgeted_max_num_seqs(&budget(36)), 2);
     }
 
     #[test]
-    fn max_num_seqs_allows_concurrency_on_large_memory() {
-        assert_eq!(default_max_num_seqs(Some(48 * GB)), 2);
-        assert_eq!(default_max_num_seqs(Some(64 * GB)), 2);
-        assert_eq!(default_max_num_seqs(Some(128 * GB)), 2);
+    fn budget_scales_with_memory_up_to_the_ceiling() {
+        // 48 GiB: 0.8·48 − 24 ≈ 14.4 GiB / 1.82 ≈ 7 slots.
+        assert_eq!(budgeted_max_num_seqs(&budget(48)), 7);
+        // 64 GiB: ≈ 27 GiB / 1.82 ≈ 14 → clamped to the ceiling (8).
+        assert_eq!(
+            budgeted_max_num_seqs(&budget(64)),
+            super::DEFAULT_SEQS_CEILING
+        );
+    }
+
+    #[test]
+    fn budget_floors_to_one_on_unknown_or_overcommitted_memory() {
+        let mut b = budget(64);
+        b.weights = None; // first run, weights not cached → can't budget
+        assert_eq!(budgeted_max_num_seqs(&b), 1);
+
+        // Model bigger than available → no headroom → floor 1, not 0.
+        assert_eq!(budgeted_max_num_seqs(&budget(16)), 1);
     }
 }

@@ -1,5 +1,21 @@
 # Changelog
 
+## concurrency-budget — load-time budgeted engine max_num_seqs (Phase A)
+Completed: 2026-06-11
+First phase of `mistralrs-concurrency-scheduling`. Replaces the total-`hw.memsize`
+1/2 ladder with a footprint budget: `budgeted_max_num_seqs(ConcurrencyBudget)`
+(pure, in the lib) returns `clamp((0.8·available − weights − kv_pool) /
+per_seq_peak, 1, ceiling)`, where `per_seq_peak = prefill_chunk × ~465 KB/token`
+(constant under chunked prefill) and `ceiling` defaults to 8 (Metal is one GPU —
+past a handful of concurrent prefills you gain tail latency, not throughput).
+`resolve_max_num_seqs` in `main.rs` gathers the footprint from the existing
+preflight helpers and applies env overrides (`ROZUM_MISTRALRS_MAX_SEQS` forces,
+`ROZUM_MISTRALRS_SEQS_CEILING` caps, `MISTRALRS_PREFILL_CHUNK` sizes the per-slot
+cost), logging a `concurrency_budget` obs event. `MistralrsOptions::default()`
+now carries a plain serialised floor of 1. 6 lib unit tests (no Xcode), feature
+build clean. Phases B+C (admission scheduler + fast lane) and D (backpressure +
+circuit breaker) remain in SPRINT.md.
+
 ## mistralrs-adaptive-concurrency — memory-adaptive default for max_num_seqs
 Completed: 2026-06-11
 The mistralrs backend's concurrent-prefill cap (`max_num_seqs`) default is no

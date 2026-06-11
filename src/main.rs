@@ -1093,6 +1093,50 @@ fn memory_preflight_ok(model_id: &str, n_ctx: u32) -> bool {
     forced
 }
 
+/// Budget the engine's `max_num_seqs` at load time from the actual model
+/// footprint vs the RAM free right now. `ROZUM_MISTRALRS_MAX_SEQS` forces an
+/// exact value; otherwise `budgeted_max_num_seqs` clamps to `[1, ceiling]`
+/// (`ROZUM_MISTRALRS_SEQS_CEILING`, default 8). Per-slot cost tracks the prefill
+/// chunk (`MISTRALRS_PREFILL_CHUNK`). Spec:
+/// docs/specs/mistralrs-concurrency-scheduling.md (Phase A).
+#[cfg(feature = "mistralrs")]
+fn resolve_max_num_seqs(model_id: &str, n_ctx: u32) -> usize {
+    use rozum::mistralrs_backend::{
+        ConcurrencyBudget, DEFAULT_SEQS_CEILING, budgeted_max_num_seqs, per_seq_prefill_peak,
+    };
+    let env_usize = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
+    if let Some(n) = env_usize("ROZUM_MISTRALRS_MAX_SEQS").filter(|&n| n >= 1) {
+        return n;
+    }
+    let ceiling = env_usize("ROZUM_MISTRALRS_SEQS_CEILING")
+        .filter(|&n| n >= 1)
+        .unwrap_or(DEFAULT_SEQS_CEILING);
+    // Prefill chunk drives the per-slot peak; mirror the engine's paged default.
+    let chunk = env_usize("MISTRALRS_PREFILL_CHUNK")
+        .filter(|&n| n >= 1)
+        .unwrap_or(4096);
+    let budget = ConcurrencyBudget {
+        available_ram: available_ram_bytes(),
+        weights: cached_weights_bytes(model_id),
+        kv_pool: kv_cache_bytes(model_id, n_ctx),
+        per_seq_peak: per_seq_prefill_peak(chunk),
+        ceiling,
+    };
+    let n = budgeted_max_num_seqs(&budget);
+    let gb = |b: u64| ((b as f64 / 1e9) * 10.0).round() / 10.0;
+    rozum::obs::log_event(serde_json::json!({
+        "event": "concurrency_budget", "model": model_id, "n_ctx": n_ctx,
+        "max_num_seqs": n, "ceiling": ceiling, "prefill_chunk": chunk,
+        "available_gb": budget.available_ram.map(gb),
+        "weights_gb": budget.weights.map(gb),
+        "kv_pool_gb": budget.kv_pool.map(gb),
+    }));
+    if n > 1 {
+        eprintln!("mistralrs: concurrency budget → max_num_seqs={n} (ceiling {ceiling})");
+    }
+    n
+}
+
 #[cfg(feature = "mistralrs")]
 async fn try_build_mistralrs_backend(
     model_spec: &str,
@@ -1109,7 +1153,7 @@ async fn try_build_mistralrs_backend(
     }
     let opts = MistralrsOptions {
         n_ctx,
-        ..MistralrsOptions::default()
+        max_num_seqs: resolve_max_num_seqs(&id, n_ctx),
     };
     match MistralrsBackend::new(&id, opts).await {
         Ok(b) => {
