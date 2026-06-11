@@ -524,10 +524,38 @@ async fn run_launch(
     spawn_lease_heartbeat(me_pid);
 
     // Failover: while the agent runs, keep the shared daemon alive — if it dies,
-    // one launch respawns it on the same port (the agent's own retry then
-    // reconnects). Spec: shared-gateway-failover.
+    // one launch respawns it on the same port. Spec: shared-gateway-failover.
     spawn_failover_watchdog(effective_model.clone(), n_ctx, gw_port);
-    exec_agent(program, &effective_model, gw_port).await
+
+    // Launch-local reverse proxy: the agent talks to a per-launch loopback port
+    // that forwards to the shared daemon. This is the path later phases use for
+    // transparent replay / poison handling / model-swap holds; here it is a
+    // transparent pass-through. Spec: shared-gateway-proxy.
+    let agent_port = match start_launch_proxy(gw_port).await {
+        Some(p) => p,
+        None => {
+            // Couldn't bind a local proxy port — fall back to pointing the agent
+            // straight at the daemon (loses replay/poison, but still works).
+            eprintln!("rozum launch: proxy unavailable; pointing agent directly at the daemon.");
+            gw_port
+        }
+    };
+    exec_agent(program, &effective_model, agent_port).await
+}
+
+/// Bind an ephemeral loopback port, start the launch-local reverse proxy on it
+/// (forwarding to the shared daemon on `daemon_port`), and return the proxy's
+/// port. The proxy task dies with this process when the agent exits.
+async fn start_launch_proxy(daemon_port: u16) -> Option<u16> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.ok()?;
+    let port = listener.local_addr().ok()?.port();
+    tokio::spawn(async move {
+        if let Err(e) = rozum::proxy::serve(listener, daemon_port).await {
+            eprintln!("rozum launch: proxy exited: {e}");
+        }
+    });
+    eprintln!("rozum launch: proxy on :{port} → shared gateway :{daemon_port}");
+    Some(port)
 }
 
 /// Resolve which model `rozum launch` should use when `--model` may be omitted:

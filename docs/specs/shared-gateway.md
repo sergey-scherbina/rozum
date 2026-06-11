@@ -151,9 +151,10 @@ The agent talks to a **launch-local model-free proxy** (mirrors `mcp-proxy` for
 rooms); the proxy forwards to the shared daemon and owns the resilience policy.
 This is what lets clients "not notice" a daemon crash/restart/swap.
 
-- [ ] `rozum launch` runs a tiny reverse proxy on a per-launch local port and
+- [x] `rozum launch` runs a tiny reverse proxy on a per-launch local port and
       points the agent's `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` at it; the proxy
       forwards to the shared daemon's stable port. (No model in the proxy.)
+      (`src/proxy.rs`; `start_launch_proxy` in `main.rs`.)
 - [ ] **Replay before first token:** if the daemon connection fails *before any
       response byte has been forwarded to the agent*, the proxy waits for the
       daemon to come back (re-election respawns it) and re-sends the buffered
@@ -502,3 +503,30 @@ dependency-free `which` helper locates `ollama`.
 
 Verification: `cargo fmt --check` clean; 67 lib tests; default + `--features
 mistralrs` build/check clean.
+
+### `shared-gateway-proxy` (done)
+
+`src/proxy.rs` — a launch-local **model-free** reverse HTTP proxy (the gateway
+analog of `meeting::proxy`). `proxy::serve(listener, daemon_port)` runs an axum
+`fallback` that forwards every request to `http://127.0.0.1:{daemon_port}{path?query}`:
+it buffers the request body (the seed for future replay), strips hop-by-hop +
+framing headers both ways, sends via a no-timeout reqwest client, and streams the
+response back verbatim via `Body::from_stream(resp.bytes_stream())` — so SSE token
+streams pass through unchanged. An unreachable daemon yields a clean `502`
+`upstream_error` (the surface that `shared-gateway-replay-retry` will replace with
+replay-before-first-token). `daemon_port` is held in an `AtomicU16` so a later
+phase can re-point the proxy at a respawned daemon without rebuilding the router.
+
+`main.rs` `start_launch_proxy` binds an ephemeral `127.0.0.1` port, spawns
+`proxy::serve`, and `exec_agent` now points the agent at the **proxy** port (the
+failover watchdog and lease heartbeat still target the daemon's stable port). If
+the proxy can't bind, launch falls back to pointing the agent straight at the
+daemon. The proxy task dies with the launch, like the old in-process gateway.
+
+Verification: 5 new tests (header filtering + two real end-to-end tokio tests:
+method/path/query/body/header pass-through and streamed body; dead-daemon 502);
+70 lib tests total; fmt + `--features mistralrs` clean. No new deps.
+
+Deferred to `-replay-retry`/`-poison`: replay-before-first-token, smart retry,
+two-tier admission, and poison fingerprinting all build on this buffered-body
+forward path.

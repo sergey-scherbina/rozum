@@ -1,5 +1,19 @@
 # Changelog
 
+## shared-gateway-proxy — launch-local reverse proxy in the request path
+Completed: 2026-06-11
+New `src/proxy.rs`: a model-free launch-local reverse HTTP proxy (gateway analog
+of the mcp-proxy). `proxy::serve` forwards every request to the shared daemon's
+stable port and streams the response back verbatim (SSE token streams included),
+buffering the request body (the seed for future replay), stripping hop-by-hop and
+framing headers both ways, with a no-timeout client. An unreachable daemon yields
+a clean 502; `daemon_port` lives in an AtomicU16 so a later phase can re-point it
+at a respawned daemon. `rozum launch` (`start_launch_proxy`) binds an ephemeral
+loopback port, spawns the proxy, and points the agent at it (failover watchdog +
+lease heartbeat still target the daemon); falls back to the daemon directly if the
+proxy can't bind. Foundation for replay / poison / two-tier backpressure /
+transparent swap. 5 new tests incl. two real end-to-end tokio tests. No new deps.
+
 ## models-rm — delete a cached model from disk
 Completed: 2026-06-11
 `rozum models rm <spec> [-y]` frees disk by deleting a cached model. It

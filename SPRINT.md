@@ -174,9 +174,9 @@ Spec: `docs/specs/shared-gateway.md`.
   confirm); non-TTY → error. Mismatch policy: takeover-if-idle else reuse-with-warning. **DONE.**
 - [x] models-rm - `rozum models rm <spec>`: confirm, refuse if it is the active
   model, delete HF/LMStudio dirs directly (Ollama via `ollama rm`), report freed size. **DONE.**
-- [ ] shared-gateway-proxy - Launch-local model-free reverse proxy in the request
+- [x] shared-gateway-proxy - Launch-local model-free reverse proxy in the request
   path (agent → proxy → daemon), mirroring `mcp-proxy`. Foundation for replay /
-  poison / transparent swap. Re-points the agent at the proxy's local port.
+  poison / transparent swap. Re-points the agent at the proxy's local port. **DONE.**
 - [ ] shared-gateway-replay-retry - Buffer + replay a request when the daemon dies
   **before the first streamed token**; mid-stream failures surface. Smart retry:
   backoff + jitter, attempt cap, wait-for-health. **Two-tier admission**: daemon
