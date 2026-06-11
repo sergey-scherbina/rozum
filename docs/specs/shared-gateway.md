@@ -155,13 +155,15 @@ This is what lets clients "not notice" a daemon crash/restart/swap.
       points the agent's `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` at it; the proxy
       forwards to the shared daemon's stable port. (No model in the proxy.)
       (`src/proxy.rs`; `start_launch_proxy` in `main.rs`.)
-- [ ] **Replay before first token:** if the daemon connection fails *before any
+- [x] **Replay before first token:** if the daemon connection fails *before any
       response byte has been forwarded to the agent*, the proxy waits for the
       daemon to come back (re-election respawns it) and re-sends the buffered
       request — transparently. The agent sees a slower response, not an error.
-- [ ] **Mid-stream is not replayable:** once tokens have been forwarded, a daemon
+      (`forward` retry loop + `wait_for_health` in `src/proxy.rs`.)
+- [x] **Mid-stream is not replayable:** once tokens have been forwarded, a daemon
       death surfaces an error to the agent (we can't un-send tokens); the agent
-      decides whether to retry the whole turn. Documented, not hidden.
+      decides whether to retry the whole turn. Documented, not hidden. (The replay
+      boundary is returning the `Response`: status+headers commit the stream.)
 - [ ] **Poison-prompt protection (soft, graduated):** the proxy fingerprints each
       request and counts crash-attributed attempts. The escalation is gentle, not
       a hair-trigger ban:
@@ -181,10 +183,12 @@ This is what lets clients "not notice" a daemon crash/restart/swap.
       everyone. A restarted daemon loads `poison.json` and fast-refuses confirmed
       entries; they are advisory and expire (`ROZUM_POISON_TTL_SECS`, default
       3600, shortened from the earlier 24 h) and decay on the next clean success.
-- [ ] **Smart retry policy:** retries use exponential backoff + jitter, a per-
+- [x] **Smart retry policy:** retries use exponential backoff + jitter, a per-
       request attempt cap, wait-for-health (don't fire at a warming daemon), and
-      honor the daemon's backpressure (below) — so a crowd of reconnecting proxies
-      doesn't stampede the fresh daemon.
+      honor the daemon's backpressure (`429` + `Retry-After` → hold and retry) —
+      so a crowd of reconnecting proxies doesn't stampede the fresh daemon.
+      (`RetryPolicy` in `src/proxy.rs`: `ROZUM_PROXY_MAX_ATTEMPTS`/`_BACKOFF_MS`/
+      `_HEALTH_WAIT_SECS`.)
 
 ### Two-tier admission: daemon backpressure → proxy queue
 

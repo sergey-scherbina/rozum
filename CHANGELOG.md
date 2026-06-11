@@ -1,5 +1,22 @@
 # Changelog
 
+## shared-gateway-replay-retry (part 1) — replay before first token + smart retry
+Completed: 2026-06-11
+The launch-local proxy now makes a daemon crash transparent to the agent. The
+`forward` path buffers the request body once and re-sends it on a replay loop:
+a connection failure *before any response byte reaches the agent* is safe to
+replay, so the proxy waits for re-election to bring the daemon back on the same
+stable port (`wait_for_health`) and retries — the agent sees a slower response,
+not an error. Once a `Response` is returned (status+headers committed), a
+mid-stream death surfaces the error instead (we can't un-send tokens). Retries
+use capped exponential backoff + ±50% jitter (no `rand` dep — wall-clock nanos),
+a per-request attempt cap, wait-for-health between tries, and honor the daemon's
+`429`/`Retry-After` by holding and retrying rather than bouncing it back. Tunable
+via `ROZUM_PROXY_MAX_ATTEMPTS` (6), `ROZUM_PROXY_BACKOFF_MS` (150),
+`ROZUM_PROXY_HEALTH_WAIT_SECS` (60). 3 new tests (backoff math + an end-to-end
+replay-after-daemon-returns test). No new deps. (Two-tier admission follows in
+part 2.)
+
 ## shared-gateway-proxy — launch-local reverse proxy in the request path
 Completed: 2026-06-11
 New `src/proxy.rs`: a model-free launch-local reverse HTTP proxy (gateway analog
