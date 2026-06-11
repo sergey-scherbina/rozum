@@ -274,16 +274,30 @@ mod inner {
         }
     }
 
-    fn message_text(msg: &Message) -> String {
-        msg.content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("")
+    /// Flatten a message's blocks into the string the chat template renders.
+    /// Assistant `ToolUse` blocks are rendered back as Qwen3 `<tool_call>{…}</tool_call>`
+    /// markup (the inverse of `parse_tool_calls`) so a prior assistant tool call
+    /// survives in multi-turn history — without it, a tool-result follow-up has no
+    /// preceding call and the model loses the trained tool-loop format. `ToolResult`
+    /// blocks pass their content through (rendered under the `tool` role).
+    pub(crate) fn message_text(msg: &Message) -> String {
+        let mut out = String::new();
+        for b in &msg.content {
+            match b {
+                ContentBlock::Text { text } => out.push_str(text),
+                ContentBlock::ToolResult { content, .. } => out.push_str(content),
+                ContentBlock::ToolUse { name, input, .. } => {
+                    let call = serde_json::json!({ "name": name, "arguments": input });
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str("<tool_call>\n");
+                    out.push_str(&call.to_string());
+                    out.push_str("\n</tool_call>");
+                }
+            }
+        }
+        out
     }
 
     /// Worker thread entry point. Loads the model (reporting load result over
@@ -778,6 +792,31 @@ mod tests {
         let calls = parse_tool_calls(two);
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[1].0, "b");
+    }
+
+    // An assistant ToolUse block must survive `message_text` as `<tool_call>`
+    // markup so multi-turn tool loops keep the prior call in history. This is
+    // the inverse of `parse_tool_calls` — render then re-parse round-trips.
+    #[test]
+    fn tool_use_round_trips_into_history() {
+        use super::inner::{message_text, parse_tool_calls};
+        use crate::backend::{ContentBlock, Message, Role};
+
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "get_weather".into(),
+                input: serde_json::json!({ "city": "Paris" }),
+            }],
+        };
+        let rendered = message_text(&msg);
+        assert!(rendered.contains("<tool_call>"), "rendered: {rendered}");
+
+        let calls = parse_tool_calls(&rendered);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "get_weather");
+        assert!(calls[0].1.contains("Paris"), "args: {}", calls[0].1);
     }
 
     #[test]

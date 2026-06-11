@@ -90,9 +90,12 @@ features the mistralrs backend shipped that the native backend does NOT yet have
   `req.tools`; `render_prompt` builds OpenAI-style schemas; `stream_generation`
   suppresses `<tool_call>` from text and parses it into `ToolUse*` events +
   `stop_reason=ToolUse`. E2E `mlx_tool_use_weather` (get_weather call) + unit
-  `parse_tool_calls_extracts`. FOLLOW-UP: feed prior assistant tool-calls / `tool`
-  results back as structured history for multi-turn loops (today `tool` results are
-  folded in as text).
+  `parse_tool_calls_extracts`.
+
+- [x] mlx-native-tool-history - DONE (rozum-only, pin unchanged). `message_text`
+  renders assistant `ToolUse` blocks back as `<tool_call>` markup (inverse of
+  `parse_tool_calls`) instead of dropping them, so multi-turn tool loops carry the
+  prior call in history. Unit `tool_use_round_trips_into_history`.
 
 - [x] mlx-native-multi-eos - DONE (rozum `b022dc4`). `read_config` collects the full
   `eos_token_id` set; `stream_generation` stops on any (Qwen3: `<|im_end|>` 151645 +
