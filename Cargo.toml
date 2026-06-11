@@ -30,13 +30,16 @@ tokenizers = { version = "0.22.0", features = ["onig"], optional = true }
 llama-cpp-2 = { version = ">=0.1.100", features = ["metal"], optional = true }
 mistralrs = { version = "0.8.1", features = ["metal"], optional = true }
 
-# Native MLX runtime, vendored fork of oxideai/mlx-rs (the `mlx-lm` Rust crates).
-# Path deps for local iteration on the fork (mirrors the mistralrs setup). The
-# `.vendor` tree is gitignored; merging to master must swap these for a git-rev
-# pin on the pushed fork, exactly as the mistralrs [patch.crates-io] below does.
-mlx-rs = { path = "../../.vendor/mlx-lm/mlx-rs", optional = true }
-mlx-lm = { path = "../../.vendor/mlx-lm/mlx-lm", optional = true }
-mlx-lm-utils = { path = "../../.vendor/mlx-lm/mlx-lm-utils", optional = true }
+# Native MLX runtime: the vendored fork of oxideai/mlx-rs (the `mlx-lm` Rust
+# crates). Pinned to a fork rev so a clean clone builds reproducibly without the
+# local `.vendor` worktree (gitignored), exactly like the mistralrs
+# [patch.crates-io] below. To iterate locally, temporarily swap these for
+# `{ path = "../../.vendor/mlx-lm/<crate>" }` (from a worktree) or
+# `{ path = ".vendor/mlx-lm/<crate>" }` (from the repo root), then push the fork
+# and bump the rev. mlx-sys builds MLX C++ from source (cmake + Xcode).
+mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "f27ddc4239019d4bc7fdfa441a42ed8ac7d7c37e", optional = true }
+mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "f27ddc4239019d4bc7fdfa441a42ed8ac7d7c37e", optional = true }
+mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "f27ddc4239019d4bc7fdfa441a42ed8ac7d7c37e", optional = true }
 
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
