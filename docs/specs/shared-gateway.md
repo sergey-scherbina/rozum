@@ -39,6 +39,12 @@ rozum gateway --model X [--port P] [--n-ctx N] [--no-idle-timeout]
 
 rozum gateway status        # show the active shared gateway: model, pid, port, clients, uptime
 rozum gateway stop          # ask the active shared gateway to exit (refused if clients attached, unless --force)
+rozum gateway switch --model Y [--backend B] [--n-ctx N]
+                            # transparently swap the resident model (and/or backend) in place:
+                            # drain → unload → load Y → resume. Clients' requests are held by
+                            # their proxy across the gap, not failed.
+rozum gateway reload        # graceful restart of the daemon (e.g. after upgrading the rozum binary)
+rozum gateway unload        # free the model but keep the daemon (lazy-reload on next request) — frees RAM
 
 rozum models rm <spec>      # delete a cached model (confirm; refuse if it is the active model)
 rozum models list [--remote]   # (existing) data source for the picker
@@ -47,10 +53,14 @@ rozum models list [--remote]   # (existing) data source for the picker
 ### Rendezvous state (under `$XDG_STATE_HOME/rozum/gateway/`)
 
 ```
-active.json        # { model, port, pid, n_ctx, started_at } — the registry
+active.json        # { model, backend, port, pid, n_ctx, started_at, generation } — the registry
 spawn.lock         # advisory flock, held only during a spawn attempt (anti-stampede)
 leases/<pid>       # one file per live launch client; mtime = heartbeat
+poison.json        # advisory set of request fingerprints that crashed the daemon (TTL'd)
 ```
+
+`generation` increments on every (re)spawn / switch, so a proxy can tell "the
+daemon I was talking to was replaced" from "same daemon, transient blip".
 
 Stable port: the shared gateway uses a fixed port (default 8089, `--port`/`ROZUM_GATEWAY_PORT` to override) recorded in `active.json`, so a respawn after a crash reuses the **same** port and already-connected agents reconnect transparently.
 
@@ -129,6 +139,50 @@ Stable port: the shared gateway uses a fixed port (default 8089, `--port`/`ROZUM
       shared — not safe to `rm` directly).
 - [ ] Prints the reclaimed size on success.
 
+### Client transparency on daemon loss (replay, poison, retry)
+
+The agent talks to a **launch-local model-free proxy** (mirrors `mcp-proxy` for
+rooms); the proxy forwards to the shared daemon and owns the resilience policy.
+This is what lets clients "not notice" a daemon crash/restart/swap.
+
+- [ ] `rozum launch` runs a tiny reverse proxy on a per-launch local port and
+      points the agent's `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` at it; the proxy
+      forwards to the shared daemon's stable port. (No model in the proxy.)
+- [ ] **Replay before first token:** if the daemon connection fails *before any
+      response byte has been forwarded to the agent*, the proxy waits for the
+      daemon to come back (re-election respawns it) and re-sends the buffered
+      request — transparently. The agent sees a slower response, not an error.
+- [ ] **Mid-stream is not replayable:** once tokens have been forwarded, a daemon
+      death surfaces an error to the agent (we can't un-send tokens); the agent
+      decides whether to retry the whole turn. Documented, not hidden.
+- [ ] **Poison-prompt protection:** the proxy fingerprints each request; if the
+      daemon dies while this request is the likely cause (in-flight, attributed)
+      it increments that fingerprint's attempt count. After `ROZUM_POISON_MAX`
+      (default 2) crash-attributed attempts the proxy **refuses** the request
+      (HTTP 422, clear message) instead of retrying — so one bad prompt can't
+      crash-loop the daemon for everyone.
+- [ ] The poison fingerprint is written to a shared, TTL'd `poison.json`; a
+      (re)started daemon loads it and **fast-refuses** known-poison requests
+      before processing, protecting all clients. Entries are advisory and expire
+      (`ROZUM_POISON_TTL_SECS`, default 86400) to bound false positives.
+- [ ] **Smart retry policy:** retries use exponential backoff + jitter, a per-
+      request attempt cap, wait-for-health (don't fire at a warming daemon), and
+      honor `429` + `Retry-After` from the admission layer's backpressure — so a
+      crowd of reconnecting proxies doesn't stampede the fresh daemon.
+
+### Transparent model / backend switch
+
+- [ ] `rozum gateway switch --model Y [--backend B]` drains the daemon (stop
+      admitting new requests — queue/hold via the admission limit), finishes
+      in-flight requests, unloads the current model, loads `Y` (and/or backend
+      `B`), bumps `generation`, and resumes. **In-place and sequential** — never
+      two models resident (memory). Clients' proxies hold their requests across
+      the gap and replay if needed, so the swap is transparent (just slower).
+- [ ] `rozum gateway reload` does the same drain + respawn from the current
+      `rozum` binary (transparent daemon/binary upgrade).
+- [ ] `rozum gateway unload` frees the model but keeps the daemon; the next
+      request lazy-reloads it. Frees RAM without losing the rendezvous.
+
 ## Out of scope
 
 - **Multiple resident models** ("multi-slot if memory allows"). One resident model
@@ -172,12 +226,11 @@ is the failover signal — no liveness protocol to maintain.
 
 ### Why a stable port
 
-An agent is launched with `ANTHROPIC_BASE_URL=http://127.0.0.1:P`. If a crashed
-gateway respawned on a *different* port, that URL would dangle. A fixed port per
-shared gateway makes failover transparent (the agent retries the same URL; brief
-`connection refused` window, which Claude Code rides out — same resilience the
-`mcp-proxy` reconnect already relies on). Single resident model ⇒ a single port
-suffices; multi-slot (BACKLOG) would key the port by model.
+The launch-local proxy reconnects to the daemon's **stable** port after a crash;
+a random respawn port would dangle. Single resident model ⇒ one port suffices;
+multi-slot (BACKLOG) would key the port by model. (The agent itself points at the
+proxy's local port, which is stable for the launch's whole lifetime regardless of
+daemon churn.)
 
 ### Leases vs idle-by-traffic
 
@@ -201,11 +254,60 @@ the active model (reads `active.json`), confirms, deletes the self-contained dir
 (HF/LMStudio) or delegates to `ollama rm`, and reports freed bytes via
 `models::format_size`.
 
+### Launch-local proxy (the transparency enabler)
+
+Each `rozum launch` runs a tiny **model-free** reverse proxy (the gateway analog
+of `mcp-proxy` for rooms) and points the agent at it. The proxy forwards to the
+shared daemon and is where replay, poison handling, retry/backoff, and "hold the
+request across a swap" live — none of which can be done if the agent talks to the
+daemon directly (we'd be at the mercy of the agent's own retry behaviour). Cost:
+one extra loopback hop and a small per-launch process; no extra model memory.
+
+### Replay & poison protection
+
+The proxy buffers each request body and tracks how many bytes it has forwarded to
+the agent. On a daemon-side failure:
+- **0 bytes forwarded** → safe to replay: wait for re-election to bring the daemon
+  back (same port, possibly higher `generation`), re-send, transparent.
+- **>0 bytes forwarded** → not replayable (tokens already streamed); surface the
+  error.
+
+Poison: a request fingerprint (hash of the normalized messages + sampling) gets a
+crash-attributed attempt counter. Attribution is conservative — only blame a
+request that was in-flight when the daemon died and (ideally) was the sole/large
+in-flight request, since with backpressure concurrency is low. After
+`ROZUM_POISON_MAX` attempts the proxy refuses (422) and records the fingerprint
+in `poison.json` (shared, TTL'd). A restarted daemon loads `poison.json` and
+fast-refuses known-poison **before** running the model, so the protection is
+machine-wide and survives the very crash it's guarding against. TTL + advisory
+status bound false positives (a coincidental crash shouldn't permanently ban a
+good prompt).
+
+### Retry policy
+
+Reconnect/replay uses capped exponential backoff + jitter (the `mcp-proxy`
+backoff idiom), waits for daemon health before firing (don't hit a warming
+model), caps attempts per request, and obeys `429`/`Retry-After` from the
+admission layer — so a thundering herd of proxies after a crash spreads out
+instead of re-crashing or overloading the fresh daemon.
+
+### Transparent switch / reload / unload
+
+A model or backend change is **in-place and sequential** because two models can't
+be resident at once (memory): drain (admission limit → 0, finish in-flight),
+`unload`, `load Y`/rebuild backend, bump `generation`, resume. The proxies hold
+their pending requests across the gap (bounded by a timeout) and replay, so the
+swap is transparent — clients just see a slower turn. `reload` is the same drain
++ respawn-from-current-binary (transparent binary upgrade); `unload` drops the
+model and lazy-reloads on the next request. Blue/green (spawn the new model
+alongside, flip, kill old) is rejected — it needs both models resident.
+
 ### Composition
 
 The shared gateway keeps wrapping its backend in `concurrency::admit_wrap`, so
 N launch clients on one gateway are admission-controlled exactly as designed —
-this feature is what finally makes that multi-client path real.
+and the admission **limit → 0** drain is precisely how `switch`/`reload` quiesce
+the daemon. This feature is what finally makes that multi-client path real.
 
 ## Decisions
 
@@ -227,6 +329,20 @@ this feature is what finally makes that multi-client path real.
   always spawn second (OOM).
 - **`models rm` delegates Ollama to `ollama rm`** — Ollama blobs are shared and
   content-addressed; direct `rm` could corrupt other models.
+- **Launch-local proxy in the request path** — chosen because transparent replay,
+  poison handling, retry policy, and "hold the request across a model swap" are
+  only possible if rozum controls the path; relying on the agent's own retry
+  can't do replay-control or poison breaking, and would fail a turn during a
+  swap. Mirrors the existing `mcp-proxy`. Rejected: agent → daemon directly
+  (loses all of the above; resilience reduced to the agent's behaviour).
+- **Replay only before the first streamed token** — once tokens are sent we can't
+  un-send them, so mid-stream failures are surfaced, not silently retried.
+- **Poison set is advisory + TTL'd, attribution conservative** — a permanent ban
+  on any prompt seen during a crash would mis-fire on coincidental/OOM-from-a-
+  neighbour crashes. Threshold + TTL + "was it the likely cause" keeps it safe.
+- **In-place sequential swap, not blue/green** — two models don't fit in memory,
+  so a swap accepts a short drain+reload gap (proxies hold requests) rather than
+  doubling RAM.
 
 ## Risks / sharp edges
 
@@ -239,6 +355,16 @@ this feature is what finally makes that multi-client path real.
 - **Picker only on TTY**: scripted launches must pass `--model`; clearly errored.
 - **Two gateways for two models** is intentionally *not* allowed (memory); users
   who really want it use `--dedicated` and own the consequences.
+- **Poison false positives**: a legitimate prompt present during an unrelated
+  crash could be refused until its TTL expires. Conservative attribution + a
+  clear 422 message ("looks like it crashed the model; refused — retry later")
+  keep it tolerable; tune `ROZUM_POISON_MAX`/`_TTL_SECS`.
+- **Swap gap latency**: `switch`/`reload` parks requests for the drain+reload
+  duration; a proxy hold-timeout bounds it (then it surfaces an error rather than
+  hanging the agent forever).
+- **Crash storm**: many proxies replaying after a crash — mitigated by backoff +
+  jitter + wait-for-health + 429/Retry-After, but a pathological poison prompt
+  hitting many clients at once relies on the shared `poison.json` to converge.
 
 ## Results
 

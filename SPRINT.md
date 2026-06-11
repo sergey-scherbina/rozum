@@ -173,6 +173,18 @@ Spec: `docs/specs/shared-gateway.md`.
   confirm); non-TTY → error. Mismatch policy: takeover-if-idle else reuse-with-warning.
 - [ ] models-rm - `rozum models rm <spec>`: confirm, refuse if it is the active
   model, delete HF/LMStudio dirs directly (Ollama via `ollama rm`), report freed size.
+- [ ] shared-gateway-proxy - Launch-local model-free reverse proxy in the request
+  path (agent → proxy → daemon), mirroring `mcp-proxy`. Foundation for replay /
+  poison / transparent swap. Re-points the agent at the proxy's local port.
+- [ ] shared-gateway-replay-retry - Buffer + replay a request when the daemon dies
+  **before the first streamed token**; mid-stream failures surface. Smart retry:
+  backoff + jitter, attempt cap, wait-for-health, honor 429/`Retry-After`.
+- [ ] shared-gateway-poison - Per-request fingerprint + conservative crash
+  attribution; after `ROZUM_POISON_MAX` (default 2) → refuse 422; persist to a
+  TTL'd `poison.json` that a restarted daemon loads to fast-refuse machine-wide.
+- [ ] gateway-switch - `rozum gateway switch --model Y [--backend B]` / `reload` /
+  `unload`: in-place drain (admission limit → 0) → unload → load → resume; proxies
+  hold requests across the gap. Transparent model/backend swap + binary upgrade.
 
 - [ ] runtime-config - Load backend policy and backend list from `rozum.toml`.
   - Support `single`, `fallback`, and `fanout` policies.
