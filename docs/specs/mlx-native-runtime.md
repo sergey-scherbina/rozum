@@ -460,21 +460,40 @@ mistralrs `f7efae2` (the native exact scan is faithful across chunks, unlike
 mistralrs's chunked GatedDeltaNet which reorders FP reductions — so we can assert
 byte-identity, they could not).
 
-### Dead end: mx.compile (measured net-negative in mlx-rs)
+### mx.compile: `compile_with_state` is net-negative; plain `compile` is the untested lever
 
-`mx.compile` was the presumed decode lever (decode is op-launch-bound). **A go/no-go
+`mx.compile` is the presumed decode lever (decode is op-launch-bound). **A go/no-go
 probe (`mlx_compile_probe`, dense Qwen3-4B, fixed shapes, fresh cache so the graph
 is reused) measured it SLOWER, not faster:** T=1 uncompiled 8.79 ms vs compiled
-17.34 ms (**0.51×**); T=16 35.6 vs 41.8 ms (0.85×). The mlx-rs `compile_with_state`
-returned closure does `f.compile(...)` + `mlx_detail_compile` lookup *and re-marshals
-the whole `Updatable` state every call* — `updatable_states` flattens **and sorts all
-~400 model params per call** — so the per-call binding overhead exceeds any kernel-
-fusion benefit for a model-sized forward. Conclusion: the decode gap (12 vs ~22 t/s)
-is **mlx-rs per-op / per-call FFI overhead, not missing fusion**, and `mx.compile`
-cannot close it in this binding. The fixed-size-KV-cache redesign (which only mattered
-as a compile prerequisite) is therefore NOT pursued. Reviving compile would require
-fork-level work to cache the param list / avoid re-sorting and to hold one `Compiled`
-across calls — uncertain payoff; deferred.
+17.34 ms (**0.51×**); T=16 35.6 vs 41.8 ms (0.85×). **But that probe used the wrong
+API.** mlx-rs has two compile entry points and they marshal inputs very differently:
+
+- `compile_with_state` (what the probe used): the returned closure re-marshals the
+  whole `Updatable` state **every call** — `call_mut_with_state_inner` builds a fresh
+  `VectorArray` of `args + updatable_states()`, i.e. flattens (and sorts) **all ~400
+  model params per call** (`compile_with_state.rs:396`). The per-call binding overhead
+  exceeds any fusion benefit for a model-sized forward → the 0.51× above.
+- plain `compile` (`compile.rs:344`): `call_mut_inner` marshals **only `args`** —
+  `VectorArray::try_from_iter(args.iter())`. Weight arrays referenced *inside* the
+  compiled closure are captured into the traced graph once (as MLX captured inputs),
+  exactly like Python `mx.compile`. On steady-state calls only the changing inputs
+  (token id + cache) cross the FFI boundary. This path was **never probed.**
+
+So the earlier "mx.compile is a dead end" was true only for `compile_with_state`. The
+real decode lever is a **capture-based plain-`compile`d decode step** closing over the
+weights and taking only `(token, cache)` as args — the same shape that lets Python's
+`mlx_lm` sustain ~22 t/s vs our ~12. **Hard prerequisite:** a **fixed-shape KV cache**
+(preallocate to max ctx + in-place slice-update with an offset), because today's
+`ConcatKeyValueCache` grows by concat each step, changing shapes and forcing a recompile
+(or shapeless overhead) every token. So the fixed-size-cache redesign is **not moot** —
+it is the gate for the one decode win that has a chance of ~2×.
+
+**Risk / why it is not yet implemented:** correctness-critical (must stay byte-exact),
+and it intersects the GatedDeltaNet custom-kernel buffer-donation hazard — compile +
+in-place cache + a kernel that donates buffers is precisely where the earlier token-2
+divergence lived. Needs a clean machine for trustworthy A/B (current bench numbers are
+degraded ~30% by session-long memory pressure: decode 9.5–14 vs the clean ~22 baseline).
+Recommended as a dedicated `mlx-native-perf-compile` task, not a tail-end change.
 
 ### Done: large-context KV preflight (`mlx-native-mem-bound`)
 
@@ -497,8 +516,13 @@ the fixed-size-cache redesign is otherwise moot — `mx.compile` is a dead end).
 projection + fused causal SDPA, all byte-identical. The KV preflight bounds the
 large-context memory. Only the decode lever remains, and it's hard.)
 
-1. **Decode (~12 t/s) is FFI-overhead-bound** — no cheap lever found (eval-removal:
-   free/no-op; mx.compile: net-negative). A real decode win would need manual op
-   fusion into custom Metal kernels (like the gated-delta kernel) to cut the ~450
-   dispatches/token, or reducing mlx-rs per-op marshalling overhead — both large.
-   Decode is usable; prefer the memory/UX items above first.
+1. **Decode (~12 t/s) is per-call FFI-overhead-bound** — eval-removal is free/no-op;
+   `compile_with_state` is net-negative (re-marshals ~400 params/call). The one
+   untested lever with ~2× potential is a **capture-based plain-`compile`d decode
+   step** (weights captured into the trace, only token+cache marshaled per call) —
+   matching how Python `mlx_lm` hits ~22 t/s. Gated on a **fixed-shape KV cache**
+   (preallocate + in-place slice-update; today's `ConcatKeyValueCache` grows by
+   concat and defeats compile). See the mx.compile section. Tracked as
+   `mlx-native-perf-compile`; needs a clean machine to A/B. The fallback lever
+   (manual Metal-kernel op-fusion to cut ~450 dispatches/token) is larger and lower-
+   priority. Decode is usable today; this is a speedup, not a correctness gap.
