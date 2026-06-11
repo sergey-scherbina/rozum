@@ -24,6 +24,42 @@ default CLI startup, meeting rooms, round-robin moderation, or manual moderation
 - [ ] candle-real-streaming - Stream tokens from Candle via `TokenOutputStream` instead of one-shot.
   - Low priority: Candle-Metal is slower than llama-cpp-2 on the target models.
 
+## Native MLX runtime — performance (ports from the mistralrs work)
+
+The native MLX runtime (`docs/specs/mlx-native-runtime.md`) shipped correctness +
+the GatedDeltaNet prefill kernel. These carry over optimizations proven in the
+mistralrs backend that the native runtime does NOT yet have. (Concurrency,
+admission, backpressure and the OOM circuit breaker already apply generically
+through `concurrency::admit_wrap`, so they are not relisted.)
+
+- [x] mlx-native-chunked-prefill - DONE. `Model::prefill` chunks the prompt
+  (`ROZUM_MLX_PREFILL_CHUNK`, default 2048), bounding the full-attention
+  `[chunk, ctx]` causal-mask + SDPA peak instead of `[T, T]`; caches advance and
+  are eval'd between chunks to free activations. Byte-identical to single pass
+  (test `mlx_qwen35_chunked_prefill_matches_single_pass`, Δ=0). See SPRINT.
+
+- [ ] mlx-native-mem-bound - large-context memory bounding (analog of the
+  mistralrs RAM preflight + context budgeting + PagedAttention). Native uses
+  `ConcatKeyValueCache`, which grows unbounded with context; add a KV-pool bound
+  and/or a preflight against unified memory, and surface a clear "lower --n-ctx"
+  message instead of an OOM. `context_window()` already reports the model's
+  `max_position_embeddings`; cap the effective pool.
+
+- [x] mlx-native-decode-bug - RESOLVED. The custom-kernel "needs a blocking eval
+  per call" rule is a buffer-donation hazard: the kernel's lazy `state_out` gets
+  donated/reused by the ~60 later layers before it materializes, corrupting the
+  recurrent state (decode diverges at token 2). The per-call eval forces it
+  concrete and fixes it. A/B benched: the eval is FREE (decode is op-launch-bound,
+  not sync-bound — 12 vs 12 t/s with/without). NOT a path to faster decode; the
+  lever is op fusion (`mlx-native-compile`). See SPRINT `mlx-native-perf`.
+
+- [ ] mlx-native-compile - `mx.compile` the decode forward + fuse small ops. THE
+  decode lever: the ~2x gap vs Python is op-launch overhead (~450 tiny dispatches
+  per token), confirmed bandwidth-headroom remains. NOT blocked by the kernel bug
+  (resolved): keep the custom gated-delta kernel out of the compiled region (use
+  the O(T) ops path at T=1, or compile only the attn/MLP/proj bulk). Needs the
+  stateful caches (KV + conv + recurrent) threaded through a pure fn.
+
 - [ ] gguf-tool-use-non-qwen - Extend GgufBackend tool-use parser to Llama-3.1 and Mistral chat-template formats.
 
 - [ ] ui-streaming-ws-tui - Propagate `ChatEvent` stream to web WebSocket and TUI for partial token rendering.

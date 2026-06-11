@@ -335,3 +335,74 @@ Config-driven AFQ quantization on load; single-file safetensors fallback; the
 `.inner.weight` key remap; **the `nn::Rope` L=1 reshape bug**; the no-mask/sinks
 null-array fix; KV-cache slot init. Still TODO: top_p/top_k/rep-penalty sampler,
 EOS-from-config, hf-hub download.
+
+## Performance
+
+### Measured (Qwen3.6-27B-4bit, M-series; oracle = pip mlx_lm 22 t/s decode)
+
+| prompt | prefill (ops) | prefill (kernel) | decode  |
+|--------|---------------|------------------|---------|
+| 128    | 4.8s          | 1.3s             | ~13 t/s |
+| 512    | 8.9s          | 3.4s             | ~12 t/s |
+| 1024   | 20.9s         | 7.1s (**2.9x**)  | ~12 t/s |
+
+(decode is noisy over 16 steps, ~8-13 t/s.) A 4-bit 27B reads ~15 GB/token, so
+~27 t/s is the memory-bandwidth ceiling and Python's 22 t/s is near-optimal. Our
+~12 t/s decode is **overhead/op-launch-bound** (~450 tiny matmul/conv dispatches
+per token at T=1), not bandwidth-bound.
+
+### Done: GatedDeltaNet Metal kernel (prefill ~2.9x)
+
+The Qwen3.6 linear-attention scan was the prefill bottleneck (O(T) ops scan).
+Bound `mx.fast.metal_kernel` in mlx-rs (`fast::MetalKernel` + `TemplateArg`, over
+the mlx-c `mlx_fast_metal_kernel_*` API) and ported the Python gated-delta kernel
+verbatim (`models::gated_delta::gated_delta_kernel`): the whole T-step scan in one
+GPU dispatch. Default path; `ROZUM_GD_OPS=1` forces the ops reference. Greedy
+output stays byte-identical to Python on 27B + 35B-A3B.
+
+**Resolved: why the custom kernel needs a per-call `eval` (and why it's free).**
+The kernel's `state_out` is a lazy buffer; without an immediate `eval` the ~60
+later layers of the forward donate/reuse it before it materializes, silently
+corrupting the recurrent state — decode diverges at **token 2** (the prefill's
+first token is fine because it doesn't depend on `state_out`). The per-call `eval`
+forces it concrete. It is a **buffer-donation hazard in a large deferred graph,
+not an MLX-primitive bug** — confirmed by a 64-deep chained-kernel repro that is
+correct deferred when no heavy ops run between calls. **The eval is FREE:** A/B
+benched (decode tok/s, with vs without the 48 syncs/token) shows overlapping noise
+(12 vs 12 at 1024 tok) — decode is op-launch-bound, identical either way. So the
+per-call eval stays and the decode lever is op fusion, not eval removal. (The old
+`async_eval` "garbage" was a separate concurrency artifact: MLX's single default
+stream raced a 2nd thread; the real worker is single-threaded.)
+
+### Done: chunked prefill (bound the large-prompt peak)
+
+`Model::prefill` (dense + MoE) processes the prompt in chunks of
+`ROZUM_MLX_PREFILL_CHUNK` (default 2048): each chunk is a forward over `[1, chunk]`
+with the caches carried, so the full-attention layers bound their causal-mask +
+SDPA peak to `[chunk, ctx]` instead of `[T, T]`. (The explicit causal mask
+`linds.ge(rinds)` — shape `[N, offset+N]` — is the O(T²) allocation; the fused SDPA
+tiles but still reads it.) Between chunks all caches are eval'd
+(`LayerCache::collect_eval`) to materialize the chunk's forward and free its
+activations, keeping the deferred graph from spanning the prompt; GatedDeltaNet is
+already O(1) memory. Prefill returns only the last-position logits. **Byte-identical
+to a single pass** (per-position attention + sequential delta scan are
+position-local): `mlx_qwen35_chunked_prefill_matches_single_pass` on a 3000-tok
+prompt gives `max|Δlogit|=0.000e0` (chunk 512 vs single-pass). Port of mistralrs
+`f7efae2` (the native exact scan is faithful across chunks, unlike mistralrs's
+chunked GatedDeltaNet which reorders FP reductions — so we can assert byte-identity,
+they could not).
+
+### TODO (see SPRINT `mlx-native-perf` + BACKLOG)
+
+1. **mx.compile the forward + small-op fusion** — THE decode lever (decode is
+   launch-bound, confirmed). Keep the custom gated-delta kernel OUT of the compiled
+   region (it needs its per-call eval): use the O(T) ops path at T=1, or compile
+   only the attn/MLP/proj bulk. Thread the stateful caches (KV + conv + recurrent)
+   through a pure fn.
+2. **SDPA `Causal` mode in prefill** — drop the explicit `[chunk, ctx]` mask array
+   (use the fused causal fast-path), and project only the last prompt position
+   (skip `lm_head` over discarded positions). Both shrink the prefill peak further
+   and help single-pass too.
+3. **Large-context memory bounding** — KV-pool bound / preflight (analog of the
+   mistralrs RAM preflight + context budgeting); native `ConcatKeyValueCache`
+   grows unbounded.

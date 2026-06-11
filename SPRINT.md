@@ -164,6 +164,60 @@ is 100% MLX, candle only as external oracle.
   the fork (`sergey-scherbina/mlx-rs` branch `rozum-mlx-native`) and switch to a
   git-rev pin (like the mistralrs `[patch.crates-io]`) so the default builds
   off-tree.
+- [~] mlx-native-perf - Phase 5: throughput. Spec section: `docs/specs/mlx-native-runtime.md`
+  "Performance".
+  - **DONE — GatedDeltaNet Metal kernel (~2.9x Qwen3.6 prefill)** (master `a001e90`,
+    fork `738a4419`). Bound `mx.fast.metal_kernel` in mlx-rs (`fast::MetalKernel`)
+    + ported the Python gated-delta kernel: the whole T-step scan in one GPU
+    dispatch. 27B 1024-tok prefill 20.9s->7.1s; greedy still byte-exact on 27B +
+    35B-A3B. Caveat: the custom kernel needs a BLOCKING `eval` per call (see the
+    bug below), so each call syncs.
+  - **DONE — decode bug dig (`mlx-native-decode-bug`): RESOLVED + the eval is FREE.**
+    Root cause of the "needs a blocking eval per call" rule: the custom-kernel
+    primitive's `state_out` is a lazy buffer that the ~60 intervening layers of the
+    forward can donate/reuse before it is materialized, silently corrupting the
+    recurrent state (decode diverges at the *second* token: prefill's first token
+    is correct, then the carried state is wrong). The per-call `eval` fixes it by
+    forcing `state_out` concrete immediately. Confirmed by a 64-deep chained-kernel
+    repro: a recurrent kernel chain is correct deferred when **nothing heavy runs
+    between the calls**, and only corrupts inside the large model graph — i.e. it is
+    a buffer-donation hazard, not a binding bug. (The earlier `async_eval` "garbage"
+    was MLX's single default stream racing the next step on a second thread, a
+    separate concurrency artifact — the real worker is single-threaded.)
+  - **KEY FINDING — the per-call eval is NOT the decode bottleneck.** A/B on the
+    27B bench (decode tok/s): per-call eval ON 13.0 / 7.7 / 12.2 vs OFF 16.1 / 11.2
+    / 11.2 at n=128/512/1024 — overlapping noise, no gain. Removing the 48 GPU
+    syncs/token does nothing measurable. Decode (~12 t/s vs Python ~22) is bound by
+    raw op-launch overhead across the 64-layer forward (~450 tiny matmul/conv
+    dispatches/token at T=1), the SAME whether eval'd per-call or once. **So the
+    per-call eval stays (correct + free); the real lever is op fusion, below.** No
+    code change shipped from this dig — the existing per-call eval is already
+    optimal.
+  - [ ] **mx.compile the forward + small-op fusion** (`mlx-native-compile`). THE
+    decode lever (confirmed above: decode is launch-bound, not sync-bound). Fuse
+    the per-layer tiny ops into fewer dispatches. The custom gated-delta kernel
+    can't live inside a compiled region (it needs its per-call eval), so keep it
+    out: compile the attention/MLP/projection bulk and/or use the O(T) ops path for
+    the gated-delta at T=1 (decode) inside the compiled fn. Still needs the
+    stateful caches (KV + conv + recurrent) threaded through a pure fn.
+- [x] mlx-native-chunked-prefill - DONE. `Model::prefill` (qwen3_5 + qwen3_5_moe)
+  processes the prompt in chunks of `ROZUM_MLX_PREFILL_CHUNK` (default 2048), so the
+  full-attention layers bound their `[chunk, ctx]` causal-mask + SDPA peak instead
+  of `[T, T]` (the explicit causal mask `linds.ge(rinds)` is the O(T^2) allocation;
+  the fused SDPA tiles but still reads it). Caches advance across chunks and are
+  eval'd between them (`LayerCache::collect_eval`) to free each chunk's activations
+  and keep the deferred graph from spanning the prompt; GatedDeltaNet is already
+  O(1) memory. Returns only the last-position logits. **Byte-identical to single
+  pass** (the per-position attention + sequential delta scan are position-local):
+  test `mlx_qwen35_chunked_prefill_matches_single_pass` on a 3000-tok prompt gives
+  `max|Δlogit|=0.000e0` (chunk 512 vs single-pass). Follow-up: SDPA `Causal` mode
+  to drop the explicit mask entirely; project only the last position (orthogonal,
+  helps single-pass too).
+- [ ] mlx-native-mem-bound - large-context memory bounding for the native runtime:
+  the analog of mistralrs's RAM preflight + context budgeting + PagedAttention.
+  Native uses `ConcatKeyValueCache` (grows unbounded with context); bound the KV
+  pool / preflight against unified memory. (Concurrency/admission is already
+  generic via `admit_wrap`; `concurrency_capacity()=1` for native.) See BACKLOG.
 
 #### SUPERSEDED: mistralrs-mlx-direct — targeted candle->MLX quant-op bridge
 

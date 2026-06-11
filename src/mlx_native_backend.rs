@@ -682,4 +682,65 @@ mod tests {
             );
         }
     }
+
+    // Chunked prefill must be byte-identical to a single pass: the per-position
+    // attention (causal mask + KV cache) and the sequential GatedDeltaNet scan are
+    // position-local, so splitting the prompt only changes WHEN intermediates are
+    // freed, not the math. Drives the 27B model: one ~3000-tok synthetic prompt
+    // prefilled single-pass (chunk huge) vs chunked (chunk 512); compares the
+    // last-position logits exactly. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_qwen35_chunked_prefill
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "requires local mlx-community/Qwen3.6-27B-4bit"]
+    fn mlx_qwen35_chunked_prefill_matches_single_pass() {
+        use mlx_lm::models::qwen3_5::load_qwen3_5_model;
+        use mlx_rs::Array;
+        use mlx_rs::ops::indexing::{IndexOp, NewAxis};
+        use mlx_rs::transforms::eval;
+
+        let dir = resolve_model_dir("mlx-community:Qwen3.6-27B-4bit")
+            .expect("Qwen3.6-27B-4bit not in HF cache");
+        let mut model = load_qwen3_5_model(&dir).expect("load");
+
+        let ids: Vec<u32> = (0..3000).map(|i| (1000 + i % 5000) as u32).collect();
+        let prompt = Array::from(&ids[..]).index(NewAxis);
+
+        // Single pass (chunk > T) vs chunked (512) — fresh cache each.
+        let mut cache_a = model.init_cache();
+        let single = model
+            .prefill_chunked(&prompt, &mut cache_a, 8192)
+            .expect("single-pass prefill");
+        let mut cache_b = model.init_cache();
+        let chunked = model
+            .prefill_chunked(&prompt, &mut cache_b, 512)
+            .expect("chunked prefill");
+        eval([&single, &chunked]).unwrap();
+
+        let a = single.reshape(&[-1]).unwrap();
+        let b = chunked.reshape(&[-1]).unwrap();
+        let max_abs = a
+            .subtract(&b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max(None)
+            .unwrap()
+            .item::<f32>();
+        let am = |x: &Array| {
+            mlx_rs::ops::indexing::argmax_axis(x, 0, false)
+                .unwrap()
+                .item::<u32>()
+        };
+        eprintln!(
+            "CHUNKED-PREFILL max|Δlogit|={max_abs:.3e}  argmax single={} chunked={}",
+            am(&a),
+            am(&b)
+        );
+        assert_eq!(am(&a), am(&b), "chunked prefill changed the sampled token");
+        assert!(
+            max_abs < 1e-2,
+            "chunked prefill logits diverged: max|Δ|={max_abs}"
+        );
+    }
 }
