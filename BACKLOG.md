@@ -47,16 +47,20 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   message instead of an OOM. `context_window()` already reports the model's
   `max_position_embeddings`; cap the effective pool.
 
-- [ ] mlx-native-decode-bug - dig the custom-kernel deferred-eval correctness bug
-  (the custom kernel needs a blocking `eval` per call or it returns garbage;
-  Python's same kernel works deferred). Fixing it unlocks the `async_eval` decode
-  path (~7 -> ~17 t/s on 27B). See the SPRINT `mlx-native-perf` notes for the
-  ruled-out hypotheses.
+- [x] mlx-native-decode-bug - RESOLVED. The custom-kernel "needs a blocking eval
+  per call" rule is a buffer-donation hazard: the kernel's lazy `state_out` gets
+  donated/reused by the ~60 later layers before it materializes, corrupting the
+  recurrent state (decode diverges at token 2). The per-call eval forces it
+  concrete and fixes it. A/B benched: the eval is FREE (decode is op-launch-bound,
+  not sync-bound — 12 vs 12 t/s with/without). NOT a path to faster decode; the
+  lever is op fusion (`mlx-native-compile`). See SPRINT `mlx-native-perf`.
 
-- [ ] mlx-native-compile - `mx.compile` the decode forward + fuse small ops (the
-  3x decode gap vs Python is overhead/launch-bound, not bandwidth-bound). Blocked
-  on the decode-bug dig (the custom kernel inside a compiled graph would hit the
-  same deferred issue); also needs the stateful caches threaded through a pure fn.
+- [ ] mlx-native-compile - `mx.compile` the decode forward + fuse small ops. THE
+  decode lever: the ~2x gap vs Python is op-launch overhead (~450 tiny dispatches
+  per token), confirmed bandwidth-headroom remains. NOT blocked by the kernel bug
+  (resolved): keep the custom gated-delta kernel out of the compiled region (use
+  the O(T) ops path at T=1, or compile only the attn/MLP/proj bulk). Needs the
+  stateful caches (KV + conv + recurrent) threaded through a pure fn.
 
 - [ ] gguf-tool-use-non-qwen - Extend GgufBackend tool-use parser to Llama-3.1 and Mistral chat-template formats.
 

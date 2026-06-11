@@ -172,23 +172,34 @@ is 100% MLX, candle only as external oracle.
     dispatch. 27B 1024-tok prefill 20.9s->7.1s; greedy still byte-exact on 27B +
     35B-A3B. Caveat: the custom kernel needs a BLOCKING `eval` per call (see the
     bug below), so each call syncs.
-  - **IN PROGRESS — decode bug dig (`mlx-native-decode-bug`).** Decode ~7 t/s on
-    27B vs Python mlx_lm **22 t/s** (3x gap; memory ceiling ~27 t/s, so we are
-    overhead-bound). Decode is NOT the GatedDeltaNet (ops and kernel decode both
-    ~7). The kernel's fast deferred path (`async_eval`) hits ~17 t/s but is WRONG:
-    the custom-kernel primitive corrupts unless each call is blocking-eval'd
-    immediately. Ruled out (each tested, still garbage): shared OnceLock kernel,
-    input-array lifetime (leaked), config lifetime (leaked), fresh-kernel-per-call,
-    eval-batching (also not faster). Likely an MLX/mlx-c deferred-custom-kernel
-    issue or a binding gap (Python's same kernel works deferred). FIX UNLOCKS ~17
-    t/s decode. NEXT: diff my mlx-rs `MetalKernel` apply against Python
-    `mx.fast.metal_kernel` (contiguity, output linkage, init); minimal repro
-    (N tiny kernels, deferred eval) to isolate.
-  - [ ] **mx.compile the forward + small-op fusion** (`mlx-native-compile`). The
-    deeper decode lever: fuse the many small ops/launches. Risks: stateful caches
-    (KV + conv + recurrent state must be threaded in/out of a pure fn) and the
-    custom kernel inside (would hit the same deferred bug in a compiled graph).
-    Attempt after the kernel bug is understood.
+  - **DONE — decode bug dig (`mlx-native-decode-bug`): RESOLVED + the eval is FREE.**
+    Root cause of the "needs a blocking eval per call" rule: the custom-kernel
+    primitive's `state_out` is a lazy buffer that the ~60 intervening layers of the
+    forward can donate/reuse before it is materialized, silently corrupting the
+    recurrent state (decode diverges at the *second* token: prefill's first token
+    is correct, then the carried state is wrong). The per-call `eval` fixes it by
+    forcing `state_out` concrete immediately. Confirmed by a 64-deep chained-kernel
+    repro: a recurrent kernel chain is correct deferred when **nothing heavy runs
+    between the calls**, and only corrupts inside the large model graph — i.e. it is
+    a buffer-donation hazard, not a binding bug. (The earlier `async_eval` "garbage"
+    was MLX's single default stream racing the next step on a second thread, a
+    separate concurrency artifact — the real worker is single-threaded.)
+  - **KEY FINDING — the per-call eval is NOT the decode bottleneck.** A/B on the
+    27B bench (decode tok/s): per-call eval ON 13.0 / 7.7 / 12.2 vs OFF 16.1 / 11.2
+    / 11.2 at n=128/512/1024 — overlapping noise, no gain. Removing the 48 GPU
+    syncs/token does nothing measurable. Decode (~12 t/s vs Python ~22) is bound by
+    raw op-launch overhead across the 64-layer forward (~450 tiny matmul/conv
+    dispatches/token at T=1), the SAME whether eval'd per-call or once. **So the
+    per-call eval stays (correct + free); the real lever is op fusion, below.** No
+    code change shipped from this dig — the existing per-call eval is already
+    optimal.
+  - [ ] **mx.compile the forward + small-op fusion** (`mlx-native-compile`). THE
+    decode lever (confirmed above: decode is launch-bound, not sync-bound). Fuse
+    the per-layer tiny ops into fewer dispatches. The custom gated-delta kernel
+    can't live inside a compiled region (it needs its per-call eval), so keep it
+    out: compile the attention/MLP/projection bulk and/or use the O(T) ops path for
+    the gated-delta at T=1 (decode) inside the compiled fn. Still needs the
+    stateful caches (KV + conv + recurrent) threaded through a pure fn.
 - [ ] mlx-native-chunked-prefill - port `f7efae2` (mistralrs "chunked prefill on
   Metal") to the native runtime: process the prompt in chunks to BOUND the
   activation/attention peak so large Claude Code prompts (10k+ tok) don't OOM the
