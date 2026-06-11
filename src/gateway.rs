@@ -132,6 +132,16 @@ fn drain_secs() -> u64 {
         .unwrap_or(120)
 }
 
+/// Idle seconds before the watchdog auto-unloads the resident model (keeping the
+/// daemon alive; the next chat lazily reloads). `ROZUM_GATEWAY_UNLOAD_IDLE_SECS`,
+/// default 900 (15 min); `0` disables. Spec: `docs/specs/model-unload-on-idle.md`.
+fn unload_idle_secs() -> u64 {
+    std::env::var("ROZUM_GATEWAY_UNLOAD_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(900)
+}
+
 impl Switchboard {
     fn current(&self) -> Option<Arc<dyn ChatBackend>> {
         self.backend.read().unwrap().clone()
@@ -294,6 +304,17 @@ impl Switchboard {
         };
         self.end_drain();
         out
+    }
+
+    /// True while a model is resident (vs freed by `unload`/idle-unload).
+    fn is_loaded(&self) -> bool {
+        self.backend.read().unwrap().is_some()
+    }
+
+    /// True when the model can be rebuilt in process (has a builder). A
+    /// `--dedicated` gateway returns false — it must never auto-unload.
+    fn can_reload(&self) -> bool {
+        self.builder.is_some()
     }
 
     /// Free the resident model but keep the daemon listening; the next chat
@@ -1607,34 +1628,64 @@ pub async fn serve_on(
         activity: Arc::new(Activity::default()),
     };
 
-    // Idle watchdog (shared daemon only): exit when nothing is in flight and no
-    // request has arrived for `idle_secs`, freeing the resident model.
-    if let Some(idle) = cfg.idle_secs.filter(|&s| s > 0) {
+    // Idle watchdog (shared daemon). Two complementary actions on one 30 s tick:
+    //   1. idle-exit  — no agent attached at all (no leases) and quiet for
+    //      `idle_secs`: free everything by exiting the process.
+    //   2. idle-unload — agents attached (leases held) but not generating for
+    //      `unload_secs`: drop just the model's RAM, keep the daemon; the next
+    //      chat lazily reloads. This is the `leases > 0` case idle-exit skips.
+    // Conditions are disjoint in the common case; we evaluate exit first (frees
+    // the most when truly abandoned), then unload. A `--dedicated` gateway has no
+    // builder, so unload is guarded off. Spec: `docs/specs/model-unload-on-idle.md`.
+    let idle_exit = cfg.idle_secs.filter(|&s| s > 0);
+    let unload_after = unload_idle_secs();
+    let unload_on_idle = unload_after > 0 && state.sb.can_reload();
+    if idle_exit.is_some() || unload_on_idle {
         state
             .activity
             .last_active
             .store(crate::share::now_unix(), Ordering::Relaxed);
         let activity = Arc::clone(&state.activity);
+        let sb = Arc::clone(&state.sb);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 let idle_for = crate::share::now_unix()
                     .saturating_sub(activity.last_active.load(Ordering::Relaxed));
-                // Stay up while any launch holds a fresh lease OR a request is in
-                // flight OR there was recent HTTP traffic (covers manual `rozum
-                // gateway` use). Exit only when all are quiet for `idle`.
-                let live_leases = crate::share::live_lease_count(crate::share::LEASE_FRESH_SECS);
-                if activity.in_flight.load(Ordering::Relaxed) == 0
-                    && live_leases == 0
-                    && idle_for >= idle
+
+                // 1. idle-exit: stay up while any launch holds a fresh lease OR a
+                // request is in flight OR there was recent HTTP traffic. Exit only
+                // when all are quiet for `idle_secs`.
+                if let Some(idle) = idle_exit {
+                    let live_leases =
+                        crate::share::live_lease_count(crate::share::LEASE_FRESH_SECS);
+                    if activity.in_flight.load(Ordering::Relaxed) == 0
+                        && live_leases == 0
+                        && idle_for >= idle
+                    {
+                        crate::obs::log_event(serde_json::json!({
+                            "event": "gateway_idle_exit", "idle_secs": idle_for,
+                        }));
+                        if let Some(pid) = registered_pid {
+                            crate::share::remove_active_if_mine(pid);
+                        }
+                        std::process::exit(0);
+                    }
+                }
+
+                // 2. idle-unload: model resident, nothing generating, quiet for
+                // `unload_secs`. `is_loaded()` makes this fire once, not every tick.
+                if unload_on_idle
+                    && idle_for >= unload_after
+                    && sb.generating.load(Ordering::SeqCst) == 0
+                    && sb.is_loaded()
                 {
                     crate::obs::log_event(serde_json::json!({
-                        "event": "gateway_idle_exit", "idle_secs": idle_for,
+                        "event": "gateway_idle_unload", "idle_secs": idle_for,
                     }));
-                    if let Some(pid) = registered_pid {
-                        crate::share::remove_active_if_mine(pid);
+                    if let Err(e) = sb.unload().await {
+                        tracing::warn!(error = %e, "idle-unload failed");
                     }
-                    std::process::exit(0);
                 }
             }
         });
@@ -1857,6 +1908,33 @@ mod tests {
             sb.generating.load(Ordering::SeqCst),
             0,
             "token released on drop"
+        );
+    }
+
+    #[test]
+    fn is_loaded_and_can_reload_reflect_state() {
+        assert!(test_sb(Some(ok_builder()), true).is_loaded());
+        assert!(!test_sb(Some(ok_builder()), false).is_loaded());
+        assert!(test_sb(Some(ok_builder()), true).can_reload());
+        // A --dedicated gateway has no builder: it must never auto-unload.
+        assert!(!test_sb(None, true).can_reload());
+    }
+
+    #[tokio::test]
+    async fn idle_unload_guard_is_idempotent() {
+        // The watchdog fires unload only while `is_loaded()`. After the first
+        // unload the model is gone, so the next tick is a no-op — no repeated
+        // drains / generation bumps / log spam every 30 s.
+        let sb = test_sb(Some(ok_builder()), true);
+        assert!(sb.is_loaded() && sb.generating.load(Ordering::SeqCst) == 0);
+        let g = sb.unload().await.unwrap();
+        assert!(!sb.is_loaded(), "model freed; watchdog guard now skips it");
+        // A second tick would re-check `is_loaded()` first and not unload again.
+        assert!(!sb.is_loaded());
+        assert_eq!(
+            sb.generation(),
+            g,
+            "no further generation bump while unloaded"
         );
     }
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## gateway-unload-on-idle — free model RAM when agents are attached but idle
+Completed: 2026-06-11
+The shared gateway now auto-`unload`s the resident model after a long idle window
+while keeping the daemon alive, for the case the existing idle-exit deliberately
+skips: agents attached (leases held) but not generating. idle-exit only fires at
+`live_leases == 0` (process exit); this fills the `leases > 0`-but-idle gap by
+dropping just the model's RAM and lazily reloading on the next chat. Implemented
+on the **same 30 s idle watchdog tick** (`src/gateway.rs`): evaluate idle-exit
+first (frees most when truly abandoned), then idle-unload when the model is
+resident, nothing is `generating`, and `last_active` is older than
+`ROZUM_GATEWAY_UNLOAD_IDLE_SECS` (default 900 s / 15 min; `0` disables). Reuses
+`gateway-switch`'s `Switchboard::unload()` + serialized lazy reload; a new
+`is_loaded()` guard makes it fire once (no per-tick re-drain/log spam) and
+`can_reload()` keeps a `--dedicated` gateway (no builder) from ever auto-unloading.
+Emits a `gateway_idle_unload` obs event. Spec: `docs/specs/model-unload-on-idle.md`.
+Follow-ups (need a real model on Metal): cold-vs-warm reload measurement to decide
+any fast-reload tier beyond the OS page cache, and pre-warm on a turn signal.
+No new deps.
+
 ## runtime-config — declare backends, policy & default model in `rozum.toml`
 Completed: 2026-06-11
 The gateway's backend selection and default model can now be declared once in a
