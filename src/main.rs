@@ -1315,10 +1315,10 @@ async fn build_gateway_backend(
         return Some(rozum::concurrency::admit_wrap(b));
     }
 
-    // 2. Try the pure-Rust native MLX runtime (needs --features mlx-native).
-    //    Preferred over mistralrs for MLX checkpoints: full native MLX forward,
-    //    no candle. Matches only already-local snapshots, so it falls through
-    //    cleanly for GGUF paths or un-cached repos.
+    // 2. Try the pure-Rust native MLX runtime (on by default). The primary
+    //    in-process MLX backend: full native MLX forward, no candle, no Python.
+    //    Covers the Qwen3 / Qwen3.6 family. Matches only already-local snapshots,
+    //    so it falls through cleanly for GGUF paths or un-cached repos.
     if let Some(b) = try_build_mlx_native_backend(model_spec, n_ctx).await {
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"mlx-native","model":model_spec}),
@@ -1326,7 +1326,9 @@ async fn build_gateway_backend(
         return Some(rozum::concurrency::admit_wrap(b));
     }
 
-    // 3. Try in-process native MLX via mistralrs (needs --features mistralrs)
+    // 3. Try in-process MLX via mistralrs (opt-in `--features mistralrs`): the
+    //    broader-catalog candle backend, a fallback for models the native MLX
+    //    runtime does not yet port.
     if let Some(b) = try_build_mistralrs_backend(model_spec, n_ctx).await {
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"mistralrs","model":model_spec}),
@@ -1334,8 +1336,8 @@ async fn build_gateway_backend(
         return Some(rozum::concurrency::admit_wrap(b));
     }
 
-    // 3. Try LM Studio's local server (native MLX runtime; covers Qwen3.6 MLX
-    //    today, ahead of mistralrs AFQ support)
+    // 4. Try LM Studio's local server (native MLX runtime via its GUI app), a
+    //    fallback for MLX models neither in-process backend covers.
     if let Some(b) = rozum::openai_http::try_lmstudio_http(model_spec).await {
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"lmstudio-http","model":model_spec}),
@@ -1343,15 +1345,7 @@ async fn build_gateway_backend(
         return Some(rozum::concurrency::admit_wrap(b));
     }
 
-    // 4. Try mlx_lm.server (Python, for MLX-format models)
-    if let Some(b) = rozum::openai_http::try_mlx_server(model_spec).await {
-        rozum::obs::log_event(
-            serde_json::json!({"event":"backend_selected","backend":"mlx-server-http","model":model_spec}),
-        );
-        return Some(rozum::concurrency::admit_wrap(b));
-    }
-
-    // 3. Try user-specified URL via env (any OpenAI-compatible server)
+    // 5. Try user-specified URL via env (any OpenAI-compatible server)
     if let Ok(url) = std::env::var("ROZUM_BACKEND_URL") {
         eprintln!("backend: custom HTTP at {url}");
         rozum::obs::log_event(
@@ -1364,7 +1358,7 @@ async fn build_gateway_backend(
 
     rozum::obs::log_event(serde_json::json!({
         "event": "backend_select_failed", "model": model_spec,
-        "note": "no backend: no local file, mistralrs load failed, no LM Studio/mlx_lm.server, ROZUM_BACKEND_URL unset",
+        "note": "no backend: no local file, native MLX/mistralrs load failed, no LM Studio, ROZUM_BACKEND_URL unset",
     }));
     None
 }
@@ -1377,6 +1371,7 @@ fn print_no_backend_hints(model_spec: &str) {
     // guessing why a backend that is compiled in still did not run.
     if let Some(reason) = skip_reason_slot().lock().unwrap().take() {
         eprintln!("The in-process MLX model (mistralrs) is available but was NOT loaded:");
+        // (mistralrs is opt-in `--features mistralrs`; the RAM preflight is its own.)
         eprintln!("  {reason}");
         eprintln!();
         eprintln!("To run it anyway despite low free RAM:");
@@ -1398,20 +1393,20 @@ fn print_no_backend_hints(model_spec: &str) {
         "    rozum launch --model '<ollama-name>:<tag>'      claude   # reads ~/.ollama/models/blobs/"
     );
     eprintln!();
-    eprintln!("  in-process native MLX (mistralrs, on by default, Metal, safetensors):");
+    eprintln!("  in-process native MLX (on by default, Metal, AFQ safetensors):");
     eprintln!("    rozum launch --model mlx-community:Qwen3.6-35B-A3B-4bit claude");
     eprintln!("    rozum launch --model hf:Qwen/Qwen3-4B claude");
+    eprintln!("    # covers the Qwen3 / Qwen3.6 family; the model must be cached locally");
     eprintln!();
-    eprintln!("  LM Studio (GUI app, native MLX runtime, covers Qwen3.6 today):");
+    eprintln!("  in-process mistralrs (opt-in, broader catalog):");
+    eprintln!("    cargo build --features mistralrs");
+    eprintln!("    rozum launch --model mlx-community:<repo> claude");
+    eprintln!();
+    eprintln!("  LM Studio (GUI app, native MLX runtime, for models not yet ported):");
     eprintln!("    1. Download LM Studio: https://lmstudio.ai");
-    eprintln!("    2. Inside LM Studio, install the model (Search tab → mlx-community/Qwen3.6...)");
+    eprintln!("    2. Inside LM Studio, install the model (Search tab → mlx-community/...)");
     eprintln!("    3. Start the local server (Developer tab → Status: Running)");
     eprintln!("    4. rozum launch --model <model-id-shown-in-lmstudio>  claude");
-    eprintln!();
-    eprintln!("  mlx_lm.server (Python, native MLX safetensors):");
-    eprintln!("    pip install mlx-lm");
-    eprintln!("    python -m mlx_lm.server --model mlx-community/<repo> &");
-    eprintln!("    rozum launch --model mlx-community/<repo>  claude");
     eprintln!();
     eprintln!("  any OpenAI-compatible HTTP server:");
     eprintln!("    ROZUM_BACKEND_URL=http://your-server/v1 rozum launch --model <id> claude");
@@ -1450,6 +1445,9 @@ const N_CTX_FALLBACK: u32 = 32_768;
 /// Practical cap for the auto context. Models advertise huge maxes (Qwen3.6:
 /// 262144) whose KV pool won't fit in RAM; 32k covers large agent prompts
 /// (Claude Code tokenizes to ~24k) and fits a ~16-20 GB model on a 32 GB+ Mac.
+/// Only the mistralrs `auto_n_ctx` consults it (the native MLX backend reads its
+/// own context window from config).
+#[cfg(feature = "mistralrs")]
 const N_CTX_AUTO_CAP: u32 = 32_768;
 
 /// Resolve the effective context window: an explicit `--n-ctx` wins; otherwise
