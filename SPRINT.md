@@ -77,12 +77,14 @@ is 100% MLX, candle only as external oracle.
     `.inner.weight` key remap) -> 904/904 params load.
   - **Forward bug #1 FIXED** (`1bbe6e52`): dead KV cache (slots init'd None ->
     decode ran cache-less). Output now coherent.
-  - **Forward bug #2 ROOT-CAUSED, fix pending**: fast-SDPA **Q=1 (decode)
-    kernel** in the bundled MLX is wrong. Proven: full 26-tok prefill matches
-    mlx_lm byte-for-byte (model correct); incremental decode diverges at layer 0
-    with byte-identical q/k/v inputs. Bundled MLX ~0.25 (mlx-c 0.5.0) vs pip
-    mlx_lm MLX 0.31.2 -> **fix = bump mlx-sys's MLX**, then re-gate parity, then
-    wire `MlxNativeBackend: ChatBackend`.
+  - **Forward bug #2 ROOT-CAUSED, fix BLOCKED**: fast-SDPA **single-query
+    (decode) GQA** path in the bundled MLX **0.30.6** is wrong (head 0 ok, later
+    kv-group heads wrong) for byte-identical q/k/v; fixed in pip mlx_lm's MLX
+    **0.31.2**. Bumping mlx-c's MLX to 0.31.0/0.31.2 **fails to compile**
+    (mlx-c 0.5.0 incompatible with MLX 0.31 -- fft.cpp + ops.cpp API changes).
+    Fix needs: coordinated mlx-c+mlx-sys+mlx-rs upgrade (unreleased), OR patch
+    mlx-c 0.5.0 fft/ops for 0.31, OR a correct manual-attention decode workaround
+    in mlx-lm. THEN re-gate parity + wire `MlxNativeBackend`.
 - [ ] mlx-native-p1 - Phase 1: port `qwen3_moe`; gate on `Qwen3-30B-A3B-4bit`.
 - [ ] mlx-native-p2 - Phase 2: port `qwen3_5` (27B dense) + `qwen3_5_moe`
   (35B-A3B) hybrid; gate on cached `Qwen3.6-{27B,35B-A3B}-4bit`. Headline: the

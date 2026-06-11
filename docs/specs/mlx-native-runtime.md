@@ -267,16 +267,28 @@ passes on at least one real model.
   - A full 26-token prefill matches `mlx_lm` Python **byte-for-byte** (top-1 and
     the `198 \n` vs `271 \n\n` logits) -> the **model is correct**.
   - Incremental decode diverges at **layer 0** with **byte-identical q/k/v
-    inputs** (same L2 for query, every cached key, and value) yet a different
-    attention output. So `mlx_rs::fast::scaled_dot_product_attention` returns a
-    wrong result on the **single-query (decode) path** for inputs the
-    multi-query path handles correctly. RoPE-offset and mask were ruled out
-    (direct tests). Python `mlx_lm` uses the same SDPA path and is correct.
-  - **Root cause: version skew.** Bundled MLX is ~0.25 (mlx-c 0.5.0, via
-    mlx-sys 0.2.0); pip `mlx_lm` runs **MLX 0.31.2**. The Q=1 SDPA bug is fixed
-    upstream. **Fix = bump mlx-sys's vendored MLX** (and reconcile any mlx-rs
-    0.25 API deltas), then re-run the env-gated dumps to confirm byte-parity.
-- Not yet (after the MLX bump + parity): `MlxNativeBackend` (ChatBackend)
+    inputs** (verified: same L2 for query, the full key tensor, mid + last keys,
+    and values) yet a different **attention output**: head 0 matches, but later
+    GQA heads (e.g. head 31 -> kv group 7) differ (decode 0.179 vs prefill 0.137
+    for identical inputs). So `mlx_rs::fast::scaled_dot_product_attention` is
+    wrong on the **single-query (decode) GQA path**. Ruled out by direct tests:
+    RoPE-offset (isolated rope passes), mask (None / additive-zeros / bool /
+    causal-Array all -> 271; only the multi-query causal-Array path -> 198), and
+    Q=2 padding (still wrong). Python `mlx_lm` uses the same path and is correct.
+  - **Root cause: MLX version + the SDPA GQA fix landed between releases.**
+    Bundled MLX is **0.30.6** (mlx-c fetches `GIT_TAG v0.30.6`; mlx-c wrapper is
+    0.5.0); pip `mlx_lm` runs **MLX 0.31.2**, where the single-query GQA SDPA is
+    correct.
+  - **Bump attempt -- BLOCKED.** Repointing mlx-c's FetchContent to MLX 0.31.2
+    and 0.31.0 both fail to compile: MLX's C++ API changed across the 0.31 line
+    (`fft.cpp` fft/ifft/rfft signatures at 0.31.2; `ops.cpp` optional/Stream
+    conversions at 0.31.0) and **mlx-c 0.5.0 does not support MLX 0.31**. A clean
+    fix needs a coordinated **mlx-c + mlx-sys (bindgen) + mlx-rs** upgrade to a
+    MLX-0.31-compatible set (mlx-rs has not released one), OR patch mlx-c 0.5.0's
+    `fft.cpp`/`ops.cpp` to the 0.31 API, OR a correct **manual-attention
+    workaround** in mlx-lm for the decode (Q=1) path (a naive port hit a GQA
+    head-grouping/precision bug; needs validation against the prefill kernel).
+- Not yet (after the SDPA fix + parity): `MlxNativeBackend` (ChatBackend)
   wiring; hf-hub auto-download; sampler top_p/top_k; EOS-from-config.
 
 ### Gaps in upstream confirmed (to fill / upstream PRs)
