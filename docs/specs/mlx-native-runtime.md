@@ -338,6 +338,17 @@ EOS-from-config, hf-hub download.
 
 ## Performance
 
+**Status (2026-06-11).** Prefill is fast and its large-prompt memory peak is now
+bounded (kernel + chunking + last-position projection, all byte-identical). Decode
+(~12 vs Python ~22 t/s) is **mlx-rs per-op/per-call FFI-overhead bound** — both
+obvious levers were tested and rejected: removing the custom-kernel per-call eval is
+a no-op (decode isn't sync-bound), and `mx.compile` is net-negative in this binding
+(probe below). What to do next, in order: (1) **`mlx-native-mem-bound`** — KV
+preflight + "lower --n-ctx" instead of OOM (the high-value Claude Code item;
+robustness, not throughput); (2) **SDPA `Causal` mode** in prefill (drop the explicit
+mask); (3) decode throughput is HARD and deprioritized (needs hand-written fused
+Metal kernels or fork-level work to cut mlx-rs per-op overhead). Details below.
+
 ### Measured (Qwen3.6-27B-4bit, M-series; oracle = pip mlx_lm 22 t/s decode)
 
 | prompt | prefill (ops) | prefill (kernel) | decode  |
@@ -369,10 +380,11 @@ forces it concrete. It is a **buffer-donation hazard in a large deferred graph,
 not an MLX-primitive bug** — confirmed by a 64-deep chained-kernel repro that is
 correct deferred when no heavy ops run between calls. **The eval is FREE:** A/B
 benched (decode tok/s, with vs without the 48 syncs/token) shows overlapping noise
-(12 vs 12 at 1024 tok) — decode is op-launch-bound, identical either way. So the
-per-call eval stays and the decode lever is op fusion, not eval removal. (The old
-`async_eval` "garbage" was a separate concurrency artifact: MLX's single default
-stream raced a 2nd thread; the real worker is single-threaded.)
+(12 vs 12 at 1024 tok) — decode is op-launch/FFI-overhead-bound, identical either
+way. So the per-call eval stays (correct + free); eval removal is not a decode lever
+(and neither is `mx.compile` — see the dead-end note below). (The old `async_eval`
+"garbage" was a separate concurrency artifact: MLX's single default stream raced a
+2nd thread; the real worker is single-threaded.)
 
 ### Done: chunked prefill (bound the large-prompt peak)
 

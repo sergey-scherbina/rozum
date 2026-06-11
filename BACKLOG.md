@@ -35,23 +35,28 @@ through `concurrency::admit_wrap`, so they are not relisted.)
 - [x] mlx-native-chunked-prefill - DONE. `Model::prefill` chunks the prompt
   (`ROZUM_MLX_PREFILL_CHUNK`, default 2048), bounding the full-attention
   `[chunk, ctx]` causal-mask + SDPA peak instead of `[T, T]`; caches advance and
-  are eval'd between chunks to free activations. Byte-identical to single pass
+  are eval'd between chunks to free activations. `lm_head` runs only on the final
+  position (`Model::project`), dropping the per-chunk `[1,chunk,vocab]` ~600MB
+  logits transient too. Byte-identical to single pass
   (test `mlx_qwen35_chunked_prefill_matches_single_pass`, Δ=0). See SPRINT.
 
-- [ ] mlx-native-mem-bound - large-context memory bounding (analog of the
-  mistralrs RAM preflight + context budgeting + PagedAttention). Native uses
-  `ConcatKeyValueCache`, which grows unbounded with context; add a KV-pool bound
-  and/or a preflight against unified memory, and surface a clear "lower --n-ctx"
-  message instead of an OOM. `context_window()` already reports the model's
-  `max_position_embeddings`; cap the effective pool.
+- [ ] mlx-native-mem-bound - **NEXT (recommended).** Large-context memory bounding
+  (analog of the mistralrs RAM preflight + context budgeting). Native uses
+  `ConcatKeyValueCache`, which grows unbounded with context; add a preflight against
+  unified memory (estimate KV from config: only full-attention layers hold KV; the
+  GatedDeltaNet conv/recurrent state is O(1)) and surface a clear "lower --n-ctx"
+  message instead of an OOM. `context_window()` already reports
+  `max_position_embeddings`; cap the effective pool. Concrete steps in SPRINT
+  `mlx-native-mem-bound`.
 
 - [x] mlx-native-decode-bug - RESOLVED. The custom-kernel "needs a blocking eval
   per call" rule is a buffer-donation hazard: the kernel's lazy `state_out` gets
   donated/reused by the ~60 later layers before it materializes, corrupting the
   recurrent state (decode diverges at token 2). The per-call eval forces it
   concrete and fixes it. A/B benched: the eval is FREE (decode is op-launch-bound,
-  not sync-bound — 12 vs 12 t/s with/without). NOT a path to faster decode; the
-  lever is op fusion (`mlx-native-compile`). See SPRINT `mlx-native-perf`.
+  not sync-bound — 12 vs 12 t/s with/without). NOT a path to faster decode, and the
+  obvious fusion lever (`mlx-native-compile`) turned out a measured dead end — see
+  below; decode is FFI/per-op-overhead bound. See SPRINT `mlx-native-perf`.
 
 - [x] mlx-native-compile - DEAD END (measured). `mx.compile` via mlx-rs
   `compile_with_state` is net-NEGATIVE on a model forward: probe `mlx_compile_probe`
