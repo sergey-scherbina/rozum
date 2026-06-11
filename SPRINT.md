@@ -193,13 +193,15 @@ is 100% MLX, candle only as external oracle.
     per-call eval stays (correct + free); the real lever is op fusion, below.** No
     code change shipped from this dig — the existing per-call eval is already
     optimal.
-  - [ ] **mx.compile the forward + small-op fusion** (`mlx-native-compile`). THE
-    decode lever (confirmed above: decode is launch-bound, not sync-bound). Fuse
-    the per-layer tiny ops into fewer dispatches. The custom gated-delta kernel
-    can't live inside a compiled region (it needs its per-call eval), so keep it
-    out: compile the attention/MLP/projection bulk and/or use the O(T) ops path for
-    the gated-delta at T=1 (decode) inside the compiled fn. Still needs the
-    stateful caches (KV + conv + recurrent) threaded through a pure fn.
+  - [x] **mx.compile** (`mlx-native-compile`) — DEAD END, measured net-negative.
+    Probe `mlx_compile_probe` (dense Qwen3-4B, fixed shapes): T=1 uncompiled 8.79ms
+    vs compiled 17.34ms (**0.51x**), T=16 0.85x. mlx-rs `compile_with_state`
+    re-marshals the whole `Updatable` state per call (flattens + SORTS ~400 params)
+    + `mlx_detail_compile` per call -> binding overhead > fusion benefit. So decode
+    (12 vs ~22 t/s) is **FFI/per-op overhead bound, not fusion-bound**; compile
+    can't fix it here. The fixed-size-KV-cache redesign (only useful as a compile
+    prerequisite) is NOT pursued. A real decode win would need manual kernel fusion
+    or lower per-op marshalling — both large; decode is usable, deprioritized.
 - [x] mlx-native-chunked-prefill - DONE. `Model::prefill` (qwen3_5 + qwen3_5_moe)
   processes the prompt in chunks of `ROZUM_MLX_PREFILL_CHUNK` (default 2048), so the
   full-attention layers bound their `[chunk, ctx]` causal-mask + SDPA peak instead

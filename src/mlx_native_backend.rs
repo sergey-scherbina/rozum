@@ -743,4 +743,77 @@ mod tests {
             "chunked prefill logits diverged: max|Δ|={max_abs}"
         );
     }
+
+    // Go/no-go probe for the decode-compile lever: does `mx.compile` actually fuse
+    // and speed up a real forward on this hardware? Compiles the dense Qwen3-4B
+    // forward (no custom kernel, no MoE — cleanest) at FIXED shapes (fresh cache
+    // each call, so shapes stay constant and the compiled graph is reused) and
+    // times compiled vs uncompiled at T=1 (decode-representative: same dispatch
+    // count as a real decode step) and T=16. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_compile_probe
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "perf probe; requires local mlx-community/Qwen3-4B-4bit"]
+    fn mlx_compile_probe() {
+        use mlx_lm::cache::ConcatKeyValueCache;
+        use mlx_lm::models::qwen3::{load_qwen3_model, Model, ModelInput};
+        use mlx_rs::Array;
+        use mlx_rs::module::Module;
+        use mlx_rs::ops::indexing::{IndexOp, NewAxis};
+        use mlx_rs::transforms::compile::compile_with_state;
+        use mlx_rs::transforms::eval;
+        use std::time::Instant;
+
+        let dir =
+            resolve_model_dir("mlx-community:Qwen3-4B-4bit").expect("Qwen3-4B-4bit not in HF cache");
+        let mut model = load_qwen3_model(&dir).expect("load");
+
+        // A fresh-cache single forward over [1, T]. Shapes fixed across calls, so
+        // the compiled graph is reused. Captures nothing -> Copy + 'static.
+        let step = |model: &mut Model, args: &[Array]| -> Result<Vec<Array>, mlx_rs::error::Exception> {
+            let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+            let input = ModelInput {
+                inputs: &args[0],
+                mask: None,
+                cache: &mut cache,
+            };
+            let logits = <Model as Module<ModelInput<'_, ConcatKeyValueCache>>>::forward(
+                model, input,
+            )?;
+            Ok(vec![logits])
+        };
+
+        for &t in &[1i32, 16] {
+            let ids: Vec<u32> = (0..t).map(|i| (1000 + i) as u32).collect();
+            let input = Array::from(&ids[..]).index(NewAxis);
+            let args = [input];
+            let iters = 64;
+
+            // Uncompiled baseline.
+            let _ = eval([&step(&mut model, &args).unwrap()[0]]);
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                let o = step(&mut model, &args).unwrap();
+                eval([&o[0]]).unwrap();
+            }
+            let uncompiled = t0.elapsed().as_secs_f64() / iters as f64;
+
+            // Compiled.
+            let mut compiled = compile_with_state(step, None);
+            let _ = eval([&compiled(&mut model, &args).unwrap()[0]]); // warm/trace
+            let t1 = Instant::now();
+            for _ in 0..iters {
+                let o = compiled(&mut model, &args).unwrap();
+                eval([&o[0]]).unwrap();
+            }
+            let comp = t1.elapsed().as_secs_f64() / iters as f64;
+
+            eprintln!(
+                "COMPILE-PROBE T={t:>2}  uncompiled={:.3}ms  compiled={:.3}ms  speedup={:.2}x",
+                uncompiled * 1e3,
+                comp * 1e3,
+                uncompiled / comp
+            );
+        }
+    }
 }
