@@ -261,38 +261,45 @@ passes on at least one real model.
   the `Some` branch -- so every decode step ran cache-less (no history, wrong
   position), degenerating into repetition. Fixed by initializing slots to
   `Some(C::default())` (commit `1bbe6e52`). Output became coherent.
-- **Forward bug #2 (root-caused, fix pending): fast-SDPA Q=1 kernel in the
-  bundled MLX.** After the cache fix, greedy still diverged from `mlx_lm` at the
-  2nd token. Localized with env-gated dumps (`ROZUM_{LOGIT,LAYER,ATTN}_DEBUG`):
-  - A full 26-token prefill matches `mlx_lm` Python **byte-for-byte** (top-1 and
-    the `198 \n` vs `271 \n\n` logits) -> the **model is correct**.
-  - Incremental decode diverges at **layer 0** with **byte-identical q/k/v
-    inputs** (verified: same L2 for query, the full key tensor, mid + last keys,
-    and values) yet a different **attention output**: head 0 matches, but later
-    GQA heads (e.g. head 31 -> kv group 7) differ (decode 0.179 vs prefill 0.137
-    for identical inputs). So `mlx_rs::fast::scaled_dot_product_attention` is
-    wrong on the **single-query (decode) GQA path**. Ruled out by direct tests:
-    RoPE-offset (isolated rope passes), mask (None / additive-zeros / bool /
-    causal-Array all -> 271; only the multi-query causal-Array path -> 198), and
-    Q=2 padding (still wrong). Python `mlx_lm` uses the same path and is correct.
-  - **Root cause: MLX version + the SDPA GQA fix landed between releases.**
-    Bundled MLX is **0.30.6** (mlx-c fetches `GIT_TAG v0.30.6`; mlx-c wrapper is
-    0.5.0); pip `mlx_lm` runs **MLX 0.31.2**, where the single-query GQA SDPA is
-    correct.
-  - **Bump attempt -- BLOCKED.** Repointing mlx-c's FetchContent to MLX 0.31.2
-    and 0.31.0 both fail to compile: MLX's C++ API changed across the 0.31 line
-    (`fft.cpp` fft/ifft/rfft signatures at 0.31.2; `ops.cpp` optional/Stream
-    conversions at 0.31.0) and **mlx-c 0.5.0 does not support MLX 0.31**. A clean
-    fix needs a coordinated **mlx-c + mlx-sys (bindgen) + mlx-rs** upgrade to a
-    MLX-0.31-compatible set (mlx-rs has not released one), OR patch mlx-c 0.5.0's
-    `fft.cpp`/`ops.cpp` to the 0.31 API, OR a correct **manual-attention
-    workaround** in mlx-lm for the decode (Q=1) path (a naive port hit a GQA
-    head-grouping/precision bug; needs validation against the prefill kernel).
-- Not yet (after the SDPA fix + parity): `MlxNativeBackend` (ChatBackend)
-  wiring; hf-hub auto-download; sampler top_p/top_k; EOS-from-config.
+- **Forward bug #2 (FIXED): RoPE reshape-to-3D corrupts decode.** After the
+  cache fix, greedy still diverged from `mlx_lm` at the 2nd token. An exhausting
+  bisection (env-gated `ROZUM_{LOGIT,LAYER,ATTN,QPROJ}_DEBUG` dumps + a Python
+  `mx.fast.*` monkeypatch oracle) finally pinned it:
+  - Full 26-token prefill matches `mlx_lm` byte-for-byte; the model is correct.
+  - Decode diverges at layer 0. `q_proj` output and the **post-q_norm**, pre-RoPE
+    query match Python; the **post-RoPE** query does NOT: head 0 is rotated, but
+    head 31 is left **un-rotated** (post-RoPE == pre-RoPE for that head).
+  - **Root cause:** mlx-rs `nn::Rope::forward` reshapes `[B, n_heads, L, head_dim]`
+    to `[-1, L, head_dim]` before `mx.fast.rope`. For the single-position decode
+    (`L == 1`) case the resulting `[B*n_heads, 1, head_dim]` trips an MLX fast-rope
+    bug that rotates only the first batch row -> every head past the first keeps
+    an un-rotated query -> wrong attention -> garbage decode. Python `mlx_lm`
+    calls `mx.fast.rope` on the 4D tensor directly and is unaffected.
+  - **Fix:** drop the reshape; apply RoPE on the input shape directly (in mlx-rs
+    `nn::Rope::forward` and the mlx-lm `RopeVariant`). Decode now byte-matches
+    `mlx_lm` (`STEP2 argmax 198`), and `mlx-community/Qwen3-4B-4bit` generates
+    *"The capital of France is Paris."* identically to Python at **~106 T/s**.
+  - **NOT the cause (ruled out, each cost real time):** MLX version (0.31.2
+    reproduces the bug), the mask (None/zeros/bool/causal), attention sinks,
+    array layout/contiguity, device (both GPU), and the SDPA kernel itself --
+    the SDPA was fine; its *query input* was corrupt. The MLX 0.31.2 bump (the
+    chosen path) was carried out (mlx-c `fft.cpp` excluded + `ops.cpp`
+    `global_scale` args patched so MLX 0.31.2 builds) but did **not** fix decode,
+    disproving the version hypothesis. Reverted to MLX 0.30.6 since the RoPE fix
+    is version-independent and keeps the mlx-c submodule unpatched.
+  - Bonus correctness fix (kept): mlx-rs `fast::scaled_dot_product_attention` now
+    passes a null-ctx `mlx_array` (not `mlx_array_new()`, an empty-but-non-null
+    array) for the no-mask / no-sinks case, matching Python's `mask=None`
+    semantics. (Not the decode bug, but the old behavior was wrong.)
+- **Phase 0 dense correctness + speed: DONE.** Qwen3-4B-4bit loads AFQ
+  (904/904), generates byte-identical to `mlx_lm`, decodes ~106 T/s (> candle
+  ~100, ~10x the mistralrs bridge). The native-MLX thesis is fully proven.
+- Next: `MlxNativeBackend` (ChatBackend) wiring; hf-hub auto-download; sampler
+  top_p/top_k; EOS-from-config; then Phase 1 (Qwen3 MoE).
 
-### Gaps in upstream confirmed (to fill / upstream PRs)
+### Gaps fixed in the fork (upstream PR candidates to oxideai/mlx-rs)
 
-Config-driven quantization, single-file load, the `.inner.weight` key remap (all
-done in the fork). Still TODO: top_p/top_k/rep-penalty sampler, EOS-from-config,
-hf-hub download, AND whatever the forward bug turns out to be.
+Config-driven AFQ quantization on load; single-file safetensors fallback; the
+`.inner.weight` key remap; **the `nn::Rope` L=1 reshape bug**; the no-mask/sinks
+null-array fix; KV-cache slot init. Still TODO: top_p/top_k/rep-penalty sampler,
+EOS-from-config, hf-hub download.

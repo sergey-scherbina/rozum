@@ -70,21 +70,23 @@ Decisions locked: vendor-fork `.vendor/mlx-lm` · broad catalog · top-of-chain
 (retire mlx_lm.server) · build on the crate, port only missing models · forward
 is 100% MLX, candle only as external oracle.
 
-- [~] mlx-native-p0 - Phase 0: IN PROGRESS (fork `1205b164`, `.vendor/mlx-lm`).
-  - **Speed thesis PROVEN:** Qwen3-4B-4bit decode **~121 T/s** (> candle ~100,
-    ~10x bridge). Full MLX forward, no candle. This was the whole point.
+- [x] mlx-native-p0 - Phase 0 dense: **DONE** (Qwen3-4B-4bit correct + fast).
   - **AFQ load fixed** (3 upstream gaps: config quantization, single-file,
     `.inner.weight` key remap) -> 904/904 params load.
   - **Forward bug #1 FIXED** (`1bbe6e52`): dead KV cache (slots init'd None ->
-    decode ran cache-less). Output now coherent.
-  - **Forward bug #2 ROOT-CAUSED, fix BLOCKED**: fast-SDPA **single-query
-    (decode) GQA** path in the bundled MLX **0.30.6** is wrong (head 0 ok, later
-    kv-group heads wrong) for byte-identical q/k/v; fixed in pip mlx_lm's MLX
-    **0.31.2**. Bumping mlx-c's MLX to 0.31.0/0.31.2 **fails to compile**
-    (mlx-c 0.5.0 incompatible with MLX 0.31 -- fft.cpp + ops.cpp API changes).
-    Fix needs: coordinated mlx-c+mlx-sys+mlx-rs upgrade (unreleased), OR patch
-    mlx-c 0.5.0 fft/ops for 0.31, OR a correct manual-attention decode workaround
-    in mlx-lm. THEN re-gate parity + wire `MlxNativeBackend`.
+    decode ran cache-less, repetition). Fix: `Some(C::default())`.
+  - **Forward bug #2 FIXED**: mlx-rs `nn::Rope::forward` reshaped to 3D
+    `[-1, L, head_dim]`; for decode (L=1) the `[B*n_heads, 1, head_dim]` shape
+    trips an MLX fast-rope bug rotating only head 0, leaving later heads
+    un-rotated -> garbage. Fix: RoPE on the 4D shape directly (like Python).
+    **NOT the cause** (each cost real time): MLX version (0.31.2 reproduces it),
+    mask, sinks, layout, device, SDPA. The 0.31.2 bump was done (mlx-c fft/ops
+    patched to build) but didn't fix it -> reverted to 0.30.6 (rope fix is
+    version-independent, keeps the submodule unpatched).
+  - **Result:** Qwen3-4B-4bit byte-identical to mlx_lm ("The capital of France
+    is Paris"), **~106 T/s** (> candle ~100, ~10x bridge). Native-MLX thesis
+    fully proven (fast AND correct). Next: `MlxNativeBackend` ChatBackend wiring,
+    then Phase 1 (MoE).
 - [ ] mlx-native-p1 - Phase 1: port `qwen3_moe`; gate on `Qwen3-30B-A3B-4bit`.
 - [ ] mlx-native-p2 - Phase 2: port `qwen3_5` (27B dense) + `qwen3_5_moe`
   (35B-A3B) hybrid; gate on cached `Qwen3.6-{27B,35B-A3B}-4bit`. Headline: the
