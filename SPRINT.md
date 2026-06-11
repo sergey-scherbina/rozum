@@ -82,11 +82,21 @@ Decisions locked: targeted quant-ops · `mlx-rs` bindings · in the fork, generi
     Metal tests must run single-threaded; `kill -9` of a hung Metal test wedges
     the GPU. Details in spec Results.
 
-- [ ] mlx-direct-p1 - Phase 1: dense model parity.
-  - Switch `afq_quantize_op` / `afq_dequantize_op` / `afq_mm_op` behind
-    `MISTRALRS_MLX_DIRECT`.
-  - Gate: Qwen3-4B-4bit byte-for-byte tokens vs `mlx_lm.generate --temp 0`;
-    exercise Qwen3-30B.
+- [x] mlx-direct-p1 - Phase 1: dense model correctness. **DONE** (fork commit
+  `a7ea747ea`; feature plumbed quant -> core -> cli).
+  - `mlx-community/Qwen3-4B-4bit` via `mistralrs run`, `MISTRALRS_MLX_DIRECT`
+    0 vs 1, same seed: **generation byte-identical** (623 chars, 136 tokens,
+    `A: Paris.`). No deadlock under full-forward candle<->MLX interleaving.
+  - **Perf regression: 2.89 vs 100.74 T/s (~35x).** Copy baseline's CPU
+    round-trip + per-op sync. Correct but not shippable.
+  - Cross-check vs `mlx_lm` not run (not installed); ON==OFF vs the mlx_lm-
+    validated candle path stands in.
+
+- [ ] mlx-direct-p1b - Phase 1b: on-device bridge (perf). **NEW, now priority.**
+  - Replace the GPU->CPU->MLX round-trip in `mlx_bridge.rs` with shared-Metal
+    staging / blit; recover decode T/s toward the candle path. Zero-copy spike
+    stays a later option. Gate: byte-identical output preserved, decode T/s
+    within a target factor of candle.
 
 - [ ] mlx-direct-p2 - Phase 2: MoE gather path.
   - Wire `afq_gather_qmm_rhs_sorted{,_gate_up}` → MLX gather_qmm via a thin

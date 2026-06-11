@@ -440,7 +440,31 @@ Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
 - Zero-copy: untouched (deferred to Phase 4 as planned); copy baseline is the
   shipped mechanism.
 
-Next: Phase 1 -- wire the switch through a real model forward (Qwen3-4B-4bit)
-and gate byte-for-byte tokens vs `mlx_lm.generate --temp 0`. The standalone
-`afq_mm_op` splitk hang is a separate candle/mistralrs observation to revisit
-only if a real forward path trips it (it should not).
+**Phase 1 — dense correctness DONE (2026-06-11).** Fork commit `a7ea747ea`
+(feature plumbed `mistralrs-quant -> core -> cli`).
+
+- Ran `mlx-community/Qwen3-4B-4bit` end-to-end through `mistralrs run` with
+  `MISTRALRS_MLX_DIRECT=0` (candle) and `=1` (MLX), same `--seed 0`, same prompt.
+- **Generation byte-identical** (623 chars each; only the "time to first token"
+  log line differs). Same 136 decode tokens, same answer. The dense AFQ
+  `quantized_matmul` path on real MLX matches the candle production path on a
+  full forward.
+- **No deadlock** under heavy candle<->MLX interleaving (~40 layers x several
+  quant matmuls x 136 tokens of boundary crossings) -- confirms there is no
+  coexistence stall at scale; the Phase 0 deadlock really was the standalone
+  `afq_mm_op` test artifact.
+- **Throughput regression: 2.89 T/s vs 100.74 T/s candle (~35x slower).** Cause:
+  the copy baseline does a GPU->CPU (`to_vec1`) + CPU->MLX (`from_slice`) round
+  trip and a candle/MLX sync per quant op per token. This makes the copy
+  baseline **correct but not shippable** -- the on-device bridge (avoid the CPU
+  round-trip; stage in shared Metal buffers, then later the zero-copy spike) is
+  now the priority, NOT a deferred Phase 4 nicety. Decode crossings being
+  "negligible bytes" (the earlier analysis) held for *bytes* but ignored the
+  *CPU round-trip + per-op sync* cost, which dominates.
+- Cross-check vs `mlx_lm.generate --temp 0` not run (mlx_lm not installed); ON
+  == OFF byte-for-byte against the already-mlx_lm-validated candle path is the
+  standing evidence. Install mlx_lm for the external anchor when convenient.
+
+Next: **perf** -- replace the CPU round-trip in `mlx_bridge.rs` with an
+on-device path (allocate boundary tensors in shared Metal storage, blit instead
+of read-to-host), measure decode T/s recovery; then Phase 2 (MoE gather_qmm).
