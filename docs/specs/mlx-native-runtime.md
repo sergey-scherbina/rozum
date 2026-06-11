@@ -368,9 +368,11 @@ now closed; status (highest-impact first):
    `<tool_call>` markup from the text stream and parses the run into
    `ToolUseStart/Delta/End` + `stop_reason=ToolUse` (`parse_tool_calls`; cancelled
    runs skip parsing). E2E `mlx_tool_use_weather` (model emits a `get_weather` call ->
-   `stop=ToolUse`) + unit `parse_tool_calls_extracts`. FOLLOW-UP: feed prior assistant
-   tool-calls / `tool` results back as structured history for multi-turn tool loops
-   (today `tool` role results are folded into the prompt as text).
+   `stop=ToolUse`) + unit `parse_tool_calls_extracts`. Multi-turn tool history:
+   `message_text` renders assistant `ContentBlock::ToolUse` blocks back into the
+   prompt as `<tool_call>\n{json}\n</tool_call>` markup (inverse of `parse_tool_calls`),
+   so a tool loop carries its prior call in history; `tool` results fold in as text
+   via `ToolResult`. Unit `tool_use_round_trips_into_history` (render -> re-parse).
 4. **Multiple EOS — DONE** (rozum `b022dc4`). `read_config` collects the full
    `eos_token_id` set; `stream_generation` stops on any (Qwen3: `<|im_end|>` 151645 +
    `<|endoftext|>` 151643).

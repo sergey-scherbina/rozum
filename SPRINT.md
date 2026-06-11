@@ -283,9 +283,15 @@ vs mistralrs are now mostly closed. Status:
   suppresses `<tool_call>` markup from the text stream and parses the run into
   `ToolUseStart/Delta/End` + `stop_reason=ToolUse` (`parse_tool_calls`). E2E verified:
   `mlx_tool_use_weather` emits a `get_weather` call (`stop=ToolUse`); unit test
-  `parse_tool_calls_extracts`. FOLLOW-UP: feed prior assistant tool-calls / `tool`
-  results back into history for multi-turn tool loops (currently `tool` role results
-  are folded in as text).
+  `parse_tool_calls_extracts`.
+
+- [x] mlx-native-tool-history - **DONE** (rozum-only, pin unchanged). `message_text`
+  now renders assistant `ContentBlock::ToolUse` blocks back into the prompt as
+  Qwen3 `<tool_call>\n{json}\n</tool_call>` markup (the inverse of `parse_tool_calls`),
+  instead of dropping them. Multi-turn tool loops — exactly what Claude Code/Codex
+  do — now carry the prior call in history. Unit test `tool_use_round_trips_into_history`
+  renders then re-parses (round-trip). (`tool` role results already fold in as text
+  via `ToolResult`.)
 
 #### SUPERSEDED: mistralrs-mlx-direct — targeted candle->MLX quant-op bridge
 
