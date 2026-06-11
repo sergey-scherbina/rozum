@@ -1,14 +1,17 @@
 # Agent Instructions
 
-SPRINT: WORK_QUEUE.md
+SPRINT: SPRINT.md
 BACKLOG: BACKLOG.md
 CHANGELOG: CHANGELOG.md
+REPOS: REPOS.md
 specs: docs/specs
 SPEC: SPEC.md
 
 ## Skills
 
-Read `vendor/agent-plugins/multi-agent/commands/multi-agent.md` for the multi-agent coordination protocol.
+Read `vendor/agent-plugins/multi-agent/commands/multi-agent.md` for the multi-agent coordination protocol. The sprint/work queue lives in `SPRINT.md`.
+
+Read `vendor/agent-plugins/multi-repo/commands/multi-repo.md` for the multi-repo workspace protocol. The registry lives in `REPOS.md`; this repo plus the vendored `mistral.rs` fork are treated as a virtual monorepo.
 
 Read `vendor/agent-plugins/spec-dev/commands/spec-dev.md` for the spec-driven development workflow.
 
