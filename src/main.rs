@@ -122,9 +122,11 @@ enum Command {
     /// Example: rozum launch --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit claude
     /// Example: rozum launch --model qwen2.5-coder:32b -- aider --no-auto-commits
     Launch {
-        /// Model spec (same as `gateway --model`)
+        /// Model spec (same as `gateway --model`). Optional: if omitted and a
+        /// shared gateway is already running, reuse its model; if nothing is
+        /// running on a TTY, show an interactive picker (cached models first).
         #[arg(long)]
-        model: String,
+        model: Option<String>,
 
         /// Port for the gateway (auto-picks a free port if not specified)
         #[arg(long)]
@@ -179,6 +181,18 @@ enum ModelsAction {
         /// Model spec: `mlx-community:...`, `hf:<user>/<repo>`, `<ollama-tag>`,
         /// `lmstudio:<repo>`, or an absolute path
         spec: String,
+    },
+
+    /// Delete a cached model (frees disk). Refused if it is the active gateway
+    /// model. HuggingFace/LMStudio dirs are removed directly; Ollama is delegated
+    /// to `ollama rm` (its blobs are content-addressed and shared).
+    Rm {
+        /// Spec of an installed model, exactly as shown by `rozum models list`
+        spec: String,
+
+        /// Skip the confirmation prompt (required for non-interactive use)
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 }
 
@@ -481,12 +495,16 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
 }
 
 async fn run_launch(
-    model_spec: String,
+    model: Option<String>,
     port: Option<u16>,
     n_ctx: Option<u32>,
     dedicated: bool,
     program: Vec<String>,
 ) {
+    let Some(model_spec) = resolve_launch_model(model).await else {
+        // No model and none resolvable (non-TTY without --model, or cancelled).
+        std::process::exit(2);
+    };
     let n_ctx = resolve_n_ctx(&model_spec, n_ctx);
 
     if dedicated {
@@ -510,6 +528,129 @@ async fn run_launch(
     // reconnects). Spec: shared-gateway-failover.
     spawn_failover_watchdog(effective_model.clone(), n_ctx, gw_port);
     exec_agent(program, &effective_model, gw_port).await
+}
+
+/// Resolve which model `rozum launch` should use when `--model` may be omitted:
+///
+/// - `--model X` given → use `X` (mismatch with a running gateway is handled in
+///   `ensure_shared_gateway`: takeover-if-idle, else reuse-with-warning).
+/// - omitted + a healthy gateway already running → reuse its model.
+/// - omitted + nothing running, on a TTY → interactive picker.
+/// - omitted + nothing running, not a TTY → error (scripted launches must pass
+///   `--model`).
+///
+/// Returns `None` to abort (non-TTY without a model, or the user cancelled).
+async fn resolve_launch_model(model: Option<String>) -> Option<String> {
+    use std::io::IsTerminal;
+
+    if let Some(m) = model {
+        return Some(m);
+    }
+
+    // Omitted: reuse a healthy running gateway's model if there is one.
+    if let Some(active) = rozum::share::read_active() {
+        if rozum::share::health_ok(active.port).await {
+            eprintln!("rozum launch: using running model: {}", active.model);
+            return Some(active.model);
+        }
+    }
+
+    // Nothing running. A picker only makes sense on an interactive terminal.
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        eprintln!(
+            "rozum launch: no --model given and no gateway running. Pass --model, \
+             e.g. `rozum launch --model mlx-community:Qwen3-4B-4bit claude`."
+        );
+        return None;
+    }
+
+    pick_model_interactive()
+}
+
+/// Interactive model picker (TTY only). Lists locally-cached models first
+/// (annotated `(cached, <size>)`), then curated downloadable models (annotated
+/// `(not cached, ~<size>)`). Selecting a not-cached model re-confirms the
+/// download. Returns the chosen spec, or `None` if cancelled.
+fn pick_model_interactive() -> Option<String> {
+    use rozum::models;
+    use std::io::Write as _;
+
+    struct Choice {
+        spec: String,
+        label: String,
+        cached: bool,
+    }
+
+    let installed = models::scan_all_installed();
+    let cached: std::collections::HashSet<&str> =
+        installed.iter().map(|m| m.spec.as_str()).collect();
+
+    let mut choices: Vec<Choice> = Vec::new();
+    for m in &installed {
+        choices.push(Choice {
+            spec: m.spec.clone(),
+            label: format!(
+                "{}  (cached, {})",
+                m.spec,
+                models::format_size(m.size_bytes)
+            ),
+            cached: true,
+        });
+    }
+    for r in models::RECOMMENDED {
+        if !cached.contains(r.spec) {
+            choices.push(Choice {
+                spec: r.spec.to_owned(),
+                label: format!(
+                    "{}  (not cached, ~{:.1} GB)  — {}",
+                    r.spec, r.approx_size_gb, r.display_name
+                ),
+                cached: false,
+            });
+        }
+    }
+    if choices.is_empty() {
+        eprintln!("rozum launch: no models available. See `rozum models list --remote`.");
+        return None;
+    }
+
+    eprintln!("Select a model to launch:");
+    for (i, c) in choices.iter().enumerate() {
+        eprintln!("  {:>2}) {}", i + 1, c.label);
+    }
+    eprint!("Enter number [1-{}] (q to cancel): ", choices.len());
+    let _ = std::io::stderr().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return None;
+    }
+    let line = line.trim();
+    if line.is_empty() || line.eq_ignore_ascii_case("q") {
+        eprintln!("cancelled.");
+        return None;
+    }
+    let Some(idx) = line
+        .parse::<usize>()
+        .ok()
+        .filter(|&n| n >= 1 && n <= choices.len())
+    else {
+        eprintln!("rozum launch: '{line}' is not a valid choice.");
+        return None;
+    };
+    let chosen = &choices[idx - 1];
+
+    if !chosen.cached {
+        eprint!("Download {} now and use it? [y/N]: ", chosen.spec);
+        let _ = std::io::stderr().flush();
+        let mut yn = String::new();
+        let _ = std::io::stdin().read_line(&mut yn);
+        if !yn.trim().eq_ignore_ascii_case("y") {
+            eprintln!("cancelled.");
+            return None;
+        }
+    }
+    Some(chosen.spec.clone())
 }
 
 /// Pre-sharing behaviour: load a private model in-process for just this launch.
@@ -566,7 +707,8 @@ async fn ensure_shared_gateway(
     use rozum::share;
     let want_port = port.unwrap_or(share::DEFAULT_GATEWAY_PORT);
 
-    // 1/2. A healthy running gateway → reuse it (warn if it's a different model).
+    // 1/2. A healthy running gateway → reuse it, or take it over if it serves a
+    //      different model and no other client is attached (idle).
     if let Some(active) = share::read_active() {
         if share::health_ok(active.port).await {
             if share::is_reusable(&active, model_spec) {
@@ -574,14 +716,39 @@ async fn ensure_shared_gateway(
                     "rozum launch: reusing shared gateway on :{} (model {})",
                     active.port, active.model
                 );
+                return Some((active.port, active.model));
+            }
+            // Different model. Takeover only when no other launch holds a lease —
+            // a single resident model can't host two, and stealing a model out
+            // from under a live client would break their session.
+            let clients = share::live_lease_count(share::LEASE_FRESH_SECS);
+            if clients == 0 {
+                eprintln!(
+                    "rozum launch: gateway on :{} is idle (model '{}'); taking it over for '{}'…",
+                    active.port, active.model, model_spec
+                );
+                let _ = std::process::Command::new("kill")
+                    .arg(active.pid.to_string())
+                    .status();
+                share::remove_active_if_mine(active.pid);
+                // Wait for the port to free before respawning on it.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                while share::health_ok(active.port).await {
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                // fall through to the spawn path below
             } else {
                 eprintln!(
-                    "rozum launch: gateway already running model '{}'; using it and ignoring \
-                     '{}'. Use --dedicated for a private model, or `rozum gateway switch`.",
+                    "rozum launch: gateway already running model '{}' for {clients} client(s); \
+                     using it and ignoring '{}'. Use --dedicated for a private model, or \
+                     `rozum gateway switch`.",
                     active.model, model_spec
                 );
+                return Some((active.port, active.model));
             }
-            return Some((active.port, active.model));
         }
     }
 
@@ -881,7 +1048,141 @@ async fn run_models(action: ModelsAction) {
         ModelsAction::Info { spec } => {
             run_info(&spec).await;
         }
+
+        ModelsAction::Rm { spec, yes } => {
+            run_models_rm(&spec, yes).await;
+        }
     }
+}
+
+/// Delete a cached model. Resolves `spec` to an installed model (exact match on
+/// the spec shown by `models list`), refuses if it is the active gateway model,
+/// confirms, then removes it: HuggingFace/LMStudio directories directly, Ollama
+/// via `ollama rm` (its blobs are content-addressed and shared).
+async fn run_models_rm(spec: &str, yes: bool) {
+    use rozum::models::{self, ModelSource};
+
+    let installed = models::scan_all_installed();
+    let Some(m) = installed.iter().find(|m| m.spec == spec) else {
+        eprintln!(
+            "rozum models rm: '{spec}' is not installed. Run `rozum models list` for installed specs."
+        );
+        std::process::exit(1);
+    };
+
+    // Refuse to delete the model a live gateway is serving.
+    if let Some(active) = rozum::share::read_active() {
+        if active.model == spec && rozum::share::health_ok(active.port).await {
+            eprintln!(
+                "rozum models rm: '{spec}' is the active gateway model (pid {}); stop it first \
+                 with `rozum gateway stop`.",
+                active.pid
+            );
+            std::process::exit(1);
+        }
+    }
+
+    println!("Will delete this {} model:", m.source.label());
+    println!("  spec: {}", m.spec);
+    println!("  path: {}", m.path.display());
+    println!("  size: {}", models::format_size(m.size_bytes));
+
+    match m.source {
+        ModelSource::Ollama => {
+            // Ollama blobs are content-addressed and shared between models, so a
+            // direct `rm` could corrupt others. Delegate to `ollama rm`.
+            if which("ollama").is_none() {
+                eprintln!(
+                    "rozum models rm: this is an Ollama model and the `ollama` binary was not \
+                     found. Its blobs are shared/content-addressed — not removing directly. \
+                     Install Ollama and run `ollama rm {spec}`."
+                );
+                std::process::exit(1);
+            }
+            if !confirm_delete(yes) {
+                return;
+            }
+            let status = std::process::Command::new("ollama")
+                .arg("rm")
+                .arg(spec)
+                .status();
+            match status {
+                Ok(s) if s.success() => println!("deleted (ollama rm {spec})"),
+                _ => {
+                    eprintln!("rozum models rm: `ollama rm {spec}` failed");
+                    std::process::exit(1);
+                }
+            }
+        }
+        ModelSource::HuggingFace => {
+            // `m.path` is the `models--owner--name` cache directory.
+            if !confirm_delete(yes) {
+                return;
+            }
+            if let Err(e) = std::fs::remove_dir_all(&m.path) {
+                eprintln!(
+                    "rozum models rm: failed to delete {}: {e}",
+                    m.path.display()
+                );
+                std::process::exit(1);
+            }
+            println!(
+                "deleted {}, freed {}",
+                m.spec,
+                models::format_size(m.size_bytes)
+            );
+        }
+        ModelSource::LMStudio => {
+            // `m.path` is the .gguf file; remove its containing repo directory.
+            let dir = m.path.parent().unwrap_or(&m.path).to_path_buf();
+            println!("  (removing directory {})", dir.display());
+            if !confirm_delete(yes) {
+                return;
+            }
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                eprintln!("rozum models rm: failed to delete {}: {e}", dir.display());
+                std::process::exit(1);
+            }
+            println!(
+                "deleted {}, freed {}",
+                m.spec,
+                models::format_size(m.size_bytes)
+            );
+        }
+    }
+}
+
+/// Confirm a destructive delete. `yes` skips the prompt; otherwise a TTY is
+/// prompted (`y` to proceed) and a non-TTY is refused (must pass `--yes`).
+fn confirm_delete(yes: bool) -> bool {
+    use std::io::{IsTerminal, Write as _};
+    if yes {
+        return true;
+    }
+    if !std::io::stdin().is_terminal() {
+        eprintln!("rozum models rm: refusing to delete without confirmation; pass --yes.");
+        return false;
+    }
+    eprint!("Delete this model? [y/N]: ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    if line.trim().eq_ignore_ascii_case("y") {
+        true
+    } else {
+        eprintln!("cancelled.");
+        false
+    }
+}
+
+/// Is `bin` on `PATH`? (dependency-free `which`.)
+fn which(bin: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(bin))
+        .find(|p| p.is_file())
 }
 
 async fn run_info(spec: &str) {

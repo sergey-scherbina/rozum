@@ -109,38 +109,41 @@ Stable port: the shared gateway uses a fixed port (default 8089, `--port`/`ROZUM
 
 ### Model resolution when `--model` is omitted
 
-- [ ] Omitted **and** a gateway is already running → use it; print
-      `using running model: <model>`.
-- [ ] Omitted **and** nothing running, on a TTY → show an interactive picker
-      (below). Non-TTY (piped/CI) → error: "no model specified and no gateway
+- [x] Omitted **and** a gateway is already running → use it; print
+      `using running model: <model>`. (`resolve_launch_model`.)
+- [x] Omitted **and** nothing running, on a TTY → show an interactive picker
+      (below). Non-TTY (piped/CI) → error: "no --model given and no gateway
       running; pass --model".
-- [ ] The picker lists models we can actually run: **cached models first**, each
+- [x] The picker lists models we can actually run: **cached models first**, each
       annotated `(cached, <size>)`; then downloadable models annotated
       `(not cached, ~<size>)`. Data from `models::scan_all_installed()` (cached)
-      + the curated remote list (`models list --remote`).
-- [ ] Selecting a **not-cached** model re-confirms: "Download ~<size> and use it?
-      [y/N]"; on yes, that model becomes the gateway's model (downloaded on first
-      load via hf-hub).
+      + the curated remote list (`models::RECOMMENDED`). (`pick_model_interactive`.)
+- [x] Selecting a **not-cached** model re-confirms: "Download <spec> now and use
+      it? [y/N]"; on yes, that model becomes the gateway's model (downloaded on
+      first load via hf-hub).
 
 ### Model mismatch (requested ≠ running)
 
-- [~] `--model Y` while a gateway serves `X`: **MVP reuses `X` with a warning**
-      (and points the agent's `ANTHROPIC_MODEL` at `X`) for any healthy running
-      gateway — avoids loading a second model. **Takeover-if-idle** is the
-      `launch-model-picker` phase.
+- [x] `--model Y` while a gateway serves `X`: **takeover-if-idle** — when no other
+      launch holds a lease (`live_lease_count == 0`), the running daemon is
+      SIGTERM'd and a fresh one for `Y` is spawned on the same port; otherwise
+      **reuse `X` with a warning** (and point the agent's `ANTHROPIC_MODEL` at
+      `X`) so a live client's session isn't stolen. (`ensure_shared_gateway`.)
 - [x] `--dedicated` always bypasses sharing and runs a private in-process gateway
       on its own port (the pre-feature behaviour), regardless of what is running.
 
 ### Cache deletion
 
-- [ ] `rozum models rm <spec>` resolves the spec to a cached model, prints what
-      will be freed, and **confirms** before deleting. Refuses (no delete) if that
-      model is the **active** gateway model.
-- [ ] HuggingFace (`~/.cache/huggingface/hub/models--…`) and LMStudio (per-model
-      dir) are removed directly. Ollama is delegated to `ollama rm <tag>` if the
-      binary exists, else skipped with a note (its blobs are content-addressed and
-      shared — not safe to `rm` directly).
-- [ ] Prints the reclaimed size on success.
+- [x] `rozum models rm <spec>` resolves the spec to a cached model (exact match
+      on the spec shown by `models list`), prints what will be freed, and
+      **confirms** before deleting. Refuses (no delete) if that model is the
+      **active** gateway model. (`run_models_rm`.)
+- [x] HuggingFace (`~/.cache/huggingface/hub/models--…`) and LMStudio (the
+      per-model repo dir containing the `.gguf`) are removed directly. Ollama is
+      delegated to `ollama rm <tag>` if the binary exists, else refused with a
+      note (its blobs are content-addressed and shared — not safe to `rm`).
+- [x] Prints the reclaimed size on success. (`--yes` skips the prompt for scripts;
+      a non-TTY without `--yes` is refused.)
 
 ### Client transparency on daemon loss (replay, poison, retry)
 
@@ -468,8 +471,34 @@ keep-alive, while a manually-run `rozum gateway` is still kept by HTTP traffic.
 
 Deferred (later phases): the
 launch-local proxy, replay, poison, two-tier backpressure
-(`shared-gateway-proxy`/`-replay-retry`/`-poison`); `switch`/`reload`/`unload`,
-`gateway status`/`stop`, the picker, and `models rm` (their own tasks).
+(`shared-gateway-proxy`/`-replay-retry`/`-poison`); `switch`/`reload`/`unload`.
 
 Verification: `cargo fmt --check` clean; 67 lib tests (3 new in `share`) on the
 default build (no Xcode); `cargo check --features mistralrs` clean.
+
+### `launch-model-picker` (done)
+
+`rozum launch --model` is now optional (`Option<String>`). `resolve_launch_model`
+resolves it: given → use it; omitted + a healthy gateway running → reuse its model
+(`using running model: <model>`); omitted + nothing running on a TTY →
+`pick_model_interactive`; omitted + non-TTY → error. The picker lists
+`models::scan_all_installed()` first as `(cached, <size>)`, then the not-yet-cached
+`models::RECOMMENDED` as `(not cached, ~<GB>)`; a not-cached pick re-confirms the
+download. Mismatch policy is now **takeover-if-idle** in `ensure_shared_gateway`:
+a different running model with **no** live leases is SIGTERM'd and replaced on the
+same port; with live leases it is reused-with-warning (don't steal a live
+session). `--dedicated` still bypasses everything.
+
+### `models-rm` (done)
+
+`rozum models rm <spec> [-y]` (`run_models_rm`): exact-matches `spec` against
+`scan_all_installed()`, refuses if it is the active gateway model (reads
+`active.json` + `health_ok`), prints what will be freed, and confirms
+(`confirm_delete`: `--yes`/`-y` skips; non-TTY without `--yes` refused). Deletes
+HuggingFace (the `models--owner--name` dir) and LMStudio (the repo dir holding the
+`.gguf`) directly via `remove_dir_all`; Ollama is delegated to `ollama rm` (its
+blobs are shared/content-addressed) and refused if the binary is absent. A
+dependency-free `which` helper locates `ollama`.
+
+Verification: `cargo fmt --check` clean; 67 lib tests; default + `--features
+mistralrs` build/check clean.

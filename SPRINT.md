@@ -168,12 +168,12 @@ Spec: `docs/specs/shared-gateway.md`.
   port-bind backstop. Agent reconnects over the brief gap via its own retry. **DONE.**
 - [x] shared-gateway-leases - Lease-refcount lifetime (`leases/<pid>` heartbeat,
   mtime-reap) keeps the daemon up while clients are live; `rozum gateway status`/`stop`. **DONE.**
-- [ ] launch-model-picker - `--model` optional: omitted+running → reuse (print
+- [x] launch-model-picker - `--model` optional: omitted+running → reuse (print
   model); omitted+none on a TTY → interactive picker (cached first with
   `(cached, size)` / `(not cached, ~size)` annotations; non-cached → download
-  confirm); non-TTY → error. Mismatch policy: takeover-if-idle else reuse-with-warning.
-- [ ] models-rm - `rozum models rm <spec>`: confirm, refuse if it is the active
-  model, delete HF/LMStudio dirs directly (Ollama via `ollama rm`), report freed size.
+  confirm); non-TTY → error. Mismatch policy: takeover-if-idle else reuse-with-warning. **DONE.**
+- [x] models-rm - `rozum models rm <spec>`: confirm, refuse if it is the active
+  model, delete HF/LMStudio dirs directly (Ollama via `ollama rm`), report freed size. **DONE.**
 - [ ] shared-gateway-proxy - Launch-local model-free reverse proxy in the request
   path (agent → proxy → daemon), mirroring `mcp-proxy`. Foundation for replay /
   poison / transparent swap. Re-points the agent at the proxy's local port.

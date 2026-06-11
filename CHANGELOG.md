@@ -1,5 +1,28 @@
 # Changelog
 
+## models-rm — delete a cached model from disk
+Completed: 2026-06-11
+`rozum models rm <spec> [-y]` frees disk by deleting a cached model. It
+exact-matches the spec against `scan_all_installed()`, refuses if it is the
+active gateway model (reads `active.json` + health-probes), prints what will be
+freed, and confirms (`--yes`/`-y` skips; a non-TTY without `--yes` is refused).
+HuggingFace (`models--owner--name`) and LMStudio (the repo dir holding the
+`.gguf`) directories are removed directly; Ollama is delegated to `ollama rm`
+(its blobs are content-addressed and shared) and refused if the binary is absent.
+Dependency-free `which` helper added. No new deps.
+
+## launch-model-picker — optional --model, interactive picker, takeover-if-idle
+Completed: 2026-06-11
+`rozum launch --model` is now optional. `resolve_launch_model`: given → use it;
+omitted + a healthy gateway running → reuse its model (`using running model: …`);
+omitted + nothing running on a TTY → interactive `pick_model_interactive` (cached
+models first, `(cached, size)`; then not-cached `RECOMMENDED`, `(not cached, ~GB)`;
+a not-cached pick re-confirms the download); omitted + non-TTY → error. Model
+mismatch now does **takeover-if-idle** in `ensure_shared_gateway`: a different
+running model with no live client leases is SIGTERM'd and replaced on the same
+port; with live leases it is reused-with-warning (don't steal a live session).
+`--dedicated` still bypasses sharing. No new deps.
+
 ## shared-gateway-leases — client leases drive daemon lifetime + status/stop
 Completed: 2026-06-11
 Third phase of `shared-gateway`. Each launch holds a `leases/<pid>` file
