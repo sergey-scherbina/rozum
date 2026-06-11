@@ -40,14 +40,13 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   logits transient too. Byte-identical to single pass
   (test `mlx_qwen35_chunked_prefill_matches_single_pass`, Δ=0). See SPRINT.
 
-- [ ] mlx-native-mem-bound - **NEXT (recommended).** Large-context memory bounding
-  (analog of the mistralrs RAM preflight + context budgeting). Native uses
-  `ConcatKeyValueCache`, which grows unbounded with context; add a preflight against
-  unified memory (estimate KV from config: only full-attention layers hold KV; the
-  GatedDeltaNet conv/recurrent state is O(1)) and surface a clear "lower --n-ctx"
-  message instead of an OOM. `context_window()` already reports
-  `max_position_embeddings`; cap the effective pool. Concrete steps in SPRINT
-  `mlx-native-mem-bound`.
+- [x] mlx-native-mem-bound - DONE (preflight). `run_job` estimates the request's KV
+  footprint (`kv_bytes_per_position * (prompt_len + max_tokens)`, full-attention
+  layers only — GatedDeltaNet state is O(1)) and rejects with a clear "context too
+  large … lower --n-ctx / max_tokens … fits ~N tokens" `ModelError` when it exceeds
+  75% of `available_ram_bytes()` (vm_stat), instead of letting Metal OOM. Unit test
+  `kv_bytes_per_position_estimate`. FOLLOW-UP: a bounded/rotating KV cache to cap
+  resident KV for very long sessions (only if the preflight isn't enough). See SPRINT.
 
 - [x] mlx-native-decode-bug - RESOLVED. The custom-kernel "needs a blocking eval
   per call" rule is a buffer-donation hazard: the kernel's lazy `state_out` gets

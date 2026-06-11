@@ -83,12 +83,82 @@ mod inner {
         events: mpsc::UnboundedSender<ModelResult<ChatEvent>>,
     }
 
+    /// Fraction of currently-available RAM we let the KV cache occupy, leaving
+    /// slack for weights, activations and the OS.
+    const KV_SAFETY_FRAC: f64 = 0.75;
+    /// KV cache element size (bf16 compute dtype).
+    const KV_DTYPE_BYTES: u64 = 2;
+
+    /// Bytes the KV cache grows per context position: `2 (k+v) * full_attn_layers
+    /// * n_kv_heads * head_dim * dtype`. Only the full-attention layers hold KV;
+    /// GatedDeltaNet conv/recurrent state is O(1) in context. Reads `text_config`
+    /// (the multimodal hybrid wrapper) if present, else the top level. `None` if
+    /// the config lacks the needed fields.
+    pub(crate) fn kv_bytes_per_position(cfg: &serde_json::Value) -> Option<u64> {
+        let c = cfg.get("text_config").unwrap_or(cfg);
+        let n_layers = c.get("num_hidden_layers")?.as_u64()?;
+        // Hybrid: every `full_attention_interval`-th layer is full attention.
+        // Dense models omit it -> all layers hold KV.
+        let interval = c
+            .get("full_attention_interval")
+            .and_then(|v| v.as_u64())
+            .filter(|&i| i > 0)
+            .unwrap_or(1);
+        let full_attn_layers = if interval > 1 {
+            n_layers / interval
+        } else {
+            n_layers
+        };
+        let n_kv = c.get("num_key_value_heads")?.as_u64()?;
+        let head_dim = c
+            .get("head_dim")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                let hidden = c.get("hidden_size")?.as_u64()?;
+                let heads = c.get("num_attention_heads")?.as_u64()?;
+                (heads > 0).then(|| hidden / heads)
+            })?;
+        Some(2 * full_attn_layers * n_kv * head_dim * KV_DTYPE_BYTES)
+    }
+
+    /// RAM available right now (macOS `vm_stat`: free + inactive + speculative +
+    /// purgeable pages). `None` if it can't be read.
+    fn available_ram_bytes() -> Option<u64> {
+        let out = std::process::Command::new("vm_stat").output().ok()?;
+        let s = String::from_utf8_lossy(&out.stdout);
+        let page_size = s
+            .lines()
+            .next()
+            .and_then(|l| l.split("page size of ").nth(1))
+            .and_then(|r| r.split(' ').next())
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(16384);
+        let mut pages = 0u64;
+        for line in s.lines() {
+            for label in [
+                "Pages free:",
+                "Pages inactive:",
+                "Pages speculative:",
+                "Pages purgeable:",
+            ] {
+                if let Some(rest) = line.strip_prefix(label) {
+                    if let Ok(v) = rest.trim().trim_end_matches('.').parse::<u64>() {
+                        pages += v;
+                    }
+                }
+            }
+        }
+        (pages > 0).then_some(pages * page_size)
+    }
+
     /// Minimal slice of `config.json` we read on the calling thread (plain JSON,
-    /// no MLX), so the worker only ever touches the `!Send` model.
-    fn read_config(dir: &Path) -> (u32, Vec<u32>, String) {
+    /// no MLX), so the worker only ever touches the `!Send` model. The last field
+    /// is the KV bytes-per-position for the large-context preflight.
+    fn read_config(dir: &Path) -> (u32, Vec<u32>, String, Option<u64>) {
         let mut n_ctx = DEFAULT_N_CTX;
         let mut eos: Vec<u32> = Vec::new();
         let mut model_type = "qwen3".to_string();
+        let mut kv_per_pos = None;
         if let Ok(text) = std::fs::read_to_string(dir.join("config.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                 if let Some(n) = v.get("max_position_embeddings").and_then(|x| x.as_u64()) {
@@ -108,12 +178,13 @@ mod inner {
                     }
                     _ => {}
                 }
+                kv_per_pos = kv_bytes_per_position(&v);
             }
         }
         if eos.is_empty() {
             eos.push(QWEN3_EOS);
         }
-        (n_ctx, eos, model_type)
+        (n_ctx, eos, model_type, kv_per_pos)
     }
 
     pub struct MlxNativeBackend {
@@ -127,7 +198,7 @@ mod inner {
         /// tokenizer_config.json (the layout HuggingFace / mlx-community ship).
         /// `model_id` selects the chat-template variant and labels logs.
         pub async fn new(model_dir: PathBuf, model_id: String) -> ModelResult<Self> {
-            let (n_ctx, eos, model_type) = read_config(&model_dir);
+            let (n_ctx, eos, model_type, kv_per_pos) = read_config(&model_dir);
             let (jobs_tx, jobs_rx) = mpsc::unbounded_channel::<Job>();
             let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
             let label = model_id.clone();
@@ -136,7 +207,9 @@ mod inner {
             // the `!Send` model never crosses a thread boundary.
             thread::Builder::new()
                 .name("mlx-native".into())
-                .spawn(move || worker_main(model_dir, model_type, eos, jobs_rx, ready_tx))
+                .spawn(move || {
+                    worker_main(model_dir, model_type, eos, kv_per_pos, jobs_rx, ready_tx)
+                })
                 .map_err(|e| ModelError::BackendUnavailable(format!("mlx: spawn worker: {e}")))?;
 
             match ready_rx.await {
@@ -219,6 +292,7 @@ mod inner {
         model_dir: PathBuf,
         model_type: String,
         eos: Vec<u32>,
+        kv_per_pos: Option<u64>,
         mut jobs: mpsc::UnboundedReceiver<Job>,
         ready: oneshot::Sender<Result<(), String>>,
     ) {
@@ -260,7 +334,7 @@ mod inner {
         // `blocking_recv` is correct here: this is a plain OS thread with no
         // tokio runtime, so it parks until the next job (or the queue closes).
         while let Some(job) = jobs.blocking_recv() {
-            run_job(&mut model, &mut tokenizer, &template, &eos, job);
+            run_job(&mut model, &mut tokenizer, &template, &eos, kv_per_pos, job);
         }
     }
 
@@ -271,6 +345,7 @@ mod inner {
         tokenizer: &mut Tokenizer,
         template: &str,
         eos: &[u32],
+        kv_per_pos: Option<u64>,
         job: Job,
     ) {
         let prompt_ids = match render_prompt(
@@ -289,6 +364,37 @@ mod inner {
         if std::env::var("ROZUM_MLX_DEBUG").is_ok() {
             eprintln!("PROMPT_IDS len={} {:?}", prompt_ids.len(), prompt_ids);
         }
+        let max_tokens = job
+            .sampling
+            .max_tokens
+            .map(|m| m as usize)
+            .unwrap_or(DEFAULT_MAX_TOKENS);
+
+        // Large-context KV preflight: the `ConcatKeyValueCache` grows ~`kv_per_pos`
+        // bytes per position (prompt + generation), so reject a request that would
+        // not fit in available unified memory with a clear message instead of
+        // letting Metal OOM mid-run. Skipped when either term is unknown.
+        if let (Some(kv), Some(avail)) = (kv_per_pos, available_ram_bytes()) {
+            let positions = (prompt_ids.len() + max_tokens) as u64;
+            let needed = kv.saturating_mul(positions);
+            let budget = (avail as f64 * KV_SAFETY_FRAC) as u64;
+            if needed > budget {
+                let gb = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
+                let fit = (budget / kv.max(1)) as usize;
+                let _ = job.events.send(Err(ModelError::BackendUnavailable(format!(
+                    "mlx: context too large for available memory: {} prompt + {} gen tokens \
+                     need ~{:.1} GB of KV cache but only ~{:.1} GB is free. Lower --n-ctx / \
+                     max_tokens or shorten the prompt (fits ~{} tokens now).",
+                    prompt_ids.len(),
+                    max_tokens,
+                    gb(needed),
+                    gb(budget),
+                    fit,
+                ))));
+                return;
+            }
+        }
+
         let prompt_tokens = Array::from(&prompt_ids[..]).index(NewAxis);
         let temp = job.sampling.temperature.unwrap_or(0.0);
         // top_k <= 0 / top_p >= 1.0 disable those filters (the sampler's defaults).
@@ -298,11 +404,6 @@ mod inner {
         if let Some(s) = job.sampling.seed {
             let _ = mlx_rs::random::seed(s);
         }
-        let max_tokens = job
-            .sampling
-            .max_tokens
-            .map(|m| m as usize)
-            .unwrap_or(DEFAULT_MAX_TOKENS);
 
         let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
         match model {
@@ -630,6 +731,32 @@ mod tests {
     #[test]
     fn resolve_missing_spec_is_none() {
         assert!(resolve_model_dir("definitely/not-a-real-model-xyzzy").is_none());
+    }
+
+    // KV bytes/position: only full-attention layers count (hybrid uses
+    // full_attention_interval), head_dim derived from hidden/heads if absent.
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    fn kv_bytes_per_position_estimate() {
+        use super::inner::kv_bytes_per_position;
+        // Hybrid wrapper: 64 layers, interval 4 -> 16 full-attn; kv heads 4,
+        // head_dim 256, bf16. 2*16*4*256*2 = 65536.
+        let hybrid = serde_json::json!({
+            "text_config": {
+                "num_hidden_layers": 64, "full_attention_interval": 4,
+                "num_key_value_heads": 4, "head_dim": 256
+            }
+        });
+        assert_eq!(kv_bytes_per_position(&hybrid), Some(65_536));
+        // Dense (no interval -> all 28 layers), head_dim from hidden/heads.
+        let dense = serde_json::json!({
+            "num_hidden_layers": 28, "num_key_value_heads": 8,
+            "hidden_size": 4096, "num_attention_heads": 32
+        });
+        // head_dim = 4096/32 = 128; 2*28*8*128*2 = 114688.
+        assert_eq!(kv_bytes_per_position(&dense), Some(114_688));
+        // Missing fields -> None.
+        assert_eq!(kv_bytes_per_position(&serde_json::json!({})), None);
     }
 
     // Deterministic parser check (no model): extracts name + arguments from the
