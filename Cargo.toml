@@ -13,6 +13,10 @@ default = ["mistralrs"]
 local-models = ["dep:candle", "dep:candle-transformers", "dep:tokenizers"]
 gguf = ["dep:llama-cpp-2"]
 mistralrs = ["dep:mistralrs"]
+# Pure-Rust native MLX runtime (no Python, no subprocess). Builds MLX C++ from
+# source via the vendored fork, so it needs the Metal toolchain and is off by
+# default. See docs/specs/mlx-native-runtime.md.
+mlx-native = ["dep:mlx-rs", "dep:mlx-lm", "dep:mlx-lm-utils"]
 
 [dependencies]
 candle = { package = "candle-core", version = "0.10.2", optional = true }
@@ -20,6 +24,14 @@ candle-transformers = { version = "0.10.2", optional = true }
 tokenizers = { version = "0.22.0", features = ["onig"], optional = true }
 llama-cpp-2 = { version = ">=0.1.100", features = ["metal"], optional = true }
 mistralrs = { version = "0.8.1", features = ["metal"], optional = true }
+
+# Native MLX runtime, vendored fork of oxideai/mlx-rs (the `mlx-lm` Rust crates).
+# Path deps for local iteration on the fork (mirrors the mistralrs setup). The
+# `.vendor` tree is gitignored; merging to master must swap these for a git-rev
+# pin on the pushed fork, exactly as the mistralrs [patch.crates-io] below does.
+mlx-rs = { path = "../../.vendor/mlx-lm/mlx-rs", optional = true }
+mlx-lm = { path = "../../.vendor/mlx-lm/mlx-lm", optional = true }
+mlx-lm-utils = { path = "../../.vendor/mlx-lm/mlx-lm-utils", optional = true }
 
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

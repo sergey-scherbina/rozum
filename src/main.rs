@@ -1315,7 +1315,18 @@ async fn build_gateway_backend(
         return Some(rozum::concurrency::admit_wrap(b));
     }
 
-    // 2. Try in-process native MLX via mistralrs (needs --features mistralrs)
+    // 2. Try the pure-Rust native MLX runtime (needs --features mlx-native).
+    //    Preferred over mistralrs for MLX checkpoints: full native MLX forward,
+    //    no candle. Matches only already-local snapshots, so it falls through
+    //    cleanly for GGUF paths or un-cached repos.
+    if let Some(b) = try_build_mlx_native_backend(model_spec, n_ctx).await {
+        rozum::obs::log_event(
+            serde_json::json!({"event":"backend_selected","backend":"mlx-native","model":model_spec}),
+        );
+        return Some(rozum::concurrency::admit_wrap(b));
+    }
+
+    // 3. Try in-process native MLX via mistralrs (needs --features mistralrs)
     if let Some(b) = try_build_mistralrs_backend(model_spec, n_ctx).await {
         rozum::obs::log_event(
             serde_json::json!({"event":"backend_selected","backend":"mistralrs","model":model_spec}),
@@ -1779,6 +1790,45 @@ async fn try_build_mistralrs_backend(
 
 #[cfg(not(feature = "mistralrs"))]
 async fn try_build_mistralrs_backend(
+    _model_spec: &str,
+    _n_ctx: u32,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    None
+}
+
+#[cfg(feature = "mlx-native")]
+async fn try_build_mlx_native_backend(
+    model_spec: &str,
+    _n_ctx: u32,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    use rozum::mlx_native_backend::{MlxNativeBackend, resolve_model_dir};
+    // Filesystem paths and `lmstudio:` specs belong to the GGUF backend.
+    if model_spec.starts_with("lmstudio:") || std::path::Path::new(model_spec).extension().is_some()
+    {
+        return None;
+    }
+    let dir = resolve_model_dir(model_spec)?;
+    let id = rozum::mistralrs_backend::normalize_spec(model_spec);
+    match MlxNativeBackend::new(dir.clone(), id.clone()).await {
+        Ok(b) => {
+            eprintln!(
+                "backend: mlx-native (in-process, Metal) — model: {id} ({})",
+                dir.display()
+            );
+            Some(std::sync::Arc::new(b))
+        }
+        Err(e) => {
+            eprintln!("warning: mlx-native load failed: {e}");
+            rozum::obs::log_event(serde_json::json!({
+                "event": "backend_load_failed", "backend": "mlx-native", "model": id, "error": e.to_string(),
+            }));
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "mlx-native"))]
+async fn try_build_mlx_native_backend(
     _model_spec: &str,
     _n_ctx: u32,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
