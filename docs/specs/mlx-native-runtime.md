@@ -310,10 +310,24 @@ passes on at least one real model.
   MLX checkpoints, and `concurrency_capacity() = 1` lets `admit_wrap` gate it.
   Verified end-to-end through the real SPI: streams a correct "Paris" answer in
   ~3.7s incl. load.
+- **Phase 1 — `qwen3_moe` (Qwen3-30B-A3B): DONE.** Dense Qwen3 attention reused
+  verbatim; the sparse MoE MLP is a router `gate` (quantized Linear) ->
+  `softmax(precise)` -> `argpartition` top-8 -> `take_along_axis` scores ->
+  `SwitchGLU` experts via `gather_qmm` -> score-weighted sum. AFQ experts are 3D
+  `[num_experts, out, in]` raw `Param<Array>` (not `nn::quantize`'d); the load
+  remap is target-aware (add `.inner.weight` only where that param exists, so
+  QuantizedLinear leaves get it and the experts keep `.weight`). Token-sorting
+  (a memory-access optimization in Python `mlx_lm`) is skipped — `gather_qmm` is
+  numerically identical sorted or not. The backend dispatches `qwen3`/`qwen3_moe`
+  by `config.json` `model_type` via a `LoadedModel` enum feeding one generic
+  streaming loop. **Greedy output byte-for-byte identical to Python `mlx_lm`**:
+  `<think>\n\n</think>\n\nThe capital of France is Paris.` (1351 params loaded;
+  ~4.6s load+gen). All 48 layers sparse (`mlp_only_layers=[]`); dense MoE layers
+  fail loud for now.
 - Next gaps: hf-hub auto-download (today reuses an already-downloaded HF
   snapshot via `resolve_model_dir`); sampler top_p/top_k/rep-penalty (the fork
   `Generate` only takes temp); tool-use streaming; EOS list from config. Then
-  Phase 1 (Qwen3 MoE).
+  Phase 2 (Qwen3.6 hybrid: `qwen3_5` 27B + `qwen3_5_moe` 35B-A3B).
 
 ### Gaps fixed in the fork (upstream PR candidates to oxideai/mlx-rs)
 

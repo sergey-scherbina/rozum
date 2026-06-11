@@ -102,7 +102,19 @@ is 100% MLX, candle only as external oracle.
     shared-gateway) into the branch; clean.
   - Gaps still open: hf-hub auto-download; sampler top_p/top_k/rep-penalty
     (Generate only takes temp today); tool-use streaming; EOS list from config.
-- [ ] mlx-native-p1 - Phase 1: port `qwen3_moe`; gate on `Qwen3-30B-A3B-4bit`.
+- [x] mlx-native-p1 - Phase 1: port `qwen3_moe`; gated on `Qwen3-30B-A3B-4bit`.
+  - Dense Qwen3 attention reused verbatim; sparse MoE MLP = router gate
+    (quantized Linear) -> softmax -> argpartition top-8 -> `take_along_axis`
+    scores -> `SwitchGLU` experts via `gather_qmm` -> weighted sum. Experts are
+    AFQ 3D `[E,out,in]` raw `Param<Array>`; target-aware load remap adds
+    `.inner.weight` only where that param exists (QuantizedLinear leaves) so the
+    experts keep `.weight`. Token-sort skipped (gather_qmm identical sorted/not).
+  - **Greedy byte-for-byte identical to Python `mlx_lm`** on Qwen3-30B-A3B-4bit:
+    `<think>\n\n</think>\n\nThe capital of France is Paris.` Loads 1351 params,
+    full load+gen in ~4.6s. Backend dispatches qwen3/qwen3_moe by `model_type`
+    via a `LoadedModel` enum + shared generic streaming loop. (Downloaded the
+    gate model, ~17GB.) E2E test `mlx_moe_chat_capital`.
+  - All 48 layers sparse (mlp_only=[]); dense MoE layers fail loud for now.
 - [ ] mlx-native-p2 - Phase 2: port `qwen3_5` (27B dense) + `qwen3_5_moe`
   (35B-A3B) hybrid; gate on cached `Qwen3.6-{27B,35B-A3B}-4bit`. Headline: the
   models the user runs, pure-Rust. Reuse our AFQ/Qwen3.6 findings.
