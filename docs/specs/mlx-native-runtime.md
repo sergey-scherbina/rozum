@@ -351,22 +351,26 @@ now closed; status (highest-impact first):
    analog of the mistralrs large-prompt stall (`mistralrs-large-prompt-stall.md`); an
    abandoned long request no longer blocks the `concurrency_capacity()=1` worker. Test
    `mlx_qwen35_prefill_cancels_mid_prefill` (bails at chunk 3 of ~6, deterministic).
-2. **Sampling params — DONE for top_p/top_k/seed** (fork `f36c8c3a` + rozum
-   `510c760`). `sample_with(SamplerOpts{temp,top_p,top_k})` (ported from mlx_lm:
-   top-k mask then top-p nucleus then categorical; temp 0 stays argmax, oracle
-   byte-exact) is threaded through all four `Generate` via `set_sampler`; `seed`
-   sets the MLX RNG. Unit test `sample_with_collapses_to_argmax` pins it (top_k=1 and
-   tiny top_p both == argmax). FOLLOW-UP: `repeat_penalty` is still unwired — it needs
-   the generated-token history at sample time (thread a history `Vec` into `Generate`,
-   or move sampling to the host by yielding logits). Tracked: `mlx-native-sampling`.
-3. **Tool use — STILL OPEN (largest gap).** mistralrs renders `req.tools`, parses
-   `tool_calls`, streams `ToolUseStart/Delta/End`, feeds prior calls back. Native
-   drops `req.tools` entirely. **BLOCKER:** the `mlx-lm-utils` chat-template applier
-   (`ApplyChatTemplateArgs`) has **no `tools` field**, so rendering tool definitions
-   into the Qwen3 jinja template needs fork work to thread `tools` into the template
-   context — plus carrying tools in `Job`, parsing `<tool_call>{…}</tool_call>`
-   output, and streaming `ToolUse*` events (mirror the GgufBackend parser,
-   `gguf-tool-use-non-qwen`). Tracked: `mlx-native-tool-use`.
+2. **Sampling params — DONE (top_p/top_k/seed + repeat_penalty)** (fork
+   `f36c8c3a`/`e970b23a` + rozum `510c760`/`3597abe`). `sample_with(SamplerOpts)`
+   (ported from mlx_lm: top-k mask -> top-p nucleus -> categorical; temp 0 stays
+   argmax, oracle byte-exact) threaded through all four `Generate` via `set_sampler`;
+   `seed` -> MLX RNG. `repeat_penalty` (HF convention) over a `REPEAT_CONTEXT=256`
+   window via `take_along_axis`/`put_along_axis` (O(window)); each `Generate` keeps a
+   token history only when penalty != 1.0 (greedy path untouched, skips the per-token
+   id eval). Unit test pins top_k=1/tiny-top_p == argmax + a hard penalty moving the
+   argmax. FOLLOW-UP: none required for single-turn.
+3. **Tool use — DONE** (fork `1fc66029`/`e316dbf7` + rozum `09dfbcc`). `mlx-lm-utils`
+   `ApplyChatTemplateArgs` gained a `tools` field threaded into the minijinja context
+   (and minijinja's `json` feature enabled for the `tojson` filter the Qwen3 template
+   uses). Rozum: `Job` carries `req.tools`; `render_prompt` builds OpenAI-style
+   schemas (`tools_json`) for the template; `stream_generation` suppresses
+   `<tool_call>` markup from the text stream and parses the run into
+   `ToolUseStart/Delta/End` + `stop_reason=ToolUse` (`parse_tool_calls`; cancelled
+   runs skip parsing). E2E `mlx_tool_use_weather` (model emits a `get_weather` call ->
+   `stop=ToolUse`) + unit `parse_tool_calls_extracts`. FOLLOW-UP: feed prior assistant
+   tool-calls / `tool` results back as structured history for multi-turn tool loops
+   (today `tool` role results are folded into the prompt as text).
 4. **Multiple EOS — DONE** (rozum `b022dc4`). `read_config` collects the full
    `eos_token_id` set; `stream_generation` stops on any (Qwen3: `<|im_end|>` 151645 +
    `<|endoftext|>` 151643).
