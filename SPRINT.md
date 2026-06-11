@@ -166,6 +166,26 @@ is 100% MLX, candle only as external oracle.
   off-tree.
 - [~] mlx-native-perf - Phase 5: throughput. Spec section: `docs/specs/mlx-native-runtime.md`
   "Performance".
+
+  **STATUS (2026-06-11) — perf territory mapped; prefill wins shipped, decode levers
+  exhausted.** Where things stand and what to do next:
+  - DONE on master: GatedDeltaNet prefill kernel (~2.9x), chunked prefill +
+    last-position projection (bound the large-prompt peak, byte-identical),
+    decode-bug resolved (per-call eval is correct + FREE).
+  - DEAD ENDS (measured, don't retry): removing the per-call eval (no-op, decode
+    isn't sync-bound); `mx.compile` (net-negative in mlx-rs — per-call param
+    re-marshal/sort overhead > fusion). **Decode (~12 vs Python ~22 t/s) is
+    mlx-rs per-op/per-call FFI-overhead bound, not fusion-bound.**
+  - NEXT (recommended order):
+    1. `mlx-native-mem-bound` — KV preflight + "lower --n-ctx" instead of OOM. The
+       high-value item for the Claude Code long-prompt use case (robustness, not
+       throughput). Tractable.
+    2. SDPA `Causal` mode in prefill — drop the explicit `[chunk,ctx]` mask; smaller
+       prefill peak. Small, low-risk.
+    3. (HARD, deprioritized) decode throughput would need hand-written fused Metal
+       kernels to cut the ~450 dispatches/token, or fork surgery to lower mlx-rs
+       per-op marshalling. Large; decode is usable as-is.
+
   - **DONE — GatedDeltaNet Metal kernel (~2.9x Qwen3.6 prefill)** (master `a001e90`,
     fork `738a4419`). Bound `mx.fast.metal_kernel` in mlx-rs (`fast::MetalKernel`)
     + ported the Python gated-delta kernel: the whole T-step scan in one GPU
@@ -216,11 +236,25 @@ is 100% MLX, candle only as external oracle.
   (`Model::project`): DONE (fork `932967d6`) — avoids the `[1,chunk,vocab]` ~600MB
   logits transient per chunk + the wasted vocab matmul on discarded positions, still
   Δ=0. Follow-up: SDPA `Causal` mode to drop the explicit `[chunk,ctx]` mask too.
-- [ ] mlx-native-mem-bound - large-context memory bounding for the native runtime:
-  the analog of mistralrs's RAM preflight + context budgeting + PagedAttention.
-  Native uses `ConcatKeyValueCache` (grows unbounded with context); bound the KV
-  pool / preflight against unified memory. (Concurrency/admission is already
-  generic via `admit_wrap`; `concurrency_capacity()=1` for native.) See BACKLOG.
+- [ ] mlx-native-mem-bound - **NEXT (recommended).** Large-context memory bounding:
+  the analog of mistralrs's RAM preflight + context budgeting. Native uses
+  `ConcatKeyValueCache` (grows unbounded), so a long prompt + long generation can
+  OOM the unified memory with no warning. Plan (how):
+  1. **Preflight** in `MlxNativeBackend` (or `read_config`): estimate the worst-case
+     KV footprint from config — `2 (k+v) * n_layers_full_attn * n_kv_heads *
+     head_dim * (prompt_len + max_tokens) * dtype_bytes` (only the full-attention
+     layers hold KV; the GatedDeltaNet conv/recurrent state is O(1)). Compare to a
+     fraction of `os` unified memory (reuse the mistralrs RAM-preflight helper if
+     present) and, if it won't fit, return a clear `ModelError` telling the user to
+     lower `--n-ctx` / the prompt — instead of letting Metal OOM.
+  2. **Cap** the effective context: `context_window()` already reports the config
+     `max_position_embeddings`; clamp the admitted prompt+gen to what fits.
+  3. (Optional) a bounded/rotating KV cache to cap resident KV for very long
+     sessions — but note the fixed-size-cache redesign is otherwise moot now that
+     `mx.compile` is a dead end (see `mlx-native-compile`), so only do this if the
+     preflight + cap aren't enough.
+  (Concurrency/admission is already generic via `admit_wrap`;
+  `concurrency_capacity()=1` for native.) See BACKLOG.
 
 #### SUPERSEDED: mistralrs-mlx-direct — targeted candle->MLX quant-op bridge
 
