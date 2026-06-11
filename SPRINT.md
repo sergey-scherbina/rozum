@@ -117,8 +117,8 @@ is 100% MLX, candle only as external oracle.
   - All 48 layers sparse (mlp_only=[]); dense MoE layers fail loud for now.
 - [x] mlx-native-p2 - Phase 2: port `qwen3_5` (27B dense) + `qwen3_5_moe`
   (35B-A3B) hybrid; gate on cached `Qwen3.6-{27B,35B-A3B}-4bit`. Headline: the
-  models the user runs, pure-Rust. IN PROGRESS — this is the Qwen3-Next family,
-  the hard phase. Scope mapped from Python `qwen3_5`/`qwen3_next`/`gated_delta`:
+  models the user runs, pure-Rust. Qwen3-Next family,
+  the hard phase — COMPLETE. Scope mapped from Python `qwen3_5`/`qwen3_next`/`gated_delta`:
   - **DONE (fork `364cebf6`):** the GatedDeltaNet delta-rule recurrence
     (`models/gated_delta.rs`, ops path — mlx-rs has no custom-kernel support, so
     O(T) prefill but byte-exact). Unit-test validated vs Python `gated_delta_ops`
