@@ -31,11 +31,19 @@ costs ~90% of decode time.
 ### Feature flag
 
 - New Cargo feature `mlx-direct` on the `mistralrs-quant` crate (off by
-  default; Apple-Silicon-only). Pulls in `mlx-rs` (pinned 0.x) under
+  default; Apple-Silicon-only). Pulls in **`mlx-rs = "0.25.3"`** (default
+  features `accelerate`+`metal`; transitively `mlx-sys`, which builds MLX from
+  source) under
   `#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "mlx-direct"))]`.
 - `rozum` exposes it as a passthrough feature: `rozum`'s `mistralrs` feature
   may enable `mistralrs/mlx-direct` once the engine feature is plumbed through
   `mistral.rs`'s own feature graph.
+- **Version note (probed 2026-06-11):** `mlx-rs 0.25.3` ships safe wrappers for
+  `quantize` / `dequantize` / `quantized_matmul` (Phases 0–1), but **not** for
+  `gather_qmm` (only on unreleased `main`). The MoE path (Phase 2) therefore
+  calls the C symbol directly via a thin `mlx_sys::mlx_gather_qmm` shim (the
+  symbol is present in the bundled mlx-c). This keeps us on a released crate
+  rather than a git pin.
 
 ### Runtime switch
 
@@ -286,7 +294,12 @@ Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
   Then Qwen3-30B is exercised for the bigger dense-ish surface.
 
 **Phase 2 — MoE gather path (~1 week).**
-- Wire `afq_gather_qmm_rhs_sorted{,_gate_up}` to `mx.gather_qmm`.
+- Wire `afq_gather_qmm_rhs_sorted{,_gate_up}` to MLX `gather_qmm`. Since
+  `mlx-rs 0.25.3` has no safe wrapper, add a thin unsafe shim over
+  `mlx_sys::mlx_gather_qmm(res, x, w, scales, biases, lhs_indices, rhs_indices,
+  transpose, group_size, bits, mode, sorted_indices, stream)` (note the `mode`
+  string and `sorted_indices` flag the candle path already implies). Drop the
+  shim if/when a release exposes the safe wrapper.
 - Gate: Qwen3-30B-A3B-4bit (MoE) and Qwen3.6-35B-A3B-4bit (hybrid MoE) both
   token-for-token vs `mlx_lm`. Qwen3.6 passing here is the headline result —
   it retires the candle-AFQ bug class for the model that motivated all of this.
@@ -357,9 +370,10 @@ Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
   the copy path before any model wiring. The boundary also forces a
   cross-runtime sync point (no pipelining across a quant op) — the main perf
   question for prefill, measured in Phase 4.
-- **mlx-rs API churn** — 0.x crate; pin and bump explicitly. An op we need may
-  be missing or shaped differently than `mlx_lm`'s Python; verify each against
-  the Python reference, not the paper.
+- **mlx-rs API maturity** — 0.25.x tracks MLX-core versions (not chaotic;
+  no yanks), pin `0.25.3` and bump explicitly. One concrete gap already found:
+  `gather_qmm` has no safe wrapper in 0.25.3 (handled via the `mlx_sys` shim
+  above). Verify every op against the `mlx_lm` Python reference, not the paper.
 - **Build coupling** — both candle-Metal and MLX compile Metal; first-build
   time grows and full Xcode is required (already true today). Keep the feature
   off by default so the meeting-room and GGUF builds are unaffected.
@@ -377,6 +391,11 @@ Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
 
 - `mlx-rs` exposes `quantize/dequantize/quantized_matmul/gather_qmm` with a 1:1
   fit to `afq/ops.rs`; `bits`/`group_size` are runtime args (one generic path).
+- **Pinned version: `mlx-rs 0.25.3`** (latest, Dec 2025; tracks MLX-core 0.25.x;
+  default features `accelerate`+`metal`; mlx-sys builds MLX from source). Safe
+  wrappers for `quantize/dequantize/quantized_matmul` are present; **`gather_qmm`
+  is not** (unreleased `main` only) → Phase 2 uses an `mlx_sys::mlx_gather_qmm`
+  C shim (symbol confirmed present in the bundled mlx-c).
 - All safe `Array` constructors copy; `from_raw_data`/`mlx_array_new_data` copy
   too. Zero-copy adopt exists only as mlx-c `mlx_array_new_data_managed`
   (unwrapped by mlx-rs; takes `void*`, not an MTLBuffer).

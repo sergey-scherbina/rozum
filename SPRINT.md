@@ -71,7 +71,8 @@ Spec: `docs/specs/mistralrs-mlx-direct.md`. Branch: `feature/mistralrs-mlx-direc
 Decisions locked: targeted quant-ops · `mlx-rs` bindings · in the fork, generic.
 
 - [ ] mlx-direct-p0 - Phase 0: bridge prototype + single-op parity.
-  - Add `mlx-direct` feature + pinned `mlx-rs` dep (Apple-Silicon-gated).
+  - Add `mlx-direct` feature + `mlx-rs = "0.25.3"` (Apple-Silicon-gated; probed:
+    has quantize/dequantize/quantized_matmul, default metal+accelerate).
   - `afq/mlx_bridge.rs`: candle Metal tensor ↔ `mlx_rs::Array`, **copy
     baseline** (API probe showed true zero-copy is not reachable: candle uses
     Private storage, mlx-c adopt wants a `void*` not an MTLBuffer; copy is
@@ -87,7 +88,8 @@ Decisions locked: targeted quant-ops · `mlx-rs` bindings · in the fork, generi
     exercise Qwen3-30B.
 
 - [ ] mlx-direct-p2 - Phase 2: MoE gather path.
-  - Wire `afq_gather_qmm_rhs_sorted{,_gate_up}` → `mx.gather_qmm`.
+  - Wire `afq_gather_qmm_rhs_sorted{,_gate_up}` → MLX gather_qmm via a thin
+    `mlx_sys::mlx_gather_qmm` shim (no safe wrapper in 0.25.3; C symbol present).
   - Gate: Qwen3-30B-A3B-4bit (MoE) and Qwen3.6-35B-A3B-4bit (hybrid) both
     token-for-token vs `mlx_lm`. Qwen3.6 green = headline result.
 
