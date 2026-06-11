@@ -3225,6 +3225,7 @@ dependencies = [
 [[package]]
 name = "mistralrs"
 version = "0.8.3"
+source = "git+https://github.com/sergey-scherbina/mistral.rs.git?rev=cc5c53d3c525819e2273bb6646e8ffe5998b0a7d#cc5c53d3c525819e2273bb6646e8ffe5998b0a7d"
 dependencies = [
  "anyhow",
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=65ecb58)",
@@ -3251,6 +3252,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-audio"
 version = "0.8.3"
+source = "git+https://github.com/sergey-scherbina/mistral.rs.git?rev=cc5c53d3c525819e2273bb6646e8ffe5998b0a7d#cc5c53d3c525819e2273bb6646e8ffe5998b0a7d"
 dependencies = [
  "anyhow",
  "apodize",
@@ -3261,6 +3263,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-core"
 version = "0.8.3"
+source = "git+https://github.com/sergey-scherbina/mistral.rs.git?rev=cc5c53d3c525819e2273bb6646e8ffe5998b0a7d#cc5c53d3c525819e2273bb6646e8ffe5998b0a7d"
 dependencies = [
  "ahash",
  "akin",
@@ -3359,6 +3362,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-macros"
 version = "0.8.3"
+source = "git+https://github.com/sergey-scherbina/mistral.rs.git?rev=cc5c53d3c525819e2273bb6646e8ffe5998b0a7d#cc5c53d3c525819e2273bb6646e8ffe5998b0a7d"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -3369,6 +3373,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-mcp"
 version = "0.8.3"
+source = "git+https://github.com/sergey-scherbina/mistral.rs.git?rev=cc5c53d3c525819e2273bb6646e8ffe5998b0a7d#cc5c53d3c525819e2273bb6646e8ffe5998b0a7d"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3389,6 +3394,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-paged-attn"
 version = "0.8.3"
+source = "git+https://github.com/sergey-scherbina/mistral.rs.git?rev=cc5c53d3c525819e2273bb6646e8ffe5998b0a7d#cc5c53d3c525819e2273bb6646e8ffe5998b0a7d"
 dependencies = [
  "anyhow",
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=65ecb58)",
@@ -3404,6 +3410,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-quant"
 version = "0.8.3"
+source = "git+https://github.com/sergey-scherbina/mistral.rs.git?rev=cc5c53d3c525819e2273bb6646e8ffe5998b0a7d#cc5c53d3c525819e2273bb6646e8ffe5998b0a7d"
 dependencies = [
  "byteorder",
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=65ecb58)",
@@ -3434,6 +3441,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-sandbox"
 version = "0.8.3"
+source = "git+https://github.com/sergey-scherbina/mistral.rs.git?rev=cc5c53d3c525819e2273bb6646e8ffe5998b0a7d#cc5c53d3c525819e2273bb6646e8ffe5998b0a7d"
 dependencies = [
  "anyhow",
  "itoa",
@@ -3450,6 +3458,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-vision"
 version = "0.8.3"
+source = "git+https://github.com/sergey-scherbina/mistral.rs.git?rev=cc5c53d3c525819e2273bb6646e8ffe5998b0a7d#cc5c53d3c525819e2273bb6646e8ffe5998b0a7d"
 dependencies = [
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle.git?rev=65ecb58)",
  "image",

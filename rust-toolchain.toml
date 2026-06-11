@@ -1,0 +1,6 @@
+# Pinned because the vendored mistralrs pulls candle-core, whose ARM NEON f16 path
+# (cpu/neon.rs, `stdarch_neon_f16`) only compiles on nightly. This exact nightly is
+# the one the chunked-prefill build was verified against; a clean `cargo build` then
+# uses it automatically instead of failing on stable.
+[toolchain]
+channel = "nightly-2026-06-09"

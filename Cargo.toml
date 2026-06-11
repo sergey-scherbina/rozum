@@ -48,10 +48,11 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
-# Use the patched vendored mistralrs (`.vendor/mistral-rs`) until the Qwen3.6
-# RMSNorm fix and MLX-AFQ support land upstream. The vendored crate is 0.8.3,
-# which satisfies the `^0.8.1` requirement above, so cargo transparently swaps
-# the registry build for the local one. See patches/README.md and
-# docs/specs/mlx-weight-layout-and-afq.md section 13.
+# Patched mistralrs (Qwen3.6 RMSNorm/AFQ + Metal chunked prefill) until it lands
+# upstream. Pinned to a fork rev so a clean clone builds reproducibly without the
+# local `.vendor` worktree (which is gitignored). The crate is 0.8.3, satisfying the
+# `^0.8.1` requirement above. To iterate on the vendor locally, temporarily swap this
+# for `{ path = ".vendor/mistral-rs-chunked/mistralrs" }`, then push + bump the rev.
+# See patches/README.md and docs/specs/mistralrs-chunked-prefill.md.
 [patch.crates-io]
-mistralrs = { path = ".vendor/mistral-rs-chunked/mistralrs" }
+mistralrs = { git = "https://github.com/sergey-scherbina/mistral.rs.git", rev = "cc5c53d3c525819e2273bb6646e8ffe5998b0a7d" }
