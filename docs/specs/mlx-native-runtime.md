@@ -374,6 +374,24 @@ per-call eval stays and the decode lever is op fusion, not eval removal. (The ol
 `async_eval` "garbage" was a separate concurrency artifact: MLX's single default
 stream raced a 2nd thread; the real worker is single-threaded.)
 
+### Done: chunked prefill (bound the large-prompt peak)
+
+`Model::prefill` (dense + MoE) processes the prompt in chunks of
+`ROZUM_MLX_PREFILL_CHUNK` (default 2048): each chunk is a forward over `[1, chunk]`
+with the caches carried, so the full-attention layers bound their causal-mask +
+SDPA peak to `[chunk, ctx]` instead of `[T, T]`. (The explicit causal mask
+`linds.ge(rinds)` — shape `[N, offset+N]` — is the O(T²) allocation; the fused SDPA
+tiles but still reads it.) Between chunks all caches are eval'd
+(`LayerCache::collect_eval`) to materialize the chunk's forward and free its
+activations, keeping the deferred graph from spanning the prompt; GatedDeltaNet is
+already O(1) memory. Prefill returns only the last-position logits. **Byte-identical
+to a single pass** (per-position attention + sequential delta scan are
+position-local): `mlx_qwen35_chunked_prefill_matches_single_pass` on a 3000-tok
+prompt gives `max|Δlogit|=0.000e0` (chunk 512 vs single-pass). Port of mistralrs
+`f7efae2` (the native exact scan is faithful across chunks, unlike mistralrs's
+chunked GatedDeltaNet which reorders FP reductions — so we can assert byte-identity,
+they could not).
+
 ### TODO (see SPRINT `mlx-native-perf` + BACKLOG)
 
 1. **mx.compile the forward + small-op fusion** — THE decode lever (decode is
@@ -381,8 +399,10 @@ stream raced a 2nd thread; the real worker is single-threaded.)
    region (it needs its per-call eval): use the O(T) ops path at T=1, or compile
    only the attn/MLP/proj bulk. Thread the stateful caches (KV + conv + recurrent)
    through a pure fn.
-2. **Chunked prefill** (port mistralrs `f7efae2`) — bound the full-attention
-   `[T,T]` activation peak so large prompts don't OOM.
+2. **SDPA `Causal` mode in prefill** — drop the explicit `[chunk, ctx]` mask array
+   (use the fused causal fast-path), and project only the last prompt position
+   (skip `lm_head` over discarded positions). Both shrink the prefill peak further
+   and help single-pass too.
 3. **Large-context memory bounding** — KV-pool bound / preflight (analog of the
    mistralrs RAM preflight + context budgeting); native `ConcatKeyValueCache`
    grows unbounded.

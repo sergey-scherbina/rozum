@@ -32,13 +32,11 @@ mistralrs backend that the native runtime does NOT yet have. (Concurrency,
 admission, backpressure and the OOM circuit breaker already apply generically
 through `concurrency::admit_wrap`, so they are not relisted.)
 
-- [ ] mlx-native-chunked-prefill - port mistralrs `f7efae2` ("chunked prefill on
-  Metal, bound large-prompt activation peak"). The native forward runs the whole
-  `[1, T]` prompt in one pass; the 16 full-attention layers compute full `[T, T]`
-  scores, so a 10k+ token Claude Code prompt can blow the Metal command-buffer /
-  activation peak. Process the prompt in chunks (advance the KV/conv/recurrent
-  caches per chunk) to bound the peak. The GatedDeltaNet kernel is already O(1)
-  memory, so only the full-attention layers need chunking. Gate by prompt length.
+- [x] mlx-native-chunked-prefill - DONE. `Model::prefill` chunks the prompt
+  (`ROZUM_MLX_PREFILL_CHUNK`, default 2048), bounding the full-attention
+  `[chunk, ctx]` causal-mask + SDPA peak instead of `[T, T]`; caches advance and
+  are eval'd between chunks to free activations. Byte-identical to single pass
+  (test `mlx_qwen35_chunked_prefill_matches_single_pass`, Δ=0). See SPRINT.
 
 - [ ] mlx-native-mem-bound - large-context memory bounding (analog of the
   mistralrs RAM preflight + context budgeting + PagedAttention). Native uses

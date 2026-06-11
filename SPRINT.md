@@ -200,12 +200,19 @@ is 100% MLX, candle only as external oracle.
     out: compile the attention/MLP/projection bulk and/or use the O(T) ops path for
     the gated-delta at T=1 (decode) inside the compiled fn. Still needs the
     stateful caches (KV + conv + recurrent) threaded through a pure fn.
-- [ ] mlx-native-chunked-prefill - port `f7efae2` (mistralrs "chunked prefill on
-  Metal") to the native runtime: process the prompt in chunks to BOUND the
-  activation/attention peak so large Claude Code prompts (10k+ tok) don't OOM the
-  Metal command buffer. The native forward currently runs the whole `[1,T]` prompt
-  at once (full `[T,T]` attention in the 16 full-attn layers = the memory peak;
-  the GatedDeltaNet kernel is already O(1) memory). See BACKLOG.
+- [x] mlx-native-chunked-prefill - DONE. `Model::prefill` (qwen3_5 + qwen3_5_moe)
+  processes the prompt in chunks of `ROZUM_MLX_PREFILL_CHUNK` (default 2048), so the
+  full-attention layers bound their `[chunk, ctx]` causal-mask + SDPA peak instead
+  of `[T, T]` (the explicit causal mask `linds.ge(rinds)` is the O(T^2) allocation;
+  the fused SDPA tiles but still reads it). Caches advance across chunks and are
+  eval'd between them (`LayerCache::collect_eval`) to free each chunk's activations
+  and keep the deferred graph from spanning the prompt; GatedDeltaNet is already
+  O(1) memory. Returns only the last-position logits. **Byte-identical to single
+  pass** (the per-position attention + sequential delta scan are position-local):
+  test `mlx_qwen35_chunked_prefill_matches_single_pass` on a 3000-tok prompt gives
+  `max|Δlogit|=0.000e0` (chunk 512 vs single-pass). Follow-up: SDPA `Causal` mode
+  to drop the explicit mask entirely; project only the last position (orthogonal,
+  helps single-pass too).
 - [ ] mlx-native-mem-bound - large-context memory bounding for the native runtime:
   the analog of mistralrs's RAM preflight + context budgeting + PagedAttention.
   Native uses `ConcatKeyValueCache` (grows unbounded with context); bound the KV
