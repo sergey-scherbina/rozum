@@ -151,9 +151,19 @@ is 100% MLX, candle only as external oracle.
     mlx_lm: "Thinking Process:" — worked on the first forward run (only two config
     fixes needed). E2E test `mlx_qwen35_moe_chat`. **Phase 2 COMPLETE.**
 - [ ] mlx-native-p3 - Phase 3: broaden catalog (Llama upstream; Qwen2.5 /
-  Qwen2.5-Coder deltas).
-- [ ] mlx-native-p4 - Phase 4: promote native MLX to top-of-chain for MLX specs;
-  retire `mlx_lm.server`; update SPEC.md resolution chain.
+  Qwen2.5-Coder deltas). SKIPPED for now (user request) — revisit after p4.
+- [x] mlx-native-p4 - Phase 4: native MLX is the DEFAULT backend; `mlx_lm.server`
+  retired (rozum `74b458a`). `default = ["mlx-native"]` (was `["mistralrs"]`);
+  mistralrs is now opt-in `--features mistralrs` (broader-catalog candle fallback,
+  still tried after native MLX). Removed `try_mlx_server` + its chain step; the
+  in-process native runtime supersedes the Python server. Chain is now GGUF ->
+  native MLX -> mistralrs (opt-in) -> LM Studio HTTP -> ROZUM_BACKEND_URL. SPEC.md
+  resolution chain + no-backend hints + select-failed note updated. Default and
+  `--features mistralrs` both build clean. **Open: reproducibility** — mlx-native
+  still uses path deps into the gitignored `.vendor/`; merge-to-master must push
+  the fork (`sergey-scherbina/mlx-rs` branch `rozum-mlx-native`) and switch to a
+  git-rev pin (like the mistralrs `[patch.crates-io]`) so the default builds
+  off-tree.
 
 #### SUPERSEDED: mistralrs-mlx-direct — targeted candle->MLX quant-op bridge
 
