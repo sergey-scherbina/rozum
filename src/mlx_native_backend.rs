@@ -283,6 +283,12 @@ mod inner {
         }
         let prompt_tokens = Array::from(&prompt_ids[..]).index(NewAxis);
         let temp = job.sampling.temperature.unwrap_or(0.0);
+        // top_k <= 0 / top_p >= 1.0 disable those filters (the sampler's defaults).
+        let top_p = job.sampling.top_p.unwrap_or(1.0);
+        let top_k = job.sampling.top_k.map(|k| k as i32).unwrap_or(0);
+        if let Some(s) = job.sampling.seed {
+            let _ = mlx_rs::random::seed(s);
+        }
         let max_tokens = job
             .sampling
             .max_tokens
@@ -292,7 +298,8 @@ mod inner {
         let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
         match model {
             LoadedModel::Qwen3(m) => {
-                let generator = qwen3::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                let mut generator = qwen3::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                generator.set_sampler(top_p, top_k);
                 stream_generation(
                     generator,
                     tokenizer,
@@ -303,7 +310,8 @@ mod inner {
                 );
             }
             LoadedModel::Qwen3Moe(m) => {
-                let generator = qwen3_moe::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                let mut generator = qwen3_moe::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                generator.set_sampler(top_p, top_k);
                 stream_generation(
                     generator,
                     tokenizer,
@@ -318,6 +326,7 @@ mod inner {
                 let mut generator = qwen3_5::Generate::new(m, temp, &prompt_tokens);
                 let c = job.cancel.clone();
                 generator.set_cancel(Box::new(move || c.is_cancelled()));
+                generator.set_sampler(top_p, top_k);
                 stream_generation(
                     generator,
                     tokenizer,
@@ -331,6 +340,7 @@ mod inner {
                 let mut generator = qwen3_5_moe::Generate::new(m, temp, &prompt_tokens);
                 let c = job.cancel.clone();
                 generator.set_cancel(Box::new(move || c.is_cancelled()));
+                generator.set_sampler(top_p, top_k);
                 stream_generation(
                     generator,
                     tokenizer,
