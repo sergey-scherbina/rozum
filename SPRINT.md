@@ -123,21 +123,28 @@ is 100% MLX, candle only as external oracle.
     (`models/gated_delta.rs`, ops path — mlx-rs has no custom-kernel support, so
     O(T) prefill but byte-exact). Unit-test validated vs Python `gated_delta_ops`
     (<1e-3 on a seed-0 case). compute_g + delta_step + sequential scan.
-  - **TODO:** (a) `Qwen3NextGatedDeltaNet` module: depthwise `Conv1d` short-conv
-    + causal conv-state cache, `in_proj_qkvz`/`in_proj_ba`/`A_log`/`dt_bias`,
-    `fix_query_key_value_ordering`, RMSNormGated output; (b) `Qwen3NextAttention`
-    (output-gated: q_proj->queries+gate, `o_proj(out*sigmoid(gate))`) with
-    **partial RoPE** (rotary_dim = head_dim*0.25) — NOTE config uses **mRoPE**
-    (`mrope_section [11,11,10]`, `mrope_interleaved`); for text-only this should
-    reduce to standard partial RoPE but needs verifying; (c) heterogeneous
-    per-layer cache enum (`ConcatKeyValueCache` for full-attn every 4th layer +
-    conv/recurrent state for linear layers); (d) RMSNormGated + weightless
-    rms_norm (ones-weight); (e) model assembly + load: **RMSNorm +1 convention**
-    on all norm weights, `conv1d.weight` moveaxis(2,1), multimodal config is a
-    `text_config` wrapper (`language_model_only`), AFQ load like qwen3_moe;
-    (f) Generate + backend `LoadedModel` arm. Then `qwen3_5_moe` = this attention
-    + the qwen3_moe SwitchGLU + a shared-expert (`shared_expert` + gate).
-  - 27B + 35B-A3B already cached. Validate greedy byte-parity vs Python oracle.
+  - **Phase 2a DONE — `qwen3_5` (Qwen3.6-27B) byte-exact** (fork `9df1dd15`,
+    rozum `b39a49c`). `models/qwen3_5.rs`: output-gated full attention (every 4th
+    layer; q_proj->queries+gate, `o_proj(out*sigmoid(gate))`, partial RoPE
+    rotary_dim=head_dim*0.25 — mRoPE keys ignored for text, confirmed correct) +
+    GatedDeltaNet linear layers (depthwise `Conv1d` + causal conv-state cache +
+    the f32 delta scan) + heterogeneous `LayerCache::{Full(KV), Linear{conv,state}}`
+    + RMSNormGated + weightless q/k rms_norm. Backend `Qwen35` arm; jinja template
+    fallback; sharded-no-index load; `language_model.` prefix strip (skip vision
+    tower); config under `text_config` (rope from nested `rope_parameters`).
+    **Bugs found+fixed during bring-up** (localized via per-layer L2 dumps vs a
+    Python oracle): the mlx-community 4bit checkpoint is already sanitized so the
+    RMSNorm +1 must NOT be re-applied (was doubling norms -> 6x blowup); the delta
+    recurrence must run in f32 not bf16 (greedy drift); and the `A_log` param key
+    is capitalized (was loading as ones -> wrong decay). Greedy output identical
+    to Python mlx_lm: "Here's a thinking process:" (per-layer L2 to ~0.1%). E2E
+    test `mlx_qwen35_chat`.
+  - **Phase 2b TODO — `qwen3_5_moe` (Qwen3.6-35B-A3B):** = the qwen3_5 attention +
+    GatedDeltaNet (reuse) with the MoE MLP = qwen3_moe SwitchGLU + a shared expert
+    (`shared_expert` MLP + `shared_expert_gate`: `y + sigmoid(gate(x))*shared(x)`).
+    35B-A3B cached. NOTE the MoE checkpoint may be in raw/unfused form (experts.N
+    keys) -> then the Python `sanitize` (+1, conv-moveaxis, expert-stack) DOES run;
+    handle that path in the loader.
 - [ ] mlx-native-p3 - Phase 3: broaden catalog (Llama upstream; Qwen2.5 /
   Qwen2.5-Coder deltas).
 - [ ] mlx-native-p4 - Phase 4: promote native MLX to top-of-chain for MLX specs;
