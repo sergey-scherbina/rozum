@@ -55,4 +55,4 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # for `{ path = ".vendor/mistral-rs-chunked/mistralrs" }`, then push + bump the rev.
 # See patches/README.md and docs/specs/mistralrs-chunked-prefill.md.
 [patch.crates-io]
-mistralrs = { git = "https://github.com/sergey-scherbina/mistral.rs.git", rev = "cc5c53d3c525819e2273bb6646e8ffe5998b0a7d" }
+mistralrs = { git = "https://github.com/sergey-scherbina/mistral.rs.git", rev = "6e98a45e23a834543c9ae611d579818b343a24f0" }
