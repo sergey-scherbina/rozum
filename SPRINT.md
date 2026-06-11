@@ -72,9 +72,10 @@ Decisions locked: targeted quant-ops · `mlx-rs` bindings · in the fork, generi
 
 - [ ] mlx-direct-p0 - Phase 0: bridge prototype + single-op parity.
   - Add `mlx-direct` feature + pinned `mlx-rs` dep (Apple-Silicon-gated).
-  - `afq/mlx_bridge.rs`: candle Metal tensor ↔ `mlx_rs::Array`. Settle the
-    interop mechanism (zero-copy shared MTLBuffer → same-device copy → CPU
-    fallback) and record it in the spec Results.
+  - `afq/mlx_bridge.rs`: candle Metal tensor ↔ `mlx_rs::Array`, **copy
+    baseline** (API probe showed true zero-copy is not reachable: candle uses
+    Private storage, mlx-c adopt wants a `void*` not an MTLBuffer; copy is
+    negligible in decode). Settle contiguity/dtype/staging; record in spec.
   - `afq/mlx_direct.rs`: `dequantize` + `quantized_matmul`.
   - Gate: one real AFQ weight dequant + one quantized matmul, byte-for-byte vs
     `mx.*` AND vs the legacy candle op. Blocks all later phases.
@@ -94,11 +95,13 @@ Decisions locked: targeted quant-ops · `mlx-rs` bindings · in the fork, generi
   - AFQ 2/3/6/8-bit, MXFP4, group sizes 32/128, DWQ checkpoints; parametric
     parity test over (bits, group_size).
 
-- [ ] mlx-direct-p4 - Phase 4: perf & default flip.
-  - Benchmark vs legacy (tok/s prefill+decode, peak RSS) on Qwen3.6; remove
-    copies on the decode hot loop; flip build-time default once MLX-direct
-    meets-or-beats legacy and all parity gates are green. Env switch stays as
-    escape hatch.
+- [ ] mlx-direct-p4 - Phase 4: perf, optional zero-copy spike & default flip.
+  - Benchmark copy baseline vs legacy (tok/s prefill+decode, peak RSS) on
+    Qwen3.6. Decode expected to already win; watch prefill (boundary copy +
+    lost cross-runtime overlap). Only if prefill regresses, time-box a zero-copy
+    spike (custom FFI `mlx_array_new_data_managed` + MTLBuffer adoption) or widen
+    the MLX region. Flip build-time default once MLX-direct meets-or-beats legacy
+    and all parity gates are green; env switch stays as escape hatch.
 
 - [ ] runtime-config - Load backend policy and backend list from `rozum.toml`.
   - Support `single`, `fallback`, and `fanout` policies.

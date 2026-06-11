@@ -107,9 +107,10 @@ Design) — it is the highest-risk unknown and is gated before any model wiring.
       `mlx_lm`'s `mx.quantized_matmul` output for a fixed `(x, w)` pair.
 - [ ] `gather_qmm` (MLX-direct) for the MoE expert path matches `mlx_lm`'s
       `mx.gather_qmm` for fixed `(x, w, indices)`.
-- [ ] The candle ↔ MLX bridge is zero-copy for contiguous Metal tensors
-      (verified: no extra MTLBuffer allocation on the hot path) and correct for
-      the non-contiguous fallback.
+- [ ] AFQ weights cross to MLX exactly once (at load / first use) and are
+      cached MLX-side; no per-token weight copy. Activations copy at the
+      boundary (baseline) with bounded, measured cost (decode negligible;
+      prefill quantified in Phase 4).
 - [ ] **Numerical parity gate**: Qwen3-4B-4bit (dense) generates byte-for-byte
       identical tokens to `mlx_lm.generate --temp 0` over a fixed prompt, on the
       MLX-direct path.
@@ -172,44 +173,112 @@ pub(crate) fn afq_mm_op(/* … */) -> Result<Tensor> {
 This keeps the legacy path intact for differential testing and rollback, and
 means the diff is small and reviewable per op.
 
-### The crux: candle ↔ MLX interop on unified memory
+### The crux: candle ↔ MLX interop (API findings)
 
-This is the one genuinely novel piece. candle Metal tensors are `MTLBuffer`s
-owned by candle's allocator; mlx `Array`s are owned by MLX's allocator/stream.
-On Apple Silicon both live in unified memory, so a buffer's `.contents()` is a
-CPU-visible pointer addressable by either runtime.
+This is the one genuinely novel piece, and probing the APIs settled the
+mechanism question — with the opposite conclusion to the naive "they share
+unified memory so just alias the pointer" intuition.
 
-**Phase 0 settles the mechanism by prototype**, in priority order of preference:
+**API facts (verified in source):**
 
-1. **Zero-copy view over the shared MTLBuffer.** Construct an `mlx_rs::Array`
-   that aliases the candle tensor's `MTLBuffer` contents pointer (no copy).
-   Symmetrically, read the MLX result's buffer back into a candle tensor view.
-   Requires MLX to accept an externally-owned buffer and requires care around
-   each runtime's `eval()`/command-buffer lifetime and synchronization.
-2. **Same-device GPU copy.** If aliasing is unsafe across allocators, copy
-   device→device (still no CPU round-trip). Costs one buffer copy per op
-   boundary; acceptable if it still beats the candle kernel, unlikely to.
-3. **CPU round-trip.** Only as a correctness-first fallback to unblock the
-   parity gates; never shipped on the hot path (kills throughput).
+- `mlx-rs` ops are a clean 1:1 match for `afq/ops.rs`:
+  `quantize_device(w, group_size, bits)`,
+  `dequantize_device(w, scales, biases, group_size, bits)`,
+  `quantized_matmul_device(x, w, scales, biases, transpose, group_size, bits)`,
+  `gather_qmm_device(x, w, scales, biases, lhs_indices, rhs_indices, transpose,
+  group_size, bits, sorted_indices)`. `bits`/`group_size` are runtime args, so
+  one generic path covers every bit-width.
+- **Every safe `mlx_rs::Array` constructor copies.** The only non-copying entry
+  is `unsafe Array::from_raw_data(*const c_void, …)` → `mlx_array_new_data`,
+  which in mlx-c **also copies** (`mlx_array_set_data` → `array((T*)data,…)`
+  allocates an MLX buffer and memcpy's).
+- A genuine zero-copy adopt path exists **in mlx-c** —
+  `mlx_array_new_data_managed(void* data, …, dtor)` adopts the pointer and runs
+  a destructor callback — **but** (a) `mlx-rs` does not wrap it (custom FFI
+  needed) and (b) it still takes a raw `void*`, not an `id<MTLBuffer>`.
+- **candle allocates tensors `StorageModePrivate` on macOS**
+  (`candle-core 0.10.2 metal_backend/device.rs`: "Uses StorageModePrivate on
+  macOS for faster GPU access"). A Private buffer has **no CPU-visible
+  `.contents()`** — there is no `void*` to hand the adopt path. candle's
+  buffer is reachable as `MetalStorage::buffer() -> &metal::Buffer` (and
+  `MetalStorage::new(Arc<Buffer>, …)` lets us rebuild a candle tensor around
+  one), so we can get the `MTLBuffer` *object* — but the managed C API wants a
+  memory pointer, not an MTLBuffer handle.
 
-The prototype must answer: lifetime/ownership (who frees the buffer), stream
-synchronization (MLX is async-eval; candle Metal is command-buffer based — we
-must `mx.eval()` / commit at the boundary), and contiguity (MLX expects
-row-major contiguous; non-contiguous candle tensors take the copy fallback).
-The chosen mechanism and its constraints get written back into this spec's
-Results before Phase 1 starts.
+**Conclusion: true zero-copy sharing through the public API is not reachable.**
+It needs MLX to adopt the `id<MTLBuffer>` object itself (possible only via
+custom C++ glue into MLX's `allocator::Buffer` + a no-op deleter + manual
+cross-queue synchronization) and it fights candle's Private storage. That is a
+research spike (deferred to Phase 4), **not** the baseline — and it buys very
+little (see cost analysis). The baseline is an on-device copy at the boundary.
+
+### Cost of the boundary copy (why it is acceptable)
+
+"Copy on device" = a `memcpy`/blit **inside unified memory** — no host
+transfer, no PCIe. Two distinct kinds of data, very different cost:
+
+- **Weights** (`w_q`/`scales`/`biases`, multi-GB): converted to `mlx_rs::Array`
+  **once at load** (or loaded straight into MLX so candle never holds them) and
+  kept resident MLX-side. **Zero per-token weight copies.** This is the bulk of
+  the bytes and it never re-crosses.
+- **Activations** (what actually crosses each quant op): ~one copy each
+  direction, of a tiny tensor.
+  - *Decode* (hot loop, 1 token): activation ≈ `[1, hidden]` ≈ **~10 KB**
+    (Qwen3.6 hidden≈5120, bf16). ~40 layers × ~7 quant matmuls ≈ 280 crossings
+    × 10 KB ≈ ~2.8 MB/token; at ~30 tok/s ≈ ~84 MB/s against ~200–400 GB/s
+    unified bandwidth → **<0.05% of bandwidth. Negligible.**
+  - *Prefill* (P tokens): activation ≈ `[P, hidden]`; at P=2000 ≈ 20 MB/crossing
+    × 280 ≈ ~5.6 GB ≈ **~28 ms** total at ~200 GB/s — small next to the prefill
+    matmuls themselves, but **measurable**. Chunked prefill already caps `P`.
+
+**The real cost is not the bytes — it is the sync point.** Crossing the
+boundary forces serialization: candle must finish the kernel that produced the
+activation (reading it to a CPU-visible staging buffer waits on candle's command
+buffer) and MLX must `eval()` its graph. The two runtimes therefore do **not**
+pipeline across a quant op. In decode (latency-bound, one token) this is free;
+in prefill it costs the lost overlap. This, not the copy, is what Phase 4
+benchmarking must quantify.
+
+### Bridge mechanism (baseline) and the zero-copy spike
+
+`afq/mlx_bridge.rs` (feature-gated), **baseline = copy**:
+
+1. `candle_to_mlx(&Tensor) -> Array`: ensure the source is contiguous and
+   CPU-readable (Private → one blit to a Shared staging buffer, or allocate
+   boundary tensors Shared up front), then `Array::from_raw_data` (copy into an
+   MLX buffer). Forces a candle sync first.
+2. `mlx_to_candle(&Array, &Device) -> Tensor`: `array.eval()`, read its buffer,
+   build a candle Metal tensor (copy in). 
+3. Weights: a one-time `candle_to_mlx` (or direct MLX load) cached on the
+   `AfqLayer`, never repeated.
+
+The prototype still must pin down: contiguity handling, dtype mapping
+(bf16/f16/f32), and the exact staging-buffer strategy. The chosen specifics get
+written back into Results before Phase 1.
+
+**Deferred zero-copy spike (Phase 4, only if prefill copy/sync shows up):**
+custom FFI to `mlx_array_new_data_managed` adopting candle's `id<MTLBuffer>`
+with a no-op deleter and explicit cross-queue synchronization. Tracked as a
+research item, not a dependency of the parity gates. If prefill overlap turns
+out to matter, the cheaper lever is usually to **widen the MLX region** (keep
+adjacent activations MLX-side so fewer ops cross) rather than hack the
+allocators — but that drifts toward `mlx-native-port` and is out of this
+feature's scope.
 
 ### Phased delivery
 
 Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
 
 **Phase 0 — bridge prototype + single-op parity (~3–5 days).**
-- Add the `mlx-direct` feature + `mlx-rs` dep, Apple-Silicon-gated.
-- Implement `mlx_bridge.rs` per the chosen interop mechanism.
+- Add the `mlx-direct` feature + pinned `mlx-rs` dep, Apple-Silicon-gated.
+- Implement `mlx_bridge.rs` with the **copy baseline** (`candle_to_mlx` via
+  staging + `from_raw_data`; `mlx_to_candle` via `eval` + read-back). Settle
+  contiguity, dtype mapping, and staging-buffer strategy.
 - Implement `mlx_direct::dequantize` + `quantized_matmul`.
 - Gate: a standalone test dequantizes one real AFQ weight and runs one
   quantized matmul, both byte-for-byte vs `mx.*` and vs the legacy candle op.
-  *This proves the bridge before any model code depends on it.*
+  *This proves the bridge before any model code depends on it.* No zero-copy
+  work here — correctness first.
 
 **Phase 1 — dense model parity (~1 week).**
 - Wire `afq_quantize_op` / `afq_dequantize_op` / `afq_mm_op` to the switch.
@@ -227,11 +296,17 @@ Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
   path is the whole MLX-community catalog, not just Q4/g64. Add a small
   parametric parity test over (bits, group_size) using synthetic weights.
 
-**Phase 4 — perf & default flip (~3–5 days).**
-- Benchmark MLX-direct vs legacy on Qwen3.6 (tok/s prefill + decode, peak RSS).
-- Remove avoidable copies; ensure the bridge is zero-copy on the decode hot
-  loop. When MLX-direct meets-or-beats legacy *and* all parity gates are green,
-  flip the build-time default and keep the env switch as an escape hatch.
+**Phase 4 — perf, optional zero-copy spike & default flip (~3–5 days).**
+- Benchmark MLX-direct (copy baseline) vs legacy on Qwen3.6 (tok/s prefill +
+  decode, peak RSS). Decode is expected to already meet-or-beat legacy; the
+  question is prefill, where the boundary copy + lost cross-runtime overlap
+  could show.
+- **Only if prefill regresses:** spike the zero-copy adopt path (custom FFI to
+  `mlx_array_new_data_managed`, candle `id<MTLBuffer>` adoption, no-op deleter,
+  cross-queue sync) and/or widen the MLX region for adjacent hot ops. Time-box
+  it; the copy baseline ships if the spike does not clearly pay off.
+- When MLX-direct meets-or-beats legacy *and* all parity gates are green, flip
+  the build-time default and keep the env switch as an escape hatch.
 
 ### Composition with existing work
 
@@ -274,11 +349,14 @@ Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
 
 ## Risks / sharp edges
 
-- **The bridge is the whole risk.** candle-Metal ↔ mlx interop on shared
-  buffers (ownership, async eval/commit synchronization, contiguity) is novel
-  and unproven here. Phase 0 exists solely to de-risk it before model wiring;
-  if zero-copy proves unsafe, the same-device-copy fallback still delivers
-  parity (the primary goal) even if it dents the perf goal.
+- **The bridge is the whole risk — but the copy baseline de-risks it.** True
+  zero-copy is *not* reachable through the public API (candle's Private storage
+  + two separate allocators/queues; mlx-c's adopt path wants a `void*`, not an
+  `id<MTLBuffer>`), so the baseline is an on-device copy whose cost is
+  negligible in decode and bounded in prefill. Phase 0 proves correctness with
+  the copy path before any model wiring. The boundary also forces a
+  cross-runtime sync point (no pipelining across a quant op) — the main perf
+  question for prefill, measured in Phase 4.
 - **mlx-rs API churn** — 0.x crate; pin and bump explicitly. An op we need may
   be missing or shaped differently than `mlx_lm`'s Python; verify each against
   the Python reference, not the paper.
@@ -295,5 +373,22 @@ Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
 
 ## Results
 
-(Filled in per phase. Phase 0 must record the chosen bridge mechanism, its
-zero-copy status, and the single-op parity numbers before Phase 1 begins.)
+### API probe (pre-implementation, 2026-06-11)
+
+- `mlx-rs` exposes `quantize/dequantize/quantized_matmul/gather_qmm` with a 1:1
+  fit to `afq/ops.rs`; `bits`/`group_size` are runtime args (one generic path).
+- All safe `Array` constructors copy; `from_raw_data`/`mlx_array_new_data` copy
+  too. Zero-copy adopt exists only as mlx-c `mlx_array_new_data_managed`
+  (unwrapped by mlx-rs; takes `void*`, not an MTLBuffer).
+- candle (0.10.2) tensors are `StorageModePrivate` on macOS → no CPU-visible
+  pointer to adopt; buffer reachable as `MetalStorage::buffer() -> &Buffer`.
+- **Decision from the probe:** copy baseline is the mechanism; zero-copy is a
+  deferred Phase-4 spike. Cost analysis: weights cross once at load; activation
+  copies are <0.05% bandwidth in decode, ~28 ms total at P=2000 in prefill; the
+  cross-runtime sync point (lost pipelining) is the real prefill cost to watch.
+
+### Per-phase results
+
+(Filled in per phase. Phase 0 must record the final bridge specifics —
+contiguity/dtype/staging strategy — and the single-op parity numbers before
+Phase 1 begins.)
