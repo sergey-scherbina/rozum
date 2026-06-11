@@ -115,9 +115,29 @@ is 100% MLX, candle only as external oracle.
     via a `LoadedModel` enum + shared generic streaming loop. (Downloaded the
     gate model, ~17GB.) E2E test `mlx_moe_chat_capital`.
   - All 48 layers sparse (mlp_only=[]); dense MoE layers fail loud for now.
-- [ ] mlx-native-p2 - Phase 2: port `qwen3_5` (27B dense) + `qwen3_5_moe`
+- [~] mlx-native-p2 - Phase 2: port `qwen3_5` (27B dense) + `qwen3_5_moe`
   (35B-A3B) hybrid; gate on cached `Qwen3.6-{27B,35B-A3B}-4bit`. Headline: the
-  models the user runs, pure-Rust. Reuse our AFQ/Qwen3.6 findings.
+  models the user runs, pure-Rust. IN PROGRESS — this is the Qwen3-Next family,
+  the hard phase. Scope mapped from Python `qwen3_5`/`qwen3_next`/`gated_delta`:
+  - **DONE (fork `364cebf6`):** the GatedDeltaNet delta-rule recurrence
+    (`models/gated_delta.rs`, ops path — mlx-rs has no custom-kernel support, so
+    O(T) prefill but byte-exact). Unit-test validated vs Python `gated_delta_ops`
+    (<1e-3 on a seed-0 case). compute_g + delta_step + sequential scan.
+  - **TODO:** (a) `Qwen3NextGatedDeltaNet` module: depthwise `Conv1d` short-conv
+    + causal conv-state cache, `in_proj_qkvz`/`in_proj_ba`/`A_log`/`dt_bias`,
+    `fix_query_key_value_ordering`, RMSNormGated output; (b) `Qwen3NextAttention`
+    (output-gated: q_proj->queries+gate, `o_proj(out*sigmoid(gate))`) with
+    **partial RoPE** (rotary_dim = head_dim*0.25) — NOTE config uses **mRoPE**
+    (`mrope_section [11,11,10]`, `mrope_interleaved`); for text-only this should
+    reduce to standard partial RoPE but needs verifying; (c) heterogeneous
+    per-layer cache enum (`ConcatKeyValueCache` for full-attn every 4th layer +
+    conv/recurrent state for linear layers); (d) RMSNormGated + weightless
+    rms_norm (ones-weight); (e) model assembly + load: **RMSNorm +1 convention**
+    on all norm weights, `conv1d.weight` moveaxis(2,1), multimodal config is a
+    `text_config` wrapper (`language_model_only`), AFQ load like qwen3_moe;
+    (f) Generate + backend `LoadedModel` arm. Then `qwen3_5_moe` = this attention
+    + the qwen3_moe SwitchGLU + a shared-expert (`shared_expert` + gate).
+  - 27B + 35B-A3B already cached. Validate greedy byte-parity vs Python oracle.
 - [ ] mlx-native-p3 - Phase 3: broaden catalog (Llama upstream; Qwen2.5 /
   Qwen2.5-Coder deltas).
 - [ ] mlx-native-p4 - Phase 4: promote native MLX to top-of-chain for MLX specs;
