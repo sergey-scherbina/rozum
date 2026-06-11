@@ -23,7 +23,7 @@ mod inner {
     };
 
     use mlx_lm::cache::ConcatKeyValueCache;
-    use mlx_lm::models::{qwen3, qwen3_moe};
+    use mlx_lm::models::{qwen3, qwen3_5, qwen3_moe};
     use mlx_lm_utils::tokenizer::{
         ApplyChatTemplateArgs, Chat, Conversation, Tokenizer, load_model_chat_template_from_file,
     };
@@ -46,6 +46,7 @@ mod inner {
     enum LoadedModel {
         Qwen3(qwen3::Model),
         Qwen3Moe(qwen3_moe::Model),
+        Qwen35(qwen3_5::Model),
     }
 
     impl LoadedModel {
@@ -57,6 +58,10 @@ mod inner {
                 "qwen3_moe" => qwen3_moe::load_qwen3_moe_model(dir)
                     .map(LoadedModel::Qwen3Moe)
                     .map_err(|e| format!("mlx: load qwen3_moe {}: {e}", dir.display())),
+                // Qwen3.6 dense (the config wrapper is `qwen3_5`, text is `qwen3_5_text`).
+                "qwen3_5" | "qwen3_5_text" => qwen3_5::load_qwen3_5_model(dir)
+                    .map(LoadedModel::Qwen35)
+                    .map_err(|e| format!("mlx: load qwen3_5 {}: {e}", dir.display())),
                 other => Err(format!("mlx: unsupported model_type '{other}'")),
             }
         }
@@ -224,16 +229,20 @@ mod inner {
                 return;
             }
         };
+        // Chat template: the `chat_template` field of tokenizer_config.json, or
+        // a raw `chat_template.jinja` (multimodal snapshots ship the latter).
         let template =
-            match load_model_chat_template_from_file(model_dir.join("tokenizer_config.json")) {
-                Ok(Some(t)) => t,
-                Ok(None) => {
-                    let _ =
-                        ready.send(Err("mlx: no chat_template in tokenizer_config.json".into()));
-                    return;
-                }
-                Err(e) => {
-                    let _ = ready.send(Err(format!("mlx: chat template: {e}")));
+            match load_model_chat_template_from_file(model_dir.join("tokenizer_config.json"))
+                .ok()
+                .flatten()
+                .or_else(|| std::fs::read_to_string(model_dir.join("chat_template.jinja")).ok())
+            {
+                Some(t) => t,
+                None => {
+                    let _ = ready.send(Err(
+                        "mlx: no chat template (tokenizer_config.json / chat_template.jinja)"
+                            .into(),
+                    ));
                     return;
                 }
             };
@@ -264,6 +273,9 @@ mod inner {
                 return;
             }
         };
+        if std::env::var("ROZUM_MLX_DEBUG").is_ok() {
+            eprintln!("PROMPT_IDS len={} {:?}", prompt_ids.len(), prompt_ids);
+        }
         let prompt_tokens = Array::from(&prompt_ids[..]).index(NewAxis);
         let temp = job.sampling.temperature.unwrap_or(0.0);
         let max_tokens = job
@@ -287,6 +299,18 @@ mod inner {
             }
             LoadedModel::Qwen3Moe(m) => {
                 let generator = qwen3_moe::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                stream_generation(
+                    generator,
+                    tokenizer,
+                    eos,
+                    prompt_ids.len(),
+                    max_tokens,
+                    &job,
+                );
+            }
+            LoadedModel::Qwen35(m) => {
+                // Owns its heterogeneous (KV + conv/recurrent) cache internally.
+                let generator = qwen3_5::Generate::new(m, temp, &prompt_tokens);
                 stream_generation(
                     generator,
                     tokenizer,
@@ -342,6 +366,9 @@ mod inner {
                 return;
             }
             let id = token.item::<u32>();
+            if output_tokens == 0 && std::env::var("ROZUM_MLX_DEBUG").is_ok() {
+                eprintln!("FIRST_TOK {id} (eos={eos})");
+            }
             if id == eos {
                 let _ = job.events.send(Ok(ChatEvent::Done {
                     input_tokens: prompt_len as u32,
@@ -527,5 +554,37 @@ mod tests {
         let text = collect_to_string(stream).await.expect("collect");
         eprintln!("MLX MoE OUTPUT: {text}");
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
+    }
+
+    // Qwen3.6 dense (qwen3_5: hybrid full-attn + GatedDeltaNet). Needs the local
+    // Qwen3.6-27B-4bit snapshot; run:
+    //   cargo test --features mlx-native -- --ignored mlx_qwen35_chat
+    // Greedy prefix must match Python mlx_lm (deterministic; it "thinks" first).
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires local mlx-community/Qwen3.6-27B-4bit"]
+    async fn mlx_qwen35_chat() {
+        use super::MlxNativeBackend;
+        use crate::backend::{ChatBackend, ChatRequest, SamplingParams, collect_to_string};
+
+        let dir = resolve_model_dir("mlx-community:Qwen3.6-27B-4bit")
+            .expect("Qwen3.6-27B-4bit not in HF cache");
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-27B-4bit".into())
+            .await
+            .expect("backend load");
+        let mut req = ChatRequest::simple(
+            "What is the capital of France? Reply in one short sentence. /no_think",
+        );
+        req.sampling = SamplingParams {
+            max_tokens: Some(24),
+            ..Default::default()
+        };
+        let stream = backend.chat(req).await.expect("chat");
+        let text = collect_to_string(stream).await.expect("collect");
+        eprintln!("MLX Q3.6 OUTPUT: {text}");
+        assert!(
+            text.starts_with("Here's a thinking process"),
+            "greedy prefix diverged from Python oracle; got: {text}"
+        );
     }
 }
