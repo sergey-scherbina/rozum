@@ -443,7 +443,7 @@ impl ProxyServer {
             let mut since_seq: usize = 0;
             let mut primed = false;
             loop {
-                let (room_peer, upstream_peer, my_pid, room_name) = {
+                let (room_peer, upstream_peer, my_pid, room_name, agent_name) = {
                     let s = state.lock().await;
                     match (s.current_room.as_ref(), s.upstream_peer.clone()) {
                         (Some(room), Some(up)) => (
@@ -451,6 +451,7 @@ impl ProxyServer {
                             up,
                             s.current_room_participant_id.clone(),
                             s.current_room_name.clone().unwrap_or_default(),
+                            s.client_info_name.clone(),
                         ),
                         // No room (reconnect gap) or no agent peer: wait briefly.
                         _ => {
@@ -522,6 +523,17 @@ impl ProxyServer {
                     if let Some((content, last_from)) =
                         render_channel_delta(delta, my_pid.as_deref())
                     {
+                        // Tier-3 piggyback: also drop the delta where the
+                        // launch-local HTTP proxy can inject it into the agent's
+                        // next request (for clients that take neither this channel
+                        // nor a wait_my_turn loop). Spec: rozum-native-channels.md.
+                        if super::piggyback::enabled() {
+                            super::piggyback::append(
+                                &super::piggyback::project_slug(),
+                                &agent_name,
+                                &content,
+                            );
+                        }
                         let your_turn = turn
                             .get("your_turn")
                             .and_then(|v| v.as_bool())

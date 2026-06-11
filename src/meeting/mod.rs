@@ -3,6 +3,7 @@ pub mod budget;
 pub mod list;
 pub mod mcp_server;
 pub mod participant;
+pub mod piggyback;
 pub mod proxy;
 pub(crate) mod room_client;
 pub mod room_path;
