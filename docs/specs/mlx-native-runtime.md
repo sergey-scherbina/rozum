@@ -237,6 +237,39 @@ passes on at least one real model.
 
 ## Results
 
-(Filled per phase. Phase 0 must record: does the upstream crate load AFQ
-checkpoints as-is; the Qwen3-4B-4bit decode T/s vs candle (~100) and the
-no-bridge speedup vs mlx-direct (~12); and which upstream gaps we had to fill.)
+### Phase 0 -- IN PROGRESS (2026-06-11). Fork `sergey-scherbina/mlx-rs` branch
+`rozum-mlx-native`, commit `1205b164`. Vendored at `.vendor/mlx-lm`.
+
+- **Speed thesis PROVEN.** `mlx-community/Qwen3-4B-4bit` via the upstream
+  `Generate` iterator (release): loads in ~0.3s, **decode ~121 T/s** -- faster
+  than candle (~100) and ~10x the targeted bridge (~12). Full MLX forward, no
+  candle in the graph. This is the whole point of the pivot, confirmed.
+- **AFQ loading: 3 upstream gaps found + fixed** (the "does it load AFQ as-is"
+  Phase 0 risk -- answer was NO, now yes):
+  1. `ModelArgs` ignored config.json's `quantization` block -> `Model::new`
+     built plain `Linear`. Now read it and `nn::quantize(model, gs, bits)`
+     before load so the QuantizedLinear structure matches.
+  2. `load_qwen3_model` required `model.safetensors.index.json`; single-file
+     checkpoints ship only `model.safetensors`. Added a fallback.
+  3. mlx-rs `QuantizedLinear/Embedding` nest the packed weight at
+     `<p>.inner.weight`, but checkpoints store `<p>.weight`; `load_safetensors`
+     is **non-strict** (silently skips unmatched keys -> random weights ->
+     garbage). Custom loader remaps `<p>.weight -> <p>.inner.weight` when a
+     sibling `<p>.scales` exists. **904/904 params load.**
+- **Open: forward numerical bug.** With loading correct, output still
+  degenerates after a correct first token (`<think>` then repetition). The
+  checkpoint is fine (mistralrs/candle runs it coherently with the same 25-token
+  prompt). Structure checks out (causal mask created, RoPE offset from cache,
+  GQA via MLX fast-SDPA, quantized tied lm_head correct), so it is a subtle
+  numeric drift in the v0.0.1 crate. **Next: install `mlx_lm` Python oracle, diff
+  per-layer activations (reuse the `scripts/mlx_ref.py` methodology) to localize,
+  fix, then re-gate byte-for-byte.**
+- Not yet: `MlxNativeBackend` (ChatBackend) wiring -- blocked on the forward fix
+  (no point streaming garbage). hf-hub auto-download, sampler top_p/top_k, EOS
+  from config -- after correctness.
+
+### Gaps in upstream confirmed (to fill / upstream PRs)
+
+Config-driven quantization, single-file load, the `.inner.weight` key remap (all
+done in the fork). Still TODO: top_p/top_k/rep-penalty sampler, EOS-from-config,
+hf-hub download, AND whatever the forward bug turns out to be.
