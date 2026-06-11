@@ -336,6 +336,54 @@ Config-driven AFQ quantization on load; single-file safetensors fallback; the
 null-array fix; KV-cache slot init. Still TODO: top_p/top_k/rep-penalty sampler,
 EOS-from-config, hf-hub download.
 
+## Backend feature parity vs mistralrs (audit 2026-06-11)
+
+The native MLX backend (`src/mlx_native_backend.rs`) reached correctness + the
+prefill memory work, but it does NOT yet have several request-handling features the
+mistralrs backend (`src/mistralrs_backend.rs`) shipped. Audited side-by-side; the
+gaps, highest-impact first:
+
+1. **Mid-prefill cancellation — MISSING (HIGH, same class as the mistralrs
+   large-prompt stall, `docs/specs/mistralrs-large-prompt-stall.md`).** mistralrs
+   races `tokio::select!{ cancel.cancelled() => …, upstream.next() => … }` (biased),
+   so a client disconnect/cancel is honored immediately, even mid-prefill, and the
+   request is dropped so it stops holding the sole sequence slot. The native backend
+   checks `job.cancel.is_cancelled()` only at the top of the per-token decode loop —
+   which runs *after* the first `Generate::next()` has already executed the **entire
+   prefill** synchronously on the single worker thread. So a cancel during a
+   multi-second long-prompt prefill is not honored until prefill finishes, and
+   because the worker is single-threaded (`concurrency_capacity()=1`), that abandoned
+   request blocks every subsequent one — the exact zombie-queue symptom mistralrs
+   fixed. **Fix is now cheap:** check `job.cancel` (and a failed `events.send`, =
+   client dropped) between prefill chunks (the chunked `Model::prefill` loop already
+   has the boundaries) and bail early; the per-token decode check already exists.
+   Tracked: `mlx-native-cancel-prefill`.
+2. **Sampling params — only `temperature` wired.** The SPI `SamplingParams` carries
+   `top_p`, `top_k`, `repeat_penalty`, `seed`, `max_tokens`; mistralrs wires
+   top_p/top_k/max_len. Native passes only `temperature` (+ max_tokens) because the
+   fork `Generate` accepts only `temp`. Needs fork sampler work to thread
+   top_p/top_k/repeat_penalty/seed. Tracked: `mlx-native-sampling`.
+3. **Tool use — entirely absent.** mistralrs renders `req.tools` into the request,
+   parses the model's `tool_calls`, streams `ToolUseStart/Delta/End`, and feeds prior
+   assistant tool-calls + `tool` results back into history. The native `Job` has no
+   `tools` field at all (dropped), `render_prompt` ignores tools, and nothing parses
+   tool-call output. Qwen3/3.6 templates support tools and the model emits
+   `<tool_call>{…}</tool_call>`; the GgufBackend already has such a parser
+   (`gguf-tool-use-non-qwen`). Tracked: `mlx-native-tool-use`.
+4. **Multiple EOS — stops on one token only.** Native stops on a single `eos` (first
+   of the config list). Qwen3 ships `<|im_end|>` (151645) **and** `<|endoftext|>`
+   (151643); generation should stop on the full `eos_token_id` set. Quick fix.
+   Tracked: `mlx-native-multi-eos`.
+5. **Load-time memory preflight / context retry — none.** mistralrs retries a smaller
+   `n_ctx` when the device map refuses + uses PagedAttention to bound the prefill
+   peak. Native has no preflight (folded into `mlx-native-mem-bound`).
+
+Already at parity (generic, not per-backend): concurrency admission / backpressure /
+OOM circuit breaker (via `concurrency::admit_wrap`, `concurrency_capacity()=1`);
+streaming `ChatEvent`s; system/user/assistant/tool role rendering; `<think>`
+reasoning is streamed (as plain text, since native emits raw tokens); max-tokens cap.
+Not used by either backend: `session_id` prompt-prefix caching (advisory, unwired).
+
 ## Performance
 
 **Status (2026-06-11).** Prefill is fast and its large-prompt memory peak is now
