@@ -230,16 +230,32 @@ Spec: `docs/specs/channel-wakeup.md`. rmcp 1.7 confirmed to support both pieces
 - [ ] channel-wakeup-lifecycle - Abort the task on leave / room-switch / teardown
   (same points as `heartbeat_task`/`RoomConn`); de-dup own-authored turns; advance
   `since_seq` past delivered entries so reconnect doesn't replay a notification storm.
-- [ ] channel-wakeup-launch-flag - `rozum launch` injects
+- [x] channel-wakeup-launch-flag - `rozum launch` injects
   `--dangerously-load-development-channels server:rozum` for Claude Code agents
-  (suppressible; CC ≥ 2.1.80; non-`claude` programs untouched).
+  (suppressible; CC ≥ 2.1.80; non-`claude` programs untouched). **DONE** —
+  `ChannelWakeup::flags_for` probes `claude --help` and appends the flag (else
+  degrades silently); `--no-channel-wakeup` suppresses, `--channel-mcp-name`
+  sets the `server:<name>`; threaded through `exec_agent` /
+  `exec_agent_anthropic` for both the shared and `--dedicated`/`--no-model`
+  paths. (The struct + CLI flags pre-existed but were unwired — see runtime-config
+  build fix.) The remaining channel-wakeup items (capability/pusher/lifecycle)
+  are still open.
 
-- [ ] runtime-config - Load backend policy and backend list from `rozum.toml`.
-  - Support `single`, `fallback`, and `fanout` policies.
-  - Support every `BackendEngine` defined in code (`Hello`, `Candle`, `LlamaGguf`, `NativeRust`, `ExternalCommand`, `Gguf`, plus the `mistralrs`/`openai-http` shapes once we settle on their config schema).
-  - Provide a sensible default config that mirrors the gateway/launch auto-detect chain (in-process GGUF → mistralrs → mlx_lm.server → ROZUM_BACKEND_URL).
-  - Useful when a user routinely switches between multiple local + remote backends in different sessions without re-typing `--model`.
-  - Spec first: `docs/specs/runtime-config.md`.
+- [x] runtime-config - Load backend policy and backend list from `rozum.toml`.
+  - `src/config.rs`: `RuntimeConfig` (serde + `toml`) resolved from `$ROZUM_CONFIG`
+    → `./rozum.toml` → `$XDG_CONFIG_HOME/rozum/rozum.toml`; malformed / missing-explicit
+    is a hard error. `single` / `fallback` / `fanout` policies; every engine name
+    accepted (`gguf`/`mistralrs`/`lmstudio`/`mlx`/`url` + the sync `hello`/`candle`/
+    `llama-gguf`/`native-rust`/`external-command`).
+  - `default()` IS the auto-detect chain in code (`[gguf, mistralrs, lmstudio, mlx, url]`,
+    `Fallback`) → zero behaviour change without a `rozum.toml`. The daemon's initial
+    load + every `gateway switch` now walk it (`main.rs::build_from_config`); `--backend`
+    still force-bypasses. `[runtime].model`/`n_ctx` fill in when `--model`/`--n-ctx`
+    omitted; per-backend `url`/`model`/`n_ctx` override.
+  - 12 unit tests (Metal-free); lib suite 101 passing. Also fixed a stray
+    `channel-wakeup` build break swept into the gateway-switch commit (separate fix
+    commit, which also completed the `channel-wakeup-launch-flag` mechanism).
+    Spec: `docs/specs/runtime-config.md`. **DONE.**
 
 ### Qwen3.6 unblocking track (three escalating upstream fixes)
 

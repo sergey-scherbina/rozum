@@ -1,5 +1,6 @@
 mod backend;
 pub mod concurrency;
+pub mod config;
 pub mod discord;
 pub mod gateway;
 pub mod gguf;
@@ -24,6 +25,7 @@ pub use backend::{
     Role, SMOLLM2_135M_INSTRUCT_Q2_K, SMOLLM2_135M_INSTRUCT_Q4_K_M, SamplingParams, StopReason,
     TINY_GGUF_MODELS, ToolDef, collect_to_string,
 };
+pub use config::{BackendChoice, ConfigError, Policy, RuntimeConfig};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiModel<B = HelloBackend> {

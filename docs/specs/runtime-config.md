@@ -116,31 +116,39 @@ still forces exactly one engine, bypassing the config chain.
 
 ## Behavior
 
-- [ ] No config file anywhere → `load()` returns `default()`, whose
+- [x] No config file anywhere → `load()` returns `default()`, whose
       `gateway_chain()` is exactly `[gguf, mistralrs, lmstudio, mlx, url]` in
       that order with `Fallback` policy (current auto-detect chain unchanged).
-- [ ] `$ROZUM_CONFIG` set to an existing file is loaded; set to a missing file
-      is a hard error.
-- [ ] `./rozum.toml` is preferred over the XDG path; XDG path used when no cwd
-      file.
-- [ ] `policy = "single" | "fallback" | "fanout"` parse to the matching
+      *(`default_mirrors_auto_detect_chain`, `empty_body_yields_default_chain`)*
+- [x] `$ROZUM_CONFIG` set to an existing file is loaded; set to a missing file
+      is a hard error (`ExplicitMissing`).
+      *(`load_reads_explicit_config_and_errors_when_missing`)*
+- [x] `./rozum.toml` is preferred over the XDG path; XDG path used when no cwd
+      file. *(by construction in `resolve_path` — cwd checked first, then XDG;
+      not unit-tested because cwd is process-global state.)*
+- [x] `policy = "single" | "fallback" | "fanout"` parse to the matching
       `Policy`; absent → `Fallback`; any other string → error.
-- [ ] Every engine name in the table above parses; an unknown engine name is a
+      *(`parses_all_policies`)*
+- [x] Every engine name in the table above parses; an unknown engine name is a
       hard error naming the accepted set.
-- [ ] `[[backend]]` with no `id` defaults its id to the engine name; duplicate
-      ids are a hard error.
-- [ ] Per-backend `model` / `n_ctx` / `url` / `enabled` parse and override the
+      *(`parses_every_accepted_engine`, `unknown_engine_is_error`)*
+- [x] `[[backend]]` with no `id` defaults its id to the engine name; duplicate
+      ids are a hard error. *(`id_defaults_to_engine_and_dupes_error`)*
+- [x] Per-backend `model` / `n_ctx` / `url` / `enabled` parse and override the
       `[runtime]` defaults; a disabled backend is excluded from
-      `gateway_chain()`.
-- [ ] `gateway_chain()` returns enabled backends in declared order; for `single`
+      `gateway_chain()`. *(`per_backend_overrides_and_disabled`)*
+- [x] `gateway_chain()` returns enabled backends in declared order; for `single`
       it returns just `[runtime].backend` (or the first enabled).
-- [ ] `to_model_runtime_config()` maps in-process engines to their
+      *(`single_policy_picks_named_or_first`)*
+- [x] `to_model_runtime_config()` maps in-process engines to their
       `BackendEngine` and HTTP/native engines to a placeholder, preserving order
-      and policy.
-- [ ] A malformed TOML body is a hard error (not a silent default).
-- [ ] The gateway's injected builder, given the default config, behaves
-      identically to the pre-config `build_gateway_backend` chain (regression
-      guard).
+      and policy. *(`to_model_runtime_config_maps_engines_and_policy`)*
+- [x] A malformed TOML body is a hard error (not a silent default), including an
+      unknown key (`deny_unknown_fields`). *(`malformed_toml_is_error`)*
+- [x] The gateway's injected builder, given the default config, walks the same
+      `[gguf, mistralrs, lmstudio, mlx, url]` order as the pre-config
+      `build_gateway_backend` chain (regression guard via
+      `default_mirrors_auto_detect_chain` + `main.rs::build_from_config`).
 
 ## Out of scope
 
@@ -194,4 +202,36 @@ chain, so the default and the code can't drift.
 
 ## Results
 
-<!-- filled in after verify -->
+Landed as `src/config.rs` (`RuntimeConfig` + `BackendChoice` + `Policy` +
+`ConfigError`), re-exported from `lib.rs`, with the gateway wiring in `main.rs`
+(`load_runtime_config_or_exit`, `build_from_config`, `build_choice`, and a
+config-capturing `gateway_backend_builder(Arc<RuntimeConfig>)`).
+
+- **12 unit tests** in `config.rs`, all Metal-free (no Xcode). Full lib suite
+  101 passing (was 89 at gateway-switch; +12 config, −0). `cargo fmt --check`
+  clean; `cargo build` and `cargo check --features mistralrs` clean.
+- **Zero behaviour change without a `rozum.toml`**: `RuntimeConfig::default()` is
+  the auto-detect chain in code (`[gguf, mistralrs, lmstudio, mlx, url]`,
+  `Fallback`), and the daemon's initial load + every `gateway switch` now walk
+  it via `build_from_config` instead of the old hardcoded `build_gateway_backend`
+  body. `--backend B` still force-bypasses the chain.
+- **`[runtime].model` / `[runtime].n_ctx`** are consulted when `--model` /
+  `--n-ctx` are omitted on `rozum gateway`, so a configured default model no
+  longer has to be re-typed.
+- **Per-backend `url`** lets a `lmstudio`/`mlx`/`url` entry pin an explicit
+  endpoint (built directly as an `OpenAiHttpBackend`); per-backend `model` /
+  `n_ctx` override the `[runtime]` defaults for that entry.
+- **Library/binary split preserved** (from `gateway-switch`): the plan
+  (`gateway_chain()`) lives in the library; the async build (`build_choice`,
+  which needs `--features mistralrs` / HTTP) stays in the binary.
+
+### Incidental build fix
+
+Verifying this phase surfaced that the `gateway-switch` commit (`0edfdee`) had
+swept in stray, incomplete `channel-wakeup` WIP: the `exec_agent` /
+`exec_agent_anthropic` call sites passed a `&channels` argument the function
+signatures never accepted, so `master` failed to build on default features
+(`e50b271` built; `0edfdee` did not). Fixed in a separate commit by threading
+`ChannelWakeup` through and applying `flags_for()` — which also completes the
+`channel-wakeup-launch-flag` mechanism (a capable `claude` now gets
+`--dangerously-load-development-channels` appended at launch).

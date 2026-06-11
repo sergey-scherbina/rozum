@@ -335,11 +335,15 @@ async fn main() {
             action,
         }) => match action {
             None => {
-                let Some(model) = model else {
-                    eprintln!("rozum gateway: --model is required to run the daemon");
+                let cfg = load_runtime_config_or_exit();
+                let Some(model) = model.or_else(|| cfg.model.clone()) else {
+                    eprintln!(
+                        "rozum gateway: --model is required to run the daemon \
+                         (or set [runtime].model in rozum.toml)"
+                    );
                     std::process::exit(2);
                 };
-                run_gateway(port, model, n_ctx).await;
+                run_gateway(port, model, n_ctx, cfg).await;
             }
             Some(GatewayAction::Status) => run_gateway_status().await,
             Some(GatewayAction::Stop { force }) => run_gateway_stop(force),
@@ -463,9 +467,10 @@ async fn start_web_bridge(room_name: String, port: u16, url: String) {
     }
 }
 
-async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>) {
-    let n_ctx = resolve_n_ctx(&model_spec, n_ctx);
-    let backend = match build_gateway_backend(&model_spec, n_ctx).await {
+async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: rozum::RuntimeConfig) {
+    let n_ctx = resolve_n_ctx(&model_spec, n_ctx.or(cfg.n_ctx));
+    let cfg = std::sync::Arc::new(cfg);
+    let backend = match build_from_config(&cfg, &model_spec, n_ctx).await {
         Some(b) => b,
         None => {
             print_no_backend_hints(&model_spec);
@@ -494,7 +499,7 @@ async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>) {
         register_n_ctx: Some(n_ctx),
         // Enable in-place `gateway switch` / lazy `unload` reload: the daemon
         // rebuilds the backend through this same selection chain.
-        builder: Some(gateway_backend_builder()),
+        builder: Some(gateway_backend_builder(std::sync::Arc::clone(&cfg))),
         backend_hint: None,
     };
     if let Err(e) = rozum::gateway::run(backend, port, model_spec, cfg).await {
@@ -589,8 +594,8 @@ impl ChannelWakeup {
             .arg("--help")
             .output()
             .ok()?;
-        let supported = String::from_utf8_lossy(&help.stdout)
-            .contains("dangerously-load-development-channels");
+        let supported =
+            String::from_utf8_lossy(&help.stdout).contains("dangerously-load-development-channels");
         if !supported {
             eprintln!(
                 "rozum launch: this claude build has no channel support; skipping wakeup \
@@ -1564,12 +1569,31 @@ async fn run_info(spec: &str) {
 /// A [`rozum::gateway::BackendBuilder`] over this binary's backend-selection
 /// chain, so the daemon can rebuild a model in place on `gateway switch` and
 /// lazily reload after `unload` — without the library depending on `main`.
-fn gateway_backend_builder() -> rozum::gateway::BackendBuilder {
-    std::sync::Arc::new(|model: String, n_ctx: u32, force: Option<String>| {
+/// Load `rozum.toml` (or the default auto-detect chain) or exit on a malformed /
+/// missing-explicit config — a config the user deliberately wrote must surface,
+/// not silently fall back. See `docs/specs/runtime-config.md`.
+fn load_runtime_config_or_exit() -> rozum::RuntimeConfig {
+    match rozum::RuntimeConfig::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rozum: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// The injected backend builder for the daemon's `Switchboard`. An explicit
+/// `--backend B` (`force`) bypasses the config and forces exactly one engine;
+/// otherwise it walks the configured `gateway_chain()` (fallback semantics).
+fn gateway_backend_builder(
+    cfg: std::sync::Arc<rozum::RuntimeConfig>,
+) -> rozum::gateway::BackendBuilder {
+    std::sync::Arc::new(move |model: String, n_ctx: u32, force: Option<String>| {
+        let cfg = std::sync::Arc::clone(&cfg);
         Box::pin(async move {
             match force.as_deref() {
                 Some(f) => build_gateway_backend_forced(&model, n_ctx, f).await,
-                None => build_gateway_backend(&model, n_ctx).await,
+                None => build_from_config(&cfg, &model, n_ctx).await,
             }
         })
             as std::pin::Pin<
@@ -1579,6 +1603,56 @@ fn gateway_backend_builder() -> rozum::gateway::BackendBuilder {
                 >,
             >
     })
+}
+
+/// Walk the configured backend chain, returning the first backend that builds
+/// (fallback semantics; `single` policy yields a one-element chain). With the
+/// default config this reproduces the old `build_gateway_backend` order exactly:
+/// `gguf → mistralrs → lmstudio → mlx → url`.
+async fn build_from_config(
+    cfg: &rozum::RuntimeConfig,
+    model: &str,
+    n_ctx: u32,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    for choice in cfg.gateway_chain() {
+        if let Some(b) = build_choice(choice, model, n_ctx).await {
+            rozum::obs::log_event(serde_json::json!({
+                "event": "backend_selected_from_config",
+                "backend": choice.engine, "id": choice.id, "model": model,
+            }));
+            return Some(b);
+        }
+    }
+    None
+}
+
+/// Build a single configured backend, applying its per-backend overrides
+/// (`model`, `n_ctx`, `url`). Engines that aren't gateway-servable
+/// (`hello`/`candle`/`llama-gguf`/`native-rust`/`external-command`) yield `None`
+/// so a fallback chain moves past them.
+async fn build_choice(
+    choice: &rozum::BackendChoice,
+    req_model: &str,
+    req_n_ctx: u32,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    use rozum::concurrency::admit_wrap;
+    let model = choice.model.as_deref().unwrap_or(req_model);
+    let n_ctx = choice.n_ctx.unwrap_or(req_n_ctx);
+    match choice.engine.as_str() {
+        // explicit endpoint override → construct the HTTP backend directly
+        "lmstudio" | "mlx" | "mlx_lm" | "url" | "http" if choice.url.is_some() => {
+            let url = choice.url.clone().unwrap();
+            Some(admit_wrap(
+                std::sync::Arc::new(rozum::openai_http::OpenAiHttpBackend::new(url, model))
+                    as std::sync::Arc<dyn rozum::ChatBackend>,
+            ))
+        }
+        "gguf" | "mistralrs" | "lmstudio" | "mlx" | "mlx_lm" | "url" | "http" => {
+            build_gateway_backend_forced(model, n_ctx, &choice.engine).await
+        }
+        // not servable by the gateway (sync/meeting-room engines)
+        _ => None,
+    }
 }
 
 /// Build a backend forcing a specific engine (`gateway switch --backend B`).

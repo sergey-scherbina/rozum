@@ -1,5 +1,43 @@
 # Changelog
 
+## runtime-config — declare backends, policy & default model in `rozum.toml`
+Completed: 2026-06-11
+The gateway's backend selection and default model can now be declared once in a
+`rozum.toml` instead of re-typed as `--model` / `--backend` every session. A new
+`src/config.rs` (`RuntimeConfig`, serde + `toml`) is resolved from `$ROZUM_CONFIG`
+→ `./rozum.toml` → `$XDG_CONFIG_HOME/rozum/rozum.toml`; a malformed file (or a
+`$ROZUM_CONFIG` that points at a missing one) is a hard error rather than a silent
+fall-back, because a config the user deliberately wrote must surface. The schema is
+a `[runtime]` block (`model`, `n_ctx`, `policy`, `backend`) plus an ordered list of
+`[[backend]]` tables (`id`, `engine`, optional `model`/`n_ctx`/`url`/`enabled`).
+Policies: `single` / `fallback` / `fanout`. Engine names span everything rozum can
+build — the gateway engines `gguf`/`mistralrs`/`lmstudio`/`mlx`/`url` and the sync
+meeting-room engines `hello`/`candle`/`llama-gguf`/`native-rust`/`external-command`
+(the latter map to a placeholder in the sync `BackendRegistry`; the gateway builds
+the HTTP/native ones for real).
+
+`RuntimeConfig::default()` **is** the old auto-detect chain in code — `Fallback`
+over `[gguf, mistralrs, lmstudio, mlx, url]` — so a user who never writes a config
+sees zero behaviour change. The daemon's initial model load and every `gateway
+switch` now walk this chain (`main.rs::build_from_config` / `build_choice`,
+returning the first backend that builds), with the config injected into the
+`Switchboard`'s `BackendBuilder` from `gateway-switch`. `--backend B` still
+force-bypasses the chain to a single engine. `[runtime].model` / `[runtime].n_ctx`
+fill in when `--model` / `--n-ctx` are omitted on `rozum gateway`; per-backend
+`url` pins an explicit endpoint for an `lmstudio`/`mlx`/`url` entry. The
+library/binary split from `gateway-switch` is preserved: the plan
+(`gateway_chain()`) lives in the library, the async build stays in the binary. 12
+Metal-free unit tests; lib suite 101 passing. No new deps (`toml` was already in).
+
+### Build fix bundled with this work
+The `gateway-switch` commit had swept in stray, incomplete `channel-wakeup` WIP
+(`exec_agent` / `exec_agent_anthropic` call sites passing a `&channels` argument
+the signatures never accepted), so `master` did not build on default features. A
+separate fix commit threads `ChannelWakeup` through and applies `flags_for()`,
+which also completes the `channel-wakeup-launch-flag` mechanism: a capable
+`claude` now gets `--dangerously-load-development-channels server:<name>` appended
+at launch (`--no-channel-wakeup` suppresses; `--channel-mcp-name` sets the name).
+
 ## gateway-switch — transparent in-place model/backend switch, reload & unload
 Completed: 2026-06-11
 `rozum gateway switch --model Y [--backend B] [--n-ctx N]` swaps the resident
