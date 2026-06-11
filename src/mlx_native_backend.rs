@@ -23,7 +23,7 @@ mod inner {
     };
 
     use mlx_lm::cache::ConcatKeyValueCache;
-    use mlx_lm::models::{qwen3, qwen3_5, qwen3_moe};
+    use mlx_lm::models::{qwen3, qwen3_5, qwen3_5_moe, qwen3_moe};
     use mlx_lm_utils::tokenizer::{
         ApplyChatTemplateArgs, Chat, Conversation, Tokenizer, load_model_chat_template_from_file,
     };
@@ -47,6 +47,7 @@ mod inner {
         Qwen3(qwen3::Model),
         Qwen3Moe(qwen3_moe::Model),
         Qwen35(qwen3_5::Model),
+        Qwen35Moe(qwen3_5_moe::Model),
     }
 
     impl LoadedModel {
@@ -62,6 +63,10 @@ mod inner {
                 "qwen3_5" | "qwen3_5_text" => qwen3_5::load_qwen3_5_model(dir)
                     .map(LoadedModel::Qwen35)
                     .map_err(|e| format!("mlx: load qwen3_5 {}: {e}", dir.display())),
+                // Qwen3.6 MoE (wrapper `qwen3_5_moe`, text `qwen3_5_moe_text`).
+                "qwen3_5_moe" | "qwen3_5_moe_text" => qwen3_5_moe::load_qwen3_5_moe_model(dir)
+                    .map(LoadedModel::Qwen35Moe)
+                    .map_err(|e| format!("mlx: load qwen3_5_moe {}: {e}", dir.display())),
                 other => Err(format!("mlx: unsupported model_type '{other}'")),
             }
         }
@@ -311,6 +316,17 @@ mod inner {
             LoadedModel::Qwen35(m) => {
                 // Owns its heterogeneous (KV + conv/recurrent) cache internally.
                 let generator = qwen3_5::Generate::new(m, temp, &prompt_tokens);
+                stream_generation(
+                    generator,
+                    tokenizer,
+                    eos,
+                    prompt_ids.len(),
+                    max_tokens,
+                    &job,
+                );
+            }
+            LoadedModel::Qwen35Moe(m) => {
+                let generator = qwen3_5_moe::Generate::new(m, temp, &prompt_tokens);
                 stream_generation(
                     generator,
                     tokenizer,
@@ -584,6 +600,37 @@ mod tests {
         eprintln!("MLX Q3.6 OUTPUT: {text}");
         assert!(
             text.starts_with("Here's a thinking process"),
+            "greedy prefix diverged from Python oracle; got: {text}"
+        );
+    }
+
+    // Qwen3.6 MoE (qwen3_5_moe: hybrid backbone + sparse MoE w/ shared expert).
+    // Needs the local Qwen3.6-35B-A3B-4bit snapshot; run:
+    //   cargo test --features mlx-native -- --ignored mlx_qwen35_moe_chat
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires local mlx-community/Qwen3.6-35B-A3B-4bit"]
+    async fn mlx_qwen35_moe_chat() {
+        use super::MlxNativeBackend;
+        use crate::backend::{ChatBackend, ChatRequest, SamplingParams, collect_to_string};
+
+        let dir = resolve_model_dir("mlx-community:Qwen3.6-35B-A3B-4bit")
+            .expect("Qwen3.6-35B-A3B-4bit not in HF cache");
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-35B-A3B-4bit".into())
+            .await
+            .expect("backend load");
+        let mut req = ChatRequest::simple(
+            "What is the capital of France? Reply in one short sentence. /no_think",
+        );
+        req.sampling = SamplingParams {
+            max_tokens: Some(24),
+            ..Default::default()
+        };
+        let stream = backend.chat(req).await.expect("chat");
+        let text = collect_to_string(stream).await.expect("collect");
+        eprintln!("MLX Q3.6-MoE OUTPUT: {text}");
+        assert!(
+            text.starts_with("Thinking Process:"),
             "greedy prefix diverged from Python oracle; got: {text}"
         );
     }
