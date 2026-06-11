@@ -259,26 +259,32 @@ is 100% MLX, candle only as external oracle.
 #### Native MLX — backend feature parity (vs mistralrs)
 
 Audit 2026-06-11 (`docs/specs/mlx-native-runtime.md` "Backend feature parity"): the
-native backend has correctness + the prefill memory work, but several mistralrs
-request-handling features are NOT ported. Highest impact first:
+native backend had correctness + the prefill memory work; the request-handling gaps
+vs mistralrs are now mostly closed. Status:
 
-- [ ] mlx-native-cancel-prefill - **HIGH — the user-flagged gap (cancellation).**
-  Native honors `job.cancel` only per-token in the decode loop, which runs AFTER the
-  first `Generate::next()` has done the whole prefill synchronously on the single
-  worker thread. So a cancel on a long Claude Code prompt is ignored until prefill
-  ends, and with `concurrency_capacity()=1` that abandoned request blocks the queue —
-  the SAME zombie-queue stall mistralrs fixed (`mistralrs-large-prompt-stall.md`, via
-  a `tokio::select!` cancel race + engine reaping). Fix is cheap now: check
-  `job.cancel` + a failed `events.send` (client dropped) BETWEEN prefill chunks
-  (`Model::prefill` already chunks) and bail; the per-token decode check exists.
-- [ ] mlx-native-sampling - native wires only `temperature`; thread `top_p`/`top_k`/
-  `repeat_penalty`/`seed` through (fork `Generate` takes only temp -> fork work).
-- [ ] mlx-native-tool-use - native drops `req.tools` entirely (no tools in `Job`, no
-  tool-call parsing). Carry tools -> template, parse `<tool_call>` output, stream
-  `ToolUse*` events, feed prior calls back. Mirrors GgufBackend's parser; matters for
-  agentic Claude Code / Codex.
-- [ ] mlx-native-multi-eos - stop on the full `eos_token_id` set (Qwen3 has
-  `<|im_end|>`+`<|endoftext|>`); native stops on one only. Quick fix.
+- [x] mlx-native-cancel-prefill - **DONE** (fork `fb263995` + rozum `b022dc4`). The
+  hybrid `Generate` gains a `should_cancel` predicate polled between prefill chunks
+  (`prefill_cancellable` -> `Ok(None)` ends the run); rozum wires it to `job.cancel`,
+  so a cancel/disconnect on a long prompt is honored DURING prefill, not only
+  per-token after it. Closes the native-side analog of the mistralrs large-prompt
+  stall (an abandoned long request no longer blocks the cap-1 worker). Test
+  `mlx_qwen35_prefill_cancels_mid_prefill` (bails at chunk 3 of ~6, deterministic).
+- [x] mlx-native-sampling - **DONE (top_p/top_k/seed)** (fork `f36c8c3a` + rozum
+  `510c760`). `sample_with(SamplerOpts{temp,top_p,top_k})` ported from mlx_lm,
+  threaded through all four `Generate`; greedy (temp 0) stays argmax (oracle byte
+  exact). seed wired to the MLX RNG. Unit test pins top_k=1/tiny-top_p == argmax.
+  FOLLOW-UP: `repeat_penalty` still unwired — it needs the generated-token history
+  at sample time, i.e. either threading a history `Vec` into `Generate` or moving
+  sampling to the host (have `Generate` yield logits). Small, deferred.
+- [x] mlx-native-multi-eos - **DONE** (rozum `b022dc4`). `read_config` collects the
+  full `eos_token_id` set; `stream_generation` stops on any.
+- [ ] mlx-native-tool-use - **STILL OPEN (largest).** Native drops `req.tools`
+  entirely. BLOCKER found: the `mlx-lm-utils` chat-template applier
+  (`ApplyChatTemplateArgs`) has **no `tools` field**, so rendering tool definitions
+  into the Qwen3 jinja template needs fork work in `mlx-lm-utils` (thread `tools`
+  into the template context) — plus carrying tools in `Job`, parsing the model's
+  `<tool_call>{…}</tool_call>` output, and streaming `ToolUse*` events (mirror the
+  GgufBackend parser). Matters for agentic Claude Code / Codex; scoped as its own task.
 
 #### SUPERSEDED: mistralrs-mlx-direct — targeted candle->MLX quant-op bridge
 

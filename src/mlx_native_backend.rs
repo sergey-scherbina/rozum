@@ -84,9 +84,9 @@ mod inner {
 
     /// Minimal slice of `config.json` we read on the calling thread (plain JSON,
     /// no MLX), so the worker only ever touches the `!Send` model.
-    fn read_config(dir: &Path) -> (u32, u32, String) {
+    fn read_config(dir: &Path) -> (u32, Vec<u32>, String) {
         let mut n_ctx = DEFAULT_N_CTX;
-        let mut eos = QWEN3_EOS;
+        let mut eos: Vec<u32> = Vec::new();
         let mut model_type = "qwen3".to_string();
         if let Ok(text) = std::fs::read_to_string(dir.join("config.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -96,21 +96,21 @@ mod inner {
                 if let Some(t) = v.get("model_type").and_then(|x| x.as_str()) {
                     model_type = t.to_string();
                 }
-                // eos_token_id is an int on Qwen3; take the first if it's a list.
+                // eos_token_id is an int or a list; stop on ALL of them (Qwen3
+                // ships <|im_end|> 151645 + <|endoftext|> 151643).
                 match v.get("eos_token_id") {
                     Some(serde_json::Value::Number(n)) => {
-                        if let Some(id) = n.as_u64() {
-                            eos = id as u32;
-                        }
+                        eos.extend(n.as_u64().map(|id| id as u32));
                     }
                     Some(serde_json::Value::Array(a)) => {
-                        if let Some(id) = a.first().and_then(|x| x.as_u64()) {
-                            eos = id as u32;
-                        }
+                        eos.extend(a.iter().filter_map(|x| x.as_u64()).map(|id| id as u32));
                     }
                     _ => {}
                 }
             }
+        }
+        if eos.is_empty() {
+            eos.push(QWEN3_EOS);
         }
         (n_ctx, eos, model_type)
     }
@@ -216,7 +216,7 @@ mod inner {
     fn worker_main(
         model_dir: PathBuf,
         model_type: String,
-        eos: u32,
+        eos: Vec<u32>,
         mut jobs: mpsc::UnboundedReceiver<Job>,
         ready: oneshot::Sender<Result<(), String>>,
     ) {
@@ -258,7 +258,7 @@ mod inner {
         // `blocking_recv` is correct here: this is a plain OS thread with no
         // tokio runtime, so it parks until the next job (or the queue closes).
         while let Some(job) = jobs.blocking_recv() {
-            run_job(&mut model, &mut tokenizer, &template, eos, job);
+            run_job(&mut model, &mut tokenizer, &template, &eos, job);
         }
     }
 
@@ -268,7 +268,7 @@ mod inner {
         model: &mut LoadedModel,
         tokenizer: &mut Tokenizer,
         template: &str,
-        eos: u32,
+        eos: &[u32],
         job: Job,
     ) {
         let prompt_ids = match render_prompt(tokenizer, template, &job.model_id, &job.messages) {
@@ -283,6 +283,12 @@ mod inner {
         }
         let prompt_tokens = Array::from(&prompt_ids[..]).index(NewAxis);
         let temp = job.sampling.temperature.unwrap_or(0.0);
+        // top_k <= 0 / top_p >= 1.0 disable those filters (the sampler's defaults).
+        let top_p = job.sampling.top_p.unwrap_or(1.0);
+        let top_k = job.sampling.top_k.map(|k| k as i32).unwrap_or(0);
+        if let Some(s) = job.sampling.seed {
+            let _ = mlx_rs::random::seed(s);
+        }
         let max_tokens = job
             .sampling
             .max_tokens
@@ -292,7 +298,8 @@ mod inner {
         let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
         match model {
             LoadedModel::Qwen3(m) => {
-                let generator = qwen3::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                let mut generator = qwen3::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                generator.set_sampler(top_p, top_k);
                 stream_generation(
                     generator,
                     tokenizer,
@@ -303,7 +310,8 @@ mod inner {
                 );
             }
             LoadedModel::Qwen3Moe(m) => {
-                let generator = qwen3_moe::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                let mut generator = qwen3_moe::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                generator.set_sampler(top_p, top_k);
                 stream_generation(
                     generator,
                     tokenizer,
@@ -315,7 +323,10 @@ mod inner {
             }
             LoadedModel::Qwen35(m) => {
                 // Owns its heterogeneous (KV + conv/recurrent) cache internally.
-                let generator = qwen3_5::Generate::new(m, temp, &prompt_tokens);
+                let mut generator = qwen3_5::Generate::new(m, temp, &prompt_tokens);
+                let c = job.cancel.clone();
+                generator.set_cancel(Box::new(move || c.is_cancelled()));
+                generator.set_sampler(top_p, top_k);
                 stream_generation(
                     generator,
                     tokenizer,
@@ -326,7 +337,10 @@ mod inner {
                 );
             }
             LoadedModel::Qwen35Moe(m) => {
-                let generator = qwen3_5_moe::Generate::new(m, temp, &prompt_tokens);
+                let mut generator = qwen3_5_moe::Generate::new(m, temp, &prompt_tokens);
+                let c = job.cancel.clone();
+                generator.set_cancel(Box::new(move || c.is_cancelled()));
+                generator.set_sampler(top_p, top_k);
                 stream_generation(
                     generator,
                     tokenizer,
@@ -346,7 +360,7 @@ mod inner {
     fn stream_generation<I>(
         generate: I,
         tokenizer: &mut Tokenizer,
-        eos: u32,
+        eos: &[u32],
         prompt_len: usize,
         max_tokens: usize,
         job: &Job,
@@ -383,9 +397,9 @@ mod inner {
             }
             let id = token.item::<u32>();
             if output_tokens == 0 && std::env::var("ROZUM_MLX_DEBUG").is_ok() {
-                eprintln!("FIRST_TOK {id} (eos={eos})");
+                eprintln!("FIRST_TOK {id} (eos={eos:?})");
             }
-            if id == eos {
+            if eos.contains(&id) {
                 let _ = job.events.send(Ok(ChatEvent::Done {
                     input_tokens: prompt_len as u32,
                     output_tokens,
@@ -423,6 +437,19 @@ mod inner {
                 return;
             }
         }
+
+        // The iterator ended without an internal stop — the hybrid `Generate`
+        // returns `None` when cancelled mid-prefill (chunk boundary). Report it.
+        let stop_reason = if job.cancel.is_cancelled() {
+            StopReason::Cancelled
+        } else {
+            StopReason::EndTurn
+        };
+        let _ = job.events.send(Ok(ChatEvent::Done {
+            input_tokens: prompt_len as u32,
+            output_tokens,
+            stop_reason,
+        }));
     }
 
     /// Apply the model's chat template to the messages and tokenize, returning
@@ -815,5 +842,58 @@ mod tests {
                 uncompiled / comp
             );
         }
+    }
+
+    // Mid-prefill cancellation: `Model::prefill_cancellable` must bail (return
+    // None) at a chunk boundary as soon as `should_cancel()` fires, so a cancel on
+    // a long prompt is honored DURING prefill (not only after it). Deterministic
+    // (no timing): cancel immediately, and cancel after N chunks. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_qwen35_prefill_cancel
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "requires local mlx-community/Qwen3.6-27B-4bit"]
+    fn mlx_qwen35_prefill_cancels_mid_prefill() {
+        use mlx_lm::models::qwen3_5::load_qwen3_5_model;
+        use mlx_rs::Array;
+        use mlx_rs::ops::indexing::{IndexOp, NewAxis};
+        use std::cell::Cell;
+
+        let dir = resolve_model_dir("mlx-community:Qwen3.6-27B-4bit")
+            .expect("Qwen3.6-27B-4bit not in HF cache");
+        let mut model = load_qwen3_5_model(&dir).expect("load");
+        // ~3000 tokens, chunk 512 -> ~6 chunks.
+        let ids: Vec<u32> = (0..3000).map(|i| (1000 + i % 5000) as u32).collect();
+        let prompt = Array::from(&ids[..]).index(NewAxis);
+
+        // Cancel before the first chunk -> immediate None.
+        let mut cache = model.init_cache();
+        let out = model
+            .prefill_cancellable(&prompt, &mut cache, 512, &|| true)
+            .expect("prefill");
+        assert!(out.is_none(), "immediate cancel must bail before any chunk");
+
+        // Cancel after 2 chunks -> still bails before completing all ~6.
+        let calls = Cell::new(0usize);
+        let mut cache2 = model.init_cache();
+        let out2 = model
+            .prefill_cancellable(&prompt, &mut cache2, 512, &|| {
+                calls.set(calls.get() + 1);
+                calls.get() > 2
+            })
+            .expect("prefill");
+        assert!(out2.is_none(), "cancel after 2 chunks must bail");
+        assert!(
+            calls.get() <= 4,
+            "should have stopped early, not run all chunks (calls={})",
+            calls.get()
+        );
+
+        // No cancel -> completes (Some).
+        let mut cache3 = model.init_cache();
+        let out3 = model
+            .prefill_cancellable(&prompt, &mut cache3, 512, &|| false)
+            .expect("prefill");
+        assert!(out3.is_some(), "no cancel must complete prefill");
+        eprintln!("PREFILL-CANCEL ok (calls until bail={})", calls.get());
     }
 }
