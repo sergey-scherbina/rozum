@@ -78,21 +78,22 @@ features the mistralrs backend shipped that the native backend does NOT yet have
   native-side analog of the mistralrs large-prompt stall. Test
   `mlx_qwen35_prefill_cancels_mid_prefill`.
 
-- [x] mlx-native-sampling - DONE for top_p/top_k/seed (fork `f36c8c3a` + rozum
-  `510c760`): `sample_with(SamplerOpts)` ported from mlx_lm, threaded through all
-  Generate; greedy stays argmax (oracle byte-exact); unit test pins it. FOLLOW-UP:
-  `repeat_penalty` still unwired — needs the generated-token history at sample time
-  (thread a history `Vec` into `Generate`, or move sampling to the host by yielding
-  logits). Small; tracked here.
+- [x] mlx-native-sampling - DONE: top_p/top_k/seed (fork `f36c8c3a` + rozum
+  `510c760`) AND repeat_penalty (fork `e970b23a` + rozum `3597abe`). `sample_with`
+  ported from mlx_lm, threaded through all Generate; greedy stays argmax
+  (byte-exact). repeat_penalty applies over a 256-token window (take/put_along_axis,
+  O(window)); Generate keeps a token history only when penalty != 1.0. Unit test
+  pins top_k=1/tiny-top_p == argmax + that a hard penalty moves the argmax.
 
-- [ ] mlx-native-tool-use - STILL OPEN (largest parity gap). Carry `req.tools` in
-  `Job`, render them into the chat template, parse the model's
-  `<tool_call>{…}</tool_call>` output, and stream `ToolUseStart/Delta/End` (+ feed
-  prior assistant tool-calls / `tool` results back into history). **BLOCKER:** the
-  `mlx-lm-utils` chat-template applier (`ApplyChatTemplateArgs`) has no `tools`
-  field, so rendering tools needs fork work to thread `tools` into the jinja
-  context. GgufBackend already has a tool-call parser to mirror
-  (`gguf-tool-use-non-qwen`). Important for agentic Claude Code / Codex use.
+- [x] mlx-native-tool-use - DONE (fork `1fc66029`/`e316dbf7` + rozum `09dfbcc`).
+  `mlx-lm-utils` `ApplyChatTemplateArgs` gained a `tools` field -> minijinja context
+  (+ enabled minijinja `json` feature for the `tojson` filter). Rozum: `Job` carries
+  `req.tools`; `render_prompt` builds OpenAI-style schemas; `stream_generation`
+  suppresses `<tool_call>` from text and parses it into `ToolUse*` events +
+  `stop_reason=ToolUse`. E2E `mlx_tool_use_weather` (get_weather call) + unit
+  `parse_tool_calls_extracts`. FOLLOW-UP: feed prior assistant tool-calls / `tool`
+  results back as structured history for multi-turn loops (today `tool` results are
+  folded in as text).
 
 - [x] mlx-native-multi-eos - DONE (rozum `b022dc4`). `read_config` collects the full
   `eos_token_id` set; `stream_generation` stops on any (Qwen3: `<|im_end|>` 151645 +

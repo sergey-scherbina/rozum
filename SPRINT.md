@@ -269,22 +269,27 @@ vs mistralrs are now mostly closed. Status:
   per-token after it. Closes the native-side analog of the mistralrs large-prompt
   stall (an abandoned long request no longer blocks the cap-1 worker). Test
   `mlx_qwen35_prefill_cancels_mid_prefill` (bails at chunk 3 of ~6, deterministic).
-- [x] mlx-native-sampling - **DONE (top_p/top_k/seed)** (fork `f36c8c3a` + rozum
-  `510c760`). `sample_with(SamplerOpts{temp,top_p,top_k})` ported from mlx_lm,
-  threaded through all four `Generate`; greedy (temp 0) stays argmax (oracle byte
-  exact). seed wired to the MLX RNG. Unit test pins top_k=1/tiny-top_p == argmax.
-  FOLLOW-UP: `repeat_penalty` still unwired — it needs the generated-token history
-  at sample time, i.e. either threading a history `Vec` into `Generate` or moving
-  sampling to the host (have `Generate` yield logits). Small, deferred.
+- [x] mlx-native-sampling - **DONE — top_p/top_k/seed + repeat_penalty** (fork
+  `f36c8c3a`/`e970b23a` + rozum `510c760`/`3597abe`). `sample_with(SamplerOpts)`
+  ported from mlx_lm, threaded through all four `Generate`; greedy (temp 0) stays
+  argmax (oracle byte-exact). seed -> MLX RNG. `repeat_penalty` (HF convention)
+  applies over a `REPEAT_CONTEXT=256` token window via `take_along_axis` /
+  `put_along_axis` (O(window)); each `Generate` keeps a token history (only when
+  penalty != 1.0, so the greedy path is untouched + skips the per-token id eval).
+  Unit test pins top_k=1/tiny-top_p == argmax AND that a hard penalty moves the argmax.
 - [x] mlx-native-multi-eos - **DONE** (rozum `b022dc4`). `read_config` collects the
   full `eos_token_id` set; `stream_generation` stops on any.
-- [ ] mlx-native-tool-use - **STILL OPEN (largest).** Native drops `req.tools`
-  entirely. BLOCKER found: the `mlx-lm-utils` chat-template applier
-  (`ApplyChatTemplateArgs`) has **no `tools` field**, so rendering tool definitions
-  into the Qwen3 jinja template needs fork work in `mlx-lm-utils` (thread `tools`
-  into the template context) — plus carrying tools in `Job`, parsing the model's
-  `<tool_call>{…}</tool_call>` output, and streaming `ToolUse*` events (mirror the
-  GgufBackend parser). Matters for agentic Claude Code / Codex; scoped as its own task.
+- [x] mlx-native-tool-use - **DONE** (fork `1fc66029`/`e316dbf7` + rozum `09dfbcc`).
+  `mlx-lm-utils` `ApplyChatTemplateArgs` gained a `tools` field threaded into the
+  minijinja context (+ enabled minijinja's `json` feature for the `tojson` filter
+  the Qwen3 template uses). Rozum: `Job` carries `req.tools`; `render_prompt` builds
+  OpenAI-style schemas (`tools_json`) into the template; `stream_generation`
+  suppresses `<tool_call>` markup from the text stream and parses the run into
+  `ToolUseStart/Delta/End` + `stop_reason=ToolUse` (`parse_tool_calls`). E2E verified:
+  `mlx_tool_use_weather` emits a `get_weather` call (`stop=ToolUse`); unit test
+  `parse_tool_calls_extracts`. FOLLOW-UP: feed prior assistant tool-calls / `tool`
+  results back into history for multi-turn tool loops (currently `tool` role results
+  are folded in as text).
 
 #### SUPERSEDED: mistralrs-mlx-direct — targeted candle->MLX quant-op bridge
 
