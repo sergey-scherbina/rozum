@@ -127,9 +127,11 @@ Key correctness points:
 
 ## Tunable
 
-`CHUNK` (prefill chunk size) via env `ROZUM_MISTRALRS_PREFILL_CHUNK` (default e.g.
-2048). Smaller = lower peak, slightly slower (more kernel launches); larger =
-faster, higher peak. This is mistralrs's analogue of llama.cpp `n_ubatch`.
+`CHUNK` (prefill chunk size) via env `MISTRALRS_PREFILL_CHUNK` (default 4096, `0`
+disables). Smaller = lower peak, slightly slower (more kernel launches); larger =
+faster, higher peak. This is mistralrs's analogue of llama.cpp `n_ubatch`. The var
+is read in-process by mistralrs, so setting it on the `rozum gateway` env is enough
+(no rozum-side forwarding needed).
 
 ## Test plan (cheap before expensive)
 
@@ -201,3 +203,64 @@ multimodal per-span attention-policy paths (sequence.rs:1431/1465/1504) are unto
 Force `MISTRALRS_PREFILL_CHUNK=8` on a short prompt and assert **byte-identical**
 output vs unset (single-pass). This catches position/mask/KV-offset bugs immediately;
 bail/revert if it fails before touching the memory gate.
+
+## Implementation log (v3 — LANDED, much simpler than v2 planned)
+
+The v2 plan above (hand-roll the chunk loop across scheduler.rs + sequence.rs +
+engine/mod.rs) was **not needed**. The paged prompt-prefill chunk loop already
+exists in `pipeline/mod.rs::step` — it was added for CUDA and drives exactly the
+`set_prefix_cache_len(chunk.start)` + `set_prefill_toks(tokens[..chunk.end])`
+mechanism v2 reverse-engineered, via `build_prompt_chunk_plan`. It was just gated
+to `self.device().is_cuda()`, so Metal always prefilled in one shot.
+
+**The whole fix is one commit (`698bccf1f`):**
+- relax the gate to `is_cuda() || is_metal()` in `pipeline/mod.rs::step` (~line 1277);
+- replace the hard-coded `DEFAULT_PAGED_PREFILL_CHUNK_SIZE` with
+  `paged_prefill_chunk_size()` reading env `MISTRALRS_PREFILL_CHUNK` (default 4096,
+  `0` disables).
+
+No scheduler.rs / sequence.rs / engine/mod.rs edits. The v2 "Exact edit points"
+list above is **superseded** — keep it only as the reverse-engineering record.
+
+### Verified behaviour and the chunk-size constraint (measured on Qwen3.6-27B, Metal)
+The paged block size is **32**. Chunk size interacts with it:
+
+- **Small chunks are BROKEN, not FP-noisy.** `MISTRALRS_PREFILL_CHUNK=8` on a short
+  prompt makes the model **misread the prompt** (computed `100 - 37` as `10 - 37 = -27`;
+  recalled "2 to 60" as "2 to 6" - drops the trailing token). On a ~2.5k-token prompt it
+  **crashes** in the hybrid GatedDeltaNet conv path: `narrow invalid args start + len >
+  dim_len: [992, 4, 256], len:1024` - once the cumulative prefill nears the conv's ~1024
+  window, the narrow overruns the buffer the small chunks have accumulated. Block
+  alignment alone is NOT enough: CHUNK=32 (block-aligned) still crashes at the 1024 mark.
+  The earlier "FP-level, not structural" reading was an artifact of testing at CHUNK=8.
+- **Chunks >= 512 are correct.** `MISTRALRS_PREFILL_CHUNK=512` on the same ~2.5k prompt
+  recalls a needle faithfully and is deterministic; the default 4096 is the size used for
+  the memory-win measurement. 512 is the smallest size verified correct.
+- **Guard:** `pipeline/mod.rs::step` promotes the chunk to
+  `chunk.next_multiple_of(block_size).max(MIN_PAGED_PREFILL_CHUNK_SIZE)` (512), so a
+  too-small/unaligned env value can no longer corrupt or crash - it is silently raised to
+  a safe, block-aligned size. Verified: `MISTRALRS_PREFILL_CHUNK=8` now passes the gate
+  (clamped to 512, no narrow panic) instead of crashing. The underlying GatedDeltaNet
+  small-chunk conv overrun is a real upstream bug; the floor sidesteps it (sub-512 chunks
+  buy only marginal activation-peak savings for many more kernel launches).
+- **Not bit-exact vs single-pass even when correct:** the GatedDeltaNet linear-attention
+  layers reorder their FP reductions across chunk boundaries, so a block-aligned multi-chunk
+  run is coherent + deterministic but not byte-identical to the unchunked path. A byte-diff
+  vs single-pass is therefore the wrong correctness test.
+
+Memory win (the point): a ~20k-token prefill's peak swap drops from ~5.9 GB to ~1.3 GB
+for ~13% slower prefill.
+
+### Correctness gate (rewritten)
+`scripts/chunked_prefill_gate.sh` no longer diffs against single-pass. It asserts:
+1. **Faithfulness** - a secret embedded in an *early* chunk is recalled at the final
+   position (proves cross-chunk attention reads the accumulated KV correctly);
+2. **Determinism** - two chunked runs at the same (block-aligned) chunk size are
+   byte-identical to each other.
+Default `CHUNK=512`. The old "byte-identical at CHUNK=8" gate is retired (invalid: 8 is
+sub-block, and single-pass parity is unachievable).
+
+### rozum wiring
+`Cargo.toml` `[patch.crates-io] mistralrs` -> `.vendor/mistral-rs-chunked/mistralrs`
+(branch `qwen36-chunked-prefill-v2`). Knob: `MISTRALRS_PREFILL_CHUNK` (default 4096,
+multiple of block size 32, `0` disables) - read in-process, no rozum forwarding needed.
