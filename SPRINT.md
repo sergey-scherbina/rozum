@@ -147,6 +147,33 @@ the big one is `concurrency-engine-yield` (true mid-prefill interleaving).
   - mistralrs reports `Some(max_num_seqs)`; its `chat()` is plain inference again. Generic `ROZUM_ADMIT*` env. The new mlx-rs backend gets admission/fast-lane/backpressure/breaker for free by returning a capacity.
   - Spec: `docs/specs/concurrency-backend-abstraction.md`.
 
+#### shared-gateway — one shared model process, many launch clients
+
+Make the model-serving gateway a shared, single-instance detached process that
+`rozum launch` clients discover & reuse, so two launches don't load two models
+and OOM. Single-owner election (TCP-port bind + advisory flock), transparent
+failover on a stable port, idle shutdown via client leases. `--model` becomes
+optional (reuse running / interactive picker). Adds `rozum models rm`.
+Composes with `concurrency` (sharing = one model; AdmittingBackend = N clients).
+
+Spec: `docs/specs/shared-gateway.md`.
+
+- [ ] shared-gateway-mvp - Detached `rozum gateway` daemon (registers `active.json`,
+  binds a stable port, idle-timeout exit). `rozum launch` discovers a healthy
+  compatible gateway and reuses it, else spawns one (flock anti-stampede +
+  port-bind dedup) and waits for health, then execs the agent. `--dedicated`
+  keeps the old in-process behaviour.
+- [ ] shared-gateway-failover - Re-election on gateway death: a failed request →
+  re-discover → exactly one respawn on the same port; client reconnect window.
+- [ ] shared-gateway-leases - Lease-refcount lifetime (`leases/<pid>` heartbeat,
+  reap dead pids) replacing the coarse idle-timeout; `rozum gateway status`/`stop`.
+- [ ] launch-model-picker - `--model` optional: omitted+running → reuse (print
+  model); omitted+none on a TTY → interactive picker (cached first with
+  `(cached, size)` / `(not cached, ~size)` annotations; non-cached → download
+  confirm); non-TTY → error. Mismatch policy: takeover-if-idle else reuse-with-warning.
+- [ ] models-rm - `rozum models rm <spec>`: confirm, refuse if it is the active
+  model, delete HF/LMStudio dirs directly (Ollama via `ollama rm`), report freed size.
+
 - [ ] runtime-config - Load backend policy and backend list from `rozum.toml`.
   - Support `single`, `fallback`, and `fanout` policies.
   - Support every `BackendEngine` defined in code (`Hello`, `Candle`, `LlamaGguf`, `NativeRust`, `ExternalCommand`, `Gguf`, plus the `mistralrs`/`openai-http` shapes once we settle on their config schema).

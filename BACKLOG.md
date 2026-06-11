@@ -86,6 +86,16 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
 - [ ] concurrency-observability - Expose queue depth, admission limit, fast-lane
   hits, and shed/429 counts via `obs` so the scheduler is tunable from data.
 
+- [ ] shared-gateway-multislot - Allow more than one resident model behind the
+  shared gateway when memory permits, gating a second model on `ConcurrencyBudget`
+  (Phase A) saying both fit. Keys the registry/port by model. Follow-up to
+  `shared-gateway` (which keeps a single resident model). See
+  `docs/specs/shared-gateway.md` (Out of scope).
+
+- [ ] shared-gateway-service - Optionally install the shared gateway as a
+  launchd/systemd service for always-warm startup, instead of lazy spawn +
+  idle-exit. Follow-up to `shared-gateway`.
+
 ## Model Quality
 
 - [ ] model-catalog-refresh - Expand and verify tiny model catalog.
