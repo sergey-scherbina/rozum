@@ -55,6 +55,29 @@ default CLI startup, meeting rooms, round-robin moderation, or manual moderation
   - Keep embeddings/backend choice configurable.
   - Start with small text documents and lexical fallback.
 
+### Concurrency & scheduling (follow-ups to `mistralrs-concurrency-scheduling`)
+
+Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
+`docs/specs/mistralrs-concurrency-scheduling.md` (Out of scope).
+
+- [ ] concurrency-preemption - Preempt/swap-out a running sequence to admit a
+  higher-priority one (vLLM-style). Needs mistralrs engine support it does not
+  currently expose — revisit if SJF + fast lane prove insufficient for tail latency.
+
+- [ ] concurrency-cost-tokenizer - Tokenizer-accurate `RequestCost` instead of the
+  char/word heuristic, if class boundaries (interactive vs bulk) turn out fuzzy.
+
+- [ ] concurrency-multi-instance - Size-class routing across more than one loaded
+  model (e.g. a small fast model lane + a big model lane), with a shared memory
+  budget. Heavy; only if a single-model fast lane is not enough.
+
+- [ ] concurrency-cross-process - Coordinate the concurrency budget across several
+  `rozum` processes sharing one GPU (e.g. a host-wide semaphore), instead of each
+  process budgeting in isolation.
+
+- [ ] concurrency-observability - Expose queue depth, admission limit, fast-lane
+  hits, and shed/429 counts via `obs` so the scheduler is tunable from data.
+
 ## Model Quality
 
 - [ ] model-catalog-refresh - Expand and verify tiny model catalog.

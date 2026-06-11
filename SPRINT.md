@@ -103,6 +103,40 @@ Decisions locked: targeted quant-ops · `mlx-rs` bindings · in the fork, generi
     the MLX region. Flip build-time default once MLX-direct meets-or-beats legacy
     and all parity gates are green; env switch stays as escape hatch.
 
+#### mistralrs-concurrency-scheduling — responsive, memory-budgeted concurrency
+
+Replace the blunt `max_num_seqs` 1/2 ladder with a layered model: budgeted
+engine capacity (A), a rozum-side admission scheduler decoupled from the static
+engine knob (B), priority + a reserved fast lane so small interactive requests
+never queue behind big ones (C), and bounded-queue backpressure + an OOM circuit
+breaker (D). Memory sets the upper bound; the Metal single-GPU compute sweet spot
+sets the ceiling. Deliver synergistically in the order A → B+C → D (A lifts the
+floor to 2 so a fast lane is physically possible).
+
+Spec: `docs/specs/mistralrs-concurrency-scheduling.md`. Builds on the constant
+per-prefill cost from `mistralrs-chunked-prefill.md` (~465 KB/token × chunk).
+
+- [ ] concurrency-budget - Phase A: load-time budgeted engine `max_num_seqs`.
+  - `budgeted_max_num_seqs(ConcurrencyBudget)` = `clamp(headroom/per_seq, 1, ceiling)`,
+    `headroom = safety_frac*available - weights - kv_pool`, `per_seq = prefill_chunk * ~465KB`.
+  - Reuse `main.rs` footprint helpers (weights, kv_cache_bytes, available_ram_bytes).
+  - Floor 1; lift to ≥2 only when headroom covers one extra `per_seq` (fast-lane room).
+  - `ROZUM_MISTRALRS_MAX_SEQS` forces exact; `ROZUM_MISTRALRS_SEQS_CEILING` caps (default 8).
+  - Replaces the 24-36 GB→1 / ≥48 GB→2 ladder. Pure fn unit-tested without Xcode.
+
+- [ ] concurrency-admission - Phase B+C: admission scheduler + fast lane.
+  - `AdmissionScheduler` semaphore ≤ engine capacity, limit via `ROZUM_MISTRALRS_ADMIT`.
+  - `chat()` acquires `AdmitGuard` before the engine; releases on done/cancel/drop.
+  - SJF ordering by `RequestCost (prompt+max_tokens)`; reserved fast-lane slot for
+    cost < `ROZUM_MISTRALRS_FASTLANE_TOKENS` (default 1024, 0 disables).
+  - Verify the fork interleaves between prefill chunks at capacity ≥2; record in spec.
+  - Preserve disconnect cancel/reap for both queued and admitted requests.
+
+- [ ] concurrency-load-shedding - Phase D: backpressure + circuit breaker.
+  - Bounded queue `ROZUM_MISTRALRS_QUEUE_MAX` (default 32) → `Overloaded` → gateway 429 + Retry-After.
+  - Catch runtime Metal alloc failure → drop admission limit by 1 (min 1), retry, recover after cooldown.
+  - Per-class `max_tokens` (fast-lane lower than batch). Concurrency invariants tested (no slot leak/deadlock).
+
 - [ ] runtime-config - Load backend policy and backend list from `rozum.toml`.
   - Support `single`, `fallback`, and `fanout` policies.
   - Support every `BackendEngine` defined in code (`Hello`, `Candle`, `LlamaGguf`, `NativeRust`, `ExternalCommand`, `Gguf`, plus the `mistralrs`/`openai-http` shapes once we settle on their config schema).
