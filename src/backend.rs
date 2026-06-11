@@ -21,6 +21,8 @@ pub enum ModelError {
     BackendUnavailable(String),
     BackendNotFound(String),
     NoBackendSucceeded(Vec<String>),
+    /// The backend is at capacity and shedding load — maps to HTTP 429.
+    Overloaded(String),
 }
 
 impl fmt::Display for ModelError {
@@ -35,6 +37,7 @@ impl fmt::Display for ModelError {
                 }
                 Ok(())
             }
+            Self::Overloaded(msg) => write!(f, "overloaded: {msg}"),
         }
     }
 }

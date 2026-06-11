@@ -30,8 +30,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::backend::{
-    ChatBackend, ChatEvent, ChatRequest, ChatStream, ContentBlock, Message, ModelResult, Role,
-    SamplingParams, StopReason, ToolDef,
+    ChatBackend, ChatEvent, ChatRequest, ChatStream, ContentBlock, Message, ModelError,
+    ModelResult, Role, SamplingParams, StopReason, ToolDef,
 };
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
@@ -80,6 +80,25 @@ fn total_message_text(messages: &[Message]) -> String {
 fn error_json(status: StatusCode, msg: &str, err_type: &str) -> Response {
     let body = json!({ "error": { "message": msg, "type": err_type } });
     (status, axum::Json(body)).into_response()
+}
+
+/// Map a backend `chat()` error to an HTTP response. Overload sheds with 429 +
+/// `Retry-After` so clients back off; everything else is a 500 with the dialect's
+/// own error type (`backend_error` for OpenAI, `api_error` for Anthropic).
+fn chat_error_response(e: &ModelError, fallback_type: &str) -> Response {
+    match e {
+        ModelError::Overloaded(msg) => {
+            let mut resp = error_json(StatusCode::TOO_MANY_REQUESTS, msg, "overloaded");
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+            resp
+        }
+        _ => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+            fallback_type,
+        ),
+    }
 }
 
 // ─── CancelOnDrop ─────────────────────────────────────────────────────────────
@@ -897,11 +916,7 @@ async fn oai_chat_handler(
             crate::obs::log_event(json!({
                 "event": "request_error", "endpoint": "/v1/chat/completions", "error": e.to_string(),
             }));
-            error_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &e.to_string(),
-                "backend_error",
-            )
+            chat_error_response(&e, "backend_error")
         }
         Ok(chat_stream) => {
             let meta = crate::obs::ReqMeta {
@@ -969,11 +984,7 @@ async fn anthropic_handler(
             crate::obs::log_event(json!({
                 "event": "request_error", "endpoint": "/v1/messages", "error": e.to_string(),
             }));
-            error_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &e.to_string(),
-                "api_error",
-            )
+            chat_error_response(&e, "api_error")
         }
         Ok(chat_stream) => {
             let meta = crate::obs::ReqMeta {

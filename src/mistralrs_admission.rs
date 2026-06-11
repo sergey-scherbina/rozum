@@ -36,14 +36,33 @@ impl RequestCost {
     }
 }
 
+/// Why an admission was refused outright (Phase D backpressure).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmitError {
+    /// The wait queue is full; the caller should shed load (HTTP 429).
+    Overloaded,
+}
+
+impl std::fmt::Display for AdmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdmitError::Overloaded => write!(f, "overloaded: admission queue full"),
+        }
+    }
+}
+
 /// Static configuration of the scheduler.
 #[derive(Clone, Copy, Debug)]
 pub struct AdmissionConfig {
-    /// Initial admission limit (≤ engine capacity).
+    /// Initial admission limit (≤ engine capacity); also the recovery ceiling for
+    /// the circuit breaker.
     pub limit: usize,
     /// A request whose `weight()` is below this uses the reserved fast-lane slot;
     /// `0` disables the fast lane.
     pub fastlane_tokens: usize,
+    /// Max requests allowed to wait in the queue before new ones are rejected
+    /// with `Overloaded`; `0` = unbounded.
+    pub queue_max: usize,
 }
 
 impl AdmissionConfig {
@@ -58,9 +77,11 @@ impl AdmissionConfig {
             .unwrap_or(cap)
             .min(cap);
         let fastlane_tokens = env_usize("ROZUM_MISTRALRS_FASTLANE_TOKENS").unwrap_or(1024);
+        let queue_max = env_usize("ROZUM_MISTRALRS_QUEUE_MAX").unwrap_or(32);
         Self {
             limit,
             fastlane_tokens,
+            queue_max,
         }
     }
 }
@@ -81,8 +102,13 @@ struct Waiter {
 }
 
 struct State {
+    /// Live admission limit; the circuit breaker moves this between 1 and
+    /// `capacity`.
     limit: usize,
+    /// Recovery ceiling — the configured admission limit the breaker recovers to.
+    capacity: usize,
     fastlane_tokens: usize,
+    queue_max: usize,
     general_in_use: usize,
     fast_in_use: usize,
     waiters: Vec<Waiter>,
@@ -174,10 +200,13 @@ pub struct AdmissionScheduler {
 
 impl AdmissionScheduler {
     pub fn new(cfg: AdmissionConfig) -> Self {
+        let limit = cfg.limit.max(1);
         Self {
             inner: Arc::new(Mutex::new(State {
-                limit: cfg.limit.max(1),
+                limit,
+                capacity: limit,
                 fastlane_tokens: cfg.fastlane_tokens,
+                queue_max: cfg.queue_max,
                 general_in_use: 0,
                 fast_in_use: 0,
                 waiters: Vec::new(),
@@ -191,17 +220,21 @@ impl AdmissionScheduler {
     /// frees. The returned guard releases the slot on drop — including when the
     /// awaiting future is cancelled (client disconnect), so abandoned requests
     /// never hold a slot.
-    pub async fn admit(&self, cost: RequestCost) -> AdmitGuard {
+    pub async fn admit(&self, cost: RequestCost) -> Result<AdmitGuard, AdmitError> {
         let rx = {
             let mut s = self.inner.lock().unwrap();
             let is_fast = s.fastlane_tokens > 0 && cost.weight() < s.fastlane_tokens;
             if s.can_admit(is_fast) {
                 s.take(is_fast);
-                return AdmitGuard {
+                return Ok(AdmitGuard {
                     inner: Arc::clone(&self.inner),
                     is_fast,
                     armed: true,
-                };
+                });
+            }
+            // No free slot: queue, unless the queue is full (Phase D backpressure).
+            if s.queue_max > 0 && s.waiters.len() >= s.queue_max {
+                return Err(AdmitError::Overloaded);
             }
             let seq = s.next_seq;
             s.next_seq += 1;
@@ -218,11 +251,29 @@ impl AdmissionScheduler {
         };
         // Woken with a fully-accounted guard. If the scheduler is dropped while we
         // wait (shutdown), fall back to an inert guard so callers never panic.
-        rx.await.unwrap_or(AdmitGuard {
+        Ok(rx.await.unwrap_or(AdmitGuard {
             inner: Arc::clone(&self.inner),
             is_fast: false,
             armed: false,
-        })
+        }))
+    }
+
+    /// Circuit breaker: drop the live admission limit by one (floor 1) after a
+    /// runtime allocation failure, letting in-flight requests drain before new
+    /// concurrency is allowed. Returns the new limit.
+    pub fn trip(&self) -> usize {
+        let mut s = self.inner.lock().unwrap();
+        s.limit = s.limit.saturating_sub(1).max(1);
+        s.limit
+    }
+
+    /// Circuit breaker recovery: raise the live limit by one toward `capacity`
+    /// and admit any waiters the extra slot allows. Returns the new limit.
+    pub fn recover_step(&self) -> usize {
+        let mut s = self.inner.lock().unwrap();
+        s.limit = (s.limit + 1).min(s.capacity);
+        Self::pump(&self.inner, &mut s);
+        s.limit
     }
 
     /// Move the live admission limit (Phase D circuit breaker). Lowering it lets
@@ -296,6 +347,7 @@ mod tests {
         AdmissionConfig {
             limit,
             fastlane_tokens: fastlane,
+            queue_max: 0, // unbounded unless a test sets it
         }
     }
 
@@ -315,13 +367,13 @@ mod tests {
     #[tokio::test]
     async fn admits_up_to_limit_then_queues() {
         let s = AdmissionScheduler::new(cfg(2, 0)); // fast lane off
-        let g1 = s.admit(big()).await;
-        let g2 = s.admit(big()).await;
+        let g1 = s.admit(big()).await.unwrap();
+        let g2 = s.admit(big()).await.unwrap();
         assert_eq!(s.stats(), (2, 0, 2));
 
         // Third request must queue.
         let s2 = s.clone();
-        let waiter = tokio::spawn(async move { s2.admit(big()).await });
+        let waiter = tokio::spawn(async move { s2.admit(big()).await.unwrap() });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(s.stats().1, 1, "third request should be queued");
 
@@ -336,14 +388,14 @@ mod tests {
         let s = AdmissionScheduler::new(cfg(2, 1024)); // reserve 1 of 2 for fast
         // Two big requests: the first takes the single general slot; the second
         // cannot (general_cap = 1) and queues.
-        let g1 = s.admit(big()).await;
+        let g1 = s.admit(big()).await.unwrap();
         let s_big = s.clone();
-        let big_waiter = tokio::spawn(async move { s_big.admit(big()).await });
+        let big_waiter = tokio::spawn(async move { s_big.admit(big()).await.unwrap() });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(s.stats(), (1, 1, 2), "second big request queued");
 
         // A small request uses the reserved slot immediately, despite the queue.
-        let _gfast = s.admit(small()).await;
+        let _gfast = s.admit(small()).await.unwrap();
         assert_eq!(
             s.stats().0,
             2,
@@ -359,13 +411,13 @@ mod tests {
     #[tokio::test]
     async fn single_slot_serialises_but_orders_small_first() {
         let s = AdmissionScheduler::new(cfg(1, 1024)); // fast lane inert at 1 slot
-        let g1 = s.admit(big()).await; // occupies the only slot
+        let g1 = s.admit(big()).await.unwrap(); // occupies the only slot
         // Queue a big then a small; when the slot frees, the small should win SJF.
         let sb = s.clone();
-        let big_w = tokio::spawn(async move { sb.admit(big()).await });
+        let big_w = tokio::spawn(async move { sb.admit(big()).await.unwrap() });
         tokio::time::sleep(Duration::from_millis(10)).await;
         let ss = s.clone();
-        let small_w = tokio::spawn(async move { ss.admit(small()).await });
+        let small_w = tokio::spawn(async move { ss.admit(small()).await.unwrap() });
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(s.stats().1, 2, "both queued");
 
@@ -385,9 +437,9 @@ mod tests {
     #[tokio::test]
     async fn cancelled_waiter_releases_its_queue_slot() {
         let s = AdmissionScheduler::new(cfg(1, 0));
-        let g1 = s.admit(big()).await;
+        let g1 = s.admit(big()).await.unwrap();
         let s2 = s.clone();
-        let waiter = tokio::spawn(async move { s2.admit(big()).await });
+        let waiter = tokio::spawn(async move { s2.admit(big()).await.unwrap() });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(s.stats().1, 1);
 
@@ -397,21 +449,63 @@ mod tests {
         drop(g1);
         let _g = tokio::time::timeout(Duration::from_millis(100), s.admit(big()))
             .await
-            .expect("a fresh request must still be admittable after a cancelled waiter");
+            .expect("admit must resolve after a cancelled waiter")
+            .unwrap();
         assert_eq!(s.stats().0, 1);
     }
 
     #[tokio::test]
     async fn raising_the_limit_admits_queued_waiters() {
         let s = AdmissionScheduler::new(cfg(1, 0));
-        let _g1 = s.admit(big()).await;
+        let _g1 = s.admit(big()).await.unwrap();
         let s2 = s.clone();
-        let waiter = tokio::spawn(async move { s2.admit(big()).await });
+        let waiter = tokio::spawn(async move { s2.admit(big()).await.unwrap() });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(s.stats().1, 1);
 
-        s.set_limit(2); // circuit breaker recovering
+        s.set_limit(2); // raise the limit
         let _g2 = waiter.await.unwrap();
         assert_eq!(s.stats(), (2, 0, 2));
+    }
+
+    #[tokio::test]
+    async fn full_queue_sheds_with_overloaded() {
+        // 1 slot, queue capacity 1: one in-flight + one queued is the ceiling.
+        let mut c = cfg(1, 0);
+        c.queue_max = 1;
+        let s = AdmissionScheduler::new(c);
+
+        let _g1 = s.admit(big()).await.unwrap(); // fills the slot
+        let s2 = s.clone();
+        let _queued = tokio::spawn(async move { s2.admit(big()).await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(s.stats().1, 1, "queue holds one waiter");
+
+        // The next request finds the queue full → shed immediately, no waiting.
+        assert!(matches!(s.admit(big()).await, Err(AdmitError::Overloaded)));
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_trips_and_recovers() {
+        let s = AdmissionScheduler::new(cfg(3, 0));
+        // Trip twice on simulated allocation failures: 3 → 2 → 1 (floor).
+        assert_eq!(s.trip(), 2);
+        assert_eq!(s.trip(), 1);
+        assert_eq!(s.trip(), 1, "limit floors at 1");
+        assert_eq!(s.stats().2, 1);
+
+        // With the limit at 1, a second request queues.
+        let _g1 = s.admit(big()).await.unwrap();
+        let s2 = s.clone();
+        let waiter = tokio::spawn(async move { s2.admit(big()).await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(s.stats().1, 1);
+
+        // Recovery raises the limit toward capacity and admits the waiter; it
+        // never exceeds the configured capacity (3).
+        assert_eq!(s.recover_step(), 2);
+        let _g2 = waiter.await.unwrap();
+        assert_eq!(s.recover_step(), 3);
+        assert_eq!(s.recover_step(), 3, "recovery caps at capacity");
     }
 }

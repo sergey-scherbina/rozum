@@ -15,7 +15,9 @@ mod inner {
         ChatBackend, ChatEvent, ChatRequest, ChatStream, ContentBlock, Message, ModelError,
         ModelResult, Role, StopReason,
     };
-    use crate::mistralrs_admission::{AdmissionConfig, AdmissionScheduler, RequestCost};
+    use crate::mistralrs_admission::{
+        AdmissionConfig, AdmissionScheduler, AdmitError, RequestCost,
+    };
 
     use mistralrs::{
         AutoDeviceMapParams, CalledFunction, ChatCompletionChunkResponse, ChunkChoice,
@@ -271,11 +273,57 @@ mod inner {
         }
     }
 
+    /// Best-effort circuit breaker: a runtime Metal allocation failure trips the
+    /// admission limit down one step and schedules a one-step recovery after a
+    /// cooldown. Detection is by message substring — runtime OOM on Metal is
+    /// often fatal, so the load-time budget (Phase A) is the primary defence and
+    /// this is a secondary guard that lowers concurrency after a near miss.
+    fn trip_breaker_if_oom(scheduler: &AdmissionScheduler, msg: &str) {
+        const OOM_COOLDOWN_SECS: u64 = 30;
+        let m = msg.to_lowercase();
+        let looks_like_oom = m.contains("out of memory")
+            || m.contains("oom")
+            || m.contains("failed to allocate")
+            || m.contains("insufficient memory")
+            || m.contains("exceeds total capacity");
+        if !looks_like_oom {
+            return;
+        }
+        let limit = scheduler.trip();
+        eprintln!("mistralrs: allocation failure → admission limit lowered to {limit}");
+        crate::obs::log_event(serde_json::json!({
+            "event": "admission_circuit_trip", "new_limit": limit, "reason": msg,
+        }));
+        let s = scheduler.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(OOM_COOLDOWN_SECS)).await;
+            let restored = s.recover_step();
+            crate::obs::log_event(serde_json::json!({
+                "event": "admission_circuit_recover", "new_limit": restored,
+            }));
+        });
+    }
+
     #[async_trait]
     impl ChatBackend for MistralrsBackend {
         async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream> {
-            let cancel = req.cancel.clone();
             let cost = self.estimate_cost(&req);
+            // Admit *before* returning a stream, so an overloaded queue surfaces
+            // as a real HTTP 429 (the gateway maps `Overloaded`) instead of an
+            // in-band error after the response has already started. Waiting here
+            // parks the request until a slot frees (fast lane / SJF); if the
+            // client disconnects, this future is dropped and the queued waiter
+            // cleans itself up.
+            let guard = match self.scheduler.admit(cost).await {
+                Ok(g) => g,
+                Err(AdmitError::Overloaded) => {
+                    return Err(ModelError::Overloaded(
+                        "in-process model at capacity; retry shortly".into(),
+                    ));
+                }
+            };
+
+            let cancel = req.cancel.clone();
             let scheduler = self.scheduler.clone();
             let request = self.build_request(&req);
             let model = Arc::clone(&self.model);
@@ -283,29 +331,17 @@ mod inner {
             // Move `model` into the stream so the upstream borrow it holds is
             // bounded by the stream's lifetime, not by this function call.
             let chat_stream: ChatStream = Box::pin(async_stream::stream! {
-                // Admission control: wait for a slot (fast lane / SJF). Race it
-                // against cancellation so a client that disconnects while queued
-                // never holds a phantom slot. The guard is held for the whole
-                // stream; dropping it on completion/disconnect frees the slot and
-                // wakes the next waiter.
-                let _admit = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        yield Ok(ChatEvent::Done {
-                            input_tokens: 0,
-                            output_tokens: 0,
-                            stop_reason: StopReason::Cancelled,
-                        });
-                        return;
-                    }
-                    guard = scheduler.admit(cost) => guard,
-                };
+                // Hold the admission slot for the whole stream; dropping it on
+                // completion/disconnect frees the slot and wakes the next waiter.
+                let _admit = guard;
 
                 let mut upstream = match model.stream_chat_request(request).await {
                     Ok(s) => s,
                     Err(e) => {
+                        let msg = e.to_string();
+                        trip_breaker_if_oom(&scheduler, &msg);
                         yield Err(ModelError::BackendUnavailable(format!(
-                            "mistralrs: stream_chat_request: {e}"
+                            "mistralrs: stream_chat_request: {msg}"
                         )));
                         return;
                     }

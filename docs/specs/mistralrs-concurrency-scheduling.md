@@ -137,17 +137,25 @@ pub struct RequestCost { pub prompt_tokens: usize, pub max_tokens: usize }
 
 ### Phase D — backpressure + load shedding (`concurrency-load-shedding`)
 
-- [ ] The admission queue is bounded by `ROZUM_MISTRALRS_QUEUE_MAX` (default 32);
-      exceeding it returns `AdmitError::Overloaded`, surfaced as HTTP 429 by the
-      gateway (with `Retry-After`) rather than buffering unboundedly.
-- [ ] A runtime Metal allocation failure is caught (not fatal): the scheduler
-      drops the live admission limit by one (min 1) via `set_admit_limit`, the
-      failed request is retried after the in-flight count falls, and the limit
-      recovers toward the engine capacity after a cooldown.
-- [ ] Per-class `max_tokens` defaults: fast-lane requests get a lower cap than
-      batch requests, so an interactive turn can't silently become a long job.
-- [ ] No deadlock: limit changes, cancels, and the bounded queue interact
-      without losing or double-counting slots (concurrency invariants tested).
+- [x] The admission queue is bounded by `ROZUM_MISTRALRS_QUEUE_MAX` (default 32,
+      `0` = unbounded); exceeding it returns `AdmitError::Overloaded`, surfaced as
+      HTTP 429 + `Retry-After` by the gateway (`ModelError::Overloaded`) rather
+      than buffering unboundedly.
+- [~] A runtime Metal allocation failure trips the breaker: `trip()` drops the
+      live admission limit by one (floor 1) and a cooldown task calls
+      `recover_step()` to raise it back toward capacity. **Scope note:** the
+      failed request is *not* auto-retried (a re-submit could re-OOM); it surfaces
+      to the client, which retries against the now-lower concurrency. Detection is
+      best-effort by error-message substring — runtime Metal OOM is often fatal,
+      so the load-time budget (Phase A) is the primary defence and this is a
+      secondary guard.
+- [dropped] Per-class `max_tokens`. Reconsidered as near-redundant: `RequestCost`
+      already includes `max_tokens`, so a request asking for long output is
+      classed non-fast and uses a general slot anyway; capping a fast-classified
+      (already small-output) request would only risk surprising truncation.
+- [x] No deadlock: limit changes (`trip`/`recover_step`/`set_limit`), cancels,
+      and the bounded queue interact without losing or double-counting slots
+      (covered by the scheduler unit tests).
 
 ## Out of scope
 
@@ -260,6 +268,13 @@ read", which is all the scheduler needs.
 - **Backpressure as 429, not unbounded buffering** — chosen so overload degrades
   predictably (clients back off) instead of latency/memory blowing up. Rejected:
   unbounded queue (turns overload into an OOM/timeout cascade).
+- **No auto-retry of an OOM'd request** — chosen because immediately re-submitting
+  a request that just exhausted Metal memory is likely to re-OOM; instead the
+  breaker lowers concurrency and the client retries against the calmer engine.
+- **Per-class `max_tokens` dropped** — chosen because `RequestCost` already folds
+  in `max_tokens`, so a long-output request is classed non-fast and never enters
+  the fast lane; an extra cap on fast requests would be redundant and risk
+  truncating a short prompt that legitimately wants a long answer.
 
 ## Risks / sharp edges
 
@@ -340,7 +355,31 @@ Verification: 5 async unit tests (limit/queue, fast-lane jump, single-slot SJF,
 cancelled-waiter reclaim, limit-raise) green without the feature; `cargo check
 --features mistralrs` clean; `cargo fmt --check` clean.
 
-### Phase D
+### Phase D — backpressure + load shedding (done)
 
-(Phase D records the circuit-breaker recovery behaviour under an induced
-allocation failure.)
+`admit()` now returns `Result<AdmitGuard, AdmitError>`: when no slot is free and
+the wait queue is at `ROZUM_MISTRALRS_QUEUE_MAX` (default 32, `0`=unbounded) it
+returns `Overloaded` immediately. `MistralrsBackend::chat()` acquires the guard
+**before** returning the stream, so `Overloaded` becomes a real HTTP 429 +
+`Retry-After: 1` via the gateway's `chat_error_response` (new
+`ModelError::Overloaded`); a non-overloaded request parks in `chat()` until a
+slot frees (client disconnect drops the future → the queued waiter self-cleans).
+
+Circuit breaker: `trip()` (limit −1, floor 1) + `recover_step()` (limit +1,
+ceiling = configured capacity), both pumping waiters. `trip_breaker_if_oom`
+in the backend matches OOM-ish substrings on a `stream_chat_request` failure,
+trips, logs `admission_circuit_trip`, and spawns a 30 s cooldown task that calls
+`recover_step` (logs `admission_circuit_recover`). The OOM'd request is surfaced
+to the client, not auto-retried (avoids re-OOM); detection is best-effort.
+
+Per-class `max_tokens` was **dropped** (see Decisions) — redundant with the cost
+function already weighting `max_tokens`.
+
+Verification: 7 scheduler unit tests (incl. `full_queue_sheds_with_overloaded`
+and `circuit_breaker_trips_and_recovers`) green without the feature;
+`cargo check --features mistralrs` clean; `cargo fmt --check` clean.
+
+**`mistralrs-concurrency-scheduling` is complete** (A + B+C + D). Remaining
+follow-ups live in BACKLOG: `concurrency-engine-yield` (the big one — true
+mid-prefill interleaving), `concurrency-preemption`, `concurrency-multi-instance`,
+`concurrency-cross-process`, `concurrency-cost-tokenizer`, `concurrency-observability`.

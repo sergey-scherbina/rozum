@@ -1,5 +1,22 @@
 # Changelog
 
+## concurrency-load-shedding — backpressure + OOM circuit breaker (Phase D)
+Completed: 2026-06-11
+Final phase of `mistralrs-concurrency-scheduling`. `AdmissionScheduler.admit`
+now returns `Result<AdmitGuard, AdmitError>`: a full wait queue
+(`ROZUM_MISTRALRS_QUEUE_MAX`, default 32, 0=unbounded) sheds with `Overloaded`.
+`MistralrsBackend::chat()` acquires the slot before returning the stream, so an
+overloaded backend surfaces as a genuine HTTP 429 + `Retry-After` (new
+`ModelError::Overloaded`, mapped in the gateway for both the OpenAI and Anthropic
+dialects). Circuit breaker: `trip()` lowers the live admission limit (floor 1) on
+a detected Metal allocation failure and a 30 s cooldown `recover_step()` raises
+it back toward capacity; the OOM'd request is surfaced (not auto-retried, to
+avoid re-OOM) and detection is best-effort substring matching. Per-class
+`max_tokens` was dropped as redundant (cost already weights `max_tokens`). 7
+scheduler unit tests (no Xcode); feature build + fmt clean. This completes the
+concurrency feature (A+B+C+D); follow-ups — chiefly `concurrency-engine-yield`
+for true mid-prefill interleaving — are in BACKLOG.
+
 ## concurrency-admission — admission scheduler + fast lane (Phase B+C)
 Completed: 2026-06-11
 Second phase of `mistralrs-concurrency-scheduling`. New engine-agnostic

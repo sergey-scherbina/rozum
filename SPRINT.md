@@ -134,10 +134,13 @@ per-prefill cost from `mistralrs-chunked-prefill.md` (~465 KB/token × chunk).
     deferred to backlog `concurrency-engine-yield`.
   - Disconnect cancel/reap preserved for queued + admitted requests.
 
-- [ ] concurrency-load-shedding - Phase D: backpressure + circuit breaker.
+- [x] concurrency-load-shedding - Phase D: backpressure + circuit breaker. **DONE.**
   - Bounded queue `ROZUM_MISTRALRS_QUEUE_MAX` (default 32) → `Overloaded` → gateway 429 + Retry-After.
-  - Catch runtime Metal alloc failure → drop admission limit by 1 (min 1), retry, recover after cooldown.
-  - Per-class `max_tokens` (fast-lane lower than batch). Concurrency invariants tested (no slot leak/deadlock).
+  - Metal alloc failure → `trip()` drops limit (floor 1), cooldown `recover_step()` raises back. No auto-retry (avoids re-OOM); best-effort substring detection.
+  - Per-class `max_tokens` dropped (redundant with cost weighting). Invariants covered by scheduler tests.
+
+**`mistralrs-concurrency-scheduling` complete (A + B+C + D).** Follow-ups in BACKLOG;
+the big one is `concurrency-engine-yield` (true mid-prefill interleaving).
 
 - [ ] runtime-config - Load backend policy and backend list from `rozum.toml`.
   - Support `single`, `fallback`, and `fanout` policies.

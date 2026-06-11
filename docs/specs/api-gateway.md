@@ -120,6 +120,7 @@ data: {"type":"message_stop"}
 - [x] Both routes map `messages` and `tools` to `ChatRequest` using the types from `chat-backend-spi.md`.
 - [x] Tool events from `ChatStream` serialized into the correct SSE format for each dialect.
 - [x] Context overflow → HTTP 400 with `{"error":{"message":"...","type":"context_length_exceeded"}}`.
+- [x] Backend overloaded (`ModelError::Overloaded`, e.g. mistralrs admission queue full) → HTTP 429 + `Retry-After` header, `type:"overloaded"`. See `mistralrs-concurrency-scheduling.md`.
 - [x] Client disconnect → `CancellationToken.cancel()` via `CancelOnDrop` wrapper on stream drop.
 - [x] `ROZUM_GATEWAY_TOKEN` → 401 if missing or wrong; no auth if env var absent.
 - [x] Binds only to `127.0.0.1`.
