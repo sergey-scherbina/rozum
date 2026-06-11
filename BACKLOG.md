@@ -60,6 +60,14 @@ default CLI startup, meeting rooms, round-robin moderation, or manual moderation
 Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
 `docs/specs/mistralrs-concurrency-scheduling.md` (Out of scope).
 
+- [ ] concurrency-engine-yield - Make the fork yield between prefill chunks so a
+  long prefill does not monopolise an engine step. Today chunking is internal to
+  `pipeline::step` (commit `698bccf1f`) — memory-bounded but not preemptible — so
+  the Phase B+C fast lane only reorders *admission*, not in-flight progress.
+  Moving the chunk loop up to the scheduler (re-queue the seq as a running prompt
+  after each chunk) would let an admitted fast request interleave with a big
+  prefill. Upstreamable into `mistralrs-chunked-prefill`.
+
 - [ ] concurrency-preemption - Preempt/swap-out a running sequence to admit a
   higher-priority one (vLLM-style). Needs mistralrs engine support it does not
   currently expose — revisit if SJF + fast lane prove insufficient for tail latency.

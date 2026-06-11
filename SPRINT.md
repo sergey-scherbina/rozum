@@ -124,13 +124,15 @@ per-prefill cost from `mistralrs-chunked-prefill.md` (~465 KB/token × chunk).
   - `ROZUM_MISTRALRS_MAX_SEQS` forces exact; `ROZUM_MISTRALRS_SEQS_CEILING` caps (default 8).
   - Replaces the 24-36 GB→1 / ≥48 GB→2 ladder. Pure fn unit-tested without Xcode.
 
-- [ ] concurrency-admission - Phase B+C: admission scheduler + fast lane.
+- [x] concurrency-admission - Phase B+C: admission scheduler + fast lane. **DONE.**
   - `AdmissionScheduler` semaphore ≤ engine capacity, limit via `ROZUM_MISTRALRS_ADMIT`.
   - `chat()` acquires `AdmitGuard` before the engine; releases on done/cancel/drop.
   - SJF ordering by `RequestCost (prompt+max_tokens)`; reserved fast-lane slot for
     cost < `ROZUM_MISTRALRS_FASTLANE_TOKENS` (default 1024, 0 disables).
-  - Verify the fork interleaves between prefill chunks at capacity ≥2; record in spec.
-  - Preserve disconnect cancel/reap for both queued and admitted requests.
+  - Finding: fork does NOT yield between prefill chunks (chunk loop is inside
+    `pipeline::step`) → admission-order responsiveness only; mid-prefill preempt
+    deferred to backlog `concurrency-engine-yield`.
+  - Disconnect cancel/reap preserved for queued + admitted requests.
 
 - [ ] concurrency-load-shedding - Phase D: backpressure + circuit breaker.
   - Bounded queue `ROZUM_MISTRALRS_QUEUE_MAX` (default 32) → `Overloaded` → gateway 429 + Retry-After.

@@ -15,6 +15,7 @@ mod inner {
         ChatBackend, ChatEvent, ChatRequest, ChatStream, ContentBlock, Message, ModelError,
         ModelResult, Role, StopReason,
     };
+    use crate::mistralrs_admission::{AdmissionConfig, AdmissionScheduler, RequestCost};
 
     use mistralrs::{
         AutoDeviceMapParams, CalledFunction, ChatCompletionChunkResponse, ChunkChoice,
@@ -63,6 +64,9 @@ mod inner {
     pub struct MistralrsBackend {
         model: Arc<Model>,
         opts: MistralrsOptions,
+        /// Admission gate in front of the engine (Phase B+C): runtime-adjustable
+        /// concurrency limit, SJF + reserved fast lane.
+        scheduler: AdmissionScheduler,
     }
 
     impl MistralrsBackend {
@@ -127,10 +131,35 @@ mod inner {
                 }
             };
             eprintln!("mistralrs: '{model_id}' ready (context {})", opts.n_ctx);
+            // The engine capacity (opts.max_num_seqs) was budgeted by the caller;
+            // the admission limit defaults to it (ROZUM_MISTRALRS_ADMIT overrides).
+            let scheduler =
+                AdmissionScheduler::new(AdmissionConfig::from_engine_capacity(opts.max_num_seqs));
             Ok(Self {
                 model: Arc::new(model),
                 opts,
+                scheduler,
             })
+        }
+
+        /// Cheap cost estimate for admission ordering: ~4 chars/token over the
+        /// rendered messages plus the requested generation budget. Only needs to
+        /// separate "quick follow-up" from "large context read".
+        fn estimate_cost(&self, req: &ChatRequest) -> RequestCost {
+            let chars: usize = req
+                .messages
+                .iter()
+                .map(|m| Self::message_text(m).len())
+                .sum();
+            let max_tokens = req
+                .sampling
+                .max_tokens
+                .map(|m| m as usize)
+                .unwrap_or(DEFAULT_MAX_TOKENS);
+            RequestCost {
+                prompt_tokens: chars / 4,
+                max_tokens,
+            }
         }
 
         fn message_text(msg: &Message) -> String {
@@ -246,12 +275,32 @@ mod inner {
     impl ChatBackend for MistralrsBackend {
         async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream> {
             let cancel = req.cancel.clone();
+            let cost = self.estimate_cost(&req);
+            let scheduler = self.scheduler.clone();
             let request = self.build_request(&req);
             let model = Arc::clone(&self.model);
 
             // Move `model` into the stream so the upstream borrow it holds is
             // bounded by the stream's lifetime, not by this function call.
             let chat_stream: ChatStream = Box::pin(async_stream::stream! {
+                // Admission control: wait for a slot (fast lane / SJF). Race it
+                // against cancellation so a client that disconnects while queued
+                // never holds a phantom slot. The guard is held for the whole
+                // stream; dropping it on completion/disconnect frees the slot and
+                // wakes the next waiter.
+                let _admit = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        yield Ok(ChatEvent::Done {
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            stop_reason: StopReason::Cancelled,
+                        });
+                        return;
+                    }
+                    guard = scheduler.admit(cost) => guard,
+                };
+
                 let mut upstream = match model.stream_chat_request(request).await {
                     Ok(s) => s,
                     Err(e) => {

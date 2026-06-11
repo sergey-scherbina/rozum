@@ -1,5 +1,24 @@
 # Changelog
 
+## concurrency-admission — admission scheduler + fast lane (Phase B+C)
+Completed: 2026-06-11
+Second phase of `mistralrs-concurrency-scheduling`. New engine-agnostic
+`src/mistralrs_admission.rs`: an `AdmissionScheduler` that gates actual
+concurrency in front of the static engine `max_num_seqs`, with a runtime
+`set_limit` (for Phase D), shortest-job-first queue ordering, and one reserved
+fast-lane slot so short interactive requests jump ahead of queued big ones.
+`admit(RequestCost) -> AdmitGuard`; the guard is held for the whole `chat()`
+stream and releases the slot on completion/disconnect, waking the next waiter
+(dead/cancelled waiters are skipped and their slot reclaimed). Config from
+`ROZUM_MISTRALRS_ADMIT` (limit ≤ capacity) and `ROZUM_MISTRALRS_FASTLANE_TOKENS`
+(default 1024, 0 off). 5 async unit tests, no Xcode needed; feature build clean.
+
+Finding recorded: the fork does **not** yield between prefill chunks (chunking
+is internal to `pipeline::step`), so the fast lane gives admission-order
+responsiveness but not mid-big-prefill preemption — engine-yield filed as
+`concurrency-engine-yield` in BACKLOG. Phase D (backpressure + circuit breaker)
+remains.
+
 ## concurrency-budget — load-time budgeted engine max_num_seqs (Phase A)
 Completed: 2026-06-11
 First phase of `mistralrs-concurrency-scheduling`. Replaces the total-`hw.memsize`

@@ -108,27 +108,32 @@ pub struct RequestCost { pub prompt_tokens: usize, pub max_tokens: usize }
 
 ### Phase B + C — admission scheduler + fast lane (`concurrency-admission`)
 
-- [ ] The engine is built with the budgeted capacity; actual concurrency is
+- [x] The engine is built with the budgeted capacity; actual concurrency is
       gated by an `AdmissionScheduler` semaphore whose limit defaults to that
       capacity and is overridable via `ROZUM_MISTRALRS_ADMIT`.
-- [ ] Every `chat()` acquires an `AdmitGuard` before touching the engine and
+- [x] Every `chat()` acquires an `AdmitGuard` before touching the engine and
       releases it on completion/cancel/drop.
-- [ ] Requests are ordered shortest-job-first by `RequestCost`
+- [x] Requests are ordered shortest-job-first by `RequestCost`
       (`prompt_tokens + max_tokens`); a large request never starves a small one
       that arrived later (bounded by the fast lane below).
-- [ ] One slot is reserved as a **fast lane**: a request whose cost is below
+- [x] One slot is reserved as a **fast lane**: a request whose cost is below
       `ROZUM_MISTRALRS_FASTLANE_TOKENS` (default 1024) may use the reserved slot
       even when all general slots are busy with big jobs. `=0` disables it.
-- [ ] At engine capacity `1` the fast lane is inert (no slot to reserve) but SJF
+- [x] At engine capacity `1` the fast lane is inert (no slot to reserve) but SJF
       ordering of the queue still applies — small jobs run first.
-- [ ] With chunked prefill on and capacity `≥2`, a fast-lane request admitted
-      alongside a running large prefill is interleaved by the engine's
-      continuous batching (it is not serialised behind the big prefill's full
-      completion). *(Verify the fork re-enters the scheduler between prefill
-      chunks; record in Results.)*
-- [ ] Cancel-on-disconnect still works: a queued-but-not-admitted request whose
-      client drops is removed from the queue; an admitted one cancels within one
-      decode step (preserves the `mistralrs-large-prompt-stall` reaping).
+- [~] With chunked prefill on and capacity `≥2`, a fast-lane request admitted
+      alongside a running large prefill is interleaved by the engine.
+      **Finding: the fork does NOT yield between prefill chunks** — chunking is
+      internal to `pipeline::step` (commit `698bccf1f`), so a prompt's whole
+      chunked prefill runs in one engine step. The fast lane therefore gives
+      *admission-order* responsiveness (admitted as soon as the current step
+      frees a slot, ahead of queued big jobs; not blocked on the big request's
+      full generation), but **not** mid-big-prefill preemption. True interleaving
+      is deferred to the engine-side `concurrency-engine-yield` backlog item.
+- [x] Cancel-on-disconnect still works: a queued-but-not-admitted request whose
+      client drops is removed from the queue (`admit` future drop / dead-receiver
+      reclaim); an admitted one cancels within one decode step (preserves the
+      `mistralrs-large-prompt-stall` `select!` + guard drop).
 
 ### Phase D — backpressure + load shedding (`concurrency-load-shedding`)
 
@@ -302,8 +307,40 @@ site. Worked examples (20 GiB weights + 4 GiB KV, chunk 4096):
 Verification: 6 lib unit tests green without the `mistralrs` feature (no Xcode);
 `cargo check --features mistralrs` clean; `cargo fmt --check` clean.
 
-### Phase B+C / D
+### Phase B+C — admission scheduler + fast lane (done)
 
-(Phase B+C records the verified interleaving behaviour of the fork; Phase D
-records the circuit-breaker recovery behaviour under an induced allocation
-failure.)
+`src/mistralrs_admission.rs` (engine-agnostic, no `mistralrs` types, so it
+builds + unit-tests without the feature / Xcode): `AdmissionScheduler` (cheaply
+cloneable, `Arc<Mutex<State>>`), `admit(RequestCost) -> AdmitGuard`,
+`set_limit(n)` (Phase D circuit breaker), `stats()`. Slot accounting reserves
+one fast-lane slot when `limit ≥ 2` and the fast lane is on; the hard total
+`limit` is always enforced first (`can_admit`). Waiters are woken by a `pump`
+that scans for the best *admittable* waiter (fast → SJF → FIFO) and transfers an
+already-counted `AdmitGuard` over a `oneshot`; a cancelled waiter's dead receiver
+is skipped and its slot reclaimed inline (disarmed guard ⇒ no re-entrant drop).
+Wired into `MistralrsBackend`: built from the Phase-A capacity via
+`AdmissionConfig::from_engine_capacity` (`ROZUM_MISTRALRS_ADMIT` /
+`ROZUM_MISTRALRS_FASTLANE_TOKENS`), and `chat()` acquires the guard inside the
+stream (racing cancellation) so it's held for the stream's lifetime and released
+on completion/disconnect.
+
+Env: `ROZUM_MISTRALRS_ADMIT` (limit, ≤ capacity), `ROZUM_MISTRALRS_FASTLANE_TOKENS`
+(default 1024, `0` off). Cost = `chars/4` prompt estimate + requested
+`max_tokens`.
+
+**Key finding — no engine yield between prefill chunks.** The fork's chunked
+prefill (`mistralrs-chunked-prefill.md`, commit `698bccf1f`) loops chunks
+*inside* `pipeline::step`, not across scheduler iterations. So at capacity ≥2 the
+fast lane delivers admission-order responsiveness (a short request runs as soon
+as the current step frees a slot, without waiting for the big request's full
+generation) but not mid-prefill preemption. Closing that gap requires moving the
+chunk loop up to the scheduler — filed as `concurrency-engine-yield` in BACKLOG.
+
+Verification: 5 async unit tests (limit/queue, fast-lane jump, single-slot SJF,
+cancelled-waiter reclaim, limit-raise) green without the feature; `cargo check
+--features mistralrs` clean; `cargo fmt --check` clean.
+
+### Phase D
+
+(Phase D records the circuit-breaker recovery behaviour under an induced
+allocation failure.)
