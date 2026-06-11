@@ -115,7 +115,7 @@ is 100% MLX, candle only as external oracle.
     via a `LoadedModel` enum + shared generic streaming loop. (Downloaded the
     gate model, ~17GB.) E2E test `mlx_moe_chat_capital`.
   - All 48 layers sparse (mlp_only=[]); dense MoE layers fail loud for now.
-- [~] mlx-native-p2 - Phase 2: port `qwen3_5` (27B dense) + `qwen3_5_moe`
+- [x] mlx-native-p2 - Phase 2: port `qwen3_5` (27B dense) + `qwen3_5_moe`
   (35B-A3B) hybrid; gate on cached `Qwen3.6-{27B,35B-A3B}-4bit`. Headline: the
   models the user runs, pure-Rust. IN PROGRESS — this is the Qwen3-Next family,
   the hard phase. Scope mapped from Python `qwen3_5`/`qwen3_next`/`gated_delta`:
@@ -139,12 +139,17 @@ is 100% MLX, candle only as external oracle.
     is capitalized (was loading as ones -> wrong decay). Greedy output identical
     to Python mlx_lm: "Here's a thinking process:" (per-layer L2 to ~0.1%). E2E
     test `mlx_qwen35_chat`.
-  - **Phase 2b TODO — `qwen3_5_moe` (Qwen3.6-35B-A3B):** = the qwen3_5 attention +
-    GatedDeltaNet (reuse) with the MoE MLP = qwen3_moe SwitchGLU + a shared expert
-    (`shared_expert` MLP + `shared_expert_gate`: `y + sigmoid(gate(x))*shared(x)`).
-    35B-A3B cached. NOTE the MoE checkpoint may be in raw/unfused form (experts.N
-    keys) -> then the Python `sanitize` (+1, conv-moveaxis, expert-stack) DOES run;
-    handle that path in the loader.
+  - **Phase 2b DONE — `qwen3_5_moe` (Qwen3.6-35B-A3B)** (fork `f27ddc42`, rozum
+    `223fd69`). Reuses the qwen3_5 backbone verbatim (attention + GatedDeltaNet +
+    LayerCache, made pub) + the qwen3_moe SwitchGLU (made pub); every layer's MLP
+    is a sparse MoE block = router gate + top-k SwitchGLU + a shared expert gated
+    by `sigmoid(shared_expert_gate(x))`. **Per-module quant**: the router gate and
+    shared_expert_gate are 8-bit (rest 4-bit) and nn::quantize is uniform-only, so
+    those two are raw `QuantLinear` (quantized_matmul) outside nn::quantize; the
+    4-bit experts stay raw SwitchGLU; the rest go through nn::quantize at 4-bit.
+    `intermediate_size` optional (pure-MoE omits it). Greedy output matches Python
+    mlx_lm: "Thinking Process:" — worked on the first forward run (only two config
+    fixes needed). E2E test `mlx_qwen35_moe_chat`. **Phase 2 COMPLETE.**
 - [ ] mlx-native-p3 - Phase 3: broaden catalog (Llama upstream; Qwen2.5 /
   Qwen2.5-Coder deltas).
 - [ ] mlx-native-p4 - Phase 4: promote native MLX to top-of-chain for MLX specs;
