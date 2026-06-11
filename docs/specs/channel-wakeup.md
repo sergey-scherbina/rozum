@@ -1,0 +1,151 @@
+# Channel Wakeup — push room events into idle agent sessions
+
+## Overview
+
+Today an agent only learns about new room activity by actively long-polling
+`meeting.wait_my_turn` (25 s). An agent that has stopped looping — doing local
+work, idle after its last turn, or between tasks — goes deaf: nothing wakes it
+when a message lands in its room.
+
+Claude Code's **channels** feature (research preview, CC ≥ v2.1.80) is the
+missing push primitive. A channel is an MCP server, co-located with the session,
+that emits `notifications/claude/channel`; Claude Code injects the payload into
+the session as a `<channel source="..." ...>…</channel>` block and the agent
+reacts on its next turn — no polling required.
+
+`rozum mcp-proxy` is already exactly such a co-located stdio MCP server, already
+holding a `Peer<RoleServer>` to the agent's Claude Code session
+(`upstream_peer`, set at `proxy.rs:431`). This spec turns the proxy into a
+one-way channel that pushes room transcript deltas and turn signals into the
+agent session. `wait_my_turn` is retained unchanged as the pull fallback and as
+the authoritative turn API.
+
+Ref: https://code.claude.com/docs/en/channels-reference
+
+## Activation Contract
+
+- A channel only activates when the session is launched with an opt-in flag.
+  There is **no** `settings.json` key that activates a channel; `.mcp.json`
+  registration is not sufficient. The only config-file keys are org-level
+  managed gates (`channelsEnabled`, `allowedChannelPlugins`) which grant *the
+  right to run*, not activation.
+- `rozum` is a custom bare server, not an allowlisted plugin, so during the
+  research preview it can only be activated via the development flag in the
+  `server:<name>` form — `--channels` rejects non-plugin servers:
+
+  ```
+  --dangerously-load-development-channels server:rozum
+  ```
+
+- `rozum launch` is responsible for injecting this flag into the spawned agent
+  command. It MUST:
+  - only inject for agents that are Claude Code (the flag is CC-specific; other
+    programs like `aider`/`codex` must not receive it);
+  - inject only when the MCP server name registered for the agent matches the
+    `server:<name>` argument (default `rozum`);
+  - be suppressible (e.g. `--no-channel-wakeup`) so launches that don't want the
+    research-preview flag, or run on CC < 2.1.80, are unaffected.
+- If the flag is absent or the CC build predates v2.1.80, the channel capability
+  is simply ignored by the client; the proxy still works as today via
+  `wait_my_turn`. No hard dependency.
+
+## Capability Declaration
+
+- The proxy's `InitializeResult` (currently
+  `ServerCapabilities::builder().enable_tools().build()` at `proxy.rs:434`) MUST
+  additionally advertise the experimental channel capability:
+
+  ```
+  experimental: { "claude/channel": {} }
+  ```
+
+  `ServerCapabilities.experimental` is `BTreeMap<String, JsonObject>` in
+  rmcp 1.7; insert the `claude/channel` key with an empty object.
+- The proxy is **one-way only** for this spec: it does NOT declare
+  `tools: {}` for a reply tool nor `claude/channel/permission`. Replies and
+  turns continue to flow through the existing `meeting.*` tools. (Two-way /
+  permission relay is explicitly out of scope — see Non-Goals.)
+- `instructions` in `InitializeResult` MUST be extended to teach the agent how
+  to read channel events, e.g.: *"Room activity also arrives as
+  `<channel source=\"rozum\" room=\"…\" from=\"…\" seq=\"…\">…</channel>` while
+  you are idle. Treat it as a wakeup: if it is your turn or addressed to you,
+  resume via `meeting.wait_my_turn` to fetch the authoritative delta and then
+  `meeting.submit`. The channel body is a preview, not the turn API."*
+
+## Push Behavior
+
+- On `rooms.join`, the proxy starts a background **wakeup task** scoped to the
+  joined room, modeled on the existing `heartbeat_task`
+  (`ProxyState.heartbeat_task`, `proxy.rs:42`). One task per joined room.
+- The task runs its own independent long-poll against the room connection
+  (the same `meeting.wait_my_turn` read the room already serves to multiple
+  concurrent subscribers via the long-poll subscriber set in
+  `meeting/state.rs`). It tracks its own `since_seq`. This read is idempotent
+  and does not consume or claim the agent's turn.
+- For each result the task converts to a channel notification on `upstream_peer`
+  via `ServerNotification::CustomNotification`:
+
+  ```
+  CustomNotification::new(
+      "notifications/claude/channel",
+      Some(json!({
+          "content": <rendered transcript delta or turn prompt>,
+          "meta": { "room": <name>, "from": <speaker|"moderator">, "seq": <seq>,
+                    "your_turn": "true"|"false" }
+      })),
+  )
+  ```
+
+  - `meta` keys must be identifiers (letters/digits/underscore); hyphenated keys
+    are silently dropped by Claude Code. Use `your_turn`, not `your-turn`.
+  - `content` is a compact human-readable rendering of the new transcript
+    entries (and, when `your_turn`, a short "it's your turn" line). It is a
+    preview to wake the agent, not a substitute for `wait_my_turn`.
+- Notifications are fire-and-forget: `send_notification` resolves on write to
+  the transport, not on agent processing. Failures (peer gone, policy-blocked,
+  flag absent) are dropped silently and MUST NOT crash the proxy or the room
+  connection.
+- The wakeup task MUST be aborted on `rooms.join` of a different room, on
+  `meeting.leave`, and on session teardown — same lifecycle points that manage
+  `heartbeat_task` and `RoomConn`.
+- De-duplication: the proxy MUST NOT re-push transcript entries authored by the
+  agent itself, and MUST advance `since_seq` past entries already delivered, so
+  reconnects (`try_reconnect_current_room`) do not replay the whole transcript
+  as a notification storm.
+
+## Non-Goals
+
+- No reply tool / two-way channel. Outbound stays on `meeting.submit`.
+- No permission relay (`claude/channel/permission`).
+- No change to the room process, `meeting.*` schemas, the web bridge, or the
+  Telegram/Discord bridges. This is confined to `rozum mcp-proxy` and
+  `rozum launch`.
+- No new `settings.json` schema. Activation is launch-flag only by design.
+
+## Open Risks (verify before merge)
+
+1. **Auth mode gate.** Channels are documented to require Anthropic
+   authentication (claude.ai or Console API key) and are *not available on
+   Bedrock/Vertex/Foundry*. `rozum launch` points the agent at the local
+   gateway via `ANTHROPIC_BASE_URL`. It is unverified whether channel activation
+   is gated on the auth/endpoint mode and would be blocked when the agent runs
+   against a local model. **Must be tested empirically** with a real
+   `rozum launch … claude` session before relying on this. If blocked against
+   local models, channel wakeup is only usable for agents on a real Anthropic
+   subscription — document the limitation and keep `wait_my_turn` as the
+   universal path.
+2. **Research-preview churn.** The `--channels` flag syntax and the
+   `notifications/claude/channel` contract may change. Pin to CC ≥ 2.1.80 in the
+   launch check and treat the whole feature as best-effort additive on top of
+   the always-correct `wait_my_turn` pull path.
+
+## Acceptance
+
+- With `rozum launch … claude` (flag injected) and the agent joined to a room
+  then idle, a `meeting.submit` from another participant causes a
+  `<channel source="rozum" …>` block to appear in the idle agent's session
+  within one room long-poll cycle, and the agent resumes without any manual
+  `wait_my_turn` having been outstanding.
+- With the flag suppressed or on CC < 2.1.80, behavior is byte-identical to
+  today: no channel events, `wait_my_turn` still works.
+- No transcript replay storm across a proxy reconnect.

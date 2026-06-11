@@ -1074,6 +1074,49 @@ async fn auth_layer(
     resp
 }
 
+// ─── Poison fast-refuse ─────────────────────────────────────────────────────
+
+fn poison_ttl_secs() -> u64 {
+    std::env::var("ROZUM_POISON_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(crate::share::POISON_TTL_SECS)
+}
+
+/// Daemon-side defense-in-depth: a freshly (re)spawned daemon loads the shared
+/// poison set and refuses a confirmed crasher *before running the model*, so a
+/// poison prompt that survived the crash it caused can't immediately kill the
+/// daemon again — even reaching it directly (no proxy). Only POST bodies are
+/// fingerprinted (raw bytes, matching what the proxy hashes); the body is
+/// re-attached for the downstream handler. Fail-open on any read hiccup.
+async fn poison_layer(req: axum::extract::Request, next: Next) -> Response {
+    if req.method() != axum::http::Method::POST {
+        return next.run(req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, 64 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => {
+            // Couldn't buffer — fail open; the handler reports the body error.
+            let req = axum::extract::Request::from_parts(parts, axum::body::Body::empty());
+            return next.run(req).await;
+        }
+    };
+    let fp = crate::share::fingerprint(&bytes);
+    if crate::share::is_poisoned(fp, poison_ttl_secs()) {
+        crate::obs::log_event(json!({
+            "event": "poison_refused", "fingerprint": format!("{fp:016x}"),
+        }));
+        return error_json(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "request previously crashed this model; refused for now — retry later (advisory, expires)",
+            "poison_refused",
+        );
+    }
+    let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
+    next.run(req).await
+}
+
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 pub async fn run(
@@ -1170,6 +1213,7 @@ pub async fn serve_on(
         .route("/stats", get(stats_handler))
         .route("/v1/chat/completions", post(oai_chat_handler))
         .route("/v1/messages", post(anthropic_handler))
+        .layer(middleware::from_fn(poison_layer))
         .layer(middleware::from_fn_with_state(state.clone(), auth_layer))
         .with_state(state);
 

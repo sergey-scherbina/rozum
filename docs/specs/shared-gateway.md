@@ -164,7 +164,7 @@ This is what lets clients "not notice" a daemon crash/restart/swap.
       death surfaces an error to the agent (we can't un-send tokens); the agent
       decides whether to retry the whole turn. Documented, not hidden. (The replay
       boundary is returning the `Response`: status+headers commit the stream.)
-- [ ] **Poison-prompt protection (soft, graduated):** the proxy fingerprints each
+- [x] **Poison-prompt protection (soft, graduated):** the proxy fingerprints each
       request and counts crash-attributed attempts. The escalation is gentle, not
       a hair-trigger ban:
       1. **Degrade-then-retry first.** A first crash-attributed retry goes out
@@ -175,7 +175,12 @@ This is what lets clients "not notice" a daemon crash/restart/swap.
          attempts**, with a clear, *soft* 422 ("this request keeps crashing the
          model; refused for now — retry later"). It is per-fingerprint, not a
          blanket block.
-- [ ] **Shared persistence only on high-confidence attribution.** A fingerprint is
+      (`forward` in `src/proxy.rs`: crash-attribution = an *established-connection*
+      send failure (`!e.is_connect()`, so a failover gap is not blamed on the
+      prompt); the retry after a crash takes the exclusive `lane` write-lock to
+      serialize the risky prefill; `poison`/`poison_max` count + refuse via
+      `poisoned()`.)
+- [x] **Shared persistence only on high-confidence attribution.** A fingerprint is
       written to the shared, TTL'd `poison.json` only when the daemon died with
       this request as the **sole in-flight** one (unambiguous cause). Ambiguous
       cases (concurrent in-flight requests) are counted **locally at the proxy
@@ -183,6 +188,10 @@ This is what lets clients "not notice" a daemon crash/restart/swap.
       everyone. A restarted daemon loads `poison.json` and fast-refuses confirmed
       entries; they are advisory and expire (`ROZUM_POISON_TTL_SECS`, default
       3600, shortened from the earlier 24 h) and decay on the next clean success.
+      (`share::{fingerprint,is_poisoned,record_poison,clear_poison}` over a raw-body
+      hash; sole-in-flight = the proxy's `admit.stats().in_use <= 1`; the daemon's
+      `gateway::poison_layer` fast-refuses before running the model; decay on a 2xx
+      prefill, both locally and machine-wide.)
 - [x] **Smart retry policy:** retries use exponential backoff + jitter, a per-
       request attempt cap, wait-for-health (don't fire at a warming daemon), and
       honor the daemon's backpressure (`429` + `Retry-After` → hold and retry) —
@@ -571,3 +580,46 @@ Verification: `cargo fmt --check` clean; 77 lib tests (proxy backoff math, cost 
 fast-lane, end-to-end replay-after-daemon-returns, end-to-end edge-gating until
 the daemon opens the window; `admission_stats` snapshot); `--features mistralrs`
 check clean. No new deps.
+
+### `shared-gateway-poison` (done)
+
+**Soft, graduated poison handling** in the proxy (`forward` in `src/proxy.rs`).
+Each request is fingerprinted by `share::fingerprint` — a `DefaultHasher` over the
+**raw body bytes the proxy forwards verbatim**, so the proxy and the daemon derive
+the same value with no dialect-normalization divergence (raw-body equality is a
+robust superset of the spec's "normalized messages + sampling params": the agent
+re-sending the same turn sends byte-identical JSON).
+
+Crash attribution is precise: an `Err` from the upstream send is blamed on the
+prompt **only if the connection was established and then died** (`!e.is_connect()`)
+— a pure connect failure is a failover gap (the daemon isn't listening), which
+stays on the existing wait-for-health replay path and is never counted as poison.
+On a crash-attributed failure the proxy (1) **degrades**: the retry takes the
+exclusive `lane` write-lock so the risky prefill runs serialized (no neighbour
+competes for memory — most "poison" prompts are big-prompt OOMs that clear once
+alone); (2) **counts** per fingerprint in `poison` (surviving across separate
+turns); (3) after `ROZUM_POISON_MAX` (default 3) crash-attributed attempts,
+returns a **soft, retryable 422** (`poisoned()`, `type: poison_refused`) — never a
+hard block.
+
+**Shared persistence only on high confidence.** When the graduated retries are
+exhausted *and* the crash was the **sole in-flight** request at this proxy
+(`admit.stats().in_use <= 1`), the fingerprint is confirmed machine-wide via
+`share::record_poison` to a TTL'd `poison.json` (`ROZUM_POISON_TTL_SECS`, default
+3600). Ambiguous (concurrent in-flight) crashes stay local — a coincidental crash
+can't ban a good prompt for everyone. A confirmed entry is fast-refused two ways:
+the proxy checks `is_poisoned` *before forwarding* (so it never re-kills the shared
+daemon), and the daemon's `gateway::poison_layer` middleware re-checks it
+*before running the model* (defense-in-depth for direct hits, surviving the very
+crash it guards against). Entries are advisory: they expire on TTL and **decay on
+the next clean (2xx) prefill** — `clear_poison` drops them both locally and
+machine-wide.
+
+Tunables: `ROZUM_POISON_MAX` (3), `ROZUM_POISON_TTL_SECS` (3600).
+
+Verification: `cargo fmt --check` clean; 81 lib tests (+4: `share` fingerprint
+stability + poison-set record/refuse/decay/expire; proxy poison-count helper; an
+end-to-end test with a connection-dropping "crasher" upstream that asserts the
+soft 422 after repeated crashes); `--features mistralrs` check clean. No new deps.
+The two env-mutating tests are serialized via `share::POISON_ENV_LOCK` so the
+`unsafe` `XDG_STATE_HOME` writes never race a concurrent read.

@@ -1,5 +1,27 @@
 # Changelog
 
+## shared-gateway-poison — soft, graduated poison-prompt protection
+Completed: 2026-06-11
+A request that repeatedly crashes the shared daemon is now handled gently instead
+of either retrying forever or hard-banning a possibly-good prompt. The proxy
+fingerprints each request (`share::fingerprint`, a hash of the raw body bytes it
+forwards verbatim — so the proxy and daemon agree without dialect normalization).
+Crash-attribution is precise: an upstream send error is blamed on the prompt only
+when the connection was established and then died (`!is_connect()`); a pure connect
+failure is a failover gap and stays on the wait-for-health replay path. On a
+crash-attributed failure the proxy degrades (the retry takes an exclusive `lane`
+write-lock, serializing the risky prefill so no neighbour competes for memory —
+clearing most big-prompt OOMs), counts per fingerprint, and after `ROZUM_POISON_MAX`
+(default 3) attempts returns a soft, retryable 422 (`poison_refused`). When those
+graduated retries are exhausted *and* the crash was the sole in-flight request
+(`admit.stats().in_use <= 1`), the fingerprint is confirmed machine-wide to a TTL'd
+`poison.json` (`ROZUM_POISON_TTL_SECS`, default 3600); ambiguous concurrent crashes
+stay local. A confirmed entry is fast-refused both by the proxy before forwarding
+and by the daemon's new `poison_layer` before running the model (defense-in-depth
+that survives the very crash it guards against), and decays on the next clean (2xx)
+prefill, both locally and machine-wide. Tunables: `ROZUM_POISON_MAX`,
+`ROZUM_POISON_TTL_SECS`. No new deps.
+
 ## shared-gateway-replay-retry (part 2) — two-tier admission
 Completed: 2026-06-11
 The daemon now advertises its admission state and each launch's proxy holds its

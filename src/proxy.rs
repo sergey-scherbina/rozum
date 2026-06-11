@@ -17,8 +17,9 @@
 //!
 //! Spec: `docs/specs/shared-gateway.md`.
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -98,6 +99,18 @@ pub struct ProxyState {
     /// queued at the edge. The daemon's scheduler is the global tier-1 authority
     /// (`/v1/admit`); this just orders + caps what this client pushes.
     admit: AdmissionScheduler,
+    /// Soft poison handling. `poison` is this proxy's per-fingerprint count of
+    /// crash-attributed attempts (survives across separate requests, so a re-sent
+    /// crashing turn keeps escalating); `poison_max` is the refuse threshold;
+    /// `poison_ttl_secs` is how long a *shared* confirmation stays advisory.
+    poison: Arc<Mutex<HashMap<u64, u32>>>,
+    poison_max: u32,
+    poison_ttl_secs: u64,
+    /// Degrade-then-retry lane: a normal forward holds it shared (read) across
+    /// its prefill, but a crash-attributed retry holds it exclusive (write) so the
+    /// risky prefill runs serialized — no neighbour competes for memory, which
+    /// clears most big-prompt OOMs.
+    lane: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl ProxyState {
@@ -111,12 +124,62 @@ impl ProxyState {
             daemon_port: Arc::new(AtomicU16::new(daemon_port)),
             retry: RetryPolicy::from_env(),
             admit: AdmissionScheduler::new(proxy_admit_config()),
+            poison: Arc::new(Mutex::new(HashMap::new())),
+            poison_max: poison_max_from_env(),
+            poison_ttl_secs: poison_ttl_from_env(),
+            lane: Arc::new(tokio::sync::RwLock::new(())),
         }
     }
 
     pub fn daemon_port(&self) -> u16 {
         self.daemon_port.load(Ordering::Relaxed)
     }
+
+    /// Crash-attributed attempts recorded for `fp` so far.
+    fn poison_count(&self, fp: u64) -> u32 {
+        self.poison
+            .lock()
+            .map(|m| *m.get(&fp).unwrap_or(&0))
+            .unwrap_or(0)
+    }
+
+    /// Record one more crash-attributed attempt for `fp`; returns the new total.
+    fn bump_poison(&self, fp: u64) -> u32 {
+        match self.poison.lock() {
+            Ok(mut m) => {
+                let c = m.entry(fp).or_insert(0);
+                *c += 1;
+                *c
+            }
+            Err(_) => 0,
+        }
+    }
+
+    /// Decay `fp` locally on a clean success.
+    fn clear_poison(&self, fp: u64) {
+        if let Ok(mut m) = self.poison.lock() {
+            m.remove(&fp);
+        }
+    }
+}
+
+/// `ROZUM_POISON_MAX` (default 3, min 1): crash-attributed attempts before a
+/// fingerprint is refused with a soft 422.
+fn poison_max_from_env() -> u32 {
+    std::env::var("ROZUM_POISON_MAX")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(3)
+        .max(1)
+}
+
+/// `ROZUM_POISON_TTL_SECS` (default 3600): how long a shared poison confirmation
+/// stays advisory before it expires.
+fn poison_ttl_from_env() -> u64 {
+    std::env::var("ROZUM_POISON_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(crate::share::POISON_TTL_SECS)
 }
 
 /// Local-scheduler config for a launch's proxy. `ROZUM_PROXY_ADMIT` caps how many
@@ -186,6 +249,21 @@ async fn forward(State(state): State<ProxyState>, req: Request) -> Response {
     let port = state.daemon_port();
     let url = format!("http://127.0.0.1:{port}{path_and_query}");
     let policy = &state.retry;
+    let ttl = state.poison_ttl_secs;
+
+    // Soft poison gate (graduated, never a hard block):
+    // 1. A confirmed machine-wide crasher: refuse *before forwarding* so we don't
+    //    re-kill the shared daemon (and the other clients behind it) — this is the
+    //    protection that survives the very crash it guards against.
+    let fp = crate::share::fingerprint(&body_bytes);
+    if crate::share::is_poisoned(fp, ttl) {
+        return poisoned(fp, "previously crashed the shared model (machine-wide)");
+    }
+    // 2. This proxy already exhausted its graduated retries for this fingerprint
+    //    on an earlier turn — keep refusing until it decays.
+    if state.poison_count(fp) >= state.poison_max {
+        return poisoned(fp, "keeps crashing the model");
+    }
 
     // Tier-2: order this request among the agent's own in-flight requests (SJF +
     // fast lane). `queue_max = 0`, so this never sheds — at worst it parks until a
@@ -196,15 +274,19 @@ async fn forward(State(state): State<ProxyState>, req: Request) -> Response {
     wait_for_window(&state, port).await;
 
     let mut attempt: u32 = 0;
+    let mut crashes: u32 = 0; // crash-attributed attempts this turn
     loop {
         attempt += 1;
-        let pending = state
-            .client
-            .request(method.clone(), &url)
-            .headers(forward_request_headers(&req_headers))
-            .body(body_bytes.clone())
-            .send()
-            .await;
+        // Degrade-then-retry: once this turn has crashed the daemon, serialize the
+        // prefill (exclusive lane) so nothing else competes for memory; otherwise
+        // a normal shared (read) lane lets concurrent prefills proceed.
+        let pending = if crashes > 0 {
+            let _lane = state.lane.write().await;
+            send_once(&state, &method, &url, &req_headers, &body_bytes).await
+        } else {
+            let _lane = state.lane.read().await;
+            send_once(&state, &method, &url, &req_headers, &body_bytes).await
+        };
         match pending {
             // Daemon backpressure: hold the request at the proxy and retry rather
             // than bouncing a 429 back to the agent.
@@ -218,11 +300,37 @@ async fn forward(State(state): State<ProxyState>, req: Request) -> Response {
                 wait_for_window(&state, port).await;
             }
             // Headers received: from here on the response is committed to the
-            // agent, so we stream it through and never replay.
-            Ok(resp) => return stream_back(resp, admit_guard),
-            // Connection failed before any byte reached the agent → safe to
-            // replay. After the attempt cap, surface a clean 502.
+            // agent, so we stream it through and never replay. A clean (2xx)
+            // prefill decays this fingerprint locally and machine-wide.
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    state.clear_poison(fp);
+                    crate::share::clear_poison(fp);
+                }
+                return stream_back(resp, admit_guard);
+            }
             Err(e) => {
+                // Attribution: a *connect* failure means the daemon isn't
+                // listening (a failover gap) — not our fault, so we just wait for
+                // it to come back and replay. A failure on an *established*
+                // connection means the daemon died while handling this request →
+                // crash-attributed to this fingerprint.
+                if !e.is_connect() {
+                    crashes += 1;
+                    let total = state.bump_poison(fp);
+                    if total >= state.poison_max {
+                        // Graduated retries (incl. the serialized degrade pass)
+                        // exhausted. If this was the *sole* in-flight request, the
+                        // attribution is unambiguous → confirm it machine-wide so
+                        // peers and a respawned daemon fast-refuse. Ambiguous
+                        // (concurrent) crashes stay local. Either way, a soft 422.
+                        let (in_use, _waiting, _limit) = state.admit.stats();
+                        if in_use <= 1 {
+                            crate::share::record_poison(fp, ttl);
+                        }
+                        return poisoned(fp, "keeps crashing the model");
+                    }
+                }
                 if attempt >= policy.max_attempts {
                     return bad_gateway(&format!(
                         "shared gateway on :{port} unreachable after {attempt} attempts: {e}"
@@ -232,6 +340,25 @@ async fn forward(State(state): State<ProxyState>, req: Request) -> Response {
             }
         }
     }
+}
+
+/// One forward send to the daemon. Split out so the retry loop can wrap it in the
+/// degrade lane (shared on the normal path, exclusive on a crash-attributed
+/// retry) without duplicating the request build.
+async fn send_once(
+    state: &ProxyState,
+    method: &axum::http::Method,
+    url: &str,
+    req_headers: &HeaderMap,
+    body_bytes: &axum::body::Bytes,
+) -> reqwest::Result<reqwest::Response> {
+    state
+        .client
+        .request(method.clone(), url)
+        .headers(forward_request_headers(req_headers))
+        .body(body_bytes.clone())
+        .send()
+        .await
 }
 
 /// Stream a received upstream response back to the agent verbatim (SSE token
@@ -361,6 +488,23 @@ fn is_hop_by_hop(name: &header::HeaderName) -> bool {
     ) || name.as_str().eq_ignore_ascii_case("keep-alive")
 }
 
+/// Soft, retryable refusal for a poison-attributed request (HTTP 422). Never a
+/// hard ban: the message tells the agent it can retry later, and the underlying
+/// entry decays (TTL machine-wide, clean-success locally). `reason` explains why.
+fn poisoned(fp: u64, reason: &str) -> Response {
+    let msg =
+        format!("request {fp:016x} {reason}; refused for now — retry later (advisory, expires)");
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        [(header::CONTENT_TYPE, "application/json")],
+        format!(
+            r#"{{"error":{{"type":"poison_refused","message":{}}}}}"#,
+            json_string(&msg)
+        ),
+    )
+        .into_response()
+}
+
 fn bad_gateway(msg: &str) -> Response {
     (
         StatusCode::BAD_GATEWAY,
@@ -407,6 +551,10 @@ mod tests {
                 daemon_port: Arc::new(AtomicU16::new(daemon_port)),
                 retry,
                 admit: AdmissionScheduler::new(proxy_admit_config()),
+                poison: Arc::new(Mutex::new(HashMap::new())),
+                poison_max: 3,
+                poison_ttl_secs: 3600,
+                lane: Arc::new(tokio::sync::RwLock::new(())),
             }
         }
     }
@@ -440,6 +588,94 @@ mod tests {
             cap: Duration::from_millis(100),
             health_wait: Duration::from_secs(5),
         }
+    }
+
+    #[test]
+    fn poison_count_bumps_and_clears() {
+        let st = ProxyState::with_retry(1, no_retry());
+        let fp = 0x42;
+        assert_eq!(st.poison_count(fp), 0);
+        assert_eq!(st.bump_poison(fp), 1);
+        assert_eq!(st.bump_poison(fp), 2);
+        assert_eq!(st.poison_count(fp), 2);
+        st.clear_poison(fp);
+        assert_eq!(st.poison_count(fp), 0, "a clean success decays the count");
+    }
+
+    /// Quick crash-attribution policy: many attempts, tiny backoff, short
+    /// health-wait so the loop refuses fast once it hits `poison_max`.
+    fn poison_retry() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 10,
+            base: Duration::from_millis(5),
+            cap: Duration::from_millis(10),
+            health_wait: Duration::from_millis(150),
+        }
+    }
+
+    // A daemon that accepts the connection then drops it without responding —
+    // i.e. it *crashes while handling the request* (an established-connection
+    // failure, `is_connect() == false`). The proxy must attribute the crash to
+    // this fingerprint and, after `poison_max` graduated attempts, refuse with a
+    // soft, retryable 422 rather than retrying forever.
+    #[tokio::test]
+    async fn refuses_poison_request_after_repeated_crashes() {
+        use tokio::io::AsyncReadExt as _;
+
+        // Serialize the XDG_STATE_HOME mutation: a sole-in-flight crash confirms
+        // the fingerprint to the shared poison.json, which we redirect to a temp
+        // dir so we never write the real state dir (and never race another test).
+        let _env = crate::share::POISON_ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("rozum-proxy-poison-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: held under POISON_ENV_LOCK; no other thread reads XDG now.
+        unsafe { std::env::set_var("XDG_STATE_HOME", &dir) };
+
+        // Crasher upstream: accept, read the request, drop the socket.
+        let up = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let up_port = up.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = up.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    drop(sock); // close without responding → connection reset
+                });
+            }
+        });
+
+        let px = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let px_port = px.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            serve_with(px, ProxyState::with_retry(up_port, poison_retry()))
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{px_port}/v1/messages"))
+            .body(r#"{"q":"crash me"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            422,
+            "a repeatedly-crashing request is softly refused"
+        );
+        assert!(resp.text().await.unwrap().contains("poison_refused"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: still under POISON_ENV_LOCK.
+        unsafe { std::env::remove_var("XDG_STATE_HOME") };
     }
 
     #[test]

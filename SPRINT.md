@@ -183,10 +183,14 @@ Spec: `docs/specs/shared-gateway.md`.
   advertises room (`GET /v1/admit`); each proxy holds its client's requests in its
   own `concurrency::AdmissionScheduler` (SJF + fast lane) and only forwards within
   the daemon's window — prompts wait at the edge, not bounced. **DONE.**
-- [ ] shared-gateway-poison - Soft/graduated: per-fingerprint crash count;
+- [x] shared-gateway-poison - Soft/graduated: per-fingerprint crash count;
   degrade-then-retry (serialize) first; refuse 422 only after `ROZUM_POISON_MAX`
   (default 3); share to TTL'd `poison.json` (default 1 h, decay-on-success) only
   on sole-in-flight high confidence — ambiguous stays local to the proxy.
+  Crash-attribution = established-connection death (`!is_connect`), so a failover
+  gap isn't blamed on the prompt; degrade = exclusive `lane` write-lock serializes
+  the retry prefill; proxy fast-refuses confirmed entries before forwarding and the
+  daemon's `poison_layer` re-checks before running the model. **DONE.**
 - [ ] gateway-switch - `rozum gateway switch --model Y [--backend B]` / `reload` /
   `unload`: in-place drain (admission limit → 0) → unload → load → resume; proxies
   hold requests across the gap. Transparent model/backend swap + binary upgrade.

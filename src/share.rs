@@ -138,6 +138,87 @@ pub fn live_lease_count(fresh_secs: u64) -> usize {
     live
 }
 
+// ── Poison set (shared, TTL'd) ───────────────────────────────────────────────
+// A request that crashes the daemon as the *sole* in-flight request is an
+// unambiguous crasher: we record its fingerprint here so every proxy (and a
+// freshly respawned daemon) can fast-refuse it before it kills the model again —
+// protection that survives the very crash it guards against. Entries are
+// advisory and short-TTL'd; a clean success decays them. Ambiguous crashes
+// (concurrent in-flight) are never written here — they stay local to one proxy.
+
+/// Default TTL for a shared poison entry (`ROZUM_POISON_TTL_SECS`).
+pub const POISON_TTL_SECS: u64 = 3600;
+
+pub fn poison_path() -> PathBuf {
+    gateway_dir().join("poison.json")
+}
+
+/// Stable 64-bit fingerprint of a request body. We hash the **raw bytes the
+/// proxy forwards verbatim to the daemon**, so both sides derive the same value
+/// without re-implementing dialect normalization (the spec's "normalized
+/// messages + sampling params" — raw-body equality is a robust superset: the
+/// agent re-sending the same turn sends byte-identical JSON). `DefaultHasher`
+/// (SipHash, fixed keys) is deterministic across processes of the same binary;
+/// if it ever changes across an upgrade, stale entries simply expire.
+pub fn fingerprint(body: &[u8]) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut h);
+    h.finish()
+}
+
+fn read_poison_map() -> std::collections::HashMap<String, u64> {
+    std::fs::read(poison_path())
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn write_poison_map(map: &std::collections::HashMap<String, u64>) {
+    let _ = ensure_dir();
+    if map.is_empty() {
+        let _ = std::fs::remove_file(poison_path());
+        return;
+    }
+    let tmp = gateway_dir().join(format!("poison.json.tmp.{}", std::process::id()));
+    if std::fs::write(&tmp, serde_json::to_vec(map).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(&tmp, poison_path());
+    }
+}
+
+/// Is `fp` a confirmed crasher whose entry is still within `ttl_secs`?
+pub fn is_poisoned(fp: u64, ttl_secs: u64) -> bool {
+    match read_poison_map().get(&fp.to_string()) {
+        Some(&added) => now_unix().saturating_sub(added) < ttl_secs,
+        None => false,
+    }
+}
+
+/// Confirm `fp` machine-wide (sole-in-flight high confidence). Refreshes the
+/// timestamp and prunes anything past `ttl_secs` while we hold the file.
+pub fn record_poison(fp: u64, ttl_secs: u64) {
+    let now = now_unix();
+    let mut map = read_poison_map();
+    map.retain(|_, &mut added| now.saturating_sub(added) < ttl_secs);
+    map.insert(fp.to_string(), now);
+    write_poison_map(&map);
+}
+
+/// Decay `fp` on a clean success — drop it from the shared set so a prompt that
+/// now fits (memory freed) is no longer refused.
+pub fn clear_poison(fp: u64) {
+    let mut map = read_poison_map();
+    if map.remove(&fp.to_string()).is_some() {
+        write_poison_map(&map);
+    }
+}
+
+/// Serializes the tests that mutate `XDG_STATE_HOME` (poison-set IO), so the
+/// `unsafe` env writes never race a concurrent read on another harness thread.
+/// Shared across modules (proxy tests lock it too).
+#[cfg(test)]
+pub(crate) static POISON_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn spawn_lock_path() -> PathBuf {
     gateway_dir().join("spawn.lock")
 }
@@ -242,5 +323,45 @@ mod tests {
         // Reuse keys on model only; the running n_ctx wins.
         let g = sample();
         assert!(is_reusable(&g, &g.model));
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_distinguishes_bodies() {
+        // Same bytes → same fingerprint (so proxy and daemon agree); different
+        // bytes → (overwhelmingly) different.
+        assert_eq!(
+            fingerprint(b"{\"q\":\"hi\"}"),
+            fingerprint(b"{\"q\":\"hi\"}")
+        );
+        assert_ne!(
+            fingerprint(b"{\"q\":\"hi\"}"),
+            fingerprint(b"{\"q\":\"bye\"}")
+        );
+    }
+
+    #[test]
+    fn poison_set_records_refuses_decays_and_expires() {
+        let _env = POISON_ENV_LOCK.lock().unwrap();
+        // Isolate the state dir so we don't touch a real ~/.local/state.
+        let dir = std::env::temp_dir().join(format!("rozum-poison-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: single-threaded test; we own the env for its duration.
+        unsafe { std::env::set_var("XDG_STATE_HOME", &dir) };
+
+        let fp = 0xDEAD_BEEF_u64;
+        assert!(!is_poisoned(fp, 3600), "unknown fp is not poisoned");
+
+        record_poison(fp, 3600);
+        assert!(is_poisoned(fp, 3600), "recorded fp is refused within TTL");
+        assert!(
+            !is_poisoned(fp, 0),
+            "a zero TTL treats every entry as expired"
+        );
+
+        clear_poison(fp);
+        assert!(!is_poisoned(fp, 3600), "cleared fp decays");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe { std::env::remove_var("XDG_STATE_HOME") };
     }
 }
