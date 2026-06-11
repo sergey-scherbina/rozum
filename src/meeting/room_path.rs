@@ -1,10 +1,16 @@
 use std::path::PathBuf;
 
-pub fn rooms_dir() -> PathBuf {
+/// Runtime base for all rozum ephemeral files (room sockets, piggyback drops).
+/// `$XDG_RUNTIME_DIR/rozum` or `~/.run/rozum` — tmpfs where available.
+pub fn rozum_runtime_dir() -> PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs_home().join(".run"));
-    base.join("rozum").join("rooms")
+    base.join("rozum")
+}
+
+pub fn rooms_dir() -> PathBuf {
+    rozum_runtime_dir().join("rooms")
 }
 
 pub fn room_socket(name: &str) -> PathBuf {

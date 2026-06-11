@@ -265,6 +265,13 @@ async fn forward(State(state): State<ProxyState>, req: Request) -> Response {
         return poisoned(fp, "keeps crashing the model");
     }
 
+    // Tier-3 piggyback wakeup: if this is a chat request and room activity is
+    // pending for this project, fold it in as an out-of-band system note. Done
+    // AFTER fingerprinting (above) so the injected room text never perturbs the
+    // poison identity, and once here (not per retry) so a drain happens once.
+    // Spec: docs/specs/rozum-native-channels.md (Tier 3).
+    let send_body = maybe_inject_room_activity(&body_bytes, &path_and_query);
+
     // Tier-2: order this request among the agent's own in-flight requests (SJF +
     // fast lane). `queue_max = 0`, so this never sheds — at worst it parks until a
     // local slot frees. Held for the whole request (passed into the stream below).
@@ -282,10 +289,10 @@ async fn forward(State(state): State<ProxyState>, req: Request) -> Response {
         // a normal shared (read) lane lets concurrent prefills proceed.
         let pending = if crashes > 0 {
             let _lane = state.lane.write().await;
-            send_once(&state, &method, &url, &req_headers, &body_bytes).await
+            send_once(&state, &method, &url, &req_headers, &send_body).await
         } else {
             let _lane = state.lane.read().await;
-            send_once(&state, &method, &url, &req_headers, &body_bytes).await
+            send_once(&state, &method, &url, &req_headers, &send_body).await
         };
         match pending {
             // Daemon backpressure: hold the request at the proxy and retry rather
@@ -339,6 +346,74 @@ async fn forward(State(state): State<ProxyState>, req: Request) -> Response {
                 wait_for_health(port, attempt, policy).await;
             }
         }
+    }
+}
+
+/// Tier-3 piggyback (`docs/specs/rozum-native-channels.md`): on a chat request,
+/// drain pending room activity for this project and fold it in as an out-of-band
+/// system note. Zero-touch — returns the body unchanged — when piggyback is off,
+/// the path is not a chat endpoint, the body is not JSON we recognise, or nothing
+/// is pending. The drain happens only once a successful injection is guaranteed,
+/// so a parse miss never loses pending lines.
+fn maybe_inject_room_activity(body: &axum::body::Bytes, path_and_query: &str) -> axum::body::Bytes {
+    if !crate::meeting::piggyback::enabled() {
+        return body.clone();
+    }
+    let path = path_and_query.split('?').next().unwrap_or(path_and_query);
+    let is_anthropic = path == "/v1/messages";
+    let is_openai = path == "/v1/chat/completions";
+    if !is_anthropic && !is_openai {
+        return body.clone();
+    }
+    let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return body.clone();
+    };
+    if !json.is_object() {
+        return body.clone();
+    }
+    // OpenAI needs a messages array to inject into; bail before draining if absent.
+    if is_openai && !json.get("messages").map(serde_json::Value::is_array).unwrap_or(false) {
+        return body.clone();
+    }
+    let lines = crate::meeting::piggyback::drain(&crate::meeting::piggyback::project_slug());
+    let Some(note) = crate::meeting::piggyback::render_note(&lines) else {
+        return body.clone();
+    };
+    if is_anthropic {
+        inject_anthropic_system(&mut json, &note);
+    } else {
+        inject_openai_system(&mut json, &note);
+    }
+    serde_json::to_vec(&json)
+        .map(axum::body::Bytes::from)
+        .unwrap_or_else(|_| body.clone())
+}
+
+/// Prepend the note to an Anthropic `/v1/messages` top-level `system` (string,
+/// content-block array, or absent), leaving `messages` and tool JSON untouched.
+fn inject_anthropic_system(json: &mut serde_json::Value, note: &str) {
+    let obj = match json.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+    match obj.get_mut("system") {
+        Some(serde_json::Value::String(s)) => {
+            *s = format!("{note}\n\n{s}");
+        }
+        Some(serde_json::Value::Array(arr)) => {
+            arr.insert(0, serde_json::json!({ "type": "text", "text": note }));
+        }
+        _ => {
+            obj.insert("system".into(), serde_json::Value::String(note.to_owned()));
+        }
+    }
+}
+
+/// Prepend a `system` message to an OpenAI `/v1/chat/completions` `messages`
+/// array, leaving the existing turns (and any tool-call JSON) untouched.
+fn inject_openai_system(json: &mut serde_json::Value, note: &str) {
+    if let Some(arr) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        arr.insert(0, serde_json::json!({ "role": "system", "content": note }));
     }
 }
 
@@ -540,6 +615,46 @@ fn json_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inject_anthropic_system_handles_string_array_and_absent() {
+        // Absent: a fresh string system is set.
+        let mut j = serde_json::json!({ "messages": [] });
+        inject_anthropic_system(&mut j, "NOTE");
+        assert_eq!(j["system"], serde_json::json!("NOTE"));
+
+        // String: note is prepended, original preserved.
+        let mut j = serde_json::json!({ "system": "be terse", "messages": [] });
+        inject_anthropic_system(&mut j, "NOTE");
+        assert_eq!(j["system"], serde_json::json!("NOTE\n\nbe terse"));
+
+        // Array: note becomes the first text block.
+        let mut j = serde_json::json!({
+            "system": [{ "type": "text", "text": "be terse" }], "messages": []
+        });
+        inject_anthropic_system(&mut j, "NOTE");
+        assert_eq!(j["system"][0], serde_json::json!({ "type": "text", "text": "NOTE" }));
+        assert_eq!(j["system"][1]["text"], serde_json::json!("be terse"));
+    }
+
+    #[test]
+    fn inject_openai_system_prepends_a_system_message() {
+        let mut j = serde_json::json!({ "messages": [{ "role": "user", "content": "hi" }] });
+        inject_openai_system(&mut j, "NOTE");
+        assert_eq!(j["messages"][0], serde_json::json!({ "role": "system", "content": "NOTE" }));
+        assert_eq!(j["messages"][1]["content"], serde_json::json!("hi"));
+    }
+
+    #[test]
+    fn maybe_inject_is_zero_touch_when_disabled_or_non_chat() {
+        // Piggyback off by default in the test env: body is returned verbatim.
+        let body = axum::body::Bytes::from_static(b"{\"messages\":[]}");
+        let out = maybe_inject_room_activity(&body, "/v1/messages");
+        assert_eq!(out, body);
+        // Non-chat path is never parsed/drained.
+        let out = maybe_inject_room_activity(&body, "/v1/models");
+        assert_eq!(out, body);
+    }
 
     impl ProxyState {
         /// Test constructor with an explicit retry policy (so e2e tests don't

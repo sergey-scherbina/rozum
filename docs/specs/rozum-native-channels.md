@@ -64,27 +64,49 @@ robust standalone wake when Tier 1 is off:
 - No protocol change — this tier is a documentation + behavior contract over
   existing tools. It is the fallback `channel-wakeup` already names.
 
-## Tier 3 — gateway piggyback (last resort)
+## Tier 3 — gateway piggyback (last resort) — IMPLEMENTED
 
-When approved as the last resort, implement at the **launch-local proxy**
-(`src/proxy.rs`), which already buffers requests and streams responses:
+Implemented at the **launch-local proxy** (`src/proxy.rs`) with the transcript
+tail dropped by the **mcp-proxy** (`src/meeting/proxy.rs`) through a shared file,
+keyed by **project + agent name**. Module: `src/meeting/piggyback.rs`.
 
-- **Delivery:** prepend a clearly-delimited, out-of-band system note to the
-  forwarded request (preferred over rewriting the response — never touch
-  tool-call JSON or SSE framing). Example injected system text:
-  `[rozum] While you were busy: <name> said "…" in room <X>. Use meeting.wait_my_turn for the full thread.`
-- **Source of pending context:** the proxy needs a read path to the room
-  transcript tail, which it does not have today (only the mcp-proxy talks to
-  rooms). New plumbing: a small per-launch "which room is this agent in + tail
-  since seq N" lookup. Likely a lightweight local IPC or a shared file the
-  mcp-proxy writes when its agent joins/sees turns. **This is the bulk of Tier-3
-  work** and is why it's last-resort.
-- **Scope guards:** opt-in only; gate on room membership (prompt-injection
-  surface — room text enters the model context); coalesce/cap so a busy room
-  can't flood; never alter tool JSON or stream framing; strip the injected note
-  from anything persisted as real conversation if feasible.
+- **Activation — `ROZUM_PIGGYBACK=1` (opt-in).** Room text enters the model
+  context (a prompt-injection surface), so Tier 3 is off unless the env var is
+  set. One variable arms both ends: the launch-local proxy reads its own env, and
+  the agent inherits it through `exec_agent` (`StdCommand` inherits the parent
+  env), so the agent's mcp-proxy writer turns on too. No new launch flag.
+- **Keying — `<project>/<agent>`.** Both processes run in the project dir, so the
+  project slug = cwd basename matches on both ends (the same derivation as the
+  room display-name prefix `<project>-<agent>`). Drops live at
+  `$XDG_RUNTIME_DIR/rozum/piggyback/<project>/<agent>.log` (sibling of room
+  sockets; tmpfs where available). The launch-local proxy drains *all* agent
+  files under its project (one launch = one agent in a cwd, but coalescing is
+  robust if more appear).
+- **Writer (mcp-proxy):** the existing channel-pusher loop already long-polls the
+  room and renders each new transcript delta to push as a Tier-1 channel event;
+  when `piggyback::enabled()` it *also* `append`s that rendered line to the drop
+  file. No new room read — it rides the pusher.
+- **Reader (launch-local proxy):** in `forward`, after fingerprinting (so the
+  injected room text never perturbs the poison identity) and once per request
+  (not per retry), `maybe_inject_room_activity` drains the project's drops and
+  folds them into the request as an out-of-band system note:
+  - Anthropic `/v1/messages`: prepended to the top-level `system` (string,
+    content-block array, or absent — `inject_anthropic_system`).
+  - OpenAI `/v1/chat/completions`: a `system` message prepended to `messages`
+    (`inject_openai_system`).
+  - Tool-call JSON and SSE framing are never touched; non-chat paths
+    (`/v1/models`, …) are zero-touch and never drained.
+  - Drain happens only once a successful injection is guaranteed (shape checked
+    first), so a parse miss never loses pending lines. Draining is a
+    rename-then-read so an `append` racing the drain is preserved for next time.
+- **Caps:** ≤ 4 KiB of the most recent pending text per injection
+  (`MAX_INJECT_BYTES`); an undrained drop file is trimmed to its 16 KiB tail
+  (`MAX_FILE_BYTES`) so a busy room can't grow it unbounded.
+- **Note text:** `[rozum] Room activity arrived while you were busy …` + the
+  rendered lines + "Use meeting.wait_my_turn … this note is a preview, not the
+  turn API." — a wakeup preview, not a substitute for the turn API.
 - **Reach:** any harness using our gateway (Codex/aider/opencode/older Claude).
-  Not a true idle wake.
+  Not a true idle wake — lands at the agent's next inference call.
 
 ## Relationship to existing specs
 
@@ -95,10 +117,15 @@ When approved as the last resort, implement at the **launch-local proxy**
 
 ## Open Questions
 
-1. Tier-3 transcript-tail plumbing: shared file vs local socket vs the mcp-proxy
-   exposing a tail endpoint? (Decide when/if Tier 3 is scheduled.)
-2. Tier-3 trigger policy: every new turn, only `your_turn`/@mention, or only
-   after the agent has been silent for some interval?
+1. ~~Tier-3 transcript-tail plumbing~~ — **RESOLVED: shared file**
+   (`$XDG_RUNTIME_DIR/rozum/piggyback/<project>/<agent>.log`), written by the
+   mcp-proxy's existing channel pusher, drained by the launch-local proxy. No new
+   socket or endpoint; rides the long-poll the pusher already holds.
+2. Tier-3 trigger policy: current behavior drops **every** new transcript delta
+   (same set the Tier-1 channel pusher renders) and injects whatever is pending on
+   the agent's next chat request. If this proves noisy, narrow to
+   `your_turn`/@mention at the writer (`piggyback::append` call site) — the reader
+   needs no change.
 3. Tier 2: should the proxy *itself* keep a background `wait_my_turn` open and
    convert to a local nudge for harnesses with any injection hook, or is the
    agent-loop contract enough?
@@ -106,9 +133,10 @@ When approved as the last resort, implement at the **launch-local proxy**
 ## Build order
 
 1. **DONE** — Tier 2 contract: proxy `instructions` (`feature/rozum-native-channels`).
-2. Tier 3 only if a concrete agent appears that supports neither Tier 1 nor a
-   Tier-2 loop — start with the transcript-tail plumbing, then conservative
-   system-note injection.
+2. **DONE** — Tier 3 piggyback (`feature/piggyback-wakeup`): drop file keyed by
+   project + agent (`src/meeting/piggyback.rs`), mcp-proxy writer on the channel
+   pusher, launch-local proxy reader injecting an out-of-band system note into
+   Anthropic/OpenAI chat requests. Opt-in via `ROZUM_PIGGYBACK=1`.
 
 ## Out of scope
 

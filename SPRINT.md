@@ -491,6 +491,33 @@ Spec: `docs/specs/channel-wakeup.md`. rmcp 1.7 confirmed to support both pieces
   build fix.) The remaining channel-wakeup items (capability/pusher/lifecycle)
   are still open.
 
+#### rozum-native-channels — Anthropic-independent wakeup ladder
+
+Spec: `docs/specs/rozum-native-channels.md`. Own the meeting wakeup end-to-end so
+it doesn't *depend* on Claude Code's research-preview channels (Tier 1). Tier 2 =
+the `wait_my_turn` long-poll contract (done, docs-only). Tier 3 = gateway
+piggyback for agents that take neither.
+
+- [x] rozum-native-channels-tier3 - **DONE (`feature/piggyback-wakeup`).** Tier-3
+  gateway piggyback, keyed by **project + agent name**. New `src/meeting/piggyback.rs`:
+  drop file at `$XDG_RUNTIME_DIR/rozum/piggyback/<project>/<agent>.log` (sibling of
+  room sockets). **Writer:** the mcp-proxy channel pusher (`src/meeting/proxy.rs`)
+  also `append`s each rendered transcript delta when `piggyback::enabled()` — rides
+  the long-poll it already holds, no new room read. **Reader:** the launch-local
+  HTTP proxy (`src/proxy.rs` `maybe_inject_room_activity`) drains the project's
+  drops once per request (after fingerprinting, so injected room text never
+  perturbs the poison id) and folds them into an out-of-band system note —
+  prepended to Anthropic `/v1/messages` `system` or as an OpenAI
+  `/v1/chat/completions` `system` message; tool JSON / SSE framing untouched,
+  non-chat paths zero-touch. Drain is rename-then-read (no lost lines on a racing
+  append) and only fires once injection is guaranteed (no loss on a parse miss).
+  Caps: 4 KiB/injection, 16 KiB drop-file tail. **Opt-in via `ROZUM_PIGGYBACK=1`**
+  (room text = prompt-injection surface); one env arms both ends (launch-local
+  proxy reads it; agent inherits it through `exec_agent` → mcp-proxy writer). 8
+  unit tests (append/drain round-trip + coalesce + caps + render + both inject
+  shapes + zero-touch-when-disabled). Reaches Codex/aider/opencode/older-Claude at
+  their next inference call (not a true idle wake). Build order item 2 in the spec.
+
 - [x] runtime-config - Load backend policy and backend list from `rozum.toml`.
   - `src/config.rs`: `RuntimeConfig` (serde + `toml`) resolved from `$ROZUM_CONFIG`
     → `./rozum.toml` → `$XDG_CONFIG_HOME/rozum/rozum.toml`; malformed / missing-explicit
