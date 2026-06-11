@@ -76,6 +76,7 @@ mod inner {
     /// the `!Send` MLX work happens entirely on the worker.
     struct Job {
         messages: Vec<Message>,
+        tools: Vec<crate::backend::ToolDef>,
         sampling: SamplingParams,
         model_id: String,
         cancel: tokio_util::sync::CancellationToken,
@@ -161,6 +162,7 @@ mod inner {
             let (events_tx, events_rx) = mpsc::unbounded_channel();
             let job = Job {
                 messages: req.messages,
+                tools: req.tools,
                 sampling: req.sampling,
                 model_id: self.model_id.clone(),
                 cancel: req.cancel,
@@ -271,7 +273,13 @@ mod inner {
         eos: &[u32],
         job: Job,
     ) {
-        let prompt_ids = match render_prompt(tokenizer, template, &job.model_id, &job.messages) {
+        let prompt_ids = match render_prompt(
+            tokenizer,
+            template,
+            &job.model_id,
+            &job.messages,
+            &job.tools,
+        ) {
             Ok(ids) => ids,
             Err(e) => {
                 let _ = job.events.send(Err(ModelError::BackendUnavailable(e)));
@@ -354,10 +362,44 @@ mod inner {
         }
     }
 
+    const TOOL_OPEN: &str = "<tool_call>";
+    const TOOL_CLOSE: &str = "</tool_call>";
+
+    /// Parse Qwen3 `<tool_call>{"name":..,"arguments":..}</tool_call>` blocks from
+    /// the raw output into `(name, arguments_json)` pairs.
+    pub(crate) fn parse_tool_calls(text: &str) -> Vec<(String, String)> {
+        let mut calls = Vec::new();
+        let mut rest = text;
+        while let Some(open) = rest.find(TOOL_OPEN) {
+            let after = &rest[open + TOOL_OPEN.len()..];
+            let Some(close) = after.find(TOOL_CLOSE) else {
+                break;
+            };
+            let body = after[..close].trim();
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+                let name = v
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let args = v
+                    .get("arguments")
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "{}".to_string());
+                if !name.is_empty() {
+                    calls.push((name, args));
+                }
+            }
+            rest = &after[close + TOOL_CLOSE.len()..];
+        }
+        calls
+    }
+
     /// Architecture-agnostic streaming loop: pull tokens off a `Generate`
     /// iterator, force per-token compute, stop on EOS / max-tokens / cancel,
-    /// and emit UTF-8-safe text deltas. A send error means the client dropped
-    /// the stream -> stop early.
+    /// and emit UTF-8-safe text deltas. Once a `<tool_call>` opener appears, text
+    /// streaming stops and the run is parsed into `ToolUse*` events at the end.
+    /// A send error means the client dropped the stream -> stop early.
     fn stream_generation<I>(
         generate: I,
         tokenizer: &mut Tokenizer,
@@ -369,17 +411,16 @@ mod inner {
         I: Iterator<Item = Result<Array, Exception>>,
     {
         let mut out_ids: Vec<u32> = Vec::new();
-        let mut emitted = String::new();
+        let mut emitted = String::new(); // text already streamed to the client
+        let mut full_text = String::new(); // full decoded run (incl. tool markup)
         let mut output_tokens: u32 = 0;
+        let mut tool_seen = false; // once `<tool_call>` appears, stop streaming text
 
+        let mut stop_reason = StopReason::EndTurn;
         for token in generate {
             if job.cancel.is_cancelled() {
-                let _ = job.events.send(Ok(ChatEvent::Done {
-                    input_tokens: prompt_len as u32,
-                    output_tokens,
-                    stop_reason: StopReason::Cancelled,
-                }));
-                return;
+                stop_reason = StopReason::Cancelled;
+                break;
             }
             let token = match token {
                 Ok(t) => t,
@@ -401,12 +442,8 @@ mod inner {
                 eprintln!("FIRST_TOK {id} (eos={eos:?})");
             }
             if eos.contains(&id) {
-                let _ = job.events.send(Ok(ChatEvent::Done {
-                    input_tokens: prompt_len as u32,
-                    output_tokens,
-                    stop_reason: StopReason::EndTurn,
-                }));
-                return;
+                stop_reason = StopReason::EndTurn;
+                break;
             }
             out_ids.push(id);
             output_tokens += 1;
@@ -416,36 +453,62 @@ mod inner {
             // sequence, e.g. mid-Cyrillic) until the next token completes it.
             if let Ok(text) = tokenizer.decode(&out_ids, true) {
                 let stable = text.trim_end_matches('\u{FFFD}');
-                if stable.len() > emitted.len() && stable.starts_with(&emitted) {
-                    let delta = stable[emitted.len()..].to_string();
-                    emitted = stable.to_string();
-                    if job
-                        .events
-                        .send(Ok(ChatEvent::TextDelta { text: delta }))
-                        .is_err()
-                    {
-                        return; // client dropped the stream
+                full_text = stable.to_string();
+                if !tool_seen {
+                    if let Some(pos) = stable.find(TOOL_OPEN) {
+                        // Emit any text before the tool opener, then go quiet.
+                        if pos > emitted.len() && stable.starts_with(&emitted) {
+                            let delta = stable[emitted.len()..pos].to_string();
+                            emitted = stable[..pos].to_string();
+                            let _ = job.events.send(Ok(ChatEvent::TextDelta { text: delta }));
+                        }
+                        tool_seen = true;
+                    } else if stable.len() > emitted.len() && stable.starts_with(&emitted) {
+                        let delta = stable[emitted.len()..].to_string();
+                        emitted = stable.to_string();
+                        if job
+                            .events
+                            .send(Ok(ChatEvent::TextDelta { text: delta }))
+                            .is_err()
+                        {
+                            return; // client dropped the stream
+                        }
                     }
                 }
             }
 
             if output_tokens as usize >= max_tokens {
-                let _ = job.events.send(Ok(ChatEvent::Done {
-                    input_tokens: prompt_len as u32,
-                    output_tokens,
-                    stop_reason: StopReason::MaxTokens,
-                }));
-                return;
+                stop_reason = StopReason::MaxTokens;
+                break;
             }
         }
+        // The iterator can also end on its own (None): the hybrid `Generate`
+        // returns None when cancelled mid-prefill.
+        if job.cancel.is_cancelled() {
+            stop_reason = StopReason::Cancelled;
+        }
 
-        // The iterator ended without an internal stop — the hybrid `Generate`
-        // returns `None` when cancelled mid-prefill (chunk boundary). Report it.
-        let stop_reason = if job.cancel.is_cancelled() {
-            StopReason::Cancelled
+        // Finalize: a cancelled run reports as-is; otherwise parse any tool calls.
+        let tool_calls = if matches!(stop_reason, StopReason::Cancelled) {
+            Vec::new()
         } else {
-            StopReason::EndTurn
+            parse_tool_calls(&full_text)
         };
+        if !tool_calls.is_empty() {
+            for (i, (name, args)) in tool_calls.iter().enumerate() {
+                let id = format!("call_{i}");
+                let _ = job.events.send(Ok(ChatEvent::ToolUseStart {
+                    id: id.clone(),
+                    name: name.clone(),
+                }));
+                let _ = job.events.send(Ok(ChatEvent::ToolUseDelta {
+                    id: id.clone(),
+                    input_json_delta: args.clone(),
+                }));
+                let _ = job.events.send(Ok(ChatEvent::ToolUseEnd { id }));
+            }
+            stop_reason = StopReason::ToolUse;
+        }
         let _ = job.events.send(Ok(ChatEvent::Done {
             input_tokens: prompt_len as u32,
             output_tokens,
@@ -455,11 +518,35 @@ mod inner {
 
     /// Apply the model's chat template to the messages and tokenize, returning
     /// the prompt token ids (with the generation prompt appended).
+    /// OpenAI-style tool schemas (`{type:"function", function:{name, description,
+    /// parameters}}`) for the chat template's `tools` variable. `None` if empty.
+    fn tools_json(tools: &[crate::backend::ToolDef]) -> Option<serde_json::Value> {
+        if tools.is_empty() {
+            return None;
+        }
+        Some(serde_json::Value::Array(
+            tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.input_schema,
+                        }
+                    })
+                })
+                .collect(),
+        ))
+    }
+
     fn render_prompt(
         tokenizer: &mut Tokenizer,
         template: &str,
         model_id: &str,
         messages: &[Message],
+        tools: &[crate::backend::ToolDef],
     ) -> Result<Vec<u32>, String> {
         let convo: Vec<Conversation<&'static str, String>> = messages
             .iter()
@@ -470,6 +557,7 @@ mod inner {
             .collect();
         let args = ApplyChatTemplateArgs {
             conversations: vec![Chat::from(convo)],
+            tools: tools_json(tools),
             documents: None,
             model_id,
             chat_template_id: None,
@@ -544,6 +632,27 @@ mod tests {
         assert!(resolve_model_dir("definitely/not-a-real-model-xyzzy").is_none());
     }
 
+    // Deterministic parser check (no model): extracts name + arguments from the
+    // Qwen3 `<tool_call>` markup, handles surrounding text and multiple calls.
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    fn parse_tool_calls_extracts() {
+        use super::inner::parse_tool_calls;
+        let text = "sure <tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "get_weather");
+        assert!(calls[0].1.contains("Paris"), "args: {}", calls[0].1);
+
+        assert!(parse_tool_calls("plain answer, no tools").is_empty());
+
+        let two = "<tool_call>{\"name\":\"a\",\"arguments\":{}}</tool_call>\
+                   <tool_call>{\"name\":\"b\",\"arguments\":{\"x\":1}}</tool_call>";
+        let calls = parse_tool_calls(two);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].0, "b");
+    }
+
     #[test]
     fn resolve_existing_dir_passthrough() {
         // A temp dir with a config.json resolves to itself.
@@ -575,6 +684,52 @@ mod tests {
         let text = collect_to_string(stream).await.expect("collect");
         eprintln!("MLX OUTPUT: {text}");
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
+    }
+
+    // End-to-end tool use: render a tool into the chat template, let the model
+    // emit `<tool_call>`, and parse it into ToolUse events. Model-dependent, so
+    // ignored. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_tool_use_weather
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires local mlx-community/Qwen3-4B-4bit; model-dependent"]
+    async fn mlx_tool_use_weather() {
+        use super::MlxNativeBackend;
+        use crate::backend::{ChatBackend, ChatEvent, ChatRequest, ToolDef};
+        use futures::StreamExt;
+
+        let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
+            .expect("Qwen3-4B-4bit not in HF cache");
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+            .await
+            .expect("backend load");
+        let mut req = ChatRequest::simple(
+            "What is the weather in Paris right now? Call the tool to find out. /no_think",
+        );
+        req.tools = vec![ToolDef {
+            name: "get_weather".into(),
+            description: "Get the current weather for a city.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "city": { "type": "string", "description": "City name" } },
+                "required": ["city"],
+            }),
+        }];
+        let mut stream = backend.chat(req).await.expect("chat");
+        let mut tool_names: Vec<String> = Vec::new();
+        let mut stop = None;
+        while let Some(ev) = stream.next().await {
+            match ev.expect("event") {
+                ChatEvent::ToolUseStart { name, .. } => tool_names.push(name),
+                ChatEvent::Done { stop_reason, .. } => stop = Some(stop_reason),
+                _ => {}
+            }
+        }
+        eprintln!("TOOL CALLS: {tool_names:?} stop={stop:?}");
+        assert!(
+            tool_names.iter().any(|n| n == "get_weather"),
+            "expected a get_weather tool call, got {tool_names:?}"
+        );
     }
 
     // MoE path (qwen3_moe). Needs the local Qwen3-30B-A3B-4bit snapshot; run:
