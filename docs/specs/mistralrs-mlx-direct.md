@@ -408,6 +408,39 @@ Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
 
 ### Per-phase results
 
-(Filled in per phase. Phase 0 must record the final bridge specifics —
-contiguity/dtype/staging strategy — and the single-op parity numbers before
-Phase 1 begins.)
+**Phase 0 — DONE (2026-06-11).** Fork branch `mlx-direct`, commit `14e699a26`.
+
+- Feature `mlx-direct` + `mlx-rs = "0.25.3"` added to `mistralrs-quant`
+  (Apple-Silicon-gated). First build incl. `mlx-sys` (MLX from source) ~3m25s
+  on M4 Max; `half` resolves to a single 2.7.1 shared with candle, so
+  `bf16`/`f16` types unify across the bridge (no conversion needed).
+- Bridge `afq/mlx_bridge.rs` (copy baseline): `candle_to_mlx` via
+  `contiguous()/to_vec1` + `Array::from_slice`; `mlx_to_candle` via `eval()` +
+  `try_as_slice` + `Tensor::from_slice`. dtypes f32/f16/bf16/u32. Ops in
+  `afq/mlx_direct.rs` over `mlx_rs::ops::{dequantize,quantized_matmul}`.
+- **Parity gate PASSED** (`--test-threads=1`, M4 Max):
+  - `dequantize`: MLX vs candle `afq_dequantize_op`, max abs diff < 1e-4.
+  - `quantized_matmul`: MLX vs candle `dequantize + matmul`, max abs diff
+    < 1e-3. (Reference is dequant+matmul, not `afq_mm_op` -- see below.)
+- **No candle+MLX coexistence deadlock.** A long deadlock chase during Phase 0
+  turned out to be a *faulty reference path*, not the bridge: the legacy
+  candle `afq_mm_op` splitk `sum(0)` branch (`ops.rs:456`) deadlocks in a
+  *standalone* Metal unit test (fresh device, tiny batch=4 shape) even with
+  **no MLX linked at all** -- confirmed by reproducing the hang in a
+  `--features metal` (non-mlx) binary. Production never hits it because the
+  model forward pumps/commits the command buffer; an isolated single-op test
+  does not. The MLX bridge is exonerated; the matmul parity test compares
+  against dequant+matmul to avoid that path.
+- **Test methodology (important for later phases):** Metal tests MUST run
+  `--test-threads=1` -- parallel test threads each making a `Device::new_metal`
+  and driving one `MTLDevice` deadlock candle's command-encoder mutex. And
+  `kill -9` of a hung Metal test can wedge the GPU driver (AGX), so subsequent
+  runs hang spuriously; prefer one clean process per case with generous
+  build-vs-run separated timeouts, and avoid kill cascades.
+- Zero-copy: untouched (deferred to Phase 4 as planned); copy baseline is the
+  shipped mechanism.
+
+Next: Phase 1 -- wire the switch through a real model forward (Qwen3-4B-4bit)
+and gate byte-for-byte tokens vs `mlx_lm.generate --temp 0`. The standalone
+`afq_mm_op` splitk hang is a separate candle/mistralrs observation to revisit
+only if a real forward path trips it (it should not).

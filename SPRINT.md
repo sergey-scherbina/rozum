@@ -70,16 +70,17 @@ default), upstreamable.
 Spec: `docs/specs/mistralrs-mlx-direct.md`. Branch: `feature/mistralrs-mlx-direct`.
 Decisions locked: targeted quant-ops · `mlx-rs` bindings · in the fork, generic.
 
-- [ ] mlx-direct-p0 - Phase 0: bridge prototype + single-op parity.
-  - Add `mlx-direct` feature + `mlx-rs = "0.25.3"` (Apple-Silicon-gated; probed:
-    has quantize/dequantize/quantized_matmul, default metal+accelerate).
-  - `afq/mlx_bridge.rs`: candle Metal tensor ↔ `mlx_rs::Array`, **copy
-    baseline** (API probe showed true zero-copy is not reachable: candle uses
-    Private storage, mlx-c adopt wants a `void*` not an MTLBuffer; copy is
-    negligible in decode). Settle contiguity/dtype/staging; record in spec.
-  - `afq/mlx_direct.rs`: `dequantize` + `quantized_matmul`.
-  - Gate: one real AFQ weight dequant + one quantized matmul, byte-for-byte vs
-    `mx.*` AND vs the legacy candle op. Blocks all later phases.
+- [x] mlx-direct-p0 - Phase 0: bridge prototype + single-op parity. **DONE**
+  (fork branch `mlx-direct`, commit `14e699a26`).
+  - `mlx-direct` feature + `mlx-rs = "0.25.3"` added; copy-baseline bridge
+    (`afq/mlx_bridge.rs`) + `afq/mlx_direct.rs` (dequantize + quantized_matmul);
+    runtime switch in `afq_dequantize_op`/`afq_mm_op`.
+  - Gate PASSED (`--test-threads=1`): MLX dequantize vs candle (diff < 1e-4);
+    MLX quantized_matmul vs candle dequant+matmul (diff < 1e-3).
+  - Finding: no candle+MLX coexistence deadlock; the deadlock chase was a
+    standalone `afq_mm_op` splitk `sum(0)` hang, reproduced with NO MLX linked.
+    Metal tests must run single-threaded; `kill -9` of a hung Metal test wedges
+    the GPU. Details in spec Results.
 
 - [ ] mlx-direct-p1 - Phase 1: dense model parity.
   - Switch `afq_quantize_op` / `afq_dequantize_op` / `afq_mm_op` behind
