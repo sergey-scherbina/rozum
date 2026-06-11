@@ -1,4 +1,7 @@
-# Work Queue
+# Sprint
+
+(Formerly `WORK_QUEUE.md`; renamed to `SPRINT.md` per `AGENTS.md` / the
+multi-agent skill.)
 
 Current sprint focus: (1) make Rozum a reliable local meeting room for live agents and a human operator; (2) make Rozum a local LLM provider for Claude Code and Codex via an outward OpenAI/Anthropic-compatible gateway backed by an in-process MLX / GGUF engine on Apple Silicon Metal.
 
@@ -52,6 +55,50 @@ Full writeup + the one-pass diagnostic methodology that localized it:
     routing through the LM Studio HTTP backend until then.
 
 ### Active
+
+#### P0 (current): mistralrs-mlx-direct — native direct MLX quant-ops in mistral.rs
+
+Replace `mistralrs-quant`'s candle-Metal AFQ kernels with real Apple MLX ops
+(`mx.quantized_matmul` / `quantize` / `dequantize` / `gather_qmm`) via `mlx-rs`,
+so quantized MLX-community checkpoints compute byte-for-byte with `mlx_lm` and
+the candle-AFQ bug class (RMSNorm +1, zero-buffer, nibble audits) is retired.
+Targeted to the AFQ quant ops only; candle keeps the rest of the graph.
+Generic over AFQ → covers dense/MoE/hybrid + all bit-widths with no per-model
+code. Lives in the `.vendor/mistral-rs` fork (feature `mlx-direct`, off by
+default), upstreamable.
+
+Spec: `docs/specs/mistralrs-mlx-direct.md`. Branch: `feature/mistralrs-mlx-direct`.
+Decisions locked: targeted quant-ops · `mlx-rs` bindings · in the fork, generic.
+
+- [ ] mlx-direct-p0 - Phase 0: bridge prototype + single-op parity.
+  - Add `mlx-direct` feature + pinned `mlx-rs` dep (Apple-Silicon-gated).
+  - `afq/mlx_bridge.rs`: candle Metal tensor ↔ `mlx_rs::Array`. Settle the
+    interop mechanism (zero-copy shared MTLBuffer → same-device copy → CPU
+    fallback) and record it in the spec Results.
+  - `afq/mlx_direct.rs`: `dequantize` + `quantized_matmul`.
+  - Gate: one real AFQ weight dequant + one quantized matmul, byte-for-byte vs
+    `mx.*` AND vs the legacy candle op. Blocks all later phases.
+
+- [ ] mlx-direct-p1 - Phase 1: dense model parity.
+  - Switch `afq_quantize_op` / `afq_dequantize_op` / `afq_mm_op` behind
+    `MISTRALRS_MLX_DIRECT`.
+  - Gate: Qwen3-4B-4bit byte-for-byte tokens vs `mlx_lm.generate --temp 0`;
+    exercise Qwen3-30B.
+
+- [ ] mlx-direct-p2 - Phase 2: MoE gather path.
+  - Wire `afq_gather_qmm_rhs_sorted{,_gate_up}` → `mx.gather_qmm`.
+  - Gate: Qwen3-30B-A3B-4bit (MoE) and Qwen3.6-35B-A3B-4bit (hybrid) both
+    token-for-token vs `mlx_lm`. Qwen3.6 green = headline result.
+
+- [ ] mlx-direct-p3 - Phase 3: generalize bit-widths & variants.
+  - AFQ 2/3/6/8-bit, MXFP4, group sizes 32/128, DWQ checkpoints; parametric
+    parity test over (bits, group_size).
+
+- [ ] mlx-direct-p4 - Phase 4: perf & default flip.
+  - Benchmark vs legacy (tok/s prefill+decode, peak RSS) on Qwen3.6; remove
+    copies on the decode hot loop; flip build-time default once MLX-direct
+    meets-or-beats legacy and all parity gates are green. Env switch stays as
+    escape hatch.
 
 - [ ] runtime-config - Load backend policy and backend list from `rozum.toml`.
   - Support `single`, `fallback`, and `fanout` policies.
