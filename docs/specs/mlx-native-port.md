@@ -1,5 +1,11 @@
 # Native MLX runtime: port mlx_lm to Rust over mlx-rs
 
+> **SUPERSEDED (2026-06-11) by `mlx-native-runtime.md`.** This spec assumed a
+> blank-page port of mlx_lm over raw mlx-rs ops. The `oxideai/mlx-rs` workspace
+> already ships a Rust `mlx-lm` crate (scaffolding + Qwen3 dense + Llama), so we
+> build on it instead of rewriting. Kept for the phased-delivery / numerical-gate
+> methodology, which still applies. See `mlx-native-runtime.md` for the active plan.
+
 ## Goal
 
 Build rozum's **own** in-process MLX runtime on top of [`mlx-rs`](https://crates.io/crates/mlx-rs) — Apple's MLX core ops exposed as a Rust crate — so we are not blocked on `mistralrs` or `llama-cpp-2` release cycles when a new Qwen / Llama / Mistral variant ships. The Python reference (`ml-explore/mlx-lm`) becomes our spec.

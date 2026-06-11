@@ -56,52 +56,164 @@ Full writeup + the one-pass diagnostic methodology that localized it:
 
 ### Active
 
-#### P0 (current): mistralrs-mlx-direct — native direct MLX quant-ops in mistral.rs
+#### P0 (current): mlx-native-runtime — pure-Rust native MLX runtime
 
-Replace `mistralrs-quant`'s candle-Metal AFQ kernels with real Apple MLX ops
-(`mx.quantized_matmul` / `quantize` / `dequantize` / `gather_qmm`) via `mlx-rs`,
-so quantized MLX-community checkpoints compute byte-for-byte with `mlx_lm` and
-the candle-AFQ bug class (RMSNorm +1, zero-buffer, nibble audits) is retired.
-Targeted to the AFQ quant ops only; candle keeps the rest of the graph.
-Generic over AFQ → covers dense/MoE/hybrid + all bit-widths with no per-model
-code. Lives in the `.vendor/mistral-rs` fork (feature `mlx-direct`, off by
-default), upstreamable.
+Run MLX-community checkpoints through a **full native MLX forward** (no candle,
+no Python, no subprocess) built on the upstream `oxideai/mlx-lm` Rust crate
+(scaffolding + Qwen3 dense + Llama already done). Gives MLX's real wins (fusion,
+no cross-runtime sync, day-one architectures) in one binary, and **retires
+`mlx_lm.server`**. Supersedes both `mistralrs-mlx-direct` (bridge = structural
+perf dead end) and the from-scratch `mlx-native-port`.
 
-Spec: `docs/specs/mistralrs-mlx-direct.md`. Branch: `feature/mistralrs-mlx-direct`.
-Decisions locked: targeted quant-ops · `mlx-rs` bindings · in the fork, generic.
+Spec: `docs/specs/mlx-native-runtime.md`. Branch: `feature/mlx-native`.
+Decisions locked: vendor-fork `.vendor/mlx-lm` · broad catalog · top-of-chain
+(retire mlx_lm.server) · build on the crate, port only missing models · forward
+is 100% MLX, candle only as external oracle.
 
-- [ ] mlx-direct-p0 - Phase 0: bridge prototype + single-op parity.
-  - Add `mlx-direct` feature + pinned `mlx-rs` dep (Apple-Silicon-gated).
-  - `afq/mlx_bridge.rs`: candle Metal tensor ↔ `mlx_rs::Array`, **copy
-    baseline** (API probe showed true zero-copy is not reachable: candle uses
-    Private storage, mlx-c adopt wants a `void*` not an MTLBuffer; copy is
-    negligible in decode). Settle contiguity/dtype/staging; record in spec.
-  - `afq/mlx_direct.rs`: `dequantize` + `quantized_matmul`.
-  - Gate: one real AFQ weight dequant + one quantized matmul, byte-for-byte vs
-    `mx.*` AND vs the legacy candle op. Blocks all later phases.
+- [x] mlx-native-p0 - Phase 0 dense: **DONE** (Qwen3-4B-4bit correct + fast).
+  - **AFQ load fixed** (3 upstream gaps: config quantization, single-file,
+    `.inner.weight` key remap) -> 904/904 params load.
+  - **Forward bug #1 FIXED** (`1bbe6e52`): dead KV cache (slots init'd None ->
+    decode ran cache-less, repetition). Fix: `Some(C::default())`.
+  - **Forward bug #2 FIXED**: mlx-rs `nn::Rope::forward` reshaped to 3D
+    `[-1, L, head_dim]`; for decode (L=1) the `[B*n_heads, 1, head_dim]` shape
+    trips an MLX fast-rope bug rotating only head 0, leaving later heads
+    un-rotated -> garbage. Fix: RoPE on the 4D shape directly (like Python).
+    **NOT the cause** (each cost real time): MLX version (0.31.2 reproduces it),
+    mask, sinks, layout, device, SDPA. The 0.31.2 bump was done (mlx-c fft/ops
+    patched to build) but didn't fix it -> reverted to 0.30.6 (rope fix is
+    version-independent, keeps the submodule unpatched).
+  - **Result:** Qwen3-4B-4bit byte-identical to mlx_lm ("The capital of France
+    is Paris"), **~106 T/s** (> candle ~100, ~10x bridge). Native-MLX thesis
+    fully proven (fast AND correct).
+- [x] mlx-native-p0b - `MlxNativeBackend` wired into the gateway (`b25497c`).
+  - MLX is `!Send` (one Metal stream) -> a dedicated worker thread owns the
+    model for life, loads it itself, serves jobs off a channel, streams
+    `ChatEvent`s back; the backend is a thin Send+Sync handle. Chat-template
+    render (system/user/assistant/tool), EOS/max-tokens/cancel stop, UTF-8-safe
+    incremental detokenize (holds a trailing replacement char so mid-Cyrillic
+    never leaks). `concurrency_capacity()=1` -> `admit_wrap` gates it.
+  - `mlx-native` feature (off by default) + path deps on the vendored fork
+    (swap to a git-rev pin at merge, like mistralrs). `build_gateway_backend`
+    tries it before mistralrs for MLX checkpoints.
+  - E2E test through the real SPI: streams a correct "Paris" answer in ~3.7s
+    incl. load. `cargo check --features mlx-native` + fmt + lib suite clean.
+  - Merged `origin/master` (the generic `concurrency` admission decorator +
+    shared-gateway) into the branch; clean.
+  - Gaps still open: hf-hub auto-download; sampler top_p/top_k/rep-penalty
+    (Generate only takes temp today); tool-use streaming; EOS list from config.
+- [x] mlx-native-p1 - Phase 1: port `qwen3_moe`; gated on `Qwen3-30B-A3B-4bit`.
+  - Dense Qwen3 attention reused verbatim; sparse MoE MLP = router gate
+    (quantized Linear) -> softmax -> argpartition top-8 -> `take_along_axis`
+    scores -> `SwitchGLU` experts via `gather_qmm` -> weighted sum. Experts are
+    AFQ 3D `[E,out,in]` raw `Param<Array>`; target-aware load remap adds
+    `.inner.weight` only where that param exists (QuantizedLinear leaves) so the
+    experts keep `.weight`. Token-sort skipped (gather_qmm identical sorted/not).
+  - **Greedy byte-for-byte identical to Python `mlx_lm`** on Qwen3-30B-A3B-4bit:
+    `<think>\n\n</think>\n\nThe capital of France is Paris.` Loads 1351 params,
+    full load+gen in ~4.6s. Backend dispatches qwen3/qwen3_moe by `model_type`
+    via a `LoadedModel` enum + shared generic streaming loop. (Downloaded the
+    gate model, ~17GB.) E2E test `mlx_moe_chat_capital`.
+  - All 48 layers sparse (mlp_only=[]); dense MoE layers fail loud for now.
+- [x] mlx-native-p2 - Phase 2: port `qwen3_5` (27B dense) + `qwen3_5_moe`
+  (35B-A3B) hybrid; gate on cached `Qwen3.6-{27B,35B-A3B}-4bit`. Headline: the
+  models the user runs, pure-Rust. Qwen3-Next family,
+  the hard phase — COMPLETE. Scope mapped from Python `qwen3_5`/`qwen3_next`/`gated_delta`:
+  - **DONE (fork `364cebf6`):** the GatedDeltaNet delta-rule recurrence
+    (`models/gated_delta.rs`, ops path — mlx-rs has no custom-kernel support, so
+    O(T) prefill but byte-exact). Unit-test validated vs Python `gated_delta_ops`
+    (<1e-3 on a seed-0 case). compute_g + delta_step + sequential scan.
+  - **Phase 2a DONE — `qwen3_5` (Qwen3.6-27B) byte-exact** (fork `9df1dd15`,
+    rozum `b39a49c`). `models/qwen3_5.rs`: output-gated full attention (every 4th
+    layer; q_proj->queries+gate, `o_proj(out*sigmoid(gate))`, partial RoPE
+    rotary_dim=head_dim*0.25 — mRoPE keys ignored for text, confirmed correct) +
+    GatedDeltaNet linear layers (depthwise `Conv1d` + causal conv-state cache +
+    the f32 delta scan) + heterogeneous `LayerCache::{Full(KV), Linear{conv,state}}`
+    + RMSNormGated + weightless q/k rms_norm. Backend `Qwen35` arm; jinja template
+    fallback; sharded-no-index load; `language_model.` prefix strip (skip vision
+    tower); config under `text_config` (rope from nested `rope_parameters`).
+    **Bugs found+fixed during bring-up** (localized via per-layer L2 dumps vs a
+    Python oracle): the mlx-community 4bit checkpoint is already sanitized so the
+    RMSNorm +1 must NOT be re-applied (was doubling norms -> 6x blowup); the delta
+    recurrence must run in f32 not bf16 (greedy drift); and the `A_log` param key
+    is capitalized (was loading as ones -> wrong decay). Greedy output identical
+    to Python mlx_lm: "Here's a thinking process:" (per-layer L2 to ~0.1%). E2E
+    test `mlx_qwen35_chat`.
+  - **Phase 2b DONE — `qwen3_5_moe` (Qwen3.6-35B-A3B)** (fork `f27ddc42`, rozum
+    `223fd69`). Reuses the qwen3_5 backbone verbatim (attention + GatedDeltaNet +
+    LayerCache, made pub) + the qwen3_moe SwitchGLU (made pub); every layer's MLP
+    is a sparse MoE block = router gate + top-k SwitchGLU + a shared expert gated
+    by `sigmoid(shared_expert_gate(x))`. **Per-module quant**: the router gate and
+    shared_expert_gate are 8-bit (rest 4-bit) and nn::quantize is uniform-only, so
+    those two are raw `QuantLinear` (quantized_matmul) outside nn::quantize; the
+    4-bit experts stay raw SwitchGLU; the rest go through nn::quantize at 4-bit.
+    `intermediate_size` optional (pure-MoE omits it). Greedy output matches Python
+    mlx_lm: "Thinking Process:" — worked on the first forward run (only two config
+    fixes needed). E2E test `mlx_qwen35_moe_chat`. **Phase 2 COMPLETE.**
+- [ ] mlx-native-p3 - Phase 3: broaden catalog (Llama upstream; Qwen2.5 /
+  Qwen2.5-Coder deltas). SKIPPED for now (user request) — revisit after p4.
+- [x] mlx-native-p4 - Phase 4: native MLX is the DEFAULT backend; `mlx_lm.server`
+  retired (rozum `74b458a`). `default = ["mlx-native"]` (was `["mistralrs"]`);
+  mistralrs is now opt-in `--features mistralrs` (broader-catalog candle fallback,
+  still tried after native MLX). Removed `try_mlx_server` + its chain step; the
+  in-process native runtime supersedes the Python server. Chain is now GGUF ->
+  native MLX -> mistralrs (opt-in) -> LM Studio HTTP -> ROZUM_BACKEND_URL. SPEC.md
+  resolution chain + no-backend hints + select-failed note updated. Default and
+  `--features mistralrs` both build clean. **Open: reproducibility** — mlx-native
+  still uses path deps into the gitignored `.vendor/`; merge-to-master must push
+  the fork (`sergey-scherbina/mlx-rs` branch `rozum-mlx-native`) and switch to a
+  git-rev pin (like the mistralrs `[patch.crates-io]`) so the default builds
+  off-tree.
 
-- [ ] mlx-direct-p1 - Phase 1: dense model parity.
-  - Switch `afq_quantize_op` / `afq_dequantize_op` / `afq_mm_op` behind
-    `MISTRALRS_MLX_DIRECT`.
-  - Gate: Qwen3-4B-4bit byte-for-byte tokens vs `mlx_lm.generate --temp 0`;
-    exercise Qwen3-30B.
+#### SUPERSEDED: mistralrs-mlx-direct — targeted candle->MLX quant-op bridge
 
-- [ ] mlx-direct-p2 - Phase 2: MoE gather path.
-  - Wire `afq_gather_qmm_rhs_sorted{,_gate_up}` → `mx.gather_qmm`.
-  - Gate: Qwen3-30B-A3B-4bit (MoE) and Qwen3.6-35B-A3B-4bit (hybrid) both
-    token-for-token vs `mlx_lm`. Qwen3.6 green = headline result.
+Proven dead end (kept as a parity oracle in `feature/mistralrs-mlx-direct`).
+Correct (byte-identical on Qwen3-4B) but **slower than candle** (11.76 vs 100.74
+T/s) due to a structural per-op cross-runtime GPU-sync floor. MLX speed is
+all-or-nothing -> the native runtime above is the right path. p0/p1/p1b records
+kept below; p2/p3/p4 cancelled.
 
-- [ ] mlx-direct-p3 - Phase 3: generalize bit-widths & variants.
-  - AFQ 2/3/6/8-bit, MXFP4, group sizes 32/128, DWQ checkpoints; parametric
-    parity test over (bits, group_size).
+Spec: `docs/specs/mistralrs-mlx-direct.md`. Decisions: targeted quant-ops ·
+`mlx-rs` · in the `.vendor/mistral-rs` fork, generic.
 
-- [ ] mlx-direct-p4 - Phase 4: perf, optional zero-copy spike & default flip.
-  - Benchmark copy baseline vs legacy (tok/s prefill+decode, peak RSS) on
-    Qwen3.6. Decode expected to already win; watch prefill (boundary copy +
-    lost cross-runtime overlap). Only if prefill regresses, time-box a zero-copy
-    spike (custom FFI `mlx_array_new_data_managed` + MTLBuffer adoption) or widen
-    the MLX region. Flip build-time default once MLX-direct meets-or-beats legacy
-    and all parity gates are green; env switch stays as escape hatch.
+- [x] mlx-direct-p0 - Phase 0: bridge prototype + single-op parity. **DONE**
+  (fork branch `mlx-direct`, commit `14e699a26`).
+  - `mlx-direct` feature + `mlx-rs = "0.25.3"` added; copy-baseline bridge
+    (`afq/mlx_bridge.rs`) + `afq/mlx_direct.rs` (dequantize + quantized_matmul);
+    runtime switch in `afq_dequantize_op`/`afq_mm_op`.
+  - Gate PASSED (`--test-threads=1`): MLX dequantize vs candle (diff < 1e-4);
+    MLX quantized_matmul vs candle dequant+matmul (diff < 1e-3).
+  - Finding: no candle+MLX coexistence deadlock; the deadlock chase was a
+    standalone `afq_mm_op` splitk `sum(0)` hang, reproduced with NO MLX linked.
+    Metal tests must run single-threaded; `kill -9` of a hung Metal test wedges
+    the GPU. Details in spec Results.
+
+- [x] mlx-direct-p1 - Phase 1: dense model correctness. **DONE** (fork commit
+  `a7ea747ea`; feature plumbed quant -> core -> cli).
+  - `mlx-community/Qwen3-4B-4bit` via `mistralrs run`, `MISTRALRS_MLX_DIRECT`
+    0 vs 1, same seed: **generation byte-identical** (623 chars, 136 tokens,
+    `A: Paris.`). No deadlock under full-forward candle<->MLX interleaving.
+  - **Perf regression: 2.89 vs 100.74 T/s (~35x).** Copy baseline's CPU
+    round-trip + per-op sync. Correct but not shippable.
+  - Cross-check vs `mlx_lm` not run (not installed); ON==OFF vs the mlx_lm-
+    validated candle path stands in.
+
+- [~] mlx-direct-p1b - Phase 1b: bridge perf. **PARTIAL.** (fork `c5986e13d`)
+  - Weight-array cache (memoize candle->MLX of constant AFQ weights by Metal
+    buffer addr): Qwen3-4B-4bit decode **2.89 -> 11.76 T/s (~4x)**, output still
+    byte-identical. Banked.
+  - **Remaining ~8.6x gap is structural:** per-op cross-runtime GPU sync (candle
+    drain to host for `x` + MLX eval for the result = 2 syncs x ~250 quant
+    ops/token). candle alone runs the same ops at 100 T/s via one queue + batched
+    commits. Cutting this needs shared-MTLBuffer + shared-queue/event ordering,
+    which is NOT reachable via public APIs (candle Private storage; mlx-c adopt
+    wants void* not MTLBuffer; no cross-queue event exposed), OR widening the
+    MLX region toward a fuller native runtime. Open strategic decision.
+
+- [x] mlx-direct-p2/p3/p4 - CANCELLED (superseded by mlx-native-runtime). The
+  bridge cannot beat candle (structural per-op sync floor), so wiring MoE
+  gather, generalizing bit-widths, and the zero-copy spike no longer pay off.
+  The native MLX runtime gets MLX speed by owning the whole forward instead.
 
 #### mistralrs-concurrency-scheduling — responsive, memory-budgeted concurrency
 

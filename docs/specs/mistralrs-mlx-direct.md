@@ -31,11 +31,19 @@ costs ~90% of decode time.
 ### Feature flag
 
 - New Cargo feature `mlx-direct` on the `mistralrs-quant` crate (off by
-  default; Apple-Silicon-only). Pulls in `mlx-rs` (pinned 0.x) under
+  default; Apple-Silicon-only). Pulls in **`mlx-rs = "0.25.3"`** (default
+  features `accelerate`+`metal`; transitively `mlx-sys`, which builds MLX from
+  source) under
   `#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "mlx-direct"))]`.
 - `rozum` exposes it as a passthrough feature: `rozum`'s `mistralrs` feature
   may enable `mistralrs/mlx-direct` once the engine feature is plumbed through
   `mistral.rs`'s own feature graph.
+- **Version note (probed 2026-06-11):** `mlx-rs 0.25.3` ships safe wrappers for
+  `quantize` / `dequantize` / `quantized_matmul` (Phases 0–1), but **not** for
+  `gather_qmm` (only on unreleased `main`). The MoE path (Phase 2) therefore
+  calls the C symbol directly via a thin `mlx_sys::mlx_gather_qmm` shim (the
+  symbol is present in the bundled mlx-c). This keeps us on a released crate
+  rather than a git pin.
 
 ### Runtime switch
 
@@ -286,7 +294,12 @@ Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
   Then Qwen3-30B is exercised for the bigger dense-ish surface.
 
 **Phase 2 — MoE gather path (~1 week).**
-- Wire `afq_gather_qmm_rhs_sorted{,_gate_up}` to `mx.gather_qmm`.
+- Wire `afq_gather_qmm_rhs_sorted{,_gate_up}` to MLX `gather_qmm`. Since
+  `mlx-rs 0.25.3` has no safe wrapper, add a thin unsafe shim over
+  `mlx_sys::mlx_gather_qmm(res, x, w, scales, biases, lhs_indices, rhs_indices,
+  transpose, group_size, bits, mode, sorted_indices, stream)` (note the `mode`
+  string and `sorted_indices` flag the candle path already implies). Drop the
+  shim if/when a release exposes the safe wrapper.
 - Gate: Qwen3-30B-A3B-4bit (MoE) and Qwen3.6-35B-A3B-4bit (hybrid MoE) both
   token-for-token vs `mlx_lm`. Qwen3.6 passing here is the headline result —
   it retires the candle-AFQ bug class for the model that motivated all of this.
@@ -357,9 +370,10 @@ Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
   the copy path before any model wiring. The boundary also forces a
   cross-runtime sync point (no pipelining across a quant op) — the main perf
   question for prefill, measured in Phase 4.
-- **mlx-rs API churn** — 0.x crate; pin and bump explicitly. An op we need may
-  be missing or shaped differently than `mlx_lm`'s Python; verify each against
-  the Python reference, not the paper.
+- **mlx-rs API maturity** — 0.25.x tracks MLX-core versions (not chaotic;
+  no yanks), pin `0.25.3` and bump explicitly. One concrete gap already found:
+  `gather_qmm` has no safe wrapper in 0.25.3 (handled via the `mlx_sys` shim
+  above). Verify every op against the `mlx_lm` Python reference, not the paper.
 - **Build coupling** — both candle-Metal and MLX compile Metal; first-build
   time grows and full Xcode is required (already true today). Keep the feature
   off by default so the meeting-room and GGUF builds are unaffected.
@@ -377,6 +391,11 @@ Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
 
 - `mlx-rs` exposes `quantize/dequantize/quantized_matmul/gather_qmm` with a 1:1
   fit to `afq/ops.rs`; `bits`/`group_size` are runtime args (one generic path).
+- **Pinned version: `mlx-rs 0.25.3`** (latest, Dec 2025; tracks MLX-core 0.25.x;
+  default features `accelerate`+`metal`; mlx-sys builds MLX from source). Safe
+  wrappers for `quantize/dequantize/quantized_matmul` are present; **`gather_qmm`
+  is not** (unreleased `main` only) → Phase 2 uses an `mlx_sys::mlx_gather_qmm`
+  C shim (symbol confirmed present in the bundled mlx-c).
 - All safe `Array` constructors copy; `from_raw_data`/`mlx_array_new_data` copy
   too. Zero-copy adopt exists only as mlx-c `mlx_array_new_data_managed`
   (unwrapped by mlx-rs; takes `void*`, not an MTLBuffer).
@@ -389,6 +408,85 @@ Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
 
 ### Per-phase results
 
-(Filled in per phase. Phase 0 must record the final bridge specifics —
-contiguity/dtype/staging strategy — and the single-op parity numbers before
-Phase 1 begins.)
+**Phase 0 — DONE (2026-06-11).** Fork branch `mlx-direct`, commit `14e699a26`.
+
+- Feature `mlx-direct` + `mlx-rs = "0.25.3"` added to `mistralrs-quant`
+  (Apple-Silicon-gated). First build incl. `mlx-sys` (MLX from source) ~3m25s
+  on M4 Max; `half` resolves to a single 2.7.1 shared with candle, so
+  `bf16`/`f16` types unify across the bridge (no conversion needed).
+- Bridge `afq/mlx_bridge.rs` (copy baseline): `candle_to_mlx` via
+  `contiguous()/to_vec1` + `Array::from_slice`; `mlx_to_candle` via `eval()` +
+  `try_as_slice` + `Tensor::from_slice`. dtypes f32/f16/bf16/u32. Ops in
+  `afq/mlx_direct.rs` over `mlx_rs::ops::{dequantize,quantized_matmul}`.
+- **Parity gate PASSED** (`--test-threads=1`, M4 Max):
+  - `dequantize`: MLX vs candle `afq_dequantize_op`, max abs diff < 1e-4.
+  - `quantized_matmul`: MLX vs candle `dequantize + matmul`, max abs diff
+    < 1e-3. (Reference is dequant+matmul, not `afq_mm_op` -- see below.)
+- **No candle+MLX coexistence deadlock.** A long deadlock chase during Phase 0
+  turned out to be a *faulty reference path*, not the bridge: the legacy
+  candle `afq_mm_op` splitk `sum(0)` branch (`ops.rs:456`) deadlocks in a
+  *standalone* Metal unit test (fresh device, tiny batch=4 shape) even with
+  **no MLX linked at all** -- confirmed by reproducing the hang in a
+  `--features metal` (non-mlx) binary. Production never hits it because the
+  model forward pumps/commits the command buffer; an isolated single-op test
+  does not. The MLX bridge is exonerated; the matmul parity test compares
+  against dequant+matmul to avoid that path.
+- **Test methodology (important for later phases):** Metal tests MUST run
+  `--test-threads=1` -- parallel test threads each making a `Device::new_metal`
+  and driving one `MTLDevice` deadlock candle's command-encoder mutex. And
+  `kill -9` of a hung Metal test can wedge the GPU driver (AGX), so subsequent
+  runs hang spuriously; prefer one clean process per case with generous
+  build-vs-run separated timeouts, and avoid kill cascades.
+- Zero-copy: untouched (deferred to Phase 4 as planned); copy baseline is the
+  shipped mechanism.
+
+**Phase 1 — dense correctness DONE (2026-06-11).** Fork commit `a7ea747ea`
+(feature plumbed `mistralrs-quant -> core -> cli`).
+
+- Ran `mlx-community/Qwen3-4B-4bit` end-to-end through `mistralrs run` with
+  `MISTRALRS_MLX_DIRECT=0` (candle) and `=1` (MLX), same `--seed 0`, same prompt.
+- **Generation byte-identical** (623 chars each; only the "time to first token"
+  log line differs). Same 136 decode tokens, same answer. The dense AFQ
+  `quantized_matmul` path on real MLX matches the candle production path on a
+  full forward.
+- **No deadlock** under heavy candle<->MLX interleaving (~40 layers x several
+  quant matmuls x 136 tokens of boundary crossings) -- confirms there is no
+  coexistence stall at scale; the Phase 0 deadlock really was the standalone
+  `afq_mm_op` test artifact.
+- **Throughput regression: 2.89 T/s vs 100.74 T/s candle (~35x slower).** Cause:
+  the copy baseline does a GPU->CPU (`to_vec1`) + CPU->MLX (`from_slice`) round
+  trip and a candle/MLX sync per quant op per token. This makes the copy
+  baseline **correct but not shippable** -- the on-device bridge (avoid the CPU
+  round-trip; stage in shared Metal buffers, then later the zero-copy spike) is
+  now the priority, NOT a deferred Phase 4 nicety. Decode crossings being
+  "negligible bytes" (the earlier analysis) held for *bytes* but ignored the
+  *CPU round-trip + per-op sync* cost, which dominates.
+- Cross-check vs `mlx_lm.generate --temp 0` not run (mlx_lm not installed); ON
+  == OFF byte-for-byte against the already-mlx_lm-validated candle path is the
+  standing evidence. Install mlx_lm for the external anchor when convenient.
+
+**Phase 1b -- bridge perf, PARTIAL (2026-06-11).** Fork commit `c5986e13d`.
+
+- Weight-array cache: the copy bridge was re-reading + re-uploading the constant
+  multi-MB AFQ weight tensors to MLX on every quant op of every token. Memoized
+  candle->MLX weight conversion keyed by the candle Metal buffer address
+  (`mlx_bridge.rs::candle_weight_to_mlx`); activations still convert fresh.
+  Qwen3-4B-4bit decode **2.89 -> 11.76 T/s (~4x)**, output still byte-identical.
+- **Remaining gap ~8.6x (11.76 vs 100.74 T/s candle) is structural.** Per quant
+  op the bridge still does 2 cross-runtime GPU syncs: candle drain-to-host for
+  the activation `x` (`to_vec1`) and MLX `eval()` for the result. ~250 quant
+  ops/token x 2 syncs x ~150us ~= the observed 85 ms/token. candle alone runs
+  the same ops at 100 T/s because it uses one command queue with batched commits
+  (no per-op sync). Measured floor for the op-granularity bridge ~= 10-20 T/s.
+- **This is the real verdict on the targeted approach's ceiling:** closing the
+  gap needs shared-MTLBuffer + shared-queue/event ordering between candle and
+  MLX, which is NOT reachable via public APIs (candle Private storage has no CPU
+  ptr; mlx-c `mlx_array_new_data_managed` adopts a `void*` not an `id<MTLBuffer>`;
+  neither runtime exposes cross-queue event waits). The remaining levers are:
+  (a) a custom-C++ spike into MLX internals to adopt candle's MTLBuffer and add
+  an MTLSharedEvent (high risk, may still be blocked by candle's side), or
+  (b) widen the MLX region so consecutive ops stay MLX-side and crossings drop
+  (drifts toward `mlx-native-port`). Decision pending.
+
+Then Phase 2 (MoE gather_qmm) for correctness breadth regardless of the perf
+decision.

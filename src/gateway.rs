@@ -1628,43 +1628,60 @@ pub async fn serve_on(
         activity: Arc::new(Activity::default()),
     };
 
-    // Idle watchdog (shared daemon). Two complementary actions on one 30 s tick:
-    //   1. idle-exit  — no agent attached at all (no leases) and quiet for
-    //      `idle_secs`: free everything by exiting the process.
-    //   2. idle-unload — agents attached (leases held) but not generating for
-    //      `unload_secs`: drop just the model's RAM, keep the daemon; the next
-    //      chat lazily reloads. This is the `leases > 0` case idle-exit skips.
-    // Conditions are disjoint in the common case; we evaluate exit first (frees
-    // the most when truly abandoned), then unload. A `--dedicated` gateway has no
-    // builder, so unload is guarded off. Spec: `docs/specs/model-unload-on-idle.md`.
+    // Lifecycle watchdog (shared daemon). Per 2 s tick, in order:
+    //   1. exit — no client lease and nothing in flight. A launch-managed daemon
+    //      exits the moment the last agent's lease drops (free everything); a
+    //      manual `rozum gateway` exits after `idle_secs` of no HTTP traffic.
+    //   2. idle-unload — model resident but not generating and quiet for
+    //      `unload_secs`: drop just the model's RAM, keep the daemon for lazy
+    //      reload. A `--dedicated` gateway has no builder, so unload is guarded
+    //      off. Spec: `docs/specs/model-unload-on-idle.md`.
     let idle_exit = cfg.idle_secs.filter(|&s| s > 0);
     let unload_after = unload_idle_secs();
     let unload_on_idle = unload_after > 0 && state.sb.can_reload();
-    if idle_exit.is_some() || unload_on_idle {
+    // Daemons spawned by `rozum launch` are launch-managed: shut down once the
+    // last client lease drops, even if a lease was never observed (a short
+    // startup grace lets the launch register its first lease).
+    let launch_managed = std::env::var("ROZUM_GATEWAY_LAUNCH_MANAGED").is_ok();
+    if idle_exit.is_some() || unload_on_idle || launch_managed {
+        use std::sync::atomic::Ordering;
+        const STARTUP_GRACE_SECS: u64 = 15;
         state
             .activity
             .last_active
             .store(crate::share::now_unix(), Ordering::Relaxed);
         let activity = Arc::clone(&state.activity);
         let sb = Arc::clone(&state.sb);
+        let started = crate::share::now_unix();
         tokio::spawn(async move {
+            let mut seen_lease = false;
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let live_leases = crate::share::live_lease_count(crate::share::LEASE_FRESH_SECS);
+                if live_leases > 0 {
+                    seen_lease = true;
+                }
                 let idle_for = crate::share::now_unix()
                     .saturating_sub(activity.last_active.load(Ordering::Relaxed));
 
-                // 1. idle-exit: stay up while any launch holds a fresh lease OR a
-                // request is in flight OR there was recent HTTP traffic. Exit only
-                // when all are quiet for `idle_secs`.
-                if let Some(idle) = idle_exit {
-                    let live_leases =
-                        crate::share::live_lease_count(crate::share::LEASE_FRESH_SECS);
-                    if activity.in_flight.load(Ordering::Relaxed) == 0
-                        && live_leases == 0
-                        && idle_for >= idle
-                    {
+                // 1. Lifecycle exit: no client lease and nothing in flight.
+                if activity.in_flight.load(Ordering::Relaxed) == 0 && live_leases == 0 {
+                    let up_for = crate::share::now_unix().saturating_sub(started);
+                    let exit_reason = if seen_lease {
+                        // A client lease was observed and is now gone -> agent exited.
+                        Some("clients_gone")
+                    } else if launch_managed && up_for >= STARTUP_GRACE_SECS {
+                        // Launch-spawned but no lease ever appeared (agent never
+                        // attached or exited between polls) -> don't linger.
+                        Some("clients_gone")
+                    } else if idle_exit.is_some_and(|s| idle_for >= s) {
+                        Some("idle")
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = exit_reason {
                         crate::obs::log_event(serde_json::json!({
-                            "event": "gateway_idle_exit", "idle_secs": idle_for,
+                            "event": "gateway_exit", "reason": reason, "idle_secs": idle_for,
                         }));
                         if let Some(pid) = registered_pid {
                             crate::share::remove_active_if_mine(pid);
