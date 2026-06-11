@@ -256,17 +256,28 @@ passes on at least one real model.
      is **non-strict** (silently skips unmatched keys -> random weights ->
      garbage). Custom loader remaps `<p>.weight -> <p>.inner.weight` when a
      sibling `<p>.scales` exists. **904/904 params load.**
-- **Open: forward numerical bug.** With loading correct, output still
-  degenerates after a correct first token (`<think>` then repetition). The
-  checkpoint is fine (mistralrs/candle runs it coherently with the same 25-token
-  prompt). Structure checks out (causal mask created, RoPE offset from cache,
-  GQA via MLX fast-SDPA, quantized tied lm_head correct), so it is a subtle
-  numeric drift in the v0.0.1 crate. **Next: install `mlx_lm` Python oracle, diff
-  per-layer activations (reuse the `scripts/mlx_ref.py` methodology) to localize,
-  fix, then re-gate byte-for-byte.**
-- Not yet: `MlxNativeBackend` (ChatBackend) wiring -- blocked on the forward fix
-  (no point streaming garbage). hf-hub auto-download, sampler top_p/top_k, EOS
-  from config -- after correctness.
+- **Forward bug #1 (fixed): dead KV cache.** `Qwen3Model::forward` initialized
+  cache slots to `None`, but `Attention::forward` only reads/writes the cache on
+  the `Some` branch -- so every decode step ran cache-less (no history, wrong
+  position), degenerating into repetition. Fixed by initializing slots to
+  `Some(C::default())` (commit `1bbe6e52`). Output became coherent.
+- **Forward bug #2 (root-caused, fix pending): fast-SDPA Q=1 kernel in the
+  bundled MLX.** After the cache fix, greedy still diverged from `mlx_lm` at the
+  2nd token. Localized with env-gated dumps (`ROZUM_{LOGIT,LAYER,ATTN}_DEBUG`):
+  - A full 26-token prefill matches `mlx_lm` Python **byte-for-byte** (top-1 and
+    the `198 \n` vs `271 \n\n` logits) -> the **model is correct**.
+  - Incremental decode diverges at **layer 0** with **byte-identical q/k/v
+    inputs** (same L2 for query, every cached key, and value) yet a different
+    attention output. So `mlx_rs::fast::scaled_dot_product_attention` returns a
+    wrong result on the **single-query (decode) path** for inputs the
+    multi-query path handles correctly. RoPE-offset and mask were ruled out
+    (direct tests). Python `mlx_lm` uses the same SDPA path and is correct.
+  - **Root cause: version skew.** Bundled MLX is ~0.25 (mlx-c 0.5.0, via
+    mlx-sys 0.2.0); pip `mlx_lm` runs **MLX 0.31.2**. The Q=1 SDPA bug is fixed
+    upstream. **Fix = bump mlx-sys's vendored MLX** (and reconcile any mlx-rs
+    0.25 API deltas), then re-run the env-gated dumps to confirm byte-parity.
+- Not yet (after the MLX bump + parity): `MlxNativeBackend` (ChatBackend)
+  wiring; hf-hub auto-download; sampler top_p/top_k; EOS-from-config.
 
 ### Gaps in upstream confirmed (to fill / upstream PRs)
 

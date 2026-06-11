@@ -75,10 +75,14 @@ is 100% MLX, candle only as external oracle.
     ~10x bridge). Full MLX forward, no candle. This was the whole point.
   - **AFQ load fixed** (3 upstream gaps: config quantization, single-file,
     `.inner.weight` key remap) -> 904/904 params load.
-  - **OPEN: forward numeric bug** -- correct first token then degenerates;
-    checkpoint is fine. Next: mlx_lm Python oracle + per-layer activation diff
-    to localize, then `MlxNativeBackend: ChatBackend` wiring (streaming/cancel/
-    EOS/tool-use) and the byte-for-byte gate.
+  - **Forward bug #1 FIXED** (`1bbe6e52`): dead KV cache (slots init'd None ->
+    decode ran cache-less). Output now coherent.
+  - **Forward bug #2 ROOT-CAUSED, fix pending**: fast-SDPA **Q=1 (decode)
+    kernel** in the bundled MLX is wrong. Proven: full 26-tok prefill matches
+    mlx_lm byte-for-byte (model correct); incremental decode diverges at layer 0
+    with byte-identical q/k/v inputs. Bundled MLX ~0.25 (mlx-c 0.5.0) vs pip
+    mlx_lm MLX 0.31.2 -> **fix = bump mlx-sys's MLX**, then re-gate parity, then
+    wire `MlxNativeBackend: ChatBackend`.
 - [ ] mlx-native-p1 - Phase 1: port `qwen3_moe`; gate on `Qwen3-30B-A3B-4bit`.
 - [ ] mlx-native-p2 - Phase 2: port `qwen3_5` (27B dense) + `qwen3_5_moe`
   (35B-A3B) hybrid; gate on cached `Qwen3.6-{27B,35B-A3B}-4bit`. Headline: the
