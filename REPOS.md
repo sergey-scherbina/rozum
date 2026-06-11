@@ -16,3 +16,11 @@ branch: master
 url: https://github.com/sergey-scherbina/mistral.rs.git
 path: .vendor/mistral-rs
 branch: qwen36-chunked-prefill
+
+## mlx-lm
+url: https://github.com/sergey-scherbina/mlx-rs.git
+path: .vendor/mlx-lm
+branch: main
+# Fork of oxideai/mlx-rs (workspace: mlx-rs + mlx-lm + mlx-lm-utils). We extend
+# the mlx-lm crate with the model architectures rozum needs (MoE, Qwen3.6
+# hybrid) for the native MLX runtime. Fork URL provisional until created.
