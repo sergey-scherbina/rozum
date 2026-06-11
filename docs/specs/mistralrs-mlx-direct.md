@@ -465,6 +465,28 @@ Each phase has a hard exit criterion; do not start N+1 until N's gate passes.
   == OFF byte-for-byte against the already-mlx_lm-validated candle path is the
   standing evidence. Install mlx_lm for the external anchor when convenient.
 
-Next: **perf** -- replace the CPU round-trip in `mlx_bridge.rs` with an
-on-device path (allocate boundary tensors in shared Metal storage, blit instead
-of read-to-host), measure decode T/s recovery; then Phase 2 (MoE gather_qmm).
+**Phase 1b -- bridge perf, PARTIAL (2026-06-11).** Fork commit `c5986e13d`.
+
+- Weight-array cache: the copy bridge was re-reading + re-uploading the constant
+  multi-MB AFQ weight tensors to MLX on every quant op of every token. Memoized
+  candle->MLX weight conversion keyed by the candle Metal buffer address
+  (`mlx_bridge.rs::candle_weight_to_mlx`); activations still convert fresh.
+  Qwen3-4B-4bit decode **2.89 -> 11.76 T/s (~4x)**, output still byte-identical.
+- **Remaining gap ~8.6x (11.76 vs 100.74 T/s candle) is structural.** Per quant
+  op the bridge still does 2 cross-runtime GPU syncs: candle drain-to-host for
+  the activation `x` (`to_vec1`) and MLX `eval()` for the result. ~250 quant
+  ops/token x 2 syncs x ~150us ~= the observed 85 ms/token. candle alone runs
+  the same ops at 100 T/s because it uses one command queue with batched commits
+  (no per-op sync). Measured floor for the op-granularity bridge ~= 10-20 T/s.
+- **This is the real verdict on the targeted approach's ceiling:** closing the
+  gap needs shared-MTLBuffer + shared-queue/event ordering between candle and
+  MLX, which is NOT reachable via public APIs (candle Private storage has no CPU
+  ptr; mlx-c `mlx_array_new_data_managed` adopts a `void*` not an `id<MTLBuffer>`;
+  neither runtime exposes cross-queue event waits). The remaining levers are:
+  (a) a custom-C++ spike into MLX internals to adopt candle's MTLBuffer and add
+  an MTLSharedEvent (high risk, may still be blocked by candle's side), or
+  (b) widen the MLX region so consecutive ops stay MLX-side and crossings drop
+  (drifts toward `mlx-native-port`). Decision pending.
+
+Then Phase 2 (MoE gather_qmm) for correctness breadth regardless of the perf
+decision.

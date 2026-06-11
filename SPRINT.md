@@ -92,11 +92,17 @@ Decisions locked: targeted quant-ops · `mlx-rs` bindings · in the fork, generi
   - Cross-check vs `mlx_lm` not run (not installed); ON==OFF vs the mlx_lm-
     validated candle path stands in.
 
-- [ ] mlx-direct-p1b - Phase 1b: on-device bridge (perf). **NEW, now priority.**
-  - Replace the GPU->CPU->MLX round-trip in `mlx_bridge.rs` with shared-Metal
-    staging / blit; recover decode T/s toward the candle path. Zero-copy spike
-    stays a later option. Gate: byte-identical output preserved, decode T/s
-    within a target factor of candle.
+- [~] mlx-direct-p1b - Phase 1b: bridge perf. **PARTIAL.** (fork `c5986e13d`)
+  - Weight-array cache (memoize candle->MLX of constant AFQ weights by Metal
+    buffer addr): Qwen3-4B-4bit decode **2.89 -> 11.76 T/s (~4x)**, output still
+    byte-identical. Banked.
+  - **Remaining ~8.6x gap is structural:** per-op cross-runtime GPU sync (candle
+    drain to host for `x` + MLX eval for the result = 2 syncs x ~250 quant
+    ops/token). candle alone runs the same ops at 100 T/s via one queue + batched
+    commits. Cutting this needs shared-MTLBuffer + shared-queue/event ordering,
+    which is NOT reachable via public APIs (candle Private storage; mlx-c adopt
+    wants void* not MTLBuffer; no cross-queue event exposed), OR widening the
+    MLX region toward a fuller native runtime. Open strategic decision.
 
 - [ ] mlx-direct-p2 - Phase 2: MoE gather path.
   - Wire `afq_gather_qmm_rhs_sorted{,_gate_up}` → MLX gather_qmm via a thin
