@@ -39,7 +39,9 @@ mod inner {
         /// Max sequences the engine batches concurrently. mistralrs defaults to
         /// 32; on a memory-constrained Mac that lets two large prompt prefills
         /// (e.g. Claude Code's parallel requests) run at once and OOM the Metal
-        /// command buffer. 1 serialises them, matching Ollama/LM Studio.
+        /// command buffer. 1 serialises them, matching Ollama/LM Studio; the
+        /// default is lifted to 2 on machines with ample unified memory (see
+        /// [`super::default_max_num_seqs`]). Override via `ROZUM_MISTRALRS_MAX_SEQS`.
         pub max_num_seqs: usize,
     }
 
@@ -53,7 +55,7 @@ mod inner {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .filter(|&n| n >= 1)
-                .unwrap_or(1);
+                .unwrap_or_else(|| super::default_max_num_seqs(super::total_ram_bytes()));
             Self {
                 n_ctx,
                 max_num_seqs,
@@ -387,9 +389,43 @@ pub fn normalize_spec(spec: &str) -> String {
     }
 }
 
+/// Total physical RAM in bytes (macOS `sysctl hw.memsize`). Mirrors the
+/// preflight reader in `main.rs`; duplicated here so the lib's default policy is
+/// self-contained — the `rozum` lib cannot call into the binary crate.
+#[cfg(feature = "mistralrs")]
+fn total_ram_bytes() -> Option<u64> {
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Default concurrent-prefill cap (`max_num_seqs`), adaptive to machine memory.
+///
+/// `1` serialises requests — one prefill at a time — the safe floor on
+/// memory-constrained Apple Silicon, where two concurrent large-prompt prefills
+/// can each peak the Metal working set and OOM. PagedAttention + chunked prefill
+/// bound a *single* prefill's peak, but N concurrent prefills still cost ~N× that
+/// transient peak, so the cap only lifts to `2` when the machine has clear
+/// headroom. The signal is **total** unified memory (`hw.memsize`), a stable
+/// machine-class indicator: instantaneous free memory is high at load time
+/// (weights not yet resident) and over-predicts runtime headroom, and the
+/// model-fit retry loop in `MistralrsBackend::new` already handles the dynamic
+/// "does it actually fit" question by stepping `n_ctx` down. The
+/// `ROZUM_MISTRALRS_MAX_SEQS` env var overrides this entirely.
+pub fn default_max_num_seqs(total_ram: Option<u64>) -> usize {
+    const GB: u64 = 1 << 30;
+    // ≥48 GB covers the 48/64/96/128 GB configs; 16/24/32/36 GB stay serialised.
+    match total_ram {
+        Some(bytes) if bytes >= 48 * GB => 2,
+        _ => 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::normalize_spec;
+    use super::{default_max_num_seqs, normalize_spec};
 
     #[test]
     fn normalize_mlx_community_prefix() {
@@ -408,5 +444,24 @@ mod tests {
     fn normalize_bare_passthrough() {
         assert_eq!(normalize_spec("Qwen/Qwen3-4B"), "Qwen/Qwen3-4B");
         assert_eq!(normalize_spec("/abs/path"), "/abs/path");
+    }
+
+    const GB: u64 = 1 << 30;
+
+    #[test]
+    fn max_num_seqs_serialises_on_small_or_unknown_memory() {
+        // 16/24/32/36 GB machines (the 24-36 GB target band) stay serialised.
+        assert_eq!(default_max_num_seqs(Some(16 * GB)), 1);
+        assert_eq!(default_max_num_seqs(Some(32 * GB)), 1);
+        assert_eq!(default_max_num_seqs(Some(36 * GB)), 1);
+        // Unknown total → safe floor.
+        assert_eq!(default_max_num_seqs(None), 1);
+    }
+
+    #[test]
+    fn max_num_seqs_allows_concurrency_on_large_memory() {
+        assert_eq!(default_max_num_seqs(Some(48 * GB)), 2);
+        assert_eq!(default_max_num_seqs(Some(64 * GB)), 2);
+        assert_eq!(default_max_num_seqs(Some(128 * GB)), 2);
     }
 }

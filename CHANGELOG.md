@@ -1,5 +1,18 @@
 # Changelog
 
+## mistralrs-adaptive-concurrency — memory-adaptive default for max_num_seqs
+Completed: 2026-06-11
+The mistralrs backend's concurrent-prefill cap (`max_num_seqs`) default is no
+longer a fixed `1`. A new pure `default_max_num_seqs(total_ram)` policy keeps
+the serialised `1` floor on the 24–36 GB Apple Silicon target band (where two
+concurrent large-prompt prefills can OOM the Metal command buffer) and lifts it
+to `2` on machines with ≥ 48 GB total unified memory, where PagedAttention +
+chunked prefill + the disconnected-seq reaping fix make real concurrency safe.
+The gate is on total `hw.memsize` rather than instantaneous free memory (which
+over-predicts runtime headroom at load time). `ROZUM_MISTRALRS_MAX_SEQS`
+overrides. Rationale + trade-offs documented in
+`docs/specs/mistralrs-backend.md`.
+
 ## web-basic-auth — HTTP Basic Auth on the web bridge
 Completed: 2026-06-06
 The web bridge now requires HTTP Basic Auth for `/`, `/ws`, and `/transcript`.
