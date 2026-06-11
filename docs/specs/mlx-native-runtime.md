@@ -393,8 +393,8 @@ obvious levers were tested and rejected: removing the custom-kernel per-call eva
 a no-op (decode isn't sync-bound), and `mx.compile` is net-negative in this binding
 (probe below). What's done / next: (1) **`mlx-native-mem-bound`** — DONE (KV
 preflight rejects an over-large context with a clear "lower --n-ctx" message instead
-of OOM); (2) **SDPA `Causal` mode** in prefill (drop the explicit mask) — the top
-remaining perf item, small/low-risk; (3) decode throughput is HARD and deprioritized
+of OOM); (2) **SDPA `Causal` mode** in prefill (drop the explicit mask) — DONE
+(fork `ef5cbca9`, byte-identical); (3) decode throughput is HARD and deprioritized
 (needs hand-written fused Metal kernels or fork-level work to cut mlx-rs per-op
 overhead). Details below.
 
@@ -439,10 +439,12 @@ way. So the per-call eval stays (correct + free); eval removal is not a decode l
 
 `Model::prefill` (dense + MoE) processes the prompt in chunks of
 `ROZUM_MLX_PREFILL_CHUNK` (default 2048): each chunk is a forward over `[1, chunk]`
-with the caches carried, so the full-attention layers bound their causal-mask +
-SDPA peak to `[chunk, ctx]` instead of `[T, T]`. (The explicit causal mask
-`linds.ge(rinds)` — shape `[N, offset+N]` — is the O(T²) allocation; the fused SDPA
-tiles but still reads it.) Between chunks all caches are eval'd
+with the caches carried, so the full-attention layers bound their SDPA peak to
+`[chunk, ctx]` instead of `[T, T]`. (The explicit `[T, ctx]` causal mask array is
+now gone entirely — the hybrid attention uses MLX's **fused causal SDPA mode**
+(fork `ef5cbca9`), which handles the cache offset and skips the masked upper
+triangle; byte-identical to the masked path on the oracle + chunked tests.) Between
+chunks all caches are eval'd
 (`LayerCache::collect_eval`) to materialize the chunk's forward and free its
 activations, keeping the deferred graph from spanning the prompt; GatedDeltaNet is
 already O(1) memory. **`lm_head` runs only on the final position** (`Model::project`):
@@ -489,11 +491,11 @@ the fixed-size-cache redesign is otherwise moot — `mx.compile` is a dead end).
 
 ### TODO (see SPRINT `mlx-native-perf` + BACKLOG)
 
-1. **SDPA `Causal` mode in prefill** — drop the explicit `[chunk, ctx]` mask array
-   (use the fused causal fast-path) to shrink the prefill peak further; helps
-   single-pass too. (Last-position-only projection: DONE, see above.) The top
-   remaining perf item.
-2. **Decode (~12 t/s) is FFI-overhead-bound** — no cheap lever found (eval-removal:
+(Prefill is now fully optimized: GatedDeltaNet kernel + chunking + last-position
+projection + fused causal SDPA, all byte-identical. The KV preflight bounds the
+large-context memory. Only the decode lever remains, and it's hard.)
+
+1. **Decode (~12 t/s) is FFI-overhead-bound** — no cheap lever found (eval-removal:
    free/no-op; mx.compile: net-negative). A real decode win would need manual op
    fusion into custom Metal kernels (like the gated-delta kernel) to cut the ~450
    dispatches/token, or reducing mlx-rs per-op marshalling overhead — both large.

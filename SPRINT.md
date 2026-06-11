@@ -178,11 +178,12 @@ is 100% MLX, candle only as external oracle.
     mlx-rs per-op/per-call FFI-overhead bound, not fusion-bound.**
   - NEXT (recommended order):
     1. `mlx-native-mem-bound` — DONE (KV preflight + "lower --n-ctx" instead of OOM).
-    2. SDPA `Causal` mode in prefill — drop the explicit `[chunk,ctx]` mask; smaller
-       prefill peak. Small, low-risk. (now the top remaining perf item)
-    3. (HARD, deprioritized) decode throughput would need hand-written fused Metal
-       kernels to cut the ~450 dispatches/token, or fork surgery to lower mlx-rs
-       per-op marshalling. Large; decode is usable as-is.
+    2. SDPA `Causal` mode in prefill — DONE (fork `ef5cbca9`): hybrid attention uses
+       MLX's fused causal SDPA instead of an explicit `[T, ctx]` mask array; byte-
+       identical (oracle + chunked Δ=0), drops the O(T·ctx) mask allocation.
+    3. (HARD, deprioritized — now the top remaining perf item) decode throughput
+       would need hand-written fused Metal kernels to cut the ~450 dispatches/token,
+       or fork surgery to lower mlx-rs per-op marshalling. Large; decode is usable.
 
   - **DONE — GatedDeltaNet Metal kernel (~2.9x Qwen3.6 prefill)** (master `a001e90`,
     fork `738a4419`). Bound `mx.fast.metal_kernel` in mlx-rs (`fast::MetalKernel`)
@@ -233,7 +234,8 @@ is 100% MLX, candle only as external oracle.
   `max|Δlogit|=0.000e0` (chunk 512 vs single-pass). Last-position-only `lm_head`
   (`Model::project`): DONE (fork `932967d6`) — avoids the `[1,chunk,vocab]` ~600MB
   logits transient per chunk + the wasted vocab matmul on discarded positions, still
-  Δ=0. Follow-up: SDPA `Causal` mode to drop the explicit `[chunk,ctx]` mask too.
+  Δ=0. SDPA `Causal` mode (fork `ef5cbca9`): DONE — the explicit `[chunk,ctx]` mask
+  array is gone too (MLX fused causal SDPA, handles the cache offset), still Δ=0.
 - [x] mlx-native-mem-bound - **DONE (preflight).** `run_job` estimates the KV
   footprint of the request — `kv_bytes_per_position * (prompt_len + max_tokens)`,
   where `kv_bytes_per_position = 2 (k+v) * full_attn_layers * n_kv_heads * head_dim *
