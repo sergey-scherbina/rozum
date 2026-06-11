@@ -1188,8 +1188,18 @@ fn spawn_detached_gateway(
 
 /// Build the agent child command (env wiring) and exec it, exiting with its code.
 /// `model_for_alias` is the model the gateway is actually serving.
-async fn exec_agent(program: Vec<String>, model_for_alias: &str, port: u16) -> ! {
+async fn exec_agent(
+    mut program: Vec<String>,
+    model_for_alias: &str,
+    port: u16,
+    channels: &ChannelWakeup,
+) -> ! {
     use std::process::Command as StdCommand;
+    // channel-wakeup-launch-flag: append the `--dangerously-load-development-channels`
+    // flag for a capable `claude`, so a launched agent gets woken on room events.
+    if let Some(flags) = channels.flags_for(&program[0]) {
+        program.extend(flags);
+    }
     let (program_name, args) = program
         .split_first()
         .expect("clap requires at least one arg");
@@ -1218,8 +1228,11 @@ async fn exec_agent(program: Vec<String>, model_for_alias: &str, port: u16) -> !
 /// Launch the agent with no local model: leave its upstream Anthropic auth
 /// (`ANTHROPIC_API_KEY` / claude.ai login) untouched and set none of the
 /// gateway/model env. Only the rozum agent-context defaults are applied.
-async fn exec_agent_anthropic(program: Vec<String>) -> ! {
+async fn exec_agent_anthropic(mut program: Vec<String>, channels: &ChannelWakeup) -> ! {
     use std::process::Command as StdCommand;
+    if let Some(flags) = channels.flags_for(&program[0]) {
+        program.extend(flags);
+    }
     let (program_name, args) = program
         .split_first()
         .expect("clap requires at least one arg");
