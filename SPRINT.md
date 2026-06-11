@@ -210,9 +210,10 @@ is 100% MLX, candle only as external oracle.
   O(1) memory. Returns only the last-position logits. **Byte-identical to single
   pass** (the per-position attention + sequential delta scan are position-local):
   test `mlx_qwen35_chunked_prefill_matches_single_pass` on a 3000-tok prompt gives
-  `max|Δlogit|=0.000e0` (chunk 512 vs single-pass). Follow-up: SDPA `Causal` mode
-  to drop the explicit mask entirely; project only the last position (orthogonal,
-  helps single-pass too).
+  `max|Δlogit|=0.000e0` (chunk 512 vs single-pass). Last-position-only `lm_head`
+  (`Model::project`): DONE (fork `932967d6`) — avoids the `[1,chunk,vocab]` ~600MB
+  logits transient per chunk + the wasted vocab matmul on discarded positions, still
+  Δ=0. Follow-up: SDPA `Causal` mode to drop the explicit `[chunk,ctx]` mask too.
 - [ ] mlx-native-mem-bound - large-context memory bounding for the native runtime:
   the analog of mistralrs's RAM preflight + context budgeting + PagedAttention.
   Native uses `ConcatKeyValueCache` (grows unbounded with context); bound the KV

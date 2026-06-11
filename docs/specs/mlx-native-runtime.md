@@ -384,25 +384,31 @@ SDPA peak to `[chunk, ctx]` instead of `[T, T]`. (The explicit causal mask
 tiles but still reads it.) Between chunks all caches are eval'd
 (`LayerCache::collect_eval`) to materialize the chunk's forward and free its
 activations, keeping the deferred graph from spanning the prompt; GatedDeltaNet is
-already O(1) memory. Prefill returns only the last-position logits. **Byte-identical
-to a single pass** (per-position attention + sequential delta scan are
-position-local): `mlx_qwen35_chunked_prefill_matches_single_pass` on a 3000-tok
-prompt gives `max|Δlogit|=0.000e0` (chunk 512 vs single-pass). Port of mistralrs
-`f7efae2` (the native exact scan is faithful across chunks, unlike mistralrs's
-chunked GatedDeltaNet which reorders FP reductions — so we can assert byte-identity,
-they could not).
+already O(1) memory. **`lm_head` runs only on the final position** (`Model::project`):
+the per-chunk hidden states feed only the caches, so the big vocab projection never
+runs on discarded positions — this also avoids a `[1, chunk, vocab]` logits
+transient (~600 MB at chunk 2048, vocab 151808) per chunk, another large slice off
+the prefill peak. **Byte-identical to a single pass** (per-position attention +
+sequential delta scan are position-local): `mlx_qwen35_chunked_prefill_matches_single_pass`
+on a 3000-tok prompt gives `max|Δlogit|=0.000e0` (chunk 512 vs single-pass). Port of
+mistralrs `f7efae2` (the native exact scan is faithful across chunks, unlike
+mistralrs's chunked GatedDeltaNet which reorders FP reductions — so we can assert
+byte-identity, they could not).
 
 ### TODO (see SPRINT `mlx-native-perf` + BACKLOG)
 
 1. **mx.compile the forward + small-op fusion** — THE decode lever (decode is
-   launch-bound, confirmed). Keep the custom gated-delta kernel OUT of the compiled
-   region (it needs its per-call eval): use the O(T) ops path at T=1, or compile
-   only the attn/MLP/proj bulk. Thread the stateful caches (KV + conv + recurrent)
-   through a pure fn.
+   launch-bound, confirmed). **Prerequisite: a fixed-size KV cache.** `mx.compile`
+   keys the graph by input shapes, but `ConcatKeyValueCache` grows one position per
+   step, so a compiled decode step would recompile every token (no gain). Need a
+   pre-allocated cache with in-place write at `offset` + masked full-buffer
+   attention (constant shapes). The conv + recurrent caches are already fixed-shape.
+   Then compile the decode step via `compile_with_state` over `(model, cache)`
+   (`ModuleParameters: Updatable`), keeping the custom gated-delta kernel OUT (use
+   the O(T) ops path at T=1, which is cheap there).
 2. **SDPA `Causal` mode in prefill** — drop the explicit `[chunk, ctx]` mask array
-   (use the fused causal fast-path), and project only the last prompt position
-   (skip `lm_head` over discarded positions). Both shrink the prefill peak further
-   and help single-pass too.
+   (use the fused causal fast-path) to shrink the prefill peak further; helps
+   single-pass too. (Last-position-only projection: DONE, see above.)
 3. **Large-context memory bounding** — KV-pool bound / preflight (analog of the
    mistralrs RAM preflight + context budgeting); native `ConcatKeyValueCache`
-   grows unbounded.
+   grows unbounded. (Subsumed by the fixed-size cache in #1.)
