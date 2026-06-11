@@ -433,7 +433,12 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
     args
 }
 
-async fn run_launch(model_spec: String, port: Option<u16>, n_ctx: Option<u32>, program: Vec<String>) {
+async fn run_launch(
+    model_spec: String,
+    port: Option<u16>,
+    n_ctx: Option<u32>,
+    program: Vec<String>,
+) {
     use std::process::Command as StdCommand;
 
     let n_ctx = resolve_n_ctx(&model_spec, n_ctx);
@@ -887,7 +892,12 @@ fn available_ram_bytes() -> Option<u64> {
         .unwrap_or(16384);
     let mut pages = 0u64;
     for line in s.lines() {
-        for label in ["Pages free:", "Pages inactive:", "Pages speculative:", "Pages purgeable:"] {
+        for label in [
+            "Pages free:",
+            "Pages inactive:",
+            "Pages speculative:",
+            "Pages purgeable:",
+        ] {
             if let Some(rest) = line.strip_prefix(label) {
                 if let Ok(v) = rest.trim().trim_end_matches('.').parse::<u64>() {
                     pages += v;
@@ -1015,8 +1025,7 @@ fn blind_footprint_bytes(weights: u64, n_ctx: u32) -> u64 {
 /// `eprintln!` from the gateway is easy to miss (the agent TUI scrolls it away),
 /// so the reason must reappear at the end, right where the user is looking.
 fn skip_reason_slot() -> &'static std::sync::Mutex<Option<String>> {
-    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
-        std::sync::OnceLock::new();
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<String>>> = std::sync::OnceLock::new();
     SLOT.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -1054,7 +1063,10 @@ fn memory_preflight_ok(model_id: &str, n_ctx: u32) -> bool {
             gb(weights),
             gb(k)
         ),
-        None => format!("{:.0} GB weights + KV estimated at n_ctx={n_ctx} (no config.json)", gb(weights)),
+        None => format!(
+            "{:.0} GB weights + KV estimated at n_ctx={n_ctx} (no config.json)",
+            gb(weights)
+        ),
     };
     let msg = format!(
         "model '{model_id}' needs ~{:.0} GB resident ({kv_note}) but only ~{:.0} GB RAM is free \
@@ -1169,7 +1181,11 @@ mod tests {
     fn kv_cache_counts_only_full_attention_layers() {
         let mut layer_types = Vec::new();
         for i in 0..40 {
-            layer_types.push(if i % 4 == 3 { "full_attention" } else { "linear_attention" });
+            layer_types.push(if i % 4 == 3 {
+                "full_attention"
+            } else {
+                "linear_attention"
+            });
         }
         let cfg = json!({
             "text_config": {

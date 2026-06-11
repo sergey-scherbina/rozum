@@ -18,9 +18,9 @@ mod inner {
 
     use mistralrs::{
         AutoDeviceMapParams, CalledFunction, ChatCompletionChunkResponse, ChunkChoice,
-        DeviceMapSetting, Function, MemoryGpuConfig, Model, ModelBuilder, PagedAttentionMetaBuilder,
-        RequestBuilder, Response, TextMessageRole, Tool, ToolCallResponse, ToolCallType, ToolChoice,
-        ToolType,
+        DeviceMapSetting, Function, MemoryGpuConfig, Model, ModelBuilder,
+        PagedAttentionMetaBuilder, RequestBuilder, Response, TextMessageRole, Tool,
+        ToolCallResponse, ToolCallType, ToolChoice, ToolType,
     };
 
     /// Cap on generated tokens when the request does not specify one, so a
@@ -112,8 +112,8 @@ mod inner {
                         // model + KV cache exceeds Metal's working-set budget;
                         // retry with a smaller context instead of failing outright.
                         let msg = e.to_string();
-                        let too_big = msg.contains("does not fit")
-                            || msg.contains("exceeds total capacity");
+                        let too_big =
+                            msg.contains("does not fit") || msg.contains("exceeds total capacity");
                         if too_big && opts.n_ctx > N_CTX_FLOOR {
                             let reduced = opts.n_ctx.saturating_sub(N_CTX_STEP).max(N_CTX_FLOOR);
                             eprintln!(
