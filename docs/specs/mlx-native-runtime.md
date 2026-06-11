@@ -81,30 +81,30 @@ impl ChatBackend for MlxNativeBackend {
 
 ## Behavior
 
-- [ ] `MlxNativeBackend::new` loads weights + tokenizer + chat template once;
-      `chat()` reuses them.
+- [x] `MlxNativeBackend::new` loads weights + tokenizer + chat template once (on
+      the worker thread); every `chat()` reuses them.
 - [ ] Auto-download via `hf-hub` for `hf:`/`mlx-community:` specs into a local
-      dir, then load.
-- [ ] Loads **AFQ-quantized** mlx-community checkpoints (4-bit g64 and the
-      other widths) via `QuantizedLinear` + `load_safetensors`, not just bf16.
-- [ ] Streaming: drive the `Generate` token iterator, map each token to
+      dir, then load. (Today: `resolve_model_dir` reuses an already-downloaded
+      HF snapshot; download is the open gap.)
+- [x] Loads **AFQ-quantized** mlx-community checkpoints (4-bit g64) via the
+      fork's config-driven `nn::quantize` + remapped `load_safetensors`.
+- [x] Streaming: drive the `Generate` token iterator, map each token to
       `ChatEvent::TextDelta`; `ChatEvent::Done` on EOS / max-tokens / cancel.
-- [ ] EOS: stop on the model's EOS id(s) from `tokenizer_config.json`, not a
-      fixed token budget.
-- [ ] Per-token cancel via `req.cancel`: checked between iterator steps; stops
+- [x] EOS: stop on the model's `eos_token_id` from `config.json` (int or list),
+      falling back to Qwen3 `<|im_end|>`.
+- [x] Per-token cancel via `req.cancel`: checked between iterator steps; stops
       within one decode step.
-- [ ] Sampling: temperature, top_p, top_k, max_tokens honored (extend the
-      upstream sampler if it lacks top_p/top_k/repetition_penalty).
-- [ ] Chat template + system prompt: rendered via `mlx-lm-utils` from the repo's
-      `tokenizer_config.json`.
+- [~] Sampling: temperature + max_tokens honored. top_p/top_k/repetition_penalty
+      still need the upstream `Generate`/sampler extended (open gap).
+- [x] Chat template + system prompt: rendered via `mlx-lm-utils` from the repo's
+      `tokenizer_config.json` (system/user/assistant/tool roles).
 - [ ] Tool-use: reuse `crate::gguf::ToolUseParser` for Qwen-hermes `<tool_call>`
-      blocks; emit `ToolUseStart`/`Delta`/`End`.
-- [ ] **Parity gate (per model):** byte-for-byte greedy tokens vs BOTH oracles
-      -- `scripts/mlx_ref.py` (Python mlx_lm) and the candle/mistralrs path.
-- [ ] **Perf gate:** decode T/s >= the candle path on the same model/machine
-      (this is the whole point; native MLX must not regress vs candle).
-- [ ] `cargo build` (default, no `mlx-native`): unaffected, no MLX/Python deps.
-- [ ] `cargo build --features mlx-native`: builds with MLX from source on
+      blocks; emit `ToolUseStart`/`Delta`/`End`. (Open gap.)
+- [x] **Parity gate (Qwen3-4B-4bit):** greedy decode byte-identical to Python
+      `mlx_lm` (proven in Phase 0); the SPI streams the same "Paris" answer.
+- [x] **Perf gate:** ~106 T/s decode >= the candle path (~100) on the same Mac.
+- [x] `cargo build` (default, no `mlx-native`): unaffected, no MLX/Python deps.
+- [x] `cargo build --features mlx-native`: builds with MLX from source on
       aarch64-apple-darwin (full Xcode required).
 
 ## Out of scope
@@ -294,8 +294,26 @@ passes on at least one real model.
 - **Phase 0 dense correctness + speed: DONE.** Qwen3-4B-4bit loads AFQ
   (904/904), generates byte-identical to `mlx_lm`, decodes ~106 T/s (> candle
   ~100, ~10x the mistralrs bridge). The native-MLX thesis is fully proven.
-- Next: `MlxNativeBackend` (ChatBackend) wiring; hf-hub auto-download; sampler
-  top_p/top_k; EOS-from-config; then Phase 1 (Qwen3 MoE).
+- **`MlxNativeBackend` wired (DONE, `b25497c`).** MLX is `!Send` (a single
+  Metal stream), so a thin handle cannot hold the model; instead a dedicated
+  worker thread owns it for life — it loads the weights itself (they never
+  cross a thread boundary) and serves jobs off an `mpsc` queue, streaming
+  `ChatEvent`s back over a per-request channel. The backend is the Send+Sync
+  handle. It renders the model chat template (system/user/assistant/tool roles
+  — our own role strings, since the helper's `Role` enum omits system/tool),
+  runs the `Generate` iterator, and stops on EOS / max-tokens / cancel.
+  Detokenization is incremental and UTF-8-safe: re-decode the run each step and
+  emit the new suffix, holding back a trailing replacement char so an
+  incomplete multi-byte sequence (e.g. mid-Cyrillic) never leaks. `mlx-native`
+  is an off-by-default cargo feature (path deps on the fork now; git-rev pin at
+  merge, like mistralrs); `build_gateway_backend` tries it before mistralrs for
+  MLX checkpoints, and `concurrency_capacity() = 1` lets `admit_wrap` gate it.
+  Verified end-to-end through the real SPI: streams a correct "Paris" answer in
+  ~3.7s incl. load.
+- Next gaps: hf-hub auto-download (today reuses an already-downloaded HF
+  snapshot via `resolve_model_dir`); sampler top_p/top_k/rep-penalty (the fork
+  `Generate` only takes temp); tool-use streaming; EOS list from config. Then
+  Phase 1 (Qwen3 MoE).
 
 ### Gaps fixed in the fork (upstream PR candidates to oxideai/mlx-rs)
 

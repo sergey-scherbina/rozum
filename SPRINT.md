@@ -85,8 +85,23 @@ is 100% MLX, candle only as external oracle.
     version-independent, keeps the submodule unpatched).
   - **Result:** Qwen3-4B-4bit byte-identical to mlx_lm ("The capital of France
     is Paris"), **~106 T/s** (> candle ~100, ~10x bridge). Native-MLX thesis
-    fully proven (fast AND correct). Next: `MlxNativeBackend` ChatBackend wiring,
-    then Phase 1 (MoE).
+    fully proven (fast AND correct).
+- [x] mlx-native-p0b - `MlxNativeBackend` wired into the gateway (`b25497c`).
+  - MLX is `!Send` (one Metal stream) -> a dedicated worker thread owns the
+    model for life, loads it itself, serves jobs off a channel, streams
+    `ChatEvent`s back; the backend is a thin Send+Sync handle. Chat-template
+    render (system/user/assistant/tool), EOS/max-tokens/cancel stop, UTF-8-safe
+    incremental detokenize (holds a trailing replacement char so mid-Cyrillic
+    never leaks). `concurrency_capacity()=1` -> `admit_wrap` gates it.
+  - `mlx-native` feature (off by default) + path deps on the vendored fork
+    (swap to a git-rev pin at merge, like mistralrs). `build_gateway_backend`
+    tries it before mistralrs for MLX checkpoints.
+  - E2E test through the real SPI: streams a correct "Paris" answer in ~3.7s
+    incl. load. `cargo check --features mlx-native` + fmt + lib suite clean.
+  - Merged `origin/master` (the generic `concurrency` admission decorator +
+    shared-gateway) into the branch; clean.
+  - Gaps still open: hf-hub auto-download; sampler top_p/top_k/rep-penalty
+    (Generate only takes temp today); tool-use streaming; EOS list from config.
 - [ ] mlx-native-p1 - Phase 1: port `qwen3_moe`; gate on `Qwen3-30B-A3B-4bit`.
 - [ ] mlx-native-p2 - Phase 2: port `qwen3_5` (27B dense) + `qwen3_5_moe`
   (35B-A3B) hybrid; gate on cached `Qwen3.6-{27B,35B-A3B}-4bit`. Headline: the
