@@ -200,7 +200,7 @@ These were in the queue earlier but either landed as part of larger work or no l
 ## Done Criteria
 
 - `cargo fmt --check` passes.
-- `cargo test` passes (one pre-existing `proxy::tests::forwards_room_sampling_to_upstream_client` failure is unrelated to this sprint).
+- `cargo test` passes.
 - `cargo build --release` passes.
 - `cargo build --no-default-features` produces a meeting-room-only binary.
 - Bare `rozum` starts a meeting room without model inference.
