@@ -1800,9 +1800,10 @@ async fn try_build_mlx_native_backend(
     _n_ctx: u32,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
     use rozum::mlx_native_backend::{MlxNativeBackend, resolve_model_dir};
-    // Filesystem paths and `lmstudio:` specs belong to the GGUF backend.
-    if model_spec.starts_with("lmstudio:") || std::path::Path::new(model_spec).extension().is_some()
-    {
+    // GGUF model FILES and `lmstudio:` specs belong to other backends. Use
+    // `is_file()` (not `extension()`, which misfires on dotted repo names like
+    // `mlx-community:Qwen3.6-27B-4bit`); a local MLX *directory* still resolves.
+    if model_spec.starts_with("lmstudio:") || std::path::Path::new(model_spec).is_file() {
         return None;
     }
     let dir = resolve_model_dir(model_spec)?;
