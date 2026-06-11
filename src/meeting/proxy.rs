@@ -8,9 +8,10 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, Content,
-        CreateMessageRequestParams, CreateMessageResult, Implementation, InitializeRequestParams,
-        InitializeResult, JsonObject, SamplingCapability, SamplingTaskCapability,
-        ServerCapabilities, TaskRequestsCapability, TasksCapability,
+        CreateMessageRequestParams, CreateMessageResult, CustomNotification, Implementation,
+        InitializeRequestParams, InitializeResult, JsonObject, SamplingCapability,
+        SamplingTaskCapability, ServerCapabilities, ServerNotification, TaskRequestsCapability,
+        TasksCapability,
     },
     service::{RequestContext, RunningService},
     tool, tool_handler, tool_router,
@@ -35,11 +36,19 @@ struct ProxyState {
     current_room_name: Option<String>,
     /// The agent's self-reported name from MCP initialize.
     client_info_name: String,
+    /// Participant id the joined room assigned us (from `_join_internal`).
+    /// Used by the channel pusher to skip the agent's own transcript entries.
+    current_room_participant_id: Option<String>,
     upstream_peer: Option<Peer<RoleServer>>,
     upstream_supports_sampling: bool,
     /// Background task that re-emits `meeting.mark_responding` every 15 s
     /// while the agent holds an active turn. Aborted on submit/leave/new turn.
     heartbeat_task: Option<tokio::task::JoinHandle<()>>,
+    /// Background task that long-polls the joined room and pushes new transcript
+    /// entries to the agent session as `notifications/claude/channel` events, so
+    /// an idle agent gets woken without holding its own `wait_my_turn`.
+    /// Aborted on leave / teardown. Spec: `docs/specs/channel-wakeup.md`.
+    channel_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Capped exponential backoff schedule used by `try_reconnect_current_room`.
@@ -282,9 +291,15 @@ impl ProxyServer {
 
         match join_result {
             Ok(r) if r.is_error != Some(true) => {
-                let mut s = self.state.lock().await;
-                s.current_room = Some(RoomConn { service });
-                s.current_room_name = Some(name);
+                {
+                    let mut s = self.state.lock().await;
+                    s.current_room = Some(RoomConn { service });
+                    s.current_room_name = Some(name);
+                    s.current_room_participant_id = participant_id_from_result(&r);
+                }
+                // Wake an idle agent: push room activity into the session as
+                // channel events instead of requiring it to keep long-polling.
+                self.start_channel_pusher().await;
                 r
             }
             Ok(r) => r,
@@ -331,12 +346,14 @@ impl ProxyServer {
     )]
     pub async fn leave(&self) -> CallToolResult {
         self.cancel_heartbeat().await;
+        self.cancel_channel_pusher().await;
         let result = self
             .call_room_tool("meeting.leave", serde_json::json!({}))
             .await;
         let mut s = self.state.lock().await;
         s.current_room = None;
         s.current_room_name = None;
+        s.current_room_participant_id = None;
         result
     }
 
@@ -408,6 +425,135 @@ impl ProxyServer {
             h.abort();
         }
     }
+
+    /// Spawn the channel pusher: a background loop that long-polls the joined
+    /// room (its own `wait_my_turn`, a read-only delta query that does not
+    /// consume the agent's turn) and forwards each new transcript entry to the
+    /// agent session as a `notifications/claude/channel` event. Idle agents are
+    /// thereby woken without holding their own long-poll. The agent's own
+    /// entries are skipped, and the baseline starts at "now" so a fresh join
+    /// does not replay history. Best-effort: send failures are ignored and the
+    /// loop survives reconnect gaps. Spec: `docs/specs/channel-wakeup.md`.
+    async fn start_channel_pusher(&self) {
+        self.cancel_channel_pusher().await;
+        let state = Arc::clone(&self.state);
+        let task = tokio::spawn(async move {
+            // Baseline at the current transcript head so we only push activity
+            // that arrives after the agent joined.
+            let mut since_seq: usize = 0;
+            let mut primed = false;
+            loop {
+                let (room_peer, upstream_peer, my_pid, room_name) = {
+                    let s = state.lock().await;
+                    match (s.current_room.as_ref(), s.upstream_peer.clone()) {
+                        (Some(room), Some(up)) => (
+                            room.service.peer().clone(),
+                            up,
+                            s.current_room_participant_id.clone(),
+                            s.current_room_name.clone().unwrap_or_default(),
+                        ),
+                        // No room (reconnect gap) or no agent peer: wait briefly.
+                        _ => {
+                            drop(s);
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            continue;
+                        }
+                    }
+                };
+
+                let result = match call_room_tool_via_peer(
+                    &room_peer,
+                    "meeting.wait_my_turn",
+                    serde_json::json!({ "since_seq": since_seq }),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    // Transport hiccup (e.g. room restart). The agent-facing path
+                    // owns reconnection; here we just back off and retry.
+                    Err(_) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        continue;
+                    }
+                };
+
+                let Some(payload) = serde_json::to_value(&result)
+                    .ok()
+                    .as_ref()
+                    .and_then(super::room_client::tool_result_text_json)
+                else {
+                    continue;
+                };
+
+                if payload
+                    .get("ended")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+
+                // `still_waiting` carries the current head seq: adopt it as the
+                // baseline (the first poll primes us to "now" without pushing).
+                if let Some(seq) = payload.get("seq").and_then(|v| v.as_u64()) {
+                    since_seq = (seq as usize).max(since_seq);
+                    primed = true;
+                    continue;
+                }
+
+                let Some(turn) = payload.get("turn") else {
+                    continue;
+                };
+                let new_seq = turn
+                    .get("seq")
+                    .and_then(|v| v.as_u64())
+                    .map(|s| s as usize)
+                    .unwrap_or(since_seq);
+
+                if !primed {
+                    // First response already had a delta: prime to its head and
+                    // skip the push so a join does not replay backlog.
+                    since_seq = new_seq.max(since_seq);
+                    primed = true;
+                    continue;
+                }
+
+                if let Some(delta) = turn.get("transcript_delta").and_then(|v| v.as_array()) {
+                    if let Some((content, last_from)) =
+                        render_channel_delta(delta, my_pid.as_deref())
+                    {
+                        let your_turn = turn
+                            .get("your_turn")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let meta = serde_json::json!({
+                            "room": room_name,
+                            "from": last_from,
+                            "seq": new_seq.to_string(),
+                            "your_turn": your_turn.to_string(),
+                        });
+                        let notif =
+                            ServerNotification::CustomNotification(CustomNotification::new(
+                                "notifications/claude/channel",
+                                Some(serde_json::json!({ "content": content, "meta": meta })),
+                            ));
+                        // Fire-and-forget: a client without the channel listener
+                        // ignores it; a dead peer just ends the session.
+                        let _ = upstream_peer.send_notification(notif).await;
+                    }
+                }
+                since_seq = new_seq.max(since_seq);
+            }
+        });
+        self.state.lock().await.channel_task = Some(task);
+    }
+
+    async fn cancel_channel_pusher(&self) {
+        let mut state = self.state.lock().await;
+        if let Some(h) = state.channel_task.take() {
+            h.abort();
+        }
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -431,7 +577,17 @@ impl ServerHandler for ProxyServer {
             state.upstream_peer = Some(context.peer.clone());
             state.upstream_supports_sampling = supports_sampling;
         }
-        Ok(InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
+        // Advertise the experimental channel capability (interactive Claude Code
+        // registers a listener for it) so the proxy can push room activity into
+        // an idle session. Harmless to clients that ignore it.
+        // Spec: `docs/specs/channel-wakeup.md`.
+        let mut capabilities = ServerCapabilities::builder().enable_tools().build();
+        capabilities
+            .experimental
+            .get_or_insert_with(Default::default)
+            .insert("claude/channel".to_owned(), JsonObject::new());
+
+        Ok(InitializeResult::new(capabilities)
             .with_server_info(Implementation::new(
                 "rozum-proxy",
                 env!("CARGO_PKG_VERSION"),
@@ -441,6 +597,11 @@ impl ServerHandler for ProxyServer {
                  After joining, loop: meeting.wait_my_turn (25s long-poll, retry immediately on \
                  still_waiting) → meeting.submit if you have something to add. Anyone may submit \
                  any time — there are no turns. \
+                 While idle you may also receive room activity pushed as \
+                 <channel source=\"rozum\" room=\"…\" from=\"…\" seq=\"…\"> events: treat each as \
+                 a wakeup — if it concerns you, call meeting.wait_my_turn to fetch the \
+                 authoritative delta and then meeting.submit. The channel body is a preview, not \
+                 the turn API. \
                  Before composing, check the responding[] array: if a sibling agent is already \
                  typing the same reply, wait. Keep replies short. \
                  For long offline work, post 'working: <what>' before going dark and 'done: \
@@ -563,6 +724,55 @@ fn your_turn_in_result(result: &CallToolResult) -> bool {
             .get("your_turn")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
+}
+
+/// Pull the room-assigned `participant_id` out of a `_join_internal` result.
+fn participant_id_from_result(result: &CallToolResult) -> Option<String> {
+    let json = serde_json::to_value(result).ok()?;
+    let payload = super::room_client::tool_result_text_json(&json)?;
+    payload
+        .get("participant_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+}
+
+/// Render a `transcript_delta` array into channel-event `(content, last_from)`.
+/// Skips the agent's own entries (`participant_id == my_pid`) and injected
+/// system lines. Returns `None` when nothing is left to push.
+fn render_channel_delta(
+    delta: &[serde_json::Value],
+    my_pid: Option<&str>,
+) -> Option<(String, String)> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut last_from = String::new();
+    for turn in delta {
+        if turn
+            .get("injected")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let pid = turn.get("participant_id").and_then(|v| v.as_str());
+        if let (Some(pid), Some(mine)) = (pid, my_pid) {
+            if pid == mine {
+                continue; // the agent's own message — don't echo it back
+            }
+        }
+        let from = turn
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .or(pid)
+            .unwrap_or("someone");
+        let content = turn.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        lines.push(format!("{from}: {content}"));
+        last_from = from.to_owned();
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some((lines.join("\n"), last_from))
+    }
 }
 
 fn client_name_or_default(client_info_name: &str) -> String {
@@ -702,6 +912,28 @@ mod tests {
     use rmcp::model::{CreateMessageResult, SamplingMessage};
     use tokio::net::UnixListener;
     use tokio::sync::broadcast;
+
+    #[test]
+    fn channel_delta_skips_own_and_injected_entries() {
+        let delta = vec![
+            serde_json::json!({"seq":1,"participant_id":"alice","display_name":"Alice","content":"hi all","injected":false}),
+            serde_json::json!({"seq":2,"participant_id":"me","display_name":"Me","content":"my own line","injected":false}),
+            serde_json::json!({"seq":3,"participant_id":"sys","display_name":"system","content":"joined","injected":true}),
+            serde_json::json!({"seq":4,"participant_id":"bob","display_name":"Bob","content":"ping me","injected":false}),
+        ];
+        let (content, last_from) = render_channel_delta(&delta, Some("me")).expect("has content");
+        assert_eq!(content, "Alice: hi all\nBob: ping me");
+        assert_eq!(last_from, "Bob");
+    }
+
+    #[test]
+    fn channel_delta_none_when_only_own_or_injected() {
+        let delta = vec![
+            serde_json::json!({"seq":1,"participant_id":"me","display_name":"Me","content":"x","injected":false}),
+            serde_json::json!({"seq":2,"participant_id":"sys","display_name":"system","content":"y","injected":true}),
+        ];
+        assert!(render_channel_delta(&delta, Some("me")).is_none());
+    }
 
     #[test]
     fn detects_legacy_sampling_capability() {

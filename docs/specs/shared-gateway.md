@@ -226,16 +226,25 @@ for — so prompts wait at the edge instead of bouncing off a full daemon.
 
 ### Transparent model / backend switch
 
-- [ ] `rozum gateway switch --model Y [--backend B]` drains the daemon (stop
-      admitting new requests — queue/hold via the admission limit), finishes
-      in-flight requests, unloads the current model, loads `Y` (and/or backend
-      `B`), bumps `generation`, and resumes. **In-place and sequential** — never
-      two models resident (memory). Clients' proxies hold their requests across
-      the gap and replay if needed, so the swap is transparent (just slower).
-- [ ] `rozum gateway reload` does the same drain + respawn from the current
-      `rozum` binary (transparent daemon/binary upgrade).
-- [ ] `rozum gateway unload` frees the model but keeps the daemon; the next
-      request lazy-reloads it. Frees RAM without losing the rendezvous.
+- [x] `rozum gateway switch --model Y [--backend B] [--n-ctx N]` drains the
+      daemon, finishes in-flight requests, unloads the current model, loads `Y`
+      (and/or backend `B`), bumps `generation`, and resumes — **in-place and
+      sequential** (the old model is dropped before the new one is built, so two
+      are never resident). Held in-process by a `Switchboard` swap cell + builder
+      closure; chat handlers `enter()` (park while draining, lazy-reload if
+      unloaded) and hold a `ChatLease` for the whole stream so a switch waits for
+      streaming to finish. `/control/switch` (auth-gated, localhost).
+      `gateway.rs` `Switchboard::switch` + `control_switch`; CLI
+      `run_gateway_switch`. On build failure the spec reverts so the next request
+      lazily reloads the old model.
+- [x] `rozum gateway reload` drains, then **re-execs** the current `rozum` binary
+      with the same model/port (transparent daemon/binary upgrade). The brief
+      port gap is covered by the proxies' replay path, like a failover.
+      `Switchboard::begin_drain` + `control_reload` → `reexec_gateway`.
+- [x] `rozum gateway unload` frees the model but keeps the daemon listening; the
+      next chat lazily reloads it (`ensure_loaded`, serialized by `reload_lock`).
+      Frees RAM without losing the rendezvous. `control_unload`. While unloaded,
+      `/v1/admit` advertises a closed window so proxies hold at the edge.
 
 ## Out of scope
 
@@ -623,3 +632,53 @@ end-to-end test with a connection-dropping "crasher" upstream that asserts the
 soft 422 after repeated crashes); `--features mistralrs` check clean. No new deps.
 The two env-mutating tests are serialized via `share::POISON_ENV_LOCK` so the
 `unsafe` `XDG_STATE_HOME` writes never race a concurrent read.
+
+### `gateway-switch` (done)
+
+**Transparent model/backend switch, in-place.** The daemon holds the resident
+model in a `Switchboard` (`src/gateway.rs`) — a swap cell
+(`RwLock<Option<Arc<dyn ChatBackend>>>`) plus an injected `BackendBuilder`
+closure (`ServeConfig::builder`, supplied by `main::gateway_backend_builder` so
+the library never depends on the binary's selection chain). `switch` drains,
+**drops the old model first** (never two resident — the memory constraint), then
+builds the new one, bumps `generation`, republishes `active.json`, and resumes;
+on build failure the spec reverts so the next request lazily reloads the old
+model. `--backend` forces an engine (`gguf`/`mistralrs`/`lmstudio`/`mlx`/`url`)
+via `build_gateway_backend_forced`; unknown values fall back to auto-detect.
+`--n-ctx` defaults to the current window.
+
+**Drain without deadlock.** A drain can't wait on the idle-watchdog `in_flight`
+counter (`auth_layer` holds it for the whole request, including parked time —
+waiting on it would deadlock). Instead a separate `generating` counter is taken
+only once a chat reaches the backend, via `Switchboard::enter()` (token-then-check
+paired with `begin_drain`'s set-draining-then-wait, so a swap never starts under
+live work). `enter()` returns a `ChatLease` the handler holds for the **whole
+stream** (threaded into `CancelOnDrop`), so a switch waits for streaming to finish
+before swapping — the old model's `Arc` isn't dropped while a stream still
+references it. Bounded by `ROZUM_GATEWAY_DRAIN_SECS` (default 120); on timeout the
+switch aborts and resumes rather than swap under a live request.
+
+**Transparency.** Chat requests arriving mid-swap park in `enter()` until
+`resume`; `/v1/admit` advertises a **closed window** while draining or unloaded so
+proxies hold queued requests at the edge (the gap looks like backpressure, not a
+failure). `generation` (added to `share::ActiveGateway`, `#[serde(default)]` for
+back-compat) increments on every (re)spawn and every switch — continued from the
+prior record on the same port at startup — so a proxy can tell "the daemon was
+replaced" from a transient blip.
+
+**`reload`** drains then **re-execs** the current binary (`reexec_gateway`, Unix
+`exec`) with the same model/port — a real binary upgrade; the brief port gap rides
+the proxies' existing replay path. **`unload`** drains and drops the model (frees
+RAM) but keeps the daemon listening; the next chat lazily rebuilds it via
+`ensure_loaded` (serialized by `reload_lock` so racing requests reload once).
+
+Control plane: auth-gated localhost `POST /control/{switch,unload,reload}`
+(skipped by `poison_layer`); CLI `rozum gateway switch|reload|unload`
+(`run_gateway_*` → `gateway_control_post`, no request timeout since a switch can
+take a while). A `--dedicated` gateway has no builder, so switch/unload/reload are
+cleanly refused. `gateway status` now shows `gen:`.
+
+Verification: `cargo fmt --check` clean; 89 lib tests (+8: switch bumps generation
+/ keeps n_ctx / unload-frees-then-lazy-reloads / failure-reverts-spec /
+dedicated-refuses / enter-parks-while-draining); `--features mistralrs` check
+clean. No new deps.

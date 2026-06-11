@@ -6,11 +6,13 @@
 /// Bind address is always `127.0.0.1`. Auth is optional bearer token via
 /// `ROZUM_GATEWAY_TOKEN`. Cancel propagates from client disconnect.
 use std::convert::Infallible;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Router,
@@ -38,11 +40,11 @@ use crate::backend::{
 
 #[derive(Clone)]
 struct GatewayState {
-    backend: Arc<dyn ChatBackend>,
+    /// The resident model behind a swap cell so `switch` / `unload` can replace
+    /// it in place (drain → swap → resume) without restarting the process.
+    sb: Arc<Switchboard>,
     /// Optional bearer token required on every request.
     auth_token: Option<String>,
-    /// Advertised model name (used in response envelopes).
-    model_id: String,
     /// Per-request metrics + JSONL event log.
     observer: Arc<crate::obs::Observer>,
     /// Liveness for the shared-daemon idle watchdog.
@@ -53,12 +55,267 @@ struct GatewayState {
 /// only when nothing is in flight and nothing has arrived for a while.
 #[derive(Default)]
 struct Activity {
-    last_active: std::sync::atomic::AtomicU64,
-    in_flight: std::sync::atomic::AtomicU64,
+    last_active: AtomicU64,
+    in_flight: AtomicU64,
 }
 
-/// Options for [`serve_on`]. Defaults (no register, no idle) preserve the plain
-/// in-process gateway behaviour used by `rozum launch --dedicated`.
+/// Builds a backend for a model spec / context window / optional backend hint.
+/// Async because a model load can take seconds. `None` = nothing could be built
+/// (bad spec or load failure). Injected by the binary so the daemon can rebuild
+/// in place on `switch` / lazy `unload` reload without the library depending on
+/// the binary's backend-selection chain.
+pub type BackendBuilder = Arc<
+    dyn Fn(
+            String,
+            u32,
+            Option<String>,
+        ) -> Pin<Box<dyn Future<Output = Option<Arc<dyn ChatBackend>>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Which model/backend the daemon currently serves; mutated on `switch`.
+#[derive(Clone)]
+struct ModelSpec {
+    model_id: String,
+    n_ctx: u32,
+    backend: Option<String>,
+}
+
+/// Holds the resident backend behind a swap cell. `rozum gateway switch` /
+/// `unload` drain in-flight work, drop the old model (never two resident —
+/// memory), build the new one, bump `generation`, and resume. `reload` (binary
+/// upgrade) re-execs instead; this covers in-place model/backend changes.
+struct Switchboard {
+    /// `None` = unloaded (model freed; the next chat lazily rebuilds from `spec`).
+    backend: std::sync::RwLock<Option<Arc<dyn ChatBackend>>>,
+    /// Backend factory; `None` on a `--dedicated` gateway (switching disabled).
+    builder: Option<BackendBuilder>,
+    spec: std::sync::Mutex<ModelSpec>,
+    generation: AtomicU64,
+    started_at: u64,
+    /// Set while a switch/unload finishes in-flight work; chat requests park on
+    /// `resume` until it clears so none is served mid-swap.
+    draining: AtomicBool,
+    resume: tokio::sync::Notify,
+    /// Active generations — NOT the idle-watchdog `in_flight`. A drain waits for
+    /// this to reach 0; parked/queued requests don't count, so it can't deadlock
+    /// on requests that are themselves waiting for the drain to finish.
+    generating: AtomicU64,
+    /// Serializes lazy reload so racing requests rebuild the model only once.
+    reload_lock: tokio::sync::Mutex<()>,
+    /// `(pid, port)` when registered, so a switch can republish `active.json`.
+    register: Option<(u32, u16)>,
+}
+
+/// Held by a chat handler for the whole request (prefill + stream). Keeps the
+/// chosen backend alive and counts against `generating` so a `switch` waits for
+/// real work to finish before swapping the model.
+struct ChatLease {
+    backend: Arc<dyn ChatBackend>,
+    model_id: String,
+    sb: Arc<Switchboard>,
+}
+
+impl Drop for ChatLease {
+    fn drop(&mut self) {
+        self.sb.generating.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Max seconds a switch/unload/reload waits for in-flight generations to finish
+/// before giving up (`ROZUM_GATEWAY_DRAIN_SECS`, default 120).
+fn drain_secs() -> u64 {
+    std::env::var("ROZUM_GATEWAY_DRAIN_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120)
+}
+
+impl Switchboard {
+    fn current(&self) -> Option<Arc<dyn ChatBackend>> {
+        self.backend.read().unwrap().clone()
+    }
+
+    fn model_id(&self) -> String {
+        self.spec.lock().unwrap().model_id.clone()
+    }
+
+    fn n_ctx(&self) -> u32 {
+        self.spec.lock().unwrap().n_ctx
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Bump `generation` and republish the registry so proxies see "the daemon
+    /// was reconfigured". Returns the new generation.
+    fn bump_and_republish(&self, spec: &ModelSpec) -> u64 {
+        let g = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some((pid, port)) = self.register {
+            let _ = crate::share::write_active(&crate::share::ActiveGateway {
+                model: spec.model_id.clone(),
+                port,
+                pid,
+                n_ctx: spec.n_ctx,
+                started_at: self.started_at,
+                generation: g,
+            });
+        }
+        g
+    }
+
+    /// Return the live backend, lazily rebuilding it once if unloaded.
+    async fn ensure_loaded(&self) -> Result<Arc<dyn ChatBackend>, &'static str> {
+        if let Some(b) = self.current() {
+            return Ok(b);
+        }
+        let _g = self.reload_lock.lock().await;
+        if let Some(b) = self.current() {
+            return Ok(b); // a racing request already rebuilt it
+        }
+        let Some(builder) = self.builder.clone() else {
+            return Err("model is unloaded and this gateway cannot reload it");
+        };
+        let spec = self.spec.lock().unwrap().clone();
+        crate::obs::log_event(json!({
+            "event": "gateway_lazy_reload", "model": spec.model_id, "n_ctx": spec.n_ctx,
+        }));
+        match builder(spec.model_id.clone(), spec.n_ctx, spec.backend.clone()).await {
+            Some(b) => {
+                *self.backend.write().unwrap() = Some(b.clone());
+                self.bump_and_republish(&spec);
+                Ok(b)
+            }
+            None => Err("model failed to reload"),
+        }
+    }
+
+    /// Chat-handler entry: park while a swap drains, lazily reload if unloaded,
+    /// then take a `generating` token. Returns a guard the handler holds for the
+    /// whole request so the model can't be swapped out from under it.
+    async fn enter(self: &Arc<Self>) -> Result<ChatLease, Response> {
+        loop {
+            // Take a token first, then check `draining`: paired with begin_drain
+            // (set draining, then wait for generating==0) this never races a swap
+            // into running mid-flight.
+            self.generating.fetch_add(1, Ordering::SeqCst);
+            if !self.draining.load(Ordering::SeqCst) {
+                break;
+            }
+            self.generating.fetch_sub(1, Ordering::SeqCst);
+            tokio::select! {
+                _ = self.resume.notified() => {}
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
+        }
+        // Token held; load (or lazily rebuild) the backend.
+        match self.ensure_loaded().await {
+            Ok(backend) => Ok(ChatLease {
+                backend,
+                model_id: self.model_id(),
+                sb: Arc::clone(self),
+            }),
+            Err(msg) => {
+                self.generating.fetch_sub(1, Ordering::SeqCst);
+                Err(error_json(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    msg,
+                    "model_unloaded",
+                ))
+            }
+        }
+    }
+
+    /// Stop admitting new chats and wait for in-flight generations to finish.
+    /// On timeout, resume and return an error (don't swap under live work).
+    async fn begin_drain(&self) -> Result<(), String> {
+        self.draining.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(drain_secs());
+        while self.generating.load(Ordering::SeqCst) > 0 {
+            if Instant::now() >= deadline {
+                self.draining.store(false, Ordering::SeqCst);
+                self.resume.notify_waiters();
+                return Err("timed out draining in-flight requests".into());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok(())
+    }
+
+    fn end_drain(&self) {
+        self.draining.store(false, Ordering::SeqCst);
+        self.resume.notify_waiters();
+    }
+
+    /// In-place model/backend swap: drain → drop old (frees RAM) → build new →
+    /// bump generation → resume. Sequential, never two models resident. On build
+    /// failure the spec reverts so the next request lazily reloads the old model.
+    async fn switch(
+        &self,
+        model: String,
+        n_ctx: Option<u32>,
+        backend: Option<String>,
+    ) -> Result<u64, String> {
+        let Some(builder) = self.builder.clone() else {
+            return Err("this gateway does not support switching (dedicated)".into());
+        };
+        self.begin_drain().await?;
+        let old = self.spec.lock().unwrap().clone();
+        let new = ModelSpec {
+            model_id: model.clone(),
+            n_ctx: n_ctx.unwrap_or(old.n_ctx),
+            backend,
+        };
+        // Drop the current model first so the new one never coexists with it.
+        *self.backend.write().unwrap() = None;
+        *self.spec.lock().unwrap() = new.clone();
+        crate::obs::log_event(json!({
+            "event": "gateway_switch_start", "from": old.model_id, "to": new.model_id, "n_ctx": new.n_ctx,
+        }));
+        let out = match builder(new.model_id.clone(), new.n_ctx, new.backend.clone()).await {
+            Some(b) => {
+                *self.backend.write().unwrap() = Some(b);
+                let g = self.bump_and_republish(&new);
+                crate::obs::log_event(json!({
+                    "event": "gateway_switch_done", "model": new.model_id, "generation": g,
+                }));
+                Ok(g)
+            }
+            None => {
+                // Revert so a lazy reload restores the previous model on demand.
+                *self.spec.lock().unwrap() = old;
+                crate::obs::log_event(json!({
+                    "event": "gateway_switch_failed", "model": new.model_id,
+                }));
+                Err(format!("failed to load model '{model}'"))
+            }
+        };
+        self.end_drain();
+        out
+    }
+
+    /// Free the resident model but keep the daemon listening; the next chat
+    /// lazily reloads it. Frees RAM while idle.
+    async fn unload(&self) -> Result<u64, String> {
+        if self.builder.is_none() {
+            return Err("this gateway cannot reload after unload (dedicated)".into());
+        }
+        self.begin_drain().await?;
+        *self.backend.write().unwrap() = None;
+        let spec = self.spec.lock().unwrap().clone();
+        let g = self.bump_and_republish(&spec);
+        crate::obs::log_event(json!({
+            "event": "gateway_unloaded", "model": spec.model_id, "generation": g,
+        }));
+        self.end_drain();
+        Ok(g)
+    }
+}
+
+/// Options for [`serve_on`]. Defaults (no register, no idle, no builder) preserve
+/// the plain in-process gateway behaviour used by `rozum launch --dedicated`.
 #[derive(Default)]
 pub struct ServeConfig {
     /// Idle-exit after this many seconds with zero in-flight requests and no new
@@ -66,6 +323,12 @@ pub struct ServeConfig {
     pub idle_secs: Option<u64>,
     /// When set, publish/remove the shared-gateway registry (`share::active.json`).
     pub register_n_ctx: Option<u32>,
+    /// Backend factory enabling in-place `switch` / lazy `unload` reload. `None`
+    /// disables those (the model can't be rebuilt in process).
+    pub builder: Option<BackendBuilder>,
+    /// Optional backend hint recorded with the spec (so a lazy reload rebuilds
+    /// the same way). Mirrors `switch --backend`.
+    pub backend_hint: Option<String>,
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -130,6 +393,9 @@ fn chat_error_response(e: &ModelError, fallback_type: &str) -> Response {
 struct CancelOnDrop {
     stream: ChatStream,
     cancel: CancellationToken,
+    /// Kept alive for the whole stream so a `switch` waits for streaming to
+    /// finish (the lease counts against `generating`) before swapping the model.
+    _lease: Option<ChatLease>,
 }
 
 impl Drop for CancelOnDrop {
@@ -326,10 +592,11 @@ fn oai_sse_stream(
     chat_stream: ChatStream,
     cancel: CancellationToken,
     model: String,
+    lease: Option<ChatLease>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let completion_id = new_id("chatcmpl");
     async_stream::stream! {
-        let mut events = CancelOnDrop { stream: chat_stream, cancel };
+        let mut events = CancelOnDrop { stream: chat_stream, cancel, _lease: lease };
         let mut tool: Option<OaiToolState> = None;
         let mut role_sent = false;
 
@@ -410,11 +677,17 @@ fn oai_sse_stream(
 
 // ─── OpenAI non-streaming response ───────────────────────────────────────────
 
-async fn oai_collect(chat_stream: ChatStream, cancel: CancellationToken, model: &str) -> Response {
+async fn oai_collect(
+    chat_stream: ChatStream,
+    cancel: CancellationToken,
+    model: &str,
+    lease: Option<ChatLease>,
+) -> Response {
     let completion_id = new_id("chatcmpl");
     let mut events = CancelOnDrop {
         stream: chat_stream,
         cancel,
+        _lease: lease,
     };
     let mut text = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
@@ -641,10 +914,11 @@ fn anthropic_sse_stream(
     chat_stream: ChatStream,
     cancel: CancellationToken,
     model: String,
+    lease: Option<ChatLease>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let msg_id = new_id("msg");
     async_stream::stream! {
-        let mut events = CancelOnDrop { stream: chat_stream, cancel };
+        let mut events = CancelOnDrop { stream: chat_stream, cancel, _lease: lease };
 
         // message_start
         yield Ok(anthropic_event("message_start", json!({
@@ -763,11 +1037,13 @@ async fn anthropic_collect(
     chat_stream: ChatStream,
     cancel: CancellationToken,
     model: &str,
+    lease: Option<ChatLease>,
 ) -> Response {
     let msg_id = new_id("msg");
     let mut events = CancelOnDrop {
         stream: chat_stream,
         cancel,
+        _lease: lease,
     };
     let mut text = String::new();
     let mut tool_blocks: Vec<Value> = Vec::new();
@@ -841,11 +1117,15 @@ async fn anthropic_collect(
 async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
     let mut snap = state.observer.snapshot();
     if let Value::Object(ref mut m) = snap {
-        m.insert("model".into(), json!(state.model_id));
-        m.insert(
-            "context_window".into(),
-            json!(state.backend.context_window()),
-        );
+        m.insert("model".into(), json!(state.sb.model_id()));
+        m.insert("generation".into(), json!(state.sb.generation()));
+        let ctx = state
+            .sb
+            .current()
+            .map(|b| b.context_window())
+            .unwrap_or(state.sb.n_ctx());
+        m.insert("context_window".into(), json!(ctx));
+        m.insert("loaded".into(), json!(state.sb.current().is_some()));
     }
     axum::Json(snap)
 }
@@ -855,7 +1135,13 @@ async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
 /// queued request now or hold it at the edge. Ungated backends report a generous
 /// always-free window so the proxy fails open. (`shared-gateway.md`.)
 async fn admit_handler(State(state): State<GatewayState>) -> impl IntoResponse {
-    match state.backend.admission_stats() {
+    // While a switch/unload is in progress (draining or model dropped), advertise
+    // no free window so proxies hold their queued requests at the edge — that's
+    // how the swap stays transparent (the gap looks like backpressure).
+    if state.sb.draining.load(Ordering::SeqCst) || state.sb.current().is_none() {
+        return axum::Json(json!({ "limit": 1, "in_use": 1, "waiting": 0, "free": 0 }));
+    }
+    match state.sb.current().and_then(|b| b.admission_stats()) {
         Some(s) => axum::Json(json!({
             "limit": s.limit,
             "in_use": s.in_use,
@@ -871,7 +1157,8 @@ async fn models_handler(State(state): State<GatewayState>) -> impl IntoResponse 
     // Claude Code's gateway discovery only adds models whose id starts with
     // "claude" or "anthropic" to its /model picker. Expose an alias so the
     // real model name still appears in display_name.
-    let claude_alias = claude_model_alias(&state.model_id);
+    let model_id = state.sb.model_id();
+    let claude_alias = claude_model_alias(&model_id);
     axum::Json(json!({
         "object": "list",
         "data": [{
@@ -879,7 +1166,7 @@ async fn models_handler(State(state): State<GatewayState>) -> impl IntoResponse 
             "object": "model",
             "created": now_secs(),
             "owned_by": "rozum",
-            "display_name": state.model_id,
+            "display_name": model_id,
         }]
     }))
 }
@@ -914,13 +1201,19 @@ async fn oai_chat_handler(
         stream = req.stream.unwrap_or(true),
         "POST /v1/chat/completions"
     );
+    // Hold a lease for the whole request so a `switch` can't swap the model
+    // mid-flight; parks here if a swap is draining, lazily reloads if unloaded.
+    let lease = match state.sb.enter().await {
+        Ok(l) => l,
+        Err(resp) => return resp,
+    };
     let messages = oai_messages_to_internal(&req.messages);
     let tools = oai_tools_to_internal(&req.tools);
 
     // Approximate context overflow check
     let prompt_text = total_message_text(&messages);
     let est = estimate_tokens(&prompt_text);
-    let ctx_win = state.backend.context_window();
+    let ctx_win = lease.backend.context_window();
     if ctx_win > 0 && est > ctx_win {
         return error_json(
             StatusCode::BAD_REQUEST,
@@ -945,10 +1238,10 @@ async fn oai_chat_handler(
         session_id: None,
     };
 
-    let model = req.model.unwrap_or_else(|| state.model_id.clone());
+    let model = req.model.unwrap_or_else(|| lease.model_id.clone());
     let stream_mode = req.stream.unwrap_or(true);
 
-    match state.backend.chat(chat_req).await {
+    match lease.backend.chat(chat_req).await {
         Err(e) => {
             crate::obs::log_event(json!({
                 "event": "request_error", "endpoint": "/v1/chat/completions", "error": e.to_string(),
@@ -965,9 +1258,9 @@ async fn oai_chat_handler(
             };
             let chat_stream = crate::obs::meter(chat_stream, state.observer.clone(), meta);
             if stream_mode {
-                Sse::new(oai_sse_stream(chat_stream, cancel, model)).into_response()
+                Sse::new(oai_sse_stream(chat_stream, cancel, model, Some(lease))).into_response()
             } else {
-                oai_collect(chat_stream, cancel, &model).await
+                oai_collect(chat_stream, cancel, &model, Some(lease)).await
             }
         }
     }
@@ -984,13 +1277,17 @@ async fn anthropic_handler(
         stream = req.stream.unwrap_or(true),
         "POST /v1/messages"
     );
+    let lease = match state.sb.enter().await {
+        Ok(l) => l,
+        Err(resp) => return resp,
+    };
     let messages = anthropic_messages_to_internal(req.system.as_ref(), &req.messages);
     let tools = anthropic_tools_to_internal(&req.tools);
 
     // Approximate context overflow check
     let prompt_text = total_message_text(&messages);
     let est = estimate_tokens(&prompt_text);
-    let ctx_win = state.backend.context_window();
+    let ctx_win = lease.backend.context_window();
     if ctx_win > 0 && est > ctx_win {
         return error_json(
             StatusCode::BAD_REQUEST,
@@ -1013,10 +1310,10 @@ async fn anthropic_handler(
         session_id: None,
     };
 
-    let model = req.model.unwrap_or_else(|| state.model_id.clone());
+    let model = req.model.unwrap_or_else(|| lease.model_id.clone());
     let stream_mode = req.stream.unwrap_or(true);
 
-    match state.backend.chat(chat_req).await {
+    match lease.backend.chat(chat_req).await {
         Err(e) => {
             crate::obs::log_event(json!({
                 "event": "request_error", "endpoint": "/v1/messages", "error": e.to_string(),
@@ -1033,12 +1330,119 @@ async fn anthropic_handler(
             };
             let chat_stream = crate::obs::meter(chat_stream, state.observer.clone(), meta);
             if stream_mode {
-                Sse::new(anthropic_sse_stream(chat_stream, cancel, model)).into_response()
+                Sse::new(anthropic_sse_stream(
+                    chat_stream,
+                    cancel,
+                    model,
+                    Some(lease),
+                ))
+                .into_response()
             } else {
-                anthropic_collect(chat_stream, cancel, &model).await
+                anthropic_collect(chat_stream, cancel, &model, Some(lease)).await
             }
         }
     }
+}
+
+// ─── Control plane (switch / unload / reload) ────────────────────────────────
+
+#[derive(Deserialize)]
+struct SwitchReq {
+    model: String,
+    #[serde(default)]
+    n_ctx: Option<u32>,
+    #[serde(default)]
+    backend: Option<String>,
+}
+
+/// `POST /control/switch` — in-place model/backend swap. Drains, drops the old
+/// model, loads the new one, bumps `generation`, resumes. Proxies hold their
+/// queued requests across the gap (see `admit_handler`), so it's transparent.
+async fn control_switch(
+    State(state): State<GatewayState>,
+    axum::Json(req): axum::Json<SwitchReq>,
+) -> Response {
+    match state
+        .sb
+        .switch(req.model.clone(), req.n_ctx, req.backend)
+        .await
+    {
+        Ok(generation) => axum::Json(json!({
+            "status": "switched", "model": req.model, "generation": generation,
+        }))
+        .into_response(),
+        Err(e) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "switch_failed"),
+    }
+}
+
+/// `POST /control/unload` — free the resident model but keep the daemon; the
+/// next chat lazily reloads it.
+async fn control_unload(State(state): State<GatewayState>) -> Response {
+    match state.sb.unload().await {
+        Ok(generation) => axum::Json(json!({
+            "status": "unloaded", "generation": generation,
+        }))
+        .into_response(),
+        Err(e) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "unload_failed"),
+    }
+}
+
+/// `POST /control/reload` — graceful restart from the current binary (picks up an
+/// upgraded `rozum`). Drains, then re-execs with the current model/port. The
+/// brief port gap is covered by the proxies' replay path, like a failover.
+async fn control_reload(State(state): State<GatewayState>) -> Response {
+    if state.sb.builder.is_none() {
+        return error_json(
+            StatusCode::BAD_REQUEST,
+            "this gateway does not support reload (dedicated)",
+            "reload_failed",
+        );
+    }
+    if let Err(e) = state.sb.begin_drain().await {
+        return error_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "reload_failed");
+    }
+    let spec = state.sb.spec.lock().unwrap().clone();
+    let Some((_, port)) = state.sb.register else {
+        state.sb.end_drain();
+        return error_json(
+            StatusCode::BAD_REQUEST,
+            "reload requires a registered shared gateway",
+            "reload_failed",
+        );
+    };
+    // Re-exec after the 200 response has had a moment to flush. `exec` replaces
+    // this process image (same pid); the new daemon rebinds the same port and
+    // republishes with a bumped generation (read from the prior record at start).
+    let model_id = spec.model_id.clone();
+    crate::obs::log_event(json!({
+        "event": "gateway_reload", "model": model_id, "port": port,
+    }));
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        reexec_gateway(&spec, port);
+    });
+    axum::Json(json!({ "status": "reloading", "model": model_id })).into_response()
+}
+
+/// Replace this process with a fresh `rozum gateway` for the same model/port.
+/// Falls back to `process::exit(0)` if exec fails (the failover watchdog or a
+/// fresh launch will respawn it).
+fn reexec_gateway(spec: &ModelSpec, port: u16) -> ! {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().unwrap_or_else(|_| "rozum".into());
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("gateway")
+        .arg("--model")
+        .arg(&spec.model_id)
+        .arg("--n-ctx")
+        .arg(spec.n_ctx.to_string())
+        .arg("--port")
+        .arg(port.to_string());
+    let err = cmd.exec(); // returns only on failure
+    crate::obs::log_event(json!({
+        "event": "gateway_reload_exec_failed", "error": err.to_string(),
+    }));
+    std::process::exit(0);
 }
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────
@@ -1062,7 +1466,6 @@ async fn auth_layer(
     }
     // Activity tracking for the idle watchdog: count this request as in-flight
     // for its whole duration so a long generation can't trip the idle timer.
-    use std::sync::atomic::Ordering;
     let act = &state.activity;
     act.in_flight.fetch_add(1, Ordering::Relaxed);
     act.last_active
@@ -1090,7 +1493,9 @@ fn poison_ttl_secs() -> u64 {
 /// fingerprinted (raw bytes, matching what the proxy hashes); the body is
 /// re-attached for the downstream handler. Fail-open on any read hiccup.
 async fn poison_layer(req: axum::extract::Request, next: Next) -> Response {
-    if req.method() != axum::http::Method::POST {
+    // Only chat POSTs carry prompts worth fingerprinting; control-plane POSTs
+    // (switch/unload/reload) pass through untouched.
+    if req.method() != axum::http::Method::POST || req.uri().path().starts_with("/control/") {
         return next.run(req).await;
     }
     let (parts, body) = req.into_parts();
@@ -1148,27 +1553,56 @@ pub async fn serve_on(
         "model": model_id,
     }));
 
+    let started_at = crate::share::now_unix();
+    let n_ctx = cfg
+        .register_n_ctx
+        .unwrap_or_else(|| backend.context_window());
+
     // Shared-daemon registry: publish so `rozum launch` clients discover & reuse
     // us; remove on exit (only if it's still our record). Spec: shared-gateway.
-    let registered_pid = match (cfg.register_n_ctx, port) {
+    // `generation` continues from any prior record on this port (a respawn / exec
+    // reload reusing the port) so it changes monotonically across restarts.
+    let (register, generation0) = match (cfg.register_n_ctx, port) {
         (Some(n_ctx), Some(port)) => {
             let pid = std::process::id();
+            let generation = crate::share::read_active()
+                .map(|a| a.generation)
+                .unwrap_or(0)
+                + 1;
             let _ = crate::share::write_active(&crate::share::ActiveGateway {
                 model: model_id.clone(),
                 port,
                 pid,
                 n_ctx,
-                started_at: crate::share::now_unix(),
+                started_at,
+                generation,
             });
-            Some(pid)
+            (Some((pid, port)), generation)
         }
-        _ => None,
+        _ => (None, 0),
     };
+    let registered_pid = register.map(|(pid, _)| pid);
+
+    let sb = Arc::new(Switchboard {
+        backend: std::sync::RwLock::new(Some(backend)),
+        builder: cfg.builder,
+        spec: std::sync::Mutex::new(ModelSpec {
+            model_id,
+            n_ctx,
+            backend: cfg.backend_hint,
+        }),
+        generation: AtomicU64::new(generation0),
+        started_at,
+        draining: AtomicBool::new(false),
+        resume: tokio::sync::Notify::new(),
+        generating: AtomicU64::new(0),
+        reload_lock: tokio::sync::Mutex::new(()),
+        register,
+    });
 
     let state = GatewayState {
-        backend,
+        sb,
         auth_token: std::env::var("ROZUM_GATEWAY_TOKEN").ok(),
-        model_id,
         observer,
         activity: Arc::new(Activity::default()),
     };
@@ -1176,7 +1610,6 @@ pub async fn serve_on(
     // Idle watchdog (shared daemon only): exit when nothing is in flight and no
     // request has arrived for `idle_secs`, freeing the resident model.
     if let Some(idle) = cfg.idle_secs.filter(|&s| s > 0) {
-        use std::sync::atomic::Ordering;
         state
             .activity
             .last_active
@@ -1213,6 +1646,9 @@ pub async fn serve_on(
         .route("/stats", get(stats_handler))
         .route("/v1/chat/completions", post(oai_chat_handler))
         .route("/v1/messages", post(anthropic_handler))
+        .route("/control/switch", post(control_switch))
+        .route("/control/unload", post(control_unload))
+        .route("/control/reload", post(control_reload))
         .layer(middleware::from_fn(poison_layer))
         .layer(middleware::from_fn_with_state(state.clone(), auth_layer))
         .with_state(state);
@@ -1252,7 +1688,7 @@ mod tests {
         let req = ChatRequest::simple("ping");
         let stream = backend.chat(req).await.unwrap();
         let cancel = CancellationToken::new();
-        let sse = oai_sse_stream(stream, cancel, "hello".to_owned());
+        let sse = oai_sse_stream(stream, cancel, "hello".to_owned(), None);
         futures::pin_mut!(sse);
         // Must have at least one event + [DONE]
         let events: Vec<_> = sse.collect().await;
@@ -1270,7 +1706,7 @@ mod tests {
         let req = ChatRequest::simple("hello");
         let stream = backend.chat(req).await.unwrap();
         let cancel = CancellationToken::new();
-        let sse = anthropic_sse_stream(stream, cancel, "hello-model".to_owned());
+        let sse = anthropic_sse_stream(stream, cancel, "hello-model".to_owned(), None);
         futures::pin_mut!(sse);
         let events: Vec<_> = sse.collect().await;
         // message_start + content_block_start + content_block_delta + content_block_stop +
@@ -1347,5 +1783,118 @@ mod tests {
         let defs = oai_tools_to_internal(&tools);
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "get_weather");
+    }
+
+    // ── Switchboard (gateway switch / unload / reload) ──────────────────────
+
+    fn test_sb(builder: Option<BackendBuilder>, loaded: bool) -> Arc<Switchboard> {
+        let backend = loaded.then(|| Arc::new(HelloBackend::new()) as Arc<dyn ChatBackend>);
+        Arc::new(Switchboard {
+            backend: std::sync::RwLock::new(backend),
+            builder,
+            spec: std::sync::Mutex::new(ModelSpec {
+                model_id: "model-old".into(),
+                n_ctx: 100,
+                backend: None,
+            }),
+            generation: AtomicU64::new(1),
+            started_at: 0,
+            draining: AtomicBool::new(false),
+            resume: tokio::sync::Notify::new(),
+            generating: AtomicU64::new(0),
+            reload_lock: tokio::sync::Mutex::new(()),
+            register: None, // don't touch active.json in tests
+        })
+    }
+
+    fn ok_builder() -> BackendBuilder {
+        Arc::new(|_m, _n, _b| {
+            Box::pin(async { Some(Arc::new(HelloBackend::new()) as Arc<dyn ChatBackend>) })
+        })
+    }
+
+    #[tokio::test]
+    async fn switch_swaps_model_and_bumps_generation() {
+        let sb = test_sb(Some(ok_builder()), true);
+        let g0 = sb.generation();
+        let g1 = sb
+            .switch("model-new".into(), Some(200), None)
+            .await
+            .unwrap();
+        assert_eq!(g1, g0 + 1, "generation bumps on switch");
+        assert_eq!(sb.model_id(), "model-new");
+        assert_eq!(sb.n_ctx(), 200, "new n_ctx applied");
+        assert!(sb.current().is_some(), "new model is resident");
+        assert!(
+            !sb.draining.load(Ordering::SeqCst),
+            "drain cleared after switch"
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_keeps_n_ctx_when_unspecified() {
+        let sb = test_sb(Some(ok_builder()), true);
+        sb.switch("model-new".into(), None, None).await.unwrap();
+        assert_eq!(sb.n_ctx(), 100, "n_ctx preserved across switch");
+    }
+
+    #[tokio::test]
+    async fn unload_frees_model_then_enter_lazily_reloads() {
+        let sb = test_sb(Some(ok_builder()), true);
+        let g = sb.unload().await.unwrap();
+        assert_eq!(g, 2, "generation bumps on unload");
+        assert!(sb.current().is_none(), "model freed after unload");
+        // A chat entering finds it unloaded and rebuilds it once.
+        let lease = sb.enter().await.expect("lazy reload should succeed");
+        assert!(sb.current().is_some(), "model reloaded on demand");
+        assert_eq!(
+            sb.generating.load(Ordering::SeqCst),
+            1,
+            "lease holds a token"
+        );
+        drop(lease);
+        assert_eq!(
+            sb.generating.load(Ordering::SeqCst),
+            0,
+            "token released on drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_failure_reverts_spec_and_resumes() {
+        let bad: BackendBuilder = Arc::new(|_m, _n, _b| Box::pin(async { None }));
+        let sb = test_sb(Some(bad), true);
+        let err = sb.switch("model-new".into(), None, None).await.unwrap_err();
+        assert!(err.contains("failed to load"), "got: {err}");
+        assert_eq!(sb.model_id(), "model-old", "spec reverts on build failure");
+        assert!(
+            !sb.draining.load(Ordering::SeqCst),
+            "drain cleared after failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedicated_gateway_refuses_switch_and_unload() {
+        let sb = test_sb(None, true);
+        assert!(sb.switch("x".into(), None, None).await.is_err());
+        assert!(sb.unload().await.is_err());
+        assert!(
+            sb.current().is_some(),
+            "model untouched when switch is refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn enter_parks_while_draining_then_resumes() {
+        let sb = test_sb(Some(ok_builder()), true);
+        sb.draining.store(true, Ordering::SeqCst);
+        let sb2 = Arc::clone(&sb);
+        let task = tokio::spawn(async move { sb2.enter().await.map(|_| ()) });
+        // While draining, enter must not complete.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(!task.is_finished(), "enter parked during drain");
+        sb.end_drain();
+        let res = tokio::time::timeout(Duration::from_secs(2), task).await;
+        assert!(res.is_ok(), "enter resumed after end_drain");
     }
 }

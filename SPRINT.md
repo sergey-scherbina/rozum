@@ -191,9 +191,48 @@ Spec: `docs/specs/shared-gateway.md`.
   gap isn't blamed on the prompt; degrade = exclusive `lane` write-lock serializes
   the retry prefill; proxy fast-refuses confirmed entries before forwarding and the
   daemon's `poison_layer` re-checks before running the model. **DONE.**
-- [ ] gateway-switch - `rozum gateway switch --model Y [--backend B]` / `reload` /
-  `unload`: in-place drain (admission limit → 0) → unload → load → resume; proxies
-  hold requests across the gap. Transparent model/backend swap + binary upgrade.
+- [x] gateway-switch - `rozum gateway switch --model Y [--backend B] [--n-ctx N]`
+  / `reload` / `unload`: in-place drain → drop old model (never two resident) →
+  load new → bump `generation` → resume; proxies hold across the gap (`/v1/admit`
+  closes its window). Held by a `Switchboard` swap cell + injected `BackendBuilder`
+  closure; chat handlers `enter()` (park while draining, lazy-reload if unloaded)
+  and hold a `ChatLease` for the whole stream so a switch waits for streaming to
+  finish. Drain uses a separate `generating` counter (not the idle `in_flight`,
+  which would deadlock). `reload` re-execs the binary; `unload` drops the model and
+  lazily rebuilds on the next chat. Control plane: auth-gated localhost
+  `POST /control/{switch,unload,reload}`. `--dedicated` (no builder) refuses all
+  three. `--backend` forces gguf/mistralrs/lmstudio/mlx/url. **DONE.**
+
+#### channel-wakeup — push room events into idle agent sessions
+
+Turn `rozum mcp-proxy` into a one-way Claude Code **channel** so a joined-but-idle
+agent gets woken when a message lands in its room, instead of relying on the agent
+to keep long-polling `meeting.wait_my_turn`. The proxy already holds a
+`Peer<RoleServer>` to the agent session (`upstream_peer`); it declares the
+`claude/channel` capability and a background task pushes `notifications/claude/channel`
+with the new transcript delta. `wait_my_turn` stays as the authoritative pull path.
+
+Empirically verified (CC 2.1.172): channels register fine under rozum's
+local-gateway env (auth gate is Bedrock/Vertex/Foundry-only, not custom base URL),
+but **only in the interactive `claude` CLI** — headless `-p`/Agent-SDK gets no
+channel. `rozum launch … claude` is interactive, so it's on the right path.
+
+Spec: `docs/specs/channel-wakeup.md`. rmcp 1.7 confirmed to support both pieces
+(`ServerCapabilities.experimental` map + `ServerNotification::CustomNotification`).
+
+- [ ] channel-wakeup-capability - Declare `experimental:{"claude/channel":{}}` in the
+  proxy `InitializeResult` + extend `instructions` to teach the agent to read
+  `<channel source="rozum" …>` events as a wakeup (authoritative delta via `wait_my_turn`).
+- [ ] channel-wakeup-pusher - Per-joined-room background task (modeled on `heartbeat_task`)
+  that runs its own room long-poll and emits `notifications/claude/channel`
+  (`content` = rendered delta, `meta` = `{room,from,seq,your_turn}`) on `upstream_peer`.
+  Fire-and-forget; never crash the proxy/room conn on send failure.
+- [ ] channel-wakeup-lifecycle - Abort the task on leave / room-switch / teardown
+  (same points as `heartbeat_task`/`RoomConn`); de-dup own-authored turns; advance
+  `since_seq` past delivered entries so reconnect doesn't replay a notification storm.
+- [ ] channel-wakeup-launch-flag - `rozum launch` injects
+  `--dangerously-load-development-channels server:rozum` for Claude Code agents
+  (suppressible; CC ≥ 2.1.80; non-`claude` programs untouched).
 
 - [ ] runtime-config - Load backend policy and backend list from `rozum.toml`.
   - Support `single`, `fallback`, and `fanout` policies.
@@ -269,6 +308,14 @@ soon as any single track succeeds.
   - Enables `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` so the model shows up in the `/model` picker with `display_name`.
   - Argument reordering pre-parser accepts both `--model X claude` and `claude --model X`; `--` separator forwards remaining args verbatim.
   - Spec: `docs/specs/launch-wrapper.md`.
+
+- [x] launch-no-model - `rozum launch --no-model <program>` runs the agent with no
+  local model against upstream Anthropic: no gateway/lease/proxy, no `ANTHROPIC_*`/
+  `OPENAI_*` overrides, operator's own auth preserved; only rozum agent-context
+  defaults applied. Picker lists "Anthropic (cloud — no local model)" first.
+  `LaunchTarget::{Local,Anthropic}`; `--no-model` conflicts with `--model`/
+  `--dedicated`/`--n-ctx`/`--port`, reordered like value flags. Unlocks channels
+  (real Anthropic auth) for rozum-launched agents. Spec: `docs/specs/launch-wrapper.md`. **DONE.**
 
 - [x] models-cli - `rozum models {list, list --remote, info <spec>}` for discovering and inspecting local LLM models.
   - Scans HuggingFace hub, Ollama (both monolithic GGUF and per-tensor MLX layouts), and LMStudio caches without needing those runtimes running.

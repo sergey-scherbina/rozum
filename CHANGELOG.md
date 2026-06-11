@@ -1,5 +1,53 @@
 # Changelog
 
+## gateway-switch — transparent in-place model/backend switch, reload & unload
+Completed: 2026-06-11
+`rozum gateway switch --model Y [--backend B] [--n-ctx N]` swaps the resident
+model of the running shared daemon **in place**: it drains in-flight work, drops
+the old model (never two resident — the memory constraint), loads the new one,
+bumps a new `generation`, and resumes. Clients' launch-local proxies hold their
+queued requests across the gap (`/v1/admit` advertises a closed window while
+draining, so it looks like backpressure, not a failure) and a request already
+mid-flight is held in the daemon until the swap finishes — so the swap is
+transparent, just slower. The daemon now holds its backend in a `Switchboard`
+(swap cell + an injected `BackendBuilder` closure over `rozum`'s own
+backend-selection chain), and every chat handler takes a `ChatLease` for the
+whole stream so a switch waits for streaming to finish before swapping. Drain
+tracks a dedicated `generating` counter (the idle-watchdog `in_flight` counter
+can't be used — it's held for parked requests and would deadlock the drain),
+bounded by `ROZUM_GATEWAY_DRAIN_SECS` (default 120). `--backend` forces an engine
+(`gguf`/`mistralrs`/`lmstudio`/`mlx`/`url`); on a build failure the switch reverts
+the spec so the next request lazily reloads the old model.
+
+`rozum gateway reload` drains then re-execs the current binary (transparent
+daemon/binary upgrade after a `rozum` upgrade); the brief port gap rides the
+proxies' existing replay path. `rozum gateway unload` drops the model to free RAM
+but keeps the daemon listening — the next chat lazily reloads it (serialized so
+racing requests reload once). `generation` was added to the `active.json`
+registry (`#[serde(default)]`, continued monotonically across respawns) so a
+proxy can tell "the daemon I was talking to was replaced" from a transient blip;
+`rozum gateway status` shows it as `gen:`. Control plane is auth-gated localhost
+`POST /control/{switch,unload,reload}`. A `--dedicated` gateway has no builder, so
+all three are cleanly refused. No new deps.
+
+## launch-no-model — `rozum launch --no-model` (upstream Anthropic, no gateway)
+Completed: 2026-06-11
+`rozum launch` can now run an agent with no local model at all: `--no-model`
+(and a new first **"Anthropic (cloud — no local model)"** entry in the interactive
+picker) bypass the gateway entirely — no daemon spawn, no lease, no launch-local
+proxy, and none of the `ANTHROPIC_*`/`OPENAI_*` gateway/model env overrides. The
+child inherits the operator's own Anthropic auth (`ANTHROPIC_API_KEY` / claude.ai
+OAuth), exactly like a bare `claude`; only rozum's agent-context defaults
+(`CLAUDE_CODE_DISABLE_*`, each applied only if unset) still apply. Resolution is
+modeled as `LaunchTarget::{Local(spec), Anthropic}`; `--no-model` `conflicts_with`
+`--model`/`--dedicated`/`--n-ctx`/`--port` (clap-enforced) and is hoisted by
+`reorder_launch_args` like the value flags (also fixing `--dedicated` placement
+after the program name). This is the mode that makes Claude Code features
+requiring real Anthropic auth — notably **channels** — available to a
+rozum-launched agent (empirically a local-gateway base URL does *not* block
+channels, but no-model is the clean path). Spec: `docs/specs/launch-wrapper.md`.
+No new deps.
+
 ## shared-gateway-poison — soft, graduated poison-prompt protection
 Completed: 2026-06-11
 A request that repeatedly crashes the shared daemon is now handled gently instead

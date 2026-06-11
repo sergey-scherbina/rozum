@@ -51,6 +51,12 @@ pub struct ActiveGateway {
     pub pid: u32,
     pub n_ctx: u32,
     pub started_at: u64,
+    /// Increments on every (re)spawn and every in-place switch, so a proxy can
+    /// tell "the daemon I was talking to was replaced" (model/backend swapped)
+    /// from "same daemon, transient blip". Defaults to 0 for records written by
+    /// an older daemon that predates the field.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 /// Read the registry, or `None` if absent/unparseable.
@@ -300,6 +306,7 @@ mod tests {
             pid: 4242,
             n_ctx: 32768,
             started_at: 1_700_000_000,
+            generation: 1,
         }
     }
 

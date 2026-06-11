@@ -122,22 +122,38 @@ Ref: https://code.claude.com/docs/en/channels-reference
   `rozum launch`.
 - No new `settings.json` schema. Activation is launch-flag only by design.
 
-## Open Risks (verify before merge)
+## Empirical Findings (probed on CC v2.1.172, 2026-06-11)
 
-1. **Auth mode gate.** Channels are documented to require Anthropic
-   authentication (claude.ai or Console API key) and are *not available on
-   Bedrock/Vertex/Foundry*. `rozum launch` points the agent at the local
-   gateway via `ANTHROPIC_BASE_URL`. It is unverified whether channel activation
-   is gated on the auth/endpoint mode and would be blocked when the agent runs
-   against a local model. **Must be tested empirically** with a real
-   `rozum launch … claude` session before relying on this. If blocked against
-   local models, channel wakeup is only usable for agents on a real Anthropic
-   subscription — document the limitation and keep `wait_my_turn` as the
-   universal path.
-2. **Research-preview churn.** The `--channels` flag syntax and the
-   `notifications/claude/channel` contract may change. Pin to CC ≥ 2.1.80 in the
-   launch check and treat the whole feature as best-effort additive on top of
-   the always-correct `wait_my_turn` pull path.
+A minimal Node (non-Bun) MCP server declaring `experimental:{'claude/channel':{}}`
+was registered via `--dangerously-load-development-channels server:probe` and
+driven through a PTY.
+
+1. **Auth gate is NOT triggered by the local gateway — RESOLVED (negative).**
+   Under the exact env `rozum launch` sets (`ANTHROPIC_BASE_URL=http://127.0.0.1:…`,
+   `ANTHROPIC_AUTH_TOKEN=rozum-local`, no real `ANTHROPIC_API_KEY`), the channel
+   registered *identically* to a plain Claude Pro session: the startup notice
+   read `Channels (experimental) messages from server:probe inject directly in
+   this session`. No "blocked by org policy", no "not available". The documented
+   Bedrock/Vertex/Foundry restriction is detected via those providers' own env
+   flags, not a custom `ANTHROPIC_BASE_URL`. **Channel wakeup works against the
+   rozum local gateway.**
+2. **Interactive-only — HARD CONSTRAINT.** Channels activate only in the
+   interactive `claude` CLI. In headless `-p` / Agent-SDK mode the same server
+   connected as an ordinary MCP server (`hasTools:false`, no channel listener,
+   zero `<channel>` events delivered). `rozum launch … claude` execs the
+   interactive CLI, so it is on the correct path — but the wakeup feature MUST
+   document that agents launched with `-p` (or via the Agent SDK) get no channel
+   events and fall back to `wait_my_turn` only.
+3. In the interactive session the injected event arrived as
+   `← probe: CHANNEL_PROBE token=ZEBRA7714 …` and Claude quoted the token in its
+   reply — end-to-end delivery confirmed.
+
+## Open Risks
+
+1. **Research-preview churn.** The `--channels` / `--dangerously-load-development-channels`
+   flag syntax and the `notifications/claude/channel` contract may change. Pin to
+   CC ≥ 2.1.80 in the launch check and treat the whole feature as best-effort
+   additive on top of the always-correct `wait_my_turn` pull path.
 
 ## Acceptance
 

@@ -20,6 +20,8 @@ rozum launch [OPTIONS] <PROGRAM>...
 
 Options:
   --model <SPEC>    Model spec (same as `gateway --model`)
+  --no-model        Run no local model: use the agent's upstream Anthropic
+                    credentials. Conflicts with --model/--dedicated/--n-ctx/--port.
   --port <PORT>     Gateway port (auto-picks a free port if not specified)
   --n-ctx <N>       Context window in tokens (default 32768)
 
@@ -27,10 +29,24 @@ Examples:
   rozum launch --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit claude
   rozum launch claude --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit           # same — known flags
                                                               # are reordered automatically
+  rozum launch --no-model claude                              # upstream Anthropic, no gateway
   rozum launch --model qwen2.5-coder:32b -- aider --no-auto-commits
                                                               # `--` passes the rest
                                                               # verbatim to the child
 ```
+
+### No-model (upstream Anthropic) mode
+
+`--no-model` (and the first **"Anthropic (cloud — no local model)"** entry in the
+interactive picker) bypass the gateway entirely: no daemon is spawned, no lease
+is held, no launch-local proxy is started, and **none** of the gateway/model env
+vars in the table below are set. The agent inherits the operator's own Anthropic
+authentication (`ANTHROPIC_API_KEY` / claude.ai OAuth / `ANTHROPIC_AUTH_TOKEN`),
+exactly as a bare `claude` would. Only the rozum agent-context defaults
+(`CLAUDE_CODE_DISABLE_BUNDLED_SKILLS` etc., each applied only if unset) are still
+applied. This is the mode that makes Claude Code features requiring real
+Anthropic auth — notably channels (see `channel-wakeup.md`) — available to a
+rozum-launched agent.
 
 ### Env vars set on the child
 
@@ -78,6 +94,9 @@ The `claude-` prefix is required because Claude Code's gateway-discovery filter 
 - [x] Claude Code starts on the local model: `/status` `Model:` field is `claude-rozum-<sanitized-spec>`.
 - [x] The local model also appears in the `/model` picker labelled "From gateway" with the original spec as display name.
 - [x] Works against any backend the underlying `gateway` subcommand supports: in-process GGUF (`--features gguf`), mlx_lm.server HTTP, or `ROZUM_BACKEND_URL`. If no real backend is reachable, `rozum launch` exits with code 1 instead of starting the child against a placeholder.
+- [x] `--no-model` runs the child against upstream Anthropic with no gateway, no lease, no proxy, and no gateway/model env overrides; `--no-model` conflicts with `--model`/`--dedicated`/`--n-ctx`/`--port` (clap-enforced).
+- [x] The interactive picker lists "Anthropic (cloud — no local model)" first; selecting it is equivalent to `--no-model`.
+- [x] `--no-model` is reordered to the front like the value flags, so it works placed after the program name (`rozum launch claude --no-model`); a `--no-model` after `--` stays with the child.
 
 ## Out of scope
 

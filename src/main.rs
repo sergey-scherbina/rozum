@@ -144,6 +144,27 @@ enum Command {
         #[arg(long)]
         dedicated: bool,
 
+        /// Don't run any local model: launch the agent against your configured
+        /// upstream Anthropic credentials (real claude.ai login or API key).
+        /// The gateway, model picker, and `--model`/`--dedicated`/`--n-ctx`/
+        /// `--port` are all bypassed. This is also the first ("Anthropic") entry
+        /// in the interactive model picker.
+        #[arg(long, conflicts_with_all = ["model", "dedicated", "n_ctx", "port"])]
+        no_model: bool,
+
+        /// Don't inject `--dangerously-load-development-channels server:<name>`
+        /// into a Claude Code child. By default (when the child is `claude` and
+        /// its build supports the flag) the rozum mcp-proxy is registered as a
+        /// channel so room activity wakes an idle session. Spec: channel-wakeup.
+        #[arg(long)]
+        no_channel_wakeup: bool,
+
+        /// MCP server name the agent registered `rozum mcp-proxy` under; used for
+        /// the channel-wakeup flag (`server:<name>`). Must match the name in the
+        /// agent's MCP config or the channel registers nothing (silently).
+        #[arg(long, default_value = "rozum")]
+        channel_mcp_name: String,
+
         /// Program to launch and its arguments
         #[arg(trailing_var_arg = true, required = true)]
         program: Vec<String>,
@@ -165,6 +186,25 @@ enum GatewayAction {
         #[arg(long)]
         force: bool,
     },
+    /// Transparently swap the resident model (and/or backend) in place: drain →
+    /// unload → load the new one → resume. Clients' requests are held by their
+    /// proxy across the gap, not failed.
+    Switch {
+        /// New model spec to load.
+        #[arg(long)]
+        model: String,
+        /// Context window for the new model (default: keep the current one).
+        #[arg(long)]
+        n_ctx: Option<u32>,
+        /// Force a specific engine: gguf, mistralrs, lmstudio, mlx, url.
+        #[arg(long)]
+        backend: Option<String>,
+    },
+    /// Graceful restart of the daemon from the current binary (e.g. after
+    /// upgrading `rozum`). Drains in-flight work, then re-execs.
+    Reload,
+    /// Free the resident model but keep the daemon (lazy-reload on next request).
+    Unload,
 }
 
 #[derive(Subcommand)]
@@ -303,15 +343,29 @@ async fn main() {
             }
             Some(GatewayAction::Status) => run_gateway_status().await,
             Some(GatewayAction::Stop { force }) => run_gateway_stop(force),
+            Some(GatewayAction::Switch {
+                model,
+                n_ctx,
+                backend,
+            }) => run_gateway_switch(model, n_ctx, backend).await,
+            Some(GatewayAction::Reload) => run_gateway_reload().await,
+            Some(GatewayAction::Unload) => run_gateway_unload().await,
         },
         Some(Command::Launch {
             model,
             port,
             n_ctx,
             dedicated,
+            no_model,
+            no_channel_wakeup,
+            channel_mcp_name,
             program,
         }) => {
-            run_launch(model, port, n_ctx, dedicated, program).await;
+            let channels = ChannelWakeup {
+                suppressed: no_channel_wakeup,
+                server_name: channel_mcp_name,
+            };
+            run_launch(model, port, n_ctx, dedicated, no_model, channels, program).await;
         }
         Some(Command::Models { action }) => {
             run_models(action).await;
@@ -438,6 +492,10 @@ async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>) {
     let cfg = rozum::gateway::ServeConfig {
         idle_secs: (idle_secs > 0).then_some(idle_secs),
         register_n_ctx: Some(n_ctx),
+        // Enable in-place `gateway switch` / lazy `unload` reload: the daemon
+        // rebuilds the backend through this same selection chain.
+        builder: Some(gateway_backend_builder()),
+        backend_hint: None,
     };
     if let Err(e) = rozum::gateway::run(backend, port, model_spec, cfg).await {
         eprintln!("gateway error: {e}");
@@ -458,6 +516,8 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
     };
 
     const KNOWN_FLAGS: &[&str] = &["--model", "--port", "--n-ctx"];
+    // Value-less flags: pulled to the front without consuming a following arg.
+    const KNOWN_BOOL_FLAGS: &[&str] = &["--no-model", "--dedicated"];
 
     // Collect args after "launch", pull known flag+value pairs to the front.
     let tail: Vec<String> = args.split_off(launch_idx + 1);
@@ -472,7 +532,9 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
             remaining.extend(iter);
             break;
         }
-        if let Some(flag) = KNOWN_FLAGS.iter().find(|f| arg == **f) {
+        if KNOWN_BOOL_FLAGS.iter().any(|f| arg == *f) {
+            pulled.push(arg);
+        } else if let Some(flag) = KNOWN_FLAGS.iter().find(|f| arg == **f) {
             pulled.push((*flag).to_owned());
             if let Some(value) = iter.next() {
                 pulled.push(value);
@@ -494,21 +556,85 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
     args
 }
 
+/// What `rozum launch` should run the agent against.
+enum LaunchTarget {
+    /// Run a local model spec, gateway-backed (or `--dedicated`).
+    Local(String),
+    /// Run no local model: point the agent at its configured upstream Anthropic.
+    Anthropic,
+}
+
+/// Channel-wakeup launch policy: whether (and under what MCP server name) to
+/// register the rozum mcp-proxy as a Claude Code channel so room activity wakes
+/// an idle session. Spec: `docs/specs/channel-wakeup.md`.
+struct ChannelWakeup {
+    suppressed: bool,
+    server_name: String,
+}
+
+impl ChannelWakeup {
+    /// The flags to append for `program_name`, or `None` to inject nothing.
+    /// Only Claude Code understands the flag, and only builds that actually
+    /// expose it (research preview, CC ≥ 2.1.80) — an older `claude` would
+    /// reject an unknown flag, so we probe `--help` and degrade silently.
+    fn flags_for(&self, program_name: &str) -> Option<Vec<String>> {
+        if self.suppressed {
+            return None;
+        }
+        let base = std::path::Path::new(program_name).file_name()?.to_str()?;
+        if base != "claude" {
+            return None;
+        }
+        let help = std::process::Command::new(program_name)
+            .arg("--help")
+            .output()
+            .ok()?;
+        let supported = String::from_utf8_lossy(&help.stdout)
+            .contains("dangerously-load-development-channels");
+        if !supported {
+            eprintln!(
+                "rozum launch: this claude build has no channel support; skipping wakeup \
+                 (pass --no-channel-wakeup to silence)."
+            );
+            return None;
+        }
+        eprintln!(
+            "rozum launch: channel wakeup on — registering mcp-proxy as 'server:{}'.",
+            self.server_name
+        );
+        Some(vec![
+            "--dangerously-load-development-channels".to_owned(),
+            format!("server:{}", self.server_name),
+        ])
+    }
+}
+
 async fn run_launch(
     model: Option<String>,
     port: Option<u16>,
     n_ctx: Option<u32>,
     dedicated: bool,
+    no_model: bool,
+    channels: ChannelWakeup,
     program: Vec<String>,
 ) {
-    let Some(model_spec) = resolve_launch_model(model).await else {
-        // No model and none resolvable (non-TTY without --model, or cancelled).
-        std::process::exit(2);
+    let model_spec = match resolve_launch_target(model, no_model).await {
+        // No target and none resolvable (non-TTY without --model, or cancelled).
+        None => std::process::exit(2),
+        Some(LaunchTarget::Anthropic) => {
+            eprintln!(
+                "rozum launch: no local model — running against your configured \
+                 Anthropic credentials."
+            );
+            // No gateway, proxy, lease, or model env: the agent uses its own auth.
+            exec_agent_anthropic(program, &channels).await; // -> ! (execs + exits)
+        }
+        Some(LaunchTarget::Local(m)) => m,
     };
     let n_ctx = resolve_n_ctx(&model_spec, n_ctx);
 
     if dedicated {
-        run_launch_dedicated(model_spec, port, n_ctx, program).await;
+        run_launch_dedicated(model_spec, port, n_ctx, channels, program).await;
         return; // unreachable: the dedicated path execs + exits
     }
 
@@ -540,7 +666,7 @@ async fn run_launch(
             gw_port
         }
     };
-    exec_agent(program, &effective_model, agent_port).await
+    exec_agent(program, &effective_model, agent_port, &channels).await
 }
 
 /// Bind an ephemeral loopback port, start the launch-local reverse proxy on it
@@ -558,91 +684,105 @@ async fn start_launch_proxy(daemon_port: u16) -> Option<u16> {
     Some(port)
 }
 
-/// Resolve which model `rozum launch` should use when `--model` may be omitted:
+/// Resolve what `rozum launch` should run the agent against when neither
+/// `--model` nor `--no-model` may be given:
 ///
-/// - `--model X` given → use `X` (mismatch with a running gateway is handled in
+/// - `--no-model` → `Anthropic` (no local model; upstream credentials).
+/// - `--model X` → `Local(X)` (mismatch with a running gateway is handled in
 ///   `ensure_shared_gateway`: takeover-if-idle, else reuse-with-warning).
-/// - omitted + a healthy gateway already running → reuse its model.
-/// - omitted + nothing running, on a TTY → interactive picker.
+/// - omitted + a healthy gateway already running → reuse its model (`Local`).
+/// - omitted + nothing running, on a TTY → interactive picker (Anthropic first).
 /// - omitted + nothing running, not a TTY → error (scripted launches must pass
-///   `--model`).
+///   `--model` or `--no-model`).
 ///
-/// Returns `None` to abort (non-TTY without a model, or the user cancelled).
-async fn resolve_launch_model(model: Option<String>) -> Option<String> {
+/// Returns `None` to abort (non-TTY without a choice, or the user cancelled).
+async fn resolve_launch_target(model: Option<String>, no_model: bool) -> Option<LaunchTarget> {
     use std::io::IsTerminal;
 
+    if no_model {
+        return Some(LaunchTarget::Anthropic);
+    }
     if let Some(m) = model {
-        return Some(m);
+        return Some(LaunchTarget::Local(m));
     }
 
     // Omitted: reuse a healthy running gateway's model if there is one.
     if let Some(active) = rozum::share::read_active() {
         if rozum::share::health_ok(active.port).await {
             eprintln!("rozum launch: using running model: {}", active.model);
-            return Some(active.model);
+            return Some(LaunchTarget::Local(active.model));
         }
     }
 
     // Nothing running. A picker only makes sense on an interactive terminal.
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         eprintln!(
-            "rozum launch: no --model given and no gateway running. Pass --model, \
-             e.g. `rozum launch --model mlx-community:Qwen3-4B-4bit claude`."
+            "rozum launch: no --model/--no-model given and no gateway running. Pass \
+             --no-model to use upstream Anthropic, or --model, e.g. \
+             `rozum launch --model mlx-community:Qwen3-4B-4bit claude`."
         );
         return None;
     }
 
-    pick_model_interactive()
+    pick_launch_target_interactive()
 }
 
-/// Interactive model picker (TTY only). Lists locally-cached models first
-/// (annotated `(cached, <size>)`), then curated downloadable models (annotated
+/// Interactive launch-target picker (TTY only). Lists "Anthropic (cloud)" first
+/// — choosing it runs no local model — then locally-cached models (annotated
+/// `(cached, <size>)`), then curated downloadable models (annotated
 /// `(not cached, ~<size>)`). Selecting a not-cached model re-confirms the
-/// download. Returns the chosen spec, or `None` if cancelled.
-fn pick_model_interactive() -> Option<String> {
+/// download. Returns the chosen target, or `None` if cancelled.
+fn pick_launch_target_interactive() -> Option<LaunchTarget> {
     use rozum::models;
     use std::io::Write as _;
 
+    enum Kind {
+        Anthropic,
+        Model { spec: String, cached: bool },
+    }
     struct Choice {
-        spec: String,
         label: String,
-        cached: bool,
+        kind: Kind,
     }
 
     let installed = models::scan_all_installed();
     let cached: std::collections::HashSet<&str> =
         installed.iter().map(|m| m.spec.as_str()).collect();
 
-    let mut choices: Vec<Choice> = Vec::new();
+    // Anthropic (no local model) is always first.
+    let mut choices: Vec<Choice> = vec![Choice {
+        label: "Anthropic (cloud — no local model, uses your Anthropic credentials)".to_owned(),
+        kind: Kind::Anthropic,
+    }];
     for m in &installed {
         choices.push(Choice {
-            spec: m.spec.clone(),
             label: format!(
                 "{}  (cached, {})",
                 m.spec,
                 models::format_size(m.size_bytes)
             ),
-            cached: true,
+            kind: Kind::Model {
+                spec: m.spec.clone(),
+                cached: true,
+            },
         });
     }
     for r in models::RECOMMENDED {
         if !cached.contains(r.spec) {
             choices.push(Choice {
-                spec: r.spec.to_owned(),
                 label: format!(
                     "{}  (not cached, ~{:.1} GB)  — {}",
                     r.spec, r.approx_size_gb, r.display_name
                 ),
-                cached: false,
+                kind: Kind::Model {
+                    spec: r.spec.to_owned(),
+                    cached: false,
+                },
             });
         }
     }
-    if choices.is_empty() {
-        eprintln!("rozum launch: no models available. See `rozum models list --remote`.");
-        return None;
-    }
 
-    eprintln!("Select a model to launch:");
+    eprintln!("Select what to launch the agent against:");
     for (i, c) in choices.iter().enumerate() {
         eprintln!("  {:>2}) {}", i + 1, c.label);
     }
@@ -666,19 +806,23 @@ fn pick_model_interactive() -> Option<String> {
         eprintln!("rozum launch: '{line}' is not a valid choice.");
         return None;
     };
-    let chosen = &choices[idx - 1];
 
-    if !chosen.cached {
-        eprint!("Download {} now and use it? [y/N]: ", chosen.spec);
-        let _ = std::io::stderr().flush();
-        let mut yn = String::new();
-        let _ = std::io::stdin().read_line(&mut yn);
-        if !yn.trim().eq_ignore_ascii_case("y") {
-            eprintln!("cancelled.");
-            return None;
+    match &choices[idx - 1].kind {
+        Kind::Anthropic => Some(LaunchTarget::Anthropic),
+        Kind::Model { spec, cached } => {
+            if !cached {
+                eprint!("Download {spec} now and use it? [y/N]: ");
+                let _ = std::io::stderr().flush();
+                let mut yn = String::new();
+                let _ = std::io::stdin().read_line(&mut yn);
+                if !yn.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("cancelled.");
+                    return None;
+                }
+            }
+            Some(LaunchTarget::Local(spec.clone()))
         }
     }
-    Some(chosen.spec.clone())
 }
 
 /// Pre-sharing behaviour: load a private model in-process for just this launch.
@@ -686,6 +830,7 @@ async fn run_launch_dedicated(
     model_spec: String,
     port: Option<u16>,
     n_ctx: u32,
+    channels: ChannelWakeup,
     program: Vec<String>,
 ) {
     let port = port.unwrap_or_else(|| {
@@ -720,7 +865,7 @@ async fn run_launch_dedicated(
         }
     });
     // The in-process gateway dies with this process on exec_agent's exit.
-    exec_agent(program, &model_spec, port).await
+    exec_agent(program, &model_spec, port, &channels).await
 }
 
 /// Reuse a healthy running shared gateway, else spawn a detached `rozum gateway`
@@ -836,6 +981,7 @@ async fn run_gateway_status() {
     println!("  port:    {}", active.port);
     println!("  pid:     {}", active.pid);
     println!("  n_ctx:   {}", active.n_ctx);
+    println!("  gen:     {}", active.generation);
     println!("  uptime:  {uptime}s");
     println!("  clients: {clients}");
 }
@@ -865,6 +1011,81 @@ fn run_gateway_stop(force: bool) {
         }
         _ => {
             eprintln!("rozum gateway stop: failed to signal pid {}", active.pid);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// POST a control command to the running shared gateway and return its JSON
+/// reply. Sends the bearer token if `ROZUM_GATEWAY_TOKEN` is set (same as the
+/// daemon expects). No request timeout — a `switch` reload can take a while.
+async fn gateway_control_post(
+    path: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use rozum::share;
+    let Some(active) = share::read_active() else {
+        return Err("no shared gateway running".into());
+    };
+    let url = format!("http://127.0.0.1:{}{}", active.port, path);
+    let mut req = reqwest::Client::new().post(&url).json(&body);
+    if let Ok(token) = std::env::var("ROZUM_GATEWAY_TOKEN") {
+        req = req.bearer_auth(token);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if status.is_success() {
+        Ok(json)
+    } else {
+        let msg = json
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("control request failed");
+        Err(format!("{status}: {msg}"))
+    }
+}
+
+async fn run_gateway_switch(model: String, n_ctx: Option<u32>, backend: Option<String>) {
+    let mut body = serde_json::json!({ "model": model });
+    if let Some(n) = n_ctx {
+        body["n_ctx"] = serde_json::json!(n);
+    }
+    if let Some(b) = &backend {
+        body["backend"] = serde_json::json!(b);
+    }
+    match gateway_control_post("/control/switch", body).await {
+        Ok(j) => println!(
+            "switched to {} (generation {})",
+            model,
+            j.get("generation").and_then(|g| g.as_u64()).unwrap_or(0)
+        ),
+        Err(e) => {
+            eprintln!("rozum gateway switch: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run_gateway_reload() {
+    match gateway_control_post("/control/reload", serde_json::json!({})).await {
+        Ok(_) => println!("gateway reloading (re-exec from current binary)"),
+        Err(e) => {
+            eprintln!("rozum gateway reload: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run_gateway_unload() {
+    match gateway_control_post("/control/unload", serde_json::json!({})).await {
+        Ok(j) => println!(
+            "model unloaded (generation {}); next request reloads it",
+            j.get("generation").and_then(|g| g.as_u64()).unwrap_or(0)
+        ),
+        Err(e) => {
+            eprintln!("rozum gateway unload: {e}");
             std::process::exit(1);
         }
     }
@@ -990,6 +1211,33 @@ async fn exec_agent(program: Vec<String>, model_for_alias: &str, port: u16) -> !
     cmd.env("OPENAI_API_KEY", "rozum-local");
     cmd.env("ROZUM_GATEWAY_URL", &base);
 
+    apply_rozum_agent_env(&mut cmd);
+    spawn_agent_and_exit(cmd, program_name).await
+}
+
+/// Launch the agent with no local model: leave its upstream Anthropic auth
+/// (`ANTHROPIC_API_KEY` / claude.ai login) untouched and set none of the
+/// gateway/model env. Only the rozum agent-context defaults are applied.
+async fn exec_agent_anthropic(program: Vec<String>) -> ! {
+    use std::process::Command as StdCommand;
+    let (program_name, args) = program
+        .split_first()
+        .expect("clap requires at least one arg");
+    eprintln!(
+        "  → running: {} {}  (upstream Anthropic)",
+        program_name,
+        args.join(" ")
+    );
+
+    let mut cmd = StdCommand::new(program_name);
+    cmd.args(args);
+    apply_rozum_agent_env(&mut cmd);
+    spawn_agent_and_exit(cmd, program_name).await
+}
+
+/// Apply rozum's agent-context env defaults (skills/git/CLAUDE.md trimming),
+/// each only when the operator hasn't already set it. Independent of model.
+fn apply_rozum_agent_env(cmd: &mut std::process::Command) {
     for (k, v) in [
         ("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS", "1"),
         ("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS", "1"),
@@ -1002,8 +1250,11 @@ async fn exec_agent(program: Vec<String>, model_for_alias: &str, port: u16) -> !
             cmd.env(k, v);
         }
     }
+}
 
-    let name = program_name.clone();
+/// Run the prepared agent command to completion and exit with its status code.
+async fn spawn_agent_and_exit(mut cmd: std::process::Command, program_name: &str) -> ! {
+    let name = program_name.to_owned();
     let status = tokio::task::spawn_blocking(move || cmd.status())
         .await
         .ok()
@@ -1293,6 +1544,64 @@ async fn run_info(spec: &str) {
                 println!("  lmstudio:<owner>/<repo>");
                 println!("  /absolute/path.gguf");
             }
+        }
+    }
+}
+
+/// A [`rozum::gateway::BackendBuilder`] over this binary's backend-selection
+/// chain, so the daemon can rebuild a model in place on `gateway switch` and
+/// lazily reload after `unload` — without the library depending on `main`.
+fn gateway_backend_builder() -> rozum::gateway::BackendBuilder {
+    std::sync::Arc::new(|model: String, n_ctx: u32, force: Option<String>| {
+        Box::pin(async move {
+            match force.as_deref() {
+                Some(f) => build_gateway_backend_forced(&model, n_ctx, f).await,
+                None => build_gateway_backend(&model, n_ctx).await,
+            }
+        })
+            as std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Option<std::sync::Arc<dyn rozum::ChatBackend>>>
+                        + Send,
+                >,
+            >
+    })
+}
+
+/// Build a backend forcing a specific engine (`gateway switch --backend B`).
+/// Unknown values fall back to the auto-detect chain. Recognized:
+/// `gguf`, `mistralrs`, `lmstudio`, `mlx`, `url`.
+async fn build_gateway_backend_forced(
+    model_spec: &str,
+    n_ctx: u32,
+    force: &str,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    use rozum::concurrency::admit_wrap;
+    rozum::obs::log_event(serde_json::json!({
+        "event": "backend_force", "backend": force, "model": model_spec,
+    }));
+    match force {
+        "gguf" => try_build_gguf_backend(model_spec, n_ctx).map(admit_wrap),
+        "mistralrs" => try_build_mistralrs_backend(model_spec, n_ctx)
+            .await
+            .map(admit_wrap),
+        "lmstudio" => rozum::openai_http::try_lmstudio_http(model_spec)
+            .await
+            .map(admit_wrap),
+        "mlx" | "mlx_lm" => rozum::openai_http::try_mlx_server(model_spec)
+            .await
+            .map(admit_wrap),
+        "url" | "http" => std::env::var("ROZUM_BACKEND_URL").ok().map(|url| {
+            admit_wrap(
+                std::sync::Arc::new(rozum::openai_http::OpenAiHttpBackend::new(url, model_spec))
+                    as std::sync::Arc<dyn rozum::ChatBackend>,
+            )
+        }),
+        other => {
+            rozum::obs::log_event(serde_json::json!({
+                "event": "backend_force_unknown", "backend": other, "fallback": "auto",
+            }));
+            build_gateway_backend(model_spec, n_ctx).await
         }
     }
 }
@@ -1825,6 +2134,34 @@ fn init_tui_logging() {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn reorder(args: &[&str]) -> Vec<String> {
+        reorder_launch_args(args.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn reorder_pulls_bool_flag_after_program_to_front() {
+        // `--no-model` placed after the program name is hoisted ahead of it so
+        // clap parses it as a launch flag, not a child arg.
+        assert_eq!(
+            reorder(&["rozum", "launch", "claude", "--no-model"]),
+            vec!["rozum", "launch", "--no-model", "claude"]
+        );
+        // Mixed with a value flag, both are pulled and order is preserved.
+        assert_eq!(
+            reorder(&["rozum", "launch", "claude", "--no-model", "--port", "9000"]),
+            vec!["rozum", "launch", "--no-model", "--port", "9000", "claude"]
+        );
+    }
+
+    #[test]
+    fn reorder_stops_at_separator() {
+        // A `--no-model` after `--` belongs to the child program, untouched.
+        assert_eq!(
+            reorder(&["rozum", "launch", "claude", "--", "--no-model"]),
+            vec!["rozum", "launch", "claude", "--", "--no-model"]
+        );
+    }
 
     // Qwen3.6-35B-A3B: 40 layers, 1-in-4 full attention (10), 2 KV heads,
     // head_dim 256. Only full-attention layers count toward the context KV cache.
