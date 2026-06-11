@@ -57,13 +57,23 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   obvious fusion lever (`mlx-native-compile`) turned out a measured dead end — see
   below; decode is FFI/per-op-overhead bound. See SPRINT `mlx-native-perf`.
 
-- [x] mlx-native-compile - DEAD END (measured). `mx.compile` via mlx-rs
-  `compile_with_state` is net-NEGATIVE on a model forward: probe `mlx_compile_probe`
-  (dense Qwen3-4B) gives T=1 0.51x (8.79->17.34ms), T=16 0.85x. The binding
-  re-marshals + sorts all ~400 params per call + `mlx_detail_compile` per call, so
-  per-call overhead > fusion benefit. Decode (12 vs ~22 t/s) is FFI/per-op-overhead
-  bound, not fusion-bound. The fixed-size-KV-cache prerequisite is moot, dropped.
-  See SPRINT `mlx-native-perf`.
+- [x] mlx-native-compile - `compile_with_state` is net-NEGATIVE (measured), but this
+  only rules out ONE of mlx-rs's two compile APIs. Probe `mlx_compile_probe` (dense
+  Qwen3-4B): T=1 0.51x (8.79->17.34ms), T=16 0.85x — because `compile_with_state`
+  re-marshals + sorts all ~400 params per call. **Plain `compile` (`compile.rs:344`)
+  marshals only the args and captures referenced weights into the trace** — the way
+  Python `mlx_lm` reaches ~22 t/s vs our ~12 — and was never probed. See
+  `mlx-native-perf-compile` below; the fixed-shape-cache prereq is NOT moot.
+
+- [ ] mlx-native-perf-compile - the top remaining decode lever (~2× potential): a
+  capture-based plain-`compile`d decode step closing over the weights, taking only
+  `(token, cache)` as args. **Prereq:** fixed-shape KV cache (preallocate + in-place
+  slice-update; today's `ConcatKeyValueCache` grows by concat and forces a recompile
+  each step). Correctness-critical (byte-exact) and intersects the GatedDeltaNet
+  buffer-donation hazard (compile + in-place cache + buffer-donating kernel = where
+  the token-2 divergence lived). Needs a clean machine for trustworthy A/B (current
+  numbers ~30% degraded by session memory pressure). Do as a dedicated session. See
+  SPRINT `mlx-native-perf` + the spec's mx.compile section.
 
 ### Native MLX runtime — backend feature parity (vs mistralrs)
 

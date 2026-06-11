@@ -167,23 +167,33 @@ is 100% MLX, candle only as external oracle.
 - [~] mlx-native-perf - Phase 5: throughput. Spec section: `docs/specs/mlx-native-runtime.md`
   "Performance".
 
-  **STATUS (2026-06-11) — perf territory mapped; prefill wins shipped, decode levers
-  exhausted.** Where things stand and what to do next:
+  **STATUS (2026-06-11) — perf territory mapped; prefill wins shipped; one decode
+  lever identified (capture-based compile), gated on a fixed-shape cache.** Where
+  things stand and what to do next:
   - DONE on master: GatedDeltaNet prefill kernel (~2.9x), chunked prefill +
     last-position projection (bound the large-prompt peak, byte-identical),
-    decode-bug resolved (per-call eval is correct + FREE).
-  - DEAD ENDS (measured, don't retry): removing the per-call eval (no-op, decode
-    isn't sync-bound); `mx.compile` (net-negative in mlx-rs — per-call param
-    re-marshal/sort overhead > fusion). **Decode (~12 vs Python ~22 t/s) is
-    mlx-rs per-op/per-call FFI-overhead bound, not fusion-bound.**
+    decode-bug resolved (per-call eval is correct + FREE), fused causal SDPA,
+    sampling (top_p/top_k/seed/repeat_penalty), cancellation, multi-eos, tool-use +
+    multi-turn tool history, KV preflight.
+  - DEAD END (measured, don't retry): removing the per-call eval (no-op, decode isn't
+    sync-bound); `compile_with_state` (net-negative — re-marshals ~400 params/call).
+  - **CORRECTION (2026-06-11):** the "mx.compile is a dead end" finding was scoped to
+    `compile_with_state` only. Plain `compile` (`compile.rs:344`) marshals **only the
+    args** and captures referenced weights into the trace — exactly how Python
+    `mlx_lm` reaches ~22 t/s vs our ~12. This **capture-based plain-`compile`d decode
+    step was never probed** and is the one untested lever with ~2× potential.
   - NEXT (recommended order):
     1. `mlx-native-mem-bound` — DONE (KV preflight + "lower --n-ctx" instead of OOM).
-    2. SDPA `Causal` mode in prefill — DONE (fork `ef5cbca9`): hybrid attention uses
-       MLX's fused causal SDPA instead of an explicit `[T, ctx]` mask array; byte-
-       identical (oracle + chunked Δ=0), drops the O(T·ctx) mask allocation.
-    3. (HARD, deprioritized — now the top remaining perf item) decode throughput
-       would need hand-written fused Metal kernels to cut the ~450 dispatches/token,
-       or fork surgery to lower mlx-rs per-op marshalling. Large; decode is usable.
+    2. SDPA `Causal` mode in prefill — DONE (fork `ef5cbca9`): fused causal SDPA,
+       byte-identical (oracle + chunked Δ=0), drops the O(T·ctx) mask allocation.
+    3. `mlx-native-perf-compile` (NEW, top remaining perf item) — capture-based
+       plain-`compile`d decode step. **Prereq:** fixed-shape KV cache (preallocate +
+       in-place slice-update; today's `ConcatKeyValueCache` grows by concat and
+       defeats compile). Correctness-critical (must stay byte-exact) and intersects
+       the GatedDeltaNet buffer-donation hazard. **Needs a clean machine to A/B** —
+       current numbers degraded ~30% by session memory pressure. Do as a dedicated
+       session, not a tail-end change.
+    4. (FALLBACK, larger) hand-written fused Metal kernels to cut ~450 dispatches/token.
 
   - **DONE — GatedDeltaNet Metal kernel (~2.9x Qwen3.6 prefill)** (master `a001e90`,
     fork `738a4419`). Bound `mx.fast.metal_kernel` in mlx-rs (`fast::MetalKernel`)
@@ -212,15 +222,15 @@ is 100% MLX, candle only as external oracle.
     per-call eval stays (correct + free); the real lever is op fusion, below.** No
     code change shipped from this dig — the existing per-call eval is already
     optimal.
-  - [x] **mx.compile** (`mlx-native-compile`) — DEAD END, measured net-negative.
+  - [x] **mx.compile via `compile_with_state`** (`mlx-native-compile`) — net-negative.
     Probe `mlx_compile_probe` (dense Qwen3-4B, fixed shapes): T=1 uncompiled 8.79ms
     vs compiled 17.34ms (**0.51x**), T=16 0.85x. mlx-rs `compile_with_state`
     re-marshals the whole `Updatable` state per call (flattens + SORTS ~400 params)
-    + `mlx_detail_compile` per call -> binding overhead > fusion benefit. So decode
-    (12 vs ~22 t/s) is **FFI/per-op overhead bound, not fusion-bound**; compile
-    can't fix it here. The fixed-size-KV-cache redesign (only useful as a compile
-    prerequisite) is NOT pursued. A real decode win would need manual kernel fusion
-    or lower per-op marshalling — both large; decode is usable, deprioritized.
+    + `mlx_detail_compile` per call -> binding overhead > fusion benefit. **NOTE
+    (correction):** this rules out the `compile_with_state` API only. Plain `compile`
+    marshals just the args (weights captured into the trace) — see
+    `mlx-native-perf-compile` above; that variant is the real lever and was NOT
+    probed. The fixed-shape-KV-cache redesign (its prereq) is therefore NOT moot.
 - [x] mlx-native-chunked-prefill - DONE. `Model::prefill` (qwen3_5 + qwen3_5_moe)
   processes the prompt in chunks of `ROZUM_MLX_PREFILL_CHUNK` (default 2048), so the
   full-attention layers bound their `[chunk, ctx]` causal-mask + SDPA peak instead
@@ -246,9 +256,9 @@ is 100% MLX, candle only as external oracle.
   large … lower --n-ctx / max_tokens … fits ~N tokens now") instead of letting Metal
   OOM. Skipped when either term is unknown (no false negatives). Unit test
   `kv_bytes_per_position_estimate` (hybrid + dense + missing-fields). FOLLOW-UP: a
-  bounded/rotating KV cache to actually cap resident KV for very long sessions (the
-  fixed-size-cache redesign is otherwise moot now that `mx.compile` is a dead end —
-  do it only if the preflight isn't enough).
+  bounded/rotating KV cache to actually cap resident KV for very long sessions — and
+  it now doubles as the prereq for `mlx-native-perf-compile` (a fixed-shape cache is
+  what lets plain `compile` reuse the decode graph). Worth doing for either reason.
   (Concurrency/admission is already generic via `admit_wrap`;
   `concurrency_capacity()=1` for native.)
 
