@@ -395,20 +395,33 @@ mistralrs `f7efae2` (the native exact scan is faithful across chunks, unlike
 mistralrs's chunked GatedDeltaNet which reorders FP reductions — so we can assert
 byte-identity, they could not).
 
+### Dead end: mx.compile (measured net-negative in mlx-rs)
+
+`mx.compile` was the presumed decode lever (decode is op-launch-bound). **A go/no-go
+probe (`mlx_compile_probe`, dense Qwen3-4B, fixed shapes, fresh cache so the graph
+is reused) measured it SLOWER, not faster:** T=1 uncompiled 8.79 ms vs compiled
+17.34 ms (**0.51×**); T=16 35.6 vs 41.8 ms (0.85×). The mlx-rs `compile_with_state`
+returned closure does `f.compile(...)` + `mlx_detail_compile` lookup *and re-marshals
+the whole `Updatable` state every call* — `updatable_states` flattens **and sorts all
+~400 model params per call** — so the per-call binding overhead exceeds any kernel-
+fusion benefit for a model-sized forward. Conclusion: the decode gap (12 vs ~22 t/s)
+is **mlx-rs per-op / per-call FFI overhead, not missing fusion**, and `mx.compile`
+cannot close it in this binding. The fixed-size-KV-cache redesign (which only mattered
+as a compile prerequisite) is therefore NOT pursued. Reviving compile would require
+fork-level work to cache the param list / avoid re-sorting and to hold one `Compiled`
+across calls — uncertain payoff; deferred.
+
 ### TODO (see SPRINT `mlx-native-perf` + BACKLOG)
 
-1. **mx.compile the forward + small-op fusion** — THE decode lever (decode is
-   launch-bound, confirmed). **Prerequisite: a fixed-size KV cache.** `mx.compile`
-   keys the graph by input shapes, but `ConcatKeyValueCache` grows one position per
-   step, so a compiled decode step would recompile every token (no gain). Need a
-   pre-allocated cache with in-place write at `offset` + masked full-buffer
-   attention (constant shapes). The conv + recurrent caches are already fixed-shape.
-   Then compile the decode step via `compile_with_state` over `(model, cache)`
-   (`ModuleParameters: Updatable`), keeping the custom gated-delta kernel OUT (use
-   the O(T) ops path at T=1, which is cheap there).
+1. **Large-context memory bounding** (`mlx-native-mem-bound`) — the high-value
+   remaining item for the Claude Code use case: KV-pool bound / preflight against
+   unified memory + a clear "lower --n-ctx" message instead of an OOM (analog of the
+   mistralrs RAM preflight + context budgeting). `ConcatKeyValueCache` grows unbounded.
 2. **SDPA `Causal` mode in prefill** — drop the explicit `[chunk, ctx]` mask array
    (use the fused causal fast-path) to shrink the prefill peak further; helps
    single-pass too. (Last-position-only projection: DONE, see above.)
-3. **Large-context memory bounding** — KV-pool bound / preflight (analog of the
-   mistralrs RAM preflight + context budgeting); native `ConcatKeyValueCache`
-   grows unbounded. (Subsumed by the fixed-size cache in #1.)
+3. **Decode (~12 t/s) is FFI-overhead-bound** — no cheap lever found (eval-removal:
+   free/no-op; mx.compile: net-negative). A real decode win would need manual op
+   fusion into custom Metal kernels (like the gated-delta kernel) to cut the ~450
+   dispatches/token, or reducing mlx-rs per-op marshalling overhead — both large.
+   Decode is usable; prefer the memory/UX items above first.

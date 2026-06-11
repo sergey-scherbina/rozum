@@ -53,12 +53,13 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   not sync-bound — 12 vs 12 t/s with/without). NOT a path to faster decode; the
   lever is op fusion (`mlx-native-compile`). See SPRINT `mlx-native-perf`.
 
-- [ ] mlx-native-compile - `mx.compile` the decode forward + fuse small ops. THE
-  decode lever: the ~2x gap vs Python is op-launch overhead (~450 tiny dispatches
-  per token), confirmed bandwidth-headroom remains. NOT blocked by the kernel bug
-  (resolved): keep the custom gated-delta kernel out of the compiled region (use
-  the O(T) ops path at T=1, or compile only the attn/MLP/proj bulk). Needs the
-  stateful caches (KV + conv + recurrent) threaded through a pure fn.
+- [x] mlx-native-compile - DEAD END (measured). `mx.compile` via mlx-rs
+  `compile_with_state` is net-NEGATIVE on a model forward: probe `mlx_compile_probe`
+  (dense Qwen3-4B) gives T=1 0.51x (8.79->17.34ms), T=16 0.85x. The binding
+  re-marshals + sorts all ~400 params per call + `mlx_detail_compile` per call, so
+  per-call overhead > fusion benefit. Decode (12 vs ~22 t/s) is FFI/per-op-overhead
+  bound, not fusion-bound. The fixed-size-KV-cache prerequisite is moot, dropped.
+  See SPRINT `mlx-native-perf`.
 
 - [ ] gguf-tool-use-non-qwen - Extend GgufBackend tool-use parser to Llama-3.1 and Mistral chat-template formats.
 
