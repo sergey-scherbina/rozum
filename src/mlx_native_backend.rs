@@ -634,4 +634,52 @@ mod tests {
             "greedy prefix diverged from Python oracle; got: {text}"
         );
     }
+
+    // Perf benchmark for the Qwen3.6 GatedDeltaNet prefill (the ops-path scan).
+    // Drives the fork model directly with synthetic tokens. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_qwen35_prefill_bench
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "perf bench; requires local mlx-community/Qwen3.6-27B-4bit"]
+    fn mlx_qwen35_prefill_bench() {
+        use mlx_lm::models::qwen3_5::load_qwen3_5_model;
+        use mlx_rs::Array;
+        use mlx_rs::ops::indexing::{IndexOp, NewAxis};
+        use mlx_rs::transforms::eval;
+        use std::time::Instant;
+
+        let dir = resolve_model_dir("mlx-community:Qwen3.6-27B-4bit")
+            .expect("Qwen3.6-27B-4bit not in HF cache");
+        let mut model = load_qwen3_5_model(&dir).expect("load");
+
+        // Synthetic prompt token ids (values don't matter for timing).
+        let synth = |n: usize| -> Vec<u32> { (0..n).map(|i| (1000 + i % 5000) as u32).collect() };
+
+        for &n in &[128usize, 512, 1024] {
+            let ids = synth(n);
+            let prompt = Array::from(&ids[..]).index(NewAxis);
+            let mut cache = model.init_cache();
+            let t = Instant::now();
+            let logits = model.forward(&prompt, &mut cache).expect("prefill");
+            eval([&logits]).unwrap();
+            let prefill = t.elapsed().as_secs_f64();
+            // Decode rate: time 16 single-token steps.
+            let mut y = logits.index((.., -1, ..));
+            let td = Instant::now();
+            let steps = 16;
+            for _ in 0..steps {
+                let inp = mlx_rs::ops::indexing::argmax_axis(&y, -1, false)
+                    .unwrap()
+                    .index((.., NewAxis));
+                let l = model.forward(&inp, &mut cache).expect("decode");
+                y = l.index((.., -1, ..));
+                eval([&y]).unwrap();
+            }
+            let dps = steps as f64 / td.elapsed().as_secs_f64();
+            eprintln!(
+                "BENCH n={n:>4}  prefill={prefill:>7.3}s ({:>7.1} tok/s)  decode={dps:>6.1} tok/s",
+                n as f64 / prefill
+            );
+        }
+    }
 }
