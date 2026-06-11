@@ -23,11 +23,12 @@ mod inner {
     };
 
     use mlx_lm::cache::ConcatKeyValueCache;
-    use mlx_lm::models::qwen3::{Generate, load_qwen3_model};
+    use mlx_lm::models::{qwen3, qwen3_moe};
     use mlx_lm_utils::tokenizer::{
         ApplyChatTemplateArgs, Chat, Conversation, Tokenizer, load_model_chat_template_from_file,
     };
     use mlx_rs::Array;
+    use mlx_rs::error::Exception;
     use mlx_rs::ops::indexing::{IndexOp, NewAxis};
     use mlx_rs::transforms::eval;
 
@@ -38,6 +39,28 @@ mod inner {
     const QWEN3_EOS: u32 = 151645;
     /// Fallback context window when config lacks `max_position_embeddings`.
     const DEFAULT_N_CTX: u32 = 32_768;
+
+    /// A loaded MLX model, dispatched by `config.json`'s `model_type`. Each
+    /// variant exposes the same `Generate` token iterator, so the streaming
+    /// loop is architecture-agnostic.
+    enum LoadedModel {
+        Qwen3(qwen3::Model),
+        Qwen3Moe(qwen3_moe::Model),
+    }
+
+    impl LoadedModel {
+        fn load(model_type: &str, dir: &Path) -> Result<Self, String> {
+            match model_type {
+                "qwen3" => qwen3::load_qwen3_model(dir)
+                    .map(LoadedModel::Qwen3)
+                    .map_err(|e| format!("mlx: load qwen3 {}: {e}", dir.display())),
+                "qwen3_moe" => qwen3_moe::load_qwen3_moe_model(dir)
+                    .map(LoadedModel::Qwen3Moe)
+                    .map_err(|e| format!("mlx: load qwen3_moe {}: {e}", dir.display())),
+                other => Err(format!("mlx: unsupported model_type '{other}'")),
+            }
+        }
+    }
 
     /// One inference request handed to the worker thread. All fields are `Send`;
     /// the `!Send` MLX work happens entirely on the worker.
@@ -51,13 +74,17 @@ mod inner {
 
     /// Minimal slice of `config.json` we read on the calling thread (plain JSON,
     /// no MLX), so the worker only ever touches the `!Send` model.
-    fn read_config(dir: &Path) -> (u32, u32) {
+    fn read_config(dir: &Path) -> (u32, u32, String) {
         let mut n_ctx = DEFAULT_N_CTX;
         let mut eos = QWEN3_EOS;
+        let mut model_type = "qwen3".to_string();
         if let Ok(text) = std::fs::read_to_string(dir.join("config.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                 if let Some(n) = v.get("max_position_embeddings").and_then(|x| x.as_u64()) {
                     n_ctx = n as u32;
+                }
+                if let Some(t) = v.get("model_type").and_then(|x| x.as_str()) {
+                    model_type = t.to_string();
                 }
                 // eos_token_id is an int on Qwen3; take the first if it's a list.
                 match v.get("eos_token_id") {
@@ -75,7 +102,7 @@ mod inner {
                 }
             }
         }
-        (n_ctx, eos)
+        (n_ctx, eos, model_type)
     }
 
     pub struct MlxNativeBackend {
@@ -89,7 +116,7 @@ mod inner {
         /// tokenizer_config.json (the layout HuggingFace / mlx-community ship).
         /// `model_id` selects the chat-template variant and labels logs.
         pub async fn new(model_dir: PathBuf, model_id: String) -> ModelResult<Self> {
-            let (n_ctx, eos) = read_config(&model_dir);
+            let (n_ctx, eos, model_type) = read_config(&model_dir);
             let (jobs_tx, jobs_rx) = mpsc::unbounded_channel::<Job>();
             let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
             let label = model_id.clone();
@@ -98,7 +125,7 @@ mod inner {
             // the `!Send` model never crosses a thread boundary.
             thread::Builder::new()
                 .name("mlx-native".into())
-                .spawn(move || worker_main(model_dir, eos, jobs_rx, ready_tx))
+                .spawn(move || worker_main(model_dir, model_type, eos, jobs_rx, ready_tx))
                 .map_err(|e| ModelError::BackendUnavailable(format!("mlx: spawn worker: {e}")))?;
 
             match ready_rx.await {
@@ -178,14 +205,15 @@ mod inner {
     /// `ready`), then serves jobs until the queue closes.
     fn worker_main(
         model_dir: PathBuf,
+        model_type: String,
         eos: u32,
         mut jobs: mpsc::UnboundedReceiver<Job>,
         ready: oneshot::Sender<Result<(), String>>,
     ) {
-        let mut model = match load_qwen3_model(&model_dir) {
+        let mut model = match LoadedModel::load(&model_type, &model_dir) {
             Ok(m) => m,
             Err(e) => {
-                let _ = ready.send(Err(format!("mlx: load {}: {e}", model_dir.display())));
+                let _ = ready.send(Err(e));
                 return;
             }
         };
@@ -220,10 +248,10 @@ mod inner {
         }
     }
 
-    /// Render the prompt, run the MLX `Generate` iterator, and stream token
-    /// events. A send error means the client dropped the stream -> stop early.
+    /// Render the prompt and stream token events. Dispatches on the model
+    /// architecture; each `Generate` iterator feeds the shared streaming loop.
     fn run_job(
-        model: &mut mlx_lm::models::qwen3::Model,
+        model: &mut LoadedModel,
         tokenizer: &mut Tokenizer,
         template: &str,
         eos: u32,
@@ -245,8 +273,46 @@ mod inner {
             .unwrap_or(DEFAULT_MAX_TOKENS);
 
         let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
-        let generate = Generate::new(model, &mut cache, temp, &prompt_tokens);
+        match model {
+            LoadedModel::Qwen3(m) => {
+                let generator = qwen3::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                stream_generation(
+                    generator,
+                    tokenizer,
+                    eos,
+                    prompt_ids.len(),
+                    max_tokens,
+                    &job,
+                );
+            }
+            LoadedModel::Qwen3Moe(m) => {
+                let generator = qwen3_moe::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                stream_generation(
+                    generator,
+                    tokenizer,
+                    eos,
+                    prompt_ids.len(),
+                    max_tokens,
+                    &job,
+                );
+            }
+        }
+    }
 
+    /// Architecture-agnostic streaming loop: pull tokens off a `Generate`
+    /// iterator, force per-token compute, stop on EOS / max-tokens / cancel,
+    /// and emit UTF-8-safe text deltas. A send error means the client dropped
+    /// the stream -> stop early.
+    fn stream_generation<I>(
+        generate: I,
+        tokenizer: &mut Tokenizer,
+        eos: u32,
+        prompt_len: usize,
+        max_tokens: usize,
+        job: &Job,
+    ) where
+        I: Iterator<Item = Result<Array, Exception>>,
+    {
         let mut out_ids: Vec<u32> = Vec::new();
         let mut emitted = String::new();
         let mut output_tokens: u32 = 0;
@@ -254,7 +320,7 @@ mod inner {
         for token in generate {
             if job.cancel.is_cancelled() {
                 let _ = job.events.send(Ok(ChatEvent::Done {
-                    input_tokens: prompt_ids.len() as u32,
+                    input_tokens: prompt_len as u32,
                     output_tokens,
                     stop_reason: StopReason::Cancelled,
                 }));
@@ -278,7 +344,7 @@ mod inner {
             let id = token.item::<u32>();
             if id == eos {
                 let _ = job.events.send(Ok(ChatEvent::Done {
-                    input_tokens: prompt_ids.len() as u32,
+                    input_tokens: prompt_len as u32,
                     output_tokens,
                     stop_reason: StopReason::EndTurn,
                 }));
@@ -307,7 +373,7 @@ mod inner {
 
             if output_tokens as usize >= max_tokens {
                 let _ = job.events.send(Ok(ChatEvent::Done {
-                    input_tokens: prompt_ids.len() as u32,
+                    input_tokens: prompt_len as u32,
                     output_tokens,
                     stop_reason: StopReason::MaxTokens,
                 }));
@@ -437,6 +503,29 @@ mod tests {
         let stream = backend.chat(req).await.expect("chat");
         let text = collect_to_string(stream).await.expect("collect");
         eprintln!("MLX OUTPUT: {text}");
+        assert!(text.contains("Paris"), "expected Paris, got: {text}");
+    }
+
+    // MoE path (qwen3_moe). Needs the local Qwen3-30B-A3B-4bit snapshot; run:
+    //   cargo test --features mlx-native -- --ignored mlx_moe_chat_capital
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires local mlx-community/Qwen3-30B-A3B-4bit"]
+    async fn mlx_moe_chat_capital() {
+        use super::MlxNativeBackend;
+        use crate::backend::{ChatBackend, ChatRequest, collect_to_string};
+
+        let dir = resolve_model_dir("mlx-community:Qwen3-30B-A3B-4bit")
+            .expect("Qwen3-30B-A3B-4bit not in HF cache");
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-30B-A3B-4bit".into())
+            .await
+            .expect("backend load");
+        let req = ChatRequest::simple(
+            "What is the capital of France? Reply in one short sentence. /no_think",
+        );
+        let stream = backend.chat(req).await.expect("chat");
+        let text = collect_to_string(stream).await.expect("collect");
+        eprintln!("MLX MoE OUTPUT: {text}");
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
     }
 }
