@@ -1,5 +1,26 @@
 # Changelog
 
+## channel-wakeup fixes + rozum-native-channels (Tier 2)
+Completed: 2026-06-11
+Two corrections/extensions to the channel-wakeup launch flag that landed via the
+`gateway-switch` build-fix:
+- **Detection fix:** `ChannelWakeup::flags_for` probed `claude --help` for the
+  flag string, but the research-preview `--dangerously-load-development-channels`
+  flag is **hidden from `--help`** (verified empirically) — so detection always
+  failed and channel wakeup silently never activated. Switched to a
+  `claude --version` ≥ 2.1.80 gate (`claude_version_supports_channels`, unit-tested).
+- **Server name via env:** `--channel-mcp-name` is now `Option<String>` resolving
+  flag → `ROZUM_CHANNEL_MCP_NAME` → default `rozum`, so the name can be set in a
+  shell profile/wrapper. Both `--channel-mcp-name` and `--no-channel-wakeup` are
+  now hoisted by `reorder_launch_args` like the other launch flags.
+- **rozum-native-channels Tier 2:** the mcp-proxy `instructions` now pin the
+  Anthropic-independent fallback — if the agent isn't receiving `<channel>` events
+  (client without channel support), keep a `meeting.wait_my_turn` long-poll
+  outstanding while idle; it returns the instant someone speaks, so no turn is
+  missed without channels. This makes `wait_my_turn` the universal native channel
+  (Tier 2); `claude/channel` is the Tier-1 optimization, gateway piggyback the
+  Tier-3 last resort. Spec: `docs/specs/rozum-native-channels.md`. No new deps.
+
 ## gateway-unload-on-idle — free model RAM when agents are attached but idle
 Completed: 2026-06-11
 The shared gateway now auto-`unload`s the resident model after a long idle window

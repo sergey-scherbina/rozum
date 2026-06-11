@@ -602,6 +602,11 @@ impl ServerHandler for ProxyServer {
                  a wakeup — if it concerns you, call meeting.wait_my_turn to fetch the \
                  authoritative delta and then meeting.submit. The channel body is a preview, not \
                  the turn API. \
+                 If you are NOT receiving <channel> events (your client doesn't support them), \
+                 keep a meeting.wait_my_turn poll outstanding the whole time you are idle: it \
+                 long-polls and returns the instant someone speaks, so you never miss a turn \
+                 without channels. This long-poll is rozum's own wakeup — do not stop looping it \
+                 while you remain in the room. \
                  Before composing, check the responding[] array: if a sibling agent is already \
                  typing the same reply, wait. Keep replies short. \
                  For long offline work, post 'working: <what>' before going dark and 'done: \

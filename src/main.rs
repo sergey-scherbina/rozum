@@ -161,9 +161,11 @@ enum Command {
 
         /// MCP server name the agent registered `rozum mcp-proxy` under; used for
         /// the channel-wakeup flag (`server:<name>`). Must match the name in the
-        /// agent's MCP config or the channel registers nothing (silently).
-        #[arg(long, default_value = "rozum")]
-        channel_mcp_name: String,
+        /// agent's MCP config or the channel registers nothing (silently). Can
+        /// also be set with `ROZUM_CHANNEL_MCP_NAME` (the flag wins); handy for a
+        /// shell profile or launch wrapper. Defaults to `rozum`.
+        #[arg(long)]
+        channel_mcp_name: Option<String>,
 
         /// Program to launch and its arguments
         #[arg(trailing_var_arg = true, required = true)]
@@ -365,9 +367,13 @@ async fn main() {
             channel_mcp_name,
             program,
         }) => {
+            // Precedence: --channel-mcp-name > ROZUM_CHANNEL_MCP_NAME > "rozum".
+            let server_name = channel_mcp_name
+                .or_else(|| std::env::var("ROZUM_CHANNEL_MCP_NAME").ok())
+                .unwrap_or_else(|| "rozum".to_owned());
             let channels = ChannelWakeup {
                 suppressed: no_channel_wakeup,
-                server_name: channel_mcp_name,
+                server_name,
             };
             run_launch(model, port, n_ctx, dedicated, no_model, channels, program).await;
         }
@@ -520,9 +526,9 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
         return args;
     };
 
-    const KNOWN_FLAGS: &[&str] = &["--model", "--port", "--n-ctx"];
+    const KNOWN_FLAGS: &[&str] = &["--model", "--port", "--n-ctx", "--channel-mcp-name"];
     // Value-less flags: pulled to the front without consuming a following arg.
-    const KNOWN_BOOL_FLAGS: &[&str] = &["--no-model", "--dedicated"];
+    const KNOWN_BOOL_FLAGS: &[&str] = &["--no-model", "--dedicated", "--no-channel-wakeup"];
 
     // Collect args after "launch", pull known flag+value pairs to the front.
     let tail: Vec<String> = args.split_off(launch_idx + 1);
@@ -579,9 +585,10 @@ struct ChannelWakeup {
 
 impl ChannelWakeup {
     /// The flags to append for `program_name`, or `None` to inject nothing.
-    /// Only Claude Code understands the flag, and only builds that actually
-    /// expose it (research preview, CC ≥ 2.1.80) — an older `claude` would
-    /// reject an unknown flag, so we probe `--help` and degrade silently.
+    /// Only Claude Code understands the flag, and only builds ≥ 2.1.80 expose it
+    /// (research preview). An older `claude` would reject an unknown flag, so we
+    /// gate on `claude --version` and degrade silently. The flag is hidden from
+    /// `--help`, so version is the reliable probe.
     fn flags_for(&self, program_name: &str) -> Option<Vec<String>> {
         if self.suppressed {
             return None;
@@ -590,16 +597,16 @@ impl ChannelWakeup {
         if base != "claude" {
             return None;
         }
-        let help = std::process::Command::new(program_name)
-            .arg("--help")
+        let out = std::process::Command::new(program_name)
+            .arg("--version")
             .output()
             .ok()?;
-        let supported =
-            String::from_utf8_lossy(&help.stdout).contains("dangerously-load-development-channels");
-        if !supported {
+        let version = String::from_utf8_lossy(&out.stdout);
+        if !claude_version_supports_channels(&version) {
             eprintln!(
-                "rozum launch: this claude build has no channel support; skipping wakeup \
-                 (pass --no-channel-wakeup to silence)."
+                "rozum launch: claude '{}' predates channel support (need ≥ 2.1.80); \
+                 skipping wakeup.",
+                version.trim()
             );
             return None;
         }
@@ -611,6 +618,22 @@ impl ChannelWakeup {
             "--dangerously-load-development-channels".to_owned(),
             format!("server:{}", self.server_name),
         ])
+    }
+}
+
+/// True if a `claude --version` string ("2.1.172 (Claude Code)") is ≥ 2.1.80,
+/// the first build to support channels. Unparseable output → false (degrade).
+fn claude_version_supports_channels(version: &str) -> bool {
+    let nums: Vec<u32> = version
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .map(|p| p.trim().parse::<u32>().unwrap_or(0))
+        .collect();
+    match nums.as_slice() {
+        [maj, min, patch, ..] => (*maj, *min, *patch) >= (2, 1, 80),
+        _ => false,
     }
 }
 
@@ -2224,6 +2247,18 @@ mod tests {
 
     fn reorder(args: &[&str]) -> Vec<String> {
         reorder_launch_args(args.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn claude_channel_version_gate() {
+        assert!(claude_version_supports_channels("2.1.172 (Claude Code)"));
+        assert!(claude_version_supports_channels("2.1.80"));
+        assert!(claude_version_supports_channels("2.2.0 (Claude Code)"));
+        assert!(claude_version_supports_channels("3.0.0"));
+        assert!(!claude_version_supports_channels("2.1.79"));
+        assert!(!claude_version_supports_channels("2.0.99"));
+        assert!(!claude_version_supports_channels("garbage"));
+        assert!(!claude_version_supports_channels(""));
     }
 
     #[test]
