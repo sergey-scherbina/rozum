@@ -3,3 +3,4 @@
 /models/*.gguf
 /models/*.part
 .vendor/
+/.worktrees/
