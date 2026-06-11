@@ -45,6 +45,27 @@ struct GatewayState {
     model_id: String,
     /// Per-request metrics + JSONL event log.
     observer: Arc<crate::obs::Observer>,
+    /// Liveness for the shared-daemon idle watchdog.
+    activity: Arc<Activity>,
+}
+
+/// Tracks request activity so the shared gateway can idle-exit (free the model)
+/// only when nothing is in flight and nothing has arrived for a while.
+#[derive(Default)]
+struct Activity {
+    last_active: std::sync::atomic::AtomicU64,
+    in_flight: std::sync::atomic::AtomicU64,
+}
+
+/// Options for [`serve_on`]. Defaults (no register, no idle) preserve the plain
+/// in-process gateway behaviour used by `rozum launch --dedicated`.
+#[derive(Default)]
+pub struct ServeConfig {
+    /// Idle-exit after this many seconds with zero in-flight requests and no new
+    /// arrivals (the shared daemon). `None`/`0` = never idle-exit.
+    pub idle_secs: Option<u64>,
+    /// When set, publish/remove the shared-gateway registry (`share::active.json`).
+    pub register_n_ctx: Option<u32>,
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1023,7 +1044,18 @@ async fn auth_layer(
             return (StatusCode::UNAUTHORIZED, "401 Unauthorized\n").into_response();
         }
     }
-    next.run(req).await
+    // Activity tracking for the idle watchdog: count this request as in-flight
+    // for its whole duration so a long generation can't trip the idle timer.
+    use std::sync::atomic::Ordering;
+    let act = &state.activity;
+    act.in_flight.fetch_add(1, Ordering::Relaxed);
+    act.last_active
+        .store(crate::share::now_unix(), Ordering::Relaxed);
+    let resp = next.run(req).await;
+    act.in_flight.fetch_sub(1, Ordering::Relaxed);
+    act.last_active
+        .store(crate::share::now_unix(), Ordering::Relaxed);
+    resp
 }
 
 // ─── Public entry point ───────────────────────────────────────────────────────
@@ -1032,10 +1064,11 @@ pub async fn run(
     backend: Arc<dyn ChatBackend>,
     port: u16,
     model_id: String,
+    cfg: ServeConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_on(backend, listener, model_id).await
+    serve_on(backend, listener, model_id, cfg).await
 }
 
 /// Serve the gateway on an already-bound listener.
@@ -1044,21 +1077,69 @@ pub async fn serve_on(
     backend: Arc<dyn ChatBackend>,
     listener: tokio::net::TcpListener,
     model_id: String,
+    cfg: ServeConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let observer = crate::obs::Observer::new();
     observer.set_backend_label(backend.label());
+    let port = listener.local_addr().ok().map(|a| a.port());
     crate::obs::log_event(serde_json::json!({
         "event": "gateway_listening",
         "addr": listener.local_addr().ok().map(|a| a.to_string()),
         "backend": backend.label(),
         "model": model_id,
     }));
+
+    // Shared-daemon registry: publish so `rozum launch` clients discover & reuse
+    // us; remove on exit (only if it's still our record). Spec: shared-gateway.
+    let registered_pid = match (cfg.register_n_ctx, port) {
+        (Some(n_ctx), Some(port)) => {
+            let pid = std::process::id();
+            let _ = crate::share::write_active(&crate::share::ActiveGateway {
+                model: model_id.clone(),
+                port,
+                pid,
+                n_ctx,
+                started_at: crate::share::now_unix(),
+            });
+            Some(pid)
+        }
+        _ => None,
+    };
+
     let state = GatewayState {
         backend,
         auth_token: std::env::var("ROZUM_GATEWAY_TOKEN").ok(),
         model_id,
         observer,
+        activity: Arc::new(Activity::default()),
     };
+
+    // Idle watchdog (shared daemon only): exit when nothing is in flight and no
+    // request has arrived for `idle_secs`, freeing the resident model.
+    if let Some(idle) = cfg.idle_secs.filter(|&s| s > 0) {
+        use std::sync::atomic::Ordering;
+        state
+            .activity
+            .last_active
+            .store(crate::share::now_unix(), Ordering::Relaxed);
+        let activity = Arc::clone(&state.activity);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let idle_for = crate::share::now_unix()
+                    .saturating_sub(activity.last_active.load(Ordering::Relaxed));
+                if activity.in_flight.load(Ordering::Relaxed) == 0 && idle_for >= idle {
+                    crate::obs::log_event(serde_json::json!({
+                        "event": "gateway_idle_exit", "idle_secs": idle_for,
+                    }));
+                    if let Some(pid) = registered_pid {
+                        crate::share::remove_active_if_mine(pid);
+                    }
+                    std::process::exit(0);
+                }
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/v1/models", get(models_handler))
@@ -1069,7 +1150,11 @@ pub async fn serve_on(
         .with_state(state);
 
     tracing::info!(addr = ?listener.local_addr().ok(), "rozum gateway listening");
-    axum::serve(listener, app).await?;
+    let result = axum::serve(listener, app).await;
+    if let Some(pid) = registered_pid {
+        crate::share::remove_active_if_mine(pid);
+    }
+    result?;
     Ok(())
 }
 

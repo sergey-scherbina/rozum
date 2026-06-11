@@ -1,0 +1,138 @@
+//! Shared-gateway rendezvous: discover and reuse one resident model across many
+//! `rozum launch` clients, instead of each launch loading its own copy.
+//!
+//! Spec: `docs/specs/shared-gateway.md` (phase `shared-gateway-mvp`). The TCP
+//! port bind is the singleton guarantee (one process binds it); this module is
+//! the registry + health probe + reuse policy around it.
+
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+/// Default stable port for the shared gateway. A respawn reuses the same port so
+/// already-connected agents reconnect transparently.
+pub const DEFAULT_GATEWAY_PORT: u16 = 8089;
+
+fn home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+}
+
+/// `$XDG_STATE_HOME/rozum/gateway/` (or `~/.local/state/...`).
+pub fn gateway_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".local/state"));
+    base.join("rozum").join("gateway")
+}
+
+pub fn active_path() -> PathBuf {
+    gateway_dir().join("active.json")
+}
+
+pub fn ensure_dir() -> std::io::Result<()> {
+    std::fs::create_dir_all(gateway_dir())
+}
+
+pub fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The registry record published by a live shared gateway.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveGateway {
+    pub model: String,
+    pub port: u16,
+    pub pid: u32,
+    pub n_ctx: u32,
+    pub started_at: u64,
+}
+
+/// Read the registry, or `None` if absent/unparseable.
+pub fn read_active() -> Option<ActiveGateway> {
+    let bytes = std::fs::read(active_path()).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Publish the registry atomically (write-temp + rename).
+pub fn write_active(g: &ActiveGateway) -> std::io::Result<()> {
+    ensure_dir()?;
+    let tmp = gateway_dir().join(format!("active.json.tmp.{}", g.pid));
+    let body = serde_json::to_vec_pretty(g).unwrap_or_default();
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, active_path())
+}
+
+/// Remove the registry only if it still points at `pid` — so a process never
+/// deletes a newer gateway's record on its way out.
+pub fn remove_active_if_mine(pid: u32) {
+    if let Some(g) = read_active() {
+        if g.pid == pid {
+            let _ = std::fs::remove_file(active_path());
+        }
+    }
+}
+
+/// Reuse policy (MVP): same model spec. An `n_ctx` difference is tolerated — the
+/// running context window wins. Mismatch handling is the `launch-model-picker`
+/// phase's job.
+pub fn is_reusable(active: &ActiveGateway, want_model: &str) -> bool {
+    active.model == want_model
+}
+
+/// Does a gateway answer on this port? The authoritative liveness signal (a stale
+/// registry whose process is gone simply won't respond).
+pub async fn health_ok(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{port}/v1/models");
+    let client = reqwest::Client::new();
+    matches!(
+        client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(1))
+            .send()
+            .await,
+        Ok(r) if r.status().is_success()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> ActiveGateway {
+        ActiveGateway {
+            model: "mlx-community/Qwen3-30B-A3B-Instruct-4bit".into(),
+            port: 8089,
+            pid: 4242,
+            n_ctx: 32768,
+            started_at: 1_700_000_000,
+        }
+    }
+
+    #[test]
+    fn registry_round_trips_through_json() {
+        let g = sample();
+        let bytes = serde_json::to_vec(&g).unwrap();
+        let back: ActiveGateway = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(g, back);
+    }
+
+    #[test]
+    fn reusable_only_on_matching_model() {
+        let g = sample();
+        assert!(is_reusable(&g, "mlx-community/Qwen3-30B-A3B-Instruct-4bit"));
+        assert!(!is_reusable(&g, "mlx-community/Qwen3.6-35B-A3B-4bit"));
+    }
+
+    #[test]
+    fn n_ctx_difference_does_not_block_reuse() {
+        // Reuse keys on model only; the running n_ctx wins.
+        let g = sample();
+        assert!(is_reusable(&g, &g.model));
+    }
+}

@@ -158,11 +158,11 @@ Composes with `concurrency` (sharing = one model; AdmittingBackend = N clients).
 
 Spec: `docs/specs/shared-gateway.md`.
 
-- [ ] shared-gateway-mvp - Detached `rozum gateway` daemon (registers `active.json`,
-  binds a stable port, idle-timeout exit). `rozum launch` discovers a healthy
-  compatible gateway and reuses it, else spawns one (flock anti-stampede +
-  port-bind dedup) and waits for health, then execs the agent. `--dedicated`
-  keeps the old in-process behaviour.
+- [x] shared-gateway-mvp - Detached `rozum gateway` daemon (registers `active.json`,
+  stable port, idle-timeout exit). `rozum launch` discovers a healthy compatible
+  gateway and reuses it, else spawns one (port-bind dedup; flock deferred to
+  failover) and waits for health, then execs the agent. `--dedicated` keeps the
+  old in-process behaviour. **DONE.**
 - [ ] shared-gateway-failover - Re-election on gateway death: a failed request →
   re-discover → exactly one respawn on the same port; client reconnect window.
 - [ ] shared-gateway-leases - Lease-refcount lifetime (`leases/<pid>` heartbeat,

@@ -131,6 +131,12 @@ enum Command {
         #[arg(long)]
         n_ctx: Option<u32>,
 
+        /// Bypass the shared gateway: run a private in-process model just for
+        /// this launch (the pre-sharing behaviour). Use when you intentionally
+        /// want a second model resident and own the memory cost.
+        #[arg(long)]
+        dedicated: bool,
+
         /// Program to launch and its arguments
         #[arg(trailing_var_arg = true, required = true)]
         program: Vec<String>,
@@ -259,9 +265,10 @@ async fn main() {
             model,
             port,
             n_ctx,
+            dedicated,
             program,
         }) => {
-            run_launch(model, port, n_ctx, program).await;
+            run_launch(model, port, n_ctx, dedicated, program).await;
         }
         Some(Command::Models { action }) => {
             run_models(action).await;
@@ -378,7 +385,18 @@ async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>) {
     eprintln!("  # OpenAI Codex / aider:");
     eprintln!("  export OPENAI_BASE_URL=http://127.0.0.1:{port}/v1");
     eprintln!("  export OPENAI_API_KEY=rozum-local");
-    if let Err(e) = rozum::gateway::run(backend, port, model_spec).await {
+    // Run as a shareable daemon: publish the registry so `rozum launch` clients
+    // discover & reuse this model, and idle-exit to free RAM when unused.
+    // ROZUM_GATEWAY_IDLE_SECS=0 keeps it up indefinitely (default 900s).
+    let idle_secs = std::env::var("ROZUM_GATEWAY_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(900);
+    let cfg = rozum::gateway::ServeConfig {
+        idle_secs: (idle_secs > 0).then_some(idle_secs),
+        register_n_ctx: Some(n_ctx),
+    };
+    if let Err(e) = rozum::gateway::run(backend, port, model_spec, cfg).await {
         eprintln!("gateway error: {e}");
         std::process::exit(1);
     }
@@ -437,24 +455,38 @@ async fn run_launch(
     model_spec: String,
     port: Option<u16>,
     n_ctx: Option<u32>,
+    dedicated: bool,
     program: Vec<String>,
 ) {
-    use std::process::Command as StdCommand;
-
     let n_ctx = resolve_n_ctx(&model_spec, n_ctx);
-    let (program_name, args) = program
-        .split_first()
-        .expect("clap requires at least one arg");
 
-    // Pick a free port if not specified.
+    if dedicated {
+        run_launch_dedicated(model_spec, port, n_ctx, program).await;
+        return; // unreachable: the dedicated path execs + exits
+    }
+
+    // Shared path: discover & reuse a running gateway, or spawn a detached daemon.
+    let (gw_port, effective_model) = match ensure_shared_gateway(&model_spec, n_ctx, port).await {
+        Some(x) => x,
+        None => std::process::exit(1),
+    };
+    exec_agent(program, &effective_model, gw_port).await
+}
+
+/// Pre-sharing behaviour: load a private model in-process for just this launch.
+async fn run_launch_dedicated(
+    model_spec: String,
+    port: Option<u16>,
+    n_ctx: u32,
+    program: Vec<String>,
+) {
     let port = port.unwrap_or_else(|| {
         std::net::TcpListener::bind("127.0.0.1:0")
             .ok()
             .and_then(|l| l.local_addr().ok())
             .map(|a| a.port())
-            .unwrap_or(8089)
+            .unwrap_or(rozum::share::DEFAULT_GATEWAY_PORT)
     });
-
     let backend = match build_gateway_backend(&model_spec, n_ctx).await {
         Some(b) => b,
         None => {
@@ -462,9 +494,6 @@ async fn run_launch(
             std::process::exit(1);
         }
     };
-
-    // Bind the listener before forking off the child so it can connect
-    // immediately without racing the gateway startup.
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -473,36 +502,138 @@ async fn run_launch(
             std::process::exit(1);
         }
     };
-
-    eprintln!("rozum launch  gateway=http://127.0.0.1:{port}  model={model_spec}");
-    eprintln!("  → running: {} {}", program_name, args.join(" "));
-
-    // Compute the claude-prefixed alias before moving model_spec into the gateway task.
-    let claude_alias = rozum::gateway::claude_model_alias(&model_spec);
-
-    // Start the gateway in a background task.
-    let gateway_handle = tokio::spawn(async move {
-        if let Err(e) = rozum::gateway::serve_on(backend, listener, model_spec).await {
+    eprintln!("rozum launch  (dedicated)  gateway=http://127.0.0.1:{port}  model={model_spec}");
+    let model_for_task = model_spec.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            rozum::gateway::serve_on(backend, listener, model_for_task, Default::default()).await
+        {
             eprintln!("gateway error: {e}");
         }
     });
+    // The in-process gateway dies with this process on exec_agent's exit.
+    exec_agent(program, &model_spec, port).await
+}
 
-    // Build the child command with both API conventions set.
-    // Claude Code precedence: ANTHROPIC_AUTH_TOKEN > ANTHROPIC_API_KEY > OAuth.
-    // Using ANTHROPIC_AUTH_TOKEN AND explicitly clearing ANTHROPIC_API_KEY avoids
-    // the "Auth conflict" warning while still leaving the user's global OAuth
-    // login intact (no `claude /logout` required).
+/// Reuse a healthy running shared gateway, else spawn a detached `rozum gateway`
+/// daemon and wait for it to come up. Returns `(port, effective_model)` — the
+/// effective model may differ from `model_spec` if a gateway for another model is
+/// already running (MVP: reuse it with a warning rather than load a second model).
+async fn ensure_shared_gateway(
+    model_spec: &str,
+    n_ctx: u32,
+    port: Option<u16>,
+) -> Option<(u16, String)> {
+    use rozum::share;
+    let want_port = port.unwrap_or(share::DEFAULT_GATEWAY_PORT);
+
+    // 1/2. A healthy running gateway → reuse it (warn if it's a different model).
+    if let Some(active) = share::read_active() {
+        if share::health_ok(active.port).await {
+            if share::is_reusable(&active, model_spec) {
+                eprintln!(
+                    "rozum launch: reusing shared gateway on :{} (model {})",
+                    active.port, active.model
+                );
+            } else {
+                eprintln!(
+                    "rozum launch: gateway already running model '{}'; using it and ignoring \
+                     '{}'. Use --dedicated for a private model, or `rozum gateway switch`.",
+                    active.model, model_spec
+                );
+            }
+            return Some((active.port, active.model));
+        }
+    }
+
+    // 3. Nothing usable → spawn a detached daemon and wait for health.
+    eprintln!("rozum launch: starting shared gateway for '{model_spec}' on :{want_port}…");
+    let mut child = match spawn_detached_gateway(model_spec, want_port, n_ctx) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rozum launch: failed to spawn gateway daemon: {e}");
+            return None;
+        }
+    };
+    // Poll for health; fail fast if the daemon process exits (load error).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        if share::health_ok(want_port).await {
+            return Some((want_port, model_spec.to_string()));
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            eprintln!(
+                "rozum launch: gateway daemon exited before becoming ready ({status}); \
+                 see {}",
+                share::gateway_dir().join("gateway.log").display()
+            );
+            return None;
+        }
+        if std::time::Instant::now() >= deadline {
+            eprintln!(
+                "rozum launch: gateway not ready after 300s (still downloading?); \
+                 see {}",
+                share::gateway_dir().join("gateway.log").display()
+            );
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// Spawn `rozum gateway --model … --port … --n-ctx …` as a detached process that
+/// outlives this launch (own process group, stdio to a log file).
+fn spawn_detached_gateway(
+    model_spec: &str,
+    port: u16,
+    n_ctx: u32,
+) -> std::io::Result<std::process::Child> {
+    use std::process::{Command as StdCommand, Stdio};
+    let exe = std::env::current_exe()?;
+    let _ = rozum::share::ensure_dir();
+    let log = rozum::share::gateway_dir().join("gateway.log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)?;
+    let mut cmd = StdCommand::new(exe);
+    cmd.arg("gateway")
+        .arg("--model")
+        .arg(model_spec)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--n-ctx")
+        .arg(n_ctx.to_string())
+        .stdin(Stdio::null())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file);
+    // Own process group so a Ctrl-C / terminal close on the launch doesn't kill
+    // the shared daemon.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn()
+}
+
+/// Build the agent child command (env wiring) and exec it, exiting with its code.
+/// `model_for_alias` is the model the gateway is actually serving.
+async fn exec_agent(program: Vec<String>, model_for_alias: &str, port: u16) -> ! {
+    use std::process::Command as StdCommand;
+    let (program_name, args) = program
+        .split_first()
+        .expect("clap requires at least one arg");
+    let claude_alias = rozum::gateway::claude_model_alias(model_for_alias);
+    eprintln!("  → running: {} {}", program_name, args.join(" "));
+
     let base = format!("http://127.0.0.1:{port}");
     let mut cmd = StdCommand::new(program_name);
     cmd.args(args);
     cmd.env("ANTHROPIC_BASE_URL", &base);
     cmd.env("ANTHROPIC_AUTH_TOKEN", "rozum-local");
     cmd.env_remove("ANTHROPIC_API_KEY");
-    // Ask Claude Code to query our /v1/models endpoint so the local model
-    // shows up in the /model picker.
     cmd.env("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
-    // Pre-select our model so Claude Code starts on it without the user
-    // having to open /model and pick it manually.
     cmd.env("ANTHROPIC_MODEL", &claude_alias);
     cmd.env("ANTHROPIC_DEFAULT_OPUS_MODEL", &claude_alias);
     cmd.env("ANTHROPIC_DEFAULT_SONNET_MODEL", &claude_alias);
@@ -511,9 +642,6 @@ async fn run_launch(
     cmd.env("OPENAI_API_KEY", "rozum-local");
     cmd.env("ROZUM_GATEWAY_URL", &base);
 
-    // Trim Claude Code's system prompt (bundled skills, git instructions, CLAUDE.md)
-    // and non-essential background calls so its large prompts fit the local model's
-    // smaller context window. Defaults only: a value the user already exported wins.
     for (k, v) in [
         ("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS", "1"),
         ("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS", "1"),
@@ -527,18 +655,15 @@ async fn run_launch(
         }
     }
 
-    // Run the child synchronously in a blocking task so we can wait on its exit code.
+    let name = program_name.clone();
     let status = tokio::task::spawn_blocking(move || cmd.status())
         .await
         .ok()
         .and_then(|r| r.ok());
-
-    // Tear down the gateway and exit with the child's code.
-    gateway_handle.abort();
     let code = match status {
         Some(s) => s.code().unwrap_or(1),
         None => {
-            eprintln!("rozum launch: failed to spawn '{program_name}'");
+            eprintln!("rozum launch: failed to spawn '{name}'");
             127
         }
     };

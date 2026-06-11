@@ -1,5 +1,23 @@
 # Changelog
 
+## shared-gateway-mvp — share one model daemon across launches
+Completed: 2026-06-11
+First phase of `shared-gateway`. `rozum launch` no longer always loads its own
+in-process model (two launches → two models → OOM). New `src/share.rs` registry
+(`active.json` under `$XDG_STATE_HOME/rozum/gateway/`, atomic write +
+remove-if-mine, `health_ok` probe, `is_reusable`, stable `DEFAULT_GATEWAY_PORT`
+8089). `rozum gateway` publishes the registry and idle-exits after
+`ROZUM_GATEWAY_IDLE_SECS` (default 900) when nothing is in flight (in-flight-aware
+via an Activity counter in the auth layer, so long generations don't trip it).
+`rozum launch` reuses a healthy running gateway (or a different-model one with a
+warning), else spawns a detached `rozum gateway` (own process group, stdio →
+gateway.log) and waits for health; the TCP-port bind is the single-owner
+guarantee. `--dedicated` keeps the old private in-process gateway. Deferred to
+later phases: flock anti-stampede + crash re-election, client-pid leases, the
+launch-local proxy / replay / poison / two-tier backpressure, switch/reload/
+unload, gateway status/stop, the model picker, and `models rm`. 3 share unit
+tests (no Xcode); fmt + feature build clean.
+
 ## concurrency-backend-abstraction — generic admission for any backend
 Completed: 2026-06-11
 Lifted the concurrency machinery (scheduler, memory budget, fast lane,

@@ -68,23 +68,24 @@ Stable port: the shared gateway uses a fixed port (default 8089, `--port`/`ROZUM
 
 ### Discovery & reuse
 
-- [ ] `rozum launch --model X`: if `active.json` exists, its `pid` is alive, the
-      port answers `GET /v1/models`, and the model is compatible → **reuse**:
-      point the agent's `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` at the running
-      port and exec the agent. No new model is loaded.
-- [ ] A stale registry (dead pid, or port not answering) is treated as "none
-      running".
+- [x] `rozum launch --model X`: if `active.json` exists, the port answers
+      `GET /v1/models`, and the model is compatible → **reuse**: point the agent's
+      `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` at the running port and exec the
+      agent. No new model is loaded. (`ensure_shared_gateway` in `main.rs`.)
+- [x] A stale registry (port not answering) is treated as "none running" — the
+      HTTP health probe is the authoritative liveness signal.
 
 ### Single-owner election & spawn
 
-- [ ] When no usable gateway is found, the launch contends for `spawn.lock`
-      (non-blocking `flock`): the **winner** spawns a detached `rozum gateway
-      --model X --port P`, waits for it to become healthy, then proceeds; **losers**
-      skip spawning and poll `active.json`/health with backoff until it is up, then reuse.
-- [ ] Even without the lock, concurrent spawners are deduplicated by the TCP bind:
-      exactly one `rozum gateway` binds the port; the rest fail `EADDRINUSE` and exit.
-- [ ] The detached gateway outlives the launching client (it does not die when
-      the agent exits).
+- [~] When no usable gateway is found the launch spawns a detached `rozum gateway
+      --model X --port P` and waits for health. **MVP: no `spawn.lock` yet** —
+      relies on the TCP bind below for correctness; the flock anti-stampede is
+      the `shared-gateway-failover` phase.
+- [x] Concurrent spawners are deduplicated by the TCP bind: exactly one `rozum
+      gateway` binds the port; the rest fail `EADDRINUSE` and exit, then all
+      launches discover the survivor via the health poll.
+- [x] The detached gateway (own process group, stdio → `gateway.log`) outlives
+      the launching client (it does not die when the agent exits).
 
 ### Failover
 
@@ -96,7 +97,12 @@ Stable port: the shared gateway uses a fixed port (default 8089, `--port`/`ROZUM
 
 ### Lifetime (idle shutdown)
 
-- [ ] Each launch client maintains a lease (`leases/<pid>`, heartbeated). The
+- [~] **MVP**: the daemon idle-exits after `ROZUM_GATEWAY_IDLE_SECS` (default
+      900) with zero in-flight requests and no new arrivals (request-activity
+      based, in-flight-aware so a long generation can't trip it). Lease-by-client
+      (`leases/<pid>`) is the `shared-gateway-leases` phase; until then the timer
+      is HTTP-activity, not client-liveness. (Original wording:) Each launch
+      client maintains a lease (`leases/<pid>`, heartbeated). The
       gateway reaps leases whose pid is dead; when **no live lease** remains for
       `ROZUM_GATEWAY_IDLE_SECS` (default 300) it shuts down gracefully, freeing
       the port and the model. `--no-idle-timeout` keeps it up indefinitely.
@@ -120,12 +126,11 @@ Stable port: the shared gateway uses a fixed port (default 8089, `--port`/`ROZUM
 
 ### Model mismatch (requested ≠ running)
 
-- [ ] `--model Y` while a gateway serves `X`:
-      - if the running gateway has **no live leases** (idle) → **take over**: stop
-        it, spawn one for `Y`;
-      - if it has live clients → **reuse `X` with a warning** ("model X is in use;
-        ignoring --model Y") and set the agent's `ANTHROPIC_MODEL` to `X`.
-- [ ] `--dedicated` always bypasses sharing and runs a private in-process gateway
+- [~] `--model Y` while a gateway serves `X`: **MVP reuses `X` with a warning**
+      (and points the agent's `ANTHROPIC_MODEL` at `X`) for any healthy running
+      gateway — avoids loading a second model. **Takeover-if-idle** is the
+      `launch-model-picker` phase.
+- [x] `--dedicated` always bypasses sharing and runs a private in-process gateway
       on its own port (the pre-feature behaviour), regardless of what is running.
 
 ### Cache deletion
@@ -423,4 +428,30 @@ the daemon. This feature is what finally makes that multi-client path real.
 
 ## Results
 
-(Filled after implementation.)
+### `shared-gateway-mvp` (done)
+
+`src/share.rs` — registry (`ActiveGateway` in `active.json`, atomic
+write/remove-if-mine), `health_ok(port)` probe (the authoritative liveness
+signal), `is_reusable` (model match), `DEFAULT_GATEWAY_PORT = 8089`, `gateway_dir`
+under `$XDG_STATE_HOME/rozum/gateway/`. 3 unit tests (no feature/Xcode).
+
+`rozum gateway` (`gateway::serve_on` + `ServeConfig`) now: publishes/removes the
+registry, and idle-exits after `ROZUM_GATEWAY_IDLE_SECS` (default 900, `0` =
+never) when no request is in flight and none has arrived — in-flight-aware via an
+`Activity` counter updated in `auth_layer`, so a long generation can't trip it.
+
+`rozum launch` (`ensure_shared_gateway`): reuse a healthy compatible gateway
+(or a different-model one with a warning, MVP), else spawn a **detached** `rozum
+gateway` (own process group, stdio → `gateway.log`) and poll for health (fails
+fast if the daemon exits during load; 300 s cap otherwise). `--dedicated` keeps
+the old private in-process gateway. `exec_agent` factors the agent env wiring and
+points `ANTHROPIC_MODEL` at the *effective* model.
+
+Deferred (later phases): `spawn.lock` anti-stampede + crash re-election
+(`shared-gateway-failover`); client-pid leases (`shared-gateway-leases`); the
+launch-local proxy, replay, poison, two-tier backpressure
+(`shared-gateway-proxy`/`-replay-retry`/`-poison`); `switch`/`reload`/`unload`,
+`gateway status`/`stop`, the picker, and `models rm` (their own tasks).
+
+Verification: `cargo fmt --check` clean; 67 lib tests (3 new in `share`) on the
+default build (no Xcode); `cargo check --features mistralrs` clean.
