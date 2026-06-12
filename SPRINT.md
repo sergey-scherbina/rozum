@@ -58,8 +58,25 @@ Full writeup + the one-pass diagnostic methodology that localized it:
 
 #### P0 (TOP PRIORITY): mlx-native-perf-compile — close the decode-speed gap to Python
 
-**Goal: native MLX decode ~12 t/s → ~22 t/s (Python `mlx_lm` parity).** This is the
-must-do. Full analysis: `docs/specs/mlx-native-runtime.md` → "mx.compile" + the
+**✅ RESOLVED (2026-06-12, merged to master).** The hybrid (Qwen3.6) decode gap is
+the gated_delta per-call eval, and its ROOT CAUSE is MLX's **unretained
+command-buffer references** (`commandBufferWithUnretainedReferences`): a buffer
+feeding the custom kernel is freed/reused before the in-flight GPU dispatch reads it
+→ garbage from token 2; the per-call eval was a ~48-sync/token workaround. FIX:
+env-gated **retained refs** (`ROZUM_MLX_RETAIN`) applied via a `PATCH_COMMAND` on the
+MLX FetchContent (mlx-c fork), enabled by the backend for hybrid models only;
+gated_delta then drops the per-call eval. **27B decode ~12 → ~16-17 t/s (+30-40%)**,
+byte-identical output; dense models unaffected. Forks pushed
+(`sergey-scherbina/mlx-c` @ rozum-retain-0.30.6, `sergey-scherbina/mlx-rs` @
+rozum-hybrid-decode); rozum pinned to mlx rev `09c5b20d`. Full investigation +
+bottom-up Python↔Rust log + patch: `docs/mlx-gd-bug/`. Bumping MLX does NOT help
+(master/0.31.2 still unretained); a per-op buffer-lifetime difference vs `mlx_lm`
+(which is correct serially on the same MLX) remains a curiosity but is not needed.
+The "mx.compile / capture-based" plan below was the wrong lever (probed, dead end);
+kept for the record.
+
+**(historical goal) native MLX decode ~12 t/s → ~22 t/s (Python `mlx_lm` parity).**
+Full analysis: `docs/specs/mlx-native-runtime.md` → "mx.compile" + the
 "Performance — capture-based compile plan" section.
 
 **The problem (root cause, settled).** Decode is **per-call op-launch / FFI-overhead
