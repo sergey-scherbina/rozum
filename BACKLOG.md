@@ -141,6 +141,41 @@ degraded".
   exact-match/edit-distance + a small general probe. Decides yes/no on "helped my
   domain without breaking general use" before investing in the items above. Spec §6.
 
+### Portability / hardware-agnostic core (keep the durable layer durable)
+
+The hardware-agnostic abstraction already exists — the `ChatBackend` SPI and
+everything above it (gateway, rooms, launch, orchestration, model infra). MLX is
+one swappable leaf; GGUF/llama.cpp already carries non-Mac (Linux/Windows, CUDA/
+ROCm/Vulkan/CPU). Full write-up: `docs/specs/portability-and-the-backend-spi.md`.
+These items turn "portable in principle" into "portable by `cargo build`".
+
+- [ ] portability-platform-features - Make the default build platform-aware. Today
+  `default = ["mlx-native", "gguf"]` assumes macOS; `cargo build` on Linux tries to
+  compile MLX (Apple toolchain) and fails. Default the MLX leaf on macOS only (e.g.
+  `[target.'cfg(target_os = "macos")']` deps + a no-op feature elsewhere, or a
+  documented build matrix), and make a clean cross-platform default (gguf + a
+  CUDA/Vulkan passthrough feature on `llama-cpp-2`, which currently hard-codes
+  `["metal"]`). Goal: "not a Mac" is a first-class `cargo build`, not a flag dance.
+
+- [ ] portability-shared-model-source - Lift the backend-agnostic model infra above
+  the SPI. Auto-download + hf_hub/ModelScope cache (`src/hf_hub.rs`,
+  `src/modelscope.rs`) + spec resolution + the RAM preflight are hardware-agnostic
+  and useful to ANY safetensors backend (mistralrs, a future runtime), but are wired
+  through the MLX path today (`ensure_model_dir` lives in `mlx_native_backend`).
+  Factor a `model_source` layer so a new leaf reuses fetching/cache/preflight for
+  free instead of re-implementing them.
+
+- [ ] portability-new-backend-checklist - Write the "add a new runtime/hardware
+  backend" recipe down (implement the 5 `ChatBackend` methods; bring your own chat
+  template + tokenizer + cache; slot into `build_gateway_backend` + the config
+  chain). Turns the seam from folklore into a checklist; complements the portability
+  spec.
+
+- [ ] portability-cuda-gguf - Concrete non-Mac GPU path: expose `gguf-cuda` /
+  `gguf-vulkan` features that pass the matching `llama-cpp-2` backend feature
+  through, so a Linux/CUDA user gets GPU GGUF inference without editing Cargo.toml.
+  (Cheapest real "runs on someone else's non-Mac hardware" deliverable.)
+
 ### Native MLX runtime — backend feature parity (vs mistralrs)
 
 Audit 2026-06-11 (`docs/specs/mlx-native-runtime.md` "Backend feature parity"):
