@@ -176,6 +176,15 @@ enum Command {
         #[arg(long)]
         no_piggyback: bool,
 
+        /// Point the agent at an external OpenAI-compatible server instead of a
+        /// local model — e.g. Ollama (`http://localhost:11434/v1`), vLLM, or any
+        /// `/v1` endpoint. The CLI equivalent of `ROZUM_BACKEND_URL`. Forces that
+        /// backend (skips the local GGUF/MLX chain) and runs a lightweight
+        /// in-process gateway (no shared daemon, no model load). Pass the upstream
+        /// model name with `--model` (e.g. `--model qwen3:8b`).
+        #[arg(long, conflicts_with = "no_model")]
+        backend_url: Option<String>,
+
         /// Program to launch and its arguments
         #[arg(trailing_var_arg = true, required = true)]
         program: Vec<String>,
@@ -375,6 +384,7 @@ async fn main() {
             no_channel_wakeup,
             channel_mcp_name,
             no_piggyback,
+            backend_url,
             program,
         }) => {
             // Precedence: --channel-mcp-name > ROZUM_CHANNEL_MCP_NAME > "rozum".
@@ -389,7 +399,23 @@ async fn main() {
             // twice). Piggyback (Tier 3) is the fallback — auto-off when channels
             // (Tier 1) are active, unless forced by `--no-piggyback`/`ROZUM_PIGGYBACK`.
             let wakeup = WakeupPolicy::resolve(&channels, no_piggyback, &program[0]);
-            run_launch(model, port, n_ctx, dedicated, no_model, wakeup, program).await;
+            match backend_url {
+                // External OpenAI-compatible server (Ollama/vLLM/…): force it,
+                // skip the local-model resolution + shared daemon entirely.
+                Some(url) => {
+                    let Some(model_spec) = model else {
+                        eprintln!(
+                            "rozum launch: --backend-url requires --model (the upstream model \
+                             name, e.g. --model qwen3:8b)"
+                        );
+                        std::process::exit(2);
+                    };
+                    run_launch_url(url, model_spec, port, n_ctx, wakeup, program).await;
+                }
+                None => {
+                    run_launch(model, port, n_ctx, dedicated, no_model, wakeup, program).await;
+                }
+            }
         }
         Some(Command::Models { action }) => {
             run_models(action).await;
@@ -540,7 +566,8 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
         return args;
     };
 
-    const KNOWN_FLAGS: &[&str] = &["--model", "--port", "--n-ctx", "--channel-mcp-name"];
+    const KNOWN_FLAGS: &[&str] =
+        &["--model", "--port", "--n-ctx", "--channel-mcp-name", "--backend-url"];
     // Value-less flags: pulled to the front without consuming a following arg.
     const KNOWN_BOOL_FLAGS: &[&str] =
         &["--no-model", "--dedicated", "--no-channel-wakeup", "--no-piggyback"];
@@ -641,7 +668,29 @@ fn resolve_piggyback(no_piggyback: bool, env_override: Option<bool>, channels_ac
 
 #[cfg(test)]
 mod backend_engine_tests {
-    use super::is_mlx_server_engine;
+    use super::{is_mlx_server_engine, reorder_launch_args};
+
+    #[test]
+    fn backend_url_value_flag_hoisted_from_after_program() {
+        // `--backend-url URL` placed after the program is pulled (with its value)
+        // ahead of the program so clap parses it as a launch flag.
+        let got = reorder_launch_args(
+            ["rozum", "launch", "claude", "--backend-url", "http://localhost:11434/v1"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        assert_eq!(
+            got,
+            vec![
+                "rozum",
+                "launch",
+                "--backend-url",
+                "http://localhost:11434/v1",
+                "claude"
+            ]
+        );
+    }
 
     #[test]
     fn mlx_server_engine_aliases_are_distinct_from_native_mlx() {
@@ -948,6 +997,51 @@ fn pick_launch_target_interactive() -> Option<LaunchTarget> {
             Some(LaunchTarget::Local(spec.clone()))
         }
     }
+}
+
+/// `--backend-url`: serve an external OpenAI-compatible backend (Ollama, vLLM, …)
+/// through a lightweight in-process gateway. No local model is loaded and the
+/// shared daemon is bypassed — `model_spec` is just the upstream model name
+/// forwarded to that server. The gateway dies with this process on the agent's
+/// exit, like the `--dedicated` path.
+async fn run_launch_url(
+    url: String,
+    model_spec: String,
+    port: Option<u16>,
+    n_ctx: Option<u32>,
+    wakeup: WakeupPolicy,
+    program: Vec<String>,
+) -> ! {
+    let WakeupPolicy { channel_flags, piggyback } = wakeup;
+    let _ = n_ctx; // informational for a remote backend; the upstream owns its KV
+    let port = port.unwrap_or_else(|| {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .ok()
+            .and_then(|l| l.local_addr().ok())
+            .map(|a| a.port())
+            .unwrap_or(rozum::share::DEFAULT_GATEWAY_PORT)
+    });
+    let backend = rozum::concurrency::admit_wrap(std::sync::Arc::new(
+        rozum::openai_http::OpenAiHttpBackend::new(&url, &model_spec),
+    ) as std::sync::Arc<dyn rozum::ChatBackend>);
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("rozum launch: failed to bind 127.0.0.1:{port}: {e}");
+            std::process::exit(1);
+        }
+    };
+    eprintln!("rozum launch  (backend-url)  gateway=http://127.0.0.1:{port}  → {url}  model={model_spec}");
+    let model_for_task = model_spec.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            rozum::gateway::serve_on(backend, listener, model_for_task, Default::default()).await
+        {
+            eprintln!("gateway error: {e}");
+        }
+    });
+    exec_agent(program, &model_spec, port, channel_flags, piggyback).await
 }
 
 /// Pre-sharing behaviour: load a private model in-process for just this launch.
