@@ -1,158 +1,235 @@
-# busi integration & the rozum agent runtime
+# busi integration & the agent runtime (distributed-first)
 
-**Status: design / plan.** How an application (the first being **busi**, an
-accounting app that compiles Scala→Rust and exposes an **MCP** interface) embeds a
-local model through rozum to drive its own tools. The headline new capability is a
-**headless, embeddable agent runtime** — reusable far beyond busi.
+**Status: design / plan.** How an application (first: **busi**, an accounting app
+written in **scalascript** — which can compile to Rust, though not all of busi is
+guaranteed to be Rust — and which exposes an **MCP** interface) embeds a local model
+through rozum to drive its own tools. Designed **distributed-first** (scaling +
+fault-tolerance), with an in-process embedded mode kept as an option for small models.
 
-Companion reading: `portability-and-the-backend-spi.md` (the SPI is the durable
-boundary; this runtime sits *above* it), `training-and-lora-exploration.md` (the
-optional fine-tune step), `mlx-native-runtime.md` (the local model serving below).
+Companion reading: `portability-and-the-backend-spi.md` (the SPI is rozum's durable
+boundary; this sits above it), `training-and-lora-exploration.md` (the optional
+fine-tune), `mlx-native-runtime.md` (local model serving below).
 
-## The one architectural fact that decides everything
+## The architectural decision: busi is the agent; rozum is a stateless model service
 
-rozum today is a **stateless** model gateway: `/v1/messages` takes
-`messages + tools` and returns *either* text *or* a `tool_use` — and the
-**agentic loop** (model → tool call → execute → tool result → model → …) is the
-*client's* job. Today that client is Claude Code (external). For an embedded app
-like busi, that loop must exist **headless and embeddable**.
+rozum's gateway is **stateless per call**: `messages + tools` in, *either* text *or*
+`tool_calls` out. The **agentic loop** (model → tool call → execute → tool result →
+model → …) is the *caller's* job. The question is who runs that loop. For a
+**distributed, scalable, fault-tolerant** system the answer is:
 
-**Mental model:**
+> **busi owns the agent loop and executes tools in-process; rozum is a stateless
+> model service it calls over HTTP.**
 
-> **rozum agent runtime** = a headless, embeddable "Claude Code" that runs a
-> **local** model and drives an app's tools to completion.
-> **busi** = an **MCP server** (the tools + the accounting rules + validation) plus
-> the *activation prompts*.
-> **rozum** = the **MCP host** (model + loop + tool orchestration).
+Why, specifically:
+- **Session / orchestration state lives in busi** (it already owns the user session,
+  context, permissions). The loop just grows a `messages` array — that *is* the
+  state, and it belongs where the session is.
+- **rozum stays stateless** → trivially horizontally scalable and fault-tolerant:
+  any instance serves any request; an instance dies → busi retries on another. The
+  conversation isn't lost because busi holds it.
+- The alternative (**rozum owns the loop**) makes the *agent layer* stateful (live
+  sessions in rozum) → losing an instance mid-loop loses state unless externalized,
+  plus an extra hop rozum→MCP→busi per tool call. Worse for distribution.
 
-The app owns the *truth* (its tools validate everything; the model never invents
-accounting). rozum owns the *loop* and the *local private brain*.
+So: **the model layer is stateless and replicated; the orchestration state is in
+busi.** Standard, robust LLM-app shape — and it cleanly accommodates "not all of busi
+is Rust" (HTTP is language-agnostic).
 
-What already exists and is reused: `rmcp` MCP client/server plumbing (used for
-meeting rooms), tool-use parsing into `ToolUse` events, multi-turn tool-history
-rendering, the `ChatBackend` SPI + local MLX serving, concurrency/admission. **The
-new part is the orchestration loop + a stable embed API.**
+## Transports — what actually exists
 
-## Two integration modes (the Scala→Rust advantage)
+- **HTTP (OpenAI/Anthropic + SSE) — the spine.** busi → rozum gateway: send
+  `messages + tools` (JSON-Schema), get back `tool_calls` or text; stream via SSE.
+  Language-agnostic (scalascript just needs an HTTP+JSON+SSE client). **This is the
+  busi↔rozum integration.**
+- **MCP — optional, the *other* direction.** MCP is a tool-*provider* protocol
+  (provider → external agent). It's for when an **external** agent (Claude Code, …)
+  should drive busi. busi's **own** embedded model does NOT need MCP internally — busi
+  executes its tools in-process; the model only needs the tool *schemas* in the
+  request, not MCP.
+- **Embedded Rust crate — optional optimization.** When a busi component is Rust + the
+  model is small + no network is wanted: link rozum in-process. Kept, not primary.
+- **Nothing exotic needed.** HTTP+SSE+JSON covers it; gRPC/WebSocket are unnecessary.
+  Scaling is a load balancer + health + retries (deployment, not a new protocol).
 
-Because busi compiles to **Rust** and rozum **is** Rust, the tightest mode is
-available:
-
-- **Mode A — in-process Rust crate (recommended for desktop / embedded).** busi's
-  Rust output depends on the `rozum-agent` crate; the loop runs in busi's process;
-  the model lives in busi's process (the `!Send` worker thread); tools execute via a
-  direct callback (or busi's in-process MCP). **No HTTP, no subprocess, fully
-  private, lowest latency.** The natural fit for busi.
-- **Mode B — HTTP + MCP (for server / shared model).** busi runs its MCP server;
-  rozum runs as a daemon with the agent runtime; busi calls a `/v1/agent` endpoint
-  (prompt + which MCP server to drive). For a shared resident model across clients.
-
-Both sit behind the same agent-runtime abstraction. Start with A; add B when a
-shared daemon is needed.
-
-## End-to-end data flow (one request)
+## End-to-end data flow (busi owns the loop)
 
 ```
 user prompt (busi UI)
-  → busi builds (system context + user prompt + tool set)
-  → rozum-agent loop:
-        model call (with tools)
-        → tool_use?  → busi executes the tool (VALIDATES) → tool_result → ↺
-        → final text → stop
-  → busi shows / applies the result
+  → busi builds [system (activation), user] + tool schemas
+  → busi agent loop:
+        POST rozum /v1/chat/completions (messages, tools)
+        → tool_calls?  → busi executes each tool in-process (VALIDATES)
+                       → append assistant + tool results → ↺
+        → final text   → stop
+  → busi shows / applies the result (+ keeps the transcript for audit)
 ```
 
-The model never leaves the loop; **busi validates every operation**. A rejected
-operation comes back as a tool error the model corrects. No hallucinated entries
-can be committed.
+The model never leaves the loop; **busi validates every operation** (a rejected
+operation returns as a tool error the model corrects). No hallucinated entries commit.
 
-## What rozum must build
+## Layering — generic infrastructure vs domain logic
 
-1. **`rozum-agent` — the headless agent runtime (the core new piece).**
-   - Input: `(backend, system_prompt, user_prompt, tool_source, budget)` where
-     `budget` caps steps / tokens / wall-time.
-   - Loop: call the model with the tool set → parse `tool_use` → execute via the
-     tool source → feed the `tool_result` back (reusing the multi-turn tool-history
-     rendering) → repeat until a final answer, the step budget, or a stop signal.
-   - Output: final response **+ transcript + the list of operations performed**
-     (so busi can show/audit what happened).
-   - This is Claude Code's loop minus the UI, as a library. Streaming + cancellation
-     ride the existing `ChatEvent` stream.
-2. **Tool-source adapters** (how the loop reaches the app's tools):
-   - **MCP client** — connect to the app's MCP server, auto-discover tools (reuses
-     `rmcp` + the room MCP-client plumbing), execute tool calls over MCP. Decoupled;
-     the app just runs its MCP server.
-   - **Direct callback** — `Fn(ToolCall) -> ToolResult` for in-process Mode A (no
-     MCP serialization). The app passes a closure that calls its own logic.
-   - Both expose the same `ToolSource` trait to the loop.
-3. **`rozum-embed` — a stable, minimal, versioned public crate.** The only surface
-   an embedder links: build a backend (local MLX or HTTP), construct the agent
-   runtime, pick a tool source. Keeps busi off rozum's internals so rozum can evolve.
-4. **(Optional, high value) constrained / structured decoding.** Enforce the model's
-   tool-argument output against the app's JSON tool schemas *during decoding* →
-   reliability for small local models (they can't emit an invalid arg). This is the
-   backlog `structured-output` item, now driven by a concrete consumer.
-5. **(Optional) `/v1/agent` HTTP endpoint** for Mode B (prompt + MCP-server pointer
-   → runs the loop → returns result + transcript).
-6. **Model lifecycle for embedding** — load/unload, the `!Send` worker, concurrency:
-   mostly exists; expose it cleanly through `rozum-embed`.
+A crucial split (same principle as rozum's portability taxonomy — push generic infra
+into the reusable layer, keep domain logic in the leaf). Three tiers:
 
-## What busi / scalascript must do
+```
+┌───────────────────────────────────────────────────────────────────────┐
+│ rozum (Rust)        stateless model service: the OpenAI/Anthropic       │
+│                     gateway (tools + SSE) + local MLX/etc. below the SPI │
+│                     + (optional) a Rust reference agent-loop.            │
+├───────────────────────────────────────────────────────────────────────┤
+│ scalascript         GENERIC agent SDK — identical in ANY app, not       │
+│ library / compiler  accounting-specific. Build ONCE, reuse everywhere.  │
+├───────────────────────────────────────────────────────────────────────┤
+│ busi (on scalascript)  DOMAIN: the accounting tools, prompts, rules,    │
+│                        eval. Thin layer over the SDK.                    │
+└───────────────────────────────────────────────────────────────────────┘
+```
 
-1. **MCP tool design — the most important lever (it sets the required model size).**
-   High-level, **atomic, deterministic** operations (push multi-step logic into
-   busi, e.g. `post_transaction(...)` that does the whole double entry, not three
-   low-level calls); **strict schemas** (types, enums, required fields); **clear,
-   actionable error messages**; validation *inside* each tool. The cleaner and
-   higher-level the MCP surface, the smaller/cheaper/more-local the model can be.
-2. **The Rust glue.** Since busi compiles to Rust, it needs a thin Rust layer that
-   links `rozum-agent`, wires busi's tools (callback or its MCP server) and the model
-   choice. **scalascript must be able to express a crate dependency / FFI** to this
-   layer (the integration seam on the busi side).
-3. **Activation prompts / templates.** The system prompt (busi context: chart of
-   accounts, conventions, the operating instructions) + user-facing triggers
-   (slash-commands → structured prompts) that pre-shape tasks and lower the required
-   model intelligence.
-4. **An eval harness.** 20–50 representative real flows + a *task-success* metric
-   (did the model produce the correct busi operations end-to-end). This — not a
-   guess — picks the model size and is the fine-tune signal. (Same lesson as the
-   training spec: the limiting reagents are *data + eval*, not the model.)
-5. **Model bundling / serving choice.** Ship-with-model (local MLX via rozum, data
-   never leaves the machine — the killer feature for accounting) vs point at a shared
-   rozum daemon.
-6. **(Later) the fine-tune.** Once flows + eval exist, QLoRA a small model on the
-   collected `(prompt → tool-call)` traces → a fast, private, on-device busi model
-   (the `tune-toolcall-format` / domain-tune backlog pattern).
+**GENERIC → belongs in scalascript (as a library, or — scalascript's call — in the
+compiler where type-derivation/codegen helps). Reusable by ANY scalascript app, not
+just busi:**
+- **Model client** — HTTP/JSON/SSE client to an OpenAI/Anthropic-compatible endpoint.
+- **Agent loop** — Contract 2 below (message assembly, tool-call handling, budget,
+  stop, retry/error). The scalascript twin of rozum's Rust agent-runtime.
+- **Tool framework** — declare/register a tool, serialize its schema into the request,
+  dispatch `tool_calls` to handlers, format results/errors (Contract 3 plumbing). The
+  *framework* is generic; the *tools* are domain.
+- **JSON-Schema derivation from scalascript types** — generating a tool's parameter
+  schema from a typed handler signature. Especially **compiler/macro-amenable**.
+- **Streaming** — SSE parsing + partial token / tool-call-argument assembly.
+- **Endpoint pool + retry / failover / health** — talk to N rozum instances, retry on
+  failure, prefer healthy ones. This is where distribution/fault-tolerance lives.
+- **Transcript / audit log** — recording the loop's steps + executed operations.
+- **Prompt templating** — the *mechanism* (the *content* is domain).
+- **(Optional) MCP-server framework** — exposing typed tools over MCP for external
+  agents (the protocol is generic; the tools are domain).
 
-## Required model complexity (summary; full reasoning in chat history)
+**DOMAIN → belongs in busi, on top of the SDK (accounting-specific; would differ in
+any other app):**
+- **The actual tools** — `post_transaction`, `create_invoice`, `reconcile`,
+  `lookup_account`, … : the operations + their validation rules.
+- **System / activation prompt CONTENT** — chart of accounts, conventions, operating
+  instructions, the user-facing command templates.
+- **The eval set + success metric** — representative accounting flows.
+- **Model choice / domain fine-tune** — picked by the eval; the QLoRA on busi traces.
+
+Net: the scalascript team builds a generic **"agent SDK"** once; busi is a thin
+accounting layer over it; the *next* scalascript app reuses the SDK unchanged.
+
+## Specification for the scalascript side — the three contracts
+
+This is what scalascript implements against. rozum provides the gateway (Contract 1)
++ this spec, and optionally a Rust reference implementation of Contracts 2–3 (an
+*executable* spec that the scalascript SDK mirrors, and that powers the embedded mode).
+
+### Contract 1 — Model call (rozum gateway API)
+
+`POST /v1/chat/completions` (OpenAI form; `/v1/messages` Anthropic form is equivalent):
+```jsonc
+// request
+{ "model": "<id>",
+  "messages": [ {"role":"system","content":"…"}, {"role":"user","content":"…"} ],
+  "tools": [ {"type":"function",
+              "function":{"name":"…","description":"…","parameters": <JSON-Schema> }} ],
+  "tool_choice": "auto",      // or force a specific tool
+  "temperature": 0,           // determinism for reproducible eval
+  "stream": true }
+```
+```jsonc
+// response (non-stream): choices[0].message is EITHER
+{ "content": "final text…" }                 // finish_reason "stop"
+// OR
+{ "tool_calls": [ {"id":"call_1","type":"function",
+                   "function":{"name":"…","arguments":"<json string>"}} ] }  // finish_reason "tool_calls"
+```
+Streaming: SSE `data:` deltas (text deltas; tool-call argument deltas), terminated by
+`[DONE]`. `finish_reason ∈ {stop, tool_calls, length}`.
+
+### Contract 2 — Agent loop (the algorithm)
+
+```
+messages = [system(activation prompt), user(prompt)]
+repeat (within budget):
+    resp = POST model with (messages, tools)
+    if resp.finish_reason == "tool_calls":
+        append assistant(resp.tool_calls) to messages
+        for call in resp.tool_calls:
+            result = dispatch(call.name, parse(call.arguments))   # busi handler; validates
+            append tool(tool_call_id=call.id, content=result_or_error) to messages
+        continue
+    else:                                  # final text
+        return { text: resp.content, operations: executed, transcript: messages }
+on model/transport error: retry on another rozum instance, capped backoff, up to N
+budget: max_steps, max_tokens, wall_time   (then stop with a partial/abort result)
+```
+
+### Contract 3 — Tool
+
+```
+Tool {
+    name        : String        // stable, unique
+    description : String        // what it does + when to use it (the model reads this)
+    schema      : JSONSchema     // parameters; STRICT — types, enums, required
+    handler     : (args: Json) -> Result<Json, ToolError>
+                  // validates, executes the domain op, returns a structured result
+                  // OR a ToolError = a clear, actionable message the model can fix from
+}
+```
+Design rules (these set the required model size — see below): **high-level, atomic,
+deterministic** tools (push multi-step logic into the op, e.g. one
+`post_transaction` that does the whole double entry); **strict schemas**; **clear
+errors**; validation inside the handler.
+
+## What rozum provides (less than it first seemed)
+
+With "busi is the agent", rozum's new work shrinks:
+- **A rock-solid stateless gateway with tools** (mostly exists: `tool_calls`/`tool_use`
+  + multi-turn history + SSE). Action: pin down + stabilize the Contract-1 surface.
+- **Distributed readiness**: the gateway as a deployable service, health/readiness,
+  horizontal scale (stateless), a model pool/router. Partly exists (shared-gateway
+  daemon, `concurrency::admit_wrap`, the launch proxy's replay/retry).
+- **The protocol spec** (Contracts 1–3) + an **optional Rust reference agent-runtime**
+  that is *dual-purpose*: (a) the in-process embedded mode, and (b) the *executable
+  spec* the scalascript SDK mirrors.
+
+## What busi provides (domain only)
+
+The accounting tools + their validation, the system/activation prompt content, the
+eval set, and (later) the domain fine-tune. Everything generic is in the scalascript
+SDK, not here.
+
+## Required model complexity (summary)
 
 The model needs **agentic tool-use competence, not accounting knowledge** (busi has
-that). Required size is set by: how multi-step/branching the flows are, how many/how
-clear the tools are, and how much the activation prompts pre-structure the task —
-all of which busi controls. Rough tiers: simple single-step flows → 1.5–3B
-(tool-tuned, optionally QLoRA); typical multi-step over ~10–30 well-shaped tools →
-**7–14B local (the sweet spot)**; complex branching/recovery/long-context →
+that). Size is set by flow depth, tool count/clarity, and how much the activation
+prompts pre-structure the task — all controlled by busi/scalascript. Rough tiers:
+simple single-step → 1.5–3B (tool-tuned, optional QLoRA); typical multi-step over
+~10–30 well-shaped tools → **7–14B local (sweet spot)**; complex branching/recovery →
 32B-local or a frontier model with escalation. **Tool-tuned beats bigger-but-generic.**
-Don't guess — the busi eval harness picks the smallest model that clears the bar.
+Don't guess — busi's eval harness picks the smallest model that clears the bar.
 
 ## Phased plan
 
-- **P0 (rozum)** — `rozum-agent` runtime + the `ToolSource` trait + the MCP-client
-  and callback adapters + the `rozum-embed` public crate. Validate against a toy MCP
-  server (a couple of fake tools, assert the loop calls them and finishes).
-- **P1 (busi + rozum)** — busi designs its MCP tool surface (atomic, strict schemas,
-  good errors) + the Rust glue; drive busi's real tools with an off-the-shelf
-  tool-capable model; build the eval harness. Find the capability ceiling.
-- **P2** — minimize the model (eval-pick the smallest that passes) + add
-  constrained/structured decoding for tool-arg reliability.
-- **P3** — QLoRA a small model on busi traces → a local, private, fast busi model;
+- **P0a (scalascript SDK)** — the generic agent SDK: model client + agent loop + tool
+  framework + schema derivation + streaming + endpoint pool/retry. (Lib or compiler —
+  scalascript's call.) Validate against rozum's gateway with two fake tools.
+- **P0b (rozum)** — stabilize the Contract-1 gateway surface + (optional) the Rust
+  reference agent-runtime + distributed-readiness basics.
+- **P1 (busi)** — design the accounting tool surface (atomic, strict schemas, good
+  errors) + activation prompts + the eval harness; drive it with an off-the-shelf
+  tool-capable model; find the capability ceiling.
+- **P2** — eval-pick the smallest sufficient model + constrained/structured decoding
+  (rozum side) for tool-arg reliability.
+- **P3** — QLoRA a small model on busi traces → a fast, private, on-device busi model;
   route the rote 80% to it, escalate the hard 20% (busi validates either way).
 
-## Why this is the right shape
+## Why this shape
 
-The new capability — **a headless, embeddable agent runtime (MCP host with a local
-model)** — is *not* a busi-specific hack. It lives **above the `ChatBackend` SPI**,
-is engine/hardware-agnostic (the portability taxonomy's durable layer), and lets
-**any** Rust app with its own MCP surface embed a local private agent. busi is its
-first consumer; the runtime is a general rozum layer. And the hard part stays where
-it belongs: the app's tool/MCP design and its eval — not the model.
+- The model layer (rozum) stays **stateless** → scales + fails over for free; the
+  state stays in busi where the session lives.
+- The **generic agent SDK in scalascript** is the same "push reusable infra into the
+  durable layer" move as rozum's own extraction taxonomy — the *next* scalascript app
+  reuses it; busi is a thin domain leaf.
+- The hard part stays where it belongs: busi's **tool/MCP design and its eval** — not
+  the model, and not bespoke plumbing.

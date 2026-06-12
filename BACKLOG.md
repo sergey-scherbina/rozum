@@ -238,48 +238,59 @@ or on nothing — so any engine can reuse it.
   pushing them upstream so the *ecosystem* carries them (done: 4 mistralrs PRs + the
   mlx-rs fork fixes); this item is just the standing reminder to upstream, not vendor.
 
-### Agent runtime & embedding (busi integration)
+### Agent integration (busi) — DISTRIBUTED-FIRST
 
-A headless, embeddable agent runtime so a Rust app with its own MCP surface (first:
-**busi**, an accounting app, Scala→Rust + MCP) can embed a local model that drives
-its tools. Design + full plan: `docs/specs/busi-integration-and-agent-runtime.md`.
-The runtime lives ABOVE the `ChatBackend` SPI (engine/hardware-agnostic) and is
-reusable beyond busi.
+**busi is the agent; rozum is a stateless model service it calls over HTTP.** The
+orchestration/session state lives in busi (so rozum scales + fails over for free);
+the agent loop + the generic plumbing live in a **scalascript "agent SDK"** (generic,
+reusable by any app), and the accounting tools/prompts/eval are busi on top. Design +
+the three contracts (model-call API / agent loop / tool) + the generic-vs-domain
+layering: `docs/specs/busi-integration-and-agent-runtime.md`. The rozum items here are
+just the model-service side; the SDK + tools are owned by the scalascript/busi side.
 
-- [ ] rozum-agent-runtime - **P0, the core piece.** A headless agent loop:
-  `(backend, system, user, tool_source, budget)` → model call (with tools) → parse
-  `tool_use` → execute via the tool source → feed `tool_result` back (reuse the
-  multi-turn tool-history rendering) → repeat to a final answer / step budget / stop.
-  Output: final text + transcript + the operations performed. Claude Code's loop
-  minus UI, as a library; streaming + cancel ride the existing `ChatEvent` stream.
+- [ ] rozum-gateway-tool-contract - **P0b (rozum).** Stabilize + document the
+  Contract-1 surface the SDK targets: `/v1/chat/completions` (+ `/v1/messages`) with
+  `tools` (JSON-Schema), `tool_choice`, `temperature`, `stream`; response `tool_calls`
+  (id/name/arguments) vs text + `finish_reason`; SSE tool-call argument deltas. Mostly
+  exists (tool-use + multi-turn history + SSE) — harden it as a stable contract +
+  conformance tests so the scalascript SDK can build against it confidently.
 
-- [ ] rozum-toolsource-adapters - **P0.** A `ToolSource` trait + two adapters: (a)
-  **MCP client** (connect to the app's MCP server, auto-discover tools, execute over
-  MCP — reuses `rmcp` + the room MCP-client plumbing); (b) **direct callback**
-  (`Fn(ToolCall)->ToolResult`, in-process, no serialization). The app picks.
+- [ ] rozum-distributed-readiness - **P0b/P1 (rozum).** The gateway as a deployable,
+  horizontally-scalable, stateless service: health/readiness endpoints, clean
+  load-balancing (any instance serves any request), a model pool/router, graceful
+  drain. Partly exists (shared-gateway daemon, `concurrency::admit_wrap`, the launch
+  proxy's replay/retry) — consolidate into a documented "run rozum as a service" path.
 
-- [ ] rozum-embed-crate - **P0.** A stable, minimal, versioned public crate
-  (`rozum-embed`) — the only surface an embedder links: build a backend (local MLX or
-  HTTP), construct the agent runtime, pick a tool source. Keeps busi off rozum's
-  internals. (Enables the Mode-A in-process Rust integration.)
+- [ ] rozum-agent-runtime - **P0b (rozum, optional, DUAL-PURPOSE).** A Rust reference
+  implementation of the agent loop (Contracts 2–3): `(backend, system, user,
+  tool_source, budget)` → model call → `tool_use` → execute via tool source → feed
+  result → repeat. Serves two purposes: (a) the in-process **embedded mode** (small
+  model, no network), and (b) the **executable spec** the scalascript SDK mirrors.
+  `ToolSource` trait + adapters: MCP-client (reuse `rmcp`) and direct callback.
 
-- [ ] rozum-agent-http - **P1 (optional, Mode B).** A `/v1/agent` HTTP endpoint:
-  prompt + MCP-server pointer → run the loop → return result + transcript. For a
-  shared resident model across clients (vs in-process embedding).
+- [ ] rozum-embed-crate - **P2 (rozum, optional).** Stable minimal public crate
+  (`rozum-embed`) for the in-process embedded mode (Rust busi component + small model):
+  build a backend, run the reference agent-runtime, pick a tool source. Not the primary
+  path (distributed HTTP is) — the small-model optimization.
 
-- [ ] structured-output-for-tools - **P2.** Constrained / structured decoding that
-  enforces the model's tool-argument output against the app's JSON tool schemas
-  during decoding → tool-arg reliability for small local models (they can't emit an
-  invalid arg). Supersedes the older `structured-output` Runtime/UX item; now driven
-  by a concrete consumer (busi). Native MLX sampler-level work + a schema→constraint
-  compiler.
+- [ ] structured-output-for-tools - **P2 (rozum).** Constrained / structured decoding
+  that enforces the model's tool-argument output against the app's JSON tool schemas
+  during decoding → tool-arg reliability for small local models (can't emit an invalid
+  arg). Supersedes the older Runtime/UX `structured-output`; now driven by a concrete
+  consumer. Native MLX sampler-level work + a schema→constraint compiler. Exposed over
+  Contract-1 so the SDK just passes schemas.
 
-- [ ] busi-eval-and-tune - **P1→P3 (mostly busi-side; tracked here for the rozum
-  hooks).** busi builds the eval harness (20–50 real flows + task-success metric) to
-  pick the smallest model that clears the bar; then QLoRA a small model on collected
-  `(prompt → tool-call)` traces (offline; see `tune-toolcall-format`) → a fast,
-  private, on-device busi model. rozum side: serve the merged checkpoint (already
-  works) + expose decode determinism for reproducible eval.
+- [ ] busi-eval-and-tune - **P1→P3 (busi-side; rozum hooks only).** busi/scalascript
+  build the eval harness (20–50 real flows + task-success metric) to pick the smallest
+  model that clears the bar; then QLoRA a small model on collected `(prompt →
+  tool-call)` traces (offline; see `tune-toolcall-format`) → a fast, private,
+  on-device busi model. rozum side: serve the merged checkpoint (already works) +
+  decode determinism (`temperature:0`) for reproducible eval.
+
+  NOTE: the **generic scalascript agent SDK** (model HTTP/SSE client, agent loop, tool
+  framework, schema derivation, endpoint pool/retry — the "build once, reuse in any
+  app" layer) is owned by the scalascript/busi side, not rozum. rozum provides the
+  gateway contract + the optional Rust reference runtime as its executable twin.
 
 ### Native MLX runtime — backend feature parity (vs mistralrs)
 
