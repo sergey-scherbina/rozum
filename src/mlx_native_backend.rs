@@ -777,28 +777,38 @@ fn config_model_type(cfg: &serde_json::Value) -> Option<&str> {
         })
 }
 
+/// Download gate: accept only a `config.json` whose `model_type` the native
+/// runtime can load (rejects an unsupported repo before its multi-GB weights).
+fn model_type_gate(cfg: &serde_json::Value) -> Result<(), String> {
+    match config_model_type(cfg) {
+        Some(mt) if supported_model_type(mt) => Ok(()),
+        Some(mt) => Err(format!(
+            "native MLX does not support model_type '{mt}' (Qwen2/Qwen3/Qwen3.6/Llama)"
+        )),
+        None => Err("config.json has no model_type".to_owned()),
+    }
+}
+
 /// Resolve a model spec to a local model dir, **downloading it if absent**.
 ///
-/// Tries the local HF cache first (`resolve_model_dir`); on a miss, if the spec
-/// is an HF repo (`mlx-community:` / `hf:` / `owner/repo`), fetches the snapshot
-/// via [`crate::hf_hub`] — but only after `config.json` confirms a supported
-/// `model_type`, so an unsupported repo is rejected before its weights. Returns
-/// `None` (and the chain falls through) when the spec isn't an HF repo or the
+/// Tries the local cache first (`resolve_model_dir`); on a miss, fetches the
+/// snapshot from the matching hub — `modelscope:<owner>/<repo>` → ModelScope,
+/// otherwise `mlx-community:` / `hf:` / `owner/repo` → HuggingFace — but only
+/// after `config.json` confirms a supported `model_type`. Each writes the hub's
+/// native cache layout so the download is shared with that hub's own tools.
+/// Returns `None` (chain falls through) when the spec isn't a hub repo or the
 /// download fails.
 pub async fn ensure_model_dir(spec: &str) -> Option<std::path::PathBuf> {
     if let Some(dir) = resolve_model_dir(spec) {
         return Some(dir);
     }
-    let repo = spec_to_hf_repo(spec)?;
-    match crate::hf_hub::ensure_snapshot(&repo, |cfg| match config_model_type(cfg) {
-        Some(mt) if supported_model_type(mt) => Ok(()),
-        Some(mt) => Err(format!(
-            "native MLX does not support model_type '{mt}' (Qwen3/Qwen3.6 only)"
-        )),
-        None => Err("config.json has no model_type".to_owned()),
-    })
-    .await
-    {
+    let result = if let Some(repo) = spec.strip_prefix("modelscope:") {
+        crate::modelscope::ensure_snapshot(repo, model_type_gate).await
+    } else {
+        let repo = spec_to_hf_repo(spec)?;
+        crate::hf_hub::ensure_snapshot(&repo, model_type_gate).await
+    };
+    match result {
         Ok(dir) => Some(dir),
         Err(e) => {
             eprintln!("rozum mlx: auto-download of '{spec}' skipped: {e}");
@@ -822,6 +832,13 @@ pub fn resolve_model_dir(spec: &str) -> Option<std::path::PathBuf> {
     let direct = PathBuf::from(spec);
     if direct.is_dir() && direct.join("config.json").is_file() {
         return Some(direct);
+    }
+
+    // ModelScope specs resolve to ModelScope's own (flat) cache dir.
+    if let Some(r) = spec.strip_prefix("modelscope:") {
+        let (owner, name) = r.split_once('/')?;
+        let dir = crate::modelscope::model_cache_dir(owner, name)?;
+        return dir.join("config.json").is_file().then_some(dir);
     }
 
     // Normalize the spec's `org/name`, mirroring mistralrs_backend::normalize_spec.
@@ -982,6 +999,29 @@ mod tests {
         let stream = backend.chat(req).await.expect("chat");
         let text = collect_to_string(stream).await.expect("collect");
         eprintln!("MLX LLAMA OUTPUT: {text}");
+        assert!(text.contains("Paris"), "expected Paris, got: {text}");
+    }
+
+    // End-to-end via ModelScope: auto-download an MLX model from modelscope.cn
+    // (not HF) + load + generate. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_modelscope_chat
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "network: auto-downloads from modelscope.cn"]
+    async fn mlx_modelscope_chat() {
+        use super::{MlxNativeBackend, ensure_model_dir};
+        use crate::backend::{ChatBackend, ChatRequest, collect_to_string};
+
+        let spec = "modelscope:mlx-community/Qwen2.5-0.5B-Instruct-4bit";
+        let dir = ensure_model_dir(spec).await.expect("modelscope download/resolve");
+        let backend = MlxNativeBackend::new(dir, "Qwen2.5-0.5B-Instruct-4bit".into())
+            .await
+            .expect("backend load");
+        let req =
+            ChatRequest::simple("What is the capital of France? Answer in one short sentence.");
+        let stream = backend.chat(req).await.expect("chat");
+        let text = collect_to_string(stream).await.expect("collect");
+        eprintln!("MLX MODELSCOPE OUTPUT: {text}");
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
     }
 
