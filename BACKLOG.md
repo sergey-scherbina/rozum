@@ -65,6 +65,27 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   Python `mlx_lm` reaches ~22 t/s vs our ~12 — and was never probed. See
   `mlx-native-perf-compile` below; the fixed-shape-cache prereq is NOT moot.
 
+- [x] mlx-native-perf-pipeline - **DONE (merged).** Decode-speed root cause settled:
+  it was PIPELINING, not compile/cache. `stream_generation` now `async_eval`s step n+1
+  before blocking on step n (dense arches: Qwen3/Qwen3-MoE/Llama/Qwen2; hybrid stays
+  serial). Qwen3-4B **114→128 t/s = 96.5% of Python**; byte-exact all arches. Compile
+  probes (`mlx_compile_probe_plain`) showed plain `compile` is 0.69× — not the lever;
+  the fixed-cache + compiled-decode redesign is shelved. Spec: mlx-native-runtime.md
+  "Performance — decode parity".
+
+- [ ] mlx-native-perf-hybrid-mlxbump - **Hybrid (Qwen3.6) decode ~12 → ~22 t/s.** The
+  GatedDeltaNet kernel needs a blocking `eval` per layer (~48/token) to dodge a
+  metal_kernel buffer-donation bug → the forward self-blocks, so it can't pipeline.
+  Removing the eval OR `async_eval` both give garbage on our **MLX 0.30.6**; Python's
+  kernel has NO eval and is correct on **MLX 0.31.2** → the bug is fixed upstream. Fix
+  = bump `mlx-sys` 0.30.6 → 0.31.2 (needs the fft.cpp-exclude + ops.cpp patch from the
+  earlier attempt), drop `gated_delta.rs:250`'s eval, then pipeline the hybrid like the
+  dense path + flip its `pipeline=false` to true. Heavy: ~15-min MLX C++ rebuild, build
+  patches, 27B byte-exact validation, reboot-risky (run on the small models where
+  possible; the SPRINT RESUME CHECKPOINT + small-model discipline applies). High
+  probability but unproven (the earlier 0.31.2 attempt was for the rope bug, never
+  tested gated_delta).
+
 - [ ] mlx-native-perf-compile - the top remaining decode lever (~2× potential): a
   capture-based plain-`compile`d decode step closing over the weights, taking only
   `(token, cache)` as args. **Prereq:** fixed-shape KV cache (preallocate + in-place

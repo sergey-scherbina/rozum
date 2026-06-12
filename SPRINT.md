@@ -108,14 +108,23 @@ state).
   path (`pipeline=false`). Byte-exact on all four arches (Qwen3-4B/Qwen2/Llama/Qwen3.6
   oracle strings unchanged). Probe `mlx_decode_pipeline_probe`: 4B **114→128 t/s =
   96.5% of Python's 132.9**. **The dense decode gap is closed.**
-- **HYBRID 27B still ~12 t/s (the remaining gap).** 27B bench (serial vs pipelined)
-  showed pipelining is neutral-to-negative for the hybrid (128 n=128 1.22×, but ≤1×
-  at 512/1024) BECAUSE the GatedDeltaNet custom kernel does a **mandatory per-call
-  `eval` inside the forward** (the buffer-donation fix) → the forward already blocks
-  mid-step, so token-level `async_eval` can't overlap. **The real hybrid lever:
-  eliminate the buffer-donation hazard WITHOUT the per-call eval** (mark `state_out`
-  non-donatable / copy it / restructure the kernel's output), so the hybrid forward
-  stops self-blocking and can pipeline like Python. That is the next investigation.
+- **HYBRID 27B still ~12 t/s — lever found, but it's an MLX version bump.** The
+  GatedDeltaNet kernel does a **mandatory blocking `eval` after EVERY layer**
+  (`gated_delta.rs:250`, ~48/token) — the buffer-donation fix. Investigated
+  conclusively (fork `ROZUM_GD_NO_EVAL` / `ROZUM_GD_ASYNC` gates, then reverted):
+  - **no-eval → garbage** (`)`); **async_eval → garbage** (`)`). So neither removing
+    nor async-ing works on our MLX. The blocking eval is genuinely required.
+  - **Python's `gated_delta_kernel` has NO eval at all** and is correct — because it
+    runs on **MLX 0.31.2**; we pin **0.30.6**. The metal_kernel buffer-donation bug is
+    evidently **fixed in newer MLX.** So the hybrid lever = **bump mlx-sys 0.30.6 →
+    0.31.2**, then drop the per-call eval → the 48 layers stop self-blocking → the
+    hybrid pipelines like Python → ~22 t/s.
+  - NOTE: an earlier 0.31.2 bump attempt (memory) was for the *rope* bug (version-
+    independent, reverted) and **never tested the gated_delta donation** — so this is
+    unproven but high-probability. It needs the fft.cpp-exclude + ops.cpp patch the
+    memory recorded, a ~15-min MLX C++ rebuild, and careful 27B byte-exact validation.
+    DEDICATED TASK (`mlx-native-perf-hybrid-mlxbump`, in BACKLOG) — heavy + reboot-risky,
+    not a tail-end change.
 - **(historical) Stage 0 done (probe written + run); hypothesis pivoted.**
 - **Results so far (2026-06-12):**
   - `mlx_compile_probe_plain` on Qwen3-0.6B-4bit (thread-local model + plain
