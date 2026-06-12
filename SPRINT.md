@@ -511,12 +511,16 @@ piggyback for agents that take neither.
   `/v1/chat/completions` `system` message; tool JSON / SSE framing untouched,
   non-chat paths zero-touch. Drain is rename-then-read (no lost lines on a racing
   append) and only fires once injection is guaranteed (no loss on a parse miss).
-  Caps: 4 KiB/injection, 16 KiB drop-file tail. **Opt-in via `ROZUM_PIGGYBACK=1`**
-  (room text = prompt-injection surface); one env arms both ends (launch-local
-  proxy reads it; agent inherits it through `exec_agent` → mcp-proxy writer). 8
-  unit tests (append/drain round-trip + coalesce + caps + render + both inject
-  shapes + zero-touch-when-disabled). Reaches Codex/aider/opencode/older-Claude at
-  their next inference call (not a true idle wake). Build order item 2 in the spec.
+  Caps: 4 KiB/injection, 16 KiB drop-file tail. **On by default; disable with
+  `rozum launch --no-piggyback` or `ROZUM_PIGGYBACK=0`** (room text = prompt-injection
+  surface, but inert unless the agent joined a room). `run_launch` resolves the
+  decision once into a `WakeupPolicy` and drives both ends: threads the bool into
+  the launch-local proxy reader (`ProxyState::with_piggyback` / `serve(.., piggyback)`
+  — a disabled launch never drains, not even a stale drop file) and exports
+  `ROZUM_PIGGYBACK=1|0` to the agent so the mcp-proxy writer agrees. 8 unit tests
+  (append/drain round-trip + coalesce + caps + render + both inject shapes +
+  zero-touch-when-disabled). Reaches Codex/aider/opencode/older-Claude at their next
+  inference call (not a true idle wake). Build order item 2 in the spec.
 
 - [x] runtime-config - Load backend policy and backend list from `rozum.toml`.
   - `src/config.rs`: `RuntimeConfig` (serde + `toml`) resolved from `$ROZUM_CONFIG`

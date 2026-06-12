@@ -111,10 +111,19 @@ pub struct ProxyState {
     /// risky prefill runs serialized — no neighbour competes for memory, which
     /// clears most big-prompt OOMs.
     lane: Arc<tokio::sync::RwLock<()>>,
+    /// Tier-3 piggyback reader switch. `rozum launch` decides it (default on,
+    /// off under `--no-piggyback`/`ROZUM_PIGGYBACK=0`) and threads it here so a
+    /// disabled launch never drains drop files — not even stale ones left by an
+    /// earlier session. Spec: `docs/specs/rozum-native-channels.md` (Tier 3).
+    piggyback: bool,
 }
 
 impl ProxyState {
     pub fn new(daemon_port: u16) -> Self {
+        Self::with_piggyback(daemon_port, true)
+    }
+
+    pub fn with_piggyback(daemon_port: u16, piggyback: bool) -> Self {
         ProxyState {
             // No timeout: generations can stream for minutes. Per-request cancel
             // comes from the client disconnect propagating through the body.
@@ -128,6 +137,7 @@ impl ProxyState {
             poison_max: poison_max_from_env(),
             poison_ttl_secs: poison_ttl_from_env(),
             lane: Arc::new(tokio::sync::RwLock::new(())),
+            piggyback,
         }
     }
 
@@ -207,10 +217,15 @@ fn estimate_cost(body: &[u8]) -> RequestCost {
     }
 }
 
-/// Serve the reverse proxy on `listener`, forwarding to `daemon_port`. Runs until
-/// the process exits (it dies with the launch, like the in-process gateway did).
-pub async fn serve(listener: tokio::net::TcpListener, daemon_port: u16) -> std::io::Result<()> {
-    serve_with(listener, ProxyState::new(daemon_port)).await
+/// Serve the reverse proxy on `listener`, forwarding to `daemon_port`. `piggyback`
+/// gates the Tier-3 reader (room-activity injection). Runs until the process exits
+/// (it dies with the launch, like the in-process gateway did).
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    daemon_port: u16,
+    piggyback: bool,
+) -> std::io::Result<()> {
+    serve_with(listener, ProxyState::with_piggyback(daemon_port, piggyback)).await
 }
 
 async fn serve_with(listener: tokio::net::TcpListener, state: ProxyState) -> std::io::Result<()> {
@@ -270,7 +285,7 @@ async fn forward(State(state): State<ProxyState>, req: Request) -> Response {
     // AFTER fingerprinting (above) so the injected room text never perturbs the
     // poison identity, and once here (not per retry) so a drain happens once.
     // Spec: docs/specs/rozum-native-channels.md (Tier 3).
-    let send_body = maybe_inject_room_activity(&body_bytes, &path_and_query);
+    let send_body = maybe_inject_room_activity(&body_bytes, &path_and_query, state.piggyback);
 
     // Tier-2: order this request among the agent's own in-flight requests (SJF +
     // fast lane). `queue_max = 0`, so this never sheds — at worst it parks until a
@@ -355,8 +370,12 @@ async fn forward(State(state): State<ProxyState>, req: Request) -> Response {
 /// the path is not a chat endpoint, the body is not JSON we recognise, or nothing
 /// is pending. The drain happens only once a successful injection is guaranteed,
 /// so a parse miss never loses pending lines.
-fn maybe_inject_room_activity(body: &axum::body::Bytes, path_and_query: &str) -> axum::body::Bytes {
-    if !crate::meeting::piggyback::enabled() {
+fn maybe_inject_room_activity(
+    body: &axum::body::Bytes,
+    path_and_query: &str,
+    enabled: bool,
+) -> axum::body::Bytes {
+    if !enabled {
         return body.clone();
     }
     let path = path_and_query.split('?').next().unwrap_or(path_and_query);
@@ -647,12 +666,12 @@ mod tests {
 
     #[test]
     fn maybe_inject_is_zero_touch_when_disabled_or_non_chat() {
-        // Piggyback off by default in the test env: body is returned verbatim.
         let body = axum::body::Bytes::from_static(b"{\"messages\":[]}");
-        let out = maybe_inject_room_activity(&body, "/v1/messages");
+        // Reader disabled: body is returned verbatim even on a chat path.
+        let out = maybe_inject_room_activity(&body, "/v1/messages", false);
         assert_eq!(out, body);
-        // Non-chat path is never parsed/drained.
-        let out = maybe_inject_room_activity(&body, "/v1/models");
+        // Enabled but a non-chat path is never parsed/drained.
+        let out = maybe_inject_room_activity(&body, "/v1/models", true);
         assert_eq!(out, body);
     }
 
@@ -670,6 +689,7 @@ mod tests {
                 poison_max: 3,
                 poison_ttl_secs: 3600,
                 lane: Arc::new(tokio::sync::RwLock::new(())),
+                piggyback: false,
             }
         }
     }

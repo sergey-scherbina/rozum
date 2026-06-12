@@ -167,6 +167,13 @@ enum Command {
         #[arg(long)]
         channel_mcp_name: Option<String>,
 
+        /// Disable Tier-3 piggyback wakeup (on by default): don't fold pending
+        /// meeting-room activity into the agent's chat requests as a system note.
+        /// Equivalent to `ROZUM_PIGGYBACK=0`. Only ever active for an agent that
+        /// has joined a room. Spec: `docs/specs/rozum-native-channels.md`.
+        #[arg(long)]
+        no_piggyback: bool,
+
         /// Program to launch and its arguments
         #[arg(trailing_var_arg = true, required = true)]
         program: Vec<String>,
@@ -365,6 +372,7 @@ async fn main() {
             no_model,
             no_channel_wakeup,
             channel_mcp_name,
+            no_piggyback,
             program,
         }) => {
             // Precedence: --channel-mcp-name > ROZUM_CHANNEL_MCP_NAME > "rozum".
@@ -375,7 +383,12 @@ async fn main() {
                 suppressed: no_channel_wakeup,
                 server_name,
             };
-            run_launch(model, port, n_ctx, dedicated, no_model, channels, program).await;
+            // Tier-3 piggyback: on by default, off under `--no-piggyback` or
+            // `ROZUM_PIGGYBACK=0`. Resolve once here; the same decision drives the
+            // launch-local proxy reader and the agent's mcp-proxy writer.
+            let piggyback = !no_piggyback && rozum::meeting::piggyback::enabled();
+            let wakeup = WakeupPolicy { channels, piggyback };
+            run_launch(model, port, n_ctx, dedicated, no_model, wakeup, program).await;
         }
         Some(Command::Models { action }) => {
             run_models(action).await;
@@ -528,7 +541,8 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
 
     const KNOWN_FLAGS: &[&str] = &["--model", "--port", "--n-ctx", "--channel-mcp-name"];
     // Value-less flags: pulled to the front without consuming a following arg.
-    const KNOWN_BOOL_FLAGS: &[&str] = &["--no-model", "--dedicated", "--no-channel-wakeup"];
+    const KNOWN_BOOL_FLAGS: &[&str] =
+        &["--no-model", "--dedicated", "--no-channel-wakeup", "--no-piggyback"];
 
     // Collect args after "launch", pull known flag+value pairs to the front.
     let tail: Vec<String> = args.split_off(launch_idx + 1);
@@ -581,6 +595,15 @@ enum LaunchTarget {
 struct ChannelWakeup {
     suppressed: bool,
     server_name: String,
+}
+
+/// The two meeting-room wakeup policies resolved at launch: Tier-1 Claude-Code
+/// channel registration and Tier-3 gateway piggyback. `piggyback` is the resolved
+/// decision (default on; off under `--no-piggyback`/`ROZUM_PIGGYBACK=0`) threaded
+/// to both the launch-local proxy reader and the agent's mcp-proxy writer.
+struct WakeupPolicy {
+    channels: ChannelWakeup,
+    piggyback: bool,
 }
 
 impl ChannelWakeup {
@@ -643,9 +666,10 @@ async fn run_launch(
     n_ctx: Option<u32>,
     dedicated: bool,
     no_model: bool,
-    channels: ChannelWakeup,
+    wakeup: WakeupPolicy,
     program: Vec<String>,
 ) {
+    let WakeupPolicy { channels, piggyback } = wakeup;
     let model_spec = match resolve_launch_target(model, no_model).await {
         // No target and none resolvable (non-TTY without --model, or cancelled).
         None => std::process::exit(2),
@@ -662,7 +686,8 @@ async fn run_launch(
     let n_ctx = resolve_n_ctx(&model_spec, n_ctx);
 
     if dedicated {
-        run_launch_dedicated(model_spec, port, n_ctx, channels, program).await;
+        let wakeup = WakeupPolicy { channels, piggyback };
+        run_launch_dedicated(model_spec, port, n_ctx, wakeup, program).await;
         return; // unreachable: the dedicated path execs + exits
     }
 
@@ -685,7 +710,7 @@ async fn run_launch(
     // that forwards to the shared daemon. This is the path later phases use for
     // transparent replay / poison handling / model-swap holds; here it is a
     // transparent pass-through. Spec: shared-gateway-proxy.
-    let agent_port = match start_launch_proxy(gw_port).await {
+    let agent_port = match start_launch_proxy(gw_port, piggyback).await {
         Some(p) => p,
         None => {
             // Couldn't bind a local proxy port — fall back to pointing the agent
@@ -694,17 +719,18 @@ async fn run_launch(
             gw_port
         }
     };
-    exec_agent(program, &effective_model, agent_port, &channels).await
+    exec_agent(program, &effective_model, agent_port, &channels, piggyback).await
 }
 
 /// Bind an ephemeral loopback port, start the launch-local reverse proxy on it
 /// (forwarding to the shared daemon on `daemon_port`), and return the proxy's
-/// port. The proxy task dies with this process when the agent exits.
-async fn start_launch_proxy(daemon_port: u16) -> Option<u16> {
+/// port. `piggyback` gates the Tier-3 room-activity reader. The proxy task dies
+/// with this process when the agent exits.
+async fn start_launch_proxy(daemon_port: u16, piggyback: bool) -> Option<u16> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.ok()?;
     let port = listener.local_addr().ok()?.port();
     tokio::spawn(async move {
-        if let Err(e) = rozum::proxy::serve(listener, daemon_port).await {
+        if let Err(e) = rozum::proxy::serve(listener, daemon_port, piggyback).await {
             eprintln!("rozum launch: proxy exited: {e}");
         }
     });
@@ -858,9 +884,10 @@ async fn run_launch_dedicated(
     model_spec: String,
     port: Option<u16>,
     n_ctx: u32,
-    channels: ChannelWakeup,
+    wakeup: WakeupPolicy,
     program: Vec<String>,
 ) {
+    let WakeupPolicy { channels, piggyback } = wakeup;
     let port = port.unwrap_or_else(|| {
         std::net::TcpListener::bind("127.0.0.1:0")
             .ok()
@@ -893,7 +920,7 @@ async fn run_launch_dedicated(
         }
     });
     // The in-process gateway dies with this process on exec_agent's exit.
-    exec_agent(program, &model_spec, port, &channels).await
+    exec_agent(program, &model_spec, port, &channels, piggyback).await
 }
 
 /// Reuse a healthy running shared gateway, else spawn a detached `rozum gateway`
@@ -1224,6 +1251,7 @@ async fn exec_agent(
     model_for_alias: &str,
     port: u16,
     channels: &ChannelWakeup,
+    piggyback: bool,
 ) -> ! {
     use std::process::Command as StdCommand;
     // channel-wakeup-launch-flag: append the `--dangerously-load-development-channels`
@@ -1243,6 +1271,9 @@ async fn exec_agent(
     cmd.env("ANTHROPIC_BASE_URL", &base);
     cmd.env("ANTHROPIC_AUTH_TOKEN", "rozum-local");
     cmd.env_remove("ANTHROPIC_API_KEY");
+    // Tier-3 piggyback: export the launch's decision so the agent's mcp-proxy
+    // writer matches the launch-local proxy reader exactly (both on, or both off).
+    cmd.env("ROZUM_PIGGYBACK", if piggyback { "1" } else { "0" });
     cmd.env("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
     cmd.env("ANTHROPIC_MODEL", &claude_alias);
     cmd.env("ANTHROPIC_DEFAULT_OPUS_MODEL", &claude_alias);
