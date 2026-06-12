@@ -101,15 +101,29 @@ state).
   SMALLEST model (`mlx-community:Qwen3-0.6B-4bit`, cached), NOT 27B. Check
   `memory_pressure` before any model load; if free < ~25%, stop and free first. Only
   use 27B for the final Stage-3 A/B.
-- **Current stage:** Stage 0 (writing the plain-`compile` probe). 
-- **Last done:** plan recorded; reference probe is the OLD `mlx_compile_probe`
-  (`src/mlx_native_backend.rs`, uses `compile_with_state` — the wrong API; keep as the
-  net-negative baseline). 
-- **Next concrete step:** add `mlx_compile_probe_plain` next to it using
-  `mlx_rs::transforms::compile::compile` with the model captured (Rc<RefCell> if the
-  borrow checker needs it) and only the token array as `args`; run on Qwen3-0.6B-4bit,
-  print compiled vs uncompiled per-step ms.
-- **Results so far:** (none yet — fill in `COMPILE-PROBE-PLAIN T=1 …` lines here).
+- **Current stage:** Stage 0 done (probe written + run); hypothesis pivoted.
+- **Results so far (2026-06-12):**
+  - `mlx_compile_probe_plain` on Qwen3-0.6B-4bit (thread-local model + plain
+    `compile`, weights captured, only token marshaled):
+    `T=1 uncompiled 3.137ms vs compiled 4.541ms (0.69×); T=16 1.00×`.
+    → **Plain `compile` is ALSO not a win.** So the decode gap is NOT a compile
+    problem. (Makes sense: compile fuses elementwise glue, NOT the matmul GEMMs that
+    dominate a transformer's ~450 dispatches.) **This rules out the fixed-cache +
+    compiled-decode redesign as the lever — big save.**
+  - The probe used a FRESH cache, so it didn't measure the cache cost. Confirmed
+    `ConcatKeyValueCache::update_and_fetch` does `concatenate_axis` EVERY step
+    (`cache.rs:95`) → O(n) realloc+copy per token, vs Python's preallocated in-place
+    KVCache. BUT the old bench was ~flat across 128/512/1024 context (~13/12/12 t/s),
+    which argues concat is NOT the dominant cost at ≤1024 either.
+- **New hypotheses to test (in order):** (1) **pipelining** — we do a blocking
+  `eval`+`item::<u32>()` readback every token (GPU idles while Rust preps next step);
+  Python `mlx_lm` uses `async_eval` to overlap step n+1 compute with step n readback.
+  (2) **op count** — our model code may emit more ops/dispatches than `mlx_lm`'s.
+  (3) fixed in-place cache (only if pipelining doesn't close it).
+- **Next concrete step:** get the TARGET — run Python `mlx_lm` decode t/s on
+  `Qwen3-4B-4bit` (oracle in `/tmp/mlxvenv`) AND our decode on the same model; if the
+  ~1.8× gap reproduces on 4B, iterate the pipelining experiment on 4B (fast, memory
+  -safe). Then prototype async-eval pipelining in the decode loop and A/B.
 
 #### P0 (current): mlx-native-runtime — pure-Rust native MLX runtime
 

@@ -1361,6 +1361,87 @@ mod tests {
         }
     }
 
+    // Stage-0 perf probe (P0 mlx-native-perf-compile): the CORRECT compile API.
+    // Unlike `mlx_compile_probe` (which uses `compile_with_state` → re-marshals all
+    // ~400 params/call → net-negative), this uses *plain* `compile`: the model lives
+    // in a thread-local, the compiled closure captures NOTHING (Copy+'static), so
+    // MLX traces once and bakes the weights into the graph — only the token `arg`
+    // crosses FFI per call, exactly like Python `mx.compile`. Go/no-go for the
+    // fixed-shape-cache + compiled-decode redesign. Small model on purpose (memory).
+    // Run: cargo test --features mlx-native -- --ignored --nocapture mlx_compile_probe_plain
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "perf probe; requires local mlx-community/Qwen3-0.6B-4bit"]
+    fn mlx_compile_probe_plain() {
+        use mlx_lm::cache::ConcatKeyValueCache;
+        use mlx_lm::models::qwen3::{load_qwen3_model, Model, ModelInput};
+        use mlx_rs::Array;
+        use mlx_rs::module::Module;
+        use mlx_rs::ops::indexing::{IndexOp, NewAxis};
+        use mlx_rs::transforms::compile::compile;
+        use mlx_rs::transforms::eval;
+        use std::cell::RefCell;
+        use std::time::Instant;
+
+        thread_local! {
+            static PROBE_MODEL: RefCell<Option<Model>> = const { RefCell::new(None) };
+        }
+
+        let dir = resolve_model_dir("mlx-community:Qwen3-0.6B-4bit")
+            .expect("Qwen3-0.6B-4bit not in HF cache (auto-download it first)");
+        let model = load_qwen3_model(&dir).expect("load");
+        PROBE_MODEL.with(|c| *c.borrow_mut() = Some(model));
+
+        // Non-capturing (Copy + 'static): reads the model from the thread-local, runs
+        // one forward over `[1, T]` with a fresh cache. Fixed shapes → graph reused.
+        let step = |args: &[Array]| -> Vec<Array> {
+            PROBE_MODEL.with(|c| {
+                let mut m = c.borrow_mut();
+                let model = m.as_mut().expect("probe model set");
+                let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+                let input = ModelInput { inputs: &args[0], mask: None, cache: &mut cache };
+                let logits =
+                    <Model as Module<ModelInput<'_, ConcatKeyValueCache>>>::forward(model, input)
+                        .expect("forward");
+                vec![logits]
+            })
+        };
+
+        for &t in &[1i32, 16] {
+            let ids: Vec<u32> = (0..t).map(|i| (1000 + i) as u32).collect();
+            let input = Array::from(&ids[..]).index(NewAxis);
+            let args = [input];
+            let iters = 64;
+
+            // Uncompiled baseline.
+            let _ = eval([&step(&args)[0]]);
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                let o = step(&args);
+                eval([&o[0]]).unwrap();
+            }
+            let uncompiled = t0.elapsed().as_secs_f64() / iters as f64;
+
+            // Compiled (plain — weights captured, only `args` marshaled).
+            let mut compiled = compile(step, None);
+            let _ = eval([&compiled(&args).unwrap()[0]]); // warm/trace
+            let t1 = Instant::now();
+            for _ in 0..iters {
+                let o = compiled(&args).unwrap();
+                eval([&o[0]]).unwrap();
+            }
+            let comp = t1.elapsed().as_secs_f64() / iters as f64;
+
+            eprintln!(
+                "COMPILE-PROBE-PLAIN T={t:>2}  uncompiled={:.3}ms  compiled={:.3}ms  speedup={:.2}x",
+                uncompiled * 1e3,
+                comp * 1e3,
+                uncompiled / comp
+            );
+        }
+        PROBE_MODEL.with(|c| *c.borrow_mut() = None);
+    }
+
     // Mid-prefill cancellation: `Model::prefill_cancellable` must bail (return
     // None) at a chunk boundary as soon as `should_cancel()` fires, so a cancel on
     // a long prompt is honored DURING prefill (not only after it). Deterministic
