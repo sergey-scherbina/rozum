@@ -83,9 +83,11 @@ impl ChatBackend for MlxNativeBackend {
 
 - [x] `MlxNativeBackend::new` loads weights + tokenizer + chat template once (on
       the worker thread); every `chat()` reuses them.
-- [ ] Auto-download via `hf-hub` for `hf:`/`mlx-community:` specs into a local
-      dir, then load. (Today: `resolve_model_dir` reuses an already-downloaded
-      HF snapshot; download is the open gap.)
+- [x] Auto-download for `hf:`/`mlx-community:`/`owner/repo` specs into the HF
+      cache, then load — `src/hf_hub.rs` (`reqwest` streaming, no `hf-hub` crate).
+      `ensure_model_dir` = cached-or-download; `config.json` is fetched first and
+      gated on a supported `model_type` before the weights; live per-file progress
+      line; `HF_TOKEN` honored. `resolve_model_dir` stays the cache-only resolver.
 - [x] Loads **AFQ-quantized** mlx-community checkpoints (4-bit g64) via the
       fork's config-driven `nn::quantize` + remapped `load_safetensors`.
 - [x] Streaming: drive the `Generate` token iterator, map each token to

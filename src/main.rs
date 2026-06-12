@@ -2454,14 +2454,17 @@ async fn try_build_mlx_native_backend(
     model_spec: &str,
     _n_ctx: u32,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
-    use rozum::mlx_native_backend::{MlxNativeBackend, resolve_model_dir};
+    use rozum::mlx_native_backend::{MlxNativeBackend, ensure_model_dir};
     // GGUF model FILES and `lmstudio:` specs belong to other backends. Use
     // `is_file()` (not `extension()`, which misfires on dotted repo names like
     // `mlx-community:Qwen3.6-27B-4bit`); a local MLX *directory* still resolves.
     if model_spec.starts_with("lmstudio:") || std::path::Path::new(model_spec).is_file() {
         return None;
     }
-    let dir = resolve_model_dir(model_spec)?;
+    // Use a cached snapshot if present, else auto-download it from HuggingFace
+    // (gated on a supported `model_type` so we never pull weights for a repo this
+    // runtime can't run). `None` → fall through to the next backend.
+    let dir = ensure_model_dir(model_spec).await?;
     let id = rozum::mistralrs_backend::normalize_spec(model_spec);
     match MlxNativeBackend::new(dir.clone(), id.clone()).await {
         Ok(b) => {

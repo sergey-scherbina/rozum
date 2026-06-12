@@ -150,8 +150,44 @@ is 100% MLX, candle only as external oracle.
     `intermediate_size` optional (pure-MoE omits it). Greedy output matches Python
     mlx_lm: "Thinking Process:" — worked on the first forward run (only two config
     fixes needed). E2E test `mlx_qwen35_moe_chat`. **Phase 2 COMPLETE.**
-- [ ] mlx-native-p3 - Phase 3: broaden catalog (Llama upstream; Qwen2.5 /
-  Qwen2.5-Coder deltas). SKIPPED for now (user request) — revisit after p4.
+#### mlx-native catalog + UX (user request 2026-06-12) — broaden models + auto-download
+
+- [x] mlx-native-autodownload - **DONE (`feature/mlx-autodownload`, rozum-only).**
+  Native MLX now auto-fetches an MLX snapshot from HuggingFace when not cached. New
+  `src/hf_hub.rs`: `ensure_snapshot(repo, config_gate)` — lists files via the HF API
+  (`…/api/models/<repo>` → `sha` + `siblings`), downloads into the HF cache layout
+  (`~/.cache/huggingface/hub/models--<org>--<name>/snapshots/<sha>/`) via `reqwest`
+  streaming (no `hf-hub` crate). **`config.json` fetched FIRST + passed to a gate** so an
+  unsupported `model_type` is rejected before the multi-GB weights. **Live progress
+  line** per file (`[i/N] <file>  <done>/<total> (NN%)`, throttled ~4 MiB, `\r`+clear).
+  Honors `HF_TOKEN`. `mlx_native_backend::ensure_model_dir(spec)` = cached-or-download,
+  wired into `try_build_mlx_native_backend` (replaces the cache-only `resolve_model_dir`);
+  gate = `supported_model_type` (matches `LoadedModel::load`, checks top-level +
+  `text_config.model_type`). Validated: rejection path (config-only) + full ~0.4 GB
+  download of `Qwen3-0.6B-4bit` (8 files, progress 0→100%, loadable snapshot). Tests
+  `wanted_*` + ignored network `config_first_gate_*` / `full_download_*`.
+
+- [ ] mlx-native-llama - Llama family for native MLX. `mlx-lm/src/models/llama.rs`
+  **already exists in the fork** (Model + `load_llama_model` + `Generate<'a, C>`), so
+  wiring is mostly rozum-side BUT the fork file needs two ports first: (1) **AFQ-quant
+  loader** — `load_llama_model` does a plain `load_safetensors` with NO `nn::quantize`
+  from config + NO `<p>.weight → <p>.inner.weight` remap, so 4-bit mlx-community Llama
+  would load garbage; mirror `load_qwen3_model` (qwen3.rs:617-632). (2) **sampler** —
+  llama's `Generate` is temp-only; port `SamplerOpts`/`sample_with`/`set_sampler`/
+  `apply_repeat_penalty`/`top_p_sample` from qwen3.rs (cancellation is free — the rozum
+  `stream_generation` loop already checks `job.cancel` per token; only the hybrid arches
+  need `set_cancel`). Then rozum: `LoadedModel::Llama` variant + `load` arm (`model_type`
+  "llama") + a dispatch arm like `Qwen3` (external `Vec<Option<ConcatKeyValueCache>>` +
+  `set_sampler`). **Validate greedy byte-exact vs Python `mlx_lm` oracle** on a small
+  model (e.g. Llama-3.2-1B-Instruct-4bit) before claiming done.
+
+- [ ] mlx-native-qwen2 - Qwen2.5 / Qwen2 (incl. Qwen2.5-Coder) for native MLX. **No
+  `qwen2.rs` in the fork** — needs a new model file. Qwen2 ≈ Qwen3 minus q/k-norm plus
+  QKV bias (attention `bias=true`), standard dense transformer + KV cache; closest base
+  is qwen3.rs or llama.rs. Reuse the AFQ-quant loader pattern + the qwen3 sampler. Then
+  rozum: `LoadedModel::Qwen2` + `load` arm (`model_type` "qwen2") + dispatch. Unlocks the
+  `Qwen2.5-Coder-32B-Instruct-4bit` already in `models::RECOMMENDED`. Validate vs oracle.
+  Depends on the loader/sampler helpers landed by `mlx-native-llama`.
 - [x] mlx-native-p4 - Phase 4: native MLX is the DEFAULT backend; `mlx_lm.server`
   retired (rozum `74b458a`). `default = ["mlx-native"]` (was `["mistralrs"]`);
   mistralrs is now opt-in `--features mistralrs` (broader-catalog candle fallback,
