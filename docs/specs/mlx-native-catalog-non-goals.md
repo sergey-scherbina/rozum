@@ -50,13 +50,18 @@ Things that ARE worth doing live in `BACKLOG.md` (catalog expansion) and
 - **Verdict.** Two hubs is the right number. A local-dir spec is the universal
   escape hatch.
 
-## 4. Training / fine-tuning / LoRA application at load — NO
+## 4. Training / fine-tuning / LoRA application at load — NO (for the host)
 
 - rozum is an **inference host**. mlx-lm can train, but that's a separate tool and
   workflow with no place in a gateway whose job is to serve a resident model to an
   agent. (Applying a pre-merged LoRA is just loading the merged checkpoint — which
   already works; *runtime* LoRA stacking is the out-of-scope part.)
-- **Verdict.** Out of scope. Merge adapters offline, then serve the result.
+- **Nuance:** *improving* a model for a domain via **offline** QLoRA → merge →
+  serve is genuinely useful and already works (serve the merged dir). It's only
+  *training inside the host* (online/continual) that's out of scope. The full
+  landscape — what's feasible, the memory math, where it's useful vs a trap — is in
+  `docs/specs/training-and-lora-exploration.md`.
+- **Verdict.** Host stays inference-only. Tune offline, then serve the result.
 
 ## 5. GGUF / llama.cpp models through the *native MLX* runtime — NO (already covered)
 
