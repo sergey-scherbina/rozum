@@ -75,6 +75,41 @@ bottom-up Python↔Rust log + patch: `docs/mlx-gd-bug/`. Bumping MLX does NOT he
 The "mx.compile / capture-based" plan below was the wrong lever (probed, dead end);
 kept for the record.
 
+#### P1 (follow-up): mlx-native-decode-gap-remainder — close 17 → ~22 t/s (the OTHER half)
+
+**Status: OPEN, not started.** The eval bug above (the big, fixable half) is done:
+27B hybrid decode ~12 → ~16-17 t/s. Python `mlx_lm` is still **~21-23 t/s**, so ~17→22
+remains. This is a SEPARATE, harder bottleneck — NOT the eval.
+
+**Where the remaining gap is.** Decode at T=1 is ~450 tiny dispatches/token
+(matmul/conv/quantized across 64 layers) — op-launch / FFI-overhead bound, not math.
+Two suspects for why Python is faster on the same model:
+1. **MLX version** — Python runs 0.31.2, we run 0.30.6; kernel/scheduler perf work
+   landed in newer MLX. (We stayed on 0.30.6: the retain bug isn't fixed upstream
+   anyway, and a bump risks the byte-exact Qwen3.6 forward — see the bump history
+   below.)
+2. **Pipelining** — `mlx_lm` overlaps the next token's graph build with the current
+   token's GPU compute (`async_eval`). Our hybrid backend is `pipeline=false` because
+   the OLD per-call eval blocked it — **that blocker is gone now**, so `pipeline=true`
+   is worth re-trying (was ~neutral in the synthetic bench, and hybrid is largely
+   compute-bound from the GatedDeltaNet recurrence × 48 layers, so temper expectations).
+
+**Levers, cheapest first:**
+- [ ] decode-gap-measure - measure the REAL gap first: our prod path (backend,
+  retained refs) vs Python `mlx_lm`, SAME 27B + prompt + max_tokens, on a clean machine
+  (gate on `memory_pressure`). Get the actual number + where it goes before optimizing.
+- [ ] decode-gap-pipeline - flip Qwen35/Qwen35Moe to `pipeline=true` in
+  `mlx_native_backend::stream_generation` (the per-call eval no longer blocks), A/B
+  decode t/s, keep if it helps. Cheap.
+- [ ] decode-gap-031 - assess a careful MLX 0.31.2 bump for PERF only (re-validate
+  byte-exact greedy on every arch; high-risk per the bump history) — only if the
+  measure shows version is a big chunk.
+- [ ] decode-gap-dispatch - (hard, last) cut the ~450 dispatches/token via fused Metal
+  kernels on the hot path. Diminishing returns vs effort.
+
+**Don't block other work on this** — the eval was the main lever and it's taken; this
+is the tail.
+
 **(historical goal) native MLX decode ~12 t/s → ~22 t/s (Python `mlx_lm` parity).**
 Full analysis: `docs/specs/mlx-native-runtime.md` → "mx.compile" + the
 "Performance — capture-based compile plan" section.
