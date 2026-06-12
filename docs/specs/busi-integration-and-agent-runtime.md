@@ -88,7 +88,8 @@ into the reusable layer, keep domain logic in the leaf). Three tiers:
 
 **GENERIC → belongs in scalascript (as a library, or — scalascript's call — in the
 compiler where type-derivation/codegen helps). Reusable by ANY scalascript app, not
-just busi:**
+just busi.** Its full design + public API is its own spec: `scalascript-agent-sdk.md`.
+In brief:**
 - **Model client** — HTTP/JSON/SSE client to an OpenAI/Anthropic-compatible endpoint.
 - **Agent loop** — Contract 2 below (message assembly, tool-call handling, budget,
   stop, retry/error). The scalascript twin of rozum's Rust agent-runtime.
