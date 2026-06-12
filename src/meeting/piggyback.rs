@@ -11,10 +11,13 @@
 //! chat request as an out-of-band system note. Reaches the agent at its next
 //! inference call — never a truly idle one — which is why it is the last rung.
 //!
-//! Opt-in only (`ROZUM_PIGGYBACK=1`): room text enters the model context, a
-//! prompt-injection surface, so it stays off unless explicitly enabled. The env
-//! is read by the launch-local proxy and inherited by the agent (hence the
-//! mcp-proxy writer) through `exec`, so one variable on `rozum launch` arms both.
+//! On by default; disable per launch with `rozum launch --no-piggyback` or the
+//! env `ROZUM_PIGGYBACK=0`. Room text enters the model context (a prompt-injection
+//! surface), but only ever for an agent that has joined a meeting room — when no
+//! room is joined nothing is ever written, so the default is inert for ordinary
+//! use. `rozum launch` decides once and propagates the choice to both ends: it
+//! threads the flag into the launch-local proxy (the reader) and exports the
+//! matching `ROZUM_PIGGYBACK` to the agent, which the mcp-proxy writer inherits.
 
 use std::path::{Path, PathBuf};
 
@@ -27,11 +30,14 @@ const MAX_INJECT_BYTES: usize = 4096;
 /// trimmed to its tail rather than growing without bound.
 const MAX_FILE_BYTES: u64 = 16 * 1024;
 
-/// Tier-3 is opt-in: `ROZUM_PIGGYBACK` in `{1,true,on}`.
+/// Tier-3 is on by default; `ROZUM_PIGGYBACK` in `{0,false,off,no}` disables it.
+/// This is the env half of the switch (read by the mcp-proxy writer); the
+/// launch-local proxy reader is gated by an explicit flag threaded from
+/// `rozum launch`, which also exports the matching env so both ends agree.
 pub fn enabled() -> bool {
-    matches!(
+    !matches!(
         std::env::var("ROZUM_PIGGYBACK").ok().as_deref(),
-        Some("1" | "true" | "on" | "yes")
+        Some("0" | "false" | "off" | "no")
     )
 }
 

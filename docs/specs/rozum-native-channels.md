@@ -70,11 +70,15 @@ Implemented at the **launch-local proxy** (`src/proxy.rs`) with the transcript
 tail dropped by the **mcp-proxy** (`src/meeting/proxy.rs`) through a shared file,
 keyed by **project + agent name**. Module: `src/meeting/piggyback.rs`.
 
-- **Activation — `ROZUM_PIGGYBACK=1` (opt-in).** Room text enters the model
-  context (a prompt-injection surface), so Tier 3 is off unless the env var is
-  set. One variable arms both ends: the launch-local proxy reads its own env, and
-  the agent inherits it through `exec_agent` (`StdCommand` inherits the parent
-  env), so the agent's mcp-proxy writer turns on too. No new launch flag.
+- **Activation — on by default; disable with `--no-piggyback` or
+  `ROZUM_PIGGYBACK=0`.** Room text enters the model context (a prompt-injection
+  surface), but only ever for an agent that has *joined a room* — with no room
+  joined nothing is written, so the default is inert for ordinary use. `rozum
+  launch` resolves the decision once (`piggyback = !--no-piggyback && env-not-off`)
+  and drives both ends from it: it threads the bool into the launch-local proxy
+  (the reader, so a disabled launch never drains even a *stale* drop file) and
+  exports the matching `ROZUM_PIGGYBACK=1|0` to the agent, which the mcp-proxy
+  writer inherits. The two ends therefore always agree.
 - **Keying — `<project>/<agent>`.** Both processes run in the project dir, so the
   project slug = cwd basename matches on both ends (the same derivation as the
   room display-name prefix `<project>-<agent>`). Drops live at
@@ -136,7 +140,8 @@ keyed by **project + agent name**. Module: `src/meeting/piggyback.rs`.
 2. **DONE** — Tier 3 piggyback (`feature/piggyback-wakeup`): drop file keyed by
    project + agent (`src/meeting/piggyback.rs`), mcp-proxy writer on the channel
    pusher, launch-local proxy reader injecting an out-of-band system note into
-   Anthropic/OpenAI chat requests. Opt-in via `ROZUM_PIGGYBACK=1`.
+   Anthropic/OpenAI chat requests. On by default; disable per launch with
+   `--no-piggyback` or `ROZUM_PIGGYBACK=0`.
 
 ## Out of scope
 
