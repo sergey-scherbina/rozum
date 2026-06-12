@@ -695,16 +695,85 @@ mod inner {
 #[cfg(feature = "mlx-native")]
 pub use inner::Export as MlxNativeBackend;
 
-/// Resolve a model spec to a local directory of safetensors + tokenizer files.
+/// Map a model spec to its HuggingFace `org/name` repo id, or `None` if the spec
+/// isn't an HF reference (a filesystem path, `lmstudio:`/`ollama:` spec, …).
+pub fn spec_to_hf_repo(spec: &str) -> Option<String> {
+    if std::path::Path::new(spec).exists() {
+        return None;
+    }
+    if let Some(r) = spec.strip_prefix("mlx-community:") {
+        Some(format!("mlx-community/{r}"))
+    } else if let Some(r) = spec.strip_prefix("hf:") {
+        Some(r.to_owned())
+    } else if spec.contains('/') && !spec.starts_with('/') && !spec.contains(':') {
+        // Bare `owner/repo`.
+        Some(spec.to_owned())
+    } else {
+        None
+    }
+}
+
+/// `model_type` values the native runtime can load (matches `LoadedModel::load`).
+/// Used to reject an unsupported repo after its `config.json` is fetched, before
+/// the multi-GB weights.
+pub fn supported_model_type(model_type: &str) -> bool {
+    matches!(
+        model_type,
+        "qwen3" | "qwen3_moe" | "qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text"
+    )
+}
+
+/// The effective `model_type` of a parsed `config.json` — top-level, or the
+/// `text_config.model_type` of a multimodal wrapper (Qwen3.6 ships the latter).
+fn config_model_type(cfg: &serde_json::Value) -> Option<&str> {
+    cfg.get("model_type")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            cfg.get("text_config")
+                .and_then(|t| t.get("model_type"))
+                .and_then(|v| v.as_str())
+        })
+}
+
+/// Resolve a model spec to a local model dir, **downloading it if absent**.
+///
+/// Tries the local HF cache first (`resolve_model_dir`); on a miss, if the spec
+/// is an HF repo (`mlx-community:` / `hf:` / `owner/repo`), fetches the snapshot
+/// via [`crate::hf_hub`] — but only after `config.json` confirms a supported
+/// `model_type`, so an unsupported repo is rejected before its weights. Returns
+/// `None` (and the chain falls through) when the spec isn't an HF repo or the
+/// download fails.
+pub async fn ensure_model_dir(spec: &str) -> Option<std::path::PathBuf> {
+    if let Some(dir) = resolve_model_dir(spec) {
+        return Some(dir);
+    }
+    let repo = spec_to_hf_repo(spec)?;
+    match crate::hf_hub::ensure_snapshot(&repo, |cfg| match config_model_type(cfg) {
+        Some(mt) if supported_model_type(mt) => Ok(()),
+        Some(mt) => Err(format!(
+            "native MLX does not support model_type '{mt}' (Qwen3/Qwen3.6 only)"
+        )),
+        None => Err("config.json has no model_type".to_owned()),
+    })
+    .await
+    {
+        Ok(dir) => Some(dir),
+        Err(e) => {
+            eprintln!("rozum mlx: auto-download of '{spec}' skipped: {e}");
+            None
+        }
+    }
+}
+
+/// Resolve a model spec to a local directory of safetensors + tokenizer files
+/// **already present** on disk (no download — see [`ensure_model_dir`]).
 ///
 /// - an existing directory path -> as-is
 /// - `mlx-community:<repo>` / `hf:<user>/<repo>` / `<user>/<repo>` -> the
-///   already-downloaded HuggingFace cache snapshot, if present
+///   downloaded HuggingFace cache snapshot, if present
 ///   (`~/.cache/huggingface/hub/models--<org>--<name>/snapshots/<rev>/`).
 ///
-/// Auto-download is deliberately out of scope for now: this reuses weights a
-/// prior mistralrs / mlx_lm run already fetched. Returns `None` when nothing
-/// local matches, so the gateway falls through to the next backend.
+/// Returns `None` when nothing local matches.
 pub fn resolve_model_dir(spec: &str) -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
 
