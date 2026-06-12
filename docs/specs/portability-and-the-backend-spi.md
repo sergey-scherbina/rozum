@@ -149,6 +149,53 @@ remap", or "lazy-eval runtimes can donate a not-yet-materialized buffer — forc
 code doesn't. (Several fixes also went upstream as PRs — ecosystem-portable by
 definition.)
 
+## Taxonomy by dependency — the real axis
+
+"Portable / not portable" is too coarse. The useful question is **what does each
+piece fundamentally depend on?** Sort by that and the extraction strategy falls
+out: anything that depends on *less than the engine* can become a module reusable
+by *any* engine that shares that one dependency (hardware, or model, or nothing).
+
+| Level | Depends on | Examples from our work | Today lives in | Reusable by |
+|---|---|---|---|---|
+| **L0 Host** | nothing | gateway, rooms, launch, orchestration, admission | above SPI | everything, already |
+| **L1 Format/protocol logic** | the model's *text* conventions (tool-call format, chat template, tokenizer), not engine/hw | `parse_tool_calls`, tool-history rendering, chat-template render, UTF-8 detok, multi-EOS, KV/RAM preflight, spec resolution, auto-download + hf_hub/ModelScope cache | mostly **inside the MLX leaf** (some in separate modules) | any in-process leaf |
+| **L2 Sampling** | a logit vector + RNG, not engine/hw | top-p / top-k / repeat-penalty / seed / categorical | inside the MLX fork (operates on mlx `Array`) | any leaf, if it hands logits to a shared CPU sampler |
+| **L3 Model architecture & checkpoint conventions** | the *model*, not engine/hw | the forward math (Qwen3.6 hybrid, Qwen2…), RMSNorm +1, AFQ `.weight↔.inner.weight` / `.bias↔.inner.bias` remap *pattern*, f32 delta-scan numerics, Qwen2 bias/`head_dim`, multimodal `text_config` unwrap, safetensors-index sharding | the MLX fork (as Rust math) + tribal knowledge | any engine implementing that model — as **reference**, code re-written per tensor lib |
+| **L4 Hardware kernels** | the *hardware* (Metal) + maybe a model, not the engine's logic | GatedDeltaNet fused-scan Metal kernel, chunked-prefill kernel (MSL source) | the MLX fork via `mx.fast.metal_kernel` | any Metal engine — the MSL source is engine-independent |
+| **L5 Engine binding internals** | the specific engine / tensor lib | RoPE-reshape fix, zero-buffer fix, buffer-donation/`eval` hazard, `mx.compile` finding, the `metal_kernel` mlx-c binding | the MLX/mistralrs forks | only that engine — stays put (already upstreamed where possible) |
+
+The dividing line for "can it be a standalone module?" is **L0–L4 yes, L5 no.**
+L5 is the irreducible cost of a given engine; everything above it depends on less
+than the engine and can, in principle, be shared.
+
+## What to extract (and into what)
+
+These are the concrete "pull it out of the leaf into a module that depends only on
+its true input" moves. All are tracked in `BACKLOG.md` (Portability section).
+
+- **L1 → shared serving helpers (engine-agnostic Rust).** `parse_tool_calls` is
+  *already duplicated* (GGUF leaf + MLX leaf have their own); tool-history
+  rendering, chat-template render, UTF-8 detok, multi-EOS, and the KV/RAM preflight
+  are pure logic over text/config. Lift them into a `serving` module every leaf
+  calls. (Auto-download + cache is the same idea — its module exists, just MLX-wired;
+  that's `portability-shared-model-source`.)
+- **L2 → a shared CPU sampler.** Define the sampler over a plain logit slice
+  (`&[f32]` / small ndarray) + RNG; each leaf materializes the final logit vector
+  and calls it. The GPU→CPU copy of one vocab-sized vector per token is negligible
+  for our op-launch-bound decode, and it deletes per-leaf sampler duplication.
+- **L3 → model-reference specs.** Capture the *knowledge* (forward math +
+  checkpoint conventions per family) as engine-independent reference docs, so a new
+  leaf implements Qwen3.6/Qwen2/… from a spec instead of reverse-engineering a
+  checkpoint. The code stays per-tensor-lib; the *spec* is the portable artifact.
+- **L4 → a standalone Metal-kernel module.** The GatedDeltaNet (and any future)
+  fused-scan kernel is plain Metal Shading Language; factor the `.metal` source out
+  so any Metal engine (mlx, a candle-metal path, mistralrs-metal) can bind the same
+  kernel instead of re-deriving it. Depends only on Metal + the architecture.
+- **L5 → leave it; track upstream.** Engine-binding fixes belong in that engine's
+  fork; our discipline is to push them upstream (done: 4 mistralrs PRs + the mlx-rs
+  fork fixes) so the *ecosystem* carries them, not us.
+
 ## Takeaway
 
 rozum's durable identity is the **host/orchestration layer**: a local
