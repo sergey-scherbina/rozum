@@ -290,7 +290,7 @@ just the model-service side; the SDK + tools are owned by the scalascript/busi s
   NOTE: the **generic scalascript agent SDK** (model HTTP/SSE client, agent loop, tool
   framework, schema derivation, endpoint pool/retry — the "build once, reuse in any
   app" layer) is owned by the scalascript/busi side, not rozum — full design + public
-  API in `docs/specs/scalascript-agent-sdk.md`. rozum provides the gateway contract +
+  API in `docs/specs/agent-sdk.md`. rozum provides the gateway contract +
   the optional Rust reference runtime as its executable twin.
 
 ### Native MLX runtime — backend feature parity (vs mistralrs)
