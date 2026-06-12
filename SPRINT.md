@@ -81,31 +81,31 @@ kept for the record.
 27B hybrid decode ~12 → ~16-17 t/s. Python `mlx_lm` is still **~21-23 t/s**, so ~17→22
 remains. This is a SEPARATE, harder bottleneck — NOT the eval.
 
-**Where the remaining gap is.** Decode at T=1 is ~450 tiny dispatches/token
-(matmul/conv/quantized across 64 layers) — op-launch / FFI-overhead bound, not math.
-Two suspects for why Python is faster on the same model:
-1. **MLX version** — Python runs 0.31.2, we run 0.30.6; kernel/scheduler perf work
-   landed in newer MLX. (We stayed on 0.30.6: the retain bug isn't fixed upstream
-   anyway, and a bump risks the byte-exact Qwen3.6 forward — see the bump history
-   below.)
-2. **Pipelining** — `mlx_lm` overlaps the next token's graph build with the current
-   token's GPU compute (`async_eval`). Our hybrid backend is `pipeline=false` because
-   the OLD per-call eval blocked it — **that blocker is gone now**, so `pipeline=true`
-   is worth re-trying (was ~neutral in the synthetic bench, and hybrid is largely
-   compute-bound from the GatedDeltaNet recurrence × 48 layers, so temper expectations).
+**MEASURED (2026-06-12, clean machine, SAME model/prompt):** ours (retained refs)
+**16.8/17.5 t/s** (n=128 serial/pipelined), 16.2 (n=512); Python `mlx_lm` (0.31.2)
+**22.835 t/s**. Gap ~17 → ~22.8.
 
-**Levers, cheapest first:**
-- [ ] decode-gap-measure - measure the REAL gap first: our prod path (backend,
-  retained refs) vs Python `mlx_lm`, SAME 27B + prompt + max_tokens, on a clean machine
-  (gate on `memory_pressure`). Get the actual number + where it goes before optimizing.
+**VERSION RULED OUT (measured, not guessed).** Rebuilt ours on a genuine MLX 0.31.2:
+no-eval throughput **16.5/17.4 t/s = identical to 0.30.6**. So 0.31.2 does NOT speed
+up our decode. ⇒ the gap is **our op-dispatch path vs `mlx_lm`'s**, on the SAME MLX,
+not the version. (We DID migrate to 0.31.2 anyway, per user — see merge `5e55bd9`.)
+Decode at T=1 is ~450 tiny dispatches/token (matmul/conv/quantized × 64 layers),
+op-launch bound. `mlx_lm` emits a faster/leaner graph — prime suspects: its
+`@mx.compile`'d `compute_g` (we run plain ops), and possibly fewer per-layer
+intermediates.
+
+**Levers (remaining):**
+- [x] decode-gap-measure - DONE (above): ours ~17, Python 22.8, same 0.31.2.
+- [x] decode-gap-031 - DONE: NOT a perf lever (ours ~17 on both 0.30.6 and 0.31.2).
+  Migrated to 0.31.2 anyway (user's call; reproducible via the forks).
 - [ ] decode-gap-pipeline - flip Qwen35/Qwen35Moe to `pipeline=true` in
   `mlx_native_backend::stream_generation` (the per-call eval no longer blocks), A/B
-  decode t/s, keep if it helps. Cheap.
-- [ ] decode-gap-031 - assess a careful MLX 0.31.2 bump for PERF only (re-validate
-  byte-exact greedy on every arch; high-risk per the bump history) — only if the
-  measure shows version is a big chunk.
-- [ ] decode-gap-dispatch - (hard, last) cut the ~450 dispatches/token via fused Metal
-  kernels on the hot path. Diminishing returns vs effort.
+  decode t/s, keep if it helps. Cheap. (Synthetic bench was ~neutral; the real
+  streaming path may differ.)
+- [ ] decode-gap-compile - port `mlx_lm`'s `@mx.compile` of `compute_g` (and any
+  fusable hot ops) to mlx-rs `compile`, and/or reduce per-layer intermediates, to cut
+  the dispatch count. The real remaining lever — needs profiling first.
+- [ ] decode-gap-dispatch - (hard, last) fused Metal kernels for the hot path.
 
 **Don't block other work on this** — the eval was the main lever and it's taken; this
 is the tail.

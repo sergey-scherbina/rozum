@@ -1,0 +1,28 @@
+diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
+index d678461e..729c1d52 100644
+--- a/mlx/backend/metal/device.cpp
++++ b/mlx/backend/metal/device.cpp
+@@ -275,7 +275,10 @@ CommandEncoder::CommandEncoder(
+     queue_->addResidencySet(residency_set.mtl_residency_set());
+   }
+   debug_set_stream_queue_label(queue_.get(), index);
+-  buffer_ = NS::RetainPtr(queue_->commandBufferWithUnretainedReferences());
++  buffer_ = NS::RetainPtr(
++      std::getenv("ROZUM_MLX_RETAIN")
++          ? queue_->commandBuffer()
++          : queue_->commandBufferWithUnretainedReferences());
+ }
+ 
+ CommandEncoder::~CommandEncoder() {
+@@ -449,7 +452,10 @@ bool CommandEncoder::needs_commit() const {
+ 
+ void CommandEncoder::commit() {
+   buffer_->commit();
+-  buffer_ = NS::RetainPtr(queue_->commandBufferWithUnretainedReferences());
++  buffer_ = NS::RetainPtr(
++      std::getenv("ROZUM_MLX_RETAIN")
++          ? queue_->commandBuffer()
++          : queue_->commandBufferWithUnretainedReferences());
+   buffer_ops_ = 0;
+   buffer_sizes_ = 0;
+ }
