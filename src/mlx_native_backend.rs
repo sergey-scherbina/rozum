@@ -1357,6 +1357,126 @@ mod tests {
         }
     }
 
+    // MoE sibling of mlx_qwen35_prefill_bench: same loop on Qwen3.6-35B-A3B-4bit
+    // (3B active). Python mlx_lm.generate does ~100 t/s on this; this measures
+    // whether our native runtime is at parity on the MoE too. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_qwen35_moe_decode_bench
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "perf bench; requires local mlx-community/Qwen3.6-35B-A3B-4bit"]
+    fn mlx_qwen35_moe_decode_bench() {
+        use mlx_lm::models::qwen3_5_moe::load_qwen3_5_moe_model;
+        use mlx_rs::Array;
+        use mlx_rs::ops::indexing::{IndexOp, NewAxis};
+        use mlx_rs::transforms::eval;
+        use std::time::Instant;
+
+        let dir = resolve_model_dir("mlx-community:Qwen3.6-35B-A3B-4bit")
+            .expect("Qwen3.6-35B-A3B-4bit not in HF cache");
+        let mut model = load_qwen3_5_moe_model(&dir).expect("load");
+
+        let synth = |n: usize| -> Vec<u32> { (0..n).map(|i| (1000 + i % 5000) as u32).collect() };
+        let argmax_next = |y: &Array| {
+            mlx_rs::ops::indexing::argmax_axis(y, -1, false)
+                .unwrap()
+                .index((.., NewAxis))
+        };
+
+        // Context-growth probe: small prefill, then decode many steps, timing
+        // per-window. If KV-concat (O(context) copy/token) is the cost, t/s drops
+        // as context grows; a pre-allocated cache would stay flat.
+        if std::env::var_os("ROZUM_CTXSWEEP").is_some() {
+            let ids = synth(8);
+            let prompt = Array::from(&ids[..]).index(NewAxis);
+            let mut cache = model.init_cache();
+            let mut y = model.forward(&prompt, &mut cache).expect("prefill").index((.., -1, ..));
+            eval([&y]).unwrap();
+            let total = 1024usize;
+            let win = 64usize;
+            let mut wstart = Instant::now();
+            for s in 0..total {
+                let inp = argmax_next(&y);
+                y = model.forward(&inp, &mut cache).expect("decode").index((.., -1, ..));
+                eval([&y]).unwrap();
+                if (s + 1) % win == 0 {
+                    let tps = win as f64 / wstart.elapsed().as_secs_f64();
+                    eprintln!("CTX ~{:>5}: {:>6.1} t/s", s + 1, tps);
+                    wstart = Instant::now();
+                }
+            }
+            return;
+        }
+        let steps = 64;
+        let ids_of = |arrs: &[Array]| -> Vec<u32> {
+            let refs: Vec<&Array> = arrs.iter().collect();
+            eval(refs).unwrap();
+            arrs.iter().map(|a| a.item::<u32>()).collect()
+        };
+        for &n in &[128usize, 512] {
+            let ids = synth(n);
+            let prompt = Array::from(&ids[..]).index(NewAxis);
+
+            let mut cache = model.init_cache();
+            let t = Instant::now();
+            let logits = model.forward(&prompt, &mut cache).expect("prefill");
+            eval([&logits]).unwrap();
+            let prefill = t.elapsed().as_secs_f64();
+
+            // Serial decode, splitting CPU build (FFI node construction) from eval
+            // (graph traverse + Metal dispatch + GPU) to locate the bottleneck.
+            let mut y = logits.index((.., -1, ..));
+            let mut serial_inps: Vec<Array> = Vec::with_capacity(steps);
+            let (mut build_ns, mut eval_ns) = (0u128, 0u128);
+            let td = Instant::now();
+            for _ in 0..steps {
+                let inp = argmax_next(&y);
+                serial_inps.push(inp.clone());
+                let tb = Instant::now();
+                let raw = model.forward(&inp, &mut cache).expect("decode");
+                build_ns += tb.elapsed().as_nanos();
+                y = raw.index((.., -1, ..));
+                let te = Instant::now();
+                eval([&y]).unwrap();
+                eval_ns += te.elapsed().as_nanos();
+            }
+            let serial = steps as f64 / td.elapsed().as_secs_f64();
+            let serial_ids = ids_of(&serial_inps);
+            eprintln!(
+                "SPLIT n={n}: build={:.2}ms/tok  eval={:.2}ms/tok  ({:.0}% build)",
+                build_ns as f64 / steps as f64 / 1e6,
+                eval_ns as f64 / steps as f64 / 1e6,
+                100.0 * build_ns as f64 / (build_ns + eval_ns) as f64
+            );
+
+            // Pipelined decode (async_eval next before blocking on current).
+            let mut cache2 = model.init_cache();
+            let logits2 = model.forward(&prompt, &mut cache2).expect("prefill2");
+            let mut cur = logits2.index((.., -1, ..));
+            let _ = mlx_rs::transforms::async_eval([&cur]);
+            let mut pipe_inps: Vec<Array> = Vec::with_capacity(steps);
+            let tp = Instant::now();
+            for _ in 0..steps {
+                let inp = argmax_next(&cur);
+                pipe_inps.push(inp.clone());
+                let next = model.forward(&inp, &mut cache2).expect("decode2").index((.., -1, ..));
+                let _ = mlx_rs::transforms::async_eval([&next]);
+                eval([&cur]).unwrap();
+                cur = next;
+            }
+            let pipelined = steps as f64 / tp.elapsed().as_secs_f64();
+            let pipe_ids = ids_of(&pipe_inps);
+
+            let match_sp = if serial_ids == pipe_ids { "MATCH" } else { "DIVERGE" };
+            eprintln!(
+                "MOE BENCH n={n:>4}  prefill={prefill:>6.2}s ({:>6.1} tok/s)  decode serial={serial:>5.1}  pipelined={pipelined:>5.1} t/s  ({:.2}x)  serial==pipe:{match_sp}",
+                n as f64 / prefill,
+                pipelined / serial
+            );
+            eprintln!("SERIAL_IDS   n={n}: {:?}", &serial_ids[..serial_ids.len().min(24)]);
+            eprintln!("PIPELINE_IDS n={n}: {:?}", &pipe_ids[..pipe_ids.len().min(24)]);
+        }
+    }
+
     // Chunked prefill must be byte-identical to a single pass: the per-position
     // attention (causal mask + KV cache) and the sequential GatedDeltaNet scan are
     // position-local, so splitting the prompt only changes WHEN intermediates are
