@@ -54,6 +54,28 @@ mod inner {
 
     impl LoadedModel {
         fn load(model_type: &str, dir: &Path) -> Result<Self, String> {
+            // Hybrid models (Qwen3.6 GatedDeltaNet custom kernel) are only correct
+            // without a per-call eval when MLX command buffers RETAIN their referenced
+            // buffers (otherwise an upstream kernel-input buffer is freed before the
+            // in-flight GPU dispatch reads it — see docs/mlx-gd-bug/). Enable retained
+            // refs BEFORE the first MLX op (model load), so MLX's command-buffer
+            // creation reads it; this drops ~48 syncs/token (~12 -> ~16-17 t/s).
+            // Dense models keep the faster unretained path.
+            let hybrid = matches!(
+                model_type,
+                "qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text"
+            );
+            // SAFETY: the native backend runs all MLX work on one dedicated worker
+            // thread; set/clear before that thread touches MLX. Cleared for dense so a
+            // gateway dense<->hybrid switch in the same process stays correct (the MLX
+            // patch reads the env per command buffer).
+            unsafe {
+                if hybrid {
+                    std::env::set_var("ROZUM_MLX_RETAIN", "1");
+                } else {
+                    std::env::remove_var("ROZUM_MLX_RETAIN");
+                }
+            }
             match model_type {
                 "qwen3" => qwen3::load_qwen3_model(dir)
                     .map(LoadedModel::Qwen3)
@@ -497,7 +519,8 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
-                    false,  // pipeline: dense overlaps; hybrid kernel-eval blocks
+                    false, // hybrid: the GatedDeltaNet kernel blocking-evals its
+                           // state per call (donation-safe), so decode can't pipeline
                 );
             }
             LoadedModel::Qwen35Moe(m) => {
@@ -512,7 +535,8 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
-                    false,  // pipeline: dense overlaps; hybrid kernel-eval blocks
+                    false, // hybrid: the GatedDeltaNet kernel blocking-evals its
+                           // state per call (donation-safe), so decode can't pipeline
                 );
             }
         }
@@ -1194,7 +1218,7 @@ mod tests {
             "What is the capital of France? Reply in one short sentence. /no_think",
         );
         req.sampling = SamplingParams {
-            max_tokens: Some(24),
+            max_tokens: Some(64),
             ..Default::default()
         };
         let stream = backend.chat(req).await.expect("chat");
@@ -1225,7 +1249,7 @@ mod tests {
             "What is the capital of France? Reply in one short sentence. /no_think",
         );
         req.sampling = SamplingParams {
-            max_tokens: Some(24),
+            max_tokens: Some(64),
             ..Default::default()
         };
         let stream = backend.chat(req).await.expect("chat");
@@ -1262,8 +1286,13 @@ mod tests {
                 .unwrap()
                 .index((.., NewAxis))
         };
-        let steps = 32;
-        for &n in &[128usize, 512, 1024] {
+        let steps = 64;
+        let no_eval = std::env::var_os("ROZUM_GD_NO_EVAL").is_some();
+        let gd_ops = std::env::var_os("ROZUM_GD_OPS").is_some();
+        eprintln!("BENCH config: steps={steps} GD_NO_EVAL={no_eval} GD_OPS={gd_ops}");
+        // n=1024 single-pass prefill omitted: model.forward (not chunked) peaks
+        // too high for a 15GB model in tight RAM. Decode t/s is ~flat across ctx.
+        for &n in &[128usize, 512] {
             let ids = synth(n);
             let prompt = Array::from(&ids[..]).index(NewAxis);
 
@@ -1274,36 +1303,57 @@ mod tests {
             eval([&logits]).unwrap();
             let prefill = t.elapsed().as_secs_f64();
 
+            // Helper: eval the lazily-collected input arrays and pull their ids,
+            // so the hot loop stays sync-free (timing) but we still capture the
+            // greedy id sequence (correctness).
+            let ids_of = |arrs: &[Array]| -> Vec<u32> {
+                let refs: Vec<&Array> = arrs.iter().collect();
+                eval(refs).unwrap();
+                arrs.iter().map(|a| a.item::<u32>()).collect()
+            };
+
             // Serial decode (our old pattern): forward, eval (block), repeat.
             let mut y = logits.index((.., -1, ..));
+            let mut serial_inps: Vec<Array> = Vec::with_capacity(steps);
             let td = Instant::now();
             for _ in 0..steps {
                 let inp = argmax_next(&y);
+                serial_inps.push(inp.clone());
                 y = model.forward(&inp, &mut cache).expect("decode").index((.., -1, ..));
                 eval([&y]).unwrap();
             }
             let serial = steps as f64 / td.elapsed().as_secs_f64();
+            let serial_ids = ids_of(&serial_inps);
 
             // Pipelined decode: async_eval the next step before blocking on current.
+            // Building step n+1's graph (which reads the cache state written by n)
+            // BEFORE eval'ing n keeps that state referenced — the same retention
+            // Python relies on, so the GatedDeltaNet state_out is not pool-reused.
             let mut cache2 = model.init_cache();
             let logits2 = model.forward(&prompt, &mut cache2).expect("prefill2");
             let mut cur = logits2.index((.., -1, ..));
             let _ = mlx_rs::transforms::async_eval([&cur]);
+            let mut pipe_inps: Vec<Array> = Vec::with_capacity(steps);
             let tp = Instant::now();
             for _ in 0..steps {
                 let inp = argmax_next(&cur);
+                pipe_inps.push(inp.clone());
                 let next = model.forward(&inp, &mut cache2).expect("decode2").index((.., -1, ..));
                 let _ = mlx_rs::transforms::async_eval([&next]);
                 eval([&cur]).unwrap();
                 cur = next;
             }
             let pipelined = steps as f64 / tp.elapsed().as_secs_f64();
+            let pipe_ids = ids_of(&pipe_inps);
 
+            let match_sp = if serial_ids == pipe_ids { "MATCH" } else { "DIVERGE" };
             eprintln!(
-                "BENCH n={n:>4}  prefill={prefill:>6.2}s ({:>6.1} tok/s)  decode serial={serial:>5.1}  pipelined={pipelined:>5.1} t/s  ({:.2}x)",
+                "BENCH n={n:>4}  prefill={prefill:>6.2}s ({:>6.1} tok/s)  decode serial={serial:>5.1}  pipelined={pipelined:>5.1} t/s  ({:.2}x)  serial==pipe:{match_sp}",
                 n as f64 / prefill,
                 pipelined / serial
             );
+            eprintln!("SERIAL_IDS   n={n}: {:?}", &serial_ids[..serial_ids.len().min(24)]);
+            eprintln!("PIPELINE_IDS n={n}: {:?}", &pipe_ids[..pipe_ids.len().min(24)]);
         }
     }
 

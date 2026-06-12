@@ -94,38 +94,108 @@ The machine has rebooted from memory pressure mid-experiment before; this block 
 single source of truth to pick up "as if nothing happened". Update it after every
 meaningful step and commit (small, frequent commits — never hold uncommitted experiment
 state).
-- **Branch:** `feature/mlx-perf-compile` (worktree `.worktrees/mlx-native`). Fork at
-  `.vendor/mlx-lm` branch `rozum-mlx-native`; Cargo pin currently
-  `d62049c93d9a6cbcc6fa37ae1480864094a887bc` (path-deps while iterating on the fork).
+
+**ACTIVE NOW (2026-06-12): MLX 0.31.2 bump for hybrid — NEGATIVE RESULT, settled.
+Awaiting the Python-oracle decode number, then revert the bump.**
+
+**⛔ THE BUMP DOES NOT FIX THE HYBRID. The premise was false.** The plan was:
+bump MLX 0.30.6→0.31.2 → the GatedDeltaNet buffer-donation bug disappears → drop the
+per-call eval → hybrid pipelines → ~22 t/s. Every link broke under test:
+
+1. **0.31.2 does NOT fix the donation hazard.** Clean rebuild from scratch
+   (`cargo clean -p mlx-sys --release` → 2m06s full C++ compile, fetched-src
+   `git describe`=v0.31.2): `ROZUM_GD_NO_EVAL=1 mlx_qwen35_chat` → **garbage `)`,
+   identical to 0.30.6.** eval-ON → `Here's a thinking process:` (byte-exact, as always).
+   - ⚠ **STALE-BUILD MIRAGE LESSON:** an *incremental* 21s relink after the GIT_TAG bump
+     showed no-eval = coherent `Here\n\n\n</think>` — a LIE. Incremental builds don't
+     recompile `libmlx.a`; a 0.30.6/0.31.2 ABI mix gave lucky-looking garbage. **After
+     any mlx-c/CMake version bump you MUST `cargo clean -p mlx-sys` before trusting
+     runtime behavior.** The clean build is the only truth.
+2. **The per-call eval is genuinely mandatory for the metal_kernel path** on both
+   versions (the buffer-donation hazard is real and version-independent for our kernel).
+3. **The pure-ops path (`ROZUM_GD_OPS=1`, `gated_delta_ops`) is donation-safe with ZERO
+   eval** → correct output. So the bug is specific to the custom metal_kernel primitive,
+   not the math. (mlx-rs `MetalKernel::new` uses `ensure_row_contiguous=true, atomic=false`
+   — faithful to Python defaults, so the wrapper isn't the difference.)
+4. **Pipelining does NOT help hybrid — it's compute-bound, not readback-bound.** Bench
+   on 27B-4bit (`mlx_qwen35_prefill_bench`):
+   ```
+                       decode serial   pipelined     prefill
+     kernel+eval n=128     12.3          14.3       119 tok/s
+     kernel+eval n=1024    13.3          11.1       147 tok/s   (pipeline HURTS)
+     ops no-eval n=128     15.0          16.3        92 tok/s
+     ops no-eval n=1024    13.1          12.2        85 tok/s   (pipeline HURTS)
+   ```
+   The dense pipelining win (96.5% of Python) came from filling the per-token readback
+   bubble; the hybrid forward (GatedDeltaNet recurrence × 48 layers) has **no idle-GPU
+   bubble** → nothing to fill. Dropping the eval (ops path) buys ~20% at short context
+   and **vanishes/reverses by n=1024** — exactly the contexts a coding agent runs at.
+   And ops wrecks prefill (85 vs 147 tok/s). **Hybrid decode ≈ 13 t/s regardless of
+   eval / pipelining / MLX version.**
+
+**CONCLUSION on the bump:** the 0.31.2 bump buys nothing for the hybrid goal and carries
+the fft.cpp-disable + ops.cpp `global_scale`-nullopt patches as pure maintenance debt.
+**Revert it.** Keep **kernel+eval** for hybrid (correct; best prefill).
+
+**⭐ THE REAL GAP IS FOUND — and it is NOT the bump. Python is ~1.8× faster.** Oracle
+measured (2026-06-12, `/tmp/mlxoracle`, mlx 0.31.2 + mlx_lm 0.31.3, same 27B-4bit):
+```
+  Python mlx_lm  decode = 23.1 tok/s   (prompt 32 t/s, peak 15.4 GB)
+  our kernel+eval decode ≈ 12–13 tok/s        → ~1.8× gap, REAL
+```
+So 13 t/s is NOT the ceiling. Ruled out as the cause: eval (our ops no-eval path = ~15,
+still far from 23), pipelining (hurts us), MLX version (both on 0.31.2).
+
+**THE CRUX (next agent: start here).** Python runs the **same `gated_delta` metal_kernel
+with NO per-call eval** and is correct; ours needs the 48-syncs/token eval or it's garbage
+`)`. That eval is ~the 1.8×. **Why does our identical kernel need the eval when Python's
+doesn't?** Python source read (`/private/tmp/mlxoracle/.../mlx_lm/models/`):
+- `gated_delta.py:171 gated_delta_kernel` — builds the kernel output, **returns lazy, no
+  eval**. Same `GATED_DELTA_SOURCE`, same wrapper (`ensure_row_contiguous=true,atomic=false`).
+- `qwen3_5.py:183-197` — `out, state = gated_delta_update(...)`; `cache[1] = state` (stores
+  the **lazy** state); `cache.advance(S)`. Uses `ArraysCache` (`cache.py`), NOT our
+  `ConcatKeyValueCache`. Conv state: `cache[0] = mx.contiguous(conv_input[:, -n_keep:, :])`
+  (note the explicit `mx.contiguous`, qwen3_5.py:166).
+**Concrete hypotheses to test (cheapest first, all small-model-probeable):**
+  1. **`T` passed as Array vs scalar.** Ours (`gated_delta.rs:226`) passes
+     `&t_scalar = Array::from_int(t)` — an MLX **Array** (runtime buffer). Python passes a
+     raw **int** `T` → MLX templates it as a constant. mlx-rs `MetalKernel::apply` only
+     takes `&[impl AsRef<Array>]` (no scalar path) → forces T to a buffer → possibly
+     different/garbage codegen only masked by the eval. **Check if mlx-rs/mlx-c exposes a
+     scalar-input path for metal_kernel; if not, add one.** Most promising lead.
+  2. **State contiguity / dtype.** Python stores a contiguous state; ours may hand the
+     kernel a non-contiguous cache slice that aliases under donation. Try
+     `state.contiguous()` (or `+0`) before/after the kernel WITHOUT eval.
+  3. **Cache structure.** Port Python's `ArraysCache` (lazy-state store + `advance`) for
+     hybrid instead of `ConcatKeyValueCache`; the in-place store may keep the state
+     buffer concrete across later layers.
+- **If kernel-no-eval is made correct → expect ~23 t/s (kernel speed + no syncs).** That's
+  the whole prize. Validate byte-exact greedy vs the oracle each step.
+- **Oracle env stays at `/tmp/mlxoracle`** (reuse it; rerun
+  `HF_HUB_OFFLINE=1 python -m mlx_lm generate --model mlx-community/Qwen3.6-27B-4bit
+  --prompt "..." --max-tokens 64 --temp 0` for fresh numbers). 27B run = memory-heavy,
+  ~15.4 GB peak; gate on `memory_pressure` (was 90% free), one run at a time.
+
+**Repo state (NOT merged):** rozum worktree `feature/mlx-031-bump` (Cargo.toml = path-deps
+to fork); fork `.vendor/mlx-lm` branch `mlx-0.31.2-bump` (GIT_TAG v0.31.2 @ CMakeLists.txt:38;
+fft.cpp disabled @:55; ops.cpp 3 quantize calls patched w/ `std::nullopt` global_scale;
+gated_delta.rs:252 `ROZUM_GD_NO_EVAL` gate). 0.30.6 baseline = prior fork branch
+`rozum-mlx-native` @ d62049c9. **The lib is currently built clean against 0.31.2.**
+**To revert the bump:** point rozum's Cargo.toml/git-pin back at `rozum-mlx-native`
+(0.30.6), drop the `feature/mlx-031-bump` + `mlx-0.31.2-bump` branches (or keep them
+parked, documented as a closed negative experiment).
+
 - **Memory discipline (this is what caused the reboots):** probe/iterate on the
   SMALLEST model (`mlx-community:Qwen3-0.6B-4bit`, cached), NOT 27B. Check
   `memory_pressure` before any model load; if free < ~25%, stop and free first. Only
-  use 27B for the final Stage-3 A/B.
-- **Current stage:** DENSE SOLVED & merged; HYBRID is the remaining headline problem.
-- **DONE (dense decode — pipelining):** `stream_generation` now pipelines (build +
+  use 27B for a final A/B.
+- **DENSE decode SOLVED & merged (pipelining):** `stream_generation` pipelines (build +
   `async_eval` the next token before blocking on the current) for dense arches
   (Qwen3, Qwen3-MoE, Llama, Qwen2 — `pipeline=true`); hybrid (Qwen3.6) keeps the serial
-  path (`pipeline=false`). Byte-exact on all four arches (Qwen3-4B/Qwen2/Llama/Qwen3.6
-  oracle strings unchanged). Probe `mlx_decode_pipeline_probe`: 4B **114→128 t/s =
-  96.5% of Python's 132.9**. **The dense decode gap is closed.**
-- **HYBRID 27B still ~12 t/s — lever found, but it's an MLX version bump.** The
-  GatedDeltaNet kernel does a **mandatory blocking `eval` after EVERY layer**
-  (`gated_delta.rs:250`, ~48/token) — the buffer-donation fix. Investigated
-  conclusively (fork `ROZUM_GD_NO_EVAL` / `ROZUM_GD_ASYNC` gates, then reverted):
-  - **no-eval → garbage** (`)`); **async_eval → garbage** (`)`). So neither removing
-    nor async-ing works on our MLX. The blocking eval is genuinely required.
-  - **Python's `gated_delta_kernel` has NO eval at all** and is correct — because it
-    runs on **MLX 0.31.2**; we pin **0.30.6**. The metal_kernel buffer-donation bug is
-    evidently **fixed in newer MLX.** So the hybrid lever = **bump mlx-sys 0.30.6 →
-    0.31.2**, then drop the per-call eval → the 48 layers stop self-blocking → the
-    hybrid pipelines like Python → ~22 t/s.
-  - NOTE: an earlier 0.31.2 bump attempt (memory) was for the *rope* bug (version-
-    independent, reverted) and **never tested the gated_delta donation** — so this is
-    unproven but high-probability. It needs the fft.cpp-exclude + ops.cpp patch the
-    memory recorded, a ~15-min MLX C++ rebuild, and careful 27B byte-exact validation.
-    DEDICATED TASK (`mlx-native-perf-hybrid-mlxbump`, in BACKLOG) — heavy + reboot-risky,
-    not a tail-end change.
-- **(historical) Stage 0 done (probe written + run); hypothesis pivoted.**
+  path (`pipeline=false`) — **and per the bench above, that is correct: pipelining hurts
+  hybrid, so do NOT flip the hybrid arms.** Probe `mlx_decode_pipeline_probe`: 4B
+  **114→128 t/s = 96.5% of Python's 132.9**.
+- **(historical) compile + cache levers — both ruled out.**
 - **Results so far (2026-06-12):**
   - `mlx_compile_probe_plain` on Qwen3-0.6B-4bit (thread-local model + plain
     `compile`, weights captured, only token marshaled):

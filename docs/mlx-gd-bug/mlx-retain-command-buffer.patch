@@ -1,0 +1,27 @@
+# Fix: GatedDeltaNet custom-kernel garbage without a per-call eval (Qwen3.6 hybrid).
+#
+# Root cause: MLX's metal backend creates command buffers with UNRETAINED references
+# (`commandBufferWithUnretainedReferences`), relying on MLX's own buffer-lifetime
+# tracking. In the large Qwen3.6 forward an upstream buffer feeding the gated_delta
+# custom metal_kernel is freed/reused before the in-flight GPU dispatch reads it ->
+# garbage from the 2nd decode token. Visible only via the custom kernel (its output
+# feeds the recurrent cache, so the corruption persists across tokens).
+#
+# Fix: use RETAINED references so Metal keeps the referenced buffers alive until the
+# command buffer completes. Lets us drop the per-call `eval` workaround in
+# gated_delta.rs (~48 syncs/token) -> 27B decode ~12 -> ~16-17 t/s, byte-exact.
+#
+# Apply to the FetchContent'd MLX core source, e.g. a PATCH_COMMAND in the mlx-c
+# submodule's FetchContent_Declare(mlx ...), or against a forked MLX checkout.
+# Caveat: this is GLOBAL (all command buffers) — measure dense-model/prefill
+# regression, or make it a runtime flag gated to hybrid models before shipping.
+--- a/mlx/backend/metal/device.cpp
++++ b/mlx/backend/metal/device.cpp
+@@ MTL::CommandBuffer* Device::get_command_buffer(int index) {
+   auto& stream = get_stream_(index);
+   if (stream.buffer == nullptr) {
+-    stream.buffer = stream.queue->commandBufferWithUnretainedReferences();
++    stream.buffer = stream.queue->commandBuffer();
+     if (!stream.buffer) {
+       throw std::runtime_error(
+           "[metal::Device] Unable to create new command buffer");
