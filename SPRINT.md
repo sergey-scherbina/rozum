@@ -94,9 +94,33 @@ The machine has rebooted from memory pressure mid-experiment before; this block 
 single source of truth to pick up "as if nothing happened". Update it after every
 meaningful step and commit (small, frequent commits — never hold uncommitted experiment
 state).
-- **Branch:** `feature/mlx-perf-compile` (worktree `.worktrees/mlx-native`). Fork at
-  `.vendor/mlx-lm` branch `rozum-mlx-native`; Cargo pin currently
-  `d62049c93d9a6cbcc6fa37ae1480864094a887bc` (path-deps while iterating on the fork).
+
+**ACTIVE NOW (2026-06-12): MLX 0.30.6 → 0.31.2 bump (for the hybrid no-eval fix).**
+- **Branches:** rozum `feature/mlx-031-bump` (Cargo.toml = path-deps); fork
+  `.vendor/mlx-lm` branch `mlx-0.31.2-bump` (off `rozum-mlx-native` @ d62049c9).
+- **What's changed (all on the fork `mlx-0.31.2-bump` branch + its `mlx-c` submodule
+  working tree — re-applicable from this list if lost):**
+  1. `mlx-sys/src/mlx-c/CMakeLists.txt:38` `GIT_TAG v0.30.6` → `v0.31.2`.
+  2. `mlx-sys/src/mlx-c/CMakeLists.txt:55` — commented out `mlx/c/fft.cpp` (0.31.2 added
+     an `FFTNorm` arg; FFT unused for inference).
+  3. `mlx-sys/src/mlx-c/mlx/c/ops.cpp` — 0.31.2 added `global_scale` params to the
+     quantize family; inserted `std::nullopt` to keep affine behavior: **dequantize**
+     (1 nullopt after `mode`, before the dtype block), **qqmm** (2 nullopts:
+     global_scale_x/w, before the stream), **quantize** (1 nullopt before the stream).
+  4. `mlx-lm/src/models/gated_delta.rs:250` eval gated by `ROZUM_GD_NO_EVAL` (default =
+     eval kept, safe).
+- **Build:** with the fft+ops patches, mlx-c compiles against MLX 0.31.2. Time-heavy,
+  memory-light (mem stayed 93% throughout). MLX C++ itself builds clean; only mlx-c's
+  thin wrappers needed the patches.
+- **Resume after reboot during build:** `rm -rf target/release/build/mlx-sys-*` then
+  `cargo build --release --lib --features mlx-native` (the GIT_TAG edit persists on the
+  fork branch). The bump itself doesn't load any model → safe to rebuild anytime.
+- **⚠ STOP POINT (tell the user FIRST — memory-heavy, reboot risk):** after the build
+  succeeds + a SMALL dense model (`Qwen3-0.6B-4bit`) verifies the bumped MLX still works,
+  the next step LOADS 27B Qwen3.6 to test `ROZUM_GD_NO_EVAL=1` correctness + decode
+  speed. THAT is the risky run — do NOT start it autonomously; wait for the user's go.
+- **(historical) Branch:** `feature/mlx-perf-compile`. Fork
+  `rozum-mlx-native` @ `d62049c9` was the pre-bump pinned state.
 - **Memory discipline (this is what caused the reboots):** probe/iterate on the
   SMALLEST model (`mlx-community:Qwen3-0.6B-4bit`, cached), NOT 27B. Check
   `memory_pressure` before any model load; if free < ~25%, stop and free first. Only
