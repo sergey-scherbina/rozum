@@ -593,7 +593,7 @@ mod inner {
             None => None, // hybrid Generate returns None when cancelled mid-prefill
         };
         // Helper: pull the next token from the iterator, surfacing a stream error.
-        let mut pull = |iter: &mut I, prefetch: bool| -> Result<Option<Array>, ()> {
+        let pull = |iter: &mut I, prefetch: bool| -> Result<Option<Array>, ()> {
             match iter.next() {
                 Some(Ok(t)) => {
                     // Pipeline: kick off the next token's GPU work now, so the GPU

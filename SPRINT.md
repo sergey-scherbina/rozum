@@ -101,7 +101,22 @@ state).
   SMALLEST model (`mlx-community:Qwen3-0.6B-4bit`, cached), NOT 27B. Check
   `memory_pressure` before any model load; if free < ~25%, stop and free first. Only
   use 27B for the final Stage-3 A/B.
-- **Current stage:** Stage 0 done (probe written + run); hypothesis pivoted.
+- **Current stage:** DENSE SOLVED & merged; HYBRID is the remaining headline problem.
+- **DONE (dense decode — pipelining):** `stream_generation` now pipelines (build +
+  `async_eval` the next token before blocking on the current) for dense arches
+  (Qwen3, Qwen3-MoE, Llama, Qwen2 — `pipeline=true`); hybrid (Qwen3.6) keeps the serial
+  path (`pipeline=false`). Byte-exact on all four arches (Qwen3-4B/Qwen2/Llama/Qwen3.6
+  oracle strings unchanged). Probe `mlx_decode_pipeline_probe`: 4B **114→128 t/s =
+  96.5% of Python's 132.9**. **The dense decode gap is closed.**
+- **HYBRID 27B still ~12 t/s (the remaining gap).** 27B bench (serial vs pipelined)
+  showed pipelining is neutral-to-negative for the hybrid (128 n=128 1.22×, but ≤1×
+  at 512/1024) BECAUSE the GatedDeltaNet custom kernel does a **mandatory per-call
+  `eval` inside the forward** (the buffer-donation fix) → the forward already blocks
+  mid-step, so token-level `async_eval` can't overlap. **The real hybrid lever:
+  eliminate the buffer-donation hazard WITHOUT the per-call eval** (mark `state_out`
+  non-donatable / copy it / restructure the kernel's output), so the hybrid forward
+  stops self-blocking and can pipeline like Python. That is the next investigation.
+- **(historical) Stage 0 done (probe written + run); hypothesis pivoted.**
 - **Results so far (2026-06-12):**
   - `mlx_compile_probe_plain` on Qwen3-0.6B-4bit (thread-local model + plain
     `compile`, weights captured, only token marshaled):
