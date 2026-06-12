@@ -23,7 +23,7 @@ mod inner {
     };
 
     use mlx_lm::cache::ConcatKeyValueCache;
-    use mlx_lm::models::{llama, qwen3, qwen3_5, qwen3_5_moe, qwen3_moe};
+    use mlx_lm::models::{llama, qwen2, qwen3, qwen3_5, qwen3_5_moe, qwen3_moe};
     use mlx_lm_utils::tokenizer::{
         ApplyChatTemplateArgs, Chat, Conversation, Tokenizer, load_model_chat_template_from_file,
     };
@@ -49,6 +49,7 @@ mod inner {
         Qwen35(qwen3_5::Model),
         Qwen35Moe(qwen3_5_moe::Model),
         Llama(llama::Model),
+        Qwen2(qwen2::Model),
     }
 
     impl LoadedModel {
@@ -72,6 +73,10 @@ mod inner {
                 "llama" => llama::load_llama_model(dir)
                     .map(LoadedModel::Llama)
                     .map_err(|e| format!("mlx: load llama {}: {e}", dir.display())),
+                // Qwen2 / Qwen2.5 / Qwen2.5-Coder (dense; qkv-bias, no q/k-norm).
+                "qwen2" => qwen2::load_qwen2_model(dir)
+                    .map(LoadedModel::Qwen2)
+                    .map_err(|e| format!("mlx: load qwen2 {}: {e}", dir.display())),
                 other => Err(format!("mlx: unsupported model_type '{other}'")),
             }
         }
@@ -463,6 +468,18 @@ mod inner {
                     &job,
                 );
             }
+            LoadedModel::Qwen2(m) => {
+                let mut generator = qwen2::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                generator.set_sampler(top_p, top_k, repeat_penalty);
+                stream_generation(
+                    generator,
+                    tokenizer,
+                    eos,
+                    prompt_ids.len(),
+                    max_tokens,
+                    &job,
+                );
+            }
             LoadedModel::Qwen35(m) => {
                 // Owns its heterogeneous (KV + conv/recurrent) cache internally.
                 let mut generator = qwen3_5::Generate::new(m, temp, &prompt_tokens);
@@ -744,6 +761,7 @@ pub fn supported_model_type(model_type: &str) -> bool {
             | "qwen3_5_moe"
             | "qwen3_5_moe_text"
             | "llama"
+            | "qwen2"
     )
 }
 
@@ -964,6 +982,28 @@ mod tests {
         let stream = backend.chat(req).await.expect("chat");
         let text = collect_to_string(stream).await.expect("collect");
         eprintln!("MLX LLAMA OUTPUT: {text}");
+        assert!(text.contains("Paris"), "expected Paris, got: {text}");
+    }
+
+    // End-to-end Qwen2.5 through native MLX (auto-downloads). Greedy.
+    // Run: cargo test --features mlx-native -- --ignored --nocapture mlx_qwen2_chat
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "network: auto-downloads mlx-community/Qwen2.5-0.5B-Instruct-4bit"]
+    async fn mlx_qwen2_chat() {
+        use super::{MlxNativeBackend, ensure_model_dir};
+        use crate::backend::{ChatBackend, ChatRequest, collect_to_string};
+
+        let spec = "mlx-community:Qwen2.5-0.5B-Instruct-4bit";
+        let dir = ensure_model_dir(spec).await.expect("qwen2 download/resolve");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+            .await
+            .expect("backend load");
+        let req =
+            ChatRequest::simple("What is the capital of France? Answer in one short sentence.");
+        let stream = backend.chat(req).await.expect("chat");
+        let text = collect_to_string(stream).await.expect("collect");
+        eprintln!("MLX QWEN2 OUTPUT: {text}");
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
     }
 
