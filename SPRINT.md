@@ -167,19 +167,16 @@ is 100% MLX, candle only as external oracle.
   download of `Qwen3-0.6B-4bit` (8 files, progress 0→100%, loadable snapshot). Tests
   `wanted_*` + ignored network `config_first_gate_*` / `full_download_*`.
 
-- [ ] mlx-native-llama - Llama family for native MLX. `mlx-lm/src/models/llama.rs`
-  **already exists in the fork** (Model + `load_llama_model` + `Generate<'a, C>`), so
-  wiring is mostly rozum-side BUT the fork file needs two ports first: (1) **AFQ-quant
-  loader** — `load_llama_model` does a plain `load_safetensors` with NO `nn::quantize`
-  from config + NO `<p>.weight → <p>.inner.weight` remap, so 4-bit mlx-community Llama
-  would load garbage; mirror `load_qwen3_model` (qwen3.rs:617-632). (2) **sampler** —
-  llama's `Generate` is temp-only; port `SamplerOpts`/`sample_with`/`set_sampler`/
-  `apply_repeat_penalty`/`top_p_sample` from qwen3.rs (cancellation is free — the rozum
-  `stream_generation` loop already checks `job.cancel` per token; only the hybrid arches
-  need `set_cancel`). Then rozum: `LoadedModel::Llama` variant + `load` arm (`model_type`
-  "llama") + a dispatch arm like `Qwen3` (external `Vec<Option<ConcatKeyValueCache>>` +
-  `set_sampler`). **Validate greedy byte-exact vs Python `mlx_lm` oracle** on a small
-  model (e.g. Llama-3.2-1B-Instruct-4bit) before claiming done.
+- [x] mlx-native-llama - **DONE (`feature/mlx-llama`, fork `b46aee6f`).** Llama family
+  for native MLX. Fork `llama.rs`: (1) **AFQ-quant loader** — `load_llama_model` now
+  mirrors `load_qwen3_model` (read `quantization` → `nn::quantize` → remap
+  `<p>.weight → <p>.inner.weight` where a `.scales` sibling exists); `ModelArgs` gained
+  `quantization`. (2) **sampler** — `Generate` reuses qwen3's model-agnostic
+  `SamplerOpts`/`sample_with`/`repeat_window` (imported, not duplicated) + history +
+  `set_sampler`. rozum: `LoadedModel::Llama` + `load` arm (`model_type` "llama") +
+  dispatch like `Qwen3` (external cache + `set_sampler`); `supported_model_type` += llama.
+  **Validated greedy byte-exact vs Python `mlx_lm`** on Llama-3.2-1B-Instruct-4bit:
+  both emit "The capital of France is Paris." E2E test `mlx_llama_chat` (auto-downloads).
 
 - [ ] mlx-native-qwen2 - Qwen2.5 / Qwen2 (incl. Qwen2.5-Coder) for native MLX. **No
   `qwen2.rs` in the fork** — needs a new model file. Qwen2 ≈ Qwen3 minus q/k-norm plus
