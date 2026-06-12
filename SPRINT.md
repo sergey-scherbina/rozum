@@ -178,13 +178,18 @@ is 100% MLX, candle only as external oracle.
   **Validated greedy byte-exact vs Python `mlx_lm`** on Llama-3.2-1B-Instruct-4bit:
   both emit "The capital of France is Paris." E2E test `mlx_llama_chat` (auto-downloads).
 
-- [ ] mlx-native-qwen2 - Qwen2.5 / Qwen2 (incl. Qwen2.5-Coder) for native MLX. **No
-  `qwen2.rs` in the fork** — needs a new model file. Qwen2 ≈ Qwen3 minus q/k-norm plus
-  QKV bias (attention `bias=true`), standard dense transformer + KV cache; closest base
-  is qwen3.rs or llama.rs. Reuse the AFQ-quant loader pattern + the qwen3 sampler. Then
-  rozum: `LoadedModel::Qwen2` + `load` arm (`model_type` "qwen2") + dispatch. Unlocks the
-  `Qwen2.5-Coder-32B-Instruct-4bit` already in `models::RECOMMENDED`. Validate vs oracle.
-  Depends on the loader/sampler helpers landed by `mlx-native-llama`.
+- [x] mlx-native-qwen2 - **DONE (`feature/mlx-llama`, fork `d62049c9`).** Qwen2 / Qwen2.5
+  (incl. Qwen2.5-Coder) for native MLX. New fork `models/qwen2.rs` (adapted from
+  `llama.rs`): dense transformer with the Qwen2 bias convention — **q/k/v carry a bias,
+  o_proj does not** (independent of `attention_bias`, which Qwen2 omits); reuses the
+  AFQ-quant loader + qwen3 sampler. Two Qwen2-specific fixes over the llama base: (1)
+  `head_dim` optional → filled from `hidden_size / num_attention_heads`; (2) the weight
+  remap also maps **`.bias → .inner.bias`** for quantized layers (QuantizedLinear nests
+  the linear bias under `inner`; Qwen2 has q/k/v biases, so without this they stay at
+  init → garbage; `.biases` quant zero-points left alone). rozum: `LoadedModel::Qwen2` +
+  `load` arm + dispatch + `supported_model_type` += qwen2. **Validated greedy byte-exact
+  vs Python `mlx_lm`** on Qwen2.5-0.5B-Instruct-4bit. Unlocks `Qwen2.5-Coder-32B-Instruct-4bit`
+  (in `RECOMMENDED`). E2E test `mlx_qwen2_chat`.
 - [x] mlx-native-p4 - Phase 4: native MLX is the DEFAULT backend; `mlx_lm.server`
   retired (rozum `74b458a`). `default = ["mlx-native"]` (was `["mistralrs"]`);
   mistralrs is now opt-in `--features mistralrs` (broader-catalog candle fallback,
