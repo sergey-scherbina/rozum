@@ -497,8 +497,8 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
-                    false, // hybrid: Generate::next evals token+states (1 sync/token)
-                           // for state retention, so it blocks — no pipeline overlap
+                    false, // hybrid: the GatedDeltaNet kernel blocking-evals its
+                           // state per call (donation-safe), so decode can't pipeline
                 );
             }
             LoadedModel::Qwen35Moe(m) => {
@@ -513,8 +513,8 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
-                    false, // hybrid: Generate::next evals token+states (1 sync/token)
-                           // for state retention, so it blocks — no pipeline overlap
+                    false, // hybrid: the GatedDeltaNet kernel blocking-evals its
+                           // state per call (donation-safe), so decode can't pipeline
                 );
             }
         }
