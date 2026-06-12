@@ -104,6 +104,43 @@ vision) and why: `docs/specs/mlx-native-catalog-non-goals.md`.
   (the launch picker / `rozum models` list) with a few good defaults per family
   (coder, small, mid) so users get a sensible menu, not just whatever they type.
 
+### Native MLX runtime — domain fine-tuning (OFFLINE, exploratory)
+
+All **offline** (train with `mlx_lm.lora`/`fuse`, serve the merged checkpoint — the
+host stays inference-only). The full feasibility/memory/eval write-up is
+`docs/specs/training-and-lora-exploration.md`. Reality check on size: QLoRA on
+**0.5–4B is plenty for FORMAT / STYLE / narrow-domain PATTERNS** (the three items
+below), but NOT for raw reasoning — that stays on a big/remote model. Step up to
+7–14B (still QLoRA-able on a 32–64 GB Mac) only if a tune must also carry capability.
+Every item is gated by a **held-out eval** (domain set + a general probe to catch
+forgetting) — non-negotiable; without it you can't tell "improved" from "quietly
+degraded".
+
+- [ ] tune-toolcall-format - **Highest value/effort.** SFT/QLoRA a small model
+  (0.5–1.5B) on correct `<tool_call>{…}</tool_call>` traces to raise tool-call
+  format adherence (small models sometimes botch the JSON). Narrow, low-risk,
+  trivially measurable (format-valid rate on a held-out set). Pure format learning —
+  a tiny model is enough.
+
+- [ ] tune-domain-coder - QLoRA `Qwen2.5-Coder-1.5B/7B` on this repo's conventions
+  (FIM / signature+docstring→body / diff→commit-message) for fast, private, on-device
+  **autocomplete + boilerplate** in our style. NOT a replacement for the agent model
+  — it's the "small local handles the rote 80%, big/remote handles the hard 20%"
+  tier (rozum's multi-backend routing already fits this). 1.5–4B for completion;
+  7B if it should also carry a bit of domain reasoning.
+
+- [ ] tune-room-agent-style - Light QLoRA for a consistent room-agent voice/format
+  (tone, structure of replies, meeting etiquette). Style/persona is exactly what a
+  small model picks up; 0.5–4B is enough.
+
+- [ ] tune-minimal-experiment - **The one-day proof.** Offline QLoRA
+  `mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit`: ~1–5k `(prompt, completion)` pairs
+  from the repo (10% held out), rank 16, target `q/k/v/o + gate/up/down`, LR 1e-4,
+  2 epochs, seq 2048, batch 1 + grad checkpointing → `mlx_lm.fuse` → `rozum launch
+  --model <merged-dir>`. Fits in 16–32 GB, ~an afternoon. Eval: held-out
+  exact-match/edit-distance + a small general probe. Decides yes/no on "helped my
+  domain without breaking general use" before investing in the items above. Spec §6.
+
 ### Native MLX runtime — backend feature parity (vs mistralrs)
 
 Audit 2026-06-11 (`docs/specs/mlx-native-runtime.md` "Backend feature parity"):
