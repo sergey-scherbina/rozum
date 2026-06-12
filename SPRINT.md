@@ -101,15 +101,55 @@ state).
   SMALLEST model (`mlx-community:Qwen3-0.6B-4bit`, cached), NOT 27B. Check
   `memory_pressure` before any model load; if free < ~25%, stop and free first. Only
   use 27B for the final Stage-3 A/B.
-- **Current stage:** Stage 0 (writing the plain-`compile` probe). 
-- **Last done:** plan recorded; reference probe is the OLD `mlx_compile_probe`
-  (`src/mlx_native_backend.rs`, uses `compile_with_state` — the wrong API; keep as the
-  net-negative baseline). 
-- **Next concrete step:** add `mlx_compile_probe_plain` next to it using
-  `mlx_rs::transforms::compile::compile` with the model captured (Rc<RefCell> if the
-  borrow checker needs it) and only the token array as `args`; run on Qwen3-0.6B-4bit,
-  print compiled vs uncompiled per-step ms.
-- **Results so far:** (none yet — fill in `COMPILE-PROBE-PLAIN T=1 …` lines here).
+- **Current stage:** DENSE SOLVED & merged; HYBRID is the remaining headline problem.
+- **DONE (dense decode — pipelining):** `stream_generation` now pipelines (build +
+  `async_eval` the next token before blocking on the current) for dense arches
+  (Qwen3, Qwen3-MoE, Llama, Qwen2 — `pipeline=true`); hybrid (Qwen3.6) keeps the serial
+  path (`pipeline=false`). Byte-exact on all four arches (Qwen3-4B/Qwen2/Llama/Qwen3.6
+  oracle strings unchanged). Probe `mlx_decode_pipeline_probe`: 4B **114→128 t/s =
+  96.5% of Python's 132.9**. **The dense decode gap is closed.**
+- **HYBRID 27B still ~12 t/s (the remaining gap).** 27B bench (serial vs pipelined)
+  showed pipelining is neutral-to-negative for the hybrid (128 n=128 1.22×, but ≤1×
+  at 512/1024) BECAUSE the GatedDeltaNet custom kernel does a **mandatory per-call
+  `eval` inside the forward** (the buffer-donation fix) → the forward already blocks
+  mid-step, so token-level `async_eval` can't overlap. **The real hybrid lever:
+  eliminate the buffer-donation hazard WITHOUT the per-call eval** (mark `state_out`
+  non-donatable / copy it / restructure the kernel's output), so the hybrid forward
+  stops self-blocking and can pipeline like Python. That is the next investigation.
+- **(historical) Stage 0 done (probe written + run); hypothesis pivoted.**
+- **Results so far (2026-06-12):**
+  - `mlx_compile_probe_plain` on Qwen3-0.6B-4bit (thread-local model + plain
+    `compile`, weights captured, only token marshaled):
+    `T=1 uncompiled 3.137ms vs compiled 4.541ms (0.69×); T=16 1.00×`.
+    → **Plain `compile` is ALSO not a win.** So the decode gap is NOT a compile
+    problem. (Makes sense: compile fuses elementwise glue, NOT the matmul GEMMs that
+    dominate a transformer's ~450 dispatches.) **This rules out the fixed-cache +
+    compiled-decode redesign as the lever — big save.**
+  - The probe used a FRESH cache, so it didn't measure the cache cost. Confirmed
+    `ConcatKeyValueCache::update_and_fetch` does `concatenate_axis` EVERY step
+    (`cache.rs:95`) → O(n) realloc+copy per token, vs Python's preallocated in-place
+    KVCache. BUT the old bench was ~flat across 128/512/1024 context (~13/12/12 t/s),
+    which argues concat is NOT the dominant cost at ≤1024 either.
+- **LEVER FOUND = PIPELINING (`async_eval`).** Read `mlx_lm/generate.py:455-470`:
+  Python builds step n+1's graph from the *lazy* token n and `mx.async_eval`s it
+  BEFORE `y.item()` on token n — GPU never idles waiting for the CPU to build the next
+  graph. Our `stream_generation` (line ~570) does `eval`+`item` (blocking) THEN builds
+  the next step → a sync bubble every token.
+  - `mlx_decode_pipeline_probe` on Qwen3-4B-4bit: **serial 114.2 t/s, pipelined
+    128.3 t/s (1.12×)**. Python `mlx_lm` same model = **132.9 t/s**. So pipelined =
+    **96.5% of Python** (serial was 86%). **Pipelining closes the gap.** Win scales
+    with how much CPU graph-build hides behind GPU compute → bigger on 27B (more
+    layers, where the serial gap was 12 vs 22 = 55%).
+- **Next concrete step:** implement pipelining in the REAL decode loop
+  (`stream_generation`): hold the current lazy token, build+`async_eval` the next
+  before reading the current. Then (a) byte-exact check the dense e2e tests
+  (`mlx_chat_capital_of_france`, `mlx_qwen2_chat`, `mlx_llama_chat`) — tokens must be
+  identical; (b) **carefully** test the HYBRID path (qwen3_5 27B) — the GatedDeltaNet
+  custom kernel needs a per-call `eval` (buffer-donation hazard); async_eval deferral
+  may re-trigger the token-2 garbage. If hybrid breaks, gate pipelining to non-kernel
+  (dense) arches, or force the kernel's state eval inside the loop.
+- mx.compile + fixed-cache redesign: **shelved** (probe showed compile is not the
+  lever; the cache concat is ~flat across context). Pipelining is simpler and wins.
 
 #### P0 (current): mlx-native-runtime — pure-Rust native MLX runtime
 

@@ -441,6 +441,7 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
+                    true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
             LoadedModel::Qwen3Moe(m) => {
@@ -453,6 +454,7 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
+                    true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
             LoadedModel::Llama(m) => {
@@ -466,6 +468,7 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
+                    true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
             LoadedModel::Qwen2(m) => {
@@ -478,6 +481,7 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
+                    true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
             LoadedModel::Qwen35(m) => {
@@ -493,6 +497,7 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
+                    false,  // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
             LoadedModel::Qwen35Moe(m) => {
@@ -507,6 +512,7 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
+                    false,  // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
         }
@@ -557,6 +563,7 @@ mod inner {
         prompt_len: usize,
         max_tokens: usize,
         job: &Job,
+        pipeline: bool,
     ) where
         I: Iterator<Item = Result<Array, Exception>>,
     {
@@ -567,19 +574,60 @@ mod inner {
         let mut tool_seen = false; // once `<tool_call>` appears, stop streaming text
 
         let mut stop_reason = StopReason::EndTurn;
-        for token in generate {
+        // Pipelined decode (mirrors Python `mlx_lm`): build step n+1's graph from the
+        // lazy token n and `async_eval` it BEFORE blocking on token n's readback, so
+        // the GPU never idles waiting for the CPU to build the next graph. Token
+        // output is identical to a serial loop — only the eval timing changes.
+        let mut iter = generate;
+        let mut cur = match iter.next() {
+            Some(Ok(t)) => {
+                let _ = mlx_rs::transforms::async_eval([&t]);
+                Some(t)
+            }
+            Some(Err(e)) => {
+                let _ = job
+                    .events
+                    .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
+                return;
+            }
+            None => None, // hybrid Generate returns None when cancelled mid-prefill
+        };
+        // Helper: pull the next token from the iterator, surfacing a stream error.
+        let pull = |iter: &mut I, prefetch: bool| -> Result<Option<Array>, ()> {
+            match iter.next() {
+                Some(Ok(t)) => {
+                    // Pipeline: kick off the next token's GPU work now, so the GPU
+                    // stays fed while we block reading the current one.
+                    if prefetch {
+                        let _ = mlx_rs::transforms::async_eval([&t]);
+                    }
+                    Ok(Some(t))
+                }
+                Some(Err(e)) => {
+                    let _ = job
+                        .events
+                        .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
+                    Err(())
+                }
+                None => Ok(None),
+            }
+        };
+        while let Some(token) = cur.take() {
             if job.cancel.is_cancelled() {
                 stop_reason = StopReason::Cancelled;
                 break;
             }
-            let token = match token {
-                Ok(t) => t,
-                Err(e) => {
-                    let _ = job
-                        .events
-                        .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
-                    return;
+            // Pipelined arches pre-build + `async_eval` the next token now (before we
+            // block on the current). Hybrid (custom-kernel) arches don't benefit — the
+            // kernel's per-call `eval` already blocks the forward — so they fetch the
+            // next token serially after processing the current (`pipeline == false`).
+            let next = if pipeline {
+                match pull(&mut iter, true) {
+                    Ok(n) => n,
+                    Err(()) => return,
                 }
+            } else {
+                None
             };
             if eval([&token]).is_err() {
                 let _ = job.events.send(Err(ModelError::BackendUnavailable(
@@ -631,6 +679,16 @@ mod inner {
                 stop_reason = StopReason::MaxTokens;
                 break;
             }
+            // Advance. Pipelined: the already-`async_eval`'d next token. Serial:
+            // fetch it now (after processing the current), no pre-eval.
+            cur = if pipeline {
+                next
+            } else {
+                match pull(&mut iter, false) {
+                    Ok(n) => n,
+                    Err(()) => return,
+                }
+            };
         }
         // The iterator can also end on its own (None): the hybrid `Generate`
         // returns None when cancelled mid-prefill.
@@ -1199,30 +1257,52 @@ mod tests {
         // Synthetic prompt token ids (values don't matter for timing).
         let synth = |n: usize| -> Vec<u32> { (0..n).map(|i| (1000 + i % 5000) as u32).collect() };
 
+        let argmax_next = |y: &Array| {
+            mlx_rs::ops::indexing::argmax_axis(y, -1, false)
+                .unwrap()
+                .index((.., NewAxis))
+        };
+        let steps = 32;
         for &n in &[128usize, 512, 1024] {
             let ids = synth(n);
             let prompt = Array::from(&ids[..]).index(NewAxis);
+
+            // Prefill (timed once).
             let mut cache = model.init_cache();
             let t = Instant::now();
             let logits = model.forward(&prompt, &mut cache).expect("prefill");
             eval([&logits]).unwrap();
             let prefill = t.elapsed().as_secs_f64();
-            // Decode rate: time 16 single-token steps.
+
+            // Serial decode (our old pattern): forward, eval (block), repeat.
             let mut y = logits.index((.., -1, ..));
             let td = Instant::now();
-            let steps = 16;
             for _ in 0..steps {
-                let inp = mlx_rs::ops::indexing::argmax_axis(&y, -1, false)
-                    .unwrap()
-                    .index((.., NewAxis));
-                let l = model.forward(&inp, &mut cache).expect("decode");
-                y = l.index((.., -1, ..));
+                let inp = argmax_next(&y);
+                y = model.forward(&inp, &mut cache).expect("decode").index((.., -1, ..));
                 eval([&y]).unwrap();
             }
-            let dps = steps as f64 / td.elapsed().as_secs_f64();
+            let serial = steps as f64 / td.elapsed().as_secs_f64();
+
+            // Pipelined decode: async_eval the next step before blocking on current.
+            let mut cache2 = model.init_cache();
+            let logits2 = model.forward(&prompt, &mut cache2).expect("prefill2");
+            let mut cur = logits2.index((.., -1, ..));
+            let _ = mlx_rs::transforms::async_eval([&cur]);
+            let tp = Instant::now();
+            for _ in 0..steps {
+                let inp = argmax_next(&cur);
+                let next = model.forward(&inp, &mut cache2).expect("decode2").index((.., -1, ..));
+                let _ = mlx_rs::transforms::async_eval([&next]);
+                eval([&cur]).unwrap();
+                cur = next;
+            }
+            let pipelined = steps as f64 / tp.elapsed().as_secs_f64();
+
             eprintln!(
-                "BENCH n={n:>4}  prefill={prefill:>7.3}s ({:>7.1} tok/s)  decode={dps:>6.1} tok/s",
-                n as f64 / prefill
+                "BENCH n={n:>4}  prefill={prefill:>6.2}s ({:>6.1} tok/s)  decode serial={serial:>5.1}  pipelined={pipelined:>5.1} t/s  ({:.2}x)",
+                n as f64 / prefill,
+                pipelined / serial
             );
         }
     }
@@ -1359,6 +1439,151 @@ mod tests {
                 uncompiled / comp
             );
         }
+    }
+
+    // Stage-0 perf probe (P0 mlx-native-perf-compile): the CORRECT compile API.
+    // Unlike `mlx_compile_probe` (which uses `compile_with_state` → re-marshals all
+    // ~400 params/call → net-negative), this uses *plain* `compile`: the model lives
+    // in a thread-local, the compiled closure captures NOTHING (Copy+'static), so
+    // MLX traces once and bakes the weights into the graph — only the token `arg`
+    // crosses FFI per call, exactly like Python `mx.compile`. Go/no-go for the
+    // fixed-shape-cache + compiled-decode redesign. Small model on purpose (memory).
+    // Run: cargo test --features mlx-native -- --ignored --nocapture mlx_compile_probe_plain
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "perf probe; requires local mlx-community/Qwen3-0.6B-4bit"]
+    fn mlx_compile_probe_plain() {
+        use mlx_lm::cache::ConcatKeyValueCache;
+        use mlx_lm::models::qwen3::{load_qwen3_model, Model, ModelInput};
+        use mlx_rs::Array;
+        use mlx_rs::module::Module;
+        use mlx_rs::ops::indexing::{IndexOp, NewAxis};
+        use mlx_rs::transforms::compile::compile;
+        use mlx_rs::transforms::eval;
+        use std::cell::RefCell;
+        use std::time::Instant;
+
+        thread_local! {
+            static PROBE_MODEL: RefCell<Option<Model>> = const { RefCell::new(None) };
+        }
+
+        let dir = resolve_model_dir("mlx-community:Qwen3-0.6B-4bit")
+            .expect("Qwen3-0.6B-4bit not in HF cache (auto-download it first)");
+        let model = load_qwen3_model(&dir).expect("load");
+        PROBE_MODEL.with(|c| *c.borrow_mut() = Some(model));
+
+        // Non-capturing (Copy + 'static): reads the model from the thread-local, runs
+        // one forward over `[1, T]` with a fresh cache. Fixed shapes → graph reused.
+        let step = |args: &[Array]| -> Vec<Array> {
+            PROBE_MODEL.with(|c| {
+                let mut m = c.borrow_mut();
+                let model = m.as_mut().expect("probe model set");
+                let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+                let input = ModelInput { inputs: &args[0], mask: None, cache: &mut cache };
+                let logits =
+                    <Model as Module<ModelInput<'_, ConcatKeyValueCache>>>::forward(model, input)
+                        .expect("forward");
+                vec![logits]
+            })
+        };
+
+        for &t in &[1i32, 16] {
+            let ids: Vec<u32> = (0..t).map(|i| (1000 + i) as u32).collect();
+            let input = Array::from(&ids[..]).index(NewAxis);
+            let args = [input];
+            let iters = 64;
+
+            // Uncompiled baseline.
+            let _ = eval([&step(&args)[0]]);
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                let o = step(&args);
+                eval([&o[0]]).unwrap();
+            }
+            let uncompiled = t0.elapsed().as_secs_f64() / iters as f64;
+
+            // Compiled (plain — weights captured, only `args` marshaled).
+            let mut compiled = compile(step, None);
+            let _ = eval([&compiled(&args).unwrap()[0]]); // warm/trace
+            let t1 = Instant::now();
+            for _ in 0..iters {
+                let o = compiled(&args).unwrap();
+                eval([&o[0]]).unwrap();
+            }
+            let comp = t1.elapsed().as_secs_f64() / iters as f64;
+
+            eprintln!(
+                "COMPILE-PROBE-PLAIN T={t:>2}  uncompiled={:.3}ms  compiled={:.3}ms  speedup={:.2}x",
+                uncompiled * 1e3,
+                comp * 1e3,
+                uncompiled / comp
+            );
+        }
+        PROBE_MODEL.with(|c| *c.borrow_mut() = None);
+    }
+
+    // Stage-0b perf probe (P0): decode PIPELINING. Python `mlx_lm` builds step n+1's
+    // graph from the lazy token n and `async_eval`s it BEFORE blocking on token n's
+    // `.item()` — so the GPU never idles waiting for the CPU to build the next graph.
+    // Our `stream_generation` does `eval`+`item` (blocking) THEN builds the next step
+    // → a sync bubble every token. A/B serial vs pipelined decode on Qwen3-4B-4bit.
+    // Run: cargo test --features mlx-native -- --ignored --nocapture mlx_decode_pipeline_probe
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "perf probe; requires local mlx-community/Qwen3-4B-4bit"]
+    fn mlx_decode_pipeline_probe() {
+        use mlx_lm::cache::ConcatKeyValueCache;
+        use mlx_lm::models::qwen3::{load_qwen3_model, Generate};
+        use mlx_rs::Array;
+        use mlx_rs::ops::indexing::{IndexOp, NewAxis};
+        use mlx_rs::transforms::{async_eval, eval};
+        use std::time::Instant;
+
+        let dir =
+            resolve_model_dir("mlx-community:Qwen3-4B-4bit").expect("Qwen3-4B-4bit not in HF cache");
+        let mut model = load_qwen3_model(&dir).expect("load");
+        let prompt_ids: Vec<u32> = (0..32).map(|i| (1000 + i) as u32).collect();
+        let prompt = Array::from(&prompt_ids[..]).index(NewAxis);
+        let steps = 64usize;
+
+        // --- Serial: eval + item, then build next (our current pattern) ---
+        let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+        let mut g = Generate::new(&mut model, &mut cache, 0.0, &prompt);
+        let first = g.next().unwrap().unwrap(); // prefill (untimed)
+        eval([&first]).unwrap();
+        let _ = first.item::<u32>();
+        let t0 = Instant::now();
+        for _ in 0..steps {
+            let tok = g.next().unwrap().unwrap();
+            eval([&tok]).unwrap();
+            let _ = tok.item::<u32>();
+        }
+        let serial = t0.elapsed().as_secs_f64();
+        drop(g);
+
+        // --- Pipelined: async_eval the next step before reading the current ---
+        let mut cache2: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+        let mut g = Generate::new(&mut model, &mut cache2, 0.0, &prompt);
+        let first = g.next().unwrap().unwrap(); // prefill (untimed)
+        eval([&first]).unwrap();
+        let _ = first.item::<u32>();
+        let mut cur = g.next().unwrap().unwrap();
+        async_eval([&cur]).unwrap();
+        let t1 = Instant::now();
+        for _ in 0..steps {
+            let next = g.next().unwrap().unwrap(); // builds n+1 from lazy n
+            async_eval([&next]).unwrap();
+            let _ = cur.item::<u32>(); // already computed by its async_eval
+            cur = next;
+        }
+        let pipelined = t1.elapsed().as_secs_f64();
+
+        eprintln!(
+            "DECODE-PIPELINE  serial={:.1} t/s  pipelined={:.1} t/s  speedup={:.2}x",
+            steps as f64 / serial,
+            steps as f64 / pipelined,
+            serial / pipelined
+        );
     }
 
     // Mid-prefill cancellation: `Model::prefill_cancellable` must bail (return
