@@ -222,3 +222,33 @@ passes `sorted_indices=false` and never sorts. At **decode** (T=1, indices.size 
   each runtime (instrument the MLX patch's `CommandEncoder`) to see if Rust dispatches more.
 - The earlier "remaining 17→22.8" P1 was a CROSS-SESSION machine-state artifact (throttled
   Rust 17 vs an earlier cool-machine Python 22.8). Same-session clean: dense is 16.2 vs 23.0.
+
+## ★★★ 2026-06-12 (cont.) — MoE prefill FIXED (~1.7×); MoE decode gap LOCALIZED
+
+**SHIPPED: MoE expert-sort for prefill.** Ported Python `SwitchGLU`'s `_gather_sort`/
+`_scatter_unsort` into Rust `qwen3_moe.rs` (`SwitchGlu`/`QSwitchLinear`, shared by both MoE
+arches): when `indices.size>=64` (prefill), argsort the (token,slot) rows by expert id, run
+`gather_qmm(sorted_indices=true)` (contiguous per-expert access), scatter back via the
+inverse permutation. Pure access-order change → **byte-exact** (decode IDs identical; both
+MoE chat tests pass). **Qwen3.6-35B-A3B-4bit prefill 584 → ~1020 tok/s (n=512, ~1.7×)** vs
+Python 1180. Decode unchanged (T=1 has 8<64 slots → no sort, exactly as Python). Fork
+`4ec9bc86`, rozum pinned + reproducible git-rev build verified.
+
+**MoE decode 3.3× gap — LOCALIZED to a 2.4× super-additive eval, root NOT yet fixed.**
+Instrumented split + per-block skip hatches (`ROZUM_SKIP_MOE`/`ROZUM_SKIP_ATTN`), n=512
+decode eval ms/token:
+| variant | eval ms/tok | t/s |
+|---|---|---|
+| FULL | 28.6 | 34 |
+| backbone only (skip MoE) | 6.5 | 135 |
+| MoE block only (skip attn) | 5.5 | 161 |
+Parts sum to **12 ms** but FULL is **28.6 ms** → **2.4× super-additive**, appears only with
+the whole graph. Python's full forward (~10 ms) ≈ the additive sum → Python has NO blowup.
+RULED OUT as the cause: retain patch (28.6 ms with `ROZUM_MLX_RETAIN` on OR off — so the
+retain refs are NOT the decode cost), command-buffer commit frequency (`MLX_MAX_OPS_PER_BUFFER`
+∈ {10,100,10000} all 28.6 ms), build/FFI (8%), pipelining, KV-concat, MLX version. ⇒ a
+GPU-dispatch/scheduling effect on OUR deep T=1 graph (as built by mlx-rs) that Python's
+binding avoids. NEXT: count Metal dispatches / graph primitives per token in each runtime
+(`mx.export_to_dot` node count for Python vs an instrumented Rust eval) — does mlx-rs emit
+more / deeper-chained primitives per high-level op? A fix likely needs leaner op emission or
+hand-fused per-layer kernels. Hatches reverted after measuring (re-add to repro).

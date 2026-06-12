@@ -112,20 +112,32 @@ math. So the fix is leaner/fewer GPU dispatches, not a faster binding.
 - [x] decode-gap-kvcache - RULED OUT for decode: `ConcatKeyValueCache` does an O(ctx) concat
   per step but the context sweep is FLAT (Rust 32.7→30.9 t/s ctx 128→1024). Not this gap.
   (Still worth a pre-alloc cache for very long contexts — separate concern.)
-- [ ] **moe-prefill-sort** - CONCRETE WIN (~2×, prefill). Port Python's `SwitchGLU` expert
-  sort: `_gather_sort`/`_scatter_unsort` + `sorted_indices=true` into `gather_qmm` when
-  `indices.size>=64`. Files: `.vendor/mlx-lm/.../qwen3_moe.rs` (`SwitchGlu`, `QSwitchLinear`).
-  Shared by qwen3_moe + qwen3_5_moe. Validate byte-exact + prefill t/s.
-- [ ] **moe-decode-dispatch** - the open 3.3× decode. Next dig: count Metal kernel
-  dispatches/token in each runtime (instrument the MLX retain patch's `CommandEncoder` to
-  tally dispatches) to confirm Rust emits more, then localize (routing softmax/argpartition
-  over 256 experts × 40 layers, or the unsorted `gather_qmm`). At T=1 Python doesn't sort
-  either (indices.size=8<64), so it's NOT the sort there.
-- [ ] dense-decode-dispatch - the 1.4×; same op-graph/dispatch root, smaller payoff.
+- [x] **moe-prefill-sort** - DONE, SHIPPED. Ported Python `SwitchGLU` expert sort
+  (`_gather_sort`/`_scatter_unsort` + `sorted_indices=true` into `gather_qmm` when
+  `indices.size>=64`) in `qwen3_moe.rs` `SwitchGlu`/`QSwitchLinear` (shared by qwen3_moe +
+  qwen3_5_moe). **Qwen3.6-35B-A3B-4bit prefill 584 → ~1020 tok/s (n=512, ~1.7×)** toward
+  Python's 1180; decode unchanged (no sort at T=1); byte-exact (decode IDs identical), both
+  MoE chat tests pass. Fork `sergey-scherbina/mlx-rs` @ rozum-hybrid-decode `4ec9bc86`;
+  rozum (feature/mlx-hybrid-decode) Cargo pinned to it, reproducible git-rev build verified.
+- [~] **moe-decode-dispatch** - the open 3.3× decode. LOCALIZED (not yet fixed):
+  instrumented `build` vs `eval` and added per-block skip hatches (since reverted). At
+  n=512 decode, eval/token = **28.6 ms FULL**, but **6.5 ms backbone-only** (skip MoE) +
+  **5.5 ms MoE-only** (skip attn) = 12 ms → the full graph is **2.4× super-additive**.
+  RULED OUT as the cause: the retain patch (eval 28.6 ms with `ROZUM_MLX_RETAIN` on OR off),
+  command-buffer commit frequency (`MLX_MAX_OPS_PER_BUFFER` 10/100/10000 all 28.6 ms),
+  pipelining, KV-concat, version. Python's full forward (~10 ms) ≈ the additive 12 ms, so
+  Python does NOT have the blowup → it's a GPU-dispatch/scheduling effect on OUR deep
+  T=1 graph (mlx-rs-built) that Python's binding avoids. NEXT: count Metal dispatches /
+  primitives per token in each runtime (Python `mx.export_to_dot` node count vs an
+  instrumented Rust eval) to see if mlx-rs emits more / deeper-chained primitives; a fix
+  likely means leaner op emission or hand-fusing the hot per-layer ops. Big, uncertain.
+- [ ] dense-decode-dispatch - the 1.4×; likely the same super-additive root, smaller payoff.
 
 Diagnostics on branch `feature/mlx-hybrid-decode`: Rust benches `mlx_qwen35_prefill_bench`
 (dense) / `mlx_qwen35_moe_decode_bench` (MoE; `ROZUM_CTXSWEEP=1` env) — run with
 `ROZUM_MLX_RETAIN=1`. Python: `docs/mlx-gd-bug/py/decode_bench.py <repo>` (`CTXSWEEP=1` env).
+Per-block skip hatches (`ROZUM_SKIP_MOE`/`ROZUM_SKIP_ATTN` in qwen3_5_moe DecoderLayer) were
+used for the localization above and reverted; re-add to reproduce.
 
 **Don't block other work on this** — usable speeds today; this is parity-chasing.
 
