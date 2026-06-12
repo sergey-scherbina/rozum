@@ -211,7 +211,7 @@ pub fn scan_ollama() -> Vec<InstalledModel> {
                 let size = std::fs::metadata(&blob).map(|m| m.len()).unwrap_or(0);
                 out.push(InstalledModel {
                     source: ModelSource::Ollama,
-                    spec: format!("{name}:{tag}"),
+                    spec: format!("ollama:{name}:{tag}"),
                     path: blob,
                     size_bytes: size,
                 });
@@ -230,7 +230,7 @@ pub fn scan_ollama() -> Vec<InstalledModel> {
             if tensor_total > 0 {
                 out.push(InstalledModel {
                     source: ModelSource::Ollama,
-                    spec: format!("{name}:{tag}"),
+                    spec: format!("ollama:{name}:{tag}"),
                     path: tag_entry.path(),
                     size_bytes: tensor_total,
                 });

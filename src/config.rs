@@ -166,9 +166,10 @@ impl std::error::Error for ConfigError {}
 
 impl Default for RuntimeConfig {
     /// The auto-detect chain, in code — the single source of truth for "no
-    /// `rozum.toml`". `Fallback` over `[gguf, mistralrs, lmstudio, mlx, url]`.
+    /// `rozum.toml`". `Fallback` over `[mlx, gguf, mistralrs, lmstudio, url]`
+    /// (native MLX is the primary in-process backend; GGUF is the fallback).
     fn default() -> Self {
-        let chain = ["gguf", "mistralrs", "lmstudio", "mlx", "url"];
+        let chain = ["mlx", "gguf", "mistralrs", "lmstudio", "url"];
         Self {
             model: None,
             n_ctx: None,
@@ -379,7 +380,7 @@ mod tests {
             .iter()
             .map(|c| c.engine.as_str())
             .collect();
-        assert_eq!(engines, ["gguf", "mistralrs", "lmstudio", "mlx", "url"]);
+        assert_eq!(engines, ["mlx", "gguf", "mistralrs", "lmstudio", "url"]);
     }
 
     #[test]
@@ -408,7 +409,7 @@ mod tests {
             .iter()
             .map(|c| c.engine.as_str())
             .collect();
-        assert_eq!(engines, ["gguf", "mistralrs", "lmstudio", "mlx", "url"]);
+        assert_eq!(engines, ["mlx", "gguf", "mistralrs", "lmstudio", "url"]);
     }
 
     #[test]
