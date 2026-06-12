@@ -99,6 +99,56 @@ These are tracked in `BACKLOG.md` (Portability / hardware-agnostic core). None a
 urgent — the seam already works — but they turn "portable in principle" into
 "portable by `cargo build`".
 
+## "But all the optimizations and fixes we did — do they port?"
+
+Fair question, and the honest answer is *it depends which one* — they fall into
+three buckets. The split is healthy: the non-portable work is exactly the work that
+*should* be leaf-local, and nothing durable is lost when you swap a leaf.
+
+**Bucket 1 — Already above the SPI → portable to every backend & machine, today.**
+The protocol gateway, agent rooms, launch wrapper, multi-backend orchestration,
+concurrency/admission — these never knew what runtime was under them. They work for
+GGUF, mistralrs, HTTP, MLX, on any OS, unchanged.
+
+**Bucket 2 — Portable *concept*, currently leaf-bound.** A chunk of our work is
+hardware-agnostic in principle but lives inside the MLX leaf (`mlx_native_backend`)
+because the SPI boundary is at *text events*, not logits — so per-request
+rendering, sampling, parsing, and preflight all happen *inside* a backend:
+- tool-call parsing (`parse_tool_calls`) + multi-turn tool-history rendering,
+- the sampler (top-p / top-k / repeat-penalty / seed),
+- per-token + mid-prefill **cancellation**, multi-EOS,
+- the **RAM/KV preflight**,
+- auto-download + hf_hub/ModelScope cache (already separate modules, MLX-wired).
+The *ideas and most of the code* would carry to another in-process runtime, but
+today they'd be re-implemented per leaf (GGUF already has its own tool parser —
+duplication). Lifting these into a shared layer is the
+`portability-shared-model-source` (plus a future "shared serving helpers") backlog
+work. **Portable, just not yet *shared*.**
+
+**Bucket 3 — Genuinely leaf/hardware/model-specific → does NOT port, and must not.**
+The Metal kernels (GatedDeltaNet fused scan, fused causal SDPA), the chunked-prefill
++ last-position-projection plumbing, the `mlx-rs` binding fixes (RoPE reshape,
+AFQ `.weight→.inner.weight` / `.bias→.inner.bias` remap, the zero-buffer and
+buffer-donation/`eval` hazards), and the model-arch quirks (RMSNorm +1, f32 delta
+scan, Qwen2 optional `head_dim`) are all bound to *MLX + a specific checkpoint*.
+On CUDA/llama.cpp they would be different code — or **non-issues**, because that
+runtime already solved them its own way.
+
+**The key insight.** Bucket 3 is the *price of running our own MLX leaf* — it buys
+peak Apple-Silicon speed and day-one architectures (we had Qwen3.6 hybrid working
+natively before most tooling did). It is deliberately *quarantined below the seam*.
+Move to other hardware and you **lose our MLX-specific implementations but inherit
+that runtime's** (llama.cpp is one of the most optimized inference engines in
+existence — you trade our kernels for theirs, not for nothing), while keeping all of
+Bucket 1 and the *concepts* of Bucket 2. Nothing durable is lost.
+
+And the non-portable *code* still leaves portable **knowledge**: e.g. "a quantized
+backend's checkpoint keys rarely match the framework's param tree — check the
+remap", or "lazy-eval runtimes can donate a not-yet-materialized buffer — force
+`eval` on recurrent state". Those lessons transfer to the *next* leaf even when the
+code doesn't. (Several fixes also went upstream as PRs — ecosystem-portable by
+definition.)
+
 ## Takeaway
 
 rozum's durable identity is the **host/orchestration layer**: a local
