@@ -441,6 +441,7 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
+                    true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
             LoadedModel::Qwen3Moe(m) => {
@@ -453,6 +454,7 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
+                    true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
             LoadedModel::Llama(m) => {
@@ -466,6 +468,7 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
+                    true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
             LoadedModel::Qwen2(m) => {
@@ -478,6 +481,7 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
+                    true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
             LoadedModel::Qwen35(m) => {
@@ -493,6 +497,7 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
+                    false,  // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
             LoadedModel::Qwen35Moe(m) => {
@@ -507,6 +512,7 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
+                    false,  // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
         }
@@ -557,6 +563,7 @@ mod inner {
         prompt_len: usize,
         max_tokens: usize,
         job: &Job,
+        pipeline: bool,
     ) where
         I: Iterator<Item = Result<Array, Exception>>,
     {
@@ -567,19 +574,60 @@ mod inner {
         let mut tool_seen = false; // once `<tool_call>` appears, stop streaming text
 
         let mut stop_reason = StopReason::EndTurn;
-        for token in generate {
+        // Pipelined decode (mirrors Python `mlx_lm`): build step n+1's graph from the
+        // lazy token n and `async_eval` it BEFORE blocking on token n's readback, so
+        // the GPU never idles waiting for the CPU to build the next graph. Token
+        // output is identical to a serial loop — only the eval timing changes.
+        let mut iter = generate;
+        let mut cur = match iter.next() {
+            Some(Ok(t)) => {
+                let _ = mlx_rs::transforms::async_eval([&t]);
+                Some(t)
+            }
+            Some(Err(e)) => {
+                let _ = job
+                    .events
+                    .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
+                return;
+            }
+            None => None, // hybrid Generate returns None when cancelled mid-prefill
+        };
+        // Helper: pull the next token from the iterator, surfacing a stream error.
+        let mut pull = |iter: &mut I, prefetch: bool| -> Result<Option<Array>, ()> {
+            match iter.next() {
+                Some(Ok(t)) => {
+                    // Pipeline: kick off the next token's GPU work now, so the GPU
+                    // stays fed while we block reading the current one.
+                    if prefetch {
+                        let _ = mlx_rs::transforms::async_eval([&t]);
+                    }
+                    Ok(Some(t))
+                }
+                Some(Err(e)) => {
+                    let _ = job
+                        .events
+                        .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
+                    Err(())
+                }
+                None => Ok(None),
+            }
+        };
+        while let Some(token) = cur.take() {
             if job.cancel.is_cancelled() {
                 stop_reason = StopReason::Cancelled;
                 break;
             }
-            let token = match token {
-                Ok(t) => t,
-                Err(e) => {
-                    let _ = job
-                        .events
-                        .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
-                    return;
+            // Pipelined arches pre-build + `async_eval` the next token now (before we
+            // block on the current). Hybrid (custom-kernel) arches don't benefit — the
+            // kernel's per-call `eval` already blocks the forward — so they fetch the
+            // next token serially after processing the current (`pipeline == false`).
+            let next = if pipeline {
+                match pull(&mut iter, true) {
+                    Ok(n) => n,
+                    Err(()) => return,
                 }
+            } else {
+                None
             };
             if eval([&token]).is_err() {
                 let _ = job.events.send(Err(ModelError::BackendUnavailable(
@@ -631,6 +679,16 @@ mod inner {
                 stop_reason = StopReason::MaxTokens;
                 break;
             }
+            // Advance. Pipelined: the already-`async_eval`'d next token. Serial:
+            // fetch it now (after processing the current), no pre-eval.
+            cur = if pipeline {
+                next
+            } else {
+                match pull(&mut iter, false) {
+                    Ok(n) => n,
+                    Err(()) => return,
+                }
+            };
         }
         // The iterator can also end on its own (None): the hybrid `Generate`
         // returns None when cancelled mid-prefill.
@@ -1199,30 +1257,52 @@ mod tests {
         // Synthetic prompt token ids (values don't matter for timing).
         let synth = |n: usize| -> Vec<u32> { (0..n).map(|i| (1000 + i % 5000) as u32).collect() };
 
+        let argmax_next = |y: &Array| {
+            mlx_rs::ops::indexing::argmax_axis(y, -1, false)
+                .unwrap()
+                .index((.., NewAxis))
+        };
+        let steps = 32;
         for &n in &[128usize, 512, 1024] {
             let ids = synth(n);
             let prompt = Array::from(&ids[..]).index(NewAxis);
+
+            // Prefill (timed once).
             let mut cache = model.init_cache();
             let t = Instant::now();
             let logits = model.forward(&prompt, &mut cache).expect("prefill");
             eval([&logits]).unwrap();
             let prefill = t.elapsed().as_secs_f64();
-            // Decode rate: time 16 single-token steps.
+
+            // Serial decode (our old pattern): forward, eval (block), repeat.
             let mut y = logits.index((.., -1, ..));
             let td = Instant::now();
-            let steps = 16;
             for _ in 0..steps {
-                let inp = mlx_rs::ops::indexing::argmax_axis(&y, -1, false)
-                    .unwrap()
-                    .index((.., NewAxis));
-                let l = model.forward(&inp, &mut cache).expect("decode");
-                y = l.index((.., -1, ..));
+                let inp = argmax_next(&y);
+                y = model.forward(&inp, &mut cache).expect("decode").index((.., -1, ..));
                 eval([&y]).unwrap();
             }
-            let dps = steps as f64 / td.elapsed().as_secs_f64();
+            let serial = steps as f64 / td.elapsed().as_secs_f64();
+
+            // Pipelined decode: async_eval the next step before blocking on current.
+            let mut cache2 = model.init_cache();
+            let logits2 = model.forward(&prompt, &mut cache2).expect("prefill2");
+            let mut cur = logits2.index((.., -1, ..));
+            let _ = mlx_rs::transforms::async_eval([&cur]);
+            let tp = Instant::now();
+            for _ in 0..steps {
+                let inp = argmax_next(&cur);
+                let next = model.forward(&inp, &mut cache2).expect("decode2").index((.., -1, ..));
+                let _ = mlx_rs::transforms::async_eval([&next]);
+                eval([&cur]).unwrap();
+                cur = next;
+            }
+            let pipelined = steps as f64 / tp.elapsed().as_secs_f64();
+
             eprintln!(
-                "BENCH n={n:>4}  prefill={prefill:>7.3}s ({:>7.1} tok/s)  decode={dps:>6.1} tok/s",
-                n as f64 / prefill
+                "BENCH n={n:>4}  prefill={prefill:>6.2}s ({:>6.1} tok/s)  decode serial={serial:>5.1}  pipelined={pipelined:>5.1} t/s  ({:.2}x)",
+                n as f64 / prefill,
+                pipelined / serial
             );
         }
     }
