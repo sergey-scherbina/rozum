@@ -43,23 +43,27 @@ impl Default for GgufOptions {
 /// Resolve a model spec to a concrete GGUF file path.
 ///
 /// Resolution order (first match wins):
-/// 1. Absolute / relative filesystem path that exists.
-/// 2. `lmstudio:<user>/<repo>` — search `~/.cache/lm-studio/models/<user>/<repo>/`.
-/// 3. Bare `<name>[:<tag>]` interpreted as an Ollama model whose blob already
-///    sits in `~/.ollama/models/blobs/` (we use the cached file directly — no
-///    HTTP call to a running `ollama serve`).
+/// 1. `lmstudio:<user>/<repo>` — search `~/.cache/lm-studio/models/<user>/<repo>/`.
+/// 2. `ollama:<name>[:<tag>]` — the Ollama model whose blob already sits in
+///    `~/.ollama/models/blobs/` (used directly — no HTTP to a running
+///    `ollama serve`). The `ollama:` prefix is REQUIRED; a bare `name:tag` is not
+///    interpreted as Ollama.
+/// 3. Absolute / relative filesystem path that exists.
 ///
 /// Returns `None` and logs a warning if no path can be determined.
 pub fn resolve_model_path(spec: &str) -> Option<PathBuf> {
     if let Some(repo) = spec.strip_prefix("lmstudio:") {
         return resolve_lmstudio_model(repo);
     }
+    // Ollama models must be requested explicitly with an `ollama:` prefix — a bare
+    // `name:tag` is no longer silently treated as Ollama (it was ambiguous with HF
+    // / MLX specs and surprised users).
+    if let Some(name) = spec.strip_prefix("ollama:") {
+        return resolve_ollama_blob(name);
+    }
     let path = PathBuf::from(spec);
     if path.exists() {
         return Some(path);
-    }
-    if let Some(blob) = resolve_ollama_blob(spec) {
-        return Some(blob);
     }
     tracing::warn!(spec = %spec, "gguf: could not resolve spec to a file path");
     None
@@ -920,18 +924,23 @@ mod tests {
         unsafe {
             std::env::set_var("ROZUM_OLLAMA_HOME", dir.path());
         }
-        // Note: bare model spec, no `ollama:` prefix.
+        // The `ollama:` prefix is REQUIRED; a bare `name:tag` no longer resolves.
+        let prefixed = resolve_model_path("ollama:qwen3.5:9b-mlx");
         let bare = resolve_model_path("qwen3.5:9b-mlx");
-        let default_tag = resolve_model_path("qwen3.5"); // should NOT match — no `latest` tag
+        let default_tag = resolve_model_path("ollama:qwen3.5"); // no `latest` tag present
         unsafe {
             std::env::remove_var("ROZUM_OLLAMA_HOME");
         }
 
         assert!(
-            bare.is_some(),
-            "expected to resolve qwen3.5:9b-mlx, got None"
+            prefixed.is_some(),
+            "expected to resolve ollama:qwen3.5:9b-mlx, got None"
         );
-        assert!(bare.unwrap().file_name().unwrap() == blob_name.as_str());
+        assert!(prefixed.unwrap().file_name().unwrap() == blob_name.as_str());
+        assert!(
+            bare.is_none(),
+            "a bare name:tag must NOT resolve to Ollama (prefix required)"
+        );
         assert!(
             default_tag.is_none(),
             "should not resolve to default :latest when not present"

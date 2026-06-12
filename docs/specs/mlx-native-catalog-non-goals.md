@@ -60,11 +60,18 @@ Things that ARE worth doing live in `BACKLOG.md` (catalog expansion) and
 
 ## 5. GGUF / llama.cpp models through the *native MLX* runtime — NO (already covered)
 
-- GGUF is a different weight format (llama.cpp), not MLX safetensors. We already
-  serve GGUF — via the **GGUF backend** (`--features gguf`, reading Ollama /
-  LM Studio / local files). Teaching the MLX runtime to read GGUF would duplicate
-  that backend in the wrong place.
-- **Verdict.** GGUF stays in the GGUF backend; native MLX stays MLX-safetensors.
+- **We DO have our own GGUF backend.** To be unambiguous: rozum ships a real
+  in-process GGUF backend — `src/gguf.rs`, in the default build, running llama.cpp
+  in-process via the `llama-cpp-2` Rust bindings (not a subprocess), with streaming
+  + tool-use, resolving local `.gguf` files / `lmstudio:` / `ollama:` specs. So
+  "GGUF support" is **not** the non-goal.
+- The non-goal is narrower: (a) teaching the **native MLX runtime** to read the
+  GGUF format (GGUF is llama.cpp's format, not MLX safetensors — that would
+  duplicate the GGUF backend in the wrong place), and (b) writing a **from-scratch
+  GGUF reader / inference engine** (that's reinventing llama.cpp, a mature, fast
+  Metal engine, for zero benefit — same logic as not reinventing MLX).
+- **Verdict.** GGUF stays in the GGUF backend (llama.cpp); native MLX stays
+  MLX-safetensors (mlx-rs). Each format keeps its own proven engine.
 
 ## 6. Non-quantized giant models "just because" — NO
 

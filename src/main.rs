@@ -238,8 +238,9 @@ enum ModelsAction {
 
     /// Show details for a model spec (works for installed and non-installed)
     Info {
-        /// Model spec: `mlx-community:...`, `hf:<user>/<repo>`, `<ollama-tag>`,
-        /// `lmstudio:<repo>`, or an absolute path
+        /// Model spec: `mlx-community:...`, `hf:<user>/<repo>`,
+        /// `modelscope:<owner>/<repo>`, `ollama:<name>[:<tag>]`, `lmstudio:<repo>`,
+        /// or an absolute path
         spec: String,
     },
 
@@ -1946,21 +1947,23 @@ async fn build_gateway_backend(
         "event": "backend_select_start", "model": model_spec, "n_ctx": n_ctx,
     }));
 
-    // 1. Try in-process GGUF (fastest for GGUF files, needs --features gguf)
-    if let Some(b) = try_build_gguf_backend(model_spec, n_ctx) {
+    // 1. Try the pure-Rust native MLX runtime (the primary in-process backend):
+    //    full native MLX forward, no candle, no Python. Covers the Qwen3 / Qwen3.6
+    //    / Qwen2 / Llama families and auto-downloads HF / ModelScope MLX repos.
+    //    Declines fast for `.gguf` files / `lmstudio:` / `ollama:` specs, so those
+    //    fall through to GGUF below.
+    if let Some(b) = try_build_mlx_native_backend(model_spec, n_ctx).await {
         rozum::obs::log_event(
-            serde_json::json!({"event":"backend_selected","backend":"gguf","model":model_spec}),
+            serde_json::json!({"event":"backend_selected","backend":"mlx-native","model":model_spec}),
         );
         return Some(rozum::concurrency::admit_wrap(b));
     }
 
-    // 2. Try the pure-Rust native MLX runtime (on by default). The primary
-    //    in-process MLX backend: full native MLX forward, no candle, no Python.
-    //    Covers the Qwen3 / Qwen3.6 family. Matches only already-local snapshots,
-    //    so it falls through cleanly for GGUF paths or un-cached repos.
-    if let Some(b) = try_build_mlx_native_backend(model_spec, n_ctx).await {
+    // 2. Try in-process GGUF (the GGUF/llama.cpp fallback, in the default build):
+    //    local `.gguf` files, `lmstudio:<repo>`, `ollama:<name>` (cached blobs).
+    if let Some(b) = try_build_gguf_backend(model_spec, n_ctx) {
         rozum::obs::log_event(
-            serde_json::json!({"event":"backend_selected","backend":"mlx-native","model":model_spec}),
+            serde_json::json!({"event":"backend_selected","backend":"gguf","model":model_spec}),
         );
         return Some(rozum::concurrency::admit_wrap(b));
     }
@@ -2041,7 +2044,7 @@ fn print_no_backend_hints(model_spec: &str) {
     eprintln!("    rozum launch --model /path/to/model.gguf       claude");
     eprintln!("    rozum launch --model 'lmstudio:<user>/<repo>'   claude");
     eprintln!(
-        "    rozum launch --model '<ollama-name>:<tag>'      claude   # reads ~/.ollama/models/blobs/"
+        "    rozum launch --model 'ollama:<name>:<tag>'      claude   # reads ~/.ollama/models/blobs/"
     );
     eprintln!();
     eprintln!("  in-process native MLX (on by default, Metal, AFQ safetensors):");
@@ -2458,7 +2461,10 @@ async fn try_build_mlx_native_backend(
     // GGUF model FILES and `lmstudio:` specs belong to other backends. Use
     // `is_file()` (not `extension()`, which misfires on dotted repo names like
     // `mlx-community:Qwen3.6-27B-4bit`); a local MLX *directory* still resolves.
-    if model_spec.starts_with("lmstudio:") || std::path::Path::new(model_spec).is_file() {
+    if model_spec.starts_with("lmstudio:")
+        || model_spec.starts_with("ollama:")
+        || std::path::Path::new(model_spec).is_file()
+    {
         return None;
     }
     // Use a cached snapshot if present, else auto-download it from HuggingFace

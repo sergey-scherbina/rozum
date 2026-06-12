@@ -5,16 +5,14 @@ edition = "2024"
 license = "Apache-2.0"
 
 [features]
-# The pure-Rust native MLX runtime is the default in-process backend so
-# `cargo build` produces a binary that runs the Qwen3 / Qwen3.6 family out of the
-# box on Apple Silicon (no Python, no mlx_lm.server). It builds MLX C++ from
-# source (cmake + full Xcode, ~15 min first build). Use `--no-default-features`
-# for just the meeting-room runtime (no Metal toolchain), or
-# `--features mistralrs` for the broader-catalog candle backend.
-# NOTE: `mlx-native` currently uses path deps into the gitignored `.vendor/`
-# (below), so a clean clone must push the fork and switch to a git-rev pin (like
-# the mistralrs [patch.crates-io]) before this default builds off-tree.
-default = ["mlx-native"]
+# Default = the pure-Rust native MLX runtime (primary in-process backend) PLUS the
+# GGUF backend (the fallback for GGUF/llama.cpp files, tried after native MLX), so
+# `cargo build` runs the Qwen3 / Qwen3.6 family out of the box AND opens local
+# `.gguf` / `lmstudio:` / `ollama:` models. Heavy first build: mlx-sys compiles
+# MLX C++ and llama-cpp-2 compiles llama.cpp (cmake + full Xcode). Use
+# `--no-default-features` for just the meeting-room runtime (no Metal toolchain),
+# or `--features mistralrs` for the broader-catalog candle backend.
+default = ["mlx-native", "gguf"]
 local-models = ["dep:candle", "dep:candle-transformers", "dep:tokenizers"]
 gguf = ["dep:llama-cpp-2"]
 mistralrs = ["dep:mistralrs"]
