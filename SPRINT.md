@@ -102,10 +102,17 @@ intermediates.
   `mlx_native_backend::stream_generation` (the per-call eval no longer blocks), A/B
   decode t/s, keep if it helps. Cheap. (Synthetic bench was ~neutral; the real
   streaming path may differ.)
-- [ ] decode-gap-compile - port `mlx_lm`'s `@mx.compile` of `compute_g` (and any
-  fusable hot ops) to mlx-rs `compile`, and/or reduce per-layer intermediates, to cut
-  the dispatch count. The real remaining lever — needs profiling first.
-- [ ] decode-gap-dispatch - (hard, last) fused Metal kernels for the hot path.
+- [x] decode-gap-compile - TESTED, net-NEGATIVE. Wrapped `compute_g` in mlx-rs
+  `transforms::compile::compile` (mirrors Python's `@mx.compile`): byte-exact but decode
+  serial 16.5 → 15.8 t/s (slightly SLOWER). mlx-rs `compile`'s per-call closure/marshal
+  overhead exceeds the fusion saving on these tiny tensors. So this lever is closed —
+  Python's native `@mx.compile` is lower-overhead than mlx-rs's.
+- [ ] decode-gap-dispatch - (hard, last, diminishing returns) The remaining ~17→22.8
+  gap is STRUCTURAL: mlx-rs's per-op FFI/binding overhead vs Python's mlx binding
+  (~450 tiny ops/token, each costlier in mlx-rs), and mlx-rs `compile` is too heavy to
+  fuse small hot ops. Closing it needs either a lower-overhead mlx-rs op path
+  (binding-level) or hand-fused Metal kernels for the hot path. Big effort, uncertain;
+  the +30% (12→17) is banked. Not recommended unless decode speed becomes critical.
 
 **Don't block other work on this** — the eval was the main lever and it's taken; this
 is the tail.
