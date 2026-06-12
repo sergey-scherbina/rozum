@@ -2,7 +2,7 @@
 
 **Status: design / plan.** The **generic, domain-agnostic** layer that lets any
 scalascript application embed a tool-using LLM agent. It is the middle tier of the
-busi integration (`busi-integration-and-agent-runtime.md`): below it sits **rozum**
+busi integration (`integration.md`): below it sits **rozum**
 (a stateless model service speaking the OpenAI/Anthropic API), above it sits the
 **app** (busi — accounting tools + prompts). **busi-specific = nothing here**; the
 *next* scalascript app reuses this SDK unchanged.
@@ -24,7 +24,7 @@ surface. It does **three** things and nothing else:
 3. **Frames tools** (Contract 3) — declare a tool, derive its schema, dispatch calls
    to the app's handler, format results/errors.
 
-(The three contracts are defined in `busi-integration-and-agent-runtime.md`; this spec
+(The three contracts are defined in `integration.md`; this spec
 is their realized design.)
 
 It explicitly does **not**: own session/business state (the app does), execute side
@@ -210,7 +210,7 @@ One stop token may still emit a trailing tool round that's discarded — harmles
 - **rozum** provides Contract 1 (the gateway), an optional **Rust reference
   agent-runtime** as the *executable twin* of this SDK (same Contracts 2–3, for the
   embedded mode), and `structured-output` so the SDK can pass JSON schemas and get
-  schema-valid tool args. See `busi-integration-and-agent-runtime.md` + BACKLOG
+  schema-valid tool args. See `integration.md` + BACKLOG
   ("Agent integration (busi)").
 - **busi** is a thin domain layer: it provides `Tool`s (handlers + schemas), the
   system/activation prompts, the eval set, and the model choice — nothing generic.

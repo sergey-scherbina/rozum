@@ -245,7 +245,7 @@ orchestration/session state lives in busi (so rozum scales + fails over for free
 the agent loop + the generic plumbing live in a **scalascript "agent SDK"** (generic,
 reusable by any app), and the accounting tools/prompts/eval are busi on top. Design +
 the three contracts (model-call API / agent loop / tool) + the generic-vs-domain
-layering: `docs/specs/busi-integration-and-agent-runtime.md`. The rozum items here are
+layering: `docs/specs/integration.md`. The rozum items here are
 just the model-service side; the SDK + tools are owned by the scalascript/busi side.
 
 - [ ] rozum-gateway-tool-contract - **P0b (rozum).** Stabilize + document the
