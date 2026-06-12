@@ -115,10 +115,20 @@ state).
 - **Resume after reboot during build:** `rm -rf target/release/build/mlx-sys-*` then
   `cargo build --release --lib --features mlx-native` (the GIT_TAG edit persists on the
   fork branch). The bump itself doesn't load any model → safe to rebuild anytime.
-- **⚠ STOP POINT (tell the user FIRST — memory-heavy, reboot risk):** after the build
-  succeeds + a SMALL dense model (`Qwen3-0.6B-4bit`) verifies the bumped MLX still works,
-  the next step LOADS 27B Qwen3.6 to test `ROZUM_GD_NO_EVAL=1` correctness + decode
-  speed. THAT is the risky run — do NOT start it autonomously; wait for the user's go.
+- **⚠ STOP POINT REACHED (2026-06-12) — awaiting user go.** Bump DONE: builds on MLX
+  0.31.2, dense (Qwen2/Llama/Qwen3-4B) byte-exact, all pushed (fork `mlx-0.31.2-bump`
+  b33ea570; submodule `mlx-0.31.2-compat` 7dc0fc5; rozum `feature/mlx-031-bump` fe50ada).
+  Memory held at 93% the whole time. The NEXT step is the memory-heavy / reboot-risky one
+  (LOADS 27B Qwen3.6) — paused for the user to free resources. **After the go, run:**
+  1. `ROZUM_GD_NO_EVAL=1 cargo test --release --lib --features mlx-native mlx_qwen35_chat
+     -- --ignored --nocapture` → if the output is COHERENT (not `)` garbage), the 0.31.2
+     bump FIXED the donation hazard → we can drop the per-call eval.
+  2. If fixed: flip the two hybrid arms' `pipeline=false` → `true` in `run_job`
+     (`LoadedModel::Qwen35` / `Qwen35Moe`), default the eval OFF (or keep `ROZUM_GD_NO_EVAL`
+     in the worker env for hybrid), then `mlx_qwen35_prefill_bench` → target ~22 t/s.
+  3. Validate byte-exact greedy vs the Python oracle on 27B, then finalize the fork
+     (commit the eval-drop, push, bump rozum's git pin) + flip pipeline + merge.
+  - Check `memory_pressure` first (27B needs ~15 GB); free < ~40% → wait/free more.
 - **(historical) Branch:** `feature/mlx-perf-compile`. Fork
   `rozum-mlx-native` @ `d62049c9` was the pre-bump pinned state.
 - **Memory discipline (this is what caused the reboots):** probe/iterate on the
