@@ -1442,6 +1442,70 @@ mod tests {
         PROBE_MODEL.with(|c| *c.borrow_mut() = None);
     }
 
+    // Stage-0b perf probe (P0): decode PIPELINING. Python `mlx_lm` builds step n+1's
+    // graph from the lazy token n and `async_eval`s it BEFORE blocking on token n's
+    // `.item()` — so the GPU never idles waiting for the CPU to build the next graph.
+    // Our `stream_generation` does `eval`+`item` (blocking) THEN builds the next step
+    // → a sync bubble every token. A/B serial vs pipelined decode on Qwen3-4B-4bit.
+    // Run: cargo test --features mlx-native -- --ignored --nocapture mlx_decode_pipeline_probe
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "perf probe; requires local mlx-community/Qwen3-4B-4bit"]
+    fn mlx_decode_pipeline_probe() {
+        use mlx_lm::cache::ConcatKeyValueCache;
+        use mlx_lm::models::qwen3::{load_qwen3_model, Generate};
+        use mlx_rs::Array;
+        use mlx_rs::ops::indexing::{IndexOp, NewAxis};
+        use mlx_rs::transforms::{async_eval, eval};
+        use std::time::Instant;
+
+        let dir =
+            resolve_model_dir("mlx-community:Qwen3-4B-4bit").expect("Qwen3-4B-4bit not in HF cache");
+        let mut model = load_qwen3_model(&dir).expect("load");
+        let prompt_ids: Vec<u32> = (0..32).map(|i| (1000 + i) as u32).collect();
+        let prompt = Array::from(&prompt_ids[..]).index(NewAxis);
+        let steps = 64usize;
+
+        // --- Serial: eval + item, then build next (our current pattern) ---
+        let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+        let mut g = Generate::new(&mut model, &mut cache, 0.0, &prompt);
+        let first = g.next().unwrap().unwrap(); // prefill (untimed)
+        eval([&first]).unwrap();
+        let _ = first.item::<u32>();
+        let t0 = Instant::now();
+        for _ in 0..steps {
+            let tok = g.next().unwrap().unwrap();
+            eval([&tok]).unwrap();
+            let _ = tok.item::<u32>();
+        }
+        let serial = t0.elapsed().as_secs_f64();
+        drop(g);
+
+        // --- Pipelined: async_eval the next step before reading the current ---
+        let mut cache2: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+        let mut g = Generate::new(&mut model, &mut cache2, 0.0, &prompt);
+        let first = g.next().unwrap().unwrap(); // prefill (untimed)
+        eval([&first]).unwrap();
+        let _ = first.item::<u32>();
+        let mut cur = g.next().unwrap().unwrap();
+        async_eval([&cur]).unwrap();
+        let t1 = Instant::now();
+        for _ in 0..steps {
+            let next = g.next().unwrap().unwrap(); // builds n+1 from lazy n
+            async_eval([&next]).unwrap();
+            let _ = cur.item::<u32>(); // already computed by its async_eval
+            cur = next;
+        }
+        let pipelined = t1.elapsed().as_secs_f64();
+
+        eprintln!(
+            "DECODE-PIPELINE  serial={:.1} t/s  pipelined={:.1} t/s  speedup={:.2}x",
+            steps as f64 / serial,
+            steps as f64 / pipelined,
+            serial / pipelined
+        );
+    }
+
     // Mid-prefill cancellation: `Model::prefill_cancellable` must bail (return
     // None) at a chunk boundary as soon as `should_cancel()` fires, so a cancel on
     // a long prompt is honored DURING prefill (not only after it). Deterministic
