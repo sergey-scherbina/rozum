@@ -207,7 +207,7 @@ enum GatewayAction {
         /// Context window for the new model (default: keep the current one).
         #[arg(long)]
         n_ctx: Option<u32>,
-        /// Force a specific engine: gguf, mistralrs, lmstudio, mlx, url.
+        /// Force a specific engine: gguf, mistralrs, lmstudio, mlx, mlx-server, url.
         #[arg(long)]
         backend: Option<String>,
     },
@@ -637,6 +637,22 @@ fn resolve_piggyback(no_piggyback: bool, env_override: Option<bool>, channels_ac
         return false;
     }
     env_override.unwrap_or(!channels_active)
+}
+
+#[cfg(test)]
+mod backend_engine_tests {
+    use super::is_mlx_server_engine;
+
+    #[test]
+    fn mlx_server_engine_aliases_are_distinct_from_native_mlx() {
+        for e in ["mlx-server", "mlx_lm_server", "mlx-lm-server"] {
+            assert!(is_mlx_server_engine(e), "{e} should route to mlx_lm.server");
+        }
+        // Native MLX engine names must NOT route to the Python server.
+        for e in ["mlx", "mlx-native", "mlx_lm", "lmstudio", "gguf", "url", ""] {
+            assert!(!is_mlx_server_engine(e), "{e} must not route to mlx_lm.server");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1757,14 +1773,18 @@ async fn build_choice(
     let n_ctx = choice.n_ctx.unwrap_or(req_n_ctx);
     match choice.engine.as_str() {
         // explicit endpoint override → construct the HTTP backend directly
-        "lmstudio" | "mlx" | "mlx_lm" | "url" | "http" if choice.url.is_some() => {
+        "lmstudio" | "mlx" | "mlx_lm" | "mlx-server" | "mlx_lm_server" | "mlx-lm-server" | "url"
+        | "http"
+            if choice.url.is_some() =>
+        {
             let url = choice.url.clone().unwrap();
             Some(admit_wrap(
                 std::sync::Arc::new(rozum::openai_http::OpenAiHttpBackend::new(url, model))
                     as std::sync::Arc<dyn rozum::ChatBackend>,
             ))
         }
-        "gguf" | "mistralrs" | "lmstudio" | "mlx" | "mlx_lm" | "url" | "http" => {
+        "gguf" | "mistralrs" | "lmstudio" | "mlx" | "mlx_lm" | "mlx-server" | "mlx_lm_server"
+        | "mlx-lm-server" | "url" | "http" => {
             build_gateway_backend_forced(model, n_ctx, &choice.engine).await
         }
         // not servable by the gateway (sync/meeting-room engines)
@@ -1772,9 +1792,15 @@ async fn build_choice(
     }
 }
 
+/// Engine aliases that select the opt-in Python `mlx_lm.server` HTTP backend.
+/// Distinct from `mlx`/`mlx-native` (the in-process native MLX runtime).
+fn is_mlx_server_engine(engine: &str) -> bool {
+    matches!(engine, "mlx-server" | "mlx_lm_server" | "mlx-lm-server")
+}
+
 /// Build a backend forcing a specific engine (`gateway switch --backend B`).
 /// Unknown values fall back to the auto-detect chain. Recognized:
-/// `gguf`, `mistralrs`, `lmstudio`, `mlx`, `url`.
+/// `gguf`, `mistralrs`, `lmstudio`, `mlx`, `mlx-server`, `url`.
 async fn build_gateway_backend_forced(
     model_spec: &str,
     n_ctx: u32,
@@ -1792,9 +1818,13 @@ async fn build_gateway_backend_forced(
         "lmstudio" => rozum::openai_http::try_lmstudio_http(model_spec)
             .await
             .map(admit_wrap),
-        // `mlx_lm` (the Python mlx_lm.server) was retired; `mlx` now forces the
-        // in-process native MLX runtime.
+        // `mlx`/`mlx_lm` force the in-process native MLX runtime; `mlx-server`
+        // (a.k.a. `mlx_lm_server`) forces the opt-in Python `mlx_lm.server` over
+        // HTTP (`ROZUM_MLX_HTTP`).
         "mlx" | "mlx-native" | "mlx_lm" => try_build_mlx_native_backend(model_spec, n_ctx)
+            .await
+            .map(admit_wrap),
+        e if is_mlx_server_engine(e) => rozum::openai_http::try_mlx_server(model_spec)
             .await
             .map(admit_wrap),
         "url" | "http" => std::env::var("ROZUM_BACKEND_URL").ok().map(|url| {
@@ -1860,6 +1890,18 @@ async fn build_gateway_backend(
         return Some(rozum::concurrency::admit_wrap(b));
     }
 
+    // 4b. Opt-in: Python `mlx_lm.server`. Retired as a default (native MLX
+    //     supersedes it), so only tried when the operator points us at one via
+    //     `ROZUM_MLX_HTTP` — otherwise skipped so its default port isn't probed.
+    if std::env::var_os("ROZUM_MLX_HTTP").is_some() {
+        if let Some(b) = rozum::openai_http::try_mlx_server(model_spec).await {
+            rozum::obs::log_event(
+                serde_json::json!({"event":"backend_selected","backend":"mlx-server-http","model":model_spec}),
+            );
+            return Some(rozum::concurrency::admit_wrap(b));
+        }
+    }
+
     // 5. Try user-specified URL via env (any OpenAI-compatible server)
     if let Ok(url) = std::env::var("ROZUM_BACKEND_URL") {
         eprintln!("backend: custom HTTP at {url}");
@@ -1922,6 +1964,10 @@ fn print_no_backend_hints(model_spec: &str) {
     eprintln!("    2. Inside LM Studio, install the model (Search tab → mlx-community/...)");
     eprintln!("    3. Start the local server (Developer tab → Status: Running)");
     eprintln!("    4. rozum launch --model <model-id-shown-in-lmstudio>  claude");
+    eprintln!();
+    eprintln!("  mlx_lm.server (Python, opt-in — set ROZUM_MLX_HTTP or --backend mlx-server):");
+    eprintln!("    python -m mlx_lm.server --model mlx-community/<repo> --port 8080 &");
+    eprintln!("    ROZUM_MLX_HTTP=http://localhost:8080/v1 rozum launch --model <id> claude");
     eprintln!();
     eprintln!("  any OpenAI-compatible HTTP server:");
     eprintln!("    ROZUM_BACKEND_URL=http://your-server/v1 rozum launch --model <id> claude");

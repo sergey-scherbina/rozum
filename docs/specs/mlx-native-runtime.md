@@ -196,7 +196,11 @@ passes on at least one real model.
 - **Phase 3 -- broaden catalog.** Llama, Qwen2.5, Qwen2.5-Coder, etc.
 - **Phase 4 -- promote + retire `mlx_lm.server`.** Make native MLX the default
   top-of-chain for MLX specs; remove the Python subprocess path; update SPEC.md
-  resolution chain.
+  resolution chain. (Update: the `mlx_lm.server` HTTP backend was later restored
+  as **opt-in** — `try_mlx_server` in `openai_http.rs`, tried in the auto-chain
+  only when `ROZUM_MLX_HTTP` is set, or forced via `--backend mlx-server`. It is
+  off the default path; native MLX remains the default. For anyone who prefers to
+  run their own `python -m mlx_lm.server`.)
 
 ## Decisions
 

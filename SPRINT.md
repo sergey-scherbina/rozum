@@ -491,6 +491,17 @@ Spec: `docs/specs/channel-wakeup.md`. rmcp 1.7 confirmed to support both pieces
   build fix.) The remaining channel-wakeup items (capability/pusher/lifecycle)
   are still open.
 
+- [x] mlx-server-backend-optional - **DONE (`feature/mlx-server-backend`).** Restored
+  the Python `mlx_lm.server` HTTP backend (retired in Phase 4) as **opt-in**, no cargo
+  feature (HTTP backends are always compiled — just `reqwest`). `try_mlx_server`
+  (`openai_http.rs`) probes `ROZUM_MLX_HTTP` (default `http://localhost:8080/v1`).
+  Auto-chain step 4b runs it **only when `ROZUM_MLX_HTTP` is set** (so its port isn't
+  probed otherwise), between LM Studio and the custom-URL step. Forceable via
+  `--backend mlx-server` (aliases `mlx_lm_server`/`mlx-lm-server`; `mlx`/`mlx_lm` still
+  force native MLX) — routed through `is_mlx_server_engine` in `build_gateway_backend_forced`
+  + `build_choice`. Restored the `print_no_backend_hints` lines + SPEC.md chain. Unit
+  test `backend_engine_tests::mlx_server_engine_aliases_are_distinct_from_native_mlx`.
+
 #### rozum-native-channels — Anthropic-independent wakeup ladder
 
 Spec: `docs/specs/rozum-native-channels.md`. Own the meeting wakeup end-to-end so
