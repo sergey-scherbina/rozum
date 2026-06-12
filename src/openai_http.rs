@@ -374,8 +374,23 @@ impl ChatBackend for OpenAiHttpBackend {
 
 // ─── Auto-detect helpers ──────────────────────────────────────────────────────
 
-// `try_mlx_server` (the Python `mlx_lm.server` HTTP fallback) was retired in
-// Phase 4: the in-process native MLX runtime supersedes it.
+/// Try the Python `mlx_lm.server` at `http://localhost:8080/v1` (override with
+/// `ROZUM_MLX_HTTP`). Superseded by the in-process native MLX runtime, so it is
+/// **opt-in only** — never tried in the default auto-chain unless `ROZUM_MLX_HTTP`
+/// is set, or forced via `--engine mlx-server`. Kept for anyone who prefers to
+/// run their own `python -m mlx_lm.server` (e.g. a model the native runtime does
+/// not port yet, or a remote host).
+pub async fn try_mlx_server(model_spec: &str) -> Option<Arc<dyn ChatBackend>> {
+    let url = std::env::var("ROZUM_MLX_HTTP")
+        .unwrap_or_else(|_| "http://localhost:8080/v1".to_owned());
+    let b = OpenAiHttpBackend::new(&url, model_spec);
+    if b.probe().await {
+        eprintln!("backend: mlx_lm.server at {url} (model: {model_spec})");
+        Some(Arc::new(b))
+    } else {
+        None
+    }
+}
 
 /// Try LM Studio's local server at the default port (`http://localhost:1234/v1`).
 /// LM Studio bundles a native MLX runtime; kept as a GUI-app fallback for MLX
