@@ -155,3 +155,16 @@ Real qwen3_5 GatedDeltaNet ops my synthetic lacks, in suspicion order:
 Each: add to Rust repro → run; if garbage, found it, then confirm Python w/ same op
 is correct (⇒ Rust/mlx-rs-specific). If correct, next.
 
+
+## ★ SHIPPED (2026-06-12) — (b) gated to hybrid models, +30% decode
+- mlx-c submodule (56aed1c): `FetchContent_Declare(mlx)` PATCH_COMMAND applies
+  `patches/mlx-retain-command-buffer.patch` — `device.cpp::get_command_buffer` reads
+  `ROZUM_MLX_RETAIN` PER CALL (default OFF) → retained `commandBuffer()` vs unretained.
+- backend (rozum 92f8f5f): `LoadedModel::load` sets `ROZUM_MLX_RETAIN` for
+  qwen3_5/qwen3_5_moe, CLEARS it for dense (gateway dense↔hybrid switch safe).
+- gated_delta.rs (fork 6eccdc1b): skips the per-call eval when `ROZUM_MLX_RETAIN` set.
+- Verified: clean rebuild re-clones MLX and applies the patch (idempotent); 27B hybrid
+  correct ("Here's a thinking process") at decode **15.8/16.1 t/s vs ~12** baseline,
+  byte-identical IDs; dense Qwen3-4B unaffected ("…Paris.").
+- Follow-ups: push mlx-c 56aed1c to a fork remote (currently local; remote is upstream
+  ml-explore) for off-machine reproducibility; file the MLX bug upstream.
