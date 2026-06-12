@@ -23,7 +23,7 @@ mod inner {
     };
 
     use mlx_lm::cache::ConcatKeyValueCache;
-    use mlx_lm::models::{qwen3, qwen3_5, qwen3_5_moe, qwen3_moe};
+    use mlx_lm::models::{llama, qwen3, qwen3_5, qwen3_5_moe, qwen3_moe};
     use mlx_lm_utils::tokenizer::{
         ApplyChatTemplateArgs, Chat, Conversation, Tokenizer, load_model_chat_template_from_file,
     };
@@ -48,6 +48,7 @@ mod inner {
         Qwen3Moe(qwen3_moe::Model),
         Qwen35(qwen3_5::Model),
         Qwen35Moe(qwen3_5_moe::Model),
+        Llama(llama::Model),
     }
 
     impl LoadedModel {
@@ -67,6 +68,10 @@ mod inner {
                 "qwen3_5_moe" | "qwen3_5_moe_text" => qwen3_5_moe::load_qwen3_5_moe_model(dir)
                     .map(LoadedModel::Qwen35Moe)
                     .map_err(|e| format!("mlx: load qwen3_5_moe {}: {e}", dir.display())),
+                // Llama family (Llama 3.x, and other `model_type: llama` checkpoints).
+                "llama" => llama::load_llama_model(dir)
+                    .map(LoadedModel::Llama)
+                    .map_err(|e| format!("mlx: load llama {}: {e}", dir.display())),
                 other => Err(format!("mlx: unsupported model_type '{other}'")),
             }
         }
@@ -445,6 +450,19 @@ mod inner {
                     &job,
                 );
             }
+            LoadedModel::Llama(m) => {
+                // Dense transformer like Qwen3: external KV cache + the shared sampler.
+                let mut generator = llama::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                generator.set_sampler(top_p, top_k, repeat_penalty);
+                stream_generation(
+                    generator,
+                    tokenizer,
+                    eos,
+                    prompt_ids.len(),
+                    max_tokens,
+                    &job,
+                );
+            }
             LoadedModel::Qwen35(m) => {
                 // Owns its heterogeneous (KV + conv/recurrent) cache internally.
                 let mut generator = qwen3_5::Generate::new(m, temp, &prompt_tokens);
@@ -719,7 +737,13 @@ pub fn spec_to_hf_repo(spec: &str) -> Option<String> {
 pub fn supported_model_type(model_type: &str) -> bool {
     matches!(
         model_type,
-        "qwen3" | "qwen3_moe" | "qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text"
+        "qwen3"
+            | "qwen3_moe"
+            | "qwen3_5"
+            | "qwen3_5_text"
+            | "qwen3_5_moe"
+            | "qwen3_5_moe_text"
+            | "llama"
     )
 }
 
@@ -918,6 +942,28 @@ mod tests {
         let stream = backend.chat(req).await.expect("chat");
         let text = collect_to_string(stream).await.expect("collect");
         eprintln!("MLX OUTPUT: {text}");
+        assert!(text.contains("Paris"), "expected Paris, got: {text}");
+    }
+
+    // End-to-end Llama through native MLX (auto-downloads the model). Greedy.
+    // Run: cargo test --features mlx-native -- --ignored --nocapture mlx_llama_chat
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "network: auto-downloads mlx-community/Llama-3.2-1B-Instruct-4bit"]
+    async fn mlx_llama_chat() {
+        use super::{MlxNativeBackend, ensure_model_dir};
+        use crate::backend::{ChatBackend, ChatRequest, collect_to_string};
+
+        let spec = "mlx-community:Llama-3.2-1B-Instruct-4bit";
+        let dir = ensure_model_dir(spec).await.expect("llama download/resolve");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+            .await
+            .expect("backend load");
+        let req =
+            ChatRequest::simple("What is the capital of France? Answer in one short sentence.");
+        let stream = backend.chat(req).await.expect("chat");
+        let text = collect_to_string(stream).await.expect("collect");
+        eprintln!("MLX LLAMA OUTPUT: {text}");
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
     }
 
