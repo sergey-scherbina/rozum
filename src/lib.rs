@@ -9,6 +9,7 @@ pub mod meeting;
 pub mod mistralrs_backend;
 pub mod mlx_native_backend;
 pub mod models;
+pub mod modelscope;
 pub mod obs;
 pub mod openai_http;
 pub mod proxy;

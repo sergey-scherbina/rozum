@@ -83,11 +83,17 @@ impl ChatBackend for MlxNativeBackend {
 
 - [x] `MlxNativeBackend::new` loads weights + tokenizer + chat template once (on
       the worker thread); every `chat()` reuses them.
-- [x] Auto-download for `hf:`/`mlx-community:`/`owner/repo` specs into the HF
-      cache, then load — `src/hf_hub.rs` (`reqwest` streaming, no `hf-hub` crate).
-      `ensure_model_dir` = cached-or-download; `config.json` is fetched first and
-      gated on a supported `model_type` before the weights; live per-file progress
-      line; `HF_TOKEN` honored. `resolve_model_dir` stays the cache-only resolver.
+- [x] Auto-download for `hf:`/`mlx-community:`/`owner/repo` (HuggingFace) and
+      `modelscope:<owner>/<repo>` (ModelScope) specs, then load — `src/hf_hub.rs` /
+      `src/modelscope.rs` (`reqwest` streaming, no `hf-hub` crate). `ensure_model_dir`
+      = cached-or-download, dispatched by spec prefix; `config.json` is fetched first
+      and gated on a supported `model_type` before the weights; live per-file progress;
+      `HF_TOKEN` / `MODELSCOPE_API_TOKEN` honored. Each writes the hub's **native cache
+      layout** so downloads are shared with that hub's own tools — HF: proper
+      `blobs/<etag>` + `snapshots/<commit>/<file>` symlinks + `refs/main` (verified:
+      `huggingface_hub` / `mlx_lm` load OFFLINE against a rozum-written cache); ModelScope:
+      flat files under `$MODELSCOPE_CACHE/hub/<owner>/<name>/`. `resolve_model_dir` stays
+      the cache-only resolver (HF snapshot or ModelScope dir).
 - [x] Loads **AFQ-quantized** mlx-community checkpoints (4-bit g64) via the
       fork's config-driven `nn::quantize` + remapped `load_safetensors`.
 - [x] Streaming: drive the `Generate` token iterator, map each token to

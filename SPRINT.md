@@ -167,6 +167,25 @@ is 100% MLX, candle only as external oracle.
   download of `Qwen3-0.6B-4bit` (8 files, progress 0→100%, loadable snapshot). Tests
   `wanted_*` + ignored network `config_first_gate_*` / `full_download_*`.
 
+- [x] mlx-native-hub-cache - **DONE (`feature/mlx-hub-cache`, rozum-only).** Two fixes
+  to auto-download so it shares the cache with the native tools (no double-downloads):
+  (1) **Proper `huggingface_hub` layout.** Old code wrote real files into
+  `snapshots/<sha>/` (so Python re-downloaded the same model into the proper layout →
+  wasted disk). Now `hf_hub.rs` writes the exact hf_hub layout — `blobs/<oid|sha256>`
+  (etag from the tree API: `oid` for regular, `lfs.oid`=sha256 for LFS), `snapshots/
+  <commit>/<path>` → `../../blobs/<oid>` symlinks, `refs/main`; an existing blob (from
+  either tool) is reused, not re-fetched. **Proven bidirectional**: `huggingface_hub.
+  try_to_load_from_cache` + `mlx_lm.load` work fully OFFLINE against a rozum-written
+  cache. (2) **ModelScope source** (`src/modelscope.rs`, spec `modelscope:<owner>/<repo>`)
+  — the other hub carrying MLX (Qwen-heavy, CN). Lists via `…/api/v1/models/<repo>/repo/
+  files`, downloads flat into `$MODELSCOPE_CACHE/hub/<owner>/<name>/` (ModelScope's own
+  layout), same config-first gate + progress (shared `stream_download`/`wanted`).
+  `ensure_model_dir`/`resolve_model_dir` dispatch by `modelscope:` prefix. Validated e2e:
+  `mlx_modelscope_chat` downloaded `mlx-community/Qwen2.5-0.5B-Instruct-4bit` FROM
+  modelscope.cn + loaded + generated. **Disk cleanup done**: deleted 3 old wrong-layout
+  dirs (~964 MB; Llama-1B / Qwen2.5-0.5B / a config-only orphan), re-scan confirms only
+  correct-layout remains, and a re-download lands in proper layout + loads offline.
+
 - [x] mlx-native-llama - **DONE (`feature/mlx-llama`, fork `b46aee6f`).** Llama family
   for native MLX. Fork `llama.rs`: (1) **AFQ-quant loader** — `load_llama_model` now
   mirrors `load_qwen3_model` (read `quantization` → `nn::quantize` → remap
