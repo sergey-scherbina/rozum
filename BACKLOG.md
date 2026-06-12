@@ -130,8 +130,9 @@ features the mistralrs backend shipped that the native backend does NOT yet have
   room transcript delta to `$XDG_RUNTIME_DIR/rozum/piggyback/<project>/<agent>.log`;
   the launch-local HTTP proxy drains it into the next chat request as an
   out-of-band system note (Anthropic `system` / OpenAI `system` message; tool JSON
-  + SSE untouched). On by default; disable with `--no-piggyback` /
-  `ROZUM_PIGGYBACK=0`. New `src/meeting/piggyback.rs` +
+  + SSE untouched). Fallback rung: auto-off when Tier-1 channels are active, on
+  otherwise; `--no-piggyback` forces off, `ROZUM_PIGGYBACK=1` forces on. New
+  `src/meeting/piggyback.rs` +
   hooks in `src/meeting/proxy.rs` (writer) and `src/proxy.rs` (reader). Reaches
   agents that take neither Tier-1 channels nor a Tier-2 `wait_my_turn` loop. Spec:
   `docs/specs/rozum-native-channels.md`.

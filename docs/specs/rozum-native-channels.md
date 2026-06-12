@@ -70,15 +70,26 @@ Implemented at the **launch-local proxy** (`src/proxy.rs`) with the transcript
 tail dropped by the **mcp-proxy** (`src/meeting/proxy.rs`) through a shared file,
 keyed by **project + agent name**. Module: `src/meeting/piggyback.rs`.
 
-- **Activation — on by default; disable with `--no-piggyback` or
-  `ROZUM_PIGGYBACK=0`.** Room text enters the model context (a prompt-injection
-  surface), but only ever for an agent that has *joined a room* — with no room
-  joined nothing is written, so the default is inert for ordinary use. `rozum
-  launch` resolves the decision once (`piggyback = !--no-piggyback && env-not-off`)
-  and drives both ends from it: it threads the bool into the launch-local proxy
-  (the reader, so a disabled launch never drains even a *stale* drop file) and
-  exports the matching `ROZUM_PIGGYBACK=1|0` to the agent, which the mcp-proxy
-  writer inherits. The two ends therefore always agree.
+- **Activation — the fallback rung, auto-off when Tier-1 channels are active.**
+  Piggyback is redundant for an agent that already gets `claude/channel` events
+  (it would receive both the channel event *and* an injected note), so `rozum
+  launch` turns it **off automatically when it is registering channels** for the
+  agent (`channel_flags.is_some()` — a capable interactive `claude`, not
+  suppressed). When channels are *not* available (non-`claude`, CC < 2.1.80,
+  `--no-channel-wakeup`, or a `-p`/headless run that won't activate them),
+  piggyback stays **on** as the fallback. Resolution precedence
+  (`resolve_piggyback`): `--no-piggyback` (force off) > `ROZUM_PIGGYBACK=1|0`
+  (operator override, beats the auto rule) > auto (on iff channels inactive).
+- **One decision, both ends.** Room text enters the model context (a
+  prompt-injection surface) but only ever for an agent that *joined a room* (no
+  room → nothing written). `rozum launch` resolves the decision once and threads
+  the bool into the launch-local proxy (the reader — so a disabled launch never
+  drains even a *stale* drop file) and exports the matching `ROZUM_PIGGYBACK=1|0`
+  to the agent, which the mcp-proxy writer inherits. The two ends always agree.
+- **Tier-1 flags are probed once.** `ChannelWakeup::flags_for` spawns
+  `claude --version` and prints the activation notice, so the launch resolves the
+  flags a single time into a `WakeupPolicy` and passes them to `exec_agent`
+  (rather than re-probing there).
 - **Keying — `<project>/<agent>`.** Both processes run in the project dir, so the
   project slug = cwd basename matches on both ends (the same derivation as the
   room display-name prefix `<project>-<agent>`). Drops live at
@@ -140,8 +151,9 @@ keyed by **project + agent name**. Module: `src/meeting/piggyback.rs`.
 2. **DONE** — Tier 3 piggyback (`feature/piggyback-wakeup`): drop file keyed by
    project + agent (`src/meeting/piggyback.rs`), mcp-proxy writer on the channel
    pusher, launch-local proxy reader injecting an out-of-band system note into
-   Anthropic/OpenAI chat requests. On by default; disable per launch with
-   `--no-piggyback` or `ROZUM_PIGGYBACK=0`.
+   Anthropic/OpenAI chat requests. Fallback rung — auto-off when Tier-1 channels
+   are active, on otherwise; `--no-piggyback` forces off, `ROZUM_PIGGYBACK=1`
+   forces on.
 
 ## Out of scope
 
