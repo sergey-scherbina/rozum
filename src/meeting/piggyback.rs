@@ -41,6 +41,17 @@ pub fn enabled() -> bool {
     )
 }
 
+/// The *explicit* `ROZUM_PIGGYBACK` setting, or `None` when unset/unrecognized so
+/// the caller can apply its own default. `rozum launch` uses this to let an
+/// operator override the automatic "off when Tier-1 channels are active" rule.
+pub fn env_override() -> Option<bool> {
+    match std::env::var("ROZUM_PIGGYBACK").ok().as_deref() {
+        Some("0" | "false" | "off" | "no") => Some(false),
+        Some("1" | "true" | "on" | "yes") => Some(true),
+        _ => None,
+    }
+}
+
 /// Basename of the current working directory — the project scope shared by the
 /// launch process and the agent's mcp-proxy (both run in the project dir). Same
 /// derivation as the room display-name prefix, so the keys line up.

@@ -167,10 +167,12 @@ enum Command {
         #[arg(long)]
         channel_mcp_name: Option<String>,
 
-        /// Disable Tier-3 piggyback wakeup (on by default): don't fold pending
-        /// meeting-room activity into the agent's chat requests as a system note.
-        /// Equivalent to `ROZUM_PIGGYBACK=0`. Only ever active for an agent that
-        /// has joined a room. Spec: `docs/specs/rozum-native-channels.md`.
+        /// Disable Tier-3 piggyback wakeup: don't fold pending meeting-room
+        /// activity into the agent's chat requests as a system note. Piggyback is
+        /// the fallback rung — already auto-off when Tier-1 channels are active for
+        /// the agent, and on otherwise; this flag forces it off unconditionally.
+        /// Force it on instead with `ROZUM_PIGGYBACK=1`. Only ever active for an
+        /// agent that joined a room. Spec: `docs/specs/rozum-native-channels.md`.
         #[arg(long)]
         no_piggyback: bool,
 
@@ -383,11 +385,10 @@ async fn main() {
                 suppressed: no_channel_wakeup,
                 server_name,
             };
-            // Tier-3 piggyback: on by default, off under `--no-piggyback` or
-            // `ROZUM_PIGGYBACK=0`. Resolve once here; the same decision drives the
-            // launch-local proxy reader and the agent's mcp-proxy writer.
-            let piggyback = !no_piggyback && rozum::meeting::piggyback::enabled();
-            let wakeup = WakeupPolicy { channels, piggyback };
+            // Resolve both wakeup tiers once (Tier-1 flags are probed here, not
+            // twice). Piggyback (Tier 3) is the fallback — auto-off when channels
+            // (Tier 1) are active, unless forced by `--no-piggyback`/`ROZUM_PIGGYBACK`.
+            let wakeup = WakeupPolicy::resolve(&channels, no_piggyback, &program[0]);
             run_launch(model, port, n_ctx, dedicated, no_model, wakeup, program).await;
         }
         Some(Command::Models { action }) => {
@@ -597,13 +598,67 @@ struct ChannelWakeup {
     server_name: String,
 }
 
-/// The two meeting-room wakeup policies resolved at launch: Tier-1 Claude-Code
-/// channel registration and Tier-3 gateway piggyback. `piggyback` is the resolved
-/// decision (default on; off under `--no-piggyback`/`ROZUM_PIGGYBACK=0`) threaded
-/// to both the launch-local proxy reader and the agent's mcp-proxy writer.
+/// The two meeting-room wakeup policies resolved at launch. `channel_flags` are
+/// the Tier-1 flags to inject (computed once — `flags_for` both probes
+/// `claude --version` and prints, so it must not run twice). `piggyback` is the
+/// resolved Tier-3 decision threaded to both the launch-local proxy reader and
+/// the agent's mcp-proxy writer. Piggyback is the *fallback* rung: on by default,
+/// but auto-off when Tier-1 channels are active (they already wake the agent),
+/// unless the operator forces it. Precedence: `--no-piggyback` > `ROZUM_PIGGYBACK`
+/// > auto (off iff channels active).
 struct WakeupPolicy {
-    channels: ChannelWakeup,
+    channel_flags: Option<Vec<String>>,
     piggyback: bool,
+}
+
+impl WakeupPolicy {
+    /// Resolve the launch-time wakeup policy for `program` (the agent argv[0]).
+    fn resolve(channels: &ChannelWakeup, no_piggyback: bool, program: &str) -> Self {
+        let channel_flags = channels.flags_for(program);
+        let piggyback = resolve_piggyback(
+            no_piggyback,
+            rozum::meeting::piggyback::env_override(),
+            channel_flags.is_some(),
+        );
+        WakeupPolicy {
+            channel_flags,
+            piggyback,
+        }
+    }
+}
+
+/// Decide whether Tier-3 piggyback runs, given the `--no-piggyback` flag, the
+/// explicit `ROZUM_PIGGYBACK` override (if any), and whether Tier-1 channels are
+/// active. Precedence: flag (force off) > env override > auto. Auto makes
+/// piggyback the *fallback* — on only when channels are NOT already waking the
+/// agent. Spec: `docs/specs/rozum-native-channels.md`.
+fn resolve_piggyback(no_piggyback: bool, env_override: Option<bool>, channels_active: bool) -> bool {
+    if no_piggyback {
+        return false;
+    }
+    env_override.unwrap_or(!channels_active)
+}
+
+#[cfg(test)]
+mod wakeup_tests {
+    use super::resolve_piggyback;
+
+    #[test]
+    fn piggyback_is_the_fallback_rung() {
+        // Auto (no flag, no env): on only when Tier-1 channels are NOT active.
+        assert!(resolve_piggyback(false, None, false), "no channels → fallback on");
+        assert!(
+            !resolve_piggyback(false, None, true),
+            "channels active → auto-off (redundant)"
+        );
+        // `--no-piggyback` always wins, even without channels.
+        assert!(!resolve_piggyback(true, None, false));
+        assert!(!resolve_piggyback(true, Some(true), true));
+        // Explicit env override beats the auto rule (force on despite channels;
+        // force off despite no channels).
+        assert!(resolve_piggyback(false, Some(true), true), "ROZUM_PIGGYBACK=1 forces on");
+        assert!(!resolve_piggyback(false, Some(false), false), "ROZUM_PIGGYBACK=0 forces off");
+    }
 }
 
 impl ChannelWakeup {
@@ -669,7 +724,7 @@ async fn run_launch(
     wakeup: WakeupPolicy,
     program: Vec<String>,
 ) {
-    let WakeupPolicy { channels, piggyback } = wakeup;
+    let WakeupPolicy { channel_flags, piggyback } = wakeup;
     let model_spec = match resolve_launch_target(model, no_model).await {
         // No target and none resolvable (non-TTY without --model, or cancelled).
         None => std::process::exit(2),
@@ -679,14 +734,14 @@ async fn run_launch(
                  Anthropic credentials."
             );
             // No gateway, proxy, lease, or model env: the agent uses its own auth.
-            exec_agent_anthropic(program, &channels).await; // -> ! (execs + exits)
+            exec_agent_anthropic(program, channel_flags).await; // -> ! (execs + exits)
         }
         Some(LaunchTarget::Local(m)) => m,
     };
     let n_ctx = resolve_n_ctx(&model_spec, n_ctx);
 
     if dedicated {
-        let wakeup = WakeupPolicy { channels, piggyback };
+        let wakeup = WakeupPolicy { channel_flags, piggyback };
         run_launch_dedicated(model_spec, port, n_ctx, wakeup, program).await;
         return; // unreachable: the dedicated path execs + exits
     }
@@ -719,7 +774,7 @@ async fn run_launch(
             gw_port
         }
     };
-    exec_agent(program, &effective_model, agent_port, &channels, piggyback).await
+    exec_agent(program, &effective_model, agent_port, channel_flags, piggyback).await
 }
 
 /// Bind an ephemeral loopback port, start the launch-local reverse proxy on it
@@ -887,7 +942,7 @@ async fn run_launch_dedicated(
     wakeup: WakeupPolicy,
     program: Vec<String>,
 ) {
-    let WakeupPolicy { channels, piggyback } = wakeup;
+    let WakeupPolicy { channel_flags, piggyback } = wakeup;
     let port = port.unwrap_or_else(|| {
         std::net::TcpListener::bind("127.0.0.1:0")
             .ok()
@@ -920,7 +975,7 @@ async fn run_launch_dedicated(
         }
     });
     // The in-process gateway dies with this process on exec_agent's exit.
-    exec_agent(program, &model_spec, port, &channels, piggyback).await
+    exec_agent(program, &model_spec, port, channel_flags, piggyback).await
 }
 
 /// Reuse a healthy running shared gateway, else spawn a detached `rozum gateway`
@@ -1250,13 +1305,14 @@ async fn exec_agent(
     mut program: Vec<String>,
     model_for_alias: &str,
     port: u16,
-    channels: &ChannelWakeup,
+    channel_flags: Option<Vec<String>>,
     piggyback: bool,
 ) -> ! {
     use std::process::Command as StdCommand;
     // channel-wakeup-launch-flag: append the `--dangerously-load-development-channels`
-    // flag for a capable `claude`, so a launched agent gets woken on room events.
-    if let Some(flags) = channels.flags_for(&program[0]) {
+    // flag for a capable `claude` (resolved once at launch), so a launched agent
+    // gets woken on room events.
+    if let Some(flags) = channel_flags {
         program.extend(flags);
     }
     let (program_name, args) = program
@@ -1290,9 +1346,9 @@ async fn exec_agent(
 /// Launch the agent with no local model: leave its upstream Anthropic auth
 /// (`ANTHROPIC_API_KEY` / claude.ai login) untouched and set none of the
 /// gateway/model env. Only the rozum agent-context defaults are applied.
-async fn exec_agent_anthropic(mut program: Vec<String>, channels: &ChannelWakeup) -> ! {
+async fn exec_agent_anthropic(mut program: Vec<String>, channel_flags: Option<Vec<String>>) -> ! {
     use std::process::Command as StdCommand;
-    if let Some(flags) = channels.flags_for(&program[0]) {
+    if let Some(flags) = channel_flags {
         program.extend(flags);
     }
     let (program_name, args) = program
