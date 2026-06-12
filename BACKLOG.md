@@ -176,6 +176,47 @@ These items turn "portable in principle" into "portable by `cargo build`".
   through, so a Linux/CUDA user gets GPU GGUF inference without editing Cargo.toml.
   (Cheapest real "runs on someone else's non-Mac hardware" deliverable.)
 
+#### Extractions — pull leaf-bound work into modules keyed by their *true* dependency
+
+The taxonomy + rationale is in `docs/specs/portability-and-the-backend-spi.md`
+("Taxonomy by dependency" / "What to extract"). Each item below pulls something out
+of the MLX leaf into a module that depends only on hardware, or only on the model,
+or on nothing — so any engine can reuse it.
+
+- [ ] extract-shared-serving-helpers - **L1.** Lift the engine-agnostic per-request
+  logic into a `serving` module every leaf calls, instead of re-implementing it.
+  First target: `parse_tool_calls` is **already duplicated** (own copy in `gguf.rs`
+  AND `mlx_native_backend.rs`) — unify it. Then tool-history rendering
+  (`message_text`), UTF-8-safe incremental detokenize, multi-EOS stop logic, and the
+  KV/RAM preflight (pure arithmetic from `config.json` + free RAM). Depends only on
+  the model's text/config conventions, not the engine.
+
+- [ ] extract-shared-sampler - **L2.** Define the sampler (top-p / top-k /
+  repeat-penalty / seed / categorical) over a plain logit slice (`&[f32]`) + RNG, in
+  a shared module. Each leaf materializes the final-position logits and calls it; the
+  per-token GPU→CPU copy of one vocab vector is negligible for our op-launch-bound
+  decode. Removes the per-leaf sampler duplication (today it lives inside the MLX
+  fork, bound to mlx `Array`).
+
+- [ ] extract-model-reference-specs - **L3.** Capture the model *knowledge* as
+  engine-independent reference docs (one per family): the forward math + the
+  checkpoint conventions we reverse-engineered — RMSNorm +1, AFQ
+  `.weight↔.inner.weight` / `.bias↔.inner.bias` remap pattern, f32 delta-scan,
+  Qwen2 bias / optional `head_dim`, multimodal `text_config` unwrap, safetensors-index
+  sharding. The code stays per-tensor-lib; the spec lets a new leaf implement from
+  fact instead of re-deriving from a checkpoint (this is where the real time went).
+
+- [ ] extract-metal-kernels - **L4.** Factor the GatedDeltaNet fused-scan (and future)
+  Metal kernels' MSL source into a standalone hardware-only module, so any Metal
+  engine (mlx, a candle-metal path, mistralrs-metal) binds the same `.metal` instead
+  of re-deriving it. Depends only on Metal + the architecture, not the engine's logic.
+
+- [ ] extract-l5-track-upstream - **L5 (no extraction — discipline only).** Engine
+  -binding fixes (RoPE reshape, zero-buffer, buffer-donation/`eval`, `mx.compile`
+  finding, the `metal_kernel` mlx-c binding) are irreducibly engine-specific. Keep
+  pushing them upstream so the *ecosystem* carries them (done: 4 mistralrs PRs + the
+  mlx-rs fork fixes); this item is just the standing reminder to upstream, not vendor.
+
 ### Native MLX runtime — backend feature parity (vs mistralrs)
 
 Audit 2026-06-11 (`docs/specs/mlx-native-runtime.md` "Backend feature parity"):
