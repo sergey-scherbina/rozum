@@ -120,6 +120,31 @@ How to reproduce the fix (current build): `ROZUM_GD_NONE=1 ROZUM_RETAIN=1` env o
 hybrid run = no per-call eval + retained refs = correct & fast. (Env hooks live in
 the gitignored `_deps` MLX build copy; the patch file is the persistent artifact.)
 
+## "How does it work in Python?" — direct A/B (2026-06-12)
+THE decisive one: ran the REAL Qwen3.6-27B in pure Python via mlx_lm (model only),
+with MY OWN loop = our exact Rust pattern: forward → eval(token) → argmax → repeat,
+**serial, NO per-call eval, NO pipelining** (`py/real_serial.py`):
+- **Python serial, no-eval → CORRECT** ("Here's a thinking process:"). Pipelined too.
+- Rust serial, no-eval → garbage. SAME pattern, same unretained MLX.
+⇒ It is NOT pipelining (Python is correct serial too). It's a genuine
+Python(mlx_lm) vs Rust(our model + mlx-rs) difference at the MLX op level.
+
+Ruled OUT as the difference (each tested directly on the real 27B, no-eval, no retain):
+- pipelining — Python serial correct, Rust pipelined garbage.
+- host-array lifetime — holding q,k,v,g,beta,z,conv_out,qkv alive (`ROZUM_GD_HOLDALL`)
+  did NOT fix Rust. So it's not those arrays being dropped early.
+- conv-cache contiguity — storing the conv cache as a contiguous copy (Python does
+  `mx.contiguous`, we stored a view) did NOT fix Rust.
+- threading — ran the real decode on the MAIN thread (examples/lm hacked to qwen3_5):
+  Rust main-thread no-eval STILL garbage `[284,198,3840,198,91,91,…]`. Not a worker-
+  thread artifact.
+
+STILL OPEN: the exact op-graph difference. mlx_lm's Python model emits an MLX graph
+that doesn't free the offending buffer; our Rust/mlx-rs model's graph does. Both
+compute byte-identical values (validated with eval). Finding it needs op-level graph
+diffing of the two runtimes — deep. The PROVEN fix (global retained refs, +30%) does
+not depend on it.
+
 ## (superseded) Plan from here: add REAL ops to the Rust repro until it breaks
 Real qwen3_5 GatedDeltaNet ops my synthetic lacks, in suspicion order:
 1. `fast::rms_norm` (weightless) on q,k right before the kernel.
