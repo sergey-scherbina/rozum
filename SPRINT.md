@@ -491,6 +491,17 @@ Spec: `docs/specs/channel-wakeup.md`. rmcp 1.7 confirmed to support both pieces
   build fix.) The remaining channel-wakeup items (capability/pusher/lifecycle)
   are still open.
 
+- [x] launch-backend-url-flag - **DONE (`feature/mlx-server-backend`).** `rozum launch
+  --backend-url <URL>` — CLI equivalent of `ROZUM_BACKEND_URL` for pointing the agent
+  at an external OpenAI-compatible server (Ollama `http://localhost:11434/v1`, vLLM,
+  any `/v1`). **Forces** that backend (skips the local GGUF/MLX chain) via a dedicated
+  in-process path `run_launch_url` — no shared daemon, no model load; `--model` carries
+  the upstream model name (e.g. `qwen3:8b`), required (errors if omitted). Conflicts with
+  `--no-model`; registered in `reorder_launch_args` (value flag). Builds
+  `OpenAiHttpBackend` directly + serves the lightweight gateway, dies with the agent like
+  `--dedicated`. Unit test `backend_url_value_flag_hoisted_from_after_program`. SPEC.md
+  updated.
+
 - [x] mlx-server-backend-optional - **DONE (`feature/mlx-server-backend`).** Restored
   the Python `mlx_lm.server` HTTP backend (retired in Phase 4) as **opt-in**, no cargo
   feature (HTTP backends are always compiled — just `reqwest`). `try_mlx_server`
