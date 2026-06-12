@@ -507,32 +507,36 @@ divergence lived. Needs a clean machine for trustworthy A/B (current bench numbe
 degraded ~30% by session-long memory pressure: decode 9.5–14 vs the clean ~22 baseline).
 Recommended as a dedicated `mlx-native-perf-compile` task, not a tail-end change.
 
-### Performance — capture-based compile plan (P0, IN PROGRESS)
+### Performance — decode parity (RESOLVED for dense; hybrid = MLX bump)
 
-This is the active top-priority work. The live state (current stage, branch, fork
-rev, next command, results) lives in `SPRINT.md` under **"P0 (TOP PRIORITY):
-mlx-native-perf-compile"** → the **RESUME CHECKPOINT** block — that block is the
-single source of truth for picking up after a reboot. The plan:
+The decode-speed investigation **settled the root cause and shipped the dense fix.**
 
-- **Stage 0 — plain-`compile` probe (de-risk first).** Measure a *plain* `compile`
-  (weights captured, `compile.rs:344`) — NOT `compile_with_state` — of one decode
-  step at fixed shapes + fixed-size cache, on the small dense Qwen3 (0.6B/4B). A/B
-  vs uncompiled. Go/no-go for the cache redesign before building it. (The existing
-  `mlx_compile_probe` uses `compile_with_state` and is kept only as the net-negative
-  baseline.)
-- **Stage 1 — fixed-shape KV cache.** Preallocate to max-ctx + in-place slice-update
-  + offset, replacing the grow-by-concat `ConcatKeyValueCache`. Byte-exact.
-- **Stage 2 — compiled decode step.** Plain `compile`, weights captured, args =
-  token + cache; the GatedDeltaNet custom kernel kept OUT of the compiled region
-  (O(T) ops path at T=1, or compile only the attn/MLP/proj bulk). Byte-exact vs the
-  Python oracle.
-- **Stage 3 — clean A/B on 27B**, target ~22 t/s.
+**It was NOT compile, NOT the cache.** Probes (kept as `#[ignore]` perf tests):
+- `mlx_compile_probe_plain` (plain `compile`, weights captured via a thread-local) on
+  Qwen3-0.6B: **0.69× at T=1** — compile does not help (it fuses elementwise glue, not
+  the matmul GEMMs that dominate). So the fixed-shape-cache + compiled-decode redesign
+  is **shelved**. `ConcatKeyValueCache` does concat each step but decode is ~flat
+  across context, so the concat isn't dominant either.
 
-**Resumability protocol (the machine has rebooted from memory pressure mid-run).**
-Commit small and often — never hold uncommitted experiment state. Probe on the
-SMALLEST cached model (`Qwen3-0.6B-4bit`), not 27B; check `memory_pressure` before
-any load; reserve 27B for the final Stage-3 A/B only. After a reboot: read the SPRINT
-RESUME CHECKPOINT and continue from "Next concrete step".
+**The lever was PIPELINING (`async_eval`).** `mlx_lm/generate.py:455-470`: Python
+builds step n+1's graph from the *lazy* token n and `async_eval`s it BEFORE blocking
+on token n's `.item()`, so the GPU never idles waiting for the CPU to build the next
+graph. Our `stream_generation` did `eval`+`item` then built next → a sync bubble
+every token. **Fixed:** `stream_generation` now pipelines for dense arches
+(`pipeline=true`: Qwen3, Qwen3-MoE, Llama, Qwen2); hybrid stays serial
+(`pipeline=false`). `mlx_decode_pipeline_probe` on Qwen3-4B: **114→128 t/s = 96.5%
+of Python's 132.9.** Byte-exact on all arches. **Dense decode parity achieved.**
+
+**Hybrid (Qwen3.6) still ~12 t/s — needs an MLX version bump.** The GatedDeltaNet
+kernel does a mandatory blocking `eval` after every layer (~48/token,
+`gated_delta.rs:250`) to dodge a metal_kernel buffer-donation bug. Confirmed
+conclusively: removing it OR using `async_eval` both produce garbage on our pinned
+**MLX 0.30.6**. Python's kernel has **no eval** and is correct on **MLX 0.31.2** — the
+donation bug is fixed upstream. So the hybrid lever = bump mlx-sys 0.30.6 → 0.31.2,
+drop the eval, let the hybrid pipeline. Dedicated task
+`mlx-native-perf-hybrid-mlxbump` (BACKLOG): heavy MLX C++ rebuild + build patches +
+27B byte-exact validation; reboot-risky. The SPRINT RESUME CHECKPOINT has the live
+state.
 
 ### Done: large-context KV preflight (`mlx-native-mem-bound`)
 
