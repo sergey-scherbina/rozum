@@ -168,3 +168,57 @@ is correct (⇒ Rust/mlx-rs-specific). If correct, next.
   byte-identical IDs; dense Qwen3-4B unaffected ("…Paris.").
 - Follow-ups: push mlx-c 56aed1c to a fork remote (currently local; remote is upstream
   ml-explore) for off-machine reproducibility; file the MLX bug upstream.
+
+## ★★ 2026-06-12 (cont.) — clean re-measure: the gap is REAL, and the MoE gap is the big one
+
+**Methodology bug that nearly produced a false "parity" conclusion.** A ScalaCli/Bloop
+**Java daemon was holding 17.9 GB** (of 38.7 GB). On Apple-Silicon unified memory that
+contention throttles MLX inference — and it throttles **Python harder than Rust** (Python
+is more GPU-throughput-bound), so the gap *collapsed to apparent parity* under pressure:
+
+| measured under Java pressure | Python dense | Rust dense | ratio |
+|---|---|---|---|
+| dense 27B decode (manual loop) | 15.5 | 14.4 | 1.08 (FALSE parity) |
+
+Killing the Bloop daemon (`kill <pid>`, it respawns on demand) freed the memory and the
+real numbers returned. **ALWAYS kill the Bloop/Java daemon before any MLX benchmark.**
+
+**Clean numbers (Bloop killed, ~21 GB free), Qwen3.6-4bit, n=512 prefill + 64 decode:**
+
+| model | Rust (retain) | Python manual | Python `generate` | decode gap | prefill |
+|---|---|---|---|---|---|
+| Dense 27B    | 16.2 t/s | 19.8 | **23.0** | **1.4×** | Rust 170 vs Py 194 (1.14×) |
+| MoE 35B-A3B  | 33.4 t/s | 97.3 | **110.9**| **3.3×** | Rust 584 vs Py 1180 (2.0×) |
+
+Greedy output IDs are **byte-identical** Rust↔Python on both models (correctness intact).
+Pipelining (`async_eval` overlap) is ~neutral on both (1.0–1.1×) → not the lever.
+
+**Where the decode time goes (Rust MoE, instrumented split):** `build` (mlx-rs FFI node
+construction in `forward()`) = **2.4 ms/tok (8%)**; `eval` (graph traverse + Metal dispatch
++ GPU) = **28.7 ms/tok (92%)**. So the gap is **NOT mlx-rs FFI/binding overhead** (build is
+cheap). It is in `eval` — i.e. our op graph dispatches more / less-efficient GPU work than
+Python's for the same math. `eval` is shared C++; the graphs differ.
+
+**Ruled out as the decode cause:** KV-cache concat. `ConcatKeyValueCache.update_and_fetch`
+does `concatenate_axis([k,keys],-2)` every step (O(context) copy) — looked like the smoking
+gun, but a context sweep (decode 1024 steps from an 8-tok prefill) is **flat**: Rust 32.7 →
+30.9 t/s over ctx 128→1024 (~6%), Python flat ~85. A growing concat would slope down hard;
+it doesn't. So KV-concat is minor at these contexts. (Still worth a pre-alloc cache for very
+long ctx, but it is not this gap.)
+
+**Identified prefill cause (MoE 2.0× gap):** Python `SwitchGLU.__call__`
+(`mlx_lm/models/switch_layers.py`) sorts tokens by expert and passes `sorted_indices=True`
+to `gather_qmm` when `indices.size >= 64` (i.e. prefill / many tokens) for coalesced expert
+access — `_gather_sort` + `_scatter_unsort`. Our Rust `SwitchGlu`/`QSwitchLinear` always
+passes `sorted_indices=false` and never sorts. At **decode** (T=1, indices.size = top_k=8 <
+64) Python does NOT sort either → the decode gap is elsewhere (the MoE routing / unsorted
+`gather_qmm` / 40-layer per-token op count), still open.
+
+**Status of the gaps:**
+- Dense 1.4× — real; the retain fix already closed 12→16; remainder (16→23) is op-graph /
+  dispatch-level, needs per-kernel GPU timing to localize.
+- MoE 3.3× decode + 2.0× prefill — the bigger prize. Prefill: port expert-sort
+  (`sorted_indices`). Decode: open; next step is counting Metal kernel dispatches/token in
+  each runtime (instrument the MLX patch's `CommandEncoder`) to see if Rust dispatches more.
+- The earlier "remaining 17→22.8" P1 was a CROSS-SESSION machine-state artifact (throttled
+  Rust 17 vs an earlier cool-machine Python 22.8). Same-session clean: dense is 16.2 vs 23.0.

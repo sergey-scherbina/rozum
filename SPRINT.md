@@ -75,47 +75,59 @@ bottom-up Python↔Rust log + patch: `docs/mlx-gd-bug/`. Bumping MLX does NOT he
 The "mx.compile / capture-based" plan below was the wrong lever (probed, dead end);
 kept for the record.
 
-#### P1 (follow-up): mlx-native-decode-gap-remainder — close 17 → ~22 t/s (the OTHER half)
+#### P1 (follow-up): mlx-native-decode-gap-remainder — re-scoped: gap is REAL; MoE is the big one
 
-**Status: OPEN, not started.** The eval bug above (the big, fixable half) is done:
-27B hybrid decode ~12 → ~16-17 t/s. Python `mlx_lm` is still **~21-23 t/s**, so ~17→22
-remains. This is a SEPARATE, harder bottleneck — NOT the eval.
+**Status: OPEN, re-measured CLEAN 2026-06-12. The "structural FFI overhead" verdict was
+WRONG, and the gap is bigger on the MoE than the dense.**
 
-**MEASURED (2026-06-12, clean machine, SAME model/prompt):** ours (retained refs)
-**16.8/17.5 t/s** (n=128 serial/pipelined), 16.2 (n=512); Python `mlx_lm` (0.31.2)
-**22.835 t/s**. Gap ~17 → ~22.8.
+**⚠ METHODOLOGY: kill the Bloop/ScalaCli Java daemon before benchmarking.** It held
+**17.9 GB / 38.7**, and unified-memory contention throttles Python HARDER than Rust →
+the gap *fakes parity* under pressure (dense Python 15.5 vs Rust 14.4 = 1.08×, false).
+`ps -A -o rss,comm | sort -rn | head` → `kill <java pid>` (respawns on demand) → re-bench.
+A whole "we're at parity" detour came from benchmarking under this contamination.
 
-**VERSION RULED OUT (measured, not guessed).** Rebuilt ours on a genuine MLX 0.31.2:
-no-eval throughput **16.5/17.4 t/s = identical to 0.30.6**. So 0.31.2 does NOT speed
-up our decode. ⇒ the gap is **our op-dispatch path vs `mlx_lm`'s**, on the SAME MLX,
-not the version. (We DID migrate to 0.31.2 anyway, per user — see merge `5e55bd9`.)
-Decode at T=1 is ~450 tiny dispatches/token (matmul/conv/quantized × 64 layers),
-op-launch bound. `mlx_lm` emits a faster/leaner graph — prime suspects: its
-`@mx.compile`'d `compute_g` (we run plain ops), and possibly fewer per-layer
-intermediates.
+**CLEAN numbers (Bloop killed), Qwen3.6-4bit, n=512 prefill + 64 decode:**
+| model | Rust (retain) | Py manual | Py `generate` | decode gap | prefill gap |
+|---|---|---|---|---|---|
+| Dense 27B   | 16.2 t/s | 19.8 | **23.0** | **1.4×** | 170 vs 194 (1.14×) |
+| MoE 35B-A3B | 33.4 t/s | 97.3 | **110.9**| **3.3×** | 584 vs 1180 (2.0×) |
+Output IDs byte-identical Rust↔Python on both. **The MoE 3.3× is the real prize**, not
+the dense 1.4×. (Note: MoE 33 t/s is already faster than dense 16 — usable; this is a
+parity-with-Python goal, not a usability blocker.)
 
-**Levers (remaining):**
-- [x] decode-gap-measure - DONE (above): ours ~17, Python 22.8, same 0.31.2.
-- [x] decode-gap-031 - DONE: NOT a perf lever (ours ~17 on both 0.30.6 and 0.31.2).
-  Migrated to 0.31.2 anyway (user's call; reproducible via the forks).
-- [ ] decode-gap-pipeline - flip Qwen35/Qwen35Moe to `pipeline=true` in
-  `mlx_native_backend::stream_generation` (the per-call eval no longer blocks), A/B
-  decode t/s, keep if it helps. Cheap. (Synthetic bench was ~neutral; the real
-  streaming path may differ.)
-- [x] decode-gap-compile - TESTED, net-NEGATIVE. Wrapped `compute_g` in mlx-rs
-  `transforms::compile::compile` (mirrors Python's `@mx.compile`): byte-exact but decode
-  serial 16.5 → 15.8 t/s (slightly SLOWER). mlx-rs `compile`'s per-call closure/marshal
-  overhead exceeds the fusion saving on these tiny tensors. So this lever is closed —
-  Python's native `@mx.compile` is lower-overhead than mlx-rs's.
-- [ ] decode-gap-dispatch - (hard, last, diminishing returns) The remaining ~17→22.8
-  gap is STRUCTURAL: mlx-rs's per-op FFI/binding overhead vs Python's mlx binding
-  (~450 tiny ops/token, each costlier in mlx-rs), and mlx-rs `compile` is too heavy to
-  fuse small hot ops. Closing it needs either a lower-overhead mlx-rs op path
-  (binding-level) or hand-fused Metal kernels for the hot path. Big effort, uncertain;
-  the +30% (12→17) is banked. Not recommended unless decode speed becomes critical.
+**The gap is in `eval` (GPU dispatch), NOT mlx-rs FFI/binding.** Instrumented split,
+Rust MoE decode: `build` (FFI node construction in `forward()`) = **2.4 ms/tok (8%)**;
+`eval` (graph traverse + Metal dispatch + GPU) = **28.7 ms/tok (92%)**. `eval` is shared
+C++ → our op GRAPH dispatches more / less-efficient GPU work than Python's for identical
+math. So the fix is leaner/fewer GPU dispatches, not a faster binding.
 
-**Don't block other work on this** — the eval was the main lever and it's taken; this
-is the tail.
+**Levers:**
+- [x] decode-gap-measure - DONE, corrected: dense 16.2 vs 23.0 (1.4×); MoE 33.4 vs 110.9
+  (3.3×). Earlier "17 vs 22.8 structural FFI" was cross-session machine-state contamination.
+- [x] decode-gap-031 - DONE: version is not a lever.
+- [x] decode-gap-compile - TESTED net-NEGATIVE (compute_g via mlx-rs compile: 16.5→15.8).
+- [x] decode-gap-pipeline - TESTED ~neutral on both models clean (dense 15.9→16.2, MoE
+  32.1→33.4). Not the lever.
+- [x] decode-gap-ffi-vs-eval - DONE: build=8%, eval=92% → NOT FFI overhead; it's GPU-side.
+- [x] decode-gap-kvcache - RULED OUT for decode: `ConcatKeyValueCache` does an O(ctx) concat
+  per step but the context sweep is FLAT (Rust 32.7→30.9 t/s ctx 128→1024). Not this gap.
+  (Still worth a pre-alloc cache for very long contexts — separate concern.)
+- [ ] **moe-prefill-sort** - CONCRETE WIN (~2×, prefill). Port Python's `SwitchGLU` expert
+  sort: `_gather_sort`/`_scatter_unsort` + `sorted_indices=true` into `gather_qmm` when
+  `indices.size>=64`. Files: `.vendor/mlx-lm/.../qwen3_moe.rs` (`SwitchGlu`, `QSwitchLinear`).
+  Shared by qwen3_moe + qwen3_5_moe. Validate byte-exact + prefill t/s.
+- [ ] **moe-decode-dispatch** - the open 3.3× decode. Next dig: count Metal kernel
+  dispatches/token in each runtime (instrument the MLX retain patch's `CommandEncoder` to
+  tally dispatches) to confirm Rust emits more, then localize (routing softmax/argpartition
+  over 256 experts × 40 layers, or the unsorted `gather_qmm`). At T=1 Python doesn't sort
+  either (indices.size=8<64), so it's NOT the sort there.
+- [ ] dense-decode-dispatch - the 1.4×; same op-graph/dispatch root, smaller payoff.
+
+Diagnostics on branch `feature/mlx-hybrid-decode`: Rust benches `mlx_qwen35_prefill_bench`
+(dense) / `mlx_qwen35_moe_decode_bench` (MoE; `ROZUM_CTXSWEEP=1` env) — run with
+`ROZUM_MLX_RETAIN=1`. Python: `docs/mlx-gd-bug/py/decode_bench.py <repo>` (`CTXSWEEP=1` env).
+
+**Don't block other work on this** — usable speeds today; this is parity-chasing.
 
 **(historical goal) native MLX decode ~12 t/s → ~22 t/s (Python `mlx_lm` parity).**
 Full analysis: `docs/specs/mlx-native-runtime.md` → "mx.compile" + the
