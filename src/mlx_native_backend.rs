@@ -54,6 +54,28 @@ mod inner {
 
     impl LoadedModel {
         fn load(model_type: &str, dir: &Path) -> Result<Self, String> {
+            // Hybrid models (Qwen3.6 GatedDeltaNet custom kernel) are only correct
+            // without a per-call eval when MLX command buffers RETAIN their referenced
+            // buffers (otherwise an upstream kernel-input buffer is freed before the
+            // in-flight GPU dispatch reads it — see docs/mlx-gd-bug/). Enable retained
+            // refs BEFORE the first MLX op (model load), so MLX's command-buffer
+            // creation reads it; this drops ~48 syncs/token (~12 -> ~16-17 t/s).
+            // Dense models keep the faster unretained path.
+            let hybrid = matches!(
+                model_type,
+                "qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text"
+            );
+            // SAFETY: the native backend runs all MLX work on one dedicated worker
+            // thread; set/clear before that thread touches MLX. Cleared for dense so a
+            // gateway dense<->hybrid switch in the same process stays correct (the MLX
+            // patch reads the env per command buffer).
+            unsafe {
+                if hybrid {
+                    std::env::set_var("ROZUM_MLX_RETAIN", "1");
+                } else {
+                    std::env::remove_var("ROZUM_MLX_RETAIN");
+                }
+            }
             match model_type {
                 "qwen3" => qwen3::load_qwen3_model(dir)
                     .map(LoadedModel::Qwen3)
