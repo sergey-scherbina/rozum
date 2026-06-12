@@ -507,6 +507,33 @@ divergence lived. Needs a clean machine for trustworthy A/B (current bench numbe
 degraded ~30% by session-long memory pressure: decode 9.5–14 vs the clean ~22 baseline).
 Recommended as a dedicated `mlx-native-perf-compile` task, not a tail-end change.
 
+### Performance — capture-based compile plan (P0, IN PROGRESS)
+
+This is the active top-priority work. The live state (current stage, branch, fork
+rev, next command, results) lives in `SPRINT.md` under **"P0 (TOP PRIORITY):
+mlx-native-perf-compile"** → the **RESUME CHECKPOINT** block — that block is the
+single source of truth for picking up after a reboot. The plan:
+
+- **Stage 0 — plain-`compile` probe (de-risk first).** Measure a *plain* `compile`
+  (weights captured, `compile.rs:344`) — NOT `compile_with_state` — of one decode
+  step at fixed shapes + fixed-size cache, on the small dense Qwen3 (0.6B/4B). A/B
+  vs uncompiled. Go/no-go for the cache redesign before building it. (The existing
+  `mlx_compile_probe` uses `compile_with_state` and is kept only as the net-negative
+  baseline.)
+- **Stage 1 — fixed-shape KV cache.** Preallocate to max-ctx + in-place slice-update
+  + offset, replacing the grow-by-concat `ConcatKeyValueCache`. Byte-exact.
+- **Stage 2 — compiled decode step.** Plain `compile`, weights captured, args =
+  token + cache; the GatedDeltaNet custom kernel kept OUT of the compiled region
+  (O(T) ops path at T=1, or compile only the attn/MLP/proj bulk). Byte-exact vs the
+  Python oracle.
+- **Stage 3 — clean A/B on 27B**, target ~22 t/s.
+
+**Resumability protocol (the machine has rebooted from memory pressure mid-run).**
+Commit small and often — never hold uncommitted experiment state. Probe on the
+SMALLEST cached model (`Qwen3-0.6B-4bit`), not 27B; check `memory_pressure` before
+any load; reserve 27B for the final Stage-3 A/B only. After a reboot: read the SPRINT
+RESUME CHECKPOINT and continue from "Next concrete step".
+
 ### Done: large-context KV preflight (`mlx-native-mem-bound`)
 
 `run_job` estimates the request's KV growth — `kv_bytes_per_position * (prompt_len +

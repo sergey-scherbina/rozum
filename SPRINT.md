@@ -56,6 +56,61 @@ Full writeup + the one-pass diagnostic methodology that localized it:
 
 ### Active
 
+#### P0 (TOP PRIORITY): mlx-native-perf-compile — close the decode-speed gap to Python
+
+**Goal: native MLX decode ~12 t/s → ~22 t/s (Python `mlx_lm` parity).** This is the
+must-do. Full analysis: `docs/specs/mlx-native-runtime.md` → "mx.compile" + the
+"Performance — capture-based compile plan" section.
+
+**The problem (root cause, settled).** Decode is **per-call op-launch / FFI-overhead
+bound** — ~450 tiny matmul/conv dispatches per token at T=1; each is an FFI call +
+lazy-graph build. NOT bandwidth-bound (~27 t/s ceiling), NOT missing fusion (rms_norm
+/ rope / sdpa fast kernels already used). Python hits ~22 because `mx.compile` turns
+the whole forward into ONE traced graph (weights captured, only token+cache crosses
+FFI per step).
+
+**The lever.** A **capture-based plain `compile`** of the decode step (`compile.rs:344`
+marshals only `args`, captures weights into the trace — like Python), NOT
+`compile_with_state` (re-marshals ~400 params/call → the net-negative my old
+`mlx_compile_probe` measured). **Prereq: a fixed-shape KV cache** (preallocate to
+max-ctx + in-place slice-update + offset; today's `ConcatKeyValueCache` grows by
+concat → shape changes → recompile every token). **Risk:** must stay byte-exact; the
+GatedDeltaNet custom kernel must stay OUT of the compiled region (compile + in-place
+cache + buffer-donating kernel = the token-2 divergence hazard).
+
+**Stages.**
+- [ ] **Stage 0 — probe (de-risk first).** Write a *plain*-`compile` probe (not
+  `compile_with_state`): one decode step on the SMALL dense Qwen3 (0.6B/4B), fixed
+  shapes + fixed-size cache, weights captured. A/B compiled vs uncompiled. Decides
+  go/no-go on the cache redesign BEFORE building it.
+- [ ] **Stage 1 — fixed-shape KV cache** (preallocate + in-place slice-update +
+  offset). Byte-exact vs the current `ConcatKeyValueCache`.
+- [ ] **Stage 2 — compiled decode step** (plain `compile`, weights captured, args =
+  token+cache; custom kernel kept out / O(T) ops path at T=1). Byte-exact vs oracle.
+- [ ] **Stage 3 — clean A/B on 27B**; target ~22 t/s.
+
+**⚠ RESUME CHECKPOINT — read this first after any reboot, then continue.**
+The machine has rebooted from memory pressure mid-experiment before; this block is the
+single source of truth to pick up "as if nothing happened". Update it after every
+meaningful step and commit (small, frequent commits — never hold uncommitted experiment
+state).
+- **Branch:** `feature/mlx-perf-compile` (worktree `.worktrees/mlx-native`). Fork at
+  `.vendor/mlx-lm` branch `rozum-mlx-native`; Cargo pin currently
+  `d62049c93d9a6cbcc6fa37ae1480864094a887bc` (path-deps while iterating on the fork).
+- **Memory discipline (this is what caused the reboots):** probe/iterate on the
+  SMALLEST model (`mlx-community:Qwen3-0.6B-4bit`, cached), NOT 27B. Check
+  `memory_pressure` before any model load; if free < ~25%, stop and free first. Only
+  use 27B for the final Stage-3 A/B.
+- **Current stage:** Stage 0 (writing the plain-`compile` probe). 
+- **Last done:** plan recorded; reference probe is the OLD `mlx_compile_probe`
+  (`src/mlx_native_backend.rs`, uses `compile_with_state` — the wrong API; keep as the
+  net-negative baseline). 
+- **Next concrete step:** add `mlx_compile_probe_plain` next to it using
+  `mlx_rs::transforms::compile::compile` with the model captured (Rc<RefCell> if the
+  borrow checker needs it) and only the token array as `args`; run on Qwen3-0.6B-4bit,
+  print compiled vs uncompiled per-step ms.
+- **Results so far:** (none yet — fill in `COMPILE-PROBE-PLAIN T=1 …` lines here).
+
 #### P0 (current): mlx-native-runtime — pure-Rust native MLX runtime
 
 Run MLX-community checkpoints through a **full native MLX forward** (no candle,
