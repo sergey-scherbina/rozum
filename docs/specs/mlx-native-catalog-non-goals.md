@@ -1,0 +1,82 @@
+# Native MLX catalog — non-goals (what we deliberately will NOT port, and why)
+
+The native MLX runtime exists to serve **local coding/agent models on Apple
+Silicon** for Claude Code / Codex / aider through the rozum gateway. That purpose
+is the lens for every "should we support model X" decision. The architectures and
+features below are **explicitly out of scope** — not "not yet", but "the cost is
+real and the benefit to our use case is ~zero". Recorded here so nobody
+re-litigates them or sinks a week into one by reflex.
+
+Things that ARE worth doing live in `BACKLOG.md` (catalog expansion) and
+`SPRINT.md` (quick wins). This file is only the negatives.
+
+## 1. DeepSeek-V2 / V3 and other MLA-attention models — NO
+
+- **What it'd take.** DeepSeek uses **Multi-head Latent Attention (MLA)** — a
+  fundamentally different attention with a compressed latent KV cache and
+  decoupled RoPE. It is not a quirk on top of the Llama/Qwen block; it's a new
+  attention implementation, a new KV-cache type, and (for speed) new fused
+  kernels. That's a multi-week port with its own validation surface.
+- **Why it's pointless for us.** The models that use it are 200B–680B parameters.
+  Even at 4-bit they need hundreds of GB; they do not fit on the Apple-Silicon
+  machines rozum targets (a dev laptop / Studio). DeepSeek's small "distill"
+  variants are **Qwen/Llama architectures** (not MLA) — those already work via our
+  Qwen/Llama paths. So MLA buys us only the models we can't run anyway.
+- **Verdict.** Skip MLA entirely. If someone needs a giant DeepSeek, that's a
+  remote endpoint (`--backend-url`), not in-process MLX.
+
+## 2. Vision / multimodal (Qwen2.5-VL, Llama-Vision, Pixtral, …) — NO
+
+- **What it'd take.** A vision tower + multi-modal projector + image
+  preprocessing pipeline + the multimodal chat template + threading image inputs
+  through the gateway's text-only request/response types. Large, and it touches
+  the whole stack, not just one model file.
+- **Why it's pointless for us.** rozum drives **text** coding agents. The gateway
+  speaks Anthropic/OpenAI **chat** (text + tool-calls); Claude Code / Codex / aider
+  send text. There is no path for an image to even reach the backend, and no agent
+  use case that wants one. We already strip multimodal checkpoints to their
+  `text_config` and run the language model — that is exactly the right amount of
+  "vision support" for us (zero).
+- **Verdict.** Text-only. Multimodal is a different product.
+
+## 3. More download sources beyond HuggingFace + ModelScope — NO
+
+- HF + ModelScope already host essentially every MLX-safetensors checkpoint in
+  existence (mlx-community is HF-native; ModelScope mirrors it + the CN Qwen
+  builds). Adding Kaggle / direct-git / S3 / etc. is per-source API + auth + cache
+  layout maintenance for ~no coverage gain.
+- A model that lives *only* somewhere else can always be pointed at as a **local
+  directory** (download it however, pass the path) or run via `--backend-url`.
+- **Verdict.** Two hubs is the right number. A local-dir spec is the universal
+  escape hatch.
+
+## 4. Training / fine-tuning / LoRA application at load — NO
+
+- rozum is an **inference host**. mlx-lm can train, but that's a separate tool and
+  workflow with no place in a gateway whose job is to serve a resident model to an
+  agent. (Applying a pre-merged LoRA is just loading the merged checkpoint — which
+  already works; *runtime* LoRA stacking is the out-of-scope part.)
+- **Verdict.** Out of scope. Merge adapters offline, then serve the result.
+
+## 5. GGUF / llama.cpp models through the *native MLX* runtime — NO (already covered)
+
+- GGUF is a different weight format (llama.cpp), not MLX safetensors. We already
+  serve GGUF — via the **GGUF backend** (`--features gguf`, reading Ollama /
+  LM Studio / local files). Teaching the MLX runtime to read GGUF would duplicate
+  that backend in the wrong place.
+- **Verdict.** GGUF stays in the GGUF backend; native MLX stays MLX-safetensors.
+
+## 6. Non-quantized giant models "just because" — NO
+
+- The non-quantized (bf16/fp16) load path exists and works, but it is for *small*
+  models; loading a 70B fp16 (140 GB) is a RAM wall, and the KV preflight will
+  reject it anyway. We don't add anything to "support" this — physics already
+  decides it.
+- **Verdict.** No work item. Use the 4-bit AFQ build, or a remote endpoint.
+
+---
+
+**Summary.** Native MLX's catalog should grow along the **dense decoder-only,
+Apple-Silicon-sized, text** axis (Mistral, Gemma, Phi, Mixtral — see BACKLOG).
+Everything above trades a large, ongoing engineering cost for models we either
+can't run, can't feed, or already serve elsewhere.

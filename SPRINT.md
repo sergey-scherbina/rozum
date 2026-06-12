@@ -209,6 +209,30 @@ is 100% MLX, candle only as external oracle.
   `load` arm + dispatch + `supported_model_type` += qwen2. **Validated greedy byte-exact
   vs Python `mlx_lm`** on Qwen2.5-0.5B-Instruct-4bit. Unlocks `Qwen2.5-Coder-32B-Instruct-4bit`
   (in `RECOMMENDED`). E2E test `mlx_qwen2_chat`.
+
+##### Catalog — quick & cheap wins (do next; each = small port + oracle sweep)
+
+- [ ] mlx-native-mistral - **CHEAP — likely a one-line alias.** Mistral / Mistral-Nemo
+  (`model_type: "mistral"`) is architecturally Llama (GQA, no qkv-bias, SwiGLU, RoPE),
+  and upstream `mlx_lm` serves it with the *llama* model class. So try routing
+  `"mistral" => llama::load_llama_model` (+ `supported_model_type` += "mistral") with NO
+  new fork file, then validate greedy byte-exact vs Python `mlx_lm` on a small Mistral
+  MLX 4-bit. Caveat: Mistral uses sliding-window attention (window 4096); the llama path
+  does full attention, so it diverges from the reference only for contexts **>window** —
+  fine for the agent use case and bounded by the KV preflight. If a real divergence shows
+  up at short context, fall back to a thin `mistral.rs` copy. Opens Mistral/Nemo (and the
+  Mixtral base) at near-zero cost.
+
+- [ ] mlx-native-llama-aliases - **TRIVIAL — verify, don't port.** SmolLM / TinyLlama /
+  Llama-3.x variants already ship `model_type: "llama"`, so they should run on the
+  existing Llama path as-is. Just download one small one and confirm greedy vs oracle;
+  add to `models::RECOMMENDED` if it's a useful default. No code beyond a possible
+  RECOMMENDED entry.
+
+- [ ] mlx-native-fp16-verify - **TRIVIAL — verify only.** The AFQ loader already has a
+  non-quantized branch (`quantization = None`), so bf16/fp16 MLX checkpoints should load
+  (just more RAM). Confirm with one small fp16 MLX model; document it. No code expected.
+
 - [x] mlx-native-p4 - Phase 4: native MLX is the DEFAULT backend; `mlx_lm.server`
   retired (rozum `74b458a`). `default = ["mlx-native"]` (was `["mistralrs"]`);
   mistralrs is now opt-in `--features mistralrs` (broader-catalog candle fallback,

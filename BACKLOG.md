@@ -75,6 +75,35 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   numbers ~30% degraded by session memory pressure). Do as a dedicated session. See
   SPRINT `mlx-native-perf` + the spec's mx.compile section.
 
+### Native MLX runtime — catalog expansion (more architectures)
+
+Each architecture port is now cheap: the AFQ-quant loader + the model-agnostic
+sampler are shared (import from `qwen3.rs`), so a new dense model ≈ a copy of
+`llama.rs`/`qwen2.rs` with the right attention/norm quirks + a `LoadedModel` arm
++ a byte-exact oracle sweep vs Python `mlx_lm`. (Quick near-free ones — Mistral
+alias, Llama variants, fp16 — are in SPRINT.) Out-of-scope ones (DeepSeek/MLA,
+vision) and why: `docs/specs/mlx-native-catalog-non-goals.md`.
+
+- [ ] mlx-native-gemma - Gemma 2 / Gemma 3 (`model_type: "gemma2"`/`"gemma3"`). Own
+  fork model file: RMSNorm with a **+1 weight convention**, **attention logit
+  soft-cap** + final-logit soft-cap (Gemma2), embedding scaled by `sqrt(hidden)`,
+  tied embeddings, GQA. Reuse the AFQ loader + shared sampler. Moderate (the soft-cap
+  + norm convention are the only real deltas). Validate vs oracle.
+
+- [ ] mlx-native-phi3 - Phi-3 / Phi-3.5 (`model_type: "phi3"`). Dense, close to Llama
+  but with a **fused `qkv_proj`** and **fused `gate_up_proj`** (split after the matmul),
+  partial RoPE on some variants. Own file (the fused projections need splitting at load
+  or in forward). Validate vs oracle. (Phi-4 if its config differs.)
+
+- [ ] mlx-native-mixtral - Mixtral / Mistral-MoE (`model_type: "mixtral"`). Sparse MoE
+  on the Mistral block — reuse the `qwen3_moe` SwitchGLU routing pattern + the Mistral
+  attention (from `mlx-native-mistral`). Bigger than the dense ports; do after Mistral
+  + Gemma land. Validate vs oracle.
+
+- [ ] mlx-native-recommend-catalog - As architectures land, curate `models::RECOMMENDED`
+  (the launch picker / `rozum models` list) with a few good defaults per family
+  (coder, small, mid) so users get a sensible menu, not just whatever they type.
+
 ### Native MLX runtime — backend feature parity (vs mistralrs)
 
 Audit 2026-06-11 (`docs/specs/mlx-native-runtime.md` "Backend feature parity"):
