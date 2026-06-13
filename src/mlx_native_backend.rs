@@ -571,27 +571,64 @@ mod inner {
         let mut rest = text;
         while let Some(open) = rest.find(TOOL_OPEN) {
             let after = &rest[open + TOOL_OPEN.len()..];
-            let Some(close) = after.find(TOOL_CLOSE) else {
-                break;
+            // Tolerate a missing `</tool_call>` (the model hit EOS right after a
+            // complete JSON body): parse the trailing run instead of dropping it.
+            let (body, next) = match after.find(TOOL_CLOSE) {
+                Some(close) => (after[..close].trim(), Some(&after[close + TOOL_CLOSE.len()..])),
+                None => (after.trim(), None),
             };
-            let body = after[..close].trim();
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-                let name = v
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or_default()
-                    .to_string();
+            if let Some(call) = parse_tool_call_body(body) {
+                calls.push(call);
+            }
+            match next {
+                Some(n) => rest = n,
+                None => break,
+            }
+        }
+        calls
+    }
+
+    /// Parse one tool-call body (the text inside `<tool_call>…</tool_call>`) into
+    /// `(name, arguments_json)`. Qwen3.6 emits EITHER form nondeterministically:
+    ///   - JSON:  `{"name":"f","arguments":{…}}`
+    ///   - XML:   `<function=f><parameter=k>v</parameter>…</function>`
+    /// so we accept both (the XML form was silently lost before).
+    fn parse_tool_call_body(body: &str) -> Option<(String, String)> {
+        // JSON form.
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+            let name = v.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+            if !name.is_empty() {
                 let args = v
                     .get("arguments")
                     .map(|a| a.to_string())
                     .unwrap_or_else(|| "{}".to_string());
-                if !name.is_empty() {
-                    calls.push((name, args));
-                }
+                return Some((name.to_string(), args));
             }
-            rest = &after[close + TOOL_CLOSE.len()..];
         }
-        calls
+        // XML / Hermes form: <function=NAME> <parameter=KEY>VALUE</parameter> … </function>
+        let fstart = body.find("<function=")?;
+        let aft = &body[fstart + "<function=".len()..];
+        let name_end = aft.find('>')?;
+        let name = aft[..name_end].trim();
+        if name.is_empty() {
+            return None;
+        }
+        let mut args = serde_json::Map::new();
+        let mut p = &aft[name_end + 1..];
+        while let Some(ps) = p.find("<parameter=") {
+            let a2 = &p[ps + "<parameter=".len()..];
+            let Some(ke) = a2.find('>') else { break };
+            let key = a2[..ke].trim().to_string();
+            let vrest = &a2[ke + 1..];
+            let Some(ve) = vrest.find("</parameter>") else { break };
+            let val = vrest[..ve].trim();
+            // Keep a typed value if it's valid JSON (numbers/bools), else a string.
+            let jval = serde_json::from_str::<serde_json::Value>(val)
+                .unwrap_or_else(|_| serde_json::Value::String(val.to_string()));
+            args.insert(key, jval);
+            p = &vrest[ve + "</parameter>".len()..];
+        }
+        Some((name.to_string(), serde_json::Value::Object(args).to_string()))
     }
 
     /// Architecture-agnostic streaming loop: pull tokens off a `Generate`
@@ -781,6 +818,15 @@ mod inner {
                 let _ = job.events.send(Ok(ChatEvent::ToolUseEnd { id }));
             }
             stop_reason = StopReason::ToolUse;
+        } else if tool_seen && full_text.len() > emitted.len() {
+            // A `<tool_call>` opener appeared (so text streaming stopped) but nothing
+            // parsed into a valid call — a truncated/malformed tool call (e.g. MoE
+            // greedy nondeterminism emitting odd markup). Don't swallow it: emit the
+            // held-back run as text so the client gets a non-empty response instead
+            // of silence. (parse_tool_calls also now tolerates a missing close tag.)
+            let _ = job.events.send(Ok(ChatEvent::TextDelta {
+                text: full_text[emitted.len()..].to_string(),
+            }));
         }
         let _ = job.events.send(Ok(ChatEvent::Done {
             input_tokens: prompt_len as u32,
@@ -1019,6 +1065,34 @@ mod tests {
         for t in ["qwen3", "qwen3_moe", "llama", "qwen2", "qwen2_5"] {
             assert!(!super::inner::is_hybrid_model(t), "{t} is dense (unretained path)");
         }
+    }
+
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    fn parse_tool_calls_handles_close_tag_and_nested_braces() {
+        let p = super::inner::parse_tool_calls;
+        // Normal, well-formed.
+        assert_eq!(
+            p("<tool_call>{\"name\":\"f\",\"arguments\":{\"x\":1}}</tool_call>"),
+            vec![("f".to_string(), "{\"x\":1}".to_string())]
+        );
+        // Nested braces in a string arg (code) — fine, the close tag delimits.
+        let code = p("<tool_call>{\"name\":\"write_file\",\"arguments\":{\"content\":\"fn add()->i32{ a + b }\"}}</tool_call>");
+        assert_eq!(code.len(), 1);
+        assert_eq!(code[0].0, "write_file");
+        assert!(code[0].1.contains("a + b"));
+        // MISSING close tag (model hit EOS after a complete body) — recovered, not dropped.
+        assert_eq!(
+            p("<tool_call>{\"name\":\"g\",\"arguments\":{}}"),
+            vec![("g".to_string(), "{}".to_string())]
+        );
+        // XML / Hermes form (Qwen3.6 emits this nondeterministically) — was lost before.
+        let xml = p("<tool_call>\n<function=write_file>\n<parameter=path>\nadd.rs\n</parameter>\n<parameter=content>\nfn add()->i32{ a + b }\n</parameter>\n</function>\n</tool_call>");
+        assert_eq!(xml.len(), 1, "XML tool call should parse: {xml:?}");
+        assert_eq!(xml[0].0, "write_file");
+        assert!(xml[0].1.contains("add.rs") && xml[0].1.contains("a + b"), "args: {}", xml[0].1);
+        // No tool call at all.
+        assert!(p("just some text").is_empty());
     }
 
     // KV bytes/position: only full-attention layers count (hybrid uses
