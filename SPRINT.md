@@ -83,13 +83,19 @@ drop-in for Claude Code and Codex against the in-process MLX/GGUF engine.
   moderation (round-robin + manual), idle model-unload interactions.
 - [ ] meeting-reliability-fixes — fix the concrete gaps, with tests.
 
-#### P2 (NEXT): mlx-prealloc-kv — pre-allocated/rotating KV cache
+#### P2: mlx-prealloc-kv — pre-allocated KV cache ✅ DONE (2026-06-13)
 
-**Engine follow-up.** Replace `ConcatKeyValueCache` (O(ctx) copy + realloc every decode
-step) with a pre-allocated, chunk-growing / rotating cache like `mlx_lm`'s `KVCache`, to
-cap resident KV and drop the per-step concat on long sessions. (Ruled OUT as the decode
-gap — context sweep was flat — so this is for long-context memory/throughput, not the
-headline speed.) Gate: byte-identical greedy output vs the concat cache.
+`ConcatKeyValueCache` now pre-allocates the key/value buffers in `KV_STEP`(256)-blocks
+along the sequence axis and writes each step in place via `slice_update`, returning a
+`[:offset]` view — instead of `concatenate`-ing (+ reallocating) the whole history every
+decode step (mirrors `mlx_lm`'s `KVCache`). The O(ctx) per-step copy → amortised O(1)
+write (one growth concat / 256 steps). **Decode byte-exact** (greedy IDs unchanged, all
+chat tests pass, fast lib suite 118/0); decode t/s flat across ctx 64→1024. Chunked-vs-
+single prefill stays argmax-exact (~1 bf16 ulp from the strided-slice SDPA when the
+single-pass length isn't step-aligned; gate relaxed 1e-2→0.2 with an inline explanation).
+Fork `d197d1da`, rozum master `c7ffa5c`. (As expected, no headline-speed change — the
+concat was already flat in the ctx sweep; the win is constant-memory KV growth for long
+sessions + no realloc churn.) Next: **P0.1 gateway-prod-perf-verify** (runtime).
 
 ---
 #### (record) P0 RESOLVED: mlx-native-perf-compile — close the decode-speed gap to Python

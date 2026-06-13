@@ -1,5 +1,16 @@
 # Changelog
 
+## MLX native runtime — pre-allocated KV cache
+Completed: 2026-06-13
+`ConcatKeyValueCache` now pre-allocates its key/value buffers in 256-position blocks and
+writes each decode step in place (`slice_update`), returning a `[:offset]` view — instead
+of `concatenate`-ing (and reallocating) the entire history every step (mirrors Python
+`mlx_lm`'s `KVCache`). The per-step O(context) copy becomes an amortised O(1) write (one
+growth concat every 256 steps); decode t/s is flat across context. Decode output is
+byte-identical (greedy IDs unchanged, all chat tests pass); chunked-vs-single prefill
+stays argmax-exact (~1 bf16 ulp from the strided-slice SDPA on non-step-aligned single
+passes). For long sessions this removes the realloc churn. Fork `d197d1da`.
+
 ## MLX native runtime — decode perf root-caused & fixed (+2.7× MoE)
 Completed: 2026-06-13
 Closed the native-MLX decode gap vs Python `mlx_lm` for the Qwen3.6 hybrid models.
