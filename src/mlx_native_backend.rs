@@ -40,6 +40,31 @@ mod inner {
     /// Fallback context window when config lacks `max_position_embeddings`.
     const DEFAULT_N_CTX: u32 = 32_768;
 
+    /// Hybrid (GatedDeltaNet) archs that need MLX retained command-buffer refs
+    /// (`ROZUM_MLX_RETAIN`) for correctness — the custom kernel's input buffer is
+    /// otherwise freed before the in-flight GPU dispatch reads it (docs/mlx-gd-bug/).
+    /// This is also the bf16/retain fast decode path; keep this list in sync with the
+    /// `qwen3_5` / `qwen3_5_moe` loaders or the +2.7× decode win silently regresses.
+    pub(crate) fn is_hybrid_model(model_type: &str) -> bool {
+        matches!(
+            model_type,
+            "qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text"
+        )
+    }
+
+    /// Set/clear `ROZUM_MLX_RETAIN` for `model_type` (hybrid → retained refs; dense →
+    /// the faster unretained path). Must run before the worker thread's first MLX op.
+    fn apply_retain_env(model_type: &str) {
+        // SAFETY: single-threaded MLX worker; see `LoadedModel::load`.
+        unsafe {
+            if is_hybrid_model(model_type) {
+                std::env::set_var("ROZUM_MLX_RETAIN", "1");
+            } else {
+                std::env::remove_var("ROZUM_MLX_RETAIN");
+            }
+        }
+    }
+
     /// A loaded MLX model, dispatched by `config.json`'s `model_type`. Each
     /// variant exposes the same `Generate` token iterator, so the streaming
     /// loop is architecture-agnostic.
@@ -61,21 +86,11 @@ mod inner {
             // refs BEFORE the first MLX op (model load), so MLX's command-buffer
             // creation reads it; this drops ~48 syncs/token (~12 -> ~16-17 t/s).
             // Dense models keep the faster unretained path.
-            let hybrid = matches!(
-                model_type,
-                "qwen3_5" | "qwen3_5_text" | "qwen3_5_moe" | "qwen3_5_moe_text"
-            );
             // SAFETY: the native backend runs all MLX work on one dedicated worker
             // thread; set/clear before that thread touches MLX. Cleared for dense so a
             // gateway dense<->hybrid switch in the same process stays correct (the MLX
             // patch reads the env per command buffer).
-            unsafe {
-                if hybrid {
-                    std::env::set_var("ROZUM_MLX_RETAIN", "1");
-                } else {
-                    std::env::remove_var("ROZUM_MLX_RETAIN");
-                }
-            }
+            apply_retain_env(model_type);
             match model_type {
                 "qwen3" => qwen3::load_qwen3_model(dir)
                     .map(LoadedModel::Qwen3)
@@ -957,6 +972,22 @@ mod tests {
         assert!(resolve_model_dir("definitely/not-a-real-model-xyzzy").is_none());
     }
 
+    // Regression guard: the hybrid (GatedDeltaNet) archs MUST map to retained MLX
+    // command-buffer refs (`ROZUM_MLX_RETAIN`). Dropping one from the list silently
+    // reverts the +2.7× decode win (and risks the token-2 garbage the retain fixes).
+    #[test]
+    fn hybrid_models_need_retain() {
+        for t in ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"] {
+            assert!(
+                super::inner::is_hybrid_model(t),
+                "{t} must be hybrid (needs ROZUM_MLX_RETAIN for correctness + speed)"
+            );
+        }
+        for t in ["qwen3", "qwen3_moe", "llama", "qwen2", "qwen2_5"] {
+            assert!(!super::inner::is_hybrid_model(t), "{t} is dense (unretained path)");
+        }
+    }
+
     // KV bytes/position: only full-attention layers count (hybrid uses
     // full_attention_interval), head_dim derived from hidden/heads if absent.
     #[cfg(feature = "mlx-native")]
@@ -1060,6 +1091,57 @@ mod tests {
         let text = collect_to_string(stream).await.expect("collect");
         eprintln!("MLX OUTPUT: {text}");
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
+    }
+
+    // Prod-path decode t/s: drives the FULL MlxNativeBackend.chat (tokenizer detok
+    // per token + ChatEvent streaming), not the raw model.forward bench — so it
+    // catches per-token overhead the gateway would actually pay. The internal bench
+    // shows ~88 t/s on this model; the floor guards against a gross prod regression.
+    // Run: cargo test --features mlx-native -- --ignored --nocapture mlx_moe_backend_chat_tps
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "perf; requires local mlx-community/Qwen3.6-35B-A3B-4bit + ROZUM_MLX_RETAIN"]
+    async fn mlx_moe_backend_chat_tps() {
+        use super::MlxNativeBackend;
+        use crate::backend::{ChatBackend, ChatEvent, ChatRequest};
+        use futures::StreamExt;
+        use std::time::Instant;
+
+        let dir = resolve_model_dir("mlx-community:Qwen3.6-35B-A3B-4bit")
+            .expect("Qwen3.6-35B-A3B-4bit not in HF cache");
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-35B-A3B-4bit".into())
+            .await
+            .expect("backend load");
+        let mut req = ChatRequest::simple(
+            "Write a detailed, multi-paragraph explanation of how transformer neural networks work.",
+        );
+        req.sampling.max_tokens = Some(160);
+        let mut stream = backend.chat(req).await.expect("chat");
+
+        let (mut first, mut last, mut out_tokens) = (None::<Instant>, Instant::now(), 0u32);
+        while let Some(ev) = stream.next().await {
+            match ev.expect("event") {
+                ChatEvent::TextDelta { .. } => {
+                    first.get_or_insert_with(Instant::now);
+                    last = Instant::now();
+                }
+                ChatEvent::Done { output_tokens, .. } => out_tokens = output_tokens,
+                _ => {}
+            }
+        }
+        let decode_s = first.map_or(0.0, |f| (last - f).as_secs_f64());
+        let tps = if decode_s > 0.0 {
+            out_tokens as f64 / decode_s
+        } else {
+            0.0
+        };
+        eprintln!(
+            "BACKEND.CHAT MoE prod path: output_tokens={out_tokens}  decode={decode_s:.2}s  -> {tps:.1} t/s (raw bench ~88)"
+        );
+        assert!(
+            tps > 60.0,
+            "prod backend.chat decode too slow: {tps:.1} t/s (bench ~88; per-token detok/stream regression?)"
+        );
     }
 
     // End-to-end Llama through native MLX (auto-downloads the model). Greedy.
