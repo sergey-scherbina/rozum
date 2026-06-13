@@ -193,8 +193,13 @@ math. So the fix is leaner/fewer GPU dispatches, not a faster binding.
   are `compute_g` / gate f32 math that Python fuses via `mx.compile` (mlx-rs compile is
   net-negative). MoE ~88 vs Python 97/110; dense ~19.6 vs 23. Diminishing — needs hand-fused
   Metal kernels or a lower-overhead mlx-rs compile.
-- [~] dense-decode-dispatch - the 1.4× → now ~1.2× (16.2 → ~19 t/s) from the SAME shared GDN
-  fix. Remaining 19 vs 23 is the leaner-graph / fused-op tail (smaller payoff than MoE was).
+- [x] dense-decode-dispatch - RESOLVED end-to-end. The bf16 fix took the bench 16.2→~19, but
+  the bench's own argmax/clone/eval loop UNDER-measures ~10-15%: through the real prod
+  `backend.chat` (pipelined) **dense Qwen3.6-27B = 22.5 t/s = Python parity (23)**, MoE ~99-100
+  (= Python). So effectively NO prod decode gap on either model. The synthetic engine-bench
+  tail (88 vs 97) is the BACKLOG fusion item but doesn't show end-to-end. Verified by
+  `mlx_dense_backend_chat_tps` / `mlx_moe_backend_chat_tps` (TTFT prefill-bound: dense ~2.5s,
+  MoE ~1.2-1.7s/520tok; concurrency serialized via the single MLX worker thread).
 
 Diagnostics on branch `feature/mlx-hybrid-decode`: Rust benches `mlx_qwen35_prefill_bench`
 (dense) / `mlx_qwen35_moe_decode_bench` (MoE; `ROZUM_CTXSWEEP=1` env) — run with
