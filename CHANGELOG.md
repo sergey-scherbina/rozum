@@ -1,5 +1,21 @@
 # Changelog
 
+## MLX native runtime — decode perf root-caused & fixed (+2.7× MoE)
+Completed: 2026-06-13
+Closed the native-MLX decode gap vs Python `mlx_lm` for the Qwen3.6 hybrid models.
+- **Root cause:** `GatedDeltaNet` scaled q/k by `Array::from_f32(inv_scale)` — a *strong*
+  f32 0-dim array — which promoted the whole hidden stream bf16→f32 at the first GDN
+  layer (Python multiplies by a python float, staying bf16). The f32 stream then forced
+  ~1000 bf16→f32 casts/token on the quantized scales/biases at every matmul and ran the
+  matmuls in f32. Fix: scale by a scalar cast to q/k's dtype (one line each).
+- **Also:** MoE expert-sort for prefill (`SwitchGLU` `_gather_sort`/`sorted_indices`),
+  and `fast::rms_norm_no_weight` (null-weight kernel) for the weightless GDN norm.
+- **Results (byte-exact, all chat tests pass):** Qwen3.6-35B-A3B-4bit decode 33→~88 t/s,
+  prefill 943→~1215 (= Python 1180); dense 27B decode 16→~19.6.
+- Tooling added: `mlx_export_to_dot` (mlx-c) + rust wrapper + `count_prims.py` for
+  per-token graph-primitive counting. Full log: `docs/mlx-gd-bug/LOG.md`.
+- Pins mlx fork `0d4b3729` (mlx-c `d71809d`); reproducible git-rev build verified.
+
 ## channel-wakeup fixes + rozum-native-channels (Tier 2)
 Completed: 2026-06-11
 Two corrections/extensions to the channel-wakeup launch flag that landed via the

@@ -56,7 +56,43 @@ Full writeup + the one-pass diagnostic methodology that localized it:
 
 ### Active
 
-#### P0 (TOP PRIORITY): mlx-native-perf-compile — close the decode-speed gap to Python
+> **MLX native runtime is DONE (correctness + perf), 2026-06-13.** Decode root-caused
+> & fixed (bf16 stream leak in GatedDeltaNet q/k scaling → ~1000 casts/token): MoE
+> decode 33→~88 t/s (2.7×), prefill →1215 (=Python), dense 16→~19.6; byte-exact; merged
+> to master `74c7a96`, fork `0d4b3729`. The P0/P1 below are that work (kept for record).
+> Chosen next (2026-06-13, user): the three tasks here; hand-fused Metal kernels → BACKLOG.
+
+#### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
+
+**Sprint goal #2.** The outward gateway exists (`src/gateway.rs`: `/v1/chat/completions`
+OpenAI + `/v1/messages` Anthropic + `/v1/models` + `/control/*`). Make it a *reliable*
+drop-in for Claude Code and Codex against the in-process MLX/GGUF engine.
+- [ ] gateway-prod-perf-verify — confirm the MLX win flows end-to-end: serve Qwen3.6-MoE
+  via `/v1/chat/completions` and measure decode t/s (expect ~88); confirm `ROZUM_MLX_RETAIN`
+  is set on the gateway→`LoadedModel::load` path. Add a cheap regression guard.
+- [ ] gateway-cc-codex-audit — drive real Claude Code + Codex against the gateway; list
+  concrete gaps (tool-use round-trips, streaming SSE shape/stop, `/v1/models` contents,
+  model switching via `/control/switch`, cancel/error semantics, auth header).
+- [ ] gateway-cc-codex-fixes — close the gaps found, with tests.
+
+#### P1 (NEXT): meeting-room-reliability — solid "agents + human operator" room
+
+**Sprint goal #1.** `meeting/` + the rozum MCP server exist. Harden the live flow.
+- [ ] meeting-reliability-audit — map failure modes: turn integrity under concurrent
+  submits, wakeup-channel delivery vs long-poll fallback, agent reconnect/leave, operator
+  moderation (round-robin + manual), idle model-unload interactions.
+- [ ] meeting-reliability-fixes — fix the concrete gaps, with tests.
+
+#### P2 (NEXT): mlx-prealloc-kv — pre-allocated/rotating KV cache
+
+**Engine follow-up.** Replace `ConcatKeyValueCache` (O(ctx) copy + realloc every decode
+step) with a pre-allocated, chunk-growing / rotating cache like `mlx_lm`'s `KVCache`, to
+cap resident KV and drop the per-step concat on long sessions. (Ruled OUT as the decode
+gap — context sweep was flat — so this is for long-context memory/throughput, not the
+headline speed.) Gate: byte-identical greedy output vs the concat cache.
+
+---
+#### (record) P0 RESOLVED: mlx-native-perf-compile — close the decode-speed gap to Python
 
 **✅ RESOLVED (2026-06-12, merged to master).** The hybrid (Qwen3.6) decode gap is
 the gated_delta per-call eval, and its ROOT CAUSE is MLX's **unretained

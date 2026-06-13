@@ -32,6 +32,17 @@ mistralrs backend that the native runtime does NOT yet have. (Concurrency,
 admission, backpressure and the OOM circuit breaker already apply generically
 through `concurrency::admit_wrap`, so they are not relisted.)
 
+- [ ] mlx-hand-fused-gdn-kernels — close the last MLX decode gap to Python (MoE ~88→97,
+  dense ~19.6→23). After the bf16-stream fix (2026-06-13), the residual gap is op-FUSION:
+  Python's `mx.compile` collapses `compute_g` (softplus/exp) and the gate
+  (sigmoid·multiply) into single `Compiled*` Metal kernels; mlx-rs `compile` is
+  net-negative (per-call closure marshal > saving on tiny T=1 tensors, measured twice).
+  Closing it needs HAND-WRITTEN fused `mx.fast.metal_kernel`s for those hot per-layer ops
+  (like the existing gated_delta kernel). Big + uncertain payoff (~10%); the cheap wins
+  are banked (33→88, 2.7×). **Only pull if decode speed becomes critical.** Diagnostic
+  tooling exists: `mlx_export_to_dot` + `docs/mlx-gd-bug/py/count_prims.py` (Rust 3127 vs
+  Python 2610 prims/token; the delta is unfused Multiply/Broadcast/AsType + Exp/LogAddExp).
+
 - [x] mlx-native-chunked-prefill - DONE. `Model::prefill` chunks the prompt
   (`ROZUM_MLX_PREFILL_CHUNK`, default 2048), bounding the full-attention
   `[chunk, ctx]` causal-mask + SDPA peak instead of `[T, T]`; caches advance and
