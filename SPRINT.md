@@ -93,19 +93,25 @@ drop-in for Claude Code and Codex against the in-process MLX/GGUF engine.
   The gateway's own banner targets CC (`ANTHROPIC_BASE_URL`) + Codex (`OPENAI_BASE_URL`).
   Findings → fixes below. (Still worth a LIVE pass with real CC/Codex for client-specific
   quirks; needs the user to point them at the endpoint.)
-- [ ] gateway-cc-codex-fixes — close the audit findings, with tests:
-  - **stream-default** (most important): `req.stream.unwrap_or(true)` (gateway.rs ~1263/1335)
-    makes an ABSENT `stream` field default to SSE; OpenAI & Anthropic specs default to
-    non-streaming JSON. A client that omits `stream` (e.g. OpenAI SDK non-streaming) gets
-    SSE → JSON parse error. Default to `false`. Low risk (streaming clients set `stream:true`
-    explicitly) but it's a behavior change — confirm nothing in `rozum launch` relies on it.
-  - **think-passthrough**: Qwen3 `<think>…</think>` reasoning streams as plain text/content
-    in BOTH dialects (not an Anthropic `thinking` block / OpenAI `reasoning_content`), so CC
-    shows raw reasoning. Options: parse `<think>`→thinking/reasoning field, strip, or inject
-    `/no_think` by default. (Verify against CC's actual rendering in the live pass.)
-  - **models-id**: `/v1/models` returns `id:"claude-rozum-<spec>"` (prefixed/mangled);
-    request `model` is ignored (routes to the one loaded model). Cosmetic — but confirm
-    CC/Codex model-select/display isn't confused (the `claude-` prefix looks intentional).
+- [~] gateway-cc-codex-fixes — 1 fixed, 1 not-a-bug, 1 needs a policy call:
+  - [x] **stream-default** — FIXED (master `b4c6501`). `req.stream.unwrap_or(true)` → `false`
+    in both handlers + debug logs; an absent `stream` now returns non-streaming JSON (spec).
+    Verified live (omit `stream` → `chat.completion` JSON); gateway lib tests 14/0. `rozum
+    launch` only exports env (no requests), CC/Codex set `stream:true` explicitly → unaffected.
+  - [x] **models-id** — NOT A BUG. The `claude-rozum-<spec>` id is intentional
+    (`claude_model_alias`): `rozum launch` exports it as `ANTHROPIC_MODEL` so CC pre-selects
+    the local model instead of the default OAuth one. Request `model` is ignored (one loaded
+    model). No change.
+  - [ ] **think-passthrough** — needs a POLICY decision (not a clear bug; the gateway faithfully
+    streams what the model emits). Qwen3 `<think>…</think>` (even EMPTY with `/no_think`:
+    `<think>\n\n</think>`) lands in `content`/text, so CC/Codex see the wrapper. Each fix has
+    a real tradeoff: (a) **strip** `<think>…</think>` → clean answers but reasoning hidden +
+    no streamed feedback during thinking; (b) **route to OpenAI `reasoning_content`** (safe,
+    standard, unknown-to-client → ignored) — but Anthropic `thinking` blocks need signatures
+    so routing there risks CC rejecting them; (c) **disable thinking** via the chat template
+    (`enable_thinking=false`) → cleanest output but loses reasoning quality on hard tasks.
+    Recommend: at least strip EMPTY think blocks always (pure noise), and pick (a)/(b)/(c)
+    for non-empty after a LIVE CC/Codex pass confirms rendering. Awaiting the policy choice.
 
 #### P1 (NEXT): meeting-room-reliability — solid "agents + human operator" room
 
