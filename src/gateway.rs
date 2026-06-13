@@ -1219,7 +1219,7 @@ async fn oai_chat_handler(
         model = req.model.as_deref().unwrap_or("?"),
         msgs = req.messages.len(),
         tools = req.tools.len(),
-        stream = req.stream.unwrap_or(true),
+        stream = req.stream.unwrap_or(false),
         "POST /v1/chat/completions"
     );
     // Hold a lease for the whole request so a `switch` can't swap the model
@@ -1260,7 +1260,9 @@ async fn oai_chat_handler(
     };
 
     let model = req.model.unwrap_or_else(|| lease.model_id.clone());
-    let stream_mode = req.stream.unwrap_or(true);
+    // OpenAI/Anthropic spec default for an absent `stream` is non-streaming JSON.
+    // (Streaming clients — CC, Codex — always send `stream:true` explicitly.)
+    let stream_mode = req.stream.unwrap_or(false);
 
     match lease.backend.chat(chat_req).await {
         Err(e) => {
@@ -1295,7 +1297,7 @@ async fn anthropic_handler(
         model = req.model.as_deref().unwrap_or("?"),
         msgs = req.messages.len(),
         tools = req.tools.len(),
-        stream = req.stream.unwrap_or(true),
+        stream = req.stream.unwrap_or(false),
         "POST /v1/messages"
     );
     let lease = match state.sb.enter().await {
@@ -1332,7 +1334,9 @@ async fn anthropic_handler(
     };
 
     let model = req.model.unwrap_or_else(|| lease.model_id.clone());
-    let stream_mode = req.stream.unwrap_or(true);
+    // OpenAI/Anthropic spec default for an absent `stream` is non-streaming JSON.
+    // (Streaming clients — CC, Codex — always send `stream:true` explicitly.)
+    let stream_mode = req.stream.unwrap_or(false);
 
     match lease.backend.chat(chat_req).await {
         Err(e) => {
