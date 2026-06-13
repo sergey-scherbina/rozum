@@ -1,5 +1,19 @@
 # Changelog
 
+## Gateway — parse Qwen3.6's `<function=>` XML tool-call format (agentic coding fix)
+Completed: 2026-06-13
+Qwen3.6 emits tool calls in EITHER the JSON form
+(`<tool_call>{"name":…,"arguments":…}</tool_call>`) OR the Hermes-style XML form
+(`<tool_call><function=NAME><parameter=K>V</parameter>…</function></tool_call>`), chosen
+nondeterministically. The backend only parsed the JSON form, so the XML calls were
+silently dropped — the `<tool_call>` opener suppressed text streaming, the parse then
+failed, and the client got an **empty response** with the tokens lost. For agentic
+coding (Claude Code / Codex, which live in multi-step tool loops) this meant tool calls
+randomly failing. Now `parse_tool_calls` accepts both forms, tolerates a missing
+`</tool_call>` (model hit EOS after a complete body), and falls back to emitting the raw
+run as text if a `<tool_call>` appeared but nothing parsed — so tokens are never silently
+swallowed. Verified read→write_file end-to-end (5/5 OpenAI, 3/3 Anthropic).
+
 ## Gateway — CC/Codex compatibility fixes (audit)
 Completed: 2026-06-13
 A synthetic audit of the gateway against the OpenAI (Codex) and Anthropic (Claude Code)

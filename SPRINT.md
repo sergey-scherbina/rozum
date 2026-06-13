@@ -93,7 +93,16 @@ drop-in for Claude Code and Codex against the in-process MLX/GGUF engine.
   The gateway's own banner targets CC (`ANTHROPIC_BASE_URL`) + Codex (`OPENAI_BASE_URL`).
   Findings → fixes below. (Still worth a LIVE pass with real CC/Codex for client-specific
   quirks; needs the user to point them at the endpoint.)
-- [x] gateway-cc-codex-fixes — DONE (2 fixed, 1 not-a-bug):
+- [x] gateway-cc-codex-fixes — DONE (3 fixed, 1 not-a-bug):
+  - [x] **tool-call-xml-format** — FOUND in the tool-use pass + FIXED (master `8c29870`),
+    the most impactful. Qwen3.6 emits tool calls in EITHER `<tool_call>{json}</tool_call>`
+    OR the Hermes `<tool_call><function=NAME><parameter=K>V</parameter>…</function></tool_call>`
+    form, nondeterministically. `parse_tool_calls` only handled JSON → the XML calls were
+    SILENTLY LOST (text suppressed by `<tool_call>`, parse fails → empty response) — a
+    showstopper for agentic coding. Now parses both forms + tolerates a missing close tag
+    + never swallows tokens (raw-text fallback). Verified read→write_file 5/5 OpenAI + 3/3
+    Anthropic. (Underlying greedy MoE nondeterminism between the two formats is a separate,
+    model-level quirk; the parser now handles both so it doesn't matter.)
   - [x] **stream-default** — FIXED (master `b4c6501`). `req.stream.unwrap_or(true)` → `false`
     in both handlers + debug logs; an absent `stream` now returns non-streaming JSON (spec).
     Verified live (omit `stream` → `chat.completion` JSON); gateway lib tests 14/0. `rozum
