@@ -83,10 +83,29 @@ drop-in for Claude Code and Codex against the in-process MLX/GGUF engine.
   14 ms → 0; byte-exact (hybrid 27B + MoE chat pass). Perf-test floor bumped to 80 t/s
   to guard it; kept a small env-gated per-token profiler. master `b9ef3d5`. (No
   streaming detokenizer needed — left in BACKLOG only if a future tokenizer is slow.)
-- [ ] gateway-cc-codex-audit — drive real Claude Code + Codex against the gateway; list
-  concrete gaps (tool-use round-trips, streaming SSE shape/stop, `/v1/models` contents,
-  model switching via `/control/switch`, cancel/error semantics, auth header).
-- [ ] gateway-cc-codex-fixes — close the gaps found, with tests.
+- [x] gateway-cc-codex-audit — DONE (synthetic pass, 2026-06-13). Launched `rozum gateway`
+  + Qwen3-4B and drove the wire protocol. **Core is solid for both dialects:** OpenAI
+  `/v1/chat/completions` (non-stream JSON + stream SSE `role→deltas→finish_reason→[DONE]` +
+  tool-use `tool_calls`/`finish_reason:"tool_calls"`), Anthropic `/v1/messages` (full SSE
+  `message_start→content_block_start→content_block_delta→content_block_stop→message_delta
+  {stop_reason}→message_stop` + non-stream JSON + tool-use `tool_use`/`input_json_delta`),
+  `/v1/models`, stop-reason mapping (length↔max_tokens, tool_calls), validation→HTTP 422.
+  The gateway's own banner targets CC (`ANTHROPIC_BASE_URL`) + Codex (`OPENAI_BASE_URL`).
+  Findings → fixes below. (Still worth a LIVE pass with real CC/Codex for client-specific
+  quirks; needs the user to point them at the endpoint.)
+- [ ] gateway-cc-codex-fixes — close the audit findings, with tests:
+  - **stream-default** (most important): `req.stream.unwrap_or(true)` (gateway.rs ~1263/1335)
+    makes an ABSENT `stream` field default to SSE; OpenAI & Anthropic specs default to
+    non-streaming JSON. A client that omits `stream` (e.g. OpenAI SDK non-streaming) gets
+    SSE → JSON parse error. Default to `false`. Low risk (streaming clients set `stream:true`
+    explicitly) but it's a behavior change — confirm nothing in `rozum launch` relies on it.
+  - **think-passthrough**: Qwen3 `<think>…</think>` reasoning streams as plain text/content
+    in BOTH dialects (not an Anthropic `thinking` block / OpenAI `reasoning_content`), so CC
+    shows raw reasoning. Options: parse `<think>`→thinking/reasoning field, strip, or inject
+    `/no_think` by default. (Verify against CC's actual rendering in the live pass.)
+  - **models-id**: `/v1/models` returns `id:"claude-rozum-<spec>"` (prefixed/mangled);
+    request `model` is ignored (routes to the one loaded model). Cosmetic — but confirm
+    CC/Codex model-select/display isn't confused (the `claude-` prefix looks intentional).
 
 #### P1 (NEXT): meeting-room-reliability — solid "agents + human operator" room
 
