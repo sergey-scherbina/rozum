@@ -114,10 +114,22 @@ drop-in for Claude Code and Codex against the in-process MLX/GGUF engine.
 #### P1 (NEXT): meeting-room-reliability — solid "agents + human operator" room
 
 **Sprint goal #1.** `meeting/` + the rozum MCP server exist. Harden the live flow.
-- [ ] meeting-reliability-audit — map failure modes: turn integrity under concurrent
-  submits, wakeup-channel delivery vs long-poll fallback, agent reconnect/leave, operator
-  moderation (round-robin + manual), idle model-unload interactions.
-- [ ] meeting-reliability-fixes — fix the concrete gaps, with tests.
+- [x] meeting-reliability-audit — DONE. Mapped the failure modes; found ONE real bug
+  (below). Verified-handled: **disconnect/crash cleanup** (`app.rs` spawn_connection:
+  `service.waiting()` returns on socket EOF → auto-leave → clears participant + responding/
+  polling markers); **stale markers** (responding/polling filtered at read time ~30s + cleared
+  on submit/leave, existing tests); **concurrent submits** (serialized by the meeting `Mutex`,
+  seq-ordered; "anyone submits any time" by design — no turn lock to corrupt); **wakeup-channel
+  vs long-poll** (long-poll is seq-based off the transcript, so a missed broadcast still
+  recovers on the next poll). idle-model-unload doesn't touch meetings (rooms are independent
+  of the gateway model).
+- [x] **meeting-reliability-fixes** — lost-wakeup in `wait_my_turn` FIXED (master `0c85de5`).
+  `post_submission` wakes pollers with `notify_waiters()` (stores NO permit), but `wait_my_turn`
+  created `notify.notified()` AFTER its transcript check — a submit landing between the check
+  and the `.await` was lost, stalling the poller until the 25s deadline (~25s latency on a
+  message). Fix: arm the `Notified` (pin + `enable()`) BEFORE the check; kept `notify_waiters`
+  (wake-all, since N agents poll concurrently — `notify_one` would wake only one). Regression
+  test `wait_my_turn_wakes_on_submit` (poller must return ≪25s on submit). All 23 meeting tests pass.
 
 #### P2: mlx-prealloc-kv — pre-allocated KV cache ✅ DONE (2026-06-13)
 
