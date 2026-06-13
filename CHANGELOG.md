@@ -1,5 +1,17 @@
 # Changelog
 
+## Gateway — hybrid decode now pipelines (prod path 62 → ~96 t/s)
+Completed: 2026-06-13
+The in-process gateway path (`MlxNativeBackend.chat`) decoded the Qwen3.6 hybrid models
+~30% slower than the raw engine because `stream_generation` ran each token's GPU sync
+(`eval` + `token.item()` host readback) serially, with `pipeline=false` left over from
+when the GatedDeltaNet kernel blocking-eval'd its state per call. The retain fix
+(`ROZUM_MLX_RETAIN`) removed that eval, so the hybrid models now pipeline like the dense
+ones — the next token's forward `async_eval`s while the current token's id is read back.
+Prod `backend.chat` decode 62 → ~96 t/s (the per-token sync 14ms → 0); byte-identical
+output. (Profiling showed detokenization was never the cost — 0.03 ms/token.) Adds a
+prod-path perf test (`mlx_moe_backend_chat_tps`) + a `hybrid_models_need_retain` guard.
+
 ## MLX native runtime — pre-allocated KV cache
 Completed: 2026-06-13
 `ConcatKeyValueCache` now pre-allocates its key/value buffers in 256-position blocks and

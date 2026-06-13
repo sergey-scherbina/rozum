@@ -73,12 +73,16 @@ drop-in for Claude Code and Codex against the in-process MLX/GGUF engine.
   extracted + `hybrid_models_need_retain` unit test (fast suite). Runtime: new perf test
   `mlx_moe_backend_chat_tps` drives the full `MlxNativeBackend.chat`. **FINDING: prod path
   61.8 t/s vs the raw `model.forward` bench ~88 — ~30% lost to per-token detok** (see next).
-- [ ] **gateway-streaming-detok** — `stream_generation` re-runs `tokenizer.decode(&out_ids)`
-  on the WHOLE growing run every token (~N full-decode calls + per-token string diff / tool
-  scan). That costs ~30% of decode (62 vs 88 t/s prod). Port an incremental/streaming
-  detokenizer (decode only the new token(s) with a small overlap for BPE/multi-byte safety;
-  cf. `mlx_lm`'s streaming detok), keeping output byte-identical. Gate: same text out,
-  `mlx_moe_backend_chat_tps` → toward ~88. (62 is already usable, so P1-ish.)
+- [x] **gateway-streaming-detok** — DONE, but MISDIAGNOSED → real fix was pipelining.
+  Profiled the prod path (`ROZUM_DETOK_PROFILE`): **detok = 0.03 ms/tok** (negligible),
+  the ~30% gap was the **per-token GPU sync** (`eval` + `token.item()` readback) run
+  SERIALLY. `Qwen35`/`Qwen35Moe` still passed `pipeline=false` on a stale "kernel
+  blocking-evals per call" assumption — the retain fix removed that eval (bench
+  `serial==pipe` MATCH). Flipped both to `pipeline=true` (overlaps the next token's
+  forward with the current readback): **prod `backend.chat` 62/72 → 96.2 t/s**, sync
+  14 ms → 0; byte-exact (hybrid 27B + MoE chat pass). Perf-test floor bumped to 80 t/s
+  to guard it; kept a small env-gated per-token profiler. master `b9ef3d5`. (No
+  streaming detokenizer needed — left in BACKLOG only if a future tokenizer is slow.)
 - [ ] gateway-cc-codex-audit — drive real Claude Code + Codex against the gateway; list
   concrete gaps (tool-use round-trips, streaming SSE shape/stop, `/v1/models` contents,
   model switching via `/control/switch`, cancel/error semantics, auth header).
