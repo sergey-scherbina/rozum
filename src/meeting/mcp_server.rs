@@ -102,6 +102,17 @@ impl RoomServer {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
 
         loop {
+            // Arm the wakeup BEFORE checking the transcript. `post_submission` wakes
+            // pollers with `notify_waiters()`, which stores NO permit — so a submit
+            // landing between this check and the `.await` below would be lost and the
+            // poller would stall until the 25s deadline. Registering interest first
+            // (`enable()`) means such a `notify_waiters()` wakes this already-armed
+            // future instead. (notify_one would fix the race but only wake ONE of N
+            // concurrent pollers; we need wake-all.)
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
             {
                 let m = self.meeting.lock().await;
 
@@ -141,7 +152,7 @@ impl RoomServer {
             }
 
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let _ = tokio::time::timeout(remaining, notify.notified()).await;
+            let _ = tokio::time::timeout(remaining, notified.as_mut()).await;
         }
     }
 
@@ -360,5 +371,54 @@ impl Drop for PollingGuard {
         tokio::spawn(async move {
             meeting.lock().await.unmark_polling(&id);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meeting::budget::BudgetGuard;
+    use std::time::Duration;
+    use tokio::sync::broadcast;
+
+    // Regression guard for the long-poll wakeup: a `meeting.submit` must wake an
+    // in-flight `wait_my_turn` promptly (well under its 25s deadline), not stall.
+    // Guards the `notify_waiters` + armed-`Notified` wiring against a lost wakeup.
+    #[tokio::test]
+    async fn wait_my_turn_wakes_on_submit() {
+        let (events, _rx) = broadcast::channel(16);
+        let mut meeting = Meeting::new("room", "topic", "operator", BudgetGuard::default(), events);
+        let agent = meeting.join_mcp("codex"); // the poller
+        let human = meeting.human_participant_id().unwrap(); // the submitter
+        let meeting = Arc::new(Mutex::new(meeting));
+
+        let server = RoomServer::new(
+            meeting.clone(),
+            Arc::new(Mutex::new(Some(agent))),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        // No turns yet → this would block up to 25s without a wakeup.
+        let poll = tokio::spawn(async move {
+            server
+                .wait_my_turn(Parameters(WaitMyTurnParams { since_seq: Some(0) }))
+                .await
+        });
+
+        // Let the poller enter its wait, then submit.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        meeting
+            .lock()
+            .await
+            .submit(&human, "hello-from-human".to_owned())
+            .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), poll)
+            .await
+            .expect("wait_my_turn did not return within 5s — lost wakeup?")
+            .expect("poll task panicked");
+        let s = serde_json::to_string(&result).unwrap();
+        assert!(s.contains("hello-from-human"), "expected the new turn; got {s}");
+        assert!(s.contains("your_turn"), "expected your_turn payload; got {s}");
     }
 }
