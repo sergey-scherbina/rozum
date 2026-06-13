@@ -67,9 +67,18 @@ Full writeup + the one-pass diagnostic methodology that localized it:
 **Sprint goal #2.** The outward gateway exists (`src/gateway.rs`: `/v1/chat/completions`
 OpenAI + `/v1/messages` Anthropic + `/v1/models` + `/control/*`). Make it a *reliable*
 drop-in for Claude Code and Codex against the in-process MLX/GGUF engine.
-- [ ] gateway-prod-perf-verify — confirm the MLX win flows end-to-end: serve Qwen3.6-MoE
-  via `/v1/chat/completions` and measure decode t/s (expect ~88); confirm `ROZUM_MLX_RETAIN`
-  is set on the gateway→`LoadedModel::load` path. Add a cheap regression guard.
+- [x] gateway-prod-perf-verify — DONE. Static: default `build_gateway_backend` routes
+  Qwen3.6 → native MLX → `LoadedModel::load` sets `ROZUM_MLX_RETAIN` (hybrid), so the
+  +2.7× win is live on `/v1/chat/completions` + `/v1/messages`. Guard: `is_hybrid_model`
+  extracted + `hybrid_models_need_retain` unit test (fast suite). Runtime: new perf test
+  `mlx_moe_backend_chat_tps` drives the full `MlxNativeBackend.chat`. **FINDING: prod path
+  61.8 t/s vs the raw `model.forward` bench ~88 — ~30% lost to per-token detok** (see next).
+- [ ] **gateway-streaming-detok** — `stream_generation` re-runs `tokenizer.decode(&out_ids)`
+  on the WHOLE growing run every token (~N full-decode calls + per-token string diff / tool
+  scan). That costs ~30% of decode (62 vs 88 t/s prod). Port an incremental/streaming
+  detokenizer (decode only the new token(s) with a small overlap for BPE/multi-byte safety;
+  cf. `mlx_lm`'s streaming detok), keeping output byte-identical. Gate: same text out,
+  `mlx_moe_backend_chat_tps` → toward ~88. (62 is already usable, so P1-ish.)
 - [ ] gateway-cc-codex-audit — drive real Claude Code + Codex against the gateway; list
   concrete gaps (tool-use round-trips, streaming SSE shape/stop, `/v1/models` contents,
   model switching via `/control/switch`, cancel/error semantics, auth header).
