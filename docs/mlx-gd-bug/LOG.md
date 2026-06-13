@@ -291,3 +291,18 @@ graphs (skip-MoE / skip-attn) stayed mostly bf16 and looked cheap. Fork `8739cf7
 casts — Python passes weight=None; mlx-c allows null weight, mlx-rs wrapper doesn't yet),
 30 from `compute_g` Exp/LogAddExp (Python fuses via `mx.compile`; mlx-rs compile was
 net-negative). MoE ~83 vs Python 97/110; dense ~19 vs 23. Diminishing returns.
+
+## 2026-06-13 (cont.) — follow-up: rms_norm null-weight (~83→~88 t/s MoE)
+
+The 60 `Full→AsType→RMSNorm`/token were our `rms_norm_weightless` building a per-call f32
+ones weight then casting it. mlx-c's `mlx_fast_rms_norm` accepts a null weight
+(`weight.ctx ? optional : nullopt`), but the mlx-rs wrapper required one. Added
+`fast::rms_norm_no_weight` (passes `mlx_array_new()` as weight, frees it after) and used it.
+Prims 3307→3127 (Full 60→0, AsType 210→150), MoE decode ~83→~88 t/s, dense ~19→~19.6;
+byte-exact, all chat tests pass. Fork mlx-lm `0d4b3729`, rozum `4f31ecc`.
+
+Remaining 150 AsType + extra Multiply/Broadcast are the `compute_g` (softplus/exp in f32)
+and gate math that Python fuses into single `Compiled*` ops via `mx.compile`. mlx-rs
+`compile` per-call marshal overhead exceeds the fusion saving on these tiny T=1 tensors
+(tested earlier, net-negative), so closing the last ~88→97 needs hand-fused Metal kernels
+or a lower-overhead mlx-rs compile path. Diminishing returns; total so far 33→88 (2.7×).

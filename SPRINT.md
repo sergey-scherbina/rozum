@@ -131,8 +131,13 @@ math. So the fix is leaner/fewer GPU dispatches, not a faster binding.
   decode 33→83, **prefill 943→~1200 (= Python 1180)**. Shared GDN → dense 27B too. Fork
   `8739cf72` (mlx-c `d71809d`), rozum `5dc7bd0`, reproducible git-rev build verified.
   The earlier "2.4× super-additive eval" was this: the f32 stream's extra casts scaled with
-  graph size. Remaining: Rust 3307 vs Python 2610 prims (210 AsType + unfused compute_g/gate
-  — Python uses `mx.compile`'d ops we can't fuse cheaply); MoE ~83 vs Python 97/110.
+  graph size. FOLLOW-UP DONE: `rms_norm_no_weight` (null-weight fast kernel; mlx-c allowed it,
+  mlx-rs wrapper didn't) replaced the per-call ones weight → prims 3307→3127 (Full 60→0),
+  **MoE decode ~83→~88 t/s**, dense ~19→~19.6; byte-exact. Fork `0d4b3729`, rozum `4f31ecc`.
+  Remaining tail: Rust 3127 vs Python 2610 — the leftover 150 AsType + extra Multiply/Broadcast
+  are `compute_g` / gate f32 math that Python fuses via `mx.compile` (mlx-rs compile is
+  net-negative). MoE ~88 vs Python 97/110; dense ~19.6 vs 23. Diminishing — needs hand-fused
+  Metal kernels or a lower-overhead mlx-rs compile.
 - [~] dense-decode-dispatch - the 1.4× → now ~1.2× (16.2 → ~19 t/s) from the SAME shared GDN
   fix. Remaining 19 vs 23 is the leaner-graph / fused-op tail (smaller payoff than MoE was).
 
