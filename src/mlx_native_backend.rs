@@ -534,8 +534,10 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
-                    false, // hybrid: the GatedDeltaNet kernel blocking-evals its
-                           // state per call (donation-safe), so decode can't pipeline
+                    true, // hybrid now pipelines too: the retain fix (ROZUM_MLX_RETAIN)
+                          // dropped the per-call kernel eval, so the next token's graph
+                          // can async_eval while we read the current's id (byte-exact;
+                          // see mlx_qwen35_moe_decode_bench serial==pipe MATCH)
                 );
             }
             LoadedModel::Qwen35Moe(m) => {
@@ -550,8 +552,10 @@ mod inner {
                     prompt_ids.len(),
                     max_tokens,
                     &job,
-                    false, // hybrid: the GatedDeltaNet kernel blocking-evals its
-                           // state per call (donation-safe), so decode can't pipeline
+                    true, // hybrid now pipelines too: the retain fix (ROZUM_MLX_RETAIN)
+                          // dropped the per-call kernel eval, so the next token's graph
+                          // can async_eval while we read the current's id (byte-exact;
+                          // see mlx_qwen35_moe_decode_bench serial==pipe MATCH)
                 );
             }
         }
@@ -651,6 +655,10 @@ mod inner {
                 None => Ok(None),
             }
         };
+        // Per-token cost profiling (ROZUM_DETOK_PROFILE): split GPU sync (eval+item)
+        // from detok+string, to locate the prod-path overhead vs the raw bench.
+        let profile = std::env::var_os("ROZUM_DETOK_PROFILE").is_some();
+        let (mut sync_ns, mut detok_ns, mut prof_tokens) = (0u128, 0u128, 0u32);
         while let Some(token) = cur.take() {
             if job.cancel.is_cancelled() {
                 stop_reason = StopReason::Cancelled;
@@ -668,6 +676,7 @@ mod inner {
             } else {
                 None
             };
+            let t_sync = profile.then(std::time::Instant::now);
             if eval([&token]).is_err() {
                 let _ = job.events.send(Err(ModelError::BackendUnavailable(
                     "mlx: eval failed".into(),
@@ -675,6 +684,9 @@ mod inner {
                 return;
             }
             let id = token.item::<u32>();
+            if let Some(t) = t_sync {
+                sync_ns += t.elapsed().as_nanos();
+            }
             if output_tokens == 0 && std::env::var("ROZUM_MLX_DEBUG").is_ok() {
                 eprintln!("FIRST_TOK {id} (eos={eos:?})");
             }
@@ -688,6 +700,7 @@ mod inner {
             // Incremental detokenize: re-decode the run and emit the new suffix.
             // Hold back a trailing replacement char (an incomplete multi-byte
             // sequence, e.g. mid-Cyrillic) until the next token completes it.
+            let t_detok = profile.then(std::time::Instant::now);
             if let Ok(text) = tokenizer.decode(&out_ids, true) {
                 let stable = text.trim_end_matches('\u{FFFD}');
                 full_text = stable.to_string();
@@ -714,6 +727,11 @@ mod inner {
                 }
             }
 
+            if let Some(t) = t_detok {
+                detok_ns += t.elapsed().as_nanos();
+                prof_tokens += 1;
+            }
+
             if output_tokens as usize >= max_tokens {
                 stop_reason = StopReason::MaxTokens;
                 break;
@@ -728,6 +746,14 @@ mod inner {
                     Err(()) => return,
                 }
             };
+        }
+        if profile && prof_tokens > 0 {
+            let n = prof_tokens as f64;
+            eprintln!(
+                "DETOK_PROFILE tokens={prof_tokens}  sync(eval+item)={:.2}ms/tok  detok+string={:.2}ms/tok",
+                sync_ns as f64 / n / 1e6,
+                detok_ns as f64 / n / 1e6,
+            );
         }
         // The iterator can also end on its own (None): the hybrid `Generate`
         // returns None when cancelled mid-prefill.
@@ -1138,9 +1164,12 @@ mod tests {
         eprintln!(
             "BACKEND.CHAT MoE prod path: output_tokens={out_tokens}  decode={decode_s:.2}s  -> {tps:.1} t/s (raw bench ~88)"
         );
+        // ~96 t/s once hybrid pipelining is on; without it (serial eval+item) it's
+        // ~62-72. Floor guards a pipelining regression. (Kill the Bloop/Java daemon
+        // first — memory pressure throttles this.)
         assert!(
-            tps > 60.0,
-            "prod backend.chat decode too slow: {tps:.1} t/s (bench ~88; per-token detok/stream regression?)"
+            tps > 80.0,
+            "prod backend.chat decode too slow: {tps:.1} t/s — hybrid pipelining off? (expect ~96)"
         );
     }
 
