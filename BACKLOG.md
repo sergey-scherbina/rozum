@@ -43,6 +43,25 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   tooling exists: `mlx_export_to_dot` + `docs/mlx-gd-bug/py/count_prims.py` (Rust 3127 vs
   Python 2610 prims/token; the delta is unfused Multiply/Broadcast/AsType + Exp/LogAddExp).
 
+- [ ] mlx-native-batched-decode — true parallel serving (multiple concurrent sessions).
+  TODAY: the native MLX backend is capacity-1 — one OS worker thread owns the `!Send` model
+  and runs jobs strictly serially (`worker_main`'s `while blocking_recv { run_job }`);
+  `concurrency_capacity()=Some(1)`, so `admit_wrap` admits 1 and queues the rest (bounded
+  `ROZUM_ADMIT_QUEUE_MAX`=32, shortest-job-first + fast lane, HTTP 429 on overflow). That's
+  fine for ONE active CC/Codex session; many simultaneous sessions serialize (queued, not
+  parallel). To actually serve N in parallel, add **continuous/batched decode** to the
+  native runtime: batch B sequences in one `forward` (MLX has the batch dim), a per-sequence
+  KV cache stacked on the batch axis (extend `ConcatKeyValueCache` / the GatedDeltaNet conv
+  + recurrent state to a batch axis), ragged prefill admission, and per-sequence
+  EOS/stop/cancel + streaming. Then raise `concurrency_capacity()` to a memory-budgeted
+  `budgeted_max_num_seqs` (the budget machinery already exists; mistralrs uses it). Big:
+  touches `Generate`, every model's `forward`, all KV/conv/recurrent caches, and the
+  admission wiring. Throughput win scales with B until memory/Metal-bandwidth bound;
+  single-stream latency unchanged. Only pull when concurrent multi-session serving is a real
+  requirement (today's queue+SJF+429 is a reasonable single-GPU answer). Hybrid (Qwen3.6)
+  is the hard part — the gated_delta kernel + conv cache must batch correctly (byte-exact
+  per sequence vs the B=1 path).
+
 - [x] mlx-native-chunked-prefill - DONE. `Model::prefill` chunks the prompt
   (`ROZUM_MLX_PREFILL_CHUNK`, default 2048), bounding the full-attention
   `[chunk, ctx]` causal-mask + SDPA peak instead of `[T, T]`; caches advance and
