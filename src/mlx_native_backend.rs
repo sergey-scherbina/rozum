@@ -1551,9 +1551,16 @@ mod tests {
             am(&b)
         );
         assert_eq!(am(&a), am(&b), "chunked prefill changed the sampled token");
+        // The pre-allocated KV cache (`ConcatKeyValueCache`, mlx_lm-style) returns a
+        // strided `[:offset]` view of a step-padded buffer. When the single-pass length
+        // isn't step-aligned its buffer is padded (cap>offset) while the chunked path's
+        // step-aligned chunks aren't — so SDPA runs over a strided vs contiguous key and
+        // rounds ~1 bf16 ulp differently (here |Δ|≈0.09 on logits ~22). Argmax is the hard
+        // gate; the magnitude bound just guards against gross divergence. (The old concat
+        // cache was bit-exact here, hence the previous 1e-2.)
         assert!(
-            max_abs < 1e-2,
-            "chunked prefill logits diverged: max|Δ|={max_abs}"
+            max_abs < 0.2,
+            "chunked prefill logits diverged beyond bf16 noise: max|Δ|={max_abs}"
         );
     }
 
