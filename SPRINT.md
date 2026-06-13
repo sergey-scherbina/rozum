@@ -93,7 +93,7 @@ drop-in for Claude Code and Codex against the in-process MLX/GGUF engine.
   The gateway's own banner targets CC (`ANTHROPIC_BASE_URL`) + Codex (`OPENAI_BASE_URL`).
   Findings → fixes below. (Still worth a LIVE pass with real CC/Codex for client-specific
   quirks; needs the user to point them at the endpoint.)
-- [~] gateway-cc-codex-fixes — 1 fixed, 1 not-a-bug, 1 needs a policy call:
+- [x] gateway-cc-codex-fixes — DONE (2 fixed, 1 not-a-bug):
   - [x] **stream-default** — FIXED (master `b4c6501`). `req.stream.unwrap_or(true)` → `false`
     in both handlers + debug logs; an absent `stream` now returns non-streaming JSON (spec).
     Verified live (omit `stream` → `chat.completion` JSON); gateway lib tests 14/0. `rozum
@@ -102,16 +102,14 @@ drop-in for Claude Code and Codex against the in-process MLX/GGUF engine.
     (`claude_model_alias`): `rozum launch` exports it as `ANTHROPIC_MODEL` so CC pre-selects
     the local model instead of the default OAuth one. Request `model` is ignored (one loaded
     model). No change.
-  - [ ] **think-passthrough** — needs a POLICY decision (not a clear bug; the gateway faithfully
-    streams what the model emits). Qwen3 `<think>…</think>` (even EMPTY with `/no_think`:
-    `<think>\n\n</think>`) lands in `content`/text, so CC/Codex see the wrapper. Each fix has
-    a real tradeoff: (a) **strip** `<think>…</think>` → clean answers but reasoning hidden +
-    no streamed feedback during thinking; (b) **route to OpenAI `reasoning_content`** (safe,
-    standard, unknown-to-client → ignored) — but Anthropic `thinking` blocks need signatures
-    so routing there risks CC rejecting them; (c) **disable thinking** via the chat template
-    (`enable_thinking=false`) → cleanest output but loses reasoning quality on hard tasks.
-    Recommend: at least strip EMPTY think blocks always (pure noise), and pick (a)/(b)/(c)
-    for non-empty after a LIVE CC/Codex pass confirms rendering. Awaiting the policy choice.
+  - [x] **think-passthrough** — FIXED via option (c), made a launch flag (user's call:
+    "disable by default"). The native backend renders the chat template with
+    `enable_thinking=false` by DEFAULT, so a reasoning model (Qwen3) prefills a closed
+    `<think></think>` in the PROMPT and the generated OUTPUT is clean (no think tags at all,
+    not even the empty `/no_think` wrapper). A new `rozum gateway --enable-thinking` flag (or
+    `ROZUM_ENABLE_THINKING`) turns reasoning back on. Threaded `enable_thinking: Option<bool>`
+    through `ApplyChatTemplateArgs`→minijinja `context!` (fork `4978c2d4`). Verified e2e:
+    default → no `<think>`; `--enable-thinking` → `<think>`. master `550f970`.
 
 #### P1 (NEXT): meeting-room-reliability — solid "agents + human operator" room
 
