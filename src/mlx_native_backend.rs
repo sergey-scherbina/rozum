@@ -828,6 +828,12 @@ mod inner {
                 content: message_text(m),
             })
             .collect();
+        // Thinking is OFF by default (clean output for CC/Codex); the gateway's
+        // `--enable-thinking` flag (or `ROZUM_ENABLE_THINKING`) turns it back on.
+        // For a reasoning model this passes `enable_thinking=false` to the chat
+        // template, which prefills a closed `<think></think>` so the OUTPUT is clean
+        // (vs `/no_think`, which leaves an empty `<think></think>` in the output).
+        let enable_thinking = std::env::var_os("ROZUM_ENABLE_THINKING").is_some();
         let args = ApplyChatTemplateArgs {
             conversations: vec![Chat::from(convo)],
             tools: tools_json(tools),
@@ -836,6 +842,7 @@ mod inner {
             chat_template_id: None,
             add_generation_prompt: Some(true),
             continue_final_message: None,
+            enable_thinking: Some(enable_thinking),
         };
         let encodings = tokenizer
             .apply_chat_template_and_encode(template.to_string(), args)
