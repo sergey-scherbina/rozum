@@ -111,6 +111,12 @@ enum Command {
         #[arg(long)]
         n_ctx: Option<u32>,
 
+        /// Let reasoning models think (emit `<think>…</think>`). OFF by default:
+        /// the gateway disables thinking so CC/Codex get clean output. Sets
+        /// `ROZUM_ENABLE_THINKING` for the in-process backend.
+        #[arg(long)]
+        enable_thinking: bool,
+
         /// `status` or `stop` the shared gateway; omit to run the daemon.
         #[command(subcommand)]
         action: Option<GatewayAction>,
@@ -353,9 +359,18 @@ async fn main() {
             port,
             model,
             n_ctx,
+            enable_thinking,
             action,
         }) => match action {
             None => {
+                // Reasoning models think by default in their chat template; the
+                // gateway disables it (clean CC/Codex output) unless --enable-thinking
+                // (or ROZUM_ENABLE_THINKING) is set. The native backend reads this env
+                // per request when rendering the prompt.
+                if enable_thinking {
+                    // SAFETY: set before the backend worker thread is spawned.
+                    unsafe { std::env::set_var("ROZUM_ENABLE_THINKING", "1") };
+                }
                 let cfg = load_runtime_config_or_exit();
                 let Some(model) = model.or_else(|| cfg.model.clone()) else {
                     eprintln!(
