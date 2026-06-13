@@ -1119,31 +1119,32 @@ mod tests {
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
     }
 
-    // Prod-path decode t/s: drives the FULL MlxNativeBackend.chat (tokenizer detok
-    // per token + ChatEvent streaming), not the raw model.forward bench — so it
-    // catches per-token overhead the gateway would actually pay. The internal bench
-    // shows ~88 t/s on this model; the floor guards against a gross prod regression.
-    // Run: cargo test --features mlx-native -- --ignored --nocapture mlx_moe_backend_chat_tps
+    // Prod-path perf through the FULL MlxNativeBackend.chat (tokenizer detok +
+    // ChatEvent streaming) — the gateway's real path, not the raw model.forward
+    // bench. Reports TTFT (prefill latency → first streamed token) and steady-state
+    // decode t/s. `prompt_repeat` × ~13 tok sizes the prefill for a realistic TTFT.
     #[cfg(feature = "mlx-native")]
-    #[tokio::test]
-    #[ignore = "perf; requires local mlx-community/Qwen3.6-35B-A3B-4bit + ROZUM_MLX_RETAIN"]
-    async fn mlx_moe_backend_chat_tps() {
+    async fn run_backend_chat_perf(
+        spec: &str,
+        model_id: &str,
+        prompt_repeat: usize,
+        max_tokens: u32,
+    ) -> (f64, f64, u32) {
         use super::MlxNativeBackend;
         use crate::backend::{ChatBackend, ChatEvent, ChatRequest};
         use futures::StreamExt;
         use std::time::Instant;
 
-        let dir = resolve_model_dir("mlx-community:Qwen3.6-35B-A3B-4bit")
-            .expect("Qwen3.6-35B-A3B-4bit not in HF cache");
-        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-35B-A3B-4bit".into())
+        let dir = resolve_model_dir(spec).unwrap_or_else(|| panic!("{spec} not in HF cache"));
+        let backend = MlxNativeBackend::new(dir, model_id.into())
             .await
             .expect("backend load");
-        let mut req = ChatRequest::simple(
-            "Write a detailed, multi-paragraph explanation of how transformer neural networks work.",
-        );
-        req.sampling.max_tokens = Some(160);
-        let mut stream = backend.chat(req).await.expect("chat");
+        let sentence = "Explain in detail how transformer neural networks process a sequence. ";
+        let mut req = ChatRequest::simple(sentence.repeat(prompt_repeat));
+        req.sampling.max_tokens = Some(max_tokens);
 
+        let t0 = Instant::now();
+        let mut stream = backend.chat(req).await.expect("chat");
         let (mut first, mut last, mut out_tokens) = (None::<Instant>, Instant::now(), 0u32);
         while let Some(ev) = stream.next().await {
             match ev.expect("event") {
@@ -1155,6 +1156,7 @@ mod tests {
                 _ => {}
             }
         }
+        let ttft = first.map_or(0.0, |f| (f - t0).as_secs_f64());
         let decode_s = first.map_or(0.0, |f| (last - f).as_secs_f64());
         let tps = if decode_s > 0.0 {
             out_tokens as f64 / decode_s
@@ -1162,15 +1164,43 @@ mod tests {
             0.0
         };
         eprintln!(
-            "BACKEND.CHAT MoE prod path: output_tokens={out_tokens}  decode={decode_s:.2}s  -> {tps:.1} t/s (raw bench ~88)"
+            "BACKEND.CHAT {model_id}: TTFT={ttft:.2}s (~{prompt_repeat} prompt-repeats)  decode={tps:.1} t/s  ({out_tokens} tok)"
         );
-        // ~96 t/s once hybrid pipelining is on; without it (serial eval+item) it's
-        // ~62-72. Floor guards a pipelining regression. (Kill the Bloop/Java daemon
-        // first — memory pressure throttles this.)
+        (ttft, tps, out_tokens)
+    }
+
+    // MoE prod path (Qwen3.6-35B-A3B): ~96 t/s decode with hybrid pipelining.
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "perf; requires local mlx-community/Qwen3.6-35B-A3B-4bit + ROZUM_MLX_RETAIN"]
+    async fn mlx_moe_backend_chat_tps() {
+        let (_ttft, tps, _n) = run_backend_chat_perf(
+            "mlx-community:Qwen3.6-35B-A3B-4bit",
+            "mlx-community/Qwen3.6-35B-A3B-4bit",
+            40,
+            128,
+        )
+        .await;
         assert!(
             tps > 80.0,
-            "prod backend.chat decode too slow: {tps:.1} t/s — hybrid pipelining off? (expect ~96)"
+            "MoE prod decode {tps:.1} t/s — hybrid pipelining off? (expect ~96)"
         );
+    }
+
+    // Dense prod path (Qwen3.6-27B): confirms the dense hybrid model reaches its
+    // engine decode (~19-20 t/s) through the full gateway path (it pipelines too).
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "perf; requires local mlx-community/Qwen3.6-27B-4bit + ROZUM_MLX_RETAIN"]
+    async fn mlx_dense_backend_chat_tps() {
+        let (_ttft, tps, _n) = run_backend_chat_perf(
+            "mlx-community:Qwen3.6-27B-4bit",
+            "mlx-community/Qwen3.6-27B-4bit",
+            40,
+            96,
+        )
+        .await;
+        assert!(tps > 16.0, "dense prod decode {tps:.1} t/s (expect ~19-20)");
     }
 
     // End-to-end Llama through native MLX (auto-downloads the model). Greedy.
