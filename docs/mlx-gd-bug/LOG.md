@@ -252,3 +252,42 @@ binding avoids. NEXT: count Metal dispatches / graph primitives per token in eac
 (`mx.export_to_dot` node count for Python vs an instrumented Rust eval) — does mlx-rs emit
 more / deeper-chained primitives per high-level op? A fix likely needs leaner op emission or
 hand-fused per-layer kernels. Hatches reverted after measuring (re-add to repro).
+
+## ★★★★ 2026-06-13 — ROOT CAUSE of the decode gap FOUND & FIXED (+2.5× MoE decode)
+
+**The decode gap was a bf16→f32 stream leak causing ~1000 spurious casts/token.**
+Tooling: added `mlx_export_to_dot` to mlx-c (+ rust wrapper, + a `ROZUM_DUMP_DOT` bench
+branch) to dump the single-token (T=1) graph; counted primitives vs Python
+(`docs/mlx-gd-bug/py/count_prims.py`, `mx.export_to_dot`):
+- **Rust MoE: 4366 primitives/token vs Python 2610** — and **1269 `AsType` (Rust) vs ~0
+  (Python)**. Tracing the AsType: ~774 fed QuantizedMatmul, ~240 GatherQMM, 130 RMSNorm —
+  all casting the **bf16** quantized scales/biases/norm-weights **up to f32**, because the
+  activation `x` was Float32 (debug: `QSL x=Float32 scales=Bfloat16`).
+- dtype trace through the forward: `h after embed: Bfloat16` → `after GDN layer 0: Float32`.
+  The leak is the GatedDeltaNet q/k delta-scaling (`qwen3_5.rs`):
+  `rms_norm_weightless(q).multiply(Array::from_f32(inv_scale*inv_scale))` — a STRONG f32
+  0-dim array promotes bf16→f32 (MLX type promotion). Python (`qwen3_5.py:180`) does
+  `(inv_scale**2) * rms_norm(...)` with a **python float**, which keeps bf16.
+- **FIX:** scale by a scalar cast to q/k's dtype (`Array::from_f32(s).as_dtype(qn.dtype())`).
+  One line each for q and k. Byte-exact: greedy IDs unchanged, all chat tests pass
+  (hybrid 27B, MoE 35B, dense-attn 30B).
+
+**Results (clean, Bloop killed, retain on):**
+| metric | before | after | Python |
+|---|---|---|---|
+| MoE decode (n=512) | 33 t/s | **~83 t/s (2.5×)** | 97 manual / 110 gen |
+| MoE prefill (n=512) | 943 | **~1200 tok/s** | 1180 |
+| dense 27B decode | 16.2 | **~19 t/s** | 23 |
+| Rust prims/token (MoE) | 4366 | 3307 | 2610 |
+| AsType/token (MoE) | 1269 | 210 | ~0 |
+
+Shared GatedDeltaNet ⇒ both hybrid arches benefit. This subsumes the earlier "2.4×
+super-additive eval" puzzle: the f32 stream's extra casts grew with graph size, so half-
+graphs (skip-MoE / skip-attn) stayed mostly bf16 and looked cheap. Fork `8739cf72`
+(mlx-c `d71809d`), rozum `5dc7bd0`, reproducible git-rev build verified.
+
+**Remaining tail (smaller):** Rust 3307 vs Python 2610 prims. 210 AsType left: 60
+`Full→AsType→RMSNorm` (our `rms_norm_weightless` makes a per-call f32 ones weight then
+casts — Python passes weight=None; mlx-c allows null weight, mlx-rs wrapper doesn't yet),
+30 from `compute_g` Exp/LogAddExp (Python fuses via `mx.compile`; mlx-rs compile was
+net-negative). MoE ~83 vs Python 97/110; dense ~19 vs 23. Diminishing returns.

@@ -119,19 +119,22 @@ math. So the fix is leaner/fewer GPU dispatches, not a faster binding.
   Python's 1180; decode unchanged (no sort at T=1); byte-exact (decode IDs identical), both
   MoE chat tests pass. Fork `sergey-scherbina/mlx-rs` @ rozum-hybrid-decode `4ec9bc86`;
   rozum (feature/mlx-hybrid-decode) Cargo pinned to it, reproducible git-rev build verified.
-- [~] **moe-decode-dispatch** - the open 3.3× decode. LOCALIZED (not yet fixed):
-  instrumented `build` vs `eval` and added per-block skip hatches (since reverted). At
-  n=512 decode, eval/token = **28.6 ms FULL**, but **6.5 ms backbone-only** (skip MoE) +
-  **5.5 ms MoE-only** (skip attn) = 12 ms → the full graph is **2.4× super-additive**.
-  RULED OUT as the cause: the retain patch (eval 28.6 ms with `ROZUM_MLX_RETAIN` on OR off),
-  command-buffer commit frequency (`MLX_MAX_OPS_PER_BUFFER` 10/100/10000 all 28.6 ms),
-  pipelining, KV-concat, version. Python's full forward (~10 ms) ≈ the additive 12 ms, so
-  Python does NOT have the blowup → it's a GPU-dispatch/scheduling effect on OUR deep
-  T=1 graph (mlx-rs-built) that Python's binding avoids. NEXT: count Metal dispatches /
-  primitives per token in each runtime (Python `mx.export_to_dot` node count vs an
-  instrumented Rust eval) to see if mlx-rs emits more / deeper-chained primitives; a fix
-  likely means leaner op emission or hand-fusing the hot per-layer ops. Big, uncertain.
-- [ ] dense-decode-dispatch - the 1.4×; likely the same super-additive root, smaller payoff.
+- [x] **moe-decode-dispatch** - ROOT-CAUSED & FIXED (**MoE decode 33 → ~83 t/s, 2.5×**).
+  Added `mlx_export_to_dot` (mlx-c) + rust wrapper + a `ROZUM_DUMP_DOT` bench branch, and
+  counted graph primitives per T=1 token: **Rust 4366 vs Python 2610**, with **1269 `AsType`
+  (dtype casts) in Rust vs ~0 in Python**. Traced them: ~1000 fed QuantizedMatmul/GatherQMM,
+  casting the bf16 quantized scales/biases up — because **the activation stream was f32**.
+  Root cause: `GatedDeltaNet` (qwen3_5.rs) scaled q/k by `Array::from_f32(inv_scale)` — a
+  STRONG f32 0-dim array → promoted the whole stream bf16→f32 at the 1st GDN layer (Python
+  multiplies by a python float, stays bf16). Fix: scale by a scalar cast to q/k's dtype.
+  Byte-exact (greedy IDs identical, all chat tests pass). Prims 4366→3307 (AsType 1269→210),
+  decode 33→83, **prefill 943→~1200 (= Python 1180)**. Shared GDN → dense 27B too. Fork
+  `8739cf72` (mlx-c `d71809d`), rozum `5dc7bd0`, reproducible git-rev build verified.
+  The earlier "2.4× super-additive eval" was this: the f32 stream's extra casts scaled with
+  graph size. Remaining: Rust 3307 vs Python 2610 prims (210 AsType + unfused compute_g/gate
+  — Python uses `mx.compile`'d ops we can't fuse cheaply); MoE ~83 vs Python 97/110.
+- [~] dense-decode-dispatch - the 1.4× → now ~1.2× (16.2 → ~19 t/s) from the SAME shared GDN
+  fix. Remaining 19 vs 23 is the leaner-graph / fused-op tail (smaller payoff than MoE was).
 
 Diagnostics on branch `feature/mlx-hybrid-decode`: Rust benches `mlx_qwen35_prefill_bench`
 (dense) / `mlx_qwen35_moe_decode_bench` (MoE; `ROZUM_CTXSWEEP=1` env) — run with
