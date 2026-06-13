@@ -1,5 +1,21 @@
 # Changelog
 
+## Gateway — CC/Codex compatibility fixes (audit)
+Completed: 2026-06-13
+A synthetic audit of the gateway against the OpenAI (Codex) and Anthropic (Claude Code)
+dialects found the core protocol solid (streaming SSE, non-stream JSON, tool-use, stop
+reasons, 422 validation). Two fixes:
+- **stream default**: an absent `stream` field defaulted to SSE; the OpenAI/Anthropic
+  specs default to non-streaming JSON. A client that omits `stream` now gets JSON, not an
+  unparseable SSE stream. (Streaming clients — CC, Codex — always send `stream:true`.)
+- **`--enable-thinking` flag (reasoning OFF by default)**: reasoning models (Qwen3) emit
+  `<think>…</think>` — even an empty `<think></think>` — which leaked into CC/Codex content.
+  The gateway now renders the chat template with `enable_thinking=false` by default (the
+  prompt prefills a closed `<think></think>`, so the generated output is clean); pass
+  `rozum gateway --enable-thinking` (or set `ROZUM_ENABLE_THINKING`) to turn reasoning back on.
+- (`/v1/models` id `claude-rozum-<spec>` is intentional — `rozum launch` exports it as
+  `ANTHROPIC_MODEL` so CC pre-selects the local model.)
+
 ## Gateway — hybrid decode now pipelines (prod path 62 → ~96 t/s)
 Completed: 2026-06-13
 The in-process gateway path (`MlxNativeBackend.chat`) decoded the Qwen3.6 hybrid models
