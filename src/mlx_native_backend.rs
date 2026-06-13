@@ -1382,6 +1382,25 @@ mod tests {
                 .index((.., NewAxis))
         };
 
+        // Dump the single-decode-step (T=1) op graph to DOT, so its primitive count
+        // can be compared to Python mlx_lm (`docs/mlx-gd-bug/py/count_prims.py`):
+        // does mlx-rs emit more / less-fused primitives per token?
+        if let Some(path) = std::env::var_os("ROZUM_DUMP_DOT") {
+            let ids = synth(8);
+            let prompt = Array::from(&ids[..]).index(NewAxis);
+            let mut cache = model.init_cache();
+            let y = model.forward(&prompt, &mut cache).expect("prefill");
+            // Make prefill + all cache state concrete so the next step's graph is T=1.
+            eval([&y]).unwrap();
+            // One decode step, lazy; export its graph (matches the Python script).
+            let inp = argmax_next(&y.index((.., -1, ..)));
+            let y2 = model.forward(&inp, &mut cache).expect("decode").index((.., -1, ..));
+            let p = path.to_string_lossy().to_string();
+            mlx_rs::transforms::export_to_dot(&p, [&y2]).expect("export_to_dot");
+            eprintln!("DUMPED decode-step graph to {p}");
+            return;
+        }
+
         // Context-growth probe: small prefill, then decode many steps, timing
         // per-window. If KV-concat (O(context) copy/token) is the cost, t/s drops
         // as context grows; a pre-allocated cache would stay flat.
