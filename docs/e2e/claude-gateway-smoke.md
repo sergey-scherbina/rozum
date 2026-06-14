@@ -39,9 +39,17 @@ Each task runs in a fresh `mktemp -d` workdir; Claude is told to build there.
   src/main.rs, edition 2021, no deps) that reverses its first CLI argument; run
   `cargo run -- hello` and confirm it prints `olleh`."*
   - **Checks:** `Cargo.toml` exists · `src/*.rs` exists · `cargo run -- hello` ⇒ `olleh`.
-- **test** (a step up — adds a unit test + `cargo test`): a `pub fn reverse(&str)->String`
-  in `src/lib.rs`, a `#[test]` for `reverse("hello") == "olleh"`, and `src/main.rs` using it.
-  - **Checks:** the above + `cargo test` is green.
+- **test** (a step up — adds a unit test + `cargo test`): a **binary** `reverse-cli` with
+  `fn reverse(&str)->String` and a `#[cfg(test)]` unit test for `reverse("hello") == "olleh"`,
+  both in `src/main.rs`; `main` reverses its first CLI arg.
+  - **Checks:** the above + `cargo test` is green + `cargo run -- hello` ⇒ `olleh`.
+
+> **Why a binary (not a lib) for the `test` task.** An earlier `test` prompt asked for a
+> `src/lib.rs` + `#[test]`. The model would `cargo init` a default crate (whose template test
+> is `assert_eq!(add(2,2), 4)` — always green) and never implement `reverse`, yet the run
+> reported **"cargo test green"** — a *false success*. Forcing a binary + an **un-fakeable
+> behavior check** (`cargo run -- hello` must print `olleh`) closes that hole: a scaffold-only
+> run fails the behavior check as it should.
 
 The runner verifies the **artifacts on disk**, not Claude's prose — so the test is robust to
 Claude's exact wording / the model's nondeterminism. The TASK + success criteria are fixed;
@@ -82,6 +90,32 @@ throwaway temp dir). Thinking is **off by default** in the gateway (clean output
   to `--max-turns 20`; keep it.
 - **Speed:** ~6 min wall for a trivial task is dominated by the 12 agentic round-trips (each
   re-prefills the growing context), not raw decode (~96 t/s). Fewer-turn models finish faster.
+
+## Codex (OpenAI dialect) — currently BLOCKED ⛔
+
+`scripts/e2e_codex_gateway.sh [build|test]` is the Codex parallel of the Claude runner
+(drives `codex exec` headless, same tasks, same independent disk verification). **But it
+cannot run today:**
+
+- **Codex CLI ≥ 0.137 requires the OpenAI _Responses_ API** (`POST /v1/responses`) and
+  **dropped `wire_api="chat"`** (config error: *"`wire_api = "chat"` is no longer supported …
+  set `wire_api = "responses"`"*).
+- The rozum gateway only implements `/v1/chat/completions` (OpenAI) and `/v1/messages`
+  (Anthropic). `POST /v1/responses` → **HTTP 404**, so Codex retries and dies:
+  *"unexpected status 404 Not Found … /v1/responses"*.
+- Also note: Codex **ignores `OPENAI_BASE_URL`** — it needs an explicit model provider
+  (`-c model_provider=rozum -c 'model_providers.rozum.base_url=…' -c '…wire_api="responses"'`),
+  which the runner sets. `rozum launch`'s `OPENAI_BASE_URL`/`OPENAI_API_KEY` are therefore
+  **not enough** for current Codex.
+
+The runner preflights `/v1/responses` and exits 3 with a clear message if it's 404.
+
+**Improvement to unblock Codex → BACKLOG `gateway-openai-responses-api`:** add a
+`POST /v1/responses` endpoint that translates the Responses request (`input` items, `tools`,
+`instructions`, `stream`) to the internal `ChatBackend` and streams back the Responses event
+protocol (`response.created` / `response.output_text.delta` /
+`response.function_call_arguments.delta` / `response.completed`, …). This is the single
+biggest thing missing for "Rozum as a local provider for **Codex**".
 
 ## Ideas for harder scenarios (later)
 
