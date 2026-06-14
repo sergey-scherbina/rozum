@@ -97,8 +97,19 @@ through `concurrency::admit_wrap`, so they are not relisted.)
     `"Red"`, distinct — `mlx_hybrid_batched_scheduler_two_concurrent`), and **2.30× throughput** at
     B=2 (`mlx_hybrid_batched_decode_throughput`, test profile — higher than dense's 1.98× because
     hybrid decode has more per-token op launches to amortize). Fork rev `9a3b3949`.
-  - **Follow-up (not blocking):** continuous batching — admit a queued job into a free row mid-decode
-    instead of waiting for the whole batch to drain (better utilization under uneven response lengths).
+  - **Continuous batching SHIPPED 2026-06-14** (both dense + hybrid). `run_batch`/`run_batch_hybrid`
+    now take the job receiver and, while decoding, ADMIT queued greedy jobs into freed/spare slots
+    (up to `cap`) instead of waiting for the whole batch to drain — so a finished short row's slot is
+    refilled mid-decode rather than idling. The decode loop tracks the KV `width` + per-row pad
+    explicitly (invariant `pad_i = width − len_i`, both grow by 1/step); admitting a row prefills it
+    (B=1), grows the width + left-pads existing rows if the new prompt is longer, then stacks it on
+    the batch axis (dense KV / heterogeneous `LayerCache` Full+Linear). Byte-exact by the same
+    argument as the initial ragged assembly (front-pad masked, rope offset invariant). Non-greedy
+    jobs pulled from the queue are returned to the worker to run serially; a lone greedy job still
+    goes serial (keeps the prefix-KV LRU). Validated: `mlx_continuous_admit_three` — 3 concurrent
+    requests, `ROZUM_BATCH=2`, the 3rd admitted into a freed slot mid-decode (one `run_batch` call,
+    `BATCH_ADMIT_COUNT`+1), each correct + distinct (`Paris`/`Tokyo`/`Berlin`); all dense + hybrid
+    byte-exact and scheduler tests still green.
 
   **RAGGED is tractable — confirmed (`mlx_rope_per_row_probe`):** `mlx_rs::fast::rope_dynamic`
   accepts a **per-row `[B]` offset array** and ropes each row at its own position (byte-exact vs

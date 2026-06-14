@@ -1,5 +1,24 @@
 # Changelog
 
+## mlx-native — continuous batching (admit queued requests into a live batch mid-decode)
+Completed: 2026-06-14
+Batched decode no longer waits for the whole batch to drain before serving the next request. While
+a batch decodes, `run_batch`/`run_batch_hybrid` now ADMIT queued greedy jobs from the worker channel
+into freed or spare slots (up to `ROZUM_BATCH`): a short request that finishes frees its slot, and a
+waiting request is prefilled and stacked into the batch on the next step instead of idling — better
+GPU utilization under uneven response lengths and bursty arrivals. The decode loop tracks the KV
+`width` and each row's pad explicitly (invariant `pad_i = width − len_i`); admitting a row grows the
+shared width (left-padding existing rows) only if the new prompt is longer, then concatenates it on
+the batch axis (dense KV or the heterogeneous hybrid `LayerCache`). It's byte-exact by the same
+argument as the initial ragged assembly — the new row's left-pad is masked and its RoPE offset is
+its true position — so an admitted row decodes identically to running alone. Non-greedy jobs pulled
+from the queue are run serially afterward; a lone greedy request still goes serial (keeping the
+prefix-KV LRU). Validated end-to-end (`mlx_continuous_admit_three`): three concurrent requests with
+`ROZUM_BATCH=2` — the first two batch, the third is admitted into a freed slot mid-decode (ONE
+`run_batch` call, `BATCH_ADMIT_COUNT` confirms the admission), and each returns its own correct,
+uncontaminated answer (`Paris` / `Tokyo` / `Berlin`). All dense + hybrid byte-exact and scheduler
+tests remain green.
+
 ## mlx-native — batched/parallel decode for hybrid Qwen3.6 (the primary coding model)
 Completed: 2026-06-14
 Extends batched decode to the hybrid Qwen3.6 arches (dense `Qwen35` + MoE `Qwen35Moe`) — the models
