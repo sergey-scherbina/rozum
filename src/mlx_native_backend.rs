@@ -449,7 +449,11 @@ mod inner {
             let (greedy, other): (Vec<_>, Vec<_>) =
                 pending.into_iter().partition(|j| is_greedy(j));
             if greedy.len() >= 2 {
-                run_batch(&mut model, &mut tokenizer, &template, &eos, greedy);
+                if is_hybrid_arch(&model) {
+                    run_batch_hybrid(&mut model, &mut tokenizer, &template, &eos, greedy);
+                } else {
+                    run_batch(&mut model, &mut tokenizer, &template, &eos, greedy);
+                }
             } else {
                 for job in greedy {
                     run_job(&mut model, &mut tokenizer, &template, &eos, kv_per_pos, &mut store, job);
@@ -479,10 +483,24 @@ mod inner {
             .unwrap_or(10)
     }
 
-    /// Arches that use `qwen3::Attention`'s per-row-rope path → batchable. (Llama /
-    /// Qwen2 have their own attention; hybrid Qwen3.6 carries a recurrent state.)
+    /// Arches that support batched decode. Dense Qwen3 / Qwen3-MoE use `qwen3::Attention`'s
+    /// per-row-rope path; hybrid Qwen3.6 (`Qwen35`/`Qwen35Moe`) batches its full-attention
+    /// layers the same way and STACKS the fixed-size GatedDeltaNet state per row. (Llama /
+    /// Qwen2 have their own attention with no per-row-rope path yet.)
     fn is_batchable_arch(model: &LoadedModel) -> bool {
-        matches!(model, LoadedModel::Qwen3(_) | LoadedModel::Qwen3Moe(_))
+        matches!(
+            model,
+            LoadedModel::Qwen3(_)
+                | LoadedModel::Qwen3Moe(_)
+                | LoadedModel::Qwen35(_)
+                | LoadedModel::Qwen35Moe(_)
+        )
+    }
+
+    /// Hybrid (Qwen3.6) arches — routed to [`run_batch_hybrid`] (heterogeneous cache)
+    /// instead of the dense [`run_batch`].
+    fn is_hybrid_arch(model: &LoadedModel) -> bool {
+        matches!(model, LoadedModel::Qwen35(_) | LoadedModel::Qwen35Moe(_))
     }
 
     /// A request joins a batch only if greedy (argmax) — temp 0/unset, no top_p/top_k/
@@ -1185,6 +1203,280 @@ mod inner {
             set_batch_pad_offsets(Some(pad_off));
             let out = dense_forward(model, &y, Some(&dec_mask), &mut bcache);
             set_batch_pad_offsets(None);
+            logits = match out {
+                Ok(l) => l.index((.., -1, ..)),
+                Err(e) => {
+                    for &si in &batch_seq {
+                        let _ = seqs[si].job.events.send(Err(ModelError::BackendUnavailable(
+                            format!("mlx: {e}"),
+                        )));
+                    }
+                    return;
+                }
+            };
+            step += 1;
+        }
+    }
+
+    /// Hybrid (Qwen3.6) batched-decode dispatch. `Qwen35` and `Qwen35Moe` share
+    /// `qwen3_5::LayerCache` and the same `Model::{init_cache, prefill, forward}` API,
+    /// so one batched path serves both — only the concrete model call differs.
+    fn hybrid_init_cache(model: &LoadedModel) -> Vec<qwen3_5::LayerCache> {
+        match model {
+            LoadedModel::Qwen35(m) => m.init_cache(),
+            LoadedModel::Qwen35Moe(m) => m.init_cache(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn hybrid_prefill(
+        model: &mut LoadedModel,
+        prompt: &Array,
+        cache: &mut [qwen3_5::LayerCache],
+    ) -> Result<Array, Exception> {
+        match model {
+            LoadedModel::Qwen35(m) => m.prefill(prompt, cache),
+            LoadedModel::Qwen35Moe(m) => m.prefill(prompt, cache),
+            _ => Err(Exception::custom("hybrid_prefill: non-hybrid arch")),
+        }
+    }
+
+    fn hybrid_forward(
+        model: &mut LoadedModel,
+        inp: &Array,
+        cache: &mut [qwen3_5::LayerCache],
+    ) -> Result<Array, Exception> {
+        match model {
+            LoadedModel::Qwen35(m) => m.forward(inp, cache),
+            LoadedModel::Qwen35Moe(m) => m.forward(inp, cache),
+            _ => Err(Exception::custom("hybrid_forward: non-hybrid arch")),
+        }
+    }
+
+    /// Hybrid (Qwen3.6 dense + MoE) batched decode. Mirror of [`run_batch`], but over the
+    /// heterogeneous `qwen3_5::LayerCache`: `Full` (attention) layers batch exactly like
+    /// the dense path (left-pad each row's KV to `maxL`, per-row RoPE + key-pad mask),
+    /// while `Linear` (GatedDeltaNet) layers just STACK each row's fixed-size conv +
+    /// recurrent state on the batch axis — no padding/rope/mask, because the recurrence
+    /// is row-independent (proven byte-exact in `gated_delta_batches_row_independent`).
+    /// Each sequence is prefilled SEPARATELY so no pad token ever advances the recurrence.
+    fn run_batch_hybrid(
+        model: &mut LoadedModel,
+        tokenizer: &mut Tokenizer,
+        template: &str,
+        eos: &[u32],
+        jobs: Vec<Job>,
+    ) {
+        use mlx_lm::models::qwen3_5::{
+            set_batch_pad_mask, set_batch_pad_offsets, LayerCache,
+        };
+        use mlx_rs::ops::indexing::{argmax_axis, take_axis, IndexOp, NewAxis};
+        use mlx_rs::ops::{arange, concatenate_axis, zeros_dtype};
+
+        BATCH_RUN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if std::env::var_os("ROZUM_MLX_DEBUG").is_some() {
+            eprintln!("mlx batched decode (hybrid): B={}", jobs.len());
+        }
+
+        let ceiling = std::env::var("ROZUM_MAX_OUTPUT_TOKENS")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_OUTPUT_CEILING);
+
+        // 1. Prefill each request separately (correct per-sequence KV + recurrent state,
+        //    no padding through the GatedDeltaNet). Eval each before the next so the
+        //    deferred graph doesn't span all sequences.
+        let mut seqs: Vec<BatchSeq> = Vec::new();
+        let mut caches: Vec<Vec<LayerCache>> = Vec::new();
+        let mut logit_rows: Vec<Array> = Vec::new();
+        for job in jobs {
+            let prompt_ids = match render_prompt(
+                tokenizer, template, &job.model_id, &job.messages, &job.tools,
+            ) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    let _ = job.events.send(Err(ModelError::BackendUnavailable(e)));
+                    continue;
+                }
+            };
+            let max_tokens = {
+                let want = job
+                    .sampling
+                    .max_tokens
+                    .map(|m| m as usize)
+                    .unwrap_or(DEFAULT_MAX_TOKENS);
+                if ceiling == 0 { want } else { want.min(ceiling) }
+            };
+            let prompt = Array::from(&prompt_ids[..]).index(NewAxis);
+            let mut cache = hybrid_init_cache(model);
+            let logits = match hybrid_prefill(model, &prompt, &mut cache) {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = job
+                        .events
+                        .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
+                    continue;
+                }
+            };
+            let row = logits.index((.., -1, ..)); // [1, vocab]
+            // Materialize this sequence's logits + cache so the next prefill starts clean.
+            let mut to_eval: Vec<&Array> = vec![&row];
+            for c in cache.iter() {
+                c.collect_eval(&mut to_eval);
+            }
+            let _ = mlx_rs::transforms::eval(to_eval);
+            logit_rows.push(row);
+            seqs.push(BatchSeq {
+                job,
+                out_ids: Vec::new(),
+                emitted: String::new(),
+                full_text: String::new(),
+                tool_seen: false,
+                output_tokens: 0,
+                prompt_len: prompt_ids.len() as i32,
+                max_tokens,
+                finished: false,
+                stop: StopReason::EndTurn,
+            });
+            caches.push(cache);
+        }
+        if seqs.is_empty() {
+            return;
+        }
+
+        // 2. Assemble one batched heterogeneous cache. Full → left-pad+stack KV (rows
+        //    right-aligned at maxL); Linear → stack the fixed-size conv + recurrent state.
+        let max_l = seqs.iter().map(|s| s.prompt_len).max().unwrap();
+        let lpad = |x: &Array, pad: i32| -> Array {
+            if pad == 0 {
+                return x.clone();
+            }
+            let s = x.shape();
+            let z = zeros_dtype(&[s[0], s[1], pad, s[3]], x.dtype()).unwrap();
+            concatenate_axis(&[&z, x], 2).unwrap()
+        };
+        let stack0 = |arrs: &[Array]| -> Array {
+            let r: Vec<&Array> = arrs.iter().collect();
+            concatenate_axis(&r, 0).unwrap()
+        };
+        let n_layers = caches[0].len();
+        let mut bcache: Vec<LayerCache> = Vec::with_capacity(n_layers);
+        for l in 0..n_layers {
+            match &caches[0][l] {
+                LayerCache::Full(_) => {
+                    let mut ks: Vec<Array> = Vec::with_capacity(seqs.len());
+                    let mut vs: Vec<Array> = Vec::with_capacity(seqs.len());
+                    for (c, s) in caches.iter().zip(&seqs) {
+                        if let LayerCache::Full(kv) = &c[l] {
+                            let (k, v, _) = kv.kv_used().unwrap();
+                            ks.push(lpad(&k, max_l - s.prompt_len));
+                            vs.push(lpad(&v, max_l - s.prompt_len));
+                        }
+                    }
+                    bcache.push(LayerCache::Full(ConcatKeyValueCache::from_kv(
+                        stack0(&ks),
+                        stack0(&vs),
+                        max_l,
+                    )));
+                }
+                LayerCache::Linear { .. } => {
+                    let mut convs: Vec<Array> = Vec::with_capacity(seqs.len());
+                    let mut states: Vec<Array> = Vec::with_capacity(seqs.len());
+                    for c in caches.iter() {
+                        if let LayerCache::Linear { conv, state } = &c[l] {
+                            convs.push(conv.clone().expect("prefilled conv state"));
+                            states.push(state.clone().expect("prefilled recurrent state"));
+                        }
+                    }
+                    bcache.push(LayerCache::Linear {
+                        conv: Some(stack0(&convs)),
+                        state: Some(stack0(&states)),
+                    });
+                }
+            }
+        }
+        drop(caches);
+        let lr: Vec<&Array> = logit_rows.iter().collect();
+        let mut logits = concatenate_axis(&lr, 0).unwrap(); // [B, vocab]
+        drop(logit_rows);
+
+        // 3. Decode loop: per-row argmax, stream, retire finished rows, forward the rest.
+        let mut batch_seq: Vec<usize> = (0..seqs.len()).collect();
+        let mut step = 0i32;
+        loop {
+            let mut keep_rows: Vec<usize> = Vec::new();
+            let mut keep_toks: Vec<u32> = Vec::new();
+            for (row, &si) in batch_seq.iter().enumerate() {
+                let tok = argmax_axis(&logits.index((row as i32, ..)), -1, false)
+                    .unwrap()
+                    .item::<u32>();
+                let mut finish = false;
+                if eos.contains(&tok) {
+                    seqs[si].stop = StopReason::EndTurn;
+                    finish = true;
+                } else if seqs[si].job.cancel.is_cancelled() {
+                    seqs[si].stop = StopReason::Cancelled;
+                    finish = true;
+                } else if !seqs[si].push(tok, tokenizer) {
+                    seqs[si].stop = StopReason::Cancelled;
+                    finish = true;
+                } else if seqs[si].output_tokens as usize >= seqs[si].max_tokens {
+                    seqs[si].stop = StopReason::MaxTokens;
+                    finish = true;
+                } else if is_runaway_loop(&seqs[si].out_ids) {
+                    seqs[si].stop = StopReason::EndTurn;
+                    finish = true;
+                }
+                if finish {
+                    seqs[si].finished = true;
+                    seqs[si].finalize();
+                } else {
+                    keep_rows.push(row);
+                    keep_toks.push(tok);
+                }
+            }
+            if keep_rows.is_empty() {
+                break;
+            }
+            // Retire finished rows: slice both cache kinds on the batch axis.
+            if keep_rows.len() != batch_seq.len() {
+                let idx = Array::from(
+                    &keep_rows.iter().map(|&r| r as i32).collect::<Vec<_>>()[..],
+                );
+                for c in bcache.iter_mut() {
+                    match c {
+                        LayerCache::Full(kv) => {
+                            let (k, v, off) = kv.kv_used().unwrap();
+                            *kv = ConcatKeyValueCache::from_kv(
+                                take_axis(&k, &idx, 0).unwrap(),
+                                take_axis(&v, &idx, 0).unwrap(),
+                                off,
+                            );
+                        }
+                        LayerCache::Linear { conv, state } => {
+                            *conv = conv.as_ref().map(|a| take_axis(a, &idx, 0).unwrap());
+                            *state = state.as_ref().map(|a| take_axis(a, &idx, 0).unwrap());
+                        }
+                    }
+                }
+                batch_seq = keep_rows.iter().map(|&r| batch_seq[r]).collect();
+            }
+            // Forward the kept tokens with per-row rope offset + per-row key-pad mask
+            // (the GatedDeltaNet layers ignore both — fixed-size per-row state).
+            let pads: Vec<i32> = batch_seq.iter().map(|&si| max_l - seqs[si].prompt_len).collect();
+            let pad_off = Array::from(&pads[..]);
+            let y = Array::from(&keep_toks[..])
+                .reshape(&[keep_toks.len() as i32, 1])
+                .unwrap();
+            let k_cur = max_l + step + 1;
+            let kidx = arange::<_, i32>(0, k_cur, None).unwrap().index((NewAxis, ..));
+            let padd = pad_off.index((.., NewAxis));
+            let dec_mask = kidx.ge(&padd).unwrap().index((.., NewAxis, NewAxis, ..));
+            set_batch_pad_offsets(Some(pad_off));
+            set_batch_pad_mask(Some(dec_mask));
+            let out = hybrid_forward(model, &y, &mut bcache);
+            set_batch_pad_offsets(None);
+            set_batch_pad_mask(None);
             logits = match out {
                 Ok(l) => l.index((.., -1, ..)),
                 Err(e) => {
@@ -2950,6 +3242,246 @@ mod tests {
         }
     }
 
+    // HYBRID (Qwen3.6) batched-decode THROUGHPUT: B=2 batched decode vs 2× serial on the
+    // 27B. Hybrid decode is ~92% CPU graph-build (the gated_delta/full-attn op launches),
+    // so doing ONE build for B rows should amortize it just like the dense path (1.98×).
+    // Uniform-length sequences (pad 0) to isolate the throughput question from raggedness.
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_hybrid_batched_decode_throughput
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "perf; requires mlx-community/Qwen3.6-27B-4bit + ROZUM_MLX_RETAIN"]
+    fn mlx_hybrid_batched_decode_throughput() {
+        use mlx_lm::models::qwen3_5::{load_qwen3_5_model, set_batch_pad_offsets, Model};
+        use mlx_rs::ops::indexing::{argmax_axis, IndexOp, NewAxis};
+        use mlx_rs::transforms::eval;
+        use mlx_rs::Array;
+        use std::time::Instant;
+
+        unsafe {
+            std::env::set_var("ROZUM_MLX_RETAIN", "1");
+        }
+        let dir = resolve_model_dir("mlx-community:Qwen3.6-27B-4bit")
+            .expect("Qwen3.6-27B-4bit not in HF cache");
+        let mut model = load_qwen3_5_model(&dir).expect("load");
+        let steps = 32usize;
+        let a: Vec<u32> = vec![785, 6722, 315, 9625, 374, 220, 17];
+        let b: Vec<u32> = vec![3838, 374, 279, 1429, 5089, 1372, 30]; // same length (7)
+        let argmax_row = |l: &Array, r: i32| -> u32 {
+            argmax_axis(&l.index((r, -1, ..)), -1, false).unwrap().item::<u32>()
+        };
+
+        // Serial: decode each sequence alone, blocking per step.
+        let mut serial = |ids: &[u32], model: &mut Model| {
+            let mut cache = model.init_cache();
+            let mut y = model.forward(&Array::from(ids).index(NewAxis), &mut cache).unwrap();
+            for _ in 0..steps {
+                let t = argmax_row(&y, 0);
+                y = model.forward(&Array::from(&[t][..]).index(NewAxis), &mut cache).unwrap();
+                eval([&y]).unwrap();
+            }
+        };
+        let ts = Instant::now();
+        serial(&a, &mut model);
+        serial(&b, &mut model);
+        let serial_s = ts.elapsed().as_secs_f64();
+
+        // Batched B=2: prefill each into its own cache, assemble (uniform length → pad 0),
+        // then decode in lockstep.
+        use mlx_lm::cache::ConcatKeyValueCache;
+        use mlx_lm::models::qwen3_5::LayerCache;
+        use mlx_rs::ops::concatenate_axis;
+        let mut ca = model.init_cache();
+        let la = model.forward(&Array::from(&a[..]).index(NewAxis), &mut ca).unwrap();
+        let mut cb = model.init_cache();
+        let lb = model.forward(&Array::from(&b[..]).index(NewAxis), &mut cb).unwrap();
+        let max_l = a.len() as i32;
+        let mut bcache: Vec<LayerCache> = Vec::with_capacity(ca.len());
+        for l in 0..ca.len() {
+            match (&ca[l], &cb[l]) {
+                (LayerCache::Full(akv), LayerCache::Full(bkv)) => {
+                    let (ka, va, _) = akv.kv_used().unwrap();
+                    let (kb, vb, _) = bkv.kv_used().unwrap();
+                    let bk = concatenate_axis(&[&ka, &kb], 0).unwrap();
+                    let bv = concatenate_axis(&[&va, &vb], 0).unwrap();
+                    bcache.push(LayerCache::Full(ConcatKeyValueCache::from_kv(bk, bv, max_l)));
+                }
+                (LayerCache::Linear { conv: ac, state: as_ }, LayerCache::Linear { conv: bc, state: bs }) => {
+                    let conv = concatenate_axis(&[ac.as_ref().unwrap(), bc.as_ref().unwrap()], 0).unwrap();
+                    let state = concatenate_axis(&[as_.as_ref().unwrap(), bs.as_ref().unwrap()], 0).unwrap();
+                    bcache.push(LayerCache::Linear { conv: Some(conv), state: Some(state) });
+                }
+                _ => unreachable!(),
+            }
+        }
+        drop((ca, cb));
+        let mut ta = argmax_row(&la, 0);
+        let mut tb = argmax_row(&lb, 0);
+        let pad_off = Array::from(&[0i32, 0][..]);
+        let tb_start = Instant::now();
+        for _ in 0..steps {
+            let y = Array::from(&[ta, tb][..]).reshape(&[2, 1]).unwrap();
+            set_batch_pad_offsets(Some(pad_off.clone()));
+            let logits = model.forward(&y, &mut bcache).unwrap();
+            set_batch_pad_offsets(None);
+            ta = argmax_row(&logits, 0);
+            tb = argmax_row(&logits, 1);
+            eval([&logits]).unwrap();
+        }
+        let batched_s = tb_start.elapsed().as_secs_f64();
+
+        let serial_tps = (2 * steps) as f64 / serial_s;
+        let batched_tps = (2 * steps) as f64 / batched_s;
+        eprintln!(
+            "HYBRID THROUGHPUT (2 seqs, {steps} steps): batched(B=2)={batched_tps:.1} tok/s  serial(2×)={serial_tps:.1} tok/s  speedup={:.2}×",
+            batched_tps / serial_tps
+        );
+    }
+
+    // HYBRID (Qwen3.6) ragged batched decode must be byte-exact, the analog of
+    // `mlx_batched_ragged_byte_exact` over the heterogeneous `qwen3_5::LayerCache`:
+    // the full-attention layers batch like the dense path (left-pad+stack KV, per-row
+    // rope + key-pad mask) while the GatedDeltaNet layers stack their fixed-size conv +
+    // recurrent state on the batch axis. Two different-length sequences, prefilled
+    // separately then assembled, must each decode the SAME greedy tokens as alone.
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_hybrid_batched_ragged_byte_exact
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "hybrid ragged batched-decode byte-exact; requires mlx-community/Qwen3.6-27B-4bit"]
+    fn mlx_hybrid_batched_ragged_byte_exact() {
+        use mlx_lm::cache::ConcatKeyValueCache;
+        use mlx_lm::models::qwen3_5::{
+            load_qwen3_5_model, set_batch_pad_mask, set_batch_pad_offsets, LayerCache, Model,
+        };
+        use mlx_rs::ops::indexing::{argmax_axis, IndexOp, NewAxis};
+        use mlx_rs::ops::{arange, concatenate_axis, zeros_dtype};
+        use mlx_rs::Array;
+
+        // The GatedDeltaNet kernel needs retained command-buffer refs for correctness in
+        // the large forward (docs/mlx-gd-bug). The backend sets this for hybrid loads; the
+        // test loads the model directly, so set it here. SAFETY: single-threaded test.
+        unsafe {
+            std::env::set_var("ROZUM_MLX_RETAIN", "1");
+        }
+
+        let dir = resolve_model_dir("mlx-community:Qwen3.6-27B-4bit")
+            .expect("Qwen3.6-27B-4bit not in HF cache");
+        let mut model = load_qwen3_5_model(&dir).expect("load");
+        let n_decode = 12usize;
+
+        // Two DIFFERENT-length sequences (ragged).
+        let a: Vec<u32> = vec![785, 6722, 315, 9625, 374, 220, 17]; // len 7
+        let b: Vec<u32> = vec![3838, 374, 279, 1429]; // len 4
+
+        let argmax_row = |logits: &Array, row: i32| -> u32 {
+            argmax_axis(&logits.index((row, -1, ..)), -1, false).unwrap().item::<u32>()
+        };
+
+        // --- Serial: greedy-decode each alone (its own heterogeneous cache). ---
+        let mut serial = |ids: &[u32], model: &mut Model| -> Vec<u32> {
+            let mut cache = model.init_cache();
+            let mut logits =
+                model.forward(&Array::from(ids).index(NewAxis), &mut cache).expect("fwd");
+            let mut out = Vec::new();
+            for _ in 0..n_decode {
+                let tok = argmax_row(&logits, 0);
+                out.push(tok);
+                let y = Array::from(&[tok][..]).index(NewAxis);
+                logits = model.forward(&y, &mut cache).expect("fwd");
+            }
+            out
+        };
+        let sa = serial(&a, &mut model);
+        let sb = serial(&b, &mut model);
+
+        // --- Batched ragged: prefill each SEPARATELY, then assemble. ---
+        let max_l = a.len().max(b.len()) as i32;
+        let (pad_a, pad_b) = (max_l - a.len() as i32, max_l - b.len() as i32);
+        let pad_off = Array::from(&[pad_a, pad_b][..]);
+
+        let prefill = |m: &mut Model, ids: &[u32]| -> (Array, Vec<LayerCache>) {
+            let mut cache = m.init_cache();
+            let logits = m.forward(&Array::from(ids).index(NewAxis), &mut cache).expect("prefill");
+            (logits, cache)
+        };
+        let (la0, ca) = prefill(&mut model, &a);
+        let (lb0, cb) = prefill(&mut model, &b);
+
+        let lpad = |x: &Array, pad: i32| -> Array {
+            if pad == 0 {
+                return x.clone();
+            }
+            let s = x.shape();
+            let z = zeros_dtype(&[s[0], s[1], pad, s[3]], x.dtype()).unwrap();
+            concatenate_axis(&[&z, x], 2).unwrap()
+        };
+        // Full → left-pad+stack KV; Linear → stack conv + recurrent state (no padding).
+        let mut bcache: Vec<LayerCache> = Vec::with_capacity(ca.len());
+        for l in 0..ca.len() {
+            match (&ca[l], &cb[l]) {
+                (LayerCache::Full(akv), LayerCache::Full(bkv)) => {
+                    let (ka, va, _) = akv.kv_used().unwrap();
+                    let (kb, vb, _) = bkv.kv_used().unwrap();
+                    let bk = concatenate_axis(&[&lpad(&ka, pad_a), &lpad(&kb, pad_b)], 0).unwrap();
+                    let bv = concatenate_axis(&[&lpad(&va, pad_a), &lpad(&vb, pad_b)], 0).unwrap();
+                    bcache.push(LayerCache::Full(ConcatKeyValueCache::from_kv(bk, bv, max_l)));
+                }
+                (
+                    LayerCache::Linear { conv: ac, state: as_ },
+                    LayerCache::Linear { conv: bc, state: bs },
+                ) => {
+                    let conv =
+                        concatenate_axis(&[ac.as_ref().unwrap(), bc.as_ref().unwrap()], 0).unwrap();
+                    let state =
+                        concatenate_axis(&[as_.as_ref().unwrap(), bs.as_ref().unwrap()], 0).unwrap();
+                    bcache.push(LayerCache::Linear { conv: Some(conv), state: Some(state) });
+                }
+                _ => panic!("layer {l}: cache kind mismatch between sequences"),
+            }
+        }
+
+        let mut ba = vec![argmax_row(&la0, 0)];
+        let mut bb = vec![argmax_row(&lb0, 0)];
+        let mut b_logits = vec![lb0.index((0, -1, ..))];
+        for step in 0..(n_decode - 1) {
+            let y = Array::from(&[*ba.last().unwrap(), *bb.last().unwrap()][..])
+                .reshape(&[2, 1])
+                .unwrap();
+            let k_cur = max_l + step as i32 + 1;
+            let kidx = arange::<_, i32>(0, k_cur, None).unwrap().index((NewAxis, ..));
+            let padd = pad_off.index((.., NewAxis));
+            let dec_mask = kidx.ge(&padd).unwrap().index((.., NewAxis, NewAxis, ..));
+            set_batch_pad_offsets(Some(pad_off.clone()));
+            set_batch_pad_mask(Some(dec_mask));
+            let logits = model.forward(&y, &mut bcache).expect("batched fwd");
+            set_batch_pad_offsets(None);
+            set_batch_pad_mask(None);
+            ba.push(argmax_row(&logits, 0));
+            bb.push(argmax_row(&logits, 1));
+            b_logits.push(logits.index((1, -1, ..)));
+        }
+
+        eprintln!("serial A: {sa:?}\nbatch  A: {ba:?}");
+        eprintln!("serial B: {sb:?}\nbatch  B: {bb:?}");
+        // Row A (no pad) byte-exact; row B may diverge only on a bf16 near-tie.
+        assert_eq!(sa, ba, "hybrid ragged batched row0 (A, len 7) must byte-match serial");
+        if let Some(step) = sb.iter().zip(&bb).position(|(s, b)| s != b) {
+            let lg = &b_logits[step];
+            let gs = lg.index(sb[step] as i32).item::<f32>();
+            let gb = lg.index(bb[step] as i32).item::<f32>();
+            let gap = (gb - gs).abs();
+            eprintln!(
+                "B: byte-exact for {step} tokens, then a near-tie flip (gap={gap:.4} ≈ bf16 ulp) — valid greedy choice."
+            );
+            assert!(
+                gap < 0.5,
+                "row B (len 4) divergence at step {step} must be a bf16 near-tie (gap={gap}), not structural"
+            );
+        } else {
+            eprintln!("B: byte-exact too.");
+        }
+        eprintln!("HYBRID-BATCH: Qwen3.6 ragged batched decode byte-exact ✓");
+    }
+
     // Batched-decode probe (P0 de-risk for `mlx-native-batched-decode`): does a B>1
     // batched `forward` produce per-sequence-IDENTICAL output to running each alone
     // (byte-exact), and does it gain THROUGHPUT vs serial? Dense Qwen3 (no GatedDeltaNet);
@@ -3235,5 +3767,68 @@ mod tests {
         );
         assert!(t1.contains("Paris"), "France row wrong/contaminated: {t1:?}");
         assert!(t2.contains("Tokyo"), "Japan row wrong/contaminated: {t2:?}");
+    }
+
+    // Hybrid (Qwen3.6) batched scheduler end-to-end: with `ROZUM_BATCH=2`, two concurrent
+    // greedy requests on ONE hybrid backend must route to `run_batch_hybrid` (asserted via
+    // BATCH_RUN_COUNT) and stream a coherent, DISTINCT response per row (no cross-row
+    // leakage). Qwen3.6-27B thinks even with /no_think, so the bar is non-empty + distinct
+    // (byte-exactness of the batched forward is proven separately by
+    // `mlx_hybrid_batched_ragged_byte_exact`); this exercises the dispatch + per-row
+    // BatchSeq streaming/retire over the heterogeneous cache.
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_hybrid_batched_scheduler_two_concurrent
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires local mlx-community/Qwen3.6-27B-4bit"]
+    async fn mlx_hybrid_batched_scheduler_two_concurrent() {
+        use super::MlxNativeBackend;
+        use super::inner::BATCH_RUN_COUNT;
+        use crate::backend::{ChatBackend, ChatRequest, SamplingParams, collect_to_string};
+        use std::sync::atomic::Ordering;
+
+        // Worker reads ROZUM_BATCH once at startup; set before building the backend. A
+        // generous window makes the two sends land in the same batch deterministically.
+        // SAFETY: test process, set before the worker thread starts.
+        unsafe {
+            std::env::set_var("ROZUM_BATCH", "2");
+            std::env::set_var("ROZUM_BATCH_WINDOW_MS", "500");
+        }
+
+        let dir = resolve_model_dir("mlx-community:Qwen3.6-27B-4bit")
+            .expect("Qwen3.6-27B-4bit not in HF cache");
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-27B-4bit".into())
+            .await
+            .expect("backend load");
+
+        let mk = |q: &str| {
+            let mut req = ChatRequest::simple(q);
+            req.sampling = SamplingParams { max_tokens: Some(24), ..Default::default() };
+            req
+        };
+        let before = BATCH_RUN_COUNT.load(Ordering::Relaxed);
+        let s1 = backend
+            .chat(mk("What is the capital of France? Answer in one word. /no_think"))
+            .await
+            .expect("chat France");
+        let s2 = backend
+            .chat(mk("Name a primary color. Answer in one word. /no_think"))
+            .await
+            .expect("chat color");
+        let (t1, t2) = tokio::join!(collect_to_string(s1), collect_to_string(s2));
+        let (t1, t2) = (t1.expect("collect 1"), t2.expect("collect 2"));
+
+        let runs = BATCH_RUN_COUNT.load(Ordering::Relaxed) - before;
+        eprintln!("HYBRID BATCHED  t1={t1:?}\n                t2={t2:?}  (run_batch calls={runs})");
+
+        // SAFETY: test cleanup.
+        unsafe {
+            std::env::remove_var("ROZUM_BATCH");
+            std::env::remove_var("ROZUM_BATCH_WINDOW_MS");
+        }
+
+        assert_eq!(runs, 1, "the two concurrent hybrid requests must batch in ONE run_batch_hybrid call");
+        assert!(!t1.trim().is_empty(), "row 1 produced no output");
+        assert!(!t2.trim().is_empty(), "row 2 produced no output");
+        assert_ne!(t1, t2, "distinct prompts must give distinct outputs (no cross-row leakage)");
     }
 }

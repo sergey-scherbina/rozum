@@ -57,7 +57,7 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   `ROZUM_DUMP_DOT=/tmp/d.dot … mlx_qwen35_moe_decode_bench` + a DOT label histogram.
 
 - [x] mlx-native-batched-decode — true parallel serving (multiple concurrent sessions).
-  **DONE + e2e-validated 2026-06-14 (dense Qwen3 / Qwen3-MoE). Hybrid Qwen3.6 still serial.**
+  **DONE + e2e-validated 2026-06-14 — dense Qwen3 / Qwen3-MoE AND hybrid Qwen3.6 (both arches).**
   - **Worker scheduler SHIPPED (`mlx_batched_scheduler_two_concurrent`):** with `ROZUM_BATCH=2`
     two concurrent greedy requests on one backend batch into **one** `run_batch` call (asserted via
     `BATCH_RUN_COUNT`) and each row gets its OWN correct answer — `France="Paris." Japan="Tokyo"`,
@@ -80,9 +80,25 @@ through `concurrency::admit_wrap`, so they are not relisted.)
     Attention ropes at `cache.offset()−pad_i` per row when set; **OFF by default → B=1 path
     byte-identical, no regression**), `ConcatKeyValueCache::{kv_used, from_kv}` (assemble a batched
     cache from per-sequence KV — avoids pad-token/negative-rope artifacts).
-  - **Follow-ups (not blocking):** continuous batching (admit a queued job into a free row mid-decode
-    instead of waiting for the whole batch to drain) and hybrid Qwen3.6 batching (the GatedDeltaNet
-    recurrence can't be left-padded — see below).
+  - **Hybrid Qwen3.6 batching SHIPPED 2026-06-14 (`run_batch_hybrid`).** The feared blocker — "the
+    GatedDeltaNet recurrence can't be left-padded" — only bites if you prefill a PADDED batch; we
+    prefill each sequence separately (as the dense path already does), so no pad token ever advances
+    the recurrence. The GDN turned out to be **already batch-generic and row-independent** (kernel
+    grid z spans `b*hv`, `b_idx=n/Hv`; conv+recurrent state is `[B,…]`) — proven byte-exact
+    (`gated_delta_batches_row_independent`, synthetic, no model). So hybrid batched decode = the
+    dense ragged path for the full-attention layers (left-pad+stack KV, per-row rope + key-pad mask,
+    ported to `qwen3_5::Attention` via `set_batch_pad_offsets`/`set_batch_pad_mask`) **+ just STACK
+    the fixed-size conv + recurrent state on the batch axis for the GatedDeltaNet layers** (no
+    padding/rope/mask — fixed size regardless of length). `run_batch_hybrid` assembles the
+    heterogeneous `qwen3_5::LayerCache` (`Full`→KV stack, `Linear`→state stack), shared by both the
+    dense-hybrid `Qwen35` and MoE-hybrid `Qwen35Moe` (same Model API). Validated on the real
+    Qwen3.6-27B: **byte-exact** per row vs serial (`mlx_hybrid_batched_ragged_byte_exact` — both
+    rows exact, incl. the padded one), e2e two concurrent sessions batch into one call (`"Paris"` /
+    `"Red"`, distinct — `mlx_hybrid_batched_scheduler_two_concurrent`), and **2.30× throughput** at
+    B=2 (`mlx_hybrid_batched_decode_throughput`, test profile — higher than dense's 1.98× because
+    hybrid decode has more per-token op launches to amortize). Fork rev `9a3b3949`.
+  - **Follow-up (not blocking):** continuous batching — admit a queued job into a free row mid-decode
+    instead of waiting for the whole batch to drain (better utilization under uneven response lengths).
 
   **RAGGED is tractable — confirmed (`mlx_rope_per_row_probe`):** `mlx_rs::fast::rope_dynamic`
   accepts a **per-row `[B]` offset array** and ropes each row at its own position (byte-exact vs
@@ -106,11 +122,13 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   - **Worker:** drain up to B ready jobs each cycle → batch; 1 job → existing serial path (keeps
     the prefix-KV LRU). Raise `concurrency_capacity()` to a memory-budgeted `B`.
 
-  **Hybrid (Qwen3.6) — separate, harder:** the GatedDeltaNet recurrence can't be left-padded
-  (padding pollutes the running state); needs per-row state without feeding pad tokens through the
-  recurrence (conv cache + recurrent state on the batch axis, byte-exact per row). Ship dense
-  first. The two probes + `rope_dynamic` finding (`src/mlx_native_backend.rs`) are the foundation;
-  the dense build is now fully specified + de-risked — a focused fork-forward + scheduler effort.
+  **Hybrid (Qwen3.6) — SHIPPED 2026-06-14 (see `run_batch_hybrid` above), turned out NOT harder.**
+  The premise "the GatedDeltaNet recurrence can't be left-padded (padding pollutes the running
+  state)" is true but irrelevant: we prefill each sequence SEPARATELY (no padding through the
+  recurrence) and the GDN state is fixed-size per row, so it just stacks on the batch axis. The
+  conv+recurrent state was already `[B,…]` and the kernel grid already spans batch — byte-exact per
+  row with zero kernel changes (`gated_delta_batches_row_independent`). The only real work was
+  porting the dense per-row rope/mask to `qwen3_5::Attention` + assembling the heterogeneous cache.
   TODAY: the native MLX backend is capacity-1 — one OS worker thread owns the `!Send` model
   and runs jobs strictly serially (`worker_main`'s `while blocking_recv { run_job }`);
   `concurrency_capacity()=Some(1)`, so `admit_wrap` admits 1 and queues the rest (bounded
