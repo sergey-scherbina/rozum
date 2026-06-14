@@ -259,9 +259,29 @@ mod inner {
     }
 
     pub struct MlxNativeBackend {
-        jobs: mpsc::UnboundedSender<Job>,
+        /// `Option` so [`Drop`] can close the channel (drop the sender) BEFORE joining the
+        /// worker — otherwise the live sender keeps `blocking_recv` parked and join deadlocks.
+        jobs: Option<mpsc::UnboundedSender<Job>>,
+        /// The worker thread, joined on drop so the model's MLX buffers are fully freed
+        /// before this returns (clean unload/swap; no teardown↔next-load race on the shared
+        /// Metal context).
+        worker: Option<thread::JoinHandle<()>>,
         model_id: String,
         n_ctx: u32,
+    }
+
+    impl Drop for MlxNativeBackend {
+        fn drop(&mut self) {
+            // Close the job channel so the worker's `blocking_recv` returns `None` and it
+            // exits its loop + drops the model, THEN join it. Without the join, ~8-15 GB of
+            // MLX buffers free asynchronously and race a subsequent model load on the
+            // single-stream Metal context (corruption / SIGSEGV) — and an unload wouldn't
+            // deterministically reclaim the RAM. Joining blocks until teardown completes.
+            drop(self.jobs.take());
+            if let Some(handle) = self.worker.take() {
+                let _ = handle.join();
+            }
+        }
     }
 
     impl MlxNativeBackend {
@@ -275,8 +295,9 @@ mod inner {
             let label = model_id.clone();
 
             // The worker loads the model on its own thread and owns it for life;
-            // the `!Send` model never crosses a thread boundary.
-            thread::Builder::new()
+            // the `!Send` model never crosses a thread boundary. Keep the handle so the
+            // backend can join it on drop (clean teardown).
+            let worker = thread::Builder::new()
                 .name("mlx-native".into())
                 .spawn(move || {
                     worker_main(model_dir, model_type, eos, kv_per_pos, jobs_rx, ready_tx)
@@ -287,7 +308,8 @@ mod inner {
                 Ok(Ok(())) => {
                     eprintln!("mlx-native: '{label}' ready (context {n_ctx})");
                     Ok(Self {
-                        jobs: jobs_tx,
+                        jobs: Some(jobs_tx),
+                        worker: Some(worker),
                         model_id,
                         n_ctx,
                     })
@@ -313,6 +335,8 @@ mod inner {
                 events: events_tx,
             };
             self.jobs
+                .as_ref()
+                .ok_or_else(|| ModelError::BackendUnavailable("mlx: worker shut down".into()))?
                 .send(job)
                 .map_err(|_| ModelError::BackendUnavailable("mlx: worker gone".into()))?;
             Ok(Box::pin(UnboundedReceiverStream::new(events_rx)))
@@ -2421,6 +2445,51 @@ mod tests {
         std::fs::write(tmp.join("config.json"), "{}").unwrap();
         assert_eq!(resolve_model_dir(tmp.to_str().unwrap()), Some(tmp.clone()));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Diagnostic: load a backend, FULLY drop it (Drop joins the worker), then load a
+    // SECOND backend in the same process and chat. Characterizes whether sequential model
+    // loads survive in one process — the model-unload/swap scenario (and why running two
+    // model e2e tests together used to crash). Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_sequential_backend_loads
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires local mlx-community/Qwen3-4B-4bit"]
+    async fn mlx_sequential_backend_loads() {
+        use super::MlxNativeBackend;
+        use crate::backend::{ChatBackend, ChatRequest, collect_to_string};
+        let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
+            .expect("Qwen3-4B-4bit not in HF cache");
+        let q = || ChatRequest::simple("What is the capital of France? Answer in one word. /no_think");
+        // SAFETY: test process, set before the worker thread starts. Exercise a BATCHED run
+        // on A (model-swap after batched decode is the real busy-gateway-then-unload path).
+        unsafe {
+            std::env::set_var("ROZUM_BATCH", "2");
+            std::env::set_var("ROZUM_BATCH_WINDOW_MS", "500");
+        }
+        {
+            let a = MlxNativeBackend::new(dir.clone(), "mlx-community/Qwen3-4B-4bit".into())
+                .await
+                .expect("load A");
+            let s1 = a.chat(q()).await.unwrap();
+            let s2 = a.chat(q()).await.unwrap();
+            let (t1, t2) = tokio::join!(collect_to_string(s1), collect_to_string(s2));
+            let (t1, t2) = (t1.unwrap(), t2.unwrap());
+            eprintln!("SEQ A (batched): {t1:?} {t2:?}");
+            assert!(t1.contains("Paris") && t2.contains("Paris"), "A: {t1:?} {t2:?}");
+        } // a dropped here → Drop joins the worker, frees the model
+        eprintln!("SEQ: backend A dropped+joined; loading B...");
+        let b = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+            .await
+            .expect("load B");
+        let t = collect_to_string(b.chat(q()).await.unwrap()).await.unwrap();
+        eprintln!("SEQ B: {t:?}");
+        assert!(t.contains("Paris"), "B (second load in same process): {t:?}");
+        unsafe {
+            std::env::remove_var("ROZUM_BATCH");
+            std::env::remove_var("ROZUM_BATCH_WINDOW_MS");
+        }
+        eprintln!("SEQ: model swap after a batched run OK ✓");
     }
 
     // End-to-end through the real ChatBackend (template -> worker -> stream).
