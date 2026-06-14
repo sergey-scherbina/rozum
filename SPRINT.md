@@ -399,6 +399,17 @@ parked, documented as a closed negative experiment).
     problem. (Makes sense: compile fuses elementwise glue, NOT the matmul GEMMs that
     dominate a transformer's ~450 dispatches.) **This rules out the fixed-cache +
     compiled-decode redesign as the lever — big save.**
+  - **RE-PROBED 2026-06-14 on a 7× bigger model (Qwen3-4B-4bit) — still net-NEGATIVE:**
+    `T=1 uncompiled 9.633ms vs compiled 15.053ms (0.64×); T=16 0.92×`. The hypothesis
+    "compile wins once build is expensive" is **refuted**: the slowdown does NOT shrink
+    with model size — mlx-rs's `compile` *adds* per-call overhead that exceeds the build
+    it saves, independent of build cost. So the Python `mx.compile` win (token+cache only
+    crossing FFI, trace reused) does **not** translate to the mlx-rs binding; getting it
+    would require fixing mlx-rs `compile` / calling mlx-c compile directly (deep, uncertain
+    upstream work). The post-bf16-fix MoE decode is build/FFI-bound (92%), but that build
+    is **not reducible via mlx-rs compile** — `mlx-native-perf-compile` is a confirmed
+    dead end for now. (Note: the original "eval=92% GPU" framing was pre-bf16-fix; post-fix
+    the split flips to build=92% — but compile still can't capture it.)
   - The probe used a FRESH cache, so it didn't measure the cache cost. Confirmed
     `ConcatKeyValueCache::update_and_fetch` does `concatenate_axis` EVERY step
     (`cache.rs:95`) → O(n) realloc+copy per token, vs Python's preallocated in-place
