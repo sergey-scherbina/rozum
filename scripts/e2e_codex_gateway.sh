@@ -3,11 +3,11 @@
 # backed by a local MLX model, same tasks as the Claude runner. Spec:
 # docs/e2e/claude-gateway-smoke.md (covers both agents).
 #
-# ⚠ BLOCKED as of 2026-06-14: Codex CLI ≥ 0.137 dropped `wire_api="chat"` and now
-# REQUIRES the OpenAI Responses API (POST /v1/responses). The rozum gateway only
-# implements /v1/chat/completions (+ Anthropic /v1/messages), so Codex gets 404.
-# This script preflights that endpoint and reports the blocker; it will work once
-# the gateway grows a /v1/responses endpoint (BACKLOG: gateway-openai-responses-api).
+# Codex CLI ≥ 0.137 dropped `wire_api="chat"` and REQUIRES the OpenAI Responses API
+# (POST /v1/responses). The gateway now implements it (`responses_handler`), so Codex
+# connects via `wire_api="responses"`. (Codex also ignores OPENAI_BASE_URL, so we set
+# an explicit `-c model_provider`.) The script preflights /v1/responses and aborts
+# with a clear message if it's missing (an older gateway binary).
 #
 # Usage:  scripts/e2e_codex_gateway.sh [build|test]
 # Env:  ROZUM=<rozum binary>  MODEL=<spec>  PORT=<n>  KEEP=1
@@ -35,19 +35,16 @@ for i in $(seq 1 90); do curl -s -m2 "http://127.0.0.1:$PORT/v1/models" >/dev/nu
 curl -s -m2 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 || { echo "FAIL: gateway not ready"; exit 1; }
 echo "ready"
 
-# Preflight: Codex needs the Responses API. Fail fast with a clear message if absent.
-RC_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m5 "http://127.0.0.1:$PORT/v1/responses" \
-  -H 'Content-Type: application/json' -d '{"model":"x","input":"ping"}')
+# Preflight: Codex needs the Responses API. A 1-token request both confirms the
+# endpoint exists (not 404 → not an old binary) and that it returns a response.
+RC_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m30 "http://127.0.0.1:$PORT/v1/responses" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"x","input":"hi","max_output_tokens":1,"stream":false}')
 if [ "$RC_CODE" = 404 ]; then
-  say "❌ BLOCKED: gateway has no /v1/responses (HTTP 404)"
-  cat <<'MSG'
-Codex CLI >= 0.137 requires the OpenAI Responses API and no longer supports
-wire_api="chat". The rozum gateway only implements /v1/chat/completions, so Codex
-cannot connect. Implement POST /v1/responses to unblock (BACKLOG:
-gateway-openai-responses-api). Until then this e2e cannot run.
-MSG
+  say "❌ gateway has no /v1/responses (HTTP 404) — rebuild with the responses-api change"
   exit 3
 fi
+echo "preflight /v1/responses -> HTTP $RC_CODE"
 
 case "$TASK" in
   build) PROMPT='Create a minimal Rust binary project in the current directory: a Cargo.toml (package name "reverse-cli", edition 2021, no dependencies) and src/main.rs. The program reverses its first command-line argument (by characters) and prints the result. Then run "cargo run -- hello" and confirm it prints "olleh". Keep it minimal.' ;;

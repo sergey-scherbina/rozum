@@ -848,19 +848,30 @@ fn responses_content_to_blocks(content: &Value) -> Vec<ContentBlock> {
 }
 
 fn responses_input_to_internal(instructions: Option<&str>, input: &Value) -> Vec<Message> {
-    let mut msgs = Vec::new();
+    // Many chat templates (incl. Qwen3.6) require a SINGLE system message that is
+    // the very first message, else they `raise_exception('System message must be at
+    // the beginning.')`. Codex sends both a top-level `instructions` AND a
+    // `developer` message — two system turns — so fold all system/developer text
+    // into one leading system message and keep the rest in order.
+    let mut system_parts: Vec<String> = Vec::new();
     if let Some(instr) = instructions {
         if !instr.is_empty() {
-            msgs.push(Message {
-                role: Role::System,
-                content: vec![ContentBlock::Text {
-                    text: instr.to_owned(),
-                }],
-            });
+            system_parts.push(instr.to_owned());
         }
     }
+    let mut rest: Vec<Message> = Vec::new();
+    let text_of = |blocks: &[ContentBlock]| -> String {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    };
     match input {
-        Value::String(s) if !s.is_empty() => msgs.push(Message {
+        Value::String(s) if !s.is_empty() => rest.push(Message {
             role: Role::User,
             content: vec![ContentBlock::Text { text: s.clone() }],
         }),
@@ -869,14 +880,23 @@ fn responses_input_to_internal(instructions: Option<&str>, input: &Value) -> Vec
                 match item.get("type").and_then(Value::as_str) {
                     // A normal message turn (type may be omitted → treat as message).
                     Some("message") | None => {
-                        let role = match item.get("role").and_then(Value::as_str) {
-                            Some("system") | Some("developer") => Role::System,
-                            Some("assistant") => Role::Assistant,
-                            _ => Role::User,
-                        };
                         let content = responses_content_to_blocks(&item["content"]);
-                        if !content.is_empty() {
-                            msgs.push(Message { role, content });
+                        if content.is_empty() {
+                            continue;
+                        }
+                        match item.get("role").and_then(Value::as_str) {
+                            // System/developer fold into the single leading system msg.
+                            Some("system") | Some("developer") => {
+                                system_parts.push(text_of(&content));
+                            }
+                            Some("assistant") => rest.push(Message {
+                                role: Role::Assistant,
+                                content,
+                            }),
+                            _ => rest.push(Message {
+                                role: Role::User,
+                                content,
+                            }),
                         }
                     }
                     // A prior assistant tool call.
@@ -894,7 +914,7 @@ fn responses_input_to_internal(instructions: Option<&str>, input: &Value) -> Vec
                             .to_owned();
                         let args = item.get("arguments").and_then(Value::as_str).unwrap_or("");
                         let input_val: Value = serde_json::from_str(args).unwrap_or(Value::Null);
-                        msgs.push(Message {
+                        rest.push(Message {
                             role: Role::Assistant,
                             content: vec![ContentBlock::ToolUse {
                                 id,
@@ -915,7 +935,7 @@ fn responses_input_to_internal(instructions: Option<&str>, input: &Value) -> Vec
                             Some(v) => v.to_string(),
                             None => String::new(),
                         };
-                        msgs.push(Message {
+                        rest.push(Message {
                             role: Role::Tool,
                             content: vec![ContentBlock::ToolResult {
                                 tool_use_id: id,
@@ -931,6 +951,17 @@ fn responses_input_to_internal(instructions: Option<&str>, input: &Value) -> Vec
         }
         _ => {}
     }
+    // One leading system message (if any), then the rest in order.
+    let mut msgs = Vec::with_capacity(rest.len() + 1);
+    if !system_parts.is_empty() {
+        msgs.push(Message {
+            role: Role::System,
+            content: vec![ContentBlock::Text {
+                text: system_parts.join("\n\n"),
+            }],
+        });
+    }
+    msgs.extend(rest);
     msgs
 }
 
@@ -2440,6 +2471,38 @@ mod tests {
         let msgs = responses_input_to_internal(None, &json!("just a string"));
         assert_eq!(msgs.len(), 1);
         assert!(matches!(msgs[0].role, Role::User));
+    }
+
+    #[test]
+    fn responses_folds_multiple_system_messages() {
+        // Codex sends a top-level `instructions` AND a `developer` message — two
+        // system turns. Templates (Qwen3.6) require a single system message that is
+        // first, so they must fold into ONE leading system message.
+        let input = json!([
+            {"type": "message", "role": "developer",
+             "content": [{"type": "input_text", "text": "Dev rules."}]},
+            {"type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": "hi"}]},
+            {"type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": "do it"}]},
+        ]);
+        let msgs = responses_input_to_internal(Some("Top instructions."), &input);
+        assert_eq!(msgs.len(), 3, "one system + two users");
+        assert!(matches!(msgs[0].role, Role::System));
+        assert!(matches!(msgs[1].role, Role::User));
+        assert!(matches!(msgs[2].role, Role::User));
+        assert_eq!(
+            msgs.iter().filter(|m| matches!(m.role, Role::System)).count(),
+            1,
+            "exactly one system message"
+        );
+        match &msgs[0].content[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("Top instructions."), "instructions folded in");
+                assert!(text.contains("Dev rules."), "developer folded in");
+            }
+            _ => panic!("system message should be text"),
+        }
     }
 
     #[test]
