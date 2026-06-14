@@ -1,5 +1,15 @@
 # Changelog
 
+## mlx-native — verified Llama-family aliases + non-quantized (bf16) load (SmolLM2)
+Completed: 2026-06-14
+Closes two "quick & cheap" catalog verifies with one model. `mlx-community/SmolLM2-1.7B-Instruct` is
+a non-Llama-3 `model_type: "llama"` checkpoint AND a non-quantized bf16 model, so running it
+(`mlx_smollm_chat` → *"The capital of France is Paris."*) confirms both `mlx-native-llama-aliases`
+(the wider Llama family runs on the shared llama path) and `mlx-native-fp16-verify` (the AFQ loader's
+`quantization = None` branch loads full-precision MLX checkpoints, just using more RAM). The recent
+`head_dim` config-tolerance fix held for SmolLM2 too. Added to `models::RECOMMENDED` as a tiny,
+light, non-Qwen option.
+
 ## gateway — admission counters in /stats (fast-lane hits, shed/429, queued, admitted)
 Completed: 2026-06-14
 Finishes `concurrency-observability`. The `/stats` `admission` block now carries, alongside the
