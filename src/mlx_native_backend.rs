@@ -2188,6 +2188,25 @@ pub fn batch_stats() -> Option<BatchStats> {
     None
 }
 
+/// MLX Metal memory `(active, peak, cache)` in MB — the resident model's unified-memory
+/// footprint (which process RSS does not capture). `active` drops to ~0 when the model is
+/// unloaded. For the gateway `/stats` endpoint. `None` without the `mlx-native` feature.
+#[cfg(feature = "mlx-native")]
+pub fn mlx_memory_mb() -> Option<(u64, u64, u64)> {
+    let mb = |b: usize| (b / (1024 * 1024)) as u64;
+    Some((
+        mb(mlx_rs::memory::get_active_memory()),
+        mb(mlx_rs::memory::get_peak_memory()),
+        mb(mlx_rs::memory::get_cache_memory()),
+    ))
+}
+
+/// No MLX runtime without the feature → no Metal memory stats.
+#[cfg(not(feature = "mlx-native"))]
+pub fn mlx_memory_mb() -> Option<(u64, u64, u64)> {
+    None
+}
+
 /// Map a model spec to its HuggingFace `org/name` repo id, or `None` if the spec
 /// isn't an HF reference (a filesystem path, `lmstudio:`/`ollama:` spec, …).
 pub fn spec_to_hf_repo(spec: &str) -> Option<String> {
@@ -2501,6 +2520,55 @@ mod tests {
         std::fs::write(tmp.join("config.json"), "{}").unwrap();
         assert_eq!(resolve_model_dir(tmp.to_str().unwrap()), Some(tmp.clone()));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Proves the worker-join `Drop` actually RECLAIMS the model's Metal memory (the
+    // deterministic-unload guarantee). MLX weights live in unified-memory Metal buffers that
+    // process RSS does NOT capture, so this measures MLX's OWN active-memory counter
+    // (`mlx_rs::memory::get_active_memory`) before load, after load+chat, and after the
+    // backend drops (Drop closes the channel + joins the worker → the model's arrays free).
+    // The drop must give back most of what the load added — an idle-unload genuinely returns
+    // the memory, not just marks the model gone. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_drop_reclaims_memory
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires local mlx-community/Qwen3-4B-4bit"]
+    async fn mlx_drop_reclaims_memory() {
+        use super::MlxNativeBackend;
+        use crate::backend::{ChatBackend, ChatRequest, collect_to_string};
+        let active_mb = || (mlx_rs::memory::get_active_memory() / (1024 * 1024)) as u64;
+
+        let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
+            .expect("Qwen3-4B-4bit not in HF cache");
+        let before = active_mb();
+        let after_load;
+        {
+            let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+                .await
+                .expect("backend load");
+            let _ = collect_to_string(
+                backend
+                    .chat(ChatRequest::simple("Hi. /no_think"))
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            after_load = active_mb();
+        } // backend drops here → Drop joins worker → MLX arrays freed
+        let after_drop = active_mb();
+        let added = after_load.saturating_sub(before);
+        let freed = after_load.saturating_sub(after_drop);
+        eprintln!(
+            "MLX ACTIVE  before={before}MB  after_load={after_load}MB (+{added})  after_drop={after_drop}MB (freed {freed})"
+        );
+        // The 4-bit model is ~2.4 GB of Metal buffers; the load must be visible and the drop
+        // must give back most of it (allocator may retain a little in its buffer cache).
+        assert!(added > 1000, "model load should add >1GB active Metal memory (got +{added}MB)");
+        assert!(
+            freed as f64 > added as f64 * 0.8,
+            "drop must reclaim most of the model's Metal memory: freed {freed}MB of +{added}MB"
+        );
     }
 
     // Diagnostic: load a backend, FULLY drop it (Drop joins the worker), then load a
