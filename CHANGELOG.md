@@ -1,5 +1,23 @@
 # Changelog
 
+## mlx-native — batched sampling (temperature/top-p/top-k requests batch too, not just greedy)
+Completed: 2026-06-14
+Batched decode is no longer greedy-only. The new fork sampler
+`qwen3::sample_rows(logits[B,vocab], temp[B], top_k[B], top_p[B])` samples one token per row with
+each row honoring its OWN temperature / top-k / top-p, via a single unified nucleus path: `top_k <= 0`
+and `top_p >= 1` keep all tokens (plain temperature-categorical), and `temp == 0` is a per-row argmax
+override — so a single batch can MIX greedy and sampling requests. The batching gate relaxed from
+`is_greedy` to `is_batchable`: any request batches unless it needs a repetition penalty (per-row
+history scattered into the logits) or a fixed seed (per-row RNG keys), which stay on the serial path.
+`run_batch`/`run_batch_hybrid` build per-row `[B]` param arrays from each row's `SamplingParams` and
+call `sample_rows` in place of argmax at every selection point (the decode step, mid-decode admission,
+and the first token after prefill). Validated: the fork's `sample_rows_per_row_collapses_to_argmax`
+proves a mixed per-row batch each collapses to its own argmax deterministically; the existing greedy
+end-to-end tests now route through `sample_rows` at temp 0 and stay byte-exact (`Paris`/`Tokyo`/
+`Berlin`); and `mlx_batched_sampling_two_concurrent` confirms two `temperature=0.7` requests batch
+(`run_batch calls=1`, previously they fell back to serial) and stream coherent output. This widens how
+many concurrent requests actually share a forward — real agents often run with temperature > 0.
+
 ## mlx-native — continuous batching (admit queued requests into a live batch mid-decode)
 Completed: 2026-06-14
 Batched decode no longer waits for the whole batch to drain before serving the next request. While

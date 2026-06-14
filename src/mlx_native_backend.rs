@@ -450,23 +450,25 @@ mod inner {
                     }
                 }
             }
-            // Batch the greedy ones together (argmax per row); run the rest serially. The
-            // batch runs CONTINUOUSLY — it keeps pulling more greedy jobs from `jobs` into
-            // freed slots and returns any non-greedy ones it drained (`returned`) to run
-            // serially alongside `other`. A lone greedy job stays serial (keeps prefix-KV).
-            let (greedy, mut serial): (Vec<_>, Vec<_>) =
-                pending.into_iter().partition(|j| is_greedy(j));
-            if greedy.len() >= 2 {
+            // Batch the batchable ones together (per-row sampling); run the rest serially.
+            // The batch runs CONTINUOUSLY — it keeps pulling more batchable jobs from `jobs`
+            // into freed slots and returns any it can't batch (`returned`) to run serially
+            // alongside `other`. A lone batchable job stays serial (keeps prefix-KV).
+            let (batchable, mut serial): (Vec<_>, Vec<_>) =
+                pending.into_iter().partition(|j| is_batchable(j));
+            if batchable.len() >= 2 {
                 let returned = if is_hybrid_arch(&model) {
                     run_batch_hybrid(
-                        &mut model, &mut tokenizer, &template, &eos, greedy, &mut jobs, cap,
+                        &mut model, &mut tokenizer, &template, &eos, batchable, &mut jobs, cap,
                     )
                 } else {
-                    run_batch(&mut model, &mut tokenizer, &template, &eos, greedy, &mut jobs, cap)
+                    run_batch(
+                        &mut model, &mut tokenizer, &template, &eos, batchable, &mut jobs, cap,
+                    )
                 };
                 serial.extend(returned);
             } else {
-                serial.extend(greedy);
+                serial.extend(batchable);
             }
             for job in serial {
                 run_job(&mut model, &mut tokenizer, &template, &eos, kv_per_pos, &mut store, job);
@@ -512,15 +514,42 @@ mod inner {
         matches!(model, LoadedModel::Qwen35(_) | LoadedModel::Qwen35Moe(_))
     }
 
-    /// A request joins a batch only if greedy (argmax) — temp 0/unset, no top_p/top_k/
-    /// repeat_penalty; batched decode samples argmax per row. Others run serially.
-    fn is_greedy(job: &Job) -> bool {
+    /// A request joins a batch if it needs neither a repetition penalty nor a fixed seed —
+    /// `qwen3::sample_rows` does per-row temp/top_k/top_p (greedy = temp 0 → argmax override),
+    /// so temperature/top-p/top-k requests batch too. Repetition penalty (needs each row's
+    /// history scattered into the logits) and explicit seeds (need per-row RNG keys) are not
+    /// supported in the batched path yet, so those rows run serially.
+    fn is_batchable(job: &Job) -> bool {
         let s = &job.sampling;
-        s.temperature.unwrap_or(0.0) == 0.0
-            && s.top_p.unwrap_or(1.0) >= 1.0
-            && s.top_k.unwrap_or(0) == 0
-            && s.repeat_penalty.unwrap_or(1.0) == 1.0
-            && s.seed.is_none()
+        s.repeat_penalty.unwrap_or(1.0) == 1.0 && s.seed.is_none()
+    }
+
+    /// Per-row sampling params `(temp, top_k, top_p)` for `qwen3::sample_rows`, with the
+    /// runtime defaults (temp 0 = greedy, no top-k/top-p filtering).
+    fn sampling_of(job: &Job) -> (f32, i32, f32) {
+        let s = &job.sampling;
+        (
+            s.temperature.unwrap_or(0.0),
+            s.top_k.unwrap_or(0) as i32,
+            s.top_p.unwrap_or(1.0),
+        )
+    }
+
+    /// Sample one token per row of `[B, vocab]` logits, each row honoring its own
+    /// `(temp, top_k, top_p)`. Returns `B` token ids. The batched analog of the serial
+    /// path's `qwen3::sample_with`.
+    fn sample_rows_vec(logits: &Array, temps: &[f32], topks: &[i32], topps: &[f32]) -> Vec<u32> {
+        use mlx_rs::ops::indexing::IndexOp;
+        let n = temps.len() as i32;
+        let toks = qwen3::sample_rows(
+            logits,
+            &Array::from_slice(temps, &[n]),
+            &Array::from_slice(topks, &[n]),
+            &Array::from_slice(topps, &[n]),
+        )
+        .expect("sample_rows");
+        let _ = mlx_rs::transforms::eval([&toks]);
+        (0..temps.len()).map(|r| toks.index(r as i32).item::<u32>()).collect()
     }
 
     /// True if the tail of `ids` is a runaway loop: the last `REPEAT_WINDOW` tokens
@@ -1146,7 +1175,7 @@ mod inner {
         cap: usize,
     ) -> Vec<Job> {
         use mlx_lm::models::qwen3::set_batch_pad_offsets;
-        use mlx_rs::ops::indexing::{argmax_axis, take_axis, IndexOp, NewAxis};
+        use mlx_rs::ops::indexing::{take_axis, IndexOp, NewAxis};
         use mlx_rs::ops::{arange, concatenate_axis};
 
         BATCH_RUN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1209,12 +1238,21 @@ mod inner {
         //    queued greedy jobs into freed/spare slots, then forward the live rows.
         let mut batch_seq: Vec<usize> = (0..seqs.len()).collect(); // seq index per live row
         loop {
+            // Sample one token per row, each honoring its own temp/top_k/top_p.
+            let mut temps: Vec<f32> = Vec::with_capacity(batch_seq.len());
+            let mut topks: Vec<i32> = Vec::with_capacity(batch_seq.len());
+            let mut topps: Vec<f32> = Vec::with_capacity(batch_seq.len());
+            for &si in &batch_seq {
+                let (t, k, p) = sampling_of(&seqs[si].job);
+                temps.push(t);
+                topks.push(k);
+                topps.push(p);
+            }
+            let toks = sample_rows_vec(&logits, &temps, &topks, &topps);
             let mut keep_rows: Vec<usize> = Vec::new();
             let mut next_toks: Vec<u32> = Vec::new();
             for (row, &si) in batch_seq.iter().enumerate() {
-                let tok = argmax_axis(&logits.index((row as i32, ..)), -1, false)
-                    .unwrap()
-                    .item::<u32>();
+                let tok = toks[row];
                 if check_finish(&mut seqs[si], tok, eos, tokenizer) {
                     seqs[si].finished = true;
                     seqs[si].finalize();
@@ -1247,7 +1285,7 @@ mod inner {
                     Ok(j) => j,
                     Err(_) => break,
                 };
-                if !is_greedy(&job) {
+                if !is_batchable(&job) {
                     deferred.push(job);
                     continue;
                 }
@@ -1256,7 +1294,8 @@ mod inner {
                         Some(t) => t,
                         None => continue,
                     };
-                let ntok = argmax_axis(&nrow.index((0, ..)), -1, false).unwrap().item::<u32>();
+                let (t, k, p) = sampling_of(&nseq.job);
+                let ntok = sample_rows_vec(&nrow, &[t], &[k], &[p])[0];
                 if check_finish(&mut nseq, ntok, eos, tokenizer) {
                     // First token already ends it — finalize, never enters the batch.
                     nseq.finished = true;
@@ -1435,7 +1474,7 @@ mod inner {
         cap: usize,
     ) -> Vec<Job> {
         use mlx_lm::models::qwen3_5::{set_batch_pad_mask, set_batch_pad_offsets, LayerCache};
-        use mlx_rs::ops::indexing::{argmax_axis, take_axis, IndexOp, NewAxis};
+        use mlx_rs::ops::indexing::{take_axis, IndexOp, NewAxis};
         use mlx_rs::ops::{arange, concatenate_axis};
 
         BATCH_RUN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1581,12 +1620,21 @@ mod inner {
         //    queued greedy jobs into freed/spare slots, then forward the live rows.
         let mut batch_seq: Vec<usize> = (0..seqs.len()).collect();
         loop {
+            // Sample one token per row, each honoring its own temp/top_k/top_p.
+            let mut temps: Vec<f32> = Vec::with_capacity(batch_seq.len());
+            let mut topks: Vec<i32> = Vec::with_capacity(batch_seq.len());
+            let mut topps: Vec<f32> = Vec::with_capacity(batch_seq.len());
+            for &si in &batch_seq {
+                let (t, k, p) = sampling_of(&seqs[si].job);
+                temps.push(t);
+                topks.push(k);
+                topps.push(p);
+            }
+            let toks = sample_rows_vec(&logits, &temps, &topks, &topps);
             let mut keep_rows: Vec<usize> = Vec::new();
             let mut next_toks: Vec<u32> = Vec::new();
             for (row, &si) in batch_seq.iter().enumerate() {
-                let tok = argmax_axis(&logits.index((row as i32, ..)), -1, false)
-                    .unwrap()
-                    .item::<u32>();
+                let tok = toks[row];
                 if check_finish(&mut seqs[si], tok, eos, tokenizer) {
                     seqs[si].finished = true;
                     seqs[si].finalize();
@@ -1624,7 +1672,7 @@ mod inner {
                     Ok(j) => j,
                     Err(_) => break,
                 };
-                if !is_greedy(&job) {
+                if !is_batchable(&job) {
                     deferred.push(job);
                     continue;
                 }
@@ -1633,7 +1681,8 @@ mod inner {
                         Some(t) => t,
                         None => continue,
                     };
-                let ntok = argmax_axis(&nrow.index((0, ..)), -1, false).unwrap().item::<u32>();
+                let (t, k, p) = sampling_of(&nseq.job);
+                let ntok = sample_rows_vec(&nrow, &[t], &[k], &[p])[0];
                 if check_finish(&mut nseq, ntok, eos, tokenizer) {
                     nseq.finished = true;
                     nseq.finalize();
@@ -4014,6 +4063,59 @@ mod tests {
         assert!(t1.contains("Paris"), "France: {t1:?}");
         assert!(t2.contains("Tokyo"), "Japan: {t2:?}");
         assert!(t3.contains("Berlin"), "Germany (admitted mid-decode) wrong/contaminated: {t3:?}");
+    }
+
+    // Batched SAMPLING end-to-end: two concurrent requests with temperature > 0 (+ top_p)
+    // must BATCH (the relaxed `is_batchable` gate — not just greedy) and each stream a
+    // coherent non-empty response via `qwen3::sample_rows` (per-row temp/top_k/top_p). Output
+    // is stochastic so the bar is non-empty + batched (the per-row filter correctness is
+    // proven deterministically in the fork's `sample_rows_per_row_collapses_to_argmax` and by
+    // the greedy e2e tests above, which now route through `sample_rows` with temp 0).
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_batched_sampling_two_concurrent
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires local mlx-community/Qwen3-4B-4bit"]
+    async fn mlx_batched_sampling_two_concurrent() {
+        use super::MlxNativeBackend;
+        use super::inner::BATCH_RUN_COUNT;
+        use crate::backend::{ChatBackend, ChatRequest, SamplingParams, collect_to_string};
+        use std::sync::atomic::Ordering;
+
+        // SAFETY: test process, set before the worker thread starts.
+        unsafe {
+            std::env::set_var("ROZUM_BATCH", "2");
+            std::env::set_var("ROZUM_BATCH_WINDOW_MS", "500");
+        }
+        let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
+            .expect("Qwen3-4B-4bit not in HF cache");
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+            .await
+            .expect("backend load");
+        // Temperature + top_p (NOT greedy) — these used to fall back to serial; now they batch.
+        let mk = |q: &str| {
+            let mut req = ChatRequest::simple(q);
+            req.sampling = SamplingParams {
+                temperature: Some(0.7),
+                top_p: Some(0.9),
+                max_tokens: Some(24),
+                ..Default::default()
+            };
+            req
+        };
+        let before = BATCH_RUN_COUNT.load(Ordering::Relaxed);
+        let s1 = backend.chat(mk("Name a color. Answer in one word. /no_think")).await.unwrap();
+        let s2 = backend.chat(mk("Name an animal. Answer in one word. /no_think")).await.unwrap();
+        let (t1, t2) = tokio::join!(collect_to_string(s1), collect_to_string(s2));
+        let (t1, t2) = (t1.unwrap(), t2.unwrap());
+        let runs = BATCH_RUN_COUNT.load(Ordering::Relaxed) - before;
+        eprintln!("SAMPLING(temp=0.7)  t1={t1:?}  t2={t2:?}  (run_batch calls={runs})");
+        unsafe {
+            std::env::remove_var("ROZUM_BATCH");
+            std::env::remove_var("ROZUM_BATCH_WINDOW_MS");
+        }
+        assert_eq!(runs, 1, "two temp>0 requests must batch (relaxed gate), not run serially");
+        assert!(!t1.trim().is_empty(), "sampling row 1 produced no output");
+        assert!(!t2.trim().is_empty(), "sampling row 2 produced no output");
     }
 
     // Hybrid (Qwen3.6) batched scheduler end-to-end: with `ROZUM_BATCH=2`, two concurrent
