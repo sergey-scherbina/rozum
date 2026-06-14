@@ -96,6 +96,12 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
         approx_size_gb: 3.4,
         notes: "Tiny Llama-arch model (bf16, non-quantized). Fast, light, general chat.",
     },
+    RecommendedModel {
+        spec: "mlx-community:Phi-3-mini-4k-instruct-4bit",
+        display_name: "Phi-3 mini 4k Instruct",
+        approx_size_gb: 2.2,
+        notes: "Microsoft Phi-3 (fused projections, runs on the Llama path). Small, capable.",
+    },
 ];
 
 // ─── Scanners ────────────────────────────────────────────────────────────────

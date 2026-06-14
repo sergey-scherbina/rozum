@@ -260,10 +260,17 @@ vision) and why: `docs/specs/mlx-native-catalog-non-goals.md`.
   tied embeddings, GQA. Reuse the AFQ loader + shared sampler. Moderate (the soft-cap
   + norm convention are the only real deltas). Validate vs oracle.
 
-- [ ] mlx-native-phi3 - Phi-3 / Phi-3.5 (`model_type: "phi3"`). Dense, close to Llama
-  but with a **fused `qkv_proj`** and **fused `gate_up_proj`** (split after the matmul),
-  partial RoPE on some variants. Own file (the fused projections need splitting at load
-  or in forward). Validate vs oracle. (Phi-4 if its config differs.)
+- [x] mlx-native-phi3 - **DONE 2026-06-14 — NO new model file.** Phi-3 (`model_type: "phi3"`) is
+  the Llama arch with **fused `qkv_proj` + `gate_up_proj`**. Rather than a whole new file,
+  `llama::load_phi3_model` SPLITS each fused tensor along the OUTPUT axis into the separate
+  `q/k/v_proj` + `gate/up_proj` at load (the 4-bit AFQ packing is along the INPUT axis, so
+  row-slicing weight/scales/biases is exact — no unpacking), then returns a `llama::Model` that
+  runs on the existing Llama path (Generate, batched decode, sampling — all reused). Routed via
+  `"phi3" => load_phi3_model → LoadedModel::Llama`; `supported_model_type` admits it; dense guard +
+  `mistral_is_a_supported_model_type` updated. **VALIDATED end-to-end** (`mlx_phi3_chat`,
+  Phi-3-mini-4k-instruct-4bit, first try): *"The capital of France is Paris."* Added to
+  `models::RECOMMENDED`. (Phi-3-mini-4k = full RoPE; the 128k `su`/longrope variant needs
+  `rope_scaling` threaded — a small follow-up. Phi-3.5-mini is the same arch → should work too.)
 
 - [ ] mlx-native-mixtral - Mixtral / Mistral-MoE (`model_type: "mixtral"`). Sparse MoE
   on the Mistral block — reuse the `qwen3_moe` SwitchGLU routing pattern + the Mistral

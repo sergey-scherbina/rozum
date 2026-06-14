@@ -156,6 +156,12 @@ mod inner {
                 "llama" | "mistral" => llama::load_llama_model(dir)
                     .map(LoadedModel::Llama)
                     .map_err(|e| format!("mlx: load llama/mistral {}: {e}", dir.display())),
+                // Phi-3 (`model_type: "phi3"`) — the Llama arch with FUSED qkv / gate_up
+                // projections; the loader splits them and returns a `llama::Model`, so it runs
+                // on the existing Llama path (Generate, batched decode, etc.).
+                "phi3" => llama::load_phi3_model(dir)
+                    .map(LoadedModel::Llama)
+                    .map_err(|e| format!("mlx: load phi3 {}: {e}", dir.display())),
                 // Qwen2 / Qwen2.5 / Qwen2.5-Coder (dense; qkv-bias, no q/k-norm).
                 "qwen2" => qwen2::load_qwen2_model(dir)
                     .map(LoadedModel::Qwen2)
@@ -2244,6 +2250,7 @@ pub fn supported_model_type(model_type: &str) -> bool {
             | "qwen3_5_moe_text"
             | "llama"
             | "mistral"
+            | "phi3"
             | "qwen2"
     )
 }
@@ -2365,6 +2372,7 @@ mod tests {
     fn mistral_is_a_supported_model_type() {
         assert!(super::supported_model_type("mistral"));
         assert!(super::supported_model_type("llama"));
+        assert!(super::supported_model_type("phi3"), "Phi-3 routes via the fused-split llama loader");
         assert!(!super::supported_model_type("mixtral"), "sparse MoE Mistral is a separate port");
     }
 
@@ -2379,7 +2387,7 @@ mod tests {
                 "{t} must be hybrid (needs ROZUM_MLX_RETAIN for correctness + speed)"
             );
         }
-        for t in ["qwen3", "qwen3_moe", "llama", "mistral", "qwen2", "qwen2_5"] {
+        for t in ["qwen3", "qwen3_moe", "llama", "mistral", "phi3", "qwen2", "qwen2_5"] {
             assert!(!super::inner::is_hybrid_model(t), "{t} is dense (unretained path)");
         }
     }
@@ -2898,6 +2906,30 @@ mod tests {
         let stream = backend.chat(req).await.expect("chat");
         let text = collect_to_string(stream).await.expect("collect");
         eprintln!("MLX SMOLLM OUTPUT: {text}");
+        assert!(text.contains("Paris"), "expected Paris, got: {text}");
+    }
+
+    // Phi-3 (`model_type: "phi3"`) — proves the FUSED-projection split loader works end to end
+    // (qkv_proj / gate_up_proj split into q/k/v + gate/up at load, then run on the Llama path).
+    // Auto-downloads ~2 GB. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_phi3_chat
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "network: auto-downloads mlx-community/Phi-3-mini-4k-instruct-4bit (~2GB)"]
+    async fn mlx_phi3_chat() {
+        use super::{MlxNativeBackend, ensure_model_dir};
+        use crate::backend::{ChatBackend, ChatRequest, collect_to_string};
+
+        let spec = "mlx-community:Phi-3-mini-4k-instruct-4bit";
+        let dir = ensure_model_dir(spec).await.expect("phi3 download/resolve");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+            .await
+            .expect("backend load (Phi-3 fused-split → llama path)");
+        let req =
+            ChatRequest::simple("What is the capital of France? Answer in one short sentence.");
+        let stream = backend.chat(req).await.expect("chat");
+        let text = collect_to_string(stream).await.expect("collect");
+        eprintln!("MLX PHI3 OUTPUT: {text}");
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
     }
 
