@@ -35,6 +35,19 @@ mod inner {
     /// Cap on generated tokens when the request does not specify one, so a
     /// reasoning model can't run away unbounded.
     const DEFAULT_MAX_TOKENS: usize = 4096;
+    /// Hard ceiling on generated tokens regardless of what the client asks for, so
+    /// one runaway generation can't tie up the cap-1 worker for many minutes. A
+    /// coding agent's single turn rarely needs more; override via
+    /// `ROZUM_MAX_OUTPUT_TOKENS` (0 disables the cap). Backstop to the repetition
+    /// guard below — that catches the common case (a loop) far sooner.
+    const DEFAULT_OUTPUT_CEILING: usize = 8192;
+    /// Runaway-loop guard: if the last `REPEAT_WINDOW` generated tokens are exactly
+    /// periodic with some period ≤ `REPEAT_MAX_PERIOD` (i.e. a short block repeated
+    /// ≥ ~4×), the greedy decode is stuck in a loop — stop instead of generating to
+    /// the cap. 64 tokens of perfect periodicity essentially never occurs in real
+    /// output, so this does not false-trigger on legitimate repetitive text.
+    const REPEAT_WINDOW: usize = 64;
+    const REPEAT_MAX_PERIOD: usize = 16;
     /// Qwen3 `<|im_end|>`, used when the checkpoint config omits `eos_token_id`.
     const QWEN3_EOS: u32 = 151645;
     /// Fallback context window when config lacks `max_position_embeddings`.
@@ -399,6 +412,20 @@ mod inner {
         }
     }
 
+    /// True if the tail of `ids` is a runaway loop: the last `REPEAT_WINDOW` tokens
+    /// are exactly periodic with some period `1..=REPEAT_MAX_PERIOD`. Used to stop a
+    /// greedy decode that has fallen into a short repeating cycle. O(window·period).
+    pub(crate) fn is_runaway_loop(ids: &[u32]) -> bool {
+        if ids.len() < REPEAT_WINDOW {
+            return false;
+        }
+        let tail = &ids[ids.len() - REPEAT_WINDOW..];
+        // For each candidate period p, the window is periodic iff every position
+        // equals the one p back. The smallest such p is the true period; any p in
+        // range that satisfies it means ≥ REPEAT_WINDOW/p repeats of a ≤p block.
+        (1..=REPEAT_MAX_PERIOD).any(|p| (p..REPEAT_WINDOW).all(|i| tail[i] == tail[i - p]))
+    }
+
     /// Render the prompt and stream token events. Dispatches on the model
     /// architecture; each `Generate` iterator feeds the shared streaming loop.
     fn run_job(
@@ -425,11 +452,23 @@ mod inner {
         if std::env::var("ROZUM_MLX_DEBUG").is_ok() {
             eprintln!("PROMPT_IDS len={} {:?}", prompt_ids.len(), prompt_ids);
         }
-        let max_tokens = job
-            .sampling
-            .max_tokens
-            .map(|m| m as usize)
-            .unwrap_or(DEFAULT_MAX_TOKENS);
+        // Effective output budget: the client's `max_tokens` (or our default), then
+        // clamped to a hard ceiling so one runaway generation can't pin the cap-1
+        // worker for minutes. Clients like Claude Code send a very large `max_tokens`;
+        // the ceiling bounds the worst case (the repetition guard below catches an
+        // actual loop far sooner). `ROZUM_MAX_OUTPUT_TOKENS=0` disables the ceiling.
+        let ceiling = std::env::var("ROZUM_MAX_OUTPUT_TOKENS")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_OUTPUT_CEILING);
+        let max_tokens = {
+            let want = job
+                .sampling
+                .max_tokens
+                .map(|m| m as usize)
+                .unwrap_or(DEFAULT_MAX_TOKENS);
+            if ceiling == 0 { want } else { want.min(ceiling) }
+        };
 
         // Large-context KV preflight: the `ConcatKeyValueCache` grows ~`kv_per_pos`
         // bytes per position (prompt + generation), so reject a request that would
@@ -695,6 +734,8 @@ mod inner {
         // Per-token cost profiling (ROZUM_DETOK_PROFILE): split GPU sync (eval+item)
         // from detok+string, to locate the prod-path overhead vs the raw bench.
         let profile = std::env::var_os("ROZUM_DETOK_PROFILE").is_some();
+        // Runaway-loop guard (on by default; `ROZUM_REPEAT_GUARD=0` disables it).
+        let repeat_guard = !matches!(std::env::var("ROZUM_REPEAT_GUARD").as_deref(), Ok("0"));
         let (mut sync_ns, mut detok_ns, mut prof_tokens) = (0u128, 0u128, 0u32);
         while let Some(token) = cur.take() {
             if job.cancel.is_cancelled() {
@@ -771,6 +812,16 @@ mod inner {
 
             if output_tokens as usize >= max_tokens {
                 stop_reason = StopReason::MaxTokens;
+                break;
+            }
+            // Runaway loop: the greedy decode is repeating a short block (≥64 tokens
+            // of perfect periodicity). Stop cleanly instead of generating to the cap
+            // and pinning the worker — this is the common runaway failure mode.
+            if repeat_guard && is_runaway_loop(&out_ids) {
+                if std::env::var_os("ROZUM_MLX_DEBUG").is_some() {
+                    eprintln!("REPEAT_GUARD stop after {output_tokens} tokens (loop detected)");
+                }
+                stop_reason = StopReason::EndTurn;
                 break;
             }
             // Advance. Pipelined: the already-`async_eval`'d next token. Serial:
@@ -1165,6 +1216,28 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "get_weather");
         assert!(calls[0].1.contains("Paris"), "args: {}", calls[0].1);
+    }
+
+    #[test]
+    fn runaway_loop_detection() {
+        use super::inner::is_runaway_loop;
+        // Below the window: never a loop yet.
+        assert!(!is_runaway_loop(&[7u32; 10]));
+        // Single-token spam (period 1) over the full window.
+        assert!(is_runaway_loop(&[7u32; 80]));
+        // A short repeating phrase (period 3) tiled past the window.
+        let cycle: Vec<u32> = (0..80).map(|i| [11u32, 22, 33][i % 3]).collect();
+        assert!(is_runaway_loop(&cycle));
+        // Period 16 (the max we catch), repeated 5× = 80 tokens.
+        let p16: Vec<u32> = (0..80).map(|i| (i % 16) as u32).collect();
+        assert!(is_runaway_loop(&p16));
+        // Real-looking, non-periodic text must NOT trigger (no false positive).
+        let varied: Vec<u32> = (0..200).map(|i| (i * 2654435761u64 % 5003) as u32).collect();
+        assert!(!is_runaway_loop(&varied));
+        // A long non-repeating run that ends in a brief repeat (< window) is fine.
+        let mut tail = varied.clone();
+        tail.extend([9u32; 20]); // only 20 repeats, < REPEAT_WINDOW(64)
+        assert!(!is_runaway_loop(&tail));
     }
 
     #[test]
