@@ -1,5 +1,20 @@
 # Changelog
 
+## mlx-native — prefix-KV cache: per-session LRU (interleaved sessions each reuse)
+Completed: 2026-06-14
+The prefix cache kept a single slot per worker, so *interleaved* conversations thrashed it:
+session A's turn → session B's turn evicts A → A's next turn re-prefills from scratch (no
+reuse for anyone). This matters whenever more than one conversation shares a gateway — several
+meeting-room agents, or Claude Code + Codex at once. Replaced the single slot with a small
+**LRU** (`PrefixStore`, default 4 slots, `ROZUM_PREFIX_CACHE_SLOTS`): each request reuses the
+stored conversation it extends via a **longest-prefix match** (`best_match`), content-based so
+no per-dialect session id is needed; the matched entry is replaced at MRU, an unmatched (new)
+conversation inserts + evicts the LRU. A worker serves one model, so only the dense or the
+hybrid LRU is populated. Verified live (small dense model, A1/B1/A2/B2 interleaved):
+`SLOTS=4 → 2 reuse fires` (both A2 and B2 reuse their own prefix), `SLOTS=1 → 0` (thrash).
+Each slot holds a conversation's KV, so it costs memory — lower the slot count for very long
+contexts. Unit test `prefix_store_best_match`; byte-exact reuse tests still green.
+
 ## mlx-native — prefix-KV cache: key on the conversation boundary (make reuse fire)
 Completed: 2026-06-14
 The prefix-KV cache (dense + hybrid) was keyed on the **full prompt**, so reuse never
