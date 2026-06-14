@@ -63,16 +63,35 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   to linear: decode is 92% CPU graph-build (FFI), and batching does ONE build for B sequences
   instead of B** → it amortizes exactly the per-token build that `mlx-native-perf-compile` tried
   (and failed) to eliminate. So batched decode is BOTH the multi-session throughput lever AND
-  the real answer to the build-bound decode — the two perf threads converge here. **Remaining
-  work to ship (the big part):** (1) a worker scheduler that collects up to B jobs + continuous
-  batching (admit/retire mid-decode); (2) **ragged lengths** — sequences differ in length, so
-  the batched cache needs left-padding + a per-row additive attention mask (mask the pad region),
-  or per-sequence offsets; (3) per-sequence EOS/stop/cancel + streaming; (4) raise
-  `concurrency_capacity()` to a memory-budgeted `B`. (5) **Hybrid is the hard part** — the
-  GatedDeltaNet recurrence can't be left-padded (padding pollutes the running state), so its
-  batching needs per-row state without feeding pad tokens through the recurrence (conv cache +
-  recurrent state on the batch axis, byte-exact per row). Recommend: ship dense first (the probe
-  proves it), hybrid second. The probe (`src/mlx_native_backend.rs`) is the reusable foundation.
+  the real answer to the build-bound decode — the two perf threads converge here.
+
+  **RAGGED is tractable — confirmed (`mlx_rope_per_row_probe`):** `mlx_rs::fast::rope_dynamic`
+  accepts a **per-row `[B]` offset array** and ropes each row at its own position (byte-exact vs
+  per-row scalar rope, diff 0.00e0). So a batch of different-length sequences can be rope'd
+  correctly in one call — no per-row rope loop, no per-row cache.
+
+  **Full de-risked design (dense):**
+  - **Left-pad** the B prompts to `maxL` (`pad_i = maxL − len_i` per row); one shared
+    `ConcatKeyValueCache` holds `[B,H,maxL+steps,D]`, all rows append at the shared offset.
+  - **RoPE per-row offset = `cache.offset() − pad_i`** (a `[B]` array) via `rope_dynamic`. During
+    prefill (`offset=0`) row i token t → position `t − pad_i` (real tokens `t≥pad_i` get `[0,len_i)`);
+    during decode (`offset=maxL+s`) the new token → position `len_i + s`. Byte-exact vs serial.
+  - **Mask** (additive, via the existing `AttentionInput.mask`): row i masks key slots `[0, pad_i)`
+    (the left pad); prefill also causal. Built in rozum with Array ops.
+  - **Fork change:** thread an optional `pad_offsets: Option<&Array>` through `ModelInput →
+    AttentionInput → Attention::forward`; when `Some`, use `rope_dynamic(q/k, cache.offset() −
+    pad_offsets)` instead of the scalar `rope(cache.offset())`. Existing (B=1, `None`) path
+    unchanged. Then a rozum batched-decode path: serial-prefill or batched-left-pad-prefill,
+    assemble offsets+mask, batched decode loop, per-row argmax, per-sequence detok/stream, retire
+    a row on EOS/max-tokens (shrink the batch), admit queued jobs (continuous batching).
+  - **Worker:** drain up to B ready jobs each cycle → batch; 1 job → existing serial path (keeps
+    the prefix-KV LRU). Raise `concurrency_capacity()` to a memory-budgeted `B`.
+
+  **Hybrid (Qwen3.6) — separate, harder:** the GatedDeltaNet recurrence can't be left-padded
+  (padding pollutes the running state); needs per-row state without feeding pad tokens through the
+  recurrence (conv cache + recurrent state on the batch axis, byte-exact per row). Ship dense
+  first. The two probes + `rope_dynamic` finding (`src/mlx_native_backend.rs`) are the foundation;
+  the dense build is now fully specified + de-risked — a focused fork-forward + scheduler effort.
   TODAY: the native MLX backend is capacity-1 — one OS worker thread owns the `!Send` model
   and runs jobs strictly serially (`worker_main`'s `while blocking_recv { run_job }`);
   `concurrency_capacity()=Some(1)`, so `admit_wrap` admits 1 and queues the rest (bounded
