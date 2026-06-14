@@ -9,7 +9,7 @@
 # an explicit `-c model_provider`.) The script preflights /v1/responses and aborts
 # with a clear message if it's missing (an older gateway binary).
 #
-# Usage:  scripts/e2e_codex_gateway.sh [build|test]
+# Usage:  scripts/e2e_codex_gateway.sh [build|test|fix|debug]  (see the Claude runner / spec)
 # Env:  ROZUM=<rozum binary>  MODEL=<spec>  PORT=<n>  KEEP=1
 set -uo pipefail
 
@@ -49,6 +49,46 @@ echo "preflight /v1/responses -> HTTP $RC_CODE"
 case "$TASK" in
   build) PROMPT='Create a minimal Rust binary project in the current directory: a Cargo.toml (package name "reverse-cli", edition 2021, no dependencies) and src/main.rs. The program reverses its first command-line argument (by characters) and prints the result. Then run "cargo run -- hello" and confirm it prints "olleh". Keep it minimal.' ;;
   test)  PROMPT='In the CURRENT directory (do NOT create a subdirectory), create a minimal Rust BINARY project: a Cargo.toml (package "reverse-cli", edition 2021, no dependencies) and src/main.rs. Implement `fn reverse(s: &str) -> String` that reverses by characters; main reads its first CLI argument and prints reverse(arg). ALSO add a `#[cfg(test)]` unit test in src/main.rs asserting `reverse("hello") == "olleh"`. Then run "cargo test" (must pass) and "cargo run -- hello" (must print olleh). Do NOT just scaffold a default project — actually implement reverse. Keep it minimal.' ;;
+  fix)
+    # Pre-create a project whose reverse() is buggy (returns the input unchanged).
+    printf '[package]\nname = "reverse-cli"\nversion = "0.1.0"\nedition = "2021"\n' >"$WORK/Cargo.toml"
+    mkdir -p "$WORK/src"
+    cat >"$WORK/src/main.rs" <<'EOF'
+use std::env;
+
+/// Reverse a string by characters.
+fn reverse(s: &str) -> String {
+    // Returns the input unchanged.
+    s.to_string()
+}
+
+fn main() {
+    let arg = env::args().nth(1).unwrap_or_default();
+    println!("{}", reverse(&arg));
+}
+EOF
+    PROMPT='There is a Rust project in the current directory. Running "cargo run -- hello" should print "olleh" (the reverse of the argument) but it prints "hello". Find and fix the bug in src/main.rs, then run "cargo run -- hello" to confirm it prints "olleh". Make the minimal change; do not rewrite the whole file.' ;;
+  debug)
+    # Pre-create a library whose `add` subtracts, so its unit test fails.
+    printf '[package]\nname = "mathlib"\nversion = "0.1.0"\nedition = "2021"\n' >"$WORK/Cargo.toml"
+    mkdir -p "$WORK/src"
+    cat >"$WORK/src/lib.rs" <<'EOF'
+/// Add two integers.
+pub fn add(a: i32, b: i32) -> i32 {
+    a - b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adds() {
+        assert_eq!(add(2, 3), 5);
+    }
+}
+EOF
+    PROMPT='There is a Rust library in the current directory. "cargo test" fails because of a bug in src/lib.rs. Fix the bug so the test passes. Do NOT modify the test. Then run "cargo test" to confirm it passes. Make the minimal change.' ;;
   *) echo "unknown task: $TASK"; exit 2 ;;
 esac
 
@@ -69,7 +109,7 @@ fail=0; cd "$WORK"
 ls -R "$WORK" | grep -vE 'gateway.log|codex.out|cargo.err|run.err' | head -20
 [ -f Cargo.toml ] && echo "PASS  Cargo.toml exists" || { echo "FAIL  Cargo.toml missing"; fail=1; }
 ls src/*.rs >/dev/null 2>&1 && echo "PASS  src/*.rs exists" || { echo "FAIL  no src/*.rs"; fail=1; }
-[ "$TASK" = test ] && { cargo test -q 2>"$WORK/cargo.err" && echo "PASS  cargo test green" || { echo "FAIL  cargo test"; fail=1; }; }
+{ [ "$TASK" = test ] || [ "$TASK" = debug ]; } && { cargo test -q 2>"$WORK/cargo.err" && echo "PASS  cargo test green" || { echo "FAIL  cargo test"; fail=1; }; }
 if [ -f src/main.rs ] || grep -qE '\[\[bin\]\]' Cargo.toml 2>/dev/null; then
   OUT="$(cargo run -q -- hello 2>"$WORK/run.err")"
   [ "$OUT" = olleh ] && echo "PASS  cargo run -- hello -> olleh" || { echo "FAIL  cargo run -> '$OUT'"; fail=1; }

@@ -43,6 +43,15 @@ Each task runs in a fresh `mktemp -d` workdir; Claude is told to build there.
   `fn reverse(&str)->String` and a `#[cfg(test)]` unit test for `reverse("hello") == "olleh"`,
   both in `src/main.rs`; `main` reverses its first CLI arg.
   - **Checks:** the above + `cargo test` is green + `cargo run -- hello` ⇒ `olleh`.
+- **fix** (edit, not create): the runner **pre-creates** a `reverse-cli` whose `reverse()`
+  returns the input unchanged. *"`cargo run -- hello` should print `olleh` but prints `hello`;
+  find and fix the bug in `src/main.rs` (minimal change, don't rewrite)."* Exercises the
+  **read → locate → edit** path that real coding work is (vs. create-from-scratch).
+  - **Checks:** `cargo run -- hello` ⇒ `olleh` (un-fakeable; the bug must actually be fixed).
+- **debug** (a debug loop): the runner pre-creates a `mathlib` library whose `add(a,b)` does
+  `a - b`, so its `#[test]` (`add(2,3)==5`) fails. *"`cargo test` fails; fix the bug in
+  `src/lib.rs` (don't touch the test)."* Exercises **run-test → read-failure → fix → re-run**.
+  - **Checks:** `cargo test` is green (lib-only, so no `cargo run`).
 
 > **Why a binary (not a lib) for the `test` task.** An earlier `test` prompt asked for a
 > `src/lib.rs` + `#[test]`. The model would `cargo init` a default crate (whose template test
