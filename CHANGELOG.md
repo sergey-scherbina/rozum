@@ -1,5 +1,20 @@
 # Changelog
 
+## mlx-native — idle-unload proven to reclaim memory (100%) + non-blocking unload + memory in /stats
+Completed: 2026-06-14
+Follow-through on the worker-join `Drop`: proves it actually frees the model's RAM and stops it
+blocking the runtime. (1) **Proof it reclaims memory.** MLX weights live in unified-memory Metal
+buffers that process RSS does NOT capture (an `ps -o rss` probe saw the load add only ~600 MB and free
+~0). Added a fork `mlx_rs::memory` module wrapping mlx-c's `mlx_get_active_memory` / peak / cache, and
+a test (`mlx_drop_reclaims_memory`) using MLX's own counter: load a model, chat, drop the backend —
+`active before=0MB → after_load=2197MB → after_drop=0MB`, i.e. **100% of the model's Metal memory is
+reclaimed** on drop. So idle-unload genuinely returns the RAM. (2) **Non-blocking unload.** The
+`Drop` now joins the worker (blocks until buffers free), so `unload()` doing `*backend = None` inline
+under the `backend` RwLock would stall every concurrent `current()` reader and block a tokio thread.
+Fixed: take the backend out of the lock first (so `current()` reports unloaded immediately), then free
+it on `spawn_blocking`. (3) **Observability.** `/stats` now reports `mlx_memory_mb` (active / peak /
+cache) — watch the model's footprint, and watch `active` drop to ~0 after an idle-unload.
+
 ## mlx-native — verified batching fires through the admission layer + batch observability
 Completed: 2026-06-14
 Closes the loop on the batched-decode work: confirmed that concurrent load actually batches through

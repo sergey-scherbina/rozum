@@ -324,9 +324,18 @@ impl Switchboard {
             return Err("this gateway cannot reload after unload (dedicated)".into());
         }
         self.begin_drain().await?;
-        *self.backend.write().unwrap() = None;
+        // Take the backend OUT of the lock, then free it OUTSIDE the guard on a blocking
+        // thread. The MLX backend's `Drop` now joins its worker thread (blocking until the
+        // model's ~GB of buffers are actually freed), so holding the `backend` RwLock across
+        // that drop would stall every concurrent `current()` reader, and doing it inline
+        // would block a tokio runtime thread. `current()` already reports unloaded the moment
+        // we `take()`; the physical free completes on the blocking thread.
+        let old = self.backend.write().unwrap().take();
         let spec = self.spec.lock().unwrap().clone();
         let g = self.bump_and_republish(&spec);
+        if old.is_some() {
+            tokio::task::spawn_blocking(move || drop(old)).await.ok();
+        }
         crate::obs::log_event(json!({
             "event": "gateway_unloaded", "model": spec.model_id, "generation": g,
         }));
@@ -1427,6 +1436,15 @@ async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
                     "waiting": a.waiting,
                     "free": a.free(),
                 }),
+            );
+        }
+        // MLX Metal memory (native runtime): the resident model's unified-memory footprint
+        // (active / peak / cache MB), which process RSS doesn't capture. `active` drops to ~0
+        // after an idle-unload, so this is how you watch the model free its RAM.
+        if let Some((active, peak, cache)) = crate::mlx_native_backend::mlx_memory_mb() {
+            m.insert(
+                "mlx_memory_mb".into(),
+                json!({ "active": active, "peak": peak, "cache": cache }),
             );
         }
         // Batched-decode occupancy (native MLX): how many concurrent requests actually
