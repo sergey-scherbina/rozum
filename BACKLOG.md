@@ -183,15 +183,17 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   probability but unproven (the earlier 0.31.2 attempt was for the rope bug, never
   tested gated_delta).
 
-- [ ] mlx-native-perf-compile - the top remaining decode lever (~2× potential): a
-  capture-based plain-`compile`d decode step closing over the weights, taking only
-  `(token, cache)` as args. **Prereq:** fixed-shape KV cache (preallocate + in-place
-  slice-update; today's `ConcatKeyValueCache` grows by concat and forces a recompile
-  each step). Correctness-critical (byte-exact) and intersects the GatedDeltaNet
-  buffer-donation hazard (compile + in-place cache + buffer-donating kernel = where
-  the token-2 divergence lived). Needs a clean machine for trustworthy A/B (current
-  numbers ~30% degraded by session memory pressure). Do as a dedicated session. See
-  SPRINT `mlx-native-perf` + the spec's mx.compile section.
+- [x] mlx-native-perf-compile - **CLOSED 2026-06-14: confirmed dead AND superseded by
+  mlx-native-batched-decode.** The premise was that `mx.compile` (trace once + reuse) could
+  recover the ~2× left on the table by the 92% CPU build/FFI cost. Two findings retire it:
+  (1) **compile is net-negative in mlx-rs** — `mlx_compile_probe` re-probed plain `compile` on
+  the dense Qwen3-4B forward (7× bigger build than the original 0.6B probe) at fixed shapes and
+  it's STILL 0.64× (slower), so the lever doesn't exist on this stack regardless of the
+  fixed-shape-cache prereq. (2) **batched decode already captures the win compile aimed for** —
+  the cost compile targeted is the per-token graph build, and batching does ONE build for B
+  sequences, so B=2 gets 1.98× on exactly that axis (`mlx_batched_decode_probe`). The two perf
+  threads converged: batching IS the amortization, shipped and validated. Custom hand-fused
+  kernels (the other ~no-gain lever) stay deferred per `mlx-native-perf` notes above.
 
 ### Native MLX runtime — catalog expansion (more architectures)
 
