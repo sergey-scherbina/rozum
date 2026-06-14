@@ -4,7 +4,11 @@
 # result independently. Spec: docs/e2e/claude-gateway-smoke.md
 #
 # Usage:  scripts/e2e_claude_gateway.sh [task]
-#   task = build (default) | test    — see the spec for what each asks.
+#   task = build (default) | test | fix | debug — see the spec for what each asks.
+#     build : create a reverse-cli binary (create-only).
+#     test  : create the binary + a #[cfg(test)] unit test + cargo test.
+#     fix   : a pre-made project with a buggy reverse() — find + EDIT the bug.
+#     debug : a pre-made library with a failing test — run, read failure, fix.
 # Env:  ROZUM=<rozum binary>  MODEL=<spec>  PORT=<n>  KEEP=1 (keep workdir)
 set -uo pipefail
 
@@ -43,6 +47,58 @@ case "$TASK" in
     PROMPT='Create a minimal Rust binary project in the current directory: a Cargo.toml (package name "reverse-cli", edition 2021, no dependencies) and src/main.rs. The program reverses its first command-line argument (by characters) and prints the result. Then run "cargo run -- hello" and confirm it prints "olleh". Keep it minimal.' ;;
   test)
     PROMPT='In the CURRENT directory (do NOT create a subdirectory), create a minimal Rust BINARY project: a Cargo.toml (package "reverse-cli", edition 2021, no dependencies) and src/main.rs. Implement `fn reverse(s: &str) -> String` that reverses by characters; main reads its first CLI argument and prints reverse(arg). ALSO add a `#[cfg(test)]` unit test in src/main.rs asserting `reverse("hello") == "olleh"`. Then run "cargo test" (must pass) and "cargo run -- hello" (must print olleh). Do NOT just scaffold a default project — actually implement reverse. Keep it minimal.' ;;
+  fix)
+    # Pre-create a project whose reverse() is buggy (returns the input unchanged).
+    # The agent must READ the file, find the bug, and EDIT it — not just create.
+    cat >Cargo.toml <<'EOF'
+[package]
+name = "reverse-cli"
+version = "0.1.0"
+edition = "2021"
+EOF
+    mkdir -p src
+    cat >src/main.rs <<'EOF'
+use std::env;
+
+/// Reverse a string by characters.
+fn reverse(s: &str) -> String {
+    // Returns the input unchanged.
+    s.to_string()
+}
+
+fn main() {
+    let arg = env::args().nth(1).unwrap_or_default();
+    println!("{}", reverse(&arg));
+}
+EOF
+    PROMPT='There is a Rust project in the current directory. Running "cargo run -- hello" should print "olleh" (the reverse of the argument) but it prints "hello". Find and fix the bug in src/main.rs, then run "cargo run -- hello" to confirm it prints "olleh". Make the minimal change; do not rewrite the whole file.' ;;
+  debug)
+    # Pre-create a library whose `add` subtracts, so its unit test fails. The agent
+    # must run the test, read the failure, and fix the bug (a debug loop).
+    cat >Cargo.toml <<'EOF'
+[package]
+name = "mathlib"
+version = "0.1.0"
+edition = "2021"
+EOF
+    mkdir -p src
+    cat >src/lib.rs <<'EOF'
+/// Add two integers.
+pub fn add(a: i32, b: i32) -> i32 {
+    a - b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adds() {
+        assert_eq!(add(2, 3), 5);
+    }
+}
+EOF
+    PROMPT='There is a Rust library in the current directory. "cargo test" fails because of a bug in src/lib.rs. Fix the bug so the test passes. Do NOT modify the test. Then run "cargo test" to confirm it passes. Make the minimal change.' ;;
   *) echo "unknown task: $TASK"; exit 2 ;;
 esac
 
@@ -80,13 +136,20 @@ fail=0
 ls -R "$WORK" | grep -vE 'gateway.log|claude.jsonl|cargo.err|run.err' | head -20
 [ -f Cargo.toml ] && echo "PASS  Cargo.toml exists" || { echo "FAIL  Cargo.toml missing"; fail=1; }
 ls src/*.rs >/dev/null 2>&1 && echo "PASS  src/*.rs exists" || { echo "FAIL  no src/*.rs"; fail=1; }
-if [ "$TASK" = test ]; then
-  if cargo test -q 2>"$WORK/cargo.err"; then echo "PASS  cargo test green"; else echo "FAIL  cargo test"; sed -n '1,15p' "$WORK/cargo.err"; fail=1; fi
-fi
-# Behavior check (un-fakeable): both tasks ask for a binary that reverses, so this
-# verifies the actual implementation — a scaffold-only run fails here as it should.
-OUT="$(cargo run -q -- hello 2>"$WORK/run.err")"
-if [ "$OUT" = "olleh" ]; then echo "PASS  cargo run -- hello -> olleh"; else echo "FAIL  cargo run -- hello -> '$OUT'"; sed -n '1,15p' "$WORK/run.err"; fail=1; fi
+# `test` and `debug` are graded by the test suite going green.
+case "$TASK" in
+  test|debug)
+    if cargo test -q 2>"$WORK/cargo.err"; then echo "PASS  cargo test green"; else echo "FAIL  cargo test"; sed -n '1,15p' "$WORK/cargo.err"; fail=1; fi ;;
+esac
+# Un-fakeable behavior check for the binary tasks: a scaffold/no-op fails here as it
+# should. `debug` is a lib-only crate, so `cargo run` doesn't apply (its test is the check).
+case "$TASK" in
+  build|test|fix)
+    OUT="$(cargo run -q -- hello 2>"$WORK/run.err")"
+    if [ "$OUT" = "olleh" ]; then echo "PASS  cargo run -- hello -> olleh"; else echo "FAIL  cargo run -- hello -> '$OUT'"; sed -n '1,15p' "$WORK/run.err"; fail=1; fi ;;
+  debug)
+    echo "SKIP  cargo run (lib-only crate; cargo test is the check)" ;;
+esac
 
 say "RESULT: $([ $fail = 0 ] && echo '✅ PASS' || echo '❌ FAIL')  (workdir: $WORK)"
 exit $fail
