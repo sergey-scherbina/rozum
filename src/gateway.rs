@@ -1426,7 +1426,9 @@ async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
             .unwrap_or(state.sb.n_ctx());
         m.insert("context_window".into(), json!(ctx));
         m.insert("loaded".into(), json!(state.sb.current().is_some()));
-        // Admission window (limit / in-flight / queued) — how concurrency is gated.
+        // Admission window — instantaneous (limit / in-flight / queued / free) plus the
+        // cumulative scheduler counters (admitted, fast-lane hits, shed/429, queued) so the
+        // admission policy is tunable from data.
         if let Some(a) = state.sb.current().and_then(|b| b.admission_stats()) {
             m.insert(
                 "admission".into(),
@@ -1435,6 +1437,10 @@ async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
                     "in_use": a.in_use,
                     "waiting": a.waiting,
                     "free": a.free(),
+                    "admitted": a.admitted,
+                    "fast_lane": a.fast_lane,
+                    "shed": a.shed,
+                    "queued": a.queued,
                 }),
             );
         }

@@ -598,12 +598,18 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   `rozum` processes sharing one GPU (e.g. a host-wide semaphore), instead of each
   process budgeting in isolation.
 
-- [~] concurrency-observability - Expose queue depth, admission limit, fast-lane
-  hits, and shed/429 counts via `obs` so the scheduler is tunable from data.
-  **PARTIAL 2026-06-14:** `/stats` now reports an `admission` block (limit / in-use / waiting / free)
-  and a `batch` block (runs / rows / mid-decode admits / peak size / avg occupancy via
-  `mlx_native_backend::batch_stats`), so batched-decode utilization + the admission window are
-  visible. Still TODO: fast-lane hit counts and shed/429 counters wired through `obs`.
+- [x] concurrency-observability - Expose queue depth, admission limit, fast-lane
+  hits, and shed/429 counts so the scheduler is tunable from data. **DONE 2026-06-14.**
+  `/stats` reports an `admission` block — instantaneous (limit / in-use / waiting / free) PLUS the
+  cumulative scheduler counters (`admitted`, `fast_lane`, `shed`, `queued`) — a `batch` block (runs /
+  rows / mid-decode admits / peak / avg occupancy), and `mlx_memory_mb` (active/peak/cache). The
+  counters live in the `AdmissionScheduler` `State` (under its existing mutex, no extra atomics):
+  `take()` bumps `admitted` (+`fast_lane` for a reserved-lane admit), the full-queue path bumps
+  `shed` before returning 429, and a queued arrival bumps `queued`; a pumped-but-cancelled waiter
+  decrements back. Surfaced via `AdmissionSnapshot` + `AdmissionScheduler::counters()`. Test
+  `counters_track_admit_fastlane_queue_and_shed` walks the whole flow (admit → fast-lane → queue →
+  shed → admit). (The numbers are in `/stats` JSON; a push into the `obs` event log is a trivial
+  later add if a metrics pipeline wants it.)
 
 - [ ] shared-gateway-multislot - Allow more than one resident model behind the
   shared gateway when memory permits, gating a second model on `ConcurrencyBudget`
