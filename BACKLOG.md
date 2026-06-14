@@ -32,16 +32,25 @@ mistralrs backend that the native runtime does NOT yet have. (Concurrency,
 admission, backpressure and the OOM circuit breaker already apply generically
 through `concurrency::admit_wrap`, so they are not relisted.)
 
-- [ ] mlx-hand-fused-gdn-kernels — close the last MLX decode gap to Python (MoE ~88→97,
-  dense ~19.6→23). After the bf16-stream fix (2026-06-13), the residual gap is op-FUSION:
-  Python's `mx.compile` collapses `compute_g` (softplus/exp) and the gate
-  (sigmoid·multiply) into single `Compiled*` Metal kernels; mlx-rs `compile` is
-  net-negative (per-call closure marshal > saving on tiny T=1 tensors, measured twice).
-  Closing it needs HAND-WRITTEN fused `mx.fast.metal_kernel`s for those hot per-layer ops
-  (like the existing gated_delta kernel). Big + uncertain payoff (~10%); the cheap wins
-  are banked (33→88, 2.7×). **Only pull if decode speed becomes critical.** Diagnostic
-  tooling exists: `mlx_export_to_dot` + `docs/mlx-gd-bug/py/count_prims.py` (Rust 3127 vs
-  Python 2610 prims/token; the delta is unfused Multiply/Broadcast/AsType + Exp/LogAddExp).
+- [~] mlx-hand-fused-gdn-kernels — **PROBED 2026-06-14: low reward, deferred.** Re-measured
+  the MoE hybrid decode (`mlx_qwen35_moe_decode_bench`, 35B-A3B — the e2e model): **~59-60 t/s**,
+  serial==pipe (pipelining gives only 1.02× — see why below), and the SPLIT timing is
+  **`build=15.65ms/tok, eval=1.31ms/tok` → 92% of per-token time is CPU graph-build / FFI**,
+  only 8% GPU. Dumped the decode-step graph (`ROZUM_DUMP_DOT`): **122 primitive nodes**, and
+  the hot elementwise ops are **already auto-fused by MLX** at eval — the gate sigmoid·multiply
+  shows up as `CompiledSigmoidBroadcastBroadcastMultiply` (5×), `RMSNorm` is fused (7×), and
+  there are **no stray `AsType`** (the bf16-stream fix held). So the original premise — that
+  `compute_g`/gate are *unfused* and need hand-written `metal_kernel`s — no longer holds; MLX's
+  automatic elementwise fusion already collapses them. Custom kernels would duplicate MLX and
+  carry the hybrid byte-exactness risk for ~no gain. **The real lever is the 92% build/FFI
+  cost** (≈0.13 ms × 122 op-launches/token of Rust→C→C++), which pipelining can't hide (build ≫
+  eval) — that's the `mlx-native-perf-compile` SPRINT item (trace the decode step once + reuse;
+  prereq a fixed-shape cache so the graph shape is constant). Large, gated, uncertain; decode at
+  ~59 t/s is already fast and the dominant agentic latency (prefill) is now solved by prefix-KV
+  reuse. **Don't pull hand kernels;** revisit compile+fixed-cache only if single-stream decode
+  becomes critical. (Probe was the MoE; the dense 27B hybrid runs all params per token and is
+  slower — re-probe it separately if it becomes the primary model.) Diagnostics:
+  `ROZUM_DUMP_DOT=/tmp/d.dot … mlx_qwen35_moe_decode_bench` + a DOT label histogram.
 
 - [ ] mlx-native-batched-decode — true parallel serving (multiple concurrent sessions).
   TODAY: the native MLX backend is capacity-1 — one OS worker thread owns the `!Send` model
