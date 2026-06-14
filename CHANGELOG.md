@@ -1,5 +1,17 @@
 # Changelog
 
+## mlx-native — Mistral / Mistral-Nemo support (one-line alias to the Llama path)
+Completed: 2026-06-14
+Opens the Mistral family (`model_type: "mistral"`) at near-zero cost. Mistral / Mistral-Nemo are
+architecturally Llama (GQA, no qkv-bias, SwiGLU, RoPE) and upstream `mlx_lm` serves them with the
+*llama* model class, so `LoadedModel::load` now routes `"llama" | "mistral" => llama::load_llama_model`
+and `supported_model_type` admits `"mistral"` — no new fork model file. The one delta is Mistral's
+sliding-window attention (4096), which the llama path approximates with full attention: identical to
+the reference except for contexts beyond the window (fine for agent use, and bounded by the KV
+preflight). Fast guards added (`mistral_is_a_supported_model_type`, dense-classification list);
+130/0. End-to-end validation is a ready `#[ignore]` network test (`mlx_mistral_chat`, auto-downloads
+`mlx-community/Mistral-7B-Instruct-v0.3-4bit`) — run it when a ~4 GB download is acceptable.
+
 ## mlx-native — idle-unload proven to reclaim memory (100%) + non-blocking unload + memory in /stats
 Completed: 2026-06-14
 Follow-through on the worker-join `Drop`: proves it actually frees the model's RAM and stops it
