@@ -1,5 +1,20 @@
 # Changelog
 
+## mlx-native — Phi-3 support (fused-projection split into the Llama path, no new model file)
+Completed: 2026-06-14
+Opens Microsoft's Phi-3 family (`model_type: "phi3"`). Phi-3 is the Llama architecture but ships
+FUSED projections — one `qkv_proj` and one `gate_up_proj` per layer instead of separate
+`q/k/v_proj` + `gate/up_proj`. Instead of a whole new model file, `llama::load_phi3_model` splits
+each fused tensor along the OUTPUT axis into the separate weights the Llama structure expects, then
+returns a `llama::Model`. The 4-bit AFQ packing is along the INPUT axis, so row-slicing the
+weight/scales/biases is exact (no unpacking). Phi-3 then runs on the existing Llama path — Generate,
+batched decode, sampling, everything — with no new runtime variant (`"phi3" => load_phi3_model →
+LoadedModel::Llama`). Validated end-to-end first try (`mlx_phi3_chat`, Phi-3-mini-4k-instruct-4bit):
+*"The capital of France is Paris."* Added to `models::RECOMMENDED`; `supported_model_type` + the
+dense-classification guard updated; 131/0. (Phi-3-mini-4k uses full RoPE; the 128k su/longrope
+variant would need `rope_scaling` threaded — a small follow-up. Phi-3.5-mini is the same arch.)
+Fork rev `0bfa4bd6`.
+
 ## mlx-native — verified Llama-family aliases + non-quantized (bf16) load (SmolLM2)
 Completed: 2026-06-14
 Closes two "quick & cheap" catalog verifies with one model. `mlx-community/SmolLM2-1.7B-Instruct` is
