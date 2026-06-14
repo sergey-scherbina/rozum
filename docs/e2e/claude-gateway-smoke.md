@@ -91,11 +91,12 @@ throwaway temp dir). Thinking is **off by default** in the gateway (clean output
 - **Speed:** ~6 min wall for a trivial task is dominated by the 12 agentic round-trips (each
   re-prefills the growing context), not raw decode (~96 t/s). Fewer-turn models finish faster.
 
-- **test task: ❌ FAIL both runs — exposes the model's agentic ceiling, two distinct ways.**
-  The `test` task (binary + a `#[cfg(test)]` test + `cargo test`) is one notch harder than
-  `build`, and Qwen3.6-35B-A3B failed it intermittently, in two different failure modes — the
-  gateway delivered every tool call + result correctly each time, so both are **model behavior,
-  not gateway bugs**:
+- **test task: ✅ PASS after `runaway-stop` (❌ FAIL before it — two ways).** The `test` task
+  (binary + a `#[cfg(test)]` test + `cargo test`) is one notch harder than `build`. Before the
+  runaway guard, Qwen3.6-35B-A3B failed it intermittently in two distinct ways (below); after it,
+  the same task passes its verification. In every run the gateway delivered each tool call +
+  result correctly, so the pre-fix failures were **model behavior / a missing server guard, not
+  gateway protocol bugs**:
   - **Run A — token-level runaway (a hang).** Hit the 600 s `timeout` with `result=None` after
     only **1 tool-use**: on the turn after the first tool round-trip the greedy decode **ran
     away** (looped / never emitted EOS) toward Claude Code's large `max_tokens`. `--max-turns`
@@ -110,6 +111,17 @@ throwaway temp dir). Thinking is **off by default** in the gateway (clean output
     structure…", and then **stopped, declaring success without ever writing `src/main.rs`**.
     This is small-model degeneracy (repeating no-op tool calls, then a false "done"); a server
     token-guard can't catch it (it's across separate requests). It's the model ceiling.
+  - **After `mlx-native-runaway-stop` (2026-06-14): ✅ the `test` task now PASSES verification.**
+    Re-run: `assistant=26, tool_uses=21`, the model created a correct binary (`fn reverse` +
+    a `#[cfg(test)]` test), **`cargo test` green + `cargo run -- hello` → `olleh`** — the
+    un-fakeable checks pass. Crucially there is **no single-generation hang** anymore: the
+    session progresses through 26 turns of real work (vs. Run A's stall at 1 tool-use), so the
+    runaway guard did its job. It still hit the 600 s `timeout` (`rc=124`, `result=None`) —
+    Claude's loop kept going without a clean final turn — but the **deliverable is correct and
+    verified**. The 605 s is now *slowness*, not a hang: ~26 hybrid turns, each re-prefilling the
+    growing context (~20 s/turn). That per-turn re-prefill is exactly what
+    `mlx-native-prefix-kv-cache` removes for dense — and `mlx-native-prefix-kv-cache-hybrid`
+    will remove for Qwen3.6.
   - **Takeaway:** `build` (the simplest task) is a reliable smoke; `test` sits at/above this
     model's reliable agentic ceiling and fails intermittently. Use `build` as the go/no-go
     gateway smoke; treat `test` as a model-capability stress, not a gateway regression.
@@ -126,31 +138,36 @@ throwaway temp dir). Thinking is **off by default** in the gateway (clean output
   rule for new scenarios: always include a behavior assertion the model can't satisfy by
   scaffolding.
 
-## Codex (OpenAI dialect) — currently BLOCKED ⛔
+## Codex (OpenAI dialect) — ✅ WORKS (since the `/v1/responses` endpoint)
 
 `scripts/e2e_codex_gateway.sh [build|test]` is the Codex parallel of the Claude runner
-(drives `codex exec` headless, same tasks, same independent disk verification). **But it
-cannot run today:**
+(drives `codex exec` headless, same tasks, same independent disk verification).
 
-- **Codex CLI ≥ 0.137 requires the OpenAI _Responses_ API** (`POST /v1/responses`) and
-  **dropped `wire_api="chat"`** (config error: *"`wire_api = "chat"` is no longer supported …
-  set `wire_api = "responses"`"*).
-- The rozum gateway only implements `/v1/chat/completions` (OpenAI) and `/v1/messages`
-  (Anthropic). `POST /v1/responses` → **HTTP 404**, so Codex retries and dies:
-  *"unexpected status 404 Not Found … /v1/responses"*.
-- Also note: Codex **ignores `OPENAI_BASE_URL`** — it needs an explicit model provider
+- **`build` task: ✅ PASS** (2026-06-14, Qwen3.6-35B-A3B-4bit): `codex exec` created a correct
+  `reverse-cli`, ran `cargo run -- hello` → `olleh`, `rc=0` in **~71 s** (notably fewer turns /
+  faster than Claude on the same task). The gateway carried the whole loop through the new
+  `POST /v1/responses` endpoint (typed Responses SSE: `response.created` → `output_item.added`
+  → `output_text.delta` → … → `response.completed`).
+- **What made it work** (both shipped):
+  1. **`POST /v1/responses`** (`gateway.rs::responses_handler`). Codex CLI ≥ 0.137 dropped
+     `wire_api="chat"` and *requires* the Responses API; the endpoint translates the Responses
+     request ⇄ the internal `ChatBackend` and streams the typed Responses event protocol.
+  2. **Single leading system message.** Codex sends a top-level `instructions` **and** a
+     `developer` message — two system turns — which the Qwen3.6 chat template rejects
+     (`raise_exception('System message must be at the beginning.')`, surfaced as a
+     `response.failed` event → Codex retried 5× and died). The Responses→internal conversion
+     now **folds all system/developer text into one leading system message**.
+- **Wiring caveat:** Codex **ignores `OPENAI_BASE_URL`** — it needs an explicit model provider
   (`-c model_provider=rozum -c 'model_providers.rozum.base_url=…' -c '…wire_api="responses"'`),
-  which the runner sets. `rozum launch`'s `OPENAI_BASE_URL`/`OPENAI_API_KEY` are therefore
-  **not enough** for current Codex.
+  which the runner sets. `rozum launch`'s `OPENAI_BASE_URL`/`OPENAI_API_KEY` are **not enough**
+  for current Codex; a launch integration should write a Codex `model_providers` config.
+- The runner preflights `/v1/responses` (a 1-token request) and aborts only if it's 404 (an
+  old gateway binary without the endpoint).
 
-The runner preflights `/v1/responses` and exits 3 with a clear message if it's 404.
-
-**Improvement to unblock Codex → BACKLOG `gateway-openai-responses-api`:** add a
-`POST /v1/responses` endpoint that translates the Responses request (`input` items, `tools`,
-`instructions`, `stream`) to the internal `ChatBackend` and streams back the Responses event
-protocol (`response.created` / `response.output_text.delta` /
-`response.function_call_arguments.delta` / `response.completed`, …). This is the single
-biggest thing missing for "Rozum as a local provider for **Codex**".
+> Known cosmetic gap: Codex's `/v1/models` refresh wants `{"models":[…]}` (the gateway returns
+> the OpenAI `{"data":[…],"object":"list"}` shape), so Codex logs one non-fatal
+> "failed to refresh available models" warning and proceeds. Harmless; a `/v1/models` alias is
+> a trivial future nicety.
 
 ## Ideas for harder scenarios (later)
 
