@@ -42,14 +42,18 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   there are **no stray `AsType`** (the bf16-stream fix held). So the original premise — that
   `compute_g`/gate are *unfused* and need hand-written `metal_kernel`s — no longer holds; MLX's
   automatic elementwise fusion already collapses them. Custom kernels would duplicate MLX and
-  carry the hybrid byte-exactness risk for ~no gain. **The real lever is the 92% build/FFI
+  carry the hybrid byte-exactness risk for ~no gain. **The bottleneck is the 92% build/FFI
   cost** (≈0.13 ms × 122 op-launches/token of Rust→C→C++), which pipelining can't hide (build ≫
-  eval) — that's the `mlx-native-perf-compile` SPRINT item (trace the decode step once + reuse;
-  prereq a fixed-shape cache so the graph shape is constant). Large, gated, uncertain; decode at
-  ~59 t/s is already fast and the dominant agentic latency (prefill) is now solved by prefix-KV
-  reuse. **Don't pull hand kernels;** revisit compile+fixed-cache only if single-stream decode
-  becomes critical. (Probe was the MoE; the dense 27B hybrid runs all params per token and is
-  slower — re-probe it separately if it becomes the primary model.) Diagnostics:
+  eval). The obvious lever for that is `mx.compile` (trace once + reuse) — **but it's confirmed
+  dead in mlx-rs (see `mlx-native-perf-compile` below): re-probed plain `compile` on Qwen3-4B
+  (7× bigger build than the original 0.6B probe) and it's STILL net-negative (0.64×); mlx-rs's
+  `compile` adds more overhead than the per-token build it saves, independent of model size.**
+  So the build cost isn't reducible via the available APIs (MLX already auto-fuses the
+  elementwise ops; mlx-rs compile doesn't deliver the Python `mx.compile` win). Decode at
+  ~59 t/s is already fast and the dominant agentic latency (prefill) is solved by prefix-KV
+  reuse. **Don't pull hand kernels; don't pull compile.** (Probe was the MoE; the dense 27B
+  hybrid runs all params per token and is slower — re-probe it separately if it becomes the
+  primary model.) Diagnostics:
   `ROZUM_DUMP_DOT=/tmp/d.dot … mlx_qwen35_moe_decode_bench` + a DOT label histogram.
 
 - [ ] mlx-native-batched-decode — true parallel serving (multiple concurrent sessions).
