@@ -57,6 +57,22 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   `ROZUM_DUMP_DOT=/tmp/d.dot … mlx_qwen35_moe_decode_bench` + a DOT label histogram.
 
 - [ ] mlx-native-batched-decode — true parallel serving (multiple concurrent sessions).
+  **PROBED 2026-06-14 — viable + high value (`mlx_batched_decode_probe`, dense Qwen3-4B):** a
+  B=2 batched `forward` is **byte-exact per sequence** (each row == running that sequence alone)
+  and runs **2 sequences at 212.7 tok/s vs 108.7 serial = 1.96×** (near-linear). **Why so close
+  to linear: decode is 92% CPU graph-build (FFI), and batching does ONE build for B sequences
+  instead of B** → it amortizes exactly the per-token build that `mlx-native-perf-compile` tried
+  (and failed) to eliminate. So batched decode is BOTH the multi-session throughput lever AND
+  the real answer to the build-bound decode — the two perf threads converge here. **Remaining
+  work to ship (the big part):** (1) a worker scheduler that collects up to B jobs + continuous
+  batching (admit/retire mid-decode); (2) **ragged lengths** — sequences differ in length, so
+  the batched cache needs left-padding + a per-row additive attention mask (mask the pad region),
+  or per-sequence offsets; (3) per-sequence EOS/stop/cancel + streaming; (4) raise
+  `concurrency_capacity()` to a memory-budgeted `B`. (5) **Hybrid is the hard part** — the
+  GatedDeltaNet recurrence can't be left-padded (padding pollutes the running state), so its
+  batching needs per-row state without feeding pad tokens through the recurrence (conv cache +
+  recurrent state on the batch axis, byte-exact per row). Recommend: ship dense first (the probe
+  proves it), hybrid second. The probe (`src/mlx_native_backend.rs`) is the reusable foundation.
   TODAY: the native MLX backend is capacity-1 — one OS worker thread owns the `!Send` model
   and runs jobs strictly serially (`worker_main`'s `while blocking_recv { run_job }`);
   `concurrency_capacity()=Some(1)`, so `admit_wrap` admits 1 and queues the rest (bounded
