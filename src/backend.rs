@@ -220,6 +220,14 @@ pub struct AdmissionSnapshot {
     pub in_use: usize,
     /// Requests queued waiting for a slot.
     pub waiting: usize,
+    /// Cumulative requests admitted over the daemon's life.
+    pub admitted: u64,
+    /// Cumulative admissions that took a reserved fast-lane slot.
+    pub fast_lane: u64,
+    /// Cumulative requests shed with HTTP 429 (queue full).
+    pub shed: u64,
+    /// Cumulative requests that had to wait for a slot.
+    pub queued: u64,
 }
 
 impl AdmissionSnapshot {

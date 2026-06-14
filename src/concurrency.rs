@@ -122,6 +122,15 @@ struct State {
     fast_in_use: usize,
     waiters: Vec<Waiter>,
     next_seq: u64,
+    // Cumulative counters (observability, monotonic over the daemon's life).
+    /// Requests that got a slot (immediately or after queueing).
+    admitted_total: u64,
+    /// Subset of `admitted_total` that took a reserved fast-lane slot.
+    fast_admitted_total: u64,
+    /// Requests rejected with HTTP 429 because the wait queue was full (shed load).
+    shed_total: u64,
+    /// Requests that had to WAIT for a slot (no free slot at arrival).
+    queued_total: u64,
 }
 
 impl State {
@@ -153,9 +162,11 @@ impl State {
     fn take(&mut self, is_fast: bool) {
         if is_fast {
             self.fast_in_use += 1;
+            self.fast_admitted_total += 1;
         } else {
             self.general_in_use += 1;
         }
+        self.admitted_total += 1;
     }
 
     fn put_back(&mut self, is_fast: bool) {
@@ -220,6 +231,10 @@ impl AdmissionScheduler {
                 fast_in_use: 0,
                 waiters: Vec::new(),
                 next_seq: 0,
+                admitted_total: 0,
+                fast_admitted_total: 0,
+                shed_total: 0,
+                queued_total: 0,
             })),
         }
     }
@@ -243,10 +258,12 @@ impl AdmissionScheduler {
             }
             // No free slot: queue, unless the queue is full (Phase D backpressure).
             if s.queue_max > 0 && s.waiters.len() >= s.queue_max {
+                s.shed_total += 1;
                 return Err(AdmitError::Overloaded);
             }
             let seq = s.next_seq;
             s.next_seq += 1;
+            s.queued_total += 1;
             let (tx, rx) = oneshot::channel();
             s.waiters.push(Waiter {
                 prio: Priority {
@@ -299,6 +316,19 @@ impl AdmissionScheduler {
         (s.in_use(), s.waiters.len(), s.limit)
     }
 
+    /// Cumulative observability counters `(admitted, fast_lane, shed, queued)`, monotonic
+    /// over the daemon's life: total requests admitted, the fast-lane subset, requests shed
+    /// with HTTP 429 (full queue), and requests that had to wait for a slot.
+    pub fn counters(&self) -> (u64, u64, u64, u64) {
+        let s = self.inner.lock().unwrap();
+        (
+            s.admitted_total,
+            s.fast_admitted_total,
+            s.shed_total,
+            s.queued_total,
+        )
+    }
+
     /// Admit as many queued waiters as currently fit. Called after a slot frees
     /// or the limit rises. Each successful hand-off transfers an already-counted
     /// guard; a waiter whose receiver has gone (cancelled) is skipped and its
@@ -320,6 +350,11 @@ impl AdmissionScheduler {
             if let Err(mut returned) = w.tx.send(guard) {
                 returned.armed = false; // receiver gone: no-op drop
                 s.put_back(w.prio.is_fast);
+                // `take` counted an admission that never reached the (gone) client — undo it.
+                s.admitted_total = s.admitted_total.saturating_sub(1);
+                if w.prio.is_fast {
+                    s.fast_admitted_total = s.fast_admitted_total.saturating_sub(1);
+                }
             }
         }
     }
@@ -540,10 +575,15 @@ impl ChatBackend for AdmittingBackend {
 
     fn admission_stats(&self) -> Option<crate::backend::AdmissionSnapshot> {
         let (in_use, waiting, limit) = self.scheduler.stats();
+        let (admitted, fast_lane, shed, queued) = self.scheduler.counters();
         Some(crate::backend::AdmissionSnapshot {
             limit,
             in_use,
             waiting,
+            admitted,
+            fast_lane,
+            shed,
+            queued,
         })
     }
 }
@@ -604,6 +644,38 @@ mod tests {
         let _g3 = waiter.await.unwrap();
         assert_eq!(s.stats(), (2, 0, 2));
         drop(g2);
+    }
+
+    // Observability counters (admitted / fast_lane / shed / queued) track the whole flow.
+    #[tokio::test]
+    async fn counters_track_admit_fastlane_queue_and_shed() {
+        // 2 slots (1 reserved for the fast lane), queue holds 1.
+        let s = AdmissionScheduler::new(AdmissionConfig {
+            limit: 2,
+            fastlane_tokens: 1024,
+            queue_max: 1,
+        });
+        assert_eq!(s.counters(), (0, 0, 0, 0));
+
+        let g1 = s.admit(big()).await.unwrap(); // general slot
+        assert_eq!(s.counters(), (1, 0, 0, 0), "first admit");
+        let _gfast = s.admit(small()).await.unwrap(); // reserved fast-lane slot
+        assert_eq!(s.counters(), (2, 1, 0, 0), "fast-lane hit counted");
+
+        // Both slots busy → the next big request queues.
+        let s2 = s.clone();
+        let waiter = tokio::spawn(async move { s2.admit(big()).await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(s.counters(), (2, 1, 0, 1), "queued counted");
+
+        // Queue is full (queue_max 1) → the next request is shed with 429.
+        assert!(matches!(s.admit(big()).await, Err(AdmitError::Overloaded)));
+        assert_eq!(s.counters(), (2, 1, 1, 1), "shed counted");
+
+        // Free the general slot → the queued waiter is admitted (admitted increments).
+        drop(g1);
+        let _g3 = waiter.await.unwrap();
+        assert_eq!(s.counters(), (3, 1, 1, 1), "queued waiter admitted");
     }
 
     #[tokio::test]

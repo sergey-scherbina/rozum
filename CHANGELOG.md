@@ -1,5 +1,18 @@
 # Changelog
 
+## gateway — admission counters in /stats (fast-lane hits, shed/429, queued, admitted)
+Completed: 2026-06-14
+Finishes `concurrency-observability`. The `/stats` `admission` block now carries, alongside the
+instantaneous window (limit / in-use / waiting / free), four cumulative scheduler counters:
+`admitted` (total requests that got a slot), `fast_lane` (the subset that took a reserved fast-lane
+slot), `shed` (rejected with HTTP 429 because the queue was full), and `queued` (had to wait for a
+slot). They live in the `AdmissionScheduler`'s `State` under its existing mutex (no new atomics):
+`take()` bumps `admitted` (+`fast_lane`), the full-queue path bumps `shed` before returning
+`Overloaded`, a queued arrival bumps `queued`, and a pumped-but-cancelled waiter decrements back so
+the count stays exact. Exposed through `AdmissionSnapshot` + a new `AdmissionScheduler::counters()`.
+Test `counters_track_admit_fastlane_queue_and_shed` walks the full flow. The admission policy
+(limit, fast-lane reservation, queue depth) is now tunable from data.
+
 ## mlx-native — Mistral / Mistral-Nemo support (one-line alias to the Llama path)
 Completed: 2026-06-14
 Opens the Mistral family (`model_type: "mistral"`) at near-zero cost. Mistral / Mistral-Nemo are
