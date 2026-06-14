@@ -2400,6 +2400,107 @@ mod tests {
         PROBE_MODEL.with(|c| *c.borrow_mut() = None);
     }
 
+    // Batched-decode probe (P0 de-risk for `mlx-native-batched-decode`): does a B>1
+    // batched `forward` produce per-sequence-IDENTICAL output to running each alone
+    // (byte-exact), and does it gain THROUGHPUT vs serial? Dense Qwen3 (no GatedDeltaNet);
+    // uniform-length sequences (lockstep decode, single cache offset).
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_batched_decode_probe
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "batched-decode probe; requires mlx-community/Qwen3-4B-4bit"]
+    fn mlx_batched_decode_probe() {
+        use mlx_lm::cache::ConcatKeyValueCache;
+        use mlx_lm::models::qwen3::{load_qwen3_model, Model, ModelInput};
+        use mlx_rs::Array;
+        use mlx_rs::module::Module;
+        use mlx_rs::ops::indexing::{argmax_axis, IndexOp, NewAxis};
+        use mlx_rs::transforms::eval;
+        use std::time::Instant;
+
+        let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
+            .expect("Qwen3-4B-4bit not in HF cache");
+        let mut model = load_qwen3_model(&dir).expect("load");
+
+        // Two distinct same-length prompts.
+        let a: Vec<u32> = vec![785, 6722, 315, 9625, 374, 220, 17];
+        let b: Vec<u32> = vec![3838, 374, 279, 1429, 5089, 1372, 30];
+        let t = a.len() as i32;
+        assert_eq!(a.len(), b.len());
+
+        let forward = |model: &mut Model,
+                       inp: &Array,
+                       cache: &mut Vec<Option<ConcatKeyValueCache>>|
+         -> Array {
+            let input = ModelInput { inputs: inp, mask: None, cache };
+            <Model as Module<ModelInput<'_, ConcatKeyValueCache>>>::forward(model, input)
+                .expect("forward")
+        };
+        // argmax of `row`'s last position.
+        let last = |logits: &Array, row: i32| -> u32 {
+            argmax_axis(&logits.index((row, -1, ..)), -1, false)
+                .unwrap()
+                .item::<u32>()
+        };
+
+        // --- Byte-exactness: batched seq i must equal serial seq i ---
+        let mut ca: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+        let mut cb: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+        let la = forward(&mut model, &Array::from(&a[..]).index(NewAxis), &mut ca);
+        let lb = forward(&mut model, &Array::from(&b[..]).index(NewAxis), &mut cb);
+        let (sa, sb) = (last(&la, 0), last(&lb, 0));
+
+        let batch = Array::from_iter(a.iter().chain(b.iter()).copied(), &[2, t]);
+        let mut cbatch: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+        let lbatch = forward(&mut model, &batch, &mut cbatch);
+        let (ba, bb) = (last(&lbatch, 0), last(&lbatch, 1));
+
+        eprintln!("serial next:  A={sa} B={sb}\nbatched next: A={ba} B={bb}");
+        assert_eq!(sa, ba, "batched row0 must byte-match serial A");
+        assert_eq!(sb, bb, "batched row1 must byte-match serial B");
+
+        // --- Throughput: N decode steps, batched B=2 vs 2× serial (one model, one GPU) ---
+        let n = 64;
+        let next_row = |logits: &Array| -> Array {
+            // argmax over each row's last position -> [B,1]
+            argmax_axis(&logits.index((.., -1, ..)), -1, false)
+                .unwrap()
+                .index((.., NewAxis))
+        };
+
+        // batched
+        let mut yb = next_row(&lbatch);
+        eval([&yb]).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..n {
+            let l = forward(&mut model, &yb, &mut cbatch);
+            yb = next_row(&l);
+            eval([&yb]).unwrap();
+        }
+        let batched_tps = (2 * n) as f64 / t0.elapsed().as_secs_f64();
+
+        // serial 2× (two sequences, one after the other)
+        let mut ya = next_row(&la);
+        let mut yb2 = next_row(&lb);
+        eval([&ya, &yb2]).unwrap();
+        let t1 = Instant::now();
+        for _ in 0..n {
+            let l = forward(&mut model, &ya, &mut ca);
+            ya = next_row(&l);
+            eval([&ya]).unwrap();
+        }
+        for _ in 0..n {
+            let l = forward(&mut model, &yb2, &mut cb);
+            yb2 = next_row(&l);
+            eval([&yb2]).unwrap();
+        }
+        let serial_tps = (2 * n) as f64 / t1.elapsed().as_secs_f64();
+
+        eprintln!(
+            "THROUGHPUT (2 seqs): batched(B=2)={batched_tps:.1} tok/s  serial(2×)={serial_tps:.1} tok/s  speedup={:.2}×",
+            batched_tps / serial_tps
+        );
+    }
+
     // Stage-0b perf probe (P0): decode PIPELINING. Python `mlx_lm` builds step n+1's
     // graph from the lazy token n and `async_eval`s it BEFORE blocking on token n's
     // `.item()` — so the GPU never idles waiting for the CPU to build the next graph.
