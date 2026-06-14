@@ -35,9 +35,9 @@ mistralrs = { version = "0.8.1", features = ["metal"], optional = true }
 # `{ path = "../../.vendor/mlx-lm/<crate>" }` (from a worktree) or
 # `{ path = ".vendor/mlx-lm/<crate>" }` (from the repo root), then push the fork
 # and bump the rev. mlx-sys builds MLX C++ from source (cmake + Xcode).
-mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "0bfa4bd6c157e95faa3f066ea3cec34d4789a8aa", optional = true }
-mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "0bfa4bd6c157e95faa3f066ea3cec34d4789a8aa", optional = true }
-mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "0bfa4bd6c157e95faa3f066ea3cec34d4789a8aa", optional = true }
+mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "9b4c844f36b152878c34848a95a601fe1a960138", optional = true }
+mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "9b4c844f36b152878c34848a95a601fe1a960138", optional = true }
+mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "9b4c844f36b152878c34848a95a601fe1a960138", optional = true }
 
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

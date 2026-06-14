@@ -102,6 +102,12 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
         approx_size_gb: 2.2,
         notes: "Microsoft Phi-3 (fused projections, runs on the Llama path). Small, capable.",
     },
+    RecommendedModel {
+        spec: "mlx-community:gemma-3-1b-it-4bit",
+        display_name: "Gemma 3 1B Instruct",
+        approx_size_gb: 1.0,
+        notes: "Google Gemma 3 (text). Very small, fast; full local/global attention port.",
+    },
 ];
 
 // ─── Scanners ────────────────────────────────────────────────────────────────

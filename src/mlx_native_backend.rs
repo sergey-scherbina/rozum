@@ -23,7 +23,7 @@ mod inner {
     };
 
     use mlx_lm::cache::ConcatKeyValueCache;
-    use mlx_lm::models::{llama, qwen2, qwen3, qwen3_5, qwen3_5_moe, qwen3_moe};
+    use mlx_lm::models::{gemma3, llama, qwen2, qwen3, qwen3_5, qwen3_5_moe, qwen3_moe};
     use mlx_lm_utils::tokenizer::{
         ApplyChatTemplateArgs, Chat, Conversation, Tokenizer, load_model_chat_template_from_file,
     };
@@ -116,6 +116,7 @@ mod inner {
         Qwen35Moe(qwen3_5_moe::Model),
         Llama(llama::Model),
         Qwen2(qwen2::Model),
+        Gemma3(gemma3::Model),
     }
 
     impl LoadedModel {
@@ -162,6 +163,11 @@ mod inner {
                 "phi3" => llama::load_phi3_model(dir)
                     .map(LoadedModel::Llama)
                     .map_err(|e| format!("mlx: load phi3 {}: {e}", dir.display())),
+                // Gemma 3 (text). The wrapper config maps `text_config.model_type`, so both the
+                // text-only `gemma3_text` and the multimodal `gemma3` wrapper land here.
+                "gemma3_text" | "gemma3" => gemma3::load_gemma3_model(dir)
+                    .map(LoadedModel::Gemma3)
+                    .map_err(|e| format!("mlx: load gemma3 {}: {e}", dir.display())),
                 // Qwen2 / Qwen2.5 / Qwen2.5-Coder (dense; qkv-bias, no q/k-norm).
                 "qwen2" => qwen2::load_qwen2_model(dir)
                     .map(LoadedModel::Qwen2)
@@ -431,7 +437,7 @@ mod inner {
     fn worker_main(
         model_dir: PathBuf,
         model_type: String,
-        eos: Vec<u32>,
+        mut eos: Vec<u32>,
         kv_per_pos: Option<u64>,
         mut jobs: mpsc::UnboundedReceiver<Job>,
         ready: oneshot::Sender<Result<(), String>>,
@@ -450,6 +456,17 @@ mod inner {
                 return;
             }
         };
+        // Chat turn-end tokens that end an assistant turn but aren't in the raw config
+        // `eos_token_id` (Gemma's instruct models emit `<end_of_turn>` (106), but config eos
+        // is only `<eos>` (1) → the model over-runs into garbage past its answer). Add any
+        // such token the tokenizer knows; harmless for models without it (None).
+        for t in ["<end_of_turn>"] {
+            if let Some(id) = tokenizer.token_to_id(t) {
+                if !eos.contains(&id) {
+                    eos.push(id);
+                }
+            }
+        }
         // Chat template: the `chat_template` field of tokenizer_config.json, or
         // a raw `chat_template.jinja` (multimodal snapshots ship the latter).
         let template =
@@ -467,6 +484,9 @@ mod inner {
                     return;
                 }
             };
+        // Expose the model's BOS token to templates that emit it themselves (Gemma).
+        MODEL_BOS_TOKEN
+            .with(|c| *c.borrow_mut() = read_bos_token(&model_dir.join("tokenizer_config.json")));
         if ready.send(Ok(())).is_err() {
             return; // caller gave up before load finished
         }
@@ -933,6 +953,19 @@ mod inner {
                     max_tokens,
                     &job,
                     true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
+                );
+            }
+            LoadedModel::Gemma3(m) => {
+                let mut generator = gemma3::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                generator.set_sampler(top_p, top_k, repeat_penalty);
+                stream_generation(
+                    generator,
+                    tokenizer,
+                    eos,
+                    prompt_ids.len(),
+                    max_tokens,
+                    &job,
+                    true, // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
             LoadedModel::Qwen35(m) => {
@@ -2102,6 +2135,27 @@ mod inner {
         ))
     }
 
+    thread_local! {
+        /// The model's BOS token string (from tokenizer_config.json), exposed to chat
+        /// templates that emit it themselves via `{{ bos_token }}` (Gemma). Without it the
+        /// template renders an empty BOS and a BOS-sensitive model produces garbage. Set
+        /// once at worker startup (single worker thread → thread-local is fine).
+        static MODEL_BOS_TOKEN: std::cell::RefCell<Option<String>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Read `bos_token` from a tokenizer_config.json (a plain string or a `{content}` object).
+    fn read_bos_token(path: &Path) -> Option<String> {
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        match v.get("bos_token")? {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Object(o) => {
+                o.get("content").and_then(|c| c.as_str()).map(String::from)
+            }
+            _ => None,
+        }
+    }
+
     fn render_prompt(
         tokenizer: &mut Tokenizer,
         template: &str,
@@ -2147,6 +2201,8 @@ mod inner {
             add_generation_prompt: Some(add_gen),
             continue_final_message: None,
             enable_thinking: Some(enable_thinking),
+            bos_token: MODEL_BOS_TOKEN.with(|c| c.borrow().clone()),
+            eos_token: None,
         };
         let encodings = tokenizer
             .apply_chat_template_and_encode(template.to_string(), args)
@@ -2251,6 +2307,8 @@ pub fn supported_model_type(model_type: &str) -> bool {
             | "llama"
             | "mistral"
             | "phi3"
+            | "gemma3"
+            | "gemma3_text"
             | "qwen2"
     )
 }
@@ -2387,7 +2445,7 @@ mod tests {
                 "{t} must be hybrid (needs ROZUM_MLX_RETAIN for correctness + speed)"
             );
         }
-        for t in ["qwen3", "qwen3_moe", "llama", "mistral", "phi3", "qwen2", "qwen2_5"] {
+        for t in ["qwen3", "qwen3_moe", "llama", "mistral", "phi3", "gemma3_text", "qwen2", "qwen2_5"] {
             assert!(!super::inner::is_hybrid_model(t), "{t} is dense (unretained path)");
         }
     }
@@ -2906,6 +2964,30 @@ mod tests {
         let stream = backend.chat(req).await.expect("chat");
         let text = collect_to_string(stream).await.expect("collect");
         eprintln!("MLX SMOLLM OUTPUT: {text}");
+        assert!(text.contains("Paris"), "expected Paris, got: {text}");
+    }
+
+    // Gemma 3 (text) — proves the dedicated port works end to end (+1 RMSNorm, embed scaling,
+    // q/k norm, GELU MLP, 4 norms/layer, per-layer local/global RoPE, tied embeddings). Short
+    // prompt (within the 512 sliding window → full-attn approximation is exact). ~1 GB. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_gemma3_chat
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "network: auto-downloads mlx-community/gemma-3-1b-it-4bit (~1GB)"]
+    async fn mlx_gemma3_chat() {
+        use super::{MlxNativeBackend, ensure_model_dir};
+        use crate::backend::{ChatBackend, ChatRequest, collect_to_string};
+
+        let spec = "mlx-community:gemma-3-1b-it-4bit";
+        let dir = ensure_model_dir(spec).await.expect("gemma3 download/resolve");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+            .await
+            .expect("backend load (Gemma 3)");
+        let req =
+            ChatRequest::simple("What is the capital of France? Answer in one short sentence.");
+        let stream = backend.chat(req).await.expect("chat");
+        let text = collect_to_string(stream).await.expect("collect");
+        eprintln!("MLX GEMMA3 OUTPUT: {text}");
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
     }
 

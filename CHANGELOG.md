@@ -1,5 +1,25 @@
 # Changelog
 
+## mlx-native — Gemma 3 (text) support — own model file + three general template/EOS/lm_head fixes
+Completed: 2026-06-14
+Opens Google's Gemma 3 family (`model_type: "gemma3_text"` / multimodal-wrapper `gemma3`). Unlike
+Mistral/Phi-3 this is a genuine port (`gemma3.rs`): the `(1 + weight)` RMSNorm convention (f32),
+embedding `sqrt(hidden)` scaling, per-head q/k RMSNorm, GELU(tanh) MLP, four norms per layer,
+alternating local/global attention (per-layer RoPE base `rope_local_base_freq` vs `rope_theta`,
+every `sliding_window_pattern`-th layer global), and `query_pre_attn_scalar^-0.5` scale; own
+`Generate`, `LoadedModel::Gemma3`. Validated end-to-end (`mlx_gemma3_chat`, gemma-3-1b-it-4bit):
+*"Paris is the capital of France."* (clean). Getting there required three fixes that are GENERAL
+improvements, not Gemma-specific: (1) mlx-community 4-bit conversions ship a SEPARATE quantized
+`lm_head` even for tied models (its quant params differ from the embedding's) — detect an `lm_head.*`
+key and use it; (2) chat templates that emit `{{ bos_token }}` themselves (Gemma) got an empty BOS
+because the minijinja context lacked it — `bos_token`/`eos_token` are now threaded into the render
+context (a BOS-sensitive model was pure garbage without the leading `<bos>`); (3) the assistant
+turn-end token `<end_of_turn>` (106) wasn't in EOS (config eos is only `<eos>`=1), so the model
+over-ran into garbage past its answer — the worker now adds the tokenizer's turn-end token to EOS.
+Added to `models::RECOMMENDED`; 131/0. Deferred: the 512 sliding window is approximated by full
+attention (exact within the window); Gemma 2's logit soft-cap and the vision tower are separate.
+Fork rev `9b4c844f`.
+
 ## mlx-native — Phi-3 support (fused-projection split into the Llama path, no new model file)
 Completed: 2026-06-14
 Opens Microsoft's Phi-3 family (`model_type: "phi3"`). Phi-3 is the Llama architecture but ships
