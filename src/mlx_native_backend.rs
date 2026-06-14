@@ -410,6 +410,7 @@ mod inner {
         // `prefix` carries the previous dense request's KV across jobs for prefix
         // reuse (the worker is cap-1 serial, so no locking is needed).
         let mut prefix: Option<PrefixCache> = None;
+        let mut hprefix: Option<HybridPrefix> = None;
         while let Some(job) = jobs.blocking_recv() {
             run_job(
                 &mut model,
@@ -418,6 +419,7 @@ mod inner {
                 &eos,
                 kv_per_pos,
                 &mut prefix,
+                &mut hprefix,
                 job,
             );
         }
@@ -446,10 +448,21 @@ mod inner {
         cache: Vec<Option<ConcatKeyValueCache>>,
     }
 
+    /// Persisted hybrid (Qwen3.6) cache from the previous request, for prefix reuse.
+    /// `cache` is the live heterogeneous cache (advanced past `ids` by generation);
+    /// `snap` is the per-layer `Linear` recurrent state snapshotted at the END of the
+    /// previous prefill (offset == `ids.len()`). On reuse the `Full` layers are
+    /// truncated to `ids.len()` and the `Linear` layers restored from `snap`.
+    struct HybridPrefix {
+        ids: Vec<u32>,
+        cache: Vec<qwen3_5::LayerCache>,
+        snap: Vec<qwen3_5::LinearSnap>,
+    }
+
     /// Dense arches own their KV cache externally (`Vec<Option<ConcatKeyValueCache>>`)
-    /// and so support prefix reuse via truncation. Hybrid (Qwen3.6) owns its cache
-    /// internally and carries a non-truncatable recurrent state (see BACKLOG
-    /// `mlx-native-prefix-kv-cache`), so it isn't reused here.
+    /// and support prefix reuse via plain truncation. Hybrid (Qwen3.6) owns its cache
+    /// internally and carries a non-truncatable GatedDeltaNet recurrent state, so it
+    /// reuses via truncate-`Full` + restore-`Linear`-from-snapshot (`HybridPrefix`).
     fn is_dense(model: &LoadedModel) -> bool {
         matches!(
             model,
@@ -469,6 +482,7 @@ mod inner {
         eos: &[u32],
         kv_per_pos: Option<u64>,
         prefix: &mut Option<PrefixCache>,
+        hprefix: &mut Option<HybridPrefix>,
         job: Job,
     ) {
         let prompt_ids = match render_prompt(
@@ -549,6 +563,9 @@ mod inner {
             !matches!(std::env::var("ROZUM_PREFIX_CACHE").as_deref(), Ok("0"));
         let dense = is_dense(model);
         let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+        // Hybrid: a pre-populated heterogeneous cache when reusing (else None → the
+        // hybrid `Generate` builds a fresh one via `init_cache`).
+        let mut hcache: Option<Vec<qwen3_5::LayerCache>> = None;
         let mut reuse_len = 0usize;
         if prefix_enabled && dense {
             if let Some(p) = prefix.as_mut() {
@@ -558,6 +575,21 @@ mod inner {
                     for c in cache.iter_mut().flatten() {
                         c.truncate(reuse_len as i32);
                     }
+                }
+            }
+        } else if prefix_enabled {
+            // Hybrid (Qwen3.6): truncate the `Full` (KV) layers to the shared prefix
+            // and restore the `Linear` recurrent layers from the end-of-prefill
+            // snapshot taken last turn — byte-exact for the append-only case.
+            if let Some(p) = hprefix.as_mut() {
+                if p.ids.len() < prompt_ids.len() && prompt_ids.starts_with(&p.ids) {
+                    reuse_len = p.ids.len();
+                    let mut c = std::mem::take(&mut p.cache);
+                    for (layer, snap) in c.iter_mut().zip(p.snap.iter()) {
+                        layer.truncate(reuse_len as i32);
+                        layer.restore(snap);
+                    }
+                    hcache = Some(c);
                 }
             }
         }
@@ -574,6 +606,12 @@ mod inner {
         } else {
             Array::from(&prompt_ids[..]).index(NewAxis)
         };
+        // Hybrid arms hand back their (advanced) cache + end-of-prefill snapshot here
+        // so they can be persisted for next-turn reuse (dense persists `cache` below).
+        let mut hybrid_result: Option<(
+            Vec<qwen3_5::LayerCache>,
+            Option<Vec<qwen3_5::LinearSnap>>,
+        )> = None;
         match model {
             LoadedModel::Qwen3(m) => {
                 let mut generator = qwen3::Generate::new(m, &mut cache, temp, &prompt_tokens);
@@ -629,12 +667,16 @@ mod inner {
                 );
             }
             LoadedModel::Qwen35(m) => {
-                // Owns its heterogeneous (KV + conv/recurrent) cache internally.
-                let mut generator = qwen3_5::Generate::new(m, temp, &prompt_tokens);
+                // Owns its heterogeneous (KV + conv/recurrent) cache internally; on
+                // reuse it's seeded with the truncated+restored cache via `with_cache`.
+                let mut generator = match hcache.take() {
+                    Some(c) => qwen3_5::Generate::with_cache(m, temp, &prompt_tokens, c),
+                    None => qwen3_5::Generate::new(m, temp, &prompt_tokens),
+                };
                 let c = job.cancel.clone();
                 generator.set_cancel(Box::new(move || c.is_cancelled()));
                 generator.set_sampler(top_p, top_k, repeat_penalty);
-                stream_generation(
+                let generator = stream_generation(
                     generator,
                     tokenizer,
                     eos,
@@ -646,13 +688,17 @@ mod inner {
                           // can async_eval while we read the current's id (byte-exact;
                           // see mlx_qwen35_moe_decode_bench serial==pipe MATCH)
                 );
+                hybrid_result = Some(generator.into_cache_and_snapshot());
             }
             LoadedModel::Qwen35Moe(m) => {
-                let mut generator = qwen3_5_moe::Generate::new(m, temp, &prompt_tokens);
+                let mut generator = match hcache.take() {
+                    Some(c) => qwen3_5_moe::Generate::with_cache(m, temp, &prompt_tokens, c),
+                    None => qwen3_5_moe::Generate::new(m, temp, &prompt_tokens),
+                };
                 let c = job.cancel.clone();
                 generator.set_cancel(Box::new(move || c.is_cancelled()));
                 generator.set_sampler(top_p, top_k, repeat_penalty);
-                stream_generation(
+                let generator = stream_generation(
                     generator,
                     tokenizer,
                     eos,
@@ -664,16 +710,22 @@ mod inner {
                           // can async_eval while we read the current's id (byte-exact;
                           // see mlx_qwen35_moe_decode_bench serial==pipe MATCH)
                 );
+                hybrid_result = Some(generator.into_cache_and_snapshot());
             }
         }
 
-        // Persist the (now advanced) dense cache so the next request that extends
-        // this prompt can reuse its KV. `cache` is non-empty only for dense arches
-        // (hybrid keeps its cache internally); keyed by this prompt's ids, so next
-        // turn truncates back to here before prefilling the new suffix. A non-dense
-        // run leaves `prefix` untouched (the worker only ever serves one model).
-        if prefix_enabled && dense && !cache.is_empty() {
+        // Persist the (now advanced) cache so the next request that extends this
+        // prompt can reuse it (keyed by this prompt's ids → next turn truncates back
+        // to here before prefilling the new suffix). Dense: the external KV vec.
+        // Hybrid: the live heterogeneous cache + the end-of-prefill Linear snapshot.
+        if !prefix_enabled {
+            // leave both untouched
+        } else if dense && !cache.is_empty() {
             *prefix = Some(PrefixCache { ids: prompt_ids, cache });
+        } else if let Some((hcache, Some(snap))) = hybrid_result {
+            // Only persist when prefill ran (snapshot present); a mid-prefill cancel
+            // yields no snapshot, so we don't poison the cache with a partial state.
+            *hprefix = Some(HybridPrefix { ids: prompt_ids, cache: hcache, snap });
         }
     }
 
@@ -752,6 +804,10 @@ mod inner {
     /// and emit UTF-8-safe text deltas. Once a `<tool_call>` opener appears, text
     /// streaming stops and the run is parsed into `ToolUse*` events at the end.
     /// A send error means the client dropped the stream -> stop early.
+    /// Drive the token iterator, streaming `ChatEvent`s to the client. Returns the
+    /// (now exhausted) iterator so a hybrid caller can reclaim its internal cache +
+    /// prefill snapshot for prefix reuse (`into_cache_and_snapshot`); dense callers
+    /// drop it (releasing the external-cache borrow).
     fn stream_generation<I>(
         generate: I,
         tokenizer: &mut Tokenizer,
@@ -760,7 +816,8 @@ mod inner {
         max_tokens: usize,
         job: &Job,
         pipeline: bool,
-    ) where
+    ) -> I
+    where
         I: Iterator<Item = Result<Array, Exception>>,
     {
         let mut out_ids: Vec<u32> = Vec::new();
@@ -784,7 +841,7 @@ mod inner {
                 let _ = job
                     .events
                     .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
-                return;
+                return iter;
             }
             None => None, // hybrid Generate returns None when cancelled mid-prefill
         };
@@ -826,7 +883,7 @@ mod inner {
             let next = if pipeline {
                 match pull(&mut iter, true) {
                     Ok(n) => n,
-                    Err(()) => return,
+                    Err(()) => return iter,
                 }
             } else {
                 None
@@ -836,7 +893,7 @@ mod inner {
                 let _ = job.events.send(Err(ModelError::BackendUnavailable(
                     "mlx: eval failed".into(),
                 )));
-                return;
+                return iter;
             }
             let id = token.item::<u32>();
             if let Some(t) = t_sync {
@@ -876,7 +933,7 @@ mod inner {
                             .send(Ok(ChatEvent::TextDelta { text: delta }))
                             .is_err()
                         {
-                            return; // client dropped the stream
+                            return iter; // client dropped the stream
                         }
                     }
                 }
@@ -908,7 +965,7 @@ mod inner {
             } else {
                 match pull(&mut iter, false) {
                     Ok(n) => n,
-                    Err(()) => return,
+                    Err(()) => return iter,
                 }
             };
         }
@@ -961,6 +1018,7 @@ mod inner {
             output_tokens,
             stop_reason,
         }));
+        iter
     }
 
     /// Apply the model's chat template to the messages and tokenize, returning
@@ -1403,6 +1461,66 @@ mod tests {
 
         eprintln!("REUSE: {reuse:?}\nFRESH: {fresh:?}");
         assert_eq!(reuse, fresh, "prefix-reuse output must byte-match a fresh prefill");
+    }
+
+    // Hybrid (Qwen3.6) prefix reuse must be byte-exact too: the recurrent GatedDeltaNet
+    // `Linear` state restored from the end-of-prefill snapshot + the truncated `Full`
+    // KV must reproduce a fresh prefill exactly. Uses the DENSE hybrid Qwen3.6-27B
+    // (deterministic; the 35B-A3B MoE has greedy float-reduction nondeterminism that
+    // would make a byte comparison flaky — the MoE shares this exact reuse logic). One
+    // backend + `ROZUM_PREFIX_CACHE` toggle to keep memory to a single model load.
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_prefix_reuse_byte_exact_hybrid
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires local mlx-community/Qwen3.6-27B-4bit"]
+    async fn mlx_prefix_reuse_byte_exact_hybrid() {
+        use super::MlxNativeBackend;
+        use crate::backend::{
+            ChatBackend, ChatRequest, ContentBlock, Message, Role, SamplingParams,
+            collect_to_string,
+        };
+        use tokio_util::sync::CancellationToken;
+
+        let dir = resolve_model_dir("mlx-community:Qwen3.6-27B-4bit")
+            .expect("Qwen3.6-27B-4bit not in HF cache");
+        let asst = |s: &str| Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text { text: s.into() }],
+        };
+        let req = |msgs: Vec<Message>| ChatRequest {
+            messages: msgs,
+            tools: vec![],
+            sampling: SamplingParams { max_tokens: Some(24), ..Default::default() },
+            cancel: CancellationToken::new(),
+            session_id: None,
+        };
+        let q1 = "Name three primary colors, comma separated.";
+        let q2 = "Now name three farm animals, comma separated.";
+
+        let b = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-27B-4bit".into())
+            .await
+            .expect("load");
+
+        // Turn 1 populates the hybrid prefix; turn 2 REUSES it (truncate Full +
+        // restore Linear from snapshot + prefill the suffix).
+        unsafe { std::env::set_var("ROZUM_PREFIX_CACHE", "1") };
+        let t1 = collect_to_string(b.chat(req(vec![Message::user(q1)])).await.unwrap())
+            .await
+            .unwrap();
+        let convo2 = vec![Message::user(q1), asst(&t1), Message::user(q2)];
+        let reuse = collect_to_string(b.chat(req(convo2.clone())).await.unwrap())
+            .await
+            .unwrap();
+
+        // Same turn-2 conversation, prefix OFF → full fresh prefill (no reuse).
+        unsafe { std::env::set_var("ROZUM_PREFIX_CACHE", "0") };
+        let fresh = collect_to_string(b.chat(req(convo2)).await.unwrap())
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var("ROZUM_PREFIX_CACHE") };
+
+        eprintln!("REUSE: {reuse:?}\nFRESH: {fresh:?}");
+        assert_eq!(reuse, fresh, "hybrid prefix-reuse output must byte-match a fresh prefill");
     }
 
     // Prod-path perf through the FULL MlxNativeBackend.chat (tokenizer detok +

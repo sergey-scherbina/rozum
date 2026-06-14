@@ -17,6 +17,21 @@ into one leading system message. **Codex e2e build task PASSES end-to-end** (`re
 `cargo run -- hello` → `olleh`, `rc=0`, ~71 s). Tests: input/tool conversion, multi-system fold,
 response-object shape, SSE smoke.
 
+## mlx-native — prefix-KV cache reuse for the hybrid Qwen3.6 arches
+Completed: 2026-06-14
+Extends prefix reuse to the hybrid Qwen3.6 models (Qwen35 + Qwen35Moe — the models the e2e
+runs). Their `Full(KV)` layers truncate to the shared prefix like dense; their `Linear`
+GatedDeltaNet layers carry a **recurrent** state that can't be truncated, so it is deep-copied
+(`Array::deep_clone` → own buffer, survives decode buffer donation) at the **end of prefill**
+(offset == prompt len) and restored on the next reuse. Fork (`fd284599`):
+`LayerCache::{truncate, snapshot, restore}` + `LinearSnap`, `Generate::with_cache` (start from a
+pre-populated cache, snapshot the Linear state right after the prefill step) +
+`into_cache_and_snapshot`. rozum: `stream_generation` returns the iterator so the hybrid arms
+reclaim the cache + snapshot; the worker persists `HybridPrefix{ids, cache, snap}`, and on reuse
+truncates Full + restores Linear + prefills only the new suffix. **Byte-exact** vs a fresh
+prefill (integration test `mlx_prefix_reuse_byte_exact_hybrid` on the deterministic Qwen3.6-27B).
+Now every agentic turn — dense OR hybrid — skips re-prefilling the growing conversation.
+
 ## mlx-native — prefix-KV cache reuse across agentic turns (dense)
 Completed: 2026-06-14
 Every Claude Code / Codex turn used to re-prefill the **entire growing conversation** (a fresh

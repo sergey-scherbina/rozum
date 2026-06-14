@@ -120,8 +120,8 @@ throwaway temp dir). Thinking is **off by default** in the gateway (clean output
     Claude's loop kept going without a clean final turn — but the **deliverable is correct and
     verified**. The 605 s is now *slowness*, not a hang: ~26 hybrid turns, each re-prefilling the
     growing context (~20 s/turn). That per-turn re-prefill is exactly what
-    `mlx-native-prefix-kv-cache` removes for dense — and `mlx-native-prefix-kv-cache-hybrid`
-    will remove for Qwen3.6.
+    `mlx-native-prefix-kv-cache` removes for dense — and (now shipped)
+    `mlx-native-prefix-kv-cache-hybrid` removes for Qwen3.6 too.
   - **Takeaway:** `build` (the simplest task) is a reliable smoke; `test` sits at/above this
     model's reliable agentic ceiling and fails intermittently. Use `build` as the go/no-go
     gateway smoke; treat `test` as a model-capability stress, not a gateway regression.
