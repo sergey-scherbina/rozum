@@ -409,8 +409,7 @@ mod inner {
         // tokio runtime, so it parks until the next job (or the queue closes).
         // `prefix` carries the previous dense request's KV across jobs for prefix
         // reuse (the worker is cap-1 serial, so no locking is needed).
-        let mut prefix: Option<PrefixCache> = None;
-        let mut hprefix: Option<HybridPrefix> = None;
+        let mut store = PrefixStore::new();
         while let Some(job) = jobs.blocking_recv() {
             run_job(
                 &mut model,
@@ -418,8 +417,7 @@ mod inner {
                 &template,
                 &eos,
                 kv_per_pos,
-                &mut prefix,
-                &mut hprefix,
+                &mut store,
                 job,
             );
         }
@@ -459,6 +457,84 @@ mod inner {
         snap: Vec<qwen3_5::LinearSnap>,
     }
 
+    /// Default number of prefix-cache slots (distinct conversations whose KV is kept
+    /// resident). 1 covers a single agent; >1 lets *interleaved* sessions (several
+    /// room agents, or Claude Code + Codex at once) each keep their prefix instead of
+    /// thrashing one slot. Each slot holds a conversation's KV, so it costs memory —
+    /// override via `ROZUM_PREFIX_CACHE_SLOTS` (lower it for very long contexts).
+    const DEFAULT_PREFIX_SLOTS: usize = 4;
+
+    /// Small LRU of prefix caches on the (cap-1) worker, so concurrent/interleaved
+    /// conversations each reuse their own KV. A worker serves one model, so only one
+    /// of `dense`/`hybrid` is ever populated. Front = most-recently-used.
+    pub(crate) struct PrefixStore {
+        dense: Vec<PrefixCache>,
+        hybrid: Vec<HybridPrefix>,
+        cap: usize,
+    }
+
+    impl PrefixStore {
+        fn new() -> Self {
+            let cap = std::env::var("ROZUM_PREFIX_CACHE_SLOTS")
+                .ok()
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .unwrap_or(DEFAULT_PREFIX_SLOTS)
+                .max(1);
+            Self { dense: Vec::new(), hybrid: Vec::new(), cap }
+        }
+
+        /// Index of the entry whose `ids` is the LONGEST strict prefix of `ids` (the
+        /// conversation this request extends), among entries — or `None`.
+        pub(crate) fn best_match<T>(
+            entries: &[T],
+            ids: &[u32],
+            get: impl Fn(&T) -> &[u32],
+        ) -> Option<usize> {
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    let eids = get(e);
+                    eids.len() < ids.len() && ids.starts_with(eids)
+                })
+                .max_by_key(|(_, e)| get(e).len())
+                .map(|(i, _)| i)
+        }
+
+        /// Take the dense entry this prompt extends (removed; the advanced cache is
+        /// re-inserted by `put_dense` after generation). Returns `(reuse_len, cache)`.
+        fn take_dense(&mut self, ids: &[u32]) -> Option<(usize, Vec<Option<ConcatKeyValueCache>>)> {
+            let i = Self::best_match(&self.dense, ids, |e| &e.ids)?;
+            let e = self.dense.remove(i);
+            Some((e.ids.len(), e.cache))
+        }
+
+        fn put_dense(&mut self, ids: Vec<u32>, cache: Vec<Option<ConcatKeyValueCache>>) {
+            self.dense.insert(0, PrefixCache { ids, cache });
+            self.dense.truncate(self.cap);
+        }
+
+        /// Take the hybrid entry this prompt extends. Returns `(reuse_len, cache, snap)`.
+        fn take_hybrid(
+            &mut self,
+            ids: &[u32],
+        ) -> Option<(usize, Vec<qwen3_5::LayerCache>, Vec<qwen3_5::LinearSnap>)> {
+            let i = Self::best_match(&self.hybrid, ids, |e| &e.ids)?;
+            let e = self.hybrid.remove(i);
+            Some((e.ids.len(), e.cache, e.snap))
+        }
+
+        fn put_hybrid(
+            &mut self,
+            ids: Vec<u32>,
+            cache: Vec<qwen3_5::LayerCache>,
+            snap: Vec<qwen3_5::LinearSnap>,
+        ) {
+            self.hybrid.insert(0, HybridPrefix { ids, cache, snap });
+            self.hybrid.truncate(self.cap);
+        }
+    }
+
     /// Dense arches own their KV cache externally (`Vec<Option<ConcatKeyValueCache>>`)
     /// and support prefix reuse via plain truncation. Hybrid (Qwen3.6) owns its cache
     /// internally and carries a non-truncatable GatedDeltaNet recurrent state, so it
@@ -481,8 +557,7 @@ mod inner {
         template: &str,
         eos: &[u32],
         kv_per_pos: Option<u64>,
-        prefix: &mut Option<PrefixCache>,
-        hprefix: &mut Option<HybridPrefix>,
+        store: &mut PrefixStore,
         job: Job,
     ) {
         let prompt_ids = match render_prompt(
@@ -570,12 +645,13 @@ mod inner {
             let _ = mlx_rs::random::seed(s);
         }
 
-        // Prefix-KV reuse (dense arches only — see `is_dense`/`PrefixCache`): if the
-        // previous request's prompt is a strict prefix of this one (the append-only
-        // agentic-loop case), keep its KV, truncate the cache to the shared length,
-        // and prefill only the new suffix. Byte-exact: the kept `[0, reuse)` KV is
-        // exactly what a fresh prefill would compute, and `create_attention_mask`
-        // builds the causal mask from the cache offset. `ROZUM_PREFIX_CACHE=0` off.
+        // Prefix-KV reuse: find the stored conversation that this prompt extends
+        // (longest-prefix match in the LRU — so interleaved sessions each reuse their
+        // own), keep its KV, truncate to the shared length, and prefill only the new
+        // suffix. Byte-exact: the kept `[0, reuse)` KV is exactly what a fresh prefill
+        // computes, and `create_attention_mask` builds the causal mask from the cache
+        // offset. Reuse keys on the CONVERSATION boundary (`conv_len` below), since the
+        // generation-prompt tail doesn't recur. `ROZUM_PREFIX_CACHE=0` disables.
         let prefix_enabled =
             !matches!(std::env::var("ROZUM_PREFIX_CACHE").as_deref(), Ok("0"));
         let dense = is_dense(model);
@@ -585,29 +661,24 @@ mod inner {
         let mut hcache: Option<Vec<qwen3_5::LayerCache>> = None;
         let mut reuse_len = 0usize;
         if prefix_enabled && dense {
-            if let Some(p) = prefix.as_mut() {
-                if p.ids.len() < prompt_ids.len() && prompt_ids.starts_with(&p.ids) {
-                    reuse_len = p.ids.len();
-                    cache = std::mem::take(&mut p.cache);
-                    for c in cache.iter_mut().flatten() {
-                        c.truncate(reuse_len as i32);
-                    }
+            if let Some((rl, c)) = store.take_dense(&prompt_ids) {
+                reuse_len = rl;
+                cache = c;
+                for c in cache.iter_mut().flatten() {
+                    c.truncate(reuse_len as i32);
                 }
             }
         } else if prefix_enabled {
             // Hybrid (Qwen3.6): truncate the `Full` (KV) layers to the shared prefix
-            // and restore the `Linear` recurrent layers from the end-of-prefill
+            // and restore the `Linear` recurrent layers from the conversation-boundary
             // snapshot taken last turn — byte-exact for the append-only case.
-            if let Some(p) = hprefix.as_mut() {
-                if p.ids.len() < prompt_ids.len() && prompt_ids.starts_with(&p.ids) {
-                    reuse_len = p.ids.len();
-                    let mut c = std::mem::take(&mut p.cache);
-                    for (layer, snap) in c.iter_mut().zip(p.snap.iter()) {
-                        layer.truncate(reuse_len as i32);
-                        layer.restore(snap);
-                    }
-                    hcache = Some(c);
+            if let Some((rl, mut c, snap)) = store.take_hybrid(&prompt_ids) {
+                reuse_len = rl;
+                for (layer, s) in c.iter_mut().zip(snap.iter()) {
+                    layer.truncate(reuse_len as i32);
+                    layer.restore(s);
                 }
+                hcache = Some(c);
             }
         }
         if reuse_len > 0 && std::env::var_os("ROZUM_MLX_DEBUG").is_some() {
@@ -737,22 +808,22 @@ mod inner {
             }
         }
 
-        // Persist the (now advanced) cache so the next request that extends this
-        // conversation can reuse it. Keyed by the CONVERSATION boundary (`conv_len`),
-        // not the full prompt: the generation-prompt tail doesn't recur, so the next
-        // prompt only starts_with the conversation prefix. Next turn truncates back to
-        // here (dense KV / hybrid Full) + restores the Linear snapshot (taken at this
-        // same boundary), then prefills the new suffix.
+        // Persist the (now advanced) cache into the LRU so the next request that
+        // extends this conversation can reuse it. Keyed by the CONVERSATION boundary
+        // (`conv_len`), not the full prompt: the generation-prompt tail doesn't recur,
+        // so the next prompt only starts_with the conversation prefix. The matched
+        // entry (if any) was removed on reuse above, so this re-inserts the extended
+        // conversation at MRU; an unmatched (new) conversation inserts + evicts LRU.
         let conv_ids = prompt_ids.get(..conv_len).map(<[u32]>::to_vec);
         if !prefix_enabled {
-            // leave both untouched
+            // leave the store untouched
         } else if let Some(ids) = conv_ids {
             if dense && !cache.is_empty() {
-                *prefix = Some(PrefixCache { ids, cache });
+                store.put_dense(ids, cache);
             } else if let Some((hcache, Some(snap))) = hybrid_result {
                 // Only persist when prefill ran (snapshot present); a mid-prefill
                 // cancel yields no snapshot, so we don't poison the cache.
-                *hprefix = Some(HybridPrefix { ids, cache: hcache, snap });
+                store.put_hybrid(ids, hcache, snap);
             }
         }
     }
@@ -1417,6 +1488,28 @@ mod tests {
         let mut tail = varied.clone();
         tail.extend([9u32; 20]); // only 20 repeats, < REPEAT_WINDOW(64)
         assert!(!is_runaway_loop(&tail));
+    }
+
+    #[test]
+    fn prefix_store_best_match() {
+        use super::inner::PrefixStore;
+        let m = |entries: &[Vec<u32>], ids: &[u32]| {
+            PrefixStore::best_match(entries, ids, |v: &Vec<u32>| v.as_slice())
+        };
+        // Two interleaved "sessions": A = [1,2,3...], B = [1,9,...] (diverge at idx 1).
+        let entries: Vec<Vec<u32>> = vec![vec![1, 2, 3], vec![1, 9]];
+        // A's next turn extends A → matches entry 0, not B.
+        assert_eq!(m(&entries, &[1, 2, 3, 4, 5]), Some(0));
+        // B's next turn extends B → matches entry 1 (B is a prefix; A is not).
+        assert_eq!(m(&entries, &[1, 9, 8, 7]), Some(1));
+        // A different conversation that shares only [1] matches neither (no entry is
+        // a full prefix) — it's a new session.
+        assert_eq!(m(&entries, &[1, 0, 0]), None);
+        // Longest-prefix wins when several entries match.
+        let nested: Vec<Vec<u32>> = vec![vec![1], vec![1, 2], vec![1, 2, 3]];
+        assert_eq!(m(&nested, &[1, 2, 3, 4]), Some(2));
+        // An exact-length match is NOT reused (need a strict prefix to have a suffix).
+        assert_eq!(m(&entries, &[1, 2, 3]), None);
     }
 
     #[test]
