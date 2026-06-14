@@ -170,18 +170,26 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   the fixed-cache + compiled-decode redesign is shelved. Spec: mlx-native-runtime.md
   "Performance — decode parity".
 
-- [ ] mlx-native-perf-hybrid-mlxbump - **Hybrid (Qwen3.6) decode ~12 → ~22 t/s.** The
-  GatedDeltaNet kernel needs a blocking `eval` per layer (~48/token) to dodge a
-  metal_kernel buffer-donation bug → the forward self-blocks, so it can't pipeline.
-  Removing the eval OR `async_eval` both give garbage on our **MLX 0.30.6**; Python's
-  kernel has NO eval and is correct on **MLX 0.31.2** → the bug is fixed upstream. Fix
-  = bump `mlx-sys` 0.30.6 → 0.31.2 (needs the fft.cpp-exclude + ops.cpp patch from the
-  earlier attempt), drop `gated_delta.rs:250`'s eval, then pipeline the hybrid like the
-  dense path + flip its `pipeline=false` to true. Heavy: ~15-min MLX C++ rebuild, build
-  patches, 27B byte-exact validation, reboot-risky (run on the small models where
-  possible; the SPRINT RESUME CHECKPOINT + small-model discipline applies). High
-  probability but unproven (the earlier 0.31.2 attempt was for the rope bug, never
-  tested gated_delta).
+- [x] mlx-native-perf-hybrid-mlxbump - **DONE + SUPERSEDED — all of it shipped, and the real
+  win was 3× bigger than this item imagined.** The plan here (bump to MLX 0.31.2, drop the
+  per-layer GatedDeltaNet eval, pipeline the hybrid) is **entirely landed**: mlx-c builds against
+  `GIT_TAG v0.31.2` with the env-gated retained-command-buffer `PATCH_COMMAND` (mlx-c `85ee313`),
+  `gated_delta.rs` skips the per-call eval when `ROZUM_MLX_RETAIN` is set, and the hybrid decode
+  paths (`Qwen35`/`Qwen35Moe` in `src/mlx_native_backend.rs`) already pass `pipeline=true`. That
+  combo alone was ~12 → 16-17 t/s. **Then the actual bottleneck turned out to be something this
+  item never saw:** a bf16→f32 stream leak in `qwen3_5.rs`'s q/k delta-scaling (a strong f32
+  0-dim multiplier promoted the whole stream to f32 → ~1000 spurious `AsType` casts/token feeding
+  every QuantizedMatmul/RMSNorm). Fixed by casting the scale to q/k's dtype
+  (`Array::from_f32(s).as_dtype(qn.dtype())`, lines 426/428) + a null-weight `rms_norm_no_weight`.
+  **Result: MoE hybrid decode 33 → ~88 t/s (2.7×), dense 27B 16 → ~19.6 t/s** — ~90% of Python
+  (97-110 MoE / 23 dense). Full diagnostic + numbers: `docs/mlx-gd-bug/LOG.md`. Single-stream
+  hybrid decode is now effectively maxed: every per-token-cost lever (mlxbump, retain, bf16-leak,
+  null-weight norm, pipelining, hand-fused kernels, mx.compile) is pulled or proven dead. **The
+  ONE lever left is batching** — the probe (`mlx-hand-fused-gdn-kernels`) showed 92% of per-token
+  time is CPU graph-build/FFI (`build=15.65 eval=1.31 ms/tok`), and batching amortizes exactly
+  that across B sequences (dense already got 1.98×, `mlx-native-batched-decode`). So the remaining
+  hybrid-decode speedup lives in **hybrid batched decode** (the hard counterpart — GatedDeltaNet
+  recurrence can't be left-padded; needs per-row conv+recurrent state on the batch axis).
 
 - [x] mlx-native-perf-compile - **CLOSED 2026-06-14: confirmed dead AND superseded by
   mlx-native-batched-decode.** The premise was that `mx.compile` (trace once + reuse) could
