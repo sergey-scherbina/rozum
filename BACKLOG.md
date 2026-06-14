@@ -110,6 +110,19 @@ through `concurrency::admit_wrap`, so they are not relisted.)
     requests, `ROZUM_BATCH=2`, the 3rd admitted into a freed slot mid-decode (one `run_batch` call,
     `BATCH_ADMIT_COUNT`+1), each correct + distinct (`Paris`/`Tokyo`/`Berlin`); all dense + hybrid
     byte-exact and scheduler tests still green.
+  - **Batched SAMPLING SHIPPED 2026-06-14** — batching is no longer greedy-only. Fork
+    `qwen3::sample_rows(logits[B,vocab], temp[B], top_k[B], top_p[B])` samples one token per row,
+    each honoring its OWN temperature/top-k/top-p (a unified always-nucleus path; `top_k<=0`/`top_p>=1`
+    keep all; `temp==0` → per-row argmax override), so one batch can MIX greedy + sampling requests.
+    The batch gate relaxed from `is_greedy` to `is_batchable` (only repetition-penalty / explicit-seed
+    rows stay serial — they need per-row history scatter / RNG keys). `run_batch`/`run_batch_hybrid`
+    build per-row `[B]` param arrays from each row's `SamplingParams` and call `sample_rows` in place
+    of argmax (decode step + admit + initial). Validated: fork `sample_rows_per_row_collapses_to_argmax`
+    (mixed per-row configs each collapse to their own argmax, deterministic) + the greedy e2e tests now
+    route through `sample_rows@temp0` and stay byte-exact (`Paris`/`Tokyo`/`Berlin`) +
+    `mlx_batched_sampling_two_concurrent` (two `temp=0.7` requests batch — `run_batch calls=1` — and
+    stream coherent output `Red`/`Dog`). Repetition-penalty + per-seed batching are the remaining
+    follow-up (rare for coding agents; serial path covers them).
 
   **RAGGED is tractable — confirmed (`mlx_rope_per_row_probe`):** `mlx_rs::fast::rope_dynamic`
   accepts a **per-row `[B]` offset array** and ropes each row at its own position (byte-exact vs
