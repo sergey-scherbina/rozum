@@ -388,6 +388,42 @@ features the mistralrs backend shipped that the native backend does NOT yet have
   gap for Codex support** (Claude Code already works via `/v1/messages`). Note also: Codex
   ignores `OPENAI_BASE_URL` — it needs a `-c model_provider` config (the e2e script sets it).
 
+- [ ] mlx-native-prefix-kv-cache — **reuse KV across agentic turns** (biggest real-world
+  latency lever for coding agents). Today `run_job` builds a FRESH cache per request
+  (`mlx_native_backend.rs:469`), so every Claude Code / Codex turn **re-prefills the entire
+  growing conversation from scratch** — for an N-turn loop that is ~O(N × avg_prompt) of
+  redundant prefill. The e2e showed a trivial "reverse CLI" task taking ~6 min wall, dominated
+  by 12 agentic round-trips each re-prefilling the prior context (decode is ~96 t/s — NOT the
+  bottleneck; the round-trip re-prefill is). Plan: keep the last request's token-prefix + its
+  KV on the worker thread; on the next request, find the longest common token prefix with the
+  prior prompt, keep that slice of the cache, and prefill only the new suffix. Per-session keyed
+  (the worker is cap-1 / single-model, so one live cache + a small LRU is enough). Must stay
+  byte-exact (trim the cache to the shared prefix length; the hybrid `LayerCache` —
+  `Full(KV)` + `Linear{conv,state}` — has to be trimmable/snapshot-able at the prefix
+  boundary, which is the tricky part for the GatedDeltaNet recurrent state: a clean cut likely
+  means snapshotting conv+recurrent state at the prefix end). Intersects the fixed-shape KV
+  cache work in SPRINT (`mlx-native-perf-compile` prereq) — a preallocated, offset-indexed
+  cache is also what makes prefix retention cheap. **This, not raw decode t/s, is the #1
+  perf win for the actual agentic use case.**
+
+- [ ] mlx-native-runaway-stop — **bound a single runaway generation** (reliability). The e2e
+  `test` task stalled the whole agentic session for the full 600 s timeout (`result=None`,
+  only 1 tool-use): on the turn after a tool round-trip the greedy decode ran away (looped /
+  never emitted EOS) and generated toward the client's large `max_tokens`. Two gaps enable
+  this: (1) the gateway passes the client's `max_tokens` straight through with **no cap**
+  (`gateway.rs:1254/1329`; `DEFAULT_MAX_TOKENS=4096` only applies when the client omits it,
+  and Claude Code always sends a big value), and (2) there is **no anti-repetition / no-progress
+  stop** on the greedy (temp 0) path — `repeat_penalty` only engages when the client sets it
+  ≠ 1.0, which Claude Code does not. Fix: (a) a server-side `max_tokens` ceiling
+  (`ROZUM_MAX_OUTPUT_TOKENS`, sane default e.g. 4096–8192) that clamps the effective generation
+  length regardless of what the client asks; (b) a cheap **n-gram repetition / no-progress
+  guard** in `stream_generation` that stops a greedy loop early (e.g. stop if the last K tokens
+  repeat an N-gram M times). (b) is the principled fix — it catches the actual failure (the
+  model looping) without truncating a legitimately long answer; (a) is the cheap safety net.
+  Without this, one unlucky greedy-MoE runaway makes the local provider hang for minutes —
+  `--max-turns` does NOT help (it bounds the agentic loop, not a single generation's tokens).
+  Surfaced by `scripts/e2e_claude_gateway.sh test`.
+
 - [x] rozum-native-channels-tier3 - DONE (`feature/piggyback-wakeup`). Tier-3
   gateway piggyback wakeup, keyed by project + agent name. mcp-proxy drops each
   room transcript delta to `$XDG_RUNTIME_DIR/rozum/piggyback/<project>/<agent>.log`;

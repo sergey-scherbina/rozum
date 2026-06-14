@@ -91,6 +91,41 @@ throwaway temp dir). Thinking is **off by default** in the gateway (clean output
 - **Speed:** ~6 min wall for a trivial task is dominated by the 12 agentic round-trips (each
   re-prefills the growing context), not raw decode (~96 t/s). Fewer-turn models finish faster.
 
+- **test task: ❌ FAIL both runs — exposes the model's agentic ceiling, two distinct ways.**
+  The `test` task (binary + a `#[cfg(test)]` test + `cargo test`) is one notch harder than
+  `build`, and Qwen3.6-35B-A3B failed it intermittently, in two different failure modes — the
+  gateway delivered every tool call + result correctly each time, so both are **model behavior,
+  not gateway bugs**:
+  - **Run A — token-level runaway (a hang).** Hit the 600 s `timeout` with `result=None` after
+    only **1 tool-use**: on the turn after the first tool round-trip the greedy decode **ran
+    away** (looped / never emitted EOS) toward Claude Code's large `max_tokens`. `--max-turns`
+    did **not** save it — that bounds the agentic loop, not a single generation's token count.
+    Enabled by two gaps the gateway *can* fix: no `max_tokens` cap + no anti-repetition / no-
+    progress stop on the greedy (temp 0) path → **BACKLOG `mlx-native-runaway-stop`** (server
+    `max_tokens` ceiling + an n-gram repetition guard in `stream_generation`).
+  - **Run B — tool-level loop + premature "success".** Completed at `num_turns=12,
+    tool_uses=11, result=success, 363 s`, but the project was **broken**: the model issued the
+    *identical* `mkdir -p reverse-cli/src` **five times**, created two duplicate `TaskCreate`s,
+    wrote a root `Cargo.toml` with no `[[bin]]` / no `src`, said "I'll create the project
+    structure…", and then **stopped, declaring success without ever writing `src/main.rs`**.
+    This is small-model degeneracy (repeating no-op tool calls, then a false "done"); a server
+    token-guard can't catch it (it's across separate requests). It's the model ceiling.
+  - **Takeaway:** `build` (the simplest task) is a reliable smoke; `test` sits at/above this
+    model's reliable agentic ceiling and fails intermittently. Use `build` as the go/no-go
+    gateway smoke; treat `test` as a model-capability stress, not a gateway regression.
+  - (The `test` prompt now also says **"in the CURRENT directory (do NOT create a
+    subdirectory)"** — Run B's `cargo new reverse-cli`-style subdir misread is otherwise a
+    natural reading of "create a project reverse-cli", and the disk verify checks the workdir
+    root.)
+
+- **Eval-harness lesson (fixed).** An earlier `test` prompt asked for a `lib.rs` + `#[test]`;
+  the model `cargo init`-ed a default crate whose template test (`add(2,2)==4`) is always green
+  and never implemented `reverse`, yet the run reported **"cargo test green"** — a *false
+  success*. The `test` task now forces a **binary** + an **un-fakeable** behavior check
+  (`cargo run -- hello` must print `olleh`), so a scaffold-only run fails as it should. General
+  rule for new scenarios: always include a behavior assertion the model can't satisfy by
+  scaffolding.
+
 ## Codex (OpenAI dialect) — currently BLOCKED ⛔
 
 `scripts/e2e_codex_gateway.sh [build|test]` is the Codex parallel of the Claude runner
