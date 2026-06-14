@@ -1,5 +1,21 @@
 # Changelog
 
+## mlx-native — verified batching fires through the admission layer + batch observability
+Completed: 2026-06-14
+Closes the loop on the batched-decode work: confirmed that concurrent load actually batches through
+the real production path, and exposed it operationally. The gateway serves every request via
+`concurrency::admit_wrap(backend)` with `limit = concurrency_capacity() = batch_cap()`, so a new test
+(`mlx_admit_wrap_batches_e2e`) wraps the REAL MLX backend the same way, asserts the admission limit is
+2, and fires two concurrent requests — admission lets BOTH reach the worker and they land in ONE
+`run_batch` (`Paris`/`Tokyo`, `run_batch calls=1`). So the batching isn't serialized by admission; it
+fires end-to-end. Observability: promoted the batched-decode counters to real metrics
+(`mlx_native_backend::batch_stats()` → runs / rows / mid-decode admits / peak batch size) updated in
+`run_batch`/`run_batch_hybrid` + on each continuous admit, and surfaced them in the gateway `/stats`
+JSON alongside a new `admission` block (limit / in-use / waiting / free). `/stats` now answers "how
+many concurrent requests actually share a forward" — `batch.avg_occupancy = rows/runs`, `batch.max`
+the high-water size, `batch.admits` the continuous admissions. Verified live: after a 2-row batch,
+`batch_stats()` reports `runs=1 rows=2 admits=0 max=2`. Default (no-feature) build returns `None`.
+
 ## mlx-native — join the worker thread on drop (deterministic unload + model swap)
 Completed: 2026-06-14
 `MlxNativeBackend` spawned its `!Send` model-owning worker thread **detached** (the `JoinHandle`

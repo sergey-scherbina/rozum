@@ -598,8 +598,12 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   `rozum` processes sharing one GPU (e.g. a host-wide semaphore), instead of each
   process budgeting in isolation.
 
-- [ ] concurrency-observability - Expose queue depth, admission limit, fast-lane
+- [~] concurrency-observability - Expose queue depth, admission limit, fast-lane
   hits, and shed/429 counts via `obs` so the scheduler is tunable from data.
+  **PARTIAL 2026-06-14:** `/stats` now reports an `admission` block (limit / in-use / waiting / free)
+  and a `batch` block (runs / rows / mid-decode admits / peak size / avg occupancy via
+  `mlx_native_backend::batch_stats`), so batched-decode utilization + the admission window are
+  visible. Still TODO: fast-lane hit counts and shed/429 counters wired through `obs`.
 
 - [ ] shared-gateway-multislot - Allow more than one resident model behind the
   shared gateway when memory permits, gating a second model on `ConcurrencyBudget`

@@ -64,6 +64,23 @@ mod inner {
     pub(crate) static BATCH_ADMIT_COUNT: std::sync::atomic::AtomicUsize =
         std::sync::atomic::AtomicUsize::new(0);
 
+    /// Total rows ever served via batched decode (initial batch members + mid-decode admits).
+    /// `BATCH_ROWS_TOTAL / BATCH_RUN_COUNT` ≈ average batch occupancy. Observability only.
+    pub(crate) static BATCH_ROWS_TOTAL: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    /// Peak rows in a single batch seen so far (high-water mark). Observability only.
+    pub(crate) static BATCH_MAX: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    /// Record `added` new rows entering a batch and the resulting `peak` occupancy into the
+    /// global counters (initial assembly: `added == peak == B`; a mid-decode admit:
+    /// `added == 1`, `peak ==` the batch size after the admit).
+    fn note_batch_rows(added: usize, peak: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        BATCH_ROWS_TOTAL.fetch_add(added, Relaxed);
+        BATCH_MAX.fetch_max(peak, Relaxed);
+    }
+
     /// Hybrid (GatedDeltaNet) archs that need MLX retained command-buffer refs
     /// (`ROZUM_MLX_RETAIN`) for correctness — the custom kernel's input buffer is
     /// otherwise freed before the in-flight GPU dispatch reads it (docs/mlx-gd-bug/).
@@ -1261,6 +1278,7 @@ mod inner {
         // 3. Continuous decode loop: sample per row, stream, retire finished rows, ADMIT
         //    queued greedy jobs into freed/spare slots, then forward the live rows.
         let mut batch_seq: Vec<usize> = (0..seqs.len()).collect(); // seq index per live row
+        note_batch_rows(batch_seq.len(), batch_seq.len());
         loop {
             // Sample one token per row, each honoring its own temp/top_k/top_p.
             let mut temps: Vec<f32> = Vec::with_capacity(batch_seq.len());
@@ -1358,6 +1376,7 @@ mod inner {
                 batch_seq.push(seqs.len() - 1);
                 pads.push(pad_new);
                 next_toks.push(ntok);
+                note_batch_rows(1, batch_seq.len());
             }
             if batch_seq.is_empty() {
                 break;
@@ -1643,6 +1662,7 @@ mod inner {
         // 3. Continuous decode loop: per-row argmax, stream, retire finished rows, ADMIT
         //    queued greedy jobs into freed/spare slots, then forward the live rows.
         let mut batch_seq: Vec<usize> = (0..seqs.len()).collect();
+        note_batch_rows(batch_seq.len(), batch_seq.len());
         loop {
             // Sample one token per row, each honoring its own temp/top_k/top_p.
             let mut temps: Vec<f32> = Vec::with_capacity(batch_seq.len());
@@ -1718,6 +1738,7 @@ mod inner {
                 seqs.push(nseq);
                 batch_seq.push(seqs.len() - 1);
                 next_toks.push(ntok);
+                note_batch_rows(1, batch_seq.len());
             }
             if batch_seq.is_empty() {
                 break;
@@ -2131,6 +2152,41 @@ mod inner {
 
 #[cfg(feature = "mlx-native")]
 pub use inner::Export as MlxNativeBackend;
+
+/// Process-wide batched-decode counters, for the gateway `/stats` endpoint. `runs` is the
+/// number of batched-decode invocations (≥2 rows), `rows` the total rows they served (initial
+/// members + mid-decode admits), `admits` the continuous mid-decode admissions, and `max` the
+/// peak rows in a single batch. `rows / runs` ≈ average batch occupancy.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct BatchStats {
+    pub runs: u64,
+    pub rows: u64,
+    pub admits: u64,
+    pub max: u64,
+}
+
+/// Snapshot the global batched-decode counters. Returns `None` when nothing has batched yet
+/// (so `/stats` can omit the section), else the running totals.
+#[cfg(feature = "mlx-native")]
+pub fn batch_stats() -> Option<BatchStats> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let runs = inner::BATCH_RUN_COUNT.load(Relaxed) as u64;
+    if runs == 0 {
+        return None;
+    }
+    Some(BatchStats {
+        runs,
+        rows: inner::BATCH_ROWS_TOTAL.load(Relaxed) as u64,
+        admits: inner::BATCH_ADMIT_COUNT.load(Relaxed) as u64,
+        max: inner::BATCH_MAX.load(Relaxed) as u64,
+    })
+}
+
+/// Without the `mlx-native` feature there is no batched decode → no stats.
+#[cfg(not(feature = "mlx-native"))]
+pub fn batch_stats() -> Option<BatchStats> {
+    None
+}
 
 /// Map a model spec to its HuggingFace `org/name` repo id, or `None` if the spec
 /// isn't an HF reference (a filesystem path, `lmstudio:`/`ollama:` spec, …).
@@ -4185,6 +4241,78 @@ mod tests {
         assert_eq!(runs, 1, "two temp>0 requests must batch (relaxed gate), not run serially");
         assert!(!t1.trim().is_empty(), "sampling row 1 produced no output");
         assert!(!t2.trim().is_empty(), "sampling row 2 produced no output");
+    }
+
+    // E2E THROUGH THE ADMISSION LAYER — the exact production concurrency path. The gateway
+    // serves requests via `concurrency::admit_wrap(backend)` (limit = `concurrency_capacity`
+    // = `batch_cap`), so this wraps the REAL MLX backend the same way and fires two
+    // concurrent requests: admission must let BOTH reach the worker (limit 2) so they land in
+    // ONE `run_batch` (BATCH_RUN_COUNT +1) — proving the batching actually fires end-to-end
+    // and isn't serialized by admission. Closes the loop on "does concurrent load batch?".
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_admit_wrap_batches_e2e
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires local mlx-community/Qwen3-4B-4bit"]
+    async fn mlx_admit_wrap_batches_e2e() {
+        use super::MlxNativeBackend;
+        use super::inner::BATCH_RUN_COUNT;
+        use crate::backend::{ChatBackend, ChatRequest, SamplingParams, collect_to_string};
+        use crate::concurrency::admit_wrap;
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        // SAFETY: test process, set before the worker thread starts.
+        unsafe {
+            std::env::set_var("ROZUM_BATCH", "2");
+            std::env::set_var("ROZUM_BATCH_WINDOW_MS", "500");
+        }
+        let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
+            .expect("Qwen3-4B-4bit not in HF cache");
+        let inner = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+            .await
+            .expect("backend load");
+        // Wrap exactly as `serve` does. capacity == batch_cap() == 2 → admission limit 2.
+        let backend: Arc<dyn ChatBackend> = admit_wrap(Arc::new(inner));
+        assert_eq!(
+            backend.admission_stats().map(|s| s.limit),
+            Some(2),
+            "admission limit must equal batch_cap (2), or concurrent requests can't batch"
+        );
+
+        let mk = |q: &str| {
+            let mut req = ChatRequest::simple(q);
+            req.sampling = SamplingParams { max_tokens: Some(24), ..Default::default() };
+            req
+        };
+        let before = BATCH_RUN_COUNT.load(Ordering::Relaxed);
+        // Fire both through the admission-wrapped backend concurrently.
+        let s1 = backend
+            .chat(mk("What is the capital of France? Answer in one word. /no_think"))
+            .await
+            .expect("admit France");
+        let s2 = backend
+            .chat(mk("What is the capital of Japan? Answer in one word. /no_think"))
+            .await
+            .expect("admit Japan");
+        let (t1, t2) = tokio::join!(collect_to_string(s1), collect_to_string(s2));
+        let (t1, t2) = (t1.unwrap(), t2.unwrap());
+        let runs = BATCH_RUN_COUNT.load(Ordering::Relaxed) - before;
+        eprintln!("ADMIT-E2E  France={t1:?} Japan={t2:?}  (run_batch calls={runs})");
+        unsafe {
+            std::env::remove_var("ROZUM_BATCH");
+            std::env::remove_var("ROZUM_BATCH_WINDOW_MS");
+        }
+        assert_eq!(runs, 1, "admission must let both concurrent requests batch in ONE run_batch");
+        assert!(t1.contains("Paris"), "France: {t1:?}");
+        assert!(t2.contains("Tokyo"), "Japan: {t2:?}");
+
+        // Observability: the /stats batch counters must reflect the 2-row batch.
+        let bs = super::batch_stats().expect("batch_stats present after a batched run");
+        eprintln!(
+            "BATCH STATS  runs={} rows={} admits={} max={}",
+            bs.runs, bs.rows, bs.admits, bs.max
+        );
+        assert!(bs.runs >= 1 && bs.rows >= 2 && bs.max >= 2, "batch stats must reflect a 2-row batch: {bs:?}");
     }
 
     // Hybrid (Qwen3.6) batched scheduler end-to-end: with `ROZUM_BATCH=2`, two concurrent
