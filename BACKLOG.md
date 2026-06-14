@@ -399,18 +399,18 @@ features the mistralrs backend shipped that the native backend does NOT yet have
   disables. Dense only — Qwen3 / Qwen3-MoE / Llama / Qwen2 (they own the KV cache externally).
   **Follow-up below for hybrid (Qwen3.6).**
 
-- [ ] mlx-native-prefix-kv-cache-hybrid — extend prefix reuse to the **hybrid** Qwen3.6 arches.
-  Harder than dense for two reasons: (1) the hybrid `Generate` owns its `Vec<LayerCache>`
-  *internally* (not an external vec), so it must accept a pre-populated cache + a suffix and
-  expose it after prefill; (2) the `LayerCache::Linear{conv,state}` layers carry a **recurrent**
-  GatedDeltaNet state that **can't be truncated** (it's a running summary, not per-position KV).
-  Design (worked out): keep one live cache on the worker; **truncate** the `Full(KV)` layers to
-  the shared prefix (same as dense), and **deep-snapshot** the small `conv`+`state` of each
-  `Linear` layer at the end of prefill (the GatedDeltaNet update is functional, so a forced copy
-  is a safe snapshot), restoring those snapshots on the next reuse. Needs fork support
-  (`Generate::new_with_cache` / cache accessor + `LayerCache` snapshot/restore/truncate) and a
-  byte-exact gate vs the fresh path. This is the bigger, riskier half (the GatedDeltaNet
-  byte-exactness minefield), so it's split out from the shipped dense work above.
+- [x] mlx-native-prefix-kv-cache-hybrid — **DONE.** Prefix reuse for the **hybrid** Qwen3.6
+  arches (Qwen35 + Qwen35Moe). The `Full(KV)` layers truncate to the shared prefix like dense;
+  the `Linear` GatedDeltaNet layers carry a recurrent state that can't be truncated, so it's
+  **deep-snapshotted** (`Array::deep_clone` → own buffer, survives decode buffer donation) at the
+  **end of prefill** (offset == prompt len) and restored on the next reuse. Fork (rev
+  `fd284599`): `LayerCache::{truncate, snapshot→LinearSnap, restore}`, `Generate::with_cache`
+  (start from a pre-populated cache + suffix) snapshotting right after the prefill step, and
+  `into_cache_and_snapshot()`. rozum: `stream_generation` returns the iterator so the hybrid arms
+  reclaim cache+snapshot; the worker persists `HybridPrefix{ids, cache, snap}` and on reuse
+  truncates Full + restores Linear + prefills only the suffix. **Byte-exact** vs a fresh prefill
+  (integration test `mlx_prefix_reuse_byte_exact_hybrid` on the deterministic Qwen3.6-27B; the
+  35B-A3B MoE shares the exact reuse logic). `ROZUM_PREFIX_CACHE=0` disables.
 
 - [x] mlx-native-runaway-stop — **DONE.** Bound a single runaway generation so one greedy loop
   can't pin the cap-1 worker for minutes (the e2e `test` task hit a 600 s hang, `result=None`).
