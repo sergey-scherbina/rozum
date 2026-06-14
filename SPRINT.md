@@ -600,10 +600,15 @@ is 100% MLX, candle only as external oracle.
   to the dense/unretained classification test (fast suite, 130/0). Caveat as noted: Mistral's
   sliding-window attention (4096) is approximated by the llama path's full attention, so it
   matches the reference except beyond the window — fine for agents, bounded by the KV preflight;
-  if a short-context divergence ever shows, fall back to a thin `mistral.rs`. **Validation is a
-  ready `#[ignore]` network test `mlx_mistral_chat`** (auto-downloads `mlx-community/
-  Mistral-7B-Instruct-v0.3-4bit` ~4 GB, asserts "Paris") — run when a download is acceptable.
-  Opens Mistral/Nemo (and the Mixtral base) at near-zero cost.
+  if a short-context divergence ever shows, fall back to a thin `mistral.rs`. **VALIDATED
+  end-to-end** (`mlx_mistral_chat`, Mistral-7B-Instruct-v0.3-4bit): *"Paris is the capital of
+  France."* The run surfaced two general config quirks (NOT in the alias itself), both fixed in the
+  fork: (1) Mistral's `config.json` omits `head_dim` → made it `Option` in `llama::ModelArgs`,
+  default `hidden_size/num_attention_heads` (fork `1f5475a1`); (2) Mistral ships `chat_template` as
+  the older list-of-`{name,template}` form → `load_model_chat_template_from_str` now parses both the
+  string and list forms, picking the `"default"` entry (fork `3f230b2a`, + unit test, + fixed
+  pre-existing broken `mlx-lm-utils` tests). Added to `models::RECOMMENDED`. Opens Mistral / Nemo
+  (and the Mixtral base) — and these two fixes broaden the whole Llama family's config tolerance.
 
 - [ ] mlx-native-llama-aliases - **TRIVIAL — verify, don't port.** SmolLM / TinyLlama /
   Llama-3.x variants already ship `model_type: "llama"`, so they should run on the

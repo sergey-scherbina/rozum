@@ -84,6 +84,12 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
         approx_size_gb: 2.5,
         notes: "Tiny test model. Fits anywhere, fast iteration.",
     },
+    RecommendedModel {
+        spec: "mlx-community:Mistral-7B-Instruct-v0.3-4bit",
+        display_name: "Mistral 7B Instruct v0.3",
+        approx_size_gb: 4.1,
+        notes: "Non-Qwen option (Mistral family, runs on the Llama path). General-purpose.",
+    },
 ];
 
 // ─── Scanners ────────────────────────────────────────────────────────────────

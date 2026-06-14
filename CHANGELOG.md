@@ -13,17 +13,21 @@ the count stays exact. Exposed through `AdmissionSnapshot` + a new `AdmissionSch
 Test `counters_track_admit_fastlane_queue_and_shed` walks the full flow. The admission policy
 (limit, fast-lane reservation, queue depth) is now tunable from data.
 
-## mlx-native — Mistral / Mistral-Nemo support (one-line alias to the Llama path)
+## mlx-native — Mistral / Mistral-Nemo support (Llama-path alias) — VALIDATED + 2 config fixes
 Completed: 2026-06-14
-Opens the Mistral family (`model_type: "mistral"`) at near-zero cost. Mistral / Mistral-Nemo are
-architecturally Llama (GQA, no qkv-bias, SwiGLU, RoPE) and upstream `mlx_lm` serves them with the
-*llama* model class, so `LoadedModel::load` now routes `"llama" | "mistral" => llama::load_llama_model`
-and `supported_model_type` admits `"mistral"` — no new fork model file. The one delta is Mistral's
-sliding-window attention (4096), which the llama path approximates with full attention: identical to
-the reference except for contexts beyond the window (fine for agent use, and bounded by the KV
-preflight). Fast guards added (`mistral_is_a_supported_model_type`, dense-classification list);
-130/0. End-to-end validation is a ready `#[ignore]` network test (`mlx_mistral_chat`, auto-downloads
-`mlx-community/Mistral-7B-Instruct-v0.3-4bit`) — run it when a ~4 GB download is acceptable.
+Opens the Mistral family (`model_type: "mistral"`) at near-zero cost and validated it end to end
+(*"Paris is the capital of France."* on Mistral-7B-Instruct-v0.3-4bit). Mistral / Mistral-Nemo are
+architecturally Llama and upstream `mlx_lm` serves them with the *llama* class, so `LoadedModel::load`
+routes `"llama" | "mistral" => llama::load_llama_model` and `supported_model_type` admits `"mistral"`
+— no new fork model file. (The one delta, Mistral's 4096 sliding-window attention, is approximated by
+the llama path's full attention: identical except beyond the window — fine for agents, bounded by the
+KV preflight.) Running it surfaced two GENERAL config quirks (not the alias itself), both fixed in the
+fork so the whole Llama family is more config-tolerant: (1) Mistral's `config.json` omits `head_dim`
+→ `llama::ModelArgs.head_dim` is now `Option`, default `hidden_size/num_attention_heads`; (2) Mistral
+ships `chat_template` as the older list-of-`{name,template}` form → `load_model_chat_template_from_str`
+parses both the string and list forms (picking the `"default"` entry), with a unit test (and the
+pre-existing broken `mlx-lm-utils` tests fixed along the way). Added to `models::RECOMMENDED`; fast
+guards + `mlx_mistral_chat` network test; 131/0. Fork rev `3f230b2a`.
 
 ## mlx-native — idle-unload proven to reclaim memory (100%) + non-blocking unload + memory in /stats
 Completed: 2026-06-14
