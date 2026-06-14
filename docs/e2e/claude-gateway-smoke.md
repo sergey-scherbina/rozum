@@ -91,6 +91,25 @@ throwaway temp dir). Thinking is **off by default** in the gateway (clean output
 - **Speed:** ~6 min wall for a trivial task is dominated by the 12 agentic round-trips (each
   re-prefills the growing context), not raw decode (~96 t/s). Fewer-turn models finish faster.
 
+- **test task: ⚠ stalled (reliability finding).** A `test`-task run hit the 600 s `timeout`
+  with `result=None` after only **1 tool-use**: on the turn after the first tool round-trip the
+  greedy decode **ran away** (looped / never emitted EOS) and generated toward Claude Code's
+  large `max_tokens`. `--max-turns` did **not** save it — that bounds the agentic loop, not a
+  single generation's token count. Two gaps enable this: the gateway doesn't cap the client's
+  `max_tokens`, and there's no anti-repetition / no-progress stop on the greedy (temp 0) path.
+  → **BACKLOG `mlx-native-runaway-stop`** (server-side `max_tokens` ceiling + an n-gram
+  repetition guard in `stream_generation`). This is the top *reliability* fix for the gateway
+  as a local agent provider; the runaway is intermittent (greedy-MoE float-reduction
+  nondeterminism), so it surfaces as occasional multi-minute hangs.
+
+- **Eval-harness lesson (fixed).** An earlier `test` prompt asked for a `lib.rs` + `#[test]`;
+  the model `cargo init`-ed a default crate whose template test (`add(2,2)==4`) is always green
+  and never implemented `reverse`, yet the run reported **"cargo test green"** — a *false
+  success*. The `test` task now forces a **binary** + an **un-fakeable** behavior check
+  (`cargo run -- hello` must print `olleh`), so a scaffold-only run fails as it should. General
+  rule for new scenarios: always include a behavior assertion the model can't satisfy by
+  scaffolding.
+
 ## Codex (OpenAI dialect) — currently BLOCKED ⛔
 
 `scripts/e2e_codex_gateway.sh [build|test]` is the Codex parallel of the Claude runner
