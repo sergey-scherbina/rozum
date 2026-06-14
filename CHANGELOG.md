@@ -1,5 +1,29 @@
 # Changelog
 
+## mlx-native — batched/parallel decode (dense Qwen3): 2 concurrent sessions in one forward
+Completed: 2026-06-14
+The native MLX backend was capacity-1: one worker thread ran jobs strictly serially, so two
+sessions (Claude Code + Codex, or several meeting-room agents) serialized — the second queued
+behind the first. It now **batches concurrent greedy requests through one `forward`**. With
+`ROZUM_BATCH=N` (default 1 = the proven serial path), `worker_main` drains up to N already-admitted
+jobs within a small `ROZUM_BATCH_WINDOW_MS` window (default 10ms), batches the greedy (argmax) ones
+(≥2) via `run_batch`, and runs everything else — non-greedy requests, single jobs, non-batchable
+arches (Llama/Qwen2/hybrid Qwen3.6) — on the existing serial prefix-KV path. `run_batch` prefills
+each sequence separately (correct per-sequence KV, keeps prefix reuse), assembles one left-padded
+batched cache (`ConcatKeyValueCache::{kv_used, from_kv}`), then decodes all rows together: per-row
+RoPE via `qwen3::set_batch_pad_offsets` + a per-row left-pad mask, argmax per row, per-sequence
+detok/stream (`BatchSeq`), and retires a row on EOS/max-tokens/runaway by slicing it out
+(`take_axis`) and re-assembling the mask/offsets. `concurrency_capacity()=Some(ROZUM_BATCH)` so
+admission admits B. **Why it's a real win:** decode is ~92% CPU graph-build, and batching does ONE
+build for B sequences — it amortizes exactly the cost `mlx-native-perf-compile` couldn't reduce
+(`mx.compile` was net-negative here), so the two perf threads converge. Validated: B=2 throughput
+**126.3 vs 63.9 t/s = 1.98×** (`mlx_batched_decode_probe`); ragged forward byte-exact to 1 bf16 ulp
+(`mlx_batched_ragged_byte_exact`); end-to-end `mlx_batched_scheduler_two_concurrent` — two
+concurrent requests batch into ONE `run_batch` call and each row gets its own uncontaminated answer
+(`France="Paris." Japan="Tokyo"`). B=1 path is byte-identical to before (per-row rope OFF by
+default) — zero regression. Continuous batching (admit a queued job mid-decode) and hybrid Qwen3.6
+batching are follow-ups.
+
 ## launch — `rozum launch codex` works out-of-box (+ quiet /v1/models)
 Completed: 2026-06-14
 Codex now launches against the local gateway like Claude already does. Codex **ignores

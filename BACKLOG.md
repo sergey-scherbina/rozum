@@ -56,13 +56,22 @@ through `concurrency::admit_wrap`, so they are not relisted.)
   primary model.) Diagnostics:
   `ROZUM_DUMP_DOT=/tmp/d.dot … mlx_qwen35_moe_decode_bench` + a DOT label histogram.
 
-- [~] mlx-native-batched-decode — true parallel serving (multiple concurrent sessions).
-  **CORE BUILT + VALIDATED 2026-06-14 (dense forward); worker scheduler is what remains.**
-  - Probe: B=2 batched `forward` is byte-exact per sequence + **2 seqs at 212.7 vs 108.7 t/s =
-    1.96×** (near-linear) — because decode is 92% CPU graph-build and batching does ONE build for
+- [x] mlx-native-batched-decode — true parallel serving (multiple concurrent sessions).
+  **DONE + e2e-validated 2026-06-14 (dense Qwen3 / Qwen3-MoE). Hybrid Qwen3.6 still serial.**
+  - **Worker scheduler SHIPPED (`mlx_batched_scheduler_two_concurrent`):** with `ROZUM_BATCH=2`
+    two concurrent greedy requests on one backend batch into **one** `run_batch` call (asserted via
+    `BATCH_RUN_COUNT`) and each row gets its OWN correct answer — `France="Paris." Japan="Tokyo"`,
+    no cross-row contamination. `worker_main` drains up to `ROZUM_BATCH` (default 1 = serial) ready
+    jobs within a `ROZUM_BATCH_WINDOW_MS` (default 10) window, partitions greedy (argmax) vs the
+    rest, batches the greedy ≥2 via `run_batch`, runs the others (and any single job) serially on the
+    proven prefix-KV path. `concurrency_capacity()=Some(batch_cap())` so `admit_wrap` admits B.
+    Non-batchable arches (Llama/Qwen2/hybrid) stay serial. Per-row streaming + EOS/max-tokens/runaway
+    retirement via `BatchSeq` (`take_axis` row-slice shrink + re-assembled per-row pad mask & rope).
+  - Probe: B=2 batched `forward` is byte-exact per sequence + **2 seqs at 126.3 vs 63.9 t/s =
+    1.98×** (near-linear) — because decode is 92% CPU graph-build and batching does ONE build for
     B sequences, **amortizing the exact build cost `mlx-native-perf-compile` couldn't reduce** (the
     two perf threads converge here: batching IS what compile aimed for, and it works).
-  - **Ragged dense forward DONE + validated (`mlx_batched_ragged_byte_exact`):** two
+  - **Ragged dense forward validated (`mlx_batched_ragged_byte_exact`):** two
     different-length sequences, prefilled separately then assembled into one batched cache, decode
     together with per-row RoPE + a per-row left-pad mask. Row A (len 7) **byte-exact** vs serial;
     row B (len 4) byte-exact 8 tokens then a **1-bf16-ulp near-tie flip** (a valid greedy choice,
@@ -71,12 +80,9 @@ through `concurrency::admit_wrap`, so they are not relisted.)
     Attention ropes at `cache.offset()−pad_i` per row when set; **OFF by default → B=1 path
     byte-identical, no regression**), `ConcatKeyValueCache::{kv_used, from_kv}` (assemble a batched
     cache from per-sequence KV — avoids pad-token/negative-rope artifacts).
-  - **REMAINING (the worker scheduler — plumbing, no more fork minefield):** drain up to B ready
-    jobs → serial-prefill each (keeps the prefix-KV LRU) → assemble the batched cache → batched
-    decode loop (per-row argmax + detok/stream per sequence) → retire a row on EOS/max-tokens
-    (shrink the batch + re-assemble) → admit queued jobs (continuous batching) → raise
-    `concurrency_capacity()` to a memory-budgeted B. The hard correctness core (the forward) is
-    proven; this is scheduling + per-sequence streaming.
+  - **Follow-ups (not blocking):** continuous batching (admit a queued job into a free row mid-decode
+    instead of waiting for the whole batch to drain) and hybrid Qwen3.6 batching (the GatedDeltaNet
+    recurrence can't be left-padded — see below).
 
   **RAGGED is tractable — confirmed (`mlx_rope_per_row_probe`):** `mlx_rs::fast::rope_dynamic`
   accepts a **per-row `[B]` offset array** and ropes each row at its own position (byte-exact vs

@@ -53,6 +53,12 @@ mod inner {
     /// Fallback context window when config lacks `max_position_embeddings`.
     const DEFAULT_N_CTX: u32 = 32_768;
 
+    /// Count of batched-decode runs (`run_batch` calls with ≥2 rows). Lets a test
+    /// prove the scheduler actually batched concurrent requests rather than quietly
+    /// falling back to serial. Process-global; only read in tests.
+    pub(crate) static BATCH_RUN_COUNT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
     /// Hybrid (GatedDeltaNet) archs that need MLX retained command-buffer refs
     /// (`ROZUM_MLX_RETAIN`) for correctness — the custom kernel's input buffer is
     /// otherwise freed before the in-flight GPU dispatch reads it (docs/mlx-gd-bug/).
@@ -318,7 +324,10 @@ mod inner {
         /// MLX serialises on a single worker thread / Metal stream, so a safe
         /// in-process capacity is 1 — `concurrency::admit_wrap` gates at that.
         fn concurrency_capacity(&self) -> Option<usize> {
-            Some(1)
+            // `ROZUM_BATCH=N` (default 1) admits up to N concurrent requests so the
+            // worker can batch them (continuous batched decode, dense Qwen3 + greedy);
+            // 1 = the proven serial path. Non-batchable requests still run serially.
+            Some(batch_cap())
         }
     }
 
@@ -410,17 +419,81 @@ mod inner {
         // `prefix` carries the previous dense request's KV across jobs for prefix
         // reuse (the worker is cap-1 serial, so no locking is needed).
         let mut store = PrefixStore::new();
-        while let Some(job) = jobs.blocking_recv() {
-            run_job(
-                &mut model,
-                &mut tokenizer,
-                &template,
-                &eos,
-                kv_per_pos,
-                &mut store,
-                job,
-            );
+        let cap = batch_cap();
+        let batchable_arch = is_batchable_arch(&model);
+        while let Some(first) = jobs.blocking_recv() {
+            // Fast path: batching off, or this model's arch isn't batchable → serial
+            // (keeps the prefix-KV LRU).
+            if cap <= 1 || !batchable_arch {
+                run_job(&mut model, &mut tokenizer, &template, &eos, kv_per_pos, &mut store, first);
+                continue;
+            }
+            // Gather more already-admitted jobs (up to `cap`), waiting a small window
+            // (`ROZUM_BATCH_WINDOW_MS`, default 10) for near-simultaneous requests to
+            // arrive so they batch together instead of racing the worker.
+            let mut pending = vec![first];
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_millis(batch_window_ms());
+            while pending.len() < cap {
+                match jobs.try_recv() {
+                    Ok(j) => pending.push(j),
+                    Err(_) => {
+                        if std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }
+            }
+            // Batch the greedy ones together (argmax per row); run the rest serially.
+            let (greedy, other): (Vec<_>, Vec<_>) =
+                pending.into_iter().partition(|j| is_greedy(j));
+            if greedy.len() >= 2 {
+                run_batch(&mut model, &mut tokenizer, &template, &eos, greedy);
+            } else {
+                for job in greedy {
+                    run_job(&mut model, &mut tokenizer, &template, &eos, kv_per_pos, &mut store, job);
+                }
+            }
+            for job in other {
+                run_job(&mut model, &mut tokenizer, &template, &eos, kv_per_pos, &mut store, job);
+            }
         }
+    }
+
+    /// Batched-decode capacity from `ROZUM_BATCH` (default 1 = serial).
+    fn batch_cap() -> usize {
+        std::env::var("ROZUM_BATCH")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    /// How long (ms) the worker waits for near-simultaneous requests to fill a
+    /// batch before starting decode. `ROZUM_BATCH_WINDOW_MS` (default 10).
+    fn batch_window_ms() -> u64 {
+        std::env::var("ROZUM_BATCH_WINDOW_MS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(10)
+    }
+
+    /// Arches that use `qwen3::Attention`'s per-row-rope path → batchable. (Llama /
+    /// Qwen2 have their own attention; hybrid Qwen3.6 carries a recurrent state.)
+    fn is_batchable_arch(model: &LoadedModel) -> bool {
+        matches!(model, LoadedModel::Qwen3(_) | LoadedModel::Qwen3Moe(_))
+    }
+
+    /// A request joins a batch only if greedy (argmax) — temp 0/unset, no top_p/top_k/
+    /// repeat_penalty; batched decode samples argmax per row. Others run serially.
+    fn is_greedy(job: &Job) -> bool {
+        let s = &job.sampling;
+        s.temperature.unwrap_or(0.0) == 0.0
+            && s.top_p.unwrap_or(1.0) >= 1.0
+            && s.top_k.unwrap_or(0) == 0
+            && s.repeat_penalty.unwrap_or(1.0) == 1.0
+            && s.seed.is_none()
     }
 
     /// True if the tail of `ids` is a runaway loop: the last `REPEAT_WINDOW` tokens
@@ -825,6 +898,305 @@ mod inner {
                 // cancel yields no snapshot, so we don't poison the cache.
                 store.put_hybrid(ids, hcache, snap);
             }
+        }
+    }
+
+    /// Forward for the batchable dense arches (Qwen3 / Qwen3-MoE — both `qwen3::Attention`).
+    fn dense_forward(
+        model: &mut LoadedModel,
+        inp: &Array,
+        mask: Option<&Array>,
+        cache: &mut Vec<Option<ConcatKeyValueCache>>,
+    ) -> Result<Array, mlx_rs::error::Exception> {
+        use mlx_rs::module::Module;
+        match model {
+            LoadedModel::Qwen3(m) => {
+                let input = qwen3::ModelInput { inputs: inp, mask, cache };
+                <qwen3::Model as Module<qwen3::ModelInput<'_, ConcatKeyValueCache>>>::forward(m, input)
+            }
+            LoadedModel::Qwen3Moe(m) => {
+                let input = qwen3::ModelInput { inputs: inp, mask, cache };
+                <qwen3_moe::Model as Module<qwen3::ModelInput<'_, ConcatKeyValueCache>>>::forward(
+                    m, input,
+                )
+            }
+            _ => Err(mlx_rs::error::Exception::custom("dense_forward: non-batchable arch")),
+        }
+    }
+
+    /// Per-sequence streaming state inside a batch (mirrors `stream_generation`'s
+    /// per-token emit + finalize for one row).
+    struct BatchSeq {
+        job: Job,
+        out_ids: Vec<u32>,
+        emitted: String,
+        full_text: String,
+        tool_seen: bool,
+        output_tokens: u32,
+        prompt_len: i32,
+        max_tokens: usize,
+        finished: bool,
+        stop: StopReason,
+    }
+
+    impl BatchSeq {
+        /// Append `tok`, detok, and stream the new text suffix (suppressing `<tool_call>`
+        /// markup). Returns false if the client dropped the stream.
+        fn push(&mut self, tok: u32, tokenizer: &mut Tokenizer) -> bool {
+            self.out_ids.push(tok);
+            self.output_tokens += 1;
+            if let Ok(text) = tokenizer.decode(&self.out_ids, true) {
+                let stable = text.trim_end_matches('\u{FFFD}');
+                self.full_text = stable.to_string();
+                if !self.tool_seen {
+                    if let Some(pos) = stable.find(TOOL_OPEN) {
+                        if pos > self.emitted.len() && stable.starts_with(&self.emitted) {
+                            let delta = stable[self.emitted.len()..pos].to_string();
+                            self.emitted = stable[..pos].to_string();
+                            let _ = self.job.events.send(Ok(ChatEvent::TextDelta { text: delta }));
+                        }
+                        self.tool_seen = true;
+                    } else if stable.len() > self.emitted.len() && stable.starts_with(&self.emitted)
+                    {
+                        let delta = stable[self.emitted.len()..].to_string();
+                        self.emitted = stable.to_string();
+                        if self
+                            .job
+                            .events
+                            .send(Ok(ChatEvent::TextDelta { text: delta }))
+                            .is_err()
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+            true
+        }
+
+        /// Parse any tool calls, emit them (or the held-back text), then `Done`.
+        fn finalize(&mut self) {
+            let tool_calls = if matches!(self.stop, StopReason::Cancelled) {
+                Vec::new()
+            } else {
+                parse_tool_calls(&self.full_text)
+            };
+            if !tool_calls.is_empty() {
+                for (i, (name, args)) in tool_calls.iter().enumerate() {
+                    let id = format!("call_{i}");
+                    let _ = self.job.events.send(Ok(ChatEvent::ToolUseStart {
+                        id: id.clone(),
+                        name: name.clone(),
+                    }));
+                    let _ = self.job.events.send(Ok(ChatEvent::ToolUseDelta {
+                        id: id.clone(),
+                        input_json_delta: args.clone(),
+                    }));
+                    let _ = self.job.events.send(Ok(ChatEvent::ToolUseEnd { id }));
+                }
+                self.stop = StopReason::ToolUse;
+            } else if self.tool_seen && self.full_text.len() > self.emitted.len() {
+                let _ = self.job.events.send(Ok(ChatEvent::TextDelta {
+                    text: self.full_text[self.emitted.len()..].to_string(),
+                }));
+            }
+            let _ = self.job.events.send(Ok(ChatEvent::Done {
+                input_tokens: self.prompt_len as u32,
+                output_tokens: self.output_tokens,
+                stop_reason: self.stop,
+            }));
+        }
+    }
+
+    /// Batched (continuous) decode for a wave of greedy dense requests: prefill each
+    /// separately (own cache), assemble one left-padded batched cache, then decode all
+    /// together (per-row argmax + per-row rope + per-row pad mask), streaming each
+    /// sequence independently and retiring a row from the batch on EOS/max-tokens.
+    /// Dense Qwen3/Qwen3-MoE only (the per-row-rope `qwen3::Attention`).
+    fn run_batch(
+        model: &mut LoadedModel,
+        tokenizer: &mut Tokenizer,
+        template: &str,
+        eos: &[u32],
+        jobs: Vec<Job>,
+    ) {
+        use mlx_lm::models::qwen3::set_batch_pad_offsets;
+        use mlx_rs::ops::indexing::{argmax_axis, take_axis, IndexOp, NewAxis};
+        use mlx_rs::ops::{arange, concatenate_axis, zeros_dtype};
+
+        BATCH_RUN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if std::env::var_os("ROZUM_MLX_DEBUG").is_some() {
+            eprintln!("mlx batched decode: B={}", jobs.len());
+        }
+
+        let ceiling = std::env::var("ROZUM_MAX_OUTPUT_TOKENS")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_OUTPUT_CEILING);
+
+        // 1. Prefill each request separately (correct per-sequence KV, no padding).
+        let mut seqs: Vec<BatchSeq> = Vec::new();
+        let mut caches: Vec<Vec<Option<ConcatKeyValueCache>>> = Vec::new();
+        let mut logit_rows: Vec<Array> = Vec::new();
+        for job in jobs {
+            let prompt_ids = match render_prompt(
+                tokenizer, template, &job.model_id, &job.messages, &job.tools,
+            ) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    let _ = job.events.send(Err(ModelError::BackendUnavailable(e)));
+                    continue;
+                }
+            };
+            let max_tokens = {
+                let want = job
+                    .sampling
+                    .max_tokens
+                    .map(|m| m as usize)
+                    .unwrap_or(DEFAULT_MAX_TOKENS);
+                if ceiling == 0 { want } else { want.min(ceiling) }
+            };
+            let prompt = Array::from(&prompt_ids[..]).index(NewAxis);
+            let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+            let logits = match dense_forward(model, &prompt, None, &mut cache) {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = job
+                        .events
+                        .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
+                    continue;
+                }
+            };
+            logit_rows.push(logits.index((.., -1, ..))); // [1, vocab]
+            seqs.push(BatchSeq {
+                job,
+                out_ids: Vec::new(),
+                emitted: String::new(),
+                full_text: String::new(),
+                tool_seen: false,
+                output_tokens: 0,
+                prompt_len: prompt_ids.len() as i32,
+                max_tokens,
+                finished: false,
+                stop: StopReason::EndTurn,
+            });
+            caches.push(cache);
+        }
+        if seqs.is_empty() {
+            return;
+        }
+
+        // 2. Assemble one left-padded batched cache (rows aligned at maxL on the right).
+        let max_l = seqs.iter().map(|s| s.prompt_len).max().unwrap();
+        let lpad = |x: &Array, pad: i32| -> Array {
+            if pad == 0 {
+                return x.clone();
+            }
+            let s = x.shape();
+            let z = zeros_dtype(&[s[0], s[1], pad, s[3]], x.dtype()).unwrap();
+            concatenate_axis(&[&z, x], 2).unwrap()
+        };
+        let n_layers = caches[0].len();
+        let mut bcache: Vec<Option<ConcatKeyValueCache>> = Vec::with_capacity(n_layers);
+        for l in 0..n_layers {
+            let mut ks: Vec<Array> = Vec::with_capacity(seqs.len());
+            let mut vs: Vec<Array> = Vec::with_capacity(seqs.len());
+            for (c, s) in caches.iter().zip(&seqs) {
+                let (k, v, _) = c[l].as_ref().unwrap().kv_used().unwrap();
+                ks.push(lpad(&k, max_l - s.prompt_len));
+                vs.push(lpad(&v, max_l - s.prompt_len));
+            }
+            let kr: Vec<&Array> = ks.iter().collect();
+            let vr: Vec<&Array> = vs.iter().collect();
+            bcache.push(Some(ConcatKeyValueCache::from_kv(
+                concatenate_axis(&kr, 0).unwrap(),
+                concatenate_axis(&vr, 0).unwrap(),
+                max_l,
+            )));
+        }
+        drop(caches);
+        let lr: Vec<&Array> = logit_rows.iter().collect();
+        let mut logits = concatenate_axis(&lr, 0).unwrap(); // [B, vocab]
+        drop(logit_rows);
+
+        // 3. Decode loop: sample per row, stream, retire finished rows, forward the rest.
+        let mut batch_seq: Vec<usize> = (0..seqs.len()).collect(); // seq index per live row
+        let mut step = 0i32;
+        loop {
+            let mut keep_rows: Vec<usize> = Vec::new();
+            let mut keep_toks: Vec<u32> = Vec::new();
+            for (row, &si) in batch_seq.iter().enumerate() {
+                let tok = argmax_axis(&logits.index((row as i32, ..)), -1, false)
+                    .unwrap()
+                    .item::<u32>();
+                let mut finish = false;
+                if eos.contains(&tok) {
+                    seqs[si].stop = StopReason::EndTurn;
+                    finish = true;
+                } else if seqs[si].job.cancel.is_cancelled() {
+                    seqs[si].stop = StopReason::Cancelled;
+                    finish = true;
+                } else if !seqs[si].push(tok, tokenizer) {
+                    seqs[si].stop = StopReason::Cancelled;
+                    finish = true;
+                } else if seqs[si].output_tokens as usize >= seqs[si].max_tokens {
+                    seqs[si].stop = StopReason::MaxTokens;
+                    finish = true;
+                } else if is_runaway_loop(&seqs[si].out_ids) {
+                    seqs[si].stop = StopReason::EndTurn;
+                    finish = true;
+                }
+                if finish {
+                    seqs[si].finished = true;
+                    seqs[si].finalize();
+                } else {
+                    keep_rows.push(row);
+                    keep_toks.push(tok);
+                }
+            }
+            if keep_rows.is_empty() {
+                break;
+            }
+            // Retire finished rows: slice the batched cache + the row→seq map.
+            if keep_rows.len() != batch_seq.len() {
+                let idx = Array::from(
+                    &keep_rows.iter().map(|&r| r as i32).collect::<Vec<_>>()[..],
+                );
+                for c in bcache.iter_mut() {
+                    let (k, v, off) = c.as_ref().unwrap().kv_used().unwrap();
+                    *c = Some(ConcatKeyValueCache::from_kv(
+                        take_axis(&k, &idx, 0).unwrap(),
+                        take_axis(&v, &idx, 0).unwrap(),
+                        off,
+                    ));
+                }
+                batch_seq = keep_rows.iter().map(|&r| batch_seq[r]).collect();
+            }
+            // Forward the kept tokens with per-row rope offset + per-row pad mask.
+            let pads: Vec<i32> = batch_seq.iter().map(|&si| max_l - seqs[si].prompt_len).collect();
+            let pad_off = Array::from(&pads[..]);
+            let y = Array::from(&keep_toks[..])
+                .reshape(&[keep_toks.len() as i32, 1])
+                .unwrap();
+            let k_cur = max_l + step + 1;
+            let kidx = arange::<_, i32>(0, k_cur, None).unwrap().index((NewAxis, ..));
+            let padd = pad_off.index((.., NewAxis));
+            let dec_mask = kidx.ge(&padd).unwrap().index((.., NewAxis, NewAxis, ..));
+            set_batch_pad_offsets(Some(pad_off));
+            let out = dense_forward(model, &y, Some(&dec_mask), &mut bcache);
+            set_batch_pad_offsets(None);
+            logits = match out {
+                Ok(l) => l.index((.., -1, ..)),
+                Err(e) => {
+                    for &si in &batch_seq {
+                        let _ = seqs[si].job.events.send(Err(ModelError::BackendUnavailable(
+                            format!("mlx: {e}"),
+                        )));
+                    }
+                    return;
+                }
+            };
+            step += 1;
         }
     }
 
@@ -2794,5 +3166,74 @@ mod tests {
             .expect("prefill");
         assert!(out3.is_some(), "no cancel must complete prefill");
         eprintln!("PREFILL-CANCEL ok (calls until bail={})", calls.get());
+    }
+
+    // Batched-decode scheduler, end-to-end through the real ChatBackend. With
+    // `ROZUM_BATCH=2`, two concurrent greedy requests on ONE backend (ONE worker)
+    // must (a) actually batch — `BATCH_RUN_COUNT` increments exactly once, proving
+    // the scheduler didn't silently fall back to serial decode — and (b) each row
+    // gets ITS OWN correct, uncontaminated answer. The central batched-decode risk
+    // is cross-row leakage through padding/masking, so two different capitals make
+    // any contamination obvious. Needs the local Qwen3-4B-4bit snapshot; run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_batched_scheduler_two_concurrent
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires local mlx-community/Qwen3-4B-4bit"]
+    async fn mlx_batched_scheduler_two_concurrent() {
+        use super::MlxNativeBackend;
+        use super::inner::BATCH_RUN_COUNT;
+        use crate::backend::{ChatBackend, ChatRequest, SamplingParams, collect_to_string};
+        use std::sync::atomic::Ordering;
+
+        // The worker reads `ROZUM_BATCH` once at startup, so set it BEFORE building
+        // the backend. A generous window makes the two near-simultaneous sends land
+        // in the SAME batch deterministically (otherwise job 1 could decode before
+        // job 2 arrives). SAFETY: test process, set before the worker thread starts.
+        unsafe {
+            std::env::set_var("ROZUM_BATCH", "2");
+            std::env::set_var("ROZUM_BATCH_WINDOW_MS", "500");
+        }
+
+        let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
+            .expect("Qwen3-4B-4bit not in HF cache");
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+            .await
+            .expect("backend load");
+
+        let mk = |q: &str| {
+            let mut req = ChatRequest::simple(q);
+            req.sampling = SamplingParams { max_tokens: Some(32), ..Default::default() };
+            req
+        };
+        let before = BATCH_RUN_COUNT.load(Ordering::Relaxed);
+
+        // Enqueue both jobs back-to-back (each `chat().await` sends synchronously),
+        // then drive both streams together — they coincide inside the batch window.
+        let s1 = backend
+            .chat(mk("What is the capital of France? Answer in one word. /no_think"))
+            .await
+            .expect("chat France");
+        let s2 = backend
+            .chat(mk("What is the capital of Japan? Answer in one word. /no_think"))
+            .await
+            .expect("chat Japan");
+        let (t1, t2) = tokio::join!(collect_to_string(s1), collect_to_string(s2));
+        let (t1, t2) = (t1.expect("collect France"), t2.expect("collect Japan"));
+
+        let runs = BATCH_RUN_COUNT.load(Ordering::Relaxed) - before;
+        eprintln!("BATCHED France={t1:?}  Japan={t2:?}  (run_batch calls={runs})");
+
+        // SAFETY: test cleanup; no other thread reads these now.
+        unsafe {
+            std::env::remove_var("ROZUM_BATCH");
+            std::env::remove_var("ROZUM_BATCH_WINDOW_MS");
+        }
+
+        assert_eq!(
+            runs, 1,
+            "the two concurrent greedy requests must batch in ONE run_batch call"
+        );
+        assert!(t1.contains("Paris"), "France row wrong/contaminated: {t1:?}");
+        assert!(t2.contains("Tokyo"), "Japan row wrong/contaminated: {t2:?}");
     }
 }
