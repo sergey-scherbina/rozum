@@ -2400,6 +2400,52 @@ mod tests {
         PROBE_MODEL.with(|c| *c.borrow_mut() = None);
     }
 
+    // Feasibility probe for ragged batched decode: can `rope_dynamic` apply a PER-ROW
+    // position offset (a [B] offset array), so a batch of sequences at different lengths
+    // can each be rope'd at its own position in one call? If yes, ragged batching is
+    // tractable without per-row rope loops.
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_rope_per_row_probe
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "rope feasibility probe (no model needed)"]
+    fn mlx_rope_per_row_probe() {
+        use mlx_rs::ops::indexing::{IndexOp, NewAxis};
+        use mlx_rs::Array;
+
+        // q: [B=2, H=1, T=1, D=4] — two rows, a single token each.
+        let dims = 4i32;
+        let q = Array::from_iter(
+            [0.1f32, 0.2, 0.3, 0.4, 0.1, 0.2, 0.3, 0.4].into_iter(),
+            &[2, 1, 1, dims],
+        );
+        // Per-row offsets: row0 at position 0, row1 at position 10.
+        let off = Array::from_iter([0i32, 10].into_iter(), &[2]);
+
+        // Batched per-row rope (the thing we want to work).
+        let batched =
+            mlx_rs::fast::rope_dynamic(&q, dims, false, Some(1e6f32), 1.0, &off, None);
+
+        // Reference: rope each row separately with a scalar offset.
+        let r0 = mlx_rs::fast::rope(&q.index((0, NewAxis)), dims, false, Some(1e6f32), 1.0, 0, None);
+        let r10 =
+            mlx_rs::fast::rope(&q.index((1, NewAxis)), dims, false, Some(1e6f32), 1.0, 10, None);
+
+        match (batched, r0, r10) {
+            (Ok(b), Ok(r0), Ok(r10)) => {
+                let row0 = b.index((0, NewAxis));
+                let row1 = b.index((1, NewAxis));
+                let d0 = row0.subtract(&r0).unwrap().abs().unwrap().max(None).unwrap().item::<f32>();
+                let d1 = row1.subtract(&r10).unwrap().abs().unwrap().max(None).unwrap().item::<f32>();
+                eprintln!("PER-ROW ROPE: max|batched_row0 - rope(off=0)|={d0:.2e}  max|batched_row1 - rope(off=10)|={d1:.2e}");
+                eprintln!(
+                    "=> per-row offset {}",
+                    if d0 < 1e-5 && d1 < 1e-5 { "WORKS (ragged batching is tractable)" } else { "does NOT match (offset is not per-row)" }
+                );
+            }
+            (b, _, _) => eprintln!("rope_dynamic per-row offset errored: {:?}", b.err()),
+        }
+    }
+
     // Batched-decode probe (P0 de-risk for `mlx-native-batched-decode`): does a B>1
     // batched `forward` produce per-sequence-IDENTICAL output to running each alone
     // (byte-exact), and does it gain THROUGHPUT vs serial? Dense Qwen3 (no GatedDeltaNet);
