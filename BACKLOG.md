@@ -288,6 +288,21 @@ features the mistralrs backend shipped that the native backend does NOT yet have
 
 ## Runtime And UX
 
+- [ ] gateway-openai-responses-api — add `POST /v1/responses` so the **Codex CLI** can use
+  the gateway. Codex ≥ 0.137 dropped `wire_api="chat"` and now REQUIRES the OpenAI Responses
+  API; the gateway only has `/v1/chat/completions` (+ Anthropic `/v1/messages`), so Codex
+  gets 404 and can't connect (confirmed via the e2e — `scripts/e2e_codex_gateway.sh`,
+  `docs/e2e/claude-gateway-smoke.md`). Implement: parse the Responses request (`input` items
+  — messages + `function_call_output`; `tools` as flat `{type:function,name,…}`;
+  `instructions` as system; `stream`) into the internal `ChatBackend`, and stream back the
+  Responses event protocol (`response.created` → `response.output_item.added` →
+  `response.output_text.delta` / `response.function_call_arguments.delta` →
+  `response.output_item.done` → `response.completed`), plus a non-stream JSON `response`
+  object with `output[]` + `usage`. Reuse the existing message/tool conversion + the backend
+  stream; the work is the new request/response/event shapes. This is the **single biggest
+  gap for Codex support** (Claude Code already works via `/v1/messages`). Note also: Codex
+  ignores `OPENAI_BASE_URL` — it needs a `-c model_provider` config (the e2e script sets it).
+
 - [x] rozum-native-channels-tier3 - DONE (`feature/piggyback-wakeup`). Tier-3
   gateway piggyback wakeup, keyed by project + agent name. mcp-proxy drops each
   room transcript delta to `$XDG_RUNTIME_DIR/rozum/piggyback/<project>/<agent>.log`;

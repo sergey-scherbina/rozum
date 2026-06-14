@@ -42,7 +42,7 @@ case "$TASK" in
   build)
     PROMPT='Create a minimal Rust binary project in the current directory: a Cargo.toml (package name "reverse-cli", edition 2021, no dependencies) and src/main.rs. The program reverses its first command-line argument (by characters) and prints the result. Then run "cargo run -- hello" and confirm it prints "olleh". Keep it minimal.' ;;
   test)
-    PROMPT='Create a minimal Rust library+binary project "reverse-cli" (edition 2021, no deps): a pub fn reverse(s: &str) -> String in src/lib.rs, a src/main.rs that reverses argv[1] using it, and a #[test] in src/lib.rs checking reverse("hello") == "olleh". Run "cargo test" and make it pass. Keep it minimal.' ;;
+    PROMPT='Create a minimal Rust BINARY project "reverse-cli" (Cargo.toml + src/main.rs, edition 2021, no dependencies). Implement `fn reverse(s: &str) -> String` that reverses by characters; main reads its first CLI argument and prints reverse(arg). ALSO add a `#[cfg(test)]` unit test in src/main.rs asserting `reverse("hello") == "olleh"`. Then run "cargo test" (must pass) and "cargo run -- hello" (must print olleh). Do NOT just scaffold a default project — actually implement reverse. Keep it minimal.' ;;
   *) echo "unknown task: $TASK"; exit 2 ;;
 esac
 
@@ -83,6 +83,8 @@ ls src/*.rs >/dev/null 2>&1 && echo "PASS  src/*.rs exists" || { echo "FAIL  no 
 if [ "$TASK" = test ]; then
   if cargo test -q 2>"$WORK/cargo.err"; then echo "PASS  cargo test green"; else echo "FAIL  cargo test"; sed -n '1,15p' "$WORK/cargo.err"; fail=1; fi
 fi
+# Behavior check (un-fakeable): both tasks ask for a binary that reverses, so this
+# verifies the actual implementation — a scaffold-only run fails here as it should.
 OUT="$(cargo run -q -- hello 2>"$WORK/run.err")"
 if [ "$OUT" = "olleh" ]; then echo "PASS  cargo run -- hello -> olleh"; else echo "FAIL  cargo run -- hello -> '$OUT'"; sed -n '1,15p' "$WORK/run.err"; fail=1; fi
 
