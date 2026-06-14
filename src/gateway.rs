@@ -1450,15 +1450,23 @@ async fn models_handler(State(state): State<GatewayState>) -> impl IntoResponse 
     // real model name still appears in display_name.
     let model_id = state.sb.model_id();
     let claude_alias = claude_model_alias(&model_id);
+    let entry = json!({
+        "id": claude_alias,
+        "object": "model",
+        "created": now_secs(),
+        "owned_by": "rozum",
+        "display_name": model_id,
+    });
+    // `data` is the OpenAI shape (the real model). `models` is the key Codex's
+    // model-list refresh requires — but each Codex `Model` entry has many required
+    // fields (`slug`, `supported_reasoning_levels`, …) we'd have to track. We force
+    // `-m local` via the launch, so the list is unused; return an EMPTY `models` so
+    // Codex finds the key and validates zero entries (no "missing field" warning),
+    // while OpenAI clients keep using `data`.
     axum::Json(json!({
         "object": "list",
-        "data": [{
-            "id": claude_alias,
-            "object": "model",
-            "created": now_secs(),
-            "owned_by": "rozum",
-            "display_name": model_id,
-        }]
+        "data": [entry],
+        "models": [],
     }))
 }
 
