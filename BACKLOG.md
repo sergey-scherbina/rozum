@@ -254,11 +254,20 @@ sampler are shared (import from `qwen3.rs`), so a new dense model ≈ a copy of
 alias, Llama variants, fp16 — are in SPRINT.) Out-of-scope ones (DeepSeek/MLA,
 vision) and why: `docs/specs/mlx-native-catalog-non-goals.md`.
 
-- [ ] mlx-native-gemma - Gemma 2 / Gemma 3 (`model_type: "gemma2"`/`"gemma3"`). Own
-  fork model file: RMSNorm with a **+1 weight convention**, **attention logit
-  soft-cap** + final-logit soft-cap (Gemma2), embedding scaled by `sqrt(hidden)`,
-  tied embeddings, GQA. Reuse the AFQ loader + shared sampler. Moderate (the soft-cap
-  + norm convention are the only real deltas). Validate vs oracle.
+- [x] mlx-native-gemma - **Gemma 3 (text) DONE 2026-06-14 — own fork file `gemma3.rs`.**
+  Distinct from Llama: `(1 + weight)` RMSNorm convention (computed in f32), embedding scaled by
+  `sqrt(hidden)`, per-head q/k RMSNorm, **GELU(tanh) MLP**, four norms per layer, **alternating
+  local/global attention** (per-layer RoPE base — `rope_local_base_freq` local vs `rope_theta`
+  global, every `sliding_window_pattern`-th layer global), scale `query_pre_attn_scalar^-0.5`. Own
+  `Generate` (mirrors llama); `LoadedModel::Gemma3`; routes `"gemma3_text" | "gemma3"`. **VALIDATED**
+  (`mlx_gemma3_chat`, gemma-3-1b-it-4bit): *"Paris is the capital of France."* (clean). Getting there
+  surfaced THREE general fixes (not Gemma-only): (1) mlx-community 4bit ships a SEPARATE quantized
+  `lm_head` even when tied → detect + use it; (2) chat templates that emit `{{ bos_token }}` (Gemma)
+  got an empty BOS → thread `bos_token`/`eos_token` into the minijinja context (a BOS-sensitive model
+  was garbage without it); (3) `<end_of_turn>` (106) wasn't in EOS (config eos is only `<eos>`) → add
+  the tokenizer's turn-end token. Added to `models::RECOMMENDED`. **Deferred:** the 512 sliding window
+  is approximated by full attention (exact within the window; bounded divergence beyond — a windowed-
+  mask follow-up); Gemma 2 (`attn_logit_softcapping`) and the multimodal vision tower are separate.
 
 - [x] mlx-native-phi3 - **DONE 2026-06-14 — NO new model file.** Phi-3 (`model_type: "phi3"`) is
   the Llama arch with **fused `qkv_proj` + `gate_up_proj`**. Rather than a whole new file,
