@@ -147,6 +147,25 @@ throwaway temp dir). Thinking is **off by default** in the gateway (clean output
   rule for new scenarios: always include a behavior assertion the model can't satisfy by
   scaffolding.
 
+- **fix task: ✅ PASS.** Given a pre-made `reverse-cli` whose `reverse()` returned the input
+  unchanged, the model read the file, located the bug, and made a **surgical** edit
+  (`s.to_string()` → `s.chars().rev().collect()`, the rest of the file untouched); `cargo run --
+  hello` ⇒ `olleh` (rc=0, 12 turns, ~472 s). The **read → locate → edit** path works — the most
+  important capability beyond create-from-scratch.
+
+- **debug task: ❌ FAIL (consistently — model agentic ceiling).** Given a `mathlib` whose
+  `add(a,b)` does `a-b` (so its `#[test]` fails), two runs both failed to fix it, two different
+  ways: (run 1) the model diagnosed correctly ("expects 5 but gets -1, let me look at the
+  source") but then emitted a **malformed tool call** as text — `<tool_call><arguments>{…,
+  "name":"Read"}</arguments></tool_call>` (a one-off greedy-MoE garbling: stray `<arguments>`,
+  `name` inside, wrong arg key) which the gateway can't parse, so it leaked and the loop stalled
+  before the fix; (run 2) it read everything but **never attempted an Edit at all** (0 Edit/Write
+  across 24 turns) and declared a false success. So the multi-step **run-test → read-failure →
+  edit → re-run** loop is *above* this model's reliable ceiling, where the single-edit `fix` task
+  is *within* it. Not a gateway bug (it delivered every well-formed tool call): a model-capability
+  ceiling, surfaced exactly as a "harder scenario" should. Use `build`/`fix` as the reliable
+  gateway smokes; `test`/`debug` as model-capability stress.
+
 ## Codex (OpenAI dialect) — ✅ WORKS (since the `/v1/responses` endpoint)
 
 `scripts/e2e_codex_gateway.sh [build|test]` is the Codex parallel of the Claude runner
