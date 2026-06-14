@@ -407,8 +407,19 @@ mod inner {
 
         // `blocking_recv` is correct here: this is a plain OS thread with no
         // tokio runtime, so it parks until the next job (or the queue closes).
+        // `prefix` carries the previous dense request's KV across jobs for prefix
+        // reuse (the worker is cap-1 serial, so no locking is needed).
+        let mut prefix: Option<PrefixCache> = None;
         while let Some(job) = jobs.blocking_recv() {
-            run_job(&mut model, &mut tokenizer, &template, &eos, kv_per_pos, job);
+            run_job(
+                &mut model,
+                &mut tokenizer,
+                &template,
+                &eos,
+                kv_per_pos,
+                &mut prefix,
+                job,
+            );
         }
     }
 
@@ -426,6 +437,29 @@ mod inner {
         (1..=REPEAT_MAX_PERIOD).any(|p| (p..REPEAT_WINDOW).all(|i| tail[i] == tail[i - p]))
     }
 
+    /// Persisted dense KV cache from the previous request on this worker, for
+    /// prefix reuse. `ids` is the prompt the cache represents (its KV covers
+    /// `[0, ids.len())`); when the next prompt extends `ids`, the cache is
+    /// truncated to that length and only the new suffix is prefilled.
+    struct PrefixCache {
+        ids: Vec<u32>,
+        cache: Vec<Option<ConcatKeyValueCache>>,
+    }
+
+    /// Dense arches own their KV cache externally (`Vec<Option<ConcatKeyValueCache>>`)
+    /// and so support prefix reuse via truncation. Hybrid (Qwen3.6) owns its cache
+    /// internally and carries a non-truncatable recurrent state (see BACKLOG
+    /// `mlx-native-prefix-kv-cache`), so it isn't reused here.
+    fn is_dense(model: &LoadedModel) -> bool {
+        matches!(
+            model,
+            LoadedModel::Qwen3(_)
+                | LoadedModel::Qwen3Moe(_)
+                | LoadedModel::Llama(_)
+                | LoadedModel::Qwen2(_)
+        )
+    }
+
     /// Render the prompt and stream token events. Dispatches on the model
     /// architecture; each `Generate` iterator feeds the shared streaming loop.
     fn run_job(
@@ -434,6 +468,7 @@ mod inner {
         template: &str,
         eos: &[u32],
         kv_per_pos: Option<u64>,
+        prefix: &mut Option<PrefixCache>,
         job: Job,
     ) {
         let prompt_ids = match render_prompt(
@@ -495,7 +530,6 @@ mod inner {
             }
         }
 
-        let prompt_tokens = Array::from(&prompt_ids[..]).index(NewAxis);
         let temp = job.sampling.temperature.unwrap_or(0.0);
         // top_k <= 0 / top_p >= 1.0 disable those filters (the sampler's defaults).
         let top_p = job.sampling.top_p.unwrap_or(1.0);
@@ -505,7 +539,41 @@ mod inner {
             let _ = mlx_rs::random::seed(s);
         }
 
+        // Prefix-KV reuse (dense arches only — see `is_dense`/`PrefixCache`): if the
+        // previous request's prompt is a strict prefix of this one (the append-only
+        // agentic-loop case), keep its KV, truncate the cache to the shared length,
+        // and prefill only the new suffix. Byte-exact: the kept `[0, reuse)` KV is
+        // exactly what a fresh prefill would compute, and `create_attention_mask`
+        // builds the causal mask from the cache offset. `ROZUM_PREFIX_CACHE=0` off.
+        let prefix_enabled =
+            !matches!(std::env::var("ROZUM_PREFIX_CACHE").as_deref(), Ok("0"));
+        let dense = is_dense(model);
         let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+        let mut reuse_len = 0usize;
+        if prefix_enabled && dense {
+            if let Some(p) = prefix.as_mut() {
+                if p.ids.len() < prompt_ids.len() && prompt_ids.starts_with(&p.ids) {
+                    reuse_len = p.ids.len();
+                    cache = std::mem::take(&mut p.cache);
+                    for c in cache.iter_mut().flatten() {
+                        c.truncate(reuse_len as i32);
+                    }
+                }
+            }
+        }
+        if reuse_len > 0 && std::env::var_os("ROZUM_MLX_DEBUG").is_some() {
+            eprintln!(
+                "PREFIX_REUSE reuse={reuse_len}/{} (prefill {} new tokens)",
+                prompt_ids.len(),
+                prompt_ids.len() - reuse_len
+            );
+        }
+        // Prefill the full prompt fresh, or just the new suffix when reusing.
+        let prompt_tokens = if reuse_len > 0 {
+            Array::from(&prompt_ids[reuse_len..]).index(NewAxis)
+        } else {
+            Array::from(&prompt_ids[..]).index(NewAxis)
+        };
         match model {
             LoadedModel::Qwen3(m) => {
                 let mut generator = qwen3::Generate::new(m, &mut cache, temp, &prompt_tokens);
@@ -597,6 +665,15 @@ mod inner {
                           // see mlx_qwen35_moe_decode_bench serial==pipe MATCH)
                 );
             }
+        }
+
+        // Persist the (now advanced) dense cache so the next request that extends
+        // this prompt can reuse its KV. `cache` is non-empty only for dense arches
+        // (hybrid keeps its cache internally); keyed by this prompt's ids, so next
+        // turn truncates back to here before prefilling the new suffix. A non-dense
+        // run leaves `prefix` untouched (the worker only ever serves one model).
+        if prefix_enabled && dense && !cache.is_empty() {
+            *prefix = Some(PrefixCache { ids: prompt_ids, cache });
         }
     }
 
@@ -1271,6 +1348,61 @@ mod tests {
         let text = collect_to_string(stream).await.expect("collect");
         eprintln!("MLX OUTPUT: {text}");
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
+    }
+
+    // Prefix-KV reuse must be byte-exact: a turn-2 request that reuses turn-1's KV
+    // prefix (same backend → same worker) must produce the IDENTICAL output to the
+    // same turn-2 conversation prefilled fresh (a second, history-less backend).
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_prefix_reuse_byte_exact
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires local mlx-community/Qwen3-4B-4bit"]
+    async fn mlx_prefix_reuse_byte_exact() {
+        use super::MlxNativeBackend;
+        use crate::backend::{
+            ChatBackend, ChatRequest, ContentBlock, Message, Role, SamplingParams,
+            collect_to_string,
+        };
+        use tokio_util::sync::CancellationToken;
+
+        let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
+            .expect("Qwen3-4B-4bit not in HF cache");
+        let asst = |s: &str| Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text { text: s.into() }],
+        };
+        let req = |msgs: Vec<Message>| ChatRequest {
+            messages: msgs,
+            tools: vec![],
+            sampling: SamplingParams { max_tokens: Some(24), ..Default::default() },
+            cancel: CancellationToken::new(),
+            session_id: None,
+        };
+        let q1 = "Name three primary colors, comma separated.";
+        let q2 = "Now name three farm animals, comma separated.";
+
+        // Backend A: turn 1 (populates the prefix), then turn 2 (REUSES it).
+        let a = MlxNativeBackend::new(dir.clone(), "mlx-community/Qwen3-4B-4bit".into())
+            .await
+            .expect("load A");
+        let t1 = collect_to_string(a.chat(req(vec![Message::user(q1)])).await.unwrap())
+            .await
+            .unwrap();
+        let convo2 = vec![Message::user(q1), asst(&t1), Message::user(q2)];
+        let reuse = collect_to_string(a.chat(req(convo2.clone())).await.unwrap())
+            .await
+            .unwrap();
+
+        // Backend B: same turn-2 conversation, no history → full fresh prefill.
+        let b = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+            .await
+            .expect("load B");
+        let fresh = collect_to_string(b.chat(req(convo2)).await.unwrap())
+            .await
+            .unwrap();
+
+        eprintln!("REUSE: {reuse:?}\nFRESH: {fresh:?}");
+        assert_eq!(reuse, fresh, "prefix-reuse output must byte-match a fresh prefill");
     }
 
     // Prod-path perf through the FULL MlxNativeBackend.chat (tokenizer detok +
