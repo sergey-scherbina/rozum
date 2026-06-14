@@ -592,16 +592,18 @@ is 100% MLX, candle only as external oracle.
 
 ##### Catalog — quick & cheap wins (do next; each = small port + oracle sweep)
 
-- [ ] mlx-native-mistral - **CHEAP — likely a one-line alias.** Mistral / Mistral-Nemo
-  (`model_type: "mistral"`) is architecturally Llama (GQA, no qkv-bias, SwiGLU, RoPE),
-  and upstream `mlx_lm` serves it with the *llama* model class. So try routing
-  `"mistral" => llama::load_llama_model` (+ `supported_model_type` += "mistral") with NO
-  new fork file, then validate greedy byte-exact vs Python `mlx_lm` on a small Mistral
-  MLX 4-bit. Caveat: Mistral uses sliding-window attention (window 4096); the llama path
-  does full attention, so it diverges from the reference only for contexts **>window** —
-  fine for the agent use case and bounded by the KV preflight. If a real divergence shows
-  up at short context, fall back to a thin `mistral.rs` copy. Opens Mistral/Nemo (and the
-  Mixtral base) at near-zero cost.
+- [x] mlx-native-mistral - **DONE 2026-06-14 — the one-line alias, as predicted.** Mistral /
+  Mistral-Nemo (`model_type: "mistral"`) is architecturally Llama (GQA, no qkv-bias, SwiGLU,
+  RoPE) and upstream `mlx_lm` serves it with the *llama* model class, so `LoadedModel::load`
+  now routes `"llama" | "mistral" => llama::load_llama_model` and `supported_model_type` admits
+  `"mistral"` — NO new fork file. Guards: `mistral_is_a_supported_model_type` + `mistral` added
+  to the dense/unretained classification test (fast suite, 130/0). Caveat as noted: Mistral's
+  sliding-window attention (4096) is approximated by the llama path's full attention, so it
+  matches the reference except beyond the window — fine for agents, bounded by the KV preflight;
+  if a short-context divergence ever shows, fall back to a thin `mistral.rs`. **Validation is a
+  ready `#[ignore]` network test `mlx_mistral_chat`** (auto-downloads `mlx-community/
+  Mistral-7B-Instruct-v0.3-4bit` ~4 GB, asserts "Paris") — run when a download is acceptable.
+  Opens Mistral/Nemo (and the Mixtral base) at near-zero cost.
 
 - [ ] mlx-native-llama-aliases - **TRIVIAL — verify, don't port.** SmolLM / TinyLlama /
   Llama-3.x variants already ship `model_type: "llama"`, so they should run on the

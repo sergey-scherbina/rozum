@@ -147,10 +147,15 @@ mod inner {
                 "qwen3_5_moe" | "qwen3_5_moe_text" => qwen3_5_moe::load_qwen3_5_moe_model(dir)
                     .map(LoadedModel::Qwen35Moe)
                     .map_err(|e| format!("mlx: load qwen3_5_moe {}: {e}", dir.display())),
-                // Llama family (Llama 3.x, and other `model_type: llama` checkpoints).
-                "llama" => llama::load_llama_model(dir)
+                // Llama family (Llama 3.x, and other `model_type: llama` checkpoints), plus
+                // Mistral / Mistral-Nemo (`model_type: "mistral"`) — architecturally Llama
+                // (GQA, no qkv-bias, SwiGLU, RoPE) and served by the *llama* class upstream in
+                // `mlx_lm`. The only delta is Mistral's sliding-window attention; the llama
+                // path runs full attention, so it matches the reference except for contexts
+                // beyond the window (4096), which the KV preflight already bounds.
+                "llama" | "mistral" => llama::load_llama_model(dir)
                     .map(LoadedModel::Llama)
-                    .map_err(|e| format!("mlx: load llama {}: {e}", dir.display())),
+                    .map_err(|e| format!("mlx: load llama/mistral {}: {e}", dir.display())),
                 // Qwen2 / Qwen2.5 / Qwen2.5-Coder (dense; qkv-bias, no q/k-norm).
                 "qwen2" => qwen2::load_qwen2_model(dir)
                     .map(LoadedModel::Qwen2)
@@ -2238,6 +2243,7 @@ pub fn supported_model_type(model_type: &str) -> bool {
             | "qwen3_5_moe"
             | "qwen3_5_moe_text"
             | "llama"
+            | "mistral"
             | "qwen2"
     )
 }
@@ -2352,6 +2358,16 @@ mod tests {
         assert!(resolve_model_dir("definitely/not-a-real-model-xyzzy").is_none());
     }
 
+    // Mistral / Mistral-Nemo route to the native MLX runtime via the Llama path (they ARE
+    // the llama arch). Guards the catalog alias so `model_type: "mistral"` is admitted (and
+    // doesn't regress to "unsupported", which would silently fall through to another backend).
+    #[test]
+    fn mistral_is_a_supported_model_type() {
+        assert!(super::supported_model_type("mistral"));
+        assert!(super::supported_model_type("llama"));
+        assert!(!super::supported_model_type("mixtral"), "sparse MoE Mistral is a separate port");
+    }
+
     // Regression guard: the hybrid (GatedDeltaNet) archs MUST map to retained MLX
     // command-buffer refs (`ROZUM_MLX_RETAIN`). Dropping one from the list silently
     // reverts the +2.7× decode win (and risks the token-2 garbage the retain fixes).
@@ -2363,7 +2379,7 @@ mod tests {
                 "{t} must be hybrid (needs ROZUM_MLX_RETAIN for correctness + speed)"
             );
         }
-        for t in ["qwen3", "qwen3_moe", "llama", "qwen2", "qwen2_5"] {
+        for t in ["qwen3", "qwen3_moe", "llama", "mistral", "qwen2", "qwen2_5"] {
             assert!(!super::inner::is_hybrid_model(t), "{t} is dense (unretained path)");
         }
     }
@@ -2857,6 +2873,31 @@ mod tests {
         let stream = backend.chat(req).await.expect("chat");
         let text = collect_to_string(stream).await.expect("collect");
         eprintln!("MLX LLAMA OUTPUT: {text}");
+        assert!(text.contains("Paris"), "expected Paris, got: {text}");
+    }
+
+    // Mistral (`model_type: "mistral"`) on the Llama path — proves the alias works end to
+    // end (Mistral is architecturally Llama; the llama loader reads its config). Greedy;
+    // short prompt (well within the sliding window, so the full-attn approximation is exact).
+    // Auto-downloads ~4 GB. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_mistral_chat
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "network: auto-downloads mlx-community/Mistral-7B-Instruct-v0.3-4bit (~4GB)"]
+    async fn mlx_mistral_chat() {
+        use super::{MlxNativeBackend, ensure_model_dir};
+        use crate::backend::{ChatBackend, ChatRequest, collect_to_string};
+
+        let spec = "mlx-community:Mistral-7B-Instruct-v0.3-4bit";
+        let dir = ensure_model_dir(spec).await.expect("mistral download/resolve");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+            .await
+            .expect("backend load (mistral routes to the llama path)");
+        let req =
+            ChatRequest::simple("What is the capital of France? Answer in one short sentence.");
+        let stream = backend.chat(req).await.expect("chat");
+        let text = collect_to_string(stream).await.expect("collect");
+        eprintln!("MLX MISTRAL OUTPUT: {text}");
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
     }
 
