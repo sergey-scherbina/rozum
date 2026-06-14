@@ -501,6 +501,23 @@ mod inner {
         if std::env::var("ROZUM_MLX_DEBUG").is_ok() {
             eprintln!("PROMPT_IDS len={} {:?}", prompt_ids.len(), prompt_ids);
         }
+        // Conversation boundary (prompt WITHOUT the trailing generation prompt): the
+        // prefix that recurs across agentic turns and that prefix reuse keys on. The
+        // generation prompt — esp. the thinking-off `<think></think>` prefill — does
+        // NOT recur (next turn renders this turn as a completed message), so reusing
+        // up to the full prompt would never match. Falls back to the full length if
+        // the no-gen render fails (then reuse just won't fire).
+        let conv_len = render_prompt_opt(
+            tokenizer,
+            template,
+            &job.model_id,
+            &job.messages,
+            &job.tools,
+            false,
+        )
+        .map(|c| c.len().min(prompt_ids.len()))
+        .unwrap_or(prompt_ids.len());
+        let gen_prompt_len = prompt_ids.len().saturating_sub(conv_len);
         // Effective output budget: the client's `max_tokens` (or our default), then
         // clamped to a hard ceiling so one runaway generation can't pin the cap-1
         // worker for minutes. Clients like Claude Code send a very large `max_tokens`;
@@ -676,6 +693,9 @@ mod inner {
                 let c = job.cancel.clone();
                 generator.set_cancel(Box::new(move || c.is_cancelled()));
                 generator.set_sampler(top_p, top_k, repeat_penalty);
+                // Snapshot the Linear state at the conversation boundary (before the
+                // generation-prompt tail), so it matches the next turn's reuse offset.
+                generator.set_gen_prompt_len(gen_prompt_len as i32);
                 let generator = stream_generation(
                     generator,
                     tokenizer,
@@ -698,6 +718,9 @@ mod inner {
                 let c = job.cancel.clone();
                 generator.set_cancel(Box::new(move || c.is_cancelled()));
                 generator.set_sampler(top_p, top_k, repeat_penalty);
+                // Snapshot the Linear state at the conversation boundary (before the
+                // generation-prompt tail), so it matches the next turn's reuse offset.
+                generator.set_gen_prompt_len(gen_prompt_len as i32);
                 let generator = stream_generation(
                     generator,
                     tokenizer,
@@ -715,17 +738,22 @@ mod inner {
         }
 
         // Persist the (now advanced) cache so the next request that extends this
-        // prompt can reuse it (keyed by this prompt's ids → next turn truncates back
-        // to here before prefilling the new suffix). Dense: the external KV vec.
-        // Hybrid: the live heterogeneous cache + the end-of-prefill Linear snapshot.
+        // conversation can reuse it. Keyed by the CONVERSATION boundary (`conv_len`),
+        // not the full prompt: the generation-prompt tail doesn't recur, so the next
+        // prompt only starts_with the conversation prefix. Next turn truncates back to
+        // here (dense KV / hybrid Full) + restores the Linear snapshot (taken at this
+        // same boundary), then prefills the new suffix.
+        let conv_ids = prompt_ids.get(..conv_len).map(<[u32]>::to_vec);
         if !prefix_enabled {
             // leave both untouched
-        } else if dense && !cache.is_empty() {
-            *prefix = Some(PrefixCache { ids: prompt_ids, cache });
-        } else if let Some((hcache, Some(snap))) = hybrid_result {
-            // Only persist when prefill ran (snapshot present); a mid-prefill cancel
-            // yields no snapshot, so we don't poison the cache with a partial state.
-            *hprefix = Some(HybridPrefix { ids: prompt_ids, cache: hcache, snap });
+        } else if let Some(ids) = conv_ids {
+            if dense && !cache.is_empty() {
+                *prefix = Some(PrefixCache { ids, cache });
+            } else if let Some((hcache, Some(snap))) = hybrid_result {
+                // Only persist when prefill ran (snapshot present); a mid-prefill
+                // cancel yields no snapshot, so we don't poison the cache.
+                *hprefix = Some(HybridPrefix { ids, cache: hcache, snap });
+            }
         }
     }
 
@@ -1053,6 +1081,22 @@ mod inner {
         messages: &[Message],
         tools: &[crate::backend::ToolDef],
     ) -> Result<Vec<u32>, String> {
+        render_prompt_opt(tokenizer, template, model_id, messages, tools, true)
+    }
+
+    /// `render_prompt` with control over the trailing generation prompt. Rendering
+    /// with `add_gen=false` gives the **conversation boundary** length — the prefix
+    /// that recurs across agentic turns — which prefix reuse keys on (the generation
+    /// prompt, esp. the thinking-off `<think></think>` prefill, differs from how the
+    /// same turn is later rendered as a completed message, so it must be excluded).
+    fn render_prompt_opt(
+        tokenizer: &mut Tokenizer,
+        template: &str,
+        model_id: &str,
+        messages: &[Message],
+        tools: &[crate::backend::ToolDef],
+        add_gen: bool,
+    ) -> Result<Vec<u32>, String> {
         let convo: Vec<Conversation<&'static str, String>> = messages
             .iter()
             .map(|m| Conversation {
@@ -1072,7 +1116,7 @@ mod inner {
             documents: None,
             model_id,
             chat_template_id: None,
-            add_generation_prompt: Some(true),
+            add_generation_prompt: Some(add_gen),
             continue_final_message: None,
             enable_thinking: Some(enable_thinking),
         };

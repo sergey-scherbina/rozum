@@ -1,5 +1,22 @@
 # Changelog
 
+## mlx-native — prefix-KV cache: key on the conversation boundary (make reuse fire)
+Completed: 2026-06-14
+The prefix-KV cache (dense + hybrid) was keyed on the **full prompt**, so reuse never
+actually fired: the trailing generation prompt — especially the thinking-off
+`<think></think>` prefill — does NOT recur next turn (the same turn is later re-rendered
+as a *completed* message), so consecutive prompts share only the **conversation** prefix
+(measured: LCP 3525/3529 — they diverge in the last 4 tokens). With `starts_with(full
+prompt)` the match failed every time (`reuse_len=0`), and the byte-exact tests passed
+*vacuously* (fresh == fresh). Fix: persist + key on the **conversation boundary** (the
+prompt rendered without the generation prompt, `render_prompt_opt(add_gen=false)`); the
+next turn `starts_with` that and reuses it. For hybrid, the Linear-state snapshot is now
+taken at that boundary too — prefill the conversation part, snapshot, then forward the
+tiny generation-prompt tail (`Generate::set_gen_prompt_len`, fork rev `c9ee1940`),
+byte-exact (the split is position-local + causal). **Now reuse fires** (e.g.
+`reuse=3522/3547, prefill 25 new tokens`) and a turn-2 prefill on a ~3.5k-token context
+drops **2.62s → 0.13s (~20×)**. Byte-exact tests now genuinely exercise reuse.
+
 ## Gateway — `POST /v1/responses` (OpenAI Responses API): Codex now works
 Completed: 2026-06-14
 Codex CLI ≥ 0.137 dropped `wire_api="chat"` and **requires** the OpenAI Responses API; the
