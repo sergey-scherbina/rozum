@@ -1,5 +1,21 @@
 # Changelog
 
+## mlx-native — join the worker thread on drop (deterministic unload + model swap)
+Completed: 2026-06-14
+`MlxNativeBackend` spawned its `!Send` model-owning worker thread **detached** (the `JoinHandle`
+was discarded) with no `Drop`, so dropping a backend only closed the job channel and let the worker
+free its ~8–15 GB of MLX buffers **asynchronously**. A subsequent model load then raced that teardown
+on the shared single-stream Metal context — so an unload didn't deterministically reclaim RAM, and a
+load→unload→load swap could corrupt MLX state. Fix: keep the worker `JoinHandle` and add a `Drop` that
+closes the channel (the sender is now an `Option`, taken first so `blocking_recv` returns and the
+worker exits) then **joins** the thread — the model's buffers are fully freed before drop returns.
+Validated by `mlx_sequential_backend_loads`: load a backend, run a **batched** decode, drop it
+(join+free), then load a *second* backend in the same process and chat — both answer correctly
+(previously the second load hit corrupt MLX state). This is the model-unload-on-idle / model-swap
+path. (Note: running multiple model `#[tokio::test]`s in one `cargo test` process still crashes —
+each test spins its own tokio runtime; that's a harness artifact, not the production path. Run model
+e2e tests individually, as the `#[ignore]` markers already imply.)
+
 ## mlx-native — batched sampling (temperature/top-p/top-k requests batch too, not just greedy)
 Completed: 2026-06-14
 Batched decode is no longer greedy-only. The new fork sampler
