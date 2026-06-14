@@ -91,11 +91,12 @@ throwaway temp dir). Thinking is **off by default** in the gateway (clean output
 - **Speed:** ~6 min wall for a trivial task is dominated by the 12 agentic round-trips (each
   re-prefills the growing context), not raw decode (~96 t/s). Fewer-turn models finish faster.
 
-- **test task: ❌ FAIL both runs — exposes the model's agentic ceiling, two distinct ways.**
-  The `test` task (binary + a `#[cfg(test)]` test + `cargo test`) is one notch harder than
-  `build`, and Qwen3.6-35B-A3B failed it intermittently, in two different failure modes — the
-  gateway delivered every tool call + result correctly each time, so both are **model behavior,
-  not gateway bugs**:
+- **test task: ✅ PASS after `runaway-stop` (❌ FAIL before it — two ways).** The `test` task
+  (binary + a `#[cfg(test)]` test + `cargo test`) is one notch harder than `build`. Before the
+  runaway guard, Qwen3.6-35B-A3B failed it intermittently in two distinct ways (below); after it,
+  the same task passes its verification. In every run the gateway delivered each tool call +
+  result correctly, so the pre-fix failures were **model behavior / a missing server guard, not
+  gateway protocol bugs**:
   - **Run A — token-level runaway (a hang).** Hit the 600 s `timeout` with `result=None` after
     only **1 tool-use**: on the turn after the first tool round-trip the greedy decode **ran
     away** (looped / never emitted EOS) toward Claude Code's large `max_tokens`. `--max-turns`
@@ -110,6 +111,17 @@ throwaway temp dir). Thinking is **off by default** in the gateway (clean output
     structure…", and then **stopped, declaring success without ever writing `src/main.rs`**.
     This is small-model degeneracy (repeating no-op tool calls, then a false "done"); a server
     token-guard can't catch it (it's across separate requests). It's the model ceiling.
+  - **After `mlx-native-runaway-stop` (2026-06-14): ✅ the `test` task now PASSES verification.**
+    Re-run: `assistant=26, tool_uses=21`, the model created a correct binary (`fn reverse` +
+    a `#[cfg(test)]` test), **`cargo test` green + `cargo run -- hello` → `olleh`** — the
+    un-fakeable checks pass. Crucially there is **no single-generation hang** anymore: the
+    session progresses through 26 turns of real work (vs. Run A's stall at 1 tool-use), so the
+    runaway guard did its job. It still hit the 600 s `timeout` (`rc=124`, `result=None`) —
+    Claude's loop kept going without a clean final turn — but the **deliverable is correct and
+    verified**. The 605 s is now *slowness*, not a hang: ~26 hybrid turns, each re-prefilling the
+    growing context (~20 s/turn). That per-turn re-prefill is exactly what
+    `mlx-native-prefix-kv-cache` removes for dense — and `mlx-native-prefix-kv-cache-hybrid`
+    will remove for Qwen3.6.
   - **Takeaway:** `build` (the simplest task) is a reliable smoke; `test` sits at/above this
     model's reliable agentic ceiling and fails intermittently. Use `build` as the go/no-go
     gateway smoke; treat `test` as a model-capability stress, not a gateway regression.
