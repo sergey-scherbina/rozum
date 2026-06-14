@@ -373,56 +373,54 @@ features the mistralrs backend shipped that the native backend does NOT yet have
 
 ## Runtime And UX
 
-- [ ] gateway-openai-responses-api — add `POST /v1/responses` so the **Codex CLI** can use
-  the gateway. Codex ≥ 0.137 dropped `wire_api="chat"` and now REQUIRES the OpenAI Responses
-  API; the gateway only has `/v1/chat/completions` (+ Anthropic `/v1/messages`), so Codex
-  gets 404 and can't connect (confirmed via the e2e — `scripts/e2e_codex_gateway.sh`,
-  `docs/e2e/claude-gateway-smoke.md`). Implement: parse the Responses request (`input` items
-  — messages + `function_call_output`; `tools` as flat `{type:function,name,…}`;
-  `instructions` as system; `stream`) into the internal `ChatBackend`, and stream back the
-  Responses event protocol (`response.created` → `response.output_item.added` →
-  `response.output_text.delta` / `response.function_call_arguments.delta` →
-  `response.output_item.done` → `response.completed`), plus a non-stream JSON `response`
-  object with `output[]` + `usage`. Reuse the existing message/tool conversion + the backend
-  stream; the work is the new request/response/event shapes. This is the **single biggest
-  gap for Codex support** (Claude Code already works via `/v1/messages`). Note also: Codex
-  ignores `OPENAI_BASE_URL` — it needs a `-c model_provider` config (the e2e script sets it).
+- [x] gateway-openai-responses-api — **DONE.** `POST /v1/responses` (the OpenAI Responses API)
+  so the **Codex CLI** (≥ 0.137, which dropped `wire_api="chat"`) can use the gateway.
+  `responses_handler` parses the Responses request (`instructions` → system; `input` items —
+  messages / `function_call` / `function_call_output`; flat `tools`; `max_output_tokens`) into
+  the internal `ChatBackend`, and streams back the typed Responses event protocol
+  (`response.created` → `output_item.added`/`content_part.added` → `output_text.delta` →
+  `output_text.done`/`content_part.done`/`output_item.done` → `function_call` items
+  (`arguments.delta`/`.done`) → `response.completed`, each event with `type` +
+  `sequence_number`); non-stream returns the final `response` object with `output[]` + `usage`.
+  Reuses the same backend stream as `/v1/chat/completions` (our event order — text then whole
+  tool calls then Done — maps onto a message item + function_call items). Stateless (Codex
+  sends the full `input` each turn). Tests: input/tool conversion, response-object shape, SSE
+  smoke. The e2e Codex runner (`scripts/e2e_codex_gateway.sh`) now connects via
+  `wire_api="responses"` (Codex ignores `OPENAI_BASE_URL`, so it sets `-c model_provider`).
 
-- [ ] mlx-native-prefix-kv-cache — **reuse KV across agentic turns** (biggest real-world
-  latency lever for coding agents). Today `run_job` builds a FRESH cache per request
-  (`mlx_native_backend.rs:469`), so every Claude Code / Codex turn **re-prefills the entire
-  growing conversation from scratch** — for an N-turn loop that is ~O(N × avg_prompt) of
-  redundant prefill. The e2e showed a trivial "reverse CLI" task taking ~6 min wall, dominated
-  by 12 agentic round-trips each re-prefilling the prior context (decode is ~96 t/s — NOT the
-  bottleneck; the round-trip re-prefill is). Plan: keep the last request's token-prefix + its
-  KV on the worker thread; on the next request, find the longest common token prefix with the
-  prior prompt, keep that slice of the cache, and prefill only the new suffix. Per-session keyed
-  (the worker is cap-1 / single-model, so one live cache + a small LRU is enough). Must stay
-  byte-exact (trim the cache to the shared prefix length; the hybrid `LayerCache` —
-  `Full(KV)` + `Linear{conv,state}` — has to be trimmable/snapshot-able at the prefix
-  boundary, which is the tricky part for the GatedDeltaNet recurrent state: a clean cut likely
-  means snapshotting conv+recurrent state at the prefix end). Intersects the fixed-shape KV
-  cache work in SPRINT (`mlx-native-perf-compile` prereq) — a preallocated, offset-indexed
-  cache is also what makes prefix retention cheap. **This, not raw decode t/s, is the #1
-  perf win for the actual agentic use case.**
+- [x] mlx-native-prefix-kv-cache — **DONE for dense arches.** Reuse KV across agentic turns:
+  the cap-1 worker now persists the previous request's prompt ids + KV (`PrefixCache`), and
+  when the next prompt strictly extends it (the append-only agentic-loop case) it truncates the
+  cache to the shared prefix and prefills only the **new suffix** instead of re-prefilling the
+  whole growing conversation. Byte-exact: the kept `[0,reuse)` KV is exactly what a fresh
+  prefill computes, and `create_attention_mask` builds the causal mask from the cache offset
+  (integration test `mlx_prefix_reuse_byte_exact` asserts reuse output == fresh prefill). New
+  fork method `ConcatKeyValueCache::truncate` (mlx-rs fork rev `c8517814`). `ROZUM_PREFIX_CACHE=0`
+  disables. Dense only — Qwen3 / Qwen3-MoE / Llama / Qwen2 (they own the KV cache externally).
+  **Follow-up below for hybrid (Qwen3.6).**
 
-- [ ] mlx-native-runaway-stop — **bound a single runaway generation** (reliability). The e2e
-  `test` task stalled the whole agentic session for the full 600 s timeout (`result=None`,
-  only 1 tool-use): on the turn after a tool round-trip the greedy decode ran away (looped /
-  never emitted EOS) and generated toward the client's large `max_tokens`. Two gaps enable
-  this: (1) the gateway passes the client's `max_tokens` straight through with **no cap**
-  (`gateway.rs:1254/1329`; `DEFAULT_MAX_TOKENS=4096` only applies when the client omits it,
-  and Claude Code always sends a big value), and (2) there is **no anti-repetition / no-progress
-  stop** on the greedy (temp 0) path — `repeat_penalty` only engages when the client sets it
-  ≠ 1.0, which Claude Code does not. Fix: (a) a server-side `max_tokens` ceiling
-  (`ROZUM_MAX_OUTPUT_TOKENS`, sane default e.g. 4096–8192) that clamps the effective generation
-  length regardless of what the client asks; (b) a cheap **n-gram repetition / no-progress
-  guard** in `stream_generation` that stops a greedy loop early (e.g. stop if the last K tokens
-  repeat an N-gram M times). (b) is the principled fix — it catches the actual failure (the
-  model looping) without truncating a legitimately long answer; (a) is the cheap safety net.
-  Without this, one unlucky greedy-MoE runaway makes the local provider hang for minutes —
-  `--max-turns` does NOT help (it bounds the agentic loop, not a single generation's tokens).
-  Surfaced by `scripts/e2e_claude_gateway.sh test`.
+- [ ] mlx-native-prefix-kv-cache-hybrid — extend prefix reuse to the **hybrid** Qwen3.6 arches.
+  Harder than dense for two reasons: (1) the hybrid `Generate` owns its `Vec<LayerCache>`
+  *internally* (not an external vec), so it must accept a pre-populated cache + a suffix and
+  expose it after prefill; (2) the `LayerCache::Linear{conv,state}` layers carry a **recurrent**
+  GatedDeltaNet state that **can't be truncated** (it's a running summary, not per-position KV).
+  Design (worked out): keep one live cache on the worker; **truncate** the `Full(KV)` layers to
+  the shared prefix (same as dense), and **deep-snapshot** the small `conv`+`state` of each
+  `Linear` layer at the end of prefill (the GatedDeltaNet update is functional, so a forced copy
+  is a safe snapshot), restoring those snapshots on the next reuse. Needs fork support
+  (`Generate::new_with_cache` / cache accessor + `LayerCache` snapshot/restore/truncate) and a
+  byte-exact gate vs the fresh path. This is the bigger, riskier half (the GatedDeltaNet
+  byte-exactness minefield), so it's split out from the shipped dense work above.
+
+- [x] mlx-native-runaway-stop — **DONE.** Bound a single runaway generation so one greedy loop
+  can't pin the cap-1 worker for minutes (the e2e `test` task hit a 600 s hang, `result=None`).
+  Two guards in the backend: (a) `DEFAULT_OUTPUT_CEILING=8192` clamps the effective `max_tokens`
+  regardless of the client value (`ROZUM_MAX_OUTPUT_TOKENS` overrides; 0 disables) — a backstop;
+  (b) `is_runaway_loop` in `stream_generation` stops when the last 64 generated tokens are
+  exactly periodic with period ≤16 (a short block repeated ≥4×) — the principled fix, catches a
+  greedy loop in ~64 tokens with no false positives on real text (`ROZUM_REPEAT_GUARD=0`
+  disables). Unit test `runaway_loop_detection`. `--max-turns` does NOT help (it bounds the
+  agentic loop, not one generation's tokens) — this does.
 
 - [x] rozum-native-channels-tier3 - DONE (`feature/piggyback-wakeup`). Tier-3
   gateway piggyback wakeup, keyed by project + agent name. mcp-proxy drops each

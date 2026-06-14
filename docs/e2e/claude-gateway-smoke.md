@@ -126,31 +126,36 @@ throwaway temp dir). Thinking is **off by default** in the gateway (clean output
   rule for new scenarios: always include a behavior assertion the model can't satisfy by
   scaffolding.
 
-## Codex (OpenAI dialect) — currently BLOCKED ⛔
+## Codex (OpenAI dialect) — ✅ WORKS (since the `/v1/responses` endpoint)
 
 `scripts/e2e_codex_gateway.sh [build|test]` is the Codex parallel of the Claude runner
-(drives `codex exec` headless, same tasks, same independent disk verification). **But it
-cannot run today:**
+(drives `codex exec` headless, same tasks, same independent disk verification).
 
-- **Codex CLI ≥ 0.137 requires the OpenAI _Responses_ API** (`POST /v1/responses`) and
-  **dropped `wire_api="chat"`** (config error: *"`wire_api = "chat"` is no longer supported …
-  set `wire_api = "responses"`"*).
-- The rozum gateway only implements `/v1/chat/completions` (OpenAI) and `/v1/messages`
-  (Anthropic). `POST /v1/responses` → **HTTP 404**, so Codex retries and dies:
-  *"unexpected status 404 Not Found … /v1/responses"*.
-- Also note: Codex **ignores `OPENAI_BASE_URL`** — it needs an explicit model provider
+- **`build` task: ✅ PASS** (2026-06-14, Qwen3.6-35B-A3B-4bit): `codex exec` created a correct
+  `reverse-cli`, ran `cargo run -- hello` → `olleh`, `rc=0` in **~71 s** (notably fewer turns /
+  faster than Claude on the same task). The gateway carried the whole loop through the new
+  `POST /v1/responses` endpoint (typed Responses SSE: `response.created` → `output_item.added`
+  → `output_text.delta` → … → `response.completed`).
+- **What made it work** (both shipped):
+  1. **`POST /v1/responses`** (`gateway.rs::responses_handler`). Codex CLI ≥ 0.137 dropped
+     `wire_api="chat"` and *requires* the Responses API; the endpoint translates the Responses
+     request ⇄ the internal `ChatBackend` and streams the typed Responses event protocol.
+  2. **Single leading system message.** Codex sends a top-level `instructions` **and** a
+     `developer` message — two system turns — which the Qwen3.6 chat template rejects
+     (`raise_exception('System message must be at the beginning.')`, surfaced as a
+     `response.failed` event → Codex retried 5× and died). The Responses→internal conversion
+     now **folds all system/developer text into one leading system message**.
+- **Wiring caveat:** Codex **ignores `OPENAI_BASE_URL`** — it needs an explicit model provider
   (`-c model_provider=rozum -c 'model_providers.rozum.base_url=…' -c '…wire_api="responses"'`),
-  which the runner sets. `rozum launch`'s `OPENAI_BASE_URL`/`OPENAI_API_KEY` are therefore
-  **not enough** for current Codex.
+  which the runner sets. `rozum launch`'s `OPENAI_BASE_URL`/`OPENAI_API_KEY` are **not enough**
+  for current Codex; a launch integration should write a Codex `model_providers` config.
+- The runner preflights `/v1/responses` (a 1-token request) and aborts only if it's 404 (an
+  old gateway binary without the endpoint).
 
-The runner preflights `/v1/responses` and exits 3 with a clear message if it's 404.
-
-**Improvement to unblock Codex → BACKLOG `gateway-openai-responses-api`:** add a
-`POST /v1/responses` endpoint that translates the Responses request (`input` items, `tools`,
-`instructions`, `stream`) to the internal `ChatBackend` and streams back the Responses event
-protocol (`response.created` / `response.output_text.delta` /
-`response.function_call_arguments.delta` / `response.completed`, …). This is the single
-biggest thing missing for "Rozum as a local provider for **Codex**".
+> Known cosmetic gap: Codex's `/v1/models` refresh wants `{"models":[…]}` (the gateway returns
+> the OpenAI `{"data":[…],"object":"list"}` shape), so Codex logs one non-fatal
+> "failed to refresh available models" warning and proceeds. Harmless; a `/v1/models` alias is
+> a trivial future nicety.
 
 ## Ideas for harder scenarios (later)
 

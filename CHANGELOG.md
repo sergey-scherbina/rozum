@@ -1,5 +1,46 @@
 # Changelog
 
+## Gateway — `POST /v1/responses` (OpenAI Responses API): Codex now works
+Completed: 2026-06-14
+Codex CLI ≥ 0.137 dropped `wire_api="chat"` and **requires** the OpenAI Responses API; the
+gateway only had `/v1/chat/completions` (+ Anthropic `/v1/messages`), so Codex got 404 and was
+**fully blocked**. Added `responses_handler`: it translates the Responses request
+(`instructions` → system; `input` items — messages / `function_call` / `function_call_output`;
+flat `tools`; `max_output_tokens`) into the internal `ChatBackend` and streams the typed
+Responses SSE protocol (`response.created` → `output_item.added`/`content_part.added` →
+`output_text.delta` → `output_text.done`/`content_part.done`/`output_item.done` →
+`function_call` items (`arguments.delta`/`.done`) → `response.completed`; non-stream returns the
+final `response` object). One render fix was needed: Codex sends a top-level `instructions`
+**and** a `developer` message — two system turns — which the Qwen3.6 template rejects
+("System message must be at the beginning."); the conversion now folds all system/developer text
+into one leading system message. **Codex e2e build task PASSES end-to-end** (`reverse-cli`,
+`cargo run -- hello` → `olleh`, `rc=0`, ~71 s). Tests: input/tool conversion, multi-system fold,
+response-object shape, SSE smoke.
+
+## mlx-native — prefix-KV cache reuse across agentic turns (dense)
+Completed: 2026-06-14
+Every Claude Code / Codex turn used to re-prefill the **entire growing conversation** (a fresh
+cache per request) — the dominant agentic latency, not decode. The cap-1 worker now persists the
+previous request's prompt ids + KV; when the next prompt strictly extends it (the append-only
+agentic-loop case) it truncates the cache to the shared prefix and prefills only the **new
+suffix**. Byte-exact — the kept `[0,reuse)` KV is exactly what a fresh prefill computes, and
+`create_attention_mask` builds the causal mask from the cache offset (integration test
+`mlx_prefix_reuse_byte_exact`: reuse output == fresh prefill). Dense arches (Qwen3 / Qwen3-MoE /
+Llama / Qwen2); needs the new fork method `ConcatKeyValueCache::truncate`. Hybrid (Qwen3.6) is a
+scoped follow-up (its recurrent state needs snapshotting, not truncation). `ROZUM_PREFIX_CACHE=0`
+disables.
+
+## mlx-native — runaway-stop: bound a single runaway generation (reliability)
+Completed: 2026-06-14
+One greedy generation could loop (repeat a short block / never emit EOS) and generate to the
+client's large `max_tokens`, pinning the cap-1 worker for minutes (the e2e `test` task hit a
+600 s hang, `result=None`). Two guards in the backend: a hard `max_tokens` ceiling
+(`DEFAULT_OUTPUT_CEILING=8192`, `ROZUM_MAX_OUTPUT_TOKENS` overrides) and `is_runaway_loop` in
+`stream_generation` — stop when the last 64 generated tokens are exactly periodic with period
+≤16 (a short block repeated ≥4×), which catches a greedy loop in ~64 tokens with no false
+positives on real text (`ROZUM_REPEAT_GUARD=0` disables). `--max-turns` does NOT help (it bounds
+the agentic loop, not one generation). Unit test `runaway_loop_detection`.
+
 ## Gateway — parse Qwen3.6's `<function=>` XML tool-call format (agentic coding fix)
 Completed: 2026-06-13
 Qwen3.6 emits tool calls in EITHER the JSON form
