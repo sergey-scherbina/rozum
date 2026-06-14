@@ -2876,6 +2876,31 @@ mod tests {
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
     }
 
+    // Two catalog verifies in one tiny model: SmolLM2-1.7B-Instruct is `model_type: "llama"`
+    // (llama-aliases) AND a NON-quantized bf16 checkpoint (fp16-verify — the AFQ loader's
+    // `quantization = None` branch). Confirms a non-Llama-3, full-precision model runs on the
+    // shared llama path. ~3.4 GB bf16. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_smollm_chat
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "network: auto-downloads mlx-community/SmolLM2-1.7B-Instruct (bf16, ~3.4GB)"]
+    async fn mlx_smollm_chat() {
+        use super::{MlxNativeBackend, ensure_model_dir};
+        use crate::backend::{ChatBackend, ChatRequest, collect_to_string};
+
+        let spec = "mlx-community:SmolLM2-1.7B-Instruct";
+        let dir = ensure_model_dir(spec).await.expect("smollm download/resolve");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+            .await
+            .expect("backend load (SmolLM2 — llama path, non-quantized)");
+        let req =
+            ChatRequest::simple("What is the capital of France? Answer in one short sentence.");
+        let stream = backend.chat(req).await.expect("chat");
+        let text = collect_to_string(stream).await.expect("collect");
+        eprintln!("MLX SMOLLM OUTPUT: {text}");
+        assert!(text.contains("Paris"), "expected Paris, got: {text}");
+    }
+
     // Mistral (`model_type: "mistral"`) on the Llama path — proves the alias works end to
     // end (Mistral is architecturally Llama; the llama loader reads its config). Greedy;
     // short prompt (well within the sliding window, so the full-attn approximation is exact).

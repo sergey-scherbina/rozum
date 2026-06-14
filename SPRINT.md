@@ -610,15 +610,16 @@ is 100% MLX, candle only as external oracle.
   pre-existing broken `mlx-lm-utils` tests). Added to `models::RECOMMENDED`. Opens Mistral / Nemo
   (and the Mixtral base) — and these two fixes broaden the whole Llama family's config tolerance.
 
-- [ ] mlx-native-llama-aliases - **TRIVIAL — verify, don't port.** SmolLM / TinyLlama /
-  Llama-3.x variants already ship `model_type: "llama"`, so they should run on the
-  existing Llama path as-is. Just download one small one and confirm greedy vs oracle;
-  add to `models::RECOMMENDED` if it's a useful default. No code beyond a possible
-  RECOMMENDED entry.
+- [x] mlx-native-llama-aliases - **DONE 2026-06-14.** Verified `mlx-community:SmolLM2-1.7B-Instruct`
+  (a non-Llama-3 `model_type: "llama"` model) runs on the existing llama path: *"The capital of
+  France is Paris."* (`mlx_smollm_chat`). Confirms the alias works for the wider Llama family (and
+  the `head_dim` config-tolerance fix held for it). Added to `models::RECOMMENDED`. No code beyond
+  the RECOMMENDED entry + test.
 
-- [ ] mlx-native-fp16-verify - **TRIVIAL — verify only.** The AFQ loader already has a
-  non-quantized branch (`quantization = None`), so bf16/fp16 MLX checkpoints should load
-  (just more RAM). Confirm with one small fp16 MLX model; document it. No code expected.
+- [x] mlx-native-fp16-verify - **DONE 2026-06-14 (same model).** `SmolLM2-1.7B-Instruct` is a
+  **non-quantized bf16** checkpoint, so loading it exercises the AFQ loader's `quantization = None`
+  branch — confirmed loads + generates correctly (`mlx_smollm_chat`). bf16/fp16 MLX checkpoints
+  work as-is (just more RAM). No code.
 
 - [x] mlx-native-p4 - Phase 4: native MLX is the DEFAULT backend; `mlx_lm.server`
   retired (rozum `74b458a`). `default = ["mlx-native"]` (was `["mistralrs"]`);

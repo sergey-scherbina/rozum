@@ -90,6 +90,12 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
         approx_size_gb: 4.1,
         notes: "Non-Qwen option (Mistral family, runs on the Llama path). General-purpose.",
     },
+    RecommendedModel {
+        spec: "mlx-community:SmolLM2-1.7B-Instruct",
+        display_name: "SmolLM2 1.7B Instruct",
+        approx_size_gb: 3.4,
+        notes: "Tiny Llama-arch model (bf16, non-quantized). Fast, light, general chat.",
+    },
 ];
 
 // ─── Scanners ────────────────────────────────────────────────────────────────
