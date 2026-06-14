@@ -1,5 +1,27 @@
 # Changelog
 
+## mlx-native — batched/parallel decode for hybrid Qwen3.6 (the primary coding model)
+Completed: 2026-06-14
+Extends batched decode to the hybrid Qwen3.6 arches (dense `Qwen35` + MoE `Qwen35Moe`) — the models
+that actually run the coding agents — so two+ concurrent sessions share one forward. The feared
+blocker ("the GatedDeltaNet recurrence can't be left-padded") was a non-issue: we prefill each
+sequence separately, so no pad token ever advances the recurrence, and the GDN state is fixed-size
+per row. The GatedDeltaNet turned out to be **already batch-generic and row-independent** (kernel
+grid spans `b*hv`, conv+recurrent state is `[B,…]`) — proven byte-exact by a synthetic probe with no
+model load (`gated_delta_batches_row_independent`). So hybrid batched decode is just: the dense
+ragged path for the full-attention layers (left-pad+stack KV, per-row RoPE + key-pad mask, ported to
+`qwen3_5::Attention` via two thread-locals — OFF by default, B=1 byte-identical) **plus stacking the
+fixed-size conv + recurrent state on the batch axis for the GatedDeltaNet layers** (no padding, rope,
+or mask). `run_batch_hybrid` assembles the heterogeneous `qwen3_5::LayerCache` and serves both hybrid
+arches (shared Model API); the worker routes hybrid greedy batches to it via `is_hybrid_arch`.
+Validated on the real Qwen3.6-27B: **byte-exact** per row vs serial decode incl. the padded row
+(`mlx_hybrid_batched_ragged_byte_exact`); two concurrent sessions batch into ONE call with distinct,
+uncontaminated answers — `"Paris"` / `"Red"` (`mlx_hybrid_batched_scheduler_two_concurrent`); and
+**2.30× throughput** at B=2 (`mlx_hybrid_batched_decode_throughput`, test profile — even higher than
+dense's 1.98× because hybrid decode launches more ops per token for batching to amortize). With
+single-stream hybrid decode already maxed (~90% of Python), batching is now the only lever that
+scales hybrid throughput, and it works. Fork rev `9a3b3949`.
+
 ## mlx-native — batched/parallel decode (dense Qwen3): 2 concurrent sessions in one forward
 Completed: 2026-06-14
 The native MLX backend was capacity-1: one worker thread ran jobs strictly serially, so two
