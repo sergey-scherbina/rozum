@@ -1465,8 +1465,44 @@ async fn exec_agent(
     cmd.env("OPENAI_API_KEY", "rozum-local");
     cmd.env("ROZUM_GATEWAY_URL", &base);
 
+    // Codex ignores `OPENAI_BASE_URL` — it needs an explicit model provider, and
+    // (≥ 0.137) the Responses API. Inject `-c` overrides on top of the user's config
+    // (their `~/.codex` is left intact) so `rozum launch codex` just works, like
+    // Claude does. Mirrors what the e2e runner sets.
+    let is_codex = program_name == "codex" || program_name.ends_with("/codex");
+    if is_codex {
+        let has_model = args
+            .iter()
+            .any(|a| a == "-m" || a == "--model" || a.starts_with("--model="));
+        cmd.args(codex_provider_flags(&base, has_model));
+        eprintln!("  → codex: routed at the rozum gateway (model_provider=rozum, wire_api=responses)");
+    }
+
     apply_rozum_agent_env(&mut cmd);
     spawn_agent_and_exit(cmd, program_name).await
+}
+
+/// Codex CLI `-c` overrides that point it at the local rozum gateway over the
+/// OpenAI Responses API (Codex ignores `OPENAI_BASE_URL`). The gateway ignores the
+/// model name, so `-m local` is just a label (only added if the user didn't pass one).
+fn codex_provider_flags(base: &str, has_model: bool) -> Vec<String> {
+    let mut f = vec![
+        "-c".into(),
+        "model_provider=rozum".into(),
+        "-c".into(),
+        "model_providers.rozum.name=\"rozum\"".into(),
+        "-c".into(),
+        format!("model_providers.rozum.base_url=\"{base}/v1\""),
+        "-c".into(),
+        "model_providers.rozum.wire_api=\"responses\"".into(),
+        "-c".into(),
+        "model_providers.rozum.env_key=\"OPENAI_API_KEY\"".into(),
+    ];
+    if !has_model {
+        f.push("-m".into());
+        f.push("local".into());
+    }
+    f
 }
 
 /// Launch the agent with no local model: leave its upstream Anthropic auth

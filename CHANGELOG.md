@@ -1,5 +1,18 @@
 # Changelog
 
+## launch — `rozum launch codex` works out-of-box (+ quiet /v1/models)
+Completed: 2026-06-14
+Codex now launches against the local gateway like Claude already does. Codex **ignores
+`OPENAI_BASE_URL`** and (≥ 0.137) needs the Responses API, so `rozum launch` detects a `codex`
+program and injects the `-c` overrides on top of the user's `~/.codex` (left intact):
+`model_provider=rozum`, `model_providers.rozum.base_url=…/v1`, `wire_api="responses"`,
+`env_key="OPENAI_API_KEY"`, and `-m local` (only if the user didn't pass a model). Verified:
+`rozum launch --model <spec> -- codex exec "…" --dangerously-bypass-approvals-and-sandbox` →
+Codex connects (`provider: rozum`) and answers, `rc=0`. Also: `/v1/models` now returns an empty
+`models: []` next to the OpenAI `data` so Codex's model-list refresh stops logging a non-fatal
+"failed to refresh available models" warning (its `Model` entries have many required fields, but
+the launch forces `-m local`, so the list is unused).
+
 ## mlx-native — prefix-KV cache: per-session LRU (interleaved sessions each reuse)
 Completed: 2026-06-14
 The prefix cache kept a single slot per worker, so *interleaved* conversations thrashed it:

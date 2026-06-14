@@ -157,17 +157,21 @@ throwaway temp dir). Thinking is **off by default** in the gateway (clean output
      (`raise_exception('System message must be at the beginning.')`, surfaced as a
      `response.failed` event → Codex retried 5× and died). The Responses→internal conversion
      now **folds all system/developer text into one leading system message**.
-- **Wiring caveat:** Codex **ignores `OPENAI_BASE_URL`** — it needs an explicit model provider
-  (`-c model_provider=rozum -c 'model_providers.rozum.base_url=…' -c '…wire_api="responses"'`),
-  which the runner sets. `rozum launch`'s `OPENAI_BASE_URL`/`OPENAI_API_KEY` are **not enough**
-  for current Codex; a launch integration should write a Codex `model_providers` config.
+- **`rozum launch codex` now works out-of-box.** Codex **ignores `OPENAI_BASE_URL`** — it needs
+  an explicit model provider over the Responses API. `rozum launch` detects a `codex` program
+  and injects the `-c` overrides for it (`model_provider=rozum`,
+  `model_providers.rozum.base_url=…/v1`, `wire_api="responses"`, `env_key="OPENAI_API_KEY"`,
+  `-m local`) on top of the user's `~/.codex` (left intact) — so `rozum launch --model <spec> --
+  codex …` just works, like Claude. (The e2e runner still sets these `-c` flags itself.) Verified:
+  `rozum launch … -- codex exec "Say hi" --dangerously-bypass-approvals-and-sandbox` → Codex
+  connects (`provider: rozum`) and answers, `rc=0`.
 - The runner preflights `/v1/responses` (a 1-token request) and aborts only if it's 404 (an
   old gateway binary without the endpoint).
-
-> Known cosmetic gap: Codex's `/v1/models` refresh wants `{"models":[…]}` (the gateway returns
-> the OpenAI `{"data":[…],"object":"list"}` shape), so Codex logs one non-fatal
-> "failed to refresh available models" warning and proceeds. Harmless; a `/v1/models` alias is
-> a trivial future nicety.
+- **`/v1/models`** now returns an empty `models: []` alongside the OpenAI `data` so Codex's
+  model-list refresh stops logging "failed to refresh available models" (Codex's `Model` entry
+  has many required fields — `slug`, `supported_reasoning_levels`, … — but it forces `-m local`
+  via the launch, so the list is unused; an empty array satisfies the key with zero entries to
+  validate). Cosmetic.
 
 ## Ideas for harder scenarios (later)
 
