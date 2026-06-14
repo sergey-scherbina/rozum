@@ -784,6 +784,245 @@ async fn oai_collect(
     axum::Json(body).into_response()
 }
 
+// ─── OpenAI Responses API (POST /v1/responses) ───────────────────────────────
+//
+// The wire protocol Codex CLI (>= 0.137) speaks: a different request shape
+// (`input` items + `instructions` + flat `tools`) and a typed SSE event stream
+// (`response.created` → `response.output_item.added` → `response.output_text.delta`
+// / `response.function_call_arguments.delta` → `response.output_item.done` →
+// `response.completed`). We translate to/from the internal `ChatBackend` and reuse
+// the same backend stream as `/v1/chat/completions`. Stateless: Codex sends the
+// full conversation in `input` each turn (`store:false`), so no server storage.
+
+#[derive(Deserialize)]
+struct RespReq {
+    #[serde(default)]
+    model: Option<String>,
+    /// System / developer prompt (prepended as a system message).
+    #[serde(default)]
+    instructions: Option<String>,
+    /// A bare string, or an array of typed input items (messages, function_call,
+    /// function_call_output, reasoning, …).
+    #[serde(default)]
+    input: Value,
+    #[serde(default)]
+    tools: Vec<RespTool>,
+    #[serde(default)]
+    stream: Option<bool>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    max_output_tokens: Option<u32>,
+    top_k: Option<u32>,
+}
+
+/// Responses-API tools are FLAT (`{type:"function", name, description, parameters}`),
+/// unlike chat-completions (`{type, function:{…}}`).
+#[derive(Deserialize)]
+struct RespTool {
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    parameters: Option<Value>,
+}
+
+fn responses_content_to_blocks(content: &Value) -> Vec<ContentBlock> {
+    match content {
+        Value::String(s) if !s.is_empty() => vec![ContentBlock::Text { text: s.clone() }],
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|c| match c.get("type").and_then(Value::as_str) {
+                // input_text (user), output_text (prior assistant), or plain text.
+                Some("input_text") | Some("output_text") | Some("text") => c
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(|t| ContentBlock::Text { text: t.to_owned() }),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn responses_input_to_internal(instructions: Option<&str>, input: &Value) -> Vec<Message> {
+    let mut msgs = Vec::new();
+    if let Some(instr) = instructions {
+        if !instr.is_empty() {
+            msgs.push(Message {
+                role: Role::System,
+                content: vec![ContentBlock::Text {
+                    text: instr.to_owned(),
+                }],
+            });
+        }
+    }
+    match input {
+        Value::String(s) if !s.is_empty() => msgs.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: s.clone() }],
+        }),
+        Value::Array(items) => {
+            for item in items {
+                match item.get("type").and_then(Value::as_str) {
+                    // A normal message turn (type may be omitted → treat as message).
+                    Some("message") | None => {
+                        let role = match item.get("role").and_then(Value::as_str) {
+                            Some("system") | Some("developer") => Role::System,
+                            Some("assistant") => Role::Assistant,
+                            _ => Role::User,
+                        };
+                        let content = responses_content_to_blocks(&item["content"]);
+                        if !content.is_empty() {
+                            msgs.push(Message { role, content });
+                        }
+                    }
+                    // A prior assistant tool call.
+                    Some("function_call") => {
+                        let id = item
+                            .get("call_id")
+                            .or_else(|| item.get("id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                        let name = item
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                        let args = item.get("arguments").and_then(Value::as_str).unwrap_or("");
+                        let input_val: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+                        msgs.push(Message {
+                            role: Role::Assistant,
+                            content: vec![ContentBlock::ToolUse {
+                                id,
+                                name,
+                                input: input_val,
+                            }],
+                        });
+                    }
+                    // The result of a prior tool call.
+                    Some("function_call_output") => {
+                        let id = item
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                        let out = match item.get("output") {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(v) => v.to_string(),
+                            None => String::new(),
+                        };
+                        msgs.push(Message {
+                            role: Role::Tool,
+                            content: vec![ContentBlock::ToolResult {
+                                tool_use_id: id,
+                                content: out,
+                                is_error: false,
+                            }],
+                        });
+                    }
+                    // reasoning / item_reference / etc. — not needed for inference.
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    msgs
+}
+
+fn responses_tools_to_internal(tools: &[RespTool]) -> Vec<ToolDef> {
+    tools
+        .iter()
+        .filter(|t| t.kind.as_deref().unwrap_or("function") == "function" && t.name.is_some())
+        .map(|t| ToolDef {
+            name: t.name.clone().unwrap_or_default(),
+            description: t.description.clone().unwrap_or_default(),
+            input_schema: t
+                .parameters
+                .clone()
+                .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+        })
+        .collect()
+}
+
+/// Build one typed Responses SSE event: stamps `type` + a monotonic
+/// `sequence_number` into the payload and sets the SSE `event:` name.
+fn resp_event(seq: &mut u64, typ: &str, mut data: Value) -> Event {
+    if let Value::Object(ref mut m) = data {
+        m.insert("type".into(), json!(typ));
+        m.insert("sequence_number".into(), json!(*seq));
+    }
+    *seq += 1;
+    Event::default().event(typ).data(data.to_string())
+}
+
+/// The three events that close an assistant `message` output item (text done →
+/// content part done → item done). Returned as a Vec so the caller can `yield`
+/// each lexically inside the `async_stream` body (a `yield` hidden in a
+/// `macro_rules!` would not be seen by the `stream!` proc-macro).
+fn close_message_events(seq: &mut u64, mid: &str, output_index: usize, text: &str) -> Vec<Event> {
+    vec![
+        resp_event(
+            seq,
+            "response.output_text.done",
+            json!({
+                "item_id": mid, "output_index": output_index, "content_index": 0, "text": text,
+            }),
+        ),
+        resp_event(
+            seq,
+            "response.content_part.done",
+            json!({
+                "item_id": mid, "output_index": output_index, "content_index": 0,
+                "part": {"type": "output_text", "text": text, "annotations": []},
+            }),
+        ),
+        resp_event(
+            seq,
+            "response.output_item.done",
+            json!({
+                "output_index": output_index,
+                "item": {"type": "message", "id": mid, "status": "completed", "role": "assistant",
+                         "content": [{"type": "output_text", "text": text, "annotations": []}]},
+            }),
+        ),
+    ]
+}
+
+/// The final `response` object (shared by the streaming `response.completed` event
+/// and the non-streaming body).
+fn responses_object(
+    id: &str,
+    created: u64,
+    model: &str,
+    status: &str,
+    output: Value,
+    input_tokens: u32,
+    output_tokens: u32,
+) -> Value {
+    json!({
+        "id": id,
+        "object": "response",
+        "created_at": created,
+        "status": status,
+        "model": model,
+        "output": output,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+        "error": null,
+        "incomplete_details": null,
+        "metadata": {},
+        "parallel_tool_calls": true,
+    })
+}
+
 // ─── Anthropic wire types ─────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -1289,6 +1528,307 @@ async fn oai_chat_handler(
     }
 }
 
+async fn responses_handler(
+    State(state): State<GatewayState>,
+    axum::Json(req): axum::Json<RespReq>,
+) -> Response {
+    tracing::debug!(
+        model = req.model.as_deref().unwrap_or("?"),
+        tools = req.tools.len(),
+        stream = req.stream.unwrap_or(false),
+        "POST /v1/responses"
+    );
+    let lease = match state.sb.enter().await {
+        Ok(l) => l,
+        Err(resp) => return resp,
+    };
+    let messages = responses_input_to_internal(req.instructions.as_deref(), &req.input);
+    let tools = responses_tools_to_internal(&req.tools);
+
+    let prompt_text = total_message_text(&messages);
+    let est = estimate_tokens(&prompt_text);
+    let ctx_win = lease.backend.context_window();
+    if ctx_win > 0 && est > ctx_win {
+        return error_json(
+            StatusCode::BAD_REQUEST,
+            &format!("prompt exceeds model context window of {ctx_win} tokens"),
+            "context_length_exceeded",
+        );
+    }
+
+    let (n_messages, n_tools) = (messages.len(), tools.len());
+    let cancel = CancellationToken::new();
+    let chat_req = ChatRequest {
+        messages,
+        tools,
+        sampling: SamplingParams {
+            temperature: req.temperature,
+            top_p: req.top_p,
+            max_tokens: req.max_output_tokens,
+            top_k: req.top_k,
+            ..Default::default()
+        },
+        cancel: cancel.clone(),
+        session_id: None,
+    };
+
+    let model = req.model.unwrap_or_else(|| lease.model_id.clone());
+    let stream_mode = req.stream.unwrap_or(false);
+
+    match lease.backend.chat(chat_req).await {
+        Err(e) => {
+            crate::obs::log_event(json!({
+                "event": "request_error", "endpoint": "/v1/responses", "error": e.to_string(),
+            }));
+            chat_error_response(&e, "backend_error")
+        }
+        Ok(chat_stream) => {
+            let meta = crate::obs::ReqMeta {
+                endpoint: "/v1/responses",
+                model: model.clone(),
+                n_messages,
+                n_tools,
+                est_prompt_tokens: est,
+            };
+            let chat_stream = crate::obs::meter(chat_stream, state.observer.clone(), meta);
+            if stream_mode {
+                Sse::new(responses_sse_stream(
+                    chat_stream,
+                    cancel,
+                    model,
+                    Some(lease),
+                ))
+                .into_response()
+            } else {
+                responses_collect(chat_stream, cancel, &model, Some(lease)).await
+            }
+        }
+    }
+}
+
+/// Stream the internal `ChatEvent`s as the typed Responses SSE protocol. Our
+/// backend emits text deltas first, then (at finalization) whole tool calls, then
+/// `Done` — which maps cleanly onto a `message` output item followed by
+/// `function_call` items.
+fn responses_sse_stream(
+    chat_stream: ChatStream,
+    cancel: CancellationToken,
+    model: String,
+    lease: Option<ChatLease>,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    let response_id = new_id("resp");
+    let created = now_secs();
+    async_stream::stream! {
+        let mut events = CancelOnDrop { stream: chat_stream, cancel, _lease: lease };
+        let mut seq = 0u64;
+        let mut next_index = 0usize;
+
+        // Message (assistant text) item state.
+        let mut msg_id: Option<String> = None;
+        let mut msg_index = 0usize;
+        let mut msg_closed = false;
+        let mut text = String::new();
+
+        // Tool-call items, completed (for the final output[]).
+        let mut tool_items: Vec<Value> = Vec::new();
+        // The currently-open function_call: (fc_id, call_id, name, output_index, args).
+        let mut cur_tool: Option<(String, String, String, usize, String)> = None;
+
+        yield Ok(resp_event(&mut seq, "response.created", json!({
+            "response": responses_object(&response_id, created, &model, "in_progress", json!([]), 0, 0)
+        })));
+
+        while let Some(ev) = events.next().await {
+            match ev {
+                Ok(ChatEvent::TextDelta { text: t }) => {
+                    if msg_id.is_none() {
+                        let mid = new_id("msg");
+                        msg_index = next_index; next_index += 1;
+                        yield Ok(resp_event(&mut seq, "response.output_item.added", json!({
+                            "output_index": msg_index,
+                            "item": {"type": "message", "id": mid, "status": "in_progress",
+                                     "role": "assistant", "content": []},
+                        })));
+                        yield Ok(resp_event(&mut seq, "response.content_part.added", json!({
+                            "item_id": mid, "output_index": msg_index, "content_index": 0,
+                            "part": {"type": "output_text", "text": "", "annotations": []},
+                        })));
+                        msg_id = Some(mid);
+                    }
+                    text.push_str(&t);
+                    let mid = msg_id.clone().unwrap();
+                    yield Ok(resp_event(&mut seq, "response.output_text.delta", json!({
+                        "item_id": mid, "output_index": msg_index, "content_index": 0, "delta": t,
+                    })));
+                }
+
+                Ok(ChatEvent::ToolUseStart { id, name }) => {
+                    if let Some(mid) = msg_id.clone() {
+                        if !msg_closed {
+                            msg_closed = true;
+                            for e in close_message_events(&mut seq, &mid, msg_index, &text) {
+                                yield Ok(e);
+                            }
+                        }
+                    }
+                    let fc_id = new_id("fc");
+                    let oi = next_index; next_index += 1;
+                    yield Ok(resp_event(&mut seq, "response.output_item.added", json!({
+                        "output_index": oi,
+                        "item": {"type": "function_call", "id": fc_id, "call_id": id,
+                                 "name": name, "arguments": "", "status": "in_progress"},
+                    })));
+                    cur_tool = Some((fc_id, id, name, oi, String::new()));
+                }
+
+                Ok(ChatEvent::ToolUseDelta { input_json_delta, .. }) => {
+                    if let Some((ref fc_id, _, _, oi, ref mut args)) = cur_tool {
+                        args.push_str(&input_json_delta);
+                        yield Ok(resp_event(&mut seq, "response.function_call_arguments.delta", json!({
+                            "item_id": fc_id, "output_index": oi, "delta": input_json_delta,
+                        })));
+                    }
+                }
+
+                Ok(ChatEvent::ToolUseEnd { .. }) => {
+                    if let Some((fc_id, call_id, name, oi, args)) = cur_tool.take() {
+                        yield Ok(resp_event(&mut seq, "response.function_call_arguments.done", json!({
+                            "item_id": fc_id, "output_index": oi, "arguments": args,
+                        })));
+                        let item = json!({"type": "function_call", "id": fc_id, "call_id": call_id,
+                                          "name": name, "arguments": args, "status": "completed"});
+                        yield Ok(resp_event(&mut seq, "response.output_item.done", json!({
+                            "output_index": oi, "item": item.clone(),
+                        })));
+                        tool_items.push(item);
+                    }
+                }
+
+                Ok(ChatEvent::Done { stop_reason, input_tokens, output_tokens }) => {
+                    if let Some(mid) = msg_id.clone() {
+                        if !msg_closed {
+                            // (no need to set msg_closed; we break right after)
+                            for e in close_message_events(&mut seq, &mid, msg_index, &text) {
+                                yield Ok(e);
+                            }
+                        }
+                    }
+                    let status = match stop_reason {
+                        StopReason::Cancelled => "incomplete",
+                        _ => "completed",
+                    };
+                    let mut output = Vec::new();
+                    if let Some(ref mid) = msg_id {
+                        output.push(json!({"type": "message", "id": mid, "status": "completed",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": text, "annotations": []}]}));
+                    }
+                    output.extend(tool_items.clone());
+                    yield Ok(resp_event(&mut seq, "response.completed", json!({
+                        "response": responses_object(&response_id, created, &model, status,
+                            json!(output), input_tokens, output_tokens)
+                    })));
+                    break;
+                }
+
+                Err(e) => {
+                    yield Ok(resp_event(&mut seq, "response.failed", json!({
+                        "response": responses_object(&response_id, created, &model, "failed",
+                            json!([]), 0, 0),
+                        "error": {"message": e.to_string()},
+                    })));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Non-streaming `/v1/responses`: drain the backend and return the final
+/// `response` object with `output[]` + `usage`.
+async fn responses_collect(
+    chat_stream: ChatStream,
+    cancel: CancellationToken,
+    model: &str,
+    lease: Option<ChatLease>,
+) -> Response {
+    let response_id = new_id("resp");
+    let created = now_secs();
+    let mut events = CancelOnDrop {
+        stream: chat_stream,
+        cancel,
+        _lease: lease,
+    };
+    let mut text = String::new();
+    let mut output: Vec<Value> = Vec::new();
+    let mut cur_tool: Option<(String, String, String)> = None; // (call_id, name, args)
+    let mut status = "completed";
+    let mut input_tokens = 0u32;
+    let mut output_tokens = 0u32;
+
+    while let Some(ev) = events.next().await {
+        match ev {
+            Ok(ChatEvent::TextDelta { text: t }) => text.push_str(&t),
+            Ok(ChatEvent::ToolUseStart { id, name }) => {
+                cur_tool = Some((id, name, String::new()));
+            }
+            Ok(ChatEvent::ToolUseDelta {
+                input_json_delta, ..
+            }) => {
+                if let Some((_, _, ref mut args)) = cur_tool {
+                    args.push_str(&input_json_delta);
+                }
+            }
+            Ok(ChatEvent::ToolUseEnd { .. }) => {
+                if let Some((call_id, name, args)) = cur_tool.take() {
+                    output.push(json!({"type": "function_call", "id": new_id("fc"),
+                        "call_id": call_id, "name": name, "arguments": args, "status": "completed"}));
+                }
+            }
+            Ok(ChatEvent::Done {
+                stop_reason,
+                input_tokens: i,
+                output_tokens: o,
+            }) => {
+                if matches!(stop_reason, StopReason::Cancelled) {
+                    status = "incomplete";
+                }
+                input_tokens = i;
+                output_tokens = o;
+                break;
+            }
+            Err(e) => {
+                return error_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &e.to_string(),
+                    "backend_error",
+                );
+            }
+        }
+    }
+
+    // Assistant message item goes first (Responses order), then tool calls.
+    let mut full = Vec::new();
+    if !text.is_empty() {
+        full.push(
+            json!({"type": "message", "id": new_id("msg"), "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text, "annotations": []}]}),
+        );
+    }
+    full.extend(output);
+    let body = responses_object(
+        &response_id,
+        created,
+        model,
+        status,
+        json!(full),
+        input_tokens,
+        output_tokens,
+    );
+    axum::Json(body).into_response()
+}
+
 async fn anthropic_handler(
     State(state): State<GatewayState>,
     axum::Json(req): axum::Json<AnthropicReq>,
@@ -1717,6 +2257,7 @@ pub async fn serve_on(
         .route("/v1/admit", get(admit_handler))
         .route("/stats", get(stats_handler))
         .route("/v1/chat/completions", post(oai_chat_handler))
+        .route("/v1/responses", post(responses_handler))
         .route("/v1/messages", post(anthropic_handler))
         .route("/control/switch", post(control_switch))
         .route("/control/unload", post(control_unload))
@@ -1855,6 +2396,90 @@ mod tests {
         let defs = oai_tools_to_internal(&tools);
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "get_weather");
+    }
+
+    // ── OpenAI Responses API (/v1/responses, for Codex) ─────────────────────
+
+    #[test]
+    fn responses_input_parsed() {
+        // instructions + a user message + a prior tool call + its result.
+        let input = json!([
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hi"}]},
+            {"type": "function_call", "call_id": "call_1", "name": "get_weather",
+             "arguments": "{\"city\":\"Paris\"}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "sunny"},
+        ]);
+        let msgs = responses_input_to_internal(Some("Be terse."), &input);
+        assert_eq!(msgs.len(), 4); // system + user + assistant(tool_use) + tool(result)
+        assert!(matches!(msgs[0].role, Role::System));
+        assert!(matches!(msgs[1].role, Role::User));
+        assert!(matches!(msgs[2].role, Role::Assistant));
+        assert!(matches!(msgs[3].role, Role::Tool));
+        match &msgs[2].content[0] {
+            ContentBlock::ToolUse { name, id, .. } => {
+                assert_eq!(name, "get_weather");
+                assert_eq!(id, "call_1");
+            }
+            _ => panic!("expected ToolUse in assistant turn"),
+        }
+        match &msgs[3].content[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "call_1");
+                assert_eq!(content, "sunny");
+            }
+            _ => panic!("expected ToolResult in tool turn"),
+        }
+    }
+
+    #[test]
+    fn responses_string_input() {
+        let msgs = responses_input_to_internal(None, &json!("just a string"));
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(msgs[0].role, Role::User));
+    }
+
+    #[test]
+    fn responses_tool_def_mapped() {
+        // Responses tools are FLAT (no nested `function`).
+        let tools = vec![RespTool {
+            kind: Some("function".into()),
+            name: Some("get_weather".into()),
+            description: Some("Get weather".into()),
+            parameters: Some(json!({ "type": "object" })),
+        }];
+        let defs = responses_tools_to_internal(&tools);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "get_weather");
+    }
+
+    #[test]
+    fn responses_object_shape() {
+        let obj = responses_object("resp_1", 123, "m", "completed", json!([]), 3, 4);
+        assert_eq!(obj["object"], "response");
+        assert_eq!(obj["status"], "completed");
+        assert_eq!(obj["usage"]["total_tokens"], 7);
+    }
+
+    #[tokio::test]
+    async fn responses_sse_emits_events() {
+        let backend = Arc::new(HelloBackend::new()) as Arc<dyn ChatBackend>;
+        let req = ChatRequest::simple("hi");
+        let stream = backend.chat(req).await.unwrap();
+        let cancel = CancellationToken::new();
+        let sse = responses_sse_stream(stream, cancel, "m".to_owned(), None);
+        futures::pin_mut!(sse);
+        let events: Vec<_> = sse.collect().await;
+        // created + output_item.added + content_part.added + >=1 delta +
+        // output_text.done + content_part.done + output_item.done + completed.
+        assert!(
+            events.len() >= 5,
+            "expected Responses SSE events, got {}",
+            events.len()
+        );
     }
 
     // ── Switchboard (gateway switch / unload / reload) ──────────────────────
