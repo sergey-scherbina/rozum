@@ -1417,6 +1417,34 @@ async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
             .unwrap_or(state.sb.n_ctx());
         m.insert("context_window".into(), json!(ctx));
         m.insert("loaded".into(), json!(state.sb.current().is_some()));
+        // Admission window (limit / in-flight / queued) — how concurrency is gated.
+        if let Some(a) = state.sb.current().and_then(|b| b.admission_stats()) {
+            m.insert(
+                "admission".into(),
+                json!({
+                    "limit": a.limit,
+                    "in_use": a.in_use,
+                    "waiting": a.waiting,
+                    "free": a.free(),
+                }),
+            );
+        }
+        // Batched-decode occupancy (native MLX): how many concurrent requests actually
+        // share a forward. `avg_occupancy = rows/runs`; `max` is the high-water batch size;
+        // `admits` counts continuous mid-decode admissions. Omitted until something batches.
+        if let Some(b) = crate::mlx_native_backend::batch_stats() {
+            let avg = if b.runs > 0 { b.rows as f64 / b.runs as f64 } else { 0.0 };
+            m.insert(
+                "batch".into(),
+                json!({
+                    "runs": b.runs,
+                    "rows": b.rows,
+                    "admits": b.admits,
+                    "max": b.max,
+                    "avg_occupancy": (avg * 100.0).round() / 100.0,
+                }),
+            );
+        }
     }
     axum::Json(snap)
 }
