@@ -256,6 +256,10 @@ enum ServiceAction {
     },
     /// Stop + uninstall the service.
     Uninstall,
+    /// Start the installed service (load it / `systemctl --user start`).
+    Start,
+    /// Stop the running service without uninstalling it (unload / `systemctl --user stop`).
+    Stop,
     /// Show the service status.
     Status,
 }
@@ -2000,6 +2004,8 @@ fn run_service(action: ServiceAction) {
             install_service(&program, &args, &env);
         }
         ServiceAction::Uninstall => uninstall_service(),
+        ServiceAction::Start => start_service(),
+        ServiceAction::Stop => stop_service(),
         ServiceAction::Status => status_service(),
     }
 }
@@ -2048,6 +2054,24 @@ fn uninstall_service() {
 }
 
 #[cfg(target_os = "macos")]
+fn start_service() {
+    let path = rozum::service::launchd_plist_path();
+    if !path.exists() {
+        eprintln!("rozum service: not installed — run `rozum service install --model …` first");
+        std::process::exit(1);
+    }
+    let st = std::process::Command::new("launchctl").args(["load", &path.to_string_lossy()]).status();
+    report_status(st, "started launchd service");
+}
+
+#[cfg(target_os = "macos")]
+fn stop_service() {
+    let path = rozum::service::launchd_plist_path();
+    let st = std::process::Command::new("launchctl").args(["unload", &path.to_string_lossy()]).status();
+    report_status(st, "stopped launchd service");
+}
+
+#[cfg(target_os = "macos")]
 fn status_service() {
     let st = std::process::Command::new("launchctl").args(["list", rozum::service::SERVICE_LABEL]).status();
     if !matches!(st, Ok(s) if s.success()) {
@@ -2083,6 +2107,22 @@ fn uninstall_service() {
     let _ = std::fs::remove_file(&path);
     let _ = std::process::Command::new("systemctl").args(["--user", "daemon-reload"]).status();
     eprintln!("uninstalled systemd --user service ({})", path.display());
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_service() {
+    let st = std::process::Command::new("systemctl")
+        .args(["--user", "start", rozum::service::SYSTEMD_UNIT])
+        .status();
+    report_status(st, "started systemd --user service");
+}
+
+#[cfg(not(target_os = "macos"))]
+fn stop_service() {
+    let st = std::process::Command::new("systemctl")
+        .args(["--user", "stop", rozum::service::SYSTEMD_UNIT])
+        .status();
+    report_status(st, "stopped systemd --user service");
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -11,8 +11,14 @@ gateway as a **user service** that starts at login and is kept alive — launchd
 rozum service install --model qwen3-4b [--model claude-haiku-4-5] [--port 8089] [--n-ctx N] \
                       [--offline] [--strategy classify|learned|cheapest]
 rozum service uninstall
+rozum service start     # start an installed-but-stopped service
+rozum service stop      # stop the running service (keeps it installed)
 rozum service status
 ```
+
+`install` writes the file and starts it; `uninstall` stops + removes it. `start`/`stop` only toggle
+the running state (launchd `load`/`unload`, `systemctl --user start`/`stop`) without touching the
+installed file.
 
 `--model` is repeatable / comma-separated (a cascade), exactly like `rozum gateway`. The service runs
 `rozum gateway --model … [flags]`; `--offline`/`--strategy` are threaded as gateway flags, and
