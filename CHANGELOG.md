@@ -1,5 +1,18 @@
 # Changelog
 
+## mlx-native — Gemma 3 sliding-window attention (local layers window correctly at long context)
+Completed: 2026-06-15
+Finishes the one deferred Gemma 3 gap. Its LOCAL (non-global) layers are supposed to attend only to
+the last `sliding_window` (512) keys, but the initial port approximated them with full attention —
+exact for short prompts, but diverging on long contexts (which coding agents hit). Now each layer
+gets the right additive mask: GLOBAL layers stay full causal, LOCAL layers additionally drop keys
+older than the window. Both masks are built over ABSOLUTE positions (`build_gemma_masks`) so they're
+correct at decode (`offset > 0`), and they coincide whenever the whole context fits the window — so
+short prompts are byte-unchanged (`mlx_gemma3_chat` still clean). A deterministic unit test proves
+the local mask bands the causal mask to the window (prefill) and windows correctly at decode (no
+model needed). The mask keeps the full KV cache, so memory is still O(context) — a bounded windowed
+KV cache is a later optimization, not a correctness gap. Fork rev `f3e66904`.
+
 ## mlx-native — Gemma 3 (text) support — own model file + three general template/EOS/lm_head fixes
 Completed: 2026-06-14
 Opens Google's Gemma 3 family (`model_type: "gemma3_text"` / multimodal-wrapper `gemma3`). Unlike

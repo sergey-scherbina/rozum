@@ -265,9 +265,14 @@ vision) and why: `docs/specs/mlx-native-catalog-non-goals.md`.
   `lm_head` even when tied → detect + use it; (2) chat templates that emit `{{ bos_token }}` (Gemma)
   got an empty BOS → thread `bos_token`/`eos_token` into the minijinja context (a BOS-sensitive model
   was garbage without it); (3) `<end_of_turn>` (106) wasn't in EOS (config eos is only `<eos>`) → add
-  the tokenizer's turn-end token. Added to `models::RECOMMENDED`. **Deferred:** the 512 sliding window
-  is approximated by full attention (exact within the window; bounded divergence beyond — a windowed-
-  mask follow-up); Gemma 2 (`attn_logit_softcapping`) and the multimodal vision tower are separate.
+  the tokenizer's turn-end token. Added to `models::RECOMMENDED`. **Sliding window SHIPPED
+  2026-06-15:** local layers now additionally mask keys older than `sliding_window` (global layers
+  stay full causal), via per-layer additive masks built over absolute positions (`build_gemma_masks`
+  — correct at decode); a no-op when the context fits the window (short prompts unchanged). A
+  deterministic unit test proves the banding + decode windowing; `mlx_gemma3_chat` still clean.
+  **Deferred:** Gemma 2 (`attn_logit_softcapping`) and the multimodal vision tower are separate; the
+  mask keeps the FULL KV (memory still O(context)) — a bounded windowed KV cache is a later memory
+  optimization, not a correctness gap.
 
 - [x] mlx-native-phi3 - **DONE 2026-06-14 — NO new model file.** Phi-3 (`model_type: "phi3"`) is
   the Llama arch with **fused `qkv_proj` + `gate_up_proj`**. Rather than a whole new file,
