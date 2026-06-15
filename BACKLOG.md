@@ -395,12 +395,18 @@ or on nothing — so any engine can reuse it.
   KV/RAM preflight (pure arithmetic from `config.json` + free RAM). Depends only on
   the model's text/config conventions, not the engine.
 
-- [ ] extract-shared-sampler - **L2.** Define the sampler (top-p / top-k /
-  repeat-penalty / seed / categorical) over a plain logit slice (`&[f32]`) + RNG, in
-  a shared module. Each leaf materializes the final-position logits and calls it; the
-  per-token GPU→CPU copy of one vocab vector is negligible for our op-launch-bound
-  decode. Removes the per-leaf sampler duplication (today it lives inside the MLX
-  fork, bound to mlx `Array`).
+- [x] extract-shared-sampler - **L2. DONE 2026-06-15** (`src/sampler.rs`). The sampler
+  (repeat-penalty → temperature → top-k → top-p → categorical) defined over a plain `&[f32]` logit
+  slice + an `impl Rng`, engine-agnostic. `SamplerConfig::from_params`, `seeded_rng(seed)`,
+  `repeat_window`, `sample(logits, cfg, recent, rng)`. 6 deterministic unit tests (greedy, repeat
+  penalty, top-k=1 collapse, top-p nucleus, seeded determinism, window).
+  - **GGUF now calls it** (`gguf.rs`), replacing its ad-hoc temp+softmax + buggy global-static LCG —
+    a real upgrade (gains top-k/top-p/repeat-penalty/seed) AND the dedup. Compile-verified
+    `--features gguf`.
+  - The MLX hot path keeps its on-device `sample_with` (byte-exact oracle tests); `src/sampler.rs` is
+    the canonical CPU definition it mirrors, and what CPU leaves (GGUF, and any future CUDA/CPU leaf)
+    call. The per-token GPU→CPU copy of one vocab vector is negligible for op-launch-bound decode, so
+    a leaf can adopt it whenever byte-exactness isn't required.
 
 - [x] extract-model-reference-specs - **L3. DONE 2026-06-15.** Captured the model *knowledge* as
   engine-independent reference docs in `docs/specs/model-reference/`: a `README.md` of cross-cutting
