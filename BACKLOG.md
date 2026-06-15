@@ -769,16 +769,19 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   tokenizers live in `!Send` worker threads, so wiring their `count_tokens` needs a worker round-trip
   (or a cached token-count cell) — left `None` for now; remote backends have no local tokenizer.
 
-- [~] concurrency-multi-instance - **Core primitive DONE 2026-06-15** (`src/concurrency.rs`). The
-  **shared cross-resident GPU gate**: a process-wide semaphore (size = one GPU's concurrent-prefill
-  sweet spot, `DEFAULT_SEQS_CEILING`; `ROZUM_GPU_GATE` overrides, `0` disables) that every local
-  (`admit_wrap`-ped) backend acquires *in addition to* its per-model slot, so concurrent prefills
-  across **distinct resident models** can't oversaturate one GPU. Acquired after the per-model admit
-  (no priority inversion), held for the request, composes with the cascade lanes + per-model adaptive
-  ceiling. A no-op for a single resident (gate ≥ per-model cap), so default-on is safe. 2 tests
-  (shared-across-two-backends, no-bind-below-size). 272/0. **Remaining**: size-class *routing* (small
-  lane / big lane) is already the cascade's `LaneSet` + multislot residency; the shared *memory*
-  budget across distinct residents is `shared-gateway-multislot` Phase 2 (`plan_residency`).
+- [x] concurrency-multi-instance - **DONE 2026-06-15** — "several models on one GPU, done smartly" is
+  fully covered by three shipped mechanisms:
+  1. **Shared cross-resident GPU gate** (`src/concurrency.rs::global_gpu_gate`): a process-wide
+     semaphore (size = one GPU's concurrent-prefill sweet spot, `DEFAULT_SEQS_CEILING`;
+     `ROZUM_GPU_GATE` overrides) every local `admit_wrap`-ped backend acquires *in addition to* its
+     per-model slot, so prefills across **distinct residents** can't oversaturate one GPU. Acquired
+     after the per-model admit (no priority inversion); no-op for a single resident. 2 tests.
+  2. **Size-class routing** (small lane / big lane, non-blocking) = the cascade's Phase-6 `LaneSet` +
+     difficulty classifier (simple→small, complex→big, parallel lanes).
+  3. **Shared memory budget** across residents = `shared-gateway-multislot`'s `plan_residency`
+     (memory-gated admission + utility eviction).
+  Out-of-process coordination (several daemons on one GPU) stays in `concurrency-cross-process`
+  (low-priority — the architecture avoids it).
 
 - [ ] concurrency-cross-process - **LOW PRIORITY (2026-06-15): the architecture avoids the
   multi-process case.** The in-process shared GPU gate (`concurrency-multi-instance` core) + multislot
