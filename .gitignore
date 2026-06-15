@@ -4,3 +4,4 @@
 /models/*.part
 .vendor/
 /.worktrees/
+/scripts/bench/results/
