@@ -30,7 +30,7 @@ pub enum RemoteApi {
 }
 
 /// One cascade tier — a model spec the resolver turns into a backend, plus its placement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TierSpec {
     /// The model spec resolved to a backend (a local model id like `mlx-community:Qwen3-4B-4bit`,
     /// or a remote model id like `claude-haiku-4-5`).
@@ -56,7 +56,7 @@ pub struct TierSpec {
 }
 
 /// The start-tier routing strategy, by name (config-friendly).
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StrategyName {
     #[default]
@@ -76,7 +76,7 @@ impl From<StrategyName> for RoutingStrategy {
 }
 
 /// A whole cascade, ready to build: cost-ordered tiers + a few knobs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CascadeSpec {
     /// Tiers in cost order, cheapest first (the tier index is the position).
     pub tiers: Vec<TierSpec>,

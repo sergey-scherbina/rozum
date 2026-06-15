@@ -58,6 +58,32 @@ url     = "https://my-host:8000/v1"
 `[runtime].backend = "lmstudio"` (optional) names which backend `single` policy
 uses; default is the first enabled entry.
 
+#### `[cascade.<name>]` — named cascade configs (optional)
+
+Declare frugal/escalation cascades (see `cascade-router.md`) the gateway selects via
+`model: "cascade"` (→ `default`) or `model: "cascade:<name>"`. Each is a `CascadeSpec`:
+
+```toml
+[cascade.default]
+strategy        = "classify"   # alwaysCheapest (default) | classify | learned
+max_escalations = 1            # optional escalation-hop cap
+
+  [[cascade.default.tiers]]    # cost-ordered, cheapest first
+  model = "mlx-community/Qwen3-4B-4bit"   # local: resolved via the backend chain above
+
+  [[cascade.default.tiers]]
+  model       = "claude-haiku-4-5"
+  location    = "remote"
+  api         = "anthropic"    # openai (default) | anthropic
+  # endpoint    = "..."        # optional (anthropic defaults to https://api.anthropic.com)
+  # api_key_env = "..."        # optional (defaults: ANTHROPIC_API_KEY / OPENAI_API_KEY)
+  # pool        = "gpu0"       # optional residency-lane override
+```
+
+A `[cascade.<name>]` table takes precedence over the env JSON (`ROZUM_CASCADE` /
+`ROZUM_CASCADE_<NAME>`), which remains as a fallback. A tier that can't be built (missing key /
+endpoint) is skipped; only an all-empty cascade errors.
+
 ### Engine names
 
 The `engine` field accepts every engine rozum can name:
