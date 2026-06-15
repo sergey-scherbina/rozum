@@ -11,10 +11,12 @@
 
 mod acceptance;
 mod health;
+mod judge;
 mod self_signal;
 
 pub use acceptance::{AcceptanceCheck, StructuralCheck, TurnOutcome, Verdict};
 pub use health::{classify, FailReason, HealthRegistry, HealthState};
+pub use judge::{HeuristicJudge, Judge, JudgeConfig, ModelJudge};
 pub use self_signal::{escalation_tools, EscalationAffordance, SelfSignalCheck};
 
 use std::sync::Arc;
@@ -66,17 +68,20 @@ pub struct CascadeConfig {
     pub budget: CascadeBudget,
     /// The escalation affordance injected into each non-top model's prompt (`None` = off).
     pub affordance: Option<EscalationAffordance>,
+    /// The L2 judge, consulted only when L0/L1 are inconclusive (`None` = accept inconclusive).
+    pub judge: Option<JudgeConfig>,
 }
 
 impl CascadeConfig {
     /// The default config over `models`: L0 (structural) + L1 (self-signal) acceptance, the
-    /// escalation affordance on, unbounded budget.
+    /// escalation affordance on, no L2 judge (opt-in), unbounded budget.
     pub fn new(models: Vec<ModelCard>) -> Self {
         Self {
             models,
             acceptance: vec![Box::new(StructuralCheck), Box::new(SelfSignalCheck::default())],
             budget: CascadeBudget::default(),
             affordance: Some(EscalationAffordance::default()),
+            judge: None,
         }
     }
 }
@@ -217,7 +222,21 @@ impl ChatBackend for CascadeBackend {
                 continue;
             }
             self.health.record_success(&card.id);
-            match pipeline_verdict(&self.config.acceptance, &req, &outcome) {
+            // L0/L1 (sync) decide first; if inconclusive, consult the L2 judge (async) if set.
+            let verdict = match pipeline_verdict(&self.config.acceptance, &req, &outcome) {
+                Some(v) => v,
+                None => match &self.config.judge {
+                    Some(jc) => {
+                        if jc.judge.score(&req, &outcome).await >= jc.threshold {
+                            Verdict::Accept
+                        } else {
+                            Verdict::Escalate
+                        }
+                    }
+                    None => Verdict::Accept,
+                },
+            };
+            match verdict {
                 Verdict::Accept => {
                     tracing::debug!(model = %card.id, "cascade: accepted");
                     return Ok(buffered(outcome_events(&outcome, marker)));
@@ -470,5 +489,43 @@ mod tests {
         let be = CascadeBackend::new(CascadeConfig::new(vec![c, s]));
         let out = collect(be.chat(ChatRequest::simple("q")).await.unwrap()).await;
         assert_eq!(out, "partial answer", "the marker is removed from the fallback");
+    }
+
+    // ── Phase 4: the L2 judge ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn judge_escalates_low_quality_freeform() {
+        // Free-form (L0/L1 inconclusive): the heuristic judge scores the cheap non-answer low →
+        // escalate to the strong model.
+        let (c, cc) = card("cheap", 0, Script::Text("I don't know"));
+        let (s, sc) = card("strong", 1, Script::Text("Paris is the capital of France."));
+        let mut cfg = CascadeConfig::new(vec![c, s]);
+        cfg.judge = Some(JudgeConfig { judge: Box::new(HeuristicJudge), threshold: 0.5 });
+        let be = CascadeBackend::new(cfg);
+        let out = collect(be.chat(ChatRequest::simple("capital of France?")).await.unwrap()).await;
+        assert_eq!(out, "Paris is the capital of France.");
+        assert_eq!(cc.load(Ordering::SeqCst), 1);
+        assert_eq!(sc.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn no_judge_accepts_inconclusive_cheap() {
+        // Without a judge, an inconclusive free-form answer is accepted (judge is opt-in).
+        let (c, _cc) = card("cheap", 0, Script::Text("I don't know"));
+        let (s, sc) = card("strong", 1, Script::Text("better"));
+        let be = CascadeBackend::new(CascadeConfig::new(vec![c, s]));
+        let out = collect(be.chat(ChatRequest::simple("q")).await.unwrap()).await;
+        assert_eq!(out, "I don't know");
+        assert_eq!(sc.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn model_judge_scores_from_backend() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let jb: Arc<dyn ChatBackend> = Arc::new(Mock { script: Script::Text("8"), calls });
+        let j = ModelJudge { backend: jb };
+        let ans = TurnOutcome { text: "an answer".into(), ..Default::default() };
+        let score = j.score(&ChatRequest::simple("q"), &ans).await;
+        assert!((score - 0.8).abs() < 1e-3, "8/10 → 0.8, got {score}");
     }
 }

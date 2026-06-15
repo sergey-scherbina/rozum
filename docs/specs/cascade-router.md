@@ -93,18 +93,32 @@ bailing to escalate on the first failure**, cheapest checks first so we rarely p
   Pass → strong accept for structured tasks.
 - **L1 — self-signal (free, same response).** Did the model call an `escalate` tool, refuse, or
   emit a low-confidence marker? → escalate.
-- **L2 — cheap judge (one extra cheap call, only when L0/L1 are inconclusive).** A small local
-  model or heuristic scores the answer; below `threshold` → escalate. Last, because it costs.
+- **L2 — cheap judge (one extra cheap call, only when L0/L1 are inconclusive).** A pluggable
+  `Judge` scores the answer `0..1`; below `threshold` → escalate. Last, because it costs.
+  Implementations: a free `HeuristicJudge` (empty / explicit-non-answer → low) and a `ModelJudge`
+  (a small model rates the answer 0–10). Default judge = the next-cheapest local model + a
+  heuristic.
 
 ```rust
-trait AcceptanceCheck {            // each is cheap-before-expensive ordered in the config
+trait AcceptanceCheck {            // L0/L1 — cheap, synchronous, cheapest-first in the config
     fn decide(&self, req: &ChatRequest, answer: &Turn) -> Verdict; // Accept | Escalate | Inconclusive
 }
+trait Judge { async fn score(&self, req, answer) -> f32; }  // L2 — consulted only on Inconclusive
 ```
 
-`Accept` short-circuits (return). `Escalate` goes to the next tier. `Inconclusive` falls to the
-next check; if all are `Inconclusive`, the default is `Accept` (don't escalate without a
-reason).
+L0/L1 run first (sync); the first `Accept`/`Escalate` decides. If every check is `Inconclusive`,
+the L2 judge (if configured) decides (`score >= threshold` → `Accept`); with no judge, `Inconclusive`
+defaults to `Accept` (don't escalate without a reason).
+
+**Execution-feedback signal (agent context).** The most reliable quality signal isn't a judge's
+opinion — it's whether the answer *worked*. In an agent loop a model's tool calls either succeed or
+return a `ToolError`; the agent runtime already records this (`AgentOutcome.operations[].output:
+Result<Value, String>`) and feeds each error back to the model for self-correction. This can't drive
+the bare per-response cascade (the response is returned before the tools run), so it lives at the
+**agent** level: (a) `run_agent` over a cascade escalates the backend when tool errors persist (a
+model that keeps producing failing calls → a stronger tier for the next step), and (b) the per-model
+tool-error rate per task-class feeds the learned stats (§ adaptive routing). Tracked as a follow-up
+phase.
 
 ### Routing strategy (start-tier selection)
 
@@ -246,6 +260,9 @@ Each phase ships value and is testable; early phases are deterministic/model-fre
    policy — single-resident first, then multi-resident with `ConcurrencyBudget`).
 7. **Learned stats + adaptive thresholds/start-tier + persisted health patterns** (the `Learned`
    strategy; JSONL carried across restarts).
+8. **Execution-feedback escalation (agent context).** `run_agent` over a cascade escalates the
+   backend when tool calls keep failing (`AgentOutcome.operations` errors), and the tool-error rate
+   feeds the learned stats. The grounded "did it actually work" quality signal.
 
 ## Decisions
 
