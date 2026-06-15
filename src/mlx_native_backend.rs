@@ -2846,7 +2846,9 @@ pub fn resolve_model_dir(spec: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-#[cfg(test)]
+// Gated on the feature: these tests reach into the `mlx-native`-only `inner` module, so they only
+// build when the runtime is compiled (keeps `--no-default-features` — the portable core — green).
+#[cfg(all(test, feature = "mlx-native"))]
 mod tests {
     use super::resolve_model_dir;
 

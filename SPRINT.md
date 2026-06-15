@@ -287,6 +287,13 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   inversion (admit-then-gate), composes with cascade lanes + adaptive ceiling, no-op for a single
   resident (gate ≥ cap) → safe default-on. 2 tests. 272/0. Size-class routing = cascade lanes +
   multislot residency; shared memory budget = multislot Phase 2.
+- [~] portability-platform-features - **Durable core DONE + CI-enforced 2026-06-15** (`ci.yml`,
+  `Cargo.toml`). `cargo build --no-default-features` builds + tests the non-backend durable layer
+  (SPI/gateway/agent/cascade/concurrency/config/meeting — 271 tests) with no native toolchain; a CI
+  `linux-core` job (`ubuntu-latest`) enforces it every push. Gated one MLX-only test module on the
+  feature. Remaining (needs a Linux box): bare `cargo build` on Linux — native backends are
+  Metal-bound (mlx-sys + `llama-cpp-2 metal`); → `portability-cuda-gguf`. Also closed C-category
+  no-longer-developed items (candle / gguf-tool-use / preemption / superseded stubs).
 - [x] shared-gateway-service - **DONE 2026-06-15** (`src/service.rs` + `src/main.rs`). `rozum service
   {install,uninstall,status}` registers the gateway as an always-warm user service (launchd / `systemd
   --user`) instead of lazy spawn + idle-exit. `--model` repeatable/cascade + `--port/--n-ctx/--offline/
