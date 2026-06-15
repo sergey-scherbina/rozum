@@ -45,6 +45,7 @@ Bind address is always `127.0.0.1`. CORS is not required (local use only).
   "model": "string",         // matched to backend id; falls back to default
   "messages": [...],         // roles: system, user, assistant, tool
   "tools": [...],            // optional; function-calling format
+  "tool_choice": "auto",     // "auto" | "none" | "required" | {"type":"function","function":{"name":"f"}}
   "stream": true,            // always treated as true
   "temperature": 0.7,
   "top_p": 0.9,
@@ -72,6 +73,7 @@ Terminator: `data: [DONE]`
   "system": "string",
   "messages": [...],
   "tools": [...],
+  "tool_choice": {"type": "auto"},  // "auto" | "any" | "none" | {"type":"tool","name":"f"}
   "max_tokens": 2048,
   "temperature": 0.7,
   "stream": true
@@ -110,6 +112,44 @@ event: message_stop
 data: {"type":"message_stop"}
 ```
 
+### Tool use (Contract-1) — the stable surface the agent SDK targets
+
+This is the contract `rozum-gateway-tool-contract`: the request/response shape an SDK can
+build against without reading the implementation. Conformance is unit-tested
+(`gateway::tests::{tool_choice_*, oai_collect_tool_call_shape, anthropic_collect_tool_use_shape}`).
+
+**Request — tools.** `tools[].function.{name, description, parameters}` (OpenAI/Responses) or
+`tools[].{name, description, input_schema}` (Anthropic) map to the SPI `ToolDef`. `parameters` /
+`input_schema` is a JSON Schema, passed through verbatim.
+
+**Request — `tool_choice`** (normalized across dialects; honored by transforming the tool set the
+backend sees — no SPI change):
+
+| intent            | OpenAI / Responses                                   | Anthropic                      | effect                                              |
+|-------------------|------------------------------------------------------|--------------------------------|-----------------------------------------------------|
+| model decides     | `"auto"` / absent                                    | `{"type":"auto"}` / absent     | tools passed through (default)                      |
+| no tools          | `"none"`                                             | `{"type":"none"}`              | tool set emptied → text-only reply                  |
+| must call *a* tool| `"required"`                                         | `{"type":"any"}`               | accepted; **best-effort** (not forced) — tools kept |
+| must call tool X  | `{"type":"function","function":{"name":"X"}}` (flat `{"type":"function","name":"X"}` for Responses) | `{"type":"tool","name":"X"}` | tool set restricted to X (empty if X undeclared)    |
+
+**Response — non-streaming.** OpenAI:
+`choices[0].message.tool_calls[] = {id, type:"function", function:{name, arguments:"<json string>"}}`,
+`message.content:null` when tool calls are present, `finish_reason:"tool_calls"`. Anthropic:
+`content[] += {type:"tool_use", id, name, input:<json object>}`, `stop_reason:"tool_use"`.
+
+**Response — streaming.** OpenAI: `delta.tool_calls[].function.{name, arguments}` deltas, terminal
+`finish_reason:"tool_calls"`, then `[DONE]`. Anthropic: a `tool_use` `content_block_start`, then
+`input_json_delta` `content_block_delta`s, `content_block_stop`, and `message_delta` with
+`stop_reason:"tool_use"`.
+
+**`finish_reason` / `stop_reason`** (from SPI `StopReason`): `EndTurn`→`stop`/`end_turn`,
+`ToolUse`→`tool_calls`/`tool_use`, `MaxTokens`→`length`/`max_tokens`.
+
+**Argument reliability.** When the native MLX backend runs with `ROZUM_MLX_CONSTRAIN`, tool
+arguments are schema-constrained *during decode* (the model cannot emit a malformed/out-of-schema
+argument object). This is a server-side reliability feature, transparent to the contract — the SDK
+just gets conformant `arguments`. See `constrained-tool-decoding.md`.
+
 ## Behavior
 
 - [x] `rozum gateway --port 8089 --model "/path/to/model.gguf"` starts an HTTP server on `127.0.0.1:8089` with the specified backend loaded.
@@ -118,6 +158,7 @@ data: {"type":"message_stop"}
 - [x] `POST /v1/chat/completions` with `"stream":false` returns a non-streaming JSON completion object.
 - [x] `POST /v1/messages` returns an Anthropic-format SSE stream or synchronous response.
 - [x] Both routes map `messages` and `tools` to `ChatRequest` using the types from `chat-backend-spi.md`.
+- [x] `tool_choice` parsed + honored on all three routes (`auto`/`none`/`required`/named); see the Tool-use contract above. Conformance unit tests cover parsing, application, and the tool-call response shapes for both dialects.
 - [x] Tool events from `ChatStream` serialized into the correct SSE format for each dialect.
 - [x] Context overflow → HTTP 400 with `{"error":{"message":"...","type":"context_length_exceeded"}}`.
 - [x] Backend overloaded (`ModelError::Overloaded`, e.g. mistralrs admission queue full) → HTTP 429 + `Retry-After` header, `type:"overloaded"`. See `mistralrs-concurrency-scheduling.md`.
