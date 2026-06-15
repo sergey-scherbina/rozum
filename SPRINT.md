@@ -62,6 +62,41 @@ Full writeup + the one-pass diagnostic methodology that localized it:
 > to master `74c7a96`, fork `0d4b3729`. The P0/P1 below are that work (kept for record).
 > Chosen next (2026-06-13, user): the three tasks here; hand-fused Metal kernels → BACKLOG.
 
+#### P0 (CURRENT, 2026-06-15): cascade-router — frugal/escalation model routing
+
+**User-driven feature.** Spec: `docs/specs/cascade-router.md` (design agreed + availability/health
+folded in). Try the cheapest/fastest model first (small local → big local → cheap remote →
+frontier), escalate only when the cheap answer isn't good enough, stop at the first acceptable —
+cheaper than a single frontier call on average (the opposite of Fusion's parallel ensemble). Caller
+supplies the candidate list (inline or a parameter-selectable named config); one model = passthrough.
+Configurable + adaptive (acceptance L0 structural → L1 self-signal/escalate-tool → L2 cheap judge;
+strategy AlwaysCheapest / ClassifyThenStart / Learned; learned stats). Resilient: transient model
+health (quota / rate-limit / down / network / OOM) → route to the best AVAILABLE model, auto-recover,
+never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsumes
+`concurrency-multi-instance`). Built on `BackendOrchestrator`; remote tiers = `openai_http`/
+`anthropic_http`. 7 phases, each its own branch + tests + merge; early phases deterministic/model-free.
+
+- [ ] cascade-p1-core - **Phase 1.** `src/cascade/`: `ModelCard` + `BackendRef` (resolve → `Arc<dyn
+  ChatBackend>`), minimal `CascadeConfig` (`models`, `AlwaysCheapest`, `[L0Structural]`, `budget`),
+  `CascadeBackend::chat` (1 model → passthrough; else cost-ordered loop: run → L0 accept/escalate →
+  winner; budget → best-so-far + path metadata). L0 = error→escalate; if `response_schema`/`tools`
+  validate output via `constrain`→fail→escalate, else accept. Model-free e2e (cheap mock fails L0 →
+  strong mock; passthrough; budget exhaustion; accept-on-cheap). Gateway wiring (`model:"cascade[:name]"`)
+  at the end.
+- [ ] cascade-p2-health - **Phase 2.** Availability/health: error classification → `Health`
+  {state, FailReason, cooldown} with exp-backoff+jitter+half-open; skip in-cooldown; best-AVAILABLE
+  selection (sideways/down: remote down→local, big-local OOM→smaller); graceful degradation, no
+  hard-fail while any model serves; `Network` parks all remotes. Model-free e2e (mock errors → falls to
+  healthy mock; OOM → smaller).
+- [ ] cascade-p3-self-signal - **Phase 3.** L1 self-signal + the `escalate`/`consult_stronger` tool
+  (`ToolSource`, composes with `run_agent` + `MultiToolSource`).
+- [ ] cascade-p4-judge - **Phase 4.** L2 cheap judge (next-cheapest-local + heuristic; pluggable threshold).
+- [ ] cascade-p5-classifier - **Phase 5.** Difficulty classifier → `ClassifyThenStart` (heuristic features / tiny model → start tier).
+- [ ] cascade-p6-scheduler - **Phase 6.** Parallel scheduler / lanes (per-request difficulty routing,
+  non-blocking; residency policy — single-resident first, then multi-resident via `ConcurrencyBudget`).
+- [ ] cascade-p7-learned - **Phase 7.** Learned stats + adaptive thresholds/start-tier + persisted
+  health patterns (JSONL via the `memory_store` pattern; the `Learned` strategy).
+
 #### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
 
 **Sprint goal #2.** The outward gateway exists (`src/gateway.rs`: `/v1/chat/completions`
