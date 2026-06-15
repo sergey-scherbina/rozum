@@ -3025,6 +3025,34 @@ mod tests {
         assert!(text.contains("Paris"), "expected Paris, got: {text}");
     }
 
+    // Gemma 3 MULTIMODAL-WRAPPER checkpoint (`model_type: "gemma3"`, the 4B/12B/27B) — a different
+    // load path from the flat 1B (`gemma3_text`) above: text params live under `text_config` (with
+    // most head fields omitted → Gemma3 defaults), `quantization` is top-level, the language-model
+    // weights are prefixed `language_model.` next to vision/projector tensors we drop, the lm_head is
+    // tied, the index.json is stale (names 2 shards that don't exist → fall back to the consolidated
+    // `model.safetensors`), and the GLOBAL layers carry linear RoPE scaling (factor 8). Auto-downloads
+    // ~3.4 GB. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_gemma3_wrapper_chat
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "network: auto-downloads mlx-community/gemma-3-4b-it-4bit (~3.4GB)"]
+    async fn mlx_gemma3_wrapper_chat() {
+        use super::{MlxNativeBackend, ensure_model_dir};
+        use crate::backend::{ChatBackend, ChatRequest, collect_to_string};
+
+        let spec = "mlx-community:gemma-3-4b-it-4bit";
+        let dir = ensure_model_dir(spec).await.expect("gemma3-4b download/resolve");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+            .await
+            .expect("backend load (Gemma 3 multimodal wrapper → text model)");
+        let req =
+            ChatRequest::simple("What is the capital of France? Answer in one short sentence.");
+        let stream = backend.chat(req).await.expect("chat");
+        let text = collect_to_string(stream).await.expect("collect");
+        eprintln!("MLX GEMMA3-4B WRAPPER OUTPUT: {text}");
+        assert!(text.contains("Paris"), "expected Paris, got: {text}");
+    }
+
     // Phi-3 (`model_type: "phi3"`) — proves the FUSED-projection split loader works end to end
     // (qkv_proj / gate_up_proj split into q/k/v + gate/up at load, then run on the Llama path).
     // Auto-downloads ~2 GB. Run:

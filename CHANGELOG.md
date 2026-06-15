@@ -1,5 +1,32 @@
 # Changelog
 
+## mlx-native — the bigger Gemma 3 sizes load (4B/12B/27B multimodal wrapper) + catalog mid-tier
+Completed: 2026-06-15
+Only the tiny text-only Gemma 3 1B (`model_type: "gemma3_text"`) loaded before; the genuinely useful
+4B/12B/27B ship as the **multimodal wrapper** (`model_type: "gemma3"`) and failed at load. The 4B was
+added to the catalog, validation caught the failure (exactly why each addition is run, not assumed),
+and the loader was fixed — four general changes in `gemma3.rs`, all validated end-to-end on
+gemma-3-4b-it-4bit (answers correctly, `mlx_gemma3_wrapper_chat`):
+- **Config nesting:** the text model lives under `text_config` (with `quantization` at the top level,
+  grafted on). The wrapper omits most head fields, so `ModelArgs` now carries serde defaults matching
+  HF `Gemma3TextConfig` (heads 8, kv 4, head_dim 256, sliding_window_pattern 6, query_pre_attn_scalar
+  256, rope_theta 1e6, rope_local 1e4, vocab 262208) — verified to reconstruct 4B (heads→8), 12B
+  (head_dim→256) and 27B exactly. Model-free unit test `wrapper_text_config_fills_gemma3_defaults`.
+- **Weight prefix:** strip `language_model.` and skip `vision_tower.*` / `multi_modal_projector.*` so
+  the text params line up; no materialized lm_head → tied embeddings (already handled).
+- **RoPE scaling:** the wrapper sets linear scaling `{factor 8}`, which Gemma 3 applies to the GLOBAL
+  layers only (local sliding-window layers stay unscaled). Threaded through `Attention::new` /
+  `DecoderLayer::new`.
+- **Stale index (general robustness):** some mlx-community uploads ship a `model.safetensors.index.json`
+  that names sharded files (`model-0000N-of-…`) after the weights were consolidated into a single
+  `model.safetensors`. Trust the index only when every shard it names exists; otherwise load every
+  `*.safetensors` actually present. Fixes the load for any repo with a stale index, not just Gemma.
+
+Catalog (`mlx-native-recommend-catalog`): with all the architectures now landed, `models::RECOMMENDED`
+gained mid-tier entries so the picker has coder/general at a fits-16GB size, not just tiny + heavy —
+**Qwen2.5-Coder 7B** (mid coder, same family as the 32B) and **Gemma 3 4B** (mid general). Both
+validated by actually loading + answering. Fork rev `8c18fd23`.
+
 ## mlx-native — Gemma 3 batches too → EVERY dense family now serves concurrently
 Completed: 2026-06-15
 The last serial dense arch joins the batched path: two concurrent Gemma 3 sessions now share one
