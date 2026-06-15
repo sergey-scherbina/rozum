@@ -78,6 +78,39 @@ compiled.
   the seam changes. The recipe is: *make it satisfy the five methods, slot it into
   `build_gateway_backend` / the config chain, done.*
 
+## Add-a-backend checklist (write a new runtime/hardware leaf)
+
+The recipe, concretely. A new backend is a type implementing `ChatBackend` (`src/backend.rs`); only
+two methods are **required**, the rest are opt-in hooks the rozum machinery uses if you provide them.
+
+1. **`async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream>`** *(required).* The core.
+   Render `req.messages` + `req.tools` with **your** chat template, run inference, and yield
+   `ChatEvent`s incrementally: `TextDelta`* then, for each tool call, `ToolUseStart` →
+   `ToolUseDelta`* → `ToolUseEnd`, ending with `Done { input_tokens, output_tokens, stop_reason }`.
+   Honor `req.sampling` (temperature/top-p/penalties/seed/max_tokens) and, if you can, the optional
+   `response_schema` (constrained decode). Respect `req.cancel` (stop and emit `Done{Cancelled}`).
+2. **`fn context_window(&self) -> u32`** *(required).* The model's max context (0 if unknown).
+3. **Optional hooks** — implement the ones that apply:
+   - `label() -> &'static str` — a short id for `/stats` + the JSONL log.
+   - `concurrency_capacity() -> Option<usize>` — `Some(n)` if you have a safe concurrent-request
+     limit ⇒ `concurrency::admit_wrap` puts admission control (+ the adaptive ceiling) in front of
+     you. Remote / self-serializing backends return `None` (the default) to pass through ungated.
+   - `count_tokens(text) -> Option<usize>` — exact token count if your tokenizer is cheaply
+     reachable (makes the admission cost estimate exact instead of the char heuristic).
+   - `report_quality(ok)` — usually leave default; `AdmittingBackend` overrides it.
+4. **Bring your own** template, tokenizer, and KV cache — they live *inside* the leaf (above the seam
+   nothing knows about them). Reuse the hardware-agnostic model source (hf_hub/ModelScope fetch +
+   cache + spec resolution) where you can.
+5. **Register it in the resolution chain** — add a builder arm in `main.rs`
+   (`build_gateway_backend_forced` / `build_choice`) and an `engine` name in
+   `config.rs::ACCEPTED_ENGINES`, so `--backend <name>` and `rozum.toml` can select it. Wrap it in
+   `concurrency::admit_wrap` if it advertises a capacity.
+6. **Test it** feature-free where possible: a unit test with a scripted backend, and (behind your
+   feature, `#[ignore]`) a real-model smoke test. The `HelloBackend` in `backend.rs` is the minimal
+   reference implementation.
+
+Nothing above the seam (gateway, agent runtime, cascade, concurrency, config) changes.
+
 ## What we should still do to fully realize this (backlog)
 
 The abstraction exists; a few sharp edges keep it from being clean portability:
@@ -92,8 +125,8 @@ The abstraction exists; a few sharp edges keep it from being clean portability:
    *any* safetensors backend (mistralrs, a future runtime), but today they're wired
    through the MLX path. Factor them into a backend-agnostic "model source" layer so
    a new leaf reuses fetching/cache/preflight for free.
-3. **This doc + a "write a new backend" checklist** so the recipe above is written
-   down, not folklore.
+3. ~~**This doc + a "write a new backend" checklist** so the recipe above is written
+   down, not folklore.~~ **DONE** — see *Add-a-backend checklist* above.
 
 These are tracked in `BACKLOG.md` (Portability / hardware-agnostic core). None are
 urgent — the seam already works — but they turn "portable in principle" into
