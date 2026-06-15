@@ -1,5 +1,19 @@
 # Changelog
 
+## agent — `MultiToolSource` combinator: compose the local-agent toolkit
+Completed: 2026-06-15
+`run_agent` takes a single `ToolSource`, but an app wants several at once — the built-in tools
+(`tool-routing`), the memory store (`memory-store`), a retrieval index (`rag-lite`), and its own
+domain tools. `MultiToolSource` composes them into one: the union of their tools (first-added wins on a
+name clash) with each call routed to the source that declares it. Builder API
+(`MultiToolSource::new().with(a).with(b)`). Unit-tested (union + clash precedence + routing + unknown
+→ `ToolError`). This is the capstone that ties the recent local-agent toolkit together. 172/0.
+
+Also marked `ui-streaming-ws-tui` **not-applicable**: after the meeting-room pivot there's no
+`ChatEvent` token stream feeding the web/TUI — external agents submit *complete* messages via the
+atomic MCP `meeting.submit`, and the web bridge broadcasts complete transcript entries. The live
+responding-indicator already covers "who's typing".
+
 ## agent — lexical retrieval (rag-lite): search a local corpus
 Completed: 2026-06-15
 A lightweight local retrieval layer (`src/rag_lite.rs`, `rag-lite`): index small text documents and

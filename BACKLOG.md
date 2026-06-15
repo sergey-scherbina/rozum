@@ -574,7 +574,14 @@ features the mistralrs backend shipped that the native backend does NOT yet have
 
 - [ ] gguf-tool-use-non-qwen - Extend GgufBackend tool-use parser to Llama-3.1 and Mistral chat-template formats.
 
-- [ ] ui-streaming-ws-tui - Propagate `ChatEvent` stream to web WebSocket and TUI for partial token rendering.
+- [~] ui-streaming-ws-tui - **NOT APPLICABLE to the current architecture** (2026-06-15). Propagate a
+  `ChatEvent` token stream to the web WebSocket + TUI for partial rendering. After the meeting-room
+  pivot there is no such stream to propagate: external agents (Claude Code, Codex) generate their own
+  responses and submit **complete** messages via the MCP `meeting.submit` tool (atomic), and the web
+  bridge broadcasts complete transcript entries over its WebSocket. The live "is responding" indicator
+  already exists (`responding-indicator.md`). Token-level streaming would require streaming partial
+  submits through the MCP meeting protocol — a protocol change, not a UI change. Revisit only if rozum
+  itself renders a locally-generated model stream in the room UI.
 
 - [x] openai-http-client-backend - **DONE.** `ChatBackend` that calls the OpenAI Chat Completions API
   (`src/openai_http.rs`): SSE text + tool-call deltas → `ChatEvent`, sends `tools`, finish/usage/cancel,
