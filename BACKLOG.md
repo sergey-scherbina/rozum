@@ -744,9 +744,16 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   tokenizers live in `!Send` worker threads, so wiring their `count_tokens` needs a worker round-trip
   (or a cached token-count cell) — left `None` for now; remote backends have no local tokenizer.
 
-- [ ] concurrency-multi-instance - Size-class routing across more than one loaded
-  model (e.g. a small fast model lane + a big model lane), with a shared memory
-  budget. Heavy; only if a single-model fast lane is not enough.
+- [~] concurrency-multi-instance - **Core primitive DONE 2026-06-15** (`src/concurrency.rs`). The
+  **shared cross-resident GPU gate**: a process-wide semaphore (size = one GPU's concurrent-prefill
+  sweet spot, `DEFAULT_SEQS_CEILING`; `ROZUM_GPU_GATE` overrides, `0` disables) that every local
+  (`admit_wrap`-ped) backend acquires *in addition to* its per-model slot, so concurrent prefills
+  across **distinct resident models** can't oversaturate one GPU. Acquired after the per-model admit
+  (no priority inversion), held for the request, composes with the cascade lanes + per-model adaptive
+  ceiling. A no-op for a single resident (gate ≥ per-model cap), so default-on is safe. 2 tests
+  (shared-across-two-backends, no-bind-below-size). 272/0. **Remaining**: size-class *routing* (small
+  lane / big lane) is already the cascade's `LaneSet` + multislot residency; the shared *memory*
+  budget across distinct residents is `shared-gateway-multislot` Phase 2 (`plan_residency`).
 
 - [ ] concurrency-cross-process - Coordinate the concurrency budget across several
   `rozum` processes sharing one GPU (e.g. a host-wide semaphore), instead of each

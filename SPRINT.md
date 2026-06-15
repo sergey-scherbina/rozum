@@ -280,6 +280,13 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   `self.inner.count_tokens`). Fixed the fallback heuristic from **bytes** (`str::len()/4`) to
   **chars** (`chars().count()/4`) — the old one over-costed Cyrillic/non-ASCII ~2× and skewed SJF
   ordering — and it now sums tool-result + tool-call blocks. 3 tests. 270/0.
+- [~] concurrency-multi-instance - **Core (shared GPU gate) DONE 2026-06-15** (`src/concurrency.rs`).
+  A process-wide GPU gate (`global_gpu_gate`, semaphore sized to `DEFAULT_SEQS_CEILING`; `ROZUM_GPU_GATE`
+  overrides, `0` disables) every local `admit_wrap`-ped backend acquires *after* its per-model slot —
+  so concurrent prefills across **distinct resident models** can't oversaturate one GPU. No priority
+  inversion (admit-then-gate), composes with cascade lanes + adaptive ceiling, no-op for a single
+  resident (gate ≥ cap) → safe default-on. 2 tests. 272/0. Size-class routing = cascade lanes +
+  multislot residency; shared memory budget = multislot Phase 2.
 - [x] docs-hygiene - **DONE 2026-06-15.** Two doc items. `portability-new-backend-checklist`: the
   add-a-backend recipe written down (`docs/specs/portability-and-the-backend-spi.md`). `prompt-policy`:
   a documented decision (`docs/specs/prompt-policy.md`) — the gateway is a transparent provider, no
