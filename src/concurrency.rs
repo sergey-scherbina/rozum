@@ -20,6 +20,7 @@
 //! (see `concurrency-engine-yield` in BACKLOG). Nothing here depends on any
 //! backend feature, so it builds and unit-tests with no features (no Xcode).
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -601,6 +602,133 @@ pub fn admit_wrap(inner: Arc<dyn ChatBackend>) -> Arc<dyn ChatBackend> {
     }
 }
 
+// ── Adaptive per-model concurrency (cascade Phase 9) ─────────────────────────────
+
+/// One completed request's worth of evidence about whether a model can take *more* concurrency.
+/// The cascade / agent fills these from what it already tracks — a load failure (`FailReason`
+/// classified to `overload`), the local resource snapshot, the observed latency, and whether the
+/// answer actually worked.
+#[derive(Debug, Clone, Copy)]
+pub struct ConcurrencySample {
+    /// A failure attributable to *load*: rate-limit / quota / OOM (a hard red — back off now).
+    pub overload: bool,
+    /// Local free-resource headroom at dispatch as a fraction `[0,1]` (`None` for remotes). Below
+    /// [`AdaptiveConfig::min_headroom`] → back off *before* the next OOM, not after.
+    pub headroom: Option<f32>,
+    /// Observed latency over the model's low-load baseline (`observed / baseline`; `None` until a
+    /// baseline exists). Above [`AdaptiveConfig::max_latency_ratio`] → the model is saturating.
+    pub latency_ratio: Option<f32>,
+    /// Did the answer pass (exec-feedback / judge)? A failure *while running concurrently* is a
+    /// quality-vs-concurrency red flag; at the floor it's not a concurrency problem and is ignored.
+    pub ok: bool,
+}
+
+impl ConcurrencySample {
+    /// A healthy sample with no resource pressure — the common case (probe up).
+    pub fn healthy() -> Self {
+        Self { overload: false, headroom: None, latency_ratio: None, ok: true }
+    }
+    /// A load-failure sample (429 / quota / OOM) — back off.
+    pub fn overloaded() -> Self {
+        Self { overload: true, ..Self::healthy() }
+    }
+}
+
+/// AIMD thresholds for [`AdaptiveConcurrency`].
+#[derive(Debug, Clone, Copy)]
+pub struct AdaptiveConfig {
+    /// Floor — one request must always be admissible.
+    pub min: usize,
+    /// Ceiling — never probe past the model's hard capacity (e.g. the budgeted slot count).
+    pub max: usize,
+    /// Multiplicative back-off on a red signal (`0.5` halves the limit).
+    pub backoff: f64,
+    /// Consecutive green samples before the additive +1 probe.
+    pub probe_after: u32,
+    /// Local headroom floor; below this fraction is red.
+    pub min_headroom: f32,
+    /// Latency-ratio ceiling; above this is red.
+    pub max_latency_ratio: f32,
+}
+
+impl AdaptiveConfig {
+    /// Sensible defaults for a model whose hard capacity is `max` (start serial, probe up cautiously).
+    pub fn for_capacity(max: usize) -> Self {
+        Self {
+            min: 1,
+            max: max.max(1),
+            backoff: 0.5,
+            probe_after: 5,
+            min_headroom: 0.15,
+            max_latency_ratio: 2.0,
+        }
+    }
+}
+
+struct AimdState {
+    limit: usize,
+    green: u32,
+}
+
+/// Per-model **AIMD** concurrency controller (Phase 9). Each model's right concurrency level is
+/// unknown and model-specific, so we *measure* it: probe the admission limit up by one after a run
+/// of healthy requests (additive increase), and the moment the model shows load — an overload
+/// failure, thin resource headroom, a latency cliff, or quality degrading under concurrency —
+/// multiplicatively back off. The limit oscillates around each model's demonstrated sweet spot
+/// without ever assuming it (classic TCP-style congestion control over request admission).
+///
+/// Feed it [`ConcurrencySample`]s via [`record`](Self::record); push the returned target onto the
+/// model's [`AdmissionScheduler::set_limit`]. It composes with the Phase-6 residency lanes: the
+/// effective live width of a model is `min(this adaptive limit, its lane's residency share)`.
+pub struct AdaptiveConcurrency {
+    cfg: AdaptiveConfig,
+    state: Mutex<HashMap<String, AimdState>>,
+}
+
+impl AdaptiveConcurrency {
+    pub fn new(cfg: AdaptiveConfig) -> Self {
+        Self { cfg, state: Mutex::new(HashMap::new()) }
+    }
+
+    /// Fold one sample for `model` and return its new target limit.
+    pub fn record(&self, model: &str, sample: ConcurrencySample) -> usize {
+        let floor = self.cfg.min.max(1);
+        let mut map = self.state.lock().unwrap();
+        let st = map.entry(model.to_string()).or_insert(AimdState { limit: floor, green: 0 });
+
+        // Hard reds (load / resource / latency) back off at any level.
+        let hard_red = sample.overload
+            || sample.headroom.is_some_and(|h| h < self.cfg.min_headroom)
+            || sample.latency_ratio.is_some_and(|r| r > self.cfg.max_latency_ratio);
+
+        if hard_red || (!sample.ok && st.limit > floor) {
+            // Back off — a load signal, or quality degrading *under concurrency*.
+            st.limit = ((st.limit as f64 * self.cfg.backoff).floor() as usize).max(floor);
+            st.green = 0;
+        } else if sample.ok {
+            // A clean run: count toward the next additive probe.
+            st.green += 1;
+            if st.green >= self.cfg.probe_after && st.limit < self.cfg.max {
+                st.limit += 1;
+                st.green = 0;
+            }
+        }
+        // else: a quality failure at the floor — neutral. Not a concurrency problem, and we can't
+        // go lower; don't reward it with a probe either.
+        st.limit
+    }
+
+    /// The model's current target limit (the floor if it's never been seen).
+    pub fn target_limit(&self, model: &str) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .get(model)
+            .map(|s| s.limit)
+            .unwrap_or(self.cfg.min.max(1))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -933,5 +1061,94 @@ mod tests {
         // A plain backend reports no admission state (ungated).
         let plain: Arc<dyn ChatBackend> = Arc::new(FakeBackend { capacity: None });
         assert!(plain.admission_stats().is_none());
+    }
+
+    // ── Phase 9: adaptive per-model concurrency ─────────────────────────────
+
+    fn adaptive(max: usize, probe_after: u32) -> AdaptiveConcurrency {
+        AdaptiveConcurrency::new(AdaptiveConfig { probe_after, ..AdaptiveConfig::for_capacity(max) })
+    }
+
+    #[test]
+    fn adaptive_probes_up_under_healthy_load() {
+        let c = adaptive(4, 2);
+        assert_eq!(c.target_limit("m"), 1, "starts serial");
+        // Two clean runs → +1; capped at max.
+        assert_eq!(c.record("m", ConcurrencySample::healthy()), 1);
+        assert_eq!(c.record("m", ConcurrencySample::healthy()), 2, "additive increase after probe_after");
+        c.record("m", ConcurrencySample::healthy());
+        assert_eq!(c.record("m", ConcurrencySample::healthy()), 3);
+        for _ in 0..10 {
+            c.record("m", ConcurrencySample::healthy());
+        }
+        assert_eq!(c.target_limit("m"), 4, "never probes past the hard ceiling");
+    }
+
+    #[test]
+    fn adaptive_backs_off_on_overload() {
+        let c = adaptive(8, 2);
+        // Probe up to 4 (3 increments → 6 clean runs).
+        for _ in 0..6 {
+            c.record("m", ConcurrencySample::healthy());
+        }
+        assert_eq!(c.target_limit("m"), 4);
+        // A load failure halves it immediately.
+        assert_eq!(c.record("m", ConcurrencySample::overloaded()), 2, "multiplicative back-off");
+    }
+
+    #[test]
+    fn adaptive_floor_holds_under_overload() {
+        let c = adaptive(4, 2);
+        // Repeated overload can't drive the limit below 1 (one request must always run).
+        for _ in 0..5 {
+            c.record("m", ConcurrencySample::overloaded());
+        }
+        assert_eq!(c.target_limit("m"), 1);
+    }
+
+    #[test]
+    fn adaptive_low_headroom_and_latency_cliff_are_red() {
+        let c = adaptive(8, 2);
+        for _ in 0..6 {
+            c.record("m", ConcurrencySample::healthy());
+        }
+        assert_eq!(c.target_limit("m"), 4);
+        // Thin local memory headroom → back off (before an OOM).
+        let tight = ConcurrencySample { headroom: Some(0.05), ..ConcurrencySample::healthy() };
+        assert_eq!(c.record("m", tight), 2);
+        // A latency cliff → back off again.
+        let slow = ConcurrencySample { latency_ratio: Some(3.0), ..ConcurrencySample::healthy() };
+        assert_eq!(c.record("m", slow), 1);
+    }
+
+    #[test]
+    fn adaptive_quality_failure_is_red_only_above_floor() {
+        let c = adaptive(8, 2);
+        for _ in 0..6 {
+            c.record("m", ConcurrencySample::healthy());
+        }
+        assert_eq!(c.target_limit("m"), 4);
+        // A bad answer while running concurrently → quality-vs-concurrency back-off.
+        let bad = ConcurrencySample { ok: false, ..ConcurrencySample::healthy() };
+        assert_eq!(c.record("m", bad), 2);
+        // Drive to the floor, then a bad answer is neutral (serial → not a concurrency problem).
+        c.record("m", ConcurrencySample { ok: false, ..ConcurrencySample::healthy() }); // 2 → 1
+        assert_eq!(c.target_limit("m"), 1);
+        assert_eq!(c.record("m", bad), 1, "a failure at the floor neither backs off nor probes up");
+    }
+
+    #[test]
+    fn adaptive_drives_a_real_admission_scheduler() {
+        // The actuator binding: push the controller's target onto a live AdmissionScheduler.
+        let sched = AdmissionScheduler::new(AdmissionConfig::for_capacity(8));
+        let c = adaptive(8, 2);
+        for _ in 0..6 {
+            let target = c.record("m", ConcurrencySample::healthy());
+            sched.set_limit(target);
+        }
+        assert_eq!(sched.stats().2, 4, "scheduler limit rose with the adaptive target");
+        let target = c.record("m", ConcurrencySample::overloaded());
+        sched.set_limit(target);
+        assert_eq!(sched.stats().2, 2, "scheduler limit dropped on back-off");
     }
 }

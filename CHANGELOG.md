@@ -1,5 +1,35 @@
 # Changelog
 
+## cascade — Phase 9: adaptive per-model concurrency (the cascade-router is complete)
+Completed: 2026-06-15
+
+The right concurrency level is **different for every model and can't be assumed** — a small local
+takes more concurrent prefills than a big one; a generous remote more than a metered one. So
+`cascade-p9-adaptive-concurrency` *measures* it. `AdaptiveConcurrency` is a per-model **AIMD**
+controller (the TCP congestion-control idea, applied to request admission): probe the limit up by one
+after a run of healthy requests (additive increase), and the moment the model shows load —
+multiplicatively back off. It starts serial and opens each model up only as evidence accumulates,
+oscillating around the demonstrated sweet spot.
+
+`ConcurrencySample { overload, headroom, latency_ratio, ok }` carries exactly the signals the user
+called for: a load failure (429 / quota / OOM), thin local resource headroom (back off *before* the
+OOM, not after), a latency cliff, and **answer quality as a function of concurrency** (a failed
+answer counts as red only *above* the floor — at serial it isn't a concurrency problem). `record(model,
+sample)` returns the new target; a caller pushes it onto the already-resizable
+`AdmissionScheduler::set_limit` (the actuator that existed since the circuit-breaker work).
+
+It composes with the Phase-6 residency lanes for free — the effective live width of a model is
+`min(adaptive limit, lane residency share)`, two independent gates already in the pipeline. Live
+feeding (classify each request's `FailReason` / resource snapshot / exec-feedback into a sample and
+apply per model) lands with the gateway request-surface wiring.
+
+`src/concurrency.rs`; 6 new tests. 235/0.
+
+**This closes the Cascade Router** (`docs/specs/cascade-router.md`): all 9 phases shipped — frugal
+cheapest-first routing, transient health/availability, self-signal + the uncertainty affordance, an
+L2 judge, a difficulty classifier, parallel residency lanes, a learned/persisted stats store with the
+`Learned` start-tier, execution-feedback escalation, and now adaptive per-model concurrency.
+
 ## cascade — Phase 8: execution-feedback escalation (agent loop)
 Completed: 2026-06-15
 

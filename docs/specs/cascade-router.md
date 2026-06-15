@@ -280,10 +280,11 @@ availability fallback (a mock backend that errors → the next available is chos
 
 Each phase ships value and is testable; early phases are deterministic/model-free.
 
-**Status (2026-06-15): phases 1–8 shipped** (`src/cascade/`, 48 tests; P8 = `run_agent_escalating`
-in `src/agent.rs`, 3 tests). P7 = stats store + `Learned` start-tier (adaptive thresholds /
-health-pattern persistence are a follow-up on the same store). Remaining: 9 (adaptive per-model
-concurrency).
+**Status (2026-06-15): ALL 9 phases shipped — the cascade-router is complete.** `src/cascade/` (48
+tests) + `run_agent_escalating` in `src/agent.rs` (P8, 3 tests) + `AdaptiveConcurrency` in
+`src/concurrency.rs` (P9, 6 tests). Follow-ups on the same foundations (non-blocking): P7 adaptive
+judge thresholds / health-pattern persistence; the gateway request-surface wiring (`model:
+"cascade[:name]"` + named configs) and the live feed of P9 samples + per-model `set_limit`.
 
 1. **Registry + pure cascade + L0 structural acceptance.** Caller-supplied list, `AlwaysCheapest`,
    escalate on error/structural-fail, single-model passthrough. Local→remote tiers via existing
