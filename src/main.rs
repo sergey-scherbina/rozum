@@ -2015,19 +2015,38 @@ fn load_cascade_spec(name: &str) -> Option<rozum::cascade::CascadeSpec> {
     }
 }
 
-/// Resolve a remote cascade tier to an OpenAI-compatible HTTP backend (covers OpenAI, OpenRouter,
-/// LM Studio, mlx_lm.server, …). Requires an `endpoint`; the API key, if any, comes from the env
-/// var named by `api_key_env`. Returns `None` (→ the tier is skipped) when no endpoint is set.
+/// Resolve a remote cascade tier to an HTTP backend. `api: "anthropic"` → the native Claude
+/// `/v1/messages` backend (default endpoint `https://api.anthropic.com`, key from
+/// `ANTHROPIC_API_KEY`); otherwise an OpenAI-compatible `/v1/chat/completions` backend (covers
+/// OpenAI, OpenRouter, LM Studio, mlx_lm.server, …, key from `OPENAI_API_KEY`). `api_key_env` /
+/// `endpoint` override the defaults. Returns `None` (→ the tier is skipped) when a required key or
+/// endpoint is missing.
 fn build_remote_tier(
     tier: &rozum::cascade::TierSpec,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    use rozum::cascade::RemoteApi;
     use rozum::concurrency::admit_wrap;
-    let endpoint = tier.endpoint.as_deref()?;
-    let mut backend = rozum::openai_http::OpenAiHttpBackend::new(endpoint, &tier.model);
-    if let Some(key) = tier.api_key_env.as_deref().and_then(|e| std::env::var(e).ok()) {
-        backend = backend.with_api_key(key);
-    }
-    Some(admit_wrap(std::sync::Arc::new(backend) as std::sync::Arc<dyn rozum::ChatBackend>))
+    let backend: std::sync::Arc<dyn rozum::ChatBackend> = match tier.api {
+        RemoteApi::Anthropic => {
+            // Native Anthropic requires a key — skip the tier if it isn't configured.
+            let endpoint = tier.endpoint.as_deref().unwrap_or("https://api.anthropic.com");
+            let key_env = tier.api_key_env.as_deref().unwrap_or("ANTHROPIC_API_KEY");
+            let key = std::env::var(key_env).ok().filter(|k| !k.is_empty())?;
+            std::sync::Arc::new(rozum::anthropic_http::AnthropicHttpBackend::new(
+                endpoint, &tier.model, key,
+            ))
+        }
+        RemoteApi::Openai => {
+            let endpoint = tier.endpoint.as_deref()?; // OpenAI-compatible needs an explicit endpoint
+            let key_env = tier.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
+            let mut b = rozum::openai_http::OpenAiHttpBackend::new(endpoint, &tier.model);
+            if let Some(key) = std::env::var(key_env).ok().filter(|k| !k.is_empty()) {
+                b = b.with_api_key(key);
+            }
+            std::sync::Arc::new(b)
+        }
+    };
+    Some(admit_wrap(backend))
 }
 
 /// Build a backend forcing a specific engine (`gateway switch --backend B`).

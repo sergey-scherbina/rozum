@@ -1,5 +1,25 @@
 # Changelog
 
+## cascade — Anthropic-native remote tier (Claude as the strong tier)
+Completed: 2026-06-15
+
+A cascade can now use **Claude natively** as a remote tier over Anthropic's `/v1/messages`, not just
+through an OpenAI-compatible proxy (`cascade-anthropic-tier`). `TierSpec` gained `api: RemoteApi`
+(`openai` default, `anthropic`). When a remote tier is `anthropic`, the gateway builds the native
+`AnthropicHttpBackend` — endpoint defaults to `https://api.anthropic.com`, the key comes from
+`ANTHROPIC_API_KEY` (required; the tier is skipped if it's absent, like any unbuildable tier);
+OpenAI-compatible tiers default their key to `OPENAI_API_KEY`. `api_key_env` and `endpoint` override
+the defaults either way.
+
+So a frugal "local-first, Claude-on-escalation" cascade is now a one-liner:
+
+```
+ROZUM_CASCADE='{"tiers":[{"model":"mlx-community:Qwen3-4B-4bit"},
+  {"model":"claude-haiku-4-5","location":"remote","api":"anthropic"}],"strategy":"classify"}'
+```
+
+`src/cascade/spec.rs` + `src/main.rs`; 2 new tests. 251/0.
+
 ## cascade — resource headroom: back off before the OOM (P9 signal set complete)
 Completed: 2026-06-15
 
