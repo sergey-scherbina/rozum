@@ -45,7 +45,7 @@ tokio-util = "0.7"
 async-stream = "0.3"
 futures = "0.3"
 tokio-stream = "0.1"
-rmcp = { version = "1.7", features = ["server", "client", "transport-io"] }
+rmcp = { version = "1.7", features = ["server", "client", "transport-io", "transport-child-process"] }
 schemars = "1.0"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }

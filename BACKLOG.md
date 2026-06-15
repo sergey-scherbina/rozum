@@ -468,22 +468,24 @@ just the model-service side; the SDK + tools are owned by the scalascript/busi s
     size-class routing (`shared-gateway-multislot` + `concurrency-multi-instance`); cross-instance
     admission coordination (`concurrency-cross-process`).
 
-- [~] rozum-agent-runtime - **P0b (rozum, DUAL-PURPOSE). Core SHIPPED 2026-06-15** (`src/agent.rs`).
+- [x] rozum-agent-runtime - **P0b (rozum, DUAL-PURPOSE). DONE 2026-06-15** (`src/agent.rs`).
   A Rust reference implementation of the agent loop (Contracts 2–3): `(backend, system, user,
   tool_source, budget)` → model call → `tool_use` → execute via tool source → feed result → repeat.
   Dual-purpose: the in-process **embedded mode** and the **executable spec** the scalascript SDK
   mirrors. See the implemented contracts in `docs/specs/integration.md`.
   - **Contract 3**: `ToolSource` trait (`tools()` + `async dispatch(name,args)->Result<Value,
-    ToolError>`) + `CallbackToolSource` (direct in-process adapter). `ToolError` = recoverable
-    message fed back to the model.
+    ToolError>`) with BOTH adapters: `CallbackToolSource` (direct in-process) and `McpToolSource`
+    (external MCP server over `rmcp` — `connect_stdio` spawns it, caches `list_tools`, forwards
+    `dispatch` as `tools/call`; needs the `transport-child-process` rmcp feature). `ToolError` =
+    recoverable message fed back to the model.
   - **Contract 2**: `run_agent(...) -> AgentOutcome {text, stop, steps, operations, transcript}`,
     bounded by `Budget {max_steps, max_tokens, wall_time, temperature=0}`. Speaks only the
     `ChatBackend` SPI → runs against any backend.
   - Validated model-free (scripted MockBackend: full loop + result feedback, budget cap,
-    unknown-tool + handler-error recovery) AND e2e on native MLX (`agent_loop_real_backend`:
-    Qwen3-4B `add(3,5)`→`{sum:8}`→final text, constrained args). 154/0.
-  - **Follow-up**: an MCP-client `ToolSource` adapter (over `rmcp`) — the trait is ready for it.
-    This + `rozum-embed-crate` is the remaining work to call it fully done.
+    unknown-tool + handler-error recovery; `McpToolSource` over an in-memory MCP duplex: list +
+    dispatch) AND e2e on native MLX (`agent_loop_real_backend`: Qwen3-4B `add(3,5)`→`{sum:8}`→final
+    text, constrained args). 157/0.
+  - **Remaining (separate item)**: `rozum-embed-crate` (P2) — the stable public crate over this.
 
 - [ ] rozum-embed-crate - **P2 (rozum, optional).** Stable minimal public crate
   (`rozum-embed`) for the in-process embedded mode (Rust busi component + small model):
