@@ -115,10 +115,11 @@ opinion — it's whether the answer *worked*. In an agent loop a model's tool ca
 return a `ToolError`; the agent runtime already records this (`AgentOutcome.operations[].output:
 Result<Value, String>`) and feeds each error back to the model for self-correction. This can't drive
 the bare per-response cascade (the response is returned before the tools run), so it lives at the
-**agent** level: (a) `run_agent` over a cascade escalates the backend when tool errors persist (a
-model that keeps producing failing calls → a stronger tier for the next step), and (b) the per-model
-tool-error rate per task-class feeds the learned stats (§ adaptive routing). Tracked as a follow-up
-phase.
+**agent** level: (a) `run_agent_escalating` over a cost-ordered backend list escalates when tool
+errors persist (a model that keeps producing failing calls → a stronger tier for the next step,
+which inherits the transcript and corrects it), and (b) `AgentOutcome::tool_error_rate_by_tier()` is
+the per-tier `(errors, total)` bridge a caller maps tier→model to feed the learned stats (§ adaptive
+routing). **Shipped (Phase 8)** — `src/agent.rs`, `ExecFeedbackPolicy{escalate_after_error_steps}`.
 
 ### Routing strategy (start-tier selection)
 
@@ -279,9 +280,10 @@ availability fallback (a mock backend that errors → the next available is chos
 
 Each phase ships value and is testable; early phases are deterministic/model-free.
 
-**Status (2026-06-15): phases 1–7 shipped** (`src/cascade/`, 48 tests; P7 = stats store + `Learned`
-start-tier, with adaptive thresholds / health-pattern persistence as a follow-up on the same store).
-Remaining: 8 (execution-feedback escalation), 9 (adaptive per-model concurrency).
+**Status (2026-06-15): phases 1–8 shipped** (`src/cascade/`, 48 tests; P8 = `run_agent_escalating`
+in `src/agent.rs`, 3 tests). P7 = stats store + `Learned` start-tier (adaptive thresholds /
+health-pattern persistence are a follow-up on the same store). Remaining: 9 (adaptive per-model
+concurrency).
 
 1. **Registry + pure cascade + L0 structural acceptance.** Caller-supplied list, `AlwaysCheapest`,
    escalate on error/structural-fail, single-model passthrough. Local→remote tiers via existing
