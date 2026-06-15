@@ -274,6 +274,12 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   gateway/`launch`/cascade). Added a "Local LLM gateway & model cascade" quickstart (gateway, launch,
   picker, the cascade model-list + `--strategy`), refreshed the project layout (gateway/cascade/
   concurrency/agent/config modules) and the dev section (feature-free tests = what CI runs).
+- [x] concurrency-cost-tokenizer - **DONE 2026-06-15** (`src/concurrency.rs`, `src/backend.rs`).
+  Admission cost is tokenizer-pluggable: `RequestCost::estimate(req, count_tokens)` + a
+  `ChatBackend::count_tokens(text) -> Option<usize>` hook (default None; `AdmittingBackend` passes
+  `self.inner.count_tokens`). Fixed the fallback heuristic from **bytes** (`str::len()/4`) to
+  **chars** (`chars().count()/4`) — the old one over-costed Cyrillic/non-ASCII ~2× and skewed SJF
+  ordering — and it now sums tool-result + tool-call blocks. 3 tests. 270/0.
 - [~] shared-gateway-multislot - **Phase 1 (decision core) DONE 2026-06-15 (user idea)**
   (`src/resident.rs`). Adaptive memory-gated residency: small requested models that fit and are
   *statistically useful* (frequency × recency) stay co-resident without thrashing; the least-useful

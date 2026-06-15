@@ -43,6 +43,42 @@ impl RequestCost {
     pub fn weight(&self) -> usize {
         self.prompt_tokens.saturating_add(self.max_tokens)
     }
+
+    /// Estimate a request's cost, using `count_tokens` (a backend's exact tokenizer) per text block
+    /// when it returns `Some`, else the char-based [`heuristic_tokens`] fallback. The prompt cost is
+    /// summed over every text-bearing content block (text, tool results, and rendered tool calls).
+    pub fn estimate(req: &ChatRequest, count_tokens: impl Fn(&str) -> Option<usize>) -> RequestCost {
+        let mut prompt_tokens = 0usize;
+        for m in &req.messages {
+            for b in &m.content {
+                if let Some(t) = block_text(b) {
+                    prompt_tokens += count_tokens(&t).unwrap_or_else(|| heuristic_tokens(&t));
+                }
+            }
+        }
+        let max_tokens = req.sampling.max_tokens.map(|m| m as usize).unwrap_or(4096);
+        RequestCost { prompt_tokens, max_tokens }
+    }
+}
+
+/// The text a content block contributes to the prompt (for cost estimation): plain text and tool
+/// results verbatim, a tool call as `name + serialized args` (close enough to its rendered tokens).
+fn block_text(b: &crate::backend::ContentBlock) -> Option<std::borrow::Cow<'_, str>> {
+    use crate::backend::ContentBlock;
+    match b {
+        ContentBlock::Text { text } => Some(std::borrow::Cow::Borrowed(text)),
+        ContentBlock::ToolResult { content, .. } => Some(std::borrow::Cow::Borrowed(content)),
+        ContentBlock::ToolUse { name, input, .. } => {
+            Some(std::borrow::Cow::Owned(format!("{name} {input}")))
+        }
+    }
+}
+
+/// Char-based token estimate (~4 **characters** per token — not bytes, so non-ASCII prompts, e.g.
+/// Cyrillic, aren't double-counted the way `str::len()` would). Cheap; only needs to rank a "quick
+/// follow-up" below a "large context read".
+pub fn heuristic_tokens(text: &str) -> usize {
+    text.chars().count() / 4
 }
 
 /// Why an admission was refused outright (Phase D backpressure).
@@ -465,26 +501,11 @@ pub fn budgeted_max_num_seqs(b: &ConcurrencyBudget) -> usize {
 
 // ── Cost estimation (shared, backend-independent) ───────────────────────────────
 
-/// Cheap cost estimate for admission ordering: ~4 chars/token over the rendered
-/// message text plus the requested generation budget. Only needs to separate a
-/// "quick follow-up" from a "large context read".
+/// Cheap cost estimate for admission ordering using the char-based heuristic only (no backend
+/// tokenizer). Equivalent to `RequestCost::estimate(req, |_| None)`. Prefer
+/// [`RequestCost::estimate`] with the backend's [`ChatBackend::count_tokens`] when available.
 pub fn estimate_cost(req: &ChatRequest) -> RequestCost {
-    use crate::backend::ContentBlock;
-    let chars: usize = req
-        .messages
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .map(|b| match b {
-            ContentBlock::Text { text } => text.len(),
-            ContentBlock::ToolResult { content, .. } => content.len(),
-            _ => 0,
-        })
-        .sum();
-    let max_tokens = req.sampling.max_tokens.map(|m| m as usize).unwrap_or(4096);
-    RequestCost {
-        prompt_tokens: chars / 4,
-        max_tokens,
-    }
+    RequestCost::estimate(req, |_| None)
 }
 
 // ── Circuit-breaker trip on a backend's resource-exhaustion error ───────────────
@@ -708,7 +729,9 @@ impl ChatBackend for AdmittingBackend {
         // after the response has started. A non-overloaded request parks here
         // until a slot frees; a client disconnect drops this future and the
         // queued waiter self-cleans.
-        let guard = match self.scheduler.admit(estimate_cost(&req)).await {
+        // Tokenizer-accurate cost when the backend exposes its tokenizer; else the char heuristic.
+        let cost = RequestCost::estimate(&req, |t| self.inner.count_tokens(t));
+        let guard = match self.scheduler.admit(cost).await {
             Ok(g) => g,
             Err(AdmitError::Overloaded) => {
                 return Err(ModelError::Overloaded(
@@ -1472,6 +1495,42 @@ mod tests {
         assert!(raised >= 3);
         let slow = ConcurrencySample { latency_ratio: Some(3.0), ..ConcurrencySample::healthy() };
         assert!(c.record("m", slow) < raised, "a latency cliff backs the limit off");
+    }
+
+    // ── Cost estimation (tokenizer-accurate when available) ─────────────────
+
+    #[test]
+    fn cost_uses_backend_tokenizer_when_available() {
+        let req = ChatRequest::simple("any text here");
+        let exact = RequestCost::estimate(&req, |_| Some(7));
+        assert_eq!(exact.prompt_tokens, 7, "the backend's exact token count is used");
+    }
+
+    #[test]
+    fn cost_heuristic_counts_chars_not_bytes() {
+        // 10 Unicode chars, 19 UTF-8 bytes. char-based → 10/4 = 2; byte-based would be 19/4 = 4.
+        let req = ChatRequest::simple("привет мир");
+        assert_eq!("привет мир".chars().count(), 10);
+        let est = RequestCost::estimate(&req, |_| None);
+        assert_eq!(est.prompt_tokens, 2, "char-based heuristic, not the old byte-based one");
+    }
+
+    #[test]
+    fn cost_sums_all_text_bearing_blocks() {
+        use crate::backend::{ContentBlock, Message, Role};
+        let mut req = ChatRequest::simple("");
+        req.messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text { text: "aaaaaaaa".into() }, // 8 chars → 2
+                ContentBlock::ToolResult {
+                    tool_use_id: "x".into(),
+                    content: "bbbb".into(), // 4 chars → 1
+                    is_error: false,
+                },
+            ],
+        }];
+        assert_eq!(RequestCost::estimate(&req, |_| None).prompt_tokens, 3);
     }
 
     fn adaptive(max: usize, probe_after: u32) -> AdaptiveConcurrency {

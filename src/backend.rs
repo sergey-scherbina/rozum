@@ -272,6 +272,15 @@ pub trait ChatBackend: Send + Sync {
     /// a no-op (most backends don't self-tune). `ok == true` is intentionally not rewarded here —
     /// the throughput path already probes up.
     fn report_quality(&self, _ok: bool) {}
+
+    /// Exact token count of `text` using this backend's own tokenizer, **if it's cheaply reachable**.
+    /// `None` (default) → the admission layer falls back to a char-based heuristic. Remote backends
+    /// (no local tokenizer) and in-process engines whose tokenizer lives in a `!Send` worker thread
+    /// return `None`; a backend that holds its tokenizer on the struct can override this to make the
+    /// cost estimate (`RequestCost::estimate`) tokenizer-accurate.
+    fn count_tokens(&self, _text: &str) -> Option<usize> {
+        None
+    }
 }
 
 /// Drain a `ChatStream` to a plain text string (text deltas only).

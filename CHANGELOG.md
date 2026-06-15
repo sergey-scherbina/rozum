@@ -1,5 +1,22 @@
 # Changelog
 
+## concurrency — tokenizer-pluggable request cost (+ a char-vs-byte heuristic fix)
+Completed: 2026-06-15
+
+The admission cost estimate is now **tokenizer-accurate when a backend can provide it**, and its
+fallback heuristic is fixed (`concurrency-cost-tokenizer`). `RequestCost::estimate(req,
+count_tokens)` uses a new `ChatBackend::count_tokens(text) -> Option<usize>` hook (default `None`)
+per text block, summed over the prompt (text, tool results, and rendered tool calls); the
+`AdmittingBackend` passes its backend's `count_tokens`.
+
+The fallback heuristic had a real bug: it estimated tokens from `str::len()` (**bytes**), so a
+non-ASCII prompt — e.g. Cyrillic, where each char is ~2 UTF-8 bytes — was costed ~2× too high,
+skewing the shortest-job-first admission order. It now counts **characters** (`chars().count() / 4`).
+
+`src/concurrency.rs` + `src/backend.rs`; 3 tests. 270/0. The MLX/GGUF tokenizers live in `!Send`
+worker threads, so wiring their exact `count_tokens` (a worker round-trip / cached cell) is a
+follow-up; remote backends have no local tokenizer, so they stay on the heuristic.
+
 ## shared-gateway-multislot — adaptive residency, Phase 1 (decision core)
 Completed: 2026-06-15
 
