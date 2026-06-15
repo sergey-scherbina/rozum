@@ -1,5 +1,24 @@
 # Changelog
 
+## structured output — `response_format: json_schema` constrains the whole reply
+Completed: 2026-06-15
+Exposes the `constrain.rs` engine as **non-tool structured output**: a client asks for a JSON shape and
+the native MLX backend guarantees the entire response parses + conforms (`structured-output`). The
+gateway parses OpenAI `response_format` (`{"type":"json_object"}` → any object;
+`{"type":"json_schema","json_schema":{"schema":…}}` → that schema; `text`/absent → free) onto a new
+`SamplingParams.response_schema`, which flows to the backend with the rest of sampling (zero new
+threading).
+- **Generalized the constrained decode** rather than duplicating it: the masked B=1 loop is now generic
+  over a `ConstraintDriver`. `ToolConstraint` (the existing tool path, waits for `<tool_call>`) and the
+  new `ResponseConstraint` (constrains the WHOLE output to a fixed schema from the first token, releases
+  on completion) both drive the same loop on both dense and hybrid arches.
+- **Always honored** when a `response_schema` is present — unlike the tool constraint it is NOT gated by
+  `ROZUM_MLX_CONSTRAIN`, because it's an explicit client correctness request, not an opt-in reliability
+  tweak.
+- Validated: a gateway parse unit test (`response_format_parsing`) and an e2e
+  (`mlx_response_format_json_schema`, Qwen3-4B): "Return the city Paris and its country as JSON" →
+  `{"city":"Paris","country":"France"}` — pure, schema-conforming JSON constrained from token 0. 161/0.
+
 ## backends — Anthropic Messages HTTP client backend (+ OpenAI client API-key auth)
 Completed: 2026-06-15
 Adds the client side of the Anthropic dialect so rozum can call a remote Anthropic (or

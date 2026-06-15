@@ -767,14 +767,25 @@ mod inner {
         store: &mut PrefixStore,
         job: Job,
     ) {
-        // Schema-constrained tool decode: a separate B=1 loop that masks the sampler to the
-        // tool schemas. OFF unless `ROZUM_MLX_CONSTRAIN` is set. Hybrid Qwen3.6 takes the
-        // `LayerCache` path; every dense arch takes the KV-cache path.
+        // Schema-constrained decode: a separate B=1 loop that masks the sampler. Hybrid Qwen3.6
+        // takes the `LayerCache` path; every dense arch takes the KV-cache path. Two triggers:
+        //   1. tool-call constraining — OPT-IN via `ROZUM_MLX_CONSTRAIN` (a reliability tweak).
+        //   2. `response_format` / structured output — ALWAYS honored when the client asks
+        //      (it's an explicit correctness request, not an opt-in).
         if should_constrain(&job, model) {
+            let driver = ToolConstraint::from_job(&job).expect("constrained job has tools");
             return if is_hybrid_arch(model) {
-                run_constrained_hybrid(model, tokenizer, template, eos, job)
+                run_constrained_hybrid(model, tokenizer, template, eos, job, driver)
             } else {
-                run_constrained_dense(model, tokenizer, template, eos, job)
+                run_constrained_dense(model, tokenizer, template, eos, job, driver)
+            };
+        }
+        if (is_dense(model) || is_hybrid_arch(model)) && job.sampling.response_schema.is_some() {
+            let driver = ResponseConstraint::from_job(&job).expect("response_schema present");
+            return if is_hybrid_arch(model) {
+                run_constrained_hybrid(model, tokenizer, template, eos, job, driver)
+            } else {
+                run_constrained_dense(model, tokenizer, template, eos, job, driver)
             };
         }
         let prompt_ids = match render_prompt(
@@ -1323,6 +1334,63 @@ mod inner {
         }
     }
 
+    /// Drives a constrained decode: given the decoded text so far, returns the text region to
+    /// constrain right now + the active `Constraint`, or `None` for free decode. Lets the same
+    /// masked loop serve both tool-call constraining ([`ToolConstraint`]) and whole-response
+    /// structured output ([`ResponseConstraint`]).
+    trait ConstraintDriver {
+        fn region<'a>(
+            &mut self,
+            full_text: &'a str,
+        ) -> Option<(&'a str, &crate::constrain::Constraint)>;
+    }
+
+    impl ConstraintDriver for ToolConstraint {
+        fn region<'a>(
+            &mut self,
+            full_text: &'a str,
+        ) -> Option<(&'a str, &crate::constrain::Constraint)> {
+            let region = self.json_region(full_text)?;
+            Some((region, &self.cons))
+        }
+    }
+
+    /// Constrains the ENTIRE response to a fixed JSON Schema — the `response_format` /
+    /// structured-output path. Active from the first generated token; releases once the value
+    /// completes (then the model is free to emit EOS). Unlike [`ToolConstraint`] there's no
+    /// `<tool_call>` envelope: the whole output IS the schema's value.
+    struct ResponseConstraint {
+        cons: crate::constrain::Constraint,
+        done: bool,
+    }
+
+    impl ResponseConstraint {
+        /// Build from a job's `response_schema` (the parsed `response_format`), or `None`.
+        fn from_job(job: &Job) -> Option<Self> {
+            let schema = job.sampling.response_schema.as_ref()?;
+            Some(Self {
+                cons: crate::constrain::Constraint::Json(crate::constrain::Schema::parse(schema)),
+                done: false,
+            })
+        }
+    }
+
+    impl ConstraintDriver for ResponseConstraint {
+        fn region<'a>(
+            &mut self,
+            full_text: &'a str,
+        ) -> Option<(&'a str, &crate::constrain::Constraint)> {
+            if self.done {
+                return None;
+            }
+            if self.cons.is_complete(full_text) {
+                self.done = true;
+                return None;
+            }
+            Some((full_text, &self.cons))
+        }
+    }
+
     /// Pull a completed `"name": "X"` value out of a partial Hermes envelope, if present.
     /// Tool names carry no JSON escapes, so a plain quote scan is exact.
     pub(crate) fn extract_tool_name(json: &str) -> Option<String> {
@@ -1428,11 +1496,11 @@ mod inner {
     /// Each step masks the sampler to the tool schema inside the `<tool_call>` JSON (free
     /// otherwise), then advances the cache via `forward`. Generic over the cache type so the
     /// dense (`ConcatKeyValueCache`) and hybrid (`qwen3_5::LayerCache`) paths share it.
-    fn constrained_decode_loop<C>(
+    fn constrained_decode_loop<C, D: ConstraintDriver>(
         model: &mut LoadedModel,
         tokenizer: &mut Tokenizer,
         eos: &[u32],
-        mut tc: ToolConstraint,
+        mut driver: D,
         opts: qwen3::SamplerOpts,
         mut seq: BatchSeq,
         mut cache: Vec<C>,
@@ -1446,12 +1514,12 @@ mod inner {
             } else {
                 &[]
             };
-            // Pick the next token (masked inside the tool JSON, free otherwise). The block
-            // bounds the immutable borrows of `seq`/`tc` so `check_finish` can take `&mut`.
+            // Pick the next token (masked inside the constrained region, free otherwise). The
+            // block bounds the immutable borrows of `seq`/`driver` so `check_finish` can `&mut`.
             let tok = {
-                match tc.json_region(&seq.full_text) {
-                    Some(json) => {
-                        sample_constrained(&logits, json, &tc.cons, tokenizer, &opts, recent)
+                match driver.region(&seq.full_text) {
+                    Some((region, cons)) => {
+                        sample_constrained(&logits, region, cons, tokenizer, &opts, recent)
                     }
                     None => {
                         let t = qwen3::sample_with(&logits, &opts, recent).expect("sample_with");
@@ -1504,14 +1572,14 @@ mod inner {
         hybrid_forward(model, inp, cache)
     }
 
-    fn run_constrained_dense(
+    fn run_constrained_dense<D: ConstraintDriver>(
         model: &mut LoadedModel,
         tokenizer: &mut Tokenizer,
         template: &str,
         eos: &[u32],
         job: Job,
+        driver: D,
     ) {
-        let tc = ToolConstraint::from_job(&job).expect("constrained job has tools");
         let opts = sampler_opts_of(&job);
         if let Some(s) = job.sampling.seed {
             let _ = mlx_rs::random::seed(s);
@@ -1521,20 +1589,20 @@ mod inner {
                 Some(x) => x,
                 None => return,
             };
-        constrained_decode_loop(model, tokenizer, eos, tc, opts, seq, cache, logits, dense_step);
+        constrained_decode_loop(model, tokenizer, eos, driver, opts, seq, cache, logits, dense_step);
     }
 
     /// Hybrid (Qwen3.6) constrained decode — same masked loop as the dense path, over the
-    /// heterogeneous `LayerCache`. This is what makes constrained tool-args work on the
-    /// Qwen3.6 hybrid (the user's primary tool-use model).
-    fn run_constrained_hybrid(
+    /// heterogeneous `LayerCache`. This is what makes constrained decode work on the Qwen3.6
+    /// hybrid (the user's primary model) for both tool-args and structured output.
+    fn run_constrained_hybrid<D: ConstraintDriver>(
         model: &mut LoadedModel,
         tokenizer: &mut Tokenizer,
         template: &str,
         eos: &[u32],
         job: Job,
+        driver: D,
     ) {
-        let tc = ToolConstraint::from_job(&job).expect("constrained job has tools");
         let opts = sampler_opts_of(&job);
         if let Some(s) = job.sampling.seed {
             let _ = mlx_rs::random::seed(s);
@@ -1544,7 +1612,7 @@ mod inner {
                 Some(x) => x,
                 None => return,
             };
-        constrained_decode_loop(model, tokenizer, eos, tc, opts, seq, cache, logits, hybrid_step);
+        constrained_decode_loop(model, tokenizer, eos, driver, opts, seq, cache, logits, hybrid_step);
     }
 
     /// Render + prefill ONE job on the dense path, building its `BatchSeq` + per-layer KV
@@ -3064,6 +3132,54 @@ mod tests {
         assert!(
             matches!(unit, Some("kelvin") | Some("rankine")),
             "`unit` must be redirected to an enum literal on the hybrid path: {v}"
+        );
+    }
+
+    // Structured output (`response_format: json_schema`, no tools): the WHOLE response is
+    // constrained to the schema during decode, so it parses + conforms. ALWAYS honored when
+    // the request carries a `response_schema` (no env flag). Qwen3-4B. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_response_format_json_schema
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "network: uses mlx-community/Qwen3-4B-4bit"]
+    async fn mlx_response_format_json_schema() {
+        use super::{MlxNativeBackend, ensure_model_dir};
+        use crate::backend::{ChatBackend, ChatRequest, SamplingParams, collect_to_string};
+
+        let spec = "mlx-community:Qwen3-4B-4bit";
+        let dir = ensure_model_dir(spec).await.expect("resolve");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/")).await.expect("load");
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "country": {"type": "string"}
+            },
+            "required": ["city", "country"]
+        });
+        let mut req = ChatRequest::simple("Return the city Paris and its country as JSON.");
+        req.sampling = SamplingParams {
+            max_tokens: Some(64),
+            response_schema: Some(schema),
+            ..Default::default()
+        };
+
+        let text = collect_to_string(backend.chat(req).await.unwrap()).await.unwrap();
+        eprintln!("RESPONSE_FORMAT OUTPUT: {text:?}");
+        // Parse the first JSON value (tolerates any trailing tokens after completion).
+        let v: serde_json::Value = serde_json::Deserializer::from_str(text.trim())
+            .into_iter::<serde_json::Value>()
+            .next()
+            .expect("at least one JSON value")
+            .expect("the constrained output must be valid JSON");
+        assert!(
+            v.get("city").and_then(|x| x.as_str()).is_some(),
+            "required string `city` missing: {v}"
+        );
+        assert!(
+            v.get("country").and_then(|x| x.as_str()).is_some(),
+            "required string `country` missing: {v}"
         );
     }
 

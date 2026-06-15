@@ -151,6 +151,11 @@ pub struct SamplingParams {
     pub repeat_penalty: Option<f32>,
     pub seed: Option<u64>,
     pub max_tokens: Option<u32>,
+    /// `response_format`: when set, the *entire* response is constrained during decode to
+    /// this JSON Schema (structured output, not tied to tools). A backend that supports it
+    /// (native MLX) guarantees the output parses + conforms; others ignore it. See
+    /// `docs/specs/constrained-tool-decoding.md`.
+    pub response_schema: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug)]
