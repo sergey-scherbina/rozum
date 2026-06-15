@@ -682,8 +682,13 @@ features the mistralrs backend shipped that the native backend does NOT yet have
   agents that take neither Tier-1 channels nor a Tier-2 `wait_my_turn` loop. Spec:
   `docs/specs/rozum-native-channels.md`.
 
-- [ ] streaming-output - Stream model output token by token.
-  - Add CLI support without breaking non-streaming evals.
+- [x] streaming-output - **DONE/OBSOLETE 2026-06-15.** Satisfied by the gateway: model output
+  streams **token by token** on all three dialects — OpenAI `/v1/chat/completions` (`oai_sse_stream`,
+  a chunk per `ChatEvent::TextDelta`), OpenAI `/v1/responses`, and Anthropic `/v1/messages`
+  (`anthropic_sse_stream`). The "CLI eval" framing predates the gateway (there's no non-streaming CLI
+  run/eval path to retrofit; the agent runtime collects programmatically by design). A multi-model
+  cascade necessarily buffers (it must see the whole answer to judge it), but a single-model
+  passthrough streams live.
 
 - [x] structured-output - **DONE 2026-06-15.** JSON/schema-constrained output, exposed as a non-tool
   `response_format` request field. The gateway parses OpenAI `response_format`
@@ -794,9 +799,13 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   cross-resident GPU gate already shipped (`concurrency-multi-instance` core); out-of-process
   coordination stays in `concurrency-cross-process`.
 
-- [ ] shared-gateway-service - Optionally install the shared gateway as a
-  launchd/systemd service for always-warm startup, instead of lazy spawn +
-  idle-exit. Follow-up to `shared-gateway`.
+- [x] shared-gateway-service - **DONE 2026-06-15** (`src/service.rs` + `src/main.rs`;
+  `docs/specs/shared-gateway-service.md`). `rozum service {install,uninstall,status}` registers the
+  gateway as an always-warm **user service** (launchd on macOS, `systemd --user` on Linux) instead of
+  lazy spawn + idle-exit. `--model` (repeatable/cascade) + `--port/--n-ctx/--offline/--strategy`;
+  `ROZUM_CASCADE`/`ROZUM_CONFIG` captured into the service env. The plist/unit generation is the
+  library's pure, unit-tested `service` module (4 tests); the binary writes the file + drives
+  `launchctl`/`systemctl` (operator-validated, touches the real service manager). 282/0.
 
 ## Model Quality
 
