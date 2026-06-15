@@ -579,6 +579,7 @@ mod inner {
                 | LoadedModel::Qwen35Moe(_)
                 | LoadedModel::Llama(_)
                 | LoadedModel::Qwen2(_)
+                | LoadedModel::Gemma3(_)
         )
     }
 
@@ -1078,6 +1079,14 @@ mod inner {
                     m, input,
                 )
             }
+            // Gemma 3: per-row rope (BATCH_PAD_OFFSETS) + it derives per-layer local masks from
+            // the pad mask we pass (global) + its sliding window.
+            LoadedModel::Gemma3(m) => {
+                let input = gemma3::ModelInput { inputs: inp, mask, cache };
+                <gemma3::Model as Module<gemma3::ModelInput<'_, ConcatKeyValueCache>>>::forward(
+                    m, input,
+                )
+            }
             _ => Err(mlx_rs::error::Exception::custom("dense_forward: non-batchable arch")),
         }
     }
@@ -1455,11 +1464,13 @@ mod inner {
             // model's attention reads its own, so the extra setters are harmless no-ops.
             llama::set_batch_pad_offsets(Some(pad_off.clone()));
             qwen2::set_batch_pad_offsets(Some(pad_off.clone()));
+            gemma3::set_batch_pad_offsets(Some(pad_off.clone()));
             set_batch_pad_offsets(Some(pad_off));
             let out = dense_forward(model, &y, Some(&dec_mask), &mut bcache);
             set_batch_pad_offsets(None);
             llama::set_batch_pad_offsets(None);
             qwen2::set_batch_pad_offsets(None);
+            gemma3::set_batch_pad_offsets(None);
             logits = match out {
                 Ok(l) => l.index((.., -1, ..)),
                 Err(e) => {
@@ -4486,6 +4497,51 @@ mod tests {
             std::env::remove_var("ROZUM_BATCH_WINDOW_MS");
         }
         assert_eq!(runs, 1, "two concurrent Qwen2 requests must batch in ONE run_batch call");
+        assert!(t1.contains("Paris"), "France: {t1:?}");
+        assert!(t2.contains("Tokyo"), "Japan: {t2:?}");
+    }
+
+    // Gemma 3 batches too — the trickiest dense arch (per-layer local/global masks). Two
+    // concurrent requests on a cached gemma-3-1b backend land in ONE `run_batch` call with
+    // distinct correct answers. Short prompts (< 512 window) so the per-layer local mask == the
+    // pad mask; this validates the per-row rope + the batched-mask plumbing (windowing math is
+    // covered by `sliding_window_mask_bands_local_attention`). Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_gemma3_batched_two_concurrent
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires/auto-downloads mlx-community/gemma-3-1b-it-4bit"]
+    async fn mlx_gemma3_batched_two_concurrent() {
+        use super::{MlxNativeBackend, ensure_model_dir};
+        use super::inner::BATCH_RUN_COUNT;
+        use crate::backend::{ChatBackend, ChatRequest, SamplingParams, collect_to_string};
+        use std::sync::atomic::Ordering;
+
+        unsafe {
+            std::env::set_var("ROZUM_BATCH", "2");
+            std::env::set_var("ROZUM_BATCH_WINDOW_MS", "500");
+        }
+        let spec = "mlx-community:gemma-3-1b-it-4bit";
+        let dir = ensure_model_dir(spec).await.expect("gemma3 resolve/download");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+            .await
+            .expect("backend load");
+        let mk = |q: &str| {
+            let mut req = ChatRequest::simple(q);
+            req.sampling = SamplingParams { max_tokens: Some(24), ..Default::default() };
+            req
+        };
+        let before = BATCH_RUN_COUNT.load(Ordering::Relaxed);
+        let s1 = backend.chat(mk("What is the capital of France? Answer in one short sentence.")).await.unwrap();
+        let s2 = backend.chat(mk("What is the capital of Japan? Answer in one short sentence.")).await.unwrap();
+        let (t1, t2) = tokio::join!(collect_to_string(s1), collect_to_string(s2));
+        let (t1, t2) = (t1.unwrap(), t2.unwrap());
+        let runs = BATCH_RUN_COUNT.load(Ordering::Relaxed) - before;
+        eprintln!("GEMMA3 BATCHED  France={t1:?} Japan={t2:?}  (run_batch calls={runs})");
+        unsafe {
+            std::env::remove_var("ROZUM_BATCH");
+            std::env::remove_var("ROZUM_BATCH_WINDOW_MS");
+        }
+        assert_eq!(runs, 1, "two concurrent Gemma 3 requests must batch in ONE run_batch call");
         assert!(t1.contains("Paris"), "France: {t1:?}");
         assert!(t2.contains("Tokyo"), "Japan: {t2:?}");
     }

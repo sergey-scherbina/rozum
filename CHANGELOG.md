@@ -1,5 +1,24 @@
 # Changelog
 
+## mlx-native — Gemma 3 batches too → EVERY dense family now serves concurrently
+Completed: 2026-06-15
+The last serial dense arch joins the batched path: two concurrent Gemma 3 sessions now share one
+forward instead of queueing. Gemma 3 was the hold-out because its LOCAL layers attend only to the
+last `sliding_window` (512) keys, and that per-layer windowed mask had to be threaded through the
+batched decode (the per-row RoPE port — `BATCH_PAD_OFFSETS` + `set_batch_pad_offsets` in `gemma3.rs`
+— is the same mechanism as Llama/Qwen2). The window plumbing is cheap because of the cache geometry:
+at decode every row is right-aligned in the left-padded KV cache, so "keep the last `window` keys"
+is a single uniform key-axis mask (`build_window_keep`: `kpos ≥ total − window`) AND-ed with the
+per-row pad mask — no per-row window math. `dense_forward` gained a `Gemma3` arm, `is_batchable_arch`
+includes it, and `run_batch` sets `gemma3::set_batch_pad_offsets` alongside the others (each model
+reads only its own thread-local — harmless no-ops). OFF by default → B=1 serial path byte-identical
+(`mlx_gemma3_chat` unchanged; windowing math still covered by `sliding_window_mask_bands_local_attention`).
+Validated end-to-end (`mlx_gemma3_batched_two_concurrent`, cached gemma-3-1b-it-4bit): two concurrent
+requests land in ONE `run_batch` call with distinct correct answers (`Paris` / `Tokyo`). **So now
+EVERY dense family batches** — Qwen3 / Qwen3-MoE, Qwen2/2.5, Llama / Mistral / Phi-3 / SmolLM, and
+Gemma 3 — plus the Qwen3.6 hybrid via its own `run_batch_hybrid`. No dense arch is left serial.
+131/0. Fork rev `06fd0421`.
+
 ## mlx-native — the Llama family batches too (Mistral / Phi-3 / SmolLM / Llama-3.x)
 Completed: 2026-06-15
 Batched decode used to be Qwen-only — every dense Llama-family model (Llama 3.x, Mistral, Phi-3,
