@@ -1,5 +1,16 @@
 # Changelog
 
+## agent — local memory store (memory-store): durable remember/recall
+Completed: 2026-06-15
+An append-only local memory (`src/memory_store.rs`, `memory-store`): a key→value JSONL log with
+retrieval by exact key. `MemoryStore::{open, in_memory, set, get, all, keys}` — `get` is
+last-write-wins, `all` returns the full per-key history, appends never rewrite earlier records, and
+`open` replays the JSONL into the index so memory survives restarts. Exposed to the reference agent
+runtime as `remember(key, value)` / `recall(key)` tools (`memory_tools(Arc<MemoryStore>)`), so a small
+local agent has durable memory across turns and sessions. Deliberately exact-key only — no
+embeddings/ranking (that's `rag-lite`). Unit-tested (append-only history, disk persistence + replay,
+the tools incl. missing-key → `found:false`). 168/0.
+
 ## agent — built-in tools registry (tool-routing)
 Completed: 2026-06-15
 A small registry of safe, read-only built-in tools (`src/builtin_tools.rs`, `tool-routing`) exposed as

@@ -9,6 +9,7 @@ pub mod gateway;
 pub mod gguf;
 pub mod hf_hub;
 pub mod meeting;
+pub mod memory_store;
 pub mod mistralrs_backend;
 pub mod mlx_native_backend;
 pub mod models;
