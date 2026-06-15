@@ -1,5 +1,33 @@
 # Changelog
 
+## cascade — named configs in rozum.toml ([cascade.<name>] tables)
+Completed: 2026-06-15
+
+Cascade configs can now live in `rozum.toml` instead of an env var (`cascade-toml-config`), so a
+named cascade survives a restart without re-exporting JSON. A `[cascade.<name>]` table is a
+`CascadeSpec` — `strategy`, `max_escalations`, and `[[cascade.<name>.tiers]]` entries:
+
+```toml
+[cascade.default]
+strategy = "classify"
+max_escalations = 1
+  [[cascade.default.tiers]]
+  model = "mlx-community:Qwen3-4B-4bit"
+  [[cascade.default.tiers]]
+  model = "claude-haiku-4-5"
+  location = "remote"
+  api = "anthropic"
+```
+
+`model: "cascade"` selects `default`; `model: "cascade:<name>"` selects `<name>`.
+`RuntimeConfig` gained a `cascades` map + `cascade_spec(name)`; the gateway's `load_cascade_spec`
+checks the TOML table first and **falls back to the env JSON** (`ROZUM_CASCADE` /
+`ROZUM_CASCADE_<NAME>`), so both paths work. `TierSpec`/`CascadeSpec`/`StrategyName` gained
+`PartialEq`/`Eq` (so they can embed in the `Eq` `RuntimeConfig`).
+
+`src/config.rs` + `src/main.rs`; 1 new test. 256/0. This closes the cascade-router's open follow-ups
+— the feature is done end to end.
+
 ## cascade — Phase 7 follow-ups: adaptive judge threshold + persisted health
 Completed: 2026-06-15
 

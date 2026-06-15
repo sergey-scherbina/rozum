@@ -270,12 +270,13 @@ availability fallback (a mock backend that errors → the next available is chos
   (vs always-frontier), avg escalations/request.
 - Config: a `CascadeSpec` (cost-ordered `TierSpec`s + `max_escalations` + `strategy`), loaded by
   name from the environment as JSON — `ROZUM_CASCADE` for the default `model: "cascade"`,
-  `ROZUM_CASCADE_<NAME>` for `model: "cascade:<name>"`. Each tier is `{model, location, pool?, api?,
+  `ROZUM_CASCADE_<NAME>` for `model: "cascade:<name>"`, **or** a `[cascade.<name>]` table in
+  `rozum.toml` (the TOML wins; env is the fallback). Each tier is `{model, location, pool?, api?,
   endpoint?, api_key_env?}`; locals resolve through the gateway's normal build chain, remotes through
   either an OpenAI-compatible HTTP backend or — with `api: "anthropic"` — the native Claude
   `/v1/messages` backend (default endpoint + `ANTHROPIC_API_KEY`). A tier that can't be built is
-  skipped (a partial config still runs). **Shipped** (`src/cascade/spec.rs`, `build_cascade` + the
-  `build_cascade_backend` hook in `main.rs`). *Follow-up*: a `rozum.toml [cascade]` schema.
+  skipped (a partial config still runs). **Shipped** (`src/cascade/spec.rs` + `build_cascade`, the
+  `build_cascade_backend` hook in `main.rs`, and `RuntimeConfig.cascades` in `config.rs`).
 
 ## Design notes
 
@@ -305,8 +306,9 @@ set**: overload, throughput (success), latency (a per-token baseline → ratio),
 (`system_memory_headroom`, back off before an OOM). The learned track is complete: the `Learned`
 start-tier, an **adaptive judge threshold** (trusted `(task, model)` pairs get a lower bar,
 `judge_trust_discount`), and **persisted health** (cooldowns survive a restart via
-`HealthRegistry::open`/`health_path`). Only open follow-up (non-blocking): a `rozum.toml [cascade]`
-schema (config now via env JSON, with OpenAI-compatible **and** native-Anthropic remote tiers).
+`HealthRegistry::open`/`health_path`). Config is via `[cascade.<name>]` in `rozum.toml` (env JSON
+fallback), with OpenAI-compatible **and** native-Anthropic remote tiers. **The cascade-router is
+complete end to end.**
 
 1. **Registry + pure cascade + L0 structural acceptance.** Caller-supplied list, `AlwaysCheapest`,
    escalate on error/structural-fail, single-model passthrough. Local→remote tiers via existing

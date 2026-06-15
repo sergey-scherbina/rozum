@@ -1958,7 +1958,7 @@ async fn build_cascade_backend(
     name: &str,
     n_ctx: u32,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
-    let spec = load_cascade_spec(name)?;
+    let spec = load_cascade_spec(cfg, name)?;
     let cfg = std::sync::Arc::clone(cfg);
     let resolver = move |tier: rozum::cascade::TierSpec| {
         let cfg = std::sync::Arc::clone(&cfg);
@@ -1987,9 +1987,16 @@ async fn build_cascade_backend(
     }
 }
 
-/// Load a [`rozum::cascade::CascadeSpec`] from the environment: `ROZUM_CASCADE` for the default
-/// (`name == ""`), `ROZUM_CASCADE_<NAME>` (upper-cased) for a named config. The value is JSON.
-fn load_cascade_spec(name: &str) -> Option<rozum::cascade::CascadeSpec> {
+/// Resolve a [`rozum::cascade::CascadeSpec`] by name. A `[cascade.<name>]` table in `rozum.toml`
+/// wins (`default` for `model: "cascade"`); otherwise fall back to the environment —
+/// `ROZUM_CASCADE` / `ROZUM_CASCADE_<NAME>` (upper-cased) as JSON.
+fn load_cascade_spec(
+    cfg: &rozum::RuntimeConfig,
+    name: &str,
+) -> Option<rozum::cascade::CascadeSpec> {
+    if let Some(spec) = cfg.cascade_spec(name) {
+        return Some(spec.clone());
+    }
     let var = if name.is_empty() {
         "ROZUM_CASCADE".to_string()
     } else {

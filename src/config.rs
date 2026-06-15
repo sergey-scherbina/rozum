@@ -9,12 +9,14 @@
 //! walks [`RuntimeConfig::gateway_chain`]; this keeps the library/binary
 //! boundary from `gateway-switch` intact.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
 use crate::backend::{BackendConfig, BackendEngine, BackendPolicy, ModelRuntimeConfig};
+use crate::cascade::CascadeSpec;
 
 /// Selection policy over the backend list.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
@@ -86,6 +88,9 @@ pub struct RuntimeConfig {
     pub policy: Policy,
     pub backends: Vec<BackendChoice>,
     pub single_backend: Option<String>,
+    /// Named cascade configs from `[cascade.<name>]` tables. `model: "cascade"` selects `default`,
+    /// `model: "cascade:<name>"` selects `<name>`. See `docs/specs/cascade-router.md`.
+    pub cascades: HashMap<String, CascadeSpec>,
 }
 
 // ─── serde wire format ────────────────────────────────────────────────────────
@@ -97,6 +102,9 @@ struct RawConfig {
     runtime: RawRuntime,
     #[serde(default, rename = "backend")]
     backends: Vec<RawBackend>,
+    /// `[cascade.<name>]` tables → named `CascadeSpec`s (`tiers`, `strategy`, `max_escalations`).
+    #[serde(default)]
+    cascade: HashMap<String, CascadeSpec>,
 }
 
 #[derive(Deserialize, Default)]
@@ -186,6 +194,7 @@ impl Default for RuntimeConfig {
                 })
                 .collect(),
             single_backend: None,
+            cascades: HashMap::new(),
         }
     }
 }
@@ -274,7 +283,15 @@ impl RuntimeConfig {
             policy,
             backends,
             single_backend: raw.runtime.backend,
+            cascades: raw.cascade,
         })
+    }
+
+    /// The cascade config selected by a `model:` string: `""` (i.e. `model: "cascade"`) → the
+    /// `default` table; `"<name>"` → the `<name>` table. `None` if it isn't declared in the TOML.
+    pub fn cascade_spec(&self, name: &str) -> Option<&CascadeSpec> {
+        let key = if name.is_empty() { "default" } else { name };
+        self.cascades.get(key)
     }
 
     /// Enabled backends in the order the gateway should try them. For `Single`,
@@ -544,5 +561,41 @@ mod tests {
             RuntimeConfig::from_toml_str("[runtime]\nbogus = 1\n"),
             Err(ConfigError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn parses_named_cascade_tables() {
+        use crate::cascade::{Location, RemoteApi, StrategyName};
+        let cfg = RuntimeConfig::from_toml_str(
+            r#"
+            [cascade.default]
+            strategy = "classify"
+            max_escalations = 1
+            [[cascade.default.tiers]]
+            model = "mlx-community:Qwen3-4B-4bit"
+            [[cascade.default.tiers]]
+            model = "claude-haiku-4-5"
+            location = "remote"
+            api = "anthropic"
+
+            [cascade.fast]
+            [[cascade.fast.tiers]]
+            model = "mlx-community:Qwen3-4B-4bit"
+            "#,
+        )
+        .unwrap();
+
+        let def = cfg.cascade_spec("").expect("default cascade (model: cascade)");
+        assert_eq!(def.tiers.len(), 2);
+        assert_eq!(def.strategy, StrategyName::Classify);
+        assert_eq!(def.max_escalations, Some(1));
+        assert_eq!(def.tiers[0].location, Location::Local); // defaulted
+        assert_eq!(def.tiers[1].location, Location::Remote);
+        assert_eq!(def.tiers[1].api, RemoteApi::Anthropic);
+
+        assert_eq!(cfg.cascade_spec("fast").expect("named cascade").tiers.len(), 1);
+        assert!(cfg.cascade_spec("missing").is_none());
+        // The default config (no [cascade]) has no cascades.
+        assert!(RuntimeConfig::default().cascade_spec("").is_none());
     }
 }

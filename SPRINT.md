@@ -237,6 +237,15 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   keeps escalating. `CascadeConfig` gained `judge_trust_discount` + `health_path` (both opt-in,
   default off). 4 new tests (judge trusts/holds, cooldown-survives-restart, recovered-available).
   255/0.
+- [x] cascade-toml-config - **DONE 2026-06-15** (`src/config.rs` + `src/main.rs`). Named cascade
+  configs in `rozum.toml` via `[cascade.<name>]` tables (a `CascadeSpec`: `strategy`,
+  `max_escalations`, `[[cascade.<name>.tiers]]`). `model: "cascade"` → `default`, `"cascade:<name>"`
+  → `<name>`. `RuntimeConfig.cascades` + `cascade_spec(name)`; `main.rs::load_cascade_spec` prefers
+  the TOML table, falling back to the env JSON (`ROZUM_CASCADE[_<NAME>]`) — so config survives a
+  restart without exporting env vars. `TierSpec`/`CascadeSpec`/`StrategyName` gained `PartialEq/Eq`
+  (RuntimeConfig is `Eq`). 1 new test (parses named cascade tables + default lookup). 256/0. **This
+  closes the cascade-router** — all phases, gateway wiring, full adaptive signal set, learned track,
+  Anthropic tier, and TOML config shipped.
 
 #### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
 
