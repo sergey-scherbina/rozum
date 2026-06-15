@@ -161,14 +161,21 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   the P7 learned stats). `run_agent` is now a one-line wrapper (single tier, never escalates → all
   prior behavior unchanged). 3 new tests (escalate-on-persistent-errors, no-escalation-on-recovery,
   single-backend-stays-tier-0). 229/0.
-- [ ] cascade-p9-adaptive-concurrency - **Phase 9 (user idea 2026-06-15).** Per-model parallelism is
-  model-specific and can't be assumed — *measure* it. An AIMD controller per model raises the
-  resizable admission limit (`AdmissionScheduler::set_limit` — already exists) while throughput
-  improves and signals stay green, and backs off on a red signal: local mem/CPU headroom vs free
-  system resources (back off *before* OOM), remote 429/latency reaction, and failure-rate + answer
-  **quality as a function of concurrency**. Effective width = `min(adaptive limit, lane residency
-  share)`. Reuses Phase-6 lanes + `AdmittingBackend` as actuators (no Phase 6 change); consumes the
-  Phase-7 concurrency curve (persisted across restarts).
+- [x] cascade-p9-adaptive-concurrency - **Phase 9. DONE 2026-06-15 (user idea)**
+  (`src/concurrency.rs`). `AdaptiveConcurrency` — a per-model **AIMD** controller (TCP-style): probe
+  the admission limit up by one after `probe_after` clean runs (additive), multiplicatively back off
+  (`backoff`, default ×0.5) the moment a model shows load. `ConcurrencySample{overload, headroom,
+  latency_ratio, ok}` carries the user's signals — a load failure (429/quota/OOM), thin local
+  resource headroom (back off *before* OOM), a latency cliff, and **quality-as-a-function-of-
+  concurrency** (a failed answer is red only *above* the floor; serial isn't a concurrency problem).
+  `record(model, sample) → new target`; push it onto the already-resizable `AdmissionScheduler::
+  set_limit` (the actuator). Starts serial and opens up only as evidence accumulates — measured, not
+  assumed. Composes with Phase-6 lanes for free: effective width = `min(adaptive limit, lane
+  residency share)` (two independent gates in the pipeline, no extra code). 6 new tests (probe-up,
+  back-off-on-overload, floor-holds, headroom+latency reds, quality-red-only-above-floor, drives-a-
+  real-scheduler). 235/0. **Live feeding deferred to gateway integration**: classify each request's
+  `FailReason`/`ResourceSnapshot`/exec-feedback into a sample and apply `set_limit` per model
+  (lands with the cascade request-surface wiring).
 
 #### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
 
