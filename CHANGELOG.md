@@ -1,5 +1,27 @@
 # Changelog
 
+## cascade — frugal/escalation model routing, Phase 1 (the deterministic core)
+Completed: 2026-06-15
+First phase of the Cascade Router (`cascade-router`; spec `docs/specs/cascade-router.md`): a
+`CascadeBackend: ChatBackend` (`src/cascade/`) that arbitrates over a caller-supplied, cost-ordered
+list of models — try the cheapest first, escalate only when the cheap answer isn't good enough, stop
+at the first acceptable. Cheaper than a single frontier call on average (the opposite of a parallel
+ensemble). Phase 1 is the deterministic, model-free core:
+- `ModelCard {id, backend, tier}` + `CascadeConfig {models, acceptance, budget}`; one model → live
+  passthrough (no arbitration).
+- The loop: drain each attempt to a `TurnOutcome`, run the acceptance pipeline, `Accept` →
+  short-circuit and replay that model's output, `Escalate` → next tier, errored attempt skipped;
+  budget (`max_escalations` / `wall_time`) or list exhaustion → the best usable answer so far, only a
+  hard error if no model produced one.
+- L0 `StructuralCheck` (reusing the `constrain` engine): a backend error escalates; a
+  `response_format` schema or tool-call args that don't conform escalate; free-form text is
+  inconclusive (→ accept). `AcceptanceCheck` trait + `Verdict {Accept, Escalate, Inconclusive}` +
+  `pipeline_verdict` (first decisive check wins; all-inconclusive → Accept).
+- 7 model-free e2e tests (escalate-on-structural-fail → strong wins; accept-cheap skips strong;
+  passthrough; error-escalate; budget → best-so-far; free-form → cheapest; all-error → error). 185/0.
+Next phases (sprint): availability/health-aware routing, self-signal+escalate-tool, cheap judge,
+difficulty classifier, parallel lanes, learned stats. (Gateway request-surface wiring deferred.)
+
 ## kernels — extract the GatedDeltaNet Metal kernel into a standalone .metal (L4)
 Completed: 2026-06-15
 Factored the GatedDeltaNet fused delta-rule scan kernel's MSL source out of the inline raw string in
