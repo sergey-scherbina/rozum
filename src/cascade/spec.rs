@@ -59,18 +59,20 @@ pub struct TierSpec {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StrategyName {
+    /// Always start at the cheapest tier; escalate only when the answer is rejected.
     #[default]
-    AlwaysCheapest,
+    #[serde(alias = "alwaysCheapest")] // back-compat with the old name
+    Cheapest,
     Classify,
     Learned,
 }
 
 impl StrategyName {
-    /// Parse a CLI/env value (case- and separator-insensitive): `alwaysCheapest`/`cheapest`,
+    /// Parse a CLI/env value (case- and separator-insensitive): `cheapest` (alias `alwaysCheapest`),
     /// `classify`, `learned`. `None` for an unrecognized value.
     pub fn parse_cli(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().replace(['-', '_', ' '], "").as_str() {
-            "alwayscheapest" | "cheapest" | "cheap" => Some(StrategyName::AlwaysCheapest),
+            "cheapest" | "cheap" | "alwayscheapest" => Some(StrategyName::Cheapest),
             "classify" | "classifythenstart" => Some(StrategyName::Classify),
             "learned" | "learn" => Some(StrategyName::Learned),
             _ => None,
@@ -81,7 +83,7 @@ impl StrategyName {
 impl From<StrategyName> for RoutingStrategy {
     fn from(s: StrategyName) -> Self {
         match s {
-            StrategyName::AlwaysCheapest => RoutingStrategy::AlwaysCheapest,
+            StrategyName::Cheapest => RoutingStrategy::AlwaysCheapest,
             StrategyName::Classify => RoutingStrategy::ClassifyThenStart,
             StrategyName::Learned => RoutingStrategy::Learned,
         }
@@ -314,11 +316,26 @@ mod tests {
     }
 
     #[test]
+    fn strategy_name_serde_uses_cheapest_with_back_compat() {
+        // The canonical serialized name is "cheapest".
+        assert_eq!(serde_json::to_string(&StrategyName::Cheapest).unwrap(), "\"cheapest\"");
+        assert_eq!(
+            serde_json::from_str::<StrategyName>("\"cheapest\"").unwrap(),
+            StrategyName::Cheapest
+        );
+        // The old "alwaysCheapest" still deserializes (config back-compat).
+        assert_eq!(
+            serde_json::from_str::<StrategyName>("\"alwaysCheapest\"").unwrap(),
+            StrategyName::Cheapest
+        );
+    }
+
+    #[test]
     fn strategy_name_parses_cli_values() {
         assert_eq!(StrategyName::parse_cli("classify"), Some(StrategyName::Classify));
         assert_eq!(StrategyName::parse_cli("Learned"), Some(StrategyName::Learned));
-        assert_eq!(StrategyName::parse_cli("always-cheapest"), Some(StrategyName::AlwaysCheapest));
-        assert_eq!(StrategyName::parse_cli("cheapest"), Some(StrategyName::AlwaysCheapest));
+        assert_eq!(StrategyName::parse_cli("always-cheapest"), Some(StrategyName::Cheapest));
+        assert_eq!(StrategyName::parse_cli("cheapest"), Some(StrategyName::Cheapest));
         assert_eq!(StrategyName::parse_cli("nonsense"), None);
     }
 
@@ -395,7 +412,7 @@ mod tests {
         let spec = CascadeSpec {
             tiers: vec![tier("cheap", Location::Local), tier("strong", Location::Remote)],
             max_escalations: None,
-            strategy: StrategyName::AlwaysCheapest,
+            strategy: StrategyName::Cheapest,
         };
         let be = build_cascade(&spec, |t| async move {
             Some(Arc::new(Echo(if t.model == "cheap" { "C" } else { "S" })) as Arc<dyn ChatBackend>)
@@ -417,7 +434,7 @@ mod tests {
         let spec = CascadeSpec {
             tiers: vec![tier("missing-remote", Location::Remote), tier("local", Location::Local)],
             max_escalations: None,
-            strategy: StrategyName::AlwaysCheapest,
+            strategy: StrategyName::Cheapest,
         };
         let be = build_cascade(&spec, |t| async move {
             if t.model == "missing-remote" {
@@ -441,7 +458,7 @@ mod tests {
         let spec = CascadeSpec {
             tiers: vec![tier("a", Location::Remote), tier("b", Location::Remote)],
             max_escalations: None,
-            strategy: StrategyName::AlwaysCheapest,
+            strategy: StrategyName::Cheapest,
         };
         let r = build_cascade(&spec, |_t| async move { None }).await;
         assert!(r.is_err(), "an all-unavailable cascade is an error, not an empty backend");

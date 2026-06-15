@@ -1,5 +1,15 @@
 # Changelog
 
+## cascade — rename the `alwaysCheapest` strategy to `cheapest`
+Completed: 2026-06-15
+
+The user-facing strategy name is now just **`cheapest`** (config, `--strategy`, JSON/TOML) instead of
+`alwaysCheapest`. `StrategyName::AlwaysCheapest` → `StrategyName::Cheapest`; serde serializes it as
+`"cheapest"` and accepts the old `"alwaysCheapest"` via a `#[serde(alias)]` (so existing configs keep
+working). `parse_cli` takes `cheapest`/`cheap`/`alwaysCheapest`. The internal runtime enum
+`RoutingStrategy::AlwaysCheapest` is unchanged (descriptive, not user-facing). Docs/help updated. 1
+new test. 260/0.
+
 ## cascade — repeatable --model + a --strategy flag
 Completed: 2026-06-15
 
