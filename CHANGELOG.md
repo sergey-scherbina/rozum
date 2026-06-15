@@ -1,5 +1,26 @@
 # Changelog
 
+## backends — Anthropic Messages HTTP client backend (+ OpenAI client API-key auth)
+Completed: 2026-06-15
+Adds the client side of the Anthropic dialect so rozum can call a remote Anthropic (or
+Anthropic-compatible) model as a `ChatBackend` — the mirror of the gateway's server-side Anthropic
+support, and the path for **frontier-model escalation/fallback** when a local model can't handle a
+task (`integration.md`). `src/anthropic_http.rs`:
+- `messages_to_anthropic` folds system turns into the top-level `system` and carries tool-results as
+  user-role `tool_result` blocks (the Anthropic wire shape).
+- `POST /v1/messages` with `x-api-key` + `anthropic-version`, `stream: true`, `tools` as
+  `{name, description, input_schema}`.
+- Parses the Anthropic SSE — `content_block_start`/`_delta`/`_stop` (text + `tool_use` blocks, via an
+  index→tool-id map) and `message_delta`/`message_stop` — into `ChatEvent`s, mapping `stop_reason`
+  (`tool_use`→ToolUse, `max_tokens`→MaxTokens, else EndTurn). Unit-tested (text stream, tool_use
+  block, message conversion).
+- **OpenAI client** (`openai_http.rs`) gained `with_api_key` (Bearer) so it works against
+  authenticated remotes (OpenAI/OpenRouter), not just local servers — closing
+  `openai-http-client-backend` too. 160/0.
+
+Both client backends speak the `ChatBackend` SPI, so they plug into the orchestrator and the reference
+agent runtime exactly like the in-process backends.
+
 ## agent — MCP-client ToolSource adapter (the runtime can use external MCP tools)
 Completed: 2026-06-15
 Adds the second `ToolSource` adapter to the reference agent runtime: `McpToolSource`, backed by an

@@ -17,6 +17,9 @@ pub struct OpenAiHttpBackend {
     /// Base URL including `/v1` if needed (e.g. `http://localhost:11434/v1`).
     endpoint: String,
     model: String,
+    /// Optional bearer token for authenticated remotes (OpenAI, OpenRouter, …). Local
+    /// servers (Ollama, llama.cpp) need none.
+    api_key: Option<String>,
     client: reqwest::Client,
 }
 
@@ -30,8 +33,16 @@ impl OpenAiHttpBackend {
         Self {
             endpoint: endpoint.into(),
             model: model.into(),
+            api_key: None,
             client,
         }
+    }
+
+    /// Attach an `Authorization: Bearer <key>` to every request (builder style).
+    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
+        let k = key.into();
+        self.api_key = (!k.is_empty()).then_some(k);
+        self
     }
 
     /// Return `true` if the server answers to `GET /v1/models` within 3 s.
@@ -273,10 +284,11 @@ impl ChatBackend for OpenAiHttpBackend {
         }
 
         let url = format!("{}/chat/completions", self.endpoint);
-        let response = self
-            .client
-            .post(&url)
-            .json(&body)
+        let mut request = self.client.post(&url).json(&body);
+        if let Some(key) = &self.api_key {
+            request = request.bearer_auth(key);
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| ModelError::BackendUnavailable(format!("http request: {e}")))?;

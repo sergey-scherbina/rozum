@@ -13,6 +13,7 @@ pub mod mlx_native_backend;
 pub mod models;
 pub mod modelscope;
 pub mod obs;
+pub mod anthropic_http;
 pub mod openai_http;
 pub mod proxy;
 pub mod share;
