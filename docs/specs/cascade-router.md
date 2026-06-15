@@ -160,10 +160,13 @@ enum FailReason { None, RateLimited, QuotaExhausted, Down, Network, OutOfMemory,
 - **Graceful degradation, never hard-fail.** If the *ideal* tier is unavailable, answer with the
   best available model rather than erroring — "do what we can with what's available." Only when
   *no* candidate is available does the request error.
-- **Persisted + adaptive.** Health *events* (when/why a model failed and recovered) go in the
-  stats store, so patterns carry forward across restarts (e.g. a model that reliably exhausts
-  its monthly quota near month-end can be deprioritized proactively, and typical recovery times
-  tune the backoff). Health is also a routing signal the `Learned` strategy can weight.
+- **Persisted + adaptive.** Health *events* (a failure with its wall-clock cooldown deadline, or a
+  recovery) are appended to a JSONL log (`HealthRegistry::open`/`CascadeConfig.health_path`) and
+  replayed on start: a still-active cooldown is restored (the `Instant` rebuilt from the persisted
+  unix deadline) with its `fails` count, so a quota-exhausted remote stays parked across a restart
+  instead of being re-probed, and exponential backoff keeps escalating. **Shipped.** *Further
+  refinements* (non-blocking): proactive deprioritization from recurring patterns (e.g. monthly-quota
+  timing) and tuning the base backoff from observed recovery times.
 
 ### Parallel scheduling (lanes)
 
@@ -299,9 +302,11 @@ ceilings (`set_ceiling`), reconciled with the circuit breaker (breaker = fast in
 controller's ceiling), opt-in via `ROZUM_ADAPTIVE_CONCURRENCY=1`, and is fed by the **full signal
 set**: overload, throughput (success), latency (a per-token baseline → ratio), answer quality
 (`ChatBackend::report_quality`, the cascade's verdict), and free-memory headroom
-(`system_memory_headroom`, back off before an OOM). Follow-ups (non-blocking): P7 adaptive judge
-thresholds / health-pattern persistence; a `rozum.toml [cascade]` schema (config now via env JSON,
-with OpenAI-compatible **and** native-Anthropic remote tiers).
+(`system_memory_headroom`, back off before an OOM). The learned track is complete: the `Learned`
+start-tier, an **adaptive judge threshold** (trusted `(task, model)` pairs get a lower bar,
+`judge_trust_discount`), and **persisted health** (cooldowns survive a restart via
+`HealthRegistry::open`/`health_path`). Only open follow-up (non-blocking): a `rozum.toml [cascade]`
+schema (config now via env JSON, with OpenAI-compatible **and** native-Anthropic remote tiers).
 
 1. **Registry + pure cascade + L0 structural acceptance.** Caller-supplied list, `AlwaysCheapest`,
    escalate on error/structural-fail, single-model passthrough. Local→remote tiers via existing

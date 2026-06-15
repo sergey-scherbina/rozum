@@ -5,6 +5,9 @@
 //! *available* alternative. See `docs/specs/cascade-router.md`.
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -94,15 +97,84 @@ impl Default for Entry {
     }
 }
 
+/// A persisted health transition (JSONL row): a failure (`reason: Some`) with its wall-clock
+/// cooldown deadline, or a recovery (`reason: None`). Replayed on start so cooldowns survive a
+/// restart — a remote whose hourly quota is exhausted stays parked instead of being re-probed
+/// immediately, and a model's `fails` count (hence its backoff level) carries forward.
+#[derive(Serialize, Deserialize)]
+struct HealthEvent {
+    model: String,
+    reason: Option<FailReason>,
+    /// Wall-clock cooldown deadline (unix secs); `0` for a recovery.
+    cooldown_until_unix: u64,
+    fails: u32,
+    ts: u64,
+}
+
 /// Per-model transient health, shared across concurrent requests on one `CascadeBackend`.
 #[derive(Default)]
 pub struct HealthRegistry {
     inner: Mutex<HashMap<String, Entry>>,
+    /// Backing JSONL for cross-restart persistence; `None` = in-memory only.
+    path: Option<PathBuf>,
 }
 
 impl HealthRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Open a registry backed by a JSONL log, replaying it: each model's **latest** event wins, and
+    /// a failure whose cooldown is still in the future is restored as an active `Unavailable`
+    /// cooldown (recoveries and already-elapsed cooldowns leave the model available).
+    pub fn open(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let mut latest: HashMap<String, HealthEvent> = HashMap::new();
+        if path.exists() {
+            if let Ok(f) = File::open(&path) {
+                for line in BufReader::new(f).lines().map_while(Result::ok) {
+                    let t = line.trim();
+                    if t.is_empty() {
+                        continue;
+                    }
+                    if let Ok(ev) = serde_json::from_str::<HealthEvent>(t) {
+                        let keep = latest.get(&ev.model).is_none_or(|p| ev.ts >= p.ts);
+                        if keep {
+                            latest.insert(ev.model.clone(), ev);
+                        }
+                    }
+                }
+            }
+        }
+        let now = crate::share::now_unix();
+        let mut map: HashMap<String, Entry> = HashMap::new();
+        for (model, ev) in latest {
+            if let Some(reason) = ev.reason {
+                if ev.cooldown_until_unix > now {
+                    let remaining = Duration::from_secs(ev.cooldown_until_unix - now);
+                    map.insert(
+                        model,
+                        Entry {
+                            state: HealthState::Unavailable,
+                            reason: Some(reason),
+                            cooldown_until: Some(Instant::now() + remaining),
+                            fails: ev.fails,
+                        },
+                    );
+                }
+            }
+        }
+        Self { inner: Mutex::new(map), path: Some(path) }
+    }
+
+    /// Append a health transition to the backing log (no-op when in-memory).
+    fn persist(&self, ev: HealthEvent) {
+        let Some(path) = &self.path else { return };
+        if let Ok(line) = serde_json::to_string(&ev) {
+            if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(f, "{line}");
+            }
+        }
     }
 
     /// May this model be tried now? `Healthy`/`Degraded` → yes; an `Unavailable` model whose
@@ -125,21 +197,38 @@ impl HealthRegistry {
 
     /// Record a failure: `Unavailable`, with an exponential-backoff + jitter cooldown.
     pub fn record_failure(&self, id: &str, reason: FailReason) {
-        let mut m = self.inner.lock().unwrap();
-        let e = m.entry(id.to_string()).or_default();
-        e.fails = e.fails.saturating_add(1);
-        e.reason = Some(reason);
-        e.state = HealthState::Unavailable;
-        let mult = 1u32 << e.fails.saturating_sub(1).min(5); // 2^0 .. 2^5
-        let backed = reason.base_cooldown() * mult;
-        let jitter_ms = rand::thread_rng().gen_range(0..=(backed.as_millis() / 2) as u64);
-        e.cooldown_until = Some(Instant::now() + backed + Duration::from_millis(jitter_ms));
+        let (total, fails) = {
+            let mut m = self.inner.lock().unwrap();
+            let e = m.entry(id.to_string()).or_default();
+            e.fails = e.fails.saturating_add(1);
+            e.reason = Some(reason);
+            e.state = HealthState::Unavailable;
+            let mult = 1u32 << e.fails.saturating_sub(1).min(5); // 2^0 .. 2^5
+            let backed = reason.base_cooldown() * mult;
+            let jitter_ms = rand::thread_rng().gen_range(0..=(backed.as_millis() / 2) as u64);
+            let total = backed + Duration::from_millis(jitter_ms);
+            e.cooldown_until = Some(Instant::now() + total);
+            (total, e.fails)
+        };
+        self.persist(HealthEvent {
+            model: id.to_string(),
+            reason: Some(reason),
+            cooldown_until_unix: crate::share::now_unix() + total.as_secs(),
+            fails,
+            ts: crate::share::now_unix(),
+        });
     }
 
     /// Record a success: back to `Healthy`, counters reset.
     pub fn record_success(&self, id: &str) {
-        let mut m = self.inner.lock().unwrap();
-        m.insert(id.to_string(), Entry::default());
+        self.inner.lock().unwrap().insert(id.to_string(), Entry::default());
+        self.persist(HealthEvent {
+            model: id.to_string(),
+            reason: None,
+            cooldown_until_unix: 0,
+            fails: 0,
+            ts: crate::share::now_unix(),
+        });
     }
 
     pub fn state(&self, id: &str) -> HealthState {
@@ -193,5 +282,33 @@ mod tests {
             h.record_failure("m", FailReason::RateLimited);
         }
         assert!(!h.is_available("m"));
+    }
+
+    #[test]
+    fn cooldown_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("health.jsonl");
+        {
+            let h = HealthRegistry::open(&path);
+            h.record_failure("remote", FailReason::QuotaExhausted); // ~1h cooldown
+            assert!(!h.is_available("remote"));
+        }
+        // Restart: the still-active cooldown is restored from the log, not re-probed immediately.
+        let h2 = HealthRegistry::open(&path);
+        assert!(!h2.is_available("remote"), "a live cooldown survives a restart");
+        assert_eq!(h2.state("remote"), HealthState::Unavailable);
+    }
+
+    #[test]
+    fn recovered_model_is_available_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("health.jsonl");
+        {
+            let h = HealthRegistry::open(&path);
+            h.record_failure("m", FailReason::Down);
+            h.record_success("m"); // recovered — the latest event wins on replay
+        }
+        let h2 = HealthRegistry::open(&path);
+        assert!(h2.is_available("m"), "a recovered model is available after restart");
     }
 }
