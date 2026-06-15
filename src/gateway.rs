@@ -110,6 +110,12 @@ struct Switchboard {
     /// routing) and new chats are rejected rather than parked, so in-flight work
     /// drains and the process exits cleanly during a rolling deploy.
     shutting_down: AtomicBool,
+    /// Secondary resident models kept warm (multislot Phase 2). Empty when off / single-model.
+    warm: tokio::sync::Mutex<std::collections::HashMap<String, WarmEntry>>,
+    /// Learned per-model usefulness (frequency × recency) ranking warm eviction.
+    usage: crate::resident::UsageStats,
+    /// Injectable memory inputs for the warm admission decision.
+    warm_cfg: WarmConfig,
 }
 
 /// Held by a chat handler for the whole request (prefill + stream). Keeps the
@@ -119,11 +125,21 @@ struct ChatLease {
     backend: Arc<dyn ChatBackend>,
     model_id: String,
     sb: Arc<Switchboard>,
+    /// `Some` for a **warm** (secondary-resident) lease — drop decrements that model's own counter,
+    /// not the primary `generating` (so warm traffic can't deadlock a primary swap drain).
+    warm_inflight: Option<Arc<AtomicU64>>,
 }
 
 impl Drop for ChatLease {
     fn drop(&mut self) {
-        self.sb.generating.fetch_sub(1, Ordering::SeqCst);
+        match &self.warm_inflight {
+            Some(c) => {
+                c.fetch_sub(1, Ordering::SeqCst);
+            }
+            None => {
+                self.sb.generating.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
     }
 }
 
@@ -144,6 +160,43 @@ fn unload_idle_secs() -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(900)
+}
+
+// ── Multi-resident warm cache (shared-gateway-multislot Phase 2) ─────────────────
+
+/// On by default; `ROZUM_MULTISLOT=0|false|off` disables it (→ exactly the single-resident path).
+fn multislot_enabled() -> bool {
+    !matches!(std::env::var("ROZUM_MULTISLOT").ok().as_deref(), Some("0" | "false" | "off"))
+}
+
+/// A secondary resident model kept warm alongside the primary (avoids thrashing).
+struct WarmEntry {
+    backend: Arc<dyn ChatBackend>,
+    weight_bytes: u64,
+    /// In-flight requests on THIS model — its own counter, NOT the primary `generating`, so warm
+    /// traffic never holds up a primary swap/unload drain.
+    inflight: Arc<AtomicU64>,
+}
+
+/// Injectable memory inputs for the warm-cache admission decision (real on the daemon; deterministic
+/// stubs in tests). `weight(spec)` = a model's resident bytes (`None` ⇒ not a known cached local ⇒
+/// not warmable); `budget()` = usable model-memory bytes.
+struct WarmConfig {
+    weight: Arc<dyn Fn(&str) -> Option<u64> + Send + Sync>,
+    budget: Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+impl Default for WarmConfig {
+    fn default() -> Self {
+        Self {
+            weight: Arc::new(|spec: &str| {
+                crate::models::scan_all_installed().into_iter().find(|m| m.spec == spec).map(|m| m.size_bytes)
+            }),
+            budget: Arc::new(|| {
+                crate::concurrency::total_ram_bytes().map(|t| (t as f64 * 0.8) as u64).unwrap_or(0)
+            }),
+        }
+    }
 }
 
 impl Switchboard {
@@ -206,10 +259,120 @@ impl Switchboard {
         }
     }
 
-    /// Chat-handler entry: park while a swap drains, lazily reload if unloaded,
-    /// then take a `generating` token. Returns a guard the handler holds for the
-    /// whole request so the model can't be swapped out from under it.
-    async fn enter(self: &Arc<Self>) -> Result<ChatLease, Response> {
+    /// Chat-handler entry. Routes by the request's `model`: a request for a **different**,
+    /// warmable model (multislot on, a known cached local spec that fits) is served from the warm
+    /// cache without disturbing the primary; everything else (the default / single-model case) takes
+    /// the primary path unchanged.
+    async fn enter(self: &Arc<Self>, requested: Option<&str>) -> Result<ChatLease, Response> {
+        if self.is_shutting_down() {
+            return Err(error_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "gateway is shutting down",
+                "shutting_down",
+            ));
+        }
+        if multislot_enabled() {
+            if let Some(model) = requested.map(str::trim).filter(|m| !m.is_empty()) {
+                if model != self.model_id() {
+                    if let Some((backend, inflight)) = self.ensure_warm(model).await {
+                        inflight.fetch_add(1, Ordering::SeqCst);
+                        return Ok(ChatLease {
+                            backend,
+                            model_id: model.to_string(),
+                            sb: Arc::clone(self),
+                            warm_inflight: Some(inflight),
+                        });
+                    }
+                }
+            }
+        }
+        self.enter_primary().await
+    }
+
+    /// Get-or-build a **warm** secondary resident for `model`, admitting/evicting via the memory
+    /// planner. `None` ⇒ not warmable (unknown model, dedicated gateway, won't fit, or build failed)
+    /// → the caller falls back to the primary path. Only known cached local models are warmable.
+    async fn ensure_warm(
+        self: &Arc<Self>,
+        model: &str,
+    ) -> Option<(Arc<dyn ChatBackend>, Arc<AtomicU64>)> {
+        let now = crate::share::now_unix();
+        // Fast path: already warm.
+        {
+            let warm = self.warm.lock().await;
+            if let Some(e) = warm.get(model) {
+                self.usage.record(model, e.weight_bytes, now);
+                return Some((e.backend.clone(), e.inflight.clone()));
+            }
+        }
+        // Only warm a known cached local model (we know its weight + can build it).
+        let weight = (self.warm_cfg.weight)(model)?;
+        let builder = self.builder.clone()?; // dedicated gateway → no warming
+
+        // Hold the warm lock for the decision + build (serializes warm builds — rare; fine for v1).
+        let mut warm = self.warm.lock().await;
+        if let Some(e) = warm.get(model) {
+            // A racing request already built it.
+            self.usage.record(model, e.weight_bytes, now);
+            return Some((e.backend.clone(), e.inflight.clone()));
+        }
+        // Plan: residents = primary (always mandatory) + each warm (busy = inflight>0).
+        let primary_id = self.model_id();
+        let mut residents = vec![crate::resident::ResidentInfo {
+            model: primary_id.clone(),
+            weight_bytes: (self.warm_cfg.weight)(&primary_id).unwrap_or(0),
+            // The primary is the daemon's launched model — never evicted by the warm logic (its own
+            // swap/unload owns its lifecycle), so mark it mandatory (busy) unconditionally.
+            busy: true,
+        }];
+        for (m, e) in warm.iter() {
+            residents.push(crate::resident::ResidentInfo {
+                model: m.clone(),
+                weight_bytes: e.weight_bytes,
+                busy: e.inflight.load(Ordering::SeqCst) > 0,
+            });
+        }
+        let req = crate::resident::ResidentRequest {
+            requested: model,
+            requested_weight: weight,
+            residents: &residents,
+            budget_bytes: (self.warm_cfg.budget)(),
+        };
+        let plan = crate::resident::plan_residency(&req, |m| self.usage.utility(m, now));
+        if plan.oversubscribed {
+            return None; // won't co-reside → fall back to the primary (today's swap/thrash)
+        }
+        // Evict the plan's idle warm victims (never the primary — it isn't in `warm`).
+        for victim in &plan.evict {
+            if *victim == primary_id {
+                continue;
+            }
+            let idle = warm.get(victim).is_some_and(|e| e.inflight.load(Ordering::SeqCst) == 0);
+            if idle {
+                if let Some(removed) = warm.remove(victim) {
+                    let b = removed.backend;
+                    tokio::task::spawn_blocking(move || drop(b)); // join the !Send worker off-thread
+                    crate::obs::log_event(json!({ "event": "warm_evicted", "model": victim }));
+                }
+            }
+        }
+        // Build the new warm model.
+        let n_ctx = self.spec.lock().unwrap().n_ctx;
+        let backend = builder(model.to_string(), n_ctx, None).await?;
+        let inflight = Arc::new(AtomicU64::new(0));
+        warm.insert(
+            model.to_string(),
+            WarmEntry { backend: backend.clone(), weight_bytes: weight, inflight: inflight.clone() },
+        );
+        self.usage.record(model, weight, now);
+        crate::obs::log_event(json!({ "event": "warm_built", "model": model }));
+        Some((backend, inflight))
+    }
+
+    /// The single-resident entry: park while a swap drains, lazily reload if unloaded, then take a
+    /// `generating` token. Returns a guard the handler holds for the whole request so the (primary)
+    /// model can't be swapped out from under it.
+    async fn enter_primary(self: &Arc<Self>) -> Result<ChatLease, Response> {
         loop {
             // A graceful shutdown rejects new work outright (don't park — there's no
             // resume coming); the load balancer has already been told we're not ready.
@@ -239,6 +402,7 @@ impl Switchboard {
                 backend,
                 model_id: self.model_id(),
                 sb: Arc::clone(self),
+                warm_inflight: None,
             }),
             Err(msg) => {
                 self.generating.fetch_sub(1, Ordering::SeqCst);
@@ -1731,7 +1895,7 @@ async fn oai_chat_handler(
     );
     // Hold a lease for the whole request so a `switch` can't swap the model
     // mid-flight; parks here if a swap is draining, lazily reloads if unloaded.
-    let lease = match state.sb.enter().await {
+    let lease = match state.sb.enter(req.model.as_deref()).await {
         Ok(l) => l,
         Err(resp) => return resp,
     };
@@ -1810,7 +1974,7 @@ async fn responses_handler(
         stream = req.stream.unwrap_or(false),
         "POST /v1/responses"
     );
-    let lease = match state.sb.enter().await {
+    let lease = match state.sb.enter(req.model.as_deref()).await {
         Ok(l) => l,
         Err(resp) => return resp,
     };
@@ -2115,7 +2279,7 @@ async fn anthropic_handler(
         stream = req.stream.unwrap_or(false),
         "POST /v1/messages"
     );
-    let lease = match state.sb.enter().await {
+    let lease = match state.sb.enter(req.model.as_deref()).await {
         Ok(l) => l,
         Err(resp) => return resp,
     };
@@ -2442,6 +2606,9 @@ pub async fn serve_on(
         reload_lock: tokio::sync::Mutex::new(()),
         register,
         shutting_down: AtomicBool::new(false),
+        warm: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        usage: crate::resident::UsageStats::in_memory(),
+        warm_cfg: WarmConfig::default(),
     });
 
     let state = GatewayState {
@@ -2929,6 +3096,14 @@ mod tests {
     // ── Switchboard (gateway switch / unload / reload) ──────────────────────
 
     fn test_sb(builder: Option<BackendBuilder>, loaded: bool) -> Arc<Switchboard> {
+        test_sb_cfg(builder, loaded, WarmConfig::default())
+    }
+
+    fn test_sb_cfg(
+        builder: Option<BackendBuilder>,
+        loaded: bool,
+        warm_cfg: WarmConfig,
+    ) -> Arc<Switchboard> {
         let backend = loaded.then(|| Arc::new(HelloBackend::new()) as Arc<dyn ChatBackend>);
         Arc::new(Switchboard {
             backend: std::sync::RwLock::new(backend),
@@ -2946,7 +3121,68 @@ mod tests {
             reload_lock: tokio::sync::Mutex::new(()),
             register: None, // don't touch active.json in tests
             shutting_down: AtomicBool::new(false),
+            warm: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            usage: crate::resident::UsageStats::in_memory(),
+            warm_cfg,
         })
+    }
+
+    // ── Multi-resident warm cache (multislot Phase 2) ───────────────────────
+
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    /// A deterministic `WarmConfig`: `weights` maps a known model spec → GB, `budget_gb` is the
+    /// usable budget. Anything not in the map is "not a cached local" (not warmable).
+    fn warm_cfg(budget_gb: u64, weights: &[(&'static str, u64)]) -> WarmConfig {
+        let map: std::collections::HashMap<String, u64> =
+            weights.iter().map(|(m, gb)| ((*m).to_string(), gb * GB)).collect();
+        WarmConfig {
+            weight: Arc::new(move |spec: &str| map.get(spec).copied()),
+            budget: Arc::new(move || budget_gb * GB),
+        }
+    }
+
+    #[tokio::test]
+    async fn warm_serves_a_second_model_without_disturbing_primary() {
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(16, &[("model-old", 2), ("warm-b", 2)]));
+        let lease = sb.enter(Some("warm-b")).await.expect("the warmable second model is served");
+        assert_eq!(lease.model_id, "warm-b");
+        assert_eq!(sb.generating.load(Ordering::SeqCst), 0, "a warm lease never touches primary generating");
+        assert_eq!(sb.warm.lock().await.get("warm-b").unwrap().inflight.load(Ordering::SeqCst), 1);
+        drop(lease);
+        assert_eq!(sb.warm.lock().await.get("warm-b").unwrap().inflight.load(Ordering::SeqCst), 0, "released on drop");
+        assert!(sb.current().is_some(), "the primary is untouched");
+    }
+
+    #[tokio::test]
+    async fn warm_falls_back_to_primary_when_it_doesnt_fit() {
+        // budget 4; primary 3 + requested 3 = 6 > 4 → oversubscribed → serve the primary.
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(4, &[("model-old", 3), ("big", 3)]));
+        let lease = sb.enter(Some("big")).await.expect("served");
+        assert_eq!(lease.model_id, "model-old", "a too-big model falls back to the primary");
+        assert_eq!(sb.generating.load(Ordering::SeqCst), 1, "the primary lease holds a token");
+        assert!(sb.warm.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn warm_skips_unknown_or_remote_models() {
+        // "claude-x" isn't a known cached local → not warmable → primary path (req.model informational).
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(16, &[("model-old", 2)]));
+        let lease = sb.enter(Some("claude-x")).await.expect("served");
+        assert_eq!(lease.model_id, "model-old");
+        assert!(sb.warm.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn warm_evicts_an_idle_model_to_make_room() {
+        // budget 4: primary(1) + one warm(2) fits; a second warm needs the first evicted.
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(4, &[("model-old", 1), ("A", 2), ("B", 2)]));
+        drop(sb.enter(Some("A")).await.expect("A warmed")); // A resident, then idle
+        assert!(sb.warm.lock().await.contains_key("A"));
+        drop(sb.enter(Some("B")).await.expect("B warmed")); // B needs room → evict idle A
+        let warm = sb.warm.lock().await;
+        assert!(warm.contains_key("B"), "B is now warm");
+        assert!(!warm.contains_key("A"), "idle A was evicted to fit B");
     }
 
     fn ok_builder() -> BackendBuilder {
@@ -2987,7 +3223,7 @@ mod tests {
         assert_eq!(g, 2, "generation bumps on unload");
         assert!(sb.current().is_none(), "model freed after unload");
         // A chat entering finds it unloaded and rebuilds it once.
-        let lease = sb.enter().await.expect("lazy reload should succeed");
+        let lease = sb.enter(None).await.expect("lazy reload should succeed");
         assert!(sb.current().is_some(), "model reloaded on demand");
         assert_eq!(
             sb.generating.load(Ordering::SeqCst),
@@ -3035,7 +3271,7 @@ mod tests {
     async fn enter_rejects_new_chats_while_shutting_down() {
         let sb = test_sb(Some(ok_builder()), true);
         sb.mark_shutting_down();
-        let err = sb.enter().await.err().expect("enter must reject during shutdown");
+        let err = sb.enter(None).await.err().expect("enter must reject during shutdown");
         assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             sb.generating.load(Ordering::SeqCst),
@@ -3091,7 +3327,7 @@ mod tests {
         let sb = test_sb(Some(ok_builder()), true);
         sb.draining.store(true, Ordering::SeqCst);
         let sb2 = Arc::clone(&sb);
-        let task = tokio::spawn(async move { sb2.enter().await.map(|_| ()) });
+        let task = tokio::spawn(async move { sb2.enter(None).await.map(|_| ()) });
         // While draining, enter must not complete.
         tokio::time::sleep(Duration::from_millis(120)).await;
         assert!(!task.is_finished(), "enter parked during drain");

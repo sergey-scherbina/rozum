@@ -674,7 +674,7 @@ fn latency_signal(
 }
 
 /// Total physical RAM in bytes — constant, probed once (macOS `sysctl hw.memsize`).
-fn total_ram_bytes() -> Option<u64> {
+pub fn total_ram_bytes() -> Option<u64> {
     static TOTAL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     *TOTAL.get_or_init(|| {
         let out = std::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output().ok()?;

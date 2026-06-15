@@ -1,5 +1,28 @@
 # Changelog
 
+## shared-gateway-multislot — Phase 2: the warm cache (on by default)
+Completed: 2026-06-15
+
+The shared gateway can now keep **more than one model resident** so two clients hitting two
+different local models don't thrash a single slot (`shared-gateway-multislot` Phase 2). It's an
+**additive warm cache** layered on the untouched single-resident core, **on by default** (opt out
+with `ROZUM_MULTISLOT=0`) and a **strict no-op for single-model traffic** — so the common
+Claude-Code/Codex case is byte-for-byte unchanged.
+
+`enter(req.model)` routes a request for a *different*, warmable model (a known cached local that
+fits the memory budget) to a **warm secondary resident**, built through the existing backend builder;
+admission and eviction run through the Phase-1 `resident::plan_residency` planner (keep the most
+useful that fit, evict the least-useful *idle* ones, fall back to a primary swap when a model's too
+big). A warm entry carries its **own in-flight counter**, decoupled from the primary `generating`,
+so warm traffic can never hold up a primary swap/unload drain; eviction is idle-only and drops the
+backend on a blocking thread (joins the `!Send` worker) like the existing unload. Any miss
+(unknown/remote model, won't fit, build failure) cleanly falls back to the primary path.
+
+`src/gateway.rs`; 4 tests via the mock-builder harness (serve-second-model, fall-back-when-too-big,
+skip-unknown/remote, evict-idle-to-make-room). 276/0. **Real-model validation** (two real models
+co-resident; eviction frees RAM) is the operator's to run — the spec lists the checklist. Deferred:
+idle-*timeout* warm eviction (today freed only under pressure) and persisting `UsageStats`.
+
 ## concurrency — shared cross-resident GPU gate
 Completed: 2026-06-15
 
