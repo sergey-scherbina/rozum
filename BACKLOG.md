@@ -449,11 +449,24 @@ just the model-service side; the SDK + tools are owned by the scalascript/busi s
   - Follow-up: genuinely *forcing* `required`/named (mask the model to start a tool call) — pairs
     with the constrained-decoding opener; deferred.
 
-- [ ] rozum-distributed-readiness - **P0b/P1 (rozum).** The gateway as a deployable,
-  horizontally-scalable, stateless service: health/readiness endpoints, clean
-  load-balancing (any instance serves any request), a model pool/router, graceful
-  drain. Partly exists (shared-gateway daemon, `concurrency::admit_wrap`, the launch
-  proxy's replay/retry) — consolidate into a documented "run rozum as a service" path.
+- [~] rozum-distributed-readiness - **P0b/P1 (rozum). Core SHIPPED 2026-06-15.** The gateway
+  as a deployable, horizontally-scalable, stateless service. Spec:
+  `docs/specs/distributed-readiness.md`.
+  - **Health/readiness endpoints**: `GET /health` (liveness — never touches the model) and
+    `GET /ready` (readiness — 200 servable / 503 while draining; body `{ready, loaded,
+    shutting_down, model}`). A transient swap-drain does NOT flip readiness (those park + succeed).
+  - **Graceful shutdown** on SIGTERM/SIGINT (`with_graceful_shutdown`): flip `/ready`→503 +
+    reject new chats (`enter()` 503 instead of parking), grace (`ROZUM_SHUTDOWN_GRACE_SECS`,
+    default 3) so the LB deregisters, then axum drains in-flight streams and exits — rolling-deploy
+    safe.
+  - **Stateless** documented: prefix-KV is a per-instance optimization, not affinity → no sticky
+    sessions; round-robin/least-conn is fine. Builds on the existing shared-gateway daemon +
+    `concurrency::admit_wrap` + the launch proxy replay/retry.
+  - Tests: `readiness_reflects_servability`, `shutdown_flips_readiness`,
+    `enter_rejects_new_chats_while_shutting_down`. 149/0.
+  - **Follow-ups** (out of scope here): a model pool/router serving multiple resident models with
+    size-class routing (`shared-gateway-multislot` + `concurrency-multi-instance`); cross-instance
+    admission coordination (`concurrency-cross-process`).
 
 - [ ] rozum-agent-runtime - **P0b (rozum, optional, DUAL-PURPOSE).** A Rust reference
   implementation of the agent loop (Contracts 2–3): `(backend, system, user,

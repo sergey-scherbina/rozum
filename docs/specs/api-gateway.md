@@ -32,11 +32,17 @@ Environment:
 
 | Method | Path | Dialect |
 |--------|------|---------|
+| `GET`  | `/health` | liveness (200 while the process serves HTTP) |
+| `GET`  | `/ready` | readiness (200 servable / 503 draining) |
 | `GET`  | `/v1/models` | OpenAI |
 | `POST` | `/v1/chat/completions` | OpenAI |
 | `POST` | `/v1/messages` | Anthropic |
 
 Bind address is always `127.0.0.1`. CORS is not required (local use only).
+
+`/health` and `/ready` separate liveness from readiness for an orchestrator / load
+balancer (see `distributed-readiness.md`): `/health` never touches the model, `/ready`
+returns 503 while the instance is draining for shutdown so traffic stops being routed to it.
 
 ### OpenAI Chat Completions — Request subset handled
 
@@ -165,6 +171,8 @@ just gets conformant `arguments`. See `constrained-tool-decoding.md`.
 - [x] Client disconnect → `CancellationToken.cancel()` via `CancelOnDrop` wrapper on stream drop.
 - [x] `ROZUM_GATEWAY_TOKEN` → 401 if missing or wrong; no auth if env var absent.
 - [x] Binds only to `127.0.0.1`.
+- [x] `GET /health` (liveness) and `GET /ready` (readiness, 503 while draining) for load-balanced deploys; see `distributed-readiness.md`.
+- [x] SIGTERM/SIGINT → graceful shutdown: flip `/ready` to 503, grace period, drain in-flight streams, exit (rolling-deploy safe).
 - [x] Unit tests: SSE stream lengths verified (6 tests pass), message/tool/system parsing, context overflow estimate.
 - [ ] E2E with real GGUF model (requires `--features gguf` + cmake + a local .gguf file).
 - [ ] E2E Claude Code / Codex (requires real GGUF loaded).
