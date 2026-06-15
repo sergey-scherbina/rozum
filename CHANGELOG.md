@@ -1,5 +1,26 @@
 # Changelog
 
+## cascade — the simple path: just list models, rozum builds the cascade
+Completed: 2026-06-15
+
+Configuring a cascade no longer needs a full spec — **just name the models** and rozum auto-orders
+and auto-policies them (`cascade-model-list`). `from_model_list(names)` classifies each name
+(`classify_model_name`: `claude…` → native Anthropic, `gpt…`/`o1…`/`o3…` → OpenAI, everything else →
+a local model) and orders them cheapest→most-capable — locals first (free, on-device) by parameter
+size (MoE ranked by *active* params, the `Nbit` quant suffix ignored), then remotes by provider tier
+(haiku/mini < sonnet/4o < opus/o1). The strategy defaults to `classify`, so simple requests start at
+the cheapest tier and hard ones start higher.
+
+Two ways in:
+- **A comma-separated model string** — `--model "qwen3-4b,claude-haiku-4-5,gpt-4o"`, or a request's
+  `"model"` — builds an auto-ordered cascade. One name = a plain model (not a cascade).
+- **The launch picker** now lists hosted **Anthropic + OpenAI** models alongside local ones, and
+  **multi-select** (e.g. `2 9 4`) forms a cascade from the chosen models.
+
+`build_remote_tier` defaults the OpenAI endpoint (`https://api.openai.com/v1`) so a bare `gpt-4o`
+resolves; `models::RECOMMENDED_REMOTE` is the picker's hosted-model catalog (you can also type any
+exact model id). `src/cascade/spec.rs` + `src/models.rs` + `src/main.rs`; 2 new tests. 258/0.
+
 ## cascade — named configs in rozum.toml ([cascade.<name>] tables)
 Completed: 2026-06-15
 

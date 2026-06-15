@@ -268,6 +268,13 @@ availability fallback (a mock backend that errors → the next available is chos
   attempts before it are not streamed to the client; only the winner is).
 - `/stats` gains a `cascade` block: per-tier attempt/accept/escalate counts, realized savings
   (vs always-frontier), avg escalations/request.
+- **Simple path (just list models):** a comma-separated `model` string — `--model
+  "qwen3-4b,claude-haiku-4-5,gpt-4o"` or a request's `"model"` — is auto-built into a cascade:
+  `from_model_list` classifies each name (local / Claude / OpenAI) and orders them
+  cheapest→most-capable (locals by parameter size, then remotes by provider tier), `classify`
+  strategy. The launch model-picker lists hosted Anthropic + OpenAI models too and multi-select forms
+  a cascade. **Shipped** (`classify_model_name` / `from_model_list` in `spec.rs`,
+  `build_cascade_from_list` in `main.rs`).
 - Config: a `CascadeSpec` (cost-ordered `TierSpec`s + `max_escalations` + `strategy`), loaded by
   name from the environment as JSON — `ROZUM_CASCADE` for the default `model: "cascade"`,
   `ROZUM_CASCADE_<NAME>` for `model: "cascade:<name>"`, **or** a `[cascade.<name>]` table in
