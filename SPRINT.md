@@ -217,6 +217,15 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   is **injectable** (`with_headroom_probe`) for a GPU-specific probe later / deterministic tests. 2
   new tests (low-headroom-holds-serial, probe-is-a-sane-fraction). 250/0. **`ConcurrencySample` is
   now fully fed** — overload, success, latency, quality, headroom.
+- [x] cascade-anthropic-tier - **DONE 2026-06-15** (`src/cascade/spec.rs` + `src/main.rs`).
+  Anthropic-native remote tier so a cascade can use Claude as the strong tier over `/v1/messages`
+  (not just an OpenAI-compatible proxy). `TierSpec` gained `api: RemoteApi {Openai (default),
+  Anthropic}`. `build_remote_tier` now branches: `anthropic` → `AnthropicHttpBackend` (default
+  endpoint `https://api.anthropic.com`, key from `ANTHROPIC_API_KEY` — required, tier skipped if
+  absent); else OpenAI-compatible (key from `OPENAI_API_KEY`). `api_key_env`/`endpoint` override the
+  defaults. 2 new tests (api in JSON round-trip, api reaches the resolver). 251/0. **Remaining
+  follow-ups**: a `rozum.toml [cascade]` schema (v1 is env JSON); P7 adaptive judge thresholds /
+  health-pattern persistence.
 
 #### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
 

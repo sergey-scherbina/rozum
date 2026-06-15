@@ -18,6 +18,17 @@ use serde::{Deserialize, Serialize};
 use super::{CascadeBackend, CascadeConfig, Lane, Location, ModelCard, RoutingStrategy};
 use crate::backend::ChatBackend;
 
+/// The remote wire protocol for a tier.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteApi {
+    /// OpenAI-compatible `/v1/chat/completions` (OpenAI, OpenRouter, LM Studio, mlx_lm.server, …).
+    #[default]
+    Openai,
+    /// Anthropic-native `/v1/messages` (Claude).
+    Anthropic,
+}
+
 /// One cascade tier — a model spec the resolver turns into a backend, plus its placement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TierSpec {
@@ -31,10 +42,15 @@ pub struct TierSpec {
     /// Residency pool override (Phase 6). `None` → [`Lane::default_for`] the location.
     #[serde(default)]
     pub pool: Option<String>,
-    /// Remote only: the OpenAI-/Anthropic-compatible HTTP endpoint.
+    /// Remote only: the wire protocol (default OpenAI-compatible; `anthropic` for native Claude).
+    #[serde(default)]
+    pub api: RemoteApi,
+    /// Remote only: the HTTP endpoint. Optional for `anthropic` (defaults to
+    /// `https://api.anthropic.com`); required for an OpenAI-compatible remote.
     #[serde(default)]
     pub endpoint: Option<String>,
-    /// Remote only: the environment variable holding the API key.
+    /// Remote only: the environment variable holding the API key (defaults per `api`:
+    /// `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`).
     #[serde(default)]
     pub api_key_env: Option<String>,
 }
@@ -165,7 +181,14 @@ mod tests {
     }
 
     fn tier(model: &str, location: Location) -> TierSpec {
-        TierSpec { model: model.into(), location, pool: None, endpoint: None, api_key_env: None }
+        TierSpec {
+            model: model.into(),
+            location,
+            pool: None,
+            api: RemoteApi::default(),
+            endpoint: None,
+            api_key_env: None,
+        }
     }
 
     #[test]
@@ -182,8 +205,7 @@ mod tests {
         let s: CascadeSpec = serde_json::from_value(json!({
             "tiers": [
                 {"model": "local-small"},
-                {"model": "claude-haiku-4-5", "location": "remote",
-                 "endpoint": "https://api.anthropic.com", "api_key_env": "ANTHROPIC_API_KEY"}
+                {"model": "claude-haiku-4-5", "location": "remote", "api": "anthropic"}
             ],
             "max_escalations": 1,
             "strategy": "classify"
@@ -191,7 +213,9 @@ mod tests {
         .unwrap();
         assert_eq!(s.tiers.len(), 2);
         assert_eq!(s.tiers[0].location, Location::Local); // defaulted
+        assert_eq!(s.tiers[0].api, RemoteApi::Openai); // defaulted
         assert_eq!(s.tiers[1].location, Location::Remote);
+        assert_eq!(s.tiers[1].api, RemoteApi::Anthropic);
         assert!(matches!(s.strategy, StrategyName::Classify));
         assert_eq!(s.max_escalations, Some(1));
     }
@@ -251,6 +275,28 @@ mod tests {
         };
         let r = build_cascade(&spec, |_t| async move { None }).await;
         assert!(r.is_err(), "an all-unavailable cascade is an error, not an empty backend");
+    }
+
+    #[tokio::test]
+    async fn api_kind_reaches_the_resolver() {
+        // The wire protocol flows through build_cascade to the resolver, where the gateway picks
+        // the Anthropic vs OpenAI backend.
+        let mut t = tier("claude-haiku-4-5", Location::Remote);
+        t.api = RemoteApi::Anthropic;
+        let spec =
+            CascadeSpec { tiers: vec![t], max_escalations: None, strategy: StrategyName::default() };
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen2 = std::sync::Arc::clone(&seen);
+        let be = build_cascade(&spec, move |t: TierSpec| {
+            let seen2 = std::sync::Arc::clone(&seen2);
+            async move {
+                *seen2.lock().unwrap() = Some(t.api);
+                Some(Arc::new(Echo("x")) as Arc<dyn ChatBackend>)
+            }
+        })
+        .await;
+        assert!(be.is_ok());
+        assert_eq!(*seen.lock().unwrap(), Some(RemoteApi::Anthropic));
     }
 
     #[tokio::test]

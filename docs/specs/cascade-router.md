@@ -267,12 +267,12 @@ availability fallback (a mock backend that errors → the next available is chos
   (vs always-frontier), avg escalations/request.
 - Config: a `CascadeSpec` (cost-ordered `TierSpec`s + `max_escalations` + `strategy`), loaded by
   name from the environment as JSON — `ROZUM_CASCADE` for the default `model: "cascade"`,
-  `ROZUM_CASCADE_<NAME>` for `model: "cascade:<name>"`. Each tier is `{model, location, pool?,
+  `ROZUM_CASCADE_<NAME>` for `model: "cascade:<name>"`. Each tier is `{model, location, pool?, api?,
   endpoint?, api_key_env?}`; locals resolve through the gateway's normal build chain, remotes through
-  the OpenAI-compatible HTTP backend with the env-named key. A tier that can't be built is skipped
-  (a partial config still runs). **Shipped** (`src/cascade/spec.rs`, `build_cascade` + the
-  `build_cascade_backend` hook in `main.rs`). *Follow-up*: a `rozum.toml [cascade]` schema and an
-  Anthropic-native remote tier.
+  either an OpenAI-compatible HTTP backend or — with `api: "anthropic"` — the native Claude
+  `/v1/messages` backend (default endpoint + `ANTHROPIC_API_KEY`). A tier that can't be built is
+  skipped (a partial config still runs). **Shipped** (`src/cascade/spec.rs`, `build_cascade` + the
+  `build_cascade_backend` hook in `main.rs`). *Follow-up*: a `rozum.toml [cascade]` schema.
 
 ## Design notes
 
@@ -300,8 +300,8 @@ controller's ceiling), opt-in via `ROZUM_ADAPTIVE_CONCURRENCY=1`, and is fed by 
 set**: overload, throughput (success), latency (a per-token baseline → ratio), answer quality
 (`ChatBackend::report_quality`, the cascade's verdict), and free-memory headroom
 (`system_memory_headroom`, back off before an OOM). Follow-ups (non-blocking): P7 adaptive judge
-thresholds / health-pattern persistence; an Anthropic-native remote tier + a `rozum.toml [cascade]`
-schema.
+thresholds / health-pattern persistence; a `rozum.toml [cascade]` schema (config now via env JSON,
+with OpenAI-compatible **and** native-Anthropic remote tiers).
 
 1. **Registry + pure cascade + L0 structural acceptance.** Caller-supplied list, `AlwaysCheapest`,
    escalate on error/structural-fail, single-model passthrough. Local→remote tiers via existing
