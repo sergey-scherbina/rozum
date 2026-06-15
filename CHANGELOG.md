@@ -1,5 +1,28 @@
 # Changelog
 
+## cascade — Phase 6: parallel residency lanes
+Completed: 2026-06-15
+
+The cascade now **parallelizes by difficulty without blocking** (`cascade-p6-scheduler`). Concurrent
+requests already ran as independent futures; what they must not do is contend for the same scarce
+local memory. A simple request on the small fast model must never be stuck behind a complex request
+on the big one, and remote (HTTP) requests should parallelize freely.
+
+A **lane** is a residency group. `Lane { Pool(name), Free }` per `ModelCard`; `Lane::default_for`
+puts every local in one shared `"local"` pool (one GPU, mutually exclusive) and every remote in
+`Free`. `LaneSet` holds one semaphore per pool. The cascade `enter`s a model's lane before each
+attempt and holds the permit **only for that attempt** (freed on escalation), so co-residents
+serialize (single-resident = 1 slot) while a request in a *different* lane — or any remote — runs in
+parallel. Multi-resident (co-residency / multi-GPU) is the same code with `residency_slots[pool] > 1`.
+
+The scheduler sits **above** per-backend admission (`concurrency::admit_wrap`): it owns lane
+assignment and delegates within-lane concurrency to the backend. The default (one 1-slot local pool)
+is safe on a single-GPU box and leaves every existing single-request path unchanged.
+
+`src/cascade/scheduler.rs`; 6 new tests (5 `LaneSet` unit incl. distinct-pools-parallel,
+same-pool-serialize-then-free, multi-resident slots; 1 e2e where a simple + a hard request on
+distinct lanes meet at a shared barrier — proving they ran concurrently). 218/0.
+
 ## cascade — Phase 5: difficulty classifier → ClassifyThenStart
 Completed: 2026-06-15
 

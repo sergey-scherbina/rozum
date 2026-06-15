@@ -13,14 +13,17 @@ mod acceptance;
 mod classifier;
 mod health;
 mod judge;
+mod scheduler;
 mod self_signal;
 
 pub use acceptance::{AcceptanceCheck, StructuralCheck, TurnOutcome, Verdict};
 pub use classifier::{Classifier, HeuristicClassifier, RoutingStrategy};
 pub use health::{classify, FailReason, HealthRegistry, HealthState};
 pub use judge::{HeuristicJudge, Judge, JudgeConfig, ModelJudge};
+pub use scheduler::{Lane, LaneSet};
 pub use self_signal::{escalation_tools, EscalationAffordance, SelfSignalCheck};
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -46,6 +49,9 @@ pub struct ModelCard {
     pub backend: Arc<dyn ChatBackend>,
     pub tier: u32,
     pub location: Location,
+    /// The residency lane this model competes in (Phase 6). Co-residents share a [`Lane::Pool`]
+    /// and are serialized; remotes are [`Lane::Free`]. See [`Lane::default_for`].
+    pub lane: Lane,
 }
 
 /// Bounds on how far a request may escalate.
@@ -76,6 +82,9 @@ pub struct CascadeConfig {
     pub strategy: RoutingStrategy,
     /// The difficulty classifier for `ClassifyThenStart` (`None` → the built-in heuristic).
     pub classifier: Option<Box<dyn Classifier>>,
+    /// Per-pool concurrent residency slots (Phase 6). Unlisted pools default to `1`
+    /// (single-resident); raise a pool's count for co-resident models (multi-resident).
+    pub residency_slots: HashMap<String, usize>,
 }
 
 impl CascadeConfig {
@@ -90,6 +99,7 @@ impl CascadeConfig {
             judge: None,
             strategy: RoutingStrategy::AlwaysCheapest,
             classifier: None,
+            residency_slots: HashMap::new(),
         }
     }
 }
@@ -99,12 +109,17 @@ impl CascadeConfig {
 pub struct CascadeBackend {
     config: CascadeConfig,
     health: HealthRegistry,
+    /// Residency lanes, shared across all concurrent requests so co-residents serialize while
+    /// different lanes (and remotes) run in parallel (Phase 6).
+    lanes: LaneSet,
 }
 
 impl CascadeBackend {
     pub fn new(mut config: CascadeConfig) -> Self {
         config.models.sort_by_key(|m| m.tier);
-        Self { config, health: HealthRegistry::new() }
+        let lanes =
+            LaneSet::new(config.models.iter().map(|m| &m.lane), &config.residency_slots);
+        Self { config, health: HealthRegistry::new(), lanes }
     }
 
     /// The shared health registry (observability / tests).
@@ -240,6 +255,10 @@ impl ChatBackend for CascadeBackend {
                 Some(aff) if idx != last_idx => self_signal::inject_affordance(req.clone(), aff),
                 _ => req.clone(),
             };
+            // Enter the model's residency lane: co-residents serialize here, but a request in a
+            // different lane (or a remote) is never blocked. Held only for this attempt; freed on
+            // escalation so the next tier (or a waiting concurrent request) can take the slot.
+            let _lane = self.lanes.enter(&card.lane).await;
             let outcome = run_attempt(&card.backend, attempt_req).await;
             if let Some(e) = &outcome.error {
                 let reason = classify(e);
@@ -360,6 +379,7 @@ mod tests {
             id: id.to_string(),
             tier,
             location,
+            lane: Lane::default_for(location),
             backend: Arc::new(Mock { script, calls: calls.clone() }),
         };
         (mc, calls)
@@ -610,5 +630,81 @@ mod tests {
         let ans = TurnOutcome { text: "an answer".into(), ..Default::default() };
         let score = j.score(&ChatRequest::simple("q"), &ans).await;
         assert!((score - 0.8).abs() < 1e-3, "8/10 → 0.8, got {score}");
+    }
+
+    // ── Phase 6: parallel residency lanes ───────────────────────────────────
+
+    /// A backend that blocks at a shared barrier before answering. Two of them complete only if
+    /// *both* reach the barrier — i.e. only if they ran concurrently. If the cascade serialized
+    /// them into one lane, the first would wait at the barrier forever (the second never starts).
+    struct BarrierMock {
+        barrier: Arc<tokio::sync::Barrier>,
+        text: &'static str,
+    }
+
+    #[async_trait]
+    impl ChatBackend for BarrierMock {
+        async fn chat(&self, _req: ChatRequest) -> ModelResult<ChatStream> {
+            self.barrier.wait().await;
+            let evs: Vec<ModelResult<ChatEvent>> = vec![
+                Ok(ChatEvent::TextDelta { text: self.text.into() }),
+                Ok(ChatEvent::Done {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    stop_reason: StopReason::EndTurn,
+                }),
+            ];
+            Ok(Box::pin(futures::stream::iter(evs)))
+        }
+        fn context_window(&self) -> u32 {
+            u32::MAX
+        }
+    }
+
+    fn barrier_card(
+        id: &str,
+        tier: u32,
+        pool: &str,
+        barrier: Arc<tokio::sync::Barrier>,
+        text: &'static str,
+    ) -> ModelCard {
+        ModelCard {
+            id: id.into(),
+            tier,
+            location: Location::Local,
+            lane: Lane::Pool(pool.into()),
+            backend: Arc::new(BarrierMock { barrier, text }),
+        }
+    }
+
+    #[tokio::test]
+    async fn different_lanes_run_concurrently() {
+        // A simple request (→ cheap, lane "small") and a hard request (→ strong, lane "big") are
+        // dispatched at once. Distinct lanes ⇒ both acquire their permits and meet at the barrier;
+        // a single global lane would deadlock one of them. ClassifyThenStart does the routing.
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let cheap = barrier_card("cheap", 0, "small", barrier.clone(), "easy");
+        let strong = barrier_card("strong", 1, "big", barrier.clone(), "hard");
+        let mut cfg = CascadeConfig::new(vec![cheap, strong]);
+        cfg.strategy = RoutingStrategy::ClassifyThenStart;
+        let be = Arc::new(CascadeBackend::new(cfg));
+
+        let be1 = be.clone();
+        let simple = tokio::spawn(async move {
+            collect(be1.chat(ChatRequest::simple("hi")).await.unwrap()).await
+        });
+        let be2 = be.clone();
+        let hard = tokio::spawn(async move {
+            let prompt = "```\nfn solve() {}\n```\nprove the theorem step by step and analyze";
+            collect(be2.chat(ChatRequest::simple(prompt)).await.unwrap()).await
+        });
+
+        let joined = tokio::time::timeout(Duration::from_secs(2), async {
+            (simple.await.unwrap(), hard.await.unwrap())
+        })
+        .await;
+        let (s, h) = joined.expect("distinct lanes must run concurrently (else the barrier hangs)");
+        assert_eq!(s, "easy", "the simple request was served by the cheap/small lane");
+        assert_eq!(h, "hard", "the hard request was served by the strong/big lane, in parallel");
     }
 }
