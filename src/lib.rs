@@ -22,6 +22,7 @@ pub mod proxy;
 pub mod rag_lite;
 pub mod resident;
 pub mod sampler;
+pub mod service;
 pub mod share;
 pub mod telegram;
 pub mod tui;

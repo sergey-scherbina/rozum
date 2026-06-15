@@ -287,6 +287,12 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   inversion (admit-then-gate), composes with cascade lanes + adaptive ceiling, no-op for a single
   resident (gate ≥ cap) → safe default-on. 2 tests. 272/0. Size-class routing = cascade lanes +
   multislot residency; shared memory budget = multislot Phase 2.
+- [x] shared-gateway-service - **DONE 2026-06-15** (`src/service.rs` + `src/main.rs`). `rozum service
+  {install,uninstall,status}` registers the gateway as an always-warm user service (launchd / `systemd
+  --user`) instead of lazy spawn + idle-exit. `--model` repeatable/cascade + `--port/--n-ctx/--offline/
+  --strategy`; `ROZUM_CASCADE`/`ROZUM_CONFIG` captured. Pure plist/unit generation in the tested
+  `service` module (4 tests); binary drives `launchctl`/`systemctl` (operator-validated). Also
+  re-closed `streaming-output` (lost backlog doc-edit). 282/0.
 - [x] docs-hygiene - **DONE 2026-06-15.** Two doc items. `portability-new-backend-checklist`: the
   add-a-backend recipe written down (`docs/specs/portability-and-the-backend-spi.md`). `prompt-policy`:
   a documented decision (`docs/specs/prompt-policy.md`) — the gateway is a transparent provider, no

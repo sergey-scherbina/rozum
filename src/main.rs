@@ -225,6 +225,39 @@ enum Command {
         #[command(subcommand)]
         action: ModelsAction,
     },
+
+    /// Install the gateway as an always-warm user service (launchd / systemd --user),
+    /// instead of the lazy-spawn + idle-exit default.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Generate + install + start the service (runs `rozum gateway --model …` at login).
+    Install {
+        /// Model spec(s); repeatable (or one comma value) to run a cascade. Same as `gateway --model`.
+        #[arg(long)]
+        model: Vec<String>,
+        /// Context window in tokens.
+        #[arg(long)]
+        n_ctx: Option<u32>,
+        /// Gateway port (default 8089).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Only local models (sets `ROZUM_OFFLINE` in the service env).
+        #[arg(long)]
+        offline: bool,
+        /// Cascade start-tier strategy (`classify` | `learned` | `cheapest`).
+        #[arg(long)]
+        strategy: Option<String>,
+    },
+    /// Stop + uninstall the service.
+    Uninstall,
+    /// Show the service status.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -468,6 +501,9 @@ async fn main() {
         }
         Some(Command::Models { action }) => {
             run_models(action).await;
+        }
+        Some(Command::Service { action }) => {
+            run_service(action);
         }
         Some(Command::Telegram { room, name }) => {
             let token = std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_else(|_| {
@@ -1915,6 +1951,145 @@ async fn run_info(spec: &str) {
             }
         }
     }
+}
+
+/// `rozum service {install,uninstall,status}` — install the gateway as an always-warm user service.
+/// The plist/unit *generation* is the library's tested `rozum::service`; here we write the file and
+/// drive `launchctl` / `systemctl`. Spec: `docs/specs/shared-gateway-service.md`.
+fn run_service(action: ServiceAction) {
+    match action {
+        ServiceAction::Install { model, n_ctx, port, offline, strategy } => {
+            let Some(model) = join_models(model) else {
+                eprintln!("rozum service install: --model is required (the model the service serves)");
+                std::process::exit(2);
+            };
+            let program = match std::env::current_exe() {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                Err(e) => {
+                    eprintln!("rozum service: cannot resolve own executable path: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let mut args: Vec<String> = vec!["gateway".into()];
+            for m in model.split(',').map(str::trim).filter(|m| !m.is_empty()) {
+                args.push("--model".into());
+                args.push(m.to_string());
+            }
+            if let Some(n) = n_ctx {
+                args.push("--n-ctx".into());
+                args.push(n.to_string());
+            }
+            if let Some(p) = port {
+                args.push("--port".into());
+                args.push(p.to_string());
+            }
+            if offline {
+                args.push("--offline".into());
+            }
+            if let Some(s) = &strategy {
+                args.push("--strategy".into());
+                args.push(s.clone());
+            }
+            // Inherit the cascade config env so a named/JSON cascade keeps working under the service.
+            let mut env: Vec<(String, String)> = Vec::new();
+            for k in ["ROZUM_CASCADE", "ROZUM_CONFIG"] {
+                if let Ok(v) = std::env::var(k) {
+                    env.push((k.to_string(), v));
+                }
+            }
+            install_service(&program, &args, &env);
+        }
+        ServiceAction::Uninstall => uninstall_service(),
+        ServiceAction::Status => status_service(),
+    }
+}
+
+/// Print whether the external command succeeded.
+fn report_status(st: std::io::Result<std::process::ExitStatus>, ok_msg: &str) {
+    match st {
+        Ok(s) if s.success() => eprintln!("{ok_msg}"),
+        Ok(s) => {
+            eprintln!("rozum service: command exited with status {s}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("rozum service: failed to run the service manager: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_service(program: &str, args: &[String], env: &[(String, String)]) {
+    let plist = rozum::service::launchd_plist(program, args, env);
+    let path = rozum::service::launchd_plist_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = rozum::share::ensure_dir(); // the service.log dir
+    if let Err(e) = std::fs::write(&path, plist) {
+        eprintln!("rozum service: write {}: {e}", path.display());
+        std::process::exit(1);
+    }
+    let ps = path.to_string_lossy();
+    let _ = std::process::Command::new("launchctl").args(["unload", &ps]).status(); // idempotent
+    let st = std::process::Command::new("launchctl").args(["load", "-w", &ps]).status();
+    report_status(st, &format!("installed + started launchd service → {}", path.display()));
+}
+
+#[cfg(target_os = "macos")]
+fn uninstall_service() {
+    let path = rozum::service::launchd_plist_path();
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", "-w", &path.to_string_lossy()])
+        .status();
+    let _ = std::fs::remove_file(&path);
+    eprintln!("uninstalled launchd service ({})", path.display());
+}
+
+#[cfg(target_os = "macos")]
+fn status_service() {
+    let st = std::process::Command::new("launchctl").args(["list", rozum::service::SERVICE_LABEL]).status();
+    if !matches!(st, Ok(s) if s.success()) {
+        eprintln!("rozum service: not installed (launchctl list found no {})", rozum::service::SERVICE_LABEL);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_service(program: &str, args: &[String], env: &[(String, String)]) {
+    let unit = rozum::service::systemd_unit(program, args, env);
+    let path = rozum::service::systemd_unit_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = rozum::share::ensure_dir();
+    if let Err(e) = std::fs::write(&path, unit) {
+        eprintln!("rozum service: write {}: {e}", path.display());
+        std::process::exit(1);
+    }
+    let _ = std::process::Command::new("systemctl").args(["--user", "daemon-reload"]).status();
+    let st = std::process::Command::new("systemctl")
+        .args(["--user", "enable", "--now", rozum::service::SYSTEMD_UNIT])
+        .status();
+    report_status(st, &format!("installed + started systemd --user service → {}", path.display()));
+}
+
+#[cfg(not(target_os = "macos"))]
+fn uninstall_service() {
+    let path = rozum::service::systemd_unit_path();
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "disable", "--now", rozum::service::SYSTEMD_UNIT])
+        .status();
+    let _ = std::fs::remove_file(&path);
+    let _ = std::process::Command::new("systemctl").args(["--user", "daemon-reload"]).status();
+    eprintln!("uninstalled systemd --user service ({})", path.display());
+}
+
+#[cfg(not(target_os = "macos"))]
+fn status_service() {
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "status", rozum::service::SYSTEMD_UNIT])
+        .status();
 }
 
 /// A [`rozum::gateway::BackendBuilder`] over this binary's backend-selection

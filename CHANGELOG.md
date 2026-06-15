@@ -1,5 +1,22 @@
 # Changelog
 
+## gateway — install as an always-warm user service (+ closed streaming-output)
+Completed: 2026-06-15
+
+`rozum service {install,uninstall,status}` registers the local gateway as a **user service** —
+launchd on macOS, `systemd --user` on Linux — so it starts at login and is kept alive, instead of
+the lazy-spawn + idle-exit default (`shared-gateway-service`). `--model` is repeatable / comma
+(a cascade), with `--port/--n-ctx/--offline/--strategy`; `ROZUM_CASCADE`/`ROZUM_CONFIG` from the
+installing shell are captured into the service environment so a named/JSON cascade keeps working.
+
+The plist / unit **generation** is a pure, unit-tested library module (`src/service.rs` —
+`launchd_plist`, `systemd_unit`, the install paths; XML-escaped values, `RunAtLoad`+`KeepAlive` /
+`Restart=on-failure`). The binary writes the file and drives `launchctl` / `systemctl` (operator
+runs it — it touches the real service manager). `docs/specs/shared-gateway-service.md`; 4 tests.
+
+Also re-closed `streaming-output` (a backlog doc-edit lost in an earlier branch shuffle): the gateway
+already streams token-by-token on all three dialects. 282/0.
+
 ## shared-gateway-multislot — warm idle eviction + persisted usefulness
 Completed: 2026-06-15
 
