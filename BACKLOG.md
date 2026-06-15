@@ -622,7 +622,10 @@ features the mistralrs backend shipped that the native backend does NOT yet have
   difficulty-routed to lanes that run non-blocking (simple→small, complex→big, in parallel) — subsumes
   `concurrency-multi-instance` and drives `shared-gateway-multislot`. `CascadeBackend: ChatBackend` on
   the existing `BackendOrchestrator`; remote tiers are the `openai_http`/`anthropic_http` backends.
-  6 phases (registry+pure-cascade+L0 first, deterministic/model-free). Plan + Phase 1 next.
+  Also **resilient**: transient model health (quota / rate-limit / down / network / OOM) tracked
+  adaptively with backoff → route to the best AVAILABLE model (remote down → local; big-local OOM →
+  smaller), auto-recover, never hard-fail. 7 phases (registry+pure-cascade+L0 first, then
+  availability/health; both deterministic/model-free). Plan + Phase 1 next.
 
 - [x] gateway-openai-responses-api — **DONE.** `POST /v1/responses` (the OpenAI Responses API)
   so the **Codex CLI** (≥ 0.137, which dropped `wire_api="chat"`) can use the gateway.

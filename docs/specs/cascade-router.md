@@ -17,6 +17,13 @@ fleet is **scheduled in parallel**: each concurrent request is routed to the tie
 difficulty warrants, and the cheap lane and the heavy lane run concurrently so a simple
 request never waits behind a complex one.
 
+It is also **resilient**: model availability is transient — a remote can hit its token quota
+(hourly/weekly/monthly), get rate-limited under load, go down, or the network drops; a big local
+can OOM. The router tracks this as live, adaptive health, routes around a model that's failing
+*right now* to the best **available** alternative (a remote outage → a local; a big-local OOM → a
+smaller one), and recovers automatically when the model comes back — "do what we can with what's
+available," never a hard failure while any model can serve.
+
 ## Scope
 
 New, mostly self-contained, composing what already exists:
@@ -109,6 +116,40 @@ reason).
 - **Learned** — a data-driven `(task-class → start tier)` map (a bandit/threshold over the stats)
   layered on the classifier; adapts the start tier as evidence accumulates.
 
+### Availability & health (transient, adaptive)
+
+Quality-escalation goes *up*; **availability routing goes to the best model usable right now**,
+which may be sideways or *down* (a remote that's failing → a local; a big local that OOM'd → a
+smaller one). A model's availability is **transient** — it fails and recovers — so it's tracked
+as runtime health, not a static property, with backoff and persisted history.
+
+```rust
+struct Health { state: HealthState, reason: FailReason, cooldown_until: Instant, fails: u32 }
+enum HealthState { Healthy, Degraded, Unavailable }   // Degraded = recently flaky / half-open
+enum FailReason { None, RateLimited, QuotaExhausted, Down, Network, OutOfMemory, Unknown }
+```
+
+- **Error classification.** Each backend error maps to a `FailReason` + a backoff: HTTP 429 →
+  `RateLimited` (short backoff); 401/403 or a quota message → `QuotaExhausted` (long backoff —
+  to the hour/day boundary if known); 5xx / timeout → `Down`; connection/DNS error → `Network`
+  (applies to *all* remote tiers at once — the internet is gone); a local OOM → `OutOfMemory`
+  for *that* model only (a smaller local still fits).
+- **Selection respects health.** At every step the candidate set is the configured list **minus
+  models in cooldown**, ordered by cost; pick the start tier (per strategy) among the *available*
+  ones. So a configured order `[small-local, big-local, cheap-remote, frontier]` with the two
+  remotes in cooldown degrades to the locals automatically; with all locals OOM-capped it uses
+  the smallest that fits.
+- **Recovery is automatic** (transient): `cooldown_until` expires → the model goes `Degraded`
+  (half-open) and is retried on the next eligible request; a success → `Healthy`, another failure
+  → re-`Unavailable` with a longer backoff (exponential + jitter). No manual reset.
+- **Graceful degradation, never hard-fail.** If the *ideal* tier is unavailable, answer with the
+  best available model rather than erroring — "do what we can with what's available." Only when
+  *no* candidate is available does the request error.
+- **Persisted + adaptive.** Health *events* (when/why a model failed and recovered) go in the
+  stats store, so patterns carry forward across restarts (e.g. a model that reliably exhausts
+  its monthly quota near month-end can be deprioritized proactively, and typical recovery times
+  tune the backoff). Health is also a routing signal the `Learned` strategy can weight.
+
 ### Parallel scheduling (lanes)
 
 Concurrent requests are dispatched by difficulty so the cheap lane and the heavy lane run
@@ -125,10 +166,12 @@ Concurrent requests are dispatched by difficulty so the cheap lane and the heavy
 
 ### Stats store (static + learned)
 
-Per `(task-class, model)`: accepted / escalated counts, latency, realized cost, judge-score.
-Persisted as JSONL (`memory_store` pattern) and replayed on start. Feeds: judge thresholds, the
-`Learned` start-tier map, the registry's measured `speed`, and the cost-vs-latency weighting.
-`task-class` v1 buckets: `{freeform, structured, tool-use}` × a coarse difficulty label.
+Per `(task-class, model)`: accepted / escalated counts, latency, realized cost, judge-score,
+**plus health events** (failure `FailReason` + timestamp, and recovery). Persisted as JSONL
+(`memory_store` pattern) and replayed on start. Feeds: judge thresholds, the `Learned` start-tier
+map, the registry's measured `speed`, the cost-vs-latency weighting, and the availability backoff
++ proactive deprioritization. `task-class` v1 buckets: `{freeform, structured, tool-use}` × a
+coarse difficulty label.
 
 ### Escalation as a tool (optional, agent mode)
 
@@ -139,18 +182,27 @@ agent runtime (`run_agent` + `MultiToolSource`). This is L1 made explicit + mode
 ## Behavior
 
 1. Resolve the `CascadeConfig` for the request (named / inline / default). 1 model → passthrough.
-2. **Start tier** = `strategy`'s choice (0 for `AlwaysCheapest`; classifier/learned otherwise).
-3. **Dispatch** the request to the start tier's **lane** (concurrent with other lanes).
+2. **Available set** = the configured list minus models in health cooldown (§ Availability).
+   **Start tier** = `strategy`'s choice over the available set (0 for `AlwaysCheapest`).
+3. **Dispatch** the request to the chosen model's **lane** (concurrent with other lanes).
 4. Run the model; collect the `Turn` (text / tool calls / structured output).
-5. **Acceptance pipeline** (L0→L1→L2, enabled+ordered): `Accept` → return; `Escalate` → tier+1.
-6. Repeat from 3 at the next tier until `Accept`, the list is exhausted, or `budget` is hit
-   (max escalations / wall-time / $). On exhaustion return the **best answer so far** (highest
-   judge-score / last tier) with a `cascade` trailer in the response metadata.
-7. **Record stats** for each attempt `(task-class, model, accepted?, latency, cost, score)`.
-8. The response carries which model finally answered + the escalation path (observability).
+   - On a backend **error**: classify it → update the model's `Health` (cooldown + backoff) →
+     re-select the best **available** candidate (which may be a cheaper local — sideways/down,
+     not just up) and go to 3. A `Network` error parks all remote tiers at once.
+5. **Acceptance pipeline** (L0→L1→L2, enabled+ordered): `Accept` → return; `Escalate` → the next
+   *available* tier up; `Inconclusive` → `Accept`.
+6. Repeat from 3 until `Accept`, the available list is exhausted, or `budget` is hit (max
+   escalations / wall-time / $). On exhaustion return the **best answer so far** (highest
+   judge-score / last tier) with a `cascade` trailer in the response metadata. Only if *no*
+   candidate was ever available does the request error.
+7. **Record stats** for each attempt `(task-class, model, accepted?, latency, cost, score)` and
+   any health transition.
+8. The response carries which model finally answered + the path taken (escalations + any
+   availability fallbacks), for observability.
 
-Determinism: with `temperature: 0` and `AlwaysCheapest` + only L0 (structural), the whole thing
-is deterministic and model-free testable end-to-end.
+Determinism: with `temperature: 0`, `AlwaysCheapest`, only L0 (structural), and all models
+healthy, the whole thing is deterministic and model-free testable end-to-end — including the
+availability fallback (a mock backend that errors → the next available is chosen deterministically).
 
 ## Interface (surface)
 
@@ -183,12 +235,17 @@ Each phase ships value and is testable; early phases are deterministic/model-fre
    escalate on error/structural-fail, single-model passthrough. Local→remote tiers via existing
    backends. Model-free e2e with mock backends (a cheap one that fails L0, a strong one that
    passes). The deterministic core.
-2. **L1 self-signal + the `escalate`/`consult_stronger` tool.**
-3. **L2 cheap judge** (next-cheapest-local + heuristic; pluggable).
-4. **Difficulty classifier → `ClassifyThenStart`.**
-5. **Parallel scheduler / lanes** (per-request difficulty routing, non-blocking lanes; residency
+2. **Availability & health-aware routing.** Error classification → `Health` (cooldown + exp
+   backoff + jitter), skip models in cooldown, best-available selection (sideways/down fallback),
+   graceful degradation, automatic half-open recovery. Model-free e2e: a "remote" mock that errors
+   (429 / network) → falls to a healthy "local" mock; OOM on the big mock → the small mock.
+3. **L1 self-signal + the `escalate`/`consult_stronger` tool.**
+4. **L2 cheap judge** (next-cheapest-local + heuristic; pluggable).
+5. **Difficulty classifier → `ClassifyThenStart`.**
+6. **Parallel scheduler / lanes** (per-request difficulty routing, non-blocking lanes; residency
    policy — single-resident first, then multi-resident with `ConcurrencyBudget`).
-6. **Learned stats + adaptive thresholds/start-tier** (the `Learned` strategy; persisted JSONL).
+7. **Learned stats + adaptive thresholds/start-tier + persisted health patterns** (the `Learned`
+   strategy; JSONL carried across restarts).
 
 ## Decisions
 
@@ -200,6 +257,12 @@ Each phase ships value and is testable; early phases are deterministic/model-fre
 - The client sees only the **winning** model's stream, plus metadata of the path taken.
 - Judge default = the **next-cheapest local model** + a heuristic, not a dedicated expensive judge
   (keep the verifier cheaper than the escalation target).
+- **Availability is transient, not static**: a failing model is put in timed cooldown and probed
+  again (half-open), never permanently blacklisted. Backoff length scales with the `FailReason`
+  (rate-limit short; quota long, to a known reset boundary; network applies to all remotes at once).
+- **Availability trumps the cost order** for *unavailable* models: routing always falls to the best
+  *usable* model, even sideways/down (remote down → local; big-local OOM → smaller local) — "do
+  what we can with what's available," and only hard-fail when nothing is available.
 
 ## Out of scope (for now)
 
