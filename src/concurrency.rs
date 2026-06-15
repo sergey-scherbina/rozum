@@ -525,6 +525,11 @@ pub fn note_backend_error(scheduler: &AdmissionScheduler, err: &ModelError) {
 /// Wraps any [`ChatBackend`] with admission control, backpressure, and the
 /// circuit breaker. Construct directly, or use [`admit_wrap`] to apply it only to
 /// backends that advertise a capacity.
+/// A free-memory-headroom probe `() -> Option<f32>` (fraction `[0,1]`, `None` = unavailable). The
+/// adaptive loop calls it per completed request to back off before an OOM. Defaults to
+/// [`system_memory_headroom`]; pluggable for tests or a GPU-specific probe later.
+pub type HeadroomProbe = Arc<dyn Fn() -> Option<f32> + Send + Sync>;
+
 pub struct AdmittingBackend {
     inner: Arc<dyn ChatBackend>,
     scheduler: AdmissionScheduler,
@@ -535,6 +540,12 @@ pub struct AdmittingBackend {
     /// EWMA of low-concurrency latency (ms/token), the baseline the latency signal compares
     /// against. `None` until the first unsaturated request establishes it.
     latency_baseline: Arc<Mutex<Option<f64>>>,
+    /// The free-memory probe feeding the adaptive headroom signal.
+    headroom_probe: HeadroomProbe,
+}
+
+fn default_headroom_probe() -> HeadroomProbe {
+    Arc::new(system_memory_headroom)
 }
 
 impl AdmittingBackend {
@@ -544,6 +555,7 @@ impl AdmittingBackend {
             scheduler: AdmissionScheduler::new(cfg),
             adaptive: None,
             latency_baseline: Arc::new(Mutex::new(None)),
+            headroom_probe: default_headroom_probe(),
         }
     }
 
@@ -562,7 +574,15 @@ impl AdmittingBackend {
             scheduler: AdmissionScheduler::new(cfg),
             adaptive: Some(Arc::new(adaptive)),
             latency_baseline: Arc::new(Mutex::new(None)),
+            headroom_probe: default_headroom_probe(),
         }
+    }
+
+    /// Override the free-memory headroom probe (a custom/GPU probe, or a deterministic stub in
+    /// tests).
+    pub fn with_headroom_probe(mut self, probe: HeadroomProbe) -> Self {
+        self.headroom_probe = probe;
+        self
     }
 }
 
@@ -620,6 +640,66 @@ fn latency_signal(
     }
 }
 
+/// Total physical RAM in bytes — constant, probed once (macOS `sysctl hw.memsize`).
+fn total_ram_bytes() -> Option<u64> {
+    static TOTAL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *TOTAL.get_or_init(|| {
+        let out = std::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output().ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().ok()
+    })
+}
+
+/// RAM available right now (macOS `vm_stat`: free + inactive + speculative + purgeable pages),
+/// cached for ~1s so the adaptive loop never spawns a subprocess per request.
+fn available_ram_bytes_cached() -> Option<u64> {
+    use std::time::{Duration, Instant};
+    static CACHE: std::sync::OnceLock<Mutex<Option<(Instant, Option<u64>)>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Some((t, v)) = &*cache.lock().unwrap() {
+        if t.elapsed() < Duration::from_millis(1000) {
+            return *v;
+        }
+    }
+    let fresh = probe_available_ram_bytes();
+    *cache.lock().unwrap() = Some((Instant::now(), fresh));
+    fresh
+}
+
+fn probe_available_ram_bytes() -> Option<u64> {
+    let out = std::process::Command::new("vm_stat").output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let page_size = s
+        .lines()
+        .next()
+        .and_then(|l| l.split("page size of ").nth(1))
+        .and_then(|r| r.split(' ').next())
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or(16384);
+    let mut pages = 0u64;
+    for line in s.lines() {
+        for label in ["Pages free:", "Pages inactive:", "Pages speculative:", "Pages purgeable:"] {
+            if let Some(rest) = line.strip_prefix(label) {
+                if let Ok(v) = rest.trim().trim_end_matches('.').parse::<u64>() {
+                    pages += v;
+                }
+            }
+        }
+    }
+    (pages > 0).then_some(pages * page_size)
+}
+
+/// Free-memory headroom as a fraction `[0,1]` of total RAM — the Phase-9 resource signal. When it
+/// drops below the controller's `min_headroom` the admission ceiling backs off *before* an OOM
+/// rather than after one. `None` when the probe is unavailable (non-macOS) → the signal is skipped.
+/// Local/in-process backends share unified memory, so this system-wide figure applies to all of
+/// them (it's only consulted for admission-controlled — i.e. local — backends).
+pub fn system_memory_headroom() -> Option<f32> {
+    let avail = available_ram_bytes_cached()?;
+    let total = total_ram_bytes()?;
+    (total > 0).then(|| (avail as f32 / total as f32).clamp(0.0, 1.0))
+}
+
 #[async_trait]
 impl ChatBackend for AdmittingBackend {
     async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream> {
@@ -640,6 +720,7 @@ impl ChatBackend for AdmittingBackend {
         let scheduler = self.scheduler.clone();
         let adaptive = self.adaptive.clone();
         let baseline = Arc::clone(&self.latency_baseline);
+        let headroom_probe = Arc::clone(&self.headroom_probe);
         let model = self.inner.label().to_string();
         let stream: ChatStream = Box::pin(async_stream::stream! {
             // Hold the slot for the whole stream; dropping it on
@@ -689,8 +770,10 @@ impl ChatBackend for AdmittingBackend {
                 } else {
                     None
                 };
+                // Free-memory headroom (unified memory → system-wide): below the controller's floor
+                // it backs off before an OOM. Probed only here (adaptive on), cached ~1s.
                 apply_sample(&adaptive, &scheduler, &model, ConcurrencySample {
-                    overload: false, ok: true, headroom: None, latency_ratio,
+                    overload: false, ok: true, headroom: headroom_probe(), latency_ratio,
                 });
             }
         });
@@ -1292,7 +1375,8 @@ mod tests {
         let inner: Arc<dyn ChatBackend> = Arc::new(FakeBackend { capacity: Some(8) });
         let ctrl =
             AdaptiveConcurrency::new(AdaptiveConfig { probe_after: 2, ..AdaptiveConfig::for_capacity(8) });
-        let backend = AdmittingBackend::with_adaptive(inner, AdmissionConfig::for_capacity(8), ctrl);
+        let backend = AdmittingBackend::with_adaptive(inner, AdmissionConfig::for_capacity(8), ctrl)
+            .with_headroom_probe(headroom_stub(0.9)); // plenty of free RAM → not a red signal
         assert_eq!(backend.scheduler.stats().2, 1, "adaptive backends start serial");
 
         for _ in 0..2 {
@@ -1318,7 +1402,8 @@ mod tests {
         });
         let ctrl =
             AdaptiveConcurrency::new(AdaptiveConfig { probe_after: 1, ..AdaptiveConfig::for_capacity(8) });
-        let backend = AdmittingBackend::with_adaptive(inner, AdmissionConfig::for_capacity(8), ctrl);
+        let backend = AdmittingBackend::with_adaptive(inner, AdmissionConfig::for_capacity(8), ctrl)
+            .with_headroom_probe(headroom_stub(0.9)); // plenty of free RAM → not a red signal
 
         // 4 clean runs (probe_after 1) → ceiling 1→5.
         for _ in 0..4 {
@@ -1342,7 +1427,8 @@ mod tests {
         let inner: Arc<dyn ChatBackend> = Arc::new(FakeBackend { capacity: Some(8) });
         let ctrl =
             AdaptiveConcurrency::new(AdaptiveConfig { probe_after: 1, ..AdaptiveConfig::for_capacity(8) });
-        let backend = AdmittingBackend::with_adaptive(inner, AdmissionConfig::for_capacity(8), ctrl);
+        let backend = AdmittingBackend::with_adaptive(inner, AdmissionConfig::for_capacity(8), ctrl)
+            .with_headroom_probe(headroom_stub(0.9)); // plenty of free RAM → not a red signal
         for _ in 0..3 {
             drain(backend.chat(ChatRequest::simple("hi")).await.unwrap()).await;
         }
@@ -1390,6 +1476,34 @@ mod tests {
 
     fn adaptive(max: usize, probe_after: u32) -> AdaptiveConcurrency {
         AdaptiveConcurrency::new(AdaptiveConfig { probe_after, ..AdaptiveConfig::for_capacity(max) })
+    }
+
+    /// A deterministic headroom probe for tests (so the adaptive loop doesn't read live RAM).
+    fn headroom_stub(v: f32) -> HeadroomProbe {
+        Arc::new(move || Some(v))
+    }
+
+    #[tokio::test]
+    async fn adaptive_low_headroom_holds_the_ceiling_serial() {
+        // Every successful request reports thin free memory → the controller never probes up, so
+        // we back off *before* an OOM instead of after one.
+        let inner: Arc<dyn ChatBackend> = Arc::new(FakeBackend { capacity: Some(8) });
+        let ctrl =
+            AdaptiveConcurrency::new(AdaptiveConfig { probe_after: 1, ..AdaptiveConfig::for_capacity(8) });
+        let backend = AdmittingBackend::with_adaptive(inner, AdmissionConfig::for_capacity(8), ctrl)
+            .with_headroom_probe(headroom_stub(0.05)); // 5% free < 15% floor → red
+        for _ in 0..5 {
+            drain(backend.chat(ChatRequest::simple("hi")).await.unwrap()).await;
+        }
+        assert_eq!(backend.scheduler.stats().2, 1, "low headroom keeps concurrency at the floor");
+    }
+
+    #[test]
+    fn system_memory_headroom_is_a_sane_fraction() {
+        // On macOS the real probe returns a fraction in [0,1]; elsewhere None (skipped).
+        if let Some(h) = system_memory_headroom() {
+            assert!((0.0..=1.0).contains(&h), "headroom out of range: {h}");
+        }
     }
 
     #[test]

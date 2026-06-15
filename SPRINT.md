@@ -207,8 +207,16 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   calls it after each acceptance verdict, so a model whose answers are rejected *under concurrency*
   backs off ("quality drops under load" closed into the live loop) — no cross-layer registry needed,
   the backend owns its controller. 4 new tests (latency_signal baseline/ratio, latency-cliff
-  back-off, report_quality back-off). 248/0. **Remaining**: resource headroom (free mem/CPU) — needs
-  MLX-specific probing, the one signal still `None` in `ConcurrencySample`.
+  back-off, report_quality back-off). 248/0.
+- [x] cascade-adaptive-headroom - **DONE 2026-06-15** (`src/concurrency.rs`). The last P9 signal:
+  **resource headroom**. `system_memory_headroom()` — a std-only, cached (~1s) macOS probe (`vm_stat`
+  free+inactive+speculative+purgeable / `sysctl hw.memsize`) → free-RAM fraction `[0,1]`. The
+  `AdmittingBackend` feeds it on every completed request; below the controller's `min_headroom`
+  (0.15) the ceiling backs off **before** an OOM, not after. Unified memory → one system-wide figure
+  covers all local backends; probe lives in the feature-free concurrency layer (no MLX coupling) and
+  is **injectable** (`with_headroom_probe`) for a GPU-specific probe later / deterministic tests. 2
+  new tests (low-headroom-holds-serial, probe-is-a-sane-fraction). 250/0. **`ConcurrencySample` is
+  now fully fed** — overload, success, latency, quality, headroom.
 
 #### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
 
