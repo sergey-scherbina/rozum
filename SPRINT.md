@@ -196,8 +196,19 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   overload/error → back off via `set_ceiling`). Adaptive backends **start serial** and open up on
   healthy traffic. Enabled by `ROZUM_ADAPTIVE_CONCURRENCY=1` in `admit_wrap` (default off → static
   budget unchanged). 4 new tests (ceiling-bounds-recovery, ceiling-raises/lowers, probe-up,
-  back-off-on-OOM). 245/0. **Remaining follow-ups**: richer signals (resource headroom / latency
-  baseline / judge+exec-feedback quality — v1 uses overload+success only).
+  back-off-on-OOM). 245/0.
+- [x] cascade-adaptive-signals - **DONE 2026-06-15** (`src/concurrency.rs`, `src/backend.rs`,
+  `src/cascade/mod.rs`). Richer P9 signals beyond overload+success: (1) **latency** — the
+  `AdmittingBackend` times each request and tracks a low-concurrency `ms/token` baseline (EWMA); a
+  loaded request's `per_token/baseline` becomes the `latency_ratio`, so saturation (a latency cliff)
+  backs the ceiling off. Cost-normalized (per-token) + a min-token floor so prefill-dominated tiny
+  outputs don't add noise. (2) **quality** — a new `ChatBackend::report_quality(ok)` (default no-op;
+  the `AdmittingBackend` overrides it) lets a higher layer feed the grounded verdict; the cascade
+  calls it after each acceptance verdict, so a model whose answers are rejected *under concurrency*
+  backs off ("quality drops under load" closed into the live loop) — no cross-layer registry needed,
+  the backend owns its controller. 4 new tests (latency_signal baseline/ratio, latency-cliff
+  back-off, report_quality back-off). 248/0. **Remaining**: resource headroom (free mem/CPU) — needs
+  MLX-specific probing, the one signal still `None` in `ConcurrencySample`.
 
 #### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
 

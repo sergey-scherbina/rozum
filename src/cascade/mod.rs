@@ -380,6 +380,10 @@ impl ChatBackend for CascadeBackend {
                 judge_score,
                 None,
             );
+            // Feed the grounded quality verdict to the model's adaptive controller (no-op unless the
+            // backend self-tunes): a rejection while running concurrently backs its admission
+            // ceiling off — "quality drops under load" closed into the live concurrency loop.
+            card.backend.report_quality(verdict == Verdict::Accept);
             match verdict {
                 Verdict::Accept => {
                     tracing::debug!(model = %card.id, "cascade: accepted");

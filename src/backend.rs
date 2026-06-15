@@ -264,6 +264,14 @@ pub trait ChatBackend: Send + Sync {
     fn admission_stats(&self) -> Option<AdmissionSnapshot> {
         None
     }
+    /// Out-of-band **answer-quality feedback** from a higher layer (the cascade's acceptance
+    /// verdict, the agent's execution feedback): `ok == false` means this backend's last answer was
+    /// rejected / failed. An adaptive backend ([`crate::concurrency::AdmittingBackend`]) treats a
+    /// rejection *while running concurrently* as a quality-vs-concurrency red signal and backs its
+    /// admission ceiling off — so "quality drops under load" is closed into the live loop. Default:
+    /// a no-op (most backends don't self-tune). `ok == true` is intentionally not rewarded here —
+    /// the throughput path already probes up.
+    fn report_quality(&self, _ok: bool) {}
 }
 
 /// Drain a `ChatStream` to a plain text string (text deltas only).
