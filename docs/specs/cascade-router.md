@@ -260,8 +260,14 @@ availability fallback (a mock backend that errors → the next available is chos
   attempts before it are not streamed to the client; only the winner is).
 - `/stats` gains a `cascade` block: per-tier attempt/accept/escalate counts, realized savings
   (vs always-frontier), avg escalations/request.
-- Config: a `cascade` section in the runtime config + named configs; env overrides for the
-  global knobs (e.g. `ROZUM_CASCADE_DEFAULT=<name>`).
+- Config: a `CascadeSpec` (cost-ordered `TierSpec`s + `max_escalations` + `strategy`), loaded by
+  name from the environment as JSON — `ROZUM_CASCADE` for the default `model: "cascade"`,
+  `ROZUM_CASCADE_<NAME>` for `model: "cascade:<name>"`. Each tier is `{model, location, pool?,
+  endpoint?, api_key_env?}`; locals resolve through the gateway's normal build chain, remotes through
+  the OpenAI-compatible HTTP backend with the env-named key. A tier that can't be built is skipped
+  (a partial config still runs). **Shipped** (`src/cascade/spec.rs`, `build_cascade` + the
+  `build_cascade_backend` hook in `main.rs`). *Follow-up*: a `rozum.toml [cascade]` schema and an
+  Anthropic-native remote tier.
 
 ## Design notes
 
@@ -280,11 +286,13 @@ availability fallback (a mock backend that errors → the next available is chos
 
 Each phase ships value and is testable; early phases are deterministic/model-free.
 
-**Status (2026-06-15): ALL 9 phases shipped — the cascade-router is complete.** `src/cascade/` (48
-tests) + `run_agent_escalating` in `src/agent.rs` (P8, 3 tests) + `AdaptiveConcurrency` in
-`src/concurrency.rs` (P9, 6 tests). Follow-ups on the same foundations (non-blocking): P7 adaptive
-judge thresholds / health-pattern persistence; the gateway request-surface wiring (`model:
-"cascade[:name]"` + named configs) and the live feed of P9 samples + per-model `set_limit`.
+**Status (2026-06-15): ALL 9 phases shipped + the gateway request-surface wiring.** `src/cascade/`
+(54 tests) + `run_agent_escalating` in `src/agent.rs` (P8, 3 tests) + `AdaptiveConcurrency` in
+`src/concurrency.rs` (P9, 6 tests) + `model: "cascade[:name]"` → `CascadeBackend` (`spec.rs` + the
+`main.rs` hook, 6 tests). Follow-ups (non-blocking): P7 adaptive judge thresholds / health-pattern
+persistence; an Anthropic-native remote tier + a `rozum.toml [cascade]` schema; and the **live P9
+feed** — feeding `ConcurrencySample`s and applying per-model `set_limit`, which first needs
+reconciling the AIMD controller with the existing circuit breaker (both move the admission `limit`).
 
 1. **Registry + pure cascade + L0 structural acceptance.** Caller-supplied list, `AlwaysCheapest`,
    escalate on error/structural-fail, single-model passthrough. Local→remote tiers via existing

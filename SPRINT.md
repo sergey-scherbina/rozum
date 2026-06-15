@@ -176,6 +176,18 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   real-scheduler). 235/0. **Live feeding deferred to gateway integration**: classify each request's
   `FailReason`/`ResourceSnapshot`/exec-feedback into a sample and apply `set_limit` per model
   (lands with the cascade request-surface wiring).
+- [x] cascade-gateway-wiring - **DONE 2026-06-15** (`src/cascade/spec.rs` + `src/main.rs`). Expose
+  the cascade through the gateway: `model: "cascade"` / `"cascade:<name>"` now builds a
+  `CascadeBackend`. A serializable `CascadeSpec`/`TierSpec` + `build_cascade(spec, resolver)` (the
+  cascade stays decoupled — the resolver builds each tier: locals via `build_from_config`, remotes
+  via the OpenAI-compatible HTTP backend with the env-named API key). Unbuildable tiers (missing key
+  / endpoint) are **skipped**, not fatal; only an all-empty cascade errors. Named specs load from
+  env JSON (`ROZUM_CASCADE` / `ROZUM_CASCADE_<NAME>`). `parse_cascade_model` routes the model string;
+  `Location` is now serde. 6 new tests (parse cases, JSON round-trip, build-in-order, skip-on-fail,
+  empty-is-error, pool-override). 241/0. **Remaining follow-ups**: Anthropic-native remote tier
+  (v1 is OpenAI-compatible only); a `rozum.toml [cascade]` schema (v1 is env JSON); and the P9 live
+  feed — which needs reconciling the AIMD controller with the existing circuit breaker (both move the
+  admission `limit`), so it's its own design, not a drop-in.
 
 #### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
 

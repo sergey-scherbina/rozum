@@ -15,6 +15,7 @@ mod health;
 mod judge;
 mod scheduler;
 mod self_signal;
+mod spec;
 mod stats;
 
 pub use acceptance::{AcceptanceCheck, StructuralCheck, TurnOutcome, Verdict};
@@ -23,6 +24,7 @@ pub use health::{classify, FailReason, HealthRegistry, HealthState};
 pub use judge::{HeuristicJudge, Judge, JudgeConfig, ModelJudge};
 pub use scheduler::{Lane, LaneSet};
 pub use self_signal::{escalation_tools, EscalationAffordance, SelfSignalCheck};
+pub use spec::{build_cascade, parse_cascade_model, CascadeSpec, StrategyName, TierSpec};
 pub use stats::{
     AttemptRecord, DiffBucket, ModelTaskStat, ResourceSnapshot, StatsStore, TaskClass, TaskShape,
 };
@@ -41,8 +43,10 @@ use acceptance::pipeline_verdict;
 
 /// Where a model runs — local (its own resource limits, e.g. memory) vs remote (the network +
 /// the provider's quota/rate limits). A `Network` failure parks *all* remote models at once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Location {
+    #[default]
     Local,
     Remote,
 }

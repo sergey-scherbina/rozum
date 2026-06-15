@@ -1870,6 +1870,11 @@ fn gateway_backend_builder(
     std::sync::Arc::new(move |model: String, n_ctx: u32, force: Option<String>| {
         let cfg = std::sync::Arc::clone(&cfg);
         Box::pin(async move {
+            // `model: "cascade[:name]"` resolves to a CascadeBackend (the request-surface wiring),
+            // regardless of any forced engine — the model string is the explicit intent.
+            if let Some(name) = rozum::cascade::parse_cascade_model(&model) {
+                return build_cascade_backend(&cfg, &name, n_ctx).await;
+            }
             match force.as_deref() {
                 Some(f) => build_gateway_backend_forced(&model, n_ctx, f).await,
                 None => build_from_config(&cfg, &model, n_ctx).await,
@@ -1942,6 +1947,87 @@ async fn build_choice(
 /// Distinct from `mlx`/`mlx-native` (the in-process native MLX runtime).
 fn is_mlx_server_engine(engine: &str) -> bool {
     matches!(engine, "mlx-server" | "mlx_lm_server" | "mlx-lm-server")
+}
+
+/// Build a [`rozum::cascade::CascadeBackend`] for `model: "cascade[:name]"`. The named spec is
+/// loaded from the environment (`ROZUM_CASCADE` for the default, `ROZUM_CASCADE_<NAME>` for a named
+/// config) as JSON; each tier is resolved through this binary's normal build chain — locals via
+/// `build_from_config`, remotes via the OpenAI-compatible HTTP backend with the configured key.
+async fn build_cascade_backend(
+    cfg: &std::sync::Arc<rozum::RuntimeConfig>,
+    name: &str,
+    n_ctx: u32,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    let spec = load_cascade_spec(name)?;
+    let cfg = std::sync::Arc::clone(cfg);
+    let resolver = move |tier: rozum::cascade::TierSpec| {
+        let cfg = std::sync::Arc::clone(&cfg);
+        async move {
+            match tier.location {
+                rozum::cascade::Location::Local => {
+                    build_from_config(&cfg, &tier.model, n_ctx).await
+                }
+                rozum::cascade::Location::Remote => build_remote_tier(&tier),
+            }
+        }
+    };
+    match rozum::cascade::build_cascade(&spec, resolver).await {
+        Ok(be) => {
+            rozum::obs::log_event(serde_json::json!({
+                "event": "cascade_built", "config": name, "tiers": spec.tiers.len(),
+            }));
+            Some(std::sync::Arc::new(be) as std::sync::Arc<dyn rozum::ChatBackend>)
+        }
+        Err(e) => {
+            rozum::obs::log_event(serde_json::json!({
+                "event": "cascade_build_failed", "config": name, "error": e,
+            }));
+            None
+        }
+    }
+}
+
+/// Load a [`rozum::cascade::CascadeSpec`] from the environment: `ROZUM_CASCADE` for the default
+/// (`name == ""`), `ROZUM_CASCADE_<NAME>` (upper-cased) for a named config. The value is JSON.
+fn load_cascade_spec(name: &str) -> Option<rozum::cascade::CascadeSpec> {
+    let var = if name.is_empty() {
+        "ROZUM_CASCADE".to_string()
+    } else {
+        format!("ROZUM_CASCADE_{}", name.to_uppercase())
+    };
+    let raw = match std::env::var(&var) {
+        Ok(r) if !r.trim().is_empty() => r,
+        _ => {
+            rozum::obs::log_event(serde_json::json!({
+                "event": "cascade_spec_missing", "config": name, "env": var,
+            }));
+            return None;
+        }
+    };
+    match serde_json::from_str(&raw) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            rozum::obs::log_event(serde_json::json!({
+                "event": "cascade_spec_invalid", "env": var, "error": e.to_string(),
+            }));
+            None
+        }
+    }
+}
+
+/// Resolve a remote cascade tier to an OpenAI-compatible HTTP backend (covers OpenAI, OpenRouter,
+/// LM Studio, mlx_lm.server, …). Requires an `endpoint`; the API key, if any, comes from the env
+/// var named by `api_key_env`. Returns `None` (→ the tier is skipped) when no endpoint is set.
+fn build_remote_tier(
+    tier: &rozum::cascade::TierSpec,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    use rozum::concurrency::admit_wrap;
+    let endpoint = tier.endpoint.as_deref()?;
+    let mut backend = rozum::openai_http::OpenAiHttpBackend::new(endpoint, &tier.model);
+    if let Some(key) = tier.api_key_env.as_deref().and_then(|e| std::env::var(e).ok()) {
+        backend = backend.with_api_key(key);
+    }
+    Some(admit_wrap(std::sync::Arc::new(backend) as std::sync::Arc<dyn rozum::ChatBackend>))
 }
 
 /// Build a backend forcing a specific engine (`gateway switch --backend B`).

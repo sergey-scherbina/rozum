@@ -1,5 +1,30 @@
 # Changelog
 
+## cascade — gateway request-surface wiring (`model: "cascade[:name]"`)
+Completed: 2026-06-15
+
+The cascade is now reachable from outside: a request with `model: "cascade"` (or
+`"cascade:<name>"`) builds and runs a `CascadeBackend` through the normal gateway path
+(`cascade-gateway-wiring`).
+
+A serializable `CascadeSpec` describes a cascade — cost-ordered `TierSpec`s (`{model, location,
+pool?, endpoint?, api_key_env?}`) plus `max_escalations` and a `strategy` name. `build_cascade(spec,
+resolver)` turns it into a backend by handing each tier's model to a caller-supplied async resolver,
+so the cascade module stays decoupled from how backends are constructed. The `main.rs` hook resolves
+locals through this binary's normal build chain and remotes through the OpenAI-compatible HTTP
+backend with the env-named API key. A tier that can't be built (a remote with a missing key or
+endpoint) is **skipped**, not fatal — a partial config still runs; only an all-empty cascade errors.
+
+Named specs load from the environment as JSON: `ROZUM_CASCADE` for the default `model: "cascade"`,
+`ROZUM_CASCADE_<NAME>` for `model: "cascade:<name>"`. `parse_cascade_model` routes the model string;
+`Location` gained serde. `src/cascade/spec.rs` + the `build_cascade_backend` hook in `src/main.rs`;
+6 new tests. 241/0.
+
+Follow-ups: an Anthropic-native remote tier (v1 is OpenAI-compatible only), a `rozum.toml [cascade]`
+schema (v1 is env JSON), and the **live P9 feed** — feeding per-request `ConcurrencySample`s and
+applying per-model `set_limit`, which first needs reconciling the AIMD controller with the existing
+circuit breaker (both move the admission `limit`).
+
 ## cascade — Phase 9: adaptive per-model concurrency (the cascade-router is complete)
 Completed: 2026-06-15
 
