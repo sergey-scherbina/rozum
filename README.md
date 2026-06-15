@@ -25,6 +25,11 @@ any time — there are no fixed turns.
 - **Telegram and Discord bridges** for joining a room from a chat app.
 - **On-disk transcript persistence** so a room survives `rozum` restarts and
   late joiners can replay history.
+- **A local LLM gateway.** `rozum gateway` / `rozum launch` serve an
+  OpenAI- and Anthropic-compatible API on `127.0.0.1`, backed by an in-process
+  MLX / GGUF engine on Apple Silicon — a drop-in local provider for Claude Code,
+  Codex, and anything that speaks those dialects, with a **frugal model cascade**
+  (cheapest model first, escalate only when needed). See below.
 
 ## Quick start
 
@@ -45,6 +50,37 @@ Point an MCP-capable agent at `rozum mcp-proxy` to join programmatically; see
 [USER_MANUAL.md](USER_MANUAL.md) for the full agent setup, web/Telegram/Discord
 bridges, hotkeys, and slash commands.
 
+## Local LLM gateway & model cascade
+
+Serve a local model behind an OpenAI/Anthropic-compatible API, or launch a tool
+against it with the right env vars already set:
+
+```bash
+# Run the gateway daemon (OpenAI on /v1, Anthropic on /):
+rozum gateway --model mlx-community/Qwen3-4B-4bit
+#   export OPENAI_BASE_URL=http://localhost:8089/v1
+#   export ANTHROPIC_BASE_URL=http://localhost:8089
+
+# Or launch a program with the gateway + env vars wired up automatically:
+rozum launch --model mlx-community/Qwen3-4B-4bit -- claude
+rozum launch                 # no --model → interactive picker (local + cloud)
+```
+
+**Cascade** — name several models and rozum routes frugally: the cheapest model
+first, escalating to a stronger one only when the answer isn't good enough.
+rozum auto-orders them cheapest→most-capable and classifies local vs cloud:
+
+```bash
+# Repeatable --model (or one comma-separated value) makes a cascade:
+rozum launch --model qwen3-4b --model claude-haiku-4-5 --model gpt-4o -- claude
+rozum launch --model "qwen3-4b,claude-haiku-4-5" --strategy classify -- codex
+```
+
+`--strategy` picks the start tier: `cheapest` | `classify` (default) | `learned`.
+Named cascades can also live in `rozum.toml` (`[cascade.<name>]`). See
+[docs/specs/cascade-router.md](docs/specs/cascade-router.md) and
+[docs/specs/runtime-config.md](docs/specs/runtime-config.md).
+
 ## Documentation
 
 - **[INSTALL.md](INSTALL.md)** — prerequisites, build, optional features.
@@ -62,7 +98,12 @@ bridges, hotkeys, and slash commands.
 src/
 ├── main.rs                 CLI entry point (clap subcommands)
 ├── lib.rs                  library entry
-├── backend.rs              optional inference backend abstraction
+├── backend.rs              ChatBackend SPI (the inference backend abstraction)
+├── gateway.rs              OpenAI/Anthropic HTTP gateway + switchboard
+├── cascade/                frugal/escalation model router (CascadeBackend)
+├── concurrency.rs          admission control + adaptive per-model concurrency
+├── agent.rs                reference agent runtime (tool loop, escalation)
+├── config.rs               rozum.toml runtime config (backends, cascades)
 ├── meeting/                room runtime, MCP server + proxy, persistence
 │   ├── app.rs              top-level room driver
 │   ├── state.rs            Meeting state machine, events, transcript
@@ -79,10 +120,15 @@ src/
 ## Development
 
 ```bash
-cargo fmt --check
-cargo test
-cargo build --release
+cargo build --lib --bin rozum   # feature-free core (no Xcode/Metal needed)
+cargo test --lib                # the core test suite — what CI runs
+cargo build --release           # full build with the in-process engines
 ```
+
+The MLX / GGUF inference engines are behind cargo features (they need Xcode /
+Metal). The pure-Rust core — SPI, gateway, agent runtime, cascade router,
+concurrency, config — builds and tests without any toolchain; the `ci`
+GitHub Actions workflow gates exactly that on every push/PR to `master`.
 
 This repository uses
 [agent-plugins](vendor/agent-plugins) as a git submodule for

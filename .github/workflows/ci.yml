@@ -1,0 +1,45 @@
+name: ci
+
+# Smoke CI: build + the feature-free library tests on every push / PR to master.
+# The MLX/mistralrs engines are behind cargo features (need Xcode/Metal) and are
+# intentionally NOT built here — this gate protects the pure-Rust core (the SPI,
+# gateway, agent runtime, cascade router, concurrency layer, config) that builds
+# and tests without any platform toolchain.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancel an in-flight run when a newer commit lands on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build + lib tests (no features)
+    # Apple Silicon runner — matches the dev platform, avoids cross-platform surprises.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Build (no features)
+        run: cargo build --lib --bin rozum
+
+      - name: Library tests (no features)
+        run: cargo test --lib

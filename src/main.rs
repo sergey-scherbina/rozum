@@ -112,6 +112,11 @@ enum Command {
         #[arg(long)]
         strategy: Option<String>,
 
+        /// Offline: disable all remote (cloud) cascade tiers — use only local
+        /// models. Sets `ROZUM_OFFLINE`; the model picker hides cloud entries too.
+        #[arg(long)]
+        offline: bool,
+
         /// Context window in tokens. Default: the model's max context (from its
         /// config.json), capped so the KV cache stays within a fraction of RAM;
         /// falls back to 32768 if the model max is unknown. Lower it to save RAM.
@@ -147,6 +152,11 @@ enum Command {
         /// `classify` (default), `learned`, or `cheapest`.
         #[arg(long)]
         strategy: Option<String>,
+
+        /// Offline: disable all remote (cloud) cascade tiers and hide cloud models
+        /// in the picker — use only local models. Sets `ROZUM_OFFLINE`.
+        #[arg(long)]
+        offline: bool,
 
         /// Port for the gateway (auto-picks a free port if not specified)
         #[arg(long)]
@@ -373,6 +383,7 @@ async fn main() {
             port,
             model,
             strategy,
+            offline,
             n_ctx,
             enable_thinking,
             action,
@@ -387,6 +398,7 @@ async fn main() {
                     unsafe { std::env::set_var("ROZUM_ENABLE_THINKING", "1") };
                 }
                 apply_cascade_strategy(strategy.as_deref());
+                apply_offline(offline);
                 let cfg = load_runtime_config_or_exit();
                 let Some(model) = join_models(model).or_else(|| cfg.model.clone()) else {
                     eprintln!(
@@ -410,6 +422,7 @@ async fn main() {
         Some(Command::Launch {
             model,
             strategy,
+            offline,
             port,
             n_ctx,
             dedicated,
@@ -421,6 +434,7 @@ async fn main() {
             program,
         }) => {
             apply_cascade_strategy(strategy.as_deref());
+            apply_offline(offline);
             let model = join_models(model);
             // Precedence: --channel-mcp-name > ROZUM_CHANNEL_MCP_NAME > "rozum".
             let server_name = channel_mcp_name
@@ -958,18 +972,23 @@ fn pick_launch_target_interactive() -> Option<LaunchTarget> {
     let cached: std::collections::HashSet<&str> =
         installed.iter().map(|m| m.spec.as_str()).collect();
 
-    // Anthropic (no local model, no gateway — the agent uses its own credentials) is always first.
-    let mut choices: Vec<Choice> = vec![Choice {
-        label: "Anthropic (no local model — agent uses your Anthropic credentials directly)"
-            .to_owned(),
-        kind: Kind::Anthropic,
-    }];
-    // Hosted models (Anthropic + OpenAI) — selectable as a tier; routed via the HTTP backends.
-    for r in models::RECOMMENDED_REMOTE {
+    // Offline (`--offline` / ROZUM_OFFLINE): no remote/cloud entries — local models only.
+    let offline = is_offline();
+    let mut choices: Vec<Choice> = Vec::new();
+    if !offline {
+        // Anthropic (no local model, no gateway — the agent uses its own credentials).
         choices.push(Choice {
-            label: format!("{}  (cloud · {})  — {}", r.spec, r.provider, r.display_name),
-            kind: Kind::Model { spec: r.spec.to_owned(), cached: true },
+            label: "Anthropic (no local model — agent uses your Anthropic credentials directly)"
+                .to_owned(),
+            kind: Kind::Anthropic,
         });
+        // Hosted models (Anthropic + OpenAI) — selectable as a tier; routed via the HTTP backends.
+        for r in models::RECOMMENDED_REMOTE {
+            choices.push(Choice {
+                label: format!("{}  (cloud · {})  — {}", r.spec, r.provider, r.display_name),
+                kind: Kind::Model { spec: r.spec.to_owned(), cached: true },
+            });
+        }
     }
     for m in &installed {
         choices.push(Choice {
@@ -989,7 +1008,10 @@ fn pick_launch_target_interactive() -> Option<LaunchTarget> {
         }
     }
 
-    eprintln!("Select what to launch the agent against:");
+    eprintln!(
+        "Select what to launch the agent against{}:",
+        if offline { " (offline — cloud models hidden)" } else { "" }
+    );
     for (i, c) in choices.iter().enumerate() {
         eprintln!("  {:>2}) {}", i + 1, c.label);
     }
@@ -2031,6 +2053,20 @@ fn apply_cascade_strategy(strategy: Option<&str>) {
     }
 }
 
+/// Apply `--offline` via `ROZUM_OFFLINE`, read by [`build_remote_tier`] (skip remote tiers) and the
+/// model picker (hide cloud entries). The spawned daemon inherits it.
+fn apply_offline(offline: bool) {
+    if offline {
+        // SAFETY: set at startup, before the backend/daemon is built or spawned.
+        unsafe { std::env::set_var("ROZUM_OFFLINE", "1") };
+    }
+}
+
+/// Whether offline mode is on (`ROZUM_OFFLINE` truthy) — no remote/cloud models.
+fn is_offline() -> bool {
+    matches!(std::env::var("ROZUM_OFFLINE").ok().as_deref(), Some("1" | "true" | "on"))
+}
+
 async fn build_cascade_backend(
     cfg: &std::sync::Arc<rozum::RuntimeConfig>,
     name: &str,
@@ -2148,6 +2184,13 @@ fn build_remote_tier(
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
     use rozum::cascade::RemoteApi;
     use rozum::concurrency::admit_wrap;
+    // Offline mode: drop every remote tier (it's skipped like any unbuildable tier).
+    if is_offline() {
+        rozum::obs::log_event(serde_json::json!({
+            "event": "cascade_tier_skipped_offline", "model": tier.model,
+        }));
+        return None;
+    }
     let backend: std::sync::Arc<dyn rozum::ChatBackend> = match tier.api {
         RemoteApi::Anthropic => {
             // Native Anthropic requires a key — skip the tier if it isn't configured.

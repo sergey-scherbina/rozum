@@ -1,5 +1,26 @@
 # Changelog
 
+## quick wins — CI smoke gate, README refresh, and `--offline`
+Completed: 2026-06-15
+
+Three small high-value items.
+
+**CI** (`ci-smoke`): there was no CI at all. A GitHub Actions workflow now gates `master` push/PR —
+`cargo build --lib --bin rozum` + `cargo test --lib` (feature-free, no Xcode/Metal) on `macos-latest`,
+with cargo caching. Protects the pure-Rust core (SPI, gateway, agent runtime, cascade router,
+concurrency, config — 260 tests) on every change.
+
+**README** (`docs-bootstrap`): the README documented only the meeting-room half. Added a "Local LLM
+gateway & model cascade" quickstart (the gateway, `rozum launch`, the picker, the cascade
+model-list + `--strategy`), refreshed the project layout and the dev/test instructions.
+
+**`--offline`** (`cascade-offline`): a new flag on `launch`/`gateway` that disables all remote/cloud
+cascade tiers — use only local models. It sets `ROZUM_OFFLINE` (the spawned daemon inherits it);
+`build_remote_tier` then skips every remote tier (dropped like any unbuildable tier — locals survive,
+an all-remote cascade errors), and the launch picker hides the Anthropic + OpenAI entries.
+
+`.github/workflows/ci.yml`, `README.md`, `src/main.rs`. 260/0.
+
 ## cascade — rename the `alwaysCheapest` strategy to `cheapest`
 Completed: 2026-06-15
 

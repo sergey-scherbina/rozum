@@ -789,9 +789,10 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   - Include submodule, specs, Rust project, tiny model scripts, and backend abstraction.
   - Do not commit `.tools/`, `target/`, or `models/*.gguf`.
 
-- [ ] ci-smoke - Add a lightweight CI path.
-  - Run fmt/test/build without requiring model downloads.
-  - Keep real model smoke tests opt-in.
+- [x] ci-smoke - **DONE 2026-06-15** (`.github/workflows/ci.yml`). Build + feature-free `cargo test
+  --lib` on `master` push/PR (macos-latest, cargo cache). No model downloads; the real-model smoke
+  tests stay opt-in (feature-gated + `#[ignore]`).
 
-- [ ] docs-bootstrap - Add a concise setup guide.
-  - Include clone, submodule init, build, first room, and MCP proxy setup.
+- [x] docs-bootstrap - **DONE 2026-06-15** (`README.md`). Refreshed the README with the LLM gateway /
+  `rozum launch` / model-cascade quickstart (it was meeting-room only). Clone/submodule/build + first
+  room + MCP proxy were already covered.
