@@ -252,6 +252,23 @@ impl Default for Budget {
     }
 }
 
+/// When to escalate the backend on **execution feedback** (Phase 8). The most reliable quality
+/// signal isn't a judge's opinion — it's whether the model's tool calls *worked*. If a model keeps
+/// producing failing calls, a stronger tier is warranted for the next step.
+#[derive(Debug, Clone)]
+pub struct ExecFeedbackPolicy {
+    /// Escalate to the next tier after this many **consecutive** steps whose tool calls *all*
+    /// errored (the model is stuck). `usize::MAX` disables exec-feedback escalation. A clean step
+    /// (any tool call succeeds, or a final text answer) resets the counter.
+    pub escalate_after_error_steps: usize,
+}
+
+impl Default for ExecFeedbackPolicy {
+    fn default() -> Self {
+        Self { escalate_after_error_steps: 2 }
+    }
+}
+
 /// Why the loop stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentStop {
@@ -273,6 +290,10 @@ pub struct ToolInvocation {
     pub input: Value,
     /// `Ok(result)` or `Err(message)` (a [`ToolError`]).
     pub output: Result<Value, String>,
+    /// The cost-tier (index into the backend list) whose turn requested this call — `0` for a
+    /// single-backend [`run_agent`]. Lets a caller attribute tool-error rate to the model that
+    /// produced the call, the grounded execution-quality signal (Phase 8).
+    pub tier: usize,
 }
 
 /// The result of an agent run.
@@ -286,16 +307,36 @@ pub struct AgentOutcome {
     pub operations: Vec<ToolInvocation>,
     /// The full conversation, for audit / continuation.
     pub transcript: Vec<Message>,
+    /// The cost-tier that produced the final answer — `> 0` iff execution feedback escalated to a
+    /// stronger backend mid-loop (Phase 8).
+    pub final_tier: usize,
 }
 
 impl AgentOutcome {
     pub fn is_done(&self) -> bool {
         self.stop == AgentStop::Done
     }
+
+    /// Per cost-tier, `(tool errors, total tool calls)` — the grounded "did it actually work"
+    /// signal the learned stats consume (Phase 8). A caller maps tier → model id to record the
+    /// per-model tool-error rate per task-class. Lower is better; a tier with all-errored calls is
+    /// the evidence that a stronger model was (or would be) warranted.
+    pub fn tool_error_rate_by_tier(&self) -> HashMap<usize, (usize, usize)> {
+        let mut m: HashMap<usize, (usize, usize)> = HashMap::new();
+        for op in &self.operations {
+            let e = m.entry(op.tier).or_insert((0, 0));
+            e.1 += 1;
+            if op.output.is_err() {
+                e.0 += 1;
+            }
+        }
+        m
+    }
 }
 
 /// Run the agent loop: `[system, user] → model → (tool calls → dispatch → results)* →
-/// final text`, bounded by `budget`. See Contract 2 in `integration.md`.
+/// final text`, bounded by `budget`. See Contract 2 in `integration.md`. Single backend, no
+/// escalation — a thin wrapper over [`run_agent_escalating`].
 pub async fn run_agent(
     backend: &dyn ChatBackend,
     system: &str,
@@ -303,18 +344,40 @@ pub async fn run_agent(
     tools: &dyn ToolSource,
     budget: &Budget,
 ) -> AgentOutcome {
+    run_agent_escalating(&[backend], system, user, tools, budget, &ExecFeedbackPolicy::default())
+        .await
+}
+
+/// The agent loop over a **cost-ordered list of backends**, escalating to a stronger tier on
+/// **execution feedback** (Phase 8): when the current model keeps producing *failing* tool calls
+/// (per `policy`), the next tier takes over — carrying the full transcript (including the errors),
+/// so the stronger model sees what went wrong and corrects it. `tiers[0]` is the cheapest; one
+/// backend = plain [`run_agent`]. The grounded "did it actually work" signal beats any judge's
+/// guess — a tool error is ground truth that the answer was wrong.
+pub async fn run_agent_escalating(
+    tiers: &[&dyn ChatBackend],
+    system: &str,
+    user: &str,
+    tools: &dyn ToolSource,
+    budget: &Budget,
+    policy: &ExecFeedbackPolicy,
+) -> AgentOutcome {
+    assert!(!tiers.is_empty(), "run_agent_escalating needs at least one backend");
     let start = Instant::now();
     let tool_defs = tools.tools();
     let mut messages = vec![Message::system(system), Message::user(user)];
     let mut operations: Vec<ToolInvocation> = Vec::new();
     let mut steps = 0usize;
+    // The active cost-tier and how many consecutive all-errored steps it has produced.
+    let mut tier = 0usize;
+    let mut consecutive_error_steps = 0usize;
 
     loop {
         if steps >= budget.max_steps {
-            return outcome(String::new(), AgentStop::BudgetSteps, steps, operations, messages);
+            return outcome(String::new(), AgentStop::BudgetSteps, steps, operations, messages, tier);
         }
         if budget.wall_time.is_some_and(|wt| start.elapsed() >= wt) {
-            return outcome(String::new(), AgentStop::BudgetTime, steps, operations, messages);
+            return outcome(String::new(), AgentStop::BudgetTime, steps, operations, messages, tier);
         }
         steps += 1;
 
@@ -330,9 +393,11 @@ pub async fn run_agent(
             session_id: None,
         };
 
-        let turn = match collect_turn(backend, req).await {
+        let turn = match collect_turn(tiers[tier], req).await {
             Ok(t) => t,
-            Err(e) => return outcome(String::new(), AgentStop::Error(e), steps, operations, messages),
+            Err(e) => {
+                return outcome(String::new(), AgentStop::Error(e), steps, operations, messages, tier)
+            }
         };
 
         // No tool calls → the model gave its final answer.
@@ -343,7 +408,7 @@ pub async fn run_agent(
                     content: vec![ContentBlock::Text { text: turn.text.clone() }],
                 });
             }
-            return outcome(turn.text, AgentStop::Done, steps, operations, messages);
+            return outcome(turn.text, AgentStop::Done, steps, operations, messages, tier);
         }
 
         // Record the assistant turn (text + the tool calls it requested), then execute
@@ -361,6 +426,8 @@ pub async fn run_agent(
         }
         messages.push(Message { role: Role::Assistant, content: assistant });
 
+        let mut step_calls = 0usize;
+        let mut step_errors = 0usize;
         for (id, name, args) in turn.tool_calls {
             let input = parse_args(&args);
             let result = tools.dispatch(&name, input.clone()).await;
@@ -368,6 +435,10 @@ pub async fn run_agent(
                 Ok(v) => (value_to_tool_content(v), false),
                 Err(e) => (e.0.clone(), true),
             };
+            step_calls += 1;
+            if is_error {
+                step_errors += 1;
+            }
             messages.push(Message {
                 role: Role::Tool,
                 content: vec![ContentBlock::ToolResult {
@@ -376,12 +447,25 @@ pub async fn run_agent(
                     is_error,
                 }],
             });
-            operations.push(ToolInvocation {
-                id,
-                name,
-                input,
-                output: result.map_err(|e| e.0),
-            });
+            operations.push(ToolInvocation { id, name, input, output: result.map_err(|e| e.0), tier });
+        }
+
+        // Execution-feedback escalation: a step whose tool calls *all* errored means the model is
+        // stuck producing failing calls. Enough consecutive such steps at this tier → hand off to
+        // a stronger one. Any progress (a call that worked) resets the counter.
+        let all_failed = step_calls > 0 && step_errors == step_calls;
+        if all_failed {
+            consecutive_error_steps += 1;
+            if consecutive_error_steps >= policy.escalate_after_error_steps && tier + 1 < tiers.len() {
+                tier += 1;
+                consecutive_error_steps = 0;
+                tracing::debug!(
+                    new_tier = tier,
+                    "agent: escalating backend on persistent tool-call failures"
+                );
+            }
+        } else {
+            consecutive_error_steps = 0;
         }
     }
 }
@@ -446,8 +530,9 @@ fn outcome(
     steps: usize,
     operations: Vec<ToolInvocation>,
     transcript: Vec<Message>,
+    final_tier: usize,
 ) -> AgentOutcome {
-    AgentOutcome { text, stop, steps, operations, transcript }
+    AgentOutcome { text, stop, steps, operations, transcript, final_tier }
 }
 
 #[cfg(test)]
@@ -658,6 +743,86 @@ mod tests {
         assert_eq!(multi.dispatch("shared", json!({})).await.unwrap()["who"], "a");
         // Unknown tool → recoverable error.
         assert!(multi.dispatch("nope", json!({})).await.is_err());
+    }
+
+    // ── Phase 8: execution-feedback escalation ──────────────────────────────
+
+    #[tokio::test]
+    async fn exec_feedback_escalates_on_persistent_tool_errors() {
+        // The weak tier keeps calling `add` with a non-integer (the handler rejects it); after two
+        // consecutive all-errored steps the loop hands off to the strong tier, which calls it
+        // correctly and answers. The strong model sees the full transcript (the errors included).
+        let weak = MockBackend::new(vec![
+            Scripted::Call { id: "w0", name: "add", args: "{\"a\":\"x\",\"b\":1}" },
+            Scripted::Call { id: "w1", name: "add", args: "{\"a\":\"y\",\"b\":1}" },
+        ]);
+        let strong = MockBackend::new(vec![
+            Scripted::Call { id: "s0", name: "add", args: "{\"a\":3,\"b\":5}" },
+            Scripted::Text("The sum is 8."),
+        ]);
+        let policy = ExecFeedbackPolicy { escalate_after_error_steps: 2 };
+        let out = run_agent_escalating(
+            &[&weak, &strong],
+            "sys",
+            "add the numbers",
+            &add_tool(),
+            &Budget::default(),
+            &policy,
+        )
+        .await;
+
+        assert_eq!(out.stop, AgentStop::Done);
+        assert_eq!(out.final_tier, 1, "exec-feedback escalated to the strong tier");
+        assert_eq!(out.text, "The sum is 8.");
+        assert_eq!(out.operations.len(), 3);
+        assert_eq!(out.operations[0].tier, 0);
+        assert!(out.operations[0].output.is_err());
+        assert_eq!(out.operations[1].tier, 0);
+        assert!(out.operations[1].output.is_err());
+        assert_eq!(out.operations[2].tier, 1);
+        assert!(out.operations[2].output.is_ok());
+        // The grounded per-tier signal: tier 0 errored 2/2, tier 1 succeeded 0 errors of 1.
+        let rates = out.tool_error_rate_by_tier();
+        assert_eq!(rates[&0], (2, 2));
+        assert_eq!(rates[&1], (0, 1));
+    }
+
+    #[tokio::test]
+    async fn exec_feedback_no_escalation_when_model_recovers() {
+        // The weak tier errors once, then recovers on its own — a clean step resets the counter, so
+        // we never escalate. The strong tier has an empty script: calling it would panic.
+        let weak = MockBackend::new(vec![
+            Scripted::Call { id: "w0", name: "add", args: "{\"a\":\"x\",\"b\":1}" }, // error
+            Scripted::Call { id: "w1", name: "add", args: "{\"a\":2,\"b\":2}" },     // recovers
+            Scripted::Text("Done: 4."),
+        ]);
+        let strong = MockBackend::new(vec![]); // must never be called
+        let out = run_agent_escalating(
+            &[&weak, &strong],
+            "sys",
+            "go",
+            &add_tool(),
+            &Budget::default(),
+            &ExecFeedbackPolicy::default(),
+        )
+        .await;
+
+        assert_eq!(out.stop, AgentStop::Done);
+        assert_eq!(out.final_tier, 0, "the model recovered → no escalation");
+        assert_eq!(out.text, "Done: 4.");
+        assert!(out.operations.iter().all(|o| o.tier == 0));
+    }
+
+    #[tokio::test]
+    async fn single_backend_run_agent_stays_at_tier_zero() {
+        let backend = MockBackend::new(vec![
+            Scripted::Call { id: "c0", name: "add", args: "{\"a\":3,\"b\":5}" },
+            Scripted::Text("8"),
+        ]);
+        let out = run_agent(&backend, "sys", "add", &add_tool(), &Budget::default()).await;
+        assert_eq!(out.final_tier, 0);
+        assert!(out.operations.iter().all(|o| o.tier == 0));
+        assert_eq!(out.tool_error_rate_by_tier()[&0], (0, 1));
     }
 
     // ── MCP adapter: conversions ────────────────────────────────────────────

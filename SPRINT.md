@@ -149,11 +149,18 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   stats). 226/0. **Deferred within the learned track** (not blocking): adaptive judge thresholds and
   health-pattern persistence feeding the backoff/proactive-deprioritization — small follow-ups on top
   of this store.
-- [ ] cascade-p8-exec-feedback - **Phase 8 (user idea 2026-06-15).** Execution-feedback escalation:
-  `run_agent` over a cascade escalates the backend when tool calls keep failing
-  (`AgentOutcome.operations[].output` errors — the grounded "did it actually work" signal, which the
-  bare per-response cascade can't see), and the per-model tool-error rate per task-class feeds the
-  learned stats (P7). The most reliable quality signal — real execution, not a judge's guess.
+- [x] cascade-p8-exec-feedback - **Phase 8. DONE 2026-06-15 (user idea)** (`src/agent.rs`).
+  Execution-feedback escalation in the agent loop: `run_agent_escalating(tiers, …, policy)` drives a
+  **cost-ordered list of backends** and, when the current model keeps producing *failing* tool calls,
+  hands off to the next tier — which inherits the full transcript (errors included) and corrects it.
+  `ExecFeedbackPolicy{escalate_after_error_steps}` (default 2): N **consecutive** all-errored steps →
+  escalate; any progress resets. The grounded "did it actually work" signal (a `ToolError` is ground
+  truth the answer was wrong) — which the bare per-response cascade can't see (it returns before
+  tools run). `ToolInvocation` gained `tier`; `AgentOutcome` gained `final_tier` +
+  `tool_error_rate_by_tier()` (the per-tier `(errors, total)` bridge a caller maps tier→model to feed
+  the P7 learned stats). `run_agent` is now a one-line wrapper (single tier, never escalates → all
+  prior behavior unchanged). 3 new tests (escalate-on-persistent-errors, no-escalation-on-recovery,
+  single-backend-stays-tier-0). 229/0.
 - [ ] cascade-p9-adaptive-concurrency - **Phase 9 (user idea 2026-06-15).** Per-model parallelism is
   model-specific and can't be assumed — *measure* it. An AIMD controller per model raises the
   resizable admission limit (`AdmissionScheduler::set_limit` — already exists) while throughput

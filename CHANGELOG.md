@@ -1,5 +1,28 @@
 # Changelog
 
+## cascade — Phase 8: execution-feedback escalation (agent loop)
+Completed: 2026-06-15
+
+The agent loop can now escalate the **backend itself** on the most reliable quality signal there is
+— whether the model's tool calls actually *worked* (`cascade-p8-exec-feedback`). A judge guesses; a
+`ToolError` is ground truth that the answer was wrong. This can't drive the bare per-response cascade
+(the response returns before the tools run), so it lives at the agent level.
+
+`run_agent_escalating(tiers, system, user, tools, budget, policy)` drives a **cost-ordered list of
+backends**: when the current model keeps producing failing tool calls, the next tier takes over,
+inheriting the full transcript — errors included — so the stronger model sees exactly what went wrong
+and fixes it. `ExecFeedbackPolicy { escalate_after_error_steps }` (default 2): that many
+**consecutive** all-errored steps escalates; any progress (a call that works, or a final answer)
+resets the counter. `tiers[0]` is the cheapest; one backend = plain `run_agent` (now a one-line
+wrapper that never escalates, so all prior behavior is unchanged).
+
+`ToolInvocation` gained `tier` (which cost-tier produced the call); `AgentOutcome` gained `final_tier`
+and `tool_error_rate_by_tier() -> {tier: (errors, total)}` — the bridge a caller maps tier→model to
+feed the Phase-7 learned stats with the per-model, per-task-class tool-error rate.
+
+`src/agent.rs`; 3 new tests (escalate-on-persistent-errors, no-escalation-on-recovery,
+single-backend-stays-tier-0). 229/0.
+
 ## cascade — Phase 7: learned stats store → the Learned start-tier
 Completed: 2026-06-15
 
