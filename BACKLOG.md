@@ -758,11 +758,17 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   shed → admit). (The numbers are in `/stats` JSON; a push into the `obs` event log is a trivial
   later add if a metrics pipeline wants it.)
 
-- [ ] shared-gateway-multislot - Allow more than one resident model behind the
-  shared gateway when memory permits, gating a second model on `ConcurrencyBudget`
-  (Phase A) saying both fit. Keys the registry/port by model. Follow-up to
-  `shared-gateway` (which keeps a single resident model). See
-  `docs/specs/shared-gateway.md` (Out of scope).
+- [~] shared-gateway-multislot - **Phase 1 (decision core) DONE 2026-06-15** (`src/resident.rs`).
+  Allow more than one resident model behind the shared gateway when memory permits — **adaptively**:
+  keep the most *useful* (frequency × recency) small models co-resident without thrashing, evict the
+  least useful (idle only) to make room, and fall back to a swap for a model too big to co-reside
+  (unavoidable thrash). `UsageStats` (persisted JSONL) learns per-model usefulness; `plan_residency`
+  is the pure, fully-tested memory-gated/utility decision (greedy keep-highest-utility-that-fits,
+  busy models never evicted, `oversubscribed` flags the swap case). 7 tests.
+  **Phase 2 (PENDING — needs real-model daemon validation)**: wire the planner into the `Switchboard`
+  — replace the single `backend: RwLock<Option<Arc>>` with a model-keyed resident set, route
+  `enter(req.model)`, per-model `generating`/idle-unload, build/evict via the planner, key the
+  registry by the resident set. Out-of-process coordination stays in `concurrency-cross-process`.
 
 - [ ] shared-gateway-service - Optionally install the shared gateway as a
   launchd/systemd service for always-warm startup, instead of lazy spawn +

@@ -274,6 +274,15 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   gateway/`launch`/cascade). Added a "Local LLM gateway & model cascade" quickstart (gateway, launch,
   picker, the cascade model-list + `--strategy`), refreshed the project layout (gateway/cascade/
   concurrency/agent/config modules) and the dev section (feature-free tests = what CI runs).
+- [~] shared-gateway-multislot - **Phase 1 (decision core) DONE 2026-06-15 (user idea)**
+  (`src/resident.rs`). Adaptive memory-gated residency: small requested models that fit and are
+  *statistically useful* (frequency × recency) stay co-resident without thrashing; the least-useful
+  idle model is evicted to make room; a model too big to co-reside falls back to a swap (unavoidable
+  thrash) — "pick the best arrangement possible under the memory budget". `UsageStats` (persisted
+  JSONL, `ModelUsage::utility` = count × recency-decay) + the pure `plan_residency` planner
+  (keep-highest-utility-that-fits, busy never evicted, `oversubscribed` = swap case). 7 tests. 267/0.
+  **Phase 2 (PENDING, user validates on real models)**: wire it into the `Switchboard` (model-keyed
+  resident set, route by `req.model`, per-model generating/idle-unload, build/evict via the planner).
 - [x] cascade-offline - **DONE 2026-06-15 (user idea)** (`src/main.rs`). `--offline` on
   `launch`/`gateway` (→ `ROZUM_OFFLINE`, inherited by the spawned daemon): `build_remote_tier` skips
   every remote tier (dropped like any unbuildable tier — locals survive, an all-remote cascade
