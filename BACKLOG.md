@@ -674,8 +674,12 @@ features the mistralrs backend shipped that the native backend does NOT yet have
   models. File lookup deliberately omitted (security). Unit-tested (registry shape + each tool's
   dispatch incl. the missing-arg `ToolError`). An app composes these with its own domain tools.
 
-- [ ] memory-store - Add local memory storage.
-  - Start with append-only facts and retrieval by exact key.
+- [x] memory-store - **DONE 2026-06-15** (`src/memory_store.rs`). Append-only local memory: a
+  key→value JSONL log with retrieval by exact key (`MemoryStore::{open, in_memory, set, get, all,
+  keys}`; last-write-wins for `get`, full per-key history for `all`; appends never rewrite). Exposed
+  to the agent runtime as `remember`/`recall` tools (`memory_tools(Arc<MemoryStore>)`) so a small
+  local agent has durable memory across turns. Unit-tested (append-only history, disk persistence +
+  replay, the tools). No embeddings/ranking — that's `rag-lite`.
 
 - [ ] rag-lite - Add a local retrieval layer.
   - Keep embeddings/backend choice configurable.
