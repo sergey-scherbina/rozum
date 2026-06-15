@@ -224,8 +224,19 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   endpoint `https://api.anthropic.com`, key from `ANTHROPIC_API_KEY` — required, tier skipped if
   absent); else OpenAI-compatible (key from `OPENAI_API_KEY`). `api_key_env`/`endpoint` override the
   defaults. 2 new tests (api in JSON round-trip, api reaches the resolver). 251/0. **Remaining
-  follow-ups**: a `rozum.toml [cascade]` schema (v1 is env JSON); P7 adaptive judge thresholds /
-  health-pattern persistence.
+  follow-up**: a `rozum.toml [cascade]` schema (v1 is env JSON).
+- [x] cascade-p7-adaptive - **DONE 2026-06-15** (`src/cascade/{stats,health,mod}.rs`). The last two
+  Phase-7 pieces. (1) **Adaptive judge threshold**: `StatsStore::is_trusted(task, model, …)` →
+  `CascadeBackend::effective_judge_threshold` lowers the L2 judge threshold by `judge_trust_discount`
+  (0.1) for a `(task-class, model)` whose historical accept-rate has earned trust — so we stop
+  wasting escalations second-guessing a proven model; an unproven one keeps the base threshold. (2)
+  **Health-pattern persistence**: `HealthRegistry::open(path)` replays a JSONL of health transitions
+  (`HealthEvent` = failure + wall-clock cooldown deadline / recovery); a still-active cooldown is
+  restored on start (the `Instant` rebuilt from the persisted unix deadline) with its `fails` count,
+  so a quota-exhausted remote stays parked across a restart instead of being re-probed, and backoff
+  keeps escalating. `CascadeConfig` gained `judge_trust_discount` + `health_path` (both opt-in,
+  default off). 4 new tests (judge trusts/holds, cooldown-survives-restart, recovered-available).
+  255/0.
 
 #### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
 

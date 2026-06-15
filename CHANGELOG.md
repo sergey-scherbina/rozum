@@ -1,5 +1,28 @@
 # Changelog
 
+## cascade — Phase 7 follow-ups: adaptive judge threshold + persisted health
+Completed: 2026-06-15
+
+The two remaining Phase-7 pieces, both driven by the learned stats (`cascade-p7-adaptive`).
+
+**Adaptive judge threshold.** A `(task-class, model)` whose historical accept-rate has earned trust
+now gets a *more lenient* L2 judge — `StatsStore::is_trusted(…)` →
+`CascadeBackend::effective_judge_threshold` lowers the configured threshold by `judge_trust_discount`
+(default 0.1). So once a cheap model has proven itself on a class, we stop burning escalations
+second-guessing it on a borderline judge score; a model with no track record keeps the strict base
+threshold. Off with `judge_trust_discount = 0.0`.
+
+**Health-pattern persistence.** Cooldowns now survive a restart. `HealthRegistry::open(path)` replays
+a JSONL of health transitions (`HealthEvent` = a failure with its wall-clock cooldown deadline, or a
+recovery; latest event per model wins). A cooldown still in the future is restored as an active
+`Unavailable` entry — the `Instant` rebuilt from the persisted unix deadline — carrying its `fails`
+count, so a remote whose hourly quota is exhausted stays parked across a daemon restart instead of
+being re-probed immediately, and exponential backoff keeps escalating. Opt-in via
+`CascadeConfig.health_path` (`None` = in-memory, unchanged).
+
+`src/cascade/{stats,health,mod}.rs`; 4 new tests. 255/0. With this the cascade-router's learned track
+is complete; the only open follow-up is a `rozum.toml [cascade]` config schema.
+
 ## cascade — Anthropic-native remote tier (Claude as the strong tier)
 Completed: 2026-06-15
 

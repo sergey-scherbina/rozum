@@ -197,6 +197,24 @@ impl StatsStore {
         self.inner.lock().unwrap().agg.get(&(task.key(), model.to_string())).cloned()
     }
 
+    /// True if `(task, model)` has *earned trust* — a historical accept-rate ≥ `accept_threshold`
+    /// with at least `min_attempts` of evidence. The adaptive-judge signal: a proven model gets a
+    /// more lenient acceptance threshold, so we stop wasting escalations second-guessing it.
+    pub fn is_trusted(
+        &self,
+        task: TaskClass,
+        model: &str,
+        accept_threshold: f64,
+        min_attempts: u64,
+    ) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .agg
+            .get(&(task.key(), model.to_string()))
+            .is_some_and(|s| s.attempts >= min_attempts && s.accept_rate() >= accept_threshold)
+    }
+
     /// **The `Learned` start-tier.** Among the cost-ordered `model_ids` (cheapest first), the index
     /// of the cheapest model whose historical accept-rate for `task` clears `accept_threshold` with
     /// at least `min_attempts` of evidence. `None` → not enough evidence (the caller falls back to

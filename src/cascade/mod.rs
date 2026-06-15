@@ -30,6 +30,7 @@ pub use stats::{
 };
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -97,9 +98,16 @@ pub struct CascadeConfig {
     /// strategy can read it; `None` → no learning/recording.
     pub stats: Option<Arc<StatsStore>>,
     /// `Learned` start-tier thresholds: the cheapest tier whose accept-rate ≥ this, with ≥
-    /// `learned_min_attempts` of evidence, becomes the entry point.
+    /// `learned_min_attempts` of evidence, becomes the entry point. Also the "trust" bar for the
+    /// adaptive judge threshold.
     pub learned_accept_threshold: f64,
     pub learned_min_attempts: u64,
+    /// Adaptive judge: how much to *lower* the L2 judge threshold for a `(task-class, model)` the
+    /// stats have shown to be trustworthy (accept-rate ≥ `learned_accept_threshold`). `0.0` = off.
+    pub judge_trust_discount: f32,
+    /// Persist health transitions (cooldowns) to this JSONL and replay on start, so a parked model
+    /// stays parked across restarts. `None` = in-memory health only.
+    pub health_path: Option<PathBuf>,
 }
 
 impl CascadeConfig {
@@ -118,6 +126,8 @@ impl CascadeConfig {
             stats: None,
             learned_accept_threshold: 0.6,
             learned_min_attempts: 5,
+            judge_trust_discount: 0.1,
+            health_path: None,
         }
     }
 }
@@ -137,7 +147,11 @@ impl CascadeBackend {
         config.models.sort_by_key(|m| m.tier);
         let lanes =
             LaneSet::new(config.models.iter().map(|m| &m.lane), &config.residency_slots);
-        Self { config, health: HealthRegistry::new(), lanes }
+        let health = match &config.health_path {
+            Some(p) => HealthRegistry::open(p),
+            None => HealthRegistry::new(),
+        };
+        Self { config, health, lanes }
     }
 
     /// The shared health registry (observability / tests).
@@ -185,6 +199,26 @@ impl CascadeBackend {
                 Self::classify_start(difficulty, n)
             }
         }
+    }
+
+    /// The L2 judge threshold to apply for this `(task, model)` — the configured base, lowered by
+    /// `judge_trust_discount` when the stats show the model has earned trust on this task-class
+    /// (fewer wasted escalations second-guessing a proven model). Falls back to the base with no
+    /// stats / no track record.
+    fn effective_judge_threshold(&self, base: f32, task: TaskClass, model: &str) -> f32 {
+        if self.config.judge_trust_discount > 0.0 {
+            if let Some(stats) = &self.config.stats {
+                if stats.is_trusted(
+                    task,
+                    model,
+                    self.config.learned_accept_threshold,
+                    self.config.learned_min_attempts,
+                ) {
+                    return (base - self.config.judge_trust_discount).max(0.0);
+                }
+            }
+        }
+        base
     }
 
     /// Record one attempt into the learned stats store (no-op when stats are off).
@@ -364,7 +398,8 @@ impl ChatBackend for CascadeBackend {
                     Some(jc) => {
                         let s = jc.judge.score(&req, &outcome).await;
                         judge_score = Some(s);
-                        if s >= jc.threshold { Verdict::Accept } else { Verdict::Escalate }
+                        let thr = self.effective_judge_threshold(jc.threshold, task, &card.id);
+                        if s >= thr { Verdict::Accept } else { Verdict::Escalate }
                     }
                     None => Verdict::Accept,
                 },
@@ -888,5 +923,51 @@ mod tests {
         assert_eq!((cheap.attempts, cheap.accepts, cheap.escalations), (1, 0, 1));
         let strong = stats.stat(task, "strong").expect("strong attempt recorded");
         assert_eq!((strong.attempts, strong.accepts, strong.escalations), (1, 1, 0));
+    }
+
+    // ── Phase 7 follow-up: adaptive judge threshold ─────────────────────────
+
+    struct FixedJudge(f32);
+    #[async_trait]
+    impl Judge for FixedJudge {
+        async fn score(&self, _req: &ChatRequest, _ans: &TurnOutcome) -> f32 {
+            self.0
+        }
+    }
+
+    #[tokio::test]
+    async fn adaptive_judge_trusts_a_proven_model() {
+        // cheap is proven on this task-class (accept-rate 1.0). A judge score of 0.45 is below the
+        // base threshold 0.5 but above the trusted threshold (0.5 − 0.1) → cheap is accepted.
+        let stats = Arc::new(StatsStore::in_memory());
+        let task = TaskClass { shape: TaskShape::Freeform, difficulty: DiffBucket::Easy };
+        seed_stat(&stats, task, "cheap", 0, true, 10);
+
+        let (c, cc) = card("cheap", 0, Script::Text("an ok answer"));
+        let (s, sc) = card("strong", 1, Script::Text("better"));
+        let mut cfg = CascadeConfig::new(vec![c, s]);
+        cfg.judge = Some(JudgeConfig { judge: Box::new(FixedJudge(0.45)), threshold: 0.5 });
+        cfg.stats = Some(stats);
+        let be = CascadeBackend::new(cfg);
+        let out = collect(be.chat(ChatRequest::simple("hi")).await.unwrap()).await;
+        assert_eq!(out, "an ok answer", "a trusted model is accepted at the lowered threshold");
+        assert_eq!(cc.load(Ordering::SeqCst), 1);
+        assert_eq!(sc.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn adaptive_judge_holds_the_base_for_an_unproven_model() {
+        // Same judge score, but no track record → the base threshold 0.5 applies → 0.45 escalates.
+        let stats = Arc::new(StatsStore::in_memory());
+        let (c, cc) = card("cheap", 0, Script::Text("an ok answer"));
+        let (s, sc) = card("strong", 1, Script::Text("better"));
+        let mut cfg = CascadeConfig::new(vec![c, s]);
+        cfg.judge = Some(JudgeConfig { judge: Box::new(FixedJudge(0.45)), threshold: 0.5 });
+        cfg.stats = Some(stats);
+        let be = CascadeBackend::new(cfg);
+        let out = collect(be.chat(ChatRequest::simple("hi")).await.unwrap()).await;
+        assert_eq!(out, "better", "an unproven model is held to the base threshold and escalates");
+        assert_eq!(cc.load(Ordering::SeqCst), 1);
+        assert_eq!(sc.load(Ordering::SeqCst), 1);
     }
 }
