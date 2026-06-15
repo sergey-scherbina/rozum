@@ -681,9 +681,12 @@ features the mistralrs backend shipped that the native backend does NOT yet have
   local agent has durable memory across turns. Unit-tested (append-only history, disk persistence +
   replay, the tools). No embeddings/ranking — that's `rag-lite`.
 
-- [ ] rag-lite - Add a local retrieval layer.
-  - Keep embeddings/backend choice configurable.
-  - Start with small text documents and lexical fallback.
+- [x] rag-lite - **DONE 2026-06-15** (`src/rag_lite.rs`). Local retrieval over small text documents:
+  `LexicalIndex` (BM25 — `add(id, text)` + `search(query, k) -> Vec<Hit>`), pure Rust, no model/network,
+  deterministic. The `Retriever` trait keeps the API stable so an embedding backend can drop in later
+  (the "configurable backend"). Exposed to the agent runtime as a `search_documents` tool
+  (`retrieval_tools(Arc<dyn Retriever>)`). Unit-tested (BM25 ranking + no-match/empty/k=0 edges, idf,
+  the tool). Lexical fallback is the starting point per the brief; embeddings are the follow-up.
 
 ### Concurrency & scheduling (follow-ups to `mistralrs-concurrency-scheduling`)
 

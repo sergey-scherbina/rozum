@@ -1,5 +1,17 @@
 # Changelog
 
+## agent — lexical retrieval (rag-lite): search a local corpus
+Completed: 2026-06-15
+A lightweight local retrieval layer (`src/rag_lite.rs`, `rag-lite`): index small text documents and
+pull the top-K most relevant to a query. v1 is **lexical** — a `LexicalIndex` implementing **BM25**
+(`add(id, text)` + `search(query, k) -> Vec<Hit>`), pure Rust, no model/network, fully deterministic.
+A `Retriever` trait keeps the retrieval API stable so an **embedding** backend can be dropped in later
+(the configurable backend the brief asks for) without touching callers. Exposed to the reference agent
+runtime as a `search_documents` tool (`retrieval_tools(Arc<dyn Retriever>)`), so a small local agent
+can ground answers in a local corpus. Unit-tested (BM25 ranks the relevant doc first; no-match / empty
+index / `k=0` are safe; idf; the tool). Pairs with `memory-store` (exact key) and `tool-routing` as the
+local-agent toolkit. 171/0.
+
 ## agent — local memory store (memory-store): durable remember/recall
 Completed: 2026-06-15
 An append-only local memory (`src/memory_store.rs`, `memory-store`): a key→value JSONL log with
