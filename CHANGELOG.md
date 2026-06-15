@@ -1,5 +1,24 @@
 # Changelog
 
+## shared-gateway-multislot — Phase 2 design (live-daemon wiring)
+Completed: 2026-06-15
+
+The Phase-2 design for wiring the residency core into the live `Switchboard`
+(`docs/specs/shared-gateway-multislot.md`). The approach is deliberately **additive + opt-in**: keep
+the single-resident core (swap/drain/unload/idle) untouched and add a **warm cache** of secondary
+residents gated by `ROZUM_MULTISLOT` (default off ⇒ byte-for-byte today's behavior). `enter(req.model)`
+routes a known cached-local request to the warm cache; a warm entry has its own in-flight counter
+(decoupled from the primary drain, so it can't deadlock a swap); admission/eviction goes through
+`resident::plan_residency`; eviction is idle-only with the existing `spawn_blocking` drop care. The
+spec calls out injectable weight/budget seams so the logic is mock-testable, and the exact
+**real-model validation checklist** (two small models co-resident, eviction frees RAM, big-model
+swap, flag-off regression).
+
+Implementation is **deferred on purpose**: it changes the live serving path that backs Claude
+Code / Codex, and its memory / `!Send`-worker-drop behavior can only be confirmed on the target
+machine — so it's best written as small, individually-validated steps rather than one unvalidatable
+big-bang. Phase 1 (the tested decision core, `src/resident.rs`) already shipped.
+
 ## docs hygiene — add-a-backend checklist + prompt policy
 Completed: 2026-06-15
 

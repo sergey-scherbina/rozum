@@ -772,10 +772,14 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   (unavoidable thrash). `UsageStats` (persisted JSONL) learns per-model usefulness; `plan_residency`
   is the pure, fully-tested memory-gated/utility decision (greedy keep-highest-utility-that-fits,
   busy models never evicted, `oversubscribed` flags the swap case). 7 tests.
-  **Phase 2 (PENDING — needs real-model daemon validation)**: wire the planner into the `Switchboard`
-  — replace the single `backend: RwLock<Option<Arc>>` with a model-keyed resident set, route
-  `enter(req.model)`, per-model `generating`/idle-unload, build/evict via the planner, key the
-  registry by the resident set. Out-of-process coordination stays in `concurrency-cross-process`.
+  **Phase 2 DESIGNED 2026-06-15** (`docs/specs/shared-gateway-multislot.md`) — an **additive warm
+  cache** alongside the untouched single-resident core, gated by `ROZUM_MULTISLOT` (default off),
+  `enter(req.model)` routing, warm-entry inflight decoupled from the primary drain, build/evict via
+  the planner, idle eviction, injectable weight/budget seams for mock tests. **Implementation
+  deferred — needs real-model daemon validation** (it changes the live serving core; the memory /
+  `!Send`-worker-drop can only be confirmed with two real models): write it as small validated steps.
+  Out-of-process coordination stays in `concurrency-cross-process`; a shared cross-resident GPU
+  admission gate stays in `concurrency-multi-instance`.
 
 - [ ] shared-gateway-service - Optionally install the shared gateway as a
   launchd/systemd service for always-warm startup, instead of lazy spawn +

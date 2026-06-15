@@ -291,8 +291,14 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   thrash) — "pick the best arrangement possible under the memory budget". `UsageStats` (persisted
   JSONL, `ModelUsage::utility` = count × recency-decay) + the pure `plan_residency` planner
   (keep-highest-utility-that-fits, busy never evicted, `oversubscribed` = swap case). 7 tests. 267/0.
-  **Phase 2 (PENDING, user validates on real models)**: wire it into the `Switchboard` (model-keyed
-  resident set, route by `req.model`, per-model generating/idle-unload, build/evict via the planner).
+  **Phase 2 DESIGNED 2026-06-15** (`docs/specs/shared-gateway-multislot.md`): an **additive warm
+  cache** alongside the untouched single-resident core, gated by `ROZUM_MULTISLOT` (default off →
+  byte-for-byte today when off), `enter(req.model)` routing, warm entries with their own inflight
+  (decoupled from the primary drain), build/evict via `plan_residency`, idle eviction, and injectable
+  weight/budget seams so the logic is mock-testable. **Implementation deferred**: it rewrites the
+  live serving core and the real memory / `!Send`-worker-drop behavior can only be confirmed on the
+  target machine — best written as small, individually-validated steps when the user is at a box to
+  run two real models. The spec lists the exact validation checklist.
 - [x] cascade-offline - **DONE 2026-06-15 (user idea)** (`src/main.rs`). `--offline` on
   `launch`/`gateway` (→ `ROZUM_OFFLINE`, inherited by the spawned daemon): `build_remote_tier` skips
   every remote tier (dropped like any unbuildable tier — locals survive, an all-remote cascade
