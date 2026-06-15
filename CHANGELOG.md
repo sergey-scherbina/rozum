@@ -1,5 +1,26 @@
 # Changelog
 
+## shared-gateway-multislot — adaptive residency, Phase 1 (decision core)
+Completed: 2026-06-15
+
+Toward serving more than one model behind the shared gateway **without thrashing**, the adaptive
+decision core (`src/resident.rs`). The policy the user asked for: small requested models that fit
+*and are statistically useful* stay co-resident; the least-useful idle model is evicted to make
+room; a model too big to co-reside falls back to a swap (thrash is unavoidable for big models) — so
+the gateway keeps the **best arrangement possible under the memory budget**.
+
+`UsageStats` is a persisted (JSONL, replay-on-open) per-model request history; `ModelUsage::utility`
+= request count × an exponential recency decay (1 h half-life), so frequent+recent models rank high
+and stale ones decay out of the warm set. `plan_residency` is the pure, fully-tested planner: greedy
+*keep the highest-utility models that fit* (always including the just-requested one), evict the rest
+(idle only — a busy model is never dropped mid-stream), and flag `oversubscribed` when the request
+can't co-reside (the caller swaps).
+
+It's the **pure core** — reasons over `(model, weight, busy, utility)` only, no backends/daemon — so
+it's fully unit-tested here (7 tests). Phase 2 (wiring it into the live `Switchboard`: a model-keyed
+resident set, routing by `req.model`, per-model generating/idle-unload) is a separate step that
+needs real-model daemon validation. `src/resident.rs`; 267/0.
+
 ## quick wins — CI smoke gate, README refresh, and `--offline`
 Completed: 2026-06-15
 
