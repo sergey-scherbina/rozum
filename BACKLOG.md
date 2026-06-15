@@ -66,10 +66,13 @@ through `concurrency::admit_wrap`, so they are not relisted.)
     rest, batches the greedy ≥2 via `run_batch`, runs the others (and any single job) serially on the
     proven prefix-KV path. `concurrency_capacity()=Some(batch_cap())` so `admit_wrap` admits B.
     (**ALL dense families now batch** since 2026-06-15 — Llama 3.x / Mistral / Phi-3 / SmolLM
-    (`llama.rs`) and Qwen2 / Qwen2.5 / Qwen2.5-Coder (`qwen2.rs`) got the same per-row-RoPE port;
-    `dense_forward`+`is_batchable_arch` include both. Validated `mlx_llama_batched_two_concurrent` +
-    `mlx_qwen2_batched_two_concurrent`. Only Gemma 3 stays serial — its per-layer windowed masks need
-    threading.) Per-row streaming + EOS/max-tokens/runaway
+    (`llama.rs`), Qwen2 / Qwen2.5 / Qwen2.5-Coder (`qwen2.rs`), AND Gemma 3 (`gemma3.rs`) got the
+    same per-row-RoPE port; `dense_forward`+`is_batchable_arch` include all three. Gemma 3 also
+    needed its per-layer LOCAL windowed mask threaded into the batched path (`build_window_keep`
+    AND-ed with the pad mask — at decode all rows are right-aligned in the left-padded cache so the
+    window is uniform across slots). Validated `mlx_llama_batched_two_concurrent` +
+    `mlx_qwen2_batched_two_concurrent` + `mlx_gemma3_batched_two_concurrent`. **No dense family stays
+    serial.**) Per-row streaming + EOS/max-tokens/runaway
     retirement via `BatchSeq` (`take_axis` row-slice shrink + re-assembled per-row pad mask & rope).
   - Probe: B=2 batched `forward` is byte-exact per sequence + **2 seqs at 126.3 vs 63.9 t/s =
     1.98×** (near-linear) — because decode is 92% CPU graph-build and batching does ONE build for
