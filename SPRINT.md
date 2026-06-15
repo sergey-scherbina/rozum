@@ -97,8 +97,16 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   hard-fail only if nothing available/usable). `ModelCard` gained `location: Local|Remote`. 6 new
   tests (classify, park→half-open→recover, backoff; e2e: parked-skipped-next-request, network-parks-
   all-remotes→degrade-to-local, OOM-big→fall-to-smaller). 191/0.
-- [ ] cascade-p3-self-signal - **Phase 3.** L1 self-signal + the `escalate`/`consult_stronger` tool
-  (`ToolSource`, composes with `run_agent` + `MultiToolSource`).
+- [x] cascade-p3-self-signal - **Phase 3. DONE 2026-06-15** (`src/cascade/self_signal.rs`). L1 plus the
+  **escalation affordance** (the user's point — teach the model the skill, don't guess at refusals):
+  `EscalationAffordance` injects a system-prompt instruction into every NON-top tier ("if not
+  confident, don't guess — reply `[[ESCALATE: reason]]`; admitting it beats being confidently wrong"),
+  and `SelfSignalCheck` (L1) escalates on the marker, an `escalate`/`consult_stronger` tool call, or an
+  opt-in refusal pattern (off by default — rely on the taught signal). The marker is stripped from any
+  fallback answer. `escalation_tools()` exposes `consult_stronger` as a `ToolSource` for agent mode
+  (composes with `run_agent`/`MultiToolSource`). Default cascade pipeline is now `[L0 structural, L1
+  self-signal]` + affordance on. 7 new tests (marker/tool/refusal detection, affordance injection,
+  marker strip, tool ack; e2e marker→escalate, marker-stripped-fallback). 198/0.
 - [ ] cascade-p4-judge - **Phase 4.** L2 cheap judge (next-cheapest-local + heuristic; pluggable threshold).
 - [ ] cascade-p5-classifier - **Phase 5.** Difficulty classifier → `ClassifyThenStart` (heuristic features / tiny model → start tier).
 - [ ] cascade-p6-scheduler - **Phase 6.** Parallel scheduler / lanes (per-request difficulty routing,

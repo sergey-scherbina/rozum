@@ -11,9 +11,11 @@
 
 mod acceptance;
 mod health;
+mod self_signal;
 
 pub use acceptance::{AcceptanceCheck, StructuralCheck, TurnOutcome, Verdict};
 pub use health::{classify, FailReason, HealthRegistry, HealthState};
+pub use self_signal::{escalation_tools, EscalationAffordance, SelfSignalCheck};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -62,15 +64,19 @@ pub struct CascadeConfig {
     pub models: Vec<ModelCard>,
     pub acceptance: Vec<Box<dyn AcceptanceCheck>>,
     pub budget: CascadeBudget,
+    /// The escalation affordance injected into each non-top model's prompt (`None` = off).
+    pub affordance: Option<EscalationAffordance>,
 }
 
 impl CascadeConfig {
-    /// The default Phase-1 config over `models`: L0 (structural) acceptance, unbounded budget.
+    /// The default config over `models`: L0 (structural) + L1 (self-signal) acceptance, the
+    /// escalation affordance on, unbounded budget.
     pub fn new(models: Vec<ModelCard>) -> Self {
         Self {
             models,
-            acceptance: vec![Box::new(StructuralCheck)],
+            acceptance: vec![Box::new(StructuralCheck), Box::new(SelfSignalCheck::default())],
             budget: CascadeBudget::default(),
+            affordance: Some(EscalationAffordance::default()),
         }
     }
 }
@@ -135,11 +141,16 @@ async fn run_attempt(backend: &Arc<dyn ChatBackend>, req: ChatRequest) -> TurnOu
 }
 
 /// Reconstruct the `ChatEvent`s to replay a collected outcome to the client (buffered — the
-/// cascade has to see the whole answer to judge it, so the winner is emitted post-hoc).
-fn outcome_events(o: &TurnOutcome) -> Vec<ChatEvent> {
+/// cascade has to see the whole answer to judge it, so the winner is emitted post-hoc). Any
+/// escalation `marker` is stripped from the emitted text (a fallback answer mustn't leak it).
+fn outcome_events(o: &TurnOutcome, marker: Option<&str>) -> Vec<ChatEvent> {
     let mut evs = Vec::new();
-    if !o.text.is_empty() {
-        evs.push(ChatEvent::TextDelta { text: o.text.clone() });
+    let text = match marker {
+        Some(m) => self_signal::strip_marker(&o.text, m),
+        None => o.text.clone(),
+    };
+    if !text.is_empty() {
+        evs.push(ChatEvent::TextDelta { text });
     }
     for (id, name, args) in &o.tool_calls {
         evs.push(ChatEvent::ToolUseStart { id: id.clone(), name: name.clone() });
@@ -168,12 +179,14 @@ impl ChatBackend for CascadeBackend {
         }
 
         let cap = self.config.budget.max_escalations.saturating_add(1);
+        let marker = self.config.affordance.as_ref().map(|a| a.marker.as_str());
         let start = Instant::now();
         let mut best_ok: Option<TurnOutcome> = None;
         let mut last_err: Option<String> = None;
         let mut attempts = 0usize;
+        let last_idx = models.len() - 1;
 
-        for card in models.iter() {
+        for (idx, card) in models.iter().enumerate() {
             if attempts >= cap || self.config.budget.wall_time.is_some_and(|wt| start.elapsed() >= wt)
             {
                 break;
@@ -183,7 +196,13 @@ impl ChatBackend for CascadeBackend {
                 continue;
             }
             attempts += 1;
-            let outcome = run_attempt(&card.backend, req.clone()).await;
+            // Give every non-top model the escalation affordance (the "skill") so it knows it can
+            // defer instead of guessing. The top tier has nothing above it → no affordance.
+            let attempt_req = match &self.config.affordance {
+                Some(aff) if idx != last_idx => self_signal::inject_affordance(req.clone(), aff),
+                _ => req.clone(),
+            };
+            let outcome = run_attempt(&card.backend, attempt_req).await;
             if let Some(e) = &outcome.error {
                 let reason = classify(e);
                 self.health.record_failure(&card.id, reason);
@@ -201,7 +220,7 @@ impl ChatBackend for CascadeBackend {
             match pipeline_verdict(&self.config.acceptance, &req, &outcome) {
                 Verdict::Accept => {
                     tracing::debug!(model = %card.id, "cascade: accepted");
-                    return Ok(buffered(outcome_events(&outcome)));
+                    return Ok(buffered(outcome_events(&outcome, marker)));
                 }
                 _ => {
                     tracing::debug!(model = %card.id, "cascade: escalating");
@@ -213,7 +232,7 @@ impl ChatBackend for CascadeBackend {
         // Exhausted budget/list without an `Accept`: return the best usable answer (graceful
         // degradation), or error only if nothing was available or usable.
         match best_ok {
-            Some(o) => Ok(buffered(outcome_events(&o))),
+            Some(o) => Ok(buffered(outcome_events(&o, marker))),
             None => Err(ModelError::BackendUnavailable(last_err.unwrap_or_else(|| {
                 if attempts == 0 {
                     "cascade: all candidate models are temporarily unavailable".into()
@@ -427,5 +446,29 @@ mod tests {
         assert_eq!(out, "partial", "falls back to the smaller model's answer");
         assert_eq!(bc.load(Ordering::SeqCst), 1);
         assert_eq!(be.health().state("big"), HealthState::Unavailable);
+    }
+
+    // ── Phase 3: self-signal ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn self_signal_marker_escalates() {
+        // The cheap model honestly defers via the marker → the strong model answers.
+        let (c, cc) = card("cheap", 0, Script::Text("[[ESCALATE: not sure]]"));
+        let (s, sc) = card("strong", 1, Script::Text("the answer"));
+        let be = CascadeBackend::new(CascadeConfig::new(vec![c, s]));
+        let out = collect(be.chat(ChatRequest::simple("hard q")).await.unwrap()).await;
+        assert_eq!(out, "the answer");
+        assert_eq!(cc.load(Ordering::SeqCst), 1);
+        assert_eq!(sc.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn marker_is_stripped_from_a_fallback_answer() {
+        // Both defer; the top tier's answer is the fallback, with its marker stripped.
+        let (c, _cc) = card("cheap", 0, Script::Text("[[ESCALATE: a]]"));
+        let (s, _sc) = card("strong", 1, Script::Text("partial answer [[ESCALATE: b]]"));
+        let be = CascadeBackend::new(CascadeConfig::new(vec![c, s]));
+        let out = collect(be.chat(ChatRequest::simple("q")).await.unwrap()).await;
+        assert_eq!(out, "partial answer", "the marker is removed from the fallback");
     }
 }
