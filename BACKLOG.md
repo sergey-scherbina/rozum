@@ -667,8 +667,12 @@ features the mistralrs backend shipped that the native backend does NOT yet have
   - Required for reliable tool routing.
   - Start with parse/repair/retry before grammar decoding.
 
-- [ ] tool-routing - Add a small tool registry and let the model select simple tools.
-  - First tools: echo, time, file lookup, model catalog.
+- [x] tool-routing - **DONE 2026-06-15** (`src/builtin_tools.rs`). A small registry of safe,
+  read-only built-in tools (`echo`, `current_time`, `list_models`) exposed as a `CallbackToolSource`,
+  so the reference agent runtime (`run_agent`) lets the model select them. Side-effect-free (no
+  filesystem/network writes); `list_models` surfaces the recommended catalog + locally-installed
+  models. File lookup deliberately omitted (security). Unit-tested (registry shape + each tool's
+  dispatch incl. the missing-arg `ToolError`). An app composes these with its own domain tools.
 
 - [ ] memory-store - Add local memory storage.
   - Start with append-only facts and retrieval by exact key.
