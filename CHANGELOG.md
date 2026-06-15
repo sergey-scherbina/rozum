@@ -1,5 +1,27 @@
 # Changelog
 
+## gateway — distributed readiness: /health + /ready + graceful shutdown (run rozum as a service)
+Completed: 2026-06-15
+Makes the gateway safe to run as N identical instances behind a load balancer with zero-downtime
+rolling deploys (`rozum-distributed-readiness`, P0b/P1). Spec: `docs/specs/distributed-readiness.md`.
+- **`GET /health`** (liveness — 200 while the process serves HTTP, never touches the model) and
+  **`GET /ready`** (readiness — 200 when servable, 503 while draining; body `{ready, loaded,
+  shutting_down, model}`). The split is the standard one: health → restart decisions, ready → routing
+  decisions. A transient model **swap**-drain (`/control/switch`) does NOT flip readiness — those
+  requests park for the brief swap and still succeed, so the instance stays in rotation; only a
+  shutdown (or an unloaded `--dedicated` model that can't rebuild) reads not-ready.
+- **Graceful shutdown** on SIGTERM/SIGINT via `axum::serve(...).with_graceful_shutdown(...)`: flip the
+  instance to not-ready and reject new chats (`enter()` returns 503 `shutting_down` instead of
+  parking), wait `ROZUM_SHUTDOWN_GRACE_SECS` (default 3) so the LB deregisters, then axum stops
+  accepting and drains the in-flight streams to completion before exit. Rolling deploys bleed an old
+  instance out cleanly while new ones absorb traffic.
+- **Stateless** is now documented as a property: the prefix-KV cache is a per-instance latency
+  optimization, not session affinity — any instance serves any request, so no sticky sessions are
+  needed (round-robin / least-connections is fine).
+- Tests: `readiness_reflects_servability`, `shutdown_flips_readiness`,
+  `enter_rejects_new_chats_while_shutting_down` (no leaked `generating` token). 149/0. Follow-ups
+  (noted): a multi-model pool/router and cross-instance admission coordination.
+
 ## gateway — tool contract (Contract-1) hardened + documented; `tool_choice` honored
 Completed: 2026-06-15
 The HTTP tool surface the scalascript agent SDK builds against (`rozum-gateway-tool-contract`, P0b) is

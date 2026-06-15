@@ -106,6 +106,10 @@ struct Switchboard {
     reload_lock: tokio::sync::Mutex<()>,
     /// `(pid, port)` when registered, so a switch can republish `active.json`.
     register: Option<(u32, u16)>,
+    /// Set once on SIGTERM/SIGINT: `/ready` flips to 503 (the load balancer stops
+    /// routing) and new chats are rejected rather than parked, so in-flight work
+    /// drains and the process exits cleanly during a rolling deploy.
+    shutting_down: AtomicBool,
 }
 
 /// Held by a chat handler for the whole request (prefill + stream). Keeps the
@@ -207,6 +211,15 @@ impl Switchboard {
     /// whole request so the model can't be swapped out from under it.
     async fn enter(self: &Arc<Self>) -> Result<ChatLease, Response> {
         loop {
+            // A graceful shutdown rejects new work outright (don't park — there's no
+            // resume coming); the load balancer has already been told we're not ready.
+            if self.is_shutting_down() {
+                return Err(error_json(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "gateway is shutting down",
+                    "shutting_down",
+                ));
+            }
             // Take a token first, then check `draining`: paired with begin_drain
             // (set draining, then wait for generating==0) this never races a swap
             // into running mid-flight.
@@ -315,6 +328,24 @@ impl Switchboard {
     /// `--dedicated` gateway returns false — it must never auto-unload.
     fn can_reload(&self) -> bool {
         self.builder.is_some()
+    }
+
+    /// True once the process has begun a graceful shutdown.
+    fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
+    }
+
+    /// Begin graceful shutdown: stop reporting ready and reject new chats.
+    fn mark_shutting_down(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+    }
+
+    /// Readiness for a load balancer: can this instance serve a new request right
+    /// now? `false` while shutting down (drain) or when the model is gone and this
+    /// gateway can't rebuild it. A transient swap-drain does NOT flip readiness —
+    /// those requests park briefly and still succeed.
+    fn is_ready(&self) -> bool {
+        !self.is_shutting_down() && (self.is_loaded() || self.can_reload())
     }
 
     /// Free the resident model but keep the daemon listening; the next chat
@@ -1484,6 +1515,65 @@ async fn anthropic_collect(
 
 // ─── Route handlers ───────────────────────────────────────────────────────────
 
+/// `GET /health` — liveness. 200 as long as the process serves HTTP. Cheap, never
+/// touches the model; an orchestrator uses it to decide whether to restart the pod.
+async fn health_handler() -> impl IntoResponse {
+    (StatusCode::OK, axum::Json(json!({ "status": "ok" })))
+}
+
+/// `GET /ready` — readiness for a load balancer. 200 when this instance can serve a
+/// new request now; 503 while draining for shutdown (so the LB stops routing here and
+/// in-flight work finishes) or when the model is gone and can't be rebuilt.
+async fn ready_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let ready = state.sb.is_ready();
+    let code = if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let body = json!({
+        "ready": ready,
+        "loaded": state.sb.is_loaded(),
+        "shutting_down": state.sb.is_shutting_down(),
+        "model": state.sb.model_id(),
+    });
+    (code, axum::Json(body))
+}
+
+/// Seconds to keep serving after a shutdown signal so a load balancer notices
+/// `/ready` = 503 before connections are cut. `ROZUM_SHUTDOWN_GRACE_SECS` (default 3).
+fn shutdown_grace_secs() -> u64 {
+    std::env::var("ROZUM_SHUTDOWN_GRACE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(3)
+}
+
+/// Completes on SIGTERM/SIGINT, after flipping the gateway to "not ready" and waiting a
+/// short grace so the load balancer deregisters this instance before axum stops
+/// accepting connections and drains the in-flight streams. Wired into
+/// `axum::serve(...).with_graceful_shutdown(...)`.
+async fn shutdown_signal(sb: Arc<Switchboard>) {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = term => {}
+    }
+    crate::obs::log_event(json!({ "event": "gateway_shutdown_signal" }));
+    sb.mark_shutting_down();
+    tokio::time::sleep(Duration::from_secs(shutdown_grace_secs())).await;
+}
+
 async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
     let mut snap = state.observer.snapshot();
     if let Value::Object(ref mut m) = snap {
@@ -2333,6 +2423,7 @@ pub async fn serve_on(
         generating: AtomicU64::new(0),
         reload_lock: tokio::sync::Mutex::new(()),
         register,
+        shutting_down: AtomicBool::new(false),
     });
 
     let state = GatewayState {
@@ -2423,6 +2514,8 @@ pub async fn serve_on(
     }
 
     let app = Router::new()
+        .route("/health", get(health_handler))
+        .route("/ready", get(ready_handler))
         .route("/v1/models", get(models_handler))
         .route("/v1/admit", get(admit_handler))
         .route("/stats", get(stats_handler))
@@ -2434,10 +2527,12 @@ pub async fn serve_on(
         .route("/control/reload", post(control_reload))
         .layer(middleware::from_fn(poison_layer))
         .layer(middleware::from_fn_with_state(state.clone(), auth_layer))
-        .with_state(state);
+        .with_state(state.clone());
 
     tracing::info!(addr = ?listener.local_addr().ok(), "rozum gateway listening");
-    let result = axum::serve(listener, app).await;
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(state.sb.clone()))
+        .await;
     if let Some(pid) = registered_pid {
         crate::share::remove_active_if_mine(pid);
     }
@@ -2809,6 +2904,7 @@ mod tests {
             generating: AtomicU64::new(0),
             reload_lock: tokio::sync::Mutex::new(()),
             register: None, // don't touch active.json in tests
+            shutting_down: AtomicBool::new(false),
         })
     }
 
@@ -2872,6 +2968,39 @@ mod tests {
         assert!(test_sb(Some(ok_builder()), true).can_reload());
         // A --dedicated gateway has no builder: it must never auto-unload.
         assert!(!test_sb(None, true).can_reload());
+    }
+
+    #[test]
+    fn readiness_reflects_servability() {
+        // Loaded → ready. Unloaded but rebuildable → still ready (lazy reload).
+        assert!(test_sb(Some(ok_builder()), true).is_ready());
+        assert!(test_sb(Some(ok_builder()), false).is_ready());
+        // Unloaded AND no builder (dedicated, freed) → can't serve → not ready.
+        assert!(!test_sb(None, false).is_ready());
+        // A loaded dedicated gateway is ready.
+        assert!(test_sb(None, true).is_ready());
+    }
+
+    #[test]
+    fn shutdown_flips_readiness() {
+        let sb = test_sb(Some(ok_builder()), true);
+        assert!(sb.is_ready(), "ready before shutdown");
+        sb.mark_shutting_down();
+        assert!(sb.is_shutting_down());
+        assert!(!sb.is_ready(), "a draining instance must read NOT ready");
+    }
+
+    #[tokio::test]
+    async fn enter_rejects_new_chats_while_shutting_down() {
+        let sb = test_sb(Some(ok_builder()), true);
+        sb.mark_shutting_down();
+        let err = sb.enter().await.err().expect("enter must reject during shutdown");
+        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            sb.generating.load(Ordering::SeqCst),
+            0,
+            "a rejected chat must not leak a generating token"
+        );
     }
 
     #[tokio::test]
