@@ -154,6 +154,115 @@ pub fn parse_cascade_model(model: &str) -> Option<String> {
     }
 }
 
+/// Classify a bare model name into a [`TierSpec`] — its location and (for remotes) wire protocol —
+/// from the name alone. `claude…`/`anthropic…` → native Anthropic; OpenAI families (`gpt…`, `o1/o3/
+/// o4…`, `chatgpt…`) → OpenAI; everything else (HF repo ids, `mlx-community/…`, `hf:…`) → local.
+/// Endpoints/keys are left unset — the gateway resolver fills the provider defaults.
+pub fn classify_model_name(name: &str) -> TierSpec {
+    let model = name.trim().to_string();
+    let lower = model.to_lowercase();
+    let (location, api) = if lower.starts_with("claude") || lower.contains("anthropic") {
+        (Location::Remote, RemoteApi::Anthropic)
+    } else if is_openai_name(&lower) {
+        (Location::Remote, RemoteApi::Openai)
+    } else {
+        (Location::Local, RemoteApi::Openai) // api is irrelevant for a local tier
+    };
+    TierSpec { model, location, pool: None, api, endpoint: None, api_key_env: None }
+}
+
+fn is_openai_name(lower: &str) -> bool {
+    lower.starts_with("gpt-")
+        || lower.starts_with("gpt4")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+        || lower.starts_with("chatgpt")
+        || lower.starts_with("text-")
+        || lower.starts_with("davinci")
+}
+
+/// Pull a `<n>b` parameter count (billions) out of a model name, preferring an MoE *active* count
+/// `a<n>b` (so `Qwen3-30B-A3B` ranks like a 3B for speed). `None` if the name carries no size.
+fn name_param_billions(lower: &str) -> Option<f64> {
+    let b = lower.as_bytes();
+    let mut max_size: Option<f64> = None;
+    let mut active: Option<f64> = None;
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') {
+                i += 1;
+            }
+            // `<n>b` is a parameter count — but not the `<n>bit` quantization suffix.
+            if i < b.len() && b[i] == b'b' && !lower[i..].starts_with("bit") {
+                if let Ok(v) = lower[start..i].parse::<f64>() {
+                    if start > 0 && b[start - 1] == b'a' {
+                        active = Some(v);
+                    }
+                    max_size = Some(max_size.map_or(v, |m: f64| m.max(v)));
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    active.or(max_size)
+}
+
+/// A rough provider-tier rank for a remote model (cheaper/faster → lower).
+fn remote_tier_rank(lower: &str) -> u64 {
+    if lower.contains("haiku")
+        || lower.contains("mini")
+        || lower.contains("flash")
+        || lower.contains("nano")
+        || lower.contains("small")
+    {
+        10
+    } else if lower.contains("sonnet") || lower.contains("gpt-4o") || lower.contains("gpt-4-turbo") {
+        30
+    } else if lower.contains("opus")
+        || lower.contains("o1")
+        || lower.contains("o3")
+        || lower.contains("o4")
+        || lower.contains("gpt-4")
+        || lower.contains("large")
+    {
+        50
+    } else {
+        40 // unknown remote → middle of the pack
+    }
+}
+
+/// A cost/capability rank for ordering a cascade cheapest-first: locals (free, on-device) before
+/// remotes, locals by parameter size (MoE by active params), remotes by provider tier.
+fn model_rank(t: &TierSpec) -> u64 {
+    let lower = t.model.to_lowercase();
+    match t.location {
+        Location::Local => name_param_billions(&lower).map(|b| b.round() as u64).unwrap_or(50),
+        Location::Remote => 1000 + remote_tier_rank(&lower),
+    }
+}
+
+/// Build a cascade from a **flat list of model names** — the simple path. Each name is classified
+/// (local / Claude / OpenAI) and the list is auto-ordered cheapest→most-capable; the strategy
+/// defaults to `classify` (simple requests start cheap, hard ones start higher). This is what
+/// `--model "qwen3-4b,claude-haiku-4-5,gpt-4o"` and a multi-select model picker produce.
+pub fn from_model_list<S: AsRef<str>>(names: &[S]) -> CascadeSpec {
+    let mut ranked: Vec<(u64, TierSpec)> = names
+        .iter()
+        .map(|n| classify_model_name(n.as_ref()))
+        .map(|t| (model_rank(&t), t))
+        .collect();
+    ranked.sort_by_key(|(r, _)| *r); // stable → preserves input order within a tier rank
+    CascadeSpec {
+        tiers: ranked.into_iter().map(|(_, t)| t).collect(),
+        max_escalations: None,
+        strategy: StrategyName::Classify,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +298,45 @@ mod tests {
             endpoint: None,
             api_key_env: None,
         }
+    }
+
+    #[test]
+    fn classify_model_name_detects_provider() {
+        assert_eq!(classify_model_name("claude-haiku-4-5").location, Location::Remote);
+        assert_eq!(classify_model_name("claude-haiku-4-5").api, RemoteApi::Anthropic);
+        assert_eq!(classify_model_name("gpt-4o").api, RemoteApi::Openai);
+        assert_eq!(classify_model_name("o1-mini").api, RemoteApi::Openai);
+        assert_eq!(classify_model_name("o1-mini").location, Location::Remote);
+        // A local HF/MLX id.
+        let local = classify_model_name("mlx-community/Qwen3-4B-4bit");
+        assert_eq!(local.location, Location::Local);
+    }
+
+    #[test]
+    fn from_model_list_orders_cheapest_first() {
+        // Mixed: a big remote, a small local, a big local, a cheap remote, a MoE.
+        let names = [
+            "claude-opus-4-8",                  // remote, top tier
+            "mlx-community/Qwen3-30B-A3B-4bit",  // local MoE, active 3B → ranks small
+            "mlx-community/Qwen2.5-Coder-32B",   // local dense 32B → ranks large
+            "claude-haiku-4-5",                  // remote, cheap tier
+            "mlx-community/Qwen3-4B-4bit",       // local 4B → cheapest
+        ];
+        let spec = from_model_list(&names);
+        let order: Vec<&str> = spec.tiers.iter().map(|t| t.model.as_str()).collect();
+        // Locals first (free), ascending by size (MoE by active params); remotes last by tier.
+        assert_eq!(
+            order,
+            vec![
+                "mlx-community/Qwen3-30B-A3B-4bit", // active 3B
+                "mlx-community/Qwen3-4B-4bit",       // 4B
+                "mlx-community/Qwen2.5-Coder-32B",   // 32B
+                "claude-haiku-4-5",                  // remote cheap
+                "claude-opus-4-8",                   // remote top
+            ]
+        );
+        assert_eq!(spec.strategy, StrategyName::Classify);
+        assert_eq!(spec.tiers[3].api, RemoteApi::Anthropic);
     }
 
     #[test]

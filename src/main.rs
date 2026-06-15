@@ -939,35 +939,33 @@ fn pick_launch_target_interactive() -> Option<LaunchTarget> {
     let cached: std::collections::HashSet<&str> =
         installed.iter().map(|m| m.spec.as_str()).collect();
 
-    // Anthropic (no local model) is always first.
+    // Anthropic (no local model, no gateway — the agent uses its own credentials) is always first.
     let mut choices: Vec<Choice> = vec![Choice {
-        label: "Anthropic (cloud — no local model, uses your Anthropic credentials)".to_owned(),
+        label: "Anthropic (no local model — agent uses your Anthropic credentials directly)"
+            .to_owned(),
         kind: Kind::Anthropic,
     }];
+    // Hosted models (Anthropic + OpenAI) — selectable as a tier; routed via the HTTP backends.
+    for r in models::RECOMMENDED_REMOTE {
+        choices.push(Choice {
+            label: format!("{}  (cloud · {})  — {}", r.spec, r.provider, r.display_name),
+            kind: Kind::Model { spec: r.spec.to_owned(), cached: true },
+        });
+    }
     for m in &installed {
         choices.push(Choice {
-            label: format!(
-                "{}  (cached, {})",
-                m.spec,
-                models::format_size(m.size_bytes)
-            ),
-            kind: Kind::Model {
-                spec: m.spec.clone(),
-                cached: true,
-            },
+            label: format!("{}  (local, cached, {})", m.spec, models::format_size(m.size_bytes)),
+            kind: Kind::Model { spec: m.spec.clone(), cached: true },
         });
     }
     for r in models::RECOMMENDED {
         if !cached.contains(r.spec) {
             choices.push(Choice {
                 label: format!(
-                    "{}  (not cached, ~{:.1} GB)  — {}",
+                    "{}  (local, not cached, ~{:.1} GB)  — {}",
                     r.spec, r.approx_size_gb, r.display_name
                 ),
-                kind: Kind::Model {
-                    spec: r.spec.to_owned(),
-                    cached: false,
-                },
+                kind: Kind::Model { spec: r.spec.to_owned(), cached: false },
             });
         }
     }
@@ -976,7 +974,9 @@ fn pick_launch_target_interactive() -> Option<LaunchTarget> {
     for (i, c) in choices.iter().enumerate() {
         eprintln!("  {:>2}) {}", i + 1, c.label);
     }
-    eprint!("Enter number [1-{}] (q to cancel): ", choices.len());
+    eprintln!("Tip: pick several (e.g. \"2 9 4\") to run them as a cascade — rozum orders them");
+    eprintln!("     cheapest→most-capable and escalates only when needed.");
+    eprint!("Enter number(s) [1-{}] (q to cancel): ", choices.len());
     let _ = std::io::stderr().flush();
 
     let mut line = String::new();
@@ -988,31 +988,62 @@ fn pick_launch_target_interactive() -> Option<LaunchTarget> {
         eprintln!("cancelled.");
         return None;
     }
-    let Some(idx) = line
-        .parse::<usize>()
-        .ok()
-        .filter(|&n| n >= 1 && n <= choices.len())
-    else {
-        eprintln!("rozum launch: '{line}' is not a valid choice.");
-        return None;
-    };
 
-    match &choices[idx - 1].kind {
-        Kind::Anthropic => Some(LaunchTarget::Anthropic),
-        Kind::Model { spec, cached } => {
-            if !cached {
-                eprint!("Download {spec} now and use it? [y/N]: ");
-                let _ = std::io::stderr().flush();
-                let mut yn = String::new();
-                let _ = std::io::stdin().read_line(&mut yn);
-                if !yn.trim().eq_ignore_ascii_case("y") {
-                    eprintln!("cancelled.");
-                    return None;
-                }
+    // Parse one or more indices (space/comma separated). Duplicates collapse, order preserved.
+    let mut picks: Vec<usize> = Vec::new();
+    for tok in line.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()) {
+        match tok.parse::<usize>().ok().filter(|&n| n >= 1 && n <= choices.len()) {
+            Some(n) if !picks.contains(&n) => picks.push(n),
+            Some(_) => {}
+            None => {
+                eprintln!("rozum launch: '{tok}' is not a valid choice.");
+                return None;
             }
-            Some(LaunchTarget::Local(spec.clone()))
         }
     }
+    if picks.is_empty() {
+        eprintln!("cancelled.");
+        return None;
+    }
+
+    // Single selection → keep the existing behavior (incl. the Anthropic-only mode + download prompt).
+    if picks.len() == 1 {
+        return match &choices[picks[0] - 1].kind {
+            Kind::Anthropic => Some(LaunchTarget::Anthropic),
+            Kind::Model { spec, cached } => {
+                if !cached {
+                    eprint!("Download {spec} now and use it? [y/N]: ");
+                    let _ = std::io::stderr().flush();
+                    let mut yn = String::new();
+                    let _ = std::io::stdin().read_line(&mut yn);
+                    if !yn.trim().eq_ignore_ascii_case("y") {
+                        eprintln!("cancelled.");
+                        return None;
+                    }
+                }
+                Some(LaunchTarget::Local(spec.clone()))
+            }
+        };
+    }
+
+    // Multiple selections → a cascade. The "Anthropic (no local model)" entry can't be a tier.
+    let mut specs: Vec<String> = Vec::new();
+    for &p in &picks {
+        match &choices[p - 1].kind {
+            Kind::Anthropic => {
+                eprintln!(
+                    "rozum launch: the 'Anthropic (no local model)' option can't be part of a \
+                     cascade — pick specific models (e.g. claude-haiku-4-5)."
+                );
+                return None;
+            }
+            Kind::Model { spec, .. } => specs.push(spec.clone()),
+        }
+    }
+    // Joined as a comma list → the gateway builds an auto-ordered cascade. Uncached locals download
+    // lazily when their tier is first reached.
+    eprintln!("Cascade: {} (auto-ordered cheapest→most-capable).", specs.join(", "));
+    Some(LaunchTarget::Local(specs.join(",")))
 }
 
 /// `--backend-url`: serve an external OpenAI-compatible backend (Ollama, vLLM, …)
@@ -1875,6 +1906,12 @@ fn gateway_backend_builder(
             if let Some(name) = rozum::cascade::parse_cascade_model(&model) {
                 return build_cascade_backend(&cfg, &name, n_ctx).await;
             }
+            // The simple path: a comma-separated model list → an auto-ordered cascade.
+            if model.contains(',') {
+                if let Some(be) = build_cascade_from_list(&cfg, &model, n_ctx).await {
+                    return Some(be);
+                }
+            }
             match force.as_deref() {
                 Some(f) => build_gateway_backend_forced(&model, n_ctx, f).await,
                 None => build_from_config(&cfg, &model, n_ctx).await,
@@ -1959,6 +1996,36 @@ async fn build_cascade_backend(
     n_ctx: u32,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
     let spec = load_cascade_spec(cfg, name)?;
+    build_cascade_from_spec(cfg, spec, n_ctx, name).await
+}
+
+/// The simple path: `model` is a comma-separated list of names → an **auto-cascade** (each name
+/// classified local/Claude/OpenAI, the list auto-ordered cheapest→most-capable, `classify`
+/// strategy). One name → not a cascade (built by the normal chain). Returns `None` if it isn't a
+/// list. `--model "qwen3-4b,claude-haiku-4-5,gpt-4o"` and the multi-select picker land here.
+async fn build_cascade_from_list(
+    cfg: &std::sync::Arc<rozum::RuntimeConfig>,
+    model: &str,
+    n_ctx: u32,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    let names: Vec<String> =
+        model.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if names.len() < 2 {
+        return None; // a single name isn't a cascade — let the normal path build it
+    }
+    let spec = rozum::cascade::from_model_list(&names);
+    build_cascade_from_spec(cfg, spec, n_ctx, "auto").await
+}
+
+/// Resolve a [`rozum::cascade::CascadeSpec`] to a live `CascadeBackend`: locals via this binary's
+/// normal build chain, remotes via the OpenAI/Anthropic HTTP backends.
+async fn build_cascade_from_spec(
+    cfg: &std::sync::Arc<rozum::RuntimeConfig>,
+    spec: rozum::cascade::CascadeSpec,
+    n_ctx: u32,
+    label: &str,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    let n_tiers = spec.tiers.len();
     let cfg = std::sync::Arc::clone(cfg);
     let resolver = move |tier: rozum::cascade::TierSpec| {
         let cfg = std::sync::Arc::clone(&cfg);
@@ -1974,13 +2041,13 @@ async fn build_cascade_backend(
     match rozum::cascade::build_cascade(&spec, resolver).await {
         Ok(be) => {
             rozum::obs::log_event(serde_json::json!({
-                "event": "cascade_built", "config": name, "tiers": spec.tiers.len(),
+                "event": "cascade_built", "config": label, "tiers": n_tiers,
             }));
             Some(std::sync::Arc::new(be) as std::sync::Arc<dyn rozum::ChatBackend>)
         }
         Err(e) => {
             rozum::obs::log_event(serde_json::json!({
-                "event": "cascade_build_failed", "config": name, "error": e,
+                "event": "cascade_build_failed", "config": label, "error": e,
             }));
             None
         }
@@ -2044,7 +2111,9 @@ fn build_remote_tier(
             ))
         }
         RemoteApi::Openai => {
-            let endpoint = tier.endpoint.as_deref()?; // OpenAI-compatible needs an explicit endpoint
+            // Defaults to OpenAI itself; an OpenAI-compatible provider (OpenRouter, LM Studio, …)
+            // sets `endpoint` explicitly.
+            let endpoint = tier.endpoint.as_deref().unwrap_or("https://api.openai.com/v1");
             let key_env = tier.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
             let mut b = rozum::openai_http::OpenAiHttpBackend::new(endpoint, &tier.model);
             if let Some(key) = std::env::var(key_env).ok().filter(|k| !k.is_empty()) {

@@ -237,6 +237,17 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   keeps escalating. `CascadeConfig` gained `judge_trust_discount` + `health_path` (both opt-in,
   default off). 4 new tests (judge trusts/holds, cooldown-survives-restart, recovered-available).
   255/0.
+- [x] cascade-model-list - **DONE 2026-06-15** (`src/cascade/spec.rs`, `src/models.rs`,
+  `src/main.rs`). The **simple** cascade path: just list models, rozum auto-orders + auto-policies.
+  `from_model_list(names)` classifies each name (`classify_model_name`: `claude…`→Anthropic,
+  `gpt…/o1…`→OpenAI, else local) and **auto-orders** cheapest→most-capable (locals by parameter
+  size — MoE by *active* params, ignoring the `Nbit` quant suffix — then remotes by provider tier),
+  strategy defaults to `classify`. Wired two ways: (1) a comma-separated `model` string
+  (`--model "qwen3-4b,claude-haiku-4-5,gpt-4o"` or the request's `model`) → `build_cascade_from_list`
+  → auto-cascade; (2) the **launch picker now lists hosted Anthropic + OpenAI models**
+  (`models::RECOMMENDED_REMOTE`) alongside locals and supports **multi-select** (e.g. `2 9 4`) →
+  joined into a cascade. `build_remote_tier` now defaults the OpenAI endpoint
+  (`https://api.openai.com/v1`). 2 new tests (provider detection, cheapest-first ordering). 258/0.
 - [x] cascade-toml-config - **DONE 2026-06-15** (`src/config.rs` + `src/main.rs`). Named cascade
   configs in `rozum.toml` via `[cascade.<name>]` tables (a `CascadeSpec`: `strategy`,
   `max_escalations`, `[[cascade.<name>.tiers]]`). `model: "cascade"` → `default`, `"cascade:<name>"`

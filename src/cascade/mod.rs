@@ -24,7 +24,10 @@ pub use health::{classify, FailReason, HealthRegistry, HealthState};
 pub use judge::{HeuristicJudge, Judge, JudgeConfig, ModelJudge};
 pub use scheduler::{Lane, LaneSet};
 pub use self_signal::{escalation_tools, EscalationAffordance, SelfSignalCheck};
-pub use spec::{build_cascade, parse_cascade_model, CascadeSpec, RemoteApi, StrategyName, TierSpec};
+pub use spec::{
+    build_cascade, classify_model_name, from_model_list, parse_cascade_model, CascadeSpec,
+    RemoteApi, StrategyName, TierSpec,
+};
 pub use stats::{
     AttemptRecord, DiffBucket, ModelTaskStat, ResourceSnapshot, StatsStore, TaskClass, TaskShape,
 };

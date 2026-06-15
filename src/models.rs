@@ -122,6 +122,50 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
     },
 ];
 
+/// A hosted (cloud) model offered in the launch picker. Selecting one (or mixing it into a
+/// multi-select) routes through the OpenAI/Anthropic HTTP backends; no local download. Uses the
+/// provider's API key from the environment (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`).
+#[derive(Debug, Clone, Copy)]
+pub struct RemoteModel {
+    pub spec: &'static str,
+    pub provider: &'static str,
+    pub display_name: &'static str,
+}
+
+/// Common hosted models (Anthropic + OpenAI), cheapest/fastest first within each provider. Pick any
+/// in the launch picker; multi-select several (local and/or cloud) to form a cascade. You can also
+/// pass an exact model id directly (e.g. `--model "qwen3-4b,gpt-4o"`), so this list need not be
+/// exhaustive.
+pub const RECOMMENDED_REMOTE: &[RemoteModel] = &[
+    RemoteModel {
+        spec: "claude-haiku-4-5",
+        provider: "Anthropic",
+        display_name: "Claude Haiku 4.5 — fast, cheap",
+    },
+    RemoteModel {
+        spec: "claude-sonnet-4-6",
+        provider: "Anthropic",
+        display_name: "Claude Sonnet 4.6 — balanced",
+    },
+    RemoteModel {
+        spec: "claude-opus-4-8",
+        provider: "Anthropic",
+        display_name: "Claude Opus 4.8 — most capable",
+    },
+    RemoteModel {
+        spec: "gpt-4o-mini",
+        provider: "OpenAI",
+        display_name: "GPT-4o mini — fast, cheap",
+    },
+    RemoteModel { spec: "gpt-4o", provider: "OpenAI", display_name: "GPT-4o — balanced" },
+    RemoteModel {
+        spec: "o3-mini",
+        provider: "OpenAI",
+        display_name: "o3-mini — reasoning, economical",
+    },
+    RemoteModel { spec: "o1", provider: "OpenAI", display_name: "o1 — deep reasoning" },
+];
+
 // ─── Scanners ────────────────────────────────────────────────────────────────
 
 pub fn scan_all_installed() -> Vec<InstalledModel> {
