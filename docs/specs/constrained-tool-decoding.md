@@ -84,26 +84,46 @@ step:
 4. set every other logit to −∞ and hand off to the existing `sample_with`
    (temp/top-k/top-p/penalty still apply among the *allowed* tokens).
 
-The constraint engages when `full_text` contains `<tool_call>` and the object
-`{` has started; it releases when the object completes at depth 0 (the model is
-then free to emit `</tool_call>` and EOS).
+The constraint engages when `full_text` contains `<tool_call>` and the body has
+started; it releases when the body completes (the model is then free to emit
+`</tool_call>` and EOS).
+
+### Two tool-call formats
+
+A model emits one of two envelopes after `<tool_call>` — the format is picked
+from the first body character and re-validated each step:
+
+- **JSON Hermes** (`{` → Qwen3 dense): `{"name": <enum>, "arguments": <schema>}`.
+  `arguments` resolves to the chosen tool's schema once `name` is read.
+- **XML** (`<` → Qwen3.6 / Qwen-Coder):
+  `<function=NAME><parameter=KEY>\nVALUE\n</parameter>…</function>`. `NAME` ∈ tool
+  names, `KEY` ∈ that tool's properties (no dupes, all required before
+  `</function>`), an `enum` `VALUE` is restricted to its literals; other values
+  are free text up to `</parameter>`. Same `Prefix` semantics, exposed as
+  `Constraint::{Json, Xml}`.
+
+### Arch coverage
+
+The masked loop (`constrained_decode_loop`) is generic over the cache type, so it
+runs on **both** the dense KV-cache path (`run_constrained_dense`, every dense
+arch) and the Qwen3.6 **hybrid** `LayerCache` path (`run_constrained_hybrid`) —
+the hybrid is the user's primary tool-use model.
 
 ## Non-goals (follow-ups)
 
-- Hybrid (Qwen3.6 GatedDeltaNet) constrained decode — v1 is dense arches; hybrid
-  falls back to the free path. (The user's Qwen3.6 is hybrid; wiring the same
-  mask into `run_*_hybrid`'s single-stream path is the immediate follow-up.)
-- Full JSON-Schema (`oneOf`/`$ref`/patterns) — v1 relaxes these to generic JSON.
-- Batched constrained decode (per-row masks). v1 is B=1, which is what a single
-  tool call needs.
+- Full JSON-Schema (`oneOf`/`$ref`/patterns) — relaxed to generic JSON.
+- Typed (number/integer/boolean) XML `VALUE`s — currently only `enum` values are
+  strictly constrained in the XML form; other scalars are free text.
+- Batched constrained decode (per-row masks). B=1 is what a single tool call needs.
 - A general `response_format: json_schema` request field (structured output not
   tied to tools). The engine is the shared core; exposing it is a small add-on.
 
 ## Validation
 
-- Unit tests (model-free) for `JsonSchema::prefix`: valid prefixes accepted,
-  invalid bytes rejected, enums/types/required-keys enforced, completion
-  detected, the relax-on-unknown path. This is where correctness lives.
-- One e2e (small dense model, ignored/network): a tool whose schema has an enum
-  + a typed field; assert the emitted arguments parse and conform even when the
-  unconstrained model would drift.
+- Unit tests (model-free): `Schema::prefix` (JSON) + `xml_prefix` (XML) — valid
+  prefixes accepted, invalid rejected, enums/types/required-keys enforced,
+  completion detected, the relax-on-unknown path, and `Constraint` dispatch.
+- e2e (ignored/network), enum `["kelvin","rankine"]` against a "celsius" prompt so
+  a conforming `unit` proves the mask redirected the model off its preferred
+  (invalid) token: `mlx_constrained_tool_call_conforms` (Qwen3-4B, JSON) and
+  `mlx_constrained_tool_call_hybrid` (Qwen3.6 MoE, XML).

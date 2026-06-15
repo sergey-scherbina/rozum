@@ -466,20 +466,23 @@ just the model-service side; the SDK + tools are owned by the scalascript/busi s
     const), integer, number, boolean, array-of-scalar, nested object; anything else
     relaxes to generic well-formed JSON (never over-rejects). Stateless re-parse of the
     whole suffix each step. 6 model-free unit tests.
-  - **Sampler mask** (`mlx_native_backend.rs`): a B=1 dense decode loop (`run_constrained_dense`)
-    that masks the logits to the top-K candidates whose decoded piece keeps the JSON a
-    valid prefix (widen 256→4096→full, argmax fallback), then runs the normal sampler.
-    Activates once the model opens `<tool_call>{`; resolves `arguments` to the chosen
-    tool's schema once `name` is read; releases on object close. Behind
-    `ROZUM_MLX_CONSTRAIN` (OFF by default → free path byte-identical).
-  - **Validated**: discriminating e2e (`mlx_constrained_tool_call_conforms`, Qwen3-4B) —
-    prompt asks "celsius" but the schema enum is `["kelvin","rankine"]`; output is
-    `{"location":"Paris","unit":"kelvin"}`, proving the mask redirected the model off its
-    preferred (invalid) token. 138/0.
-  - **Follow-ups**: hybrid (Qwen3.6) constrained decode (v1 is dense only; hybrid falls
-    back to post-hoc parse); full JSON-Schema (`oneOf`/`$ref`/patterns); a general
-    `response_format: json_schema` request field reusing the same engine; expose over
-    Contract-1 so the SDK just passes schemas.
+  - **Sampler mask** (`mlx_native_backend.rs`): a generic B=1 decode loop
+    (`constrained_decode_loop<C>`) that masks the logits to the top-K candidates whose
+    decoded piece keeps the body a valid prefix (widen 256→4096→full, argmax fallback), then
+    runs the normal sampler. Runs on BOTH the dense KV path (`run_constrained_dense`, every
+    dense arch) and the Qwen3.6 **hybrid** `LayerCache` path (`run_constrained_hybrid`).
+    Behind `ROZUM_MLX_CONSTRAIN` (OFF by default → free path byte-identical).
+  - **Two formats** (2026-06-15): picks the envelope from the first body char after
+    `<tool_call>` — JSON Hermes `{…}` (Qwen3) or XML `<function=…>` (Qwen3.6/Coder), via
+    `Constraint::{Json, Xml}` + `xml_prefix`. The JSON path resolves `arguments` once `name`
+    is read; the XML path constrains `NAME`/`KEY`/required + `enum` `VALUE`s.
+  - **Validated** on both: `mlx_constrained_tool_call_conforms` (Qwen3-4B, JSON) and
+    `mlx_constrained_tool_call_hybrid` (Qwen3.6-35B-A3B, hybrid+XML). Discriminating enum
+    `["kelvin","rankine"]` vs a "celsius" prompt → output `unit:"kelvin"` on both, proving
+    the mask bites. 141/0.
+  - **Follow-ups**: full JSON-Schema (`oneOf`/`$ref`/patterns); typed (number/bool) XML
+    values (only `enum` is strict there today); a general `response_format: json_schema`
+    request field reusing the engine; expose over Contract-1 so the SDK just passes schemas.
 
 - [ ] busi-eval-and-tune - **P1→P3 (busi-side; rozum hooks only).** busi/scalascript
   build the eval harness (20–50 real flows + task-success metric) to pick the smallest
