@@ -487,10 +487,11 @@ just the model-service side; the SDK + tools are owned by the scalascript/busi s
     text, constrained args). 157/0.
   - **Remaining (separate item)**: `rozum-embed-crate` (P2) — the stable public crate over this.
 
-- [ ] rozum-embed-crate - **P2 (rozum, optional).** Stable minimal public crate
-  (`rozum-embed`) for the in-process embedded mode (Rust busi component + small model):
-  build a backend, run the reference agent-runtime, pick a tool source. Not the primary
-  path (distributed HTTP is) — the small-model optimization.
+- [ ] rozum-embed-crate - **P2 (rozum, optional). DEFERRED — not needed for now** (2026-06-15,
+  user's call). Stable minimal public crate (`rozum-embed`) for the in-process embedded mode (Rust
+  busi component + small model): build a backend, run the reference agent-runtime, pick a tool source.
+  The runtime itself (`src/agent.rs`) already exists; this is only the packaging-as-a-crate, which is
+  not currently wanted. Revisit if an external Rust embedder appears.
 
 - [~] structured-output-for-tools - **P2 (rozum). v1 SHIPPED 2026-06-15.** Constrained
   decoding that enforces a tool call's arguments against the tool's JSON schema *during*
@@ -573,11 +574,17 @@ features the mistralrs backend shipped that the native backend does NOT yet have
 
 - [ ] ui-streaming-ws-tui - Propagate `ChatEvent` stream to web WebSocket and TUI for partial token rendering.
 
-- [ ] openai-http-client-backend - `ChatBackend` that calls the OpenAI Chat Completions API (client side).
-  - Shares SSE parsing logic with the gateway server side.
-  - Useful as a fallback when no local model is available.
+- [x] openai-http-client-backend - **DONE.** `ChatBackend` that calls the OpenAI Chat Completions API
+  (`src/openai_http.rs`): SSE text + tool-call deltas → `ChatEvent`, sends `tools`, finish/usage/cancel,
+  works against any OpenAI-compatible server (Ollama, llama.cpp, vLLM, OpenAI). 2026-06-15: added
+  `with_api_key` (Bearer) so authenticated remotes (OpenAI/OpenRouter) work, not just local servers.
 
-- [ ] anthropic-http-client-backend - `ChatBackend` that calls the Anthropic Messages API (client side).
+- [x] anthropic-http-client-backend - **DONE 2026-06-15** (`src/anthropic_http.rs`). `ChatBackend`
+  calling the Anthropic Messages API: folds system turns + tool-results into the Anthropic wire shape,
+  POSTs `/v1/messages` with `x-api-key`/`anthropic-version`, and parses the Anthropic SSE
+  (`content_block_start`/`_delta`/`_stop` + `message_delta`/`message_stop`) — text + `tool_use` blocks
+  — back into `ChatEvent`s. Enables frontier-model escalation/fallback (per `integration.md`). Unit
+  tests for the SSE parser (text + tool_use) and the message conversion. 160/0.
   - Shares SSE parsing logic with the gateway server side.
   - Complements / supersedes the `remote-api-backends` sprint task (which predates the new SPI).
 
