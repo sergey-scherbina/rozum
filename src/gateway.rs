@@ -125,16 +125,17 @@ struct ChatLease {
     backend: Arc<dyn ChatBackend>,
     model_id: String,
     sb: Arc<Switchboard>,
-    /// `Some` for a **warm** (secondary-resident) lease — drop decrements that model's own counter,
-    /// not the primary `generating` (so warm traffic can't deadlock a primary swap drain).
-    warm_inflight: Option<Arc<AtomicU64>>,
+    /// `Some` for a **warm** (secondary-resident) lease — drop decrements that model's own counter
+    /// (not the primary `generating`) and refreshes its last-activity time.
+    warm: Option<WarmHandle>,
 }
 
 impl Drop for ChatLease {
     fn drop(&mut self) {
-        match &self.warm_inflight {
-            Some(c) => {
-                c.fetch_sub(1, Ordering::SeqCst);
+        match &self.warm {
+            Some(h) => {
+                h.inflight.fetch_sub(1, Ordering::SeqCst);
+                h.last_used.store(crate::share::now_unix(), Ordering::SeqCst);
             }
             None => {
                 self.sb.generating.fetch_sub(1, Ordering::SeqCst);
@@ -173,9 +174,23 @@ fn multislot_enabled() -> bool {
 struct WarmEntry {
     backend: Arc<dyn ChatBackend>,
     weight_bytes: u64,
-    /// In-flight requests on THIS model — its own counter, NOT the primary `generating`, so warm
-    /// traffic never holds up a primary swap/unload drain.
+    /// Per-model in-flight + last-activity, shared with each lease (see [`WarmHandle`]).
+    handle: WarmHandle,
+}
+
+/// The shared per-warm-model counters a lease holds: its own in-flight count (NOT the primary
+/// `generating`, so warm traffic never holds up a primary swap/unload drain) and last-activity unix
+/// time (drives idle eviction).
+#[derive(Clone)]
+struct WarmHandle {
     inflight: Arc<AtomicU64>,
+    last_used: Arc<AtomicU64>,
+}
+
+impl WarmHandle {
+    fn new(now: u64) -> Self {
+        Self { inflight: Arc::new(AtomicU64::new(0)), last_used: Arc::new(AtomicU64::new(now)) }
+    }
 }
 
 /// Injectable memory inputs for the warm-cache admission decision (real on the daemon; deterministic
@@ -274,13 +289,14 @@ impl Switchboard {
         if multislot_enabled() {
             if let Some(model) = requested.map(str::trim).filter(|m| !m.is_empty()) {
                 if model != self.model_id() {
-                    if let Some((backend, inflight)) = self.ensure_warm(model).await {
-                        inflight.fetch_add(1, Ordering::SeqCst);
+                    if let Some((backend, handle)) = self.ensure_warm(model).await {
+                        handle.inflight.fetch_add(1, Ordering::SeqCst);
+                        handle.last_used.store(crate::share::now_unix(), Ordering::SeqCst);
                         return Ok(ChatLease {
                             backend,
                             model_id: model.to_string(),
                             sb: Arc::clone(self),
-                            warm_inflight: Some(inflight),
+                            warm: Some(handle),
                         });
                     }
                 }
@@ -289,20 +305,42 @@ impl Switchboard {
         self.enter_primary().await
     }
 
+    /// Evict warm secondary residents idle (no in-flight) for ≥ `idle_secs`, freeing their RAM.
+    /// Called by the lifecycle watchdog; the primary has its own idle-unload.
+    async fn sweep_idle_warm(&self, idle_secs: u64) {
+        let now = crate::share::now_unix();
+        let mut warm = self.warm.lock().await;
+        let victims: Vec<String> = warm
+            .iter()
+            .filter(|(_, e)| {
+                e.handle.inflight.load(Ordering::SeqCst) == 0
+                    && now.saturating_sub(e.handle.last_used.load(Ordering::SeqCst)) >= idle_secs
+            })
+            .map(|(m, _)| m.clone())
+            .collect();
+        for m in victims {
+            if let Some(removed) = warm.remove(&m) {
+                let b = removed.backend;
+                tokio::task::spawn_blocking(move || drop(b)); // join the !Send worker off-thread
+                crate::obs::log_event(json!({ "event": "warm_idle_evicted", "model": m }));
+            }
+        }
+    }
+
     /// Get-or-build a **warm** secondary resident for `model`, admitting/evicting via the memory
     /// planner. `None` ⇒ not warmable (unknown model, dedicated gateway, won't fit, or build failed)
     /// → the caller falls back to the primary path. Only known cached local models are warmable.
     async fn ensure_warm(
         self: &Arc<Self>,
         model: &str,
-    ) -> Option<(Arc<dyn ChatBackend>, Arc<AtomicU64>)> {
+    ) -> Option<(Arc<dyn ChatBackend>, WarmHandle)> {
         let now = crate::share::now_unix();
         // Fast path: already warm.
         {
             let warm = self.warm.lock().await;
             if let Some(e) = warm.get(model) {
                 self.usage.record(model, e.weight_bytes, now);
-                return Some((e.backend.clone(), e.inflight.clone()));
+                return Some((e.backend.clone(), e.handle.clone()));
             }
         }
         // Only warm a known cached local model (we know its weight + can build it).
@@ -314,7 +352,7 @@ impl Switchboard {
         if let Some(e) = warm.get(model) {
             // A racing request already built it.
             self.usage.record(model, e.weight_bytes, now);
-            return Some((e.backend.clone(), e.inflight.clone()));
+            return Some((e.backend.clone(), e.handle.clone()));
         }
         // Plan: residents = primary (always mandatory) + each warm (busy = inflight>0).
         let primary_id = self.model_id();
@@ -329,7 +367,7 @@ impl Switchboard {
             residents.push(crate::resident::ResidentInfo {
                 model: m.clone(),
                 weight_bytes: e.weight_bytes,
-                busy: e.inflight.load(Ordering::SeqCst) > 0,
+                busy: e.handle.inflight.load(Ordering::SeqCst) > 0,
             });
         }
         let req = crate::resident::ResidentRequest {
@@ -347,7 +385,8 @@ impl Switchboard {
             if *victim == primary_id {
                 continue;
             }
-            let idle = warm.get(victim).is_some_and(|e| e.inflight.load(Ordering::SeqCst) == 0);
+            let idle =
+                warm.get(victim).is_some_and(|e| e.handle.inflight.load(Ordering::SeqCst) == 0);
             if idle {
                 if let Some(removed) = warm.remove(victim) {
                     let b = removed.backend;
@@ -359,14 +398,14 @@ impl Switchboard {
         // Build the new warm model.
         let n_ctx = self.spec.lock().unwrap().n_ctx;
         let backend = builder(model.to_string(), n_ctx, None).await?;
-        let inflight = Arc::new(AtomicU64::new(0));
+        let handle = WarmHandle::new(now);
         warm.insert(
             model.to_string(),
-            WarmEntry { backend: backend.clone(), weight_bytes: weight, inflight: inflight.clone() },
+            WarmEntry { backend: backend.clone(), weight_bytes: weight, handle: handle.clone() },
         );
         self.usage.record(model, weight, now);
         crate::obs::log_event(json!({ "event": "warm_built", "model": model }));
-        Some((backend, inflight))
+        Some((backend, handle))
     }
 
     /// The single-resident entry: park while a swap drains, lazily reload if unloaded, then take a
@@ -402,7 +441,7 @@ impl Switchboard {
                 backend,
                 model_id: self.model_id(),
                 sb: Arc::clone(self),
-                warm_inflight: None,
+                warm: None,
             }),
             Err(msg) => {
                 self.generating.fetch_sub(1, Ordering::SeqCst);
@@ -2607,7 +2646,11 @@ pub async fn serve_on(
         register,
         shutting_down: AtomicBool::new(false),
         warm: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-        usage: crate::resident::UsageStats::in_memory(),
+        // Persist per-model usefulness so the warm set adapts across restarts.
+        usage: {
+            let _ = crate::share::ensure_dir();
+            crate::resident::UsageStats::open(crate::share::gateway_dir().join("warm-usage.jsonl"))
+        },
         warm_cfg: WarmConfig::default(),
     });
 
@@ -2693,6 +2736,12 @@ pub async fn serve_on(
                     if let Err(e) = sb.unload().await {
                         tracing::warn!(error = %e, "idle-unload failed");
                     }
+                }
+
+                // 3. Evict warm secondary residents (multislot) idle past the unload timeout,
+                // freeing their RAM. The primary has its own idle-unload above.
+                if unload_after > 0 {
+                    sb.sweep_idle_warm(unload_after).await;
                 }
             }
         });
@@ -3148,9 +3197,9 @@ mod tests {
         let lease = sb.enter(Some("warm-b")).await.expect("the warmable second model is served");
         assert_eq!(lease.model_id, "warm-b");
         assert_eq!(sb.generating.load(Ordering::SeqCst), 0, "a warm lease never touches primary generating");
-        assert_eq!(sb.warm.lock().await.get("warm-b").unwrap().inflight.load(Ordering::SeqCst), 1);
+        assert_eq!(sb.warm.lock().await.get("warm-b").unwrap().handle.inflight.load(Ordering::SeqCst), 1);
         drop(lease);
-        assert_eq!(sb.warm.lock().await.get("warm-b").unwrap().inflight.load(Ordering::SeqCst), 0, "released on drop");
+        assert_eq!(sb.warm.lock().await.get("warm-b").unwrap().handle.inflight.load(Ordering::SeqCst), 0, "released on drop");
         assert!(sb.current().is_some(), "the primary is untouched");
     }
 
@@ -3171,6 +3220,25 @@ mod tests {
         let lease = sb.enter(Some("claude-x")).await.expect("served");
         assert_eq!(lease.model_id, "model-old");
         assert!(sb.warm.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn warm_sweep_evicts_long_idle_models() {
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(16, &[("model-old", 2), ("warm-b", 2)]));
+        drop(sb.enter(Some("warm-b")).await.expect("warmed")); // now idle
+        // Backdate last activity so it reads as long-idle.
+        sb.warm.lock().await.get("warm-b").unwrap().handle.last_used.store(0, Ordering::SeqCst);
+        sb.sweep_idle_warm(60).await;
+        assert!(sb.warm.lock().await.is_empty(), "a long-idle warm model is swept (RAM freed)");
+    }
+
+    #[tokio::test]
+    async fn warm_sweep_keeps_a_busy_model() {
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(16, &[("model-old", 2), ("warm-b", 2)]));
+        let _lease = sb.enter(Some("warm-b")).await.expect("warmed"); // held → inflight 1
+        sb.warm.lock().await.get("warm-b").unwrap().handle.last_used.store(0, Ordering::SeqCst);
+        sb.sweep_idle_warm(60).await;
+        assert!(sb.warm.lock().await.contains_key("warm-b"), "a busy warm model is never swept");
     }
 
     #[tokio::test]

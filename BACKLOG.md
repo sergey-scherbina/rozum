@@ -787,9 +787,11 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   `spawn_blocking` drop) under memory pressure. **On by default** (user's choice), `ROZUM_MULTISLOT=0`
   opts out, **strict no-op for single-model traffic**, falls back to the primary on any miss
   (unknown/remote model, won't fit, build fail). 4 tests (serve-second, fall-back, skip-unknown,
-  evict-idle). 276/0. **Real-model validation pending** (two real models co-resident, eviction frees
-  RAM — the user runs it). **Deferred**: idle-*timeout* warm eviction + persisted `UsageStats`. A
-  shared cross-resident GPU gate already shipped (`concurrency-multi-instance` core); out-of-process
+  evict-idle). Plus **idle-timeout warm eviction** (the watchdog `sweep_idle_warm` frees a warm
+  model idle past `unload_idle_secs`) and **persisted `UsageStats`** (`$XDG_STATE_HOME/rozum/gateway/
+  warm-usage.jsonl` → the warm set's usefulness survives a restart). 6 tests. 278/0. **Real-model
+  validation pending** (two real models co-resident, eviction frees RAM — the user runs it). A shared
+  cross-resident GPU gate already shipped (`concurrency-multi-instance` core); out-of-process
   coordination stays in `concurrency-cross-process`.
 
 - [ ] shared-gateway-service - Optionally install the shared gateway as a

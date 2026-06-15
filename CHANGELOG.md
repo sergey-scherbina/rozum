@@ -1,5 +1,19 @@
 # Changelog
 
+## shared-gateway-multislot — warm idle eviction + persisted usefulness
+Completed: 2026-06-15
+
+The two finishing touches on the warm cache. **Idle-timeout eviction**: the gateway's lifecycle
+watchdog now also sweeps warm secondary residents — `sweep_idle_warm` drops a warm model that's been
+idle (no in-flight) past `unload_idle_secs`, freeing its RAM on a blocking thread (joins the `!Send`
+worker), just like the primary's idle-unload. Each warm entry tracks its own last-activity (set on
+request start, refreshed on lease drop) so a busy model is never swept. **Persisted usefulness**: the
+per-model `UsageStats` is now opened at `$XDG_STATE_HOME/rozum/gateway/warm-usage.jsonl`, so the
+frequency×recency ranking that decides which models stay warm survives a daemon restart (tests stay
+in-memory).
+
+`src/gateway.rs`; 2 new tests (sweep evicts a long-idle model, keeps a busy one). 278/0.
+
 ## shared-gateway-multislot — Phase 2: the warm cache (on by default)
 Completed: 2026-06-15
 
