@@ -1,5 +1,25 @@
 # Changelog
 
+## cascade — Phase 2: transient availability/health-aware routing
+Completed: 2026-06-15
+Makes the Cascade Router **resilient** (`cascade-p2-health`): a model's availability is transient — a
+remote hits its quota / gets rate-limited / goes down / the network drops, a big local OOMs — so it's
+tracked as live runtime health and the cascade routes around a model that's failing *right now* to the
+best **available** alternative, recovering automatically.
+- `HealthRegistry` (`src/cascade/health.rs`): per-model `HealthState {Healthy, Degraded(half-open),
+  Unavailable}` + `FailReason {RateLimited, QuotaExhausted, Down, Network, OutOfMemory, Unknown}`.
+  `classify(err)` maps a backend error string to a reason; `record_failure` parks the model with an
+  exponential-backoff + jitter cooldown (longer for quota, short for rate-limit); `is_available` goes
+  half-open once the cooldown elapses (one probe); `record_success` → Healthy.
+- The cascade loop now **skips models in cooldown** (best-available routing, which may be sideways or
+  *down* — a failing remote → a local, a big-local OOM → the smaller model's best-so-far), classifies
+  an attempt error → parks the model, and a `Network` failure parks **every** `Location::Remote` model
+  at once (the internet is gone). Graceful degradation: return the best usable answer, hard-fail only
+  when nothing is available or usable. `ModelCard` gained `location: Local | Remote`.
+- 6 new tests: error classification, park → half-open → recover, backoff; and deterministic e2e —
+  a parked model is skipped on the next request, a remote network failure parks all remotes and
+  degrades to local, a big-local OOM falls back to the smaller model. 191/0.
+
 ## cascade — frugal/escalation model routing, Phase 1 (the deterministic core)
 Completed: 2026-06-15
 First phase of the Cascade Router (`cascade-router`; spec `docs/specs/cascade-router.md`): a

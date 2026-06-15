@@ -10,8 +10,10 @@
 //! parallel lanes (P6), and learned stats (P7) layer on top.
 
 mod acceptance;
+mod health;
 
 pub use acceptance::{AcceptanceCheck, StructuralCheck, TurnOutcome, Verdict};
+pub use health::{classify, FailReason, HealthRegistry, HealthState};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,11 +26,20 @@ use crate::backend::{
 };
 use acceptance::pipeline_verdict;
 
+/// Where a model runs — local (its own resource limits, e.g. memory) vs remote (the network +
+/// the provider's quota/rate limits). A `Network` failure parks *all* remote models at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Location {
+    Local,
+    Remote,
+}
+
 /// A candidate model + its position in the cost order (lowest `tier` = cheapest/fastest).
 pub struct ModelCard {
     pub id: String,
     pub backend: Arc<dyn ChatBackend>,
     pub tier: u32,
+    pub location: Location,
 }
 
 /// Bounds on how far a request may escalate.
@@ -64,15 +75,22 @@ impl CascadeConfig {
     }
 }
 
-/// A [`ChatBackend`] that cascades over `config.models` cheapest-first.
+/// A [`ChatBackend`] that cascades over `config.models` cheapest-first, skipping models in
+/// transient health cooldown and recording outcomes back into [`HealthRegistry`].
 pub struct CascadeBackend {
     config: CascadeConfig,
+    health: HealthRegistry,
 }
 
 impl CascadeBackend {
     pub fn new(mut config: CascadeConfig) -> Self {
         config.models.sort_by_key(|m| m.tier);
-        Self { config }
+        Self { config, health: HealthRegistry::new() }
+    }
+
+    /// The shared health registry (observability / tests).
+    pub fn health(&self) -> &HealthRegistry {
+        &self.health
     }
 }
 
@@ -149,26 +167,37 @@ impl ChatBackend for CascadeBackend {
             return models[0].backend.chat(req).await;
         }
 
-        let max_attempts = self
-            .config
-            .budget
-            .max_escalations
-            .saturating_add(1)
-            .min(models.len());
+        let cap = self.config.budget.max_escalations.saturating_add(1);
         let start = Instant::now();
         let mut best_ok: Option<TurnOutcome> = None;
         let mut last_err: Option<String> = None;
+        let mut attempts = 0usize;
 
-        for card in models.iter().take(max_attempts) {
-            if self.config.budget.wall_time.is_some_and(|wt| start.elapsed() >= wt) {
+        for card in models.iter() {
+            if attempts >= cap || self.config.budget.wall_time.is_some_and(|wt| start.elapsed() >= wt)
+            {
                 break;
             }
+            // Skip a model that's in health cooldown — route to the best *available* one.
+            if !self.health.is_available(&card.id) {
+                continue;
+            }
+            attempts += 1;
             let outcome = run_attempt(&card.backend, req.clone()).await;
             if let Some(e) = &outcome.error {
-                // Phase 1: an errored attempt is skipped; Phase 2 makes this health-aware.
+                let reason = classify(e);
+                self.health.record_failure(&card.id, reason);
+                // A network failure means the internet is gone — park every remote at once.
+                if reason == FailReason::Network {
+                    for c in models.iter().filter(|c| c.location == Location::Remote) {
+                        self.health.record_failure(&c.id, FailReason::Network);
+                    }
+                }
+                tracing::debug!(model = %card.id, ?reason, "cascade: model failed, routing around");
                 last_err = Some(e.clone());
                 continue;
             }
+            self.health.record_success(&card.id);
             match pipeline_verdict(&self.config.acceptance, &req, &outcome) {
                 Verdict::Accept => {
                     tracing::debug!(model = %card.id, "cascade: accepted");
@@ -181,13 +210,17 @@ impl ChatBackend for CascadeBackend {
             }
         }
 
-        // Exhausted budget/list without an `Accept`: return the best usable answer, or error
-        // only if no candidate produced one.
+        // Exhausted budget/list without an `Accept`: return the best usable answer (graceful
+        // degradation), or error only if nothing was available or usable.
         match best_ok {
             Some(o) => Ok(buffered(outcome_events(&o))),
-            None => Err(ModelError::BackendUnavailable(
-                last_err.unwrap_or_else(|| "cascade: no model produced a usable answer".into()),
-            )),
+            None => Err(ModelError::BackendUnavailable(last_err.unwrap_or_else(|| {
+                if attempts == 0 {
+                    "cascade: all candidate models are temporarily unavailable".into()
+                } else {
+                    "cascade: no model produced a usable answer".into()
+                }
+            }))),
         }
     }
 
@@ -242,10 +275,20 @@ mod tests {
     }
 
     fn card(id: &str, tier: u32, script: Script) -> (ModelCard, Arc<AtomicUsize>) {
+        card_at(id, tier, Location::Local, script)
+    }
+
+    fn card_at(
+        id: &str,
+        tier: u32,
+        location: Location,
+        script: Script,
+    ) -> (ModelCard, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let mc = ModelCard {
             id: id.to_string(),
             tier,
+            location,
             backend: Arc::new(Mock { script, calls: calls.clone() }),
         };
         (mc, calls)
@@ -340,5 +383,49 @@ mod tests {
         let (s, _sc) = card("strong", 1, Script::Err("down"));
         let be = CascadeBackend::new(CascadeConfig::new(vec![c, s]));
         assert!(be.chat(schema_req()).await.is_err(), "no usable model → error");
+    }
+
+    // ── Phase 2: availability / health ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn parked_model_skipped_on_next_request() {
+        // Request 1: cheap OOMs (a long cooldown) → strong wins. Request 2: cheap is in cooldown,
+        // so it's skipped and strong serves directly.
+        let (c, cc) = card("cheap", 0, Script::Err("out of memory"));
+        let (s, sc) = card("strong", 1, Script::Text("{\"x\": 1}"));
+        let be = CascadeBackend::new(CascadeConfig::new(vec![c, s]));
+        assert_eq!(collect(be.chat(schema_req()).await.unwrap()).await, "{\"x\": 1}");
+        assert_eq!(collect(be.chat(schema_req()).await.unwrap()).await, "{\"x\": 1}");
+        assert_eq!(cc.load(Ordering::SeqCst), 1, "parked cheap was tried only once");
+        assert_eq!(sc.load(Ordering::SeqCst), 2);
+        assert_eq!(be.health().state("cheap"), HealthState::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn network_error_parks_all_remotes() {
+        // local (escalates) → remote1 network-fails → that parks BOTH remotes, so remote2 is
+        // never tried; we degrade to local's best-so-far.
+        let (l, lc) = card_at("local", 0, Location::Local, Script::Text("nope"));
+        let (r1, r1c) = card_at("remote1", 1, Location::Remote, Script::Err("connection refused"));
+        let (r2, r2c) = card_at("remote2", 2, Location::Remote, Script::Text("{\"x\": 1}"));
+        let be = CascadeBackend::new(CascadeConfig::new(vec![l, r1, r2]));
+        let out = collect(be.chat(schema_req()).await.unwrap()).await;
+        assert_eq!(out, "nope", "degrades to the local best-so-far");
+        assert_eq!(lc.load(Ordering::SeqCst), 1);
+        assert_eq!(r1c.load(Ordering::SeqCst), 1);
+        assert_eq!(r2c.load(Ordering::SeqCst), 0, "remote2 parked by remote1's network failure");
+        assert_eq!(be.health().state("remote2"), HealthState::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn oom_on_big_local_falls_back_to_smaller() {
+        // small escalates (best-so-far); big OOMs → parked; we fall back to small's answer.
+        let (small, _sc) = card("small", 0, Script::Text("partial"));
+        let (big, bc) = card("big", 1, Script::Err("Metal out of memory"));
+        let be = CascadeBackend::new(CascadeConfig::new(vec![small, big]));
+        let out = collect(be.chat(schema_req()).await.unwrap()).await;
+        assert_eq!(out, "partial", "falls back to the smaller model's answer");
+        assert_eq!(bc.load(Ordering::SeqCst), 1);
+        assert_eq!(be.health().state("big"), HealthState::Unavailable);
     }
 }
