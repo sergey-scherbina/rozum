@@ -610,6 +610,20 @@ features the mistralrs backend shipped that the native backend does NOT yet have
 
 ## Runtime And UX
 
+- [ ] cascade-router - **NEW, SPEC'd 2026-06-15** (`docs/specs/cascade-router.md`). Frugal/escalation
+  routing: try the cheapest/fastest model first (small local → big local → cheap remote → frontier),
+  escalate only when the cheap answer isn't good enough; stop at the first acceptable one. The
+  opposite of a parallel ensemble (Fusion) — cheaper than a single frontier call on average. The
+  caller supplies the candidate model list (inline or a named, parameter-selectable config); one model
+  = passthrough. Configurable + adaptive: the acceptance pipeline (L0 structural via `constrain` → L1
+  self-signal/escalate-tool → L2 cheap judge, cheap-check-first) and the routing strategy
+  (AlwaysCheapest / ClassifyThenStart / Learned) are selectable; learned stats (JSONL, `memory_store`
+  pattern) adapt thresholds + start-tier over time. **Parallel scheduler**: concurrent requests are
+  difficulty-routed to lanes that run non-blocking (simple→small, complex→big, in parallel) — subsumes
+  `concurrency-multi-instance` and drives `shared-gateway-multislot`. `CascadeBackend: ChatBackend` on
+  the existing `BackendOrchestrator`; remote tiers are the `openai_http`/`anthropic_http` backends.
+  6 phases (registry+pure-cascade+L0 first, deterministic/model-free). Plan + Phase 1 next.
+
 - [x] gateway-openai-responses-api — **DONE.** `POST /v1/responses` (the OpenAI Responses API)
   so the **Codex CLI** (≥ 0.137, which dropped `wire_api="chat"`) can use the gateway.
   `responses_handler` parses the Responses request (`instructions` → system; `input` items —
