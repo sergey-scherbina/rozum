@@ -1,5 +1,17 @@
 # Changelog
 
+## agent — built-in tools registry (tool-routing)
+Completed: 2026-06-15
+A small registry of safe, read-only built-in tools (`src/builtin_tools.rs`, `tool-routing`) exposed as
+a `CallbackToolSource`, so the reference agent runtime lets a model select them with zero app wiring:
+- `echo(text)` — round-trips text (handy for exercising the tool loop).
+- `current_time()` — UTC unix timestamp + ISO-8601.
+- `list_models()` — the recommended catalog (`models::RECOMMENDED`) + the locally-installed models
+  (`scan_all_installed`), so an agent can introspect what it can run.
+Side-effect-free (no filesystem/network writes); file lookup deliberately omitted (security). Composes
+with an app's own domain tools. Unit-tested (registry shape + each tool's dispatch, including the
+missing-arg `ToolError`). 165/0.
+
 ## docs — model reference specs (engine-independent): implement a new leaf from fact
 Completed: 2026-06-15
 Captured the model *knowledge* we reverse-engineered porting each family into the native MLX runtime,
