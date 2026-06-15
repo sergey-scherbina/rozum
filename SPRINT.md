@@ -107,12 +107,24 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   (composes with `run_agent`/`MultiToolSource`). Default cascade pipeline is now `[L0 structural, L1
   self-signal]` + affordance on. 7 new tests (marker/tool/refusal detection, affordance injection,
   marker strip, tool ack; e2e marker→escalate, marker-stripped-fallback). 198/0.
-- [ ] cascade-p4-judge - **Phase 4.** L2 cheap judge (next-cheapest-local + heuristic; pluggable threshold).
+- [x] cascade-p4-judge - **Phase 4. DONE 2026-06-15** (`src/cascade/judge.rs`). L2 — a pluggable
+  `Judge` trait (`async score(req,ans)->0..1`) consulted ONLY when L0/L1 are inconclusive; below the
+  config `threshold` → escalate. `HeuristicJudge` (free — empty/explicit-non-answer → low) and
+  `ModelJudge` (a small model rates 0–10, parsed; neutral 0.5 on judge error so a flaky judge never
+  blocks). `pipeline_verdict` now returns `Option<Verdict>` (None = all-inconclusive → the cascade
+  runs the async judge, or accepts if no judge). Opt-in (default `judge: None`). 5 new tests
+  (parse_score, heuristic surface signals; e2e judge-escalates-low-quality, no-judge-accepts,
+  model-judge-from-backend). 203/0.
 - [ ] cascade-p5-classifier - **Phase 5.** Difficulty classifier → `ClassifyThenStart` (heuristic features / tiny model → start tier).
 - [ ] cascade-p6-scheduler - **Phase 6.** Parallel scheduler / lanes (per-request difficulty routing,
   non-blocking; residency policy — single-resident first, then multi-resident via `ConcurrencyBudget`).
 - [ ] cascade-p7-learned - **Phase 7.** Learned stats + adaptive thresholds/start-tier + persisted
   health patterns (JSONL via the `memory_store` pattern; the `Learned` strategy).
+- [ ] cascade-p8-exec-feedback - **Phase 8 (user idea 2026-06-15).** Execution-feedback escalation:
+  `run_agent` over a cascade escalates the backend when tool calls keep failing
+  (`AgentOutcome.operations[].output` errors — the grounded "did it actually work" signal, which the
+  bare per-response cascade can't see), and the per-model tool-error rate per task-class feeds the
+  learned stats (P7). The most reliable quality signal — real execution, not a judge's guess.
 
 #### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
 

@@ -69,17 +69,18 @@ impl AcceptanceCheck for StructuralCheck {
     }
 }
 
-/// Run the ordered checks: the first `Accept`/`Escalate` decides; all-`Inconclusive` → `Accept`.
+/// Run the ordered checks: the first decisive `Accept`/`Escalate` wins; `None` if every check is
+/// `Inconclusive` (the caller then consults the L2 judge, if configured).
 pub fn pipeline_verdict(
     checks: &[Box<dyn AcceptanceCheck>],
     req: &ChatRequest,
     ans: &TurnOutcome,
-) -> Verdict {
+) -> Option<Verdict> {
     for c in checks {
         match c.decide(req, ans) {
             Verdict::Inconclusive => continue,
-            v => return v,
+            v => return Some(v),
         }
     }
-    Verdict::Accept
+    None
 }

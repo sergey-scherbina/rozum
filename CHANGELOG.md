@@ -1,5 +1,24 @@
 # Changelog
 
+## cascade — Phase 4: the L2 judge (pluggable: heuristic or model)
+Completed: 2026-06-15
+Adds the L2 judge to the Cascade Router (`cascade-p4-judge`), consulted **only when L0/L1 are
+inconclusive** (a free-form answer with no structural requirement and no self-signal), so most
+requests are still settled by the free checks. A pluggable `Judge` trait (`async score(req, answer)
+-> 0..1`); below the configured `threshold` → escalate. Two implementations: `HeuristicJudge` (free,
+deterministic — an empty answer or an explicit non-answer like "I don't know" scores low) and
+`ModelJudge` (a small model rates the answer 0–10, parsed and normalized; a judge error yields a
+neutral 0.5 so a flaky judge never blocks the cascade). `pipeline_verdict` now returns
+`Option<Verdict>` — `None` (all inconclusive) routes to the async judge if configured, else accepts.
+Opt-in (default no judge). `src/cascade/judge.rs`; 5 new tests. 203/0.
+
+Also noted (sprint `cascade-p8-exec-feedback`, a user idea): the most reliable quality signal is
+**execution feedback** — whether the model's tool calls actually *worked*. The agent runtime already
+records it (`AgentOutcome.operations[].output: Result`), so a later phase lets `run_agent` over a
+cascade escalate when tool calls keep failing, and feeds the tool-error rate into the learned stats.
+The bare per-response cascade can't see it (the answer returns before tools run), so it lives at the
+agent level. Spec updated (`docs/specs/cascade-router.md`).
+
 ## cascade — Phase 3: self-signal escalation + the "admit uncertainty" affordance
 Completed: 2026-06-15
 The cheap model can now **defer instead of guessing** (`cascade-p3-self-signal`). Rather than guessing
