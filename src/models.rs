@@ -70,7 +70,13 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
         spec: "mlx-community:Qwen2.5-Coder-32B-Instruct-4bit",
         display_name: "Qwen2.5-Coder 32B",
         approx_size_gb: 19.0,
-        notes: "Strong coding model, native tool-use, dense.",
+        notes: "Strong coding model, native tool-use, dense. Heavy tier (needs ~24 GB).",
+    },
+    RecommendedModel {
+        spec: "mlx-community:Qwen2.5-Coder-7B-Instruct-4bit",
+        display_name: "Qwen2.5-Coder 7B",
+        approx_size_gb: 4.3,
+        notes: "Mid coder — same family as the 32B, native tool-use, fits 16 GB machines.",
     },
     RecommendedModel {
         spec: "mlx-community:Qwen3-30B-A3B-Instruct-4bit",
@@ -103,10 +109,16 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
         notes: "Microsoft Phi-3 (fused projections, runs on the Llama path). Small, capable.",
     },
     RecommendedModel {
+        spec: "mlx-community:gemma-3-4b-it-4bit",
+        display_name: "Gemma 3 4B Instruct",
+        approx_size_gb: 3.4,
+        notes: "Google Gemma 3 (text), general mid-size; sliding-window local/global attention.",
+    },
+    RecommendedModel {
         spec: "mlx-community:gemma-3-1b-it-4bit",
         display_name: "Gemma 3 1B Instruct",
         approx_size_gb: 1.0,
-        notes: "Google Gemma 3 (text). Very small, fast; full local/global attention port.",
+        notes: "Smallest Gemma 3 (text). Tiny test/iteration model; same attention port as 4B.",
     },
 ];
 

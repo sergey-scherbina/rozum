@@ -298,9 +298,15 @@ vision) and why: `docs/specs/mlx-native-catalog-non-goals.md`.
   attention (from `mlx-native-mistral`). Bigger than the dense ports; do after Mistral
   + Gemma land. Validate vs oracle.
 
-- [ ] mlx-native-recommend-catalog - As architectures land, curate `models::RECOMMENDED`
+- [x] mlx-native-recommend-catalog - As architectures land, curate `models::RECOMMENDED`
   (the launch picker / `rozum models` list) with a few good defaults per family
   (coder, small, mid) so users get a sensible menu, not just whatever they type.
+  **DONE 2026-06-15.** Tiers across the landed families: heavy (Qwen3.6 MoE/dense, Coder-32B),
+  mid (Qwen2.5-Coder-7B, Gemma 3 4B, Mistral-7B), small/test (Qwen3-4B, SmolLM2-1.7B, Phi-3-mini,
+  Gemma 3 1B). Every spec is loaded + answered before listing (caught the Gemma 4B wrapper-load
+  failure → fixed in the same change). New entries validated via the e2e tests. While adding the
+  Gemma 3 4B, discovered + fixed the multimodal-wrapper load path (4B/12B/27B), so the bigger —
+  actually useful — Gemma sizes work now, not just the 1B test model.
 
 ### Native MLX runtime — domain fine-tuning (OFFLINE, exploratory)
 
