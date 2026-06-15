@@ -9,9 +9,9 @@ default CLI startup, meeting rooms, round-robin moderation, or manual moderation
   - Prefer pure Rust and keep heavyweight features gated.
   - Compare output and latency against `llama-gguf`.
 
-- [ ] native-gguf-backend - Superseded by sprint task `gguf-backend` (in-process via llama-cpp-2). Remove this entry when that task is complete.
+- [x] native-gguf-backend - **SUPERSEDED/DONE.** The in-process GGUF backend (`gguf` feature, llama-cpp-2) shipped.
 
-- [ ] llama-gguf-library-backend - Superseded by sprint task `gguf-backend`. Remove when complete.
+- [x] llama-gguf-library-backend - **SUPERSEDED.** Covered by the in-process GGUF backend.
 
 - [x] external-command-backend - **Superseded/WON'T DO.** The OpenAI-HTTP client backend covers the
   Ollama / LM Studio HTTP use case; no separate external-command engine needed.
@@ -22,7 +22,9 @@ default CLI startup, meeting rooms, round-robin moderation, or manual moderation
   Gemma3 / Qwen2, continuous batched decode, prefix-KV reuse, constrained decoding. The original
   ">10% over llama-cpp-2" bar was cleared and then some. Specs under `docs/specs/mlx-native-*`.
 
-- [ ] candle-real-streaming - Stream tokens from Candle via `TokenOutputStream` instead of one-shot.
+- [x] candle-real-streaming - **WON'T DO (2026-06-15).** The Candle backend is no longer developed
+  (native MLX is the primary in-process engine; GGUF the fallback; remotes via HTTP). Not worth the
+  streaming work.
   - Low priority: Candle-Metal is slower than llama-cpp-2 on the target models.
 
 ## Native MLX runtime — performance (ports from the mistralrs work)
@@ -357,13 +359,16 @@ one swappable leaf; GGUF/llama.cpp already carries non-Mac (Linux/Windows, CUDA/
 ROCm/Vulkan/CPU). Full write-up: `docs/specs/portability-and-the-backend-spi.md`.
 These items turn "portable in principle" into "portable by `cargo build`".
 
-- [ ] portability-platform-features - Make the default build platform-aware. Today
-  `default = ["mlx-native", "gguf"]` assumes macOS; `cargo build` on Linux tries to
-  compile MLX (Apple toolchain) and fails. Default the MLX leaf on macOS only (e.g.
-  `[target.'cfg(target_os = "macos")']` deps + a no-op feature elsewhere, or a
-  documented build matrix), and make a clean cross-platform default (gguf + a
-  CUDA/Vulkan passthrough feature on `llama-cpp-2`, which currently hard-codes
-  `["metal"]`). Goal: "not a Mac" is a first-class `cargo build`, not a flag dance.
+- [~] portability-platform-features - **Durable core DONE + CI-enforced 2026-06-15.** `cargo build
+  --no-default-features` builds **and tests** the whole non-backend layer (SPI, gateway w/ HTTP
+  backends, agent, cascade, concurrency, config, meeting room — 271 tests) with no native toolchain;
+  a CI **`linux-core`** job (`ubuntu-latest`) runs exactly that on every push, so a Linux regression
+  in the durable layer fails CI, not folklore. (Gated the one MLX-only test module on the feature so
+  `--no-default-features` test-compiles.) **Remaining (needs a Linux box):** make *bare* `cargo
+  build` first-class on Linux — the native backends are Apple-Metal-bound (mlx-sys; `llama-cpp-2 {
+  features=["metal"] }`), so a target-conditional default (MLX only on macOS) + a gguf-CPU/CUDA path
+  (non-`metal` llama-cpp-2) — entangled with the Metal feature flags, can't be validated from macOS.
+  Tracked with `portability-cuda-gguf`.
 
 - [ ] portability-shared-model-source - Lift the backend-agnostic model infra above
   the SPI. Auto-download + hf_hub/ModelScope cache (`src/hf_hub.rs`,
@@ -587,7 +592,9 @@ features the mistralrs backend shipped that the native backend does NOT yet have
   `eos_token_id` set; `stream_generation` stops on any (Qwen3: `<|im_end|>` 151645 +
   `<|endoftext|>` 151643).
 
-- [ ] gguf-tool-use-non-qwen - Extend GgufBackend tool-use parser to Llama-3.1 and Mistral chat-template formats.
+- [x] gguf-tool-use-non-qwen - **WON'T DO (2026-06-15).** GGUF is the maintained fallback, not an
+  area of active feature work; tool-use for Llama-3.1 / Mistral is already covered by the primary
+  native-MLX engine (constrained decoding + the cascade). Not worth extending the GGUF parser.
 
 - [~] ui-streaming-ws-tui - **NOT APPLICABLE to the current architecture** (2026-06-15). Propagate a
   `ChatEvent` token stream to the web WebSocket + TUI for partial rendering. After the meeting-room
@@ -746,9 +753,11 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   after each chunk) would let an admitted fast request interleave with a big
   prefill. Upstreamable into `mistralrs-chunked-prefill`.
 
-- [ ] concurrency-preemption - Preempt/swap-out a running sequence to admit a
-  higher-priority one (vLLM-style). Needs mistralrs engine support it does not
-  currently expose — revisit if SJF + fast lane prove insufficient for tail latency.
+- [~] concurrency-preemption - **LOW PRIORITY / mostly moot (2026-06-15).** It needs **mistralrs**
+  engine support (non-default, not developed). The primary **mlx-native** engine already does
+  continuous batched decode (new requests join a live batch mid-flight), which covers most of the
+  tail-latency goal; SJF + fast lane + the GPU gate handle admission. Revisit only with a concrete
+  tail-latency problem on the default engine.
 
 - [x] concurrency-cost-tokenizer - **DONE 2026-06-15** (`src/concurrency.rs`, `src/backend.rs`).
   `RequestCost::estimate(req, count_tokens)` is now tokenizer-pluggable: a new

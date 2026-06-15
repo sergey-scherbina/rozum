@@ -116,10 +116,16 @@ Nothing above the seam (gateway, agent runtime, cascade, concurrency, config) ch
 The abstraction exists; a few sharp edges keep it from being clean portability:
 
 1. **Platform-aware build.** `default = ["mlx-native", "gguf"]` assumes macOS —
-   a `cargo build` on Linux tries to compile MLX (Apple toolchain) and fails. We
-   want the MLX leaf to default on macOS only, and a clean cross-platform default
-   elsewhere (gguf + a CUDA/Vulkan passthrough feature), so "not a Mac" is a
-   first-class build, not a flag incantation.
+   a bare `cargo build` on Linux tries to compile MLX (Apple toolchain) and fails.
+   - **Done (2026-06-15): the durable core is portable + CI-enforced.** `cargo build
+     --no-default-features` builds + tests the whole non-backend layer (SPI, gateway w/ HTTP
+     backends, agent, cascade, concurrency, config, meeting room) with no native toolchain — and a
+     CI `linux-core` job (`ubuntu-latest`) runs exactly that on every push, so a Linux regression in
+     the durable layer fails CI rather than being folklore.
+   - **Remaining (needs a Linux box):** make *bare* `cargo build` first-class on Linux — the native
+     backends are Apple-Metal-bound (mlx-sys; `llama-cpp-2 { features = ["metal"] }`), so this means
+     a target-conditional default (MLX only on macOS) + a gguf-CPU/CUDA path (non-`metal`
+     llama-cpp-2). Entangled with the Metal feature flags; tracked under `portability-cuda-gguf`.
 2. **Lift the shared model infra above the seam.** Auto-download +
    hf_hub/ModelScope cache + spec resolution are hardware-agnostic and useful to
    *any* safetensors backend (mistralrs, a future runtime), but today they're wired

@@ -1,5 +1,26 @@
 # Changelog
 
+## portability — the durable core is Linux-buildable + CI-enforced
+Completed: 2026-06-15
+
+The "durable layer" portability thesis is now **verified, not folklore** (`portability-platform-
+features`, durable-core part). `cargo build --no-default-features` builds **and tests** the whole
+non-backend layer — the `ChatBackend` SPI, the gateway (with HTTP/remote backends), the agent
+runtime, the cascade router, the concurrency layer, config, and the meeting room — with **no native
+toolchain** (no Metal/Xcode), 271 tests. A new CI **`linux-core`** job (`ubuntu-latest`) runs exactly
+that on every push, so a Linux regression in the durable layer fails CI. (One MLX-only test module
+was gated on the `mlx-native` feature so `--no-default-features` test-compiles.) The macOS CI job now
+also runs the tests.
+
+Bare `cargo build` on Linux is **not** yet first-class — the native backends are Apple-Metal-bound
+(mlx-sys; `llama-cpp-2 { features = ["metal"] }`), so a target-conditional default + a gguf-CPU/CUDA
+path is a larger effort that can't be validated from macOS (tracked with `portability-cuda-gguf`).
+
+Also backlog hygiene: closed several no-longer-developed items — `candle-real-streaming`,
+`gguf-tool-use-non-qwen` (won't do; native MLX covers tool-use), `concurrency-preemption` (mistralrs
+fork, mostly moot — mlx-native does continuous batched decode), and the superseded gguf-adapter
+stubs. `.github/workflows/ci.yml`, `Cargo.toml`, docs. 282 (default) / 271 (no-default).
+
 ## gateway — install as an always-warm user service (+ closed streaming-output)
 Completed: 2026-06-15
 

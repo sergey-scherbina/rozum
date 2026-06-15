@@ -1,10 +1,11 @@
 name: ci
 
-# Smoke CI: build + the feature-free library tests on every push / PR to master.
-# The MLX/mistralrs engines are behind cargo features (need Xcode/Metal) and are
-# intentionally NOT built here — this gate protects the pure-Rust core (the SPI,
-# gateway, agent runtime, cascade router, concurrency layer, config) that builds
-# and tests without any platform toolchain.
+# Two gates:
+#  - macos: the default build (native MLX + GGUF, which need Xcode/Metal) + the lib tests.
+#  - linux: the **portable durable core** (`--no-default-features`: no native backends — the SPI,
+#    gateway w/ HTTP backends, agent runtime, cascade router, concurrency, config, meeting room).
+#    This enforces that the durable layer stays Linux-buildable, the central claim of
+#    `docs/specs/portability-and-the-backend-spi.md` — a regression there fails CI, not folklore.
 
 on:
   push:
@@ -18,16 +19,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: build + lib tests (no features)
-    # Apple Silicon runner — matches the dev platform, avoids cross-platform surprises.
+  macos:
+    name: macos — default build + lib tests
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install the Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install stable
-
       - name: Cache cargo registry + build
         uses: actions/cache@v4
         with:
@@ -37,9 +35,29 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
+      - name: Build + test (default features)
+        run: |
+          cargo build --lib --bin rozum
+          cargo test --lib
 
-      - name: Build (no features)
-        run: cargo build --lib --bin rozum
-
-      - name: Library tests (no features)
-        run: cargo test --lib
+  linux-core:
+    name: linux — portable core (no native backends)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install stable
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      # No Metal/Xcode toolchain on Linux: build + test the durable core only.
+      - name: Build + test (--no-default-features)
+        run: |
+          cargo build --no-default-features --lib --bin rozum
+          cargo test --no-default-features --lib
