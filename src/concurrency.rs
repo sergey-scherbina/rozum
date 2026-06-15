@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use futures::StreamExt as _;
 use tokio::sync::oneshot;
 
-use crate::backend::{ChatBackend, ChatRequest, ChatStream, ModelError, ModelResult};
+use crate::backend::{ChatBackend, ChatEvent, ChatRequest, ChatStream, ModelError, ModelResult};
 
 /// Estimated cost of a request, used for shortest-job-first ordering and fast-
 /// lane classification. Cheap heuristic — see `weight`.
@@ -532,11 +532,19 @@ pub struct AdmittingBackend {
     /// [`ConcurrencySample`] and the controller drives [`AdmissionScheduler::set_ceiling`] —
     /// closing the adaptive loop on real traffic, with the breaker as the fast inner loop.
     adaptive: Option<Arc<AdaptiveConcurrency>>,
+    /// EWMA of low-concurrency latency (ms/token), the baseline the latency signal compares
+    /// against. `None` until the first unsaturated request establishes it.
+    latency_baseline: Arc<Mutex<Option<f64>>>,
 }
 
 impl AdmittingBackend {
     pub fn new(inner: Arc<dyn ChatBackend>, cfg: AdmissionConfig) -> Self {
-        Self { inner, scheduler: AdmissionScheduler::new(cfg), adaptive: None }
+        Self {
+            inner,
+            scheduler: AdmissionScheduler::new(cfg),
+            adaptive: None,
+            latency_baseline: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Like [`new`](Self::new) but with the AIMD controller live: the admission ceiling self-tunes
@@ -553,6 +561,7 @@ impl AdmittingBackend {
             inner,
             scheduler: AdmissionScheduler::new(cfg),
             adaptive: Some(Arc::new(adaptive)),
+            latency_baseline: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -573,26 +582,42 @@ fn looks_like_overload(err: &ModelError) -> bool {
         || m.contains("quota")
 }
 
-/// Feed one completed request's outcome to the per-model controller and apply the new ceiling.
-/// `err == None` is a clean run (probe up); `Some(e)` backs off (multiplicatively on overload, a
-/// quality red otherwise). No-op when the controller is off.
-fn feed_adaptive(
+/// Apply one [`ConcurrencySample`] to the per-model controller and push the new ceiling. No-op
+/// when the controller is off.
+fn apply_sample(
     adaptive: &Option<Arc<AdaptiveConcurrency>>,
     scheduler: &AdmissionScheduler,
     model: &str,
-    err: Option<&ModelError>,
+    sample: ConcurrencySample,
 ) {
-    let Some(ctrl) = adaptive else { return };
-    let sample = match err {
-        None => ConcurrencySample::healthy(),
-        Some(e) => ConcurrencySample {
-            overload: looks_like_overload(e),
-            ok: false,
-            headroom: None,
-            latency_ratio: None,
-        },
-    };
-    scheduler.set_ceiling(ctrl.record(model, sample));
+    if let Some(ctrl) = adaptive {
+        scheduler.set_ceiling(ctrl.record(model, sample));
+    }
+}
+
+/// EWMA factor for the latency baseline (slow-moving — it's the model's *unsaturated* speed).
+const LAT_BASELINE_ALPHA: f64 = 0.2;
+/// Ignore latency from tiny outputs — prefill dominates and `ms/token` is noise below this.
+const LAT_MIN_TOKENS: u32 = 4;
+
+/// The latency signal: at **low concurrency** the per-token latency *is* the baseline (fold it into
+/// the EWMA, no ratio — an unsaturated request can't be "too slow"); under concurrency the ratio is
+/// `per_token / baseline` (saturation shows as a ratio > 1). Returns `(new_baseline, ratio)`.
+/// A baseline of `None` (not yet established) yields no ratio.
+fn latency_signal(
+    prev: Option<f64>,
+    per_token_ms: f64,
+    low_concurrency: bool,
+) -> (Option<f64>, Option<f32>) {
+    if low_concurrency {
+        let base = match prev {
+            Some(b) => LAT_BASELINE_ALPHA * per_token_ms + (1.0 - LAT_BASELINE_ALPHA) * b,
+            None => per_token_ms,
+        };
+        (Some(base), None)
+    } else {
+        (prev, prev.map(|b| (per_token_ms / b.max(1e-6)) as f32))
+    }
 }
 
 #[async_trait]
@@ -614,34 +639,59 @@ impl ChatBackend for AdmittingBackend {
         let inner = Arc::clone(&self.inner);
         let scheduler = self.scheduler.clone();
         let adaptive = self.adaptive.clone();
+        let baseline = Arc::clone(&self.latency_baseline);
         let model = self.inner.label().to_string();
         let stream: ChatStream = Box::pin(async_stream::stream! {
             // Hold the slot for the whole stream; dropping it on
             // completion/disconnect frees the slot and wakes the next waiter.
             let _guard = guard;
+            // Measure generation latency and the concurrency it ran at (for the adaptive signal).
+            let started = std::time::Instant::now();
+            let low_concurrency = scheduler.stats().0 <= 1; // only this request in flight → unsaturated
+            let mut output_tokens = 0u32;
             let mut inner_stream = match inner.chat(req).await {
                 Ok(s) => s,
                 Err(e) => {
                     note_backend_error(&scheduler, &e);
-                    feed_adaptive(&adaptive, &scheduler, &model, Some(&e));
+                    apply_sample(&adaptive, &scheduler, &model, ConcurrencySample {
+                        overload: looks_like_overload(&e), ok: false, headroom: None, latency_ratio: None,
+                    });
                     yield Err(e);
                     return;
                 }
             };
             let mut errored = false;
             while let Some(item) = inner_stream.next().await {
-                if let Err(e) = &item {
-                    note_backend_error(&scheduler, e);
-                    if !errored {
-                        feed_adaptive(&adaptive, &scheduler, &model, Some(e));
-                        errored = true;
+                match &item {
+                    Err(e) => {
+                        note_backend_error(&scheduler, e);
+                        if !errored {
+                            apply_sample(&adaptive, &scheduler, &model, ConcurrencySample {
+                                overload: looks_like_overload(e), ok: false, headroom: None, latency_ratio: None,
+                            });
+                            errored = true;
+                        }
                     }
+                    Ok(ChatEvent::Done { output_tokens: ot, .. }) => output_tokens = *ot,
+                    _ => {}
                 }
                 yield item;
             }
-            // A clean run is the controller's signal to probe concurrency up.
-            if !errored {
-                feed_adaptive(&adaptive, &scheduler, &model, None);
+            // A clean run probes concurrency up, with the latency signal when the output is large
+            // enough to be meaningful (small outputs are prefill-dominated noise).
+            if !errored && adaptive.is_some() {
+                let latency_ratio = if output_tokens >= LAT_MIN_TOKENS {
+                    let per_token = started.elapsed().as_secs_f64() * 1000.0 / output_tokens as f64;
+                    let prev = *baseline.lock().unwrap();
+                    let (new_base, ratio) = latency_signal(prev, per_token, low_concurrency);
+                    *baseline.lock().unwrap() = new_base;
+                    ratio
+                } else {
+                    None
+                };
+                apply_sample(&adaptive, &scheduler, &model, ConcurrencySample {
+                    overload: false, ok: true, headroom: None, latency_ratio,
+                });
             }
         });
         Ok(stream)
@@ -671,6 +721,20 @@ impl ChatBackend for AdmittingBackend {
             shed,
             queued,
         })
+    }
+
+    fn report_quality(&self, ok: bool) {
+        // A rejected answer is a quality-vs-concurrency red signal; an accepted one isn't rewarded
+        // here (the throughput path already probes up). No-op when adaptive control is off.
+        if !ok {
+            let model = self.inner.label();
+            apply_sample(
+                &self.adaptive,
+                &self.scheduler,
+                model,
+                ConcurrencySample { overload: false, ok: false, headroom: None, latency_ratio: None },
+            );
+        }
     }
 }
 
@@ -1269,6 +1333,59 @@ mod tests {
         drop(s);
         let dropped = backend.scheduler.stats().2;
         assert!(dropped < raised, "an OOM backed the ceiling off: {raised} → {dropped}");
+    }
+
+    #[tokio::test]
+    async fn report_quality_rejection_backs_off_adaptive_ceiling() {
+        // A higher layer (the cascade) reporting a rejected answer backs the ceiling off; an
+        // accepted answer is a no-op (the throughput path already rewards success).
+        let inner: Arc<dyn ChatBackend> = Arc::new(FakeBackend { capacity: Some(8) });
+        let ctrl =
+            AdaptiveConcurrency::new(AdaptiveConfig { probe_after: 1, ..AdaptiveConfig::for_capacity(8) });
+        let backend = AdmittingBackend::with_adaptive(inner, AdmissionConfig::for_capacity(8), ctrl);
+        for _ in 0..3 {
+            drain(backend.chat(ChatRequest::simple("hi")).await.unwrap()).await;
+        }
+        let raised = backend.scheduler.stats().2;
+        assert!(raised >= 3, "probed up first, got {raised}");
+
+        backend.report_quality(false);
+        let dropped = backend.scheduler.stats().2;
+        assert!(dropped < raised, "a quality rejection backs off: {raised} → {dropped}");
+        backend.report_quality(true);
+        assert_eq!(backend.scheduler.stats().2, dropped, "an accepted answer doesn't move it");
+    }
+
+    #[test]
+    fn latency_signal_sets_baseline_then_ratios() {
+        // A low-concurrency request establishes the baseline (no ratio — it can't be "too slow").
+        let (b1, r1) = latency_signal(None, 10.0, true);
+        assert_eq!(b1, Some(10.0));
+        assert_eq!(r1, None);
+        // Under concurrency, a 3× slowdown surfaces as ratio 3.0 (the saturation red signal).
+        let (b2, r2) = latency_signal(b1, 30.0, false);
+        assert_eq!(b2, Some(10.0), "baseline is not moved by a loaded sample");
+        assert!((r2.unwrap() - 3.0).abs() < 1e-5);
+        // A faster unsaturated sample folds into the EWMA baseline (toward 8.8), still no ratio.
+        let (b3, r3) = latency_signal(b1, 6.0, true);
+        assert!((b3.unwrap() - (0.2 * 6.0 + 0.8 * 10.0)).abs() < 1e-9);
+        assert_eq!(r3, None);
+        // No baseline yet + under load → no opinion.
+        assert_eq!(latency_signal(None, 50.0, false), (None, None));
+    }
+
+    #[test]
+    fn adaptive_latency_cliff_backs_off_via_signal() {
+        // The controller treats a latency_ratio over its ceiling as red (back off), under it as
+        // green (probe up) — the AdmittingBackend feeds this from the latency_signal above.
+        let c = adaptive(8, 1);
+        for _ in 0..3 {
+            c.record("m", ConcurrencySample::healthy());
+        }
+        let raised = c.target_limit("m");
+        assert!(raised >= 3);
+        let slow = ConcurrencySample { latency_ratio: Some(3.0), ..ConcurrencySample::healthy() };
+        assert!(c.record("m", slow) < raised, "a latency cliff backs the limit off");
     }
 
     fn adaptive(max: usize, probe_after: u32) -> AdaptiveConcurrency {

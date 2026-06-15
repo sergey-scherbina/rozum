@@ -1,5 +1,30 @@
 # Changelog
 
+## cascade — richer adaptive signals: latency + quality into the live loop
+Completed: 2026-06-15
+
+The adaptive concurrency loop (Phase 9) now reacts to two more signals beyond raw overload/success
+(`cascade-adaptive-signals`), so it finds each model's sweet spot by *both* throughput and quality.
+
+**Latency.** The `AdmittingBackend` times every request and tracks a low-concurrency `ms/token`
+baseline (EWMA — the model's *unsaturated* speed). Under concurrency, a request's `per_token /
+baseline` becomes the `latency_ratio`; a ratio over the controller's ceiling (a latency cliff —
+GPU contention) backs the admission ceiling off. It's cost-normalized (per output token) with a
+min-token floor, so prefill-dominated tiny responses don't add noise, and the baseline only moves on
+unsaturated requests (which can't be "too slow").
+
+**Quality.** A new `ChatBackend::report_quality(ok)` (default no-op; the `AdmittingBackend` overrides
+it) lets a higher layer feed the grounded answer-quality verdict into the per-model controller. The
+cascade calls it after each acceptance verdict — so a model whose answers get *rejected while running
+concurrently* backs its ceiling off ("quality drops under load" closed into the live loop). No
+cross-layer controller registry is needed: the backend already owns its controller, and a rejection
+is fed as a quality-red `ConcurrencySample` (an accepted answer is a no-op — the throughput path
+already rewards success).
+
+`src/concurrency.rs` + `src/backend.rs` + `src/cascade/mod.rs`; 4 new tests. 248/0. The one remaining
+`ConcurrencySample` field still unfed is local resource headroom (free mem/CPU), which needs
+MLX-specific probing.
+
 ## cascade — adaptive concurrency goes live (AIMD ⇄ circuit-breaker reconciliation)
 Completed: 2026-06-15
 
