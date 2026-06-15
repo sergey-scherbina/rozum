@@ -431,12 +431,23 @@ the three contracts (model-call API / agent loop / tool) + the generic-vs-domain
 layering: `docs/specs/integration.md`. The rozum items here are
 just the model-service side; the SDK + tools are owned by the scalascript/busi side.
 
-- [ ] rozum-gateway-tool-contract - **P0b (rozum).** Stabilize + document the
-  Contract-1 surface the SDK targets: `/v1/chat/completions` (+ `/v1/messages`) with
-  `tools` (JSON-Schema), `tool_choice`, `temperature`, `stream`; response `tool_calls`
-  (id/name/arguments) vs text + `finish_reason`; SSE tool-call argument deltas. Mostly
-  exists (tool-use + multi-turn history + SSE) — harden it as a stable contract +
-  conformance tests so the scalascript SDK can build against it confidently.
+- [x] rozum-gateway-tool-contract - **P0b (rozum). DONE 2026-06-15.** Stabilize + document the
+  Contract-1 surface the SDK targets: `/v1/chat/completions` (+ `/v1/messages` + `/v1/responses`)
+  with `tools` (JSON-Schema), `tool_choice`, `temperature`, `stream`; response `tool_calls`
+  (id/name/arguments) vs text + `finish_reason`; SSE tool-call argument deltas.
+  - Closed the one real gap: `tool_choice` was silently ignored on all three routes. Now parsed +
+    normalized across dialects (`ToolChoice::{Auto,None,Required,Named}`; OpenAI string/object,
+    Responses flat, Anthropic `auto`/`any`/`none`/`tool`) and honored by transforming the tool set
+    (none→empty, named→restrict) — no SPI change. `required` is accepted but best-effort (not forced),
+    documented as such.
+  - Documented as a stable contract in `docs/specs/api-gateway.md` (Tool-use / Contract-1 section:
+    request `tools`/`tool_choice` table, non-streaming + streaming response shapes, the
+    `finish_reason`/`stop_reason` mapping, and the `ROZUM_MLX_CONSTRAIN` arg-reliability note).
+  - Conformance unit tests: `tool_choice_parse_openai`/`_anthropic`, `tool_choice_apply_semantics`,
+    `oai_collect_tool_call_shape`, `anthropic_collect_tool_use_shape` (mock tool stream → asserted
+    response JSON). 146/0.
+  - Follow-up: genuinely *forcing* `required`/named (mask the model to start a tool call) — pairs
+    with the constrained-decoding opener; deferred.
 
 - [ ] rozum-distributed-readiness - **P0b/P1 (rozum).** The gateway as a deployable,
   horizontally-scalable, stateless service: health/readiness endpoints, clean

@@ -455,6 +455,8 @@ struct OaiChatReq {
     #[serde(default)]
     tools: Vec<OaiTool>,
     #[serde(default)]
+    tool_choice: Value,
+    #[serde(default)]
     stream: Option<bool>,
     temperature: Option<f32>,
     top_p: Option<f32>,
@@ -589,6 +591,70 @@ fn oai_tools_to_internal(tools: &[OaiTool]) -> Vec<ToolDef> {
                 .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
         })
         .collect()
+}
+
+// ─── tool_choice (Contract-1) ─────────────────────────────────────────────────
+
+/// Normalized tool-choice across the OpenAI / Anthropic wire formats. We honor it by
+/// transforming the tool set the backend sees (no SPI change): `None` removes all tools,
+/// `Named` restricts to that one tool. `Auto` (the default) and `Required` leave the set
+/// intact — `Required` is accepted but enforcement is best-effort (the model is not forced
+/// to start a call), so it is documented as such, not silently dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum ToolChoice {
+    #[default]
+    Auto,
+    None,
+    Required,
+    Named(String),
+}
+
+/// Parse the OpenAI / Responses `tool_choice` value (string `auto`/`none`/`required`, or
+/// `{"type":"function","function":{"name":…}}` / flat `{"type":"function","name":…}`).
+fn parse_oai_tool_choice(v: &Value) -> ToolChoice {
+    match v {
+        Value::String(s) => match s.as_str() {
+            "none" => ToolChoice::None,
+            "required" => ToolChoice::Required,
+            _ => ToolChoice::Auto,
+        },
+        Value::Object(_) => {
+            // name may be nested under `function` (chat) or flat (responses).
+            let name = v
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .or_else(|| v.get("name"))
+                .and_then(Value::as_str);
+            match name {
+                Some(n) => ToolChoice::Named(n.to_string()),
+                None => ToolChoice::Auto,
+            }
+        }
+        _ => ToolChoice::Auto,
+    }
+}
+
+/// Parse the Anthropic `tool_choice` object (`{"type":"auto"|"any"|"none"|"tool","name":…}`).
+fn parse_anthropic_tool_choice(v: &Value) -> ToolChoice {
+    match v.get("type").and_then(Value::as_str) {
+        Some("none") => ToolChoice::None,
+        Some("any") => ToolChoice::Required,
+        Some("tool") => match v.get("name").and_then(Value::as_str) {
+            Some(n) => ToolChoice::Named(n.to_string()),
+            None => ToolChoice::Auto,
+        },
+        _ => ToolChoice::Auto,
+    }
+}
+
+/// Apply a [`ToolChoice`] to the resolved tool set: `None` → empty, `Named` → only that tool
+/// (empty if the client named a tool it didn't define), `Auto`/`Required` → unchanged.
+fn apply_tool_choice(tools: Vec<ToolDef>, choice: &ToolChoice) -> Vec<ToolDef> {
+    match choice {
+        ToolChoice::Auto | ToolChoice::Required => tools,
+        ToolChoice::None => Vec::new(),
+        ToolChoice::Named(name) => tools.into_iter().filter(|t| &t.name == name).collect(),
+    }
 }
 
 // ─── OpenAI SSE serialization ─────────────────────────────────────────────────
@@ -816,6 +882,8 @@ struct RespReq {
     input: Value,
     #[serde(default)]
     tools: Vec<RespTool>,
+    #[serde(default)]
+    tool_choice: Value,
     #[serde(default)]
     stream: Option<bool>,
     temperature: Option<f32>,
@@ -1074,6 +1142,8 @@ struct AnthropicReq {
     messages: Vec<AnthropicMsg>,
     #[serde(default)]
     tools: Vec<AnthropicTool>,
+    #[serde(default)]
+    tool_choice: Value,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
     #[serde(default)]
@@ -1559,7 +1629,10 @@ async fn oai_chat_handler(
         Err(resp) => return resp,
     };
     let messages = oai_messages_to_internal(&req.messages);
-    let tools = oai_tools_to_internal(&req.tools);
+    let tools = apply_tool_choice(
+        oai_tools_to_internal(&req.tools),
+        &parse_oai_tool_choice(&req.tool_choice),
+    );
 
     // Approximate context overflow check
     let prompt_text = total_message_text(&messages);
@@ -1634,7 +1707,10 @@ async fn responses_handler(
         Err(resp) => return resp,
     };
     let messages = responses_input_to_internal(req.instructions.as_deref(), &req.input);
-    let tools = responses_tools_to_internal(&req.tools);
+    let tools = apply_tool_choice(
+        responses_tools_to_internal(&req.tools),
+        &parse_oai_tool_choice(&req.tool_choice),
+    );
 
     let prompt_text = total_message_text(&messages);
     let est = estimate_tokens(&prompt_text);
@@ -1936,7 +2012,10 @@ async fn anthropic_handler(
         Err(resp) => return resp,
     };
     let messages = anthropic_messages_to_internal(req.system.as_ref(), &req.messages);
-    let tools = anthropic_tools_to_internal(&req.tools);
+    let tools = apply_tool_choice(
+        anthropic_tools_to_internal(&req.tools),
+        &parse_anthropic_tool_choice(&req.tool_choice),
+    );
 
     // Approximate context overflow check
     let prompt_text = total_message_text(&messages);
@@ -2487,6 +2566,112 @@ mod tests {
         let defs = oai_tools_to_internal(&tools);
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "get_weather");
+    }
+
+    // ── Contract-1: tool_choice ─────────────────────────────────────────────
+
+    #[test]
+    fn tool_choice_parse_openai() {
+        assert_eq!(parse_oai_tool_choice(&Value::Null), ToolChoice::Auto);
+        assert_eq!(parse_oai_tool_choice(&json!("auto")), ToolChoice::Auto);
+        assert_eq!(parse_oai_tool_choice(&json!("none")), ToolChoice::None);
+        assert_eq!(parse_oai_tool_choice(&json!("required")), ToolChoice::Required);
+        // Chat form (nested under `function`).
+        assert_eq!(
+            parse_oai_tool_choice(&json!({"type": "function", "function": {"name": "f"}})),
+            ToolChoice::Named("f".into())
+        );
+        // Responses form (flat `name`).
+        assert_eq!(
+            parse_oai_tool_choice(&json!({"type": "function", "name": "g"})),
+            ToolChoice::Named("g".into())
+        );
+    }
+
+    #[test]
+    fn tool_choice_parse_anthropic() {
+        assert_eq!(parse_anthropic_tool_choice(&Value::Null), ToolChoice::Auto);
+        assert_eq!(parse_anthropic_tool_choice(&json!({"type": "auto"})), ToolChoice::Auto);
+        assert_eq!(parse_anthropic_tool_choice(&json!({"type": "any"})), ToolChoice::Required);
+        assert_eq!(parse_anthropic_tool_choice(&json!({"type": "none"})), ToolChoice::None);
+        assert_eq!(
+            parse_anthropic_tool_choice(&json!({"type": "tool", "name": "f"})),
+            ToolChoice::Named("f".into())
+        );
+    }
+
+    #[test]
+    fn tool_choice_apply_semantics() {
+        let mk = |n: &str| ToolDef {
+            name: n.into(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+        };
+        let tools = || vec![mk("a"), mk("b")];
+        assert_eq!(apply_tool_choice(tools(), &ToolChoice::Auto).len(), 2);
+        assert_eq!(apply_tool_choice(tools(), &ToolChoice::Required).len(), 2);
+        assert_eq!(apply_tool_choice(tools(), &ToolChoice::None).len(), 0);
+        let named = apply_tool_choice(tools(), &ToolChoice::Named("b".into()));
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].name, "b");
+        // Naming a tool the client never defined yields an empty set (predictable).
+        assert_eq!(apply_tool_choice(tools(), &ToolChoice::Named("z".into())).len(), 0);
+    }
+
+    // ── Contract-1: tool-call response shapes ───────────────────────────────
+
+    /// A backend stream that emits one tool call (`start`/`delta`/`end`) then `Done(ToolUse)`.
+    fn tool_call_stream(name: &str, args: &str) -> ChatStream {
+        let evs: Vec<crate::backend::ModelResult<ChatEvent>> = vec![
+            Ok(ChatEvent::ToolUseStart { id: "call_0".into(), name: name.into() }),
+            Ok(ChatEvent::ToolUseDelta {
+                id: "call_0".into(),
+                input_json_delta: args.into(),
+            }),
+            Ok(ChatEvent::ToolUseEnd { id: "call_0".into() }),
+            Ok(ChatEvent::Done {
+                input_tokens: 5,
+                output_tokens: 7,
+                stop_reason: StopReason::ToolUse,
+            }),
+        ];
+        Box::pin(futures::stream::iter(evs))
+    }
+
+    async fn body_json(resp: Response) -> Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn oai_collect_tool_call_shape() {
+        let stream = tool_call_stream("get_weather", "{\"city\":\"Paris\"}");
+        let resp = oai_collect(stream, CancellationToken::new(), "m", None).await;
+        let v = body_json(resp).await;
+        assert_eq!(v["object"], "chat.completion");
+        let choice = &v["choices"][0];
+        assert_eq!(choice["finish_reason"], "tool_calls");
+        assert!(choice["message"]["content"].is_null());
+        let tc = &choice["message"]["tool_calls"][0];
+        assert_eq!(tc["id"], "call_0");
+        assert_eq!(tc["type"], "function");
+        assert_eq!(tc["function"]["name"], "get_weather");
+        assert_eq!(tc["function"]["arguments"], "{\"city\":\"Paris\"}");
+    }
+
+    #[tokio::test]
+    async fn anthropic_collect_tool_use_shape() {
+        let stream = tool_call_stream("get_weather", "{\"city\":\"Paris\"}");
+        let resp = anthropic_collect(stream, CancellationToken::new(), "m", None).await;
+        let v = body_json(resp).await;
+        assert_eq!(v["type"], "message");
+        assert_eq!(v["stop_reason"], "tool_use");
+        let block = &v["content"][0];
+        assert_eq!(block["type"], "tool_use");
+        assert_eq!(block["id"], "call_0");
+        assert_eq!(block["name"], "get_weather");
+        // `input` is parsed back to a JSON object, not a string.
+        assert_eq!(block["input"]["city"], "Paris");
     }
 
     // ── OpenAI Responses API (/v1/responses, for Codex) ─────────────────────

@@ -1,5 +1,26 @@
 # Changelog
 
+## gateway — tool contract (Contract-1) hardened + documented; `tool_choice` honored
+Completed: 2026-06-15
+The HTTP tool surface the scalascript agent SDK builds against (`rozum-gateway-tool-contract`, P0b) is
+now a stable, documented, conformance-tested contract. The tool-use machinery mostly existed
+(`tools` → `tool_calls`/`finish_reason`/SSE deltas across `/v1/chat/completions`, `/v1/messages`,
+`/v1/responses`); the one real gap was `tool_choice` — parsed nowhere, silently ignored.
+- **`tool_choice` now parsed + honored** on all three routes, normalized across dialects into
+  `ToolChoice::{Auto, None, Required, Named}` (OpenAI string/object, Responses flat `{type,name}`,
+  Anthropic `{type: auto|any|none|tool}`). Honored by transforming the tool set the backend sees — no
+  SPI change: `none` empties the tools (text-only), `named` restricts to that one tool, `auto` passes
+  through. `required` is accepted but best-effort (the model isn't *forced* to start a call) and
+  documented as such rather than silently dropped.
+- **Documented** as a stable contract in `docs/specs/api-gateway.md` — a Tool-use/Contract-1 section
+  with the `tool_choice` cross-dialect table, the non-streaming + streaming response shapes, the
+  `finish_reason`/`stop_reason` mapping, and the `ROZUM_MLX_CONSTRAIN` arg-reliability note (the
+  constrained decoding is transparent to the contract — the SDK just gets conformant `arguments`).
+- **Conformance tests** (model-free, mock streams): `tool_choice` parsing per dialect +
+  `apply_tool_choice` semantics, and the actual tool-call response JSON for both dialects
+  (`oai_collect_tool_call_shape`: `tool_calls[].{id,type,function}` + `finish_reason:"tool_calls"`;
+  `anthropic_collect_tool_use_shape`: `tool_use` block + `stop_reason:"tool_use"`). 146/0.
+
 ## mlx-native — constrained tool decoding reaches Qwen3.6 (hybrid path + XML tool format)
 Completed: 2026-06-15
 The constrained-decoding v1 only covered dense arches and the JSON Hermes tool format — so it didn't
