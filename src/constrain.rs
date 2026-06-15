@@ -456,6 +456,204 @@ pub fn envelope(tool_names: &[String], args: Schema) -> Schema {
     }
 }
 
+// ─── XML tool format (Qwen3.6 / Qwen-Coder) ──────────────────────────────────
+//
+// Qwen3.6 emits tool calls as XML, not JSON:
+//
+//   <function=NAME>
+//   <parameter=KEY>
+//   VALUE
+//   </parameter>
+//   ...
+//   </function>
+//
+// The body fed to the matcher starts at `<function=`. Structure (`<function=`,
+// `<parameter=`, `</parameter>`, `</function>`) is fixed; NAME ∈ tool names, KEY ∈ that
+// tool's properties (no dupes, all required before `</function>`), and an `enum`-typed
+// VALUE is restricted to its literals. Non-enum values are free text up to `</parameter>`
+// (strings are unconstrained anyway; typed scalars are a follow-up).
+
+/// A compiled constraint for whichever tool-call envelope the model emits. The decode loop
+/// picks the variant from the first non-space char after `<tool_call>` (`{` → JSON Hermes,
+/// `<` → XML) and re-validates the whole body suffix each step.
+#[derive(Debug, Clone)]
+pub enum Constraint {
+    /// JSON Hermes envelope (`{"name":…,"arguments":…}`) — possibly with `arguments`
+    /// resolved to the chosen tool's schema.
+    Json(Schema),
+    /// XML `<function=…>` form, carrying every tool's `(name, args-schema)`.
+    Xml(Vec<(String, Schema)>),
+}
+
+impl Constraint {
+    pub fn prefix(&self, s: &str) -> Prefix {
+        match self {
+            Constraint::Json(schema) => schema.prefix(s),
+            Constraint::Xml(tools) => xml_prefix(tools, s),
+        }
+    }
+    pub fn is_complete(&self, s: &str) -> bool {
+        self.prefix(s) == Prefix::Complete
+    }
+}
+
+/// Classify a partial XML tool-call body (`<function=…>…`) against the tool set.
+pub fn xml_prefix(tools: &[(String, Schema)], s: &str) -> Prefix {
+    match match_xml(tools, s) {
+        XM::Done(rest) => {
+            if json_ws(rest).is_empty() {
+                Prefix::Complete
+            } else {
+                Prefix::Invalid
+            }
+        }
+        XM::More => Prefix::Partial,
+        XM::No => Prefix::Invalid,
+    }
+}
+
+enum XM<'a> {
+    Done(&'a str),
+    More,
+    No,
+}
+
+/// Outcome of matching a fixed literal at the start of `s`.
+enum Lit<'a> {
+    Take(&'a str),
+    Part,
+    No,
+}
+
+fn lit<'a>(s: &'a str, kw: &str) -> Lit<'a> {
+    if let Some(r) = s.strip_prefix(kw) {
+        Lit::Take(r)
+    } else if kw.starts_with(s) {
+        Lit::Part // `s` is a proper prefix of the literal
+    } else {
+        Lit::No
+    }
+}
+
+/// Match a `NAME>` token against an allowed set: returns the matched index + the text after
+/// `>`. Names contain no `>`.
+enum NameM<'a> {
+    Done(usize, &'a str),
+    More,
+    No,
+}
+
+fn match_name<'a>(s: &'a str, allowed: &[&str]) -> NameM<'a> {
+    if let Some(gt) = s.find('>') {
+        let name = &s[..gt];
+        match allowed.iter().position(|n| *n == name) {
+            Some(i) => NameM::Done(i, &s[gt + 1..]),
+            None => NameM::No,
+        }
+    } else if allowed.iter().any(|n| n.starts_with(s)) {
+        NameM::More
+    } else {
+        NameM::No
+    }
+}
+
+fn match_xml<'a>(tools: &[(String, Schema)], s: &'a str) -> XM<'a> {
+    let s = json_ws(s);
+    let after_fn = match lit(s, "<function=") {
+        Lit::Take(r) => r,
+        Lit::Part => return XM::More,
+        Lit::No => return XM::No,
+    };
+    let names: Vec<&str> = tools.iter().map(|(n, _)| n.as_str()).collect();
+    let (tidx, mut rest) = match match_name(after_fn, &names) {
+        NameM::Done(i, r) => (i, r),
+        NameM::More => return XM::More,
+        NameM::No => return XM::No,
+    };
+    // The tool's args must be an object (the only shape the parameter form can carry).
+    let (props, required): (&[(String, Schema)], &[String]) = match &tools[tidx].1 {
+        Schema::Object { props, required } => (props, required),
+        _ => (&[], &[]),
+    };
+    let mut seen: Vec<&str> = Vec::new();
+    loop {
+        let r = json_ws(rest);
+        // Close: `</function>` (only once every required parameter is present).
+        match lit(r, "</function>") {
+            Lit::Take(after) => {
+                if required.iter().all(|req| seen.iter().any(|k| k == req)) {
+                    return XM::Done(after);
+                }
+                return XM::No;
+            }
+            Lit::Part => return XM::More,
+            Lit::No => {}
+        }
+        // Otherwise a parameter: `<parameter=KEY>`.
+        let after_open = match lit(r, "<parameter=") {
+            Lit::Take(r) => r,
+            Lit::Part => return XM::More,
+            Lit::No => return XM::No,
+        };
+        let remaining: Vec<&str> = props
+            .iter()
+            .filter(|(n, _)| !seen.iter().any(|k| *k == n))
+            .map(|(n, _)| n.as_str())
+            .collect();
+        let (key, after_key) = match match_name(after_open, &remaining) {
+            NameM::Done(i, r) => (remaining[i], r),
+            NameM::More => return XM::More,
+            NameM::No => return XM::No,
+        };
+        let kschema = &props.iter().find(|(n, _)| n == key).expect("matched key").1;
+        rest = match match_xml_value(kschema, after_key) {
+            Lit::Take(r) => r,
+            Lit::Part => return XM::More,
+            Lit::No => return XM::No,
+        };
+        seen.push(key);
+    }
+}
+
+/// Match a parameter VALUE and its `</parameter>` close. An `enum` value is restricted to
+/// its literals (raw, unquoted); anything else is free text up to `</parameter>`.
+fn match_xml_value<'a>(schema: &Schema, s: &'a str) -> Lit<'a> {
+    if let Schema::Str { allowed: Some(lits) } = schema {
+        let v = json_ws(s);
+        let mut part = false;
+        for litv in lits {
+            if let Some(r) = v.strip_prefix(litv.as_str()) {
+                // Literal matched; expect ws then `</parameter>`.
+                let r2 = json_ws(r);
+                match lit(r2, "</parameter>") {
+                    Lit::Take(a) => return Lit::Take(a),
+                    Lit::Part => return Lit::Part,
+                    Lit::No => {
+                        if r2.is_empty() {
+                            return Lit::Part;
+                        }
+                        // this literal doesn't lead to a close — try the others
+                    }
+                }
+            }
+            if litv.starts_with(v) {
+                part = true;
+            }
+        }
+        if v.is_empty() || part {
+            Lit::Part
+        } else {
+            Lit::No
+        }
+    } else {
+        // Free value: consume up to the closing tag (unconstrained content).
+        match s.find("</parameter>") {
+            Some(end) => Lit::Take(&s[end + "</parameter>".len()..]),
+            None => Lit::Part,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,5 +778,77 @@ mod tests {
             open.prefix("{\"name\": \"get_weather\", \"arguments\": {\"any"),
             Prefix::Partial
         );
+    }
+
+    fn weather_tools() -> Vec<(String, Schema)> {
+        vec![(
+            "get_weather".to_string(),
+            sc(json!({
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                    "unit": {"enum": ["kelvin", "rankine"]}
+                },
+                "required": ["location", "unit"]
+            })),
+        )]
+    }
+
+    #[test]
+    fn xml_tool_structure_and_enum() {
+        let tools = weather_tools();
+        let p = |s: &str| xml_prefix(&tools, s);
+        // Building the skeleton up.
+        assert_eq!(p("<function="), Prefix::Partial);
+        assert_eq!(p("<function=get_weather>"), Prefix::Partial);
+        assert_eq!(p("<function=get_weather>\n<parameter=location>\n"), Prefix::Partial);
+        assert_eq!(
+            p("<function=get_weather>\n<parameter=location>\nParis\n</parameter>\n"),
+            Prefix::Partial
+        );
+        // Complete call.
+        let full = "<function=get_weather>\n<parameter=location>\nParis\n</parameter>\n\
+                    <parameter=unit>\nkelvin\n</parameter>\n</function>";
+        assert_eq!(p(full), Prefix::Complete);
+        // Wrong function name can't be produced.
+        assert_eq!(p("<function=get_wea_x"), Prefix::Invalid);
+        // Hallucinated parameter key rejected.
+        assert_eq!(p("<function=get_weather>\n<parameter=zip"), Prefix::Invalid);
+        // Cannot close before a required parameter is present.
+        assert_eq!(
+            p("<function=get_weather>\n<parameter=location>\nParis\n</parameter>\n</function>"),
+            Prefix::Invalid
+        );
+    }
+
+    #[test]
+    fn xml_enum_value_is_masked() {
+        let tools = weather_tools();
+        let p = |s: &str| xml_prefix(&tools, s);
+        let head = "<function=get_weather>\n<parameter=location>\nParis\n</parameter>\n\
+                    <parameter=unit>\n";
+        // A legal enum value (prefix) is accepted.
+        assert_eq!(p(&format!("{head}kel")), Prefix::Partial);
+        assert_eq!(p(&format!("{head}rankine\n</parameter>\n</function>")), Prefix::Complete);
+        // The model's *preferred* (but illegal) value is rejected — the mask bites.
+        assert_eq!(p(&format!("{head}celsius")), Prefix::Invalid);
+        assert_eq!(p(&format!("{head}c")), Prefix::Invalid);
+    }
+
+    #[test]
+    fn constraint_dispatch_json_vs_xml() {
+        let tools = weather_tools();
+        let json = Constraint::Json(envelope(
+            &["get_weather".to_string()],
+            tools[0].1.clone(),
+        ));
+        let xml = Constraint::Xml(tools);
+        assert!(json.is_complete(
+            "{\"name\":\"get_weather\",\"arguments\":{\"location\":\"Paris\",\"unit\":\"kelvin\"}}"
+        ));
+        assert!(xml.is_complete(
+            "<function=get_weather>\n<parameter=location>\nParis\n</parameter>\n\
+             <parameter=unit>\nkelvin\n</parameter>\n</function>"
+        ));
     }
 }

@@ -1,5 +1,25 @@
 # Changelog
 
+## mlx-native — constrained tool decoding reaches Qwen3.6 (hybrid path + XML tool format)
+Completed: 2026-06-15
+The constrained-decoding v1 only covered dense arches and the JSON Hermes tool format — so it didn't
+actually help the user's primary model: Qwen3.6 is a **hybrid** (GatedDeltaNet) arch AND it emits tool
+calls as **XML**, not JSON. Both gaps are now closed.
+- **Hybrid path**: extracted the masked decode into a generic `constrained_decode_loop<C>` and added
+  `run_constrained_hybrid` over the heterogeneous `LayerCache` (mirror of the dense
+  `run_constrained_dense`). `should_constrain` now routes both dense and hybrid arches.
+- **XML tool format**: Qwen3.6 emits `<function=NAME><parameter=KEY>\nVALUE\n</parameter>…</function>`
+  rather than `{"name":…,"arguments":…}`. Added an XML prefix-acceptor (`xml_prefix`) and a unified
+  `Constraint::{Json, Xml}` enum; the decode loop picks the format from the first body char after
+  `<tool_call>` (`{` → JSON, `<` → XML) and constrains accordingly — `NAME` ∈ tool names, `KEY` ∈ the
+  tool's properties (no dupes, all required before `</function>`), `enum` `VALUE`s restricted to their
+  literals. 3 new model-free unit tests.
+- **Validated on the real model** (`mlx_constrained_tool_call_hybrid`, Qwen3.6-35B-A3B): the prompt
+  asks for "celsius" but the schema enum is `["kelvin","rankine"]` → output
+  `{"location":"Paris","unit":"kelvin"}`, i.e. the mask bit on the hybrid XML path exactly as on the
+  dense JSON path. The discovery that surfaced this (the dense JSON e2e passed but the hybrid one came
+  back `unit:"celsius"`) is itself why each addition is run, not assumed. 141/0.
+
 ## mlx-native — constrained tool-argument decoding (small models can't emit an invalid tool call)
 Completed: 2026-06-15
 Tool-use was post-hoc: render `tools` into the prompt, generate freely, then parse
