@@ -654,9 +654,14 @@ features the mistralrs backend shipped that the native backend does NOT yet have
 - [ ] streaming-output - Stream model output token by token.
   - Add CLI support without breaking non-streaming evals.
 
-- [ ] structured-output - Add JSON/schema-constrained output validation. (The decode-time
-  engine landed in `structured-output-for-tools` / `src/constrain.rs`; what remains here is
-  exposing it as a non-tool `response_format: json_schema` request field.)
+- [x] structured-output - **DONE 2026-06-15.** JSON/schema-constrained output, exposed as a non-tool
+  `response_format` request field. The gateway parses OpenAI `response_format`
+  (`{"type":"json_object"}` → any object; `{"type":"json_schema","json_schema":{"schema":…}}` → that
+  schema) onto `SamplingParams.response_schema`. The native MLX backend constrains the WHOLE response
+  to it during decode (`ResponseConstraint` + a generic `ConstraintDriver`/`constrained_decode_loop`
+  shared with the tool path) — always honored when present (no env flag), dense + hybrid arches.
+  Validated: gateway parse unit test + e2e (`mlx_response_format_json_schema`, Qwen3-4B → pure
+  `{"city":"Paris","country":"France"}`). 161/0.
   - Required for reliable tool routing.
   - Start with parse/repair/retry before grammar decoding.
 

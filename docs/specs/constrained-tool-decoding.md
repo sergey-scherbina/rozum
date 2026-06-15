@@ -104,10 +104,19 @@ from the first body character and re-validated each step:
 
 ### Arch coverage
 
-The masked loop (`constrained_decode_loop`) is generic over the cache type, so it
-runs on **both** the dense KV-cache path (`run_constrained_dense`, every dense
-arch) and the Qwen3.6 **hybrid** `LayerCache` path (`run_constrained_hybrid`) —
-the hybrid is the user's primary tool-use model.
+The masked loop (`constrained_decode_loop`) is generic over the cache type AND over a
+`ConstraintDriver`, so it runs on **both** the dense KV-cache path
+(`run_constrained_dense`, every dense arch) and the Qwen3.6 **hybrid** `LayerCache` path
+(`run_constrained_hybrid`), for **two** triggers:
+
+- `ToolConstraint` — tool-call args (OPT-IN via `ROZUM_MLX_CONSTRAIN`; waits for the
+  `<tool_call>` envelope).
+- `ResponseConstraint` — **structured output** (`response_format`): the *whole* response
+  is constrained to a fixed schema from the first generated token, released when the value
+  completes. ALWAYS honored when the request carries a schema (an explicit correctness
+  request, not an opt-in). The gateway maps OpenAI `response_format`
+  (`{"type":"json_object"}` → any object; `{"type":"json_schema","json_schema":{"schema":…}}`
+  → that schema) onto `SamplingParams.response_schema`.
 
 ## Non-goals (follow-ups)
 
@@ -115,8 +124,8 @@ the hybrid is the user's primary tool-use model.
 - Typed (number/integer/boolean) XML `VALUE`s — currently only `enum` values are
   strictly constrained in the XML form; other scalars are free text.
 - Batched constrained decode (per-row masks). B=1 is what a single tool call needs.
-- A general `response_format: json_schema` request field (structured output not
-  tied to tools). The engine is the shared core; exposing it is a small add-on.
+- Forcing EOS exactly at completion (today the constraint releases on a complete value and
+  the model naturally stops; a strict "no trailing tokens" mode is a later add).
 
 ## Validation
 

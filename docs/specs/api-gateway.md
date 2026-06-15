@@ -52,6 +52,7 @@ returns 503 while the instance is draining for shutdown so traffic stops being r
   "messages": [...],         // roles: system, user, assistant, tool
   "tools": [...],            // optional; function-calling format
   "tool_choice": "auto",     // "auto" | "none" | "required" | {"type":"function","function":{"name":"f"}}
+  "response_format": {"type":"json_schema","json_schema":{"schema":{...}}},  // or {"type":"json_object"} — constrains the whole reply (native MLX)
   "stream": true,            // always treated as true
   "temperature": 0.7,
   "top_p": 0.9,

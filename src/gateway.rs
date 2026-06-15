@@ -488,6 +488,8 @@ struct OaiChatReq {
     #[serde(default)]
     tool_choice: Value,
     #[serde(default)]
+    response_format: Value,
+    #[serde(default)]
     stream: Option<bool>,
     temperature: Option<f32>,
     top_p: Option<f32>,
@@ -675,6 +677,21 @@ fn parse_anthropic_tool_choice(v: &Value) -> ToolChoice {
             None => ToolChoice::Auto,
         },
         _ => ToolChoice::Auto,
+    }
+}
+
+/// Parse OpenAI `response_format` into the JSON Schema to constrain the response to (or
+/// `None` for free text). `{"type":"json_object"}` → any JSON object; `{"type":"json_schema",
+/// "json_schema":{"schema":{…}}}` → that schema; `{"type":"text"}` / absent → `None`.
+fn parse_response_format(v: &Value) -> Option<Value> {
+    match v.get("type").and_then(Value::as_str) {
+        Some("json_object") => Some(json!({ "type": "object" })),
+        Some("json_schema") => v
+            .get("json_schema")
+            .and_then(|js| js.get("schema"))
+            .cloned()
+            .or_else(|| Some(json!({ "type": "object" }))),
+        _ => None,
     }
 }
 
@@ -1746,6 +1763,7 @@ async fn oai_chat_handler(
             top_p: req.top_p,
             max_tokens: req.max_tokens,
             top_k: req.top_k,
+            response_schema: parse_response_format(&req.response_format),
             ..Default::default()
         },
         cancel: cancel.clone(),
@@ -2692,6 +2710,29 @@ mod tests {
         assert_eq!(
             parse_anthropic_tool_choice(&json!({"type": "tool", "name": "f"})),
             ToolChoice::Named("f".into())
+        );
+    }
+
+    #[test]
+    fn response_format_parsing() {
+        assert_eq!(parse_response_format(&Value::Null), None);
+        assert_eq!(parse_response_format(&json!({"type": "text"})), None);
+        assert_eq!(
+            parse_response_format(&json!({"type": "json_object"})),
+            Some(json!({"type": "object"}))
+        );
+        let schema = json!({"type": "object", "properties": {"x": {"type": "integer"}}});
+        assert_eq!(
+            parse_response_format(&json!({
+                "type": "json_schema",
+                "json_schema": {"name": "r", "schema": schema}
+            })),
+            Some(schema)
+        );
+        // json_schema without an explicit schema falls back to "any object".
+        assert_eq!(
+            parse_response_format(&json!({"type": "json_schema", "json_schema": {}})),
+            Some(json!({"type": "object"}))
         );
     }
 
