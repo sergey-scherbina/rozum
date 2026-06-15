@@ -13,13 +13,14 @@ default CLI startup, meeting rooms, round-robin moderation, or manual moderation
 
 - [ ] llama-gguf-library-backend - Superseded by sprint task `gguf-backend`. Remove when complete.
 
-- [ ] external-command-backend - Superseded; OpenAI-HTTP client backend covers the Ollama/LMStudio HTTP use case if needed.
+- [x] external-command-backend - **Superseded/WON'T DO.** The OpenAI-HTTP client backend covers the
+  Ollama / LM Studio HTTP use case; no separate external-command engine needed.
 
-- [ ] mlx-native-backend - Native MLX inference via `mlx-rs` (no Python, no subprocess).
-  - Only worthwhile if benchmarks show >10% throughput gain over llama-cpp-2 Metal.
-  - Requires porting Qwen3-30B-A3B forward pass + KV-cache + chat-template to Rust.
-  - Plugs directly into the `ChatBackend` trait from `chat-backend-spi.md` — no SPI change needed.
-  - Spec: `docs/specs/mlx-native-backend.md` (to be written when scheduled).
+- [x] mlx-native-backend - **DONE (shipped long ago — this was the planning stub).** Native MLX
+  inference via `mlx-rs` is the **primary in-process engine** now (`src/mlx_native_backend.rs`,
+  feature `mlx-native`, default): Qwen3 / Qwen3-MoE / Qwen3.6 hybrid / Llama / Mistral / Phi-3 /
+  Gemma3 / Qwen2, continuous batched decode, prefix-KV reuse, constrained decoding. The original
+  ">10% over llama-cpp-2" bar was cleared and then some. Specs under `docs/specs/mlx-native-*`.
 
 - [ ] candle-real-streaming - Stream tokens from Candle via `TokenOutputStream` instead of one-shot.
   - Low priority: Candle-Metal is slower than llama-cpp-2 on the target models.
@@ -843,9 +844,8 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
 
 ## Project Hygiene
 
-- [ ] commit-initial-project - Commit the current initial project state once the user is ready.
-  - Include submodule, specs, Rust project, tiny model scripts, and backend abstraction.
-  - Do not commit `.tools/`, `target/`, or `models/*.gguf`.
+- [x] commit-initial-project - **DONE/N-A (2026-06-15).** The project is a live git repo with full
+  history (this very work merges to `master` daily); the "commit the initial state" task is moot.
 
 - [x] ci-smoke - **DONE 2026-06-15** (`.github/workflows/ci.yml`). Build + feature-free `cargo test
   --lib` on `master` push/PR (macos-latest, cargo cache). No model downloads; the real-model smoke
