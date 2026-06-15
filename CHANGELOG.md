@@ -1,5 +1,30 @@
 # Changelog
 
+## cascade — adaptive concurrency goes live (AIMD ⇄ circuit-breaker reconciliation)
+Completed: 2026-06-15
+
+The Phase-9 AIMD controller now drives **real admission limits** — and it no longer fights the
+circuit breaker (`cascade-adaptive-live`). Both used to move the same admission `limit`: the breaker
+trips it down on an OOM and recovers it; the controller tunes the steady state. Run together they'd
+stomp each other.
+
+The fix is a clean split of roles. The controller owns the **ceiling**: `AdmissionScheduler::
+set_ceiling` sets both the recovery `capacity` and the live `limit`. The breaker (`trip` /
+`recover_step`) then operates as a *fast inner loop within `[1, ceiling]`* — an acute OOM still drops
+the live limit instantly and drains in-flight work, but recovery can't climb back above what the
+controller has learned the model sustains. The breaker handles sub-update transients; the controller
+sets the steady state; neither overrides the other.
+
+`AdmittingBackend` gained an opt-in `AdaptiveConcurrency` (`with_adaptive`): every completed request
+feeds a `ConcurrencySample` and the controller drives `set_ceiling` — a clean run probes the ceiling
+up, an overload/error backs it off. Adaptive backends **start serial** (limit 1) and open up only as
+healthy traffic accumulates — measured, not assumed. Turned on with `ROZUM_ADAPTIVE_CONCURRENCY=1`
+in `admit_wrap` (default off, so the static budgeted limit is unchanged).
+
+v1 drives the loop from the overload + success signals; the richer signals already modeled in
+`ConcurrencySample` (resource headroom, latency baseline, judge/exec-feedback quality) are the next
+refinement. `src/concurrency.rs`; 4 new tests. 245/0.
+
 ## cascade — gateway request-surface wiring (`model: "cascade[:name]"`)
 Completed: 2026-06-15
 

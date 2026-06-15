@@ -311,6 +311,23 @@ impl AdmissionScheduler {
         Self::pump(&self.inner, &mut s);
     }
 
+    /// **Adaptive steady-state ceiling** (cascade Phase 9). The per-model AIMD controller owns this:
+    /// it's both the live admission limit *and* the breaker's recovery ceiling. The breaker (`trip`
+    /// / `recover_step`) then operates as a fast inner loop *within* `[1, ceiling]` — an acute OOM
+    /// still drops `limit` instantly and drains, but recovery can't climb back above what the
+    /// controller has learned the model sustains. The two controllers compose instead of fighting:
+    /// the breaker handles sub-update transients, the controller sets the steady state.
+    pub fn set_ceiling(&self, ceiling: usize) {
+        let mut s = self.inner.lock().unwrap();
+        let c = ceiling.max(1);
+        s.capacity = c;
+        // The controller raises the ceiling only on healthy evidence and lowers it on load, so its
+        // recommendation is authoritative for the steady-state live limit; the breaker dips below
+        // between updates.
+        s.limit = c;
+        Self::pump(&self.inner, &mut s);
+    }
+
     /// Snapshot for tests / observability: `(in_use, waiting, limit)`.
     pub fn stats(&self) -> (usize, usize, usize) {
         let s = self.inner.lock().unwrap();
@@ -511,15 +528,71 @@ pub fn note_backend_error(scheduler: &AdmissionScheduler, err: &ModelError) {
 pub struct AdmittingBackend {
     inner: Arc<dyn ChatBackend>,
     scheduler: AdmissionScheduler,
+    /// Optional per-model AIMD controller (Phase 9). When set, every completed request feeds a
+    /// [`ConcurrencySample`] and the controller drives [`AdmissionScheduler::set_ceiling`] —
+    /// closing the adaptive loop on real traffic, with the breaker as the fast inner loop.
+    adaptive: Option<Arc<AdaptiveConcurrency>>,
 }
 
 impl AdmittingBackend {
     pub fn new(inner: Arc<dyn ChatBackend>, cfg: AdmissionConfig) -> Self {
+        Self { inner, scheduler: AdmissionScheduler::new(cfg), adaptive: None }
+    }
+
+    /// Like [`new`](Self::new) but with the AIMD controller live: the admission ceiling self-tunes
+    /// from each request's outcome (success → probe up; overload/error → back off). The scheduler
+    /// **starts serial** (limit 1) — measured, not assumed — and the controller opens it up to the
+    /// advertised capacity as healthy traffic accumulates.
+    pub fn with_adaptive(
+        inner: Arc<dyn ChatBackend>,
+        cfg: AdmissionConfig,
+        adaptive: AdaptiveConcurrency,
+    ) -> Self {
+        let cfg = AdmissionConfig { limit: 1, ..cfg };
         Self {
             inner,
             scheduler: AdmissionScheduler::new(cfg),
+            adaptive: Some(Arc::new(adaptive)),
         }
     }
+}
+
+/// A backend error that signals *overload* (vs a one-off failure) — a resource-exhaustion / OOM or
+/// a provider rate-limit / quota. Drives the AIMD controller to back off (and the breaker to trip).
+fn looks_like_overload(err: &ModelError) -> bool {
+    let m = err.to_string().to_lowercase();
+    m.contains("out of memory")
+        || m.contains("oom")
+        || m.contains("failed to allocate")
+        || m.contains("insufficient memory")
+        || m.contains("exceeds total capacity")
+        || m.contains("429")
+        || m.contains("rate limit")
+        || m.contains("too many requests")
+        || m.contains("overloaded")
+        || m.contains("quota")
+}
+
+/// Feed one completed request's outcome to the per-model controller and apply the new ceiling.
+/// `err == None` is a clean run (probe up); `Some(e)` backs off (multiplicatively on overload, a
+/// quality red otherwise). No-op when the controller is off.
+fn feed_adaptive(
+    adaptive: &Option<Arc<AdaptiveConcurrency>>,
+    scheduler: &AdmissionScheduler,
+    model: &str,
+    err: Option<&ModelError>,
+) {
+    let Some(ctrl) = adaptive else { return };
+    let sample = match err {
+        None => ConcurrencySample::healthy(),
+        Some(e) => ConcurrencySample {
+            overload: looks_like_overload(e),
+            ok: false,
+            headroom: None,
+            latency_ratio: None,
+        },
+    };
+    scheduler.set_ceiling(ctrl.record(model, sample));
 }
 
 #[async_trait]
@@ -540,6 +613,8 @@ impl ChatBackend for AdmittingBackend {
         };
         let inner = Arc::clone(&self.inner);
         let scheduler = self.scheduler.clone();
+        let adaptive = self.adaptive.clone();
+        let model = self.inner.label().to_string();
         let stream: ChatStream = Box::pin(async_stream::stream! {
             // Hold the slot for the whole stream; dropping it on
             // completion/disconnect frees the slot and wakes the next waiter.
@@ -548,15 +623,25 @@ impl ChatBackend for AdmittingBackend {
                 Ok(s) => s,
                 Err(e) => {
                     note_backend_error(&scheduler, &e);
+                    feed_adaptive(&adaptive, &scheduler, &model, Some(&e));
                     yield Err(e);
                     return;
                 }
             };
+            let mut errored = false;
             while let Some(item) = inner_stream.next().await {
                 if let Err(e) = &item {
                     note_backend_error(&scheduler, e);
+                    if !errored {
+                        feed_adaptive(&adaptive, &scheduler, &model, Some(e));
+                        errored = true;
+                    }
                 }
                 yield item;
+            }
+            // A clean run is the controller's signal to probe concurrency up.
+            if !errored {
+                feed_adaptive(&adaptive, &scheduler, &model, None);
             }
         });
         Ok(stream)
@@ -592,14 +677,28 @@ impl ChatBackend for AdmittingBackend {
 /// Wrap `inner` with admission control **iff** it advertises a concurrency
 /// capacity; otherwise return it unchanged. Remote / self-serializing backends
 /// (which return `None`) pass through untouched — the safe default.
+///
+/// With `ROZUM_ADAPTIVE_CONCURRENCY=1` the wrapped backend's admission ceiling **self-tunes** via
+/// the Phase-9 AIMD controller (start serial, probe up on healthy traffic, back off on overload),
+/// bounded by the advertised capacity. Off by default — the static budgeted limit is unchanged.
 pub fn admit_wrap(inner: Arc<dyn ChatBackend>) -> Arc<dyn ChatBackend> {
     match inner.concurrency_capacity() {
-        Some(cap) => Arc::new(AdmittingBackend::new(
-            inner,
-            AdmissionConfig::for_capacity(cap),
-        )),
+        Some(cap) => {
+            let cfg = AdmissionConfig::for_capacity(cap);
+            if adaptive_concurrency_enabled() {
+                let ctrl = AdaptiveConcurrency::new(AdaptiveConfig::for_capacity(cap));
+                Arc::new(AdmittingBackend::with_adaptive(inner, cfg, ctrl))
+            } else {
+                Arc::new(AdmittingBackend::new(inner, cfg))
+            }
+        }
         None => inner,
     }
+}
+
+/// Whether the adaptive admission ceiling is enabled (`ROZUM_ADAPTIVE_CONCURRENCY` truthy).
+fn adaptive_concurrency_enabled() -> bool {
+    matches!(std::env::var("ROZUM_ADAPTIVE_CONCURRENCY").ok().as_deref(), Some("1" | "true" | "on"))
 }
 
 // ── Adaptive per-model concurrency (cascade Phase 9) ─────────────────────────────
@@ -1063,7 +1162,114 @@ mod tests {
         assert!(plain.admission_stats().is_none());
     }
 
+    /// A backend that succeeds for its first `ok_until` calls, then fails with `msg` (drives the
+    /// probe-up-then-back-off path through one controller).
+    struct FlakyBackend {
+        ok_until: usize,
+        msg: &'static str,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        capacity: Option<usize>,
+    }
+    #[async_trait]
+    impl ChatBackend for FlakyBackend {
+        async fn chat(&self, _req: ChatRequest) -> ModelResult<ChatStream> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.ok_until {
+                Ok(Box::pin(async_stream::stream! {
+                    yield Ok(ChatEvent::Done {
+                        input_tokens: 0, output_tokens: 0, stop_reason: StopReason::EndTurn,
+                    });
+                }))
+            } else {
+                Err(ModelError::BackendUnavailable(self.msg.into()))
+            }
+        }
+        fn context_window(&self) -> u32 {
+            4096
+        }
+        fn concurrency_capacity(&self) -> Option<usize> {
+            self.capacity
+        }
+    }
+
+    async fn drain(mut s: ChatStream) {
+        while s.next().await.is_some() {}
+    }
+
     // ── Phase 9: adaptive per-model concurrency ─────────────────────────────
+
+    // ── Phase 9 live: AIMD ⇄ circuit-breaker reconciliation ─────────────────
+
+    #[test]
+    fn set_ceiling_bounds_breaker_recovery() {
+        // The controller (AIMD) owns the ceiling; the breaker recovers only up to it, not the
+        // original capacity. Start at 4, controller lowers the ceiling to 2.
+        let s = AdmissionScheduler::new(cfg(4, 0));
+        s.set_ceiling(2);
+        assert_eq!(s.stats().2, 2, "ceiling sets the live limit");
+        // An acute OOM trips below the ceiling…
+        assert_eq!(s.trip(), 1);
+        // …and recovery walks back up to the controller's ceiling (2), never to the old 4.
+        assert_eq!(s.recover_step(), 2);
+        assert_eq!(s.recover_step(), 2, "breaker cannot climb above the AIMD ceiling");
+    }
+
+    #[test]
+    fn set_ceiling_raises_and_lowers_the_live_limit() {
+        let s = AdmissionScheduler::new(cfg(1, 0));
+        s.set_ceiling(4); // controller opens it up
+        assert_eq!(s.stats().2, 4);
+        s.set_ceiling(2); // controller backs off
+        assert_eq!(s.stats().2, 2);
+    }
+
+    #[tokio::test]
+    async fn adaptive_admitting_backend_probes_up_on_clean_traffic() {
+        let inner: Arc<dyn ChatBackend> = Arc::new(FakeBackend { capacity: Some(8) });
+        let ctrl =
+            AdaptiveConcurrency::new(AdaptiveConfig { probe_after: 2, ..AdaptiveConfig::for_capacity(8) });
+        let backend = AdmittingBackend::with_adaptive(inner, AdmissionConfig::for_capacity(8), ctrl);
+        assert_eq!(backend.scheduler.stats().2, 1, "adaptive backends start serial");
+
+        for _ in 0..2 {
+            drain(backend.chat(ChatRequest::simple("hi")).await.unwrap()).await;
+        }
+        assert_eq!(backend.scheduler.stats().2, 2, "two clean runs → ceiling probes up to 2");
+        for _ in 0..2 {
+            drain(backend.chat(ChatRequest::simple("hi")).await.unwrap()).await;
+        }
+        assert_eq!(backend.scheduler.stats().2, 3);
+    }
+
+    #[tokio::test]
+    async fn adaptive_admitting_backend_backs_off_on_overload() {
+        // Probe the ceiling up with clean runs, then one OOM halves it — all through one
+        // controller, exercising both the success and the overload feed paths.
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let inner: Arc<dyn ChatBackend> = Arc::new(FlakyBackend {
+            ok_until: 4,
+            msg: "out of memory",
+            calls: calls.clone(),
+            capacity: Some(8),
+        });
+        let ctrl =
+            AdaptiveConcurrency::new(AdaptiveConfig { probe_after: 1, ..AdaptiveConfig::for_capacity(8) });
+        let backend = AdmittingBackend::with_adaptive(inner, AdmissionConfig::for_capacity(8), ctrl);
+
+        // 4 clean runs (probe_after 1) → ceiling 1→5.
+        for _ in 0..4 {
+            drain(backend.chat(ChatRequest::simple("hi")).await.unwrap()).await;
+        }
+        let raised = backend.scheduler.stats().2;
+        assert!(raised >= 4, "probed up first, got {raised}");
+
+        // The 5th request OOMs → the controller halves the ceiling.
+        let mut s = backend.chat(ChatRequest::simple("hi")).await.unwrap();
+        assert!(s.next().await.unwrap().is_err(), "the backend OOMed");
+        drop(s);
+        let dropped = backend.scheduler.stats().2;
+        assert!(dropped < raised, "an OOM backed the ceiling off: {raised} → {dropped}");
+    }
 
     fn adaptive(max: usize, probe_after: u32) -> AdaptiveConcurrency {
         AdaptiveConcurrency::new(AdaptiveConfig { probe_after, ..AdaptiveConfig::for_capacity(max) })
