@@ -293,10 +293,13 @@ vision) and why: `docs/specs/mlx-native-catalog-non-goals.md`.
   `models::RECOMMENDED`. (Phi-3-mini-4k = full RoPE; the 128k `su`/longrope variant needs
   `rope_scaling` threaded — a small follow-up. Phi-3.5-mini is the same arch → should work too.)
 
-- [ ] mlx-native-mixtral - Mixtral / Mistral-MoE (`model_type: "mixtral"`). Sparse MoE
-  on the Mistral block — reuse the `qwen3_moe` SwitchGLU routing pattern + the Mistral
-  attention (from `mlx-native-mistral`). Bigger than the dense ports; do after Mistral
-  + Gemma land. Validate vs oracle.
+- [ ] mlx-native-mixtral - **LOW PRIORITY (2026-06-15): MoE need already covered; Mixtral largely
+  superseded.** mlx-native already serves Qwen3-MoE and **Qwen3.6-35B-A3B** (a more modern + faster
+  MoE — 3B active), so the sparse-MoE capability is there with better models. Mixtral 8x7B (~26 GB
+  @4bit, borderline on 32 GB) was a late-2023 hit now mostly displaced by Qwen3.x / Llama3.x / Gemma3.
+  A full new-arch port + real-weight parity for nichey value — skip unless a specific Mixtral need
+  appears. Original note: Mixtral / Mistral-MoE (`model_type: "mixtral"`). Sparse MoE on the Mistral
+  block — reuse the `qwen3_moe` SwitchGLU routing + Mistral attention. Validate vs oracle.
 
 - [x] mlx-native-recommend-catalog - As architectures land, curate `models::RECOMMENDED`
   (the launch picker / `rozum models` list) with a few good defaults per family
@@ -727,7 +730,14 @@ features the mistralrs backend shipped that the native backend does NOT yet have
 Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
 `docs/specs/mistralrs-concurrency-scheduling.md` (Out of scope).
 
-- [ ] concurrency-engine-yield - Make the fork yield between prefill chunks so a
+- [ ] concurrency-engine-yield - **LOW PRIORITY (2026-06-15): mistralrs-only + non-default, and the
+  default engine already does better.** This targets the **mistralrs fork** (`pipeline::step`), which
+  is **not in the default build** (`default = ["mlx-native", "gguf"]`). The default **mlx-native**
+  engine already does **continuous batched decode** — new requests are admitted into a *live* decode
+  batch mid-flight (`src/mlx_native_backend.rs`), which is the interleaving this was reaching for and
+  more than mistralrs's admission-only fast lane. (A very long *prefill* in mlx-native still runs as a
+  block, not chunk-interleaved — a narrow residual.) Original note: ↓
+  Make the fork yield between prefill chunks so a
   long prefill does not monopolise an engine step. Today chunking is internal to
   `pipeline::step` (commit `698bccf1f`) — memory-bounded but not preemptible — so
   the Phase B+C fast lane only reorders *admission*, not in-flight progress.
