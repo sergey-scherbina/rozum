@@ -402,13 +402,15 @@ or on nothing — so any engine can reuse it.
   decode. Removes the per-leaf sampler duplication (today it lives inside the MLX
   fork, bound to mlx `Array`).
 
-- [ ] extract-model-reference-specs - **L3.** Capture the model *knowledge* as
-  engine-independent reference docs (one per family): the forward math + the
-  checkpoint conventions we reverse-engineered — RMSNorm +1, AFQ
-  `.weight↔.inner.weight` / `.bias↔.inner.bias` remap pattern, f32 delta-scan,
-  Qwen2 bias / optional `head_dim`, multimodal `text_config` unwrap, safetensors-index
-  sharding. The code stays per-tensor-lib; the spec lets a new leaf implement from
-  fact instead of re-deriving from a checkpoint (this is where the real time went).
+- [x] extract-model-reference-specs - **L3. DONE 2026-06-15.** Captured the model *knowledge* as
+  engine-independent reference docs in `docs/specs/model-reference/`: a `README.md` of cross-cutting
+  checkpoint conventions (AFQ `.weight↔.inner.weight`/`.bias↔.inner.bias` remap, RMSNorm `+1`, tied
+  embeddings, safetensors stale-shard-index fallback, multimodal `text_config` unwrap, MLX↔PyTorch row
+  order) + one file per family (`qwen3`, `qwen36-hybrid` incl. the f32 GatedDeltaNet scan, `llama-family`
+  incl. the Phi-3 fused-projection split + Mistral `head_dim`/list-template, `qwen2` QKV-bias, `gemma3`
+  incl. the multimodal-wrapper defaults table). The forward math + quirks per family, grounded in the
+  fork's model files. Linked from `mlx-native-runtime.md`. The code stays per-tensor-lib; the spec lets a
+  new leaf implement from fact instead of re-deriving from a checkpoint.
 
 - [ ] extract-metal-kernels - **L4.** Factor the GatedDeltaNet fused-scan (and future)
   Metal kernels' MSL source into a standalone hardware-only module, so any Metal
