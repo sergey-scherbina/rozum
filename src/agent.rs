@@ -96,6 +96,52 @@ impl ToolSource for CallbackToolSource {
     }
 }
 
+/// Compose several [`ToolSource`]s into one — the union of their tools, with each call routed to
+/// the source that declares it. `run_agent` takes a single source, so this is how an app combines
+/// the built-in tools, the memory store, a retrieval index, and its own domain tools. On a name
+/// clash the **first-added** source wins.
+#[derive(Default)]
+pub struct MultiToolSource {
+    sources: Vec<Box<dyn ToolSource>>,
+}
+
+impl MultiToolSource {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a source (builder style). Earlier-added sources take precedence on a name clash.
+    pub fn with(mut self, source: impl ToolSource + 'static) -> Self {
+        self.sources.push(Box::new(source));
+        self
+    }
+}
+
+#[async_trait]
+impl ToolSource for MultiToolSource {
+    fn tools(&self) -> Vec<ToolDef> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for s in &self.sources {
+            for t in s.tools() {
+                if seen.insert(t.name.clone()) {
+                    out.push(t);
+                }
+            }
+        }
+        out
+    }
+
+    async fn dispatch(&self, name: &str, args: Value) -> Result<Value, ToolError> {
+        for s in &self.sources {
+            if s.tools().iter().any(|t| t.name == name) {
+                return s.dispatch(name, args).await;
+            }
+        }
+        Err(ToolError::new(format!("unknown tool: {name}")))
+    }
+}
+
 // ─── MCP-client adapter ────────────────────────────────────────────────────────
 
 use rmcp::{
@@ -584,6 +630,34 @@ mod tests {
         let out = run_agent(&backend, "sys", "bad", &add_tool(), &Budget::default()).await;
         assert_eq!(out.stop, AgentStop::Done);
         assert!(out.operations[0].output.is_err());
+    }
+
+    #[tokio::test]
+    async fn multi_tool_source_unions_and_routes() {
+        let def = |n: &str| ToolDef {
+            name: n.into(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+        };
+        let a = CallbackToolSource::new()
+            .with_tool(def("alpha"), |_| Ok(json!({"from": "a"})))
+            .with_tool(def("shared"), |_| Ok(json!({"who": "a"})));
+        let b = CallbackToolSource::new()
+            .with_tool(def("beta"), |_| Ok(json!({"from": "b"})))
+            .with_tool(def("shared"), |_| Ok(json!({"who": "b"})));
+        let multi = MultiToolSource::new().with(a).with(b);
+
+        // Union, first-wins on the `shared` clash → 3 tools, not 4.
+        let names: Vec<String> = multi.tools().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["alpha", "shared", "beta"]);
+
+        // Calls route to the owning source.
+        assert_eq!(multi.dispatch("alpha", json!({})).await.unwrap()["from"], "a");
+        assert_eq!(multi.dispatch("beta", json!({})).await.unwrap()["from"], "b");
+        // The clash resolves to the first-added source (a).
+        assert_eq!(multi.dispatch("shared", json!({})).await.unwrap()["who"], "a");
+        // Unknown tool → recoverable error.
+        assert!(multi.dispatch("nope", json!({})).await.is_err());
     }
 
     // ── MCP adapter: conversions ────────────────────────────────────────────
