@@ -65,7 +65,7 @@ Declare frugal/escalation cascades (see `cascade-router.md`) the gateway selects
 
 ```toml
 [cascade.default]
-strategy        = "classify"   # alwaysCheapest (default) | classify | learned
+strategy        = "classify"   # cheapest (default) | classify | learned
 max_escalations = 1            # optional escalation-hop cap
 
   [[cascade.default.tiers]]    # cost-ordered, cheapest first
@@ -87,7 +87,7 @@ endpoint) is skipped; only an all-empty cascade errors.
 **No table needed for the common case** — just list the models and rozum builds an auto-ordered
 cascade (cheapest→most-capable; `claude…` → Anthropic, `gpt…/o1…` → OpenAI, else local). `--model` is
 repeatable (or use one comma-separated value), and `--strategy` picks the start-tier strategy
-(`classify` default | `learned` | `alwaysCheapest`):
+(`classify` default | `learned` | `cheapest`):
 
 ```
 rozum launch --model "mlx-community/Qwen3-4B-4bit,claude-haiku-4-5,gpt-4o"

@@ -123,13 +123,16 @@ routing). **Shipped (Phase 8)** — `src/agent.rs`, `ExecFeedbackPolicy{escalate
 
 ### Routing strategy (start-tier selection)
 
-- **AlwaysCheapest** — start at tier 0, escalate on failure. Cheapest average; extra latency on
-  hard tasks (several attempts).
-- **ClassifyThenStart** — a cheap difficulty classifier (heuristic features: length, code/math
-  markers, multi-step cues, tool count/complexity; or a tiny model) picks the **start tier**, so
-  obviously-hard requests skip wasted cheap attempts. Then cascade from there.
-- **Learned** — a data-driven `(task-class → start tier)` map (a bandit/threshold over the stats)
-  layered on the classifier; adapts the start tier as evidence accumulates.
+Config/CLI names: `cheapest`, `classify`, `learned` (the runtime enum is `RoutingStrategy::
+{AlwaysCheapest, ClassifyThenStart, Learned}`).
+
+- **cheapest** (`AlwaysCheapest`) — start at tier 0, escalate on failure. Cheapest average; extra
+  latency on hard tasks (several attempts).
+- **classify** (`ClassifyThenStart`) — a cheap difficulty classifier (heuristic features: length,
+  code/math markers, multi-step cues, tool count/complexity; or a tiny model) picks the **start
+  tier**, so obviously-hard requests skip wasted cheap attempts. Then cascade from there.
+- **learned** (`Learned`) — a data-driven `(task-class → start tier)` map (a bandit/threshold over
+  the stats) layered on the classifier; adapts the start tier as evidence accumulates.
 
 ### Availability & health (transient, adaptive)
 

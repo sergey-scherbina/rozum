@@ -108,7 +108,7 @@ enum Command {
         model: Vec<String>,
 
         /// Cascade start-tier strategy when more than one model is given:
-        /// `classify` (default), `learned`, or `alwaysCheapest`.
+        /// `classify` (default), `learned`, or `cheapest`.
         #[arg(long)]
         strategy: Option<String>,
 
@@ -144,7 +144,7 @@ enum Command {
         model: Vec<String>,
 
         /// Cascade start-tier strategy when more than one model is given:
-        /// `classify` (default), `learned`, or `alwaysCheapest`.
+        /// `classify` (default), `learned`, or `cheapest`.
         #[arg(long)]
         strategy: Option<String>,
 
