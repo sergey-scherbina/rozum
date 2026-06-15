@@ -94,6 +94,10 @@ rozum launch --model "mlx-community/Qwen3-4B-4bit,claude-haiku-4-5,gpt-4o"
 rozum launch --model qwen3-4b --model claude-haiku-4-5 --strategy learned   # same cascade
 ```
 
+`--offline` (sets `ROZUM_OFFLINE`) disables every remote/cloud tier — local models only. Remote tiers
+are skipped (locals in a mixed cascade still run; an all-remote cascade errors), and the picker hides
+the Anthropic + OpenAI entries.
+
 The interactive launch picker (shown when `--model` is omitted) lists hosted Anthropic + OpenAI
 models alongside local ones; selecting several forms a cascade.
 

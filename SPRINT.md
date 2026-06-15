@@ -264,6 +264,21 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   closes the cascade-router** — all phases, gateway wiring, full adaptive signal set, learned track,
   Anthropic tier, and TOML config shipped.
 
+#### Quick wins (2026-06-15)
+
+- [x] ci-smoke - **DONE** (`.github/workflows/ci.yml`). There was **no CI**. Added a GitHub Actions
+  smoke gate on `master` push/PR: `cargo build --lib --bin rozum` + `cargo test --lib` (feature-free,
+  no Xcode/Metal) on `macos-latest`, with cargo caching + in-progress cancellation. Protects the
+  pure-Rust core (SPI, gateway, agent, cascade, concurrency, config — 260 tests).
+- [x] docs-bootstrap - **DONE** (`README.md`). The README was meeting-room only (0 mentions of the
+  gateway/`launch`/cascade). Added a "Local LLM gateway & model cascade" quickstart (gateway, launch,
+  picker, the cascade model-list + `--strategy`), refreshed the project layout (gateway/cascade/
+  concurrency/agent/config modules) and the dev section (feature-free tests = what CI runs).
+- [x] cascade-offline - **DONE 2026-06-15 (user idea)** (`src/main.rs`). `--offline` on
+  `launch`/`gateway` (→ `ROZUM_OFFLINE`, inherited by the spawned daemon): `build_remote_tier` skips
+  every remote tier (dropped like any unbuildable tier — locals survive, an all-remote cascade
+  errors), and the launch picker hides the cloud entries (Anthropic + OpenAI). Use only local models.
+
 #### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
 
 **Sprint goal #2.** The outward gateway exists (`src/gateway.rs`: `/v1/chat/completions`
