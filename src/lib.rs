@@ -19,6 +19,7 @@ pub mod anthropic_http;
 pub mod openai_http;
 pub mod proxy;
 pub mod rag_lite;
+pub mod sampler;
 pub mod share;
 pub mod telegram;
 pub mod tui;

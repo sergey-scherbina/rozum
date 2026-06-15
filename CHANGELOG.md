@@ -1,5 +1,20 @@
 # Changelog
 
+## sampler — shared engine-agnostic token sampler (extract-shared-sampler, L2)
+Completed: 2026-06-15
+The sampler (repeat-penalty → temperature → top-k → top-p → categorical) now lives in one
+engine-agnostic module (`src/sampler.rs`, L2 of the durable-layer split), defined over a plain
+`&[f32]` logit slice + an `impl Rng` so every leaf can materialize its final-position logits and call
+it instead of re-implementing sampling. `SamplerConfig::from_params`, `seeded_rng(seed)`,
+`repeat_window`, `sample(logits, cfg, recent, rng)`; 6 deterministic unit tests.
+- **GGUF migrated to it** (`gguf.rs`): its ad-hoc temperature+softmax with a buggy *global-static* LCG
+  is gone, replaced by the shared sampler — so GGUF now honors `top_k` / `top_p` / `repeat_penalty` /
+  `seed` (which it silently ignored before) and shares one definition. Compile-verified
+  `--features gguf`.
+- The MLX hot path keeps its on-device `sample_with` (the byte-exact oracle tests pin it); the shared
+  module is the canonical CPU definition it mirrors, available to any CPU leaf — the per-token GPU→CPU
+  copy of one vocab vector is negligible for op-launch-bound decode. 178/0.
+
 ## agent — `MultiToolSource` combinator: compose the local-agent toolkit
 Completed: 2026-06-15
 `run_agent` takes a single `ToolSource`, but an app wants several at once — the built-in tools

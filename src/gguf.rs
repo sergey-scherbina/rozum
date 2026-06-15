@@ -522,7 +522,17 @@ mod inner {
             }
 
             let max_tokens = sampling.max_tokens.unwrap_or(2048);
-            let temperature = sampling.temperature.unwrap_or(0.7);
+            // Shared engine-agnostic sampler over the CPU logit slice (top-k/top-p/
+            // repeat-penalty/seed) — see `crate::sampler`. Default temp 0.7 keeps GGUF's
+            // historic behavior when the request omits it.
+            let cfg = crate::sampler::SamplerConfig {
+                temperature: sampling.temperature.unwrap_or(0.7),
+                top_k: sampling.top_k.unwrap_or(0) as usize,
+                top_p: sampling.top_p.unwrap_or(1.0),
+                repeat_penalty: sampling.repeat_penalty.unwrap_or(1.0),
+            };
+            let mut rng = crate::sampler::seeded_rng(sampling.seed);
+            let mut recent: Vec<u32> = Vec::new();
             let mut n_cur = batch.n_tokens();
             let mut n_generated: u32 = 0;
             let mut parser = ToolUseParser::new();
@@ -549,9 +559,16 @@ mod inner {
                     return;
                 }
 
-                // Sample the next token using raw logits (no sampler feature needed).
+                // Sample the next token from the raw CPU logits via the shared sampler.
                 let logits = ctx.get_logits_ith(n_cur - 1);
-                let token = sample_token(logits, temperature);
+                let id = crate::sampler::sample(
+                    logits,
+                    &cfg,
+                    crate::sampler::repeat_window(&recent),
+                    &mut rng,
+                );
+                recent.push(id);
+                let token = LlamaToken(id as i32);
 
                 if token == eos || model.is_eog_token(token) {
                     emit_flush(&mut parser, &tx);
@@ -603,52 +620,6 @@ mod inner {
                 }
             }
         }
-    }
-
-    /// Sample the next token from raw logits.
-    ///
-    /// Uses greedy decoding when `temperature ≤ 1e-6`, otherwise applies
-    /// temperature scaling + softmax + categorical sampling with a simple LCG.
-    fn sample_token(logits: &[f32], temperature: f32) -> LlamaToken {
-        if logits.is_empty() {
-            return LlamaToken(0);
-        }
-        if temperature <= 1e-6 {
-            // Greedy
-            let best = logits
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            return LlamaToken(best as i32);
-        }
-        // Temperature + softmax
-        let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let mut probs: Vec<f32> = logits
-            .iter()
-            .map(|&l| ((l - max_l) / temperature).exp())
-            .collect();
-        let sum: f32 = probs.iter().sum();
-        if sum > 0.0 {
-            probs.iter_mut().for_each(|p| *p /= sum);
-        }
-        // Simple counter-based PRNG (no external dep, deterministic between calls).
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let c = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let r_bits = c
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407)
-            >> 32;
-        let r = (r_bits as f32) / (u32::MAX as f32);
-        let mut cumulative = 0.0f32;
-        for (i, &p) in probs.iter().enumerate() {
-            cumulative += p;
-            if r <= cumulative {
-                return LlamaToken(i as i32);
-            }
-        }
-        LlamaToken((probs.len() - 1) as i32)
     }
 
     fn emit_flush(
