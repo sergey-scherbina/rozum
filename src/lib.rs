@@ -1,4 +1,5 @@
 mod backend;
+pub mod agent;
 pub mod concurrency;
 pub mod config;
 pub mod constrain;

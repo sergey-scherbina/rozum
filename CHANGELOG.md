@@ -1,5 +1,30 @@
 # Changelog
 
+## agent — reference agent runtime (Contracts 2–3): the tool loop, in Rust
+Completed: 2026-06-15
+A Rust reference implementation of the agentic loop (`rozum-agent-runtime`, P0b), in `src/agent.rs`.
+Dual purpose: it powers the in-process embedded mode (small local model, no network) and is the
+executable spec the scalascript agent SDK mirrors. It speaks only the `ChatBackend` SPI, so it runs
+against any backend (native MLX, GGUF, a remote HTTP client backend). Completes the P0b contract
+trio (Contract 1 gateway ✓, the tool contract ✓, now the agent loop).
+- **Contract 3 — Tool** (`ToolSource` trait): `fn tools() -> Vec<ToolDef>` (the schemas advertised to
+  the model) + `async fn dispatch(name, args) -> Result<Value, ToolError>`. `CallbackToolSource` is
+  the direct in-process adapter — register `(ToolDef, handler)` pairs; a `ToolError` is a recoverable
+  message handed back to the model as the tool result so it can self-correct.
+- **Contract 2 — the loop** (`run_agent(backend, system, user, tools, budget) -> AgentOutcome`):
+  `[system, user] → model → (tool calls → dispatch → append results)* → final text`, bounded by
+  `Budget {max_steps, max_tokens, wall_time, temperature}` (temperature 0 by default for reproducible
+  runs). `AgentOutcome` carries `{text, stop, steps, operations, transcript}` — the full audit trail
+  of executed side effects + the conversation. `AgentStop ∈ {Done, BudgetSteps, BudgetTime, Error}`.
+- **Validated model-free** (a scripted `MockBackend`): the full tool loop with the result fed back on
+  the next step, the budget capping a runaway tool-calling loop, and recovery from both an
+  unknown-tool call and a handler validation error (the `ToolError` reaches the model). **And e2e
+  against native MLX** (`agent_loop_real_backend`, Qwen3-4B): the model calls `add(3,5)`, gets
+  `{sum:8}`, and answers "The result of 3 + 5 is 8." — with `ROZUM_MLX_CONSTRAIN` guaranteeing the
+  args are valid. 154/0.
+- **Follow-up**: an MCP-client `ToolSource` adapter (over `rmcp`) so the runtime can use tools from an
+  external MCP server (the trait is ready), and the `rozum-embed` public crate.
+
 ## gateway — distributed readiness: /health + /ready + graceful shutdown (run rozum as a service)
 Completed: 2026-06-15
 Makes the gateway safe to run as N identical instances behind a load balancer with zero-downtime

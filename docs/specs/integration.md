@@ -182,6 +182,27 @@ deterministic** tools (push multi-step logic into the op, e.g. one
 `post_transaction` that does the whole double entry); **strict schemas**; **clear
 errors**; validation inside the handler.
 
+### Rust reference runtime (implemented — `src/agent.rs`)
+
+Contracts 2–3 have an executable Rust implementation that the scalascript SDK mirrors and
+that powers the in-process embedded mode:
+
+- **Contract 3** — `ToolSource` trait (`fn tools() -> Vec<ToolDef>`, `async fn dispatch(name,
+  args) -> Result<Value, ToolError>`) with `CallbackToolSource`, the direct in-process
+  adapter (register `(ToolDef, handler)` pairs; a `ToolError` is the recoverable message fed
+  back to the model).
+- **Contract 2** — `run_agent(backend, system, user, tools, budget) -> AgentOutcome`, the
+  loop: `[system,user] → model → (tool calls → dispatch → append results)* → final text`,
+  bounded by `Budget {max_steps, max_tokens, wall_time, temperature}` (temp 0 default for
+  reproducible runs). `AgentOutcome` carries `{text, stop, steps, operations, transcript}` —
+  the audit trail. It speaks only the `ChatBackend` SPI, so it runs against any backend.
+- Validated model-free (scripted `MockBackend`: full tool loop with result feedback, budget
+  cap, unknown-tool + handler-validation recovery) AND end-to-end against native MLX
+  (`agent_loop_real_backend`: Qwen3-4B calls `add(3,5)` → `{sum:8}` → "The result of 3 + 5
+  is 8.", with constrained decoding guaranteeing valid args).
+- **Follow-up**: an MCP-client `ToolSource` adapter (over `rmcp`) so the runtime can use tools
+  from an external MCP server; the trait is ready for it.
+
 ## What rozum provides (less than it first seemed)
 
 With "busi is the agent", rozum's new work shrinks:
