@@ -1,5 +1,20 @@
 # Changelog
 
+## agent — MCP-client ToolSource adapter (the runtime can use external MCP tools)
+Completed: 2026-06-15
+Adds the second `ToolSource` adapter to the reference agent runtime: `McpToolSource`, backed by an
+external MCP server over `rmcp`. `connect_stdio(program, args)` spawns the server (stdio child
+process), runs the MCP handshake, and caches its `list_tools`; `dispatch` forwards each call as
+`tools/call` and flattens the `CallToolResult` (preferring structured content, else the text parts).
+So `run_agent` can now drive a model against tools served by any MCP server, not just in-process
+callbacks — the same loop, a different tool backend. Completes `rozum-agent-runtime`.
+- Added the `transport-child-process` rmcp feature (for the stdio transport).
+- `McpToolSource::from_service` wraps any already-connected client service, which the test uses over
+  an in-memory duplex: a minimal `#[tool]` MCP server exposing `add` → `list_tools` surfaces it →
+  `dispatch("add", {a:3,b:5})` returns `{sum:8}`. Plus model-free unit tests for the two conversions
+  (`Tool`→`ToolDef`, `CallToolResult`→`Value`). 157/0.
+- Remaining nearby: `rozum-embed` (P2), the stable public crate over `run_agent` + the adapters.
+
 ## agent — reference agent runtime (Contracts 2–3): the tool loop, in Rust
 Completed: 2026-06-15
 A Rust reference implementation of the agentic loop (`rozum-agent-runtime`, P0b), in `src/agent.rs`.
