@@ -3,9 +3,11 @@
 ## gateway — install as an always-warm user service (+ closed streaming-output)
 Completed: 2026-06-15
 
-`rozum service {install,uninstall,status}` registers the local gateway as a **user service** —
-launchd on macOS, `systemd --user` on Linux — so it starts at login and is kept alive, instead of
-the lazy-spawn + idle-exit default (`shared-gateway-service`). `--model` is repeatable / comma
+`rozum service {install,uninstall,start,stop,status}` registers the local gateway as a **user
+service** — launchd on macOS, `systemd --user` on Linux — so it starts at login and is kept alive,
+instead of the lazy-spawn + idle-exit default (`shared-gateway-service`). `start`/`stop` toggle the
+running state (launchd `load`/`unload`, `systemctl --user start`/`stop`) without removing the
+installed file; `install`/`uninstall` write/remove it. `--model` is repeatable / comma
 (a cascade), with `--port/--n-ctx/--offline/--strategy`; `ROZUM_CASCADE`/`ROZUM_CONFIG` from the
 installing shell are captured into the service environment so a named/JSON cascade keeps working.
 

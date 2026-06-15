@@ -800,8 +800,9 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   coordination stays in `concurrency-cross-process`.
 
 - [x] shared-gateway-service - **DONE 2026-06-15** (`src/service.rs` + `src/main.rs`;
-  `docs/specs/shared-gateway-service.md`). `rozum service {install,uninstall,status}` registers the
-  gateway as an always-warm **user service** (launchd on macOS, `systemd --user` on Linux) instead of
+  `docs/specs/shared-gateway-service.md`). `rozum service {install,uninstall,start,stop,status}`
+  registers the gateway as an always-warm **user service** (launchd on macOS, `systemd --user` on
+  Linux) instead of
   lazy spawn + idle-exit. `--model` (repeatable/cascade) + `--port/--n-ctx/--offline/--strategy`;
   `ROZUM_CASCADE`/`ROZUM_CONFIG` captured into the service env. The plist/unit generation is the
   library's pure, unit-tested `service` module (4 tests); the binary writes the file + drives
