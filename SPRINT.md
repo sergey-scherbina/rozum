@@ -87,11 +87,16 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   skip-strong, passthrough, error-escalate, budget→best-so-far, free-form-cheapest, all-error→error).
   185/0. **Deferred to a follow-up:** the gateway request-surface (`model:"cascade[:name]"` + named
   configs from a config file) — the core takes a programmatic `CascadeConfig`; wiring is config-heavy.
-- [ ] cascade-p2-health - **Phase 2.** Availability/health: error classification → `Health`
-  {state, FailReason, cooldown} with exp-backoff+jitter+half-open; skip in-cooldown; best-AVAILABLE
-  selection (sideways/down: remote down→local, big-local OOM→smaller); graceful degradation, no
-  hard-fail while any model serves; `Network` parks all remotes. Model-free e2e (mock errors → falls to
-  healthy mock; OOM → smaller).
+- [x] cascade-p2-health - **Phase 2. DONE 2026-06-15** (`src/cascade/health.rs`). `HealthRegistry`:
+  per-model `HealthState {Healthy, Degraded(half-open), Unavailable}` + `FailReason {RateLimited,
+  QuotaExhausted, Down, Network, OutOfMemory, Unknown}`; `classify(err)` maps backend error strings;
+  `record_failure` sets exp-backoff (base/reason × 2^fails, capped) + jitter cooldown; `is_available`
+  goes half-open when the cooldown elapses; `record_success` → Healthy. Cascade loop now skips models
+  in cooldown (best-AVAILABLE routing — sideways/down), classifies an attempt error → parks the model,
+  a `Network` failure parks ALL `Location::Remote` cards at once, graceful degradation (best-so-far,
+  hard-fail only if nothing available/usable). `ModelCard` gained `location: Local|Remote`. 6 new
+  tests (classify, park→half-open→recover, backoff; e2e: parked-skipped-next-request, network-parks-
+  all-remotes→degrade-to-local, OOM-big→fall-to-smaller). 191/0.
 - [ ] cascade-p3-self-signal - **Phase 3.** L1 self-signal + the `escalate`/`consult_stronger` tool
   (`ToolSource`, composes with `run_agent` + `MultiToolSource`).
 - [ ] cascade-p4-judge - **Phase 4.** L2 cheap judge (next-cheapest-local + heuristic; pluggable threshold).
