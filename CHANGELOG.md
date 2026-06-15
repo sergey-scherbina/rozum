@@ -1,5 +1,20 @@
 # Changelog
 
+## cascade — Phase 3: self-signal escalation + the "admit uncertainty" affordance
+Completed: 2026-06-15
+The cheap model can now **defer instead of guessing** (`cascade-p3-self-signal`). Rather than guessing
+whether a model "sounds unsure", we give it the skill: an `EscalationAffordance` injects a system-prompt
+instruction into every non-top tier — *"if you are not confident, do not guess; reply `[[ESCALATE:
+reason]]` and a stronger model takes over — admitting it beats being confidently wrong"* — and L1
+`SelfSignalCheck` escalates on that marker, on an `escalate`/`consult_stronger` tool call, or on an
+opt-in refusal pattern (off by default; we rely on the taught signal, not heuristics). The marker is
+stripped from any fallback answer so it never leaks to the client. `escalation_tools()` exposes
+`consult_stronger` as a `ToolSource` for agent mode (composes with `run_agent` / `MultiToolSource`). The
+default cascade pipeline is now `[L0 structural, L1 self-signal]` with the affordance on; the top tier
+gets no affordance (nothing above it). 7 new tests (marker / tool / refusal detection, affordance
+injection, marker strip, tool ack; e2e: marker → escalate to the strong model, marker stripped from a
+fallback). 198/0.
+
 ## cascade — Phase 2: transient availability/health-aware routing
 Completed: 2026-06-15
 Makes the Cascade Router **resilient** (`cascade-p2-health`): a model's availability is transient — a
