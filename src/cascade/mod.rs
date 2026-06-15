@@ -10,11 +10,13 @@
 //! parallel lanes (P6), and learned stats (P7) layer on top.
 
 mod acceptance;
+mod classifier;
 mod health;
 mod judge;
 mod self_signal;
 
 pub use acceptance::{AcceptanceCheck, StructuralCheck, TurnOutcome, Verdict};
+pub use classifier::{Classifier, HeuristicClassifier, RoutingStrategy};
 pub use health::{classify, FailReason, HealthRegistry, HealthState};
 pub use judge::{HeuristicJudge, Judge, JudgeConfig, ModelJudge};
 pub use self_signal::{escalation_tools, EscalationAffordance, SelfSignalCheck};
@@ -70,6 +72,10 @@ pub struct CascadeConfig {
     pub affordance: Option<EscalationAffordance>,
     /// The L2 judge, consulted only when L0/L1 are inconclusive (`None` = accept inconclusive).
     pub judge: Option<JudgeConfig>,
+    /// How the cascade chooses its *entry* model (Phase 5).
+    pub strategy: RoutingStrategy,
+    /// The difficulty classifier for `ClassifyThenStart` (`None` → the built-in heuristic).
+    pub classifier: Option<Box<dyn Classifier>>,
 }
 
 impl CascadeConfig {
@@ -82,6 +88,8 @@ impl CascadeConfig {
             budget: CascadeBudget::default(),
             affordance: Some(EscalationAffordance::default()),
             judge: None,
+            strategy: RoutingStrategy::AlwaysCheapest,
+            classifier: None,
         }
     }
 }
@@ -102,6 +110,23 @@ impl CascadeBackend {
     /// The shared health registry (observability / tests).
     pub fn health(&self) -> &HealthRegistry {
         &self.health
+    }
+
+    /// The cost-ordered index of the *entry* model for this request, per the routing strategy.
+    /// `ClassifyThenStart` maps difficulty `0..1` onto `0..n-1` (round to nearest tier); the
+    /// configured classifier wins, else the built-in heuristic. Never exceeds the top tier.
+    fn start_index(&self, req: &ChatRequest, n: usize) -> usize {
+        match self.config.strategy {
+            RoutingStrategy::AlwaysCheapest => 0,
+            RoutingStrategy::ClassifyThenStart if n > 1 => {
+                let d = match &self.config.classifier {
+                    Some(c) => c.difficulty(req),
+                    None => HeuristicClassifier.difficulty(req),
+                };
+                ((d.clamp(0.0, 1.0) * (n - 1) as f32).round() as usize).min(n - 1)
+            }
+            RoutingStrategy::ClassifyThenStart => 0,
+        }
     }
 }
 
@@ -191,7 +216,15 @@ impl ChatBackend for CascadeBackend {
         let mut attempts = 0usize;
         let last_idx = models.len() - 1;
 
-        for (idx, card) in models.iter().enumerate() {
+        // Choose the entry tier. `AlwaysCheapest` starts at 0; `ClassifyThenStart` scores the
+        // request once and maps difficulty → a proportional start tier. The candidate order is
+        // then start-and-up (the natural escalation path), then the cheaper tiers below start as
+        // availability fallbacks — so a parked entry tier still degrades to *something*.
+        let start_idx = self.start_index(&req, models.len());
+        let order: Vec<usize> = (start_idx..models.len()).chain((0..start_idx).rev()).collect();
+
+        for &idx in &order {
+            let card = &models[idx];
             if attempts >= cap || self.config.budget.wall_time.is_some_and(|wt| start.elapsed() >= wt)
             {
                 break;
@@ -517,6 +550,56 @@ mod tests {
         let out = collect(be.chat(ChatRequest::simple("q")).await.unwrap()).await;
         assert_eq!(out, "I don't know");
         assert_eq!(sc.load(Ordering::SeqCst), 0);
+    }
+
+    // ── Phase 5: difficulty classifier → ClassifyThenStart ──────────────────
+
+    fn classify_cfg(models: Vec<ModelCard>) -> CascadeConfig {
+        let mut cfg = CascadeConfig::new(models);
+        cfg.strategy = RoutingStrategy::ClassifyThenStart;
+        cfg
+    }
+
+    #[tokio::test]
+    async fn classify_starts_trivial_prompt_at_cheapest() {
+        // A bare greeting is trivial → start at tier 0; the stronger tiers are never touched.
+        let (c, cc) = card("cheap", 0, Script::Text("hello"));
+        let (m, mc) = card("mid", 1, Script::Text("MID"));
+        let (s, sc) = card("strong", 2, Script::Text("STRONG"));
+        let be = CascadeBackend::new(classify_cfg(vec![c, m, s]));
+        let out = collect(be.chat(ChatRequest::simple("hi")).await.unwrap()).await;
+        assert_eq!(out, "hello");
+        assert_eq!(cc.load(Ordering::SeqCst), 1);
+        assert_eq!(mc.load(Ordering::SeqCst), 0);
+        assert_eq!(sc.load(Ordering::SeqCst), 0, "trivial prompt never reaches the strong tier");
+    }
+
+    #[tokio::test]
+    async fn classify_skips_cheap_on_a_hard_prompt() {
+        // Code + math + multi-step → difficulty ≳ 0.75 → start above tier 0, so the cheap model
+        // is bypassed entirely and the strong model answers directly.
+        let (c, cc) = card("cheap", 0, Script::Text("weak"));
+        let (s, sc) = card("strong", 1, Script::Text("strong answer"));
+        let be = CascadeBackend::new(classify_cfg(vec![c, s]));
+        let hard = "```\nfn solve() {}\n```\nprove the theorem step by step and analyze";
+        let out = collect(be.chat(ChatRequest::simple(hard)).await.unwrap()).await;
+        assert_eq!(out, "strong answer");
+        assert_eq!(cc.load(Ordering::SeqCst), 0, "the cheap tier is skipped for a hard prompt");
+        assert_eq!(sc.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn classify_falls_back_below_start_when_entry_unavailable() {
+        // Hard prompt routes to the strong tier, but it's down → fall back to the cheaper tier
+        // below the entry point rather than failing.
+        let (c, cc) = card("cheap", 0, Script::Text("cheap saves the day"));
+        let (s, sc) = card("strong", 1, Script::Err("down"));
+        let be = CascadeBackend::new(classify_cfg(vec![c, s]));
+        let hard = "```\nfn solve() {}\n```\nprove the theorem step by step and analyze";
+        let out = collect(be.chat(ChatRequest::simple(hard)).await.unwrap()).await;
+        assert_eq!(out, "cheap saves the day", "degrades to the cheaper tier below the entry");
+        assert_eq!(sc.load(Ordering::SeqCst), 1);
+        assert_eq!(cc.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -1,5 +1,30 @@
 # Changelog
 
+## cascade — Phase 5: difficulty classifier → ClassifyThenStart
+Completed: 2026-06-15
+
+The cascade can now **start partway up** instead of always at the cheapest tier
+(`cascade-p5-classifier`). `AlwaysCheapest` wastes a round-trip on every obviously hard request
+(long code, formal reasoning) that the cheap tier will predictably punt. `ClassifyThenStart` scores
+the request's difficulty once, up front, and enters the cascade at a proportional tier.
+
+`Classifier` trait (`difficulty(req) -> 0.0..1.0`) + `HeuristicClassifier` — a free, deterministic
+score over surface features: prompt length, code markers (```` ``` ````, `fn `, `def `, …), math/
+reasoning cues (`prove`, `integral`, …), multi-step asks (`step by step`, `refactor`, `analyze`, …),
+the number of offered tools, and conversation depth. It reads **only the user/assistant turns**, so a
+big system prompt never inflates the score.
+
+`RoutingStrategy { AlwaysCheapest (default), ClassifyThenStart }` on `CascadeConfig`; `start_index`
+maps difficulty onto `0..n-1` (round to nearest). The candidate order is **start-and-up** (the
+natural escalation path) then the **cheaper tiers below as availability fallbacks**
+(`(start..n).chain((0..start).rev())`), so a parked entry tier still degrades to something rather than
+failing. Classification moves only the *entry point*, never the ceiling — escalation works unchanged
+from there, and `AlwaysCheapest` reproduces the old order byte-for-byte (all Phase 1–4 tests stay
+green). Opt-in (default `AlwaysCheapest`, classifier `None` → the built-in heuristic).
+
+`src/cascade/classifier.rs`; 9 new tests (6 heuristic scoring, 3 e2e: trivial→cheapest,
+hard→skip-cheap, hard-prompt-with-entry-down→fall-back-below). 212/0.
+
 ## cascade — Phase 4: the L2 judge (pluggable: heuristic or model)
 Completed: 2026-06-15
 Adds the L2 judge to the Cascade Router (`cascade-p4-judge`), consulted **only when L0/L1 are

@@ -115,7 +115,16 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   runs the async judge, or accepts if no judge). Opt-in (default `judge: None`). 5 new tests
   (parse_score, heuristic surface signals; e2e judge-escalates-low-quality, no-judge-accepts,
   model-judge-from-backend). 203/0.
-- [ ] cascade-p5-classifier - **Phase 5.** Difficulty classifier → `ClassifyThenStart` (heuristic features / tiny model → start tier).
+- [x] cascade-p5-classifier - **Phase 5. DONE 2026-06-15** (`src/cascade/classifier.rs`). A
+  `Classifier` trait (`difficulty(req)->0..1`) + `HeuristicClassifier` (length, code/math/multi-step
+  markers, tool count, conversation depth — user/assistant text only, so system boilerplate doesn't
+  inflate). `RoutingStrategy{AlwaysCheapest (default), ClassifyThenStart}` on `CascadeConfig`;
+  `start_index` maps difficulty → a proportional *entry* tier (round to nearest of `0..n-1`); the
+  candidate order is start-and-up then the cheaper tiers below as availability fallbacks
+  (`(start..n).chain((0..start).rev())`), so a parked entry tier still degrades. Classification moves
+  only the entry point, never the ceiling — escalation works unchanged from there. `AlwaysCheapest`
+  is byte-for-byte the old order (all Phase 1–4 tests stay green). 9 new tests (6 heuristic scoring,
+  3 e2e: trivial→cheapest, hard→skip-cheap, hard+entry-down→fall-back-below). 212/0.
 - [ ] cascade-p6-scheduler - **Phase 6.** Parallel scheduler / lanes (per-request difficulty routing,
   non-blocking; residency policy — single-resident first, then multi-resident via `ConcurrencyBudget`).
 - [ ] cascade-p7-learned - **Phase 7.** Learned stats + adaptive thresholds/start-tier + persisted
