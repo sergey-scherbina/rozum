@@ -185,9 +185,19 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   env JSON (`ROZUM_CASCADE` / `ROZUM_CASCADE_<NAME>`). `parse_cascade_model` routes the model string;
   `Location` is now serde. 6 new tests (parse cases, JSON round-trip, build-in-order, skip-on-fail,
   empty-is-error, pool-override). 241/0. **Remaining follow-ups**: Anthropic-native remote tier
-  (v1 is OpenAI-compatible only); a `rozum.toml [cascade]` schema (v1 is env JSON); and the P9 live
-  feed — which needs reconciling the AIMD controller with the existing circuit breaker (both move the
-  admission `limit`), so it's its own design, not a drop-in.
+  (v1 is OpenAI-compatible only); a `rozum.toml [cascade]` schema (v1 is env JSON).
+- [x] cascade-adaptive-live - **DONE 2026-06-15** (`src/concurrency.rs`). The P9 live feed +
+  **AIMD ⇄ circuit-breaker reconciliation**. The breaker and the AIMD controller both moved the
+  admission `limit` — they'd fight. Fix: the controller now owns the **ceiling** (`set_ceiling` sets
+  both `capacity` and the live `limit`), and the breaker (`trip`/`recover_step`) operates as a fast
+  inner loop *within* `[1, ceiling]` — an acute OOM still drops `limit` instantly, but recovery
+  can't climb above what the controller has learned the model sustains. `AdmittingBackend` gained an
+  opt-in `AdaptiveConcurrency`: each completed request feeds a `ConcurrencySample` (clean → probe up;
+  overload/error → back off via `set_ceiling`). Adaptive backends **start serial** and open up on
+  healthy traffic. Enabled by `ROZUM_ADAPTIVE_CONCURRENCY=1` in `admit_wrap` (default off → static
+  budget unchanged). 4 new tests (ceiling-bounds-recovery, ceiling-raises/lowers, probe-up,
+  back-off-on-OOM). 245/0. **Remaining follow-ups**: richer signals (resource headroom / latency
+  baseline / judge+exec-feedback quality — v1 uses overload+success only).
 
 #### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
 

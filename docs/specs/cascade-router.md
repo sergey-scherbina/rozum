@@ -187,11 +187,16 @@ saturates, rate-limits, OOMs, or its answers degrade. That number **differs per 
 assumed** — a small local may take 4–8 concurrent prefills, a big local 1, a generous remote dozens,
 a metered remote 2 before 429s. So **measure it at runtime** and adapt, per model.
 
-- **The actuators already exist.** Per-model throughput is the resizable admission limit
-  (`AdmissionScheduler::set_limit` / `bump_limit` on the `AdmittingBackend` wrapping each backend);
-  cross-model residency is the Phase-6 lane slots. The effective live concurrency of a model is
-  `min(its adaptive limit, its lane's residency share)`. This phase adds only the **controller** that
-  moves `set_limit`; Phase 6 is unchanged.
+- **The actuators already exist.** Per-model throughput is the resizable admission limit on the
+  `AdmittingBackend` wrapping each backend; cross-model residency is the Phase-6 lane slots. The
+  effective live concurrency of a model is `min(its adaptive limit, its lane's residency share)`.
+  This phase adds only the **controller**; Phase 6 is unchanged. **Reconciled with the circuit
+  breaker** (shipped): the controller owns the *ceiling* (`AdmissionScheduler::set_ceiling` sets both
+  the recovery `capacity` and the live `limit`); the breaker's `trip`/`recover_step` operate as a
+  fast inner loop *within* `[1, ceiling]`, so an acute OOM drops the live limit instantly but
+  recovery can't climb above the controller's learned ceiling. Live via `AdmittingBackend::
+  with_adaptive` (opt-in, `ROZUM_ADAPTIVE_CONCURRENCY=1`); each completed request feeds a
+  `ConcurrencySample`.
 - **Signals, per location class:**
   - *Local* — the model's resident/peak memory + CPU/GPU utilization vs **free system** memory and
     compute headroom (so we raise concurrency only while resources allow, and back off before an
@@ -286,13 +291,15 @@ availability fallback (a mock backend that errors → the next available is chos
 
 Each phase ships value and is testable; early phases are deterministic/model-free.
 
-**Status (2026-06-15): ALL 9 phases shipped + the gateway request-surface wiring.** `src/cascade/`
-(54 tests) + `run_agent_escalating` in `src/agent.rs` (P8, 3 tests) + `AdaptiveConcurrency` in
-`src/concurrency.rs` (P9, 6 tests) + `model: "cascade[:name]"` → `CascadeBackend` (`spec.rs` + the
-`main.rs` hook, 6 tests). Follow-ups (non-blocking): P7 adaptive judge thresholds / health-pattern
-persistence; an Anthropic-native remote tier + a `rozum.toml [cascade]` schema; and the **live P9
-feed** — feeding `ConcurrencySample`s and applying per-model `set_limit`, which first needs
-reconciling the AIMD controller with the existing circuit breaker (both move the admission `limit`).
+**Status (2026-06-15): ALL 9 phases shipped + the gateway request-surface wiring + the live P9
+feed.** `src/cascade/` (54 tests) + `run_agent_escalating` in `src/agent.rs` (P8, 3 tests) +
+`AdaptiveConcurrency` in `src/concurrency.rs` (P9, 6 + 4 tests) + `model: "cascade[:name]"` →
+`CascadeBackend` (`spec.rs` + the `main.rs` hook, 6 tests). The P9 controller now drives real
+admission ceilings (`set_ceiling`), reconciled with the circuit breaker (breaker = fast inner loop
+within the controller's ceiling), opt-in via `ROZUM_ADAPTIVE_CONCURRENCY=1`. Follow-ups
+(non-blocking): P7 adaptive judge thresholds / health-pattern persistence; an Anthropic-native remote
+tier + a `rozum.toml [cascade]` schema; richer P9 signals (resource headroom / latency baseline /
+quality — v1 uses overload+success).
 
 1. **Registry + pure cascade + L0 structural acceptance.** Caller-supplied list, `AlwaysCheapest`,
    escalate on error/structural-fail, single-model passthrough. Local→remote tiers via existing
