@@ -456,12 +456,30 @@ just the model-service side; the SDK + tools are owned by the scalascript/busi s
   build a backend, run the reference agent-runtime, pick a tool source. Not the primary
   path (distributed HTTP is) — the small-model optimization.
 
-- [ ] structured-output-for-tools - **P2 (rozum).** Constrained / structured decoding
-  that enforces the model's tool-argument output against the app's JSON tool schemas
-  during decoding → tool-arg reliability for small local models (can't emit an invalid
-  arg). Supersedes the older Runtime/UX `structured-output`; now driven by a concrete
-  consumer. Native MLX sampler-level work + a schema→constraint compiler. Exposed over
-  Contract-1 so the SDK just passes schemas.
+- [~] structured-output-for-tools - **P2 (rozum). v1 SHIPPED 2026-06-15.** Constrained
+  decoding that enforces a tool call's arguments against the tool's JSON schema *during*
+  decode, so a small local model cannot emit an invalid argument object. Spec:
+  `docs/specs/constrained-tool-decoding.md`.
+  - **Engine** (`src/constrain.rs`): a JSON-Schema subset → incremental **prefix
+    acceptor** (`Schema::prefix` → Complete/Partial/Invalid). Subset = object
+    (properties/required, additional props forbidden → keys restricted), string (+enum/
+    const), integer, number, boolean, array-of-scalar, nested object; anything else
+    relaxes to generic well-formed JSON (never over-rejects). Stateless re-parse of the
+    whole suffix each step. 6 model-free unit tests.
+  - **Sampler mask** (`mlx_native_backend.rs`): a B=1 dense decode loop (`run_constrained_dense`)
+    that masks the logits to the top-K candidates whose decoded piece keeps the JSON a
+    valid prefix (widen 256→4096→full, argmax fallback), then runs the normal sampler.
+    Activates once the model opens `<tool_call>{`; resolves `arguments` to the chosen
+    tool's schema once `name` is read; releases on object close. Behind
+    `ROZUM_MLX_CONSTRAIN` (OFF by default → free path byte-identical).
+  - **Validated**: discriminating e2e (`mlx_constrained_tool_call_conforms`, Qwen3-4B) —
+    prompt asks "celsius" but the schema enum is `["kelvin","rankine"]`; output is
+    `{"location":"Paris","unit":"kelvin"}`, proving the mask redirected the model off its
+    preferred (invalid) token. 138/0.
+  - **Follow-ups**: hybrid (Qwen3.6) constrained decode (v1 is dense only; hybrid falls
+    back to post-hoc parse); full JSON-Schema (`oneOf`/`$ref`/patterns); a general
+    `response_format: json_schema` request field reusing the same engine; expose over
+    Contract-1 so the SDK just passes schemas.
 
 - [ ] busi-eval-and-tune - **P1→P3 (busi-side; rozum hooks only).** busi/scalascript
   build the eval harness (20–50 real flows + task-success metric) to pick the smallest
@@ -590,7 +608,9 @@ features the mistralrs backend shipped that the native backend does NOT yet have
 - [ ] streaming-output - Stream model output token by token.
   - Add CLI support without breaking non-streaming evals.
 
-- [ ] structured-output - Add JSON/schema-constrained output validation.
+- [ ] structured-output - Add JSON/schema-constrained output validation. (The decode-time
+  engine landed in `structured-output-for-tools` / `src/constrain.rs`; what remains here is
+  exposing it as a non-tool `response_format: json_schema` request field.)
   - Required for reliable tool routing.
   - Start with parse/repair/retry before grammar decoding.
 

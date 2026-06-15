@@ -1,6 +1,7 @@
 mod backend;
 pub mod concurrency;
 pub mod config;
+pub mod constrain;
 pub mod discord;
 pub mod gateway;
 pub mod gguf;

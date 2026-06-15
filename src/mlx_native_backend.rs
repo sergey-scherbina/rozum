@@ -596,7 +596,10 @@ mod inner {
     /// supported in the batched path yet, so those rows run serially.
     fn is_batchable(job: &Job) -> bool {
         let s = &job.sampling;
-        s.repeat_penalty.unwrap_or(1.0) == 1.0 && s.seed.is_none()
+        // Constrained tool jobs need the B=1 masked loop (`run_constrained_dense`), so keep
+        // them out of the batched path.
+        let constrained = constrain_enabled() && !job.tools.is_empty();
+        !constrained && s.repeat_penalty.unwrap_or(1.0) == 1.0 && s.seed.is_none()
     }
 
     /// Per-row sampling params `(temp, top_k, top_p)` for `qwen3::sample_rows`, with the
@@ -764,6 +767,11 @@ mod inner {
         store: &mut PrefixStore,
         job: Job,
     ) {
+        // Schema-constrained tool decode (dense arches): a separate B=1 loop that masks the
+        // sampler to the tool schemas. OFF unless `ROZUM_MLX_CONSTRAIN` is set.
+        if should_constrain(&job, model) {
+            return run_constrained_dense(model, tokenizer, template, eos, job);
+        }
         let prompt_ids = match render_prompt(
             tokenizer,
             template,
@@ -1215,6 +1223,235 @@ mod inner {
             return true;
         }
         false
+    }
+
+    // ─── Constrained tool-argument decode (schema-masked, B=1, dense) ─────────────
+
+    /// `true` when this job should decode under the JSON-schema constraint: the
+    /// `ROZUM_MLX_CONSTRAIN` flag is set, the request carries tools, and the model is a
+    /// dense arch (the constrained loop goes through `dense_forward`). Hybrid Qwen3.6
+    /// falls through to the free path (post-hoc parse) — a v1 limitation.
+    fn should_constrain(job: &Job, model: &LoadedModel) -> bool {
+        constrain_enabled() && !job.tools.is_empty() && is_dense(model)
+    }
+
+    /// Whether constrained tool decoding is enabled (`ROZUM_MLX_CONSTRAIN` set, any value).
+    fn constrain_enabled() -> bool {
+        std::env::var_os("ROZUM_MLX_CONSTRAIN").is_some()
+    }
+
+    /// Runtime driver that constrains a tool call's JSON to the tool schemas. Built from a
+    /// job's `tools`; the Hermes envelope `{"name": <enum>, "arguments": <schema>}` is
+    /// enforced once the model opens a `<tool_call>`, with `arguments` resolved to the
+    /// chosen tool's schema as soon as the `name` literal is read.
+    struct ToolConstraint {
+        names: Vec<String>,
+        arg_schemas: Vec<crate::constrain::Schema>,
+        schema: crate::constrain::Schema,
+        active: bool,
+        done: bool,
+        json_start: usize,
+    }
+
+    impl ToolConstraint {
+        fn from_job(job: &Job) -> Option<Self> {
+            if job.tools.is_empty() {
+                return None;
+            }
+            let names: Vec<String> = job.tools.iter().map(|t| t.name.clone()).collect();
+            let arg_schemas: Vec<crate::constrain::Schema> = job
+                .tools
+                .iter()
+                .map(|t| crate::constrain::Schema::parse(&t.input_schema))
+                .collect();
+            let schema = crate::constrain::envelope(&names, crate::constrain::Schema::Any);
+            Some(Self { names, arg_schemas, schema, active: false, done: false, json_start: 0 })
+        }
+
+        /// The JSON-in-progress slice to constrain right now, or `None` for free decode
+        /// (before the `<tool_call>{` opener, or after the object completes).
+        fn json_region<'a>(&mut self, full_text: &'a str) -> Option<&'a str> {
+            if self.done {
+                return None;
+            }
+            if !self.active {
+                let op = full_text.find(TOOL_OPEN)?;
+                let after = &full_text[op + TOOL_OPEN.len()..];
+                let br = after.find('{')?;
+                self.active = true;
+                self.json_start = op + TOOL_OPEN.len() + br;
+            }
+            let json = &full_text[self.json_start..];
+            if let Some(name) = extract_tool_name(json) {
+                if let Some(i) = self.names.iter().position(|n| *n == name) {
+                    self.schema =
+                        crate::constrain::envelope(&self.names, self.arg_schemas[i].clone());
+                }
+            }
+            if self.schema.is_complete(json) {
+                self.done = true;
+                return None;
+            }
+            Some(json)
+        }
+    }
+
+    /// Pull a completed `"name": "X"` value out of a partial Hermes envelope, if present.
+    /// Tool names carry no JSON escapes, so a plain quote scan is exact.
+    pub(crate) fn extract_tool_name(json: &str) -> Option<String> {
+        let k = json.find("\"name\"")?;
+        let after = &json[k + 6..];
+        let colon = after.find(':')?;
+        let rest = &after[colon + 1..];
+        let q = rest.find('"')?;
+        let val = &rest[q + 1..];
+        let end = val.find('"')?;
+        Some(val[..end].to_string())
+    }
+
+    /// Sample one token from `[1, vocab]` logits under the schema mask: keep only the
+    /// top-K candidates whose decoded piece keeps the JSON a valid (in)complete prefix,
+    /// forbid all others (−∞), then run the normal sampler among the allowed. Widens K
+    /// (256 → 4096 → full vocab) until ≥1 candidate is valid — a satisfiable prefix always
+    /// has one — and falls back to the unconstrained argmax only if truly nothing matches.
+    fn sample_constrained(
+        logits: &Array,
+        json: &str,
+        schema: &crate::constrain::Schema,
+        tokenizer: &Tokenizer,
+        opts: &qwen3::SamplerOpts,
+        recent: &[u32],
+    ) -> u32 {
+        use crate::constrain::Prefix;
+        // Materialize a contiguous CPU copy of the row (the `+0` forces it).
+        let dense = logits.add(Array::from_f32(0.0)).expect("dense logits");
+        let _ = mlx_rs::transforms::eval([&dense]);
+        let row: Vec<f32> = dense.as_slice::<f32>().to_vec();
+        let vocab = row.len();
+
+        let piece_ok = |id: usize| -> bool {
+            let Ok(text) = tokenizer.decode(&[id as u32], false) else {
+                return false;
+            };
+            if text.is_empty() {
+                return false; // special/empty token — never a JSON char
+            }
+            let mut probe = String::with_capacity(json.len() + text.len());
+            probe.push_str(json);
+            probe.push_str(&text);
+            schema.prefix(&probe) != Prefix::Invalid
+        };
+        let topk = |k: usize| -> Vec<usize> {
+            let mut idx: Vec<usize> = (0..vocab).collect();
+            if k < vocab {
+                idx.select_nth_unstable_by(k, |&a, &b| row[b].total_cmp(&row[a]));
+                idx.truncate(k);
+            }
+            idx
+        };
+
+        let mut allowed: Vec<i32> = Vec::new();
+        for &k in &[256usize, 4096, vocab] {
+            allowed = topk(k.min(vocab))
+                .into_iter()
+                .filter(|&i| piece_ok(i))
+                .map(|i| i as i32)
+                .collect();
+            if !allowed.is_empty() {
+                break;
+            }
+        }
+        if allowed.is_empty() {
+            return argmax_u32(&dense);
+        }
+
+        let mut bias = vec![f32::NEG_INFINITY; vocab];
+        for &i in &allowed {
+            bias[i as usize] = 0.0;
+        }
+        let bias = Array::from_slice(&bias, &[1, vocab as i32]);
+        let masked = dense.add(&bias).expect("mask add");
+        let tok = qwen3::sample_with(&masked, opts, recent).expect("sample_with");
+        let _ = mlx_rs::transforms::eval([&tok]);
+        tok.reshape(&[-1]).unwrap().index(0).item::<u32>()
+    }
+
+    /// Argmax token id of `[1, vocab]` logits.
+    fn argmax_u32(logits: &Array) -> u32 {
+        use mlx_rs::ops::indexing::IndexOp;
+        let a = mlx_rs::ops::indexing::argmax_axis(logits, -1, false).expect("argmax");
+        let _ = mlx_rs::transforms::eval([&a]);
+        a.reshape(&[-1]).unwrap().index(0).item::<u32>()
+    }
+
+    /// B=1 schema-constrained decode for dense arches. Mirrors `run_job`'s decode but masks
+    /// the sampler to the tool schemas inside the `<tool_call>` JSON. Fresh prefill (no
+    /// prefix-KV reuse) — a tool turn is short, so that is fine for v1.
+    fn run_constrained_dense(
+        model: &mut LoadedModel,
+        tokenizer: &mut Tokenizer,
+        template: &str,
+        eos: &[u32],
+        job: Job,
+    ) {
+        use mlx_rs::ops::indexing::{IndexOp, NewAxis};
+        let mut tc = ToolConstraint::from_job(&job).expect("constrained job has tools");
+        let opts = qwen3::SamplerOpts {
+            temp: job.sampling.temperature.unwrap_or(0.0),
+            top_p: job.sampling.top_p.unwrap_or(1.0),
+            top_k: job.sampling.top_k.map(|k| k as i32).unwrap_or(0),
+            repeat_penalty: job.sampling.repeat_penalty.unwrap_or(1.0),
+        };
+        if let Some(s) = job.sampling.seed {
+            let _ = mlx_rs::random::seed(s);
+        }
+        let ceiling = std::env::var("ROZUM_MAX_OUTPUT_TOKENS")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_OUTPUT_CEILING);
+
+        let (mut seq, mut cache, mut logits) =
+            match prefill_job_dense(model, tokenizer, template, ceiling, job) {
+                Some(x) => x,
+                None => return,
+            };
+
+        loop {
+            let recent: &[u32] = if opts.repeat_penalty != 1.0 {
+                qwen3::repeat_window(&seq.out_ids)
+            } else {
+                &[]
+            };
+            // Pick the next token (masked inside the tool JSON, free otherwise). The block
+            // bounds the immutable borrows of `seq`/`tc` so `check_finish` can take `&mut`.
+            let tok = {
+                match tc.json_region(&seq.full_text) {
+                    Some(json) => {
+                        sample_constrained(&logits, json, &tc.schema, tokenizer, &opts, recent)
+                    }
+                    None => {
+                        let t = qwen3::sample_with(&logits, &opts, recent).expect("sample_with");
+                        let _ = mlx_rs::transforms::eval([&t]);
+                        t.reshape(&[-1]).unwrap().index(0).item::<u32>()
+                    }
+                }
+            };
+            if check_finish(&mut seq, tok, eos, tokenizer) {
+                break;
+            }
+            let inp = Array::from(&[tok][..]).index(NewAxis);
+            logits = match dense_forward(model, &inp, None, &mut cache) {
+                Ok(l) => l.index((.., -1, ..)),
+                Err(e) => {
+                    let _ = seq
+                        .job
+                        .events
+                        .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
+                    return;
+                }
+            };
+        }
+        seq.finalize();
     }
 
     /// Render + prefill ONE job on the dense path, building its `BatchSeq` + per-layer KV
@@ -2582,6 +2819,93 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "get_weather");
         assert!(calls[0].1.contains("Paris"), "args: {}", calls[0].1);
+    }
+
+    #[test]
+    fn extract_tool_name_from_partial_envelope() {
+        use super::inner::extract_tool_name;
+        // Complete name literal → extracted.
+        assert_eq!(
+            extract_tool_name(r#"{"name": "get_weather", "arguments": {"#).as_deref(),
+            Some("get_weather")
+        );
+        // Name not finished yet → None (don't resolve the args schema early).
+        assert_eq!(extract_tool_name(r#"{"name": "get_wea"#), None);
+        // Object opened but no name key yet → None.
+        assert_eq!(extract_tool_name(r#"{"#), None);
+        // Tight spacing.
+        assert_eq!(
+            extract_tool_name(r#"{"name":"x","arguments":{}}"#).as_deref(),
+            Some("x")
+        );
+    }
+
+    // End-to-end proof the schema MASK bites: with `ROZUM_MLX_CONSTRAIN=1`, the tool's `unit`
+    // enum is deliberately `["kelvin","rankine"]` — values a model would never volunteer for a
+    // normal weather query (it wants celsius/fahrenheit, both forbidden here). The constrained
+    // arguments must still be valid JSON, carry the required keys, AND use one of the odd enum
+    // literals — which can only happen if the sampler was actually masked off the model's
+    // preferred (invalid) tokens. Qwen3-4B (Hermes `<tool_call>` format). Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_constrained_tool_call_conforms
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "network: uses mlx-community/Qwen3-4B-4bit"]
+    async fn mlx_constrained_tool_call_conforms() {
+        use super::{MlxNativeBackend, ensure_model_dir};
+        use crate::backend::{ChatBackend, ChatEvent, ChatRequest, SamplingParams, ToolDef};
+        use futures::StreamExt;
+
+        unsafe {
+            std::env::set_var("ROZUM_MLX_CONSTRAIN", "1");
+        }
+        let spec = "mlx-community:Qwen3-4B-4bit";
+        let dir = ensure_model_dir(spec).await.expect("qwen3 resolve");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/")).await.expect("load");
+
+        let tool = ToolDef {
+            name: "get_weather".into(),
+            description: "Get the current weather for a city.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                    "unit": {"enum": ["kelvin", "rankine"]}
+                },
+                "required": ["location", "unit"]
+            }),
+        };
+        let mut req =
+            ChatRequest::simple("What is the weather in Paris in celsius? Call the get_weather tool.");
+        req.tools = vec![tool];
+        req.sampling = SamplingParams { max_tokens: Some(128), ..Default::default() };
+
+        let mut stream = backend.chat(req).await.expect("chat");
+        let (mut name, mut args) = (String::new(), String::new());
+        while let Some(ev) = stream.next().await {
+            match ev.expect("event") {
+                ChatEvent::ToolUseStart { name: n, .. } => name = n,
+                ChatEvent::ToolUseDelta { input_json_delta, .. } => args.push_str(&input_json_delta),
+                ChatEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        unsafe {
+            std::env::remove_var("ROZUM_MLX_CONSTRAIN");
+        }
+        eprintln!("CONSTRAINED TOOL  name={name:?}  args={args:?}");
+        assert_eq!(name, "get_weather", "the model must call the constrained tool");
+        // The constraint guarantees: valid JSON, required keys present, enum honored.
+        let v: serde_json::Value =
+            serde_json::from_str(&args).expect("constrained args must be valid JSON");
+        assert!(
+            v.get("location").and_then(|x| x.as_str()).is_some(),
+            "required string `location` missing: {v}"
+        );
+        let unit = v.get("unit").and_then(|x| x.as_str());
+        assert!(
+            matches!(unit, Some("kelvin") | Some("rankine")),
+            "`unit` must be redirected to an enum literal (proves the mask bites): {v}"
+        );
     }
 
     #[test]

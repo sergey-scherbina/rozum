@@ -1,5 +1,40 @@
 # Changelog
 
+## mlx-native — constrained tool-argument decoding (small models can't emit an invalid tool call)
+Completed: 2026-06-15
+Tool-use was post-hoc: render `tools` into the prompt, generate freely, then parse
+`<tool_call>{json}</tool_call>` after the fact — so a small model could emit malformed JSON, a
+hallucinated key, a wrong type, or a missing required arg, and the parse would fail or yield garbage.
+Now, behind `ROZUM_MLX_CONSTRAIN`, the sampler is **masked to the tool's JSON schema during decode**,
+so the arguments object physically cannot violate it. v1 of `structured-output-for-tools`; spec at
+`docs/specs/constrained-tool-decoding.md`.
+
+- **Engine** (`src/constrain.rs`, pure Rust, no MLX): a JSON-Schema subset compiles to an incremental
+  **prefix acceptor** — `Schema::prefix(s)` returns Complete / Partial / Invalid for the partial JSON
+  so far. Subset: object (properties + required, keys restricted to declared props), string (+`enum`/
+  `const`), integer, number, boolean, array-of-scalar, nested object; anything it can't model relaxes
+  to generic well-formed JSON (it never over-rejects). It's stateless — re-validates the whole suffix
+  each step (args are short), which also lets the caller swap the schema mid-stream for free. 6
+  model-free unit tests cover required keys, enums, types, completion, and the relax path.
+- **Sampler mask** (`mlx_native_backend.rs`): a B=1 dense decode loop (`run_constrained_dense`) that,
+  once the model opens a `<tool_call>{`, keeps only the top-K candidate tokens whose decoded piece
+  leaves the JSON a valid prefix (widen 256→4096→full vocab, argmax fallback), forbids the rest (−∞),
+  then runs the existing `sample_with` among the allowed (temp/top-p/top-k/penalty still apply). The
+  Hermes envelope `{"name": <enum tool names>, "arguments": <schema>}` is enforced; `arguments`
+  resolves to the chosen tool's schema as soon as the `name` literal is read; the constraint releases
+  when the object closes. Covers every dense arch (Qwen3/Qwen2/Llama/Gemma 3) via `dense_forward`.
+- **OFF by default** → the free-decode + post-hoc-parse path is byte-identical; constrained jobs are
+  also kept out of the batched path (they need the B=1 masked loop).
+- **Validated** with a discriminating e2e (`mlx_constrained_tool_call_conforms`, Qwen3-4B): the prompt
+  asks for "celsius" but the schema's `unit` enum is `["kelvin","rankine"]` — the output is
+  `{"location":"Paris","unit":"kelvin"}`, i.e. the mask redirected the model off its *preferred but
+  invalid* token onto a legal enum literal. Proves the constraint actually bites, not that the model
+  happened to comply. 138/0.
+
+Follow-ups (BACKLOG): hybrid Qwen3.6 constrained decode (v1 is dense; hybrid falls back to post-hoc),
+full JSON-Schema (`oneOf`/`$ref`/patterns), and a general `response_format: json_schema` request field
+reusing the same engine.
+
 ## mlx-native — the bigger Gemma 3 sizes load (4B/12B/27B multimodal wrapper) + catalog mid-tier
 Completed: 2026-06-15
 Only the tiny text-only Gemma 3 1B (`model_type: "gemma3_text"`) loaded before; the genuinely useful
