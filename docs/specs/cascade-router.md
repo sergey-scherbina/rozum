@@ -178,14 +178,48 @@ Concurrent requests are dispatched by difficulty so the cheap lane and the heavy
 - The scheduler sits **above** per-backend admission; it owns lane assignment + the residency
   policy, and delegates within-lane concurrency to the existing `concurrency::admit_wrap`.
 
+### Adaptive per-model concurrency (measured, not assumed)
+
+Residency (above) is **cross-model** — which models can be co-resident. Orthogonal to it is each
+model's own **throughput concurrency**: how many requests *one* model serves well before it
+saturates, rate-limits, OOMs, or its answers degrade. That number **differs per model and can't be
+assumed** — a small local may take 4–8 concurrent prefills, a big local 1, a generous remote dozens,
+a metered remote 2 before 429s. So **measure it at runtime** and adapt, per model.
+
+- **The actuators already exist.** Per-model throughput is the resizable admission limit
+  (`AdmissionScheduler::set_limit` / `bump_limit` on the `AdmittingBackend` wrapping each backend);
+  cross-model residency is the Phase-6 lane slots. The effective live concurrency of a model is
+  `min(its adaptive limit, its lane's residency share)`. This phase adds only the **controller** that
+  moves `set_limit`; Phase 6 is unchanged.
+- **Signals, per location class:**
+  - *Local* — the model's resident/peak memory + CPU/GPU utilization vs **free system** memory and
+    compute headroom (so we raise concurrency only while resources allow, and back off before an
+    OOM, not after).
+  - *Remote* — the provider's reaction: 429 / `RateLimited` incidence, latency inflation under load,
+    `QuotaExhausted` boundaries (don't probe up into a known-metered ceiling).
+  - *All* — failure rate **and answer quality** (judge / execution-feedback score) **as a function of
+    the concurrency level**: if quality or success drops when N rises, that N is too high for this
+    model regardless of raw resources.
+- **Controller: AIMD-style probe + back-off.** Per model, additively raise the limit while
+  throughput improves and every signal stays green; on any red signal (429, OOM/near-OOM, latency
+  cliff, quality/failure regression) multiplicatively back off and remember the safe ceiling. State
+  is per-model and **persisted** in the stats store (the measured concurrency–throughput–quality
+  curve carries across restarts; we don't re-learn from scratch each boot).
+- **Composes with everything:** the lane gate still enforces residency; health/cooldown still parks
+  failing models; the controller only tunes the *width* of each healthy lane to what that specific
+  model has demonstrably sustained.
+
 ### Stats store (static + learned)
 
 Per `(task-class, model)`: accepted / escalated counts, latency, realized cost, judge-score,
-**plus health events** (failure `FailReason` + timestamp, and recovery). Persisted as JSONL
+**plus health events** (failure `FailReason` + timestamp, and recovery) **plus the concurrency level
+and a resource snapshot** at the time of each attempt (local mem/CPU headroom; remote
+rate-limit/latency reaction) — so quality, latency, and failures are attributable to the concurrency
+at which they happened, which is what the adaptive controller (above) consumes. Persisted as JSONL
 (`memory_store` pattern) and replayed on start. Feeds: judge thresholds, the `Learned` start-tier
-map, the registry's measured `speed`, the cost-vs-latency weighting, and the availability backoff
-+ proactive deprioritization. `task-class` v1 buckets: `{freeform, structured, tool-use}` × a
-coarse difficulty label.
+map, the registry's measured `speed`, the cost-vs-latency weighting, the availability backoff +
+proactive deprioritization, and the **per-model concurrency curve**. `task-class` v1 buckets:
+`{freeform, structured, tool-use}` × a coarse difficulty label.
 
 ### Escalation as a tool (optional, agent mode)
 
@@ -245,8 +279,9 @@ availability fallback (a mock backend that errors → the next available is chos
 
 Each phase ships value and is testable; early phases are deterministic/model-free.
 
-**Status (2026-06-15): phases 1–6 shipped** (`src/cascade/`, 40 tests). Remaining: 7 (learned
-stats), 8 (execution-feedback escalation).
+**Status (2026-06-15): phases 1–7 shipped** (`src/cascade/`, 48 tests; P7 = stats store + `Learned`
+start-tier, with adaptive thresholds / health-pattern persistence as a follow-up on the same store).
+Remaining: 8 (execution-feedback escalation), 9 (adaptive per-model concurrency).
 
 1. **Registry + pure cascade + L0 structural acceptance.** Caller-supplied list, `AlwaysCheapest`,
    escalate on error/structural-fail, single-model passthrough. Local→remote tiers via existing
@@ -266,6 +301,11 @@ stats), 8 (execution-feedback escalation).
 8. **Execution-feedback escalation (agent context).** `run_agent` over a cascade escalates the
    backend when tool calls keep failing (`AgentOutcome.operations` errors), and the tool-error rate
    feeds the learned stats. The grounded "did it actually work" quality signal.
+9. **Adaptive per-model concurrency** (§ Adaptive per-model concurrency). An AIMD controller per
+   model that measures throughput / resources / rate-limits / quality vs the concurrency level and
+   moves the resizable admission limit (`set_limit`) to each model's demonstrated sweet spot. Reuses
+   the existing actuators (Phase 6 lanes + `AdmittingBackend`); consumes the Phase 7 stats
+   (concurrency curve persisted across restarts). No change to Phase 6.
 
 ## Decisions
 

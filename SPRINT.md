@@ -136,13 +136,32 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   new tests (5 LaneSet unit: distinct-pools-parallel, same-pool-serialize-then-free,
   Free-ungated, multi-resident-slots, default-lane-map; 1 e2e: a simple + a hard request on distinct
   lanes meet at a shared barrier ⇒ proven concurrent). 218/0.
-- [ ] cascade-p7-learned - **Phase 7.** Learned stats + adaptive thresholds/start-tier + persisted
-  health patterns (JSONL via the `memory_store` pattern; the `Learned` strategy).
+- [x] cascade-p7-learned - **Phase 7. DONE 2026-06-15** (`src/cascade/stats.rs`). The learned-stats
+  data layer: `TaskClass` (`{Freeform,Structured,ToolUse} × {Easy,Medium,Hard}`), an `AttemptRecord`
+  per model attempt (accepted/escalated, latency, tokens, judge-score, `FailReason`, **+ concurrency
+  level + a `ResourceSnapshot`** for the Phase-9 curve), a `StatsStore` (JSONL append-only +
+  replay-on-open like `memory_store`; in-memory aggregates per `(task-class, model)` with EWMA
+  latency/score + accept-rate). New `RoutingStrategy::Learned`: `start_index` enters at the cheapest
+  tier whose historical accept-rate ≥ `learned_accept_threshold` (0.6) with ≥ `learned_min_attempts`
+  (5) of evidence, else falls back to `ClassifyThenStart`. The cascade now records every attempt
+  (opt-in `config.stats`). 8 new tests (5 unit: task-class buckets, accept-rate fold, learned-skip,
+  needs-evidence, JSONL persist/replay; 3 e2e: learned-skips-cheap, learned-falls-back, records-into-
+  stats). 226/0. **Deferred within the learned track** (not blocking): adaptive judge thresholds and
+  health-pattern persistence feeding the backoff/proactive-deprioritization — small follow-ups on top
+  of this store.
 - [ ] cascade-p8-exec-feedback - **Phase 8 (user idea 2026-06-15).** Execution-feedback escalation:
   `run_agent` over a cascade escalates the backend when tool calls keep failing
   (`AgentOutcome.operations[].output` errors — the grounded "did it actually work" signal, which the
   bare per-response cascade can't see), and the per-model tool-error rate per task-class feeds the
   learned stats (P7). The most reliable quality signal — real execution, not a judge's guess.
+- [ ] cascade-p9-adaptive-concurrency - **Phase 9 (user idea 2026-06-15).** Per-model parallelism is
+  model-specific and can't be assumed — *measure* it. An AIMD controller per model raises the
+  resizable admission limit (`AdmissionScheduler::set_limit` — already exists) while throughput
+  improves and signals stay green, and backs off on a red signal: local mem/CPU headroom vs free
+  system resources (back off *before* OOM), remote 429/latency reaction, and failure-rate + answer
+  **quality as a function of concurrency**. Effective width = `min(adaptive limit, lane residency
+  share)`. Reuses Phase-6 lanes + `AdmittingBackend` as actuators (no Phase 6 change); consumes the
+  Phase-7 concurrency curve (persisted across restarts).
 
 #### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
 

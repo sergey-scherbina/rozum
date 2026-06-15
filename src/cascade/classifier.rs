@@ -26,6 +26,9 @@ pub enum RoutingStrategy {
     AlwaysCheapest,
     /// Score difficulty up front and start at a proportional tier (Phase 5).
     ClassifyThenStart,
+    /// Start at the cheapest tier that the **learned stats** show has been good enough for this
+    /// task-class; fall back to `ClassifyThenStart` when there's not enough evidence (Phase 7).
+    Learned,
 }
 
 /// A free, deterministic difficulty heuristic over the prompt's surface features: length, code
