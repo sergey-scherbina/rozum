@@ -137,12 +137,23 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   Free-ungated, multi-resident-slots, default-lane-map; 1 e2e: a simple + a hard request on distinct
   lanes meet at a shared barrier ⇒ proven concurrent). 218/0.
 - [ ] cascade-p7-learned - **Phase 7.** Learned stats + adaptive thresholds/start-tier + persisted
-  health patterns (JSONL via the `memory_store` pattern; the `Learned` strategy).
+  health patterns (JSONL via the `memory_store` pattern; the `Learned` strategy). Each attempt record
+  also carries the **concurrency level + a resource snapshot** (local mem/CPU headroom; remote
+  rate-limit/latency reaction) so quality/latency/failures are attributable to the concurrency they
+  happened at — the curve the Phase 9 controller consumes.
 - [ ] cascade-p8-exec-feedback - **Phase 8 (user idea 2026-06-15).** Execution-feedback escalation:
   `run_agent` over a cascade escalates the backend when tool calls keep failing
   (`AgentOutcome.operations[].output` errors — the grounded "did it actually work" signal, which the
   bare per-response cascade can't see), and the per-model tool-error rate per task-class feeds the
   learned stats (P7). The most reliable quality signal — real execution, not a judge's guess.
+- [ ] cascade-p9-adaptive-concurrency - **Phase 9 (user idea 2026-06-15).** Per-model parallelism is
+  model-specific and can't be assumed — *measure* it. An AIMD controller per model raises the
+  resizable admission limit (`AdmissionScheduler::set_limit` — already exists) while throughput
+  improves and signals stay green, and backs off on a red signal: local mem/CPU headroom vs free
+  system resources (back off *before* OOM), remote 429/latency reaction, and failure-rate + answer
+  **quality as a function of concurrency**. Effective width = `min(adaptive limit, lane residency
+  share)`. Reuses Phase-6 lanes + `AdmittingBackend` as actuators (no Phase 6 change); consumes the
+  Phase-7 concurrency curve (persisted across restarts).
 
 #### P0 (NEXT): gateway-cc-codex — reliable local-LLM provider for Claude Code & Codex
 
