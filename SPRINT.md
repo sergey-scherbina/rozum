@@ -248,6 +248,12 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   (`models::RECOMMENDED_REMOTE`) alongside locals and supports **multi-select** (e.g. `2 9 4`) →
   joined into a cascade. `build_remote_tier` now defaults the OpenAI endpoint
   (`https://api.openai.com/v1`). 2 new tests (provider detection, cheapest-first ordering). 258/0.
+- [x] cascade-cli-ergonomics - **DONE 2026-06-15** (`src/main.rs`, `src/cascade/spec.rs`). `--model`
+  is now **repeatable** on `launch`/`gateway` (`Vec<String>`): `--model a --model b` ≡ `--model a,b`
+  (each value may itself be a comma list; `join_models` flattens both → the auto-cascade path). New
+  **`--strategy`** flag (`classify`/`learned`/`alwaysCheapest`) flows via `ROZUM_CASCADE_STRATEGY`
+  (the spawned daemon inherits it) and `build_cascade_from_spec` overrides the spec's start-tier
+  strategy with it. `StrategyName::parse_cli` (case/separator-insensitive). 1 new test. 259/0.
 - [x] cascade-toml-config - **DONE 2026-06-15** (`src/config.rs` + `src/main.rs`). Named cascade
   configs in `rozum.toml` via `[cascade.<name>]` tables (a `CascadeSpec`: `strategy`,
   `max_escalations`, `[[cascade.<name>.tiers]]`). `model: "cascade"` → `default`, `"cascade:<name>"`

@@ -84,11 +84,14 @@ A `[cascade.<name>]` table takes precedence over the env JSON (`ROZUM_CASCADE` /
 `ROZUM_CASCADE_<NAME>`), which remains as a fallback. A tier that can't be built (missing key /
 endpoint) is skipped; only an all-empty cascade errors.
 
-**No table needed for the common case** — just list the models, comma-separated, and rozum builds an
-auto-ordered cascade (cheapest→most-capable; `claude…` → Anthropic, `gpt…/o1…` → OpenAI, else local):
+**No table needed for the common case** — just list the models and rozum builds an auto-ordered
+cascade (cheapest→most-capable; `claude…` → Anthropic, `gpt…/o1…` → OpenAI, else local). `--model` is
+repeatable (or use one comma-separated value), and `--strategy` picks the start-tier strategy
+(`classify` default | `learned` | `alwaysCheapest`):
 
 ```
 rozum launch --model "mlx-community/Qwen3-4B-4bit,claude-haiku-4-5,gpt-4o"
+rozum launch --model qwen3-4b --model claude-haiku-4-5 --strategy learned   # same cascade
 ```
 
 The interactive launch picker (shown when `--model` is omitted) lists hosted Anthropic + OpenAI

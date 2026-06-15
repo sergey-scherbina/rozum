@@ -1,5 +1,22 @@
 # Changelog
 
+## cascade — repeatable --model + a --strategy flag
+Completed: 2026-06-15
+
+Two CLI ergonomics on top of the simple model-list path (`cascade-cli-ergonomics`).
+
+`--model` is now **repeatable** on `launch` and `gateway`: `--model qwen3-4b --model claude-haiku-4-5
+--model gpt-4o` builds the same cascade as the comma form `--model "qwen3-4b,claude-haiku-4-5,gpt-4o"`
+(each value may itself be a comma list — `join_models` flattens and re-joins, then the auto-cascade
+path orders them).
+
+A new **`--strategy`** flag picks the cascade start-tier strategy — `classify` (default), `learned`,
+or `alwaysCheapest` — without writing a full spec. It flows through `ROZUM_CASCADE_STRATEGY` (so a
+spawned shared-gateway daemon inherits it) and overrides the strategy of whatever spec is built
+(list, TOML, or env JSON). `StrategyName::parse_cli` parses it case- and separator-insensitively.
+
+`src/main.rs` + `src/cascade/spec.rs`; 1 new test. 259/0.
+
 ## cascade — the simple path: just list models, rozum builds the cascade
 Completed: 2026-06-15
 

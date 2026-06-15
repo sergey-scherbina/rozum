@@ -101,9 +101,16 @@ enum Command {
 
         /// Model spec: absolute .gguf path, "lmstudio:<repo>", or any model id
         /// understood by mlx_lm.server / ROZUM_BACKEND_URL. Required to run the
-        /// daemon; not needed for `status` / `stop`.
+        /// daemon; not needed for `status` / `stop`. **Repeatable** — pass it
+        /// several times (or one comma-separated value) to run the models as a
+        /// cascade, e.g. `--model qwen3-4b --model claude-haiku-4-5`.
         #[arg(long)]
-        model: Option<String>,
+        model: Vec<String>,
+
+        /// Cascade start-tier strategy when more than one model is given:
+        /// `classify` (default), `learned`, or `alwaysCheapest`.
+        #[arg(long)]
+        strategy: Option<String>,
 
         /// Context window in tokens. Default: the model's max context (from its
         /// config.json), capped so the KV cache stays within a fraction of RAM;
@@ -131,8 +138,15 @@ enum Command {
         /// Model spec (same as `gateway --model`). Optional: if omitted and a
         /// shared gateway is already running, reuse its model; if nothing is
         /// running on a TTY, show an interactive picker (cached models first).
+        /// **Repeatable** — pass it several times (or one comma-separated value)
+        /// to run the models as a cascade (rozum auto-orders cheapest→most-capable).
         #[arg(long)]
-        model: Option<String>,
+        model: Vec<String>,
+
+        /// Cascade start-tier strategy when more than one model is given:
+        /// `classify` (default), `learned`, or `alwaysCheapest`.
+        #[arg(long)]
+        strategy: Option<String>,
 
         /// Port for the gateway (auto-picks a free port if not specified)
         #[arg(long)]
@@ -358,6 +372,7 @@ async fn main() {
         Some(Command::Gateway {
             port,
             model,
+            strategy,
             n_ctx,
             enable_thinking,
             action,
@@ -371,8 +386,9 @@ async fn main() {
                     // SAFETY: set before the backend worker thread is spawned.
                     unsafe { std::env::set_var("ROZUM_ENABLE_THINKING", "1") };
                 }
+                apply_cascade_strategy(strategy.as_deref());
                 let cfg = load_runtime_config_or_exit();
-                let Some(model) = model.or_else(|| cfg.model.clone()) else {
+                let Some(model) = join_models(model).or_else(|| cfg.model.clone()) else {
                     eprintln!(
                         "rozum gateway: --model is required to run the daemon \
                          (or set [runtime].model in rozum.toml)"
@@ -393,6 +409,7 @@ async fn main() {
         },
         Some(Command::Launch {
             model,
+            strategy,
             port,
             n_ctx,
             dedicated,
@@ -403,6 +420,8 @@ async fn main() {
             backend_url,
             program,
         }) => {
+            apply_cascade_strategy(strategy.as_deref());
+            let model = join_models(model);
             // Precedence: --channel-mcp-name > ROZUM_CHANNEL_MCP_NAME > "rozum".
             let server_name = channel_mcp_name
                 .or_else(|| std::env::var("ROZUM_CHANNEL_MCP_NAME").ok())
@@ -1990,6 +2009,28 @@ fn is_mlx_server_engine(engine: &str) -> bool {
 /// loaded from the environment (`ROZUM_CASCADE` for the default, `ROZUM_CASCADE_<NAME>` for a named
 /// config) as JSON; each tier is resolved through this binary's normal build chain — locals via
 /// `build_from_config`, remotes via the OpenAI-compatible HTTP backend with the configured key.
+/// Fold the (repeatable) `--model` values into one model string. Each value may itself be a comma
+/// list, so `--model a,b --model c` flattens to `a,b,c`; the comma form then routes to the
+/// auto-cascade path. Empty → `None` (no model given).
+fn join_models(values: Vec<String>) -> Option<String> {
+    let parts: Vec<String> = values
+        .iter()
+        .flat_map(|s| s.split(','))
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(","))
+}
+
+/// Apply `--strategy` to the cascade builder via `ROZUM_CASCADE_STRATEGY`, which
+/// [`build_cascade_from_spec`] reads (and the spawned daemon inherits).
+fn apply_cascade_strategy(strategy: Option<&str>) {
+    if let Some(s) = strategy.map(str::trim).filter(|s| !s.is_empty()) {
+        // SAFETY: set at startup, before the backend/daemon is built or spawned.
+        unsafe { std::env::set_var("ROZUM_CASCADE_STRATEGY", s) };
+    }
+}
+
 async fn build_cascade_backend(
     cfg: &std::sync::Arc<rozum::RuntimeConfig>,
     name: &str,
@@ -2021,10 +2062,17 @@ async fn build_cascade_from_list(
 /// normal build chain, remotes via the OpenAI/Anthropic HTTP backends.
 async fn build_cascade_from_spec(
     cfg: &std::sync::Arc<rozum::RuntimeConfig>,
-    spec: rozum::cascade::CascadeSpec,
+    mut spec: rozum::cascade::CascadeSpec,
     n_ctx: u32,
     label: &str,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    // `--strategy` (→ ROZUM_CASCADE_STRATEGY) overrides the spec's start-tier strategy.
+    if let Some(st) = std::env::var("ROZUM_CASCADE_STRATEGY")
+        .ok()
+        .and_then(|v| rozum::cascade::StrategyName::parse_cli(&v))
+    {
+        spec.strategy = st;
+    }
     let n_tiers = spec.tiers.len();
     let cfg = std::sync::Arc::clone(cfg);
     let resolver = move |tier: rozum::cascade::TierSpec| {
