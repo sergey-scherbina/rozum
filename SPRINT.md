@@ -76,13 +76,17 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
 `concurrency-multi-instance`). Built on `BackendOrchestrator`; remote tiers = `openai_http`/
 `anthropic_http`. 7 phases, each its own branch + tests + merge; early phases deterministic/model-free.
 
-- [ ] cascade-p1-core - **Phase 1.** `src/cascade/`: `ModelCard` + `BackendRef` (resolve → `Arc<dyn
-  ChatBackend>`), minimal `CascadeConfig` (`models`, `AlwaysCheapest`, `[L0Structural]`, `budget`),
-  `CascadeBackend::chat` (1 model → passthrough; else cost-ordered loop: run → L0 accept/escalate →
-  winner; budget → best-so-far + path metadata). L0 = error→escalate; if `response_schema`/`tools`
-  validate output via `constrain`→fail→escalate, else accept. Model-free e2e (cheap mock fails L0 →
-  strong mock; passthrough; budget exhaustion; accept-on-cheap). Gateway wiring (`model:"cascade[:name]"`)
-  at the end.
+- [x] cascade-p1-core - **Phase 1. DONE 2026-06-15** (`src/cascade/`). `ModelCard {id,backend,tier}`,
+  `CascadeConfig` (`models` cost-ordered, `acceptance: [StructuralCheck]`, `CascadeBudget
+  {max_escalations, wall_time}`), `CascadeBackend: ChatBackend` (1 model → live passthrough; else
+  cost-ordered loop: drain each attempt → L0 verdict → Accept short-circuits, Escalate→next, errored
+  skipped; budget/exhaustion → best usable so far, all-failed → error). L0 `StructuralCheck`:
+  error→escalate; `response_schema`/tool-args validated via `constrain`→fail→escalate; free-form→
+  inconclusive (accept). `AcceptanceCheck` trait + `Verdict` + `pipeline_verdict` (first decisive
+  wins; all-inconclusive→Accept). 7 model-free e2e tests (escalate-on-structural-fail, accept-cheap-
+  skip-strong, passthrough, error-escalate, budget→best-so-far, free-form-cheapest, all-error→error).
+  185/0. **Deferred to a follow-up:** the gateway request-surface (`model:"cascade[:name]"` + named
+  configs from a config file) — the core takes a programmatic `CascadeConfig`; wiring is config-heavy.
 - [ ] cascade-p2-health - **Phase 2.** Availability/health: error classification → `Health`
   {state, FailReason, cooldown} with exp-backoff+jitter+half-open; skip in-cooldown; best-AVAILABLE
   selection (sideways/down: remote down→local, big-local OOM→smaller); graceful degradation, no

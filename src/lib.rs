@@ -1,6 +1,7 @@
 mod backend;
 pub mod agent;
 pub mod builtin_tools;
+pub mod cascade;
 pub mod concurrency;
 pub mod config;
 pub mod constrain;
