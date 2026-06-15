@@ -125,8 +125,17 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   only the entry point, never the ceiling — escalation works unchanged from there. `AlwaysCheapest`
   is byte-for-byte the old order (all Phase 1–4 tests stay green). 9 new tests (6 heuristic scoring,
   3 e2e: trivial→cheapest, hard→skip-cheap, hard+entry-down→fall-back-below). 212/0.
-- [ ] cascade-p6-scheduler - **Phase 6.** Parallel scheduler / lanes (per-request difficulty routing,
-  non-blocking; residency policy — single-resident first, then multi-resident via `ConcurrencyBudget`).
+- [x] cascade-p6-scheduler - **Phase 6. DONE 2026-06-15** (`src/cascade/scheduler.rs`). Residency
+  lanes: a `Lane{Pool(name), Free}` per `ModelCard` (`Lane::default_for`: every local → one shared
+  `"local"` pool, every remote → `Free`) + a `LaneSet` of one semaphore per pool. The cascade
+  `enter`s a model's lane before each attempt and holds the permit only for that attempt (freed on
+  escalation), so co-residents serialize (single-resident = 1 slot) while a request in a *different*
+  lane — or any remote — never blocks. Multi-resident is the same code with `residency_slots[pool] >
+  1`. Sits above per-backend `concurrency::admit_wrap`. All existing single-request tests are
+  unaffected (locals share one 1-slot pool, but they run sequentially within a request anyway). 6
+  new tests (5 LaneSet unit: distinct-pools-parallel, same-pool-serialize-then-free,
+  Free-ungated, multi-resident-slots, default-lane-map; 1 e2e: a simple + a hard request on distinct
+  lanes meet at a shared barrier ⇒ proven concurrent). 218/0.
 - [ ] cascade-p7-learned - **Phase 7.** Learned stats + adaptive thresholds/start-tier + persisted
   health patterns (JSONL via the `memory_store` pattern; the `Learned` strategy).
 - [ ] cascade-p8-exec-feedback - **Phase 8 (user idea 2026-06-15).** Execution-feedback escalation:
