@@ -8,6 +8,14 @@ get MLX's real advantages -- kernel fusion, no cross-runtime sync, Apple-tuned
 quant/attention kernels, and day-one support for new architectures -- in a
 single Rust binary.
 
+> **Porting a new model?** The forward math + checkpoint conventions we
+> reverse-engineered per family are captured engine-independently in
+> [`model-reference/`](model-reference/README.md) (RMSNorm `+1`, AFQ `.inner.*`
+> remap, multimodal `text_config` unwrap, stale-shard-index fallback, the
+> per-family quirks). Plus the deep quant-layout spec
+> [`mlx-weight-layout-and-afq.md`](mlx-weight-layout-and-afq.md). Implement from
+> those facts instead of re-deriving from a checkpoint.
+
 This **supersedes two earlier tracks**:
 
 - `mistralrs-mlx-direct` (the targeted candle->MLX quant-op bridge) is a proven

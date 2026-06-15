@@ -1,5 +1,24 @@
 # Changelog
 
+## docs — model reference specs (engine-independent): implement a new leaf from fact
+Completed: 2026-06-15
+Captured the model *knowledge* we reverse-engineered porting each family into the native MLX runtime,
+as engine-independent reference docs in `docs/specs/model-reference/` — so a new leaf (a different
+tensor library, a CUDA path) implements from fact instead of re-deriving from a checkpoint, which is
+where the real time went (`extract-model-reference-specs`, L3 of the durable-layer split).
+- `README.md` — the cross-cutting checkpoint conventions: the AFQ `.weight→.inner.weight` /
+  `.bias→.inner.bias` load-time remap (detected by a sibling `.scales`), the RMSNorm `+1` convention
+  (who uses it — Gemma 3 + Qwen3.6, NOT Qwen3/Qwen2/Llama — and computed in f32), tied-embedding
+  detection by key presence, the safetensors stale-shard-index fallback, the multimodal `text_config`
+  unwrap (`language_model.` prefix + skip vision), and the MLX↔PyTorch row-order caveat.
+- One file per family: `qwen3` (per-head q/k norm, SwitchGLU MoE), `qwen36-hybrid` (the
+  GatedDeltaNet f32 delta-scan, heterogeneous per-layer cache, +1-at-load, the 8-bit router/shared-gate
+  outside `nn::quantize`), `llama-family` (the Phi-3 fused-projection split at load, Mistral's optional
+  `head_dim` + list chat-template, SmolLM bf16), `qwen2` (the QKV-bias quirk), `gemma3` (four norms,
+  `query_pre_attn_scalar` scale, sliding-window local/global, linear RoPE scaling, and the
+  multimodal-wrapper config-defaults table for 4B/12B/27B).
+Grounded in the fork's `models/*.rs`; linked from `mlx-native-runtime.md`. Docs only — no code change.
+
 ## structured output — `response_format: json_schema` constrains the whole reply
 Completed: 2026-06-15
 Exposes the `constrain.rs` engine as **non-tool structured output**: a client asks for a JSON shape and
