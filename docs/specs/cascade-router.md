@@ -279,8 +279,9 @@ availability fallback (a mock backend that errors → the next available is chos
 
 Each phase ships value and is testable; early phases are deterministic/model-free.
 
-**Status (2026-06-15): phases 1–6 shipped** (`src/cascade/`, 40 tests). Remaining: 7 (learned
-stats), 8 (execution-feedback escalation), 9 (adaptive per-model concurrency).
+**Status (2026-06-15): phases 1–7 shipped** (`src/cascade/`, 48 tests; P7 = stats store + `Learned`
+start-tier, with adaptive thresholds / health-pattern persistence as a follow-up on the same store).
+Remaining: 8 (execution-feedback escalation), 9 (adaptive per-model concurrency).
 
 1. **Registry + pure cascade + L0 structural acceptance.** Caller-supplied list, `AlwaysCheapest`,
    escalate on error/structural-fail, single-model passthrough. Local→remote tiers via existing

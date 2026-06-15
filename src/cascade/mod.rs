@@ -15,6 +15,7 @@ mod health;
 mod judge;
 mod scheduler;
 mod self_signal;
+mod stats;
 
 pub use acceptance::{AcceptanceCheck, StructuralCheck, TurnOutcome, Verdict};
 pub use classifier::{Classifier, HeuristicClassifier, RoutingStrategy};
@@ -22,6 +23,9 @@ pub use health::{classify, FailReason, HealthRegistry, HealthState};
 pub use judge::{HeuristicJudge, Judge, JudgeConfig, ModelJudge};
 pub use scheduler::{Lane, LaneSet};
 pub use self_signal::{escalation_tools, EscalationAffordance, SelfSignalCheck};
+pub use stats::{
+    AttemptRecord, DiffBucket, ModelTaskStat, ResourceSnapshot, StatsStore, TaskClass, TaskShape,
+};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -85,6 +89,13 @@ pub struct CascadeConfig {
     /// Per-pool concurrent residency slots (Phase 6). Unlisted pools default to `1`
     /// (single-resident); raise a pool's count for co-resident models (multi-resident).
     pub residency_slots: HashMap<String, usize>,
+    /// The learned stats store (Phase 7). `Some` → every attempt is recorded and the `Learned`
+    /// strategy can read it; `None` → no learning/recording.
+    pub stats: Option<Arc<StatsStore>>,
+    /// `Learned` start-tier thresholds: the cheapest tier whose accept-rate ≥ this, with ≥
+    /// `learned_min_attempts` of evidence, becomes the entry point.
+    pub learned_accept_threshold: f64,
+    pub learned_min_attempts: u64,
 }
 
 impl CascadeConfig {
@@ -100,6 +111,9 @@ impl CascadeConfig {
             strategy: RoutingStrategy::AlwaysCheapest,
             classifier: None,
             residency_slots: HashMap::new(),
+            stats: None,
+            learned_accept_threshold: 0.6,
+            learned_min_attempts: 5,
         }
     }
 }
@@ -127,20 +141,78 @@ impl CascadeBackend {
         &self.health
     }
 
+    /// The difficulty score for `req` — the configured classifier, else the built-in heuristic.
+    fn difficulty(&self, req: &ChatRequest) -> f32 {
+        match &self.config.classifier {
+            Some(c) => c.difficulty(req),
+            None => HeuristicClassifier.difficulty(req),
+        }
+    }
+
+    /// Map a difficulty score onto a proportional start tier in `0..n` (round to nearest).
+    fn classify_start(difficulty: f32, n: usize) -> usize {
+        if n <= 1 {
+            return 0;
+        }
+        ((difficulty.clamp(0.0, 1.0) * (n - 1) as f32).round() as usize).min(n - 1)
+    }
+
     /// The cost-ordered index of the *entry* model for this request, per the routing strategy.
-    /// `ClassifyThenStart` maps difficulty `0..1` onto `0..n-1` (round to nearest tier); the
-    /// configured classifier wins, else the built-in heuristic. Never exceeds the top tier.
-    fn start_index(&self, req: &ChatRequest, n: usize) -> usize {
+    /// `ClassifyThenStart` maps difficulty onto the tiers; `Learned` prefers the cheapest tier the
+    /// stats say has been good enough for this task-class, falling back to the classifier when the
+    /// evidence is thin. Never exceeds the top tier.
+    fn start_index(&self, req: &ChatRequest, difficulty: f32, n: usize) -> usize {
         match self.config.strategy {
             RoutingStrategy::AlwaysCheapest => 0,
-            RoutingStrategy::ClassifyThenStart if n > 1 => {
-                let d = match &self.config.classifier {
-                    Some(c) => c.difficulty(req),
-                    None => HeuristicClassifier.difficulty(req),
-                };
-                ((d.clamp(0.0, 1.0) * (n - 1) as f32).round() as usize).min(n - 1)
+            RoutingStrategy::ClassifyThenStart => Self::classify_start(difficulty, n),
+            RoutingStrategy::Learned => {
+                if let Some(stats) = &self.config.stats {
+                    let task = TaskClass::of(req, difficulty);
+                    let ids: Vec<&str> = self.config.models.iter().map(|m| m.id.as_str()).collect();
+                    if let Some(i) = stats.learned_start_tier(
+                        task,
+                        &ids,
+                        self.config.learned_accept_threshold,
+                        self.config.learned_min_attempts,
+                    ) {
+                        return i;
+                    }
+                }
+                Self::classify_start(difficulty, n)
             }
-            RoutingStrategy::ClassifyThenStart => 0,
+        }
+    }
+
+    /// Record one attempt into the learned stats store (no-op when stats are off).
+    #[allow(clippy::too_many_arguments)]
+    fn record_attempt(
+        &self,
+        task: TaskClass,
+        id: &str,
+        tier: u32,
+        accepted: bool,
+        latency_ms: u64,
+        input_tokens: u32,
+        output_tokens: u32,
+        judge_score: Option<f32>,
+        fail_reason: Option<FailReason>,
+    ) {
+        if let Some(stats) = &self.config.stats {
+            stats.record(AttemptRecord {
+                ts: crate::share::now_unix(),
+                task,
+                model: id.to_string(),
+                tier,
+                accepted,
+                escalated: !accepted,
+                latency_ms,
+                input_tokens,
+                output_tokens,
+                judge_score,
+                fail_reason,
+                concurrency: 0,
+                resource: ResourceSnapshot::default(),
+            });
         }
     }
 }
@@ -231,11 +303,14 @@ impl ChatBackend for CascadeBackend {
         let mut attempts = 0usize;
         let last_idx = models.len() - 1;
 
-        // Choose the entry tier. `AlwaysCheapest` starts at 0; `ClassifyThenStart` scores the
-        // request once and maps difficulty → a proportional start tier. The candidate order is
-        // then start-and-up (the natural escalation path), then the cheaper tiers below start as
-        // availability fallbacks — so a parked entry tier still degrades to *something*.
-        let start_idx = self.start_index(&req, models.len());
+        // Score difficulty once: it drives both the entry tier and the stats task-class.
+        let difficulty = self.difficulty(&req);
+        let task = TaskClass::of(&req, difficulty);
+        // Choose the entry tier. `AlwaysCheapest` starts at 0; `ClassifyThenStart`/`Learned` start
+        // higher for harder/known-hard classes. The candidate order is then start-and-up (the
+        // natural escalation path), then the cheaper tiers below start as availability fallbacks —
+        // so a parked entry tier still degrades to *something*.
+        let start_idx = self.start_index(&req, difficulty, models.len());
         let order: Vec<usize> = (start_idx..models.len()).chain((0..start_idx).rev()).collect();
 
         for &idx in &order {
@@ -258,11 +333,14 @@ impl ChatBackend for CascadeBackend {
             // Enter the model's residency lane: co-residents serialize here, but a request in a
             // different lane (or a remote) is never blocked. Held only for this attempt; freed on
             // escalation so the next tier (or a waiting concurrent request) can take the slot.
+            let t0 = Instant::now();
             let _lane = self.lanes.enter(&card.lane).await;
             let outcome = run_attempt(&card.backend, attempt_req).await;
+            let latency_ms = t0.elapsed().as_millis() as u64;
             if let Some(e) = &outcome.error {
                 let reason = classify(e);
                 self.health.record_failure(&card.id, reason);
+                self.record_attempt(task, &card.id, card.tier, false, latency_ms, 0, 0, None, Some(reason));
                 // A network failure means the internet is gone — park every remote at once.
                 if reason == FailReason::Network {
                     for c in models.iter().filter(|c| c.location == Location::Remote) {
@@ -275,19 +353,29 @@ impl ChatBackend for CascadeBackend {
             }
             self.health.record_success(&card.id);
             // L0/L1 (sync) decide first; if inconclusive, consult the L2 judge (async) if set.
+            let mut judge_score: Option<f32> = None;
             let verdict = match pipeline_verdict(&self.config.acceptance, &req, &outcome) {
                 Some(v) => v,
                 None => match &self.config.judge {
                     Some(jc) => {
-                        if jc.judge.score(&req, &outcome).await >= jc.threshold {
-                            Verdict::Accept
-                        } else {
-                            Verdict::Escalate
-                        }
+                        let s = jc.judge.score(&req, &outcome).await;
+                        judge_score = Some(s);
+                        if s >= jc.threshold { Verdict::Accept } else { Verdict::Escalate }
                     }
                     None => Verdict::Accept,
                 },
             };
+            self.record_attempt(
+                task,
+                &card.id,
+                card.tier,
+                verdict == Verdict::Accept,
+                latency_ms,
+                outcome.input_tokens,
+                outcome.output_tokens,
+                judge_score,
+                None,
+            );
             match verdict {
                 Verdict::Accept => {
                     tracing::debug!(model = %card.id, "cascade: accepted");
@@ -706,5 +794,91 @@ mod tests {
         let (s, h) = joined.expect("distinct lanes must run concurrently (else the barrier hangs)");
         assert_eq!(s, "easy", "the simple request was served by the cheap/small lane");
         assert_eq!(h, "hard", "the hard request was served by the strong/big lane, in parallel");
+    }
+
+    // ── Phase 7: learned stats → Learned start-tier ─────────────────────────
+
+    fn seed_stat(
+        stats: &StatsStore,
+        task: TaskClass,
+        model: &str,
+        tier: u32,
+        accepted: bool,
+        n: usize,
+    ) {
+        for _ in 0..n {
+            stats.record(AttemptRecord {
+                ts: 0,
+                task,
+                model: model.into(),
+                tier,
+                accepted,
+                escalated: !accepted,
+                latency_ms: 1,
+                input_tokens: 0,
+                output_tokens: 0,
+                judge_score: None,
+                fail_reason: None,
+                concurrency: 0,
+                resource: ResourceSnapshot::default(),
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn learned_skips_cheap_when_stats_say_it_escalates() {
+        // History for this task-class: the cheap tier almost always escalated, the strong tier was
+        // good. `Learned` therefore enters at the strong tier and the cheap one is never tried.
+        let stats = Arc::new(StatsStore::in_memory());
+        let task = TaskClass { shape: TaskShape::Freeform, difficulty: DiffBucket::Easy };
+        seed_stat(&stats, task, "cheap", 0, false, 10); // accept-rate 0
+        seed_stat(&stats, task, "strong", 1, true, 10); // accept-rate 1
+
+        let (c, cc) = card("cheap", 0, Script::Text("weak"));
+        let (s, sc) = card("strong", 1, Script::Text("strong answer"));
+        let mut cfg = CascadeConfig::new(vec![c, s]);
+        cfg.strategy = RoutingStrategy::Learned;
+        cfg.stats = Some(stats);
+        let be = CascadeBackend::new(cfg);
+        let out = collect(be.chat(ChatRequest::simple("hi")).await.unwrap()).await;
+        assert_eq!(out, "strong answer");
+        assert_eq!(cc.load(Ordering::SeqCst), 0, "learned to skip the cheap tier on this class");
+        assert_eq!(sc.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn learned_falls_back_to_cheapest_without_evidence() {
+        // No history → `Learned` defers to the classifier; a trivial prompt starts at tier 0.
+        let stats = Arc::new(StatsStore::in_memory());
+        let (c, cc) = card("cheap", 0, Script::Text("hello"));
+        let (s, sc) = card("strong", 1, Script::Text("strong"));
+        let mut cfg = CascadeConfig::new(vec![c, s]);
+        cfg.strategy = RoutingStrategy::Learned;
+        cfg.stats = Some(stats);
+        let be = CascadeBackend::new(cfg);
+        let out = collect(be.chat(ChatRequest::simple("hi")).await.unwrap()).await;
+        assert_eq!(out, "hello");
+        assert_eq!(cc.load(Ordering::SeqCst), 1);
+        assert_eq!(sc.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn cascade_records_attempts_into_stats() {
+        // The cheap model fails L0 (non-JSON) → escalate; the strong model conforms → accept. Both
+        // attempts are recorded under the request's task-class.
+        let stats = Arc::new(StatsStore::in_memory());
+        let (c, _cc) = card("cheap", 0, Script::Text("not json"));
+        let (s, _sc) = card("strong", 1, Script::Text("{\"x\": 1}"));
+        let mut cfg = CascadeConfig::new(vec![c, s]);
+        cfg.stats = Some(stats.clone());
+        let be = CascadeBackend::new(cfg);
+        let req = schema_req();
+        let task = TaskClass::of(&req, HeuristicClassifier.difficulty(&req));
+        let _ = collect(be.chat(req).await.unwrap()).await;
+
+        let cheap = stats.stat(task, "cheap").expect("cheap attempt recorded");
+        assert_eq!((cheap.attempts, cheap.accepts, cheap.escalations), (1, 0, 1));
+        let strong = stats.stat(task, "strong").expect("strong attempt recorded");
+        assert_eq!((strong.attempts, strong.accepts, strong.escalations), (1, 1, 0));
     }
 }

@@ -1,5 +1,31 @@
 # Changelog
 
+## cascade — Phase 7: learned stats store → the Learned start-tier
+Completed: 2026-06-15
+
+The cascade now **learns from its own history** and **carries it across restarts**
+(`cascade-p7-learned`). Every model attempt is recorded per `(task-class, model)`; the first thing
+that data buys is the `Learned` routing strategy — start at the cheapest tier that has *demonstrably*
+been good enough for this class, instead of always re-discovering at tier 0 that the cheap model
+escalates on hard prompts.
+
+`TaskClass` = `{Freeform, Structured, ToolUse} × {Easy, Medium, Hard}` (shape from the request,
+difficulty bucketed from the classifier score). `AttemptRecord` per attempt: accepted/escalated,
+latency, tokens, judge-score, `FailReason` — **plus the concurrency level and a `ResourceSnapshot`**
+(local mem/CPU headroom; remote rate-limit/latency reaction) so quality/latency/failures are
+attributable to the concurrency they happened at, which is the curve the Phase-9 adaptive controller
+will consume. `StatsStore` is an append-only JSONL log (the `memory_store` pattern) replayed on open,
+with in-memory aggregates (EWMA latency/score, accept-rate) per `(task-class, model)`.
+
+`RoutingStrategy::Learned`: `start_index` enters at the cheapest tier whose historical accept-rate
+clears `learned_accept_threshold` (0.6) with at least `learned_min_attempts` (5) of evidence,
+falling back to `ClassifyThenStart` when the evidence is thin. The cascade records every attempt when
+`config.stats` is set (opt-in; default off, so all prior paths are unchanged).
+
+`FailReason` gained `Serialize`/`Deserialize` for the log. `src/cascade/stats.rs`; 8 new tests (5
+unit, 3 e2e). 226/0. Deferred within the learned track (non-blocking): adaptive judge thresholds and
+health-pattern persistence feeding the backoff.
+
 ## cascade — Phase 6: parallel residency lanes
 Completed: 2026-06-15
 
