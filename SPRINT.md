@@ -298,14 +298,15 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   thrash) — "pick the best arrangement possible under the memory budget". `UsageStats` (persisted
   JSONL, `ModelUsage::utility` = count × recency-decay) + the pure `plan_residency` planner
   (keep-highest-utility-that-fits, busy never evicted, `oversubscribed` = swap case). 7 tests. 267/0.
-  **Phase 2 DESIGNED 2026-06-15** (`docs/specs/shared-gateway-multislot.md`): an **additive warm
-  cache** alongside the untouched single-resident core, gated by `ROZUM_MULTISLOT` (default off →
-  byte-for-byte today when off), `enter(req.model)` routing, warm entries with their own inflight
-  (decoupled from the primary drain), build/evict via `plan_residency`, idle eviction, and injectable
-  weight/budget seams so the logic is mock-testable. **Implementation deferred**: it rewrites the
-  live serving core and the real memory / `!Send`-worker-drop behavior can only be confirmed on the
-  target machine — best written as small, individually-validated steps when the user is at a box to
-  run two real models. The spec lists the exact validation checklist.
+  **Phase 2 IMPLEMENTED 2026-06-15** (mock-tested; `src/gateway.rs`): an **additive warm cache**
+  alongside the untouched single-resident core, **on by default** (user's choice; `ROZUM_MULTISLOT=0`
+  opts out), a **strict no-op for single-model traffic**. `enter(req.model)` routes a *different*,
+  warmable model (known cached local that fits) to a warm secondary resident built via the existing
+  builder; admit/evict via `plan_residency`; warm entry has its own inflight (decoupled from the
+  primary drain); idle-only eviction with `spawn_blocking` drop; any miss falls back to the primary.
+  4 tests (serve-second, fall-back-too-big, skip-unknown, evict-idle). 276/0. **Real-model validation
+  pending** (two real models co-resident, eviction frees RAM — operator runs it). **Deferred**:
+  idle-timeout warm eviction + persisted `UsageStats`.
 - [x] cascade-offline - **DONE 2026-06-15 (user idea)** (`src/main.rs`). `--offline` on
   `launch`/`gateway` (→ `ROZUM_OFFLINE`, inherited by the spawned daemon): `build_remote_tier` skips
   every remote tier (dropped like any unbuildable tier — locals survive, an all-remote cascade

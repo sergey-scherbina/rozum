@@ -2,9 +2,21 @@
 
 Phase 1 (the decision core, `src/resident.rs`) is shipped + tested. This spec is **Phase 2**: wiring
 that core into the live `Switchboard` so the shared gateway can keep more than one model resident.
-It is written to be implemented in small, individually-validated steps, because it changes the
-**live serving path** (the gateway that backs Claude Code / Codex) and the memory/`!Send`-drop
-behavior can only be confirmed on a real machine with real models — not in the feature-free tests.
+
+## Status (2026-06-15): IMPLEMENTED (mock-tested), real-model validation pending
+
+The additive warm cache below is **implemented in `src/gateway.rs`** and unit-tested with the
+mock-builder harness (`test_sb_cfg` + a deterministic `WarmConfig`): serve-a-second-model,
+fall-back-when-it-doesn't-fit, skip-unknown/remote, evict-idle-to-make-room. It is **on by default**
+(the user's choice), `ROZUM_MULTISLOT=0|false|off` opts out, and it is a **strict no-op for
+single-model traffic** (the common Claude-Code/Codex case) — so existing behavior is unchanged unless
+you actually request a second model.
+
+What still needs **real-model** confirmation (it changes the live serving path and the
+memory / `!Send`-worker-drop behavior can't be exercised by the feature-free tests) — see the
+validation checklist at the bottom. **Deferred follow-ups**: idle-*timeout* eviction of a warm model
+(today it's freed only under memory pressure, not proactively), and persisting `UsageStats` across
+restarts (currently in-memory).
 
 ## Goal (recap of the user's policy)
 

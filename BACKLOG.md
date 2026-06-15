@@ -779,14 +779,18 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   (unavoidable thrash). `UsageStats` (persisted JSONL) learns per-model usefulness; `plan_residency`
   is the pure, fully-tested memory-gated/utility decision (greedy keep-highest-utility-that-fits,
   busy models never evicted, `oversubscribed` flags the swap case). 7 tests.
-  **Phase 2 DESIGNED 2026-06-15** (`docs/specs/shared-gateway-multislot.md`) — an **additive warm
-  cache** alongside the untouched single-resident core, gated by `ROZUM_MULTISLOT` (default off),
-  `enter(req.model)` routing, warm-entry inflight decoupled from the primary drain, build/evict via
-  the planner, idle eviction, injectable weight/budget seams for mock tests. **Implementation
-  deferred — needs real-model daemon validation** (it changes the live serving core; the memory /
-  `!Send`-worker-drop can only be confirmed with two real models): write it as small validated steps.
-  Out-of-process coordination stays in `concurrency-cross-process`; a shared cross-resident GPU
-  admission gate stays in `concurrency-multi-instance`.
+  **Phase 2 IMPLEMENTED 2026-06-15** (mock-tested; `src/gateway.rs` + `docs/specs/shared-gateway-
+  multislot.md`) — an **additive warm cache** alongside the untouched single-resident core. `enter(req
+  .model)` routes a *different*, warmable model (a known cached local that fits) to a warm secondary
+  resident built via the existing builder; admit/evict goes through `plan_residency`; a warm entry has
+  its own in-flight counter (decoupled from the primary drain) and is evicted (idle-only,
+  `spawn_blocking` drop) under memory pressure. **On by default** (user's choice), `ROZUM_MULTISLOT=0`
+  opts out, **strict no-op for single-model traffic**, falls back to the primary on any miss
+  (unknown/remote model, won't fit, build fail). 4 tests (serve-second, fall-back, skip-unknown,
+  evict-idle). 276/0. **Real-model validation pending** (two real models co-resident, eviction frees
+  RAM — the user runs it). **Deferred**: idle-*timeout* warm eviction + persisted `UsageStats`. A
+  shared cross-resident GPU gate already shipped (`concurrency-multi-instance` core); out-of-process
+  coordination stays in `concurrency-cross-process`.
 
 - [ ] shared-gateway-service - Optionally install the shared gateway as a
   launchd/systemd service for always-warm startup, instead of lazy spawn +
