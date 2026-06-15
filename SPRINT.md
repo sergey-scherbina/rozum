@@ -304,9 +304,11 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   warmable model (known cached local that fits) to a warm secondary resident built via the existing
   builder; admit/evict via `plan_residency`; warm entry has its own inflight (decoupled from the
   primary drain); idle-only eviction with `spawn_blocking` drop; any miss falls back to the primary.
-  4 tests (serve-second, fall-back-too-big, skip-unknown, evict-idle). 276/0. **Real-model validation
-  pending** (two real models co-resident, eviction frees RAM — operator runs it). **Deferred**:
-  idle-timeout warm eviction + persisted `UsageStats`.
+  4 tests (serve-second, fall-back-too-big, skip-unknown, evict-idle). Plus **idle-timeout warm
+  eviction** (`sweep_idle_warm` in the watchdog frees a warm model idle past `unload_idle_secs`; each
+  entry tracks its own last-activity, busy never swept) and **persisted `UsageStats`**
+  (`$XDG_STATE_HOME/rozum/gateway/warm-usage.jsonl`). 6 tests. 278/0. **Real-model validation pending**
+  (two real models co-resident, eviction frees RAM — operator runs it).
 - [x] cascade-offline - **DONE 2026-06-15 (user idea)** (`src/main.rs`). `--offline` on
   `launch`/`gateway` (→ `ROZUM_OFFLINE`, inherited by the spawned daemon): `build_remote_tier` skips
   every remote tier (dropped like any unbuildable tier — locals survive, an all-remote cascade

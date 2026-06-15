@@ -12,11 +12,15 @@ fall-back-when-it-doesn't-fit, skip-unknown/remote, evict-idle-to-make-room. It 
 single-model traffic** (the common Claude-Code/Codex case) — so existing behavior is unchanged unless
 you actually request a second model.
 
+Both earlier follow-ups are now done too: **idle-timeout eviction** (the lifecycle watchdog sweeps
+warm entries idle past `unload_idle_secs` and frees their RAM — `sweep_idle_warm`, gated on
+`inflight == 0` and last-activity age), and **persisted usefulness** (`UsageStats` is opened at
+`$XDG_STATE_HOME/rozum/gateway/warm-usage.jsonl`, so the warm set's frequency×recency ranking
+survives a restart; tests stay in-memory).
+
 What still needs **real-model** confirmation (it changes the live serving path and the
 memory / `!Send`-worker-drop behavior can't be exercised by the feature-free tests) — see the
-validation checklist at the bottom. **Deferred follow-ups**: idle-*timeout* eviction of a warm model
-(today it's freed only under memory pressure, not proactively), and persisting `UsageStats` across
-restarts (currently in-memory).
+validation checklist at the bottom.
 
 ## Goal (recap of the user's policy)
 
