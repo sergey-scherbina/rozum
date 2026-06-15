@@ -418,10 +418,15 @@ or on nothing — so any engine can reuse it.
   fork's model files. Linked from `mlx-native-runtime.md`. The code stays per-tensor-lib; the spec lets a
   new leaf implement from fact instead of re-deriving from a checkpoint.
 
-- [ ] extract-metal-kernels - **L4.** Factor the GatedDeltaNet fused-scan (and future)
-  Metal kernels' MSL source into a standalone hardware-only module, so any Metal
-  engine (mlx, a candle-metal path, mistralrs-metal) binds the same `.metal` instead
-  of re-deriving it. Depends only on Metal + the architecture, not the engine's logic.
+- [x] extract-metal-kernels - **L4. DONE 2026-06-15.** Factored the GatedDeltaNet fused delta-rule
+  scan kernel's MSL out of the inline raw string in the fork's `models/gated_delta.rs` into a
+  hardware-only module: `mlx-lm/src/kernels/gated_delta_step.metal` (the kernel body + its I/O
+  contract) + `kernels/mod.rs` exposing it via `include_str!` as `GATED_DELTA_SOURCE`. The engine
+  binding (`MetalKernel::new` buffers, dispatch, eval control) stays in `gated_delta.rs`. So a future
+  Metal engine (candle-metal, mistralrs-metal) can bind the same `.metal` instead of re-deriving the
+  math. **Pure move — kernel output byte-identical:** the fork's `gated_delta_kernel_matches_ops` +
+  `gated_delta_matches_python` still pass (4/4), and rozum's full suite is green against the bumped fork
+  rev `838a39ab`. 178/0. Future Metal kernels land in the same module.
 
 - [ ] extract-l5-track-upstream - **L5 (no extraction — discipline only).** Engine
   -binding fixes (RoPE reshape, zero-buffer, buffer-donation/`eval`, `mx.compile`
