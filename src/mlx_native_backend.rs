@@ -577,6 +577,7 @@ mod inner {
                 | LoadedModel::Qwen3Moe(_)
                 | LoadedModel::Qwen35(_)
                 | LoadedModel::Qwen35Moe(_)
+                | LoadedModel::Llama(_)
         )
     }
 
@@ -1061,6 +1062,15 @@ mod inner {
                     m, input,
                 )
             }
+            // Llama family (Llama 3.x, Mistral, Phi-3, SmolLM …) — its `Attention` reads
+            // `llama::BATCH_PAD_OFFSETS` for per-row rope and takes the key-pad mask via
+            // `ModelInput.mask`, so the same ragged batched cache + masks drive it.
+            LoadedModel::Llama(m) => {
+                let input = llama::ModelInput { inputs: inp, mask, cache };
+                <llama::Model as Module<llama::ModelInput<'_, ConcatKeyValueCache>>>::forward(
+                    m, input,
+                )
+            }
             _ => Err(mlx_rs::error::Exception::custom("dense_forward: non-batchable arch")),
         }
     }
@@ -1434,9 +1444,13 @@ mod inner {
             let kidx = arange::<_, i32>(0, k_cur, None).unwrap().index((NewAxis, ..));
             let padd = pad_off.index((.., NewAxis));
             let dec_mask = kidx.ge(&padd).unwrap().index((.., NewAxis, NewAxis, ..));
+            // Set the per-row offsets on BOTH arches' thread-locals — only the loaded model's
+            // attention reads its own, so the extra setter is a harmless no-op.
+            llama::set_batch_pad_offsets(Some(pad_off.clone()));
             set_batch_pad_offsets(Some(pad_off));
             let out = dense_forward(model, &y, Some(&dec_mask), &mut bcache);
             set_batch_pad_offsets(None);
+            llama::set_batch_pad_offsets(None);
             logits = match out {
                 Ok(l) => l.index((.., -1, ..)),
                 Err(e) => {
@@ -4377,6 +4391,51 @@ mod tests {
         );
         assert!(t1.contains("Paris"), "France row wrong/contaminated: {t1:?}");
         assert!(t2.contains("Tokyo"), "Japan row wrong/contaminated: {t2:?}");
+    }
+
+    // The LLAMA family batches too (Llama 3.x / Mistral / Phi-3 / SmolLM all load into
+    // `LoadedModel::Llama`): two concurrent greedy requests on a Llama-3.2-1B backend must land
+    // in ONE `run_batch` (BATCH_RUN_COUNT +1) and each get its own correct answer — proving the
+    // per-row RoPE ported into `llama.rs` + the shared ragged batched path work for the family.
+    // Auto-downloads the tiny Llama-3.2-1B if absent. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_llama_batched_two_concurrent
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires/auto-downloads mlx-community/Llama-3.2-1B-Instruct-4bit"]
+    async fn mlx_llama_batched_two_concurrent() {
+        use super::{MlxNativeBackend, ensure_model_dir};
+        use super::inner::BATCH_RUN_COUNT;
+        use crate::backend::{ChatBackend, ChatRequest, SamplingParams, collect_to_string};
+        use std::sync::atomic::Ordering;
+
+        unsafe {
+            std::env::set_var("ROZUM_BATCH", "2");
+            std::env::set_var("ROZUM_BATCH_WINDOW_MS", "500");
+        }
+        let spec = "mlx-community:Llama-3.2-1B-Instruct-4bit";
+        let dir = ensure_model_dir(spec).await.expect("llama resolve/download");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+            .await
+            .expect("backend load");
+        let mk = |q: &str| {
+            let mut req = ChatRequest::simple(q);
+            req.sampling = SamplingParams { max_tokens: Some(24), ..Default::default() };
+            req
+        };
+        let before = BATCH_RUN_COUNT.load(Ordering::Relaxed);
+        let s1 = backend.chat(mk("What is the capital of France? Answer in one word.")).await.unwrap();
+        let s2 = backend.chat(mk("What is the capital of Japan? Answer in one word.")).await.unwrap();
+        let (t1, t2) = tokio::join!(collect_to_string(s1), collect_to_string(s2));
+        let (t1, t2) = (t1.unwrap(), t2.unwrap());
+        let runs = BATCH_RUN_COUNT.load(Ordering::Relaxed) - before;
+        eprintln!("LLAMA BATCHED  France={t1:?} Japan={t2:?}  (run_batch calls={runs})");
+        unsafe {
+            std::env::remove_var("ROZUM_BATCH");
+            std::env::remove_var("ROZUM_BATCH_WINDOW_MS");
+        }
+        assert_eq!(runs, 1, "two concurrent Llama requests must batch in ONE run_batch call");
+        assert!(t1.contains("Paris"), "France: {t1:?}");
+        assert!(t2.contains("Tokyo"), "Japan: {t2:?}");
     }
 
     // Continuous batching end-to-end: with `ROZUM_BATCH=2`, THREE concurrent greedy requests

@@ -1,5 +1,21 @@
 # Changelog
 
+## mlx-native — the Llama family batches too (Mistral / Phi-3 / SmolLM / Llama-3.x)
+Completed: 2026-06-15
+Batched decode used to be Qwen-only — every dense Llama-family model (Llama 3.x, Mistral, Phi-3,
+SmolLM, all of which load into `LoadedModel::Llama`) ran strictly serially, so concurrent sessions on
+them queued instead of sharing a forward. Now they batch: ported qwen3's per-row-RoPE mechanism into
+`llama.rs` (a `BATCH_PAD_OFFSETS` thread-local + `set_batch_pad_offsets`; `Attention` ropes q/k at
+`cache.offset() − pad_i` per row via `forward_dynamic` when set, else the normal scalar offset). The
+key-pad mask was already threaded through `AttentionInput.mask`, so it needed no change. `dense_forward`
+gained a `Llama` arm and `is_batchable_arch` includes it; `run_batch` sets both arches' thread-locals
+(only the loaded model reads its own — the extra setter is a harmless no-op). OFF by default → the B=1
+serial path is byte-identical (`mlx_llama_chat` unchanged). Validated end-to-end
+(`mlx_llama_batched_two_concurrent`, Llama-3.2-1B): two concurrent requests land in ONE `run_batch`
+call with distinct correct answers (`Paris` / `Tokyo`). So all five dense families now serve concurrent
+sessions in parallel with continuous batching + per-row sampling. 131/0. Fork rev `bd8266b4`. (Qwen2
+and Gemma 3 — its per-layer windowed masks need threading — remain serial; follow-ups.)
+
 ## mlx-native — Gemma 3 sliding-window attention (local layers window correctly at long context)
 Completed: 2026-06-15
 Finishes the one deferred Gemma 3 gap. Its LOCAL (non-global) layers are supposed to attend only to
