@@ -1,5 +1,18 @@
 # Changelog
 
+## kernels — extract the GatedDeltaNet Metal kernel into a standalone .metal (L4)
+Completed: 2026-06-15
+Factored the GatedDeltaNet fused delta-rule scan kernel's MSL source out of the inline raw string in
+the fork's `models/gated_delta.rs` into a **hardware-only** module
+(`mlx-lm/src/kernels/gated_delta_step.metal` + `kernels/mod.rs` exposing it via `include_str!` as
+`GATED_DELTA_SOURCE`). The kernel math now lives once, as an actual `.metal` source with its I/O
+contract documented; the engine *binding* (`MetalKernel::new` buffer wiring, dispatch, eval control)
+stays with the model leaf. So a future Metal engine (a candle-metal path, mistralrs-metal) can bind the
+same `.metal` instead of re-deriving the recurrence — the last piece of the durable-layer split (L4).
+Pure move — kernel output is byte-identical: the fork's `gated_delta_kernel_matches_ops` (kernel vs ops
+reference) and `gated_delta_matches_python` still pass (4/4), and rozum's full suite is green against
+the bumped fork rev `838a39ab`. 178/0.
+
 ## sampler — shared engine-agnostic token sampler (extract-shared-sampler, L2)
 Completed: 2026-06-15
 The sampler (repeat-penalty → temperature → top-k → top-p → categorical) now lives in one
