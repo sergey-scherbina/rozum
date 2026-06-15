@@ -296,11 +296,12 @@ feed.** `src/cascade/` (54 tests) + `run_agent_escalating` in `src/agent.rs` (P8
 `AdaptiveConcurrency` in `src/concurrency.rs` (P9, 6 + 4 tests) + `model: "cascade[:name]"` →
 `CascadeBackend` (`spec.rs` + the `main.rs` hook, 6 tests). The P9 controller drives real admission
 ceilings (`set_ceiling`), reconciled with the circuit breaker (breaker = fast inner loop within the
-controller's ceiling), opt-in via `ROZUM_ADAPTIVE_CONCURRENCY=1`, and is fed by **overload, success,
-latency (a per-token baseline → ratio), and answer quality** (`ChatBackend::report_quality`, the
-cascade's verdict). Follow-ups (non-blocking): P7 adaptive judge thresholds / health-pattern
-persistence; an Anthropic-native remote tier + a `rozum.toml [cascade]` schema; local resource
-headroom (the one P9 signal still unfed — needs MLX-specific probing).
+controller's ceiling), opt-in via `ROZUM_ADAPTIVE_CONCURRENCY=1`, and is fed by the **full signal
+set**: overload, throughput (success), latency (a per-token baseline → ratio), answer quality
+(`ChatBackend::report_quality`, the cascade's verdict), and free-memory headroom
+(`system_memory_headroom`, back off before an OOM). Follow-ups (non-blocking): P7 adaptive judge
+thresholds / health-pattern persistence; an Anthropic-native remote tier + a `rozum.toml [cascade]`
+schema.
 
 1. **Registry + pure cascade + L0 structural acceptance.** Caller-supplied list, `AlwaysCheapest`,
    escalate on error/structural-fail, single-model passthrough. Local→remote tiers via existing

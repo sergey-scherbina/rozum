@@ -1,5 +1,27 @@
 # Changelog
 
+## cascade — resource headroom: back off before the OOM (P9 signal set complete)
+Completed: 2026-06-15
+
+The last unfed Phase-9 signal is now live (`cascade-adaptive-headroom`): **free-memory headroom**, so
+the adaptive loop backs concurrency off *before* an OOM instead of recovering from one.
+
+`system_memory_headroom()` is a std-only, cached (~1s) probe — macOS `vm_stat`
+(free+inactive+speculative+purgeable pages) over `sysctl hw.memsize` → a free-RAM fraction `[0,1]`.
+On Apple Silicon's unified memory the GPU shares system RAM, so one system-wide figure applies to
+every local backend; the probe lives in the feature-free concurrency layer (no MLX coupling) and
+returns `None` off macOS (the signal is simply skipped). The `AdmittingBackend` feeds it on every
+completed request; below the controller's `min_headroom` (0.15) it's a hard red and the admission
+ceiling backs off.
+
+The probe is **injectable** (`AdmittingBackend::with_headroom_probe`) — a clean seam for a
+GPU-specific probe later and for deterministic tests. `src/concurrency.rs`; 2 new tests. 250/0.
+
+With this, `ConcurrencySample` is **fully fed** — the per-model AIMD controller now reacts to
+overload, throughput (success), latency (a per-token baseline → ratio), answer quality
+(`report_quality`), and resource headroom. The cascade-router and its adaptive concurrency loop are
+feature-complete.
+
 ## cascade — richer adaptive signals: latency + quality into the live loop
 Completed: 2026-06-15
 
