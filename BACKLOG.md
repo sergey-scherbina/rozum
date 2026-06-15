@@ -734,8 +734,15 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   higher-priority one (vLLM-style). Needs mistralrs engine support it does not
   currently expose — revisit if SJF + fast lane prove insufficient for tail latency.
 
-- [ ] concurrency-cost-tokenizer - Tokenizer-accurate `RequestCost` instead of the
-  char/word heuristic, if class boundaries (interactive vs bulk) turn out fuzzy.
+- [x] concurrency-cost-tokenizer - **DONE 2026-06-15** (`src/concurrency.rs`, `src/backend.rs`).
+  `RequestCost::estimate(req, count_tokens)` is now tokenizer-pluggable: a new
+  `ChatBackend::count_tokens(text) -> Option<usize>` hook (default `None`) lets a backend supply
+  exact counts; the `AdmittingBackend` passes `self.inner.count_tokens`. The fallback heuristic is
+  fixed to count **characters** (`chars().count()`), not bytes — the old `str::len()/4` over-counted
+  non-ASCII (e.g. Cyrillic) prompts ~2× — and now also sums tool-result + rendered tool-call blocks.
+  3 tests (exact-via-hook, char-not-byte, sums-all-blocks). 270/0. *Follow-up*: the MLX/GGUF
+  tokenizers live in `!Send` worker threads, so wiring their `count_tokens` needs a worker round-trip
+  (or a cached token-count cell) — left `None` for now; remote backends have no local tokenizer.
 
 - [ ] concurrency-multi-instance - Size-class routing across more than one loaded
   model (e.g. a small fast model lane + a big model lane), with a shared memory
