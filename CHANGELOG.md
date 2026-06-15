@@ -12,9 +12,12 @@ gained a `Llama` arm and `is_batchable_arch` includes it; `run_batch` sets both 
 (only the loaded model reads its own — the extra setter is a harmless no-op). OFF by default → the B=1
 serial path is byte-identical (`mlx_llama_chat` unchanged). Validated end-to-end
 (`mlx_llama_batched_two_concurrent`, Llama-3.2-1B): two concurrent requests land in ONE `run_batch`
-call with distinct correct answers (`Paris` / `Tokyo`). So all five dense families now serve concurrent
-sessions in parallel with continuous batching + per-row sampling. 131/0. Fork rev `bd8266b4`. (Qwen2
-and Gemma 3 — its per-layer windowed masks need threading — remain serial; follow-ups.)
+call with distinct correct answers (`Paris` / `Tokyo`). **Qwen2 / Qwen2.5 / Qwen2.5-Coder got the same
+treatment** (identical per-row-RoPE port in `qwen2.rs`; `mlx_qwen2_batched_two_concurrent` on a cached
+Qwen2.5-0.5B). So EVERY dense family now serves concurrent sessions in parallel with continuous
+batching + per-row sampling — Qwen3 / Qwen3-MoE, Qwen2/2.5, Llama, Mistral, Phi-3, SmolLM (plus the
+Qwen3.6 hybrid via its own path). 131/0. Fork rev `341ebb2c`. (Only Gemma 3 — its per-layer
+local/global windowed masks need threading into the batched path — remains serial; a follow-up.)
 
 ## mlx-native — Gemma 3 sliding-window attention (local layers window correctly at long context)
 Completed: 2026-06-15
