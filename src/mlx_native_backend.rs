@@ -578,6 +578,7 @@ mod inner {
                 | LoadedModel::Qwen35(_)
                 | LoadedModel::Qwen35Moe(_)
                 | LoadedModel::Llama(_)
+                | LoadedModel::Qwen2(_)
         )
     }
 
@@ -1071,6 +1072,12 @@ mod inner {
                     m, input,
                 )
             }
+            LoadedModel::Qwen2(m) => {
+                let input = qwen2::ModelInput { inputs: inp, mask, cache };
+                <qwen2::Model as Module<qwen2::ModelInput<'_, ConcatKeyValueCache>>>::forward(
+                    m, input,
+                )
+            }
             _ => Err(mlx_rs::error::Exception::custom("dense_forward: non-batchable arch")),
         }
     }
@@ -1444,13 +1451,15 @@ mod inner {
             let kidx = arange::<_, i32>(0, k_cur, None).unwrap().index((NewAxis, ..));
             let padd = pad_off.index((.., NewAxis));
             let dec_mask = kidx.ge(&padd).unwrap().index((.., NewAxis, NewAxis, ..));
-            // Set the per-row offsets on BOTH arches' thread-locals — only the loaded model's
-            // attention reads its own, so the extra setter is a harmless no-op.
+            // Set the per-row offsets on every dense arch's thread-local — only the loaded
+            // model's attention reads its own, so the extra setters are harmless no-ops.
             llama::set_batch_pad_offsets(Some(pad_off.clone()));
+            qwen2::set_batch_pad_offsets(Some(pad_off.clone()));
             set_batch_pad_offsets(Some(pad_off));
             let out = dense_forward(model, &y, Some(&dec_mask), &mut bcache);
             set_batch_pad_offsets(None);
             llama::set_batch_pad_offsets(None);
+            qwen2::set_batch_pad_offsets(None);
             logits = match out {
                 Ok(l) => l.index((.., -1, ..)),
                 Err(e) => {
@@ -4434,6 +4443,49 @@ mod tests {
             std::env::remove_var("ROZUM_BATCH_WINDOW_MS");
         }
         assert_eq!(runs, 1, "two concurrent Llama requests must batch in ONE run_batch call");
+        assert!(t1.contains("Paris"), "France: {t1:?}");
+        assert!(t2.contains("Tokyo"), "Japan: {t2:?}");
+    }
+
+    // Qwen2 / Qwen2.5 (incl. Qwen2.5-Coder) batches too — two concurrent requests on a cached
+    // Qwen2.5-0.5B backend land in ONE `run_batch` call, each answer correct. Proves the per-row
+    // RoPE ported into `qwen2.rs`. Run:
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_qwen2_batched_two_concurrent
+    #[cfg(feature = "mlx-native")]
+    #[tokio::test]
+    #[ignore = "requires/auto-downloads mlx-community/Qwen2.5-0.5B-Instruct-4bit"]
+    async fn mlx_qwen2_batched_two_concurrent() {
+        use super::{MlxNativeBackend, ensure_model_dir};
+        use super::inner::BATCH_RUN_COUNT;
+        use crate::backend::{ChatBackend, ChatRequest, SamplingParams, collect_to_string};
+        use std::sync::atomic::Ordering;
+
+        unsafe {
+            std::env::set_var("ROZUM_BATCH", "2");
+            std::env::set_var("ROZUM_BATCH_WINDOW_MS", "500");
+        }
+        let spec = "mlx-community:Qwen2.5-0.5B-Instruct-4bit";
+        let dir = ensure_model_dir(spec).await.expect("qwen2 resolve/download");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+            .await
+            .expect("backend load");
+        let mk = |q: &str| {
+            let mut req = ChatRequest::simple(q);
+            req.sampling = SamplingParams { max_tokens: Some(24), ..Default::default() };
+            req
+        };
+        let before = BATCH_RUN_COUNT.load(Ordering::Relaxed);
+        let s1 = backend.chat(mk("What is the capital of France? Answer in one word.")).await.unwrap();
+        let s2 = backend.chat(mk("What is the capital of Japan? Answer in one word.")).await.unwrap();
+        let (t1, t2) = tokio::join!(collect_to_string(s1), collect_to_string(s2));
+        let (t1, t2) = (t1.unwrap(), t2.unwrap());
+        let runs = BATCH_RUN_COUNT.load(Ordering::Relaxed) - before;
+        eprintln!("QWEN2 BATCHED  France={t1:?} Japan={t2:?}  (run_batch calls={runs})");
+        unsafe {
+            std::env::remove_var("ROZUM_BATCH");
+            std::env::remove_var("ROZUM_BATCH_WINDOW_MS");
+        }
+        assert_eq!(runs, 1, "two concurrent Qwen2 requests must batch in ONE run_batch call");
         assert!(t1.contains("Paris"), "France: {t1:?}");
         assert!(t2.contains("Tokyo"), "Japan: {t2:?}");
     }
