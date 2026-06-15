@@ -563,6 +563,10 @@ pub struct AdmittingBackend {
     latency_baseline: Arc<Mutex<Option<f64>>>,
     /// The free-memory probe feeding the adaptive headroom signal.
     headroom_probe: HeadroomProbe,
+    /// Shared **cross-resident GPU gate** (`concurrency-multi-instance`): a process-wide semaphore
+    /// every local backend acquires *in addition to* its own per-model slot, so total concurrent
+    /// prefills across distinct resident models can't oversaturate one GPU. `None` = ungated.
+    gpu_gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 fn default_headroom_probe() -> HeadroomProbe {
@@ -577,7 +581,14 @@ impl AdmittingBackend {
             adaptive: None,
             latency_baseline: Arc::new(Mutex::new(None)),
             headroom_probe: default_headroom_probe(),
+            gpu_gate: None,
         }
+    }
+
+    /// Attach a shared cross-resident GPU gate (see the field). Builder style.
+    pub fn with_gpu_gate(mut self, gate: Option<Arc<tokio::sync::Semaphore>>) -> Self {
+        self.gpu_gate = gate;
+        self
     }
 
     /// Like [`new`](Self::new) but with the AIMD controller live: the admission ceiling self-tunes
@@ -596,6 +607,7 @@ impl AdmittingBackend {
             adaptive: Some(Arc::new(adaptive)),
             latency_baseline: Arc::new(Mutex::new(None)),
             headroom_probe: default_headroom_probe(),
+            gpu_gate: None,
         }
     }
 
@@ -739,6 +751,15 @@ impl ChatBackend for AdmittingBackend {
                 ));
             }
         };
+        // Then the shared cross-resident GPU gate: with our per-model slot already held, park until
+        // one GPU's worth of concurrent prefills frees, regardless of which resident is running —
+        // bounding total local GPU work across distinct residents. Acquiring *after* admit avoids
+        // holding a scarce GPU permit while merely waiting for a per-model slot (priority
+        // inversion). `None` (or a gate ≥ this backend's cap) is a no-op.
+        let gpu_permit = match &self.gpu_gate {
+            Some(g) => Arc::clone(g).acquire_owned().await.ok(),
+            None => None,
+        };
         let inner = Arc::clone(&self.inner);
         let scheduler = self.scheduler.clone();
         let adaptive = self.adaptive.clone();
@@ -746,9 +767,10 @@ impl ChatBackend for AdmittingBackend {
         let headroom_probe = Arc::clone(&self.headroom_probe);
         let model = self.inner.label().to_string();
         let stream: ChatStream = Box::pin(async_stream::stream! {
-            // Hold the slot for the whole stream; dropping it on
-            // completion/disconnect frees the slot and wakes the next waiter.
+            // Hold the slot (and the shared GPU permit) for the whole stream; dropping them on
+            // completion/disconnect frees the slot + GPU permit and wakes the next waiter.
             let _guard = guard;
+            let _gpu = gpu_permit;
             // Measure generation latency and the concurrency it ran at (for the adaptive signal).
             let started = std::time::Instant::now();
             let low_concurrency = scheduler.stats().0 <= 1; // only this request in flight → unsaturated
@@ -851,19 +873,42 @@ impl ChatBackend for AdmittingBackend {
 /// With `ROZUM_ADAPTIVE_CONCURRENCY=1` the wrapped backend's admission ceiling **self-tunes** via
 /// the Phase-9 AIMD controller (start serial, probe up on healthy traffic, back off on overload),
 /// bounded by the advertised capacity. Off by default — the static budgeted limit is unchanged.
+///
+/// Every wrapped (i.e. local, GPU-bound) backend also shares the **process-wide GPU gate**
+/// ([`global_gpu_gate`]), so concurrent prefills across *distinct* resident models can't
+/// oversaturate one GPU. With a single resident this never binds (the gate ≥ the per-model cap);
+/// `ROZUM_GPU_GATE=0` disables it.
 pub fn admit_wrap(inner: Arc<dyn ChatBackend>) -> Arc<dyn ChatBackend> {
     match inner.concurrency_capacity() {
         Some(cap) => {
             let cfg = AdmissionConfig::for_capacity(cap);
-            if adaptive_concurrency_enabled() {
+            let gate = global_gpu_gate();
+            let backend = if adaptive_concurrency_enabled() {
                 let ctrl = AdaptiveConcurrency::new(AdaptiveConfig::for_capacity(cap));
-                Arc::new(AdmittingBackend::with_adaptive(inner, cfg, ctrl))
+                AdmittingBackend::with_adaptive(inner, cfg, ctrl)
             } else {
-                Arc::new(AdmittingBackend::new(inner, cfg))
-            }
+                AdmittingBackend::new(inner, cfg)
+            };
+            Arc::new(backend.with_gpu_gate(gate))
         }
         None => inner,
     }
+}
+
+/// The process-wide cross-resident GPU gate (`concurrency-multi-instance`): a semaphore sized to one
+/// GPU's concurrent-prefill sweet spot, shared by every local backend so two resident models can't
+/// together oversaturate the device. `ROZUM_GPU_GATE` overrides the size; `0` disables (returns
+/// `None`). Lazily initialized once.
+pub fn global_gpu_gate() -> Option<Arc<tokio::sync::Semaphore>> {
+    static GATE: std::sync::OnceLock<Option<Arc<tokio::sync::Semaphore>>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| {
+        let n = std::env::var("ROZUM_GPU_GATE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_SEQS_CEILING);
+        (n > 0).then(|| Arc::new(tokio::sync::Semaphore::new(n)))
+    })
+    .clone()
 }
 
 /// Whether the adaptive admission ceiling is enabled (`ROZUM_ADAPTIVE_CONCURRENCY` truthy).
@@ -1495,6 +1540,59 @@ mod tests {
         assert!(raised >= 3);
         let slow = ConcurrencySample { latency_ratio: Some(3.0), ..ConcurrencySample::healthy() };
         assert!(c.record("m", slow) < raised, "a latency cliff backs the limit off");
+    }
+
+    // ── Cross-resident GPU gate (concurrency-multi-instance) ────────────────
+
+    #[tokio::test]
+    async fn gpu_gate_is_shared_across_distinct_backends() {
+        use tokio::sync::Semaphore;
+        // One shared GPU gate (size 1) across two distinct admission-wrapped backends.
+        let gate = Arc::new(Semaphore::new(1));
+        let mk = || {
+            let inner: Arc<dyn ChatBackend> = Arc::new(FakeBackend { capacity: Some(4) });
+            AdmittingBackend::new(inner, cfg(4, 0)).with_gpu_gate(Some(gate.clone()))
+        };
+        let a = mk();
+        let b = mk();
+        // The GPU is busy: hold the gate's only permit (as another resident's in-flight request
+        // would). Both backends' chat() must now park on the shared gate.
+        let permit = gate.clone().acquire_owned().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), a.chat(ChatRequest::simple("x")))
+                .await
+                .is_err(),
+            "backend A parks on the full shared GPU gate"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), b.chat(ChatRequest::simple("x")))
+                .await
+                .is_err(),
+            "backend B parks on the same shared gate"
+        );
+        // Free the GPU → a request proceeds.
+        drop(permit);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), a.chat(ChatRequest::simple("x")))
+                .await
+                .is_ok(),
+            "a request proceeds once the gate frees"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_gate_does_not_bind_below_its_size() {
+        use tokio::sync::Semaphore;
+        // Gate (8) ≥ the per-model cap (2) → a lone request never blocks on it (single-resident
+        // no-op).
+        let gate = Arc::new(Semaphore::new(8));
+        let inner: Arc<dyn ChatBackend> = Arc::new(FakeBackend { capacity: Some(2) });
+        let be = AdmittingBackend::new(inner, cfg(2, 0)).with_gpu_gate(Some(gate));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), be.chat(ChatRequest::simple("x")))
+                .await
+                .is_ok()
+        );
     }
 
     // ── Cost estimation (tokenizer-accurate when available) ─────────────────

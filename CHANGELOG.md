@@ -1,5 +1,25 @@
 # Changelog
 
+## concurrency — shared cross-resident GPU gate
+Completed: 2026-06-15
+
+The missing primitive for running more than one model on one GPU without oversaturating it
+(`concurrency-multi-instance`, the core). Per-model admission bounds each backend's own concurrency,
+but two *distinct* resident models each admitting up to their cap could together run 2× the GPU's
+sweet-spot of concurrent prefills. A **process-wide GPU gate** — a semaphore sized to one GPU's
+concurrent-prefill sweet spot (`DEFAULT_SEQS_CEILING`; `ROZUM_GPU_GATE` overrides, `0` disables) —
+is now shared by every local (`admit_wrap`-ped) backend: each request acquires it *in addition to*
+its per-model slot, so total concurrent local prefills across all residents stay bounded.
+
+It's acquired **after** the per-model admit (so a request parked for its own slot never holds a
+scarce GPU permit — no priority inversion), held for the request, and released on
+completion/disconnect. It composes with the cascade residency lanes and the per-model adaptive
+ceiling (just another `min()`), and is a **no-op for a single resident** (the gate ≥ the per-model
+cap, so it never binds) — hence safe to leave on by default.
+
+`src/concurrency.rs` (`global_gpu_gate`, `AdmittingBackend::with_gpu_gate`); 2 tests
+(shared-across-two-backends, no-bind-below-size). 272/0.
+
 ## shared-gateway-multislot — Phase 2 design (live-daemon wiring)
 Completed: 2026-06-15
 
