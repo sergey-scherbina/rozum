@@ -369,11 +369,11 @@ These items turn "portable in principle" into "portable by `cargo build`".
   Factor a `model_source` layer so a new leaf reuses fetching/cache/preflight for
   free instead of re-implementing them.
 
-- [ ] portability-new-backend-checklist - Write the "add a new runtime/hardware
-  backend" recipe down (implement the 5 `ChatBackend` methods; bring your own chat
-  template + tokenizer + cache; slot into `build_gateway_backend` + the config
-  chain). Turns the seam from folklore into a checklist; complements the portability
-  spec.
+- [x] portability-new-backend-checklist - **DONE 2026-06-15.** The "add a new runtime/hardware
+  backend" recipe is written down — a concrete *Add-a-backend checklist* in
+  `docs/specs/portability-and-the-backend-spi.md` (the 2 required `ChatBackend` methods + the opt-in
+  hooks `concurrency_capacity`/`count_tokens`/`label`; bring your own template/tokenizer/cache; slot
+  into `main.rs` builder + `config.rs` `ACCEPTED_ENGINES`; test feature-free). Folklore → checklist.
 
 - [ ] portability-cuda-gguf - Concrete non-Mac GPU path: expose `gguf-cuda` /
   `gguf-vulkan` features that pass the matching `llama-cpp-2` backend feature
@@ -790,8 +790,12 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
 - [ ] benchmark-baseline - Record latency, disk size, and smoke eval score for each backend/model pair.
   - Use the eval harness once available.
 
-- [ ] prompt-policy - Define system prompts and safety/style constraints per model.
-  - Keep raw mode available for debugging.
+- [x] prompt-policy - **DONE 2026-06-15** (decision, `docs/specs/prompt-policy.md`). The gateway is a
+  **transparent provider**: it passes the client's own system prompt + messages through unchanged and
+  does **not** inject per-model prompts (that would corrupt CC/Codex). Raw is the default and only
+  mode; the lone shaping is the existing `--enable-thinking` toggle. Per-model style/persona lives in
+  the caller (agent runtime's `system` arg / room etiquette), not the gateway. A per-model prompt
+  registry is explicitly rejected — the transparent boundary is the feature.
 
 - [ ] distillation-plan - Design a later LoRA/QLoRA or distillation path.
   - Do not implement until evals provide a baseline.

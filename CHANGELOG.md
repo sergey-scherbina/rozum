@@ -1,5 +1,20 @@
 # Changelog
 
+## docs hygiene — add-a-backend checklist + prompt policy
+Completed: 2026-06-15
+
+Two documentation items, no code. **Add-a-backend checklist** (`portability-new-backend-checklist`):
+the recipe for a new runtime/hardware leaf is now written down in
+`docs/specs/portability-and-the-backend-spi.md` — the 2 required `ChatBackend` methods (`chat`,
+`context_window`), the opt-in hooks (`concurrency_capacity`, `count_tokens`, `label`), bring your own
+template/tokenizer/cache, register it in `main.rs` + `config.rs::ACCEPTED_ENGINES`, test feature-free.
+
+**Prompt policy** (`prompt-policy`, `docs/specs/prompt-policy.md`): a decision, not a feature. The
+gateway is a transparent provider — it passes the client's own system prompt through unchanged and
+does *not* inject per-model prompts (that would corrupt CC/Codex); raw is the default and only mode,
+the lone shaping being the existing `--enable-thinking` toggle. Per-model style/persona belongs to
+the caller (the agent runtime's `system` arg, room etiquette), not the gateway passthrough.
+
 ## concurrency — tokenizer-pluggable request cost (+ a char-vs-byte heuristic fix)
 Completed: 2026-06-15
 

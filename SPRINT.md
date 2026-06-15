@@ -280,6 +280,10 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   `self.inner.count_tokens`). Fixed the fallback heuristic from **bytes** (`str::len()/4`) to
   **chars** (`chars().count()/4`) — the old one over-costed Cyrillic/non-ASCII ~2× and skewed SJF
   ordering — and it now sums tool-result + tool-call blocks. 3 tests. 270/0.
+- [x] docs-hygiene - **DONE 2026-06-15.** Two doc items. `portability-new-backend-checklist`: the
+  add-a-backend recipe written down (`docs/specs/portability-and-the-backend-spi.md`). `prompt-policy`:
+  a documented decision (`docs/specs/prompt-policy.md`) — the gateway is a transparent provider, no
+  injected per-model prompts (raw is the only mode; per-model persona lives in the caller).
 - [~] shared-gateway-multislot - **Phase 1 (decision core) DONE 2026-06-15 (user idea)**
   (`src/resident.rs`). Adaptive memory-gated residency: small requested models that fit and are
   *statistically useful* (frequency × recency) stay co-resident without thrashing; the least-useful
