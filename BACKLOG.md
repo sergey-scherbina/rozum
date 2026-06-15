@@ -770,9 +770,13 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
   lane / big lane) is already the cascade's `LaneSet` + multislot residency; the shared *memory*
   budget across distinct residents is `shared-gateway-multislot` Phase 2 (`plan_residency`).
 
-- [ ] concurrency-cross-process - Coordinate the concurrency budget across several
-  `rozum` processes sharing one GPU (e.g. a host-wide semaphore), instead of each
-  process budgeting in isolation.
+- [ ] concurrency-cross-process - **LOW PRIORITY (2026-06-15): the architecture avoids the
+  multi-process case.** The in-process shared GPU gate (`concurrency-multi-instance` core) + multislot
+  (several models in ONE daemon) + the single-shared-daemon registry mean the typical setup is one
+  process — so a host-wide budget only matters in niche layouts (`--dedicated` beside the shared
+  daemon, or several independent `rozum gateway` processes on one GPU). Needs IPC (named semaphore /
+  `flock` / a coordinator) + multi-process validation. Original note: coordinate the concurrency
+  budget across several `rozum` processes sharing one GPU, instead of budgeting in isolation.
 
 - [x] concurrency-observability - Expose queue depth, admission limit, fast-lane
   hits, and shed/429 counts so the scheduler is tunable from data. **DONE 2026-06-14.**
