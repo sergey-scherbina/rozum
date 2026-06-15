@@ -65,6 +65,19 @@ pub enum StrategyName {
     Learned,
 }
 
+impl StrategyName {
+    /// Parse a CLI/env value (case- and separator-insensitive): `alwaysCheapest`/`cheapest`,
+    /// `classify`, `learned`. `None` for an unrecognized value.
+    pub fn parse_cli(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().replace(['-', '_', ' '], "").as_str() {
+            "alwayscheapest" | "cheapest" | "cheap" => Some(StrategyName::AlwaysCheapest),
+            "classify" | "classifythenstart" => Some(StrategyName::Classify),
+            "learned" | "learn" => Some(StrategyName::Learned),
+            _ => None,
+        }
+    }
+}
+
 impl From<StrategyName> for RoutingStrategy {
     fn from(s: StrategyName) -> Self {
         match s {
@@ -298,6 +311,15 @@ mod tests {
             endpoint: None,
             api_key_env: None,
         }
+    }
+
+    #[test]
+    fn strategy_name_parses_cli_values() {
+        assert_eq!(StrategyName::parse_cli("classify"), Some(StrategyName::Classify));
+        assert_eq!(StrategyName::parse_cli("Learned"), Some(StrategyName::Learned));
+        assert_eq!(StrategyName::parse_cli("always-cheapest"), Some(StrategyName::AlwaysCheapest));
+        assert_eq!(StrategyName::parse_cli("cheapest"), Some(StrategyName::AlwaysCheapest));
+        assert_eq!(StrategyName::parse_cli("nonsense"), None);
     }
 
     #[test]
