@@ -1272,6 +1272,22 @@ mod inner {
         body_start: usize,
     }
 
+    /// Byte offset of a `{` that opens a tool-call-shaped JSON (`{ "name": … }`),
+    /// for constraining a loose markdown/bare-json tool call that lacks the
+    /// `<tool_call>` envelope. Requires the first key to be `name`, so a `{` in
+    /// ordinary prose (or a `{}` in a code example) isn't mistaken for a tool call.
+    pub(crate) fn find_loose_tool_json(text: &str) -> Option<usize> {
+        let mut i = 0;
+        while let Some(rel) = text[i..].find('{') {
+            let pos = i + rel;
+            if text[pos + 1..].trim_start().starts_with("\"name\"") {
+                return Some(pos);
+            }
+            i = pos + 1;
+        }
+        None
+    }
+
     impl ToolConstraint {
         fn from_job(job: &Job) -> Option<Self> {
             if job.tools.is_empty() {
@@ -1300,12 +1316,21 @@ mod inner {
                 return None;
             }
             if !self.active {
-                let op = full_text.find(TOOL_OPEN)?;
-                let after = &full_text[op + TOOL_OPEN.len()..];
-                // First non-space body char decides the format: `{` JSON, `<` XML.
-                let trimmed = after.trim_start();
-                let lead = trimmed.chars().next()?;
-                let off = op + TOOL_OPEN.len() + (after.len() - trimmed.len());
+                // Native Qwen `<tool_call>` envelope (preferred); first body char picks
+                // the format (`{` JSON, `<` XML). If the model emits NO envelope —
+                // common for 4B–7B models driven by a foreign (Claude/OpenAI) tool
+                // schema, which fall back to a bare or ```json `{"name":…,"arguments":…}`
+                // — constrain that instead, so the masked sampler still forces VALID
+                // JSON (escaped quotes, schema-conforming) and the call isn't dropped.
+                let (off, lead) = match full_text.find(TOOL_OPEN) {
+                    Some(op) => {
+                        let after = &full_text[op + TOOL_OPEN.len()..];
+                        let trimmed = after.trim_start();
+                        let lead = trimmed.chars().next()?;
+                        (op + TOOL_OPEN.len() + (after.len() - trimmed.len()), lead)
+                    }
+                    None => (find_loose_tool_json(full_text)?, '{'),
+                };
                 match lead {
                     '{' => self.cons = Constraint::Json(envelope(&self.names, Schema::Any)),
                     '<' => self.cons = Constraint::Xml(self.tools()),
@@ -2875,6 +2900,19 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "get_weather");
         assert!(calls[0].1.contains("Paris"), "args: {}", calls[0].1);
+    }
+
+    #[test]
+    fn find_loose_tool_json_locates_envelope() {
+        use super::inner::find_loose_tool_json;
+        // Bare and ```json-fenced tool-call JSON → offset of the `{`.
+        assert_eq!(find_loose_tool_json(r#"{"name":"Write","arguments":{}}"#), Some(0));
+        let fenced = "I'll write it.\n```json\n{\n  \"name\": \"Write\"\n}\n```";
+        let off = find_loose_tool_json(fenced).unwrap();
+        assert_eq!(&fenced[off..off + 1], "{");
+        // A `{` in ordinary prose / a code example (no leading "name") is NOT a tool call.
+        assert_eq!(find_loose_tool_json("the struct is { x: 1 }"), None);
+        assert_eq!(find_loose_tool_json(r#"{"file_path":"a","content":"b"}"#), None);
     }
 
     #[test]

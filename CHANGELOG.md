@@ -1,5 +1,19 @@
 # Changelog
 
+## mlx-native — constrained decoding also catches loose (markdown / bare) JSON tool calls
+Completed: 2026-06-16
+
+`ROZUM_MLX_CONSTRAIN` (the opt-in masked tool-decode) now activates not only on the trained Qwen
+`<tool_call>` envelope but also on a **loose** `{"name":…,"arguments":…}` — bare or in a ```json fence
+— that smaller models emit when driven by a foreign (Claude/OpenAI) tool schema. The constraint masks
+the sampler to valid schema-conforming JSON, so the model **cannot** emit the malformed JSON it
+otherwise tends to (e.g. unescaped quotes in a `"content"` arg of Rust code), which the parser had to
+drop. `json_region` gains a fallback: when there is no `<tool_call>`, `find_loose_tool_json` locates a
+`{` whose first key is `name` (so a `{` in prose / a code example isn't mistaken for a call) and
+constrains from there. Validated: Qwen2.5-Coder-7B `build` went from `tool_uses=1` (2nd call lost to
+bad JSON) to **9 valid tool calls** — it now writes both `Cargo.toml` and a correct `src/main.rs`.
+(The masked path is B=1, hence still opt-in for the perf cost.) `src/mlx_native_backend.rs`, 1 test.
+
 ## mlx fork — fix multi-turn crash on qwen2 / llama prefix reuse (mask offset)
 Completed: 2026-06-16
 
