@@ -1,5 +1,22 @@
 # Changelog
 
+## bench — agentic end-to-end benchmark (real Claude Code / Codex through the gateway)
+Completed: 2026-06-16
+
+`scripts/bench/agentic.sh`: drives a real headless coding agent (Claude Code and/or OpenAI Codex)
+against a local MLX model through the gateway — the same wiring `rozum launch claude` / `rozum launch
+codex` set up, but with an explicit gateway so the harness owns the lifecycle and can attribute
+resources. For every `agent × model × task` it gives a real coding task (trivial → hard, with tool
+use: `greet` / `build` / `fix` / `test` / `debug`, reusing the proven e2e tasks), **verifies the
+result independently** of the agent (files exist, `cargo test` green, `cargo run -- hello` == `olleh`),
+and measures wall time, the agent process-tree peak RAM + peak combined CPU%, and the model's resident
+footprint (gateway, `/usr/bin/time -l`). Curated tool-use-capable default model set (tiny models can't
+drive tool calls); both agents auto-detected. Early findings: verification is independent of agent
+completion (a run killed by its timeout still PASSes if the artifact is correct); Claude Code's large
+system prompt + tools needs `n_ctx≥16384` and inflates the model footprint well past a bare chat
+request (~16.8 GB vs ~4.4 GB for Qwen3-4B), while Codex is leaner and ~4× faster to first result.
+`results/` gitignored.
+
 ## gateway — generation inactivity timeout + local-model benchmark harness
 Completed: 2026-06-16
 
