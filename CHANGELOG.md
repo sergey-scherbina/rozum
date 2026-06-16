@@ -1,5 +1,23 @@
 # Changelog
 
+## gateway — Anthropic tool results now render under the `tool` role (was `user`)
+Completed: 2026-06-16
+
+Anthropic has no `tool` role: a tool result arrives inside a `user` message as a `tool_result`
+block. `anthropic_messages_to_internal` mapped that message straight to `Role::User`, so the
+backend rendered the result as a plain user turn — contradicting the code's own documented
+contract (`mlx_native_backend.rs:455`: "rendered under the `tool` role") and diverging from the
+OpenAI and Responses paths, which both emit `Role::Tool`. Under Qwen3.6's chat template
+(`chat_template.jinja`), only the `tool` role gets the trained `<tool_response>…</tool_response>`
+wrapper; under `user` the model sees a bare paste. Fixed: split each `tool_result` out of the
+`user` message into its own `Role::Tool` message, preserving block order (two unit tests).
+
+Honest scope: this was investigated as the cause of claude `debug` read-looping on Qwen3.6-35B-A3B
+(the model re-reads a file instead of editing). It is NOT — an e2e re-run with the fix shows the
+SAME read-loop and FAIL: the model simply never emits an `Edit` (0 Edit/Write across the run),
+independent of tool-result formatting. That failure is a model/agentic-capability limit, not a
+gateway bug. This change ships only as the correctness fix it is.
+
 ## mlx — constrained tool-call decoding ON by default (fixes Codex tool delivery)
 Completed: 2026-06-16
 

@@ -1662,13 +1662,40 @@ fn anthropic_messages_to_internal(system: Option<&Value>, msgs: &[AnthropicMsg])
     }
 
     for m in msgs {
-        let role = match m.role.as_str() {
-            "user" => Role::User,
-            "assistant" => Role::Assistant,
+        match m.role.as_str() {
+            "assistant" => {
+                out.push(Message {
+                    role: Role::Assistant,
+                    content: anthropic_content_to_blocks(&m.content),
+                });
+            }
+            // Anthropic has no `tool` role: tool results ride inside a `user` message as
+            // `tool_result` blocks. The Qwen3 chat template only renders the trained
+            // tool-response format under the `tool` role — left under `user`, the model
+            // can't tie the output to its call and re-issues it (a file read-loop that
+            // never reaches the edit). Split each tool_result into its own Role::Tool
+            // message (mirrors the OpenAI/Responses paths), preserving block order.
+            "user" => {
+                let mut pending = Vec::new();
+                for b in anthropic_content_to_blocks(&m.content) {
+                    if matches!(b, ContentBlock::ToolResult { .. }) {
+                        if !pending.is_empty() {
+                            out.push(Message {
+                                role: Role::User,
+                                content: std::mem::take(&mut pending),
+                            });
+                        }
+                        out.push(Message { role: Role::Tool, content: vec![b] });
+                    } else {
+                        pending.push(b);
+                    }
+                }
+                if !pending.is_empty() {
+                    out.push(Message { role: Role::User, content: pending });
+                }
+            }
             _ => continue,
-        };
-        let content = anthropic_content_to_blocks(&m.content);
-        out.push(Message { role, content });
+        }
     }
 
     out
@@ -3382,6 +3409,59 @@ mod tests {
         assert_eq!(block["name"], "get_weather");
         // `input` is parsed back to a JSON object, not a string.
         assert_eq!(block["input"]["city"], "Paris");
+    }
+
+    #[test]
+    fn anthropic_tool_result_maps_to_tool_role() {
+        // Anthropic carries a tool result inside a `user` message; it must become a
+        // Role::Tool message so the Qwen3 template renders it as a tool response (not a
+        // user turn). Mirrors the OpenAI/Responses convention.
+        let msgs = vec![
+            AnthropicMsg { role: "user".into(), content: json!("fix the bug") },
+            AnthropicMsg {
+                role: "assistant".into(),
+                content: json!([{"type": "tool_use", "id": "t1", "name": "Read",
+                                 "input": {"file_path": "lib.rs"}}]),
+            },
+            AnthropicMsg {
+                role: "user".into(),
+                content: json!([{"type": "tool_result", "tool_use_id": "t1",
+                                 "content": "a - b"}]),
+            },
+        ];
+        let out = anthropic_messages_to_internal(None, &msgs);
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[0].role, Role::User));
+        assert!(matches!(out[1].role, Role::Assistant));
+        assert!(matches!(out[2].role, Role::Tool), "tool_result must map to Role::Tool");
+        match &out[2].content[0] {
+            ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                assert_eq!(tool_use_id, "t1");
+                assert_eq!(content, "a - b");
+            }
+            _ => panic!("expected ToolResult in tool turn"),
+        }
+    }
+
+    #[test]
+    fn anthropic_tool_result_then_text_splits_in_order() {
+        // A user message with a tool_result followed by text splits into Tool then User,
+        // preserving order.
+        let msgs = vec![AnthropicMsg {
+            role: "user".into(),
+            content: json!([
+                {"type": "tool_result", "tool_use_id": "t1", "content": "done"},
+                {"type": "text", "text": "now also add a test"},
+            ]),
+        }];
+        let out = anthropic_messages_to_internal(None, &msgs);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0].role, Role::Tool));
+        assert!(matches!(out[1].role, Role::User));
+        match &out[1].content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "now also add a test"),
+            _ => panic!("expected trailing user text"),
+        }
     }
 
     // ── OpenAI Responses API (/v1/responses, for Codex) ─────────────────────
