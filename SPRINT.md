@@ -89,10 +89,10 @@ untouched**. Key decisions locked with the user:
   **day-scoped** (`GET /rooms/{name}/days` +
   `GET /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`).
 
-**Status: P0, P1, P2, P3a DONE (24 unit tests, all green) on branch
-`feature/meetings-impl`; P3b (daemon rmcp server + `rozum meetings` CLI) is NEXT.
-`src/gateway.rs` is NOT touched. All library so far — no behavior change to the
-existing in-process room until P5 switches bare `rozum` to the client.**
+**Status: P0–P3b DONE (28 tests green + live CLI smoke) on branch
+`feature/meetings-impl`; the `rozum meetings` daemon runs end-to-end. P4
+(mcp-proxy rewrite) is NEXT. `src/gateway.rs` is NOT touched; the legacy
+in-process room is untouched until P5 switches bare `rozum` to the client.**
 Build sequence (each phase compiles + has its own tests; do them in order — P0→P2
 are pure library and land behind today's behavior, P3 brings the daemon up, P4/P5
 are clients and can go in parallel, P6 is the service):
@@ -130,16 +130,18 @@ are clients and can go in parallel, P6 is the service):
       `evict` (files stay, reopen on demand), `list`, `open_count`. *Verified:*
       idempotent while open; evict→reopen continues from disk (high-water+roster);
       list/get_by_name see registered rooms.
-- [ ] **P3b — daemon server + CLI** (NEXT). New rmcp server bound to
-      `meeting.sock` driving the `RoomRegistry`: session `current_room`,
-      `rooms.list/join`, `meeting.wait_my_turn/submit/mark_responding/status/leave`,
-      `_join_internal{project,session_token}`; idle-evict watchdog; reopen-from-
-      `rooms.json` on start; panic-isolation per room. New `src/main.rs` daemon
-      mode + CLI `rozum meetings start|stop|status` (detached spawn, single-owner
-      socket+lock, graceful stop drains long-polls) and `install|uninstall`.
-      *Verify (needs a running daemon — smoke):* 2 rooms concurrent; list/join/
-      submit/wait over socket; stop drains; restart reopens. `meetings_plist/unit`
-      pure tests reuse `src/service.rs` (see P6).
+- [x] **P3b — daemon server + CLI** — DONE (`src/meeting/daemon.rs` +
+      `src/main.rs` `meetings` cmd; 2 in-process rmcp tests + live CLI smoke).
+      `MeetingServer` (rmcp on `meeting.sock`, per-session room) over the
+      `RoomRegistry`: `rooms.list/join`, `_join_internal{project,session_token}`,
+      `meeting.submit/wait_my_turn/mark_responding/status/leave`; lazy reopen via
+      registry; `pub daemon_alive`/`daemon_rooms` client helpers. CLI `rozum
+      meetings start [--foreground] | stop | status` (detached spawn, pidfile,
+      socket-ping liveness, `kill` stop). *Verified:* join→submit→wait→list
+      roundtrip over a unix socket; same-token rebind across reconnect; live
+      start→status→stop lifecycle clean (no stray procs). DEFERRED to follow-ups:
+      idle-evict watchdog, graceful drain (pending waits → `{ended}`) on SIGTERM,
+      per-room `catch_unwind`; `install|uninstall` is P6.
 - [ ] **P4 — mcp-proxy rewrite** (`src/meeting/proxy.rs`). Dial the single
       `meeting.sock`; pass `project`+`session_token`; read content from disk
       (`TranscriptReader`) and return to the agent; `wait_my_turn` = daemon wakeup

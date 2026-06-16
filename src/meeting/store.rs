@@ -257,6 +257,12 @@ impl TranscriptWriter {
     pub fn paths(&self) -> &RoomPaths {
         &self.paths
     }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
 
     /// Append one message, assigning `(date, n)` from `ts`'s local date. Creates
     /// the room dir + `.gitignore` and registers the room on the first call.

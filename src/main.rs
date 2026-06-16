@@ -243,6 +243,11 @@ enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Run / control the meeting-room daemon (hosts many disk-backed rooms).
+    Meetings {
+        #[command(subcommand)]
+        action: MeetingsAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -272,6 +277,19 @@ enum ServiceAction {
     /// Stop the running service without uninstalling it (unload / `systemctl --user stop`).
     Stop,
     /// Show the service status.
+    Status,
+}
+
+#[derive(Subcommand)]
+enum MeetingsAction {
+    /// Start the meeting daemon (detached by default; `--foreground` stays attached).
+    Start {
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// Stop the running meeting daemon (graceful).
+    Stop,
+    /// Show the meeting daemon status and its rooms.
     Status,
 }
 
@@ -522,6 +540,11 @@ async fn main() {
         Some(Command::Service { action }) => {
             run_service(action);
         }
+        Some(Command::Meetings { action }) => match action {
+            MeetingsAction::Start { foreground } => run_meetings_start(foreground).await,
+            MeetingsAction::Stop => run_meetings_stop(),
+            MeetingsAction::Status => run_meetings_status().await,
+        },
         Some(Command::Telegram { room, name }) => {
             let token = std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_else(|_| {
                 eprintln!("error: TELEGRAM_BOT_TOKEN not set");
@@ -668,11 +691,21 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
         return args;
     };
 
-    const KNOWN_FLAGS: &[&str] =
-        &["--model", "--port", "--n-ctx", "--channel-mcp-name", "--backend-url"];
+    const KNOWN_FLAGS: &[&str] = &[
+        "--model",
+        "--port",
+        "--n-ctx",
+        "--channel-mcp-name",
+        "--backend-url",
+    ];
     // Value-less flags: pulled to the front without consuming a following arg.
-    const KNOWN_BOOL_FLAGS: &[&str] =
-        &["--no-model", "--dedicated", "--no-channel-wakeup", "--no-piggyback", "--lean"];
+    const KNOWN_BOOL_FLAGS: &[&str] = &[
+        "--no-model",
+        "--dedicated",
+        "--no-channel-wakeup",
+        "--no-piggyback",
+        "--lean",
+    ];
 
     // Collect args after "launch", pull known flag+value pairs to the front.
     let tail: Vec<String> = args.split_off(launch_idx + 1);
@@ -761,7 +794,11 @@ impl WakeupPolicy {
 /// active. Precedence: flag (force off) > env override > auto. Auto makes
 /// piggyback the *fallback* — on only when channels are NOT already waking the
 /// agent. Spec: `docs/specs/rozum-native-channels.md`.
-fn resolve_piggyback(no_piggyback: bool, env_override: Option<bool>, channels_active: bool) -> bool {
+fn resolve_piggyback(
+    no_piggyback: bool,
+    env_override: Option<bool>,
+    channels_active: bool,
+) -> bool {
     if no_piggyback {
         return false;
     }
@@ -777,10 +814,16 @@ mod backend_engine_tests {
         // `--backend-url URL` placed after the program is pulled (with its value)
         // ahead of the program so clap parses it as a launch flag.
         let got = reorder_launch_args(
-            ["rozum", "launch", "claude", "--backend-url", "http://localhost:11434/v1"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            [
+                "rozum",
+                "launch",
+                "claude",
+                "--backend-url",
+                "http://localhost:11434/v1",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         );
         assert_eq!(
             got,
@@ -801,7 +844,10 @@ mod backend_engine_tests {
         }
         // Native MLX engine names must NOT route to the Python server.
         for e in ["mlx", "mlx-native", "mlx_lm", "lmstudio", "gguf", "url", ""] {
-            assert!(!is_mlx_server_engine(e), "{e} must not route to mlx_lm.server");
+            assert!(
+                !is_mlx_server_engine(e),
+                "{e} must not route to mlx_lm.server"
+            );
         }
     }
 }
@@ -813,7 +859,10 @@ mod wakeup_tests {
     #[test]
     fn piggyback_is_the_fallback_rung() {
         // Auto (no flag, no env): on only when Tier-1 channels are NOT active.
-        assert!(resolve_piggyback(false, None, false), "no channels → fallback on");
+        assert!(
+            resolve_piggyback(false, None, false),
+            "no channels → fallback on"
+        );
         assert!(
             !resolve_piggyback(false, None, true),
             "channels active → auto-off (redundant)"
@@ -823,8 +872,14 @@ mod wakeup_tests {
         assert!(!resolve_piggyback(true, Some(true), true));
         // Explicit env override beats the auto rule (force on despite channels;
         // force off despite no channels).
-        assert!(resolve_piggyback(false, Some(true), true), "ROZUM_PIGGYBACK=1 forces on");
-        assert!(!resolve_piggyback(false, Some(false), false), "ROZUM_PIGGYBACK=0 forces off");
+        assert!(
+            resolve_piggyback(false, Some(true), true),
+            "ROZUM_PIGGYBACK=1 forces on"
+        );
+        assert!(
+            !resolve_piggyback(false, Some(false), false),
+            "ROZUM_PIGGYBACK=0 forces off"
+        );
     }
 }
 
@@ -891,7 +946,10 @@ async fn run_launch(
     wakeup: WakeupPolicy,
     program: Vec<String>,
 ) {
-    let WakeupPolicy { channel_flags, piggyback } = wakeup;
+    let WakeupPolicy {
+        channel_flags,
+        piggyback,
+    } = wakeup;
     let model_spec = match resolve_launch_target(model, no_model).await {
         // No target and none resolvable (non-TTY without --model, or cancelled).
         None => std::process::exit(2),
@@ -908,7 +966,10 @@ async fn run_launch(
     let n_ctx = resolve_n_ctx(&model_spec, n_ctx);
 
     if dedicated {
-        let wakeup = WakeupPolicy { channel_flags, piggyback };
+        let wakeup = WakeupPolicy {
+            channel_flags,
+            piggyback,
+        };
         run_launch_dedicated(model_spec, port, n_ctx, wakeup, program).await;
         return; // unreachable: the dedicated path execs + exits
     }
@@ -941,7 +1002,14 @@ async fn run_launch(
             gw_port
         }
     };
-    exec_agent(program, &effective_model, agent_port, channel_flags, piggyback).await
+    exec_agent(
+        program,
+        &effective_model,
+        agent_port,
+        channel_flags,
+        piggyback,
+    )
+    .await
 }
 
 /// Bind an ephemeral loopback port, start the launch-local reverse proxy on it
@@ -1039,14 +1107,24 @@ fn pick_launch_target_interactive() -> Option<LaunchTarget> {
         for r in models::RECOMMENDED_REMOTE {
             choices.push(Choice {
                 label: format!("{}  (cloud · {})  — {}", r.spec, r.provider, r.display_name),
-                kind: Kind::Model { spec: r.spec.to_owned(), cached: true },
+                kind: Kind::Model {
+                    spec: r.spec.to_owned(),
+                    cached: true,
+                },
             });
         }
     }
     for m in &installed {
         choices.push(Choice {
-            label: format!("{}  (local, cached, {})", m.spec, models::format_size(m.size_bytes)),
-            kind: Kind::Model { spec: m.spec.clone(), cached: true },
+            label: format!(
+                "{}  (local, cached, {})",
+                m.spec,
+                models::format_size(m.size_bytes)
+            ),
+            kind: Kind::Model {
+                spec: m.spec.clone(),
+                cached: true,
+            },
         });
     }
     for r in models::RECOMMENDED {
@@ -1056,14 +1134,21 @@ fn pick_launch_target_interactive() -> Option<LaunchTarget> {
                     "{}  (local, not cached, ~{:.1} GB)  — {}",
                     r.spec, r.approx_size_gb, r.display_name
                 ),
-                kind: Kind::Model { spec: r.spec.to_owned(), cached: false },
+                kind: Kind::Model {
+                    spec: r.spec.to_owned(),
+                    cached: false,
+                },
             });
         }
     }
 
     eprintln!(
         "Select what to launch the agent against{}:",
-        if offline { " (offline — cloud models hidden)" } else { "" }
+        if offline {
+            " (offline — cloud models hidden)"
+        } else {
+            ""
+        }
     );
     for (i, c) in choices.iter().enumerate() {
         eprintln!("  {:>2}) {}", i + 1, c.label);
@@ -1085,8 +1170,15 @@ fn pick_launch_target_interactive() -> Option<LaunchTarget> {
 
     // Parse one or more indices (space/comma separated). Duplicates collapse, order preserved.
     let mut picks: Vec<usize> = Vec::new();
-    for tok in line.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()) {
-        match tok.parse::<usize>().ok().filter(|&n| n >= 1 && n <= choices.len()) {
+    for tok in line
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+    {
+        match tok
+            .parse::<usize>()
+            .ok()
+            .filter(|&n| n >= 1 && n <= choices.len())
+        {
             Some(n) if !picks.contains(&n) => picks.push(n),
             Some(_) => {}
             None => {
@@ -1136,7 +1228,10 @@ fn pick_launch_target_interactive() -> Option<LaunchTarget> {
     }
     // Joined as a comma list → the gateway builds an auto-ordered cascade. Uncached locals download
     // lazily when their tier is first reached.
-    eprintln!("Cascade: {} (auto-ordered cheapest→most-capable).", specs.join(", "));
+    eprintln!(
+        "Cascade: {} (auto-ordered cheapest→most-capable).",
+        specs.join(", ")
+    );
     Some(LaunchTarget::Local(specs.join(",")))
 }
 
@@ -1153,7 +1248,10 @@ async fn run_launch_url(
     wakeup: WakeupPolicy,
     program: Vec<String>,
 ) -> ! {
-    let WakeupPolicy { channel_flags, piggyback } = wakeup;
+    let WakeupPolicy {
+        channel_flags,
+        piggyback,
+    } = wakeup;
     let _ = n_ctx; // informational for a remote backend; the upstream owns its KV
     let port = port.unwrap_or_else(|| {
         std::net::TcpListener::bind("127.0.0.1:0")
@@ -1173,7 +1271,9 @@ async fn run_launch_url(
             std::process::exit(1);
         }
     };
-    eprintln!("rozum launch  (backend-url)  gateway=http://127.0.0.1:{port}  → {url}  model={model_spec}");
+    eprintln!(
+        "rozum launch  (backend-url)  gateway=http://127.0.0.1:{port}  → {url}  model={model_spec}"
+    );
     let model_for_task = model_spec.clone();
     tokio::spawn(async move {
         if let Err(e) =
@@ -1193,7 +1293,10 @@ async fn run_launch_dedicated(
     wakeup: WakeupPolicy,
     program: Vec<String>,
 ) {
-    let WakeupPolicy { channel_flags, piggyback } = wakeup;
+    let WakeupPolicy {
+        channel_flags,
+        piggyback,
+    } = wakeup;
     let port = port.unwrap_or_else(|| {
         std::net::TcpListener::bind("127.0.0.1:0")
             .ok()
@@ -1318,6 +1421,122 @@ async fn ensure_shared_gateway(
             return None;
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+async fn run_meetings_start(foreground: bool) {
+    use rozum::meeting::daemon::{daemon_alive, serve_daemon};
+    use rozum::meeting::registry::RoomRegistry;
+    use rozum::meeting::room_path::meeting_sock;
+    use rozum::meeting::store::rozum_state_dir;
+
+    let sock = meeting_sock();
+
+    if !foreground {
+        if daemon_alive(&sock).await {
+            println!("meeting daemon already running ({})", sock.display());
+            return;
+        }
+        match spawn_detached_meetings() {
+            Ok(_) => {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while std::time::Instant::now() < deadline {
+                    if daemon_alive(&sock).await {
+                        println!("meeting daemon started ({})", sock.display());
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                eprintln!(
+                    "meeting daemon spawned but not ready yet ({})",
+                    sock.display()
+                );
+            }
+            Err(e) => eprintln!("failed to spawn meeting daemon: {e}"),
+        }
+        return;
+    }
+
+    // Foreground: this process IS the daemon.
+    if daemon_alive(&sock).await {
+        eprintln!("meeting daemon already running ({})", sock.display());
+        return;
+    }
+    let state_dir = rozum_state_dir();
+    let _ = std::fs::create_dir_all(&state_dir);
+    let pid_path = state_dir.join("meetings.pid");
+    let _ = std::fs::write(&pid_path, std::process::id().to_string());
+
+    let registry = std::sync::Arc::new(RoomRegistry::new(state_dir));
+    if let Err(e) = serve_daemon(&sock, registry).await {
+        eprintln!("meeting daemon error: {e}");
+    }
+    let _ = std::fs::remove_file(&pid_path);
+}
+
+fn spawn_detached_meetings() -> std::io::Result<std::process::Child> {
+    use rozum::meeting::store::rozum_state_dir;
+    use std::process::{Command as StdCommand, Stdio};
+    let exe = std::env::current_exe()?;
+    let dir = rozum_state_dir().join("meetings");
+    let _ = std::fs::create_dir_all(&dir);
+    let log = dir.join("meetings.log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)?;
+    let mut cmd = StdCommand::new(exe);
+    cmd.arg("meetings")
+        .arg("start")
+        .arg("--foreground")
+        .stdin(Stdio::null())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn()
+}
+
+fn run_meetings_stop() {
+    use rozum::meeting::room_path::meeting_sock;
+    use rozum::meeting::store::rozum_state_dir;
+    let pid_path = rozum_state_dir().join("meetings.pid");
+    let Ok(pid_s) = std::fs::read_to_string(&pid_path) else {
+        println!("no meeting daemon pidfile; not running?");
+        return;
+    };
+    let pid = pid_s.trim();
+    match std::process::Command::new("kill").arg(pid).status() {
+        Ok(s) if s.success() => {
+            println!("stopped meeting daemon (pid {pid})");
+            let _ = std::fs::remove_file(&pid_path);
+            let _ = std::fs::remove_file(meeting_sock());
+        }
+        Ok(s) => eprintln!("kill {pid} exited with {s}"),
+        Err(e) => eprintln!("failed to signal pid {pid}: {e}"),
+    }
+}
+
+async fn run_meetings_status() {
+    use rozum::meeting::daemon::{daemon_alive, daemon_rooms};
+    use rozum::meeting::room_path::meeting_sock;
+    let sock = meeting_sock();
+    if !daemon_alive(&sock).await {
+        println!("meeting daemon: not running ({})", sock.display());
+        return;
+    }
+    println!("meeting daemon: running ({})", sock.display());
+    match daemon_rooms(&sock).await {
+        Ok(rooms) if rooms.is_empty() => println!("  (no rooms yet)"),
+        Ok(rooms) => {
+            for (name, project) in rooms {
+                println!("  {name}   project: {}", project.as_deref().unwrap_or("-"));
+            }
+        }
+        Err(e) => eprintln!("  rooms.list failed: {e}"),
     }
 }
 
@@ -1600,7 +1819,9 @@ async fn exec_agent(
             .iter()
             .any(|a| a == "-m" || a == "--model" || a.starts_with("--model="));
         cmd.args(codex_provider_flags(&base, has_model));
-        eprintln!("  → codex: routed at the rozum gateway (model_provider=rozum, wire_api=responses)");
+        eprintln!(
+            "  → codex: routed at the rozum gateway (model_provider=rozum, wire_api=responses)"
+        );
     }
 
     apply_rozum_agent_env(&mut cmd);
@@ -1664,11 +1885,29 @@ async fn exec_agent_anthropic(mut program: Vec<String>, channel_flags: Option<Ve
 /// request. `mcp__rozum` is a server-level wildcard that drops all rozum MCP tools.
 /// Names that aren't present are harmless no-ops, so the list can be a safe superset.
 const LEAN_DISALLOW: &[&str] = &[
-    "AskUserQuestion", "WebFetch", "WebSearch", "NotebookEdit",
-    "Task", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate",
-    "CronCreate", "CronDelete", "CronList",
-    "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree",
-    "Workflow", "Skill", "ScheduleWakeup", "Agent", "LSP",
+    "AskUserQuestion",
+    "WebFetch",
+    "WebSearch",
+    "NotebookEdit",
+    "Task",
+    "TaskCreate",
+    "TaskGet",
+    "TaskList",
+    "TaskOutput",
+    "TaskStop",
+    "TaskUpdate",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "EnterWorktree",
+    "ExitWorktree",
+    "Workflow",
+    "Skill",
+    "ScheduleWakeup",
+    "Agent",
+    "LSP",
     "mcp__rozum",
 ];
 
@@ -1703,7 +1942,9 @@ fn apply_lean_flags(program: &mut Vec<String>, lean: bool) {
         // for a launched codex. Skipped if the operator passes their own reasoning effort.
         let user_sets = program.iter().any(|a| a.contains("model_reasoning_effort"));
         if user_sets {
-            eprintln!("rozum launch: --lean reasoning-cap skipped (you pass model_reasoning_effort)");
+            eprintln!(
+                "rozum launch: --lean reasoning-cap skipped (you pass model_reasoning_effort)"
+            );
         } else {
             eprintln!("rozum launch: --lean → codex -c model_reasoning_effort=medium (cap xhigh)");
             program.push("-c".into());
@@ -1745,7 +1986,7 @@ fn apply_lean_flags(program: &mut Vec<String>, lean: bool) {
 
 #[cfg(test)]
 mod nctx_tests {
-    use super::{auto_n_ctx, model_max_ctx, N_CTX_FALLBACK};
+    use super::{N_CTX_FALLBACK, auto_n_ctx, model_max_ctx};
 
     #[test]
     fn auto_n_ctx_is_model_max_when_config_cached() {
@@ -1757,7 +1998,11 @@ mod nctx_tests {
         match model_max_ctx(spec) {
             Some(max) => {
                 assert_eq!(max, 40_960, "Qwen3-4B max_position_embeddings");
-                assert_eq!(auto_n_ctx(spec), 40_960, "auto must equal the model max for mlx");
+                assert_eq!(
+                    auto_n_ctx(spec),
+                    40_960,
+                    "auto must equal the model max for mlx"
+                );
             }
             None => assert_eq!(auto_n_ctx(spec), N_CTX_FALLBACK),
         }
@@ -1766,7 +2011,7 @@ mod nctx_tests {
 
 #[cfg(test)]
 mod lean_tests {
-    use super::{apply_lean_flags, LEAN_DISALLOW};
+    use super::{LEAN_DISALLOW, apply_lean_flags};
 
     const EXCL: &str = "--exclude-dynamic-system-prompt-sections";
 
@@ -1791,21 +2036,36 @@ mod lean_tests {
         // Coding-core tools are NOT stripped.
         assert!(!has(&out, "Bash") && !has(&out, "Edit"));
         // Works for an absolute path too.
-        assert!(has(&lean(&["/usr/bin/claude", "-p", "x"], true), "--disallowedTools"));
+        assert!(has(
+            &lean(&["/usr/bin/claude", "-p", "x"], true),
+            "--disallowedTools"
+        ));
     }
 
     #[test]
     fn lean_codex_caps_reasoning_effort() {
         let out = lean(&["codex", "exec", "fix it"], true);
-        assert_eq!(&out[..3], &["codex", "exec", "fix it"], "original args preserved");
+        assert_eq!(
+            &out[..3],
+            &["codex", "exec", "fix it"],
+            "original args preserved"
+        );
         assert!(has(&out, "-c") && has(&out, "model_reasoning_effort=medium"));
         // Absolute path too.
-        assert!(has(&lean(&["/usr/local/bin/codex", "exec", "x"], true),
-                    "model_reasoning_effort=medium"));
+        assert!(has(
+            &lean(&["/usr/local/bin/codex", "exec", "x"], true),
+            "model_reasoning_effort=medium"
+        ));
         // Off → untouched.
-        assert!(!has(&lean(&["codex", "exec", "x"], false), "model_reasoning_effort=medium"));
+        assert!(!has(
+            &lean(&["codex", "exec", "x"], false),
+            "model_reasoning_effort=medium"
+        ));
         // User sets their own → skip.
-        let u = lean(&["codex", "exec", "x", "-c", "model_reasoning_effort=high"], true);
+        let u = lean(
+            &["codex", "exec", "x", "-c", "model_reasoning_effort=high"],
+            true,
+        );
         assert!(!has(&u, "model_reasoning_effort=medium"));
     }
 
@@ -1813,18 +2073,27 @@ mod lean_tests {
     fn keeps_exclude_dynamic_but_skips_tool_strip_when_user_manages_tools() {
         // User set --disallowedTools → don't override the tool set, but still stabilize
         // the system prefix.
-        let out = lean(&["claude", "-p", "x", "--disallowedTools", "AskUserQuestion"], true);
+        let out = lean(
+            &["claude", "-p", "x", "--disallowedTools", "AskUserQuestion"],
+            true,
+        );
         assert!(has(&out, EXCL), "exclude-dynamic still applied");
         assert!(!has(&out, "mcp__rozum"), "LEAN_DISALLOW list not appended");
         // --allowedTools likewise.
-        assert!(has(&lean(&["claude", "--allowedTools", "Read"], true), EXCL));
+        assert!(has(
+            &lean(&["claude", "--allowedTools", "Read"], true),
+            EXCL
+        ));
     }
 
     #[test]
     fn skips_exclude_dynamic_when_user_sets_system_prompt() {
         // User owns the system prompt → don't touch it; tool strip still applies.
         let out = lean(&["claude", "-p", "x", "--system-prompt", "custom"], true);
-        assert!(!has(&out, EXCL), "must not relocate when user set --system-prompt");
+        assert!(
+            !has(&out, EXCL),
+            "must not relocate when user set --system-prompt"
+        );
         assert!(has(&out, "--disallowedTools"));
         // Already-present exclude-dynamic isn't duplicated.
         let out2 = lean(&["claude", "-p", "x", EXCL], true);
@@ -1834,8 +2103,14 @@ mod lean_tests {
     #[test]
     fn noop_when_off_or_unknown_agent() {
         // Lean off → untouched (claude and codex alike).
-        assert_eq!(lean(&["claude", "-p", "x"], false), vec!["claude", "-p", "x"]);
-        assert_eq!(lean(&["codex", "exec", "x"], false), vec!["codex", "exec", "x"]);
+        assert_eq!(
+            lean(&["claude", "-p", "x"], false),
+            vec!["claude", "-p", "x"]
+        );
+        assert_eq!(
+            lean(&["codex", "exec", "x"], false),
+            vec!["codex", "exec", "x"]
+        );
         // Lean on but an unknown agent (neither claude nor codex) → untouched.
         assert_eq!(lean(&["aider", "x"], true), vec!["aider", "x"]);
     }
@@ -2163,9 +2438,17 @@ async fn run_info(spec: &str) {
 /// drive `launchctl` / `systemctl`. Spec: `docs/specs/shared-gateway-service.md`.
 fn run_service(action: ServiceAction) {
     match action {
-        ServiceAction::Install { model, n_ctx, port, offline, strategy } => {
+        ServiceAction::Install {
+            model,
+            n_ctx,
+            port,
+            offline,
+            strategy,
+        } => {
             let Some(model) = join_models(model) else {
-                eprintln!("rozum service install: --model is required (the model the service serves)");
+                eprintln!(
+                    "rozum service install: --model is required (the model the service serves)"
+                );
                 std::process::exit(2);
             };
             let program = match std::env::current_exe() {
@@ -2239,9 +2522,16 @@ fn install_service(program: &str, args: &[String], env: &[(String, String)]) {
         std::process::exit(1);
     }
     let ps = path.to_string_lossy();
-    let _ = std::process::Command::new("launchctl").args(["unload", &ps]).status(); // idempotent
-    let st = std::process::Command::new("launchctl").args(["load", "-w", &ps]).status();
-    report_status(st, &format!("installed + started launchd service → {}", path.display()));
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", &ps])
+        .status(); // idempotent
+    let st = std::process::Command::new("launchctl")
+        .args(["load", "-w", &ps])
+        .status();
+    report_status(
+        st,
+        &format!("installed + started launchd service → {}", path.display()),
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -2261,22 +2551,31 @@ fn start_service() {
         eprintln!("rozum service: not installed — run `rozum service install --model …` first");
         std::process::exit(1);
     }
-    let st = std::process::Command::new("launchctl").args(["load", &path.to_string_lossy()]).status();
+    let st = std::process::Command::new("launchctl")
+        .args(["load", &path.to_string_lossy()])
+        .status();
     report_status(st, "started launchd service");
 }
 
 #[cfg(target_os = "macos")]
 fn stop_service() {
     let path = rozum::service::launchd_plist_path();
-    let st = std::process::Command::new("launchctl").args(["unload", &path.to_string_lossy()]).status();
+    let st = std::process::Command::new("launchctl")
+        .args(["unload", &path.to_string_lossy()])
+        .status();
     report_status(st, "stopped launchd service");
 }
 
 #[cfg(target_os = "macos")]
 fn status_service() {
-    let st = std::process::Command::new("launchctl").args(["list", rozum::service::SERVICE_LABEL]).status();
+    let st = std::process::Command::new("launchctl")
+        .args(["list", rozum::service::SERVICE_LABEL])
+        .status();
     if !matches!(st, Ok(s) if s.success()) {
-        eprintln!("rozum service: not installed (launchctl list found no {})", rozum::service::SERVICE_LABEL);
+        eprintln!(
+            "rozum service: not installed (launchctl list found no {})",
+            rozum::service::SERVICE_LABEL
+        );
     }
 }
 
@@ -2292,11 +2591,19 @@ fn install_service(program: &str, args: &[String], env: &[(String, String)]) {
         eprintln!("rozum service: write {}: {e}", path.display());
         std::process::exit(1);
     }
-    let _ = std::process::Command::new("systemctl").args(["--user", "daemon-reload"]).status();
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status();
     let st = std::process::Command::new("systemctl")
         .args(["--user", "enable", "--now", rozum::service::SYSTEMD_UNIT])
         .status();
-    report_status(st, &format!("installed + started systemd --user service → {}", path.display()));
+    report_status(
+        st,
+        &format!(
+            "installed + started systemd --user service → {}",
+            path.display()
+        ),
+    );
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2306,7 +2613,9 @@ fn uninstall_service() {
         .args(["--user", "disable", "--now", rozum::service::SYSTEMD_UNIT])
         .status();
     let _ = std::fs::remove_file(&path);
-    let _ = std::process::Command::new("systemctl").args(["--user", "daemon-reload"]).status();
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status();
     eprintln!("uninstalled systemd --user service ({})", path.display());
 }
 
@@ -2418,8 +2727,8 @@ async fn build_choice(
     let n_ctx = choice.n_ctx.unwrap_or(req_n_ctx);
     match choice.engine.as_str() {
         // explicit endpoint override → construct the HTTP backend directly
-        "lmstudio" | "mlx" | "mlx_lm" | "mlx-server" | "mlx_lm_server" | "mlx-lm-server" | "url"
-        | "http"
+        "lmstudio" | "mlx" | "mlx_lm" | "mlx-server" | "mlx_lm_server" | "mlx-lm-server"
+        | "url" | "http"
             if choice.url.is_some() =>
         {
             let url = choice.url.clone().unwrap();
@@ -2480,7 +2789,10 @@ fn apply_offline(offline: bool) {
 
 /// Whether offline mode is on (`ROZUM_OFFLINE` truthy) — no remote/cloud models.
 fn is_offline() -> bool {
-    matches!(std::env::var("ROZUM_OFFLINE").ok().as_deref(), Some("1" | "true" | "on"))
+    matches!(
+        std::env::var("ROZUM_OFFLINE").ok().as_deref(),
+        Some("1" | "true" | "on")
+    )
 }
 
 async fn build_cascade_backend(
@@ -2501,8 +2813,11 @@ async fn build_cascade_from_list(
     model: &str,
     n_ctx: u32,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
-    let names: Vec<String> =
-        model.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let names: Vec<String> = model
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     if names.len() < 2 {
         return None; // a single name isn't a cascade — let the normal path build it
     }
@@ -2610,17 +2925,25 @@ fn build_remote_tier(
     let backend: std::sync::Arc<dyn rozum::ChatBackend> = match tier.api {
         RemoteApi::Anthropic => {
             // Native Anthropic requires a key — skip the tier if it isn't configured.
-            let endpoint = tier.endpoint.as_deref().unwrap_or("https://api.anthropic.com");
+            let endpoint = tier
+                .endpoint
+                .as_deref()
+                .unwrap_or("https://api.anthropic.com");
             let key_env = tier.api_key_env.as_deref().unwrap_or("ANTHROPIC_API_KEY");
             let key = std::env::var(key_env).ok().filter(|k| !k.is_empty())?;
             std::sync::Arc::new(rozum::anthropic_http::AnthropicHttpBackend::new(
-                endpoint, &tier.model, key,
+                endpoint,
+                &tier.model,
+                key,
             ))
         }
         RemoteApi::Openai => {
             // Defaults to OpenAI itself; an OpenAI-compatible provider (OpenRouter, LM Studio, …)
             // sets `endpoint` explicitly.
-            let endpoint = tier.endpoint.as_deref().unwrap_or("https://api.openai.com/v1");
+            let endpoint = tier
+                .endpoint
+                .as_deref()
+                .unwrap_or("https://api.openai.com/v1");
             let key_env = tier.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
             let mut b = rozum::openai_http::OpenAiHttpBackend::new(endpoint, &tier.model);
             if let Some(key) = std::env::var(key_env).ok().filter(|k| !k.is_empty()) {

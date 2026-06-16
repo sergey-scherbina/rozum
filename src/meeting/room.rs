@@ -121,6 +121,35 @@ impl DaemonRoom {
     pub fn high_water(&self) -> HighWater {
         self.writer.high_water()
     }
+
+    pub fn name(&self) -> &str {
+        self.writer.name()
+    }
+    pub fn topic(&self) -> &str {
+        self.writer.topic()
+    }
+    pub fn root(&self) -> &std::path::Path {
+        &self.writer.paths().root
+    }
+
+    /// Read all messages at or after the cursor `(since_date, since_n)` straight
+    /// from disk. `since_date = None` returns the whole history. Used by the
+    /// daemon to assemble a `wait` delta (P4 moves this read into the proxy).
+    pub fn read_since(&self, since_date: Option<&str>, since_n: u64) -> Vec<StoredTurn> {
+        let root = &self.writer.paths().root;
+        let mut out = vec![];
+        for date in self.writer.index().days.keys() {
+            let from = match since_date {
+                Some(sd) if date.as_str() < sd => continue,
+                Some(sd) if date.as_str() == sd => since_n,
+                _ => 0,
+            };
+            if let Ok(turns) = super::store::read_day(root, date, from, None) {
+                out.extend(turns);
+            }
+        }
+        out
+    }
     pub fn phase(&self) -> Phase {
         self.phase
     }
