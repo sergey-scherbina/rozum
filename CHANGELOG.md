@@ -1,5 +1,25 @@
 # Changelog
 
+## mlx-native — cap MLX unified memory (no more 28 GB hoard / rc=2 cascade) + constrain back to opt-in
+Completed: 2026-06-16
+
+MLX kept freed Metal buffers cached and grew its footprint to a RAM fraction (~28 GB) regardless of
+model size, which starved agent processes (the agentic-benchmark rc=2 cascade), pushed big models
+near-OOM, and forced a per-task gateway reload. The vendored fork now exposes the mlx-c memory
+setters (`mlx_rs::memory::set_cache_limit` / `set_memory_limit` / `set_wired_limit`, fork
+`693f89ab`); rozum's `cap_mlx_memory()` (called at model load) caps them — `ROZUM_MLX_CACHE_GB`
+(default 4) and `ROZUM_MLX_MEM_GB` (default total RAM − 8). The cache cap is the lever:
+**a Qwen3-4B gateway serving 12 requests now peaks at 2.5 GB (was ~28 GB)** — the cache no longer
+accumulates, so the cascade is gone and a shared per-model "load once" gateway is viable again.
+
+Also, with the loose-JSON repair shipped, `ROZUM_MLX_CONSTRAIN` is back to **opt-in** (`=1`): the
+repair recovers the common malformations on the fast path (Coder-7B agentic 2→4/5, constrain-off), so
+the B=1 masked decode is only worth its cost for the rare case repair can't disambiguate. And the
+agentic benchmark default model set is now just the 5 that actually do agentic coding (4B–35B) — the
+weak (Qwen2.5-0.5B / Qwen3-0.6B / Llama-3.2-1B, `greet`-only even with repair) and template-less
+(gemma, Phi-3, SmolLM2, Mistral-v0.3) models were deleted from cache + benchmark. `Cargo.toml`,
+`src/mlx_native_backend.rs`, fork `mlx-rs/src/memory.rs`, `scripts/bench/agentic.sh`, `SPRINT.md`.
+
 ## serving — repair malformed tool-call JSON (recover calls with constrain OFF) + bigger timeouts
 Completed: 2026-06-16
 

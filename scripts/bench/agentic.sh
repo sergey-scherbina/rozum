@@ -62,16 +62,12 @@ if [ -z "$BIN" ]; then
 fi
 case "$BIN" in /*) ;; *) BIN="$repo/$BIN" ;; esac   # launch runs in a temp cwd → need absolute
 
-# Default: every installed model whose chat template actually supports tools
-# (Qwen2.5 / Qwen3 / Qwen3.6 / Llama-3.2 / Mistral-v0.3 — all `<tool_call>`-style),
-# small → large. Models whose template has no tool support (gemma-3, Phi-3-mini,
-# SmolLM2) are excluded — the gateway can't offer them tools. Small models still
-# "know" the format but are weak at the multi-step agentic loop; that gap is the
-# point. Override with AGENTIC_MODELS.
+# Default: the models that actually do agentic coding (4B → 35B), small → large.
+# The agentic matrix found a 7B→27B capability cliff: sub-4B / weak tool models
+# (Qwen2.5-0.5B, Qwen3-0.6B, Llama-3.2-1B) only manage `greet` even with the
+# JSON-repair, and template-less / incompatible models (gemma, Phi-3, SmolLM2,
+# Mistral-v0.3) can't drive tools at all — all dropped. Override with AGENTIC_MODELS.
 DEFAULT_MODELS="\
-mlx-community:Qwen2.5-0.5B-Instruct-4bit \
-mlx-community:Qwen3-0.6B-4bit \
-mlx-community:Llama-3.2-1B-Instruct-4bit \
 mlx-community:Qwen3-4B-4bit \
 mlx-community:Qwen2.5-Coder-7B-Instruct-4bit \
 mlx-community:Qwen3.6-27B-4bit \

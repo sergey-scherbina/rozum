@@ -62,6 +62,46 @@ Full writeup + the one-pass diagnostic methodology that localized it:
 > to master `74c7a96`, fork `0d4b3729`. The P0/P1 below are that work (kept for record).
 > Chosen next (2026-06-13, user): the three tasks here; hand-fused Metal kernels → BACKLOG.
 
+#### Agentic local-model reliability + memory (2026-06-16, from the agentic benchmark)
+
+The agentic e2e matrix (`scripts/bench/agentic.sh`, 9 models × claude+codex × 5 tasks) drove a chain
+of backend fixes and surfaced the levers below. **DONE this round:** cache-aware attention mask for
+qwen2/llama (fork `bddd6feb`, fixes the multi-turn prefix-reuse crash), unify+robustify tool-call
+parsing in `serving` (loose markdown/bare JSON), suppress loose tool calls from the text stream (fixes
+the agentic re-emit loop), constrain-on-by-default, **JSON-repair** (recovers malformed tool calls on
+the constrain-OFF fast path), per-task gateway (robust under MLX memory growth), Mistral-v0.3 dropped.
+
+- [x] mlx-memory-cap — **DONE 2026-06-16.** Fork (`693f89ab`) exposes `set_cache_limit` /
+  `set_memory_limit` / `set_wired_limit` (wrapping the mlx-c setters); rozum `cap_mlx_memory()`
+  (`MlxNativeBackend::new`) sets them — `ROZUM_MLX_CACHE_GB` (default 4) + `ROZUM_MLX_MEM_GB` (default
+  total RAM − 8). The cache cap is the key lever: MLX otherwise hoarded freed buffers to ~28 GB.
+  **Validated:** a Qwen3-4B gateway serving 12 requests now peaks at **2.5 GB** (was ~28 GB) — the
+  cache no longer accumulates, so the rc=2 cascade is gone and the shared per-model "load once" gateway
+  is viable again (the per-task reload was only a workaround).
+
+- [x] constrain-default-reconsider — **DONE 2026-06-16.** `ROZUM_MLX_CONSTRAIN` flipped back to
+  **opt-in** (`=1` to enable). The `serving` JSON-repair recovers the common malformations on the fast
+  path (Coder-7B agentic 2→4/5 with repair, constrain-off), so the B=1 masked decode is only worth its
+  cost for the rare `","`-in-content case repair can't disambiguate.
+
+- [ ] agent-termination-nudge — slow/strong models (dense-27B) finish the task correctly but don't
+  STOP, running to the run-timeout instead of a final answer. A short prompt nudge ("once verified,
+  stop") and/or a lower `--max-turns` would give clean termination + faster benchmark runs.
+
+- [ ] cc-prompt-lean-mode — Claude Code's system prompt + ~25 tool schemas fill the 16K context →
+  large KV + slow prefill on local models. A "lean" launch mode (fewer tools / a compact system note)
+  cuts context, memory, and prefill. `rozum launch` already trims skills/git/CLAUDE.md
+  (`apply_rozum_agent_env`); extend it for local models.
+
+- [ ] recommend-agentic-models — surface the benchmark's verdict in the catalog (`src/models.rs`
+  recommendations): the 7B→27B capability cliff, MoE (Qwen3-30B-A3B) = best speed/capability/memory
+  for local agentic coding, Qwen3/Qwen3.6 native `<tool_call>` > Qwen2.5/Llama loose JSON.
+
+- [ ] mistral-system-fold — (LOW) restrictive templates (Mistral-v0.3 rejects `system` + needs strict
+  user/assistant alternation) 500 on every Claude Code request. Folding system→first-user when a
+  template lacks system support would un-break them. We deleted Mistral-v0.3, so low priority — a
+  general robustness note for future restrictive templates.
+
 #### P0 (CURRENT, 2026-06-15): cascade-router — frugal/escalation model routing
 
 **User-driven feature.** Spec: `docs/specs/cascade-router.md` (design agreed + availability/health

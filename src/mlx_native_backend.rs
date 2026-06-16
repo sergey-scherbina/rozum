@@ -323,6 +323,7 @@ mod inner {
         /// tokenizer_config.json (the layout HuggingFace / mlx-community ship).
         /// `model_id` selects the chat-template variant and labels logs.
         pub async fn new(model_dir: PathBuf, model_id: String) -> ModelResult<Self> {
+            cap_mlx_memory();
             let (n_ctx, eos, model_type, kv_per_pos) = read_config(&model_dir);
             let (jobs_tx, jobs_rx) = mpsc::unbounded_channel::<Job>();
             let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
@@ -353,6 +354,35 @@ mod inner {
                     "mlx: worker died during load".into(),
                 )),
             }
+        }
+    }
+
+    /// Cap MLX's unified-memory use so a resident model doesn't hoard all of RAM and
+    /// starve the agent / other processes on the host. `set_cache_limit` is the key
+    /// lever: MLX otherwise keeps freed Metal buffers cached, so the footprint grows to
+    /// a RAM fraction (~28 GB observed) regardless of model size; capping it returns
+    /// those buffers to the OS, keeping the footprint near the live (weights + KV)
+    /// memory. `ROZUM_MLX_CACHE_GB` (default 4) and `ROZUM_MLX_MEM_GB` (default total
+    /// RAM − 8) override; `0` for either disables that cap. Process-global, idempotent.
+    fn cap_mlx_memory() {
+        let gb = |g: u64| -> usize { (g as usize).saturating_mul(1usize << 30) };
+        let total_gb = crate::concurrency::total_ram_bytes().unwrap_or(16u64 << 30) / (1u64 << 30);
+        let cache_gb = std::env::var("ROZUM_MLX_CACHE_GB")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(4);
+        let mem_gb = std::env::var("ROZUM_MLX_MEM_GB")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or_else(|| total_gb.saturating_sub(8).max(8));
+        if mem_gb > 0 {
+            mlx_rs::memory::set_memory_limit(gb(mem_gb));
+        }
+        if cache_gb > 0 {
+            mlx_rs::memory::set_cache_limit(gb(cache_gb));
+        }
+        if std::env::var_os("ROZUM_MLX_DEBUG").is_some() {
+            eprintln!("mlx-native: memory cap mem={mem_gb}GB cache={cache_gb}GB (total {total_gb}GB)");
         }
     }
 
@@ -1268,12 +1298,12 @@ mod inner {
             && (is_dense(model) || is_hybrid_arch(model))
     }
 
-    /// Whether constrained tool decoding is enabled. **On by default** (it forces
-    /// valid, schema-conforming tool-call JSON even from weaker models); set
-    /// `ROZUM_MLX_CONSTRAIN=0` to disable it (the B=1 masked path has a perf cost,
-    /// so high-throughput multi-stream serving may want it off).
+    /// Whether constrained tool decoding is enabled. **Opt-in** (`ROZUM_MLX_CONSTRAIN=1`):
+    /// the B=1 masked path forces valid tool-call JSON but is slow, and the fast path's
+    /// `serving` JSON-repair already recovers the common malformations (unescaped quotes),
+    /// so it's only worth the cost for the rare case repair can't disambiguate.
     fn constrain_enabled() -> bool {
-        !matches!(std::env::var("ROZUM_MLX_CONSTRAIN").as_deref(), Ok("0"))
+        matches!(std::env::var("ROZUM_MLX_CONSTRAIN").ok().as_deref(), Some(v) if !v.is_empty() && v != "0")
     }
 
     /// Runtime driver that constrains a tool call to the tool schemas. Built from a job's
