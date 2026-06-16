@@ -1447,6 +1447,59 @@ soon as any single track succeeds.
   - Estimated effort: ~5-8 calendar weeks for parity with current mistralrs scope.
   - Spec: `docs/specs/mlx-native-port.md`.
 
+### Small-model utility track (P2) — where 4B/7B earn their keep
+
+> Motivation (from the 2026-06-16 agentic matrix): small models (Qwen3-4B,
+> Qwen2.5-Coder-7B) are NOT viable autonomous coders — they pass `greet` and the
+> occasional one-line edit but fail multi-step `build`/`test`. They ARE fast
+> (~8 GB, high tok/s) and fine for narrow single-shot work. Two concrete roles:
+
+- [ ] spec-decode-draft - **Speculative decoding: a small draft model accelerates a big one.**
+  - A small model (e.g. `Qwen3-4B-4bit`) proposes k tokens; the big target
+    (e.g. `Qwen3.6-35B-A3B-4bit`) verifies them in one forward and accepts the
+    longest correct prefix. Net: fewer big-model forwards → faster decode with
+    **byte-identical greedy output** (the whole point — it's not a quality
+    tradeoff, it's a latency win).
+  - Where: the mlx-native decode loop (`src/mlx_native_backend.rs`, `run_job` /
+    the per-token sample path). Needs a second resident model (the draft) and a
+    verify-and-rollback step on the target's KV cache.
+  - Caveats to design around: the hybrid Qwen3.6 GatedDeltaNet recurrent state is
+    not freely truncatable (see `HybridPrefix`) — rollback on rejected drafts is
+    the hard part; may land dense-target-only first. Draft + target must share a
+    tokenizer (Qwen3 family ✓).
+  - Acceptance: a `--draft-model <spec>` (or env) path that produces greedy output
+    **identical** to non-draft, with a measured tok/s speedup on 35B-A3B. Effort:
+    LARGE. Spec first (`docs/specs/`), per spec-dev.
+
+- [ ] small-model-router-rag - **Small model as router / classifier / RAG worker.**
+  - Use a 4B/Coder-7B for the narrow, single-shot, latency-sensitive steps that
+    don't need a big model: intent/query classification, model-or-tool routing
+    (cheap pre-filter before invoking 27B+), RAG chunk rerank + summarize,
+    structured-field extraction. Builds on what's already here — `src/rag_lite.rs`
+    and `src/memory_store.rs`.
+  - Where: a small routing/classification entrypoint the gateway (or `rozum
+    launch`) can call before/around the main model; reuse `rag_lite` for retrieval.
+  - Acceptance: one working entrypoint (e.g. classify-and-route, or rerank) backed
+    by a small model, with a tiny eval showing it's accurate enough to gate the big
+    model. Effort: MEDIUM (foundation exists). Spec first.
+
+- [ ] small-model-cascade - **Single-shot bounded tasks served small-first, escalate on doubt.**
+  - The narrow, non-agentic tasks a 4B/Coder-7B can actually do: commit messages,
+    PR descriptions, code explanations, renames, docstrings, simple one-line fixes.
+    Run them in a **cascade**: the small model answers first; a cheap gate —
+    self-reported confidence, a validator, or a fast sanity check (e.g. `cargo
+    check` for a one-line fix, regex/lint for a rename) — decides ACCEPT or
+    ESCALATE to the big model. Most requests resolve on the cheap tier; only the
+    hard residue pays for the big model. (Generalizes [[small-model-router-rag]]:
+    routing decides up-front, the cascade decides after a cheap attempt.)
+  - Where: a cascade wrapper around the gateway chat path — small backend →
+    gate → (optional) big backend; the gate is per-task-type pluggable.
+  - Caveat: only worth it where a cheap, reliable accept/reject signal exists; for
+    open-ended generation with no validator, lead with the big model instead.
+  - Acceptance: a cascade entrypoint covering ≥1 task type (e.g. commit-message or
+    one-line-fix) with a measured small-tier hit-rate and end-to-end cost/latency
+    vs big-only. Effort: MEDIUM. Spec first.
+
 ### Done
 
 - [x] lmstudio-http-backend - Auto-detect LM Studio's local OpenAI-compatible server at `http://localhost:1234/v1`.
