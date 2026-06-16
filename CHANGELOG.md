@@ -1,5 +1,16 @@
 # Changelog
 
+## launch — `--lean` now also caps codex reasoning effort to `medium`
+Completed: 2026-06-17
+
+`rozum launch codex --lean` now appends `-c model_reasoning_effort=medium`. Codex inherits the
+user's global `model_reasoning_effort` (often `xhigh`), which on a LOCAL model burns long reasoning
+chains for little gain — measured codex on Qwen3-30B-A3B taking 7+ min/task (fix 433 s, test hit the
+600 s wall). A mock-codex study also showed the meta-tools/heavy-reasoning path traps weaker models
+(see the codex patch-barrier investigation). Capping to `medium` roughly halves the wasted
+generation. Opt-in (only with `--lean`); skipped if the operator passes their own
+`model_reasoning_effort`. Extends the existing claude `--lean`; 5 unit tests.
+
 ## models — Qwen3.6-35B-A3B is now the top recommended local model
 Completed: 2026-06-16
 
