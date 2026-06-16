@@ -1,5 +1,26 @@
 # Changelog
 
+## mlx — constrained tool-call decoding ON by default (fixes Codex tool delivery)
+Completed: 2026-06-16
+
+`ROZUM_MLX_CONSTRAIN` was opt-in: the fast (unconstrained) decode relied on `serving`'s JSON-repair
+to recover malformed tool calls. But a local model driven under a foreign (Codex/Claude) tool schema
+emits a structurally-broken Qwen3.6 XML form — e.g. `<tool_call>{"function=exec_command">{…}}` — that
+repair can't recover (it's neither valid JSON nor the `<function=…>` XML the parser knows), so
+`parse_tool_calls` returns nothing, the agent silently drops the call, and loops.
+
+Measured on Qwen3.6-35B-A3B (KEEP=1 transcripts): with constraints OFF, **Codex `fix` and `debug` both
+fail** — the model knows the fix (`s.chars().rev().collect()`, `a + b`) but every apply path emits an
+unparseable `<tool_call>` that Codex never executes, so the file is never edited. With constraints ON,
+the masked sampler forces a valid `{"name":…,"arguments":…}` body the moment `<tool_call>` opens, and
+**both pass** (final files correctly edited, zero malformed `function=` markers in the transcript).
+
+Flipped `constrain_enabled()` to default ON; opt out with `ROZUM_MLX_CONSTRAIN=0`. Cost: the B=1 masked
+path is ~2-3× slower per token and disables batching, but only for tool-bearing requests on dense/hybrid
+models — exactly the agentic coding path where a dropped tool call wastes the whole turn. (Does NOT fix
+the separate claude `debug` failure, which is a read-only stall in the loop-breaker, not a tool-call
+format problem.)
+
 ## gateway — a manual shared gateway no longer self-exits on `clients_gone`
 Completed: 2026-06-16
 

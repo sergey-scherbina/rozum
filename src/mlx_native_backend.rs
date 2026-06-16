@@ -810,7 +810,7 @@ mod inner {
     ) {
         // Schema-constrained decode: a separate B=1 loop that masks the sampler. Hybrid Qwen3.6
         // takes the `LayerCache` path; every dense arch takes the KV-cache path. Two triggers:
-        //   1. tool-call constraining — OPT-IN via `ROZUM_MLX_CONSTRAIN` (a reliability tweak).
+        //   1. tool-call constraining — ON by default (opt out with `ROZUM_MLX_CONSTRAIN=0`).
         //   2. `response_format` / structured output — ALWAYS honored when the client asks
         //      (it's an explicit correctness request, not an opt-in).
         if should_constrain(&job, model) {
@@ -1300,21 +1300,28 @@ mod inner {
 
     // ─── Constrained tool-argument decode (schema-masked, B=1, dense) ─────────────
 
-    /// `true` when this job should decode under the JSON-schema constraint: the
-    /// `ROZUM_MLX_CONSTRAIN` flag is set, the request carries tools, and the model is a dense
-    /// arch (`run_constrained_dense`) or the Qwen3.6 hybrid (`run_constrained_hybrid`).
+    /// `true` when this job should decode under the JSON-schema constraint: constraints are
+    /// enabled (default on, unless `ROZUM_MLX_CONSTRAIN=0`), the request carries tools, and the
+    /// model is a dense arch (`run_constrained_dense`) or the Qwen3.6 hybrid (`run_constrained_hybrid`).
     fn should_constrain(job: &Job, model: &LoadedModel) -> bool {
         constrain_enabled()
             && !job.tools.is_empty()
             && (is_dense(model) || is_hybrid_arch(model))
     }
 
-    /// Whether constrained tool decoding is enabled. **Opt-in** (`ROZUM_MLX_CONSTRAIN=1`):
-    /// the B=1 masked path forces valid tool-call JSON but is slow, and the fast path's
-    /// `serving` JSON-repair already recovers the common malformations (unescaped quotes),
-    /// so it's only worth the cost for the rare case repair can't disambiguate.
+    /// Whether constrained tool decoding is enabled. **On by default**; opt out with
+    /// `ROZUM_MLX_CONSTRAIN=0`. The B=1 masked path forces valid tool-call JSON but is
+    /// ~2-3× slower per token; `serving`'s JSON-repair recovers *common* malformations
+    /// (unescaped quotes) on the fast path, but NOT the structurally-broken Qwen3.6 XML
+    /// form a local model emits under a foreign (Codex/Claude) tool schema — e.g.
+    /// `<tool_call>{"function=exec_command">{…}}` — which parses to nothing, so the agent
+    /// silently drops the call and loops. Measured 2026-06-16 on Qwen3.6-35B-A3B: with
+    /// constraints OFF, Codex `fix`/`debug` both fail (malformed `<tool_call>` never
+    /// executes); ON, both pass. Correctness on the agentic tool path outweighs the
+    /// latency, so it's the default; set `=0` for perf-sensitive serving that doesn't
+    /// rely on tool calls landing.
     fn constrain_enabled() -> bool {
-        matches!(std::env::var("ROZUM_MLX_CONSTRAIN").ok().as_deref(), Some(v) if !v.is_empty() && v != "0")
+        !matches!(std::env::var("ROZUM_MLX_CONSTRAIN").ok().as_deref(), Some("0" | "false" | "off"))
     }
 
     /// Runtime driver that constrains a tool call to the tool schemas. Built from a job's
