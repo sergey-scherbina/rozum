@@ -195,33 +195,15 @@ echo "  out          : $OUT"
 echo
 
 "$BIN" gateway stop --force >/dev/null 2>&1 || true
-idx=0
 for spec in "${MODELS[@]}"; do
-  port=$((PORT_BASE + idx)); idx=$((idx + 1)); base="http://127.0.0.1:$port"
-  glog="$OUT/runs/${spec//[:\/]/_}.gateway.log"
-  echo "================ model: $spec  (port $port) ================"
-
-  # Load the model ONCE: a shared gateway, under /usr/bin/time -l for the model's
-  # resident footprint. Each task below runs `rozum launch` which *reuses* it (no
-  # reload). ROZUM_GEN_TIMEOUT_SECS bounds a single model request; idle-exit off.
-  ROZUM_GATEWAY_IDLE_SECS=0 ROZUM_GEN_TIMEOUT_SECS="$GEN_TIMEOUT" /usr/bin/time -l \
-    "$BIN" gateway --model "$spec" --port "$port" --offline "${NCTX_OPT[@]}" \
-    >"$glog" 2>&1 &
-  TIME_PID=$!
-  GW_PID=""; for _ in $(seq 1 40); do GW_PID="$(pgrep -P "$TIME_PID" 2>/dev/null | head -1)"; [ -n "$GW_PID" ] && break; sleep 0.25; done
-  ok=0
-  for _ in $(seq 1 180); do curl -s -m2 "$base/v1/models" >/dev/null 2>&1 && { ok=1; break; }
-    kill -0 "$TIME_PID" 2>/dev/null || break; sleep 1; done
-  if [ "$ok" != 1 ]; then echo "  ! gateway not ready (see $glog)"; kill -INT "$GW_PID" 2>/dev/null; wait "$TIME_PID" 2>/dev/null; continue; fi
-  echo "  model loaded once; running ${#TASK_LIST[@]} tasks × ${#AGENT_RUN[@]} agent(s)"
-
+  echo "================ model: $spec ================"
   for agent in "${AGENT_RUN[@]}"; do
     for task in "${TASK_LIST[@]}"; do
       diff=${DIFF[$task]:-0}
       work="$(mktemp -d /tmp/rozum-agentic-XXXXXX)"
       setup_task "$task" "$work"
       prompt="$(prompt_for "$task")"
-      alog="$work/agent.log"; sfile="$work/samples.txt"
+      alog="$work/agent.log"; glog="$work/gateway.log"; sfile="$work/samples.txt"
       if [ "$agent" = claude ]; then
         # Disallow AskUserQuestion: in headless `-p` it can't be answered, so a model
         # that calls it to "verify" loops on the error until the timeout.
@@ -232,55 +214,45 @@ for spec in "${MODELS[@]}"; do
         aargs=(codex exec "$prompt" --dangerously-bypass-approvals-and-sandbox)
       fi
 
-      # Real `rozum launch` (no --model) → reuses the resident shared gateway; the
-      # model does NOT reload between tasks. Each task is its own process tree, so
-      # its time + resources are measured independently.
+      # Fresh `rozum launch --dedicated` PER TASK: the model loads in-process, the
+      # agent runs, and the whole tree exits when the agent finishes — so MLX's
+      # memory cache is released between tasks and never starves the next agent (a
+      # shared gateway accumulates it and the next launch fails). Agent stream-json
+      # → alog (stdout); rozum banner + /usr/bin/time -l footprint → glog (stderr).
       start=$(perl -MTime::HiRes=time -e 'printf "%.2f", time')
-      ( cd "$work"; exec "$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}" ) \
-        </dev/null >"$alog" 2>&1 &
-      LP=$!
-      # Sample the agent tree (RSS + CPU) and add the gateway's CPU (it does the
-      # inference); the model's RAM is the gateway footprint, measured separately.
-      ( while kill -0 "$LP" 2>/dev/null; do
-          read ar ac < <(tree_sample "$LP")
-          gc=$(ps -o pcpu= -p "$GW_PID" 2>/dev/null | tr -d ' '); gc=${gc:-0}
-          awk -v ar="${ar:-0}" -v ac="${ac:-0}" -v gc="$gc" 'BEGIN{printf "%d %.1f\n", ar, ac+gc}' >>"$sfile"
-          sleep 2
-        done ) & SAMP=$!
-      ( sleep "$RUN_TIMEOUT"; kill_descendants "$LP"; kill -TERM "$LP" 2>/dev/null ) & WD=$!
-      wait "$LP"; rc=$?
+      ( cd "$work"; exec env ROZUM_GEN_TIMEOUT_SECS="$GEN_TIMEOUT" /usr/bin/time -l \
+          "$BIN" launch --model "$spec" --dedicated --no-channel-wakeup --no-piggyback \
+          "${NCTX_OPT[@]}" "${aargs[@]}" ) </dev/null >"$alog" 2>"$glog" &
+      TP=$!
+      ROZ=""; for _ in $(seq 1 40); do ROZ="$(pgrep -P "$TP" 2>/dev/null | head -1)"; [ -n "$ROZ" ] && break; sleep 0.25; done
+      ( while kill -0 "$TP" 2>/dev/null; do tree_sample "$TP" >>"$sfile"; echo >>"$sfile"; sleep 2; done ) & SAMP=$!
+      ( sleep "$RUN_TIMEOUT"; [ -n "$ROZ" ] && kill_descendants "$ROZ" ) & WD=$!
+      wait "$TP"; rc=$?
       kill "$WD" "$SAMP" 2>/dev/null; wait "$SAMP" 2>/dev/null
       secs=$(perl -MTime::HiRes=time -e 'printf "%.1f", time-'"$start")
       tmo=$(awk -v s="$secs" -v t="$RUN_TIMEOUT" 'BEGIN{print (s>=t-2)?1:0}')
 
-      agent_mb=$(awk '{if($1>m)m=$1}END{printf "%.0f", m/1024}' "$sfile" 2>/dev/null); agent_mb=${agent_mb:-0}
-      peak_cpu=$(awk '{if($2>m)m=$2}END{printf "%.0f", m}' "$sfile" 2>/dev/null); peak_cpu=${peak_cpu:-0}
+      tree_mb=$(awk '{if($1>m)m=$1}END{printf "%.0f", m/1024}' "$sfile" 2>/dev/null | tr -dc '0-9'); tree_mb=${tree_mb:-0}
+      peak_cpu=$(awk '{if($2>m)m=$2}END{printf "%.0f", m}' "$sfile" 2>/dev/null | tr -dc '0-9'); peak_cpu=${peak_cpu:-0}
+      foot=$(grep -m1 'peak memory footprint' "$glog" 2>/dev/null | awk '{printf "%.0f", $1/1048576}' | tr -dc '0-9'); foot=${foot:-0}
 
       turns="-"; tools="-"
       if [ "$agent" = claude ]; then
-        turns=$(grep -c '"type":"assistant"' "$alog" 2>/dev/null || echo 0)
-        tools=$(grep -o '"type":"tool_use"' "$alog" 2>/dev/null | wc -l | tr -d ' ')
+        turns=$(grep -c '"type":"assistant"' "$alog" 2>/dev/null | tr -dc '0-9'); turns=${turns:-0}
+        tools=$(grep -o '"type":"tool_use"' "$alog" 2>/dev/null | wc -l | tr -dc '0-9'); tools=${tools:-0}
       fi
 
       detail="$(verify_task "$task" "$work" "$alog")"; pass=$([ $? = 0 ] && echo 1 || echo 0)
       [ "$tmo" = 1 ] && tflag=" (RUN_TIMEOUT)" || tflag=""
-      printf "  [%s] %-6s %ss%s  pass=%s  agent=%sMB  cpu=%s%%  turns=%s tools=%s\n" \
-        "$agent" "$task" "$secs" "$tflag" "$pass" "$agent_mb" "$peak_cpu" "$turns" "$tools"
+      printf "  [%s] %-6s %ss%s  pass=%s  mem=%sMB  cpu=%s%%  turns=%s tools=%s\n" \
+        "$agent" "$task" "$secs" "$tflag" "$pass" "$foot" "$peak_cpu" "$turns" "$tools"
       echo "$detail"
       printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$agent" "$spec" "$task" "$diff" "$secs" "$pass" "$rc" "$tmo" "$turns" "$tools" "$agent_mb" "$peak_cpu" "" >> "$CSV"
+        "$agent" "$spec" "$task" "$diff" "$secs" "$pass" "$rc" "$tmo" "$turns" "$tools" "$tree_mb" "$peak_cpu" "$foot" >> "$CSV"
 
       [ "${KEEP:-0}" = 1 ] && echo "    kept: $work" || rm -rf "$work"
     done
   done
-
-  # Stop the shared gateway; /usr/bin/time flushes the model's peak footprint.
-  kill -INT "$GW_PID" 2>/dev/null
-  for _ in $(seq 1 60); do kill -0 "$TIME_PID" 2>/dev/null || break; sleep 1; done
-  kill -KILL "$TIME_PID" 2>/dev/null; wait "$TIME_PID" 2>/dev/null
-  foot=$(grep -m1 'peak memory footprint' "$glog" | awk '{printf "%.0f", $1/1048576}')
-  awk -F, -v m="$spec" -v f="${foot:-}" 'BEGIN{OFS=","} NR==1{print;next} $2==m{$13=f} {print}' "$CSV" > "$CSV.tmp" && mv "$CSV.tmp" "$CSV"
-  echo "  model footprint: ${foot:-n/a}MB"
   echo
 done
 
