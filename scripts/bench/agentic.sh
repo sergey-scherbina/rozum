@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # Agentic end-to-end benchmark for rozum.
 #
-# Drives a real, headless coding agent (Claude Code and/or OpenAI Codex) against
-# a local MLX model through the rozum gateway — exactly what `rozum launch claude`
-# / `rozum launch codex` set up, but with an explicit gateway so the harness owns
-# the lifecycle and can attribute resources. For every (agent × model × task) it:
-#   - gives the agent a real coding task (trivial -> hard, with tool use),
-#   - verifies the result independently of the agent (files, cargo test, run output),
-#   - measures wall time, the agent process-tree peak RAM, peak combined CPU%, and
-#     the model's resident footprint (gateway, /usr/bin/time -l).
+# Drives a REAL `rozum launch claude` / `rozum launch codex` against a local MLX
+# model — the whole stack as a user runs it: rozum launch starts a private
+# in-process model (`--dedicated`), applies its Claude-Code prompt trimming and
+# Codex provider config, and execs the agent. We pass every agent flag on the
+# command line. For each (agent × model × task) it gives a real coding task
+# (trivial -> hard, with tool use), verifies the result independently of the
+# agent, and measures wall time, the whole process-tree peak RAM + CPU, and the
+# model's resident footprint (/usr/bin/time -l on the rozum process).
+#
+# Two independent timeouts (per your design — model vs everything else):
+#   - ROZUM_GEN_TIMEOUT_SECS  (engine, default 180): bounds a single model request
+#     inside the gateway. A wedged generation aborts; the agent loop continues.
+#   - RUN_TIMEOUT  (default 1200): the whole agentic task — many model calls plus
+#     cargo builds and tool ops, which don't depend on any one model request.
 #
 # Tasks (increasing difficulty):
 #   greet  - reply with one word (no tools)            -> output contains "pong"
@@ -18,76 +24,81 @@
 #   debug  - failing test, run-read-fix loop           -> cargo test green
 #
 # Usage:
-#   scripts/bench/agentic.sh                       # default models x agents x tasks
-#   AGENTIC_MODELS="mlx-community:Qwen3-4B-4bit" AGENTS=claude scripts/bench/agentic.sh
-#   TASKS="greet build" scripts/bench/agentic.sh
+#   scripts/bench/agentic.sh
+#   AGENTIC_MODELS="mlx-community:Qwen3-30B-A3B-4bit" AGENTS=claude scripts/bench/agentic.sh
+#   TASKS="greet build" RUN_TIMEOUT=600 scripts/bench/agentic.sh
 #
 # Env knobs:
 #   AGENTIC_MODELS  space-separated specs (default: a curated tool-use-capable set)
 #   AGENTS          "claude codex" (default both, if installed)
 #   TASKS           subset of: greet build fix test debug (default all)
-#   AGENTIC_TIMEOUT per-run wall ceiling, seconds (default 300)
-#   MAX_TURNS       Claude --max-turns (default 25)
-#   NCTX            gateway context window (default 16384)
-#   BENCH_BIN       rozum binary (default target/release/rozum)
+#   RUN_TIMEOUT     whole-task wall ceiling, seconds (default 1200)
+#   GEN_TIMEOUT     ROZUM_GEN_TIMEOUT_SECS for the in-process gateway (default 180)
+#   MAX_TURNS       Claude --max-turns (default 30)
+#   NCTX            override gateway context (default: omit -> model max, auto)
+#   BENCH_BIN       rozum binary (default target/release/rozum, absolute)
 #   BENCH_OUT       output dir (default scripts/bench/results/agentic-<ts>)
-#   KEEP=1          keep per-run workdirs for inspection
+#   KEEP=1          keep per-run workdirs
 #
-# Requires: claude and/or codex, cargo, jq, curl, macOS /usr/bin/time -l.
+# Requires: claude and/or codex, cargo, jq, perl, macOS /usr/bin/time -l.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 cd "$repo"
 
-NCTX="${NCTX:-16384}"
-TIMEOUT="${AGENTIC_TIMEOUT:-300}"
-MAX_TURNS="${MAX_TURNS:-25}"
-PORT_BASE="${BENCH_PORT_BASE:-8300}"
+RUN_TIMEOUT="${RUN_TIMEOUT:-1200}"
+GEN_TIMEOUT="${GEN_TIMEOUT:-180}"
+MAX_TURNS="${MAX_TURNS:-30}"
 OUT="${BENCH_OUT:-$here/results/agentic-$(date +%Y%m%d-%H%M%S)}"
+NCTX_OPT=(); [ -n "${NCTX:-}" ] && NCTX_OPT=(--n-ctx "$NCTX")
 
 BIN="${BENCH_BIN:-}"
 if [ -z "$BIN" ]; then
-  if   [ -x target/release/rozum ]; then BIN=target/release/rozum
-  elif [ -x target/debug/rozum   ]; then BIN=target/debug/rozum
+  if   [ -x "$repo/target/release/rozum" ]; then BIN="$repo/target/release/rozum"
+  elif [ -x "$repo/target/debug/rozum"   ]; then BIN="$repo/target/debug/rozum"
   else echo "no rozum binary; build with: cargo build --release --bin rozum" >&2; exit 1; fi
 fi
+case "$BIN" in /*) ;; *) BIN="$repo/$BIN" ;; esac   # launch runs in a temp cwd → need absolute
 
-# Curated default: models that can actually drive tool use. Tiny models (<=1B)
-# flail on agentic tasks (no usable tool-calling) and just burn the timeout, so
-# they're excluded by default — override with AGENTIC_MODELS to include them.
+# Default pairs a mid model with a strong one to show the capability gap: many
+# 4B–7B models emit tool calls in a format the gateway can't parse (markdown JSON
+# instead of `<tool_call>`) and fail the agentic tasks, while a strong MoE drives
+# the full read/edit/run loop. Override with AGENTIC_MODELS.
 DEFAULT_MODELS="mlx-community:Qwen2.5-Coder-7B-Instruct-4bit mlx-community:Qwen3-30B-A3B-4bit"
 read -r -a MODELS <<<"${AGENTIC_MODELS:-$DEFAULT_MODELS}"
 read -r -a TASK_LIST <<<"${TASKS:-greet build fix test debug}"
 
-# Agents: default both, drop any not installed.
-AGENT_SEL="${AGENTS:-claude codex}"
 AGENT_RUN=()
-for a in $AGENT_SEL; do command -v "$a" >/dev/null && AGENT_RUN+=("$a") || echo "skip agent '$a' (not on PATH)"; done
+for a in ${AGENTS:-claude codex}; do command -v "$a" >/dev/null && AGENT_RUN+=("$a") || echo "skip agent '$a' (not on PATH)"; done
 [ "${#AGENT_RUN[@]}" -gt 0 ] || { echo "no agent CLIs available" >&2; exit 1; }
 command -v cargo >/dev/null || { echo "need cargo" >&2; exit 1; }
-command -v jq    >/dev/null || { echo "need jq" >&2; exit 1; }
 
 mkdir -p "$OUT/runs"
 CSV="$OUT/per-run.csv"
-echo "agent,model,task,difficulty,seconds,pass,rc,turns,tool_uses,agent_peak_mb,peak_cpu_pct,model_footprint_mb" > "$CSV"
-
+echo "agent,model,task,difficulty,seconds,pass,rc,timeout,turns,tool_uses,tree_peak_mb,peak_cpu_pct,model_footprint_mb" > "$CSV"
 declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-# Sum RSS (KB) + CPU% over a process tree (root + all descendants), plus the
-# gateway's CPU. Prints: agent_tree_rss_kb  agent_tree_cpu  gw_cpu
-tree_stats() { # $1=agent_root_pid  $2=gw_pid
-  ps -axo pid=,ppid=,rss=,pcpu= | awk -v ag="$1" -v gw="$2" '
+# Kill every descendant of $1 (not $1 itself), depth-first. Used on timeout to
+# stop the agent so the rozum-launch parent unblocks, exits, and /usr/bin/time
+# flushes its footprint line.
+kill_descendants() {
+  local pid="$1" c
+  for c in $(pgrep -P "$pid" 2>/dev/null); do kill_descendants "$c"; kill -TERM "$c" 2>/dev/null; done
+}
+
+# One sample of a process tree (root + all descendants): total RSS (KB) + CPU%.
+tree_sample() { # $1=root_pid
+  ps -axo pid=,ppid=,rss=,pcpu= | awk -v root="$1" '
     { p=$1; ppid[p]=$2; rss[p]=$3; cpu[p]=$4; ids[++n]=p }
     END{
-      inset[ag]=1; changed=1
+      inset[root]=1; changed=1
       while(changed){ changed=0
         for(i=1;i<=n;i++){ p=ids[i]; if(!inset[p] && inset[ppid[p]]){ inset[p]=1; changed=1 } } }
-      ar=0; ac=0
-      for(i=1;i<=n;i++){ p=ids[i]; if(inset[p]){ ar+=rss[p]; ac+=cpu[p] } }
-      printf "%d %.1f %.1f", ar, ac, cpu[gw]+0
+      r=0; c=0; for(i=1;i<=n;i++){ p=ids[i]; if(inset[p]){ r+=rss[p]; c+=cpu[p] } }
+      printf "%d %.1f", r, c
     }'
 }
 
@@ -102,12 +113,11 @@ prompt_for() {
 }
 
 setup_task() { # $1=task  $2=workdir — pre-create files for fix/debug
-  local t="$1" w="$2"
-  case "$t" in
+  case "$1" in
     fix)
-      printf '[package]\nname = "reverse-cli"\nversion = "0.1.0"\nedition = "2021"\n' >"$w/Cargo.toml"
-      mkdir -p "$w/src"
-      cat >"$w/src/main.rs" <<'EOF'
+      printf '[package]\nname = "reverse-cli"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
+      mkdir -p "$2/src"
+      cat >"$2/src/main.rs" <<'EOF'
 use std::env;
 
 /// Reverse a string by characters.
@@ -123,9 +133,9 @@ fn main() {
 EOF
       ;;
     debug)
-      printf '[package]\nname = "mathlib"\nversion = "0.1.0"\nedition = "2021"\n' >"$w/Cargo.toml"
-      mkdir -p "$w/src"
-      cat >"$w/src/lib.rs" <<'EOF'
+      printf '[package]\nname = "mathlib"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
+      mkdir -p "$2/src"
+      cat >"$2/src/lib.rs" <<'EOF'
 /// Add two integers.
 pub fn add(a: i32, b: i32) -> i32 {
     a - b
@@ -148,17 +158,16 @@ verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0
   local t="$1" w="$2" log="$3" fail=0
   ( cd "$w"
     case "$t" in
-      greet)
-        if grep -qiE '\bpong\b' "$log"; then echo "    PASS  said pong"; else echo "    FAIL  no 'pong' in output"; exit 1; fi ;;
+      greet) grep -qiE '\bpong\b' "$log" && { echo "    PASS  said pong"; exit 0; } || { echo "    FAIL  no 'pong'"; exit 1; } ;;
       *)
         [ -f Cargo.toml ] || { echo "    FAIL  Cargo.toml missing"; fail=1; }
         ls src/*.rs >/dev/null 2>&1 || { echo "    FAIL  no src/*.rs"; fail=1; }
         if [ "$t" = test ] || [ "$t" = debug ]; then
-          if cargo test -q >/dev/null 2>"$w/cargo.err"; then echo "    PASS  cargo test green"; else echo "    FAIL  cargo test red"; fail=1; fi
+          cargo test -q >/dev/null 2>"$w/cargo.err" && echo "    PASS  cargo test green" || { echo "    FAIL  cargo test red"; fail=1; }
         fi
         if [ "$t" = build ] || [ "$t" = test ] || [ "$t" = fix ]; then
           out="$(cargo run -q -- hello 2>"$w/run.err")"
-          if [ "$out" = olleh ]; then echo "    PASS  cargo run -- hello -> olleh"; else echo "    FAIL  cargo run -> '$out'"; fail=1; fi
+          [ "$out" = olleh ] && echo "    PASS  cargo run -- hello -> olleh" || { echo "    FAIL  cargo run -> '$out'"; fail=1; }
         fi
         exit $fail ;;
     esac )
@@ -166,104 +175,69 @@ verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0
 
 # ── main loop ────────────────────────────────────────────────────────────────
 
-echo "rozum agentic benchmark"
-echo "  binary : $BIN"
-echo "  agents : ${AGENT_RUN[*]}    models: ${#MODELS[@]}    tasks: ${TASK_LIST[*]}"
-echo "  out    : $OUT"
+echo "rozum agentic benchmark (real rozum launch)"
+echo "  binary       : $BIN"
+echo "  agents       : ${AGENT_RUN[*]}    models: ${#MODELS[@]}    tasks: ${TASK_LIST[*]}"
+echo "  run timeout  : ${RUN_TIMEOUT}s   gen timeout: ${GEN_TIMEOUT}s   ctx: ${NCTX:-auto(max)}"
+echo "  out          : $OUT"
 echo
 
-"$BIN" gateway stop --force >/dev/null 2>&1 || true
-idx=0
 for spec in "${MODELS[@]}"; do
-  port=$((PORT_BASE + idx)); idx=$((idx + 1))
-  base="http://127.0.0.1:$port"
-  glog="$OUT/runs/${spec//[:\/]/_}.gateway.log"
-  echo "================ model: $spec  (port $port) ================"
-
-  ROZUM_GATEWAY_IDLE_SECS=0 /usr/bin/time -l \
-    "$BIN" gateway --model "$spec" --port "$port" --offline --n-ctx "$NCTX" \
-    >"$glog" 2>&1 &
-  TIME_PID=$!
-  GW_PID=""
-  for _ in $(seq 1 20); do GW_PID="$(pgrep -P "$TIME_PID" || true)"; [ -n "$GW_PID" ] && break; sleep 0.2; done
-
-  ok=0
-  for _ in $(seq 1 120); do curl -s -m2 "$base/v1/models" >/dev/null 2>&1 && { ok=1; break; }
-    kill -0 "$TIME_PID" 2>/dev/null || break; sleep 1; done
-  if [ "$ok" != 1 ]; then echo "  ! gateway not ready (see $glog)"; kill -INT "$GW_PID" 2>/dev/null; wait "$TIME_PID" 2>/dev/null; continue; fi
-  alias="$(curl -s "$base/v1/models" | jq -r '.data[0].id')"
-  echo "  ready; model alias = $alias"
-
+  echo "================ model: $spec ================"
   for agent in "${AGENT_RUN[@]}"; do
     for task in "${TASK_LIST[@]}"; do
       diff=${DIFF[$task]:-0}
-      work="$(mktemp -d "/tmp/rozum-agentic-XXXXXX")"
+      work="$(mktemp -d /tmp/rozum-agentic-XXXXXX)"
       setup_task "$task" "$work"
       prompt="$(prompt_for "$task")"
-      alog="$work/agent.log"
-      sfile="$work/samples.txt"
+      glog="$work/launch.log"; sfile="$work/samples.txt"
 
-      # Launch the agent headless in the background; sample its process tree + the
-      # gateway CPU once a second until it exits or the timeout fires.
-      start=$(perl -MTime::HiRes=time -e 'printf "%.2f", time')
       if [ "$agent" = claude ]; then
-        ( cd "$work"
-          export ANTHROPIC_BASE_URL="$base" ANTHROPIC_API_KEY="rozum-local"
-          export ANTHROPIC_MODEL="$alias" ANTHROPIC_DEFAULT_SONNET_MODEL="$alias"
-          timeout "$TIMEOUT" claude -p "$prompt" --model "$alias" \
-            --dangerously-skip-permissions --max-turns "$MAX_TURNS" \
-            --output-format stream-json --verbose ) >"$alog" 2>&1 &
+        aargs=(claude -p "$prompt" --output-format stream-json --verbose
+               --dangerously-skip-permissions --max-turns "$MAX_TURNS")
       else
-        ( export OPENAI_API_KEY="rozum-local"
-          timeout "$TIMEOUT" codex exec "$prompt" -m local \
-            --dangerously-bypass-approvals-and-sandbox -C "$work" \
-            -c model_provider=rozum -c 'model_providers.rozum.name="rozum"' \
-            -c "model_providers.rozum.base_url=\"$base/v1\"" \
-            -c 'model_providers.rozum.wire_api="responses"' \
-            -c 'model_providers.rozum.env_key="OPENAI_API_KEY"' ) >"$alog" 2>&1 &
+        aargs=(codex exec "$prompt" --dangerously-bypass-approvals-and-sandbox)
       fi
-      AGP=$!
 
-      ( while kill -0 "$AGP" 2>/dev/null; do tree_stats "$AGP" "$GW_PID" >>"$sfile"; echo >>"$sfile"; sleep 1; done ) &
-      SAMP=$!
-      wait "$AGP"; rc=$?
-      kill "$SAMP" 2>/dev/null; wait "$SAMP" 2>/dev/null
+      start=$(perl -MTime::HiRes=time -e 'printf "%.2f", time')
+      # Real `rozum launch`, in the task workdir, under /usr/bin/time -l. The model
+      # request timeout goes to the in-process gateway via ROZUM_GEN_TIMEOUT_SECS.
+      ( cd "$work"; exec env ROZUM_GEN_TIMEOUT_SECS="$GEN_TIMEOUT" /usr/bin/time -l \
+          "$BIN" launch --model "$spec" --dedicated --no-channel-wakeup --no-piggyback \
+          "${NCTX_OPT[@]}" "${aargs[@]}" ) >"$glog" 2>&1 &
+      TP=$!
+      ROZ=""; for _ in $(seq 1 40); do ROZ="$(pgrep -P "$TP" 2>/dev/null | head -1)"; [ -n "$ROZ" ] && break; sleep 0.25; done
+
+      ( while kill -0 "$TP" 2>/dev/null; do tree_sample "$TP" >>"$sfile"; echo >>"$sfile"; sleep 2; done ) & SAMP=$!
+      # Whole-task watchdog: on RUN_TIMEOUT, stop the agent subtree so rozum exits
+      # cleanly and time flushes the footprint (don't SIGKILL the whole tree).
+      ( sleep "$RUN_TIMEOUT"; [ -n "$ROZ" ] && kill_descendants "$ROZ" ) & WD=$!
+      wait "$TP"; rc=$?
+      kill "$WD" "$SAMP" 2>/dev/null; wait "$SAMP" 2>/dev/null
       secs=$(perl -MTime::HiRes=time -e 'printf "%.1f", time-'"$start")
+      tmo=$(awk -v s="$secs" -v t="$RUN_TIMEOUT" 'BEGIN{print (s>=t-2)?1:0}')
 
-      # Peak resources from the samples.
-      peak_mb=$(awk '{if($1>m)m=$1}END{printf "%.0f", m/1024}' "$sfile" 2>/dev/null); peak_mb=${peak_mb:-0}
-      peak_cpu=$(awk '{c=$2+$3; if(c>m)m=c}END{printf "%.0f", m}' "$sfile" 2>/dev/null); peak_cpu=${peak_cpu:-0}
+      tree_mb=$(awk '{if($1>m)m=$1}END{printf "%.0f", m/1024}' "$sfile" 2>/dev/null); tree_mb=${tree_mb:-0}
+      peak_cpu=$(awk '{if($2>m)m=$2}END{printf "%.0f", m}' "$sfile" 2>/dev/null); peak_cpu=${peak_cpu:-0}
+      foot=$(grep -m1 'peak memory footprint' "$glog" | awk '{printf "%.0f", $1/1048576}'); foot=${foot:-}
 
-      # Claude stream-json (NDJSON) carries turn/tool counts; count by substring
-      # (tolerant of any non-JSON noise). Codex doesn't emit this.
       turns="-"; tools="-"
       if [ "$agent" = claude ]; then
-        turns=$(grep -c '"type":"assistant"' "$alog" 2>/dev/null || echo 0)
-        tools=$(grep -o '"type":"tool_use"' "$alog" 2>/dev/null | wc -l | tr -d ' ')
+        turns=$(grep -c '"type":"assistant"' "$glog" 2>/dev/null || echo 0)
+        tools=$(grep -o '"type":"tool_use"' "$glog" 2>/dev/null | wc -l | tr -d ' ')
       fi
 
-      detail="$(verify_task "$task" "$work" "$alog")"; pass=$([ $? = 0 ] && echo 1 || echo 0)
-      [ "$rc" = 124 ] && tmo=" (TIMEOUT)" || tmo=""
-      printf "  [%s] %-6s %ss%s  pass=%s  mem=%sMB  cpu=%s%%  turns=%s tools=%s\n" \
-        "$agent" "$task" "$secs" "$tmo" "$pass" "$peak_mb" "$peak_cpu" "$turns" "$tools"
+      detail="$(verify_task "$task" "$work" "$glog")"; pass=$([ $? = 0 ] && echo 1 || echo 0)
+      [ "$tmo" = 1 ] && tflag=" (RUN_TIMEOUT)" || tflag=""
+      printf "  [%s] %-6s %ss%s  pass=%s  tree=%sMB  cpu=%s%%  model=%sMB  turns=%s tools=%s\n" \
+        "$agent" "$task" "$secs" "$tflag" "$pass" "$tree_mb" "$peak_cpu" "${foot:-?}" "$turns" "$tools"
       echo "$detail"
-      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$agent" "$spec" "$task" "$diff" "$secs" "$pass" "$rc" "$turns" "$tools" "$peak_mb" "$peak_cpu" "" >> "$CSV"
+      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$agent" "$spec" "$task" "$diff" "$secs" "$pass" "$rc" "$tmo" "$turns" "$tools" "$tree_mb" "$peak_cpu" "$foot" >> "$CSV"
 
       [ "${KEEP:-0}" = 1 ] && echo "    kept: $work" || rm -rf "$work"
     done
   done
-
-  # Graceful stop so /usr/bin/time prints the peak footprint. A run killed by its
-  # timeout can leave an in-flight generation the gateway must drain first, so be
-  # patient (up to 60s) before the hard kill.
-  kill -INT "$GW_PID" 2>/dev/null
-  for _ in $(seq 1 60); do kill -0 "$TIME_PID" 2>/dev/null || break; sleep 1; done
-  kill -KILL "$TIME_PID" 2>/dev/null; wait "$TIME_PID" 2>/dev/null
-  foot=$(grep -m1 'peak memory footprint' "$glog" | awk '{printf "%.0f", $1/1048576}')
-  # Backfill the model footprint column for this model's rows.
-  awk -F, -v m="$spec" -v f="${foot:-}" 'BEGIN{OFS=","} NR==1{print;next} $2==m{$12=f} {print}' "$CSV" > "$CSV.tmp" && mv "$CSV.tmp" "$CSV"
-  echo "  model footprint: ${foot:-n/a}MB"
   echo
 done
 

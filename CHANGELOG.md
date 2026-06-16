@@ -1,20 +1,28 @@
 # Changelog
 
-## bench — agentic end-to-end benchmark (real Claude Code / Codex through the gateway)
+## bench — agentic end-to-end benchmark (real `rozum launch` Claude Code / Codex)
 Completed: 2026-06-16
 
-`scripts/bench/agentic.sh`: drives a real headless coding agent (Claude Code and/or OpenAI Codex)
-against a local MLX model through the gateway — the same wiring `rozum launch claude` / `rozum launch
-codex` set up, but with an explicit gateway so the harness owns the lifecycle and can attribute
-resources. For every `agent × model × task` it gives a real coding task (trivial → hard, with tool
-use: `greet` / `build` / `fix` / `test` / `debug`, reusing the proven e2e tasks), **verifies the
-result independently** of the agent (files exist, `cargo test` green, `cargo run -- hello` == `olleh`),
-and measures wall time, the agent process-tree peak RAM + peak combined CPU%, and the model's resident
-footprint (gateway, `/usr/bin/time -l`). Curated tool-use-capable default model set (tiny models can't
-drive tool calls); both agents auto-detected. Early findings: verification is independent of agent
-completion (a run killed by its timeout still PASSes if the artifact is correct); Claude Code's large
-system prompt + tools needs `n_ctx≥16384` and inflates the model footprint well past a bare chat
-request (~16.8 GB vs ~4.4 GB for Qwen3-4B), while Codex is leaner and ~4× faster to first result.
+`scripts/bench/agentic.sh`: drives a **real `rozum launch claude` / `rozum launch codex`** against a
+local MLX model — the whole stack as a user runs it. Each run is a private in-process model
+(`--dedicated`), so launch applies its Claude-Code prompt trimming and Codex provider config; every
+agent flag is passed on the command line. For each `agent × model × task` it gives a real coding task
+(trivial → hard, with tool use: `greet` / `build` / `fix` / `test` / `debug`, reusing the e2e tasks),
+**verifies the result independently** of the agent (files exist, `cargo test` green, `cargo run --
+hello` == `olleh`), and measures wall time, the whole process-tree peak RAM + CPU%, and the model's
+resident footprint (`/usr/bin/time -l` on the rozum process). **Two independent timeouts** per the
+intended design: `ROZUM_GEN_TIMEOUT_SECS` (engine, default 180) bounds a single model request; a
+generous `RUN_TIMEOUT` (default 1200) bounds the whole task (many model calls + cargo builds, which
+don't depend on any one request). Context defaults to the model max (auto, no `--n-ctx` cap).
+
+Findings: verification is independent of the agent's exit (a run that exits non-zero, or is killed by
+its timeout, still PASSes if the artifact is correct — Qwen3-30B-A3B `build` exited rc=1 but passed
+with 31 tool calls). `rozum launch` already trims the Claude-Code prompt
+(`CLAUDE_CODE_DISABLE_BUNDLED_SKILLS` / `_GIT_INSTRUCTIONS` / `_CLAUDE_MDS` / `_NONESSENTIAL_TRAFFIC`,
+`DISABLE_NON_ESSENTIAL_MODEL_CALLS`), cutting footprint ~16.8 → ~13.4 GB for Qwen3-4B even at 2× the
+context — **but the trim has a cost: weak 4B–7B models then emit tool calls as markdown JSON the gateway
+can't parse and fail the agentic loop, while a strong MoE (30B-A3B) drives the full read/edit/run
+loop.** CPU% is GPU-bound-low for the model (MLX runs on Metal) and mainly reflects the agent + cargo.
 `results/` gitignored.
 
 ## gateway — generation inactivity timeout + local-model benchmark harness
