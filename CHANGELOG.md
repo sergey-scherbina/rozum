@@ -1,5 +1,23 @@
 # Changelog
 
+## launch/mlx — coherent context window: auto = model max, `--n-ctx` honored, one number
+Completed: 2026-06-16
+
+The context window was reported inconsistently for mlx-native (the default backend): `resolve_n_ctx`
+printed `context window: 32768 (auto)` (a fixed fallback — `auto_n_ctx` never read the config for the
+non-mistralrs build), `register_n_ctx` advertised that 32768 in `/v1/models`, yet the backend actually
+loaded the model's true max (`ready (context 40960)`) and the overflow guard used that. Three different
+numbers, and `--n-ctx` was silently ignored by mlx (the constructor never received it).
+
+Now there's one source of truth. `auto_n_ctx` reads the model's `max_position_embeddings` for mlx too
+(via the now-ungated `cached_config_json` + new `model_max_ctx`); mlx grows its KV cache lazily per token
+and RAM-preflights each request, so the full max is the safe default (no upfront cost — that's why no cap,
+unlike the mistralrs path which still caps at `N_CTX_AUTO_CAP` because it pre-allocates the pool).
+`MlxNativeBackend::new` now takes `max_ctx: Option<u32>`: `Some(n)` from a user `--n-ctx` caps the window
+to `min(model_max, n)` (so `--n-ctx` finally works on mlx), `None` (tests) uses the full max. So
+`resolve_n_ctx`'s printed value, `register_n_ctx`, `context_window()`, and the backend's "ready" line now
+all agree. Unit test pins `auto_n_ctx("Qwen3-4B") == 40960`. `src/main.rs`, `src/mlx_native_backend.rs`.
+
 ## launch — `--lean` also stabilizes the system-prompt prefix for KV-cache reuse
 Completed: 2026-06-16
 

@@ -322,9 +322,20 @@ mod inner {
         /// `model_dir` is a local directory of safetensors + tokenizer.json +
         /// tokenizer_config.json (the layout HuggingFace / mlx-community ship).
         /// `model_id` selects the chat-template variant and labels logs.
-        pub async fn new(model_dir: PathBuf, model_id: String) -> ModelResult<Self> {
+        /// `max_ctx` caps the declared context window (the model's own max from config is
+        /// the ceiling): `Some(n)` honors a user `--n-ctx` (the window becomes
+        /// `min(model_max, n)`); `None` uses the model's full max. The KV cache grows lazily
+        /// per token + a per-request RAM preflight guards memory, so the full max is safe.
+        pub async fn new(
+            model_dir: PathBuf,
+            model_id: String,
+            max_ctx: Option<u32>,
+        ) -> ModelResult<Self> {
             cap_mlx_memory();
-            let (n_ctx, eos, model_type, kv_per_pos) = read_config(&model_dir);
+            let (mut n_ctx, eos, model_type, kv_per_pos) = read_config(&model_dir);
+            if let Some(cap) = max_ctx {
+                n_ctx = n_ctx.min(cap);
+            }
             let (jobs_tx, jobs_rx) = mpsc::unbounded_channel::<Job>();
             let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
             let label = model_id.clone();
@@ -3042,7 +3053,7 @@ mod tests {
         }
         let spec = "mlx-community:Qwen3-4B-4bit";
         let dir = ensure_model_dir(spec).await.expect("qwen3 resolve");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/")).await.expect("load");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None).await.expect("load");
 
         let tool = ToolDef {
             name: "get_weather".into(),
@@ -3109,7 +3120,7 @@ mod tests {
         }
         let spec = "mlx-community:Qwen3.6-35B-A3B-4bit";
         let dir = ensure_model_dir(spec).await.expect("qwen3.6 resolve");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/")).await.expect("load");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None).await.expect("load");
 
         let tool = ToolDef {
             name: "get_weather".into(),
@@ -3169,7 +3180,7 @@ mod tests {
 
         let spec = "mlx-community:Qwen3-4B-4bit";
         let dir = ensure_model_dir(spec).await.expect("resolve");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/")).await.expect("load");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None).await.expect("load");
 
         let schema = serde_json::json!({
             "type": "object",
@@ -3279,7 +3290,7 @@ mod tests {
         let before = active_mb();
         let after_load;
         {
-            let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+            let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into(), None)
                 .await
                 .expect("backend load");
             let _ = collect_to_string(
@@ -3328,7 +3339,7 @@ mod tests {
             std::env::set_var("ROZUM_BATCH_WINDOW_MS", "500");
         }
         {
-            let a = MlxNativeBackend::new(dir.clone(), "mlx-community/Qwen3-4B-4bit".into())
+            let a = MlxNativeBackend::new(dir.clone(), "mlx-community/Qwen3-4B-4bit".into(), None)
                 .await
                 .expect("load A");
             let s1 = a.chat(q()).await.unwrap();
@@ -3339,7 +3350,7 @@ mod tests {
             assert!(t1.contains("Paris") && t2.contains("Paris"), "A: {t1:?} {t2:?}");
         } // a dropped here → Drop joins the worker, frees the model
         eprintln!("SEQ: backend A dropped+joined; loading B...");
-        let b = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+        let b = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into(), None)
             .await
             .expect("load B");
         let t = collect_to_string(b.chat(q()).await.unwrap()).await.unwrap();
@@ -3364,7 +3375,7 @@ mod tests {
 
         let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
             .expect("Qwen3-4B-4bit not in HF cache");
-        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into(), None)
             .await
             .expect("backend load");
         let req =
@@ -3407,7 +3418,7 @@ mod tests {
         let q2 = "Now name three farm animals, comma separated.";
 
         // Backend A: turn 1 (populates the prefix), then turn 2 (REUSES it).
-        let a = MlxNativeBackend::new(dir.clone(), "mlx-community/Qwen3-4B-4bit".into())
+        let a = MlxNativeBackend::new(dir.clone(), "mlx-community/Qwen3-4B-4bit".into(), None)
             .await
             .expect("load A");
         let t1 = collect_to_string(a.chat(req(vec![Message::user(q1)])).await.unwrap())
@@ -3419,7 +3430,7 @@ mod tests {
             .unwrap();
 
         // Backend B: same turn-2 conversation, no history → full fresh prefill.
-        let b = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+        let b = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into(), None)
             .await
             .expect("load B");
         let fresh = collect_to_string(b.chat(req(convo2)).await.unwrap())
@@ -3464,7 +3475,7 @@ mod tests {
         let q1 = "Name three primary colors, comma separated.";
         let q2 = "Now name three farm animals, comma separated.";
 
-        let b = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-27B-4bit".into())
+        let b = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-27B-4bit".into(), None)
             .await
             .expect("load");
 
@@ -3507,7 +3518,7 @@ mod tests {
         use std::time::Instant;
 
         let dir = resolve_model_dir(spec).unwrap_or_else(|| panic!("{spec} not in HF cache"));
-        let backend = MlxNativeBackend::new(dir, model_id.into())
+        let backend = MlxNativeBackend::new(dir, model_id.into(), None)
             .await
             .expect("backend load");
         let sentence = "Explain in detail how transformer neural networks process a sequence. ";
@@ -3585,7 +3596,7 @@ mod tests {
 
         let spec = "mlx-community:Llama-3.2-1B-Instruct-4bit";
         let dir = ensure_model_dir(spec).await.expect("llama download/resolve");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None)
             .await
             .expect("backend load");
         let req =
@@ -3610,7 +3621,7 @@ mod tests {
 
         let spec = "mlx-community:SmolLM2-1.7B-Instruct";
         let dir = ensure_model_dir(spec).await.expect("smollm download/resolve");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None)
             .await
             .expect("backend load (SmolLM2 — llama path, non-quantized)");
         let req =
@@ -3634,7 +3645,7 @@ mod tests {
 
         let spec = "mlx-community:gemma-3-1b-it-4bit";
         let dir = ensure_model_dir(spec).await.expect("gemma3 download/resolve");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None)
             .await
             .expect("backend load (Gemma 3)");
         let req =
@@ -3662,7 +3673,7 @@ mod tests {
 
         let spec = "mlx-community:gemma-3-4b-it-4bit";
         let dir = ensure_model_dir(spec).await.expect("gemma3-4b download/resolve");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None)
             .await
             .expect("backend load (Gemma 3 multimodal wrapper → text model)");
         let req =
@@ -3686,7 +3697,7 @@ mod tests {
 
         let spec = "mlx-community:Phi-3-mini-4k-instruct-4bit";
         let dir = ensure_model_dir(spec).await.expect("phi3 download/resolve");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None)
             .await
             .expect("backend load (Phi-3 fused-split → llama path)");
         let req =
@@ -3711,7 +3722,7 @@ mod tests {
 
         let spec = "mlx-community:Mistral-7B-Instruct-v0.3-4bit";
         let dir = ensure_model_dir(spec).await.expect("mistral download/resolve");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None)
             .await
             .expect("backend load (mistral routes to the llama path)");
         let req =
@@ -3734,7 +3745,7 @@ mod tests {
 
         let spec = "modelscope:mlx-community/Qwen2.5-0.5B-Instruct-4bit";
         let dir = ensure_model_dir(spec).await.expect("modelscope download/resolve");
-        let backend = MlxNativeBackend::new(dir, "Qwen2.5-0.5B-Instruct-4bit".into())
+        let backend = MlxNativeBackend::new(dir, "Qwen2.5-0.5B-Instruct-4bit".into(), None)
             .await
             .expect("backend load");
         let req =
@@ -3756,7 +3767,7 @@ mod tests {
 
         let spec = "mlx-community:Qwen2.5-0.5B-Instruct-4bit";
         let dir = ensure_model_dir(spec).await.expect("qwen2 download/resolve");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None)
             .await
             .expect("backend load");
         let req =
@@ -3781,7 +3792,7 @@ mod tests {
 
         let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
             .expect("Qwen3-4B-4bit not in HF cache");
-        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into(), None)
             .await
             .expect("backend load");
         let mut req = ChatRequest::simple(
@@ -3824,7 +3835,7 @@ mod tests {
 
         let dir = resolve_model_dir("mlx-community:Qwen3-30B-A3B-4bit")
             .expect("Qwen3-30B-A3B-4bit not in HF cache");
-        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-30B-A3B-4bit".into())
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-30B-A3B-4bit".into(), None)
             .await
             .expect("backend load");
         let req = ChatRequest::simple(
@@ -3849,7 +3860,7 @@ mod tests {
 
         let dir = resolve_model_dir("mlx-community:Qwen3.6-27B-4bit")
             .expect("Qwen3.6-27B-4bit not in HF cache");
-        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-27B-4bit".into())
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-27B-4bit".into(), None)
             .await
             .expect("backend load");
         let mut req = ChatRequest::simple(
@@ -3880,7 +3891,7 @@ mod tests {
 
         let dir = resolve_model_dir("mlx-community:Qwen3.6-35B-A3B-4bit")
             .expect("Qwen3.6-35B-A3B-4bit not in HF cache");
-        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-35B-A3B-4bit".into())
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-35B-A3B-4bit".into(), None)
             .await
             .expect("backend load");
         let mut req = ChatRequest::simple(
@@ -5020,7 +5031,7 @@ mod tests {
 
         let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
             .expect("Qwen3-4B-4bit not in HF cache");
-        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into(), None)
             .await
             .expect("backend load");
 
@@ -5082,7 +5093,7 @@ mod tests {
         }
         let spec = "mlx-community:Llama-3.2-1B-Instruct-4bit";
         let dir = ensure_model_dir(spec).await.expect("llama resolve/download");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None)
             .await
             .expect("backend load");
         let mk = |q: &str| {
@@ -5125,7 +5136,7 @@ mod tests {
         }
         let spec = "mlx-community:Qwen2.5-0.5B-Instruct-4bit";
         let dir = ensure_model_dir(spec).await.expect("qwen2 resolve/download");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None)
             .await
             .expect("backend load");
         let mk = |q: &str| {
@@ -5170,7 +5181,7 @@ mod tests {
         }
         let spec = "mlx-community:gemma-3-1b-it-4bit";
         let dir = ensure_model_dir(spec).await.expect("gemma3 resolve/download");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"))
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None)
             .await
             .expect("backend load");
         let mk = |q: &str| {
@@ -5217,7 +5228,7 @@ mod tests {
         }
         let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
             .expect("Qwen3-4B-4bit not in HF cache");
-        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into(), None)
             .await
             .expect("backend load");
         let mk = |q: &str| {
@@ -5276,7 +5287,7 @@ mod tests {
         }
         let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
             .expect("Qwen3-4B-4bit not in HF cache");
-        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into(), None)
             .await
             .expect("backend load");
         // Temperature + top_p (NOT greedy) — these used to fall back to serial; now they batch.
@@ -5331,7 +5342,7 @@ mod tests {
         }
         let dir = resolve_model_dir("mlx-community:Qwen3-4B-4bit")
             .expect("Qwen3-4B-4bit not in HF cache");
-        let inner = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into())
+        let inner = MlxNativeBackend::new(dir, "mlx-community/Qwen3-4B-4bit".into(), None)
             .await
             .expect("backend load");
         // Wrap exactly as `serve` does. capacity == batch_cap() == 2 → admission limit 2.
@@ -5405,7 +5416,7 @@ mod tests {
 
         let dir = resolve_model_dir("mlx-community:Qwen3.6-27B-4bit")
             .expect("Qwen3.6-27B-4bit not in HF cache");
-        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-27B-4bit".into())
+        let backend = MlxNativeBackend::new(dir, "mlx-community/Qwen3.6-27B-4bit".into(), None)
             .await
             .expect("backend load");
 

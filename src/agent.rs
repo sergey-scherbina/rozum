@@ -932,7 +932,7 @@ mod tests {
         }
         let spec = "mlx-community:Qwen3-4B-4bit";
         let dir = ensure_model_dir(spec).await.expect("resolve");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/")).await.expect("load");
+        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None).await.expect("load");
 
         let out = run_agent(
             &backend,

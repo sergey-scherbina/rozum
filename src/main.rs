@@ -1725,6 +1725,27 @@ fn apply_lean_flags(program: &mut Vec<String>, lean: bool) {
 }
 
 #[cfg(test)]
+mod nctx_tests {
+    use super::{auto_n_ctx, model_max_ctx, N_CTX_FALLBACK};
+
+    #[test]
+    fn auto_n_ctx_is_model_max_when_config_cached() {
+        // Qwen3-4B's config.json has max_position_embeddings = 40960. When that snapshot
+        // is cached locally, `auto` must report the real model max (the bug was returning a
+        // fixed 32768 fallback while the mlx backend loaded 40960). If the model isn't
+        // cached in this environment, the helper returns None → the fallback; tolerate both.
+        let spec = "mlx-community:Qwen3-4B-4bit";
+        match model_max_ctx(spec) {
+            Some(max) => {
+                assert_eq!(max, 40_960, "Qwen3-4B max_position_embeddings");
+                assert_eq!(auto_n_ctx(spec), 40_960, "auto must equal the model max for mlx");
+            }
+            None => assert_eq!(auto_n_ctx(spec), N_CTX_FALLBACK),
+        }
+    }
+}
+
+#[cfg(test)]
 mod lean_tests {
     use super::{apply_lean_flags, LEAN_DISALLOW};
 
@@ -2800,26 +2821,32 @@ fn resolve_n_ctx(model_spec: &str, requested: Option<u32>) -> u32 {
     n
 }
 
-/// The model's `max_position_embeddings` (from config.json), capped at
-/// [`N_CTX_AUTO_CAP`]; falls back to [`N_CTX_FALLBACK`] when the config can't
-/// be read. The KV cache is what actually scales with this, so the cap keeps the
-/// pre-allocated PagedAttention pool bounded; lower it (or raise it) with `--n-ctx`.
-#[cfg(feature = "mistralrs")]
-fn auto_n_ctx(model_spec: &str) -> u32 {
+/// The model's max context — `max_position_embeddings` from the cached `config.json`
+/// (`text_config`'s for multimodal). `None` if the config can't be read.
+fn model_max_ctx(model_spec: &str) -> Option<u32> {
     let id = rozum::mistralrs_backend::normalize_spec(model_spec);
-    cached_config_json(&id)
-        .and_then(|cfg| {
-            let t = cfg.get("text_config").cloned().unwrap_or(cfg);
-            t.get("max_position_embeddings")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32)
-        })
-        .map_or(N_CTX_FALLBACK, |model_max| model_max.min(N_CTX_AUTO_CAP))
+    cached_config_json(&id).and_then(|cfg| {
+        let t = cfg.get("text_config").cloned().unwrap_or(cfg);
+        t.get("max_position_embeddings")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+    })
 }
 
+/// The default context window: the model's max, falling back to [`N_CTX_FALLBACK`].
+/// **mistralrs** additionally caps it at [`N_CTX_AUTO_CAP`] — it pre-allocates the
+/// PagedAttention KV pool, so a huge advertised max (Qwen3.6: 262144) would never fit.
+#[cfg(feature = "mistralrs")]
+fn auto_n_ctx(model_spec: &str) -> u32 {
+    model_max_ctx(model_spec).map_or(N_CTX_FALLBACK, |m| m.min(N_CTX_AUTO_CAP))
+}
+
+/// The default context window: the model's max, falling back to [`N_CTX_FALLBACK`].
+/// **mlx-native** grows its KV cache lazily per actual token and runs a per-request RAM
+/// preflight, so the full model max is safe as the default — no upfront cost, no cap.
 #[cfg(not(feature = "mistralrs"))]
-fn auto_n_ctx(_model_spec: &str) -> u32 {
-    N_CTX_FALLBACK
+fn auto_n_ctx(model_spec: &str) -> u32 {
+    model_max_ctx(model_spec).unwrap_or(N_CTX_FALLBACK)
 }
 
 /// Total physical RAM in bytes (macOS `sysctl hw.memsize`).
@@ -2893,7 +2920,6 @@ fn cached_weights_bytes(model_id: &str) -> Option<u64> {
 }
 
 /// Parse the model's `config.json` from the local HuggingFace cache, if present.
-#[cfg(feature = "mistralrs")]
 fn cached_config_json(model_id: &str) -> Option<serde_json::Value> {
     let (org, repo) = model_id.split_once('/')?;
     let home = std::env::var("HOME").ok()?;
@@ -3136,7 +3162,7 @@ async fn try_build_mistralrs_backend(
 #[cfg(feature = "mlx-native")]
 async fn try_build_mlx_native_backend(
     model_spec: &str,
-    _n_ctx: u32,
+    n_ctx: u32,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
     use rozum::mlx_native_backend::{MlxNativeBackend, ensure_model_dir};
     // GGUF model FILES and `lmstudio:` specs belong to other backends. Use
@@ -3153,7 +3179,7 @@ async fn try_build_mlx_native_backend(
     // runtime can't run). `None` → fall through to the next backend.
     let dir = ensure_model_dir(model_spec).await?;
     let id = rozum::mistralrs_backend::normalize_spec(model_spec);
-    match MlxNativeBackend::new(dir.clone(), id.clone()).await {
+    match MlxNativeBackend::new(dir.clone(), id.clone(), Some(n_ctx)).await {
         Ok(b) => {
             eprintln!(
                 "backend: mlx-native (in-process, Metal) — model: {id} ({})",
