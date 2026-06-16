@@ -797,6 +797,28 @@ mod inner {
         )
     }
 
+    /// A process-unique tool-call id. The Anthropic/OpenAI contract requires each
+    /// `tool_use` id to be unique within a conversation so the client can pair the
+    /// matching `tool_result` back to it. A per-response `call_{i}` reset collides
+    /// across turns (`call_0` reappears every turn), and Claude Code then can't pair
+    /// the result — it drops the turn as `[Tool use interrupted]`, so the model never
+    /// sees its tool output and loops (e.g. re-reads a file forever). A monotonic
+    /// counter guarantees a fresh id every time, across all turns and requests.
+    fn next_tool_call_id() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        format!("call_{}", NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn tool_call_ids_are_unique() {
+        // A per-turn `call_0` reset collides across turns and the client (Claude
+        // Code) then can't pair the tool_result, dropping the turn as `[Tool use
+        // interrupted]`. Each id must be fresh.
+        assert_ne!(next_tool_call_id(), next_tool_call_id());
+    }
+
     /// Render the prompt and stream token events. Dispatches on the model
     /// architecture; each `Generate` iterator feeds the shared streaming loop.
     fn run_job(
@@ -1228,8 +1250,8 @@ mod inner {
                 crate::serving::parse_tool_calls(&self.full_text)
             };
             if !tool_calls.is_empty() {
-                for (i, (name, args)) in tool_calls.iter().enumerate() {
-                    let id = format!("call_{i}");
+                for (name, args) in tool_calls.iter() {
+                    let id = next_tool_call_id();
                     let _ = self.job.events.send(Ok(ChatEvent::ToolUseStart {
                         id: id.clone(),
                         name: name.clone(),
@@ -2564,8 +2586,8 @@ mod inner {
             crate::serving::parse_tool_calls(&full_text)
         };
         if !tool_calls.is_empty() {
-            for (i, (name, args)) in tool_calls.iter().enumerate() {
-                let id = format!("call_{i}");
+            for (name, args) in tool_calls.iter() {
+                let id = next_tool_call_id();
                 let _ = job.events.send(Ok(ChatEvent::ToolUseStart {
                     id: id.clone(),
                     name: name.clone(),

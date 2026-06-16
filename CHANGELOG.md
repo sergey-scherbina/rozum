@@ -1,5 +1,28 @@
 # Changelog
 
+## mlx — globally-unique tool-call ids (fixes claude `debug` read-loop on 35B)
+Completed: 2026-06-16
+
+The mlx backend minted each `tool_use` id as `call_{i}` where `i` is the index **within one
+response** — so the counter RESET to `call_0` every turn and the same id recurred across the
+conversation. The Anthropic/OpenAI contract requires `tool_use` ids unique within a conversation so
+the client pairs each `tool_result` back to its call. Claude Code, receiving a `call_0` it had already
+seen in a prior turn, could not pair the result and dropped the turn as `[Tool use interrupted]` /
+`(no content)`. The model therefore **never saw the output of its own tool call** (e.g. the file it
+just Read) and re-issued it forever — the 35B `debug` read-loop.
+
+Captured the real CC requests (temporary `ROZUM_DUMP_REQ`) and proved it: across all 5 requests CC
+sent for the 35B run, the `src/lib.rs` content was ABSENT — every Read turn was `[Tool use
+interrupted]`. The gateway stream itself was textbook-clean (single `tool_use`, `stop_reason=tool_use`,
+TTFT 1.5 s, no timeout), and the model edits correctly when the Read result is supplied — so the only
+defect was the colliding id. Why it bit 35B and not 30B-A3B: 35B opens with TWO tool calls
+(`call_0`+`call_1`), so its turn-2 `call_0` collides with an id already in the conversation; 30B-A3B
+emits one call per turn and dodged it.
+
+Fix: `next_tool_call_id()` — a process-monotonic counter, so every id is fresh across all turns and
+requests. Verified: 35B claude went **4/5 → 5/5** (`debug` now PASSes, and fewer turns — no more
+loop), 30B-A3B stays **5/5** (no regression). Unit test asserts uniqueness.
+
 ## constrain — tool-call envelope forces `name` before `arguments`
 Completed: 2026-06-16
 
