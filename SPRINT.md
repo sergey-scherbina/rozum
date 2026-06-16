@@ -78,14 +78,15 @@ Full writeup + the one-pass diagnostic methodology that localized it:
   files land in cwd → passes. Hence claude 72% vs codex 32%.
 - **Coder-7B text-only** (turns=1, tools=0): writes the solution as prose instead of calling tools.
 
-- [ ] mlx-chunked-prefill — **PROPOSED (the real 35B memory fix).** The single-request serving path
-  prefills the whole prompt in one forward (`qwen3::Generate::new(m, &mut cache, …, &prompt_tokens)` in
-  the vendored mlx-lm) → activation memory ∝ prompt length → the spike OOMs big models. Chunk the prefill
-  (e.g. 512 tokens/step, accumulating the KV cache — the prefix-reuse path already prefills a *suffix*, so
-  the forward supports incremental) to bound the peak → the 35B fits **without more RAM**. Needs a fork
-  edit to the mlx-lm `Generate` prefill (+ bump rev). Correctness is byte-exact testable on the 4B
-  (chunked == single-shot logits); memory benefit validates on the 35B when RAM frees. Quick interim
-  lever: `ROZUM_MLX_CACHE_GB=1` frees ~3 GB of cache headroom.
+- [x] mlx-chunked-prefill — **DONE 2026-06-16 (dense paths + lower default; fork `9fa852f4`).** Found the
+  hybrid Qwen3.6 path ALREADY chunked; the gap was the **dense** `qwen3`/`qwen3_moe` Generate (single
+  forward over the whole prompt → unbounded activation spike). Both dense Prefill states now chunk at
+  `prefill_chunk_size()`, advancing the KV cache and eval'ing only the cache between chunks (MLX lazy-skips
+  `lm_head` on discarded chunks). Added `KeyValueCache::collect_eval`. **Byte-exact verified on Qwen3-4B**
+  (chunk=64 == single-shot). Lowered `PREFILL_CHUNK_DEFAULT` 2048→1024 for 35B headroom (incremental
+  prefix-reuse makes per-turn cost ~nil). Cargo rev bumped. **Open:** the 35B OOM relief is reasoned, not
+  re-measured (needs RAM headroom — pair with `ROZUM_MLX_CACHE_GB=1`); qwen2/gemma3/llama dense paths not
+  yet chunked (rare/dropped models, no current OOM).
 
 The agentic e2e matrix (`scripts/bench/agentic.sh`, 9 models × claude+codex × 5 tasks) drove a chain
 of backend fixes and surfaced the levers below. **DONE this round:** cache-aware attention mask for

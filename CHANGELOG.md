@@ -1,5 +1,24 @@
 # Changelog
 
+## mlx — chunked prefill for the dense paths + lower default chunk (35B memory headroom)
+Completed: 2026-06-16
+
+The final matrix's only infra failure was the 35B-A3B gateway OOMing during a big agent prompt's prefill.
+Root cause: the **dense** `qwen3` / `qwen3_moe` Generate prefilled the whole prompt in **one forward**, so
+the activation spike (attention scores `[T, ctx]` + MLP + `lm_head` over all T positions) was unbounded;
+the **hybrid** Qwen3.6 path already chunked, but its 2048-token default still spiked.
+
+Fork (`9fa852f4`): both dense Prefill states now process the prompt in chunks of `prefill_chunk_size()`,
+advancing the KV cache across chunks and eval'ing **only the cache** between them — so MLX's lazy graph
+skips `lm_head` on the discarded intermediate chunks (needed only for the final position) and the peak is
+bounded to one chunk. Added `KeyValueCache::collect_eval` (default no-op; `ConcatKeyValueCache` pushes its
+state arrays) so the generic dense Generate can force the per-chunk cache. **Byte-exact verified on
+Qwen3-4B** (chunk=64 vs single-shot → identical greedy output). Also lowered `PREFILL_CHUNK_DEFAULT`
+2048→1024 (the 2048 spike + ~25 GB resident + KV + cache topped the MLX cap on a 36 GB Mac → process-fatal
+Metal OOM); prefix-reuse makes per-turn prefill incremental, so it only adds a few eval syncs on turn 1.
+Env-tunable via `ROZUM_MLX_PREFILL_CHUNK`. `Cargo.toml` bumps the fork rev. (35B OOM relief reasoned, not
+yet re-measured — needs RAM headroom; pair with `ROZUM_MLX_CACHE_GB=1`.)
+
 ## launch/mlx — coherent context window: auto = model max, `--n-ctx` honored, one number
 Completed: 2026-06-16
 

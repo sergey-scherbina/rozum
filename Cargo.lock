@@ -3512,7 +3512,7 @@ dependencies = [
 [[package]]
 name = "mlx-internal-macros"
 version = "0.25.3"
-source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=693f89ab1a4f95ba2973bc21a53a0c2030ce7070#693f89ab1a4f95ba2973bc21a53a0c2030ce7070"
+source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=9fa852f4bc3f8831ce83b8743495bc929720b8da#9fa852f4bc3f8831ce83b8743495bc929720b8da"
 dependencies = [
  "darling 0.21.3",
  "itertools 0.14.0",
@@ -3524,7 +3524,7 @@ dependencies = [
 [[package]]
 name = "mlx-lm"
 version = "0.0.1"
-source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=693f89ab1a4f95ba2973bc21a53a0c2030ce7070#693f89ab1a4f95ba2973bc21a53a0c2030ce7070"
+source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=9fa852f4bc3f8831ce83b8743495bc929720b8da#9fa852f4bc3f8831ce83b8743495bc929720b8da"
 dependencies = [
  "anyhow",
  "clap",
@@ -3542,7 +3542,7 @@ dependencies = [
 [[package]]
 name = "mlx-lm-utils"
 version = "0.0.1"
-source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=693f89ab1a4f95ba2973bc21a53a0c2030ce7070#693f89ab1a4f95ba2973bc21a53a0c2030ce7070"
+source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=9fa852f4bc3f8831ce83b8743495bc929720b8da#9fa852f4bc3f8831ce83b8743495bc929720b8da"
 dependencies = [
  "minijinja",
  "minijinja-contrib",
@@ -3555,7 +3555,7 @@ dependencies = [
 [[package]]
 name = "mlx-macros"
 version = "0.25.3"
-source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=693f89ab1a4f95ba2973bc21a53a0c2030ce7070#693f89ab1a4f95ba2973bc21a53a0c2030ce7070"
+source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=9fa852f4bc3f8831ce83b8743495bc929720b8da#9fa852f4bc3f8831ce83b8743495bc929720b8da"
 dependencies = [
  "darling 0.21.3",
  "proc-macro2",
@@ -3566,7 +3566,7 @@ dependencies = [
 [[package]]
 name = "mlx-rs"
 version = "0.25.3"
-source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=693f89ab1a4f95ba2973bc21a53a0c2030ce7070#693f89ab1a4f95ba2973bc21a53a0c2030ce7070"
+source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=9fa852f4bc3f8831ce83b8743495bc929720b8da#9fa852f4bc3f8831ce83b8743495bc929720b8da"
 dependencies = [
  "dyn-clone",
  "half",
@@ -3589,7 +3589,7 @@ dependencies = [
 [[package]]
 name = "mlx-sys"
 version = "0.2.0"
-source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=693f89ab1a4f95ba2973bc21a53a0c2030ce7070#693f89ab1a4f95ba2973bc21a53a0c2030ce7070"
+source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=9fa852f4bc3f8831ce83b8743495bc929720b8da#9fa852f4bc3f8831ce83b8743495bc929720b8da"
 dependencies = [
  "bindgen",
  "cc",
