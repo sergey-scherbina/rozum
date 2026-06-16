@@ -1,5 +1,22 @@
 # Changelog
 
+## mlx-native — stop streaming loose tool calls as text (fixes agentic re-emit loop) + constrain on by default
+Completed: 2026-06-16
+
+Two changes that, together with the earlier constrained-decode + mask fixes, make a small model run a
+full agentic task **cleanly to completion**:
+
+- **Don't leak a loose tool call as text.** The streamer suppressed only the `<tool_call>` envelope, so
+  a loose ```json / `{"name":…}` tool call was emitted BOTH as raw text AND (at finalize) as a
+  `tool_use`. The model then saw its own call twice in the next turn and kept re-emitting it — an
+  infinite agentic loop that burned the whole timeout on an already-passing task. `BatchSeq` now
+  suppresses loose tool markup too (`tool_markup_at` + a held-back trailing ``` fence in tool requests,
+  flushed at finalize if it wasn't a call). Validated: Qwen2.5-Coder-7B `build` now finishes in 4 turns,
+  `rc=0`, no loop (was: looped to the 500 s timeout) — clean `tool_use` blocks, `cargo run` → `olleh`.
+- **`ROZUM_MLX_CONSTRAIN` is on by default** (`=0` to disable). The masked decode forces valid,
+  schema-conforming tool-call JSON even from weaker models; the perf cost (B=1) is worth the
+  reliability for the typical single-stream agentic use. `src/mlx_native_backend.rs`, 2 tests.
+
 ## mlx-native — constrained decoding also catches loose (markdown / bare) JSON tool calls
 Completed: 2026-06-16
 

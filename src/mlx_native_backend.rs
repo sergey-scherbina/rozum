@@ -1140,7 +1140,8 @@ mod inner {
                 let stable = text.trim_end_matches('\u{FFFD}');
                 self.full_text = stable.to_string();
                 if !self.tool_seen {
-                    if let Some(pos) = stable.find(TOOL_OPEN) {
+                    let tools = !self.job.tools.is_empty();
+                    if let Some(pos) = tool_markup_at(stable, tools) {
                         if pos > self.emitted.len() && stable.starts_with(&self.emitted) {
                             let delta = stable[self.emitted.len()..pos].to_string();
                             self.emitted = stable[..pos].to_string();
@@ -1149,15 +1150,28 @@ mod inner {
                         self.tool_seen = true;
                     } else if stable.len() > self.emitted.len() && stable.starts_with(&self.emitted)
                     {
-                        let delta = stable[self.emitted.len()..].to_string();
-                        self.emitted = stable.to_string();
-                        if self
-                            .job
-                            .events
-                            .send(Ok(ChatEvent::TextDelta { text: delta }))
-                            .is_err()
-                        {
-                            return false;
+                        // Hold back a trailing ``` fence in a tool request — it may open a
+                        // loose tool call the finalizer turns into a tool_use; leaking it
+                        // duplicates the call as text. Flushed at finalize if it wasn't one.
+                        let cut = if tools {
+                            stable
+                                .rfind("```")
+                                .filter(|&p| p >= self.emitted.len())
+                                .unwrap_or(stable.len())
+                        } else {
+                            stable.len()
+                        };
+                        if cut > self.emitted.len() {
+                            let delta = stable[self.emitted.len()..cut].to_string();
+                            self.emitted = stable[..cut].to_string();
+                            if self
+                                .job
+                                .events
+                                .send(Ok(ChatEvent::TextDelta { text: delta }))
+                                .is_err()
+                            {
+                                return false;
+                            }
                         }
                     }
                 }
@@ -1186,7 +1200,9 @@ mod inner {
                     let _ = self.job.events.send(Ok(ChatEvent::ToolUseEnd { id }));
                 }
                 self.stop = StopReason::ToolUse;
-            } else if self.tool_seen && self.full_text.len() > self.emitted.len() {
+            } else if self.full_text.len() > self.emitted.len() {
+                // Flush held-back text: suppressed tool markup that wasn't a parseable
+                // call, or a held-back ``` fence that turned out not to open one.
                 let _ = self.job.events.send(Ok(ChatEvent::TextDelta {
                     text: self.full_text[self.emitted.len()..].to_string(),
                 }));
@@ -1252,9 +1268,12 @@ mod inner {
             && (is_dense(model) || is_hybrid_arch(model))
     }
 
-    /// Whether constrained tool decoding is enabled (`ROZUM_MLX_CONSTRAIN` set, any value).
+    /// Whether constrained tool decoding is enabled. **On by default** (it forces
+    /// valid, schema-conforming tool-call JSON even from weaker models); set
+    /// `ROZUM_MLX_CONSTRAIN=0` to disable it (the B=1 masked path has a perf cost,
+    /// so high-throughput multi-stream serving may want it off).
     fn constrain_enabled() -> bool {
-        std::env::var_os("ROZUM_MLX_CONSTRAIN").is_some()
+        !matches!(std::env::var("ROZUM_MLX_CONSTRAIN").as_deref(), Ok("0"))
     }
 
     /// Runtime driver that constrains a tool call to the tool schemas. Built from a job's
@@ -1286,6 +1305,29 @@ mod inner {
             i = pos + 1;
         }
         None
+    }
+
+    /// Byte offset where tool-call markup begins, to suppress it from the streamed
+    /// text: a `<tool_call>` envelope, or — when `tools` are offered — a loose
+    /// ```json fence / bare `{"name":…}` the finalizer turns into a `tool_use`.
+    /// Without suppression the call leaks as raw text AND a tool_use, which makes
+    /// weaker models re-emit it (an agentic loop).
+    pub(crate) fn tool_markup_at(text: &str, tools: bool) -> Option<usize> {
+        if let Some(p) = text.find(TOOL_OPEN) {
+            return Some(p);
+        }
+        if !tools {
+            return None;
+        }
+        let brace = find_loose_tool_json(text)?;
+        // Suppress an enclosing ```json fence too, if it sits just before the `{`.
+        let head = &text[..brace];
+        match head.rfind("```") {
+            Some(f) if head[f + 3..].chars().all(|c| c.is_alphanumeric() || c.is_whitespace()) => {
+                Some(f)
+            }
+            _ => Some(brace),
+        }
     }
 
     impl ToolConstraint {
@@ -2913,6 +2955,22 @@ mod tests {
         // A `{` in ordinary prose / a code example (no leading "name") is NOT a tool call.
         assert_eq!(find_loose_tool_json("the struct is { x: 1 }"), None);
         assert_eq!(find_loose_tool_json(r#"{"file_path":"a","content":"b"}"#), None);
+    }
+
+    #[test]
+    fn tool_markup_suppression_points() {
+        use super::inner::tool_markup_at;
+        // Native <tool_call> — suppressed regardless of tools.
+        assert_eq!(tool_markup_at("hi <tool_call>{}", false), Some(3));
+        // Loose ```json fence (tools offered) — suppress from the fence.
+        let fenced = "I'll write it.\n```json\n{\"name\":\"Write\"}";
+        assert_eq!(tool_markup_at(fenced, true), fenced.find("```"));
+        // Bare {"name" — suppress from the brace.
+        assert_eq!(tool_markup_at("ok {\"name\":\"x\"}", true), Some(3));
+        // No tools offered → a loose json is NOT treated as a call.
+        assert_eq!(tool_markup_at("```json\n{\"name\":\"x\"}", false), None);
+        // A `{` in prose / a code example is not a call.
+        assert_eq!(tool_markup_at("returns { x: 1 }", true), None);
     }
 
     #[test]
