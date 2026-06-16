@@ -1,5 +1,17 @@
 # Changelog
 
+## launch — rozum-launched codex now defaults to `medium` reasoning (was the user's global `xhigh`)
+Completed: 2026-06-17
+
+`rozum launch codex` now appends `-c model_reasoning_effort=medium` by default (skipped if the
+operator passes their own). Codex inherits the user's global `model_reasoning_effort` — often
+`xhigh`, which suits a frontier cloud model but on a LOCAL model burns minutes of reasoning for
+little gain (measured codex on Qwen3-30B-A3B at 7+ min/task; fix 433 s, test hit the 600 s wall).
+This is unconditional (not gated on `--lean`) and leaves the user's `~/.codex/config.toml` intact —
+it's a launch-time override, like the provider flags. Supersedes the opt-in `--lean` codex cap;
+`--lean` is once again a no-op for codex. The agentic benchmark's codex now runs at medium
+automatically (it launches via `rozum launch`).
+
 ## launch + bench — `rozum launch opencode`; agentic benchmark adds opencode, defaults to 35B
 Completed: 2026-06-17
 

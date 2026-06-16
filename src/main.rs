@@ -1600,7 +1600,13 @@ async fn exec_agent(
             .iter()
             .any(|a| a == "-m" || a == "--model" || a.starts_with("--model="));
         cmd.args(codex_provider_flags(&base, has_model));
-        eprintln!("  → codex: routed at the rozum gateway (model_provider=rozum, wire_api=responses)");
+        // Codex inherits the user's global `model_reasoning_effort` (often `xhigh`), which on a
+        // LOCAL model burns long reasoning chains for little gain — measured codex on Qwen3-30B-A3B
+        // at 7+ min/task. Default the rozum-launched codex to `medium`; skip if the user sets it.
+        if !args.iter().any(|a| a.contains("model_reasoning_effort")) {
+            cmd.args(["-c", "model_reasoning_effort=medium"]);
+        }
+        eprintln!("  → codex: routed at the rozum gateway (model_provider=rozum, wire_api=responses, reasoning=medium)");
     }
 
     // opencode reads providers from a config file, not env. Write one that adds an
@@ -1709,10 +1715,9 @@ const LEAN_DISALLOW: &[&str] = &[
     "mcp__rozum",
 ];
 
-/// `--lean`: optimize a launched agent's request for a local model. For `codex` it caps
-/// `model_reasoning_effort` to `medium` (the user's global `xhigh` burns minutes of reasoning
-/// on a local model for little gain). No-op for other non-`claude` programs. For `claude`,
-/// two safe levers (CC's system prompt itself is load-bearing and
+/// `--lean`: optimize a launched `claude`'s request for a local model. No-op for non-`claude`
+/// programs (codex is already capped to `medium` reasoning unconditionally in `exec_agent`).
+/// Two safe levers (CC's system prompt itself is load-bearing and
 /// is NOT touched — stripping it breaks the agent; only the tool schemas are pure overhead):
 ///
 ///   1. `--exclude-dynamic-system-prompt-sections` — move per-machine bits (cwd, env, **git
@@ -1731,23 +1736,8 @@ fn apply_lean_flags(program: &mut Vec<String>, lean: bool) {
     }
     let Some(p0) = program.first() else { return };
     let is_claude = p0 == "claude" || p0.ends_with("/claude");
-    let is_codex = p0 == "codex" || p0.ends_with("/codex");
-
-    if is_codex {
-        // Codex inherits the user's global `model_reasoning_effort` (often `xhigh`). On a
-        // local model that burns long reasoning chains for little gain — measured codex on a
-        // 30B-A3B taking 7+ min/task (fix 433s, test hit the 600s wall). Cap it to `medium`
-        // for a launched codex. Skipped if the operator passes their own reasoning effort.
-        let user_sets = program.iter().any(|a| a.contains("model_reasoning_effort"));
-        if user_sets {
-            eprintln!("rozum launch: --lean reasoning-cap skipped (you pass model_reasoning_effort)");
-        } else {
-            eprintln!("rozum launch: --lean → codex -c model_reasoning_effort=medium (cap xhigh)");
-            program.push("-c".into());
-            program.push("model_reasoning_effort=medium".into());
-        }
-        return;
-    }
+    // codex reasoning is capped to `medium` unconditionally in `exec_agent` (local models
+    // don't benefit from `xhigh`), so `--lean` has nothing extra to do for codex.
     if !is_claude {
         return;
     }
@@ -1848,18 +1838,9 @@ mod lean_tests {
     }
 
     #[test]
-    fn lean_codex_caps_reasoning_effort() {
-        let out = lean(&["codex", "exec", "fix it"], true);
-        assert_eq!(&out[..3], &["codex", "exec", "fix it"], "original args preserved");
-        assert!(has(&out, "-c") && has(&out, "model_reasoning_effort=medium"));
-        // Absolute path too.
-        assert!(has(&lean(&["/usr/local/bin/codex", "exec", "x"], true),
-                    "model_reasoning_effort=medium"));
-        // Off → untouched.
-        assert!(!has(&lean(&["codex", "exec", "x"], false), "model_reasoning_effort=medium"));
-        // User sets their own → skip.
-        let u = lean(&["codex", "exec", "x", "-c", "model_reasoning_effort=high"], true);
-        assert!(!has(&u, "model_reasoning_effort=medium"));
+    fn lean_is_noop_for_codex() {
+        // codex reasoning is capped in exec_agent, not via --lean → --lean leaves codex args alone.
+        assert_eq!(lean(&["codex", "exec", "x"], true), vec!["codex", "exec", "x"]);
     }
 
     #[test]
