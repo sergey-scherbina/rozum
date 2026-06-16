@@ -1,5 +1,22 @@
 # Changelog
 
+## mlx fork — fix multi-turn crash on qwen2 / llama prefix reuse (mask offset)
+Completed: 2026-06-16
+
+The agentic benchmark surfaced a real backend crash, not just model weakness: a 2nd-turn agentic
+request to a **qwen2** (Qwen2.5 / Coder) or **llama** (Llama-3.2 / Mistral / Phi-3) model died with
+`[broadcast_shapes] Shapes (T,T) and (1,H,T,N+T) cannot be broadcast` → HTTP 500, breaking the tool
+loop. Cause: those two model forwards built the causal mask with `create_additive_causal_mask(T)` —
+a `(T,T)` mask that **ignores the KV-cache offset**. With prefix reuse a continuation prefills `T>1`
+new tokens against an `N`-token cache, so attention is `(B,H,T,N+T)` and the `(T,T)` mask can't
+broadcast. `qwen3` / `qwen3_moe` already used the cache-aware `create_attention_mask(&h, cache, …)`
+(hence 30B-A3B never crashed but Coder-7B did). Ported the same to qwen2 + llama in the vendored
+mlx-rs fork (`838a39ab..bddd6feb`, branch `rozum-hybrid-decode`); `Cargo.toml` bumped to the new rev.
+The no-cache single-turn path is byte-identical (offset 0 → same `(T,T)` causal mask), so no
+regression. Validated: Coder-7B `build` no longer crashes on turn 3 (was rc=1 + 500, now rc=0, no
+`broadcast_shapes`). Note: the crash and a small model's weak multi-step agentic ability are
+independent — Coder-7B still only manages one tool call, but the backend no longer falls over.
+
 ## serving — robust tool-call parsing, unified in a shared module
 Completed: 2026-06-16
 
