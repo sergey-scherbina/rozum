@@ -1,5 +1,29 @@
 # Changelog
 
+## gateway — a manual shared gateway no longer self-exits on `clients_gone`
+Completed: 2026-06-16
+
+The agentic benchmark (`scripts/bench/agentic.sh`) loads each model once as a shared `rozum gateway`
+and reuses it across tasks via `rozum launch` (no `--model`). In practice only the first 2-4 claude
+tasks per model ran; the rest — and **every** codex task — returned `rc=2` (`no gateway running`),
+instantly (0.0 s, 0 turns). Not the 35B prefill OOM `rc=2`: reproduced on tiny Qwen3-4B, where OOM is
+impossible.
+
+Root cause: the lifecycle watchdog spawns whenever `idle_exit || unload_on_idle || launch_managed`.
+The mlx-native backend `can_reload()`, so `unload_on_idle` is true and the watchdog runs even for a
+plain `rozum gateway`. Its lifecycle-exit branch `if seen_lease { "clients_gone" }` was **not** gated
+behind `launch_managed`, so the moment the first `rozum launch` client's lease dropped in the gap
+between two invocations (`in_flight==0 && live_leases==0`), the gateway `process::exit(0)`'d. The
+`/usr/bin/time` rusage showed a ~22 s gateway lifetime instead of the full run. `ROZUM_GATEWAY_IDLE_SECS=0`
+did not help — it only disables the `idle` exit reason, not `clients_gone`.
+
+Fix: gate `seen_lease -> clients_gone` behind `launch_managed`, matching the documented contract — a
+manual gateway exits only via `idle_secs`; a launch-managed daemon still frees everything when its last
+client leaves. Verified end-to-end: the full agentic matrix (5 models × claude+codex × 5 tasks) now runs
+with **0 `rc=2`** (was ~30), the shared gateway survives the whole per-model run, and codex — previously a
+silent victim of the dead gateway — executes normally. This also re-measured the chunked-prefill relief:
+Qwen3.6-35B-A3B served all 10 real agentic tasks at ~25.8 GB peak (under the cap), no OOM.
+
 ## mlx — chunked prefill for the dense paths + lower default chunk (35B memory headroom)
 Completed: 2026-06-16
 

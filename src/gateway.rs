@@ -2869,8 +2869,13 @@ pub async fn serve_on(
                 // 1. Lifecycle exit: no client lease and nothing in flight.
                 if activity.in_flight.load(Ordering::Relaxed) == 0 && live_leases == 0 {
                     let up_for = crate::share::now_unix().saturating_sub(started);
-                    let exit_reason = if seen_lease {
+                    let exit_reason = if launch_managed && seen_lease {
                         // A client lease was observed and is now gone -> agent exited.
+                        // Launch-managed only: a manual `rozum gateway` must outlive
+                        // transient lease gaps between `rozum launch` invocations
+                        // (it only exits via `idle_secs`); otherwise the shared
+                        // "load once, reuse across tasks" gateway self-exits the
+                        // moment one agent detaches.
                         Some("clients_gone")
                     } else if launch_managed && up_for >= STARTUP_GRACE_SECS {
                         // Launch-spawned but no lease ever appeared (agent never
