@@ -1,5 +1,36 @@
 # Changelog
 
+## gateway — break agentic stuck-loops server-side (agents that can't stop when done)
+Completed: 2026-06-16
+
+**Why.** Weak local models driving `rozum launch claude/codex` often don't STOP after finishing a
+task — they run to `--max-turns`. A real `rozum launch claude` transcript (Qwen3-4B, `fix` task) showed
+the mechanism: the model applies the correct fix on its **first** `Edit`, then re-issues the
+byte-identical edit; each retry fails with `String to replace not found` (the target text is gone), and
+the model reads the error as "retry" rather than "already done". It also skips the verification step, so
+it never gets the positive closure signal. Tool-call format is **not** at fault — it's a small-model
+state-tracking limit (0.5–4B loop hard, Llama-1B `fix` = 442 turns; Qwen3-30B-A3B doesn't).
+
+**What.** The gateway sees the whole conversation each turn, so it now detects the stuck signature and
+short-circuits the next doomed turn with a synthetic stop. `detect_stuck_loop` + `chat_or_loopbreak`
+(all three protocol handlers — OpenAI / Responses / Anthropic — route through it) + `synthetic_stop_stream`
+(a one-shot `TextDelta` + `Done{EndTurn}` that every per-protocol serializer renders as an ordinary
+`finish_reason: stop`). Two signatures, because the loop surfaces differently per harness:
+1. **structured** — the same tool call (name+input) repeated ≥3× with **error** results (Codex /
+   Responses, and CC when tool use completes);
+2. **text-repeat** — CC headless *interrupts* its own doomed tool use and records the turn as a text
+   placeholder (`[Tool use interrupted]` / `(no content)`), so the gateway never sees structured tool
+   blocks. CC ping-pongs between a re-diagnosis and the interruption, so "N-in-a-row" misses it; instead
+   we fire when any single assistant text recurs ≥3× within the recent 6-turn window.
+
+**Verified e2e** (Qwen3-4B `fix`): the gateway logged `stuck_loop_broken`, the synthetic stop became
+CC's final assistant turn, and the run concluded `subtype=success` at 7 turns instead of looping.
+Thresholds are conservative (a healthy agent never re-sends a byte-identical failed call nor repeats the
+same assistant text) — 5 unit tests cover both signatures and the distinct-progress non-firing case.
+Also shipped as band-aids: `scripts/bench/agentic.sh` `MAX_TURNS` 30→15 and per-task
+"you-are-DONE→STOP" prompt nudges (fix/debug also say "String to replace not found = already applied,
+don't retry"). `src/gateway.rs`, `scripts/bench/agentic.sh`, `SPRINT.md`.
+
 ## mlx-native — cap MLX unified memory (no more 28 GB hoard / rc=2 cascade) + constrain back to opt-in
 Completed: 2026-06-16
 

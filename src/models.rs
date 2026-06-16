@@ -45,14 +45,26 @@ pub struct RecommendedModel {
     pub notes: &'static str,
 }
 
-/// Hand-picked list optimised for Apple Silicon 24-36 GB unified memory.
-/// Update when new strong models appear in `mlx-community/`.
+/// Hand-picked list optimised for Apple Silicon 24-36 GB unified memory, ordered for
+/// **agentic coding** (Claude Code / Codex via `rozum launch`). The agentic benchmark
+/// (`scripts/bench/agentic.sh`) found a sharp **7B→27B capability cliff**: below ~27B
+/// (or a strong MoE) local quantized models can't reliably drive the multi-step tool
+/// loop. Qwen3/Qwen3.6 emit the native `<tool_call>` format (always valid); Qwen2.5/Coder
+/// need the gateway's JSON-repair. MoE (30B-A3B) is the best speed/capability/memory
+/// balance. Update when stronger `mlx-community/` models appear.
 pub const RECOMMENDED: &[RecommendedModel] = &[
+    RecommendedModel {
+        spec: "mlx-community:Qwen3-30B-A3B-4bit",
+        display_name: "Qwen3 30B-A3B (MoE)",
+        approx_size_gb: 16.0,
+        notes: "BEST for local agentic coding. MoE ~3B active/token → ~100 t/s + strong; \
+                completes tasks cleanly. The speed/capability/memory sweet spot.",
+    },
     RecommendedModel {
         spec: "mlx-community:Qwen3.6-35B-A3B-4bit",
         display_name: "Qwen3.6 35B-A3B (MoE)",
         approx_size_gb: 17.0,
-        notes: "Recommended. MoE, ~3B active params/token, very fast on M-series.",
+        notes: "Strongest MoE; agentic-capable + fast. Slightly more memory than the 30B.",
     },
     RecommendedModel {
         spec: "mlx-community:Qwen3.6-35B-A3B-4bit-DWQ",
@@ -61,64 +73,31 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
         notes: "Distillation-Weighted Quant — same MoE, slightly better quality.",
     },
     RecommendedModel {
-        spec: "hf:unsloth/Qwen3.6-27B-UD-MLX-4bit",
+        spec: "mlx-community:Qwen3.6-27B-4bit",
         display_name: "Qwen3.6 27B (dense)",
-        approx_size_gb: 14.0,
-        notes: "Dense alternative, simpler than MoE.",
+        approx_size_gb: 15.0,
+        notes: "Most capable per task, but DENSE → slow (~15 t/s): finishes correctly yet may \
+                hit the agent timeout before stopping. Prefer the MoE for interactive use.",
     },
     RecommendedModel {
         spec: "mlx-community:Qwen2.5-Coder-32B-Instruct-4bit",
         display_name: "Qwen2.5-Coder 32B",
         approx_size_gb: 19.0,
-        notes: "Strong coding model, native tool-use, dense. Heavy tier (needs ~24 GB).",
+        notes: "Strong dense coder, native tool-use. Heavy (needs ~24 GB); dense → slower.",
     },
     RecommendedModel {
         spec: "mlx-community:Qwen2.5-Coder-7B-Instruct-4bit",
         display_name: "Qwen2.5-Coder 7B",
         approx_size_gb: 4.3,
-        notes: "Mid coder — same family as the 32B, native tool-use, fits 16 GB machines.",
-    },
-    RecommendedModel {
-        spec: "mlx-community:Qwen3-30B-A3B-Instruct-4bit",
-        display_name: "Qwen3 30B-A3B (MoE)",
-        approx_size_gb: 17.0,
-        notes: "Previous-gen Qwen3 MoE, still solid.",
+        notes: "Smallest model that does agentic coding (4/5 build/fix/test/debug) — but only \
+                with the gateway's loose-JSON repair; fits 16 GB. Below this, agentic fails.",
     },
     RecommendedModel {
         spec: "mlx-community:Qwen3-4B-4bit",
         display_name: "Qwen3 4B",
         approx_size_gb: 2.5,
-        notes: "Tiny test model. Fits anywhere, fast iteration.",
-    },
-    RecommendedModel {
-        spec: "mlx-community:Mistral-7B-Instruct-v0.3-4bit",
-        display_name: "Mistral 7B Instruct v0.3",
-        approx_size_gb: 4.1,
-        notes: "Non-Qwen option (Mistral family, runs on the Llama path). General-purpose.",
-    },
-    RecommendedModel {
-        spec: "mlx-community:SmolLM2-1.7B-Instruct",
-        display_name: "SmolLM2 1.7B Instruct",
-        approx_size_gb: 3.4,
-        notes: "Tiny Llama-arch model (bf16, non-quantized). Fast, light, general chat.",
-    },
-    RecommendedModel {
-        spec: "mlx-community:Phi-3-mini-4k-instruct-4bit",
-        display_name: "Phi-3 mini 4k Instruct",
-        approx_size_gb: 2.2,
-        notes: "Microsoft Phi-3 (fused projections, runs on the Llama path). Small, capable.",
-    },
-    RecommendedModel {
-        spec: "mlx-community:gemma-3-4b-it-4bit",
-        display_name: "Gemma 3 4B Instruct",
-        approx_size_gb: 3.4,
-        notes: "Google Gemma 3 (text), general mid-size; sliding-window local/global attention.",
-    },
-    RecommendedModel {
-        spec: "mlx-community:gemma-3-1b-it-4bit",
-        display_name: "Gemma 3 1B Instruct",
-        approx_size_gb: 1.0,
-        notes: "Smallest Gemma 3 (text). Tiny test/iteration model; same attention port as 4B.",
+        notes: "Borderline for agentic (passes simpler edits via native <tool_call>); great as \
+                a fast cascade start-tier / non-agentic chat. Fits anywhere.",
     },
 ];
 

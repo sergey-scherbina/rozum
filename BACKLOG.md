@@ -416,6 +416,14 @@ or on nothing — so any engine can reuse it.
   false positives). Validated: Coder-7B `build` now passes **with `ROZUM_MLX_CONSTRAIN=0`** (was a
   fail — lost the call). Known limit: a literal `","` inside content still defeats the heuristic.
 
+- [ ] mistral-system-fold — **WON'T DO (2026-06-16).** A restrictive chat template (Mistral-7B-v0.3:
+  rejects the `system` role via `raise_exception` + needs strict user/assistant alternation) 500s on
+  every Claude Code request (which sends a system message + tool results). Folding system→first-user
+  when a template lacks system support would un-break it — but **only Mistral-v0.3 needed this**, and
+  it's been deleted from the cache + benchmark; all kept models (Qwen2.5/Qwen3/Qwen3.6) support the
+  `system` role natively. Not worth the message-rewriting complexity for a model we don't use. Reopen
+  only if a future restrictive-template model we actually want shows up.
+
 - [x] extract-shared-sampler - **L2. DONE 2026-06-15** (`src/sampler.rs`). The sampler
   (repeat-penalty → temperature → top-k → top-p → categorical) defined over a plain `&[f32]` logit
   slice + an `impl Rng`, engine-agnostic. `SamplerConfig::from_params`, `seeded_rng(seed)`,

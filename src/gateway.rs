@@ -726,6 +726,121 @@ fn with_gen_timeout(mut stream: ChatStream, cancel: CancellationToken, dur: Dura
     })
 }
 
+/// Number of identical, consecutively-failing tool calls that mark a stuck agent.
+const STUCK_LOOP_THRESHOLD: usize = 3;
+
+/// Detect the agentic stuck-loop signature in the incoming conversation. A weak local
+/// model that re-issues the same already-applied edit gets stuck retrying and runs to
+/// `--max-turns` instead of stopping (root cause: SPRINT.md "agentic-loop-root-cause").
+/// The gateway sees the whole conversation each turn, so it can short-circuit the next
+/// doomed turn. Two signatures, because the loop surfaces differently per harness:
+///
+///  1. **Structured** (Codex / Responses, and CC when tool use completes): the last
+///     `STUCK_LOOP_THRESHOLD` tool calls are byte-identical (same name + input) and each
+///     got an **error** result — the model keeps re-sending an edit whose target text is
+///     already gone (`String to replace not found`).
+///  2. **Text-repeat** (Claude Code headless): CC *interrupts* the doomed tool use and
+///     records the turn as a placeholder (`[Tool use interrupted]` / `(no content)`), so
+///     the gateway never sees a structured call — only the same assistant text repeated.
+///
+/// Both are conservative: a healthy agent never re-sends a byte-identical failed call nor
+/// repeats the same assistant text `STUCK_LOOP_THRESHOLD` times, so neither trips it.
+fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
+    use std::collections::HashMap;
+    // ── Signature 1: identical, consecutively-failing structured tool calls ──
+    let mut errored: HashMap<&str, bool> = HashMap::new();
+    for m in messages {
+        for b in &m.content {
+            if let ContentBlock::ToolResult { tool_use_id, is_error, .. } = b {
+                errored.insert(tool_use_id.as_str(), *is_error);
+            }
+        }
+    }
+    let mut calls: Vec<(&str, &Value, bool)> = Vec::new();
+    for m in messages {
+        for b in &m.content {
+            if let ContentBlock::ToolUse { id, name, input } = b {
+                let err = errored.get(id.as_str()).copied().unwrap_or(false);
+                calls.push((name.as_str(), input, err));
+            }
+        }
+    }
+    if calls.len() >= STUCK_LOOP_THRESHOLD {
+        let tail = &calls[calls.len() - STUCK_LOOP_THRESHOLD..];
+        let (name0, input0, _) = tail[0];
+        if tail.iter().all(|(n, i, e)| *e && *n == name0 && *i == input0) {
+            return Some(format!(
+                "The `{name0}` tool was called {STUCK_LOOP_THRESHOLD} times in a row with identical \
+                 arguments and every call returned an error — the change has most likely already \
+                 been applied. Stopping to avoid an infinite retry loop; verify and report."
+            ));
+        }
+    }
+
+    // ── Signature 2: no-progress repetition in the recent assistant turns ──
+    // CC's interrupted-tool loop doesn't repeat one text *consecutively* — it ping-pongs
+    // between a re-diagnosis ("The bug is in `reverse`…") and the `[Tool use interrupted]`
+    // placeholder. So instead of "N identical in a row", fire when, within the recent
+    // window, any single assistant text recurs `STUCK_LOOP_THRESHOLD` times — the model is
+    // cycling the same outputs without making progress.
+    let asst_texts: Vec<String> = messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::Assistant))
+        .map(|m| {
+            m.content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.trim()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim()
+                .to_string()
+        })
+        .collect();
+    const WINDOW: usize = 2 * STUCK_LOOP_THRESHOLD;
+    let start = asst_texts.len().saturating_sub(WINDOW);
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for t in &asst_texts[start..] {
+        if !t.is_empty() {
+            *counts.entry(t.as_str()).or_default() += 1;
+        }
+    }
+    if counts.values().any(|&c| c >= STUCK_LOOP_THRESHOLD) {
+        return Some(
+            "The last several assistant turns cycled the same outputs without progress (the tool \
+             cycle is stuck — repeated re-attempts/interruptions). Stopping to avoid an infinite \
+             loop; verify the current result and report it in one short line."
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// A one-shot `ChatStream` that emits `text` then `Done{EndTurn}` without touching the
+/// model. Used by the loop-breaker: it slots in where `backend.chat` would, so every
+/// existing per-protocol serializer (OpenAI / Responses / Anthropic, streaming or not)
+/// renders it as an ordinary final assistant turn with `finish_reason: stop`.
+fn synthetic_stop_stream(text: String) -> ChatStream {
+    Box::pin(async_stream::stream! {
+        yield Ok(ChatEvent::TextDelta { text });
+        yield Ok(ChatEvent::Done { input_tokens: 0, output_tokens: 0, stop_reason: StopReason::EndTurn });
+    })
+}
+
+/// `backend.chat`, but first break a detected agentic stuck-loop with a synthetic stop.
+async fn chat_or_loopbreak(
+    backend: &Arc<dyn ChatBackend>,
+    req: ChatRequest,
+) -> ModelResult<ChatStream> {
+    if let Some(reason) = detect_stuck_loop(&req.messages) {
+        crate::obs::log_event(json!({ "event": "stuck_loop_broken", "detail": reason }));
+        return Ok(synthetic_stop_stream(reason));
+    }
+    backend.chat(req).await
+}
+
 // ─── OpenAI wire types ────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -2025,7 +2140,7 @@ async fn oai_chat_handler(
     // (Streaming clients — CC, Codex — always send `stream:true` explicitly.)
     let stream_mode = req.stream.unwrap_or(false);
 
-    match lease.backend.chat(chat_req).await {
+    match chat_or_loopbreak(&lease.backend, chat_req).await {
         Err(e) => {
             crate::obs::log_event(json!({
                 "event": "request_error", "endpoint": "/v1/chat/completions", "error": e.to_string(),
@@ -2101,7 +2216,7 @@ async fn responses_handler(
     let model = req.model.unwrap_or_else(|| lease.model_id.clone());
     let stream_mode = req.stream.unwrap_or(false);
 
-    match lease.backend.chat(chat_req).await {
+    match chat_or_loopbreak(&lease.backend, chat_req).await {
         Err(e) => {
             crate::obs::log_event(json!({
                 "event": "request_error", "endpoint": "/v1/responses", "error": e.to_string(),
@@ -2408,7 +2523,7 @@ async fn anthropic_handler(
     // (Streaming clients — CC, Codex — always send `stream:true` explicitly.)
     let stream_mode = req.stream.unwrap_or(false);
 
-    match lease.backend.chat(chat_req).await {
+    match chat_or_loopbreak(&lease.backend, chat_req).await {
         Err(e) => {
             crate::obs::log_event(json!({
                 "event": "request_error", "endpoint": "/v1/messages", "error": e.to_string(),
@@ -2846,6 +2961,122 @@ mod tests {
         }
         assert!(cancel.is_cancelled(), "job must be cancelled on timeout");
         assert!(s.next().await.is_none(), "stream ends after the timeout error");
+    }
+
+    // ── stuck-loop detector ──────────────────────────────────────────────────
+    fn tool_use(id: &str, name: &str, input: Value) -> ContentBlock {
+        ContentBlock::ToolUse { id: id.into(), name: name.into(), input }
+    }
+    fn tool_err(id: &str, err: bool) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.into(),
+                content: "x".into(),
+                is_error: err,
+            }],
+        }
+    }
+    fn asst(block: ContentBlock) -> Message {
+        Message { role: Role::Assistant, content: vec![block] }
+    }
+
+    #[test]
+    fn stuck_loop_fires_on_three_identical_errored_calls() {
+        let args = json!({ "old_string": "s.to_string()", "new_string": "s.chars().rev().collect()" });
+        let mut msgs = vec![Message::user("fix the bug")];
+        for i in 0..3 {
+            let id = format!("call_{i}");
+            msgs.push(asst(tool_use(&id, "Edit", args.clone())));
+            msgs.push(tool_err(&id, true)); // "String to replace not found"
+        }
+        assert!(detect_stuck_loop(&msgs).is_some(), "3 identical failing Edits must trip");
+    }
+
+    #[test]
+    fn stuck_loop_ignores_successes_variation_and_short_runs() {
+        let args = json!({ "old_string": "a", "new_string": "b" });
+        // (a) identical but SUCCEEDING calls — not stuck (no error).
+        let mut ok = vec![Message::user("go")];
+        for i in 0..3 {
+            let id = format!("c{i}");
+            ok.push(asst(tool_use(&id, "Edit", args.clone())));
+            ok.push(tool_err(&id, false));
+        }
+        assert!(detect_stuck_loop(&ok).is_none(), "successful repeats are not a loop");
+
+        // (b) failing but DIFFERENT args at the tail — not stuck.
+        let mut varied = vec![Message::user("go")];
+        for i in 0..3 {
+            let id = format!("v{i}");
+            varied.push(asst(tool_use(&id, "Edit", json!({ "old_string": format!("x{i}") }))));
+            varied.push(tool_err(&id, true));
+        }
+        assert!(detect_stuck_loop(&varied).is_none(), "distinct args are not a loop");
+
+        // (c) only two identical failing calls — below threshold.
+        let mut two = vec![Message::user("go")];
+        for i in 0..2 {
+            let id = format!("t{i}");
+            two.push(asst(tool_use(&id, "Edit", args.clone())));
+            two.push(tool_err(&id, true));
+        }
+        assert!(detect_stuck_loop(&two).is_none(), "two repeats is below threshold");
+    }
+
+    fn asst_text(t: &str) -> Message {
+        asst(ContentBlock::Text { text: t.into() })
+    }
+
+    #[test]
+    fn stuck_loop_fires_on_repeated_assistant_text() {
+        // Claude Code's interrupted-tool loop: the same placeholder assistant turn
+        // ("[Tool use interrupted]") repeated, with no structured tool blocks at all.
+        let mut msgs = vec![Message::user("fix the bug"), asst_text("I'll fix it.")];
+        for _ in 0..3 {
+            msgs.push(Message::user("(no content)"));
+            msgs.push(asst_text("[Tool use interrupted]"));
+        }
+        assert!(detect_stuck_loop(&msgs).is_some(), "3 identical assistant turns must trip");
+    }
+
+    #[test]
+    fn stuck_loop_fires_on_alternating_no_progress() {
+        // The real CC signature: ping-pong between a re-diagnosis and an interruption —
+        // not consecutive, but one text recurs >= threshold within the recent window.
+        let msgs = vec![
+            asst_text("I'll fix it."),
+            asst_text("The bug is in reverse."),
+            asst_text("[Tool use interrupted]"),
+            asst_text("The bug is in reverse."),
+            asst_text("[Tool use interrupted]"),
+            asst_text("[Tool use interrupted]"),
+        ];
+        assert!(detect_stuck_loop(&msgs).is_some(), "3x interrupted in window must trip");
+    }
+
+    #[test]
+    fn stuck_loop_ignores_distinct_progress() {
+        // Normal progress — every assistant turn distinct — must NOT trip.
+        let ok = vec![
+            asst_text("Reading the file."),
+            asst_text("Found the bug in reverse()."),
+            asst_text("Applied the fix."),
+            asst_text("Ran cargo, it prints olleh."),
+            asst_text("Verified, done."),
+        ];
+        assert!(detect_stuck_loop(&ok).is_none(), "distinct assistant turns are not a loop");
+    }
+
+    #[tokio::test]
+    async fn synthetic_stop_stream_ends_with_endturn() {
+        let mut s = synthetic_stop_stream("stopping".into());
+        assert!(matches!(s.next().await, Some(Ok(ChatEvent::TextDelta { .. }))));
+        assert!(matches!(
+            s.next().await,
+            Some(Ok(ChatEvent::Done { stop_reason: StopReason::EndTurn, .. }))
+        ));
+        assert!(s.next().await.is_none());
     }
 
     #[tokio::test]

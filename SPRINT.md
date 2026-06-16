@@ -84,23 +84,51 @@ the constrain-OFF fast path), per-task gateway (robust under MLX memory growth),
   path (Coder-7B agentic 2→4/5 with repair, constrain-off), so the B=1 masked decode is only worth its
   cost for the rare `","`-in-content case repair can't disambiguate.
 
-- [ ] agent-termination-nudge — slow/strong models (dense-27B) finish the task correctly but don't
-  STOP, running to the run-timeout instead of a final answer. A short prompt nudge ("once verified,
-  stop") and/or a lower `--max-turns` would give clean termination + faster benchmark runs.
+- [x] agent-termination-nudge — **DONE 2026-06-16.** Lowered `MAX_TURNS` 30→15 and added per-task
+  "you are DONE → STOP" nudges to all four coding prompts (build/test/fix/debug). The fix/debug nudges
+  also tell the model that an `Edit` failing with "String to replace not found" means the change is
+  **already applied** — do not retry, just verify. (See why below.)
+
+- [x] agentic-loop-root-cause — **INVESTIGATED 2026-06-16.** Captured a real `rozum launch claude`
+  transcript (Qwen3-4B, `fix` task) to answer "why can't agents stop when done?" Mechanism: the model
+  applies the correct fix on its **first** `Edit` (success), then re-issues the **byte-identical** edit
+  5+ more times; each now fails with `String to replace not found` (the target text is gone), and the
+  weak model reads the error as "retry" rather than "already done" → it loops to `--max-turns`. It also
+  **skips the verification step** (`cargo run`), so it never gets the positive "olleh" closure signal.
+  Tool-call format is NOT at fault (native `<tool_call>` works). This is a small-model state-tracking
+  limit: 0.5–4B loop (Llama-1B `fix` = 442 turns), Qwen3-30B-A3B does not. The run that *did* stop only
+  did so by luck — the model emitted a `<tool_call>` missing its `name`, which our parser correctly
+  dropped to text → `finish_reason: stop`. Levers: `max-turns` cap + prompt nudges (band-aids, shipped)
+  + bigger model (architectural, in RECOMMENDED). One real model-agnostic server lever below.
+
+- [x] agentic-loop-breaker — **DONE 2026-06-16.** Server-side, model-agnostic loop break in the gateway
+  (`detect_stuck_loop` + `chat_or_loopbreak` + `synthetic_stop_stream`, all three protocol handlers route
+  through it). On a detected stuck loop it returns a synthetic one-shot stream (text + `Done{EndTurn}`)
+  instead of generating another doomed turn — every per-protocol serializer renders it as an ordinary
+  `finish_reason: stop`, so the agent concludes. **Two signatures** (the e2e repro proved one isn't
+  enough): (1) **structured** — the same tool call (name+input) repeated ≥3× with error results (Codex /
+  Responses, and CC when tool use completes); (2) **text-repeat** — CC headless *interrupts* its own
+  doomed tool use and records the turn as a text placeholder (`[Tool use interrupted]` / `(no content)`),
+  so the gateway never sees structured tool blocks — only the same assistant text **recurring** in the
+  recent window (it ping-pongs between a re-diagnosis and the interruption, so "N-in-a-row" misses it;
+  the fix counts repeats in the last 6 assistant turns). **Verified e2e** (Qwen3-4B `fix`): the gateway
+  logged `stuck_loop_broken`, the synthetic stop became CC's final turn, and the run ended
+  `subtype=success` at 7 turns instead of looping to `--max-turns`. 5 unit tests; conservative thresholds
+  = no false positives on distinct-progress conversations. (`ROZUM_DEBUG_LOOP` probe used during the
+  investigation, removed.)
+
+- [x] recommend-agentic-models — **DONE 2026-06-16.** `src/models.rs` RECOMMENDED rewritten with the
+  agentic verdict: Qwen3-30B-A3B = best for local agentic coding, the 7B→27B capability cliff,
+  Qwen3/Qwen3.6 native `<tool_call>` > Qwen2.5/Llama loose JSON. Dropped Mistral/SmolLM2/Phi-3/gemma×2.
 
 - [ ] cc-prompt-lean-mode — Claude Code's system prompt + ~25 tool schemas fill the 16K context →
   large KV + slow prefill on local models. A "lean" launch mode (fewer tools / a compact system note)
   cuts context, memory, and prefill. `rozum launch` already trims skills/git/CLAUDE.md
   (`apply_rozum_agent_env`); extend it for local models.
 
-- [ ] recommend-agentic-models — surface the benchmark's verdict in the catalog (`src/models.rs`
-  recommendations): the 7B→27B capability cliff, MoE (Qwen3-30B-A3B) = best speed/capability/memory
-  for local agentic coding, Qwen3/Qwen3.6 native `<tool_call>` > Qwen2.5/Llama loose JSON.
 
-- [ ] mistral-system-fold — (LOW) restrictive templates (Mistral-v0.3 rejects `system` + needs strict
-  user/assistant alternation) 500 on every Claude Code request. Folding system→first-user when a
-  template lacks system support would un-break them. We deleted Mistral-v0.3, so low priority — a
-  general robustness note for future restrictive templates.
+(mistral-system-fold moved to BACKLOG as WON'T DO — only Mistral-v0.3 needed it, and all kept models
+support the `system` role.)
 
 #### P0 (CURRENT, 2026-06-15): cascade-router — frugal/escalation model routing
 
