@@ -1,5 +1,16 @@
 # Changelog
 
+## models — Qwen3.6-35B-A3B is now the top recommended local model
+Completed: 2026-06-16
+
+Reordered `RECOMMENDED` (`src/models.rs`) to lead with `Qwen3.6-35B-A3B-4bit`: the only model to
+score a perfect 10/10 (claude 5/5 + codex 5/5) in the 2026-06-16 agentic matrix once this session's
+gateway fixes landed (unique tool-call ids, constrained-decode default, name-first envelope,
+tool-role, clients_gone). Dropped the stale OOM caveat from its notes — chunked prefill + the MLX
+memory cap removed the prefill-OOM, and the full matrix ran it cleanly at ~25 GB peak on a 36 GB Mac.
+30B-A3B is now framed as the lighter/more-headroom alternative. All `RECOMMENDED` consumers (the
+launch picker, `rozum list`, builtin tools) iterate in order, so the new ordering surfaces everywhere.
+
 ## mlx — globally-unique tool-call ids (fixes claude `debug` read-loop on 35B)
 Completed: 2026-06-16
 

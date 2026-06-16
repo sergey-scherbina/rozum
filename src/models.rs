@@ -50,39 +50,43 @@ pub struct RecommendedModel {
 /// (`scripts/bench/agentic.sh`) found a sharp **7B→27B capability cliff**: below ~27B
 /// (or a strong MoE) local quantized models can't reliably drive the multi-step tool
 /// loop. Qwen3/Qwen3.6 emit the native `<tool_call>` format (always valid); Qwen2.5/Coder
-/// need the gateway's JSON-repair. MoE (30B-A3B) is the best speed/capability/memory
-/// balance. Update when stronger `mlx-community/` models appear.
+/// need the gateway's JSON-repair. **Top pick: Qwen3.6-35B-A3B** — the strongest MoE and the
+/// only model to score a perfect 10/10 (claude 5/5 + codex 5/5) in the 2026-06-16 matrix; the
+/// old OOM caveat is gone now that chunked prefill + the MLX memory cap shipped (serves cleanly
+/// at ~25 GB peak on a 36 GB Mac). Update when stronger `mlx-community/` models appear.
 pub const RECOMMENDED: &[RecommendedModel] = &[
+    RecommendedModel {
+        spec: "mlx-community:Qwen3.6-35B-A3B-4bit",
+        display_name: "Qwen3.6 35B-A3B (MoE)",
+        approx_size_gb: 17.0,
+        notes: "RECOMMENDED — best local agentic coder. Perfect 10/10 in the matrix \
+                (claude 5/5 + codex 5/5). MoE ~3B active/token → fast AND strongest. Peaks \
+                ~25 GB on a 36 GB Mac; the chunked-prefill + memory-cap fixes (2026-06) removed \
+                the old prefill-OOM, so it runs agentic cleanly. Tightest of the picks on 36 GB — \
+                drop to the 30B-A3B below for more headroom. `ROZUM_MLX_CACHE_GB=1` frees more.",
+    },
     RecommendedModel {
         spec: "mlx-community:Qwen3-30B-A3B-4bit",
         display_name: "Qwen3 30B-A3B (MoE)",
         approx_size_gb: 16.0,
-        notes: "BEST for local agentic coding. MoE ~3B active/token → ~100 t/s + strong; \
-                completes tasks cleanly. The speed/capability/memory sweet spot.",
+        notes: "Excellent value pick: claude 5/5 in the matrix, MoE ~3B active/token → ~100 t/s, \
+                ~16 GB → most headroom of the strong models. Prefer it over the 35B when RAM is \
+                tight or for max interactive speed; the 35B edges it on codex/hardest tasks.",
     },
     RecommendedModel {
         spec: "mlx-community:Qwen3.6-27B-4bit",
         display_name: "Qwen3.6 27B (dense)",
         approx_size_gb: 15.0,
-        notes: "Most capable for agentic coding (5/5 in the matrix) and fits agentic use on a \
-                36 GB Mac. DENSE → slower (~15 t/s) than the MoEs; prefer the 30B-A3B MoE for \
-                interactive speed, this when you want the strongest single-shot result.",
-    },
-    RecommendedModel {
-        spec: "mlx-community:Qwen3.6-35B-A3B-4bit",
-        display_name: "Qwen3.6 35B-A3B (MoE)",
-        approx_size_gb: 17.0,
-        notes: "Strongest/fastest MoE, but HEAVY for agentic on 36 GB: peaks ~25 GB and the \
-                gateway can OOM on a big agent prompt (the single-shot prefill spike hits the \
-                MLX memory cap) → the worker dies mid-run. Use for chat / on ≥48 GB, or wait \
-                for chunked prefill. Lower `ROZUM_MLX_CACHE_GB` to free headroom.",
+        notes: "Most capable DENSE (claude 5/5) and fits agentic on a 36 GB Mac. Dense → slower \
+                (~15 t/s) than the MoEs; pick a MoE above for interactive speed, this for the \
+                strongest single-shot dense result.",
     },
     RecommendedModel {
         spec: "mlx-community:Qwen3.6-35B-A3B-4bit-DWQ",
         display_name: "Qwen3.6 35B-A3B DWQ",
         approx_size_gb: 17.0,
-        notes: "Distillation-Weighted Quant — same MoE, slightly better quality. Same ~25 GB / \
-                OOM caveat as the 35B above on a 36 GB Mac.",
+        notes: "Distillation-Weighted Quant — same MoE as the top pick, slightly better quality, \
+                same ~25 GB footprint (OOM resolved like the 35B above).",
     },
     RecommendedModel {
         spec: "mlx-community:Qwen2.5-Coder-32B-Instruct-4bit",
