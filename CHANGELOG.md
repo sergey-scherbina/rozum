@@ -1,5 +1,27 @@
 # Changelog
 
+## gateway — count tool schemas + tool results in the prompt-token estimate (accurate overflow guard)
+Completed: 2026-06-16
+
+`estimate_prompt_tokens` replaces the old `total_message_text` + `estimate_tokens` pair at all three
+handlers (OpenAI / Responses / Anthropic). The old estimate counted only `Text` blocks, so it **ignored
+the parts that dominate an agentic request**: prior tool-call args, **tool results** (file dumps /
+command output — often the largest blocks), and the **tool schemas** (which the chat template renders
+into the prompt — ~5K tokens for Claude Code's ~33 tools). It under-counted a real coding turn
+several-fold, so the context-overflow preflight (`est > ctx_win`) could wave through a prompt that
+actually blows the model's window. Discovered while measuring `--lean`: the estimate stayed flat (1732)
+even as the tool count swung 27→35. The new estimate sums all block types + each tool's
+name+description+schema. Unit test covers the tool-result and tool-schema contributions. `src/gateway.rs`.
+
+**Investigated, NOT shipped — CC system-prompt stripping.** The other half of the prompt overhead is
+Claude Code's system prompt (~1,400 tokens). Measured the CLI levers: `--bare` cuts it to ~27 tokens
+(est −71%) and `--system-prompt <minimal>` replaces it (est −48%). But both **break the agent** on local
+models — `--bare`: 0/3 on the simple `fix` task (the model runs but can't complete the tool loop) and
+flaky on `build`; `--system-prompt` minimal: 0/3 on `build`. Unlike the tool schemas (pure overhead,
+safely stripped by `--lean`), the system prompt is **load-bearing** — it carries the operating
+instructions the weak local model depends on — so it is left intact. (`--exclude-dynamic-system-prompt-
+sections` only *relocates* per-machine sections for cache reuse; it's not a size win.)
+
 ## launch — `rozum launch --lean`: strip non-coding tools from Claude Code (smaller local-model prompt)
 Completed: 2026-06-16
 

@@ -133,8 +133,23 @@ the constrain-OFF fast path), per-task gateway (robust under MLX memory growth),
   (variadic flag), no-op for non-`claude`, skipped if the user already manages tools; `--lean` added to
   `KNOWN_BOOL_FLAGS` so it hoists when placed after the program name. `scripts/bench/agentic.sh` now uses
   `--lean` (which covers the old `--disallowedTools AskUserQuestion`). 2 unit tests + verified e2e (claude
-  still answers under the lean tool set). Did NOT touch CC's fixed system prompt (not strippable via CLI) —
-  the tool schemas were the bigger, variable half.
+  still answers under the lean tool set; `--lean` ≠ regression — `fix` 3/3 with vs 3/3 without).
+
+- [x] est-prompt-tokens-accurate — **DONE 2026-06-16.** `estimate_prompt_tokens(messages, tools)` replaces
+  the Text-only `total_message_text`+`estimate_tokens` at all 3 handlers. The old estimate ignored prior
+  tool-call args, **tool results** (file dumps / command output — often the largest blocks), and the
+  **tool schemas** (~5K tokens) — under-counting an agentic turn several-fold, so the overflow preflight
+  (`est > ctx_win`) could wave through a prompt that blows the model's window. Found while measuring
+  `--lean` (the estimate stayed flat as the tool count swung 27→35). New estimate sums all block types +
+  each tool's name+description+schema. Unit test covers tool-result + tool-schema contributions.
+
+- [ ] ~~cc-system-prompt-strip~~ — **INVESTIGATED, WON'T DO (2026-06-16).** Tried to cut the other half
+  of the prompt overhead (CC's ~1,400-token system prompt). CLI levers measured: `--bare` → sys ~27 tok
+  (est −71%), `--system-prompt <minimal>` → sys ~49 tok (est −48%). **Both break the agent on local
+  models:** `--bare` 0/3 on `fix` (model runs but can't complete the tool loop) + flaky `build`;
+  `--system-prompt` minimal 0/3 on `build`. Unlike the tool schemas (pure overhead → `--lean`), the
+  system prompt is **load-bearing** — operating instructions the weak model depends on. Left intact.
+  `--exclude-dynamic-system-prompt-sections` only *relocates* per-machine bits (cache reuse, not size).
 
 
 (mistral-system-fold moved to BACKLOG as WON'T DO — only Mistral-v0.3 needed it, and all kept models

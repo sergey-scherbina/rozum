@@ -608,21 +608,28 @@ fn new_id(prefix: &str) -> String {
     format!("{}-{}", prefix, Uuid::new_v4().simple())
 }
 
-/// Very rough token estimate: 1 token ≈ 3.5 chars (conservative for code).
-fn estimate_tokens(text: &str) -> u32 {
-    ((text.len() as f32) / 3.5) as u32 + 1
-}
-
-fn total_message_text(messages: &[Message]) -> String {
-    messages
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+/// Rough token estimate of the *whole* prompt the model will see — used for the
+/// context-overflow preflight and reported as `est_prompt_tokens`. Unlike a Text-only
+/// count it includes the parts that actually dominate an agentic request: prior tool-call
+/// args, **tool results** (file dumps / command output, often the largest blocks), and the
+/// **tool schemas** (which the chat template renders into the prompt — easily ~5K tokens
+/// of Claude Code's ~33 tools). Counting only `Text` blocks under-counts a real coding
+/// turn several-fold and can let an over-long prompt slip past the overflow guard.
+fn estimate_prompt_tokens(messages: &[Message], tools: &[ToolDef]) -> u32 {
+    let mut chars = 0usize;
+    for m in messages {
+        for b in &m.content {
+            chars += match b {
+                ContentBlock::Text { text } => text.len(),
+                ContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
+                ContentBlock::ToolResult { content, .. } => content.len(),
+            };
+        }
+    }
+    for t in tools {
+        chars += t.name.len() + t.description.len() + t.input_schema.to_string().len();
+    }
+    (chars as f32 / 3.5) as u32 + 1
 }
 
 fn error_json(status: StatusCode, msg: &str, err_type: &str) -> Response {
@@ -2107,8 +2114,7 @@ async fn oai_chat_handler(
     );
 
     // Approximate context overflow check
-    let prompt_text = total_message_text(&messages);
-    let est = estimate_tokens(&prompt_text);
+    let est = estimate_prompt_tokens(&messages, &tools);
     let ctx_win = lease.backend.context_window();
     if ctx_win > 0 && est > ctx_win {
         return error_json(
@@ -2186,8 +2192,7 @@ async fn responses_handler(
         &parse_oai_tool_choice(&req.tool_choice),
     );
 
-    let prompt_text = total_message_text(&messages);
-    let est = estimate_tokens(&prompt_text);
+    let est = estimate_prompt_tokens(&messages, &tools);
     let ctx_win = lease.backend.context_window();
     if ctx_win > 0 && est > ctx_win {
         return error_json(
@@ -2493,8 +2498,7 @@ async fn anthropic_handler(
     );
 
     // Approximate context overflow check
-    let prompt_text = total_message_text(&messages);
-    let est = estimate_tokens(&prompt_text);
+    let est = estimate_prompt_tokens(&messages, &tools);
     let ctx_win = lease.backend.context_window();
     if ctx_win > 0 && est > ctx_win {
         return error_json(
@@ -3160,10 +3164,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn context_overflow_detected() {
-        // PlaceholderBackend returns Err immediately and has context_window = 0
-        // (0 means unchecked). Test with HelloBackend whose context_window = u32::MAX.
+    #[test]
+    fn estimate_prompt_tokens_counts_text_results_and_tools() {
+        // Large user text → large estimate (baseline behaviour).
         let long_text: String = "word ".repeat(200_000);
         let messages = oai_messages_to_internal(&[OaiMsg {
             role: "user".into(),
@@ -3171,11 +3174,31 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
         }]);
-        let text = total_message_text(&messages);
-        let est = estimate_tokens(&text);
-        // HelloBackend has context_window u32::MAX so overflow check won't fire for it.
-        // Just verify the estimate function works.
-        assert!(est > 100_000, "expected large token estimate, got {est}");
+        let base = estimate_prompt_tokens(&messages, &[]);
+        assert!(base > 100_000, "expected large token estimate, got {base}");
+
+        // A big tool RESULT (e.g. a file dump) must be counted — the old Text-only
+        // count ignored it entirely, under-counting an agentic turn several-fold.
+        let dump = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(),
+                content: "x".repeat(40_000),
+                is_error: false,
+            }],
+        }];
+        assert!(estimate_prompt_tokens(&dump, &[]) > 8_000, "tool results must be counted");
+
+        // Tool schemas render into the prompt → they must add to the estimate.
+        let tools = vec![ToolDef {
+            name: "Bash".into(),
+            description: "run a shell command ".repeat(100),
+            input_schema: json!({"type":"object","properties":{"command":{"type":"string"}}}),
+        }];
+        assert!(
+            estimate_prompt_tokens(&dump, &tools) > estimate_prompt_tokens(&dump, &[]),
+            "tool schemas must increase the estimate"
+        );
     }
 
     #[test]
