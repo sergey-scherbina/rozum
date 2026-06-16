@@ -118,6 +118,15 @@ impl RoomPaths {
         Self::ad_hoc_in(&rozum_state_dir(), name)
     }
 
+    /// Reconstruct paths from a known `root` (e.g. a registry entry) without a
+    /// gitignore parent — used when reopening a room by its recorded location.
+    pub fn raw(root: PathBuf) -> Self {
+        Self {
+            root,
+            gitignore_dir: None,
+        }
+    }
+
     pub fn day_file(&self, date: &str) -> PathBuf {
         self.root.join(format!("{date}.jsonl"))
     }
