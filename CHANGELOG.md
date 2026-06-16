@@ -1,5 +1,26 @@
 # Changelog
 
+## gateway — generation inactivity timeout + local-model benchmark harness
+Completed: 2026-06-16
+
+A wedged in-process generation can no longer hang a client forever. A 13-model benchmark
+(`scripts/bench`) surfaced it: under memory pressure the 35B-A3B's longest task stalled for ~4.5 h —
+a single Metal eval thrashing swap blocks inside one FFI call, so the decode loop's per-token
+`is_cancelled()` check never runs. The gateway now wraps **every backend stream** (all dialects,
+streaming + non-streaming) in an inactivity timeout: if no event arrives within
+`ROZUM_GEN_TIMEOUT_SECS` (default 180; `0` disables), it cancels the job and ends the stream with
+`ModelError::Timeout` → HTTP 504 instead of hanging. The cancel lets the worker abandon the job the
+moment its eval unblocks. Engine-agnostic (mlx-native, gguf, remote). `src/gateway.rs`,
+`src/backend.rs`; 3 unit tests.
+
+The **benchmark harness** (`scripts/bench/run.sh` + `tasks.jsonl`): 8 tasks of increasing difficulty,
+per model — load time, peak physical-memory footprint (`/usr/bin/time -l`), TTFT (first content
+token), pure decode rate (tok/s excluding prefill), and a heuristic answer-key PASS/FAIL. A per-model
+warm-up request removes the cold-start blip; a per-request `curl --max-time` ceiling is the
+harness-side backstop. Headline: MoE breaks the size→speed curve (Qwen3-30B-A3B 16 GB ≈104 tok/s,
+faster than every dense 7B; dense-27B ≈15 tok/s); a cold hybrid/MoE first token costs up to ~33 s
+(Metal kernel JIT + weight page-in). `results/` is gitignored (reproducible).
+
 ## portability — the durable core is Linux-buildable + CI-enforced
 Completed: 2026-06-15
 

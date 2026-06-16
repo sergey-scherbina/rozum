@@ -170,6 +170,7 @@ just gets conformant `arguments`. See `constrained-tool-decoding.md`.
 - [x] Context overflow → HTTP 400 with `{"error":{"message":"...","type":"context_length_exceeded"}}`.
 - [x] Backend overloaded (`ModelError::Overloaded`, e.g. mistralrs admission queue full) → HTTP 429 + `Retry-After` header, `type:"overloaded"`. See `mistralrs-concurrency-scheduling.md`.
 - [x] Client disconnect → `CancellationToken.cancel()` via `CancelOnDrop` wrapper on stream drop.
+- [x] Generation inactivity timeout: every backend stream is wrapped (`with_gen_timeout`, all dialects, streaming + non-streaming) so a wedged in-process generation can't hang a client. If no event arrives within `ROZUM_GEN_TIMEOUT_SECS` (default 180; `0` disables), the job is cancelled and the stream ends with `ModelError::Timeout` → HTTP 504. Backstop for a Metal eval that blocks inside one FFI call under memory pressure, where the per-token cancel check can't run. 3 unit tests.
 - [x] `ROZUM_GATEWAY_TOKEN` → 401 if missing or wrong; no auth if env var absent.
 - [x] Binds only to `127.0.0.1`.
 - [x] `GET /health` (liveness) and `GET /ready` (readiness, 503 while draining) for load-balanced deploys; see `distributed-readiness.md`.

@@ -44,6 +44,14 @@ NCTX="${BENCH_NCTX:-8192}"
 LOAD_TIMEOUT="${BENCH_LOAD_TIMEOUT:-600}"
 PORT_BASE="${BENCH_PORT_BASE:-8101}"
 OUT="${BENCH_OUT:-$here/results/$(date +%Y%m%d-%H%M%S)}"
+# Per-request wall-clock ceiling (curl --max-time). A wedged generation (e.g. a
+# big model thrashing swap) is cut here instead of hanging the run forever; the
+# task is recorded with whatever streamed before the cut. The engine has its own
+# inactivity timeout too — this is the harness-side backstop.
+REQ_TIMEOUT="${BENCH_REQ_TIMEOUT:-300}"
+# One throwaway request per model before timing, to JIT-compile Metal kernels and
+# page in weights (heavy/hybrid models otherwise pay a huge first-token cost).
+WARMUP_MAX="${BENCH_WARMUP_MAX:-300}"
 
 BIN="${BENCH_BIN:-}"
 if [ -z "$BIN" ]; then
@@ -122,7 +130,19 @@ for spec in "${MODELS[@]}"; do
   load_secs=$SECONDS
 
   if [ "$loaded_ok" = "1" ]; then
-    echo "  loaded in ${load_secs}s, running $(wc -l <"$here/tasks.jsonl" | tr -d ' ') tasks"
+    echo "  loaded in ${load_secs}s"
+
+    # Warm-up (not recorded): one tiny request so Metal kernels are compiled and
+    # weights paged in before the timed tasks — removes the cold-start blip that
+    # otherwise lands on the first task (huge on hybrid/MoE models).
+    warm_t0=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+    curl -s -o /dev/null --max-time "$WARMUP_MAX" \
+      -X POST "$base/v1/chat/completions" \
+      -H 'content-type: application/json' -H 'authorization: Bearer rozum-local' \
+      -d "$(jq -nc --arg m "$spec" '{model:$m,temperature:0,max_tokens:8,messages:[{role:"user",content:"Reply with: ok"}]}')"
+    warm_s=$(perl -MTime::HiRes=time -e 'printf "%.1f", time-'"$warm_t0")
+    echo "  warmup: ${warm_s}s, running $(wc -l <"$here/tasks.jsonl" | tr -d ' ') tasks"
+
     while IFS= read -r task; do
       [ -z "$task" ] && continue
       tid=$(jq -r '.id' <<<"$task")
@@ -135,7 +155,7 @@ for spec in "${MODELS[@]}"; do
       # first content chunk (TTFT) and the stream end (total). perl reads to EOF
       # so curl is never cut short by a broken pipe.
       T0=$(perl -MTime::HiRes=time -e 'printf "%.6f", time')
-      read ttft total < <(curl -N -s -X POST "$base/v1/chat/completions" \
+      read ttft total < <(curl -N -s --max-time "$REQ_TIMEOUT" -X POST "$base/v1/chat/completions" \
             -H 'content-type: application/json' -H 'authorization: Bearer rozum-local' \
             -d "$req" \
           | tee "$raw" \

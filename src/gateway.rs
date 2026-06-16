@@ -641,6 +641,7 @@ fn chat_error_response(e: &ModelError, fallback_type: &str) -> Response {
                 .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
             resp
         }
+        ModelError::Timeout(msg) => error_json(StatusCode::GATEWAY_TIMEOUT, msg, fallback_type),
         _ => error_json(
             StatusCode::INTERNAL_SERVER_ERROR,
             &e.to_string(),
@@ -677,6 +678,52 @@ impl Stream for CancelOnDrop {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.stream.poll_next_unpin(cx)
     }
+}
+
+// ─── Generation inactivity timeout ────────────────────────────────────────────
+
+/// Inactivity ceiling between two backend events. `ROZUM_GEN_TIMEOUT_SECS`
+/// (default 180; `0` disables). Must exceed the worst legitimate gap — a cold
+/// hybrid/MoE first token (Metal kernel JIT + weight page-in) ran ~33s in the
+/// local-model benchmark, so the default leaves generous headroom.
+fn gen_inactivity_timeout() -> Duration {
+    std::env::var("ROZUM_GEN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(180))
+}
+
+/// Wrap a backend stream so a stalled generation can't hang the client forever.
+/// If no event arrives within `gen_inactivity_timeout()`, cancel the job and end
+/// the stream with `ModelError::Timeout` (HTTP 504). This is the backstop the
+/// per-token cancel check can't provide: a Metal eval wedged under memory
+/// pressure blocks inside one FFI call, so the decode loop's `is_cancelled()`
+/// check never runs until it returns. Cancelling here lets the worker abandon the
+/// job the moment it unblocks; the client gets an error instead of hanging.
+fn with_gen_timeout(mut stream: ChatStream, cancel: CancellationToken, dur: Duration) -> ChatStream {
+    if dur.is_zero() {
+        return stream;
+    }
+    Box::pin(async_stream::stream! {
+        loop {
+            match tokio::time::timeout(dur, stream.next()).await {
+                Ok(Some(item)) => yield item,
+                Ok(None) => break,
+                Err(_) => {
+                    cancel.cancel();
+                    crate::obs::log_event(json!({
+                        "event": "generation_timeout", "inactivity_secs": dur.as_secs(),
+                    }));
+                    yield Err(ModelError::Timeout(format!(
+                        "no output for {}s; generation aborted",
+                        dur.as_secs()
+                    )));
+                    break;
+                }
+            }
+        }
+    })
 }
 
 // ─── OpenAI wire types ────────────────────────────────────────────────────────
@@ -1994,6 +2041,7 @@ async fn oai_chat_handler(
                 est_prompt_tokens: est,
             };
             let chat_stream = crate::obs::meter(chat_stream, state.observer.clone(), meta);
+            let chat_stream = with_gen_timeout(chat_stream, cancel.clone(), gen_inactivity_timeout());
             if stream_mode {
                 Sse::new(oai_sse_stream(chat_stream, cancel, model, Some(lease))).into_response()
             } else {
@@ -2069,6 +2117,7 @@ async fn responses_handler(
                 est_prompt_tokens: est,
             };
             let chat_stream = crate::obs::meter(chat_stream, state.observer.clone(), meta);
+            let chat_stream = with_gen_timeout(chat_stream, cancel.clone(), gen_inactivity_timeout());
             if stream_mode {
                 Sse::new(responses_sse_stream(
                     chat_stream,
@@ -2375,6 +2424,7 @@ async fn anthropic_handler(
                 est_prompt_tokens: est,
             };
             let chat_stream = crate::obs::meter(chat_stream, state.observer.clone(), meta);
+            let chat_stream = with_gen_timeout(chat_stream, cancel.clone(), gen_inactivity_timeout());
             if stream_mode {
                 Sse::new(anthropic_sse_stream(
                     chat_stream,
@@ -2780,6 +2830,55 @@ pub async fn serve_on(
 mod tests {
     use super::*;
     use crate::backend::{ChatEvent, HelloBackend, StopReason};
+
+    #[tokio::test]
+    async fn gen_timeout_aborts_stalled_stream() {
+        // A backend that produces nothing for far longer than the inactivity window.
+        let inner: ChatStream = Box::pin(async_stream::stream! {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            yield Ok(ChatEvent::TextDelta { text: "late".into() });
+        });
+        let cancel = CancellationToken::new();
+        let mut s = with_gen_timeout(inner, cancel.clone(), Duration::from_millis(50));
+        match s.next().await {
+            Some(Err(ModelError::Timeout(_))) => {}
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+        assert!(cancel.is_cancelled(), "job must be cancelled on timeout");
+        assert!(s.next().await.is_none(), "stream ends after the timeout error");
+    }
+
+    #[tokio::test]
+    async fn gen_timeout_passes_normal_stream_through() {
+        let inner: ChatStream = Box::pin(async_stream::stream! {
+            yield Ok(ChatEvent::TextDelta { text: "hi".into() });
+            yield Ok(ChatEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                input_tokens: 1,
+                output_tokens: 1,
+            });
+        });
+        let cancel = CancellationToken::new();
+        let mut s = with_gen_timeout(inner, cancel.clone(), Duration::from_secs(5));
+        let mut n = 0;
+        while let Some(ev) = s.next().await {
+            assert!(ev.is_ok());
+            n += 1;
+        }
+        assert_eq!(n, 2);
+        assert!(!cancel.is_cancelled(), "no timeout => no cancel");
+    }
+
+    #[tokio::test]
+    async fn gen_timeout_zero_disables() {
+        let inner: ChatStream = Box::pin(async_stream::stream! {
+            yield Ok(ChatEvent::TextDelta { text: "x".into() });
+        });
+        let cancel = CancellationToken::new();
+        let mut s = with_gen_timeout(inner, cancel.clone(), Duration::from_secs(0));
+        assert!(matches!(s.next().await, Some(Ok(ChatEvent::TextDelta { .. }))));
+        assert!(!cancel.is_cancelled());
+    }
     use futures::StreamExt as _;
 
     async fn collect_sse(stream: impl Stream<Item = Result<Event, Infallible>>) -> Vec<String> {

@@ -23,6 +23,9 @@ pub enum ModelError {
     NoBackendSucceeded(Vec<String>),
     /// The backend is at capacity and shedding load — maps to HTTP 429.
     Overloaded(String),
+    /// Generation stalled — the backend produced no output within the inactivity
+    /// window (e.g. a Metal eval wedged under memory pressure). Maps to HTTP 504.
+    Timeout(String),
 }
 
 impl fmt::Display for ModelError {
@@ -38,6 +41,7 @@ impl fmt::Display for ModelError {
                 Ok(())
             }
             Self::Overloaded(msg) => write!(f, "overloaded: {msg}"),
+            Self::Timeout(msg) => write!(f, "generation timeout: {msg}"),
         }
     }
 }
