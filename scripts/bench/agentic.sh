@@ -61,11 +61,22 @@ if [ -z "$BIN" ]; then
 fi
 case "$BIN" in /*) ;; *) BIN="$repo/$BIN" ;; esac   # launch runs in a temp cwd → need absolute
 
-# Default pairs a mid model with a strong one to show the capability gap: many
-# 4B–7B models emit tool calls in a format the gateway can't parse (markdown JSON
-# instead of `<tool_call>`) and fail the agentic tasks, while a strong MoE drives
-# the full read/edit/run loop. Override with AGENTIC_MODELS.
-DEFAULT_MODELS="mlx-community:Qwen2.5-Coder-7B-Instruct-4bit mlx-community:Qwen3-30B-A3B-4bit"
+# Default: every installed model whose chat template actually supports tools
+# (Qwen2.5 / Qwen3 / Qwen3.6 / Llama-3.2 / Mistral-v0.3 — all `<tool_call>`-style),
+# small → large. Models whose template has no tool support (gemma-3, Phi-3-mini,
+# SmolLM2) are excluded — the gateway can't offer them tools. Small models still
+# "know" the format but are weak at the multi-step agentic loop; that gap is the
+# point. Override with AGENTIC_MODELS.
+DEFAULT_MODELS="\
+mlx-community:Qwen2.5-0.5B-Instruct-4bit \
+mlx-community:Qwen3-0.6B-4bit \
+mlx-community:Llama-3.2-1B-Instruct-4bit \
+mlx-community:Qwen3-4B-4bit \
+mlx-community:Mistral-7B-Instruct-v0.3-4bit \
+mlx-community:Qwen2.5-Coder-7B-Instruct-4bit \
+mlx-community:Qwen3.6-27B-4bit \
+mlx-community:Qwen3-30B-A3B-4bit \
+mlx-community:Qwen3.6-35B-A3B-4bit"
 read -r -a MODELS <<<"${AGENTIC_MODELS:-$DEFAULT_MODELS}"
 read -r -a TASK_LIST <<<"${TASKS:-greet build fix test debug}"
 
