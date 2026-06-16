@@ -1,5 +1,10 @@
 # Agent Meetings — Process Topology
 
+> **Superseded (2026-06-17) by `agent-meetings-daemon.md`.** One-process-per-room
+> is replaced by a dedicated multi-room meeting daemon; rooms are disk-backed in
+> the project (`.rozum/room/`). The model gateway is a separate, unchanged
+> process. Kept for history.
+
 ## Overview
 
 One `rozum` process = one meeting room. No registry daemon. Multiple rooms = multiple processes.

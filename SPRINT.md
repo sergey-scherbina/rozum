@@ -56,6 +56,94 @@ Full writeup + the one-pass diagnostic methodology that localized it:
 
 ### Active
 
+#### Meeting-room daemon: disk-backed, multi-room, dedicated daemon (spec stage, 2026-06-16)
+
+Spec committed: `docs/specs/agent-meetings-daemon.md` (supersedes the
+one-process-one-room topology in `agent-meetings-process.md`; `SPEC.md` updated).
+Puts meeting rooms in a **dedicated meeting daemon** (`rozum meetings`) as many
+disk-backed rooms (supervised tasks, not threads); the **model gateway is
+untouched**. Key decisions locked with the user:
+- **Topology**: dedicated meeting daemon `rozum meetings` (control:
+  `start|stop|status`, like `rozum gateway`; `install|uninstall` as a launchd/
+  systemd user-service like `rozum service`), separate from the gateway (gateway
+  is stateless/scalable/idle-exiting, rooms are stateful/single-writer — don't
+  co-host); model-as-participant is a localhost HTTP call to the gateway.
+- **Storage**: append-only JSONL is canonical, in the project at `.rozum/room/`,
+  split into daily files (`YYYY-MM-DD.jsonl`); message address is `(date, n)` with
+  a per-day counter `n` reset to 0 each day (no global seq); daemon holds only
+  high-water `(date,n,offset)` + budget counters (no turns in RAM). Lazy-created
+  on first message; `.rozum/.gitignore`=`*`; `index.json` date→{count,bytes};
+  `rooms.json` registry of room locations for discovery/reopen.
+- **Single writer + direct-read clients**: `submit` is an RPC to the daemon (it
+  owns seq/append/budget); TUI + `mcp-proxy` read `transcript.jsonl` directly,
+  write-before-notify, content never transits the daemon. Agent tool contract
+  unchanged.
+- **Identity**: opaque `ParticipantId` + friendly per-project handle, stable for
+  the proxy's session (token in proxy memory, binding persisted in `roster.json`);
+  `#N` suffix removed.
+- **Rooms by project**: project → one canonical room (idempotent); TUI is a
+  daemon client — launched in a project it enters that room, else a picker;
+  `[o]rooms` statusline shortcut to select/switch; many TUIs, independent. TUI
+  renders/scrolls **by day** (loads current day, lazy older days, day separators).
+- **Future (not now)**: remote stateless REST read on the meeting daemon,
+  **day-scoped** (`GET /rooms/{name}/days` +
+  `GET /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`).
+
+**Status: design only, nothing implemented. `src/gateway.rs` is NOT touched.**
+Build sequence (each phase compiles + has its own tests; do them in order — P0→P2
+are pure library and land behind today's behavior, P3 brings the daemon up, P4/P5
+are clients and can go in parallel, P6 is the service):
+
+- [ ] **P0 — Storage core** (lib, no daemon). New `src/meeting/store.rs`:
+      `RoomPaths` (resolve `<project>/.rozum/room/`, ad-hoc fallback
+      `$XDG_STATE_HOME/rozum/rooms/<name>/`, `rooms.json` registry, write
+      `.rozum/.gitignore`=`*`); `TranscriptWriter` (lazy-create on first append,
+      daily file `YYYY-MM-DD.jsonl`, per-day `n` reset at rollover, `index.json`
+      date→{count,bytes}, `meta.json` incl. `budget_chars`); `TranscriptReader`
+      (open day file, tail `[off,end)`, parse whole lines, roll to next day).
+      *Verify (tempdir unit tests):* append→`(date,n)`; rollover resets `n`;
+      reader tails new lines; reopen recovers high-water from newest day;
+      `index.json` rebuild; `.gitignore` + `rooms.json` add/list.
+- [ ] **P1 — Identity** (`src/meeting/participant.rs`). Opaque `ParticipantId` +
+      `handle` (project-namespaced adjective-animal) + `session_token`; resolve by
+      token, persist roster in `roster.json`; drop `#N` + name/staleness reclaim.
+      *Verify:* same token→same id/handle on rejoin; new token→new handle; roster
+      round-trip; no `#N`.
+- [ ] **P2 — Room model refactor** (`src/meeting/state.rs`). Replace
+      `transcript: Vec<Turn>` with the writer; `MeetingEvent` carries
+      `{date,n,end_offset}` (no `content`); `submit` → writer; budget from
+      `meta.json`. Free-submit stays; remove any vestigial turn/moderator wording.
+      *Verify:* adapted meeting tests; submit appends to disk + emits shrunk event.
+- [ ] **P3 — `meetings` daemon + RoomRegistry + MCP routing**
+      (`src/meeting/mcp_server.rs`, new daemon mode in `src/main.rs`).
+      `RoomRegistry` (id→RoomHandle, supervised task, panic-isolated, idle-evict,
+      lazy-create, reopen from `rooms.json` on start); one rmcp server on
+      `meeting.sock`; session `current_room`; `rooms.list/join` from registry;
+      `_join_internal{project,session_token}`. CLI `rozum meetings
+      start|stop|status` (detached spawn, single-owner socket+lock, graceful stop
+      drains `wait_my_turn`). *Verify:* 2 rooms concurrent; list/join/submit/
+      wait_my_turn over socket; stop drains; restart reopens.
+- [ ] **P4 — mcp-proxy rewrite** (`src/meeting/proxy.rs`). Dial the single
+      `meeting.sock`; pass `project`+`session_token`; read content from disk
+      (`TranscriptReader`) and return to the agent; `wait_my_turn` = daemon wakeup
+      + disk read; tool call-shape unchanged. *Verify (real agent, #[ignore]):*
+      Claude/Codex join project room, submit, see others; identity stable across
+      in-session reconnect.
+- [ ] **P5 — TUI as client** (`src/tui/`, `run_room`→attach in `src/main.rs`).
+      Connect to daemon (drop in-process `Arc<Mutex<Meeting>>`); room picker
+      (list/select/switch, `[o]rooms`, new-room); day-scoped render (current day +
+      lazy older + separators + rollover); launch-in-project enters its room;
+      auto-spawn daemon. *Verify:* in-project entry; picker switch; N independent
+      TUIs; scrollback loads older days.
+- [ ] **P6 — user service** (`src/service.rs`). `meetings_plist`/`meetings_unit`
+      (pure + unit-tested) + `rozum meetings install|uninstall` (launchd
+      `com.rozum.meetings` / systemd `rozum-meetings.service`, runs `meetings start
+      --foreground`, KeepAlive). *Verify:* generation unit tests; operator runs
+      `launchctl`/`systemctl`.
+- [ ] **Deferred (not now):** Future REST read-by-day on the meeting daemon's HTTP
+      (`/rooms/{name}/days`, `/messages/<date>`); model-as-participant via gateway
+      local HTTP.
+
 > **MLX native runtime is DONE (correctness + perf), 2026-06-13.** Decode root-caused
 > & fixed (bf16 stream leak in GatedDeltaNet q/k scaling → ~1000 casts/token): MoE
 > decode 33→~88 t/s (2.7×), prefill →1215 (=Python), dense 16→~19.6; byte-exact; merged

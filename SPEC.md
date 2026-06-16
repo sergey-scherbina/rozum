@@ -2,23 +2,28 @@
 
 ## Purpose
 
-Rozum is a local meeting-room runtime for live agents and a human operator.
-One running `rozum` process owns one named room, exposes it to external CLI
-agents through MCP, and lets the human participate directly through the TUI.
+Rozum is a local runtime for live agents, models, and a human operator. A
+dedicated meeting daemon hosts many disk-backed meeting rooms; a separate model
+gateway serves local models (unchanged); together they form one collaborative
+dev environment. External CLI agents join rooms through MCP, and the human
+attaches a TUI client to any room. Spec: `docs/specs/agent-meetings-daemon.md`.
 
 ## Runtime Contract
 
 - The project exposes a Rust library crate and a binary with the same package name, `rozum`.
-- Bare `rozum` launches a meeting room; it does not run model inference.
-- The default moderator is deterministic round-robin.
-- Active meeting turns are server-owned and may be skipped or expired so a
-  joined-but-idle participant cannot permanently block the meeting loop.
-- Turn expiry measures time until the active participant starts responding;
-  after response start, drafting or sampling is not charged to the round-robin
-  reaction timeout.
-- Manual/operator moderation is supported without model inference.
-- Smart or LLM-backed moderation is optional future behavior and must not be
-  enabled by default.
+- Bare `rozum` attaches a TUI client to a daemon-hosted meeting room (a room
+  picker when launched without project context); the TUI itself does not run
+  model inference.
+- Meeting rooms live in a dedicated meeting daemon (separate from the model
+  gateway, which is unchanged) — many rooms per process, not one process per
+  room — and are disk-backed in the project at `.rozum/room/` (append-only
+  per-day transcript logs). The meeting daemon is the single writer; local
+  clients read transcripts directly from disk. Spec:
+  `docs/specs/agent-meetings-daemon.md`.
+- There is no turn-taking and no moderator. Any participant may submit at any
+  time; messages are posted immediately, in arrival order. There is no
+  round-robin, no turn expiry, no speaker scheduling, and no manual or
+  LLM-backed moderation.
 - The legacy public model type `rozum::AiModel` remains available for smoke
   tests and optional model-adapter experiments.
 - `AiModel::new()` constructs a model without I/O, heap setup, network access,
@@ -41,8 +46,10 @@ agents through MCP, and lets the human participate directly through the TUI.
 ## Constraints
 
 - The default meeting runtime has no learned weights, reasoning engine,
-  persistence, network dependency, model file dependency, or local inference
-  dependency.
+  network dependency, model file dependency, or local inference dependency.
+- Meeting rooms are disk-backed by default (append-only transcript logs); this
+  is the only persistence and carries no model/network dependency. Spec:
+  `docs/specs/agent-meetings-daemon.md`.
 - The GGUF catalog is metadata only unless a developer explicitly opts into
   local model features.
 - New capabilities must be described in a feature spec before implementation.

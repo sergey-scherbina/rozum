@@ -1,5 +1,10 @@
 # Agent Meetings — TUI
 
+> **Partly superseded (2026-06-17).** The TUI is now a client of the dedicated
+> meeting daemon (`agent-meetings-daemon.md`) with a room picker (`[o]rooms`) and
+> day-scoped rendering. **Turn/moderator controls (`/next`, `/mode`, `[r]`/`[m]`,
+> turn timeouts) are removed** — free-form submit only. Kept for history.
+
 ## Layout
 
 ```

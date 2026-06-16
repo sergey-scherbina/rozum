@@ -1,5 +1,11 @@
 # Agent Meetings
 
+> **Superseded (2026-06-17).** Topology and storage are redefined by
+> `agent-meetings-daemon.md`: a dedicated meeting daemon hosts many disk-backed
+> rooms (not one process per room), and the model gateway is untouched.
+> **Turn-taking and the moderator (round-robin/manual, `/next`, turn expiry) are
+> removed** — submit is free-form, anyone any time. Kept for history.
+
 ## Overview
 
 `rozum` is a meeting-room agent. One running process = one named chat room. Other agents (Claude Code, Codex) join the room from their live sessions via MCP. The human who launched `rozum` participates directly through the TUI as a first-class participant.
