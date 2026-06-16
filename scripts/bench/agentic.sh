@@ -117,7 +117,7 @@ tree_sample() { # $1=root_pid
 prompt_for() {
   case "$1" in
     greet) echo 'Reply with exactly the single word: pong  (nothing else, no punctuation).' ;;
-    build) echo 'Create a minimal Rust binary project in the current directory: a Cargo.toml (package name "reverse-cli", edition 2021, no dependencies) and src/main.rs. The program reverses its first command-line argument (by characters) and prints the result. Then run "cargo run -- hello" and confirm it prints "olleh". Keep it minimal.' ;;
+    build) echo 'In the CURRENT directory (do NOT create a subdirectory), create a minimal Rust binary project: a Cargo.toml (package name "reverse-cli", edition 2021, no dependencies) and src/main.rs. The program reverses its first command-line argument (by characters) and prints the result. Then run "cargo run -- hello" and confirm it prints "olleh". Keep it minimal.' ;;
     test)  echo 'In the CURRENT directory (do NOT create a subdirectory), create a minimal Rust BINARY project: a Cargo.toml (package "reverse-cli", edition 2021, no dependencies) and src/main.rs. Implement `fn reverse(s: &str) -> String` that reverses by characters; main reads its first CLI argument and prints reverse(arg). ALSO add a `#[cfg(test)]` unit test asserting `reverse("hello") == "olleh"`. Then run "cargo test" (must pass) and "cargo run -- hello" (must print olleh). Actually implement reverse; do not just scaffold. Keep it minimal.' ;;
     fix)   echo 'There is a Rust project in the current directory. Running "cargo run -- hello" should print "olleh" (the reverse of the argument) but it prints "hello". Find and fix the bug in src/main.rs, then run "cargo run -- hello" to confirm it prints "olleh". Make the minimal change; do not rewrite the whole file.' ;;
     debug) echo 'There is a Rust library in the current directory. "cargo test" fails because of a bug in src/lib.rs. Fix the bug so the test passes. Do NOT modify the test. Then run "cargo test" to confirm it passes. Make the minimal change.' ;;
@@ -223,8 +223,11 @@ for spec in "${MODELS[@]}"; do
       prompt="$(prompt_for "$task")"
       alog="$work/agent.log"; sfile="$work/samples.txt"
       if [ "$agent" = claude ]; then
+        # Disallow AskUserQuestion: in headless `-p` it can't be answered, so a model
+        # that calls it to "verify" loops on the error until the timeout.
         aargs=(claude -p "$prompt" --output-format stream-json --verbose
-               --dangerously-skip-permissions --max-turns "$MAX_TURNS")
+               --dangerously-skip-permissions --max-turns "$MAX_TURNS"
+               --disallowedTools AskUserQuestion)
       else
         aargs=(codex exec "$prompt" --dangerously-bypass-approvals-and-sandbox)
       fi
