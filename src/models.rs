@@ -61,23 +61,28 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
                 completes tasks cleanly. The speed/capability/memory sweet spot.",
     },
     RecommendedModel {
+        spec: "mlx-community:Qwen3.6-27B-4bit",
+        display_name: "Qwen3.6 27B (dense)",
+        approx_size_gb: 15.0,
+        notes: "Most capable for agentic coding (5/5 in the matrix) and fits agentic use on a \
+                36 GB Mac. DENSE → slower (~15 t/s) than the MoEs; prefer the 30B-A3B MoE for \
+                interactive speed, this when you want the strongest single-shot result.",
+    },
+    RecommendedModel {
         spec: "mlx-community:Qwen3.6-35B-A3B-4bit",
         display_name: "Qwen3.6 35B-A3B (MoE)",
         approx_size_gb: 17.0,
-        notes: "Strongest MoE; agentic-capable + fast. Slightly more memory than the 30B.",
+        notes: "Strongest/fastest MoE, but HEAVY for agentic on 36 GB: peaks ~25 GB and the \
+                gateway can OOM on a big agent prompt (the single-shot prefill spike hits the \
+                MLX memory cap) → the worker dies mid-run. Use for chat / on ≥48 GB, or wait \
+                for chunked prefill. Lower `ROZUM_MLX_CACHE_GB` to free headroom.",
     },
     RecommendedModel {
         spec: "mlx-community:Qwen3.6-35B-A3B-4bit-DWQ",
         display_name: "Qwen3.6 35B-A3B DWQ",
         approx_size_gb: 17.0,
-        notes: "Distillation-Weighted Quant — same MoE, slightly better quality.",
-    },
-    RecommendedModel {
-        spec: "mlx-community:Qwen3.6-27B-4bit",
-        display_name: "Qwen3.6 27B (dense)",
-        approx_size_gb: 15.0,
-        notes: "Most capable per task, but DENSE → slow (~15 t/s): finishes correctly yet may \
-                hit the agent timeout before stopping. Prefer the MoE for interactive use.",
+        notes: "Distillation-Weighted Quant — same MoE, slightly better quality. Same ~25 GB / \
+                OOM caveat as the 35B above on a 36 GB Mac.",
     },
     RecommendedModel {
         spec: "mlx-community:Qwen2.5-Coder-32B-Instruct-4bit",
@@ -96,8 +101,9 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
         spec: "mlx-community:Qwen3-4B-4bit",
         display_name: "Qwen3 4B",
         approx_size_gb: 2.5,
-        notes: "Borderline for agentic (passes simpler edits via native <tool_call>); great as \
-                a fast cascade start-tier / non-agentic chat. Fits anywhere.",
+        notes: "Punches above its weight for agentic with Claude Code (4/5 in the matrix, native \
+                <tool_call> + the gateway's loop-breaker/termination fixes) at a ~360 MB agent \
+                footprint. Great fast cascade start-tier / chat. Fits anywhere.",
     },
 ];
 

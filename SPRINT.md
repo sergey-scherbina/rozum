@@ -64,6 +64,29 @@ Full writeup + the one-pass diagnostic methodology that localized it:
 
 #### Agentic local-model reliability + memory (2026-06-16, from the agentic benchmark)
 
+**Final 5-model matrix (2026-06-16, all fixes on): claude 18/25, codex 8/25. Infra is clean** — 0 loops,
+0 timeouts, 0 crashes in working models. Remaining failures are model/agent, root-caused:
+- **35B-A3B `rc=2` (memory, the only infra-ish failure).** The 35B gateway OOMs **during a single-shot
+  prefill** of a big agent prompt: the prefill activation spike + ~25 GB resident hits the MLX memory cap
+  (`total−8 = 28 GB` on a 36 GB Mac), and a **Metal OOM is process-fatal** → the gateway dies → every
+  later task on that model returns `rc=2`. Not "the agent can't get RAM" (it needs <1 GB) — the *model's
+  prefill* momentarily wants >28 GB. And the host rarely has spare RAM (≈7 GB free with a Claude Code
+  session running). 27B (5/5) is the practical ceiling for 36 GB; 35B lowered + caveated in `models.rs`.
+- **codex wrong paths (the big codex cluster).** The model runs `cargo new reverse-cli --lib` → creates a
+  **subdirectory** (forbidden) + a lib (not bin), then can't edit its own files (they're in the subdir).
+  Model instruction-following gap, amplified by codex's shell-first style; Claude uses `Write`/`Edit` →
+  files land in cwd → passes. Hence claude 72% vs codex 32%.
+- **Coder-7B text-only** (turns=1, tools=0): writes the solution as prose instead of calling tools.
+
+- [ ] mlx-chunked-prefill — **PROPOSED (the real 35B memory fix).** The single-request serving path
+  prefills the whole prompt in one forward (`qwen3::Generate::new(m, &mut cache, …, &prompt_tokens)` in
+  the vendored mlx-lm) → activation memory ∝ prompt length → the spike OOMs big models. Chunk the prefill
+  (e.g. 512 tokens/step, accumulating the KV cache — the prefix-reuse path already prefills a *suffix*, so
+  the forward supports incremental) to bound the peak → the 35B fits **without more RAM**. Needs a fork
+  edit to the mlx-lm `Generate` prefill (+ bump rev). Correctness is byte-exact testable on the 4B
+  (chunked == single-shot logits); memory benefit validates on the 35B when RAM frees. Quick interim
+  lever: `ROZUM_MLX_CACHE_GB=1` frees ~3 GB of cache headroom.
+
 The agentic e2e matrix (`scripts/bench/agentic.sh`, 9 models × claude+codex × 5 tasks) drove a chain
 of backend fixes and surfaced the levers below. **DONE this round:** cache-aware attention mask for
 qwen2/llama (fork `bddd6feb`, fixes the multi-turn prefix-reuse crash), unify+robustify tool-call
