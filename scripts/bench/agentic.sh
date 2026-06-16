@@ -29,8 +29,8 @@
 #   TASKS="greet build" RUN_TIMEOUT=600 scripts/bench/agentic.sh
 #
 # Env knobs:
-#   AGENTIC_MODELS  space-separated specs (default: a curated tool-use-capable set)
-#   AGENTS          "claude codex" (default both, if installed)
+#   AGENTIC_MODELS  space-separated specs (default: Qwen3.6-35B-A3B — the standard model)
+#   AGENTS          subset of "claude codex opencode" (default all three, if installed)
 #   TASKS           subset of: greet build fix test debug (default all)
 #   RUN_TIMEOUT     whole-task wall ceiling, seconds (default 1200)
 #   GEN_TIMEOUT     ROZUM_GEN_TIMEOUT_SECS for the in-process gateway (default 180)
@@ -68,17 +68,14 @@ case "$BIN" in /*) ;; *) BIN="$repo/$BIN" ;; esac   # launch runs in a temp cwd 
 # (Qwen2.5-0.5B, Qwen3-0.6B, Llama-3.2-1B) only manage `greet` even with the
 # JSON-repair, and template-less / incompatible models (gemma, Phi-3, SmolLM2,
 # Mistral-v0.3) can't drive tools at all — all dropped. Override with AGENTIC_MODELS.
-DEFAULT_MODELS="\
-mlx-community:Qwen3-4B-4bit \
-mlx-community:Qwen2.5-Coder-7B-Instruct-4bit \
-mlx-community:Qwen3.6-27B-4bit \
-mlx-community:Qwen3-30B-A3B-4bit \
-mlx-community:Qwen3.6-35B-A3B-4bit"
+# Standardized on Qwen3.6-35B-A3B (the only model that clears codex's apply_patch bar →
+# the recommended local agentic model). Override with AGENTIC_MODELS="spec1 spec2 ...".
+DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit"
 read -r -a MODELS <<<"${AGENTIC_MODELS:-$DEFAULT_MODELS}"
 read -r -a TASK_LIST <<<"${TASKS:-greet build fix test debug}"
 
 AGENT_RUN=()
-for a in ${AGENTS:-claude codex}; do command -v "$a" >/dev/null && AGENT_RUN+=("$a") || echo "skip agent '$a' (not on PATH)"; done
+for a in ${AGENTS:-claude codex opencode}; do command -v "$a" >/dev/null && AGENT_RUN+=("$a") || echo "skip agent '$a' (not on PATH)"; done
 [ "${#AGENT_RUN[@]}" -gt 0 ] || { echo "no agent CLIs available" >&2; exit 1; }
 command -v cargo >/dev/null || { echo "need cargo" >&2; exit 1; }
 
@@ -219,23 +216,27 @@ for spec in "${MODELS[@]}"; do
       setup_task "$task" "$work"
       prompt="$(prompt_for "$task")"
       alog="$work/agent.log"; sfile="$work/samples.txt"
-      lean=()
+      # Build the runner per agent. claude/codex route through `rozum launch` (no --model)
+      # which reuses the resident shared gateway. opencode uses its own OpenAI-compatible
+      # provider pointed straight at that gateway's port (rozum launch doesn't drive it).
       if [ "$agent" = claude ]; then
         # --lean strips non-coding tools (incl. AskUserQuestion, which in headless `-p`
         # can't be answered → a model that calls it to "verify" loops until the timeout)
         # from claude's request: 33 tools / ~4.9K schema tokens → 4 / ~0.8K. Big win on a
         # local model's context/KV/prefill, and fewer ways for a weak model to derail.
-        lean=(--lean)
         aargs=(claude -p "$prompt" --output-format stream-json --verbose
                --dangerously-skip-permissions --max-turns "$MAX_TURNS")
-      else
+        runner=("$BIN" launch --no-channel-wakeup --no-piggyback --lean "${aargs[@]}")
+      elif [ "$agent" = codex ]; then
         aargs=(codex exec "$prompt" --dangerously-bypass-approvals-and-sandbox)
+        runner=("$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}")
+      else  # opencode — `rozum launch` wires the gateway provider + -m rozum/local
+        aargs=(opencode run "$prompt")
+        runner=("$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}")
       fi
 
-      # `rozum launch` (no --model) → reuses the resident shared gateway, no reload.
       start=$(perl -MTime::HiRes=time -e 'printf "%.2f", time')
-      ( cd "$work"; exec "$BIN" launch --no-channel-wakeup --no-piggyback "${lean[@]}" "${aargs[@]}" ) \
-        </dev/null >"$alog" 2>&1 &
+      ( cd "$work"; exec "${runner[@]}" ) </dev/null >"$alog" 2>&1 &
       LP=$!
       # Agent-tree RSS + (agent + gateway) CPU; the model's RAM is the gateway footprint.
       ( while kill -0 "$LP" 2>/dev/null; do

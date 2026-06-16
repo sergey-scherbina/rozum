@@ -60,21 +60,9 @@ if [ -z "$BIN" ]; then
   else echo "no rozum binary; build with: cargo build --bin rozum" >&2; exit 1; fi
 fi
 
-# Default model set: installed mlx-community models, small -> large so quick
-# feedback comes first and the heavy ones run last.
+# Default: just Qwen3.6-35B-A3B — the standardized local model. Pass model specs as
+# args to benchmark a different/wider set (e.g. `run.sh spec1 spec2 ...`).
 DEFAULT_MODELS=(
-  mlx-community:Qwen2.5-0.5B-Instruct-4bit
-  mlx-community:Qwen3-0.6B-4bit
-  mlx-community:Llama-3.2-1B-Instruct-4bit
-  mlx-community:gemma-3-1b-it-4bit
-  mlx-community:SmolLM2-1.7B-Instruct
-  mlx-community:Phi-3-mini-4k-instruct-4bit
-  mlx-community:Qwen3-4B-4bit
-  mlx-community:gemma-3-4b-it-4bit
-  mlx-community:Mistral-7B-Instruct-v0.3-4bit
-  mlx-community:Qwen2.5-Coder-7B-Instruct-4bit
-  mlx-community:Qwen3.6-27B-4bit
-  mlx-community:Qwen3-30B-A3B-4bit
   mlx-community:Qwen3.6-35B-A3B-4bit
 )
 if [ "$#" -gt 0 ]; then MODELS=("$@"); else MODELS=("${DEFAULT_MODELS[@]}"); fi

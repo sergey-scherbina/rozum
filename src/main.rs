@@ -1603,6 +1603,24 @@ async fn exec_agent(
         eprintln!("  → codex: routed at the rozum gateway (model_provider=rozum, wire_api=responses)");
     }
 
+    // opencode reads providers from a config file, not env. Write one that adds an
+    // OpenAI-compatible `rozum` provider at the gateway and point OPENCODE_CONFIG at it.
+    // opencode's own tools (edit/bash/read/…) are built in, so a provider-only config is
+    // enough. Default the model to `rozum/local` if the user didn't pass `-m`.
+    let is_opencode = program_name == "opencode" || program_name.ends_with("/opencode");
+    if is_opencode {
+        if let Some(path) = write_opencode_config(&base) {
+            cmd.env("OPENCODE_CONFIG", &path);
+        }
+        let has_model = args
+            .iter()
+            .any(|a| a == "-m" || a == "--model" || a.starts_with("--model="));
+        if !has_model {
+            cmd.args(["-m", "rozum/local"]);
+        }
+        eprintln!("  → opencode: routed at the rozum gateway (provider=rozum, OpenAI-compatible)");
+    }
+
     apply_rozum_agent_env(&mut cmd);
     spawn_agent_and_exit(cmd, program_name).await
 }
@@ -1628,6 +1646,25 @@ fn codex_provider_flags(base: &str, has_model: bool) -> Vec<String> {
         f.push("local".into());
     }
     f
+}
+
+/// Write a temp opencode config defining a `rozum` OpenAI-compatible provider that
+/// points at the local gateway, and return its path (for `OPENCODE_CONFIG`). The model
+/// id is a label the gateway ignores; the user selects it as `-m rozum/local`.
+fn write_opencode_config(base: &str) -> Option<std::path::PathBuf> {
+    let cfg = serde_json::json!({
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            "rozum": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Rozum",
+                "options": { "baseURL": format!("{base}/v1"), "apiKey": "rozum-local" },
+                "models": { "local": { "name": "local" } }
+            }
+        }
+    });
+    let path = std::env::temp_dir().join(format!("rozum-opencode-{}.json", std::process::id()));
+    std::fs::write(&path, cfg.to_string()).ok().map(|_| path)
 }
 
 /// Launch the agent with no local model: leave its upstream Anthropic auth
@@ -1740,6 +1777,22 @@ fn apply_lean_flags(program: &mut Vec<String>, lean: bool) {
         );
         program.push("--disallowedTools".into());
         program.extend(LEAN_DISALLOW.iter().map(|t| (*t).to_string()));
+    }
+}
+
+#[cfg(test)]
+mod opencode_tests {
+    use super::write_opencode_config;
+
+    #[test]
+    fn opencode_config_points_at_gateway() {
+        let p = write_opencode_config("http://127.0.0.1:9999").expect("write config");
+        let s = std::fs::read_to_string(&p).expect("read config");
+        let v: serde_json::Value = serde_json::from_str(&s).expect("valid json");
+        assert_eq!(v["provider"]["rozum"]["options"]["baseURL"], "http://127.0.0.1:9999/v1");
+        assert_eq!(v["provider"]["rozum"]["npm"], "@ai-sdk/openai-compatible");
+        assert!(v["provider"]["rozum"]["models"]["local"].is_object());
+        let _ = std::fs::remove_file(&p);
     }
 }
 

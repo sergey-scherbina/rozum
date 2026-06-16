@@ -1,5 +1,18 @@
 # Changelog
 
+## launch + bench — `rozum launch opencode`; agentic benchmark adds opencode, defaults to 35B
+Completed: 2026-06-17
+
+`rozum launch opencode …` now works like claude/codex: it writes a temp opencode config defining an
+OpenAI-compatible `rozum` provider pointed at the local gateway (`OPENCODE_CONFIG`) and defaults the
+model to `-m rozum/local`. opencode's tools (edit/bash/read/…) are built in, so a provider-only config
+suffices. Verified: `opencode run` fixes the reverse-cli bug on Qwen3.6-35B-A3B (PASS).
+
+`scripts/bench/agentic.sh` now compares **three** agents — claude, codex, AND opencode (all via
+`rozum launch`, reusing the resident shared gateway) — and both bench scripts default to just
+`Qwen3.6-35B-A3B-4bit` (the standardized local model; override with `AGENTIC_MODELS=…` / args). Unit
+test for the opencode config writer; bench scripts syntax-checked.
+
 ## launch — `--lean` now also caps codex reasoning effort to `medium`
 Completed: 2026-06-17
 
