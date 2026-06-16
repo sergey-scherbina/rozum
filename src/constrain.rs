@@ -39,6 +39,13 @@ pub enum Schema {
     Object {
         props: Vec<(String, Schema)>,
         required: Vec<String>,
+        /// When set, keys MUST appear in declared order (no skipping a required
+        /// key). Used only by the tool-call `envelope` to force `name` before
+        /// `arguments`: a weak model otherwise opens `{"arguments":…}` first, then
+        /// — unable to recover to emit the now-required `name` — degenerates into
+        /// whitespace (constrained) or closes name-less (free), and the call is
+        /// dropped. Plain JSON-schema objects stay unordered (`false`).
+        ordered: bool,
     },
     /// Unknown / unsupported subschema: accept any well-formed JSON value.
     Any,
@@ -105,7 +112,7 @@ impl Schema {
                     .and_then(Value::as_array)
                     .map(|r| r.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
                     .unwrap_or_default();
-                Schema::Object { props, required }
+                Schema::Object { props, required, ordered: false }
             }
             // No (or unknown) `type` → accept any JSON value.
             _ => Schema::Any,
@@ -150,7 +157,7 @@ fn match_value<'a>(schema: &Schema, s: &'a str) -> M<'a> {
         Schema::Number => match_number(s, true),
         Schema::Str { allowed } => match_string(s, allowed.as_deref()),
         Schema::Array { items } => match_array(items, s),
-        Schema::Object { props, required } => match_object(props, required, s),
+        Schema::Object { props, required, ordered } => match_object(props, required, *ordered, s),
         Schema::Any => match_any(s),
     }
 }
@@ -307,7 +314,12 @@ fn match_array<'a>(items: &Schema, s: &'a str) -> M<'a> {
 
 /// Match a JSON object against declared `props` (keys restricted to them) and
 /// `required` (all must be present before the closing brace).
-fn match_object<'a>(props: &[(String, Schema)], required: &[String], s: &'a str) -> M<'a> {
+fn match_object<'a>(
+    props: &[(String, Schema)],
+    required: &[String],
+    ordered: bool,
+    s: &'a str,
+) -> M<'a> {
     let bytes = s.as_bytes();
     if bytes[0] != b'{' {
         return M::No;
@@ -326,11 +338,21 @@ fn match_object<'a>(props: &[(String, Schema)], required: &[String], s: &'a str)
             }
             return M::No;
         }
-        // Expect a key: one of the not-yet-seen declared property names.
-        let remaining: Vec<&(String, Schema)> = props
-            .iter()
-            .filter(|(name, _)| !seen.iter().any(|k| k == name))
-            .collect();
+        // Expect a key: a not-yet-seen declared property. When `ordered`, only the
+        // NEXT declared key is allowed (no skipping) — forces `name` before
+        // `arguments` for the tool-call envelope.
+        let remaining: Vec<&(String, Schema)> = if ordered {
+            props
+                .iter()
+                .find(|(name, _)| !seen.iter().any(|k| k == name))
+                .into_iter()
+                .collect()
+        } else {
+            props
+                .iter()
+                .filter(|(name, _)| !seen.iter().any(|k| k == name))
+                .collect()
+        };
         let key_lits: Vec<String> = remaining.iter().map(|(n, _)| n.clone()).collect();
         let (key, after_key) = match match_string(r, Some(&key_lits)) {
             M::Done(after) => {
@@ -453,6 +475,9 @@ pub fn envelope(tool_names: &[String], args: Schema) -> Schema {
             ("arguments".to_string(), args),
         ],
         required: vec!["name".to_string(), "arguments".to_string()],
+        // Force `name` before `arguments`: weak models in a rich agentic context
+        // open the tool call with `arguments` first and then can't emit the name.
+        ordered: true,
     }
 }
 
@@ -572,7 +597,7 @@ fn match_xml<'a>(tools: &[(String, Schema)], s: &'a str) -> XM<'a> {
     };
     // The tool's args must be an object (the only shape the parameter form can carry).
     let (props, required): (&[(String, Schema)], &[String]) = match &tools[tidx].1 {
-        Schema::Object { props, required } => (props, required),
+        Schema::Object { props, required, .. } => (props, required),
         _ => (&[], &[]),
     };
     let mut seen: Vec<&str> = Vec::new();
@@ -777,6 +802,23 @@ mod tests {
         assert_eq!(
             open.prefix("{\"name\": \"get_weather\", \"arguments\": {\"any"),
             Prefix::Partial
+        );
+    }
+
+    #[test]
+    fn envelope_forces_name_first() {
+        // Regression: a weak model in a rich agentic context opens the tool call
+        // with `arguments` first and then can't emit the now-required `name`,
+        // degenerating into whitespace (constrained) / closing name-less (free) so
+        // the call is dropped. The ordered envelope must reject `arguments`-first.
+        let env = envelope(&["Edit".to_string()], Schema::Any);
+        assert_eq!(env.prefix("{\"name"), Prefix::Partial);
+        assert_eq!(env.prefix("{\"arguments\""), Prefix::Invalid);
+        assert_eq!(env.prefix("{ \"arguments\""), Prefix::Invalid);
+        // Full name-first call still completes.
+        assert_eq!(
+            env.prefix("{\"name\": \"Edit\", \"arguments\": {\"x\": 1}}"),
+            Prefix::Complete
         );
     }
 

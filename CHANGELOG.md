@@ -1,5 +1,26 @@
 # Changelog
 
+## constrain — tool-call envelope forces `name` before `arguments`
+Completed: 2026-06-16
+
+Direct-probe root-cause of why Qwen3.6-35B-A3B's tool calls vanish in a rich agentic context:
+given a faithful Claude-Code-style history (ls → cargo test → line-numbered Read), the model opens
+the tool call with `arguments` FIRST and never emits the required `name` — `{"arguments":{…}}`. Free
+decode then closes it name-less (→ `parse_tool_calls` drops it, no `name`); constrained decode
+correctly blocks the close (name required) but JSON permits whitespace, so the weak model degenerates
+into `\r` spam instead of recovering to `,"name":…`. Either way the call is dropped and the agent
+loops. NOT a model-capability limit: in a clean single-turn context the same model emits a correct
+`{"name":"Edit",…}`.
+
+Fix: the tool-call `envelope` schema is now an ORDERED object — `name` must precede `arguments`
+(added `ordered` to `Schema::Object`, enforced in `match_object`; plain JSON-schema / structured-output
+objects stay unordered). Probe-verified: the exact reproduction now yields a clean
+`tool_use` Edit (was dropped text). 2 unit tests.
+
+Honest scope: this fixes the malformed-tool-call class, but does NOT by itself fix the claude `debug`
+e2e on 35B — in the FULL Claude Code context (large system prompt + tool set) the model read-loops and
+never emits the Edit at all (a separate tool-SELECTION issue the minimal probes don't reproduce).
+
 ## gateway — Anthropic tool results now render under the `tool` role (was `user`)
 Completed: 2026-06-16
 
