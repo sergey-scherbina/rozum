@@ -1,5 +1,26 @@
 # Changelog
 
+## launch — `rozum launch --lean`: strip non-coding tools from Claude Code (smaller local-model prompt)
+Completed: 2026-06-16
+
+Claude Code ships its full tool set on **every** request to the model. Measured on a real
+`rozum launch claude` (Qwen3-4B): **33 tools = ~4,878 tool-schema tokens** of fixed overhead — and
+most are non-coding (7 `mcp__rozum__*` meeting-room tools, `Cron*`, `Task*`, `Workflow`,
+`Enter/ExitPlanMode`, `Enter/ExitWorktree`, `Skill`, `Agent`, `ScheduleWakeup`, `LSP`, `Web*`,
+`NotebookEdit`). On a local quantized model with a 16–40K context that bloats the prompt + KV cache,
+slows prefill, and gives a weak model more ways to derail.
+
+`--lean` injects `--disallowedTools` with the non-coding list (+ `mcp__rozum` server-wildcard) →
+**4 tools / ~761 tokens (−84%)**, leaving the Read/Write/Edit/Bash core. Important correction the
+measurement forced: **`--allowedTools` is a permission whitelist, not a request shaper** — it left the
+tool count unchanged (even +2); `--disallowedTools` is the flag that actually removes schemas from the
+request. `apply_lean_tools` (`src/main.rs`) injects at the end of the program vector (the flag is
+variadic), is a no-op for non-`claude` programs, and is skipped if the user already manages tools.
+`--lean` is in `KNOWN_BOOL_FLAGS` so it hoists when placed after the program name. The agentic
+benchmark (`scripts/bench/agentic.sh`) now passes `--lean` (it subsumes the old `--disallowedTools
+AskUserQuestion`). CC's fixed system prompt isn't strippable via CLI, so `--lean` targets the tool
+schemas (the bigger, variable half). 2 unit tests + verified e2e. `src/main.rs`, `scripts/bench/agentic.sh`.
+
 ## gateway — break agentic stuck-loops server-side (agents that can't stop when done)
 Completed: 2026-06-16
 

@@ -121,10 +121,20 @@ the constrain-OFF fast path), per-task gateway (robust under MLX memory growth),
   agentic verdict: Qwen3-30B-A3B = best for local agentic coding, the 7B→27B capability cliff,
   Qwen3/Qwen3.6 native `<tool_call>` > Qwen2.5/Llama loose JSON. Dropped Mistral/SmolLM2/Phi-3/gemma×2.
 
-- [ ] cc-prompt-lean-mode — Claude Code's system prompt + ~25 tool schemas fill the 16K context →
-  large KV + slow prefill on local models. A "lean" launch mode (fewer tools / a compact system note)
-  cuts context, memory, and prefill. `rozum launch` already trims skills/git/CLAUDE.md
-  (`apply_rozum_agent_env`); extend it for local models.
+- [x] cc-prompt-lean-mode — **DONE 2026-06-16.** `rozum launch --lean` strips non-coding tools from a
+  launched `claude`. **Measured** the actual bloat first (Qwen3-4B, real launch): CC ships **33 tools /
+  ~4,878 tool-schema tokens** every request — most non-coding (7 `mcp__rozum__*` meeting-room tools,
+  `Cron*`, `Task*`, `Workflow`, `Enter/ExitPlanMode`, `Enter/ExitWorktree`, `Skill`, `Agent`,
+  `ScheduleWakeup`, `LSP`, `Web*`, `NotebookEdit`). Key correction from the measurement: **`--allowedTools`
+  is a *permission* whitelist, not a request shaper** (it left the count unchanged / *higher* — 35) —
+  `--disallowedTools` is what removes schemas from the request. `--lean` injects `--disallowedTools` with
+  the non-coding list (+ `mcp__rozum` server-wildcard) → **4 tools / ~761 tokens (−84%)**, leaving the
+  Read/Write/Edit/Bash core. `apply_lean_tools` (`src/main.rs`) injects at the end of the program vector
+  (variadic flag), no-op for non-`claude`, skipped if the user already manages tools; `--lean` added to
+  `KNOWN_BOOL_FLAGS` so it hoists when placed after the program name. `scripts/bench/agentic.sh` now uses
+  `--lean` (which covers the old `--disallowedTools AskUserQuestion`). 2 unit tests + verified e2e (claude
+  still answers under the lean tool set). Did NOT touch CC's fixed system prompt (not strippable via CLI) —
+  the tool schemas were the bigger, variable half.
 
 
 (mistral-system-fold moved to BACKLOG as WON'T DO — only Mistral-v0.3 needed it, and all kept models

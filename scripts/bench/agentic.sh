@@ -219,19 +219,22 @@ for spec in "${MODELS[@]}"; do
       setup_task "$task" "$work"
       prompt="$(prompt_for "$task")"
       alog="$work/agent.log"; sfile="$work/samples.txt"
+      lean=()
       if [ "$agent" = claude ]; then
-        # Disallow AskUserQuestion: in headless `-p` it can't be answered, so a model
-        # that calls it to "verify" loops on the error until the timeout.
+        # --lean strips non-coding tools (incl. AskUserQuestion, which in headless `-p`
+        # can't be answered → a model that calls it to "verify" loops until the timeout)
+        # from claude's request: 33 tools / ~4.9K schema tokens → 4 / ~0.8K. Big win on a
+        # local model's context/KV/prefill, and fewer ways for a weak model to derail.
+        lean=(--lean)
         aargs=(claude -p "$prompt" --output-format stream-json --verbose
-               --dangerously-skip-permissions --max-turns "$MAX_TURNS"
-               --disallowedTools AskUserQuestion)
+               --dangerously-skip-permissions --max-turns "$MAX_TURNS")
       else
         aargs=(codex exec "$prompt" --dangerously-bypass-approvals-and-sandbox)
       fi
 
       # `rozum launch` (no --model) → reuses the resident shared gateway, no reload.
       start=$(perl -MTime::HiRes=time -e 'printf "%.2f", time')
-      ( cd "$work"; exec "$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}" ) \
+      ( cd "$work"; exec "$BIN" launch --no-channel-wakeup --no-piggyback "${lean[@]}" "${aargs[@]}" ) \
         </dev/null >"$alog" 2>&1 &
       LP=$!
       # Agent-tree RSS + (agent + gateway) CPU; the model's RAM is the gateway footprint.

@@ -215,6 +215,16 @@ enum Command {
         #[arg(long, conflicts_with = "no_model")]
         backend_url: Option<String>,
 
+        /// Lean mode for local models: strip non-coding tools from Claude Code via
+        /// `--disallowedTools` (meeting-room MCP, plan/worktree/cron/task/workflow/skill/
+        /// notebook/web). Claude Code otherwise ships ~33 tool schemas on every request —
+        /// measured ~4.9K tokens of fixed overhead that bloats a small model's context + KV
+        /// cache, slows prefill, and gives a weak model more ways to derail; --lean cuts it
+        /// to ~0.8K (the Read/Write/Edit/Bash core). No-op for non-`claude` programs, and
+        /// skipped if you already pass `--allowedTools`/`--disallowedTools` yourself.
+        #[arg(long)]
+        lean: bool,
+
         /// Program to launch and its arguments
         #[arg(trailing_var_arg = true, required = true)]
         program: Vec<String>,
@@ -468,10 +478,12 @@ async fn main() {
             channel_mcp_name,
             no_piggyback,
             backend_url,
-            program,
+            lean,
+            mut program,
         }) => {
             apply_cascade_strategy(strategy.as_deref());
             apply_offline(offline);
+            apply_lean_tools(&mut program, lean);
             let model = join_models(model);
             // Precedence: --channel-mcp-name > ROZUM_CHANNEL_MCP_NAME > "rozum".
             let server_name = channel_mcp_name
@@ -659,7 +671,7 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
         &["--model", "--port", "--n-ctx", "--channel-mcp-name", "--backend-url"];
     // Value-less flags: pulled to the front without consuming a following arg.
     const KNOWN_BOOL_FLAGS: &[&str] =
-        &["--no-model", "--dedicated", "--no-channel-wakeup", "--no-piggyback"];
+        &["--no-model", "--dedicated", "--no-channel-wakeup", "--no-piggyback", "--lean"];
 
     // Collect args after "launch", pull known flag+value pairs to the front.
     let tail: Vec<String> = args.split_off(launch_idx + 1);
@@ -1642,6 +1654,98 @@ async fn exec_agent_anthropic(mut program: Vec<String>, channel_flags: Option<Ve
 
 /// Apply rozum's agent-context env defaults (skills/git/CLAUDE.md trimming),
 /// each only when the operator hasn't already set it. Independent of model.
+/// Non-coding tools `--lean` strips from a launched `claude` via `--disallowedTools`.
+/// A headless coding launch keeps the core (Read/Write/Edit/Bash + any Glob/Grep/LS/
+/// MultiEdit), and drops meeting-room (rozum MCP), planning, worktree, cron, task,
+/// workflow, skill, notebook, and web tools — they're schema tokens the model pays for on
+/// every request and extra ways for a weak model to derail. **Measured** (Qwen3-4B, real
+/// `rozum launch claude`): 33 tools / ~4,878 tool-schema tokens → 4 tools / ~761 (−84%).
+/// `--allowedTools` is a *permission* whitelist, not a request shaper (it left the count
+/// unchanged / higher) — `--disallowedTools` is what actually removes schemas from the
+/// request. `mcp__rozum` is a server-level wildcard that drops all rozum MCP tools.
+/// Names that aren't present are harmless no-ops, so the list can be a safe superset.
+const LEAN_DISALLOW: &[&str] = &[
+    "AskUserQuestion", "WebFetch", "WebSearch", "NotebookEdit",
+    "Task", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate",
+    "CronCreate", "CronDelete", "CronList",
+    "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree",
+    "Workflow", "Skill", "ScheduleWakeup", "Agent", "LSP",
+    "mcp__rozum",
+];
+
+/// `--lean`: when launching `claude`, append `--disallowedTools <LEAN_DISALLOW>` so Claude
+/// Code drops those non-coding tool schemas from every request to the (local) model —
+/// smaller prompt, less KV/prefill, fewer derails. No-op for non-`claude` programs; skipped
+/// if the user is already managing the tool set (`--allowedTools`/`--disallowedTools`) so we
+/// never override an explicit choice. Injected at the END of `program` (the flag is variadic,
+/// so nothing must follow it) and flows through every launch path.
+fn apply_lean_tools(program: &mut Vec<String>, lean: bool) {
+    if !lean {
+        return;
+    }
+    let Some(p0) = program.first() else { return };
+    let is_claude = p0 == "claude" || p0.ends_with("/claude");
+    if !is_claude {
+        return;
+    }
+    let user_manages_tools = program
+        .iter()
+        .any(|a| a.starts_with("--allowedTools") || a.starts_with("--disallowedTools"));
+    if user_manages_tools {
+        eprintln!("rozum launch: --lean ignored (you already pass --allowedTools/--disallowedTools)");
+        return;
+    }
+    eprintln!(
+        "rozum launch: --lean → claude --disallowedTools (strip {} non-coding tools)",
+        LEAN_DISALLOW.len()
+    );
+    program.push("--disallowedTools".into());
+    program.extend(LEAN_DISALLOW.iter().map(|t| (*t).to_string()));
+}
+
+#[cfg(test)]
+mod lean_tests {
+    use super::{apply_lean_tools, LEAN_DISALLOW};
+
+    fn lean(args: &[&str], on: bool) -> Vec<String> {
+        let mut p: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        apply_lean_tools(&mut p, on);
+        p
+    }
+
+    #[test]
+    fn injects_disallowed_tools_for_claude() {
+        let out = lean(&["claude", "-p", "fix it"], true);
+        // Original args preserved, then --disallowedTools + the full strip list at the end.
+        assert_eq!(&out[..3], &["claude", "-p", "fix it"]);
+        assert_eq!(out[3], "--disallowedTools");
+        assert_eq!(out.len(), 4 + LEAN_DISALLOW.len());
+        assert!(out.contains(&"AskUserQuestion".to_string()));
+        assert!(out.contains(&"mcp__rozum".to_string()));
+        // Coding-core tools are NOT stripped.
+        assert!(!out.contains(&"Bash".to_string()) && !out.contains(&"Edit".to_string()));
+        // Works for an absolute path too.
+        assert!(lean(&["/usr/bin/claude", "-p", "x"], true).iter().any(|a| a == "--disallowedTools"));
+    }
+
+    #[test]
+    fn noop_when_off_or_not_claude_or_user_manages_tools() {
+        // Flag off → untouched.
+        assert_eq!(lean(&["claude", "-p", "x"], false), vec!["claude", "-p", "x"]);
+        // Non-claude (codex) → untouched.
+        assert_eq!(lean(&["codex", "exec", "x"], true), vec!["codex", "exec", "x"]);
+        // User already manages tools → not overridden (either flag).
+        assert_eq!(
+            lean(&["claude", "-p", "x", "--disallowedTools", "AskUserQuestion"], true),
+            vec!["claude", "-p", "x", "--disallowedTools", "AskUserQuestion"]
+        );
+        assert_eq!(
+            lean(&["claude", "--allowedTools", "Read"], true),
+            vec!["claude", "--allowedTools", "Read"]
+        );
+    }
+}
+
 fn apply_rozum_agent_env(cmd: &mut std::process::Command) {
     for (k, v) in [
         ("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS", "1"),
