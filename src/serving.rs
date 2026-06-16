@@ -120,12 +120,35 @@ fn parse_xml_function(body: &str) -> Option<(String, String)> {
 /// markers aren't braces, so the object inside is found directly). Requires the
 /// `{name:string, arguments|parameters:object}` signature.
 fn parse_loose_tool_calls(text: &str) -> Vec<(String, String)> {
+    // Strict path first: well-formed JSON (most models) — no false-positive risk.
     let mut calls = Vec::new();
     for obj in balanced_json_objects(text) {
         if let Ok(v) = serde_json::from_str::<Value>(obj) {
             if let Some(call) = tool_call_from_value(&v, true) {
                 calls.push(call);
             }
+        }
+    }
+    if !calls.is_empty() {
+        return calls;
+    }
+    // Repair path: a MALFORMED `{"name":…}` — the classic LLM mistake of unescaped
+    // quotes inside a string value (e.g. `"content":"…println!("{}", x)…"`) breaks
+    // both `serde_json` AND the brace scanner. Find each `{"name"` and tolerantly
+    // repair + parse it, so the call isn't dropped.
+    let b = text.as_bytes();
+    let mut i = 0;
+    while let Some(start) = find_name_brace(b, i) {
+        match repair_tool_object(b, start) {
+            Some((repaired, end)) => {
+                if let Ok(v) = serde_json::from_str::<Value>(&repaired) {
+                    if let Some(call) = tool_call_from_value(&v, true) {
+                        calls.push(call);
+                    }
+                }
+                i = end.max(start + 1);
+            }
+            None => break,
         }
     }
     calls
@@ -174,6 +197,94 @@ fn balanced_json_objects(s: &str) -> Vec<&str> {
         }
     }
     out
+}
+
+/// Index of a `{` whose first key is `name` (a tool-call opening), at or after `from`.
+fn find_name_brace(b: &[u8], from: usize) -> Option<usize> {
+    let mut i = from;
+    while let Some(rel) = b[i..].iter().position(|&c| c == b'{') {
+        let pos = i + rel;
+        let mut j = pos + 1;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if b[j..].starts_with(b"\"name\"") {
+            return Some(pos);
+        }
+        i = pos + 1;
+    }
+    None
+}
+
+/// Tolerantly scan a (possibly malformed) JSON object from `start` (a `{`), escaping
+/// unescaped `"` and raw control chars inside string values, and return the repaired
+/// JSON + the index just past the closing `}`. A `"` is a string CLOSE only if the
+/// next non-space byte is `:` / `}` / `]` / end, or a `,` followed by the next key's
+/// `"` — so a content quote (e.g. in `println!("{}", x)`) is escaped, not treated as
+/// a close, and the braces inside that string never unbalance the object. `None` if
+/// it never balances.
+fn repair_tool_object(b: &[u8], start: usize) -> Option<(String, usize)> {
+    let mut out: Vec<u8> = Vec::with_capacity(64);
+    let (mut depth, mut in_str, mut esc) = (0i32, false, false);
+    let mut i = start;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            if esc {
+                out.push(c);
+                esc = false;
+            } else if c == b'\\' {
+                out.push(c);
+                esc = true;
+            } else if c == b'"' {
+                let mut j = i + 1;
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                let closes = match b.get(j) {
+                    None | Some(b':') | Some(b'}') | Some(b']') => true,
+                    Some(b',') => {
+                        let mut k = j + 1;
+                        while k < b.len() && b[k].is_ascii_whitespace() {
+                            k += 1;
+                        }
+                        b.get(k) == Some(&b'"')
+                    }
+                    _ => false,
+                };
+                if closes {
+                    out.push(b'"');
+                    in_str = false;
+                } else {
+                    out.extend_from_slice(b"\\\""); // escape a content quote
+                }
+            } else if c < 0x20 {
+                match c {
+                    b'\n' => out.extend_from_slice(b"\\n"),
+                    b'\t' => out.extend_from_slice(b"\\t"),
+                    b'\r' => out.extend_from_slice(b"\\r"),
+                    _ => {} // drop other control chars
+                }
+            } else {
+                out.push(c);
+            }
+        } else {
+            out.push(c);
+            match c {
+                b'"' => in_str = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return String::from_utf8(out).ok().map(|s| (s, i + 1));
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -257,6 +368,40 @@ mod tests {
         let calls = parse_tool_calls(text);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "a");
+    }
+
+    #[test]
+    fn repair_unescaped_quotes_in_code_content() {
+        // The classic weak-model malformation: unescaped quotes inside Rust code in a
+        // "content" arg. Includes `"{}"` whose closing quote is followed by a comma —
+        // a content quote that a naive parser mistakes for a value close.
+        let malformed = concat!(
+            "I'll write it.\n```json\n{\"name\":\"Write\",\"arguments\":{",
+            "\"file_path\":\"/tmp/main.rs\",",
+            "\"content\":\"fn main(){ println!(\"{}\", x); }\"",
+            "}}\n```"
+        );
+        let calls = parse_tool_calls(malformed);
+        assert_eq!(calls.len(), 1, "calls: {calls:?}");
+        assert_eq!(calls[0].0, "Write");
+        // The repaired arguments must be valid JSON with the code preserved.
+        let v: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(v["file_path"], "/tmp/main.rs");
+        assert!(
+            v["content"].as_str().unwrap().contains("println!(\"{}\", x)"),
+            "content: {}",
+            v["content"]
+        );
+    }
+
+    #[test]
+    fn repair_does_not_fire_for_wellformed_or_non_calls() {
+        // Well-formed call → handled by the strict path (one call, not double-counted).
+        let ok = "```json\n{\"name\":\"ls\",\"arguments\":{\"path\":\".\"}}\n```";
+        assert_eq!(parse_tool_calls(ok).len(), 1);
+        // A `{"name":…}` without object args is still not a tool call after repair.
+        assert!(parse_tool_calls("{\"name\":\"Alice\",\"age\":30}").is_empty());
+        assert!(parse_tool_calls("here is { some prose } with braces").is_empty());
     }
 
     #[test]

@@ -1,5 +1,22 @@
 # Changelog
 
+## serving — repair malformed tool-call JSON (recover calls with constrain OFF) + bigger timeouts
+Completed: 2026-06-16
+
+`serving::parse_loose_tool_calls` now **repairs** a malformed `{"name":…}` instead of dropping it.
+The classic weak-model mistake is unescaped quotes inside a string value (`"content":"…println!("{}",
+x)…"`), which breaks both `serde_json` and the brace scanner. When the strict parse finds nothing,
+`repair_tool_object` does one tolerant scan that disambiguates a content `"` from a structural one by
+lookahead — a `"` closes the string only if the next non-ws byte is `:` / `}` / `]` / EOF, or a `,`
+followed by the next key's `"` — and escapes content quotes + raw control chars (so `println!("{}", x)`,
+including the tricky `"{}"`-then-comma, is recovered). Runs only after a failed strict parse → no false
+positives. **This makes weaker models reliable with `ROZUM_MLX_CONSTRAIN=0` (the fast path)** instead
+of needing the B=1 masked decode: Coder-7B `build` now passes constrain-off (was a fail — lost the
+call). Surfaced by the agentic benchmark. Also: `ROZUM_GEN_TIMEOUT_SECS` default 180 → **300** (more
+headroom for slow/big quantized models); the bench `agentic.sh` drops the template-incompatible
+`Mistral-7B-v0.3` from its default set and raises its run/gen timeouts. `src/serving.rs` (12 tests),
+`src/gateway.rs`, `scripts/bench/agentic.sh`.
+
 ## mlx-native — stop streaming loose tool calls as text (fixes agentic re-emit loop) + constrain on by default
 Completed: 2026-06-16
 

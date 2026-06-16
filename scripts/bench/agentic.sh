@@ -47,8 +47,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 cd "$repo"
 
-RUN_TIMEOUT="${RUN_TIMEOUT:-1200}"
-GEN_TIMEOUT="${GEN_TIMEOUT:-180}"
+RUN_TIMEOUT="${RUN_TIMEOUT:-600}"
+GEN_TIMEOUT="${GEN_TIMEOUT:-300}"
 MAX_TURNS="${MAX_TURNS:-30}"
 PORT_BASE="${BENCH_PORT_BASE:-8300}"
 OUT="${BENCH_OUT:-$here/results/agentic-$(date +%Y%m%d-%H%M%S)}"
@@ -73,7 +73,6 @@ mlx-community:Qwen2.5-0.5B-Instruct-4bit \
 mlx-community:Qwen3-0.6B-4bit \
 mlx-community:Llama-3.2-1B-Instruct-4bit \
 mlx-community:Qwen3-4B-4bit \
-mlx-community:Mistral-7B-Instruct-v0.3-4bit \
 mlx-community:Qwen2.5-Coder-7B-Instruct-4bit \
 mlx-community:Qwen3.6-27B-4bit \
 mlx-community:Qwen3-30B-A3B-4bit \

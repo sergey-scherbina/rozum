@@ -683,15 +683,15 @@ impl Stream for CancelOnDrop {
 // ─── Generation inactivity timeout ────────────────────────────────────────────
 
 /// Inactivity ceiling between two backend events. `ROZUM_GEN_TIMEOUT_SECS`
-/// (default 180; `0` disables). Must exceed the worst legitimate gap — a cold
-/// hybrid/MoE first token (Metal kernel JIT + weight page-in) ran ~33s in the
-/// local-model benchmark, so the default leaves generous headroom.
+/// (default 300; `0` disables). Must exceed the worst legitimate gap — a cold
+/// hybrid/MoE first token (Metal kernel JIT + weight page-in) ran ~33s, and a big
+/// quantized model under memory pressure can stall longer, so keep headroom.
 fn gen_inactivity_timeout() -> Duration {
     std::env::var("ROZUM_GEN_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(180))
+        .unwrap_or(Duration::from_secs(300))
 }
 
 /// Wrap a backend stream so a stalled generation can't hang the client forever.

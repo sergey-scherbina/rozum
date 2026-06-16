@@ -407,16 +407,14 @@ or on nothing — so any engine can reuse it.
   to lift into `serving`: tool-history rendering (`message_text`), UTF-8-safe incremental
   detokenize, multi-EOS stop logic, the KV/RAM preflight.
 
-- [ ] serving-loose-json-repair - the loose tool-call fallback drops a call when the model emits
-  **malformed** JSON — the classic LLM mistake of unescaped quotes inside a string value (e.g.
-  `"content":"…println!("{}", x)…"`). Today that's only saved by `ROZUM_MLX_CONSTRAIN` (masked
-  decode, on by default but B=1-slow). Add a tolerant repair to `serving::parse_loose_tool_calls`
-  so the call is recovered even with constrain OFF (fast path). Non-trivial: the unescaped quotes
-  break both `serde_json` AND the balanced-brace scanner (a content `"` looks like a string close,
-  so braces in the code unbalance it). Needs a single tolerant scan that disambiguates a content
-  `"` from a structural one by lookahead — a `"` closes the string only if the next non-ws char is
-  `:` / `}` / `]` / EOF, or a `,` followed by a `"key"` — which correctly parses `println!("{}", x)`.
-  Escape the rest. Surfaced by the agentic benchmark (sub-7B models lose calls with constrain off).
+- [x] serving-loose-json-repair - **DONE 2026-06-16** (`src/serving.rs`). `parse_loose_tool_calls`
+  now repairs a **malformed** `{"name":…}` when the strict path finds nothing: `repair_tool_object`
+  does a single tolerant scan that disambiguates a content `"` from a structural one by lookahead (a
+  `"` closes the string only if the next non-ws byte is `:` / `}` / `]` / EOF, or a `,` followed by
+  the next key's `"`), escaping content quotes + raw control chars — so `println!("{}", x)` (incl. the
+  `"{}"`-then-comma case) is recovered, not dropped. Runs only when the strict parse failed (no
+  false positives). Validated: Coder-7B `build` now passes **with `ROZUM_MLX_CONSTRAIN=0`** (was a
+  fail — lost the call). Known limit: a literal `","` inside content still defeats the heuristic.
 
 - [x] extract-shared-sampler - **L2. DONE 2026-06-15** (`src/sampler.rs`). The sampler
   (repeat-penalty → temperature → top-k → top-p → categorical) defined over a plain `&[f32]` logit
