@@ -396,13 +396,16 @@ The taxonomy + rationale is in `docs/specs/portability-and-the-backend-spi.md`
 of the MLX leaf into a module that depends only on hardware, or only on the model,
 or on nothing — so any engine can reuse it.
 
-- [ ] extract-shared-serving-helpers - **L1.** Lift the engine-agnostic per-request
-  logic into a `serving` module every leaf calls, instead of re-implementing it.
-  First target: `parse_tool_calls` is **already duplicated** (own copy in `gguf.rs`
-  AND `mlx_native_backend.rs`) — unify it. Then tool-history rendering
-  (`message_text`), UTF-8-safe incremental detokenize, multi-EOS stop logic, and the
-  KV/RAM preflight (pure arithmetic from `config.json` + free RAM). Depends only on
-  the model's text/config conventions, not the engine.
+- [ ] extract-shared-serving-helpers - **L1. STARTED 2026-06-16** (`src/serving.rs`).
+  Tool-call parsing is unified there: MLX's whole-text `parse_tool_calls` and GGUF's
+  streaming `tool_name` both call it (the duplicated body-parsing is gone). It was also
+  made **robust** — when a model emits no `<tool_call>` envelope (common for 4B–7B models
+  driven by a foreign tool schema, which fall back to a bare or ```json-fenced
+  `{name,arguments}`), the call is recovered via a string-aware balanced-brace scan with a
+  strict `arguments`-is-object guard against false positives; native `<tool_call>` blocks
+  suppress the fallback. Validated end-to-end: Coder-7B's lost tool calls now execute. Still
+  to lift into `serving`: tool-history rendering (`message_text`), UTF-8-safe incremental
+  detokenize, multi-EOS stop logic, the KV/RAM preflight.
 
 - [x] extract-shared-sampler - **L2. DONE 2026-06-15** (`src/sampler.rs`). The sampler
   (repeat-penalty → temperature → top-k → top-p → categorical) defined over a plain `&[f32]` logit

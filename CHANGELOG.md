@@ -1,5 +1,21 @@
 # Changelog
 
+## serving — robust tool-call parsing, unified in a shared module
+Completed: 2026-06-16
+
+New `src/serving.rs` holds the engine-agnostic tool-call parser; the MLX backend's whole-text
+`parse_tool_calls` and the GGUF streaming detector's `tool_name` both call it now (the duplicated
+body-parsing is gone — first slice of `extract-shared-serving-helpers`, L1). The parser is also
+**robust to models that don't emit the trained `<tool_call>` envelope**: smaller models (4B–7B)
+driven by Claude Code's / Codex's foreign tool schema fall back to a bare or ```json-fenced
+`{"name":…,"arguments":…}`, which the old parser silently dropped — the agent then executed nothing.
+A fallback now recovers those via a string-aware balanced-brace scan (so braces inside a `"content"`
+arg don't unbalance it) with a strict `arguments`-is-object guard, and it runs **only** when there were
+no native `<tool_call>` blocks, so a legitimate ```json example in a normal answer is never mistaken
+for a call. The agentic benchmark proved it end-to-end: Qwen2.5-Coder-7B `build` went from `tool_uses=0`
+(nothing created) to actually executing its `Write` call. `src/serving.rs` (8 unit tests),
+`src/mlx_native_backend.rs`, `src/gguf.rs`, `src/lib.rs`.
+
 ## bench — agentic end-to-end benchmark (real `rozum launch` Claude Code / Codex)
 Completed: 2026-06-16
 

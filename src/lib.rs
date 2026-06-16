@@ -23,6 +23,7 @@ pub mod rag_lite;
 pub mod resident;
 pub mod sampler;
 pub mod service;
+pub mod serving;
 pub mod share;
 pub mod telegram;
 pub mod tui;

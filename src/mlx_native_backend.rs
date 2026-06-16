@@ -1170,7 +1170,7 @@ mod inner {
             let tool_calls = if matches!(self.stop, StopReason::Cancelled) {
                 Vec::new()
             } else {
-                parse_tool_calls(&self.full_text)
+                crate::serving::parse_tool_calls(&self.full_text)
             };
             if !tool_calls.is_empty() {
                 for (i, (name, args)) in tool_calls.iter().enumerate() {
@@ -2253,72 +2253,10 @@ mod inner {
     const TOOL_OPEN: &str = "<tool_call>";
     const TOOL_CLOSE: &str = "</tool_call>";
 
-    /// Parse Qwen3 `<tool_call>{"name":..,"arguments":..}</tool_call>` blocks from
-    /// the raw output into `(name, arguments_json)` pairs.
-    pub(crate) fn parse_tool_calls(text: &str) -> Vec<(String, String)> {
-        let mut calls = Vec::new();
-        let mut rest = text;
-        while let Some(open) = rest.find(TOOL_OPEN) {
-            let after = &rest[open + TOOL_OPEN.len()..];
-            // Tolerate a missing `</tool_call>` (the model hit EOS right after a
-            // complete JSON body): parse the trailing run instead of dropping it.
-            let (body, next) = match after.find(TOOL_CLOSE) {
-                Some(close) => (after[..close].trim(), Some(&after[close + TOOL_CLOSE.len()..])),
-                None => (after.trim(), None),
-            };
-            if let Some(call) = parse_tool_call_body(body) {
-                calls.push(call);
-            }
-            match next {
-                Some(n) => rest = n,
-                None => break,
-            }
-        }
-        calls
-    }
-
-    /// Parse one tool-call body (the text inside `<tool_call>…</tool_call>`) into
-    /// `(name, arguments_json)`. Qwen3.6 emits EITHER form nondeterministically:
-    ///   - JSON:  `{"name":"f","arguments":{…}}`
-    ///   - XML:   `<function=f><parameter=k>v</parameter>…</function>`
-    /// so we accept both (the XML form was silently lost before).
-    fn parse_tool_call_body(body: &str) -> Option<(String, String)> {
-        // JSON form.
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-            let name = v.get("name").and_then(|n| n.as_str()).unwrap_or_default();
-            if !name.is_empty() {
-                let args = v
-                    .get("arguments")
-                    .map(|a| a.to_string())
-                    .unwrap_or_else(|| "{}".to_string());
-                return Some((name.to_string(), args));
-            }
-        }
-        // XML / Hermes form: <function=NAME> <parameter=KEY>VALUE</parameter> … </function>
-        let fstart = body.find("<function=")?;
-        let aft = &body[fstart + "<function=".len()..];
-        let name_end = aft.find('>')?;
-        let name = aft[..name_end].trim();
-        if name.is_empty() {
-            return None;
-        }
-        let mut args = serde_json::Map::new();
-        let mut p = &aft[name_end + 1..];
-        while let Some(ps) = p.find("<parameter=") {
-            let a2 = &p[ps + "<parameter=".len()..];
-            let Some(ke) = a2.find('>') else { break };
-            let key = a2[..ke].trim().to_string();
-            let vrest = &a2[ke + 1..];
-            let Some(ve) = vrest.find("</parameter>") else { break };
-            let val = vrest[..ve].trim();
-            // Keep a typed value if it's valid JSON (numbers/bools), else a string.
-            let jval = serde_json::from_str::<serde_json::Value>(val)
-                .unwrap_or_else(|_| serde_json::Value::String(val.to_string()));
-            args.insert(key, jval);
-            p = &vrest[ve + "</parameter>".len()..];
-        }
-        Some((name.to_string(), serde_json::Value::Object(args).to_string()))
-    }
+    // Tool-call parsing (`<tool_call>` JSON/XML + the bare/```json fallback for
+    // models that emit no envelope) lives in the shared `crate::serving` module;
+    // call sites use `crate::serving::parse_tool_calls` directly. `TOOL_OPEN` /
+    // `TOOL_CLOSE` stay here for the streaming suppression + constrained-decode paths.
 
     /// Architecture-agnostic streaming loop: pull tokens off a `Generate`
     /// iterator, force per-token compute, stop on EOS / max-tokens / cancel,
@@ -2508,7 +2446,7 @@ mod inner {
         let tool_calls = if matches!(stop_reason, StopReason::Cancelled) {
             Vec::new()
         } else {
-            parse_tool_calls(&full_text)
+            crate::serving::parse_tool_calls(&full_text)
         };
         if !tool_calls.is_empty() {
             for (i, (name, args)) in tool_calls.iter().enumerate() {
@@ -2884,33 +2822,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "mlx-native")]
-    #[test]
-    fn parse_tool_calls_handles_close_tag_and_nested_braces() {
-        let p = super::inner::parse_tool_calls;
-        // Normal, well-formed.
-        assert_eq!(
-            p("<tool_call>{\"name\":\"f\",\"arguments\":{\"x\":1}}</tool_call>"),
-            vec![("f".to_string(), "{\"x\":1}".to_string())]
-        );
-        // Nested braces in a string arg (code) — fine, the close tag delimits.
-        let code = p("<tool_call>{\"name\":\"write_file\",\"arguments\":{\"content\":\"fn add()->i32{ a + b }\"}}</tool_call>");
-        assert_eq!(code.len(), 1);
-        assert_eq!(code[0].0, "write_file");
-        assert!(code[0].1.contains("a + b"));
-        // MISSING close tag (model hit EOS after a complete body) — recovered, not dropped.
-        assert_eq!(
-            p("<tool_call>{\"name\":\"g\",\"arguments\":{}}"),
-            vec![("g".to_string(), "{}".to_string())]
-        );
-        // XML / Hermes form (Qwen3.6 emits this nondeterministically) — was lost before.
-        let xml = p("<tool_call>\n<function=write_file>\n<parameter=path>\nadd.rs\n</parameter>\n<parameter=content>\nfn add()->i32{ a + b }\n</parameter>\n</function>\n</tool_call>");
-        assert_eq!(xml.len(), 1, "XML tool call should parse: {xml:?}");
-        assert_eq!(xml[0].0, "write_file");
-        assert!(xml[0].1.contains("add.rs") && xml[0].1.contains("a + b"), "args: {}", xml[0].1);
-        // No tool call at all.
-        assert!(p("just some text").is_empty());
-    }
 
     // KV bytes/position: only full-attention layers count (hybrid uses
     // full_attention_interval), head_dim derived from hidden/heads if absent.
@@ -2938,33 +2849,15 @@ mod tests {
         assert_eq!(kv_bytes_per_position(&serde_json::json!({})), None);
     }
 
-    // Deterministic parser check (no model): extracts name + arguments from the
-    // Qwen3 `<tool_call>` markup, handles surrounding text and multiple calls.
-    #[cfg(feature = "mlx-native")]
-    #[test]
-    fn parse_tool_calls_extracts() {
-        use super::inner::parse_tool_calls;
-        let text = "sure <tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>";
-        let calls = parse_tool_calls(text);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "get_weather");
-        assert!(calls[0].1.contains("Paris"), "args: {}", calls[0].1);
-
-        assert!(parse_tool_calls("plain answer, no tools").is_empty());
-
-        let two = "<tool_call>{\"name\":\"a\",\"arguments\":{}}</tool_call>\
-                   <tool_call>{\"name\":\"b\",\"arguments\":{\"x\":1}}</tool_call>";
-        let calls = parse_tool_calls(two);
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[1].0, "b");
-    }
+    // (The deterministic `<tool_call>` parser checks now live in `serving.rs`.)
 
     // An assistant ToolUse block must survive `message_text` as `<tool_call>`
     // markup so multi-turn tool loops keep the prior call in history. This is
-    // the inverse of `parse_tool_calls` — render then re-parse round-trips.
+    // the inverse of `crate::serving::parse_tool_calls` — render then re-parse round-trips.
     #[test]
     fn tool_use_round_trips_into_history() {
-        use super::inner::{message_text, parse_tool_calls};
+        use super::inner::message_text;
+        use crate::serving::parse_tool_calls;
         use crate::backend::{ContentBlock, Message, Role};
 
         let msg = Message {

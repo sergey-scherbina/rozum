@@ -300,8 +300,8 @@ impl ToolUseParser {
                             unreachable!()
                         };
 
-                        let name =
-                            extract_tool_name(&accumulated).unwrap_or_else(|| "unknown".to_owned());
+                        let name = crate::serving::tool_name(&accumulated)
+                            .unwrap_or_else(|| "unknown".to_owned());
                         events.push(ToolParseEvent::Start {
                             id: id.clone(),
                             name,
@@ -355,12 +355,6 @@ impl Default for ToolUseParser {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn extract_tool_name(json: &str) -> Option<String> {
-    let trimmed = json.trim();
-    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-    v.get("name").and_then(|n| n.as_str()).map(str::to_owned)
 }
 
 // ─── GgufBackend (feature = "gguf") ─────────────────────────────────────────
