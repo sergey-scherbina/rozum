@@ -1500,6 +1500,39 @@ soon as any single track succeeds.
     one-line-fix) with a measured small-tier hit-rate and end-to-end cost/latency
     vs big-only. Effort: MEDIUM. Spec first.
 
+### Model bringup track (catalog) — new architectures to get working
+
+> Suggested 2026-06-16. Both need investigation + fiddling before they serve
+> cleanly. Bringup workflow per model: pick the MLX checkpoint → check
+> `supported_model_type` (`src/mlx_native_backend.rs`) and `config.json`
+> `model_type` → if unknown arch, port it (else just register) → numerical-parity
+> gate vs `mlx_lm` (`scripts/mlx_ref.py`) → add to the catalog (`src/models.rs`) →
+> verify tool-call parse/format (`src/serving.rs` / `src/constrain.rs`).
+
+- [ ] gpt-oss-20b-bringup - **OpenAI GPT-OSS-20B** (open-weight MoE, ~21B/3.6B active).
+  - NOT in `supported_model_type` (no `gpt_oss`). Two paths: (a) **quick win** —
+    route via an existing HTTP backend (LM Studio / `mlx_lm.server`) so it serves
+    today; (b) **native port** — add the `gpt_oss` arch to mlx-native (MoE +
+    attention sinks + sliding-window attention + MXFP4 dequant), gated by
+    `supported_model_type` + a parity gate vs `mlx_lm`.
+  - Tool calls: gpt-oss uses the **harmony** format, NOT Qwen `<tool_call>` — so
+    `parse_tool_calls` / the constrained-decode envelope need a gpt-oss adapter
+    (don't assume the Qwen path works). This is the main "повозиться" risk.
+  - Checkpoint: `mlx-community/gpt-oss-20b` (or MXFP4). Acceptance: serves + greedy
+    parity vs `mlx_lm` + tool calls parse + added to `src/models.rs`.
+
+- [ ] qwen4-coder-bringup - **Qwen "4" Coder** (a Qwen-family coder model).
+  - STEP 1: verify the exact model — confirm whether this is `Qwen3-Coder`
+    (e.g. `Qwen3-Coder-30B-A3B`) or a genuinely newer Qwen4 line, and pick the
+    MLX checkpoint. The name is unconfirmed; don't port blind.
+  - If its `model_type` is `qwen3` / `qwen3_moe`, it likely routes through the
+    EXISTING mlx-native path with little/no code — validate numerically + add to
+    catalog. If it's a new arch, port + parity gate.
+  - Tool calls: Qwen-Coder emits the XML `<function=…>` form (already noted at
+    `src/constrain.rs:484`) — validate `parse_xml_function` handles it.
+  - Acceptance: serves + greedy parity vs `mlx_lm` + tool calls parse + added to
+    `src/models.rs`. Effort: SMALL if Qwen3-arch, LARGE if a new arch.
+
 ### Done
 
 - [x] lmstudio-http-backend - Auto-detect LM Studio's local OpenAI-compatible server at `http://localhost:1234/v1`.
