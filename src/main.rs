@@ -415,7 +415,15 @@ async fn main() {
             }
         }
         Some(Command::McpProxy) => {
-            if let Err(e) = rozum::meeting::run_proxy().await {
+            // Default: bridge to the meeting daemon (`meeting.sock`). Set
+            // ROZUM_LEGACY_PROXY=1 for the old per-room-socket proxy.
+            let legacy = std::env::var_os("ROZUM_LEGACY_PROXY").is_some();
+            let res = if legacy {
+                rozum::meeting::run_proxy().await
+            } else {
+                rozum::meeting::daemon_proxy::run_daemon_proxy().await
+            };
+            if let Err(e) = res {
                 eprintln!("proxy error: {e}");
                 std::process::exit(1);
             }

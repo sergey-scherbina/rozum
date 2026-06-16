@@ -1,6 +1,7 @@
 pub mod app;
 pub mod budget;
 pub mod daemon;
+pub mod daemon_proxy;
 pub mod identity;
 pub mod list;
 pub mod mcp_server;

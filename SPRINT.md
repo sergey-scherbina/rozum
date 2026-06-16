@@ -89,10 +89,10 @@ untouched**. Key decisions locked with the user:
   **day-scoped** (`GET /rooms/{name}/days` +
   `GET /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`).
 
-**Status: P0–P3b DONE (28 tests green + live CLI smoke) on branch
-`feature/meetings-impl`; the `rozum meetings` daemon runs end-to-end. P4
-(mcp-proxy rewrite) is NEXT. `src/gateway.rs` is NOT touched; the legacy
-in-process room is untouched until P5 switches bare `rozum` to the client.**
+**Status: P0–P4 DONE (29 tests green + live CLI/stdio smoke) on branch
+`feature/meetings-impl`. Agents can reach the daemon: `rozum mcp-proxy` →
+`meeting.sock`. P5 (TUI as client) is NEXT. `src/gateway.rs` is NOT touched;
+the legacy in-process room + `proxy.rs` stay until P5 cutover.**
 Build sequence (each phase compiles + has its own tests; do them in order — P0→P2
 are pure library and land behind today's behavior, P3 brings the daemon up, P4/P5
 are clients and can go in parallel, P6 is the service):
@@ -142,12 +142,19 @@ are clients and can go in parallel, P6 is the service):
       start→status→stop lifecycle clean (no stray procs). DEFERRED to follow-ups:
       idle-evict watchdog, graceful drain (pending waits → `{ended}`) on SIGTERM,
       per-room `catch_unwind`; `install|uninstall` is P6.
-- [ ] **P4 — mcp-proxy rewrite** (`src/meeting/proxy.rs`). Dial the single
-      `meeting.sock`; pass `project`+`session_token`; read content from disk
-      (`TranscriptReader`) and return to the agent; `wait_my_turn` = daemon wakeup
-      + disk read; tool call-shape unchanged. *Verify (real agent, #[ignore]):*
-      Claude/Codex join project room, submit, see others; identity stable across
-      in-session reconnect.
+- [x] **P4 — mcp-proxy → daemon** — DONE (`src/meeting/daemon_proxy.rs`; 1
+      in-process roundtrip test + binary stdio smoke). New `DaemonProxy` stdio
+      server: generates a `session_token` once, detects project (git root/cwd),
+      auto-spawns the daemon (`rozum meetings start`), auto-joins the project room
+      via `_join_internal{project,session_token}`, forwards `rooms.*`/`meeting.*`,
+      and tracks the `(date,n)` cursor so `meeting.wait_my_turn` takes no args.
+      `rozum mcp-proxy` now uses it by default (`ROZUM_LEGACY_PROXY=1` for the old
+      per-room-socket proxy). PLAN NOTE: built additively beside legacy
+      `proxy.rs` (untouched) rather than rewriting it. DEFERRED: move the wait
+      content-read from the daemon into the proxy (`TranscriptReader`) — daemon
+      currently returns content; the proxy already tracks the cursor. *Verified:*
+      auto-join→submit→cursor-tracked wait→rooms.list over a unix socket; `rozum
+      mcp-proxy` serves the 7-tool surface over stdio.
 - [ ] **P5 — TUI as client** (`src/tui/`, `run_room`→attach in `src/main.rs`).
       Connect to daemon (drop in-process `Arc<Mutex<Meeting>>`); room picker
       (list/select/switch, `[o]rooms`, new-room); day-scoped render (current day +
