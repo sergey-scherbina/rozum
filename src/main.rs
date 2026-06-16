@@ -215,13 +215,14 @@ enum Command {
         #[arg(long, conflicts_with = "no_model")]
         backend_url: Option<String>,
 
-        /// Lean mode for local models: strip non-coding tools from Claude Code via
-        /// `--disallowedTools` (meeting-room MCP, plan/worktree/cron/task/workflow/skill/
-        /// notebook/web). Claude Code otherwise ships ~33 tool schemas on every request —
-        /// measured ~4.9K tokens of fixed overhead that bloats a small model's context + KV
-        /// cache, slows prefill, and gives a weak model more ways to derail; --lean cuts it
-        /// to ~0.8K (the Read/Write/Edit/Bash core). No-op for non-`claude` programs, and
-        /// skipped if you already pass `--allowedTools`/`--disallowedTools` yourself.
+        /// Lean mode for local models: optimize Claude Code's request. (1) Strip non-coding
+        /// tools via `--disallowedTools` (meeting-room MCP, plan/worktree/cron/task/workflow/
+        /// skill/notebook/web) — CC otherwise ships ~33 tool schemas (~4.9K tokens) every
+        /// request; --lean cuts it to ~0.8K (Read/Write/Edit/Bash). (2) Add
+        /// `--exclude-dynamic-system-prompt-sections` so per-machine bits (incl. git status,
+        /// which changes on every edit) leave the system prefix → it stays cacheable across
+        /// turns instead of re-prefilling. CC's core system prompt is load-bearing and is left
+        /// intact. No-op for non-`claude`; each lever skipped if you set it yourself.
         #[arg(long)]
         lean: bool,
 
@@ -483,7 +484,7 @@ async fn main() {
         }) => {
             apply_cascade_strategy(strategy.as_deref());
             apply_offline(offline);
-            apply_lean_tools(&mut program, lean);
+            apply_lean_flags(&mut program, lean);
             let model = join_models(model);
             // Precedence: --channel-mcp-name > ROZUM_CHANNEL_MCP_NAME > "rozum".
             let server_name = channel_mcp_name
@@ -1652,8 +1653,6 @@ async fn exec_agent_anthropic(mut program: Vec<String>, channel_flags: Option<Ve
     spawn_agent_and_exit(cmd, program_name).await
 }
 
-/// Apply rozum's agent-context env defaults (skills/git/CLAUDE.md trimming),
-/// each only when the operator hasn't already set it. Independent of model.
 /// Non-coding tools `--lean` strips from a launched `claude` via `--disallowedTools`.
 /// A headless coding launch keeps the core (Read/Write/Edit/Bash + any Glob/Grep/LS/
 /// MultiEdit), and drops meeting-room (rozum MCP), planning, worktree, cron, task,
@@ -1673,13 +1672,21 @@ const LEAN_DISALLOW: &[&str] = &[
     "mcp__rozum",
 ];
 
-/// `--lean`: when launching `claude`, append `--disallowedTools <LEAN_DISALLOW>` so Claude
-/// Code drops those non-coding tool schemas from every request to the (local) model —
-/// smaller prompt, less KV/prefill, fewer derails. No-op for non-`claude` programs; skipped
-/// if the user is already managing the tool set (`--allowedTools`/`--disallowedTools`) so we
-/// never override an explicit choice. Injected at the END of `program` (the flag is variadic,
-/// so nothing must follow it) and flows through every launch path.
-fn apply_lean_tools(program: &mut Vec<String>, lean: bool) {
+/// `--lean`: optimize a launched `claude`'s request for a local model. No-op for
+/// non-`claude` programs. Two safe levers (CC's system prompt itself is load-bearing and
+/// is NOT touched — stripping it breaks the agent; only the tool schemas are pure overhead):
+///
+///   1. `--exclude-dynamic-system-prompt-sections` — move per-machine bits (cwd, env, **git
+///      status**, memory paths) out of the system prompt into the first user message. CC
+///      otherwise re-embeds git status in the system prefix, and it changes every time the
+///      agent edits a file — busting the prefix-KV cache and forcing a full re-prefill of the
+///      ~1.4K-token system+tools block *every turn*. Relocating it keeps the prefix
+///      byte-identical → cached across turns. Safe (relocates, removes nothing). Skipped if
+///      the operator set their own system prompt.
+///   2. `--disallowedTools <LEAN_DISALLOW>` — drop the non-coding tool schemas (33 tools /
+///      ~4.9K tokens → 4 / ~0.8K). Variadic flag, so it goes LAST. Skipped if the operator
+///      manages the tool set (`--allowedTools`/`--disallowedTools`).
+fn apply_lean_flags(program: &mut Vec<String>, lean: bool) {
     if !lean {
         return;
     }
@@ -1688,64 +1695,96 @@ fn apply_lean_tools(program: &mut Vec<String>, lean: bool) {
     if !is_claude {
         return;
     }
+
+    // (1) Stabilize the system-prompt prefix for cache reuse.
+    let user_handles_sys = program.iter().any(|a| {
+        a.starts_with("--system-prompt") || a == "--exclude-dynamic-system-prompt-sections"
+    });
+    if !user_handles_sys {
+        program.push("--exclude-dynamic-system-prompt-sections".into());
+    }
+
+    // (2) Strip non-coding tool schemas — variadic flag, must come last.
     let user_manages_tools = program
         .iter()
         .any(|a| a.starts_with("--allowedTools") || a.starts_with("--disallowedTools"));
     if user_manages_tools {
-        eprintln!("rozum launch: --lean ignored (you already pass --allowedTools/--disallowedTools)");
-        return;
+        eprintln!(
+            "rozum launch: --lean tool-strip skipped (you pass --allowedTools/--disallowedTools); \
+             keeping --exclude-dynamic-system-prompt-sections"
+        );
+    } else {
+        eprintln!(
+            "rozum launch: --lean → claude --exclude-dynamic-system-prompt-sections + \
+             --disallowedTools (strip {} non-coding tools)",
+            LEAN_DISALLOW.len()
+        );
+        program.push("--disallowedTools".into());
+        program.extend(LEAN_DISALLOW.iter().map(|t| (*t).to_string()));
     }
-    eprintln!(
-        "rozum launch: --lean → claude --disallowedTools (strip {} non-coding tools)",
-        LEAN_DISALLOW.len()
-    );
-    program.push("--disallowedTools".into());
-    program.extend(LEAN_DISALLOW.iter().map(|t| (*t).to_string()));
 }
 
 #[cfg(test)]
 mod lean_tests {
-    use super::{apply_lean_tools, LEAN_DISALLOW};
+    use super::{apply_lean_flags, LEAN_DISALLOW};
+
+    const EXCL: &str = "--exclude-dynamic-system-prompt-sections";
 
     fn lean(args: &[&str], on: bool) -> Vec<String> {
         let mut p: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        apply_lean_tools(&mut p, on);
+        apply_lean_flags(&mut p, on);
         p
     }
-
-    #[test]
-    fn injects_disallowed_tools_for_claude() {
-        let out = lean(&["claude", "-p", "fix it"], true);
-        // Original args preserved, then --disallowedTools + the full strip list at the end.
-        assert_eq!(&out[..3], &["claude", "-p", "fix it"]);
-        assert_eq!(out[3], "--disallowedTools");
-        assert_eq!(out.len(), 4 + LEAN_DISALLOW.len());
-        assert!(out.contains(&"AskUserQuestion".to_string()));
-        assert!(out.contains(&"mcp__rozum".to_string()));
-        // Coding-core tools are NOT stripped.
-        assert!(!out.contains(&"Bash".to_string()) && !out.contains(&"Edit".to_string()));
-        // Works for an absolute path too.
-        assert!(lean(&["/usr/bin/claude", "-p", "x"], true).iter().any(|a| a == "--disallowedTools"));
+    fn has(v: &[String], s: &str) -> bool {
+        v.iter().any(|a| a == s)
     }
 
     #[test]
-    fn noop_when_off_or_not_claude_or_user_manages_tools() {
-        // Flag off → untouched.
+    fn full_lean_for_plain_claude() {
+        let out = lean(&["claude", "-p", "fix it"], true);
+        // Original args preserved; then exclude-dynamic, then the variadic --disallowedTools last.
+        assert_eq!(&out[..3], &["claude", "-p", "fix it"]);
+        assert_eq!(out[3], EXCL);
+        assert_eq!(out[4], "--disallowedTools");
+        assert_eq!(out.len(), 5 + LEAN_DISALLOW.len());
+        assert!(has(&out, "AskUserQuestion") && has(&out, "mcp__rozum"));
+        // Coding-core tools are NOT stripped.
+        assert!(!has(&out, "Bash") && !has(&out, "Edit"));
+        // Works for an absolute path too.
+        assert!(has(&lean(&["/usr/bin/claude", "-p", "x"], true), "--disallowedTools"));
+    }
+
+    #[test]
+    fn keeps_exclude_dynamic_but_skips_tool_strip_when_user_manages_tools() {
+        // User set --disallowedTools → don't override the tool set, but still stabilize
+        // the system prefix.
+        let out = lean(&["claude", "-p", "x", "--disallowedTools", "AskUserQuestion"], true);
+        assert!(has(&out, EXCL), "exclude-dynamic still applied");
+        assert!(!has(&out, "mcp__rozum"), "LEAN_DISALLOW list not appended");
+        // --allowedTools likewise.
+        assert!(has(&lean(&["claude", "--allowedTools", "Read"], true), EXCL));
+    }
+
+    #[test]
+    fn skips_exclude_dynamic_when_user_sets_system_prompt() {
+        // User owns the system prompt → don't touch it; tool strip still applies.
+        let out = lean(&["claude", "-p", "x", "--system-prompt", "custom"], true);
+        assert!(!has(&out, EXCL), "must not relocate when user set --system-prompt");
+        assert!(has(&out, "--disallowedTools"));
+        // Already-present exclude-dynamic isn't duplicated.
+        let out2 = lean(&["claude", "-p", "x", EXCL], true);
+        assert_eq!(out2.iter().filter(|a| a.as_str() == EXCL).count(), 1);
+    }
+
+    #[test]
+    fn noop_when_off_or_not_claude() {
         assert_eq!(lean(&["claude", "-p", "x"], false), vec!["claude", "-p", "x"]);
-        // Non-claude (codex) → untouched.
         assert_eq!(lean(&["codex", "exec", "x"], true), vec!["codex", "exec", "x"]);
-        // User already manages tools → not overridden (either flag).
-        assert_eq!(
-            lean(&["claude", "-p", "x", "--disallowedTools", "AskUserQuestion"], true),
-            vec!["claude", "-p", "x", "--disallowedTools", "AskUserQuestion"]
-        );
-        assert_eq!(
-            lean(&["claude", "--allowedTools", "Read"], true),
-            vec!["claude", "--allowedTools", "Read"]
-        );
     }
 }
 
+/// Apply rozum's agent-context env defaults (skills/git/CLAUDE.md trimming),
+/// each only when the operator hasn't already set it. Independent of model.
 fn apply_rozum_agent_env(cmd: &mut std::process::Command) {
     for (k, v) in [
         ("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS", "1"),

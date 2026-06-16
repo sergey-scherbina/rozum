@@ -132,8 +132,14 @@ the constrain-OFF fast path), per-task gateway (robust under MLX memory growth),
   Read/Write/Edit/Bash core. `apply_lean_tools` (`src/main.rs`) injects at the end of the program vector
   (variadic flag), no-op for non-`claude`, skipped if the user already manages tools; `--lean` added to
   `KNOWN_BOOL_FLAGS` so it hoists when placed after the program name. `scripts/bench/agentic.sh` now uses
-  `--lean` (which covers the old `--disallowedTools AskUserQuestion`). 2 unit tests + verified e2e (claude
+  `--lean` (which covers the old `--disallowedTools AskUserQuestion`). 4 unit tests + verified e2e (claude
   still answers under the lean tool set; `--lean` ≠ regression — `fix` 3/3 with vs 3/3 without).
+  **Update 2026-06-16:** `--lean` also adds `--exclude-dynamic-system-prompt-sections` — CC embeds git
+  status (which changes on every file edit) in the system prefix, busting the prefix-KV cache and forcing
+  a full ~1.4K-token re-prefill each turn; the flag relocates those per-machine sections into the first
+  user message so the static prefix stays cached. Safe (relocates, doesn't strip the load-bearing system
+  prompt). `apply_lean_tools` → `apply_lean_flags`; `fix` 4/5 with both levers, and successful runs went
+  ~10 → 6 turns.
 
 - [x] est-prompt-tokens-accurate — **DONE 2026-06-16.** `estimate_prompt_tokens(messages, tools)` replaces
   the Text-only `total_message_text`+`estimate_tokens` at all 3 handlers. The old estimate ignored prior

@@ -1,5 +1,19 @@
 # Changelog
 
+## launch — `--lean` also stabilizes the system-prompt prefix for KV-cache reuse
+Completed: 2026-06-16
+
+`--lean` now adds `--exclude-dynamic-system-prompt-sections` in addition to stripping non-coding tools.
+CC embeds per-machine bits — cwd, env, **git status**, memory paths — in the system prompt; git status
+changes every time the agent edits a file, so the ~1.4K-token system+tools prefix changes every turn,
+busting the prefix-KV cache and forcing a full re-prefill each turn. The flag relocates those sections
+into the first user message, keeping the static prefix byte-identical → cached across turns. It's safe
+(relocates, removes nothing — unlike stripping the system prompt, which is load-bearing and breaks the
+agent). Each lever is independent: tool-strip is skipped if you manage tools yourself, exclude-dynamic
+is skipped if you set `--system-prompt`. Verified: `fix` 4/5 (no regression; the miss is the usual
+weak-model give-up), and successful runs dropped from ~10 turns to a consistent 6. `apply_lean_tools`
+renamed to `apply_lean_flags`; 4 unit tests. `src/main.rs`.
+
 ## gateway — count tool schemas + tool results in the prompt-token estimate (accurate overflow guard)
 Completed: 2026-06-16
 
