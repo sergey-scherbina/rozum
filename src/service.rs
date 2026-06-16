@@ -11,12 +11,16 @@ pub const SERVICE_LABEL: &str = "com.rozum.gateway";
 pub const SYSTEMD_UNIT: &str = "rozum-gateway.service";
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// `~/Library/LaunchAgents/com.rozum.gateway.plist`.
 pub fn launchd_plist_path() -> PathBuf {
-    home().join("Library/LaunchAgents").join(format!("{SERVICE_LABEL}.plist"))
+    home()
+        .join("Library/LaunchAgents")
+        .join(format!("{SERVICE_LABEL}.plist"))
 }
 
 /// `$XDG_CONFIG_HOME/systemd/user/rozum-gateway.service` (or `~/.config/...`).
@@ -29,7 +33,9 @@ pub fn systemd_unit_path() -> PathBuf {
 
 /// Minimal XML escaping for the plist string values.
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// A user LaunchAgent plist running `program args…` with `env`, started at load and kept alive.
@@ -103,17 +109,124 @@ pub fn systemd_unit(program: &str, args: &[String], env: &[(String, String)]) ->
     )
 }
 
+// ── Meeting daemon service (parallel to the gateway service above) ──────────────
+
+/// launchd label / systemd unit base name for the meeting daemon.
+pub const MEETINGS_LABEL: &str = "com.rozum.meetings";
+pub const MEETINGS_SYSTEMD_UNIT: &str = "rozum-meetings.service";
+
+/// `~/Library/LaunchAgents/com.rozum.meetings.plist`.
+pub fn meetings_launchd_plist_path() -> PathBuf {
+    home()
+        .join("Library/LaunchAgents")
+        .join(format!("{MEETINGS_LABEL}.plist"))
+}
+
+/// `$XDG_CONFIG_HOME/systemd/user/rozum-meetings.service` (or `~/.config/...`).
+pub fn meetings_systemd_unit_path() -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".config"));
+    base.join("systemd/user").join(MEETINGS_SYSTEMD_UNIT)
+}
+
+/// `$XDG_STATE_HOME/rozum/meetings/service.log`.
+fn meetings_log_path() -> PathBuf {
+    crate::meeting::store::rozum_state_dir()
+        .join("meetings")
+        .join("service.log")
+}
+
+/// A user LaunchAgent plist running the meeting daemon, started at load + kept alive.
+pub fn meetings_launchd_plist(program: &str, args: &[String], env: &[(String, String)]) -> String {
+    let mut prog_args = String::new();
+    for a in std::iter::once(&program.to_string()).chain(args.iter()) {
+        prog_args.push_str(&format!("    <string>{}</string>\n", xml_escape(a)));
+    }
+    let mut env_block = String::new();
+    if !env.is_empty() {
+        env_block.push_str("  <key>EnvironmentVariables</key>\n  <dict>\n");
+        for (k, v) in env {
+            env_block.push_str(&format!(
+                "    <key>{}</key>\n    <string>{}</string>\n",
+                xml_escape(k),
+                xml_escape(v)
+            ));
+        }
+        env_block.push_str("  </dict>\n");
+    }
+    let log = xml_escape(&meetings_log_path().to_string_lossy());
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{MEETINGS_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+{prog_args}  </array>
+{env_block}  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>{log}</string>
+  <key>StandardErrorPath</key>
+  <string>{log}</string>
+</dict>
+</plist>
+"#
+    )
+}
+
+/// A `systemd --user` unit running the meeting daemon, enabled for the default target.
+pub fn meetings_systemd_unit(program: &str, args: &[String], env: &[(String, String)]) -> String {
+    let exec = std::iter::once(program.to_string())
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut env_lines = String::new();
+    for (k, v) in env {
+        env_lines.push_str(&format!("Environment={k}={v}\n"));
+    }
+    format!(
+        "[Unit]\n\
+         Description=rozum meeting daemon\n\
+         After=default.target\n\
+         \n\
+         [Service]\n\
+         Type=simple\n\
+         ExecStart={exec}\n\
+         {env_lines}Restart=on-failure\n\
+         RestartSec=2\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn args() -> Vec<String> {
-        vec!["gateway".into(), "--model".into(), "qwen3-4b".into(), "--model".into(), "claude-haiku-4-5".into()]
+        vec![
+            "gateway".into(),
+            "--model".into(),
+            "qwen3-4b".into(),
+            "--model".into(),
+            "claude-haiku-4-5".into(),
+        ]
     }
 
     #[test]
     fn launchd_plist_has_program_args_and_keepalive() {
-        let p = launchd_plist("/usr/local/bin/rozum", &args(), &[("ROZUM_MULTISLOT".into(), "1".into())]);
+        let p = launchd_plist(
+            "/usr/local/bin/rozum",
+            &args(),
+            &[("ROZUM_MULTISLOT".into(), "1".into())],
+        );
         assert!(p.contains("<string>com.rozum.gateway</string>"));
         assert!(p.contains("<string>/usr/local/bin/rozum</string>"));
         assert!(p.contains("<string>gateway</string>"));
@@ -133,8 +246,14 @@ mod tests {
 
     #[test]
     fn systemd_unit_has_execstart_and_install() {
-        let u = systemd_unit("/usr/local/bin/rozum", &args(), &[("ROZUM_OFFLINE".into(), "1".into())]);
-        assert!(u.contains("ExecStart=/usr/local/bin/rozum gateway --model qwen3-4b --model claude-haiku-4-5"));
+        let u = systemd_unit(
+            "/usr/local/bin/rozum",
+            &args(),
+            &[("ROZUM_OFFLINE".into(), "1".into())],
+        );
+        assert!(u.contains(
+            "ExecStart=/usr/local/bin/rozum gateway --model qwen3-4b --model claude-haiku-4-5"
+        ));
         assert!(u.contains("Environment=ROZUM_OFFLINE=1"));
         assert!(u.contains("WantedBy=default.target"));
         assert!(u.contains("Restart=on-failure"));
@@ -142,7 +261,55 @@ mod tests {
 
     #[test]
     fn paths_land_in_the_right_dirs() {
-        assert!(launchd_plist_path().to_string_lossy().ends_with("LaunchAgents/com.rozum.gateway.plist"));
-        assert!(systemd_unit_path().to_string_lossy().ends_with("systemd/user/rozum-gateway.service"));
+        assert!(
+            launchd_plist_path()
+                .to_string_lossy()
+                .ends_with("LaunchAgents/com.rozum.gateway.plist")
+        );
+        assert!(
+            systemd_unit_path()
+                .to_string_lossy()
+                .ends_with("systemd/user/rozum-gateway.service")
+        );
+    }
+
+    fn meetings_args() -> Vec<String> {
+        vec!["meetings".into(), "start".into(), "--foreground".into()]
+    }
+
+    #[test]
+    fn meetings_launchd_plist_runs_the_daemon_kept_alive() {
+        let p = meetings_launchd_plist("/usr/local/bin/rozum", &meetings_args(), &[]);
+        assert!(p.contains("<string>com.rozum.meetings</string>"));
+        assert!(p.contains("<string>/usr/local/bin/rozum</string>"));
+        assert!(p.contains("<string>meetings</string>"));
+        assert!(p.contains("<string>--foreground</string>"));
+        assert!(p.contains("<key>RunAtLoad</key>\n  <true/>"));
+        assert!(p.contains("<key>KeepAlive</key>"));
+        // The gateway label must NOT appear in the meetings plist.
+        assert!(!p.contains("com.rozum.gateway"));
+    }
+
+    #[test]
+    fn meetings_systemd_unit_execs_the_daemon() {
+        let u = meetings_systemd_unit("/usr/local/bin/rozum", &meetings_args(), &[]);
+        assert!(u.contains("ExecStart=/usr/local/bin/rozum meetings start --foreground"));
+        assert!(u.contains("Description=rozum meeting daemon"));
+        assert!(u.contains("WantedBy=default.target"));
+        assert!(u.contains("Restart=on-failure"));
+    }
+
+    #[test]
+    fn meetings_paths_land_in_the_right_dirs() {
+        assert!(
+            meetings_launchd_plist_path()
+                .to_string_lossy()
+                .ends_with("LaunchAgents/com.rozum.meetings.plist")
+        );
+        assert!(
+            meetings_systemd_unit_path()
+                .to_string_lossy()
+                .ends_with("systemd/user/rozum-meetings.service")
+        );
     }
 }

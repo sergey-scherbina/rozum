@@ -89,10 +89,11 @@ untouched**. Key decisions locked with the user:
   **day-scoped** (`GET /rooms/{name}/days` +
   `GET /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`).
 
-**Status: P0–P4 DONE (29 tests green + live CLI/stdio smoke) on branch
-`feature/meetings-impl`. Agents can reach the daemon: `rozum mcp-proxy` →
-`meeting.sock`. P5 (TUI as client) is NEXT. `src/gateway.rs` is NOT touched;
-the legacy in-process room + `proxy.rs` stay until P5 cutover.**
+**Status: P0–P4 + P6 DONE (32 tests green + live CLI/stdio smoke) on branch
+`feature/meetings-impl`. The daemon, agent proxy, and user-service are complete
+and verified. Only P5 (the human TUI as a daemon client — interactive) remains.
+`src/gateway.rs` is NOT touched; the legacy in-process room + `proxy.rs` stay
+until the P5 cutover.**
 Build sequence (each phase compiles + has its own tests; do them in order — P0→P2
 are pure library and land behind today's behavior, P3 brings the daemon up, P4/P5
 are clients and can go in parallel, P6 is the service):
@@ -161,11 +162,14 @@ are clients and can go in parallel, P6 is the service):
       lazy older + separators + rollover); launch-in-project enters its room;
       auto-spawn daemon. *Verify:* in-project entry; picker switch; N independent
       TUIs; scrollback loads older days.
-- [ ] **P6 — user service** (`src/service.rs`). `meetings_plist`/`meetings_unit`
-      (pure + unit-tested) + `rozum meetings install|uninstall` (launchd
+- [x] **P6 — user service** — DONE (`src/service.rs` `meetings_launchd_plist`/
+      `meetings_systemd_unit` + paths/labels, 3 tests; `rozum meetings
+      install|uninstall` in `src/main.rs`, cfg-gated macOS/Linux). launchd
       `com.rozum.meetings` / systemd `rozum-meetings.service`, runs `meetings start
-      --foreground`, KeepAlive). *Verify:* generation unit tests; operator runs
-      `launchctl`/`systemctl`.
+      --foreground` with RunAtLoad+KeepAlive / Restart=on-failure; logs under
+      `state/meetings/service.log`. *Verified:* generation unit tests + CLI `--help`
+      wires up; the real `launchctl`/`systemctl` call is operator-validated (same
+      convention as the gateway service — not run against the dev machine).
 - [ ] **Deferred (not now):** Future REST read-by-day on the meeting daemon's HTTP
       (`/rooms/{name}/days`, `/messages/<date>`); model-as-participant via gateway
       local HTTP.

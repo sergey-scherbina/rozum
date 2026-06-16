@@ -291,6 +291,10 @@ enum MeetingsAction {
     Stop,
     /// Show the meeting daemon status and its rooms.
     Status,
+    /// Install + start as a launchd/systemd user service (auto-start at login).
+    Install,
+    /// Stop + remove the user service.
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -552,6 +556,8 @@ async fn main() {
             MeetingsAction::Start { foreground } => run_meetings_start(foreground).await,
             MeetingsAction::Stop => run_meetings_stop(),
             MeetingsAction::Status => run_meetings_status().await,
+            MeetingsAction::Install => run_meetings_install(),
+            MeetingsAction::Uninstall => run_meetings_uninstall(),
         },
         Some(Command::Telegram { room, name }) => {
             let token = std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_else(|_| {
@@ -1546,6 +1552,112 @@ async fn run_meetings_status() {
         }
         Err(e) => eprintln!("  rooms.list failed: {e}"),
     }
+}
+
+fn meetings_service_spec() -> (String, Vec<String>) {
+    let program = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "rozum".into());
+    (
+        program,
+        vec!["meetings".into(), "start".into(), "--foreground".into()],
+    )
+}
+
+fn ensure_meetings_log_dir() {
+    let dir = rozum::meeting::store::rozum_state_dir().join("meetings");
+    let _ = std::fs::create_dir_all(dir);
+}
+
+#[cfg(target_os = "macos")]
+fn run_meetings_install() {
+    let (program, args) = meetings_service_spec();
+    let plist = rozum::service::meetings_launchd_plist(&program, &args, &[]);
+    let path = rozum::service::meetings_launchd_plist_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    ensure_meetings_log_dir();
+    if let Err(e) = std::fs::write(&path, plist) {
+        eprintln!("rozum meetings install: write {}: {e}", path.display());
+        std::process::exit(1);
+    }
+    let ps = path.to_string_lossy();
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", &ps])
+        .status(); // idempotent
+    let st = std::process::Command::new("launchctl")
+        .args(["load", "-w", &ps])
+        .status();
+    report_status(
+        st,
+        &format!(
+            "installed + started launchd meeting service → {}",
+            path.display()
+        ),
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn run_meetings_uninstall() {
+    let path = rozum::service::meetings_launchd_plist_path();
+    let ps = path.to_string_lossy();
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", &ps])
+        .status();
+    let _ = std::fs::remove_file(&path);
+    println!("uninstalled launchd meeting service ({})", path.display());
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_meetings_install() {
+    let (program, args) = meetings_service_spec();
+    let unit = rozum::service::meetings_systemd_unit(&program, &args, &[]);
+    let path = rozum::service::meetings_systemd_unit_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    ensure_meetings_log_dir();
+    if let Err(e) = std::fs::write(&path, unit) {
+        eprintln!("rozum meetings install: write {}: {e}", path.display());
+        std::process::exit(1);
+    }
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status();
+    let st = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "enable",
+            "--now",
+            rozum::service::MEETINGS_SYSTEMD_UNIT,
+        ])
+        .status();
+    report_status(
+        st,
+        &format!(
+            "installed + started systemd --user meeting service → {}",
+            path.display()
+        ),
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_meetings_uninstall() {
+    let _ = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "disable",
+            "--now",
+            rozum::service::MEETINGS_SYSTEMD_UNIT,
+        ])
+        .status();
+    let path = rozum::service::meetings_systemd_unit_path();
+    let _ = std::fs::remove_file(&path);
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status();
+    println!("uninstalled systemd meeting service ({})", path.display());
 }
 
 async fn run_gateway_status() {
