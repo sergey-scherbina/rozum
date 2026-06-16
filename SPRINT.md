@@ -105,11 +105,13 @@ are clients and can go in parallel, P6 is the service):
       *Verify (tempdir unit tests):* append→`(date,n)`; rollover resets `n`;
       reader tails new lines; reopen recovers high-water from newest day;
       `index.json` rebuild; `.gitignore` + `rooms.json` add/list.
-- [ ] **P1 — Identity** (`src/meeting/participant.rs`). Opaque `ParticipantId` +
-      `handle` (project-namespaced adjective-animal) + `session_token`; resolve by
-      token, persist roster in `roster.json`; drop `#N` + name/staleness reclaim.
-      *Verify:* same token→same id/handle on rejoin; new token→new handle; roster
-      round-trip; no `#N`.
+- [x] **P1 — Identity** — DONE (`src/meeting/identity.rs`, 6 tests green). Additive
+      primitives (`Roster`/`RosterEntry`, `resolve_or_mint`, `mint_handle`,
+      `display_name`): opaque UUID `ParticipantId` + `handle` (adjective-animal,
+      unique-in-room) + `session_token` reconnect key, `roster.json` round-trip;
+      no `#N`. Wiring into the room (replacing name/staleness reclaim) lands in
+      P2/P3. *Verified:* same token→same id/handle; new token→new handle; roster
+      reload rebinds; minted handle avoids taken.
 - [ ] **P2 — Room model refactor** (`src/meeting/state.rs`). Replace
       `transcript: Vec<Turn>` with the writer; `MeetingEvent` carries
       `{date,n,end_offset}` (no `content`); `submit` → writer; budget from

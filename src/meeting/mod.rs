@@ -1,5 +1,6 @@
 pub mod app;
 pub mod budget;
+pub mod identity;
 pub mod list;
 pub mod mcp_server;
 pub mod participant;
