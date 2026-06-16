@@ -112,11 +112,15 @@ are clients and can go in parallel, P6 is the service):
       no `#N`. Wiring into the room (replacing name/staleness reclaim) lands in
       P2/P3. *Verified:* same token→same id/handle; new token→new handle; roster
       reload rebinds; minted handle avoids taken.
-- [ ] **P2 — Room model refactor** (`src/meeting/state.rs`). Replace
-      `transcript: Vec<Turn>` with the writer; `MeetingEvent` carries
-      `{date,n,end_offset}` (no `content`); `submit` → writer; budget from
-      `meta.json`. Free-submit stays; remove any vestigial turn/moderator wording.
-      *Verify:* adapted meeting tests; submit appends to disk + emits shrunk event.
+- [x] **P2 — Room model** — DONE (`src/meeting/room.rs` `DaemonRoom`, 6 tests; all
+      44 meeting tests green). PLAN ADJUSTMENT: built a **new** disk-backed room
+      model additively instead of mutating the live `state.rs::Meeting` — keeps the
+      build green; `DaemonRoom` owns a `TranscriptWriter` (no content in RAM) + a
+      `Roster`, free-submit, shrunk `RoomEvent` (`{date,n,end_offset}`, no content),
+      budget from the writer. The legacy in-process `Meeting`/`run_room`/web path is
+      retired when bare `rozum` becomes a client (P5). *Verified:* join mints+
+      persists+rebinds-by-token; submit appends to disk + emits shrunk Posted;
+      reopen restores high-water+roster; max-chars ends.
 - [ ] **P3 — `meetings` daemon + RoomRegistry + MCP routing**
       (`src/meeting/mcp_server.rs`, new daemon mode in `src/main.rs`).
       `RoomRegistry` (id→RoomHandle, supervised task, panic-isolated, idle-evict,

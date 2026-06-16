@@ -6,6 +6,7 @@ pub mod mcp_server;
 pub mod participant;
 pub mod piggyback;
 pub mod proxy;
+pub mod room;
 pub(crate) mod room_client;
 pub mod room_path;
 pub mod state;
