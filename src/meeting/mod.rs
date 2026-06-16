@@ -8,6 +8,7 @@ pub mod proxy;
 pub(crate) mod room_client;
 pub mod room_path;
 pub mod state;
+pub mod store;
 
 pub use app::{RoomConfig, run_room};
 pub use list::list_rooms;

@@ -89,12 +89,13 @@ untouched**. Key decisions locked with the user:
   **day-scoped** (`GET /rooms/{name}/days` +
   `GET /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`).
 
-**Status: design only, nothing implemented. `src/gateway.rs` is NOT touched.**
+**Status: P0 done; P1 next. `src/gateway.rs` is NOT touched.**
 Build sequence (each phase compiles + has its own tests; do them in order — P0→P2
 are pure library and land behind today's behavior, P3 brings the daemon up, P4/P5
 are clients and can go in parallel, P6 is the service):
 
-- [ ] **P0 — Storage core** (lib, no daemon). New `src/meeting/store.rs`:
+- [x] **P0 — Storage core** — DONE (`src/meeting/store.rs`, 9 tempdir tests green;
+      branch `feature/meetings-impl`). Library, no daemon. New `src/meeting/store.rs`:
       `RoomPaths` (resolve `<project>/.rozum/room/`, ad-hoc fallback
       `$XDG_STATE_HOME/rozum/rooms/<name>/`, `rooms.json` registry, write
       `.rozum/.gitignore`=`*`); `TranscriptWriter` (lazy-create on first append,
