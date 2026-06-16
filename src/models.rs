@@ -89,6 +89,15 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
                 same ~25 GB footprint (OOM resolved like the 35B above).",
     },
     RecommendedModel {
+        spec: "mlx-community:gpt-oss-20b-MXFP4-Q4",
+        display_name: "gpt-oss 20B (MoE, MXFP4)",
+        approx_size_gb: 12.0,
+        notes: "OpenAI gpt-oss-20b — native MLX port (MXFP4 experts + attention sinks + \
+                sliding-window + YaRN), byte-exact greedy parity vs Python mlx_lm. MoE ~3.6B \
+                active/token, ~12 GB → roomy on 36 GB. Emits the harmony channel format; plain \
+                chat works, agentic tool-use needs the harmony adapter (in progress).",
+    },
+    RecommendedModel {
         spec: "mlx-community:Qwen2.5-Coder-32B-Instruct-4bit",
         display_name: "Qwen2.5-Coder 32B",
         approx_size_gb: 19.0,

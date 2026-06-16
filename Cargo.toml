@@ -41,9 +41,12 @@ mistralrs = { version = "0.8.1", features = ["metal"], optional = true }
 # `{ path = "../../.vendor/mlx-lm/<crate>" }` (from a worktree) or
 # `{ path = ".vendor/mlx-lm/<crate>" }` (from the repo root), then push the fork
 # and bump the rev. mlx-sys builds MLX C++ from source (cmake + Xcode).
-mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "9fa852f4bc3f8831ce83b8743495bc929720b8da", optional = true }
-mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "9fa852f4bc3f8831ce83b8743495bc929720b8da", optional = true }
-mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "9fa852f4bc3f8831ce83b8743495bc929720b8da", optional = true }
+# Local dev: pointed at the `.vendor/mlx-lm` fork checkout (branch gpt-oss-native)
+# for the native gpt-oss port. Swap back to the pinned git rev (push fork + bump)
+# before this lands on master.
+mlx-rs = { path = "../../.vendor/mlx-lm/mlx-rs", optional = true }
+mlx-lm = { path = "../../.vendor/mlx-lm/mlx-lm", optional = true }
+mlx-lm-utils = { path = "../../.vendor/mlx-lm/mlx-lm-utils", optional = true }
 
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

@@ -23,7 +23,7 @@ mod inner {
     };
 
     use mlx_lm::cache::ConcatKeyValueCache;
-    use mlx_lm::models::{gemma3, llama, qwen2, qwen3, qwen3_5, qwen3_5_moe, qwen3_moe};
+    use mlx_lm::models::{gemma3, gpt_oss, llama, qwen2, qwen3, qwen3_5, qwen3_5_moe, qwen3_moe};
     use mlx_lm_utils::tokenizer::{
         ApplyChatTemplateArgs, Chat, Conversation, Tokenizer, load_model_chat_template_from_file,
     };
@@ -117,6 +117,7 @@ mod inner {
         Llama(llama::Model),
         Qwen2(qwen2::Model),
         Gemma3(gemma3::Model),
+        GptOss(gpt_oss::Model),
     }
 
     impl LoadedModel {
@@ -140,6 +141,10 @@ mod inner {
                 "qwen3_moe" => qwen3_moe::load_qwen3_moe_model(dir)
                     .map(LoadedModel::Qwen3Moe)
                     .map_err(|e| format!("mlx: load qwen3_moe {}: {e}", dir.display())),
+                // OpenAI gpt-oss (MXFP4 MoE + attention sinks + sliding-window + YaRN).
+                "gpt_oss" => gpt_oss::load_gpt_oss_model(dir)
+                    .map(LoadedModel::GptOss)
+                    .map_err(|e| format!("mlx: load gpt_oss {}: {e}", dir.display())),
                 // Qwen3.6 dense (the config wrapper is `qwen3_5`, text is `qwen3_5_text`).
                 "qwen3_5" | "qwen3_5_text" => qwen3_5::load_qwen3_5_model(dir)
                     .map(LoadedModel::Qwen35)
@@ -1018,6 +1023,19 @@ mod inner {
                     true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
                 );
             }
+            LoadedModel::GptOss(m) => {
+                let mut generator = gpt_oss::Generate::new(m, &mut cache, temp, &prompt_tokens);
+                generator.set_sampler(top_p, top_k, repeat_penalty);
+                stream_generation(
+                    generator,
+                    tokenizer,
+                    eos,
+                    prompt_ids.len(),
+                    max_tokens,
+                    &job,
+                    true,  // pipeline: dense overlaps (gpt-oss is single-stream)
+                );
+            }
             LoadedModel::Llama(m) => {
                 // Dense transformer like Qwen3: external KV cache + the shared sampler.
                 let mut generator = llama::Generate::new(m, &mut cache, temp, &prompt_tokens);
@@ -1148,6 +1166,14 @@ mod inner {
             LoadedModel::Qwen3Moe(m) => {
                 let input = qwen3::ModelInput { inputs: inp, mask, cache };
                 <qwen3_moe::Model as Module<qwen3::ModelInput<'_, ConcatKeyValueCache>>>::forward(
+                    m, input,
+                )
+            }
+            // gpt-oss reuses qwen3's `ModelInput`; it ignores the external `mask` and
+            // builds its own per-layer full/sliding masks internally.
+            LoadedModel::GptOss(m) => {
+                let input = qwen3::ModelInput { inputs: inp, mask, cache };
+                <gpt_oss::Model as Module<qwen3::ModelInput<'_, ConcatKeyValueCache>>>::forward(
                     m, input,
                 )
             }
@@ -2811,6 +2837,7 @@ pub fn supported_model_type(model_type: &str) -> bool {
             | "qwen3_5_text"
             | "qwen3_5_moe"
             | "qwen3_5_moe_text"
+            | "gpt_oss"
             | "llama"
             | "mistral"
             | "phi3"
