@@ -351,6 +351,31 @@ degraded".
   exact-match/edit-distance + a small general probe. Decides yes/no on "helped my
   domain without breaking general use" before investing in the items above. Spec §6.
 
+### Agent meetings daemon — follow-ups (spec: `docs/specs/agent-meetings-daemon.md`)
+
+Shipped on `feature/meetings-impl`: the daemon (`rozum meetings`), disk-backed
+multi-room store (daily files, per-day `n`), session-lifetime identity, agent
+proxy (`rozum mcp-proxy` → `meeting.sock`), user-service install, human TUI
+client (`rozum` / `rozum meetings attach`) with picker + day-scoped render, and
+polish (graceful drain, idle-evict, content-off-daemon, per-room `catch_unwind`,
+second poll-connection, bare-`rozum` cutover with `--legacy-room` escape hatch).
+Remaining:
+
+- [ ] meetings-rest-read — remote stateless read-by-day on the meeting daemon's
+  own HTTP listener: `GET /rooms/{name}/days`, `GET
+  /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`. Spec'd as "Future" in the
+  spec; lets a non-local reader fetch content (direct-disk needs a shared FS).
+  Verifiable (axum handler over the day files).
+- [ ] meetings-model-as-participant — a model joins a room as a participant,
+  served by the gateway over **localhost HTTP** (the daemon's `register_peer` is
+  a stub; today only the LEGACY in-process room does this, via MCP server→client
+  sampling). Room-side "model participant" calls the gateway `/v1/messages` and
+  `meeting.submit`s. Keep opt-in / off-by-default (SPEC stance).
+- [ ] meetings-bridges-on-daemon — port web/telegram/discord bridges
+  (`src/web`, `src/telegram`, `src/discord`) off the legacy per-room socket onto
+  `meeting.sock` (`rooms.join`), so the legacy in-process room can eventually be
+  retired (today the bridges force `--legacy-room` / `--web-port`).
+
 ### Portability / hardware-agnostic core (keep the durable layer durable)
 
 The hardware-agnostic abstraction already exists — the `ChatBackend` SPI and
@@ -388,6 +413,23 @@ These items turn "portable in principle" into "portable by `cargo build`".
   `gguf-vulkan` features that pass the matching `llama-cpp-2` backend feature
   through, so a Linux/CUDA user gets GPU GGUF inference without editing Cargo.toml.
   (Cheapest real "runs on someone else's non-Mac hardware" deliverable.)
+
+- [ ] portability-heterogeneous-devices - Utilize a commodity x86 box's
+  **discrete NVIDIA GPU + integrated GPU (UMA) + CPU concurrently**. NOT by
+  splitting one model across them (a trap: the throughput gap + PCIe/UMA
+  interconnect makes heterogeneous tensor/pipeline parallelism net-negative), but
+  by **device-pinned multi-instance**: a fast worker model on the dGPU
+  (`gguf-cuda`), a small utility/draft/router/embeddings model on the iGPU
+  (`gguf-vulkan`, tapping the big DRAM via UMA), overflow on CPU — routed by the
+  cascade/multislot by size-class **+ device**. The one genuine single-stream
+  co-use is **speculative decoding**: draft on iGPU/CPU, target verifies on the
+  dGPU (rozum already has a spec-decode draft track). Generalizes
+  `shared-gateway-multislot` (one-GPU co-residency) to N heterogeneous devices +
+  per-device budgets. Prereqs: `portability-cuda-gguf`; a device-pinning notion
+  in the backend builder; `resident::plan_residency` extended across devices.
+  Note: the native-MLX perf work does NOT port (Apple/Metal-only) — the x86 path
+  is the `ChatBackend` SPI + GGUF/CUDA-Vulkan + HTTP backends. See the 2026-06-17
+  discussion.
 
 #### Extractions — pull leaf-bound work into modules keyed by their *true* dependency
 

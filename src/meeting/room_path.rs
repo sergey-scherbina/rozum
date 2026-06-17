@@ -17,6 +17,12 @@ pub fn room_socket(name: &str) -> PathBuf {
     rooms_dir().join(format!("{name}.sock"))
 }
 
+/// The single MCP endpoint of the `rozum meetings` daemon. All rooms are served
+/// here; a session selects one via `rooms.join` / `_join_internal`.
+pub fn meeting_sock() -> PathBuf {
+    rozum_runtime_dir().join("meeting.sock")
+}
+
 pub fn ensure_rooms_dir() -> std::io::Result<()> {
     std::fs::create_dir_all(rooms_dir())
 }

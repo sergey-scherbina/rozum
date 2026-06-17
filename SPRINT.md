@@ -89,12 +89,35 @@ untouched**. Key decisions locked with the user:
   **day-scoped** (`GET /rooms/{name}/days` +
   `GET /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`).
 
-**Status: design only, nothing implemented. `src/gateway.rs` is NOT touched.**
+**Status: P0–P6 ALL DONE + first polish pass (54 meeting tests green + live
+CLI/stdio smoke) on branch `feature/meetings-impl`. The meeting daemon, agent
+proxy, user-service, and human TUI client are implemented end-to-end.
+POLISH DONE: graceful SIGTERM drain (pending waits → `{ended:server-shutdown}`),
+idle-evict watchdog (`ROZUM_MEETINGS_IDLE_SECS`), and **content off the daemon**
+(`wait` returns coordination only; proxy + `MeetingClient` read content from disk
+via `store::read_since`). The only unverified piece is the ratatui *rendering* of
+`rozum meetings attach` (needs interactive run); its logic is unit-tested.
+`src/gateway.rs` untouched; fully additive. POLISH (2nd pass): per-room
+panic isolation — every daemon tool handler runs under `guard(...)`
+(`catch_unwind`), test `guard_isolates_panics`. POLISH (3rd pass) — all three
+remaining items DONE: (a) **bare-`rozum` cutover** — `rozum` now attaches a TUI
+to the daemon by default; `--legacy-room` (or `--web-port`) keeps the legacy
+in-process room (bridges + sampling) as the escape hatch (additive, nothing
+removed); (b) **room picker** — `Ctrl-O`/`/rooms` lists rooms (name/topic/
+participants/last-day from enriched `rooms.list`), ↑↓+Enter switch, `/new`/`[+ new
+room]` creates an ad-hoc room (`rooms.new`); (c) **second poll connection** —
+`MeetingClient::spawn_poll` long-polls on its own connection + streams via mpsc,
+so keypresses never cancel an in-flight `wait_my_turn` (tests
+`poll_stream_delivers_new_messages`, `rooms_new_creates_ad_hoc_and_list_enriches`).
+57 meeting tests green. ONLY the ratatui *rendering* of `rozum`/`rozum meetings
+attach` needs interactive verification. Remaining: the deferred REST read; and
+model-as-participant via gateway HTTP (today only the legacy room does sampling).**
 Build sequence (each phase compiles + has its own tests; do them in order — P0→P2
 are pure library and land behind today's behavior, P3 brings the daemon up, P4/P5
 are clients and can go in parallel, P6 is the service):
 
-- [ ] **P0 — Storage core** (lib, no daemon). New `src/meeting/store.rs`:
+- [x] **P0 — Storage core** — DONE (`src/meeting/store.rs`, 9 tempdir tests green;
+      branch `feature/meetings-impl`). Library, no daemon. New `src/meeting/store.rs`:
       `RoomPaths` (resolve `<project>/.rozum/room/`, ad-hoc fallback
       `$XDG_STATE_HOME/rozum/rooms/<name>/`, `rooms.json` registry, write
       `.rozum/.gitignore`=`*`); `TranscriptWriter` (lazy-create on first append,
@@ -104,42 +127,75 @@ are clients and can go in parallel, P6 is the service):
       *Verify (tempdir unit tests):* append→`(date,n)`; rollover resets `n`;
       reader tails new lines; reopen recovers high-water from newest day;
       `index.json` rebuild; `.gitignore` + `rooms.json` add/list.
-- [ ] **P1 — Identity** (`src/meeting/participant.rs`). Opaque `ParticipantId` +
-      `handle` (project-namespaced adjective-animal) + `session_token`; resolve by
-      token, persist roster in `roster.json`; drop `#N` + name/staleness reclaim.
-      *Verify:* same token→same id/handle on rejoin; new token→new handle; roster
-      round-trip; no `#N`.
-- [ ] **P2 — Room model refactor** (`src/meeting/state.rs`). Replace
-      `transcript: Vec<Turn>` with the writer; `MeetingEvent` carries
-      `{date,n,end_offset}` (no `content`); `submit` → writer; budget from
-      `meta.json`. Free-submit stays; remove any vestigial turn/moderator wording.
-      *Verify:* adapted meeting tests; submit appends to disk + emits shrunk event.
-- [ ] **P3 — `meetings` daemon + RoomRegistry + MCP routing**
-      (`src/meeting/mcp_server.rs`, new daemon mode in `src/main.rs`).
-      `RoomRegistry` (id→RoomHandle, supervised task, panic-isolated, idle-evict,
-      lazy-create, reopen from `rooms.json` on start); one rmcp server on
-      `meeting.sock`; session `current_room`; `rooms.list/join` from registry;
-      `_join_internal{project,session_token}`. CLI `rozum meetings
-      start|stop|status` (detached spawn, single-owner socket+lock, graceful stop
-      drains `wait_my_turn`). *Verify:* 2 rooms concurrent; list/join/submit/
-      wait_my_turn over socket; stop drains; restart reopens.
-- [ ] **P4 — mcp-proxy rewrite** (`src/meeting/proxy.rs`). Dial the single
-      `meeting.sock`; pass `project`+`session_token`; read content from disk
-      (`TranscriptReader`) and return to the agent; `wait_my_turn` = daemon wakeup
-      + disk read; tool call-shape unchanged. *Verify (real agent, #[ignore]):*
-      Claude/Codex join project room, submit, see others; identity stable across
-      in-session reconnect.
-- [ ] **P5 — TUI as client** (`src/tui/`, `run_room`→attach in `src/main.rs`).
-      Connect to daemon (drop in-process `Arc<Mutex<Meeting>>`); room picker
-      (list/select/switch, `[o]rooms`, new-room); day-scoped render (current day +
-      lazy older + separators + rollover); launch-in-project enters its room;
-      auto-spawn daemon. *Verify:* in-project entry; picker switch; N independent
-      TUIs; scrollback loads older days.
-- [ ] **P6 — user service** (`src/service.rs`). `meetings_plist`/`meetings_unit`
-      (pure + unit-tested) + `rozum meetings install|uninstall` (launchd
+- [x] **P1 — Identity** — DONE (`src/meeting/identity.rs`, 6 tests green). Additive
+      primitives (`Roster`/`RosterEntry`, `resolve_or_mint`, `mint_handle`,
+      `display_name`): opaque UUID `ParticipantId` + `handle` (adjective-animal,
+      unique-in-room) + `session_token` reconnect key, `roster.json` round-trip;
+      no `#N`. Wiring into the room (replacing name/staleness reclaim) lands in
+      P2/P3. *Verified:* same token→same id/handle; new token→new handle; roster
+      reload rebinds; minted handle avoids taken.
+- [x] **P2 — Room model** — DONE (`src/meeting/room.rs` `DaemonRoom`, 6 tests; all
+      44 meeting tests green). PLAN ADJUSTMENT: built a **new** disk-backed room
+      model additively instead of mutating the live `state.rs::Meeting` — keeps the
+      build green; `DaemonRoom` owns a `TranscriptWriter` (no content in RAM) + a
+      `Roster`, free-submit, shrunk `RoomEvent` (`{date,n,end_offset}`, no content),
+      budget from the writer. The legacy in-process `Meeting`/`run_room`/web path is
+      retired when bare `rozum` becomes a client (P5). *Verified:* join mints+
+      persists+rebinds-by-token; submit appends to disk + emits shrunk Posted;
+      reopen restores high-water+roster; max-chars ends.
+- [x] **P3a — RoomRegistry** — DONE (`src/meeting/registry.rs`, 3 tokio tests).
+      `RoomHandle = Arc<AsyncMutex<DaemonRoom>>`; lazy `get_or_create` (open from
+      disk if `meta.json` exists, else fresh), `get_by_name` via `rooms.json`,
+      `evict` (files stay, reopen on demand), `list`, `open_count`. *Verified:*
+      idempotent while open; evict→reopen continues from disk (high-water+roster);
+      list/get_by_name see registered rooms.
+- [x] **P3b — daemon server + CLI** — DONE (`src/meeting/daemon.rs` +
+      `src/main.rs` `meetings` cmd; 2 in-process rmcp tests + live CLI smoke).
+      `MeetingServer` (rmcp on `meeting.sock`, per-session room) over the
+      `RoomRegistry`: `rooms.list/join`, `_join_internal{project,session_token}`,
+      `meeting.submit/wait_my_turn/mark_responding/status/leave`; lazy reopen via
+      registry; `pub daemon_alive`/`daemon_rooms` client helpers. CLI `rozum
+      meetings start [--foreground] | stop | status` (detached spawn, pidfile,
+      socket-ping liveness, `kill` stop). *Verified:* join→submit→wait→list
+      roundtrip over a unix socket; same-token rebind across reconnect; live
+      start→status→stop lifecycle clean (no stray procs). DEFERRED to follow-ups:
+      idle-evict watchdog, graceful drain (pending waits → `{ended}`) on SIGTERM,
+      per-room `catch_unwind`; `install|uninstall` is P6.
+- [x] **P4 — mcp-proxy → daemon** — DONE (`src/meeting/daemon_proxy.rs`; 1
+      in-process roundtrip test + binary stdio smoke). New `DaemonProxy` stdio
+      server: generates a `session_token` once, detects project (git root/cwd),
+      auto-spawns the daemon (`rozum meetings start`), auto-joins the project room
+      via `_join_internal{project,session_token}`, forwards `rooms.*`/`meeting.*`,
+      and tracks the `(date,n)` cursor so `meeting.wait_my_turn` takes no args.
+      `rozum mcp-proxy` now uses it by default (`ROZUM_LEGACY_PROXY=1` for the old
+      per-room-socket proxy). PLAN NOTE: built additively beside legacy
+      `proxy.rs` (untouched) rather than rewriting it. DEFERRED: move the wait
+      content-read from the daemon into the proxy (`TranscriptReader`) — daemon
+      currently returns content; the proxy already tracks the cursor. *Verified:*
+      auto-join→submit→cursor-tracked wait→rooms.list over a unix socket; `rozum
+      mcp-proxy` serves the 7-tool surface over stdio.
+- [x] **P5 — TUI as client (model + shell)** — model DONE & tested; ratatui shell
+      functional, interactive-verify pending. `src/meeting/tui_client.rs`
+      `MeetingClient` (2 tests): connect-as-human, `list_rooms` (incl. `root`),
+      `enter_project`/`enter_named` (joins `kind="human"`, identity on
+      `rooms.join`), disk-read day-scoped transcript, cursor-tracked `poll`,
+      `load_prev_day` scrollback. `src/meeting/attach.rs` + `rozum meetings
+      attach [--room]`: ratatui loop (transcript + day separators + input,
+      PgUp=older, Esc=quit), auto-spawns daemon, enters cwd project room.
+      PLAN NOTE: additive (`rozum meetings attach`) — bare `rozum` / legacy
+      `tui/mod.rs` untouched; the bare-`rozum`→client cutover + full picker UX are
+      follow-ups. *Verified:* model tests (enter/submit/tail/list, scrollback) +
+      build/CLI; **ratatui rendering needs interactive `rozum meetings attach`.**
+      FOLLOW-UP: poll-cancel on keypress abandons one daemon long-poll (self-
+      corrects); a second connection for the poll loop would avoid it.
+- [x] **P6 — user service** — DONE (`src/service.rs` `meetings_launchd_plist`/
+      `meetings_systemd_unit` + paths/labels, 3 tests; `rozum meetings
+      install|uninstall` in `src/main.rs`, cfg-gated macOS/Linux). launchd
       `com.rozum.meetings` / systemd `rozum-meetings.service`, runs `meetings start
-      --foreground`, KeepAlive). *Verify:* generation unit tests; operator runs
-      `launchctl`/`systemctl`.
+      --foreground` with RunAtLoad+KeepAlive / Restart=on-failure; logs under
+      `state/meetings/service.log`. *Verified:* generation unit tests + CLI `--help`
+      wires up; the real `launchctl`/`systemctl` call is operator-validated (same
+      convention as the gateway service — not run against the dev machine).
 - [ ] **Deferred (not now):** Future REST read-by-day on the meeting daemon's HTTP
       (`/rooms/{name}/days`, `/messages/<date>`); model-as-participant via gateway
       local HTTP.
