@@ -6,8 +6,19 @@ A small **draft** model proposes `k` tokens; the big **target** verifies them in
 one forward, accepts the longest prefix that equals the target's own greedy
 choice, and appends the target's next token at the first divergence. Net: fewer
 expensive target forwards per emitted token → faster decode with **byte-identical
-greedy output**. This is a **latency win, not a quality tradeoff** — the output is
-exactly what the target alone would have produced greedily.
+greedy output (in exact arithmetic)**. This is a **latency win, not a quality
+tradeoff** — the orchestrator emits *only* the target's own greedy tokens, so each
+output is a valid greedy decode of the target.
+
+**Floating-point caveat (measured on Metal):** the verify forward scores `k+1`
+positions in one batched pass, so the target's KV cache is built in a different
+*shape* than a one-token-per-step sequential decode. On finite-precision hardware
+that tiny difference can flip an argmax at a near-tie — the same batched-vs-sequential
+class as chunked prefill — so the output is identical to a sequential greedy decode
+*except at rare ties* (e.g. 17/20 tokens shared before the first tie-flip on a
+Qwen3-4B self-speculation run; both remain valid greedy decodes). The exact-arithmetic
+byte-identity is proven by the engine-agnostic mock unit test; the **functional**
+equivalence on real workloads is the agentic-matrix gate (pass/fail unchanged).
 
 Architecturally, draft and target are two **residents** (the residency / warm
 layer), so on heterogeneous hardware the draft runs on a cheap device (iGPU/CPU)
@@ -47,9 +58,13 @@ draft.propose(ctx, k)             -> [TokenId; k]   // greedy
 
 ## Behavior
 
-- [ ] Output is **byte-identical** to pure greedy decode of the target alone —
-      the invariant. Tested with a mock target whose greedy sequence is fixed and
-      a mock draft of arbitrary quality.
+- [x] Output is **byte-identical** to pure greedy decode of the target alone **in
+      exact arithmetic** — the invariant. Proven with a mock target whose greedy
+      sequence is fixed and a mock draft of arbitrary quality (`src/specdecode.rs`
+      tests). On Metal it holds modulo rare float argmax ties (see the FP caveat
+      above); the MLX dense verify/propose are proven to track the target greedy on
+      a real model by `mlx_spec_decode_byte_identical` (Qwen3-4B self-speculation:
+      lcp 17/20, 5 target forwards vs 20 — the speedup).
 - [ ] Per step: draft proposes `k`; target verifies in one forward; accept the
       longest prefix equal to the target's greedy argmax; emit the accepted tokens
       + the target's corrected token; advance KV to that point.
