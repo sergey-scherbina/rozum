@@ -1598,22 +1598,33 @@ soon as any single track succeeds.
 > occasional one-line edit but fail multi-step `build`/`test`. They ARE fast
 > (~8 GB, high tok/s) and fine for narrow single-shot work. Two concrete roles:
 
-- [ ] spec-decode-draft - **Speculative decoding: a small draft model accelerates a big one.**
+- [~] spec-decode-draft - **Speculative decoding: a small draft accelerates a big target. SPEC WRITTEN — NEXT P0, build architecturally.** Spec: `docs/specs/speculative-decoding.md`.
   - A small model (e.g. `Qwen3-4B-4bit`) proposes k tokens; the big target
     (e.g. `Qwen3.6-35B-A3B-4bit`) verifies them in one forward and accepts the
     longest correct prefix. Net: fewer big-model forwards → faster decode with
     **byte-identical greedy output** (the whole point — it's not a quality
     tradeoff, it's a latency win).
-  - Where: the mlx-native decode loop (`src/mlx_native_backend.rs`, `run_job` /
-    the per-token sample path). Needs a second resident model (the draft) and a
-    verify-and-rollback step on the target's KV cache.
+  - **Architecture (грамотно, per spec):** NOT a hack in the MLX loop. An
+    **engine-agnostic orchestrator above the SPI** (`src/specdecode.rs`,
+    accept-longest-prefix loop, byte-identical invariant **unit-tested with a mock
+    target** — no real model) + a small opt-in `SpeculativeVerify` capability a
+    backend implements (`prefill`/`verify`+KV-rollback). Draft + target are two
+    **residents**; device-aware placement (draft cheap device, target fast) —
+    the canonical heterogeneous single-stream co-use (`multi-device-residency.md`,
+    North Star). MLX implements the capability for dense targets first; GGUF later.
   - Caveats to design around: the hybrid Qwen3.6 GatedDeltaNet recurrent state is
-    not freely truncatable (see `HybridPrefix`) — rollback on rejected drafts is
-    the hard part; may land dense-target-only first. Draft + target must share a
-    tokenizer (Qwen3 family ✓).
-  - Acceptance: a `--draft-model <spec>` (or env) path that produces greedy output
-    **identical** to non-draft, with a measured tok/s speedup on 35B-A3B. Effort:
-    LARGE. Spec first (`docs/specs/`), per spec-dev.
+    not freely truncatable (`HybridPrefix`) — rollback on rejected drafts is the
+    hard part; **dense-target first**, hybrid degrades to plain greedy. Draft +
+    target must share a tokenizer (Qwen3 family ✓; enforced).
+  - Acceptance: `--draft-model <spec>` (or env) → greedy output **identical** to
+    non-draft + a measured tok/s speedup on a real dense target. Effort: LARGE.
+  - **P0 DONE** (`src/specdecode.rs`, 3 tests, branch `feature/spec-decode`): the
+    engine-agnostic orchestrator (`Draft`/`Target` traits + `decode()`,
+    accept-longest-greedy-prefix) with the **byte-identical invariant proven with
+    a mock target** (oracle/all-wrong/flaky drafts all yield the exact target
+    greedy seq; oracle ~len/(k+1) forwards vs all-wrong's len). **P1 NEXT:** the
+    MLX **dense** `SpeculativeVerify` impl (batch-verify + KV-truncate-to-accepted
+    in `mlx_native_backend`), draft+target as two residents, `--draft-model` wiring.
 
 - [ ] small-model-router-rag - **Small model as router / classifier / RAG worker.**
   - Use a 4B/Coder-7B for the narrow, single-shot, latency-sensitive steps that
