@@ -8,6 +8,24 @@ gateway serves local models (unchanged); together they form one collaborative
 dev environment. External CLI agents join rooms through MCP, and the human
 attaches a TUI client to any room. Spec: `docs/specs/agent-meetings-daemon.md`.
 
+## North Star
+
+Rozum's purpose is to **keep intelligence running on whatever is actually here**.
+It must work well and correctly on **any hardware it lands on** (Apple-Silicon
+UMA, an x86 box with a discrete + an integrated GPU, or CPU-only) and with **any
+model that can run there**, using **what is available right now** — adapting to
+the machine and the models on hand, placing each model where it runs best rather
+than assuming one blessed setup.
+
+Concretely: the `ChatBackend` SPI is the durable, hardware-agnostic layer;
+engines (MLX/Metal, GGUF/CUDA·Vulkan·CPU, remote HTTP) are swappable leaves;
+device-aware placement (`docs/specs/multi-device-residency.md`) maps models onto
+the present devices; agents, models, and meeting rooms cooperate as one
+environment. Correctness and frugality are first-class — no oversubscribing
+memory to OOM, no splitting one model across mismatched devices, no needless data
+paths. Make it run where it can with what there is; remove waste and breakage
+wherever they are found.
+
 ## Runtime Contract
 
 - The project exposes a Rust library crate and a binary with the same package name, `rozum`.
