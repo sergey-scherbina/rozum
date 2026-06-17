@@ -489,6 +489,34 @@ mod inner {
         out
     }
 
+    /// Render a message for the gpt-oss **harmony** template: assistant `ToolUse`
+    /// blocks become structured `tool_calls` (so the template emits native
+    /// `commentary to=functions.X` markup and a later `tool` result has a matching
+    /// preceding call — else it `raise_exception`s); `Text`/`ToolResult` pass
+    /// through as content. The template does `tool_call.arguments|tojson`, so the
+    /// arguments are passed as the parsed object, not a JSON string.
+    fn harmony_conversation(msg: &Message) -> Conversation<&'static str, String> {
+        let mut text = String::new();
+        let mut calls: Vec<serde_json::Value> = Vec::new();
+        for b in &msg.content {
+            match b {
+                ContentBlock::Text { text: t } => text.push_str(t),
+                ContentBlock::ToolResult { content, .. } => text.push_str(content),
+                ContentBlock::ToolUse { name, input, .. } => {
+                    calls.push(serde_json::json!({
+                        "type": "function",
+                        "function": { "name": name, "arguments": input },
+                    }));
+                }
+            }
+        }
+        Conversation {
+            role: role_str(&msg.role),
+            content: text,
+            tool_calls: (!calls.is_empty()).then(|| serde_json::Value::Array(calls)),
+        }
+    }
+
     /// Worker thread entry point. Loads the model (reporting load result over
     /// `ready`), then serves jobs until the queue closes.
     fn worker_main(
@@ -2765,11 +2793,23 @@ mod inner {
         tools: &[crate::backend::ToolDef],
         add_gen: bool,
     ) -> Result<Vec<u32>, String> {
+        // gpt-oss's harmony template renders tool calls/results natively from
+        // `message.tool_calls` (assistant) + the `tool` role, and raises if a tool
+        // result has no preceding structured call. Detect it by its channel markers
+        // and pass tool calls structurally instead of as Qwen `<tool_call>` text.
+        let harmony = template.contains("<|channel|>");
         let convo: Vec<Conversation<&'static str, String>> = messages
             .iter()
-            .map(|m| Conversation {
-                role: role_str(&m.role),
-                content: message_text(m),
+            .map(|m| {
+                if harmony {
+                    harmony_conversation(m)
+                } else {
+                    Conversation {
+                        role: role_str(&m.role),
+                        content: message_text(m),
+                        tool_calls: None,
+                    }
+                }
             })
             .collect();
         // Thinking is OFF by default (clean output for CC/Codex); the gateway's
