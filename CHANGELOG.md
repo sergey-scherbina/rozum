@@ -1,5 +1,20 @@
 # Changelog
 
+## bench — graceful gateway teardown (stop the agentic matrix from kernel-panicking the Mac)
+Completed: 2026-06-18
+
+The agentic matrix (`scripts/bench/agentic.sh`) could **reboot the host via a GPU kernel panic** —
+not a RAM OOM. It tore each model's shared gateway down with `kill -INT` → 60s → an **unconditional
+`kill -KILL`**; a SIGKILL landing while the MLX worker is inside a wedged Metal eval corrupts the
+IOGPU driver's buffer accounting (`IOGPUGroupMemory::remove_memory_object() not found`) → panic →
+reboot. Now the teardown is graceful: SIGINT → wait `TEARDOWN_GRACE` (180s, env-overridable) for a
+clean exit → SIGKILL only as a loudly-flagged last resort → a `GPU_SETTLE` (8s) pause so the kernel
+finishes async IOGPU reclamation before the next gateway allocates on the same Metal device. Also
+adds `ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0` to the gateway launch so the shared gateway isn't self-exited
+(`clients_gone`) between the claude/codex phases. Harness-only; `bash -n` clean. Tracked in BUGS.md
+BUG-001. The deeper rozum-side bounded-teardown (a Metal-eval timeout so Drop's join can't block
+forever) is a deliberate tracked follow-up — it can't be validated without risking a reboot.
+
 ## meeting — channel-wakeup ported to the default daemon proxy
 Completed: 2026-06-18
 

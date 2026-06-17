@@ -222,6 +222,21 @@ are clients and can go in parallel, P6 is the service):
   files land in cwd → passes. Hence claude 72% vs codex 32%.
 - **Coder-7B text-only** (turns=1, tools=0): writes the solution as prose instead of calling tools.
 
+- [x] matrix-teardown-panic — **DONE 2026-06-18 (P0; harness-side; ported to master).** The
+  agentic matrix **rebooted the Mac via a KERNEL PANIC** — not an OOM. `scripts/bench/agentic.sh`
+  tore each model's gateway down with `kill -INT` → 60s → **unconditional `kill -KILL`**; a SIGKILL
+  landing on a wedged Metal eval double-frees an IOGPU buffer
+  (`IOGPUGroupMemory::remove_memory_object() not found`) → panic → reboot. Fix (validated no-panic
+  on 27B on the original `feature/matrix-teardown-panic-fix`, which went 70 commits stale → the
+  still-needed change was **ported fresh onto master**, not merged): graceful teardown — SIGINT →
+  wait `TEARDOWN_GRACE` (180s) for a clean exit → SIGKILL **only as a loudly-flagged last resort** →
+  `GPU_SETTLE` (8s) so the kernel finishes async IOGPU reclamation before the next gateway allocates.
+  Also added `ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0` to the launch (keeps the shared gateway alive across
+  the claude/codex phases — the `clients_gone` self-exit, [[project-agentic-bench-clients-gone]]).
+  `bash -n` clean. Tracked in **BUGS.md BUG-001**; root cause [[project-matrix-kernel-panic]].
+  **Deliberately NOT done (tracked follow-up):** the deeper rozum-side bounded/non-wedging teardown
+  (a real Metal-eval timeout; Drop's `join()` can't block forever) — it touches the GPU teardown hot
+  path and can't be validated without risking a reboot, so it isn't shipped blind.
 - [x] mlx-chunked-prefill — **DONE 2026-06-16 (dense paths + lower default; fork `9fa852f4`).** Found the
   hybrid Qwen3.6 path ALREADY chunked; the gap was the **dense** `qwen3`/`qwen3_moe` Generate (single
   forward over the whole prompt → unbounded activation spike). Both dense Prefill states now chunk at
