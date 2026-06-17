@@ -696,36 +696,22 @@ async fn start_web_bridge(room_name: String, port: u16, url: String) {
 async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: rozum::RuntimeConfig) {
     let n_ctx = resolve_n_ctx(&model_spec, n_ctx.or(cfg.n_ctx));
     let cfg = std::sync::Arc::new(cfg);
-    let backend = match build_from_config(&cfg, &model_spec, n_ctx).await {
+    // Speculative decoding: if a draft model is configured (`--draft-model` /
+    // `ROZUM_DRAFT_MODEL`), build the target+draft pair; else the plain target.
+    // Spec: docs/specs/speculative-decoding.md.
+    let draft_spec = std::env::var("ROZUM_DRAFT_MODEL")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let backend = match &draft_spec {
+        Some(draft) => build_spec_decode_backend(&cfg, &model_spec, draft.trim(), n_ctx).await,
+        None => build_from_config(&cfg, &model_spec, n_ctx).await,
+    };
+    let backend = match backend {
         Some(b) => b,
         None => {
             print_no_backend_hints(&model_spec);
             std::process::exit(1);
         }
-    };
-    // Speculative decoding: if a draft model is configured, build it and wrap the
-    // target in a SpecDecodeBackend. Iteration-1 falls back to target-only decode
-    // (byte-identical); the draft→verify path lands next. Spec:
-    // docs/specs/speculative-decoding.md.
-    let backend = match std::env::var("ROZUM_DRAFT_MODEL") {
-        Ok(draft_spec) if !draft_spec.trim().is_empty() => {
-            match build_from_config(&cfg, draft_spec.trim(), n_ctx).await {
-                Some(draft) => {
-                    eprintln!("  spec-decode draft:  {draft_spec}");
-                    std::sync::Arc::new(rozum::specdecode_backend::SpecDecodeBackend::new(
-                        backend, draft,
-                    )) as std::sync::Arc<dyn rozum::ChatBackend>
-                }
-                None => {
-                    eprintln!(
-                        "rozum gateway: --draft-model '{draft_spec}' failed to build; \
-                         serving target only"
-                    );
-                    backend
-                }
-            }
-        }
-        _ => backend,
     };
     eprintln!("rozum gateway  http://127.0.0.1:{port}");
     eprintln!("  model:              {model_spec}");
@@ -3717,6 +3703,82 @@ async fn try_build_mistralrs_backend(
 #[cfg(not(feature = "mistralrs"))]
 async fn try_build_mistralrs_backend(
     _model_spec: &str,
+    _n_ctx: u32,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    None
+}
+
+/// Build a speculative-decoding backend for `target_spec` accelerated by
+/// `draft_spec`. Prefers the real MLX dual-model spec-decode (both dense MLX →
+/// the greedy decode speedup, loaded together in one worker so the target isn't
+/// loaded twice); falls back to the engine-agnostic `SpecDecodeBackend` SPI
+/// wrapper (target-only decode — byte-identical, no speedup) for non-MLX or
+/// non-dense pairs. Spec: docs/specs/speculative-decoding.md.
+async fn build_spec_decode_backend(
+    cfg: &rozum::RuntimeConfig,
+    target_spec: &str,
+    draft_spec: &str,
+    n_ctx: u32,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    if let Some(b) = try_build_mlx_spec_decode(target_spec, draft_spec, n_ctx).await {
+        eprintln!("  spec-decode:        target {target_spec} + draft {draft_spec} (MLX dense)");
+        return Some(b);
+    }
+    // Fallback: target alone, with the draft held resident behind the SPI wrapper.
+    let target = build_from_config(cfg, target_spec, n_ctx).await?;
+    match build_from_config(cfg, draft_spec, n_ctx).await {
+        Some(draft) => {
+            eprintln!("  spec-decode draft:  {draft_spec} (SPI wrapper — target-only decode)");
+            Some(std::sync::Arc::new(
+                rozum::specdecode_backend::SpecDecodeBackend::new(target, draft),
+            ))
+        }
+        None => {
+            eprintln!(
+                "rozum gateway: --draft-model '{draft_spec}' failed to build; serving target only"
+            );
+            Some(target)
+        }
+    }
+}
+
+#[cfg(feature = "mlx-native")]
+async fn try_build_mlx_spec_decode(
+    target_spec: &str,
+    draft_spec: &str,
+    n_ctx: u32,
+) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
+    use rozum::mlx_native_backend::{MlxNativeBackend, ensure_model_dir};
+    // Non-MLX specs (GGUF files, lmstudio:/ollama:) → let the SPI fallback handle it.
+    for s in [target_spec, draft_spec] {
+        if s.starts_with("lmstudio:")
+            || s.starts_with("ollama:")
+            || std::path::Path::new(s).is_file()
+        {
+            return None;
+        }
+    }
+    let target_dir = ensure_model_dir(target_spec).await?;
+    let draft_dir = ensure_model_dir(draft_spec).await?;
+    let target_id = rozum::mistralrs_backend::normalize_spec(target_spec);
+    match MlxNativeBackend::new_spec_decode(target_dir, target_id.clone(), draft_dir, Some(n_ctx))
+        .await
+    {
+        Ok(b) => {
+            eprintln!("backend: mlx-native spec-decode (in-process, Metal) — target {target_id}");
+            Some(std::sync::Arc::new(b))
+        }
+        Err(e) => {
+            eprintln!("warning: mlx spec-decode build failed ({e}); falling back to target-only");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "mlx-native"))]
+async fn try_build_mlx_spec_decode(
+    _target_spec: &str,
+    _draft_spec: &str,
     _n_ctx: u32,
 ) -> Option<std::sync::Arc<dyn rozum::ChatBackend>> {
     None
