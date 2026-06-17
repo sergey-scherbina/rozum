@@ -155,5 +155,42 @@ prefix, truncate KV to accepted+1" rather than new cache machinery.
 
 ## Results
 
-<!-- Fill in after the matrix runs: baseline-vs-spec-decode pass matrix
-     (must match) + per-run tok/s delta on a dense target. -->
+**Correctness gate — PASSED.** Agentic matrix (`scripts/bench/agentic.sh`,
+claude × Qwen3-30B-A3B-4bit target + Qwen3-4B-4bit draft, greet/build/fix) on the
+M4: the pass/fail matrix is **identical** off-vs-on (3/3 both; same turns 1/4/6,
+same tool calls 0/3/3). Footprint +2.2 GB (the draft resident). The spec-decode
+path engaged (`backend: mlx-native spec-decode … (MLX dense)`). So spec-decode
+introduces **no behavioral regression** on real agentic workloads — the
+byte-identical-in-exact-arithmetic contract holds functionally.
+
+**Speedup gate — FAILED on this (MoE) target; the economics are the finding.**
+Isolated long-generation decode (250-word essay, greedy, 400 max tokens):
+
+| config | tok/s | note |
+|---|---|---|
+| Qwen3-30B-A3B target alone | **98.1** | MoE, 3B active → already fast |
+| Qwen3-4B draft alone | 124.3 | only **1.27×** the target's speed |
+| spec-decode (target + draft) | **34.8** | **2.8× slower**, though target forwards fell 2.65× (111 vs 294) |
+
+Two structural reasons, both inherent (not bugs):
+
+1. **MoE target.** A 3B-active MoE decodes a single token cheaply, but a `k+1`-token
+   *verify* forward routes those tokens to *more distinct experts*, so it must load
+   more expert weights — the dominant (memory-bandwidth) cost. The per-forward cost
+   therefore **scales with token count**, which cancels the forward-count reduction.
+   Spec-decode's premise is a target whose forward cost is ~flat in sequence length
+   (true for a **dense**, bandwidth-bound model that loads its weights once per
+   forward regardless of token count) — not a MoE.
+2. **Draft not cheap enough.** The smallest same-family draft on hand (4B dense,
+   124 t/s) is barely faster than the MoE target (98 t/s). For a win the draft must
+   be *much* cheaper (≥5–10×) than the target; a 4B dense draft vs a 3B-active MoE
+   target is a wash.
+
+**Conclusion.** The spec-decode infrastructure is correct, proven, and is the
+durable engine-agnostic / heterogeneous-device layer (North Star). But it is a
+**latency win only for a slow, memory-bandwidth-bound _dense_ target paired with a
+much smaller draft** (e.g. a 32B+ dense model at ~15–25 t/s + a ≤1B draft) — a
+configuration not present among the cached/recommended M4 models (the recommended
+local agentic model, Qwen3-30B-A3B, is MoE). It therefore stays **off by default**
+(opt-in via `--draft-model`), correct when enabled, and ready for the dense /
+heterogeneous-device case it's designed for.

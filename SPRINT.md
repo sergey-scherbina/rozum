@@ -1619,19 +1619,38 @@ soon as any single track succeeds.
   - Acceptance: `--draft-model <spec>` (or env) → greedy output **identical** to
     non-draft + a measured tok/s speedup on a real dense target. Effort: LARGE.
   - **P0 DONE** (`src/specdecode.rs`, 3 tests, branch `feature/spec-decode`): the
-    engine-agnostic orchestrator (`Draft`/`Target` traits + `decode()`,
+    engine-agnostic orchestrator (`Draft`/`Target` traits + `decode()`/`decode_streaming()`,
     accept-longest-greedy-prefix) with the **byte-identical invariant proven with
     a mock target** (oracle/all-wrong/flaky drafts all yield the exact target
-    greedy seq; oracle ~len/(k+1) forwards vs all-wrong's len). **P1 (in progress,
-    branch `feature/spec-decode-p1`):** the MLX **dense** `SpeculativeVerify` impl
-    (batch-verify + KV-truncate-to-accepted in `mlx_native_backend` — builds on the
-    existing `PREFIX_REUSE` truncate + suffix-prefill + `argmax_u32`), draft+target
-    as two residents, `rozum gateway --draft-model <spec>` wiring.
-  - **GATE = the agentic matrix** (`scripts/bench/agentic.sh`, run on the M4):
-    `rozum gateway --model T --draft-model D` → pass/fail matrix **identical** to
-    baseline (byte-identical, guaranteed by P0) + per-run tok/s up. Build loop: I
-    write an iteration → matrix off-vs-on on the hardware → iterate. (See spec
-    "Verification gate".) Not headless — runs where the real models live.
+    greedy seq; oracle ~len/(k+1) forwards vs all-wrong's len).
+  - **P1 DONE — built, proven, matrix-gated; verdict: net-negative on the
+    recommended MoE model** (branch `feature/spec-decode-p1`, commits
+    `02e2ecd`/`a0ed496`/`eeb8487`). iter-1 = `--draft-model` flag + SPI
+    `SpecDecodeBackend` (target-only fallback). iter-2 = MLX **dense** verify
+    (multi-pos forward → per-row argmax → accept-longest-greedy-prefix →
+    KV-truncate-to-accepted) + propose, on the existing `dense_forward` /
+    `ConcatKeyValueCache.truncate` / `argmax`; proven on Metal by
+    `mlx_spec_decode_byte_identical`. iter-3 = dual-model worker
+    (`MlxNativeBackend::new_spec_decode`, both models one worker, orchestrator runs
+    inside) streaming via `BatchSeq` + chunked prefill so a 30B target doesn't OOM;
+    gateway auto-detects an MLX-dense pair (`build_spec_decode_backend`).
+  - **MATRIX RESULT (M4, claude × Qwen3-30B-A3B + Qwen3-4B draft):** correctness
+    gate **PASSED** (pass-matrix identical off-vs-on, no quality regression); speed
+    gate **FAILED on this target** — spec-decode 34.8 t/s vs 98.1 baseline (2.8×
+    *slower*) despite 2.65× fewer target forwards. **Why (structural, not a bug):**
+    (1) the 30B-A3B target is **MoE** — a `k+1`-token verify forward loads more
+    distinct experts, so per-forward cost scales with tokens and cancels the
+    forward-count win (spec-decode needs a *dense*, bandwidth-bound target whose
+    forward cost is flat in token count); (2) the 4B dense draft (124 t/s) is no
+    cheaper than the MoE target (98 t/s) — the draft must be ≥5–10× cheaper.
+    **Verdict:** correct + valuable durable infra (North Star: dense /
+    heterogeneous-device single-stream co-use), stays **off by default** (opt-in
+    `--draft-model`); a win only for a slow large *dense* target + tiny draft, which
+    isn't among the cached/recommended M4 models. Full numbers + reasoning in the
+    spec "Results". Float-tie caveat: byte-identical in exact arithmetic; on Metal,
+    identical modulo rare argmax ties (verify batches positions → KV built in a
+    different shape than sequential decode) — `mlx_spec_decode_byte_identical`
+    asserts the mechanism (lcp), the matrix asserts functional equivalence.
 
 - [ ] small-model-router-rag - **Small model as router / classifier / RAG worker.**
   - Use a 4B/Coder-7B for the narrow, single-shot, latency-sensitive steps that
