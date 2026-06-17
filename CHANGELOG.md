@@ -1,5 +1,24 @@
 # Changelog
 
+## router — small-model RAG worker (rerank + grounded summarize); closes small-model-router
+Completed: 2026-06-18
+
+`src/router.rs` gains `RagWorker` — the P2 RAG counterpart to `ModelRouter`, same shape (tight
+prompt, `temp 0`, `snap_to_label`, **never errors**) applied to retrieval post-processing:
+- `rerank(query, hits)` judges each `rag_lite::Hit` `relevant`/`related`/`irrelevant`, **drops** the
+  irrelevant ones, and reorders relevant-first with a **stable** sort — so a small model's coarse
+  3-way verdict *refines* BM25 recall without scrambling the lexical order within a grade. A model
+  failure / off-set reply keeps the hit as `related` (a conservative keep — never silently drop on a
+  fumble).
+- `summarize(query, hits)` condenses the survivors into an answer grounded **only** in their text;
+  a blank/failed generation falls back to the top hit's snippet (capped on a char boundary).
+- `rerank_and_summarize` / `grounded_answer(retriever, query, k)` compose the two with `rag_lite`
+  recall into the end-to-end grounded step → `GroundedAnswer { hits, summary }`.
+
+7 hardware-free unit tests over a scripted backend + an `#[ignore]` M4 eval `rag_worker_eval`
+(Qwen3-4B drops a lexical decoy, ranks the answering doc first, grounds the summary). 373 fast tests
+green. This closes the **small-model-router** track (classifier P1, cascade wiring P2, RAG worker P2).
+
 ## launch — rozum-launched codex now defaults to `medium` reasoning (was the user's global `xhigh`)
 Completed: 2026-06-17
 

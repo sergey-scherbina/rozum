@@ -146,6 +146,27 @@ cascade's optional **async, model-backed difficulty source**:
   entry tier. Tests: `router_model_is_resolved_and_threaded`,
   `router_model_round_trips_in_json`.
 
-**Next (P2 remaining):** the RAG rerank/summarize worker (same `ModelRouter` shape
-over `rag_lite::Hit`s) — relevance-label each hit, reorder/drop, optionally
-summarize the survivors with the small model.
+**P2 — RAG rerank/summarize worker DONE** (`src/router.rs` `RagWorker`). The same
+`ModelRouter` shape (tight prompt, `temp 0`, `snap_to_label`, never-errors) applied
+to retrieval post-processing:
+- `rerank(query, hits)` judges each `rag_lite::Hit`'s relevance to the query into an
+  ordered 3-way set (`relevant`/`related`/`irrelevant`, via `snap_to_label`), **drops**
+  the irrelevant ones, and reorders relevant-first with a **stable** sort — so the
+  model's coarse verdict *refines* BM25 recall without scrambling the lexical order
+  within a grade. Degrades safely: a model failure / off-set reply keeps the hit as
+  `related` (a conservative keep — never silently drop on a fumble).
+- `summarize(query, hits)` condenses the survivors into an answer grounded **only** in
+  their text; an empty/failed generation falls back to the top hit's snippet (capped on
+  a char boundary). Empty hits → empty string.
+- `rerank_and_summarize` / `grounded_answer(retriever, query, k)` compose the two (and
+  `rag_lite` recall) into the end-to-end grounded step → `GroundedAnswer { hits, summary }`.
+- **Tests:** 7 hardware-free unit tests over a scripted backend (drop-irrelevant +
+  grade-order, stable-within-grade, off-set→keep, summary empty/fallback/passthrough,
+  `grounded_answer` end-to-end) + an `#[ignore]` M4 eval `rag_worker_eval` (Qwen3-4B
+  reranks a mixed corpus — drops a lexical decoy, ranks the answering doc first, and
+  produces a grounded summary). Run:
+  `cargo test --features mlx-native -- --ignored --nocapture rag_worker_eval`.
+
+This closes the **small-model-router** track (classifier P1, cascade wiring P2, RAG
+worker P2). Remaining cross-references live in [[small-model-cascade]] (the after-the-
+fact escalation counterpart).
