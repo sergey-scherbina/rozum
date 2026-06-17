@@ -198,7 +198,13 @@ for spec in "${MODELS[@]}"; do
   # cap_mlx_memory keeps the MLX cache bounded (`ROZUM_MLX_CACHE_GB`), so it no longer
   # accumulates across the model's tasks (which used to grow to ~28 GB and starve the
   # next agent — the rc=2 cascade). Each task runs `rozum launch` (no --model) → reuse.
-  ROZUM_GATEWAY_IDLE_SECS=0 ROZUM_GEN_TIMEOUT_SECS="$GEN_TIMEOUT" /usr/bin/time -l \
+  # ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0 is REQUIRED: with the default the gateway is reloadable,
+  # so the lifecycle watchdog spawns and its `clients_gone` branch (gateway.rs ~2906) self-
+  # exits the process the instant one agent's leases drop — killing the shared gateway in the
+  # gap between the claude and codex phases, so every later codex task sees a dead gateway and
+  # returns rc=2 at 0.0s (looks like "codex is broken"; it isn't). =0 disables the watchdog so
+  # the load-once gateway survives all agents. See BUGS.md BUG-001 / project-agentic-bench-clients-gone.
+  ROZUM_GATEWAY_IDLE_SECS=0 ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0 ROZUM_GEN_TIMEOUT_SECS="$GEN_TIMEOUT" /usr/bin/time -l \
     "$BIN" gateway --model "$spec" --port "$port" --offline "${NCTX_OPT[@]}" \
     >"$glog" 2>&1 &
   TIME_PID=$!
@@ -272,11 +278,28 @@ for spec in "${MODELS[@]}"; do
     done
   done
 
-  # Stop the shared gateway; /usr/bin/time flushes the model's peak footprint (now
-  # bounded by the memory cap). Backfill it into this model's rows (column 13).
+  # Stop the shared gateway GRACEFULLY. A `kill -KILL` landing while the MLX worker is inside
+  # a Metal eval corrupts the IOGPU driver's buffer accounting → KERNEL PANIC
+  # (`IOGPUGroupMemory::remove_memory_object() not found`) that REBOOTS the Mac — see BUGS.md
+  # BUG-001. So: SIGINT → the gateway's graceful shutdown drains in-flight generation, joins the
+  # MLX worker, and frees buffers with the GPU idle; we wait generously for that. SIGKILL is a
+  # last resort only, loudly flagged. At end-of-model the gateway is idle so graceful exit takes
+  # a few seconds; the long window is insurance against a wedged eval. /usr/bin/time only flushes
+  # the peak-footprint line on a CLEAN exit — another reason to avoid SIGKILL.
+  TEARDOWN_GRACE="${TEARDOWN_GRACE:-180}"; GPU_SETTLE="${GPU_SETTLE:-8}"
   kill -INT "$GW_PID" 2>/dev/null
-  for _ in $(seq 1 60); do kill -0 "$TIME_PID" 2>/dev/null || break; sleep 1; done
-  kill -KILL "$TIME_PID" 2>/dev/null; wait "$TIME_PID" 2>/dev/null
+  gone=0
+  for _ in $(seq 1 "$TEARDOWN_GRACE"); do kill -0 "$TIME_PID" 2>/dev/null || { gone=1; break; }; sleep 1; done
+  if [ "$gone" != 1 ]; then
+    echo "  ! gateway did not exit gracefully in ${TEARDOWN_GRACE}s — forcing SIGKILL"
+    echo "    (PANIC RISK: a SIGKILL on a live Metal eval can panic the GPU driver and reboot the host)"
+    kill -KILL "$TIME_PID" 2>/dev/null
+  fi
+  wait "$TIME_PID" 2>/dev/null
+  # Let the kernel finish async IOGPU reclamation of the just-exited process's GPU buffers
+  # before the next gateway allocates ~15-28 GB on the same Metal device (the cross-process
+  # remove_memory_object race).
+  sleep "$GPU_SETTLE"
   foot=$(grep -m1 'peak memory footprint' "$glog" | awk '{printf "%.0f", $1/1048576}')
   awk -F, -v m="$spec" -v f="${foot:-}" 'BEGIN{OFS=","} NR==1{print;next} $2==m{$13=f} {print}' "$CSV" > "$CSV.tmp" && mv "$CSV.tmp" "$CSV"
   echo "  model footprint: ${foot:-n/a}MB"
