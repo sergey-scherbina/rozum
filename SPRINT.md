@@ -1633,10 +1633,14 @@ soon as any single track succeeds.
   define the seam (`src/engine.rs`: `LocalEngine`/`EngineMeta`/`drive`) → **A2a [x]**
   extract the engine-agnostic consumption loop `consume_tokens` (detok→`ChatEvent`,
   harmony + `<tool_call>` parse, EOS/max-tokens/runaway-guard, finalize) +
-  `is_runaway_loop`/`next_tool_call_id`, unit-tested hardware-free → **A2b [ ]** rewire
-  the MLX leaf (`stream_generation` → a `u32` producer feeding `consume_tokens`; MLX
-  implements `LocalEngine`; tests + agentic matrix + decode throughput unchanged) →
-  **A3 [ ]** GGUF adopts it + lift render/EOS/harmony/model-source. Token-level seam,
+  `is_runaway_loop`/`next_tool_call_id`, unit-tested hardware-free → **A2b [x]** rewire
+  the MLX leaf: `stream_generation` now only PRODUCES token ids (`PipelinedIds`, keeps
+  the `async_eval` pipelining; lazy serial fetch so hybrid prefix-reuse stays in sync)
+  and delegates to `consume_tokens` (the ~200-line copy deleted). Validated: 314 lib
+  tests; gpt-oss chat+tool+~90 tok/s; Qwen3.6-27B hybrid multi-turn prefix-reuse. (A
+  formal `impl LocalEngine` wrapping load/meta/generate is the remaining tidy-up.) →
+  **A3 [ ]** GGUF adopts `consume_tokens` + lift render/EOS/harmony/model-source.
+  Token-level seam,
   NOT a per-op tensor abstraction (avoids the `mistralrs-mlx-direct` perf dead-end).
   Spec: `docs/specs/native-engine-spi.md`.
 
