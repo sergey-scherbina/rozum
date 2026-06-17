@@ -99,9 +99,19 @@ via `store::read_since`). The only unverified piece is the ratatui *rendering* o
 `rozum meetings attach` (needs interactive run); its logic is unit-tested.
 `src/gateway.rs` untouched; fully additive. POLISH (2nd pass): per-room
 panic isolation — every daemon tool handler runs under `guard(...)`
-(`catch_unwind`), so a panic returns a tool error and keeps the connection +
-daemon alive (test `guard_isolates_panics`). Remaining polish: bare-`rozum`
-cutover, full picker UX, second poll-connection in the TUI, + the deferred REST read.**
+(`catch_unwind`), test `guard_isolates_panics`. POLISH (3rd pass) — all three
+remaining items DONE: (a) **bare-`rozum` cutover** — `rozum` now attaches a TUI
+to the daemon by default; `--legacy-room` (or `--web-port`) keeps the legacy
+in-process room (bridges + sampling) as the escape hatch (additive, nothing
+removed); (b) **room picker** — `Ctrl-O`/`/rooms` lists rooms (name/topic/
+participants/last-day from enriched `rooms.list`), ↑↓+Enter switch, `/new`/`[+ new
+room]` creates an ad-hoc room (`rooms.new`); (c) **second poll connection** —
+`MeetingClient::spawn_poll` long-polls on its own connection + streams via mpsc,
+so keypresses never cancel an in-flight `wait_my_turn` (tests
+`poll_stream_delivers_new_messages`, `rooms_new_creates_ad_hoc_and_list_enriches`).
+57 meeting tests green. ONLY the ratatui *rendering* of `rozum`/`rozum meetings
+attach` needs interactive verification. Remaining: the deferred REST read; and
+model-as-participant via gateway HTTP (today only the legacy room does sampling).**
 Build sequence (each phase compiles + has its own tests; do them in order — P0→P2
 are pure library and land behind today's behavior, P3 brings the daemon up, P4/P5
 are clients and can go in parallel, P6 is the service):
