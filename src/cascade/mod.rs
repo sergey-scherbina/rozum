@@ -17,6 +17,7 @@ mod scheduler;
 mod self_signal;
 mod spec;
 mod stats;
+mod tasks;
 
 pub use acceptance::{AcceptanceCheck, StructuralCheck, TurnOutcome, Verdict};
 pub use classifier::{Classifier, HeuristicClassifier, RoutingStrategy};
@@ -31,6 +32,7 @@ pub use spec::{
 pub use stats::{
     AttemptRecord, DiffBucket, ModelTaskStat, ResourceSnapshot, StatsStore, TaskClass, TaskShape,
 };
+pub use tasks::{commit_message_request, small_task_config, CommitMessageGate, SmallTask};
 
 use std::collections::HashMap;
 use std::path::PathBuf;

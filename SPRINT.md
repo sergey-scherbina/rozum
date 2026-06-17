@@ -1694,22 +1694,27 @@ soon as any single track succeeds.
     (classifier P1, cascade wiring P2, RAG worker P2). Composes with
     [[small-model-cascade]] (the after-the-fact escalation counterpart).
 
-- [ ] small-model-cascade - **Single-shot bounded tasks served small-first, escalate on doubt.**
-  - The narrow, non-agentic tasks a 4B/Coder-7B can actually do: commit messages,
-    PR descriptions, code explanations, renames, docstrings, simple one-line fixes.
-    Run them in a **cascade**: the small model answers first; a cheap gate —
-    self-reported confidence, a validator, or a fast sanity check (e.g. `cargo
-    check` for a one-line fix, regex/lint for a rename) — decides ACCEPT or
-    ESCALATE to the big model. Most requests resolve on the cheap tier; only the
-    hard residue pays for the big model. (Generalizes [[small-model-router-rag]]:
-    routing decides up-front, the cascade decides after a cheap attempt.)
-  - Where: a cascade wrapper around the gateway chat path — small backend →
-    gate → (optional) big backend; the gate is per-task-type pluggable.
-  - Caveat: only worth it where a cheap, reliable accept/reject signal exists; for
-    open-ended generation with no validator, lead with the big model instead.
-  - Acceptance: a cascade entrypoint covering ≥1 task type (e.g. commit-message or
-    one-line-fix) with a measured small-tier hit-rate and end-to-end cost/latency
-    vs big-only. Effort: MEDIUM. Spec first.
+- [x] small-model-cascade - **Single-shot bounded tasks served small-first, escalate on
+  doubt. DONE 2026-06-18** (`src/cascade/tasks.rs`, branch `feature/small-model-cascade`).
+  Spec: `docs/specs/small-model-cascade.md`. A **thin preset over the cascade core** (one
+  `AcceptanceCheck` gate + a two-tier config builder + a prompt helper — no new engine):
+  - `SmallTask::CommitMessage` + `small_task_config(task, small, big)` → a two-tier
+    `CascadeConfig` (`small`=tier 0, `big`=tier 1, `AlwaysCheapest`, acceptance =
+    `[StructuralCheck, <task gate>]`, self-signal + affordance off — the task has a concrete
+    validator, not a self-report). Health/backoff/budget/stats/lanes inherited from cascade.
+  - `CommitMessageGate` (free, deterministic): extract the subject (first non-empty line,
+    fence/quote/heading stripped) → `ESCALATE` on empty / over-72-char / refusal / chatter
+    preamble / `<placeholder>`, else `ACCEPT`; never `Inconclusive`. False-positive-safe
+    ("Fix commit message parser crash" accepts). `commit_message_request(diff)` builds the
+    tight gate-shaped prompt.
+  - **10 fast tests, all green** (no model): gate accept/escalate cases + e2e over a real
+    `CascadeBackend` with mock backends — good cheap answer accepts at tier 0 (**big never
+    called**), junk escalates once, and a **small-tier hit-rate** batch (small passes 3/4 →
+    big called exactly once). 383 fast tests green. Generalizes [[small-model-router-rag]]
+    (routing decides up-front; the cascade decides after a cheap attempt).
+  - **Follow-ups (deferred):** process-gated task types (`OneLineFix` via `cargo check`,
+    `Rename` via build/lint — gate trait supports it, not hermetically testable); CLI/gateway
+    wiring (`rozum commit-msg` from `git diff --cached`).
 
 ### Model bringup track (catalog) — new architectures to get working
 
