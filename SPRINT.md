@@ -1622,9 +1622,16 @@ soon as any single track succeeds.
     engine-agnostic orchestrator (`Draft`/`Target` traits + `decode()`,
     accept-longest-greedy-prefix) with the **byte-identical invariant proven with
     a mock target** (oracle/all-wrong/flaky drafts all yield the exact target
-    greedy seq; oracle ~len/(k+1) forwards vs all-wrong's len). **P1 NEXT:** the
-    MLX **dense** `SpeculativeVerify` impl (batch-verify + KV-truncate-to-accepted
-    in `mlx_native_backend`), draft+target as two residents, `--draft-model` wiring.
+    greedy seq; oracle ~len/(k+1) forwards vs all-wrong's len). **P1 (in progress,
+    branch `feature/spec-decode-p1`):** the MLX **dense** `SpeculativeVerify` impl
+    (batch-verify + KV-truncate-to-accepted in `mlx_native_backend` — builds on the
+    existing `PREFIX_REUSE` truncate + suffix-prefill + `argmax_u32`), draft+target
+    as two residents, `rozum gateway --draft-model <spec>` wiring.
+  - **GATE = the agentic matrix** (`scripts/bench/agentic.sh`, run on the M4):
+    `rozum gateway --model T --draft-model D` → pass/fail matrix **identical** to
+    baseline (byte-identical, guaranteed by P0) + per-run tok/s up. Build loop: I
+    write an iteration → matrix off-vs-on on the hardware → iterate. (See spec
+    "Verification gate".) Not headless — runs where the real models live.
 
 - [ ] small-model-router-rag - **Small model as router / classifier / RAG worker.**
   - Use a 4B/Coder-7B for the narrow, single-shot, latency-sensitive steps that

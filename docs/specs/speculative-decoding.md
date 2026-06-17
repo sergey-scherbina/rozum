@@ -112,8 +112,33 @@ draft.propose(ctx, k)             -> [TokenId; k]   // greedy
   recurrent-state rollback on rejected drafts is unsolved; a hybrid target
   degrades to plain greedy (still correct) rather than blocking the feature.
 
+## Verification gate (the e2e agentic matrix)
+
+The objective acceptance gate is the existing **agentic matrix**
+(`scripts/bench/agentic.sh`): it launches `rozum gateway --model <spec>` and runs
+real `claude`/`codex`/`opencode` over the task set, recording per-task pass/fail
+and a per-run CSV (tok/s, footprint). Spec-decode plugs in at the gateway:
+`rozum gateway --model <target> --draft-model <draft>`. Acceptance:
+
+1. **Correctness (no regression):** the matrix **pass/fail matrix with
+   `--draft-model` must be identical** to the baseline run without it. Output is
+   byte-identical greedy by construction (the P0 orchestrator only emits the
+   target's greedy tokens; the unit test proves it), so the matrix is the e2e
+   proof on real agentic workloads, not just the mock.
+2. **Speedup:** the per-run CSV decode tok/s (or wall-time) improves with
+   `--draft-model` on, on a dense target (e.g. Qwen3-30B-A3B + a Qwen3-4B draft).
+
+This runs on the target Apple-Silicon box (the M4) with the real models — it is
+not a headless check. The build loop: implement an iteration → run the matrix
+off-vs-on → confirm identical pass-matrix + tok/s gain → iterate.
+
+Tractability note: the MLX `verify` capability builds on primitives the dense
+decode loop already has (`src/mlx_native_backend.rs`): KV truncate-to-prefix
+(`PREFIX_REUSE`), suffix prefill, and `argmax_u32` — so verify = "prefill the k
+draft tokens, take argmax at each position, accept the longest greedy-matching
+prefix, truncate KV to accepted+1" rather than new cache machinery.
+
 ## Results
 
-<!-- Fill in after implementation: orchestrator invariant tests (byte-identical
-     for all-wrong / all-right / mixed draft); MLX dense target + small draft
-     tok/s speedup on a real model; no output change. -->
+<!-- Fill in after the matrix runs: baseline-vs-spec-decode pass matrix
+     (must match) + per-run tok/s delta on a dense target. -->
