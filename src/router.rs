@@ -28,6 +28,17 @@ impl Label {
     }
 }
 
+/// The standard difficulty-ordered label set (cheapest → hardest) for using a
+/// [`ModelRouter`] as the cascade's [`ModelRouter::difficulty`] source — `trivial`
+/// → `0.0`, `moderate` → `0.5`, `hard` → `1.0`.
+pub fn difficulty_labels() -> Vec<Label> {
+    vec![
+        Label::new("trivial", "a greeting, a one-word answer, or a simple lookup"),
+        Label::new("moderate", "a normal question needing a short focused answer"),
+        Label::new("hard", "long multi-step reasoning, math proofs, or substantial code"),
+    ]
+}
+
 /// The outcome of a classification: the chosen label, a coarse confidence, and
 /// whether the router fell back (the model's reply didn't name a label, or the call
 /// failed). `confidence` is coarse in v1 (no logprobs): `1.0` exact, `0.6` snapped
@@ -82,6 +93,22 @@ impl ModelRouter {
                 fallback_used: true,
             },
         }
+    }
+
+    /// A difficulty score in `0.0..=1.0` for `query`, for use as the cascade's
+    /// (async, model-backed) `Classifier` signal. The label set is treated as
+    /// ordered **cheapest → hardest**, and the chosen label's position maps to
+    /// `index / (n-1)` — so construct the router with difficulty-ordered labels
+    /// (e.g. `["trivial","moderate","hard"]`) to use this. A single label, or a
+    /// fallback (the model didn't name a label / the call failed), → `0.0` (the
+    /// conservative cheap-first default; the cascade still escalates from there).
+    pub async fn difficulty(&self, query: &str) -> f32 {
+        if self.labels.len() <= 1 {
+            return 0.0;
+        }
+        let c = self.classify(query).await;
+        let idx = self.labels.iter().position(|l| l.name == c.label).unwrap_or(0);
+        idx as f32 / (self.labels.len() - 1) as f32
     }
 
     /// The classification prompt: enumerate labels + hints, ask for ONLY the name.

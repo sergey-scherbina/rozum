@@ -101,6 +101,12 @@ pub struct CascadeSpec {
     /// The start-tier strategy.
     #[serde(default)]
     pub strategy: StrategyName,
+    /// Optional **small-model router** model spec: when set (and the strategy uses difficulty),
+    /// this model classifies each query's difficulty to pick the cascade's entry tier — a cheap
+    /// 4B pre-filter. Resolved via the same resolver as the tiers; if it can't be built it's
+    /// skipped (the cascade falls back to the heuristic). See `docs/specs/small-model-router.md`.
+    #[serde(default)]
+    pub router_model: Option<String>,
 }
 
 impl TierSpec {
@@ -155,6 +161,28 @@ where
         cfg.budget.max_escalations = m;
     }
     cfg.strategy = spec.strategy.into();
+    // Optional small-model router for entry-tier difficulty. Resolved through the same closure
+    // (as a Local tier); if it can't be built, the cascade falls back to the heuristic.
+    if let Some(model) = &spec.router_model {
+        let tier = TierSpec {
+            model: model.clone(),
+            location: Location::Local,
+            pool: None,
+            api: RemoteApi::default(),
+            api_key_env: None,
+            endpoint: None,
+        };
+        match resolve(tier).await {
+            Some(backend) => match crate::router::ModelRouter::new(
+                backend,
+                crate::router::difficulty_labels(),
+            ) {
+                Ok(r) => cfg.router = Some(Arc::new(r)),
+                Err(e) => tracing::warn!(error = %e, "cascade: router build failed; using heuristic"),
+            },
+            None => tracing::warn!(model = %model, "cascade: router model unavailable; using heuristic"),
+        }
+    }
     Ok(CascadeBackend::new(cfg))
 }
 
@@ -275,6 +303,7 @@ pub fn from_model_list<S: AsRef<str>>(names: &[S]) -> CascadeSpec {
         tiers: ranked.into_iter().map(|(_, t)| t).collect(),
         max_escalations: None,
         strategy: StrategyName::Classify,
+        router_model: None,
     }
 }
 
@@ -413,6 +442,7 @@ mod tests {
             tiers: vec![tier("cheap", Location::Local), tier("strong", Location::Remote)],
             max_escalations: None,
             strategy: StrategyName::Cheapest,
+            router_model: None,
         };
         let be = build_cascade(&spec, |t| async move {
             Some(Arc::new(Echo(if t.model == "cheap" { "C" } else { "S" })) as Arc<dyn ChatBackend>)
@@ -435,6 +465,7 @@ mod tests {
             tiers: vec![tier("missing-remote", Location::Remote), tier("local", Location::Local)],
             max_escalations: None,
             strategy: StrategyName::Cheapest,
+            router_model: None,
         };
         let be = build_cascade(&spec, |t| async move {
             if t.model == "missing-remote" {
@@ -459,6 +490,7 @@ mod tests {
             tiers: vec![tier("a", Location::Remote), tier("b", Location::Remote)],
             max_escalations: None,
             strategy: StrategyName::Cheapest,
+            router_model: None,
         };
         let r = build_cascade(&spec, |_t| async move { None }).await;
         assert!(r.is_err(), "an all-unavailable cascade is an error, not an empty backend");
@@ -471,7 +503,12 @@ mod tests {
         let mut t = tier("claude-haiku-4-5", Location::Remote);
         t.api = RemoteApi::Anthropic;
         let spec =
-            CascadeSpec { tiers: vec![t], max_escalations: None, strategy: StrategyName::default() };
+            CascadeSpec {
+                tiers: vec![t],
+                max_escalations: None,
+                strategy: StrategyName::default(),
+                router_model: None,
+            };
         let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
         let seen2 = std::sync::Arc::clone(&seen);
         let be = build_cascade(&spec, move |t: TierSpec| {
@@ -491,12 +528,56 @@ mod tests {
         let mut t = tier("local", Location::Local);
         t.pool = Some("gpu0".into());
         let spec =
-            CascadeSpec { tiers: vec![t], max_escalations: None, strategy: StrategyName::default() };
+            CascadeSpec {
+                tiers: vec![t],
+                max_escalations: None,
+                strategy: StrategyName::default(),
+                router_model: None,
+            };
         // One tier → passthrough still builds fine; the lane override is carried into the card.
         let be = build_cascade(&spec, |_t| async move {
             Some(Arc::new(Echo("x")) as Arc<dyn ChatBackend>)
         })
         .await;
         assert!(be.is_ok());
+    }
+
+    #[tokio::test]
+    async fn router_model_is_resolved_and_threaded() {
+        // `router_model` is resolved through the same closure as the tiers — proving it reaches
+        // the cascade as the entry-tier difficulty source (config surface for the CLI/TOML).
+        let spec = CascadeSpec {
+            tiers: vec![tier("local", Location::Local)],
+            max_escalations: None,
+            strategy: StrategyName::Classify,
+            router_model: Some("router-4b".into()),
+        };
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen2 = std::sync::Arc::clone(&seen);
+        let be = build_cascade(&spec, move |t: TierSpec| {
+            let seen2 = std::sync::Arc::clone(&seen2);
+            async move {
+                seen2.lock().unwrap().push(t.model.clone());
+                Some(Arc::new(Echo("x")) as Arc<dyn ChatBackend>)
+            }
+        })
+        .await;
+        assert!(be.is_ok());
+        let models = seen.lock().unwrap();
+        assert!(models.contains(&"local".to_string()), "the tier was resolved");
+        assert!(
+            models.contains(&"router-4b".to_string()),
+            "the router model was resolved + threaded into the cascade"
+        );
+    }
+
+    #[test]
+    fn router_model_round_trips_in_json() {
+        let json = r#"{"tiers":[{"model":"a"}],"strategy":"classify","router_model":"router-4b"}"#;
+        let spec: CascadeSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.router_model.as_deref(), Some("router-4b"));
+        // Absent → None (the default), so existing configs are unaffected.
+        let bare: CascadeSpec = serde_json::from_str(r#"{"tiers":[{"model":"a"}]}"#).unwrap();
+        assert_eq!(bare.router_model, None);
     }
 }

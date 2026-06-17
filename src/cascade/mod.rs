@@ -94,6 +94,12 @@ pub struct CascadeConfig {
     pub strategy: RoutingStrategy,
     /// The difficulty classifier for `ClassifyThenStart` (`None` → the built-in heuristic).
     pub classifier: Option<Box<dyn Classifier>>,
+    /// An optional **small-model router** as the (async, model-backed) difficulty source for
+    /// `ClassifyThenStart`/`Learned`: a 4B classifies the query into a difficulty-ordered label
+    /// set, overriding the sync heuristic. `None` (default) → the sync `classifier`/heuristic.
+    /// Skipped under `AlwaysCheapest` (difficulty is ignored there, so no model call is made).
+    /// See `docs/specs/small-model-router.md`.
+    pub router: Option<Arc<crate::router::ModelRouter>>,
     /// Per-pool concurrent residency slots (Phase 6). Unlisted pools default to `1`
     /// (single-resident); raise a pool's count for co-resident models (multi-resident).
     pub residency_slots: HashMap<String, usize>,
@@ -125,6 +131,7 @@ impl CascadeConfig {
             judge: None,
             strategy: RoutingStrategy::AlwaysCheapest,
             classifier: None,
+            router: None,
             residency_slots: HashMap::new(),
             stats: None,
             learned_accept_threshold: 0.6,
@@ -345,7 +352,15 @@ impl ChatBackend for CascadeBackend {
         let last_idx = models.len() - 1;
 
         // Score difficulty once: it drives both the entry tier and the stats task-class.
-        let difficulty = self.difficulty(&req);
+        // A configured small-model router is the difficulty source for the difficulty-using
+        // strategies (one cheap 4B classification picks the entry tier); `AlwaysCheapest`
+        // ignores difficulty, so skip the model call there and use the free heuristic.
+        let difficulty = match &self.config.router {
+            Some(r) if !matches!(self.config.strategy, RoutingStrategy::AlwaysCheapest) => {
+                r.difficulty(&judge::first_user_text(&req)).await
+            }
+            _ => self.difficulty(&req),
+        };
         let task = TaskClass::of(&req, difficulty);
         // Choose the entry tier. `AlwaysCheapest` starts at 0; `ClassifyThenStart`/`Learned` start
         // higher for harder/known-hard classes. The candidate order is then start-and-up (the
@@ -754,6 +769,57 @@ mod tests {
         assert_eq!(out, "cheap saves the day", "degrades to the cheaper tier below the entry");
         assert_eq!(sc.load(Ordering::SeqCst), 1);
         assert_eq!(cc.load(Ordering::SeqCst), 1);
+    }
+
+    // ── small-model router as the cascade's difficulty source (small-model-router P2) ──
+
+    fn diff_labels() -> Vec<crate::router::Label> {
+        use crate::router::Label;
+        vec![
+            Label::new("trivial", "a greeting or a one-word answer"),
+            Label::new("moderate", "a normal question"),
+            Label::new("hard", "long multi-step reasoning or code"),
+        ]
+    }
+
+    fn router_over(reply: &'static str) -> Arc<crate::router::ModelRouter> {
+        let be: Arc<dyn ChatBackend> =
+            Arc::new(Mock { script: Script::Text(reply), calls: Arc::new(AtomicUsize::new(0)) });
+        Arc::new(crate::router::ModelRouter::new(be, diff_labels()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn router_routes_hard_prompt_to_top_tier() {
+        // The small-model router classifies "hard" → difficulty 1.0 → enter at the top tier;
+        // the cheap/mid tiers are never touched. Note the *prompt itself* is trivial-looking —
+        // the entry tier comes from the router's verdict, not the heuristic.
+        let (c, cc) = card("cheap", 0, Script::Text("CHEAP"));
+        let (m, mc) = card("mid", 1, Script::Text("MID"));
+        let (s, sc) = card("strong", 2, Script::Text("STRONG"));
+        let mut cfg = classify_cfg(vec![c, m, s]);
+        cfg.router = Some(router_over("hard"));
+        let be = CascadeBackend::new(cfg);
+        let out = collect(be.chat(ChatRequest::simple("hi")).await.unwrap()).await;
+        assert_eq!(out, "STRONG");
+        assert_eq!(cc.load(Ordering::SeqCst), 0, "router said hard → cheap tier skipped");
+        assert_eq!(mc.load(Ordering::SeqCst), 0, "mid tier skipped");
+        assert_eq!(sc.load(Ordering::SeqCst), 1, "entered at the strong tier");
+    }
+
+    #[tokio::test]
+    async fn router_routes_trivial_prompt_to_cheapest() {
+        // The router classifies "trivial" → difficulty 0.0 → start at the cheapest tier even
+        // for a prompt the heuristic would score as hard (code fences + multi-step markers).
+        let (c, cc) = card("cheap", 0, Script::Text("CHEAP"));
+        let (s, sc) = card("strong", 1, Script::Text("STRONG"));
+        let mut cfg = classify_cfg(vec![c, s]);
+        cfg.router = Some(router_over("trivial"));
+        let be = CascadeBackend::new(cfg);
+        let hard = "```\nfn solve() {}\n```\nprove the theorem step by step and analyze";
+        let out = collect(be.chat(ChatRequest::simple(hard)).await.unwrap()).await;
+        assert_eq!(out, "CHEAP", "router overrode the heuristic → started cheap");
+        assert_eq!(cc.load(Ordering::SeqCst), 1);
+        assert_eq!(sc.load(Ordering::SeqCst), 0, "strong tier untouched");
     }
 
     #[tokio::test]

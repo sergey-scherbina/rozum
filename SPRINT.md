@@ -1668,10 +1668,18 @@ soon as any single track succeeds.
     100%** on Qwen3-4B (code/math/chitchat), all exact matches — well above the
     0.80 gate-the-big-model bar. Plain prompt+snap sufficed (no constrained decode
     needed). Spec: `docs/specs/small-model-router.md`.
-  - **P2 (remaining):** RAG rerank/summarize worker over `rag_lite::Hit`s (same
-    `ModelRouter` shape) + wire `classify` into the cascade entry / gateway
-    pre-filter (async-classify → `difficulty_of(label)` → entry tier; sync
-    `Classifier` trait unchanged). Composes with [[small-model-cascade]].
+  - **P2 cascade wiring DONE** (`src/cascade/{mod,spec}.rs`): `ModelRouter` is the
+    cascade's optional async model-backed difficulty source.
+    `ModelRouter::difficulty` (over `router::difficulty_labels()` trivial/moderate/
+    hard) → `CascadeConfig.router` drives the entry tier for `ClassifyThenStart`/
+    `Learned` (skipped under `AlwaysCheapest`; sync `Classifier` trait untouched).
+    Reachable from config: `CascadeSpec.router_model` resolved in `build_cascade`
+    (→ `model:"cascade:<name>"` + `router_model` in `rozum.toml`/`ROZUM_CASCADE`).
+    4 new tests (router routes hard→top / trivial→cheapest; router_model resolved+
+    threaded; JSON round-trip). 366 fast tests green.
+  - **P2 remaining:** RAG rerank/summarize worker over `rag_lite::Hit`s (same
+    `ModelRouter` shape — relevance-label, reorder/drop, summarize survivors).
+    Composes with [[small-model-cascade]].
 
 - [ ] small-model-cascade - **Single-shot bounded tasks served small-first, escalate on doubt.**
   - The narrow, non-agentic tasks a 4B/Coder-7B can actually do: commit messages,

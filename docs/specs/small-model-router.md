@@ -127,7 +127,25 @@ model emitted exactly the label name each time, so constrained decode wasn't nee
 for this label set (kept as a P2 option for noisier/larger sets). Well above the
 0.80 gate-the-big-model bar.
 
-**Next (P2):** the RAG rerank/summarize worker (same `ModelRouter` shape over
-`rag_lite::Hit`s) and wiring `classify` into the cascade entry / gateway pre-filter
-(async-classify → `difficulty_of(label)` → entry tier; no change to the sync
-`Classifier` trait).
+**P2 — cascade wiring DONE** (`src/cascade/{mod,spec}.rs`). The router is now the
+cascade's optional **async, model-backed difficulty source**:
+- `ModelRouter::difficulty(query) -> f32` maps a difficulty-ordered label set
+  (`router::difficulty_labels()` = trivial/moderate/hard → 0.0/0.5/1.0) to the
+  heuristic-comparable score the cascade's `ClassifyThenStart`/`Learned` already
+  consume.
+- `CascadeConfig.router: Option<Arc<ModelRouter>>`; `chat()` uses it for the entry
+  tier when the strategy uses difficulty (skipped under `AlwaysCheapest`, so no
+  model call is wasted). The sync `Classifier` trait is unchanged — the async call
+  lives at the one entry point. Tests: `router_routes_hard_prompt_to_top_tier`,
+  `router_routes_trivial_prompt_to_cheapest` (the router's verdict overrides the
+  heuristic, both directions).
+- **Reachable from config:** `CascadeSpec.router_model: Option<String>` (serde
+  `default`), resolved through the same resolver as the tiers in `build_cascade`
+  (skipped → heuristic fallback if it can't be built). So `model:"cascade:<name>"`
+  with a `router_model` in `rozum.toml` / `ROZUM_CASCADE` env uses a 4B to pick the
+  entry tier. Tests: `router_model_is_resolved_and_threaded`,
+  `router_model_round_trips_in_json`.
+
+**Next (P2 remaining):** the RAG rerank/summarize worker (same `ModelRouter` shape
+over `rag_lite::Hit`s) — relevance-label each hit, reorder/drop, optionally
+summarize the survivors with the small model.
