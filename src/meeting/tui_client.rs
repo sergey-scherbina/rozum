@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use super::room_client::{RoomConnection, tool_result_text_json};
 use super::store::{RoomPaths, StoredTurn, day_dates, read_day, read_since};
@@ -27,14 +29,26 @@ pub struct RoomInfo {
     pub name: String,
     pub project: Option<String>,
     pub root: PathBuf,
+    pub topic: String,
+    pub participants: u64,
+    pub last_date: Option<String>,
+}
+
+/// How a room was entered — the poll connection rejoins it the same way.
+#[derive(Clone, Debug)]
+enum JoinSpec {
+    Project(String),
+    Named(String),
 }
 
 pub struct MeetingClient {
     conn: RoomConnection,
+    sock: PathBuf,
     display_name: String,
     session_token: String,
     room_name: Option<String>,
     room_root: Option<PathBuf>,
+    join_spec: Option<JoinSpec>,
     /// `(date, n)` high-water the human has seen — the `wait` cursor.
     cursor: Option<(String, u64)>,
     /// Transcript loaded for rendering (current day, plus any scrolled-in days).
@@ -49,10 +63,12 @@ impl MeetingClient {
         let conn = RoomConnection::connect(sock, display_name, T).await?;
         Ok(Self {
             conn,
+            sock: sock.to_path_buf(),
             display_name: display_name.to_owned(),
             session_token: uuid::Uuid::new_v4().simple().to_string(),
             room_name: None,
             room_root: None,
+            join_spec: None,
             cursor: None,
             transcript: vec![],
             oldest_loaded_date: None,
@@ -89,6 +105,19 @@ impl MeetingClient {
                     name: name.to_owned(),
                     project,
                     root,
+                    topic: room
+                        .get("topic")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned(),
+                    participants: room
+                        .get("participants")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    last_date: room
+                        .get("last_date")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
                 });
             }
         }
@@ -118,6 +147,7 @@ impl MeetingClient {
             .to_owned();
         self.room_name = Some(room.clone());
         self.room_root = Some(RoomPaths::for_project(Path::new(project)).root);
+        self.join_spec = Some(JoinSpec::Project(project.to_owned()));
         self.reload_current_day();
         Ok(room)
     }
@@ -138,8 +168,56 @@ impl MeetingClient {
             .await?;
         self.room_name = Some(info.name.clone());
         self.room_root = Some(info.root.clone());
+        self.join_spec = Some(JoinSpec::Named(info.name.clone()));
         self.reload_current_day();
         Ok(())
+    }
+
+    /// Create + enter a new ad-hoc room (the picker's "new room").
+    pub async fn new_room(&mut self, topic: Option<&str>) -> ClientResult<String> {
+        let mut args = json!({
+            "client_info_name": self.display_name,
+            "session_token": self.session_token,
+        });
+        if let Some(t) = topic {
+            args["topic"] = json!(t);
+        }
+        let r = self.conn.call_tool("rooms.new", args, T).await?;
+        let v = tool_result_text_json(&r).ok_or("bad rooms.new")?;
+        let name = v
+            .get("room")
+            .and_then(Value::as_str)
+            .ok_or("no room in result")?
+            .to_owned();
+        let root = v
+            .get("root")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or("no root in result")?;
+        self.room_name = Some(name.clone());
+        self.room_root = Some(root);
+        self.join_spec = Some(JoinSpec::Named(name.clone()));
+        self.reload_current_day();
+        Ok(name)
+    }
+
+    /// Spawn a dedicated background connection that long-polls the current room
+    /// and streams new messages — so the UI loop never has to cancel an
+    /// in-flight `wait_my_turn` (which would leak a daemon long-poll). Returns the
+    /// receiver of new-message batches + the task handle (abort it on switch/quit).
+    pub fn spawn_poll(&self) -> (mpsc::Receiver<Vec<StoredTurn>>, JoinHandle<()>) {
+        let (tx, rx) = mpsc::channel::<Vec<StoredTurn>>(64);
+        let (Some(spec), Some(root)) = (self.join_spec.clone(), self.room_root.clone()) else {
+            // No room yet → an immediately-finished task (the caller will respawn
+            // after entering a room).
+            return (rx, tokio::spawn(async {}));
+        };
+        let sock = self.sock.clone();
+        let token = self.session_token.clone();
+        let name = self.display_name.clone();
+        let cursor = self.cursor.clone();
+        let handle = tokio::spawn(poll_loop(sock, spec, token, name, root, cursor, tx));
+        (rx, handle)
     }
 
     /// Post a message as the human.
@@ -193,22 +271,20 @@ impl MeetingClient {
         Ok(new)
     }
 
-    /// Scroll back: prepend the previous day's messages. Returns how many were
-    /// loaded (0 if already at the earliest day).
-    pub fn load_prev_day(&mut self) -> usize {
+    /// Fetch the day before the earliest loaded day (advancing the scrollback
+    /// marker). Returns its messages for the caller to prepend; empty at the
+    /// earliest day.
+    pub fn prev_day_turns(&mut self) -> Vec<StoredTurn> {
         let (Some(root), Some(oldest)) = (self.room_root.clone(), self.oldest_loaded_date.clone())
         else {
-            return 0;
+            return vec![];
         };
         match prev_day(&root, &oldest) {
-            Some((prev, mut turns)) => {
-                let n = turns.len();
-                turns.extend(self.transcript.drain(..));
-                self.transcript = turns;
+            Some((prev, turns)) => {
                 self.oldest_loaded_date = Some(prev);
-                n
+                turns
             }
-            None => 0,
+            None => vec![],
         }
     }
 
@@ -224,6 +300,85 @@ impl MeetingClient {
             self.cursor = Some((last.clone(), turns.len() as u64));
             self.oldest_loaded_date = Some(last.clone());
             self.transcript = turns;
+        }
+    }
+}
+
+/// Dedicated poll loop on its own connection (the TUI's second connection):
+/// rejoin the room with the shared `token`, then long-poll forever, reading each
+/// delta from disk and pushing it down `tx`. Exits when the room ends, the socket
+/// dies, or the receiver is dropped.
+async fn poll_loop(
+    sock: PathBuf,
+    spec: JoinSpec,
+    token: String,
+    name: String,
+    root: PathBuf,
+    mut cursor: Option<(String, u64)>,
+    tx: mpsc::Sender<Vec<StoredTurn>>,
+) {
+    let Ok(mut conn) = RoomConnection::connect(&sock, &name, T).await else {
+        return;
+    };
+    // Rejoin with the same session_token → the same participant identity.
+    let join = match &spec {
+        JoinSpec::Project(p) => {
+            conn.call_tool(
+                "_join_internal",
+                json!({ "client_info_name": name, "project": p, "session_token": token, "kind": "human" }),
+                T,
+            )
+            .await
+        }
+        JoinSpec::Named(n) => {
+            conn.call_tool(
+                "rooms.join",
+                json!({ "name": n, "client_info_name": name, "session_token": token, "kind": "human" }),
+                T,
+            )
+            .await
+        }
+    };
+    if join.is_err() {
+        return;
+    }
+
+    loop {
+        let prev = cursor.clone();
+        let since = match &prev {
+            Some((d, n)) => json!({ "since_date": d, "since_n": n }),
+            None => json!({}),
+        };
+        let Ok(r) = conn.call_tool("meeting.wait_my_turn", since, WAIT_T).await else {
+            return; // socket died → end the stream (UI can respawn)
+        };
+        let Some(v) = tool_result_text_json(&r) else {
+            continue;
+        };
+        if v.get("ended").and_then(Value::as_bool) == Some(true) {
+            return;
+        }
+        let still_waiting = v
+            .get("still_waiting")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if let Some(hw) = v.get("high_water") {
+            if let (Some(d), Some(n)) = (
+                hw.get("date").and_then(Value::as_str),
+                hw.get("n").and_then(Value::as_u64),
+            ) {
+                cursor = Some((d.to_owned(), n));
+            }
+        }
+        if !still_waiting {
+            let (sd, sn) = match &prev {
+                Some((d, n)) => (Some(d.as_str()), *n),
+                None => (None, 0),
+            };
+            let turns = read_since(&root, sd, sn);
+            if !turns.is_empty() && tx.send(turns).await.is_err() {
+                return; // UI gone
+            }
         }
     }
 }
@@ -295,6 +450,39 @@ mod tests {
         // The room is now discoverable in the picker.
         let rooms = client.list_rooms().await.unwrap();
         assert!(rooms.iter().any(|r| r.name == room));
+    }
+
+    #[tokio::test]
+    async fn poll_stream_delivers_new_messages() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("meeting.sock");
+        let registry = Arc::new(RoomRegistry::new(dir.path().join("state")));
+        {
+            let sock = sock.clone();
+            tokio::spawn(async move {
+                let _ = serve_daemon(&sock, registry).await;
+            });
+        }
+        wait_for_socket(&sock).await;
+
+        let project = tempdir().unwrap();
+        let mut client = MeetingClient::connect(&sock, "alice").await.unwrap();
+        client
+            .enter_project(&project.path().to_string_lossy())
+            .await
+            .unwrap();
+
+        // The poll loop runs on its own connection (same session_token → same
+        // identity), so submitting on the action connection is picked up.
+        let (mut rx, handle) = client.spawn_poll();
+        client.submit("hi from poll test").await.unwrap();
+
+        let got = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("poll stream delivered within 3s")
+            .expect("a batch");
+        assert!(got.iter().any(|t| t.content == "hi from poll test"));
+        handle.abort();
     }
 
     #[test]

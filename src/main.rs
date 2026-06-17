@@ -36,6 +36,12 @@ struct Cli {
     /// roughly 4× this number). No warning if not set.
     #[arg(long)]
     per_turn_budget: Option<usize>,
+
+    /// Use the legacy in-process single-room runtime (with web/telegram/discord
+    /// bridges + model-as-participant sampling) instead of attaching a TUI to
+    /// the meeting daemon. `--web-port` implies this.
+    #[arg(long)]
+    legacy_room: bool,
 }
 
 #[derive(Subcommand)]
@@ -391,17 +397,25 @@ async fn main() {
 
     match cli.command {
         None => {
-            // Default: launch meeting room.
-            run_room(
-                cli.room,
-                &cli.topic,
-                cli.r#as,
-                cli.web_port,
-                !cli.no_persist,
-                cli.budget,
-                cli.per_turn_budget,
-            )
-            .await;
+            // Default: attach a TUI to the meeting daemon. The legacy in-process
+            // room (with web/telegram/discord bridges + model-as-participant
+            // sampling) is the escape hatch: `--legacy-room`, or implicitly when
+            // `--web-port` is set (the web bridge needs the in-process room).
+            if cli.legacy_room || cli.web_port.is_some() {
+                run_room(
+                    cli.room,
+                    &cli.topic,
+                    cli.r#as,
+                    cli.web_port,
+                    !cli.no_persist,
+                    cli.budget,
+                    cli.per_turn_budget,
+                )
+                .await;
+            } else if let Err(e) = rozum::meeting::attach::run_attach(cli.room).await {
+                eprintln!("rozum: {e}");
+                std::process::exit(1);
+            }
         }
         Some(Command::List) => {
             let rooms = rozum::meeting::list_rooms().await;
