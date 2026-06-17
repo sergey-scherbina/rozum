@@ -13,13 +13,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::{
-    ErrorData, ServerHandler,
+    ErrorData, Peer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, Content, Implementation, InitializeRequestParams, InitializeResult,
-        ServerCapabilities,
+        CallToolResult, Content, CustomNotification, Implementation, InitializeRequestParams,
+        InitializeResult, JsonObject, ServerCapabilities, ServerNotification,
     },
-    service::RequestContext,
+    service::{RequestContext, RoleServer},
     tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,22 @@ use super::store;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(35);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often the channel-wakeup task tails the room transcript on disk. Well within
+/// the 25 s `wait_my_turn` cycle the spec measures against, and cheap (a seek-from-cursor
+/// read of small day files). See `docs/specs/channel-wakeup.md`.
+const WAKEUP_POLL: Duration = Duration::from_millis(1500);
+
+/// The proxy's MCP `instructions`: the room loop plus how to read channel wakeup events.
+const PROXY_INSTRUCTIONS: &str =
+    "You are connected to a rozum meeting room (your project's room). \
+     Loop: meeting.wait_my_turn (25s long-poll, no args) → meeting.submit if you have \
+     something to add. Anyone may submit at any time. rooms.list / rooms.join switch rooms. \
+     While idle you may also receive room activity pushed as \
+     <channel source=\"rozum\" room=\"…\" from=\"…\" seq=\"…\"> events: treat each as a wakeup \
+     — if it concerns you, call meeting.wait_my_turn to fetch the authoritative delta and then \
+     meeting.submit. The channel body is a preview, not the turn API. If your client does NOT \
+     deliver <channel> events, keep a meeting.wait_my_turn poll outstanding the whole time you \
+     are idle so you never miss a turn.";
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct JoinParams {
@@ -57,6 +73,17 @@ struct State {
     /// Last `(date, n)` high-water the agent has seen; the `wait` cursor.
     cursor: Option<(String, u64)>,
     auto_spawn: bool,
+    /// The Claude Code session peer (set at `initialize`). The channel-wakeup task
+    /// pushes `notifications/claude/channel` events here. Spec: `docs/specs/channel-wakeup.md`.
+    upstream_peer: Option<Peer<RoleServer>>,
+    /// Our own `participant_id` in the joined room (from the join result) — the
+    /// channel task skips the agent's own transcript entries so it isn't echoed back.
+    self_pid: Option<String>,
+    /// The joined room's name, for the channel notification `meta`.
+    room_name: Option<String>,
+    /// The background channel-wakeup task (disk-tails the room, pushes deltas to the
+    /// session). One per proxy; started lazily at `initialize`, aborted on teardown.
+    wakeup_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -88,6 +115,10 @@ impl DaemonProxy {
                 room_root: None,
                 cursor: None,
                 auto_spawn,
+                upstream_peer: None,
+                self_pid: None,
+                room_name: None,
+                wakeup_task: None,
             })),
             tool_router: Self::tool_router(),
         }
@@ -117,36 +148,123 @@ impl DaemonProxy {
             .call_tool("_join_internal", args, CONNECT_TIMEOUT)
             .await
             .map_err(|e| format!("join: {e}"))?;
-        if let Some(root) = tool_result_text_json(&join)
-            .as_ref()
-            .and_then(|v| v.get("root"))
-            .and_then(Value::as_str)
-        {
-            s.room_root = Some(PathBuf::from(root));
+        if let Some(j) = tool_result_text_json(&join) {
+            if let Some(root) = j.get("root").and_then(Value::as_str) {
+                s.room_root = Some(PathBuf::from(root));
+            }
+            if let Some(pid) = j.get("participant_id").and_then(Value::as_str) {
+                s.self_pid = Some(pid.to_string());
+            }
+            if let Some(name) = j.get("room").and_then(Value::as_str) {
+                s.room_name = Some(name.to_string());
+            }
         }
         s.conn = Some(conn);
         Ok(())
     }
 
-    /// Forward a tool call to the daemon, reconnecting once on transport error.
-    async fn forward(&self, tool: &str, params: Value) -> CallToolResult {
+    /// Forward a tool call to the daemon, returning the daemon's raw result value.
+    /// On transport error the connection is dropped (next call reconnects).
+    async fn forward_raw(&self, tool: &str, params: Value) -> Result<Value, CallToolResult> {
         if let Err(e) = self.ensure().await {
-            return err_result(&e);
+            return Err(err_result(&e));
         }
         let mut s = self.state.lock().await;
         let res = {
             let Some(conn) = s.conn.as_mut() else {
-                return err_result("no daemon connection");
+                return Err(err_result("no daemon connection"));
             };
             conn.call_tool(tool, params, CALL_TIMEOUT).await
         };
         match res {
-            Ok(v) => value_to_call_result(&v),
+            Ok(v) => Ok(v),
             Err(e) => {
                 s.conn = None;
-                err_result(&format!("daemon-error: {e}"))
+                Err(err_result(&format!("daemon-error: {e}")))
             }
         }
+    }
+
+    /// Forward a tool call to the daemon, converting the result for the agent.
+    async fn forward(&self, tool: &str, params: Value) -> CallToolResult {
+        match self.forward_raw(tool, params).await {
+            Ok(v) => value_to_call_result(&v),
+            Err(e) => e,
+        }
+    }
+
+    /// Start the channel-wakeup task once. It disk-tails the joined room and pushes new
+    /// transcript deltas to the agent session as `notifications/claude/channel` events, so an
+    /// idle agent is woken without holding its own `wait_my_turn`. Reads the room from `State`
+    /// every tick, so it idles before a join and re-primes on a room switch; it never consumes
+    /// the agent's turn (a read-only disk tail), skips the agent's own entries, and primes the
+    /// baseline to the current head so a fresh join replays no backlog. Best-effort: a send
+    /// failure (no channel listener / dead peer) is dropped. Spec: `docs/specs/channel-wakeup.md`.
+    async fn ensure_wakeup_task(&self) {
+        let mut s = self.state.lock().await;
+        if s.wakeup_task.is_some() {
+            return;
+        }
+        let state = Arc::clone(&self.state);
+        s.wakeup_task = Some(tokio::spawn(async move {
+            // The room this loop is primed against, and the next `(date, n)` to deliver
+            // (one past the last delivered entry — `read_since` is inclusive of `n`).
+            let mut primed_root: Option<PathBuf> = None;
+            let mut since: Option<(String, u64)> = None;
+            loop {
+                tokio::time::sleep(WAKEUP_POLL).await;
+                let (root, peer, self_pid, room_name, agent) = {
+                    let s = state.lock().await;
+                    match (s.room_root.clone(), s.upstream_peer.clone()) {
+                        (Some(root), Some(peer)) => (
+                            root,
+                            peer,
+                            s.self_pid.clone(),
+                            s.room_name.clone().unwrap_or_default(),
+                            s.client_info_name.clone(),
+                        ),
+                        // Not joined yet, or no session peer: idle.
+                        _ => continue,
+                    }
+                };
+                // First arm, or a room switch: prime to the current head and skip the push,
+                // so a join/switch never replays the backlog as a notification storm.
+                if primed_root.as_deref() != Some(root.as_path()) {
+                    since = transcript_head(&root);
+                    primed_root = Some(root);
+                    continue;
+                }
+                let (sd, sn) = match &since {
+                    Some((d, n)) => (Some(d.as_str()), *n),
+                    None => (None, 0),
+                };
+                let turns = store::read_since(&root, sd, sn);
+                let Some(last) = turns.last() else { continue };
+                // Advance past everything read (own entries included), so we neither re-read
+                // nor re-push them on the next tick.
+                since = Some((last.date.clone(), last.n + 1));
+                if let Some((content, from, seq)) = render_stored_delta(&turns, self_pid.as_deref())
+                {
+                    // Tier-3 piggyback fallback: also drop the delta where the launch-local HTTP
+                    // proxy can inject it (clients with neither channels nor a wait loop). Auto-off
+                    // when Tier-1 channels are active. Spec: `docs/specs/rozum-native-channels.md`.
+                    if super::piggyback::enabled() {
+                        super::piggyback::append(&super::piggyback::project_slug(), &agent, &content);
+                    }
+                    let meta = json!({
+                        "room": room_name,
+                        "from": from,
+                        "seq": seq,
+                        "your_turn": "false",
+                    });
+                    let notif = ServerNotification::CustomNotification(CustomNotification::new(
+                        "notifications/claude/channel",
+                        Some(json!({ "content": content, "meta": meta })),
+                    ));
+                    let _ = peer.send_notification(notif).await;
+                }
+            }
+        }));
     }
 }
 
@@ -165,8 +283,29 @@ impl DaemonProxy {
         description = "Switch to a room by name (you start in your project's room)."
     )]
     pub async fn rooms_join(&self, params: Parameters<JoinParams>) -> CallToolResult {
-        self.forward("rooms.join", json!({ "name": params.0.name }))
+        let v = match self
+            .forward_raw("rooms.join", json!({ "name": params.0.name }))
             .await
+        {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        // Re-point the proxy at the new room so both the agent's disk reads and the
+        // channel-wakeup task follow the switch (the task re-primes on the new root).
+        if let Some(j) = tool_result_text_json(&v) {
+            let mut s = self.state.lock().await;
+            if let Some(root) = j.get("root").and_then(Value::as_str) {
+                s.room_root = Some(PathBuf::from(root));
+            }
+            if let Some(pid) = j.get("participant_id").and_then(Value::as_str) {
+                s.self_pid = Some(pid.to_string());
+            }
+            if let Some(name) = j.get("room").and_then(Value::as_str) {
+                s.room_name = Some(name.to_string());
+            }
+            s.cursor = None; // fresh room → reset the wait cursor
+        }
+        value_to_call_result(&v)
     }
 
     #[tool(
@@ -256,7 +395,13 @@ impl DaemonProxy {
 
     #[tool(name = "meeting.leave", description = "Leave the current room.")]
     pub async fn leave(&self) -> CallToolResult {
-        self.forward("meeting.leave", json!({})).await
+        let r = self.forward("meeting.leave", json!({})).await;
+        // Stop pushing wakeups for a room we've left (the task idles on a null room_root).
+        let mut s = self.state.lock().await;
+        s.room_root = None;
+        s.self_pid = None;
+        s.cursor = None;
+        r
     }
 }
 
@@ -265,25 +410,26 @@ impl ServerHandler for DaemonProxy {
     async fn initialize(
         &self,
         params: InitializeRequestParams,
-        _context: RequestContext<rmcp::service::RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, ErrorData> {
         let name = params.client_info.name;
-        if !name.is_empty() {
-            self.state.lock().await.client_info_name = name;
+        {
+            let mut s = self.state.lock().await;
+            if !name.is_empty() {
+                s.client_info_name = name;
+            }
+            // Hold the session peer so the channel-wakeup task can push to it.
+            s.upstream_peer = Some(context.peer.clone());
         }
-        Ok(
-            InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
-                .with_server_info(Implementation::new(
-                    "rozum-mcp-proxy",
-                    env!("CARGO_PKG_VERSION"),
-                ))
-                .with_instructions(
-                    "You are connected to a rozum meeting room (your project's room). \
-                     Loop: meeting.wait_my_turn (25s long-poll, no args) → meeting.submit if \
-                     you have something to add. Anyone may submit at any time. rooms.list / \
-                     rooms.join switch rooms.",
-                ),
-        )
+        // Interactive Claude Code registers a channel listener for this experimental
+        // capability; clients that ignore it fall back to `wait_my_turn` unchanged.
+        self.ensure_wakeup_task().await;
+        Ok(InitializeResult::new(channel_capabilities())
+            .with_server_info(Implementation::new(
+                "rozum-mcp-proxy",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(PROXY_INSTRUCTIONS))
     }
 }
 
@@ -340,6 +486,54 @@ fn value_to_call_result(v: &Value) -> CallToolResult {
 
 fn err_result(msg: &str) -> CallToolResult {
     CallToolResult::error(vec![Content::text(msg)])
+}
+
+/// The proxy's server capabilities: tools + the experimental Claude Code channel capability
+/// (`experimental: {"claude/channel": {}}`). Spec: `docs/specs/channel-wakeup.md`.
+fn channel_capabilities() -> ServerCapabilities {
+    let mut caps = ServerCapabilities::builder().enable_tools().build();
+    caps.experimental
+        .get_or_insert_with(Default::default)
+        .insert("claude/channel".to_owned(), JsonObject::new());
+    caps
+}
+
+/// Render new transcript turns into a channel-event body, skipping the agent's own entries
+/// (`self_pid`) so it isn't echoed back. Returns `(content, last_from, seq)`, or `None` when
+/// nothing remains to push.
+fn render_stored_delta(
+    turns: &[store::StoredTurn],
+    self_pid: Option<&str>,
+) -> Option<(String, String, String)> {
+    let mut lines = Vec::new();
+    let mut last_from = String::new();
+    let mut last_seq = String::new();
+    for t in turns {
+        if self_pid == Some(t.participant_id.as_str()) {
+            continue;
+        }
+        let from = if t.display_name.is_empty() {
+            t.participant_id.as_str()
+        } else {
+            t.display_name.as_str()
+        };
+        lines.push(format!("{from}: {}", t.content));
+        last_from = from.to_owned();
+        last_seq = format!("{}:{}", t.date, t.n);
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some((lines.join("\n"), last_from, last_seq))
+    }
+}
+
+/// The `(date, next_n)` just past the transcript head — the baseline a fresh join/switch primes
+/// to, so the wakeup task pushes only what arrives afterwards. `None` for an empty room.
+fn transcript_head(root: &std::path::Path) -> Option<(String, u64)> {
+    store::read_since(root, None, 0)
+        .last()
+        .map(|t| (t.date.clone(), t.n + 1))
 }
 
 #[cfg(test)]
@@ -419,6 +613,77 @@ mod tests {
             names.contains(&expected),
             "expected room {expected} in {names:?}"
         );
+    }
+
+    // ── Channel-wakeup unit tests (pure, no MCP peer) ───────────────────────────
+
+    fn sturn(pid: &str, name: &str, content: &str, date: &str, n: u64) -> store::StoredTurn {
+        store::StoredTurn {
+            date: date.into(),
+            n,
+            participant_id: pid.into(),
+            display_name: name.into(),
+            content: content.into(),
+            ts: 0,
+        }
+    }
+
+    #[test]
+    fn render_stored_delta_skips_own_and_formats() {
+        let turns = vec![
+            sturn("p1", "alice", "hello", "2026-06-18", 0),
+            sturn("me", "bob", "my own message", "2026-06-18", 1),
+            sturn("p2", "carol", "hi there", "2026-06-18", 2),
+        ];
+        let (content, from, seq) = render_stored_delta(&turns, Some("me")).unwrap();
+        assert_eq!(content, "alice: hello\ncarol: hi there");
+        assert_eq!(from, "carol");
+        assert_eq!(seq, "2026-06-18:2");
+    }
+
+    #[test]
+    fn render_stored_delta_all_own_is_none() {
+        let turns = vec![sturn("me", "bob", "x", "2026-06-18", 0)];
+        assert!(render_stored_delta(&turns, Some("me")).is_none());
+    }
+
+    #[test]
+    fn channel_capability_and_instructions_declared() {
+        let caps = channel_capabilities();
+        assert!(
+            caps.experimental
+                .as_ref()
+                .is_some_and(|e| e.contains_key("claude/channel")),
+            "experimental claude/channel capability must be advertised"
+        );
+        assert!(PROXY_INSTRUCTIONS.contains("channel"), "instructions must teach channel wakeup");
+    }
+
+    #[test]
+    fn transcript_head_primes_past_the_backlog() {
+        // A room with two existing turns: priming a fresh join must skip both, then deliver
+        // only what arrives afterwards. Exercises transcript_head + read_since + render together.
+        let dir = tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let paths = store::RoomPaths::ad_hoc_in(&state, "wakeup-test");
+        let root = paths.root.clone();
+        let mut w = store::TranscriptWriter::new(paths, "wakeup-test", "", None, state.clone());
+        w.append("p1", "alice", "old one", 0).unwrap();
+        w.append("p1", "alice", "old two", 0).unwrap();
+
+        // Prime: baseline is just past the head → no backlog replayed.
+        let since = transcript_head(&root).unwrap();
+        let (sd, sn) = (Some(since.0.as_str()), since.1);
+        assert!(store::read_since(&root, sd, sn).is_empty(), "backlog must not replay");
+
+        // A new turn from someone else → delivered; the agent's own turn → skipped.
+        w.append("p2", "carol", "fresh news", 0).unwrap();
+        w.append("me", "bob", "my reply", 0).unwrap();
+        let turns = store::read_since(&root, sd, sn);
+        let (content, from, _) = render_stored_delta(&turns, Some("me")).unwrap();
+        assert_eq!(content, "carol: fresh news");
+        assert_eq!(from, "carol");
     }
 
     /// Extract a tool result's text payload as JSON (the proxy returns the
