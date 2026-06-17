@@ -94,8 +94,11 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
         approx_size_gb: 12.0,
         notes: "OpenAI gpt-oss-20b — native MLX port (MXFP4 experts + attention sinks + \
                 sliding-window + YaRN), byte-exact greedy parity vs Python mlx_lm. MoE ~3.6B \
-                active/token, ~12 GB → roomy on 36 GB. Emits the harmony channel format; plain \
-                chat works, agentic tool-use needs the harmony adapter (in progress).",
+                active/token, ~12 GB → roomy on 36 GB. Full harmony adapter: clean chat + \
+                multi-turn tool calls work. But a WEAK agentic coder — ~5/15 on the matrix \
+                (reliable greet, inconsistent on build/fix/test/debug: stops early / doesn't \
+                finish multi-step work). Stay on the 35B-A3B for agentic; gpt-oss is supported \
+                but not recommended for coding agents.",
     },
     RecommendedModel {
         spec: "mlx-community:Qwen2.5-Coder-32B-Instruct-4bit",
