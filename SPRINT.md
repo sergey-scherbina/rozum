@@ -1662,17 +1662,16 @@ soon as any single track succeeds.
   loops → temp floor; parser dropped recipient-on-wrong-channel calls; no prefix reuse).
   In `src/models.rs`. Fork pushed + pinned. Memory: [[project-gptoss-native-port]].
 
-- [ ] qwen4-coder-bringup - **Qwen "4" Coder** (a Qwen-family coder model).
-  - STEP 1: verify the exact model — confirm whether this is `Qwen3-Coder`
-    (e.g. `Qwen3-Coder-30B-A3B`) or a genuinely newer Qwen4 line, and pick the
-    MLX checkpoint. The name is unconfirmed; don't port blind.
-  - If its `model_type` is `qwen3` / `qwen3_moe`, it likely routes through the
-    EXISTING mlx-native path with little/no code — validate numerically + add to
-    catalog. If it's a new arch, port + parity gate.
-  - Tool calls: Qwen-Coder emits the XML `<function=…>` form (already noted at
-    `src/constrain.rs:484`) — validate `parse_xml_function` handles it.
-  - Acceptance: serves + greedy parity vs `mlx_lm` + tool calls parse + added to
-    `src/models.rs`. Effort: SMALL if Qwen3-arch, LARGE if a new arch.
+- [x] qwen4-coder-bringup - **DONE 2026-06-17 = `Qwen3-Coder-30B-A3B-Instruct-4bit`.**
+  `model_type: qwen3_moe` → routes through the EXISTING path; **byte-exact greedy
+  parity** vs Python `mlx_lm` (`s.chars().rev().collect::<String>()`). Tool calls
+  parse (XML `<function=…>` form). Needed TWO small fixes: (1) the checkpoint
+  quantizes the MoE router (`mlp.gate`) at **8-bit** while the rest is 4-bit — added
+  per-tensor router-bits handling to the fork's `qwen3_moe` loader (pre-quantize the
+  gate at its own bits; backward-compatible). (2) its chat template does
+  `tools | length` / `tools is defined` → pass an empty `[]` for no-tools (not null),
+  in `tools_json` (matches transformers; truthiness-guarded templates unaffected —
+  gpt-oss regression-checked). Added to `src/models.rs`. Fork rev bumped to e5ebe9d2.
 
 ### Runtime / backend track — new engines below the `ChatBackend` seam
 

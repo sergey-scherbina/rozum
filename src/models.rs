@@ -101,6 +101,15 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
                 fast (prefix reuse). Strong local agentic coder; the 35B-A3B stays #1 for codex.",
     },
     RecommendedModel {
+        spec: "mlx-community:Qwen3-Coder-30B-A3B-Instruct-4bit",
+        display_name: "Qwen3-Coder 30B-A3B (MoE)",
+        approx_size_gb: 17.0,
+        notes: "Coder-tuned Qwen3 MoE (~3B active/token, 128 experts top-8) — routes through the \
+                existing `qwen3_moe` path (no port). Fast (MoE) + strong at code; ~17 GB. Emits \
+                the Qwen XML `<function=…>` tool form inside `<tool_call>`. The newest local coder \
+                MoE; pair with the 35B-A3B for the hardest agentic tasks.",
+    },
+    RecommendedModel {
         spec: "mlx-community:Qwen2.5-Coder-32B-Instruct-4bit",
         display_name: "Qwen2.5-Coder 32B",
         approx_size_gb: 19.0,

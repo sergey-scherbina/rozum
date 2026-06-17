@@ -2602,8 +2602,12 @@ mod inner {
     /// OpenAI-style tool schemas (`{type:"function", function:{name, description,
     /// parameters}}`) for the chat template's `tools` variable. `None` if empty.
     fn tools_json(tools: &[crate::backend::ToolDef]) -> Option<serde_json::Value> {
+        // An EMPTY list, not `None`, for no tools — matching transformers. Some chat
+        // templates (Qwen3-Coder) do `tools | length` / `tools is defined` and break
+        // on a null; truthiness-guarded templates (`{% if tools %}`) treat `[]` as
+        // no-tools identically.
         if tools.is_empty() {
-            return None;
+            return Some(serde_json::Value::Array(vec![]));
         }
         Some(serde_json::Value::Array(
             tools
