@@ -40,8 +40,49 @@ pub trait Draft {
     fn propose(&mut self, ctx: &[TokenId], k: usize) -> Vec<TokenId>;
 }
 
-/// Run speculative decoding to at most `max_new` tokens. The result is exactly
-/// what greedy decoding the target alone would produce.
+/// Run speculative decoding to at most `max_new` tokens, invoking `on_token` for
+/// each emitted token as it is produced. If `on_token` returns `false` the loop
+/// stops immediately (the caller hit its own stop condition — client gone, EOS it
+/// tracks, max-tokens, a loop guard). Returns the number of tokens emitted. Every
+/// emitted token is one of the target's greedy tokens, so the streamed sequence is
+/// a valid greedy decode of the target regardless of draft quality.
+pub fn decode_streaming(
+    prompt: &[TokenId],
+    draft: &mut dyn Draft,
+    target: &mut dyn Target,
+    k: usize,
+    max_new: usize,
+    on_token: &mut dyn FnMut(TokenId) -> bool,
+) -> usize {
+    let k = k.max(1);
+    let mut emitted = 0usize;
+    let mut ctx: Vec<TokenId> = prompt.to_vec();
+    while emitted < max_new {
+        let proposed = draft.propose(&ctx, k);
+        let v = target.verify(&ctx, &proposed);
+        if v.emit.is_empty() {
+            break;
+        }
+        for t in &v.emit {
+            if emitted >= max_new {
+                break;
+            }
+            ctx.push(*t);
+            emitted += 1;
+            if !on_token(*t) {
+                return emitted;
+            }
+        }
+        if v.eos {
+            break;
+        }
+    }
+    emitted
+}
+
+/// Run speculative decoding to at most `max_new` tokens, collecting the result.
+/// The result is exactly what greedy decoding the target alone would produce (in
+/// exact arithmetic). A thin wrapper over [`decode_streaming`].
 pub fn decode(
     prompt: &[TokenId],
     draft: &mut dyn Draft,
@@ -49,26 +90,11 @@ pub fn decode(
     k: usize,
     max_new: usize,
 ) -> Vec<TokenId> {
-    let k = k.max(1);
     let mut out: Vec<TokenId> = Vec::new();
-    let mut ctx: Vec<TokenId> = prompt.to_vec();
-    while out.len() < max_new {
-        let proposed = draft.propose(&ctx, k);
-        let v = target.verify(&ctx, &proposed);
-        if v.emit.is_empty() {
-            break;
-        }
-        for t in &v.emit {
-            if out.len() >= max_new {
-                break;
-            }
-            out.push(*t);
-            ctx.push(*t);
-        }
-        if v.eos {
-            break;
-        }
-    }
+    decode_streaming(prompt, draft, target, k, max_new, &mut |t| {
+        out.push(t);
+        true
+    });
     out
 }
 
