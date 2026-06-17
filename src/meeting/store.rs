@@ -412,6 +412,23 @@ impl TranscriptReader {
     }
 }
 
+/// Day dates present in a room dir, ascending (`YYYY-MM-DD`). Used by clients for
+/// day-scoped rendering / scrollback.
+pub fn day_dates(root: &Path) -> Vec<String> {
+    let mut dates = vec![];
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for ent in rd.flatten() {
+            if let Some(name) = ent.file_name().to_str() {
+                if let Some(date) = name.strip_suffix(".jsonl") {
+                    dates.push(date.to_owned());
+                }
+            }
+        }
+    }
+    dates.sort();
+    dates
+}
+
 /// Read one whole day file, optionally slicing by `n` (`from`, `count`). Used by
 /// scrollback and the future REST read.
 pub fn read_day(

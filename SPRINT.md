@@ -89,11 +89,14 @@ untouched**. Key decisions locked with the user:
   **day-scoped** (`GET /rooms/{name}/days` +
   `GET /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`).
 
-**Status: P0–P4 + P6 DONE (32 tests green + live CLI/stdio smoke) on branch
-`feature/meetings-impl`. The daemon, agent proxy, and user-service are complete
-and verified. Only P5 (the human TUI as a daemon client — interactive) remains.
-`src/gateway.rs` is NOT touched; the legacy in-process room + `proxy.rs` stay
-until the P5 cutover.**
+**Status: P0–P6 ALL DONE (34 tests green + live CLI/stdio smoke) on branch
+`feature/meetings-impl`. The meeting daemon, agent proxy, user-service, and the
+human TUI client are implemented end-to-end. The only unverified piece is the
+ratatui *rendering* of `rozum meetings attach` (needs interactive run); its
+logic (`MeetingClient`) is unit-tested. `src/gateway.rs` is untouched; the
+feature is fully additive — bare `rozum` and the legacy `proxy.rs`/`tui` still
+work. Remaining are polish follow-ups (idle-evict, graceful drain, bare-`rozum`
+cutover, full picker UX) + the deferred REST read.**
 Build sequence (each phase compiles + has its own tests; do them in order — P0→P2
 are pure library and land behind today's behavior, P3 brings the daemon up, P4/P5
 are clients and can go in parallel, P6 is the service):
@@ -156,12 +159,20 @@ are clients and can go in parallel, P6 is the service):
       currently returns content; the proxy already tracks the cursor. *Verified:*
       auto-join→submit→cursor-tracked wait→rooms.list over a unix socket; `rozum
       mcp-proxy` serves the 7-tool surface over stdio.
-- [ ] **P5 — TUI as client** (`src/tui/`, `run_room`→attach in `src/main.rs`).
-      Connect to daemon (drop in-process `Arc<Mutex<Meeting>>`); room picker
-      (list/select/switch, `[o]rooms`, new-room); day-scoped render (current day +
-      lazy older + separators + rollover); launch-in-project enters its room;
-      auto-spawn daemon. *Verify:* in-project entry; picker switch; N independent
-      TUIs; scrollback loads older days.
+- [x] **P5 — TUI as client (model + shell)** — model DONE & tested; ratatui shell
+      functional, interactive-verify pending. `src/meeting/tui_client.rs`
+      `MeetingClient` (2 tests): connect-as-human, `list_rooms` (incl. `root`),
+      `enter_project`/`enter_named` (joins `kind="human"`, identity on
+      `rooms.join`), disk-read day-scoped transcript, cursor-tracked `poll`,
+      `load_prev_day` scrollback. `src/meeting/attach.rs` + `rozum meetings
+      attach [--room]`: ratatui loop (transcript + day separators + input,
+      PgUp=older, Esc=quit), auto-spawns daemon, enters cwd project room.
+      PLAN NOTE: additive (`rozum meetings attach`) — bare `rozum` / legacy
+      `tui/mod.rs` untouched; the bare-`rozum`→client cutover + full picker UX are
+      follow-ups. *Verified:* model tests (enter/submit/tail/list, scrollback) +
+      build/CLI; **ratatui rendering needs interactive `rozum meetings attach`.**
+      FOLLOW-UP: poll-cancel on keypress abandons one daemon long-poll (self-
+      corrects); a second connection for the poll loop would avoid it.
 - [x] **P6 — user service** — DONE (`src/service.rs` `meetings_launchd_plist`/
       `meetings_systemd_unit` + paths/labels, 3 tests; `rozum meetings
       install|uninstall` in `src/main.rs`, cfg-gated macOS/Linux). launchd

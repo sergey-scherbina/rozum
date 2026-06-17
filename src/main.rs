@@ -291,6 +291,12 @@ enum MeetingsAction {
     Stop,
     /// Show the meeting daemon status and its rooms.
     Status,
+    /// Attach a TUI to a room (defaults to the cwd project's room).
+    Attach {
+        /// Room name (from `rooms.list`); default is the cwd project's room.
+        #[arg(long)]
+        room: Option<String>,
+    },
     /// Install + start as a launchd/systemd user service (auto-start at login).
     Install,
     /// Stop + remove the user service.
@@ -556,6 +562,12 @@ async fn main() {
             MeetingsAction::Start { foreground } => run_meetings_start(foreground).await,
             MeetingsAction::Stop => run_meetings_stop(),
             MeetingsAction::Status => run_meetings_status().await,
+            MeetingsAction::Attach { room } => {
+                if let Err(e) = rozum::meeting::attach::run_attach(room).await {
+                    eprintln!("attach error: {e}");
+                    std::process::exit(1);
+                }
+            }
             MeetingsAction::Install => run_meetings_install(),
             MeetingsAction::Uninstall => run_meetings_uninstall(),
         },

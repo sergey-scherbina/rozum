@@ -47,6 +47,14 @@ pub struct JoinInternalParams {
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RoomsJoinParams {
     pub name: String,
+    /// Identity for clients that join by name without a prior `_join_internal`
+    /// (e.g. the human TUI in picker mode).
+    #[serde(default)]
+    pub client_info_name: Option<String>,
+    #[serde(default)]
+    pub session_token: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -133,6 +141,7 @@ impl MeetingServer {
                 serde_json::json!({
                     "name": l.name,
                     "project": l.project,
+                    "root": l.root,
                 })
             })
             .collect();
@@ -144,20 +153,32 @@ impl MeetingServer {
         description = "Join a room by name (switches the session's room)."
     )]
     pub async fn rooms_join(&self, params: Parameters<RoomsJoinParams>) -> CallToolResult {
-        let name = params.0.name;
+        let p = params.0;
+        let name = p.name;
         let room = match self.registry.get_by_name(&name) {
             Ok(Some(r)) => r,
             Ok(None) => return err_result(&format!("no such room: {name}")),
             Err(e) => return err_result(&format!("open error: {e}")),
         };
-        let client_name = self.session.lock().await.client_name.clone();
-        let token = self.session.lock().await.session_token.clone();
+        // Prefer identity supplied with the call (picker flow), else what a prior
+        // `_join_internal` recorded on this session.
+        let (sess_name, sess_token) = {
+            let s = self.session.lock().await;
+            (s.client_name.clone(), s.session_token.clone())
+        };
+        let client_name = p.client_info_name.unwrap_or(sess_name);
+        let token = p.session_token.or(sess_token);
+        let kind = match p.kind.as_deref() {
+            Some("bridge") => "bridge",
+            Some("human") => "human",
+            _ => "mcp",
+        };
         let (id, handle) = self
             .enter_room(
                 room,
                 name.clone(),
                 &client_name,
-                "mcp",
+                kind,
                 token.as_deref(),
                 None,
             )
@@ -190,6 +211,7 @@ impl MeetingServer {
             };
         let kind = match p.kind.as_deref() {
             Some("bridge") => "bridge",
+            Some("human") => "human",
             _ => "mcp",
         };
         let (id, handle) = self
