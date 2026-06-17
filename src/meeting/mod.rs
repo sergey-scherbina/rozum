@@ -1,13 +1,21 @@
 pub mod app;
+pub mod attach;
 pub mod budget;
+pub mod daemon;
+pub mod daemon_proxy;
+pub mod identity;
 pub mod list;
 pub mod mcp_server;
 pub mod participant;
 pub mod piggyback;
 pub mod proxy;
+pub mod registry;
+pub mod room;
 pub(crate) mod room_client;
 pub mod room_path;
 pub mod state;
+pub mod store;
+pub mod tui_client;
 
 pub use app::{RoomConfig, run_room};
 pub use list::list_rooms;
