@@ -389,6 +389,27 @@ These items turn "portable in principle" into "portable by `cargo build`".
   through, so a Linux/CUDA user gets GPU GGUF inference without editing Cargo.toml.
   (Cheapest real "runs on someone else's non-Mac hardware" deliverable.)
 
+- [ ] x86-native-runtime - **The MLX recipe on commodity x86: a native iGPU engine.**
+  Bring MLX's architectural advantage — compute on the **integrated GPU**, **unified
+  memory** (no host↔device copy), **zero-copy `mmap` of the weight file** — to x86 as
+  a new `ChatBackend` leaf on **cross-vendor Vulkan compute** (Intel Xe/Arc + AMD APU).
+  Distinct from `portability-cuda-gguf` (that's llama.cpp's engine; this is OUR graph,
+  day-one models from `model-reference/`, shared AFQ/MXFP4 quant) and from MLX-CUDA
+  (discrete VRAM + copies — the opposite of the UMA thesis). Zero-copy via
+  `VK_EXT_external_memory_host`; weights live once in shared RAM, model size bounded
+  by total RAM like a Mac. **Reuses L1–L4** (chat template, `parse_tool_calls`, the
+  harmony adapter, the CPU sampler, the `model-reference/` forward math); writes only
+  **L5** (Vulkan tensors + memory + quant/attention kernels + the decode loop).
+  Feature-gated `--features x86-native` (off by default). Honest caveat: own kernels
+  ⇒ won't match MLX speed day one — bank correctness + day-one models + zero-copy
+  memory first, perf is a separate tuning track (bar = llama.cpp-Vulkan on the same
+  iGPU). Phased: **P0** probe (Vulkan device + zero-copy import on both vendors) → **P1**
+  MVP dense forward (Qwen3-4B, greedy parity vs MLX) → **P2** AFQ quant kernels
+  (zero-copy) → **P3** MoE + gpt-oss (gather-qmm, MXFP4, sinks, sliding, YaRN, harmony)
+  → **P4** perf → **P5** catalog + ship. Decisions locked 2026-06-17: Vulkan + own
+  kernels, cross-vendor iGPU. Full write-up: `docs/specs/x86-native-runtime.md`.
+  Effort: LARGE (a forward engine + GPU kernels from a blank page).
+
 #### Extractions — pull leaf-bound work into modules keyed by their *true* dependency
 
 The taxonomy + rationale is in `docs/specs/portability-and-the-backend-spi.md`

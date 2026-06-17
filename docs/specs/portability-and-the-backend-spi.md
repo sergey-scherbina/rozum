@@ -76,7 +76,10 @@ compiled.
   thing, a CUDA-native path) is a **new leaf**: implement `ChatBackend`, bring your
   own template/tokenizer/cache, register it in the resolution chain. Nothing above
   the seam changes. The recipe is: *make it satisfy the five methods, slot it into
-  `build_gateway_backend` / the config chain, done.*
+  `build_gateway_backend` / the config chain, done.* The Vulkan-native engine is now
+  specced — the **MLX recipe (iGPU + unified memory + zero-copy `mmap`) on commodity
+  x86**: [`x86-native-runtime.md`](x86-native-runtime.md) (reuses L1–L4, writes only
+  the L5 Vulkan engine).
 
 ## Add-a-backend checklist (write a new runtime/hardware leaf)
 

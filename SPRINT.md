@@ -1621,6 +1621,20 @@ soon as any single track succeeds.
   - Acceptance: serves + greedy parity vs `mlx_lm` + tool calls parse + added to
     `src/models.rs`. Effort: SMALL if Qwen3-arch, LARGE if a new arch.
 
+### Runtime / backend track — new engines below the `ChatBackend` seam
+
+- [ ] x86-native-p0-probe - **P0 of `x86-native-runtime`** (the MLX recipe — iGPU +
+  unified memory + zero-copy `mmap` — on commodity x86 via cross-vendor Vulkan).
+  Stand up a Vulkan compute device from Rust (`ash`/`vulkano`); on BOTH an Intel
+  Xe/Arc and an AMD APU confirm a `HOST_VISIBLE | DEVICE_LOCAL` heap and
+  `VK_EXT_external_memory_host`, then `mmap` a safetensors file → import the host
+  pointer as device memory → read a tensor back GPU-side (zero-copy). Decide the
+  Rust Vulkan binding and whether to lean on a kernel lib for plumbing. Acceptance:
+  zero-copy import demonstrated on both vendors + a short decision record appended
+  to the spec. **Needs an x86 iGPU box** (can't be validated from macOS). Spec:
+  `docs/specs/x86-native-runtime.md`; epic + phases P1–P5 in `BACKLOG.md`
+  (`x86-native-runtime`).
+
 ### Done
 
 - [x] lmstudio-http-backend - Auto-detect LM Studio's local OpenAI-compatible server at `http://localhost:1234/v1`.
