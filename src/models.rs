@@ -96,9 +96,9 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
                 sliding-window + YaRN), byte-exact greedy parity vs Python mlx_lm. MoE ~3.6B \
                 active/token, ~12 GB → roomy on 36 GB. Full harmony adapter (clean chat + \
                 multi-turn tool calls). REASONING model — MUST sample (the gateway floors its \
-                temp to ~1.0; greedy makes its CoT loop). claude 4/5 on the matrix (greet/build/\
-                test/debug); codex weak (apply_patch barrier for sub-35B); opencode slow. Solid \
-                agentic coder, a notch below the 35B-A3B (5/5) — that stays the top pick.",
+                temp to ~1.0; greedy makes its CoT loop). claude 5/5 on the matrix — matches the \
+                35B. codex weak (sub-35B fumbles its shell-only file ops); opencode passes + now \
+                fast (prefix reuse). Strong local agentic coder; the 35B-A3B stays #1 for codex.",
     },
     RecommendedModel {
         spec: "mlx-community:Qwen2.5-Coder-32B-Instruct-4bit",
