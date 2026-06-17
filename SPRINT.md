@@ -1623,7 +1623,20 @@ soon as any single track succeeds.
 
 ### Runtime / backend track — new engines below the `ChatBackend` seam
 
-- [ ] x86-native-p0-probe - **P0 of `x86-native-runtime`** (the MLX recipe — iGPU +
+- [ ] native-engine-spi - **ARCHITECTURE FIRST (prerequisite of `x86-native-runtime`).**
+  Draw the internal seam every in-process engine shares so a new engine is "implement
+  a tiny trait + its kernels", not "re-implement the leaf". Lift the engine-agnostic
+  decode/serving logic UP into one shared `drive` loop behind a `LocalEngine` trait;
+  push hardware/kernels DOWN into small isolated components. The decode-control loop
+  is currently copy-pasted (MLX `stream_generation`, GGUF's own loop) — x86 would be
+  a third. Hardware-independent; validated on MLX+GGUF on a Mac. Phases: **A1** define
+  the seam (`src/engine.rs`: `LocalEngine`/`EngineMeta`/`drive`) → **A2** extract
+  `drive` from the MLX leaf (MLX implements `LocalEngine`; tests + agentic matrix +
+  decode throughput unchanged) → **A3** GGUF adopts it + lift render/EOS/harmony/
+  model-source. Token-level seam, NOT a per-op tensor abstraction (avoids the
+  `mistralrs-mlx-direct` perf dead-end). Spec: `docs/specs/native-engine-spi.md`.
+
+- [ ] x86-native-p0-probe - **P0 of `x86-native-runtime`** (after `native-engine-spi`) (the MLX recipe — iGPU +
   unified memory + zero-copy `mmap` — on commodity x86 via cross-vendor Vulkan).
   Stand up a Vulkan compute device from Rust (`ash`/`vulkano`); on BOTH an Intel
   Xe/Arc and an AMD APU confirm a `HOST_VISIBLE | DEVICE_LOCAL` heap and

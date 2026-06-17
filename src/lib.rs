@@ -6,6 +6,7 @@ pub mod concurrency;
 pub mod config;
 pub mod constrain;
 pub mod discord;
+pub mod engine;
 pub mod gateway;
 pub mod gguf;
 pub mod hf_hub;

@@ -389,6 +389,18 @@ These items turn "portable in principle" into "portable by `cargo build`".
   through, so a Linux/CUDA user gets GPU GGUF inference without editing Cargo.toml.
   (Cheapest real "runs on someone else's non-Mac hardware" deliverable.)
 
+- [ ] native-engine-spi - **Architecture: lift the reusable layer up, isolate hardware
+  down (prerequisite of `x86-native-runtime`).** The decode-control loop is copy-pasted
+  per engine (MLX `stream_generation`, GGUF's own loop); x86 would be a third. Define a
+  tiny `LocalEngine` trait + one shared engine-agnostic `drive` loop above it (render +
+  tokenize + detok→`ChatEvent` + tool-call parse incl. harmony + EOS/cancel/max-tokens +
+  sampling glue), so an engine only provides `load`/`meta`/`generate` (forward + sampling
+  + kernels). Token-level seam, NOT a per-op tensor abstraction — the engine keeps whole-
+  graph ownership, so no `mistralrs-mlx-direct` perf floor. Hardware-independent; A1 define
+  seam → A2 MLX adopts (tests/matrix/throughput unchanged) → A3 GGUF adopts + lift render/
+  EOS/harmony/model-source. Net: a new engine = "implement `LocalEngine` + kernels". Full
+  write-up: `docs/specs/native-engine-spi.md`. Effort: MEDIUM (behavior-preserving refactor).
+
 - [ ] x86-native-runtime - **The MLX recipe on commodity x86: a native iGPU engine.**
   Bring MLX's architectural advantage — compute on the **integrated GPU**, **unified
   memory** (no host↔device copy), **zero-copy `mmap` of the weight file** — to x86 as

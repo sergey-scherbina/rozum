@@ -150,6 +150,11 @@ HTTP backends, ahead of CPU-only fallbacks.
 
 ## Phased plan (each phase independently shippable + benchmarked)
 
+- **A (prerequisite) — the engine seam.** Do the architecture step
+  [`native-engine-spi.md`](native-engine-spi.md) FIRST: lift the engine-agnostic
+  decode/serving loop into one shared `drive` behind a tiny `LocalEngine` trait,
+  validated on the MLX+GGUF leaves. Then this runtime is "implement `LocalEngine`
+  for Vulkan" and reuses all of L1–L4 for free.
 - **P0 — Probe & decision record.** Stand up Vulkan device + compute queue from
   Rust (`ash`/`vulkano`); confirm an `HOST_VISIBLE | DEVICE_LOCAL` heap and
   `VK_EXT_external_memory_host` on a target Intel Xe and an AMD APU; `mmap` →
