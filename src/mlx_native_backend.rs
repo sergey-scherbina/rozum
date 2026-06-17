@@ -971,11 +971,27 @@ mod inner {
             }
         }
 
-        let temp = job.sampling.temperature.unwrap_or(0.0);
+        let mut temp = job.sampling.temperature.unwrap_or(0.0);
         // top_k <= 0 / top_p >= 1.0 disable those filters (the sampler's defaults).
         let top_p = job.sampling.top_p.unwrap_or(1.0);
         let top_k = job.sampling.top_k.map(|k| k as i32).unwrap_or(0);
         let repeat_penalty = job.sampling.repeat_penalty.unwrap_or(1.0);
+        // gpt-oss is a reasoning model built for SAMPLING (generation_config:
+        // do_sample=true, temperature 1.0). Under greedy / near-greedy decoding its
+        // long analysis CoT collapses into verbatim repetition loops ("We need. We
+        // need…") that emit no tool call, so the agent stalls. Floor the temperature
+        // to gpt-oss's intended ~1.0 (clients asking for MORE keep it). A repetition
+        // penalty does NOT help and in fact breaks it — harmony output must repeat
+        // structural tokens (<|channel|>, <|message|>, "functions", JSON punctuation),
+        // so penalizing repeats corrupts the tool-call format. Verified: temp 1.0 +
+        // no penalty completes 6/6 where greedy completes 0/6. Floor tunable via env.
+        if matches!(model, LoadedModel::GptOss(_)) {
+            let min_temp = std::env::var("ROZUM_GPTOSS_MIN_TEMP")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1.0);
+            temp = temp.max(min_temp);
+        }
         if let Some(s) = job.sampling.seed {
             let _ = mlx_rs::random::seed(s);
         }
@@ -2673,6 +2689,20 @@ mod inner {
             stop_reason = StopReason::Cancelled;
         }
 
+        // Diagnostic: dump the raw marker-bearing run + the harmony parse, to verify
+        // exactly what the model emitted vs what we forward (ROZUM_HARMONY_DUMP=1).
+        if harmony && std::env::var_os("ROZUM_HARMONY_DUMP").is_some() {
+            let p = crate::harmony::parse_harmony(&full_text);
+            eprintln!("─── HARMONY_DUMP (stop={stop_reason:?} out_tokens={output_tokens}) ───");
+            eprintln!("RAW: {full_text:?}");
+            eprintln!(
+                "PARSED final={:?} | tool_calls={:?} | analysis_len={}",
+                p.final_text,
+                p.tool_calls,
+                p.analysis.len()
+            );
+        }
+
         // Finalize: a cancelled run reports as-is; otherwise parse any tool calls.
         // Harmony (gpt-oss) parses channels from the marker-bearing `full_text`;
         // everything else uses the Qwen `<tool_call>` parser.
@@ -2833,11 +2863,13 @@ mod inner {
         let encodings = tokenizer
             .apply_chat_template_and_encode(template.to_string(), args)
             .map_err(|e| format!("mlx: chat template render: {e}"))?;
-        Ok(encodings
-            .iter()
-            .flat_map(|e| e.get_ids())
-            .copied()
-            .collect())
+        let ids: Vec<u32> = encodings.iter().flat_map(|e| e.get_ids()).copied().collect();
+        if harmony && add_gen && std::env::var_os("ROZUM_PROMPT_DUMP").is_some() {
+            if let Ok(txt) = tokenizer.decode(&ids, false) {
+                eprintln!("─── PROMPT_DUMP ({} tokens) ───\n{txt}\n─── /PROMPT_DUMP ───", ids.len());
+            }
+        }
+        Ok(ids)
     }
 
     pub use MlxNativeBackend as Export;
