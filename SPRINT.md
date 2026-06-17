@@ -1652,7 +1652,8 @@ soon as any single track succeeds.
     different shape than sequential decode) — `mlx_spec_decode_byte_identical`
     asserts the mechanism (lcp), the matrix asserts functional equivalence.
 
-- [ ] small-model-router-rag - **Small model as router / classifier / RAG worker.**
+- [~] small-model-router-rag - **Small model as router / classifier / RAG worker.
+  P1 DONE — acceptance met** (`src/router.rs`, branch `feature/small-model-router`).
   - Use a 4B/Coder-7B for the narrow, single-shot, latency-sensitive steps that
     don't need a big model: intent/query classification, model-or-tool routing
     (cheap pre-filter before invoking 27B+), RAG chunk rerank + summarize,
@@ -1660,9 +1661,17 @@ soon as any single track succeeds.
     and `src/memory_store.rs`.
   - Where: a small routing/classification entrypoint the gateway (or `rozum
     launch`) can call before/around the main model; reuse `rag_lite` for retrieval.
-  - Acceptance: one working entrypoint (e.g. classify-and-route, or rerank) backed
-    by a small model, with a tiny eval showing it's accurate enough to gate the big
-    model. Effort: MEDIUM (foundation exists). Spec first.
+  - **P1 DONE:** `ModelRouter` classifier primitive — caller-supplied `Label` set,
+    engine-agnostic over any `ChatBackend` (mirrors `cascade::ModelJudge`), never
+    errors (`snap_to_label` snaps a noisy reply to a label; off-set/failure →
+    fallback). 8 hardware-free unit tests + **M4 eval `model_router_eval` 6/6 =
+    100%** on Qwen3-4B (code/math/chitchat), all exact matches — well above the
+    0.80 gate-the-big-model bar. Plain prompt+snap sufficed (no constrained decode
+    needed). Spec: `docs/specs/small-model-router.md`.
+  - **P2 (remaining):** RAG rerank/summarize worker over `rag_lite::Hit`s (same
+    `ModelRouter` shape) + wire `classify` into the cascade entry / gateway
+    pre-filter (async-classify → `difficulty_of(label)` → entry tier; sync
+    `Classifier` trait unchanged). Composes with [[small-model-cascade]].
 
 - [ ] small-model-cascade - **Single-shot bounded tasks served small-first, escalate on doubt.**
   - The narrow, non-agentic tasks a 4B/Coder-7B can actually do: commit messages,
