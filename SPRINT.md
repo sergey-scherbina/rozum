@@ -1652,8 +1652,9 @@ soon as any single track succeeds.
     different shape than sequential decode) — `mlx_spec_decode_byte_identical`
     asserts the mechanism (lcp), the matrix asserts functional equivalence.
 
-- [~] small-model-router-rag - **Small model as router / classifier / RAG worker.
-  P1 DONE — acceptance met** (`src/router.rs`, branch `feature/small-model-router`).
+- [x] small-model-router-rag - **Small model as router / classifier / RAG worker.
+  DONE — all P1+P2 shipped** (`src/router.rs`, branches `feature/small-model-router`
+  + `feature/small-model-rag-worker`).
   - Use a 4B/Coder-7B for the narrow, single-shot, latency-sensitive steps that
     don't need a big model: intent/query classification, model-or-tool routing
     (cheap pre-filter before invoking 27B+), RAG chunk rerank + summarize,
@@ -1677,9 +1678,21 @@ soon as any single track succeeds.
     (→ `model:"cascade:<name>"` + `router_model` in `rozum.toml`/`ROZUM_CASCADE`).
     4 new tests (router routes hard→top / trivial→cheapest; router_model resolved+
     threaded; JSON round-trip). 366 fast tests green.
-  - **P2 remaining:** RAG rerank/summarize worker over `rag_lite::Hit`s (same
-    `ModelRouter` shape — relevance-label, reorder/drop, summarize survivors).
-    Composes with [[small-model-cascade]].
+  - **P2 RAG worker DONE 2026-06-18** (`src/router.rs` `RagWorker`): same
+    `ModelRouter` shape over `rag_lite::Hit`s. `rerank(query, hits)` judges each hit
+    `relevant`/`related`/`irrelevant` (via `snap_to_label`), **drops** irrelevant +
+    reorders relevant-first with a **stable** sort (refines BM25 recall, never
+    scrambles within a grade); a model fumble keeps the hit as `related` (conservative
+    — never silently drop). `summarize(query, hits)` answers grounded **only** in the
+    survivors, falls back to the top snippet on a blank/failed generation.
+    `rerank_and_summarize` / `grounded_answer(retriever, query, k)` compose the two
+    with `rag_lite` recall → `GroundedAnswer { hits, summary }`. 7 hardware-free unit
+    tests (drop+grade-order, stable-within-grade, off-set→keep, summary
+    empty/fallback/passthrough, `grounded_answer` e2e) + `#[ignore]` M4 eval
+    `rag_worker_eval` (4B drops a lexical decoy, ranks the answering doc first, grounds
+    the summary). 373 fast tests green. **This closes the small-model-router track**
+    (classifier P1, cascade wiring P2, RAG worker P2). Composes with
+    [[small-model-cascade]] (the after-the-fact escalation counterpart).
 
 - [ ] small-model-cascade - **Single-shot bounded tasks served small-first, escalate on doubt.**
   - The narrow, non-agentic tasks a 4B/Coder-7B can actually do: commit messages,
