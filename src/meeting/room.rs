@@ -74,6 +74,9 @@ pub struct DaemonRoom {
     polling: HashMap<ParticipantId, u64>,
     /// Optional hard cap on total chars; `None` = unlimited.
     max_total_chars: Option<u64>,
+    /// Last time anything happened in this room (join/submit/responding) — drives
+    /// idle eviction.
+    last_activity: u64,
     pub notify: Arc<Notify>,
     pub events: broadcast::Sender<RoomEvent>,
 }
@@ -108,9 +111,24 @@ impl DaemonRoom {
             responding: HashMap::new(),
             polling: HashMap::new(),
             max_total_chars: None,
+            last_activity: unix_ts(),
             notify: Arc::new(Notify::new()),
             events,
         }
+    }
+
+    fn touch(&mut self) {
+        self.last_activity = unix_ts();
+    }
+
+    pub fn last_activity(&self) -> u64 {
+        self.last_activity
+    }
+
+    /// True if anyone is actively polling or composing right now (stale markers
+    /// filtered) — such a room must not be evicted.
+    pub fn has_live_pollers(&self) -> bool {
+        !self.active_polling().is_empty() || !self.active_responding().is_empty()
     }
 
     pub fn with_max_total_chars(mut self, max: u64) -> Self {
@@ -130,25 +148,6 @@ impl DaemonRoom {
     }
     pub fn root(&self) -> &std::path::Path {
         &self.writer.paths().root
-    }
-
-    /// Read all messages at or after the cursor `(since_date, since_n)` straight
-    /// from disk. `since_date = None` returns the whole history. Used by the
-    /// daemon to assemble a `wait` delta (P4 moves this read into the proxy).
-    pub fn read_since(&self, since_date: Option<&str>, since_n: u64) -> Vec<StoredTurn> {
-        let root = &self.writer.paths().root;
-        let mut out = vec![];
-        for date in self.writer.index().days.keys() {
-            let from = match since_date {
-                Some(sd) if date.as_str() < sd => continue,
-                Some(sd) if date.as_str() == sd => since_n,
-                _ => 0,
-            };
-            if let Ok(turns) = super::store::read_day(root, date, from, None) {
-                out.extend(turns);
-            }
-        }
-        out
     }
     pub fn phase(&self) -> Phase {
         self.phase
@@ -174,6 +173,7 @@ impl DaemonRoom {
         kind: &str,
         project: Option<&str>,
     ) -> (ParticipantId, String) {
+        self.touch();
         let (id, handle, is_new) =
             self.roster
                 .resolve_or_mint(session_token, base_name, kind, project);
@@ -227,6 +227,7 @@ impl DaemonRoom {
         if !self.is_member(id) {
             return Err("not-joined".into());
         }
+        self.touch();
         let display = self.handle_for(id);
         let turn = self
             .writer
@@ -262,6 +263,7 @@ impl DaemonRoom {
     // ── Responding / polling markers (liveness, not identity) ─────────────────
 
     pub fn mark_responding(&mut self, id: &ParticipantId) {
+        self.touch();
         if self.is_member(id) && self.responding.insert(id.clone(), unix_ts()).is_none() {
             let _ = self.events.send(RoomEvent::RespondingChanged {
                 id: id.clone(),

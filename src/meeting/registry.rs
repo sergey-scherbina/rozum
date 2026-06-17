@@ -107,6 +107,30 @@ impl RoomRegistry {
             .is_some()
     }
 
+    /// Evict open rooms idle for at least `threshold_secs` (as of `now`) that have
+    /// no live pollers/responders. Their files stay; they reopen on demand. A
+    /// momentarily-locked (busy) room is skipped. Returns how many were evicted.
+    pub async fn evict_idle(&self, now: u64, threshold_secs: u64) -> usize {
+        let keys: Vec<String> = self.open.lock().unwrap().keys().cloned().collect();
+        let mut evicted = 0;
+        for key in keys {
+            let handle = self.open.lock().unwrap().get(&key).cloned();
+            let Some(h) = handle else { continue };
+            let evictable = match h.try_lock() {
+                Ok(room) => {
+                    now.saturating_sub(room.last_activity()) >= threshold_secs
+                        && !room.has_live_pollers()
+                }
+                Err(_) => false, // locked right now → active → keep
+            };
+            if evictable {
+                self.open.lock().unwrap().remove(&key);
+                evicted += 1;
+            }
+        }
+        evicted
+    }
+
     /// All known rooms (from the on-disk registry — independent of open state).
     pub fn list(&self) -> Vec<RoomLocation> {
         store::list_registered(&self.state_dir)
@@ -170,6 +194,42 @@ mod tests {
         assert_eq!(room.high_water().date, date);
         assert_eq!(room.high_water().n, 1);
         assert!(room.roster().by_token("tok").is_some());
+    }
+
+    #[tokio::test]
+    async fn evict_idle_drops_quiet_rooms_keeps_busy_ones() {
+        use crate::meeting::state::unix_ts;
+        let dir = tempdir().unwrap();
+        let reg = RoomRegistry::new(dir.path().join("state"));
+
+        let proj_a = dir.path().join("a");
+        let proj_b = dir.path().join("b");
+        // Room A: a message, then quiet.
+        {
+            let h = reg
+                .get_or_create(RoomPaths::for_project(&proj_a), "a", "", None)
+                .unwrap();
+            let mut r = h.lock().await;
+            let (id, _) = r.join(Some("t"), "claude", "mcp", None);
+            r.submit(&id, "hi").unwrap();
+        }
+        // Room B: a message AND an in-flight poller → must be kept.
+        {
+            let h = reg
+                .get_or_create(RoomPaths::for_project(&proj_b), "b", "", None)
+                .unwrap();
+            let mut r = h.lock().await;
+            let (id, _) = r.join(Some("t"), "claude", "mcp", None);
+            r.submit(&id, "hi").unwrap();
+            r.mark_polling(&id);
+        }
+        assert_eq!(reg.open_count(), 2);
+
+        // Far-future `now` → both are past the idle threshold by last_activity, but
+        // B has a (real-time-fresh) poller, so only A is evicted.
+        let evicted = reg.evict_idle(unix_ts() + 10_000, 1).await;
+        assert_eq!(evicted, 1);
+        assert_eq!(reg.open_count(), 1);
     }
 
     #[tokio::test]

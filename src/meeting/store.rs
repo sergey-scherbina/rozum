@@ -429,6 +429,24 @@ pub fn day_dates(root: &Path) -> Vec<String> {
     dates
 }
 
+/// Read every message at or after the cursor `(since_date, since_n)` from disk.
+/// `since_date = None` returns the whole history. This is how direct-read clients
+/// fetch a `wait` delta — content never transits the daemon.
+pub fn read_since(root: &Path, since_date: Option<&str>, since_n: u64) -> Vec<StoredTurn> {
+    let mut out = vec![];
+    for date in day_dates(root) {
+        let from = match since_date {
+            Some(sd) if date.as_str() < sd => continue,
+            Some(sd) if date.as_str() == sd => since_n,
+            _ => 0,
+        };
+        if let Ok(turns) = read_day(root, &date, from, None) {
+            out.extend(turns);
+        }
+    }
+    out
+}
+
 /// Read one whole day file, optionally slicing by `n` (`from`, `count`). Used by
 /// scrollback and the future REST read.
 pub fn read_day(

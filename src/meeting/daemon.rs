@@ -2,9 +2,9 @@
 //! [`RoomRegistry`]. A session selects a room (`_join_internal` for the caller's
 //! project room, or `rooms.join` by name), then `meeting.*` operate on it.
 //!
-//! For now the daemon assembles the `wait` delta by reading its own disk; P4
-//! moves that read into the proxy (content off the daemon socket). See
-//! `docs/specs/agent-meetings-daemon.md`.
+//! `wait_my_turn` returns **coordination only** (a high-water `(date, n)`) —
+//! message content never transits the daemon socket; local clients read it from
+//! disk themselves. See `docs/specs/agent-meetings-daemon.md`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 use super::participant::ParticipantId;
 use super::registry::{RoomHandle, RoomRegistry};
@@ -89,15 +89,31 @@ pub struct MeetingServer {
     session: Arc<Mutex<Session>>,
     peer_slot: Arc<Mutex<Option<Peer<RoleServer>>>>,
     tool_router: ToolRouter<Self>,
+    /// Flips to `true` when the daemon is draining; long-polls return `{ended}`.
+    shutdown: watch::Receiver<bool>,
+    /// Keeps a self-owned shutdown channel alive (so `shutdown.changed()` never
+    /// errors) when the server isn't driven by `serve_daemon`.
+    _shutdown_keep: Option<watch::Sender<bool>>,
 }
 
 impl MeetingServer {
     pub fn new(registry: Arc<RoomRegistry>) -> Self {
+        let (tx, rx) = watch::channel(false);
+        Self::with_shutdown(registry, rx, Some(tx))
+    }
+
+    fn with_shutdown(
+        registry: Arc<RoomRegistry>,
+        shutdown: watch::Receiver<bool>,
+        keep: Option<watch::Sender<bool>>,
+    ) -> Self {
         Self {
             registry,
             session: Arc::new(Mutex::new(Session::default())),
             peer_slot: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
+            shutdown,
+            _shutdown_keep: keep,
         }
     }
 
@@ -173,6 +189,7 @@ impl MeetingServer {
             Some("human") => "human",
             _ => "mcp",
         };
+        let root = room.lock().await.root().to_path_buf();
         let (id, handle) = self
             .enter_room(
                 room,
@@ -185,7 +202,7 @@ impl MeetingServer {
             .await;
         register_peer(&self.peer_slot, &self.session, &id).await;
         text_result(
-            &serde_json::json!({ "room": name, "participant_id": id.0, "handle": handle })
+            &serde_json::json!({ "room": name, "participant_id": id.0, "handle": handle, "root": root })
                 .to_string(),
         )
     }
@@ -201,6 +218,7 @@ impl MeetingServer {
         };
         let name = project_room_name(&project);
         let paths = RoomPaths::for_project(Path::new(&project));
+        let root = paths.root.clone();
         let room =
             match self
                 .registry
@@ -230,6 +248,7 @@ impl MeetingServer {
                 "participant_id": id.0,
                 "handle": handle,
                 "room": name,
+                "root": root,
             })
             .to_string(),
         )
@@ -275,8 +294,12 @@ impl MeetingServer {
             id: my_id.clone(),
         };
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
+        let mut shutdown = self.shutdown.clone();
 
         loop {
+            if *shutdown.borrow() {
+                return text_result("{\"ended\":true,\"reason\":\"server-shutdown\"}");
+            }
             let notified = notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -286,13 +309,13 @@ impl MeetingServer {
                 if r.phase() == Phase::Ended {
                     return text_result("{\"ended\":true,\"reason\":\"meeting-ended\"}");
                 }
-                let delta = r.read_since(since_date.as_deref(), since_n);
-                if !delta.is_empty() {
-                    let hw = r.high_water();
+                // Coordination only — compare high-water to the cursor; the
+                // client reads the content itself from disk (no bytes transit).
+                let hw = r.high_water();
+                if has_new(&hw, since_date.as_deref(), since_n) {
                     return text_result(
                         &serde_json::json!({
                             "still_waiting": false,
-                            "turns": delta,
                             "high_water": high_water_json(&hw),
                             "responding": responding_ids(&r),
                         })
@@ -313,7 +336,11 @@ impl MeetingServer {
                 );
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let _ = tokio::time::timeout(remaining, notified.as_mut()).await;
+            tokio::select! {
+                _ = notified.as_mut() => {}
+                _ = shutdown.changed() => {}
+                _ = tokio::time::sleep(remaining) => {}
+            }
         }
     }
 
@@ -408,31 +435,106 @@ impl ServerHandler for MeetingServer {
     }
 }
 
-/// Serve the daemon on `socket_path` until the process is signalled. Removes a
-/// stale socket, then accepts connections, one [`MeetingServer`] per connection.
+/// Serve the daemon on `socket_path` until SIGINT/SIGTERM. On shutdown, pending
+/// `wait_my_turn` long-polls return `{ended:"server-shutdown"}` and the socket is
+/// removed after a short drain.
 pub async fn serve_daemon(socket_path: &Path, registry: Arc<RoomRegistry>) -> std::io::Result<()> {
+    let (tx, rx) = watch::channel(false);
+    // Translate OS signals into the shutdown flag, then keep `tx` alive until one
+    // arrives (so subscribers' `changed()` never errors prematurely).
+    tokio::spawn(async move {
+        let mut term =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async {
+                match term.as_mut() {
+                    Some(t) => { t.recv().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
+        }
+        let _ = tx.send(true);
+    });
+    serve_daemon_until(socket_path, registry, rx).await
+}
+
+/// The accept loop, parameterized on a `shutdown` flag (so it is driveable from
+/// tests without OS signals).
+async fn serve_daemon_until(
+    socket_path: &Path,
+    registry: Arc<RoomRegistry>,
+    mut shutdown: watch::Receiver<bool>,
+) -> std::io::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
     tracing::info!("meeting daemon listening on {}", socket_path.display());
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let registry = Arc::clone(&registry);
+
+    // Idle-evict watchdog: sweep long-idle rooms out of the open set (files stay,
+    // they reopen on demand). `ROZUM_MEETINGS_IDLE_SECS=0` disables it.
+    let idle_secs = std::env::var("ROZUM_MEETINGS_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(1800);
+    if idle_secs > 0 {
+        let reg = Arc::clone(&registry);
+        let mut sh = shutdown.clone();
+        let interval = idle_secs.clamp(30, 300);
         tokio::spawn(async move {
-            let server = MeetingServer::new(registry);
-            let session = Arc::clone(&server.session);
-            if let Ok(service) = server.serve(stream).await {
-                let _ = service.waiting().await;
-            }
-            // Connection dropped → leave the room (roster record stays on disk).
-            let s = session.lock().await;
-            if let (Some(room), Some(id)) = (s.room.clone(), s.participant_id.clone()) {
-                room.lock().await.leave(&id);
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(interval)) => {}
+                    _ = sh.changed() => break,
+                }
+                if *sh.borrow() {
+                    break;
+                }
+                let n = reg.evict_idle(super::state::unix_ts(), idle_secs).await;
+                if n > 0 {
+                    tracing::debug!(evicted = n, "idle-evicted rooms");
+                }
             }
         });
     }
+
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                let (stream, _) = accept?;
+                serve_conn(stream, Arc::clone(&registry), shutdown.clone());
+            }
+            _ = shutdown.changed() => break,
+        }
+        if *shutdown.borrow() {
+            break;
+        }
+    }
+    // Give in-flight long-polls a moment to observe the flag and return `{ended}`.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let _ = std::fs::remove_file(socket_path);
+    Ok(())
+}
+
+fn serve_conn(
+    stream: tokio::net::UnixStream,
+    registry: Arc<RoomRegistry>,
+    shutdown: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let server = MeetingServer::with_shutdown(registry, shutdown, None);
+        let session = Arc::clone(&server.session);
+        if let Ok(service) = server.serve(stream).await {
+            let _ = service.waiting().await;
+        }
+        // Connection dropped → leave the room (roster record stays on disk).
+        let s = session.lock().await;
+        if let (Some(room), Some(id)) = (s.room.clone(), s.participant_id.clone()) {
+            room.lock().await.leave(&id);
+        }
+    });
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -455,6 +557,16 @@ fn err_result(msg: &str) -> CallToolResult {
 
 fn high_water_json(hw: &super::store::HighWater) -> serde_json::Value {
     serde_json::json!({ "date": hw.date, "n": hw.n, "end_offset": hw.end_offset })
+}
+
+/// Is there a message at/after the cursor `(since_date, since_n)`? Cheap compare
+/// against the high-water — no content read. `hw.n` is the active day's message
+/// count; days are append-ordered, so a newer high-water date implies new data.
+fn has_new(hw: &super::store::HighWater, since_date: Option<&str>, since_n: u64) -> bool {
+    match since_date {
+        None => hw.n > 0,
+        Some(sd) => hw.date.as_str() > sd || (hw.date.as_str() == sd && hw.n > since_n),
+    }
 }
 
 fn responding_ids(r: &super::room::DaemonRoom) -> Vec<String> {
@@ -582,27 +694,40 @@ mod tests {
         let join = tool_result_text_json(&join).unwrap();
         assert_eq!(join["room"], project_room_name(&project));
         assert!(join["handle"].as_str().unwrap().contains('-'));
+        // The room's disk location is returned so the client can read content.
+        let root = std::path::PathBuf::from(join["root"].as_str().unwrap());
 
         // Submit a message.
-        conn.call_tool(
-            "meeting.submit",
-            serde_json::json!({ "content": "hello daemon" }),
-            t,
-        )
-        .await
-        .unwrap();
+        let sub = conn
+            .call_tool(
+                "meeting.submit",
+                serde_json::json!({ "content": "hello daemon" }),
+                t,
+            )
+            .await
+            .unwrap();
+        let date = tool_result_text_json(&sub).unwrap()["date"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
-        // wait_my_turn returns the message (read from the daemon's disk).
+        // wait_my_turn returns coordination only (no content on the wire).
         let wait = conn
             .call_tool("meeting.wait_my_turn", serde_json::json!({}), t)
             .await
             .unwrap();
         let wait = tool_result_text_json(&wait).unwrap();
         assert_eq!(wait["still_waiting"], false);
-        let turns = wait["turns"].as_array().unwrap();
+        assert_eq!(wait["high_water"]["n"], 1);
+        assert!(
+            wait.get("turns").is_none(),
+            "content must not transit the daemon"
+        );
+
+        // The content is on disk, where the client reads it directly.
+        let turns = crate::meeting::store::read_day(&root, &date, 0, None).unwrap();
         assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0]["content"], "hello daemon");
-        assert_eq!(turns[0]["n"], 0);
+        assert_eq!(turns[0].content, "hello daemon");
 
         // rooms.list now shows the project room.
         let list = conn
@@ -617,6 +742,45 @@ mod tests {
             .map(|r| r["name"].as_str().unwrap().to_string())
             .collect();
         assert!(names.contains(&project_room_name(&project)));
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_ends_pending_waits() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("meeting.sock");
+        let registry = Arc::new(RoomRegistry::new(dir.path().join("state")));
+        let (tx, rx) = watch::channel(false);
+        {
+            let sock = sock.clone();
+            tokio::spawn(async move {
+                let _ = serve_daemon_until(&sock, registry, rx).await;
+            });
+        }
+        wait_for_socket(&sock).await;
+
+        let t = Duration::from_secs(10);
+        let project = dir.path().to_string_lossy().into_owned();
+        let mut conn = RoomConnection::connect(&sock, "claude", t).await.unwrap();
+        conn.call_tool(
+            "_join_internal",
+            serde_json::json!({ "client_info_name": "claude", "project": project }),
+            t,
+        )
+        .await
+        .unwrap();
+
+        // Start a long-poll (empty room → it blocks), then signal shutdown.
+        let waiter = tokio::spawn(async move {
+            conn.call_tool("meeting.wait_my_turn", serde_json::json!({}), t)
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        tx.send(true).unwrap();
+
+        let res = waiter.await.unwrap().unwrap();
+        let payload = tool_result_text_json(&res).unwrap();
+        assert_eq!(payload["ended"], true);
+        assert_eq!(payload["reason"], "server-shutdown");
     }
 
     #[tokio::test]

@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::room_client::{RoomConnection, tool_result_text_json};
-use super::store::{RoomPaths, StoredTurn, day_dates, read_day};
+use super::store::{RoomPaths, StoredTurn, day_dates, read_day, read_since};
 
 const T: Duration = Duration::from_secs(5);
 const WAIT_T: Duration = Duration::from_secs(30);
@@ -156,7 +156,8 @@ impl MeetingClient {
 
     /// Long-poll for new messages; append them to the transcript and return them.
     pub async fn poll(&mut self) -> ClientResult<Vec<StoredTurn>> {
-        let since = match &self.cursor {
+        let since_cursor = self.cursor.clone();
+        let since = match &since_cursor {
             Some((d, n)) => json!({ "since_date": d, "since_n": n }),
             None => json!({}),
         };
@@ -165,20 +166,27 @@ impl MeetingClient {
             .call_tool("meeting.wait_my_turn", since, WAIT_T)
             .await?;
         let v = tool_result_text_json(&r).ok_or("bad wait result")?;
-        let mut new = vec![];
-        if let Some(turns) = v.get("turns").and_then(Value::as_array) {
-            for t in turns {
-                if let Ok(st) = serde_json::from_value::<StoredTurn>(t.clone()) {
-                    new.push(st);
-                }
-            }
-        }
+        let still_waiting = v
+            .get("still_waiting")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
         if let Some(hw) = v.get("high_water") {
             if let (Some(d), Some(n)) = (
                 hw.get("date").and_then(Value::as_str),
                 hw.get("n").and_then(Value::as_u64),
             ) {
                 self.cursor = Some((d.to_owned(), n));
+            }
+        }
+        // New messages: read the content straight from the room's day files.
+        let mut new = vec![];
+        if !still_waiting {
+            if let Some(root) = &self.room_root {
+                let (sd, sn) = match &since_cursor {
+                    Some((d, n)) => (Some(d.as_str()), *n),
+                    None => (None, 0),
+                };
+                new = read_since(root, sd, sn);
             }
         }
         self.transcript.extend(new.iter().cloned());

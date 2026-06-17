@@ -29,6 +29,7 @@ use tokio::sync::Mutex;
 use super::daemon::daemon_alive;
 use super::room_client::{RoomConnection, tool_result_text_json};
 use super::room_path::meeting_sock;
+use super::store;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(35);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -51,6 +52,8 @@ struct State {
     session_token: String,
     client_info_name: String,
     conn: Option<RoomConnection>,
+    /// The joined room's on-disk dir — the proxy reads content from here.
+    room_root: Option<PathBuf>,
     /// Last `(date, n)` high-water the agent has seen; the `wait` cursor.
     cursor: Option<(String, u64)>,
     auto_spawn: bool,
@@ -82,6 +85,7 @@ impl DaemonProxy {
                 session_token,
                 client_info_name: client,
                 conn: None,
+                room_root: None,
                 cursor: None,
                 auto_spawn,
             })),
@@ -109,9 +113,17 @@ impl DaemonProxy {
         if let Some(p) = &s.project {
             args["project"] = json!(p);
         }
-        conn.call_tool("_join_internal", args, CONNECT_TIMEOUT)
+        let join = conn
+            .call_tool("_join_internal", args, CONNECT_TIMEOUT)
             .await
             .map_err(|e| format!("join: {e}"))?;
+        if let Some(root) = tool_result_text_json(&join)
+            .as_ref()
+            .and_then(|v| v.get("root"))
+            .and_then(Value::as_str)
+        {
+            s.room_root = Some(PathBuf::from(root));
+        }
         s.conn = Some(conn);
         Ok(())
     }
@@ -175,7 +187,8 @@ impl DaemonProxy {
             return err_result(&e);
         }
         let mut s = self.state.lock().await;
-        let since = match &s.cursor {
+        let since_cursor = s.cursor.clone();
+        let since = match &since_cursor {
             Some((d, n)) => json!({ "since_date": d, "since_n": n }),
             None => json!({}),
         };
@@ -188,14 +201,35 @@ impl DaemonProxy {
         };
         match res {
             Ok(v) => {
-                if let Some(payload) = tool_result_text_json(&v) {
-                    if let Some(hw) = payload.get("high_water") {
-                        if let (Some(d), Some(n)) = (
-                            hw.get("date").and_then(Value::as_str),
-                            hw.get("n").and_then(Value::as_u64),
-                        ) {
-                            s.cursor = Some((d.to_string(), n));
-                        }
+                let payload = tool_result_text_json(&v);
+                let still_waiting = payload
+                    .as_ref()
+                    .and_then(|p| p.get("still_waiting"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let hw = payload.as_ref().and_then(|p| p.get("high_water")).cloned();
+                if let Some(hw) = &hw {
+                    if let (Some(d), Some(n)) = (
+                        hw.get("date").and_then(Value::as_str),
+                        hw.get("n").and_then(Value::as_u64),
+                    ) {
+                        s.cursor = Some((d.to_string(), n));
+                    }
+                }
+                // New messages: read the content from disk and hand it to the agent.
+                if !still_waiting {
+                    if let Some(root) = s.room_root.clone() {
+                        let (sd, sn) = match &since_cursor {
+                            Some((d, n)) => (Some(d.as_str()), *n),
+                            None => (None, 0),
+                        };
+                        let turns = store::read_since(&root, sd, sn);
+                        let payload = json!({
+                            "still_waiting": false,
+                            "turns": turns,
+                            "high_water": hw,
+                        });
+                        return CallToolResult::success(vec![Content::text(payload.to_string())]);
                     }
                 }
                 value_to_call_result(&v)

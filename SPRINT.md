@@ -89,14 +89,17 @@ untouched**. Key decisions locked with the user:
   **day-scoped** (`GET /rooms/{name}/days` +
   `GET /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`).
 
-**Status: P0–P6 ALL DONE (34 tests green + live CLI/stdio smoke) on branch
-`feature/meetings-impl`. The meeting daemon, agent proxy, user-service, and the
-human TUI client are implemented end-to-end. The only unverified piece is the
-ratatui *rendering* of `rozum meetings attach` (needs interactive run); its
-logic (`MeetingClient`) is unit-tested. `src/gateway.rs` is untouched; the
-feature is fully additive — bare `rozum` and the legacy `proxy.rs`/`tui` still
-work. Remaining are polish follow-ups (idle-evict, graceful drain, bare-`rozum`
-cutover, full picker UX) + the deferred REST read.**
+**Status: P0–P6 ALL DONE + first polish pass (54 meeting tests green + live
+CLI/stdio smoke) on branch `feature/meetings-impl`. The meeting daemon, agent
+proxy, user-service, and human TUI client are implemented end-to-end.
+POLISH DONE: graceful SIGTERM drain (pending waits → `{ended:server-shutdown}`),
+idle-evict watchdog (`ROZUM_MEETINGS_IDLE_SECS`), and **content off the daemon**
+(`wait` returns coordination only; proxy + `MeetingClient` read content from disk
+via `store::read_since`). The only unverified piece is the ratatui *rendering* of
+`rozum meetings attach` (needs interactive run); its logic is unit-tested.
+`src/gateway.rs` untouched; fully additive. Remaining polish: bare-`rozum`
+cutover, full picker UX, second poll-connection in the TUI, per-room
+`catch_unwind` (mostly covered by tokio task isolation), + the deferred REST read.**
 Build sequence (each phase compiles + has its own tests; do them in order — P0→P2
 are pure library and land behind today's behavior, P3 brings the daemon up, P4/P5
 are clients and can go in parallel, P6 is the service):
