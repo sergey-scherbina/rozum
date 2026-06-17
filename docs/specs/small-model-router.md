@@ -116,5 +116,18 @@ Classification { label: String, confidence: f32, fallback_used: bool }
 
 ## Results
 
-<!-- Fill in after the M4 eval: classifier accuracy on the eval set + any
-     prompt/snap tweaks the eval drove. -->
+**P1 DONE** (`src/router.rs`). `ModelRouter` + `Label` + `Classification` +
+`snap_to_label`; 8 hardware-free unit tests (snap exact/cased/prefix/substring-
+false-positive/ambiguous/off-set, empty-set rejected, fallback path).
+
+**M4 eval — PASSED, 100%.** `model_router_eval` (Qwen3-4B-4bit, 6 labeled queries
+across code / math / chitchat): **6/6 correct**, every one an *exact* match
+(confidence 1.0, no fallback). The plain prompt + `snap_to_label` was enough — the
+model emitted exactly the label name each time, so constrained decode wasn't needed
+for this label set (kept as a P2 option for noisier/larger sets). Well above the
+0.80 gate-the-big-model bar.
+
+**Next (P2):** the RAG rerank/summarize worker (same `ModelRouter` shape over
+`rag_lite::Hit`s) and wiring `classify` into the cascade entry / gateway pre-filter
+(async-classify → `difficulty_of(label)` → entry tier; no change to the sync
+`Classifier` trait).
