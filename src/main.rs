@@ -135,6 +135,13 @@ enum Command {
         #[arg(long)]
         enable_thinking: bool,
 
+        /// Speculative decoding: a small **draft** model (same tokenizer family,
+        /// e.g. `mlx-community:Qwen3-4B-4bit`) proposes tokens the target verifies
+        /// in one forward — faster decode, byte-identical greedy output. Sets
+        /// `ROZUM_DRAFT_MODEL` (the matrix can also set it via env).
+        #[arg(long)]
+        draft_model: Option<String>,
+
         /// `status` or `stop` the shared gateway; omit to run the daemon.
         #[command(subcommand)]
         action: Option<GatewayAction>,
@@ -484,6 +491,7 @@ async fn main() {
             offline,
             n_ctx,
             enable_thinking,
+            draft_model,
             action,
         }) => match action {
             None => {
@@ -494,6 +502,13 @@ async fn main() {
                 if enable_thinking {
                     // SAFETY: set before the backend worker thread is spawned.
                     unsafe { std::env::set_var("ROZUM_ENABLE_THINKING", "1") };
+                }
+                // Speculative decoding: --draft-model sets ROZUM_DRAFT_MODEL, which
+                // run_gateway reads (env so the agentic matrix can enable it on the
+                // gateway it spawns without passing the flag).
+                if let Some(d) = &draft_model {
+                    // SAFETY: set before the backend worker thread is spawned.
+                    unsafe { std::env::set_var("ROZUM_DRAFT_MODEL", d) };
                 }
                 apply_cascade_strategy(strategy.as_deref());
                 apply_offline(offline);
@@ -687,6 +702,30 @@ async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: roz
             print_no_backend_hints(&model_spec);
             std::process::exit(1);
         }
+    };
+    // Speculative decoding: if a draft model is configured, build it and wrap the
+    // target in a SpecDecodeBackend. Iteration-1 falls back to target-only decode
+    // (byte-identical); the draft→verify path lands next. Spec:
+    // docs/specs/speculative-decoding.md.
+    let backend = match std::env::var("ROZUM_DRAFT_MODEL") {
+        Ok(draft_spec) if !draft_spec.trim().is_empty() => {
+            match build_from_config(&cfg, draft_spec.trim(), n_ctx).await {
+                Some(draft) => {
+                    eprintln!("  spec-decode draft:  {draft_spec}");
+                    std::sync::Arc::new(rozum::specdecode_backend::SpecDecodeBackend::new(
+                        backend, draft,
+                    )) as std::sync::Arc<dyn rozum::ChatBackend>
+                }
+                None => {
+                    eprintln!(
+                        "rozum gateway: --draft-model '{draft_spec}' failed to build; \
+                         serving target only"
+                    );
+                    backend
+                }
+            }
+        }
+        _ => backend,
     };
     eprintln!("rozum gateway  http://127.0.0.1:{port}");
     eprintln!("  model:              {model_spec}");

@@ -28,6 +28,7 @@ pub mod service;
 pub mod serving;
 pub mod share;
 pub mod specdecode;
+pub mod specdecode_backend;
 pub mod telegram;
 pub mod tui;
 pub mod web;
