@@ -1267,6 +1267,36 @@ mod inner {
         flat.as_slice::<u32>().to_vec()
     }
 
+    /// Feed `tokens` through `model` in chunks of `prefill_chunk_size()`, advancing
+    /// `cache` and discarding logits — bounds the prefill activation / `lm_head`
+    /// spike on a large prompt (the same single-shot-prefill OOM the dense Generate
+    /// path chunks for; critical for a 30B+ target). Eval'ing only the cache state
+    /// between chunks frees the per-chunk graph and lets MLX lazy-skip `lm_head` on
+    /// the discarded positions, so it stays cheap.
+    #[allow(dead_code)]
+    fn chunk_prefill_dense(
+        model: &mut LoadedModel,
+        cache: &mut Vec<Option<ConcatKeyValueCache>>,
+        tokens: &[u32],
+    ) {
+        if tokens.is_empty() {
+            return;
+        }
+        let chunk = qwen3_5::prefill_chunk_size().max(1) as usize;
+        let mut i = 0;
+        while i < tokens.len() {
+            let end = (i + chunk).min(tokens.len());
+            let inp = Array::from(&tokens[i..end]).index(NewAxis);
+            let _logits = dense_forward(model, &inp, None, cache).expect("spec-decode chunk prefill");
+            let mut to_eval: Vec<&Array> = Vec::new();
+            for c in cache.iter().flatten() {
+                to_eval.extend(c.state_arrays());
+            }
+            let _ = eval(to_eval);
+            i = end;
+        }
+    }
+
     /// MLX dense **target**: verifies `k` draft tokens in ONE forward over its KV.
     /// Holds the model + its external KV cache; `kv_len` is how many context
     /// tokens the cache currently covers — always a true prefix of `ctx`, since we
@@ -1282,26 +1312,29 @@ mod inner {
 
     impl crate::specdecode::Target for MlxDenseTarget<'_> {
         fn verify(&mut self, ctx: &[u32], draft: &[u32]) -> crate::specdecode::Verify {
-            // Feed the context tail not yet in the KV (`delta`, ≥1 token) plus the
-            // `k` draft tokens in one forward. `delta` is the corrected/bonus token
-            // from the previous round (or the whole prompt on the first call).
-            let d = ctx.len() - self.kv_len;
-            let mut feed: Vec<u32> = Vec::with_capacity(d + draft.len());
-            feed.extend_from_slice(&ctx[self.kv_len..]);
+            // The context tail not yet in the KV (`delta`, ≥1 token): the corrected/
+            // bonus token from last round, or the whole prompt on the first call.
+            let delta = &ctx[self.kv_len..];
+            let split = delta.len() - 1;
+            // Chunk-prefill all but the last delta token (no logits needed for them) —
+            // bounds the activation spike when `delta` is a big prompt.
+            chunk_prefill_dense(&mut self.model, &mut self.cache, &delta[..split]);
+            // Final forward: [last delta token] ++ k draft tokens. Row 0 predicts ctx
+            // position ctx.len() (the target's first greedy token), row i predicts
+            // ctx.len()+i — so the target greedy `t_i` is simply `preds[i]`.
+            let mut feed: Vec<u32> = Vec::with_capacity(1 + draft.len());
+            feed.push(delta[split]);
             feed.extend_from_slice(draft);
             let inp = Array::from(&feed[..]).index(NewAxis);
             let logits = dense_forward(&mut self.model, &inp, None, &mut self.cache)
                 .expect("spec-decode target forward");
             self.forwards += 1;
-            // Row j predicts the token at KV position kv_len+j+1, so the target's
-            // greedy token for ctx position ctx.len()+i is row (d-1+i): row d-1 is
-            // the last `delta` row (predicts the first new token), then one per draft.
             let preds = argmax_rows(&logits);
             let mut emit: Vec<u32> = Vec::new();
             let mut accepted = 0usize;
             let mut eos = false;
             for i in 0..draft.len() {
-                let t_i = preds[d - 1 + i];
+                let t_i = preds[i];
                 emit.push(t_i); // always the target's greedy token (byte-identical)
                 if draft[i] == t_i {
                     accepted += 1;
@@ -1319,7 +1352,7 @@ mod inner {
             }
             if accepted == draft.len() && !eos {
                 // All `k` accepted → append the target's free bonus token.
-                let bonus = preds[d - 1 + draft.len()];
+                let bonus = preds[draft.len()];
                 emit.push(bonus);
                 if self.eos.contains(&bonus) {
                     eos = true;
@@ -1360,13 +1393,19 @@ mod inner {
                 }
                 self.fed.truncate(cp);
             }
-            // Feed the new context tail, then greedily extend `k` tokens, one forward
-            // each. An empty tail (KV already covers all of `ctx`) → propose nothing;
-            // the target then emits its plain-greedy token (still correct, no speedup).
-            let mut step_in: Vec<u32> = ctx[self.fed.len()..].to_vec();
-            if step_in.is_empty() {
+            // The new context tail to feed; empty (KV already covers all of `ctx`) →
+            // propose nothing (the target then emits its plain-greedy token — still
+            // correct, no speedup).
+            let tail = &ctx[self.fed.len()..];
+            if tail.is_empty() {
                 return Vec::new();
             }
+            // Chunk-prefill all but the last tail token (bounds the spike on a big
+            // prompt), then greedily extend `k` tokens, one forward each.
+            let split = tail.len() - 1;
+            chunk_prefill_dense(&mut self.model, &mut self.cache, &tail[..split]);
+            self.fed.extend_from_slice(&tail[..split]);
+            let mut step_in: Vec<u32> = vec![tail[split]];
             let mut proposed: Vec<u32> = Vec::with_capacity(k);
             for _ in 0..k {
                 let inp = Array::from(&step_in[..]).index(NewAxis);
