@@ -548,6 +548,12 @@ fn load_meta(paths: &RoomPaths) -> Option<Meta> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Read a room's `meta.json` given its `root` (for discovery/summaries).
+pub fn read_meta(root: &Path) -> Option<Meta> {
+    let bytes = std::fs::read(root.join("meta.json")).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

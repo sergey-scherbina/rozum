@@ -23,10 +23,11 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, watch};
 
+use super::identity::Roster;
 use super::participant::ParticipantId;
 use super::registry::{RoomHandle, RoomRegistry};
 use super::room::Phase;
-use super::store::RoomPaths;
+use super::store::{self, RoomPaths};
 
 // ── Tool params ───────────────────────────────────────────────────────────────
 
@@ -55,6 +56,19 @@ pub struct RoomsJoinParams {
     pub session_token: Option<String>,
     #[serde(default)]
     pub kind: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RoomsNewParams {
+    /// Room name; default is a generated adjective-noun.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
+    pub client_info_name: Option<String>,
+    #[serde(default)]
+    pub session_token: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -155,10 +169,20 @@ impl MeetingServer {
                 .list()
                 .into_iter()
                 .map(|l| {
+                    let topic = store::read_meta(&l.root)
+                        .map(|m| m.topic)
+                        .unwrap_or_default();
+                    let participants = Roster::load(&RoomPaths::raw(l.root.clone()).roster_path())
+                        .participants
+                        .len();
+                    let last_date = store::day_dates(&l.root).last().cloned();
                     serde_json::json!({
                         "name": l.name,
                         "project": l.project,
                         "root": l.root,
+                        "topic": topic,
+                        "participants": participants,
+                        "last_date": last_date,
                     })
                 })
                 .collect();
@@ -209,6 +233,41 @@ impl MeetingServer {
             &serde_json::json!({ "room": name, "participant_id": id.0, "handle": handle, "root": root })
                 .to_string(),
         )
+        })
+        .await
+    }
+
+    #[tool(
+        name = "rooms.new",
+        description = "Create + join a new ad-hoc room (not tied to a project). Returns room + root."
+    )]
+    pub async fn rooms_new(&self, params: Parameters<RoomsNewParams>) -> CallToolResult {
+        guard("rooms.new", async move {
+            let p = params.0;
+            let name = p
+                .name
+                .unwrap_or_else(super::room_path::generate_room_name);
+            let paths = RoomPaths::ad_hoc_in(self.registry.state_dir(), &name);
+            let root = paths.root.clone();
+            let topic = p.topic.unwrap_or_default();
+            let room = match self.registry.get_or_create(paths, &name, &topic, None) {
+                Ok(r) => r,
+                Err(e) => return err_result(&format!("open error: {e}")),
+            };
+            let (sess_name, sess_token) = {
+                let s = self.session.lock().await;
+                (s.client_name.clone(), s.session_token.clone())
+            };
+            let client_name = p.client_info_name.unwrap_or(sess_name);
+            let token = p.session_token.or(sess_token);
+            let (id, handle) = self
+                .enter_room(room, name.clone(), &client_name, "human", token.as_deref(), None)
+                .await;
+            register_peer(&self.peer_slot, &self.session, &id).await;
+            text_result(
+                &serde_json::json!({ "room": name, "root": root, "participant_id": id.0, "handle": handle })
+                    .to_string(),
+            )
         })
         .await
     }
@@ -799,6 +858,55 @@ mod tests {
         })
         .await;
         assert_eq!(bad.is_error, Some(true));
+    }
+
+    #[tokio::test]
+    async fn rooms_new_creates_ad_hoc_and_list_enriches() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("meeting.sock");
+        let registry = Arc::new(RoomRegistry::new(dir.path().join("state")));
+        {
+            let sock = sock.clone();
+            tokio::spawn(async move {
+                let _ = serve_daemon(&sock, registry).await;
+            });
+        }
+        wait_for_socket(&sock).await;
+
+        let t = Duration::from_secs(5);
+        let mut conn = RoomConnection::connect(&sock, "alice", t).await.unwrap();
+
+        // Create an ad-hoc room with a topic.
+        let new = tool_result_text_json(
+            &conn
+                .call_tool("rooms.new", serde_json::json!({ "topic": "hi there" }), t)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let name = new["room"].as_str().unwrap().to_string();
+        assert!(!name.is_empty());
+        // Materialize it (lazy until first message).
+        conn.call_tool("meeting.submit", serde_json::json!({ "content": "x" }), t)
+            .await
+            .unwrap();
+
+        // rooms.list shows it, enriched with topic + participant count.
+        let list = tool_result_text_json(
+            &conn
+                .call_tool("rooms.list", serde_json::json!({}), t)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let room = list["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == serde_json::json!(name))
+            .expect("new room is listed");
+        assert_eq!(room["topic"], "hi there");
+        assert!(room["participants"].as_u64().unwrap() >= 1);
     }
 
     #[tokio::test]
