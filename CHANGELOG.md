@@ -1,5 +1,27 @@
 # Changelog
 
+## cascade — task-typed small-first cascade (commit-message gate)
+Completed: 2026-06-18
+
+`src/cascade/tasks.rs` adds the **small-model-cascade**: bounded single-shot tasks run small-first
+behind a cheap, task-specific validator gate that ACCEPTs a good cheap answer or ESCALATEs to the
+big model. A thin preset over the existing cascade (one `AcceptanceCheck` + a two-tier config
+builder + a prompt helper), not a new engine — health/backoff/budget/stats/lanes are inherited.
+
+- `SmallTask::CommitMessage` + `small_task_config(task, small, big)` → a two-tier `CascadeConfig`
+  (small=tier 0, big=tier 1, `AlwaysCheapest`; acceptance = `[StructuralCheck, <task gate>]`;
+  self-signal + escalation affordance off — the task has a concrete validator, not a self-report).
+- `CommitMessageGate` (free, deterministic): extracts the subject (first non-empty line, wrapping
+  fence/quote/heading stripped) and ESCALATEs on empty / over-72-char / refusal / chatter-preamble /
+  `<placeholder>`; otherwise ACCEPT. False-positive-safe (a legit "Fix commit message parser crash"
+  accepts). `commit_message_request(diff)` builds the tight gate-shaped prompt.
+
+10 fast tests (gate accept/escalate cases + e2e over a real `CascadeBackend` with mock backends:
+good cheap answer accepts at tier 0 with the big tier never called, junk escalates once, and a
+small-tier hit-rate batch where 3/4 cheap answers pass → big called exactly once). 383 fast tests
+green. Spec: `docs/specs/small-model-cascade.md`. Deferred: process-gated task types (one-line-fix
+via `cargo check`) and CLI wiring (`rozum commit-msg`).
+
 ## router — small-model RAG worker (rerank + grounded summarize); closes small-model-router
 Completed: 2026-06-18
 
