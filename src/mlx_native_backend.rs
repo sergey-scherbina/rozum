@@ -2500,6 +2500,104 @@ mod inner {
     /// (now exhausted) iterator so a hybrid caller can reclaim its internal cache +
     /// prefill snapshot for prefix reuse (`into_cache_and_snapshot`); dense callers
     /// drop it (releasing the external-cache borrow).
+    /// Wraps an MLX token iterator (`Generate`) as a `u32` producer for the shared
+    /// [`crate::engine::consume_tokens`], preserving the `async_eval`-lookahead
+    /// pipelining: build step n+1's graph + `async_eval` it BEFORE blocking on n's
+    /// readback, so the GPU never idles (byte-identical output; only eval timing).
+    /// `pipeline=false` (hybrid custom-kernel arches whose per-call `eval` already
+    /// blocks the forward) fetches the next token **lazily** — only when the consumer
+    /// asks — so a stop (EOS) never computes an extra forward (which would desync the
+    /// hybrid prefix-reuse cache). Errors surface as `Err(String)`; [`into_inner`]
+    /// returns the drained iterator for hybrid cache/snapshot reclaim.
+    struct PipelinedIds<I> {
+        iter: I,
+        cur: Option<Array>,
+        pending_err: Option<String>,
+        pipeline: bool,
+        needs_fetch: bool,
+    }
+
+    impl<I> PipelinedIds<I>
+    where
+        I: Iterator<Item = Result<Array, Exception>>,
+    {
+        fn new(mut iter: I, pipeline: bool) -> Self {
+            // Prime `cur` with the first token + `async_eval` it (as the old loop did,
+            // unconditionally). Hybrid `Generate` returns None when cancelled mid-prefill.
+            let (cur, pending_err) = match iter.next() {
+                Some(Ok(t)) => {
+                    let _ = mlx_rs::transforms::async_eval([&t]);
+                    (Some(t), None)
+                }
+                Some(Err(e)) => (None, Some(format!("mlx: {e}"))),
+                None => (None, None),
+            };
+            Self { iter, cur, pending_err, pipeline, needs_fetch: false }
+        }
+
+        fn into_inner(self) -> I {
+            self.iter
+        }
+
+        /// Pull the next token; `prefetch` kicks off its GPU work now so the GPU stays
+        /// fed while we block reading the current one. Streams errors via `pending_err`.
+        fn pull(&mut self, prefetch: bool) -> Option<Array> {
+            match self.iter.next() {
+                Some(Ok(t)) => {
+                    if prefetch {
+                        let _ = mlx_rs::transforms::async_eval([&t]);
+                    }
+                    Some(t)
+                }
+                Some(Err(e)) => {
+                    self.pending_err = Some(format!("mlx: {e}"));
+                    None
+                }
+                None => None,
+            }
+        }
+    }
+
+    impl<I> Iterator for PipelinedIds<I>
+    where
+        I: Iterator<Item = Result<Array, Exception>>,
+    {
+        type Item = Result<u32, String>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if let Some(e) = self.pending_err.take() {
+                return Some(Err(e));
+            }
+            // Serial: fetch the current token lazily (deferred from the previous call),
+            // so a stop on the previous token never computed this one.
+            if !self.pipeline && self.needs_fetch {
+                self.cur = self.pull(false);
+                self.needs_fetch = false;
+                if let Some(e) = self.pending_err.take() {
+                    return Some(Err(e));
+                }
+            }
+            let token = self.cur.take()?;
+            if self.pipeline {
+                // Pre-build + async_eval the NEXT token before blocking on the current.
+                let next = self.pull(true);
+                if eval([&token]).is_err() {
+                    return Some(Err("mlx: eval failed".into()));
+                }
+                let id = token.item::<u32>();
+                self.cur = next;
+                Some(Ok(id))
+            } else {
+                if eval([&token]).is_err() {
+                    return Some(Err("mlx: eval failed".into()));
+                }
+                let id = token.item::<u32>();
+                self.needs_fetch = true; // fetch n+1 on the NEXT call, not now
+                Some(Ok(id))
+            }
+        }
+    }
+
     fn stream_generation<I>(
         generate: I,
         tokenizer: &mut Tokenizer,
@@ -2513,252 +2611,30 @@ mod inner {
     where
         I: Iterator<Item = Result<Array, Exception>>,
     {
-        let mut out_ids: Vec<u32> = Vec::new();
-        let mut emitted = String::new(); // text already streamed to the client
-        let mut full_text = String::new(); // full decoded run (incl. tool markup)
-        let mut output_tokens: u32 = 0;
-        let mut tool_seen = false; // once `<tool_call>` appears, stop streaming text
-
-        let mut stop_reason = StopReason::EndTurn;
-        // Pipelined decode (mirrors Python `mlx_lm`): build step n+1's graph from the
-        // lazy token n and `async_eval` it BEFORE blocking on token n's readback, so
-        // the GPU never idles waiting for the CPU to build the next graph. Token
-        // output is identical to a serial loop — only the eval timing changes.
-        let mut iter = generate;
-        let mut cur = match iter.next() {
-            Some(Ok(t)) => {
-                let _ = mlx_rs::transforms::async_eval([&t]);
-                Some(t)
-            }
-            Some(Err(e)) => {
-                let _ = job
-                    .events
-                    .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
-                return iter;
-            }
-            None => None, // hybrid Generate returns None when cancelled mid-prefill
-        };
-        // Helper: pull the next token from the iterator, surfacing a stream error.
-        let pull = |iter: &mut I, prefetch: bool| -> Result<Option<Array>, ()> {
-            match iter.next() {
-                Some(Ok(t)) => {
-                    // Pipeline: kick off the next token's GPU work now, so the GPU
-                    // stays fed while we block reading the current one.
-                    if prefetch {
-                        let _ = mlx_rs::transforms::async_eval([&t]);
-                    }
-                    Ok(Some(t))
-                }
-                Some(Err(e)) => {
-                    let _ = job
-                        .events
-                        .send(Err(ModelError::BackendUnavailable(format!("mlx: {e}"))));
-                    Err(())
-                }
-                None => Ok(None),
-            }
-        };
-        // Per-token cost profiling (ROZUM_DETOK_PROFILE): split GPU sync (eval+item)
-        // from detok+string, to locate the prod-path overhead vs the raw bench.
-        let profile = std::env::var_os("ROZUM_DETOK_PROFILE").is_some();
-        // Runaway-loop guard (on by default; `ROZUM_REPEAT_GUARD=0` disables it).
+        // A2b (native-engine-spi): the engine-agnostic detok->event + finalize half
+        // now lives in `crate::engine::consume_tokens`. Here we only PRODUCE token
+        // ids -- `PipelinedIds` wraps the MLX `Generate` iterator, keeping the
+        // `async_eval`-lookahead pipelining and yielding `u32`s -- and return the
+        // (drained) iterator so a hybrid caller can reclaim its cache + snapshot.
         let repeat_guard = !matches!(std::env::var("ROZUM_REPEAT_GUARD").as_deref(), Ok("0"));
-        let (mut sync_ns, mut detok_ns, mut prof_tokens) = (0u128, 0u128, 0u32);
-        while let Some(token) = cur.take() {
-            if job.cancel.is_cancelled() {
-                stop_reason = StopReason::Cancelled;
-                break;
-            }
-            // Pipelined arches pre-build + `async_eval` the next token now (before we
-            // block on the current). Hybrid (custom-kernel) arches don't benefit — the
-            // kernel's per-call `eval` already blocks the forward — so they fetch the
-            // next token serially after processing the current (`pipeline == false`).
-            let next = if pipeline {
-                match pull(&mut iter, true) {
-                    Ok(n) => n,
-                    Err(()) => return iter,
-                }
-            } else {
-                None
-            };
-            let t_sync = profile.then(std::time::Instant::now);
-            if eval([&token]).is_err() {
-                let _ = job.events.send(Err(ModelError::BackendUnavailable(
-                    "mlx: eval failed".into(),
-                )));
-                return iter;
-            }
-            let id = token.item::<u32>();
-            if let Some(t) = t_sync {
-                sync_ns += t.elapsed().as_nanos();
-            }
-            if output_tokens == 0 && std::env::var("ROZUM_MLX_DEBUG").is_ok() {
-                eprintln!("FIRST_TOK {id} (eos={eos:?})");
-            }
-            if eos.contains(&id) {
-                stop_reason = StopReason::EndTurn;
-                break;
-            }
-            out_ids.push(id);
-            output_tokens += 1;
-
-            // Incremental detokenize: re-decode the run and emit the new suffix.
-            // Hold back a trailing replacement char (an incomplete multi-byte
-            // sequence, e.g. mid-Cyrillic) until the next token completes it.
-            let t_detok = profile.then(std::time::Instant::now);
-            if harmony {
-                // Decode KEEPING special tokens so the `<|channel|>`/`<|message|>`
-                // markers are literal; stream only the growing `final` channel text
-                // (the `analysis` chain-of-thought and tool-call commentary stay hidden).
-                if let Ok(marked) = tokenizer.decode(&out_ids, false) {
-                    let stable = marked.trim_end_matches('\u{FFFD}');
-                    full_text = stable.to_string();
-                    let ft = crate::harmony::parse_harmony(stable).final_text;
-                    if ft.len() > emitted.len() && ft.starts_with(&emitted) {
-                        let delta = ft[emitted.len()..].to_string();
-                        emitted = ft;
-                        if job
-                            .events
-                            .send(Ok(ChatEvent::TextDelta { text: delta }))
-                            .is_err()
-                        {
-                            return iter; // client dropped the stream
-                        }
-                    }
-                }
-            } else if let Ok(text) = tokenizer.decode(&out_ids, true) {
-                let stable = text.trim_end_matches('\u{FFFD}');
-                full_text = stable.to_string();
-                if !tool_seen {
-                    if let Some(pos) = stable.find(TOOL_OPEN) {
-                        // Emit any text before the tool opener, then go quiet.
-                        if pos > emitted.len() && stable.starts_with(&emitted) {
-                            let delta = stable[emitted.len()..pos].to_string();
-                            emitted = stable[..pos].to_string();
-                            let _ = job.events.send(Ok(ChatEvent::TextDelta { text: delta }));
-                        }
-                        tool_seen = true;
-                    } else if stable.len() > emitted.len() && stable.starts_with(&emitted) {
-                        let delta = stable[emitted.len()..].to_string();
-                        emitted = stable.to_string();
-                        if job
-                            .events
-                            .send(Ok(ChatEvent::TextDelta { text: delta }))
-                            .is_err()
-                        {
-                            return iter; // client dropped the stream
-                        }
-                    }
-                }
-            }
-
-            if let Some(t) = t_detok {
-                detok_ns += t.elapsed().as_nanos();
-                prof_tokens += 1;
-            }
-
-            if output_tokens as usize >= max_tokens {
-                stop_reason = StopReason::MaxTokens;
-                break;
-            }
-            // Runaway loop: the greedy decode is repeating a short block (≥64 tokens
-            // of perfect periodicity). Stop cleanly instead of generating to the cap
-            // and pinning the worker — this is the common runaway failure mode.
-            if repeat_guard && is_runaway_loop(&out_ids) {
-                if std::env::var_os("ROZUM_MLX_DEBUG").is_some() {
-                    eprintln!("REPEAT_GUARD stop after {output_tokens} tokens (loop detected)");
-                }
-                stop_reason = StopReason::EndTurn;
-                break;
-            }
-            // Advance. Pipelined: the already-`async_eval`'d next token. Serial:
-            // fetch it now (after processing the current), no pre-eval.
-            cur = if pipeline {
-                next
-            } else {
-                match pull(&mut iter, false) {
-                    Ok(n) => n,
-                    Err(()) => return iter,
-                }
-            };
-        }
-        if profile && prof_tokens > 0 {
-            let n = prof_tokens as f64;
-            eprintln!(
-                "DETOK_PROFILE tokens={prof_tokens}  sync(eval+item)={:.2}ms/tok  detok+string={:.2}ms/tok",
-                sync_ns as f64 / n / 1e6,
-                detok_ns as f64 / n / 1e6,
-            );
-        }
-        // The iterator can also end on its own (None): the hybrid `Generate`
-        // returns None when cancelled mid-prefill.
-        if job.cancel.is_cancelled() {
-            stop_reason = StopReason::Cancelled;
-        }
-
-        // Diagnostic: dump the raw marker-bearing run + the harmony parse, to verify
-        // exactly what the model emitted vs what we forward (ROZUM_HARMONY_DUMP=1).
-        if harmony && std::env::var_os("ROZUM_HARMONY_DUMP").is_some() {
-            let p = crate::harmony::parse_harmony(&full_text);
-            eprintln!("─── HARMONY_DUMP (stop={stop_reason:?} out_tokens={output_tokens}) ───");
-            eprintln!("RAW: {full_text:?}");
-            eprintln!(
-                "PARSED final={:?} | tool_calls={:?} | analysis_len={}",
-                p.final_text,
-                p.tool_calls,
-                p.analysis.len()
-            );
-        }
-
-        // Finalize: a cancelled run reports as-is; otherwise parse any tool calls.
-        // Harmony (gpt-oss) parses channels from the marker-bearing `full_text`;
-        // everything else uses the Qwen `<tool_call>` parser.
-        let tool_calls = if matches!(stop_reason, StopReason::Cancelled) {
-            Vec::new()
-        } else if harmony {
-            crate::harmony::parse_harmony(&full_text).tool_calls
-        } else {
-            crate::serving::parse_tool_calls(&full_text)
+        let meta = crate::engine::EngineMeta {
+            n_ctx: 0,
+            eos: eos.to_vec(),
+            model_type: String::new(),
+            harmony,
         };
-        if !tool_calls.is_empty() {
-            for (name, args) in tool_calls.iter() {
-                let id = next_tool_call_id();
-                let _ = job.events.send(Ok(ChatEvent::ToolUseStart {
-                    id: id.clone(),
-                    name: name.clone(),
-                }));
-                let _ = job.events.send(Ok(ChatEvent::ToolUseDelta {
-                    id: id.clone(),
-                    input_json_delta: args.clone(),
-                }));
-                let _ = job.events.send(Ok(ChatEvent::ToolUseEnd { id }));
-            }
-            stop_reason = StopReason::ToolUse;
-        } else if harmony {
-            // Flush any `final` text not yet streamed (e.g. a run that ended without
-            // a stop token, or the tail after the last emitted delta).
-            let ft = crate::harmony::parse_harmony(&full_text).final_text;
-            if ft.len() > emitted.len() && ft.starts_with(&emitted) {
-                let _ = job.events.send(Ok(ChatEvent::TextDelta {
-                    text: ft[emitted.len()..].to_string(),
-                }));
-            }
-        } else if tool_seen && full_text.len() > emitted.len() {
-            // A `<tool_call>` opener appeared (so text streaming stopped) but nothing
-            // parsed into a valid call — a truncated/malformed tool call (e.g. MoE
-            // greedy nondeterminism emitting odd markup). Don't swallow it: emit the
-            // held-back run as text so the client gets a non-empty response instead
-            // of silence. (parse_tool_calls also now tolerates a missing close tag.)
-            let _ = job.events.send(Ok(ChatEvent::TextDelta {
-                text: full_text[emitted.len()..].to_string(),
-            }));
-        }
-        let _ = job.events.send(Ok(ChatEvent::Done {
-            input_tokens: prompt_len as u32,
-            output_tokens,
-            stop_reason,
-        }));
-        iter
+        let mut ids = PipelinedIds::new(generate, pipeline);
+        crate::engine::consume_tokens(
+            &mut ids,
+            &meta,
+            prompt_len,
+            max_tokens,
+            repeat_guard,
+            &job.cancel,
+            |slice, skip| tokenizer.decode(slice, skip).ok(),
+            |ev| job.events.send(ev).is_ok(),
+        );
+        ids.into_inner()
     }
 
     /// Apply the model's chat template to the messages and tokenize, returning

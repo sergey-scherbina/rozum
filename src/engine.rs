@@ -242,6 +242,20 @@ where
         stop_reason = StopReason::Cancelled;
     }
 
+    // Diagnostic: dump the raw marker-bearing run + the harmony parse, to verify
+    // exactly what the model emitted vs what we forward (ROZUM_HARMONY_DUMP=1).
+    if meta.harmony && std::env::var_os("ROZUM_HARMONY_DUMP").is_some() {
+        let p = crate::harmony::parse_harmony(&full_text);
+        eprintln!("─── HARMONY_DUMP (stop={stop_reason:?} out_tokens={output_tokens}) ───");
+        eprintln!("RAW: {full_text:?}");
+        eprintln!(
+            "PARSED final={:?} | tool_calls={:?} | analysis_len={}",
+            p.final_text,
+            p.tool_calls,
+            p.analysis.len()
+        );
+    }
+
     // Finalize: a cancelled run reports as-is; otherwise parse any tool calls.
     let tool_calls = if matches!(stop_reason, StopReason::Cancelled) {
         Vec::new()
