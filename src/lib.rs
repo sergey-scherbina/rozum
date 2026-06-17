@@ -17,6 +17,7 @@ pub mod models;
 pub mod modelscope;
 pub mod obs;
 pub mod anthropic_http;
+pub mod harmony;
 pub mod openai_http;
 pub mod proxy;
 pub mod rag_lite;

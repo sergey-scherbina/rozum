@@ -294,6 +294,17 @@ mod inner {
         if eos.is_empty() {
             eos.push(QWEN3_EOS);
         }
+        // gpt-oss (harmony) also stops on <|call|> 200012 (a tool call) and
+        // <|endoftext|> 199999, per generation_config.json's eos list; config.json
+        // lists only <|return|> 200002, so without these a tool call never stops
+        // and the model hallucinates the tool's result + a final answer.
+        if model_type == "gpt_oss" {
+            for id in [199999u32, 200012] {
+                if !eos.contains(&id) {
+                    eos.push(id);
+                }
+            }
+        }
         (n_ctx, eos, model_type, kv_per_pos)
     }
 
@@ -1008,6 +1019,7 @@ mod inner {
                     max_tokens,
                     &job,
                     true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
+                    false, // harmony: Qwen-style <tool_call>, not the channel format
                 );
             }
             LoadedModel::Qwen3Moe(m) => {
@@ -1021,6 +1033,7 @@ mod inner {
                     max_tokens,
                     &job,
                     true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
+                    false, // harmony: Qwen-style <tool_call>, not the channel format
                 );
             }
             LoadedModel::GptOss(m) => {
@@ -1034,6 +1047,7 @@ mod inner {
                     max_tokens,
                     &job,
                     true,  // pipeline: dense overlaps (gpt-oss is single-stream)
+                    true,  // harmony: parse the channel format into final/tool_calls
                 );
             }
             LoadedModel::Llama(m) => {
@@ -1048,6 +1062,7 @@ mod inner {
                     max_tokens,
                     &job,
                     true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
+                    false, // harmony: Qwen-style <tool_call>, not the channel format
                 );
             }
             LoadedModel::Qwen2(m) => {
@@ -1061,6 +1076,7 @@ mod inner {
                     max_tokens,
                     &job,
                     true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
+                    false, // harmony: Qwen-style <tool_call>, not the channel format
                 );
             }
             LoadedModel::Gemma3(m) => {
@@ -1074,6 +1090,7 @@ mod inner {
                     max_tokens,
                     &job,
                     true, // pipeline: dense overlaps; hybrid kernel-eval blocks
+                    false, // harmony: Qwen-style <tool_call>, not the channel format
                 );
             }
             LoadedModel::Qwen35(m) => {
@@ -1100,6 +1117,7 @@ mod inner {
                           // dropped the per-call kernel eval, so the next token's graph
                           // can async_eval while we read the current's id (byte-exact;
                           // see mlx_qwen35_moe_decode_bench serial==pipe MATCH)
+                    false, // harmony: Qwen-style <tool_call>, not the channel format
                 );
                 hybrid_result = Some(generator.into_cache_and_snapshot());
             }
@@ -1125,6 +1143,7 @@ mod inner {
                           // dropped the per-call kernel eval, so the next token's graph
                           // can async_eval while we read the current's id (byte-exact;
                           // see mlx_qwen35_moe_decode_bench serial==pipe MATCH)
+                    false, // harmony: Qwen-style <tool_call>, not the channel format
                 );
                 hybrid_result = Some(generator.into_cache_and_snapshot());
             }
@@ -2438,6 +2457,7 @@ mod inner {
         max_tokens: usize,
         job: &Job,
         pipeline: bool,
+        harmony: bool,
     ) -> I
     where
         I: Iterator<Item = Result<Array, Exception>>,
@@ -2535,7 +2555,27 @@ mod inner {
             // Hold back a trailing replacement char (an incomplete multi-byte
             // sequence, e.g. mid-Cyrillic) until the next token completes it.
             let t_detok = profile.then(std::time::Instant::now);
-            if let Ok(text) = tokenizer.decode(&out_ids, true) {
+            if harmony {
+                // Decode KEEPING special tokens so the `<|channel|>`/`<|message|>`
+                // markers are literal; stream only the growing `final` channel text
+                // (the `analysis` chain-of-thought and tool-call commentary stay hidden).
+                if let Ok(marked) = tokenizer.decode(&out_ids, false) {
+                    let stable = marked.trim_end_matches('\u{FFFD}');
+                    full_text = stable.to_string();
+                    let ft = crate::harmony::parse_harmony(stable).final_text;
+                    if ft.len() > emitted.len() && ft.starts_with(&emitted) {
+                        let delta = ft[emitted.len()..].to_string();
+                        emitted = ft;
+                        if job
+                            .events
+                            .send(Ok(ChatEvent::TextDelta { text: delta }))
+                            .is_err()
+                        {
+                            return iter; // client dropped the stream
+                        }
+                    }
+                }
+            } else if let Ok(text) = tokenizer.decode(&out_ids, true) {
                 let stable = text.trim_end_matches('\u{FFFD}');
                 full_text = stable.to_string();
                 if !tool_seen {
@@ -2606,8 +2646,12 @@ mod inner {
         }
 
         // Finalize: a cancelled run reports as-is; otherwise parse any tool calls.
+        // Harmony (gpt-oss) parses channels from the marker-bearing `full_text`;
+        // everything else uses the Qwen `<tool_call>` parser.
         let tool_calls = if matches!(stop_reason, StopReason::Cancelled) {
             Vec::new()
+        } else if harmony {
+            crate::harmony::parse_harmony(&full_text).tool_calls
         } else {
             crate::serving::parse_tool_calls(&full_text)
         };
@@ -2625,6 +2669,15 @@ mod inner {
                 let _ = job.events.send(Ok(ChatEvent::ToolUseEnd { id }));
             }
             stop_reason = StopReason::ToolUse;
+        } else if harmony {
+            // Flush any `final` text not yet streamed (e.g. a run that ended without
+            // a stop token, or the tail after the last emitted delta).
+            let ft = crate::harmony::parse_harmony(&full_text).final_text;
+            if ft.len() > emitted.len() && ft.starts_with(&emitted) {
+                let _ = job.events.send(Ok(ChatEvent::TextDelta {
+                    text: ft[emitted.len()..].to_string(),
+                }));
+            }
         } else if tool_seen && full_text.len() > emitted.len() {
             // A `<tool_call>` opener appeared (so text streaming stopped) but nothing
             // parsed into a valid call — a truncated/malformed tool call (e.g. MoE
