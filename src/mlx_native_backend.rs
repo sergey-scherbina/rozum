@@ -1005,7 +1005,14 @@ mod inner {
         // generation-prompt tail doesn't recur. `ROZUM_PREFIX_CACHE=0` disables.
         let prefix_enabled =
             !matches!(std::env::var("ROZUM_PREFIX_CACHE").as_deref(), Ok("0"));
-        let dense = is_dense(model);
+        // gpt-oss owns an external `ConcatKeyValueCache` like the dense arches, so it
+        // supports prefix reuse (truncate to the shared prefix, prefill only the new
+        // suffix) — byte-exact since the sliding-window mask is recomputed from the
+        // (post-truncation) offset each forward. It is deliberately NOT in `is_dense`
+        // (which also gates the Qwen `<tool_call>` constraints that harmony must
+        // avoid), so include it here explicitly. Without reuse every turn re-prefills
+        // the whole growing conversation — brutally slow for multi-turn agents.
+        let dense = is_dense(model) || matches!(model, LoadedModel::GptOss(_));
         let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
         // Hybrid: a pre-populated heterogeneous cache when reusing (else None → the
         // hybrid `Generate` builds a fresh one via `init_cache`).
