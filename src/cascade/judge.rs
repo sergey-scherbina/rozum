@@ -86,7 +86,7 @@ impl Judge for ModelJudge {
     }
 }
 
-fn first_user_text(req: &ChatRequest) -> String {
+pub(crate) fn first_user_text(req: &ChatRequest) -> String {
     req.messages
         .iter()
         .rev()

@@ -23,6 +23,7 @@ pub mod openai_http;
 pub mod proxy;
 pub mod rag_lite;
 pub mod resident;
+pub mod router;
 pub mod sampler;
 pub mod service;
 pub mod serving;
