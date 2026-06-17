@@ -1618,8 +1618,13 @@ soon as any single track succeeds.
     target must share a tokenizer (Qwen3 family ✓; enforced).
   - Acceptance: `--draft-model <spec>` (or env) → greedy output **identical** to
     non-draft + a measured tok/s speedup on a real dense target. Effort: LARGE.
-  - **P0 (started):** the engine-agnostic orchestrator + mock-tested byte-identical
-    invariant (the testable core). Then the MLX dense `SpeculativeVerify` impl.
+  - **P0 DONE** (`src/specdecode.rs`, 3 tests, branch `feature/spec-decode`): the
+    engine-agnostic orchestrator (`Draft`/`Target` traits + `decode()`,
+    accept-longest-greedy-prefix) with the **byte-identical invariant proven with
+    a mock target** (oracle/all-wrong/flaky drafts all yield the exact target
+    greedy seq; oracle ~len/(k+1) forwards vs all-wrong's len). **P1 NEXT:** the
+    MLX **dense** `SpeculativeVerify` impl (batch-verify + KV-truncate-to-accepted
+    in `mlx_native_backend`), draft+target as two residents, `--draft-model` wiring.
 
 - [ ] small-model-router-rag - **Small model as router / classifier / RAG worker.**
   - Use a 4B/Coder-7B for the narrow, single-shot, latency-sensitive steps that
