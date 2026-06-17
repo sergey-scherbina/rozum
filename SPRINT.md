@@ -1629,12 +1629,16 @@ soon as any single track succeeds.
   decode/serving logic UP into one shared `drive` loop behind a `LocalEngine` trait;
   push hardware/kernels DOWN into small isolated components. The decode-control loop
   is currently copy-pasted (MLX `stream_generation`, GGUF's own loop) — x86 would be
-  a third. Hardware-independent; validated on MLX+GGUF on a Mac. Phases: **A1** define
-  the seam (`src/engine.rs`: `LocalEngine`/`EngineMeta`/`drive`) → **A2** extract
-  `drive` from the MLX leaf (MLX implements `LocalEngine`; tests + agentic matrix +
-  decode throughput unchanged) → **A3** GGUF adopts it + lift render/EOS/harmony/
-  model-source. Token-level seam, NOT a per-op tensor abstraction (avoids the
-  `mistralrs-mlx-direct` perf dead-end). Spec: `docs/specs/native-engine-spi.md`.
+  a third. Hardware-independent; validated on MLX+GGUF on a Mac. Phases: **A1 [x]**
+  define the seam (`src/engine.rs`: `LocalEngine`/`EngineMeta`/`drive`) → **A2a [x]**
+  extract the engine-agnostic consumption loop `consume_tokens` (detok→`ChatEvent`,
+  harmony + `<tool_call>` parse, EOS/max-tokens/runaway-guard, finalize) +
+  `is_runaway_loop`/`next_tool_call_id`, unit-tested hardware-free → **A2b [ ]** rewire
+  the MLX leaf (`stream_generation` → a `u32` producer feeding `consume_tokens`; MLX
+  implements `LocalEngine`; tests + agentic matrix + decode throughput unchanged) →
+  **A3 [ ]** GGUF adopts it + lift render/EOS/harmony/model-source. Token-level seam,
+  NOT a per-op tensor abstraction (avoids the `mistralrs-mlx-direct` perf dead-end).
+  Spec: `docs/specs/native-engine-spi.md`.
 
 - [ ] x86-native-p0-probe - **P0 of `x86-native-runtime`** (after `native-engine-spi`) (the MLX recipe — iGPU +
   unified memory + zero-copy `mmap` — on commodity x86 via cross-vendor Vulkan).
