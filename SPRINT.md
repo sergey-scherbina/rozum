@@ -1639,7 +1639,13 @@ soon as any single track succeeds.
   and delegates to `consume_tokens` (the ~200-line copy deleted). Validated: 314 lib
   tests; gpt-oss chat+tool+~90 tok/s; Qwen3.6-27B hybrid multi-turn prefix-reuse. (A
   formal `impl LocalEngine` wrapping load/meta/generate is the remaining tidy-up.) →
-  **A3 [ ]** GGUF adopts `consume_tokens` + lift render/EOS/harmony/model-source.
+  helpers consolidated to one source. **Core done — the shared layer the x86 leaf
+  needs is ready** (`consume_tokens`, `sampler`, `serving`/`harmony`, model-reference).
+  **A3 [deferred to x86 P1, on purpose]** GGUF is divergent (per-token detok + a
+  *streaming* tool parser that's arguably better than finalize parsing — forcing
+  `consume_tokens` would downgrade it); render/preflight are MLX-tokenizer-bound and
+  best lifted when the **x86 leaf is the real second consumer** shaping them, not
+  speculatively (the premature-abstraction trap the portability spec warns of).
   Token-level seam,
   NOT a per-op tensor abstraction (avoids the `mistralrs-mlx-direct` perf dead-end).
   Spec: `docs/specs/native-engine-spi.md`.
