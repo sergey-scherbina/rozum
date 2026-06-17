@@ -41,13 +41,7 @@ mod inner {
     /// `ROZUM_MAX_OUTPUT_TOKENS` (0 disables the cap). Backstop to the repetition
     /// guard below — that catches the common case (a loop) far sooner.
     const DEFAULT_OUTPUT_CEILING: usize = 8192;
-    /// Runaway-loop guard: if the last `REPEAT_WINDOW` generated tokens are exactly
-    /// periodic with some period ≤ `REPEAT_MAX_PERIOD` (i.e. a short block repeated
-    /// ≥ ~4×), the greedy decode is stuck in a loop — stop instead of generating to
-    /// the cap. 64 tokens of perfect periodicity essentially never occurs in real
-    /// output, so this does not false-trigger on legitimate repetitive text.
-    const REPEAT_WINDOW: usize = 64;
-    const REPEAT_MAX_PERIOD: usize = 16;
+    // Runaway-loop guard is shared: `crate::engine::is_runaway_loop`.
     /// Qwen3 `<|im_end|>`, used when the checkpoint config omits `eos_token_id`.
     const QWEN3_EOS: u32 = 151645;
     /// Fallback context window when config lacks `max_position_embeddings`.
@@ -715,20 +709,6 @@ mod inner {
         (0..temps.len()).map(|r| toks.index(r as i32).item::<u32>()).collect()
     }
 
-    /// True if the tail of `ids` is a runaway loop: the last `REPEAT_WINDOW` tokens
-    /// are exactly periodic with some period `1..=REPEAT_MAX_PERIOD`. Used to stop a
-    /// greedy decode that has fallen into a short repeating cycle. O(window·period).
-    pub(crate) fn is_runaway_loop(ids: &[u32]) -> bool {
-        if ids.len() < REPEAT_WINDOW {
-            return false;
-        }
-        let tail = &ids[ids.len() - REPEAT_WINDOW..];
-        // For each candidate period p, the window is periodic iff every position
-        // equals the one p back. The smallest such p is the true period; any p in
-        // range that satisfies it means ≥ REPEAT_WINDOW/p repeats of a ≤p block.
-        (1..=REPEAT_MAX_PERIOD).any(|p| (p..REPEAT_WINDOW).all(|i| tail[i] == tail[i - p]))
-    }
-
     /// Persisted dense KV cache from the previous request on this worker, for
     /// prefix reuse. `ids` is the prompt the cache represents (its KV covers
     /// `[0, ids.len())`); when the next prompt extends `ids`, the cache is
@@ -841,27 +821,7 @@ mod inner {
         )
     }
 
-    /// A process-unique tool-call id. The Anthropic/OpenAI contract requires each
-    /// `tool_use` id to be unique within a conversation so the client can pair the
-    /// matching `tool_result` back to it. A per-response `call_{i}` reset collides
-    /// across turns (`call_0` reappears every turn), and Claude Code then can't pair
-    /// the result — it drops the turn as `[Tool use interrupted]`, so the model never
-    /// sees its tool output and loops (e.g. re-reads a file forever). A monotonic
-    /// counter guarantees a fresh id every time, across all turns and requests.
-    fn next_tool_call_id() -> String {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        format!("call_{}", NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-
-    #[cfg(test)]
-    #[test]
-    fn tool_call_ids_are_unique() {
-        // A per-turn `call_0` reset collides across turns and the client (Claude
-        // Code) then can't pair the tool_result, dropping the turn as `[Tool use
-        // interrupted]`. Each id must be fresh.
-        assert_ne!(next_tool_call_id(), next_tool_call_id());
-    }
+    // Process-unique tool-call id is shared: `crate::engine::next_tool_call_id`.
 
     /// Render the prompt and stream token events. Dispatches on the model
     /// architecture; each `Generate` iterator feeds the shared streaming loop.
@@ -1347,7 +1307,7 @@ mod inner {
             };
             if !tool_calls.is_empty() {
                 for (name, args) in tool_calls.iter() {
-                    let id = next_tool_call_id();
+                    let id = crate::engine::next_tool_call_id();
                     let _ = self.job.events.send(Ok(ChatEvent::ToolUseStart {
                         id: id.clone(),
                         name: name.clone(),
@@ -1409,7 +1369,7 @@ mod inner {
             seq.stop = StopReason::MaxTokens;
             return true;
         }
-        if is_runaway_loop(&seq.out_ids) {
+        if crate::engine::is_runaway_loop(&seq.out_ids) {
             seq.stop = StopReason::EndTurn;
             return true;
         }
@@ -3281,7 +3241,7 @@ mod tests {
 
     #[test]
     fn runaway_loop_detection() {
-        use super::inner::is_runaway_loop;
+        use crate::engine::is_runaway_loop;
         // Below the window: never a loop yet.
         assert!(!is_runaway_loop(&[7u32; 10]));
         // Single-token spam (period 1) over the full window.

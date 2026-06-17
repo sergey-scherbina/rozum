@@ -431,6 +431,13 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_ids_are_unique() {
+        // A per-turn `call_0` reset collides across turns and the client (Claude
+        // Code) then can't pair the tool_result; each id must be fresh.
+        assert_ne!(super::next_tool_call_id(), super::next_tool_call_id());
+    }
+
+    #[test]
     fn eos_and_max_tokens_stop() {
         let table = std::collections::HashMap::from([(1, ("a", false)), (9, ("", false))]);
         let m = meta(false, vec![9]);
