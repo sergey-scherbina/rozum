@@ -149,19 +149,22 @@ impl MeetingServer {
         description = "List meeting rooms known to the daemon."
     )]
     pub async fn rooms_list(&self) -> CallToolResult {
-        let rooms: Vec<_> = self
-            .registry
-            .list()
-            .into_iter()
-            .map(|l| {
-                serde_json::json!({
-                    "name": l.name,
-                    "project": l.project,
-                    "root": l.root,
+        guard("rooms.list", async move {
+            let rooms: Vec<_> = self
+                .registry
+                .list()
+                .into_iter()
+                .map(|l| {
+                    serde_json::json!({
+                        "name": l.name,
+                        "project": l.project,
+                        "root": l.root,
+                    })
                 })
-            })
-            .collect();
-        text_result(&serde_json::json!({ "rooms": rooms }).to_string())
+                .collect();
+            text_result(&serde_json::json!({ "rooms": rooms }).to_string())
+        })
+        .await
     }
 
     #[tool(
@@ -169,6 +172,7 @@ impl MeetingServer {
         description = "Join a room by name (switches the session's room)."
     )]
     pub async fn rooms_join(&self, params: Parameters<RoomsJoinParams>) -> CallToolResult {
+        guard("rooms.join", async move {
         let p = params.0;
         let name = p.name;
         let room = match self.registry.get_by_name(&name) {
@@ -205,6 +209,8 @@ impl MeetingServer {
             &serde_json::json!({ "room": name, "participant_id": id.0, "handle": handle, "root": root })
                 .to_string(),
         )
+        })
+        .await
     }
 
     #[tool(
@@ -212,46 +218,49 @@ impl MeetingServer {
         description = "Internal: register in your project's room. Returns participant_id + handle."
     )]
     pub async fn join_internal(&self, params: Parameters<JoinInternalParams>) -> CallToolResult {
-        let p = params.0;
-        let Some(project) = p.project else {
-            return err_result("no project: call rooms.join(name) to pick a room");
-        };
-        let name = project_room_name(&project);
-        let paths = RoomPaths::for_project(Path::new(&project));
-        let root = paths.root.clone();
-        let room =
-            match self
-                .registry
-                .get_or_create(paths, &name, "", Some(PathBuf::from(&project)))
-            {
-                Ok(r) => r,
-                Err(e) => return err_result(&format!("open error: {e}")),
+        guard("_join_internal", async move {
+            let p = params.0;
+            let Some(project) = p.project else {
+                return err_result("no project: call rooms.join(name) to pick a room");
             };
-        let kind = match p.kind.as_deref() {
-            Some("bridge") => "bridge",
-            Some("human") => "human",
-            _ => "mcp",
-        };
-        let (id, handle) = self
-            .enter_room(
-                room,
-                name.clone(),
-                &p.client_info_name,
-                kind,
-                p.session_token.as_deref(),
-                Some(&project),
+            let name = project_room_name(&project);
+            let paths = RoomPaths::for_project(Path::new(&project));
+            let root = paths.root.clone();
+            let room =
+                match self
+                    .registry
+                    .get_or_create(paths, &name, "", Some(PathBuf::from(&project)))
+                {
+                    Ok(r) => r,
+                    Err(e) => return err_result(&format!("open error: {e}")),
+                };
+            let kind = match p.kind.as_deref() {
+                Some("bridge") => "bridge",
+                Some("human") => "human",
+                _ => "mcp",
+            };
+            let (id, handle) = self
+                .enter_room(
+                    room,
+                    name.clone(),
+                    &p.client_info_name,
+                    kind,
+                    p.session_token.as_deref(),
+                    Some(&project),
+                )
+                .await;
+            register_peer(&self.peer_slot, &self.session, &id).await;
+            text_result(
+                &serde_json::json!({
+                    "participant_id": id.0,
+                    "handle": handle,
+                    "room": name,
+                    "root": root,
+                })
+                .to_string(),
             )
-            .await;
-        register_peer(&self.peer_slot, &self.session, &id).await;
-        text_result(
-            &serde_json::json!({
-                "participant_id": id.0,
-                "handle": handle,
-                "room": name,
-                "root": root,
-            })
-            .to_string(),
-        )
+        })
+        .await
     }
 
     #[tool(
@@ -259,17 +268,20 @@ impl MeetingServer {
         description = "Submit a message. Anyone can submit at any time."
     )]
     pub async fn submit(&self, params: Parameters<SubmitParams>) -> CallToolResult {
-        let (room, id) = self.session_room().await;
-        let (Some(room), Some(id)) = (room, id) else {
-            return err_result("not-joined: call _join_internal first");
-        };
-        let res = room.lock().await.submit(&id, &params.0.content);
-        match res {
-            Ok(turn) => {
-                text_result(&serde_json::json!({ "date": turn.date, "n": turn.n }).to_string())
+        guard("meeting.submit", async move {
+            let (room, id) = self.session_room().await;
+            let (Some(room), Some(id)) = (room, id) else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let res = room.lock().await.submit(&id, &params.0.content);
+            match res {
+                Ok(turn) => {
+                    text_result(&serde_json::json!({ "date": turn.date, "n": turn.n }).to_string())
+                }
+                Err(e) => err_result(&e),
             }
-            Err(e) => err_result(&e),
-        }
+        })
+        .await
     }
 
     #[tool(
@@ -277,71 +289,74 @@ impl MeetingServer {
         description = "Long-poll (25s) for new messages since (since_date, since_n). Returns a transcript delta."
     )]
     pub async fn wait_my_turn(&self, params: Parameters<WaitParams>) -> CallToolResult {
-        let (room, my_id) = self.session_room().await;
-        let (Some(room), Some(my_id)) = (room, my_id) else {
-            return err_result("not-joined: call _join_internal first");
-        };
-        let since_date = params.0.since_date;
-        let since_n = params.0.since_n.unwrap_or(0);
+        guard("meeting.wait_my_turn", async move {
+            let (room, my_id) = self.session_room().await;
+            let (Some(room), Some(my_id)) = (room, my_id) else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let since_date = params.0.since_date;
+            let since_n = params.0.since_n.unwrap_or(0);
 
-        let notify = {
-            let mut r = room.lock().await;
-            r.mark_polling(&my_id);
-            r.notify.clone()
-        };
-        let _guard = PollGuard {
-            room: room.clone(),
-            id: my_id.clone(),
-        };
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
-        let mut shutdown = self.shutdown.clone();
+            let notify = {
+                let mut r = room.lock().await;
+                r.mark_polling(&my_id);
+                r.notify.clone()
+            };
+            let _guard = PollGuard {
+                room: room.clone(),
+                id: my_id.clone(),
+            };
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
+            let mut shutdown = self.shutdown.clone();
 
-        loop {
-            if *shutdown.borrow() {
-                return text_result("{\"ended\":true,\"reason\":\"server-shutdown\"}");
-            }
-            let notified = notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-
-            {
-                let r = room.lock().await;
-                if r.phase() == Phase::Ended {
-                    return text_result("{\"ended\":true,\"reason\":\"meeting-ended\"}");
+            loop {
+                if *shutdown.borrow() {
+                    return text_result("{\"ended\":true,\"reason\":\"server-shutdown\"}");
                 }
-                // Coordination only — compare high-water to the cursor; the
-                // client reads the content itself from disk (no bytes transit).
-                let hw = r.high_water();
-                if has_new(&hw, since_date.as_deref(), since_n) {
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+
+                {
+                    let r = room.lock().await;
+                    if r.phase() == Phase::Ended {
+                        return text_result("{\"ended\":true,\"reason\":\"meeting-ended\"}");
+                    }
+                    // Coordination only — compare high-water to the cursor; the
+                    // client reads the content itself from disk (no bytes transit).
+                    let hw = r.high_water();
+                    if has_new(&hw, since_date.as_deref(), since_n) {
+                        return text_result(
+                            &serde_json::json!({
+                                "still_waiting": false,
+                                "high_water": high_water_json(&hw),
+                                "responding": responding_ids(&r),
+                            })
+                            .to_string(),
+                        );
+                    }
+                }
+
+                if tokio::time::Instant::now() >= deadline {
+                    let r = room.lock().await;
                     return text_result(
                         &serde_json::json!({
-                            "still_waiting": false,
-                            "high_water": high_water_json(&hw),
+                            "still_waiting": true,
+                            "high_water": high_water_json(&r.high_water()),
                             "responding": responding_ids(&r),
                         })
                         .to_string(),
                     );
                 }
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                tokio::select! {
+                    _ = notified.as_mut() => {}
+                    _ = shutdown.changed() => {}
+                    _ = tokio::time::sleep(remaining) => {}
+                }
             }
-
-            if tokio::time::Instant::now() >= deadline {
-                let r = room.lock().await;
-                return text_result(
-                    &serde_json::json!({
-                        "still_waiting": true,
-                        "high_water": high_water_json(&r.high_water()),
-                        "responding": responding_ids(&r),
-                    })
-                    .to_string(),
-                );
-            }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            tokio::select! {
-                _ = notified.as_mut() => {}
-                _ = shutdown.changed() => {}
-                _ = tokio::time::sleep(remaining) => {}
-            }
-        }
+        })
+        .await
     }
 
     #[tool(
@@ -349,12 +364,15 @@ impl MeetingServer {
         description = "Signal you are composing a response."
     )]
     pub async fn mark_responding(&self) -> CallToolResult {
-        let (room, id) = self.session_room().await;
-        let (Some(room), Some(id)) = (room, id) else {
-            return err_result("not-joined: call _join_internal first");
-        };
-        room.lock().await.mark_responding(&id);
-        text_result("{\"ok\":true}")
+        guard("meeting.mark_responding", async move {
+            let (room, id) = self.session_room().await;
+            let (Some(room), Some(id)) = (room, id) else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            room.lock().await.mark_responding(&id);
+            text_result("{\"ok\":true}")
+        })
+        .await
     }
 
     #[tool(
@@ -362,45 +380,51 @@ impl MeetingServer {
         description = "Current room status: name, phase, participants, high-water."
     )]
     pub async fn status(&self) -> CallToolResult {
-        let (room, _) = self.session_room().await;
-        let Some(room) = room else {
-            return err_result("not-joined: call _join_internal first");
-        };
-        let r = room.lock().await;
-        let hw = r.high_water();
-        let participants: Vec<_> = r
-            .roster()
-            .participants
-            .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "id": e.id, "handle": e.handle, "base_name": e.base_name, "kind": e.kind,
+        guard("meeting.status", async move {
+            let (room, _) = self.session_room().await;
+            let Some(room) = room else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let r = room.lock().await;
+            let hw = r.high_water();
+            let participants: Vec<_> = r
+                .roster()
+                .participants
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "id": e.id, "handle": e.handle, "base_name": e.base_name, "kind": e.kind,
+                    })
                 })
-            })
-            .collect();
-        text_result(
-            &serde_json::json!({
-                "name": r.name(),
-                "topic": r.topic(),
-                "phase": format!("{:?}", r.phase()),
-                "high_water": high_water_json(&hw),
-                "budget_chars": r.budget_chars(),
-                "participants": participants,
-                "responding": responding_ids(&r),
-            })
-            .to_string(),
-        )
+                .collect();
+            text_result(
+                &serde_json::json!({
+                    "name": r.name(),
+                    "topic": r.topic(),
+                    "phase": format!("{:?}", r.phase()),
+                    "high_water": high_water_json(&hw),
+                    "budget_chars": r.budget_chars(),
+                    "participants": participants,
+                    "responding": responding_ids(&r),
+                })
+                .to_string(),
+            )
+        })
+        .await
     }
 
     #[tool(name = "meeting.leave", description = "Leave the current room.")]
     pub async fn leave(&self) -> CallToolResult {
-        let mut s = self.session.lock().await;
-        if let (Some(room), Some(id)) = (s.room.clone(), s.participant_id.take()) {
-            room.lock().await.leave(&id);
-        }
-        s.room = None;
-        s.room_name = None;
-        text_result("{\"ok\":true}")
+        guard("meeting.leave", async move {
+            let mut s = self.session.lock().await;
+            if let (Some(room), Some(id)) = (s.room.clone(), s.participant_id.take()) {
+                room.lock().await.leave(&id);
+            }
+            s.room = None;
+            s.room_name = None;
+            text_result("{\"ok\":true}")
+        })
+        .await
     }
 }
 
@@ -553,6 +577,24 @@ fn text_result(content: &str) -> CallToolResult {
 }
 fn err_result(msg: &str) -> CallToolResult {
     CallToolResult::error(vec![Content::text(msg)])
+}
+
+/// Run a room handler with **panic isolation**: a panic is caught and returned
+/// as a tool error, so it cannot abort the connection, other rooms, or the
+/// daemon. (tokio already isolates a panicked task; this also keeps the agent's
+/// connection alive instead of dropping it.)
+async fn guard<F>(tool: &str, fut: F) -> CallToolResult
+where
+    F: std::future::Future<Output = CallToolResult>,
+{
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(r) => r,
+        Err(_) => {
+            tracing::error!(tool, "room handler panicked — isolated");
+            err_result("internal-error: the operation panicked and was isolated")
+        }
+    }
 }
 
 fn high_water_json(hw: &super::store::HighWater) -> serde_json::Value {
@@ -742,6 +784,21 @@ mod tests {
             .map(|r| r["name"].as_str().unwrap().to_string())
             .collect();
         assert!(names.contains(&project_room_name(&project)));
+    }
+
+    #[tokio::test]
+    async fn guard_isolates_panics() {
+        // A normal handler passes through.
+        let ok = guard("t", async { text_result("{\"ok\":true}") }).await;
+        assert_ne!(ok.is_error, Some(true));
+        // A panicking handler is caught and returned as an error — not propagated.
+        let bad = guard("t", async {
+            panic!("boom");
+            #[allow(unreachable_code)]
+            text_result("never")
+        })
+        .await;
+        assert_eq!(bad.is_error, Some(true));
     }
 
     #[tokio::test]
