@@ -60,16 +60,18 @@ pub fn parse_harmony(marked: &str) -> HarmonyParsed {
             .unwrap_or(body_region.len());
         let body = &body_region[..body_end];
 
-        if header.starts_with("final") {
+        // A `to=functions.NAME` recipient means a tool call — check it FIRST,
+        // regardless of the channel name. gpt-oss-20b is not perfectly consistent
+        // with the format and sometimes attaches the recipient to the WRONG channel
+        // (e.g. `analysis to=functions.exec_command<|channel|>commentary…`); routing
+        // by channel name first would mis-file that as analysis and DROP the call,
+        // stalling the agent. A bare `commentary` (preamble, no recipient) is ignored.
+        if let Some(name) = function_recipient(header) {
+            out.tool_calls.push((name, body.trim().to_string()));
+        } else if header.starts_with("final") {
             out.final_text.push_str(body);
         } else if header.starts_with("analysis") {
             out.analysis.push_str(body);
-        } else if header.starts_with("commentary") {
-            // Tool call: `commentary to=functions.NAME ...`. A bare `commentary`
-            // (preamble) carries no recipient — ignore it.
-            if let Some(name) = function_recipient(header) {
-                out.tool_calls.push((name, body.trim().to_string()));
-            }
         }
 
         // Advance to the terminator so the next iteration finds the next channel.
@@ -120,6 +122,17 @@ mod tests {
         let a = "<|channel|>final<|message|>The capital";
         let b = "<|channel|>final<|message|>The capital of France is Paris.";
         assert!(parse_harmony(b).final_text.starts_with(&parse_harmony(a).final_text));
+    }
+
+    #[test]
+    fn recipient_on_wrong_channel_still_parses_as_tool_call() {
+        // gpt-oss-20b sometimes attaches the recipient to the analysis channel and
+        // doubles the channel marker; the call must still be extracted, not dropped.
+        let s = "<|channel|>analysis<|message|>Let's inspect.<|end|><|start|>assistant\
+                 <|channel|>analysis to=functions.exec_command<|channel|>commentary<|constrain|>json\
+                 <|message|>{\"cmd\":\"ls -R\",\"workdir\":\"./\"}";
+        let p = parse_harmony(s);
+        assert_eq!(p.tool_calls, vec![("exec_command".into(), "{\"cmd\":\"ls -R\",\"workdir\":\"./\"}".into())]);
     }
 
     #[test]
