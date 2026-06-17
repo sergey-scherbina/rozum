@@ -155,6 +155,30 @@ driven through a PTY.
    CC ≥ 2.1.80 in the launch check and treat the whole feature as best-effort
    additive on top of the always-correct `wait_my_turn` pull path.
 
+## Implementation note (2026-06-18) — ported to the daemon proxy
+
+The original line references in this spec (`proxy.rs:431`, the `heartbeat_task` model, the
+room-`wait_my_turn` long-poll) describe the **legacy** in-process proxy (`src/meeting/proxy.rs`),
+where the feature was first built. The P4 meeting-daemon refactor then made
+`src/meeting/daemon_proxy.rs` the **default** `rozum mcp-proxy` (legacy behind
+`ROZUM_LEGACY_PROXY=1`), which stranded channel-wakeup on the unused path. The feature is now
+implemented in **`daemon_proxy.rs`**, adapted to the daemon's architecture:
+
+- **Capability + peer:** `initialize` captures `context.peer` as `upstream_peer` and advertises
+  `experimental:{"claude/channel":{}}` via `channel_capabilities()`; `PROXY_INSTRUCTIONS` carries
+  the teaching text.
+- **Push by disk-tail, not a second long-poll:** the daemon is the single writer and clients read
+  transcripts directly from disk (`agent-meetings-daemon.md`). The wakeup task therefore tails the
+  room dir with `store::read_since(room_root, …)` every `WAKEUP_POLL` (1.5 s, well inside the 25 s
+  cycle) instead of opening a second daemon connection — no ghost participant, no turn consumed.
+  `read_since` is **inclusive of `n`**, so the cursor tracks *next-n* (`last.n + 1`).
+- **De-dup / priming:** own entries are skipped by `participant_id` (`self_pid` from the join
+  result); a fresh join/switch primes the cursor to `transcript_head` so no backlog replays.
+- **Lifecycle:** one task per session, started at `initialize`; it idles when `room_root` is
+  `None` (after `leave`) and re-primes when `rooms.join` re-points the room; teardown is process
+  exit (stdio server). The Tier-3 piggyback append (also previously legacy-only) rides the same
+  loop, auto-off when Tier-1 channels are active.
+
 ## Acceptance
 
 - With `rozum launch … claude` (flag injected) and the agent joined to a room

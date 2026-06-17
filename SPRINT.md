@@ -1471,16 +1471,33 @@ channel. `rozum launch … claude` is interactive, so it's on the right path.
 Spec: `docs/specs/channel-wakeup.md`. rmcp 1.7 confirmed to support both pieces
 (`ServerCapabilities.experimental` map + `ServerNotification::CustomNotification`).
 
-- [ ] channel-wakeup-capability - Declare `experimental:{"claude/channel":{}}` in the
-  proxy `InitializeResult` + extend `instructions` to teach the agent to read
+> **NOTE 2026-06-18:** channel-wakeup was originally built in the legacy `proxy.rs`, but
+> the P4 daemon refactor made `daemon_proxy.rs` the **default** `rozum mcp-proxy` (legacy
+> behind `ROZUM_LEGACY_PROXY=1`), stranding the whole feature (Tier-1 capability/pusher AND
+> the Tier-3 piggyback writer) on the unused legacy path. All three items below are now
+> **DONE by porting the mechanism into `daemon_proxy.rs`**, adapted to its disk-read
+> architecture (`feature/channel-wakeup-daemon-proxy`).
+
+- [x] channel-wakeup-capability - **DONE.** `daemon_proxy.rs` `initialize` now captures the
+  session `upstream_peer`, advertises `experimental:{"claude/channel":{}}`
+  (`channel_capabilities()`), and `PROXY_INSTRUCTIONS` teaches the agent to read
   `<channel source="rozum" …>` events as a wakeup (authoritative delta via `wait_my_turn`).
-- [ ] channel-wakeup-pusher - Per-joined-room background task (modeled on `heartbeat_task`)
-  that runs its own room long-poll and emits `notifications/claude/channel`
-  (`content` = rendered delta, `meta` = `{room,from,seq,your_turn}`) on `upstream_peer`.
-  Fire-and-forget; never crash the proxy/room conn on send failure.
-- [ ] channel-wakeup-lifecycle - Abort the task on leave / room-switch / teardown
-  (same points as `heartbeat_task`/`RoomConn`); de-dup own-authored turns; advance
-  `since_seq` past delivered entries so reconnect doesn't replay a notification storm.
+- [x] channel-wakeup-pusher - **DONE.** A per-session background task (`ensure_wakeup_task`,
+  started at `initialize`) **disk-tails** the joined room (`store::read_since` from the
+  proxy's `room_root` — read-only, no second daemon connection, no ghost participant, fits
+  the daemon's "clients read disk directly" contract) and emits `notifications/claude/channel`
+  (`content` = `render_stored_delta`, `meta` = `{room,from,seq,your_turn}`) on the peer.
+  Fire-and-forget; a send/read failure never crashes the proxy. Also carries the **Tier-3
+  piggyback** append (was likewise stranded on legacy), auto-off when channels are active.
+- [x] channel-wakeup-lifecycle - **DONE.** The task idles when `room_root` is `None` (after
+  `leave`) and **re-primes on a room switch** (`rooms.join` re-points `room_root`/`self_pid`/
+  `room_name`); teardown = process exit (stdio server). De-dups own-authored turns by
+  `participant_id` (`self_pid`); primes the cursor to the transcript head (`transcript_head`)
+  and advances it past delivered entries (`read_since` is inclusive of `n`, so it tracks
+  *next-n*) — no backlog/reconnect notification storm. Bonus: `rooms.join` now also refreshes
+  the proxy's disk-read `room_root` (a latent stale-room bug for `wait_my_turn` after a switch).
+  4 new unit tests (render skip-own/format/seq, all-own→none, capability+instructions declared,
+  transcript_head primes-past-backlog + delivers-fresh). 387 fast tests green.
 - [x] channel-wakeup-launch-flag - `rozum launch` injects
   `--dangerously-load-development-channels server:rozum` for Claude Code agents
   (suppressible; CC ≥ 2.1.80; non-`claude` programs untouched). **DONE** —

@@ -1,5 +1,29 @@
 # Changelog
 
+## meeting — channel-wakeup ported to the default daemon proxy
+Completed: 2026-06-18
+
+Channel-wakeup (push room activity into an idle Claude Code session as `<channel>` events) was
+built in the **legacy** `proxy.rs`, but the P4 daemon refactor made `daemon_proxy.rs` the default
+`rozum mcp-proxy` — stranding the whole feature (Tier-1 capability/pusher AND the Tier-3 piggyback
+writer) on the now-unused legacy path. Ported the mechanism into `daemon_proxy.rs`:
+
+- `initialize` captures the session peer and advertises `experimental:{"claude/channel":{}}`;
+  instructions teach the agent to treat `<channel source="rozum" …>` events as a wakeup and fetch
+  the authoritative delta via `meeting.wait_my_turn`.
+- A per-session background task **disk-tails** the joined room (`store::read_since` from the
+  proxy's `room_root` — no second daemon connection, no ghost participant; fits the daemon's
+  "clients read disk directly" contract) and pushes `notifications/claude/channel` deltas
+  fire-and-forget. It skips the agent's own entries (`participant_id`), primes past the backlog on
+  join, and re-primes on a room switch; `read_since` is inclusive of `n`, so the cursor tracks
+  next-n. Also carries the Tier-3 piggyback append (likewise previously legacy-only).
+- `rooms.join` now also re-points the proxy's disk-read `room_root` (fixes a latent stale-room bug
+  for `wait_my_turn` after a switch); `leave` idles the task.
+
+4 new unit tests (render skip-own/format/seq, all-own→none, capability+instructions declared,
+transcript_head primes-past-backlog + delivers-fresh). 387 fast tests green. Spec updated with the
+daemon-proxy implementation note.
+
 ## cascade — task-typed small-first cascade (commit-message gate)
 Completed: 2026-06-18
 
