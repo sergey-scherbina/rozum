@@ -44,7 +44,7 @@ self-exited (`clients_gone`) between the claude/codex phases — see
 `[[project-agentic-bench-clients-gone]]` (a different matrix bug, co-fixed here as it makes
 the run reach a clean teardown at all).
 
-- **Fix commit:** `6137351` (`scripts/bench/agentic.sh` graceful teardown + idle-secs).
+- **Fix commit:** `326bb9d` (`scripts/bench/agentic.sh` graceful teardown + idle-secs).
 
 **Open follow-up (defense-in-depth, NOT done — deliberately).** The deepest fix is rozum
 *itself* guaranteeing a bounded, non-wedging teardown (a real Metal-eval timeout that returns
