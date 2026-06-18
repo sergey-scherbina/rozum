@@ -56,6 +56,32 @@ Full writeup + the one-pass diagnostic methodology that localized it:
 
 ### Active
 
+#### matrix-failure-analysis (2026-06-18) — study every matrix red → fix or prove-structural+document
+
+From the full-canonical matrix on master (60 cells, `results/full-canonical-091719`): claude 19/20,
+opencode 17/20, codex 10/20 = 46/60, **0 panics / 0 rc=2** (infra clean; BUG-001 holds at full
+scale). The **14 reds** are being worked one root-cause at a time. Living doc + evidence + verdicts:
+`docs/matrix-failure-analysis.md`. Method: reproduce each cell with `KEEP=1`, classify by control
+(other agent passes ⇒ agent mechanism; all fail ⇒ model ceiling), prove our-bug vs model-limit
+before concluding.
+
+- [x] **Finding 1 — codex file-creation blocked by approval/meta-tool layer, NOT edit-format.**
+  Reproduced (codex `build` × 30B). The local model requests escalated permissions (codex rejects
+  under `approval=never`) + calls meta-tools (`request_user_input`) instead of plain shell; falls
+  back to `cargo new <name>` (subdir) and never overwrites the default `main.rs`. **Plain shell
+  works** (`cargo new` ran in 154 ms). **Overturns** the earlier "needs structured-edit MCP"
+  hypothesis (which came from a *mock*-codex harness). Candidate fix: trim codex's tool surface
+  (drop `request_user_input`/`update_plan`, a codex `--lean`) — see BACKLOG `codex-tool-surface-lean`.
+- [ ] **Confirm Finding 1's raw tool call** (does the model set `with_escalated_permissions`? which
+  meta-tools does codex 0.137 offer?) via `codex --json` / a gateway request dump.
+- [ ] **Finding 2 — opencode** (`fix` on gpt-oss + 27B): reproduce + transcript; mechanism likely distinct.
+- [ ] **Finding 3 — gpt-oss `build`** (the one all-agent ceiling): reproduce; prove our-bug (temp/prompt)
+  vs genuine gpt-oss ceiling; fix or document why insurmountable.
+- [ ] **Then:** apply the proven fixes, re-run the matrix, record residual proven-impossible reds in the doc.
+
+> Note (2026-06-18): staged on branch `docs/matrix-analysis` (off master) because a co-agent occupies
+> the master worktree; fast-forward / merge into master when it's free.
+
 #### Meeting-room daemon: disk-backed, multi-room, dedicated daemon (spec stage, 2026-06-16)
 
 Spec committed: `docs/specs/agent-meetings-daemon.md` (supersedes the

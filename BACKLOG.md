@@ -1,5 +1,18 @@
 # Backlog
 
+## Agentic-bench fix candidates (from matrix-failure-analysis)
+
+- [ ] codex-tool-surface-lean — **Candidate fix for the codex matrix reds (most of codex's 10/20).**
+  Root cause (reproduced, `docs/matrix-failure-analysis.md` Finding 1): rozum-launched codex gives the
+  local model codex's full tool surface incl. meta-tools (`request_user_input`, `update_plan`) and the
+  escalation path. The model then **requests escalated permissions** (codex rejects under
+  `approval=never`) and **calls meta-tools** instead of plain shell → wastes turns, falls back to
+  `cargo new <name>` (subdir), never writes real code. Plain shell itself **works**. Fix to try (NOT
+  yet concluded): trim codex's tool surface (disable/strip the meta-tools + neutralize gratuitous
+  escalation) — a codex analog of claude `--lean` (`exec_agent` in `src/main.rs`). Validate via an A/B
+  re-run of the codex `build`/`fix`/`debug` reds. NB: this **replaces** the earlier (mock-derived)
+  `structured-edit-MCP-for-codex` idea, which the real-CLI repro did not support.
+
 ## Optional Model Adapters
 
 Model adapters are optional. They must not be required for the default build,
