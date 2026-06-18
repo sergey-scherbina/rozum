@@ -3736,16 +3736,18 @@ mod tests {
 
     #[test]
     fn responses_tool_def_mapped() {
-        // Responses tools are FLAT (no nested `function`).
+        // Responses tools are FLAT (no nested `function`). Use a tool the default codex-lean
+        // filter keeps (`shell`), so this exercises the flat→ToolDef mapping regardless of
+        // `ROZUM_CODEX_LEAN` (which defaults ON and drops non-coding tools like `get_weather`).
         let tools = vec![RespTool {
             kind: Some("function".into()),
-            name: Some("get_weather".into()),
-            description: Some("Get weather".into()),
+            name: Some("shell".into()),
+            description: Some("Run a shell command".into()),
             parameters: Some(json!({ "type": "object" })),
         }];
         let defs = responses_tools_to_internal(&tools);
         assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "get_weather");
+        assert_eq!(defs[0].name, "shell");
     }
 
     #[test]
