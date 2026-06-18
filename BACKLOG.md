@@ -478,6 +478,25 @@ These items turn "portable in principle" into "portable by `cargo build`".
   seam → A2 MLX adopts (tests/matrix/throughput unchanged) → A3 GGUF adopts + lift render/
   EOS/harmony/model-source. Net: a new engine = "implement `LocalEngine` + kernels". Full
   write-up: `docs/specs/native-engine-spi.md`. Effort: MEDIUM (behavior-preserving refactor).
+  - **Progress 2026-06-18** (branch `feature/native-engine-spi-a2-a3`): A1 seam + A2a
+    `consume_tokens` + A2b MLX-rewire done; `model_source` extracted (incl. the KV preflight
+    estimator); **`drive` implemented + unit-tested** (generate→`consume_tokens`; render/detok
+    caller-side). Remaining = the deferred-risky sub-item below + A3 GGUF/render lift (shape
+    with the real x86 consumer; don't downgrade GGUF's *streaming* tool parser).
+
+- [ ] native-engine-spi-mlx-reclaim-seam - **DEFERRED / RISKY (user: leave for later, 2026-06-18).**
+  Route the **MLX** leaf formally through `LocalEngine`/`drive`. **Blocker (found in code):** the
+  hybrid arches (`qwen3_5`/`qwen3_5_moe`) reclaim the generator's internal KV/conv cache *after* a
+  run via `into_cache_and_snapshot()` (for next-turn prefix reuse), but the trait's
+  `generate() -> Box<dyn Iterator>` return **erases** that concrete state — so forcing hybrid MLX
+  through `drive` would break shipped prefix reuse. Needs a **trait cache-reclaim seam** (an
+  associated `GenerationState` / `into_generation_state` hook, or engine-owned cache) — a real
+  refactor of the hybrid `Generate`. Also relax `LocalEngine: Send` (MLX model is `!Send`; the seam
+  is single-threaded on the worker). **Gate (mandatory):** the full agentic matrix + a
+  before/after decode-throughput check on a clean machine — byte-exact greedy unchanged AND no
+  prefix-reuse regression. Best shaped *with* the real x86 engine (no hybrid-reclaim quirk), per
+  the spec's 2026-06-18 note. Dense MLX has no reclaim and could adopt `drive` first as a
+  lower-risk warm-up. Spec: `docs/specs/native-engine-spi.md` (A2 risk section).
 
 - [ ] x86-native-runtime - **The MLX recipe on commodity x86: a native iGPU engine.**
   Bring MLX's architectural advantage — compute on the **integrated GPU**, **unified

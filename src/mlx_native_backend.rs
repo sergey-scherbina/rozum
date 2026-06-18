@@ -190,40 +190,8 @@ mod inner {
     /// Fraction of currently-available RAM we let the KV cache occupy, leaving
     /// slack for weights, activations and the OS.
     const KV_SAFETY_FRAC: f64 = 0.75;
-    /// KV cache element size (bf16 compute dtype).
-    const KV_DTYPE_BYTES: u64 = 2;
-
-    /// Bytes the KV cache grows per context position: `2 (k+v) * full_attn_layers
-    /// * n_kv_heads * head_dim * dtype`. Only the full-attention layers hold KV;
-    /// GatedDeltaNet conv/recurrent state is O(1) in context. Reads `text_config`
-    /// (the multimodal hybrid wrapper) if present, else the top level. `None` if
-    /// the config lacks the needed fields.
-    pub(crate) fn kv_bytes_per_position(cfg: &serde_json::Value) -> Option<u64> {
-        let c = cfg.get("text_config").unwrap_or(cfg);
-        let n_layers = c.get("num_hidden_layers")?.as_u64()?;
-        // Hybrid: every `full_attention_interval`-th layer is full attention.
-        // Dense models omit it -> all layers hold KV.
-        let interval = c
-            .get("full_attention_interval")
-            .and_then(|v| v.as_u64())
-            .filter(|&i| i > 0)
-            .unwrap_or(1);
-        let full_attn_layers = if interval > 1 {
-            n_layers / interval
-        } else {
-            n_layers
-        };
-        let n_kv = c.get("num_key_value_heads")?.as_u64()?;
-        let head_dim = c
-            .get("head_dim")
-            .and_then(|v| v.as_u64())
-            .or_else(|| {
-                let hidden = c.get("hidden_size")?.as_u64()?;
-                let heads = c.get("num_attention_heads")?.as_u64()?;
-                (heads > 0).then(|| hidden / heads)
-            })?;
-        Some(2 * full_attn_layers * n_kv * head_dim * KV_DTYPE_BYTES)
-    }
+    // KV-cache bytes-per-position estimate (used by the preflight below) now lives
+    // in the engine-agnostic `crate::model_source` so any safetensors leaf reuses it.
 
     /// RAM available right now (macOS `vm_stat`: free + inactive + speculative +
     /// purgeable pages). `None` if it can't be read.
@@ -282,7 +250,7 @@ mod inner {
                     }
                     _ => {}
                 }
-                kv_per_pos = kv_bytes_per_position(&v);
+                kv_per_pos = crate::model_source::kv_bytes_per_position(&v);
             }
         }
         if eos.is_empty() {
@@ -3424,31 +3392,7 @@ mod tests {
     }
 
 
-    // KV bytes/position: only full-attention layers count (hybrid uses
-    // full_attention_interval), head_dim derived from hidden/heads if absent.
-    #[cfg(feature = "mlx-native")]
-    #[test]
-    fn kv_bytes_per_position_estimate() {
-        use super::inner::kv_bytes_per_position;
-        // Hybrid wrapper: 64 layers, interval 4 -> 16 full-attn; kv heads 4,
-        // head_dim 256, bf16. 2*16*4*256*2 = 65536.
-        let hybrid = serde_json::json!({
-            "text_config": {
-                "num_hidden_layers": 64, "full_attention_interval": 4,
-                "num_key_value_heads": 4, "head_dim": 256
-            }
-        });
-        assert_eq!(kv_bytes_per_position(&hybrid), Some(65_536));
-        // Dense (no interval -> all 28 layers), head_dim from hidden/heads.
-        let dense = serde_json::json!({
-            "num_hidden_layers": 28, "num_key_value_heads": 8,
-            "hidden_size": 4096, "num_attention_heads": 32
-        });
-        // head_dim = 4096/32 = 128; 2*28*8*128*2 = 114688.
-        assert_eq!(kv_bytes_per_position(&dense), Some(114_688));
-        // Missing fields -> None.
-        assert_eq!(kv_bytes_per_position(&serde_json::json!({})), None);
-    }
+    // (KV bytes/position estimate + its test moved to `crate::model_source`.)
 
     // (The deterministic `<tool_call>` parser checks now live in `serving.rs`.)
 
