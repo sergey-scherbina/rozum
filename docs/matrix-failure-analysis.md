@@ -32,7 +32,7 @@ codex `⏱` RUN_TIMEOUTs are a *symptom* (retry loops), not a separate cause.
 
 ---
 
-## Finding 1 — codex: file creation blocked by the approval / meta-tool layer (NOT the edit format)
+## Finding 1a — codex: file creation stalls in the approval / meta-tool layer (Qwen3-30B repro)
 
 **Repro:** codex `build` × Qwen3-30B-A3B (claude✓ opencode✓ codex✗), `KEEP=1`,
 workdir `/tmp/rozum-agentic-VJepXV` (2026-06-18).
@@ -66,23 +66,79 @@ plain shell. It then leans on `cargo new <name>` (subdir) and never overwrites t
 > distract even 35B; codex-lean ✓ vs full ✗") — but rozum's codex integration does NOT trim codex's
 > meta-tools the way `--lean` trims claude's.
 
-**Open (to confirm before concluding a fix):**
-- The raw tool call — does the model set `with_escalated_permissions=true`? Which meta-tools does
-  codex 0.137 offer? (gateway doesn't log request bodies — capture via `codex --json` or a dump.)
+### Finding 1b — codex writes CODE via `echo > file`; shell escaping corrupts it (gpt-oss build repro)
 
-**Fix candidates (NOT yet concluded):**
-- Trim codex's tool surface: drop/disable `request_user_input` + `update_plan` (a codex analog of
-  `--lean`) so the model uses plain shell / apply_patch directly.
-- Gateway-normalize the escalation flag out of the model's tool calls so codex stops rejecting them.
-- Validate with an A/B re-run of the codex `build`/`fix`/`debug` reds.
+**codex's failure mode is MODEL-DEPENDENT** — a second repro (codex `build` × gpt-oss-20b, workdir
+`/tmp/rozum-agentic-oygvsq`) showed a *different* mechanism, no approval errors this time:
+- The model wrote files with `/bin/zsh -lc 'echo -e "fn main(){…println!(\"{}\",rev)…}" > src/main.rs'`
+  — files landed in **cwd** (no subdir here).
+- But the produced `src/main.rs` is `println!({},rev);` — **the format string `"{}"` lost its quotes**
+  to zsh escaping. It does not compile. codex then ran out of the wall-clock budget (timed out at
+  180 s) before detecting/fixing it.
+
+**This is the real answer to "why doesn't codex work through plain shell?"** Shell is simple for
+*commands*, but writing **code** through `echo "…" > file` is a trap: any code with quotes/braces/
+`!` gets mangled by shell escaping. claude/opencode write files with a **structured tool** (raw
+content, no shell layer) → the code lands intact. codex leans on shell-echo (or hits the approval
+path of Finding 1a for apply_patch) → the code is corrupted or never lands. Reconciles the old "shell
+is simpler" note: simpler for commands, fragile for source code.
+
+**Open:** why does the model pick `echo >` over codex's `apply_patch` (which would avoid escaping)?
+Is apply_patch being rejected/penalized (cf. Finding 1a), or just not preferred? Capture the raw
+tool calls (`codex --json` / gateway dump).
 
 ---
 
-## Finding 2 — opencode (`fix` on gpt-oss, 27B) — INVESTIGATING
-Not yet reproduced with a transcript. opencode shares only the `fix` reds with codex (and passes
-nearly everything else, incl. 5/5 on 30B+35B), so its mechanism is likely distinct.
+## Finding 2 — opencode: model appends a DUPLICATE `fn main` → compile error (gpt-oss build repro)
 
-## Finding 3 — gpt-oss `build` (the one model/task ceiling — all 3 agents fail) — INVESTIGATING
-Not yet reproduced. Hypotheses to test: temp-floor not applied / "no subdirectory" prompt
-ambiguity / genuine gpt-oss ceiling. claude fails build ONLY on gpt-oss (5/5 build on all Qwen),
-so it is gpt-oss-specific — our-bug vs ceiling still to be proven.
+**Repro:** opencode `build` × gpt-oss-20b, workdir `/tmp/rozum-agentic-0e8uZt`. opencode uses
+chat/completions + its built-in `write`/`edit`/`bash` tools (NOT codex's Responses path), so its
+structured write does **not** mangle content. Evidence — the produced `src/main.rs` (323 B):
+```rust
+fn main() { /* correct reverse logic: chars().rev().collect(); println!("{}", reversed) */ }
+
+fn main() {        // ← a DUPLICATE main appended by the model
+    main();
+}
+```
+Two `fn main` → `error[E0428]` duplicate definition. opencode DID iterate (it saw `cargo run`'s "no
+targets specified" error and Edited `Cargo.toml` to add `[bin]`+version), so its loop works — but the
+model's *edit* appended a second `main` instead of replacing, and it ran out of time (153 s) before
+fixing the duplicate. **Root: a model edit-quality error** (append-vs-replace), surfaced by opencode's
+structured write; not an infra bug. Distinct from codex.
+
+## Finding 3 — gpt-oss `build` is NOT a model ceiling — it's flaky + agent-recovery
+
+**Correction to the classification.** The "all 3 agents fail ⇒ ceiling" label came from a single
+matrix run. The repro shows **claude PASSES gpt-oss build** (62 s → `olleh`). So there is **no true
+model/task ceiling among the 14** — a single run can mislabel a *flaky* cell.
+
+What actually happens (all from the same gpt-oss-20b model): the model emits a **buggy first draft**
+of `main.rs` (claude's first draft: `chars().rev()..collect()` typo + `print!("{}", "{}")` garbage,
+and it even emitted a malformed `Edit` with empty params → `InputValidationError`). Whether the run
+passes is decided by **agent recovery within the time budget**:
+- **claude** ✓ — read the file back, then **re-`Write` the whole file** with correct code (raw
+  content, no append) → compiles → `olleh`. Recovered from both the model's bad draft and its own
+  malformed tool call.
+- **codex** ✗ — shell-echo mangled the code (Finding 1b) + too slow → timed out before recovery.
+- **opencode** ✗ — duplicate `fn main` (Finding 2) + too slow → timed out before recovery.
+
+---
+
+## Synthesis (so far — NOT final)
+
+The 14 reds are **not one bug**. Three interacting factors, none a clean infra defect:
+1. **Model code-quality** — gpt-oss-20b (and weaker models) emit buggy first drafts. Universal; only
+   *iteration* or a stronger model fixes it. claude masks it via fast full-file rewrites.
+2. **Agent file-write mechanism** — claude (raw structured `Write`) is robust; **codex** corrupts code
+   via shell-echo (1b) or stalls in the approval/escalation path (1a); **opencode** is structurally
+   fine but exposed a model append-vs-replace error (F2).
+3. **Time budget / speed** — codex is slow on our gateway → too few iterations to recover from 1+2 →
+   RUN_TIMEOUTs. The `⏱` reds are this, compounding the above.
+
+**Implication for "fix vs prove-impossible":** the recovery-and-speed factors are partly ours
+(codex tool-surface / apply-patch preference, decode speed), while the model code-quality factor is a
+ceiling for a given model. Verdicts per fail will be recorded above as each is fixed or proven structural.
+
+**Still to do:** raw codex tool-call capture (1a/1b); repro the `fix`/`debug`/`test` reds (edit-on-
+existing-file, a different shape than create-from-scratch); A/B any candidate fix; re-run the matrix.
