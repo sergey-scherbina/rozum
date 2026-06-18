@@ -331,6 +331,20 @@ enum MeetingsAction {
     Install,
     /// Stop + remove the user service.
     Uninstall,
+    /// Post a one-shot message to a room (the cwd project's room by default).
+    ///
+    /// The transport for coordination hooks (SessionStart/Stop) and quick human/script
+    /// posts. Auto-spawns the daemon if it isn't running.
+    Post {
+        /// The message text.
+        text: String,
+        /// Target room name (from `rozum meetings status`); default = the cwd project's room.
+        #[arg(long)]
+        room: Option<String>,
+        /// Author display name (default: $USER, or $ROZUM_MEETING_AS). Hooks pass the agent's name.
+        #[arg(long = "as")]
+        as_display: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -616,6 +630,9 @@ async fn main() {
             }
             MeetingsAction::Install => run_meetings_install(),
             MeetingsAction::Uninstall => run_meetings_uninstall(),
+            MeetingsAction::Post { text, room, as_display } => {
+                run_meetings_post(text, room, as_display).await
+            }
         },
         Some(Command::CommitMsg { model, n_ctx }) => run_commit_msg(model, n_ctx).await,
         Some(Command::Telegram { room, name }) => {
@@ -1581,6 +1598,42 @@ fn spawn_detached_meetings() -> std::io::Result<std::process::Child> {
         cmd.process_group(0);
     }
     cmd.spawn()
+}
+
+/// `rozum meetings post <text>` — one-shot post to a room (project room by default).
+/// Auto-spawns the daemon if down. Author display = `--as`, else $ROZUM_MEETING_AS, else $USER.
+async fn run_meetings_post(text: String, room: Option<String>, as_display: Option<String>) {
+    use rozum::meeting::daemon::daemon_alive;
+    use rozum::meeting::daemon_proxy::{detect_project, spawn_daemon};
+    use rozum::meeting::room_path::meeting_sock;
+    use rozum::meeting::tui_client::{PostTarget, post_once};
+
+    let sock = meeting_sock();
+    if !daemon_alive(&sock).await {
+        spawn_daemon().await;
+    }
+    let display = as_display
+        .or_else(|| std::env::var("ROZUM_MEETING_AS").ok())
+        .or_else(|| std::env::var("USER").ok())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "operator".into());
+    let target = match room {
+        Some(name) => PostTarget::Named(name),
+        None => match detect_project() {
+            Some(p) => PostTarget::Project(p),
+            None => {
+                eprintln!("meetings post: no project detected — run inside a repo, or pass --room");
+                std::process::exit(1);
+            }
+        },
+    };
+    match post_once(&sock, target, &display, &text).await {
+        Ok(room) => eprintln!("posted to '{room}' as {display}"),
+        Err(e) => {
+            eprintln!("meetings post: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn run_meetings_stop() {

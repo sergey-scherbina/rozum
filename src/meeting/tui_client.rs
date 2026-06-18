@@ -395,6 +395,41 @@ fn prev_day(root: &Path, oldest: &str) -> Option<(String, Vec<StoredTurn>)> {
     Some((prev, turns))
 }
 
+/// Where a one-shot [`post_once`] message goes.
+pub enum PostTarget {
+    /// The canonical room of this git project (a project path).
+    Project(String),
+    /// A named room from `rooms.list`.
+    Named(String),
+}
+
+/// One-shot post: connect as `display`, join `target`, submit `text`, return the room name.
+/// The shared transport for `rozum meetings post` and the coordination hooks (SessionStart/Stop).
+/// The daemon must already be reachable at `sock` — the caller ensures it's up.
+pub async fn post_once(
+    sock: &Path,
+    target: PostTarget,
+    display: &str,
+    text: &str,
+) -> ClientResult<String> {
+    let mut client = MeetingClient::connect(sock, display).await?;
+    let room = match target {
+        PostTarget::Project(p) => client.enter_project(&p).await?,
+        PostTarget::Named(name) => {
+            let info = client
+                .list_rooms()
+                .await?
+                .into_iter()
+                .find(|r| r.name == name)
+                .ok_or_else(|| format!("no room named '{name}'"))?;
+            client.enter_named(&info).await?;
+            name
+        }
+    };
+    client.submit(text).await?;
+    Ok(room)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,5 +539,37 @@ mod tests {
         assert_eq!(turns[0].content, "day0-a");
         // At the earliest day there is nothing older.
         assert!(prev_day(&paths.root, &d0).is_none());
+    }
+
+    #[tokio::test]
+    async fn post_once_lands_in_the_project_room() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("meeting.sock");
+        let registry = Arc::new(RoomRegistry::new(dir.path().join("state")));
+        {
+            let sock = sock.clone();
+            tokio::spawn(async move {
+                let _ = serve_daemon(&sock, registry).await;
+            });
+        }
+        wait_for_socket(&sock).await;
+
+        let project = tempdir().unwrap();
+        let proj = project.path().to_string_lossy().into_owned();
+        let room = post_once(&sock, PostTarget::Project(proj.clone()), "tester", "joined: working on X")
+            .await
+            .expect("post_once succeeds");
+        assert!(!room.is_empty());
+
+        // A fresh client sees the posted message in the room transcript.
+        let mut reader = MeetingClient::connect(&sock, "reader").await.unwrap();
+        reader.enter_project(&proj).await.unwrap();
+        assert!(
+            reader.transcript().iter().any(|t| t.content == "joined: working on X"),
+            "the one-shot post is in the room transcript"
+        );
+
+        // An unknown named room is a clean error, not a panic.
+        assert!(post_once(&sock, PostTarget::Named("nope".into()), "tester", "x").await.is_err());
     }
 }

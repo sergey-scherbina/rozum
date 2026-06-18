@@ -211,6 +211,25 @@ impl DaemonRoom {
             .unwrap_or_else(|| id.0.clone())
     }
 
+    /// The author label written into the transcript: `base_name · handle` (e.g.
+    /// `claude · keen-sable`) so readers see WHO posted (the agent/human name), not just
+    /// the opaque handle. The base name comes from the joining client (`--as`, the agent's
+    /// name, or `$USER`); falls back to the handle when no base name is recorded.
+    pub fn display_for(&self, id: &ParticipantId) -> String {
+        self.roster
+            .participants
+            .iter()
+            .find(|e| e.id == id.0)
+            .map(|e| {
+                if e.base_name.trim().is_empty() {
+                    e.handle.clone()
+                } else {
+                    super::identity::display_name(&e.base_name, &e.handle)
+                }
+            })
+            .unwrap_or_else(|| id.0.clone())
+    }
+
     fn is_member(&self, id: &ParticipantId) -> bool {
         self.roster.participants.iter().any(|e| e.id == id.0)
     }
@@ -228,7 +247,7 @@ impl DaemonRoom {
             return Err("not-joined".into());
         }
         self.touch();
-        let display = self.handle_for(id);
+        let display = self.display_for(id);
         let turn = self
             .writer
             .append(&id.0, display, content, unix_ts())
