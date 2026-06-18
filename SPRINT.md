@@ -200,6 +200,35 @@ are clients and can go in parallel, P6 is the service):
       (`/rooms/{name}/days`, `/messages/<date>`); model-as-participant via gateway
       local HTTP.
 
+#### agent-meeting-coordination — meetings as the collaboration system (2026-06-18, user-driven)
+
+**Goal:** all the user's agents coordinate via meetings when they need to; the human sees what's
+happening any time + intervenes, from any client. The daemon becomes a collaboration hub with
+**equal pluggable clients** (TUI/web/telegram/discord/remote) + a **`Principal` identity layer**
+(one human = one identity across clients; agents auto-identified; multi-user/remote = a resolver
+swap later). Spec: `docs/specs/agent-meeting-coordination.md`. Phased P1–P4.
+
+- [x] **P1.1 — post transport + author display (DONE 2026-06-18, branch
+  `feature/agent-meeting-coordination`).** `meeting::tui_client::post_once` + `rozum meetings post
+  <text> [--room <name>] [--as <display>]`: one-shot connect→join (project room by default, or a
+  named room)→submit→exit; **auto-spawns the daemon** if down. The transport the SessionStart/Stop
+  hooks will call + a handy human/script post. Also **surfaced the author** in the transcript:
+  `room.rs::submit` now writes `display_for(id)` = `base_name · handle` (e.g. `claude · spry-wren`)
+  instead of the bare handle, so readers see WHO posted (the `--as`/agent name). Verified live
+  (auto-spawn → post → on disk → author shows the name) + `post_once` unit test (lands in room,
+  unknown-room errors cleanly). 380 fast tests green.
+- [ ] **P1.2 — global room + auto-join config.** Well-known `commons` room + `rozum.toml [meeting]
+  auto_join`; proxy joins project [+ global]. (Needs multi-room session membership — assess.)
+- [ ] **P1.3 — `rozum mcp install/uninstall` + CC coordination hooks.** Global MCP registration so
+  bare `claude`/`codex` auto-join; CC SessionStart→`joined:` / Stop→`done:` hooks calling
+  `meetings post --as <agent>`. (codex/opencode: instructions-only — confirm no lifecycle hooks.)
+- [ ] **P1.4 — strengthen instructions + AGENTS.md coordination convention.**
+- [ ] **P1.5 — TUI multi-room overview.**
+- [ ] **P1.6 — `Principal` layer (local-default resolver).** `Principal{Human|Agent}` above
+  sessions; OS-user = one Human, agent = Agent per session; `principals.json`; `rozum identity
+  whoami/list`. No auth backends yet (P2 links one human across clients; P3 web/bridges as equal
+  clients; P4 remote + multi-user).
+
 > **MLX native runtime is DONE (correctness + perf), 2026-06-13.** Decode root-caused
 > & fixed (bf16 stream leak in GatedDeltaNet q/k scaling → ~1000 casts/token): MoE
 > decode 33→~88 t/s (2.7×), prefill →1215 (=Python), dense 16→~19.6; byte-exact; merged

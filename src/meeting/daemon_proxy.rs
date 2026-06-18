@@ -445,7 +445,7 @@ pub async fn run_daemon_proxy() -> Result<(), Box<dyn std::error::Error + Send +
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /// The agent's project: the nearest ancestor with a `.git`, else the cwd.
-fn detect_project() -> Option<String> {
+pub fn detect_project() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let mut dir = cwd.as_path();
     loop {
@@ -460,7 +460,7 @@ fn detect_project() -> Option<String> {
     Some(cwd.to_string_lossy().into_owned())
 }
 
-async fn spawn_daemon() {
+pub async fn spawn_daemon() {
     if let Ok(exe) = std::env::current_exe() {
         // `meetings start` spawns the detached daemon and waits for its socket.
         let _ = tokio::process::Command::new(exe)

@@ -1,5 +1,24 @@
 # Changelog
 
+## meeting — `rozum meetings post` (one-shot post transport) + author display in the transcript
+Completed: 2026-06-18
+
+First increment of the **agent-meeting-coordination** epic (the meeting room as the collaboration
+system — `docs/specs/agent-meeting-coordination.md`):
+
+- `rozum meetings post <text> [--room <name>] [--as <display>]` — one-shot connect → join (the cwd
+  project's room by default, or a named room) → submit → exit; **auto-spawns the daemon** if it
+  isn't running. This is the transport the upcoming SessionStart/Stop coordination hooks call, and
+  a handy human/script post. Core is `meeting::tui_client::post_once` (unit-tested: lands in the
+  room; unknown room errors cleanly).
+- **Author is now visible in the transcript:** `room.rs::submit` writes `base_name · handle`
+  (e.g. `claude · spry-wren`) via the existing `identity::display_name`, instead of the bare
+  minted handle — so readers see WHO posted (the agent name / `--as` value / `$USER`), which the
+  coordination use case needs. De-dup stays by participant id, so this is cosmetic + safe.
+
+Verified live (auto-spawn → post → on disk → author shows the name). 380 fast tests green. Fuller
+Principal-based identity/display, the global room, auto-join, and the hooks are the next increments.
+
 ## x86 — scaffold the native x86 (Vulkan iGPU) engine slot, ready to fill without rework
 Completed: 2026-06-18
 
