@@ -417,13 +417,44 @@ These items turn "portable in principle" into "portable by `cargo build`".
   (non-`metal` llama-cpp-2) — entangled with the Metal feature flags, can't be validated from macOS.
   Tracked with `portability-cuda-gguf`.
 
-- [ ] portability-shared-model-source - Lift the backend-agnostic model infra above
-  the SPI. Auto-download + hf_hub/ModelScope cache (`src/hf_hub.rs`,
-  `src/modelscope.rs`) + spec resolution + the RAM preflight are hardware-agnostic
-  and useful to ANY safetensors backend (mistralrs, a future runtime), but are wired
-  through the MLX path today (`ensure_model_dir` lives in `mlx_native_backend`).
-  Factor a `model_source` layer so a new leaf reuses fetching/cache/preflight for
-  free instead of re-implementing them.
+- [ ] windows-portability - **Make rozum a first-class Windows host (durable core + CI).**
+  rozum-as-gateway/launcher already works on Windows today (HTTP backends are pure
+  cross-platform Rust); these sub-tasks close the gap for the **local meeting daemon** and
+  **in-process engines**. All hardware-independent except GPU validation. Spec:
+  `docs/specs/portability-and-the-backend-spi.md` (§ "Platform-aware build (Linux *and*
+  Windows)"). Engines on Windows are tracked elsewhere and need NO separate item: GGUF via
+  `portability-cuda-gguf` (non-`metal` llama-cpp-2 — CPU/CUDA/Vulkan; builds with MSVC), and
+  the native iGPU path via `x86-native-runtime` (Vulkan is cross-platform — the SAME L5 engine
+  runs on Windows; `VK_EXT_external_memory_host` zero-copy works there too). Sub-tasks:
+  - [ ] windows-core-ci - A `windows-core` CI job (`windows-latest`) mirroring `linux-core`:
+    `cargo build --no-default-features` + durable-layer tests on every push, so a Windows
+    regression fails CI, not folklore. Cheapest first step; it surfaces the seams below.
+  - [ ] windows-daemon-ipc - Abstract the meeting daemon's client transport. Today it's a
+    Unix-domain socket (`meeting_sock()` / `UnixListener`), and `std::os::unix::net` does not
+    exist on Windows. Put it behind a small transport with a Windows impl — AF_UNIX (Win10
+    1803+) via a crate (`interprocess`), a named pipe, or a loopback-TCP fallback. The
+    single-writer + direct-read model and the `mcp-proxy` bridge stay; only the byte transport
+    changes.
+  - [ ] windows-service-install - Add a Windows arm to `src/service.rs` (today: launchd/systemd
+    generation + `launchctl`/`systemctl`): install/uninstall a Windows Service (`sc.exe` / the
+    `windows-service` crate) or a Task Scheduler entry. The module is already "pure generation +
+    invoke", so the arm slots in beside the existing two.
+  - [ ] windows-fs-locks - Route the `.rozum/room/` single-writer advisory lock through a
+    cross-platform lock (`fs2` / `fd-lock`) instead of a raw `flock`, and confirm all room/cache
+    path handling is `PathBuf`-based (no hardcoded `/`).
+
+- [~] portability-shared-model-source - **STARTED 2026-06-18** (branch
+  `feature/native-engine-spi-a2-a3`). Step 1 DONE: created `src/model_source.rs` — an
+  engine-agnostic module holding `spec_to_hf_repo` / `resolve_model_dir` /
+  `config_model_type` / `ensure_model_dir`, lifted out of the MLX leaf, with the per-engine
+  "can I load this `model_type`?" decision passed in as a **`gate` callback** (so a new leaf
+  reuses one fetch/cache/resolve path). The MLX leaf keeps its catalog
+  (`supported_model_type`/`model_type_gate`) and re-exports for zero caller churn.
+  **REMAINING:** the RAM/KV **preflight** is still MLX-leaf-bound (lift when a real 2nd
+  in-process consumer shapes it); wire `mistralrs`/GGUF to call `model_source` as that 2nd
+  consumer (today they have their own resolution). Auto-download + hf_hub/ModelScope cache
+  (`src/hf_hub.rs`, `src/modelscope.rs`) were already separate modules; `model_source` is now
+  the shared front door to them.
 
 - [x] portability-new-backend-checklist - **DONE 2026-06-15.** The "add a new runtime/hardware
   backend" recipe is written down — a concrete *Add-a-backend checklist* in
