@@ -1462,6 +1462,81 @@ fn responses_input_to_internal(instructions: Option<&str>, input: &Value) -> Vec
     msgs
 }
 
+/// Codex's `apply_patch` requires its bespoke envelope (`*** Update File: <path>` + bare `@@`
+/// hunk markers). Local models routinely emit a **standard unified diff** inside the
+/// `*** Begin Patch` wrapper (`--- /+++ /@@ -a,b +c,d @@`), which codex rejects with
+/// "Invalid patch hunk". The change lines (` `/`-`/`+`) are identical in both dialects, so we
+/// translate just the headers and the (already-correct) edit lands. See
+/// `docs/matrix-failure-analysis.md` Finding 4. Returns the input unchanged unless it is exactly
+/// this malformed hybrid (codex envelope + unified-diff headers).
+fn rewrite_unified_diff_to_apply_patch(patch: &str) -> String {
+    let looks_unified = patch.starts_with("--- ") || patch.contains("\n--- ");
+    if !patch.contains("*** Begin Patch") || !looks_unified {
+        return patch.to_string();
+    }
+    let strip = |p: &str| -> String {
+        let p = p.trim();
+        p.strip_prefix("a/")
+            .or_else(|| p.strip_prefix("b/"))
+            .unwrap_or(p)
+            .to_string()
+    };
+    let mut out = String::with_capacity(patch.len() + 16);
+    let mut lines = patch.lines().peekable();
+    while let Some(line) = lines.next() {
+        if let Some(path) = line.strip_prefix("--- ") {
+            // `--- a/x` [`+++ b/x`] → `*** Update File: x` (prefer the +++ path; both name the file)
+            let mut file = strip(path);
+            if let Some(next) = lines.peek() {
+                if let Some(p2) = next.strip_prefix("+++ ") {
+                    if p2.trim() != "/dev/null" {
+                        file = strip(p2);
+                    }
+                    lines.next();
+                }
+            }
+            out.push_str("*** Update File: ");
+            out.push_str(&file);
+            out.push('\n');
+        } else if line.starts_with("@@") {
+            // unified hunk header `@@ -a,b +c,d @@ ctx` → codex bare `@@` marker
+            out.push_str("@@\n");
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Walk a tool-call `arguments` JSON string and rewrite any embedded malformed codex `apply_patch`
+/// (Finding 4). The patch text is nested inside the shell tool's command (and JSON-escaped), so we
+/// parse, recurse over every string value, and re-serialize — keeping escaping correct. A no-op for
+/// non-codex agents (only the Responses path calls this) and for well-formed / non-patch args.
+fn normalize_codex_tool_args(args: &str) -> String {
+    let mut v: Value = match serde_json::from_str(args) {
+        Ok(v) => v,
+        Err(_) => return args.to_string(),
+    };
+    fn walk(v: &mut Value) {
+        match v {
+            Value::String(s) => {
+                if s.contains("*** Begin Patch") {
+                    let fixed = rewrite_unified_diff_to_apply_patch(s);
+                    if fixed != *s {
+                        *s = fixed;
+                    }
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(walk),
+            Value::Object(o) => o.values_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    walk(&mut v);
+    v.to_string()
+}
+
 fn responses_tools_to_internal(tools: &[RespTool]) -> Vec<ToolDef> {
     tools
         .iter()
@@ -2356,16 +2431,21 @@ fn responses_sse_stream(
                 }
 
                 Ok(ChatEvent::ToolUseDelta { input_json_delta, .. }) => {
-                    if let Some((ref fc_id, _, _, oi, ref mut args)) = cur_tool {
+                    // Buffer tool-call args (don't stream incrementally) so the apply_patch bridge
+                    // at ToolUseEnd can rewrite a malformed unified diff consistently (Finding 4).
+                    if let Some((_, _, _, _, ref mut args)) = cur_tool {
                         args.push_str(&input_json_delta);
-                        yield Ok(resp_event(&mut seq, "response.function_call_arguments.delta", json!({
-                            "item_id": fc_id, "output_index": oi, "delta": input_json_delta,
-                        })));
                     }
                 }
 
                 Ok(ChatEvent::ToolUseEnd { .. }) => {
                     if let Some((fc_id, call_id, name, oi, args)) = cur_tool.take() {
+                        // Bridge a malformed apply_patch (unified diff → codex format), Finding 4.
+                        let args = normalize_codex_tool_args(&args);
+                        // Args were buffered above; emit them once (post-bridge) as a single delta.
+                        yield Ok(resp_event(&mut seq, "response.function_call_arguments.delta", json!({
+                            "item_id": fc_id, "output_index": oi, "delta": args,
+                        })));
                         yield Ok(resp_event(&mut seq, "response.function_call_arguments.done", json!({
                             "item_id": fc_id, "output_index": oi, "arguments": args,
                         })));
@@ -2455,6 +2535,7 @@ async fn responses_collect(
             }
             Ok(ChatEvent::ToolUseEnd { .. }) => {
                 if let Some((call_id, name, args)) = cur_tool.take() {
+                    let args = normalize_codex_tool_args(&args);
                     output.push(json!({"type": "function_call", "id": new_id("fc"),
                         "call_id": call_id, "name": name, "arguments": args, "status": "completed"}));
                 }
@@ -3552,6 +3633,36 @@ mod tests {
         let defs = responses_tools_to_internal(&tools);
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "get_weather");
+    }
+
+    #[test]
+    fn apply_patch_bridge_rewrites_unified_diff() {
+        // The exact malformed patch a local model emitted (matrix-failure-analysis Finding 4):
+        // codex `*** Begin Patch` envelope but unified-diff headers inside.
+        let patch = "*** Begin Patch\n--- src/main.rs\n+++ src/main.rs\n@@ -4,7 +4,7 @@\n \
+            /// Reverse a string by characters.\n fn reverse(s: &str) -> String {\n\
+            -    // BUG: returns the input unchanged.\n-    s.to_string()\n\
+            +    s.chars().rev().collect()\n }\n\n fn main() {\n*** End Patch";
+        let out = rewrite_unified_diff_to_apply_patch(patch);
+        assert!(out.contains("*** Update File: src/main.rs"), "got: {out}");
+        assert!(!out.contains("--- src/main.rs") && !out.contains("+++ "), "headers not removed: {out}");
+        assert!(!out.contains("@@ -4,7"), "unified hunk header not stripped: {out}");
+        assert!(out.contains("@@\n"), "missing bare @@ marker: {out}");
+        // The (correct) change lines survive verbatim.
+        assert!(out.contains("-    s.to_string()"));
+        assert!(out.contains("+    s.chars().rev().collect()"));
+        assert!(out.contains("*** Begin Patch") && out.contains("*** End Patch"));
+
+        // Nested inside a shell tool-call's JSON arguments → rewritten in place, escaping intact.
+        let args = json!({ "command": ["zsh", "-lc", format!("apply_patch \"{}\"", patch)] }).to_string();
+        let fixed = normalize_codex_tool_args(&args);
+        assert!(fixed.contains("*** Update File: src/main.rs"));
+        assert!(!fixed.contains("--- src/main.rs"));
+
+        // Well-formed codex patches and non-patch args are untouched.
+        let ok = "*** Begin Patch\n*** Update File: a.rs\n@@\n-x\n+y\n*** End Patch";
+        assert_eq!(rewrite_unified_diff_to_apply_patch(ok), ok);
+        assert_eq!(normalize_codex_tool_args("{\"command\":\"ls -l\"}"), "{\"command\":\"ls -l\"}");
     }
 
     #[test]
