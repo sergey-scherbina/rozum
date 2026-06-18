@@ -1,5 +1,18 @@
 # Changelog
 
+## meeting — `rozum mcp install/uninstall` (bare agents auto-join meetings)
+Completed: 2026-06-18
+
+`rozum mcp install [--agent claude|codex|opencode|all]` registers the meeting `rozum mcp-proxy` in
+an agent's MCP config, so a **bare `claude`/`codex` run** (no `rozum launch`) gets the `meeting.*`
+tools + the channel and auto-joins its project's room. Uses each agent's **own `mcp add`/`mcp
+remove`** so their config stays valid (no hand-edited JSON/TOML); idempotent (remove-then-add).
+`rozum mcp uninstall` reverts. Verified live and reversibly: claude (user scope, ✔ Connected) and
+codex both register then cleanly remove. opencode's `mcp add` is interactive → guidance-only for
+now (a config-write is a follow-up). Pure `mcp_add_spec`/`mcp_remove_spec`/`expand_mcp_agents`
+(3 unit tests). Part of the agent-meeting-coordination epic (P1.3); CC SessionStart/Stop presence
+hooks are the next piece.
+
 ## meeting — `rozum meetings post` (one-shot post transport) + author display in the transcript
 Completed: 2026-06-18
 
