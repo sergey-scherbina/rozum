@@ -1651,9 +1651,16 @@ async fn run_meetings_post(text: String, room: Option<String>, as_display: Optio
         .or_else(|| std::env::var("USER").ok())
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "operator".into());
-    let target = match room {
-        Some(name) => PostTarget::Named(name),
-        None => match detect_project() {
+    // Room precedence: explicit --room, then a configured shared room (ROZUM_MEETING_ROOM, so
+    // hook posts land where the agents are), then the cwd project's room.
+    let shared = std::env::var("ROZUM_MEETING_ROOM")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let target = match (room, shared) {
+        (Some(name), _) => PostTarget::Named(name),
+        (None, Some(name)) => PostTarget::Shared(name),
+        (None, None) => match detect_project() {
             Some(p) => PostTarget::Project(p),
             None => {
                 eprintln!("meetings post: no project detected — run inside a repo, or pass --room");

@@ -1,5 +1,18 @@
 # Changelog
 
+## meeting — shared coordination room via `ROZUM_MEETING_ROOM`
+Completed: 2026-06-18
+
+Lets the operator route all agents into one shared room (e.g. `commons`) for a single overview,
+instead of per-project rooms (agent-meeting-coordination P1.2). When `ROZUM_MEETING_ROOM=<name>` is
+set, the mcp-proxy's auto-join uses `rooms.new` (create-or-open) for that named room instead of the
+project room, and `rozum meetings post` honors the same room (precedence: `--room` >
+`ROZUM_MEETING_ROOM` > the cwd project) so the presence-hook posts land where the agents are. New
+`MeetingClient::enter_or_create` + `PostTarget::Shared` (create-or-open, unlike `Named` which opens
+an existing room only). Verified live (post created + routed to `commons`; `meetings status` lists
+it) + a unit test. Deferred (a daemon single-room→multi-room change, best shaped by dogfooding):
+being in the project room AND `commons` at once; and a `rozum.toml [meeting]` config (env-only now).
+
 ## meeting — Claude Code presence hooks + coordination instructions
 Completed: 2026-06-18
 
