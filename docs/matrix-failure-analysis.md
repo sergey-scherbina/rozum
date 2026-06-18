@@ -125,9 +125,46 @@ passes is decided by **agent recovery within the time budget**:
 
 ---
 
+## Finding 4 — codex `fix`/`debug` (edit-existing-file): unified-diff vs apply_patch format mismatch
+
+**Repro:** codex `fix` × Qwen3.6-27B (claude✓ codex✗; opencode **flaky-passed** the repro), workdir
+`/tmp/rozum-agentic-YwDNGa`. The harness seeds a `src/main.rs` whose `reverse()` returns the input
+unchanged (`// BUG`). Sequence:
+1. `cat src/main.rs` → the model **correctly diagnoses**: "reverse() just returns the input unchanged".
+2. It calls codex `apply_patch` but emits a **unified-diff** body:
+   ```
+   *** Begin Patch
+   --- src/main.rs
+   ...
+   *** End Patch
+   ```
+   → `Invalid patch hunk on line 2: '--- src/main.rs' is not a valid hunk header. Valid hunk headers:
+   '*** Add File: {path}', '*** Delete File: {path}', '*** Update File: {path}'`.
+3. Edit **never lands** → file unchanged → `cargo run -> hello` → FAIL (timed out at 200 s, still failing).
+
+**Root cause.** A **patch-format mismatch**: the local model produces a *standard unified diff*
+(`--- / +++ / @@`), but codex's `apply_patch` requires its **bespoke** envelope
+(`*** Begin Patch` + `*** Update File: {path}` + `@@`-less context lines). The model **knows the
+fix** — it just cannot speak codex's patch dialect. This is the precise, evidence-based version of the
+old `project-codex-patch-barrier` memory, and it is specific to **edit-existing-file** (create-from-
+scratch failed differently — Findings 1a/1b). claude/opencode don't hit it (claude `Edit` old/new
+string; opencode its own simple edit) — both are formats the model produces correctly.
+
+**Fix direction (NOT concluded):** bridge the model's unified-diff → codex apply_patch format (a
+gateway/wrapper translation), or steer the model to emit codex's format. A real, addressable
+incompatibility — unlike the create case, this one IS partly about the edit mechanism.
+
+> **opencode `fix` reds are flaky, not structural** — opencode passed this repro (slow, hit the
+> 200 s ceiling but still produced `olleh`). Its matrix `fix` reds are speed/variance, not a hard
+> mechanism failure.
+
+---
+
 ## Synthesis (so far — NOT final)
 
-The 14 reds are **not one bug**. Three interacting factors, none a clean infra defect:
+The 14 reds are **not one bug**, and **codex fails differently by task shape**: create-from-scratch →
+shell-echo corruption / approval-stall (1a/1b); edit-existing → unified-diff vs apply_patch mismatch
+(F4). Three interacting factors, none a single clean infra defect:
 1. **Model code-quality** — gpt-oss-20b (and weaker models) emit buggy first drafts. Universal; only
    *iteration* or a stronger model fixes it. claude masks it via fast full-file rewrites.
 2. **Agent file-write mechanism** — claude (raw structured `Write`) is robust; **codex** corrupts code

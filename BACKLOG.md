@@ -8,11 +8,19 @@
   (`request_user_input`, gratuitous escalation rejected under `approval=never`) and falls back to
   `cargo new <name>` (subdir); (1b) it writes code via `echo "…" > file` and **zsh escaping corrupts
   it** (`println!("{}",rev)` → `println!({},rev)`). Plus codex is slow → times out before recovering.
-  Levers to A/B (NOT yet concluded): (a) trim codex's meta-tools (a codex analog of claude `--lean`);
-  (b) get the model to write via codex's **apply_patch** (raw content, no shell escaping) instead of
-  `echo >` — investigate why it prefers `echo`; (c) speed (already capped to `medium` reasoning).
+  And edit-existing (`fix`/`debug`, Finding 4): the model emits a **standard unified diff**, but codex
+  `apply_patch` wants its bespoke `*** Update File:` format → `Invalid patch hunk` → the (correctly
+  diagnosed) edit never lands.
+  Levers to A/B (NOT yet concluded), highest-leverage first:
+  - **(edit) bridge unified-diff → codex apply_patch format** in the gateway/wrapper — the model
+    already produces a correct unified diff; translating it would land the fix. Most concrete lever.
+  - (create) get the model onto codex's structured write (apply_patch raw content) instead of
+    `echo > file`, which zsh-escaping corrupts; investigate why it prefers `echo`.
+  - trim codex's meta-tools (a codex analog of claude `--lean`) for the 1a approval-stall.
+  - speed (already capped to `medium` reasoning) — fewer timeouts = more recovery turns.
   Validate via A/B re-run of the codex `build`/`fix`/`debug` reds. NB: **replaces** the earlier
-  (mock-derived) `structured-edit-MCP-for-codex` idea — the real-CLI repro did not support it.
+  (mock-derived) `structured-edit-MCP-for-codex` idea; the real-CLI repro shows it's a patch-format
+  mismatch (edit) + shell-echo corruption (create), not a missing edit tool.
 
 ## Optional Model Adapters
 

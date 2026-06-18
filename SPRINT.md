@@ -79,7 +79,14 @@ before concluding.
   among the 14 — a single matrix run mislabeled a flaky cell. The model emits buggy first drafts;
   whether a run passes is decided by **agent recovery within the time budget** (claude re-Writes the
   whole file and recovers; codex/opencode time out).
-- **Synthesis:** 3 interacting factors, none a clean infra bug — model code-quality × agent file-write
+- [x] **Finding 4 — codex `fix`/`debug` (edit-existing): unified-diff vs apply_patch mismatch (27B repro).**
+  The model correctly diagnoses the bug, then emits a **standard unified diff** (`--- /+++ /@@`) into
+  codex `apply_patch`, which wants its bespoke `*** Update File:` format → `Invalid patch hunk` → edit
+  never lands → bug stays. The precise, evidence-based version of `project-codex-patch-barrier`,
+  specific to **edit-existing**. **Most actionable lever:** bridge unified-diff → apply_patch
+  (gateway/wrapper). opencode `fix` **flaky-passed** the repro → its fix reds are speed/variance, not structural.
+- **Synthesis:** codex fails *differently by task shape* (create → echo/approval 1a/1b; edit → patch
+  mismatch F4). 3 interacting factors, none a clean infra bug — model code-quality × agent file-write
   mechanism (codex shell-echo/approval vs claude raw-Write vs opencode append-error) × speed/time-budget.
 - [ ] **Still to do:** raw codex tool-call capture (1a/1b — why `echo` over `apply_patch`?); repro the
   `fix`/`debug`/`test` reds (edit-existing-file, different shape); per-fail verdict (fix vs structural);
