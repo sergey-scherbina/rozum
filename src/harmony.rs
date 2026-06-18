@@ -67,7 +67,7 @@ pub fn parse_harmony(marked: &str) -> HarmonyParsed {
         // by channel name first would mis-file that as analysis and DROP the call,
         // stalling the agent. A bare `commentary` (preamble, no recipient) is ignored.
         if let Some(name) = function_recipient(header) {
-            out.tool_calls.push((name, body.trim().to_string()));
+            out.tool_calls.push((name, first_json_args(body)));
         } else if header.starts_with("final") {
             out.final_text.push_str(body);
         } else if header.starts_with("analysis") {
@@ -79,6 +79,21 @@ pub fn parse_harmony(marked: &str) -> HarmonyParsed {
     }
 
     out
+}
+
+/// gpt-oss-20b sometimes appends trailing junk after the tool-call arguments object (observed: a
+/// stray `\n"}` after a complete `{...}`), which makes the args invalid JSON ("Extra data") so the
+/// agent (codex/opencode/claude) drops the call and stalls. Take the FIRST complete JSON value and
+/// discard the rest; a non-JSON body is left untouched (downstream loose/repair paths can still try).
+fn first_json_args(body: &str) -> String {
+    let body = body.trim();
+    let mut de = serde_json::Deserializer::from_str(body).into_iter::<serde_json::Value>();
+    match de.next() {
+        // Truncate at the end of the first complete value (keep original bytes — don't reorder
+        // keys / reformat), dropping any trailing junk.
+        Some(Ok(_)) => body[..de.byte_offset()].trim_end().to_string(),
+        _ => body.to_string(),
+    }
 }
 
 /// Extract `NAME` from a `commentary to=functions.NAME ...` header, if present.
@@ -139,5 +154,21 @@ mod tests {
     fn bare_commentary_preamble_ignored() {
         let s = "<|channel|>commentary<|message|>Let me think out loud.<|end|>";
         assert!(parse_harmony(s).tool_calls.is_empty());
+    }
+
+    #[test]
+    fn tool_call_trailing_junk_after_json_dropped() {
+        // gpt-oss-20b sometimes appends a stray `\n"}` after a complete args object → the raw body
+        // is invalid JSON ("Extra data") and the agent drops the call. We keep the first value only.
+        let s = "<|start|>assistant<|channel|>commentary to=functions.apply_unified_diff \
+                 <|constrain|>json<|message|>{\"diff\":\"--- a\\n+++ b\"}\n\"}<|call|>";
+        let p = parse_harmony(s);
+        assert_eq!(p.tool_calls.len(), 1, "call must not be dropped");
+        let (name, args) = &p.tool_calls[0];
+        assert_eq!(name, "apply_unified_diff");
+        assert_eq!(args, "{\"diff\":\"--- a\\n+++ b\"}", "trailing junk not dropped: {args}");
+        // and it's valid JSON now
+        let v: serde_json::Value = serde_json::from_str(args).expect("valid JSON");
+        assert_eq!(v["diff"], "--- a\n+++ b");
     }
 }
