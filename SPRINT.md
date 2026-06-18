@@ -1186,8 +1186,15 @@ is 100% MLX, candle only as external oracle.
   the fork (`sergey-scherbina/mlx-rs` branch `rozum-mlx-native`) and switch to a
   git-rev pin (like the mistralrs `[patch.crates-io]`) so the default builds
   off-tree.
-- [~] mlx-native-perf - Phase 5: throughput. Spec section: `docs/specs/mlx-native-runtime.md`
-  "Performance".
+- [x] mlx-native-perf - Phase 5: throughput. Spec section: `docs/specs/mlx-native-runtime.md`
+  "Performance". **RESOLVED + SHIPPED + single-stream MAXED (2026-06-13).** Decode root-caused &
+  fixed (bf16 stream leak in GatedDeltaNet q/k scaling → ~1000 casts/token): MoE decode 33→~88 t/s
+  (2.7×), prefill →1215 (=Python), dense 16→~19.6 (~90% of Python); byte-exact; on master. The
+  "capture-based plain-`compile`" lever below was the open hypothesis — since **REFUTED** (MLX
+  auto-fuses; bottleneck is 92% CPU build/FFI, not fusion), so **batching is the only further
+  lever** and BOTH dense (1.98×) AND hybrid (2.30×, byte-exact) batched decode are now **shipped**
+  too. Nothing left on single-stream. Detail: [[project-mlx-hybrid-decode-gap]]; the historical
+  investigation is preserved below for the record.
 
   **STATUS (2026-06-11) — perf territory mapped; prefill wins shipped; one decode
   lever identified (capture-based compile), gated on a fixed-shape cache.** Where
