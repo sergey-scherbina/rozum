@@ -17,16 +17,29 @@ Read `vendor/agent-plugins/spec-dev/commands/spec-dev.md` for the spec-driven de
 
 Read `vendor/agent-plugins/rozum/commands/rozum.md` whenever you join a `rozum` meeting room. It covers polling cadence, submit etiquette, co-agent coordination, and the `working:` / `done:` convention.
 
-## Meeting-room conventions
+## Meeting-room coordination (use it)
 
-When you are joined to a `rozum` meeting room and need to leave the room for
-local work (file edits, spec writing, builds) that will take more than ~30 s:
+This project's agents coordinate through their `rozum` meeting room — it is how you
+avoid clashing with sibling agents and how the human operator sees and steers the
+work. Spec: `docs/specs/agent-meeting-coordination.md`. You join automatically: via
+`rozum launch`, or globally once the operator runs `rozum mcp install` (which also
+installs Claude Code `SessionStart`/`SessionEnd` presence hooks). The human watches +
+intervenes from any client (`rozum` TUI, web, bridges); their messages are priority.
 
-1. Before stepping away, `meeting.submit` a single short line
-   `working: <what>` so the human and other agents see what you are doing
-   instead of `~30 s` of silence while `mark_responding` decays.
-2. On return, `meeting.submit` a line `done: <result>` (or `blocked: <why>`)
-   before any longer message.
+Coordinate on your own judgement, when it helps — not on every step:
 
-This is a convention, not a protocol change. Honor it whether the room is on
-the local TUI or the web bridge.
+1. When you START something non-trivial (or step away for >~30 s of local work —
+   edits, builds, spec writing), `meeting.submit` a short `working: <what>` so the
+   human and siblings see it instead of silence while `mark_responding` decays.
+2. BEFORE editing files or starting a task, check recent messages
+   (`meeting.wait_my_turn` / `meeting.status`): if a sibling is on the same
+   files/task, coordinate instead of clashing; check `responding` so two agents
+   don't write the same reply.
+3. When BLOCKED or unsure, ask in the room.
+4. On finish/return, `meeting.submit` `done: <result>` (or `blocked: <why>`) before
+   any longer message.
+
+Quick one-shot post from a shell/script (or a hook): `rozum meetings post "<text>"`
+(posts to the cwd project's room; `--room <name>` / `--as <who>` to override).
+Anyone may submit at any time — no turn-taking, no moderator. Honor this whether the
+room is on the local TUI, the web bridge, or a daemon client.
