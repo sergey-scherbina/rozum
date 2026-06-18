@@ -297,6 +297,18 @@ swap later). Spec: `docs/specs/agent-meeting-coordination.md`. Phased P1–P4.
   test (no global-env mutation). The first, zero-config rung of the Principal model. **Remaining
   (P2-P4, dogfooding-shaped):** unify the agent's hook-post + mcp-proxy handles (needs session
   correlation); link one human across web/telegram (P3); auth + multiple/remote humans (P4).
+- [ ] **P1.7 — daemon-backed web client with shared-secret auth (user-requested 2026-06-18).**
+  A human web UI to the **daemon** meeting rooms (the legacy `rozum web` bridges the in-process
+  room — this one reads the daemon's disk transcript + submits via the daemon). `rozum meetings web
+  [--port P] [--room name] [--bind addr]`. Auth = a single shared secret (env `ROZUM_WEB_SECRET`,
+  else generated + printed on start): a login page takes the code → sets a cookie; API + stream
+  require it. Endpoints: serve the chat page; `GET /api/messages?since=` (read transcript from
+  disk); `POST /api/submit` (submit as the local human identity); `GET /api/stream` (SSE tailing
+  the room → the **wakeup**: new messages appear live). Acceptance (with the user): the operator
+  opens the link, logs in with the code, sees the transcript, posts a message that an agent (or
+  `rozum meetings post`) sees, and an agent's reply appears live via SSE. **This is the first equal
+  non-TUI client (P3 groundwork).** Subtasks: (a) web module + auth + endpoints + SSE; (b) the
+  `meetings web` command; (c) a chat UI (adapt `src/web/index.html`); (d) live test with the human.
 
 > **MLX native runtime is DONE (correctness + perf), 2026-06-13.** Decode root-caused
 > & fixed (bf16 stream leak in GatedDeltaNet q/k scaling → ~1000 casts/token): MoE
