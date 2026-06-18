@@ -264,17 +264,19 @@ swap later). Spec: `docs/specs/agent-meeting-coordination.md`. Phased P1–P4.
   create-or-open unit test. **Deferred (needs a daemon model change — best shaped by dogfooding):**
   being in the project room AND `commons` *simultaneously* (the daemon session is single-room);
   and a `rozum.toml [meeting]` config (env-only for now).
-- [x] **P1.3 — `rozum mcp install/uninstall` + CC presence hooks (DONE 2026-06-18).**
-  `rozum mcp install [--agent claude|codex|opencode|all] [--no-hooks]` registers `rozum mcp-proxy`
-  via each agent's **own `mcp add`** (robust — agent owns its config), `uninstall` via `mcp remove`;
-  idempotent (remove-then-add). For claude it also merges **SessionStart→`joined:` / SessionEnd→
-  `left:`** presence hooks into `~/.claude/settings.json` (NOT per-turn `Stop`), calling `rozum
-  meetings post --as claude` — preserving every existing key + hook, idempotent, and **byte-clean
-  reversible** (verified live: install adds hooks keeping `PreToolUse`, uninstall reverts to
-  byte-identical). Enabled serde_json `preserve_order` so the config round-trip keeps the user's key
-  order. opencode's `mcp add` is interactive → guidance-only (config-write follow-up). codex has no
-  lifecycle hooks → MCP-only (auto-join covers roster presence). 4 unit tests
-  (`mcp_add_spec`/`mcp_remove_spec`/`expand_mcp_agents` + hook-merge preserve/idempotent/reversible).
+- [x] **P1.3 — `rozum mcp install/uninstall` (DONE 2026-06-18).** `rozum mcp install [--agent
+  claude|codex|opencode|all]` registers `rozum mcp-proxy` via each agent's **own `mcp add`**
+  (robust — agent owns its config), `uninstall` via `mcp remove`; idempotent (remove-then-add).
+  Verified live + reversibly (claude user-scope ✔ Connected + codex registered, then removed).
+  opencode's `mcp add` is interactive → guidance-only (config-write follow-up). 3 unit tests
+  (`mcp_add_spec`/`mcp_remove_spec`/`expand_mcp_agents`).
+- [x] **Presence via the proxy, not hooks (DONE 2026-06-18 — superseded the CC hooks).** The
+  mcp-proxy posts a `joined:` line on its first join and a `left:` line when the agent's session
+  ends, **over the agent's own session** → the presence line carries the agent's handle (unified
+  with its messages), works for **every** agent (not just CC), and edits no `settings.json`. This
+  replaced the earlier CC `SessionStart`/`SessionEnd` hooks (would double-post, CC-only, intrusive)
+  — removed the hook-merge code + `--no-hooks` flag; kept serde_json `preserve_order` (harmless).
+  Verified (the existing daemon-proxy test now asserts the `joined:` line + the submit).
 - [x] **P1.4 — coordination instructions + AGENTS.md convention (DONE 2026-06-18).** Rewrote the
   mcp-proxy `PROXY_INSTRUCTIONS` (every connecting agent sees it) into a coordination contract:
   announce `working:` on start, check the room before clashing on files/`responding`, ask when

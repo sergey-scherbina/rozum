@@ -100,6 +100,10 @@ struct State {
     /// The background channel-wakeup task (disk-tails the room, pushes deltas to the
     /// session). One per proxy; started lazily at `initialize`, aborted on teardown.
     wakeup_task: Option<tokio::task::JoinHandle<()>>,
+    /// Whether this proxy has posted its `joined:` presence line yet — posted once on the
+    /// first join (NOT on reconnects), via the agent's own session so it shares the agent's
+    /// handle and works for every agent (no per-client hooks). Spec: agent-meeting-coordination.
+    presence_announced: bool,
 }
 
 #[derive(Clone)]
@@ -140,6 +144,7 @@ impl DaemonProxy {
                 self_pid: None,
                 room_name: None,
                 wakeup_task: None,
+                presence_announced: false,
             })),
             tool_router: Self::tool_router(),
         }
@@ -197,7 +202,34 @@ impl DaemonProxy {
             }
         }
         s.conn = Some(conn);
+        // Announce presence ONCE (not on reconnects), via this same session so it carries the
+        // agent's handle — unifies the join line with the agent's messages and works for every
+        // agent (no per-client hooks). Best-effort.
+        if !s.presence_announced {
+            s.presence_announced = true;
+            let content = format!("joined: {} is here", s.client_info_name);
+            if let Some(conn) = s.conn.as_mut() {
+                let _ = conn
+                    .call_tool("meeting.submit", json!({ "content": content }), CONNECT_TIMEOUT)
+                    .await;
+            }
+        }
         Ok(())
+    }
+
+    /// Best-effort `left:` presence line, posted after the agent's stdio session ends (the
+    /// daemon connection usually outlives it for a moment). Mirrors the `joined:` line.
+    async fn announce_left(&self) {
+        let mut s = self.state.lock().await;
+        if !s.presence_announced {
+            return;
+        }
+        let content = format!("left: {} ended its session", s.client_info_name);
+        if let Some(conn) = s.conn.as_mut() {
+            let _ = conn
+                .call_tool("meeting.submit", json!({ "content": content }), CONNECT_TIMEOUT)
+                .await;
+        }
     }
 
     /// Forward a tool call to the daemon, returning the daemon's raw result value.
@@ -474,8 +506,11 @@ impl ServerHandler for DaemonProxy {
 pub async fn run_daemon_proxy() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::{ServiceExt, transport::stdio};
     let server = DaemonProxy::new();
+    let presence = server.clone(); // shares the Arc<State>; serve() consumes `server`
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
+    // The agent's stdio session ended — post a best-effort `left:` before exiting.
+    presence.announce_left().await;
     Ok(())
 }
 
@@ -621,13 +656,21 @@ mod tests {
             .await;
         assert_ne!(submitted.is_error, Some(true), "submit should succeed");
 
-        // wait_my_turn (no args) returns the message via the tracked cursor.
+        // wait_my_turn (no args) returns the messages via the tracked cursor: the proxy's
+        // auto-posted `joined:` presence line, then the submitted message.
         let wait = proxy.wait_my_turn().await;
         let payload = tool_result_json(&wait);
         assert_eq!(payload["still_waiting"], false);
         let turns = payload["turns"].as_array().unwrap();
-        assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0]["content"], "hello via proxy");
+        let contents: Vec<&str> = turns.iter().filter_map(|t| t["content"].as_str()).collect();
+        assert!(
+            contents.iter().any(|c| c.starts_with("joined:")),
+            "proxy posts a joined: presence line on first join: {contents:?}"
+        );
+        assert!(
+            contents.contains(&"hello via proxy"),
+            "the submitted message is present: {contents:?}"
+        );
 
         // The cursor advanced: a second wait with no new messages → still_waiting.
         let again = proxy.wait_my_turn().await;

@@ -98,20 +98,19 @@ Session   { session_token, principal_id, client: Tui|Web|Telegram|Discord|Mcp|Re
   opencode config). Then even a bare `claude` run auto-joins. Idempotent; `rozum mcp
   uninstall` reverts. This is the "mix" path the user picked.
 
-### 4. Coordination — instructions + hard hooks
+### 4. Coordination — instructions + proxy-emitted presence
 
 - **Instructions (discretion, "when they need to")**: the proxy's `instructions` + the
   `rozum` etiquette skill, strengthened: *announce* `working: <what>` before going heads-down,
   *check* the room for a sibling on the same file before editing, *ask* when blocked, post
   `done:`/`blocked:` on finish. The agent decides when — guided, not forced.
-- **Hard hooks (always-fire lifecycle points)** — Claude Code hooks (`SessionStart`, `Stop`,
-  optionally `SubagentStop`): `rozum mcp install` also installs hooks that
-  - **SessionStart** → `meeting.submit` a `joined: <cwd/task>` presence line (so the human
-    + siblings see the agent arrive), and
-  - **Stop** → `meeting.submit` a `done:`/`idle:` line (so the room reflects it stopped).
-  These are the two points that must not depend on the model remembering. Codex/opencode:
-  no equivalent hook system → instructions-only there (documented), with the proxy's
-  auto-join covering "joined".
+- **Presence is emitted by the mcp-proxy itself, not per-client hooks** (decided 2026-06-18
+  during build — strictly better than the CC-hooks-into-settings.json approach): on its first
+  join the proxy `meeting.submit`s a `joined:` line, and on session end a `left:` line, **over
+  the agent's own session** — so the presence line carries the agent's handle (unified with its
+  messages), it works for **every** agent (not just Claude Code), and nothing edits the user's
+  `settings.json`. The earlier CC `SessionStart`/`SessionEnd` hooks are removed (would
+  double-post + only covered CC + edited a user config file).
 
 ### 5. Clients — equal front-ends over one contract
 
@@ -164,9 +163,10 @@ turn/presence }`. New clients implement this; nothing privileged.
   many-clients and multi-user/remote are a resolver swap, not a re-architecture; ships
   zero-config single-operator today (the premature-abstraction guard: build the seam +
   the one real resolver, not speculative auth backends).
-- **Coordination = strong instructions + two hard hooks** — the model's discretion is the
-  point ("when they need to"), but join/leave presence must always fire, so hooks cover
-  exactly those two points; not blanket per-tool hooks (noise).
+- **Coordination = strong instructions + proxy-emitted presence** — the model's discretion is
+  the point ("when they need to"), and join/leave presence always fires from the mcp-proxy
+  itself (one mechanism, every agent, unified handle, no user-config edits). Chosen over
+  per-client lifecycle hooks (CC-only, dual-handle, edits `settings.json`).
 - **Per-project + one global room** — within-project coordination stays local to the repo;
   the global room is the cross-project channel + the human's single overview.
 
@@ -179,10 +179,23 @@ turn/presence }`. New clients implement this; nothing privileged.
 
 ## Open questions
 
-- Global room name + default auto-join policy (`commons`? project-only by default with an
-  opt-in flag, or both by default?).
-- Codex/opencode hook story: confirm neither has a usable session-lifecycle hook; if so,
-  document instructions-only for them (the proxy auto-join still covers presence).
-- Hook transport: the SessionStart/Stop hook needs to `meeting.submit` — call the daemon
-  socket directly via a tiny `rozum meeting post <text>` CLI (no MCP round-trip).
-</content>
+- Global room: should an agent be in its project room AND `commons` *simultaneously* (needs
+  the daemon's single-room session → multi-room), or is the env-selected single room enough?
+- Unifying the human across web/Telegram/remote: the `Principal` `AuthRef` resolver (P3/P4) —
+  shape it from real multi-client use.
+
+## Status (build progress, 2026-06-18)
+
+- **P1.1** post transport (`rozum meetings post`) + author shown in the transcript — DONE.
+- **P1.2** shared room via `ROZUM_MEETING_ROOM` (proxy + post honor it) — DONE; true
+  simultaneous multi-room deferred (daemon model change).
+- **P1.3** `rozum mcp install/uninstall` (claude+codex via their own `mcp add`) — DONE.
+- **P1.4** coordination contract in the proxy `instructions` + AGENTS.md — DONE.
+- **Presence** emitted by the mcp-proxy (`joined:`/`left:`, every agent, unified handle) — DONE;
+  superseded the CC settings.json hooks.
+- **P1.6** stable local identity (`rozum identity whoami/set-name`, `~/.config/rozum/identity.json`)
+  — DONE (local-default `Principal`).
+- **P1.5** multi-room TUI dashboard — the enriched room picker covers visibility; a dedicated
+  overview is interactive-shaped polish.
+- **P2–P4** (cross-client Principal unification, web/Telegram/Discord on the daemon, auth +
+  remote multi-user) — shaped by dogfooding.
