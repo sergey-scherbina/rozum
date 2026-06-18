@@ -1,5 +1,27 @@
 # Changelog
 
+## x86 — scaffold the native x86 (Vulkan iGPU) engine slot, ready to fill without rework
+Completed: 2026-06-18
+
+Prepares the ground for the cross-vendor Vulkan iGPU engine (`docs/specs/x86-native-runtime.md`)
+so the real engine drops into a named, compiling slot with no structural rework — no hardware
+needed yet. New `src/x86/`:
+
+- `X86NativeOptions`, `X86NativeBackend` (`impl ChatBackend` — errors with a self-documenting
+  `NOT_IMPLEMENTED` message), `try_build_x86_backend` (logs + falls through until built), and
+  `X86Engine` (`impl crate::engine::LocalEngine`) — a **second `LocalEngine` implementor** that
+  proves the token-level seam fits a non-MLX engine (the native-engine-spi validation, sans GPU).
+- The five compact components the spec decomposes the engine into are pre-shaped stub files with
+  their contract + the test to write: `device`, `memory` (zero-copy `mmap` import), `tensor`,
+  `kernels` (quant matmul / sdpa / rmsnorm / rope / swiglu …), `model` (per-family forward).
+- Reachable + self-documenting: `engine = "x86-native"` (aliases `x86`/`vulkan`) is in
+  `config.rs::ACCEPTED_ENGINES` with a `main.rs::build_choice` arm; NOT in the default auto-chain.
+  `Cargo.toml` reserves the `x86-native` feature for the future Vulkan binding; the stub needs no
+  deps, so the default CI keeps the contract honest (3 slot tests; 379 fast tests green).
+
+To fill the slot: add the Vulkan dep under the feature, implement the component bodies (P0–P5), and
+wire `chat` through the shared `engine::drive` (native-engine-spi A3, shaped against this consumer).
+
 ## cli — `rozum commit-msg` (small-first commit messages from the staged diff)
 Completed: 2026-06-18
 

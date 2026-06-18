@@ -26,6 +26,13 @@ mistralrs = ["dep:mistralrs"]
 # source via the vendored fork, so it needs the Metal toolchain and is off by
 # default. See docs/specs/mlx-native-runtime.md.
 mlx-native = ["dep:mlx-rs", "dep:mlx-lm", "dep:mlx-lm-utils"]
+# x86-native: the cross-vendor Vulkan iGPU engine (docs/specs/x86-native-runtime.md).
+# RESERVED for the real engine's deps (a Vulkan binding + SPIR-V toolchain) once P0 picks
+# them. The engine SLOT (`src/x86/`: the `LocalEngine`/`ChatBackend` contract + the
+# device/memory/tensor/kernels/model component stubs) compiles WITHOUT this feature, so the
+# default CI keeps the seam honest; filling the slot adds `dep:ash`/etc. here and replaces the
+# `todo!()` bodies — no structural rework.
+x86-native = []
 
 [dependencies]
 candle = { package = "candle-core", version = "0.10.2", optional = true }

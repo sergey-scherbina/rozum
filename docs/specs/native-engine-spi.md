@@ -152,6 +152,13 @@ hardware blast radius is contained.
 - **Then** `x86-native-runtime` P0+ implements `LocalEngine` for Vulkan — and
   reuses A1–A3 for free.
 
+> **Update 2026-06-18 — the x86 slot is scaffolded** (`src/x86/`, `x86-native-slot`).
+> `X86Engine` is a real (stub) `impl LocalEngine` — the **second implementor**, which
+> validates A1's seam shape against a non-MLX engine *without hardware* and pins the contract
+> the Vulkan kernels fill. It compiles in the default CI, so the seam can't silently rot.
+> A2's formal MLX `impl LocalEngine` + the A3 `drive` lift are still deliberately deferred to
+> be shaped against this now-concrete x86 consumer.
+
 ## Non-goals
 
 - Not a per-op tensor-framework abstraction shared at runtime across engines (the
