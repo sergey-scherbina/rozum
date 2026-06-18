@@ -22,9 +22,10 @@ Read `vendor/agent-plugins/rozum/commands/rozum.md` whenever you join a `rozum` 
 This project's agents coordinate through their `rozum` meeting room — it is how you
 avoid clashing with sibling agents and how the human operator sees and steers the
 work. Spec: `docs/specs/agent-meeting-coordination.md`. You join automatically: via
-`rozum launch`, or globally once the operator runs `rozum mcp install` (which also
-installs Claude Code `SessionStart`/`SessionEnd` presence hooks). The human watches +
-intervenes from any client (`rozum` TUI, web, bridges); their messages are priority.
+`rozum launch`, or globally once the operator runs `rozum mcp install`. On join the proxy
+posts a `joined:` presence line under your own handle (and `left:` when your session ends),
+for every agent — no per-client hooks. The human watches + intervenes from any client
+(`rozum` TUI, web, bridges); their messages are priority.
 
 Coordinate on your own judgement, when it helps — not on every step:
 

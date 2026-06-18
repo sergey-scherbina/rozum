@@ -316,11 +316,8 @@ enum McpAction {
         /// Which agent(s): `claude`, `codex`, `opencode`, or `all` (default).
         #[arg(long, default_value = "all")]
         agent: String,
-        /// Skip the Claude Code presence hooks (SessionStart→`joined:` / SessionEnd→`left:`).
-        #[arg(long)]
-        no_hooks: bool,
     },
-    /// Remove the rozum mcp-proxy registration (and the presence hooks).
+    /// Remove the rozum mcp-proxy registration.
     Uninstall {
         /// Which agent(s): `claude`, `codex`, `opencode`, or `all` (default).
         #[arg(long, default_value = "all")]
@@ -684,7 +681,7 @@ async fn main() {
         },
         Some(Command::CommitMsg { model, n_ctx }) => run_commit_msg(model, n_ctx).await,
         Some(Command::Mcp { action }) => match action {
-            McpAction::Install { agent, no_hooks } => run_mcp_install(&agent, no_hooks),
+            McpAction::Install { agent } => run_mcp_install(&agent),
             McpAction::Uninstall { agent } => run_mcp_uninstall(&agent),
         },
         Some(Command::Identity { action }) => match action {
@@ -1782,11 +1779,10 @@ fn rozum_exe() -> String {
         .unwrap_or_else(|| "rozum".into())
 }
 
-fn run_mcp_install(agent: &str, no_hooks: bool) {
+fn run_mcp_install(agent: &str) {
     let rozum = rozum_exe();
-    let agents = expand_mcp_agents(agent);
-    for a in &agents {
-        let Some((prog, args)) = mcp_add_spec(a, &rozum) else {
+    for a in expand_mcp_agents(agent) {
+        let Some((prog, args)) = mcp_add_spec(&a, &rozum) else {
             println!(
                 "  {a}: no non-interactive `mcp add` — register manually: its MCP server \
                  `rozum` = command `{rozum} mcp-proxy` (e.g. `opencode mcp add`)."
@@ -1794,7 +1790,7 @@ fn run_mcp_install(agent: &str, no_hooks: bool) {
             continue;
         };
         // Idempotent: drop any prior registration first (ignore failure), then add fresh.
-        if let Some((rp, ra)) = mcp_remove_spec(a) {
+        if let Some((rp, ra)) = mcp_remove_spec(&a) {
             let _ = std::process::Command::new(rp).args(&ra).output();
         }
         match std::process::Command::new(prog).args(&args).output() {
@@ -1808,25 +1804,17 @@ fn run_mcp_install(agent: &str, no_hooks: bool) {
             Err(e) => println!("  {a}: cannot run `{prog}` ({e}) — is it installed + on PATH?"),
         }
     }
-    // Claude Code presence hooks (SessionStart→joined / SessionEnd→left). CC only — codex/opencode
-    // have no session-lifecycle hooks; their auto-join via the proxy covers roster presence.
-    if !no_hooks && agents.iter().any(|a| a == "claude") {
-        match install_claude_hooks(&rozum) {
-            Ok(true) => println!("  claude: installed presence hooks (SessionStart→joined / SessionEnd→left)."),
-            Ok(false) => println!("  claude: presence hooks already present."),
-            Err(e) => println!("  claude: could NOT install presence hooks ({e}); MCP registration is unaffected."),
-        }
-    }
     println!(
-        "Done. Bare agents now auto-join their project's room via `rozum mcp-proxy`. \
-         (Run the meeting daemon with `rozum meetings start`, or it auto-spawns.)"
+        "Done. Bare agents now auto-join their project's room via `rozum mcp-proxy`, which posts \
+         a `joined:` presence line on join and `left:` on exit — under the agent's own handle, for \
+         every agent, with no settings.json edits. (Run the daemon with `rozum meetings start`, or \
+         it auto-spawns.)"
     );
 }
 
 fn run_mcp_uninstall(agent: &str) {
-    let agents = expand_mcp_agents(agent);
-    for a in &agents {
-        let Some((prog, args)) = mcp_remove_spec(a) else {
+    for a in expand_mcp_agents(agent) {
+        let Some((prog, args)) = mcp_remove_spec(&a) else {
             println!("  {a}: remove the `rozum` MCP server manually.");
             continue;
         };
@@ -1839,144 +1827,6 @@ fn run_mcp_uninstall(agent: &str) {
             Err(e) => println!("  {a}: cannot run `{prog}` ({e})."),
         }
     }
-    if agents.iter().any(|a| a == "claude") {
-        match uninstall_claude_hooks() {
-            Ok(true) => println!("  claude: removed presence hooks."),
-            Ok(false) => {}
-            Err(e) => println!("  claude: could not edit settings.json ({e})."),
-        }
-    }
-}
-
-/// The substring that identifies a rozum-installed hook command, for idempotency + removal.
-const HOOK_TAG: &str = "meetings post --as claude";
-
-/// Path to Claude Code's user settings (`~/.claude/settings.json`).
-fn claude_settings_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".claude/settings.json"))
-}
-
-/// Merge the rozum SessionStart/SessionEnd presence hooks into a Claude Code `settings.json`
-/// value, preserving every existing key + hook. Idempotent. Returns `true` if it added
-/// anything. Pure (no I/O) — unit-tested.
-fn add_meeting_hooks(settings: &mut serde_json::Value, rozum: &str) -> bool {
-    use serde_json::json;
-    if !settings.is_object() {
-        *settings = json!({});
-    }
-    let hooks = settings
-        .as_object_mut()
-        .unwrap()
-        .entry("hooks")
-        .or_insert_with(|| json!({}));
-    if !hooks.is_object() {
-        return false; // a non-object `hooks` — don't touch a hand-rolled config.
-    }
-    let mut changed = false;
-    for (event, msg) in [
-        ("SessionStart", "joined: a Claude session started here"),
-        ("SessionEnd", "left: Claude session ended"),
-    ] {
-        let command = format!("{rozum} meetings post --as claude \"{msg}\"");
-        let arr = hooks
-            .as_object_mut()
-            .unwrap()
-            .entry(event)
-            .or_insert_with(|| json!([]));
-        let Some(arr) = arr.as_array_mut() else { continue };
-        if arr.iter().any(group_is_rozum) {
-            continue; // already installed
-        }
-        arr.push(json!({
-            "matcher": "*",
-            "hooks": [ { "type": "command", "command": command } ],
-        }));
-        changed = true;
-    }
-    changed
-}
-
-/// Remove rozum-installed hook groups from a settings value. Returns `true` if it removed any.
-fn remove_meeting_hooks(settings: &mut serde_json::Value) -> bool {
-    let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
-        return false;
-    };
-    let mut changed = false;
-    let mut empty_events = vec![];
-    for event in ["SessionStart", "SessionEnd"] {
-        if let Some(arr) = hooks.get_mut(event).and_then(|a| a.as_array_mut()) {
-            let before = arr.len();
-            arr.retain(|g| !group_is_rozum(g));
-            if arr.len() != before {
-                changed = true;
-                // Drop an event key we emptied (we created it), but leave one the user populated.
-                if arr.is_empty() {
-                    empty_events.push(event);
-                }
-            }
-        }
-    }
-    for event in empty_events {
-        hooks.remove(event);
-    }
-    changed
-}
-
-/// Does this hook group contain a rozum-installed command?
-fn group_is_rozum(group: &serde_json::Value) -> bool {
-    group
-        .get("hooks")
-        .and_then(|h| h.as_array())
-        .is_some_and(|hs| {
-            hs.iter().any(|h| {
-                h.get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|c| c.contains(HOOK_TAG))
-            })
-        })
-}
-
-/// Install the presence hooks into `~/.claude/settings.json`, preserving the rest. Returns
-/// whether it changed anything. Never clobbers a malformed/unparseable file.
-fn install_claude_hooks(rozum: &str) -> Result<bool, String> {
-    let path = claude_settings_path().ok_or("no $HOME")?;
-    let mut v = read_settings(&path)?;
-    let changed = add_meeting_hooks(&mut v, rozum);
-    if changed {
-        write_settings(&path, &v)?;
-    }
-    Ok(changed)
-}
-
-fn uninstall_claude_hooks() -> Result<bool, String> {
-    let path = claude_settings_path().ok_or("no $HOME")?;
-    if !path.exists() {
-        return Ok(false);
-    }
-    let mut v = read_settings(&path)?;
-    let changed = remove_meeting_hooks(&mut v);
-    if changed {
-        write_settings(&path, &v)?;
-    }
-    Ok(changed)
-}
-
-fn read_settings(path: &std::path::Path) -> Result<serde_json::Value, String> {
-    match std::fs::read_to_string(path) {
-        Ok(s) if s.trim().is_empty() => Ok(serde_json::json!({})),
-        Ok(s) => serde_json::from_str(&s).map_err(|e| format!("parse {}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::json!({})),
-        Err(e) => Err(format!("read {}: {e}", path.display())),
-    }
-}
-
-fn write_settings(path: &std::path::Path, v: &serde_json::Value) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    }
-    let mut body = serde_json::to_string_pretty(v).map_err(|e| e.to_string())?;
-    body.push('\n');
-    std::fs::write(path, body).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 #[cfg(test)]
@@ -2008,35 +1858,6 @@ mod mcp_install_tests {
         assert_eq!(mcp_remove_spec("claude").unwrap().0, "claude");
         assert_eq!(mcp_remove_spec("codex").unwrap().0, "codex");
         assert!(mcp_remove_spec("opencode").is_none());
-    }
-
-    #[test]
-    fn hook_merge_preserves_existing_idempotent_and_reversible() {
-        use serde_json::json;
-        // A settings.json shaped like the real one: other keys + a pre-existing PreToolUse hook.
-        let mut s = json!({
-            "model": "opus",
-            "hooks": {
-                "PreToolUse": [
-                    { "matcher": "*", "hooks": [{ "type": "command", "command": "~/.claude/auto-allow.sh" }] }
-                ]
-            }
-        });
-        // Adds SessionStart + SessionEnd, leaves the rest alone.
-        assert!(add_meeting_hooks(&mut s, "/abs/rozum"));
-        assert_eq!(s["model"], "opus");
-        assert_eq!(s["hooks"]["PreToolUse"].as_array().unwrap().len(), 1, "existing hook untouched");
-        assert!(s["hooks"]["SessionStart"].as_array().unwrap().iter().any(group_is_rozum));
-        assert!(s["hooks"]["SessionEnd"].as_array().unwrap().iter().any(group_is_rozum));
-        // Idempotent: a second add changes nothing + doesn't duplicate.
-        assert!(!add_meeting_hooks(&mut s, "/abs/rozum"));
-        assert_eq!(s["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
-        // Reversible: remove ours; the emptied SessionStart/SessionEnd keys we created are
-        // cleaned up entirely, and PreToolUse is untouched.
-        assert!(remove_meeting_hooks(&mut s));
-        assert!(s["hooks"].get("SessionStart").is_none(), "emptied event key removed");
-        assert!(s["hooks"].get("SessionEnd").is_none(), "emptied event key removed");
-        assert_eq!(s["hooks"]["PreToolUse"].as_array().unwrap().len(), 1, "PreToolUse survives removal");
     }
 }
 

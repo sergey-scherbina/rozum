@@ -1,5 +1,17 @@
 # Changelog
 
+## meeting — presence emitted by the mcp-proxy (supersedes the Claude Code settings.json hooks)
+Completed: 2026-06-18
+
+The mcp-proxy now posts a `joined:` line on its first join and a `left:` line when the agent's
+session ends, **over the agent's own session** — so the presence line carries the agent's handle
+(unified with its messages, fixing the dual-handle wart), works for **every** agent (not just
+Claude Code), and edits no user config. This replaces the earlier `rozum mcp install` Claude Code
+`SessionStart`/`SessionEnd` hooks (which would double-post, were CC-only, and edited
+`~/.claude/settings.json`): the hook-merge code + the `--no-hooks` flag are removed, so `rozum mcp
+install` now just registers the MCP server. Posted once per proxy lifetime (not on reconnects);
+`left:` is best-effort after the stdio session ends. (serde_json `preserve_order` is kept — harmless.)
+
 ## meeting — stable local identity (`rozum identity`); the human is one handle across launches
 Completed: 2026-06-18
 
