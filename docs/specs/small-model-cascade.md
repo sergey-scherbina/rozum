@@ -123,8 +123,18 @@ the diff; e2e over a real `CascadeBackend` with mock backends — good cheap ans
 tier 0 (**big never called**), junk escalates to big once, and a **small-tier hit-rate** batch
 (small passes 3/4 → big called exactly once). 383 fast tests green.
 
+**CLI wiring DONE 2026-06-18** — `rozum commit-msg [--model <spec[,spec2]>]` (`src/main.rs`):
+reads `git diff --cached`, builds the gate-shaped `commit_message_request`, and prints the
+message. A single `--model` generates directly; a `small,big` comma-list builds the
+`small_task_config(CommitMessage, …)` cascade (the small model answers, the
+`CommitMessageGate` escalates to the big model only when the cheap answer is unusable). Model
+defaults to `[runtime].model` from `rozum.toml`. `staged_diff_in` split out + unit-tested in a
+temp git repo (stages a file, asserts the diff; empty index → empty, not an error); the
+model-call path is manual (needs a real model).
+
 **Follow-ups (deferred):** process-gated task types (`OneLineFix` via `cargo check`, `Rename`
 via build/lint — the gate trait supports running a command, but not hermetically testable);
-CLI/gateway wiring (`rozum commit-msg` from `git diff --cached`).
+a remote big tier for `commit-msg` (v1 treats both tiers as local — `small_task_config`'s
+documented limitation).
 </content>
 </invoke>
