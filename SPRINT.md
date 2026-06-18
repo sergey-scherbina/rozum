@@ -258,9 +258,14 @@ swap later). Spec: `docs/specs/agent-meeting-coordination.md`. Phased P1–P4.
   unknown-room errors cleanly). 380 fast tests green.
 - [ ] **P1.2 — global room + auto-join config.** Well-known `commons` room + `rozum.toml [meeting]
   auto_join`; proxy joins project [+ global]. (Needs multi-room session membership — assess.)
-- [ ] **P1.3 — `rozum mcp install/uninstall` + CC coordination hooks.** Global MCP registration so
-  bare `claude`/`codex` auto-join; CC SessionStart→`joined:` / Stop→`done:` hooks calling
-  `meetings post --as <agent>`. (codex/opencode: instructions-only — confirm no lifecycle hooks.)
+- [~] **P1.3 — `rozum mcp install/uninstall` (DONE for claude+codex) + CC hooks (pending).**
+  `rozum mcp install [--agent claude|codex|opencode|all]` registers `rozum mcp-proxy` via each
+  agent's **own `mcp add`** (robust — the agent owns its config), `uninstall` via `mcp remove`;
+  idempotent (remove-then-add). **Verified live + reversibly:** claude (user scope, ✔ Connected) +
+  codex both registered, then cleanly removed. opencode's `mcp add` is interactive → guidance-only
+  (config-write follow-up). Pure `mcp_add_spec`/`mcp_remove_spec`/`expand_mcp_agents` + 3 unit tests.
+  **Remaining:** CC SessionStart→`joined:` / Stop→`done:` hooks calling `rozum meetings post
+  --as <agent>` (settings.json write); opencode config-write.
 - [ ] **P1.4 — strengthen instructions + AGENTS.md coordination convention.**
 - [ ] **P1.5 — TUI multi-room overview.**
 - [ ] **P1.6 — `Principal` layer (local-default resolver).** `Principal{Human|Agent}` above

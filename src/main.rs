@@ -278,6 +278,33 @@ enum Command {
         #[arg(long)]
         n_ctx: Option<u32>,
     },
+
+    /// Register the rozum meeting mcp-proxy in an agent's config, so bare agents auto-join.
+    ///
+    /// Uses each agent's own `mcp add`/`mcp remove`, so their config stays valid. After
+    /// `install`, a bare `claude`/`codex` run gets the `meeting.*` tools + the channel and
+    /// auto-joins its project's room — no `rozum launch` needed.
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
+}
+
+/// `rozum mcp install/uninstall` — register/remove the meeting mcp-proxy in an agent's config.
+#[derive(Subcommand)]
+enum McpAction {
+    /// Register `rozum mcp-proxy` in the agent's user-level MCP config.
+    Install {
+        /// Which agent(s): `claude`, `codex`, `opencode`, or `all` (default).
+        #[arg(long, default_value = "all")]
+        agent: String,
+    },
+    /// Remove the rozum mcp-proxy registration.
+    Uninstall {
+        /// Which agent(s): `claude`, `codex`, `opencode`, or `all` (default).
+        #[arg(long, default_value = "all")]
+        agent: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -635,6 +662,10 @@ async fn main() {
             }
         },
         Some(Command::CommitMsg { model, n_ctx }) => run_commit_msg(model, n_ctx).await,
+        Some(Command::Mcp { action }) => match action {
+            McpAction::Install { agent } => run_mcp_install(&agent),
+            McpAction::Uninstall { agent } => run_mcp_uninstall(&agent),
+        },
         Some(Command::Telegram { room, name }) => {
             let token = std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_else(|_| {
                 eprintln!("error: TELEGRAM_BOT_TOKEN not set");
@@ -1633,6 +1664,139 @@ async fn run_meetings_post(text: String, room: Option<String>, as_display: Optio
             eprintln!("meetings post: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// The agents whose MCP config `rozum mcp install` can manage non-interactively (each owns a
+/// native `mcp add`/`mcp remove`). `opencode`'s `mcp add` is interactive, so it's guidance-only.
+const MCP_AGENTS: &[&str] = &["claude", "codex"];
+
+/// Expand the `--agent` selector into concrete agent names. `all` → every supported agent.
+fn expand_mcp_agents(agent: &str) -> Vec<String> {
+    match agent.trim().to_lowercase().as_str() {
+        "all" | "" => MCP_AGENTS.iter().map(|s| s.to_string()).collect(),
+        other => vec![other.to_string()],
+    }
+}
+
+/// The `<agent> mcp add` invocation that registers `rozum mcp-proxy` (user scope), or `None`
+/// for an agent without a non-interactive add (e.g. opencode). Pure — unit-tested.
+fn mcp_add_spec(agent: &str, rozum: &str) -> Option<(&'static str, Vec<String>)> {
+    let r = rozum.to_string();
+    match agent {
+        // claude mcp add --scope user rozum -- <rozum> mcp-proxy
+        "claude" => Some((
+            "claude",
+            vec![
+                "mcp".into(), "add".into(), "--scope".into(), "user".into(),
+                "rozum".into(), "--".into(), r, "mcp-proxy".into(),
+            ],
+        )),
+        // codex mcp add rozum -- <rozum> mcp-proxy
+        "codex" => Some((
+            "codex",
+            vec!["mcp".into(), "add".into(), "rozum".into(), "--".into(), r, "mcp-proxy".into()],
+        )),
+        _ => None,
+    }
+}
+
+/// The `<agent> mcp remove` invocation, or `None` for an unmanaged agent. Pure — unit-tested.
+fn mcp_remove_spec(agent: &str) -> Option<(&'static str, Vec<String>)> {
+    match agent {
+        "claude" => Some((
+            "claude",
+            vec!["mcp".into(), "remove".into(), "--scope".into(), "user".into(), "rozum".into()],
+        )),
+        "codex" => Some(("codex", vec!["mcp".into(), "remove".into(), "rozum".into()])),
+        _ => None,
+    }
+}
+
+fn rozum_exe() -> String {
+    std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "rozum".into())
+}
+
+fn run_mcp_install(agent: &str) {
+    let rozum = rozum_exe();
+    for a in expand_mcp_agents(agent) {
+        let Some((prog, args)) = mcp_add_spec(&a, &rozum) else {
+            println!(
+                "  {a}: no non-interactive `mcp add` — register manually: its MCP server \
+                 `rozum` = command `{rozum} mcp-proxy` (e.g. `opencode mcp add`)."
+            );
+            continue;
+        };
+        // Idempotent: drop any prior registration first (ignore failure), then add fresh.
+        if let Some((rp, ra)) = mcp_remove_spec(&a) {
+            let _ = std::process::Command::new(rp).args(&ra).output();
+        }
+        match std::process::Command::new(prog).args(&args).output() {
+            Ok(o) if o.status.success() => {
+                println!("  {a}: registered `rozum` mcp-proxy (user scope).");
+            }
+            Ok(o) => println!(
+                "  {a}: `{prog} mcp add` failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => println!("  {a}: cannot run `{prog}` ({e}) — is it installed + on PATH?"),
+        }
+    }
+    println!(
+        "Done. Bare agents now auto-join their project's room via `rozum mcp-proxy`. \
+         (Run the meeting daemon with `rozum meetings start`, or it auto-spawns.)"
+    );
+}
+
+fn run_mcp_uninstall(agent: &str) {
+    for a in expand_mcp_agents(agent) {
+        let Some((prog, args)) = mcp_remove_spec(&a) else {
+            println!("  {a}: remove the `rozum` MCP server manually.");
+            continue;
+        };
+        match std::process::Command::new(prog).args(&args).output() {
+            Ok(o) if o.status.success() => println!("  {a}: removed `rozum` mcp-proxy."),
+            Ok(o) => println!(
+                "  {a}: `{prog} mcp remove` failed (maybe not registered): {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => println!("  {a}: cannot run `{prog}` ({e})."),
+        }
+    }
+}
+
+#[cfg(test)]
+mod mcp_install_tests {
+    use super::*;
+
+    #[test]
+    fn expand_all_lists_managed_agents() {
+        assert_eq!(expand_mcp_agents("all"), vec!["claude", "codex"]);
+        assert_eq!(expand_mcp_agents("codex"), vec!["codex"]);
+    }
+
+    #[test]
+    fn add_spec_per_agent_and_skips_opencode() {
+        let (prog, args) = mcp_add_spec("claude", "/abs/rozum").unwrap();
+        assert_eq!(prog, "claude");
+        assert!(args.windows(2).any(|w| w == ["--scope", "user"]), "claude is user-scoped");
+        assert!(args.contains(&"/abs/rozum".to_string()), "the rozum path is the registered command");
+        assert_eq!(args.last().unwrap(), "mcp-proxy");
+        let (cprog, cargs) = mcp_add_spec("codex", "/abs/rozum").unwrap();
+        assert_eq!(cprog, "codex");
+        assert_eq!(cargs.last().unwrap(), "mcp-proxy");
+        // opencode's `mcp add` is interactive → no non-interactive spec.
+        assert!(mcp_add_spec("opencode", "/abs/rozum").is_none());
+    }
+
+    #[test]
+    fn remove_spec_matches_managed_agents() {
+        assert_eq!(mcp_remove_spec("claude").unwrap().0, "claude");
+        assert_eq!(mcp_remove_spec("codex").unwrap().0, "codex");
+        assert!(mcp_remove_spec("opencode").is_none());
     }
 }
 
