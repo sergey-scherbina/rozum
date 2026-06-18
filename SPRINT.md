@@ -281,11 +281,20 @@ swap later). Spec: `docs/specs/agent-meeting-coordination.md`. Phased P1–P4.
   blocked, post `done:`/`blocked:` on finish, human messages are priority — on the agent's own
   judgement. Strengthened AGENTS.md "Meeting-room coordination" (join paths, the etiquette, the
   one-shot `rozum meetings post`).
-- [ ] **P1.5 — TUI multi-room overview.**
-- [ ] **P1.6 — `Principal` layer (local-default resolver).** `Principal{Human|Agent}` above
-  sessions; OS-user = one Human, agent = Agent per session; `principals.json`; `rozum identity
-  whoami/list`. No auth backends yet (P2 links one human across clients; P3 web/bridges as equal
-  clients; P4 remote + multi-user).
+- [~] **P1.5 — TUI multi-room visibility.** The room picker (Ctrl-O / `/rooms`) already lists
+  every room enriched with participants + last-activity day, so the human can see + switch across
+  all rooms — the core multi-room visibility. A dedicated always-on overview *dashboard* (all rooms'
+  unread at a glance) is **interactive-shaped polish** — best built once the operator has used the
+  current TUI and says what the overview should show (can't be render-verified without a TTY).
+- [x] **P1.6 — local-default `Principal`: stable local identity (DONE 2026-06-18).**
+  `src/meeting/local_identity.rs` persists a stable `{token, display}` in
+  `~/.config/rozum/identity.json`; the TUI (`MeetingClient::connect_as`) + `rozum meetings post`
+  (human path) use it, so the operator is **one participant (handle) across launches/clients**
+  instead of a fresh random one. `rozum identity whoami` / `set-name <name>` manage it. Verified
+  live (two posts → same `Sergiy · mellow-marten`; set-name keeps the token) + a path-injected unit
+  test (no global-env mutation). The first, zero-config rung of the Principal model. **Remaining
+  (P2-P4, dogfooding-shaped):** unify the agent's hook-post + mcp-proxy handles (needs session
+  correlation); link one human across web/telegram (P3); auth + multiple/remote humans (P4).
 
 > **MLX native runtime is DONE (correctness + perf), 2026-06-13.** Decode root-caused
 > & fixed (bf16 stream leak in GatedDeltaNet q/k scaling → ~1000 casts/token): MoE

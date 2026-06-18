@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod daemon_proxy;
 pub mod identity;
 pub mod list;
+pub mod local_identity;
 pub mod mcp_server;
 pub mod participant;
 pub mod piggyback;

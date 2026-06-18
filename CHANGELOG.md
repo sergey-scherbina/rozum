@@ -1,5 +1,18 @@
 # Changelog
 
+## meeting — stable local identity (`rozum identity`); the human is one handle across launches
+Completed: 2026-06-18
+
+The local-default `Principal` (agent-meeting-coordination P1.6). The TUI + `rozum meetings post`
+used to mint a fresh random session token each launch, so the operator showed up as a new
+adjective-animal every time. Now `src/meeting/local_identity.rs` persists a stable `{token, display}`
+in `~/.config/rozum/identity.json`; the human's clients (`MeetingClient::connect_as`, `meetings post`
+without `--as`) present it, so the operator is **one participant across launches/clients**.
+`rozum identity whoami` shows it; `rozum identity set-name <name>` sets the display (keeping the
+token). Verified live (two posts → same `Sergiy · mellow-marten`) + a path-injected unit test.
+First zero-config rung of the Principal model; auth / multiple-and-remote humans / cross-client
+unification are later resolvers on the same seam.
+
 ## meeting — shared coordination room via `ROZUM_MEETING_ROOM`
 Completed: 2026-06-18
 

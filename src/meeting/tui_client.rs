@@ -58,14 +58,25 @@ pub struct MeetingClient {
 }
 
 impl MeetingClient {
-    /// Connect to the daemon as `display_name` (a fresh session token).
+    /// Connect to the daemon as `display_name` (a fresh, ephemeral session token).
     pub async fn connect(sock: &Path, display_name: &str) -> ClientResult<Self> {
+        Self::connect_with(sock, display_name, uuid::Uuid::new_v4().simple().to_string()).await
+    }
+
+    /// Connect with a **stable** session token — the local human's persisted identity
+    /// ([`super::local_identity`]), so all this machine's human clients map to one participant
+    /// (handle) across launches instead of a fresh random one.
+    pub async fn connect_as(sock: &Path, display_name: &str, token: &str) -> ClientResult<Self> {
+        Self::connect_with(sock, display_name, token.to_owned()).await
+    }
+
+    async fn connect_with(sock: &Path, display_name: &str, token: String) -> ClientResult<Self> {
         let conn = RoomConnection::connect(sock, display_name, T).await?;
         Ok(Self {
             conn,
             sock: sock.to_path_buf(),
             display_name: display_name.to_owned(),
-            session_token: uuid::Uuid::new_v4().simple().to_string(),
+            session_token: token,
             room_name: None,
             room_root: None,
             join_spec: None,
@@ -442,9 +453,13 @@ pub async fn post_once(
     sock: &Path,
     target: PostTarget,
     display: &str,
+    token: Option<&str>,
     text: &str,
 ) -> ClientResult<String> {
-    let mut client = MeetingClient::connect(sock, display).await?;
+    let mut client = match token {
+        Some(t) => MeetingClient::connect_as(sock, display, t).await?,
+        None => MeetingClient::connect(sock, display).await?,
+    };
     let room = match target {
         PostTarget::Project(p) => client.enter_project(&p).await?,
         PostTarget::Shared(name) => client.enter_or_create(&name).await?,
@@ -589,7 +604,7 @@ mod tests {
 
         let project = tempdir().unwrap();
         let proj = project.path().to_string_lossy().into_owned();
-        let room = post_once(&sock, PostTarget::Project(proj.clone()), "tester", "joined: working on X")
+        let room = post_once(&sock, PostTarget::Project(proj.clone()), "tester", None, "joined: working on X")
             .await
             .expect("post_once succeeds");
         assert!(!room.is_empty());
@@ -603,15 +618,15 @@ mod tests {
         );
 
         // An unknown named room is a clean error, not a panic.
-        assert!(post_once(&sock, PostTarget::Named("nope".into()), "tester", "x").await.is_err());
+        assert!(post_once(&sock, PostTarget::Named("nope".into()), "tester", None, "x").await.is_err());
 
         // Shared(name) create-or-opens the room (no prior existence needed), and a second
         // post reuses it.
-        let r1 = post_once(&sock, PostTarget::Shared("commons".into()), "a", "hi commons")
+        let r1 = post_once(&sock, PostTarget::Shared("commons".into()), "a", None, "hi commons")
             .await
             .expect("shared post creates + posts");
         assert_eq!(r1, "commons");
-        post_once(&sock, PostTarget::Shared("commons".into()), "b", "again")
+        post_once(&sock, PostTarget::Shared("commons".into()), "b", None, "again")
             .await
             .expect("second shared post reuses the room");
         let mut reader = MeetingClient::connect(&sock, "reader2").await.unwrap();
