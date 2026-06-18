@@ -45,6 +45,13 @@ self-exited (`clients_gone`) between the claude/codex phases — see
 the run reach a clean teardown at all).
 
 - **Fix commit:** `326bb9d` (`scripts/bench/agentic.sh` graceful teardown + idle-secs).
+- **Validation 2026-06-18 (partial — single-model run):** the matrix on master with the fix
+  (default `Qwen3.6-35B-A3B-4bit` × claude+codex+opencode × 5 tasks) ran **15/15 PASS, rc=0,
+  0 timeouts, and produced NO new `.panic` file** (`results/agentic-20260618-081632`). This
+  validates the **end-of-model** graceful teardown + the `clients_gone` idle-secs fix. It does
+  **not** yet exercise an **inter-model** teardown transition — the original panic point — since
+  it was a single-model run. A ≥2-model run (e.g. `AGENTIC_MODELS="…27B …30B-A3B …35B"`) is the
+  remaining step to move BUG-001 `fixed → done`.
 
 **Open follow-up (defense-in-depth, NOT done — deliberately).** The deepest fix is rozum
 *itself* guaranteeing a bounded, non-wedging teardown (a real Metal-eval timeout that returns
