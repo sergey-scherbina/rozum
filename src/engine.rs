@@ -7,17 +7,19 @@
 //! level — the engine owns its whole forward + sampling graph, so there is no
 //! per-op cross-runtime sync (the `mistralrs-mlx-direct` dead-end).
 //!
-//! Status: **A1 of `native-engine-spi`** — the seam is *defined* here. A2 extracts
-//! [`drive`]'s body from the MLX leaf's `stream_generation` (behavior-preserving,
-//! gated by the existing tests); A3 adopts it in the GGUF leaf.
+//! Status (`native-engine-spi`): the seam is defined here and the engine-agnostic
+//! consumption loop [`consume_tokens`] is shared + already used by the MLX leaf
+//! (A2a/A2b). [`drive`] wraps it over the `LocalEngine` seam (A2). Routing the MLX
+//! leaf *through* `drive` and lifting prompt-render are deferred until the real x86
+//! leaf shapes the trait — notably a cache-reclaim seam the MLX **hybrid** path
+//! needs (it reclaims the generator's internal KV/conv cache after a run for prefix
+//! reuse, which a `generate() -> Box<dyn Iterator>` return type erases).
 
 use std::path::Path;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::backend::{
-    ChatEvent, ChatRequest, ModelError, ModelResult, SamplingParams, StopReason,
-};
+use crate::backend::{ChatEvent, ModelError, ModelResult, SamplingParams, StopReason};
 
 /// Static facts the shared driver needs from a loaded model.
 pub struct EngineMeta {
@@ -75,28 +77,61 @@ pub trait LocalEngine: Send {
     }
 }
 
-/// The shared, engine-agnostic decode-control loop. Renders the prompt (chat
-/// template + tokenizer via [`LocalEngine::meta`]), drives [`LocalEngine::generate`],
-/// and turns the token stream into [`ChatEvent`]s — streaming non-tool /
-/// `final`-channel text, detecting & emitting tool calls
-/// ([`crate::serving::parse_tool_calls`] or the harmony parser per
-/// [`EngineMeta::harmony`]), honoring EOS/cancel/max-tokens, finalizing with
-/// `Done`. This is today's per-leaf `stream_generation` (MLX) / token loop (GGUF)
-/// generalized to one place.
+/// The shared, engine-agnostic decode driver: run [`LocalEngine::generate`] over a
+/// rendered `prompt` and feed its token ids through [`consume_tokens`] (detok →
+/// [`ChatEvent`]s, tool-call parse via serving/harmony, EOS/cancel/max-tokens/
+/// runaway guard, finalize with `Done`). Returns the final [`StopReason`].
 ///
-/// **A2 of `native-engine-spi`:** extract the body from `stream_generation`,
-/// behavior-preserving, gated by the existing MLX + GGUF tests. Defined here as
-/// the seam target so A1 type-checks the boundary.
-pub fn drive<E, F>(_engine: &mut E, _req: &ChatRequest, _emit: F)
+/// Prompt rendering (chat template + tokenizer) and detokenization stay with the
+/// caller: the engine's tokenizer is borrowed separately from its forward graph,
+/// so `decode` is passed in rather than reached through `&self` (which `generate`
+/// already borrows mutably for the iterator's lifetime).
+///
+/// **native-engine-spi status:** this completes the shared driver for engines whose
+/// generation owns no reclaimable post-run state (the x86 Vulkan leaf, dense MLX).
+/// The MLX leaf keeps calling [`consume_tokens`] directly for now because its
+/// **hybrid** path reclaims the generator's internal KV/conv cache *after* the run
+/// (`into_cache_and_snapshot`, for prefix reuse) — state that a `Box<dyn Iterator>`
+/// return erases. Growing the trait a cache-reclaim seam is deferred to be shaped
+/// against the real x86 engine (`docs/specs/native-engine-spi.md`).
+#[allow(clippy::too_many_arguments)]
+pub fn drive<E, D, F>(
+    engine: &mut E,
+    prompt: &[u32],
+    params: &SamplingParams,
+    max_tokens: usize,
+    repeat_guard: bool,
+    cancel: &CancellationToken,
+    decode: D,
+    emit: F,
+) -> StopReason
 where
     E: LocalEngine,
-    F: FnMut(ChatEvent),
+    D: FnMut(&[u32], bool) -> Option<String>,
+    F: FnMut(ModelResult<ChatEvent>) -> bool,
 {
-    // A3 of `native-engine-spi`: render the prompt (chat template + tokenizer over
-    // `meta`), run `engine.generate`, and feed its token ids through
-    // [`consume_tokens`]. The consumption half is already extracted below;
-    // rendering is the remaining lift.
-    unimplemented!("native-engine-spi A3: render + engine.generate + consume_tokens")
+    // Snapshot the static facts before `generate` takes the mutable borrow.
+    let meta = {
+        let m = engine.meta();
+        EngineMeta {
+            n_ctx: m.n_ctx,
+            eos: m.eos.clone(),
+            model_type: m.model_type.clone(),
+            harmony: m.harmony,
+        }
+    };
+    let prompt_len = prompt.len();
+    let tokens = engine.generate(prompt, params, cancel);
+    consume_tokens(
+        tokens,
+        &meta,
+        prompt_len,
+        max_tokens,
+        repeat_guard,
+        cancel,
+        decode,
+        emit,
+    )
 }
 
 // ─────────── A2: the engine-agnostic token-consumption loop ───────────
@@ -445,5 +480,74 @@ mod tests {
         assert_eq!(stop, StopReason::MaxTokens);
         let (_e2, stop2) = run(&[1, 9, 1], &m, 100, &table);
         assert_eq!(stop2, StopReason::EndTurn);
+    }
+
+    // A minimal in-memory `LocalEngine` (no hardware) — a second implementor used to
+    // exercise `drive` end-to-end: yield scripted ids, let `drive` snapshot `meta`,
+    // run `generate`, and feed the ids through `consume_tokens`.
+    struct FakeEngine {
+        meta: EngineMeta,
+        ids: Vec<u32>,
+    }
+
+    impl super::LocalEngine for FakeEngine {
+        fn load(_dir: &std::path::Path, _opts: &super::EngineOptions) -> Result<Self, String> {
+            unreachable!("FakeEngine is constructed directly in tests")
+        }
+        fn meta(&self) -> &EngineMeta {
+            &self.meta
+        }
+        fn generate<'a>(
+            &'a mut self,
+            _prompt: &'a [u32],
+            _params: &'a crate::backend::SamplingParams,
+            _cancel: &'a CancellationToken,
+        ) -> Box<dyn Iterator<Item = Result<u32, String>> + Send + 'a> {
+            Box::new(self.ids.clone().into_iter().map(Ok::<u32, String>))
+        }
+    }
+
+    #[test]
+    fn drive_runs_generate_through_consume_tokens() {
+        let table = std::collections::HashMap::from([
+            (1, ("Hel", false)),
+            (2, ("lo", false)),
+            (9, ("", false)), // eos
+        ]);
+        let mut eng = FakeEngine {
+            meta: meta(false, vec![9]),
+            ids: vec![1, 2, 9],
+        };
+        let mut events = Vec::new();
+        let cancel = CancellationToken::new();
+        let stop = super::drive(
+            &mut eng,
+            &[100, 101, 102], // rendered prompt (len 3)
+            &crate::backend::SamplingParams::default(),
+            100,
+            true,
+            &cancel,
+            toy_decode(&table),
+            |e| {
+                if let Ok(ev) = e {
+                    events.push(ev);
+                }
+                true
+            },
+        );
+        assert_eq!(stop, StopReason::EndTurn);
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ChatEvent::TextDelta { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "Hello");
+        // `Done` reports the rendered prompt length `drive` was given.
+        assert!(matches!(
+            events.last(),
+            Some(ChatEvent::Done { input_tokens: 3, .. })
+        ));
     }
 }

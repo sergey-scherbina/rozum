@@ -1921,9 +1921,18 @@ soon as any single track succeeds.
   future leaf reuse one fetch/cache/resolve path); the MLX leaf keeps its catalog
   (`supported_model_type`/`model_type_gate`) and re-exports for zero caller churn.
   Verified: feature-free build green, `model_source` unit tests pass, `mlx-native
-  --tests` compiles. NEXT: A2 formal `impl LocalEngine` for MLX + implement `drive`
-  (generate→`consume_tokens`, render stays per-leaf) → A3 GGUF adoption (caveat
-  retained: don't downgrade GGUF's *streaming* tool parser; render/preflight lift).
+  --tests` compiles. Step 2 DONE: **`drive` implemented** (was `unimplemented!()`) —
+  runs `LocalEngine::generate` over a rendered prompt → `consume_tokens`, render/detok
+  stay caller-side (engine tokenizer is borrowed separately from its forward graph);
+  unit-tested end-to-end via a minimal in-memory `FakeEngine`. **FINDING (blocks the
+  formal MLX `impl LocalEngine`):** the MLX **hybrid** arches (Qwen3.6) reclaim the
+  generator's internal KV/conv cache *after* a run (`into_cache_and_snapshot`, for
+  prefix reuse), which a `generate()->Box<dyn Iterator>` return ERASES — so routing
+  hybrid MLX through `drive` would break shipped prefix reuse. The trait needs a
+  cache-reclaim seam, deferred to be shaped against the real x86 engine (dense MLX +
+  the x86 leaf have no such reclaim and can adopt `drive` directly). NEXT: A3 GGUF
+  adoption (caveat retained: don't downgrade GGUF's *streaming* tool parser;
+  render/preflight lift) — also best shaped by the x86 consumer.
   Token-level seam,
   NOT a per-op tensor abstraction (avoids the `mistralrs-mlx-direct` perf dead-end).
   Spec: `docs/specs/native-engine-spi.md`.
