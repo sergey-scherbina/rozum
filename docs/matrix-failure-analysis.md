@@ -215,3 +215,55 @@ edit-method variance (the model sometimes writes the patch to a temp file instea
 **Lesson:** the codex reds were NEVER model incapability. The model speaks the universal formats
 fluently; codex's proprietary V4A + tool/prompt overload were the barrier. Lean + a standard-tool
 bridge resolved it on the capable models.
+
+## RESOLUTION 2 (2026-06-18) — per-case dig into the 13 residual reds: one more gateway fix, the rest proven model-level
+
+Re-ran every residual red with `KEEP=1` + `ROZUM_HARMONY_DUMP` (raw model output), same probe-first method
+("understand the model, don't blame it"). Two structural conclusions:
+
+**(A) The matrix is a noisy SINGLE sample — most "reds" are flakiness, not deterministic failures.**
+`claude × gpt-oss fix` was red in the matrix (`turns=0`). Reproduced **7/7 PASS** (turns 3–12). The matrix
+caught a rare stall; it *undersold* gpt-oss (claude × gpt-oss is really ~5/5). Lesson for reading the
+matrix: a single red cell ≠ a bug — confirm with repetitions before concluding anything.
+
+**(B) `codex × gpt-oss` had ONE more real gateway barrier — now fixed.** Dump showed:
+```
+ERROR codex_core::tools::router: error=unsupported call: apply_patch
+```
+gpt-oss (trained on OpenAI's own tool surface) calls **`apply_patch` as a FUNCTION**
+(`{"command":["apply_patch","*** Begin Patch …"]}`), but codex — for the rozum-served local-model config —
+offers apply_patch only as a **shell command**, never as a function tool (confirmed: not among the 18 tools
+in `RESP_DUMP`). So codex rejects the call and the edit is lost. This is the function-call analogue of the
+V4A barrier, and it's just as fixable in the gateway.
+
+**Fix (3rd gateway fix, `src/gateway.rs` Responses path):** `rewrite_apply_patch_function_args` +
+re-route in both `responses_sse_stream` and `responses_collect`. When the model emits an `apply_patch`
+*function* call **and codex did NOT offer apply_patch as a tool** (`apply_patch_is_tool` computed from the
+request), rename the item to `exec_command` and convert the args into `{"cmd": "<patch --fuzz heredoc>",
+"login": true}` (reusing Method B's `apply_patch_block_to_fuzz`; raw-`apply_patch` heredoc fallback). The
+gate means a real codex-with-apply_patch config is untouched, and Qwen (which calls apply_patch via the
+*shell*, name=`exec_command`) is unaffected — Method B path unchanged.
+
+**Validated:** `codex × gpt-oss fix` repro — `unsupported call: apply_patch` **eliminated (0/0/0)**, the
+re-route fires whenever the model uses the function form, and a run **passes *because* of it** (run1, reroute
+×3). Unit test `apply_patch_function_reroutes_to_exec_command`; full gateway suite 50/50.
+
+**The genuine residual is now proven MODEL-LEVEL (not a gateway mechanism), with evidence:**
+- **Malformed shell.** gpt-oss emits broken commands — `rg -n "main.rs" "reverse"` (args swapped → exit 2),
+  `sed -n -n ./src/main.rs` (double `-n`, no script → exit 1), `sed -n 's/Hello/'"'`?'` (unmatched `` ` ``).
+  The model never even reads the file. Repairing arbitrary broken shell in the gateway is unreliable +
+  unsafe → **not gateway-fixable**.
+- **Looping (temp-1.0 variance).** A failing run generated the *correct* fix (`s.chars().rev()`) **74×** in
+  one turn without finalizing. gpt-oss is a reasoning model that must run at temp ~1.0 (greedy makes it loop
+  on structural tokens; a repetition penalty corrupts harmony — both already refuted). Variance is intrinsic.
+- **`cargo new <name>` → subdirectory** (build, instruction-following): the model creates a subdir despite
+  "do NOT create a subdirectory". Only "fixable" by a `cargo new`→`cargo init` rewrite that is **wrong in
+  general** (legitimate elsewhere) — declined as a hack; it's a model instruction-following limit.
+- **Edit-method variance (30B).** `fix` passes when the model picks `sed`/inline-`apply_patch` (works
+  natively / via Method B / via the new re-route) and fails when it stalls or writes the patch to a temp
+  file first — the model chooses, per run.
+
+**Bottom line.** Three clean gateway barriers existed and are all fixed (lean, Method B shell-bridge, and now
+the apply_patch-function re-route). Everything still red is genuine model behaviour — flakiness, malformed
+shell, looping, instruction-following — **proven by raw-output evidence, not assumed**, and not removable in
+the gateway without hacks. The matrix's single-sample noise overstates it.

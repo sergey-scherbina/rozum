@@ -1534,6 +1534,15 @@ fn rewrite_apply_patch_command(cmd: &str) -> Option<String> {
         .replace("\\$", "$")
         .replace("\\`", "`")
         .replace("\\\\", "\\");
+    apply_patch_block_to_fuzz(&block)
+}
+
+/// Convert an unescaped V4A patch block (`*** Begin Patch` … `*** End Patch`, or a bare
+/// `*** Update File:` + hunk) into a `patch -p0 --fuzz=3` heredoc — a small ±3-context match
+/// surface that standard `patch` applies reliably. Shared by the apply_patch *shell-command*
+/// bridge (Method B) and the apply_patch-*function* re-route (gpt-oss). None when there are no
+/// change lines to anchor on.
+fn apply_patch_block_to_fuzz(block: &str) -> Option<String> {
     let mut path: Option<String> = None;
     let mut body: Vec<String> = Vec::new();
     for ln in block.lines() {
@@ -1574,6 +1583,37 @@ fn rewrite_apply_patch_command(cmd: &str) -> Option<String> {
     Some(format!(
         "patch -p0 --fuzz=3 <<'ROZUM_PATCH_EOF'\n{diff}ROZUM_PATCH_EOF\n"
     ))
+}
+
+/// gpt-oss (trained on the OpenAI/codex tool surface) emits a native `apply_patch` *function*
+/// call, but codex serves apply_patch only as a shell command for the rozum-backed local-model
+/// config — so the function call is rejected (`unsupported call: apply_patch`) and the edit is
+/// silently lost. Re-route it: convert the function args into an `exec_command` payload that
+/// applies the patch with standard tooling (Method B `patch --fuzz`; failing that, a quote-safe
+/// `apply_patch` heredoc so codex's own V4A applier still gets a shot). Returns the exec_command
+/// args JSON, or None when there is no reconstructable patch (caller keeps the original args).
+fn rewrite_apply_patch_function_args(args: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(args).ok()?;
+    // The model passes the patch text in one of a few shapes:
+    //   {"command":["apply_patch","<patch>"]}  (gpt-oss, observed) — the last array string is it
+    //   {"input":"<patch>"} / {"patch":"<patch>"} / a bare string
+    let patch = v
+        .get("command")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.iter().rev().find_map(|x| x.as_str()))
+        .or_else(|| v.get("input").and_then(|x| x.as_str()))
+        .or_else(|| v.get("patch").and_then(|x| x.as_str()))
+        .or_else(|| v.as_str())?;
+    if !patch.contains("*** Begin Patch") && !patch.contains("*** Update File") {
+        return None;
+    }
+    // Prefer Method B: codex runs `patch --fuzz` verbatim (it only intercepts `apply_patch`).
+    let cmd = apply_patch_block_to_fuzz(patch).unwrap_or_else(|| {
+        // Fallback: hand codex the raw apply_patch via a quote-safe heredoc (its V4A applier).
+        format!("apply_patch <<'ROZUM_AP_EOF'\n{patch}\nROZUM_AP_EOF\n")
+    });
+    eprintln!("[apply_patch-fn] re-routed apply_patch function call → exec_command (gpt-oss)");
+    Some(json!({ "cmd": cmd, "login": true }).to_string())
 }
 
 /// Walk a tool-call `arguments` JSON string and rewrite any embedded malformed codex `apply_patch`
@@ -2402,6 +2442,13 @@ async fn responses_handler(
         Err(resp) => return resp,
     };
     let messages = responses_input_to_internal(req.instructions.as_deref(), &req.input);
+    // Did codex offer `apply_patch` as a function tool for this request? If not, a model that calls
+    // it as a function (gpt-oss) would hit "unsupported call: apply_patch" — so we re-route those to
+    // exec_command. When codex DID offer it as a tool, the call is legit and we leave it alone.
+    let apply_patch_is_tool = req
+        .tools
+        .iter()
+        .any(|t| t.name.as_deref() == Some("apply_patch"));
     let tools = apply_tool_choice(
         responses_tools_to_internal(&req.tools),
         &parse_oai_tool_choice(&req.tool_choice),
@@ -2459,10 +2506,12 @@ async fn responses_handler(
                     cancel,
                     model,
                     Some(lease),
+                    apply_patch_is_tool,
                 ))
                 .into_response()
             } else {
-                responses_collect(chat_stream, cancel, &model, Some(lease)).await
+                responses_collect(chat_stream, cancel, &model, Some(lease), apply_patch_is_tool)
+                    .await
             }
         }
     }
@@ -2477,6 +2526,7 @@ fn responses_sse_stream(
     cancel: CancellationToken,
     model: String,
     lease: Option<ChatLease>,
+    apply_patch_is_tool: bool,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let response_id = new_id("resp");
     let created = now_secs();
@@ -2493,8 +2543,9 @@ fn responses_sse_stream(
 
         // Tool-call items, completed (for the final output[]).
         let mut tool_items: Vec<Value> = Vec::new();
-        // The currently-open function_call: (fc_id, call_id, name, output_index, args).
-        let mut cur_tool: Option<(String, String, String, usize, String)> = None;
+        // The currently-open function_call: (fc_id, call_id, name, output_index, args, reroute_ap).
+        // reroute_ap = this is an apply_patch function call we re-route to exec_command at End.
+        let mut cur_tool: Option<(String, String, String, usize, String, bool)> = None;
 
         yield Ok(resp_event(&mut seq, "response.created", json!({
             "response": responses_object(&response_id, created, &model, "in_progress", json!([]), 0, 0)
@@ -2535,26 +2586,35 @@ fn responses_sse_stream(
                     }
                     let fc_id = new_id("fc");
                     let oi = next_index; next_index += 1;
+                    // gpt-oss calls `apply_patch` as a function, which codex rejects unless it
+                    // offered apply_patch as a tool — re-route to exec_command (rewrite at End).
+                    let reroute_ap = !apply_patch_is_tool && name == "apply_patch";
+                    let emit_name = if reroute_ap { "exec_command".to_string() } else { name };
                     yield Ok(resp_event(&mut seq, "response.output_item.added", json!({
                         "output_index": oi,
                         "item": {"type": "function_call", "id": fc_id, "call_id": id,
-                                 "name": name, "arguments": "", "status": "in_progress"},
+                                 "name": emit_name, "arguments": "", "status": "in_progress"},
                     })));
-                    cur_tool = Some((fc_id, id, name, oi, String::new()));
+                    cur_tool = Some((fc_id, id, emit_name, oi, String::new(), reroute_ap));
                 }
 
                 Ok(ChatEvent::ToolUseDelta { input_json_delta, .. }) => {
                     // Buffer tool-call args (don't stream incrementally) so the apply_patch bridge
                     // at ToolUseEnd can rewrite a malformed unified diff consistently (Finding 4).
-                    if let Some((_, _, _, _, ref mut args)) = cur_tool {
+                    if let Some((_, _, _, _, ref mut args, _)) = cur_tool {
                         args.push_str(&input_json_delta);
                     }
                 }
 
                 Ok(ChatEvent::ToolUseEnd { .. }) => {
-                    if let Some((fc_id, call_id, name, oi, args)) = cur_tool.take() {
-                        // Bridge a malformed apply_patch (unified diff → codex format), Finding 4.
-                        let args = normalize_codex_tool_args(&args);
+                    if let Some((fc_id, call_id, name, oi, args, reroute_ap)) = cur_tool.take() {
+                        // Re-route an apply_patch function call to exec_command (gpt-oss), else
+                        // bridge a malformed apply_patch shell command (unified diff → patch), Finding 4.
+                        let args = if reroute_ap {
+                            rewrite_apply_patch_function_args(&args).unwrap_or(args)
+                        } else {
+                            normalize_codex_tool_args(&args)
+                        };
                         // Args were buffered above; emit them once (post-bridge) as a single delta.
                         yield Ok(resp_event(&mut seq, "response.function_call_arguments.delta", json!({
                             "item_id": fc_id, "output_index": oi, "delta": args,
@@ -2618,6 +2678,7 @@ async fn responses_collect(
     cancel: CancellationToken,
     model: &str,
     lease: Option<ChatLease>,
+    apply_patch_is_tool: bool,
 ) -> Response {
     let response_id = new_id("resp");
     let created = now_secs();
@@ -2628,7 +2689,8 @@ async fn responses_collect(
     };
     let mut text = String::new();
     let mut output: Vec<Value> = Vec::new();
-    let mut cur_tool: Option<(String, String, String)> = None; // (call_id, name, args)
+    // (call_id, name, args, reroute_ap) — reroute_ap re-routes apply_patch fn → exec_command.
+    let mut cur_tool: Option<(String, String, String, bool)> = None;
     let mut status = "completed";
     let mut input_tokens = 0u32;
     let mut output_tokens = 0u32;
@@ -2637,18 +2699,24 @@ async fn responses_collect(
         match ev {
             Ok(ChatEvent::TextDelta { text: t }) => text.push_str(&t),
             Ok(ChatEvent::ToolUseStart { id, name }) => {
-                cur_tool = Some((id, name, String::new()));
+                let reroute_ap = !apply_patch_is_tool && name == "apply_patch";
+                let name = if reroute_ap { "exec_command".to_string() } else { name };
+                cur_tool = Some((id, name, String::new(), reroute_ap));
             }
             Ok(ChatEvent::ToolUseDelta {
                 input_json_delta, ..
             }) => {
-                if let Some((_, _, ref mut args)) = cur_tool {
+                if let Some((_, _, ref mut args, _)) = cur_tool {
                     args.push_str(&input_json_delta);
                 }
             }
             Ok(ChatEvent::ToolUseEnd { .. }) => {
-                if let Some((call_id, name, args)) = cur_tool.take() {
-                    let args = normalize_codex_tool_args(&args);
+                if let Some((call_id, name, args, reroute_ap)) = cur_tool.take() {
+                    let args = if reroute_ap {
+                        rewrite_apply_patch_function_args(&args).unwrap_or(args)
+                    } else {
+                        normalize_codex_tool_args(&args)
+                    };
                     output.push(json!({"type": "function_call", "id": new_id("fc"),
                         "call_id": call_id, "name": name, "arguments": args, "status": "completed"}));
                 }
@@ -3806,6 +3874,30 @@ mod tests {
     }
 
     #[test]
+    fn apply_patch_function_reroutes_to_exec_command() {
+        // gpt-oss emits apply_patch as a FUNCTION (`{"command":["apply_patch","<patch>"]}`); codex
+        // rejects it ("unsupported call: apply_patch"). We re-route to an exec_command payload.
+        let patch = "*** Begin Patch\n*** Update File: src/main.rs\n@@\n \
+            /// Reverse a string by characters.\n fn reverse(s: &str) -> String {\n\
+            -    // BUG: returns the input unchanged.\n-    s.to_string()\n\
+            +    s.chars().rev().collect()\n }\n*** End Patch";
+        let args = json!({ "command": ["apply_patch", patch] }).to_string();
+        let out = rewrite_apply_patch_function_args(&args).expect("reroutable");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["login"], true, "exec_command needs login flag");
+        let cmd = v["cmd"].as_str().unwrap();
+        assert!(cmd.starts_with("patch -p0 --fuzz=3 <<'ROZUM_PATCH_EOF'"), "got: {cmd}");
+        assert!(cmd.contains("-    s.to_string()") && cmd.contains("+    s.chars().rev().collect()"));
+        assert!(!cmd.contains("apply_patch"), "Method B should leave no apply_patch: {cmd}");
+
+        // The `{"input": "<patch>"}` shape is also accepted.
+        assert!(rewrite_apply_patch_function_args(&json!({ "input": patch }).to_string()).is_some());
+        // A non-patch exec call is left untouched (None → caller keeps the original args).
+        let plain = json!({ "cmd": "cargo run", "login": true }).to_string();
+        assert!(rewrite_apply_patch_function_args(&plain).is_none());
+    }
+
+    #[test]
     fn responses_object_shape() {
         let obj = responses_object("resp_1", 123, "m", "completed", json!([]), 3, 4);
         assert_eq!(obj["object"], "response");
@@ -3819,7 +3911,7 @@ mod tests {
         let req = ChatRequest::simple("hi");
         let stream = backend.chat(req).await.unwrap();
         let cancel = CancellationToken::new();
-        let sse = responses_sse_stream(stream, cancel, "m".to_owned(), None);
+        let sse = responses_sse_stream(stream, cancel, "m".to_owned(), None, false);
         futures::pin_mut!(sse);
         let events: Vec<_> = sse.collect().await;
         // created + output_item.added + content_part.added + >=1 delta +

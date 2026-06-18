@@ -1,5 +1,23 @@
 # Changelog
 
+## gateway — re-route gpt-oss's `apply_patch` *function* call to exec_command (codex)
+Completed: 2026-06-18
+
+gpt-oss (trained on OpenAI's tool surface) emits `apply_patch` as a **function** call, but codex —
+for the rozum-served local-model config — offers apply_patch only as a **shell command**, so codex
+rejected it (`error=unsupported call: apply_patch`) and the edit was silently lost. This was the last
+clean gateway barrier behind `codex × gpt-oss`'s edit failures. `src/gateway.rs` now re-routes it
+(`rewrite_apply_patch_function_args` + the Responses streaming/collect paths): when the model calls
+`apply_patch` as a function **and codex didn't offer apply_patch as a tool** (`apply_patch_is_tool`,
+read from the request), the item is renamed to `exec_command` and the args become `{"cmd":"<patch
+--fuzz heredoc>","login":true}` (reusing Method B's `apply_patch_block_to_fuzz`; raw-`apply_patch`
+heredoc fallback). The gate leaves a genuine codex-with-apply_patch config — and Qwen's
+apply_patch-via-shell (Method B) path — untouched. Validated: `unsupported call` eliminated, the
+re-route fires + a `codex × gpt-oss fix` run passes because of it; unit test
+`apply_patch_function_reroutes_to_exec_command`, gateway suite 50/50. The remaining `codex × gpt-oss`
+reds are now proven model-level (malformed shell, temp-1.0 looping, `cargo new` subdir), documented in
+`docs/matrix-failure-analysis.md` (RESOLUTION 2).
+
 ## meeting — presence emitted by the mcp-proxy (supersedes the Claude Code settings.json hooks)
 Completed: 2026-06-18
 
