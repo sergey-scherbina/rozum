@@ -258,15 +258,23 @@ swap later). Spec: `docs/specs/agent-meeting-coordination.md`. Phased P1–P4.
   unknown-room errors cleanly). 380 fast tests green.
 - [ ] **P1.2 — global room + auto-join config.** Well-known `commons` room + `rozum.toml [meeting]
   auto_join`; proxy joins project [+ global]. (Needs multi-room session membership — assess.)
-- [~] **P1.3 — `rozum mcp install/uninstall` (DONE for claude+codex) + CC hooks (pending).**
-  `rozum mcp install [--agent claude|codex|opencode|all]` registers `rozum mcp-proxy` via each
-  agent's **own `mcp add`** (robust — the agent owns its config), `uninstall` via `mcp remove`;
-  idempotent (remove-then-add). **Verified live + reversibly:** claude (user scope, ✔ Connected) +
-  codex both registered, then cleanly removed. opencode's `mcp add` is interactive → guidance-only
-  (config-write follow-up). Pure `mcp_add_spec`/`mcp_remove_spec`/`expand_mcp_agents` + 3 unit tests.
-  **Remaining:** CC SessionStart→`joined:` / Stop→`done:` hooks calling `rozum meetings post
-  --as <agent>` (settings.json write); opencode config-write.
-- [ ] **P1.4 — strengthen instructions + AGENTS.md coordination convention.**
+- [x] **P1.3 — `rozum mcp install/uninstall` + CC presence hooks (DONE 2026-06-18).**
+  `rozum mcp install [--agent claude|codex|opencode|all] [--no-hooks]` registers `rozum mcp-proxy`
+  via each agent's **own `mcp add`** (robust — agent owns its config), `uninstall` via `mcp remove`;
+  idempotent (remove-then-add). For claude it also merges **SessionStart→`joined:` / SessionEnd→
+  `left:`** presence hooks into `~/.claude/settings.json` (NOT per-turn `Stop`), calling `rozum
+  meetings post --as claude` — preserving every existing key + hook, idempotent, and **byte-clean
+  reversible** (verified live: install adds hooks keeping `PreToolUse`, uninstall reverts to
+  byte-identical). Enabled serde_json `preserve_order` so the config round-trip keeps the user's key
+  order. opencode's `mcp add` is interactive → guidance-only (config-write follow-up). codex has no
+  lifecycle hooks → MCP-only (auto-join covers roster presence). 4 unit tests
+  (`mcp_add_spec`/`mcp_remove_spec`/`expand_mcp_agents` + hook-merge preserve/idempotent/reversible).
+- [x] **P1.4 — coordination instructions + AGENTS.md convention (DONE 2026-06-18).** Rewrote the
+  mcp-proxy `PROXY_INSTRUCTIONS` (every connecting agent sees it) into a coordination contract:
+  announce `working:` on start, check the room before clashing on files/`responding`, ask when
+  blocked, post `done:`/`blocked:` on finish, human messages are priority — on the agent's own
+  judgement. Strengthened AGENTS.md "Meeting-room coordination" (join paths, the etiquette, the
+  one-shot `rozum meetings post`).
 - [ ] **P1.5 — TUI multi-room overview.**
 - [ ] **P1.6 — `Principal` layer (local-default resolver).** `Principal{Human|Agent}` above
   sessions; OS-user = one Human, agent = Agent per session; `principals.json`; `rozum identity

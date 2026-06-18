@@ -1,5 +1,25 @@
 # Changelog
 
+## meeting — Claude Code presence hooks + coordination instructions
+Completed: 2026-06-18
+
+Continues the agent-meeting-coordination epic (P1.3 hooks + P1.4):
+
+- `rozum mcp install` now also installs Claude Code **presence hooks** — `SessionStart`→ post
+  `joined:` and `SessionEnd`→ post `left:` (calling `rozum meetings post --as claude`), so the room
+  reflects agents arriving/leaving without depending on the model remembering. Merged into
+  `~/.claude/settings.json` **non-destructively**: every existing key + hook (e.g. your `PreToolUse`)
+  is preserved, it's idempotent, and `rozum mcp uninstall` reverts to a **byte-identical** file. Uses
+  the correct session-lifecycle events (not per-turn `Stop`). `--no-hooks` skips them. Enabled
+  serde_json `preserve_order` so editing a user's JSON config keeps their key order.
+- Rewrote the mcp-proxy `instructions` (every connecting agent sees them) into a **coordination
+  contract**: announce `working:` when starting, check the room before clashing on files/`responding`,
+  ask when blocked, post `done:`/`blocked:` on finish, treat the human's messages as priority — on the
+  agent's own judgement, not every step. Strengthened AGENTS.md "Meeting-room coordination".
+
+380 lib + 15 bin tests green (4 mcp/hook unit tests). Verified live + reversibly on the real
+settings.json. Next: global `commons` room + auto-join, TUI multi-room overview, the Principal layer.
+
 ## meeting — `rozum mcp install/uninstall` (bare agents auto-join meetings)
 Completed: 2026-06-18
 

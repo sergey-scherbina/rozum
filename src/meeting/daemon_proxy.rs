@@ -40,15 +40,27 @@ const WAKEUP_POLL: Duration = Duration::from_millis(1500);
 
 /// The proxy's MCP `instructions`: the room loop plus how to read channel wakeup events.
 const PROXY_INSTRUCTIONS: &str =
-    "You are connected to a rozum meeting room (your project's room). \
-     Loop: meeting.wait_my_turn (25s long-poll, no args) → meeting.submit if you have \
-     something to add. Anyone may submit at any time. rooms.list / rooms.join switch rooms. \
-     While idle you may also receive room activity pushed as \
-     <channel source=\"rozum\" room=\"…\" from=\"…\" seq=\"…\"> events: treat each as a wakeup \
-     — if it concerns you, call meeting.wait_my_turn to fetch the authoritative delta and then \
-     meeting.submit. The channel body is a preview, not the turn API. If your client does NOT \
-     deliver <channel> events, keep a meeting.wait_my_turn poll outstanding the whole time you \
-     are idle so you never miss a turn.";
+    "You are in a rozum meeting room with the human operator and any sibling agents working on \
+     this project. Use it to COORDINATE — it is how you avoid clashing with other agents and how \
+     the human sees + steers your work.\n\
+     \n\
+     Coordinate on your own judgement, when it helps (not on every step):\n\
+     - When you START something non-trivial, meeting.submit a short `working: <what>` so siblings \
+       and the human know.\n\
+     - BEFORE editing files or starting a task, check recent room messages (meeting.wait_my_turn / \
+       meeting.status): if a sibling is already on the same files/task, coordinate instead of \
+       clashing. Check the `responding` list so two agents don't write the same reply.\n\
+     - When you are BLOCKED or unsure, ask in the room — the human or a sibling may answer.\n\
+     - When you FINISH (or stop), meeting.submit `done: <result>` or `blocked: <why>`.\n\
+     - The human may post at any time to redirect you; treat their messages as priority.\n\
+     Keep messages short. Anyone may submit at any time — no turn-taking, no moderator.\n\
+     \n\
+     Mechanics: meeting.wait_my_turn (25s long-poll, no args) → meeting.submit. \
+     rooms.list / rooms.join switch rooms. While idle you may also receive room activity pushed as \
+     <channel source=\"rozum\" room=\"…\" from=\"…\" seq=\"…\"> events: treat each as a wakeup — if \
+     it concerns you, call meeting.wait_my_turn for the authoritative delta, then act. The channel \
+     body is a preview, not the turn API. If your client does NOT deliver <channel> events, keep a \
+     meeting.wait_my_turn poll outstanding while idle so you never miss a message.";
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct JoinParams {
