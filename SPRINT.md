@@ -1744,9 +1744,13 @@ soon as any single track succeeds.
     called**), junk escalates once, and a **small-tier hit-rate** batch (small passes 3/4 →
     big called exactly once). 383 fast tests green. Generalizes [[small-model-router-rag]]
     (routing decides up-front; the cascade decides after a cheap attempt).
+  - **CLI wiring DONE 2026-06-18:** `rozum commit-msg [--model <spec[,spec2]>]` (`src/main.rs`)
+    reads `git diff --cached` → `commit_message_request` → prints. Single `--model` generates
+    directly; a `small,big` list builds the `small_task_config` cascade (small answers, gate
+    escalates). Defaults to `[runtime].model`. `staged_diff_in` unit-tested in a temp git repo.
   - **Follow-ups (deferred):** process-gated task types (`OneLineFix` via `cargo check`,
-    `Rename` via build/lint — gate trait supports it, not hermetically testable); CLI/gateway
-    wiring (`rozum commit-msg` from `git diff --cached`).
+    `Rename` via build/lint — gate trait supports it, not hermetically testable); a remote big
+    tier for `commit-msg` (v1 treats both tiers as local).
 
 ### Model bringup track (catalog) — new architectures to get working
 

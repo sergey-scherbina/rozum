@@ -1,5 +1,17 @@
 # Changelog
 
+## cli — `rozum commit-msg` (small-first commit messages from the staged diff)
+Completed: 2026-06-18
+
+New subcommand `rozum commit-msg [--model <spec[,spec2]>] [--n-ctx N]`: reads `git diff --cached`,
+builds the gate-shaped `commit_message_request`, runs it through a local model, and prints the
+message. A single `--model` generates directly; a `small,big` comma-list builds the
+`cascade::small_task_config(CommitMessage, …)` cascade — the small model answers and the
+`CommitMessageGate` escalates to the big model only when the cheap answer is unusable. Model
+defaults to `[runtime].model` from `rozum.toml`; errors cleanly when nothing is staged. This wires
+the previously library-only small-model-cascade to a real CLI. `staged_diff_in` is split out and
+unit-tested in a temp git repo; the model-call path is manual. Spec: `docs/specs/small-model-cascade.md`.
+
 ## bench — graceful gateway teardown (stop the agentic matrix from kernel-panicking the Mac)
 Completed: 2026-06-18
 

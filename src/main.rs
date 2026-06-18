@@ -261,6 +261,23 @@ enum Command {
         #[command(subcommand)]
         action: MeetingsAction,
     },
+
+    /// Generate a git commit message for the staged diff with a local model.
+    ///
+    /// Reads `git diff --cached` and prints a commit message. With a single
+    /// `--model` it generates directly; with a comma-list (`small,big`) it runs a
+    /// small-first cascade — the small model answers, and a structural commit-message
+    /// gate escalates to the big model only when the cheap answer is unusable.
+    CommitMsg {
+        /// Model spec, or a `small,big` comma-list for the small-first cascade.
+        /// Defaults to the configured `rozum.toml` model.
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Context window (tokens).
+        #[arg(long)]
+        n_ctx: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -600,6 +617,7 @@ async fn main() {
             MeetingsAction::Install => run_meetings_install(),
             MeetingsAction::Uninstall => run_meetings_uninstall(),
         },
+        Some(Command::CommitMsg { model, n_ctx }) => run_commit_msg(model, n_ctx).await,
         Some(Command::Telegram { room, name }) => {
             let token = std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_else(|_| {
                 eprintln!("error: TELEGRAM_BOT_TOKEN not set");
@@ -2885,6 +2903,122 @@ fn gateway_backend_builder(
 /// (fallback semantics; `single` policy yields a one-element chain). With the
 /// default config this reproduces the old `build_gateway_backend` order exactly:
 /// `gguf → mistralrs → lmstudio → mlx → url`.
+/// `rozum commit-msg` — generate a commit message for the staged diff with a local model.
+/// A single `--model` generates directly; a `small,big` comma-list runs the small-first
+/// cascade (`cascade::small_task_config`) so the small model answers and a structural
+/// commit-message gate escalates to the big model only when the cheap answer is unusable.
+async fn run_commit_msg(model: Option<String>, n_ctx: Option<u32>) {
+    use rozum::cascade::{CascadeBackend, SmallTask, commit_message_request, small_task_config};
+
+    let diff = match staged_diff() {
+        Ok(d) if !d.trim().is_empty() => d,
+        Ok(_) => {
+            eprintln!("commit-msg: nothing staged — `git add` your changes first");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("commit-msg: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let cfg = load_runtime_config_or_exit();
+    let Some(model) = model.or_else(|| cfg.model.clone()) else {
+        eprintln!("commit-msg: no model — pass --model <spec> (or set [runtime].model in rozum.toml)");
+        std::process::exit(1);
+    };
+    let n_ctx = n_ctx.unwrap_or(N_CTX_FALLBACK);
+
+    let names: Vec<&str> = model.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let build = |spec: &str| {
+        let cfg = &cfg;
+        let spec = spec.to_string();
+        async move {
+            build_from_config(cfg, &spec, n_ctx).await.unwrap_or_else(|| {
+                eprintln!("commit-msg: could not load model '{spec}'");
+                std::process::exit(1);
+            })
+        }
+    };
+
+    let backend: std::sync::Arc<dyn rozum::ChatBackend> = if names.len() >= 2 {
+        // small-first cascade: cheapest model answers, the commit-message gate escalates.
+        let small = build(names[0]).await;
+        let big = build(names[names.len() - 1]).await;
+        std::sync::Arc::new(CascadeBackend::new(small_task_config(
+            SmallTask::CommitMessage,
+            small,
+            big,
+        )))
+    } else {
+        build(names.first().copied().unwrap_or(model.as_str())).await
+    };
+
+    let stream = match backend.chat(commit_message_request(&diff)).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("commit-msg: generation failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    let msg = rozum::collect_to_string(stream).await.unwrap_or_default();
+    let msg = msg.trim();
+    if msg.is_empty() {
+        eprintln!("commit-msg: model returned an empty message");
+        std::process::exit(1);
+    }
+    println!("{msg}");
+}
+
+/// The staged diff (`git diff --cached`), no color, from the repo at the cwd.
+fn staged_diff() -> Result<String, String> {
+    staged_diff_in(None)
+}
+
+/// `git diff --cached` in `dir` (or the cwd when `None`) — split out so it's testable.
+fn staged_diff_in(dir: Option<&std::path::Path>) -> Result<String, String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["diff", "--cached", "--no-color"]);
+    if let Some(d) = dir {
+        cmd.current_dir(d);
+    }
+    let out = cmd.output().map_err(|e| format!("running git: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    String::from_utf8(out.stdout).map_err(|e| format!("git output not UTF-8: {e}"))
+}
+
+#[cfg(test)]
+mod commit_msg_tests {
+    use super::*;
+
+    #[test]
+    fn staged_diff_reads_the_index_and_empty_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(p)
+                .output()
+                .unwrap();
+        };
+        git(&["init", "-q"]);
+        // A fresh repo with nothing staged → empty diff, NOT an error.
+        assert!(staged_diff_in(Some(p)).unwrap().trim().is_empty());
+        // Stage a file → the diff names it and shows the added content.
+        std::fs::write(p.join("hello.txt"), "fn main() {}\n").unwrap();
+        git(&["add", "hello.txt"]);
+        let diff = staged_diff_in(Some(p)).expect("staged diff");
+        assert!(diff.contains("hello.txt"), "diff names the staged file:\n{diff}");
+        assert!(diff.contains("fn main()"), "diff shows the added content:\n{diff}");
+    }
+}
+
 async fn build_from_config(
     cfg: &rozum::RuntimeConfig,
     model: &str,
