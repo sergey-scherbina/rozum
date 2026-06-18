@@ -1470,8 +1470,10 @@ fn responses_input_to_internal(instructions: Option<&str>, input: &Value) -> Vec
 /// `docs/matrix-failure-analysis.md` Finding 4. Returns the input unchanged unless it is exactly
 /// this malformed hybrid (codex envelope + unified-diff headers).
 fn rewrite_unified_diff_to_apply_patch(patch: &str) -> String {
-    let looks_unified = patch.starts_with("--- ") || patch.contains("\n--- ");
-    if !patch.contains("*** Begin Patch") || !looks_unified {
+    // Fire on EITHER unified malformation: a `--- ` file header, or a `@@ -a,b +c,d @@` hunk header
+    // (the model sometimes emits the codex `*** Update File:` header itself but keeps unified `@@`).
+    let has_unified = patch.starts_with("--- ") || patch.contains("\n--- ") || patch.contains("@@ -");
+    if !patch.contains("*** Begin Patch") || !has_unified {
         return patch.to_string();
     }
     let strip = |p: &str| -> String {
@@ -1498,9 +1500,10 @@ fn rewrite_unified_diff_to_apply_patch(patch: &str) -> String {
             out.push_str("*** Update File: ");
             out.push_str(&file);
             out.push('\n');
-        } else if line.starts_with("@@") {
-            // unified hunk header `@@ -a,b +c,d @@ ctx` → codex bare `@@` marker
-            out.push_str("@@\n");
+        } else if line.starts_with("@@ -") || line.starts_with("@@-") {
+            // unified hunk header (`@@ -a,b +c,d @@`) — DROP it. codex's V4A apply_patch locates the
+            // change via the surrounding context lines; a literal `@@ -a,b...` is read as a context
+            // string to find ("Failed to find context '-a,b...'") which never matches the file.
         } else {
             out.push_str(line);
             out.push('\n');
@@ -1524,6 +1527,7 @@ fn normalize_codex_tool_args(args: &str) -> String {
                 if s.contains("*** Begin Patch") {
                     let fixed = rewrite_unified_diff_to_apply_patch(s);
                     if fixed != *s {
+                        eprintln!("[apply_patch-bridge] rewrote unified-diff headers → codex format");
                         *s = fixed;
                     }
                 }
@@ -3646,12 +3650,20 @@ mod tests {
         let out = rewrite_unified_diff_to_apply_patch(patch);
         assert!(out.contains("*** Update File: src/main.rs"), "got: {out}");
         assert!(!out.contains("--- src/main.rs") && !out.contains("+++ "), "headers not removed: {out}");
-        assert!(!out.contains("@@ -4,7"), "unified hunk header not stripped: {out}");
-        assert!(out.contains("@@\n"), "missing bare @@ marker: {out}");
-        // The (correct) change lines survive verbatim.
+        assert!(!out.contains("@@"), "unified hunk header not dropped: {out}");
+        // The (correct) change + context lines survive verbatim (codex locates via context).
         assert!(out.contains("-    s.to_string()"));
         assert!(out.contains("+    s.chars().rev().collect()"));
+        assert!(out.contains(" fn reverse(s: &str) -> String {"));
         assert!(out.contains("*** Begin Patch") && out.contains("*** End Patch"));
+
+        // Hybrid the model also emits: correct `*** Update File:` header but a unified `@@ -n,m @@`
+        // hunk line (the NEW-binary repro: codex "Failed to find context '-3,7 +3,7 @@'").
+        let hybrid = "*** Begin Patch\n*** Update File: src/main.rs\n@@ -3,7 +3,7 @@\n \
+            fn reverse(s: &str) -> String {\n-    s.to_string()\n+    s.chars().rev().collect()\n*** End Patch";
+        let h = rewrite_unified_diff_to_apply_patch(hybrid);
+        assert!(h.contains("*** Update File: src/main.rs") && !h.contains("@@"), "hybrid not fixed: {h}");
+        assert!(h.contains("+    s.chars().rev().collect()"));
 
         // Nested inside a shell tool-call's JSON arguments → rewritten in place, escaping intact.
         let args = json!({ "command": ["zsh", "-lc", format!("apply_patch \"{}\"", patch)] }).to_string();
