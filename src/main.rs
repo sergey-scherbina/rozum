@@ -288,6 +288,24 @@ enum Command {
         #[command(subcommand)]
         action: McpAction,
     },
+
+    /// Show or set this machine's local meeting identity (your stable handle in rooms).
+    Identity {
+        #[command(subcommand)]
+        action: IdentityAction,
+    },
+}
+
+/// `rozum identity whoami|set-name` — the local human's stable meeting identity.
+#[derive(Subcommand)]
+enum IdentityAction {
+    /// Show your local meeting identity (stable token + display name + file).
+    Whoami,
+    /// Set your display name in meeting rooms (keeps the stable token).
+    SetName {
+        /// The display name.
+        name: String,
+    },
 }
 
 /// `rozum mcp install/uninstall` — register/remove the meeting mcp-proxy in an agent's config.
@@ -668,6 +686,10 @@ async fn main() {
         Some(Command::Mcp { action }) => match action {
             McpAction::Install { agent, no_hooks } => run_mcp_install(&agent, no_hooks),
             McpAction::Uninstall { agent } => run_mcp_uninstall(&agent),
+        },
+        Some(Command::Identity { action }) => match action {
+            IdentityAction::Whoami => run_identity_whoami(),
+            IdentityAction::SetName { name } => run_identity_set_name(&name),
         },
         Some(Command::Telegram { room, name }) => {
             let token = std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_else(|_| {
@@ -1646,11 +1668,19 @@ async fn run_meetings_post(text: String, room: Option<String>, as_display: Optio
     if !daemon_alive(&sock).await {
         spawn_daemon().await;
     }
-    let display = as_display
+    // Identity: an explicit `--as`/$ROZUM_MEETING_AS label (a hook/agent) posts with that
+    // display under an ephemeral token; otherwise this is the human → use the stable local
+    // identity (one participant across launches/clients).
+    let explicit = as_display
         .or_else(|| std::env::var("ROZUM_MEETING_AS").ok())
-        .or_else(|| std::env::var("USER").ok())
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "operator".into());
+        .filter(|s| !s.trim().is_empty());
+    let (display, token) = match explicit {
+        Some(d) => (d, None),
+        None => {
+            let id = rozum::meeting::local_identity::load_or_create();
+            (id.display, Some(id.token))
+        }
+    };
     // Room precedence: explicit --room, then a configured shared room (ROZUM_MEETING_ROOM, so
     // hook posts land where the agents are), then the cwd project's room.
     let shared = std::env::var("ROZUM_MEETING_ROOM")
@@ -1668,10 +1698,32 @@ async fn run_meetings_post(text: String, room: Option<String>, as_display: Optio
             }
         },
     };
-    match post_once(&sock, target, &display, &text).await {
+    match post_once(&sock, target, &display, token.as_deref(), &text).await {
         Ok(room) => eprintln!("posted to '{room}' as {display}"),
         Err(e) => {
             eprintln!("meetings post: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_identity_whoami() {
+    use rozum::meeting::local_identity;
+    let id = local_identity::load_or_create();
+    let path = local_identity::identity_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "(no config dir)".into());
+    println!("display: {}", id.display);
+    println!("token:   {}", id.token);
+    println!("file:    {path}");
+    println!("(Your stable local identity — every local meeting client of yours maps to it.)");
+}
+
+fn run_identity_set_name(name: &str) {
+    match rozum::meeting::local_identity::set_display(name) {
+        Ok(id) => println!("display name set to '{}' (stable token kept).", id.display),
+        Err(e) => {
+            eprintln!("identity set-name: {e}");
             std::process::exit(1);
         }
     }

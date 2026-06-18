@@ -46,8 +46,10 @@ pub async fn run_attach(room: Option<String>) -> Boxed<()> {
         }
     }
 
-    let me = std::env::var("USER").unwrap_or_else(|_| "human".into());
-    let mut client = MeetingClient::connect(&sock, &me).await?;
+    // The human's stable local identity → one participant (handle) across launches, not a
+    // fresh random one each time. See `super::local_identity`.
+    let id = super::local_identity::load_or_create();
+    let mut client = MeetingClient::connect_as(&sock, &id.display, &id.token).await?;
 
     match room {
         Some(name) => {
