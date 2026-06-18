@@ -201,6 +201,36 @@ impl MeetingClient {
         Ok(name)
     }
 
+    /// Create-or-open a **named** room (idempotent `rooms.new`) and enter it — used for a
+    /// shared room like `commons` that may not exist yet (unlike `enter_named`, which opens
+    /// an existing room only).
+    pub async fn enter_or_create(&mut self, name: &str) -> ClientResult<String> {
+        let r = self
+            .conn
+            .call_tool(
+                "rooms.new",
+                json!({
+                    "name": name,
+                    "client_info_name": self.display_name,
+                    "session_token": self.session_token,
+                }),
+                T,
+            )
+            .await?;
+        let v = tool_result_text_json(&r).ok_or("bad rooms.new")?;
+        let room = v.get("room").and_then(Value::as_str).ok_or("no room in result")?.to_owned();
+        let root = v
+            .get("root")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or("no root in result")?;
+        self.room_name = Some(room.clone());
+        self.room_root = Some(root);
+        self.join_spec = Some(JoinSpec::Named(room.clone()));
+        self.reload_current_day();
+        Ok(room)
+    }
+
     /// Spawn a dedicated background connection that long-polls the current room
     /// and streams new messages — so the UI loop never has to cancel an
     /// in-flight `wait_my_turn` (which would leak a daemon long-poll). Returns the
@@ -399,8 +429,10 @@ fn prev_day(root: &Path, oldest: &str) -> Option<(String, Vec<StoredTurn>)> {
 pub enum PostTarget {
     /// The canonical room of this git project (a project path).
     Project(String),
-    /// A named room from `rooms.list`.
+    /// A named room from `rooms.list` — must already exist.
     Named(String),
+    /// A shared room by name, created-or-opened (`ROZUM_MEETING_ROOM`, e.g. `commons`).
+    Shared(String),
 }
 
 /// One-shot post: connect as `display`, join `target`, submit `text`, return the room name.
@@ -415,6 +447,7 @@ pub async fn post_once(
     let mut client = MeetingClient::connect(sock, display).await?;
     let room = match target {
         PostTarget::Project(p) => client.enter_project(&p).await?,
+        PostTarget::Shared(name) => client.enter_or_create(&name).await?,
         PostTarget::Named(name) => {
             let info = client
                 .list_rooms()
@@ -571,5 +604,19 @@ mod tests {
 
         // An unknown named room is a clean error, not a panic.
         assert!(post_once(&sock, PostTarget::Named("nope".into()), "tester", "x").await.is_err());
+
+        // Shared(name) create-or-opens the room (no prior existence needed), and a second
+        // post reuses it.
+        let r1 = post_once(&sock, PostTarget::Shared("commons".into()), "a", "hi commons")
+            .await
+            .expect("shared post creates + posts");
+        assert_eq!(r1, "commons");
+        post_once(&sock, PostTarget::Shared("commons".into()), "b", "again")
+            .await
+            .expect("second shared post reuses the room");
+        let mut reader = MeetingClient::connect(&sock, "reader2").await.unwrap();
+        reader.enter_or_create("commons").await.unwrap();
+        let contents: Vec<_> = reader.transcript().iter().map(|t| t.content.clone()).collect();
+        assert!(contents.contains(&"hi commons".to_string()) && contents.contains(&"again".to_string()));
     }
 }

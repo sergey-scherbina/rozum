@@ -256,8 +256,14 @@ swap later). Spec: `docs/specs/agent-meeting-coordination.md`. Phased P1–P4.
   instead of the bare handle, so readers see WHO posted (the `--as`/agent name). Verified live
   (auto-spawn → post → on disk → author shows the name) + `post_once` unit test (lands in room,
   unknown-room errors cleanly). 380 fast tests green.
-- [ ] **P1.2 — global room + auto-join config.** Well-known `commons` room + `rozum.toml [meeting]
-  auto_join`; proxy joins project [+ global]. (Needs multi-room session membership — assess.)
+- [~] **P1.2 — shared room (DONE) / true multi-room (deferred).** `ROZUM_MEETING_ROOM=<name>`
+  routes an agent into ONE shared room (e.g. `commons`) instead of its per-project room: the
+  proxy's auto-join uses `rooms.new` (create-or-open) when set, and `rozum meetings post` honors it
+  (precedence `--room` > `ROZUM_MEETING_ROOM` > project) so hook posts land where the agents are.
+  Verified live (post created+routed to `commons`; `status` lists it) + a `post_once` Shared
+  create-or-open unit test. **Deferred (needs a daemon model change — best shaped by dogfooding):**
+  being in the project room AND `commons` *simultaneously* (the daemon session is single-room);
+  and a `rozum.toml [meeting]` config (env-only for now).
 - [x] **P1.3 — `rozum mcp install/uninstall` + CC presence hooks (DONE 2026-06-18).**
   `rozum mcp install [--agent claude|codex|opencode|all] [--no-hooks]` registers `rozum mcp-proxy`
   via each agent's **own `mcp add`** (robust — agent owns its config), `uninstall` via `mcp remove`;

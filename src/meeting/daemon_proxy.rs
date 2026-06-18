@@ -77,6 +77,10 @@ pub struct SubmitParams {
 struct State {
     sock: PathBuf,
     project: Option<String>,
+    /// A shared room to join instead of the per-project room (`ROZUM_MEETING_ROOM`), so the
+    /// operator can route all agents into one common room (e.g. `commons`) for a single
+    /// overview. `None` = the project's canonical room. Spec: agent-meeting-coordination P1.2.
+    shared_room: Option<String>,
     session_token: String,
     client_info_name: String,
     conn: Option<RoomConnection>,
@@ -117,10 +121,15 @@ impl DaemonProxy {
 
     fn build(sock: PathBuf, project: Option<String>, client: String, auto_spawn: bool) -> Self {
         let session_token = uuid::Uuid::new_v4().simple().to_string();
+        let shared_room = std::env::var("ROZUM_MEETING_ROOM")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         Self {
             state: Arc::new(Mutex::new(State {
                 sock,
                 project,
+                shared_room,
                 session_token,
                 client_info_name: client,
                 conn: None,
@@ -149,15 +158,31 @@ impl DaemonProxy {
         let mut conn = RoomConnection::connect(&s.sock, &s.client_info_name, CONNECT_TIMEOUT)
             .await
             .map_err(|e| format!("connect-daemon: {e}"))?;
-        let mut args = json!({
-            "client_info_name": s.client_info_name,
-            "session_token": s.session_token,
-        });
-        if let Some(p) = &s.project {
-            args["project"] = json!(p);
-        }
+        // A configured shared room (`ROZUM_MEETING_ROOM`) → `rooms.new` (create-or-open + join);
+        // otherwise the project's canonical room via `_join_internal`. Both return
+        // `{room, root, participant_id}`.
+        let (tool, args) = match &s.shared_room {
+            Some(name) => (
+                "rooms.new",
+                json!({
+                    "name": name,
+                    "client_info_name": s.client_info_name,
+                    "session_token": s.session_token,
+                }),
+            ),
+            None => {
+                let mut a = json!({
+                    "client_info_name": s.client_info_name,
+                    "session_token": s.session_token,
+                });
+                if let Some(p) = &s.project {
+                    a["project"] = json!(p);
+                }
+                ("_join_internal", a)
+            }
+        };
         let join = conn
-            .call_tool("_join_internal", args, CONNECT_TIMEOUT)
+            .call_tool(tool, args, CONNECT_TIMEOUT)
             .await
             .map_err(|e| format!("join: {e}"))?;
         if let Some(j) = tool_result_text_json(&join) {
