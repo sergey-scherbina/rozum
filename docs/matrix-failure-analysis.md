@@ -179,3 +179,39 @@ ceiling for a given model. Verdicts per fail will be recorded above as each is f
 
 **Still to do:** raw codex tool-call capture (1a/1b); repro the `fix`/`debug`/`test` reds (edit-on-
 existing-file, a different shape than create-from-scratch); A/B any candidate fix; re-run the matrix.
+
+---
+
+## RESOLUTION (2026-06-18) — codex FIXED via lean + Method B (the model was never incapable)
+
+A **mock-codex probe** (`/tmp/mockcodex.py` — talk to the model directly, deterministic, temp=0) was
+the decisive tool. Probing 4 edit formats on the SAME Qwen3.6-27B:
+- `edit(old/new)`, `write_file`, `unified_diff` → **perfect tool calls** (correct, applicable fix).
+- codex `apply_patch` V4A → the model emits the patch as **text, not a tool call** (delivery break),
+  and even when delivered, V4A's strict context-matching rejects it.
+
+**The model is fully capable.** It produces a correct fix and delivers it flawlessly in 3 standard
+formats. It only breaks on codex's **proprietary V4A apply_patch** — a format built for OpenAI's own
+models, a poor fit for others. (This is why the same model gets 5/5 with claude's `Edit` old/new and
+with opencode.) The fix is to MEET THE MODEL WHERE IT IS, not blame it.
+
+**Two fixes (both in `src/gateway.rs`, Responses path = codex-only):**
+1. **codex-lean** (`responses_tools_to_internal`, default ON, `ROZUM_CODEX_LEAN=0` to disable) —
+   codex hands a local model ~18 tools + a ~21 KB prompt; it drowns (stalls / grabs meta-tools).
+   `codex_lean_keep()` filters to the real coding surface. Lifts the model from "stalls half the time"
+   to "reliably emits an edit".
+2. **Method B** (`rewrite_apply_patch_command`) — the model's `apply_patch "<patch>"` shell command is
+   rewritten into a reconstructed MINIMAL unified diff applied with `patch -p0 --fuzz=3` (standard
+   tool codex runs verbatim; codex only intercepts `apply_patch`, not `patch`). `patch --fuzz` locates
+   by context — tolerant of the line-number/whitespace drift that breaks V4A. The V4A header bridge
+   (`rewrite_unified_diff_to_apply_patch`) stays as a fallback.
+
+**Validated:** dedicated `codex fix × 27B` A/B = **0/5 → 5/5** (Method B fired + applied every run).
+Codex column across 4 models (300 s timeout): **10/20 → 13/20**, with **Qwen3.6-27B and Qwen3.6-35B
+now 5/5 — codex matches claude/opencode on the capable tier.** Residual (30B 2/5, gpt-oss 1/5) is
+edit-method variance (the model sometimes writes the patch to a temp file instead of an inline
+`apply_patch`, which Method B can't intercept) + gpt-oss specifics — improvable, diminishing returns.
+
+**Lesson:** the codex reds were NEVER model incapability. The model speaks the universal formats
+fluently; codex's proprietary V4A + tool/prompt overload were the barrier. Lean + a standard-tool
+bridge resolved it on the capable models.
