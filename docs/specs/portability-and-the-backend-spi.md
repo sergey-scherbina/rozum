@@ -79,7 +79,9 @@ compiled.
   `build_gateway_backend` / the config chain, done.* The Vulkan-native engine is now
   specced — the **MLX recipe (iGPU + unified memory + zero-copy `mmap`) on commodity
   x86**: [`x86-native-runtime.md`](x86-native-runtime.md) (reuses L1–L4, writes only
-  the L5 Vulkan engine).
+  the L5 Vulkan engine). Because Vulkan is cross-platform, that *one* engine is the
+  native local-inference path on **both Linux and Windows** (Intel/AMD iGPU;
+  `VK_EXT_external_memory_host` zero-copy works on Windows too) — not a Linux-only story.
 
 ## Add-a-backend checklist (write a new runtime/hardware leaf)
 
@@ -118,17 +120,37 @@ Nothing above the seam (gateway, agent runtime, cascade, concurrency, config) ch
 
 The abstraction exists; a few sharp edges keep it from being clean portability:
 
-1. **Platform-aware build.** `default = ["mlx-native", "gguf"]` assumes macOS —
-   a bare `cargo build` on Linux tries to compile MLX (Apple toolchain) and fails.
+1. **Platform-aware build (Linux *and* Windows).** `default = ["mlx-native", "gguf"]`
+   assumes macOS — a bare `cargo build` on Linux/Windows tries to compile MLX (Apple
+   toolchain) and fails.
    - **Done (2026-06-15): the durable core is portable + CI-enforced.** `cargo build
      --no-default-features` builds + tests the whole non-backend layer (SPI, gateway w/ HTTP
      backends, agent, cascade, concurrency, config, meeting room) with no native toolchain — and a
      CI `linux-core` job (`ubuntu-latest`) runs exactly that on every push, so a Linux regression in
-     the durable layer fails CI rather than being folklore.
-   - **Remaining (needs a Linux box):** make *bare* `cargo build` first-class on Linux — the native
-     backends are Apple-Metal-bound (mlx-sys; `llama-cpp-2 { features = ["metal"] }`), so this means
-     a target-conditional default (MLX only on macOS) + a gguf-CPU/CUDA path (non-`metal`
-     llama-cpp-2). Entangled with the Metal feature flags; tracked under `portability-cuda-gguf`.
+     the durable layer fails CI rather than being folklore. A **`windows-core` job
+     (`windows-latest`)** is the matching gate and should run alongside it.
+   - **Remaining — bare build per OS (needs the matching box):** make *bare* `cargo build`
+     first-class off-Mac — the native backends are Apple-Metal-bound (mlx-sys;
+     `llama-cpp-2 { features = ["metal"] }`), so this means a target-conditional default (MLX only on
+     macOS) + a gguf-CPU/CUDA/Vulkan path (non-`metal` llama-cpp-2). Entangled with the Metal feature
+     flags; tracked under `portability-cuda-gguf`.
+   - **Windows-specific durable-core seams (hardware-independent — the part the SPI alone does
+     NOT cover).** Two pieces *above* the seam currently assume Unix and must be abstracted before
+     the meeting daemon runs on Windows:
+     - **Daemon IPC** — the meeting daemon's client socket is a Unix-domain socket
+       (`meeting_sock()`), and `std::os::unix::net` does not exist on Windows. Abstract it behind a
+       small transport: Windows AF_UNIX (Win10 1803+) via a crate such as `interprocess`, a named
+       pipe, or a loopback-TCP fallback.
+     - **Service install** (`src/service.rs`) generates launchd/systemd units and invokes
+       `launchctl`/`systemctl`; add a Windows arm (a Windows Service via `sc.exe` / the
+       `windows-service` crate, or a Task Scheduler entry). The module is already "pure generation +
+       invoke", so the arm slots in cleanly.
+     - **Filesystem & locks** — `.rozum/room/` daily files + the single-writer advisory lock should
+       go through a cross-platform lock (`fs2` / `fd-lock`) rather than a raw `flock`, and path
+       handling must stay `PathBuf`-based (no hardcoded `/`).
+   - Until those land, **rozum on Windows already works as a gateway/launcher** in front of HTTP
+     backends (Ollama / LM Studio / vLLM / any `/v1`) — that path is pure cross-platform Rust today;
+     the seams above only gate the *local meeting daemon* and *in-process* engines.
 2. **Lift the shared model infra above the seam.** Auto-download +
    hf_hub/ModelScope cache + spec resolution are hardware-agnostic and useful to
    *any* safetensors backend (mistralrs, a future runtime), but today they're wired
