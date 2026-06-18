@@ -234,6 +234,12 @@ are clients and can go in parallel, P6 is the service):
   Also added `ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0` to the launch (keeps the shared gateway alive across
   the claude/codex phases — the `clients_gone` self-exit, [[project-agentic-bench-clients-gone]]).
   `bash -n` clean. Tracked in **BUGS.md BUG-001**; root cause [[project-matrix-kernel-panic]].
+  **VALIDATED ON MASTER 2026-06-18 (BUG-001 → done):** two matrix runs, neither produced a new
+  `.panic`. (1) 35B × claude+codex+opencode × 5 tasks = **15/15 PASS, rc=0**. (2) the decisive one —
+  claude × `27B → 30B-A3B → 35B` (`ROZUM_MLX_CACHE_GB=1`) = **15/15 PASS, rc=0, no panic across 2
+  inter-model teardown transitions, no SIGKILL fired** (every gateway exited gracefully; footprint
+  flushed 17.8→19.6→21.1 GB between models). The inter-model transition is exactly where the panic
+  used to hit.
   **Deliberately NOT done (tracked follow-up):** the deeper rozum-side bounded/non-wedging teardown
   (a real Metal-eval timeout; Drop's `join()` can't block forever) — it touches the GPU teardown hot
   path and can't be validated without risking a reboot, so it isn't shipped blind.
