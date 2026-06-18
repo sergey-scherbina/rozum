@@ -33,6 +33,7 @@ pub mod specdecode_backend;
 pub mod telegram;
 pub mod tui;
 pub mod web;
+pub mod x86;
 
 #[cfg(feature = "local-models")]
 pub use backend::CandleBackend;

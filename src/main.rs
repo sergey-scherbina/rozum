@@ -3304,6 +3304,12 @@ async fn build_gateway_backend_forced(
         "mlx" | "mlx-native" | "mlx_lm" => try_build_mlx_native_backend(model_spec, n_ctx)
             .await
             .map(admit_wrap),
+        // The x86 Vulkan-iGPU engine slot (docs/specs/x86-native-runtime.md). Scaffolded but
+        // not implemented — `try_build_x86_backend` logs why and returns None, so selection
+        // falls through to the next engine instead of failing silently.
+        "x86-native" | "x86" | "vulkan" => {
+            rozum::x86::try_build_x86_backend(model_spec, n_ctx).map(admit_wrap)
+        }
         e if is_mlx_server_engine(e) => rozum::openai_http::try_mlx_server(model_spec)
             .await
             .map(admit_wrap),

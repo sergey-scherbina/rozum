@@ -8,6 +8,29 @@ Bring the **MLX architectural recipe** — compute on the **integrated GPU**,
 Vulkan compute** (Intel Xe/Arc + AMD APU iGPUs). Same gateway, rooms, launch,
 catalog above the seam; a new engine below it.
 
+## Status (2026-06-18): SLOT SCAFFOLDED — ready to fill, no hardware yet
+
+The engine **slot exists and compiles on any host** (`src/x86/`), so the real Vulkan engine
+drops in by replacing stub bodies — no structural rework, no caller above the seam changes:
+
+- `src/x86/mod.rs` — `X86NativeOptions`, `X86NativeBackend` (`impl ChatBackend`, errors clearly),
+  `try_build_x86_backend` (logs + falls through until built), and `X86Engine`
+  (`impl crate::engine::LocalEngine`) — **a second `LocalEngine` implementor proves the
+  token-level seam fits a non-MLX engine** (the native-engine-spi validation, sans hardware).
+- The five compact components are pre-shaped stub files with their contract + the test to write:
+  `device.rs`, `memory.rs`, `tensor.rs`, `kernels.rs`, `model.rs`.
+- Wired + reachable: `engine = "x86-native"` (aliases `x86`/`vulkan`) is in
+  `config.rs::ACCEPTED_ENGINES`; `main.rs::build_choice` has the arm; selecting it is
+  self-documenting (the `NOT_IMPLEMENTED` message), never a silent failure. Not in the default
+  auto-chain (won't auto-select on a Mac).
+- `Cargo.toml` reserves the `x86-native` feature for the real engine's deps (a Vulkan binding +
+  SPIR-V); the stub needs none, so the **default CI keeps the contract honest** (3 slot tests).
+
+**To fill it (the P0–P5 below):** add the Vulkan binding under `x86-native`, implement the
+`Err`/`todo!()` bodies in the five components (`select_device`, `import_weights_zero_copy`, the
+kernels, the `X86Engine` forward), and wire `X86NativeBackend::chat` through the shared
+`crate::engine::drive` once it lands (native-engine-spi A3, shaped against this real consumer).
+
 ## Why — and why it is a NEW leaf, not the paths we already have
 
 rozum already runs off Apple Silicon two ways, but **neither is the MLX recipe on

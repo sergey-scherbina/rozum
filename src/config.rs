@@ -50,6 +50,9 @@ pub const ACCEPTED_ENGINES: &[&str] = &[
     "lmstudio",
     "mlx",
     "mlx_lm",
+    // Recognized so `engine = "x86-native"` is a clear "scaffolded, not built yet" path, not
+    // an "unknown engine" error. See docs/specs/x86-native-runtime.md. (Aliases normalized below.)
+    "x86-native",
     "url",
     "http",
     "hello",
@@ -64,6 +67,7 @@ fn canonical_engine(engine: &str) -> &str {
     match engine {
         "mlx_lm" => "mlx",
         "http" => "url",
+        "x86" | "vulkan" => "x86-native",
         other => other,
     }
 }

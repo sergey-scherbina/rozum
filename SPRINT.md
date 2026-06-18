@@ -1816,6 +1816,21 @@ soon as any single track succeeds.
   NOT a per-op tensor abstraction (avoids the `mistralrs-mlx-direct` perf dead-end).
   Spec: `docs/specs/native-engine-spi.md`.
 
+- [x] x86-native-slot - **DONE 2026-06-18 — the empty x86 slot, scaffolded so the real engine
+  drops in without rework** (`src/x86/`, branch `feature/x86-native-slot`). Compiles on any host
+  (no Vulkan deps yet), so the **default CI keeps the contract honest**. Contents: `X86NativeOptions`,
+  `X86NativeBackend` (`impl ChatBackend`, errors with a self-documenting `NOT_IMPLEMENTED`),
+  `try_build_x86_backend` (logs + falls through until built), and **`X86Engine` (`impl
+  crate::engine::LocalEngine`) — a second `LocalEngine` implementor that proves the token-level seam
+  fits a non-MLX engine** (the native-engine-spi validation, no hardware needed). The five compact
+  components are pre-shaped stub files with their contract + the test to write
+  (`device`/`memory`/`tensor`/`kernels`/`model`). Wired + reachable: `engine="x86-native"` (aliases
+  `x86`/`vulkan`) in `config.rs::ACCEPTED_ENGINES` + a `main.rs::build_choice` arm (NOT in the
+  default auto-chain). `Cargo.toml` reserves the `x86-native` feature for the future Vulkan binding.
+  3 slot tests (default sane, falls-through-until-built, chat errors clearly). 379 fast tests green.
+  **To fill:** add the Vulkan dep under the feature + implement the component bodies (P0–P5) + wire
+  `chat` through `engine::drive` (native-engine-spi A3, shaped against this real consumer). Spec:
+  `docs/specs/x86-native-runtime.md` § "Status: SLOT SCAFFOLDED".
 - [ ] x86-native-p0-probe - **P0 of `x86-native-runtime`** (after `native-engine-spi`) (the MLX recipe — iGPU +
   unified memory + zero-copy `mmap` — on commodity x86 via cross-vendor Vulkan).
   Stand up a Vulkan compute device from Rust (`ash`/`vulkano`); on BOTH an Intel
