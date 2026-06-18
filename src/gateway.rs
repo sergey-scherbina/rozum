@@ -1628,7 +1628,9 @@ fn codex_lean_keep(name: &str) -> bool {
 }
 
 fn responses_tools_to_internal(tools: &[RespTool]) -> Vec<ToolDef> {
-    let lean = std::env::var_os("ROZUM_CODEX_LEAN").is_some();
+    // Default ON: a local model drowns in codex's 18-tool / 21 KB surface (validated: lifts the
+    // codex `fix` reds 0→5/5 with Method B). Disable with `ROZUM_CODEX_LEAN=0`.
+    let lean = std::env::var("ROZUM_CODEX_LEAN").map(|v| v != "0").unwrap_or(true);
     tools
         .iter()
         .filter(|t| t.kind.as_deref().unwrap_or("function") == "function" && t.name.is_some())
