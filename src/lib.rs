@@ -16,6 +16,7 @@ pub mod meeting;
 pub mod memory_store;
 pub mod mistralrs_backend;
 pub mod mlx_native_backend;
+pub mod model_source;
 pub mod models;
 pub mod modelscope;
 pub mod obs;

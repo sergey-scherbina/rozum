@@ -1912,11 +1912,18 @@ soon as any single track succeeds.
   formal `impl LocalEngine` wrapping load/meta/generate is the remaining tidy-up.) →
   helpers consolidated to one source. **Core done — the shared layer the x86 leaf
   needs is ready** (`consume_tokens`, `sampler`, `serving`/`harmony`, model-reference).
-  **A3 [deferred to x86 P1, on purpose]** GGUF is divergent (per-token detok + a
-  *streaming* tool parser that's arguably better than finalize parsing — forcing
-  `consume_tokens` would downgrade it); render/preflight are MLX-tokenizer-bound and
-  best lifted when the **x86 leaf is the real second consumer** shaping them, not
-  speculatively (the premature-abstraction trap the portability spec warns of).
+  **A3 [IN PROGRESS — user-authorized full hardware-independent push, 2026-06-18]**
+  (branch `feature/native-engine-spi-a2-a3`). Step 1 DONE: **`portability-shared-
+  model-source` extracted** — `spec_to_hf_repo`/`resolve_model_dir`/
+  `config_model_type`/`ensure_model_dir` lifted out of the MLX leaf into a new
+  engine-agnostic `src/model_source.rs`, with the per-engine "can I load this
+  `model_type`?" decision passed in as a **`gate` callback** (so mistralrs / a
+  future leaf reuse one fetch/cache/resolve path); the MLX leaf keeps its catalog
+  (`supported_model_type`/`model_type_gate`) and re-exports for zero caller churn.
+  Verified: feature-free build green, `model_source` unit tests pass, `mlx-native
+  --tests` compiles. NEXT: A2 formal `impl LocalEngine` for MLX + implement `drive`
+  (generate→`consume_tokens`, render stays per-leaf) → A3 GGUF adoption (caveat
+  retained: don't downgrade GGUF's *streaming* tool parser; render/preflight lift).
   Token-level seam,
   NOT a per-op tensor abstraction (avoids the `mistralrs-mlx-direct` perf dead-end).
   Spec: `docs/specs/native-engine-spi.md`.

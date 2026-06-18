@@ -3336,23 +3336,11 @@ pub fn mlx_memory_mb() -> Option<(u64, u64, u64)> {
     None
 }
 
-/// Map a model spec to its HuggingFace `org/name` repo id, or `None` if the spec
-/// isn't an HF reference (a filesystem path, `lmstudio:`/`ollama:` spec, …).
-pub fn spec_to_hf_repo(spec: &str) -> Option<String> {
-    if std::path::Path::new(spec).exists() {
-        return None;
-    }
-    if let Some(r) = spec.strip_prefix("mlx-community:") {
-        Some(format!("mlx-community/{r}"))
-    } else if let Some(r) = spec.strip_prefix("hf:") {
-        Some(r.to_owned())
-    } else if spec.contains('/') && !spec.starts_with('/') && !spec.contains(':') {
-        // Bare `owner/repo`.
-        Some(spec.to_owned())
-    } else {
-        None
-    }
-}
+/// Model-spec resolution + hub download now live in the engine-agnostic
+/// [`crate::model_source`] module (reused by any safetensors backend). Re-exported
+/// here so existing `mlx_native_backend::{spec_to_hf_repo, resolve_model_dir}`
+/// callers and tests are unaffected.
+pub use crate::model_source::{resolve_model_dir, spec_to_hf_repo};
 
 /// `model_type` values the native runtime can load (matches `LoadedModel::load`).
 /// Used to reject an unsupported repo after its `config.json` is fetched, before
@@ -3376,22 +3364,11 @@ pub fn supported_model_type(model_type: &str) -> bool {
     )
 }
 
-/// The effective `model_type` of a parsed `config.json` — top-level, or the
-/// `text_config.model_type` of a multimodal wrapper (Qwen3.6 ships the latter).
-fn config_model_type(cfg: &serde_json::Value) -> Option<&str> {
-    cfg.get("model_type")
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            cfg.get("text_config")
-                .and_then(|t| t.get("model_type"))
-                .and_then(|v| v.as_str())
-        })
-}
-
 /// Download gate: accept only a `config.json` whose `model_type` the native
 /// runtime can load (rejects an unsupported repo before its multi-GB weights).
+/// Passed as the `gate` callback to [`crate::model_source::ensure_model_dir`].
 fn model_type_gate(cfg: &serde_json::Value) -> Result<(), String> {
-    match config_model_type(cfg) {
+    match crate::model_source::config_model_type(cfg) {
         Some(mt) if supported_model_type(mt) => Ok(()),
         Some(mt) => Err(format!(
             "native MLX does not support model_type '{mt}' (Qwen2/Qwen3/Qwen3.6/Llama)"
@@ -3400,81 +3377,12 @@ fn model_type_gate(cfg: &serde_json::Value) -> Result<(), String> {
     }
 }
 
-/// Resolve a model spec to a local model dir, **downloading it if absent**.
-///
-/// Tries the local cache first (`resolve_model_dir`); on a miss, fetches the
-/// snapshot from the matching hub — `modelscope:<owner>/<repo>` → ModelScope,
-/// otherwise `mlx-community:` / `hf:` / `owner/repo` → HuggingFace — but only
-/// after `config.json` confirms a supported `model_type`. Each writes the hub's
-/// native cache layout so the download is shared with that hub's own tools.
-/// Returns `None` (chain falls through) when the spec isn't a hub repo or the
-/// download fails.
+/// Resolve a model spec to a local model dir, **downloading it if absent**, gated
+/// to the model types the native MLX runtime can load. Thin wrapper over the
+/// engine-agnostic [`crate::model_source::ensure_model_dir`] supplying this
+/// runtime's [`model_type_gate`]; kept so existing callers are unaffected.
 pub async fn ensure_model_dir(spec: &str) -> Option<std::path::PathBuf> {
-    if let Some(dir) = resolve_model_dir(spec) {
-        return Some(dir);
-    }
-    let result = if let Some(repo) = spec.strip_prefix("modelscope:") {
-        crate::modelscope::ensure_snapshot(repo, model_type_gate).await
-    } else {
-        let repo = spec_to_hf_repo(spec)?;
-        crate::hf_hub::ensure_snapshot(&repo, model_type_gate).await
-    };
-    match result {
-        Ok(dir) => Some(dir),
-        Err(e) => {
-            eprintln!("rozum mlx: auto-download of '{spec}' skipped: {e}");
-            None
-        }
-    }
-}
-
-/// Resolve a model spec to a local directory of safetensors + tokenizer files
-/// **already present** on disk (no download — see [`ensure_model_dir`]).
-///
-/// - an existing directory path -> as-is
-/// - `mlx-community:<repo>` / `hf:<user>/<repo>` / `<user>/<repo>` -> the
-///   downloaded HuggingFace cache snapshot, if present
-///   (`~/.cache/huggingface/hub/models--<org>--<name>/snapshots/<rev>/`).
-///
-/// Returns `None` when nothing local matches.
-pub fn resolve_model_dir(spec: &str) -> Option<std::path::PathBuf> {
-    use std::path::PathBuf;
-
-    let direct = PathBuf::from(spec);
-    if direct.is_dir() && direct.join("config.json").is_file() {
-        return Some(direct);
-    }
-
-    // ModelScope specs resolve to ModelScope's own (flat) cache dir.
-    if let Some(r) = spec.strip_prefix("modelscope:") {
-        let (owner, name) = r.split_once('/')?;
-        let dir = crate::modelscope::model_cache_dir(owner, name)?;
-        return dir.join("config.json").is_file().then_some(dir);
-    }
-
-    // Normalize the spec's `org/name`, mirroring mistralrs_backend::normalize_spec.
-    let repo = if let Some(r) = spec.strip_prefix("mlx-community:") {
-        format!("mlx-community/{r}")
-    } else if let Some(r) = spec.strip_prefix("hf:") {
-        r.to_owned()
-    } else {
-        spec.to_owned()
-    };
-    let (org, name) = repo.split_once('/')?;
-
-    let home = std::env::var_os("HOME")?;
-    let cache = PathBuf::from(home)
-        .join(".cache/huggingface/hub")
-        .join(format!("models--{org}--{name}"))
-        .join("snapshots");
-    let snapshots = std::fs::read_dir(&cache).ok()?;
-    for entry in snapshots.flatten() {
-        let dir = entry.path();
-        if dir.join("config.json").is_file() {
-            return Some(dir);
-        }
-    }
-    None
+    crate::model_source::ensure_model_dir(spec, model_type_gate).await
 }
 
 // Gated on the feature: these tests reach into the `mlx-native`-only `inner` module, so they only
