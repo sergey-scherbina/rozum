@@ -65,19 +65,25 @@ scale). The **14 reds** are being worked one root-cause at a time. Living doc + 
 (other agent passes ⇒ agent mechanism; all fail ⇒ model ceiling), prove our-bug vs model-limit
 before concluding.
 
-- [x] **Finding 1 — codex file-creation blocked by approval/meta-tool layer, NOT edit-format.**
-  Reproduced (codex `build` × 30B). The local model requests escalated permissions (codex rejects
-  under `approval=never`) + calls meta-tools (`request_user_input`) instead of plain shell; falls
-  back to `cargo new <name>` (subdir) and never overwrites the default `main.rs`. **Plain shell
-  works** (`cargo new` ran in 154 ms). **Overturns** the earlier "needs structured-edit MCP"
-  hypothesis (which came from a *mock*-codex harness). Candidate fix: trim codex's tool surface
-  (drop `request_user_input`/`update_plan`, a codex `--lean`) — see BACKLOG `codex-tool-surface-lean`.
-- [ ] **Confirm Finding 1's raw tool call** (does the model set `with_escalated_permissions`? which
-  meta-tools does codex 0.137 offer?) via `codex --json` / a gateway request dump.
-- [ ] **Finding 2 — opencode** (`fix` on gpt-oss + 27B): reproduce + transcript; mechanism likely distinct.
-- [ ] **Finding 3 — gpt-oss `build`** (the one all-agent ceiling): reproduce; prove our-bug (temp/prompt)
-  vs genuine gpt-oss ceiling; fix or document why insurmountable.
-- [ ] **Then:** apply the proven fixes, re-run the matrix, record residual proven-impossible reds in the doc.
+- [x] **Finding 1a — codex stalls in the approval/meta-tool layer (30B repro).** Model requests
+  escalated permissions (rejected under `approval=never`) + calls meta-tools (`request_user_input`),
+  falls back to `cargo new <name>` (subdir). Plain shell itself works (`cargo new` in 154 ms).
+- [x] **Finding 1b — codex writes CODE via `echo > file`; zsh escaping corrupts it (gpt-oss repro).**
+  `println!("{}", rev)` → `println!({},rev)` (quotes lost) → won't compile; codex too slow → timed
+  out before recovery. **This is the real "why not plain shell"**: shell is fine for commands,
+  fragile for source code. claude/opencode write raw content via structured tools → code lands intact.
+  Together 1a/1b **overturn** the (mock-derived) "structured-edit MCP" hypothesis.
+- [x] **Finding 2 — opencode appends a DUPLICATE `fn main` (gpt-oss repro)** → E0428; its structured
+  write is fine, the model's *edit* (append-vs-replace) isn't; timed out before fixing. Model-quality, not infra.
+- [x] **Finding 3 — gpt-oss `build` is NOT a ceiling.** claude PASSES it (62 s). No true model ceiling
+  among the 14 — a single matrix run mislabeled a flaky cell. The model emits buggy first drafts;
+  whether a run passes is decided by **agent recovery within the time budget** (claude re-Writes the
+  whole file and recovers; codex/opencode time out).
+- **Synthesis:** 3 interacting factors, none a clean infra bug — model code-quality × agent file-write
+  mechanism (codex shell-echo/approval vs claude raw-Write vs opencode append-error) × speed/time-budget.
+- [ ] **Still to do:** raw codex tool-call capture (1a/1b — why `echo` over `apply_patch`?); repro the
+  `fix`/`debug`/`test` reds (edit-existing-file, different shape); per-fail verdict (fix vs structural);
+  A/B candidate fixes; re-run the matrix. Full evidence + verdicts in `docs/matrix-failure-analysis.md`.
 
 > Note (2026-06-18): staged on branch `docs/matrix-analysis` (off master) because a co-agent occupies
 > the master worktree; fast-forward / merge into master when it's free.

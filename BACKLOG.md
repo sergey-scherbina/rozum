@@ -2,16 +2,17 @@
 
 ## Agentic-bench fix candidates (from matrix-failure-analysis)
 
-- [ ] codex-tool-surface-lean — **Candidate fix for the codex matrix reds (most of codex's 10/20).**
-  Root cause (reproduced, `docs/matrix-failure-analysis.md` Finding 1): rozum-launched codex gives the
-  local model codex's full tool surface incl. meta-tools (`request_user_input`, `update_plan`) and the
-  escalation path. The model then **requests escalated permissions** (codex rejects under
-  `approval=never`) and **calls meta-tools** instead of plain shell → wastes turns, falls back to
-  `cargo new <name>` (subdir), never writes real code. Plain shell itself **works**. Fix to try (NOT
-  yet concluded): trim codex's tool surface (disable/strip the meta-tools + neutralize gratuitous
-  escalation) — a codex analog of claude `--lean` (`exec_agent` in `src/main.rs`). Validate via an A/B
-  re-run of the codex `build`/`fix`/`debug` reds. NB: this **replaces** the earlier (mock-derived)
-  `structured-edit-MCP-for-codex` idea, which the real-CLI repro did not support.
+- [ ] codex-reliability — **Candidate fixes for the codex matrix reds (most of codex's 10/20).** Root
+  cause is NOT a single bug (reproduced, `docs/matrix-failure-analysis.md` Findings 1a/1b): codex fails
+  to land code two ways depending on the model — (1a) it stalls in the approval/meta-tool layer
+  (`request_user_input`, gratuitous escalation rejected under `approval=never`) and falls back to
+  `cargo new <name>` (subdir); (1b) it writes code via `echo "…" > file` and **zsh escaping corrupts
+  it** (`println!("{}",rev)` → `println!({},rev)`). Plus codex is slow → times out before recovering.
+  Levers to A/B (NOT yet concluded): (a) trim codex's meta-tools (a codex analog of claude `--lean`);
+  (b) get the model to write via codex's **apply_patch** (raw content, no shell escaping) instead of
+  `echo >` — investigate why it prefers `echo`; (c) speed (already capped to `medium` reasoning).
+  Validate via A/B re-run of the codex `build`/`fix`/`debug` reds. NB: **replaces** the earlier
+  (mock-derived) `structured-edit-MCP-for-codex` idea — the real-CLI repro did not support it.
 
 ## Optional Model Adapters
 
