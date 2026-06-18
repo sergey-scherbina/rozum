@@ -1541,10 +1541,29 @@ fn normalize_codex_tool_args(args: &str) -> String {
     v.to_string()
 }
 
+/// codex-lean: codex hands a LOCAL model ~18 tools (most are meta-tool noise — plans, goals,
+/// plugins, MCP listing, `request_user_input`, …) on top of a ~21 KB system prompt. A small model
+/// drowns in it: it stalls after diagnosing, or grabs a meta-tool instead of editing
+/// (`docs/matrix-failure-analysis.md` Findings 1a/3). Dropping the non-coding tools is the codex
+/// analog of claude `--lean` (which lifts the same model to 5/5). Gated by `ROZUM_CODEX_LEAN`
+/// (off → codex's full tool set, unchanged). The keep-set is the actual coding surface.
+fn codex_lean_keep(name: &str) -> bool {
+    // Shell + file I/O + patching: everything a coding agent needs. Anything containing these
+    // stems survives (covers exec_command, write_stdin, apply_patch, shell, read/write/edit, …).
+    const KEEP_STEMS: &[&str] = &[
+        "exec", "shell", "command", "stdin", "apply_patch", "patch", "read_file", "write_file",
+        "edit", "view_image",
+    ];
+    let n = name.to_ascii_lowercase();
+    KEEP_STEMS.iter().any(|s| n.contains(s))
+}
+
 fn responses_tools_to_internal(tools: &[RespTool]) -> Vec<ToolDef> {
+    let lean = std::env::var_os("ROZUM_CODEX_LEAN").is_some();
     tools
         .iter()
         .filter(|t| t.kind.as_deref().unwrap_or("function") == "function" && t.name.is_some())
+        .filter(|t| !lean || codex_lean_keep(t.name.as_deref().unwrap_or("")))
         .map(|t| ToolDef {
             name: t.name.clone().unwrap_or_default(),
             description: t.description.clone().unwrap_or_default(),
@@ -2288,6 +2307,25 @@ async fn responses_handler(
         stream = req.stream.unwrap_or(false),
         "POST /v1/responses"
     );
+    if std::env::var_os("ROZUM_RESP_DUMP").is_some() {
+        let ins_len = req.instructions.as_deref().map(|s| s.len()).unwrap_or(0);
+        let input_len = serde_json::to_string(&req.input).map(|s| s.len()).unwrap_or(0);
+        eprintln!(
+            "─── RESP_DUMP: instructions={ins_len}B input={input_len}B tools={} ───",
+            req.tools.len()
+        );
+        for t in &req.tools {
+            eprintln!(
+                "  tool: {} (desc {}B)",
+                t.name.as_deref().unwrap_or("?"),
+                t.description.as_deref().map(|s| s.len()).unwrap_or(0)
+            );
+        }
+        if let Some(ins) = req.instructions.as_deref() {
+            let head: String = ins.chars().take(2000).collect();
+            eprintln!("─── instructions head ───\n{head}\n─── /instructions ───");
+        }
+    }
     let lease = match state.sb.enter(req.model.as_deref()).await {
         Ok(l) => l,
         Err(resp) => return resp,
