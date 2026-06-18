@@ -1512,6 +1512,70 @@ fn rewrite_unified_diff_to_apply_patch(patch: &str) -> String {
     out
 }
 
+/// Method B (the robust fix). codex's `apply_patch` uses a finicky proprietary V4A format that a
+/// local model can't reliably hit (header dialect + strict context-matching — see
+/// `docs/matrix-failure-analysis.md` Finding 4 and the mock-codex probe). But the model DOES emit a
+/// correct unified diff (its `-` lines match the file verbatim). So instead of translating to V4A,
+/// reconstruct a MINIMAL unified diff from the model's patch and rewrite the whole
+/// `apply_patch "<patch>"` shell command into `patch --fuzz` of it — standard tooling codex runs
+/// verbatim (codex only intercepts `apply_patch`, not `patch`). `patch --fuzz` locates the change by
+/// context, tolerant of the line-number/whitespace drift that breaks V4A. Returns the new shell
+/// command, or None when it isn't a reconstructable apply_patch (→ caller falls back to the V4A bridge).
+fn rewrite_apply_patch_command(cmd: &str) -> Option<String> {
+    if !cmd.contains("apply_patch") {
+        return None;
+    }
+    let begin = cmd.find("*** Begin Patch")?;
+    let end_rel = cmd[begin..].find("*** End Patch")?;
+    let end = begin + end_rel + "*** End Patch".len();
+    // The patch lives inside a shell double-quoted string — undo the shell escaping.
+    let block = cmd[begin..end]
+        .replace("\\\"", "\"")
+        .replace("\\$", "$")
+        .replace("\\`", "`")
+        .replace("\\\\", "\\");
+    let mut path: Option<String> = None;
+    let mut body: Vec<String> = Vec::new();
+    for ln in block.lines() {
+        if let Some(p) = ln.strip_prefix("*** Update File:") {
+            path = Some(p.trim().to_string());
+        } else if let Some(p) = ln.strip_prefix("--- ") {
+            let p = p.trim();
+            let p = p.strip_prefix("a/").or_else(|| p.strip_prefix("b/")).unwrap_or(p);
+            path.get_or_insert_with(|| p.to_string());
+        } else if ln.starts_with("+++ ") || ln.starts_with("@@") || ln.starts_with("*** ") {
+            continue;
+        } else if ln.is_empty() {
+            body.push(" ".to_string()); // a blank context line in the diff
+        } else if matches!(ln.as_bytes()[0], b' ' | b'+' | b'-') {
+            body.push(ln.to_string());
+        }
+        // anything else is stray prose — skip it
+    }
+    let path = path?;
+    let chg: Vec<usize> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with('+') || l.starts_with('-'))
+        .map(|(i, _)| i)
+        .collect();
+    let (&first, &last) = (chg.first()?, chg.last()?);
+    // Trim to ±3 lines of context around the change → small, reliable match surface.
+    let lo = first.saturating_sub(3);
+    let hi = (last + 1 + 3).min(body.len());
+    let hunk = &body[lo..hi];
+    let old = hunk.iter().filter(|l| l.starts_with(' ') || l.starts_with('-')).count();
+    let new = hunk.iter().filter(|l| l.starts_with(' ') || l.starts_with('+')).count();
+    let mut diff = format!("--- {path}\n+++ {path}\n@@ -1,{old} +1,{new} @@\n");
+    for l in hunk {
+        diff.push_str(l);
+        diff.push('\n');
+    }
+    Some(format!(
+        "patch -p0 --fuzz=3 <<'ROZUM_PATCH_EOF'\n{diff}ROZUM_PATCH_EOF\n"
+    ))
+}
+
 /// Walk a tool-call `arguments` JSON string and rewrite any embedded malformed codex `apply_patch`
 /// (Finding 4). The patch text is nested inside the shell tool's command (and JSON-escaped), so we
 /// parse, recurse over every string value, and re-serialize — keeping escaping correct. A no-op for
@@ -1525,10 +1589,15 @@ fn normalize_codex_tool_args(args: &str) -> String {
         match v {
             Value::String(s) => {
                 if s.contains("*** Begin Patch") {
-                    let fixed = rewrite_unified_diff_to_apply_patch(s);
-                    if fixed != *s {
-                        eprintln!("[apply_patch-bridge] rewrote unified-diff headers → codex format");
-                        *s = fixed;
+                    if let Some(rw) = rewrite_apply_patch_command(s) {
+                        eprintln!("[apply_patch-bridge] rewrote apply_patch → patch --fuzz (Method B)");
+                        *s = rw;
+                    } else {
+                        let fixed = rewrite_unified_diff_to_apply_patch(s);
+                        if fixed != *s {
+                            eprintln!("[apply_patch-bridge] rewrote unified-diff headers → codex V4A (fallback)");
+                            *s = fixed;
+                        }
                     }
                 }
             }
@@ -3703,16 +3772,33 @@ mod tests {
         assert!(h.contains("*** Update File: src/main.rs") && !h.contains("@@"), "hybrid not fixed: {h}");
         assert!(h.contains("+    s.chars().rev().collect()"));
 
-        // Nested inside a shell tool-call's JSON arguments → rewritten in place, escaping intact.
-        let args = json!({ "command": ["zsh", "-lc", format!("apply_patch \"{}\"", patch)] }).to_string();
-        let fixed = normalize_codex_tool_args(&args);
-        assert!(fixed.contains("*** Update File: src/main.rs"));
-        assert!(!fixed.contains("--- src/main.rs"));
-
-        // Well-formed codex patches and non-patch args are untouched.
+        // Well-formed codex patches and non-patch args are untouched by the V4A fallback.
         let ok = "*** Begin Patch\n*** Update File: a.rs\n@@\n-x\n+y\n*** End Patch";
         assert_eq!(rewrite_unified_diff_to_apply_patch(ok), ok);
         assert_eq!(normalize_codex_tool_args("{\"command\":\"ls -l\"}"), "{\"command\":\"ls -l\"}");
+    }
+
+    #[test]
+    fn apply_patch_method_b_rewrites_to_patch_fuzz() {
+        // The model's REAL apply_patch command (the run codex's V4A rejected with "Failed to find
+        // context"). Method B reconstructs a minimal unified diff + `patch --fuzz`.
+        let cmd = "apply_patch \"*** Begin Patch\n*** Update File: src/main.rs\n@@ -3,7 +3,7 @@\n \
+            /// Reverse a string by characters.\n fn reverse(s: &str) -> String {\n\
+            -    // BUG: returns the input unchanged.\n-    s.to_string()\n\
+            +    s.chars().rev().collect()\n }\n\n fn main() {\n*** End Patch\"";
+        let rw = rewrite_apply_patch_command(cmd).expect("reconstructable");
+        assert!(rw.starts_with("patch -p0 --fuzz=3 <<'ROZUM_PATCH_EOF'"), "got: {rw}");
+        assert!(rw.contains("--- src/main.rs") && rw.contains("+++ src/main.rs"));
+        assert!(rw.contains("@@ -1,"), "no reconstructed hunk header: {rw}");
+        assert!(rw.contains("-    s.to_string()") && rw.contains("+    s.chars().rev().collect()"));
+        assert!(rw.trim_end().ends_with("ROZUM_PATCH_EOF"));
+        assert!(rewrite_apply_patch_command("cargo run -- hello").is_none());
+
+        // End-to-end through the args JSON: apply_patch command → patch --fuzz, no apply_patch left.
+        let args = json!({ "command": ["zsh", "-lc", cmd] }).to_string();
+        let fixed = normalize_codex_tool_args(&args);
+        assert!(fixed.contains("patch -p0 --fuzz"), "Method B not applied: {fixed}");
+        assert!(!fixed.contains("apply_patch"), "apply_patch should be gone: {fixed}");
     }
 
     #[test]
