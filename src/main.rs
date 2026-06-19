@@ -2796,12 +2796,14 @@ async fn run_models_rm(spec: &str, yes: bool) {
     match m.source {
         ModelSource::Ollama => {
             // Ollama blobs are content-addressed and shared between models, so a
-            // direct `rm` could corrupt others. Delegate to `ollama rm`.
+            // direct `rm` could corrupt others. Delegate to `ollama rm` — which wants the
+            // bare `<name>:<tag>`, NOT our `ollama:`-prefixed spec.
+            let ollama_name = spec.strip_prefix("ollama:").unwrap_or(spec);
             if which("ollama").is_none() {
                 eprintln!(
                     "rozum models rm: this is an Ollama model and the `ollama` binary was not \
                      found. Its blobs are shared/content-addressed — not removing directly. \
-                     Install Ollama and run `ollama rm {spec}`."
+                     Install Ollama and run `ollama rm {ollama_name}`."
                 );
                 std::process::exit(1);
             }
@@ -2810,12 +2812,12 @@ async fn run_models_rm(spec: &str, yes: bool) {
             }
             let status = std::process::Command::new("ollama")
                 .arg("rm")
-                .arg(spec)
+                .arg(ollama_name)
                 .status();
             match status {
-                Ok(s) if s.success() => println!("deleted (ollama rm {spec})"),
+                Ok(s) if s.success() => println!("deleted (ollama rm {ollama_name})"),
                 _ => {
-                    eprintln!("rozum models rm: `ollama rm {spec}` failed");
+                    eprintln!("rozum models rm: `ollama rm {ollama_name}` failed");
                     std::process::exit(1);
                 }
             }
