@@ -72,6 +72,16 @@ pub fn parse_harmony(marked: &str) -> HarmonyParsed {
             out.final_text.push_str(body);
         } else if header.starts_with("analysis") {
             out.analysis.push_str(body);
+        } else if let Some(name) = infer_tool_from_body(header, body) {
+            eprintln!("[harmony-recover] inferred {name} from a garbled tool-call envelope");
+            // RECOVERY: gpt-oss sometimes GARBLES the harmony envelope — it drops the
+            // `to=functions.NAME` recipient, or detaches it into its own channel segment
+            // (`…<|channel|>functions.exec_command<|channel|>commentary<|constrain|>json<|message|>{…}`),
+            // leaving a `commentary` segment whose JSON body is unmistakably a tool call. Without
+            // this the call is DROPPED and the agent stalls on an empty turn — but the model DID try
+            // to act. Infer the function from the args shape so the action lands (downstream fold /
+            // read-repair then handle the command itself).
+            out.tool_calls.push((name, first_json_args(body)));
         }
 
         // Advance to the terminator so the next iteration finds the next channel.
@@ -94,6 +104,29 @@ fn first_json_args(body: &str) -> String {
         Some(Ok(_)) => body[..de.byte_offset()].trim_end().to_string(),
         _ => body.to_string(),
     }
+}
+
+/// Recover the intended function for a `commentary` segment whose harmony envelope LOST or
+/// detached its `to=functions.NAME` recipient but whose JSON body is unmistakably a tool call.
+/// Maps the args SHAPE to the function: a `cmd`/`command` field → `exec_command`; a `patch` field
+/// (or any value carrying a `*** Begin Patch` payload) → `apply_patch`. Returns None for ordinary
+/// commentary preamble (prose, or JSON without a tool-ish field) so real text isn't misrouted.
+fn infer_tool_from_body(header: &str, body: &str) -> Option<String> {
+    // Only recover on a commentary/constrained-json segment — never on `final`/`analysis` prose.
+    if !(header.contains("commentary") || header.contains("constrain") || header.contains("json")) {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&first_json_args(body)).ok()?;
+    let obj = v.as_object()?;
+    if obj.contains_key("cmd") || obj.contains_key("command") {
+        return Some("exec_command".to_string());
+    }
+    let has_patch = obj.contains_key("patch")
+        || obj.contains_key("input")
+        || obj
+            .values()
+            .any(|x| x.as_str().is_some_and(|s| s.contains("*** Begin Patch")));
+    has_patch.then(|| "apply_patch".to_string())
 }
 
 /// Extract `NAME` from a `commentary to=functions.NAME ...` header, if present.
@@ -119,6 +152,45 @@ mod tests {
         assert_eq!(p.final_text, "The capital of France is Paris.");
         assert!(p.tool_calls.is_empty());
         assert!(p.analysis.contains("capital"));
+    }
+
+    #[test]
+    fn recovers_tool_call_with_missing_recipient() {
+        // gw-1 shape: a `commentary <|constrain|>json` segment with NO `to=functions.` recipient,
+        // but a cmd body — the model tried to act; recover it instead of stalling.
+        let s = "<|channel|>analysis<|message|>need to act<|end|><|start|>assistant\
+                 <|channel|>commentary<|constrain|>json<|message|>{\"cmd\":\"cat src/main.rs\"}<|call|>";
+        let p = parse_harmony(s);
+        assert_eq!(p.tool_calls.len(), 1, "garbled call should be recovered");
+        assert_eq!(p.tool_calls[0].0, "exec_command");
+        assert!(p.tool_calls[0].1.contains("cat src/main.rs"));
+    }
+
+    #[test]
+    fn recovers_detached_recipient_tool_call() {
+        // gw-3 shape: the recipient is detached into its own channel segment.
+        let s = "<|channel|>commentary<|channel|>functions.exec_command<|channel|>commentary\
+                 <|constrain|>json<|message|>{\"cmd\":\"sed -n -n src/main.rs\"}<|call|>";
+        let p = parse_harmony(s);
+        assert_eq!(p.tool_calls.len(), 1);
+        assert_eq!(p.tool_calls[0].0, "exec_command");
+    }
+
+    #[test]
+    fn recovers_apply_patch_body() {
+        let s = "<|channel|>commentary<|constrain|>json<|message|>\
+                 {\"patch\":\"*** Begin Patch\\n*** Update File: a.rs\\n@@\\n-x\\n+y\\n*** End Patch\"}<|call|>";
+        let p = parse_harmony(s);
+        assert_eq!(p.tool_calls.len(), 1);
+        assert_eq!(p.tool_calls[0].0, "apply_patch");
+    }
+
+    #[test]
+    fn plain_commentary_prose_not_recovered() {
+        // A commentary preamble with no tool-ish JSON must NOT be turned into a tool call.
+        let s = "<|channel|>commentary<|message|>Let me think about this first.<|end|>";
+        let p = parse_harmony(s);
+        assert!(p.tool_calls.is_empty());
     }
 
     #[test]
