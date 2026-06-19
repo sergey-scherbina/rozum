@@ -1616,6 +1616,36 @@ fn rewrite_apply_patch_function_args(args: &str) -> Option<String> {
     Some(json!({ "cmd": cmd, "login": true }).to_string())
 }
 
+/// Decode literal `\uXXXX` (4-hex) escapes that gpt-oss sometimes double-escapes *into* patch
+/// content (`&` for `&`, `>` for `>`) — the literal 6-char sequence survives in the
+/// string, so the patch's context/`-` lines no longer match the file and the apply fails. Only the
+/// bare 4-hex form is touched (Rust's own escape is `\u{..}` with braces, so source code is safe).
+fn decode_unicode_escapes(s: &str) -> String {
+    if !s.contains("\\u") {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\'
+            && i + 5 < chars.len()
+            && chars[i + 1] == 'u'
+            && chars[i + 2] != '{'
+        {
+            let hex: String = chars[i + 2..i + 6].iter().collect();
+            if let Some(c) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                out.push(c);
+                i += 6;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Walk a tool-call `arguments` JSON string and rewrite any embedded malformed codex `apply_patch`
 /// (Finding 4). The patch text is nested inside the shell tool's command (and JSON-escaped), so we
 /// parse, recurse over every string value, and re-serialize — keeping escaping correct. A no-op for
@@ -1625,15 +1655,20 @@ fn normalize_codex_tool_args(args: &str) -> String {
         Ok(v) => v,
         Err(_) => return args.to_string(),
     };
+    // gpt-oss often emits the patch in a field SIBLING to a bare `apply_patch` command
+    // ({"cmd":"apply_patch","patch":"*** Begin Patch …"}); these keys carry it.
+    const PATCH_KEYS: &[&str] = &["patch", "input", "stdin", "patch_text", "content", "text"];
     fn walk(v: &mut Value) {
         match v {
             Value::String(s) => {
                 if s.contains("*** Begin Patch") {
-                    if let Some(rw) = rewrite_apply_patch_command(s) {
+                    // Decode any literal \uXXXX the model double-escaped into the patch body.
+                    let s2 = decode_unicode_escapes(s);
+                    if let Some(rw) = rewrite_apply_patch_command(&s2) {
                         eprintln!("[apply_patch-bridge] rewrote apply_patch → patch --fuzz (Method B)");
                         *s = rw;
                     } else {
-                        let fixed = rewrite_unified_diff_to_apply_patch(s);
+                        let fixed = rewrite_unified_diff_to_apply_patch(&s2);
                         if fixed != *s {
                             eprintln!("[apply_patch-bridge] rewrote unified-diff headers → codex V4A (fallback)");
                             *s = fixed;
@@ -1642,7 +1677,37 @@ fn normalize_codex_tool_args(args: &str) -> String {
                 }
             }
             Value::Array(a) => a.iter_mut().for_each(walk),
-            Value::Object(o) => o.values_mut().for_each(walk),
+            Value::Object(o) => {
+                // The dominant gpt-oss edit-delivery shape: a bare `apply_patch` command with the
+                // patch stranded in a sibling field. codex runs bare `apply_patch` (ignoring the
+                // sibling) → "Usage: apply_patch 'PATCH'" and the edit is lost. Fold the sibling
+                // patch INTO the command (Method B `patch --fuzz`, unicode-decoded) so it lands.
+                let cmd_is_apply = o
+                    .get("cmd")
+                    .and_then(Value::as_str)
+                    .map(|c| c.trim() == "apply_patch")
+                    .unwrap_or(false);
+                if cmd_is_apply {
+                    let patch = PATCH_KEYS.iter().find_map(|k| {
+                        o.get(*k)
+                            .and_then(Value::as_str)
+                            .filter(|p| {
+                                p.contains("*** Begin Patch") || p.contains("*** Update File")
+                            })
+                            .map(|p| decode_unicode_escapes(p))
+                    });
+                    if let Some(fuzz) = patch.as_deref().and_then(apply_patch_block_to_fuzz) {
+                        eprintln!(
+                            "[apply_patch-bridge] folded {{cmd:apply_patch, patch sibling}} → patch --fuzz"
+                        );
+                        o.insert("cmd".into(), Value::String(fuzz));
+                        for k in PATCH_KEYS {
+                            o.remove(*k);
+                        }
+                    }
+                }
+                o.values_mut().for_each(walk);
+            }
             _ => {}
         }
     }
@@ -3895,6 +3960,35 @@ mod tests {
         // A non-patch exec call is left untouched (None → caller keeps the original args).
         let plain = json!({ "cmd": "cargo run", "login": true }).to_string();
         assert!(rewrite_apply_patch_function_args(&plain).is_none());
+    }
+
+    #[test]
+    fn folds_cmd_apply_patch_sibling_and_decodes_unicode() {
+        // gpt-oss's DOMINANT edit shape: a bare `apply_patch` command with the patch stranded in a
+        // sibling field, and `&`/`>` double-escaped as & / > in the body.
+        let args = json!({
+            "cmd": "apply_patch",
+            "patch": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n \
+                fn reverse(s: \\u0026str) -\\u003e String {\n\
+                -    s.to_string()\n+    s.chars().rev().collect()\n }\n*** End Patch"
+        })
+        .to_string();
+        let out = normalize_codex_tool_args(&args);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let cmd = v["cmd"].as_str().unwrap();
+        assert!(cmd.starts_with("patch -p0 --fuzz=3"), "sibling not folded: {cmd}");
+        assert!(v.get("patch").is_none(), "the consumed sibling should be gone");
+        assert!(cmd.contains("&str") && cmd.contains("-> String"), "unicode not decoded: {cmd}");
+        assert!(!cmd.contains("\\u0026"), "literal escape remained: {cmd}");
+        assert!(cmd.contains("-    s.to_string()") && cmd.contains("+    s.chars().rev().collect()"));
+    }
+
+    #[test]
+    fn decode_unicode_escapes_only_bare_4hex() {
+        assert_eq!(decode_unicode_escapes("a \\u0026 b"), "a & b");
+        assert_eq!(decode_unicode_escapes("plain text"), "plain text");
+        // Rust's brace form `\u{..}` is valid source — must be left intact.
+        assert_eq!(decode_unicode_escapes("x\\u{26}y"), "x\\u{26}y");
     }
 
     #[test]

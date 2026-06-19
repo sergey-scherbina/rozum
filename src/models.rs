@@ -45,15 +45,14 @@ pub struct RecommendedModel {
     pub notes: &'static str,
 }
 
-/// Hand-picked list optimised for Apple Silicon 24-36 GB unified memory, ordered for
-/// **agentic coding** (Claude Code / Codex via `rozum launch`). The agentic benchmark
-/// (`scripts/bench/agentic.sh`) found a sharp **7B→27B capability cliff**: below ~27B
-/// (or a strong MoE) local quantized models can't reliably drive the multi-step tool
-/// loop. Qwen3/Qwen3.6 emit the native `<tool_call>` format (always valid); Qwen2.5/Coder
-/// need the gateway's JSON-repair. **Top pick: Qwen3.6-35B-A3B** — the strongest MoE and the
-/// only model to score a perfect 10/10 (claude 5/5 + codex 5/5) in the 2026-06-16 matrix; the
-/// old OOM caveat is gone now that chunked prefill + the MLX memory cap shipped (serves cleanly
-/// at ~25 GB peak on a 36 GB Mac). Update when stronger `mlx-community/` models appear.
+/// The two default local models for **agentic coding** (Claude Code / Codex via `rozum launch`),
+/// optimised for Apple Silicon 24-36 GB unified memory: **Qwen3.6-35B-A3B** (strongest MoE coder —
+/// perfect 10/10 in the matrix, claude 5/5 + codex 5/5) and **gpt-oss-20b** (OpenAI reasoning MoE,
+/// native MLX port). The agentic benchmark (`scripts/bench/agentic.sh`) found a sharp **7B→27B
+/// capability cliff**: below ~27B (or a strong MoE) local quantized models can't reliably drive the
+/// multi-step tool loop — so the picker surfaces only these two by default. The older / niche
+/// models live in [`EXTRA`] (shown by `rozum models list --all`, and usable any time via
+/// `--model <spec>`). Update when stronger `mlx-community/` models appear.
 pub const RECOMMENDED: &[RecommendedModel] = &[
     RecommendedModel {
         spec: "mlx-community:Qwen3.6-35B-A3B-4bit",
@@ -62,9 +61,27 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
         notes: "RECOMMENDED — best local agentic coder. Perfect 10/10 in the matrix \
                 (claude 5/5 + codex 5/5). MoE ~3B active/token → fast AND strongest. Peaks \
                 ~25 GB on a 36 GB Mac; the chunked-prefill + memory-cap fixes (2026-06) removed \
-                the old prefill-OOM, so it runs agentic cleanly. Tightest of the picks on 36 GB — \
-                drop to the 30B-A3B below for more headroom. `ROZUM_MLX_CACHE_GB=1` frees more.",
+                the old prefill-OOM, so it runs agentic cleanly. `ROZUM_MLX_CACHE_GB=1` frees \
+                more headroom on a 36 GB Mac.",
     },
+    RecommendedModel {
+        spec: "mlx-community:gpt-oss-20b-MXFP4-Q4",
+        display_name: "gpt-oss 20B (MoE, MXFP4)",
+        approx_size_gb: 12.0,
+        notes: "OpenAI gpt-oss-20b — native MLX port (MXFP4 experts + attention sinks + \
+                sliding-window + YaRN), byte-exact greedy parity vs Python mlx_lm. MoE ~3.6B \
+                active/token, ~12 GB → roomy on 36 GB. Full harmony adapter (clean chat + \
+                multi-turn tool calls). REASONING model — MUST sample (the gateway floors its \
+                temp to ~1.0; greedy makes its CoT loop). claude 5/5 on the matrix — matches the \
+                35B. codex weak (sub-35B fumbles its shell-only file ops); opencode passes + now \
+                fast (prefix reuse). Strong local agentic coder; the 35B-A3B stays #1 for codex.",
+    },
+];
+
+/// Extended fallback catalog — the older / niche local models, kept for enthusiasts. NOT shown by
+/// default; surfaced with `rozum models list --all`. Any of these is also directly usable via
+/// `rozum launch --model <spec>` (the catalog is a curated picker list, not a whitelist).
+pub const EXTRA: &[RecommendedModel] = &[
     RecommendedModel {
         spec: "mlx-community:Qwen3-30B-A3B-4bit",
         display_name: "Qwen3 30B-A3B (MoE)",
@@ -87,18 +104,6 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
         approx_size_gb: 17.0,
         notes: "Distillation-Weighted Quant — same MoE as the top pick, slightly better quality, \
                 same ~25 GB footprint (OOM resolved like the 35B above).",
-    },
-    RecommendedModel {
-        spec: "mlx-community:gpt-oss-20b-MXFP4-Q4",
-        display_name: "gpt-oss 20B (MoE, MXFP4)",
-        approx_size_gb: 12.0,
-        notes: "OpenAI gpt-oss-20b — native MLX port (MXFP4 experts + attention sinks + \
-                sliding-window + YaRN), byte-exact greedy parity vs Python mlx_lm. MoE ~3.6B \
-                active/token, ~12 GB → roomy on 36 GB. Full harmony adapter (clean chat + \
-                multi-turn tool calls). REASONING model — MUST sample (the gateway floors its \
-                temp to ~1.0; greedy makes its CoT loop). claude 5/5 on the matrix — matches the \
-                35B. codex weak (sub-35B fumbles its shell-only file ops); opencode passes + now \
-                fast (prefix reuse). Strong local agentic coder; the 35B-A3B stays #1 for codex.",
     },
     RecommendedModel {
         spec: "mlx-community:Qwen3-Coder-30B-A3B-Instruct-4bit",

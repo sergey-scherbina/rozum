@@ -1,5 +1,17 @@
 # Changelog
 
+## models — focus the catalog on two models; older ones move to an opt-in fallback
+Completed: 2026-06-19
+
+The `RECOMMENDED` catalog (the launch picker + `rozum models list --remote` + the `list_models`
+builtin) now surfaces only the two models we actively run: **Qwen3.6-35B-A3B-4bit** (strongest local
+agentic coder) and **gpt-oss-20b-MXFP4-Q4** (OpenAI reasoning MoE). The seven older / niche models
+(Qwen3-30B-A3B, Qwen3.6-27B, 35B-A3B-DWQ, Qwen3-Coder-30B, Qwen2.5-Coder-32B/7B, Qwen3-4B) moved to a
+new `EXTRA` fallback list — shown with `rozum models list --all` and still launchable any time via
+`--model <spec>` (the catalog is a curated picker list, not a whitelist). The agentic bench default
+(`agentic.sh DEFAULT_MODELS`) is now these two. Separately, the on-disk weights for everything except
+the two kept models were removed (HF cache + Ollama), freeing ~131 GB (163 → 32 GB).
+
 ## gateway — re-route gpt-oss's `apply_patch` *function* call to exec_command (codex)
 Completed: 2026-06-18
 

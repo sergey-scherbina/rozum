@@ -68,9 +68,10 @@ case "$BIN" in /*) ;; *) BIN="$repo/$BIN" ;; esac   # launch runs in a temp cwd 
 # (Qwen2.5-0.5B, Qwen3-0.6B, Llama-3.2-1B) only manage `greet` even with the
 # JSON-repair, and template-less / incompatible models (gemma, Phi-3, SmolLM2,
 # Mistral-v0.3) can't drive tools at all — all dropped. Override with AGENTIC_MODELS.
-# Standardized on Qwen3.6-35B-A3B (the only model that clears codex's apply_patch bar →
-# the recommended local agentic model). Override with AGENTIC_MODELS="spec1 spec2 ...".
-DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit"
+# Standardized on the two kept models: Qwen3.6-35B-A3B (strongest local agentic coder, clears
+# codex's apply_patch bar) + gpt-oss-20b (OpenAI reasoning MoE). Override with
+# AGENTIC_MODELS="spec1 spec2 ...".
+DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit mlx-community:gpt-oss-20b-MXFP4-Q4"
 read -r -a MODELS <<<"${AGENTIC_MODELS:-$DEFAULT_MODELS}"
 read -r -a TASK_LIST <<<"${TASKS:-greet build fix test debug}"
 
