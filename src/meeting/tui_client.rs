@@ -89,6 +89,11 @@ impl MeetingClient {
     pub fn room_name(&self) -> Option<&str> {
         self.room_name.as_deref()
     }
+    /// The joined room's on-disk dir — content is read directly from here (the daemon's
+    /// single-writer/direct-read contract). Used by the web client to tail the transcript.
+    pub fn room_root(&self) -> Option<&Path> {
+        self.room_root.as_deref()
+    }
     pub fn transcript(&self) -> &[StoredTurn] {
         &self.transcript
     }

@@ -1462,10 +1462,219 @@ fn responses_input_to_internal(instructions: Option<&str>, input: &Value) -> Vec
     msgs
 }
 
+/// Codex's `apply_patch` requires its bespoke envelope (`*** Update File: <path>` + bare `@@`
+/// hunk markers). Local models routinely emit a **standard unified diff** inside the
+/// `*** Begin Patch` wrapper (`--- /+++ /@@ -a,b +c,d @@`), which codex rejects with
+/// "Invalid patch hunk". The change lines (` `/`-`/`+`) are identical in both dialects, so we
+/// translate just the headers and the (already-correct) edit lands. See
+/// `docs/matrix-failure-analysis.md` Finding 4. Returns the input unchanged unless it is exactly
+/// this malformed hybrid (codex envelope + unified-diff headers).
+fn rewrite_unified_diff_to_apply_patch(patch: &str) -> String {
+    // Fire on EITHER unified malformation: a `--- ` file header, or a `@@ -a,b +c,d @@` hunk header
+    // (the model sometimes emits the codex `*** Update File:` header itself but keeps unified `@@`).
+    let has_unified = patch.starts_with("--- ") || patch.contains("\n--- ") || patch.contains("@@ -");
+    if !patch.contains("*** Begin Patch") || !has_unified {
+        return patch.to_string();
+    }
+    let strip = |p: &str| -> String {
+        let p = p.trim();
+        p.strip_prefix("a/")
+            .or_else(|| p.strip_prefix("b/"))
+            .unwrap_or(p)
+            .to_string()
+    };
+    let mut out = String::with_capacity(patch.len() + 16);
+    let mut lines = patch.lines().peekable();
+    while let Some(line) = lines.next() {
+        if let Some(path) = line.strip_prefix("--- ") {
+            // `--- a/x` [`+++ b/x`] → `*** Update File: x` (prefer the +++ path; both name the file)
+            let mut file = strip(path);
+            if let Some(next) = lines.peek() {
+                if let Some(p2) = next.strip_prefix("+++ ") {
+                    if p2.trim() != "/dev/null" {
+                        file = strip(p2);
+                    }
+                    lines.next();
+                }
+            }
+            out.push_str("*** Update File: ");
+            out.push_str(&file);
+            out.push('\n');
+        } else if line.starts_with("@@ -") || line.starts_with("@@-") {
+            // unified hunk header (`@@ -a,b +c,d @@`) — DROP it. codex's V4A apply_patch locates the
+            // change via the surrounding context lines; a literal `@@ -a,b...` is read as a context
+            // string to find ("Failed to find context '-a,b...'") which never matches the file.
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Method B (the robust fix). codex's `apply_patch` uses a finicky proprietary V4A format that a
+/// local model can't reliably hit (header dialect + strict context-matching — see
+/// `docs/matrix-failure-analysis.md` Finding 4 and the mock-codex probe). But the model DOES emit a
+/// correct unified diff (its `-` lines match the file verbatim). So instead of translating to V4A,
+/// reconstruct a MINIMAL unified diff from the model's patch and rewrite the whole
+/// `apply_patch "<patch>"` shell command into `patch --fuzz` of it — standard tooling codex runs
+/// verbatim (codex only intercepts `apply_patch`, not `patch`). `patch --fuzz` locates the change by
+/// context, tolerant of the line-number/whitespace drift that breaks V4A. Returns the new shell
+/// command, or None when it isn't a reconstructable apply_patch (→ caller falls back to the V4A bridge).
+fn rewrite_apply_patch_command(cmd: &str) -> Option<String> {
+    if !cmd.contains("apply_patch") {
+        return None;
+    }
+    let begin = cmd.find("*** Begin Patch")?;
+    let end_rel = cmd[begin..].find("*** End Patch")?;
+    let end = begin + end_rel + "*** End Patch".len();
+    // The patch lives inside a shell double-quoted string — undo the shell escaping.
+    let block = cmd[begin..end]
+        .replace("\\\"", "\"")
+        .replace("\\$", "$")
+        .replace("\\`", "`")
+        .replace("\\\\", "\\");
+    apply_patch_block_to_fuzz(&block)
+}
+
+/// Convert an unescaped V4A patch block (`*** Begin Patch` … `*** End Patch`, or a bare
+/// `*** Update File:` + hunk) into a `patch -p0 --fuzz=3` heredoc — a small ±3-context match
+/// surface that standard `patch` applies reliably. Shared by the apply_patch *shell-command*
+/// bridge (Method B) and the apply_patch-*function* re-route (gpt-oss). None when there are no
+/// change lines to anchor on.
+fn apply_patch_block_to_fuzz(block: &str) -> Option<String> {
+    let mut path: Option<String> = None;
+    let mut body: Vec<String> = Vec::new();
+    for ln in block.lines() {
+        if let Some(p) = ln.strip_prefix("*** Update File:") {
+            path = Some(p.trim().to_string());
+        } else if let Some(p) = ln.strip_prefix("--- ") {
+            let p = p.trim();
+            let p = p.strip_prefix("a/").or_else(|| p.strip_prefix("b/")).unwrap_or(p);
+            path.get_or_insert_with(|| p.to_string());
+        } else if ln.starts_with("+++ ") || ln.starts_with("@@") || ln.starts_with("*** ") {
+            continue;
+        } else if ln.is_empty() {
+            body.push(" ".to_string()); // a blank context line in the diff
+        } else if matches!(ln.as_bytes()[0], b' ' | b'+' | b'-') {
+            body.push(ln.to_string());
+        }
+        // anything else is stray prose — skip it
+    }
+    let path = path?;
+    let chg: Vec<usize> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with('+') || l.starts_with('-'))
+        .map(|(i, _)| i)
+        .collect();
+    let (&first, &last) = (chg.first()?, chg.last()?);
+    // Trim to ±3 lines of context around the change → small, reliable match surface.
+    let lo = first.saturating_sub(3);
+    let hi = (last + 1 + 3).min(body.len());
+    let hunk = &body[lo..hi];
+    let old = hunk.iter().filter(|l| l.starts_with(' ') || l.starts_with('-')).count();
+    let new = hunk.iter().filter(|l| l.starts_with(' ') || l.starts_with('+')).count();
+    let mut diff = format!("--- {path}\n+++ {path}\n@@ -1,{old} +1,{new} @@\n");
+    for l in hunk {
+        diff.push_str(l);
+        diff.push('\n');
+    }
+    Some(format!(
+        "patch -p0 --fuzz=3 <<'ROZUM_PATCH_EOF'\n{diff}ROZUM_PATCH_EOF\n"
+    ))
+}
+
+/// gpt-oss (trained on the OpenAI/codex tool surface) emits a native `apply_patch` *function*
+/// call, but codex serves apply_patch only as a shell command for the rozum-backed local-model
+/// config — so the function call is rejected (`unsupported call: apply_patch`) and the edit is
+/// silently lost. Re-route it: convert the function args into an `exec_command` payload that
+/// applies the patch with standard tooling (Method B `patch --fuzz`; failing that, a quote-safe
+/// `apply_patch` heredoc so codex's own V4A applier still gets a shot). Returns the exec_command
+/// args JSON, or None when there is no reconstructable patch (caller keeps the original args).
+fn rewrite_apply_patch_function_args(args: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(args).ok()?;
+    // The model passes the patch text in one of a few shapes:
+    //   {"command":["apply_patch","<patch>"]}  (gpt-oss, observed) — the last array string is it
+    //   {"input":"<patch>"} / {"patch":"<patch>"} / a bare string
+    let patch = v
+        .get("command")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.iter().rev().find_map(|x| x.as_str()))
+        .or_else(|| v.get("input").and_then(|x| x.as_str()))
+        .or_else(|| v.get("patch").and_then(|x| x.as_str()))
+        .or_else(|| v.as_str())?;
+    if !patch.contains("*** Begin Patch") && !patch.contains("*** Update File") {
+        return None;
+    }
+    // Prefer Method B: codex runs `patch --fuzz` verbatim (it only intercepts `apply_patch`).
+    let cmd = apply_patch_block_to_fuzz(patch).unwrap_or_else(|| {
+        // Fallback: hand codex the raw apply_patch via a quote-safe heredoc (its V4A applier).
+        format!("apply_patch <<'ROZUM_AP_EOF'\n{patch}\nROZUM_AP_EOF\n")
+    });
+    eprintln!("[apply_patch-fn] re-routed apply_patch function call → exec_command (gpt-oss)");
+    Some(json!({ "cmd": cmd, "login": true }).to_string())
+}
+
+/// Walk a tool-call `arguments` JSON string and rewrite any embedded malformed codex `apply_patch`
+/// (Finding 4). The patch text is nested inside the shell tool's command (and JSON-escaped), so we
+/// parse, recurse over every string value, and re-serialize — keeping escaping correct. A no-op for
+/// non-codex agents (only the Responses path calls this) and for well-formed / non-patch args.
+fn normalize_codex_tool_args(args: &str) -> String {
+    let mut v: Value = match serde_json::from_str(args) {
+        Ok(v) => v,
+        Err(_) => return args.to_string(),
+    };
+    fn walk(v: &mut Value) {
+        match v {
+            Value::String(s) => {
+                if s.contains("*** Begin Patch") {
+                    if let Some(rw) = rewrite_apply_patch_command(s) {
+                        eprintln!("[apply_patch-bridge] rewrote apply_patch → patch --fuzz (Method B)");
+                        *s = rw;
+                    } else {
+                        let fixed = rewrite_unified_diff_to_apply_patch(s);
+                        if fixed != *s {
+                            eprintln!("[apply_patch-bridge] rewrote unified-diff headers → codex V4A (fallback)");
+                            *s = fixed;
+                        }
+                    }
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(walk),
+            Value::Object(o) => o.values_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    walk(&mut v);
+    v.to_string()
+}
+
+/// codex-lean: codex hands a LOCAL model ~18 tools (most are meta-tool noise — plans, goals,
+/// plugins, MCP listing, `request_user_input`, …) on top of a ~21 KB system prompt. A small model
+/// drowns in it: it stalls after diagnosing, or grabs a meta-tool instead of editing
+/// (`docs/matrix-failure-analysis.md` Findings 1a/3). Dropping the non-coding tools is the codex
+/// analog of claude `--lean` (which lifts the same model to 5/5). Gated by `ROZUM_CODEX_LEAN`
+/// (off → codex's full tool set, unchanged). The keep-set is the actual coding surface.
+fn codex_lean_keep(name: &str) -> bool {
+    // Shell + file I/O + patching: everything a coding agent needs. Anything containing these
+    // stems survives (covers exec_command, write_stdin, apply_patch, shell, read/write/edit, …).
+    const KEEP_STEMS: &[&str] = &[
+        "exec", "shell", "command", "stdin", "apply_patch", "patch", "read_file", "write_file",
+        "edit", "view_image",
+    ];
+    let n = name.to_ascii_lowercase();
+    KEEP_STEMS.iter().any(|s| n.contains(s))
+}
+
 fn responses_tools_to_internal(tools: &[RespTool]) -> Vec<ToolDef> {
+    // Default ON: a local model drowns in codex's 18-tool / 21 KB surface (validated: lifts the
+    // codex `fix` reds 0→5/5 with Method B). Disable with `ROZUM_CODEX_LEAN=0`.
+    let lean = std::env::var("ROZUM_CODEX_LEAN").map(|v| v != "0").unwrap_or(true);
     tools
         .iter()
         .filter(|t| t.kind.as_deref().unwrap_or("function") == "function" && t.name.is_some())
+        .filter(|t| !lean || codex_lean_keep(t.name.as_deref().unwrap_or("")))
         .map(|t| ToolDef {
             name: t.name.clone().unwrap_or_default(),
             description: t.description.clone().unwrap_or_default(),
@@ -2209,11 +2418,37 @@ async fn responses_handler(
         stream = req.stream.unwrap_or(false),
         "POST /v1/responses"
     );
+    if std::env::var_os("ROZUM_RESP_DUMP").is_some() {
+        let ins_len = req.instructions.as_deref().map(|s| s.len()).unwrap_or(0);
+        let input_len = serde_json::to_string(&req.input).map(|s| s.len()).unwrap_or(0);
+        eprintln!(
+            "─── RESP_DUMP: instructions={ins_len}B input={input_len}B tools={} ───",
+            req.tools.len()
+        );
+        for t in &req.tools {
+            eprintln!(
+                "  tool: {} (desc {}B)",
+                t.name.as_deref().unwrap_or("?"),
+                t.description.as_deref().map(|s| s.len()).unwrap_or(0)
+            );
+        }
+        if let Some(ins) = req.instructions.as_deref() {
+            let head: String = ins.chars().take(2000).collect();
+            eprintln!("─── instructions head ───\n{head}\n─── /instructions ───");
+        }
+    }
     let lease = match state.sb.enter(req.model.as_deref()).await {
         Ok(l) => l,
         Err(resp) => return resp,
     };
     let messages = responses_input_to_internal(req.instructions.as_deref(), &req.input);
+    // Did codex offer `apply_patch` as a function tool for this request? If not, a model that calls
+    // it as a function (gpt-oss) would hit "unsupported call: apply_patch" — so we re-route those to
+    // exec_command. When codex DID offer it as a tool, the call is legit and we leave it alone.
+    let apply_patch_is_tool = req
+        .tools
+        .iter()
+        .any(|t| t.name.as_deref() == Some("apply_patch"));
     let tools = apply_tool_choice(
         responses_tools_to_internal(&req.tools),
         &parse_oai_tool_choice(&req.tool_choice),
@@ -2271,10 +2506,12 @@ async fn responses_handler(
                     cancel,
                     model,
                     Some(lease),
+                    apply_patch_is_tool,
                 ))
                 .into_response()
             } else {
-                responses_collect(chat_stream, cancel, &model, Some(lease)).await
+                responses_collect(chat_stream, cancel, &model, Some(lease), apply_patch_is_tool)
+                    .await
             }
         }
     }
@@ -2289,6 +2526,7 @@ fn responses_sse_stream(
     cancel: CancellationToken,
     model: String,
     lease: Option<ChatLease>,
+    apply_patch_is_tool: bool,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let response_id = new_id("resp");
     let created = now_secs();
@@ -2305,8 +2543,9 @@ fn responses_sse_stream(
 
         // Tool-call items, completed (for the final output[]).
         let mut tool_items: Vec<Value> = Vec::new();
-        // The currently-open function_call: (fc_id, call_id, name, output_index, args).
-        let mut cur_tool: Option<(String, String, String, usize, String)> = None;
+        // The currently-open function_call: (fc_id, call_id, name, output_index, args, reroute_ap).
+        // reroute_ap = this is an apply_patch function call we re-route to exec_command at End.
+        let mut cur_tool: Option<(String, String, String, usize, String, bool)> = None;
 
         yield Ok(resp_event(&mut seq, "response.created", json!({
             "response": responses_object(&response_id, created, &model, "in_progress", json!([]), 0, 0)
@@ -2347,25 +2586,39 @@ fn responses_sse_stream(
                     }
                     let fc_id = new_id("fc");
                     let oi = next_index; next_index += 1;
+                    // gpt-oss calls `apply_patch` as a function, which codex rejects unless it
+                    // offered apply_patch as a tool — re-route to exec_command (rewrite at End).
+                    let reroute_ap = !apply_patch_is_tool && name == "apply_patch";
+                    let emit_name = if reroute_ap { "exec_command".to_string() } else { name };
                     yield Ok(resp_event(&mut seq, "response.output_item.added", json!({
                         "output_index": oi,
                         "item": {"type": "function_call", "id": fc_id, "call_id": id,
-                                 "name": name, "arguments": "", "status": "in_progress"},
+                                 "name": emit_name, "arguments": "", "status": "in_progress"},
                     })));
-                    cur_tool = Some((fc_id, id, name, oi, String::new()));
+                    cur_tool = Some((fc_id, id, emit_name, oi, String::new(), reroute_ap));
                 }
 
                 Ok(ChatEvent::ToolUseDelta { input_json_delta, .. }) => {
-                    if let Some((ref fc_id, _, _, oi, ref mut args)) = cur_tool {
+                    // Buffer tool-call args (don't stream incrementally) so the apply_patch bridge
+                    // at ToolUseEnd can rewrite a malformed unified diff consistently (Finding 4).
+                    if let Some((_, _, _, _, ref mut args, _)) = cur_tool {
                         args.push_str(&input_json_delta);
-                        yield Ok(resp_event(&mut seq, "response.function_call_arguments.delta", json!({
-                            "item_id": fc_id, "output_index": oi, "delta": input_json_delta,
-                        })));
                     }
                 }
 
                 Ok(ChatEvent::ToolUseEnd { .. }) => {
-                    if let Some((fc_id, call_id, name, oi, args)) = cur_tool.take() {
+                    if let Some((fc_id, call_id, name, oi, args, reroute_ap)) = cur_tool.take() {
+                        // Re-route an apply_patch function call to exec_command (gpt-oss), else
+                        // bridge a malformed apply_patch shell command (unified diff → patch), Finding 4.
+                        let args = if reroute_ap {
+                            rewrite_apply_patch_function_args(&args).unwrap_or(args)
+                        } else {
+                            normalize_codex_tool_args(&args)
+                        };
+                        // Args were buffered above; emit them once (post-bridge) as a single delta.
+                        yield Ok(resp_event(&mut seq, "response.function_call_arguments.delta", json!({
+                            "item_id": fc_id, "output_index": oi, "delta": args,
+                        })));
                         yield Ok(resp_event(&mut seq, "response.function_call_arguments.done", json!({
                             "item_id": fc_id, "output_index": oi, "arguments": args,
                         })));
@@ -2425,6 +2678,7 @@ async fn responses_collect(
     cancel: CancellationToken,
     model: &str,
     lease: Option<ChatLease>,
+    apply_patch_is_tool: bool,
 ) -> Response {
     let response_id = new_id("resp");
     let created = now_secs();
@@ -2435,7 +2689,8 @@ async fn responses_collect(
     };
     let mut text = String::new();
     let mut output: Vec<Value> = Vec::new();
-    let mut cur_tool: Option<(String, String, String)> = None; // (call_id, name, args)
+    // (call_id, name, args, reroute_ap) — reroute_ap re-routes apply_patch fn → exec_command.
+    let mut cur_tool: Option<(String, String, String, bool)> = None;
     let mut status = "completed";
     let mut input_tokens = 0u32;
     let mut output_tokens = 0u32;
@@ -2444,17 +2699,24 @@ async fn responses_collect(
         match ev {
             Ok(ChatEvent::TextDelta { text: t }) => text.push_str(&t),
             Ok(ChatEvent::ToolUseStart { id, name }) => {
-                cur_tool = Some((id, name, String::new()));
+                let reroute_ap = !apply_patch_is_tool && name == "apply_patch";
+                let name = if reroute_ap { "exec_command".to_string() } else { name };
+                cur_tool = Some((id, name, String::new(), reroute_ap));
             }
             Ok(ChatEvent::ToolUseDelta {
                 input_json_delta, ..
             }) => {
-                if let Some((_, _, ref mut args)) = cur_tool {
+                if let Some((_, _, ref mut args, _)) = cur_tool {
                     args.push_str(&input_json_delta);
                 }
             }
             Ok(ChatEvent::ToolUseEnd { .. }) => {
-                if let Some((call_id, name, args)) = cur_tool.take() {
+                if let Some((call_id, name, args, reroute_ap)) = cur_tool.take() {
+                    let args = if reroute_ap {
+                        rewrite_apply_patch_function_args(&args).unwrap_or(args)
+                    } else {
+                        normalize_codex_tool_args(&args)
+                    };
                     output.push(json!({"type": "function_call", "id": new_id("fc"),
                         "call_id": call_id, "name": name, "arguments": args, "status": "completed"}));
                 }
@@ -3542,16 +3804,97 @@ mod tests {
 
     #[test]
     fn responses_tool_def_mapped() {
-        // Responses tools are FLAT (no nested `function`).
+        // Responses tools are FLAT (no nested `function`). Use a tool the default codex-lean
+        // filter keeps (`shell`), so this exercises the flat→ToolDef mapping regardless of
+        // `ROZUM_CODEX_LEAN` (which defaults ON and drops non-coding tools like `get_weather`).
         let tools = vec![RespTool {
             kind: Some("function".into()),
-            name: Some("get_weather".into()),
-            description: Some("Get weather".into()),
+            name: Some("shell".into()),
+            description: Some("Run a shell command".into()),
             parameters: Some(json!({ "type": "object" })),
         }];
         let defs = responses_tools_to_internal(&tools);
         assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "get_weather");
+        assert_eq!(defs[0].name, "shell");
+    }
+
+    #[test]
+    fn apply_patch_bridge_rewrites_unified_diff() {
+        // The exact malformed patch a local model emitted (matrix-failure-analysis Finding 4):
+        // codex `*** Begin Patch` envelope but unified-diff headers inside.
+        let patch = "*** Begin Patch\n--- src/main.rs\n+++ src/main.rs\n@@ -4,7 +4,7 @@\n \
+            /// Reverse a string by characters.\n fn reverse(s: &str) -> String {\n\
+            -    // BUG: returns the input unchanged.\n-    s.to_string()\n\
+            +    s.chars().rev().collect()\n }\n\n fn main() {\n*** End Patch";
+        let out = rewrite_unified_diff_to_apply_patch(patch);
+        assert!(out.contains("*** Update File: src/main.rs"), "got: {out}");
+        assert!(!out.contains("--- src/main.rs") && !out.contains("+++ "), "headers not removed: {out}");
+        assert!(!out.contains("@@"), "unified hunk header not dropped: {out}");
+        // The (correct) change + context lines survive verbatim (codex locates via context).
+        assert!(out.contains("-    s.to_string()"));
+        assert!(out.contains("+    s.chars().rev().collect()"));
+        assert!(out.contains(" fn reverse(s: &str) -> String {"));
+        assert!(out.contains("*** Begin Patch") && out.contains("*** End Patch"));
+
+        // Hybrid the model also emits: correct `*** Update File:` header but a unified `@@ -n,m @@`
+        // hunk line (the NEW-binary repro: codex "Failed to find context '-3,7 +3,7 @@'").
+        let hybrid = "*** Begin Patch\n*** Update File: src/main.rs\n@@ -3,7 +3,7 @@\n \
+            fn reverse(s: &str) -> String {\n-    s.to_string()\n+    s.chars().rev().collect()\n*** End Patch";
+        let h = rewrite_unified_diff_to_apply_patch(hybrid);
+        assert!(h.contains("*** Update File: src/main.rs") && !h.contains("@@"), "hybrid not fixed: {h}");
+        assert!(h.contains("+    s.chars().rev().collect()"));
+
+        // Well-formed codex patches and non-patch args are untouched by the V4A fallback.
+        let ok = "*** Begin Patch\n*** Update File: a.rs\n@@\n-x\n+y\n*** End Patch";
+        assert_eq!(rewrite_unified_diff_to_apply_patch(ok), ok);
+        assert_eq!(normalize_codex_tool_args("{\"command\":\"ls -l\"}"), "{\"command\":\"ls -l\"}");
+    }
+
+    #[test]
+    fn apply_patch_method_b_rewrites_to_patch_fuzz() {
+        // The model's REAL apply_patch command (the run codex's V4A rejected with "Failed to find
+        // context"). Method B reconstructs a minimal unified diff + `patch --fuzz`.
+        let cmd = "apply_patch \"*** Begin Patch\n*** Update File: src/main.rs\n@@ -3,7 +3,7 @@\n \
+            /// Reverse a string by characters.\n fn reverse(s: &str) -> String {\n\
+            -    // BUG: returns the input unchanged.\n-    s.to_string()\n\
+            +    s.chars().rev().collect()\n }\n\n fn main() {\n*** End Patch\"";
+        let rw = rewrite_apply_patch_command(cmd).expect("reconstructable");
+        assert!(rw.starts_with("patch -p0 --fuzz=3 <<'ROZUM_PATCH_EOF'"), "got: {rw}");
+        assert!(rw.contains("--- src/main.rs") && rw.contains("+++ src/main.rs"));
+        assert!(rw.contains("@@ -1,"), "no reconstructed hunk header: {rw}");
+        assert!(rw.contains("-    s.to_string()") && rw.contains("+    s.chars().rev().collect()"));
+        assert!(rw.trim_end().ends_with("ROZUM_PATCH_EOF"));
+        assert!(rewrite_apply_patch_command("cargo run -- hello").is_none());
+
+        // End-to-end through the args JSON: apply_patch command → patch --fuzz, no apply_patch left.
+        let args = json!({ "command": ["zsh", "-lc", cmd] }).to_string();
+        let fixed = normalize_codex_tool_args(&args);
+        assert!(fixed.contains("patch -p0 --fuzz"), "Method B not applied: {fixed}");
+        assert!(!fixed.contains("apply_patch"), "apply_patch should be gone: {fixed}");
+    }
+
+    #[test]
+    fn apply_patch_function_reroutes_to_exec_command() {
+        // gpt-oss emits apply_patch as a FUNCTION (`{"command":["apply_patch","<patch>"]}`); codex
+        // rejects it ("unsupported call: apply_patch"). We re-route to an exec_command payload.
+        let patch = "*** Begin Patch\n*** Update File: src/main.rs\n@@\n \
+            /// Reverse a string by characters.\n fn reverse(s: &str) -> String {\n\
+            -    // BUG: returns the input unchanged.\n-    s.to_string()\n\
+            +    s.chars().rev().collect()\n }\n*** End Patch";
+        let args = json!({ "command": ["apply_patch", patch] }).to_string();
+        let out = rewrite_apply_patch_function_args(&args).expect("reroutable");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["login"], true, "exec_command needs login flag");
+        let cmd = v["cmd"].as_str().unwrap();
+        assert!(cmd.starts_with("patch -p0 --fuzz=3 <<'ROZUM_PATCH_EOF'"), "got: {cmd}");
+        assert!(cmd.contains("-    s.to_string()") && cmd.contains("+    s.chars().rev().collect()"));
+        assert!(!cmd.contains("apply_patch"), "Method B should leave no apply_patch: {cmd}");
+
+        // The `{"input": "<patch>"}` shape is also accepted.
+        assert!(rewrite_apply_patch_function_args(&json!({ "input": patch }).to_string()).is_some());
+        // A non-patch exec call is left untouched (None → caller keeps the original args).
+        let plain = json!({ "cmd": "cargo run", "login": true }).to_string();
+        assert!(rewrite_apply_patch_function_args(&plain).is_none());
     }
 
     #[test]
@@ -3568,7 +3911,7 @@ mod tests {
         let req = ChatRequest::simple("hi");
         let stream = backend.chat(req).await.unwrap();
         let cancel = CancellationToken::new();
-        let sse = responses_sse_stream(stream, cancel, "m".to_owned(), None);
+        let sse = responses_sse_stream(stream, cancel, "m".to_owned(), None, false);
         futures::pin_mut!(sse);
         let events: Vec<_> = sse.collect().await;
         // created + output_item.added + content_part.added + >=1 delta +

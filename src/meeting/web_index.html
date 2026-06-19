@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>rozum meeting</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { font: 15px/1.5 -apple-system, system-ui, sans-serif; background: #14161a; color: #e6e6e6; }
+
+  /* fixed root sized to the *visual* viewport so the form sits just above the keyboard */
+  #app {
+    position: fixed; top: 0; left: 0; right: 0;
+    height: 100%;
+    display: flex; flex-direction: column;
+  }
+  header {
+    flex: 0 0 auto; height: 46px; padding: 0 14px;
+    background: #1b1e24; border-bottom: 1px solid #2a2e36;
+    font-weight: 600; color: #9ad;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  header .status { font-weight: 400; font-size: 12px; color: #6f8; }
+  #log {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    padding: 10px 14px;
+  }
+  .msg { margin: 0 0 9px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .msg .who { color: #7ab8ff; font-weight: 600; margin-right: 6px; }
+  form {
+    flex: 0 0 auto; display: flex; gap: 8px;
+    padding: 9px 12px calc(9px + env(safe-area-inset-bottom));
+    background: #1b1e24; border-top: 1px solid #2a2e36;
+  }
+  #m {
+    flex: 1; min-width: 0; padding: 10px 12px; border-radius: 9px;
+    border: 1px solid #333a44; background: #0f1115; color: #e6e6e6; font: inherit;
+  }
+  button {
+    padding: 10px 16px; border: 0; border-radius: 9px; background: #2f6feb; color: #fff;
+    font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+  <div id="app">
+    <header><span id="room">rozum meeting</span><span class="status" id="status">connecting…</span></header>
+    <div id="log"></div>
+    <form id="f">
+      <input id="m" placeholder="message…" autocomplete="off" autocapitalize="sentences" />
+      <button type="submit">send</button>
+    </form>
+  </div>
+<script>
+const app = document.getElementById('app');
+const log = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const form = document.getElementById('f');
+const input = document.getElementById('m');
+const seen = new Set();
+
+// Pin the fixed root to the *visual* viewport: size it to the visible area and
+// translate it by offsetTop so it rides along when iOS scrolls the page under the
+// keyboard (otherwise the content "flies up" and you have to drag it back down).
+// The form is the bottom flex child, so it always rests just above the keyboard.
+function fit() {
+  const vv = window.visualViewport;
+  if (vv) {
+    app.style.height = vv.height + 'px';
+    app.style.transform = 'translateY(' + vv.offsetTop + 'px)';
+  }
+}
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', fit);
+  window.visualViewport.addEventListener('scroll', fit);
+}
+window.addEventListener('resize', fit);
+window.addEventListener('orientationchange', () => setTimeout(fit, 100));
+fit();
+
+function atBottom() { return log.scrollTop + log.clientHeight >= log.scrollHeight - 80; }
+function toBottom() { log.scrollTop = log.scrollHeight; }
+
+function key(t) { return (t.date || '') + ':' + (t.n ?? ''); }
+function add(t) {
+  const k = key(t);
+  if (seen.has(k)) return;            // dedup history vs live overlap
+  seen.add(k);
+  const stick = atBottom();
+  const el = document.createElement('div');
+  el.className = 'msg';
+  const who = document.createElement('span');
+  who.className = 'who';
+  who.textContent = (t.from || 'someone') + ':';
+  el.appendChild(who);
+  el.appendChild(document.createTextNode(t.content || ''));
+  log.appendChild(el);
+  if (stick) toBottom();
+}
+
+async function loadHistory() {
+  const r = await fetch('/api/messages');
+  if (!r.ok) { statusEl.textContent = 'auth failed'; return false; }
+  const d = await r.json();
+  document.getElementById('room').textContent = 'rozum: ' + (d.room || 'meeting');
+  (d.messages || []).forEach(add);
+  toBottom();
+  return true;
+}
+
+function connectStream() {
+  const ev = new EventSource('/api/stream');
+  ev.onopen = () => { statusEl.textContent = 'live'; };
+  ev.onmessage = (e) => { try { add(JSON.parse(e.data)); } catch (_) {} };
+  ev.onerror = () => { statusEl.textContent = 'reconnecting…'; };  // EventSource auto-retries
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const v = input.value.trim();
+  if (!v) return;
+  input.value = '';
+  const r = await fetch('/api/submit', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ content: v }),
+  });
+  if (!r.ok) { statusEl.textContent = 'send failed'; input.value = v; }
+  input.focus();
+});
+
+loadHistory().then((ok) => { if (ok) connectStream(); });
+</script>
+</body>
+</html>
