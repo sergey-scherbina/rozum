@@ -417,6 +417,27 @@ These items turn "portable in principle" into "portable by `cargo build`".
   (non-`metal` llama-cpp-2) — entangled with the Metal feature flags, can't be validated from macOS.
   Tracked with `portability-cuda-gguf`.
 
+- [ ] model-sandbox - **Structural confinement for agentic model runs (no-prompt safety).**
+  Both models run agentic loops that touch the filesystem + shell; confine them so they
+  **cannot do anything harmful WITHOUT per-action approval prompts** — safety is an OS jail,
+  not interactive confirmation. **A sandbox is a SET of `(path, mode)` rules** (rw / ro / deny,
+  most-specific-wins, default-deny), NOT one directory — because builds need `~/.cargo` /
+  `~/.rustup` / `target` / `$TMPDIR`. v1 profile `rust-coding`: workspace(s) rw, toolchain
+  caches rw, system + (optional) repo ro, network loopback-to-gateway only, deny the rest.
+  Agent runs `approval=never` (safe in the jail; also kills the Codex rejected-escalation
+  stall, `matrix-failure-analysis.md` Finding 1a). Full write-up:
+  `docs/specs/model-sandbox.md`. Sub-tasks:
+  - [ ] model-sandbox-seatbelt - **P1 (M4 primary).** Generate an SBPL profile from the
+    `(path, mode)` set; wrap the `rozum launch` child in `sandbox-exec`. Done when: free
+    create/edit/run inside the workspace (no prompts), write/exec outside denied, non-loopback
+    net denied, AND `cargo build` works (toolchain paths correct). Config: `rozum launch
+    --sandbox[=<profile>]` / `rozum.toml [sandbox] workspace=[…] read_only=[…] network=…`.
+  - [ ] model-sandbox-harden-linux - **P2.** Pin toolchain path discovery (cargo/rustup home,
+    `$TMPDIR`, git) + add the Linux backend (Landlock / bubblewrap bind-mounts).
+  - [ ] model-sandbox-container - **P3.** Container backend (Docker / Apple `container` / Lima)
+    for max isolation + portability + resource limits (the out-of-scope-for-v1 DoS/kernel threats);
+    gateway reached via host loopback. Then drop the approval-reject path (reliability synergy).
+
 - [ ] windows-portability - **Make rozum a first-class Windows host (durable core + CI).**
   rozum-as-gateway/launcher already works on Windows today (HTTP backends are pure
   cross-platform Rust); these sub-tasks close the gap for the **local meeting daemon** and
