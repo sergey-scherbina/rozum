@@ -56,6 +56,42 @@ Full writeup + the one-pass diagnostic methodology that localized it:
 
 ### Active
 
+#### meeting-web-pwa-ssc (2026-06-19, operator-driven) — phone-installable meeting client, then re-author in .ssc→Rust
+
+**Goal:** a polished meeting web the operator opens + installs on their phone over the mesh,
+then re-authored in ScalaScript that **compiles to Rust** and works with the rozum daemon.
+Part of demo-conference (`docs/specs/demo-conference.md`); this is the meeting-web-PWA half of
+the split (sibling owns the model-participant bridge). Worktree `feature/meeting-web-pwa-ssc`
+(off rozum at `../rozum-meeting-pwa`). ScalaScript toolkit-on-Rust (the foundation) lives in
+`../scalascript` (branch feature/rust-web-toolkit): vstack/heading/text/lower/serve→SSR, named
+args, signals (data-ssc-*), server-push (/__ssc/push|state) — all shipped + green.
+
+- [x] **Installable PWA** (`c368774`) — apple-mobile-web-app meta + web manifest + service worker +
+      SVG icon; routes `/manifest.webmanifest`, `/sw.js`, `/icon.svg` in `src/meeting/web.rs`. iOS
+      Add-to-Home-Screen runs full-screen.
+- [x] **Reachable from the phone over Tailscale** — busi runs tailscaled userspace
+      (`~/.busi/tailscale`); `tailscale serve --bg --https=8443 → 127.0.0.1:8400` (HTTPS is REQUIRED
+      for the SW's secure context). The operator's iPhone (on the tailnet) opens
+      `https://busi.tail1174e2.ts.net:8443/`. busi's own `/`→:8088 untouched.
+- [x] **No-auth mode for a network-gated front** (`c368774`) — `ROZUM_WEB_NO_AUTH=1` (empty secret ⇒
+      `auth_layer` lets all in). Tailscale already gates the tailnet; the Basic-auth dialog was
+      re-prompting on iOS and blocking entry.
+- [x] **Persistent service** — `~/Library/LaunchAgents/com.rozum.meeting-web.plist` (RunAtLoad +
+      KeepAlive; `--room demo --bind 0.0.0.0 --port 8400`, NO_AUTH). Survives session-end + reboot.
+- [x] **Live-update fix** — a reverse proxy (Tailscale serve) buffers the SSE `/api/stream`, so the
+      phone never saw new/just-sent messages. Added a `pollHistory` fallback (re-fetch /api/messages
+      every 2.5 s + immediately after submit; `add()` dedups by date:n). web_index.html.
+- [ ] **Room picker** — the web is single-room (launched with `--room`). Add `/api/rooms` (list) +
+      `?room=` on messages/stream/submit + a UI picker so the operator chooses a room / breakout
+      (uses `MeetingClient.list_rooms()`/`join`, `list::list_rooms`). Fold into the .ssc rewrite.
+- [ ] **Re-author the meeting web in `.ssc`→Rust, working with rozum (operator directive).** The
+      toolkit's static `serve(view)` renders once; a live chat needs per-request render bound to the
+      rozum room → use `route(path, handler)` + `serve(port)` (both map to `crate::runtime::http::_http_*`
+      on Rust) + read the room transcript from disk (`readFile`→`_read_file`) + post via rozum
+      (`rozum meetings post` / the daemon). `.ssc→Rust` meeting **UI** already compiles + SSRs
+      (`../scalascript/examples/rozum-meeting.ssc`, curl-verified); remaining = the live rozum data
+      binding. Verify against the live phone baseline.
+
 #### matrix-failure-analysis (2026-06-18) — study every matrix red → fix or prove-structural+document
 
 From the full-canonical matrix on master (60 cells, `results/full-canonical-091719`): claude 19/20,
