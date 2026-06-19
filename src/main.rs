@@ -2298,7 +2298,44 @@ async fn exec_agent(
     eprintln!("  → running: {} {}", program_name, args.join(" "));
 
     let base = format!("http://127.0.0.1:{port}");
-    let mut cmd = StdCommand::new(program_name);
+    // Optional structural sandbox (docs/specs/model-sandbox.md): `ROZUM_SANDBOX=1`
+    // jails the agent to the cwd; `ROZUM_SANDBOX=<dir>` jails it to <dir>. Writes are
+    // confined to the workspace + toolchain caches, secrets unreadable, loopback-only
+    // network — and NO per-action prompts (the OS jail is the safety). We build `cmd`
+    // as the `sandbox-exec` wrapper so every later `cmd.args(...)` / `cmd.env(...)`
+    // appends to the jailed agent invocation.
+    let sandbox_ws: Option<std::path::PathBuf> = match std::env::var("ROZUM_SANDBOX") {
+        Ok(s) if s == "1" => {
+            Some(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+        }
+        Ok(s) if !s.is_empty() && s != "0" => Some(std::path::PathBuf::from(s)),
+        _ => None,
+    };
+    let mut cmd = match &sandbox_ws {
+        Some(ws) => {
+            let policy = rozum::sandbox::SandboxPolicy::rust_coding(
+                std::slice::from_ref(ws),
+                rozum::sandbox::NetPolicy::GatewayOnly,
+            );
+            match rozum::sandbox::write_seatbelt_profile_temp(&policy) {
+                Ok(profile) => {
+                    eprintln!(
+                        "  → sandboxed (Seatbelt): workspace={} profile={}",
+                        ws.display(),
+                        profile.display()
+                    );
+                    let mut c = StdCommand::new("sandbox-exec");
+                    c.arg("-f").arg(&profile).arg(program_name);
+                    c
+                }
+                Err(e) => {
+                    eprintln!("  ! sandbox profile write failed ({e}); running UNsandboxed");
+                    StdCommand::new(program_name)
+                }
+            }
+        }
+        None => StdCommand::new(program_name),
+    };
     cmd.args(args);
     cmd.env("ANTHROPIC_BASE_URL", &base);
     cmd.env("ANTHROPIC_AUTH_TOKEN", "rozum-local");

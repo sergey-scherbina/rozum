@@ -100,6 +100,16 @@ impl SandboxPolicy {
     }
 }
 
+/// Write `policy`'s Seatbelt profile to a temp file and return its path, for
+/// `sandbox-exec -f <path> <program> <args…>`. The file is intentionally left in
+/// place (the launch wrapper `exec`s into `sandbox-exec`, so no cleanup code runs;
+/// the OS clears the temp dir). One file per process (pid-named).
+pub fn write_seatbelt_profile_temp(policy: &SandboxPolicy) -> std::io::Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!("rozum-sandbox-{}.sb", std::process::id()));
+    std::fs::write(&path, policy.to_seatbelt_profile())?;
+    Ok(path)
+}
+
 /// Canonicalize a path (resolve symlinks like `/tmp`→`/private/tmp`); fall back to
 /// the path as given if it does not exist yet.
 fn resolve(p: &std::path::Path) -> PathBuf {
