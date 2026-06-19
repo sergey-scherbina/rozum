@@ -2279,6 +2279,46 @@ fn spawn_detached_gateway(
     cmd.spawn()
 }
 
+/// Build the base `Command` for an agent child, optionally jailed. With
+/// `ROZUM_SANDBOX` set (`=1` → cwd workspace; `=<dir>` → that dir) the agent runs
+/// under `sandbox-exec` with a generated Seatbelt profile — writes confined to the
+/// workspace + toolchain caches, secrets unreadable, loopback-only network, and NO
+/// per-action prompts (docs/specs/model-sandbox.md). Unset → a plain command
+/// (current behavior). Used by EVERY agent-exec path so the jail is uniform.
+fn sandboxed_command(program_name: &str) -> std::process::Command {
+    use std::process::Command as StdCommand;
+    let ws: Option<std::path::PathBuf> = match std::env::var("ROZUM_SANDBOX") {
+        Ok(s) if s == "1" => {
+            Some(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+        }
+        Ok(s) if !s.is_empty() && s != "0" => Some(std::path::PathBuf::from(s)),
+        _ => None,
+    };
+    let Some(ws) = ws else {
+        return StdCommand::new(program_name);
+    };
+    let policy = rozum::sandbox::SandboxPolicy::rust_coding(
+        std::slice::from_ref(&ws),
+        rozum::sandbox::NetPolicy::GatewayOnly,
+    );
+    match rozum::sandbox::write_seatbelt_profile_temp(&policy) {
+        Ok(profile) => {
+            eprintln!(
+                "  → sandboxed (Seatbelt): workspace={} profile={}",
+                ws.display(),
+                profile.display()
+            );
+            let mut c = StdCommand::new("sandbox-exec");
+            c.arg("-f").arg(&profile).arg(program_name);
+            c
+        }
+        Err(e) => {
+            eprintln!("  ! sandbox profile write failed ({e}); running UNsandboxed");
+            StdCommand::new(program_name)
+        }
+    }
+}
+
 /// Build the agent child command (env wiring) and exec it, exiting with its code.
 /// `model_for_alias` is the model the gateway is actually serving.
 async fn exec_agent(
@@ -2288,7 +2328,6 @@ async fn exec_agent(
     channel_flags: Option<Vec<String>>,
     piggyback: bool,
 ) -> ! {
-    use std::process::Command as StdCommand;
     // channel-wakeup-launch-flag: append the `--dangerously-load-development-channels`
     // flag for a capable `claude` (resolved once at launch), so a launched agent
     // gets woken on room events.
@@ -2302,44 +2341,10 @@ async fn exec_agent(
     eprintln!("  → running: {} {}", program_name, args.join(" "));
 
     let base = format!("http://127.0.0.1:{port}");
-    // Optional structural sandbox (docs/specs/model-sandbox.md): `ROZUM_SANDBOX=1`
-    // jails the agent to the cwd; `ROZUM_SANDBOX=<dir>` jails it to <dir>. Writes are
-    // confined to the workspace + toolchain caches, secrets unreadable, loopback-only
-    // network — and NO per-action prompts (the OS jail is the safety). We build `cmd`
-    // as the `sandbox-exec` wrapper so every later `cmd.args(...)` / `cmd.env(...)`
-    // appends to the jailed agent invocation.
-    let sandbox_ws: Option<std::path::PathBuf> = match std::env::var("ROZUM_SANDBOX") {
-        Ok(s) if s == "1" => {
-            Some(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
-        }
-        Ok(s) if !s.is_empty() && s != "0" => Some(std::path::PathBuf::from(s)),
-        _ => None,
-    };
-    let mut cmd = match &sandbox_ws {
-        Some(ws) => {
-            let policy = rozum::sandbox::SandboxPolicy::rust_coding(
-                std::slice::from_ref(ws),
-                rozum::sandbox::NetPolicy::GatewayOnly,
-            );
-            match rozum::sandbox::write_seatbelt_profile_temp(&policy) {
-                Ok(profile) => {
-                    eprintln!(
-                        "  → sandboxed (Seatbelt): workspace={} profile={}",
-                        ws.display(),
-                        profile.display()
-                    );
-                    let mut c = StdCommand::new("sandbox-exec");
-                    c.arg("-f").arg(&profile).arg(program_name);
-                    c
-                }
-                Err(e) => {
-                    eprintln!("  ! sandbox profile write failed ({e}); running UNsandboxed");
-                    StdCommand::new(program_name)
-                }
-            }
-        }
-        None => StdCommand::new(program_name),
-    };
+    // Optionally jail the agent (docs/specs/model-sandbox.md) — `sandboxed_command`
+    // returns the `sandbox-exec` wrapper when ROZUM_SANDBOX is set, else a plain
+    // command; every later `cmd.args(...)` / `cmd.env(...)` appends to it.
+    let mut cmd = sandboxed_command(program_name);
     cmd.args(args);
     cmd.env("ANTHROPIC_BASE_URL", &base);
     cmd.env("ANTHROPIC_AUTH_TOKEN", "rozum-local");
@@ -2443,7 +2448,6 @@ fn write_opencode_config(base: &str) -> Option<std::path::PathBuf> {
 /// (`ANTHROPIC_API_KEY` / claude.ai login) untouched and set none of the
 /// gateway/model env. Only the rozum agent-context defaults are applied.
 async fn exec_agent_anthropic(mut program: Vec<String>, channel_flags: Option<Vec<String>>) -> ! {
-    use std::process::Command as StdCommand;
     if let Some(flags) = channel_flags {
         program.extend(flags);
     }
@@ -2456,7 +2460,8 @@ async fn exec_agent_anthropic(mut program: Vec<String>, channel_flags: Option<Ve
         args.join(" ")
     );
 
-    let mut cmd = StdCommand::new(program_name);
+    // Jail the agent here too, uniform with the local-model paths (model-sandbox.md).
+    let mut cmd = sandboxed_command(program_name);
     cmd.args(args);
     apply_rozum_agent_env(&mut cmd);
     spawn_agent_and_exit(cmd, program_name).await
