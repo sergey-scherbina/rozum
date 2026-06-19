@@ -267,3 +267,41 @@ re-route fires whenever the model uses the function form, and a run **passes *be
 the apply_patch-function re-route). Everything still red is genuine model behaviour — flakiness, malformed
 shell, looping, instruction-following — **proven by raw-output evidence, not assumed**, and not removable in
 the gateway without hacks. The matrix's single-sample noise overstates it.
+
+## RESOLUTION 3 (2026-06-19) — codex × gpt-oss dissected to the token; delivery was dropped at THREE layers
+
+Deep per-turn dissection (HARMONY_DUMP + PROMPT_DUMP) of failing `codex × gpt-oss fix` runs overturned the
+earlier "it's just temp-1.0 variance" read. The model **knows the fix** (the correct `s.chars().rev()`
+appeared in 27/27 generation blocks of a failing run) — we were **dropping its delivery at three layers**,
+each a real gateway bug, not a model failure:
+
+1. **apply_patch shape.** codex's own 21 KB instructions teach `{"command":["apply_patch","<patch>"]}` (it
+   calls apply_patch a "tool" but shows shell-array args, and apply_patch isn't a registered function for our
+   config). The model reproduces this faithfully but in varied shapes (`command` array, `{cmd:"apply_patch",
+   patch}` sibling, `begin_patch`/`update` keys) + double-escapes `&`/`>` as `&`/`>`.
+   Fixed: `rewrite_apply_patch_function_args`, `normalize_codex_tool_args` folds the `{cmd:apply_patch, patch
+   sibling}` shape, `decode_unicode_escapes` repairs the bodies.
+2. **File reads (the decisive factor).** Verified: when the model READS the file → patches land
+   (`patch-failed=0`) → pass; when it doesn't → fail. But gpt-oss generates broken `sed` reads
+   (`sed -n 'src/main.rs'`, missing `p`) that exit non-zero, so it never sees the file. `repair_broken_read`
+   (`ROZUM_CODEX_READ_REPAIR`, env-gated) translates a malformed sed/head/tail read → `cat <file>`. NOTE:
+   codex's "do NOT re-read files after apply_patch" is NARROW (post-patch verify only) — it does **not** ban
+   the initial read.
+3. **Garbled harmony envelope (the "stalls").** The dominant residual "stall" (empty turn) was NOT the model
+   giving up — it emitted a tool call whose `to=functions.NAME` recipient was dropped or detached into its
+   own channel segment, so `parse_harmony` dropped it. `infer_tool_from_body` (harmony.rs, default-on) now
+   recovers the function from the args shape (`cmd`→exec_command, `patch`/`*** Begin Patch`→apply_patch).
+
+**REFUTED experiments (kept as negative results):** (a) **injecting an apply_patch tool with a clean schema**
+made it WORSE (3/5 → 0/5) — it converged the arg-key (the model stopped guessing) but **conflicted** with the
+instruction's `command` format and pushed blind patching; lesson: *translate the model's output, don't change
+its interface*. (b) **top_p tail-clip** (`ROZUM_GPTOSS_TOP_P`) damps malformed-shell spirals but doesn't move
+pass (within noise).
+
+**Net (full gpt-oss matrix, all fixes, 0 panics): 12/15 (80%)** — claude 5/5, opencode 4/5, codex 3/5 (was
+8/15: claude 5/5, codex 1/5, opencode 2/5). The residual reds are **create-from-scratch** (`build`/`test`:
+`cargo new` subdir + degenerate impl) + temp-1.0 variance. **Honest caveat:** `codex × fix` in isolation is so
+variance-dominated (observed 0/5…4/5 across runs) that n≤8 reps cannot distinguish a 10-15% gateway gain —
+each fix removes a real but *intermittent* mode, so the aggregate is noisy; judge gpt-oss on the whole matrix,
+not the single hardest cell. The three delivery fixes are the durable win; recovery / read-repair are correct
+insurance for the intermittent modes.

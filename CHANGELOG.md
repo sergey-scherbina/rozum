@@ -1,5 +1,20 @@
 # Changelog
 
+## gateway/harmony — gpt-oss agentic delivery: recover garbled tool calls + repair broken reads
+Completed: 2026-06-19
+
+Deep dissection (RESOLUTION 3 in `docs/matrix-failure-analysis.md`) showed codex × gpt-oss failures
+are mostly us DROPPING the model's delivery, not the model failing. Two more fixes on top of the
+delivery bridges: (1) **harmony recovery** (`infer_tool_from_body`, default-on) — gpt-oss sometimes
+garbles the harmony envelope (drops / detaches the `to=functions.NAME` recipient), so `parse_harmony`
+dropped a real tool call and the agent stalled; we now recover the function from the args shape
+(`cmd`→exec_command, `patch`/`*** Begin Patch`→apply_patch), with a negative test so prose is never
+misrecovered. (2) **read-repair** (`repair_broken_read`, `ROZUM_CODEX_READ_REPAIR`, env-gated) —
+reading the file is the decisive success factor, but gpt-oss emits broken `sed` reads that never see
+the file; we translate a malformed sed/head/tail read → `cat <file>`. Net full gpt-oss matrix with all
+fixes: 12/15 (was 8/15), 0 panics. Refuted (kept as negative results): injecting an apply_patch tool
+(conflicts with codex's instruction format → worse) and `ROZUM_GPTOSS_TOP_P` (within noise).
+
 ## models — focus the catalog on two models; older ones move to an opt-in fallback
 Completed: 2026-06-19
 
