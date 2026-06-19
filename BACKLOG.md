@@ -427,11 +427,17 @@ These items turn "portable in principle" into "portable by `cargo build`".
   Agent runs `approval=never` (safe in the jail; also kills the Codex rejected-escalation
   stall, `matrix-failure-analysis.md` Finding 1a). Full write-up:
   `docs/specs/model-sandbox.md`. Sub-tasks:
-  - [ ] model-sandbox-seatbelt - **P1 (M4 primary).** Generate an SBPL profile from the
-    `(path, mode)` set; wrap the `rozum launch` child in `sandbox-exec`. Done when: free
-    create/edit/run inside the workspace (no prompts), write/exec outside denied, non-loopback
-    net denied, AND `cargo build` works (toolchain paths correct). Config: `rozum launch
-    --sandbox[=<profile>]` / `rozum.toml [sandbox] workspace=[…] read_only=[…] network=…`.
+  - [~] model-sandbox-seatbelt - **P1 (M4 primary). CORE DONE 2026-06-19** (branch
+    `feature/model-sandbox-seatbelt`). `src/sandbox.rs`: `SandboxPolicy` + `rust_coding`
+    profile + `to_seatbelt_profile()` (validated-on-M4 SBPL) + `write_seatbelt_profile_temp`.
+    `exec_agent` wraps the agent child in `sandbox-exec -f <profile>` when **`ROZUM_SANDBOX`**
+    is set (`=1`→cwd, `=<dir>`→that dir); all later env/arg wiring appends to the jailed
+    invocation. **Validated on M4:** writes confined / outside-write denied / secret-read
+    denied / system-read OK / exec + bare-name PATH resolution OK / generated profile
+    parses+runs under `sandbox-exec`; feature-free build green. **REMAINING:** (a) real-agent
+    end-to-end (run `ROZUM_SANDBOX=1 rozum launch <agent>` against a live gateway — confirm a
+    `cargo build` works in-jail and an out-of-jail write is denied; do via the bench harness);
+    (b) the `--sandbox` clap flag as sugar over the env; (c) `rozum.toml [sandbox]` config.
   - [ ] model-sandbox-harden-linux - **P2.** Pin toolchain path discovery (cargo/rustup home,
     `$TMPDIR`, git) + add the Linux backend (Landlock / bubblewrap bind-mounts).
   - [ ] model-sandbox-container - **P3.** Container backend (Docker / Apple `container` / Lima)
