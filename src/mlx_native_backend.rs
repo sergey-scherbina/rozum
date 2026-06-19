@@ -933,7 +933,7 @@ mod inner {
 
         let mut temp = job.sampling.temperature.unwrap_or(0.0);
         // top_k <= 0 / top_p >= 1.0 disable those filters (the sampler's defaults).
-        let top_p = job.sampling.top_p.unwrap_or(1.0);
+        let mut top_p = job.sampling.top_p.unwrap_or(1.0);
         let top_k = job.sampling.top_k.map(|k| k as i32).unwrap_or(0);
         let repeat_penalty = job.sampling.repeat_penalty.unwrap_or(1.0);
         // gpt-oss is a reasoning model built for SAMPLING (generation_config:
@@ -951,6 +951,18 @@ mod inner {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(1.0);
             temp = temp.max(min_temp);
+            // Optional tail clip: keep temp at ~1.0 (any lower makes the CoT loop), but cap top_p so
+            // the sampler drops the long low-probability tail. At top_p 1.0 (the default) a temp-1.0
+            // draw occasionally picks a junk token — harmless in prose, but in a shell command it is
+            // a broken command (`sed -n -n`, an unbalanced quote). A mild nucleus (~0.95) clips that
+            // garbage while still SAMPLING (not greedy) so diversity is preserved. Off by default
+            // (1.0 = unchanged); experimental knob to test whether it cuts gpt-oss's agentic flake.
+            if let Some(p) = std::env::var("ROZUM_GPTOSS_TOP_P")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+            {
+                top_p = top_p.min(p);
+            }
         }
         if let Some(s) = job.sampling.seed {
             let _ = mlx_rs::random::seed(s);
