@@ -435,9 +435,13 @@ These items turn "portable in principle" into "portable by `cargo build`".
     invocation. **Validated on M4:** writes confined / outside-write denied / secret-read
     denied / system-read OK / exec + bare-name PATH resolution OK / generated profile
     parses+runs under `sandbox-exec`; feature-free build green. **REMAINING:** (a) real-agent
-    end-to-end (run `ROZUM_SANDBOX=1 rozum launch <agent>` against a live gateway — confirm a
-    `cargo build` works in-jail and an out-of-jail write is denied; do via the bench harness);
-    (b) the `--sandbox` clap flag as sugar over the env; (c) `rozum.toml [sandbox]` config.
+    end-to-end **DONE 2026-06-19** — committed integration test `cargo_build_runs_in_jail_and_
+    escape_denied` builds a real crate under the rozum-generated profile via `sandbox-exec`
+    (cargo build + run the binary succeed in-jail → toolchain paths correct) and proves a
+    `$HOME` write is denied; secret-read (`~/.ssh`) denied too. Remaining is only driving it
+    via a live LLM agent + gateway (agent/gateway plumbing, not the jail — the loopback-to-
+    gateway path is already allowed). (b) the `--sandbox` clap flag as sugar over the env;
+    (c) `rozum.toml [sandbox]` config.
   - [ ] model-sandbox-harden-linux - **P2.** Pin toolchain path discovery (cargo/rustup home,
     `$TMPDIR`, git) + add the Linux backend (Landlock / bubblewrap bind-mounts).
   - [ ] model-sandbox-container - **P3.** Container backend (Docker / Apple `container` / Lima)

@@ -249,4 +249,62 @@ mod tests {
         let _ = std::fs::remove_file(&f);
         assert!(status.success(), "generated profile failed to parse/run:\n{profile}");
     }
+
+    // Full e2e (macOS only; runs cargo + sandbox-exec; ignored — slow): build a
+    // real crate INSIDE the rozum-generated jail (proves the toolchain paths are
+    // right, so a coding model can actually build) AND prove a write OUTSIDE the
+    // workspace is denied (proves confinement). This is the spec's P1 "Done when"
+    // (docs/specs/model-sandbox.md). Validated on M4 2026-06-19.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "runs cargo build under sandbox-exec; macOS only, slow"]
+    fn cargo_build_runs_in_jail_and_escape_denied() {
+        use std::process::Command;
+        let id = std::process::id();
+        let ws = std::env::temp_dir().join(format!("rozum-sbx-e2e-{id}"));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let proj = ws.join("sbxdemo");
+        // A depless crate builds offline — no registry/network needed.
+        let new = Command::new("cargo")
+            .args(["new", "--bin", "--quiet", "--name", "sbxdemo"])
+            .arg(&proj)
+            .status()
+            .expect("spawn cargo new");
+        assert!(new.success(), "cargo new failed");
+
+        // The REAL rozum-generated profile for this workspace (not a hand copy).
+        let policy = SandboxPolicy::rust_coding(&[proj.clone()], NetPolicy::GatewayOnly);
+        let profile = write_seatbelt_profile_temp(&policy).unwrap();
+
+        // 1. `cargo build` must SUCCEED in the jail (toolchain paths correct).
+        let build = Command::new("sandbox-exec")
+            .arg("-f")
+            .arg(&profile)
+            .args(["cargo", "build", "--offline", "--quiet"])
+            .current_dir(&proj)
+            .status()
+            .expect("spawn sandbox-exec cargo");
+        assert!(build.success(), "cargo build failed inside the jail (toolchain paths?)");
+        assert!(
+            proj.join("target/debug/sbxdemo").exists(),
+            "no build output produced inside the jail"
+        );
+
+        // 2. a write OUTSIDE the workspace/toolchain ($HOME root) must be DENIED.
+        let home = std::env::var("HOME").expect("HOME set");
+        let escape = std::path::Path::new(&home).join(format!(".rozum-sbx-escape-{id}.txt"));
+        let _ = std::fs::remove_file(&escape);
+        let _ = Command::new("sandbox-exec")
+            .arg("-f")
+            .arg(&profile)
+            .args(["/bin/sh", "-c", &format!("echo escaped > {}", escape.display())])
+            .status();
+        let leaked = escape.exists();
+        // Cleanup before asserting.
+        let _ = std::fs::remove_file(&escape);
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_file(&profile);
+        assert!(!leaked, "SANDBOX ESCAPE: wrote outside the workspace");
+    }
 }
