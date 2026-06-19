@@ -82,8 +82,14 @@ network     = "gateway-only"        # "gateway-only" | "none" | "full"
 ```
 
 - `--sandbox` with no value → the `rust-coding` profile rooted at the launch cwd.
-- Off by default in v1 (opt-in) until validated; the long-term intent is **on by
-  default** for model-driven runs.
+- **ON by default on macOS** (2026-06-19): every `rozum launch` jails the agent to
+  its cwd with the `rust-coding` profile, no env needed. `ROZUM_SANDBOX=0` (or empty)
+  disables it; `=1` forces the cwd; `=<dir>` jails to <dir>. Off-macOS there is no
+  Seatbelt, so it stays OFF until the Linux/container backend (P2/P3) — `rozum launch`
+  is never broken by an unavailable jail.
+- Because the default workspace is the **cwd**, secret dirs (`~/.ssh`, cloud creds,
+  keychains) are denied for **both read and write** even when the cwd encompasses
+  `$HOME` — the secret denies are emitted last and last-match-wins.
 
 ## Threat model — what "wrong" means (and what is out of scope)
 

@@ -2279,22 +2279,32 @@ fn spawn_detached_gateway(
     cmd.spawn()
 }
 
-/// Build the base `Command` for an agent child, optionally jailed. With
-/// `ROZUM_SANDBOX` set (`=1` → cwd workspace; `=<dir>` → that dir) the agent runs
-/// under `sandbox-exec` with a generated Seatbelt profile — writes confined to the
-/// workspace + toolchain caches, secrets unreadable, loopback-only network, and NO
-/// per-action prompts (docs/specs/model-sandbox.md). Unset → a plain command
-/// (current behavior). Used by EVERY agent-exec path so the jail is uniform.
+/// The workspace dir to jail a launched agent in, or `None` for no jail. **Default
+/// ON** (the launch cwd) on macOS; `ROZUM_SANDBOX=0`/empty disables it, `=1` forces
+/// the cwd, `=<dir>` jails to <dir>. Off-macOS → `None` (Seatbelt is macOS-only; the
+/// Linux/container backend is model-sandbox P2/P3, so we don't break `launch` there).
+fn sandbox_workspace() -> Option<std::path::PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let cwd = || std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    match std::env::var("ROZUM_SANDBOX") {
+        Ok(s) if s.is_empty() || s == "0" => None, // explicit opt-out
+        Ok(s) if s == "1" => Some(cwd()),
+        Ok(s) => Some(std::path::PathBuf::from(s)),
+        Err(_) => Some(cwd()), // unset → DEFAULT ON
+    }
+}
+
+/// Build the base `Command` for an agent child, **jailed by default on macOS**.
+/// The agent runs under `sandbox-exec` with a generated Seatbelt profile — writes
+/// confined to the workspace (its cwd) + toolchain caches, secrets neither readable
+/// nor writable, loopback-only network, and NO per-action prompts
+/// (docs/specs/model-sandbox.md). `ROZUM_SANDBOX=0` disables it. Used by EVERY
+/// agent-exec path so the jail is uniform.
 fn sandboxed_command(program_name: &str) -> std::process::Command {
     use std::process::Command as StdCommand;
-    let ws: Option<std::path::PathBuf> = match std::env::var("ROZUM_SANDBOX") {
-        Ok(s) if s == "1" => {
-            Some(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
-        }
-        Ok(s) if !s.is_empty() && s != "0" => Some(std::path::PathBuf::from(s)),
-        _ => None,
-    };
-    let Some(ws) = ws else {
+    let Some(ws) = sandbox_workspace() else {
         return StdCommand::new(program_name);
     };
     let policy = rozum::sandbox::SandboxPolicy::rust_coding(

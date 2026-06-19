@@ -69,13 +69,9 @@ impl SandboxPolicy {
         p.push_str("(allow process-exec*)\n");
         p.push_str("(allow sysctl-read)\n");
         p.push_str("(allow mach-lookup)\n");
-        // Reads: broad (so dyld + tools load), minus the secret denylist below.
+        // Reads: broad (so dyld + tools load); secrets carved out LAST below.
         p.push_str("(allow file-read*)\n");
-        for s in &self.secret_deny {
-            p.push_str(&format!("(deny file-read* (subpath {}))\n", sbpl_quote(s)));
-        }
-        // Writes (+ the exec targets are covered by file-read* above): workspace(s)
-        // + toolchain caches + the device nodes tools expect.
+        // Writes: workspace(s) + toolchain caches + the device nodes tools expect.
         p.push_str("(allow file-write*\n");
         for w in &self.writable {
             p.push_str(&format!("  (subpath {})\n", sbpl_quote(w)));
@@ -91,6 +87,14 @@ impl SandboxPolicy {
             p.push_str(&format!("  (literal \"{dev}\")\n"));
         }
         p.push_str(")\n");
+        // Secrets LAST (Seatbelt is last-match-wins): never readable AND never
+        // writable — even when the workspace (e.g. a cwd at `$HOME` under the
+        // default-on jail) would otherwise grant write access to a subpath of it.
+        for s in &self.secret_deny {
+            let q = sbpl_quote(s);
+            p.push_str(&format!("(deny file-read* (subpath {q}))\n"));
+            p.push_str(&format!("(deny file-write* (subpath {q}))\n"));
+        }
         // Network.
         match self.network {
             NetPolicy::None => {} // (deny default) already blocks all network
@@ -218,6 +222,13 @@ mod tests {
         assert!(p.starts_with("(version 1)\n(deny default)\n"));
         assert!(p.contains("(allow file-read*)\n"));
         assert!(p.contains("(deny file-read* (subpath \"/Users/x/.ssh\"))"));
+        // Secrets are also write-denied (so they're safe even if the workspace
+        // encompasses them under default-on), and that deny comes AFTER the
+        // allow-write so last-match-wins keeps them protected.
+        assert!(p.contains("(deny file-write* (subpath \"/Users/x/.ssh\"))"));
+        let allow_w = p.find("(allow file-write*").unwrap();
+        let deny_secret = p.find("(deny file-write* (subpath \"/Users/x/.ssh\"))").unwrap();
+        assert!(deny_secret > allow_w, "secret write-deny must come after allow-write");
         assert!(p.contains("(subpath \"/private/tmp/ws\")")); // writable
         assert!(p.contains("(literal \"/dev/null\")"));
         assert!(p.contains("localhost")); // gateway-only network rule

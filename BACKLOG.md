@@ -442,10 +442,13 @@ These items turn "portable in principle" into "portable by `cargo build`".
     (exec_agent + exec_agent_anthropic via shared `sandboxed_command`). **Agent-state dirs now
     writable** (`~/.claude`/`~/.codex`/opencode under `~/.config`+`~/.local`+`~/.cache`) — a
     launched agent persists its session/history instead of crashing mid-task; live-verified
-    (~/.claude write OK, `$HOME`-root write denied). **The jail is matrix-ready:** run the bench
-    matrix sandboxed with `ROZUM_SANDBOX=1 scripts/bench/agentic.sh` (harness already launches
-    via `rozum launch`, so the env propagates per-cell to the per-task workdir). Remaining:
-    (b) the `--sandbox` clap flag as sugar over the env; (c) `rozum.toml [sandbox]` config.
+    (~/.claude write OK, `$HOME`-root write denied). **ON BY DEFAULT (macOS, 2026-06-19):**
+    every `rozum launch` jails the agent to its cwd with no env; `ROZUM_SANDBOX=0` disables,
+    `=1`/`=<dir>` override; off-macOS stays OFF (no Seatbelt) so launch isn't broken. Secrets
+    now denied for **read AND write** (last-match-wins), safe even when cwd encompasses `$HOME`.
+    **Live-validated end-to-end:** trial matrix cell claude × gpt-oss-20b × build ran jailed and
+    PASSED (`olleh`, 46s); default-on/opt-out probes confirmed. Remaining: (b) `--sandbox` clap
+    flag (now would be `--no-sandbox`, sugar over `ROZUM_SANDBOX=0`); (c) `rozum.toml [sandbox]`.
   - [ ] model-sandbox-harden-linux - **P2.** Pin toolchain path discovery (cargo/rustup home,
     `$TMPDIR`, git) + add the Linux backend (Landlock / bubblewrap bind-mounts).
   - [ ] model-sandbox-container - **P3.** Container backend (Docker / Apple `container` / Lima)
