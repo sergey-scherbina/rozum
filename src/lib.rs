@@ -26,6 +26,7 @@ pub mod rag_lite;
 pub mod resident;
 pub mod router;
 pub mod sampler;
+pub mod sandbox;
 pub mod service;
 pub mod serving;
 pub mod share;
