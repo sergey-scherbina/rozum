@@ -438,10 +438,14 @@ These items turn "portable in principle" into "portable by `cargo build`".
     end-to-end **DONE 2026-06-19** — committed integration test `cargo_build_runs_in_jail_and_
     escape_denied` builds a real crate under the rozum-generated profile via `sandbox-exec`
     (cargo build + run the binary succeed in-jail → toolchain paths correct) and proves a
-    `$HOME` write is denied; secret-read (`~/.ssh`) denied too. Remaining is only driving it
-    via a live LLM agent + gateway (agent/gateway plumbing, not the jail — the loopback-to-
-    gateway path is already allowed). (b) the `--sandbox` clap flag as sugar over the env;
-    (c) `rozum.toml [sandbox]` config.
+    `$HOME` write is denied; secret-read (`~/.ssh`) denied too. **All launch paths jailed**
+    (exec_agent + exec_agent_anthropic via shared `sandboxed_command`). **Agent-state dirs now
+    writable** (`~/.claude`/`~/.codex`/opencode under `~/.config`+`~/.local`+`~/.cache`) — a
+    launched agent persists its session/history instead of crashing mid-task; live-verified
+    (~/.claude write OK, `$HOME`-root write denied). **The jail is matrix-ready:** run the bench
+    matrix sandboxed with `ROZUM_SANDBOX=1 scripts/bench/agentic.sh` (harness already launches
+    via `rozum launch`, so the env propagates per-cell to the per-task workdir). Remaining:
+    (b) the `--sandbox` clap flag as sugar over the env; (c) `rozum.toml [sandbox]` config.
   - [ ] model-sandbox-harden-linux - **P2.** Pin toolchain path discovery (cargo/rustup home,
     `$TMPDIR`, git) + add the Linux backend (Landlock / bubblewrap bind-mounts).
   - [ ] model-sandbox-container - **P3.** Container backend (Docker / Apple `container` / Lima)

@@ -44,13 +44,16 @@ pub struct SandboxPolicy {
 
 impl SandboxPolicy {
     /// The v1 `rust-coding` profile: `workspaces` (rw, may be several) + the Rust
-    /// toolchain caches (rw, so builds work) + a default secret denylist, with the
-    /// given network policy. Env-derived (`CARGO_HOME`/`RUSTUP_HOME`/`TMPDIR`/
-    /// `HOME`); paths are canonicalized so Seatbelt matches the real location
-    /// (`/tmp` → `/private/tmp`, etc.).
+    /// toolchain caches (rw, so builds work) + the supported agent CLIs' own state
+    /// dirs (rw, so a launched agent persists its session/history mid-task instead
+    /// of crashing on a denied write) + a default secret denylist, with the given
+    /// network policy. Env-derived (`CARGO_HOME`/`RUSTUP_HOME`/`TMPDIR`/`HOME`);
+    /// paths are canonicalized so Seatbelt matches the real location (`/tmp` →
+    /// `/private/tmp`, etc.).
     pub fn rust_coding(workspaces: &[PathBuf], network: NetPolicy) -> Self {
         let mut writable: Vec<PathBuf> = workspaces.iter().map(|p| resolve(p)).collect();
         writable.extend(toolchain_paths());
+        writable.extend(agent_state_paths());
         Self {
             writable: dedup(writable),
             secret_deny: dedup(default_secret_paths()),
@@ -137,6 +140,31 @@ fn toolchain_paths() -> Vec<PathBuf> {
     // `/tmp` is the conventional scratch; canonicalizes to `/private/tmp` on macOS.
     v.push(resolve(std::path::Path::new("/tmp")));
     v
+}
+
+/// Config/state dirs the supported agent CLIs write to **operate** (session,
+/// history, todos, project state) — claude `~/.claude`, codex `~/.codex`, opencode
+/// `~/.config/opencode` + `~/.local/{share,state}/opencode` + `~/.cache/opencode`.
+/// The sandbox is for agentic runs, so the agent's OWN working state must be
+/// writable or it breaks mid-task; these are the agent's tool dirs, not the
+/// operator's project data. (Under `rozum launch` the agent auths to the local
+/// gateway, not its real creds, and network is loopback-only — so even its own
+/// creds under `~/.claude` can't be exfiltrated.)
+fn agent_state_paths() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    [
+        ".claude",
+        ".codex",
+        ".config/opencode",
+        ".local/share/opencode",
+        ".local/state/opencode",
+        ".cache/opencode",
+    ]
+    .iter()
+    .map(|s| resolve(&home.join(s)))
+    .collect()
 }
 
 /// Default secret roots to deny reads of, relative to `$HOME`. Best-effort: covers
@@ -226,6 +254,26 @@ mod tests {
         assert!(pol.writable.iter().any(|p| p == &ws));
         assert!(pol.writable.len() >= 2, "toolchain caches should be added");
         assert_eq!(pol.network, NetPolicy::GatewayOnly);
+    }
+
+    #[test]
+    fn rust_coding_includes_agent_state_dirs() {
+        // A launched agent must persist its own state (session/history/todos) or it
+        // crashes mid-task on a denied write — its state dir must be writable. The
+        // deny/allow *mechanism* is proven by the escape-denied integration test; this
+        // guards that the agent dirs are actually in the writable set.
+        if std::env::var_os("HOME").is_some() {
+            let pol =
+                SandboxPolicy::rust_coding(&[PathBuf::from("/private/tmp/ws")], NetPolicy::None);
+            assert!(
+                pol.writable.iter().any(|p| p.ends_with(".claude")),
+                "agent state dir ~/.claude must be writable so the agent can run"
+            );
+            assert!(
+                pol.writable.iter().any(|p| p.ends_with(".codex")),
+                "agent state dir ~/.codex must be writable"
+            );
+        }
     }
 
     // Integration (macOS only; runs sandbox-exec): the GENERATED profile must
