@@ -1646,6 +1646,47 @@ fn decode_unicode_escapes(s: &str) -> String {
     out
 }
 
+fn read_repair_enabled() -> bool {
+    std::env::var("ROZUM_CODEX_READ_REPAIR")
+        .map(|v| v != "0")
+        .unwrap_or(false)
+}
+
+/// A token that looks like a source-file path the model wants to view (has a slash, or a known
+/// code/text extension). Used to recognize a file-read intent in a malformed command.
+fn is_source_path(w: &str) -> bool {
+    (w.contains('/') && w.contains('.'))
+        || w.rsplit('.').next().is_some_and(|e| {
+            matches!(
+                e,
+                "rs" | "py" | "js" | "ts" | "go" | "toml" | "txt" | "md" | "json" | "c" | "cpp"
+                    | "h" | "java" | "rb" | "yaml" | "yml" | "sh" | "lock"
+            )
+        })
+}
+
+/// Translate a malformed file-READ command into a plain `cat <file>`. gpt-oss often emits broken
+/// `sed`/`head`/`tail` reads (filename as the script, missing `p`, scrambled args) that exit
+/// non-zero, so it never sees the file. The intent — view a source file — is unambiguous from the
+/// path, and reading is non-destructive. Leaves intentional edits (`s/…/`, `-i`) and redirects (`>`)
+/// alone. None when it isn't a recognizable file read. (Experimental: even well-formed partial
+/// reads collapse to a full `cat`; fine for small task files, revisit before defaulting on.)
+fn repair_broken_read(cmd: &str) -> Option<String> {
+    let t = cmd.trim();
+    let tool = t.split_whitespace().next()?;
+    if !matches!(tool, "sed" | "head" | "tail") {
+        return None;
+    }
+    if t.contains("s/") || t.contains(" -i") || t.contains('>') {
+        return None; // an intentional edit / transform / redirect — not a read
+    }
+    let path = t
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c| c == '\'' || c == '"'))
+        .find(|w| is_source_path(w))?;
+    Some(format!("cat {path}"))
+}
+
 /// Walk a tool-call `arguments` JSON string and rewrite any embedded malformed codex `apply_patch`
 /// (Finding 4). The patch text is nested inside the shell tool's command (and JSON-escaped), so we
 /// parse, recurse over every string value, and re-serialize — keeping escaping correct. A no-op for
@@ -1704,6 +1745,20 @@ fn normalize_codex_tool_args(args: &str) -> String {
                         for k in PATCH_KEYS {
                             o.remove(*k);
                         }
+                    }
+                }
+                // Read-repair: gpt-oss frequently emits broken file reads (`sed -n 'src/main.rs'`,
+                // `sed -n '1' '1' f`) that fail, so it never sees the file and can't build a matching
+                // patch — reading is the decisive success factor. Its intent is unambiguous (a source
+                // path in a read tool) and reading is non-destructive, so translate it to `cat <file>`.
+                if read_repair_enabled() {
+                    if let Some(fixed) = o
+                        .get("cmd")
+                        .and_then(Value::as_str)
+                        .and_then(repair_broken_read)
+                    {
+                        eprintln!("[read-repair] broken file-read → {fixed}");
+                        o.insert("cmd".into(), Value::String(fixed));
                     }
                 }
                 o.values_mut().for_each(walk);
@@ -2514,10 +2569,39 @@ async fn responses_handler(
         .tools
         .iter()
         .any(|t| t.name.as_deref() == Some("apply_patch"));
-    let tools = apply_tool_choice(
+    let mut tools = apply_tool_choice(
         responses_tools_to_internal(&req.tools),
         &parse_oai_tool_choice(&req.tool_choice),
     );
+    // EXPERIMENT (ROZUM_CODEX_INJECT_APPLY_PATCH): gpt-oss is trained to call `apply_patch` as a
+    // function, but codex offers it only as a shell command for our config — so the model GUESSES
+    // the schema (keys begin_patch / cmd / update …) and we drop the guesses. Give it the tool it
+    // expects, with a CLEAR schema, so it stops guessing; its clean {patch:…} call is re-routed to
+    // exec_command by the Responses handler (apply_patch_is_tool stays false → reroute fires).
+    let inject_ap = std::env::var("ROZUM_CODEX_INJECT_APPLY_PATCH")
+        .map(|v| v != "0")
+        .unwrap_or(false);
+    if inject_ap && !apply_patch_is_tool {
+        tools.push(ToolDef {
+            name: "apply_patch".into(),
+            description: "Apply a patch to a file in the working directory — the preferred way to \
+                EDIT files (use this instead of shell `sed`/`cat` heredocs). The `patch` argument \
+                is the full V4A patch: a `*** Begin Patch` line, then `*** Update File: <relative \
+                path>`, then a hunk with context lines, `-` (remove) and `+` (add) lines, then a \
+                `*** End Patch` line."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "patch": {
+                        "type": "string",
+                        "description": "The full patch, from `*** Begin Patch` to `*** End Patch`."
+                    }
+                },
+                "required": ["patch"]
+            }),
+        });
+    }
 
     let est = estimate_prompt_tokens(&messages, &tools);
     let ctx_win = lease.backend.context_window();
@@ -3981,6 +4065,26 @@ mod tests {
         assert!(cmd.contains("&str") && cmd.contains("-> String"), "unicode not decoded: {cmd}");
         assert!(!cmd.contains("\\u0026"), "literal escape remained: {cmd}");
         assert!(cmd.contains("-    s.to_string()") && cmd.contains("+    s.chars().rev().collect()"));
+    }
+
+    #[test]
+    fn repair_broken_read_translates_to_cat() {
+        // broken reads → cat (the model's intent is the file path)
+        assert_eq!(repair_broken_read("sed -n 'src/main.rs'").as_deref(), Some("cat src/main.rs"));
+        assert_eq!(
+            repair_broken_read("sed -n '1' '1' src/main.rs").as_deref(),
+            Some("cat src/main.rs")
+        );
+        assert_eq!(
+            repair_broken_read("sed -n '1,200' src/main.rs").as_deref(),
+            Some("cat src/main.rs")
+        );
+        // intentional edits / transforms / redirects / non-read tools are left untouched
+        assert!(repair_broken_read("sed -i 's/a/b/' f.rs").is_none());
+        assert!(repair_broken_read("sed -n 's/x/y/' f.rs").is_none());
+        assert!(repair_broken_read("echo hi > f.rs").is_none());
+        assert!(repair_broken_read("cat src/main.rs").is_none());
+        assert!(repair_broken_read("cargo run -- hello").is_none());
     }
 
     #[test]
