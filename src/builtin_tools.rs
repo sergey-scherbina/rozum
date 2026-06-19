@@ -62,22 +62,21 @@ fn list_models_def() -> ToolDef {
 }
 
 fn list_models(_args: Value) -> Result<Value, ToolError> {
-    let recommended: Vec<Value> = crate::models::RECOMMENDED
-        .iter()
-        .map(|m| {
-            json!({
-                "spec": m.spec,
-                "name": m.display_name,
-                "approx_size_gb": m.approx_size_gb,
-                "notes": m.notes,
-            })
+    let to_json = |m: &crate::models::RecommendedModel| {
+        json!({
+            "spec": m.spec,
+            "name": m.display_name,
+            "approx_size_gb": m.approx_size_gb,
+            "notes": m.notes,
         })
-        .collect();
+    };
+    let recommended: Vec<Value> = crate::models::RECOMMENDED.iter().map(to_json).collect();
+    let extended: Vec<Value> = crate::models::EXTRA.iter().map(to_json).collect();
     let installed: Vec<Value> = crate::models::scan_all_installed()
         .iter()
         .map(|m| json!({ "spec": m.spec, "size_bytes": m.size_bytes }))
         .collect();
-    Ok(json!({ "recommended": recommended, "installed": installed }))
+    Ok(json!({ "recommended": recommended, "extended": extended, "installed": installed }))
 }
 
 #[cfg(test)]

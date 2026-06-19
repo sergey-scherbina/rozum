@@ -445,6 +445,10 @@ enum ModelsAction {
         /// Show curated download recommendations instead of installed models
         #[arg(long)]
         remote: bool,
+
+        /// With `--remote`, also list the extended fallback catalog (older / niche models)
+        #[arg(long)]
+        all: bool,
     },
 
     /// Show details for a model spec (works for installed and non-installed)
@@ -2682,7 +2686,7 @@ async fn run_models(action: ModelsAction) {
     use rozum::models;
 
     match action {
-        ModelsAction::List { remote: false } => {
+        ModelsAction::List { remote: false, .. } => {
             let installed = models::scan_all_installed();
             if installed.is_empty() {
                 println!("No local models found.");
@@ -2716,20 +2720,34 @@ async fn run_models(action: ModelsAction) {
             );
         }
 
-        ModelsAction::List { remote: true } => {
-            println!("Curated download recommendations (Apple Silicon 24-36 GB):");
-            println!();
-            println!("{:<55} {:>7}  {}", "SPEC", "SIZE", "NOTES");
-            for m in models::RECOMMENDED {
+        ModelsAction::List { remote: true, all } => {
+            let print_row = |m: &models::RecommendedModel| {
                 println!(
                     "{:<55} {:>4.1} GB  {}",
                     m.spec, m.approx_size_gb, m.display_name
                 );
                 println!("{:<55} {:>7}  {}", "", "", m.notes);
+            };
+            println!("Curated download recommendations (Apple Silicon 24-36 GB):");
+            println!();
+            println!("{:<55} {:>7}  {}", "SPEC", "SIZE", "NOTES");
+            for m in models::RECOMMENDED {
+                print_row(m);
+            }
+            if all {
+                println!();
+                println!("Extended fallback catalog (older / niche — for enthusiasts):");
+                println!();
+                for m in models::EXTRA {
+                    print_row(m);
+                }
             }
             println!();
             println!("Install by launching with any of these specs, e.g.:");
-            println!("  rozum launch --model mlx-community:Qwen3-4B-4bit claude");
+            println!("  rozum launch --model mlx-community:Qwen3.6-35B-A3B-4bit claude");
+            if !all {
+                println!("Pass `--all` to also list the extended fallback catalog.");
+            }
             println!("Search more on HuggingFace: https://huggingface.co/mlx-community");
         }
 
