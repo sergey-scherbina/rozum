@@ -24,3 +24,13 @@ branch: main
 # Fork of oxideai/mlx-rs (workspace: mlx-rs + mlx-lm + mlx-lm-utils). We extend
 # the mlx-lm crate with the model architectures rozum needs (MoE, Qwen3.6
 # hybrid) for the native MLX runtime. Fork URL provisional until created.
+
+## scalascript
+url: git@github.com:sergey-scherbina/scalascript.git
+path: ../scalascript
+branch: main
+# ScalaScript (`.ssc`): Markdown+Scala 3 meta-language, target-agnostic
+# (interpreter · JS transpiler · JVM · Rust). Points at the operator's existing
+# working checkout (sibling dir), not a fresh `.vendor/` clone. Candidate to
+# author the rozum meeting web UI: the JS backend is mature (frontend);
+# the Rust backend is early ("R.1 hello-world subset"). See repos/scalascript.md.
