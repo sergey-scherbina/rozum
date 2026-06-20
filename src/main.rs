@@ -149,9 +149,9 @@ enum Command {
 
     /// Start the gateway and launch a program with ANTHROPIC_/OPENAI_ env vars set.
     ///
-    /// Example: rozum launch --model /path/to/qwen-coder.gguf claude
-    /// Example: rozum launch --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit claude
-    /// Example: rozum launch --model qwen2.5-coder:32b -- aider --no-auto-commits
+    /// Example: rozum launch --model mlx-community:Qwen3.6-35B-A3B-4bit claude
+    /// Example: rozum launch --model mlx-community:gpt-oss-20b-MXFP4-Q4 codex
+    /// Example: rozum launch --model /path/to/model.gguf -- aider --no-auto-commits
     Launch {
         /// Model spec (same as `gateway --model`). Optional: if omitted and a
         /// shared gateway is already running, reuse its model; if nothing is
@@ -1340,7 +1340,7 @@ async fn resolve_launch_target(model: Option<String>, no_model: bool) -> Option<
         eprintln!(
             "rozum launch: no --model/--no-model given and no gateway running. Pass \
              --no-model to use upstream Anthropic, or --model, e.g. \
-             `rozum launch --model mlx-community:Qwen3-4B-4bit claude`."
+             `rozum launch --model mlx-community:gpt-oss-20b-MXFP4-Q4 claude`."
         );
         return None;
     }
@@ -4059,8 +4059,8 @@ fn print_no_backend_hints(model_spec: &str) {
     eprintln!();
     eprintln!("  in-process native MLX (on by default, Metal, AFQ safetensors):");
     eprintln!("    rozum launch --model mlx-community:Qwen3.6-35B-A3B-4bit claude");
-    eprintln!("    rozum launch --model hf:Qwen/Qwen3-4B claude");
-    eprintln!("    # covers the Qwen3 / Qwen3.6 family; the model must be cached locally");
+    eprintln!("    rozum launch --model mlx-community:gpt-oss-20b-MXFP4-Q4 claude");
+    eprintln!("    # covers the Qwen3 / Qwen3.6 + gpt-oss families; auto-downloads if not cached");
     eprintln!();
     eprintln!("  in-process mistralrs (opt-in, broader catalog):");
     eprintln!("    cargo build --features mistralrs");
