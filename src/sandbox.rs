@@ -26,18 +26,24 @@ pub enum NetPolicy {
     /// Loopback only — reach the local model gateway, nothing off-box (the default).
     /// NOTE: under the Docker backend this is best-effort — the container reaches the
     /// host gateway, but the default bridge also permits general egress (no native
-    /// Docker egress allowlist). Use `None` for guaranteed zero-egress.
+    /// Docker egress allowlist). Use `GatewayStrict` (Docker) or `None` for a guarantee.
     #[default]
     GatewayOnly,
+    /// Reach the gateway and **nothing else** — a true egress allowlist. On Seatbelt
+    /// this is identical to `GatewayOnly` (the SBPL rule already allows only localhost).
+    /// On Docker it adds an in-container iptables egress filter (the `rozum-agent`
+    /// entrypoint, gated by `--cap-add=NET_ADMIN` + `ROZUM_EGRESS=strict`) that drops
+    /// all output except the host gateway — closing the bridge-egress gap.
+    GatewayStrict,
     /// Unrestricted (escape hatch; not for untrusted/experimental models).
     Full,
 }
 
 impl NetPolicy {
     /// Pick the network policy from `ROZUM_SANDBOX_NETWORK` (case-insensitive):
-    /// `none` | `gateway-only` (default; aliases `gateway`/`loopback`) | `full`.
-    /// Applies to BOTH backends (the renderers support all three). Unknown / unset →
-    /// `GatewayOnly`.
+    /// `none` | `gateway-only` (default; aliases `gateway`/`loopback`) |
+    /// `gateway-strict` (alias `strict`) | `full`. Applies to BOTH backends. Unknown /
+    /// unset → `GatewayOnly`.
     pub fn from_env() -> Self {
         std::env::var("ROZUM_SANDBOX_NETWORK")
             .ok()
@@ -49,6 +55,7 @@ impl NetPolicy {
     fn parse(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "none" | "off" => NetPolicy::None,
+            "gateway-strict" | "strict" => NetPolicy::GatewayStrict,
             "full" | "all" | "unrestricted" => NetPolicy::Full,
             _ => NetPolicy::GatewayOnly, // "gateway-only" / "gateway" / "loopback" / unknown
         }
@@ -236,7 +243,10 @@ impl SandboxPolicy {
         // Network.
         match self.network {
             NetPolicy::None => {} // (deny default) already blocks all network
-            NetPolicy::GatewayOnly => {
+            // Seatbelt's loopback-only rule is ALREADY a strict egress allowlist, so
+            // GatewayOnly and GatewayStrict render identically here (the strict/best-
+            // effort distinction only matters for Docker's bridge).
+            NetPolicy::GatewayOnly | NetPolicy::GatewayStrict => {
                 p.push_str("(allow network* (local ip) (remote ip \"localhost:*\"))\n");
             }
             NetPolicy::Full => p.push_str("(allow network*)\n"),
@@ -303,6 +313,17 @@ impl SandboxPolicy {
             NetPolicy::GatewayOnly | NetPolicy::Full => {
                 a.push("--add-host".into());
                 a.push(format!("{CONTAINER_GATEWAY_HOST}:host-gateway"));
+            }
+            NetPolicy::GatewayStrict => {
+                // Reach the host gateway like GatewayOnly, but ALSO grant NET_ADMIN so
+                // the image entrypoint can install an iptables egress filter that drops
+                // everything except the host gateway. `ROZUM_EGRESS=strict` turns the
+                // filter on; the entrypoint resolves the gateway IP from /etc/hosts.
+                a.push("--add-host".into());
+                a.push(format!("{CONTAINER_GATEWAY_HOST}:host-gateway"));
+                a.push("--cap-add=NET_ADMIN".into());
+                a.push("-e".into());
+                a.push("ROZUM_EGRESS=strict".into());
             }
         }
         for key in forward_env {
@@ -451,6 +472,8 @@ mod tests {
         .to_seatbelt_profile();
         assert!(!base(NetPolicy::None).contains("allow network")); // deny-default only
         assert!(base(NetPolicy::GatewayOnly).contains("(allow network* (local ip) (remote ip \"localhost:*\"))"));
+        // Seatbelt loopback-only is already strict → GatewayStrict renders identically.
+        assert_eq!(base(NetPolicy::GatewayStrict), base(NetPolicy::GatewayOnly));
         assert!(base(NetPolicy::Full).contains("(allow network*)\n"));
     }
 
@@ -594,11 +617,29 @@ mod tests {
         assert_eq!(NetPolicy::parse("OFF"), NetPolicy::None);
         assert_eq!(NetPolicy::parse("full"), NetPolicy::Full);
         assert_eq!(NetPolicy::parse(" all "), NetPolicy::Full);
+        assert_eq!(NetPolicy::parse("gateway-strict"), NetPolicy::GatewayStrict);
+        assert_eq!(NetPolicy::parse(" STRICT "), NetPolicy::GatewayStrict);
         // default + unknown + the explicit gateway aliases → GatewayOnly.
         for s in ["gateway-only", "gateway", "loopback", "", "nonsense"] {
             assert_eq!(NetPolicy::parse(s), NetPolicy::GatewayOnly, "{s:?}");
         }
         assert_eq!(NetPolicy::default(), NetPolicy::GatewayOnly);
+    }
+
+    #[test]
+    fn docker_args_strict_egress_adds_cap_and_marker() {
+        let policy = SandboxPolicy {
+            writable: vec![PathBuf::from("/ws")],
+            secret_deny: vec![],
+            network: NetPolicy::GatewayStrict,
+        };
+        let args = policy.to_docker_run_args("img", Path::new("/ws"), &[], &DockerLimits::none());
+        // Still reaches the host gateway, plus the NET_ADMIN cap + the strict marker the
+        // entrypoint reads to install the iptables egress filter.
+        assert!(window_has(&args, &["--add-host", "host.docker.internal:host-gateway"]));
+        assert!(args.iter().any(|a| a == "--cap-add=NET_ADMIN"));
+        assert!(window_has(&args, &["-e", "ROZUM_EGRESS=strict"]));
+        assert!(!args.iter().any(|a| a == "--network=none"));
     }
 
     /// True if `needle` appears as a contiguous run inside `hay` (a flat argv).

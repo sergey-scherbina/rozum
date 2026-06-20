@@ -84,16 +84,17 @@ any OS). `ROZUM_SANDBOX=0` opts out; `--no-sandbox` is the launch-flag sugar.
       (`none`|`gateway-only` (default)|`full`) via `NetPolicy::from_env()`, honored by BOTH backends
       (`sandboxed_command` no longer hard-codes `GatewayOnly`). Verified via `rozum launch`:
       `none`→gateway BLOCKED (true zero-egress), `gateway-only`→REACHED. Unit test on the parse/aliases.
-- [ ] **sandbox-docker-strict-egress — DEFERRED (no simple mechanism, verified).** Empirically (2026-06-20)
-      Docker `--internal` blocks the host gateway too, and Docker Desktop has no native egress
-      allowlist — so true "gateway-only **and** no internet" needs a host/VM-level firewall or a proxy
-      sidecar (a larger effort). Until then the strong options are `network=none` (zero egress) or the
-      documented best-effort `gateway-only` (host + bridge egress). Not faked.
-- [ ] **sandbox-docker-opencode-config — DEFERRED (real gap, verified).** opencode reads `OPENCODE_CONFIG`
-      from a `$TMPDIR` temp file; Docker Desktop doesn't reliably share `/private/var/folders`, so it's
-      invisible in the container (claude/codex are env/flag-driven and work). A clean fix needs the
-      config path decided **before** `sandboxed_command` builds the command (exec_agent refactor) so it
-      can be mounted — deferred; opencode is the third-priority agent.
+- [x] **sandbox-docker-strict-egress — DONE 2026-06-20.** `ROZUM_SANDBOX_NETWORK=gateway-strict`
+      (`NetPolicy::GatewayStrict`) = true gateway-only-no-internet. Docker has no egress-allowlist flag
+      (`--internal` kills the host too), so it's enforced IN the container: `--cap-add=NET_ADMIN` +
+      `ROZUM_EGRESS=strict` → the `rozum-agent` entrypoint installs an iptables allowlist (lo +
+      established + resolved host-gateway, DROP rest incl. IPv6; fails loud exit 70 if unenforceable).
+      Seatbelt = `gateway-only` (already loopback-only). **Verified on M4 via `rozum launch`:** gateway
+      REACHED, internet BLOCKED; `gateway-only` control reaches both.
+- [x] **sandbox-docker-opencode-config — DONE 2026-06-20.** `write_opencode_config` now writes under
+      canonical `/tmp` (a toolchain bind mount) instead of `$TMPDIR` (not shared by Docker Desktop), so
+      the file is visible in the container at `OPENCODE_CONFIG` (verified in the `rozum-agent` image).
+      Regression test `opencode_config_lives_under_tmp_so_docker_mounts_it`.
 
 #### meeting-web-pwa-ssc (2026-06-19, operator-driven) — phone-installable meeting client, then re-author in .ssc→Rust
 

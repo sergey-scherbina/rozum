@@ -20,10 +20,11 @@
 FROM rust:1-slim-bookworm
 
 # Build essentials + git + curl/ca-certs (for the NodeSource repo) + TLS headers
-# (many crates link OpenSSL). One layer, apt lists dropped to keep the image lean.
+# (many crates link OpenSSL) + iptables (the strict-egress entrypoint filter).
+# One layer, apt lists dropped to keep the image lean.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      git curl wget ca-certificates build-essential pkg-config libssl-dev \
+      git curl wget ca-certificates build-essential pkg-config libssl-dev iptables \
  && rm -rf /var/lib/apt/lists/*
 
 # Node.js 22 LTS — the agent CLIs need Node >= 18; Debian's own is too old.
@@ -52,7 +53,14 @@ ENV CARGO_TERM_COLOR=never \
     GIT_PAGER=cat \
     PAGER=cat
 
+# Entrypoint: a transparent passthrough unless ROZUM_EGRESS=strict, in which case it
+# installs an iptables egress allowlist (host gateway only) before exec'ing the agent.
+# `rozum launch` sets that env + --cap-add=NET_ADMIN for NetPolicy::GatewayStrict.
+COPY docker/rozum-entrypoint.sh /usr/local/bin/rozum-entrypoint.sh
+RUN chmod +x /usr/local/bin/rozum-entrypoint.sh
+
 # rozum sets `-w <workspace>` at launch (the mounted host cwd); this is only a
 # sane default for a bare `docker run`.
 WORKDIR /work
+ENTRYPOINT ["/usr/local/bin/rozum-entrypoint.sh"]
 CMD ["bash"]

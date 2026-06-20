@@ -1,5 +1,27 @@
 # Changelog
 
+## sandbox — strict gateway-only egress (no internet) + opencode-under-Docker fix
+Completed: 2026-06-20
+
+Closes the last two Docker-backend gaps. **`gateway-strict` egress** (`NetPolicy::GatewayStrict`,
+`ROZUM_SANDBOX_NETWORK=gateway-strict`) gives a true egress allowlist: the container reaches the
+local model gateway and **nothing else** — no internet, so a misbehaving model can't exfiltrate the
+repo or fetch untrusted code. Docker has no native egress-allowlist flag (`--internal` blocks the
+host gateway too), so it's enforced IN the container: `to_docker_run_args` adds `--cap-add=NET_ADMIN`
++ `ROZUM_EGRESS=strict`, and the `rozum-agent` entrypoint installs an iptables allowlist (ACCEPT
+loopback + established + the resolved host-gateway IP, DROP everything else incl. all IPv6) before
+exec'ing the agent. If it can't enforce (missing cap/iptables) it fails loud (exit 70) rather than
+run unprotected. On Seatbelt it's identical to `gateway-only` (the SBPL rule is already loopback-
+only). Verified on M4 via `rozum launch`: gateway REACHED, `1.1.1.1` BLOCKED (and `gateway-only`
+control reaches both). **opencode-under-Docker** now works: its generated `OPENCODE_CONFIG` file is
+written under canonical `/tmp` (a toolchain bind mount) instead of `$TMPDIR` — Docker Desktop doesn't
+reliably share `/private/var/folders`, which left the config invisible in the container; `/tmp` (host
+path == container path) is exposed by the existing mount (verified in the `rozum-agent` image). The
+image gained `iptables` + a `/usr/local/bin/rozum-entrypoint.sh` (transparent passthrough unless
+strict). 3 new tests (`docker_args_strict_egress_adds_cap_and_marker`, the net-policy parse, and
+`opencode_config_lives_under_tmp_so_docker_mounts_it`); the cargo-build-in-jail e2e still passes
+through the new entrypoint.
+
 ## sandbox — Docker resource limits + a network-policy knob (DoS containment + egress control)
 Completed: 2026-06-20
 

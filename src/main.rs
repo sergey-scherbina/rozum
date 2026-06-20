@@ -2668,6 +2668,12 @@ fn codex_provider_flags(base: &str, has_model: bool) -> Vec<String> {
 /// Write a temp opencode config defining a `rozum` OpenAI-compatible provider that
 /// points at the local gateway, and return its path (for `OPENCODE_CONFIG`). The model
 /// id is a label the gateway ignores; the user selects it as `-m rozum/local`.
+///
+/// Written under canonical `/tmp` (e.g. `/private/tmp` on macOS) — NOT `$TMPDIR`. The
+/// Docker backend bind-mounts `/tmp` (it's a toolchain path) at the same canonical path,
+/// so the file is visible inside the container at its `OPENCODE_CONFIG` path; Docker
+/// Desktop does NOT reliably share `$TMPDIR` (`/var/folders`), which left the config
+/// invisible. Seatbelt/no-sandbox read it fine from `/tmp` either way.
 fn write_opencode_config(base: &str) -> Option<std::path::PathBuf> {
     let cfg = serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
@@ -2680,7 +2686,8 @@ fn write_opencode_config(base: &str) -> Option<std::path::PathBuf> {
             }
         }
     });
-    let path = std::env::temp_dir().join(format!("rozum-opencode-{}.json", std::process::id()));
+    let dir = std::fs::canonicalize("/tmp").unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+    let path = dir.join(format!("rozum-opencode-{}.json", std::process::id()));
     std::fs::write(&path, cfg.to_string()).ok().map(|_| path)
 }
 
@@ -2811,6 +2818,22 @@ mod opencode_tests {
         assert_eq!(v["provider"]["rozum"]["options"]["baseURL"], "http://127.0.0.1:9999/v1");
         assert_eq!(v["provider"]["rozum"]["npm"], "@ai-sdk/openai-compatible");
         assert!(v["provider"]["rozum"]["models"]["local"].is_object());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn opencode_config_lives_under_tmp_so_docker_mounts_it() {
+        // Must be under canonical /tmp (a toolchain bind mount), NOT $TMPDIR — Docker
+        // Desktop doesn't reliably share /var/folders, which left the config invisible
+        // in the container. Regression guard for the model-sandbox opencode fix.
+        let p = write_opencode_config("http://127.0.0.1:9999").expect("write config");
+        let tmp = std::fs::canonicalize("/tmp").unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+        assert!(
+            p.starts_with(&tmp),
+            "opencode config must live under {} (got {})",
+            tmp.display(),
+            p.display()
+        );
         let _ = std::fs::remove_file(&p);
     }
 }

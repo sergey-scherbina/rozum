@@ -477,13 +477,17 @@ These items turn "portable in principle" into "portable by `cargo build`".
     `ROZUM_SANDBOX_DOCKER_{MEMORY,CPUS,PIDS}` (memory/cpus opt-in; pids default 2048 fork-bomb guard) —
     verified a 64 MB cap OOM-kills (rc 137) + pids cap fails forks; and `ROZUM_SANDBOX_NETWORK`
     (`none`|`gateway-only`|`full`, both backends) — verified `none`→gateway BLOCKED, `gateway-only`→
-    REACHED. Also added `wget` to the image (had only `curl`). **Findings (deferred, not faked):**
-    (a) **strict `gateway-only`-no-internet has no simple Docker mechanism** — `--internal` blocks the
-    host gateway too (verified), Docker Desktop has no egress allowlist → needs a host/VM firewall or
-    proxy sidecar; `network=none` is the available zero-egress option. (b) **opencode config-file mount**
-    — `$TMPDIR` isn't reliably shared by Docker Desktop (verified invisible); needs an exec_agent
-    refactor to decide+mount the config path. **Remaining:** strict-egress proxy/firewall; opencode
-    config mount; then drop the approval-reject path.
+    REACHED. Also added `wget` to the image (had only `curl`). **strict-egress + opencode config DONE
+    2026-06-20** (branch `feature/sandbox-strict-egress`): (a) **`gateway-strict`** (`NetPolicy::
+    GatewayStrict`, `ROZUM_SANDBOX_NETWORK=gateway-strict`) — true gateway-only-no-internet. Earlier
+    "no simple Docker mechanism" was right about flags, so we do it IN the container: `--cap-add=
+    NET_ADMIN` + `ROZUM_EGRESS=strict`, and the `rozum-agent` entrypoint installs an iptables egress
+    allowlist (lo + established + resolved host-gateway, DROP rest incl. all IPv6; fails loud exit 70 if
+    unenforceable). Seatbelt = `gateway-only` (already loopback-only). **Verified on M4 via `rozum
+    launch`:** gateway REACHED, internet BLOCKED. (b) **opencode config** — write it under canonical
+    `/tmp` (a toolchain bind mount) instead of `$TMPDIR` (which Docker Desktop doesn't share) → visible
+    in the container at `OPENCODE_CONFIG` (verified in the image). **Remaining:** drop the approval-reject
+    path now the jail makes it unnecessary (reliability synergy).
 
 - [ ] windows-portability - **Make rozum a first-class Windows host (durable core + CI).**
   rozum-as-gateway/launcher already works on Windows today (HTTP backends are pure

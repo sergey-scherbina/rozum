@@ -91,13 +91,19 @@ The same `rust-coding` `(path, mode)` set is rendered to a `docker run` invocati
 - **env** — only an allowlist (`SANDBOX_FORWARD_ENV`) is forwarded into the container
   via `-e <NAME>`; arbitrary host env does not leak.
 - **network** — per-launch via `ROZUM_SANDBOX_NETWORK` (`none` | `gateway-only`
-  (default) | `full`), applied to BOTH backends. **Caveat:** `gateway-only` under Docker
-  is best-effort — the container reaches the host gateway, but the default bridge also
-  permits general egress. There is **no simple Docker flag for true gateway-only-no-
-  internet**: `--internal` blocks the host gateway too (verified 2026-06-20), and Docker
-  Desktop has no native egress allowlist — strict containment would need a host/VM-level
-  firewall or a proxy sidecar (future). For guaranteed zero-egress use `network = "none"`
-  (verified: the container cannot reach the gateway or anything else).
+  (default) | `gateway-strict` | `full`), applied to BOTH backends.
+  - `gateway-only` under Docker is **best-effort** — the container reaches the host
+    gateway, but the default bridge also permits general egress (there is no native
+    Docker egress-allowlist flag; `--internal` blocks the host gateway too, verified).
+  - **`gateway-strict` (2026-06-20) closes that gap** — the container reaches the host
+    gateway and **nothing else**. Mechanism: `to_docker_run_args` adds `--cap-add=NET_ADMIN`
+    + `ROZUM_EGRESS=strict`, and the `rozum-agent` entrypoint then installs an iptables
+    egress allowlist (ACCEPT loopback + established + the resolved host-gateway IP, DROP
+    everything else, incl. all IPv6). If it can't enforce (no cap / no iptables) it
+    **fails loud (exit 70)** rather than run unprotected. On Seatbelt this is identical to
+    `gateway-only` (the SBPL rule is already loopback-only). **Verified on M4** via
+    `rozum launch`: gateway REACHED, internet (`1.1.1.1`) BLOCKED.
+  - `none` is guaranteed zero-egress (the container reaches nothing, gateway included).
 - **resource limits** — `--memory` / `--cpus` / `--pids-limit` via
   `ROZUM_SANDBOX_DOCKER_{MEMORY,CPUS,PIDS}` (the spec's DoS/kernel threats). memory/cpus
   are opt-in (so heavy builds aren't throttled); `--pids-limit` defaults to **2048** as a
@@ -113,11 +119,12 @@ The same `rust-coding` `(path, mode)` set is rendered to a `docker run` invocati
   PATH — the image adds `/etc/profile.d/rust.sh` so `cargo` is found either way. It
   ships both `curl` and `wget` for agents that shell out to fetch (the agent itself
   reaches the gateway over node's HTTP, not the shell).
-  `opencode` reads a config file written to a host temp path under `$TMPDIR`
-  (`OPENCODE_CONFIG`); Docker Desktop does **not** reliably share `/private/var/folders`,
-  so the file is invisible in the container (verified 2026-06-20) — opencode-under-Docker
-  needs that config decided before the command is built so it can be mounted (an
-  exec_agent refactor, deferred). `claude`/`codex` are env/flag-driven and work as-is.
+  `opencode` reads a generated config file via `OPENCODE_CONFIG`. It is written under
+  canonical **`/tmp`** (a toolchain bind mount), NOT `$TMPDIR` — Docker Desktop does not
+  reliably share `/private/var/folders`, which left it invisible in the container
+  (verified 2026-06-20); writing to `/tmp` (host path == container path) makes it visible
+  via the existing mount (verified in the `rozum-agent` image). `claude`/`codex` are
+  env/flag-driven and need no file.
 
 Validated 2026-06-20 on M4 (Docker 29.6): unit tests on the rendered argv, a real
 `docker run busybox` e2e (in-workspace write round-trips to the host; an out-of-mount
@@ -139,7 +146,7 @@ profile     = "rust-coding"        # preset path set (default when --sandbox giv
 workspace   = [".", "/tmp/scratch"] # rw paths — MAY BE SEVERAL
 read_only   = ["../shared-lib"]     # extra ro paths
 allow_toolchain = true              # auto-add ~/.cargo, ~/.rustup, target/, $TMPDIR (rw)
-network     = "gateway-only"        # "gateway-only" | "none" | "full" — env: ROZUM_SANDBOX_NETWORK
+network     = "gateway-only"        # "none" | "gateway-only" | "gateway-strict" | "full" — env: ROZUM_SANDBOX_NETWORK
 backend     = "seatbelt"            # "seatbelt" (macOS) | "docker" — env: ROZUM_SANDBOX_BACKEND
 # Docker-only resource limits (env: ROZUM_SANDBOX_DOCKER_{MEMORY,CPUS,PIDS}):
 memory      = ""                    # e.g. "8g" — opt-in --memory (OOM-kills the container)
@@ -190,9 +197,11 @@ VM/container with resource limits (the container backend, a later phase).
   allowlist), validated by unit tests + a real `docker run` e2e + a full `rozum launch`
   run. The **`rozum-agent` image** (`docker/rozum-agent.Dockerfile` +
   `scripts/build-agent-image.sh`) is **DONE 2026-06-20** — a real `cargo build` runs in
-  the container jail. Remaining: a firewalled custom network for strict `gateway-only`
-  egress; an `opencode` config mount; resource limits (DoS/kernel threats); and dropping
-  the approval-reject path now that the jail makes it unnecessary (gpt-oss/codex reliability).
+  the container jail. **Resource limits** (`--memory`/`--cpus`/`--pids-limit`),
+  **`gateway-strict` egress** (iptables allowlist — gateway-only, no internet), and the
+  **`opencode` config mount** (write under `/tmp` so the bind exposes it) are all **DONE
+  2026-06-20**, each validated end-to-end on M4. Remaining: drop the approval-reject path
+  now that the jail makes it unnecessary (gpt-oss/codex reliability synergy).
 
 ## Decisions (v1 defaults — other variants can be tried later)
 
