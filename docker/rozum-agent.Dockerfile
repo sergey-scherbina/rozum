@@ -23,7 +23,7 @@ FROM rust:1-slim-bookworm
 # (many crates link OpenSSL). One layer, apt lists dropped to keep the image lean.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      git curl ca-certificates build-essential pkg-config libssl-dev \
+      git curl wget ca-certificates build-essential pkg-config libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # Node.js 22 LTS — the agent CLIs need Node >= 18; Debian's own is too old.

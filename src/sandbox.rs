@@ -19,14 +19,40 @@
 use std::path::{Path, PathBuf};
 
 /// Network policy for the sandboxed child.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum NetPolicy {
-    /// No network at all (subsumed by `(deny default)`).
+    /// No network at all (subsumed by `(deny default)`). True zero-egress.
     None,
-    /// Loopback only — reach the local model gateway, nothing off-box.
+    /// Loopback only — reach the local model gateway, nothing off-box (the default).
+    /// NOTE: under the Docker backend this is best-effort — the container reaches the
+    /// host gateway, but the default bridge also permits general egress (no native
+    /// Docker egress allowlist). Use `None` for guaranteed zero-egress.
+    #[default]
     GatewayOnly,
     /// Unrestricted (escape hatch; not for untrusted/experimental models).
     Full,
+}
+
+impl NetPolicy {
+    /// Pick the network policy from `ROZUM_SANDBOX_NETWORK` (case-insensitive):
+    /// `none` | `gateway-only` (default; aliases `gateway`/`loopback`) | `full`.
+    /// Applies to BOTH backends (the renderers support all three). Unknown / unset →
+    /// `GatewayOnly`.
+    pub fn from_env() -> Self {
+        std::env::var("ROZUM_SANDBOX_NETWORK")
+            .ok()
+            .map(|v| Self::parse(&v))
+            .unwrap_or_default()
+    }
+
+    /// Pure parse of a network-policy name (the testable core of `from_env`).
+    fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "none" | "off" => NetPolicy::None,
+            "full" | "all" | "unrestricted" => NetPolicy::Full,
+            _ => NetPolicy::GatewayOnly, // "gateway-only" / "gateway" / "loopback" / unknown
+        }
+    }
 }
 
 /// Which OS mechanism enforces the `(path, mode)` policy. The policy is written
@@ -77,6 +103,68 @@ pub const CONTAINER_GATEWAY_HOST: &str = "host.docker.internal";
 pub fn default_docker_image() -> String {
     std::env::var("ROZUM_SANDBOX_DOCKER_IMAGE")
         .unwrap_or_else(|_| "rozum-agent:latest".to_owned())
+}
+
+/// Container resource limits — the spec's out-of-scope-for-v1 DoS/kernel threats
+/// (a runaway model exhausting host RAM/CPU or fork-bombing). Rendered to
+/// `docker run` flags; only emitted when set, so they never silently change a run.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DockerLimits {
+    /// `--memory` (e.g. `"8g"`). Opt-in: a hard memory ceiling triggers an OOM-kill
+    /// of the container rather than the host. None = no limit (heavy builds untouched).
+    pub memory: Option<String>,
+    /// `--cpus` (e.g. `"4"`). Opt-in CPU-time cap. None = no limit.
+    pub cpus: Option<String>,
+    /// `--pids-limit`. A cheap fork-bomb guard; a generous default is safe for builds.
+    /// `Some(-1)` = unlimited (Docker's convention); None = omit the flag entirely.
+    pub pids: Option<i64>,
+}
+
+impl DockerLimits {
+    /// No limits at all (the renderer adds nothing).
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Read limits from the environment:
+    /// - `ROZUM_SANDBOX_DOCKER_MEMORY` → `--memory` (opt-in, e.g. `8g`)
+    /// - `ROZUM_SANDBOX_DOCKER_CPUS`   → `--cpus` (opt-in, e.g. `4`)
+    /// - `ROZUM_SANDBOX_DOCKER_PIDS`   → `--pids-limit` (default **2048** — a fork-bomb
+    ///   guard generous enough for parallel `cargo` builds; set `-1` to disable, or a
+    ///   number to tighten).
+    pub fn from_env() -> Self {
+        let trimmed = |k: &str| {
+            std::env::var(k)
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        };
+        let pids = match trimmed("ROZUM_SANDBOX_DOCKER_PIDS") {
+            Some(s) => s.parse::<i64>().ok(),    // explicit (incl. -1 = unlimited)
+            None => Some(2048),                  // default fork-bomb guard
+        };
+        Self {
+            memory: trimmed("ROZUM_SANDBOX_DOCKER_MEMORY"),
+            cpus: trimmed("ROZUM_SANDBOX_DOCKER_CPUS"),
+            pids,
+        }
+    }
+
+    /// Append the limit flags to a `docker run` arg vector (in place).
+    fn push_args(&self, a: &mut Vec<String>) {
+        if let Some(m) = &self.memory {
+            a.push("--memory".into());
+            a.push(m.clone());
+        }
+        if let Some(c) = &self.cpus {
+            a.push("--cpus".into());
+            a.push(c.clone());
+        }
+        if let Some(p) = self.pids {
+            a.push("--pids-limit".into());
+            a.push(p.to_string());
+        }
+    }
 }
 
 /// A structural sandbox policy: confined writes + a secret-read denylist + network.
@@ -177,11 +265,14 @@ impl SandboxPolicy {
     /// - `forward_env`: env var **names** turned into `-e <NAME>` so `docker`
     ///   forwards their values from this process's environment into the container
     ///   (the caller sets them on the `docker` command). Order is preserved.
+    /// - `limits`: `--memory`/`--cpus`/`--pids-limit` (only the set ones are emitted)
+    ///   — DoS/kernel containment for a runaway model.
     pub fn to_docker_run_args(
         &self,
         image: &str,
         workdir: &Path,
         forward_env: &[&str],
+        limits: &DockerLimits,
     ) -> Vec<String> {
         let mut a: Vec<String> = vec![
             "run".into(),
@@ -189,6 +280,7 @@ impl SandboxPolicy {
             "-i".into(),
             "--init".into(), // reap the agent's child processes
         ];
+        limits.push_args(&mut a);
         // Writable paths → rw bind mounts (host path == container path).
         let writable: Vec<PathBuf> = self.writable.iter().map(|p| resolve(p)).collect();
         for w in &writable {
@@ -421,7 +513,8 @@ mod tests {
             secret_deny: vec![],
             network: NetPolicy::GatewayOnly,
         };
-        let args = policy.to_docker_run_args("img:1", Path::new("/private/tmp/ws"), &[]);
+        let args =
+            policy.to_docker_run_args("img:1", Path::new("/private/tmp/ws"), &[], &DockerLimits::none());
         // Starts a one-shot interactive run.
         assert_eq!(&args[0..4], &["run", "--rm", "-i", "--init"]);
         // Workspace is a rw bind, host path == container path.
@@ -445,7 +538,8 @@ mod tests {
             secret_deny: vec![],
             network: NetPolicy::None,
         };
-        let args = policy.to_docker_run_args("img", Path::new("/ws"), &["FOO", "BAR"]);
+        let args =
+            policy.to_docker_run_args("img", Path::new("/ws"), &["FOO", "BAR"], &DockerLimits::none());
         assert!(args.iter().any(|a| a == "--network=none"));
         assert!(!args.iter().any(|a| a == "--add-host"));
         // Env names become `-e NAME` forwards (value comes from the docker process).
@@ -465,9 +559,46 @@ mod tests {
             ],
             network: NetPolicy::None,
         };
-        let args = policy.to_docker_run_args("img", Path::new("/home/u"), &[]);
+        let args = policy.to_docker_run_args("img", Path::new("/home/u"), &[], &DockerLimits::none());
         assert!(window_has(&args, &["--tmpfs", "/home/u/.ssh"]));
         assert!(!args.iter().any(|a| a == "/elsewhere/.aws"));
+    }
+
+    #[test]
+    fn docker_args_render_resource_limits_only_when_set() {
+        let policy = SandboxPolicy {
+            writable: vec![PathBuf::from("/ws")],
+            secret_deny: vec![],
+            network: NetPolicy::None,
+        };
+        // none() → no resource flags at all.
+        let bare = policy.to_docker_run_args("img", Path::new("/ws"), &[], &DockerLimits::none());
+        for f in ["--memory", "--cpus", "--pids-limit"] {
+            assert!(!bare.iter().any(|a| a == f), "{f} must be absent when unset");
+        }
+        // Set ones are emitted with their values.
+        let limits = DockerLimits {
+            memory: Some("8g".into()),
+            cpus: Some("4".into()),
+            pids: Some(2048),
+        };
+        let args = policy.to_docker_run_args("img", Path::new("/ws"), &[], &limits);
+        assert!(window_has(&args, &["--memory", "8g"]));
+        assert!(window_has(&args, &["--cpus", "4"]));
+        assert!(window_has(&args, &["--pids-limit", "2048"]));
+    }
+
+    #[test]
+    fn net_policy_parse_maps_aliases_and_defaults() {
+        assert_eq!(NetPolicy::parse("none"), NetPolicy::None);
+        assert_eq!(NetPolicy::parse("OFF"), NetPolicy::None);
+        assert_eq!(NetPolicy::parse("full"), NetPolicy::Full);
+        assert_eq!(NetPolicy::parse(" all "), NetPolicy::Full);
+        // default + unknown + the explicit gateway aliases → GatewayOnly.
+        for s in ["gateway-only", "gateway", "loopback", "", "nonsense"] {
+            assert_eq!(NetPolicy::parse(s), NetPolicy::GatewayOnly, "{s:?}");
+        }
+        assert_eq!(NetPolicy::default(), NetPolicy::GatewayOnly);
     }
 
     /// True if `needle` appears as a contiguous run inside `hay` (a flat argv).
@@ -500,7 +631,7 @@ mod tests {
         let wsd = ws.to_string_lossy().into_owned();
         // 1+3: write inside the workspace, and try to read the masked secret.
         let run = Command::new("docker")
-            .args(policy.to_docker_run_args(IMG, &ws, &[]))
+            .args(policy.to_docker_run_args(IMG, &ws, &[], &DockerLimits::none()))
             .args([
                 "sh",
                 "-c",
@@ -535,7 +666,7 @@ mod tests {
         let escape = resolve(&std::env::temp_dir()).join(format!("rozum-docker-escape-{id}.txt"));
         let _ = std::fs::remove_file(&escape);
         let _ = Command::new("docker")
-            .args(policy.to_docker_run_args(IMG, &ws, &[]))
+            .args(policy.to_docker_run_args(IMG, &ws, &[], &DockerLimits::none()))
             .args(["sh", "-c", &format!("echo escaped > {}", escape.display())])
             .output();
         let leaked = escape.exists();
@@ -564,7 +695,7 @@ mod tests {
         let policy = SandboxPolicy::rust_coding(&[ws.clone()], NetPolicy::None);
         let wsd = ws.to_string_lossy().into_owned();
         let out = Command::new("docker")
-            .args(policy.to_docker_run_args(&image, &ws, &[]))
+            .args(policy.to_docker_run_args(&image, &ws, &[], &DockerLimits::none()))
             // A login shell, like an agent's Bash tool — exercises the PATH fix.
             .args([
                 "bash",

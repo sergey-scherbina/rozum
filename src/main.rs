@@ -2498,7 +2498,9 @@ fn sandboxed_command(program_name: &str) -> std::process::Command {
     let Some(ws) = sandbox_workspace() else {
         return StdCommand::new(program_name);
     };
-    let policy = SandboxPolicy::rust_coding(std::slice::from_ref(&ws), NetPolicy::GatewayOnly);
+    // Network policy is per-launch (`ROZUM_SANDBOX_NETWORK`: none|gateway-only|full),
+    // applied to whichever backend renders the policy.
+    let policy = SandboxPolicy::rust_coding(std::slice::from_ref(&ws), NetPolicy::from_env());
     match SandboxBackend::from_env() {
         SandboxBackend::Seatbelt => match rozum::sandbox::write_seatbelt_profile_temp(&policy) {
             Ok(profile) => {
@@ -2545,8 +2547,9 @@ fn sandboxed_command(program_name: &str) -> std::process::Command {
                 ws.display(),
                 rozum::sandbox::CONTAINER_GATEWAY_HOST
             );
+            let limits = rozum::sandbox::DockerLimits::from_env();
             let mut c = StdCommand::new("docker");
-            c.args(policy.to_docker_run_args(&image, &ws, SANDBOX_FORWARD_ENV));
+            c.args(policy.to_docker_run_args(&image, &ws, SANDBOX_FORWARD_ENV, &limits));
             c.arg(program_name);
             c
         }

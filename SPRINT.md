@@ -56,6 +56,45 @@ Full writeup + the one-pass diagnostic methodology that localized it:
 
 ### Active
 
+#### model-sandbox (2026-06-19, operator-driven) — structural jail for agentic model runs
+
+**Goal (operator):** the models rozum hosts run agentic loops that touch the FS + shell; they must
+be **structurally** unable to do harm **without a stream of per-action approval prompts** — free
+inside an allowed path-set, denied outside by the OS, no asking. Spec: `docs/specs/model-sandbox.md`.
+Two enforcement backends over one `(path,mode)` policy: macOS Seatbelt (default) and Docker (opt-in,
+any OS). `ROZUM_SANDBOX=0` opts out; `--no-sandbox` is the launch-flag sugar.
+
+- [x] **P1 — Seatbelt MVP (DONE 2026-06-19).** `src/sandbox.rs` `SandboxPolicy`/`rust_coding`/
+      `to_seatbelt_profile`; `rozum launch` jails every agent (all exec paths via `sandboxed_command`).
+      ON by default on macOS, secrets denied read+write, agent-state dirs writable. Validated on M4
+      (cargo build in-jail succeeds, escape denied) + real matrix cell.
+- [x] **`--no-sandbox` flag (DONE 2026-06-20, `56e4a03`).** CLI sugar over `ROZUM_SANDBOX=0`; hoisted
+      by `reorder_launch_args`; left for the child after `--`.
+- [x] **P3 — Docker backend (DONE 2026-06-20, `95d2814`).** `ROZUM_SANDBOX_BACKEND=docker` renders the
+      same policy to `docker run` (bind mounts + tmpfs-masked secrets + `host.docker.internal` gateway
+      + env allowlist). Validated: unit tests + real `docker run` e2e + full `rozum launch` run.
+- [x] **rozum-agent image (DONE 2026-06-20, `ba1bb80`).** `docker/rozum-agent.Dockerfile` +
+      `scripts/build-agent-image.sh` (rust + git + node + claude/codex/opencode). Validated: a real
+      `cargo build` runs inside the container jail via `rozum launch`.
+- [x] **sandbox-docker-resource-limits — DONE 2026-06-20.** `--memory`/`--cpus`/`--pids-limit` via
+      `ROZUM_SANDBOX_DOCKER_{MEMORY,CPUS,PIDS}` (memory/cpus opt-in; pids default 2048 fork-bomb guard).
+      `DockerLimits{none,from_env}` + render; verified on M4: 64 MB cap OOM-kills (rc 137), pids cap
+      fails forks past the limit, normal builds unaffected. Also added `wget` to the rozum-agent image.
+- [x] **sandbox-network-policy-knob — DONE 2026-06-20.** `ROZUM_SANDBOX_NETWORK`
+      (`none`|`gateway-only` (default)|`full`) via `NetPolicy::from_env()`, honored by BOTH backends
+      (`sandboxed_command` no longer hard-codes `GatewayOnly`). Verified via `rozum launch`:
+      `none`→gateway BLOCKED (true zero-egress), `gateway-only`→REACHED. Unit test on the parse/aliases.
+- [ ] **sandbox-docker-strict-egress — DEFERRED (no simple mechanism, verified).** Empirically (2026-06-20)
+      Docker `--internal` blocks the host gateway too, and Docker Desktop has no native egress
+      allowlist — so true "gateway-only **and** no internet" needs a host/VM-level firewall or a proxy
+      sidecar (a larger effort). Until then the strong options are `network=none` (zero egress) or the
+      documented best-effort `gateway-only` (host + bridge egress). Not faked.
+- [ ] **sandbox-docker-opencode-config — DEFERRED (real gap, verified).** opencode reads `OPENCODE_CONFIG`
+      from a `$TMPDIR` temp file; Docker Desktop doesn't reliably share `/private/var/folders`, so it's
+      invisible in the container (claude/codex are env/flag-driven and work). A clean fix needs the
+      config path decided **before** `sandboxed_command` builds the command (exec_agent refactor) so it
+      can be mounted — deferred; opencode is the third-priority agent.
+
 #### meeting-web-pwa-ssc (2026-06-19, operator-driven) — phone-installable meeting client, then re-author in .ssc→Rust
 
 **Goal:** a polished meeting web the operator opens + installs on their phone over the mesh,

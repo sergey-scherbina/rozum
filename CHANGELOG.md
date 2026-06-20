@@ -1,5 +1,24 @@
 # Changelog
 
+## sandbox — Docker resource limits + a network-policy knob (DoS containment + egress control)
+Completed: 2026-06-20
+
+Two hardening levers for the sandbox plus two honest findings. **Resource limits:** the Docker render
+now takes `--memory`/`--cpus`/`--pids-limit` (`ROZUM_SANDBOX_DOCKER_{MEMORY,CPUS,PIDS}`) so a runaway
+model can't exhaust host RAM/CPU or fork-bomb — memory/cpus are opt-in (heavy builds aren't throttled),
+and `--pids-limit` defaults to 2048 as a cheap fork-bomb guard. Verified on M4: a 64 MB cap OOM-kills a
+256 MB allocation (rc 137) and a pids cap fails forks past the limit. **Network knob:**
+`ROZUM_SANDBOX_NETWORK` (`none` | `gateway-only` (default) | `full`) is now honored by BOTH backends
+(`sandboxed_command` previously hard-coded `GatewayOnly`); verified via `rozum launch`: `none` → the
+container can't reach the gateway (true zero-egress), `gateway-only` → it can. Also added `wget` to the
+`rozum-agent` image (it shipped only `curl`). **Findings recorded (not faked):** (1) there is no simple
+Docker flag for true gateway-only-but-no-internet — `--internal` blocks the host gateway too, and Docker
+Desktop has no native egress allowlist, so strict containment needs a host/VM firewall or proxy sidecar
+(use `network=none` for guaranteed zero-egress meanwhile); (2) opencode's `$TMPDIR` config file isn't
+reliably shared into the container by Docker Desktop, so opencode-under-Docker needs an exec_agent
+refactor to mount it (claude/codex are env/flag-driven and work). 2 new unit tests
+(`docker_args_render_resource_limits_only_when_set`, `net_policy_parse_maps_aliases_and_defaults`).
+
 ## sandbox — the `rozum-agent` container image (makes the Docker backend runnable)
 Completed: 2026-06-20
 

@@ -472,9 +472,18 @@ These items turn "portable in principle" into "portable by `cargo build`".
     PATH of login shells too) + `scripts/build-agent-image.sh`; `rozum launch` prints a build hint if
     the image is missing (no silent pull). Validated: a real `cargo new` + `cargo build` + run executes
     **inside** the container jail via `rozum launch … docker` and the output round-trips to the host
-    (ignored test `agent_image_builds_a_crate_in_the_docker_jail`). **Remaining:** firewalled custom
-    network for strict `gateway-only` egress; `opencode` config-file mount; resource limits
-    (`--memory`/`--cpus`/`--pids-limit`, DoS/kernel threats); then drop the approval-reject path.
+    (ignored test `agent_image_builds_a_crate_in_the_docker_jail`). **Resource limits + network knob
+    DONE 2026-06-20** (branch `feature/sandbox-limits-network`): `--memory`/`--cpus`/`--pids-limit` via
+    `ROZUM_SANDBOX_DOCKER_{MEMORY,CPUS,PIDS}` (memory/cpus opt-in; pids default 2048 fork-bomb guard) —
+    verified a 64 MB cap OOM-kills (rc 137) + pids cap fails forks; and `ROZUM_SANDBOX_NETWORK`
+    (`none`|`gateway-only`|`full`, both backends) — verified `none`→gateway BLOCKED, `gateway-only`→
+    REACHED. Also added `wget` to the image (had only `curl`). **Findings (deferred, not faked):**
+    (a) **strict `gateway-only`-no-internet has no simple Docker mechanism** — `--internal` blocks the
+    host gateway too (verified), Docker Desktop has no egress allowlist → needs a host/VM firewall or
+    proxy sidecar; `network=none` is the available zero-egress option. (b) **opencode config-file mount**
+    — `$TMPDIR` isn't reliably shared by Docker Desktop (verified invisible); needs an exec_agent
+    refactor to decide+mount the config path. **Remaining:** strict-egress proxy/firewall; opencode
+    config mount; then drop the approval-reject path.
 
 - [ ] windows-portability - **Make rozum a first-class Windows host (durable core + CI).**
   rozum-as-gateway/launcher already works on Windows today (HTTP backends are pure

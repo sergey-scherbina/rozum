@@ -90,9 +90,19 @@ The same `rust-coding` `(path, mode)` set is rendered to a `docker run` invocati
   Anthropic/OpenAI base URLs and codex `-c base_url` are all container-correct.
 - **env** — only an allowlist (`SANDBOX_FORWARD_ENV`) is forwarded into the container
   via `-e <NAME>`; arbitrary host env does not leak.
-- **network caveat** — `gateway-only` under Docker still permits general egress over
-  the default bridge (it is best-effort: host reachable + bridge). For strict no-egress
-  use `network = "none"`; a firewalled custom network is future hardening.
+- **network** — per-launch via `ROZUM_SANDBOX_NETWORK` (`none` | `gateway-only`
+  (default) | `full`), applied to BOTH backends. **Caveat:** `gateway-only` under Docker
+  is best-effort — the container reaches the host gateway, but the default bridge also
+  permits general egress. There is **no simple Docker flag for true gateway-only-no-
+  internet**: `--internal` blocks the host gateway too (verified 2026-06-20), and Docker
+  Desktop has no native egress allowlist — strict containment would need a host/VM-level
+  firewall or a proxy sidecar (future). For guaranteed zero-egress use `network = "none"`
+  (verified: the container cannot reach the gateway or anything else).
+- **resource limits** — `--memory` / `--cpus` / `--pids-limit` via
+  `ROZUM_SANDBOX_DOCKER_{MEMORY,CPUS,PIDS}` (the spec's DoS/kernel threats). memory/cpus
+  are opt-in (so heavy builds aren't throttled); `--pids-limit` defaults to **2048** as a
+  cheap fork-bomb guard (set `-1` to disable). Verified on M4: a 64 MB cap OOM-kills a
+  256 MB allocation (rc 137), and a pids cap fails forks past the limit.
 - **image** — the agent runs in `ROZUM_SANDBOX_DOCKER_IMAGE` (default
   `rozum-agent:latest`); it MUST carry the agent CLI (`claude`/`codex`/`opencode`) on
   `PATH` plus a build toolchain. rozum ships one: **`docker/rozum-agent.Dockerfile`**
@@ -100,10 +110,14 @@ The same `rust-coding` `(path, mode)` set is rendered to a `docker run` invocati
   If the image is missing locally, `rozum launch` prints a build hint (it does not
   silently try to pull the unpublished default). Note: the `rust` base exposes cargo via
   `ENV PATH`, but agents often build through a *login* shell (`bash -lc`) that resets
-  PATH — the image adds `/etc/profile.d/rust.sh` so `cargo` is found either way.
-  `opencode` additionally reads a config file written to a host temp path
-  (`OPENCODE_CONFIG`) that is not mounted, so opencode-under-Docker needs that file
-  mounted in (future); `claude`/`codex` are env/flag-driven and work as-is.
+  PATH — the image adds `/etc/profile.d/rust.sh` so `cargo` is found either way. It
+  ships both `curl` and `wget` for agents that shell out to fetch (the agent itself
+  reaches the gateway over node's HTTP, not the shell).
+  `opencode` reads a config file written to a host temp path under `$TMPDIR`
+  (`OPENCODE_CONFIG`); Docker Desktop does **not** reliably share `/private/var/folders`,
+  so the file is invisible in the container (verified 2026-06-20) — opencode-under-Docker
+  needs that config decided before the command is built so it can be mounted (an
+  exec_agent refactor, deferred). `claude`/`codex` are env/flag-driven and work as-is.
 
 Validated 2026-06-20 on M4 (Docker 29.6): unit tests on the rendered argv, a real
 `docker run busybox` e2e (in-workspace write round-trips to the host; an out-of-mount
@@ -125,8 +139,12 @@ profile     = "rust-coding"        # preset path set (default when --sandbox giv
 workspace   = [".", "/tmp/scratch"] # rw paths — MAY BE SEVERAL
 read_only   = ["../shared-lib"]     # extra ro paths
 allow_toolchain = true              # auto-add ~/.cargo, ~/.rustup, target/, $TMPDIR (rw)
-network     = "gateway-only"        # "gateway-only" | "none" | "full"
+network     = "gateway-only"        # "gateway-only" | "none" | "full" — env: ROZUM_SANDBOX_NETWORK
 backend     = "seatbelt"            # "seatbelt" (macOS) | "docker" — env: ROZUM_SANDBOX_BACKEND
+# Docker-only resource limits (env: ROZUM_SANDBOX_DOCKER_{MEMORY,CPUS,PIDS}):
+memory      = ""                    # e.g. "8g" — opt-in --memory (OOM-kills the container)
+cpus        = ""                    # e.g. "4"  — opt-in --cpus
+pids_limit  = 2048                  # --pids-limit fork-bomb guard (-1 = unlimited)
 ```
 
 - `--sandbox` with no value → the `rust-coding` profile rooted at the launch cwd.
