@@ -143,6 +143,46 @@ args, signals (data-ssc-*), server-push (/__ssc/push|state) — all shipped + gr
       (`../scalascript/examples/rozum-meeting.ssc`, curl-verified); remaining = the live rozum data
       binding. Verify against the live phone baseline.
 
+#### demo-polish-and-resilience (2026-06-20, operator-approved) — make the live demo boringly reliable
+
+**Goal:** after the sandbox/model-participant push, turn the demo path into something a human can
+preflight, trust, and hand to sibling agents without rediscovering stale state. This is a
+cross-cutting polish queue; detailed web tasks remain under `meeting-web-pwa-ssc`, and long-term
+portability stays in BACKLOG.
+
+- [ ] **demo-doctor-self-test — first implementation pass.** Add `rozum doctor` (spec:
+      `docs/specs/demo-doctor.md`) to report meeting daemon reachability, room list, shared gateway
+      health, sandbox backend/network, Docker image availability when Docker is selected, web/PWA
+      endpoint reachability when a URL is supplied, Tailscale CLI availability, and the
+      `scripts/demo-conference.sh` launcher. Must be non-destructive: no model launch, no service
+      mutation, no Docker pulls, no room posts.
+- [ ] **sandbox-regression-harness.** Add a focused, explicit jail-invariant test target for
+      Seatbelt/Docker: workspace write allowed, secret read/write denied, selected network policy
+      enforced (`none`/`gateway-strict`), gateway reachable when expected, simple Rust build works
+      inside the jail, no-approval flags are applied only for jailed headless launches, and opencode
+      config remains visible in Docker. Keep slow/host-mutating checks ignored unless explicitly
+      requested.
+- [ ] **PWA room picker.** Finish the active `meeting-web-pwa-ssc` room picker: `/api/rooms`, `?room=`
+      on messages/stream/submit, selected-room UI, shareable room links, and mobile-safe unread/active
+      state. This is the product/demo win after the doctor lands.
+- [ ] **`.ssc` live data binding for meeting web.** Complete the ScalaScript/Rust web rewrite by
+      binding the compiled `.ssc` page to live rozum rooms/transcripts/submits, then compare it against
+      the current phone-proven PWA baseline.
+- [ ] **sprint-backlog-hygiene.** Remove stale sprint/backlog signals now contradicted by master:
+      model-participant is done, sandbox P3 is complete except optional Linux native jail, daemon web
+      exists, and previous queue-serving cleanup (`codex/queue-serving-hygiene`, commit `14c425f`) is
+      either merged or consciously dropped.
+- [ ] **windows-core-ci.** Add a low-risk portability gate: `windows-latest` build/test with
+      `--no-default-features`, documenting any Unix-only assumptions that surface instead of starting
+      a full Windows port.
+- [ ] **meetings-rest-read.** When remote/stateless clients need it, add the deferred day-scoped REST
+      read endpoints on the meeting daemon (`/rooms/{name}/days` and
+      `/rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`). Lower priority than the PWA room picker
+      unless a client requires it.
+- [ ] **model-participant web controls.** Surface start/stop/status, reply policy
+      (`mention`/`always`/`manual`), persona selection, and visible gateway/model state from the room
+      UI so demos do not require juggling several terminal commands.
+
 #### matrix-failure-analysis (2026-06-18) — study every matrix red → fix or prove-structural+document
 
 From the full-canonical matrix on master (60 cells, `results/full-canonical-091719`): claude 19/20,
