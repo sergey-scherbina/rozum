@@ -118,9 +118,17 @@ pub async fn run(
     };
     let _ = client.submit(&hint).await;
 
-    // Only NEW turns after join trigger replies (the backlog is context, not a prompt).
+    // Maintain our OWN running transcript: `spawn_poll` streams new turns on a separate
+    // connection, so `client.transcript()` (the main connection's view) does NOT include them —
+    // building context from it would omit the very message we're replying to (and a strict chat
+    // template like Qwen3.6's then errors "no user query"). Seed with the backlog, extend per batch.
+    let mut history = client.transcript().to_vec();
     let (mut rx, _poll) = client.spawn_poll();
     while let Some(batch) = rx.recv().await {
+        history.extend(batch.iter().cloned());
+        if history.len() > 200 {
+            history.drain(0..history.len() - 200);
+        }
         for turn in batch {
             if base_handle(&turn.display_name).eq_ignore_ascii_case(&handle) {
                 continue; // never reply to itself (display carries a session suffix)
@@ -129,9 +137,7 @@ pub async fn run(
                 continue;
             }
             eprintln!("[participant] replying to {} …", base_handle(&turn.display_name));
-            // Clone the transcript so no client borrow is held across the await / submit.
-            let ctx = client.transcript().to_vec();
-            match generate(&gateway_url, &model, &ctx, &handle, persona.as_deref()).await {
+            match generate(&gateway_url, &model, &history, &handle, persona.as_deref()).await {
                 Ok(text) if !text.trim().is_empty() => {
                     if let Err(e) = client.submit(text.trim()).await {
                         eprintln!("[participant] submit failed: {e}");
@@ -167,6 +173,12 @@ async fn generate(
     let mut messages = vec![serde_json::json!({ "role": "system", "content": system })];
     let start = transcript.len().saturating_sub(24);
     for t in &transcript[start..] {
+        // Presence lines (`joined:`/`left:`) are roster noise — the model's own join announcement
+        // in its context primes a terse social reply; drop them so it sees only real conversation.
+        let c = t.content.trim_start();
+        if c.starts_with("joined:") || c.starts_with("left:") {
+            continue;
+        }
         let who = base_handle(&t.display_name);
         if who.eq_ignore_ascii_case(handle) {
             messages.push(serde_json::json!({ "role": "assistant", "content": t.content }));
@@ -176,6 +188,11 @@ async fn generate(
                 "content": format!("{}: {}", who, t.content),
             }));
         }
+    }
+    // A strict chat template (e.g. Qwen3.6) errors without a user message — if the context held
+    // only presence/own turns, there's nothing to answer; stay silent rather than send a bad call.
+    if !messages.iter().any(|m| m["role"] == "user") {
+        return Ok(String::new());
     }
     let body = serde_json::json!({
         "model": model, "messages": messages, "max_tokens": 400, "stream": false,
