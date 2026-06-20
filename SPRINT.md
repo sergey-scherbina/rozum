@@ -100,8 +100,12 @@ any OS). `ROZUM_SANDBOX=0` opts out; `--no-sandbox` is the launch-flag sugar.
       `--dangerously-skip-permissions`, `codex exec` → `--dangerously-bypass-approvals-and-sandbox`,
       `opencode run` → `--dangerously-skip-permissions`) — sandboxed models act with no per-action
       prompts (kills the codex reject-escalation loop, Finding 1a). Gated: jailed-only, headless-only,
-      never overrides an explicit policy. Pure `autonomy_flag_for` (2 tests) + e2e-verified. **The
-      model-sandbox track is now complete** (only optional P2 Linux Landlock/bubblewrap remains).
+      never overrides an explicit policy. Pure `autonomy_flag_for` (2 tests) + e2e-verified.
+- [x] **sandbox-config-table — DONE 2026-06-20.** A `[sandbox]` table in `rozum.toml` (`SandboxConfig`):
+      `workspace` (extra rw), `read_only` (Docker `:ro` mounts), `secret_deny` (extra denies),
+      `network`, `backend`. Loaded in `sandboxed_command`, merged via `SandboxPolicy::rust_coding_with`;
+      **env overrides config**. Config-parse + read-only + `rust_coding_with` tests + live smoke. **The
+      model-sandbox track is now complete** (only the optional P2 Linux Landlock/bubblewrap remains).
 
 #### meeting-web-pwa-ssc (2026-06-19, operator-driven) — phone-installable meeting client, then re-author in .ssc→Rust
 

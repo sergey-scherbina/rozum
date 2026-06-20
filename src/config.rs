@@ -95,6 +95,29 @@ pub struct RuntimeConfig {
     /// Named cascade configs from `[cascade.<name>]` tables. `model: "cascade"` selects `default`,
     /// `model: "cascade:<name>"` selects `<name>`. See `docs/specs/cascade-router.md`.
     pub cascades: HashMap<String, CascadeSpec>,
+    /// The `[sandbox]` table — persistent sandbox policy (the path lists env can't express).
+    /// See `docs/specs/model-sandbox.md` "Config surface". Env vars override these.
+    pub sandbox: SandboxConfig,
+}
+
+/// `[sandbox]` config (docs/specs/model-sandbox.md). The path lists are the value
+/// over env (`ROZUM_SANDBOX*`): multiple writable workspaces, read-only reference
+/// paths (Docker `:ro` mounts), and operator-specific secret dirs to deny — none of
+/// which an env var expresses well. `network`/`backend` are config-level defaults that
+/// the matching env var overrides. Empty/`None` everywhere = no `[sandbox]` table.
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub struct SandboxConfig {
+    /// Extra writable workspace paths beyond the launch cwd (`"."` = cwd, `"~/…"` expands `$HOME`).
+    pub workspace: Vec<String>,
+    /// Read-only paths — mounted `:ro` under Docker; under Seatbelt a non-writable path
+    /// is already read-only (reads are broad), so these are informational there.
+    pub read_only: Vec<String>,
+    /// Extra secret dirs to deny (appended to the built-in denylist).
+    pub secret_deny: Vec<String>,
+    /// `none` | `gateway-only` | `gateway-strict` | `full`. Overridden by `ROZUM_SANDBOX_NETWORK`.
+    pub network: Option<String>,
+    /// `seatbelt` | `docker`. Overridden by `ROZUM_SANDBOX_BACKEND`.
+    pub backend: Option<String>,
 }
 
 // ─── serde wire format ────────────────────────────────────────────────────────
@@ -109,6 +132,22 @@ struct RawConfig {
     /// `[cascade.<name>]` tables → named `CascadeSpec`s (`tiers`, `strategy`, `max_escalations`).
     #[serde(default)]
     cascade: HashMap<String, CascadeSpec>,
+    /// The `[sandbox]` table.
+    #[serde(default)]
+    sandbox: RawSandbox,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawSandbox {
+    #[serde(default)]
+    workspace: Vec<String>,
+    #[serde(default)]
+    read_only: Vec<String>,
+    #[serde(default)]
+    secret_deny: Vec<String>,
+    network: Option<String>,
+    backend: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -199,6 +238,7 @@ impl Default for RuntimeConfig {
                 .collect(),
             single_backend: None,
             cascades: HashMap::new(),
+            sandbox: SandboxConfig::default(),
         }
     }
 }
@@ -288,6 +328,13 @@ impl RuntimeConfig {
             backends,
             single_backend: raw.runtime.backend,
             cascades: raw.cascade,
+            sandbox: SandboxConfig {
+                workspace: raw.sandbox.workspace,
+                read_only: raw.sandbox.read_only,
+                secret_deny: raw.sandbox.secret_deny,
+                network: raw.sandbox.network,
+                backend: raw.sandbox.backend,
+            },
         })
     }
 
@@ -601,5 +648,28 @@ mod tests {
         assert!(cfg.cascade_spec("missing").is_none());
         // The default config (no [cascade]) has no cascades.
         assert!(RuntimeConfig::default().cascade_spec("").is_none());
+    }
+
+    #[test]
+    fn parses_sandbox_table() {
+        let cfg = RuntimeConfig::from_toml_str(
+            r#"
+            [sandbox]
+            workspace = [".", "/tmp/scratch"]
+            read_only = ["../shared-lib"]
+            secret_deny = ["~/.my-secrets"]
+            network = "gateway-strict"
+            backend = "docker"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.sandbox.workspace, vec![".", "/tmp/scratch"]);
+        assert_eq!(cfg.sandbox.read_only, vec!["../shared-lib"]);
+        assert_eq!(cfg.sandbox.secret_deny, vec!["~/.my-secrets"]);
+        assert_eq!(cfg.sandbox.network.as_deref(), Some("gateway-strict"));
+        assert_eq!(cfg.sandbox.backend.as_deref(), Some("docker"));
+        // No [sandbox] table → empty default; an unknown key is rejected.
+        assert_eq!(RuntimeConfig::default().sandbox, SandboxConfig::default());
+        assert!(RuntimeConfig::from_toml_str("[sandbox]\nbogus = 1\n").is_err());
     }
 }

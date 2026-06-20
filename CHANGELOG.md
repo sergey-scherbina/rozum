@@ -1,5 +1,23 @@
 # Changelog
 
+## sandbox — a `[sandbox]` table in `rozum.toml` (persistent policy beyond env)
+Completed: 2026-06-20
+
+The sandbox was env-only (`ROZUM_SANDBOX*`), which can't express path lists. Added a `[sandbox]`
+table to `rozum.toml` (`SandboxConfig` on `RuntimeConfig`): `workspace` (extra writable paths beyond
+the launch cwd; `"."` = cwd, `"~/…"` = `$HOME`), `read_only` (reference paths — Docker `:ro` mounts;
+under Seatbelt a non-writable path is already read-only), `secret_deny` (extra secret dirs appended to
+the built-in denylist), `network`, and `backend`. It's loaded in `sandboxed_command` (the unsandboxed
+launcher) and merged into the policy via a new `SandboxPolicy::rust_coding_with`. **Env overrides
+config** — `ROZUM_SANDBOX_NETWORK`/`ROZUM_SANDBOX_BACKEND` win over the config values, and
+`ROZUM_SANDBOX=0` still disables the jail; the config is the persistent default, env the per-launch
+override. `SandboxPolicy` gained a `read_only` field rendered as `:ro` binds under Docker (skipping
+any path already covered by a writable mount). A missing/malformed `rozum.toml` falls back to env-only
+behavior (never breaks the jail). Resource limits stay env-only for now. Verified: config-parse +
+read-only-mount + `rust_coding_with` unit tests, and a live smoke (`[sandbox] backend=docker` +
+read_only + extra workspace/secret drove a real launch; `ROZUM_SANDBOX_BACKEND=seatbelt` overrode the
+config). Completes the model-sandbox config surface — the last (c) item of the sandbox track.
+
 ## cascade — `rozum gateway --model cascade[:name]` works from a cold start
 Completed: 2026-06-20
 

@@ -2460,14 +2460,60 @@ const SANDBOX_FORWARD_ENV: &[&str] = &[
     "DISABLE_NON_ESSENTIAL_MODEL_CALLS",
 ];
 
-/// The workspace dir to jail a launched agent in, or `None` for no jail. **Default
-/// ON** (the launch cwd); `ROZUM_SANDBOX=0`/empty disables it, `=1` forces the cwd,
-/// `=<dir>` jails to <dir>. The Seatbelt backend is macOS-only, so off macOS the jail
-/// stays OFF *unless* the Docker backend is selected (`ROZUM_SANDBOX_BACKEND=docker`),
-/// which works on any OS with a docker daemon — so `launch` is never broken by an
-/// unavailable jail.
-fn sandbox_workspace() -> Option<std::path::PathBuf> {
-    let backend = rozum::sandbox::SandboxBackend::from_env();
+/// Load the `[sandbox]` table from `rozum.toml` (docs/specs/model-sandbox.md "Config
+/// surface"). A missing/malformed config yields the empty default — it must never break
+/// the jail. Read once per call in the unsandboxed launcher; the file is tiny.
+fn sandbox_config() -> rozum::SandboxConfig {
+    rozum::RuntimeConfig::load().map(|c| c.sandbox).unwrap_or_default()
+}
+
+/// The active sandbox backend: `ROZUM_SANDBOX_BACKEND` env wins, else `[sandbox] backend`,
+/// else the default (Seatbelt).
+fn resolve_sandbox_backend(sbx: &rozum::SandboxConfig) -> rozum::sandbox::SandboxBackend {
+    use rozum::sandbox::SandboxBackend;
+    if std::env::var_os("ROZUM_SANDBOX_BACKEND").is_some() {
+        SandboxBackend::from_env()
+    } else if let Some(b) = &sbx.backend {
+        SandboxBackend::parse(b)
+    } else {
+        SandboxBackend::default()
+    }
+}
+
+/// The active network policy: `ROZUM_SANDBOX_NETWORK` env wins, else `[sandbox] network`,
+/// else the default (GatewayOnly).
+fn resolve_sandbox_network(sbx: &rozum::SandboxConfig) -> rozum::sandbox::NetPolicy {
+    use rozum::sandbox::NetPolicy;
+    if std::env::var_os("ROZUM_SANDBOX_NETWORK").is_some() {
+        NetPolicy::from_env()
+    } else if let Some(n) = &sbx.network {
+        NetPolicy::parse(n)
+    } else {
+        NetPolicy::default()
+    }
+}
+
+/// Resolve a `[sandbox] workspace` token to a path: `"."`/empty → the launch cwd,
+/// `"~/…"` → `$HOME`-relative, else verbatim.
+fn resolve_workspace_token(tok: &str) -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if tok.is_empty() || tok == "." {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else if let Some(rest) = tok.strip_prefix("~/") {
+        std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join(rest))
+            .unwrap_or_else(|| PathBuf::from(tok))
+    } else {
+        PathBuf::from(tok)
+    }
+}
+
+/// The primary workspace dir to jail a launched agent in, or `None` for no jail, for the
+/// resolved `backend`. **Default ON** (the launch cwd); `ROZUM_SANDBOX=0`/empty disables
+/// it, `=1` forces the cwd, `=<dir>` jails to <dir>. The Seatbelt backend is macOS-only,
+/// so off macOS the jail stays OFF *unless* the Docker backend is selected — so `launch`
+/// is never broken by an unavailable jail.
+fn sandbox_workspace_for(backend: rozum::sandbox::SandboxBackend) -> Option<std::path::PathBuf> {
     if backend == rozum::sandbox::SandboxBackend::Seatbelt && !cfg!(target_os = "macos") {
         return None;
     }
@@ -2480,6 +2526,12 @@ fn sandbox_workspace() -> Option<std::path::PathBuf> {
     }
 }
 
+/// Whether a jail is active (config-aware backend resolution), for callers that only
+/// need the on/off decision (autonomy flags, the gateway-host choice).
+fn sandbox_workspace() -> Option<std::path::PathBuf> {
+    sandbox_workspace_for(resolve_sandbox_backend(&sandbox_config()))
+}
+
 /// The host the agent uses to reach the rozum gateway. Normally the host loopback
 /// (`127.0.0.1`); under an **active Docker jail** the container's loopback is itself,
 /// so it must reach the host gateway via `host.docker.internal` instead (the
@@ -2487,8 +2539,9 @@ fn sandbox_workspace() -> Option<std::path::PathBuf> {
 /// derives from this single choke point, so picking the right host here makes all of
 /// them (Anthropic/OpenAI base URLs, codex `-c base_url`) correct with no other change.
 fn sandbox_gateway_host() -> &'static str {
-    if sandbox_workspace().is_some()
-        && rozum::sandbox::SandboxBackend::from_env() == rozum::sandbox::SandboxBackend::Docker
+    let backend = resolve_sandbox_backend(&sandbox_config());
+    if backend == rozum::sandbox::SandboxBackend::Docker
+        && sandbox_workspace_for(backend).is_some()
     {
         rozum::sandbox::CONTAINER_GATEWAY_HOST
     } else {
@@ -2505,15 +2558,34 @@ fn sandbox_gateway_host() -> &'static str {
 /// command ends with `program_name`, so the caller's later `.args(...)`/`.env(...)`
 /// append to the jailed invocation exactly as for an unsandboxed command.
 fn sandboxed_command(program_name: &str) -> std::process::Command {
-    use rozum::sandbox::{NetPolicy, SandboxBackend, SandboxPolicy};
+    use rozum::sandbox::{SandboxBackend, SandboxPolicy};
     use std::process::Command as StdCommand;
-    let Some(ws) = sandbox_workspace() else {
+    // Merge env + the `[sandbox]` config (env wins on network/backend; the config adds
+    // the path lists env can't express — extra workspaces, read-only refs, extra secrets).
+    let sbx = sandbox_config();
+    let backend = resolve_sandbox_backend(&sbx);
+    let Some(primary) = sandbox_workspace_for(backend) else {
         return StdCommand::new(program_name);
     };
-    // Network policy is per-launch (`ROZUM_SANDBOX_NETWORK`: none|gateway-only|full),
-    // applied to whichever backend renders the policy.
-    let policy = SandboxPolicy::rust_coding(std::slice::from_ref(&ws), NetPolicy::from_env());
-    match SandboxBackend::from_env() {
+    let mut workspaces = vec![primary.clone()];
+    workspaces.extend(sbx.workspace.iter().map(|t| resolve_workspace_token(t)));
+    let read_only: Vec<std::path::PathBuf> =
+        sbx.read_only.iter().map(|t| resolve_workspace_token(t)).collect();
+    let extra_secrets: Vec<std::path::PathBuf> =
+        sbx.secret_deny.iter().map(|t| resolve_workspace_token(t)).collect();
+    let network = resolve_sandbox_network(&sbx);
+    if !sbx.workspace.is_empty() || !read_only.is_empty() || !extra_secrets.is_empty() {
+        eprintln!(
+            "  → sandbox config: +{} workspace(s), {} read-only, +{} secret den(y/ies)",
+            sbx.workspace.len(),
+            read_only.len(),
+            extra_secrets.len()
+        );
+    }
+    let policy =
+        SandboxPolicy::rust_coding_with(&workspaces, &read_only, &extra_secrets, network);
+    let ws = primary;
+    match backend {
         SandboxBackend::Seatbelt => match rozum::sandbox::write_seatbelt_profile_temp(&policy) {
             Ok(profile) => {
                 eprintln!(

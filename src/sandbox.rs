@@ -51,8 +51,9 @@ impl NetPolicy {
             .unwrap_or_default()
     }
 
-    /// Pure parse of a network-policy name (the testable core of `from_env`).
-    fn parse(raw: &str) -> Self {
+    /// Parse a network-policy name (the testable core of `from_env`; also used to
+    /// resolve the `[sandbox] network` config value). Unknown → `GatewayOnly`.
+    pub fn parse(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "none" | "off" => NetPolicy::None,
             "gateway-strict" | "strict" => NetPolicy::GatewayStrict,
@@ -87,8 +88,9 @@ impl SandboxBackend {
             .unwrap_or_default()
     }
 
-    /// Pure parse of a backend name (the testable core of `from_env`).
-    fn parse(raw: &str) -> Self {
+    /// Parse a backend name (the testable core of `from_env`; also used to resolve the
+    /// `[sandbox] backend` config value). `container` aliases `docker`; unknown → `Seatbelt`.
+    pub fn parse(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "docker" | "container" => SandboxBackend::Docker,
             _ => SandboxBackend::Seatbelt,
@@ -181,6 +183,10 @@ impl DockerLimits {
 pub struct SandboxPolicy {
     /// Roots the child may read+write+exec (the workspace(s) + toolchain caches).
     pub writable: Vec<PathBuf>,
+    /// Read-only roots (reference repos, shared libs). Under Docker → `:ro` bind mounts;
+    /// under Seatbelt a non-writable path is already read-only (reads are broad), so these
+    /// matter only for the container backend.
+    pub read_only: Vec<PathBuf>,
     /// Secret roots carved OUT of the otherwise-readable filesystem.
     pub secret_deny: Vec<PathBuf>,
     /// Network policy.
@@ -196,12 +202,27 @@ impl SandboxPolicy {
     /// paths are canonicalized so Seatbelt matches the real location (`/tmp` →
     /// `/private/tmp`, etc.).
     pub fn rust_coding(workspaces: &[PathBuf], network: NetPolicy) -> Self {
+        Self::rust_coding_with(workspaces, &[], &[], network)
+    }
+
+    /// `rust_coding` plus operator extras from the `[sandbox]` config: additional
+    /// `read_only` reference paths (Docker `:ro` mounts) and extra `secret_deny` dirs
+    /// (appended to the built-in denylist). All paths are symlink-resolved.
+    pub fn rust_coding_with(
+        workspaces: &[PathBuf],
+        read_only: &[PathBuf],
+        extra_secret_deny: &[PathBuf],
+        network: NetPolicy,
+    ) -> Self {
         let mut writable: Vec<PathBuf> = workspaces.iter().map(|p| resolve(p)).collect();
         writable.extend(toolchain_paths());
         writable.extend(agent_state_paths());
+        let mut secrets = default_secret_paths();
+        secrets.extend(extra_secret_deny.iter().map(|p| resolve(p)));
         Self {
             writable: dedup(writable),
-            secret_deny: dedup(default_secret_paths()),
+            read_only: dedup(read_only.iter().map(|p| resolve(p)).collect()),
+            secret_deny: dedup(secrets),
             network,
         }
     }
@@ -296,6 +317,16 @@ impl SandboxPolicy {
         for w in &writable {
             a.push("-v".into());
             a.push(format!("{p}:{p}:rw", p = w.to_string_lossy()));
+        }
+        // Read-only paths → :ro bind mounts (reference repos the agent reads but must
+        // not mutate). Skip any already covered by a writable mount (rw wins).
+        for r in &self.read_only {
+            let r = resolve(r);
+            if writable.iter().any(|w| r == *w || r.starts_with(w)) {
+                continue;
+            }
+            a.push("-v".into());
+            a.push(format!("{p}:{p}:ro", p = r.to_string_lossy()));
         }
         // Mask any secret that sits UNDER a writable mount (else it'd be mounted
         // too) with an empty tmpfs; secrets not under a mount are already absent.
@@ -443,6 +474,7 @@ mod tests {
     fn profile_confines_writes_and_denies_secrets() {
         let policy = SandboxPolicy {
             writable: vec![PathBuf::from("/private/tmp/ws")],
+            read_only: vec![],
             secret_deny: vec![PathBuf::from("/Users/x/.ssh")],
             network: NetPolicy::GatewayOnly,
         };
@@ -466,6 +498,7 @@ mod tests {
     fn network_variants() {
         let base = |n| SandboxPolicy {
             writable: vec![PathBuf::from("/ws")],
+            read_only: vec![],
             secret_deny: vec![],
             network: n,
         }
@@ -533,6 +566,7 @@ mod tests {
     fn docker_args_mount_workspace_and_map_network() {
         let policy = SandboxPolicy {
             writable: vec![PathBuf::from("/private/tmp/ws")],
+            read_only: vec![],
             secret_deny: vec![],
             network: NetPolicy::GatewayOnly,
         };
@@ -558,6 +592,7 @@ mod tests {
     fn docker_args_no_network_and_env_forwarding() {
         let policy = SandboxPolicy {
             writable: vec![PathBuf::from("/ws")],
+            read_only: vec![],
             secret_deny: vec![],
             network: NetPolicy::None,
         };
@@ -576,6 +611,7 @@ mod tests {
         // bind-mounted too, so it must be shadowed with an empty tmpfs.
         let policy = SandboxPolicy {
             writable: vec![PathBuf::from("/home/u")],
+            read_only: vec![],
             secret_deny: vec![
                 PathBuf::from("/home/u/.ssh"), // under the mount → masked
                 PathBuf::from("/elsewhere/.aws"), // not under any mount → absent, no flag
@@ -591,6 +627,7 @@ mod tests {
     fn docker_args_render_resource_limits_only_when_set() {
         let policy = SandboxPolicy {
             writable: vec![PathBuf::from("/ws")],
+            read_only: vec![],
             secret_deny: vec![],
             network: NetPolicy::None,
         };
@@ -612,6 +649,39 @@ mod tests {
     }
 
     #[test]
+    fn docker_args_mount_read_only_paths_ro() {
+        // A read-only reference path → a `:ro` bind; one already covered by a writable
+        // mount is skipped (rw wins).
+        let policy = SandboxPolicy {
+            writable: vec![PathBuf::from("/private/tmp/ws")],
+            read_only: vec![
+                PathBuf::from("/private/tmp/ref"),     // distinct → :ro mount
+                PathBuf::from("/private/tmp/ws/sub"),  // under a writable mount → skipped
+            ],
+            secret_deny: vec![],
+            network: NetPolicy::None,
+        };
+        let args = policy.to_docker_run_args("img", Path::new("/private/tmp/ws"), &[], &DockerLimits::none());
+        assert!(window_has(&args, &["-v", "/private/tmp/ref:/private/tmp/ref:ro"]));
+        assert!(!args.iter().any(|a| a.contains("/private/tmp/ws/sub")));
+    }
+
+    #[test]
+    fn rust_coding_with_carries_read_only_and_extra_secrets() {
+        let pol = SandboxPolicy::rust_coding_with(
+            &[PathBuf::from("/private/tmp/ws")],
+            &[PathBuf::from("/private/tmp/ref")],
+            &[PathBuf::from("/private/tmp/extra-secret")],
+            NetPolicy::GatewayOnly,
+        );
+        assert!(pol.read_only.iter().any(|p| p.ends_with("ref")));
+        assert!(pol.secret_deny.iter().any(|p| p.ends_with("extra-secret")));
+        // The built-in toolchain writables + default secrets are still present.
+        assert!(pol.writable.len() >= 2);
+        assert!(pol.secret_deny.len() > 1);
+    }
+
+    #[test]
     fn net_policy_parse_maps_aliases_and_defaults() {
         assert_eq!(NetPolicy::parse("none"), NetPolicy::None);
         assert_eq!(NetPolicy::parse("OFF"), NetPolicy::None);
@@ -630,6 +700,7 @@ mod tests {
     fn docker_args_strict_egress_adds_cap_and_marker() {
         let policy = SandboxPolicy {
             writable: vec![PathBuf::from("/ws")],
+            read_only: vec![],
             secret_deny: vec![],
             network: NetPolicy::GatewayStrict,
         };
@@ -666,6 +737,7 @@ mod tests {
         // Workspace = ws (rw), with ws/.ssh declared a secret → must be masked.
         let policy = SandboxPolicy {
             writable: vec![ws.clone()],
+            read_only: vec![],
             secret_deny: vec![ws.join(".ssh")],
             network: NetPolicy::None,
         };

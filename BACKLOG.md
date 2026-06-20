@@ -451,8 +451,13 @@ These items turn "portable in principle" into "portable by `cargo build`".
     DONE 2026-06-20** (branch `feature/launch-no-sandbox-flag`): sugar over `ROZUM_SANDBOX=0`
     on `rozum launch` (env-set is the single decision point in `sandbox_workspace()`); hoisted by
     `reorder_launch_args` so it works after the program name, left for the child after `--`; help
-    text + 2 reorder unit tests + CLI probes green. Remaining: (c) `rozum.toml [sandbox]` (multiple
-    paths / network mode / secret-list).
+    text + 2 reorder unit tests + CLI probes green. **(c) `rozum.toml [sandbox]` DONE 2026-06-20**
+    (branch `feature/sandbox-config-table`): a `[sandbox]` table — `workspace` (extra rw, "."/"~/…"),
+    `read_only` (Docker `:ro` mounts), `secret_deny` (extra denies), `network`, `backend` — parsed into
+    `RuntimeConfig.sandbox` (`SandboxConfig`) and merged in `sandboxed_command` via `rust_coding_with`.
+    Env overrides config (`ROZUM_SANDBOX_NETWORK`/`_BACKEND`/`=0` win). Resource limits stay env-only.
+    Tests: config parse + `read_only`-→-`:ro` + `rust_coding_with`; live smoke (config→Docker+ro+secret;
+    env beats config). **The model-sandbox-seatbelt item (a/b/c) is now fully complete.**
   - [ ] model-sandbox-linux-native - **P2 — a non-container Linux jail (Landlock / bubblewrap).**
     The Docker backend already jails on any OS, but it's heavy (a whole container + image). On Linux a
     *native* jail is lighter and the natural default there, mirroring what Seatbelt is on macOS. Same

@@ -150,21 +150,26 @@ to the host workspace — the Docker analog of the Seatbelt P1 "cargo build succ
 
 ## Config surface
 
-`rozum launch --sandbox[=<profile>] <agent>` / `rozum.toml`:
+`rozum launch <agent>` reads a `[sandbox]` table from `rozum.toml` (**implemented
+2026-06-20**). The toolchain caches + agent-state dirs are always added (the
+`rust-coding` profile); the config adds the path lists env can't express:
 
 ```toml
 [sandbox]
-profile     = "rust-coding"        # preset path set (default when --sandbox given bare)
-workspace   = [".", "/tmp/scratch"] # rw paths — MAY BE SEVERAL
-read_only   = ["../shared-lib"]     # extra ro paths
-allow_toolchain = true              # auto-add ~/.cargo, ~/.rustup, target/, $TMPDIR (rw)
-network     = "gateway-only"        # "none" | "gateway-only" | "gateway-strict" | "full" — env: ROZUM_SANDBOX_NETWORK
-backend     = "seatbelt"            # "seatbelt" (macOS) | "docker" — env: ROZUM_SANDBOX_BACKEND
-# Docker-only resource limits (env: ROZUM_SANDBOX_DOCKER_{MEMORY,CPUS,PIDS}):
-memory      = ""                    # e.g. "8g" — opt-in --memory (OOM-kills the container)
-cpus        = ""                    # e.g. "4"  — opt-in --cpus
-pids_limit  = 2048                  # --pids-limit fork-bomb guard (-1 = unlimited)
+workspace   = [".", "/tmp/scratch"]  # EXTRA rw paths beyond the launch cwd ("." = cwd, "~/…" = $HOME)
+read_only   = ["../shared-lib"]      # ro reference paths — Docker :ro mounts (Seatbelt: already ro)
+secret_deny = ["~/.my-secrets"]      # EXTRA secret dirs to deny (appended to the built-in denylist)
+network     = "gateway-only"         # "none" | "gateway-only" | "gateway-strict" | "full"
+backend     = "seatbelt"             # "seatbelt" (macOS) | "docker"
 ```
+
+- **Precedence:** env wins over config. `ROZUM_SANDBOX_NETWORK` overrides `network`,
+  `ROZUM_SANDBOX_BACKEND` overrides `backend`; `ROZUM_SANDBOX=0` always disables the jail.
+  The config is the persistent default; env is the per-launch override.
+- The config is loaded in the (unsandboxed) launcher per launch and merged into the
+  `SandboxPolicy` (`rust_coding_with`). A missing/malformed `rozum.toml` → env-only behavior.
+- **Resource limits stay env-only** for now (`ROZUM_SANDBOX_DOCKER_{MEMORY,CPUS,PIDS}`); a
+  config `profile`/`allow_toolchain` is not needed yet (one profile, toolchain always on).
 
 - `--sandbox` with no value → the `rust-coding` profile rooted at the launch cwd.
 - **ON by default on macOS** (2026-06-19): every `rozum launch` jails the agent to
