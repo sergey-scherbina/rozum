@@ -87,6 +87,11 @@ network     = "gateway-only"        # "gateway-only" | "none" | "full"
   disables it; `=1` forces the cwd; `=<dir>` jails to <dir>. Off-macOS there is no
   Seatbelt, so it stays OFF until the Linux/container backend (P2/P3) — `rozum launch`
   is never broken by an unavailable jail.
+- `rozum launch --no-sandbox` (2026-06-20): CLI sugar for `ROZUM_SANDBOX=0` — the
+  flag sets the env so `sandbox_workspace()` stays the single decision point. Works
+  after the program name too (`reorder_launch_args` hoists it like the other launch
+  flags), but a `--no-sandbox` placed after a `--` separator is passed through to the
+  child program unchanged.
 - Because the default workspace is the **cwd**, secret dirs (`~/.ssh`, cloud creds,
   keychains) are denied for **both read and write** even when the cwd encompasses
   `$HOME` — the secret denies are emitted last and last-match-wins.

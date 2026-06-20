@@ -447,8 +447,12 @@ These items turn "portable in principle" into "portable by `cargo build`".
     `=1`/`=<dir>` override; off-macOS stays OFF (no Seatbelt) so launch isn't broken. Secrets
     now denied for **read AND write** (last-match-wins), safe even when cwd encompasses `$HOME`.
     **Live-validated end-to-end:** trial matrix cell claude × gpt-oss-20b × build ran jailed and
-    PASSED (`olleh`, 46s); default-on/opt-out probes confirmed. Remaining: (b) `--sandbox` clap
-    flag (now would be `--no-sandbox`, sugar over `ROZUM_SANDBOX=0`); (c) `rozum.toml [sandbox]`.
+    PASSED (`olleh`, 46s); default-on/opt-out probes confirmed. **(b) `--no-sandbox` clap flag
+    DONE 2026-06-20** (branch `feature/launch-no-sandbox-flag`): sugar over `ROZUM_SANDBOX=0`
+    on `rozum launch` (env-set is the single decision point in `sandbox_workspace()`); hoisted by
+    `reorder_launch_args` so it works after the program name, left for the child after `--`; help
+    text + 2 reorder unit tests + CLI probes green. Remaining: (c) `rozum.toml [sandbox]` (multiple
+    paths / network mode / secret-list).
   - [ ] model-sandbox-harden-linux - **P2.** Pin toolchain path discovery (cargo/rustup home,
     `$TMPDIR`, git) + add the Linux backend (Landlock / bubblewrap bind-mounts).
   - [ ] model-sandbox-container - **P3.** Container backend (Docker / Apple `container` / Lima)

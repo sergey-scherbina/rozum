@@ -1,5 +1,17 @@
 # Changelog
 
+## launch — `--no-sandbox` flag (opt out of the agent jail per-launch)
+Completed: 2026-06-20
+
+The agent sandbox is ON by default on macOS; the only way to opt out was the `ROZUM_SANDBOX=0`
+env var. Added `rozum launch --no-sandbox` as CLI sugar for it: the flag sets `ROZUM_SANDBOX=0`
+so `sandbox_workspace()` stays the single place the jail decision lives (no second code path to
+drift). It's hoisted by `reorder_launch_args` like the other launch flags, so it works after the
+program name too (`rozum launch claude --no-sandbox`); a `--no-sandbox` placed after a `--`
+separator is still passed through to the child program unchanged. Help text + 2 reorder unit tests
++ CLI probes (default jailed / `--no-sandbox` unjailed / after-program hoist / after-`--` passthrough)
+green. BACKLOG `model-sandbox-seatbelt` item (b) closed; only `rozum.toml [sandbox]` config (c) left.
+
 ## gateway/harmony — gpt-oss agentic delivery: recover garbled tool calls + repair broken reads
 Completed: 2026-06-19
 

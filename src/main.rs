@@ -239,6 +239,14 @@ enum Command {
         #[arg(long)]
         lean: bool,
 
+        /// Disable the agent sandbox for this launch (sugar for `ROZUM_SANDBOX=0`).
+        /// By default a launched agent runs jailed under Seatbelt on macOS — writes
+        /// confined to the workspace + toolchain caches, secrets denied, loopback-only
+        /// network, no per-action prompts (docs/specs/model-sandbox.md). Pass this to
+        /// run it unconfined. No-op off macOS (the jail is macOS-only there anyway).
+        #[arg(long)]
+        no_sandbox: bool,
+
         /// Program to launch and its arguments
         #[arg(trailing_var_arg = true, required = true)]
         program: Vec<String>,
@@ -667,11 +675,18 @@ async fn main() {
             no_piggyback,
             backend_url,
             lean,
+            no_sandbox,
             mut program,
         }) => {
             apply_cascade_strategy(strategy.as_deref());
             apply_offline(offline);
             apply_lean_flags(&mut program, lean);
+            // `--no-sandbox` is sugar for `ROZUM_SANDBOX=0` — keep a single source of
+            // truth so `sandbox_workspace()` (which reads the env) stays the only
+            // place the jail decision lives. The flag wins; `=0` it explicitly.
+            if no_sandbox {
+                unsafe { std::env::set_var("ROZUM_SANDBOX", "0") };
+            }
             let model = join_models(model);
             // Precedence: --channel-mcp-name > ROZUM_CHANNEL_MCP_NAME > "rozum".
             let server_name = channel_mcp_name
@@ -916,6 +931,7 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
         "--no-channel-wakeup",
         "--no-piggyback",
         "--lean",
+        "--no-sandbox",
     ];
 
     // Collect args after "launch", pull known flag+value pairs to the front.
@@ -1045,6 +1061,38 @@ mod backend_engine_tests {
                 "http://localhost:11434/v1",
                 "claude"
             ]
+        );
+    }
+
+    #[test]
+    fn no_sandbox_bool_flag_hoisted_from_after_program() {
+        // `--no-sandbox` placed after the program is a value-less flag, pulled
+        // ahead of the program (without consuming the next arg) so clap parses it.
+        let got = reorder_launch_args(
+            ["rozum", "launch", "claude", "--no-sandbox", "--lean"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        assert_eq!(
+            got,
+            vec!["rozum", "launch", "--no-sandbox", "--lean", "claude"]
+        );
+    }
+
+    #[test]
+    fn flags_after_double_dash_stay_with_the_child() {
+        // The `--` separator stops reordering: a child-program `--no-sandbox`
+        // is left in place, not hoisted into a launch flag.
+        let got = reorder_launch_args(
+            ["rozum", "launch", "claude", "--", "--no-sandbox"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        assert_eq!(
+            got,
+            vec!["rozum", "launch", "claude", "--", "--no-sandbox"]
         );
     }
 
