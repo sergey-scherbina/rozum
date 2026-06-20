@@ -886,9 +886,16 @@ async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: roz
     let draft_spec = std::env::var("ROZUM_DRAFT_MODEL")
         .ok()
         .filter(|s| !s.trim().is_empty());
-    let backend = match &draft_spec {
-        Some(draft) => build_spec_decode_backend(&cfg, &model_spec, draft.trim(), n_ctx).await,
-        None => build_from_config(&cfg, &model_spec, n_ctx).await,
+    // `--model cascade[:name]` / a comma-separated list → a CascadeBackend, resolved
+    // the SAME way the reload builder does (so the request-surface works from a cold
+    // start, not only on lazy reload). A cascade spec takes precedence over spec-decode
+    // (a draft pairs with one model, not a cascade of them).
+    let backend = match try_cascade_backend(&cfg, &model_spec, n_ctx).await {
+        Some(result) => result,
+        None => match &draft_spec {
+            Some(draft) => build_spec_decode_backend(&cfg, &model_spec, draft.trim(), n_ctx).await,
+            None => build_from_config(&cfg, &model_spec, n_ctx).await,
+        },
     };
     let backend = match backend {
         Some(b) => b,
@@ -2971,6 +2978,52 @@ mod opencode_tests {
 }
 
 #[cfg(test)]
+mod cascade_startup_tests {
+    use super::try_cascade_backend;
+
+    // A cascade of two OpenAI-compatible remote tiers: each builds by just constructing
+    // the HTTP client (no API key, no network, no model load), so this exercises the
+    // gateway STARTUP routing (`try_cascade_backend`) end-to-end without heavy I/O.
+    const TOML: &str = "\
+        [cascade.test]\n\
+        [[cascade.test.tiers]]\n\
+        model = \"gpt-4o-mini\"\n\
+        location = \"remote\"\n\
+        api = \"openai\"\n\
+        [[cascade.test.tiers]]\n\
+        model = \"gpt-4o\"\n\
+        location = \"remote\"\n\
+        api = \"openai\"\n";
+
+    #[tokio::test]
+    async fn cascade_specs_route_to_a_cascade_at_startup() {
+        let cfg = std::sync::Arc::new(rozum::RuntimeConfig::from_toml_str(TOML).unwrap());
+
+        // `cascade:test` → builds the named cascade from rozum.toml (Some(Some(_))).
+        assert!(
+            matches!(try_cascade_backend(&cfg, "cascade:test", 4096).await, Some(Some(_))),
+            "`cascade:test` must build the named cascade at startup"
+        );
+        // bare `cascade` → the [cascade.default] table; absent here → a cascade spec that
+        // fails to build → Some(None) (the caller must NOT fall back to a literal model).
+        assert!(
+            matches!(try_cascade_backend(&cfg, "cascade", 4096).await, Some(None)),
+            "`cascade` with no default table is still a cascade spec (Some(None))"
+        );
+        // a comma list of two remote names → an auto-ordered cascade (Some(Some(_))).
+        assert!(
+            matches!(try_cascade_backend(&cfg, "gpt-4o-mini,gpt-4o", 4096).await, Some(Some(_))),
+            "a comma-separated model list must build an auto-cascade"
+        );
+        // a plain single model → NOT a cascade spec → None (caller does its normal build).
+        assert!(
+            try_cascade_backend(&cfg, "qwen3-4b", 4096).await.is_none(),
+            "a plain single model must not route to the cascade path"
+        );
+    }
+}
+
+#[cfg(test)]
 mod nctx_tests {
     use super::{N_CTX_FALLBACK, auto_n_ctx, model_max_ctx};
 
@@ -3648,16 +3701,11 @@ fn gateway_backend_builder(
     std::sync::Arc::new(move |model: String, n_ctx: u32, force: Option<String>| {
         let cfg = std::sync::Arc::clone(&cfg);
         Box::pin(async move {
-            // `model: "cascade[:name]"` resolves to a CascadeBackend (the request-surface wiring),
-            // regardless of any forced engine — the model string is the explicit intent.
-            if let Some(name) = rozum::cascade::parse_cascade_model(&model) {
-                return build_cascade_backend(&cfg, &name, n_ctx).await;
-            }
-            // The simple path: a comma-separated model list → an auto-ordered cascade.
-            if model.contains(',') {
-                if let Some(be) = build_cascade_from_list(&cfg, &model, n_ctx).await {
-                    return Some(be);
-                }
+            // `model: "cascade[:name]"` / a comma-separated list → a CascadeBackend (the
+            // request-surface wiring), regardless of any forced engine — the model string
+            // is the explicit intent. Shared with the startup build via `try_cascade_backend`.
+            if let Some(result) = try_cascade_backend(&cfg, &model, n_ctx).await {
+                return result;
             }
             match force.as_deref() {
                 Some(f) => build_gateway_backend_forced(&model, n_ctx, f).await,
@@ -3890,6 +3938,32 @@ fn is_offline() -> bool {
         std::env::var("ROZUM_OFFLINE").ok().as_deref(),
         Some("1" | "true" | "on")
     )
+}
+
+/// The cascade request-surface, shared by the gateway's **startup** build and the
+/// reload `BackendBuilder` so both honor `--model cascade[:name]` / a comma-separated
+/// model list. Returns:
+/// - `None` → `model` is NOT a cascade spec → the caller does its normal single-model build;
+/// - `Some(result)` → it IS a cascade spec → use `result` directly (`Some` backend, or
+///   `None` if the cascade failed to build — do NOT fall back to a literal model named
+///   "cascade…").
+///
+/// A comma list that fails to build returns `None` (not `Some(None)`) so the caller still
+/// falls back to a normal build — preserving the prior reload-builder behavior.
+async fn try_cascade_backend(
+    cfg: &std::sync::Arc<rozum::RuntimeConfig>,
+    model: &str,
+    n_ctx: u32,
+) -> Option<Option<std::sync::Arc<dyn rozum::ChatBackend>>> {
+    if let Some(name) = rozum::cascade::parse_cascade_model(model) {
+        return Some(build_cascade_backend(cfg, &name, n_ctx).await);
+    }
+    if model.contains(',') {
+        if let Some(be) = build_cascade_from_list(cfg, model, n_ctx).await {
+            return Some(Some(be));
+        }
+    }
+    None
 }
 
 async fn build_cascade_backend(

@@ -1,5 +1,23 @@
 # Changelog
 
+## cascade — `rozum gateway --model cascade[:name]` works from a cold start
+Completed: 2026-06-20
+
+The cascade request-surface (`model: "cascade"` / `"cascade:<name>"` / a comma-separated model list
+→ a `CascadeBackend`, with named configs from `[cascade.<name>]` in `rozum.toml`) was wired into the
+gateway's reload `BackendBuilder` but NOT its initial **startup** build — so `rozum gateway --model
+cascade:fast` launched fresh tried to load a literal model named "cascade:fast" and failed with "no
+backend"; it only worked after a lazy reload/switch. Fixed by extracting the cascade detection into a
+shared `try_cascade_backend` chokepoint that both the startup build (`run_gateway`) and the reload
+builder now call, with identical semantics (a `cascade[:name]` spec never falls back to a literal
+model; a comma list that fails to build does fall back). A cascade spec takes precedence over
+speculative decoding (a draft pairs with one model, not a cascade). Verified: a startup-routing
+integration test (cascade:name / bare cascade / comma-list / plain-model all route correctly, using
+no-key OpenAI remote tiers that build without I/O) and a live smoke — `rozum gateway --model
+cascade:test` with a `[cascade.test]` rozum.toml now boots serving the cascade (startup banner, not
+"no backend"). Completes the cascade-router request-surface (the last deferred piece of the 9-phase
+cascade work).
+
 ## sandbox — no-approval autonomy for jailed headless agents (the "no-noise" principle)
 Completed: 2026-06-20
 

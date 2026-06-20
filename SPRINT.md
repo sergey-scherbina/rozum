@@ -566,8 +566,13 @@ never hard-fail. Parallel scheduler (difficulty-routed non-blocking lanes; subsu
   inconclusive (accept). `AcceptanceCheck` trait + `Verdict` + `pipeline_verdict` (first decisive
   wins; all-inconclusive→Accept). 7 model-free e2e tests (escalate-on-structural-fail, accept-cheap-
   skip-strong, passthrough, error-escalate, budget→best-so-far, free-form-cheapest, all-error→error).
-  185/0. **Deferred to a follow-up:** the gateway request-surface (`model:"cascade[:name]"` + named
-  configs from a config file) — the core takes a programmatic `CascadeConfig`; wiring is config-heavy.
+  185/0. **Gateway request-surface DONE** (branch `feature/cascade-startup-wiring`): `model:
+  "cascade[:name]"` + comma-lists resolve to a `CascadeBackend` from `[cascade.<name>]` in
+  `rozum.toml` (or `ROZUM_CASCADE[_NAME]` JSON). Built on lazy reload all along; the last gap —
+  the gateway's **cold-start** build bypassed the detection — is fixed: `try_cascade_backend` is
+  the shared chokepoint for both the startup build and the reload builder, so `rozum gateway
+  --model cascade:fast` boots serving the cascade (smoke-verified: startup banner, not "no
+  backend") + a startup-routing integration test.
 - [x] cascade-p2-health - **Phase 2. DONE 2026-06-15** (`src/cascade/health.rs`). `HealthRegistry`:
   per-model `HealthState {Healthy, Degraded(half-open), Unavailable}` + `FailReason {RateLimited,
   QuotaExhausted, Down, Network, OutOfMemory, Unknown}`; `classify(err)` maps backend error strings;

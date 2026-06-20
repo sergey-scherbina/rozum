@@ -308,7 +308,10 @@ Each phase ships value and is testable; early phases are deterministic/model-fre
 **Status (2026-06-15): ALL 9 phases shipped + the gateway request-surface wiring + the live P9
 feed.** `src/cascade/` (54 tests) + `run_agent_escalating` in `src/agent.rs` (P8, 3 tests) +
 `AdaptiveConcurrency` in `src/concurrency.rs` (P9, 6 + 4 tests) + `model: "cascade[:name]"` →
-`CascadeBackend` (`spec.rs` + the `main.rs` hook, 6 tests). The P9 controller drives real admission
+`CascadeBackend` (`spec.rs` + the `main.rs` hook, 6 tests). **2026-06-20:** the request-surface now
+also works from a **cold start** — the gateway's startup build was bypassing the cascade detection
+(only the reload builder had it); a shared `try_cascade_backend` chokepoint fixed it, so `rozum
+gateway --model cascade[:name]` boots serving the cascade. The P9 controller drives real admission
 ceilings (`set_ceiling`), reconciled with the circuit breaker (breaker = fast inner loop within the
 controller's ceiling), opt-in via `ROZUM_ADAPTIVE_CONCURRENCY=1`, and is fed by the **full signal
 set**: overload, throughput (success), latency (a per-token baseline → ratio), answer quality
