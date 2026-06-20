@@ -16,7 +16,7 @@
 //! - **Network** is deny-by-default; `GatewayOnly` adds loopback so the child can
 //!   still reach the local model gateway, nothing off-box.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Network policy for the sandboxed child.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +27,56 @@ pub enum NetPolicy {
     GatewayOnly,
     /// Unrestricted (escape hatch; not for untrusted/experimental models).
     Full,
+}
+
+/// Which OS mechanism enforces the `(path, mode)` policy. The policy is written
+/// once (`rust_coding`); each backend renders it to its own jail. Selected with
+/// `ROZUM_SANDBOX_BACKEND` (`seatbelt` | `docker`); default `Seatbelt`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SandboxBackend {
+    /// macOS `sandbox-exec` + generated SBPL. The v1 default (macOS-only).
+    #[default]
+    Seatbelt,
+    /// Run the agent in a `docker` container — writable paths become volume
+    /// mounts, the rest of the host FS is simply absent (stronger isolation than
+    /// a deny rule), the gateway is reached over the host loopback. Cross-platform
+    /// (the only jail available off macOS), heavier. model-sandbox P3.
+    Docker,
+}
+
+impl SandboxBackend {
+    /// Pick the backend from `ROZUM_SANDBOX_BACKEND` (case-insensitive). Unknown /
+    /// unset → `Seatbelt`. `container` is accepted as an alias for `docker`.
+    pub fn from_env() -> Self {
+        std::env::var("ROZUM_SANDBOX_BACKEND")
+            .ok()
+            .map(|v| Self::parse(&v))
+            .unwrap_or_default()
+    }
+
+    /// Pure parse of a backend name (the testable core of `from_env`).
+    fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "docker" | "container" => SandboxBackend::Docker,
+            _ => SandboxBackend::Seatbelt,
+        }
+    }
+}
+
+/// Hostname a container uses to reach a service on the host (the rozum gateway /
+/// MLX on the host GPU). Docker Desktop (macOS/Windows) and Docker Engine with
+/// `--add-host …:host-gateway` (Linux) both resolve this to the host. Inside a
+/// container the host's `127.0.0.1` is the container itself, so the gateway URL
+/// must use this name instead — see `to_docker_run_args` (`--add-host`).
+pub const CONTAINER_GATEWAY_HOST: &str = "host.docker.internal";
+
+/// The container image a Docker-backend launch runs the agent in. Operator-supplied
+/// (it must contain the agent CLI — `claude`/`codex`/`opencode` — and a Rust
+/// toolchain if the task builds): `ROZUM_SANDBOX_DOCKER_IMAGE`, default
+/// `rozum-agent:latest`.
+pub fn default_docker_image() -> String {
+    std::env::var("ROZUM_SANDBOX_DOCKER_IMAGE")
+        .unwrap_or_else(|_| "rozum-agent:latest".to_owned())
 }
 
 /// A structural sandbox policy: confined writes + a secret-read denylist + network.
@@ -104,6 +154,71 @@ impl SandboxPolicy {
             NetPolicy::Full => p.push_str("(allow network*)\n"),
         }
         p
+    }
+
+    /// Render the policy to the `docker run` argument vector **up to and including
+    /// the image** — the caller appends the program + its args (they become the
+    /// container's command). Mapping of the `(path, mode)` set onto Docker:
+    ///
+    /// - **writable** → `-v <path>:<path>:rw` (host path == container path so the
+    ///   workspace/cwd in args line up); the toolchain caches mount too, so builds
+    ///   reuse `~/.cargo`/`~/.rustup` and work offline.
+    /// - **everything else** → simply NOT mounted ⇒ absent in the container
+    ///   (stronger than a Seatbelt deny: there is no path to reach).
+    /// - **secrets under a writable mount** (e.g. `~/.ssh` when the workspace is
+    ///   `$HOME`) → masked with `--tmpfs <path>`: an empty in-container fs shadows
+    ///   the real dir so the mounted secret is unreadable. Secrets not under any
+    ///   mount need no flag (already absent).
+    /// - **network**: `None` → `--network none`; `GatewayOnly`/`Full` → the default
+    ///   bridge plus `--add-host host.docker.internal:host-gateway` so the agent can
+    ///   reach the host gateway. NOTE: the bridge still allows general egress, so
+    ///   Docker `GatewayOnly` is weaker than Seatbelt's loopback-only — use `None`
+    ///   for strict no-egress, or a firewalled custom network (future hardening).
+    /// - `forward_env`: env var **names** turned into `-e <NAME>` so `docker`
+    ///   forwards their values from this process's environment into the container
+    ///   (the caller sets them on the `docker` command). Order is preserved.
+    pub fn to_docker_run_args(
+        &self,
+        image: &str,
+        workdir: &Path,
+        forward_env: &[&str],
+    ) -> Vec<String> {
+        let mut a: Vec<String> = vec![
+            "run".into(),
+            "--rm".into(),
+            "-i".into(),
+            "--init".into(), // reap the agent's child processes
+        ];
+        // Writable paths → rw bind mounts (host path == container path).
+        let writable: Vec<PathBuf> = self.writable.iter().map(|p| resolve(p)).collect();
+        for w in &writable {
+            a.push("-v".into());
+            a.push(format!("{p}:{p}:rw", p = w.to_string_lossy()));
+        }
+        // Mask any secret that sits UNDER a writable mount (else it'd be mounted
+        // too) with an empty tmpfs; secrets not under a mount are already absent.
+        for s in &self.secret_deny {
+            let s = resolve(s);
+            if writable.iter().any(|w| s != *w && s.starts_with(w)) {
+                a.push("--tmpfs".into());
+                a.push(s.to_string_lossy().into_owned());
+            }
+        }
+        a.push("-w".into());
+        a.push(workdir.to_string_lossy().into_owned());
+        match self.network {
+            NetPolicy::None => a.push("--network=none".into()),
+            NetPolicy::GatewayOnly | NetPolicy::Full => {
+                a.push("--add-host".into());
+                a.push(format!("{CONTAINER_GATEWAY_HOST}:host-gateway"));
+            }
+        }
+        for key in forward_env {
+            a.push("-e".into());
+            a.push((*key).to_owned());
+        }
+        a.push(image.to_owned());
+        a
     }
 }
 
@@ -285,6 +400,148 @@ mod tests {
                 "agent state dir ~/.codex must be writable"
             );
         }
+    }
+
+    #[test]
+    fn backend_parse_selects_docker_only_for_known_aliases() {
+        assert_eq!(SandboxBackend::parse("docker"), SandboxBackend::Docker);
+        assert_eq!(SandboxBackend::parse("Docker"), SandboxBackend::Docker);
+        assert_eq!(SandboxBackend::parse(" CONTAINER "), SandboxBackend::Docker);
+        // Anything else (incl. "seatbelt", typos, empty) → the default backend.
+        for s in ["seatbelt", "", "podman", "vm", "nonsense"] {
+            assert_eq!(SandboxBackend::parse(s), SandboxBackend::Seatbelt, "{s:?}");
+        }
+        assert_eq!(SandboxBackend::default(), SandboxBackend::Seatbelt);
+    }
+
+    #[test]
+    fn docker_args_mount_workspace_and_map_network() {
+        let policy = SandboxPolicy {
+            writable: vec![PathBuf::from("/private/tmp/ws")],
+            secret_deny: vec![],
+            network: NetPolicy::GatewayOnly,
+        };
+        let args = policy.to_docker_run_args("img:1", Path::new("/private/tmp/ws"), &[]);
+        // Starts a one-shot interactive run.
+        assert_eq!(&args[0..4], &["run", "--rm", "-i", "--init"]);
+        // Workspace is a rw bind, host path == container path.
+        assert!(window_has(&args, &["-v", "/private/tmp/ws:/private/tmp/ws:rw"]));
+        // Working dir set to the workspace.
+        assert!(window_has(&args, &["-w", "/private/tmp/ws"]));
+        // GatewayOnly → host-gateway alias so the container reaches the host gateway.
+        assert!(window_has(
+            &args,
+            &["--add-host", "host.docker.internal:host-gateway"]
+        ));
+        // Image is last (program + args get appended after it by the caller).
+        assert_eq!(args.last().unwrap(), "img:1");
+        assert!(!args.iter().any(|a| a == "--network=none"));
+    }
+
+    #[test]
+    fn docker_args_no_network_and_env_forwarding() {
+        let policy = SandboxPolicy {
+            writable: vec![PathBuf::from("/ws")],
+            secret_deny: vec![],
+            network: NetPolicy::None,
+        };
+        let args = policy.to_docker_run_args("img", Path::new("/ws"), &["FOO", "BAR"]);
+        assert!(args.iter().any(|a| a == "--network=none"));
+        assert!(!args.iter().any(|a| a == "--add-host"));
+        // Env names become `-e NAME` forwards (value comes from the docker process).
+        assert!(window_has(&args, &["-e", "FOO"]));
+        assert!(window_has(&args, &["-e", "BAR"]));
+    }
+
+    #[test]
+    fn docker_args_mask_secret_under_a_writable_mount() {
+        // Workspace == $HOME-ish root that ENCOMPASSES a secret: the secret would be
+        // bind-mounted too, so it must be shadowed with an empty tmpfs.
+        let policy = SandboxPolicy {
+            writable: vec![PathBuf::from("/home/u")],
+            secret_deny: vec![
+                PathBuf::from("/home/u/.ssh"), // under the mount → masked
+                PathBuf::from("/elsewhere/.aws"), // not under any mount → absent, no flag
+            ],
+            network: NetPolicy::None,
+        };
+        let args = policy.to_docker_run_args("img", Path::new("/home/u"), &[]);
+        assert!(window_has(&args, &["--tmpfs", "/home/u/.ssh"]));
+        assert!(!args.iter().any(|a| a == "/elsewhere/.aws"));
+    }
+
+    /// True if `needle` appears as a contiguous run inside `hay` (a flat argv).
+    fn window_has(hay: &[String], needle: &[&str]) -> bool {
+        hay.windows(needle.len())
+            .any(|w| w.iter().zip(needle).all(|(a, b)| a == b))
+    }
+
+    // Real Docker e2e (ignored; needs a running daemon — pulls `busybox`). Proves
+    // the rozum-generated `docker run` argv actually (1) round-trips a write in the
+    // mounted workspace to the host, (2) leaves a non-mounted host path untouched
+    // (confinement), and (3) masks a secret that sits under the workspace mount.
+    #[test]
+    #[ignore = "runs docker; needs the daemon + pulls busybox"]
+    fn docker_run_confines_writes_and_masks_secret() {
+        use std::process::Command;
+        const IMG: &str = "busybox:latest";
+        let id = std::process::id();
+        let ws = resolve(&std::env::temp_dir()).join(format!("rozum-docker-e2e-{id}"));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join(".ssh")).unwrap();
+        std::fs::write(ws.join(".ssh/id_rsa"), b"TOP-SECRET-KEY").unwrap();
+
+        // Workspace = ws (rw), with ws/.ssh declared a secret → must be masked.
+        let policy = SandboxPolicy {
+            writable: vec![ws.clone()],
+            secret_deny: vec![ws.join(".ssh")],
+            network: NetPolicy::None,
+        };
+        let wsd = ws.to_string_lossy().into_owned();
+        // 1+3: write inside the workspace, and try to read the masked secret.
+        let run = Command::new("docker")
+            .args(policy.to_docker_run_args(IMG, &ws, &[]))
+            .args([
+                "sh",
+                "-c",
+                &format!("echo built > {wsd}/out.txt; cat {wsd}/.ssh/id_rsa 2>/dev/null || true"),
+            ])
+            .output()
+            .expect("spawn docker run");
+        assert!(
+            run.status.success(),
+            "docker run failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        // The in-workspace write reached the host.
+        assert_eq!(
+            std::fs::read_to_string(ws.join("out.txt")).unwrap().trim(),
+            "built"
+        );
+        // The masked secret read back EMPTY inside the container (tmpfs shadow),
+        // even though it's still on the host disk.
+        let seen = String::from_utf8_lossy(&run.stdout);
+        assert!(
+            !seen.contains("TOP-SECRET-KEY"),
+            "secret leaked into the container: {seen:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join(".ssh/id_rsa")).unwrap(),
+            "TOP-SECRET-KEY",
+            "host secret must be untouched"
+        );
+
+        // 2: a write to a host path OUTSIDE any mount must not reach the host.
+        let escape = resolve(&std::env::temp_dir()).join(format!("rozum-docker-escape-{id}.txt"));
+        let _ = std::fs::remove_file(&escape);
+        let _ = Command::new("docker")
+            .args(policy.to_docker_run_args(IMG, &ws, &[]))
+            .args(["sh", "-c", &format!("echo escaped > {}", escape.display())])
+            .output();
+        let leaked = escape.exists();
+        let _ = std::fs::remove_file(&escape);
+        let _ = std::fs::remove_dir_all(&ws);
+        assert!(!leaked, "SANDBOX ESCAPE: wrote to a non-mounted host path");
     }
 
     // Integration (macOS only; runs sandbox-exec): the GENERATED profile must

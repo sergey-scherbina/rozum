@@ -455,9 +455,20 @@ These items turn "portable in principle" into "portable by `cargo build`".
     paths / network mode / secret-list).
   - [ ] model-sandbox-harden-linux - **P2.** Pin toolchain path discovery (cargo/rustup home,
     `$TMPDIR`, git) + add the Linux backend (Landlock / bubblewrap bind-mounts).
-  - [ ] model-sandbox-container - **P3.** Container backend (Docker / Apple `container` / Lima)
-    for max isolation + portability + resource limits (the out-of-scope-for-v1 DoS/kernel threats);
-    gateway reached via host loopback. Then drop the approval-reject path (reliability synergy).
+  - [~] model-sandbox-container - **P3. Docker backend DONE 2026-06-20** (branch
+    `feature/sandbox-docker-backend`). `ROZUM_SANDBOX_BACKEND=docker` (alias `container`) renders the
+    same `rust-coding` `(path,mode)` set to a `docker run`: writable→`-v :rw` binds (host path==
+    container path), the rest of the host FS **absent** (stronger than deny), secrets under a mount
+    masked with `--tmpfs`, gateway via `host.docker.internal` (single choke point — `exec_agent`'s
+    base URL), env via an allowlist (`SANDBOX_FORWARD_ENV`, no host-env leak). Works on **any OS**
+    with a docker daemon (off-macOS the jail now turns on for docker). Image operator-supplied
+    (`ROZUM_SANDBOX_DOCKER_IMAGE`, default `rozum-agent:latest`; must have the agent CLI on PATH).
+    **Validated on M4 (Docker 29.6):** 4 unit tests on the argv + a real `docker run busybox` e2e
+    (in-workspace write round-trips / out-of-mount write denied / secret tmpfs-masked) +
+    `host.docker.internal` reachability probe + full `rozum launch --no-model` container run (stdout
+    surfaced, env allowlist forwarded `CLAUDE_CODE_*`, non-listed host var stayed empty). **Remaining:**
+    firewalled custom network for strict `gateway-only` egress; `opencode` config-file mount; the
+    `rozum-agent` image; resource limits (DoS/kernel threats); then drop the approval-reject path.
 
 - [ ] windows-portability - **Make rozum a first-class Windows host (durable core + CI).**
   rozum-as-gateway/launcher already works on Windows today (HTTP backends are pure

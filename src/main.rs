@@ -2422,12 +2422,41 @@ fn spawn_detached_gateway(
     cmd.spawn()
 }
 
+/// The launch-env var **names** forwarded into a Docker-backend jail (`docker run
+/// -e NAME` forwards each value from this process's env, which `exec_agent` sets).
+/// Superset of every key `exec_agent` + `apply_rozum_agent_env` may set; a name
+/// that isn't set is a harmless no-op. The Seatbelt backend ignores this (the child
+/// shares this process's env directly).
+const SANDBOX_FORWARD_ENV: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "ROZUM_GATEWAY_URL",
+    "ROZUM_PIGGYBACK",
+    "OPENCODE_CONFIG",
+    "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS",
+    "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS",
+    "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "DISABLE_NON_ESSENTIAL_MODEL_CALLS",
+];
+
 /// The workspace dir to jail a launched agent in, or `None` for no jail. **Default
-/// ON** (the launch cwd) on macOS; `ROZUM_SANDBOX=0`/empty disables it, `=1` forces
-/// the cwd, `=<dir>` jails to <dir>. Off-macOS → `None` (Seatbelt is macOS-only; the
-/// Linux/container backend is model-sandbox P2/P3, so we don't break `launch` there).
+/// ON** (the launch cwd); `ROZUM_SANDBOX=0`/empty disables it, `=1` forces the cwd,
+/// `=<dir>` jails to <dir>. The Seatbelt backend is macOS-only, so off macOS the jail
+/// stays OFF *unless* the Docker backend is selected (`ROZUM_SANDBOX_BACKEND=docker`),
+/// which works on any OS with a docker daemon — so `launch` is never broken by an
+/// unavailable jail.
 fn sandbox_workspace() -> Option<std::path::PathBuf> {
-    if !cfg!(target_os = "macos") {
+    let backend = rozum::sandbox::SandboxBackend::from_env();
+    if backend == rozum::sandbox::SandboxBackend::Seatbelt && !cfg!(target_os = "macos") {
         return None;
     }
     let cwd = || std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -2439,35 +2468,71 @@ fn sandbox_workspace() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Build the base `Command` for an agent child, **jailed by default on macOS**.
-/// The agent runs under `sandbox-exec` with a generated Seatbelt profile — writes
-/// confined to the workspace (its cwd) + toolchain caches, secrets neither readable
-/// nor writable, loopback-only network, and NO per-action prompts
-/// (docs/specs/model-sandbox.md). `ROZUM_SANDBOX=0` disables it. Used by EVERY
-/// agent-exec path so the jail is uniform.
+/// The host the agent uses to reach the rozum gateway. Normally the host loopback
+/// (`127.0.0.1`); under an **active Docker jail** the container's loopback is itself,
+/// so it must reach the host gateway via `host.docker.internal` instead (the
+/// `--add-host` alias `to_docker_run_args` emits). Every gateway URL in `exec_agent`
+/// derives from this single choke point, so picking the right host here makes all of
+/// them (Anthropic/OpenAI base URLs, codex `-c base_url`) correct with no other change.
+fn sandbox_gateway_host() -> &'static str {
+    if sandbox_workspace().is_some()
+        && rozum::sandbox::SandboxBackend::from_env() == rozum::sandbox::SandboxBackend::Docker
+    {
+        rozum::sandbox::CONTAINER_GATEWAY_HOST
+    } else {
+        "127.0.0.1"
+    }
+}
+
+/// Build the base `Command` for an agent child, **jailed by default**. The backend is
+/// `ROZUM_SANDBOX_BACKEND` (`seatbelt` default, macOS-only; `docker` = a container on
+/// any OS). Writes are confined to the workspace (its cwd) + toolchain caches, secrets
+/// are denied/absent, the gateway is reachable but nothing else off-box, and there are
+/// NO per-action prompts (docs/specs/model-sandbox.md). `ROZUM_SANDBOX=0` disables it.
+/// Used by EVERY agent-exec path so the jail is uniform. For both backends the returned
+/// command ends with `program_name`, so the caller's later `.args(...)`/`.env(...)`
+/// append to the jailed invocation exactly as for an unsandboxed command.
 fn sandboxed_command(program_name: &str) -> std::process::Command {
+    use rozum::sandbox::{NetPolicy, SandboxBackend, SandboxPolicy};
     use std::process::Command as StdCommand;
     let Some(ws) = sandbox_workspace() else {
         return StdCommand::new(program_name);
     };
-    let policy = rozum::sandbox::SandboxPolicy::rust_coding(
-        std::slice::from_ref(&ws),
-        rozum::sandbox::NetPolicy::GatewayOnly,
-    );
-    match rozum::sandbox::write_seatbelt_profile_temp(&policy) {
-        Ok(profile) => {
+    let policy = SandboxPolicy::rust_coding(std::slice::from_ref(&ws), NetPolicy::GatewayOnly);
+    match SandboxBackend::from_env() {
+        SandboxBackend::Seatbelt => match rozum::sandbox::write_seatbelt_profile_temp(&policy) {
+            Ok(profile) => {
+                eprintln!(
+                    "  → sandboxed (Seatbelt): workspace={} profile={}",
+                    ws.display(),
+                    profile.display()
+                );
+                let mut c = StdCommand::new("sandbox-exec");
+                c.arg("-f").arg(&profile).arg(program_name);
+                c
+            }
+            Err(e) => {
+                eprintln!("  ! sandbox profile write failed ({e}); running UNsandboxed");
+                StdCommand::new(program_name)
+            }
+        },
+        SandboxBackend::Docker => {
+            // The image must contain the agent CLI (`program_name`) on PATH and, for
+            // build tasks, a Rust toolchain. Operator-supplied via
+            // ROZUM_SANDBOX_DOCKER_IMAGE. The workspace + toolchain caches are bind
+            // mounts; the rest of the host FS is simply absent. env values are
+            // forwarded by name (the gateway URLs already use host.docker.internal via
+            // `sandbox_gateway_host`); the agent's args are appended after program_name.
+            let image = rozum::sandbox::default_docker_image();
             eprintln!(
-                "  → sandboxed (Seatbelt): workspace={} profile={}",
+                "  → sandboxed (Docker): image={image} workspace={} gateway via {}",
                 ws.display(),
-                profile.display()
+                rozum::sandbox::CONTAINER_GATEWAY_HOST
             );
-            let mut c = StdCommand::new("sandbox-exec");
-            c.arg("-f").arg(&profile).arg(program_name);
+            let mut c = StdCommand::new("docker");
+            c.args(policy.to_docker_run_args(&image, &ws, SANDBOX_FORWARD_ENV));
+            c.arg(program_name);
             c
-        }
-        Err(e) => {
-            eprintln!("  ! sandbox profile write failed ({e}); running UNsandboxed");
-            StdCommand::new(program_name)
         }
     }
 }
@@ -2493,9 +2558,12 @@ async fn exec_agent(
     let claude_alias = rozum::gateway::claude_model_alias(model_for_alias);
     eprintln!("  → running: {} {}", program_name, args.join(" "));
 
-    let base = format!("http://127.0.0.1:{port}");
+    // Gateway host: the host loopback normally, `host.docker.internal` under an active
+    // Docker jail (the container's own loopback isn't the host). Every URL below derives
+    // from `base`, so this one choke point makes them all container-correct.
+    let base = format!("http://{}:{port}", sandbox_gateway_host());
     // Optionally jail the agent (docs/specs/model-sandbox.md) — `sandboxed_command`
-    // returns the `sandbox-exec` wrapper when ROZUM_SANDBOX is set, else a plain
+    // returns the `sandbox-exec`/`docker run` wrapper when the jail is on, else a plain
     // command; every later `cmd.args(...)` / `cmd.env(...)` appends to it.
     let mut cmd = sandboxed_command(program_name);
     cmd.args(args);

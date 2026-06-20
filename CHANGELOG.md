@@ -1,5 +1,29 @@
 # Changelog
 
+## sandbox — Docker container backend (`ROZUM_SANDBOX_BACKEND=docker`)
+Completed: 2026-06-20
+
+A second enforcement backend for the agent jail (model-sandbox P3), opt-in alongside the default
+macOS Seatbelt. The same `rust-coding` `(path, mode)` policy is now also renderable to a `docker run`
+(`SandboxPolicy::to_docker_run_args`): writable paths become `-v <p>:<p>:rw` binds (host path ==
+container path so the workspace/cwd line up), the rest of the host filesystem is simply **absent**
+(no mount = unreachable, stronger than a Seatbelt deny), secrets that sit under a mounted workspace
+are shadowed by an empty `--tmpfs`, and network maps to `--network=none` / `--add-host
+host.docker.internal:host-gateway`. The container reaches the host gateway/MLX via
+`host.docker.internal` — wired as a **single choke point** (`sandbox_gateway_host()` feeds
+`exec_agent`'s `base`, so every Anthropic/OpenAI/codex URL is container-correct with no other change).
+Only an allowlist (`SANDBOX_FORWARD_ENV`) is forwarded into the container via `-e NAME`, so host env
+doesn't leak. Selected with `ROZUM_SANDBOX_BACKEND=docker` (alias `container`); the image is
+operator-supplied (`ROZUM_SANDBOX_DOCKER_IMAGE`, default `rozum-agent:latest`, must carry the agent
+CLI on PATH). Unlike Seatbelt (macOS-only), the Docker backend turns the jail on for any OS with a
+docker daemon. **Validated on M4 (Docker 29.6):** 4 unit tests on the rendered argv + a real `docker
+run busybox` e2e (in-workspace write round-trips to the host; an out-of-mount write does not; a secret
+under the mount reads back empty) + a container→host `host.docker.internal` reachability probe + a
+full `rozum launch --no-model` container run (the container's stdout surfaced; the env allowlist
+forwarded `CLAUDE_CODE_*` while a non-listed host var stayed empty). Known gaps (tracked in BACKLOG):
+`gateway-only` still permits bridge egress (use `none` for strict isolation), opencode's config file
+isn't mounted yet, and no resource limits. Seatbelt default + behavior unchanged.
+
 ## launch — `--no-sandbox` flag (opt out of the agent jail per-launch)
 Completed: 2026-06-20
 
