@@ -439,6 +439,13 @@ enum MeetingsAction {
         /// Other model handles in the room — so `--reply-policy always` never loops model↔model.
         #[arg(long = "peer")]
         peers: Vec<String>,
+        /// Persona / context for the model's system prompt (who it is, what the conference is,
+        /// domain facts) so it answers on-topic rather than generically.
+        #[arg(long)]
+        persona: Option<String>,
+        /// Read the persona from a file (takes precedence over `--persona`). Handy for a long one.
+        #[arg(long = "persona-file")]
+        persona_file: Option<std::path::PathBuf>,
     },
 }
 
@@ -747,9 +754,20 @@ async fn main() {
                 reply_policy,
                 gateway_url,
                 peers,
+                persona,
+                persona_file,
             } => {
-                run_meetings_participant(model, room, as_handle, reply_policy, gateway_url, peers)
-                    .await
+                run_meetings_participant(
+                    model,
+                    room,
+                    as_handle,
+                    reply_policy,
+                    gateway_url,
+                    peers,
+                    persona,
+                    persona_file,
+                )
+                .await
             }
         },
         Some(Command::CommitMsg { model, n_ctx }) => run_commit_msg(model, n_ctx).await,
@@ -1811,6 +1829,7 @@ async fn run_meetings_post(text: String, room: Option<String>, as_display: Optio
 }
 
 /// `rozum meetings participant` — run a local model as a live room participant.
+#[allow(clippy::too_many_arguments)]
 async fn run_meetings_participant(
     model: String,
     room: String,
@@ -1818,6 +1837,8 @@ async fn run_meetings_participant(
     reply_policy: String,
     gateway_url: String,
     peers: Vec<String>,
+    persona: Option<String>,
+    persona_file: Option<std::path::PathBuf>,
 ) {
     use rozum::meeting::model_participant::{ReplyPolicy, derive_handle, run};
     let policy: ReplyPolicy = match reply_policy.parse() {
@@ -1830,7 +1851,18 @@ async fn run_meetings_participant(
     let handle = as_handle
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| derive_handle(&model));
-    if let Err(e) = run(model, room, handle, policy, gateway_url, peers).await {
+    // --persona-file takes precedence over inline --persona.
+    let persona = match persona_file {
+        Some(path) => match std::fs::read_to_string(&path) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("meetings participant: --persona-file {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        },
+        None => persona,
+    };
+    if let Err(e) = run(model, room, handle, policy, gateway_url, peers, persona).await {
         eprintln!("meetings participant: {e}");
         std::process::exit(1);
     }

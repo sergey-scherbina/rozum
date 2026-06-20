@@ -84,6 +84,7 @@ pub fn should_reply(policy: ReplyPolicy, turn: &StoredTurn, handle: &str, peers:
 /// Run the bridge: join `room` as `handle`, then reply via the gateway per `policy`
 /// until the connection closes. Errors generating a reply are logged and swallowed —
 /// a gateway hiccup must never crash the room.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     model: String,
     room: String,
@@ -91,6 +92,7 @@ pub async fn run(
     policy: ReplyPolicy,
     gateway_url: String,
     peers: Vec<String>,
+    persona: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use super::daemon::daemon_alive;
     use super::daemon_proxy::spawn_daemon;
@@ -129,7 +131,7 @@ pub async fn run(
             eprintln!("[participant] replying to {} …", base_handle(&turn.display_name));
             // Clone the transcript so no client borrow is held across the await / submit.
             let ctx = client.transcript().to_vec();
-            match generate(&gateway_url, &model, &ctx, &handle).await {
+            match generate(&gateway_url, &model, &ctx, &handle, persona.as_deref()).await {
                 Ok(text) if !text.trim().is_empty() => {
                     if let Err(e) = client.submit(text.trim()).await {
                         eprintln!("[participant] submit failed: {e}");
@@ -150,12 +152,18 @@ async fn generate(
     model: &str,
     transcript: &[StoredTurn],
     handle: &str,
+    persona: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let system = format!(
-        "You are {handle}, an AI participant in a multi-person group chat. Reply briefly, \
-         directly, and conversationally to the most recent message. Messages from others are \
-         prefixed with their name; your own are not. Do NOT prefix your reply with your name."
-    );
+    // Chat mechanics are always present; an operator-supplied `--persona` prepends WHO the model
+    // is + any domain context (e.g. about rozum/busi) so it answers on-topic instead of generically.
+    let mechanics = "Reply briefly and directly to the most recent message — actually answer the \
+        question or contribute something substantive; do NOT deflect with 'how can I help' or 'what \
+        would you like to explore'. Messages from others are prefixed with their name; your own are \
+        not. Do NOT prefix your reply with your name.";
+    let system = match persona {
+        Some(p) if !p.trim().is_empty() => format!("{}\n\n{mechanics}", p.trim()),
+        _ => format!("You are {handle}, an AI participant in a multi-person group chat. {mechanics}"),
+    };
     let mut messages = vec![serde_json::json!({ "role": "system", "content": system })];
     let start = transcript.len().saturating_sub(24);
     for t in &transcript[start..] {

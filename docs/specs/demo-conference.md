@@ -28,7 +28,9 @@ references their contracts and is the coordination point, not their re-design.
 
 A long-lived process that makes a *local model* a first-class room participant.
 
-- CLI: `rozum meetings participant --model <spec> --room <name> [--as <handle>] [--reply-policy <policy>]`
+- CLI: `rozum meetings participant --model <spec> --room <name> [--as <handle>]
+  [--reply-policy <policy>] [--gateway-url <url>] [--peer <handle>...] [--persona <text>
+  | --persona-file <path>]`
   - `--model <spec>` — a catalog/gateway model spec (e.g. `mlx-community:gpt-oss-20b-MXFP4-Q4`).
   - `--room <name>` — the room to join (created if absent, per daemon rules).
   - `--as <handle>` — display handle (default derived from the model, e.g. `gpt-oss`).
@@ -36,6 +38,10 @@ A long-lived process that makes a *local model* a first-class room participant.
     the model contributes. This is a **politeness policy of one participant**, never a
     room-level moderator or turn-scheduler (see Decisions; honors the global no-moderator
     invariant).
+  - `--gateway-url <url>` — the local gateway serving `--model` (OpenAI `/v1`).
+  - `--peer <handle>` (repeatable) — other model handles, so `always` never loops model↔model.
+  - `--persona <text>` / `--persona-file <path>` — prepends WHO the model is + domain context
+    to its system prompt, so it answers on-topic (e.g. about `busi`) rather than generically.
 - Identity: the bridge presents a stable participant identity via the same
   `Principal`/session-token mechanism as human clients (`docs/specs/agent-meetings-*`),
   so it shows up in the roster as one participant with a fixed handle.
@@ -64,20 +70,20 @@ A long-lived process that makes a *local model* a first-class room participant.
 
 ## Behavior
 
-- [ ] A local model joins a room and appears in the roster as one stable-handle participant.
-- [ ] With `--reply-policy mention`, the model replies only when its handle is @mentioned;
+- [x] A local model joins a room and appears in the roster as one stable-handle participant.
+- [x] With `--reply-policy mention`, the model replies only when its handle is @mentioned;
       it stays silent otherwise (no spam, no turn-taking).
-- [ ] With `--reply-policy always`, the model may reply to any new human message; never to
+- [x] With `--reply-policy always`, the model may reply to any new human message; never to
       its own or another model's messages (no model↔model runaway loop).
 - [ ] Two participants (any mix of human/model) in a fresh room constitute a working
       one-on-one breakout; messages there are not visible in other rooms.
-- [ ] Humans and models in the same room see the same transcript in arrival order; there is
+- [x] Humans and models in the same room see the same transcript in arrival order; there is
       no turn expiry, round-robin, or moderator (global invariant preserved).
-- [ ] The bridge degrades safely: if the gateway/model is unavailable, the participant
+- [x] The bridge degrades safely: if the gateway/model is unavailable, the participant
       posts nothing (or a single `blocked:` notice) and never crashes the room.
 - [ ] Every shell/file action any model performs is denied outside the conference path-set
-      (Seatbelt escape test, per `model-sandbox.md`).
-- [ ] The default meeting runtime (no `--participant`, no models) is byte-for-byte unchanged
+      (Seatbelt escape test, per `model-sandbox.md`). *(co-agent-owned sandbox; tracked here.)*
+- [x] The default meeting runtime (no `--participant`, no models) is byte-for-byte unchanged
       and carries no new model/network dependency.
 - [ ] The PWA installs and runs as a PWA (manifest + service worker) and connects to a
       locally running rozum (rooms list, join, post, breakout). *(co-agent-owned; tracked here.)*
@@ -134,6 +140,17 @@ A long-lived process that makes a *local model* a first-class room participant.
 
 ## Results
 
-<!-- Filled after implementation: participant bridge landed?, demo matrix (humans+3 models),
-     sandbox escape test, PWA install check, any model↔model loop guards measured. -->
-_TBD — implementation follows this committed spec._
+**Model-participant bridge — landed + validated live (2026-06-20).** `src/meeting/model_participant.rs`
++ `rozum meetings participant`. End-to-end proof: gpt-oss-20b joined a room, saw a human's
+`@gpt-oss` message, generated a reply via the local gateway (`/v1/chat/completions`), and posted it —
+**~3 s on a warm model** (cold start = model load only). Verified: roster join + room
+materialization, transcript streaming, `mention`/`always`/`manual` policy (unit + live), self-skip
+past the daemon's `· suffix`, peer-model loop guard, and graceful degrade (dead gateway → stays
+silent, room intact). 6 unit tests; full suite 416 + 14 green; **0 panics**. `--persona` /
+`--persona-file` proven to drive on-topic answers (a directive persona made gpt-oss explain rozum
+concretely vs a generic deflection without one).
+
+**Still open:** breakout one-on-one test, the Seatbelt wrap of the conference session, and the
+`.ssc` → PWA front end — the co-agent's half of the split. Note for the demo: gpt-oss is a reasoning
+model prone to social deflection in casual chat — a *directive* persona fixes it, and Qwen3.6 is the
+snappier/steadier conversationalist; both drive through the same bridge.
