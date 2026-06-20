@@ -222,7 +222,6 @@ fn quant_priority(filename: &str, pref: &str) -> i32 {
 pub struct ToolUseParser {
     state: ToolParseState,
     buffer: String,
-    call_index: u32,
 }
 
 #[derive(Debug)]
@@ -253,7 +252,6 @@ impl ToolUseParser {
         Self {
             state: ToolParseState::Text,
             buffer: String::new(),
-            call_index: 0,
         }
     }
 
@@ -270,8 +268,11 @@ impl ToolUseParser {
                             events.push(ToolParseEvent::Text(self.buffer[..pos].to_owned()));
                         }
                         self.buffer = self.buffer[pos + "<tool_call>".len()..].to_owned();
-                        self.call_index += 1;
-                        let id = format!("call_{}", self.call_index);
+                        // Cross-turn-unique id (shared with the engine SPI). A per-response
+                        // `call_{n}` counter collides across turns, and Claude Code then drops
+                        // the turn (it can't pair the tool_result back). See
+                        // `crate::engine::next_tool_call_id`.
+                        let id = crate::engine::next_tool_call_id();
                         self.state = ToolParseState::InCall {
                             id,
                             json_buf: String::new(),
@@ -951,6 +952,32 @@ mod tests {
             .any(|e| matches!(e, ToolParseEvent::End { .. }));
         assert!(has_start, "expected Start event, got: {events:?}");
         assert!(has_end, "expected End event, got: {events:?}");
+    }
+
+    #[test]
+    fn tool_call_ids_are_unique_across_calls_and_consistent_within() {
+        // Each <tool_call> gets a process-unique id (crate::engine::next_tool_call_id),
+        // NOT a per-response `call_{n}` that collides across turns (which made Claude Code
+        // drop the turn — it couldn't pair the tool_result). Start/Delta/End of one call
+        // share its id; two distinct calls differ.
+        fn ids(events: &[ToolParseEvent]) -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    ToolParseEvent::Start { id, .. }
+                    | ToolParseEvent::Delta { id, .. }
+                    | ToolParseEvent::End { id } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+        let mut p = ToolUseParser::new();
+        let a = ids(&p.feed("<tool_call>\n{\"name\":\"a\",\"arguments\":{}}\n</tool_call>"));
+        let b = ids(&p.feed("<tool_call>\n{\"name\":\"b\",\"arguments\":{}}\n</tool_call>"));
+        assert!(!a.is_empty() && a.iter().all(|x| x == &a[0]), "one call shares one id: {a:?}");
+        assert!(!b.is_empty() && b.iter().all(|x| x == &b[0]), "one call shares one id: {b:?}");
+        assert!(a[0].starts_with("call_") && b[0].starts_with("call_"));
+        assert_ne!(a[0], b[0], "distinct tool calls must get distinct ids");
     }
 
     #[test]

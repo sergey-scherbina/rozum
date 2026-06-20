@@ -2099,6 +2099,14 @@ soon as any single track succeeds.
         shares `crate::sampler::sample`, so only the loop + finalize move. Hardware-independent
         (`metal`/CPU on M4). *Done when:* GGUF chat + a tool-call run behave identically (existing GGUF
         tests green + a streamed tool-call check), and the third loop copy is deleted.
+        **Step 1 DONE 2026-06-20** (branch `feature/gguf-toolcall-id`): the GGUF `ToolUseParser` now
+        mints ids via `crate::engine::next_tool_call_id()` instead of its per-response `call_{n}` counter
+        — fixes the cross-turn tool-call-id collision (dupes across turns made Claude Code drop the turn)
+        and is the first concrete GGUF↔engine sharing. Test
+        `tool_call_ids_are_unique_across_calls_and_consistent_within`. NEXT: the full loop→iterator
+        adoption (note: analysis shows the "streaming→finalize" tool-call change is cosmetic since clients
+        coalesce tool deltas, so the board's downgrade concern is moot — but it's a real `generate_blocking`
+        refactor, kept as its own focused piece).
   - [ ] **engine-spi-dense-mlx-drive — dense MLX adopts `drive()` (PLANNED 2026-06-20).**
         Give `drive()` its first PRODUCTION caller (today only the `FakeEngine` test uses it). The dense
         Qwen3/Qwen3-MoE MLX path has no hybrid cache to reclaim, so it can route `chat` → `engine::drive`

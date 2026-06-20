@@ -1,5 +1,18 @@
 # Changelog
 
+## gguf — cross-turn-unique tool-call ids (fixes Claude Code dropping turns)
+Completed: 2026-06-20
+
+The GGUF backend's streaming `ToolUseParser` minted tool-call ids from a per-response counter
+(`call_1`, `call_2`, …) that **reset every response**, so ids collided across turns — and Claude Code,
+unable to pair a `tool_result` back to a reused id, **drops the turn**. It now mints ids via the shared
+`crate::engine::next_tool_call_id()` (a process-monotonic counter, the same one the MLX path uses), so
+every tool call across a conversation is unique. This is also the first concrete step of the
+engine-SPI's GGUF adoption (sharing an engine helper). Test
+`tool_call_ids_are_unique_across_calls_and_consistent_within` (ids are unique across calls, consistent
+within a call's Start/Delta/End). The fuller GGUF→`consume_tokens` adoption remains a tracked follow-up
+(SPRINT `engine-spi-a3-gguf`).
+
 ## sandbox — a `[sandbox]` table in `rozum.toml` (persistent policy beyond env)
 Completed: 2026-06-20
 
