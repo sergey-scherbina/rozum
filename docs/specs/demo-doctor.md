@@ -25,19 +25,19 @@ assets, or modifying the workspace.
 
 ## Behavior
 
-- [ ] Reports whether the meeting daemon is reachable and, when reachable, how
+- [x] Reports whether the meeting daemon is reachable and, when reachable, how
       many rooms it can list.
-- [ ] Reports whether a shared gateway registry exists and whether the registered
+- [x] Reports whether a shared gateway registry exists and whether the registered
       gateway answers its health check.
-- [ ] Reports the selected sandbox backend/network from env/config precedence and
+- [x] Reports the selected sandbox backend/network from env/config precedence and
       warns when the jail is disabled or ineffective on the current platform.
-- [ ] When Docker is the selected sandbox backend, checks that the Docker CLI is
+- [x] When Docker is the selected sandbox backend, checks that the Docker CLI is
       available and that the configured `rozum-agent` image exists locally.
-- [ ] Checks that `scripts/demo-conference.sh` exists and is executable.
-- [ ] Checks Tailscale CLI availability as an optional phone-demo dependency.
-- [ ] With `--web-url`, probes the already-running web/PWA endpoint without
+- [x] Checks that `scripts/demo-conference.sh` exists and is executable.
+- [x] Checks Tailscale CLI availability as an optional phone-demo dependency.
+- [x] With `--web-url`, probes the already-running web/PWA endpoint without
       requiring credentials or posting data.
-- [ ] Never starts/stops daemons, launches models, pulls Docker images, mutates
+- [x] Never starts/stops daemons, launches models, pulls Docker images, mutates
       service config, writes room messages, or changes files.
 
 ## Out of scope
@@ -60,4 +60,15 @@ commands are only used where the dependency itself is a CLI (`docker`,
 
 ## Results
 
-Fill this in when implementation and verification land.
+Implemented 2026-06-20 as `src/doctor.rs` + `rozum doctor [--web-url <url>] [--strict]`.
+The first pass is intentionally read-only and advisory: default mode exits non-zero only on
+hard failures, while `--strict` treats warnings as a failing preflight.
+
+Verification:
+- `cargo test doctor --lib --no-default-features` — 5 passed.
+- `cargo test doctor --lib` — 5 passed.
+- `cargo build --bin rozum --no-default-features` — passed.
+- Live `target/debug/rozum doctor` on the dev machine reported: demo launcher ok,
+  Tailscale CLI ok, meeting daemon running with 18 rooms, no active shared gateway
+  registry (warn), Seatbelt sandbox enabled with `GatewayOnly`, Docker image skipped
+  because Docker backend is not selected, web/PWA skipped because no `--web-url` was supplied.

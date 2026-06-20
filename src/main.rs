@@ -302,6 +302,16 @@ enum Command {
         #[command(subcommand)]
         action: IdentityAction,
     },
+
+    /// Read-only readiness report for the local demo path.
+    Doctor {
+        /// Probe an already-running meeting web/PWA endpoint.
+        #[arg(long)]
+        web_url: Option<String>,
+        /// Treat warnings as a failing preflight.
+        #[arg(long)]
+        strict: bool,
+    },
 }
 
 /// `rozum identity whoami|set-name` — the local human's stable meeting identity.
@@ -784,6 +794,7 @@ async fn main() {
             IdentityAction::Whoami => run_identity_whoami(),
             IdentityAction::SetName { name } => run_identity_set_name(&name),
         },
+        Some(Command::Doctor { web_url, strict }) => run_doctor(web_url, strict).await,
         Some(Command::Telegram { room, name }) => {
             let token = std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_else(|_| {
                 eprintln!("error: TELEGRAM_BOT_TOKEN not set");
@@ -804,6 +815,14 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+    }
+}
+
+async fn run_doctor(web_url: Option<String>, strict: bool) {
+    let report = rozum::doctor::run(rozum::doctor::DoctorOptions { web_url, strict }).await;
+    print!("{}", report.render());
+    if report.should_fail(strict) {
+        std::process::exit(1);
     }
 }
 

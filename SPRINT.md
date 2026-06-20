@@ -150,12 +150,15 @@ preflight, trust, and hand to sibling agents without rediscovering stale state. 
 cross-cutting polish queue; detailed web tasks remain under `meeting-web-pwa-ssc`, and long-term
 portability stays in BACKLOG.
 
-- [ ] **demo-doctor-self-test — first implementation pass.** Add `rozum doctor` (spec:
+- [x] **demo-doctor-self-test — first implementation pass (DONE 2026-06-20).** Added
+      `rozum doctor [--web-url <url>] [--strict]` (spec:
       `docs/specs/demo-doctor.md`) to report meeting daemon reachability, room list, shared gateway
       health, sandbox backend/network, Docker image availability when Docker is selected, web/PWA
       endpoint reachability when a URL is supplied, Tailscale CLI availability, and the
       `scripts/demo-conference.sh` launcher. Must be non-destructive: no model launch, no service
-      mutation, no Docker pulls, no room posts.
+      mutation, no Docker pulls, no room posts. Verified: `cargo test doctor --lib
+      --no-default-features`, `cargo test doctor --lib`, `cargo build --bin rozum
+      --no-default-features`, and live `target/debug/rozum doctor`.
 - [ ] **sandbox-regression-harness.** Add a focused, explicit jail-invariant test target for
       Seatbelt/Docker: workspace write allowed, secret read/write denied, selected network policy
       enforced (`none`/`gateway-strict`), gateway reachable when expected, simple Rust build works
