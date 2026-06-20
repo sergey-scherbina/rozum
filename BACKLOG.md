@@ -388,15 +388,15 @@ Remaining:
   /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`. Spec'd as "Future" in the
   spec; lets a non-local reader fetch content (direct-disk needs a shared FS).
   Verifiable (axum handler over the day files).
-- [ ] meetings-model-as-participant — a model joins a room as a participant,
-  served by the gateway over **localhost HTTP** (the daemon's `register_peer` is
-  a stub; today only the LEGACY in-process room does this, via MCP server→client
-  sampling). Room-side "model participant" calls the gateway `/v1/messages` and
-  `meeting.submit`s. Keep opt-in / off-by-default (SPEC stance).
-- [ ] meetings-bridges-on-daemon — port web/telegram/discord bridges
-  (`src/web`, `src/telegram`, `src/discord`) off the legacy per-room socket onto
-  `meeting.sock` (`rooms.join`), so the legacy in-process room can eventually be
-  retired (today the bridges force `--legacy-room` / `--web-port`).
+- [x] meetings-model-as-participant — **DONE 2026-06-20.** `rozum meetings participant`
+  joins a daemon room as a live model participant, calls the local gateway over HTTP,
+  obeys `mention`/`always`/`manual` reply policy, supports persona text/files and peer
+  loop guards, and submits replies through the daemon like any other client. Spec/results:
+  `docs/specs/demo-conference.md`.
+- [ ] meetings-bridges-on-daemon — daemon-backed human web is DONE as `rozum meetings web`
+  (`src/meeting/web.rs`). Remaining bridge cleanup: port the legacy `src/web` escape hatch and
+  the telegram/discord bridges (`src/telegram`, `src/discord`) off the legacy per-room socket
+  onto `meeting.sock` (`rooms.join`), so the legacy in-process room can eventually be retired.
 
 ### Portability / hardware-agnostic core (keep the durable layer durable)
 
@@ -417,7 +417,7 @@ These items turn "portable in principle" into "portable by `cargo build`".
   (non-`metal` llama-cpp-2) — entangled with the Metal feature flags, can't be validated from macOS.
   Tracked with `portability-cuda-gguf`.
 
-- [ ] model-sandbox - **Structural confinement for agentic model runs (no-prompt safety).**
+- [~] model-sandbox - **Structural confinement for agentic model runs (core DONE; Linux native optional).**
   Both models run agentic loops that touch the filesystem + shell; confine them so they
   **cannot do anything harmful WITHOUT per-action approval prompts** — safety is an OS jail,
   not interactive confirmation. **A sandbox is a SET of `(path, mode)` rules** (rw / ro / deny,
@@ -427,7 +427,7 @@ These items turn "portable in principle" into "portable by `cargo build`".
   Agent runs `approval=never` (safe in the jail; also kills the Codex rejected-escalation
   stall, `matrix-failure-analysis.md` Finding 1a). Full write-up:
   `docs/specs/model-sandbox.md`. Sub-tasks:
-  - [~] model-sandbox-seatbelt - **P1 (M4 primary). CORE DONE 2026-06-19** (branch
+  - [x] model-sandbox-seatbelt - **P1 (M4 primary). DONE 2026-06-19/20** (branch
     `feature/model-sandbox-seatbelt`). `src/sandbox.rs`: `SandboxPolicy` + `rust_coding`
     profile + `to_seatbelt_profile()` (validated-on-M4 SBPL) + `write_seatbelt_profile_temp`.
     `exec_agent` wraps the agent child in `sandbox-exec -f <profile>` when **`ROZUM_SANDBOX`**
@@ -478,7 +478,7 @@ These items turn "portable in principle" into "portable by `cargo build`".
     Linux host `rozum launch` jails the agent natively (writes confined, secrets denied, `cargo build`
     succeeds in-jail, an out-of-workspace write denied) — the Seatbelt P1 gate, Linux edition. Not
     needed on the current M4 target; unblock when a Linux host is in play.
-  - [~] model-sandbox-container - **P3. Docker backend DONE 2026-06-20** (branch
+  - [x] model-sandbox-container - **P3. Docker backend DONE 2026-06-20** (branch
     `feature/sandbox-docker-backend`). `ROZUM_SANDBOX_BACKEND=docker` (alias `container`) renders the
     same `rust-coding` `(path,mode)` set to a `docker run`: writable→`-v :rw` binds (host path==
     container path), the rest of the host FS **absent** (stronger than deny), secrets under a mount
@@ -517,8 +517,10 @@ These items turn "portable in principle" into "portable by `cargo build`".
     prompts (the jail is the safety boundary; kills the codex reject-escalation loop, matrix Finding
     1a). Gated: only when jailed, only headless (interactive operators keep prompts), never overriding
     an explicit user policy. Pure helper `autonomy_flag_for` (2 unit tests) + e2e-verified the agent
-    receives the flag. **The model-sandbox P3 track is complete** (only the optional P2 Linux
-    Landlock/bubblewrap backend remains, off macOS).
+    receives the flag. **Regression harness DONE 2026-06-20** (`tests/sandbox_regression.rs`):
+    fast no-default checks + ignored Seatbelt/Docker e2e commands documented in
+    `docs/specs/model-sandbox.md`. **The model-sandbox P3 track is complete** (only the
+    optional P2 Linux Landlock/bubblewrap backend remains, off macOS).
 
 - [ ] windows-portability - **Make rozum a first-class Windows host (durable core + CI).**
   rozum-as-gateway/launcher already works on Windows today (HTTP backends are pure

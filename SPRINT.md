@@ -176,10 +176,12 @@ portability stays in BACKLOG.
 - [ ] **`.ssc` live data binding for meeting web.** Complete the ScalaScript/Rust web rewrite by
       binding the compiled `.ssc` page to live rozum rooms/transcripts/submits, then compare it against
       the current phone-proven PWA baseline.
-- [ ] **sprint-backlog-hygiene.** Remove stale sprint/backlog signals now contradicted by master:
+- [x] **sprint-backlog-hygiene — DONE 2026-06-20.** Removed stale sprint/backlog signals now
+      contradicted by master:
       model-participant is done, sandbox P3 is complete except optional Linux native jail, daemon web
-      exists, and previous queue-serving cleanup (`codex/queue-serving-hygiene`, commit `14c425f`) is
-      either merged or consciously dropped.
+      exists, and follow-up bridge wording now separates daemon-backed web from legacy
+      telegram/discord bridge ports. The old `codex/queue-serving-hygiene` branch/commit `14c425f`
+      remains consciously unmerged for separate review; it is not a current sprint blocker.
 - [ ] **windows-core-ci.** Add a low-risk portability gate: `windows-latest` build/test with
       `--no-default-features`, documenting any Unix-only assumptions that surface instead of starting
       a full Windows port.
@@ -291,8 +293,9 @@ room]` creates an ad-hoc room (`rooms.new`); (c) **second poll connection** —
 so keypresses never cancel an in-flight `wait_my_turn` (tests
 `poll_stream_delivers_new_messages`, `rooms_new_creates_ad_hoc_and_list_enriches`).
 57 meeting tests green. ONLY the ratatui *rendering* of `rozum`/`rozum meetings
-attach` needs interactive verification. Remaining: the deferred REST read; and
-model-as-participant via gateway HTTP (today only the legacy room does sampling).**
+attach` needs interactive verification. **Update 2026-06-20:** model-as-participant is now done
+via `rozum meetings participant` (see `docs/specs/demo-conference.md`); the daemon-side remaining
+item here is the deferred REST read.**
 Build sequence (each phase compiles + has its own tests; do them in order — P0→P2
 are pure library and land behind today's behavior, P3 brings the daemon up, P4/P5
 are clients and can go in parallel, P6 is the service):
@@ -378,8 +381,8 @@ are clients and can go in parallel, P6 is the service):
       wires up; the real `launchctl`/`systemctl` call is operator-validated (same
       convention as the gateway service — not run against the dev machine).
 - [ ] **Deferred (not now):** Future REST read-by-day on the meeting daemon's HTTP
-      (`/rooms/{name}/days`, `/messages/<date>`); model-as-participant via gateway
-      local HTTP.
+      (`/rooms/{name}/days`, `/messages/<date>`). Model-as-participant via gateway
+      local HTTP is DONE as `rozum meetings participant`.
 
 #### agent-meeting-coordination — meetings as the collaboration system (2026-06-18, user-driven)
 
@@ -439,7 +442,7 @@ swap later). Spec: `docs/specs/agent-meeting-coordination.md`. Phased P1–P4.
   test (no global-env mutation). The first, zero-config rung of the Principal model. **Remaining
   (P2-P4, dogfooding-shaped):** unify the agent's hook-post + mcp-proxy handles (needs session
   correlation); link one human across web/telegram (P3); auth + multiple/remote humans (P4).
-- [ ] **P1.7 — daemon-backed web client with shared-secret auth (user-requested 2026-06-18).**
+- [x] **P1.7 — daemon-backed web client with shared-secret auth (DONE 2026-06-19/20).**
   A human web UI to the **daemon** meeting rooms (the legacy `rozum web` bridges the in-process
   room — this one reads the daemon's disk transcript + submits via the daemon). `rozum meetings web
   [--port P] [--room name] [--bind addr]`. Auth = a single shared secret (env `ROZUM_WEB_SECRET`,
@@ -449,8 +452,8 @@ swap later). Spec: `docs/specs/agent-meeting-coordination.md`. Phased P1–P4.
   the room → the **wakeup**: new messages appear live). Acceptance (with the user): the operator
   opens the link, logs in with the code, sees the transcript, posts a message that an agent (or
   `rozum meetings post`) sees, and an agent's reply appears live via SSE. **This is the first equal
-  non-TUI client (P3 groundwork).** Subtasks: (a) web module + auth + endpoints + SSE; (b) the
-  `meetings web` command; (c) a chat UI (adapt `src/web/index.html`); (d) live test with the human.
+  non-TUI client (P3 groundwork).** Implemented as `src/meeting/web.rs` + `rozum meetings web`;
+  later PWA polish/no-auth/live-poll fallback is tracked under `meeting-web-pwa-ssc`.
 
 > **MLX native runtime is DONE (correctness + perf), 2026-06-13.** Decode root-caused
 > & fixed (bf16 stream leak in GatedDeltaNet q/k scaling → ~1000 casts/token): MoE
