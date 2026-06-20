@@ -544,6 +544,50 @@ mod tests {
         assert!(!leaked, "SANDBOX ESCAPE: wrote to a non-mounted host path");
     }
 
+    // Real coding-workload e2e (ignored; needs the `rozum-agent` image —
+    // `scripts/build-agent-image.sh` — and a running daemon). The Docker analog of
+    // `cargo_build_runs_in_jail_and_escape_denied`: a fresh crate must BUILD and RUN
+    // inside the container jail (proves the agent image's toolchain works through the
+    // rozum-generated `docker run`), and the build output must land on the host (the
+    // workspace bind round-trips). Validated on M4 2026-06-20 (rozum-agent built from
+    // docker/rozum-agent.Dockerfile). Uses the operator's configured image.
+    #[test]
+    #[ignore = "runs cargo build in the rozum-agent container; needs the image built"]
+    fn agent_image_builds_a_crate_in_the_docker_jail() {
+        use std::process::Command;
+        let image = default_docker_image();
+        let id = std::process::id();
+        let ws = resolve(&std::env::temp_dir()).join(format!("rozum-agent-build-{id}"));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let policy = SandboxPolicy::rust_coding(&[ws.clone()], NetPolicy::None);
+        let wsd = ws.to_string_lossy().into_owned();
+        let out = Command::new("docker")
+            .args(policy.to_docker_run_args(&image, &ws, &[]))
+            // A login shell, like an agent's Bash tool — exercises the PATH fix.
+            .args([
+                "bash",
+                "-lc",
+                &format!(
+                    "set -e; cd {wsd}; cargo new --bin demo >/dev/null 2>&1; cd demo; \
+                     cargo build --offline >/dev/null 2>&1; ./target/debug/demo"
+                ),
+            ])
+            .output()
+            .expect("spawn docker run");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let leaked = ws.join("demo/target/debug/demo").exists();
+        let _ = std::fs::remove_dir_all(&ws);
+        assert!(
+            out.status.success(),
+            "cargo build failed in the agent jail: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(stdout.contains("Hello, world!"), "binary did not run: {stdout:?}");
+        assert!(leaked, "build output did not round-trip to the host workspace mount");
+    }
+
     // Integration (macOS only; runs sandbox-exec): the GENERATED profile must
     // actually parse and let a real binary execute under it — string assertions
     // alone don't prove the SBPL is valid. Ignored by default (spawns a process,

@@ -466,9 +466,15 @@ These items turn "portable in principle" into "portable by `cargo build`".
     **Validated on M4 (Docker 29.6):** 4 unit tests on the argv + a real `docker run busybox` e2e
     (in-workspace write round-trips / out-of-mount write denied / secret tmpfs-masked) +
     `host.docker.internal` reachability probe + full `rozum launch --no-model` container run (stdout
-    surfaced, env allowlist forwarded `CLAUDE_CODE_*`, non-listed host var stayed empty). **Remaining:**
-    firewalled custom network for strict `gateway-only` egress; `opencode` config-file mount; the
-    `rozum-agent` image; resource limits (DoS/kernel threats); then drop the approval-reject path.
+    surfaced, env allowlist forwarded `CLAUDE_CODE_*`, non-listed host var stayed empty). **`rozum-agent`
+    image DONE 2026-06-20** (branch `feature/rozum-agent-image`): `docker/rozum-agent.Dockerfile`
+    (Rust + git + Node 22 + claude/codex/opencode CLIs; `/etc/profile.d/rust.sh` so `cargo` is on the
+    PATH of login shells too) + `scripts/build-agent-image.sh`; `rozum launch` prints a build hint if
+    the image is missing (no silent pull). Validated: a real `cargo new` + `cargo build` + run executes
+    **inside** the container jail via `rozum launch … docker` and the output round-trips to the host
+    (ignored test `agent_image_builds_a_crate_in_the_docker_jail`). **Remaining:** firewalled custom
+    network for strict `gateway-only` egress; `opencode` config-file mount; resource limits
+    (`--memory`/`--cpus`/`--pids-limit`, DoS/kernel threats); then drop the approval-reject path.
 
 - [ ] windows-portability - **Make rozum a first-class Windows host (durable core + CI).**
   rozum-as-gateway/launcher already works on Windows today (HTTP backends are pure

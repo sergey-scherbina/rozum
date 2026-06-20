@@ -93,9 +93,15 @@ The same `rust-coding` `(path, mode)` set is rendered to a `docker run` invocati
 - **network caveat** — `gateway-only` under Docker still permits general egress over
   the default bridge (it is best-effort: host reachable + bridge). For strict no-egress
   use `network = "none"`; a firewalled custom network is future hardening.
-- **image** — operator-supplied via `ROZUM_SANDBOX_DOCKER_IMAGE` (default
-  `rozum-agent:latest`); it MUST contain the agent CLI (`claude`/`codex`/`opencode`) on
-  `PATH`. `opencode` additionally reads a config file written to a host temp path
+- **image** — the agent runs in `ROZUM_SANDBOX_DOCKER_IMAGE` (default
+  `rozum-agent:latest`); it MUST carry the agent CLI (`claude`/`codex`/`opencode`) on
+  `PATH` plus a build toolchain. rozum ships one: **`docker/rozum-agent.Dockerfile`**
+  (Rust + git + Node 22 + the three CLIs), built with **`scripts/build-agent-image.sh`**.
+  If the image is missing locally, `rozum launch` prints a build hint (it does not
+  silently try to pull the unpublished default). Note: the `rust` base exposes cargo via
+  `ENV PATH`, but agents often build through a *login* shell (`bash -lc`) that resets
+  PATH — the image adds `/etc/profile.d/rust.sh` so `cargo` is found either way.
+  `opencode` additionally reads a config file written to a host temp path
   (`OPENCODE_CONFIG`) that is not mounted, so opencode-under-Docker needs that file
   mounted in (future); `claude`/`codex` are env/flag-driven and work as-is.
 
@@ -104,7 +110,10 @@ Validated 2026-06-20 on M4 (Docker 29.6): unit tests on the rendered argv, a rea
 write does not; a secret under the mount reads back empty), a container→host
 `host.docker.internal` reachability probe, and a full `rozum launch --no-model … docker`
 run (the container's stdout surfaced; the env allowlist forwarded `CLAUDE_CODE_*` while a
-non-listed host var stayed empty).
+non-listed host var stayed empty). The `rozum-agent` image was then built and a real
+coding workload validated end-to-end: `rozum launch … docker` ran `cargo new` + `cargo
+build` + executed the binary **inside the container**, and the build output round-tripped
+to the host workspace — the Docker analog of the Seatbelt P1 "cargo build succeeds" gate.
 
 ## Config surface
 
@@ -161,9 +170,11 @@ VM/container with resource limits (the container backend, a later phase).
   2026-06-20** (`ROZUM_SANDBOX_BACKEND=docker`): the path-set renders to `docker run`
   (bind mounts + tmpfs-masked secrets + `host.docker.internal` gateway + env
   allowlist), validated by unit tests + a real `docker run` e2e + a full `rozum launch`
-  run. Remaining: a firewalled custom network for strict `gateway-only` egress; an
-  `opencode` config mount; the operator agent image (`rozum-agent`); and dropping the
-  approval-reject path now that the jail makes it unnecessary (gpt-oss/codex reliability).
+  run. The **`rozum-agent` image** (`docker/rozum-agent.Dockerfile` +
+  `scripts/build-agent-image.sh`) is **DONE 2026-06-20** — a real `cargo build` runs in
+  the container jail. Remaining: a firewalled custom network for strict `gateway-only`
+  egress; an `opencode` config mount; resource limits (DoS/kernel threats); and dropping
+  the approval-reject path now that the jail makes it unnecessary (gpt-oss/codex reliability).
 
 ## Decisions (v1 defaults — other variants can be tried later)
 

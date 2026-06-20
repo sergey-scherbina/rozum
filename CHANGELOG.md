@@ -1,5 +1,25 @@
 # Changelog
 
+## sandbox — the `rozum-agent` container image (makes the Docker backend runnable)
+Completed: 2026-06-20
+
+The Docker sandbox backend renders correct `docker run` commands, but `default_docker_image()`
+pointed at a `rozum-agent:latest` that didn't exist — so a real `rozum launch <agent> … docker`
+had nothing to run in. This adds the image: `docker/rozum-agent.Dockerfile` (a `rust` slim base +
+git + Node 22 + the three agent CLIs — claude/codex/opencode — on PATH) and `scripts/build-agent-
+image.sh` to build it. The agent talks only to the host gateway via `host.docker.internal` (rozum
+wires that env at launch), so the image needs no creds and the container is fully ephemeral. One
+sharp edge fixed: the `rust` base exposes cargo via `ENV PATH`, but agents commonly build through a
+*login* shell (`bash -lc`) that resets PATH and dropped cargo — the image adds `/etc/profile.d/
+rust.sh` so `cargo` is found no matter how the agent spawns it. `rozum launch` now also prints a
+build hint when the configured image is missing locally, instead of confusingly trying to pull the
+unpublished default. **Validated end-to-end on M4 (Docker 29.6):** built the image, then a real
+`rozum launch --no-model … docker` ran `cargo new` + `cargo build` + executed the binary *inside* the
+container (`Hello, world!`), and the build output round-tripped to the host workspace — the Docker
+analog of the Seatbelt P1 "cargo build succeeds" gate (committed as the ignored test
+`agent_image_builds_a_crate_in_the_docker_jail`). Known gaps unchanged (BACKLOG): bridge egress under
+`gateway-only`, opencode's unmounted config file, no resource limits yet.
+
 ## sandbox — Docker container backend (`ROZUM_SANDBOX_BACKEND=docker`)
 Completed: 2026-06-20
 

@@ -2524,6 +2524,22 @@ fn sandboxed_command(program_name: &str) -> std::process::Command {
             // forwarded by name (the gateway URLs already use host.docker.internal via
             // `sandbox_gateway_host`); the agent's args are appended after program_name.
             let image = rozum::sandbox::default_docker_image();
+            // Preflight: if the image isn't present locally, `docker run` would try to
+            // pull it (and fail confusingly for the unpublished default). Print a clear
+            // hint instead, then still proceed so behavior stays predictable.
+            let present = StdCommand::new("docker")
+                .args(["image", "inspect", &image])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !present {
+                eprintln!(
+                    "  ! docker image '{image}' not found locally — build it first:\n    \
+                     scripts/build-agent-image.sh   (or set ROZUM_SANDBOX_DOCKER_IMAGE)"
+                );
+            }
             eprintln!(
                 "  → sandboxed (Docker): image={image} workspace={} gateway via {}",
                 ws.display(),
