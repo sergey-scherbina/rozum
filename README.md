@@ -28,8 +28,16 @@ any time — there are no fixed turns.
 - **A local LLM gateway.** `rozum gateway` / `rozum launch` serve an
   OpenAI- and Anthropic-compatible API on `127.0.0.1`, backed by an in-process
   MLX / GGUF engine on Apple Silicon — a drop-in local provider for Claude Code,
-  Codex, and anything that speaks those dialects, with a **frugal model cascade**
-  (cheapest model first, escalate only when needed). See below.
+  Codex, opencode, and anything that speaks those dialects, with a **frugal model
+  cascade** (cheapest model first, escalate only when needed). See below.
+- **A structural sandbox.** Every `rozum launch <agent>` runs the agent in a
+  Seatbelt jail (macOS) — writes confined to its workspace, secrets denied, only
+  the local gateway reachable off-box. On by default; `--no-sandbox` opts out.
+- **A local-model conference.** Local models can join a meeting room as **live
+  participants** alongside humans: `rozum meetings participant --model <spec>
+  --room <name>` joins a model that reads the room and replies like anyone else,
+  and `scripts/demo-conference.sh` brings up a whole sandboxed conference
+  (several models + humans) in one command. See the user manual.
 
 ## Quick start
 
@@ -57,14 +65,22 @@ against it with the right env vars already set:
 
 ```bash
 # Run the gateway daemon (OpenAI on /v1, Anthropic on /):
-rozum gateway --model mlx-community/Qwen3-4B-4bit
+rozum gateway --model mlx-community:gpt-oss-20b-MXFP4-Q4
 #   export OPENAI_BASE_URL=http://localhost:8089/v1
 #   export ANTHROPIC_BASE_URL=http://localhost:8089
 
-# Or launch a program with the gateway + env vars wired up automatically:
-rozum launch --model mlx-community/Qwen3-4B-4bit -- claude
+# Or launch a coding agent with the gateway + env vars wired up automatically.
+# The agent (Claude Code / Codex / opencode) runs jailed in a Seatbelt sandbox by
+# default — writes confined to its workspace, only the gateway reachable off-box:
+rozum launch --model mlx-community:Qwen3.6-35B-A3B-4bit claude
+rozum launch --model mlx-community:gpt-oss-20b-MXFP4-Q4 codex
 rozum launch                 # no --model → interactive picker (local + cloud)
+rozum launch --no-sandbox …  # opt out of the jail (ROZUM_SANDBOX=0)
 ```
+
+The two curated local models are **Qwen3.6-35B-A3B** (strongest local agentic coder)
+and **gpt-oss-20b** (OpenAI reasoning MoE); `rozum models list` shows them,
+`--all` adds the extended fallback catalog. Any HuggingFace/MLX spec works too.
 
 **Cascade** — name several models and rozum routes frugally: the cheapest model
 first, escalating to a stronger one only when the answer isn't good enough.
@@ -72,8 +88,8 @@ rozum auto-orders them cheapest→most-capable and classifies local vs cloud:
 
 ```bash
 # Repeatable --model (or one comma-separated value) makes a cascade:
-rozum launch --model qwen3-4b --model claude-haiku-4-5 --model gpt-4o -- claude
-rozum launch --model "qwen3-4b,claude-haiku-4-5" --strategy classify -- codex
+rozum launch --model gpt-oss-20b --model claude-haiku-4-5 --model gpt-4o claude
+rozum launch --model "mlx-community:gpt-oss-20b-MXFP4-Q4,claude-haiku-4-5" --strategy classify codex
 ```
 
 `--strategy` picks the start tier: `cheapest` | `classify` (default) | `learned`.
@@ -100,6 +116,7 @@ src/
 ├── lib.rs                  library entry
 ├── backend.rs              ChatBackend SPI (the inference backend abstraction)
 ├── gateway.rs              OpenAI/Anthropic HTTP gateway + switchboard
+├── sandbox.rs              Seatbelt/Docker jail for launched agents
 ├── cascade/                frugal/escalation model router (CascadeBackend)
 ├── concurrency.rs          admission control + adaptive per-model concurrency
 ├── agent.rs                reference agent runtime (tool loop, escalation)
@@ -110,7 +127,8 @@ src/
 │   ├── mcp_server.rs       Unix-socket MCP server (per room)
 │   ├── proxy.rs            stdio MCP proxy (agents)
 │   ├── budget.rs           per-room char budgets
-│   └── participant.rs      human + agent participants
+│   ├── participant.rs      human + agent participant identity types
+│   └── model_participant.rs local model as a live room participant (the conference bridge)
 ├── tui/                    ratatui terminal UI for the operator
 ├── web/                    HTTP + WebSocket bridge for browsers
 ├── telegram/               Telegram bridge

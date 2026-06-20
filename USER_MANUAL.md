@@ -242,6 +242,92 @@ permissions in the channel.
 
 ---
 
+## Local models: gateway, launch & sandbox
+
+rozum can host local LLMs and route coding agents (Claude Code, Codex, opencode)
+at them — no cloud, no API keys.
+
+### The gateway
+
+```bash
+# Serve a model behind an OpenAI (/v1) + Anthropic (/) API on 127.0.0.1:
+rozum gateway --model mlx-community:gpt-oss-20b-MXFP4-Q4
+rozum gateway status        # model, port, pid, uptime, clients
+rozum gateway stop
+```
+
+The two curated local models are **Qwen3.6-35B-A3B** (strongest local coder) and
+**gpt-oss-20b** (OpenAI reasoning MoE). List them with `rozum models list`
+(`--all` adds the extended fallback catalog); a model downloads on first use. Any
+HuggingFace / MLX / GGUF spec works too.
+
+### Launching an agent
+
+`rozum launch <agent>` starts (or reuses) a gateway and runs the agent already
+wired to it — Claude Code via Anthropic env, Codex via injected provider flags,
+opencode via a written provider config:
+
+```bash
+rozum launch --model mlx-community:Qwen3.6-35B-A3B-4bit claude
+rozum launch --model mlx-community:gpt-oss-20b-MXFP4-Q4 codex
+rozum launch opencode                  # reuse a running gateway
+rozum launch                           # interactive model picker
+```
+
+### The sandbox
+
+Every launched agent runs **jailed** by default (macOS Seatbelt): file writes
+are confined to its workspace (cwd) + toolchain caches, secrets are denied, and
+only the local gateway is reachable off-box — with no per-action approval
+prompts. Opt out per launch:
+
+```bash
+rozum launch --no-sandbox …                  # or ROZUM_SANDBOX=0
+ROZUM_SANDBOX=/path/to/ws rozum launch …      # jail to an explicit workspace
+ROZUM_SANDBOX_BACKEND=docker rozum launch …   # container backend (any OS)
+```
+
+---
+
+## Local models in a room: the conference
+
+A local model can join a meeting room as a **live participant** — it reads the
+room and replies like any human or agent, with no moderator or turn-taking.
+
+```bash
+# join room "demo" as `gpt-oss`, replying when @mentioned:
+rozum meetings participant \
+  --model mlx-community:gpt-oss-20b-MXFP4-Q4 --room demo --as gpt-oss \
+  --gateway-url http://127.0.0.1:8089/v1 \
+  --persona "You are gpt-oss, a helpful assistant in our chat."
+```
+
+- `--reply-policy` — `mention` (default; reply only on `@handle`), `always`
+  (reply to any human message), or `manual`.
+- `--persona` / `--persona-file` — context (who it is, the topic) so it answers
+  on-topic instead of generically.
+- `--peer <handle>` — other models in the room, so `always` never loops
+  model↔model.
+
+### A whole conference in one command
+
+`scripts/demo-conference.sh` brings up the model side of a conference — a gateway
++ participant per local model, each joined to one room with a persona — and
+prints how humans (TUI/web) and a cloud Claude join:
+
+```bash
+LOCAL=qwen3.6 scripts/demo-conference.sh             # one model (safe on 36 GB)
+LOCAL="qwen3.6 gpt-oss" scripts/demo-conference.sh   # both (needs ~32 GB)
+ROOM=townhall scripts/demo-conference.sh
+```
+
+Then a human joins with `rozum meetings attach --room conference` (TUI) or
+`rozum meetings web --room conference` (browser); a cloud Claude joins by running
+Claude Code in the repo. `@mention` a model to talk to it. `Ctrl-C` stops
+everything the script started.
+
+---
+
 ## Environment variables
 
 | Variable                | Used by                  | Purpose                                       |
@@ -254,6 +340,8 @@ permissions in the channel.
 | `TELEGRAM_CHAT_ID`      | `rozum telegram`         | Numeric chat ID                               |
 | `DISCORD_BOT_TOKEN`     | `rozum discord`          | Bot token                                     |
 | `DISCORD_CHANNEL_ID`    | `rozum discord`          | Numeric channel ID                            |
+| `ROZUM_SANDBOX`         | `rozum launch`           | Agent jail: on (default) / `0` off / a path = workspace |
+| `ROZUM_SANDBOX_BACKEND` | `rozum launch`           | `seatbelt` (macOS, default) or `docker`       |
 
 ---
 

@@ -6,8 +6,8 @@
 # (a shared `rozum gateway`, under /usr/bin/time -l for the resident footprint),
 # then runs every task through `rozum launch` (no --model), which *reuses* that
 # resident model — no reload between tasks. `rozum launch` still applies its
-# Claude-Code prompt trimming + Codex provider config; every agent flag is passed
-# on the command line. Each task is its own process tree, measured independently:
+# Seatbelt sandbox jail (default-on) + Claude-Code prompt trimming + Codex/opencode
+# provider config; every agent flag is passed on the command line. Each task is its own process tree, measured independently:
 # wall time, the agent tree's peak RAM, peak CPU% (agent + gateway), pass/fail.
 #
 # Two independent timeouts (per your design — model vs everything else):
@@ -223,9 +223,10 @@ for spec in "${MODELS[@]}"; do
       setup_task "$task" "$work"
       prompt="$(prompt_for "$task")"
       alog="$work/agent.log"; sfile="$work/samples.txt"
-      # Build the runner per agent. claude/codex route through `rozum launch` (no --model)
-      # which reuses the resident shared gateway. opencode uses its own OpenAI-compatible
-      # provider pointed straight at that gateway's port (rozum launch doesn't drive it).
+      # Build the runner per agent. ALL THREE route through `rozum launch` (no --model): it
+      # reuses the resident shared gateway AND jails the agent (Seatbelt sandbox, default-on).
+      # claude via Anthropic env, codex via injected provider flags, opencode via a written
+      # provider config (+ `-m rozum/local`).
       if [ "$agent" = claude ]; then
         # --lean strips non-coding tools (incl. AskUserQuestion, which in headless `-p`
         # can't be answered → a model that calls it to "verify" loops until the timeout)

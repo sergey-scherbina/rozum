@@ -73,8 +73,10 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
                 active/token, ~12 GB → roomy on 36 GB. Full harmony adapter (clean chat + \
                 multi-turn tool calls). REASONING model — MUST sample (the gateway floors its \
                 temp to ~1.0; greedy makes its CoT loop). claude 5/5 on the matrix — matches the \
-                35B. codex weak (sub-35B fumbles its shell-only file ops); opencode passes + now \
-                fast (prefix reuse). Strong local agentic coder; the 35B-A3B stays #1 for codex.",
+                35B. codex much improved by the gateway delivery bridges (apply_patch re-route + \
+                fold + unicode-decode + harmony recovery + read-repair) — full gpt-oss matrix 12/15 \
+                (was 8/15); residual reds are create-from-scratch + temp-1.0 variance, not delivery \
+                (docs/matrix-failure-analysis.md). The 35B-A3B stays #1 for the hardest codex tasks.",
     },
 ];
 
