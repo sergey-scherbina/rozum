@@ -49,7 +49,14 @@ pub struct EngineOptions {
 /// harmony), EOS/cancel/max-tokens, stream assembly, sampling glue — is shared in
 /// [`drive`]. The engine owns its whole forward + sampling graph; it only yields
 /// tokens.
-pub trait LocalEngine: Send {
+///
+/// **Not `Send`.** In-process engines are routinely `!Send`: the MLX leaf pins its
+/// model + `Array`s + KV cache to one Metal-stream worker thread for life, and
+/// llama.cpp's `LlamaContext` is likewise thread-bound. [`drive`] runs the engine
+/// **synchronously on the engine's own thread** (it never moves the engine across
+/// threads), so a `Send` bound would only lock these engines out of the seam for no
+/// benefit. Engines that *are* `Send` still are — this just doesn't require it.
+pub trait LocalEngine {
     /// Load weights (zero-copy `mmap` internally) + tokenizer + config from a
     /// model directory.
     fn load(dir: &Path, opts: &EngineOptions) -> Result<Self, String>
@@ -69,7 +76,7 @@ pub trait LocalEngine: Send {
         prompt: &'a [u32],
         params: &'a SamplingParams,
         cancel: &'a CancellationToken,
-    ) -> Box<dyn Iterator<Item = Result<u32, String>> + Send + 'a>;
+    ) -> Box<dyn Iterator<Item = Result<u32, String>> + 'a>;
 
     /// Opt-in: append-only prefix-KV reuse across turns (default: unsupported).
     fn supports_prefix_reuse(&self) -> bool {
@@ -87,13 +94,15 @@ pub trait LocalEngine: Send {
 /// so `decode` is passed in rather than reached through `&self` (which `generate`
 /// already borrows mutably for the iterator's lifetime).
 ///
-/// **native-engine-spi status:** this completes the shared driver for engines whose
-/// generation owns no reclaimable post-run state (the x86 Vulkan leaf, dense MLX).
-/// The MLX leaf keeps calling [`consume_tokens`] directly for now because its
-/// **hybrid** path reclaims the generator's internal KV/conv cache *after* the run
-/// (`into_cache_and_snapshot`, for prefix reuse) — state that a `Box<dyn Iterator>`
-/// return erases. Growing the trait a cache-reclaim seam is deferred to be shaped
-/// against the real x86 engine (`docs/specs/native-engine-spi.md`).
+/// **native-engine-spi status:** the shared driver for engines whose generation owns
+/// no reclaimable post-run state (the x86 Vulkan leaf, dense MLX, GGUF). The `Send`
+/// bound that previously kept `!Send` engines off the seam is now relaxed (see the
+/// trait), so a dense MLX / llama.cpp engine *can* implement `LocalEngine` and route
+/// through `drive`. The MLX **hybrid** path still calls [`consume_tokens`] directly
+/// because it reclaims the generator's internal KV/conv cache *after* the run
+/// (`into_cache_and_snapshot`, for prefix reuse) — state a `Box<dyn Iterator>` return
+/// erases; that cache-reclaim seam stays deferred, to be shaped against the real x86
+/// engine (`docs/specs/native-engine-spi.md`).
 #[allow(clippy::too_many_arguments)]
 pub fn drive<E, D, F>(
     engine: &mut E,
@@ -502,9 +511,65 @@ mod tests {
             _prompt: &'a [u32],
             _params: &'a crate::backend::SamplingParams,
             _cancel: &'a CancellationToken,
-        ) -> Box<dyn Iterator<Item = Result<u32, String>> + Send + 'a> {
+        ) -> Box<dyn Iterator<Item = Result<u32, String>> + 'a> {
             Box::new(self.ids.clone().into_iter().map(Ok::<u32, String>))
         }
+    }
+
+    // A deliberately `!Send` engine (holds an `Rc`, like MLX/llama.cpp hold thread-
+    // bound GPU state) — it would NOT compile under the old `LocalEngine: Send`
+    // supertrait. That it now implements the trait AND runs through `drive` is the
+    // proof that the Send-relaxation actually unblocks `!Send` in-process engines.
+    struct NotSendEngine {
+        meta: EngineMeta,
+        ids: std::rc::Rc<Vec<u32>>, // Rc is !Send
+    }
+
+    impl super::LocalEngine for NotSendEngine {
+        fn load(_dir: &std::path::Path, _opts: &super::EngineOptions) -> Result<Self, String> {
+            unreachable!()
+        }
+        fn meta(&self) -> &EngineMeta {
+            &self.meta
+        }
+        fn generate<'a>(
+            &'a mut self,
+            _prompt: &'a [u32],
+            _params: &'a crate::backend::SamplingParams,
+            _cancel: &'a CancellationToken,
+        ) -> Box<dyn Iterator<Item = Result<u32, String>> + 'a> {
+            Box::new((*self.ids).clone().into_iter().map(Ok::<u32, String>))
+        }
+    }
+
+    #[test]
+    fn drive_accepts_a_not_send_engine() {
+        // Compile-time proof of the relaxation + a runtime sanity check.
+        fn _assert_not_send<T: ?Sized>() {}
+        let table = std::collections::HashMap::from([(1, ("hi", false)), (9, ("", false))]);
+        let mut eng = NotSendEngine {
+            meta: meta(false, vec![9]),
+            ids: std::rc::Rc::new(vec![1, 9]),
+        };
+        let mut got = String::new();
+        let cancel = CancellationToken::new();
+        let stop = super::drive(
+            &mut eng,
+            &[1],
+            &crate::backend::SamplingParams::default(),
+            100,
+            true,
+            &cancel,
+            toy_decode(&table),
+            |e| {
+                if let Ok(ChatEvent::TextDelta { text }) = e {
+                    got.push_str(&text);
+                }
+                true
+            },
+        );
+        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(got, "hi");
     }
 
     #[test]

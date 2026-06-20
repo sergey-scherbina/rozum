@@ -1,5 +1,21 @@
 # Changelog
 
+## engine-spi — relax the `LocalEngine` `Send` bound (unblocks `!Send` in-process engines)
+Completed: 2026-06-20
+
+Dropped the `Send` requirement from the `LocalEngine` trait and from `generate()`'s returned iterator.
+A feasibility map established that this — not the (deferred) cache-reclaim seam — is the real blocker
+to routing the MLX path through the shared `engine::drive`: the MLX engine state (model + `Array`s +
+KV cache on one Metal stream) is irreducibly `!Send`, pinned to a worker thread for life (the same
+reason the GGUF/llama.cpp path calls `consume_tokens` directly). `drive` runs the engine
+**synchronously on its own thread** and never moves it across threads, so the `Send` bound only locked
+these engines out of the seam for no benefit; engines that *are* `Send` still are. Proven by a new
+`drive_accepts_a_not_send_engine` test — an engine holding an `Rc` (so `!Send`) that now implements
+`LocalEngine` and runs end-to-end through `drive`, which would not have compiled before. This unblocks
+a future `impl LocalEngine` for dense MLX / llama.cpp; the remaining dense-MLX `drive` adoption is a
+hot-path `run_job` restructuring of mostly-architectural value (MLX already shares the decode loop via
+`consume_tokens`), best done alongside the x86 engine — tracked in SPRINT `engine-spi-dense-mlx-drive`.
+
 ## gguf — route through the shared engine loop + fix a 1-token generation bug
 Completed: 2026-06-20
 

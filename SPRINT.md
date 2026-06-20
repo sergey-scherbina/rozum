@@ -2113,17 +2113,27 @@ soon as any single track succeeds.
         full `"1 2 … 20"` + correct `get_weather` tool_call with a cross-turn-safe id. (Step 1, the
         `next_tool_call_id` fix on `feature/gguf-toolcall-id`, was superseded here — `consume_tokens`
         already uses it.)
-  - [ ] **engine-spi-dense-mlx-drive — dense MLX adopts `drive()` (PLANNED 2026-06-20).**
-        Give `drive()` its first PRODUCTION caller (today only the `FakeEngine` test uses it). The dense
-        Qwen3/Qwen3-MoE MLX path has no hybrid cache to reclaim, so it can route `chat` → `engine::drive`
-        directly (the board's sanctioned "lower-risk warm-up" before the hybrid reclaim seam). *Done
-        when:* byte-exact greedy parity on a dense model on M4 (drive vs the current direct
-        `consume_tokens` path), no streaming/tool regression.
+  - [~] **engine-spi-dense-mlx-drive — Send-relaxation DONE 2026-06-20** (branch
+        `feature/engine-spi-relax-send`). **Prerequisite shipped:** dropped the `Send` bound from
+        `LocalEngine` and from `generate()`'s return — a feasibility map proved this (not the reclaim
+        seam) is the real blocker, since the MLX engine state (model + `Array`s + KV cache, one Metal
+        stream) is irreducibly `!Send` (same reason GGUF calls `consume_tokens` directly). `drive` runs
+        the engine synchronously on its own thread, so `Send` was unneeded; relaxing it lets `!Send`
+        in-process engines (MLX, llama.cpp) `impl LocalEngine`. Proven by a new `!Send` engine test
+        (`drive_accepts_a_not_send_engine`, holds an `Rc` — would not compile before). **Remaining (the
+        actual adoption):** wrap the dense MLX `run_job` arms as an `impl LocalEngine` and route through
+        `drive`. This is a fiddly **hot-path** restructuring (the per-arch `Generate` borrows model + the
+        external `ConcatKeyValueCache` with tight lifetimes; cache truncate/`put_dense` stay in
+        `run_job`) for **mostly-architectural** value — MLX already shares the decode loop via
+        `consume_tokens`, so `drive` adoption only proves the trait with a real engine. Recommend doing
+        it alongside the **x86 engine** (which will exercise `drive` for real anyway) rather than risking
+        the MLX hot path early. *Done when:* byte-exact greedy parity on a dense model (drive vs the
+        current direct `consume_tokens`).
   - [ ] **engine-spi-reclaim-seam — DEFERRED (draft-only).** The hybrid cache-reclaim trait seam
-        (`GenerationState`/`into_generation_state` + relaxing `LocalEngine: Send`) stays deferred — the
-        board wants it shaped against the real x86 engine, which can't exist on M4, so committing the API
-        now risks a redesign. At most: a compiled, `FakeEngine`-validated DRAFT of the seam shape; no MLX
-        hybrid rewire until x86 is in play.
+        (`GenerationState`/`into_generation_state`) stays deferred — the board wants it shaped against
+        the real x86 engine, which can't exist on M4, so committing the API now risks a redesign. (The
+        other half of the deferral, relaxing `LocalEngine: Send`, is now DONE — see above.) At most: a
+        compiled, `FakeEngine`-validated DRAFT of the seam shape; no MLX hybrid rewire until x86 is in play.
 
 - [x] x86-native-slot - **DONE 2026-06-18 — the empty x86 slot, scaffolded so the real engine
   drops in without rework** (`src/x86/`, branch `feature/x86-native-slot`). Compiles on any host

@@ -41,7 +41,7 @@ impl LocalEngine for X86Engine {
         _prompt: &'a [u32],
         _params: &'a SamplingParams,
         _cancel: &'a CancellationToken,
-    ) -> Box<dyn Iterator<Item = Result<u32, String>> + Send + 'a> {
+    ) -> Box<dyn Iterator<Item = Result<u32, String>> + 'a> {
         // Yields a single error rather than panicking, so a partial fill-in degrades cleanly.
         Box::new(std::iter::once(Err(format!(
             "x86::model::generate not implemented (x86 P1): {}",
