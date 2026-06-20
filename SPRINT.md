@@ -178,10 +178,17 @@ portability stays in BACKLOG.
 - [ ] **windows-core-ci.** Add a low-risk portability gate: `windows-latest` build/test with
       `--no-default-features`, documenting any Unix-only assumptions that surface instead of starting
       a full Windows port.
-- [ ] **meetings-rest-read.** When remote/stateless clients need it, add the deferred day-scoped REST
-      read endpoints on the meeting daemon (`/rooms/{name}/days` and
-      `/rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`). Lower priority than the PWA room picker
-      unless a client requires it.
+- [ ] **meetings-rest-read (PLANNED 2026-06-20 — the clean, non-clashing meeting pick).** A day-scoped
+      **read-only HTTP API on the meeting daemon**: `GET /rooms/{name}/days` (list day files + counts
+      from `index.json`) + `GET /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M` (a page of `(date,n)`
+      messages). The daemon is unix-socket+rmcp today with **zero HTTP**, so there's nothing to collide
+      with (the sibling's PWA web work is a separate client over `web.rs`). Pure read-from-disk over
+      `src/meeting/store.rs`'s indexed day files (reuse `read_since`/the day API the web client already
+      uses); no daemon state, no model load. Auth = the same shared-secret pattern as `meetings web`
+      (`ROZUM_WEB_SECRET`). Attach as a small axum listener spawned beside the unix socket in
+      `serve_daemon` (or a `web.rs`-style module). *Done when:* unit tests over a tempdir store return
+      the right day list + paged messages, and a live `curl` against a running daemon reads a room.
+      **Avoid `web.rs`/`web_index.html`/room-picker/.ssc — those are the sibling's `meeting-web-pwa-ssc`.**
 - [ ] **model-participant web controls.** Surface start/stop/status, reply policy
       (`mention`/`always`/`manual`), persona selection, and visible gateway/model state from the room
       UI so demos do not require juggling several terminal commands.
@@ -2083,6 +2090,26 @@ soon as any single track succeeds.
   Token-level seam,
   NOT a per-op tensor abstraction (avoids the `mistralrs-mlx-direct` perf dead-end).
   Spec: `docs/specs/native-engine-spi.md`.
+  - [ ] **engine-spi-a3-gguf — route the GGUF leaf through `consume_tokens` (PLANNED 2026-06-20).**
+        GGUF (`src/gguf.rs`) still has its OWN third copy of the decode-control loop (`generate_blocking`
+        ~`:445` + a private `ToolCallParser` ~`:217`). Lift it onto the shared `crate::engine::
+        consume_tokens` so the SPI is proven by **two real engines, not just MLX** (today only MLX +
+        `FakeEngine` exercise the shared loop). **Caveat (board):** do NOT downgrade GGUF's *streaming*
+        tool-call parser — `consume_tokens` must keep emitting tool deltas as they stream. GGUF already
+        shares `crate::sampler::sample`, so only the loop + finalize move. Hardware-independent
+        (`metal`/CPU on M4). *Done when:* GGUF chat + a tool-call run behave identically (existing GGUF
+        tests green + a streamed tool-call check), and the third loop copy is deleted.
+  - [ ] **engine-spi-dense-mlx-drive — dense MLX adopts `drive()` (PLANNED 2026-06-20).**
+        Give `drive()` its first PRODUCTION caller (today only the `FakeEngine` test uses it). The dense
+        Qwen3/Qwen3-MoE MLX path has no hybrid cache to reclaim, so it can route `chat` → `engine::drive`
+        directly (the board's sanctioned "lower-risk warm-up" before the hybrid reclaim seam). *Done
+        when:* byte-exact greedy parity on a dense model on M4 (drive vs the current direct
+        `consume_tokens` path), no streaming/tool regression.
+  - [ ] **engine-spi-reclaim-seam — DEFERRED (draft-only).** The hybrid cache-reclaim trait seam
+        (`GenerationState`/`into_generation_state` + relaxing `LocalEngine: Send`) stays deferred — the
+        board wants it shaped against the real x86 engine, which can't exist on M4, so committing the API
+        now risks a redesign. At most: a compiled, `FakeEngine`-validated DRAFT of the seam shape; no MLX
+        hybrid rewire until x86 is in play.
 
 - [x] x86-native-slot - **DONE 2026-06-18 — the empty x86 slot, scaffolded so the real engine
   drops in without rework** (`src/x86/`, branch `feature/x86-native-slot`). Compiles on any host
