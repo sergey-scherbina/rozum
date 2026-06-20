@@ -453,8 +453,26 @@ These items turn "portable in principle" into "portable by `cargo build`".
     `reorder_launch_args` so it works after the program name, left for the child after `--`; help
     text + 2 reorder unit tests + CLI probes green. Remaining: (c) `rozum.toml [sandbox]` (multiple
     paths / network mode / secret-list).
-  - [ ] model-sandbox-harden-linux - **P2.** Pin toolchain path discovery (cargo/rustup home,
-    `$TMPDIR`, git) + add the Linux backend (Landlock / bubblewrap bind-mounts).
+  - [ ] model-sandbox-linux-native - **P2 — a non-container Linux jail (Landlock / bubblewrap).**
+    The Docker backend already jails on any OS, but it's heavy (a whole container + image). On Linux a
+    *native* jail is lighter and the natural default there, mirroring what Seatbelt is on macOS. Same
+    durable seam: render the existing `rust_coding` `(path,mode)` `SandboxPolicy` to a Linux mechanism,
+    selected by `SandboxBackend` (add a `Landlock`/`Bwrap` variant + `from_env` mapping;
+    `sandbox_workspace`'s macOS-only guard already lets non-Seatbelt backends run off macOS). Two
+    candidate mechanisms, likely both (try Landlock, fall back to bubblewrap):
+    • **Landlock** (kernel ≥ 5.13, best ≥ 6.x) — in-process LSM ruleset: a `path_beneath` rule per
+      writable/ro path; the launcher applies it then `execve`s the agent (no helper binary). Closest
+      analog to Seatbelt; degrades on old kernels (feature-probe the ABI, fall back).
+    • **bubblewrap** (`bwrap`) — `--bind <p> <p>` (rw) / `--ro-bind` (ro) / `--dev`/`--proc`/`--tmpfs`
+      for the rest; unshare net for `none`, slirp/none for `gateway-only`. A helper-process jail like
+      `sandbox-exec`, so it slots into `sandboxed_command` the same way (wrap the program).
+    Carry over the macOS lessons: allow-all-read **minus** the secret denylist (an allow-list breaks
+    the loader), keep the agent-state + toolchain paths writable, map `NetPolicy` (none/gateway-only/
+    full; strict-egress via the same iptables idea or a netns). Pin toolchain-path discovery
+    (`CARGO_HOME`/`RUSTUP_HOME`/`$TMPDIR`/git) robustly across distros while here. *Done when:* on a
+    Linux host `rozum launch` jails the agent natively (writes confined, secrets denied, `cargo build`
+    succeeds in-jail, an out-of-workspace write denied) — the Seatbelt P1 gate, Linux edition. Not
+    needed on the current M4 target; unblock when a Linux host is in play.
   - [~] model-sandbox-container - **P3. Docker backend DONE 2026-06-20** (branch
     `feature/sandbox-docker-backend`). `ROZUM_SANDBOX_BACKEND=docker` (alias `container`) renders the
     same `rust-coding` `(path,mode)` set to a `docker run`: writable→`-v :rw` binds (host path==
