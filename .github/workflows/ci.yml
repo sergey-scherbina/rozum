@@ -1,11 +1,12 @@
 name: ci
 
-# Two gates:
+# Three gates:
 #  - macos: the default build (native MLX + GGUF, which need Xcode/Metal) + the lib tests.
 #  - linux: the **portable durable core** (`--no-default-features`: no native backends — the SPI,
 #    gateway w/ HTTP backends, agent runtime, cascade router, concurrency, config, meeting room).
 #    This enforces that the durable layer stays Linux-buildable, the central claim of
 #    `docs/specs/portability-and-the-backend-spi.md` — a regression there fails CI, not folklore.
+#  - windows: the same durable core gate on `windows-latest`, so Unix-only assumptions surface early.
 
 on:
   push:
@@ -57,6 +58,29 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
       # No Metal/Xcode toolchain on Linux: build + test the durable core only.
+      - name: Build + test (--no-default-features)
+        run: |
+          cargo build --no-default-features --lib --bin rozum
+          cargo test --no-default-features --lib
+
+  windows-core:
+    name: windows — portable core (no native backends)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install stable
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      # No native backends: this is the durable-layer portability signal. Windows-specific
+      # daemon IPC/service gaps stay tracked in BACKLOG until this job exposes the next seam.
       - name: Build + test (--no-default-features)
         run: |
           cargo build --no-default-features --lib --bin rozum

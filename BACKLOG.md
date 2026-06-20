@@ -531,9 +531,10 @@ These items turn "portable in principle" into "portable by `cargo build`".
   `portability-cuda-gguf` (non-`metal` llama-cpp-2 — CPU/CUDA/Vulkan; builds with MSVC), and
   the native iGPU path via `x86-native-runtime` (Vulkan is cross-platform — the SAME L5 engine
   runs on Windows; `VK_EXT_external_memory_host` zero-copy works there too). Sub-tasks:
-  - [ ] windows-core-ci - A `windows-core` CI job (`windows-latest`) mirroring `linux-core`:
-    `cargo build --no-default-features` + durable-layer tests on every push, so a Windows
-    regression fails CI, not folklore. Cheapest first step; it surfaces the seams below.
+  - [x] windows-core-ci - **DONE 2026-06-20.** A `windows-core` CI job (`windows-latest`)
+    now mirrors `linux-core`: `cargo build --no-default-features --lib --bin rozum` +
+    `cargo test --no-default-features --lib` on every push/PR, so a Windows regression fails
+    CI, not folklore. Remaining Windows work is the concrete seams below.
   - [ ] windows-daemon-ipc - Abstract the meeting daemon's client transport. Today it's a
     Unix-domain socket (`meeting_sock()` / `UnixListener`), and `std::os::unix::net` does not
     exist on Windows. Put it behind a small transport with a Windows impl — AF_UNIX (Win10

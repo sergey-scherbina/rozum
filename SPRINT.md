@@ -182,9 +182,10 @@ portability stays in BACKLOG.
       exists, and follow-up bridge wording now separates daemon-backed web from legacy
       telegram/discord bridge ports. The old `codex/queue-serving-hygiene` branch/commit `14c425f`
       remains consciously unmerged for separate review; it is not a current sprint blocker.
-- [ ] **windows-core-ci.** Add a low-risk portability gate: `windows-latest` build/test with
-      `--no-default-features`, documenting any Unix-only assumptions that surface instead of starting
-      a full Windows port.
+- [x] **windows-core-ci — DONE 2026-06-20.** Added a low-risk portability gate in
+      `.github/workflows/ci.yml`: `windows-latest` build/test with `--no-default-features`,
+      mirroring `linux-core`. This documents/exposes Unix-only assumptions without starting a full
+      Windows port.
 - [ ] **meetings-rest-read (PLANNED 2026-06-20 — the clean, non-clashing meeting pick).** A day-scoped
       **read-only HTTP API on the meeting daemon**: `GET /rooms/{name}/days` (list day files + counts
       from `index.json`) + `GET /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M` (a page of `(date,n)`
