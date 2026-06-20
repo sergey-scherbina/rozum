@@ -376,6 +376,55 @@ pub fn write_seatbelt_profile_temp(policy: &SandboxPolicy) -> std::io::Result<Pa
     Ok(path)
 }
 
+/// model-sandbox "No-noise principle": the approval-bypass flag to append for a
+/// launched agent, or `None` to leave prompts on. Pure (no env / no I/O) so both
+/// the CLI and regression harness can test the exact same decision.
+///
+/// Returns `None` when: the jail is off; the invocation is interactive; the agent
+/// is not recognized; or the user already set an approval/permission/sandbox
+/// policy (rozum never overrides an explicit choice).
+pub fn autonomy_flag_for(program: &[String], jailed: bool) -> Option<&'static str> {
+    if !jailed {
+        return None;
+    }
+    let p0 = program.first()?;
+    let base = p0.rsplit(['/', '\\']).next().unwrap_or(p0);
+    let has = |flag: &str| program.iter().any(|a| a == flag);
+    let has_pfx = |pfx: &str| {
+        program
+            .iter()
+            .any(|a| a == pfx || a.starts_with(&format!("{pfx}=")))
+    };
+    match base {
+        // claude headless = `-p`/`--print`. Skip if the user picked a permission policy.
+        "claude" => {
+            let headless = has("-p") || has("--print");
+            (headless && !has("--dangerously-skip-permissions") && !has_pfx("--permission-mode"))
+                .then_some("--dangerously-skip-permissions")
+        }
+        // codex headless = `codex exec`. The flag bypasses codex's own approval + sandbox
+        // ("intended solely for environments that are externally sandboxed" - rozum's jail).
+        // Skip if the user chose an approval or sandbox policy.
+        "codex" => {
+            let headless = has("exec");
+            let user_set = has("--dangerously-bypass-approvals-and-sandbox")
+                || has("--full-auto")
+                || has("-a")
+                || has_pfx("--ask-for-approval")
+                || has("-s")
+                || has_pfx("--sandbox");
+            (headless && !user_set).then_some("--dangerously-bypass-approvals-and-sandbox")
+        }
+        // opencode headless = `opencode run`.
+        "opencode" => {
+            let headless = has("run");
+            (headless && !has("--dangerously-skip-permissions"))
+                .then_some("--dangerously-skip-permissions")
+        }
+        _ => None,
+    }
+}
+
 /// Canonicalize a path (resolve symlinks like `/tmp`→`/private/tmp`); fall back to
 /// the path as given if it does not exist yet.
 fn resolve(p: &std::path::Path) -> PathBuf {

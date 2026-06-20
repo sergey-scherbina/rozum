@@ -159,12 +159,17 @@ portability stays in BACKLOG.
       mutation, no Docker pulls, no room posts. Verified: `cargo test doctor --lib
       --no-default-features`, `cargo test doctor --lib`, `cargo build --bin rozum
       --no-default-features`, and live `target/debug/rozum doctor`.
-- [ ] **sandbox-regression-harness.** Add a focused, explicit jail-invariant test target for
+- [x] **sandbox-regression-harness — DONE 2026-06-20.** Added
+      `tests/sandbox_regression.rs`, an explicit jail-invariant target for
       Seatbelt/Docker: workspace write allowed, secret read/write denied, selected network policy
       enforced (`none`/`gateway-strict`), gateway reachable when expected, simple Rust build works
       inside the jail, no-approval flags are applied only for jailed headless launches, and opencode
-      config remains visible in Docker. Keep slow/host-mutating checks ignored unless explicitly
-      requested.
+      config remains visible in Docker. Fast coverage is safe by default; slow/host-mutating checks
+      are `#[ignore]`. Verified: `cargo test --test sandbox_regression --no-default-features`,
+      `cargo test sandbox_autonomy --no-default-features`, and macOS Seatbelt e2e via
+      `cargo test --test sandbox_regression seatbelt_e2e_allows_workspace_and_denies_secret_and_escape
+      --no-default-features -- --ignored`. Docker e2e checks were added but not run here because
+      `rozum-agent:latest` is not currently built locally (`scripts/build-agent-image.sh` first).
 - [ ] **PWA room picker.** Finish the active `meeting-web-pwa-ssc` room picker: `/api/rooms`, `?room=`
       on messages/stream/submit, selected-room UI, shareable room links, and mobile-safe unread/active
       state. This is the product/demo win after the doctor lands.

@@ -222,6 +222,36 @@ VM/container with resource limits (the container backend, a later phase).
   The P3 track is complete; the only open follow-up is the optional Linux Landlock/
   bubblewrap backend (P2) for a non-container jail off macOS.
 
+### Regression harness
+
+Implemented 2026-06-20: `tests/sandbox_regression.rs` is the focused regression
+target for the jail invariants. The default run is fast and non-mutating outside
+temporary files:
+
+```bash
+cargo test --test sandbox_regression --no-default-features
+```
+
+It covers the rendered Seatbelt/Docker policy shape, Docker `none` vs
+`gateway-strict` argv, `OPENCODE_CONFIG` forwarding with `/tmp` mounted, and the
+no-approval autonomy decision through the shared `sandbox::autonomy_flag_for`
+helper. The host-mutating checks are present but ignored by default:
+
+```bash
+cargo test --test sandbox_regression seatbelt_e2e_allows_workspace_and_denies_secret_and_escape \
+  --no-default-features -- --ignored
+cargo test --test sandbox_regression docker_e2e_gateway_strict_reaches_host_and_blocks_internet \
+  --no-default-features -- --ignored
+cargo test --test sandbox_regression docker_e2e_builds_simple_crate_inside_jail \
+  --no-default-features -- --ignored
+```
+
+Verification on 2026-06-20: the fast harness passed (5 passed, 3 ignored), the
+main CLI-side `sandbox_autonomy` tests passed, and the macOS Seatbelt e2e passed
+(workspace write allowed, secret read/write denied, `$HOME` escape denied). The
+Docker e2e tests were not run in that session because `rozum-agent:latest` was not
+built locally; build it first with `scripts/build-agent-image.sh`.
+
 ## Decisions (v1 defaults — other variants can be tried later)
 
 Approved 2026-06-19:

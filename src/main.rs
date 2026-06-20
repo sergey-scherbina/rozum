@@ -2918,62 +2918,15 @@ fn apply_lean_flags(program: &mut Vec<String>, lean: bool) {
 /// Interactive sessions (the operator is present to answer) are left untouched.
 fn apply_sandbox_autonomy_flags(program: &mut Vec<String>) {
     // Only when the jail is actually on — never grant no-prompt autonomy unsandboxed.
-    if let Some(flag) = autonomy_flag_for(program, sandbox_workspace().is_some()) {
+    if let Some(flag) = rozum::sandbox::autonomy_flag_for(program, sandbox_workspace().is_some()) {
         eprintln!("  → sandbox autonomy: appending {flag} (jailed → no approval prompts)");
         program.push(flag.into());
     }
 }
 
-/// The approval-bypass flag to append for a launched agent, or `None` to leave prompts
-/// on. Pure (no env / no I/O) so it is unit-testable; `apply_sandbox_autonomy_flags`
-/// supplies `jailed`. Returns `None` when: the jail is off; the invocation is
-/// interactive (not headless); the agent isn't recognized; or the user already set an
-/// approval/permission/sandbox policy (we never override an explicit choice).
-fn autonomy_flag_for(program: &[String], jailed: bool) -> Option<&'static str> {
-    if !jailed {
-        return None;
-    }
-    let p0 = program.first()?;
-    let base = p0.rsplit(['/', '\\']).next().unwrap_or(p0);
-    let has = |flag: &str| program.iter().any(|a| a == flag);
-    let has_pfx = |pfx: &str| {
-        program
-            .iter()
-            .any(|a| a == pfx || a.starts_with(&format!("{pfx}=")))
-    };
-    match base {
-        // claude headless = `-p`/`--print`. Skip if the user picked a permission policy.
-        "claude" => {
-            let headless = has("-p") || has("--print");
-            (headless && !has("--dangerously-skip-permissions") && !has_pfx("--permission-mode"))
-                .then_some("--dangerously-skip-permissions")
-        }
-        // codex headless = `codex exec`. The flag bypasses codex's OWN approval + sandbox
-        // ("intended solely for environments that are externally sandboxed" — rozum's
-        // jail). Skip if the user chose an approval or sandbox policy.
-        "codex" => {
-            let headless = has("exec");
-            let user_set = has("--dangerously-bypass-approvals-and-sandbox")
-                || has("--full-auto")
-                || has("-a")
-                || has_pfx("--ask-for-approval")
-                || has("-s")
-                || has_pfx("--sandbox");
-            (headless && !user_set).then_some("--dangerously-bypass-approvals-and-sandbox")
-        }
-        // opencode headless = `opencode run`.
-        "opencode" => {
-            let headless = has("run");
-            (headless && !has("--dangerously-skip-permissions"))
-                .then_some("--dangerously-skip-permissions")
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod sandbox_autonomy_tests {
-    use super::autonomy_flag_for;
+    use rozum::sandbox::autonomy_flag_for;
 
     fn v(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
