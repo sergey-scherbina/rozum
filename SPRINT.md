@@ -95,6 +95,13 @@ any OS). `ROZUM_SANDBOX=0` opts out; `--no-sandbox` is the launch-flag sugar.
       canonical `/tmp` (a toolchain bind mount) instead of `$TMPDIR` (not shared by Docker Desktop), so
       the file is visible in the container at `OPENCODE_CONFIG` (verified in the `rozum-agent` image).
       Regression test `opencode_config_lives_under_tmp_so_docker_mounts_it`.
+- [x] **sandbox-no-approval-autonomy — DONE 2026-06-20.** The "No-noise principle": when jailed,
+      `rozum launch` injects the agent's approval-bypass flag for HEADLESS launches (`claude -p` →
+      `--dangerously-skip-permissions`, `codex exec` → `--dangerously-bypass-approvals-and-sandbox`,
+      `opencode run` → `--dangerously-skip-permissions`) — sandboxed models act with no per-action
+      prompts (kills the codex reject-escalation loop, Finding 1a). Gated: jailed-only, headless-only,
+      never overrides an explicit policy. Pure `autonomy_flag_for` (2 tests) + e2e-verified. **The
+      model-sandbox track is now complete** (only optional P2 Linux Landlock/bubblewrap remains).
 
 #### meeting-web-pwa-ssc (2026-06-19, operator-driven) — phone-installable meeting client, then re-author in .ssc→Rust
 

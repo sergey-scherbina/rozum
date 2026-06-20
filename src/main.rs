@@ -694,6 +694,11 @@ async fn main() {
             if no_sandbox {
                 unsafe { std::env::set_var("ROZUM_SANDBOX", "0") };
             }
+            // No-noise principle (docs/specs/model-sandbox.md): when the jail is active,
+            // a headless agent runs without per-action approval prompts — the sandbox,
+            // not interactive confirmation, is the safety boundary. Must come AFTER the
+            // `--no-sandbox` env set so it sees the jail's real on/off state.
+            apply_sandbox_autonomy_flags(&mut program);
             let model = join_models(model);
             // Precedence: --channel-mcp-name > ROZUM_CHANNEL_MCP_NAME > "rozum".
             let server_name = channel_mcp_name
@@ -2803,6 +2808,133 @@ fn apply_lean_flags(program: &mut Vec<String>, lean: bool) {
         );
         program.push("--disallowedTools".into());
         program.extend(LEAN_DISALLOW.iter().map(|t| (*t).to_string()));
+    }
+}
+
+/// model-sandbox "No-noise principle" (docs/specs/model-sandbox.md): when the jail is
+/// active, a **headless** agent (the model-as-agent case — it cannot answer a prompt,
+/// and a denied escalation makes it loop, matrix Finding 1a) runs with per-action
+/// approval prompts disabled. The structural sandbox — not interactive confirmation —
+/// is the safety boundary, so we can safely say "yes to everything in-bounds". Injects
+/// the agent's bypass flag in place; mirrors what the agentic bench passes explicitly.
+/// Interactive sessions (the operator is present to answer) are left untouched.
+fn apply_sandbox_autonomy_flags(program: &mut Vec<String>) {
+    // Only when the jail is actually on — never grant no-prompt autonomy unsandboxed.
+    if let Some(flag) = autonomy_flag_for(program, sandbox_workspace().is_some()) {
+        eprintln!("  → sandbox autonomy: appending {flag} (jailed → no approval prompts)");
+        program.push(flag.into());
+    }
+}
+
+/// The approval-bypass flag to append for a launched agent, or `None` to leave prompts
+/// on. Pure (no env / no I/O) so it is unit-testable; `apply_sandbox_autonomy_flags`
+/// supplies `jailed`. Returns `None` when: the jail is off; the invocation is
+/// interactive (not headless); the agent isn't recognized; or the user already set an
+/// approval/permission/sandbox policy (we never override an explicit choice).
+fn autonomy_flag_for(program: &[String], jailed: bool) -> Option<&'static str> {
+    if !jailed {
+        return None;
+    }
+    let p0 = program.first()?;
+    let base = p0.rsplit(['/', '\\']).next().unwrap_or(p0);
+    let has = |flag: &str| program.iter().any(|a| a == flag);
+    let has_pfx = |pfx: &str| {
+        program
+            .iter()
+            .any(|a| a == pfx || a.starts_with(&format!("{pfx}=")))
+    };
+    match base {
+        // claude headless = `-p`/`--print`. Skip if the user picked a permission policy.
+        "claude" => {
+            let headless = has("-p") || has("--print");
+            (headless && !has("--dangerously-skip-permissions") && !has_pfx("--permission-mode"))
+                .then_some("--dangerously-skip-permissions")
+        }
+        // codex headless = `codex exec`. The flag bypasses codex's OWN approval + sandbox
+        // ("intended solely for environments that are externally sandboxed" — rozum's
+        // jail). Skip if the user chose an approval or sandbox policy.
+        "codex" => {
+            let headless = has("exec");
+            let user_set = has("--dangerously-bypass-approvals-and-sandbox")
+                || has("--full-auto")
+                || has("-a")
+                || has_pfx("--ask-for-approval")
+                || has("-s")
+                || has_pfx("--sandbox");
+            (headless && !user_set).then_some("--dangerously-bypass-approvals-and-sandbox")
+        }
+        // opencode headless = `opencode run`.
+        "opencode" => {
+            let headless = has("run");
+            (headless && !has("--dangerously-skip-permissions"))
+                .then_some("--dangerously-skip-permissions")
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod sandbox_autonomy_tests {
+    use super::autonomy_flag_for;
+
+    fn v(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn injects_only_when_jailed_and_headless() {
+        // Jail off → never inject, even headless.
+        assert_eq!(autonomy_flag_for(&v(&["claude", "-p", "hi"]), false), None);
+        // claude headless under the jail → skip-permissions.
+        assert_eq!(
+            autonomy_flag_for(&v(&["claude", "-p", "hi"]), true),
+            Some("--dangerously-skip-permissions")
+        );
+        // claude interactive (no -p) → left alone (operator can answer).
+        assert_eq!(autonomy_flag_for(&v(&["claude"]), true), None);
+        // codex exec → bypass approvals+sandbox.
+        assert_eq!(
+            autonomy_flag_for(&v(&["codex", "exec", "hi"]), true),
+            Some("--dangerously-bypass-approvals-and-sandbox")
+        );
+        // bare codex (interactive) → left alone.
+        assert_eq!(autonomy_flag_for(&v(&["codex"]), true), None);
+        // opencode run → skip-permissions; bare opencode (TUI) → left alone.
+        assert_eq!(
+            autonomy_flag_for(&v(&["opencode", "run", "hi"]), true),
+            Some("--dangerously-skip-permissions")
+        );
+        assert_eq!(autonomy_flag_for(&v(&["opencode"]), true), None);
+        // Unknown program → None.
+        assert_eq!(autonomy_flag_for(&v(&["aider", "-p"]), true), None);
+    }
+
+    #[test]
+    fn respects_explicit_user_policy_and_is_idempotent() {
+        // Already-present flag → no duplicate.
+        assert_eq!(
+            autonomy_flag_for(&v(&["claude", "-p", "x", "--dangerously-skip-permissions"]), true),
+            None
+        );
+        // Explicit claude permission mode → don't override.
+        assert_eq!(
+            autonomy_flag_for(&v(&["claude", "-p", "x", "--permission-mode", "default"]), true),
+            None
+        );
+        // codex with an explicit sandbox/approval choice → don't override.
+        assert_eq!(
+            autonomy_flag_for(&v(&["codex", "exec", "x", "-s", "workspace-write"]), true),
+            None
+        );
+        assert_eq!(
+            autonomy_flag_for(&v(&["codex", "exec", "x", "--ask-for-approval=never"]), true),
+            None
+        );
+        // Resolved-path program names are matched by basename.
+        assert_eq!(
+            autonomy_flag_for(&v(&["/usr/local/bin/claude", "-p", "x"]), true),
+            Some("--dangerously-skip-permissions")
+        );
     }
 }
 

@@ -54,6 +54,18 @@ loop" stall (`matrix-failure-analysis.md` Finding 1a), where `approval=never`
 us say "yes to everything in-bounds" safely → fewer stalls, better gpt-oss/codex
 reliability. (Synergy, not the primary goal.)
 
+**Implemented 2026-06-20** (`apply_sandbox_autonomy_flags`): when the jail is active,
+`rozum launch` injects the agent's approval-bypass flag for **headless** invocations
+(the model-as-agent case that can't answer a prompt) — `claude -p` →
+`--dangerously-skip-permissions`, `codex exec` → `--dangerously-bypass-approvals-and-sandbox`
+(its help: "intended solely for environments that are externally sandboxed" — that's
+this jail), `opencode run` → `--dangerously-skip-permissions`. Gated three ways: only
+when jailed (never grant no-prompt autonomy unsandboxed), only headless (an interactive
+operator can answer prompts, so those sessions are untouched), and never overriding an
+explicit user policy (`--permission-mode`, codex `-a`/`-s`/`--sandbox`/`--full-auto`, or
+the flag already present). The decision is a pure helper (`autonomy_flag_for`) so it is
+unit-tested; verified end-to-end that the launched agent actually receives the flag.
+
 ## Enforcement backends — the path-set maps onto each
 
 | Backend | How the `(path, mode)` set is enforced | Status |
@@ -199,9 +211,11 @@ VM/container with resource limits (the container backend, a later phase).
   `scripts/build-agent-image.sh`) is **DONE 2026-06-20** — a real `cargo build` runs in
   the container jail. **Resource limits** (`--memory`/`--cpus`/`--pids-limit`),
   **`gateway-strict` egress** (iptables allowlist — gateway-only, no internet), and the
-  **`opencode` config mount** (write under `/tmp` so the bind exposes it) are all **DONE
-  2026-06-20**, each validated end-to-end on M4. Remaining: drop the approval-reject path
-  now that the jail makes it unnecessary (gpt-oss/codex reliability synergy).
+  **`opencode` config mount** (write under `/tmp` so the bind exposes it), and the
+  **no-approval autonomy** (drop the approval-reject path for headless agents — see the
+  No-noise principle above) are all **DONE 2026-06-20**, each validated end-to-end on M4.
+  The P3 track is complete; the only open follow-up is the optional Linux Landlock/
+  bubblewrap backend (P2) for a non-container jail off macOS.
 
 ## Decisions (v1 defaults — other variants can be tried later)
 

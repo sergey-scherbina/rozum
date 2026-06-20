@@ -1,5 +1,26 @@
 # Changelog
 
+## sandbox — no-approval autonomy for jailed headless agents (the "no-noise" principle)
+Completed: 2026-06-20
+
+Realizes the model-sandbox "No-noise principle": a sandboxed model should be free to act inside its
+allowed paths **without a stream of per-action approval prompts** — the structural jail, not
+interactive confirmation, is the safety boundary. `rozum launch` now injects the agent's
+approval-bypass flag for HEADLESS invocations when the jail is active: `claude -p` →
+`--dangerously-skip-permissions`, `codex exec` → `--dangerously-bypass-approvals-and-sandbox` (whose
+own help says it's "intended solely for environments that are externally sandboxed" — exactly this
+jail), `opencode run` → `--dangerously-skip-permissions`. This also kills the Codex reject-escalation
+retry loop (matrix Finding 1a), where prompts that can't be answered headlessly made the model spin to
+the turn cap. Gated three ways for safety: only when the jail is on (never grant no-prompt autonomy
+unsandboxed), only for headless invocations (an interactive operator can answer prompts, so those
+sessions are untouched), and never overriding an explicit user policy (`--permission-mode`, codex
+`-a`/`-s`/`--sandbox`/`--full-auto`, or the flag already present). Previously only the agentic bench
+passed these flags by hand; now any `rozum launch` of a sandboxed headless agent gets them. The
+decision lives in a pure `autonomy_flag_for` helper (2 unit tests covering jailed/headless/interactive/
+explicit-policy/idempotent/basename matching); verified end-to-end that the launched agent actually
+receives the flag, and that interactive and `ROZUM_SANDBOX=0` launches do not. Completes the
+model-sandbox P3 track.
+
 ## sandbox — strict gateway-only egress (no internet) + opencode-under-Docker fix
 Completed: 2026-06-20
 

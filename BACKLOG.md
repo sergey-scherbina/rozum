@@ -486,8 +486,16 @@ These items turn "portable in principle" into "portable by `cargo build`".
     unenforceable). Seatbelt = `gateway-only` (already loopback-only). **Verified on M4 via `rozum
     launch`:** gateway REACHED, internet BLOCKED. (b) **opencode config** — write it under canonical
     `/tmp` (a toolchain bind mount) instead of `$TMPDIR` (which Docker Desktop doesn't share) → visible
-    in the container at `OPENCODE_CONFIG` (verified in the image). **Remaining:** drop the approval-reject
-    path now the jail makes it unnecessary (reliability synergy).
+    in the container at `OPENCODE_CONFIG` (verified in the image). **no-approval autonomy DONE
+    2026-06-20** (branch `feature/sandbox-no-approval`): `apply_sandbox_autonomy_flags` injects the
+    agent's approval-bypass flag for HEADLESS launches when jailed — `claude -p` →
+    `--dangerously-skip-permissions`, `codex exec` → `--dangerously-bypass-approvals-and-sandbox`,
+    `opencode run` → `--dangerously-skip-permissions` — so sandboxed models run with no per-action
+    prompts (the jail is the safety boundary; kills the codex reject-escalation loop, matrix Finding
+    1a). Gated: only when jailed, only headless (interactive operators keep prompts), never overriding
+    an explicit user policy. Pure helper `autonomy_flag_for` (2 unit tests) + e2e-verified the agent
+    receives the flag. **The model-sandbox P3 track is complete** (only the optional P2 Linux
+    Landlock/bubblewrap backend remains, off macOS).
 
 - [ ] windows-portability - **Make rozum a first-class Windows host (durable core + CI).**
   rozum-as-gateway/launcher already works on Windows today (HTTP backends are pure
