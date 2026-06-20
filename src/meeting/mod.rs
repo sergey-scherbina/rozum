@@ -7,6 +7,7 @@ pub mod identity;
 pub mod list;
 pub mod local_identity;
 pub mod mcp_server;
+pub mod model_participant;
 pub mod participant;
 pub mod piggyback;
 pub mod proxy;

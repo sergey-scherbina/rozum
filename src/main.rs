@@ -406,6 +406,32 @@ enum MeetingsAction {
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
     },
+
+    /// Join a room as a LIVE AI participant backed by a local model (via the gateway).
+    ///
+    /// The model reads the room and replies like any other participant — no moderator,
+    /// no turn-taking. Run one per model (e.g. gpt-oss, qwen3.6) for a demo conference.
+    /// Spec: `docs/specs/demo-conference.md`.
+    Participant {
+        /// Model spec the gateway serves (e.g. `mlx-community:gpt-oss-20b-MXFP4-Q4`).
+        #[arg(long)]
+        model: String,
+        /// Room to join (created if absent).
+        #[arg(long)]
+        room: String,
+        /// Roster handle (default derived from the model, e.g. `gpt-oss`).
+        #[arg(long = "as")]
+        as_handle: Option<String>,
+        /// When to reply: `mention` (default) | `always` | `manual`.
+        #[arg(long = "reply-policy", default_value = "mention")]
+        reply_policy: String,
+        /// Gateway base URL serving the model (OpenAI `/v1`).
+        #[arg(long = "gateway-url", default_value = "http://127.0.0.1:8080/v1")]
+        gateway_url: String,
+        /// Other model handles in the room — so `--reply-policy always` never loops model↔model.
+        #[arg(long = "peer")]
+        peers: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -699,6 +725,17 @@ async fn main() {
                 run_meetings_post(text, room, as_display).await
             }
             MeetingsAction::Web { port, room, bind } => run_meetings_web(port, room, bind).await,
+            MeetingsAction::Participant {
+                model,
+                room,
+                as_handle,
+                reply_policy,
+                gateway_url,
+                peers,
+            } => {
+                run_meetings_participant(model, room, as_handle, reply_policy, gateway_url, peers)
+                    .await
+            }
         },
         Some(Command::CommitMsg { model, n_ctx }) => run_commit_msg(model, n_ctx).await,
         Some(Command::Mcp { action }) => match action {
@@ -1722,6 +1759,32 @@ async fn run_meetings_post(text: String, room: Option<String>, as_display: Optio
             eprintln!("meetings post: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// `rozum meetings participant` — run a local model as a live room participant.
+async fn run_meetings_participant(
+    model: String,
+    room: String,
+    as_handle: Option<String>,
+    reply_policy: String,
+    gateway_url: String,
+    peers: Vec<String>,
+) {
+    use rozum::meeting::model_participant::{ReplyPolicy, derive_handle, run};
+    let policy: ReplyPolicy = match reply_policy.parse() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("meetings participant: {e}");
+            std::process::exit(1);
+        }
+    };
+    let handle = as_handle
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| derive_handle(&model));
+    if let Err(e) = run(model, room, handle, policy, gateway_url, peers).await {
+        eprintln!("meetings participant: {e}");
+        std::process::exit(1);
     }
 }
 
