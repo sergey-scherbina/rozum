@@ -1538,10 +1538,11 @@ fn rewrite_apply_patch_command(cmd: &str) -> Option<String> {
 }
 
 /// Convert an unescaped V4A patch block (`*** Begin Patch` … `*** End Patch`, or a bare
-/// `*** Update File:` + hunk) into a `patch -p0 --fuzz=3` heredoc — a small ±3-context match
-/// surface that standard `patch` applies reliably. Shared by the apply_patch *shell-command*
-/// bridge (Method B) and the apply_patch-*function* re-route (gpt-oss). None when there are no
-/// change lines to anchor on.
+/// `*** Update File:` + hunk) into a `patch -p0 --fuzz=3 -N --forward` heredoc — a small
+/// ±3-context match surface that standard `patch` applies reliably and *idempotently* (`-N`:
+/// a re-submitted, already-applied patch is ignored, never reversed — see the note at the
+/// `format!` below). Shared by the apply_patch *shell-command* bridge (Method B) and the
+/// apply_patch-*function* re-route (gpt-oss). None when there are no change lines to anchor on.
 fn apply_patch_block_to_fuzz(block: &str) -> Option<String> {
     let mut path: Option<String> = None;
     let mut body: Vec<String> = Vec::new();
@@ -1580,8 +1581,16 @@ fn apply_patch_block_to_fuzz(block: &str) -> Option<String> {
         diff.push_str(l);
         diff.push('\n');
     }
+    // `-N --forward`: make re-application idempotent. A weak model (gpt-oss) flails — it
+    // re-submits the SAME patch after it has already landed. Without `-N`, GNU/BSD `patch`
+    // hits "Reversed (or previously applied) patch detected!  Assume -R? [y]" and, with no
+    // tty, assumes yes → it REVERSES the already-applied fix, putting the bug back. The file
+    // then oscillates fixed↔buggy across the model's retries and whichever state the timeout
+    // freezes decides pass/fail (observed coin-flip pass=0/1). `-N` turns a redundant patch
+    // into a no-op ("Ignoring previously applied patch") instead of a revert, so the fix is
+    // sticky and the outcome is deterministic. A genuinely new patch still applies normally.
     Some(format!(
-        "patch -p0 --fuzz=3 <<'ROZUM_PATCH_EOF'\n{diff}ROZUM_PATCH_EOF\n"
+        "patch -p0 --fuzz=3 -N --forward <<'ROZUM_PATCH_EOF'\n{diff}ROZUM_PATCH_EOF\n"
     ))
 }
 
@@ -4008,7 +4017,7 @@ mod tests {
             -    // BUG: returns the input unchanged.\n-    s.to_string()\n\
             +    s.chars().rev().collect()\n }\n\n fn main() {\n*** End Patch\"";
         let rw = rewrite_apply_patch_command(cmd).expect("reconstructable");
-        assert!(rw.starts_with("patch -p0 --fuzz=3 <<'ROZUM_PATCH_EOF'"), "got: {rw}");
+        assert!(rw.starts_with("patch -p0 --fuzz=3 -N --forward <<'ROZUM_PATCH_EOF'"), "got: {rw}");
         assert!(rw.contains("--- src/main.rs") && rw.contains("+++ src/main.rs"));
         assert!(rw.contains("@@ -1,"), "no reconstructed hunk header: {rw}");
         assert!(rw.contains("-    s.to_string()") && rw.contains("+    s.chars().rev().collect()"));
@@ -4035,7 +4044,7 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["login"], true, "exec_command needs login flag");
         let cmd = v["cmd"].as_str().unwrap();
-        assert!(cmd.starts_with("patch -p0 --fuzz=3 <<'ROZUM_PATCH_EOF'"), "got: {cmd}");
+        assert!(cmd.starts_with("patch -p0 --fuzz=3 -N --forward <<'ROZUM_PATCH_EOF'"), "got: {cmd}");
         assert!(cmd.contains("-    s.to_string()") && cmd.contains("+    s.chars().rev().collect()"));
         assert!(!cmd.contains("apply_patch"), "Method B should leave no apply_patch: {cmd}");
 
