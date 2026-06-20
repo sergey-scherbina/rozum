@@ -1,5 +1,28 @@
 # Changelog
 
+## gguf — route through the shared engine loop + fix a 1-token generation bug
+Completed: 2026-06-20
+
+Two things. **(1) engine-SPI A3:** the GGUF backend's `generate_blocking` now drives the shared
+`crate::engine::consume_tokens` (the engine-SPI decode loop, also used by MLX) via a token iterator
+(`std::iter::from_fn` over llama.cpp sample→advance) + a per-token detokenize closure — deleting
+GGUF's private ~150-line decode loop and its streaming `ToolUseParser`/`ToolParseEvent`. The SPI is
+now proven by **two real engines, not just MLX**. Tool calls + cross-turn-unique ids + the runaway
+guard come from the shared loop (no `Send` bound, so the `!Send` `LlamaContext` is fine running
+synchronously on the blocking thread — unlike `drive()`).
+
+**(2) Fixed a pre-existing GGUF generation bug surfaced by the e2e:** `get_logits_ith(n_cur - 1)`
+used the *absolute* sequence position, but `get_logits_ith` indexes the **last decoded batch** — and
+every single-token decode batch holds its token at index 0. So after the first generated token, every
+subsequent sample read past the 1-token batch → garbage logits → an end token → **generation stopped
+after ~1 token**. GGUF output in rozum was effectively broken (the focus had been MLX). Now the index
+is tracked correctly (`n_prompt-1` for the prefill batch, `0` for each decode batch). **Validated
+e2e** against `ollama:qwen2.5-coder:7b` (ollama's own runtime confirmed the model is fine): before —
+"count to 20" → `"1"`, a tool request → `{"`; after — full `"1 2 3 … 20"` and a correct
+`tool_calls: [{name: get_weather, arguments: {"city":"Kyiv"}}]` with a cross-turn-safe id, through
+the refactored path. Engine + serving + gguf unit tests green; A/B confirmed the pre-fix behavior was
+identical on master (not a regression).
+
 ## gguf — cross-turn-unique tool-call ids (fixes Claude Code dropping turns)
 Completed: 2026-06-20
 

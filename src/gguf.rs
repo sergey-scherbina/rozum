@@ -212,152 +212,6 @@ fn quant_priority(filename: &str, pref: &str) -> i32 {
     0
 }
 
-// ─── Tool-use token parser ────────────────────────────────────────────────────
-
-/// State machine that detects Qwen-hermes `<tool_call>…</tool_call>` blocks
-/// as they arrive token-by-token.
-///
-/// Call `feed(token_text)` for each decoded token; it returns zero or more
-/// events to forward to the caller.
-pub struct ToolUseParser {
-    state: ToolParseState,
-    buffer: String,
-}
-
-#[derive(Debug)]
-enum ToolParseState {
-    /// Normal text — pass through.
-    Text,
-    /// Inside a `<tool_call>…</tool_call>` block, accumulating JSON.
-    InCall { id: String, json_buf: String },
-}
-
-/// Events emitted by the parser. Mirrors `ChatEvent` variants.
-#[derive(Debug)]
-pub enum ToolParseEvent {
-    /// A piece of plain text to forward as `TextDelta`.
-    Text(String),
-    /// Start of a tool call (id + name extracted from JSON header).
-    Start { id: String, name: String },
-    /// Incremental JSON fragment of the arguments.
-    Delta { id: String, json_fragment: String },
-    /// End of the tool call JSON.
-    End { id: String },
-    /// Parsing error — emit remaining buffer as text and reset.
-    ParseError(String),
-}
-
-impl ToolUseParser {
-    pub fn new() -> Self {
-        Self {
-            state: ToolParseState::Text,
-            buffer: String::new(),
-        }
-    }
-
-    pub fn feed(&mut self, token: &str) -> Vec<ToolParseEvent> {
-        self.buffer.push_str(token);
-        let mut events = Vec::new();
-
-        loop {
-            match &self.state {
-                ToolParseState::Text => {
-                    if let Some(pos) = self.buffer.find("<tool_call>") {
-                        // Flush text before the tag.
-                        if pos > 0 {
-                            events.push(ToolParseEvent::Text(self.buffer[..pos].to_owned()));
-                        }
-                        self.buffer = self.buffer[pos + "<tool_call>".len()..].to_owned();
-                        // Cross-turn-unique id (shared with the engine SPI). A per-response
-                        // `call_{n}` counter collides across turns, and Claude Code then drops
-                        // the turn (it can't pair the tool_result back). See
-                        // `crate::engine::next_tool_call_id`.
-                        let id = crate::engine::next_tool_call_id();
-                        self.state = ToolParseState::InCall {
-                            id,
-                            json_buf: String::new(),
-                        };
-                    } else {
-                        // Keep up to the last 20 chars as lookahead for split tags.
-                        if self.buffer.len() > 20 {
-                            let flush_len = self.buffer.len() - 20;
-                            events.push(ToolParseEvent::Text(self.buffer[..flush_len].to_owned()));
-                            self.buffer = self.buffer[flush_len..].to_owned();
-                        }
-                        break;
-                    }
-                }
-                ToolParseState::InCall { .. } => {
-                    if let Some(end) = self.buffer.find("</tool_call>") {
-                        let json_fragment = self.buffer[..end].to_owned();
-                        let after = self.buffer[end + "</tool_call>".len()..].to_owned();
-                        self.buffer = after;
-
-                        let (id, accumulated) = if let ToolParseState::InCall { id, json_buf } =
-                            std::mem::replace(&mut self.state, ToolParseState::Text)
-                        {
-                            (id, json_buf + &json_fragment)
-                        } else {
-                            unreachable!()
-                        };
-
-                        let name = crate::serving::tool_name(&accumulated)
-                            .unwrap_or_else(|| "unknown".to_owned());
-                        events.push(ToolParseEvent::Start {
-                            id: id.clone(),
-                            name,
-                        });
-                        events.push(ToolParseEvent::Delta {
-                            id: id.clone(),
-                            json_fragment: accumulated,
-                        });
-                        events.push(ToolParseEvent::End { id });
-                    } else {
-                        // Accumulate into json_buf, emit incremental delta for what's safe.
-                        if let ToolParseState::InCall { json_buf, .. } = &mut self.state {
-                            // Keep last 15 chars as lookahead for split "</tool_call>".
-                            if self.buffer.len() > 15 {
-                                let safe = self.buffer.len() - 15;
-                                json_buf.push_str(&self.buffer[..safe]);
-                                self.buffer = self.buffer[safe..].to_owned();
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        events
-    }
-
-    /// Flush any remaining text at end of generation.
-    pub fn flush(&mut self) -> Vec<ToolParseEvent> {
-        let remaining = std::mem::take(&mut self.buffer);
-        let mut events = Vec::new();
-        if !remaining.is_empty() {
-            match &self.state {
-                ToolParseState::Text => {
-                    events.push(ToolParseEvent::Text(remaining));
-                }
-                ToolParseState::InCall { id, json_buf: _ } => {
-                    // Incomplete tool call — emit as parse error.
-                    events.push(ToolParseEvent::ParseError(format!(
-                        "incomplete <tool_call> block for id {id}"
-                    )));
-                }
-            }
-        }
-        self.state = ToolParseState::Text;
-        events
-    }
-}
-
-impl Default for ToolUseParser {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ─── GgufBackend (feature = "gguf") ─────────────────────────────────────────
 
 #[cfg(feature = "gguf")]
@@ -369,7 +223,7 @@ mod inner {
     use async_trait::async_trait;
     use tokio_util::sync::CancellationToken;
 
-    use super::{GgufOptions, ToolParseEvent, ToolUseParser, format_qwen_prompt};
+    use super::{GgufOptions, format_qwen_prompt};
     use crate::backend::{
         ChatBackend, ChatEvent, ChatRequest, ChatStream, ModelError, ModelResult, SamplingParams,
         StopReason,
@@ -516,7 +370,7 @@ mod inner {
                 return;
             }
 
-            let max_tokens = sampling.max_tokens.unwrap_or(2048);
+            let max_tokens = sampling.max_tokens.unwrap_or(2048) as usize;
             // Shared engine-agnostic sampler over the CPU logit slice (top-k/top-p/
             // repeat-penalty/seed) — see `crate::sampler`. Default temp 0.7 keeps GGUF's
             // historic behavior when the request omits it.
@@ -526,137 +380,91 @@ mod inner {
                 top_p: sampling.top_p.unwrap_or(1.0),
                 repeat_penalty: sampling.repeat_penalty.unwrap_or(1.0),
             };
+            let eos = model.token_eos();
+
+            // The token stream: sample from the current logits, stop on EOS/EOG, then
+            // advance the model one step so the next logits are ready. The EOS/max-tokens/
+            // cancel/runaway-guard + text & tool-call emission are owned by the shared
+            // engine-SPI loop `crate::engine::consume_tokens` (one copy across MLX + GGUF).
+            // Runs synchronously on this blocking thread, so the `!Send` `LlamaContext`
+            // living in the closure is fine (we call `consume_tokens` directly, not the
+            // `Send`-bounded `drive()`).
+            let model_iter = Arc::clone(&model);
             let mut rng = crate::sampler::seeded_rng(sampling.seed);
             let mut recent: Vec<u32> = Vec::new();
             let mut n_cur = batch.n_tokens();
-            let mut n_generated: u32 = 0;
-            let mut parser = ToolUseParser::new();
-            let eos = model.token_eos();
-
-            loop {
-                if cancel.is_cancelled() {
-                    emit_flush(&mut parser, &tx);
-                    let _ = tx.blocking_send(Ok(ChatEvent::Done {
-                        input_tokens: n_prompt as u32,
-                        output_tokens: n_generated,
-                        stop_reason: StopReason::Cancelled,
-                    }));
-                    return;
-                }
-
-                if n_generated >= max_tokens {
-                    emit_flush(&mut parser, &tx);
-                    let _ = tx.blocking_send(Ok(ChatEvent::Done {
-                        input_tokens: n_prompt as u32,
-                        output_tokens: n_generated,
-                        stop_reason: StopReason::MaxTokens,
-                    }));
-                    return;
-                }
-
-                // Sample the next token from the raw CPU logits via the shared sampler.
-                let logits = ctx.get_logits_ith(n_cur - 1);
+            // `get_logits_ith` indexes the LAST decoded batch, not the absolute position:
+            // the prefill batch's last (only-logits) token is at `n_prompt-1`, but every
+            // single-token decode batch has its token at index 0. Reading `n_cur-1` after
+            // the first step read past the 1-token decode batch → garbage logits → an end
+            // token sampled → generation stopped after one token (a pre-existing GGUF bug,
+            // surfaced by the consume_tokens adoption's e2e). Track the right index instead.
+            let mut logits_idx = n_cur - 1;
+            let token_stream = std::iter::from_fn(move || -> Option<Result<u32, String>> {
                 let id = crate::sampler::sample(
-                    logits,
+                    ctx.get_logits_ith(logits_idx),
                     &cfg,
                     crate::sampler::repeat_window(&recent),
                     &mut rng,
                 );
-                recent.push(id);
                 let token = LlamaToken(id as i32);
-
-                if token == eos || model.is_eog_token(token) {
-                    emit_flush(&mut parser, &tx);
-                    let _ = tx.blocking_send(Ok(ChatEvent::Done {
-                        input_tokens: n_prompt as u32,
-                        output_tokens: n_generated,
-                        stop_reason: StopReason::EndTurn,
-                    }));
-                    return;
+                if token == eos || model_iter.is_eog_token(token) {
+                    return None; // end of generation → consume_tokens reports EndTurn
                 }
-
-                #[allow(deprecated)]
-                let token_text = model
-                    .token_to_str(token, Special::Tokenize)
-                    .unwrap_or_default();
-
-                // Feed to tool-use parser; emit resulting events.
-                let events = parser.feed(&token_text);
-                let mut tool_call_ended = false;
-                for ev in events {
-                    if emit_event(ev, &tx) {
-                        tool_call_ended = true;
-                    }
-                }
-                if tool_call_ended {
-                    let _ = tx.blocking_send(Ok(ChatEvent::Done {
-                        input_tokens: n_prompt as u32,
-                        output_tokens: n_generated,
-                        stop_reason: StopReason::ToolUse,
-                    }));
-                    return;
-                }
-
-                n_generated += 1;
-
+                recent.push(id);
+                // Advance: feed the sampled token so the next logits are ready.
                 batch.clear();
                 if batch.add(token, n_cur, &[0], true).is_err() {
-                    let _ = tx.blocking_send(Err(ModelError::BackendUnavailable(
-                        "gguf: batch add failed during decode".to_owned(),
-                    )));
-                    return;
+                    return Some(Err("gguf: batch add failed during decode".to_owned()));
                 }
                 n_cur += 1;
                 if ctx.decode(&mut batch).is_err() {
-                    let _ = tx.blocking_send(Err(ModelError::BackendUnavailable(
-                        "gguf: decode failed".to_owned(),
-                    )));
-                    return;
+                    return Some(Err("gguf: decode failed".to_owned()));
                 }
-            }
-        }
-    }
+                logits_idx = 0; // the just-decoded batch holds exactly one token (index 0)
+                Some(Ok(id))
+            });
 
-    fn emit_flush(
-        parser: &mut ToolUseParser,
-        tx: &tokio::sync::mpsc::Sender<ModelResult<ChatEvent>>,
-    ) {
-        for ev in parser.flush() {
-            emit_event(ev, tx);
-        }
-    }
-
-    /// Emit a parser event over the channel. Returns `true` on `ToolUseEnd`.
-    fn emit_event(
-        event: ToolParseEvent,
-        tx: &tokio::sync::mpsc::Sender<ModelResult<ChatEvent>>,
-    ) -> bool {
-        match event {
-            ToolParseEvent::Text(text) => {
-                if !text.is_empty() {
-                    let _ = tx.blocking_send(Ok(ChatEvent::TextDelta { text }));
+            // Detokenizer for `consume_tokens` (it diffs the running text to stream
+            // deltas). Accumulate per-token `token_to_str` — byte-identical to GGUF's
+            // prior text; `Special::Tokenize` keeps `<tool_call>` literal for the parser.
+            let model_detok = Arc::clone(&model);
+            let mut detok_acc = String::new();
+            let mut detok_done = 0usize;
+            let decode = move |ids: &[u32], _skip_special: bool| -> Option<String> {
+                while detok_done < ids.len() {
+                    let tok = LlamaToken(ids[detok_done] as i32);
+                    #[allow(deprecated)]
+                    let s = model_detok
+                        .token_to_str(tok, Special::Tokenize)
+                        .unwrap_or_default();
+                    detok_acc.push_str(&s);
+                    detok_done += 1;
                 }
-                false
-            }
-            ToolParseEvent::Start { id, name } => {
-                let _ = tx.blocking_send(Ok(ChatEvent::ToolUseStart { id, name }));
-                false
-            }
-            ToolParseEvent::Delta { id, json_fragment } => {
-                let _ = tx.blocking_send(Ok(ChatEvent::ToolUseDelta {
-                    id,
-                    input_json_delta: json_fragment,
-                }));
-                false
-            }
-            ToolParseEvent::End { id } => {
-                let _ = tx.blocking_send(Ok(ChatEvent::ToolUseEnd { id }));
-                true
-            }
-            ToolParseEvent::ParseError(msg) => {
-                tracing::warn!(error = %msg, "gguf tool-use parser error");
-                false
-            }
+                Some(detok_acc.clone())
+            };
+
+            let meta = crate::engine::EngineMeta {
+                n_ctx: opts.n_ctx,
+                eos: Vec::new(), // EOS/EOG handled in the token iterator above
+                model_type: String::new(),
+                harmony: false, // GGUF serves Qwen-style `<tool_call>` models, not harmony
+            };
+
+            // `consume_tokens` streams TextDelta / ToolUse* / Done itself (incl. parsing
+            // tool calls at finalize via `crate::serving::parse_tool_calls`, with
+            // cross-turn-unique ids). `emit` returns false when the client dropped the
+            // stream, so a vanished receiver stops generation early.
+            crate::engine::consume_tokens(
+                token_stream,
+                &meta,
+                n_prompt,
+                max_tokens,
+                true, // runaway-loop guard (parity with the MLX path)
+                &cancel,
+                decode,
+                |ev| tx.blocking_send(ev).is_ok(),
+            );
         }
     }
 
@@ -913,90 +721,9 @@ mod tests {
         );
     }
 
-    // ── Tool-use parser tests ──
-
-    #[test]
-    fn parser_passes_plain_text_through() {
-        let mut p = ToolUseParser::new();
-        let mut events = p.feed("hello world");
-        // Short strings are kept as lookahead; flush releases them.
-        events.extend(p.flush());
-        let text: String = events
-            .iter()
-            .filter_map(|e| {
-                if let ToolParseEvent::Text(t) = e {
-                    Some(t.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(text, "hello world");
-    }
-
-    #[test]
-    fn parser_detects_complete_tool_call() {
-        let mut p = ToolUseParser::new();
-        let input = concat!(
-            "<tool_call>\n",
-            "{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Kyiv\"}}\n",
-            "</tool_call>"
-        );
-        let events = p.feed(input);
-        // Expect: Start, Delta, End (possibly preceded by empty Text)
-        let has_start = events
-            .iter()
-            .any(|e| matches!(e, ToolParseEvent::Start { name, .. } if name == "get_weather"));
-        let has_end = events
-            .iter()
-            .any(|e| matches!(e, ToolParseEvent::End { .. }));
-        assert!(has_start, "expected Start event, got: {events:?}");
-        assert!(has_end, "expected End event, got: {events:?}");
-    }
-
-    #[test]
-    fn tool_call_ids_are_unique_across_calls_and_consistent_within() {
-        // Each <tool_call> gets a process-unique id (crate::engine::next_tool_call_id),
-        // NOT a per-response `call_{n}` that collides across turns (which made Claude Code
-        // drop the turn — it couldn't pair the tool_result). Start/Delta/End of one call
-        // share its id; two distinct calls differ.
-        fn ids(events: &[ToolParseEvent]) -> Vec<String> {
-            events
-                .iter()
-                .filter_map(|e| match e {
-                    ToolParseEvent::Start { id, .. }
-                    | ToolParseEvent::Delta { id, .. }
-                    | ToolParseEvent::End { id } => Some(id.clone()),
-                    _ => None,
-                })
-                .collect()
-        }
-        let mut p = ToolUseParser::new();
-        let a = ids(&p.feed("<tool_call>\n{\"name\":\"a\",\"arguments\":{}}\n</tool_call>"));
-        let b = ids(&p.feed("<tool_call>\n{\"name\":\"b\",\"arguments\":{}}\n</tool_call>"));
-        assert!(!a.is_empty() && a.iter().all(|x| x == &a[0]), "one call shares one id: {a:?}");
-        assert!(!b.is_empty() && b.iter().all(|x| x == &b[0]), "one call shares one id: {b:?}");
-        assert!(a[0].starts_with("call_") && b[0].starts_with("call_"));
-        assert_ne!(a[0], b[0], "distinct tool calls must get distinct ids");
-    }
-
-    #[test]
-    fn parser_handles_text_before_tool_call() {
-        let mut p = ToolUseParser::new();
-        let input = "Sure, let me check. <tool_call>\n{\"name\": \"search\", \"arguments\": {}}\n</tool_call>";
-        let events = p.feed(input);
-        let has_text_before = events
-            .iter()
-            .any(|e| matches!(e, ToolParseEvent::Text(t) if t.contains("Sure")));
-        let has_start = events
-            .iter()
-            .any(|e| matches!(e, ToolParseEvent::Start { .. }));
-        assert!(
-            has_text_before,
-            "expected text before tool call: {events:?}"
-        );
-        assert!(has_start, "expected Start event: {events:?}");
-    }
+    // Tool-call parsing + cross-turn-unique ids are now covered by the shared engine
+    // loop (`crate::engine::consume_tokens` tests + `crate::serving::parse_tool_calls`
+    // + `crate::engine::next_tool_call_id`), since GGUF routes through `consume_tokens`.
 
     // ── Qwen chat template tests ──
 

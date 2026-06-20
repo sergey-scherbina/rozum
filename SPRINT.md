@@ -2090,23 +2090,20 @@ soon as any single track succeeds.
   Token-level seam,
   NOT a per-op tensor abstraction (avoids the `mistralrs-mlx-direct` perf dead-end).
   Spec: `docs/specs/native-engine-spi.md`.
-  - [ ] **engine-spi-a3-gguf — route the GGUF leaf through `consume_tokens` (PLANNED 2026-06-20).**
-        GGUF (`src/gguf.rs`) still has its OWN third copy of the decode-control loop (`generate_blocking`
-        ~`:445` + a private `ToolCallParser` ~`:217`). Lift it onto the shared `crate::engine::
-        consume_tokens` so the SPI is proven by **two real engines, not just MLX** (today only MLX +
-        `FakeEngine` exercise the shared loop). **Caveat (board):** do NOT downgrade GGUF's *streaming*
-        tool-call parser — `consume_tokens` must keep emitting tool deltas as they stream. GGUF already
-        shares `crate::sampler::sample`, so only the loop + finalize move. Hardware-independent
-        (`metal`/CPU on M4). *Done when:* GGUF chat + a tool-call run behave identically (existing GGUF
-        tests green + a streamed tool-call check), and the third loop copy is deleted.
-        **Step 1 DONE 2026-06-20** (branch `feature/gguf-toolcall-id`): the GGUF `ToolUseParser` now
-        mints ids via `crate::engine::next_tool_call_id()` instead of its per-response `call_{n}` counter
-        — fixes the cross-turn tool-call-id collision (dupes across turns made Claude Code drop the turn)
-        and is the first concrete GGUF↔engine sharing. Test
-        `tool_call_ids_are_unique_across_calls_and_consistent_within`. NEXT: the full loop→iterator
-        adoption (note: analysis shows the "streaming→finalize" tool-call change is cosmetic since clients
-        coalesce tool deltas, so the board's downgrade concern is moot — but it's a real `generate_blocking`
-        refactor, kept as its own focused piece).
+  - [x] **engine-spi-a3-gguf — DONE 2026-06-20** (branch `feature/gguf-consume-tokens`). GGUF's
+        `generate_blocking` now drives `crate::engine::consume_tokens` via a token iterator
+        (`std::iter::from_fn` over llama.cpp sample→advance) + a per-token detok closure; deleted GGUF's
+        private ~150-line decode loop + the streaming `ToolUseParser`/`ToolParseEvent`. SPI now proven by
+        **two real engines** (MLX + GGUF). `consume_tokens` has no `Send` bound, so the `!Send`
+        `LlamaContext` works on the blocking thread (couldn't use `drive()`). The "streaming→finalize"
+        tool-call change is cosmetic (clients coalesce). **Surfaced + fixed a pre-existing GGUF bug:**
+        `get_logits_ith(n_cur-1)` used the absolute position, but it indexes the last decoded batch
+        (1-token decode batch → index 0) → after the first token it read garbage → an end token →
+        generation stopped after ~1 token. GGUF was effectively broken in rozum. Fixed (track the right
+        index). **Validated e2e** on `ollama:qwen2.5-coder:7b`: before — count→`"1"`, tool→`{"`; after —
+        full `"1 2 … 20"` + correct `get_weather` tool_call with a cross-turn-safe id. (Step 1, the
+        `next_tool_call_id` fix on `feature/gguf-toolcall-id`, was superseded here — `consume_tokens`
+        already uses it.)
   - [ ] **engine-spi-dense-mlx-drive — dense MLX adopts `drive()` (PLANNED 2026-06-20).**
         Give `drive()` its first PRODUCTION caller (today only the `FakeEngine` test uses it). The dense
         Qwen3/Qwen3-MoE MLX path has no hybrid cache to reclaim, so it can route `chat` → `engine::drive`
