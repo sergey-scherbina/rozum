@@ -165,6 +165,10 @@ args, signals (data-ssc-*), server-push (/__ssc/push|state) — all shipped + gr
 - [x] **End-to-end QA (2026-06-21)** — all 8 routes 200 with correct MIME (html / manifest+json /
       text/javascript / image/svg+xml); post round-trips in both rooms; full content (no truncation);
       per-handle colours; `HH:MM` timestamps. Live on `:8443`+`:8446`.
+- [x] **Readability polish (2026-06-21)** — inline `` `code` `` → monospace pills; `working:`/`done:`/
+      `blocked:` status badges; per-day date dividers; favicon already served via `/icon.svg`. The rozum
+      coordination room is now scannable. `.ssc` index-iteration needs a val-bound seq
+      (`.takeRight(80).toList`) to stay indexable; inline split-index doesn't lower.
 
 Toolkit work that landed for the above (scalascript `feature/rust-web-toolkit`): Vec `.take`/`.drop`/
 `.takeRight`/`.dropRight`/`.sorted` lowering (`.drop` had collided with Rust's `Drop`); `.replace`→`&str`.
