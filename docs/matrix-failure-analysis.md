@@ -305,3 +305,35 @@ variance-dominated (observed 0/5…4/5 across runs) that n≤8 reps cannot disti
 each fix removes a real but *intermittent* mode, so the aggregate is noisy; judge gpt-oss on the whole matrix,
 not the single hardest cell. The three delivery fixes are the durable win; recovery / read-repair are correct
 insurance for the intermittent modes.
+
+## Finding 5 (2026-06-21) — codex create-from-scratch is a gateway-fixable malformed write-intent, NOT a model limit
+
+Finding 1b parked the create-path root cause on "capture the raw tool calls" — never done; the
+`apply_patch create-if-missing` attempt was then discarded as a **model limit** (SPRINT) *without* that
+data. I captured it: `ROZUM_CODEX_TOOL_CAPTURE=1` on a real `codex × gpt-oss-20b × build` run (the
+gateway records `codex_tool_call`). **10 of 11 tool calls were one consistent malformed shape**, e.g.:
+
+```json
+{"cmd":"apply_patch","shell":"zsh","cmd":"apply_patch","path":"Cargo.toml",
+ "content":"[package]\nname = \"reverse-cli\"\nversion = \"0.1.0\"\n..."}
+```
+
+The model **knows what to write** — `content` is a valid `Cargo.toml`. But it expresses the file-write
+as `exec_command` args carrying `{cmd:"apply_patch", path, content}` (note the duplicate `cmd` key).
+codex's `exec_command` only understands `{cmd:"<shell>"}`, so it runs `apply_patch` as a **bare shell
+command with no patch**, silently ignoring `path`+`content` → the file never lands → `build` loops to
+the timeout (rc=143, 600s) and `test` fails (pass=0). This is a **write-intent shoved into
+`exec_command`**, not the Finding-1b `echo>file`/zsh-escaping theory (no `echo` was used), and not a
+model ceiling (claude drives the SAME gpt-oss to pass `build` via its Write tool).
+
+It also explains **why `apply_patch create-if-missing` "didn't help"**: that fix operates on *patches*,
+but the model isn't emitting a patch — it's emitting `{path, content}`, which the patch path never
+sees.
+
+**Gateway-fixable (the real lever):** in the codex `exec_command` arg handling, detect args that carry
+`content` (+ `path`) — a write-intent — and synthesize a real write, e.g.
+`cat > <path> <<'ROZUM_EOF'\n<content>\nROZUM_EOF` (or route to the existing apply_patch path with a
+create-file patch). Then the correct content lands and `build`/`test` pass. **This lives in the codex
+apply_patch/`exec_command` rewrite block (`gateway.rs ~1570–2090`), which a sibling agent is actively
+editing — handed to that track to implement (with this capture as the spec) rather than edited here.**
+Evidence run: `scripts/bench/results/agentic-20260621-193933/` (codex×gpt-oss build rc=143, test pass=0).
