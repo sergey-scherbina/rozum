@@ -1776,9 +1776,10 @@ fn decode_unicode_escapes(s: &str) -> String {
 /// Read-repair (translate a malformed `sed/head/tail` file-read → `cat <file>`) is ON by default.
 /// Reading the file is the decisive success factor: a weak model (gpt-oss) that emits a broken read
 /// (`sed -n "src/main.rs"` with no line range) never sees the code and so never fixes it — it retries
-/// the same broken read and gives up. The repair is conservative (only sed/head/tail on a source path,
-/// never an `s///`/`-i`/`>`), and at worst turns a valid *ranged* read into a full-file `cat` (more
-/// context, never less). `ROZUM_CODEX_READ_REPAIR=0` turns it off.
+/// the same broken read and gives up. The repair is conservative and only fires on a *genuinely
+/// broken* read (a `sed` whose script slot holds the filename or a range with no print command);
+/// well-formed ranged reads and `head`/`tail` are left intact (see `repair_broken_read`).
+/// `ROZUM_CODEX_READ_REPAIR=0` turns it off.
 fn read_repair_enabled() -> bool {
     std::env::var("ROZUM_CODEX_READ_REPAIR")
         .map(|v| v != "0")
@@ -1798,12 +1799,13 @@ fn is_source_path(w: &str) -> bool {
         })
 }
 
-/// Translate a malformed file-READ command into a plain `cat <file>`. gpt-oss often emits broken
-/// `sed`/`head`/`tail` reads (filename as the script, missing `p`, scrambled args) that exit
+/// Translate a *genuinely broken* file-READ command into a plain `cat <file>`. gpt-oss emits broken
+/// `sed` reads (filename in the script slot, a range with no `p` command, scrambled args) that exit
 /// non-zero, so it never sees the file. The intent — view a source file — is unambiguous from the
-/// path, and reading is non-destructive. Leaves intentional edits (`s/…/`, `-i`) and redirects (`>`)
-/// alone. None when it isn't a recognizable file read. (Experimental: even well-formed partial
-/// reads collapse to a full `cat`; fine for small task files, revisit before defaulting on.)
+/// path, and reading is non-destructive. Only fires when the read would actually fail, so it is safe
+/// to default ON: a WELL-FORMED ranged read (`sed -n '1,200p' f`) and any `head`/`tail` (which work
+/// with a file) are left intact — never collapsed to a full `cat`. Edits (`s/…/`, `-i`) and
+/// redirects (`>`) are left alone. None when it isn't a recognizable broken read.
 fn repair_broken_read(cmd: &str) -> Option<String> {
     let t = cmd.trim();
     let tool = t.split_whitespace().next()?;
@@ -1813,10 +1815,27 @@ fn repair_broken_read(cmd: &str) -> Option<String> {
     if t.contains("s/") || t.contains(" -i") || t.contains('>') {
         return None; // an intentional edit / transform / redirect — not a read
     }
-    let path = t
+    // Unquoted positional (non-flag) args.
+    let args: Vec<String> = t
         .split_whitespace()
-        .map(|w| w.trim_matches(|c| c == '\'' || c == '"'))
-        .find(|w| is_source_path(w))?;
+        .skip(1)
+        .filter(|w| !w.starts_with('-'))
+        .map(|w| w.trim_matches(|c| c == '\'' || c == '"').to_string())
+        .collect();
+    let path = args.iter().find(|w| is_source_path(w))?.clone();
+    // `head`/`tail` with a file are valid reads — leave them (respect a deliberate partial read).
+    if tool != "sed" {
+        return None;
+    }
+    // A well-formed `sed -n` read has a print-script arg (`1,200p`, `5p`, `$p`). If one is present
+    // the read works as written → don't touch it. Broken only when the script slot holds the file
+    // or a range with no print command.
+    let has_print_script = args.iter().any(|a| {
+        a != &path && a.ends_with('p') && a.chars().all(|c| c.is_ascii_digit() || ",$p".contains(c))
+    });
+    if has_print_script {
+        return None;
+    }
     Some(format!("cat {path}"))
 }
 
@@ -4287,6 +4306,12 @@ mod tests {
         assert!(repair_broken_read("echo hi > f.rs").is_none());
         assert!(repair_broken_read("cat src/main.rs").is_none());
         assert!(repair_broken_read("cargo run -- hello").is_none());
+        // WELL-FORMED reads are left intact (refine-before-default-on): a valid sed print-script
+        // and any head/tail with a file work as written → don't collapse them to a full cat.
+        assert!(repair_broken_read("sed -n '1,200p' src/main.rs").is_none(), "valid ranged read must be left");
+        assert!(repair_broken_read("sed -n '5p' src/main.rs").is_none());
+        assert!(repair_broken_read("head -20 src/main.rs").is_none(), "head with a file works");
+        assert!(repair_broken_read("tail -5 src/main.rs").is_none());
     }
 
     #[test]
