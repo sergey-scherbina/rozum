@@ -212,17 +212,13 @@ portability stays in BACKLOG.
       `.github/workflows/ci.yml`: `windows-latest` build/test with `--no-default-features`,
       mirroring `linux-core`. This documents/exposes Unix-only assumptions without starting a full
       Windows port.
-- [ ] **meetings-rest-read (PLANNED 2026-06-20 — the clean, non-clashing meeting pick).** A day-scoped
-      **read-only HTTP API on the meeting daemon**: `GET /rooms/{name}/days` (list day files + counts
-      from `index.json`) + `GET /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M` (a page of `(date,n)`
-      messages). The daemon is unix-socket+rmcp today with **zero HTTP**, so there's nothing to collide
-      with (the sibling's PWA web work is a separate client over `web.rs`). Pure read-from-disk over
-      `src/meeting/store.rs`'s indexed day files (reuse `read_since`/the day API the web client already
-      uses); no daemon state, no model load. Auth = the same shared-secret pattern as `meetings web`
-      (`ROZUM_WEB_SECRET`). Attach as a small axum listener spawned beside the unix socket in
-      `serve_daemon` (or a `web.rs`-style module). *Done when:* unit tests over a tempdir store return
-      the right day list + paged messages, and a live `curl` against a running daemon reads a room.
-      **Avoid `web.rs`/`web_index.html`/room-picker/.ssc — those are the sibling's `meeting-web-pwa-ssc`.**
+- [x] **meetings-rest-read — DONE 2026-06-21.** Added the daemon-side read-only HTTP API gated by
+      `ROZUM_WEB_SECRET`: `GET /rooms/{name}/days` and
+      `GET /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`. It reads only the room registry,
+      `index.json`, and daily transcript files; no room writer/model/web UI path is touched. Listener
+      is opt-in via `ROZUM_WEB_SECRET` and binds `ROZUM_MEETINGS_REST_BIND` or `127.0.0.1:8401`.
+      Verified with tempdir REST unit tests, daemon tests, `cargo build --no-default-features`, and a
+      live temporary-daemon curl smoke that posted into `rest-smoke` and read the message back.
 - [ ] **model-participant web controls.** Surface start/stop/status, reply policy
       (`mention`/`always`/`manual`), persona selection, and visible gateway/model state from the room
       UI so demos do not require juggling several terminal commands.

@@ -34,16 +34,16 @@ not an error.
 
 ## Behavior
 
-- [ ] The daemon can expose a local read-only HTTP listener alongside
+- [x] The daemon can expose a local read-only HTTP listener alongside
       `meeting.sock` without changing the MCP tool contract.
-- [ ] REST reads resolve room names through the daemon registry and read from
+- [x] REST reads resolve room names through the daemon registry and read from
       disk; they do not open rooms as writers or mutate registry, meta, roster,
       index, or transcript files.
-- [ ] `/rooms/{name}/days` returns sorted day metadata from `index.json`, with a
+- [x] `/rooms/{name}/days` returns sorted day metadata from `index.json`, with a
       disk-scan fallback when the index is absent.
-- [ ] `/rooms/{name}/messages/{date}` returns a bounded page from a single daily
+- [x] `/rooms/{name}/messages/{date}` returns a bounded page from a single daily
       transcript and reports `next_from` / `has_more`.
-- [ ] Requests without the shared secret, or with the wrong secret, are rejected
+- [x] Requests without the shared secret, or with the wrong secret, are rejected
       with `401`.
 
 ## Out of scope
@@ -52,3 +52,17 @@ not an error.
   endpoints.
 - Replacing the TUI, MCP proxy, or existing `rozum meetings web` client.
 - Cross-host exposure by default; the default bind address is loopback.
+
+## Results
+
+Implemented in `src/meeting/rest_read.rs` and spawned from the meeting daemon
+when `ROZUM_WEB_SECRET` is configured. Verified with:
+
+- `cargo test meeting::rest_read --no-default-features`
+- `cargo test meeting::daemon --no-default-features`
+- `cargo build --no-default-features`
+- live smoke: temporary daemon with `ROZUM_WEB_SECRET=sekret` and
+  `ROZUM_MEETINGS_REST_BIND=127.0.0.1:<free-port>`, CLI post into
+  `ROZUM_MEETING_ROOM=rest-smoke`, then HTTP Basic `GET /rooms/rest-smoke/days`
+  and `GET /rooms/rest-smoke/messages/{date}?from=0&count=10` returned the
+  posted message.

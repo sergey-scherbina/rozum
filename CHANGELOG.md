@@ -1,5 +1,17 @@
 # Changelog
 
+## meetings — read-only REST transcript API on the daemon
+Completed: 2026-06-21
+
+Added an opt-in read-only HTTP listener to the meeting daemon, enabled by
+`ROZUM_WEB_SECRET` and bound by `ROZUM_MEETINGS_REST_BIND` (default
+`127.0.0.1:8401`). It exposes `GET /rooms/{name}/days` and
+`GET /rooms/{name}/messages/{date}?from=N&count=M`, reading only the daemon
+registry, `index.json`, and daily JSONL files. Auth matches `rozum meetings web`
+HTTP Basic password gating; no submit, SSE, room creation, model, or UI path is
+added. Verified with tempdir HTTP tests, daemon tests, no-default build, and a
+temporary-daemon curl smoke.
+
 ## engine-spi — draft the cache-reclaim seam (prefix-reuse engines through `drive`)
 Completed: 2026-06-21
 
