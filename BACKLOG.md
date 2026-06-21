@@ -522,6 +522,16 @@ These items turn "portable in principle" into "portable by `cargo build`".
     `docs/specs/model-sandbox.md`. **The model-sandbox P3 track is complete** (only the
     optional P2 Linux Landlock/bubblewrap backend remains, off macOS).
 
+  - [ ] sandbox-docker-e2e-rerun - **Deferred Docker confidence pass.** When Docker Desktop (or another
+    docker daemon) is intentionally running and enough memory is available, rebuild/confirm
+    `rozum-agent:latest` with `scripts/build-agent-image.sh`, then run the ignored Docker sandbox
+    regression checks:
+    `cargo test --test sandbox_regression docker_e2e_builds_simple_crate_inside_jail
+    --no-default-features -- --ignored` and
+    `cargo test --test sandbox_regression docker_e2e_gateway_strict_reaches_host_and_blocks_internet
+    --no-default-features -- --ignored`. Keep this out of the active sprint while Docker is off to
+    preserve RAM; the normal macOS Seatbelt path and no-default tests do not require Docker.
+
 - [ ] windows-portability - **Make rozum a first-class Windows host (durable core + CI).**
   rozum-as-gateway/launcher already works on Windows today (HTTP backends are pure
   cross-platform Rust); these sub-tasks close the gap for the **local meeting daemon** and

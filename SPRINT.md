@@ -204,8 +204,8 @@ portability stays in BACKLOG.
       are `#[ignore]`. Verified: `cargo test --test sandbox_regression --no-default-features`,
       `cargo test sandbox_autonomy --no-default-features`, and macOS Seatbelt e2e via
       `cargo test --test sandbox_regression seatbelt_e2e_allows_workspace_and_denies_secret_and_escape
-      --no-default-features -- --ignored`. Docker e2e checks were added but not run here because
-      `rozum-agent:latest` is not currently built locally (`scripts/build-agent-image.sh` first).
+      --no-default-features -- --ignored`. Docker e2e rerun is deferred to BACKLOG
+      `sandbox-docker-e2e-rerun` because Docker Desktop is memory-heavy and may be intentionally off.
 - [ ] **PWA room picker.** Finish the active `meeting-web-pwa-ssc` room picker: `/api/rooms`, `?room=`
       on messages/stream/submit, selected-room UI, shareable room links, and mobile-safe unread/active
       state. This is the product/demo win after the doctor lands.
