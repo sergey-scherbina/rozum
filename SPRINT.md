@@ -56,6 +56,33 @@ Full writeup + the one-pass diagnostic methodology that localized it:
 
 ### Active
 
+#### codex×gpt-oss gateway reliability (2026-06-21) — agentic matrix 22/30 → 27/30
+
+Five OUR-bugs found+fixed in `src/gateway.rs` via the `isolate` skill (agent-bisection:
+same gpt-oss, codex fails / opencode+claude pass → look at the codex path, not the model).
+Full writeup [[project-gateway-patch-revert]]; specs `docs/specs/apply-patch-*`,
+`loopbreak-edit-churn`, `patch-fuzz-tunable`.
+
+- [x] apply-patch-idempotent — `patch -p0 --fuzz=3 -N --forward`: re-sending an already-applied
+  patch was REVERTING the fix (no-tty "Assume -R?"). Coin-flip pass → deterministic. `f63d583`.
+- [x] loopbreak-edit-churn — `detect_stuck_loop` signature 3: ping-pong edit-churn (≥3 edits to one
+  file + a re-added removed line, or ≥6). Killed all 300s timeouts; opencode×gpt-oss 1/5→5/5. `c134334`.
+- [x] apply-patch-fn-decode — the apply_patch FUNCTION-call reroute (gpt-oss's dominant shape) didn't
+  decode `\uXXXX` → `collect::<String>()` landed as `collect::<String>()`. `14fe6c8`.
+- [x] read-repair-default-on — gpt-oss emits broken `sed -n "src/main.rs"` → never reads → never fixes;
+  the existing repair was gated off. Default-on + refined to only fire on broken reads. `14fe6c8`.
+- [x] apply-patch-ws-fallback — gpt-oss drops the leading indent on changed lines; BSD `patch` (even
+  `--ignore-whitespace`) can't match → `.rej`, fix lost (looked like a "revert"). Static python reads
+  the `.rej`, matches by trimmed content, re-applies preserving indent. codex×gpt-oss×fix ~1-2/5→5/6. `6f2bed9`.
+- [~] codex×gpt-oss build/test (create-from-scratch) — **MODEL+AGENT LIMIT, not a gateway bug; closing.**
+  `patch` can't create a missing file (`No file found→Oops.rej`); model flails cat/tee/apply_patch,
+  stacks duplicate `[package]`, often creates NOTHING and never reaches `src/main.rs`. Tested candidate
+  `apply_patch create-if-missing` (branch `feature/apply-patch-create`): **build 0/4, test 0/4 — did NOT
+  help** (the model rarely emits a clean create-patch, so the fix's path isn't taken). Discarded the
+  branch. claude (Write tool) drives the SAME gpt-oss to pass build → it's the codex-create workflow,
+  not the model's ability. Residual matrix reds (codex×gpt-oss build/test) are accepted as this combo's
+  limit; claude/opencode carry gpt-oss create tasks.
+
 #### model-sandbox (2026-06-19, operator-driven) — structural jail for agentic model runs
 
 **Goal (operator):** the models rozum hosts run agentic loops that touch the FS + shell; they must
