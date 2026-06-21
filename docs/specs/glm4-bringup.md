@@ -119,5 +119,14 @@ rozum's first 8 generated tokens). ~19 GB at 4-bit. Both GLM-4-9B and GLM-4-32B-
 `EXTRA` catalog; the port is parity-validated for the dense GLM-4 family. Shipped to master;
 mlx-lm fork rev `12fac5c0`.
 
-STILL TODO: GLM-4 tool-call format adapter + agentic-matrix run — the forward is parity-correct;
-agentic tool-use is the next (gpt-oss-harmony-style) step.
+**TOOL-CALL ADAPTER DONE (`ab404d1`) — GLM-4 drives the full agentic tool loop.** GLM emits a
+call as `<name>\n<json>` (stops at `<|observation|>`, already in config eos). Three pieces:
+`parse_glm_tool_call` (serving.rs, tight last-resort fallback); strip `ensure_ascii=False` from
+the chat template (minijinja rejects the kwarg; Rust tojson is already unicode-aware); and
+`glm_conversation` for multi-turn (assistant `ToolUse` → `name\n{json}`, tool result →
+`observation` role, dispatched on the template's `<|observation|>` marker, à la harmony on
+`<|channel|>`). E2e on GLM-4-9B: single call → `{"city":"Paris"}` parsed (`finish_reason=tool_calls`);
+multi-turn → reads the tool result correctly ("rainy, 14°C"). serving 11/11.
+
+STILL TODO: agentic-matrix run for GLM-4-32B (vs Qwen3.6/gpt-oss) — the tool loop works; this
+measures how strong a tool-loop DRIVER the 32B is.
