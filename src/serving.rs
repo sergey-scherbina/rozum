@@ -165,12 +165,41 @@ fn parse_loose_tool_calls(text: &str) -> Vec<(String, String)> {
     calls
 }
 
-/// GLM-4 tool-call form: the entire output is `<function_name>\n<json-object>` (e.g.
-/// `get_weather\n{"city": "Paris"}`). Returns `(name, args_json)` only when the trimmed text is
-/// EXACTLY a bare identifier line followed by a single JSON object — so prose / embedded JSON
-/// don't false-positive.
+/// GLM-4 tool-call form: a `<function_name>\n<json-object>` block (e.g. `get_weather\n{"city":
+/// "Paris"}`). GLM emits it either as the WHOLE output (simple prompts) or — with a complex agent
+/// tool set (Claude Code / Codex) — wrapped in a markdown ```fence``` amid prose (e.g.
+/// ` ```bash\nRead\n{"file_path":"…"}\n``` `). Both are handled; the strict `name\n{object}` shape
+/// (`glm_name_json`) keeps ordinary prose / code blocks from false-positiving.
 fn parse_glm_tool_call(text: &str) -> Option<(String, String)> {
-    let (first, rest) = text.trim().split_once('\n')?;
+    if let Some(call) = glm_name_json(text.trim()) {
+        return Some(call);
+    }
+    // Scan each ```…``` fenced block for a bare `name\n{json}` call.
+    let mut rest = text;
+    while let Some(open) = rest.find("```") {
+        let after = &rest[open + 3..];
+        let Some(nl) = after.find('\n') else { break }; // skip the fence/lang line (```bash)
+        let body = &after[nl + 1..];
+        let (inner, next) = match body.find("```") {
+            Some(close) => (&body[..close], &body[close + 3..]),
+            None => (body, ""),
+        };
+        if let Some(call) = glm_name_json(inner.trim()) {
+            return Some(call);
+        }
+        if next.is_empty() {
+            break;
+        }
+        rest = next;
+    }
+    None
+}
+
+/// `<identifier>\n<json-object>` (trimmed) → `(name, args_json)`, else `None`. The bare-identifier
+/// first line + single JSON object is GLM-4's tool-call shape and is strict enough that prose or a
+/// code block (e.g. `fn main() {…}` — the name would contain spaces/parens) won't match.
+fn glm_name_json(t: &str) -> Option<(String, String)> {
+    let (first, rest) = t.split_once('\n')?;
     let name = first.trim();
     if name.is_empty()
         || !name
@@ -335,6 +364,15 @@ mod tests {
         let ml = parse_tool_calls("search_web\n{\n  \"q\": \"rust traits\",\n  \"n\": 3\n}");
         assert_eq!(ml.len(), 1);
         assert_eq!(ml[0].0, "search_web");
+        // fenced form: GLM wraps the call in ```bash … ``` amid prose (the agent-context shape)
+        let fenced = parse_tool_calls(
+            "I'll read the file:\n\n```bash\nRead\n{\"file_path\": \"src/main.rs\"}\n```\n\nThen fix it.",
+        );
+        assert_eq!(fenced.len(), 1);
+        assert_eq!(fenced[0].0, "Read");
+        assert!(fenced[0].1.contains("src/main.rs"));
+        // a fenced block that ISN'T a tool call (real code) must not false-positive
+        assert!(parse_tool_calls("Here:\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```").is_empty());
         // does NOT eat ordinary prose, a non-object body, or an embedded object mid-sentence
         assert!(parse_tool_calls("Sure, here is the answer.\nIt is 42.").is_empty());
         assert!(parse_tool_calls("foo\n[1, 2, 3]").is_empty());
