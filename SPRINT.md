@@ -170,8 +170,14 @@ args, signals (data-ssc-*), server-push (/__ssc/push|state) — all shipped + gr
       coordination room is now scannable. `.ssc` index-iteration needs a val-bound seq
       (`.takeRight(80).toList`) to stay indexable; inline split-index doesn't lower.
 
+- [x] **Rich text + presence (2026-06-21)** — `**bold**`, clickable `http(s)` links, and an
+      **active-participants bar** (distinct authors of the last 25 messages, coloured chips below the
+      tabs). Note: `roster.json` is cumulative (daemon `leave()` does not prune it — `room.rs:194`),
+      so "active = recent authors" is more accurate than the roster for a live "who's here".
+
 Toolkit work that landed for the above (scalascript `feature/rust-web-toolkit`): Vec `.take`/`.drop`/
-`.takeRight`/`.dropRight`/`.sorted` lowering (`.drop` had collided with Rust's `Drop`); `.replace`→`&str`.
+`.takeRight`/`.dropRight`/`.sorted`/`.distinct` lowering (`.drop` had collided with Rust's `Drop`);
+`.replace`→`&str`; string char-hash (`String.toList`→`.chars()`, `.sum`).
 
 #### demo-polish-and-resilience (2026-06-20, operator-approved) — make the live demo boringly reliable
 
