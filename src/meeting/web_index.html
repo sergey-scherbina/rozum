@@ -23,6 +23,30 @@
     display: flex; align-items: center; justify-content: space-between;
   }
   header .status { font-weight: 400; font-size: 12px; color: #6f8; }
+  #modelPanel {
+    flex: 0 0 auto; background: #181b20; border-bottom: 1px solid #2a2e36;
+  }
+  #modelPanel summary {
+    min-height: 38px; padding: 0 14px; cursor: pointer; list-style: none;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    color: #d7dde8; font-weight: 650;
+  }
+  #modelPanel summary::-webkit-details-marker { display: none; }
+  #modelState { font-size: 12px; font-weight: 500; color: #aeb8c8; overflow-wrap: anywhere; text-align: right; }
+  #modelForm {
+    display: grid; grid-template-columns: minmax(160px, 1.4fr) minmax(88px, .7fr) minmax(170px, 1fr) minmax(96px, .6fr);
+    gap: 8px; padding: 0 12px 10px;
+  }
+  #modelForm input, #modelForm select, #modelForm textarea {
+    min-width: 0; border-radius: 7px; border: 1px solid #333a44; background: #0f1115; color: #e6e6e6;
+    font: inherit; font-size: 13px; padding: 8px 9px;
+  }
+  #modelForm textarea {
+    grid-column: 1 / 4; min-height: 38px; max-height: 96px; resize: vertical;
+  }
+  #modelActions { display: flex; gap: 8px; align-items: stretch; }
+  #modelActions button { flex: 1 1 0; padding: 8px 10px; border-radius: 7px; font-size: 13px; }
+  button.secondary { background: #343a46; color: #e6e6e6; }
   #log {
     flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
     padding: 10px 14px;
@@ -42,11 +66,46 @@
     padding: 10px 16px; border: 0; border-radius: 9px; background: #2f6feb; color: #fff;
     font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap;
   }
+  button:disabled { opacity: .55; cursor: default; }
+  @media (max-width: 780px) {
+    #modelForm { grid-template-columns: 1fr 1fr; }
+    #modelForm textarea { grid-column: 1 / 3; }
+    #modelActions { grid-column: 1 / 3; }
+  }
+  @media (max-height: 650px) {
+    #modelPanel[open] #modelForm { max-height: 34vh; overflow-y: auto; }
+  }
 </style>
 </head>
 <body>
   <div id="app">
     <header><span id="room">rozum meeting</span><span class="status" id="status">connecting…</span></header>
+    <details id="modelPanel" open>
+      <summary><span>Model</span><span id="modelState">stopped</span></summary>
+      <form id="modelForm">
+        <input id="modelSpec" name="model" placeholder="model" autocomplete="off" />
+        <input id="modelHandle" name="as_handle" placeholder="handle" autocomplete="off" />
+        <input id="gatewayUrl" name="gateway_url" value="http://127.0.0.1:8080/v1" autocomplete="off" />
+        <select id="replyPolicy" name="reply_policy">
+          <option value="mention">mention</option>
+          <option value="always">always</option>
+          <option value="manual">manual</option>
+        </select>
+        <input id="modelPeers" name="peers" placeholder="peers" autocomplete="off" />
+        <select id="personaMode" name="persona_mode">
+          <option value="">general</option>
+          <option value="reviewer">reviewer</option>
+          <option value="implementer">implementer</option>
+          <option value="operator">operator</option>
+          <option value="custom">custom</option>
+        </select>
+        <textarea id="personaText" name="persona" placeholder="persona"></textarea>
+        <div id="modelActions">
+          <button id="startModel" type="submit">start</button>
+          <button id="stopModel" type="button" class="secondary">stop</button>
+        </div>
+      </form>
+    </details>
     <div id="log"></div>
     <form id="f">
       <input id="m" placeholder="message…" autocomplete="off" autocapitalize="sentences" />
@@ -59,7 +118,23 @@ const log = document.getElementById('log');
 const statusEl = document.getElementById('status');
 const form = document.getElementById('f');
 const input = document.getElementById('m');
+const modelForm = document.getElementById('modelForm');
+const modelState = document.getElementById('modelState');
+const startModel = document.getElementById('startModel');
+const stopModel = document.getElementById('stopModel');
+const modelSpec = document.getElementById('modelSpec');
+const modelHandle = document.getElementById('modelHandle');
+const gatewayUrl = document.getElementById('gatewayUrl');
+const replyPolicy = document.getElementById('replyPolicy');
+const modelPeers = document.getElementById('modelPeers');
+const personaMode = document.getElementById('personaMode');
+const personaText = document.getElementById('personaText');
 const seen = new Set();
+const personaPresets = {
+  reviewer: 'You are a concise code reviewer in the room. Focus on risks, regressions, missing tests, and clear next actions.',
+  implementer: 'You are a pragmatic implementation agent in the room. Keep replies short, concrete, and oriented toward shipping the current task.',
+  operator: 'You are a demo operator in the room. Track what is running, what is blocked, and what the human should see next.'
+};
 
 // Pin the fixed root to the *visual* viewport: size it to the visible area and
 // translate it by offsetTop so it rides along when iOS scrolls the page under the
@@ -117,6 +192,73 @@ function connectStream() {
   ev.onerror = () => { statusEl.textContent = 'reconnecting…'; };  // EventSource auto-retries
 }
 
+function fillModelForm(cfg) {
+  if (!cfg) return;
+  if (!modelSpec.value) modelSpec.value = cfg.model || '';
+  if (!modelHandle.value) modelHandle.value = cfg.as_handle || '';
+  if (!gatewayUrl.value) gatewayUrl.value = cfg.gateway_url || 'http://127.0.0.1:8080/v1';
+  if (cfg.reply_policy) replyPolicy.value = cfg.reply_policy;
+  if (!modelPeers.value) modelPeers.value = (cfg.peers || []).join(', ');
+  if (!personaText.value) personaText.value = cfg.persona || '';
+}
+
+function renderModelStatus(d) {
+  const cfg = d.config || {};
+  const bits = [];
+  bits.push(d.running ? 'running' : 'stopped');
+  if (cfg.as_handle) bits.push(cfg.as_handle);
+  if (cfg.model) bits.push(cfg.model);
+  if (d.gateway) bits.push(d.gateway.ok ? 'gateway ok' : 'gateway down');
+  if (!d.running && d.last_exit) bits.push(d.last_exit);
+  modelState.textContent = bits.join(' · ');
+  startModel.disabled = !!d.running;
+  stopModel.disabled = !d.running;
+  fillModelForm(d.config);
+}
+
+async function refreshModel() {
+  try {
+    const r = await fetch('/api/model/status');
+    if (!r.ok) return;
+    renderModelStatus(await r.json());
+  } catch (_) {}
+}
+
+personaMode.addEventListener('change', () => {
+  if (personaMode.value === 'custom') return;
+  personaText.value = personaPresets[personaMode.value] || '';
+});
+
+modelForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = {
+    model: modelSpec.value.trim(),
+    as_handle: modelHandle.value.trim(),
+    gateway_url: gatewayUrl.value.trim(),
+    reply_policy: replyPolicy.value,
+    peers: modelPeers.value.trim(),
+    persona: personaText.value.trim(),
+  };
+  startModel.disabled = true;
+  const r = await fetch('/api/model/start', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (r.ok) {
+    renderModelStatus(await r.json());
+  } else {
+    modelState.textContent = await r.text();
+    startModel.disabled = false;
+  }
+});
+
+stopModel.addEventListener('click', async () => {
+  stopModel.disabled = true;
+  const r = await fetch('/api/model/stop', { method: 'POST' });
+  if (r.ok) renderModelStatus(await r.json());
+});
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const v = input.value.trim();
@@ -131,7 +273,13 @@ form.addEventListener('submit', async (e) => {
   input.focus();
 });
 
-loadHistory().then((ok) => { if (ok) connectStream(); });
+loadHistory().then((ok) => {
+  if (ok) {
+    connectStream();
+    refreshModel();
+    setInterval(refreshModel, 5000);
+  }
+});
 </script>
 </body>
 </html>
