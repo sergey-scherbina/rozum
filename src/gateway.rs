@@ -736,6 +736,68 @@ fn with_gen_timeout(mut stream: ChatStream, cancel: CancellationToken, dur: Dura
 /// Number of identical, consecutively-failing tool calls that mark a stuck agent.
 const STUCK_LOOP_THRESHOLD: usize = 3;
 
+/// Edit-churn (signature 3): a single file edited this many times *with* a ping-pong
+/// (an added line re-introduces a previously-removed one) marks a model going in circles.
+const EDIT_CHURN_MIN: usize = 3;
+/// Backstop: a single file edited this many times is churning even without a strict ping-pong.
+const EDIT_CHURN_BACKSTOP: usize = 6;
+
+/// From one tool-call input, extract `(file, removed_lines, added_lines)` if it carries a
+/// patch/edit. Shape-agnostic: stringifies the input and scans for a V4A/unified envelope, so
+/// it matches an `apply_patch` function call, a `{patch: …}` arg, or a rewritten `patch -p0`
+/// heredoc alike. Lines are normalized (leading `+`/`-` and surrounding whitespace stripped)
+/// for content comparison; `+++`/`---`/`@@`/`***` header lines are not change lines.
+fn edit_target_and_lines(input: &Value) -> Option<(String, Vec<String>, Vec<String>)> {
+    // Pull every string leaf out of the input so we see the patch body whatever key holds it.
+    fn collect_strings(v: &Value, out: &mut String) {
+        match v {
+            Value::String(s) => {
+                out.push_str(s);
+                out.push('\n');
+            }
+            Value::Array(a) => a.iter().for_each(|x| collect_strings(x, out)),
+            Value::Object(o) => o.values().for_each(|x| collect_strings(x, out)),
+            _ => {}
+        }
+    }
+    let mut text = String::new();
+    collect_strings(input, &mut text);
+    if !text.contains("*** Update File:") && !(text.contains("--- ") && text.contains("+++ ")) {
+        return None;
+    }
+    let mut file: Option<String> = None;
+    let mut removed = Vec::new();
+    let mut added = Vec::new();
+    for ln in text.lines() {
+        if let Some(p) = ln.strip_prefix("*** Update File:") {
+            file.get_or_insert_with(|| p.trim().to_string());
+        } else if let Some(p) = ln.strip_prefix("+++ ") {
+            let p = p.trim();
+            file.get_or_insert_with(|| {
+                p.strip_prefix("b/").or_else(|| p.strip_prefix("a/")).unwrap_or(p).to_string()
+            });
+        } else if let Some(p) = ln.strip_prefix("--- ") {
+            let p = p.trim();
+            file.get_or_insert_with(|| {
+                p.strip_prefix("a/").or_else(|| p.strip_prefix("b/")).unwrap_or(p).to_string()
+            });
+        } else if ln.starts_with("@@") || ln.starts_with("*** ") {
+            continue;
+        } else if let Some(rest) = ln.strip_prefix('+') {
+            let c = rest.trim();
+            if !c.is_empty() {
+                added.push(c.to_string());
+            }
+        } else if let Some(rest) = ln.strip_prefix('-') {
+            let c = rest.trim();
+            if !c.is_empty() {
+                removed.push(c.to_string());
+            }
+        }
+    }
+    file.map(|f| (f, removed, added))
+}
+
 /// Detect the agentic stuck-loop signature in the incoming conversation. A weak local
 /// model that re-issues the same already-applied edit gets stuck retrying and runs to
 /// `--max-turns` instead of stopping (root cause: SPRINT.md "agentic-loop-root-cause").
@@ -821,6 +883,42 @@ fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
              loop; verify the current result and report it in one short line."
                 .to_string(),
         );
+    }
+
+    // ── Signature 3: edit-churn / ping-pong ──
+    // The model re-edits one file with *different, mostly-succeeding* patches, undoing and
+    // redoing its own changes (toggling equivalent forms, re-anchoring on stale context). The
+    // patches differ and don't error, so signatures 1 & 2 miss them; left running, fuzzy
+    // re-applies corrupt the file (dup lines / unbalanced braces) and the run burns to timeout
+    // with a broken file. Fire when one file is edited >=3 times AND a ping-pong occurred (an
+    // added line re-introduces a previously-removed one), or >=6 times outright.
+    let mut edits_per_file: HashMap<String, usize> = HashMap::new();
+    let mut removed_seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    let mut pingpong_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in messages {
+        for b in &m.content {
+            if let ContentBlock::ToolUse { input, .. } = b {
+                if let Some((file, removed, added)) = edit_target_and_lines(input) {
+                    *edits_per_file.entry(file.clone()).or_default() += 1;
+                    let seen = removed_seen.entry(file.clone()).or_default();
+                    if added.iter().any(|a| seen.contains(a)) {
+                        pingpong_files.insert(file.clone());
+                    }
+                    seen.extend(removed);
+                }
+            }
+        }
+    }
+    let churn = edits_per_file.iter().find(|(f, c)| {
+        let n = **c;
+        n >= EDIT_CHURN_BACKSTOP || (n >= EDIT_CHURN_MIN && pingpong_files.contains(f.as_str()))
+    });
+    if let Some((file, n)) = churn {
+        return Some(format!(
+            "The file `{file}` has been edited {n} times, re-doing and undoing the same change \
+             without net progress — the fix has most likely already been applied. Stopping to \
+             avoid corrupting the file in a churn loop; verify it builds and report in one line."
+        ));
     }
     None
 }
@@ -3522,6 +3620,57 @@ mod tests {
             asst_text("Verified, done."),
         ];
         assert!(detect_stuck_loop(&ok).is_none(), "distinct assistant turns are not a loop");
+    }
+
+    // ── signature 3: edit-churn / ping-pong ──
+    /// One apply_patch-style tool call: `old` → `new` on `file`, as gpt-oss emits it.
+    fn patch_call(id: &str, file: &str, old: &str, new: &str) -> Message {
+        let body = format!("*** Begin Patch\n*** Update File: {file}\n@@\n-    {old}\n+    {new}\n*** End Patch");
+        asst(tool_use(id, "apply_patch", json!({ "command": ["apply_patch", body] })))
+    }
+
+    #[test]
+    fn stuck_loop_fires_on_pingpong_edit_churn() {
+        // gpt-oss toggling collect() <-> collect::<String>() on one file: different,
+        // SUCCEEDING patches that sigs 1/2 miss. The 3rd edit re-adds what the 2nd removed.
+        let msgs = vec![
+            Message::user("fix the bug"),
+            patch_call("c0", "src/main.rs", "s.to_string()", "s.chars().rev().collect::<String>()"),
+            patch_call("c1", "src/main.rs", "s.chars().rev().collect::<String>()", "s.chars().rev().collect()"),
+            patch_call("c2", "src/main.rs", "s.chars().rev().collect()", "s.chars().rev().collect::<String>()"),
+        ];
+        assert!(detect_stuck_loop(&msgs).is_some(), "ping-pong edit churn must trip");
+    }
+
+    #[test]
+    fn stuck_loop_fires_on_six_edits_backstop() {
+        // Six edits to one file (no strict ping-pong) — the >=6 backstop trips.
+        let mut msgs = vec![Message::user("go")];
+        for i in 0..6 {
+            msgs.push(patch_call(&format!("c{i}"), "src/main.rs", &format!("old{i}"), &format!("new{i}")));
+        }
+        assert!(detect_stuck_loop(&msgs).is_some(), "six edits to one file must trip backstop");
+    }
+
+    #[test]
+    fn stuck_loop_ignores_healthy_linear_edits() {
+        // A healthy fix: two forward edits to one file, never re-adding a removed line.
+        let two = vec![
+            Message::user("fix it"),
+            patch_call("c0", "src/main.rs", "s.to_string()", "s.chars().rev().collect()"),
+            patch_call("c1", "src/lib.rs", "let x = 1;", "let x = 2;"),
+        ];
+        assert!(detect_stuck_loop(&two).is_none(), "two forward edits to distinct files are not churn");
+
+        // Three forward edits to ONE file but no ping-pong (each removes a fresh line) — below
+        // backstop and not circular, so it must NOT trip.
+        let fwd = vec![
+            Message::user("refactor"),
+            patch_call("d0", "src/main.rs", "line_a", "line_a2"),
+            patch_call("d1", "src/main.rs", "line_b", "line_b2"),
+            patch_call("d2", "src/main.rs", "line_c", "line_c2"),
+        ];
+        assert!(detect_stuck_loop(&fwd).is_none(), "linear forward edits are not churn");
     }
 
     #[tokio::test]

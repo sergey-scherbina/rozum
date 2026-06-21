@@ -37,16 +37,16 @@ the call is an `apply_patch` function, a `{patch: …}` arg, or a rewritten
 
 ## Behavior
 
-- [ ] Fires when one file is edited ≥ 3 times AND a ping-pong occurred (an added
+- [x] Fires when one file is edited ≥ 3 times AND a ping-pong occurred (an added
       line re-introduces a line a previous edit to that file removed).
-- [ ] Backstop: fires when one file is edited ≥ 6 times regardless of ping-pong.
-- [ ] Does NOT fire on a healthy linear fix (1–2 edits, each moving forward, no
+- [x] Backstop: fires when one file is edited ≥ 6 times regardless of ping-pong.
+- [x] Does NOT fire on a healthy linear fix (1–2 edits, each moving forward, no
       re-adding of removed content) — verified by the 35B runs (1–2 edits) and a
       negative unit test.
-- [ ] Compares normalized code content (strip leading `+`/`-` and surrounding
+- [x] Compares normalized code content (strip leading `+`/`-` and surrounding
       whitespace), so `collect()` vs `collect::<String>()` are distinct lines but
       a re-added identical line is caught.
-- [ ] The synthetic stop tells the model it has been editing one file in circles,
+- [x] The synthetic stop tells the model it has been editing one file in circles,
       the fix is likely already applied, and to stop and report.
 
 ## Out of scope
@@ -81,4 +81,23 @@ signatures.
 
 ## Results
 
-<!-- fill after validate: unit tests; e2e codex×gpt-oss×fix before/after -->
+Unit: `src/gateway.rs` gateway suite 55/55 green (3 new: ping-pong fires, ≥6
+backstop fires, healthy linear edits don't).
+
+E2e (codex × gpt-oss-20b × fix, Seatbelt sandbox, RUN_TIMEOUT=300, ×3):
+
+| | before (idempotency-only binary) | after (this binary) |
+|---|---|---|
+| outcome | pass=0, rc=143 (300s timeout) | rc=0 in 80–120s, **no timeouts** |
+| breaker | n/a | fires at 3 / 4 / 6 edits with the churn message |
+| final file | corrupted (dup lines/braces, won't compile) | **compiles 2/3** |
+| pass | 0 | **2/3** |
+
+The breaker stops the churn early and removes the wall-clock-to-timeout. When it
+fires at the 3-edit (ping-pong) gate the earlier good state is preserved and the
+file compiles; one rep fired at 4 edits but the file was already broken — firing
+later loses, and the 3-edit gate is the floor that stays safe against healthy
+"edit → revert → try again" sequences (a 2-edit gate would false-positive on
+those). Combined with the `-N --forward` idempotency fix (inherited), this is the
+non-termination lever; the `--fuzz` A/B is the planned follow-up for the
+fire-too-late residue.
