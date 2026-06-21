@@ -85,6 +85,16 @@ pub const RECOMMENDED: &[RecommendedModel] = &[
 /// `rozum launch --model <spec>` (the catalog is a curated picker list, not a whitelist).
 pub const EXTRA: &[RecommendedModel] = &[
     RecommendedModel {
+        spec: "mlx-community:GLM-4-32B-0414-4bit",
+        display_name: "GLM-4 32B (dense, Zhipu)",
+        approx_size_gb: 19.0,
+        notes: "GLM-4 dense 32B — same native MLX `glm4` port as the 9B, ZERO new code (61 layers, \
+                hidden 6144, attention_bias=false — all config-driven). Byte-exact greedy parity vs \
+                Python mlx_lm (docs/specs/glm4-bringup.md). ~19 GB at 4-bit → fits 36 GB. The \
+                agentic-grade GLM (≈ Qwen3.6-27B class); strong dense coder. Tool-call format adapter \
+                + agentic-matrix validation are the remaining bring-up step (forward is parity-correct).",
+    },
+    RecommendedModel {
         spec: "mlx-community:GLM-4-9B-0414-4bit",
         display_name: "GLM-4 9B (dense, Zhipu)",
         approx_size_gb: 6.0,

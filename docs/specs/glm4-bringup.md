@@ -112,6 +112,12 @@ is Paris."` — a **32/32-char, token-for-token identical prefix** (rozum additi
 correctly at `<|user|>`, which the raw Python `generate_step` loop runs past). The forward
 (partial-traditional RoPE + 4-norm sandwich + fused gate_up + qkv-bias) is numerically exact.
 
-STILL TODO: catalog entry (`src/models.rs`), GLM-4-32B-0414, tool-call + agentic matrix, and
-push the mlx-lm fork + bump the Cargo rev (replace the local path-dep). Port: `.vendor/mlx-lm`
-@ 12fac5c0; rozum integration on `feature/glm4-bringup`.
+**GLM-4-32B-0414 ALSO WORKS — zero new code.** Same `glm4` arch (61 layers, hidden 6144,
+`attention_bias=false` — all config-driven); `LOADED 1349 params (glm4)` → ready, coherent +
+correct code, and **byte-parity** (Python greedy `[198,785,6722,315,9621,374,12089,13,…]` =
+rozum's first 8 generated tokens). ~19 GB at 4-bit. Both GLM-4-9B and GLM-4-32B-0414 are in the
+`EXTRA` catalog; the port is parity-validated for the dense GLM-4 family. Shipped to master;
+mlx-lm fork rev `12fac5c0`.
+
+STILL TODO: GLM-4 tool-call format adapter + agentic-matrix run — the forward is parity-correct;
+agentic tool-use is the next (gpt-oss-harmony-style) step.
