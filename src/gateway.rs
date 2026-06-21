@@ -1728,8 +1728,14 @@ fn rewrite_apply_patch_function_args(args: &str) -> Option<String> {
     if !patch.contains("*** Begin Patch") && !patch.contains("*** Update File") {
         return None;
     }
+    // Decode the `\uXXXX` escapes gpt-oss double-escapes into the body (`&`→&, `<`/`>`→
+    // </>). A Rust fix is full of these (`&str`, `&arg`, `collect::<String>()`, `->`);
+    // left literal they land verbatim and break compilation. The shell-command path
+    // (normalize_codex_tool_args) already decodes — this FUNCTION-call path (the dominant gpt-oss
+    // edit shape) did not, which is a major source of the codex×gpt-oss corruption.
+    let patch = decode_unicode_escapes(patch);
     // Prefer Method B: codex runs `patch --fuzz` verbatim (it only intercepts `apply_patch`).
-    let cmd = apply_patch_block_to_fuzz(patch).unwrap_or_else(|| {
+    let cmd = apply_patch_block_to_fuzz(&patch).unwrap_or_else(|| {
         // Fallback: hand codex the raw apply_patch via a quote-safe heredoc (its V4A applier).
         format!("apply_patch <<'ROZUM_AP_EOF'\n{patch}\nROZUM_AP_EOF\n")
     });
@@ -4216,6 +4222,24 @@ mod tests {
         // A non-patch exec call is left untouched (None → caller keeps the original args).
         let plain = json!({ "cmd": "cargo run", "login": true }).to_string();
         assert!(rewrite_apply_patch_function_args(&plain).is_none());
+    }
+
+    #[test]
+    fn apply_patch_function_decodes_unicode_escapes() {
+        // gpt-oss (trained on the OpenAI function surface) emits apply_patch as a FUNCTION call and
+        // JSON-double-escapes operators in the body: `&`→&, `<`→<, `>`→>. A Rust fix
+        // is full of these (`&str`, `&arg`, `collect::<String>()`, `->`). The function-call reroute
+        // must decode them or they land LITERALLY in the file and break compilation. (The shell-cmd
+        // path already decodes; this path did not — the codex×gpt-oss corruption.)
+        let patch = "*** Begin Patch\n*** Update File: src/main.rs\n@@\n \
+            fn reverse(s: \\u0026str) -\\u003e String {\n\
+            -    s.to_string()\n+    s.chars().rev().collect::\\u003cString\\u003e()\n }\n*** End Patch";
+        let args = json!({ "command": ["apply_patch", patch] }).to_string();
+        let out = rewrite_apply_patch_function_args(&args).expect("reroutable");
+        let cmd: String = serde_json::from_str::<Value>(&out).unwrap()["cmd"].as_str().unwrap().into();
+        assert!(!cmd.contains("\\u00"), "literal \\uXXXX escape survived into the patch: {cmd}");
+        assert!(cmd.contains("collect::<String>()"), "generic not decoded: {cmd}");
+        assert!(cmd.contains("&str") && cmd.contains("-> String"), "&/-> not decoded: {cmd}");
     }
 
     #[test]
