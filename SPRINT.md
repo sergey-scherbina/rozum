@@ -2129,11 +2129,17 @@ soon as any single track succeeds.
         it alongside the **x86 engine** (which will exercise `drive` for real anyway) rather than risking
         the MLX hot path early. *Done when:* byte-exact greedy parity on a dense model (drive vs the
         current direct `consume_tokens`).
-  - [ ] **engine-spi-reclaim-seam — DEFERRED (draft-only).** The hybrid cache-reclaim trait seam
-        (`GenerationState`/`into_generation_state`) stays deferred — the board wants it shaped against
-        the real x86 engine, which can't exist on M4, so committing the API now risks a redesign. (The
-        other half of the deferral, relaxing `LocalEngine: Send`, is now DONE — see above.) At most: a
-        compiled, `FakeEngine`-validated DRAFT of the seam shape; no MLX hybrid rewire until x86 is in play.
+  - [~] **engine-spi-reclaim-seam — DRAFT DONE 2026-06-21** (branch `feature/engine-spi-reclaim-draft`).
+        The hybrid cache-reclaim seam is now sketched + compile/FakeHybrid-validated in `src/engine.rs`:
+        a `ReclaimStream` trait (`Iterator<Item=Result<u32,String>>` + `type State` +
+        `into_state(self: Box<Self>) -> State`, mirroring MLX's `generator.into_cache_and_snapshot()`)
+        and `drive_reclaiming(...) -> (StopReason, State)` that drains the stream through the SAME shared
+        `consume_tokens` (borrowed so it survives) then reclaims its state. Two tests: `FakeHybridStream`
+        round-trips a pretend KV cache through the loop (`drive_reclaiming_returns_post_run_state`) and
+        through a `Box<dyn ReclaimStream>` (`..._works_through_a_trait_object`). **Deliberately unwired**
+        — not used by MLX; the FINAL shape (fold into `LocalEngine`? exact `State` bounds? engine-side
+        production) is to be decided against the real x86 engine. No MLX hybrid rewire until x86 is in
+        play. The Send-relaxation half is DONE (above). Spec: `docs/specs/native-engine-spi.md`.
 
 - [x] x86-native-slot - **DONE 2026-06-18 — the empty x86 slot, scaffolded so the real engine
   drops in without rework** (`src/x86/`, branch `feature/x86-native-slot`). Compiles on any host

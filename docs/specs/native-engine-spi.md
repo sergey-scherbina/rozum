@@ -52,7 +52,12 @@ pub struct EngineMeta {
 /// What an in-process engine must provide. EVERYTHING above this — templating,
 /// tokenization, the detok→event loop, tool-call parsing (serving + harmony),
 /// EOS/cancel/max-tokens, stream assembly, sampling *glue* — is shared.
-pub trait LocalEngine: Send {
+///
+/// NOT `Send` (relaxed 2026-06-20): in-process engines are routinely `!Send` (MLX
+/// pins its model + Arrays + KV cache to one Metal-stream worker thread; llama.cpp's
+/// context is thread-bound). `drive` runs the engine synchronously on its own thread,
+/// so `Send` only locked them out for no benefit.
+pub trait LocalEngine {
     fn load(dir: &Path, opts: &EngineOptions) -> Result<Self, String> where Self: Sized;
     fn meta(&self) -> &EngineMeta;
 
@@ -65,7 +70,7 @@ pub trait LocalEngine: Send {
         prompt: &'a [u32],
         params: &'a SamplingParams,
         cancel: &'a CancellationToken,
-    ) -> Box<dyn Iterator<Item = Result<u32, String>> + Send + 'a>;
+    ) -> Box<dyn Iterator<Item = Result<u32, String>> + 'a>;
 
     // Opt-in hooks (default = unsupported), so an engine adds capability without
     // bloating the required surface:
@@ -86,6 +91,32 @@ The async `ChatBackend::chat` impl stays per-leaf (it owns the worker-thread bri
 — MLX must run all GPU work on one dedicated thread), but it shrinks to: *bridge
 async↔worker, call `drive`, forward `ChatEvent`s*. The **substance** (the loop,
 parsing, EOS, harmony, sampling glue) lives once in `drive`.
+
+### Reclaim seam (DRAFT — `src/engine.rs`, not wired)
+
+`generate`'s `Box<dyn Iterator>` is dropped at end-of-run. Fine for engines that keep
+nothing (dense MLX, GGUF, CPU/Vulkan). But the MLX **hybrid** arch reclaims its
+generator's KV/conv cache *after* the run (`generator.into_cache_and_snapshot()` →
+`store.put_hybrid`) for next-turn **prefix reuse**, and `Box<dyn Iterator>` erases that
+concrete state — so the hybrid path can't go through `drive` without losing reuse (it
+still calls `consume_tokens` directly). The drafted seam:
+
+```rust
+/// A token stream that hands back reclaimable post-run state (the prefix-reuse cache).
+pub trait ReclaimStream: Iterator<Item = Result<u32, String>> {
+    type State;                                  // the reclaimable cache (+ snapshot)
+    fn into_state(self: Box<Self>) -> Self::State;   // ⟷ MLX into_cache_and_snapshot()
+}
+/// `drive` for a reclaim-capable stream: same shared loop, then hand the state back.
+pub fn drive_reclaiming<S: ReclaimStream + ?Sized>(stream: Box<S>, …)
+    -> (StopReason, S::State);
+```
+
+Compile- + `FakeHybridStream`-validated (no GPU). **Deliberately unwired** — the final
+shape (fold into `LocalEngine`? exact `State` bounds? how the engine *produces* a
+`ReclaimStream`) is to be decided against the real **x86** engine (the second
+prefix-reuse-capable engine), so no API is committed and the MLX hybrid is untouched
+until x86 forces the requirements.
 
 > **This is NOT the per-op cross-runtime dead-end.** The engine still owns its
 > whole forward + sampling graph (MLX keeps Apple-tuned whole-graph speed; see

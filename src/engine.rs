@@ -143,6 +143,72 @@ where
     )
 }
 
+// ─────────── reclaim seam (DRAFT — not wired; shape TBD against x86) ───────────
+//
+// `LocalEngine::generate` returns a `Box<dyn Iterator>` whose state is DROPPED when
+// the run ends. That's fine for engines that keep nothing post-run (dense MLX, GGUF,
+// CPU). But the MLX **hybrid** arch (Qwen3.6) reclaims its generator's internal
+// KV/conv cache *after* a run — `generator.into_cache_and_snapshot()` in
+// `mlx_native_backend.rs` — and stashes it (`store.put_hybrid`) for next-turn prefix
+// reuse. `Box<dyn Iterator>` ERASES that concrete state, so a hybrid engine can't go
+// through `drive` without losing prefix reuse — which is why it still calls
+// `consume_tokens` directly.
+//
+// This draft sketches the seam: a token stream that can hand its post-run state back,
+// and a `drive` variant that returns it. It is **deliberately unwired** — the final
+// shape (whether it folds into `LocalEngine`, the exact `State` bounds, engine-side
+// production of a `ReclaimStream`) is to be decided against the real x86 engine, the
+// second prefix-reuse-capable engine, which doesn't exist on M4 yet. Validated here
+// only against a fake hybrid stream (no GPU/MLX), to prove the seam is coherent and
+// implementable before committing the API. See `docs/specs/native-engine-spi.md`.
+
+/// A token stream that, once driven to exhaustion, can hand back reclaimable post-run
+/// state — the seam the MLX hybrid path needs. `into_state` mirrors the MLX generator's
+/// `into_cache_and_snapshot()`; `State` is the reclaimable cache (+ prefill snapshot)
+/// the caller stashes for next-turn prefix reuse. DRAFT.
+pub trait ReclaimStream: Iterator<Item = Result<u32, String>> {
+    /// The reclaimable post-run state (e.g. a prefix-reuse KV/conv cache).
+    type State;
+    /// Consume the (exhausted) stream and reclaim its state.
+    fn into_state(self: Box<Self>) -> Self::State;
+}
+
+/// Like [`drive`], but for a [`ReclaimStream`]: run the same shared decode loop
+/// ([`consume_tokens`], borrowed so the stream survives), then reclaim the stream's
+/// post-run state and return it with the stop reason. The hybrid caller would stash
+/// the `State` for next-turn prefix reuse. DRAFT — the engine-side production of the
+/// stream + the MLX wire-up are deferred (shape against x86).
+pub fn drive_reclaiming<S, D, F>(
+    mut stream: Box<S>,
+    meta: &EngineMeta,
+    prompt_len: usize,
+    max_tokens: usize,
+    repeat_guard: bool,
+    cancel: &CancellationToken,
+    decode: D,
+    emit: F,
+) -> (StopReason, S::State)
+where
+    S: ReclaimStream + ?Sized,
+    D: FnMut(&[u32], bool) -> Option<String>,
+    F: FnMut(ModelResult<ChatEvent>) -> bool,
+{
+    // Borrow the stream (`&mut Box<S>` is an `IntoIterator`) so it isn't consumed by
+    // the loop — we still own it afterward to reclaim its state.
+    let stop = consume_tokens(
+        &mut stream,
+        meta,
+        prompt_len,
+        max_tokens,
+        repeat_guard,
+        cancel,
+        decode,
+        emit,
+    );
+    let state = stream.into_state();
+    (stop, state)
+}
+
 // ─────────── A2: the engine-agnostic token-consumption loop ───────────
 // Lifted verbatim from the MLX leaf's `stream_generation` so every engine shares
 // one copy. Pure over token ids + a `decode` closure + an `emit` sink — no GPU,
@@ -614,5 +680,79 @@ mod tests {
             events.last(),
             Some(ChatEvent::Done { input_tokens: 3, .. })
         ));
+    }
+
+    // A fake "hybrid" stream: yields scripted ids AND accumulates a pretend KV cache,
+    // reclaimed via `into_state` — mirrors the MLX generator's `into_cache_and_snapshot`.
+    struct FakeHybridStream {
+        ids: std::vec::IntoIter<u32>,
+        cache: Vec<u32>, // stand-in for the reclaimable KV/conv cache
+    }
+    impl Iterator for FakeHybridStream {
+        type Item = Result<u32, String>;
+        fn next(&mut self) -> Option<Self::Item> {
+            let id = self.ids.next()?;
+            self.cache.push(id); // the "cache" grows as the run processes tokens
+            Some(Ok(id))
+        }
+    }
+    impl super::ReclaimStream for FakeHybridStream {
+        type State = Vec<u32>;
+        fn into_state(self: Box<Self>) -> Vec<u32> {
+            self.cache
+        }
+    }
+
+    #[test]
+    fn drive_reclaiming_returns_post_run_state() {
+        // The seam: drive a reclaim-capable stream through the SAME shared loop, then
+        // get its post-run state back (what the MLX hybrid path needs for prefix reuse).
+        let table = std::collections::HashMap::from([
+            (1, ("a", false)),
+            (2, ("b", false)),
+            (9, ("", false)), // eos
+        ]);
+        let stream = Box::new(FakeHybridStream {
+            ids: vec![1, 2, 9].into_iter(),
+            cache: Vec::new(),
+        });
+        let m = meta(false, vec![9]);
+        let cancel = CancellationToken::new();
+        let mut text = String::new();
+        let (stop, state) = super::drive_reclaiming(
+            stream,
+            &m,
+            4, // prompt_len
+            100,
+            true,
+            &cancel,
+            toy_decode(&table),
+            |e| {
+                if let Ok(ChatEvent::TextDelta { text: t }) = e {
+                    text.push_str(&t);
+                }
+                true
+            },
+        );
+        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(text, "ab"); // streamed text via the shared loop (eos not emitted)
+        // The reclaimed state reflects every token the run pulled (incl. the eos it saw)
+        // — proving the cache survives the shared decode loop and is handed back.
+        assert_eq!(state, vec![1, 2, 9]);
+    }
+
+    // Also exercise the seam through a trait object, since the real caller would hold a
+    // `Box<dyn ReclaimStream<State = …>>`.
+    #[test]
+    fn drive_reclaiming_works_through_a_trait_object() {
+        let table = std::collections::HashMap::from([(1, ("x", false)), (9, ("", false))]);
+        let stream: Box<dyn super::ReclaimStream<State = Vec<u32>>> =
+            Box::new(FakeHybridStream { ids: vec![1, 9].into_iter(), cache: Vec::new() });
+        let m = meta(false, vec![9]);
+        let cancel = CancellationToken::new();
+        let (stop, state) =
+            super::drive_reclaiming(stream, &m, 1, 100, true, &cancel, toy_decode(&table), |_| true);
+        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(state, vec![1, 9]);
     }
 }

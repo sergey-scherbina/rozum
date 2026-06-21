@@ -1,5 +1,25 @@
 # Changelog
 
+## engine-spi — draft the cache-reclaim seam (prefix-reuse engines through `drive`)
+Completed: 2026-06-21
+
+A compile- and FakeHybrid-validated DRAFT of the last conceptual gap in the engine SPI: how a
+prefix-reuse engine (the MLX hybrid arch — Qwen3.6) would route through the shared `drive` loop
+without losing its post-run cache. `LocalEngine::generate`'s `Box<dyn Iterator>` is dropped at
+end-of-run, which erases the generator's reclaimable KV/conv cache (MLX reclaims it via
+`generator.into_cache_and_snapshot()` → `store.put_hybrid` for next-turn prefix reuse). The draft adds
+a `ReclaimStream` trait (`Iterator<Item=Result<u32,String>>` + `type State` + `into_state(self:
+Box<Self>) -> State`, mirroring `into_cache_and_snapshot`) and `drive_reclaiming(stream, …) ->
+(StopReason, State)`, which drives the stream through the SAME shared `consume_tokens` (borrowed so the
+stream survives) then reclaims its state. Two tests prove the cache round-trips through the loop —
+directly (`FakeHybridStream`) and through a `Box<dyn ReclaimStream>` trait object. **Deliberately
+unwired:** MLX is untouched (hybrid still calls `consume_tokens` directly); the FINAL shape (whether it
+folds into `LocalEngine`, the exact `State` bounds, how an engine produces a `ReclaimStream`) is to be
+decided against the real x86 engine — the second prefix-reuse-capable engine — which doesn't exist on
+M4 yet, so no API is committed. This closes the engine-SPI's design questions on paper and de-risks the
+eventual MLX-hybrid + x86 adoption. Spec + the now-`Send`-free trait updated in
+`docs/specs/native-engine-spi.md`.
+
 ## engine-spi — relax the `LocalEngine` `Send` bound (unblocks `!Send` in-process engines)
 Completed: 2026-06-20
 
