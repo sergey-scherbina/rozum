@@ -40,4 +40,28 @@ identical to the two `normalize_codex_tool_args` paths. No signature change.
 Unit: gateway suite 56/56 (new `apply_patch_function_decodes_unicode_escapes`
 fails before the one-line decode, passes after).
 
-<!-- e2e codex × gpt-oss × fix before/after — fill after validation -->
+E2e (codex × gpt-oss × fix, sandbox, ×5): the `\u00` corruption is **gone from
+every file** and **4/5 now compile** (before, the function-path runs produced
+garbage like `collect::<String>()`). The decode fix is correct and
+removes a real failure class.
+
+### Layered finding — this fix exposed the next one (read-repair)
+
+With corruption gone, the dominant residual failure was the model **never reading
+the file**: gpt-oss emits a malformed `sed -n "src/main.rs"` (no line range), it
+errors, the model retries the same broken read and gives up without ever seeing
+the code → no fix. `repair_broken_read` already translated this to `cat <file>`
+but was **gated OFF** by default. This change flips `read_repair_enabled()` to
+default-ON (`ROZUM_CODEX_READ_REPAIR=0` to disable). A/B (×5) with it on:
+broken-read=0 across all runs — the model now reads via `cat`.
+
+### Honest residual — model-side
+
+Even with decode + read-repair + loop-breaker + `-N --forward` all correct, codex
+× gpt-oss × fix stayed ~1/5: the pipeline is no longer the bottleneck. The model
+applies the correct fix then **reverts it with a 2nd different patch** (a 2-edit
+ping-pong, below the loop-breaker's ≥3 gate), or reads-but-doesn't-edit, or
+doesn't engage — genuine gpt-oss-20b agentic-loop weakness (claude/opencode drive
+the same model to 5/5). Two real gateway bugs were found and fixed here (decode,
+read-repair-off); what remains is model quality, capped (not cured) by the
+loop-breaker.

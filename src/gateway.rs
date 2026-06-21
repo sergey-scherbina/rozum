@@ -1773,10 +1773,16 @@ fn decode_unicode_escapes(s: &str) -> String {
     out
 }
 
+/// Read-repair (translate a malformed `sed/head/tail` file-read → `cat <file>`) is ON by default.
+/// Reading the file is the decisive success factor: a weak model (gpt-oss) that emits a broken read
+/// (`sed -n "src/main.rs"` with no line range) never sees the code and so never fixes it — it retries
+/// the same broken read and gives up. The repair is conservative (only sed/head/tail on a source path,
+/// never an `s///`/`-i`/`>`), and at worst turns a valid *ranged* read into a full-file `cat` (more
+/// context, never less). `ROZUM_CODEX_READ_REPAIR=0` turns it off.
 fn read_repair_enabled() -> bool {
     std::env::var("ROZUM_CODEX_READ_REPAIR")
         .map(|v| v != "0")
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// A token that looks like a source-file path the model wants to view (has a slash, or a known
