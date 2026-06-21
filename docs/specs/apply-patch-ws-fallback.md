@@ -54,8 +54,16 @@ replaces it with the added lines prefixed by the matched line's leading whitespa
 
 ## Results
 
-<!-- unit + e2e codex × gpt-oss × fix before/after — fill after validation -->
 Isolated (no model/agent): the model's actual failing patch (`-s.to_string()` with no
 indent, `@@ -1,1`) → `patch` fails to `.rej` → python fallback applies at the real line
 with `    ` indent → `cargo run -- hello` → `olleh`. Confirmed through a real
 `zsh -lc "…"` (how codex executes the command).
+
+Unit: gateway suite 57/57, incl. `ws_fallback_lands_a_patch_whose_removed_line_lost_its_indent`
+(runs the generated command on a seeded file, asserts the fix lands with preserved indent).
+
+E2e (codex × gpt-oss-20b × fix, sandbox, ×6): **pass 5/6** (was ~1–2/5), and the
+`[rozum-apply] whitespace-tolerant fallback applied` marker fired in **all 6** runs
+(1–8× each) — the fallback is the active mechanism that lands gpt-oss's
+indentation-dropped patches. The one miss (rep2) was a non-compiling file unrelated to
+whitespace. Checkboxes covered.
