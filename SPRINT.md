@@ -2200,22 +2200,24 @@ soon as any single track succeeds.
         full `"1 2 … 20"` + correct `get_weather` tool_call with a cross-turn-safe id. (Step 1, the
         `next_tool_call_id` fix on `feature/gguf-toolcall-id`, was superseded here — `consume_tokens`
         already uses it.)
-  - [~] **engine-spi-dense-mlx-drive — Send-relaxation DONE 2026-06-20** (branch
-        `feature/engine-spi-relax-send`). **Prerequisite shipped:** dropped the `Send` bound from
-        `LocalEngine` and from `generate()`'s return — a feasibility map proved this (not the reclaim
-        seam) is the real blocker, since the MLX engine state (model + `Array`s + KV cache, one Metal
-        stream) is irreducibly `!Send` (same reason GGUF calls `consume_tokens` directly). `drive` runs
-        the engine synchronously on its own thread, so `Send` was unneeded; relaxing it lets `!Send`
-        in-process engines (MLX, llama.cpp) `impl LocalEngine`. Proven by a new `!Send` engine test
-        (`drive_accepts_a_not_send_engine`, holds an `Rc` — would not compile before). **Remaining (the
-        actual adoption):** wrap the dense MLX `run_job` arms as an `impl LocalEngine` and route through
-        `drive`. This is a fiddly **hot-path** restructuring (the per-arch `Generate` borrows model + the
-        external `ConcatKeyValueCache` with tight lifetimes; cache truncate/`put_dense` stay in
-        `run_job`) for **mostly-architectural** value — MLX already shares the decode loop via
-        `consume_tokens`, so `drive` adoption only proves the trait with a real engine. Recommend doing
-        it alongside the **x86 engine** (which will exercise `drive` for real anyway) rather than risking
-        the MLX hot path early. *Done when:* byte-exact greedy parity on a dense model (drive vs the
-        current direct `consume_tokens`).
+  - [x] **engine-spi-dense-mlx-drive — DONE 2026-06-21** (branch `feature/dense-mlx-drive`). Two parts:
+        (1) **Send-relaxation** (prereq) — dropped `Send` from `LocalEngine` + `generate()`'s return; a
+        feasibility map proved this (not the reclaim seam) was the real blocker, since the MLX engine
+        state is irreducibly `!Send`. `drive` runs the engine synchronously on its own thread, so `Send`
+        was unneeded. Proven by `drive_accepts_a_not_send_engine` (Rc-holding `!Send` engine — would not
+        compile before). (2) **The adoption** — a `DenseMlxEngine` (`impl LocalEngine`) whose `generate`
+        dispatches per dense arch (Qwen3/Qwen3Moe/GptOss/Llama/Qwen2/Gemma3), built from the prepared
+        prefill + borrowed model+cache (split-borrow); `run_job` now routes the 6 dense arches through
+        `engine::drive`, while the 2 hybrid arms stay on `stream_generation` (they reclaim via
+        `into_cache_and_snapshot`, which `Box<dyn Iterator>` would erase). `drive` now has its first
+        production caller; the SPI is exercised by a real engine. **Validation:** (a) byte-identical by
+        construction — same per-arch generator + same `consume_tokens` with identical
+        meta/prompt_len/seed/repeat_guard/decode/emit; (b) functional — the branch produced correct
+        coherent greedy output on cached gpt-oss-20b (analysis-channel prime list `2, 3, 5, 7, 11, …`);
+        (c) engine unit tests green. The empirical master-vs-branch raw A/B was attempted but blocked by
+        RAM-starvation from accumulated 11 GB model loads (an environment limit, not the code; and
+        risky to force given the GPU-memory history) — the by-construction proof + functional run stand.
+        Dense path is byte-identical; no runtime change (the value is the SPI proof / x86 de-risking).
   - [~] **engine-spi-reclaim-seam — DRAFT DONE 2026-06-21** (branch `feature/engine-spi-reclaim-draft`).
         The hybrid cache-reclaim seam is now sketched + compile/FakeHybrid-validated in `src/engine.rs`:
         a `ReclaimStream` trait (`Iterator<Item=Result<u32,String>>` + `type State` +

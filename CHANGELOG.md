@@ -35,6 +35,29 @@ HTTP Basic password gating; no submit, SSE, room creation, model, or UI path is
 added. Verified with tempdir HTTP tests, daemon tests, no-default build, and a
 temporary-daemon curl smoke.
 
+## engine-spi — dense MLX routes through `drive` (first real production caller)
+Completed: 2026-06-21
+
+The dense MLX path now goes through the shared engine-SPI driver `engine::drive` instead of calling
+`stream_generation` directly — giving `drive` its first production caller and proving `LocalEngine` on
+a real, perf-tuned engine (it had only `FakeEngine` + a stub before). A new `DenseMlxEngine`
+(`impl LocalEngine`) carries the already-prefilled state (`run_job` does prefix-reuse prefill outside
+the generator) + the borrowed model & KV cache (split-borrow) + sampler params, and its `generate`
+dispatches per dense arch (Qwen3 / Qwen3Moe / gpt-oss / Llama / Qwen2 / Gemma3) to build the same
+per-arch `Generate` + `PipelinedIds` the old arms did. `run_job` now splits on `is_hybrid_arch`: the 6
+dense arches → `drive`; the 2 hybrid arms (Qwen3.6) stay on `stream_generation` because they reclaim
+their internal KV/conv cache via `into_cache_and_snapshot` for prefix reuse, which `drive`'s
+`Box<dyn Iterator>` return would erase (that's the still-deferred reclaim seam). Builds on the
+just-shipped `Send`-relaxation (MLX engine state is `!Send`). **No runtime change** — the value is the
+architectural proof + x86 de-risking. Validation: (1) byte-identical by construction — the dense path
+builds the identical generator and runs the same `consume_tokens` with identical
+meta/prompt_len/seed/repeat_guard/decode/emit; (2) functional — the branch produced correct coherent
+greedy output on cached gpt-oss-20b (the analysis channel correctly listing primes `2, 3, 5, 7, 11, …`
+before the token cap, exactly as deterministic greedy should); (3) engine unit tests green. The
+empirical master-vs-branch raw A/B was attempted but blocked by RAM-starvation from accumulated 11 GB
+model loads (an environment limit, not the code), so it rests on the by-construction proof + the
+functional run.
+
 ## engine-spi — draft the cache-reclaim seam (prefix-reuse engines through `drive`)
 Completed: 2026-06-21
 

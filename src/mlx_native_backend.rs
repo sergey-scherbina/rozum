@@ -791,6 +791,73 @@ mod inner {
 
     // Process-unique tool-call id is shared: `crate::engine::next_tool_call_id`.
 
+    /// A dense-arch MLX adapter for the shared engine-SPI driver (`crate::engine::drive`).
+    /// `run_job` does prefix-reuse prefill OUTSIDE the generator (it truncates the external
+    /// KV cache and computes the suffix `prompt_tokens`), so `generate` IGNORES its `prompt`
+    /// arg and builds the per-arch `Generate` from the prepared `prompt_tokens` + the
+    /// borrowed model + cache. Dense only — no post-run reclaim, so it fits `drive`'s
+    /// `Box<dyn Iterator>` return (the hybrid arches keep calling `stream_generation`
+    /// directly to `into_cache_and_snapshot`). The `&mut cache` borrow is released when the
+    /// engine drops, before `run_job`'s `put_dense`. Cancel is polled by `consume_tokens`,
+    /// so dense generators need no cancel callback (matching today's dense arms).
+    struct DenseMlxEngine<'e> {
+        model: &'e mut LoadedModel,
+        cache: &'e mut Vec<Option<ConcatKeyValueCache>>,
+        prompt_tokens: Array,
+        temp: f32,
+        top_p: f32,
+        top_k: i32,
+        repeat_penalty: f32,
+        meta: crate::engine::EngineMeta,
+    }
+
+    impl crate::engine::LocalEngine for DenseMlxEngine<'_> {
+        fn load(
+            _dir: &std::path::Path,
+            _opts: &crate::engine::EngineOptions,
+        ) -> Result<Self, String> {
+            Err("DenseMlxEngine is built by run_job from a loaded model, not loaded".to_owned())
+        }
+
+        fn meta(&self) -> &crate::engine::EngineMeta {
+            &self.meta
+        }
+
+        fn generate<'a>(
+            &'a mut self,
+            _prompt: &'a [u32], // ignored: run_job prepared `prompt_tokens` (prefix reuse)
+            _params: &'a crate::backend::SamplingParams,
+            _cancel: &'a tokio_util::sync::CancellationToken, // consume_tokens polls cancel
+        ) -> Box<dyn Iterator<Item = Result<u32, String>> + 'a> {
+            let (temp, top_p, top_k, repeat_penalty) =
+                (self.temp, self.top_p, self.top_k, self.repeat_penalty);
+            let pt = &self.prompt_tokens;
+            let cache = &mut *self.cache;
+            // Per-arch generator — the dense arms of `run_job`, moved here. `true` = the
+            // pipeline lookahead (dense overlaps); `PipelinedIds` wraps it to yield `u32`s.
+            macro_rules! dense {
+                ($g:expr) => {{
+                    let mut g = $g;
+                    g.set_sampler(top_p, top_k, repeat_penalty);
+                    Box::new(PipelinedIds::new(g, true))
+                        as Box<dyn Iterator<Item = Result<u32, String>> + 'a>
+                }};
+            }
+            match &mut *self.model {
+                LoadedModel::Qwen3(m) => dense!(qwen3::Generate::new(m, cache, temp, pt)),
+                LoadedModel::Qwen3Moe(m) => dense!(qwen3_moe::Generate::new(m, cache, temp, pt)),
+                LoadedModel::GptOss(m) => dense!(gpt_oss::Generate::new(m, cache, temp, pt)),
+                LoadedModel::Llama(m) => dense!(llama::Generate::new(m, cache, temp, pt)),
+                LoadedModel::Qwen2(m) => dense!(qwen2::Generate::new(m, cache, temp, pt)),
+                LoadedModel::Gemma3(m) => dense!(gemma3::Generate::new(m, cache, temp, pt)),
+                // Hybrid arches never reach here — run_job routes them to stream_generation.
+                LoadedModel::Qwen35(_) | LoadedModel::Qwen35Moe(_) => Box::new(std::iter::once(
+                    Err("DenseMlxEngine: hybrid arch must use stream_generation".to_owned()),
+                )),
+            }
+        }
+    }
+
     /// Render the prompt and stream token events. Dispatches on the model
     /// architecture; each `Generate` iterator feeds the shared streaming loop.
     fn run_job(
@@ -998,146 +1065,101 @@ mod inner {
             Vec<qwen3_5::LayerCache>,
             Option<Vec<qwen3_5::LinearSnap>>,
         )> = None;
-        match model {
-            LoadedModel::Qwen3(m) => {
-                let mut generator = qwen3::Generate::new(m, &mut cache, temp, &prompt_tokens);
-                generator.set_sampler(top_p, top_k, repeat_penalty);
-                stream_generation(
-                    generator,
-                    tokenizer,
-                    eos,
-                    prompt_ids.len(),
-                    max_tokens,
-                    &job,
-                    true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
-                    false, // harmony: Qwen-style <tool_call>, not the channel format
-                );
+        if is_hybrid_arch(model) {
+            // Hybrid (Qwen3.6) stays on stream_generation so it can reclaim its internal
+            // KV/conv cache (`into_cache_and_snapshot`) for next-turn prefix reuse — the
+            // engine-SPI `drive`'s `Box<dyn Iterator>` return would erase that state.
+            match model {
+                LoadedModel::Qwen35(m) => {
+                    // Owns its heterogeneous (KV + conv/recurrent) cache internally; on
+                    // reuse it's seeded with the truncated+restored cache via `with_cache`.
+                    let mut generator = match hcache.take() {
+                        Some(c) => qwen3_5::Generate::with_cache(m, temp, &prompt_tokens, c),
+                        None => qwen3_5::Generate::new(m, temp, &prompt_tokens),
+                    };
+                    let c = job.cancel.clone();
+                    generator.set_cancel(Box::new(move || c.is_cancelled()));
+                    generator.set_sampler(top_p, top_k, repeat_penalty);
+                    // Snapshot the Linear state at the conversation boundary (before the
+                    // generation-prompt tail), so it matches the next turn's reuse offset.
+                    generator.set_gen_prompt_len(gen_prompt_len as i32);
+                    let generator = stream_generation(
+                        generator,
+                        tokenizer,
+                        eos,
+                        prompt_ids.len(),
+                        max_tokens,
+                        &job,
+                        true, // hybrid now pipelines too: the retain fix (ROZUM_MLX_RETAIN)
+                              // dropped the per-call kernel eval, so the next token's graph
+                              // can async_eval while we read the current's id (byte-exact;
+                              // see mlx_qwen35_moe_decode_bench serial==pipe MATCH)
+                        false, // harmony: Qwen-style <tool_call>, not the channel format
+                    );
+                    hybrid_result = Some(generator.into_cache_and_snapshot());
+                }
+                LoadedModel::Qwen35Moe(m) => {
+                    let mut generator = match hcache.take() {
+                        Some(c) => qwen3_5_moe::Generate::with_cache(m, temp, &prompt_tokens, c),
+                        None => qwen3_5_moe::Generate::new(m, temp, &prompt_tokens),
+                    };
+                    let c = job.cancel.clone();
+                    generator.set_cancel(Box::new(move || c.is_cancelled()));
+                    generator.set_sampler(top_p, top_k, repeat_penalty);
+                    // Snapshot the Linear state at the conversation boundary (before the
+                    // generation-prompt tail), so it matches the next turn's reuse offset.
+                    generator.set_gen_prompt_len(gen_prompt_len as i32);
+                    let generator = stream_generation(
+                        generator,
+                        tokenizer,
+                        eos,
+                        prompt_ids.len(),
+                        max_tokens,
+                        &job,
+                        true, // hybrid now pipelines too: the retain fix (ROZUM_MLX_RETAIN)
+                              // dropped the per-call kernel eval, so the next token's graph
+                              // can async_eval while we read the current's id (byte-exact;
+                              // see mlx_qwen35_moe_decode_bench serial==pipe MATCH)
+                        false, // harmony: Qwen-style <tool_call>, not the channel format
+                    );
+                    hybrid_result = Some(generator.into_cache_and_snapshot());
+                }
+                _ => unreachable!("is_hybrid_arch ⇒ Qwen35 / Qwen35Moe"),
             }
-            LoadedModel::Qwen3Moe(m) => {
-                let mut generator = qwen3_moe::Generate::new(m, &mut cache, temp, &prompt_tokens);
-                generator.set_sampler(top_p, top_k, repeat_penalty);
-                stream_generation(
-                    generator,
-                    tokenizer,
-                    eos,
-                    prompt_ids.len(),
-                    max_tokens,
-                    &job,
-                    true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
-                    false, // harmony: Qwen-style <tool_call>, not the channel format
-                );
-            }
-            LoadedModel::GptOss(m) => {
-                let mut generator = gpt_oss::Generate::new(m, &mut cache, temp, &prompt_tokens);
-                generator.set_sampler(top_p, top_k, repeat_penalty);
-                stream_generation(
-                    generator,
-                    tokenizer,
-                    eos,
-                    prompt_ids.len(),
-                    max_tokens,
-                    &job,
-                    true,  // pipeline: dense overlaps (gpt-oss is single-stream)
-                    true,  // harmony: parse the channel format into final/tool_calls
-                );
-            }
-            LoadedModel::Llama(m) => {
-                // Dense transformer like Qwen3: external KV cache + the shared sampler.
-                let mut generator = llama::Generate::new(m, &mut cache, temp, &prompt_tokens);
-                generator.set_sampler(top_p, top_k, repeat_penalty);
-                stream_generation(
-                    generator,
-                    tokenizer,
-                    eos,
-                    prompt_ids.len(),
-                    max_tokens,
-                    &job,
-                    true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
-                    false, // harmony: Qwen-style <tool_call>, not the channel format
-                );
-            }
-            LoadedModel::Qwen2(m) => {
-                let mut generator = qwen2::Generate::new(m, &mut cache, temp, &prompt_tokens);
-                generator.set_sampler(top_p, top_k, repeat_penalty);
-                stream_generation(
-                    generator,
-                    tokenizer,
-                    eos,
-                    prompt_ids.len(),
-                    max_tokens,
-                    &job,
-                    true,  // pipeline: dense overlaps; hybrid kernel-eval blocks
-                    false, // harmony: Qwen-style <tool_call>, not the channel format
-                );
-            }
-            LoadedModel::Gemma3(m) => {
-                let mut generator = gemma3::Generate::new(m, &mut cache, temp, &prompt_tokens);
-                generator.set_sampler(top_p, top_k, repeat_penalty);
-                stream_generation(
-                    generator,
-                    tokenizer,
-                    eos,
-                    prompt_ids.len(),
-                    max_tokens,
-                    &job,
-                    true, // pipeline: dense overlaps; hybrid kernel-eval blocks
-                    false, // harmony: Qwen-style <tool_call>, not the channel format
-                );
-            }
-            LoadedModel::Qwen35(m) => {
-                // Owns its heterogeneous (KV + conv/recurrent) cache internally; on
-                // reuse it's seeded with the truncated+restored cache via `with_cache`.
-                let mut generator = match hcache.take() {
-                    Some(c) => qwen3_5::Generate::with_cache(m, temp, &prompt_tokens, c),
-                    None => qwen3_5::Generate::new(m, temp, &prompt_tokens),
-                };
-                let c = job.cancel.clone();
-                generator.set_cancel(Box::new(move || c.is_cancelled()));
-                generator.set_sampler(top_p, top_k, repeat_penalty);
-                // Snapshot the Linear state at the conversation boundary (before the
-                // generation-prompt tail), so it matches the next turn's reuse offset.
-                generator.set_gen_prompt_len(gen_prompt_len as i32);
-                let generator = stream_generation(
-                    generator,
-                    tokenizer,
-                    eos,
-                    prompt_ids.len(),
-                    max_tokens,
-                    &job,
-                    true, // hybrid now pipelines too: the retain fix (ROZUM_MLX_RETAIN)
-                          // dropped the per-call kernel eval, so the next token's graph
-                          // can async_eval while we read the current's id (byte-exact;
-                          // see mlx_qwen35_moe_decode_bench serial==pipe MATCH)
-                    false, // harmony: Qwen-style <tool_call>, not the channel format
-                );
-                hybrid_result = Some(generator.into_cache_and_snapshot());
-            }
-            LoadedModel::Qwen35Moe(m) => {
-                let mut generator = match hcache.take() {
-                    Some(c) => qwen3_5_moe::Generate::with_cache(m, temp, &prompt_tokens, c),
-                    None => qwen3_5_moe::Generate::new(m, temp, &prompt_tokens),
-                };
-                let c = job.cancel.clone();
-                generator.set_cancel(Box::new(move || c.is_cancelled()));
-                generator.set_sampler(top_p, top_k, repeat_penalty);
-                // Snapshot the Linear state at the conversation boundary (before the
-                // generation-prompt tail), so it matches the next turn's reuse offset.
-                generator.set_gen_prompt_len(gen_prompt_len as i32);
-                let generator = stream_generation(
-                    generator,
-                    tokenizer,
-                    eos,
-                    prompt_ids.len(),
-                    max_tokens,
-                    &job,
-                    true, // hybrid now pipelines too: the retain fix (ROZUM_MLX_RETAIN)
-                          // dropped the per-call kernel eval, so the next token's graph
-                          // can async_eval while we read the current's id (byte-exact;
-                          // see mlx_qwen35_moe_decode_bench serial==pipe MATCH)
-                    false, // harmony: Qwen-style <tool_call>, not the channel format
-                );
-                hybrid_result = Some(generator.into_cache_and_snapshot());
-            }
+        } else {
+            // The 6 dense arches go through the shared engine seam (native-engine-spi):
+            // `DenseMlxEngine::generate` builds the per-arch generator from the prepared
+            // prefill; `drive` runs the same `consume_tokens` loop — byte-identical to the
+            // prior per-arm `stream_generation` (same generator + same shared loop).
+            let repeat_guard =
+                !matches!(std::env::var("ROZUM_REPEAT_GUARD").as_deref(), Ok("0"));
+            let harmony = matches!(model, LoadedModel::GptOss(_));
+            let mut engine = DenseMlxEngine {
+                model,
+                cache: &mut cache,
+                prompt_tokens,
+                temp,
+                top_p,
+                top_k,
+                repeat_penalty,
+                meta: crate::engine::EngineMeta {
+                    n_ctx: 0,
+                    eos: eos.to_vec(),
+                    model_type: String::new(),
+                    harmony,
+                },
+            };
+            crate::engine::drive(
+                &mut engine,
+                &prompt_ids,
+                &job.sampling,
+                max_tokens,
+                repeat_guard,
+                &job.cancel,
+                |slice, skip| tokenizer.decode(slice, skip).ok(),
+                |ev| job.events.send(ev).is_ok(),
+            );
+            // `engine` (holding `&mut cache`) drops here, before `put_dense` below.
         }
 
         // Persist the (now advanced) cache into the LRU so the next request that
