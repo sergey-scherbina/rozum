@@ -21,6 +21,18 @@
   Validate via A/B re-run of the codex `build`/`fix`/`debug` reds. NB: **replaces** the earlier
   (mock-derived) `structured-edit-MCP-for-codex` idea; the real-CLI repro shows it's a patch-format
   mismatch (edit) + shell-echo corruption (create), not a missing edit tool.
+  - **UPDATE 2026-06-21 — largely RESOLVED for the `fix`/`debug` (edit) reds.** Five gateway fixes
+    shipped (codex×gpt-oss; matrix 22/30 → 27/30, 35B 15/15 no regression), all in `src/gateway.rs`:
+    (1) `-N --forward` re-send idempotency (`f63d583`), (2) loop-breaker sig-3 edit-churn (`c134334`),
+    (3) `\uXXXX` decode in the apply_patch FUNCTION-call reroute (`14fe6c8`), (4) read-repair default-on
+    + refined (`14fe6c8`), (5) whitespace-tolerant `.rej` fallback — gpt-oss drops indent, BSD patch
+    can't match (`6f2bed9`). codex×gpt-oss×fix ~1-2/5 → 5/6. Method = `isolate` skill; full writeup
+    [[project-gateway-patch-revert]] + specs `apply-patch-*`. **STILL OPEN:** the `build`/`test`
+    (create-from-scratch) reds — codex×gpt-oss can't scaffold a project: `patch` can't create a
+    missing file (`No file found → Oops.rej`), model flails between `cat`/`tee`/`apply_patch` stacking
+    duplicate `[package]`, never reaches `src/main.rs`. Candidate fix `apply_patch` create-if-missing
+    being A/B'd (branch `feature/apply-patch-create`); claude (Write tool) drives the same gpt-oss to
+    pass, so it's a codex-create-workflow limit, not the model.
 
 ## Optional Model Adapters
 
@@ -48,6 +60,23 @@ default CLI startup, meeting rooms, round-robin moderation, or manual moderation
   (native MLX is the primary in-process engine; GGUF the fallback; remotes via HTTP). Not worth the
   streaming work.
   - Low priority: Candle-Metal is slower than llama-cpp-2 on the target models.
+
+## GLM model landscape (sizing + port path)
+
+- [ ] glm-model-landscape — **Recorded 2026-06-21.** Which GLM (Zhipu/Z.ai) models are worth
+  running in rozum, and how. **Verified facts:** the MLX-native crate (`.vendor/mlx-lm`) has NO
+  GLM (`unsupported model_type`); the vendored **mistral.rs DOES** — `glm4.rs` / `glm4_moe.rs` /
+  `glm4_moe_lite.rs`, registered as `Glm4ForCausalLM` / `Glm4MoeForCausalLM` / `Glm4MoeLiteForCausalLM`.
+  - **Fits 36 GB (do these):** GLM-4-9B and **GLM-4-32B-0414** (both DENSE → `glm4` loader; 4-bit
+    ~6 GB / ~18–20 GB). Actionable port task: SPRINT `glm4-bringup` (MLX-native `glm4.rs`, the
+    fast first-class path; partial-RoPE/qkv-bias/post-norm building blocks already in the crate).
+  - **Quick validation today:** `ROZUM_FORCE_MISTRALRS=1 rozum launch --model <glm-4-9b>` (arch
+    already in the fork; candle/Metal, slow — `ROZUM_FORCE_MISTRALRS` / lower `--n-ctx` for the
+    RAM preflight, per [[project-qwen36-mistralrs]]).
+  - **Too big for 36 GB (NOT targets):** GLM-4.5-Air (106B-A12B), GLM-4.5 (355B), **GLM-5 / GLM-5.1**
+    (744B total / 44B active MoE, 256 experts·8 active, DeepSeek sparse attention, 200K ctx, released
+    2026-02-11; ≈ 370 GB at 4-bit — cluster-scale). DeepSeek-style arch; mistral.rs has `deepseek2/3`
+    but no `glm5`. Revisit only if a much larger box (512 GB Mac Studio is still marginal) is in play.
 
 ## Native MLX runtime — performance (ports from the mistralrs work)
 

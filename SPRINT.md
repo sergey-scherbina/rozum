@@ -2095,6 +2095,26 @@ soon as any single track succeeds.
   in `tools_json` (matches transformers; truthiness-guarded templates unaffected —
   gpt-oss regression-checked). Added to `src/models.rs`. Fork rev bumped to e5ebe9d2.
 
+- [ ] glm4-bringup — **QUEUED 2026-06-21.** Port GLM-4 (dense) to the MLX-native crate:
+  add `.vendor/mlx-lm/mlx-lm/src/models/glm4.rs` + register in `models/mod.rs` + dispatch
+  `"glm4" => glm4::load_glm4_model(dir)` in `src/mlx_native_backend.rs`. Same playbook as
+  [[project-gptoss-native-port]]: byte-exact greedy parity vs Python `mlx_lm.glm4`
+  (`scripts/mlx_ref.py`), then catalog (`src/models.rs`) + tool-call verify. Targets that fit
+  36 GB: **GLM-4-9B** (fast bring-up) → **GLM-4-32B-0414** (dense; 4-bit ~18–20 GB, the real
+  target, ≈ Qwen3.6-27B footprint). Building blocks ALREADY in the crate to reuse: **partial
+  RoPE** (`qwen3_5`/`qwen3_5_moe` — GLM's distinctive `partial_rotary_factor`), **q/k/v bias**
+  (`qwen3`), **post-attention / sandwich norm** (`qwen3`/`gemma3`). NEW work = GLM **weight-name
+  remap** (the gpt-oss "garbage bug" risk — get q/k/v/o/gate/up/down/norm names exact) + the
+  GLM **chat template** (`[gMASK]<sop>` + `<|user|>`/`<|assistant|>`). Quick "does it run at
+  all" path meanwhile: the vendored **mistral.rs already has `Glm4ForCausalLM` /
+  `Glm4MoeForCausalLM` loaders** → `ROZUM_FORCE_MISTRALRS=1 rozum launch --model <glm-4-9b>`
+  (candle/Metal — works but ~5–10× slower per [[project-mistralrs-mlx-direct]]; validation
+  only, the real path is the MLX-native port for speed). OUT OF SCOPE for 36 GB (too big — for
+  the record): the MoE GLMs — **GLM-4.5-Air** (106B-A12B), **GLM-4.5** (355B), and **GLM-5 /
+  GLM-5.1** (744B-A44B MoE, 256 experts/8 active, DeepSeek sparse attention, 200K ctx,
+  released 2026-02-11) — GLM-5 ≈ 370 GB at 4-bit; cluster-scale, not local. See BACKLOG
+  `glm-model-landscape`.
+
 ### Runtime / backend track — new engines below the `ChatBackend` seam
 
 - [ ] native-engine-spi - **ARCHITECTURE FIRST (prerequisite of `x86-native-runtime`).**
