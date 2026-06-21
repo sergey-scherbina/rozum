@@ -151,7 +151,40 @@ fn parse_loose_tool_calls(text: &str) -> Vec<(String, String)> {
             None => break,
         }
     }
+    // Last resort: the GLM-4 form. GLM-4 emits a tool call as the WHOLE assistant output —
+    // a bare function name on its own line, then the JSON arguments, terminated by the
+    // `<|observation|>` stop token (already in GLM's config `eos_token_id`): e.g.
+    // `get_weather\n{"city": "Paris"}`. No `<tool_call>` wrapper, and the name is OUTSIDE the
+    // JSON, so the paths above miss it. Tight match (whole text = identifier + one JSON object)
+    // keeps it from eating ordinary prose; fires only when nothing else parsed.
+    if calls.is_empty() {
+        if let Some(call) = parse_glm_tool_call(text) {
+            calls.push(call);
+        }
+    }
     calls
+}
+
+/// GLM-4 tool-call form: the entire output is `<function_name>\n<json-object>` (e.g.
+/// `get_weather\n{"city": "Paris"}`). Returns `(name, args_json)` only when the trimmed text is
+/// EXACTLY a bare identifier line followed by a single JSON object — so prose / embedded JSON
+/// don't false-positive.
+fn parse_glm_tool_call(text: &str) -> Option<(String, String)> {
+    let (first, rest) = text.trim().split_once('\n')?;
+    let name = first.trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    {
+        return None;
+    }
+    let args = rest.trim();
+    let v: Value = serde_json::from_str(args).ok()?;
+    if !v.is_object() {
+        return None;
+    }
+    Some((name.to_string(), args.to_string()))
 }
 
 /// Every top-level balanced `{…}` substring, tracking JSON string state so braces
@@ -290,6 +323,27 @@ fn repair_tool_object(b: &[u8], start: usize) -> Option<(String, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glm4_tool_call_form() {
+        // GLM-4: bare name line + JSON object, terminated at gen time by <|observation|> (stripped).
+        let calls = parse_tool_calls("get_weather\n{\"city\": \"Paris\"}");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "get_weather");
+        assert!(calls[0].1.contains("Paris"));
+        // multi-line JSON args still parse (everything after the first newline is the object)
+        let ml = parse_tool_calls("search_web\n{\n  \"q\": \"rust traits\",\n  \"n\": 3\n}");
+        assert_eq!(ml.len(), 1);
+        assert_eq!(ml[0].0, "search_web");
+        // does NOT eat ordinary prose, a non-object body, or an embedded object mid-sentence
+        assert!(parse_tool_calls("Sure, here is the answer.\nIt is 42.").is_empty());
+        assert!(parse_tool_calls("foo\n[1, 2, 3]").is_empty());
+        assert!(parse_tool_calls("The result is\nsunny today").is_empty());
+        // a real <tool_call> wrapper still takes precedence (GLM path is last-resort only)
+        let wrapped = parse_tool_calls("<tool_call>{\"name\":\"x\",\"arguments\":{}}</tool_call>");
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0].0, "x");
+    }
 
     #[test]
     fn native_tool_call_blocks() {

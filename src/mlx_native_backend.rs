@@ -486,6 +486,32 @@ mod inner {
         }
     }
 
+    /// Render a message for the **GLM-4** template (`<|observation|>` marker). GLM's trained
+    /// tool-loop format is `<function_name>\n<json args>` in the assistant turn, and the tool
+    /// RESULT comes back under the `observation` role (not `tool`). So: assistant `ToolUse` →
+    /// `name\n{args}` content (the inverse of `parse_glm_tool_call`), and a tool-result message is
+    /// re-roled to `observation`. Without this, multi-turn history has the call/result in the wrong
+    /// shape and the model ignores the result (hallucinates one instead).
+    fn glm_conversation(msg: &Message) -> Conversation<&'static str, String> {
+        let mut text = String::new();
+        for b in &msg.content {
+            match b {
+                ContentBlock::Text { text: t } => text.push_str(t),
+                ContentBlock::ToolResult { content, .. } => text.push_str(content),
+                ContentBlock::ToolUse { name, input, .. } => {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(name);
+                    text.push('\n');
+                    text.push_str(&input.to_string());
+                }
+            }
+        }
+        let role = if matches!(msg.role, Role::Tool) { "observation" } else { role_str(&msg.role) };
+        Conversation { role, content: text, tool_calls: None }
+    }
+
     /// Worker thread entry point. Loads the model (reporting load result over
     /// `ready`), then serves jobs until the queue closes.
     fn worker_main(
@@ -3191,6 +3217,24 @@ mod inner {
         render_prompt_opt(tokenizer, template, model_id, messages, tools, true)
     }
 
+    /// Strip chat-template constructs the Rust minijinja (in the `tokenizers` crate) doesn't
+    /// support but Python's chat-template shim does. GLM-4's template renders its tool schemas with
+    /// `tojson(indent=4, ensure_ascii=False)`; minijinja's `tojson` rejects the `ensure_ascii` kwarg
+    /// ("unknown keyword argument 'ensure_ascii'"), and Rust's tojson is already unicode-aware, so
+    /// dropping it is a no-op. Only touches templates that contain it (others render unchanged).
+    fn sanitize_chat_template(t: &str) -> String {
+        if !t.contains("ensure_ascii") {
+            return t.to_string();
+        }
+        t.replace(", ensure_ascii=False", "")
+            .replace(",ensure_ascii=False", "")
+            .replace("ensure_ascii=False, ", "")
+            .replace("ensure_ascii=False,", "")
+            .replace("ensure_ascii=False", "")
+            .replace(", ensure_ascii=True", "")
+            .replace("ensure_ascii=True", "")
+    }
+
     /// `render_prompt` with control over the trailing generation prompt. Rendering
     /// with `add_gen=false` gives the **conversation boundary** length — the prefix
     /// that recurs across agentic turns — which prefix reuse keys on (the generation
@@ -3209,11 +3253,15 @@ mod inner {
         // result has no preceding structured call. Detect it by its channel markers
         // and pass tool calls structurally instead of as Qwen `<tool_call>` text.
         let harmony = template.contains("<|channel|>");
+        // GLM-4: `<|observation|>` marker → render tool calls/results in GLM's native form.
+        let glm = template.contains("<|observation|>");
         let convo: Vec<Conversation<&'static str, String>> = messages
             .iter()
             .map(|m| {
                 if harmony {
                     harmony_conversation(m)
+                } else if glm {
+                    glm_conversation(m)
                 } else {
                     Conversation {
                         role: role_str(&m.role),
@@ -3242,7 +3290,7 @@ mod inner {
             eos_token: None,
         };
         let encodings = tokenizer
-            .apply_chat_template_and_encode(template.to_string(), args)
+            .apply_chat_template_and_encode(sanitize_chat_template(template), args)
             .map_err(|e| format!("mlx: chat template render: {e}"))?;
         let ids: Vec<u32> = encodings.iter().flat_map(|e| e.get_ids()).copied().collect();
         if harmony && add_gen && std::env::var_os("ROZUM_PROMPT_DUMP").is_some() {
