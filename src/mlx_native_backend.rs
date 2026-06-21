@@ -23,7 +23,9 @@ mod inner {
     };
 
     use mlx_lm::cache::ConcatKeyValueCache;
-    use mlx_lm::models::{gemma3, gpt_oss, llama, qwen2, qwen3, qwen3_5, qwen3_5_moe, qwen3_moe};
+    use mlx_lm::models::{
+        gemma3, glm4, gpt_oss, llama, qwen2, qwen3, qwen3_5, qwen3_5_moe, qwen3_moe,
+    };
     use mlx_lm_utils::tokenizer::{
         ApplyChatTemplateArgs, Chat, Conversation, Tokenizer, load_model_chat_template_from_file,
     };
@@ -110,6 +112,7 @@ mod inner {
         Qwen35Moe(qwen3_5_moe::Model),
         Llama(llama::Model),
         Qwen2(qwen2::Model),
+        Glm4(glm4::Model),
         Gemma3(gemma3::Model),
         GptOss(gpt_oss::Model),
     }
@@ -171,6 +174,10 @@ mod inner {
                 "qwen2" => qwen2::load_qwen2_model(dir)
                     .map(LoadedModel::Qwen2)
                     .map_err(|e| format!("mlx: load qwen2 {}: {e}", dir.display())),
+                // GLM-4 dense (qkv-bias, partial-traditional rope, 4-norm sandwich, fused gate_up).
+                "glm4" => glm4::load_glm4_model(dir)
+                    .map(LoadedModel::Glm4)
+                    .map_err(|e| format!("mlx: load glm4 {}: {e}", dir.display())),
                 other => Err(format!("mlx: unsupported model_type '{other}'")),
             }
         }
@@ -849,6 +856,7 @@ mod inner {
                 LoadedModel::GptOss(m) => dense!(gpt_oss::Generate::new(m, cache, temp, pt)),
                 LoadedModel::Llama(m) => dense!(llama::Generate::new(m, cache, temp, pt)),
                 LoadedModel::Qwen2(m) => dense!(qwen2::Generate::new(m, cache, temp, pt)),
+                LoadedModel::Glm4(m) => dense!(glm4::Generate::new(m, cache, temp, pt)),
                 LoadedModel::Gemma3(m) => dense!(gemma3::Generate::new(m, cache, temp, pt)),
                 // Hybrid arches never reach here — run_job routes them to stream_generation.
                 LoadedModel::Qwen35(_) | LoadedModel::Qwen35Moe(_) => Box::new(std::iter::once(
@@ -1224,6 +1232,12 @@ mod inner {
                     m, input,
                 )
             }
+            LoadedModel::Glm4(m) => {
+                let input = glm4::ModelInput { inputs: inp, mask, cache };
+                <glm4::Model as Module<glm4::ModelInput<'_, ConcatKeyValueCache>>>::forward(
+                    m, input,
+                )
+            }
             // Gemma 3: per-row rope (BATCH_PAD_OFFSETS) + it derives per-layer local masks from
             // the pad mask we pass (global) + its sliding window.
             LoadedModel::Gemma3(m) => {
@@ -1499,7 +1513,8 @@ mod inner {
     fn model_type_is_dense(model_type: &str) -> bool {
         matches!(
             model_type,
-            "qwen3" | "qwen3_moe" | "llama" | "mistral" | "phi3" | "gemma3_text" | "gemma3" | "qwen2"
+            "qwen3" | "qwen3_moe" | "llama" | "mistral" | "phi3" | "gemma3_text" | "gemma3"
+                | "qwen2" | "glm4"
         )
     }
 
@@ -2572,12 +2587,14 @@ mod inner {
             // model's attention reads its own, so the extra setters are harmless no-ops.
             llama::set_batch_pad_offsets(Some(pad_off.clone()));
             qwen2::set_batch_pad_offsets(Some(pad_off.clone()));
+            glm4::set_batch_pad_offsets(Some(pad_off.clone()));
             gemma3::set_batch_pad_offsets(Some(pad_off.clone()));
             set_batch_pad_offsets(Some(pad_off));
             let out = dense_forward(model, &y, Some(&dec_mask), &mut bcache);
             set_batch_pad_offsets(None);
             llama::set_batch_pad_offsets(None);
             qwen2::set_batch_pad_offsets(None);
+            glm4::set_batch_pad_offsets(None);
             gemma3::set_batch_pad_offsets(None);
             logits = match out {
                 Ok(l) => l.index((.., -1, ..)),
@@ -3363,6 +3380,7 @@ pub fn supported_model_type(model_type: &str) -> bool {
             | "gemma3"
             | "gemma3_text"
             | "qwen2"
+            | "glm4"
     )
 }
 
