@@ -12,6 +12,7 @@ pub mod participant;
 pub mod piggyback;
 pub mod proxy;
 pub mod registry;
+pub mod rest_read;
 pub mod room;
 pub(crate) mod room_client;
 pub mod room_path;

@@ -555,6 +555,7 @@ async fn serve_daemon_until(
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
     tracing::info!("meeting daemon listening on {}", socket_path.display());
+    super::rest_read::maybe_spawn_from_env(Arc::clone(&registry), shutdown.clone());
 
     // Idle-evict watchdog: sweep long-idle rooms out of the open set (files stay,
     // they reopen on demand). `ROZUM_MEETINGS_IDLE_SECS=0` disables it.
