@@ -132,16 +132,28 @@ args, signals (data-ssc-*), server-push (/__ssc/push|state) — all shipped + gr
 - [x] **Live-update fix** — a reverse proxy (Tailscale serve) buffers the SSE `/api/stream`, so the
       phone never saw new/just-sent messages. Added a `pollHistory` fallback (re-fetch /api/messages
       every 2.5 s + immediately after submit; `add()` dedups by date:n). web_index.html.
-- [ ] **Room picker** — the web is single-room (launched with `--room`). Add `/api/rooms` (list) +
-      `?room=` on messages/stream/submit + a UI picker so the operator chooses a room / breakout
-      (uses `MeetingClient.list_rooms()`/`join`, `list::list_rooms`). Fold into the .ssc rewrite.
-- [ ] **Re-author the meeting web in `.ssc`→Rust, working with rozum (operator directive).** The
-      toolkit's static `serve(view)` renders once; a live chat needs per-request render bound to the
-      rozum room → use `route(path, handler)` + `serve(port)` (both map to `crate::runtime::http::_http_*`
-      on Rust) + read the room transcript from disk (`readFile`→`_read_file`) + post via rozum
-      (`rozum meetings post` / the daemon). `.ssc→Rust` meeting **UI** already compiles + SSRs
-      (`../scalascript/examples/rozum-meeting.ssc`, curl-verified); remaining = the live rozum data
-      binding. Verify against the live phone baseline.
+- [x] **Room picker** — DONE as `demo`/`rozum` tabs in the .ssc page header (fixed, centered);
+      each tab is a `/r/<room>` GET; `/m/<room>` live fragment + `/p/<room>` POST per room.
+- [x] **Re-author the meeting web in `.ssc`→Rust (operator directive) — DONE; now the ONLY version.**
+      `meeting-ssc/meeting.ssc` compiles to a standalone Rust binary: multi-room (demo + the project
+      rozum room, read from `.rozum/room/`), per-handle role colours, live JS polling of `/m/<room>`,
+      fetch posting → `rozum meetings post`, full PWA (manifest/sw/icon + iOS standalone), grabber
+      pull-to-refresh, flex + `visualViewport` layout (picker pinned, input above keyboard). launchd
+      `com.rozum.meeting-ssc` :8405, Tailscale `:8443`+`:8446`. The hand-written
+      `web.rs`/`web_index.html`/`meetings web` subcommand were REMOVED (`445c7a8`, cargo check clean).
+      Toolkit fixes that unblocked it landed in scalascript `feature/rust-web-toolkit` (`a0aa846`:
+      `&str` patterns, borrow intrinsics, `String.toList`→`.chars()`, `.sum`, http `no-store` +
+      MIME-by-extension).
+
+**Now — autonomous polish queue (operator: "все задачи в спринт и делай автономно", 2026-06-21):**
+- [ ] **Trim history** — `readRoom` concatenates every dated `.jsonl`; the rozum room is large and
+      grows daily. Show only the last ~80 messages so polling + render stay fast.
+- [ ] **Highlight the operator's own messages** — the web posts under the local identity's handle;
+      detect that handle and mark those rows (left accent / "you") so the human's messages stand out
+      from agents in a busy room.
+- [ ] **Message timestamps** — parse the jsonl `ts`/created field; show a small dim `HH:MM` per row.
+- [ ] **Dynamic room list** — replace the hardcoded `["demo","rozum"]` with the rooms that actually
+      exist (scan `roomsDir` + the project room) so new rooms appear without a code change.
 
 #### demo-polish-and-resilience (2026-06-20, operator-approved) — make the live demo boringly reliable
 
