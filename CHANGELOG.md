@@ -1,5 +1,16 @@
 # Changelog
 
+## gateway — opt-in raw Codex tool-call capture
+Completed: 2026-06-21
+
+Added `ROZUM_CODEX_TOOL_CAPTURE=1` for the Codex `/v1/responses` gateway path.
+When enabled, the existing gateway JSONL log records `codex_tool_inventory` and
+`codex_tool_call` events, including raw tool names/arguments and the final
+names/arguments returned to Codex after apply-patch reroutes or argument
+normalization. The trace is off by default, supports
+`ROZUM_CODEX_TOOL_CAPTURE_MAX_BYTES`, and covers both streaming and
+non-streaming responses.
+
 ## meetings web — model-participant controls
 Completed: 2026-06-21
 

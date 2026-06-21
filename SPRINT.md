@@ -269,9 +269,13 @@ before concluding.
 - **Synthesis:** codex fails *differently by task shape* (create → echo/approval 1a/1b; edit → patch
   mismatch F4). 3 interacting factors, none a clean infra bug — model code-quality × agent file-write
   mechanism (codex shell-echo/approval vs claude raw-Write vs opencode append-error) × speed/time-budget.
-- [ ] **Still to do:** raw codex tool-call capture (1a/1b — why `echo` over `apply_patch`?); repro the
-  `fix`/`debug`/`test` reds (edit-existing-file, different shape); per-fail verdict (fix vs structural);
-  A/B candidate fixes; re-run the matrix. Full evidence + verdicts in `docs/matrix-failure-analysis.md`.
+- [x] **raw codex tool-call capture — DONE 2026-06-21.** Added opt-in
+  `ROZUM_CODEX_TOOL_CAPTURE=1` JSONL events for the Codex `/v1/responses` tool
+  inventory and completed tool calls, preserving raw vs post-rewrite names/args
+  across streaming and non-streaming paths.
+- [ ] **Still to do:** repro the `fix`/`debug`/`test` reds (edit-existing-file,
+  different shape); per-fail verdict (fix vs structural); A/B candidate fixes;
+  re-run the matrix. Full evidence + verdicts in `docs/matrix-failure-analysis.md`.
 
 > Note (2026-06-18): staged on branch `docs/matrix-analysis` (off master) because a co-agent occupies
 > the master worktree; fast-forward / merge into master when it's free.

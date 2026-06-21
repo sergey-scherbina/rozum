@@ -35,16 +35,23 @@ Events:
 
 ## Behavior
 
-- [ ] Capture is completely off unless `ROZUM_CODEX_TOOL_CAPTURE` is set and is
+- [x] Capture is completely off unless `ROZUM_CODEX_TOOL_CAPTURE` is set and is
       not `0`.
-- [ ] Captured `raw_args` are the exact buffered model tool-call arguments before
+- [x] Captured `raw_args` are the exact buffered model tool-call arguments before
       `rewrite_apply_patch_function_args` or `normalize_codex_tool_args`.
-- [ ] Captured `final_args` are the arguments returned to Codex after gateway
+- [x] Captured `final_args` are the arguments returned to Codex after gateway
       rewrites.
-- [ ] Both streaming and non-streaming `/v1/responses` paths produce equivalent
+- [x] Both streaming and non-streaming `/v1/responses` paths produce equivalent
       capture events.
-- [ ] Capture uses the existing file-backed gateway log and never writes to the
+- [x] Capture uses the existing file-backed gateway log and never writes to the
       agent terminal.
+
+## Verification
+
+- `cargo test capture --no-default-features`
+- `cargo test responses_tool_def_mapped --no-default-features`
+- `cargo test apply_patch_function_reroutes_to_exec_command --no-default-features`
+- `cargo test --no-default-features`
 
 ## Out of scope
 
