@@ -158,8 +158,16 @@ args, signals (data-ssc-*), server-push (/__ssc/push|state) — all shipped + gr
       agents all post under the same local identity ("Sergiy · <handle>"), so there is no reliable
       "me" marker distinct from agents. Per-handle colour (shipped) already separates sessions.
 
+- [x] **Content integrity** (found in an audit, not the original queue) — messages containing a `"`
+      were truncated: `msg()` split on the next bare quote. Now split on the `","ts":` boundary +
+      `.replace("\\\"", "\"")` to un-escape. Needed a toolkit `.replace(from,to)`→`&str` patterns fix.
+- [x] **Empty-room placeholder** + auto-scroll-to-newest on live update (when already at bottom).
+- [x] **End-to-end QA (2026-06-21)** — all 8 routes 200 with correct MIME (html / manifest+json /
+      text/javascript / image/svg+xml); post round-trips in both rooms; full content (no truncation);
+      per-handle colours; `HH:MM` timestamps. Live on `:8443`+`:8446`.
+
 Toolkit work that landed for the above (scalascript `feature/rust-web-toolkit`): Vec `.take`/`.drop`/
-`.takeRight`/`.dropRight`/`.sorted` lowering (`.drop` had collided with Rust's `Drop`).
+`.takeRight`/`.dropRight`/`.sorted` lowering (`.drop` had collided with Rust's `Drop`); `.replace`→`&str`.
 
 #### demo-polish-and-resilience (2026-06-20, operator-approved) — make the live demo boringly reliable
 
