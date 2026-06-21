@@ -1687,9 +1687,23 @@ fn apply_patch_block_to_fuzz(block: &str) -> Option<String> {
     // freezes decides pass/fail (observed coin-flip pass=0/1). `-N` turns a redundant patch
     // into a no-op ("Ignoring previously applied patch") instead of a revert, so the fix is
     // sticky and the outcome is deterministic. A genuinely new patch still applies normally.
+    let fuzz = patch_fuzz();
     Some(format!(
-        "patch -p0 --fuzz=3 -N --forward <<'ROZUM_PATCH_EOF'\n{diff}ROZUM_PATCH_EOF\n"
+        "patch -p0 --fuzz={fuzz} -N --forward <<'ROZUM_PATCH_EOF'\n{diff}ROZUM_PATCH_EOF\n"
     ))
+}
+
+/// The `--fuzz` context-slack `patch` is allowed when matching a hunk. Higher = more lenient
+/// (lands a model's slightly-off-context patch, but can mis-apply a stale-anchored churn patch
+/// at the wrong line and corrupt the file); lower = stricter (a misanchored patch fails to a
+/// `.rej`, leaving the file intact, but the model's first imperfect patch may not land).
+/// `ROZUM_PATCH_FUZZ` overrides the default (3); clamped to GNU/BSD patch's 0..=3.
+fn patch_fuzz() -> u8 {
+    std::env::var("ROZUM_PATCH_FUZZ")
+        .ok()
+        .and_then(|v| v.trim().parse::<u8>().ok())
+        .map(|n| n.min(3))
+        .unwrap_or(3)
 }
 
 /// gpt-oss (trained on the OpenAI/codex tool surface) emits a native `apply_patch` *function*
