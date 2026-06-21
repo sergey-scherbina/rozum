@@ -35,7 +35,27 @@ attention_bias=true   tie_word_embeddings=false
 ```
 
 Reuse from existing ports: **partial RoPE** (`qwen3_5`/`qwen3_5_moe`), **q/k/v bias**
-(`qwen3`), **post-attention / sandwich norm** (`qwen3`/`gemma3`).
+(`qwen3`), **RMSNorm** (`qwen3`).
+
+### Exact structure (from `mlx_lm.models.glm4`, 181 lines — saved at `glm4_ref.py`)
+
+The blueprint — `glm4.rs` mirrors `qwen3.rs` and changes exactly these:
+
+- **Partial, traditional RoPE**: `RoPE(dims = head_dim * partial_rotary_factor = 64,
+  base = rope_theta, traditional = TRUE)`. Only the first 64 of 128 head dims are rotated,
+  and it's the **interleaved/traditional** RoPE (not the GPT-NeoX half-split). The remaining
+  64 dims pass through. (`qwen3_5` has partial rope but check the traditional flag.)
+- **q/k/v bias = true, o_proj bias = false** (`attention_bias`); GQA 32/2.
+- **Sandwich norm — FOUR RMSNorms per layer** (the distinctive GLM-4 trait):
+  ```
+  x = x + post_self_attn_layernorm( self_attn( input_layernorm(x) ) )
+  x = x + post_mlp_layernorm( mlp( post_attention_layernorm(x) ) )
+  ```
+  i.e. a norm BEFORE each sublayer (input_/post_attention_) AND a norm on each sublayer's
+  OUTPUT before the residual add (post_self_attn_/post_mlp_). qwen3 has only the two
+  pre-norms; GLM adds the two post-norms.
+- **MLP**: SwiGLU (gate/up/down), like qwen3.
+- Final `norm` (RMSNorm), `embed_tokens`, untied `lm_head`.
 
 ## Behavior
 
