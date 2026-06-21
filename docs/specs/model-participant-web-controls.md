@@ -33,17 +33,17 @@ policy, peers, persona, start, stop, and status.
 
 ## Behavior
 
-- [ ] Starting from the web UI launches the existing participant CLI with the
+- [x] Starting from the web UI launches the existing participant CLI with the
       current room name and the selected model/gateway/policy/persona options.
-- [ ] The web server supervises at most one participant child and reports
+- [x] The web server supervises at most one participant child and reports
       running/stopped/exited status without claiming participants started
       outside this web process.
-- [ ] Stopping from the web UI terminates only the managed child.
-- [ ] Invalid start requests are rejected before spawning a process; a second
+- [x] Stopping from the web UI terminates only the managed child.
+- [x] Invalid start requests are rejected before spawning a process; a second
       start while running returns `409`.
-- [ ] Status includes the visible model/gateway configuration and a best-effort
+- [x] Status includes the visible model/gateway configuration and a best-effort
       gateway probe.
-- [ ] Existing chat history, submit, and stream behavior remain unchanged.
+- [x] Existing chat history, submit, and stream behavior remain unchanged.
 
 ## Out of scope
 
@@ -52,3 +52,23 @@ policy, peers, persona, start, stop, and status.
 - Changing `rozum meetings participant` reply logic or gateway protocol.
 - Loading model weights or calling the gateway directly from the web server
   except for a lightweight status probe.
+
+## Results
+
+Implemented in `src/meeting/web.rs` and `src/meeting/web_index.html`.
+`rozum meetings web` now exposes `GET /api/model/status`,
+`POST /api/model/start`, and `POST /api/model/stop`, plus a compact browser
+control panel for model spec, handle, gateway URL, reply policy, peers, and
+persona.
+
+Verified with:
+
+- `cargo test meeting::web --no-default-features`
+- `cargo build --no-default-features`
+- live smoke: temporary `rozum meetings web` with isolated XDG dirs, Basic-auth
+  `GET /api/model/status`, `POST /api/model/start` with manual policy and a
+  dummy gateway, second start returning `409`, and `POST /api/model/stop`
+  terminating the managed child.
+
+Browser-level Playwright smoke was skipped because Playwright is not installed
+in this workspace.

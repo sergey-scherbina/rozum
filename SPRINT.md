@@ -223,9 +223,13 @@ portability stays in BACKLOG.
       is opt-in via `ROZUM_WEB_SECRET` and binds `ROZUM_MEETINGS_REST_BIND` or `127.0.0.1:8401`.
       Verified with tempdir REST unit tests, daemon tests, `cargo build --no-default-features`, and a
       live temporary-daemon curl smoke that posted into `rest-smoke` and read the message back.
-- [ ] **model-participant web controls.** Surface start/stop/status, reply policy
-      (`mention`/`always`/`manual`), persona selection, and visible gateway/model state from the room
-      UI so demos do not require juggling several terminal commands.
+- [x] **model-participant web controls — DONE 2026-06-21.** `rozum meetings web` now has a compact
+      model control panel plus authenticated `/api/model/status`, `/api/model/start`, and
+      `/api/model/stop`. It supervises one managed `rozum meetings participant` child per web process,
+      passes model/handle/gateway/reply-policy/peers/persona options through to the existing CLI,
+      rejects a second start with `409`, reports child exit and best-effort gateway state, and stops
+      only the managed child. Verified with focused web tests, no-default build, and an isolated
+      temporary-web live smoke (status → start manual participant → 409 on second start → stop).
 
 #### matrix-failure-analysis (2026-06-18) — study every matrix red → fix or prove-structural+document
 

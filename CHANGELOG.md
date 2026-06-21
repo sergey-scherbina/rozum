@@ -1,5 +1,17 @@
 # Changelog
 
+## meetings web — model-participant controls
+Completed: 2026-06-21
+
+Added a compact model control panel to `rozum meetings web` plus authenticated
+`/api/model/status`, `/api/model/start`, and `/api/model/stop` endpoints. The web
+process supervises one managed `rozum meetings participant` child for the current
+room, passing through model, handle, reply policy, gateway URL, peers, and
+persona options to the existing CLI. Status reports running/stopped/exited state,
+pid, config, and a best-effort gateway probe; stop kills only the child started
+by this web process. Verified with focused web tests, no-default build, and an
+isolated live smoke.
+
 ## meetings — read-only REST transcript API on the daemon
 Completed: 2026-06-21
 
