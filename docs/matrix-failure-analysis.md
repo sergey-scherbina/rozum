@@ -337,3 +337,15 @@ create-file patch). Then the correct content lands and `build`/`test` pass. **Th
 apply_patch/`exec_command` rewrite block (`gateway.rs ~1570–2090`), which a sibling agent is actively
 editing — handed to that track to implement (with this capture as the spec) rather than edited here.**
 Evidence run: `scripts/bench/results/agentic-20260621-193933/` (codex×gpt-oss build rc=143, test pass=0).
+
+**RESOLVED (2026-06-22).** Implemented in `normalize_codex_tool_args` (the same `exec_command` arg
+walker that already folds `{cmd:apply_patch, patch-sibling}` → `patch --fuzz`): when the bare
+`apply_patch` command carries `{path, content}` and `content` is **not** a patch (no `*** Begin
+Patch`), synthesize the real write the model intended — `mkdir -p "$(dirname '<path>')"; cat >
+'<path>' <<'ROZUM_WRITE_EOF'\n<content>\nROZUM_WRITE_EOF` — a *single-quoted* heredoc so the body
+lands byte-for-byte (no `$`/backtick/`\` expansion), preceded by `mkdir -p` for nested targets. The
+patch path is unaffected (patch-content still folds to `patch --fuzz`); path-only calls are left
+untouched (we never invent empty files). Spec: `docs/specs/codex-create-write-synth.md`. Validated:
+unit test `synthesizes_file_write_from_path_and_content` + shell-level e2e of the synthesized command
+(file lands, body verbatim, `mkdir` creates `src/`). Full model-in-the-loop matrix cell deferred —
+RAM held by a concurrent GLM-4-32B matrix run; to be re-run when memory frees.

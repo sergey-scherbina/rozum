@@ -74,20 +74,18 @@ Full writeup [[project-gateway-patch-revert]]; specs `docs/specs/apply-patch-*`,
 - [x] apply-patch-ws-fallback — gpt-oss drops the leading indent on changed lines; BSD `patch` (even
   `--ignore-whitespace`) can't match → `.rej`, fix lost (looked like a "revert"). Static python reads
   the `.rej`, matches by trimmed content, re-applies preserving indent. codex×gpt-oss×fix ~1-2/5→5/6. `6f2bed9`.
-- [ ] codex×gpt-oss build/test (create-from-scratch) — **RE-OPENED 2026-06-21: gateway-fixable, NOT a
-  model limit** (the "model limit" verdict was reached without capturing the tool calls). `ROZUM_CODEX_
-  TOOL_CAPTURE=1` on a real codex×gpt-oss build run shows **10/11 calls are one malformed shape**:
+- [x] codex×gpt-oss build/test (create-from-scratch) — **DONE 2026-06-22: gateway-fixable, NOT a model
+  limit** (the "model limit" verdict was reached without capturing the tool calls). `ROZUM_CODEX_TOOL_
+  CAPTURE=1` on a real codex×gpt-oss build run showed **10/11 calls are one malformed shape**:
   `exec_command` args = `{cmd:"apply_patch", path, content}` (dup `cmd` key) — a **write-intent shoved
-  into exec_command**. The `content` is a VALID Cargo.toml (the model knows what to write); but
-  exec_command only runs `{cmd:"<shell>"}`, so it executes `apply_patch` as a bare command and drops
-  `path`/`content` → file never lands → build loops to timeout (rc=143), test fails. NOT the Finding-1b
-  echo/zsh theory (no echo); claude drives the SAME gpt-oss to pass via its Write tool. Also explains
-  why `apply_patch create-if-missing` failed (it targets patches; the model emits `{path,content}`).
-  **Fix (gateway):** detect `content`(+`path`) in exec_command args → synthesize a real write
-  (`cat > path <<'EOF'…`) or a create-patch. Lives in the codex apply_patch/exec_command rewrite block
-  (`gateway.rs ~1570–2090`) — the **sibling's active track**; handed off with the capture as the spec
-  (Finding 5 in `docs/matrix-failure-analysis.md`; evidence `results/agentic-20260621-193933/`).
-  Not edited here to avoid clashing.
+  into exec_command**. The `content` is a VALID Cargo.toml; exec_command only runs `{cmd:"<shell>"}`, so
+  codex executed `apply_patch` as a bare command and dropped `path`/`content` → file never lands → build
+  loops to timeout (rc=143), test fails. **FIX (landed):** `normalize_codex_tool_args` now detects a bare
+  `apply_patch` carrying a non-patch `{path, content}` and synthesizes the real write — `mkdir -p
+  "$(dirname '<path>')"; cat > '<path>' <<'ROZUM_WRITE_EOF'…ROZUM_WRITE_EOF` (single-quoted heredoc →
+  verbatim body). Patch-content still folds to `patch --fuzz`; path-only untouched. Unit + shell-e2e
+  validated; full model matrix cell deferred behind a concurrent GLM-4-32B run holding RAM (expected
+  3/5 → 5/5). Spec `docs/specs/codex-create-write-synth.md`; Finding 5 in `docs/matrix-failure-analysis.md`.
 
 #### model-sandbox (2026-06-19, operator-driven) — structural jail for agentic model runs
 

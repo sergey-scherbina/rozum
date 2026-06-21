@@ -1,5 +1,21 @@
 # Changelog
 
+## gateway — codex create-from-scratch: synthesize a real write
+Completed: 2026-06-22
+
+Fixed the last codex × gpt-oss residual (matrix Finding 5). Asked to create a
+file from scratch, gpt-oss routes a write-intent through the codex shell tool as
+`{cmd:"apply_patch", path, content}` where `content` is a whole file (not a
+patch); codex runs bare `apply_patch`, drops `path`/`content`, and the file never
+lands (`build` rc=143 timeout, `test` pass=0). `normalize_codex_tool_args` now
+detects this shape — bare `apply_patch` + a non-patch `{path, content}` — and
+synthesizes the real write: `mkdir -p "$(dirname '<path>')"; cat > '<path>'
+<<'ROZUM_WRITE_EOF' … ROZUM_WRITE_EOF` (single-quoted heredoc → body verbatim,
+no shell expansion). Patch-content still folds to `patch --fuzz`; path-only calls
+are left untouched. Unit + shell-e2e validated; full matrix cell deferred behind
+a concurrent GLM-4-32B run holding RAM. Spec:
+`docs/specs/codex-create-write-synth.md`.
+
 ## gateway — opt-in raw Codex tool-call capture
 Completed: 2026-06-21
 

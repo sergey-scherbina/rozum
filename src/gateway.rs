@@ -1775,6 +1775,39 @@ fn rewrite_apply_patch_function_args(args: &str) -> Option<String> {
     Some(json!({ "cmd": cmd, "login": true }).to_string())
 }
 
+/// gpt-oss, asked to CREATE a file from scratch, routes a write-INTENT through the codex shell
+/// tool: `{cmd:"apply_patch", path:"Cargo.toml", content:"<whole file body>"}`. `content` is a full
+/// file, NOT a patch (no `*** Begin Patch`), so the apply_patch fold finds nothing and codex runs
+/// bare `apply_patch` → "Usage: apply_patch 'PATCH'" → the file never lands (build/test create-from-
+/// scratch tasks time out, matrix Finding 5). The intent is unambiguous (a path + its full content),
+/// so synthesize the real write codex can't perform from the malformed call. None unless there is a
+/// non-empty `path` plus a `content` string that is NOT a patch (patches go through the fold above).
+fn synthesize_write_from_obj(o: &serde_json::Map<String, Value>) -> Option<String> {
+    let path = o
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|p| !p.is_empty())?;
+    let content = o.get("content").and_then(Value::as_str)?;
+    let content = decode_unicode_escapes(content);
+    if content.contains("*** Begin Patch") || content.contains("*** Update File") {
+        return None; // a patch body, not a file — leave it to the apply_patch path
+    }
+    Some(synthesize_file_write(path, &content))
+}
+
+/// Render a verbatim file write as one shell command: `mkdir -p <dir>` (so a nested target like
+/// `src/main.rs` into a fresh dir doesn't fail on a missing directory) then a *single-quoted* heredoc
+/// `cat > <path>` so the body lands byte-for-byte — no `$`/backtick/`\` expansion. The path is
+/// single-quoted to tolerate spaces; a literal `'` in a path is pathological and not handled.
+fn synthesize_file_write(path: &str, content: &str) -> String {
+    format!(
+        "mkdir -p \"$(dirname '{path}')\" 2>/dev/null; cat > '{path}' <<'ROZUM_WRITE_EOF'\n\
+         {content}\n\
+         ROZUM_WRITE_EOF\n"
+    )
+}
+
 /// Decode literal `\uXXXX` (4-hex) escapes that gpt-oss sometimes double-escapes *into* patch
 /// content (`&` for `&`, `>` for `>`) — the literal 6-char sequence survives in the
 /// string, so the patch's context/`-` lines no longer match the file and the apply fails. Only the
@@ -1929,6 +1962,16 @@ fn normalize_codex_tool_args(args: &str) -> String {
                         for k in PATCH_KEYS {
                             o.remove(*k);
                         }
+                    } else if let Some(write) = synthesize_write_from_obj(o) {
+                        // Create-from-scratch (Finding 5): `content` is a whole file, not a patch, so
+                        // the fold found nothing. Synthesize the real write codex can't perform from
+                        // the malformed `{cmd:apply_patch, path, content}` so the file actually lands.
+                        eprintln!(
+                            "[apply_patch-bridge] synthesized file write from {{path, content}} (create-from-scratch, Finding 5)"
+                        );
+                        o.insert("cmd".into(), Value::String(write));
+                        o.remove("path");
+                        o.remove("content");
                     }
                 }
                 // Read-repair: gpt-oss frequently emits broken file reads (`sed -n 'src/main.rs'`,
@@ -4520,6 +4563,49 @@ mod tests {
         assert!(cmd.contains("&str") && cmd.contains("-> String"), "unicode not decoded: {cmd}");
         assert!(!cmd.contains("\\u0026"), "literal escape remained: {cmd}");
         assert!(cmd.contains("-    s.to_string()") && cmd.contains("+    s.chars().rev().collect()"));
+    }
+
+    #[test]
+    fn synthesizes_file_write_from_path_and_content() {
+        // Create-from-scratch (Finding 5): gpt-oss routes a write-intent through the codex shell tool
+        // as {cmd:"apply_patch", path, content} where `content` is a WHOLE file (not a patch). The
+        // apply_patch fold finds nothing → bare apply_patch → the file never lands. We must synthesize
+        // a real write so build/test create tasks actually produce the file.
+        let body = "[package]\nname = \"hello\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+        let args = json!({ "cmd": "apply_patch", "path": "Cargo.toml", "content": body }).to_string();
+        let out = normalize_codex_tool_args(&args);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let cmd = v["cmd"].as_str().unwrap();
+        // A real, verbatim write — not a bare apply_patch.
+        assert!(!cmd.contains("apply_patch"), "apply_patch should be gone: {cmd}");
+        assert!(cmd.contains("cat > 'Cargo.toml'"), "no cat-write synthesized: {cmd}");
+        assert!(cmd.contains("mkdir -p"), "parent dir not ensured: {cmd}");
+        assert!(cmd.contains("<<'ROZUM_WRITE_EOF'"), "not a quoted heredoc (would expand $/`): {cmd}");
+        assert!(cmd.contains("name = \"hello\""), "file body not in the write: {cmd}");
+        // The consumed shape keys are removed so codex sees a clean exec_command.
+        assert!(v.get("path").is_none() && v.get("content").is_none(), "path/content not consumed");
+
+        // A nested target ensures its directory.
+        let nested = json!({ "cmd": "apply_patch", "path": "src/main.rs", "content": "fn main() {}\n" })
+            .to_string();
+        let n = serde_json::from_str::<Value>(&normalize_codex_tool_args(&nested)).unwrap();
+        assert!(n["cmd"].as_str().unwrap().contains("dirname 'src/main.rs'"), "no mkdir for nested path");
+
+        // A real patch in `content` still goes through the patch fold, NOT the raw-write path.
+        let patchy = json!({
+            "cmd": "apply_patch",
+            "content": "*** Begin Patch\n*** Update File: a.rs\n@@\n-x\n+y\n*** End Patch"
+        })
+        .to_string();
+        let p = serde_json::from_str::<Value>(&normalize_codex_tool_args(&patchy)).unwrap();
+        let pc = p["cmd"].as_str().unwrap();
+        assert!(pc.contains("patch -p0 --fuzz"), "patch content should fold to patch, not cat: {pc}");
+        assert!(!pc.contains("ROZUM_WRITE_EOF"), "patch wrongly treated as a raw write: {pc}");
+
+        // No `content` → nothing synthesized (we never invent empty files from a bare path).
+        let pathonly = json!({ "cmd": "apply_patch", "path": "Cargo.toml" }).to_string();
+        let po = serde_json::from_str::<Value>(&normalize_codex_tool_args(&pathonly)).unwrap();
+        assert_eq!(po["cmd"].as_str().unwrap(), "apply_patch", "should be left untouched: {po}");
     }
 
     #[test]
