@@ -146,14 +146,20 @@ args, signals (data-ssc-*), server-push (/__ssc/push|state) — all shipped + gr
       MIME-by-extension).
 
 **Now — autonomous polish queue (operator: "все задачи в спринт и делай автономно", 2026-06-21):**
-- [ ] **Trim history** — `readRoom` concatenates every dated `.jsonl`; the rozum room is large and
-      grows daily. Show only the last ~80 messages so polling + render stay fast.
-- [ ] **Highlight the operator's own messages** — the web posts under the local identity's handle;
-      detect that handle and mark those rows (left accent / "you") so the human's messages stand out
-      from agents in a busy room.
-- [ ] **Message timestamps** — parse the jsonl `ts`/created field; show a small dim `HH:MM` per row.
-- [ ] **Dynamic room list** — replace the hardcoded `["demo","rozum"]` with the rooms that actually
-      exist (scan `roomsDir` + the project room) so new rooms appear without a code change.
+- [x] **Trim history** — `msgsView` now `takeRight(80)`s the content lines so polling + render stay
+      bounded as rooms grow. Needed new toolkit Vec ops.
+- [x] **Message timestamps** — `tsOf` parses the jsonl `"ts":` epoch, +UTC offset, shows a dim
+      `HH:MM` per row. Surfaced + fixed a latent **ordering bug**: `readRoom` concatenated dated files
+      in `listDir` order (non-chronological) → now `.sorted` so the newest message is last.
+- [~] **Dynamic room list** — DEFERRED. The hardcoded `["demo","rozum"]` is the operator's earlier
+      declutter ("слишком много комнат"); scanning `roomsDir` re-introduces junk rooms. Revisit only
+      with an activity filter if a third real room is wanted.
+- [~] **Highlight the operator's own messages** — NOT FEASIBLE as posed: the human web client and the
+      agents all post under the same local identity ("Sergiy · <handle>"), so there is no reliable
+      "me" marker distinct from agents. Per-handle colour (shipped) already separates sessions.
+
+Toolkit work that landed for the above (scalascript `feature/rust-web-toolkit`): Vec `.take`/`.drop`/
+`.takeRight`/`.dropRight`/`.sorted` lowering (`.drop` had collided with Rust's `Drop`).
 
 #### demo-polish-and-resilience (2026-06-20, operator-approved) — make the live demo boringly reliable
 
