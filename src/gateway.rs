@@ -1687,11 +1687,43 @@ fn apply_patch_block_to_fuzz(block: &str) -> Option<String> {
     // freezes decides pass/fail (observed coin-flip pass=0/1). `-N` turns a redundant patch
     // into a no-op ("Ignoring previously applied patch") instead of a revert, so the fix is
     // sticky and the outcome is deterministic. A genuinely new patch still applies normally.
+    // Whitespace-tolerant FALLBACK: gpt-oss often drops the leading indentation on changed lines
+    // (`-s.to_string()` instead of `-    s.to_string()`), and BSD `patch` — even `--ignore-whitespace`
+    // — refuses to match it, so the hunk fails to a `.rej` and the fix never lands (looks like the
+    // model "reverting" itself; it never applied). When `patch` leaves a `.rej`, a tiny static python
+    // helper reads that `.rej`, matches the removed block against the file by *trimmed* content
+    // (ignoring leading whitespace and the line number), and re-applies it preserving the file's own
+    // indentation. Fires only after `patch` already failed → zero effect on patches that apply.
     let fuzz = patch_fuzz();
     Some(format!(
-        "patch -p0 --fuzz={fuzz} -N --forward <<'ROZUM_PATCH_EOF'\n{diff}ROZUM_PATCH_EOF\n"
+        "patch -p0 --fuzz={fuzz} -N --forward <<'ROZUM_PATCH_EOF'\n{diff}ROZUM_PATCH_EOF\n\
+         f={path}; if [ -f \"$f.rej\" ]; then python3 - \"$f\" <<'ROZUM_PY_EOF'\n{py}\nROZUM_PY_EOF\n\
+         rm -f \"$f.rej\" \"$f.orig\"; fi\n",
+        py = PATCH_WS_FALLBACK_PY,
     ))
 }
+
+/// Static python helper for the whitespace-tolerant apply fallback (see `apply_patch_block_to_fuzz`).
+/// Reads `<file>.rej`, extracts the removed (`-`) and added (`+`) lines, finds the removed block in
+/// the file by trimmed comparison, and replaces it with the added lines re-indented to the file's
+/// own leading whitespace. Best-effort + single-block: only the file path is dynamic (argv), so the
+/// script needs no escaping when embedded in the command heredoc.
+const PATCH_WS_FALLBACK_PY: &str = r#"import sys
+f=sys.argv[1]
+old=[]; new=[]
+for ln in open(f+".rej").read().split("\n"):
+    if ln.startswith("---") or ln.startswith("+++"): continue
+    if ln[:1]=="-": old.append(ln[1:])
+    elif ln[:1]=="+": new.append(ln[1:])
+no=[s.strip() for s in old]
+if no:
+    L=open(f).read().split("\n")
+    h=next((i for i in range(len(L)-len(no)+1) if [L[i+j].strip() for j in range(len(no))]==no), -1)
+    if h>=0:
+        ind=L[h][:len(L[h])-len(L[h].lstrip())]
+        L[h:h+len(no)]=[ind+n.strip() for n in new]
+        open(f,"w").write("\n".join(L))
+        sys.stderr.write("[rozum-apply] whitespace-tolerant fallback applied\n")"#;
 
 /// The `--fuzz` context-slack `patch` is allowed when matching a hunk. Higher = more lenient
 /// (lands a model's slightly-off-context patch, but can mis-apply a stale-anchored churn patch
@@ -4215,7 +4247,9 @@ mod tests {
         assert!(rw.contains("--- src/main.rs") && rw.contains("+++ src/main.rs"));
         assert!(rw.contains("@@ -1,"), "no reconstructed hunk header: {rw}");
         assert!(rw.contains("-    s.to_string()") && rw.contains("+    s.chars().rev().collect()"));
-        assert!(rw.trim_end().ends_with("ROZUM_PATCH_EOF"));
+        assert!(rw.contains("ROZUM_PATCH_EOF\n"), "patch heredoc not closed: {rw}");
+        // whitespace-tolerant fallback appended after the patch heredoc
+        assert!(rw.contains("$f.rej") && rw.contains("ROZUM_PY_EOF"), "ws fallback missing: {rw}");
         assert!(rewrite_apply_patch_command("cargo run -- hello").is_none());
 
         // End-to-end through the args JSON: apply_patch command → patch --fuzz, no apply_patch left.
@@ -4223,6 +4257,43 @@ mod tests {
         let fixed = normalize_codex_tool_args(&args);
         assert!(fixed.contains("patch -p0 --fuzz"), "Method B not applied: {fixed}");
         assert!(!fixed.contains("apply_patch"), "apply_patch should be gone: {fixed}");
+    }
+
+    #[test]
+    fn ws_fallback_lands_a_patch_whose_removed_line_lost_its_indent() {
+        // Integration: gpt-oss drops the leading indent on the changed line. `patch` rejects it;
+        // the python fallback must still land the fix, preserving the file's own indentation.
+        // (Skips cleanly if python3 isn't on the box.)
+        if std::process::Command::new("python3").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rozum-wsfb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/main.rs"),
+            "fn reverse(s: &str) -> String {\n    // BUG\n    s.to_string()\n}\n",
+        )
+        .unwrap();
+        // The model's sloppy block: removed line has NO indentation, wrong @@ line.
+        let block = "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-s.to_string()\n\
+                     +    s.chars().rev().collect()\n*** End Patch";
+        let cmd = apply_patch_block_to_fuzz(block).expect("reconstructable");
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let got = std::fs::read_to_string(dir.join("src/main.rs")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            got.contains("    s.chars().rev().collect()"),
+            "fallback didn't land with preserved indent.\nstderr: {}\nfile:\n{got}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!got.contains("s.to_string()"), "bug line still present:\n{got}");
+        assert!(!got.contains(".rej"), "reject file leaked into source");
     }
 
     #[test]
