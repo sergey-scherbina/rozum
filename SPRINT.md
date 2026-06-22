@@ -102,18 +102,27 @@ Consolidated from the agentic matrix (`scripts/bench/agentic.sh`, sandbox on). R
     duplicate `[package]`, never reaches `src/main.rs`). Being addressed by `codex-create-write-synth`
     (apply_patch `{path,content}` → synthesize a `cat >` write). REASONING model → must sample (temp~1.0),
     greedy loops its CoT.
-- [ ] **GLM-4-32B-0414** (new MLX-native port, byte-parity) — **WEAK agentic driver: 4/15.** Strong
-  chat/code model (correct code in chat) but it **narrates tool use in markdown prose** instead of
-  emitting structured tool calls — e.g. ` ```zsh\ncat src/main.rs\n``` ` (raw shell as text) or
-  ` ```bash\nRead\n{json}\n``` `, often **repeating the same block verbatim** (no state tracking).
-  - claude **2/5** (greet+fix): GLM happened to emit `Name\n{json}` inside a fence → the new
-    `parse_glm_tool_call` fenced-form parser (serving.rs) catches it → `fix` lands.
-  - codex/opencode **1/5** (greet only): GLM emits ` ```zsh\n<shell cmd>\n``` ` prose — not reducible to
-    their structured calls; loops. NOT a clean format gap — a model characteristic (GLM-4-0414 isn't
-    tool-RLHF'd for the agent loop). Band-aiding each fence shape is whack-a-mole and won't fix the
-    no-state-tracking looping. **Verdict:** GLM-4 ships as a capable *chat/code* model (catalog `EXTRA`),
-    NOT an agentic pick. Possible future lever: constrained tool-call decoding (force structured calls),
-    or a GLM-Air/Z1 variant that's tool-tuned. Spec `docs/specs/glm4-bringup.md`.
+- [ ] **GLM-4-32B-0414** (new MLX-native port, byte-parity) — agentic matrix **4/15**. Symptom: in
+  agent runs it **narrates tool use in markdown** (` ```zsh\ncat src/main.rs\n``` ` / ` ```bash\nRead\n{json}\n``` `,
+  + ` ```prose\n…\n``` `, repeating blocks) instead of emitting a structured call → not parsed → not
+  executed. **ROOT CAUSE ISOLATED (`isolate` skill — my first read "GLM is a weak driver / model
+  characteristic, unfixable" was PREMATURE and WRONG):**
+  - **Model-only probes (direct gateway, clean prompts): GLM emits PERFECTLY STRUCTURED calls** — single
+    tool (`read_file {"path":…}`), claude's 4-tool set (`Read {"file_path":…}`), codex shell-framing
+    (`shell {"command":["cat",…]}`), AND the Anthropic `/v1/messages` endpoint. So GLM is fully capable.
+  - **Trigger reproduced deterministically:** add a big system prompt that instructs "explain in prose +
+    use markdown before each tool call" (exactly what the agent CLIs do) → GLM returns
+    ` ```prose\nI'm going to read…\n``` ` markdown narration, NO structured call. GLM **faithfully follows
+    the narrate-in-markdown instruction**, which conflicts with structured tool-calling.
+  - **Control:** Qwen3.6-35B is 15/15 under the SAME agent prompts → far less susceptible. So GLM-4-0414
+    over-weights the narration framing vs the structured-call format. A model trait, but **prompt-triggered
+    and FIXABLE**, not "inherently can't".
+  - claude **2/5** (greet+fix): when GLM happens to wrap a clean `Name\n{json}` in a fence, the new
+    `parse_glm_tool_call` fenced parser (serving.rs) catches it. Also a leak to fix: the parsed tool-call
+    text is ALSO returned as a content/text block (Anthropic path returns both text + tool_use).
+  - **FIX PATH (not whack-a-mole):** (a) constrained tool-call decoding — force structured emission (the
+    gpt-oss-style lever); or (b) normalize/strip the markdown-narration instructions from the rendered
+    prompt for GLM. Spec `docs/specs/glm4-bringup.md`. Ships meanwhile as a chat/code model in `EXTRA`.
 - [x] **Qwen2.5-Coder-7B / Qwen3-4B** — below the **~27B agentic cliff**: can't reliably drive the
   multi-step tool loop (2/5-ish). Not a bug; kept in `EXTRA` for non-agentic use. Don't surface as
   default agentic picks.
