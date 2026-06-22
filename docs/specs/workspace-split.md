@@ -163,5 +163,25 @@ to the bin (its `config→cascade` knot 2 resolves when `cascade` moves in Phase
 `cargo check` default + `--no-default-features` green; **82/82** core tests, **300/0** root lib
 tests (orchestrator + gguf-registration path included).
 
-<Phases 2/3/4: fill in build-time delta (incremental bin rebuild after an engine edit
-— the key win), test counts, matrix parity, as each lands.>
+**Phase 2 — `rozum-models` + the four engine crates (DONE).** `rozum-models`
+(`models`/`model_source`/`hf_hub`/`modelscope`/`resident`) extracted as a pure leaf —
+**no** SPI/engine deps (`c2f0bfa`). Then each engine became its own crate. **Feature
+handling — "Approach B" (chosen over making engine crates optional deps):** each engine
+crate is *always linked* but its heavy backend dep is gated behind the crate's own feature,
+and the binary's feature forwards to it (`gguf = ["rozum-gguf/gguf"]`, `mlx-native =
+["rozum-mlx/mlx-native"]`, `mistralrs = ["rozum-mistralrs/mistralrs"]`, `x86-native =
+["rozum-x86/x86-native"]`). This preserves the exact monolith compile structure (the
+always-compiled stubs/template code stay reachable), so `--no-default-features` still skips
+the Metal toolchain and external consumers (gateway's `mlx_memory_mb`/`batch_stats`, the
+test-only `MlxNativeBackend` refs in agent/router) keep resolving via the bin's re-exports —
+**zero churn in consumers**. Crates: `rozum-mistralrs` (`55c9347`), `rozum-x86` (`4aed2b5`,
+the engine slot still compiles without its feature), `rozum-gguf` (`cb4722b`, self-registers
+via the `register_engine` IoC hook from Phase 0), `rozum-mlx` (`96daf50`, carries `specdecode`/
+`specdecode_backend` + the vendored mlx-rs fork git-deps; needed a `pub(crate) use
+rozum_core::backend::*` glob because `mlx_native_backend.rs` refers to the SPI types at the
+crate root, as they were re-exported from the monolith's lib root). Verified: `cargo check`
+default (mlx+gguf on, MLX C++ built) + `--no-default-features` + `--features mistralrs` +
+`--features x86-native` all green; crate tests pass. **Engine isolation achieved:** editing
+one engine crate recompiles only it, not the other engines or the daemon.
+
+<Phases 3/4: fill in build-time delta, test counts, matrix parity, as each lands.>

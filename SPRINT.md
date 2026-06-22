@@ -39,8 +39,17 @@ test-only) live in the spec.
   (an engine edit no longer recompiles the daemon — the isolation win). `proxy`/`service` stayed
   in the bin (they need `concurrency`/`share` from `rozum-core`); they fold into `rozum-meeting`
   once Phase 0 lands.
-- [ ] **Phase 2 — `rozum-models` + engines** (`rozum-mlx`/`-gguf`/`-mistralrs`/`-x86`) under
-  feature flags forwarded from the workspace root. *Gate: each feature matrix unchanged.*
+- [x] **Phase 2 — `rozum-models` + engines** ✅ (`rozum-mlx`/`-gguf`/`-mistralrs`/`-x86`). `rozum-models`
+  (catalog/sourcing/residency) extracted as a pure leaf (`c2f0bfa`). Each engine is its own crate with
+  the **heavy dep gated behind the crate's own feature, forwarded from the bin** (`mlx-native =
+  ["rozum-mlx/mlx-native"]`, etc. — "Approach B": engine crate always linked, heavy backend optional):
+  `rozum-mistralrs` (`55c9347`), `rozum-x86` (`4aed2b5`), `rozum-gguf` (`cb4722b`, self-registers via the
+  IoC hook), `rozum-mlx` (`96daf50`, + specdecode, + a `backend::*` glob since mlx uses SPI types at the
+  crate root). Module names preserved + re-exported from `src/lib.rs` → consumers unchanged (the
+  gateway→mlx telemetry refs resolve via mlx's always-compiled `mlx_memory_mb`/`batch_stats` fallbacks).
+  Verified: `cargo check` default (mlx+gguf on, MLX C++ built) **and** `--no-default-features` green, plus
+  `--features mistralrs`/`x86-native`; crate tests pass. **The isolation win is now real for engines:
+  editing one engine recompiles only that crate, not the others or the daemon.**
 - [ ] **Phase 3 — `rozum-agent` + `rozum-gateway`.** Fix knot 3 (gateway→mlx telemetry → SPI
   stats hook) + knot 4 (test-only mlx/gguf leaks). *Gate: agentic matrix unchanged.*
 - [ ] **Phase 4 — `rozum-hardware`** (device detect + placement; North Star). Separate spec —
