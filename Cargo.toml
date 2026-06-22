@@ -23,7 +23,7 @@ license = "Apache-2.0"
 # true gguf-on-Linux (CPU/CUDA, non-metal) is the open `portability-cuda-gguf`.
 default = ["mlx-native", "gguf"]
 local-models = ["rozum-core/local-models"]
-gguf = ["dep:llama-cpp-2"]
+gguf = ["rozum-gguf/gguf"]
 mistralrs = ["rozum-mistralrs/mistralrs"]
 # Pure-Rust native MLX runtime (no Python, no subprocess). Builds MLX C++ from
 # source via the vendored fork, so it needs the Metal toolchain and is off by
@@ -53,7 +53,7 @@ rozum-models = { path = "crates/rozum-models" }
 # gated behind the crate's own feature, which the binary's feature forwards to.
 rozum-mistralrs = { path = "crates/rozum-mistralrs" }
 rozum-x86 = { path = "crates/rozum-x86" }
-llama-cpp-2 = { version = ">=0.1.100", features = ["metal"], optional = true }
+rozum-gguf = { path = "crates/rozum-gguf" }
 
 # Native MLX runtime: the vendored fork of oxideai/mlx-rs (the `mlx-lm` Rust
 # crates). Pinned to a fork rev so a clean clone builds reproducibly without the

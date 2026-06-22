@@ -5,7 +5,6 @@ pub mod cascade;
 pub mod config;
 pub mod doctor;
 pub mod gateway;
-pub mod gguf;
 pub mod mcp_tool_source;
 pub mod memory_store;
 pub mod mlx_native_backend;
@@ -39,6 +38,7 @@ pub use rozum_models::{hf_hub, model_source, models, modelscope, resident};
 
 // Engine crates (Phase 2) — re-exported under their original module paths so
 // `rozum::mistralrs_backend::…` / `rozum::x86::…` etc. keep resolving from the binary.
+pub use rozum_gguf::gguf;
 pub use rozum_mistralrs::mistralrs_backend;
 pub use rozum_x86::x86;
 

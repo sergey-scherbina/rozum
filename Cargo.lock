@@ -4908,7 +4908,6 @@ dependencies = [
  "crossterm 0.28.1",
  "futures",
  "futures-util",
- "llama-cpp-2",
  "mlx-lm",
  "mlx-lm-utils",
  "mlx-rs",
@@ -4917,6 +4916,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rmcp",
  "rozum-core",
+ "rozum-gguf",
  "rozum-meeting",
  "rozum-mistralrs",
  "rozum-models",
@@ -4952,6 +4952,21 @@ dependencies = [
  "serde_json",
  "tokenizers 0.22.2",
  "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "rozum-gguf"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "llama-cpp-2",
+ "rozum-core",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
  "tokio-util",
  "tracing",
 ]

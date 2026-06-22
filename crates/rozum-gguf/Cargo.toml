@@ -1,0 +1,26 @@
+[package]
+name = "rozum-gguf"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# The in-process GGUF / llama.cpp engine (`GgufBackend`, via llama-cpp-2 + Metal).
+# The always-compiled parts (chat-template formatting, spec/path resolution,
+# `register_engine`) build without the feature; the heavy `llama-cpp-2` dep and
+# `GgufBackend` are gated behind this crate's `gguf` feature, which the binary
+# forwards to. The engine registers itself with rozum-core's backend registry via
+# `register_engine()` (inversion of control). Phase 2 of the workspace split.
+
+[features]
+gguf = ["dep:llama-cpp-2"]
+
+[dependencies]
+rozum-core = { path = "../rozum-core" }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+async-trait = "0.1"
+serde_json = { version = "1", features = ["preserve_order"] }
+tempfile = "3"
+tracing = "0.1"
+llama-cpp-2 = { version = ">=0.1.100", features = ["metal"], optional = true }
