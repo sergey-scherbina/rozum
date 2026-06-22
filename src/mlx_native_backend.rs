@@ -512,6 +512,63 @@ mod inner {
         Conversation { role, content: text, tool_calls: None }
     }
 
+    /// The model-family **tool dialect** — the single seam for how a model family emits and
+    /// consumes tool calls. Replaces the inline `template.contains("<|channel|>" / "<|observation|>")`
+    /// sniffing that was scattered across the render and constraint paths. Stateless;
+    /// [`dialect_for`] returns a `&'static` impl chosen from the chat-template markers.
+    ///
+    /// Owns RENDER (history messages → the model's prompt conversation form) and the CONSTRAINT
+    /// envelope selector. PARSE is intentionally NOT here: `serving::parse_tool_calls` is a generic
+    /// union that tries every form (`<tool_call>`, loose JSON, GLM `name\njson`), so it is robust
+    /// across dialects and needs no per-family dispatch. See `docs/specs/architecture-spi.md`.
+    trait ToolDialect: Sync {
+        /// Render one history message into this dialect's conversation form.
+        fn render_message(&self, msg: &Message) -> Conversation<&'static str, String>;
+        /// True when tool calls use GLM's `name\n{json}` envelope (no `<tool_call>` opener) —
+        /// switches [`ToolConstraint`] to the line-anchored GLM trigger.
+        fn uses_glm_envelope(&self) -> bool {
+            false
+        }
+    }
+
+    /// Qwen / default: `<tool_call>`-style, emitted by the chat template from plain content.
+    struct QwenDialect;
+    impl ToolDialect for QwenDialect {
+        fn render_message(&self, msg: &Message) -> Conversation<&'static str, String> {
+            Conversation { role: role_str(&msg.role), content: message_text(msg), tool_calls: None }
+        }
+    }
+
+    /// gpt-oss **harmony**: structured `tool_calls` + channel markup ([`harmony_conversation`]).
+    struct HarmonyDialect;
+    impl ToolDialect for HarmonyDialect {
+        fn render_message(&self, msg: &Message) -> Conversation<&'static str, String> {
+            harmony_conversation(msg)
+        }
+    }
+
+    /// **GLM-4**: `name\n{json}` calls + `observation`-role results ([`glm_conversation`]).
+    struct GlmDialect;
+    impl ToolDialect for GlmDialect {
+        fn render_message(&self, msg: &Message) -> Conversation<&'static str, String> {
+            glm_conversation(msg)
+        }
+        fn uses_glm_envelope(&self) -> bool {
+            true
+        }
+    }
+
+    /// Pick the tool dialect from the chat template's family markers (the one place this is decided).
+    fn dialect_for(template: &str) -> &'static dyn ToolDialect {
+        if template.contains("<|channel|>") {
+            &HarmonyDialect
+        } else if template.contains("<|observation|>") {
+            &GlmDialect
+        } else {
+            &QwenDialect
+        }
+    }
+
     /// Worker thread entry point. Loads the model (reporting load result over
     /// `ready`), then serves jobs until the queue closes.
     fn worker_main(
@@ -909,9 +966,9 @@ mod inner {
         //   2. `response_format` / structured output — ALWAYS honored when the client asks
         //      (it's an explicit correctness request, not an opt-in).
         if should_constrain(&job, model) {
-            // GLM-4 uses a `name\n{json}` envelope (no `<tool_call>`); the template's
-            // `<|observation|>` stop marker identifies it (à la `glm_conversation`).
-            let glm = template.contains("<|observation|>");
+            // GLM-4 uses a `name\n{json}` envelope (no `<tool_call>`); the tool dialect (from the
+            // template markers) is the one place that decides this.
+            let glm = dialect_for(template).uses_glm_envelope();
             let driver =
                 ToolConstraint::from_job(&job, glm).expect("constrained job has tools");
             return if is_hybrid_arch(model) {
@@ -3334,25 +3391,11 @@ mod inner {
         // `message.tool_calls` (assistant) + the `tool` role, and raises if a tool
         // result has no preceding structured call. Detect it by its channel markers
         // and pass tool calls structurally instead of as Qwen `<tool_call>` text.
-        let harmony = template.contains("<|channel|>");
-        // GLM-4: `<|observation|>` marker → render tool calls/results in GLM's native form.
-        let glm = template.contains("<|observation|>");
-        let convo: Vec<Conversation<&'static str, String>> = messages
-            .iter()
-            .map(|m| {
-                if harmony {
-                    harmony_conversation(m)
-                } else if glm {
-                    glm_conversation(m)
-                } else {
-                    Conversation {
-                        role: role_str(&m.role),
-                        content: message_text(m),
-                        tool_calls: None,
-                    }
-                }
-            })
-            .collect();
+        // The tool dialect (harmony / GLM / Qwen-default) owns per-family render; picked once
+        // from the template markers (was inline `contains("<|channel|>"/"<|observation|>")`).
+        let dialect = dialect_for(template);
+        let convo: Vec<Conversation<&'static str, String>> =
+            messages.iter().map(|m| dialect.render_message(m)).collect();
         // Thinking is OFF by default (clean output for CC/Codex); the gateway's
         // `--enable-thinking` flag (or `ROZUM_ENABLE_THINKING`) turns it back on.
         // For a reasoning model this passes `enable_thinking=false` to the chat
@@ -3375,7 +3418,9 @@ mod inner {
             .apply_chat_template_and_encode(sanitize_chat_template(template), args)
             .map_err(|e| format!("mlx: chat template render: {e}"))?;
         let ids: Vec<u32> = encodings.iter().flat_map(|e| e.get_ids()).copied().collect();
-        if harmony && add_gen && std::env::var_os("ROZUM_PROMPT_DUMP").is_some() {
+        // Harmony-only debug dump (unchanged gate; the render dispatch above is what moved).
+        if template.contains("<|channel|>") && add_gen && std::env::var_os("ROZUM_PROMPT_DUMP").is_some()
+        {
             if let Ok(txt) = tokenizer.decode(&ids, false) {
                 eprintln!("─── PROMPT_DUMP ({} tokens) ───\n{txt}\n─── /PROMPT_DUMP ───", ids.len());
             }
