@@ -1,9 +1,20 @@
 # Matrix non-determinism — isolate + reproducibility instrument
 
-Status: **root cause proven from code AND live; reproducibility instrument shipped +
-unit-tested; harness wired.** Remaining: end-to-end "flip gone" on a live single-model
-matrix (guarded, coordinated — see Follow-up). Task: SPRINT `matrix-nondeterminism-flip`
-(green-matrix #1, "do this first"). Branch: `feature/matrix-nondeterminism-flip`.
+Status: **DONE — two-layer root cause proven from code AND live; E1 instrument shipped +
+unit-tested + harness-wired; Layer-A confirmed as the irreducible residual.** Task: SPRINT
+`matrix-nondeterminism-flip` (green-matrix #1). Branch: `feature/matrix-nondeterminism-flip`.
+
+**Two layers (confirmed):**
+- **E1 — our bug, FIXED.** Gateway never threaded `SamplingParams.seed` → entropy RNG →
+  `temp>0` non-deterministic. Seed-pin fixes it (GLM-4-9B: temp1 5/5 distinct → 1/5).
+- **Layer-A — the agent's own, IRREDUCIBLE by us.** The agent CLIs inject a fresh per-run
+  `session-id`+timestamp into every request (observed in codex's log: distinct `session id`
+  per run), so the request is non-identical run-to-run → the trajectory varies *even at a
+  fixed seed*. Demonstrated end-to-end: `codex×35B×test` FAIL(baseline)→PASS(repro) at the
+  SAME seed=1234, then **4/4 PASS** on fresh re-isolation (an ~80% flake, not a bug).
+- **Consequence:** a fixed seed makes the matrix *more* reproducible (kills E1 noise) but NOT
+  deterministic. **The agentic matrix must be read as an N-run PASS-RATE, not a single binary
+  cell.** A single-run red is not a bug until confirmed over N runs.
 
 ## Live probe result (decisive)
 
