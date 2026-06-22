@@ -42,14 +42,18 @@ GW=$!
 cleanup() { kill "$GW" 2>/dev/null; wait "$GW" 2>/dev/null; rm -f "$GWLOG"; }
 trap cleanup EXIT
 
+# Surface the REAL failure cause, not the generic no-backend hints (e.g. a missing
+# tokenizer from a partially-downloaded model — the model must be FULLY cached).
+gw_cause() { grep -iE 'fail|error|tokenizer|backend unavailable|not.?found|oom|panic|exceeds|does not fit' "$GWLOG" | tail -4 || tail -5 "$GWLOG"; }
+
 # Wait for ready (model load).
 ready=0
 for _ in $(seq 1 90); do
   if curl -sf --max-time 2 "$BASE/v1/models" >/dev/null 2>&1; then ready=1; break; fi
-  kill -0 "$GW" 2>/dev/null || { echo "  gateway died during load — see log:"; tail -5 "$GWLOG"; exit 1; }
+  kill -0 "$GW" 2>/dev/null || { echo "  gateway died during load — cause:"; gw_cause; exit 1; }
   sleep 1
 done
-[ "$ready" = 1 ] && ok "gateway came up and serves /v1/models" || { bad "gateway never became ready"; tail -5 "$GWLOG"; echo "smoke: $pass passed, $fail failed"; exit 1; }
+[ "$ready" = 1 ] && ok "gateway came up and serves /v1/models" || { bad "gateway never became ready — cause:"; gw_cause; echo "smoke: $pass passed, $fail failed"; exit 1; }
 
 BODY='{"model":"'"$MODEL"'","messages":[{"role":"user","content":"Reply with exactly: hello world"}],"max_tokens":16,"temperature":0}'
 

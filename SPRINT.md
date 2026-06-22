@@ -193,13 +193,13 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
 >   over-budget load before weights, max_num_seqs=1, + a RAM preflight. Residual is only that non-MLX can't
 >   pack as tightly (lever = lower n_ctx, not a cache cap); optional follow-up = calibrate runtime_footprint
 >   vs a measured gguf/mistralrs peak. No safety code change needed. Corrects smmr-A's "Known limitation".
-> - [~] **agentic-smoke-deterministic** (#3, RELIABILITY) — **HARNESS DONE** (`scripts/smoke/gateway-smoke.sh`),
->   end-to-end validation PENDING A FREE SLOT. Tiny seed-pinned 0.6B gateway smoke asserting only DETERMINISTIC
->   signals (liveness/schema, greedy byte-identical across 2 runs, no cross-request state bleed) — a red is
->   always a real gateway regression, never model variance. Dropped the tool-call check (0.6B is below the
->   agentic cliff → would flake; covered by unit tests). `bash -n` clean. Validation deferred because the slot
->   was held by plucky-finch's gpt-oss matrix (24 GB reserved) — run it when the slot frees (host clear +
->   `bash scripts/smoke/gateway-smoke.sh`), then mark [x]. Discipline: did NOT pile a 2nd model on the busy host.
+> - [x] **agentic-smoke-deterministic** (#3, RELIABILITY) — **DONE + VALIDATED 4/4** (`scripts/smoke/gateway-smoke.sh`).
+>   Ran end-to-end on Qwen3-0.6B once the slot freed: PASS liveness/schema, PASS greedy byte-identical across
+>   runs, PASS stable after an interleaved different request. Asserts only DETERMINISTIC signals (a red is
+>   always a real gateway regression, never model variance); dropped the tool-call check (0.6B below the cliff →
+>   would flake; unit-tested instead). Slot-coordinated (host clear, freed after). Gotcha found + fixed: a
+>   partially-downloaded model (killed before the tokenizer) fails with a misleading no-backend hint — improved
+>   the smoke to surface the REAL cause (`gw_cause`). NOTE for CI: the model must be FULLY cached (`--offline`).
 > - [~] **prompt-lookup-decoding** (#4, PERF) — **SPEC + P0 proposer DONE.** Spec
 >   `docs/specs/prompt-lookup-decoding.md`; `PromptLookupDraft` (`crates/rozum-mlx/src/specdecode_plookup.rs`,
 >   `impl Draft` — n-gram lookup over ctx, NO model/GPU/memory, reuses the existing verify loop) + 6 unit
