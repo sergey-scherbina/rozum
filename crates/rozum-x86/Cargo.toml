@@ -1,0 +1,21 @@
+[package]
+name = "rozum-x86"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# The x86 / cross-vendor Vulkan iGPU engine SLOT (docs/specs/x86-native-runtime.md):
+# the LocalEngine/ChatBackend contract + device/memory/tensor/kernels/model stubs.
+# Compiles WITHOUT the `x86-native` feature so default CI keeps the seam honest;
+# filling the slot adds the real deps (a Vulkan binding + SPIR-V toolchain) under
+# the feature and replaces the todo!() bodies. Phase 2 of the workspace split.
+
+[features]
+# RESERVED for the real engine's deps once P0 picks them; the binary forwards here.
+x86-native = []
+
+[dependencies]
+rozum-core = { path = "../rozum-core" }
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+tokio-util = "0.7"

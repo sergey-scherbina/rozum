@@ -18,7 +18,6 @@ pub mod service;
 pub mod share;
 pub mod specdecode;
 pub mod specdecode_backend;
-pub mod x86;
 
 // The durable SPI core (backend/concurrency/obs/engine/serving/sampler/constrain/
 // harmony) now lives in the `rozum-core` crate (Phase 0 of the workspace split).
@@ -39,8 +38,9 @@ pub use rozum_meeting::{discord, meeting, telegram, tui, web};
 pub use rozum_models::{hf_hub, model_source, models, modelscope, resident};
 
 // Engine crates (Phase 2) — re-exported under their original module paths so
-// `rozum::mistralrs_backend::…` etc. keep resolving from the binary.
+// `rozum::mistralrs_backend::…` / `rozum::x86::…` etc. keep resolving from the binary.
 pub use rozum_mistralrs::mistralrs_backend;
+pub use rozum_x86::x86;
 
 #[cfg(feature = "local-models")]
 pub use backend::CandleBackend;

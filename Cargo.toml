@@ -35,7 +35,7 @@ mlx-native = ["dep:mlx-rs", "dep:mlx-lm", "dep:mlx-lm-utils"]
 # device/memory/tensor/kernels/model component stubs) compiles WITHOUT this feature, so the
 # default CI keeps the seam honest; filling the slot adds `dep:ash`/etc. here and replaces the
 # `todo!()` bodies — no structural rework.
-x86-native = []
+x86-native = ["rozum-x86/x86-native"]
 
 [dependencies]
 # The meeting room + its client frontends, extracted into their own crate
@@ -52,6 +52,7 @@ rozum-models = { path = "crates/rozum-models" }
 # Engine crates (Phase 2). Each is always linked, but its heavy backend dep is
 # gated behind the crate's own feature, which the binary's feature forwards to.
 rozum-mistralrs = { path = "crates/rozum-mistralrs" }
+rozum-x86 = { path = "crates/rozum-x86" }
 llama-cpp-2 = { version = ">=0.1.100", features = ["metal"], optional = true }
 
 # Native MLX runtime: the vendored fork of oxideai/mlx-rs (the `mlx-lm` Rust

@@ -4920,6 +4920,7 @@ dependencies = [
  "rozum-meeting",
  "rozum-mistralrs",
  "rozum-models",
+ "rozum-x86",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -5001,6 +5002,16 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "rozum-x86"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rozum-core",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
