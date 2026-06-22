@@ -120,9 +120,21 @@ Consolidated from the agentic matrix (`scripts/bench/agentic.sh`, sandbox on). R
   - claude **2/5** (greet+fix): when GLM happens to wrap a clean `Name\n{json}` in a fence, the new
     `parse_glm_tool_call` fenced parser (serving.rs) catches it. Also a leak to fix: the parsed tool-call
     text is ALSO returned as a content/text block (Anthropic path returns both text + tool_use).
-  - **FIX PATH (not whack-a-mole):** (a) constrained tool-call decoding — force structured emission (the
-    gpt-oss-style lever); or (b) normalize/strip the markdown-narration instructions from the rendered
-    prompt for GLM. Spec `docs/specs/glm4-bringup.md`. Ships meanwhile as a chat/code model in `EXTRA`.
+  - **FIX TRIED — (b) prompt-override REGRESSED, discarded.** Injected a strong last-word system
+    instruction ("call a tool = ONLY name\\nJSON, no prose/markdown/fences") for GLM+tools. Isolated
+    probe passed (big narration prompt → structured). But the real agent run **regressed claude
+    fix 1→0**: the override worked partially — GLM *dropped the markdown fence* but kept a lead-in prose
+    line → `prose\\nRead\\n{json}` (bare, un-fenced, embedded) → the fenced parser (which had been
+    catching the ` ```bash\\nRead\\n{json}\\n``` ` form) now misses it. And codex still emitted ` ```zsh\\n<raw
+    shell>\\n``` ` (not `shell\\n{json}`), so the override didn't reach/fix the responses path. A second
+    "passed in isolation, regressed in the full multi-turn/multi-endpoint system" case (skill-recorded).
+  - **REMAINING FIX = (a) logit-constrained decoding**, but it's NOT trivial: rozum's `constrain.rs`
+    *validates* the `<tool_call>` envelope body once started; GLM's problem is it never reliably STARTS a
+    structured call (narrates instead), and forcing one is wrong (the model must also be free to answer).
+    Needs a "when the model commits to a tool, force `name\\n{json}`" constraint + GLM's envelope.
+    Substantial. **Verdict for now:** GLM-4 ships as a chat/code model in `EXTRA` (parity-exact) + basic
+    tool-use (claude 2/5 via the fenced parser); full agentic-driver parity awaits the constraint work or
+    a tool-tuned GLM variant. Spec `docs/specs/glm4-bringup.md`.
 - [x] **Qwen2.5-Coder-7B / Qwen3-4B** — below the **~27B agentic cliff**: can't reliably drive the
   multi-step tool loop (2/5-ish). Not a bug; kept in `EXTRA` for non-agentic use. Don't surface as
   default agentic picks.
