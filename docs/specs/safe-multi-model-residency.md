@@ -176,8 +176,24 @@ single-flight + fast-swap (C) until prefill activation is provably bounded.
 4. C (fast-swap) likely deserves promotion over A/B for the 27–35B agentic models, whose
    *need* alone (weights ~18 GB + KV) already precludes co-residency on 36 GiB.
 
-(Method: pure source read of the vendored MLX allocator + mlx-rs — no model loaded, no
-slot used. The empirical active-vs-cache split is the one piece that needs the slot = D.)
+**Empirical confirmation (slot-free, `crates/rozum-mlx/examples/mlx_mem_probe.rs`).** Ran
+the raw-alloc probe: with `set_memory_limit=512 MB`, allocating 1024 MB of *live* f32
+arrays gives `active=1024 MB` — **the limit was exceeded 2×**, so `set_memory_limit` is
+**SOFT** (measured, not just read). With `set_cache_limit=256 MB`, after dropping the
+live arrays the retained `cache=256 MB` exactly — so `set_cache_limit` **does** bound the
+cache term. Source + measurement agree: the cap is `set_cache_limit` (cache only);
+`set_memory_limit` does not cap a process.
+
+**The probe is the smmr-D harness.** Its *model mode* (documented in the example header)
+wraps a real model load + prefill with `reset_peak_memory()` → `get_active_memory()` /
+`get_cache_memory()` / `get_peak_memory()` to split a model's peak into active vs cache.
+Run it under the live cap (needs the slot) to make the co-residency decision:
+```text
+cargo run -p rozum-mlx --example mlx_mem_probe --features mlx-native   # raw-alloc (slot-free)
+```
+
+(Method: source read of the vendored MLX allocator + mlx-rs, plus a slot-free raw-alloc
+measurement. The active-vs-cache split *for a real model* still needs the slot = D.)
 
 ## Acceptance / done-when
 
