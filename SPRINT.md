@@ -128,13 +128,25 @@ Consolidated from the agentic matrix (`scripts/bench/agentic.sh`, sandbox on). R
     catching the ` ```bash\\nRead\\n{json}\\n``` ` form) now misses it. And codex still emitted ` ```zsh\\n<raw
     shell>\\n``` ` (not `shell\\n{json}`), so the override didn't reach/fix the responses path. A second
     "passed in isolation, regressed in the full multi-turn/multi-endpoint system" case (skill-recorded).
-  - **REMAINING FIX = (a) logit-constrained decoding**, but it's NOT trivial: rozum's `constrain.rs`
-    *validates* the `<tool_call>` envelope body once started; GLM's problem is it never reliably STARTS a
-    structured call (narrates instead), and forcing one is wrong (the model must also be free to answer).
-    Needs a "when the model commits to a tool, force `name\\n{json}`" constraint + GLM's envelope.
-    Substantial. **Verdict for now:** GLM-4 ships as a chat/code model in `EXTRA` (parity-exact) + basic
-    tool-use (claude 2/5 via the fenced parser); full agentic-driver parity awaits the constraint work or
-    a tool-tuned GLM variant. Spec `docs/specs/glm4-bringup.md`.
+  - **FIX (a) SHIPPED — logit-constrained GLM tool calls (master `99c6081`).** Taught the masked
+    decoder GLM's `name\\n{bare_args}` envelope: `find_glm_tool_call` anchors on the last line that is
+    exactly a known tool name + `\\n`, then forces the args to that tool's JSON schema; a pure-prose
+    answer (no tool-name line) stays free so the final-answer turn survives. Plus an embedded parser
+    (`glm_embedded`) + `tool_markup_at` suppression. **Proven on the LIVE matrix** (not an isolated
+    probe — the override's lesson): it fires and every call is schema-valid (claude×fix `Read`/`Edit`/
+    `Bash` clean → **pass=1, no regression**; claude×debug calls clean). 449/0 lib tests.
+  - **But the matrix score did NOT lift — and the reason is a _different_ gap, read from the kept
+    transcripts (no premature verdict).** build/test/codex fail because GLM emits the **artifact
+    directly** — Cargo.toml/main.rs *content* inside ```toml/```rust fences, or raw `cat`/```bash —
+    instead of ever *naming* `Write`/`shell` (claude×test: tools=0; codex: raw shell). No tool-name
+    line ⇒ no anchor ⇒ nothing for any output-format constraint to force. So **GLM-4-32B-0414 has a
+    tool-use _decision_ gap, not a _format_ gap**: when it names a tool the call is now clean; for
+    file-creation/shell it *shows* the artifact rather than *naming* the tool (a tuning property),
+    fixable only model-side (a tool-calling-tuned GLM variant) or by intent-forcing that breaks the
+    final-answer turn. debug = a 3rd axis (clean calls, driver loops → RUN_TIMEOUT).
+  - **Verdict:** GLM-4 ships in `EXTRA` as a parity-exact chat/code model with **hardened tool-calling
+    when invoked** (schema-valid args, no drift, default-on). Agentic-driver ceiling (claude 2/5) is set
+    by the decision gap + reasoning convergence, not output format. Spec `docs/specs/glm4-bringup.md`.
 - [x] **Qwen2.5-Coder-7B / Qwen3-4B** — below the **~27B agentic cliff**: can't reliably drive the
   multi-step tool loop (2/5-ish). Not a bug; kept in `EXTRA` for non-agentic use. Don't surface as
   default agentic picks.
