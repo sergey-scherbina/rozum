@@ -74,6 +74,16 @@ case "$BIN" in /*) ;; *) BIN="$repo/$BIN" ;; esac   # launch runs in a temp cwd 
 DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit mlx-community:gpt-oss-20b-MXFP4-Q4"
 read -r -a MODELS <<<"${AGENTIC_MODELS:-$DEFAULT_MODELS}"
 read -r -a TASK_LIST <<<"${TASKS:-greet build fix test debug}"
+# REPS>1 runs every cell N times (fresh workdir each) so the report is a PASS-RATE, not a
+# single sample. The agentic matrix is irreducibly noisy — agent CLIs inject a per-run
+# session-id/timestamp, so a cell varies run-to-run even at a fixed ROZUM_SAMPLING_SEED
+# (docs/specs/matrix-nondeterminism.md). A single-run red is NOT a bug until confirmed over
+# N runs. Implemented by repeating TASK_LIST (one model load still serves all reps).
+REPS="${REPS:-1}"
+if [ "$REPS" -gt 1 ] 2>/dev/null; then
+  _base_tasks=("${TASK_LIST[@]}"); TASK_LIST=()
+  for _ in $(seq 1 "$REPS"); do TASK_LIST+=("${_base_tasks[@]}"); done
+fi
 
 AGENT_RUN=()
 for a in ${AGENTS:-claude codex opencode}; do command -v "$a" >/dev/null && AGENT_RUN+=("$a") || echo "skip agent '$a' (not on PATH)"; done
@@ -322,5 +332,11 @@ done
 
 echo "============================================================"
 column -s, -t "$CSV"
+echo
+# Pass-RATE summary per agent×model×task (the honest read: a cell is a rate, not a single
+# sample). With REPS=1 this is just pass/1 per cell; with REPS>1 it aggregates the reps.
+echo "pass-rate (agent × model × task):"
+awk -F, 'NR>1{k=$1"|"$2"|"$3; tot[k]++; if($6==1)p[k]++; if(!(k in s)){s[k]=1; ord[++n]=k}}
+  END{for(i=1;i<=n;i++){k=ord[i]; split(k,f,"|"); printf "  %-7s %-34s %-6s %d/%d\n", f[1], f[2], f[3], p[k]+0, tot[k]}}' "$CSV"
 echo
 echo "CSV + per-run logs: $OUT"

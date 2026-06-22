@@ -294,20 +294,23 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
   observed) → non-identical request → occasional bad trajectory the seed can't pin (≈80% pass).
   Lesson (feeds `matrix-nondeterminism-flip`): a single-run matrix red is NOT a bug until confirmed
   over N runs; this one dissolved under isolation. NOT a codex-delivery bug, NOT a model-weakness.
-- [ ] **matrix-gptoss-codex-build** — `codex × gpt-oss-20b × build` = **fail** (196.7s, rc=0).
-  Create-from-scratch via codex's V4A `apply_patch`. Known family ([[project-gateway-patch-revert]],
-  Finding 5/6): gpt-oss wrestles codex's 21KB/18-tool V4A load → malformed/duplicate writes →
-  files don't land. Verify against the latest gateway create-write-synth + codex-lean; isolate any
-  residual delivery loss vs. a true model ceiling. Coordinate — a sibling holds the codex/gpt-oss branches.
-- [ ] **matrix-gptoss-codex-test** — `codex × gpt-oss-20b × test` = **fail** (300.1s, rc=143,
-  **RUN_TIMEOUT**). Same create-from-scratch family as `-build` but it TIMED OUT (the model
-  flailed past 300s). Isolate: is it the same V4A delivery loop, or does gpt-oss never converge on
-  the test scaffold within budget? Consider whether a higher `RUN_TIMEOUT` or the create-write-synth
-  changes it. Coordinate with the sibling on codex/gpt-oss.
-- [ ] **matrix-gptoss-codex-debug** — `codex × gpt-oss-20b × debug` = **fail** (55.9s, rc=0).
-  Edit-existing-file (fix the bug so `cargo test` passes). Failed fast (didn't time out) → the edit
-  never landed or was wrong. Likely the codex apply_patch edit-delivery path on gpt-oss; cross-check
-  against the five shipped gateway delivery fixes ([[project-gateway-patch-revert]]). Coordinate with the sibling.
+  **N-run isolation (plucky-finch 2026-06-22, seed1234, RUN_TIMEOUT=280, one gpt-oss load,
+  3×each):** build **0/3**, test **0/3**, debug **1/3** (results `scripts/bench/results/
+  isolate-gptoss-codex-Nrun`). 3/9 runs hit the 280s timeout — gpt-oss reasons very long under
+  codex. build/test fail even on the non-timeout runs (113-266s) → not just a budget problem.
+  This CONFIRMS Finding 5/6 with current pass-rates: create-from-scratch is a **gpt-oss-20b ×
+  codex-V4A model+interface ceiling**, NOT a fresh gateway bug (gateway create-write-synth +
+  codex-lean already maxed; Finding 6 model-only probes proved gpt-oss collapses under codex's
+  21KB/18-tool load, not V4A-incompetence). On the agentic PICK (Qwen3.6-35B) codex clears these.
+- [~] **matrix-gptoss-codex-build** — `codex × gpt-oss-20b × build` = **0/3** (create-from-scratch).
+  Isolated to the model+interface ceiling above. **One untested lever:** RUN_TIMEOUT≫280 (gpt-oss
+  reasons long); but 0/3 includes non-timeout fails so a higher budget alone won't make it green.
+  Sibling holds the codex/gpt-oss gateway branches. Don't re-close as model-side without that lever tried.
+- [~] **matrix-gptoss-codex-test** — `codex × gpt-oss-20b × test` = **0/3** (create-from-scratch +
+  a `cargo test`). Same ceiling as `-build`. Same remaining lever (longer budget). Sibling coordination.
+- [~] **matrix-gptoss-codex-debug** — `codex × gpt-oss-20b × debug` = **1/3** (edit-existing).
+  Stochastic flake (passes ~1/3), not a hard zero — the codex edit-delivery sometimes lands on
+  gpt-oss. Read as a pass-rate; a single red was misleading. Sibling holds codex/gpt-oss delivery.
 
 #### 2. Plugin-ize everything
 
