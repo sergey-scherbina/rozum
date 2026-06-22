@@ -136,12 +136,17 @@ models** (`model_is_load_sensitive` = gpt-oss). The capable tier (Qwen3.6-35B, f
 trim, `1`=always). Pure decision `lean_prompt_on` is unit-tested (race-free); gateway suite 75/75.
 This supersedes the constrained-decode approach above as the right lever.
 
-### Live validation (2026-06-22) — WORKS for build
+### Live validation (2026-06-22/23) — WORKS for both create-from-scratch cells
 
-codex×gpt-oss with the trim: **`build` 0/3 (baseline) → 2/2 real passes** (107.8s, 72.9s) — and
-**faster** (72-107s vs the baseline's 113-280s: a shorter context = fewer tokens). Confirms the
-bisection: trimming the 20.9 KB instructions recovers create-from-scratch. The run truncated after
-3 cells — the gateway was shed mid-run (clean `time -l` exit at 18.5 GB peak; the new memory-pressure
-watchdog, NOT this change, which only *reduces* load), so `test` got only 1 real attempt (0/1,
-inconclusive — `test` also adds a `cargo test`, a harder shape; needs a clean re-run). Net: validated
-for the primary 0/3 cell and shipped on master.
+codex×gpt-oss with the trim, vs the 0/3 baseline:
+
+| cell | baseline | with trim | speed |
+|---|:---:|:---:|---|
+| `build` | 0/3 | **2/3** (run 1: 2/2; run 2: 0/1 timeout) | 72-107 s (was 113-280 s) |
+| `test` | 0/3 | **2/3** (0,1,1) | **34-52 s** (was 224-280 s) |
+
+The instruction-trim recovers BOTH create-from-scratch cells from 0/3 to ~2/3 **and is 3-5× faster**
+— a 1/3-size context = far fewer tokens, which also cuts the long-reasoning timeouts. Confirms the
+bisection (context size was the dominant breaker). Residual ~1/3 failures are the model occasionally
+going down a long reasoning path → timeout (secondary lever: lower gpt-oss's reasoning effort —
+separate task). Qwen3.6-35B keeps codex's full instructions verbatim → no regression. Shipped on master.
