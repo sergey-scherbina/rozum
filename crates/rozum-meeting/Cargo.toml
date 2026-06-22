@@ -1,0 +1,32 @@
+[package]
+name = "rozum-meeting"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# The meeting room: the disk-backed daemon (server, registry, store, mcp_server,
+# room_path, identity, …) plus its client frontends (the ratatui TUI, the web
+# bridge, and the Discord/Telegram messenger bridges). Zero dependency on the
+# model-runtime side of rozum — this is the first crate extracted in the
+# workspace split (docs/specs/workspace-split.md, Phase 1).
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+futures-util = "0.3"
+rmcp = { version = "1.7", features = ["server", "client", "transport-io", "transport-child-process"] }
+schemars = "1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+rand = "0.8"
+tempfile = "3"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+axum = { version = "0.8", features = ["ws"] }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tui-textarea = { version = "0.7", features = ["crossterm"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }

@@ -6,14 +6,12 @@ pub mod cascade;
 pub mod concurrency;
 pub mod config;
 pub mod constrain;
-pub mod discord;
 pub mod doctor;
 pub mod engine;
 pub mod gateway;
 pub mod gguf;
 pub mod harmony;
 pub mod hf_hub;
-pub mod meeting;
 pub mod memory_store;
 pub mod mistralrs_backend;
 pub mod mlx_native_backend;
@@ -33,10 +31,13 @@ pub mod serving;
 pub mod share;
 pub mod specdecode;
 pub mod specdecode_backend;
-pub mod telegram;
-pub mod tui;
-pub mod web;
 pub mod x86;
+
+// The meeting room + its client frontends now live in the `rozum-meeting` crate
+// (Phase 1 of the workspace split). Re-export its modules under their original
+// paths so `crate::meeting::…` / `crate::tui::…` (and `rozum::meeting::…` from the
+// binary) keep resolving unchanged.
+pub use rozum_meeting::{discord, meeting, telegram, tui, web};
 
 #[cfg(feature = "local-models")]
 pub use backend::CandleBackend;

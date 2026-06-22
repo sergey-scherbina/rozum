@@ -18,14 +18,20 @@ green at every phase** — same binary, same features, same matrix. Decisions + 
 dependency-graph evidence (prod graph is already a clean DAG; the wrong-way edges are
 test-only) live in the spec.
 
-- [ ] **Phase 0 — Scaffold + `rozum-core`.** Root → `[workspace]`, `crates/` dir; move the
-  SPI cluster (`backend`/`concurrency`/`obs`/`engine`/`serving`/`sampler`/`constrain`/
-  `harmony`/`config`-base) into `rozum-core`. Fix knot 1 (keep the `backend↔concurrency↔obs`
-  trio together) + knot 2 (move `CascadeSpec`/`Location`/`RemoteApi`/`StrategyName` config
-  types down out of `cascade`). *Gate: `cargo check` default + `--no-default-features` green.*
-- [ ] **Phase 1 — Extract `rozum-meeting`** (proof-of-concept; daemon has **0 internal deps**).
-  meeting + proxy + service + clients (tui/web/discord/telegram). *Gate: builds/tests with
-  no engine crate in its tree.*
+- [x] **Workspace scaffold up** — root is now `[workspace] members = ["crates/*"]` (landed
+  with Phase 1, since `rozum-meeting` has 0 internal deps and didn't need `rozum-core` first).
+- [ ] **Phase 0 — `rozum-core`.** Move the SPI cluster (`backend`/`concurrency`/`obs`/`engine`/
+  `serving`/`sampler`/`constrain`/`harmony`/`config`-base) into `rozum-core`. Fix knot 1 (keep
+  the `backend↔concurrency↔obs` trio together) + knot 2 (move `CascadeSpec`/`Location`/`RemoteApi`/
+  `StrategyName` config types down out of `cascade`). *Gate: `cargo check` default + `--no-default-features` green.*
+- [x] **Phase 1 — Extract `rozum-meeting`** ✅ (proof-of-concept; daemon has **0 internal deps**).
+  meeting + clients (tui/web/discord/telegram) → `crates/rozum-meeting`; module names preserved
+  so internal `crate::…` paths resolve unchanged + the `rozum` lib re-exports them under their
+  original paths (near-zero churn in consumers). `cargo check` default **and**
+  `--no-default-features` green; **71/71** crate tests pass; **no engine crate in its tree**
+  (an engine edit no longer recompiles the daemon — the isolation win). `proxy`/`service` stayed
+  in the bin (they need `concurrency`/`share` from `rozum-core`); they fold into `rozum-meeting`
+  once Phase 0 lands.
 - [ ] **Phase 2 — `rozum-models` + engines** (`rozum-mlx`/`-gguf`/`-mistralrs`/`-x86`) under
   feature flags forwarded from the workspace root. *Gate: each feature matrix unchanged.*
 - [ ] **Phase 3 — `rozum-agent` + `rozum-gateway`.** Fix knot 3 (gateway→mlx telemetry → SPI

@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/*"]
+
 [package]
 name = "rozum"
 version = "0.1.0"
@@ -35,6 +38,10 @@ mlx-native = ["dep:mlx-rs", "dep:mlx-lm", "dep:mlx-lm-utils"]
 x86-native = []
 
 [dependencies]
+# The meeting room + its client frontends, extracted into their own crate
+# (Phase 1 of the workspace split, docs/specs/workspace-split.md). The `rozum`
+# crate re-exports its modules under their original paths in src/lib.rs.
+rozum-meeting = { path = "crates/rozum-meeting" }
 candle = { package = "candle-core", version = "0.10.2", optional = true }
 candle-transformers = { version = "0.10.2", optional = true }
 tokenizers = { version = "0.22.0", features = ["onig"], optional = true }

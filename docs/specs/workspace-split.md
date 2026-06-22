@@ -132,5 +132,19 @@ the split (an engine change shouldn't recompile the daemon or the other engines)
   risky greenfield with a behaviour-preserving move.
 
 ## Results
-<Fill in after each phase: crate count, build-time delta (incremental rebuild of bin
-after an engine edit — the key win), test counts preserved, matrix parity.>
+
+**Phase 1 — `rozum-meeting` extracted (DONE).** `crates/rozum-meeting` = `meeting` +
+clients (`tui`/`web`/`discord`/`telegram`); module names preserved so the moved files
+needed **zero edits** (internal `crate::meeting::…` / `crate::tui::…` resolve within the
+new crate), and `src/lib.rs` re-exports the five modules under their original paths
+(`pub use rozum_meeting::{discord, meeting, telegram, tui, web};`) so consumers
+(`proxy`/`service`/`doctor`/`main`) needed **zero edits** too. Root became
+`[workspace] members = ["crates/*"]` + a `path` dep. Verified: `cargo check` (default)
+green, `cargo check --no-default-features` (portable seam) green, **71/71** crate tests
+pass. The crate's dep tree carries **no engine crate** (mlx/gguf/mistralrs/x86) — the
+isolation win: editing an engine no longer recompiles the daemon. `proxy`/`service`
+stayed in the bin (they need `concurrency`/`share` from the not-yet-extracted
+`rozum-core`); they join `rozum-meeting` after Phase 0.
+
+<Phases 0/2/3/4: fill in build-time delta (incremental bin rebuild after an engine edit
+— the key win), test counts, matrix parity, as each lands.>

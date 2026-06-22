@@ -4919,6 +4919,7 @@ dependencies = [
  "ratatui",
  "reqwest 0.12.28",
  "rmcp",
+ "rozum-meeting",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -4931,6 +4932,31 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "tui-textarea",
+ "uuid 1.23.2",
+]
+
+[[package]]
+name = "rozum-meeting"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "crossterm 0.28.1",
+ "futures",
+ "futures-util",
+ "rand 0.8.6",
+ "ratatui",
+ "reqwest 0.12.28",
+ "rmcp",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
  "tui-textarea",
  "uuid 1.23.2",
 ]
