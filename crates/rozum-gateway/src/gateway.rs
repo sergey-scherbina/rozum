@@ -2894,6 +2894,44 @@ pub fn claude_model_alias(model_spec: &str) -> String {
     format!("claude-rozum-{}", sanitize_id(model_spec))
 }
 
+/// Reproducibility instrument for the agentic matrix (and any caller wanting a
+/// deterministic local model). The gateway passes the client's sampling params through
+/// verbatim and leaves `seed` unset, so the sampler + MLX RNG seed from entropy: a
+/// `temperature > 0` request (Claude Code's main loop sends 1.0) produces a DIFFERENT
+/// token stream every run → a matrix cell flips pass↔fail on a byte-identical config,
+/// which undermines every other matrix reading. These env knobs pin a run WITHOUT
+/// changing the wire protocol. Both default OFF → behaviour is byte-for-byte unchanged
+/// unless explicitly set (so it is purely a benchmark/diagnosis instrument here):
+///   `ROZUM_SAMPLING_SEED=<u64>`   pin the RNG seed (only fills it when the client sent none)
+///   `ROZUM_FORCE_GREEDY=1|true|on` force temperature 0 (argmax — removes the RNG entirely)
+fn apply_determinism_env(s: SamplingParams) -> SamplingParams {
+    let force_greedy = matches!(
+        std::env::var("ROZUM_FORCE_GREEDY").ok().as_deref(),
+        Some("1" | "true" | "on")
+    );
+    let seed = std::env::var("ROZUM_SAMPLING_SEED")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    apply_determinism(s, force_greedy, seed)
+}
+
+/// Pure core of [`apply_determinism_env`] (env read split out so it is race-free to test).
+/// `force_greedy` wins over the client's temperature; `seed` only fills an unset seed so a
+/// caller that genuinely sent its own seed keeps it.
+fn apply_determinism(mut s: SamplingParams, force_greedy: bool, seed: Option<u64>) -> SamplingParams {
+    if force_greedy {
+        s.temperature = Some(0.0);
+        s.top_p = None;
+        s.top_k = None;
+    }
+    if s.seed.is_none() {
+        if let Some(sd) = seed {
+            s.seed = Some(sd);
+        }
+    }
+    s
+}
+
 async fn oai_chat_handler(
     State(state): State<GatewayState>,
     axum::Json(req): axum::Json<OaiChatReq>,
@@ -2933,14 +2971,14 @@ async fn oai_chat_handler(
     let chat_req = ChatRequest {
         messages,
         tools,
-        sampling: SamplingParams {
+        sampling: apply_determinism_env(SamplingParams {
             temperature: req.temperature,
             top_p: req.top_p,
             max_tokens: req.max_tokens,
             top_k: req.top_k,
             response_schema: parse_response_format(&req.response_format),
             ..Default::default()
-        },
+        }),
         cancel: cancel.clone(),
         session_id: None,
     };
@@ -3074,13 +3112,13 @@ async fn responses_handler(
     let chat_req = ChatRequest {
         messages,
         tools,
-        sampling: SamplingParams {
+        sampling: apply_determinism_env(SamplingParams {
             temperature: req.temperature,
             top_p: req.top_p,
             max_tokens: req.max_output_tokens,
             top_k: req.top_k,
             ..Default::default()
-        },
+        }),
         cancel: cancel.clone(),
         session_id: None,
     };
@@ -3433,11 +3471,11 @@ async fn anthropic_handler(
     let chat_req = ChatRequest {
         messages,
         tools,
-        sampling: SamplingParams {
+        sampling: apply_determinism_env(SamplingParams {
             temperature: req.temperature,
             max_tokens: req.max_tokens,
             ..Default::default()
-        },
+        }),
         cancel: cancel.clone(),
         session_id: None,
     };
@@ -3874,6 +3912,60 @@ pub async fn serve_on(
 mod tests {
     use super::*;
     use crate::backend::{ChatEvent, HelloBackend, StopReason};
+
+    #[test]
+    fn determinism_off_is_byte_for_byte_passthrough() {
+        // Both knobs off → the client's params are untouched (behaviour-preserving default).
+        let s = SamplingParams {
+            temperature: Some(1.0),
+            top_p: Some(0.95),
+            top_k: Some(40),
+            ..Default::default()
+        };
+        let out = apply_determinism(s.clone(), false, None);
+        assert_eq!(out.temperature, Some(1.0));
+        assert_eq!(out.top_p, Some(0.95));
+        assert_eq!(out.top_k, Some(40));
+        assert_eq!(out.seed, None, "no seed forced when ROZUM_SAMPLING_SEED unset");
+    }
+
+    #[test]
+    fn determinism_seed_fills_only_when_unset() {
+        // Pins an entropy-seeded request (the matrix case) ...
+        let pinned = apply_determinism(
+            SamplingParams { temperature: Some(1.0), ..Default::default() },
+            false,
+            Some(7),
+        );
+        assert_eq!(pinned.seed, Some(7));
+        assert_eq!(pinned.temperature, Some(1.0), "seed pin does not touch temperature");
+        // ... but never clobbers a client that genuinely sent its own seed.
+        let kept = apply_determinism(
+            SamplingParams { seed: Some(123), ..Default::default() },
+            false,
+            Some(7),
+        );
+        assert_eq!(kept.seed, Some(123));
+    }
+
+    #[test]
+    fn determinism_force_greedy_overrides_sampling() {
+        // force_greedy → argmax: temperature 0, nucleus/top-k cleared (no RNG at all).
+        let out = apply_determinism(
+            SamplingParams {
+                temperature: Some(1.0),
+                top_p: Some(0.9),
+                top_k: Some(50),
+                ..Default::default()
+            },
+            true,
+            Some(7),
+        );
+        assert_eq!(out.temperature, Some(0.0));
+        assert_eq!(out.top_p, None);
+        assert_eq!(out.top_k, None);
+        assert_eq!(out.seed, Some(7), "seed still pinned alongside greedy (harmless for argmax)");
+    }
 
     #[tokio::test]
     async fn gen_timeout_aborts_stalled_stream() {
