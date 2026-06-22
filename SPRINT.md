@@ -62,12 +62,13 @@ push `feature/<slug>:master` (never edit master), then delete the done entry + p
   ~24 GB") — no 2nd model loaded, no reboot. Plus sunny-civet's real-binary smoke (held→refuse+exit1).
   The *remaining* validation is the opposite case — co-residency SUCCESS (two small models load together),
   tracked as `live-coresidency-proof` below (slot-gated).
-- [ ] **live-coresidency-proof** (`nimble-raven`, slot-gated) — the capability-side proof: start two small
-  cached models (e.g. Qwen3-4B + GLM-4-9B; footprints ~12 + ~13 ≤ budget 27) as two gateways → both admit +
-  co-reside; verify both serve, `/stats memory_pressure`=normal, host free RAM healthy, governor quiet;
-  graceful teardown. Single risk = the model slot (held by sibling matrix runs) → run when free, never
-  alongside a sibling's bench. Confirms the operator's headline goal end-to-end. (smmr-D already measured
-  the per-model footprints that make this safe: 4B real ~6 GB, two ≈ 12 GB ≪ 36.)
+- [x] **live-coresidency-proof** (`nimble-raven`) — **DONE 2026-06-22. The operator's headline goal is
+  validated end-to-end.** Two distinct models co-resident in two gateways (Qwen3-4B :8298 + GLM-4-9B :8299,
+  n_ctx 8192): B admitted alongside A → **BOTH RESIDENT, both served chat (reply ok ✓ each)**; host free RAM
+  26.6 → **21.1 GB while both loaded** (active A 2159 MB + B 5043 MB ≈ 7 GB), no danger, no reboot; graceful
+  SIGINT teardown clean (no SIGKILL) → 28.8 GB free. So: multiple models run at once, safely. (Note: the
+  running debug binary predated the `/stats memory_pressure` field so it read "?"; host free-RAM directly
+  confirms safety. Rebuild surfaces the field.)
 
 > #### ▶ nimble-raven active tracks (2026-06-22, operator: "do all three, set priorities, don't reboot, write it all down")
 > My priority order across the operator's three asks, scheduled around the **single model slot**:

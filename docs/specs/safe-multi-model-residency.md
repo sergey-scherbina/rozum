@@ -153,6 +153,11 @@ load an un-admitted combination to "see if it reboots."
   neither is unbounded ⇒ co-residency is SAFE by construction** (admission reserves ≥ real
   peak). Caveat: a big-model FULL-context/full-prefill peak wasn't directly measured (the
   structural bound + chunked prefill cover it; nice-to-confirm later).
+- ✅ **LIVE CO-RESIDENCY PROVEN (2026-06-22) — the headline goal end-to-end.** Two distinct
+  models in two gateways (Qwen3-4B :8298 + GLM-4-9B :8299, n_ctx 8192): B was **admitted
+  alongside A → both resident, both served chat simultaneously** (reply ok each); host free
+  RAM 26.6 → **21.1 GB with both loaded** (active 2159 + 5043 MB ≈ 7 GB), no danger; graceful
+  SIGINT teardown (no SIGKILL) → 28.8 GB free. Multiple models run at once, safely.
 - 🆕 **Follow-up surfaced — footprint is OVER-conservative (`footprint-overconservative`,
   see task).** It reserved ~14 GB for the 4B (full-`n_ctx` KV ~4.8 GB + 6 GB reserve) vs
   ~2.3 GB real → two small models can't co-reside (28 > budget 23.4) even though they fit
