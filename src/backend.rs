@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::OnceLock;
 #[cfg(feature = "local-models")]
 use std::sync::Mutex;
 
@@ -936,7 +937,13 @@ impl BackendRegistry {
                         PlaceholderBackend::new(config.id.clone(), config.engine),
                     ),
                 },
-                BackendEngine::Gguf => add_gguf_backend(&mut registry, config),
+                BackendEngine::Gguf => match GGUF_ENGINE.get().and_then(|ctor| ctor(&config)) {
+                    Some(backend) => registry.add_backend_arc(config, backend),
+                    None => registry.add_backend(
+                        config.clone(),
+                        PlaceholderBackend::new(config.id.clone(), config.engine),
+                    ),
+                },
                 engine => registry.add_backend(
                     config.clone(),
                     PlaceholderBackend::new(config.id.clone(), engine),
@@ -954,6 +961,12 @@ impl BackendRegistry {
             config,
             backend: Arc::new(backend),
         });
+    }
+
+    /// Register an already-boxed backend (used by externally-registered engine
+    /// constructors — see [`register_gguf_engine`]).
+    pub fn add_backend_arc(&mut self, config: BackendConfig, backend: Arc<dyn ChatBackend>) {
+        self.entries.push(BackendEntry { config, backend });
     }
 
     pub fn get_backend(&self, backend_id: &str) -> Option<Arc<dyn ChatBackend>> {
@@ -995,48 +1008,19 @@ fn add_candle_backend(registry: &mut BackendRegistry, config: BackendConfig) {
     );
 }
 
-#[cfg(feature = "gguf")]
-fn add_gguf_backend(registry: &mut BackendRegistry, config: BackendConfig) {
-    use crate::gguf::{GgufBackend, GgufOptions, resolve_model_path};
-    let spec = config.model_spec.clone().or_else(|| {
-        config
-            .model_path
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
-    });
-    let path = spec.as_deref().and_then(resolve_model_path);
-    match path {
-        None => {
-            tracing::warn!(
-                id = %config.id,
-                spec = ?spec,
-                "gguf backend: could not resolve model path; using placeholder. \
-                 Specify an absolute path or a 'lmstudio:' / 'ollama:' prefix."
-            );
-            registry.add_backend(
-                config.clone(),
-                PlaceholderBackend::new(config.id.clone(), config.engine),
-            );
-        }
-        Some(model_path) => match GgufBackend::new(model_path, GgufOptions::default()) {
-            Ok(b) => registry.add_backend(config, b),
-            Err(e) => {
-                tracing::warn!(id = %config.id, error = %e, "gguf backend: load failed; using placeholder");
-                registry.add_backend(
-                    config.clone(),
-                    PlaceholderBackend::new(config.id.clone(), config.engine),
-                );
-            }
-        },
-    }
-}
+/// Constructs an in-process backend for a [`BackendConfig`], returning `None` to
+/// fall back to a [`PlaceholderBackend`]. Engines that live in higher crates (e.g.
+/// the `gguf` engine) register their constructor here so `rozum-core` never
+/// depends on them — inversion of control for the workspace split.
+pub type EngineCtor = fn(&BackendConfig) -> Option<Arc<dyn ChatBackend>>;
 
-#[cfg(not(feature = "gguf"))]
-fn add_gguf_backend(registry: &mut BackendRegistry, config: BackendConfig) {
-    registry.add_backend(
-        config.clone(),
-        PlaceholderBackend::new(config.id.clone(), config.engine),
-    );
+static GGUF_ENGINE: OnceLock<EngineCtor> = OnceLock::new();
+
+/// Register the in-process GGUF engine constructor. The binary calls this at
+/// startup when built with the `gguf` feature; without it, `BackendEngine::Gguf`
+/// resolves to a placeholder (unchanged behaviour vs the old `#[cfg]` stub).
+pub fn register_gguf_engine(ctor: EngineCtor) {
+    let _ = GGUF_ENGINE.set(ctor);
 }
 
 // ─── BackendOrchestrator ──────────────────────────────────────────────────────

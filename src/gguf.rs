@@ -502,6 +502,47 @@ mod inner {
 #[cfg(feature = "gguf")]
 pub use inner::Export as GgufBackend;
 
+/// Register the in-process GGUF engine constructor with `rozum-core`'s backend
+/// registry (inversion of control for the workspace split — core never depends on
+/// this engine). Called once at binary startup. Behaviour matches the old
+/// in-`backend.rs` `add_gguf_backend`: resolve the spec/path, build a
+/// `GgufBackend`, fall back to a placeholder (return `None`) on any failure.
+#[cfg(feature = "gguf")]
+pub fn register_engine() {
+    crate::backend::register_gguf_engine(|config| {
+        let spec = config.model_spec.clone().or_else(|| {
+            config
+                .model_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+        });
+        let model_path = match spec.as_deref().and_then(resolve_model_path) {
+            Some(p) => p,
+            None => {
+                tracing::warn!(
+                    id = %config.id,
+                    spec = ?spec,
+                    "gguf backend: could not resolve model path; using placeholder. \
+                     Specify an absolute path or a 'lmstudio:' / 'ollama:' prefix."
+                );
+                return None;
+            }
+        };
+        match GgufBackend::new(model_path, GgufOptions::default()) {
+            Ok(b) => Some(std::sync::Arc::new(b) as std::sync::Arc<dyn crate::backend::ChatBackend>),
+            Err(e) => {
+                tracing::warn!(id = %config.id, error = %e, "gguf backend: load failed; using placeholder");
+                None
+            }
+        }
+    });
+}
+
+/// No-op when the `gguf` feature is off — `BackendEngine::Gguf` then resolves to a
+/// placeholder, exactly as before.
+#[cfg(not(feature = "gguf"))]
+pub fn register_engine() {}
+
 // ─── Chat template formatting (always compiled) ───────────────────────────────
 
 /// Format messages and optional tool definitions into a Qwen-style chat prompt.

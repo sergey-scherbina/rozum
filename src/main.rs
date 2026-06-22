@@ -509,6 +509,11 @@ enum ModelsAction {
 
 #[tokio::main]
 async fn main() {
+    // Register the in-process engine constructors that live above `rozum-core`
+    // (inversion of control for the workspace split — core never depends on an
+    // engine). A no-op when the corresponding feature is off.
+    rozum::gguf::register_engine();
+
     let cli = Cli::parse_from(reorder_launch_args(std::env::args().collect()));
 
     // The default subcommand launches a TUI. Anything written to stderr
