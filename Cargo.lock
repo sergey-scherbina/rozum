@@ -4903,8 +4903,6 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
- "candle-core 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "candle-transformers",
  "chrono",
  "clap",
  "crossterm 0.28.1",
@@ -4919,12 +4917,12 @@ dependencies = [
  "ratatui",
  "reqwest 0.12.28",
  "rmcp",
+ "rozum-core",
  "rozum-meeting",
  "schemars 1.2.1",
  "serde",
  "serde_json",
  "tempfile",
- "tokenizers 0.22.2",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.24.0",
@@ -4934,6 +4932,26 @@ dependencies = [
  "tracing-subscriber",
  "tui-textarea",
  "uuid 1.23.2",
+]
+
+[[package]]
+name = "rozum-core"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "candle-core 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "candle-transformers",
+ "chrono",
+ "futures",
+ "futures-util",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "tokenizers 0.22.2",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

@@ -146,5 +146,22 @@ isolation win: editing an engine no longer recompiles the daemon. `proxy`/`servi
 stayed in the bin (they need `concurrency`/`share` from the not-yet-extracted
 `rozum-core`); they join `rozum-meeting` after Phase 0.
 
-<Phases 0/2/3/4: fill in build-time delta (incremental bin rebuild after an engine edit
+**Phase 0 — `rozum-core` extracted (DONE).** The SPI cluster (`backend`/`concurrency`/
+`obs`/`engine`/`serving`/`sampler`/`constrain`/`harmony`) → `crates/rozum-core`; module
+names preserved (moved files needed zero edits) + `src/lib.rs` re-exports them
+(`pub use rozum_core::{concurrency, constrain, engine, harmony, obs, sampler, serving};`
++ `pub(crate) use rozum_core::backend;`) so all `crate::backend::…` / `crate::engine::…`
+consumers are unchanged. **Knot 1** (the `backend↔concurrency↔obs` mutual recursion) handled
+by co-locating the trio in one crate. **The `backend→gguf` edge** (turned out to be a
+feature-gated registry factory, not test-only as first scanned) was broken by **inversion of
+control**: `backend::register_gguf_engine(EngineCtor)` + a `OnceLock` the registry consults for
+`BackendEngine::Gguf`; the concrete constructor moved to `gguf::register_engine()` (cfg `gguf`),
+called once in `main()` — behaviour-preserving (same placeholder fallbacks/warnings). So
+`rozum-core` depends on **no** engine. `local-models` (`CandleBackend`) moved into `rozum-core`;
+the bin forwards the feature (`local-models = ["rozum-core/local-models"]`). **`config` deferred**
+to the bin (its `config→cascade` knot 2 resolves when `cascade` moves in Phase 3). Verified:
+`cargo check` default + `--no-default-features` green; **82/82** core tests, **300/0** root lib
+tests (orchestrator + gguf-registration path included).
+
+<Phases 2/3/4: fill in build-time delta (incremental bin rebuild after an engine edit
 — the key win), test counts, matrix parity, as each lands.>

@@ -1,16 +1,11 @@
 pub mod agent;
 pub mod anthropic_http;
-mod backend;
 pub mod builtin_tools;
 pub mod cascade;
-pub mod concurrency;
 pub mod config;
-pub mod constrain;
 pub mod doctor;
-pub mod engine;
 pub mod gateway;
 pub mod gguf;
-pub mod harmony;
 pub mod hf_hub;
 pub mod mcp_tool_source;
 pub mod memory_store;
@@ -19,20 +14,24 @@ pub mod mlx_native_backend;
 pub mod model_source;
 pub mod models;
 pub mod modelscope;
-pub mod obs;
 pub mod openai_http;
 pub mod proxy;
 pub mod rag_lite;
 pub mod resident;
 pub mod router;
-pub mod sampler;
 pub mod sandbox;
 pub mod service;
-pub mod serving;
 pub mod share;
 pub mod specdecode;
 pub mod specdecode_backend;
 pub mod x86;
+
+// The durable SPI core (backend/concurrency/obs/engine/serving/sampler/constrain/
+// harmony) now lives in the `rozum-core` crate (Phase 0 of the workspace split).
+// Re-export its modules under their original paths so `crate::backend::…` /
+// `crate::engine::…` etc. resolve unchanged across the crate.
+pub use rozum_core::{concurrency, constrain, engine, harmony, obs, sampler, serving};
+pub(crate) use rozum_core::backend;
 
 // The meeting room + its client frontends now live in the `rozum-meeting` crate
 // (Phase 1 of the workspace split). Re-export its modules under their original

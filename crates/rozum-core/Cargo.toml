@@ -1,0 +1,33 @@
+[package]
+name = "rozum-core"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# The durable, hardware-agnostic core: the `ChatBackend` SPI and the pieces every
+# engine and serving layer build on — backend (SPI + orchestrator/registry),
+# concurrency (admission), obs, engine, serving, sampler, constrain, harmony.
+# No dependency on any concrete engine (gguf/mlx/mistralrs/x86) — engines register
+# their constructors via `backend::register_*_engine` (inversion of control).
+# Phase 0 of the workspace split (docs/specs/workspace-split.md).
+
+[features]
+# Optional in-process candle (quantized GGUF) backend — `CandleBackend`. Pure-Rust,
+# no Metal toolchain. The binary forwards its own `local-models` feature here.
+local-models = ["dep:candle", "dep:candle-transformers", "dep:tokenizers"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+async-stream = "0.3"
+tokio-util = "0.7"
+futures = "0.3"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tracing = "0.1"
+rand = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+candle = { package = "candle-core", version = "0.10.2", optional = true }
+candle-transformers = { version = "0.10.2", optional = true }
+tokenizers = { version = "0.22.0", features = ["onig"], optional = true }

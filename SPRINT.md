@@ -20,10 +20,17 @@ test-only) live in the spec.
 
 - [x] **Workspace scaffold up** — root is now `[workspace] members = ["crates/*"]` (landed
   with Phase 1, since `rozum-meeting` has 0 internal deps and didn't need `rozum-core` first).
-- [ ] **Phase 0 — `rozum-core`.** Move the SPI cluster (`backend`/`concurrency`/`obs`/`engine`/
-  `serving`/`sampler`/`constrain`/`harmony`/`config`-base) into `rozum-core`. Fix knot 1 (keep
-  the `backend↔concurrency↔obs` trio together) + knot 2 (move `CascadeSpec`/`Location`/`RemoteApi`/
-  `StrategyName` config types down out of `cascade`). *Gate: `cargo check` default + `--no-default-features` green.*
+- [x] **Phase 0 — `rozum-core`** ✅. Moved the SPI cluster (`backend`/`concurrency`/`obs`/`engine`/
+  `serving`/`sampler`/`constrain`/`harmony`) into `crates/rozum-core`; module names preserved +
+  re-exported from `src/lib.rs` (`pub use rozum_core::{…}` + `pub(crate) use rozum_core::backend`)
+  → consumers unchanged. Knot 1 handled (the `backend↔concurrency↔obs` trio stays co-located in
+  core). **Knot — `backend→gguf` broken via inversion of control** (`25ea416`): the SPI registry no
+  longer constructs the gguf engine; `backend::register_gguf_engine()` is a hook the binary fills at
+  startup (`gguf::register_engine()` in `main()`), so core depends on **no** engine. `local-models`
+  (the candle `CandleBackend`) now lives in `rozum-core` and the bin forwards its feature. **Deferred:**
+  `config` stays in the bin (its `config→cascade` knot 2 is resolved when `cascade` moves in Phase 3).
+  Verified: `cargo check` default **and** `--no-default-features` green; **82/82** core tests + **300/0**
+  root lib tests pass (incl. orchestrator/gguf-registration path).
 - [x] **Phase 1 — Extract `rozum-meeting`** ✅ (proof-of-concept; daemon has **0 internal deps**).
   meeting + clients (tui/web/discord/telegram) → `crates/rozum-meeting`; module names preserved
   so internal `crate::…` paths resolve unchanged + the `rozum` lib re-exports them under their

@@ -22,7 +22,7 @@ license = "Apache-2.0"
 # native MLX/GGUF backends are Apple-Metal-bound (mlx-sys + llama-cpp-2 `metal`); a
 # true gguf-on-Linux (CPU/CUDA, non-metal) is the open `portability-cuda-gguf`.
 default = ["mlx-native", "gguf"]
-local-models = ["dep:candle", "dep:candle-transformers", "dep:tokenizers"]
+local-models = ["rozum-core/local-models"]
 gguf = ["dep:llama-cpp-2"]
 mistralrs = ["dep:mistralrs"]
 # Pure-Rust native MLX runtime (no Python, no subprocess). Builds MLX C++ from
@@ -42,9 +42,10 @@ x86-native = []
 # (Phase 1 of the workspace split, docs/specs/workspace-split.md). The `rozum`
 # crate re-exports its modules under their original paths in src/lib.rs.
 rozum-meeting = { path = "crates/rozum-meeting" }
-candle = { package = "candle-core", version = "0.10.2", optional = true }
-candle-transformers = { version = "0.10.2", optional = true }
-tokenizers = { version = "0.22.0", features = ["onig"], optional = true }
+# The durable SPI core (backend/concurrency/obs/engine/serving/sampler/constrain/
+# harmony). Phase 0 of the workspace split; the `rozum` crate re-exports its
+# modules under their original paths in src/lib.rs. `local-models` forwards here.
+rozum-core = { path = "crates/rozum-core" }
 llama-cpp-2 = { version = ">=0.1.100", features = ["metal"], optional = true }
 mistralrs = { version = "0.8.1", features = ["metal"], optional = true }
 
