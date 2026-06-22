@@ -71,15 +71,18 @@ The blueprint — `glm4.rs` mirrors `qwen3.rs` and changes exactly these:
       (`scripts/mlx_ref.py` — logits/`||x||` per-layer, then identical token stream).
 - [x] Chat template renders a clean single-turn reply and a tool call.
 - [x] Runs through `rozum launch` on 36 GB at 4-bit; GLM-4-32B-0414 likewise.
-- [ ] **Logit-constrained tool calls** — the constrained decoder recognises GLM's
+- [x] **Logit-constrained tool calls** — the constrained decoder recognises GLM's
   `name\n{json}` envelope (no `<tool_call>` opener) and, once the model names a known
   tool at a line start, forces the arguments to valid schema-conforming JSON. A pure
   prose answer (no tool-name line) is left unconstrained (the final-answer path must
   survive). Default-on with the other constraints (`ROZUM_MLX_CONSTRAIN`).
-- [ ] The parser extracts a `name\n{json}` call even when prose precedes it
+  (`find_glm_tool_call_anchors_on_known_name`; proven firing on the live matrix —
+  every call in claude×fix/debug is schema-valid.)
+- [x] The parser extracts a `name\n{json}` call even when prose precedes it
   (the constraint forces clean args but does not remove a lead-in line), and the
   call is suppressed from the streamed text (`tool_markup_at`) so it doesn't leak as
-  both text and `tool_use` (the re-emit loop).
+  both text and `tool_use` (the re-emit loop). (`glm4_embedded_after_prose`,
+  `tool_markup_suppression_points`.)
 
 ## Out of scope
 
@@ -181,3 +184,35 @@ so no system prompt can talk the model out of it.
 needs to end cleanly. Anchoring on a tool-name line constrains *only* the call branch and
 leaves prose answers free. Rejected: turn-start force (kills final answers); markdown-token
 banning (whack-a-mole, the discarded override's failure mode).
+
+### Results — constraint SHIPS; the matrix ceiling is a different gap
+
+Built, full lib suite green (449/0), and run on the **live** matrix (the regressed cell, not
+an isolated probe — the override's lesson): `mlx-community:GLM-4-32B-0414-4bit`, claude + codex
+× build/fix/test/debug, `KEEP=1`, constraint default-on.
+
+- **The constraint fires and is correct.** Every call it produced is schema-valid: claude×fix
+  → `Read\n{…}`, `Edit\n{…}`, `Bash\n{cargo run …}` (3 clean calls, **pass=1**); claude×debug
+  → `Read`/`Read`/`Bash{cargo test}` all clean. **No regression** — fix still passes (the
+  discarded prompt-override had broken exactly this cell). Args are now schema-forced, not
+  incidentally valid.
+- **The matrix score does not lift, for a *different* reason the constraint cannot reach.**
+  Reading the kept transcripts: build/test fail because GLM emits the **artifact directly** —
+  the Cargo.toml / main.rs *content* inside ```toml / ```rust fences — instead of ever naming
+  the `Write` tool (claude×test: turns=1, **tools=0**; claude×build: 1 Bash call, files never
+  written). Codex fails the same way: raw ` ```bash\ncat …\n``` ` instead of naming `shell`.
+  No tool-name line ⇒ no anchor ⇒ nothing for any output-format constraint to force.
+- **Therefore: GLM-4-32B-0414 has a tool-use _decision_ gap, not a _format_ gap.** When it
+  decides to call a named tool it now emits a clean, schema-valid call (the constraint
+  guarantees it). For file-creation and shell it tends to *show* the artifact rather than
+  *name* the tool — a property of how GLM-4-0414 was tuned, addressable only model-side (a
+  tool-calling-tuned GLM variant) or by an intent-forcing scheme that would break the
+  final-answer turn. debug is a third axis: clean calls but the driver loops without
+  converging (a reasoning limit, RUN_TIMEOUT).
+
+**Verdict.** Ship the constraint default-on: it is correct, non-regressing, and the durable
+hardening for GLM tool calls (schema-valid args, no drift, suppression) — unlike the
+prompt-override it does not regress. The agentic-driver ceiling on the 5-task matrix
+(claude 2/5) is now set by the decision gap + reasoning convergence, which are not
+output-format problems. GLM-4 stays in `EXTRA` as a parity-exact chat/code model with
+hardened (when invoked) tool-calling.
