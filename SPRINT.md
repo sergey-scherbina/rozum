@@ -188,6 +188,28 @@ the split (sibling owns the model-participant bridge). Worktree `feature/meeting
 `../scalascript` (branch feature/rust-web-toolkit): vstack/heading/text/lower/serve→SSR, named
 args, signals (data-ssc-*), server-push (/__ssc/push|state) — all shipped + green.
 
+**STATUS 2026-06-22: the .ssc rewrite IS the shipped, only meeting web — the hand-written
+`web.rs`/`web_index.html`/`meetings web` subcommand were removed. Source: `meeting-ssc/meeting.ssc`
+on `feature/meeting-web-pwa-ssc` (worktree `../rozum-meeting-pwa`); launchd `com.rozum.meeting-ssc`
+:8405 behind Tailscale `:8443`/`:8446`. (Code is safe in the worktree; this shared-master SPRINT.md
+is churned by sibling agents — feature tasks also tracked in `meeting-ssc/TASKS.md`.)**
+
+Done since the rewrite: rich text (inline `code`, `**bold**`, clickable links, done/working/blocked
+badges, per-day date dividers, `HH:MM`, per-handle colour), trim-80, chronological `.sorted`,
+auto-scroll, active-participants bar; content-integrity fix (quote truncation). **Dynamic rooms**:
+`/r/<room>` for ANY room via http **prefix routing** (toolkit runtime) + `<select>` switcher.
+**`/manage` panel** (⚙): rooms list/switch/create/delete + **bulk "clean empty rooms"** (19→8 junk
+ghosts pruned; project rooms protected), models list/`rm`, agents view. Toolkit additions landed in
+`feature/rust-web-toolkit`: `&str` patterns (contains/split/join/replace), Vec
+`.take/.drop/.takeRight/.dropRight/.sorted/.distinct`, `String.toList→.chars()`, `.sum`, http
+`no-store` + MIME-by-extension + prefix routing.
+
+- [ ] **Gateway control in `/manage`** (2026-06-22, in progress) — `rozum gateway` HAS `status`
+      (model/port/pid/uptime/clients), `switch --model <spec>` (clean drain→swap), `stop`/`unload`.
+      Show active model + status; switch model (per installed model); stop/unload. Makes "manage
+      models/agents" real. (Launching interactive agents via `rozum launch` stays CLI — a TTY program
+      isn't a web button.)
+
 - [x] **Installable PWA** (`c368774`) — apple-mobile-web-app meta + web manifest + service worker +
       SVG icon; routes `/manifest.webmanifest`, `/sw.js`, `/icon.svg` in `src/meeting/web.rs`. iOS
       Add-to-Home-Screen runs full-screen.
