@@ -33,21 +33,25 @@ doubles. Selection is project-owned via `BackendRegistry` / `BackendConfig` /
 servers and in-process tools share one seam. **Action: document; land the MCP
 adapter so "rozum's own tools" and "external tools" are one SPI.**
 
-### Agent dialect — `trait WireProtocol` (PROPOSED)
+### Agent dialect — wire protocols (MAPPED, no trait — see Decisions)
 
-The agent-facing wire format. Today hand-branched in `src/gateway.rs`: OpenAI Chat
-(`/v1/chat/completions`), Anthropic Messages (`/v1/messages`), OpenAI Responses
-(`/v1/responses`, Codex — `:1380`), per-protocol serializers, `tool_choice`
-normalization (`:1101`–`:1141`), and agent-specific tool-set policy
-(`codex_lean_keep` `:2072`). Proposed seam:
+The agent-facing wire format: OpenAI Chat (`/v1/chat/completions`), OpenAI Responses
+(`/v1/responses`, Codex), Anthropic Messages (`/v1/messages`). **Investigated for a
+`WireProtocol` trait; found already factored** — each dialect is a *thin* handler over
+named per-dialect `*_to_internal` parse fns + a `*_sse_stream` serializer, all converging on
+the internal `ChatRequest` / `ChatEvent`. So a trait is **not** warranted (it would force
+uniformity over genuinely different typed extractors + SSE sequences + axum routes — a
+behaviour change or a fat trait, net-negative on matrix-critical code). The legibility win is
+a one-hop **map**, now the `gateway.rs` module doc:
 
-```rust
-trait WireProtocol {            // one per agent dialect: Chat | Messages | Responses
-    fn parse_request(&self, body: &Value) -> ChatRequest;          // → internal
-    fn serialize(&self, ev: &ChatEvent, sink: &mut ResponseSink);  // internal → wire (stream/non-stream)
-    fn tool_policy(&self) -> ToolPolicy;                            // e.g. codex-lean filter
-}
-```
+| Dialect | Parse | Serialize | Handler |
+|---|---|---|---|
+| OpenAI Chat | `oai_messages_to_internal` / `oai_tools_to_internal` | `oai_sse_stream` | `oai_chat_handler` |
+| OpenAI Responses (Codex) | `responses_input_to_internal` / `responses_tools_to_internal` (+ `codex_lean_keep`) | `responses_sse_stream` | `responses_handler` |
+| Anthropic Messages | `anthropic_messages_to_internal` / `anthropic_tools_to_internal` | `anthropic_sse_stream` | `anthropic_handler` |
+
+Cross-cutting (owned by neither dialect): loop-breaker (`chat_or_loopbreak` /
+`detect_stuck_loop`), `parse_response_format`, `tool_choice` normalization.
 
 ### Model tool format — `trait ToolDialect` (PROPOSED)
 
@@ -86,15 +90,17 @@ arms on the `Command` enum (`src/main.rs`). Not a plugin axis — see Decisions.
   "Extension points".)
 - [x] `ChatBackend` and `ToolSource` are documented as the model/tool SPIs with
   their impl inventory and file anchors (no code change). (Stage 1.)
-- [ ] The gateway's agent-dialect branching is extractable behind `WireProtocol`
-  with the three existing dialects (Chat / Messages / Responses) as the first impls;
-  request parse + response serialize + tool policy move out of `gateway.rs` body.
+- [x] The gateway's agent-dialect layer is legible in one hop: the `gateway.rs`
+  module doc maps each of the three dialects to its parse fns / serializer / handler.
+  (Stage 3 — investigated a `WireProtocol` trait; found already factored, mapped
+  instead — see Interface + Decisions.)
 - [x] The per-model tool-format logic resolves through `ToolDialect` —
   `dialect_for(template)` picks `Qwen`/`Harmony`/`Glm`; render + the constraint
   envelope flag flow through it. (Stage 2; parse stays a generic union — see
   Interface.)
-- [ ] Adding a new agent = one `WireProtocol` impl; adding a new model tool format
-  = one `ToolDialect` impl — neither touches the other or the engines.
+- [x] Adding a model tool format = one `ToolDialect` impl + one `dialect_for` arm
+  (engines untouched). Adding an agent dialect = copy the parse/serialize/handler
+  triple the module-doc map names (no trait, by decision).
 - [ ] No behaviour change: the matrix (Qwen3.6-35B 10/10, gpt-oss claude 5/5) and
   serving tests are identical before/after each extraction (pure refactor gate).
 
@@ -147,10 +153,20 @@ by either — call it out explicitly so it doesn't silently re-tangle.
 
 ## Decisions
 
-- **Document models/tools, extract agent/model-format — don't "plugin-ize all."**
-  Two axes are already SPIs; re-abstracting them is churn. The agent-dialect and
-  model-tool-format layers are genuinely tangled and keep attracting fixes — extract
-  those. Rejected: a uniform plugin pass (redundant where SPIs exist).
+- **Document models/tools, extract only what's genuinely tangled — don't "plugin-ize
+  all."** Two axes are already SPIs; re-abstracting them is churn. Of the two suspected
+  tangles, only one was real: the model-tool-format dispatch *was* scattered (extracted
+  Stage 2 → `ToolDialect`); the agent-dialect layer turned out *already factored* (Stage 3
+  → mapped, not extracted). Rejected: a uniform plugin pass (redundant where SPIs exist).
+- **Agent dialect: a map, not a `WireProtocol` trait.** Investigated (Stage 3). The
+  gateway is already at a clean per-route boundary — named per-dialect `*_to_internal`
+  parse fns + `*_sse_stream` serializers + thin handlers, all converging on
+  `ChatRequest`/`ChatEvent`. A unifying trait would force uniformity over genuinely
+  different typed extractors (`OaiChatReq` vs `Value` vs `AnthropicMsg`) and SSE event
+  sequences → either looser validation (behaviour change) or a fat trait that adds
+  indirection without removing complexity, on matrix-critical code. The legibility goal is
+  met by the `gateway.rs` module-doc map. Rejected: a forced trait (net-negative). This is
+  the same principle as "services stay subcommands" — abstraction only where it pays.
 - **Services stay subcommands.** A registry/process model for `gateway`/`web`/
   `meetings` adds indirection with no payoff for a single local binary; match arms in
   `main.rs` are more legible than a plugin host. Rejected: services-as-plugins.
@@ -179,4 +195,22 @@ by either — call it out explicitly so it doesn't silently re-tangle.
   union (`serving::parse_tool_calls`) — robust across dialects, not per-family; the dialect
   owns only render + the envelope flag (what actually varies). Adding a model family's tool
   format = one `ToolDialect` impl + one arm in `dialect_for`.
-- **Stage 3 (`WireProtocol`) — pending.**
+- **Stage 3 (`WireProtocol`) — DONE as a map, trait rejected.** Investigated the gateway
+  wire layer for a trait extraction; found it already factored at a clean per-route boundary
+  (named per-dialect parse + serialize fns + thin handlers converging on
+  `ChatRequest`/`ChatEvent`). The stale module doc claimed "two dialects" (there are three —
+  Responses/Codex was added since). Replaced it with an accurate **wire-protocol map**
+  (`gateway.rs` module doc): each of OpenAI Chat / OpenAI Responses / Anthropic Messages →
+  its parse fns, serializer, handler, tool policy, plus the cross-cutting orchestration.
+  Docs-only, behaviour-preserving (no code change). A `WireProtocol` trait was **rejected**
+  as forced abstraction over different typed extractors + SSE sequences — net-negative on
+  matrix-critical code (see Decisions). Adding an agent dialect = copy the triple the map
+  names.
+- **Stage 4 (MCP `ToolSource` adapter) — optional follow-up.** Not blocking; the tool SPI
+  already exists, this only unifies external MCP + in-process tools behind it.
+- **Net outcome.** The legibility goal is met: every concern (model / tool / agent dialect /
+  model tool-format / service) has a named seam findable in one hop — `SPEC.md` "Extension
+  points" → `ChatBackend` (`backend.rs`), `ToolSource` (`agent.rs`), `ToolDialect`
+  (`mlx_native_backend.rs`), the `gateway.rs` wire-protocol map, the `Command` enum. One new
+  trait (`ToolDialect`) where the dispatch was genuinely scattered; maps + docs everywhere it
+  was already factored. No churn, no forced abstraction, no behaviour change.

@@ -1,10 +1,35 @@
-/// HTTP gateway exposing rozum's ChatBackend over two dialects:
-///
-/// - OpenAI Chat Completions  (`POST /v1/chat/completions`, `GET /v1/models`)
-/// - Anthropic Messages       (`POST /v1/messages`)
-///
-/// Bind address is always `127.0.0.1`. Auth is optional bearer token via
-/// `ROZUM_GATEWAY_TOKEN`. Cancel propagates from client disconnect.
+//! HTTP gateway exposing rozum's `ChatBackend` over three agent **wire protocols**.
+//!
+//! # Wire protocols (the agent-dialect seam)
+//!
+//! This is the `WireProtocol` axis of `docs/specs/architecture-spi.md`. Each dialect is one
+//! *thin* handler that (1) parses its request shape into the internal `ChatRequest`, (2) calls
+//! the backend via `chat_or_loopbreak`, (3) serializes the internal `ChatEvent` stream back
+//! into its SSE shape. The three handlers are deliberately parallel — to add an agent dialect,
+//! copy the triple. All three converge on `ChatRequest` / `ChatEvent`, so the backend, the
+//! model, and every robustness policy (loop-breaker, read-repair) are written once,
+//! dialect-agnostic.
+//!
+//! | Dialect | Route | Request | Parse (wire→internal) | Serialize (internal→wire) | Handler |
+//! |---|---|---|---|---|---|
+//! | OpenAI Chat | `POST /v1/chat/completions` | `OaiChatReq` | `oai_messages_to_internal` / `oai_tools_to_internal` | `oai_sse_stream` / `oai_chunk` | `oai_chat_handler` |
+//! | OpenAI Responses (Codex) | `POST /v1/responses` | `Value` | `responses_input_to_internal` / `responses_tools_to_internal` (+ `codex_lean_keep` tool policy) | `responses_sse_stream` / `responses_collect` | `responses_handler` |
+//! | Anthropic Messages | `POST /v1/messages` | `AnthropicMsg` | `anthropic_messages_to_internal` / `anthropic_tools_to_internal` | `anthropic_sse_stream` | `anthropic_handler` |
+//!
+//! Cross-cutting, owned by neither dialect: `chat_or_loopbreak` / `detect_stuck_loop`
+//! (loop-breaker), `synthetic_stop_stream`, `parse_response_format` (structured output),
+//! `parse_*_tool_choice` (tool-choice normalization). `GET /v1/models`, `/health`, `/ready`,
+//! `/stats`, `/control/*` are non-chat endpoints.
+//!
+//! **Why a map and not a `WireProtocol` trait:** the layer is already at a clean per-route
+//! boundary — named per-dialect parse + serialize fns + thin handlers. A unifying trait would
+//! fight genuinely different typed extractors (`OaiChatReq` vs `Value` vs `AnthropicMsg`) and
+//! different SSE event sequences, forcing either looser request validation (a behaviour change)
+//! or a fat trait that adds indirection without removing complexity — net-negative on this
+//! matrix-critical path. The legibility win is this accurate map; see the spec's Decisions.
+//!
+//! Bind address is always `127.0.0.1`. Auth is optional bearer token via
+//! `ROZUM_GATEWAY_TOKEN`. Cancel propagates from client disconnect.
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
