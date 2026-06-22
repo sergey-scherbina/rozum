@@ -240,3 +240,42 @@ owns format) was tried. Live A/B on one binary:
 prompting, not *fixably* so without regressing the stable behavior. The robust fix is model-side
 (a tool-calling-tuned GLM variant). For agentic driving, rozum already has Qwen3.6-35B (15/15);
 GLM-4 is the parity-exact chat/code model with hardened tool-calling when it does invoke.
+
+## UPDATE 2026-06-22 — reliable agentic use FOUND (the breaker is *narration framing*, not size/competence)
+
+The earlier "decision gap, movable not fixably so" conclusion was **too pessimistic about the
+software lever.** A load-bisection probe (model-only, GLM-4-32B + a `Write` tool + a
+create-from-scratch task) isolated the trigger precisely:
+
+| system prompt | result |
+|---|---|
+| minimal "call a tool to act" (no framing) | **NAMED the tool** (2/2 temp0) |
+| + "explain in prose, show code in markdown ``` for the user" framing | **ARTIFACT** — shows ```rust, names nothing (2/2 temp0, 4/4 temp1) |
+| framing + a counter-instruction ("you MUST call Write; markdown does nothing") | **does NOT reliably reverse** — 1/3 inline, 0/4 as last msg, 1/4 strong-last-msg |
+| no framing (with or without counter) | **NAMED, 3/3 temp1** — reliable |
+
+**So GLM-4-0414's "decision gap" is caused by the agents' narration framing** ("explain your
+reasoning in prose and show code/file contents in markdown code blocks"), which claude/codex bake
+into their system prompts. It is NOT model incompetence (clean prompt → reliable) and NOT raw
+context size (that is gpt-oss's breaker, `constrained-gptoss-delivery.md`). A **counter-instruction
+does not reliably win** against the framing (confirms why the old prompt-override/nudge regressed).
+**The reliable lever is REMOVING the framing, not fighting it.**
+
+### How to use GLM reliably with agents
+1. **Drive it with a lean, tool-first system prompt that has NO narration framing** — "to act,
+   call a tool; do not print file contents." Then GLM names `Write`/`shell`/edit tools reliably and
+   the shipped logit-constraint (`99c6081`) makes the args schema-valid. (Use rozum's embedded
+   agent / a custom prompt; the matrix's claude/codex CLIs bake in the framing.)
+2. **Gateway sanitizer (proposed, the shippable mechanism for claude/codex):** when serving a
+   `glm4` model with tools present, **strip the narration-framing directives** from incoming system
+   prompts (sentences instructing prose-explanation / markdown code-block display). Then claude/codex
+   become reliable with GLM. Needs careful matching + live A/B on the matrix (slot-gated) before
+   default-on; risk = false-positive stripping → keep it GLM-only + conservative. Counter-injection
+   is NOT a viable alternative (proven above).
+3. GLM-4-32B is already reliable for **edit-existing** (fix/debug) + chat/code; the framing mainly
+   breaks **create-from-scratch**. Qwen3.6-35B (15/15) stays the no-caveats agentic driver.
+
+### Done-when (for the sanitizer ship)
+A `glm4` gateway under claude/codex names tools (not artifacts) on create-from-scratch in a live
+A/B with the sanitizer on; matrix GLM cell lifts; no regression on edit-existing. (Probe harness:
+direct `/v1/chat/completions` with a tool + create task, count tool_calls vs ```-fenced content.)
