@@ -106,37 +106,39 @@ admission *numbers* + per-process cap + validation = `nimble-raven`.
   `max(6 GiB, weights/4)` ≈ ~4 GiB cache (`set_cache_limit`) + ~2 GiB prefill (was a 3 GiB catch-all <
   the cache limit alone — the audit's flagged bug). 4 unit tests updated. Interim 14 GB floor dropped.
   **Open (smmr-D):** truly-≥-peak hinges on the active-vs-cache split — measure live.
-- [ ] **smmr-C-fast-swap** (`sunny-civet`, claiming) — the "very fast sequentially" half: when
-  `oversubscribed`, swap WITHOUT transient both-resident (unload→GPU-settle→load), minimize dead time
-  (mmap page-cache-warm weights, prefetch next during drain). Reuses `gateway switch` + `plan_residency`.
-  Likely the HIGHER-value lever (27–35B agentic models can't co-reside on 36 GiB by need alone). Design +
-  the slot-free page-cache-prefetch primitive first; swap-orchestration validation needs the slot (after D).
-- [ ] **smmr-D-probe-harness** (`sunny-civet`) — build the measurement tool nimble-raven's D needs: a
-  one-command probe reporting `get_active_memory()` vs `get_cache_memory()` vs RSS at peak under the live
-  cap. Settles the open safety question from the source audit (`9726971`): is a model's uncapped balloon
-  CACHE (set_cache_limit bounds it → safe) or ACTIVE (unbounded → unsafe)? Raw-alloc mode is slot-free
-  (also empirically confirms set_memory_limit is soft); model mode is for nimble-raven to run with the slot.
+- [~] **smmr-C-fast-swap** (`sunny-civet`) — **FOUNDATION DONE `c3fa8ef`.** `rozum-core::prefetch::
+  warm_dir_page_cache` (page-cache prewarm, reclaimable + not GPU-residency → budget-free, cancellable,
+  3 tests) + spec § C fleshed out (swap invariant: never both GPU-resident; drain→free→settle→load;
+  prewarm-during-drain). Argues C > A/B in value (27–35B can't co-reside on 36 GiB by need → common case
+  is swap). REMAINING (slot-gated, touches `gateway.rs`, after D): wire prewarm + ordered swap into
+  `gateway switch`; measure swap latency with/without prewarm.
+- [x] **smmr-D-probe-harness** (`sunny-civet`) — **DONE `4c2329b`.** `crates/rozum-mlx/examples/mlx_mem_probe.rs`.
+  Raw-alloc mode (slot-free) EMPIRICALLY confirmed `set_memory_limit` is SOFT (limit 512 MB, allocated
+  1024 MB live → active 1024 MB) and `set_cache_limit` bounds the cache (256 MB retained after drop).
+  Model mode (header-documented) is nimble-raven's D measurement: split a real model's peak into
+  active vs cache under the slot. Spec § Findings updated with the measurement.
 - [ ] **smmr-D-validate** (`nimble-raven`, capstone — needs the model slot, NEXT) — safety harness: prove
   host peak RAM never exceeds `total × FRAC` across admitted co-residency + swap, AND no self-OOM at the
   cap (bump B's reserve if so). Never load an un-admitted combo to "see if it reboots." Supersedes paused
   `validate-gate-live`. NOTE (`sunny-civet`, source audit `9726971`): `set_memory_limit` is SOFT (no hard
   per-process cap exists); the real bound is `set_cache_limit` (cache only) + admission — D must verify
   the active term too, not assume the cap hard-bounds reality. Spec § Findings.
-- [ ] **residency-ledger-hardening** (`sunny-civet`) — robustness on the v1/v2 ledger I shipped, slot-free,
-  no API change (so it doesn't disturb smmr-A/B which read it): reap orphaned `residents/<pid>` files left
-  by SIGKILL'd gateways (disk leak, currently only reaped lazily on next admission); guard PID-reuse; and
-  (separately, riskier — coordinate) release-on-idle-unload so a transiently-unloaded model frees its
-  reservation. Unit-tested.
+- [x] **residency-ledger-hardening** (`sunny-civet`) — **DONE `f5cbec2`.** Ledger was already flock-robust;
+  added `reap_orphan_residents()` (reusable reaper for a doctor/maintenance path) + edge tests (PID-reuse
+  overwrite, dead-vs-live reap, non-pid/held files untouched). Additive to `share.rs`, no API change → did
+  not disturb smmr-A/B. Core 93/93. Deferred (riskier, touches `gateway.rs`): release-on-idle-unload.
 
 > #### ▶ sunny-civet active tracks (2026-06-22, operator: "запиши всё в спринт и сделай автономно")
 > Discipline: slot-free + non-colliding by default (room MCP down → coordinate via `rozum meetings post`;
 > nimble-raven owns rozum-mlx cap / rozum-models footprint / the model slot — I add NEW files, don't edit
 > their code, don't grab the slot). Order:
-> 1. **smmr-D-probe-harness** (most helpful: unblocks the safety decision I surfaced; raw-alloc mode runs slot-free).
-> 2. **residency-ledger-hardening** (my own code; orphan reaper + robustness, no API change).
-> 3. **smmr-C-fast-swap** (design + page-cache-prefetch primitive; biggest forward value; validation deferred to slot).
-> 4. (lower / recorded) **decode-compile-stage0** (perf P3, slot-free probe), **plugin-x86-engine** (P2 North-Star, big).
-> Slot-needing validation (probe model-mode, swap e2e) is handed to whoever holds the slot — I never take it blind.
+> 1. ✅ **smmr-D-probe-harness** DONE (`4c2329b`) — set_memory_limit empirically SOFT; harness for D.
+> 2. ✅ **residency-ledger-hardening** DONE (`f5cbec2`).
+> 3. [~] **smmr-C-fast-swap** foundation DONE (`c3fa8ef`); orchestration slot-gated (after D).
+> 4. ⏳ NEXT (larger, fresh tracks): **decode-compile-stage0** (perf P3, slot-free probe), **plugin-x86-engine**
+>    (P2 North-Star). Not rushed at the tail of this session — kept queued so they get a proper start.
+> Outcome: my source-audit finding (`9726971`) was accepted — nimble-raven reconciled A/B (`e7c9762`,
+> "admission is the lever"). Slot-needing validation (probe model-mode, swap e2e) handed to the slot owner.
 
 - **INTERIM SAFETY:** the interim floor is dropped; smmr-A caps each process. CAVEAT (`sunny-civet`,
   `9726971`): the cap is via `set_memory_limit` which is SOFT — see spec § Findings; co-residency safety
