@@ -187,10 +187,13 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
 > - [ ] **gguf-mistralrs-residency-cap** (#2, SAFETY) — smmr-A caps MLX only; gguf/mistralrs co-residency rides
 >   the *estimate* with no enforced cap = an unguarded reboot vector. Add their memory-limit knob (candle /
 >   mistralrs paged) wired to the reservation, or keep them single-flight. Engine-crate work; design first.
-> - [ ] **agentic-smoke-deterministic** (#3, RELIABILITY, claiming) — the matrix is slow/flaky and has rebooted
->   the Mac twice. Now that nondeterminism is fixed (seed), a tiny seed-pinned single-model GATEWAY smoke
->   (fixed prompt → byte-identical across 2 runs + a known tool-call shape parses) catches gateway regressions
->   in seconds, pre-commit, no reboot risk. Harness is slot-free; one validation run is slot-coordinated.
+> - [~] **agentic-smoke-deterministic** (#3, RELIABILITY) — **HARNESS DONE** (`scripts/smoke/gateway-smoke.sh`),
+>   end-to-end validation PENDING A FREE SLOT. Tiny seed-pinned 0.6B gateway smoke asserting only DETERMINISTIC
+>   signals (liveness/schema, greedy byte-identical across 2 runs, no cross-request state bleed) — a red is
+>   always a real gateway regression, never model variance. Dropped the tool-call check (0.6B is below the
+>   agentic cliff → would flake; covered by unit tests). `bash -n` clean. Validation deferred because the slot
+>   was held by plucky-finch's gpt-oss matrix (24 GB reserved) — run it when the slot frees (host clear +
+>   `bash scripts/smoke/gateway-smoke.sh`), then mark [x]. Discipline: did NOT pile a 2nd model on the busy host.
 > - [ ] **prompt-lookup-decoding** (#4, PERF, design-first) — compile=NO-GO, MoE spec-decode=net-negative,
 >   batching only helps concurrent load. Agentic/code re-emits big VERBATIM chunks of the file it just read →
 >   prompt-lookup (n-gram propose from the prompt, verify in one forward, NO draft model) wins exactly there.
