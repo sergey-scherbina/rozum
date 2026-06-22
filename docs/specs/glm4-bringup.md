@@ -71,6 +71,18 @@ The blueprint — `glm4.rs` mirrors `qwen3.rs` and changes exactly these:
       (`scripts/mlx_ref.py` — logits/`||x||` per-layer, then identical token stream).
 - [x] Chat template renders a clean single-turn reply and a tool call.
 - [x] Runs through `rozum launch` on 36 GB at 4-bit; GLM-4-32B-0414 likewise.
+- [x] **Logit-constrained tool calls** — the constrained decoder recognises GLM's
+  `name\n{json}` envelope (no `<tool_call>` opener) and, once the model names a known
+  tool at a line start, forces the arguments to valid schema-conforming JSON. A pure
+  prose answer (no tool-name line) is left unconstrained (the final-answer path must
+  survive). Default-on with the other constraints (`ROZUM_MLX_CONSTRAIN`).
+  (`find_glm_tool_call_anchors_on_known_name`; proven firing on the live matrix —
+  every call in claude×fix/debug is schema-valid.)
+- [x] The parser extracts a `name\n{json}` call even when prose precedes it
+  (the constraint forces clean args but does not remove a lead-in line), and the
+  call is suppressed from the streamed text (`tool_markup_at`) so it doesn't leak as
+  both text and `tool_use` (the re-emit loop). (`glm4_embedded_after_prose`,
+  `tool_markup_suppression_points`.)
 
 ## Out of scope
 
@@ -128,5 +140,79 @@ the chat template (minijinja rejects the kwarg; Rust tojson is already unicode-a
 `<|channel|>`). E2e on GLM-4-9B: single call → `{"city":"Paris"}` parsed (`finish_reason=tool_calls`);
 multi-turn → reads the tool result correctly ("rainy, 14°C"). serving 11/11.
 
-STILL TODO: agentic-matrix run for GLM-4-32B (vs Qwen3.6/gpt-oss) — the tool loop works; this
-measures how strong a tool-loop DRIVER the 32B is.
+**AGENTIC MATRIX + ROOT-CAUSE (2026-06-22).** GLM-4-32B on the agentic matrix scored
+claude 2/5, codex 1/5, opencode 1/5. Rigorous isolation (the `isolate` skill) **refuted**
+the seductive "weak agentic model" read: with clean prompts GLM emits perfectly structured
+`name\n{json}` calls on both the OpenAI and Anthropic endpoints. The failures are *format*,
+not capability — the agents' large system prompts ("explain in prose, use markdown before
+each call") push GLM into markdown narration (` ```bash\nRead\n{json}\n``` ` or a bare
+`prose\nRead\n{json}`), which the post-hoc parser catches only sometimes.
+
+A prompt-override (a strong "name + JSON only, no prose/markdown" system instruction) was
+tried and **discarded**: it half-worked (GLM dropped the fence) but kept a lead-in prose
+line, regressing the previously-passing claude×fix cell, and never reached codex's responses
+path. Lesson recorded in the `isolate` skill: an isolated single-turn probe that doesn't
+share the full multi-turn / multi-endpoint path proves nothing.
+
+### Constrained tool-call decoding (the robust fix)
+
+The durable fix is logit-level, not prompt-level: force the structured shape at decode time
+so no system prompt can talk the model out of it.
+
+- **Envelope.** GLM has no `<tool_call>` opener and no Hermes `{"name":…,"arguments":…}`
+  wrapper — the call is `{tool_name}\n{bare_args_json}` ended by `<|observation|>` (eos).
+  So the existing `ToolConstraint` triggers (`find` `<tool_call>` / loose `{"name"`) never
+  fire for GLM; it enters the masked B=1 loop (tools present) but never activates → free
+  narration. Add a GLM mode.
+- **Trigger = a known tool name on its own line.** `find_glm_tool_call(text, names)` scans
+  for the *last* line that is exactly one of the offered tool names immediately followed by
+  `\n`; activation point = the byte just past that newline. This fires for the clean case
+  (name is line 1) *and* the narrated case (name after a prose/fence preamble), and never
+  fires for a pure prose final answer — so the answer path is untouched. (Codex's failure
+  mode — GLM emits a raw ` ```zsh\ncat …\n``` ` shell line instead of naming the `shell`
+  tool — is **out of scope**: GLM never names the tool, so there is nothing to anchor on.)
+- **Body = the chosen tool's arg schema.** Once anchored, constrain `text[activation..]` as
+  `Constraint::Json(arg_schema[i])` — the bare arguments object, reusing the existing JSON
+  prefix-matcher and `is_complete`. No envelope wrapper.
+- **Parser + suppression.** With the constraint, GLM may still emit a lead-in prose line
+  before the (now clean) call. Extend `parse_glm_tool_call` with an *embedded* form (a bare
+  identifier line followed by a balanced JSON object, anywhere) and `tool_markup_at` to
+  suppress the GLM call from streamed text.
+
+**Decision — line-anchored trigger, not a turn-start force.** Forcing a tool call from token
+0 would break GLM's final-answer turn (terminated by `<|endoftext|>`), which the agentic loop
+needs to end cleanly. Anchoring on a tool-name line constrains *only* the call branch and
+leaves prose answers free. Rejected: turn-start force (kills final answers); markdown-token
+banning (whack-a-mole, the discarded override's failure mode).
+
+### Results — constraint SHIPS; the matrix ceiling is a different gap
+
+Built, full lib suite green (449/0), and run on the **live** matrix (the regressed cell, not
+an isolated probe — the override's lesson): `mlx-community:GLM-4-32B-0414-4bit`, claude + codex
+× build/fix/test/debug, `KEEP=1`, constraint default-on.
+
+- **The constraint fires and is correct.** Every call it produced is schema-valid: claude×fix
+  → `Read\n{…}`, `Edit\n{…}`, `Bash\n{cargo run …}` (3 clean calls, **pass=1**); claude×debug
+  → `Read`/`Read`/`Bash{cargo test}` all clean. **No regression** — fix still passes (the
+  discarded prompt-override had broken exactly this cell). Args are now schema-forced, not
+  incidentally valid.
+- **The matrix score does not lift, for a *different* reason the constraint cannot reach.**
+  Reading the kept transcripts: build/test fail because GLM emits the **artifact directly** —
+  the Cargo.toml / main.rs *content* inside ```toml / ```rust fences — instead of ever naming
+  the `Write` tool (claude×test: turns=1, **tools=0**; claude×build: 1 Bash call, files never
+  written). Codex fails the same way: raw ` ```bash\ncat …\n``` ` instead of naming `shell`.
+  No tool-name line ⇒ no anchor ⇒ nothing for any output-format constraint to force.
+- **Therefore: GLM-4-32B-0414 has a tool-use _decision_ gap, not a _format_ gap.** When it
+  decides to call a named tool it now emits a clean, schema-valid call (the constraint
+  guarantees it). For file-creation and shell it tends to *show* the artifact rather than
+  *name* the tool — a property of how GLM-4-0414 was tuned, addressable only model-side (a
+  tool-calling-tuned GLM variant) or by an intent-forcing scheme that would break the
+  final-answer turn. debug is a third axis: clean calls but the driver loops without
+  converging (a reasoning limit, RUN_TIMEOUT).
+
+**Verdict.** Ship the constraint default-on: it is correct, non-regressing, and the durable
+hardening for GLM tool calls (schema-valid args, no drift, suppression) — unlike the
+prompt-override it does not regress. The agentic-driver ceiling on the 5-task matrix
+(claude 2/5) is now set by the decision gap + reasoning convergence, which are not
+output-format problems. GLM-4 stays in `EXTRA` as a parity-exact chat/code model with
+hardened (when invoked) tool-calling.
