@@ -4914,6 +4914,7 @@ dependencies = [
  "rmcp",
  "rozum-agent",
  "rozum-core",
+ "rozum-gateway",
  "rozum-gguf",
  "rozum-meeting",
  "rozum-mistralrs",
@@ -4974,6 +4975,25 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "rozum-gateway"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum",
+ "futures",
+ "reqwest 0.12.28",
+ "rozum-core",
+ "rozum-models",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid 1.23.2",
 ]
 
 [[package]]

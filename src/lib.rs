@@ -1,8 +1,5 @@
-pub mod anthropic_http;
 pub mod config;
 pub mod doctor;
-pub mod gateway;
-pub mod openai_http;
 pub mod proxy;
 pub mod sandbox;
 pub mod service;
@@ -19,6 +16,11 @@ pub(crate) use rozum_core::backend;
 // paths so `crate::cascade::…` (and `rozum::agent::…` / `rozum::router::…` from the
 // binary + integration tests) keep resolving unchanged.
 pub use rozum_agent::{agent, builtin_tools, cascade, mcp_tool_source, memory_store, rag_lite, router};
+
+// The outward serving layer now lives in the `rozum-gateway` crate (Phase 3).
+// Re-export under their original paths so `rozum::gateway::…` / `rozum::openai_http::…`
+// / `rozum::anthropic_http::…` keep resolving from the binary.
+pub use rozum_gateway::{anthropic_http, gateway, openai_http};
 
 // The meeting room + its client frontends now live in the `rozum-meeting` crate
 // (Phase 1 of the workspace split). Re-export its modules under their original

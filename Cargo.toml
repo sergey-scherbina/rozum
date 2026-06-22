@@ -52,6 +52,10 @@ rozum-models = { path = "crates/rozum-models" }
 # The intelligence layer (agent/cascade/router/rag/tools). Phase 3; depends on no
 # engine crate. Re-exported under its original module paths in src/lib.rs.
 rozum-agent = { path = "crates/rozum-agent" }
+# The outward serving layer (OpenAI/Anthropic gateway + HTTP provider shims).
+# Phase 3; reads engine telemetry via rozum-core::obs, no engine dep. Re-exported
+# under its original module paths in src/lib.rs.
+rozum-gateway = { path = "crates/rozum-gateway" }
 # Engine crates (Phase 2). Each is always linked, but its heavy backend dep is
 # gated behind the crate's own feature, which the binary's feature forwards to.
 rozum-mistralrs = { path = "crates/rozum-mistralrs" }
