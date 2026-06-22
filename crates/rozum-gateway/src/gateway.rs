@@ -3911,11 +3911,25 @@ pub async fn serve_on(
                     }
                 }
 
+                // 2a. Pressure-evict WARM secondaries first (residency-unify U2): under
+                // genuine host pressure, free the supplementary co-resident models before
+                // touching the primary — graceful degradation that keeps the primary serving.
+                // Probe sysctl only when there IS warm to shed (no per-tick cost otherwise).
+                if shed_active && !sb.warm.lock().await.is_empty() {
+                    if crate::shed::read_host_pressure() != crate::shed::PressureLevel::Normal {
+                        crate::obs::log_event(serde_json::json!({
+                            "event": "gateway_pressure_evict_warm",
+                        }));
+                        sb.sweep_idle_warm(0).await; // evict ALL currently-idle warm now
+                    }
+                }
+
                 // 2b. Memory-pressure shedding: under genuine host pressure, unload an
                 // idle resident model EARLIER than the idle timeout so the host degrades
                 // gracefully instead of rebooting (runtime-drift half of BUG-003). The
-                // `sysctl` pressure probe is skipped unless the model is already idle +
-                // not generating, so there is no hot-path cost.
+                // primary is the LAST resort (warm shed first, 2a). The `sysctl` pressure
+                // probe is skipped unless the model is already idle + not generating, so
+                // there is no hot-path cost.
                 if shed_active
                     && sb.is_loaded()
                     && sb.generating.load(Ordering::SeqCst) == 0
