@@ -99,3 +99,32 @@ MLX-native only (`crates/rozum-mlx`): the constraint + GptOss eligibility. The g
 (codex paths) already exists and is the sibling's area — no overlap expected (I touch the MLX
 constraint driver, not gateway.rs codex code). Behaviour-preserving for every other model
 (GptOss is purely additive to the eligible set). `ROZUM_MLX_CONSTRAIN=0` still disables globally.
+
+## Load bisection — EXACTLY where gpt-oss breaks (plucky-finch 2026-06-22, isolated direct-to-model)
+
+A controlled bisection of codex's load against gpt-oss (vary ONE factor; create-a-Rust-project
+task; N=3; "valid" = a parseable file-writing tool call):
+
+| condition | sys prompt | tools | valid |
+|---|---:|---:|:---:|
+| clean `write_file` (control) | 23 B | 1 | **3/3** |
+| codex V4A `apply_patch` format | 307 B | 1 | 1/3 |
+| `write_file` + 18 tools | 23 B | 18 | 2/3 |
+| **`write_file` + 30 KB prompt** | **30 KB** | 1 | **0/3** |
+| V4A + 18 tools + 30 KB | 30 KB | 18 | 2/3 |
+
+**The dominant breaker is CONTEXT SIZE, not the V4A format.** Even with the easy `write_file`
+tool, a 30 KB system prompt → **0/3** (the model emits empty content, no tool call at all). The
+V4A format (1/3) and tool count (2/3) are secondary. Captured codex's real request: **instructions
+= 20.9 KB, input = 13 KB, 18 tools ≈ 34 KB context.** Under it gpt-oss thrashes (`mkdir` →
+`cargo run` before files exist → `apply_patch *** Update File:` on a non-existent file → `touch`
+→ malformed `apply_patch {file,contents}`) — never a clean create sequence → files don't land.
+
+**The fix, proven by the bisection: trim the INSTRUCTIONS, not just the tools.** `codex_lean_keep`
+today filters only TOOLS (keeps exec/shell/apply_patch stems, drops the meta-tools) — it never
+touches codex's 20.9 KB `instructions`, which the bisection shows is the dominant load. Replacing
+those instructions with a short focused coding prompt (≈ the 23 B control) for load-sensitive local
+models should recover gpt-oss toward 3/3 (the control proves a minimal-context gpt-oss nails it).
+Must be **model-aware / gated** (Qwen3.6-35B works WITH the full 21 KB at 4/5, so don't regress it)
+and must preserve enough protocol for the kept tools — gateway/codex territory, coordinate with the
+sibling. This supersedes the constrained-decode approach above as the right lever.
