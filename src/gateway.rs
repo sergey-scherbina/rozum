@@ -1635,6 +1635,50 @@ fn rewrite_apply_patch_command(cmd: &str) -> Option<String> {
     apply_patch_block_to_fuzz(&block)
 }
 
+/// Render a verbatim file-create as a shell command: write `content` to `path` ONLY if the path is
+/// still absent (so a re-sent create is an idempotent no-op and never clobbers a real edit), with
+/// `mkdir -p` of the parent for nested targets. Single-quoted heredoc → the body lands byte-for-byte
+/// (no `$`/backtick/`\` expansion). Shared by the explicit `*** Add/Create File:` path and the
+/// `*** Update File:`-against-an-absent-file fallback.
+fn synth_create_command(path: &str, content: &str) -> String {
+    format!(
+        "[ -e '{path}' ] || {{ mkdir -p \"$(dirname '{path}')\" 2>/dev/null; \
+         cat > '{path}' <<'ROZUM_CREATE_EOF'\n{content}\nROZUM_CREATE_EOF\n}}\n"
+    )
+}
+
+/// Extract explicit file-creations from a V4A patch block: each `*** Add File: <path>` /
+/// `*** Create File: <path>` directive plus the lines that follow it (the new file's content, bare
+/// or `+`-prefixed) up to the next `*** ` directive. This is the canonical — and, for gpt-oss, the
+/// dominant — create-from-scratch shape (`*** Create File:` is gpt-oss's variant of the standard
+/// `*** Add File:`). codex serves `apply_patch` only as a shell command for local models, so these
+/// reach the bare `apply_patch` (absent in the jail) and the file never lands; we turn each into a
+/// real write instead. Returns (path, content) pairs; empty when the block has no create directive.
+fn parse_create_directives(block: &str) -> Vec<(String, String)> {
+    let mut files: Vec<(String, Vec<String>)> = Vec::new();
+    let mut active = false;
+    for ln in block.lines() {
+        if let Some(p) = ln
+            .strip_prefix("*** Add File:")
+            .or_else(|| ln.strip_prefix("*** Create File:"))
+        {
+            files.push((p.trim().to_string(), Vec::new()));
+            active = true;
+        } else if ln.starts_with("*** ") {
+            active = false; // Begin/End Patch or an Update File hunk ends the create body
+        } else if active {
+            if let Some((_, body)) = files.last_mut() {
+                body.push(ln.strip_prefix('+').unwrap_or(ln).to_string());
+            }
+        }
+    }
+    files
+        .into_iter()
+        .filter(|(p, b)| !p.is_empty() && !b.is_empty())
+        .map(|(p, b)| (p, b.join("\n")))
+        .collect()
+}
+
 /// Convert an unescaped V4A patch block (`*** Begin Patch` … `*** End Patch`, or a bare
 /// `*** Update File:` + hunk) into a `patch -p0 --fuzz=3 -N --forward` heredoc — a small
 /// ±3-context match surface that standard `patch` applies reliably and *idempotently* (`-N`:
@@ -1642,6 +1686,12 @@ fn rewrite_apply_patch_command(cmd: &str) -> Option<String> {
 /// `format!` below). Shared by the apply_patch *shell-command* bridge (Method B) and the
 /// apply_patch-*function* re-route (gpt-oss). None when there are no change lines to anchor on.
 fn apply_patch_block_to_fuzz(block: &str) -> Option<String> {
+    // Explicit `*** Add File:` / `*** Create File:` directives → real file writes (the dominant
+    // gpt-oss create-from-scratch shape). One directive can carry several files; write each.
+    let creates = parse_create_directives(block);
+    if !creates.is_empty() {
+        return Some(creates.iter().map(|(p, c)| synth_create_command(p, c)).collect());
+    }
     let mut path: Option<String> = None;
     let mut body: Vec<String> = Vec::new();
     for ln in block.lines() {
@@ -1695,6 +1745,22 @@ fn apply_patch_block_to_fuzz(block: &str) -> Option<String> {
     // (ignoring leading whitespace and the line number), and re-applies it preserving the file's own
     // indentation. Fires only after `patch` already failed → zero effect on patches that apply.
     let fuzz = patch_fuzz();
+    // gpt-oss creating a file FROM SCRATCH emits the new content as an `*** Update File:` /
+    // unified-diff hunk whose "old" side is bogus (a lone `---`, empty context) because the target
+    // does not exist yet. `patch` then can't update the absent file → `.rej`, nothing lands (the
+    // codex×gpt-oss `build`/`test` create reds, matrix Finding 5). Detect it — additions present
+    // but the removed/context side carries no real content — and CREATE the file from the `+` lines
+    // instead, only if it's still absent (so a re-sent create is an idempotent no-op and never
+    // clobbers a real edit). A genuine edit (real removed/context lines) is byte-identical to
+    // before: it falls through to the patch path unchanged, so the `fix` task is unaffected.
+    let has_real_old = body
+        .iter()
+        .filter(|l| l.starts_with(' ') || l.starts_with('-'))
+        .any(|l| l[1..].trim().chars().any(|c| c.is_alphanumeric()));
+    let added: Vec<&str> = body.iter().filter(|l| l.starts_with('+')).map(|l| &l[1..]).collect();
+    if !added.is_empty() && !has_real_old {
+        return Some(synth_create_command(&path, &added.join("\n")));
+    }
     Some(format!(
         "patch -p0 --fuzz={fuzz} -N --forward <<'ROZUM_PATCH_EOF'\n{diff}ROZUM_PATCH_EOF\n\
          f={path}; if [ -f \"$f.rej\" ]; then python3 - \"$f\" <<'ROZUM_PY_EOF'\n{py}\nROZUM_PY_EOF\n\
@@ -4606,6 +4672,62 @@ mod tests {
         let pathonly = json!({ "cmd": "apply_patch", "path": "Cargo.toml" }).to_string();
         let po = serde_json::from_str::<Value>(&normalize_codex_tool_args(&pathonly)).unwrap();
         assert_eq!(po["cmd"].as_str().unwrap(), "apply_patch", "should be left untouched: {po}");
+    }
+
+    #[test]
+    fn create_patch_against_absent_file_writes_instead_of_patching() {
+        // Create-from-scratch via a PATCH (the dominant coherent gpt-oss shape under top_p clip):
+        // the model labels the new file an `*** Update File:` with a bogus `---` "old" side. patch
+        // can't update an absent file → .rej, nothing lands. We must create it from the `+` lines.
+        let block = "*** Begin Patch\n*** Update File: Cargo.toml\n@@\n---\n+[package]\n\
+                     +name = \"reverse-cli\"\n+version = \"0.1.0\"\n+edition = \"2021\"\n*** End Patch";
+        let cmd = apply_patch_block_to_fuzz(block).expect("reconstructable");
+        // It writes (create-when-absent), it does NOT try to `patch` an absent file.
+        assert!(cmd.contains("cat > 'Cargo.toml'"), "no create-write: {cmd}");
+        assert!(cmd.contains("[ -e 'Cargo.toml' ] ||"), "create not guarded by absence: {cmd}");
+        assert!(cmd.contains("mkdir -p"), "parent dir not ensured: {cmd}");
+        assert!(!cmd.contains("patch -p0"), "should not patch an absent file: {cmd}");
+        // The `+` content lands verbatim, the bogus `---` old-side is dropped.
+        assert!(cmd.contains("name = \"reverse-cli\""), "content missing: {cmd}");
+        assert!(!cmd.contains("\n---\n"), "bogus context leaked into the file: {cmd}");
+
+        // A GENUINE edit (real removed line) is byte-identical to before — patch path, no wrapper.
+        let edit = "*** Begin Patch\n*** Update File: src/main.rs\n@@\n \
+                    fn reverse(s: &str) -> String {\n-    s.to_string()\n+    s.chars().rev().collect()\n }\n*** End Patch";
+        let ec = apply_patch_block_to_fuzz(edit).expect("reconstructable");
+        assert!(ec.starts_with("patch -p0 --fuzz="), "edit must stay on the patch path: {ec}");
+        assert!(!ec.contains("ROZUM_CREATE_EOF"), "edit wrongly treated as create: {ec}");
+    }
+
+    #[test]
+    fn create_file_directive_writes_new_file() {
+        // The DOMINANT gpt-oss create-from-scratch shape: an explicit `*** Create File:` (its variant
+        // of the standard `*** Add File:`) with bare content lines. codex can't run bare apply_patch
+        // in the jail → file never lands. Turn it into a real write.
+        for kw in ["Create File", "Add File"] {
+            let block = format!(
+                "*** Begin Patch\n*** {kw}: Cargo.toml\n[package]\nname = \"reverse-cli\"\n\
+                 version = \"0.1.0\"\nedition = \"2021\"\n*** End Patch"
+            );
+            let cmd = apply_patch_block_to_fuzz(&block).unwrap_or_else(|| panic!("{kw} not handled"));
+            assert!(cmd.contains("cat > 'Cargo.toml'"), "{kw}: no write: {cmd}");
+            assert!(cmd.contains("[ -e 'Cargo.toml' ] ||"), "{kw}: not absence-guarded: {cmd}");
+            assert!(cmd.contains("name = \"reverse-cli\""), "{kw}: content missing: {cmd}");
+            assert!(!cmd.contains("patch -p0"), "{kw}: must not patch: {cmd}");
+            assert!(!cmd.contains("*** "), "{kw}: directive leaked into file: {cmd}");
+        }
+
+        // `+`-prefixed (strict V4A) content has the prefix stripped.
+        let v4a = "*** Begin Patch\n*** Add File: src/main.rs\n+fn main() {}\n*** End Patch";
+        let c = apply_patch_block_to_fuzz(v4a).expect("v4a add");
+        assert!(c.contains("cat > 'src/main.rs'") && c.contains("fn main() {}"), "v4a add: {c}");
+        assert!(!c.contains("+fn main"), "v4a `+` prefix not stripped: {c}");
+
+        // Multi-file in one patch → a create command per file.
+        let multi = "*** Begin Patch\n*** Create File: Cargo.toml\n[package]\nname=\"x\"\n\
+                     *** Create File: src/main.rs\nfn main() {}\n*** End Patch";
+        let m = apply_patch_block_to_fuzz(multi).expect("multi");
+        assert!(m.contains("cat > 'Cargo.toml'") && m.contains("cat > 'src/main.rs'"), "multi: {m}");
     }
 
     #[test]

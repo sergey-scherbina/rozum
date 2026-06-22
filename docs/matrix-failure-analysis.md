@@ -349,3 +349,23 @@ untouched (we never invent empty files). Spec: `docs/specs/codex-create-write-sy
 unit test `synthesizes_file_write_from_path_and_content` + shell-level e2e of the synthesized command
 (file lands, body verbatim, `mkdir` creates `src/`). Full model-in-the-loop matrix cell deferred —
 RAM held by a concurrent GLM-4-32B matrix run; to be re-run when memory frees.
+
+**Update (2026-06-22) — ran the live cell; verdict is now nuanced.** gpt-oss runs at a forced
+temp≈1.0 (greedy collapses its CoT → 0/6) so create-from-scratch is **highly stochastic**: the clean
+`{path, content}` shape that the first capture saw 10/11 is only ONE of many. Captured two more
+*coherent* PATCH-based create shapes and handled them in `apply_patch_block_to_fuzz` (commit
+`a5e051b`): (a) `*** Add File:` / `*** Create File:` directives (the dominant shape; `*** Create
+File:` is gpt-oss's variant of standard V4A), (b) `*** Update File:` against an absent file (bogus
+`---` old-side → `patch` can't update a missing file). Both write via a shared `synth_create_command`
+(`[ -e path ] || { mkdir -p …; cat > path <<'EOF' … }`, idempotent, edits stay on `patch --fuzz`).
+Paired with **`ROZUM_GPTOSS_TOP_P=0.95`** (clips the junk-token tail that otherwise makes the model
+emit unparseable garbage), this **flipped `codex × gpt-oss × test` 0→1** — the first create-from-
+scratch green; files land, compile, and run. **But `build` stayed 0/3**, and inspection shows the
+residual is now genuinely **model-side, not a gateway gap**: (#1) files landed + Cargo built but the
+model wrote *invalid Rust* (`let args: std::env::args().collect::<String>();`); (#2) the model
+*refused* ("you're asking me to create a project that requires a sub-directory `src/`" — misread "no
+subdirectory"); (#3) a fragile placeholder-then-patch dance whose patch `.rej`'d. No gateway rewrite
+fixes broken Rust or a refusal. **Conclusion:** delivery WAS broken (the gateway fixes are real and
+necessary — files now land) AND create-from-scratch ALSO has a real gpt-oss-20b capability ceiling.
+Both prior framings were half-right; the honest split is *delivery = gateway-fixed, correctness =
+model-bound*. A reliable 5/5 for gpt-oss create-from-scratch is not achievable at the gateway alone.

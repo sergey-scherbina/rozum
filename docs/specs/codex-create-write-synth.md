@@ -70,5 +70,46 @@ string codex runs verbatim), so it rides the same exec transport that is already
 
 ## Knobs
 
-None new. Reuses `ROZUM_CODEX_LEAN`, the apply_patch bridges, and `ROZUM_CODEX_TOOL_CAPTURE` (for
-re-capturing shapes). The synthesis is unconditional on the codex Responses path (same as the fold).
+None new for the synthesis. Reuses `ROZUM_CODEX_LEAN`, the apply_patch bridges, and
+`ROZUM_CODEX_TOOL_CAPTURE` (for re-capturing shapes). The synthesis is unconditional on the codex
+Responses path (same as the fold). **`ROZUM_GPTOSS_TOP_P=0.95`** is the recommended companion (see
+below) — it does not change this code, it makes the model emit *coherent* create shapes.
+
+## Update (2026-06-22) — patch-based create shapes + the temperature lever
+
+The explicit `{path, content}` shape above is only ONE of the ways gpt-oss creates a file, and (per
+real e2e capture) not the most common. gpt-oss runs at a forced temperature ≈1.0 (greedy collapses
+its CoT into repetition loops — verified 0/6), so it is highly **stochastic**: across runs it emits
+the create intent as several different shapes. Two more are now handled in `apply_patch_block_to_fuzz`
+(the single chokepoint feeding the string-command, sibling-patch, and function-call paths):
+
+- **`*** Add File:` / `*** Create File:` directive** — the canonical V4A create (`*** Create File:`
+  is gpt-oss's variant). Content lines follow the directive (bare or `+`-prefixed). `parse_create_
+  directives` extracts every such file (multi-file patches included) and writes each.
+- **`*** Update File:` on an ABSENT file** — the model labels a new file an "Update" with a bogus
+  `---` old-side; `patch` can't update a missing file → `.rej`, nothing lands. Detected by "additions
+  present, no real removed/context content" and written from the `+` lines.
+
+Both render through a shared `synth_create_command`:
+`[ -e PATH ] || { mkdir -p "$(dirname PATH)"; cat > PATH <<'ROZUM_CREATE_EOF' … }` — verbatim,
+**only when absent** (idempotent re-send, never clobbers a real edit). A genuine edit (real
+removed/context lines) is byte-identical on the `patch --fuzz` path → the `fix` task is unaffected.
+
+### The temperature lever (`ROZUM_GPTOSS_TOP_P`)
+
+At the default `top_p=1.0`, a temp-1.0 draw periodically picks a junk token, so gpt-oss emits
+*unparseable* shapes (broken JSON, `rg`-searching for the apply_patch tool, `echo | apply_patch`,
+giving up after ~195K tokens) that no gateway rewrite can salvage — a genuine model-capability floor.
+`ROZUM_GPTOSS_TOP_P=0.95` clips that low-probability tail while still sampling (no CoT loop), so the
+model emits the coherent create shapes the gateway can land. The two together flipped
+`codex × gpt-oss × test` 0→1 (first create-from-scratch green). Consider defaulting the gpt-oss
+top_p clip on; `build` remains run-to-run flaky (model variance, not a gateway gap).
+
+### Validation (this round)
+
+- 3 unit tests: `create_file_directive_writes_new_file` (Create/Add, `+`-strip, multi-file),
+  `create_patch_against_absent_file_writes_instead_of_patching`, and the original `{path,content}`.
+- Shell e2e of the emitted create command in `zsh -lc`: lands, nests (`src/`), idempotent, and
+  `cargo run -- hello → olleh`.
+- Live matrix (`codex × gpt-oss`, `top_p=0.95`): `test` PASS (files landed, compiled, ran); `build`
+  flaky across runs (model sometimes never emits a usable shape).
