@@ -441,6 +441,38 @@ fn scan_residents(skip_pid: u32) -> (u64, Vec<(u32, String)>) {
     (sum, holders)
 }
 
+/// Reap reservation files whose owning gateway has died — their `flock` is free, so a
+/// `try_lock` succeeds. [`acquire_residency`] already reaps lazily on each admission;
+/// this standalone pass lets a long-lived host (or a `doctor`/maintenance path) clean
+/// up orphaned `residents/<pid>` files left by a `SIGKILL`'d gateway *between* loads,
+/// instead of waiting for the next admission. Conservative: a file it cannot lock-probe
+/// is left in place (treated as possibly-live). Returns the number reaped.
+pub fn reap_orphan_residents() -> usize {
+    let mut reaped = 0usize;
+    let Ok(entries) = std::fs::read_dir(residents_dir()) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Only numeric pid files are reservations.
+        let is_pid = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|s| s.parse::<u32>().ok())
+            .is_some();
+        if !is_pid {
+            continue;
+        }
+        if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+            // try_lock success ⇒ nobody holds the flock ⇒ the owner died ⇒ reap.
+            if matches!(f.try_lock(), Ok(())) && std::fs::remove_file(&path).is_ok() {
+                reaped += 1;
+            }
+        }
+    }
+    reaped
+}
+
 /// Acquire a host-wide RAM reservation for a model about to load (BUG-003 v2).
 ///
 /// `footprint_bytes` is the caller's estimate of this model's resident size (weights
@@ -791,5 +823,51 @@ mod tests {
         assert!(bypass.is_none(), "escape hatch returns no guard (gate skipped)");
         // SAFETY: single-threaded test holding the shared env lock.
         unsafe { std::env::remove_var("ROZUM_ALLOW_CONCURRENT_RESIDENT") };
+    }
+
+    #[test]
+    fn reap_orphan_residents_removes_dead_keeps_live() {
+        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let dir = residency_env(20 * GB);
+
+        // A dead reservation: written but NOT flock-held (drop the File), like a
+        // SIGKILL'd gateway. And a live one held by a kept File.
+        {
+            let dead = fake_resident(910_001, "dead/x", 5 * GB);
+            drop(dead); // releases the flock; file remains on disk
+        }
+        let _live = fake_resident(910_002, "live/y", 5 * GB);
+        // A non-pid file must be ignored by the reaper.
+        let _ = std::fs::write(residents_dir().join("notapid"), b"ignore me");
+
+        let reaped = reap_orphan_residents();
+        assert_eq!(reaped, 1, "exactly the one dead reservation is reaped");
+        assert!(!resident_path(910_001).exists(), "dead reservation removed");
+        assert!(resident_path(910_002).exists(), "live reservation kept");
+        assert!(residents_dir().join("notapid").exists(), "non-pid file untouched");
+
+        residency_env_clear(&dir);
+    }
+
+    #[test]
+    fn residency_reserve_overwrites_stale_own_pid_file() {
+        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let dir = residency_env(20 * GB);
+
+        // A stale reservation file at OUR pid from a prior (dead) process that reused
+        // this pid — unlocked, with junk content. Acquire must overwrite it cleanly.
+        let mypid = std::process::id();
+        let _ = std::fs::create_dir_all(residents_dir());
+        std::fs::write(resident_path(mypid), b"{\"model\":\"stale\",\"footprint_bytes\":999999999999}")
+            .unwrap();
+
+        let g = acquire_residency("fresh/model", 8 * GB)
+            .expect("acquire ok over a stale own-pid file")
+            .expect("a guard");
+        let body = std::fs::read_to_string(resident_path(mypid)).unwrap();
+        assert!(body.contains("fresh/model"), "stale own-pid reservation was overwritten");
+        drop(g);
+
+        residency_env_clear(&dir);
     }
 }
