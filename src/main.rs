@@ -1004,6 +1004,13 @@ async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: roz
             std::process::exit(1);
         }
     };
+    // footprint-before-download fix: the model is now loaded (hence resolved/cached), so
+    // re-estimate its REAL footprint and correct this process's reservation. An uncached
+    // model reserved the unknown-size sentinel up front (the estimate ran before the
+    // download) which over-blocks other gateways for its whole life; republishing the real
+    // size unblocks them as soon as we're loaded. No-op for an already-cached model (same
+    // value) or when the gate was bypassed. Best-effort.
+    rozum::share::update_my_reservation(&model_spec, estimate_model_footprint_bytes(&model_spec, n_ctx));
     eprintln!("rozum gateway  http://127.0.0.1:{port}");
     eprintln!("  model:              {model_spec}");
     eprintln!();
@@ -1704,6 +1711,9 @@ async fn run_launch_dedicated(
             std::process::exit(1);
         }
     };
+    // footprint-before-download fix (see run_gateway): correct the reservation to the real
+    // footprint now that the model is loaded/cached (an uncached model reserved the sentinel).
+    rozum::share::update_my_reservation(&model_spec, estimate_model_footprint_bytes(&model_spec, n_ctx));
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
