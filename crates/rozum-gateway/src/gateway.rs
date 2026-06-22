@@ -2819,6 +2819,12 @@ async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
     let mut snap = state.observer.snapshot();
     if let Value::Object(ref mut m) = snap {
         m.insert("model".into(), json!(state.sb.model_id()));
+        // Resident model set (residency-unify): the primary plus any co-resident warm
+        // secondaries — what this gateway serves right now. Informational; `/stats` (unlike
+        // `/v1/models`) is not parsed by agent clients, so it's safe to surface here.
+        let mut residents = vec![state.sb.model_id()];
+        residents.extend(state.sb.warm.lock().await.keys().cloned());
+        m.insert("resident_models".into(), json!(residents));
         m.insert("generation".into(), json!(state.sb.generation()));
         let ctx = state
             .sb
