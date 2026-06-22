@@ -10,7 +10,7 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 - **Status:** fixed + ON MASTER (cherry-picked `5be81a5`+`c742e2b` onto master `8eaf21a`) + INSTALLED to `~/.cargo/bin/rozum` (release, mlx-native+gguf). Verified: the installed binary self-reaps an idle proxy at the 60s tick (rc=0). Origin `91a03c7` on `feature/meeting-web-pwa-ssc`;
   cargo check/--tests clean + a functional idle test: a silent proxy now exits at the first 60 s
   tick, rc=0). The earlier `c0117bd` spawned the watchdog AFTER `serve()`, which blocks on the MCP
-  handshake — so `91a03c7` moves it before. Not yet on master.
+  handshake — so `91a03c7`/`c742e2b` moves it before.
 - **Reporter:** operator ("почему у меня запущено три процесса розума?" → found ~6 stale
   `mcp-proxy`/`mpc-proxy`, some 4 days old).
 - **Severity:** P3 — resource leak / clutter, not a correctness break.
