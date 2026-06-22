@@ -134,5 +134,14 @@ models** (`model_is_load_sensitive` = gpt-oss). The capable tier (Qwen3.6-35B, f
 *schemas* (kept by `codex_lean_keep`) carry the arg shapes, so a short prompt suffices. Gated by
 `ROZUM_CODEX_LEAN` (shares the tool-lean switch); override with `ROZUM_CODEX_LEAN_PROMPT` (`0`=never
 trim, `1`=always). Pure decision `lean_prompt_on` is unit-tested (race-free); gateway suite 75/75.
-**Live validation (codex×gpt-oss×build 0/3 → ?) pending a gpt-oss slot — fix-forward on the result.**
 This supersedes the constrained-decode approach above as the right lever.
+
+### Live validation (2026-06-22) — WORKS for build
+
+codex×gpt-oss with the trim: **`build` 0/3 (baseline) → 2/2 real passes** (107.8s, 72.9s) — and
+**faster** (72-107s vs the baseline's 113-280s: a shorter context = fewer tokens). Confirms the
+bisection: trimming the 20.9 KB instructions recovers create-from-scratch. The run truncated after
+3 cells — the gateway was shed mid-run (clean `time -l` exit at 18.5 GB peak; the new memory-pressure
+watchdog, NOT this change, which only *reduces* load), so `test` got only 1 real attempt (0/1,
+inconclusive — `test` also adds a `cargo test`, a harder shape; needs a clean re-run). Net: validated
+for the primary 0/3 cell and shipped on master.
