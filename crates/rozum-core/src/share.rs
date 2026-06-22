@@ -221,9 +221,11 @@ pub fn clear_poison(fp: u64) {
 
 /// Serializes the tests that mutate `XDG_STATE_HOME` (poison-set IO), so the
 /// `unsafe` env writes never race a concurrent read on another harness thread.
-/// Shared across modules (proxy tests lock it too).
-#[cfg(test)]
-pub(crate) static POISON_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Shared across modules and **across crates** (the binary's proxy tests lock it
+/// too) — so it is `pub` and not `#[cfg(test)]`: a `#[cfg(test)]` item is invisible
+/// when `rozum-core` is built as a dependency, and the cross-crate test callers need
+/// it. The cost is one tiny always-present static.
+pub static POISON_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn spawn_lock_path() -> PathBuf {
     gateway_dir().join("spawn.lock")
