@@ -103,13 +103,27 @@ Draft spec-decode lost on MoE because the draft forward ≈ the target forward. 
 
 ## Phased plan (each independently shippable + benchmarked)
 
-- **P0 — proposer + offline A/B (mostly slot-free).** ✅ **Proposer DONE** —
-  `PromptLookupDraft` (`crates/rozum-mlx/src/specdecode_plookup.rs`, `impl Draft`) + 6 unit
-  tests on token slices, hardware-free (most-recent-match, periodic continuation, window
-  bound, k/max_k clamp, no-match, short-ctx). REMAINING: a small probe on a DENSE model
-  (e.g. Qwen3-4B) over a **real edit transcript** (read-file → re-emit-with-change) to
-  measure accept-rate + tokens/forward vs plain decode (slot-gated). **Gate:** acceptance
-  high + net speedup on the copy-heavy region, byte-exact.
+- **P0 — proposer + offline A/B.** ✅ **DONE — gate PASSED.** `PromptLookupDraft`
+  (`specdecode_plookup.rs`, `impl Draft`) + 6 unit tests, hardware-free. **Accept-rate
+  measured** with a REAL model tokenizer (Qwen3-0.6B) over a REAL agentic edit (rewrite a
+  2215-token source file with renames; 97% of output tokens recur in the prompt context) —
+  `prompt_lookup_acceptrate_on_real_edit` (a slot-free, model-forward-free measurement: the
+  accept-rate is purely how well the lookup predicts the real output sequence):
+
+  | n-gram | k | tokens/forward | accept-rate | speedup |
+  |---|---|---|---|---|
+  | 1 | 5 | 2.10 | 52% | **2.1×** |
+  | 2 | 5 | 3.40 | 71% | **3.4×** |
+  | 3 | 8 | 4.67 | 79% | **4.7×** |
+  | 2 | 10 | 5.00 | 80% | **5.0×** |
+
+  **Gate PASSED** (acceptance high on the copy-heavy edit; default `n=2,k=5` → 3.4×). And a
+  synthesis with the decode-compile Stage-0 finding makes the wall-clock win nearly the full
+  tokens/forward: rozum's decode is **FFI/op-launch-bound, not compute-bound** (that is why
+  `mx.compile` was net-negative), so a verify forward at `L=k+1` costs ≈ the same as `L=1`
+  (the dominant cost is the per-call FFI/dispatch, not the `k` extra tokens of compute) —
+  the very property that killed compile makes prompt-lookup pay. (MoE forward cost scales
+  more with `L`; the real MoE multiplier is P2's measurement.)
 - **P1 — wire into the decode loop** behind `ROZUM_PLOOKUP`, dense only. Byte-exact vs
   plain greedy on fixed prompts.
 - **P2 — MoE decision.** Measure the near-tie divergence rate on Qwen3.6-35B; pick the

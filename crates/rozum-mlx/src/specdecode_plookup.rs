@@ -116,4 +116,81 @@ mod tests {
         let mut d = PromptLookupDraft::new(3, 5, 0);
         assert!(d.propose(&ctx, 5).is_empty());
     }
+
+    /// Measure prompt-lookup's accept-rate / speedup on a REAL agentic edit, with a REAL
+    /// model tokenizer — the P0 economic gate (spec `docs/specs/prompt-lookup-decoding.md`).
+    /// The scenario: a model is given a source file and asked to rewrite it with a few
+    /// changes; it re-emits the whole file (≈verbatim) with the edits. No model forward —
+    /// the accept-rate is purely how well the n-gram lookup predicts the real output
+    /// sequence (in real decode the forward just confirms the greedy token).
+    ///   cargo test -p rozum-mlx --no-default-features --release prompt_lookup_acceptrate -- --ignored --nocapture
+    #[test]
+    #[ignore = "accept-rate measurement; needs a tokenizer.json (ROZUM_PLOOKUP_TOKENIZER or cached Qwen3-0.6B-4bit)"]
+    fn prompt_lookup_acceptrate_on_real_edit() {
+        use tokenizers::Tokenizer;
+        let tok_path = std::env::var("ROZUM_PLOOKUP_TOKENIZER").ok().or_else(|| {
+            let base = format!(
+                "{}/.cache/huggingface/hub/models--mlx-community--Qwen3-0.6B-4bit/snapshots",
+                std::env::var("HOME").unwrap_or_default()
+            );
+            std::fs::read_dir(&base).ok()?.flatten().find_map(|e| {
+                let p = e.path().join("tokenizer.json");
+                p.exists().then(|| p.to_string_lossy().into_owned())
+            })
+        });
+        let Some(tok_path) = tok_path else {
+            eprintln!("SKIP: no tokenizer.json (set ROZUM_PLOOKUP_TOKENIZER=/path/to/tokenizer.json)");
+            return;
+        };
+        let tok = Tokenizer::from_file(&tok_path).expect("load tokenizer");
+
+        // A real agentic edit: rename a few identifiers + note the revision across a real file.
+        let orig = include_str!("specdecode.rs");
+        let edited = orig
+            .replace("draft", "drafter")
+            .replace("target", "tgt")
+            .replace("Speculative", "Speculative (revised)");
+        let prompt = format!(
+            "Here is `specdecode.rs`:\n```rust\n{orig}\n```\nRewrite it: rename `draft`→`drafter`, \
+             `target`→`tgt`, and note the revision.\n```rust\n"
+        );
+        let prompt_ids: Vec<u32> = tok.encode(prompt, false).expect("encode prompt").get_ids().to_vec();
+        let output_ids: Vec<u32> = tok.encode(edited, false).expect("encode output").get_ids().to_vec();
+        eprintln!(
+            "prompt={} tok, output={} tok ({}% of output's tokens also appear in the prompt context)",
+            prompt_ids.len(),
+            output_ids.len(),
+            {
+                let set: std::collections::HashSet<u32> = prompt_ids.iter().copied().collect();
+                100 * output_ids.iter().filter(|t| set.contains(t)).count() / output_ids.len().max(1)
+            }
+        );
+
+        for (ngram, k) in [(1usize, 5usize), (2, 5), (3, 8), (2, 10)] {
+            let mut d = PromptLookupDraft::new(ngram, k, 8192);
+            let mut ctx = prompt_ids.clone();
+            let (mut pos, mut forwards, mut accepted) = (0usize, 0usize, 0usize);
+            while pos < output_ids.len() {
+                let prop = d.propose(&ctx, k);
+                let mut acc = 0usize;
+                while acc < prop.len() && pos + acc < output_ids.len() && prop[acc] == output_ids[pos + acc] {
+                    acc += 1;
+                }
+                // One forward emits the accepted prefix + 1 bonus (the model's own greedy token).
+                let emit = (acc + 1).min(output_ids.len() - pos);
+                ctx.extend_from_slice(&output_ids[pos..pos + emit]);
+                accepted += emit - 1; // the +1 bonus is the model's token, not a lookup save
+                pos += emit;
+                forwards += 1;
+            }
+            let toks = output_ids.len();
+            eprintln!(
+                "PLOOKUP n={ngram} k={k:>2}: forwards={forwards:>4} / {toks} tok  →  \
+                 tokens/forward={:.2}  accept-rate={:.1}%  speedup={:.2}×",
+                toks as f64 / forwards as f64,
+                100.0 * accepted as f64 / toks as f64,
+                toks as f64 / forwards as f64,
+            );
+        }
+    }
 }

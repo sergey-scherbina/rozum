@@ -5060,6 +5060,7 @@ dependencies = [
  "rozum-models",
  "serde",
  "serde_json",
+ "tokenizers 0.22.2",
  "tokio",
  "tokio-stream",
  "tokio-util",

@@ -206,14 +206,15 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
 >   would flake; unit-tested instead). Slot-coordinated (host clear, freed after). Gotcha found + fixed: a
 >   partially-downloaded model (killed before the tokenizer) fails with a misleading no-backend hint — improved
 >   the smoke to surface the REAL cause (`gw_cause`). NOTE for CI: the model must be FULLY cached (`--offline`).
-> - [~] **prompt-lookup-decoding** (#4, PERF) — **SPEC + P0 proposer DONE.** Spec
->   `docs/specs/prompt-lookup-decoding.md`; `PromptLookupDraft` (`crates/rozum-mlx/src/specdecode_plookup.rs`,
->   `impl Draft` — n-gram lookup over ctx, NO model/GPU/memory, reuses the existing verify loop) + 6 unit
->   tests, feature-free. Key insight: it's a drop-in `Draft` so the whole `specdecode` verify/decode machinery
->   is reused; the ~zero draft cost FLIPS the MoE spec-decode net-negative. Caveat documented: MoE
->   seq-length non-invariance ([[project-spec-decode-moe-numerics]]) = byte-exact on DENSE only. REMAINING
->   (slot-gated, coordinate w/ engine owner): wire into the decode loop behind `ROZUM_PLOOKUP=1` + model A/B
->   on a real edit transcript + MoE policy + matrix gate (spec P1–P3).
+> - [~] **prompt-lookup-decoding** (#4, PERF) — **SPEC + P0 DONE, GATE PASSED.** `PromptLookupDraft`
+>   (`specdecode_plookup.rs`, drop-in `impl Draft` — reuses the whole `specdecode` verify loop; ~zero draft
+>   cost FLIPS the MoE spec-decode net-negative) + 6 unit tests. **P0 accept-rate MEASURED** (real Qwen3-0.6B
+>   tokenizer, real 2215-tok code edit, `prompt_lookup_acceptrate_on_real_edit`, slot-free/forward-free):
+>   **2.1×–5.0×** (default n=2,k=5 → **3.4×**, accept 71%). Synthesis: decode is FFI-bound (why compile was
+>   NO-GO) ⇒ verify forward L=k+1 ≈ L=1 cost ⇒ tokens/forward ≈ real wall-clock speedup. Caveat: byte-exact on
+>   DENSE only ([[project-spec-decode-moe-numerics]]). REMAINING (slot + MLX-decode = engine owner, coordinate):
+>   **P1** wire into the decode loop behind `ROZUM_PLOOKUP=1` (live A/B t/s on a dense model), **P2** MoE
+>   near-tie divergence policy, **P3** matrix gate. Spec `docs/specs/prompt-lookup-decoding.md`.
 > - [~] **cross-turn-prefix-kv-reuse** (#5, PERF) — **CORRECTION (`sunny-civet`, verified in code): the
 >   single-agent win is ALREADY SHIPPED — don't rebuild it.** `mlx_native_backend.rs:~1111-1130` persists the
 >   previous request's KV cache and, on the next turn, truncates to the shared prefix and prefills only the

@@ -31,3 +31,9 @@ tracing = "0.1"
 mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "12fac5c0cb077d987aeaec23db2a509e7eb9f21b", optional = true }
 mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "12fac5c0cb077d987aeaec23db2a509e7eb9f21b", optional = true }
 mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "12fac5c0cb077d987aeaec23db2a509e7eb9f21b", optional = true }
+
+[dev-dependencies]
+# For the prompt-lookup accept-rate measurement (`specdecode_plookup` ignored test):
+# loads a real model tokenizer to measure token-level acceptance on a real code edit.
+# Dev-only + pure Rust, so it does NOT pull the MLX C++ and the default build is untouched.
+tokenizers = "0.22"
