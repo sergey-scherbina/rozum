@@ -125,13 +125,27 @@ admission *numbers* + per-process cap + validation = `nimble-raven`.
   resident = active(weights+KV, bounded by n_ctx) + cache(bounded by set_cache_limit) → co-residency SAFE
   by construction.** Caveat: big-model full-prefill peak not directly measured (structural bound + chunked
   prefill cover it). Spec § D Progress.
-- [ ] **footprint-overconservative** (`nimble-raven`, found via smmr-D) — `runtime_footprint_bytes` reserves
-  ~14 GB for a 4B that really uses ~2.3 GB (full-`n_ctx` KV ~4.8 GB + 6 GB reserve), so two small models
-  DON'T co-reside (28 > budget 23.4) though they easily fit — defeats the operator's "multiple models at
-  once" goal. **Fix:** tune the reserve down (real cache was 255 MB, not 6 GB) and/or use a realistic KV
-  fraction instead of full `n_ctx`, keeping the `n_ctx`-bounded worst case as the admission ceiling (raising
-  `RAM_BUDGET_FRAC` is the cruder alt). Trade-off: too low re-opens overcommit if a co-resident model fills
-  its context — validate with smmr-D's harness. Done-when: two ~4B co-reside; a big model still sole; safe.
+- [x] **footprint-overconservative** (`nimble-raven`) — **DONE `f430c1d`.** Two data-justified fixes so
+  small models co-reside while keeping a big REAL margin: (1) `activation_reserve` tied to real bounds =
+  `set_cache_limit + 1.5 GiB prefill` (≈5.5 GiB) not arbitrary `max(6 GiB, weights/4)`; (2)
+  `RAM_BUDGET_FRAC` 0.65→0.75. Now two ~4B pass admission (25.2 ≤ 27) and really use ~12–20 GiB (≥16 GiB
+  free). Big models still sole. rozum-models 7/7 + core 96/96 green. Live two-model validation = smmr-D when slot free.
+
+##### ▶▶ PROGRAM: max safety × capability × performance × flexibility (operator 2026-06-22)
+Spec `docs/specs/safe-multi-model-program.md` — obstacle register + the path. Core insight: today's
+safety is estimate-based (open-loop admission); the GUARANTEE needs measured closed-loop control.
+- [~] **govern-core** (`nimble-raven`) — **CORE DONE `2b510cb`.** `rozum-core::govern`: pure
+  `classify(free,total,thresholds)→Pressure{Green/Yellow/Red}` (on FREE RAM — catches over-spend from
+  ANY source admission can't see; unknown total→Red) + `action_for→{Admit,HoldAdmissions,EvictOne}`;
+  env thresholds (`ROZUM_GOV_YELLOW_FRAC` 0.20 / `_RED_FRAC` 0.10). 4 tests. **NEXT (govern-loop):** a
+  gateway task that samples `vm_stat` free + `mlx get_active/get_cache` on an interval, logs the band,
+  and on Red evicts the lowest-utility idle model via the Switchboard — the measured backstop that makes
+  pushing capability/perf safe. Coordinate with `sunny-civet` (eviction = Switchboard/ledger domain).
+- [ ] **govern-os-containment** — set gateway jetsam priority / RLIMIT so a breach is a recoverable
+  process-kill, not a kernel panic. Cheap, large safety upside.
+- [ ] **residency-unify-in-process** — fold co-residency into one in-process Switchboard (N models, exact
+  accounting, instant swap) instead of N flock-coordinated processes; flock ledger stays the cross-process
+  backstop. (Big; design-gated; coordinate.)
 - [ ] **footprint-before-download** (`nimble-raven`, found via smmr-D 2026-06-22) — `estimate_model_footprint_bytes`
   runs BEFORE `ensure_model_dir`, so an **un-cached** model scans empty → unknown-sentinel (`u64::MAX/4`) →
   reserves ~4.4e12 MB for its whole life, **blocking every other model load** (a tiny uncached 4B blocked a
