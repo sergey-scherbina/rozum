@@ -59,12 +59,20 @@ prompt rendering in `src/mlx_native_backend.rs` (`glm_conversation`,
 `src/constrain.rs`. Proposed seam:
 
 ```rust
-trait ToolDialect {             // one per model family: QwenXml | Harmony | GlmNameJson | …
-    fn render_tools(&self, msgs, tools) -> Conversation;  // tool defs + results → the model's prompt form
-    fn parse_calls(&self, text: &str) -> Vec<ToolCall>;   // model output → structured calls
-    fn constraint(&self, tools) -> Option<Box<dyn ConstraintDriver>>; // logit envelope (e.g. GLM anchor)
+trait ToolDialect {             // one per model family: Qwen(default) | Harmony | Glm
+    fn render_message(&self, msg) -> Conversation;  // history msg → the model's prompt form
+    fn uses_glm_envelope(&self) -> bool;            // selects the constraint envelope (GLM anchor)
 }
+// dialect_for(template) -> &'static dyn ToolDialect   (chosen once from template markers)
 ```
+
+**Parse is deliberately NOT on this trait.** `serving::parse_tool_calls` is a generic
+*union* that tries every form (`<tool_call>`, loose JSON, GLM `name\njson`) — robust
+across dialects, so it needs no per-family dispatch. The dialect owns only what genuinely
+varies per family: **render** + the **constraint envelope** selector. (The earlier sketch
+listed `parse_calls`/`constraint(tools)`; the union parser makes per-family parse
+unnecessary, and the constraint envelope reduces to the `uses_glm_envelope` flag the
+existing `ToolConstraint` consumes.)
 
 ### Services — subcommands (UNCHANGED, by decision)
 
@@ -73,16 +81,18 @@ arms on the `Command` enum (`src/main.rs`). Not a plugin axis — see Decisions.
 
 ## Behavior
 
-- [ ] `SPEC.md` (or this spec) names all four axes and which are SPI vs subcommand,
-  so a reader finds the seam for any concern in one hop.
-- [ ] `ChatBackend` and `ToolSource` are documented as the model/tool SPIs with
-  their impl inventory and file anchors (no code change).
+- [x] `SPEC.md` (or this spec) names all four axes and which are SPI vs subcommand,
+  so a reader finds the seam for any concern in one hop. (Stage 1, `SPEC.md`
+  "Extension points".)
+- [x] `ChatBackend` and `ToolSource` are documented as the model/tool SPIs with
+  their impl inventory and file anchors (no code change). (Stage 1.)
 - [ ] The gateway's agent-dialect branching is extractable behind `WireProtocol`
   with the three existing dialects (Chat / Messages / Responses) as the first impls;
   request parse + response serialize + tool policy move out of `gateway.rs` body.
-- [ ] The per-model tool-format logic is extractable behind `ToolDialect` with
-  Qwen-XML, Harmony, and GLM-name-json as the first impls; `serving.rs` parsing +
-  `mlx_native_backend.rs` rendering + `ToolConstraint` branches resolve through it.
+- [x] The per-model tool-format logic resolves through `ToolDialect` —
+  `dialect_for(template)` picks `Qwen`/`Harmony`/`Glm`; render + the constraint
+  envelope flag flow through it. (Stage 2; parse stays a generic union — see
+  Interface.)
 - [ ] Adding a new agent = one `WireProtocol` impl; adding a new model tool format
   = one `ToolDialect` impl — neither touches the other or the engines.
 - [ ] No behaviour change: the matrix (Qwen3.6-35B 10/10, gpt-oss claude 5/5) and
@@ -157,5 +167,16 @@ by either — call it out explicitly so it doesn't silently re-tangle.
 
 ## Results
 
-<!-- Fill after each stage: what moved, line-count deltas, matrix/serving parity. -->
-_Pending — spec gate only; no code yet._
+- **Stage 1 (docs) — DONE** (`SPEC.md` "Extension points", merged `2b0a135`). Names the
+  four axes; makes the existing `ChatBackend` / `ToolSource` SPIs visible in one hop.
+- **Stage 2 (`ToolDialect`) — DONE.** Consolidated the scattered template-marker dispatch
+  (`contains("<|channel|>"/"<|observation|>")` in render + constraint) into one
+  `trait ToolDialect` + `dialect_for(template)` (`Qwen`/`Harmony`/`Glm`) in
+  `mlx_native_backend.rs`. Render routes through `dialect.render_message`; the constraint
+  GLM flag through `dialect.uses_glm_envelope()`. The render fns
+  (`harmony_conversation`/`glm_conversation`) are unchanged impl bodies. Behaviour-preserving:
+  448/0 lib tests, `cargo check` clean. **Honest scope correction:** parse stays a generic
+  union (`serving::parse_tool_calls`) — robust across dialects, not per-family; the dialect
+  owns only render + the envelope flag (what actually varies). Adding a model family's tool
+  format = one `ToolDialect` impl + one arm in `dialect_for`.
+- **Stage 3 (`WireProtocol`) — pending.**
