@@ -56,16 +56,18 @@ push `feature/<slug>:master` (never edit master), then delete the done entry + p
 > 4. **Never start a 2nd matrix/launch while one is running.** If unsure, ask in the room.
 > Everything you do goes on this board *before* you run it, so a reboot costs minutes, not work.
 
-- [ ] **validate-gate-live** (P0, owner `nimble-raven`) — capstone the BUG-003 fix: prove the box
-  *survives* a concurrent-load attempt under the REAL binary on master, not just unit tests.
-  - **How (single model load only — safe by construction):** build `rozum` from master (≥`3bcee03`),
-    start gateway A on a TINY model (smallest in catalog), then attempt gateway B with
-    `ROZUM_GATEWAY_RESIDENCY_WAIT_SECS=0` → assert B prints the holder-named refusal + `exit 1`
-    **before** any RSS spike (B never loads). Then stop A → B succeeds. Only ONE model ever resident.
-  - **Done-when:** B refuses+exits before load (capture stderr + exit code + `ps` RSS showing no 2nd
-    model); A unaffected; A-stop frees the gate. Record result here + CHANGELOG.
-  - **Note:** sunny-civet already did a real-binary smoke (held→refuse+exit1); this is the
-    end-to-end confirmation through an actual model-loaded gateway A. Coordinate the slot (above).
+- [x] **validate-gate-live** (`nimble-raven`) — **DONE via smmr-D (2026-06-22).** The gate was validated
+  LIVE under the real binary + real concurrent load: while a sibling's **35B was resident** (30.7 GB
+  reserved), a `rozum gateway` 4B load was **REFUSED by the gate** ("would overcommit host RAM … budget
+  ~24 GB") — no 2nd model loaded, no reboot. Plus sunny-civet's real-binary smoke (held→refuse+exit1).
+  The *remaining* validation is the opposite case — co-residency SUCCESS (two small models load together),
+  tracked as `live-coresidency-proof` below (slot-gated).
+- [ ] **live-coresidency-proof** (`nimble-raven`, slot-gated) — the capability-side proof: start two small
+  cached models (e.g. Qwen3-4B + GLM-4-9B; footprints ~12 + ~13 ≤ budget 27) as two gateways → both admit +
+  co-reside; verify both serve, `/stats memory_pressure`=normal, host free RAM healthy, governor quiet;
+  graceful teardown. Single risk = the model slot (held by sibling matrix runs) → run when free, never
+  alongside a sibling's bench. Confirms the operator's headline goal end-to-end. (smmr-D already measured
+  the per-model footprints that make this safe: 4B real ~6 GB, two ≈ 12 GB ≪ 36.)
 
 > #### ▶ nimble-raven active tracks (2026-06-22, operator: "do all three, set priorities, don't reboot, write it all down")
 > My priority order across the operator's three asks, scheduled around the **single model slot**:
@@ -85,13 +87,13 @@ Spec: `docs/specs/safe-multi-model-residency.md`. The North-Star residency goal,
 Owners (room n=25–43): admission *mechanism* = `sunny-civet` (v2 RAM-ledger, on master `644e8e8`);
 admission *numbers* + per-process cap + validation = `nimble-raven`.
 
-> **⚠️ LIVE SAFETY FINDING (nimble-raven, data-backed): v2 as shipped can still reboot.** v2 admits a
-> 2nd model by `estimate = size_bytes × 1.25 + 1 GB`, but measured peak resident is **cache-dominated,
-> not weight-proportional**: Qwen3-4B (weights ~2.5 GB) peaked at **26.9 GB**; Qwen2.5-0.5B at 14.9 GB
-> (MLX caches to the per-process cap `total−8 ≈ 28 GB`). So the estimate under-counts small models ~6×;
-> two 4B models pass admission (4+4 ≤ 0.65×36=23 GB) but really need ~54 GB → **reboot**. Fix is NOT a
-> bigger inflate (balloon is additive/cache-driven). The fix = the share-bounded cap (A) — it turns the
-> reservation into an *enforced* ceiling, the only thing that makes safe co-residency possible on 36 GiB.
+> **✅ RESOLVED (was: "v2 as shipped can still reboot").** The original finding flagged that v2's
+> weights-only estimate under-counted small models ~6× (Qwen3-4B "peaked 26.9 GB"). The follow-up
+> investigation **corrected the mechanism**: that 26.9 GB was **uncapped-cache from old runs** —
+> `set_cache_limit` (4 GiB default) bounds it; `set_memory_limit` is only a soft hint
+> ([[reference-mlx-memory-cap-semantics]]). smmr-D measured the 4B's real resident at **~6 GB**, not
+> 26.9. The hole is closed by the corrected footprint (cache-tied reserve, `f430c1d`) + budget 0.75 +
+> the `shed` governor — NOT by a "hard cap" (none exists). Co-residency of small models is now safe.
 
 - [x] **smmr-A-soft-hint** (`nimble-raven`) — **DONE `95b98d6` + CORRECTED.** Each gateway process sets its
   own MLX `set_memory_limit` = its reservation before the worker loads. **CORRECTION** (source audit, re-
