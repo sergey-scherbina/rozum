@@ -226,8 +226,15 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
 > - [ ] **fast-swap-feature** (#6, NORTH-STAR) — finish smmr-C: "every model available, sub-second swap" using
 >   the landed `prefetch::warm_dir_page_cache` + ordered drain→free→settle→load via `gateway switch`. Slot-gated
 >   orchestration; the higher-value lever than co-residency for multi-model agentic use on one box.
-> - [ ] **cpu-uma-offload** (#7, NORTH-STAR, big) — device-aware placement on the Apple box itself: spill
->   layers/KV to CPU RAM when GPU-tight so a refused model loads offloaded instead. North-Star-central; large.
+> - [~] **cpu-uma-offload** (#7, NORTH-STAR) — **SPEC DONE** `docs/specs/cpu-uma-offload.md`. KEY CORRECTION:
+>   on Apple UMA there is NO separate VRAM — "spill to CPU RAM" doesn't free GPU memory (same bytes). The real
+>   lever is RESIDENCY not location: keep weights pageable (page-cache, NOT Metal-wired via `set_wired_limit`)
+>   and stream each layer's weights into a small Metal residency just-in-time → run models bigger than the
+>   Metal cap (feasibility, not speed — decode goes bandwidth-bound, ~2.5 tok/s for a 70B). Ties to BUG-003
+>   (wired memory is the non-evictable part that feeds the jetsam panic). **P0 (de-risk first, verify-before-
+>   build):** probe whether MLX wires weights or leaves them pageable — that decides whether streaming recovers
+>   ANY headroom on UMA (if MLX is already pageable, #7 is a near non-starter and GGUF/x86 is the bigger-models
+>   path instead). P1 per-layer streaming, P2 admission integration, P3 KV. Slot + MLX-forward = engine owner.
 
 - **INTERIM SAFETY:** the interim floor is dropped; smmr-A caps each process. CAVEAT (`sunny-civet`,
   `9726971`): the cap is via `set_memory_limit` which is SOFT — see spec § Findings; co-residency safety
