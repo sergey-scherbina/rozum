@@ -3980,6 +3980,32 @@ pub async fn serve_on(
         });
     }
 
+    // Declarative co-residency (residency-unify U3): warm a named model set at startup so
+    // "run these N models at once" is declarative, not lazy-on-first-request — each declared
+    // model is warmed up front (no per-model cold-start latency). Background, so the primary
+    // serves immediately; each warm-load is admission-gated (won't overcommit — overflow is
+    // refused gracefully) and the governor backstops. Opt-in: `ROZUM_WARM_MODELS=spec1,spec2`.
+    // (They follow the normal adaptive warm lifecycle — idle/pressure-evictable.)
+    if let Ok(list) = std::env::var("ROZUM_WARM_MODELS") {
+        let specs: Vec<String> = list
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !specs.is_empty() {
+            let sb = Arc::clone(&state.sb);
+            tokio::spawn(async move {
+                for spec in specs {
+                    let event = match sb.ensure_warm(&spec).await {
+                        Some(_) => "warm_preloaded",
+                        None => "warm_preload_skipped", // not warmable / didn't fit / no builder
+                    };
+                    crate::obs::log_event(json!({ "event": event, "model": spec }));
+                }
+            });
+        }
+    }
+
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(ready_handler))
