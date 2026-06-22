@@ -163,9 +163,46 @@ pub fn kv_bytes_per_position(cfg: &serde_json::Value) -> Option<u64> {
     Some(2 * full_attn_layers * n_kv * head_dim * KV_DTYPE_BYTES)
 }
 
+/// Conservative activation / compute working-set + small cache reserve added on top of
+/// weights + KV: `max(3 GiB, weights / 5)`. Under-counting either reboots an uncapped
+/// host or self-OOMs a capped model (smmr-A), so this errs high.
+fn activation_reserve_bytes(weight_bytes: u64) -> u64 {
+    const FLOOR: u64 = 3 * (1 << 30);
+    (weight_bytes / 5).max(FLOOR)
+}
+
+/// A model's resident RAM **need** — weights + the KV cache at `n_ctx` + an
+/// activation/cache reserve. NOT its uncapped peak: the MLX cache otherwise grows to
+/// ~`total − 8 GB` regardless of model size (the reboot mechanism), so the *uncapped*
+/// peak of even a 4B model is ~27 GB. This figure is instead the reservation the host
+/// residency ledger (BUG-003 v2) admits against and the per-process MLX cap (smmr-A)
+/// enforces: a model bounded to it runs without self-OOM yet cannot balloon past it.
+///
+/// `weight_bytes` is the catalog on-disk size (≈ resident quantized weights). The KV
+/// term reads the cached `config.json` via [`kv_bytes_per_position`]; an unreadable
+/// config folds KV into the reserve (the caller keeps its own conservative floor).
+/// Conservative throughout (saturating, rounds up). See
+/// `docs/specs/safe-multi-model-residency.md`.
+pub fn runtime_footprint_bytes(spec: &str, n_ctx: u32, weight_bytes: u64) -> u64 {
+    let kv = resolve_model_dir(spec)
+        .and_then(|dir| std::fs::read_to_string(dir.join("config.json")).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|cfg| kv_bytes_per_position(&cfg))
+        .map(|per| per.saturating_mul(n_ctx as u64))
+        .unwrap_or(0);
+    weight_bytes
+        .saturating_add(kv)
+        .saturating_add(activation_reserve_bytes(weight_bytes))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{config_model_type, kv_bytes_per_position, resolve_model_dir, spec_to_hf_repo};
+    use super::{
+        activation_reserve_bytes, config_model_type, kv_bytes_per_position, resolve_model_dir,
+        runtime_footprint_bytes, spec_to_hf_repo,
+    };
+
+    const GB: u64 = 1 << 30;
 
     #[test]
     fn spec_to_hf_repo_forms() {
@@ -214,5 +251,40 @@ mod tests {
         assert_eq!(kv_bytes_per_position(&dense), Some(114_688));
         // Missing fields -> None.
         assert_eq!(kv_bytes_per_position(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn activation_reserve_floor_then_proportional() {
+        // Small weights → the 3 GiB floor dominates.
+        assert_eq!(activation_reserve_bytes(2 * GB), 3 * GB);
+        assert_eq!(activation_reserve_bytes(0), 3 * GB);
+        // Large weights → 20% of weights exceeds the floor.
+        assert_eq!(activation_reserve_bytes(20 * GB), 4 * GB);
+    }
+
+    #[test]
+    fn runtime_footprint_is_weights_plus_reserve_when_config_absent() {
+        // An unknown spec has no config dir → KV folds to 0; footprint = weights +
+        // reserve. Always ≥ weights (never under-counts the weights themselves), and
+        // for a "small" 2 GiB model the 3 GiB activation floor keeps it ≥ 5 GiB — i.e.
+        // a model's NEED, distinct from its (cap-bounded) on-disk size.
+        let w = 2 * GB;
+        let fp = runtime_footprint_bytes("definitely/not-a-real-model-xyzzy", 32_768, w);
+        assert_eq!(fp, w + 3 * GB, "weights + activation floor, KV=0 without config");
+        assert!(fp >= w);
+    }
+
+    #[test]
+    fn runtime_footprint_grows_with_context_when_config_present() {
+        // With a real cached model the KV term scales linearly with n_ctx, so a larger
+        // context yields a strictly larger need. Skip when the model isn't cached here.
+        let spec = "mlx-community:Qwen3-4B-4bit";
+        if resolve_model_dir(spec).is_some() {
+            let w = 2 * GB;
+            let small = runtime_footprint_bytes(spec, 4_096, w);
+            let large = runtime_footprint_bytes(spec, 40_960, w);
+            assert!(large > small, "KV grows with n_ctx: {large} !> {small}");
+            assert!(small >= w + 3 * GB, "still ≥ weights + activation floor");
+        }
     }
 }
