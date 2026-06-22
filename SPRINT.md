@@ -87,6 +87,37 @@ Full writeup [[project-gateway-patch-revert]]; specs `docs/specs/apply-patch-*`,
   validated; full model matrix cell deferred behind a concurrent GLM-4-32B run holding RAM (expected
   3/5 → 5/5). Spec `docs/specs/codex-create-write-synth.md`; Finding 5 in `docs/matrix-failure-analysis.md`.
 
+#### Agentic-matrix model problems (catalog, 2026-06-21) — per-model failures + their cause
+
+Consolidated from the agentic matrix (`scripts/bench/agentic.sh`, sandbox on). Reminder:
+`verify_task` scores by **final file state**, not rc. Gold standard: **Qwen3.6-35B-A3B = 15/15**
+(claude/codex/opencode), the agentic pick; **Qwen3-30B-A3B** close behind. Per-model issues:
+
+- [~] **gpt-oss-20b** — claude **5/5**; codex/opencode the residual.
+  - `fix`/`debug` (edit-existing): RESOLVED — five gateway delivery bugs (revert, churn, `\uXXXX`
+    decode, read-repair-off, whitespace-`.rej` fallback), see the `codex×gpt-oss gateway reliability`
+    entry above. codex×gpt-oss×fix ~1-2/5 → 5/6.
+  - `build`/`test` (create-from-scratch): the dominant residual — gpt-oss can't scaffold via codex's
+    `apply_patch` (`patch` can't create → `Oops.rej`; model flails `cat`/`tee`/`apply_patch`, stacks
+    duplicate `[package]`, never reaches `src/main.rs`). Being addressed by `codex-create-write-synth`
+    (apply_patch `{path,content}` → synthesize a `cat >` write). REASONING model → must sample (temp~1.0),
+    greedy loops its CoT.
+- [ ] **GLM-4-32B-0414** (new MLX-native port, byte-parity) — **WEAK agentic driver: 4/15.** Strong
+  chat/code model (correct code in chat) but it **narrates tool use in markdown prose** instead of
+  emitting structured tool calls — e.g. ` ```zsh\ncat src/main.rs\n``` ` (raw shell as text) or
+  ` ```bash\nRead\n{json}\n``` `, often **repeating the same block verbatim** (no state tracking).
+  - claude **2/5** (greet+fix): GLM happened to emit `Name\n{json}` inside a fence → the new
+    `parse_glm_tool_call` fenced-form parser (serving.rs) catches it → `fix` lands.
+  - codex/opencode **1/5** (greet only): GLM emits ` ```zsh\n<shell cmd>\n``` ` prose — not reducible to
+    their structured calls; loops. NOT a clean format gap — a model characteristic (GLM-4-0414 isn't
+    tool-RLHF'd for the agent loop). Band-aiding each fence shape is whack-a-mole and won't fix the
+    no-state-tracking looping. **Verdict:** GLM-4 ships as a capable *chat/code* model (catalog `EXTRA`),
+    NOT an agentic pick. Possible future lever: constrained tool-call decoding (force structured calls),
+    or a GLM-Air/Z1 variant that's tool-tuned. Spec `docs/specs/glm4-bringup.md`.
+- [x] **Qwen2.5-Coder-7B / Qwen3-4B** — below the **~27B agentic cliff**: can't reliably drive the
+  multi-step tool loop (2/5-ish). Not a bug; kept in `EXTRA` for non-agentic use. Don't surface as
+  default agentic picks.
+
 #### model-sandbox (2026-06-19, operator-driven) — structural jail for agentic model runs
 
 **Goal (operator):** the models rozum hosts run agentic loops that touch the FS + shell; they must
