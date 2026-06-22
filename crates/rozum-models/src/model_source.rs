@@ -163,19 +163,29 @@ pub fn kv_bytes_per_position(cfg: &serde_json::Value) -> Option<u64> {
     Some(2 * full_attn_layers * n_kv * head_dim * KV_DTYPE_BYTES)
 }
 
-/// Activation working-set + cache reserve added on top of weights + KV: `max(6 GiB,
-/// weights / 4)`. Covers (a) the prefill activation spike (bounded by chunked prefill)
-/// and (b) the MLX buffer **cache** — which `set_cache_limit` (rozum default 4 GiB) is
-/// the only real per-model bound on; `set_memory_limit` is merely a *soft* hint, not a
-/// ceiling (source-proven: [[reference-mlx-memory-cap-semantics]]). So the cache that
-/// makes a small model's resident footprint exceed its weights must be *budgeted for*
-/// here, since conservative admission — not any hard cap — is the structural safety
-/// lever. Under-counting lets the ledger admit a combo that physically overcommits (the
-/// BUG-003 reboot), so this errs high. smmr-D calibrates it against measured
-/// `get_active` vs `get_cache` peaks.
+/// Activation + cache reserve added on top of weights + KV, tied to the **real bounds**
+/// (smmr-D-calibrated, 2026-06-22): (a) the MLX buffer **cache**, hard-bounded by
+/// `set_cache_limit` (rozum default 4 GiB, `ROZUM_MLX_CACHE_GB`) — smmr-D saw it grow
+/// under load and pin at exactly the limit; and (b) the prefill activation spike, bounded
+/// by chunked prefill (smmr-D measured ~1.2 GiB at 14k ctx → a 1.5 GiB margin). So the
+/// reserve is `set_cache_limit + 1.5 GiB` (≈ 5.5 GiB default), **not** the old arbitrary
+/// `max(6 GiB, weights/4)` (which over-reserved and never even engaged the weights/4 term
+/// for our ≤19 GiB-weight models — a flat 6 GiB). `set_memory_limit` is only a soft hint,
+/// so conservative admission on this figure is the safety lever
+/// ([[reference-mlx-memory-cap-semantics]]); it must stay ≥ the real cache+prefill peak.
+/// If the cache cap is DISABLED (`ROZUM_MLX_CACHE_GB=0`) the cache is unbounded → no
+/// footprint can bound it → fall back to a large conservative reserve.
 fn activation_reserve_bytes(weight_bytes: u64) -> u64 {
-    const FLOOR: u64 = 6 * (1 << 30); // ~4 GiB cache (set_cache_limit) + ~2 GiB prefill
-    (weight_bytes / 4).max(FLOOR)
+    const GB: u64 = 1 << 30;
+    let cache_gb = std::env::var("ROZUM_MLX_CACHE_GB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(4);
+    if cache_gb == 0 {
+        // Cache cap off ⇒ cache unbounded ⇒ admission must be very cautious.
+        return (weight_bytes / 4).max(8 * GB);
+    }
+    cache_gb.saturating_mul(GB).saturating_add(GB + GB / 2) // cache bound + ~1.5 GiB prefill
 }
 
 /// A model's resident RAM **need** — weights + the KV cache at `n_ctx` + an activation
@@ -262,24 +272,36 @@ mod tests {
     }
 
     #[test]
-    fn activation_reserve_floor_then_proportional() {
-        // Small weights → the 6 GiB floor dominates (~4 GiB cache + ~2 GiB prefill).
-        assert_eq!(activation_reserve_bytes(2 * GB), 6 * GB);
-        assert_eq!(activation_reserve_bytes(0), 6 * GB);
-        // Large weights → 25% of weights exceeds the floor.
-        assert_eq!(activation_reserve_bytes(40 * GB), 10 * GB);
+    fn activation_reserve_is_cache_tied_and_weight_independent() {
+        // Reserve = set_cache_limit + 1.5 GiB prefill, INDEPENDENT of weights (the old
+        // weights/4 over-reserved). Exact value asserted per the env state to stay
+        // deterministic across runners.
+        let small = activation_reserve_bytes(2 * GB);
+        let big = activation_reserve_bytes(40 * GB);
+        match std::env::var("ROZUM_MLX_CACHE_GB") {
+            Ok(v) if v.trim() == "0" => {
+                // Cache cap disabled → conservative weight-scaled fallback.
+                assert_eq!(activation_reserve_bytes(40 * GB), 10 * GB); // 40/4
+                assert_eq!(activation_reserve_bytes(2 * GB), 8 * GB); // floor
+            }
+            Ok(_) => assert_eq!(small, big, "weight-independent when cache is bounded"),
+            Err(_) => {
+                // Default cache 4 GiB → 4 + 1.5 = 5.5 GiB, weight-independent.
+                assert_eq!(small, 5 * GB + GB / 2);
+                assert_eq!(big, 5 * GB + GB / 2);
+            }
+        }
     }
 
     #[test]
     fn runtime_footprint_is_weights_plus_reserve_when_config_absent() {
-        // An unknown spec has no config dir → KV folds to 0; footprint = weights +
-        // reserve. Always ≥ weights (never under-counts the weights themselves), and
-        // for a "small" 2 GiB model the 6 GiB reserve keeps it ≥ 8 GiB — the model's
-        // real resident NEED (active + the bounded cache), not just its on-disk size.
+        // An unknown spec has no config dir → KV folds to 0; footprint = weights + the
+        // (cache-tied) reserve. Always ≥ weights, and strictly more (the model's real
+        // resident NEED = active + the bounded cache, not just its on-disk size).
         let w = 2 * GB;
         let fp = runtime_footprint_bytes("definitely/not-a-real-model-xyzzy", 32_768, w);
-        assert_eq!(fp, w + 6 * GB, "weights + activation/cache reserve, KV=0 without config");
-        assert!(fp >= w);
+        assert_eq!(fp, w + activation_reserve_bytes(w), "weights + reserve, KV=0 without config");
+        assert!(fp > w);
     }
 
     #[test]
@@ -292,7 +314,7 @@ mod tests {
             let small = runtime_footprint_bytes(spec, 4_096, w);
             let large = runtime_footprint_bytes(spec, 40_960, w);
             assert!(large > small, "KV grows with n_ctx: {large} !> {small}");
-            assert!(small >= w + 6 * GB, "still ≥ weights + activation/cache reserve");
+            assert!(small >= w + activation_reserve_bytes(w), "≥ weights + reserve (+ KV)");
         }
     }
 }

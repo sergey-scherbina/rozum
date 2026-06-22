@@ -345,11 +345,19 @@ pub fn concurrent_resident_allowed() -> bool {
         .unwrap_or(false)
 }
 
-/// Host RAM budget for the SUM of all resident model gateways. Absolute override
-/// `ROZUM_GATEWAY_RAM_BUDGET_BYTES`; else `total_ram * ROZUM_GATEWAY_RAM_BUDGET_FRAC`
-/// (default 0.65 — leaves ~1/3 of host RAM for the OS / apps / Metal overhead, a real
-/// margin since the reboot hit 1.7× overcommit). `None` ⇒ budget unknown ⇒ only a
-/// sole model is admitted (any 2nd refused), the safe fallback.
+/// Host RAM budget for the SUM of all resident model gateways' reserved footprints.
+/// Absolute override `ROZUM_GATEWAY_RAM_BUDGET_BYTES`; else `total_ram *
+/// ROZUM_GATEWAY_RAM_BUDGET_FRAC`. `None` ⇒ budget unknown ⇒ only a sole model is
+/// admitted (any 2nd refused), the safe fallback.
+///
+/// **Default 0.75** (raised from 0.65, smmr-D-justified 2026-06-22). This bounds the SUM
+/// of *reserved footprints*, and footprints are conservative over-estimates of real peak
+/// (smmr-D: a 4B reserves ~13 GiB but peaks ~6 GiB at 14k ctx / ~10 GiB at full 32k; the
+/// cache is hard-bounded by `set_cache_limit`). So real usage stays well under the budget:
+/// at 0.75 on 36 GiB the reserved cap is 27 GiB but real co-resident usage is ~20 GiB →
+/// ~16 GiB genuinely free (the reboot needed ~0 free / 1.7× overcommit). 0.75 lets two
+/// small models actually co-reside (the operator's goal) while keeping a large real
+/// margin. Raise further (≤0.95) only with measured footprints; lower for a busier host.
 pub fn host_ram_budget_bytes() -> Option<u64> {
     if let Some(abs) = std::env::var("ROZUM_GATEWAY_RAM_BUDGET_BYTES")
         .ok()
@@ -361,7 +369,7 @@ pub fn host_ram_budget_bytes() -> Option<u64> {
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .filter(|f| f.is_finite() && *f > 0.0)
-        .unwrap_or(0.65)
+        .unwrap_or(0.75)
         .clamp(0.1, 0.95);
     crate::concurrency::total_ram_bytes().map(|t| (t as f64 * frac) as u64)
 }
