@@ -389,6 +389,34 @@ pub struct ResidencyGuard {
     path: PathBuf,
 }
 
+impl ResidencyGuard {
+    /// Update this process's published reservation footprint IN PLACE, keeping the held
+    /// `flock` (the reservation stays valid throughout). For the in-process Switchboard
+    /// (residency-unify U1): a gateway holding several models should publish its **TOTAL**
+    /// footprint (primary + warm) so other gateways' [`committed_by_others_bytes`] account
+    /// for the warm set too — not just the primary reserved at load time.
+    ///
+    /// Write-then-truncate (not truncate-first) so a concurrent reader during a **grow**
+    /// (a warm model just loaded → more memory) sees either the complete new larger entry
+    /// or the old one — **never an under-count in the memory-increasing direction** (the
+    /// safety-critical one). A **shrink** (warm evicted) may transiently read as `0` —
+    /// benign, since memory is being *freed* and the `shed` governor backstops any race.
+    /// Best-effort: IO errors are swallowed (the gate is a safety net, not correctness).
+    pub fn update_footprint(&self, model: &str, footprint_bytes: u64) {
+        use std::io::{Seek, SeekFrom, Write};
+        let body = serde_json::to_vec(&ResidentEntry {
+            model: model.to_string(),
+            footprint_bytes,
+        })
+        .unwrap_or_default();
+        let mut f: &std::fs::File = &self._lock;
+        let _ = f.seek(SeekFrom::Start(0));
+        let _ = f.write_all(&body); // overwrites from 0; a grow extends, never shortens mid-read
+        let _ = self._lock.set_len(body.len() as u64); // drop any old tail (shrink case)
+        let _ = f.flush();
+    }
+}
+
 impl Drop for ResidencyGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
@@ -772,6 +800,25 @@ mod tests {
             .expect("sole model never denied")
             .expect("a guard for the sole model");
         drop(g);
+        residency_env_clear(&dir);
+    }
+
+    #[test]
+    fn residency_guard_update_footprint_republishes() {
+        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let dir = residency_env(100 * GB);
+        // Reserve 3 GiB (sole → admitted), then republish the process's total as warm
+        // models come/go (residency-unify U1). A reader from another pid's view must see
+        // the live updated value — grow AND shrink — and 0 after release.
+        let g = acquire_residency("m", 3 * GB).expect("ok").expect("guard");
+        let other = std::process::id().wrapping_add(1);
+        assert_eq!(committed_by_others_bytes(other), 3 * GB, "initial reservation visible");
+        g.update_footprint("m+warm", 9 * GB);
+        assert_eq!(committed_by_others_bytes(other), 9 * GB, "grow republished");
+        g.update_footprint("m", 1 * GB);
+        assert_eq!(committed_by_others_bytes(other), 1 * GB, "shrink republished");
+        drop(g);
+        assert_eq!(committed_by_others_bytes(other), 0, "released on drop");
         residency_env_clear(&dir);
     }
 
