@@ -279,3 +279,19 @@ does not reliably win** against the framing (confirms why the old prompt-overrid
 A `glm4` gateway under claude/codex names tools (not artifacts) on create-from-scratch in a live
 A/B with the sanitizer on; matrix GLM cell lifts; no regression on edit-existing. (Probe harness:
 direct `/v1/chat/completions` with a tool + create task, count tool_calls vs ```-fenced content.)
+
+### Sanitizer A/B — VALIDATED (2026-06-23, gateway end-to-end)
+Built (`a4b757d`): `render_prompt_opt` strips narration-framing from GLM system prompts when
+tools are present (`ROZUM_GLM_STRIP_FRAMING`, **default ON**). A/B through the real gateway path
+(GLM-4-32B, the framing system prompt + a `Write` tool + a create task, N=3, temp 1):
+
+| ROZUM_GLM_STRIP_FRAMING | result |
+|---|---|
+| **0 (control, no strip)** | **ARTIFACT 3/3** — GLM shows ```rust, names nothing |
+| **on (default, strip)** | **NAMED 3/3** — GLM calls `Write` reliably |
+
+So the gateway sanitizer **reliably reverses the framing-induced decision gap** end-to-end. GLM is
+now a reliable tool-caller under narration-framing prompts. REMAINING (separate, longer): a real
+claude/codex×GLM **matrix-cell** A/B to confirm the conservative matcher catches the *actual* agent
+phrasings (tune `is_glm_narration_directive` from a captured prompt if it misses) and to read the
+score lift. Mechanism + default-on path are proven.
