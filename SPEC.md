@@ -26,6 +26,32 @@ memory to OOM, no splitting one model across mismatched devices, no needless dat
 paths. Make it run where it can with what there is; remove waste and breakage
 wherever they are found.
 
+## Extension points
+
+Rozum varies along four axes. Two are already SPIs (in-tree Rust traits — add a
+concern by writing an impl); one is a tangle slated for extraction; one is
+deliberately not a plugin axis. Find the seam for any concern here in one hop.
+Full map + the staged extraction plan: `docs/specs/architecture-spi.md`.
+
+- **Models / engines → `ChatBackend` SPI** (`src/backend.rs`). Async chat with
+  tool-use / streaming / cancel; engine leaves (native MLX, GGUF, mistralrs,
+  remote HTTP) and decorators (`BackendOrchestrator` cascade, `AdmittingBackend`
+  admission). Selection via `BackendRegistry` / `BackendConfig` / `BackendPolicy`.
+- **Tools → `ToolSource` SPI** (`src/agent.rs`). `tools()` + `dispatch()`;
+  in-process `CallbackToolSource` today, an MCP-client adapter planned so external
+  and in-process tools share one seam.
+- **Agent dialect + model tool-format → to be extracted** (`WireProtocol` and
+  `ToolDialect`). The agent wire format (OpenAI Chat / Anthropic Messages / OpenAI
+  Responses) and the per-model tool emission/parse/constraint
+  (Qwen-XML / Harmony / GLM `name\njson`) are two orthogonal seams currently
+  hand-branched across `gateway.rs` / `serving.rs` / `mlx_native_backend.rs`. They
+  vary independently (any agent × any model); extraction is staged and
+  behaviour-preserving. Cross-cutting robustness (loop-breaker, read-repair) stays
+  an orchestration policy over both seams, owned by neither.
+- **Services → subcommands, not plugins** (`Command` in `src/main.rs`). `gateway`,
+  `web`, `meetings`, `mcp`, bridges. Deliberately not a plugin axis: a process /
+  registry model adds indirection with no payoff for a single local binary.
+
 ## Runtime Contract
 
 - The project exposes a Rust library crate and a binary with the same package name, `rozum`.
