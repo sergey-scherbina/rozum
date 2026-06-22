@@ -143,11 +143,21 @@ load an un-admitted combination to "see if it reboots."
   (30.7 GB reserved), an attempt to load a 4B was **refused by the gate** ("would
   overcommit … budget ~23961 MB"), not allowed to co-load → no reboot. The structural
   lever (admission) demonstrably works under real concurrent load.
-- ⏳ **Model-mode active-vs-cache split: DEFERRED — needs an exclusive slot.** The
-  decisive measurement (is a real model's resident peak active or cache?) requires loading
-  one model alone; the slot has been continuously held by sibling matrix/probe runs. Run
-  when free: `rozum gateway --model <small> --offline` + a few generations, then read
-  `/stats` `mlx_memory_mb {active, peak, cache}` (already exposed) at peak.
+- ✅ **Model-mode RAN (Qwen3-4B, exclusive slot, 2026-06-22) — crux SETTLED.** cap applied
+  live (`mem(soft)=14077MB cache_limit=4GB`, confirms smmr-A wiring). Real resident: after
+  load `active=2159MB cache=0`; after 3×500-tok gens `active=2267MB peak=2310MB cache=255MB`;
+  process RSS 2.32 GB. **The 4B uses ~2.3 GB, NOT 26.9 GB; cache settled at 255 MB ≪ the
+  4 GB `set_cache_limit`.** So the historical 26.9 GB does NOT reproduce under the current
+  `set_cache_limit` — it was uncapped-cache from old runs, not a live risk. **VERDICT:
+  resident = active (weights + KV, bounded by `n_ctx`) + cache (bounded by `set_cache_limit`);
+  neither is unbounded ⇒ co-residency is SAFE by construction** (admission reserves ≥ real
+  peak). Caveat: a big-model FULL-context/full-prefill peak wasn't directly measured (the
+  structural bound + chunked prefill cover it; nice-to-confirm later).
+- 🆕 **Follow-up surfaced — footprint is OVER-conservative (`footprint-overconservative`,
+  see task).** It reserved ~14 GB for the 4B (full-`n_ctx` KV ~4.8 GB + 6 GB reserve) vs
+  ~2.3 GB real → two small models can't co-reside (28 > budget 23.4) even though they fit
+  easily. Safe but defeats the operator's "multiple models at once" goal — tune the reserve
+  / KV-at-realistic-ctx down to ADMIT more, keeping the `n_ctx`-bounded worst case as the ceiling.
 - 🐞 **Footgun found — `footprint-before-download`** (see task): `estimate_model_footprint_bytes`
   runs *before* `ensure_model_dir`, so an **un-cached** model scans empty → returns the
   unknown-size sentinel (`u64::MAX/4`) → reserves ~4.4e12 MB for its whole process life,

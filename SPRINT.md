@@ -117,13 +117,21 @@ admission *numbers* + per-process cap + validation = `nimble-raven`.
   1024 MB live → active 1024 MB) and `set_cache_limit` bounds the cache (256 MB retained after drop).
   Model mode (header-documented) is nimble-raven's D measurement: split a real model's peak into
   active vs cache under the slot. Spec § Findings updated with the measurement.
-- [~] **smmr-D-validate** (`nimble-raven`, capstone — needs the model slot) — safety harness. NOTE:
-  `set_memory_limit` is SOFT; real bound = `set_cache_limit` (cache) + admission — D verifies the ACTIVE
-  term too. **PROGRESS 2026-06-22 (spec § D Progress):** ✅ raw-alloc probe run live — set_memory_limit
-  confirmed SOFT (active 2048MB > 512MB limit), set_cache_limit confirmed the cache bound; ✅ admission gate
-  validated live (sibling 35B resident → 4B load REFUSED, no reboot). ⏳ REMAINING: model-mode active-vs-cache
-  split (load one small model alone, read `/stats` `mlx_memory_mb` at peak) — deferred, slot continuously
-  held by sibling matrix/probe runs; run when free.
+- [x] **smmr-D-validate** (`nimble-raven`) — **DONE 2026-06-22 (crux settled).** ✅ raw-alloc probe:
+  `set_memory_limit` SOFT (active 2048MB > 512MB), `set_cache_limit` = real cache bound. ✅ admission gate
+  validated live (sibling 35B resident → 4B load REFUSED, no reboot). ✅ **model-mode (Qwen3-4B, exclusive
+  slot):** real resident ~2.3 GB (active 2267MB, peak 2310MB, cache 255MB ≪ 4 GB limit, RSS 2.32 GB) —
+  the 26.9 GB does NOT reproduce under `set_cache_limit` (it was uncapped-cache, old runs). **VERDICT:
+  resident = active(weights+KV, bounded by n_ctx) + cache(bounded by set_cache_limit) → co-residency SAFE
+  by construction.** Caveat: big-model full-prefill peak not directly measured (structural bound + chunked
+  prefill cover it). Spec § D Progress.
+- [ ] **footprint-overconservative** (`nimble-raven`, found via smmr-D) — `runtime_footprint_bytes` reserves
+  ~14 GB for a 4B that really uses ~2.3 GB (full-`n_ctx` KV ~4.8 GB + 6 GB reserve), so two small models
+  DON'T co-reside (28 > budget 23.4) though they easily fit — defeats the operator's "multiple models at
+  once" goal. **Fix:** tune the reserve down (real cache was 255 MB, not 6 GB) and/or use a realistic KV
+  fraction instead of full `n_ctx`, keeping the `n_ctx`-bounded worst case as the admission ceiling (raising
+  `RAM_BUDGET_FRAC` is the cruder alt). Trade-off: too low re-opens overcommit if a co-resident model fills
+  its context — validate with smmr-D's harness. Done-when: two ~4B co-reside; a big model still sole; safe.
 - [ ] **footprint-before-download** (`nimble-raven`, found via smmr-D 2026-06-22) — `estimate_model_footprint_bytes`
   runs BEFORE `ensure_model_dir`, so an **un-cached** model scans empty → unknown-sentinel (`u64::MAX/4`) →
   reserves ~4.4e12 MB for its whole life, **blocking every other model load** (a tiny uncached 4B blocked a
