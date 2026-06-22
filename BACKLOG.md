@@ -1,5 +1,19 @@
 # Backlog
 
+## Host safety
+
+- [ ] **residency-gate-v2-ramledger** — the BUG-003 single-flight gate (master `3bcee03`,
+  spec `docs/specs/gateway-residency-singleflight.md`) enforces **one resident model per host**:
+  correct + safe for the 36 GiB Mac, but it refuses *any* 2nd model even when two genuinely fit.
+  v2 (only if a real need appears — e.g. a tiny draft + small target): replace the binary lock with
+  a **RAM ledger** that admits a 2nd load iff `requested_footprint + committed_by_others ≤ total*frac`
+  (reuse `runtime_footprint_bytes`/`total_ram_bytes` in `src/main.rs`; reap dead PIDs like the lease
+  reaper in `share.rs`), plus a **sibling-aware `cap_mlx_memory`** backstop
+  (`crates/rozum-mlx/.../mlx_native_backend.rs:~363`: cap at `total−8−committed_by_others`, not flat
+  `total−8`). Rejected for v1: racy (two loaders both read free-RAM, both pass) + needs PID liveness
+  reaping the flock gets for free. Not urgent — escape hatch `ROZUM_ALLOW_CONCURRENT_RESIDENT=1` covers
+  the rare "they truly fit" case today.
+
 ## MCP (deferred — decide the use, then build)
 
 - [ ] **mcp-use** — the MCP-client `ToolSource` (`McpToolSource`, `src/mcp_tool_source.rs`)

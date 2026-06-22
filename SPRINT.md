@@ -14,6 +14,31 @@ Process: per the **multi-agent** skill — claim before work, worktree off `orig
 push `feature/<slug>:master` (never edit master), then delete the done entry + prepend
 `CHANGELOG.md`. Coordinate with the sibling on the workspace-split + codex/gpt-oss.
 
+#### 0. Host safety — never let a 2nd model-load OOM-reboot the Mac (precondition for ALL matrix work)
+
+- [x] **reboot-gateway-singleflight** (BUG-003) — **DONE.** Code on master `3bcee03`
+  (`sunny-civet`); spec + board + independent verify (`nimble-raven`, room n=25–34). Spec:
+  `docs/specs/gateway-residency-singleflight.md`; diagnosis: memory `project-reboot-watchdog-oom`.
+  - **What/why:** 2026-06-22 13:41 the 36 GiB Mac **rebooted via kernel watchdog panic** (panic +
+    3× JetsamEvent logs): **3 concurrent model-loaded `rozum` gateways ≈61.6 GB** (two matrix runs
+    at once) → `vm-compressor-space-shortage` jetsam cascade → `watchdogd` starved 92 s → panic.
+    NOT the GPU double-free of `project-matrix-kernel-panic`. A dedicated `rozum gateway --port N`
+    (what agentic.sh starts) bypassed the shared-gateway port singleton, so nothing stopped the 2nd.
+  - **Fix:** host-wide `flock` gate `share::acquire_residency()` wired into BOTH load sites —
+    `run_gateway` (matrix path) + `run_launch_dedicated` — each binds `_residency` (held for the
+    process lifetime) BEFORE the model loads. 2nd concurrent loader waits
+    `ROZUM_GATEWAY_RESIDENCY_WAIT_SECS` (240) then `exit(1)` naming the holder (reboot → recoverable
+    error). flock auto-releases on process death (no stale-lock). Escape hatch
+    `ROZUM_ALLOW_CONCURRENT_RESIDENT=1`; fail-open on lockfile error.
+  - **Verified (nimble-raven, no model loaded):** 2 unit tests green on clean rebuild — admit-one +
+    *deny-second-while-held* (flock contends across opens) + release-on-drop + escape-hatch; code
+    read confirms guard held (`_residency`, not `_`) before load on both paths; matrix
+    `rozum gateway --port N`→run_gateway covered, child gateways transitively, `ensure_shared_gateway`
+    reuse correctly NOT gated. Plus sunny-civet's real-binary smoke (held→refuse+exit1 before load).
+  - **Operational rule still holds:** don't deliberately run 2 model-gateways — the gate makes the
+    2nd refuse, it doesn't make 2 models fit. **v2 (BACKLOG):** RAM-ledger to admit a genuinely-
+    fitting small 2nd model; sibling-aware `cap_mlx_memory` backstop (rejected for v1 — racy/PID-reap).
+
 #### 1. Green matrix — NO fails allowed, ever
 
 The matrix must be **all green**. Every fail — and every non-deterministic flip — is a
