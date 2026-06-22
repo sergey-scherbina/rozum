@@ -226,6 +226,35 @@ struct WarmConfig {
     budget: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
+impl WarmConfig {
+    /// Production warm-admission config (residency-unify U1). Two corrections vs the old
+    /// weights-only/`total*0.8` default:
+    /// - **weight = calibrated footprint** (`runtime_footprint_bytes` = weights + KV at
+    ///   `n_ctx` + cache reserve, smmr-B), so warm admission sizes a secondary the SAME way
+    ///   the residency gate does — not by raw on-disk weights (which under-count the resident
+    ///   footprint ~5× and could over-admit → overcommit; multislot is on by default).
+    /// - **budget = the unified host budget − other gateways' reservations**
+    ///   (`host_ram_budget_bytes − committed_by_others`), so this process's warm set plus any
+    ///   external gateway processes sum within ONE host budget (not an isolated 0.8 each).
+    fn new(n_ctx: u32) -> Self {
+        Self {
+            weight: Arc::new(move |spec: &str| {
+                crate::models::scan_all_installed()
+                    .into_iter()
+                    .find(|m| m.spec == spec)
+                    .map(|m| rozum_models::model_source::runtime_footprint_bytes(spec, n_ctx, m.size_bytes))
+            }),
+            budget: Arc::new(|| {
+                crate::share::host_ram_budget_bytes()
+                    .unwrap_or(0)
+                    .saturating_sub(crate::share::committed_by_others_bytes(std::process::id()))
+            }),
+        }
+    }
+}
+
+/// Test-only legacy default (weights-only sizing, `total*0.8` budget). The production path
+/// uses [`WarmConfig::new`]; warm-admission unit tests inject deterministic stubs.
 impl Default for WarmConfig {
     fn default() -> Self {
         Self {
@@ -3785,7 +3814,7 @@ pub async fn serve_on(
             let _ = crate::share::ensure_dir();
             crate::resident::UsageStats::open(crate::share::gateway_dir().join("warm-usage.jsonl"))
         },
-        warm_cfg: WarmConfig::default(),
+        warm_cfg: WarmConfig::new(n_ctx),
     });
 
     let state = GatewayState {

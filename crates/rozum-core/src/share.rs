@@ -409,6 +409,15 @@ pub struct ResidencyDenied {
     pub holders: Vec<(u32, String)>,
 }
 
+/// Sum of resident-model footprints reserved by OTHER live gateway processes (skips
+/// `skip_pid`; dead holders are reaped). For the in-process Switchboard's host-aware warm
+/// admission (residency-unify U1): a process's budget for its OWN residents = the host
+/// budget minus this. Best-effort (0 if the ledger is empty/unreadable). NOT under the
+/// admit lock — a momentary read for sizing, not the admission decision itself.
+pub fn committed_by_others_bytes(skip_pid: u32) -> u64 {
+    scan_residents(skip_pid).0
+}
+
 /// Scan the ledger under the admit lock: reap dead reservations (their `flock` is
 /// free) and sum the live ones (skipping our own pid). Returns `(sum_bytes, holders)`.
 fn scan_residents(skip_pid: u32) -> (u64, Vec<(u32, String)>) {
