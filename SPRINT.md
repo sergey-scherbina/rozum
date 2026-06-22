@@ -94,8 +94,20 @@ test-only) live in the spec.
   Verified: `cargo check` default (mlx+gguf on, MLX C++ built) **and** `--no-default-features` green, plus
   `--features mistralrs`/`x86-native`; crate tests pass. **The isolation win is now real for engines:
   editing one engine recompiles only that crate, not the others or the daemon.**
-- [ ] **Phase 3 — `rozum-agent` + `rozum-gateway`.** Fix knot 3 (gateway→mlx telemetry → SPI
-  stats hook) + knot 4 (test-only mlx/gguf leaks). *Gate: agentic matrix unchanged.*
+- [x] **Phase 3 — `rozum-agent` + `rozum-gateway`** ✅. `share` moved to `rozum-core` (leaf util used
+  by both + the bin). `rozum-agent` (agent/cascade/router/rag_lite/builtin_tools/memory_store/
+  mcp_tool_source) — the intelligence layer, depends on core+models but **no engine** (118/118 tests).
+  `rozum-gateway` (gateway/openai_http/anthropic_http) — the serving layer, **no engine** (71/71 tests).
+  **Knot 3 fixed:** the gateway's MLX-telemetry reads are now a `rozum-core::obs` registration hook
+  (`register_mlx_memory`/`register_mlx_batch_stats` + `BatchStats`); `rozum-mlx::register_telemetry()`
+  fills it in `main()`, the gateway reads via `crate::obs` → it no longer references the engine.
+  **Knot 4 fixed:** the 3 real-MLX `#[ignore]` evals (agent/router/rag) relocated to the bin's
+  `tests/mlx_evals.rs` (the only place agent-loop legitimately meets a concrete engine), so rozum-agent
+  has zero mlx reference. **Knot 2 dissolved:** `config` stays in the bin (top), so `config→cascade`
+  is bin→agent — no inversion, no type move needed. (`POISON_ENV_LOCK` made `pub`+non-cfg(test) so the
+  bin's proxy tests reach it cross-crate.) Verified: `cargo check` default (mlx on) + `--no-default-features`
+  green; all test targets compile under default features. **The bin is now just the launch/CLI layer**
+  (main/config/doctor/proxy/sandbox/service).
 - [ ] **Phase 4 — `rozum-hardware`** (device detect + placement; North Star). Separate spec —
   reserved as a crate slot here, designed later (it is new work, not a move).
 

@@ -184,4 +184,31 @@ default (mlx+gguf on, MLX C++ built) + `--no-default-features` + `--features mis
 `--features x86-native` all green; crate tests pass. **Engine isolation achieved:** editing
 one engine crate recompiles only it, not the other engines or the daemon.
 
-<Phases 3/4: fill in build-time delta, test counts, matrix parity, as each lands.>
+**Phase 3 — `rozum-agent` + `rozum-gateway` (DONE).** `share` (a leaf util used by the
+agent cluster, the gateway, and the bin) moved into `rozum-core`. `rozum-agent`
+(agent/cascade/router/rag_lite/builtin_tools/memory_store/mcp_tool_source) and
+`rozum-gateway` (gateway/openai_http/anthropic_http) extracted; both depend on
+rozum-core + rozum-models and on **no engine crate**. The three knots:
+- **Knot 3 (`gateway→mlx` telemetry):** inverted like the engine registry. `rozum-core::obs`
+  now owns `BatchStats` + `register_mlx_memory`/`register_mlx_batch_stats` + the
+  `mlx_memory_mb`/`batch_stats` accessors; `rozum-mlx::register_telemetry()` registers the
+  real accessors in `main()` (no-op without `mlx-native`); the gateway reads via `crate::obs`.
+  So the serving layer no longer references the MLX engine.
+- **Knot 4 (test-only `agent`/`router`→mlx):** the 3 real-MLX `#[cfg(mlx-native)]`+`#[ignore]`
+  evals (`agent_loop_real_backend`, `model_router_eval`, `rag_worker_eval`) relocated to the
+  binary's `tests/mlx_evals.rs` — the bin is the only place that legitimately combines the
+  agent loop with a concrete engine. rozum-agent now has zero mlx reference.
+- **Knot 2 (`config→cascade`):** dissolved without moving any type — `config` stays in the bin
+  (the top layer), so `config→cascade` is bin→rozum-agent (correct direction). The originally-
+  feared inversion only existed under the assumption `config` would move into core; it didn't.
+
+One snag: `POISON_ENV_LOCK` (a test env-mutation lock in `share`) was `#[cfg(test)] pub(crate)`;
+a `#[cfg(test)]` item is invisible when its crate is a dependency, and the bin's `proxy.rs`
+tests lock it cross-crate — made it an always-present `pub static`. Verified: `cargo check`
+default (mlx on) + `--no-default-features` green; **118/118** rozum-agent + **71/71** rozum-gateway
+tests; all test targets (incl `tests/mlx_evals.rs` under mlx-native) compile.
+
+**End state: a 9-crate workspace** — `rozum-core` (SPI+share), `rozum-models`, `rozum-agent`,
+`rozum-gateway`, `rozum-meeting`, the four engines (`rozum-mlx`/`-gguf`/`-mistralrs`/`-x86`), and
+the `rozum` binary (just the launch/CLI layer: main/config/doctor/proxy/sandbox/service). Only
+Phase 4 (`rozum-hardware`, new design work) remains.
