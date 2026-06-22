@@ -885,46 +885,34 @@ async fn start_web_bridge(room_name: String, port: u16, url: String) {
     }
 }
 
-/// Estimate a model's resident footprint (weights + KV + runtime overhead) for the
-/// host RAM gate (BUG-003 v2). Catalog size × an inflation factor + a base, then a
-/// **conservative floor**; an unknown model gets a deliberately huge estimate so it
-/// only loads when the host is otherwise empty — conservative, since under-counting is
-/// the direction that reboots.
+/// Estimate a model's resident RAM **need** for the host residency gate (BUG-003 v2 +
+/// smmr, `docs/specs/safe-multi-model-residency.md`): the calibrated
+/// [`rozum::model_source::runtime_footprint_bytes`] = weights + KV at `n_ctx` +
+/// activation reserve. This is the model's need, which `smmr-A`'s per-process MLX cap
+/// then ENFORCES — so a model can neither balloon past it (the uncapped MLX cache grows
+/// to ~`total−8 GB` regardless of size, the reboot mechanism) nor be admitted beyond
+/// it. The same figure is used for the residency reservation AND the cap, so they
+/// match. An unknown model gets a deliberately huge estimate so it only loads when the
+/// host is otherwise empty (under-counting is the direction that reboots). Optional
+/// `ROZUM_GATEWAY_FOOTPRINT_INFLATE` (default 1.0) pads it for extra conservatism.
 ///
-/// INTERIM SAFETY (smmr, `docs/specs/safe-multi-model-residency.md`): real peak
-/// resident is **MLX-cache-dominated, not weight-proportional** — measured, even a
-/// 0.5B model peaks ~14.9 GB and a 4B ~26.9 GB because the per-process MLX cap is
-/// `total−8 GB` and the cache grows into it. So `size×inflate+base` under-counts small
-/// models ~6× → two of them pass admission and reboot the host. Until `smmr-A` (the
-/// share-bounded MLX cap) makes a model physically unable to exceed its reservation,
-/// floor the estimate at `ROZUM_GATEWAY_FOOTPRINT_FLOOR_MB` (default 14000 ≈ the
-/// observed minimum uncapped peak of ANY model) so admission stays effectively
-/// single-flight on a 36 GiB box rather than admitting an unsafe 2nd small model.
-/// Once `smmr-A` lands, this floor drops to the model's true min-need (`smmr-B`).
-///
-/// All tunable: `ROZUM_GATEWAY_FOOTPRINT_INFLATE` (1.25), `_FOOTPRINT_BASE_MB` (1024),
-/// `_FOOTPRINT_FLOOR_MB` (14000 — set 0 to disable the floor once `smmr-A` enforces caps).
-fn estimate_model_footprint_bytes(model: &str) -> u64 {
+/// Supersedes v2's weights-only `size×inflate+base` and the smmr interim floor: those
+/// over-counted small models to stay safe WITHOUT a cap; with `smmr-A` enforcing the
+/// cap, the true min-need is correct and is what makes real co-residency possible.
+fn estimate_model_footprint_bytes(model: &str, n_ctx: u32) -> u64 {
     let inflate = std::env::var("ROZUM_GATEWAY_FOOTPRINT_INFLATE")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .filter(|f| f.is_finite() && *f >= 1.0)
-        .unwrap_or(1.25);
-    let base = std::env::var("ROZUM_GATEWAY_FOOTPRINT_BASE_MB")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(1024)
-        .saturating_mul(1_048_576);
-    let floor = std::env::var("ROZUM_GATEWAY_FOOTPRINT_FLOOR_MB")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(14_000)
-        .saturating_mul(1_048_576);
+        .unwrap_or(1.0);
     match rozum::models::scan_all_installed()
         .into_iter()
         .find(|m| m.spec == model)
     {
-        Some(m) => (((m.size_bytes as f64) * inflate) as u64 + base).max(floor),
+        Some(m) => {
+            let fp = rozum::model_source::runtime_footprint_bytes(model, n_ctx, m.size_bytes);
+            ((fp as f64) * inflate) as u64
+        }
         None => u64::MAX / 4, // unknown size → only admits when nothing else resident
     }
 }
@@ -934,8 +922,8 @@ fn estimate_model_footprint_bytes(model: &str) -> u64 {
 /// is resident (binding it at the caller's function scope is enough). Runs the
 /// (possibly long) blocking wait off the async runtime. `None` = gate bypassed /
 /// unavailable → loading proceeds (the gate is a safety net, not correctness).
-async fn acquire_residency_or_exit(model: &str) -> Option<rozum::share::ResidencyGuard> {
-    let footprint = estimate_model_footprint_bytes(model);
+async fn acquire_residency_or_exit(model: &str, n_ctx: u32) -> Option<rozum::share::ResidencyGuard> {
+    let footprint = estimate_model_footprint_bytes(model, n_ctx);
     let model_owned = model.to_string();
     match tokio::task::spawn_blocking(move || {
         rozum::share::acquire_residency(&model_owned, footprint)
@@ -990,7 +978,7 @@ async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: roz
     // resident models can't overcommit host RAM (whole-system OOM → watchdog kernel
     // panic → reboot, BUG-003). Held for this process's lifetime; covers the initial
     // load below plus every lazy reload / `switch` (all same-process).
-    let _residency = acquire_residency_or_exit(&model_spec).await;
+    let _residency = acquire_residency_or_exit(&model_spec, n_ctx).await;
     // Speculative decoding: if a draft model is configured (`--draft-model` /
     // `ROZUM_DRAFT_MODEL`), build the target+draft pair; else the plain target.
     // Spec: docs/specs/speculative-decoding.md.
@@ -1707,7 +1695,7 @@ async fn run_launch_dedicated(
     // Same host-wide RAM gate as `run_gateway` (BUG-003): a dedicated in-process
     // model reserves its footprint so it can't overcommit host RAM next to another
     // resident gateway. Held for this launch's lifetime (drops when `exec_agent` returns).
-    let _residency = acquire_residency_or_exit(&model_spec).await;
+    let _residency = acquire_residency_or_exit(&model_spec, n_ctx).await;
     let backend = match build_gateway_backend(&model_spec, n_ctx).await {
         Some(b) => b,
         None => {
@@ -4910,6 +4898,16 @@ async fn try_build_mlx_native_backend(
     // runtime can't run). `None` → fall through to the next backend.
     let dir = ensure_model_dir(model_spec).await?;
     let id = rozum::mistralrs_backend::normalize_spec(model_spec);
+    // smmr-A (`docs/specs/safe-multi-model-residency.md`): hard-cap THIS process's MLX
+    // unified memory at the SAME footprint the residency gate reserved for this model,
+    // BEFORE the worker loads. So a co-resident gateway can't let the MLX cache balloon
+    // past its share (uncapped it grows to ~total−8 GB regardless of model size — the
+    // BUG-003 reboot mechanism); the sum across gateways stays within the host budget.
+    // Only for a known-size model; an unknown one keeps the default `total−8 GB` cap.
+    let footprint = estimate_model_footprint_bytes(model_spec, n_ctx);
+    if footprint < u64::MAX / 8 {
+        rozum::mlx_native_backend::set_memory_cap_bytes(footprint);
+    }
     match MlxNativeBackend::new(dir.clone(), id.clone(), Some(n_ctx)).await {
         Ok(b) => {
             eprintln!(

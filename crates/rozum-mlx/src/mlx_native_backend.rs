@@ -354,31 +354,42 @@ mod inner {
     }
 
     /// Cap MLX's unified-memory use so a resident model doesn't hoard all of RAM and
-    /// starve the agent / other processes on the host. `set_cache_limit` is the key
-    /// lever: MLX otherwise keeps freed Metal buffers cached, so the footprint grows to
-    /// a RAM fraction (~28 GB observed) regardless of model size; capping it returns
-    /// those buffers to the OS, keeping the footprint near the live (weights + KV)
-    /// memory. `ROZUM_MLX_CACHE_GB` (default 4) and `ROZUM_MLX_MEM_GB` (default total
-    /// RAM − 8) override; `0` for either disables that cap. Process-global, idempotent.
+    /// starve the agent / other processes — or, under co-residency, collectively
+    /// overcommit the host and reboot it (BUG-003 / smmr). `set_cache_limit` keeps freed
+    /// Metal buffers from accumulating (MLX otherwise grows to a RAM fraction, ~28 GB,
+    /// regardless of model size); `set_memory_limit` is the hard ceiling on this
+    /// process's MLX allocation. Priority for the memory limit: explicit `ROZUM_MLX_MEM_GB`
+    /// > the smmr-A residency share ([`set_memory_cap_bytes`], so co-resident gateways
+    /// sum ≤ the host budget) > default `total − 8 GB` (a lone, unmanaged gateway).
+    /// `ROZUM_MLX_CACHE_GB` (default 4); `0` disables a cap. Process-global, idempotent.
     fn cap_mlx_memory() {
+        use std::sync::atomic::Ordering;
         let gb = |g: u64| -> usize { (g as usize).saturating_mul(1usize << 30) };
-        let total_gb = crate::concurrency::total_ram_bytes().unwrap_or(16u64 << 30) / (1u64 << 30);
+        let total_bytes = crate::concurrency::total_ram_bytes().unwrap_or(16u64 << 30);
         let cache_gb = std::env::var("ROZUM_MLX_CACHE_GB")
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(4);
-        let mem_gb = std::env::var("ROZUM_MLX_MEM_GB")
+        // Hard memory ceiling (bytes): explicit env (GB) > smmr-A residency share >
+        // lone-gateway default `total − 8 GB` (see `select_mlx_mem_limit_bytes`).
+        let env_mem_gb = std::env::var("ROZUM_MLX_MEM_GB")
             .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or_else(|| total_gb.saturating_sub(8).max(8));
-        if mem_gb > 0 {
-            mlx_rs::memory::set_memory_limit(gb(mem_gb));
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        let share = super::MEM_CAP_OVERRIDE_BYTES.load(Ordering::Relaxed);
+        let mem_bytes = super::select_mlx_mem_limit_bytes(env_mem_gb, share, total_bytes);
+        if mem_bytes > 0 {
+            mlx_rs::memory::set_memory_limit(mem_bytes);
         }
         if cache_gb > 0 {
             mlx_rs::memory::set_cache_limit(gb(cache_gb));
         }
         if std::env::var_os("ROZUM_MLX_DEBUG").is_some() {
-            eprintln!("mlx-native: memory cap mem={mem_gb}GB cache={cache_gb}GB (total {total_gb}GB)");
+            eprintln!(
+                "mlx-native: memory cap mem={}MB cache={cache_gb}GB (total {}GB, smmr-share={}MB)",
+                mem_bytes / (1usize << 20),
+                total_bytes / (1u64 << 30),
+                share / (1u64 << 20),
+            );
         }
     }
 
@@ -3475,6 +3486,66 @@ mod inner {
 
 #[cfg(feature = "mlx-native")]
 pub use inner::Export as MlxNativeBackend;
+
+/// Process-global MLX memory-limit override in bytes (`0` = unset). Set by the binary
+/// (smmr-A, `docs/specs/safe-multi-model-residency.md`) from this model's reserved
+/// residency footprint BEFORE the worker loads, so a co-resident gateway caps its own
+/// MLX at its share and the sum across gateways can't overcommit the host (the BUG-003
+/// reboot mechanism). Read by `cap_mlx_memory`; an explicit `ROZUM_MLX_MEM_GB` wins.
+static MEM_CAP_OVERRIDE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Set the per-process MLX memory ceiling (bytes) for smmr-A. Call before the model
+/// loads (before [`MlxNativeBackend::new`]). `0` clears it. Always compiled (a plain
+/// atomic store); without the `mlx-native` feature nothing reads it, so it is a no-op.
+pub fn set_memory_cap_bytes(bytes: u64) {
+    MEM_CAP_OVERRIDE_BYTES.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Pure selection of the MLX memory ceiling in bytes (smmr-A), so the precedence is
+/// unit-testable without the MLX runtime: an explicit `ROZUM_MLX_MEM_GB` (in GB;
+/// `Some(0)` disables the cap entirely) wins; else the per-process residency share
+/// (bytes, when set by [`set_memory_cap_bytes`]); else the lone-gateway default
+/// `total − 8 GB`, floored at 8 GB.
+fn select_mlx_mem_limit_bytes(env_mem_gb: Option<u64>, share_bytes: u64, total_bytes: u64) -> usize {
+    let gb = |g: u64| -> usize { (g as usize).saturating_mul(1usize << 30) };
+    match env_mem_gb {
+        Some(g) => gb(g), // explicit; Some(0) → 0 → caller skips set_memory_limit (cap off)
+        None if share_bytes > 0 => share_bytes as usize,
+        None => {
+            let total_gb = total_bytes / (1u64 << 30);
+            gb(total_gb.saturating_sub(8).max(8))
+        }
+    }
+}
+
+#[cfg(test)]
+mod smmr_cap_tests {
+    use super::*;
+
+    const GB: u64 = 1 << 30;
+
+    #[test]
+    fn mem_limit_precedence_env_share_default() {
+        // Explicit env (GB) wins over everything, even a set share.
+        assert_eq!(select_mlx_mem_limit_bytes(Some(20), 6 * GB, 36 * GB), 20 * (1 << 30));
+        // Some(0) disables the cap (caller then skips set_memory_limit).
+        assert_eq!(select_mlx_mem_limit_bytes(Some(0), 6 * GB, 36 * GB), 0);
+        // No env + a smmr-A share → the share (bytes), verbatim.
+        assert_eq!(select_mlx_mem_limit_bytes(None, 6 * GB, 36 * GB), (6 * GB) as usize);
+        // No env, no share → the lone-gateway default total−8 GB.
+        assert_eq!(select_mlx_mem_limit_bytes(None, 0, 36 * GB), 28 * (1 << 30));
+        // Tiny host → floored at 8 GB, never negative/zero.
+        assert_eq!(select_mlx_mem_limit_bytes(None, 0, 4 * GB), 8 * (1 << 30));
+    }
+
+    #[test]
+    fn set_memory_cap_roundtrips() {
+        set_memory_cap_bytes(7 * GB);
+        assert_eq!(MEM_CAP_OVERRIDE_BYTES.load(std::sync::atomic::Ordering::Relaxed), 7 * GB);
+        set_memory_cap_bytes(0); // clear so other tests/processes start clean
+        assert_eq!(MEM_CAP_OVERRIDE_BYTES.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+}
 
 /// Process-wide batched-decode counters, for the gateway `/stats` endpoint. `runs` is the
 /// number of batched-decode invocations (≥2 rows), `rows` the total rows they served (initial
