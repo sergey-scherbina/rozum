@@ -1,5 +1,32 @@
 # Changelog
 
+## gateway — codex create-from-scratch: handle patch-based create shapes
+Completed: 2026-06-22
+
+Extended the create-from-scratch handling beyond the explicit `{path, content}`
+write-intent (below) to the two PATCH-based create shapes gpt-oss actually emits
+most often, both in `apply_patch_block_to_fuzz` so all three delivery paths
+(string command, sibling patch, function call) are covered:
+
+1. **`*** Add File:` / `*** Create File:` directives** (the dominant, canonical
+   create shape — `*** Create File:` is gpt-oss's variant of the standard V4A
+   `*** Add File:`). The lines that follow are the new file's content (bare or
+   `+`-prefixed); each becomes a real write. Multi-file patches handled.
+2. **`*** Update File:` against an absent file** — the model labels a brand-new
+   file an "Update" with a bogus `---` old-side; `patch` can't update a missing
+   file. Detected (additions present, no real removed/context content) and
+   written from the `+` lines.
+
+Both go through a shared `synth_create_command`: `[ -e path ] || { mkdir -p …;
+cat > path <<'ROZUM_CREATE_EOF' … }` — written verbatim, only when absent (a
+re-sent create is an idempotent no-op, never clobbers a real edit). Genuine edits
+(real removed/context lines) stay byte-identical on the `patch --fuzz` path, so
+the `fix` task is unaffected. Validated: 3 unit tests + shell e2e (`cargo run →
+olleh`) + live matrix — codex × gpt-oss × `test` flipped 0→1 (first create-from-
+scratch green); pairs best with `ROZUM_GPTOSS_TOP_P=0.95` (clips the junk-token
+tail that otherwise makes the model emit unparseable shapes). Residual `build`
+flake is gpt-oss run-to-run variance, not a gateway gap.
+
 ## gateway — codex create-from-scratch: synthesize a real write
 Completed: 2026-06-22
 
