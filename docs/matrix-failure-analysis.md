@@ -420,3 +420,49 @@ keep a safety net, right-size the model):**
 
 Expected: **#1 + #2 together** should lift codex × gpt-oss create-from-scratch to the
 claude/opencode rate; **#3** is the reliable immediate workaround. **FINDING 5 CLOSED.**
+
+## Finding 6 (2026-06-22) — WHY gpt-oss struggles with codex V4A: format-adherence collapses under context load, NOT V4A incompetence
+
+Operator's question: if claude/opencode drive the SAME gpt-oss green on multi-file create, and 35B
+clears codex's V4A bar, why does gpt-oss fail V4A *only* under codex? Isolated with the `isolate`
+skill — **model-only probes** straight to the gateway `/v1/chat/completions` (no agent), 35B as the
+control. Probe scripts: `/tmp/v4a-probe*.sh`, `/tmp/v4a-toolcall.sh`, the ~18KB-filler bloat test.
+
+| Probe (model-only, temp 1.0) | gpt-oss-20b | Qwen3.6-35B (control) |
+|---|---|---|
+| V4A as **plain text**, 1 file | **5/5 valid** | valid (missing-`Begin` = cosmetic) |
+| V4A as **plain text**, 2 files | valid @ adequate budget (890 tok) | **5/5 valid** |
+| V4A as a **tool call** (clean apply_patch fn) | **5/5 valid** | — |
+| V4A tool call **+ ~18KB filler prompt** | **2/5 valid** ⬇ | — |
+| reasoning length, 2-file (completion_tokens) | **700–1419** (one >2500) | **160–182** |
+
+1. **gpt-oss is V4A-competent.** In clean conditions it produces perfect V4A — as plain text AND as a
+   tool call, single AND multi-file. V4A is not out-of-distribution for it.
+2. **Format-adherence COLLAPSES under context overload.** Prepend ~18KB of codex-style filler and
+   validity drops **5/5 → 2/5**: the model **invents a JSON schema**
+   (`{"patch":[{"action":"apply_patch","new_file":…,"content":…}]}`) or **drops the `*** Begin Patch`
+   markers** (bare `Add File: /Cargo.toml`) — *exactly* the malformations seen in real codex captures
+   (nested heredocs, `{cmd:apply_patch}`, CoT-in-args, bare apply_patch).
+3. **gpt-oss reasons 4–8× more than 35B** (700–1419 vs 160–182 tokens, same task) and *variably*. The
+   long CoT costs context and, under tight budgets, truncates to empty (a probe artifact — codex gives
+   `max_output_tokens: 10000`, so truncation is NOT the codex mechanism; overload is).
+4. **35B clears codex's bar** because it emits the V4A with almost no reasoning and is far less
+   perturbed by the prompt load.
+5. **claude/opencode work — including multi-file** — because their per-file primitive is a trivial
+   `Write({path, content})` (no V4A, leaner prompt). Neither the format-collapse-under-load nor the
+   envelope friction bites. The file *count* was never the issue.
+
+**Root cause:** the codex-specific failure is **V4A format-adherence degrading under codex's
+~21KB-system-prompt + 18-tool context load** (compounded by gpt-oss's verbose, variable reasoning) —
+NOT a V4A capability gap and NOT model code-incompetence. Proven by control: same model, clean = 5/5,
++18KB = 2/5; 35B (minimal reasoning) stays robust.
+
+**Solution (validated direction):**
+1. **`codex-lean` (shipped) is the right lever — and this explains WHY.** Stripping the 18 meta-tools
+   cuts the load that triggers the collapse. Ensure it is ON for gpt-oss on the codex path.
+2. **Trim codex's 21KB system prompt for local models.** `codex-lean` cuts *tools*; the filler test
+   proves the *prompt size* alone also degrades adherence. Replace/trim it with a lean coding prompt
+   on the gateway codex path (`responses_input_to_internal`).
+3. **Steer to one simple create primitive** (Finding 5 §1) — less to emit under load → less to mis-form.
+4. **Right model for codex: Qwen3.6-35B-A3B.** gpt-oss is excellent under claude/opencode; for codex's
+   protocol-under-load, 35B is the reliable choice (minimal reasoning, robust to prompt size).
