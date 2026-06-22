@@ -158,6 +158,14 @@ load an un-admitted combination to "see if it reboots."
   alongside A → both resident, both served chat simultaneously** (reply ok each); host free
   RAM 26.6 → **21.1 GB with both loaded** (active 2159 + 5043 MB ≈ 7 GB), no danger; graceful
   SIGINT teardown (no SIGKILL) → 28.8 GB free. Multiple models run at once, safely.
+- ✅ **IN-PROCESS CO-RESIDENCY PROVEN (2026-06-22) — validates the whole residency-unify stack live.**
+  ONE gateway (Qwen3-4B primary + `ROZUM_WARM_MODELS=GLM-4-9B`, n_ctx 8192) held **both models in a
+  single process**: `/stats resident_models = [4B, GLM-9B]`; **both served chat** (primary + warm);
+  `memory_pressure=normal`; free RAM 21.9 → 16.8 GB w/ both loaded. The two `cap_mlx_memory` log
+  lines — `smmr-share=8957MB` (4B) + `=11015MB` (GLM-9B) — show **U1's host-aware per-model footprint
+  sizing working live** (each model's soft cap = its own footprint, Σ ≤ budget). So U1 (admission +
+  caps + republished reservation), U2 (governor), and U3 (declarative preload + `resident_models`
+  visibility) are all confirmed end-to-end. Graceful teardown → 24.9 GB free.
 - 🆕 **Follow-up surfaced — footprint is OVER-conservative (`footprint-overconservative`,
   see task).** It reserved ~14 GB for the 4B (full-`n_ctx` KV ~4.8 GB + 6 GB reserve) vs
   ~2.3 GB real → two small models can't co-reside (28 > budget 23.4) even though they fit
