@@ -19,7 +19,6 @@ pub mod room_path;
 pub mod state;
 pub mod store;
 pub mod tui_client;
-pub mod web;
 
 pub use app::{RoomConfig, run_room};
 pub use list::list_rooms;

@@ -413,12 +413,12 @@ async fn check_http(
         Ok(resp) => Check::fail(
             name,
             format!("{url} -> {}", resp.status()),
-            "start/restart: rozum meetings web --bind 0.0.0.0 --port <port>",
+            "start/restart the .ssc meeting client (rozum-meeting-ssc; launchd com.rozum.meeting-ssc)",
         ),
         Err(e) => Check::fail(
             name,
             format!("{url} unreachable: {e}"),
-            "start: rozum meetings web --bind 0.0.0.0 --port <port>",
+            "start the .ssc meeting client (rozum-meeting-ssc; launchd com.rozum.meeting-ssc)",
         ),
     }
 }

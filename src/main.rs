@@ -409,22 +409,6 @@ enum MeetingsAction {
         as_display: Option<String>,
     },
 
-    /// Serve a human web client for a room (browser chat: see + post + live updates).
-    ///
-    /// Gated by a shared secret (`ROZUM_WEB_SECRET`, else generated + printed). Log in with the
-    /// secret as the password. Auto-spawns the daemon if needed.
-    Web {
-        /// Port to listen on.
-        #[arg(long, default_value_t = 8400)]
-        port: u16,
-        /// Room name (from `rozum meetings status`); default = the cwd project's room.
-        #[arg(long)]
-        room: Option<String>,
-        /// Bind address (default 127.0.0.1; use 0.0.0.0 to reach it from another device).
-        #[arg(long, default_value = "127.0.0.1")]
-        bind: String,
-    },
-
     /// Join a room as a LIVE AI participant backed by a local model (via the gateway).
     ///
     /// The model reads the room and replies like any other participant — no moderator,
@@ -761,7 +745,6 @@ async fn main() {
             MeetingsAction::Post { text, room, as_display } => {
                 run_meetings_post(text, room, as_display).await
             }
-            MeetingsAction::Web { port, room, bind } => run_meetings_web(port, room, bind).await,
             MeetingsAction::Participant {
                 model,
                 room,
@@ -1895,28 +1878,6 @@ async fn run_meetings_participant(
     };
     if let Err(e) = run(model, room, handle, policy, gateway_url, peers, persona).await {
         eprintln!("meetings participant: {e}");
-        std::process::exit(1);
-    }
-}
-
-/// `rozum meetings web` — serve the human web client for a room. Secret from
-/// `ROZUM_WEB_SECRET`, else generated; printed so the operator can log in.
-async fn run_meetings_web(port: u16, room: Option<String>, bind: String) {
-    let secret = std::env::var("ROZUM_WEB_SECRET")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            let u = uuid::Uuid::new_v4().simple().to_string();
-            u[..8].to_string()
-        });
-    let host = if bind == "0.0.0.0" { "127.0.0.1" } else { bind.as_str() };
-    println!("┌─ rozum meetings web ─────────────────────────────");
-    println!("│ URL:    http://{host}:{port}");
-    println!("│ login:  password = {secret}   (username can be blank)");
-    println!("└──────────────────────────────────────────────────");
-    if let Err(e) = rozum::meeting::web::run_web(room, port, bind, secret).await {
-        eprintln!("meetings web: {e}");
         std::process::exit(1);
     }
 }
