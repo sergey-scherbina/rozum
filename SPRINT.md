@@ -163,9 +163,13 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
   `ensure_warm` (after a warm load) + `sweep_idle_warm` (after evict, lock released first) republish
   `primary + Σ warm` — deadlock-safe (the free fn locks the ledger file, not the warm map). 74/74 gateway
   tests. **So residency-unify U1 (host-aware + footprint-accurate + republished) + U2 are COMPLETE.**
-  **REMAINING:** (b) **U3 request→model routing** (surface the cascade); (c) decide whether the in-process
-  Switchboard becomes the *primary* multi-model path over N-process flock. (`footprint-before-download`:
-  DONE separately, `a261fb0`.)
+  ✅ **U3 substantially DONE** (`9853277`+`db930ce`): routing already works (a request for a different
+  cached model warm-loads + serves it); added **declarative preload** (`ROZUM_WARM_MODELS=spec1,spec2`
+  warms a named set at startup, admission-gated) + **`/stats resident_models`** (the co-resident set is
+  visible). **REMAINING:** (c) the architecture call — make the in-process Switchboard the *primary*
+  multi-model path over the N-process flock (affects the matrix harness → team decision, not solo); an
+  optional fuller routing *policy* (pin/priority) only if a need appears. (`footprint-before-download`:
+  DONE `a261fb0`.)
 - [x] **footprint-before-download** (`nimble-raven`) — **DONE `a261fb0`.** The footgun: estimate ran BEFORE the
   download, so an uncached model reserved the unknown-size sentinel (~4.4e12 MB) for its whole life →
   blocked every other load. Fix (now trivial via the reservation-update API): after the model loads (hence
