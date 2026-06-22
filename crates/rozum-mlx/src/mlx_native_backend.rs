@@ -353,15 +353,17 @@ mod inner {
         }
     }
 
-    /// Cap MLX's unified-memory use so a resident model doesn't hoard all of RAM and
-    /// starve the agent / other processes — or, under co-residency, collectively
-    /// overcommit the host and reboot it (BUG-003 / smmr). `set_cache_limit` keeps freed
-    /// Metal buffers from accumulating (MLX otherwise grows to a RAM fraction, ~28 GB,
-    /// regardless of model size); `set_memory_limit` is the hard ceiling on this
-    /// process's MLX allocation. Priority for the memory limit: explicit `ROZUM_MLX_MEM_GB`
-    /// > the smmr-A residency share ([`set_memory_cap_bytes`], so co-resident gateways
-    /// sum ≤ the host budget) > default `total − 8 GB` (a lone, unmanaged gateway).
-    /// `ROZUM_MLX_CACHE_GB` (default 4); `0` disables a cap. Process-global, idempotent.
+    /// Bound MLX's unified-memory use so a resident model doesn't hoard all of RAM and
+    /// starve the agent / other processes. **`set_cache_limit` is the real lever**: it
+    /// keeps freed Metal buffers from accumulating (MLX otherwise grows the *cache* to a
+    /// RAM fraction, ~28 GB, regardless of model size), so it holds the resident footprint
+    /// near the active (weights + KV) memory. `set_memory_limit` is only a **soft** hint
+    /// (allocations beyond it evict cache / wait, then proceed — NOT a hard ceiling;
+    /// memory `reference-mlx-memory-cap-semantics`); under co-residency the structural
+    /// safety is conservative *admission* (the residency ledger), this just nudges MLX
+    /// toward the model's share. Soft-limit priority: explicit `ROZUM_MLX_MEM_GB` > the
+    /// smmr-A residency share ([`set_memory_cap_bytes`]) > default `total − 8 GB` (a lone
+    /// gateway). `ROZUM_MLX_CACHE_GB` (default 4); `0` disables either. Process-global, idempotent.
     fn cap_mlx_memory() {
         use std::sync::atomic::Ordering;
         let gb = |g: u64| -> usize { (g as usize).saturating_mul(1usize << 30) };
@@ -3487,25 +3489,31 @@ mod inner {
 #[cfg(feature = "mlx-native")]
 pub use inner::Export as MlxNativeBackend;
 
-/// Process-global MLX memory-limit override in bytes (`0` = unset). Set by the binary
-/// (smmr-A, `docs/specs/safe-multi-model-residency.md`) from this model's reserved
-/// residency footprint BEFORE the worker loads, so a co-resident gateway caps its own
-/// MLX at its share and the sum across gateways can't overcommit the host (the BUG-003
-/// reboot mechanism). Read by `cap_mlx_memory`; an explicit `ROZUM_MLX_MEM_GB` wins.
+/// Process-global MLX **soft** memory-limit override in bytes (`0` = unset). Set by the
+/// binary (smmr-A, `docs/specs/safe-multi-model-residency.md`) from this model's reserved
+/// residency footprint BEFORE the worker loads. NOTE: `set_memory_limit` is only a *soft*
+/// hint (allocations beyond it evict cache / wait, but still proceed — it is NOT a hard
+/// ceiling; source-proven, memory `reference-mlx-memory-cap-semantics`). So this is
+/// defense-in-depth that nudges MLX to stay near the model's share; the actual
+/// structural safety is conservative **admission** (the residency ledger refusing to
+/// load a model that would overcommit) plus `set_cache_limit` bounding the cache. Read by
+/// `cap_mlx_memory`; an explicit `ROZUM_MLX_MEM_GB` wins.
 static MEM_CAP_OVERRIDE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Set the per-process MLX memory ceiling (bytes) for smmr-A. Call before the model
+/// Set the per-process MLX **soft** memory limit (bytes) for smmr-A (see
+/// [`MEM_CAP_OVERRIDE_BYTES`] — it nudges, it does not hard-cap). Call before the model
 /// loads (before [`MlxNativeBackend::new`]). `0` clears it. Always compiled (a plain
 /// atomic store); without the `mlx-native` feature nothing reads it, so it is a no-op.
 pub fn set_memory_cap_bytes(bytes: u64) {
     MEM_CAP_OVERRIDE_BYTES.store(bytes, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Pure selection of the MLX memory ceiling in bytes (smmr-A), so the precedence is
-/// unit-testable without the MLX runtime: an explicit `ROZUM_MLX_MEM_GB` (in GB;
-/// `Some(0)` disables the cap entirely) wins; else the per-process residency share
-/// (bytes, when set by [`set_memory_cap_bytes`]); else the lone-gateway default
-/// `total − 8 GB`, floored at 8 GB.
+/// Pure selection of the MLX **soft** memory-limit value in bytes (smmr-A), so the
+/// precedence is unit-testable without the MLX runtime: an explicit `ROZUM_MLX_MEM_GB`
+/// (in GB; `Some(0)` disables the limit entirely) wins; else the per-process residency
+/// share (bytes, when set by [`set_memory_cap_bytes`]); else the lone-gateway default
+/// `total − 8 GB`, floored at 8 GB. (Soft — a hint to evict/wait, not a hard ceiling.)
+#[allow(dead_code)] // called by cap_mlx_memory (feature-gated) + smmr_cap_tests
 fn select_mlx_mem_limit_bytes(env_mem_gb: Option<u64>, share_bytes: u64, total_bytes: u64) -> usize {
     let gb = |g: u64| -> usize { (g as usize).saturating_mul(1usize << 30) };
     match env_mem_gb {
