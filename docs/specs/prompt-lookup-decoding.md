@@ -137,11 +137,15 @@ Draft spec-decode lost on MoE because the draft forward ≈ the target forward. 
   `BatchSeq`/`check_finish` streaming) + a gated branch at the top of `worker_main`'s job
   loop: a greedy + dense + unconstrained job decodes via prompt-lookup **iff `ROZUM_PLOOKUP=1`**
   (default off ⇒ zero behaviour change for everyone else). Knobs `ROZUM_PLOOKUP_NGRAM`(2)/
-  `_K`(8)/`_WINDOW`(8192). Additive; compiles. **Live request-path A/B (served output
-  byte-identical on vs off) is PENDING A FREE SLOT** — the first attempt was correctly
-  *refused by the residency gate* (a sibling held GLM-4-32B), proving the reboot-safety;
-  run it when the host is clear. Caveat: forgoes cross-turn prefix reuse (fresh KV, like
-  `run_spec_job`) — combining them is a follow-up.
+  `_K`(8)/`_WINDOW`(8192). Additive; compiles. **Live request-path A/B ✅ PASSED:** on
+  Qwen3-0.6B, same copy-greedy request — `ROZUM_PLOOKUP=1` **engaged** (`prompt-lookup: 14
+  forwards for 60 output tokens` ≈ 4.3× on a short request), served output **byte-identical**
+  to `ROZUM_PLOOKUP=0`, and the off case used the normal path. (The first attempt was
+  correctly *refused by the residency gate* — a sibling held GLM-4-32B — proving the
+  reboot-safety; the passing run co-loaded the tiny 0.6B with `ROZUM_ALLOW_CONCURRENT_RESIDENT=1`
+  alongside a sibling's gpt-oss with ample headroom, no overcommit.) **So prompt-lookup
+  serves real requests end-to-end, gated, byte-exact.** Caveat: forgoes cross-turn prefix
+  reuse (fresh KV, like `run_spec_job`) — combining them is a follow-up.
 - **P2 — MoE decision.** Measure the near-tie divergence rate on Qwen3.6-35B; pick the
   dense-only-byte-exact vs accept-divergence policy from data.
 - **P3 — matrix gate.** Run the agentic matrix with `ROZUM_PLOOKUP=1`; confirm pass-matrix
