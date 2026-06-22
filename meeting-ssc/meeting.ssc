@@ -186,8 +186,9 @@ def page(cur: String): String =
   val rnames  = roomNames()
   val opts    = rnames.map(n => element("option", ["value" -> n], Map(), [textNode(n)])).toList
   val sel     = element("select", ["id" -> "rs", "style" -> "flex:1; min-width:0; padding:7px 10px; border-radius:8px; border:1px solid #333a44; background:#0f1115; color:#e6e6e6; font-size:15px"], Map(), opts)
+  val mpLink  = element("a", ["href" -> ("/mp/" + cur), "style" -> "flex:0 0 auto; text-decoration:none; font-size:20px; line-height:1; padding:3px 5px"], Map(), [textNode("🤖")])
   val gear    = element("a", ["href" -> "/manage", "style" -> "flex:0 0 auto; text-decoration:none; font-size:21px; line-height:1; padding:3px 6px"], Map(), [textNode("⚙")])
-  val tabsRow = element("div", ["style" -> "display:flex; gap:8px; align-items:center; width:100%"], Map(), [sel, gear])
+  val tabsRow = element("div", ["style" -> "display:flex; gap:8px; align-items:center; width:100%"], Map(), [sel, mpLink, gear])
   val handle  = element("div", ["style" -> "width:56px; height:6px; border-radius:3px; background:#3a414d"], Map(), [])
   val nav     = element("div", ["id" -> "nav", "style" -> "flex:0 0 auto; display:flex; flex-direction:column; align-items:center; gap:9px; padding:max(8px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) 8px max(12px,env(safe-area-inset-left)); background:#1b1e24; border-bottom:1px solid #2a2e36"], Map(), [tabsRow, handle])
   val list  = element("div", ["id" -> "list", "style" -> "flex:1 1 auto; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px max(14px,env(safe-area-inset-right)) 12px max(14px,env(safe-area-inset-left)); color:#e6e6e6; font:15px/1.5 -apple-system,system-ui,sans-serif"], Map(), [msgsView(cur)])
@@ -286,6 +287,73 @@ def gwView(): View =
   val ctl = if running then element("div", ["style" -> "display:flex; gap:8px; margin-top:12px"], Map(), [confirmForm("gwstop", "x", "1", "🛑 стоп", "#b3431f", "Остановить гейтвей?"), confirmForm("gwunload", "x", "1", "выгрузить", "#3a414d", "Выгрузить модель (демон останется)?")]) else element("span", Map(), Map(), [])
   element("div", Map(), Map(), [hd, element("div", Map(), Map(), rows), ctl])
 
+def firstWord(s: String): String =
+  val b = s.trim.split(" ")
+  b(0) + ""
+
+def modelSpec(l: String): String =
+  val sp = l.split("GB")
+  if sp.length < 2 then "" else sp(1).trim
+
+def gwPort(): String =
+  val o = exec("rozum", ["gateway", "status"], ProcessOptions(None, Map(), None)).stdout
+  val a = o.split("port:")
+  if a.length < 2 then "8080" else firstLine(a(1) + "")
+
+def mpStatusLine(room: String): String =
+  val pids = exec("pgrep", ["-f", s"meetings participant.*--room $room"], ProcessOptions(None, Map(), None)).stdout
+  if pids.trim == "" then ""
+  else exec("ps", ["-o", "command=", "-p", firstLine(pids + "")], ProcessOptions(None, Map(), None)).stdout
+
+def mpModelOf(line: String): String =
+  val a = line.split("--model ")
+  if a.length < 2 then "" else firstWord(a(1) + "")
+
+def mpOption(l: String): View =
+  element("option", ["value" -> (modelSpec(l) + "")], Map(), [textNode(modelSpec(l) + "")])
+
+def policyOption(p: String): View =
+  element("option", ["value" -> p], Map(), [textNode(p)])
+
+def mpPage(room: String): String =
+  val sl      = mpStatusLine(room)
+  val running = sl.trim != ""
+  val mo      = exec("rozum", ["models", "list"], ProcessOptions(None, Map(), None)).stdout
+  val ml      = mo.split("\n").filter(l => l.contains(":")).toList
+  val mopts   = ml.map(mpOption).toList
+  val popts   = ["mention", "always", "manual"].map(policyOption).toList
+  val statusV = if running then
+      element("div", ["style" -> "margin:8px 0 14px"], Map(), [
+        element("span", Map(), Map(), [textNode("● запущена: ")]),
+        element("code", ["style" -> "font-family:ui-monospace,Menlo,monospace; font-size:0.9em; background:#23272e; padding:1px 6px; border-radius:5px; color:#6ee7a8"], Map(), [textNode(mpModelOf(firstLine(sl + "")))]),
+        element("form", ["method" -> "post", "action" -> "/do", "enctype" -> "text/plain", "style" -> "display:inline; margin-left:10px", "onsubmit" -> "return confirm('Остановить модель-участника?')"], Map(), [
+          element("input", ["type" -> "hidden", "name" -> "act", "value" -> "mpstop"], Map(), []),
+          element("input", ["type" -> "hidden", "name" -> "room", "value" -> room], Map(), []),
+          element("button", ["style" -> "background:#b3431f; color:#fff; border:0; border-radius:6px; padding:4px 12px; font-size:13px"], Map(), [textNode("🛑 стоп")])
+        ])
+      ])
+    else element("div", ["style" -> "color:#5b626d; margin:8px 0 14px"], Map(), [textNode("модель-участник не запущена")])
+  val startForm = element("form", ["method" -> "post", "action" -> "/do", "enctype" -> "text/plain", "style" -> "display:flex; flex-direction:column; gap:9px"], Map(), [
+    element("input", ["type" -> "hidden", "name" -> "act", "value" -> "mpstart"], Map(), []),
+    element("input", ["type" -> "hidden", "name" -> "room", "value" -> room], Map(), []),
+    element("label", ["style" -> "font-size:12px; color:#9ad"], Map(), [textNode("модель")]),
+    element("select", ["name" -> "model", "style" -> "padding:8px 10px; border-radius:8px; border:1px solid #333a44; background:#0f1115; color:#e6e6e6; font-size:16px"], Map(), mopts),
+    element("label", ["style" -> "font-size:12px; color:#9ad"], Map(), [textNode("когда отвечать")]),
+    element("select", ["name" -> "policy", "style" -> "padding:8px 10px; border-radius:8px; border:1px solid #333a44; background:#0f1115; color:#e6e6e6; font-size:16px"], Map(), popts),
+    element("label", ["style" -> "font-size:12px; color:#9ad"], Map(), [textNode("персона / контекст (кто это, о чём конференция)")]),
+    element("input", ["name" -> "persona", "placeholder" -> "напр. ты эксперт по Rust, помогаешь команде…", "autocomplete" -> "off", "style" -> "padding:8px 10px; border-radius:8px; border:1px solid #333a44; background:#0f1115; color:#e6e6e6; font-size:16px"], Map(), []),
+    element("button", ["style" -> "margin-top:4px; background:#2e7d4f; color:#fff; border:0; border-radius:8px; padding:9px 14px; font-weight:600"], Map(), [textNode("🤖 запустить модель в комнате")])
+  ])
+  val back = element("a", ["href" -> ("/r/" + room), "style" -> "color:#7ab8ff; text-decoration:none"], Map(), [textNode("← чат")])
+  val doc  = element("div", ["style" -> "padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) 36px max(16px,env(safe-area-inset-left)); color:#e6e6e6; font:15px/1.5 -apple-system,system-ui,sans-serif; max-width:680px; margin:0 auto"], Map(), [
+    back,
+    element("h2", ["style" -> "margin:8px 0 2px"], Map(), [textNode("Модель-участник")]),
+    element("div", ["style" -> "font-size:13px; color:#6b7280; margin-bottom:8px"], Map(), [textNode("комната: " + room)]),
+    statusV,
+    startForm
+  ])
+  head ++ renderHtml(doc)
+
 def managePage(): String =
   val rlines    = statusOut().split("\n").filter(l => l.contains("project:")).toList
   val roomList  = element("div", Map(), Map(), rlines.map(roomItem).toList)
@@ -313,6 +381,14 @@ def doAction(body: String): String =
   val name = if np.length < 2 then "" else firstLine(np(1) + "")
   val sp = body.split("spec=")
   val spec = if sp.length < 2 then "" else firstLine(sp(1) + "")
+  val rp = body.split("room=")
+  val room = if rp.length < 2 then "" else firstLine(rp(1) + "")
+  val mp = body.split("model=")
+  val model = if mp.length < 2 then "" else firstLine(mp(1) + "")
+  val pp = body.split("policy=")
+  val policy = if pp.length < 2 then "mention" else firstLine(pp(1) + "")
+  val pe = body.split("persona=")
+  val persona = if pe.length < 2 then "" else pe(1).trim
   if act == "createroom" && name != "" then
     if hasBad(name) then "<!doctype html><meta http-equiv='refresh' content='0;url=/manage'>ok"
     else
@@ -337,11 +413,23 @@ def doAction(body: String): String =
   else if act == "gwunload" then
     val r = exec("rozum", ["gateway", "unload"], ProcessOptions(None, Map(), None))
     "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url=/manage\">ok"
+  else if act == "mpstart" && room != "" && model != "" then
+    val url = s"http://127.0.0.1:${gwPort()}/v1"
+    if persona == "" then
+      val r = exec("sh", ["-c", "nohup \"$@\" >/tmp/rozum-mp.log 2>&1 &", "x", "rozum", "meetings", "participant", "--model", model, "--room", room + "", "--reply-policy", policy, "--gateway-url", url], ProcessOptions(None, Map(), None))
+      s"<!doctype html><meta http-equiv='refresh' content='1;url=/mp/$room'>ok"
+    else
+      val r = exec("sh", ["-c", "nohup \"$@\" >/tmp/rozum-mp.log 2>&1 &", "x", "rozum", "meetings", "participant", "--model", model, "--room", room + "", "--reply-policy", policy, "--gateway-url", url, "--persona", persona], ProcessOptions(None, Map(), None))
+      s"<!doctype html><meta http-equiv='refresh' content='1;url=/mp/$room'>ok"
+  else if act == "mpstop" && room != "" then
+    val r = exec("pkill", ["-f", s"meetings participant.*--room ${room + ""}"], ProcessOptions(None, Map(), None))
+    s"<!doctype html><meta http-equiv='refresh' content='0;url=/mp/$room'>ok"
   else "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url=/manage\">ok"
 
 @main def run(): Unit =
   route("GET",  "/r/", req => page(afterPrefix(req)))
   route("GET",  "/m/", req => roomMsgs(afterPrefix(req)))
+  route("GET",  "/mp/", req => mpPage(afterPrefix(req)))
   route("POST", "/p",  req => doPost(req))
   route("POST", "/do", req => doAction(req))
   route("GET",  "/manage", req => managePage())
