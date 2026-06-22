@@ -145,8 +145,13 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
   critical) observability + `PressureLevel::as_str`. My parallel `govern` module was REMOVED (redundant +
   inferior signal/placement; room MCP down caused the brief dup). **REMAINING (folds into residency-unify):**
   cross-process, utility-ranked eviction — *which* model sheds, not just "self if idle".
-- [ ] **govern-os-containment** — set gateway jetsam priority / RLIMIT so a breach is a recoverable
-  process-kill, not a kernel panic. Cheap, large safety upside.
+- [x] **govern-os-containment** — **RESOLVED: not feasible on macOS via RLIMIT (`nimble-raven`, 2026-06-22,
+  empirically tested).** macOS **ignores `RLIMIT_AS`** (a 3 GB host alloc succeeded under a 2 GB `ulimit -v`),
+  and Metal/unified memory isn't process address space anyway (a 6 GB GPU alloc sailed past a 4 GB limit).
+  Jetsam priority (`memorystatus_control`) needs entitlements a normal process lacks. ⇒ there is no simple
+  OS lever to convert a breach into a recoverable process-kill. **The practical containment IS the `shed`
+  governor** (react to the OS jetsam pressure level + unload BEFORE the kernel panics) — already shipped.
+  No separate OS-containment to build; don't pursue RLIMIT.
 - [ ] **residency-unify-in-process** (design: `docs/specs/residency-unify.md`) — fold co-residency into one in-process Switchboard (N models, exact
   accounting, instant swap) instead of N flock-coordinated processes; flock ledger stays the cross-process
   backstop. (Big; design-gated; coordinate.)

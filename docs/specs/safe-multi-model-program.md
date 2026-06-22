@@ -38,10 +38,12 @@ is the single highest-leverage missing piece**, and it is what lets us safely pu
   (SPRINT task). → estimate after resolve.
 - ⛔ **Non-MLX backends (gguf/mistralrs) have no cache bound** → their co-residency is
   admission-only, no enforcement. → per-backend memory bounding, or single-flight them.
-- ⛔ **A genuine single-model OOM still panics the kernel** (Metal, process-fatal → host
-  reboot). → chunked-everything (prefill done) + OS-level containment: set the gateway's
-  jetsam priority / an RLIMIT so the OS kills *our* process (recoverable) instead of
-  panicking; the governor sheds before that.
+- 🔜 **A genuine single-model OOM still panics the kernel** (Metal, process-fatal → host
+  reboot). Mitigation: chunked-everything (prefill done) + the `shed` governor sheds before
+  the threshold. **OS-level containment RULED OUT (tested 2026-06-22):** macOS ignores
+  `RLIMIT_AS` (3 GB alloc succeeded under a 2 GB limit) and Metal isn't process AS anyway;
+  jetsam-priority needs entitlements. ⇒ `shed` (react-before-panic) is the only practical
+  containment; there is no "kill our process not the kernel" lever for a normal macOS process.
 
 ### B. Capability (as many models as fit)
 - ✅ Co-residency on by default, budget-gated; two small models now co-reside.
@@ -79,10 +81,12 @@ Sequence by leverage-on-the-guarantee, safety first:
    graceful degradation. Observable via `/stats memory_pressure` (normal/warn/critical).
    REMAINING: cross-process, utility-ranked eviction (which model sheds, not just "self if
    idle") — folds into the Switchboard unify (step 3).
-2. **OS-level containment.** Jetsam priority / RLIMIT_AS on gateway processes so a breach
-   degrades to a recoverable process kill, never a kernel panic. Cheap, huge safety upside.
+2. **OS-level containment — RULED OUT on macOS (tested).** RLIMIT_AS is ignored + Metal
+   isn't process AS; jetsam-priority needs entitlements. So `shed` (step 1, react-before-panic)
+   IS the containment — nothing more to build here on this platform.
 3. **Unify residency in-process (Switchboard).** One gateway, N models, exact accounting,
    instant swap — supersedes process-per-model. Folds B's co-residency + C's fast-swap.
+   Design ready: `docs/specs/residency-unify.md` (joint w/ sunny-civet). **Now the top lever.**
 4. **Elastic KV + footprint-after-resolve.** Remove the static-worst-case and footgun
    obstacles → more co-residency at the same safety.
 5. **Hardware abstraction (`rozum-hardware`, Phase 4).** Generalize to x86/CUDA/CPU.
