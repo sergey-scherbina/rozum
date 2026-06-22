@@ -80,6 +80,43 @@ push `feature/<slug>:master` (never edit master), then delete the done entry + p
 >    no-model default work is now **matrix-baseline prep** (done) + supporting `plucky-finch`'s probe.
 > Rule: slot-tasks (1,2) serialize behind the room claim; no-slot work runs in parallel.
 
+##### ▶▶ safe-multi-model-residency (operator vision 2026-06-22: "несколько моделей одновременно ИЛИ очень быстрый swap — но ГЛАВНОЕ всё безопасно")
+Spec: `docs/specs/safe-multi-model-residency.md`. The North-Star residency goal, safety-first.
+Owners (room n=25–43): admission *mechanism* = `sunny-civet` (v2 RAM-ledger, on master `644e8e8`);
+admission *numbers* + per-process cap + validation = `nimble-raven`.
+
+> **⚠️ LIVE SAFETY FINDING (nimble-raven, data-backed): v2 as shipped can still reboot.** v2 admits a
+> 2nd model by `estimate = size_bytes × 1.25 + 1 GB`, but measured peak resident is **cache-dominated,
+> not weight-proportional**: Qwen3-4B (weights ~2.5 GB) peaked at **26.9 GB**; Qwen2.5-0.5B at 14.9 GB
+> (MLX caches to the per-process cap `total−8 ≈ 28 GB`). So the estimate under-counts small models ~6×;
+> two 4B models pass admission (4+4 ≤ 0.65×36=23 GB) but really need ~54 GB → **reboot**. Fix is NOT a
+> bigger inflate (balloon is additive/cache-driven). The fix = the share-bounded cap (A) — it turns the
+> reservation into an *enforced* ceiling, the only thing that makes safe co-residency possible on 36 GiB.
+
+- [ ] **smmr-A-share-cap** (TOP safety priority, `nimble-raven`) — make `cap_mlx_memory`
+  (`crates/rozum-mlx/src/mlx_native_backend.rs:~363`) **sibling-aware**: cap each model's
+  `set_memory_limit`/`set_cache_limit` to its budget SHARE (`budget − committed_by_others` from the v2
+  ledger), not flat `total−8`, so Σ(caps) ≤ `total × FRAC` no matter how the cache grows. Floor each cap
+  at the model's minimum need (weights+KV+prefill) or MLX self-OOMs (process-fatal, contained — not a
+  reboot; memory `project-mlx-35b-prefill-oom`). Bin passes the reserved share into the worker. **Done-when:**
+  two co-resident models' caps sum ≤ budget; live big+small pair stays under budget (no balloon); unit test
+  on the share math; `cargo check` default & `--no-default-features` green.
+- [ ] **smmr-B-footprint** (`nimble-raven`) — replace `estimate_model_footprint_bytes` (main.rs, weights-only
+  ×1.25+1 GB) with calibrated `rozum_models::runtime_footprint(spec, n_ctx)` = weights + KV(n_ctx) +
+  activation/cache reserve, **with a floor ≥ measured per-class peak** (table in spec). Clean interface the
+  v2 ledger + the cap (A) both call (agreed room n=42, no double-owning main.rs). **Done-when:** estimate ≥
+  measured peak for every model in the spec table (unit test); ledger uses it.
+- [ ] **smmr-C-fast-swap** (track, owner TBD) — the "very fast sequentially" half: when `oversubscribed`,
+  swap WITHOUT transient both-resident (unload→GPU-settle→load), minimize dead time (mmap page-cache-warm
+  weights, prefetch next during drain). Reuses `gateway switch` + `plan_residency`. Spec later; below A/B.
+- [ ] **smmr-D-validate** (`nimble-raven`, capstone — needs the model slot, after A) — safety harness: prove
+  host peak RAM never exceeds `total × FRAC` across admitted co-residency + swap. Never load an un-admitted
+  combo to "see if it reboots." Supersedes the paused `validate-gate-live` (now validates v2/v3 semantics).
+- **INTERIM SAFETY (until A lands) — operator decision pending:** v2 co-residency is on-by-default but the
+  cap isn't share-bounded → two small models can still balloon. Safe interim = raise `ROZUM_GATEWAY_FOOTPRINT_
+  BASE_MB` to ~14000 (every model peaks ≥ ~13 GB → conservative; effectively single-flight on 36 GiB until A)
+  OR keep co-residency opt-in. Recommend the conservative base until A makes co-residency safe-by-default.
+
 #### 1. Green matrix — NO fails allowed, ever
 
 The matrix must be **all green**. Every fail — and every non-deterministic flip — is a
