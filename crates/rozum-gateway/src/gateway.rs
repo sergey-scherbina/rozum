@@ -2806,6 +2806,13 @@ async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
                 json!({ "active": active, "peak": peak, "cache": cache }),
             );
         }
+        // Host memory-pressure level (the OS jetsam ladder the shed watchdog acts on):
+        // normal / warn / critical — the real-time host safety margin, observable without
+        // re-sampling sysctl. See `rozum-core::shed` + docs/specs/safe-multi-model-program.md.
+        m.insert(
+            "memory_pressure".into(),
+            json!(crate::shed::read_host_pressure().as_str()),
+        );
         // Batched-decode occupancy (native MLX): how many concurrent requests actually
         // share a forward. `avg_occupancy = rows/runs`; `max` is the high-water batch size;
         // `admits` counts continuous mid-decode admissions. Omitted until something batches.

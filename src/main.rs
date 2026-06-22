@@ -1029,68 +1029,10 @@ async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: roz
         builder: Some(gateway_backend_builder(std::sync::Arc::clone(&cfg))),
         backend_hint: None,
     };
-    // Measured memory-pressure backstop (safe-multi-model-program §1): watch ACTUAL host
-    // free RAM, not just the admission estimate, so the host approaching the danger zone is
-    // visible in real time. The closed loop to estimate-based admission.
-    spawn_memory_governor();
     if let Err(e) = rozum::gateway::run(backend, port, model_spec, cfg).await {
         eprintln!("gateway error: {e}");
         std::process::exit(1);
     }
-}
-
-/// Spawn the measured memory-pressure governor (`docs/specs/safe-multi-model-program.md`
-/// §1). A background task that samples ACTUAL host free RAM + MLX usage and classifies
-/// pressure (`rozum::govern`), so over-spend from ANY source — a wrong footprint estimate,
-/// a backend with no cache bound, another process — surfaces before the host crosses the
-/// vm-compressor-exhaustion / watchdog-panic threshold ([[project-reboot-watchdog-oom]]).
-/// **Read-only for now** (logs Yellow/Red + the prescribed action); the Red eviction action
-/// is the coordinated next step (cross-process residency / Switchboard). Opt out with
-/// `ROZUM_GOVERNOR=0`; interval `ROZUM_GOV_INTERVAL_SECS` (default 5s).
-fn spawn_memory_governor() {
-    if std::env::var("ROZUM_GOVERNOR").map(|v| v == "0").unwrap_or(false) {
-        return;
-    }
-    let secs = std::env::var("ROZUM_GOV_INTERVAL_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(5);
-    let thresholds = rozum::govern::PressureThresholds::from_env();
-    tokio::spawn(async move {
-        use rozum::govern::{Pressure, action_for, classify};
-        let mb = |b: u64| b / (1 << 20);
-        let mut last = Pressure::Green;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
-            let total = rozum::concurrency::total_ram_bytes().unwrap_or(0);
-            let free = rozum::concurrency::available_ram_bytes().unwrap_or(0);
-            let band = classify(free, total, &thresholds);
-            // Log any non-green band, plus the one transition back to green.
-            if band != Pressure::Green || band != last {
-                let (active, _peak, cache) = rozum::obs::mlx_memory_mb().unwrap_or((0, 0, 0));
-                let tag = match band {
-                    Pressure::Green => "ok",
-                    Pressure::Yellow => "WARN",
-                    Pressure::Red => "DANGER",
-                };
-                eprintln!(
-                    "rozum governor [{tag}]: pressure={band:?} free={}MB/{}MB \
-                     mlx(active={active}MB cache={cache}MB) -> action={:?}",
-                    mb(free),
-                    mb(total),
-                    action_for(band),
-                );
-                if band == Pressure::Red {
-                    eprintln!(
-                        "  governor: host free RAM critically low — would EVICT the lowest-utility \
-                         idle model (cross-process eviction pending residency-unify); shed load now."
-                    );
-                }
-            }
-            last = band;
-        }
-    });
 }
 
 /// Pull rozum-known flags out of the program's trailing args.

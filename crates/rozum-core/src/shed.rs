@@ -22,6 +22,17 @@ pub enum PressureLevel {
     Critical,
 }
 
+impl PressureLevel {
+    /// Stable lowercase label for `/stats` / logs / UIs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PressureLevel::Normal => "normal",
+            PressureLevel::Warn => "warn",
+            PressureLevel::Critical => "critical",
+        }
+    }
+}
+
 /// Read the OS memory-pressure level. macOS: `kern.memorystatus_vm_pressure_level`
 /// (`1` normal, `2` warn, `4` critical — the value jetsam acts on). Shells `sysctl`
 /// for consistency with [`crate::concurrency::total_ram_bytes`] (no `libc` dep).

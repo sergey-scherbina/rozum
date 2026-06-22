@@ -8,7 +8,6 @@ pub mod backend;
 pub mod concurrency;
 pub mod constrain;
 pub mod engine;
-pub mod govern;
 pub mod harmony;
 pub mod obs;
 pub mod prefetch;

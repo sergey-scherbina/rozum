@@ -683,8 +683,9 @@ pub fn total_ram_bytes() -> Option<u64> {
 }
 
 /// RAM available right now (free + inactive + speculative + purgeable), cached ~1s. Public
-/// single source of free-RAM for the memory governor (safe-multi-model-program) + preflights
-/// — supersedes the bin's `#[cfg(feature="mistralrs")]` duplicate.
+/// shared free-RAM source for preflight sizing / observability — an alternative to the
+/// bin's `#[cfg(feature="mistralrs")]` duplicate. (The `shed` watchdog keys on the OS
+/// jetsam pressure level, not this; this stays useful for preflight estimates.)
 pub fn available_ram_bytes() -> Option<u64> {
     available_ram_bytes_cached()
 }
