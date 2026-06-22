@@ -369,3 +369,54 @@ fixes broken Rust or a refusal. **Conclusion:** delivery WAS broken (the gateway
 necessary — files now land) AND create-from-scratch ALSO has a real gpt-oss-20b capability ceiling.
 Both prior framings were half-right; the honest split is *delivery = gateway-fixed, correctness =
 model-bound*. A reliable 5/5 for gpt-oss create-from-scratch is not achievable at the gateway alone.
+
+### CLOSE (2026-06-22) — root cause isolated + solution
+
+A push-back ("if claude/opencode drive the SAME gpt-oss to green, the model isn't weak — why only
+codex?") forced a clean A/B, and it re-frames the whole finding. The model is **not** weak:
+
+1. claude/opencode get gpt-oss green on `build`/`test` (they also flake ~1/2 — `build` is hard for
+   gpt-oss under *every* harness, not just codex).
+2. The delivered content is **valid Rust** — proven byte-exact: the model's emitted `Cargo.toml`
+   lands verbatim through the gateway (capture RAW == file on disk).
+3. The dominant `build` failure was a **benchmark-prompt refusal**: gpt-oss read "do NOT create a
+   subdirectory" literally and refused to make `src/`. **A/B PROVEN** — clarifying the prompt
+   ("`src/` is fine; don't wrap in `cargo new`", commit `af30e59`) took refusals 2-3/3 → **0/3**,
+   `Cargo.toml` lands 3/3.
+4. The residual is **delivery**, and it degrades *specifically because of codex's V4A `apply_patch`
+   protocol*. For the second/nested file (`src/main.rs`) gpt-oss emits an **open-ended variety** of
+   malformations: bare `apply_patch`; `*** Update File:` with `+`-content on an absent file; explicit
+   `*** Add/Create File:`; a whole file dumped as a marker-less `*** Update File:`; nested heredocs
+   that share an `EOF` delimiter (`cat <<'EOF' … cat > src/main.rs <<'EOF' … EOF`, inner closes
+   outer); even chain-of-thought leaked into the tool args. The gateway now catches the coherent ones
+   (`d55fc2e`, `7d32e89`, `662595a`) — but it's whack-a-mole with diminishing returns.
+
+**Verdict:** the codex-specific gap is the **interface**, not the model. Under claude's
+`Write({path, content})` none of this arises (the path is trivial); under codex the model wrestles a
+complex patch protocol and mis-forms the delivery. "Model weak for codex" is wrong.
+
+**Solution — to make codex × gpt-oss create-from-scratch reliable (attack the entropy at the source,
+keep a safety net, right-size the model):**
+
+1. **[Highest leverage] Steer the model to ONE simple create primitive via the codex system prompt.**
+   On the gateway codex path that already folds `instructions`/`developer` (`responses_input_to_
+   internal`) and runs codex-lean, inject a short, forceful recipe: *"To create or overwrite a file,
+   use exec_command with EXACTLY `mkdir -p \"$(dirname PATH)\"; cat > PATH <<'ROZUM_EOF' … ROZUM_EOF`.
+   NEVER use apply_patch for a new file."* The model already KNOWS this works (it mused "use printf,
+   tee" mid-run) — it just won't commit. Collapsing to one shape slashes the malformation entropy and
+   the gateway can validate/repair that single shape robustly. This is the codex analog of giving the
+   model claude's trivial `Write`.
+2. **[Safety net — shipped] The gateway intent-normalizer.** When the model still deviates, map every
+   recognized create shape to the canonical absence-guarded write (`synth_create_command`). Already in
+   `apply_patch_block_to_fuzz` / `normalize_codex_tool_args` (Add/Create File, Update-on-absent,
+   bare-Update-File, `{path,content}`).
+3. **[Pragmatic now] Route codex create-heavy work to the stronger local model.** Qwen3.6-35B-A3B
+   clears codex's apply_patch bar (matrix 5/5 jailed); gpt-oss-20b is excellent under claude/opencode
+   but marginal under codex's protocol. This is the immediate "right tool for the job" workaround.
+4. **[Deeper, optional] A native simple-write tool for codex.** If codex can register a custom tool
+   (or run with a minimal set including a plain write), give the model a `Write`-equivalent — the
+   cleanest long-term fix: make codex's effective interface as simple as claude's. Depends on codex
+   extensibility.
+
+Expected: **#1 + #2 together** should lift codex × gpt-oss create-from-scratch to the
+claude/opencode rate; **#3** is the reliable immediate workaround. **FINDING 5 CLOSED.**
