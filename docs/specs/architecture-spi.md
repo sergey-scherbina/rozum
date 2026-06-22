@@ -206,8 +206,10 @@ by either — call it out explicitly so it doesn't silently re-tangle.
   as forced abstraction over different typed extractors + SSE sequences — net-negative on
   matrix-critical code (see Decisions). Adding an agent dialect = copy the triple the map
   names.
-- **Stage 4 (MCP `ToolSource` adapter) — optional follow-up.** Not blocking; the tool SPI
-  already exists, this only unifies external MCP + in-process tools behind it.
+- **Stage 4 (MCP `ToolSource` adapter) — DONE.** `McpToolSource` (`src/mcp_tool_source.rs`):
+  an rmcp 1.7 client impl of `ToolSource` over a stdio child process, unifying external MCP
+  tools with the in-process `CallbackToolSource` behind the one tool SPI (via `MultiToolSource`).
+  5/0 tests on an in-memory duplex, no external binary. Spec `docs/specs/mcp-toolsource.md`.
 - **Net outcome.** The legibility goal is met: every concern (model / tool / agent dialect /
   model tool-format / service) has a named seam findable in one hop — `SPEC.md` "Extension
   points" → `ChatBackend` (`backend.rs`), `ToolSource` (`agent.rs`), `ToolDialect`

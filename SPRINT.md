@@ -61,11 +61,13 @@ merged** (the legibility goal is met). Spec `2edbf00`; outcome in
   A trait would force uniformity over different typed extractors + SSE sequences →
   net-negative on matrix-critical code. Fixed the stale module doc ("two dialects" →
   three) into an accurate wire-protocol **map**. Docs-only.
-- [ ] **Stage 4 (optional, a FEATURE not legibility) — MCP `ToolSource` adapter.**
-  An MCP-client impl of `ToolSource` so the **embedded** agent loop can consume
-  external MCP servers' tools (the gateway/launch path already uses the external
-  agent's own tools, so this is net-new reach, not a refactor). Not auto-shipped —
-  needs its own design + integration tests; do on request.
+- [x] **Stage 4 — MCP `ToolSource` adapter** (merged). `McpToolSource`
+  (`src/mcp_tool_source.rs`): rmcp 1.7 client over a stdio child process; tools cached
+  at connect, `dispatch`→`call_tool` with `is_error`/transport failures → recoverable
+  `ToolError`; composes with in-process tools via `MultiToolSource`. **5/0 tests** via an
+  in-memory duplex against a minimal in-process rmcp server (`echo`+`boom`) — no external
+  binary. Spec `docs/specs/mcp-toolsource.md`. (Surfacing it in an embedded-agent command
+  that *configures* MCP servers is a separate later step — out of scope here.)
 - [ ] **Out of scope (decided):** services-as-plugins (subcommands stay); dynamic/
   loadable plugins (dylib/WASM/out-of-process) — in-tree trait impls only;
   re-abstracting `ChatBackend`/`ToolSource` (already correct).
