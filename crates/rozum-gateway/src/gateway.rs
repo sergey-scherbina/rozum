@@ -363,21 +363,33 @@ impl Switchboard {
     /// Called by the lifecycle watchdog; the primary has its own idle-unload.
     async fn sweep_idle_warm(&self, idle_secs: u64) {
         let now = crate::share::now_unix();
-        let mut warm = self.warm.lock().await;
-        let victims: Vec<String> = warm
-            .iter()
-            .filter(|(_, e)| {
-                e.handle.inflight.load(Ordering::SeqCst) == 0
-                    && now.saturating_sub(e.handle.last_used.load(Ordering::SeqCst)) >= idle_secs
-            })
-            .map(|(m, _)| m.clone())
-            .collect();
-        for m in victims {
-            if let Some(removed) = warm.remove(&m) {
-                let b = removed.backend;
-                tokio::task::spawn_blocking(move || drop(b)); // join the !Send worker off-thread
-                crate::obs::log_event(json!({ "event": "warm_idle_evicted", "model": m }));
+        let mut removed_any = false;
+        // Evict under the lock; capture the surviving warm total to republish after release.
+        let warm_total: u64 = {
+            let mut warm = self.warm.lock().await;
+            let victims: Vec<String> = warm
+                .iter()
+                .filter(|(_, e)| {
+                    e.handle.inflight.load(Ordering::SeqCst) == 0
+                        && now.saturating_sub(e.handle.last_used.load(Ordering::SeqCst)) >= idle_secs
+                })
+                .map(|(m, _)| m.clone())
+                .collect();
+            for m in victims {
+                if let Some(removed) = warm.remove(&m) {
+                    removed_any = true;
+                    let b = removed.backend;
+                    tokio::task::spawn_blocking(move || drop(b)); // join the !Send worker off-thread
+                    crate::obs::log_event(json!({ "event": "warm_idle_evicted", "model": m }));
+                }
             }
+            warm.values().map(|e| e.weight_bytes).sum()
+        };
+        // Republish the reduced total reservation (residency-unify U1 wiring) only when the
+        // set changed. `model_id` is read with the warm lock RELEASED → no lock-order risk.
+        if removed_any {
+            let primary_fp = (self.warm_cfg.weight)(&self.model_id()).unwrap_or(0);
+            crate::share::update_my_reservation(&self.model_id(), primary_fp.saturating_add(warm_total));
         }
     }
 
@@ -457,6 +469,13 @@ impl Switchboard {
             model.to_string(),
             WarmEntry { backend: backend.clone(), weight_bytes: weight, handle: handle.clone() },
         );
+        // Republish this process's TOTAL reservation (primary + warm) so other gateways'
+        // admission accounts for the warm set, not just the primary (residency-unify U1
+        // wiring). `primary_id` is in hand and `update_my_reservation` does ledger-file IO
+        // only — no map/spec lock — so this is deadlock-safe under the held `warm` lock.
+        let primary_fp = (self.warm_cfg.weight)(&primary_id).unwrap_or(0);
+        let total = warm.values().map(|e| e.weight_bytes).fold(primary_fp, u64::saturating_add);
+        crate::share::update_my_reservation(&primary_id, total);
         self.usage.record(model, weight, now);
         crate::obs::log_event(json!({ "event": "warm_built", "model": model }));
         Some((backend, handle))
