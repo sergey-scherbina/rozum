@@ -134,16 +134,14 @@ admission *numbers* + per-process cap + validation = `nimble-raven`.
 ##### ▶▶ PROGRAM: max safety × capability × performance × flexibility (operator 2026-06-22)
 Spec `docs/specs/safe-multi-model-program.md` — obstacle register + the path. Core insight: today's
 safety is estimate-based (open-loop admission); the GUARANTEE needs measured closed-loop control.
-- [~] **govern-core + loop (measure half)** (`nimble-raven`) — **DONE `2b510cb` + `eb575aa`.**
-  `rozum-core::govern`: pure `classify(free,total,thresholds)→Pressure{Green/Yellow/Red}` (on FREE RAM —
-  catches over-spend from ANY source admission can't see; unknown total→Red) + `action_for→{Admit,
-  HoldAdmissions,EvictOne}`; env thresholds (`ROZUM_GOV_YELLOW_FRAC` 0.20 / `_RED_FRAC` 0.10). 4 tests.
-  **Loop LIVE:** `run_gateway` spawns `spawn_memory_governor()` — samples free RAM (new pub
-  `concurrency::available_ram_bytes`, 1s-cached) + `obs::mlx_memory_mb` every `ROZUM_GOV_INTERVAL_SECS`
-  (5s), logs WARN/DANGER + the action on leaving green. Read-only (logs). `ROZUM_GOVERNOR=0` opts out.
-  **REMAINING (govern-act, the guarantee):** on sustained Red, EVICT the lowest-utility idle model.
-  Cross-process eviction = Switchboard/ledger domain → **coordinate with `sunny-civet`** + gated on
-  `residency-unify-in-process`. Until then the loop gives early-warning + the data to tune thresholds.
+- [x] **memory-governor = `shed`** (`sunny-civet` watchdog + act; `nimble-raven` observability) —
+  **CONVERGED `4a04804`.** The governor is `rozum-core::shed` (sunny-civet, wired into the gateway
+  lifecycle watchdog): keys on the OS jetsam ladder (`kern.memorystatus_vm_pressure_level` — better than
+  a homemade free-bytes estimate) and under real host pressure unloads this gateway's idle model →
+  reboot becomes graceful degradation. **nimble-raven added `/stats memory_pressure`** (normal/warn/
+  critical) observability + `PressureLevel::as_str`. My parallel `govern` module was REMOVED (redundant +
+  inferior signal/placement; room MCP down caused the brief dup). **REMAINING (folds into residency-unify):**
+  cross-process, utility-ranked eviction — *which* model sheds, not just "self if idle".
 - [ ] **govern-os-containment** — set gateway jetsam priority / RLIMIT so a breach is a recoverable
   process-kill, not a kernel panic. Cheap, large safety upside.
 - [ ] **residency-unify-in-process** — fold co-residency into one in-process Switchboard (N models, exact

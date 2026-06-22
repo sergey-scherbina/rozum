@@ -25,8 +25,13 @@ is the single highest-leverage missing piece**, and it is what lets us safely pu
 - ✅ Conservative calibrated footprint (smmr-B) + cache-tied reserve + budget 0.75 (smmr-D).
 - ✅ Cap semantics understood: `set_memory_limit` SOFT, `set_cache_limit` bounds cache,
   admission is the lever ([[reference-mlx-memory-cap-semantics]]).
-- ⛔ **No measured feedback** — admission is open-loop. *The deepest obstacle.* → **Memory
-  Governor** (below).
+- 🔜 **Measured feedback** — admission is open-loop; the closed loop is **`rozum-core::shed`**
+  (sunny-civet, on master): a watchdog in the gateway lifecycle loop that keys on the OS
+  jetsam ladder (`kern.memorystatus_vm_pressure_level`) and, under real host pressure,
+  unloads this gateway's own idle model (act). nimble-raven added `/stats memory_pressure`
+  observability. REMAINING: cross-process utility-ranked eviction (gated on residency-unify).
+  (My earlier parallel `govern` module was removed — `shed`'s OS signal + watchdog placement
+  are better; we converged. Room MCP being down caused the brief duplication.)
 - ⛔ **Static worst-case KV reservation** blocks co-residency of models that won't fill
   their context. → elastic/lazy KV accounting + governor-driven eviction under real pressure.
 - ⛔ **`footprint-before-download` footgun** — uncached model over-reserves, blocks others
@@ -67,12 +72,13 @@ is the single highest-leverage missing piece**, and it is what lets us safely pu
 
 Sequence by leverage-on-the-guarantee, safety first:
 
-1. **Memory Governor (the guarantee).** A control loop sampling host free RAM (`vm_stat`)
-   + per-model `get_active`/`get_cache` (already exposed) on a short interval. Pressure
-   bands: **green** (admit freely) → **yellow** (stop admitting; prewarm swap candidates) →
-   **red** (evict the lowest-utility idle model *now*, before the OS jetsam/panic). This
-   makes safety react to *reality*. Pure classifier core is slot-free + unit-testable; wiring
-   to evict reuses the Switchboard. **Start here.**
+1. **Memory governor (the guarantee) — `rozum-core::shed`, LANDED.** The gateway lifecycle
+   watchdog keys on the OS jetsam ladder (`kern.memorystatus_vm_pressure_level` — the kernel's
+   own signal, better than a homemade free-bytes estimate) and, under real host pressure,
+   unloads this gateway's idle model (lazy-reloads on the next request) → a reboot becomes
+   graceful degradation. Observable via `/stats memory_pressure` (normal/warn/critical).
+   REMAINING: cross-process, utility-ranked eviction (which model sheds, not just "self if
+   idle") — folds into the Switchboard unify (step 3).
 2. **OS-level containment.** Jetsam priority / RLIMIT_AS on gateway processes so a breach
    degrades to a recoverable process kill, never a kernel panic. Cheap, huge safety upside.
 3. **Unify residency in-process (Switchboard).** One gateway, N models, exact accounting,
