@@ -8,7 +8,9 @@ pub mod service;
 // harmony) now lives in the `rozum-core` crate (Phase 0 of the workspace split).
 // Re-export its modules under their original paths so `crate::backend::…` /
 // `crate::engine::…` etc. resolve unchanged across the crate.
-pub use rozum_core::{concurrency, constrain, engine, harmony, obs, sampler, serving, share};
+pub use rozum_core::{
+    concurrency, constrain, engine, govern, harmony, obs, sampler, serving, share,
+};
 pub(crate) use rozum_core::backend;
 
 // The intelligence layer (agent loop, tool dispatch, cascade, router/RAG) now lives
