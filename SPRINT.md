@@ -200,9 +200,14 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
 >   seq-length non-invariance ([[project-spec-decode-moe-numerics]]) = byte-exact on DENSE only. REMAINING
 >   (slot-gated, coordinate w/ engine owner): wire into the decode loop behind `ROZUM_PLOOKUP=1` + model A/B
 >   on a real edit transcript + MoE policy + matrix gate (spec P1–P3).
-> - [ ] **cross-turn-prefix-kv-reuse** (#5, PERF, design-first) — the agent re-sends a growing transcript each
->   turn; cache the shared-prefix KV across requests from one agent to skip re-prefill (intra-request reuse
->   exists; lift to inter-request). Big single-stream win for the dominant use case. Gateway+MLX, matrix-critical → spec first.
+> - [~] **cross-turn-prefix-kv-reuse** (#5, PERF) — **CORRECTION (`sunny-civet`, verified in code): the
+>   single-agent win is ALREADY SHIPPED — don't rebuild it.** `mlx_native_backend.rs:~1111-1130` persists the
+>   previous request's KV cache and, on the next turn, truncates to the shared prefix and prefills only the
+>   new suffix — for dense + hybrid (Qwen3.6) + gpt-oss (the comment: "without reuse every turn re-prefills
+>   the whole growing conversation — brutally slow for multi-turn agents"). My idea #5's premise ("inter-request
+>   reuse doesn't exist") was WRONG. Residual gaps (smaller, real, if a need appears): (a) the store keeps ~one
+>   recent prefix → concurrent/interleaved agents thrash it (multi-prefix LRU cache); (b) gguf/mistralrs lack
+>   it (cross-engine). Re-scope to those before any work; no big single-stream win remains here.
 > - [ ] **fast-swap-feature** (#6, NORTH-STAR) — finish smmr-C: "every model available, sub-second swap" using
 >   the landed `prefetch::warm_dir_page_cache` + ordered drain→free→settle→load via `gateway switch`. Slot-gated
 >   orchestration; the higher-value lever than co-residency for multi-model agentic use on one box.
