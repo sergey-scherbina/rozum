@@ -134,13 +134,16 @@ admission *numbers* + per-process cap + validation = `nimble-raven`.
 ##### ▶▶ PROGRAM: max safety × capability × performance × flexibility (operator 2026-06-22)
 Spec `docs/specs/safe-multi-model-program.md` — obstacle register + the path. Core insight: today's
 safety is estimate-based (open-loop admission); the GUARANTEE needs measured closed-loop control.
-- [~] **govern-core** (`nimble-raven`) — **CORE DONE `2b510cb`.** `rozum-core::govern`: pure
-  `classify(free,total,thresholds)→Pressure{Green/Yellow/Red}` (on FREE RAM — catches over-spend from
-  ANY source admission can't see; unknown total→Red) + `action_for→{Admit,HoldAdmissions,EvictOne}`;
-  env thresholds (`ROZUM_GOV_YELLOW_FRAC` 0.20 / `_RED_FRAC` 0.10). 4 tests. **NEXT (govern-loop):** a
-  gateway task that samples `vm_stat` free + `mlx get_active/get_cache` on an interval, logs the band,
-  and on Red evicts the lowest-utility idle model via the Switchboard — the measured backstop that makes
-  pushing capability/perf safe. Coordinate with `sunny-civet` (eviction = Switchboard/ledger domain).
+- [~] **govern-core + loop (measure half)** (`nimble-raven`) — **DONE `2b510cb` + `eb575aa`.**
+  `rozum-core::govern`: pure `classify(free,total,thresholds)→Pressure{Green/Yellow/Red}` (on FREE RAM —
+  catches over-spend from ANY source admission can't see; unknown total→Red) + `action_for→{Admit,
+  HoldAdmissions,EvictOne}`; env thresholds (`ROZUM_GOV_YELLOW_FRAC` 0.20 / `_RED_FRAC` 0.10). 4 tests.
+  **Loop LIVE:** `run_gateway` spawns `spawn_memory_governor()` — samples free RAM (new pub
+  `concurrency::available_ram_bytes`, 1s-cached) + `obs::mlx_memory_mb` every `ROZUM_GOV_INTERVAL_SECS`
+  (5s), logs WARN/DANGER + the action on leaving green. Read-only (logs). `ROZUM_GOVERNOR=0` opts out.
+  **REMAINING (govern-act, the guarantee):** on sustained Red, EVICT the lowest-utility idle model.
+  Cross-process eviction = Switchboard/ledger domain → **coordinate with `sunny-civet`** + gated on
+  `residency-unify-in-process`. Until then the loop gives early-warning + the data to tune thresholds.
 - [ ] **govern-os-containment** — set gateway jetsam priority / RLIMIT so a breach is a recoverable
   process-kill, not a kernel panic. Cheap, large safety upside.
 - [ ] **residency-unify-in-process** — fold co-residency into one in-process Switchboard (N models, exact
