@@ -1,5 +1,15 @@
 # Backlog
 
+## MCP (deferred — decide the use, then build)
+
+- [ ] **mcp-use** — the MCP-client `ToolSource` (`McpToolSource`, `src/mcp_tool_source.rs`)
+  is built + tested (5/0, in-memory duplex). Deferred per the user: decide the *use* before
+  building more. Three shapes considered: **(A)** an embedded agent loop that consumes MCP
+  tools; **(B)** a gateway **MCP-federation** — rozum federates N MCP servers + its meeting
+  tools into one tool surface for external agents (claude/codex) — *my recommendation, most
+  "rozum-shaped"*; **(C)** gateway tool-augmentation (inject MCP tools into external-agent
+  requests). Pick the use, then spec + build. Spec so far: `docs/specs/mcp-toolsource.md`.
+
 ## Agentic-bench fix candidates (from matrix-failure-analysis)
 
 - [ ] codex-reliability — **Candidate fixes for the codex matrix reds (most of codex's 10/20).** Root

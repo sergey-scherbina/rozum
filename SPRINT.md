@@ -7,6 +7,50 @@ Current sprint focus: (1) make Rozum a reliable local meeting room for live agen
 
 ## Sprint
 
+### ★ Active program (user priority — do strictly in this order)
+
+Do these in sequence: **1) green matrix → 2) plugin-ize everything → 3) micro-perf.**
+Process: per the **multi-agent** skill — claim before work, worktree off `origin/master`,
+push `feature/<slug>:master` (never edit master), then delete the done entry + prepend
+`CHANGELOG.md`. Coordinate with the sibling on the workspace-split + codex/gpt-oss.
+
+#### 1. Green matrix — NO fails allowed, ever
+
+The matrix must be **all green**. Every fail — and every non-deterministic flip — is a
+concrete bug **in our stack**, to isolate **fully and from all sides (the `isolate` skill)
+BEFORE any conclusion**. Never close a cell as "model too weak / model-side" — that has been
+premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One task per fail.
+
+- [ ] **matrix-baseline** — run the authoritative agentic matrix on `origin/master`
+  (agentic-grade models × claude/codex × greet/build/fix/test/debug). File ONE
+  `matrix-<model>-<agent>-<task>` isolate-task per fail below; record the fail map.
+- [ ] **matrix-nondeterminism-flip** — a cell (e.g. claude×test) flips pass 0↔1 on an
+  *identical* config. Find the real cause (race / leaked gateway state / seq-length
+  variance). **Do this first** — non-determinism undermines every other matrix reading.
+- [ ] **matrix-glm32-agentic** — GLM-4-32B emits file *content* (```toml/```rust) or raw
+  ```shell instead of *naming* Write/shell. Isolate WHERE in **our** stack it's lost
+  (prompt render, tool-schema presentation, chat-template). Do NOT close as a model
+  decision-gap until a clean-prompt model-only probe proves the model itself can't.
+- [ ] (one task per remaining fail — filed by `matrix-baseline`)
+  · codex/gpt-oss delivery fails: coordinate — the sibling holds those branches.
+
+#### 2. Plugin-ize everything
+
+- [ ] **plugin-wireprotocol** — make the agent wire layer a real `WireProtocol` trait
+  (Chat / Messages / Responses impls). Supersedes the arch-spi "map, not trait" call —
+  full plugin-ization is the goal.
+- [ ] **plugin-services** — services (gateway / web / meetings / bridges) behind a plugin
+  registry instead of `Command` match arms.
+- [ ] **plugin-x86-engine** — the reserved `rozum-x86` engine slot → a real engine plugin
+  behind `LocalEngine` / `ChatBackend` (the North-Star multi-device frontier).
+  (Already plugin-ized: `ChatBackend`, `ToolSource` + MCP client, `ToolDialect`.)
+
+#### 3. Micro-perf
+
+- [ ] **perf-baseline** — measure current single-stream + batched t/s per model on
+  `origin/master`; file one `perf-<lever>` task per opportunity (prefix-cache reuse,
+  further batching, FFI/CPU-build-cost per the hybrid-decode findings, KV layout).
+
 ### Workspace split — monolith → layered Cargo workspace (spec-gated, `docs/specs/workspace-split.md`)
 
 Goal: decompose the single ~47K-LOC `rozum` crate into a **Cargo workspace of ~7–8
