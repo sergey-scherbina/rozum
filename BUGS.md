@@ -7,8 +7,10 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ## BUG-002 — `mcp-proxy` processes pile up (orphaned when an agent re-spawns its MCP)
 
-- **Status:** fixed (`c0117bd` on `feature/meeting-web-pwa-ssc`, worktree `../rozum-meeting-pwa`;
-  cargo check/--tests clean + a functional idle test). Not yet on master.
+- **Status:** fixed (`91a03c7` on `feature/meeting-web-pwa-ssc`, worktree `../rozum-meeting-pwa`;
+  cargo check/--tests clean + a functional idle test: a silent proxy now exits at the first 60 s
+  tick, rc=0). The earlier `c0117bd` spawned the watchdog AFTER `serve()`, which blocks on the MCP
+  handshake — so `91a03c7` moves it before. Not yet on master.
 - **Reporter:** operator ("почему у меня запущено три процесса розума?" → found ~6 stale
   `mcp-proxy`/`mpc-proxy`, some 4 days old).
 - **Severity:** P3 — resource leak / clutter, not a correctness break.
