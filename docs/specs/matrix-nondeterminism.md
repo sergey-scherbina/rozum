@@ -1,9 +1,29 @@
 # Matrix non-determinism — isolate + reproducibility instrument
 
-Status: **instrument built + unit-tested; decisive model-probe pending a safe
-single-model gateway slot** (blocked on the host single-flight guard, see below).
-Task: SPRINT `matrix-nondeterminism-flip` (green-matrix #1, "do this first").
-Branch: `feature/matrix-nondeterminism-flip`.
+Status: **root cause proven from code AND live; reproducibility instrument shipped +
+unit-tested; harness wired.** Remaining: end-to-end "flip gone" on a live single-model
+matrix (guarded, coordinated — see Follow-up). Task: SPRINT `matrix-nondeterminism-flip`
+(green-matrix #1, "do this first"). Branch: `feature/matrix-nondeterminism-flip`.
+
+## Live probe result (decisive)
+
+Ran under the BUG-003 residency guard on **GLM-4-9B-0414-4bit** (dense, ~5 GB; one model
+at a time, graceful SIGINT teardown, 0 reboots). `scripts/bench/nondeterminism-probe.sh`,
+N=5, high-entropy prompt ("imaginative six-line poem"):
+
+| config | distinct / 5 | verdict |
+|---|---|---|
+| temp=1.0, unseeded | **5 / 5** | **NON-DETERMINISTIC — the flip (E1 confirmed)** |
+| temp=0, greedy | 1 / 5 | deterministic (dense argmax baseline) |
+| temp=1.0, `ROZUM_SAMPLING_SEED=42` | **1 / 5** | **deterministic — the fix works** |
+
+The seeded output (295 B) differs from the greedy output (219 B): the seed preserves the
+real temperature-1 distribution, it just replays it identically — the correct knob (not a
+behaviour-distorting force-greedy). **Control:** a *canonical-code* prompt ("reverse a
+string") gave 1/5 even **unseeded** — a peaked distribution collapses temp=1 to argmax. So
+only **high-entropy** trajectories (reasoning, free phrasing, tool-arg values) flip; that
+is why some matrix cells flip and others never do, and why a single canonical-output run
+can mislead.
 
 ## Problem
 
@@ -93,6 +113,26 @@ matrix becomes a deterministic measurement instrument and every remaining red is
 
 The 2026-06-22 reboot was whole-system RAM overcommit from **multiple concurrent
 model-loaded gateways** (`project-reboot-watchdog-oom`): never run >1 at once on the
-36 GiB Mac. This probe loads a model, so it waits for the sibling's host single-flight
-guard (`matrix-reboot-gateway-singleflight`) to land and a free slot, coordinated in the
-rozum room. Until then this branch ships only the (model-free) instrument + tests.
+36 GiB Mac. The probe above ran *after* the host single-flight guard landed (BUG-003,
+master `3bcee03`, `share.rs::acquire_residency`), one small dense model at a time, with
+graceful teardown — 0 reboots.
+
+## Harness wiring
+
+`scripts/bench/agentic.sh` now exports `ROZUM_SAMPLING_SEED="${ROZUM_SAMPLING_SEED-1234}"`
+when it starts each gateway, so the matrix is reproducible by default (every red is a
+red you can reproduce and debug, not noise). Override to any `<u64>`; set it **empty** to
+restore free entropy sampling (`${VAR-default}` substitutes only when *unset*).
+
+## Follow-up (coordinated, not now)
+
+1. **End-to-end "flip gone" on a live matrix.** A fixed seed pins per-request sampling
+   (E1), but the agent CLI may inject per-run data (session id / timestamp) into the
+   prompt → a *different request* → different output even under a pinned seed (Layer A).
+   So confirm on a real single-model matrix run (guarded, coordinated for RAM) that the
+   `claude × test` flip is actually gone; any residual flip then isolates Layer A, E2
+   (MoE numerics), or T (timeout) — already named above.
+2. **Optional production complement:** parse the OpenAI `seed` request field into
+   `SamplingParams.seed` so an API client can ask for reproducibility per-request without
+   the global env (the env stays the bench/global knob). Small, additive; deferred until
+   the end-to-end run confirms the approach.

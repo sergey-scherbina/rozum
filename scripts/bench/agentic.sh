@@ -210,7 +210,14 @@ for spec in "${MODELS[@]}"; do
   # gap between the claude and codex phases, so every later codex task sees a dead gateway and
   # returns rc=2 at 0.0s (looks like "codex is broken"; it isn't). =0 disables the watchdog so
   # the load-once gateway survives all agents. See BUGS.md BUG-001 / project-agentic-bench-clients-gone.
-  ROZUM_GATEWAY_IDLE_SECS=0 ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0 ROZUM_GEN_TIMEOUT_SECS="$GEN_TIMEOUT" /usr/bin/time -l \
+  # ROZUM_SAMPLING_SEED pins the sampler + MLX RNG so a temperature>0 request (Claude Code
+  # sends 1.0) replays an IDENTICAL token stream — without it the RNG seeds from entropy and
+  # high-entropy cells flip pass/fail on a byte-identical config, which is noise that
+  # undermines every reading (proven: docs/specs/matrix-nondeterminism.md). Default-pin so
+  # the matrix is reproducible (every red is reproducible+debuggable); override to any <u64>,
+  # or set ROZUM_SAMPLING_SEED= (empty) to restore free entropy sampling.
+  ROZUM_GATEWAY_IDLE_SECS=0 ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0 ROZUM_GEN_TIMEOUT_SECS="$GEN_TIMEOUT" \
+    ROZUM_SAMPLING_SEED="${ROZUM_SAMPLING_SEED-1234}" /usr/bin/time -l \
     "$BIN" gateway --model "$spec" --port "$port" --offline "${NCTX_OPT[@]}" \
     >"$glog" 2>&1 &
   TIME_PID=$!

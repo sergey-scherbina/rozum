@@ -102,11 +102,22 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
     run**. A *concurrent 2nd* matrix degrades gracefully: its gateway waits 240s then `exit(1)` →
     agentic.sh's "gateway not ready" path skips that model — it can't reboot the box. `agentic.sh`
     also `gateway stop --force`s any stale shared gateway first (frees a leftover flock).
+  - **NOW SEED-PINNED (plucky-finch 2026-06-22):** `agentic.sh` exports
+    `ROZUM_SAMPLING_SEED=${ROZUM_SAMPLING_SEED-1234}` → the baseline is reproducible by default
+    (see `matrix-nondeterminism-flip`), so a red is reproducible+debuggable, not sampling noise.
   - **Before running:** follow the 🛑 REBOOT-SAFETY PROTOCOL (claim the slot in-room; `ps`/lockfile
     check that no OTHER model gateway — e.g. a dedicated one from another worktree — is live).
-- [ ] **matrix-nondeterminism-flip** — a cell (e.g. claude×test) flips pass 0↔1 on an
-  *identical* config. Find the real cause (race / leaked gateway state / seq-length
-  variance). **Do this first** — non-determinism undermines every other matrix reading.
+- [~] **matrix-nondeterminism-flip** — CAUSE FOUND + FIX SHIPPED; end-to-end matrix
+  validation pending. Root cause (proven from code AND live on GLM-4-9B): the gateway
+  never threads `SamplingParams.seed`, so the sampler + MLX RNG seed from entropy — any
+  `temperature>0` request (Claude main loop = 1.0) yields a different token stream every
+  run → high-entropy cells flip. Live probe: temp1 unseeded **5/5 distinct**; temp1 +
+  `ROZUM_SAMPLING_SEED=42` **1/5 (fixed)**; temp0 greedy 1/5 (dense baseline). Shipped
+  (default-OFF): `apply_determinism_env` (`ROZUM_SAMPLING_SEED` pin + `ROZUM_FORCE_GREEDY`
+  control, 3 tests) + `agentic.sh` pins the seed by default + probe script. Spec
+  `docs/specs/matrix-nondeterminism.md`. **Remaining:** a guarded single-model live matrix
+  to confirm the `claude×test` flip is gone end-to-end (residual flips ⇒ Layer-A request
+  variance / E2 MoE numerics / timeout); optional OpenAI `seed` request-field parsing.
 - [ ] **matrix-glm32-agentic** — GLM-4-32B emits file *content* (```toml/```rust) or raw
   ```shell instead of *naming* Write/shell. Isolate WHERE in **our** stack it's lost
   (prompt render, tool-schema presentation, chat-template). Do NOT close as a model

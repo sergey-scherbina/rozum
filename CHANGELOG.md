@@ -17,6 +17,35 @@ a huge estimate so it loads only when the host is empty (conservative). Knobs:
 `ROZUM_GATEWAY_RAM_BUDGET_FRAC`/`_BYTES`, `ROZUM_GATEWAY_FOOTPRINT_INFLATE`/`_BASE_MB`.
 4 unit tests + real-binary smoke; core 91/91; spec § v2; BUGS.md BUG-003.
 
+## gateway — sampling reproducibility instrument (matrix non-determinism root cause + fix)
+Completed: 2026-06-22
+
+The agentic matrix had cells that flipped pass↔fail on a **byte-identical config** —
+noise that undermines every reading. Root cause, proven from code **and** live: the
+gateway is a faithful pass-through of `temperature`/`top_p`/`top_k` but **never threads
+`SamplingParams.seed`**, so the sampler + MLX RNG seed from entropy. Any `temperature>0`
+request (Claude Code's main loop sends 1.0; gpt-oss reasoning ~1.0) therefore produces a
+different token stream every run → high-entropy trajectories (reasoning, free phrasing,
+tool-arg values) flip. A canonical-output prompt stays stable (peaked distribution
+collapses temp=1 to argmax), which is why only some cells flip.
+
+Live probe (GLM-4-9B, dense, under the BUG-003 residency guard, N=5): temp=1.0 unseeded
+→ **5/5 distinct**; temp=1.0 + `ROZUM_SAMPLING_SEED=42` → **1/5 (deterministic — fixed)**;
+temp=0 greedy → 1/5 (dense argmax baseline).
+
+- `apply_determinism_env()` at all three gateway handler sites (`oai_chat`/`responses`/
+  `anthropic`), pure unit-tested core `apply_determinism(s, force_greedy, seed)` — both
+  knobs **default OFF, byte-for-byte unchanged** unless set:
+  - `ROZUM_SAMPLING_SEED=<u64>` — pins the RNG (fills only an unset seed) so a temp>0 run
+    replays identically **without** changing temperature (right knob for a stable matrix).
+  - `ROZUM_FORCE_GREEDY=1` — forces temp 0/argmax (isolation control; distorts reasoning
+    models, so not for the bench).
+- `scripts/bench/agentic.sh` exports `ROZUM_SAMPLING_SEED="${ROZUM_SAMPLING_SEED-1234}"`
+  → the matrix is reproducible by default (override, or set empty for free sampling).
+- `scripts/bench/nondeterminism-probe.sh` — read-only N-identical-POST byte-compare (never
+  starts a gateway). Spec `docs/specs/matrix-nondeterminism.md`. 3 tests; 74/74 gateway
+  tests green on default + `--no-default-features`.
+
 ## gateway — host-wide model-residency gate (stop concurrent-gateway reboots, BUG-003)
 Completed: 2026-06-22
 
