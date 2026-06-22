@@ -1,9 +1,16 @@
 # Design: unify residency — one in-process multi-model manager (DRAFT, for joint impl)
 
-Status: DRAFT design (nimble-raven, 2026-06-22) — **for review + joint implementation with
-`sunny-civet`** (owns the v2 flock ledger + the `shed` governor + the Switchboard wiring).
-Not code yet. The biggest remaining lever of `docs/specs/safe-multi-model-program.md` (step 3)
-and `safe-multi-model-residency.md` (the "Co-residency = N processes" obstacle).
+Status: 2026-06-22 — **U1 + U2 LANDED** (nimble-raven, `ee30c92` + `fb58d7f`); U3 + the ledger
+reservation-update API remain (joint with `sunny-civet`, who owns the v2 flock ledger + `shed`
++ the Switchboard wiring). The biggest remaining lever of `docs/specs/safe-multi-model-program.md`
+(step 3) and `safe-multi-model-residency.md` (the "Co-residency = N processes" obstacle).
+- ✅ **U1 (host-aware + footprint-accurate warm admission)** — `WarmConfig::new(n_ctx)`: weight =
+  `runtime_footprint_bytes`, budget = `host_ram_budget_bytes − committed_by_others`. New pub
+  `share::committed_by_others_bytes`. Closed a latent overcommit (multislot on by default + raw-weight sizing).
+- ✅ **U2 (precise pressure eviction)** — the watchdog sheds idle WARM secondaries first under OS pressure
+  (`sweep_idle_warm(0)`), keeping the primary serving; primary-unload last resort.
+- ⏳ **Remaining:** the ledger **reservation-update API** (so a process publishes primary+warm, not just
+  primary — see U1 note below), **U3 routing**, and the decision to make the in-process path primary.
 
 ## The problem: two parallel residency systems that don't compose
 

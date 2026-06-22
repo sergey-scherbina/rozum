@@ -152,9 +152,16 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
   OS lever to convert a breach into a recoverable process-kill. **The practical containment IS the `shed`
   governor** (react to the OS jetsam pressure level + unload BEFORE the kernel panics) — already shipped.
   No separate OS-containment to build; don't pursue RLIMIT.
-- [ ] **residency-unify-in-process** (design: `docs/specs/residency-unify.md`) — fold co-residency into one in-process Switchboard (N models, exact
-  accounting, instant swap) instead of N flock-coordinated processes; flock ledger stays the cross-process
-  backstop. (Big; design-gated; coordinate.)
+- [~] **residency-unify-in-process** (design: `docs/specs/residency-unify.md`) — fold co-residency into one
+  in-process Switchboard; flock ledger stays the cross-process backstop. **U1 + U2 DONE (`nimble-raven`,
+  `ee30c92`+`fb58d7f`):** U1 = warm admission is now footprint-accurate (`runtime_footprint_bytes`, not raw
+  weights) + host-aware (`host_ram_budget_bytes − committed_by_others`) → closed a latent overcommit path
+  (multislot is on by default). U2 = under OS pressure the watchdog sheds idle WARM secondaries first (keeps
+  the primary serving), primary-unload last resort. **REMAINING (coordinate w/ `sunny-civet`):** (a) ledger
+  **reservation-update API** so a process publishes its TOTAL (primary+warm) footprint → others see its warm
+  set (today `committed_by_others` only sums others' primaries); (b) **U3 request→model routing** (surface
+  the cascade); (c) decide whether to make the in-process Switchboard the *primary* multi-model path over the
+  N-process flock path. Folds in `footprint-before-download` (resolve-then-reserve).
 - [ ] **footprint-before-download** (`nimble-raven`, found via smmr-D 2026-06-22) — `estimate_model_footprint_bytes`
   runs BEFORE `ensure_model_dir`, so an **un-cached** model scans empty → unknown-sentinel (`u64::MAX/4`) →
   reserves ~4.4e12 MB for its whole life, **blocking every other model load** (a tiny uncached 4B blocked a
