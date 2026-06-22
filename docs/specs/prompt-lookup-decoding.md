@@ -124,8 +124,16 @@ Draft spec-decode lost on MoE because the draft forward ≈ the target forward. 
   (the dominant cost is the per-call FFI/dispatch, not the `k` extra tokens of compute) —
   the very property that killed compile makes prompt-lookup pay. (MoE forward cost scales
   more with `L`; the real MoE multiplier is P2's measurement.)
-- **P1 — wire into the decode loop** behind `ROZUM_PLOOKUP`, dense only. Byte-exact vs
-  plain greedy on fixed prompts.
+- **P1 — live validation on a real model. ✅ DONE — byte-exact + 7.06×.** The verify is
+  **reused for free**: `run_prompt_lookup_dense` (`mlx_native_backend.rs`) plugs
+  `PromptLookupDraft` into the *existing* byte-exact `MlxDenseTarget` (the same verify
+  `run_spec_decode_dense` uses), so the output is `== greedy_decode_dense` by construction —
+  only the target-forward count changes. Live test `prompt_lookup_live_vs_greedy_dense` on
+  Qwen3-0.6B, copy-heavy prompt: **120 tokens, BYTE-IDENTICAL to plain greedy, 17 forwards
+  vs 120 → 7.06×.** Confirms both the correctness contract and the real forward-reduction on
+  a live model (FFI-bound ⇒ forwards ≈ wall-clock). **REMAINING (P1.5, more invasive — wire
+  into `run_spec_job`/the request path behind `ROZUM_PLOOKUP` so it serves real requests;
+  coordinate with the engine owner — their hot file).**
 - **P2 — MoE decision.** Measure the near-tie divergence rate on Qwen3.6-35B; pick the
   dense-only-byte-exact vs accept-divergence policy from data.
 - **P3 — matrix gate.** Run the agentic matrix with `ROZUM_PLOOKUP=1`; confirm pass-matrix

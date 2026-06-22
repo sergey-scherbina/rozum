@@ -1595,6 +1595,85 @@ mod inner {
         (out, target.forwards)
     }
 
+    /// Draft-FREE speculative decode: the proposer is the n-gram prompt-lookup
+    /// (`PromptLookupDraft`) over the running context — no draft model, no extra KV.
+    /// Reuses the same byte-exact `MlxDenseTarget` verify as `run_spec_decode_dense`, so
+    /// the output is `== greedy_decode_dense` regardless; only the target-forward count
+    /// changes. Returns `(tokens, target_forwards)`. Spec: `docs/specs/prompt-lookup-decoding.md`.
+    #[allow(dead_code)]
+    fn run_prompt_lookup_dense(
+        target_model: &mut LoadedModel,
+        prompt_ids: &[u32],
+        eos: &[u32],
+        ngram: usize,
+        k: usize,
+        max_new: usize,
+    ) -> (Vec<u32>, usize) {
+        let mut target = MlxDenseTarget {
+            model: target_model,
+            cache: Vec::new(),
+            kv_len: 0,
+            eos: eos.to_vec(),
+            forwards: 0,
+        };
+        let mut draft = crate::specdecode_plookup::PromptLookupDraft::new(ngram, k, 8192);
+        let out = crate::specdecode::decode(prompt_ids, &mut draft, &mut target, k, max_new);
+        (out, target.forwards)
+    }
+
+    /// LIVE prompt-lookup validation on a real dense model: prove (a) byte-exactness vs
+    /// plain greedy and (b) the real target-forward reduction on a copy-heavy generation.
+    ///   cargo test -p rozum-mlx --features mlx-native --release prompt_lookup_live -- --ignored --nocapture
+    /// `ROZUM_PLOOKUP_MODEL` (default Qwen3-0.6B-4bit), `ROZUM_PLOOKUP_MAXNEW` (200).
+    #[cfg(test)]
+    #[test]
+    #[ignore = "live; needs a cached dense model (default mlx-community:Qwen3-0.6B-4bit)"]
+    fn prompt_lookup_live_vs_greedy_dense() {
+        let spec = std::env::var("ROZUM_PLOOKUP_MODEL")
+            .unwrap_or_else(|_| "mlx-community:Qwen3-0.6B-4bit".to_string());
+        let Some(dir) = crate::model_source::resolve_model_dir(&spec) else {
+            eprintln!("SKIP: {spec} not in HF cache");
+            return;
+        };
+        let (_n_ctx, eos, model_type, _kv) = read_config(&dir);
+        if !model_type_is_dense(&model_type) {
+            eprintln!("SKIP: {model_type} is not a dense spec-decode arch");
+            return;
+        }
+        let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json")).expect("tokenizer");
+        let max_new: usize = std::env::var("ROZUM_PLOOKUP_MAXNEW")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
+
+        // Copy-heavy generation: ask the model to repeat a real source chunk verbatim —
+        // exactly prompt-lookup's sweet spot (the agentic re-emit-the-file case).
+        let body = include_str!("specdecode.rs");
+        let prompt = format!(
+            "Repeat the following Rust code verbatim, unchanged:\n```rust\n{body}\n```\nVerbatim copy:\n```rust\n"
+        );
+        let prompt_ids: Vec<u32> = tok.encode(prompt, false).expect("encode").get_ids().to_vec();
+
+        // Baseline: plain greedy (one target forward per token).
+        let m_greedy = LoadedModel::load(&model_type, &dir).expect("load greedy");
+        let greedy = greedy_decode_dense(m_greedy, &prompt_ids, &eos, max_new);
+
+        // Prompt-lookup: same verify, n-gram proposer.
+        let mut m_plk = LoadedModel::load(&model_type, &dir).expect("load plk");
+        let (plk, forwards) = run_prompt_lookup_dense(&mut m_plk, &prompt_ids, &eos, 2, 8, max_new);
+
+        assert_eq!(
+            greedy, plk,
+            "prompt-lookup output must be BYTE-IDENTICAL to plain greedy (verify guarantee)"
+        );
+        let toks = greedy.len();
+        eprintln!(
+            "PLOOKUP-LIVE {spec}: {toks} tok, byte-exact OK; greedy_forwards={toks} \
+             plookup_forwards={forwards} -> speedup={:.2}x",
+            toks as f64 / forwards.max(1) as f64,
+        );
+    }
+
     /// Speculative lookahead `k` (draft tokens proposed per target forward).
     /// `ROZUM_SPECDECODE_K` (default 4); a bigger `k` helps when the draft is
     /// accurate (more accepted per forward) and hurts when it isn't (wasted draft

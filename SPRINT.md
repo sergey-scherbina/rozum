@@ -225,9 +225,12 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
 >   tokenizer, real 2215-tok code edit, `prompt_lookup_acceptrate_on_real_edit`, slot-free/forward-free):
 >   **2.1×–5.0×** (default n=2,k=5 → **3.4×**, accept 71%). Synthesis: decode is FFI-bound (why compile was
 >   NO-GO) ⇒ verify forward L=k+1 ≈ L=1 cost ⇒ tokens/forward ≈ real wall-clock speedup. Caveat: byte-exact on
->   DENSE only ([[project-spec-decode-moe-numerics]]). REMAINING (slot + MLX-decode = engine owner, coordinate):
->   **P1** wire into the decode loop behind `ROZUM_PLOOKUP=1` (live A/B t/s on a dense model), **P2** MoE
->   near-tie divergence policy, **P3** matrix gate. Spec `docs/specs/prompt-lookup-decoding.md`.
+>   DENSE only ([[project-spec-decode-moe-numerics]]). **P1 LIVE DONE — byte-exact + 7.06×:**
+>   `run_prompt_lookup_dense` plugs PromptLookupDraft into the EXISTING byte-exact `MlxDenseTarget` verify
+>   (zero new verify code — output `== greedy_decode_dense` by construction); live test on Qwen3-0.6B copy
+>   prompt = 120 tok BYTE-IDENTICAL, 17 forwards vs 120 → **7.06×**. REMAINING: **P1.5** wire into
+>   `run_spec_job`/request path behind `ROZUM_PLOOKUP` (more invasive, engine-owner hot file, coordinate),
+>   **P2** MoE near-tie policy, **P3** matrix gate. Spec `docs/specs/prompt-lookup-decoding.md`.
 > - [~] **cross-turn-prefix-kv-reuse** (#5, PERF) — **CORRECTION (`sunny-civet`, verified in code): the
 >   single-agent win is ALREADY SHIPPED — don't rebuild it.** `mlx_native_backend.rs:~1111-1130` persists the
 >   previous request's KV cache and, on the next turn, truncates to the shared prefix and prefills only the
