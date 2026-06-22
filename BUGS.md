@@ -5,6 +5,53 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-003 — concurrent model-loaded gateways exhaust host RAM → watchdog kernel panic → reboot
+
+- **Status:** fixed (host-wide model-residency gate) on branch
+  `feature/gateway-residency-guard`; pending matrix re-validation under load.
+- **Reporter:** operator ("система ребутнулась") — the Mac rebooted 2026-06-22 13:41.
+- **Severity:** P0 — reboots the host, so any matrix run is untrustworthy (same
+  class as BUG-001, **different mechanism**).
+
+**Symptom.** The Mac (Mac16,6 / M4, 36 GiB, macOS 26.5.1) rebooted. The panic is a
+**watchdog timeout**, NOT the BUG-001 IOGPU double-free:
+- `panic-full-2026-06-22-134243.panic`: `watchdog timeout: no checkins from
+  watchdogd in 92 seconds`. Userspace `watchdogd` was starved → kernel watchdog
+  panic → reboot.
+- 3× `JetsamEvent-2026-06-22-13{30,35:08,35:18}.ips`, every kill reason =
+  `vm-compressor-space-shortage`; dozens of system daemons mass-killed
+  (assistantd, secd, trustd, MTLCompilerService…). `largestProcess = rozum`.
+- At 13:35:18 there were **3 concurrent big rozum processes** — pid 23694 ≈24.8 GB,
+  pid 25158 ≈18.7 GB, pid 25274 ≈18.0 GB → **≈61.6 GB resident on a 36 GiB box**,
+  two distinct binary UUIDs (= >1 build/gateway running at once).
+
+**Root cause.** More than one **model-loaded gateway** resident at once. The trigger
+was two matrix runs overlapping — a `nondet-*` matrix (35B + GLM-4-32B) in the
+`feature/matrix-nondeterminism-flip` worktree **and** an `agentic-35b-leanprompt`
+run in the main worktree. Each `scripts/bench/agentic.sh` starts a **dedicated**
+`rozum gateway --model … --port 8300+` (`agentic.sh:214`), which **bypasses** the
+shared-gateway port singleton (`DEFAULT_GATEWAY_PORT` 8089 / `active.json`) — so the
+registry never sees the second resident model and nothing stops the overcommit.
+A single big model is contained (Metal OOM is process-fatal but local, BUG-001/[[35B
+prefill OOM]]); the system-killer is **N concurrent instances**. The BUG-001
+`TEARDOWN_GRACE` fix addresses GPU teardown, not this RAM-overcommit path.
+
+**Fix.** A **host-wide model-residency admission gate** (`crates/rozum-core/src/share.rs`,
+`acquire_residency`): every model-loaded gateway takes an advisory `flock` on
+`gateway_dir()/residency.lock` **before** bringing weights resident and holds it for
+its process lifetime (wired into `run_gateway` + `run_launch_dedicated` in
+`src/main.rs`). It is independent of port/run/worktree, so it catches exactly the
+dedicated-bench path the port singleton misses. A second loader waits up to
+`ROZUM_GATEWAY_RESIDENCY_WAIT_SECS` (default 240s, past the matrix teardown window)
+then **refuses with a clear message naming the holder** — a reboot becomes a
+recoverable error. `flock` is released by the OS on fd close / process death (incl.
+SIGKILL), so there is no stale-lock failure mode. Escape hatch
+`ROZUM_ALLOW_CONCURRENT_RESIDENT=1` for the rare two-small-models case. Unit tests:
+`residency_gate_admits_one_and_releases_on_drop`, `residency_escape_hatch_skips_the_gate`.
+Memory: `[[project-reboot-watchdog-oom]]`.
+
+---
+
 ## BUG-002 — `mcp-proxy` processes pile up (orphaned when an agent re-spawns its MCP)
 
 - **Status:** fixed + ON MASTER (cherry-picked `5be81a5`+`c742e2b` onto master `8eaf21a`) + INSTALLED to `~/.cargo/bin/rozum` (release, mlx-native+gguf). Verified: the installed binary self-reaps an idle proxy at the 60s tick (rc=0). Origin `91a03c7` on `feature/meeting-web-pwa-ssc`;

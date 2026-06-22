@@ -1,5 +1,28 @@
 # Changelog
 
+## gateway — host-wide model-residency gate (stop concurrent-gateway reboots, BUG-003)
+Completed: 2026-06-22
+
+The Mac rebooted (2026-06-22 13:41) from a **watchdog kernel panic** — not the
+BUG-001 GPU double-free, but whole-system memory overcommit: two matrix runs
+overlapped, ~3 model-loaded `rozum gateway` processes ≈61.6 GB on a 36 GiB box →
+`vm-compressor-space-shortage` jetsam cascade → `watchdogd` starved 92s → panic.
+A dedicated `rozum gateway --port 8300+` (what `agentic.sh` starts) bypasses the
+shared-gateway port singleton (8089/`active.json`), so nothing stopped the second
+resident model.
+
+Fix: a **host-wide model-residency admission gate** in `crates/rozum-core/src/share.rs`
+(`acquire_residency`). Every model-loaded gateway takes an advisory `flock` on
+`gateway_dir()/residency.lock` before bringing weights resident and holds it for its
+process lifetime (wired into `run_gateway` + `run_launch_dedicated`). Independent of
+port/run/worktree, so it catches the dedicated-bench path. A second loader waits up
+to `ROZUM_GATEWAY_RESIDENCY_WAIT_SECS` (default 240s, past the matrix teardown
+window) then refuses with a clear message naming the holder — a host reboot becomes
+a recoverable error. `flock` releases on process death (no stale-lock risk). Escape
+hatch `ROZUM_ALLOW_CONCURRENT_RESIDENT=1`. Unit tests + real-binary smoke (held →
+refuse+exit 1 before load; free → passes through). BUGS.md BUG-003,
+memory `[[project-reboot-watchdog-oom]]`.
+
 ## gateway — codex create: handle "whole file as a fake Update-File patch"
 Completed: 2026-06-22
 

@@ -885,9 +885,49 @@ async fn start_web_bridge(room_name: String, port: u16, url: String) {
     }
 }
 
+/// Acquire the host-wide model-residency gate (BUG-003) before loading a model,
+/// or exit with a clear message. Hold the returned guard for as long as the model
+/// is resident (binding it at the caller's function scope is enough). Runs the
+/// (possibly long) blocking wait off the async runtime. `None` = gate bypassed /
+/// unavailable → loading proceeds (the gate is a safety net, not correctness).
+async fn acquire_residency_or_exit() -> Option<rozum::share::ResidencyGuard> {
+    match tokio::task::spawn_blocking(rozum::share::acquire_residency).await {
+        Ok(Ok(guard)) => guard,
+        Ok(Err(denied)) => {
+            let who = denied
+                .holder
+                .map(|h| format!(" (pid {}, model {})", h.pid, h.model))
+                .unwrap_or_default();
+            eprintln!(
+                "rozum gateway: refusing to load a model — another rozum gateway is already \
+                 holding a resident model{who} after waiting {}s.",
+                denied.waited_secs
+            );
+            eprintln!(
+                "  Running more than one model-loaded gateway on this host can exhaust RAM and \
+                 panic/reboot the machine (BUG-003). Stop the other gateway first \
+                 (`rozum gateway stop`), or set ROZUM_ALLOW_CONCURRENT_RESIDENT=1 to override if \
+                 both models truly fit."
+            );
+            std::process::exit(1);
+        }
+        // The blocking task itself failed (panic / cancel) — fail open rather than
+        // block a legitimate load on the safety net.
+        Err(e) => {
+            eprintln!("rozum gateway: residency gate unavailable ({e}); proceeding");
+            None
+        }
+    }
+}
+
 async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: rozum::RuntimeConfig) {
     let n_ctx = resolve_n_ctx(&model_spec, n_ctx.or(cfg.n_ctx));
     let cfg = std::sync::Arc::new(cfg);
+    // Host-wide gate: never let a second model-loaded gateway go resident next to
+    // this one (whole-system OOM → watchdog kernel panic → reboot, BUG-003). Held
+    // for this process's lifetime; covers the initial load below plus every lazy
+    // reload / `switch` (all same-process).
+    let _residency = acquire_residency_or_exit().await;
     // Speculative decoding: if a draft model is configured (`--draft-model` /
     // `ROZUM_DRAFT_MODEL`), build the target+draft pair; else the plain target.
     // Spec: docs/specs/speculative-decoding.md.
@@ -1601,6 +1641,10 @@ async fn run_launch_dedicated(
             .map(|a| a.port())
             .unwrap_or(rozum::share::DEFAULT_GATEWAY_PORT)
     });
+    // Same host-wide residency gate as `run_gateway` (BUG-003): a dedicated
+    // in-process model must not load on top of another resident gateway. Held for
+    // this launch's lifetime (drops when `exec_agent` returns below).
+    let _residency = acquire_residency_or_exit().await;
     let backend = match build_gateway_backend(&model_spec, n_ctx).await {
         Some(b) => b,
         None => {

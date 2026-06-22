@@ -282,6 +282,125 @@ pub fn try_spawn_lock(stale_secs: u64) -> Option<SpawnLock> {
     }
 }
 
+// ── Host-wide model-residency admission gate (BUG-003) ────────────────────────
+// A whole-system OOM — vm-compressor-space-shortage → jetsam cascade → watchdogd
+// starved → kernel watchdog panic → REBOOT — happens when more than one
+// model-loaded gateway is resident at once on a memory-bounded box (two concurrent
+// matrix runs were ~18-25 GB each ⇒ ~61.6 GB on a 36 GiB Mac). The shared-gateway
+// port singleton (`DEFAULT_GATEWAY_PORT`) only governs gateways that go through the
+// rendezvous; a dedicated `rozum gateway --port N` (what the matrix bench starts)
+// bypasses it entirely, so the registry never sees the second resident model.
+//
+// This advisory file lock is host-wide and independent of port / run / worktree:
+// every model-loaded gateway acquires it BEFORE bringing weights resident and holds
+// it for its process lifetime. A second loader waits, then refuses with a clear
+// message — turning a host reboot into a recoverable error. `flock(2)` is released
+// by the OS when the holder's fd closes (incl. process death / SIGKILL), so there
+// is no stale-lock failure mode and no cleanup to get wrong.
+
+/// Host-wide lock file guarding model residency. Lives next to the rest of the
+/// gateway state so every gateway on the box (default env) shares one gate.
+pub fn residency_lock_path() -> PathBuf {
+    gateway_dir().join("residency.lock")
+}
+
+/// Seconds an arriving gateway waits for an in-flight resident model to free
+/// before refusing. `ROZUM_GATEWAY_RESIDENCY_WAIT_SECS`, default 240 — generously
+/// past the matrix teardown window (`TEARDOWN_GRACE` 180s + `GPU_SETTLE`), so a
+/// back-to-back bench model swap (old gateway exiting as the new one starts) never
+/// falsely refuses. `0` = refuse immediately.
+pub fn residency_wait_secs() -> u64 {
+    std::env::var("ROZUM_GATEWAY_RESIDENCY_WAIT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(240)
+}
+
+/// Operator escape hatch: explicitly allow >1 concurrent resident model (rare —
+/// two small models that genuinely fit in RAM). `ROZUM_ALLOW_CONCURRENT_RESIDENT=1`
+/// skips the gate entirely.
+pub fn concurrent_resident_allowed() -> bool {
+    std::env::var("ROZUM_ALLOW_CONCURRENT_RESIDENT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Held for the lifetime of a resident model. Dropping it — or the holding process
+/// dying — releases the host-wide gate so the next gateway can load. The `File` is
+/// the lock; keeping it alive keeps `flock` held.
+pub struct ResidencyGuard {
+    _file: std::fs::File,
+}
+
+/// The gate was held past the wait window. Carries the current holder (from the
+/// registry, best-effort) so the caller can name it in a clear refusal.
+#[derive(Debug)]
+pub struct ResidencyDenied {
+    pub holder: Option<ActiveGateway>,
+    pub waited_secs: u64,
+}
+
+/// Acquire the host-wide model-residency gate before loading a model.
+///
+/// - `Ok(None)` — the gate is bypassed (escape hatch) or could not be used (lockfile
+///   IO error / a filesystem without advisory locks): fail **open**, since the gate
+///   is a safety net, never a correctness requirement — a load must not be blocked
+///   by a lockfile problem.
+/// - `Ok(Some(guard))` — acquired; hold `guard` for as long as the model is resident.
+/// - `Err(ResidencyDenied)` — another gateway held the gate past `residency_wait_secs()`.
+///
+/// Blocking (polls `try_lock` every 2s). Run it on a blocking thread
+/// (`spawn_blocking`) when called from async — the wait can be long.
+pub fn acquire_residency() -> Result<Option<ResidencyGuard>, ResidencyDenied> {
+    if concurrent_resident_allowed() {
+        return Ok(None);
+    }
+    let _ = ensure_dir();
+    let path = residency_lock_path();
+    let wait_secs = residency_wait_secs();
+    let mut waited = 0u64;
+    let mut announced = false;
+    loop {
+        // Fresh open each attempt so a lock whose holder has died (fd closed) is
+        // immediately reusable.
+        let file = match std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(_) => return Ok(None), // cannot open the lockfile → fail open
+        };
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(ResidencyGuard { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if !announced {
+                    announced = true;
+                    let who = read_active()
+                        .map(|a| format!(" (pid {}, model {})", a.pid, a.model))
+                        .unwrap_or_default();
+                    eprintln!(
+                        "rozum gateway: another rozum gateway holds a resident model{who}; \
+                         waiting up to {wait_secs}s for it to free before loading \
+                         (set ROZUM_ALLOW_CONCURRENT_RESIDENT=1 to override) …"
+                    );
+                }
+                if waited >= wait_secs {
+                    return Err(ResidencyDenied {
+                        holder: read_active(),
+                        waited_secs: waited,
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                waited += 2;
+            }
+            // A filesystem that doesn't support advisory locks → fail open.
+            Err(std::fs::TryLockError::Error(_)) => return Ok(None),
+        }
+    }
+}
+
 /// Does a gateway answer on this port? The authoritative liveness signal (a stale
 /// registry whose process is gone simply won't respond).
 pub async fn health_ok(port: u16) -> bool {
@@ -372,5 +491,54 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         unsafe { std::env::remove_var("XDG_STATE_HOME") };
+    }
+
+    #[test]
+    fn residency_gate_admits_one_and_releases_on_drop() {
+        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("rozum-residency-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: single-threaded test holding the shared env lock.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", &dir);
+            std::env::set_var("ROZUM_GATEWAY_RESIDENCY_WAIT_SECS", "0"); // refuse immediately
+            std::env::remove_var("ROZUM_ALLOW_CONCURRENT_RESIDENT");
+        }
+
+        // First gateway acquires the host-wide gate.
+        let g1 = acquire_residency()
+            .expect("first acquire ok")
+            .expect("a guard");
+        // A second concurrent loader is refused while the gate is held — this is
+        // the reboot that BUG-003 turns into a clean error.
+        match acquire_residency() {
+            Err(denied) => assert_eq!(denied.waited_secs, 0),
+            Ok(_) => panic!("second acquire must be refused while the first is held"),
+        }
+        // Releasing the first frees the gate for the next loader.
+        drop(g1);
+        let g2 = acquire_residency()
+            .expect("re-acquire ok")
+            .expect("a guard after release");
+        drop(g2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: single-threaded test holding the shared env lock.
+        unsafe {
+            std::env::remove_var("XDG_STATE_HOME");
+            std::env::remove_var("ROZUM_GATEWAY_RESIDENCY_WAIT_SECS");
+        }
+    }
+
+    #[test]
+    fn residency_escape_hatch_skips_the_gate() {
+        let _env = POISON_ENV_LOCK.lock().unwrap();
+        // SAFETY: single-threaded test holding the shared env lock. The hatch is
+        // checked before any file IO, so this never touches a real state dir.
+        unsafe { std::env::set_var("ROZUM_ALLOW_CONCURRENT_RESIDENT", "1") };
+        let bypass = acquire_residency().expect("hatch never denies");
+        assert!(bypass.is_none(), "escape hatch returns no guard (gate skipped)");
+        // SAFETY: single-threaded test holding the shared env lock.
+        unsafe { std::env::remove_var("ROZUM_ALLOW_CONCURRENT_RESIDENT") };
     }
 }
