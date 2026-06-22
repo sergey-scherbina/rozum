@@ -518,9 +518,10 @@ pub async fn run_daemon_proxy() -> Result<(), Box<dyn std::error::Error + Send +
     use rmcp::{ServiceExt, transport::stdio};
     let server = DaemonProxy::new();
     let presence = server.clone(); // shares the Arc<State>; serve() consumes `server`
-    let watchdog = server.clone();
+    // Spawn the idle watchdog BEFORE serve(): serve() blocks until the MCP `initialize`
+    // handshake, so a proxy abandoned before (or after) initialize must still be reaped.
+    spawn_idle_watchdog(server.clone());
     let service = server.serve(stdio()).await?;
-    spawn_idle_watchdog(watchdog);
     service.waiting().await?;
     // The agent's stdio session ended — post a best-effort `left:` before exiting.
     presence.announce_left().await;
