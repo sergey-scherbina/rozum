@@ -93,18 +93,19 @@ admission *numbers* + per-process cap + validation = `nimble-raven`.
 > bigger inflate (balloon is additive/cache-driven). The fix = the share-bounded cap (A) — it turns the
 > reservation into an *enforced* ceiling, the only thing that makes safe co-residency possible on 36 GiB.
 
-- [x] **smmr-A-share-cap** (`nimble-raven`) — **DONE `95b98d6`.** Each gateway PROCESS hard-caps its own
-  MLX (`set_memory_limit`) at its model's reservation (= `runtime_footprint`, B), set before the worker
-  loads. Design refinement: v2 co-residency is N separate processes (1 model each), so cap = own
-  reservation (NOT `budget−committed`); admission already gives `Σ reservations ≤ budget` → `Σ caps ≤
-  budget`. `rozum-mlx::set_memory_cap_bytes` + pure `select_mlx_mem_limit_bytes` (env > share > total−8),
-  2 unit tests; `main.rs` cap == reservation (same estimate). cap default+--no-default green. Known gap:
-  MLX path only (gguf/mistralrs co-residency unenforced — follow-up).
-- [x] **smmr-B-footprint** (`nimble-raven`) — **DONE `d7fd456`.** `rozum_models::runtime_footprint_bytes(spec,
-  n_ctx, weight)` = weights + `kv_bytes_per_position(config)·n_ctx` + activation reserve (max 3 GiB,
-  weights/5). This is the model's NEED (small for small models) — A's cap enforces it, so the uncapped
-  26.9 GB balloon is irrelevant; a 4B reserves/caps ~6 GB → two co-reside. 4 unit tests. Interim 14 GB
-  floor (`40048ba`) now dropped (A enforces the ceiling). Post-cap target = "estimate ≥ true need" (D's job).
+- [x] **smmr-A-soft-hint** (`nimble-raven`) — **DONE `95b98d6` + CORRECTED.** Each gateway process sets its
+  own MLX `set_memory_limit` = its reservation before the worker loads. **CORRECTION** (source audit, re-
+  verified vs pinned fork `12fac5c` memory.rs:64): `set_memory_limit` is **SOFT** (evicts cache/waits, then
+  allocates anyway) — NOT a hard cap. So A is **defense-in-depth**, not enforcement; the structural lever is
+  conservative ADMISSION (v2 ledger) + `set_cache_limit` (the real cache bound). `set_memory_cap_bytes` +
+  pure `select_mlx_mem_limit_bytes` (2 tests); docs relabeled "soft hint". MLX path only (gguf/mistralrs:
+  admission-only). cap default+--no-default green.
+- [x] **smmr-B-footprint** (`nimble-raven`) — **DONE `d7fd456` + CORRECTED.** `runtime_footprint_bytes` =
+  weights + `kv_bytes_per_position(config)·n_ctx` + activation reserve. Since admission (not a hard cap) is
+  the lever, the footprint MUST be ≥ real resident peak = active + bounded cache; the reserve is now
+  `max(6 GiB, weights/4)` ≈ ~4 GiB cache (`set_cache_limit`) + ~2 GiB prefill (was a 3 GiB catch-all <
+  the cache limit alone — the audit's flagged bug). 4 unit tests updated. Interim 14 GB floor dropped.
+  **Open (smmr-D):** truly-≥-peak hinges on the active-vs-cache split — measure live.
 - [ ] **smmr-C-fast-swap** (`sunny-civet`, claiming) — the "very fast sequentially" half: when
   `oversubscribed`, swap WITHOUT transient both-resident (unload→GPU-settle→load), minimize dead time
   (mmap page-cache-warm weights, prefetch next during drain). Reuses `gateway switch` + `plan_residency`.
