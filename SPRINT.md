@@ -70,12 +70,13 @@ push `feature/<slug>:master` (never edit master), then delete the done entry + p
 > 1. **validate-gate-live** (P0, above) — cheap safety-capstone; needs the slot briefly. Coordinate
 >    with `plucky-finch` (queued for the slot for the do-first nondeterminism probe) — ideally
 >    piggyback: while their model gateway is up, my gateway-B attempt IS the live concurrency proof.
-> 2. **matrix-baseline** (P1 — green matrix #1 below) — the big authoritative run; needs the slot
->    for a long window, AFTER the nondeterminism probe. I PREP it now (harness/models/cmdlines
->    push-button) so the run is fast when the slot is free.
-> 3. **plugin track** (P2 — plugin-ize #2 below) — **no model slot needed → my default work while the
->    slot is busy.** Starting with `plugin-wireprotocol` (or `plugin-services`) on its own worktree.
-> Rule: slot-tasks (1,2) serialize behind the room claim; the no-slot task (3) runs in parallel.
+> 2. **matrix-baseline** (P1 — green matrix #1 below) — the big authoritative run. **PREP DONE
+>    (2026-06-22, see the item below): push-button + verified reboot-safe.** Just needs the slot,
+>    AFTER the nondeterminism probe.
+> 3. **plugin track** (P2 — plugin-ize #2 below) — **PARKED after triage (2026-06-22): no clean,
+>    safe, no-model increment exists right now** (verdict recorded under "#### 2" below). So my
+>    no-model default work is now **matrix-baseline prep** (done) + supporting `plucky-finch`'s probe.
+> Rule: slot-tasks (1,2) serialize behind the room claim; no-slot work runs in parallel.
 
 #### 1. Green matrix — NO fails allowed, ever
 
@@ -87,6 +88,20 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
 - [ ] **matrix-baseline** — run the authoritative agentic matrix on `origin/master`
   (agentic-grade models × claude/codex × greet/build/fix/test/debug). File ONE
   `matrix-<model>-<agent>-<task>` isolate-task per fail below; record the fail map.
+  - **PREP DONE (nimble-raven 2026-06-22):** runner is `scripts/bench/agentic.sh`; override via
+    `AGENTIC_MODELS="spec1 spec2" AGENTS="claude codex" TASKS="greet build fix test debug"`
+    (defaults: `Qwen3.6-35B-A3B-4bit` + `gpt-oss-20b-MXFP4-Q4`; gold standard Qwen3.6-35B = 15/15).
+    It starts **one shared gateway per model, serially** (`gateway --port PORT_BASE+idx`), runs all
+    agents×tasks, then SIGINT-drains + waits ≤`TEARDOWN_GRACE`(180s) for full process exit +
+    `GPU_SETTLE`(8s) before the next model.
+  - **REBOOT-SAFE — verified against the BUG-003 gate:** a *single* matrix never has >1 model
+    resident (serial loop), and the old gateway's process fully exits (flock released on fd-close)
+    before the next starts, so the gate's 240s wait is never approached → **no false-refuse within a
+    run**. A *concurrent 2nd* matrix degrades gracefully: its gateway waits 240s then `exit(1)` →
+    agentic.sh's "gateway not ready" path skips that model — it can't reboot the box. `agentic.sh`
+    also `gateway stop --force`s any stale shared gateway first (frees a leftover flock).
+  - **Before running:** follow the 🛑 REBOOT-SAFETY PROTOCOL (claim the slot in-room; `ps`/lockfile
+    check that no OTHER model gateway — e.g. a dedicated one from another worktree — is live).
 - [ ] **matrix-nondeterminism-flip** — a cell (e.g. claude×test) flips pass 0↔1 on an
   *identical* config. Find the real cause (race / leaked gateway state / seq-length
   variance). **Do this first** — non-determinism undermines every other matrix reading.
@@ -99,14 +114,34 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
 
 #### 2. Plugin-ize everything
 
+> **TRIAGE (nimble-raven 2026-06-22): none of the three is a clean, safe, no-model increment to
+> start *now* — each needs an operator decision first. Recorded so the next agent doesn't re-derive.**
+> - **wireprotocol** — HIGHEST risk: it rewrites the matrix-critical request/SSE path in
+>   `crates/rozum-gateway/src/gateway.rs`, and arch-spi Stage 3 already found the trait **net-negative**
+>   (three genuinely different typed extractors `Json<OaiChatReq>`/`Json<RespReq>`/`Json<AnthropicReq>`
+>   → three SSE sequences; a trait either erases axum's compile-time validation = behaviour change, or
+>   is a fat indirection that deletes no complexity). Nothing in the code changed since to flip that.
+>   Can't be fully de-risked without loading a model. → **re-scope** (unify only internal
+>   `ChatRequest`/`ChatEvent` + cross-cutting policy, leave extractors per-route) and **re-decide** first.
+> - **services** — explicitly **"out of scope (decided)"** in arch-spi ("subcommands stay"); it also
+>   touches the reboot-sensitive `run_gateway` dispatch (`src/main.rs:~923`). → needs an operator override.
+> - **x86-engine** — **already structurally a plugin**: `X86NativeBackend impl ChatBackend` + `X86Engine
+>   impl LocalEngine`, selectable via the forced build chain (`main.rs:~4213`, symmetric with MLX's
+>   direct `try_build_mlx_native_backend` — NOT the GGUF registry-IoC path, which exists only for the
+>   workspace-split core→gguf dep break). The only real remaining work is the **Vulkan kernels**, which
+>   can't be built/tested on Apple Silicon. Mirroring GGUF's `BackendEngine`/`OnceLock` registry IoC
+>   would add an asymmetric abstraction (MLX/mistralrs don't use it either), not plugin-ize. → defer to
+>   real x86 hardware.
+
 - [ ] **plugin-wireprotocol** — make the agent wire layer a real `WireProtocol` trait
   (Chat / Messages / Responses impls). Supersedes the arch-spi "map, not trait" call —
-  full plugin-ization is the goal.
+  full plugin-ization is the goal. **(See TRIAGE above — re-scope + re-decide before starting.)**
 - [ ] **plugin-services** — services (gateway / web / meetings / bridges) behind a plugin
-  registry instead of `Command` match arms.
+  registry instead of `Command` match arms. **(See TRIAGE — decided out-of-scope; needs override.)**
 - [ ] **plugin-x86-engine** — the reserved `rozum-x86` engine slot → a real engine plugin
   behind `LocalEngine` / `ChatBackend` (the North-Star multi-device frontier).
   (Already plugin-ized: `ChatBackend`, `ToolSource` + MCP client, `ToolDialect`.)
+  **(See TRIAGE — already structurally a plugin; remaining work is Vulkan kernels → needs x86 HW.)**
 
 #### 3. Micro-perf
 
