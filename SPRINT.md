@@ -157,11 +157,14 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
   `ee30c92`+`fb58d7f`):** U1 = warm admission is now footprint-accurate (`runtime_footprint_bytes`, not raw
   weights) + host-aware (`host_ram_budget_bytes − committed_by_others`) → closed a latent overcommit path
   (multislot is on by default). U2 = under OS pressure the watchdog sheds idle WARM secondaries first (keeps
-  the primary serving), primary-unload last resort. **REMAINING (coordinate w/ `sunny-civet`):** (a) ledger
-  **reservation-update API** so a process publishes its TOTAL (primary+warm) footprint → others see its warm
-  set (today `committed_by_others` only sums others' primaries); (b) **U3 request→model routing** (surface
-  the cascade); (c) decide whether to make the in-process Switchboard the *primary* multi-model path over the
-  N-process flock path. Folds in `footprint-before-download` (resolve-then-reserve).
+  the primary serving), primary-unload last resort. ✅ **Reservation-update API DONE (`05352c5`):**
+  `ResidencyGuard::update_footprint` + free-fn `share::update_my_reservation(model, footprint)` (grow-safe
+  in-place rewrite, no-op without a reservation), 14/14 share tests. **REMAINING:** (a) **WIRING** — the
+  Switchboard calls `update_my_reservation(primary_id, primary + Σ warm)` in `ensure_warm`/`sweep_idle_warm`
+  (sunny-civet's call: lock-ordering / where to compute total / IO-under-lock); (b) **U3 request→model
+  routing**; (c) decide whether the in-process path becomes primary over N-process. Then
+  `footprint-before-download` is a one-liner (reserve placeholder → `update_my_reservation` to real size
+  after resolve).
 - [ ] **footprint-before-download** (`nimble-raven`, found via smmr-D 2026-06-22) — `estimate_model_footprint_bytes`
   runs BEFORE `ensure_model_dir`, so an **un-cached** model scans empty → unknown-sentinel (`u64::MAX/4`) →
   reserves ~4.4e12 MB for its whole life, **blocking every other model load** (a tiny uncached 4B blocked a
