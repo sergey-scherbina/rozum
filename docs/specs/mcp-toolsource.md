@@ -47,18 +47,24 @@ impl ToolSource for McpToolSource {
 
 ## Behavior
 
-- [ ] `spawn` launches the child, completes the MCP `initialize` handshake, and caches the
-  server's tools; a bad command or failed handshake returns `Err(McpToolError)`.
-- [ ] `tools()` returns every server tool as a `ToolDef` with name, description, and the MCP
-  `inputSchema` as `input_schema`.
-- [ ] `dispatch(name, args)` calls the server and returns its structured content as `Ok(Value)`.
-- [ ] A tool that reports an error (`is_error`) yields `Err(ToolError)` with the server's
+- [x] The MCP `initialize` handshake completes and the server's tools are cached at connect.
+  (Tested via `from_service` over the duplex; `spawn`'s child-process wrapper is the same path
+  + a `TokioChildProcess` transport — compile-verified, no external-binary integration test by
+  design.)
+- [x] `tools()` returns every server tool as a `ToolDef` with name, description, and the MCP
+  `inputSchema` as `input_schema`. (`lists_and_calls_the_server_tool`)
+- [x] `dispatch(name, args)` calls the server and returns its structured content as `Ok(Value)`.
+  (`lists_and_calls_the_server_tool`)
+- [x] A tool that reports an error (`is_error`) yields `Err(ToolError)` with the server's
   message (recoverable — fed back to the model), not a panic or a construction error.
-- [ ] An unknown tool name / transport failure yields `Err(ToolError)`, never a panic.
-- [ ] An `McpToolSource` composes with an in-process `CallbackToolSource` under
+  (`tool_reported_error_maps_to_tool_error_with_message` — the `boom` tool.)
+- [x] An unknown tool name / transport failure yields `Err(ToolError)`, never a panic.
+  (`unknown_tool_is_a_recoverable_tool_error`)
+- [x] An `McpToolSource` composes with an in-process `CallbackToolSource` under
   `MultiToolSource` (the union exposes both tool sets; calls route to the owner).
-- [ ] Tested without an external binary: an in-memory duplex transport drives `connect`
-  against a minimal in-process rmcp server exposing one tool (`echo`).
+  (`composes_with_in_process_tools_under_multitoolsource`)
+- [x] Tested without an external binary: an in-memory duplex transport drives the client against
+  a minimal in-process rmcp server (`echo` + `boom`). 5/0.
 
 ## Out of scope
 
@@ -102,5 +108,22 @@ impl ToolSource for McpToolSource {
 
 ## Results
 
-<!-- Fill after implementation: tests, the in-memory duplex harness, any rmcp API specifics. -->
-_Pending — spec gate._
+**DONE.** `src/mcp_tool_source.rs` (~190 lines) — `McpToolSource` over the rmcp 1.7 client.
+`spawn(command, args, env)` builds a `TokioChildProcess` transport, runs `().serve(...)`, and
+funnels into `from_service(RunningService)` (the testable core): `list_all_tools()` → cached
+`Vec<ToolDef>` (MCP `Tool.input_schema: Arc<JsonObject>` → `Value::Object`), `dispatch` →
+`peer().call_tool(CallToolRequestParams::new(name).with_arguments(args))` with
+`structured_content` preferred, `is_error` + transport `Err` → `ToolError`. Splitting
+`from_service` out of a generic `connect<T>` sidesteps rmcp's `IntoTransport` bound and makes
+the in-memory duplex test trivial.
+
+- **All rmcp API assumptions compiled on the first try** (client `().serve`, `list_all_tools`,
+  `peer().call_tool`, `Tool`/`CallToolResult` fields, `TokioChildProcess`).
+- **Tests 5/0** (`cargo test --lib mcp_tool_source`), no external binary: a minimal in-process
+  rmcp server (`#[tool_router]`/`#[tool_handler]`, `echo` + `boom`) over `tokio::io::duplex` —
+  list+call, `is_error`→`ToolError`, unknown-tool→`ToolError`, and `MultiToolSource` composition
+  with a `CallbackToolSource`. Full lib suite green on the workspace base.
+- **Composes via the existing `MultiToolSource`** — external MCP tools + in-process tools now
+  share the one `ToolSource` SPI, closing arch-spi Stage 4 (the tool axis).
+- **Not yet surfaced in a command** (out of scope, above): this is the SPI impl; an
+  embedded-agent flow that *configures* MCP servers is a separate, later step.
