@@ -159,20 +159,19 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
   (multislot is on by default). U2 = under OS pressure the watchdog sheds idle WARM secondaries first (keeps
   the primary serving), primary-unload last resort. ✅ **Reservation-update API DONE (`05352c5`):**
   `ResidencyGuard::update_footprint` + free-fn `share::update_my_reservation(model, footprint)` (grow-safe
-  in-place rewrite, no-op without a reservation), 14/14 share tests. **REMAINING:** (a) **WIRING** — the
-  Switchboard calls `update_my_reservation(primary_id, primary + Σ warm)` in `ensure_warm`/`sweep_idle_warm`
-  (sunny-civet's call: lock-ordering / where to compute total / IO-under-lock); (b) **U3 request→model
-  routing**; (c) decide whether the in-process path becomes primary over N-process. Then
-  `footprint-before-download` is a one-liner (reserve placeholder → `update_my_reservation` to real size
-  after resolve).
-- [ ] **footprint-before-download** (`nimble-raven`, found via smmr-D 2026-06-22) — `estimate_model_footprint_bytes`
-  runs BEFORE `ensure_model_dir`, so an **un-cached** model scans empty → unknown-sentinel (`u64::MAX/4`) →
-  reserves ~4.4e12 MB for its whole life, **blocking every other model load** (a tiny uncached 4B blocked a
-  sibling's gpt-oss matrix on :8301). Safe (over-reserves) but badly over-conservative. **Fix:** compute the
-  footprint AFTER the model dir is resolved/downloaded (size known) — i.e. move/repeat the
-  reserve+cap after `ensure_model_dir` in `run_gateway`/`run_launch_dedicated`. Touches the admission call
-  site (sunny-civet's ledger + my estimate) → **coordinate before editing.** Done-when: an uncached small
-  model reserves its real size, not the sentinel; doesn't block siblings; cargo check + tests green.
+  in-place rewrite, no-op without a reservation), 14/14 share tests. ✅ **WIRING DONE (`21ed3a9`):**
+  `ensure_warm` (after a warm load) + `sweep_idle_warm` (after evict, lock released first) republish
+  `primary + Σ warm` — deadlock-safe (the free fn locks the ledger file, not the warm map). 74/74 gateway
+  tests. **So residency-unify U1 (host-aware + footprint-accurate + republished) + U2 are COMPLETE.**
+  **REMAINING:** (b) **U3 request→model routing** (surface the cascade); (c) decide whether the in-process
+  Switchboard becomes the *primary* multi-model path over N-process flock. (`footprint-before-download`:
+  DONE separately, `a261fb0`.)
+- [x] **footprint-before-download** (`nimble-raven`) — **DONE `a261fb0`.** The footgun: estimate ran BEFORE the
+  download, so an uncached model reserved the unknown-size sentinel (~4.4e12 MB) for its whole life →
+  blocked every other load. Fix (now trivial via the reservation-update API): after the model loads (hence
+  resolved/cached) in `run_gateway` + `run_launch_dedicated`, re-estimate the real footprint and
+  `share::update_my_reservation()`. So an uncached model over-blocks others only during its one-time load
+  window, not forever; cached = no-op. cargo check default + --no-default green.
 - [x] **residency-ledger-hardening** (`sunny-civet`) — **DONE `f5cbec2`.** Ledger was already flock-robust;
   added `reap_orphan_residents()` (reusable reaper for a doctor/maintenance path) + edge tests (PID-reuse
   overwrite, dead-vs-live reap, non-pid/held files untouched). Additive to `share.rs`, no API change → did
