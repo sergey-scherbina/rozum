@@ -169,9 +169,12 @@ concrete bug **in our stack**, to isolate **fully and from all sides (the `isola
 BEFORE any conclusion**. Never close a cell as "model too weak / model-side" — that has been
 premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One task per fail.
 
-- [ ] **matrix-baseline** — run the authoritative agentic matrix on `origin/master`
-  (agentic-grade models × claude/codex × greet/build/fix/test/debug). File ONE
-  `matrix-<model>-<agent>-<task>` isolate-task per fail below; record the fail map.
+- [x] **matrix-baseline** — DONE (plucky-finch 2026-06-22, seed-pinned, release@master,
+  reboot-safe single-box, **0 panic/0 reboot/0 rc2**). claude+codex × {Qwen3.6-35B-A3B,
+  gpt-oss-20b} × 5 tasks = **16/20**. **claude 10/10 on both models, deterministic** (seed-fix
+  validated end-to-end — `claude×test` flip gone). Fail map (all codex) filed as the four
+  `matrix-*` tasks below. Results: `scripts/bench/results/baseline-postfix/per-run.csv`.
+  (Not yet run: opencode column; the other models — file more tasks when run.)
   - **PREP DONE (nimble-raven 2026-06-22):** runner is `scripts/bench/agentic.sh`; override via
     `AGENTIC_MODELS="spec1 spec2" AGENTS="claude codex" TASKS="greet build fix test debug"`
     (defaults: `Qwen3.6-35B-A3B-4bit` + `gpt-oss-20b-MXFP4-Q4`; gold standard Qwen3.6-35B = 15/15).
@@ -189,23 +192,47 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
     (see `matrix-nondeterminism-flip`), so a red is reproducible+debuggable, not sampling noise.
   - **Before running:** follow the 🛑 REBOOT-SAFETY PROTOCOL (claim the slot in-room; `ps`/lockfile
     check that no OTHER model gateway — e.g. a dedicated one from another worktree — is live).
-- [~] **matrix-nondeterminism-flip** — CAUSE FOUND + FIX SHIPPED; end-to-end matrix
-  validation pending. Root cause (proven from code AND live on GLM-4-9B): the gateway
-  never threads `SamplingParams.seed`, so the sampler + MLX RNG seed from entropy — any
-  `temperature>0` request (Claude main loop = 1.0) yields a different token stream every
-  run → high-entropy cells flip. Live probe: temp1 unseeded **5/5 distinct**; temp1 +
-  `ROZUM_SAMPLING_SEED=42` **1/5 (fixed)**; temp0 greedy 1/5 (dense baseline). Shipped
-  (default-OFF): `apply_determinism_env` (`ROZUM_SAMPLING_SEED` pin + `ROZUM_FORCE_GREEDY`
-  control, 3 tests) + `agentic.sh` pins the seed by default + probe script. Spec
-  `docs/specs/matrix-nondeterminism.md`. **Remaining:** a guarded single-model live matrix
-  to confirm the `claude×test` flip is gone end-to-end (residual flips ⇒ Layer-A request
-  variance / E2 MoE numerics / timeout); optional OpenAI `seed` request-field parsing.
+- [x] **matrix-nondeterminism-flip** — DONE + VALIDATED END-TO-END. Root cause (code AND
+  live on GLM-4-9B): the gateway never threads `SamplingParams.seed`, so the sampler + MLX
+  RNG seed from entropy — any `temperature>0` request (Claude main loop = 1.0) yields a
+  different token stream every run → high-entropy cells flip. Probe: temp1 unseeded **5/5
+  distinct**; temp1 + `ROZUM_SAMPLING_SEED=42` **1/5 (fixed)**; temp0 1/5. Shipped (default-OFF):
+  `apply_determinism_env` (`ROZUM_SAMPLING_SEED` + `ROZUM_FORCE_GREEDY`, 3 tests) + `agentic.sh`
+  seed-pin + probe script. **End-to-end CONFIRMED by `matrix-baseline`:** claude 10/10
+  deterministic on both models, the `claude×test` flip is gone (no 0↔1). Spec
+  `docs/specs/matrix-nondeterminism.md`. Optional follow-up only: OpenAI `seed` request-field parse.
 - [ ] **matrix-glm32-agentic** — GLM-4-32B emits file *content* (```toml/```rust) or raw
   ```shell instead of *naming* Write/shell. Isolate WHERE in **our** stack it's lost
   (prompt render, tool-schema presentation, chat-template). Do NOT close as a model
   decision-gap until a clean-prompt model-only probe proves the model itself can't.
-- [ ] (one task per remaining fail — filed by `matrix-baseline`)
-  · codex/gpt-oss delivery fails: coordinate — the sibling holds those branches.
+  Filed from the `matrix-baseline` fail map (one task per red, all codex). Repro any cell with
+  (under the 🛑 REBOOT-SAFETY PROTOCOL — claim the slot, one model at a time):
+  `BENCH_BIN=<release> AGENTS=codex AGENTIC_MODELS="<spec>" TASKS=<task> KEEP=1 RUN_TIMEOUT=300 scripts/bench/agentic.sh`
+  (seed is pinned to 1234 by the harness ⇒ reproducible). `verify_task` scores by **final file
+  state**, not rc. Do NOT close any as "model too weak / model-side" until isolated from all sides.
+
+- [ ] **matrix-35b-codex-test** — `codex × Qwen3.6-35B-A3B-4bit × test` = **fail** (24.7s, rc=0,
+  NOT a timeout → ran to completion, wrong final file state). **Surprising**: 35B is the gold
+  agentic model and codex×35B passed greet/build/fix/debug (4/5). The `test` task adds a
+  `#[cfg(test)]` unit test + `cargo test` must pass. NEW signal — likely a codex `apply_patch`/
+  edit-delivery issue specific to the test shape, OR a seed=1234-unlucky single sample. First
+  step: `KEEP=1` to inspect the workdir (did Cargo.toml/src land? did `cargo test` fail or the
+  file never wrote?) + run 2-3 seeds (`ROZUM_SAMPLING_SEED=7/99/...`) to tell seed-unlucky from
+  structural. Highest-priority red (capable model). `docs/matrix-failure-analysis.md`.
+- [ ] **matrix-gptoss-codex-build** — `codex × gpt-oss-20b × build` = **fail** (196.7s, rc=0).
+  Create-from-scratch via codex's V4A `apply_patch`. Known family ([[project-gateway-patch-revert]],
+  Finding 5/6): gpt-oss wrestles codex's 21KB/18-tool V4A load → malformed/duplicate writes →
+  files don't land. Verify against the latest gateway create-write-synth + codex-lean; isolate any
+  residual delivery loss vs. a true model ceiling. Coordinate — a sibling holds the codex/gpt-oss branches.
+- [ ] **matrix-gptoss-codex-test** — `codex × gpt-oss-20b × test` = **fail** (300.1s, rc=143,
+  **RUN_TIMEOUT**). Same create-from-scratch family as `-build` but it TIMED OUT (the model
+  flailed past 300s). Isolate: is it the same V4A delivery loop, or does gpt-oss never converge on
+  the test scaffold within budget? Consider whether a higher `RUN_TIMEOUT` or the create-write-synth
+  changes it. Coordinate with the sibling on codex/gpt-oss.
+- [ ] **matrix-gptoss-codex-debug** — `codex × gpt-oss-20b × debug` = **fail** (55.9s, rc=0).
+  Edit-existing-file (fix the bug so `cargo test` passes). Failed fast (didn't time out) → the edit
+  never landed or was wrong. Likely the codex apply_patch edit-delivery path on gpt-oss; cross-check
+  against the five shipped gateway delivery fixes ([[project-gateway-patch-revert]]). Coordinate with the sibling.
 
 #### 2. Plugin-ize everything
 
