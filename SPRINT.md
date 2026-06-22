@@ -12,27 +12,28 @@ Current sprint focus: (1) make Rozum a reliable local meeting room for live agen
 Goal: make rozum's extension points legible — a reader finds the seam for any
 concern (model / tool / agent / service) in one hop. NOT "plugin-ize everything":
 two axes are already SPIs, one tangle is worth extracting, services stay as-is.
-Each step is **behaviour-preserving** and **matrix-gated** (Qwen3.6-35B 10/10 +
-serving tests identical before/after). Spec committed `2edbf00`; no code yet.
+Each step is **behaviour-preserving** and **matrix-gated**. **Stages 1–3 DONE +
+merged** (the legibility goal is met). Spec `2edbf00`; outcome in
+`docs/specs/architecture-spi.md` Results.
 
-- [ ] **Stage 1 — Document (no code, do first).** Add an "Extension points" section
-  to `SPEC.md` naming the four axes: `ChatBackend` (models, `backend.rs:250`, SPI ✓),
-  `ToolSource` (tools, `agent.rs:49`, SPI ✓), the agent-dialect + model-tool-format
-  tangles (→ to extract), services (`Command` enum, kept as subcommands). Link this
-  spec. Cheapest win for "понять как работает".
-- [ ] **Stage 2 — Extract `ToolDialect`** (model tool format; highest value — most
-  spread, keeps drawing fixes). One trait per model family (Qwen-XML / Harmony /
-  GLM-name-json), `render_tools` + `parse_calls` + `constraint`. Pull together
-  `serving.rs` (`parse_tool_calls`/`parse_glm_tool_call`), `mlx_native_backend.rs`
-  (`glm_conversation`/`harmony_conversation`/`render_prompt_opt`), and the
-  `ToolConstraint` envelope branches. Gate: serving + matrix byte-identical.
-- [ ] **Stage 3 — Extract `WireProtocol`** (agent dialect). One impl per dialect
-  (Chat / Messages / Responses): `parse_request` + `serialize` + `tool_policy`
-  (codex-lean). Move the per-protocol branching out of the `gateway.rs` body. Keep
-  the cross-cutting robustness (loop-breaker, read-repair) as an orchestration policy
-  parameterised by both seams — do NOT fold it into either. Gate: matrix identical.
-- [ ] **Stage 4 (optional) — MCP `ToolSource` adapter.** Unify external MCP tools and
-  in-process `CallbackToolSource` behind the one tool SPI.
+- [x] **Stage 1 — Document** (merged `2b0a135`). `SPEC.md` "Extension points" names
+  the four axes (`ChatBackend`/`ToolSource` SPIs ✓, the two seams, services).
+- [x] **Stage 2 — Extract `ToolDialect`** (merged `023c121`). `dialect_for(template)`
+  → `Qwen`/`Harmony`/`Glm`; render + constraint-envelope flag flow through it.
+  Behaviour-preserving: 448/0 lib tests + Qwen3.6-35B claude×fix smoke pass=1.
+  **Scope correction:** parse stayed a generic union (`parse_tool_calls`), not
+  per-family — the dialect owns only what varies (render + envelope).
+- [x] **Stage 3 — `WireProtocol`: MAPPED, trait rejected** (merged `2fc0ed9`).
+  Investigated; the gateway wire layer is *already factored* (named per-dialect
+  parse + serialize fns + thin handlers converging on `ChatRequest`/`ChatEvent`).
+  A trait would force uniformity over different typed extractors + SSE sequences →
+  net-negative on matrix-critical code. Fixed the stale module doc ("two dialects" →
+  three) into an accurate wire-protocol **map**. Docs-only.
+- [ ] **Stage 4 (optional, a FEATURE not legibility) — MCP `ToolSource` adapter.**
+  An MCP-client impl of `ToolSource` so the **embedded** agent loop can consume
+  external MCP servers' tools (the gateway/launch path already uses the external
+  agent's own tools, so this is net-new reach, not a refactor). Not auto-shipped —
+  needs its own design + integration tests; do on request.
 - [ ] **Out of scope (decided):** services-as-plugins (subcommands stay); dynamic/
   loadable plugins (dylib/WASM/out-of-process) — in-tree trait impls only;
   re-abstracting `ChatBackend`/`ToolSource` (already correct).
