@@ -885,29 +885,73 @@ async fn start_web_bridge(room_name: String, port: u16, url: String) {
     }
 }
 
-/// Acquire the host-wide model-residency gate (BUG-003) before loading a model,
-/// or exit with a clear message. Hold the returned guard for as long as the model
+/// Estimate a model's resident footprint (weights + KV + runtime overhead) for the
+/// host RAM gate (BUG-003 v2). Catalog size × an inflation factor + a base; an
+/// unknown model gets a deliberately huge estimate so it only loads when the host is
+/// otherwise empty — conservative, since under-counting is the direction that reboots.
+/// All tunable: `ROZUM_GATEWAY_FOOTPRINT_INFLATE` (1.25), `_FOOTPRINT_BASE_MB` (1024).
+fn estimate_model_footprint_bytes(model: &str) -> u64 {
+    let inflate = std::env::var("ROZUM_GATEWAY_FOOTPRINT_INFLATE")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|f| f.is_finite() && *f >= 1.0)
+        .unwrap_or(1.25);
+    let base = std::env::var("ROZUM_GATEWAY_FOOTPRINT_BASE_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(1024)
+        .saturating_mul(1_048_576);
+    match rozum::models::scan_all_installed()
+        .into_iter()
+        .find(|m| m.spec == model)
+    {
+        Some(m) => ((m.size_bytes as f64) * inflate) as u64 + base,
+        None => u64::MAX / 4, // unknown size → only admits when nothing else resident
+    }
+}
+
+/// Reserve host RAM for a model about to load (BUG-003 v2), or exit with a clear
+/// message if it would overcommit. Hold the returned guard for as long as the model
 /// is resident (binding it at the caller's function scope is enough). Runs the
 /// (possibly long) blocking wait off the async runtime. `None` = gate bypassed /
 /// unavailable → loading proceeds (the gate is a safety net, not correctness).
-async fn acquire_residency_or_exit() -> Option<rozum::share::ResidencyGuard> {
-    match tokio::task::spawn_blocking(rozum::share::acquire_residency).await {
+async fn acquire_residency_or_exit(model: &str) -> Option<rozum::share::ResidencyGuard> {
+    let footprint = estimate_model_footprint_bytes(model);
+    let model_owned = model.to_string();
+    match tokio::task::spawn_blocking(move || {
+        rozum::share::acquire_residency(&model_owned, footprint)
+    })
+    .await
+    {
         Ok(Ok(guard)) => guard,
         Ok(Err(denied)) => {
-            let who = denied
-                .holder
-                .map(|h| format!(" (pid {}, model {})", h.pid, h.model))
-                .unwrap_or_default();
+            let mb = |b: u64| b / 1_048_576;
+            let who = if denied.holders.is_empty() {
+                "another rozum gateway".to_string()
+            } else {
+                denied
+                    .holders
+                    .iter()
+                    .map(|(p, m)| format!("pid {p} {m}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             eprintln!(
-                "rozum gateway: refusing to load a model — another rozum gateway is already \
-                 holding a resident model{who} after waiting {}s.",
-                denied.waited_secs
+                "rozum gateway: refusing to load '{model}' (~{} MB) — it would overcommit host RAM. \
+                 {} MB already reserved by [{}]; budget {}. Waited {}s.",
+                mb(denied.footprint_bytes),
+                mb(denied.in_use_bytes),
+                who,
+                denied
+                    .budget_bytes
+                    .map(|b| format!("~{} MB", mb(b)))
+                    .unwrap_or_else(|| "unknown".into()),
+                denied.waited_secs,
             );
             eprintln!(
-                "  Running more than one model-loaded gateway on this host can exhaust RAM and \
-                 panic/reboot the machine (BUG-003). Stop the other gateway first \
-                 (`rozum gateway stop`), or set ROZUM_ALLOW_CONCURRENT_RESIDENT=1 to override if \
-                 both models truly fit."
+                "  Loading models past host RAM can panic/reboot the machine (BUG-003). Stop a \
+                 resident gateway (`rozum gateway stop`), use a smaller model, raise \
+                 ROZUM_GATEWAY_RAM_BUDGET_FRAC, or set ROZUM_ALLOW_CONCURRENT_RESIDENT=1 to override."
             );
             std::process::exit(1);
         }
@@ -923,11 +967,11 @@ async fn acquire_residency_or_exit() -> Option<rozum::share::ResidencyGuard> {
 async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: rozum::RuntimeConfig) {
     let n_ctx = resolve_n_ctx(&model_spec, n_ctx.or(cfg.n_ctx));
     let cfg = std::sync::Arc::new(cfg);
-    // Host-wide gate: never let a second model-loaded gateway go resident next to
-    // this one (whole-system OOM → watchdog kernel panic → reboot, BUG-003). Held
-    // for this process's lifetime; covers the initial load below plus every lazy
-    // reload / `switch` (all same-process).
-    let _residency = acquire_residency_or_exit().await;
+    // Host-wide RAM gate: reserve this model's footprint before loading so the
+    // resident models can't overcommit host RAM (whole-system OOM → watchdog kernel
+    // panic → reboot, BUG-003). Held for this process's lifetime; covers the initial
+    // load below plus every lazy reload / `switch` (all same-process).
+    let _residency = acquire_residency_or_exit(&model_spec).await;
     // Speculative decoding: if a draft model is configured (`--draft-model` /
     // `ROZUM_DRAFT_MODEL`), build the target+draft pair; else the plain target.
     // Spec: docs/specs/speculative-decoding.md.
@@ -1641,10 +1685,10 @@ async fn run_launch_dedicated(
             .map(|a| a.port())
             .unwrap_or(rozum::share::DEFAULT_GATEWAY_PORT)
     });
-    // Same host-wide residency gate as `run_gateway` (BUG-003): a dedicated
-    // in-process model must not load on top of another resident gateway. Held for
-    // this launch's lifetime (drops when `exec_agent` returns below).
-    let _residency = acquire_residency_or_exit().await;
+    // Same host-wide RAM gate as `run_gateway` (BUG-003): a dedicated in-process
+    // model reserves its footprint so it can't overcommit host RAM next to another
+    // resident gateway. Held for this launch's lifetime (drops when `exec_agent` returns).
+    let _residency = acquire_residency_or_exit(&model_spec).await;
     let backend = match build_gateway_backend(&model_spec, n_ctx).await {
         Some(b) => b,
         None => {

@@ -7,8 +7,10 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ## BUG-003 — concurrent model-loaded gateways exhaust host RAM → watchdog kernel panic → reboot
 
-- **Status:** fixed (host-wide model-residency gate) on branch
-  `feature/gateway-residency-guard`; pending matrix re-validation under load.
+- **Status:** fixed on master (`3bcee03` v1 single-flight) + **v2 RAM-ledger**
+  (`feature/gateway-residency-ram-ledger`): the gate now admits a genuinely-fitting
+  small 2nd model and refuses only a true overcommit. Pending matrix re-validation
+  under load (`validate-gate-live`).
 - **Reporter:** operator ("система ребутнулась") — the Mac rebooted 2026-06-22 13:41.
 - **Severity:** P0 — reboots the host, so any matrix run is untrustworthy (same
   class as BUG-001, **different mechanism**).
@@ -49,6 +51,16 @@ SIGKILL), so there is no stale-lock failure mode. Escape hatch
 `ROZUM_ALLOW_CONCURRENT_RESIDENT=1` for the rare two-small-models case. Unit tests:
 `residency_gate_admits_one_and_releases_on_drop`, `residency_escape_hatch_skips_the_gate`.
 Memory: `[[project-reboot-watchdog-oom]]`.
+
+**v2 (RAM ledger).** The v1 hard mutex refuses even a tiny 2nd model. v2 replaces it
+with a host RAM budget: each gateway *reserves* its estimated footprint (`residents/<pid>`
+flock-held file) before loading; admit iff sole OR `in_use + footprint ≤ total_ram ×
+ROZUM_GATEWAY_RAM_BUDGET_FRAC` (0.65) — a genuinely-small 2nd model co-resides, a true
+overcommit (two big models) still refuses. Reservation up-front under a brief admit lock
+⇒ no free-RAM-read TOCTOU; per-pid flock liveness ⇒ same death-safety as v1, no reaper.
+Footprint estimated caller-side from the catalog (core stays model-free); unknown model ⇒
+huge estimate ⇒ admitted only when host empty (conservative). 4 unit tests (sole / refuse-
+overcommit + admit-fitting / reap-dead / hatch) + real-binary smoke. Spec § v2.
 
 ---
 

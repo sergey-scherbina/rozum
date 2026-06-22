@@ -35,9 +35,11 @@ push `feature/<slug>:master` (never edit master), then delete the done entry + p
     read confirms guard held (`_residency`, not `_`) before load on both paths; matrix
     `rozum gateway --port N`→run_gateway covered, child gateways transitively, `ensure_shared_gateway`
     reuse correctly NOT gated. Plus sunny-civet's real-binary smoke (held→refuse+exit1 before load).
-  - **Operational rule still holds:** don't deliberately run 2 model-gateways — the gate makes the
-    2nd refuse, it doesn't make 2 models fit. **v2 (BACKLOG):** RAM-ledger to admit a genuinely-
-    fitting small 2nd model; sibling-aware `cap_mlx_memory` backstop (rejected for v1 — racy/PID-reap).
+  - **Operational rule still holds:** don't deliberately run 2 model-gateways without checking budget.
+    **v2 RAM-ledger DONE** (`feature/gateway-residency-ram-ledger`, sunny-civet): the gate now admits a
+    genuinely-fitting small 2nd model (reserve footprint up-front under an admit lock; per-pid flock
+    liveness — answers the v1 racy/PID-reap objection) and refuses only a true overcommit. Remaining
+    v3 (BACKLOG): sibling-aware `cap_mlx_memory` backstop.
 
 > ### 🛑 REBOOT-SAFETY PROTOCOL (operator directive 2026-06-22 — load-bearing, read before any model load)
 > The 36 GiB Mac reboots if >1 model is resident (BUG-003). The gate now refuses a 2nd load, but

@@ -1,5 +1,22 @@
 # Changelog
 
+## gateway — BUG-003 v2: RAM-ledger residency (admit a fitting 2nd model, not just refuse)
+Completed: 2026-06-22
+
+v1's host-residency gate was a hard single-flight — one resident model per host, any
+2nd refused. v2 makes it a **RAM budget**: each gateway reserves its estimated
+footprint (`residents/<pid>` flock-held file) before loading, and a load is admitted
+iff it is the sole resident OR `in_use + footprint ≤ total_ram × RAM_BUDGET_FRAC`
+(0.65). A genuinely-small 2nd model co-resides; the case that reboots (two big models
+⇒ overcommit) still refuses with a clear, holder-named message. The v1 reasons for
+rejecting a ledger are answered: reservation is up-front **under a brief admit lock**
+(no free-RAM-read race) and liveness is a **per-pid flock probe** (same death-safety
+as v1, no kill-reaper). Footprint is estimated caller-side from the model catalog
+(`estimate_model_footprint_bytes`, rozum-core stays model-free); an unknown model gets
+a huge estimate so it loads only when the host is empty (conservative). Knobs:
+`ROZUM_GATEWAY_RAM_BUDGET_FRAC`/`_BYTES`, `ROZUM_GATEWAY_FOOTPRINT_INFLATE`/`_BASE_MB`.
+4 unit tests + real-binary smoke; core 91/91; spec § v2; BUGS.md BUG-003.
+
 ## gateway — host-wide model-residency gate (stop concurrent-gateway reboots, BUG-003)
 Completed: 2026-06-22
 

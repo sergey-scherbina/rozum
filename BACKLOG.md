@@ -2,17 +2,18 @@
 
 ## Host safety
 
-- [ ] **residency-gate-v2-ramledger** — the BUG-003 single-flight gate (master `3bcee03`,
-  spec `docs/specs/gateway-residency-singleflight.md`) enforces **one resident model per host**:
-  correct + safe for the 36 GiB Mac, but it refuses *any* 2nd model even when two genuinely fit.
-  v2 (only if a real need appears — e.g. a tiny draft + small target): replace the binary lock with
-  a **RAM ledger** that admits a 2nd load iff `requested_footprint + committed_by_others ≤ total*frac`
-  (reuse `runtime_footprint_bytes`/`total_ram_bytes` in `src/main.rs`; reap dead PIDs like the lease
-  reaper in `share.rs`), plus a **sibling-aware `cap_mlx_memory`** backstop
-  (`crates/rozum-mlx/.../mlx_native_backend.rs:~363`: cap at `total−8−committed_by_others`, not flat
-  `total−8`). Rejected for v1: racy (two loaders both read free-RAM, both pass) + needs PID liveness
-  reaping the flock gets for free. Not urgent — escape hatch `ROZUM_ALLOW_CONCURRENT_RESIDENT=1` covers
-  the rare "they truly fit" case today.
+- [x] **residency-gate-v2-ramledger** — DONE (`feature/gateway-residency-ram-ledger`, `sunny-civet`).
+  Replaced the BUG-003 v1 binary single-flight with a **RAM ledger**: each gateway reserves its
+  estimated footprint (`residents/<pid>` flock-held file) before loading; admit iff sole OR
+  `in_use + footprint ≤ total_ram × ROZUM_GATEWAY_RAM_BUDGET_FRAC` (0.65). The v1 "racy / needs
+  PID-reap" objections are answered: reservation is up-front **under a brief admit lock** (no
+  free-RAM-read TOCTOU), and liveness uses **per-pid `flock` probe** (same death-safety as v1, no
+  kill-reaper). Footprint estimated caller-side from the catalog (core stays model-free). Spec § v2;
+  4 unit tests + real-binary smoke; core 91/91, default+no-default green.
+- [ ] **residency-gate-cap-mlx-sibling-aware** (v3 hardening, NOT urgent) — the ledger refuses at
+  *admission*; the per-process MLX cap (`crates/rozum-mlx/.../mlx_native_backend.rs:~363`) is still
+  flat `total−8`. Make it sibling-aware (`total−8−committed_by_others` from the ledger) so even an
+  escape-hatch / unknown-path 2nd MLX process can't claim near-total RAM. Secondary to the ledger.
 
 ## MCP (deferred — decide the use, then build)
 

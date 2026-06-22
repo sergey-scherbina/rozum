@@ -1,8 +1,10 @@
-# Spec: host-wide model-residency single-flight gate (reboot fix, BUG-003)
+# Spec: host-wide model-residency gate (reboot fix, BUG-003)
 
-Status: in progress (2026-06-22). Owners — code: `sunny-civet`
-(`feature/gateway-residency-guard`); spec + board + verification: `nimble-raven`
-(`feature/reboot-singleflight-spec`). Coordinated in the rozum room (n=25–29).
+Status: v1 DONE on master (`3bcee03`); **v2 RAM-ledger DONE**
+(`feature/gateway-residency-ram-ledger`, `sunny-civet`, 2026-06-22). Owners —
+code: `sunny-civet`; spec + board + verification: `nimble-raven`. Coordinated in
+the rozum room (n=25–38). v2 supersedes v1's hard single-flight: see
+[§ v2 — RAM ledger](#v2--ram-ledger-admit-a-genuinely-fitting-second-model) below.
 
 ## Problem — a concurrent second model-load reboots the machine
 
@@ -58,7 +60,7 @@ Why `flock`, not a RAM ledger (the alternative considered and rejected for v1):
 - "One resident model at a time" is the correct invariant for this box: even two
   mid-size models can co-exceed 36 GiB once each MLX cap claims ~28 GB. A precise
   RAM ledger is a possible v2 refinement (admit a genuinely-fitting second small
-  model), gated behind the same escape hatch.
+  model), gated behind the same escape hatch. **→ now implemented; see § v2.**
 
 ### Implementation (`crates/rozum-core/src/share.rs`) — DONE by sunny-civet
 
@@ -102,6 +104,75 @@ keeps the process for lazy reload, `gateway.rs`), it must **release the residenc
 guard** so another gateway can load, and **re-acquire** on lazy reload. (If
 re-acquire isn't wired, simplest v1 is: hold the guard for process lifetime and rely
 on `clients_gone`/idle *exit* to release — confirm which, and document it.)
+
+## v2 — RAM ledger (admit a genuinely-fitting second model)
+
+v1's hard single-flight (one resident model per host, period) is safe but blunt: it
+refuses a *tiny* 2nd model even when both would comfortably fit 36 GiB. v2 replaces
+the binary mutex with a **host RAM budget**: a load is admitted iff it is the **sole**
+resident OR the reserved total (incl. it) fits the budget. The case that reboots
+(two big models ⇒ overcommit) is still refused; a genuinely-small 2nd model co-resides.
+
+### Why the ledger is now correct (v1 rejected it as "racy" — that's fixed)
+
+v1's two objections (this spec, "Why `flock`, not a RAM ledger") are both answered:
+
+1. **Raciness** ("two loaders both read free RAM, both pass, both load"). v2 does **not**
+   read instantaneous free RAM. Each loader **reserves its footprint up front, under a
+   briefly-held admit lock** (`flock` on `residency.lock`), so the scan→decide→reserve
+   is atomic across processes: two racing loaders serialize on the admit lock and the
+   second sees the first's reservation even though neither has finished loading. No TOCTOU.
+2. **Liveness / stale state** ("needs PID reaping, racy"). Reservations use the **same
+   `flock` robustness as v1** — each resident holds an exclusive `flock` on its own
+   `residents/<pid>` file for its process lifetime; the OS releases it on death/SIGKILL.
+   Liveness needs no heartbeat and no `kill(pid,0)`: a reader `try_lock`s the file —
+   success ⇒ owner dead ⇒ reap; would-block ⇒ alive ⇒ count. Under-counting (the only
+   direction that could reboot) requires seeing a *live* holder as dead, which `flock`
+   cannot do.
+
+### Implementation (`crates/rozum-core/src/share.rs`) — DONE
+
+- Reservation ledger: `residents/<pid>` files, each holding an exclusive lifetime
+  `flock`; content = `{model, footprint_bytes}` (JSON). `residency.lock` is reused as
+  the **brief** admit mutex (NOT held for the model's lifetime in v2).
+- `acquire_residency(model: &str, footprint_bytes: u64) -> Result<Option<ResidencyGuard>, ResidencyDenied>`:
+  under the admit lock, `scan_residents` reaps dead files + sums live footprints;
+  admit iff `in_use == 0 || in_use + footprint <= budget`; on admit, `reserve()` owns
+  `residents/<pid>` and the guard holds its flock for life (Drop unlinks + releases).
+  Same `Ok(None)` fail-open and `spawn_blocking` contract as v1.
+- `ResidencyDenied { footprint_bytes, in_use_bytes, budget_bytes, waited_secs, holders }`
+  — the numbers + live `(pid, model)` holders, so the refusal explains exactly why.
+- **Footprint is computed by the caller** (`src/main.rs::estimate_model_footprint_bytes`
+  via `rozum-models` catalog `size_bytes × inflate + base`) and passed in — rozum-core
+  stays engine/model-free. An **unknown** model gets a huge estimate ⇒ admitted only
+  when the host is otherwise empty (conservative — under-counting is the reboot direction).
+- Budget (`host_ram_budget_bytes`): `total_ram × ROZUM_GATEWAY_RAM_BUDGET_FRAC`
+  (default **0.65** — leaves ~1/3 of host RAM for OS/apps/Metal) or absolute
+  `ROZUM_GATEWAY_RAM_BUDGET_BYTES`. `None` (unknown total RAM) ⇒ only a sole model
+  admitted (safe fallback). Footprint knobs: `ROZUM_GATEWAY_FOOTPRINT_INFLATE` (1.25),
+  `ROZUM_GATEWAY_FOOTPRINT_BASE_MB` (1024). Wait/escape knobs unchanged from v1.
+- **Backward-compatible with a running v1**: v1 held `residency.lock` for its lifetime;
+  a v2 arrival's admit-lock `try_lock` simply would-block behind it and waits — safe
+  (conservative). Once all gateways are v2, the admit lock is only ever held briefly.
+
+### Limitations (documented, acceptable for v2)
+
+- Footprint is an **estimate**; the budget frac is the real safety margin. KV grows with
+  `n_ctx`; a very long context could exceed `inflate`. The 0.65 frac (≈12.6 GB host
+  headroom on 36 GiB) absorbs this; raise/lower per box.
+- A multi-model gateway (cascade / spec-decode draft) is estimated from its **primary**
+  model only (under-count). Rare/off-by-default; the headroom frac covers the common case.
+- A process that idle-*unloads* its model keeps its reservation until it exits
+  (conservative over-count). v3 could release-on-unload / re-reserve-on-reload.
+
+### v2 validation
+
+- 4 unit tests (`share::tests::residency_*`): sole-always-admitted; refuse-overcommit
+  **and** admit-fitting-second (15+8>20 refuse, 6+8≤20 admit); reap-dead-reservation-
+  frees-budget; escape-hatch. Full core suite 91/91; `--no-default-features` +
+  default-features (MLX) green.
+- Real-binary smoke: held resident + tiny budget ⇒ refusal naming the ledger holder +
+  `exit 1` before load; no resident ⇒ sole model passes the gate.
 
 ## Acceptance / done-when
 
