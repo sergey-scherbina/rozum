@@ -909,7 +909,11 @@ mod inner {
         //   2. `response_format` / structured output — ALWAYS honored when the client asks
         //      (it's an explicit correctness request, not an opt-in).
         if should_constrain(&job, model) {
-            let driver = ToolConstraint::from_job(&job).expect("constrained job has tools");
+            // GLM-4 uses a `name\n{json}` envelope (no `<tool_call>`); the template's
+            // `<|observation|>` stop marker identifies it (à la `glm_conversation`).
+            let glm = template.contains("<|observation|>");
+            let driver =
+                ToolConstraint::from_job(&job, glm).expect("constrained job has tools");
             return if is_hybrid_arch(model) {
                 run_constrained_hybrid(model, tokenizer, template, eos, job, driver)
             } else {
@@ -1817,8 +1821,10 @@ mod inner {
                 let stable = text.trim_end_matches('\u{FFFD}');
                 self.full_text = stable.to_string();
                 if !self.tool_seen {
-                    let tools = !self.job.tools.is_empty();
-                    if let Some(pos) = tool_markup_at(stable, tools) {
+                    let names: Vec<String> =
+                        self.job.tools.iter().map(|t| t.name.clone()).collect();
+                    let tools = !names.is_empty();
+                    if let Some(pos) = tool_markup_at(stable, &names) {
                         if pos > self.emitted.len() && stable.starts_with(&self.emitted) {
                             let delta = stable[self.emitted.len()..pos].to_string();
                             self.emitted = stable[..pos].to_string();
@@ -1973,6 +1979,32 @@ mod inner {
         active: bool,
         done: bool,
         body_start: usize,
+        /// GLM-4 envelope (`name\n{bare_args}`, no `<tool_call>` / Hermes wrapper). Set from
+        /// the chat template's `<|observation|>` marker; switches `json_region` to the
+        /// line-anchored GLM trigger ([`find_glm_tool_call`]).
+        glm: bool,
+    }
+
+    /// GLM-4 tool-call trigger: the byte offset just past a `{name}\n` line whose `name` is one
+    /// of the offered tools, plus that tool's index. GLM emits `{tool_name}\n{bare_args_json}`
+    /// (no `<tool_call>` opener, name OUTSIDE the JSON), so neither `<tool_call>` nor
+    /// `find_loose_tool_json` ({"name":…}) fires. Anchored on a *known* tool name on its own
+    /// line, it catches both the clean form (name is line 1) and the narrated form (name after
+    /// a prose / ```fence``` preamble), while a pure prose answer (no tool-name line) never
+    /// matches — leaving GLM's final-answer turn free. The *last* match wins (the call follows
+    /// any preamble). The closing `\n` must already be present, so we anchor only once the model
+    /// has committed the name (the next char then opens the constrained args object).
+    pub(crate) fn find_glm_tool_call(text: &str, names: &[String]) -> Option<(usize, usize)> {
+        let mut best: Option<(usize, usize)> = None;
+        let mut line_start = 0usize;
+        for (rel, _) in text.match_indices('\n') {
+            let line = text[line_start..rel].trim();
+            if let Some(i) = names.iter().position(|n| n == line) {
+                best = Some((i, rel + 1)); // just past this '\n'
+            }
+            line_start = rel + 1;
+        }
+        best
     }
 
     /// Byte offset of a `{` that opens a tool-call-shaped JSON (`{ "name": … }`),
@@ -1993,15 +2025,35 @@ mod inner {
 
     /// Byte offset where tool-call markup begins, to suppress it from the streamed
     /// text: a `<tool_call>` envelope, or — when `tools` are offered — a loose
-    /// ```json fence / bare `{"name":…}` the finalizer turns into a `tool_use`.
-    /// Without suppression the call leaks as raw text AND a tool_use, which makes
-    /// weaker models re-emit it (an agentic loop).
-    pub(crate) fn tool_markup_at(text: &str, tools: bool) -> Option<usize> {
+    /// ```json fence / bare `{"name":…}` (or GLM's `name\n{json}`) the finalizer turns
+    /// into a `tool_use`. `names` is the offered tool set (empty = no tools), used to
+    /// recognise GLM's name-outside-the-JSON form. Without suppression the call leaks as
+    /// raw text AND a tool_use, which makes weaker models re-emit it (an agentic loop).
+    pub(crate) fn tool_markup_at(text: &str, names: &[String]) -> Option<usize> {
         if let Some(p) = text.find(TOOL_OPEN) {
             return Some(p);
         }
-        if !tools {
+        if names.is_empty() {
             return None;
+        }
+        // GLM `name\n{json}`: the name is on its own line OUTSIDE the JSON. Anchor on a known
+        // tool name immediately followed by a `{` (or nothing yet — the args are imminent);
+        // suppress from the start of that name line (and an enclosing ```fence if present).
+        if let Some((_, json_off)) = find_glm_tool_call(text, names) {
+            let tail = text[json_off..].trim_start();
+            if tail.is_empty() || tail.starts_with('{') {
+                // Start of the `name` line = char after the newline before it.
+                let line_start = text[..json_off - 1].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                let head = &text[..line_start];
+                return Some(match head.trim_end().rfind("```") {
+                    Some(f)
+                        if head[f + 3..].chars().all(|c| c.is_alphanumeric() || c.is_whitespace()) =>
+                    {
+                        f
+                    }
+                    _ => line_start,
+                });
+            }
         }
         let brace = find_loose_tool_json(text)?;
         // Suppress an enclosing ```json fence too, if it sits just before the `{`.
@@ -2015,7 +2067,7 @@ mod inner {
     }
 
     impl ToolConstraint {
-        fn from_job(job: &Job) -> Option<Self> {
+        fn from_job(job: &Job, glm: bool) -> Option<Self> {
             if job.tools.is_empty() {
                 return None;
             }
@@ -2027,7 +2079,15 @@ mod inner {
                 .collect();
             // Placeholder until the format is picked at activation.
             let cons = crate::constrain::Constraint::Json(crate::constrain::Schema::Any);
-            Some(Self { names, arg_schemas, cons, active: false, done: false, body_start: 0 })
+            Some(Self {
+                names,
+                arg_schemas,
+                cons,
+                active: false,
+                done: false,
+                body_start: 0,
+                glm,
+            })
         }
 
         fn tools(&self) -> Vec<(String, crate::constrain::Schema)> {
@@ -2040,6 +2100,28 @@ mod inner {
             use crate::constrain::{envelope, Constraint, Schema};
             if self.done {
                 return None;
+            }
+            if self.glm {
+                // GLM-4 envelope: `{tool_name}\n{bare_args}` (name OUTSIDE the JSON, no
+                // `<tool_call>` opener). Anchor on a known tool name on its own line; once it
+                // lands, constrain the args object directly to that tool's schema. Until then
+                // (and for a pure prose answer, which never names a tool on a line) → free.
+                if !self.active {
+                    let (idx, off) = find_glm_tool_call(full_text, &self.names)?;
+                    self.cons = Constraint::Json(self.arg_schemas[idx].clone());
+                    self.active = true;
+                    self.body_start = off;
+                }
+                let json = &full_text[self.body_start..];
+                if json.trim().is_empty() {
+                    // Name committed, args not started — force the object to open now.
+                    return Some(json);
+                }
+                if self.cons.is_complete(json) {
+                    self.done = true;
+                    return None;
+                }
+                return Some(json);
             }
             if !self.active {
                 // Native Qwen `<tool_call>` envelope (preferred); first body char picks
@@ -3536,19 +3618,53 @@ mod tests {
     }
 
     #[test]
+    fn find_glm_tool_call_anchors_on_known_name() {
+        use super::inner::find_glm_tool_call;
+        let names = vec!["Read".to_string(), "Edit".to_string()];
+        // Clean form: name on line 1 → activate just past `Read\n`.
+        let t = "Read\n{\"file_path\": \"a\"}";
+        assert_eq!(find_glm_tool_call(t, &names), Some((0, t.find('\n').unwrap() + 1)));
+        // Narrated form: name after a prose/fence preamble → still anchors on the name line.
+        let n = "Let me look.\n```bash\nRead\n{\"file_path\":\"a\"}";
+        let off = n.rfind("Read\n").unwrap() + "Read\n".len();
+        assert_eq!(find_glm_tool_call(n, &names), Some((0, off)));
+        // Fires the moment the name line closes, before the args open (args are imminent).
+        assert!(find_glm_tool_call("Edit\n", &names).is_some());
+        assert_eq!(find_glm_tool_call("Edit\n", &names).unwrap().0, 1);
+        // The LAST tool-name line wins (the call follows any earlier mention).
+        assert_eq!(find_glm_tool_call("Read\nstuff\nEdit\n{}", &names).unwrap().0, 1);
+        // A pure prose answer (no tool-name line) never anchors — final-answer path stays free.
+        assert_eq!(find_glm_tool_call("I have fixed the bug by editing main.rs.\n", &names), None);
+        assert_eq!(find_glm_tool_call("Reading the file now.\nDone.", &names), None);
+    }
+
+    #[test]
     fn tool_markup_suppression_points() {
         use super::inner::tool_markup_at;
+        let none: &[String] = &[];
+        let write = &["Write".to_string()];
         // Native <tool_call> — suppressed regardless of tools.
-        assert_eq!(tool_markup_at("hi <tool_call>{}", false), Some(3));
+        assert_eq!(tool_markup_at("hi <tool_call>{}", none), Some(3));
         // Loose ```json fence (tools offered) — suppress from the fence.
         let fenced = "I'll write it.\n```json\n{\"name\":\"Write\"}";
-        assert_eq!(tool_markup_at(fenced, true), fenced.find("```"));
+        assert_eq!(tool_markup_at(fenced, write), fenced.find("```"));
         // Bare {"name" — suppress from the brace.
-        assert_eq!(tool_markup_at("ok {\"name\":\"x\"}", true), Some(3));
+        assert_eq!(tool_markup_at("ok {\"name\":\"x\"}", write), Some(3));
         // No tools offered → a loose json is NOT treated as a call.
-        assert_eq!(tool_markup_at("```json\n{\"name\":\"x\"}", false), None);
+        assert_eq!(tool_markup_at("```json\n{\"name\":\"x\"}", none), None);
         // A `{` in prose / a code example is not a call.
-        assert_eq!(tool_markup_at("returns { x: 1 }", true), None);
+        assert_eq!(tool_markup_at("returns { x: 1 }", write), None);
+
+        // GLM `name\n{json}`: suppress from the start of the name line (the name is
+        // OUTSIDE the JSON, so the loose-`{"name"` path would miss it).
+        let glm = "Let me read it.\nRead\n{\"file_path\": \"a\"}";
+        assert_eq!(tool_markup_at(glm, &["Read".to_string()]), glm.find("Read"));
+        // GLM inside a ```fence``` → suppress from the fence, not the name.
+        let glmf = "ok\n```bash\nRead\n{\"file_path\": \"a\"}\n```";
+        assert_eq!(tool_markup_at(glmf, &["Read".to_string()]), glmf.find("```"));
+        // A known tool name on its own line but NOT followed by JSON is left alone (the
+        // `tail.starts_with('{')` guard — "Read" here is a word, not a call).
+        assert_eq!(tool_markup_at("Read\nThe answer is 42.", &["Read".to_string()]), None);
     }
 
     #[test]

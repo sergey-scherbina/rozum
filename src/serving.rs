@@ -192,7 +192,38 @@ fn parse_glm_tool_call(text: &str) -> Option<(String, String)> {
         }
         rest = next;
     }
-    None
+    // Embedded form: a lead-in prose line, then a bare `name\n{json}` with no fence — the
+    // shape constrained decoding produces when GLM keeps a preamble ("Let me check…\nRead\n
+    // {…}"). Neither the whole-text nor the fenced scan catches it; take the LAST such block.
+    glm_embedded(text)
+}
+
+/// The LAST `{identifier}\n{balanced-json-object}` block in `text` (the call follows any
+/// preamble), or `None`. Stricter than a substring scan: the name line must be a bare
+/// identifier and the object must begin immediately after it — so prose with an inline `{…}`
+/// won't match. Only reached as a last resort (nothing else parsed a call).
+fn glm_embedded(text: &str) -> Option<(String, String)> {
+    let mut line_start = 0usize;
+    let mut best = None;
+    for (rel, _) in text.match_indices('\n') {
+        let name = text[line_start..rel].trim();
+        if !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        {
+            let after = text[rel + 1..].trim_start();
+            if after.starts_with('{') {
+                if let Some(obj) = balanced_json_objects(after).into_iter().next() {
+                    if after.starts_with(obj)
+                        && serde_json::from_str::<Value>(obj).map(|v| v.is_object()).unwrap_or(false)
+                    {
+                        best = Some((name.to_string(), obj.to_string()));
+                    }
+                }
+            }
+        }
+        line_start = rel + 1;
+    }
+    best
 }
 
 /// `<identifier>\n<json-object>` (trimmed) → `(name, args_json)`, else `None`. The bare-identifier
@@ -381,6 +412,26 @@ mod tests {
         let wrapped = parse_tool_calls("<tool_call>{\"name\":\"x\",\"arguments\":{}}</tool_call>");
         assert_eq!(wrapped.len(), 1);
         assert_eq!(wrapped[0].0, "x");
+    }
+
+    #[test]
+    fn glm4_embedded_after_prose() {
+        // Constrained decoding forces clean args but GLM may keep a lead-in prose line and
+        // drop the fence: `prose\nName\n{json}` — caught by the embedded last-resort scan.
+        let c = parse_tool_calls(
+            "Let me first check the contents of src/main.rs.\n\nRead\n{\"file_path\": \"src/main.rs\"}",
+        );
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "Read");
+        assert!(c[0].1.contains("src/main.rs"));
+        // multiple lines of preamble + trailing newline still resolve to the LAST call block
+        let c2 = parse_tool_calls("Thinking…\nI'll edit.\nEdit\n{\"path\": \"a\", \"new\": \"b\"}\n");
+        assert_eq!(c2.len(), 1);
+        assert_eq!(c2[0].0, "Edit");
+        // prose with an inline object (object NOT immediately after a bare-identifier line)
+        // must not false-positive
+        assert!(parse_tool_calls("The config is set to {\"x\": 1} in the file.").is_empty());
+        assert!(parse_tool_calls("Here is an example value\nfor the field {\"x\": 1}.").is_empty());
     }
 
     #[test]
