@@ -682,6 +682,13 @@ pub fn total_ram_bytes() -> Option<u64> {
     })
 }
 
+/// RAM available right now (free + inactive + speculative + purgeable), cached ~1s. Public
+/// single source of free-RAM for the memory governor (safe-multi-model-program) + preflights
+/// — supersedes the bin's `#[cfg(feature="mistralrs")]` duplicate.
+pub fn available_ram_bytes() -> Option<u64> {
+    available_ram_bytes_cached()
+}
+
 /// RAM available right now (macOS `vm_stat`: free + inactive + speculative + purgeable pages),
 /// cached for ~1s so the adaptive loop never spawns a subprocess per request.
 fn available_ram_bytes_cached() -> Option<u64> {
