@@ -7,6 +7,32 @@ Current sprint focus: (1) make Rozum a reliable local meeting room for live agen
 
 ## Sprint
 
+### Workspace split — monolith → layered Cargo workspace (spec-gated, `docs/specs/workspace-split.md`)
+
+Goal: decompose the single ~47K-LOC `rozum` crate into a **Cargo workspace of ~7–8
+crates** along the dependency layers the code already has (core SPI → models/hardware/
+engines → agent/gateway → meeting → bin), so each concern is its own crate with a
+**compiler-enforced** boundary. One repo, one workspace (NOT separate repos). The
+crate-level successor to the architecture-spi work below. **Behaviour-preserving and
+green at every phase** — same binary, same features, same matrix. Decisions + the
+dependency-graph evidence (prod graph is already a clean DAG; the wrong-way edges are
+test-only) live in the spec.
+
+- [ ] **Phase 0 — Scaffold + `rozum-core`.** Root → `[workspace]`, `crates/` dir; move the
+  SPI cluster (`backend`/`concurrency`/`obs`/`engine`/`serving`/`sampler`/`constrain`/
+  `harmony`/`config`-base) into `rozum-core`. Fix knot 1 (keep the `backend↔concurrency↔obs`
+  trio together) + knot 2 (move `CascadeSpec`/`Location`/`RemoteApi`/`StrategyName` config
+  types down out of `cascade`). *Gate: `cargo check` default + `--no-default-features` green.*
+- [ ] **Phase 1 — Extract `rozum-meeting`** (proof-of-concept; daemon has **0 internal deps**).
+  meeting + proxy + service + clients (tui/web/discord/telegram). *Gate: builds/tests with
+  no engine crate in its tree.*
+- [ ] **Phase 2 — `rozum-models` + engines** (`rozum-mlx`/`-gguf`/`-mistralrs`/`-x86`) under
+  feature flags forwarded from the workspace root. *Gate: each feature matrix unchanged.*
+- [ ] **Phase 3 — `rozum-agent` + `rozum-gateway`.** Fix knot 3 (gateway→mlx telemetry → SPI
+  stats hook) + knot 4 (test-only mlx/gguf leaks). *Gate: agentic matrix unchanged.*
+- [ ] **Phase 4 — `rozum-hardware`** (device detect + placement; North Star). Separate spec —
+  reserved as a crate slot here, designed later (it is new work, not a move).
+
 ### Architecture legibility — SPI boundaries (spec-gated, `docs/specs/architecture-spi.md`)
 
 Goal: make rozum's extension points legible — a reader finds the seam for any
