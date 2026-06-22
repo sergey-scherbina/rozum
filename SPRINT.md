@@ -105,15 +105,42 @@ admission *numbers* + per-process cap + validation = `nimble-raven`.
   weights/5). This is the model's NEED (small for small models) — A's cap enforces it, so the uncapped
   26.9 GB balloon is irrelevant; a 4B reserves/caps ~6 GB → two co-reside. 4 unit tests. Interim 14 GB
   floor (`40048ba`) now dropped (A enforces the ceiling). Post-cap target = "estimate ≥ true need" (D's job).
-- [ ] **smmr-C-fast-swap** (track, owner TBD) — the "very fast sequentially" half: when `oversubscribed`,
-  swap WITHOUT transient both-resident (unload→GPU-settle→load), minimize dead time (mmap page-cache-warm
-  weights, prefetch next during drain). Reuses `gateway switch` + `plan_residency`. Spec later; below A/B.
+- [ ] **smmr-C-fast-swap** (`sunny-civet`, claiming) — the "very fast sequentially" half: when
+  `oversubscribed`, swap WITHOUT transient both-resident (unload→GPU-settle→load), minimize dead time
+  (mmap page-cache-warm weights, prefetch next during drain). Reuses `gateway switch` + `plan_residency`.
+  Likely the HIGHER-value lever (27–35B agentic models can't co-reside on 36 GiB by need alone). Design +
+  the slot-free page-cache-prefetch primitive first; swap-orchestration validation needs the slot (after D).
+- [ ] **smmr-D-probe-harness** (`sunny-civet`) — build the measurement tool nimble-raven's D needs: a
+  one-command probe reporting `get_active_memory()` vs `get_cache_memory()` vs RSS at peak under the live
+  cap. Settles the open safety question from the source audit (`9726971`): is a model's uncapped balloon
+  CACHE (set_cache_limit bounds it → safe) or ACTIVE (unbounded → unsafe)? Raw-alloc mode is slot-free
+  (also empirically confirms set_memory_limit is soft); model mode is for nimble-raven to run with the slot.
 - [ ] **smmr-D-validate** (`nimble-raven`, capstone — needs the model slot, NEXT) — safety harness: prove
   host peak RAM never exceeds `total × FRAC` across admitted co-residency + swap, AND no self-OOM at the
-  cap (bump B's reserve if so). Then FRAC can likely rise (cap now hard-bounds reality, so more of RAM is
-  safely usable). Never load an un-admitted combo to "see if it reboots." Supersedes paused `validate-gate-live`.
-- **INTERIM SAFETY — RESOLVED:** the interim floor is dropped; smmr-A's hard cap makes co-residency
-  safe-by-default (Σ caps ≤ budget, enforced not estimated). No operator action needed.
+  cap (bump B's reserve if so). Never load an un-admitted combo to "see if it reboots." Supersedes paused
+  `validate-gate-live`. NOTE (`sunny-civet`, source audit `9726971`): `set_memory_limit` is SOFT (no hard
+  per-process cap exists); the real bound is `set_cache_limit` (cache only) + admission — D must verify
+  the active term too, not assume the cap hard-bounds reality. Spec § Findings.
+- [ ] **residency-ledger-hardening** (`sunny-civet`) — robustness on the v1/v2 ledger I shipped, slot-free,
+  no API change (so it doesn't disturb smmr-A/B which read it): reap orphaned `residents/<pid>` files left
+  by SIGKILL'd gateways (disk leak, currently only reaped lazily on next admission); guard PID-reuse; and
+  (separately, riskier — coordinate) release-on-idle-unload so a transiently-unloaded model frees its
+  reservation. Unit-tested.
+
+> #### ▶ sunny-civet active tracks (2026-06-22, operator: "запиши всё в спринт и сделай автономно")
+> Discipline: slot-free + non-colliding by default (room MCP down → coordinate via `rozum meetings post`;
+> nimble-raven owns rozum-mlx cap / rozum-models footprint / the model slot — I add NEW files, don't edit
+> their code, don't grab the slot). Order:
+> 1. **smmr-D-probe-harness** (most helpful: unblocks the safety decision I surfaced; raw-alloc mode runs slot-free).
+> 2. **residency-ledger-hardening** (my own code; orphan reaper + robustness, no API change).
+> 3. **smmr-C-fast-swap** (design + page-cache-prefetch primitive; biggest forward value; validation deferred to slot).
+> 4. (lower / recorded) **decode-compile-stage0** (perf P3, slot-free probe), **plugin-x86-engine** (P2 North-Star, big).
+> Slot-needing validation (probe model-mode, swap e2e) is handed to whoever holds the slot — I never take it blind.
+
+- **INTERIM SAFETY:** the interim floor is dropped; smmr-A caps each process. CAVEAT (`sunny-civet`,
+  `9726971`): the cap is via `set_memory_limit` which is SOFT — see spec § Findings; co-residency safety
+  is not yet *proven* (hinges on smmr-D's active-vs-cache measurement), so treat default co-residency as
+  provisional until D lands.
 
 #### 1. Green matrix — NO fails allowed, ever
 
