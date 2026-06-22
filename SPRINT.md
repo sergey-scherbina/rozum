@@ -116,6 +116,14 @@ Full writeup [[project-gateway-patch-revert]]; specs `docs/specs/apply-patch-*`,
   verbatim body). Patch-content still folds to `patch --fuzz`; path-only untouched. Unit + shell-e2e
   validated; full model matrix cell deferred behind a concurrent GLM-4-32B run holding RAM (expected
   3/5 → 5/5). Spec `docs/specs/codex-create-write-synth.md`; Finding 5 in `docs/matrix-failure-analysis.md`.
+- [ ] **gptoss-v4a-isolate** — WHY does gpt-oss specifically struggle with codex's V4A `apply_patch`
+  protocol, when 35B clears it and gpt-oss creates files fine under claude/opencode? Use the `isolate`
+  skill (model-only probe, no agent): send a CLEAN minimal V4A create request straight to the gateway
+  `/v1/chat/completions` for gpt-oss AND 35B (control); count shapes; prove model-V4A-competence vs
+  codex-interface-degradation. Questions: (a) can gpt-oss produce a syntactically valid V4A patch at
+  all? (b) is V4A out-of-distribution for gpt-oss's harmony training? (c) does the failure scale with
+  prompt size / tool count (codex's 21KB/18-tool overload)? Writeup → `docs/matrix-failure-analysis.md`;
+  feeds the Finding-5 solution (system-prompt steering to one simple create primitive).
 
 #### Agentic-matrix model problems (catalog, 2026-06-21) — per-model failures + their cause
 
