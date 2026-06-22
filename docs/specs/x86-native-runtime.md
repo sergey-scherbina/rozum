@@ -173,11 +173,17 @@ HTTP backends, ahead of CPU-only fallbacks.
 
 ## Phased plan (each phase independently shippable + benchmarked)
 
-- **A (prerequisite) — the engine seam.** Do the architecture step
-  [`native-engine-spi.md`](native-engine-spi.md) FIRST: lift the engine-agnostic
-  decode/serving loop into one shared `drive` behind a tiny `LocalEngine` trait,
-  validated on the MLX+GGUF leaves. Then this runtime is "implement `LocalEngine`
-  for Vulkan" and reuses all of L1–L4 for free.
+- **A (prerequisite) — the engine seam. ✅ LARGELY DONE — the shared layer is ready.**
+  `native-engine-spi` A1/A2a/A2b landed and `drive` is implemented (`src/engine.rs`):
+  the engine-agnostic consumption loop (`consume_tokens`: detok→`ChatEvent`, harmony +
+  `<tool_call>` parse, EOS/max-tokens/runaway guard), `sampler`, `serving`/`harmony`, and
+  the shared `model_source` (fetch/cache/resolve with a per-engine `gate`) all exist and
+  are hardware-free. So this runtime is now genuinely "implement `LocalEngine` for Vulkan
+  + its kernels" and reuses L1–L4 for free. **One seam is deliberately deferred to be
+  shaped against THIS consumer:** a cache-reclaim hook (`generate()->Iterator` erases the
+  MLX-hybrid KV/conv reclaim) — but the x86 dense forward has no such reclaim and adopts
+  `drive` directly, so P1 is unblocked. GGUF's `drive` adoption is likewise queued to be
+  shaped by the x86 leaf. Net: A is no longer a blocking prerequisite for P0/P1.
 - **P0 — Probe & decision record.** Stand up Vulkan device + compute queue from
   Rust (`ash`/`vulkano`); confirm an `HOST_VISIBLE | DEVICE_LOCAL` heap and
   `VK_EXT_external_memory_host` on a target Intel Xe and an AMD APU; `mmap` →
