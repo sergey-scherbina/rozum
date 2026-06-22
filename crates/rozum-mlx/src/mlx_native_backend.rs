@@ -649,6 +649,19 @@ mod inner {
         let cap = batch_cap();
         let batchable_arch = is_batchable_arch(&model);
         while let Some(first) = jobs.blocking_recv() {
+            // Prompt-lookup (ROZUM_PLOOKUP, default off): a greedy, dense, unconstrained
+            // job decodes via draft-free n-gram speculative decoding — byte-identical to
+            // plain greedy, big win on copy-heavy code generation. Verified by the same
+            // `MlxDenseTarget` the spec-decode path uses. (Fresh KV, so it forgoes
+            // cross-turn prefix reuse — opt-in for now; combining the two is a follow-up.)
+            if plookup_enabled()
+                && is_dense(&model)
+                && is_greedy_request(&first)
+                && !should_constrain(&first, &model)
+            {
+                run_plookup_job(&mut model, &mut tokenizer, &template, &eos, first);
+                continue;
+            }
             // Fast path: batching off, or this model's arch isn't batchable → serial
             // (keeps the prefix-KV LRU).
             if cap <= 1 || !batchable_arch {
@@ -1783,6 +1796,92 @@ mod inner {
         if std::env::var_os("ROZUM_MLX_DEBUG").is_some() {
             eprintln!(
                 "spec-decode: {} target forwards for {} output tokens (k={k}) — \
+                 plain greedy would be {} forwards",
+                tgt.forwards, seq.output_tokens, seq.output_tokens
+            );
+        }
+        seq.finalize();
+    }
+
+    /// `ROZUM_PLOOKUP=1` enables draft-free prompt-lookup speculative decoding for
+    /// greedy dense requests (default off). A big win on copy-heavy code generation
+    /// (the agentic re-emit-the-file case); proven byte-exact + ~7× live.
+    fn plookup_enabled() -> bool {
+        std::env::var("ROZUM_PLOOKUP")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+    }
+
+    /// `(ngram, k, window)` for prompt-lookup: `ROZUM_PLOOKUP_NGRAM` (2),
+    /// `ROZUM_PLOOKUP_K` (8 — proposal width), `ROZUM_PLOOKUP_WINDOW` (8192).
+    fn plookup_params() -> (usize, usize, usize) {
+        let u = |key: &str, d: usize| {
+            std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(d)
+        };
+        (u("ROZUM_PLOOKUP_NGRAM", 2), u("ROZUM_PLOOKUP_K", 8), u("ROZUM_PLOOKUP_WINDOW", 8192))
+    }
+
+    /// Serve one greedy dense job via **prompt-lookup** speculative decoding — the
+    /// n-gram proposer over the running context, **no draft model**, verified by the
+    /// same byte-exact `MlxDenseTarget` `run_spec_job` uses (so the output is identical
+    /// to plain greedy; only the target-forward count drops). Streams via the same
+    /// `BatchSeq`/`check_finish` path. Fresh KV per job (no cross-turn prefix reuse —
+    /// the same caveat as `run_spec_job`; combining the two is a follow-up).
+    fn run_plookup_job(
+        target: &mut LoadedModel,
+        tokenizer: &mut Tokenizer,
+        template: &str,
+        eos: &[u32],
+        job: Job,
+    ) {
+        let prompt_ids =
+            match render_prompt(tokenizer, template, &job.model_id, &job.messages, &job.tools) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    let _ = job.events.send(Err(ModelError::BackendUnavailable(e)));
+                    return;
+                }
+            };
+        let ceiling = output_ceiling();
+        let max_tokens = {
+            let want = job.sampling.max_tokens.map(|m| m as usize).unwrap_or(DEFAULT_MAX_TOKENS);
+            if ceiling == 0 { want } else { want.min(ceiling) }
+        };
+        let (ngram, k, window) = plookup_params();
+        let mut tgt = MlxDenseTarget {
+            model: target,
+            cache: Vec::new(),
+            kv_len: 0,
+            eos: eos.to_vec(),
+            forwards: 0,
+        };
+        let mut drf = crate::specdecode_plookup::PromptLookupDraft::new(ngram, k, window);
+        let mut seq = BatchSeq {
+            job,
+            out_ids: Vec::new(),
+            emitted: String::new(),
+            full_text: String::new(),
+            tool_seen: false,
+            output_tokens: 0,
+            prompt_len: prompt_ids.len() as i32,
+            max_tokens,
+            finished: false,
+            stop: StopReason::EndTurn,
+        };
+        {
+            let mut on_token = |tok: u32| -> bool { !check_finish(&mut seq, tok, eos, tokenizer) };
+            crate::specdecode::decode_streaming(
+                &prompt_ids,
+                &mut drf,
+                &mut tgt,
+                k,
+                max_tokens,
+                &mut on_token,
+            );
+        }
+        if std::env::var_os("ROZUM_MLX_DEBUG").is_some() {
+            eprintln!(
+                "prompt-lookup: {} target forwards for {} output tokens (ngram={ngram} k={k}) — \
                  plain greedy would be {} forwards",
                 tgt.forwards, seq.output_tokens, seq.output_tokens
             );

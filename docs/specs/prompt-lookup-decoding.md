@@ -131,9 +131,17 @@ Draft spec-decode lost on MoE because the draft forward ≈ the target forward. 
   only the target-forward count changes. Live test `prompt_lookup_live_vs_greedy_dense` on
   Qwen3-0.6B, copy-heavy prompt: **120 tokens, BYTE-IDENTICAL to plain greedy, 17 forwards
   vs 120 → 7.06×.** Confirms both the correctness contract and the real forward-reduction on
-  a live model (FFI-bound ⇒ forwards ≈ wall-clock). **REMAINING (P1.5, more invasive — wire
-  into `run_spec_job`/the request path behind `ROZUM_PLOOKUP` so it serves real requests;
-  coordinate with the engine owner — their hot file).**
+  a live model (FFI-bound ⇒ forwards ≈ wall-clock).
+- **P1.5 — wired into the request path. ✅ CODE DONE (default-off).** `run_plookup_job`
+  (single-model copy of `run_spec_job`, draft swapped for `PromptLookupDraft`, same
+  `BatchSeq`/`check_finish` streaming) + a gated branch at the top of `worker_main`'s job
+  loop: a greedy + dense + unconstrained job decodes via prompt-lookup **iff `ROZUM_PLOOKUP=1`**
+  (default off ⇒ zero behaviour change for everyone else). Knobs `ROZUM_PLOOKUP_NGRAM`(2)/
+  `_K`(8)/`_WINDOW`(8192). Additive; compiles. **Live request-path A/B (served output
+  byte-identical on vs off) is PENDING A FREE SLOT** — the first attempt was correctly
+  *refused by the residency gate* (a sibling held GLM-4-32B), proving the reboot-safety;
+  run it when the host is clear. Caveat: forgoes cross-turn prefix reuse (fresh KV, like
+  `run_spec_job`) — combining them is a follow-up.
 - **P2 — MoE decision.** Measure the near-tie divergence rate on Qwen3.6-35B; pick the
   dense-only-byte-exact vs accept-divergence policy from data.
 - **P3 — matrix gate.** Run the agentic matrix with `ROZUM_PLOOKUP=1`; confirm pass-matrix
