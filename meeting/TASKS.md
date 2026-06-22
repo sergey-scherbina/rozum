@@ -1,4 +1,4 @@
-# meeting-ssc — task tracker
+# meeting — .ssc client task tracker
 
 (Tracked here in the worktree because the shared master `SPRINT.md` checkout is
 churned by sibling agents switching branches — commits there don't stick.)
