@@ -1,0 +1,6 @@
+feature/matrix-nondeterminism-flip 2026-06-22T11:11:19Z
+agent: claude-opus-4-8
+heartbeat: 2026-06-22T11:11:19Z
+status: in-progress
+done-so-far: worktree created; investigating the matrix pass 0↔1 flip
+next: build + repro the flip on the same cell N times to characterize it
