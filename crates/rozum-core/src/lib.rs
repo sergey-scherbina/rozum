@@ -10,6 +10,7 @@ pub mod constrain;
 pub mod engine;
 pub mod harmony;
 pub mod obs;
+pub mod prefetch;
 pub mod sampler;
 pub mod serving;
 pub mod share;

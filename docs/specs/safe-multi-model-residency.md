@@ -97,14 +97,36 @@ interim 14 GB floor (`40048ba`) is now **dropped** — it existed only to stay s
 > Note: the earlier "estimate ≥ measured *peak*" target was pre-cap. Post-cap the target
 > is "estimate ≥ true *need*" (so the capped model runs without self-OOM) — D's job.
 
-### C. Fast safe swap (the "very fast sequentially" half) — track, owner TBD
+### C. Fast safe swap (the "very fast sequentially" half) — `sunny-civet` (claimed)
 When the ledger says `oversubscribed` (two big models can't co-reside), swap — but
-**never transiently resident-both** (that is the OOM). Safe-fast swap = unload old
-(graceful teardown, GPU settle) → load new, minimizing dead time via: weights warm in
-the OS page cache (mmap, no re-read from disk), fast graceful teardown, optional prefetch
-of the next model's file into page cache *during* the old model's drain (page cache is not
-GPU residency, so it doesn't count against the budget). Reuses `gateway switch` (clean
-drain→swap) + `plan_residency` `oversubscribed`. Spec'd later; lower priority than A/B.
+**never transiently resident-both** (that simultaneous footprint is the OOM). This is
+likely the **higher-value lever** than A/B on this box: the 27–35B agentic models can't
+co-reside on 36 GiB by *need* alone (weights ~18 GB + KV), so the common case is swap, not
+co-residency.
+
+**Invariant:** at no instant are both models GPU-resident. Sequence:
+1. Drain the old model (in-flight requests finish; reuses `gateway switch`'s clean drain).
+2. **Free** the old model + GPU settle (Drop joins the MLX worker; `GPU_SETTLE`,
+   `project-matrix-kernel-panic`) — old residency reservation released here.
+3. Load the new model (acquires its reservation).
+Dead time = (drain tail) + free + (cold load). The lever C optimizes is the **cold load**,
+whose cost is dominated by reading weights off disk.
+
+**Page-cache prewarm (LANDED, slot-free) — `rozum-core::prefetch::warm_dir_page_cache`.**
+Reads the next model's files into the OS page cache so step 3 reads weights from RAM, and
+runs it *during* steps 1–2 (the old model's drain/settle) to overlap the fetch with
+otherwise-idle time. Page cache is **reclaimable** and is **not** GPU residency, so a
+prewarm never counts against the RAM budget (no overcommit risk — that is what makes it
+safe to overlap). Best-effort + cancellable (abort the moment the old model finishes
+draining). Portable sequential `read()` v1; `madvise(WILLNEED)` is a later optimization.
+Unit-tested (sums regular files, skips subdirs, cancel aborts, missing-dir no-op).
+
+**Remaining (needs the model slot — after smmr-D):** wire the prewarm + ordered
+free→load into the swap path (extend `gateway switch` so an `oversubscribed` request
+triggers prewarm-during-drain, then the strict free→settle→load order; reuses
+`plan_residency` `oversubscribed`), and measure swap latency with vs without prewarm. The
+orchestration touches `gateway.rs`/the worker, so it is coordinated + slot-gated; the
+prewarm primitive above is the standalone, already-usable building block.
 
 ### D. Safety-validation harness — `nimble-raven` (capstone, needs the model slot)
 Prove the invariant holds end-to-end: drive admission across co-residency + swap and
