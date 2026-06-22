@@ -249,6 +249,41 @@ cargo run -p rozum-mlx --example mlx_mem_probe --features mlx-native   # raw-all
 (Method: source read of the vendored MLX allocator + mlx-rs, plus a slot-free raw-alloc
 measurement. The active-vs-cache split *for a real model* still needs the slot = D.)
 
+## Findings: gguf/mistralrs are not an unenforced reboot vector (`sunny-civet`, 2026-06-22)
+
+smmr-A's "Known limitation" says gguf/mistralrs co-residency "relies on the footprint
+estimate without an enforced cap → follow-up". Investigated (idea #2): that **understates
+their actual safety** — there is no MLX-style cache-balloon to cap, and admission already
+covers them. So this is largely a **non-gap**; no per-process cap needs porting.
+
+- **Admission is engine-agnostic.** `acquire_residency` (the ledger) runs in `run_gateway`
+  / `run_launch_dedicated` **before** engine selection (`build_from_config` etc.), so every
+  engine — MLX, gguf, mistralrs — reserves its estimated footprint and is refused on
+  overcommit *at load time*. The reboot vector (BUG-003) is closed for all of them already.
+- **Why MLX needed `set_cache_limit` and the others don't.** MLX's resident footprint is
+  *cache-dominated* — freed Metal buffers are retained up to the (soft) limit, so a small
+  model can balloon to ~the cap (the § Findings table). `set_cache_limit` bounds that.
+  **gguf (candle) has no such retained-cache pool** — it allocates/frees per op, so its
+  footprint ≈ weights + KV(n_ctx), which the admission estimate (`runtime_footprint_bytes`
+  = weights + kv·n_ctx + reserve) already captures. There is nothing to balloon, hence no
+  analog cap is required.
+- **mistralrs is, if anything, *better* bounded than MLX.** `mistralrs_backend.rs`:
+  PagedAttention pools the KV to `MemoryGpuConfig::ContextSize(n_ctx)` (a fixed block pool,
+  not a soft hint); the auto device-mapper **refuses before weights load** when "model + KV
+  exceeds Metal's working-set budget" and steps `n_ctx` down; `max_num_seqs = 1` serializes
+  prefill; and `main.rs` runs a config-driven RAM preflight before the in-process load.
+  Its KV — the term that grows at runtime — is hard-bounded by the paged pool, and the
+  pool size ≈ the admission estimate's `kv·n_ctx`.
+
+**Residual (smaller, real):** co-residency can't *pack as tightly* for gguf/mistralrs (no
+cap to a sub-budget share like smmr-A does for MLX) — but since they don't balloon, their
+actual footprint ≈ the reservation, so co-residency is as safe as the estimate (the same
+basis smmr-D validated). If two non-MLX models ever need to co-reside tightly, the lever is
+lowering their `n_ctx` (shrinks the paged pool / KV), not a cache cap. **Recommendation:**
+correct smmr-A's "Known limitation" wording; treat gguf/mistralrs as admission-covered, not
+"unenforced". No code change needed for safety; a `runtime_footprint` calibration check
+against a measured gguf/mistralrs peak (like the MLX table) is the only optional follow-up.
+
 ## Acceptance / done-when
 
 - **A:** with two ledger-admitted models co-resident, each MLX process's hard cap sums

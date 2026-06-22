@@ -182,9 +182,15 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
 >   reboot. Conservative: never interrupts in-flight, idle-only (min-idle 30s), Critical-only by default
 >   (`ROZUM_GATEWAY_SHED_ON_WARN=1` earlier; `ROZUM_GATEWAY_SHED=0` off); sysctl probe only when idle (no
 >   hot-path cost). Minimal gateway.rs hook (extends the idle-unload watchdog). gateway 74/74, core 107/107.
-> - [ ] **gguf-mistralrs-residency-cap** (#2, SAFETY) — smmr-A caps MLX only; gguf/mistralrs co-residency rides
->   the *estimate* with no enforced cap = an unguarded reboot vector. Add their memory-limit knob (candle /
->   mistralrs paged) wired to the reservation, or keep them single-flight. Engine-crate work; design first.
+> - [x] **gguf-mistralrs-residency-cap** (#2, SAFETY) — **INVESTIGATED → largely a NON-GAP** (`sunny-civet`,
+>   verify-before-build). Spec § "Findings: gguf/mistralrs are not an unenforced reboot vector". (1) Admission
+>   (`acquire_residency`) is engine-agnostic — runs BEFORE engine selection, so the load-time overcommit is
+>   already gated for all engines. (2) gguf/candle has NO MLX-style retained-cache balloon (allocates/frees
+>   per op) → footprint ≈ weights+KV, captured by the estimate; no analog cap needed. (3) mistralrs is
+>   *better* bounded than MLX — PagedAttention pools KV to ContextSize(n_ctx), the device-mapper refuses an
+>   over-budget load before weights, max_num_seqs=1, + a RAM preflight. Residual is only that non-MLX can't
+>   pack as tightly (lever = lower n_ctx, not a cache cap); optional follow-up = calibrate runtime_footprint
+>   vs a measured gguf/mistralrs peak. No safety code change needed. Corrects smmr-A's "Known limitation".
 > - [~] **agentic-smoke-deterministic** (#3, RELIABILITY) — **HARNESS DONE** (`scripts/smoke/gateway-smoke.sh`),
 >   end-to-end validation PENDING A FREE SLOT. Tiny seed-pinned 0.6B gateway smoke asserting only DETERMINISTIC
 >   signals (liveness/schema, greedy byte-identical across 2 runs, no cross-request state bleed) — a red is
