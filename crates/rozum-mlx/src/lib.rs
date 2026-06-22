@@ -7,6 +7,7 @@
 pub mod mlx_native_backend;
 pub mod specdecode;
 pub mod specdecode_backend;
+pub mod specdecode_plookup;
 
 pub(crate) use rozum_core::{backend, concurrency, constrain, engine, serving};
 pub(crate) use rozum_models::model_source;

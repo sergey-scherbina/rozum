@@ -192,10 +192,14 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
 >   agentic cliff → would flake; covered by unit tests). `bash -n` clean. Validation deferred because the slot
 >   was held by plucky-finch's gpt-oss matrix (24 GB reserved) — run it when the slot frees (host clear +
 >   `bash scripts/smoke/gateway-smoke.sh`), then mark [x]. Discipline: did NOT pile a 2nd model on the busy host.
-> - [ ] **prompt-lookup-decoding** (#4, PERF, design-first) — compile=NO-GO, MoE spec-decode=net-negative,
->   batching only helps concurrent load. Agentic/code re-emits big VERBATIM chunks of the file it just read →
->   prompt-lookup (n-gram propose from the prompt, verify in one forward, NO draft model) wins exactly there.
->   Touches the MLX decode loop (nimble-raven's area) + model validation → spec + coordinate before impl.
+> - [~] **prompt-lookup-decoding** (#4, PERF) — **SPEC + P0 proposer DONE.** Spec
+>   `docs/specs/prompt-lookup-decoding.md`; `PromptLookupDraft` (`crates/rozum-mlx/src/specdecode_plookup.rs`,
+>   `impl Draft` — n-gram lookup over ctx, NO model/GPU/memory, reuses the existing verify loop) + 6 unit
+>   tests, feature-free. Key insight: it's a drop-in `Draft` so the whole `specdecode` verify/decode machinery
+>   is reused; the ~zero draft cost FLIPS the MoE spec-decode net-negative. Caveat documented: MoE
+>   seq-length non-invariance ([[project-spec-decode-moe-numerics]]) = byte-exact on DENSE only. REMAINING
+>   (slot-gated, coordinate w/ engine owner): wire into the decode loop behind `ROZUM_PLOOKUP=1` + model A/B
+>   on a real edit transcript + MoE policy + matrix gate (spec P1–P3).
 > - [ ] **cross-turn-prefix-kv-reuse** (#5, PERF, design-first) — the agent re-sends a growing transcript each
 >   turn; cache the shared-prefix KV across requests from one agent to skip re-prefill (intra-request reuse
 >   exists; lift to inter-request). Big single-stream win for the dominant use case. Gateway+MLX, matrix-critical → spec first.
