@@ -886,10 +886,24 @@ async fn start_web_bridge(room_name: String, port: u16, url: String) {
 }
 
 /// Estimate a model's resident footprint (weights + KV + runtime overhead) for the
-/// host RAM gate (BUG-003 v2). Catalog size × an inflation factor + a base; an
-/// unknown model gets a deliberately huge estimate so it only loads when the host is
-/// otherwise empty — conservative, since under-counting is the direction that reboots.
-/// All tunable: `ROZUM_GATEWAY_FOOTPRINT_INFLATE` (1.25), `_FOOTPRINT_BASE_MB` (1024).
+/// host RAM gate (BUG-003 v2). Catalog size × an inflation factor + a base, then a
+/// **conservative floor**; an unknown model gets a deliberately huge estimate so it
+/// only loads when the host is otherwise empty — conservative, since under-counting is
+/// the direction that reboots.
+///
+/// INTERIM SAFETY (smmr, `docs/specs/safe-multi-model-residency.md`): real peak
+/// resident is **MLX-cache-dominated, not weight-proportional** — measured, even a
+/// 0.5B model peaks ~14.9 GB and a 4B ~26.9 GB because the per-process MLX cap is
+/// `total−8 GB` and the cache grows into it. So `size×inflate+base` under-counts small
+/// models ~6× → two of them pass admission and reboot the host. Until `smmr-A` (the
+/// share-bounded MLX cap) makes a model physically unable to exceed its reservation,
+/// floor the estimate at `ROZUM_GATEWAY_FOOTPRINT_FLOOR_MB` (default 14000 ≈ the
+/// observed minimum uncapped peak of ANY model) so admission stays effectively
+/// single-flight on a 36 GiB box rather than admitting an unsafe 2nd small model.
+/// Once `smmr-A` lands, this floor drops to the model's true min-need (`smmr-B`).
+///
+/// All tunable: `ROZUM_GATEWAY_FOOTPRINT_INFLATE` (1.25), `_FOOTPRINT_BASE_MB` (1024),
+/// `_FOOTPRINT_FLOOR_MB` (14000 — set 0 to disable the floor once `smmr-A` enforces caps).
 fn estimate_model_footprint_bytes(model: &str) -> u64 {
     let inflate = std::env::var("ROZUM_GATEWAY_FOOTPRINT_INFLATE")
         .ok()
@@ -901,11 +915,16 @@ fn estimate_model_footprint_bytes(model: &str) -> u64 {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(1024)
         .saturating_mul(1_048_576);
+    let floor = std::env::var("ROZUM_GATEWAY_FOOTPRINT_FLOOR_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(14_000)
+        .saturating_mul(1_048_576);
     match rozum::models::scan_all_installed()
         .into_iter()
         .find(|m| m.spec == model)
     {
-        Some(m) => ((m.size_bytes as f64) * inflate) as u64 + base,
+        Some(m) => (((m.size_bytes as f64) * inflate) as u64 + base).max(floor),
         None => u64::MAX / 4, // unknown size → only admits when nothing else resident
     }
 }
