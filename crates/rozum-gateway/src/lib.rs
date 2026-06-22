@@ -9,5 +9,5 @@ pub mod anthropic_http;
 pub mod gateway;
 pub mod openai_http;
 
-pub(crate) use rozum_core::{backend, concurrency, obs, share};
+pub(crate) use rozum_core::{backend, concurrency, obs, share, shed};
 pub(crate) use rozum_models::{models, resident};

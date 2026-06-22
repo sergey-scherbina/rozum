@@ -1,5 +1,20 @@
 # Changelog
 
+## gateway — memory-pressure watchdog: graceful shedding before the jetsam reboot (BUG-003 runtime half)
+Completed: 2026-06-22
+
+The residency gate stops overcommit at *load* time; this handles *runtime* drift
+(KV growth on long contexts, the cap-unenforced gguf/mistralrs paths) that can still
+creep toward the OS jetsam ladder that rebooted the Mac. New `rozum-core::shed`: reads
+the OS memory-pressure level (macOS `kern.memorystatus_vm_pressure_level` — the jetsam
+signal) and a pure `should_shed(pressure, inflight, idle)` decision. The gateway
+lifecycle watchdog now unloads its OWN idle model under genuine host pressure (it lazily
+reloads on the next request) — a reboot becomes graceful degradation. Conservative by
+default: never interrupts in-flight work, only an idle model (`ROZUM_GATEWAY_SHED_MIN_IDLE_SECS`,
+30s), and Critical-pressure only (`ROZUM_GATEWAY_SHED_ON_WARN=1` for earlier); the sysctl
+probe runs only when already idle (no hot-path cost). `ROZUM_GATEWAY_SHED=0` disables.
+7 unit tests (decision matrix + reader); gateway 74/74, core 107/107.
+
 ## gateway — BUG-003 v2: RAM-ledger residency (admit a fitting 2nd model, not just refuse)
 Completed: 2026-06-22
 

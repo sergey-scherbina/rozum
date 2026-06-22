@@ -178,12 +178,12 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
 > Seven ideas from a step-back review. Discipline unchanged (slot-free + non-colliding; coordinate via
 > `rozum meetings post`; new files / my lane; never grab the slot blind). Order = value × (slot-free,
 > completable). Claiming all under `sunny-civet`; the deep ones (#4–#7) get design-specs first, not a rushed impl.
-> - [ ] **mem-pressure-watchdog** (#1, SAFETY, claiming) — finish the reboot story: admission stops overcommit
->   *at load*; runtime drift (KV growth on long ctx; the cap-unenforced gguf/mistralrs paths) can still creep to
->   jetsam. A per-gateway watchdog on macOS memory pressure that unloads ITS OWN model when the host is under
->   pressure AND it's idle → graceful degradation, not reboot. Slot-free core: `rozum-core` host-mem reader +
->   pure `should_shed(available, pressure, inflight, idle)` decision, unit-tested; minimal gateway-loop hook
->   (extends the existing idle-unload watchdog) is the only shared-file touch. Reads my residency ledger.
+> - [x] **mem-pressure-watchdog** (#1, SAFETY) — **DONE.** `rozum-core::shed`: reads OS pressure
+>   (`kern.memorystatus_vm_pressure_level`) + pure `should_shed(pressure, inflight, idle)` (7 tests). Gateway
+>   lifecycle watchdog now unloads its OWN idle model under genuine host pressure → graceful degradation, not
+>   reboot. Conservative: never interrupts in-flight, idle-only (min-idle 30s), Critical-only by default
+>   (`ROZUM_GATEWAY_SHED_ON_WARN=1` earlier; `ROZUM_GATEWAY_SHED=0` off); sysctl probe only when idle (no
+>   hot-path cost). Minimal gateway.rs hook (extends the idle-unload watchdog). gateway 74/74, core 107/107.
 > - [ ] **gguf-mistralrs-residency-cap** (#2, SAFETY) — smmr-A caps MLX only; gguf/mistralrs co-residency rides
 >   the *estimate* with no enforced cap = an unguarded reboot vector. Add their memory-limit knob (candle /
 >   mistralrs paged) wired to the reservation, or keep them single-flight. Engine-crate work; design first.

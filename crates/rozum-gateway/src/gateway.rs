@@ -3803,7 +3803,12 @@ pub async fn serve_on(
     // last client lease drops, even if a lease was never observed (a short
     // startup grace lets the launch register its first lease).
     let launch_managed = std::env::var("ROZUM_GATEWAY_LAUNCH_MANAGED").is_ok();
-    if idle_exit.is_some() || unload_on_idle || launch_managed {
+    // Memory-pressure shedding (runtime-drift half of BUG-003): a reloadable gateway
+    // runs the watchdog so it can unload its idle model under host pressure even when
+    // no other lifecycle trigger is active.
+    let shed_policy = crate::shed::ShedPolicy::from_env();
+    let shed_active = shed_policy.enabled && state.sb.can_reload();
+    if idle_exit.is_some() || unload_on_idle || launch_managed || shed_active {
         use std::sync::atomic::Ordering;
         const STARTUP_GRACE_SECS: u64 = 15;
         state
@@ -3867,6 +3872,33 @@ pub async fn serve_on(
                     }));
                     if let Err(e) = sb.unload().await {
                         tracing::warn!(error = %e, "idle-unload failed");
+                    }
+                }
+
+                // 2b. Memory-pressure shedding: under genuine host pressure, unload an
+                // idle resident model EARLIER than the idle timeout so the host degrades
+                // gracefully instead of rebooting (runtime-drift half of BUG-003). The
+                // `sysctl` pressure probe is skipped unless the model is already idle +
+                // not generating, so there is no hot-path cost.
+                if shed_active
+                    && sb.is_loaded()
+                    && sb.generating.load(Ordering::SeqCst) == 0
+                    && idle_for >= shed_policy.min_idle_secs
+                {
+                    let inputs = crate::shed::ShedInputs {
+                        pressure: crate::shed::read_host_pressure(),
+                        inflight: 0,
+                        idle_secs: idle_for,
+                    };
+                    if crate::shed::should_shed(&inputs, &shed_policy) {
+                        crate::obs::log_event(serde_json::json!({
+                            "event": "gateway_pressure_unload",
+                            "pressure": format!("{:?}", inputs.pressure),
+                            "idle_secs": idle_for,
+                        }));
+                        if let Err(e) = sb.unload().await {
+                            tracing::warn!(error = %e, "pressure-unload failed");
+                        }
                     }
                 }
 

@@ -15,3 +15,4 @@ pub mod prefetch;
 pub mod sampler;
 pub mod serving;
 pub mod share;
+pub mod shed;
