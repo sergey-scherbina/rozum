@@ -1623,10 +1623,17 @@ GatedDeltaNet custom kernel must stay OUT of the compiled region (compile + in-p
 cache + buffer-donating kernel = the token-2 divergence hazard).
 
 **Stages.**
-- [ ] **Stage 0 — probe (de-risk first).** Write a *plain*-`compile` probe (not
-  `compile_with_state`): one decode step on the SMALL dense Qwen3 (0.6B/4B), fixed
-  shapes + fixed-size cache, weights captured. A/B compiled vs uncompiled. Decides
-  go/no-go on the cache redesign BEFORE building it.
+- [x] **Stage 0 — probe (de-risk first). DONE — NO-GO signal (`sunny-civet`, 2026-06-22).**
+  Ran the existing `mlx_compile_probe_plain` (`mlx_native_backend.rs:5076`, plain `compile`,
+  weights captured) on Qwen3-0.6B-4bit: **compiled is SLOWER** — T=1 `0.69×` (26.6→38.4 ms),
+  T=16 `0.58×` (19.7→33.9 ms). Plain-compile of the decode step does **not** pay off at this
+  scale; matches the prior `compile_with_state` net-negative and [[project-mlx-hybrid-decode-gap]]
+  ("compile doesn't win, batching was the lever"). **Decision: do NOT build Stage 1/2 on this
+  premise.** Caveats (so it's a signal, not absolute): the probe uses the growing
+  `ConcatKeyValueCache` (not yet the proposed fixed-shape cache) and 0.6B (not the 27B target);
+  the *only* thing that could still flip it is a probe on 27B WITH the fixed-shape cache — but
+  given two net-negative compile results, that is a deliberate, slot-heavy bet, not a default.
+  Recommend keeping single-stream perf on the shipped batching lever.
 - [ ] **Stage 1 — fixed-shape KV cache** (preallocate + in-place slice-update +
   offset). Byte-exact vs the current `ConcatKeyValueCache`.
 - [ ] **Stage 2 — compiled decode step** (plain `compile`, weights captured, args =
