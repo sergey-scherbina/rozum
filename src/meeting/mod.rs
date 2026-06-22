@@ -1,5 +1,3 @@
-pub mod app;
-pub mod attach;
 pub mod budget;
 pub mod daemon;
 pub mod daemon_proxy;
@@ -20,7 +18,6 @@ pub mod state;
 pub mod store;
 pub mod tui_client;
 
-pub use app::{RoomConfig, run_room};
 pub use list::list_rooms;
 pub use proxy::run_proxy;
 pub use room_path::generate_room_name;

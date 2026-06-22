@@ -21,10 +21,10 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::daemon::daemon_alive;
-use super::room_path::meeting_sock;
-use super::store::StoredTurn;
-use super::tui_client::{MeetingClient, RoomInfo};
+use crate::meeting::daemon::daemon_alive;
+use crate::meeting::room_path::meeting_sock;
+use crate::meeting::store::StoredTurn;
+use crate::meeting::tui_client::{MeetingClient, RoomInfo};
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 type Boxed<U> = Result<U, Box<dyn std::error::Error + Send + Sync>>;
@@ -47,8 +47,8 @@ pub async fn run_attach(room: Option<String>) -> Boxed<()> {
     }
 
     // The human's stable local identity → one participant (handle) across launches, not a
-    // fresh random one each time. See `super::local_identity`.
-    let id = super::local_identity::load_or_create();
+    // fresh random one each time. See `crate::meeting::local_identity`.
+    let id = crate::meeting::local_identity::load_or_create();
     let mut client = MeetingClient::connect_as(&sock, &id.display, &id.token).await?;
 
     match room {

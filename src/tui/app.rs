@@ -5,11 +5,11 @@ use rmcp::{Peer, RoleServer};
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
-use super::budget::BudgetGuard;
-use super::mcp_server::{ConnParticipant, PeerRegistry, RoomServer};
-use super::participant::ParticipantId;
-use super::room_path::{ensure_rooms_dir, room_socket};
-use super::state::{Meeting, MeetingEvent, Phase};
+use crate::meeting::budget::BudgetGuard;
+use crate::meeting::mcp_server::{ConnParticipant, PeerRegistry, RoomServer};
+use crate::meeting::participant::ParticipantId;
+use crate::meeting::room_path::{ensure_rooms_dir, room_socket};
+use crate::meeting::state::{Meeting, MeetingEvent, Phase};
 
 const SAMPLING_COMPOSE_TIMEOUT_SECS: u64 = 120;
 /// Max consecutive LLM-only messages without any human/bridge input. Prevents
@@ -32,7 +32,7 @@ impl Default for RoomConfig {
     fn default() -> Self {
         let username = std::env::var("USER").unwrap_or_else(|_| "user".into());
         Self {
-            name: super::room_path::generate_room_name(),
+            name: crate::meeting::room_path::generate_room_name(),
             topic: String::new(),
             human_display_name: username,
             budget: BudgetGuard::default(),

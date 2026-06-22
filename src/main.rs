@@ -550,7 +550,7 @@ async fn main() {
                     cli.per_turn_budget,
                 )
                 .await;
-            } else if let Err(e) = rozum::meeting::attach::run_attach(cli.room).await {
+            } else if let Err(e) = rozum::tui::attach::run_attach(cli.room).await {
                 eprintln!("rozum: {e}");
                 std::process::exit(1);
             }
@@ -735,7 +735,7 @@ async fn main() {
             MeetingsAction::Stop => run_meetings_stop(),
             MeetingsAction::Status => run_meetings_status().await,
             MeetingsAction::Attach { room } => {
-                if let Err(e) = rozum::meeting::attach::run_attach(room).await {
+                if let Err(e) = rozum::tui::attach::run_attach(room).await {
                     eprintln!("attach error: {e}");
                     std::process::exit(1);
                 }
@@ -818,7 +818,7 @@ async fn run_room(
     budget: Option<usize>,
     per_turn_budget: Option<usize>,
 ) {
-    use rozum::meeting::app::RoomConfig;
+    use rozum::tui::app::RoomConfig;
 
     let name = room.unwrap_or_else(rozum::meeting::generate_room_name);
     let username =
@@ -853,7 +853,7 @@ async fn run_room(
     }
 
     tracing::info!(room = %name, "rozum room starting");
-    if let Err(e) = rozum::meeting::run_room(config, false).await {
+    if let Err(e) = rozum::tui::run_room(config, false).await {
         tracing::error!(error = %e, "room error");
         std::process::exit(1);
     }

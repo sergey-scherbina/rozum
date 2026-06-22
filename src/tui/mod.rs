@@ -1,3 +1,11 @@
+// The TUI meeting client: `attach` (the `rozum` / `rozum meetings attach` entry) + `app`
+// (room/app orchestration) live here with the ratatui rendering below; they talk to the
+// daemon via the shared `crate::meeting::` client libs.
+pub mod app;
+pub mod attach;
+
+pub use app::{RoomConfig, run_room};
+
 use std::collections::HashSet;
 use std::sync::Arc;
 
