@@ -242,9 +242,12 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
 >   reuse doesn't exist") was WRONG. Residual gaps (smaller, real, if a need appears): (a) the store keeps ~one
 >   recent prefix → concurrent/interleaved agents thrash it (multi-prefix LRU cache); (b) gguf/mistralrs lack
 >   it (cross-engine). Re-scope to those before any work; no big single-stream win remains here.
-> - [ ] **fast-swap-feature** (#6, NORTH-STAR) — finish smmr-C: "every model available, sub-second swap" using
->   the landed `prefetch::warm_dir_page_cache` + ordered drain→free→settle→load via `gateway switch`. Slot-gated
->   orchestration; the higher-value lever than co-residency for multi-model agentic use on one box.
+> - [~] **fast-swap-feature** (#6, NORTH-STAR) — **PREWARM WIRED (`sunny-civet`).** `Switchboard::switch`
+>   now spawns `prefetch::warm_dir_page_cache(new_dir)` fire-and-forget BEFORE `begin_drain`, so the new
+>   model's weights warm into page cache DURING the drain → rebuild reads from RAM. Safe ordering was already
+>   correct (drop old before rebuild — never two resident); prewarm only overlaps, page cache is off-budget.
+>   `ROZUM_SWAP_PREWARM=0` disables. Additive, 4/4 switch tests pass. REMAINING (slot): measure swap latency
+>   with/without prewarm on two real models; `oversubscribed`-triggered auto-swap is a separate follow-up.
 > - [~] **cpu-uma-offload** (#7, NORTH-STAR) — **SPEC DONE** `docs/specs/cpu-uma-offload.md`. KEY CORRECTION:
 >   on Apple UMA there is NO separate VRAM — "spill to CPU RAM" doesn't free GPU memory (same bytes). The real
 >   lever is RESIDENCY not location: keep weights pageable (page-cache, NOT Metal-wired via `set_wired_limit`)

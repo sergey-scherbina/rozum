@@ -121,12 +121,18 @@ safe to overlap). Best-effort + cancellable (abort the moment the old model fini
 draining). Portable sequential `read()` v1; `madvise(WILLNEED)` is a later optimization.
 Unit-tested (sums regular files, skips subdirs, cancel aborts, missing-dir no-op).
 
-**Remaining (needs the model slot — after smmr-D):** wire the prewarm + ordered
-free→load into the swap path (extend `gateway switch` so an `oversubscribed` request
-triggers prewarm-during-drain, then the strict free→settle→load order; reuses
-`plan_residency` `oversubscribed`), and measure swap latency with vs without prewarm. The
-orchestration touches `gateway.rs`/the worker, so it is coordinated + slot-gated; the
-prewarm primitive above is the standalone, already-usable building block.
+**Prewarm wired into the swap — ✅ DONE (`sunny-civet`).** `Switchboard::switch` now spawns
+`prefetch::warm_dir_page_cache(new_model_dir)` (fire-and-forget) **before** `begin_drain`,
+so the new model's weights warm into the OS page cache *during* the drain — the rebuild
+below then reads from RAM, not disk. The safe ordering was already correct (drop old at
+`*backend = None` **before** rebuilding — never two resident); the prewarm only adds
+overlap, and page cache is reclaimable + off-budget so it can't overcommit while the old
+model is still resident during the drain. `ROZUM_SWAP_PREWARM=0` disables; only warms an
+already-cached model. Additive, gated; 4/4 switch tests still pass.
+
+**Remaining (slot-gated):** measure swap latency with vs without prewarm on two real
+models (load A → switch to B, time the rebuild); and the `oversubscribed`-triggered
+auto-swap (reuse `plan_residency` `oversubscribed`) is a separate follow-up.
 
 ### D. Safety-validation harness — `nimble-raven` (capstone, needs the model slot)
 Prove the invariant holds end-to-end: drive admission across co-residency + swap and

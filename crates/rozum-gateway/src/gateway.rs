@@ -560,6 +560,24 @@ impl Switchboard {
         let Some(builder) = self.builder.clone() else {
             return Err("this gateway does not support switching (dedicated)".into());
         };
+        // Fast-swap prewarm (smmr-C): warm the NEW model's weights into the OS page cache
+        // NOW, so it overlaps the drain below and the rebuild reads from RAM instead of
+        // disk. Best-effort, fire-and-forget — page cache is reclaimable and is NOT GPU
+        // residency, so it never counts against the RAM budget (no overcommit while the
+        // old model is still resident during the drain). Only warms an already-cached
+        // model (a swap between known models); `ROZUM_SWAP_PREWARM=0` disables.
+        if std::env::var("ROZUM_SWAP_PREWARM").as_deref() != Ok("0") {
+            let m = model.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Some(dir) = rozum_models::model_source::resolve_model_dir(&m) {
+                    let cancel = std::sync::atomic::AtomicBool::new(false);
+                    let bytes = rozum_core::prefetch::warm_dir_page_cache(&dir, &cancel);
+                    crate::obs::log_event(json!({
+                        "event": "gateway_swap_prewarm", "model": m, "bytes": bytes,
+                    }));
+                }
+            });
+        }
         self.begin_drain().await?;
         let old = self.spec.lock().unwrap().clone();
         let new = ModelSpec {
