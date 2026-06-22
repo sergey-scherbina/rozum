@@ -3585,6 +3585,19 @@ mod inner {
         // The tool dialect (harmony / GLM / Qwen-default) owns per-family render; picked once
         // from the template markers (was inline `contains("<|channel|>"/"<|observation|>")`).
         let dialect = dialect_for(template);
+        // GLM-only: strip narration framing from system prompts when tools are present — the
+        // framing ("explain in prose / show code in markdown") flips GLM to printing the artifact
+        // instead of naming the tool (glm4-bringup § UPDATE). Opt-out: ROZUM_GLM_STRIP_FRAMING=0.
+        let glm_stripped: Vec<Message>;
+        let messages: &[Message] = if dialect.uses_glm_envelope()
+            && !tools.is_empty()
+            && super::glm_strip_framing_enabled()
+        {
+            glm_stripped = messages.iter().map(super::strip_glm_framing_msg).collect();
+            &glm_stripped
+        } else {
+            messages
+        };
         let convo: Vec<Conversation<&'static str, String>> =
             messages.iter().map(|m| dialect.render_message(m)).collect();
         // Thinking is OFF by default (clean output for CC/Codex); the gateway's
@@ -3704,6 +3717,76 @@ fn select_mlx_mem_limit_bytes(env_mem_gb: Option<u64>, share_bytes: u64, total_b
     }
 }
 
+// ── GLM narration-framing strip (docs/specs/glm4-bringup.md § UPDATE) ──────────
+// GLM-4-0414 reliably NAMES tools UNLESS the system prompt tells it to narrate —
+// "explain your reasoning in prose" / "show code in markdown code blocks" — which
+// flips it to printing the artifact instead of calling the tool (load-bisection
+// proven; a counter-instruction does NOT reliably override the framing, so REMOVING
+// it is the lever). Applied only to GLM system prompts when tools are present.
+
+/// True when `ROZUM_GLM_STRIP_FRAMING` is not explicitly disabled (default ON for GLM).
+fn glm_strip_framing_enabled() -> bool {
+    !matches!(
+        std::env::var("ROZUM_GLM_STRIP_FRAMING").ok().as_deref(),
+        Some("0" | "false" | "off")
+    )
+}
+
+/// Is `sentence` a narration *directive* (tell-the-model-to-show-prose/markdown)? Conservative:
+/// needs a narration verb AND a prose/markdown object AND is NOT about tools (so an anti-framing
+/// "use the Write tool, not a markdown block" instruction is KEPT).
+fn is_glm_narration_directive(sentence: &str) -> bool {
+    let l = sentence.to_ascii_lowercase();
+    let narrate = [
+        "explain", "describe", "show", "present", "narrate", "walk through", "think out loud",
+        "commentary", "your reasoning", "your thinking", "your thought",
+    ]
+    .iter()
+    .any(|k| l.contains(k));
+    let prose_md = [
+        "in prose", "markdown", "code block", "code fence", "```", "step by step",
+        "step-by-step", "out loud", "for the user to read", "to the user",
+    ]
+    .iter()
+    .any(|k| l.contains(k));
+    let about_tools =
+        ["tool", "function call", "call the", "invoke"].iter().any(|k| l.contains(k));
+    narrate && prose_md && !about_tools
+}
+
+/// Drop narration-directive sentences from GLM system-prompt text, keeping all else (and the
+/// line structure). Sentence boundaries: lines, then `. ` within a line.
+fn strip_glm_narration_framing(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            line.split(". ")
+                .filter(|s| !is_glm_narration_directive(s))
+                .collect::<Vec<_>>()
+                .join(". ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Return `msg` with narration framing stripped from its text — only for `System` messages.
+fn strip_glm_framing_msg(msg: &crate::backend::Message) -> crate::backend::Message {
+    use crate::backend::{ContentBlock, Message, Role};
+    if msg.role != Role::System {
+        return msg.clone();
+    }
+    let content = msg
+        .content
+        .iter()
+        .map(|b| match b {
+            ContentBlock::Text { text } => {
+                ContentBlock::Text { text: strip_glm_narration_framing(text) }
+            }
+            other => other.clone(),
+        })
+        .collect();
+    Message { role: msg.role.clone(), content }
+}
+
 #[cfg(test)]
 mod smmr_cap_tests {
     use super::*;
@@ -3730,6 +3813,58 @@ mod smmr_cap_tests {
         assert_eq!(MEM_CAP_OVERRIDE_BYTES.load(std::sync::atomic::Ordering::Relaxed), 7 * GB);
         set_memory_cap_bytes(0); // clear so other tests/processes start clean
         assert_eq!(MEM_CAP_OVERRIDE_BYTES.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+}
+
+#[cfg(test)]
+mod glm_framing_tests {
+    use super::{is_glm_narration_directive, strip_glm_framing_msg, strip_glm_narration_framing};
+    use crate::backend::{ContentBlock, Message, Role};
+
+    #[test]
+    fn detects_narration_directives_but_spares_legit_and_tool_text() {
+        // The framing that flips GLM → artifact.
+        assert!(is_glm_narration_directive(
+            "Explain your reasoning in prose and show code in markdown code blocks"
+        ));
+        assert!(is_glm_narration_directive("Before each action, show the code to the user"));
+        // Legit, non-narration instructions are KEPT.
+        assert!(!is_glm_narration_directive("Fix the failing test in src/lib.rs"));
+        assert!(!is_glm_narration_directive("You are a careful, concise coding agent"));
+        // Anti-framing tool instruction is KEPT (mentions code block + tool).
+        assert!(!is_glm_narration_directive(
+            "Use the Write tool to create files, not a markdown code block"
+        ));
+    }
+
+    #[test]
+    fn strips_framing_sentence_keeps_rest() {
+        let sys = "You are a coding agent. Before each action, explain your reasoning in prose and \
+                   show code in markdown code blocks for the user. Use the provided tools to act.";
+        let out = strip_glm_narration_framing(sys);
+        assert!(out.contains("You are a coding agent"));
+        assert!(out.contains("Use the provided tools to act"));
+        assert!(!out.to_ascii_lowercase().contains("markdown"));
+        assert!(!out.to_ascii_lowercase().contains("in prose"));
+    }
+
+    #[test]
+    fn only_touches_system_messages() {
+        let frame = "Explain your reasoning in prose in markdown.";
+        let user = Message { role: Role::User, content: vec![ContentBlock::Text { text: frame.into() }] };
+        // User message is unchanged even if it contains framing-like text.
+        let out = strip_glm_framing_msg(&user);
+        match &out.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, frame),
+            _ => panic!("text block"),
+        }
+        // System message is stripped.
+        let sysm = Message { role: Role::System, content: vec![ContentBlock::Text { text: frame.into() }] };
+        let out = strip_glm_framing_msg(&sysm);
+        match &out.content[0] {
+            ContentBlock::Text { text } => assert!(!text.to_ascii_lowercase().contains("markdown")),
+            _ => panic!("text block"),
+        }
     }
 }
 
