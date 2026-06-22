@@ -513,6 +513,7 @@ async fn main() {
     // (inversion of control for the workspace split — core never depends on an
     // engine). A no-op when the corresponding feature is off.
     rozum::gguf::register_engine();
+    rozum::mlx_native_backend::register_telemetry();
 
     let cli = Cli::parse_from(reorder_launch_args(std::env::args().collect()));
 

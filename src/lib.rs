@@ -13,13 +13,12 @@ pub mod rag_lite;
 pub mod router;
 pub mod sandbox;
 pub mod service;
-pub mod share;
 
 // The durable SPI core (backend/concurrency/obs/engine/serving/sampler/constrain/
 // harmony) now lives in the `rozum-core` crate (Phase 0 of the workspace split).
 // Re-export its modules under their original paths so `crate::backend::…` /
 // `crate::engine::…` etc. resolve unchanged across the crate.
-pub use rozum_core::{concurrency, constrain, engine, harmony, obs, sampler, serving};
+pub use rozum_core::{concurrency, constrain, engine, harmony, obs, sampler, serving, share};
 pub(crate) use rozum_core::backend;
 
 // The meeting room + its client frontends now live in the `rozum-meeting` crate

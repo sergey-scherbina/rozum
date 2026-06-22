@@ -326,3 +326,45 @@ pub fn meter(
         }
     })
 }
+
+// ─── Engine telemetry hooks (inversion of control) ──────────────────────────────
+//
+// The gateway's `/stats` reports native-MLX memory + batched-decode occupancy, but
+// `rozum-core` must not depend on the `rozum-mlx` engine. So the engine registers
+// its stat accessors here at startup (like the backend registry's engine hooks) and
+// the gateway reads them through `rozum-core`. No registration → `None` (the engine
+// is absent or its feature is off), exactly as the old `#[cfg(not)]` stubs returned.
+
+/// Batched-decode occupancy snapshot (native MLX). `avg_occupancy = rows/runs`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BatchStats {
+    pub runs: u64,
+    pub rows: u64,
+    pub admits: u64,
+    pub max: u64,
+}
+
+static MLX_MEMORY: OnceLock<fn() -> Option<(u64, u64, u64)>> = OnceLock::new();
+static MLX_BATCH: OnceLock<fn() -> Option<BatchStats>> = OnceLock::new();
+
+/// Register the native-MLX unified-memory accessor (active/peak/cache MB).
+pub fn register_mlx_memory(f: fn() -> Option<(u64, u64, u64)>) {
+    let _ = MLX_MEMORY.set(f);
+}
+
+/// Register the native-MLX batched-decode occupancy accessor.
+pub fn register_mlx_batch_stats(f: fn() -> Option<BatchStats>) {
+    let _ = MLX_BATCH.set(f);
+}
+
+/// Native-MLX unified-memory footprint (active, peak, cache) in MB, or `None` when
+/// the MLX engine is absent / its feature is off.
+pub fn mlx_memory_mb() -> Option<(u64, u64, u64)> {
+    MLX_MEMORY.get().and_then(|f| f())
+}
+
+/// Native-MLX batched-decode occupancy, or `None` when nothing has batched yet /
+/// the MLX engine is absent.
+pub fn batch_stats() -> Option<BatchStats> {
+    MLX_BATCH.get().and_then(|f| f())
+}

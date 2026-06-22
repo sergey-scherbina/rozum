@@ -12,3 +12,4 @@ pub mod harmony;
 pub mod obs;
 pub mod sampler;
 pub mod serving;
+pub mod share;

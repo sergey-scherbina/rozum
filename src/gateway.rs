@@ -2800,7 +2800,7 @@ async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
         // MLX Metal memory (native runtime): the resident model's unified-memory footprint
         // (active / peak / cache MB), which process RSS doesn't capture. `active` drops to ~0
         // after an idle-unload, so this is how you watch the model free its RAM.
-        if let Some((active, peak, cache)) = crate::mlx_native_backend::mlx_memory_mb() {
+        if let Some((active, peak, cache)) = crate::obs::mlx_memory_mb() {
             m.insert(
                 "mlx_memory_mb".into(),
                 json!({ "active": active, "peak": peak, "cache": cache }),
@@ -2809,7 +2809,7 @@ async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
         // Batched-decode occupancy (native MLX): how many concurrent requests actually
         // share a forward. `avg_occupancy = rows/runs`; `max` is the high-water batch size;
         // `admits` counts continuous mid-decode admissions. Omitted until something batches.
-        if let Some(b) = crate::mlx_native_backend::batch_stats() {
+        if let Some(b) = crate::obs::batch_stats() {
             let avg = if b.runs > 0 { b.rows as f64 / b.runs as f64 } else { 0.0 };
             m.insert(
                 "batch".into(),

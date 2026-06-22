@@ -3530,6 +3530,26 @@ pub fn mlx_memory_mb() -> Option<(u64, u64, u64)> {
     None
 }
 
+/// Register this engine's telemetry accessors with `rozum-core::obs` so the gateway
+/// can report MLX memory + batch occupancy through the core without depending on
+/// this engine crate (inversion of control). The binary calls this at startup; a
+/// no-op without the `mlx-native` feature.
+#[cfg(feature = "mlx-native")]
+pub fn register_telemetry() {
+    rozum_core::obs::register_mlx_memory(mlx_memory_mb);
+    rozum_core::obs::register_mlx_batch_stats(|| {
+        batch_stats().map(|b| rozum_core::obs::BatchStats {
+            runs: b.runs,
+            rows: b.rows,
+            admits: b.admits,
+            max: b.max,
+        })
+    });
+}
+
+#[cfg(not(feature = "mlx-native"))]
+pub fn register_telemetry() {}
+
 /// Model-spec resolution + hub download now live in the engine-agnostic
 /// [`crate::model_source`] module (reused by any safetensors backend). Re-exported
 /// here so existing `mlx_native_backend::{spec_to_hf_repo, resolve_model_dir}`
