@@ -112,6 +112,73 @@ assert host peak RAM never exceeds the safe fraction. SAFELY: derive admission f
 calibrated footprints; the worst case to *measure* is one admitted set at a time. Never
 load an un-admitted combination to "see if it reboots."
 
+## Findings: MLX cap enforcement — source audit (`sunny-civet`, 2026-06-22)
+
+Auditing the MLX metal allocator C++ (`mlx-sys` … `mlx/backend/metal/allocator.cpp`)
+to verify A's enforcement claim. **The mechanism A and B rely on is not what enforces
+the bound** — the *conclusion* may still hold, but for a different reason, and one
+unverified fact decides it.
+
+**`set_memory_limit` is SOFT — it does not cap a process (source-proven).**
+- `set_memory_limit(limit)` sets `block_limit_` and derives `gc_limit_ =
+  min(block_limit_, 0.95·recommendedMaxWorkingSetSize)` (allocator.cpp:76-83).
+- In `malloc` (allocator.cpp:96-164), `block_limit_`/`gc_limit_` are used in **exactly
+  one place**: `if (mem_required >= gc_limit_) release_cached_buffers(...)` (124-127) —
+  it **frees cache**, then **allocates the buffer anyway** (`device_->newBuffer`, 141).
+  The only hard failures are the per-buffer `maxBufferLength` (103) and a null from
+  `newBuffer` = **physical** device OOM (143-146). So a process's *active* memory grows
+  unbounded up to physical RAM regardless of `set_memory_limit`; mlx-rs documents it
+  plainly as the "**soft** memory limit … allocations beyond it wait or relax"
+  (`mlx-rs/src/memory.rs:63`).
+- ⇒ A's `set_memory_limit(reservation)` is **not** a "Hard memory ceiling" (its code
+  comment) and does **not** "enforce" the footprint (B's premise). Capping `set_memory_limit`
+  to the share just makes a process start evicting cache sooner. **No MLX API hard-caps a
+  process below physical RAM** (there is no fail-fast cap), so per-process caps cannot *be*
+  the safety guarantee — conservative **admission** (B) is the only structural lever.
+
+**What actually bounds resident footprint: `set_cache_limit` (cache only).**
+`set_cache_limit(limit)` sets `max_pool_size_` (allocator.cpp:70-74); `malloc` keeps
+`get_cache_memory() ≤ max_pool_size_` (159-162). So the **cache** term is genuinely
+bounded; the **active** term (weights + KV + prefill activation) is not bounded by
+anything but the model itself + chunked prefill.
+
+**The crux that decides B's safety (unverified): is the uncapped balloon CACHE or ACTIVE?**
+B sets `footprint = need (~6 GB for a 4B)`, declaring the uncapped ~27 GB "prevented by
+the cap." Resident = `active + cache`. Two cases:
+- **If the 27 GB is cache** → `set_cache_limit` bounds it → real peak ≈ `need + cache_limit`
+  → B is ~right but **under-counts by the cache term**: `cap_mlx_memory` allows a 4 GB cache
+  (`ROZUM_MLX_CACHE_GB` default 4), yet B folds cache+activation into a **3 GB** floor
+  (`activation_reserve = max(weights/5, 3 GiB)`) — smaller than the cache limit alone. So B
+  should add the explicit `set_cache_limit` bytes, not a 3 GB catch-all.
+- **If the 27 GB is active** (KV + prefill activations) → **nothing bounds it** (soft
+  `set_memory_limit`, and `set_cache_limit` only touches cache) → B's ~6 GB severely
+  under-counts → admitting a 2nd model can still overcommit → reboot.
+- **Contradiction to resolve:** `cap_mlx_memory` already sets `set_cache_limit=4 GB` on
+  **every** load (`mlx_native_backend.rs:319,1801`). If that was in effect when the table
+  was measured, a 0.5B model could not sit at 14.9 GB *of cache* — pointing at the active
+  case (dangerous) **or** at the measurements predating/bypassing the cap. Either way the
+  table can't be taken at face value.
+
+**Decisive measurement (smmr-D, `nimble-raven`, owns the slot):** load one model under
+the live cap and read **`get_active_memory()` vs `get_cache_memory()` vs RSS at peak**
+(`mlx-rs` exposes both; `reset_peak_memory`/`get_peak_memory` too). If peak is
+cache-dominated and ≤ `set_cache_limit` over `need`, co-residency is safe with B + an
+explicit cache term. If active-dominated, co-residency is unsafe and must stay
+single-flight + fast-swap (C) until prefill activation is provably bounded.
+
+**Recommendations (no code changed here — handing this to A/B's owner):**
+1. Relabel A: it's a *cache-eviction hint*, not a hard ceiling; the bound is admission (B)
+   + `set_cache_limit`, not `set_memory_limit`.
+2. B: add the explicit `set_cache_limit` bytes to `runtime_footprint` (per resident),
+   instead of a 3 GB floor that's below the cache limit.
+3. Gate **default** co-residency on smmr-D's active-vs-cache result; keep it opt-in until
+   then (matches "safety is the hard condition").
+4. C (fast-swap) likely deserves promotion over A/B for the 27–35B agentic models, whose
+   *need* alone (weights ~18 GB + KV) already precludes co-residency on 36 GiB.
+
+(Method: pure source read of the vendored MLX allocator + mlx-rs — no model loaded, no
+slot used. The empirical active-vs-cache split is the one piece that needs the slot = D.)
+
 ## Acceptance / done-when
 
 - **A:** with two ledger-admitted models co-resident, each MLX process's hard cap sums
