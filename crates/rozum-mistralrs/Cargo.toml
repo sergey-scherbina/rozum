@@ -1,0 +1,21 @@
+[package]
+name = "rozum-mistralrs"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# The candle-based mistral.rs engine (broad model catalog, Metal). The heavy
+# `mistralrs` dependency is gated behind this crate's `mistralrs` feature, which
+# the binary forwards to. Phase 2 of the workspace split
+# (docs/specs/workspace-split.md). The mistralrs fork pin lives in the workspace
+# root's [patch.crates-io].
+
+[features]
+mistralrs = ["dep:mistralrs"]
+
+[dependencies]
+rozum-core = { path = "../rozum-core" }
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+async-stream = "0.3"
+mistralrs = { version = "0.8.1", features = ["metal"], optional = true }

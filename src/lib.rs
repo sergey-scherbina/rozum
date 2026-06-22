@@ -8,7 +8,6 @@ pub mod gateway;
 pub mod gguf;
 pub mod mcp_tool_source;
 pub mod memory_store;
-pub mod mistralrs_backend;
 pub mod mlx_native_backend;
 pub mod openai_http;
 pub mod proxy;
@@ -38,6 +37,10 @@ pub use rozum_meeting::{discord, meeting, telegram, tui, web};
 // (Phase 2). Re-export under their original paths so `crate::model_source::…`
 // etc. resolve unchanged.
 pub use rozum_models::{hf_hub, model_source, models, modelscope, resident};
+
+// Engine crates (Phase 2) — re-exported under their original module paths so
+// `rozum::mistralrs_backend::…` etc. keep resolving from the binary.
+pub use rozum_mistralrs::mistralrs_backend;
 
 #[cfg(feature = "local-models")]
 pub use backend::CandleBackend;

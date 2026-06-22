@@ -4909,7 +4909,6 @@ dependencies = [
  "futures",
  "futures-util",
  "llama-cpp-2",
- "mistralrs",
  "mlx-lm",
  "mlx-lm-utils",
  "mlx-rs",
@@ -4919,6 +4918,7 @@ dependencies = [
  "rmcp",
  "rozum-core",
  "rozum-meeting",
+ "rozum-mistralrs",
  "rozum-models",
  "schemars 1.2.1",
  "serde",
@@ -4978,6 +4978,17 @@ dependencies = [
  "tracing",
  "tui-textarea",
  "uuid 1.23.2",
+]
+
+[[package]]
+name = "rozum-mistralrs"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "mistralrs",
+ "rozum-core",
+ "tokio",
 ]
 
 [[package]]

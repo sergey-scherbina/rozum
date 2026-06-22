@@ -24,7 +24,7 @@ license = "Apache-2.0"
 default = ["mlx-native", "gguf"]
 local-models = ["rozum-core/local-models"]
 gguf = ["dep:llama-cpp-2"]
-mistralrs = ["dep:mistralrs"]
+mistralrs = ["rozum-mistralrs/mistralrs"]
 # Pure-Rust native MLX runtime (no Python, no subprocess). Builds MLX C++ from
 # source via the vendored fork, so it needs the Metal toolchain and is off by
 # default. See docs/specs/mlx-native-runtime.md.
@@ -49,8 +49,10 @@ rozum-core = { path = "crates/rozum-core" }
 # Model catalog / sourcing / residency (Phase 2). Pure leaf; re-exported under
 # its original module paths in src/lib.rs.
 rozum-models = { path = "crates/rozum-models" }
+# Engine crates (Phase 2). Each is always linked, but its heavy backend dep is
+# gated behind the crate's own feature, which the binary's feature forwards to.
+rozum-mistralrs = { path = "crates/rozum-mistralrs" }
 llama-cpp-2 = { version = ">=0.1.100", features = ["metal"], optional = true }
-mistralrs = { version = "0.8.1", features = ["metal"], optional = true }
 
 # Native MLX runtime: the vendored fork of oxideai/mlx-rs (the `mlx-lm` Rust
 # crates). Pinned to a fork rev so a clean clone builds reproducibly without the
