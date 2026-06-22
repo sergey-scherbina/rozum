@@ -166,10 +166,40 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
 > 1. ✅ **smmr-D-probe-harness** DONE (`4c2329b`) — set_memory_limit empirically SOFT; harness for D.
 > 2. ✅ **residency-ledger-hardening** DONE (`f5cbec2`).
 > 3. [~] **smmr-C-fast-swap** foundation DONE (`c3fa8ef`); orchestration slot-gated (after D).
-> 4. ⏳ NEXT (larger, fresh tracks): **decode-compile-stage0** (perf P3, slot-free probe), **plugin-x86-engine**
->    (P2 North-Star). Not rushed at the tail of this session — kept queued so they get a proper start.
+> 4. ✅ **decode-compile-stage0** DONE (`f6b20a3`) — NO-GO: plain compile 0.58–0.69× (slower) on 0.6B;
+>    don't build Stage 1/2. ✅ **x86 spec** freshened (`e9ff8cf`, A-prereq = `drive` landed).
 > Outcome: my source-audit finding (`9726971`) was accepted — nimble-raven reconciled A/B (`e7c9762`,
-> "admission is the lever"). Slot-needing validation (probe model-mode, swap e2e) handed to the slot owner.
+> "admission is the lever") and used my probe's model-mode to settle co-residency is safe (`e8d8081`).
+
+> #### ▶ sunny-civet idea backlog (operator-authorized 2026-06-22: "запиши все эти задачи и делай автономно")
+> Seven ideas from a step-back review. Discipline unchanged (slot-free + non-colliding; coordinate via
+> `rozum meetings post`; new files / my lane; never grab the slot blind). Order = value × (slot-free,
+> completable). Claiming all under `sunny-civet`; the deep ones (#4–#7) get design-specs first, not a rushed impl.
+> - [ ] **mem-pressure-watchdog** (#1, SAFETY, claiming) — finish the reboot story: admission stops overcommit
+>   *at load*; runtime drift (KV growth on long ctx; the cap-unenforced gguf/mistralrs paths) can still creep to
+>   jetsam. A per-gateway watchdog on macOS memory pressure that unloads ITS OWN model when the host is under
+>   pressure AND it's idle → graceful degradation, not reboot. Slot-free core: `rozum-core` host-mem reader +
+>   pure `should_shed(available, pressure, inflight, idle)` decision, unit-tested; minimal gateway-loop hook
+>   (extends the existing idle-unload watchdog) is the only shared-file touch. Reads my residency ledger.
+> - [ ] **gguf-mistralrs-residency-cap** (#2, SAFETY) — smmr-A caps MLX only; gguf/mistralrs co-residency rides
+>   the *estimate* with no enforced cap = an unguarded reboot vector. Add their memory-limit knob (candle /
+>   mistralrs paged) wired to the reservation, or keep them single-flight. Engine-crate work; design first.
+> - [ ] **agentic-smoke-deterministic** (#3, RELIABILITY, claiming) — the matrix is slow/flaky and has rebooted
+>   the Mac twice. Now that nondeterminism is fixed (seed), a tiny seed-pinned single-model GATEWAY smoke
+>   (fixed prompt → byte-identical across 2 runs + a known tool-call shape parses) catches gateway regressions
+>   in seconds, pre-commit, no reboot risk. Harness is slot-free; one validation run is slot-coordinated.
+> - [ ] **prompt-lookup-decoding** (#4, PERF, design-first) — compile=NO-GO, MoE spec-decode=net-negative,
+>   batching only helps concurrent load. Agentic/code re-emits big VERBATIM chunks of the file it just read →
+>   prompt-lookup (n-gram propose from the prompt, verify in one forward, NO draft model) wins exactly there.
+>   Touches the MLX decode loop (nimble-raven's area) + model validation → spec + coordinate before impl.
+> - [ ] **cross-turn-prefix-kv-reuse** (#5, PERF, design-first) — the agent re-sends a growing transcript each
+>   turn; cache the shared-prefix KV across requests from one agent to skip re-prefill (intra-request reuse
+>   exists; lift to inter-request). Big single-stream win for the dominant use case. Gateway+MLX, matrix-critical → spec first.
+> - [ ] **fast-swap-feature** (#6, NORTH-STAR) — finish smmr-C: "every model available, sub-second swap" using
+>   the landed `prefetch::warm_dir_page_cache` + ordered drain→free→settle→load via `gateway switch`. Slot-gated
+>   orchestration; the higher-value lever than co-residency for multi-model agentic use on one box.
+> - [ ] **cpu-uma-offload** (#7, NORTH-STAR, big) — device-aware placement on the Apple box itself: spill
+>   layers/KV to CPU RAM when GPU-tight so a refused model loads offloaded instead. North-Star-central; large.
 
 - **INTERIM SAFETY:** the interim floor is dropped; smmr-A caps each process. CAVEAT (`sunny-civet`,
   `9726971`): the cap is via `set_memory_limit` which is SOFT — see spec § Findings; co-residency safety
