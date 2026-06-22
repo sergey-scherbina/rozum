@@ -146,7 +146,7 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
   cross-process, utility-ranked eviction — *which* model sheds, not just "self if idle".
 - [ ] **govern-os-containment** — set gateway jetsam priority / RLIMIT so a breach is a recoverable
   process-kill, not a kernel panic. Cheap, large safety upside.
-- [ ] **residency-unify-in-process** — fold co-residency into one in-process Switchboard (N models, exact
+- [ ] **residency-unify-in-process** (design: `docs/specs/residency-unify.md`) — fold co-residency into one in-process Switchboard (N models, exact
   accounting, instant swap) instead of N flock-coordinated processes; flock ledger stays the cross-process
   backstop. (Big; design-gated; coordinate.)
 - [ ] **footprint-before-download** (`nimble-raven`, found via smmr-D 2026-06-22) — `estimate_model_footprint_bytes`
