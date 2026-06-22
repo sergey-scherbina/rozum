@@ -917,42 +917,7 @@ mod tests {
         assert_eq!(out["sum"], 8);
     }
 
-    // End-to-end against a REAL backend: the reference loop drives native MLX through a
-    // genuine tool call and back to a final answer. Constrained decoding on, so the args
-    // are guaranteed valid. ~2.5 GB Qwen3-4B. Run:
-    //   cargo test --features mlx-native -- --ignored --nocapture agent_loop_real_backend
-    #[cfg(feature = "mlx-native")]
-    #[tokio::test]
-    #[ignore = "network: uses mlx-community/Qwen3-4B-4bit"]
-    async fn agent_loop_real_backend() {
-        use crate::mlx_native_backend::{ensure_model_dir, MlxNativeBackend};
-
-        unsafe {
-            std::env::set_var("ROZUM_MLX_CONSTRAIN", "1");
-        }
-        let spec = "mlx-community:Qwen3-4B-4bit";
-        let dir = ensure_model_dir(spec).await.expect("resolve");
-        let backend = MlxNativeBackend::new(dir, spec.replace(':', "/"), None).await.expect("load");
-
-        let out = run_agent(
-            &backend,
-            "You are a calculator. Use the add tool for any addition; do not compute it yourself.",
-            "What is 3 + 5? Use the tool, then tell me the result.",
-            &add_tool(),
-            &Budget { max_steps: 4, max_tokens: Some(128), ..Budget::default() },
-        )
-        .await;
-        unsafe {
-            std::env::remove_var("ROZUM_MLX_CONSTRAIN");
-        }
-
-        eprintln!(
-            "AGENT e2e  stop={:?} steps={} ops={} text={:?}",
-            out.stop, out.steps, out.operations.len(), out.text
-        );
-        assert_eq!(out.stop, AgentStop::Done, "loop must reach a final answer");
-        let add = out.operations.iter().find(|o| o.name == "add").expect("the model must call add");
-        assert_eq!(add.output.as_ref().expect("add succeeded")["sum"], 8);
-        assert!(!out.text.is_empty(), "a final answer is produced");
-    }
+    // NOTE: the real-MLX agent-loop eval (`agent_loop_real_backend`) moved to the
+    // binary's integration tests (`tests/mlx_evals.rs`) in the workspace split —
+    // rozum-agent has no dependency on the mlx engine.
 }

@@ -1,0 +1,27 @@
+[package]
+name = "rozum-agent"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# The intelligence layer: the agent loop + tool dispatch (`agent`, `builtin_tools`,
+# `mcp_tool_source`, `memory_store`), the cost-tier cascade (`cascade`), and the
+# small-model router / RAG worker (`router`, `rag_lite`). Builds on the rozum-core
+# SPI + rozum-models catalog; depends on NO engine crate (it drives any
+# `ChatBackend`). Phase 3 of the workspace split (docs/specs/workspace-split.md).
+
+[dependencies]
+rozum-core = { path = "../rozum-core" }
+rozum-models = { path = "../rozum-models" }
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+tokio-util = "0.7"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+schemars = "1.0"
+rmcp = { version = "1.7", features = ["server", "client", "transport-io", "transport-child-process"] }
+rand = "0.8"
+tempfile = "3"
+tracing = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

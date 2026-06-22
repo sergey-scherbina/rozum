@@ -49,6 +49,9 @@ rozum-core = { path = "crates/rozum-core" }
 # Model catalog / sourcing / residency (Phase 2). Pure leaf; re-exported under
 # its original module paths in src/lib.rs.
 rozum-models = { path = "crates/rozum-models" }
+# The intelligence layer (agent/cascade/router/rag/tools). Phase 3; depends on no
+# engine crate. Re-exported under its original module paths in src/lib.rs.
+rozum-agent = { path = "crates/rozum-agent" }
 # Engine crates (Phase 2). Each is always linked, but its heavy backend dep is
 # gated behind the crate's own feature, which the binary's feature forwards to.
 rozum-mistralrs = { path = "crates/rozum-mistralrs" }

@@ -1,16 +1,9 @@
-pub mod agent;
 pub mod anthropic_http;
-pub mod builtin_tools;
-pub mod cascade;
 pub mod config;
 pub mod doctor;
 pub mod gateway;
-pub mod mcp_tool_source;
-pub mod memory_store;
 pub mod openai_http;
 pub mod proxy;
-pub mod rag_lite;
-pub mod router;
 pub mod sandbox;
 pub mod service;
 
@@ -20,6 +13,12 @@ pub mod service;
 // `crate::engine::…` etc. resolve unchanged across the crate.
 pub use rozum_core::{concurrency, constrain, engine, harmony, obs, sampler, serving, share};
 pub(crate) use rozum_core::backend;
+
+// The intelligence layer (agent loop, tool dispatch, cascade, router/RAG) now lives
+// in the `rozum-agent` crate (Phase 3). Re-export its modules under their original
+// paths so `crate::cascade::…` (and `rozum::agent::…` / `rozum::router::…` from the
+// binary + integration tests) keep resolving unchanged.
+pub use rozum_agent::{agent, builtin_tools, cascade, mcp_tool_source, memory_store, rag_lite, router};
 
 // The meeting room + its client frontends now live in the `rozum-meeting` crate
 // (Phase 1 of the workspace split). Re-export its modules under their original
