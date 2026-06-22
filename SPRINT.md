@@ -39,6 +39,44 @@ push `feature/<slug>:master` (never edit master), then delete the done entry + p
     2nd refuse, it doesn't make 2 models fit. **v2 (BACKLOG):** RAM-ledger to admit a genuinely-
     fitting small 2nd model; sibling-aware `cap_mlx_memory` backstop (rejected for v1 — racy/PID-reap).
 
+> ### 🛑 REBOOT-SAFETY PROTOCOL (operator directive 2026-06-22 — load-bearing, read before any model load)
+> The 36 GiB Mac reboots if >1 model is resident (BUG-003). The gate now refuses a 2nd load, but
+> **do not rely on it as a license to be careless** — treat "one model-loaded gateway on this host
+> at a time" as the hard rule. Before running ANY command that loads a model (`rozum launch`,
+> `rozum gateway`, `agentic.sh`, any matrix/probe):
+> 1. **Claim the model slot in the rozum room first** ("working: taking model slot for <what>") and
+>    check nobody else holds it. Release it ("done: slot free") when finished.
+> 2. **Check the host is clear:** `ps -axo pid,rss,command | grep '[r]ozum gateway'` shows no live
+>    model gateway, and `lsof <gateway_dir>/residency.lock` is unheld. (`mcp-proxy` + `meetings` are
+>    fine — they load no model.)
+> 3. **Prefer the smallest model** that proves the point; for fast gate checks use
+>    `ROZUM_GATEWAY_RESIDENCY_WAIT_SECS=0`.
+> 4. **Never start a 2nd matrix/launch while one is running.** If unsure, ask in the room.
+> Everything you do goes on this board *before* you run it, so a reboot costs minutes, not work.
+
+- [ ] **validate-gate-live** (P0, owner `nimble-raven`) — capstone the BUG-003 fix: prove the box
+  *survives* a concurrent-load attempt under the REAL binary on master, not just unit tests.
+  - **How (single model load only — safe by construction):** build `rozum` from master (≥`3bcee03`),
+    start gateway A on a TINY model (smallest in catalog), then attempt gateway B with
+    `ROZUM_GATEWAY_RESIDENCY_WAIT_SECS=0` → assert B prints the holder-named refusal + `exit 1`
+    **before** any RSS spike (B never loads). Then stop A → B succeeds. Only ONE model ever resident.
+  - **Done-when:** B refuses+exits before load (capture stderr + exit code + `ps` RSS showing no 2nd
+    model); A unaffected; A-stop frees the gate. Record result here + CHANGELOG.
+  - **Note:** sunny-civet already did a real-binary smoke (held→refuse+exit1); this is the
+    end-to-end confirmation through an actual model-loaded gateway A. Coordinate the slot (above).
+
+> #### ▶ nimble-raven active tracks (2026-06-22, operator: "do all three, set priorities, don't reboot, write it all down")
+> My priority order across the operator's three asks, scheduled around the **single model slot**:
+> 1. **validate-gate-live** (P0, above) — cheap safety-capstone; needs the slot briefly. Coordinate
+>    with `plucky-finch` (queued for the slot for the do-first nondeterminism probe) — ideally
+>    piggyback: while their model gateway is up, my gateway-B attempt IS the live concurrency proof.
+> 2. **matrix-baseline** (P1 — green matrix #1 below) — the big authoritative run; needs the slot
+>    for a long window, AFTER the nondeterminism probe. I PREP it now (harness/models/cmdlines
+>    push-button) so the run is fast when the slot is free.
+> 3. **plugin track** (P2 — plugin-ize #2 below) — **no model slot needed → my default work while the
+>    slot is busy.** Starting with `plugin-wireprotocol` (or `plugin-services`) on its own worktree.
+> Rule: slot-tasks (1,2) serialize behind the room claim; the no-slot task (3) runs in parallel.
+
 #### 1. Green matrix — NO fails allowed, ever
 
 The matrix must be **all green**. Every fail — and every non-deterministic flip — is a
