@@ -10,7 +10,8 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rmcp::{
     ErrorData, Peer, ServerHandler,
@@ -110,6 +111,14 @@ struct State {
 pub struct DaemonProxy {
     state: Arc<Mutex<State>>,
     tool_router: ToolRouter<Self>,
+    /// Epoch-seconds of the agent's last MCP request, updated in `forward_raw`. The idle
+    /// watchdog reaps a proxy whose agent has gone silent (abandoned it on reconfig) so it
+    /// doesn't linger — an MCP stdio proxy otherwise only exits on stdin-EOF.
+    last_active: Arc<AtomicU64>,
+}
+
+fn now_epoch() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 impl Default for DaemonProxy {
@@ -147,6 +156,7 @@ impl DaemonProxy {
                 presence_announced: false,
             })),
             tool_router: Self::tool_router(),
+            last_active: Arc::new(AtomicU64::new(now_epoch())),
         }
     }
 
@@ -235,6 +245,7 @@ impl DaemonProxy {
     /// Forward a tool call to the daemon, returning the daemon's raw result value.
     /// On transport error the connection is dropped (next call reconnects).
     async fn forward_raw(&self, tool: &str, params: Value) -> Result<Value, CallToolResult> {
+        self.last_active.store(now_epoch(), Ordering::Relaxed);
         if let Err(e) = self.ensure().await {
             return Err(err_result(&e));
         }
@@ -507,11 +518,40 @@ pub async fn run_daemon_proxy() -> Result<(), Box<dyn std::error::Error + Send +
     use rmcp::{ServiceExt, transport::stdio};
     let server = DaemonProxy::new();
     let presence = server.clone(); // shares the Arc<State>; serve() consumes `server`
+    let watchdog = server.clone();
     let service = server.serve(stdio()).await?;
+    spawn_idle_watchdog(watchdog);
     service.waiting().await?;
     // The agent's stdio session ended — post a best-effort `left:` before exiting.
     presence.announce_left().await;
     Ok(())
+}
+
+/// Reap a proxy whose agent has gone silent. An MCP stdio proxy normally exits only on
+/// stdin-EOF; if the agent *dies* it does (its pipe end closes), but if the agent stays alive
+/// yet **abandons** this proxy — e.g. it re-spawned a fresh MCP server on a config reload and
+/// never closed this one's stdin — `service.waiting()` blocks forever and the process lingers
+/// (the orphaned `mpc-proxy` pile-up). An actively room-using agent calls `meeting.wait_my_turn`
+/// every ~25s (each request stamps `last_active`), so silence past the threshold means it has
+/// been abandoned. Default 2h; `ROZUM_MCP_PROXY_IDLE_SECS=0` disables.
+fn spawn_idle_watchdog(proxy: DaemonProxy) {
+    let secs = std::env::var("ROZUM_MCP_PROXY_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(7200);
+    if secs == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            let idle = now_epoch().saturating_sub(proxy.last_active.load(Ordering::Relaxed));
+            if idle >= secs {
+                std::process::exit(0);
+            }
+        }
+    });
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
