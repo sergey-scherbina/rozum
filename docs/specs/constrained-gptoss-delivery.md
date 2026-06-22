@@ -1,7 +1,42 @@
 # Constrained tool delivery for gpt-oss (harmony) — close the format-guarantee gap
 
-Status: **spec / in progress** (plucky-finch 2026-06-22). Goal: a model that CAN solve the
-task should also reliably DELIVER it. Helps green-matrix `matrix-gptoss-codex-{build,test,debug}`.
+Status: **APPROACH SHELVED — refuted by validation (plucky-finch 2026-06-22). Constraining
+gpt-oss is NOT the lever; reducing codex's load is.** Goal stands: a model that CAN solve the
+task should reliably DELIVER it (`matrix-gptoss-codex-{build,test,debug}`).
+
+## Validation result (the A/B that refuted the approach — kept because it was decisive)
+
+Implemented harmony-aware constrained decode (is_harmony_arch → should_constrain;
+`find_harmony_tool_call`; a harmony `json_region` branch) and A/B-probed it on a **clean**
+tool request (`write_file({path,content})`), N=4, before merging:
+
+| ROZUM_MLX_CONSTRAIN | schema-valid tool calls |
+|---|---|
+| **0 (today, gpt-oss UNconstrained)** | **4/4** |
+| **1 (the constrained change)** | **0/4** — no tool_call; `analysis` leaks as content |
+
+Two findings, both important:
+1. **The change BREAKS gpt-oss.** The constrained loop builds `full_text` via
+   `tokenizer.decode(ids, /*skip_special=*/true)`, which **strips the harmony special tokens**
+   (`<|channel|>`/`<|message|>`/`<|call|>`). So the anchor can't match AND `run_constrained_dense`
+   bypasses gpt-oss's harmony finalization (`parse_harmony`) → the tool call is lost. A correct
+   version would need a harmony-aware constrained loop (preserve specials + parse_harmony) — real,
+   non-trivial plumbing. The impl was dropped (never merged).
+2. **gpt-oss does NOT need the constraint.** Unconstrained, it is **4/4** schema-valid on a clean
+   prompt. So the `codex×gpt-oss` failure is NOT format-incompetence — it is **load-induced drift**
+   (Finding 6: clean 5/5 → +18 KB filler 2/5) plus long-reasoning timeouts. Constraining is at
+   best a costly secondary lever with unproven benefit; on clean prompts it is pure overhead.
+
+## PIVOT — the right lever is LOAD REDUCTION, not constraint
+
+Since the model is competent when not overloaded, "help the model deliver" = **remove the load
+that degrades it.** codex-lean already proves the direction (it lifted codex×gpt-oss 1/5→3/5).
+Next lever (separate task): trim codex's path much harder for local reasoning models — present
+gpt-oss a **minimal write/edit primitive** (the format it nails at 4/4) instead of the ~21 KB V4A
+`apply_patch` prose + 18 tools, and/or **lower its reasoning effort** (codex runs it at "medium";
+gpt-oss reasons 4-8× more than 35B → timeouts). This is gateway/codex territory (the sibling's
+area) — coordinate. Constrained-harmony stays documented here as a possible future lever IF a
+harmony-aware constrained loop is ever built and shown to help *under load*.
 
 ## The finding (root cause, our stack — not just a model ceiling)
 
