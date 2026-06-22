@@ -446,6 +446,35 @@ pub fn committed_by_others_bytes(skip_pid: u32) -> u64 {
     scan_residents(skip_pid).0
 }
 
+/// Update THIS process's published reservation footprint, if a reservation file exists
+/// (i.e. a [`ResidencyGuard`] is held). The convenient wiring API for the in-process
+/// Switchboard (residency-unify): call on each warm load/evict to republish the process's
+/// **total** footprint (primary + Σ warm) so other gateways' [`committed_by_others_bytes`]
+/// account for the warm set, not just the primary reserved at load. Opens the EXISTING
+/// `residents/<pid>` (never creates — a stray file with no flock holder would just be
+/// reaped); write-then-truncate so a concurrent reader during a grow never under-counts in
+/// the memory-increasing direction (see [`ResidencyGuard::update_footprint`]). Best-effort;
+/// a no-op when no reservation is held (gate bypassed / not yet reserved).
+pub fn update_my_reservation(model: &str, footprint_bytes: u64) {
+    use std::io::{Seek, SeekFrom, Write};
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(resident_path(std::process::id()))
+    else {
+        return;
+    };
+    let body = serde_json::to_vec(&ResidentEntry {
+        model: model.to_string(),
+        footprint_bytes,
+    })
+    .unwrap_or_default();
+    let _ = f.seek(SeekFrom::Start(0));
+    let _ = f.write_all(&body);
+    let _ = f.set_len(body.len() as u64);
+    let _ = f.flush();
+}
+
 /// Scan the ledger under the admit lock: reap dead reservations (their `flock` is
 /// free) and sum the live ones (skipping our own pid). Returns `(sum_bytes, holders)`.
 fn scan_residents(skip_pid: u32) -> (u64, Vec<(u32, String)>) {
@@ -819,6 +848,22 @@ mod tests {
         assert_eq!(committed_by_others_bytes(other), 1 * GB, "shrink republished");
         drop(g);
         assert_eq!(committed_by_others_bytes(other), 0, "released on drop");
+        residency_env_clear(&dir);
+    }
+
+    #[test]
+    fn update_my_reservation_republishes_or_noops() {
+        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let dir = residency_env(100 * GB);
+        let other = std::process::id().wrapping_add(1);
+        // No reservation held → no-op (must NOT create a stray unlocked file).
+        update_my_reservation("m", 5 * GB);
+        assert_eq!(committed_by_others_bytes(other), 0, "no-op without a reservation");
+        // With a held reservation, the free fn republishes this process's total.
+        let g = acquire_residency("m", 3 * GB).expect("ok").expect("guard");
+        update_my_reservation("m+warm", 12 * GB);
+        assert_eq!(committed_by_others_bytes(other), 12 * GB, "free-fn republish visible");
+        drop(g);
         residency_env_clear(&dir);
     }
 
