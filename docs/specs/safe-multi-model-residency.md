@@ -134,6 +134,28 @@ assert host peak RAM never exceeds the safe fraction. SAFELY: derive admission f
 calibrated footprints; the worst case to *measure* is one admitted set at a time. Never
 load an un-admitted combination to "see if it reboots."
 
+**Progress (nimble-raven, 2026-06-22):**
+- ✅ **Raw-alloc probe run live** (`mlx_mem_probe`, slot-free): `set_memory_limit=512MB`
+  yet live `active=2048MB` (4× past it) → **`set_memory_limit` is SOFT, confirmed
+  empirically** (matches the source audit); after dropping the arrays `cache` settled to
+  exactly `set_cache_limit` → **`set_cache_limit` is the real cache bound, confirmed**.
+- ✅ **Admission gate validated live (incidental):** while a sibling's 35B was resident
+  (30.7 GB reserved), an attempt to load a 4B was **refused by the gate** ("would
+  overcommit … budget ~23961 MB"), not allowed to co-load → no reboot. The structural
+  lever (admission) demonstrably works under real concurrent load.
+- ⏳ **Model-mode active-vs-cache split: DEFERRED — needs an exclusive slot.** The
+  decisive measurement (is a real model's resident peak active or cache?) requires loading
+  one model alone; the slot has been continuously held by sibling matrix/probe runs. Run
+  when free: `rozum gateway --model <small> --offline` + a few generations, then read
+  `/stats` `mlx_memory_mb {active, peak, cache}` (already exposed) at peak.
+- 🐞 **Footgun found — `footprint-before-download`** (see task): `estimate_model_footprint_bytes`
+  runs *before* `ensure_model_dir`, so an **un-cached** model scans empty → returns the
+  unknown-size sentinel (`u64::MAX/4`) → reserves ~4.4e12 MB for its whole process life,
+  **blocking every other model load** (a tiny uncached 4B blocked a sibling's matrix).
+  Safe (over-reserves) but badly over-conservative. Fix: compute footprint *after* the
+  model dir is resolved/downloaded (size known). Touches the admission call site →
+  coordinate with `sunny-civet` (ledger owner).
+
 ## Findings: MLX cap enforcement — source audit (`sunny-civet`, 2026-06-22)
 
 Auditing the MLX metal allocator C++ (`mlx-sys` … `mlx/backend/metal/allocator.cpp`)

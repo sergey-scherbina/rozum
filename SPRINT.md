@@ -117,12 +117,25 @@ admission *numbers* + per-process cap + validation = `nimble-raven`.
   1024 MB live → active 1024 MB) and `set_cache_limit` bounds the cache (256 MB retained after drop).
   Model mode (header-documented) is nimble-raven's D measurement: split a real model's peak into
   active vs cache under the slot. Spec § Findings updated with the measurement.
-- [ ] **smmr-D-validate** (`nimble-raven`, capstone — needs the model slot, NEXT) — safety harness: prove
-  host peak RAM never exceeds `total × FRAC` across admitted co-residency + swap, AND no self-OOM at the
-  cap (bump B's reserve if so). Never load an un-admitted combo to "see if it reboots." Supersedes paused
-  `validate-gate-live`. NOTE (`sunny-civet`, source audit `9726971`): `set_memory_limit` is SOFT (no hard
-  per-process cap exists); the real bound is `set_cache_limit` (cache only) + admission — D must verify
-  the active term too, not assume the cap hard-bounds reality. Spec § Findings.
+- [~] **smmr-D-validate** (`nimble-raven`, capstone — needs the model slot) — safety harness. NOTE:
+  `set_memory_limit` is SOFT; real bound = `set_cache_limit` (cache) + admission — D verifies the ACTIVE
+  term too. **PROGRESS 2026-06-22 (spec § D Progress):** ✅ raw-alloc probe run live — set_memory_limit
+  confirmed SOFT (active 2048MB > 512MB limit), set_cache_limit confirmed the cache bound; ✅ admission gate
+  validated live (sibling 35B resident → 4B load REFUSED, no reboot). ⏳ REMAINING: model-mode active-vs-cache
+  split (load one small model alone, read `/stats` `mlx_memory_mb` at peak) — deferred, slot continuously
+  held by sibling matrix/probe runs; run when free.
+- [ ] **footprint-before-download** (`nimble-raven`, found via smmr-D 2026-06-22) — `estimate_model_footprint_bytes`
+  runs BEFORE `ensure_model_dir`, so an **un-cached** model scans empty → unknown-sentinel (`u64::MAX/4`) →
+  reserves ~4.4e12 MB for its whole life, **blocking every other model load** (a tiny uncached 4B blocked a
+  sibling's gpt-oss matrix on :8301). Safe (over-reserves) but badly over-conservative. **Fix:** compute the
+  footprint AFTER the model dir is resolved/downloaded (size known) — i.e. move/repeat the
+  reserve+cap after `ensure_model_dir` in `run_gateway`/`run_launch_dedicated`. Touches the admission call
+  site (sunny-civet's ledger + my estimate) → **coordinate before editing.** Done-when: an uncached small
+  model reserves its real size, not the sentinel; doesn't block siblings; cargo check + tests green.
+- [x] **residency-ledger-hardening** (`sunny-civet`) — **DONE `f5cbec2`.** Ledger was already flock-robust;
+  added `reap_orphan_residents()` (reusable reaper for a doctor/maintenance path) + edge tests (PID-reuse
+  overwrite, dead-vs-live reap, non-pid/held files untouched). Additive to `share.rs`, no API change → did
+  not disturb smmr-A/B. Core 93/93. Deferred (riskier, touches `gateway.rs`): release-on-idle-unload.
 - [x] **residency-ledger-hardening** (`sunny-civet`) — **DONE `f5cbec2`.** Ledger was already flock-robust;
   added `reap_orphan_residents()` (reusable reaper for a doctor/maintenance path) + edge tests (PID-reuse
   overwrite, dead-vs-live reap, non-pid/held files untouched). Additive to `share.rs`, no API change → did
