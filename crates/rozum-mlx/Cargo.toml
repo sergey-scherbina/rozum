@@ -1,0 +1,33 @@
+[package]
+name = "rozum-mlx"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# The pure-Rust native MLX runtime (the primary in-process Apple-Metal engine) plus
+# speculative decoding (`specdecode` / `specdecode_backend`). The heavy MLX deps
+# (the vendored oxideai/mlx-rs fork: mlx-rs/mlx-lm/mlx-lm-utils, which build MLX C++
+# from source) are gated behind this crate's `mlx-native` feature, which the binary
+# forwards to. Phase 2 of the workspace split (docs/specs/workspace-split.md).
+# See docs/specs/mlx-native-runtime.md.
+
+[features]
+mlx-native = ["dep:mlx-rs", "dep:mlx-lm", "dep:mlx-lm-utils"]
+
+[dependencies]
+rozum-core = { path = "../rozum-core" }
+rozum-models = { path = "../rozum-models" }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tracing = "0.1"
+
+# The vendored MLX fork, pinned to a fork rev so a clean clone builds reproducibly
+# (same pin as the old root Cargo.toml). mlx-sys builds MLX C++ from source.
+mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "12fac5c0cb077d987aeaec23db2a509e7eb9f21b", optional = true }
+mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "12fac5c0cb077d987aeaec23db2a509e7eb9f21b", optional = true }
+mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "12fac5c0cb077d987aeaec23db2a509e7eb9f21b", optional = true }

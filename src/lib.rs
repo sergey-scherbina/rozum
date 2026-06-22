@@ -7,7 +7,6 @@ pub mod doctor;
 pub mod gateway;
 pub mod mcp_tool_source;
 pub mod memory_store;
-pub mod mlx_native_backend;
 pub mod openai_http;
 pub mod proxy;
 pub mod rag_lite;
@@ -15,8 +14,6 @@ pub mod router;
 pub mod sandbox;
 pub mod service;
 pub mod share;
-pub mod specdecode;
-pub mod specdecode_backend;
 
 // The durable SPI core (backend/concurrency/obs/engine/serving/sampler/constrain/
 // harmony) now lives in the `rozum-core` crate (Phase 0 of the workspace split).
@@ -40,6 +37,7 @@ pub use rozum_models::{hf_hub, model_source, models, modelscope, resident};
 // `rozum::mistralrs_backend::…` / `rozum::x86::…` etc. keep resolving from the binary.
 pub use rozum_gguf::gguf;
 pub use rozum_mistralrs::mistralrs_backend;
+pub use rozum_mlx::{mlx_native_backend, specdecode, specdecode_backend};
 pub use rozum_x86::x86;
 
 #[cfg(feature = "local-models")]

@@ -28,7 +28,7 @@ mistralrs = ["rozum-mistralrs/mistralrs"]
 # Pure-Rust native MLX runtime (no Python, no subprocess). Builds MLX C++ from
 # source via the vendored fork, so it needs the Metal toolchain and is off by
 # default. See docs/specs/mlx-native-runtime.md.
-mlx-native = ["dep:mlx-rs", "dep:mlx-lm", "dep:mlx-lm-utils"]
+mlx-native = ["rozum-mlx/mlx-native"]
 # x86-native: the cross-vendor Vulkan iGPU engine (docs/specs/x86-native-runtime.md).
 # RESERVED for the real engine's deps (a Vulkan binding + SPIR-V toolchain) once P0 picks
 # them. The engine SLOT (`src/x86/`: the `LocalEngine`/`ChatBackend` contract + the
@@ -54,17 +54,10 @@ rozum-models = { path = "crates/rozum-models" }
 rozum-mistralrs = { path = "crates/rozum-mistralrs" }
 rozum-x86 = { path = "crates/rozum-x86" }
 rozum-gguf = { path = "crates/rozum-gguf" }
-
-# Native MLX runtime: the vendored fork of oxideai/mlx-rs (the `mlx-lm` Rust
-# crates). Pinned to a fork rev so a clean clone builds reproducibly without the
-# local `.vendor` worktree (gitignored), exactly like the mistralrs
-# [patch.crates-io] below. To iterate locally, temporarily swap these for
-# `{ path = "../../.vendor/mlx-lm/<crate>" }` (from a worktree) or
-# `{ path = ".vendor/mlx-lm/<crate>" }` (from the repo root), then push the fork
-# and bump the rev. mlx-sys builds MLX C++ from source (cmake + Xcode).
-mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "12fac5c0cb077d987aeaec23db2a509e7eb9f21b", optional = true }
-mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "12fac5c0cb077d987aeaec23db2a509e7eb9f21b", optional = true }
-mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "12fac5c0cb077d987aeaec23db2a509e7eb9f21b", optional = true }
+# The native MLX runtime + speculative decoding (mlx_native_backend/specdecode).
+# The vendored mlx-rs fork deps live in the crate, gated behind its `mlx-native`
+# feature, which the binary forwards to. See docs/specs/mlx-native-runtime.md.
+rozum-mlx = { path = "crates/rozum-mlx" }
 
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

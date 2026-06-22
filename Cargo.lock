@@ -4908,9 +4908,6 @@ dependencies = [
  "crossterm 0.28.1",
  "futures",
  "futures-util",
- "mlx-lm",
- "mlx-lm-utils",
- "mlx-rs",
  "rand 0.8.6",
  "ratatui",
  "reqwest 0.12.28",
@@ -4919,6 +4916,7 @@ dependencies = [
  "rozum-gguf",
  "rozum-meeting",
  "rozum-mistralrs",
+ "rozum-mlx",
  "rozum-models",
  "rozum-x86",
  "schemars 1.2.1",
@@ -5005,6 +5003,25 @@ dependencies = [
  "mistralrs",
  "rozum-core",
  "tokio",
+]
+
+[[package]]
+name = "rozum-mlx"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "mlx-lm",
+ "mlx-lm-utils",
+ "mlx-rs",
+ "rozum-core",
+ "rozum-models",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
