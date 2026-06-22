@@ -136,10 +136,6 @@ admission *numbers* + per-process cap + validation = `nimble-raven`.
   added `reap_orphan_residents()` (reusable reaper for a doctor/maintenance path) + edge tests (PID-reuse
   overwrite, dead-vs-live reap, non-pid/held files untouched). Additive to `share.rs`, no API change → did
   not disturb smmr-A/B. Core 93/93. Deferred (riskier, touches `gateway.rs`): release-on-idle-unload.
-- [x] **residency-ledger-hardening** (`sunny-civet`) — **DONE `f5cbec2`.** Ledger was already flock-robust;
-  added `reap_orphan_residents()` (reusable reaper for a doctor/maintenance path) + edge tests (PID-reuse
-  overwrite, dead-vs-live reap, non-pid/held files untouched). Additive to `share.rs`, no API change → did
-  not disturb smmr-A/B. Core 93/93. Deferred (riskier, touches `gateway.rs`): release-on-idle-unload.
 
 > #### ▶ sunny-civet active tracks (2026-06-22, operator: "запиши всё в спринт и сделай автономно")
 > Discipline: slot-free + non-colliding by default (room MCP down → coordinate via `rozum meetings post`;
