@@ -238,10 +238,13 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
 >   lever is RESIDENCY not location: keep weights pageable (page-cache, NOT Metal-wired via `set_wired_limit`)
 >   and stream each layer's weights into a small Metal residency just-in-time → run models bigger than the
 >   Metal cap (feasibility, not speed — decode goes bandwidth-bound, ~2.5 tok/s for a 70B). Ties to BUG-003
->   (wired memory is the non-evictable part that feeds the jetsam panic). **P0 (de-risk first, verify-before-
->   build):** probe whether MLX wires weights or leaves them pageable — that decides whether streaming recovers
->   ANY headroom on UMA (if MLX is already pageable, #7 is a near non-starter and GGUF/x86 is the bigger-models
->   path instead). P1 per-layer streaming, P2 admission integration, P3 KV. Slot + MLX-forward = engine owner.
+>   (wired memory is the non-evictable part that feeds the jetsam panic). **P0 first-pass DONE** (sunny-civet,
+>   source+vmmap): MLX is NOT hard-wired (`wired_limit_`=0) but COPIES weights to ANONYMOUS Metal buffers
+>   (vmmap 0.6B: 438 MB dirty ≈ weights), not mmap-clean → recoverable headroom EXISTS but needs MLX to
+>   mmap-in-place + per-layer stream (deep change). Verdict: real North-Star effort, NOT a quick win; benefit
+>   on UMA = "droppable not compressible" (eases pressure + bigger models), not "free GPU memory";
+>   bigger-models-NOW = GGUF/x86. REMAINING: vmmap dirty/clean split on a 27B for the precise number (slot);
+>   P1 per-layer streaming, P2 admission integration, P3 KV. Slot + MLX-forward = engine owner.
 
 - **INTERIM SAFETY:** the interim floor is dropped; smmr-A caps each process. CAVEAT (`sunny-civet`,
   `9726971`): the cap is via `set_memory_limit` which is SOFT — see spec § Findings; co-residency safety
