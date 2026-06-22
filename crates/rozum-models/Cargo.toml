@@ -1,0 +1,19 @@
+[package]
+name = "rozum-models"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# Model catalog + sourcing + residency: the model registry (`models`), source
+# resolvers (`model_source`, `hf_hub`, `modelscope`) and on-disk residency
+# (`resident`). A pure leaf — no dependency on the SPI core or any engine; the
+# engines (rozum-mlx/-gguf/…) and the binary depend on it. Phase 2 of the
+# workspace split (docs/specs/workspace-split.md).
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tempfile = "3"

@@ -46,6 +46,9 @@ rozum-meeting = { path = "crates/rozum-meeting" }
 # harmony). Phase 0 of the workspace split; the `rozum` crate re-exports its
 # modules under their original paths in src/lib.rs. `local-models` forwards here.
 rozum-core = { path = "crates/rozum-core" }
+# Model catalog / sourcing / residency (Phase 2). Pure leaf; re-exported under
+# its original module paths in src/lib.rs.
+rozum-models = { path = "crates/rozum-models" }
 llama-cpp-2 = { version = ">=0.1.100", features = ["metal"], optional = true }
 mistralrs = { version = "0.8.1", features = ["metal"], optional = true }
 

@@ -4919,6 +4919,7 @@ dependencies = [
  "rmcp",
  "rozum-core",
  "rozum-meeting",
+ "rozum-models",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -4977,6 +4978,18 @@ dependencies = [
  "tracing",
  "tui-textarea",
  "uuid 1.23.2",
+]
+
+[[package]]
+name = "rozum-models"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

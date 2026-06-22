@@ -6,18 +6,13 @@ pub mod config;
 pub mod doctor;
 pub mod gateway;
 pub mod gguf;
-pub mod hf_hub;
 pub mod mcp_tool_source;
 pub mod memory_store;
 pub mod mistralrs_backend;
 pub mod mlx_native_backend;
-pub mod model_source;
-pub mod models;
-pub mod modelscope;
 pub mod openai_http;
 pub mod proxy;
 pub mod rag_lite;
-pub mod resident;
 pub mod router;
 pub mod sandbox;
 pub mod service;
@@ -38,6 +33,11 @@ pub(crate) use rozum_core::backend;
 // paths so `crate::meeting::…` / `crate::tui::…` (and `rozum::meeting::…` from the
 // binary) keep resolving unchanged.
 pub use rozum_meeting::{discord, meeting, telegram, tui, web};
+
+// Model catalog / sourcing / residency now live in the `rozum-models` crate
+// (Phase 2). Re-export under their original paths so `crate::model_source::…`
+// etc. resolve unchanged.
+pub use rozum_models::{hf_hub, model_source, models, modelscope, resident};
 
 #[cfg(feature = "local-models")]
 pub use backend::CandleBackend;
