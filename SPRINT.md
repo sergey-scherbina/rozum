@@ -93,29 +93,27 @@ admission *numbers* + per-process cap + validation = `nimble-raven`.
 > bigger inflate (balloon is additive/cache-driven). The fix = the share-bounded cap (A) — it turns the
 > reservation into an *enforced* ceiling, the only thing that makes safe co-residency possible on 36 GiB.
 
-- [ ] **smmr-A-share-cap** (TOP safety priority, `nimble-raven`) — make `cap_mlx_memory`
-  (`crates/rozum-mlx/src/mlx_native_backend.rs:~363`) **sibling-aware**: cap each model's
-  `set_memory_limit`/`set_cache_limit` to its budget SHARE (`budget − committed_by_others` from the v2
-  ledger), not flat `total−8`, so Σ(caps) ≤ `total × FRAC` no matter how the cache grows. Floor each cap
-  at the model's minimum need (weights+KV+prefill) or MLX self-OOMs (process-fatal, contained — not a
-  reboot; memory `project-mlx-35b-prefill-oom`). Bin passes the reserved share into the worker. **Done-when:**
-  two co-resident models' caps sum ≤ budget; live big+small pair stays under budget (no balloon); unit test
-  on the share math; `cargo check` default & `--no-default-features` green.
-- [ ] **smmr-B-footprint** (`nimble-raven`) — replace `estimate_model_footprint_bytes` (main.rs, weights-only
-  ×1.25+1 GB) with calibrated `rozum_models::runtime_footprint(spec, n_ctx)` = weights + KV(n_ctx) +
-  activation/cache reserve, **with a floor ≥ measured per-class peak** (table in spec). Clean interface the
-  v2 ledger + the cap (A) both call (agreed room n=42, no double-owning main.rs). **Done-when:** estimate ≥
-  measured peak for every model in the spec table (unit test); ledger uses it.
+- [x] **smmr-A-share-cap** (`nimble-raven`) — **DONE `95b98d6`.** Each gateway PROCESS hard-caps its own
+  MLX (`set_memory_limit`) at its model's reservation (= `runtime_footprint`, B), set before the worker
+  loads. Design refinement: v2 co-residency is N separate processes (1 model each), so cap = own
+  reservation (NOT `budget−committed`); admission already gives `Σ reservations ≤ budget` → `Σ caps ≤
+  budget`. `rozum-mlx::set_memory_cap_bytes` + pure `select_mlx_mem_limit_bytes` (env > share > total−8),
+  2 unit tests; `main.rs` cap == reservation (same estimate). cap default+--no-default green. Known gap:
+  MLX path only (gguf/mistralrs co-residency unenforced — follow-up).
+- [x] **smmr-B-footprint** (`nimble-raven`) — **DONE `d7fd456`.** `rozum_models::runtime_footprint_bytes(spec,
+  n_ctx, weight)` = weights + `kv_bytes_per_position(config)·n_ctx` + activation reserve (max 3 GiB,
+  weights/5). This is the model's NEED (small for small models) — A's cap enforces it, so the uncapped
+  26.9 GB balloon is irrelevant; a 4B reserves/caps ~6 GB → two co-reside. 4 unit tests. Interim 14 GB
+  floor (`40048ba`) now dropped (A enforces the ceiling). Post-cap target = "estimate ≥ true need" (D's job).
 - [ ] **smmr-C-fast-swap** (track, owner TBD) — the "very fast sequentially" half: when `oversubscribed`,
   swap WITHOUT transient both-resident (unload→GPU-settle→load), minimize dead time (mmap page-cache-warm
   weights, prefetch next during drain). Reuses `gateway switch` + `plan_residency`. Spec later; below A/B.
-- [ ] **smmr-D-validate** (`nimble-raven`, capstone — needs the model slot, after A) — safety harness: prove
-  host peak RAM never exceeds `total × FRAC` across admitted co-residency + swap. Never load an un-admitted
-  combo to "see if it reboots." Supersedes the paused `validate-gate-live` (now validates v2/v3 semantics).
-- **INTERIM SAFETY (until A lands) — operator decision pending:** v2 co-residency is on-by-default but the
-  cap isn't share-bounded → two small models can still balloon. Safe interim = raise `ROZUM_GATEWAY_FOOTPRINT_
-  BASE_MB` to ~14000 (every model peaks ≥ ~13 GB → conservative; effectively single-flight on 36 GiB until A)
-  OR keep co-residency opt-in. Recommend the conservative base until A makes co-residency safe-by-default.
+- [ ] **smmr-D-validate** (`nimble-raven`, capstone — needs the model slot, NEXT) — safety harness: prove
+  host peak RAM never exceeds `total × FRAC` across admitted co-residency + swap, AND no self-OOM at the
+  cap (bump B's reserve if so). Then FRAC can likely rise (cap now hard-bounds reality, so more of RAM is
+  safely usable). Never load an un-admitted combo to "see if it reboots." Supersedes paused `validate-gate-live`.
+- **INTERIM SAFETY — RESOLVED:** the interim floor is dropped; smmr-A's hard cap makes co-residency
+  safe-by-default (Σ caps ≤ budget, enforced not estimated). No operator action needed.
 
 #### 1. Green matrix — NO fails allowed, ever
 

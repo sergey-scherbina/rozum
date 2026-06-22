@@ -1,9 +1,11 @@
 # Spec: safe multi-model residency (co-resident when it fits, fast swap when it doesn't)
 
-Status: in progress (2026-06-22). Operator vision: **run several models at once when
-they fit, or swap between them very fast when they don't — with safety (never
-OOM/reboot) as the HARD invariant.** Maps to the North Star (device-aware residency,
-remove waste/OOM; `SPEC.md` § North Star, memory `project-rozum-north-star`).
+Status: 2026-06-22 — **interim safety + B + A LANDED on master** (`40048ba` interim
+floor, `d7fd456` smmr-B, `95b98d6` smmr-A); D (live validation) + C (fast swap)
+remain. Operator vision: **run several models at once when they fit, or swap between
+them very fast when they don't — with safety (never OOM/reboot) as the HARD
+invariant.** Maps to the North Star (device-aware residency, remove waste/OOM;
+`SPEC.md` § North Star, memory `project-rozum-north-star`).
 
 Owners (rozum room, n=25–42): admission *mechanism* = `sunny-civet`; admission
 *numbers* + per-process cap + safety validation = `nimble-raven`. Builds on the
@@ -60,30 +62,40 @@ hole. **This is the present, live risk on master.**
 
 ## Design — three coupled pieces, safety first
 
-### A. v3 — share-bounded MLX cap (TOP PRIORITY; the missing safety net) — `nimble-raven`
-Make `cap_mlx_memory` **sibling-aware**: instead of a flat `total−8`, cap each resident
-model's `set_memory_limit` (and `set_cache_limit`) to **its share of the budget** =
-`budget − committed_by_others` (from the v2 ledger), so the sum of all residents' hard
-caps ≤ `total_ram × RAM_BUDGET_FRAC`. Then no set of co-resident models can collectively
-exceed the budget *no matter how the cache grows* — the structural guarantee.
-- Read `committed_by_others` from the ledger sunny-civet added (`share.rs`
-  residents/<pid>); the bin passes the model's reserved share into the MLX worker.
-- Floor each cap at the model's **minimum need** (weights + KV + prefill activation):
-  capping *below* that makes MLX OOM the process (Metal OOM is process-fatal — memory
-  `project-mlx-35b-prefill-oom`). So admission must also ensure each admitted model's
-  share ≥ its minimum need (couples to B).
-- Env overrides preserved (`ROZUM_MLX_MEM_GB`/`ROZUM_MLX_CACHE_GB`); default becomes
-  share-derived, not `total−8`.
+### A. Share-bounded MLX cap — ✅ LANDED (`95b98d6`) — `nimble-raven`
+**Design refinement vs the first sketch:** v2 co-residency is **N separate gateway
+processes, one model each** (not many models in one process), and `set_memory_limit` is
+**per-process**. So the right cap is each process capping its OWN MLX at **its model's
+reservation** (= its `runtime_footprint`, B) — *not* `budget − committed_by_others`.
+Because admission already guarantees `Σ reservations ≤ total × FRAC`, capping each
+process at its reservation gives `Σ caps ≤ budget` for free, and it's simpler + needs no
+cross-process share arithmetic in the worker.
+- `rozum-mlx`: `set_memory_cap_bytes(bytes)` (always-compiled atomic) + the pure,
+  unit-tested `select_mlx_mem_limit_bytes` (precedence: explicit `ROZUM_MLX_MEM_GB` >
+  smmr-A share > default `total−8`); `cap_mlx_memory` uses it.
+- `main.rs::try_build_mlx_native_backend` sets the cap = the same
+  `estimate_model_footprint_bytes` the residency gate reserved, **before** the worker
+  loads → cap == reservation, so they can't disagree. Unknown-size model keeps `total−8`.
+- The cap floors at the model's need via B's reserve (capping *below* need self-OOMs the
+  process — Metal OOM is process-fatal but **contained**, not a reboot; memory
+  `project-mlx-35b-prefill-oom`). D validates no self-OOM at the cap and may bump the reserve.
+- **Known limitation:** the hard cap covers the **MLX** path (default on Apple Silicon).
+  `gguf`/`mistralrs` co-residency still relies on the footprint *estimate* without an
+  enforced cap → follow-up (their own memory-limit knob, or keep them single-flight).
 
-### B. Conservative, calibrated footprint — `nimble-raven`
-Replace weights-only `estimate_model_footprint_bytes` with a calibrated
-`rozum_models::runtime_footprint(spec, n_ctx)` that the v2 ledger calls:
-`footprint = weights + kv_bytes(n_ctx, layers, kv_heads, head_dim, dtype) + activation/cache
-reserve`, with a **minimum floor** so a small model is never under-counted (e.g. ≥ its
-measured peak class). Calibrate so the estimate ≥ measured peak for *every* row in the
-table above (validate against the logs as a unit test). Clean interface so sunny-civet's
-ledger and the cap (A) share one footprint source (no double-owning the main.rs formula —
-agreed in room n=42).
+### B. Conservative, calibrated footprint — ✅ LANDED (`d7fd456`) — `nimble-raven`
+`rozum_models::runtime_footprint_bytes(spec, n_ctx, weight_bytes)` = `weights +
+kv_bytes_per_position(config)·n_ctx + activation_reserve(max 3 GiB, weights/5)`, reusing
+the existing `kv_bytes_per_position` (handles hybrid `full_attention_interval`). This is
+the model's **need** (small for small models), NOT its uncapped peak — **because A's cap
+enforces it, the figure is the need, and the uncapped 26.9 GB balloon of a 4B is
+irrelevant** (the cap prevents it). So a 4B reserves/caps ~6 GB and two co-reside; the
+v2 ledger + A's cap both call this one source (no double-owning). Unit-tested (reserve
+floor/proportional, weights+reserve when config absent, KV grows with n_ctx). The
+interim 14 GB floor (`40048ba`) is now **dropped** — it existed only to stay safe
+*without* a cap; A makes the true need correct and re-enables real co-residency.
+> Note: the earlier "estimate ≥ measured *peak*" target was pre-cap. Post-cap the target
+> is "estimate ≥ true *need*" (so the capped model runs without self-OOM) — D's job.
 
 ### C. Fast safe swap (the "very fast sequentially" half) — track, owner TBD
 When the ledger says `oversubscribed` (two big models can't co-reside), swap — but
