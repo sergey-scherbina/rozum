@@ -2195,6 +2195,55 @@ fn codex_lean_keep(name: &str) -> bool {
     KEEP_STEMS.iter().any(|s| n.contains(s))
 }
 
+/// A short, focused replacement for codex's ~21 KB system prompt, for load-sensitive local
+/// reasoning models. The load bisection (`docs/specs/constrained-gptoss-delivery.md`) proved
+/// CONTEXT SIZE is the DOMINANT breaker of tool-call delivery on gpt-oss — more than the V4A
+/// format or tool count: with the easy `write_file` tool, a 30 KB prompt drops it to 0/3 (it
+/// emits empty content, no tool call), while a ~20-byte prompt is 3/3. `codex_lean_keep` trims
+/// only TOOLS; this trims the INSTRUCTIONS too. The tool *schemas* (kept by lean) carry the
+/// argument shapes, so a short prompt suffices.
+const LEAN_CODING_PROMPT: &str = "You are a coding agent working in a sandboxed shell, already \
+in the project's working directory. Use the provided tools to complete the user's task directly. \
+Run shell commands with the exec_command tool — including creating files (e.g. \
+`cat > path <<'EOF'` … `EOF`), building, and running. Edit an existing file with apply_patch. \
+Do the task, verify it works, then reply with one short confirmation line and stop. Do not ask \
+for confirmation or permission.";
+
+/// Models whose tool-calling collapses under a large context (so they get [`LEAN_CODING_PROMPT`]
+/// instead of codex's full instructions). gpt-oss reasons 4-8× more than Qwen3.6-35B and emits no
+/// tool call at all under codex's 21 KB+ prompt; the capable tier (35B) is fine with the full
+/// instructions (4/5) and is deliberately excluded so it is never regressed.
+fn model_is_load_sensitive(model_id: &str) -> bool {
+    let m = model_id.to_ascii_lowercase();
+    m.contains("gpt-oss") || m.contains("gpt_oss")
+}
+
+/// The instructions to actually send for a codex `/v1/responses` request: codex's own when the
+/// trim doesn't apply, or [`LEAN_CODING_PROMPT`] when it does. Gated by `ROZUM_CODEX_LEAN` (shares
+/// the tool-lean switch) AND `model_is_load_sensitive`; override with `ROZUM_CODEX_LEAN_PROMPT`
+/// (`0`/`off` = never trim, anything else = always trim). Behaviour-preserving for non-gpt-oss
+/// models (returns codex's instructions verbatim).
+fn codex_effective_instructions(model_id: &str, original: Option<&str>) -> Option<String> {
+    let force = std::env::var("ROZUM_CODEX_LEAN_PROMPT").ok();
+    let lean_tools = std::env::var("ROZUM_CODEX_LEAN").map(|v| v != "0").unwrap_or(true);
+    if lean_prompt_on(model_id, force.as_deref(), lean_tools) {
+        Some(LEAN_CODING_PROMPT.to_string())
+    } else {
+        original.map(str::to_string)
+    }
+}
+
+/// Pure decision for [`codex_effective_instructions`] (env split out so it is race-free to test).
+/// `force` is `ROZUM_CODEX_LEAN_PROMPT` (`0`/`off` = never, any other value = always); when unset,
+/// the trim follows the tool-lean switch AND model load-sensitivity.
+fn lean_prompt_on(model_id: &str, force: Option<&str>, lean_tools: bool) -> bool {
+    match force {
+        Some("0" | "false" | "off") => false,
+        Some(_) => true,
+        None => lean_tools && model_is_load_sensitive(model_id),
+    }
+}
+
 fn responses_tools_to_internal(tools: &[RespTool]) -> Vec<ToolDef> {
     // Default ON: a local model drowns in codex's 18-tool / 21 KB surface (validated: lifts the
     // codex `fix` reds 0→5/5 with Method B). Disable with `ROZUM_CODEX_LEAN=0`.
@@ -3108,7 +3157,18 @@ async fn responses_handler(
         Ok(l) => l,
         Err(resp) => return resp,
     };
-    let messages = responses_input_to_internal(req.instructions.as_deref(), &req.input);
+    // Trim codex's ~21 KB instructions to a short focused prompt for load-sensitive models
+    // (gpt-oss) — the bisection-proven dominant breaker of tool delivery. Verbatim for 35B et al.
+    let effective_instructions = codex_effective_instructions(&lease.model_id, req.instructions.as_deref());
+    if effective_instructions.as_deref() != req.instructions.as_deref() {
+        tracing::debug!(
+            model = %lease.model_id,
+            from_bytes = req.instructions.as_deref().map(str::len).unwrap_or(0),
+            to_bytes = effective_instructions.as_deref().map(str::len).unwrap_or(0),
+            "codex-lean: replaced instructions with the focused coding prompt"
+        );
+    }
+    let messages = responses_input_to_internal(effective_instructions.as_deref(), &req.input);
     // Did codex offer `apply_patch` as a function tool for this request? If not, a model that calls
     // it as a function (gpt-oss) would hit "unsupported call: apply_patch" — so we re-route those to
     // exec_command. When codex DID offer it as a tool, the call is legit and we leave it alone.
@@ -4045,6 +4105,28 @@ pub async fn serve_on(
 mod tests {
     use super::*;
     use crate::backend::{ChatEvent, HelloBackend, StopReason};
+
+    #[test]
+    fn codex_lean_prompt_trims_only_load_sensitive_models() {
+        // gpt-oss is load-sensitive; the capable tier (35B) is not.
+        assert!(model_is_load_sensitive("mlx-community:gpt-oss-20b-MXFP4-Q4"));
+        assert!(!model_is_load_sensitive("mlx-community:Qwen3.6-35B-A3B-4bit"));
+        // Default (no override): trim ON for gpt-oss when tool-lean is on, OFF for 35B.
+        assert!(lean_prompt_on("mlx-community:gpt-oss-20b-MXFP4-Q4", None, true));
+        assert!(!lean_prompt_on("mlx-community:Qwen3.6-35B-A3B-4bit", None, true));
+        // Tool-lean off → no prompt trim either (whole codex-lean disabled).
+        assert!(!lean_prompt_on("mlx-community:gpt-oss-20b-MXFP4-Q4", None, false));
+        // Explicit override wins both ways, regardless of model.
+        assert!(!lean_prompt_on("mlx-community:gpt-oss-20b-MXFP4-Q4", Some("0"), true));
+        assert!(lean_prompt_on("mlx-community:Qwen3.6-35B-A3B-4bit", Some("1"), false));
+        // The effective-instructions wrapper: 35B keeps codex's verbatim (no regression).
+        let big = "x".repeat(21_000);
+        assert_eq!(
+            codex_effective_instructions("mlx-community:Qwen3.6-35B-A3B-4bit", Some(&big))
+                .as_deref(),
+            Some(big.as_str())
+        );
+    }
 
     #[test]
     fn determinism_off_is_byte_for_byte_passthrough() {

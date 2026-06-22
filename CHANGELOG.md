@@ -1,5 +1,27 @@
 # Changelog
 
+## gateway — codex instruction-lean for load-sensitive models (help gpt-oss deliver)
+Completed: 2026-06-22
+
+A controlled load bisection (direct to gpt-oss) isolated WHY a capable model can solve a task
+but not deliver it under codex: the dominant breaker is **context SIZE, not the V4A format**.
+With the easy `write_file` tool, a 30 KB system prompt drops gpt-oss to **0/3** (it emits empty
+content, no tool call); a ~20-byte prompt is **3/3**. The V4A format (1/3) and tool count (2/3)
+are secondary. Codex's real request: **instructions = 20.9 KB + input = 13 KB + 18 tools** — and
+`codex_lean_keep` trimmed only the TOOLS, never the 20.9 KB instructions (the dominant load).
+
+- `codex_effective_instructions(model_id, original)` in `responses_handler` replaces codex's
+  instructions with a short focused `LEAN_CODING_PROMPT` **only for load-sensitive models**
+  (`model_is_load_sensitive` = gpt-oss). The capable tier (Qwen3.6-35B, fine with the full 21 KB)
+  keeps codex's instructions **verbatim → no regression by construction**. The kept tool schemas
+  carry the arg shapes, so a short prompt suffices.
+- Gated by `ROZUM_CODEX_LEAN` (shares the tool-lean switch); override with `ROZUM_CODEX_LEAN_PROMPT`
+  (`0` = never trim, `1` = always). Pure decision `lean_prompt_on` unit-tested (race-free);
+  gateway suite 75/75; `--no-default-features` bin build green.
+- Refutes the alternative (constrained-decode for gpt-oss): that A/B-broke gpt-oss (0/4) and is
+  unneeded — gpt-oss is format-competent unconstrained (4/4 clean); the issue was always LOAD.
+  Spec `docs/specs/constrained-gptoss-delivery.md`.
+
 ## gateway — memory-pressure watchdog: graceful shedding before the jetsam reboot (BUG-003 runtime half)
 Completed: 2026-06-22
 

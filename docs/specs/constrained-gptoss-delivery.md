@@ -122,9 +122,17 @@ V4A format (1/3) and tool count (2/3) are secondary. Captured codex's real reque
 
 **The fix, proven by the bisection: trim the INSTRUCTIONS, not just the tools.** `codex_lean_keep`
 today filters only TOOLS (keeps exec/shell/apply_patch stems, drops the meta-tools) — it never
-touches codex's 20.9 KB `instructions`, which the bisection shows is the dominant load. Replacing
-those instructions with a short focused coding prompt (≈ the 23 B control) for load-sensitive local
-models should recover gpt-oss toward 3/3 (the control proves a minimal-context gpt-oss nails it).
-Must be **model-aware / gated** (Qwen3.6-35B works WITH the full 21 KB at 4/5, so don't regress it)
-and must preserve enough protocol for the kept tools — gateway/codex territory, coordinate with the
-sibling. This supersedes the constrained-decode approach above as the right lever.
+touches codex's 20.9 KB `instructions`, which the bisection shows is the dominant load.
+
+### IMPLEMENTED (plucky-finch 2026-06-22)
+
+`codex_effective_instructions(model_id, original)` in `responses_handler` replaces codex's
+instructions with a short focused `LEAN_CODING_PROMPT` (~0.4 KB: "use exec_command for shell incl.
+`cat > path <<'EOF'`, apply_patch to edit, do it + verify + stop") **only for load-sensitive
+models** (`model_is_load_sensitive` = gpt-oss). The capable tier (Qwen3.6-35B, fine with the full
+21 KB at 4/5) keeps codex's instructions **verbatim → no regression by construction.** The tool
+*schemas* (kept by `codex_lean_keep`) carry the arg shapes, so a short prompt suffices. Gated by
+`ROZUM_CODEX_LEAN` (shares the tool-lean switch); override with `ROZUM_CODEX_LEAN_PROMPT` (`0`=never
+trim, `1`=always). Pure decision `lean_prompt_on` is unit-tested (race-free); gateway suite 75/75.
+**Live validation (codex×gpt-oss×build 0/3 → ?) pending a gpt-oss slot — fix-forward on the result.**
+This supersedes the constrained-decode approach above as the right lever.
