@@ -1,5 +1,26 @@
 # Changelog
 
+## gateway — codex create: handle "whole file as a fake Update-File patch"
+Completed: 2026-06-22
+
+One more gpt-oss create shape: a brand-new file (esp. nested `src/main.rs`)
+dumped as `*** Update File: <path>` whose body after `@@` is the file's RAW
+content with NO diff markers (often inside a broken `apply_patch <<'…'` heredoc
+that runs bare → nothing lands). `parse_bare_file_block` detects it (Update File
++ body, zero `+`/`-` markers) and `apply_patch_block_to_fuzz` creates the file
+from the verbatim body via the shared `synth_create_command` (absence-guarded,
+indentation preserved). A genuine diff bails out to None → patch path unchanged.
+
+Honest scope note: this is one more catch in a long tail. gpt-oss emits the
+nested-file create as an OPEN-ENDED variety of malformations (bare-Update-File,
+nested-heredoc `cat <<'EOF'…cat>…<<'EOF'` with delimiter collision, chain-of-
+thought leaked into tool args, bare `apply_patch`). The gateway can catch them
+one by one, but reliable codex×gpt-oss create-from-scratch is not reachable by
+gateway translation alone — it's the model wrestling codex's V4A protocol (the
+content it produces is valid Rust; the *delivery* is what degrades, far more than
+under claude's trivial `Write({path,content})`). See docs/matrix-failure-analysis.md
+Finding 5.
+
 ## gateway — codex create-from-scratch: handle patch-based create shapes
 Completed: 2026-06-22
 

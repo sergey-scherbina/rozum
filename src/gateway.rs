@@ -1679,6 +1679,43 @@ fn parse_create_directives(block: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Detect a "whole file dumped as a fake patch": `*** Update File: <path>` whose body (after the
+/// `@@`) is the file's RAW content with NO diff markers at all — gpt-oss does this for a brand-new
+/// file (esp. a nested `src/main.rs`), often inside a broken `apply_patch <<'…'` heredoc that runs
+/// bare and lands nothing. There is no diff to apply; the body verbatim IS the intended file, so we
+/// create it (when absent). Returns None the moment a real `+`/`-` marker appears — a genuine diff
+/// belongs to the patch path, untouched. Structural lines (`@@`, `+++ `, `--- `) are skipped.
+fn parse_bare_file_block(block: &str) -> Option<(String, String)> {
+    let mut path: Option<String> = None;
+    let mut content: Vec<&str> = Vec::new();
+    let mut started = false;
+    for ln in block.lines() {
+        if let Some(p) = ln.strip_prefix("*** Update File:") {
+            path = Some(p.trim().to_string());
+            started = true;
+            content.clear();
+        } else if ln.starts_with("*** ") {
+            if started && !content.is_empty() {
+                break; // End Patch / next directive closes this file's content
+            }
+            started = false;
+        } else if started {
+            if ln.starts_with("@@") || ln.starts_with("+++ ") || ln.starts_with("--- ") {
+                continue; // structural, skip
+            }
+            if ln.starts_with('+') || ln.starts_with('-') {
+                return None; // real diff markers → not bare content; leave it to the patch path
+            }
+            content.push(ln);
+        }
+    }
+    let path = path?;
+    if content.is_empty() {
+        return None;
+    }
+    Some((path, content.join("\n")))
+}
+
 /// Convert an unescaped V4A patch block (`*** Begin Patch` … `*** End Patch`, or a bare
 /// `*** Update File:` + hunk) into a `patch -p0 --fuzz=3 -N --forward` heredoc — a small
 /// ±3-context match surface that standard `patch` applies reliably and *idempotently* (`-N`:
@@ -1691,6 +1728,11 @@ fn apply_patch_block_to_fuzz(block: &str) -> Option<String> {
     let creates = parse_create_directives(block);
     if !creates.is_empty() {
         return Some(creates.iter().map(|(p, c)| synth_create_command(p, c)).collect());
+    }
+    // A whole new file dumped as a fake `*** Update File:` patch (bare body, no diff markers) →
+    // create it from the verbatim body. (A real diff bails out of parse_bare_file_block to None.)
+    if let Some((p, content)) = parse_bare_file_block(block) {
+        return Some(synth_create_command(&p, &content));
     }
     let mut path: Option<String> = None;
     let mut body: Vec<String> = Vec::new();
@@ -4728,6 +4770,29 @@ mod tests {
                      *** Create File: src/main.rs\nfn main() {}\n*** End Patch";
         let m = apply_patch_block_to_fuzz(multi).expect("multi");
         assert!(m.contains("cat > 'Cargo.toml'") && m.contains("cat > 'src/main.rs'"), "multi: {m}");
+    }
+
+    #[test]
+    fn bare_update_file_block_creates_from_verbatim_body() {
+        // gpt-oss dumps a whole NEW file as a fake `*** Update File:` with NO diff markers (seen for
+        // src/main.rs, inside a broken `apply_patch <<'…'` heredoc that runs bare → nothing lands).
+        // The body verbatim IS the file → create it; indentation must be preserved (not stripped).
+        let block = "*** Begin Patch\n*** Update File: src/main.rs\n@@\nfn main() {\n    \
+                     let a: Vec<String> = std::env::args().collect();\n    \
+                     println!(\"{}\", a[1].chars().rev().collect::<String>());\n}\n*** End Patch";
+        let cmd = apply_patch_block_to_fuzz(block).expect("bare body handled");
+        assert!(cmd.contains("cat > 'src/main.rs'"), "no create-write: {cmd}");
+        assert!(cmd.contains("[ -e 'src/main.rs' ] ||"), "not absence-guarded: {cmd}");
+        assert!(!cmd.contains("patch -p0"), "must not patch an absent file: {cmd}");
+        assert!(cmd.contains("    let a: Vec<String>"), "indentation not preserved: {cmd}");
+        assert!(!cmd.contains("*** "), "patch directive leaked into file: {cmd}");
+
+        // A GENUINE diff (real +/- markers) must NOT be hijacked by the bare-body path.
+        let edit = "*** Begin Patch\n*** Update File: src/main.rs\n@@\n \
+                    fn reverse(s: &str) -> String {\n-    s.to_string()\n+    s.chars().rev().collect()\n }\n*** End Patch";
+        assert!(parse_bare_file_block(edit).is_none(), "real diff wrongly taken as bare body");
+        let ec = apply_patch_block_to_fuzz(edit).expect("edit");
+        assert!(ec.starts_with("patch -p0 --fuzz="), "edit must stay on the patch path: {ec}");
     }
 
     #[test]
