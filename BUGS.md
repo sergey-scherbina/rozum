@@ -5,6 +5,33 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-002 — `mcp-proxy` processes pile up (orphaned when an agent re-spawns its MCP)
+
+- **Status:** fixed (`c0117bd` on `feature/meeting-web-pwa-ssc`, worktree `../rozum-meeting-pwa`;
+  cargo check/--tests clean + a functional idle test). Not yet on master.
+- **Reporter:** operator ("почему у меня запущено три процесса розума?" → found ~6 stale
+  `mcp-proxy`/`mpc-proxy`, some 4 days old).
+- **Severity:** P3 — resource leak / clutter, not a correctness break.
+
+**Symptom.** Several `rozum mcp-proxy` (and a typo'd-config `rozum mpc-proxy`) stdio bridges
+linger for days, tiny RSS, doing no work. One live claude session held BOTH an old `mpc-proxy`
+(4 d) and a working `mcp-proxy` (1.7 d) — a superseded duplicate that never exited.
+
+**Root cause.** An MCP stdio proxy exits only on **stdin-EOF**. Parent *death* is fine (the
+agent's pipe end closes → EOF → exit), which is why the lingering ones all had *live* parents.
+The gap is parent **abandonment**: the agent stays alive but re-spawns a fresh MCP server on a
+config reload / binary change and **never closes the old proxy's stdin**, so `service.waiting()`
+blocks forever. (`mpc-proxy` is just a stale typo in an agent's MCP config — clap accepts the
+abbreviation and runs `mcp-proxy` anyway; it marks the old entry, it is not the cause.)
+
+**Fix.** Idle watchdog in `src/meeting/daemon_proxy.rs`: `forward_raw` stamps `last_active` on
+every agent request; a 60 s-tick task exits the proxy once silent past
+`ROZUM_MCP_PROXY_IDLE_SECS` (default 2 h, `0` disables). An actively room-using agent calls
+`meeting.wait_my_turn` ~every 25 s, so only a genuinely-abandoned proxy goes silent that long.
+Stale ones were also killed by hand at report time.
+
+---
+
 ## BUG-001 — agentic matrix reboots the Mac (kernel panic on gateway teardown)
 
 - **Status:** done (harness-side fix validated across inter-model teardowns on master, 2026-06-18)
