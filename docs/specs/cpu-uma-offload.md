@@ -65,10 +65,26 @@ when admission would otherwise refuse the model. For models that fit, never stre
 
 ## Phased plan
 
-- **P0 — residency probe (de-risk first; mostly slot-free, extends `mlx_mem_probe`).** With
-  a model loaded, read `get_active_memory` vs the wired set and test `set_wired_limit(small)`:
-  does peak Metal footprint drop (weights pageable) or not (weights wired)? Decides whether
-  streaming can recover headroom at all, and by how much. **Gate:** a measured headroom number.
+- **P0 — residency probe (de-risk first). ✅ FIRST PASS DONE — `sunny-civet`.** Source + `vmmap`:
+  - **Not hard-wired by default.** MLX's `wired_limit_` defaults to **0** (`allocator.h:71`);
+    `set_wired_limit(n)` does `residency_set_.resize(n)`. Every buffer is inserted into the
+    residency set, but with target 0 it is not force-pinned — so the weights are **compressible
+    under pressure, not hard-wired**. (Good: they don't *hard*-pin RAM; bad: compression is the
+    expensive vm-compressor path that fed the BUG-003 panic.)
+  - **But weights are ANONYMOUS Metal buffers, not mmap-file-backed-clean.** `vmmap` of a live
+    Qwen3-0.6B gateway: physical footprint **438 MB ≈ the weights**, and it is **dirty/anonymous**
+    (not clean file-backed). So MLX **copies** weights into device buffers rather than mapping the
+    safetensors in place — dirty anonymous pages can be *compressed* but not *dropped*.
+  - **⇒ Verdict: there IS recoverable headroom (the anonymous weight buffers), but realizing it is
+    a deep change** — MLX would have to mmap the safetensors **in place** (clean, droppable pages)
+    and bring each layer resident just-in-time, instead of copying everything to anonymous Metal
+    buffers up front. So #7 is a genuine North-Star effort (run bigger-than-cap models; turn
+    compressible weight memory into *droppable*), **not a quick win**, and its real benefit on UMA
+    is "droppable instead of compressible" (eases the jetsam-pressure path + enables bigger models),
+    not "free GPU memory". **Bigger-models-now still routes to GGUF/llama.cpp** (already mmaps) or
+    the x86 leaf; #7 is the MLX-native path when graph ownership matters.
+  - REMAINING for a full P0 number: repeat the `vmmap` dirty-vs-clean split on a BIG model (27B)
+    to size the recoverable anonymous footprint precisely (slot-heavy).
 - **P1 — per-layer weight streaming** in the MLX forward (vendored mlx-rs or the rozum forward):
   load→compute→release each layer; `ROZUM_STREAM_LAYERS` LRU window. **Gate:** a model larger
   than the cap loads + greedy-parity vs a reference on a fixed prompt; peak Metal ≤ cap.
