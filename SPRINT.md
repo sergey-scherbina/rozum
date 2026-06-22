@@ -144,9 +144,22 @@ Consolidated from the agentic matrix (`scripts/bench/agentic.sh`, sandbox on). R
     file-creation/shell it *shows* the artifact rather than *naming* the tool (a tuning property),
     fixable only model-side (a tool-calling-tuned GLM variant) or by intent-forcing that breaks the
     final-answer turn. debug = a 3rd axis (clean calls, driver loops → RUN_TIMEOUT).
+  - **DECISION-NUDGE TRIED → DISCARDED (net-negative).** A positive few-shot in the GLM render
+    ("you are an agent, call tools, don't print artifacts"; `ROZUM_GLM_TOOLUSE_NUDGE`). Live A/B on
+    the same binary: it **proves the decision gap is prompt-MOVABLE** — GLM named `Write` for the first
+    file in test where it never had — but it is **not a reliable lever**: it *reliably regressed the
+    one stable cell* (nudge-OFF claude×fix = 1, 2/2 runs; nudge-ON = 0 — GLM read, described the fix in
+    prose, and stopped without the Edit) and induced a new failure (args object emitted with NO tool
+    name → no anchor). Discarded.
+  - **META-finding: the 5-task matrix is too NOISY for small agentic deltas.** Control exposed it —
+    claude×test flipped **0↔1 across two nudge-OFF runs of the same config**. So ±1-cell single-run
+    deltas on these toy tasks are variance, not signal; only a *reliably* reproduced shift (like the
+    fix regression, or a multi-run mean) counts. Don't read a single matrix run as a verdict.
   - **Verdict:** GLM-4 ships in `EXTRA` as a parity-exact chat/code model with **hardened tool-calling
-    when invoked** (schema-valid args, no drift, default-on). Agentic-driver ceiling (claude 2/5) is set
-    by the decision gap + reasoning convergence, not output format. Spec `docs/specs/glm4-bringup.md`.
+    when invoked** (schema-valid args, no drift, default-on). The agentic-driver ceiling is a tool-use
+    DECISION gap (GLM *shows* artifacts vs *names* Write/shell) — **prompt-movable but not
+    prompt-fixable**; the robust fix is model-side (a tool-calling-tuned GLM variant). Qwen3.6-35B
+    (15/15) remains the agentic driver; GLM-4 is the chat/code model. Spec `docs/specs/glm4-bringup.md`.
 - [x] **Qwen2.5-Coder-7B / Qwen3-4B** — below the **~27B agentic cliff**: can't reliably drive the
   multi-step tool loop (2/5-ish). Not a bug; kept in `EXTRA` for non-agentic use. Don't surface as
   default agentic picks.

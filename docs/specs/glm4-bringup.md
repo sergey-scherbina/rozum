@@ -216,3 +216,27 @@ prompt-override it does not regress. The agentic-driver ceiling on the 5-task ma
 (claude 2/5) is now set by the decision gap + reasoning convergence, which are not
 output-format problems. GLM-4 stays in `EXTRA` as a parity-exact chat/code model with
 hardened (when invoked) tool-calling.
+
+### Can the decision gap be fixed? Nudge tried → discarded; it's model-side
+
+A positive few-shot DECISION nudge (`ROZUM_GLM_TOOLUSE_NUDGE`, injected into the GLM render:
+"you are an agent — call tools, don't print artifacts"; tool-name-agnostic, the constraint
+owns format) was tried. Live A/B on one binary:
+
+- **The decision gap IS prompt-movable.** With the nudge GLM *named* `Write` for the first
+  file in claude×test — behavior it never showed before. So it's not that GLM *can't* decide
+  to call the file tool; the right context can elicit it.
+- **But the nudge is not a reliable lever — discarded.** It *reliably regressed the one stable
+  cell* (nudge-OFF claude×fix = 1, 2/2 runs; nudge-ON = 0 — GLM read the file, described the
+  fix in prose, and stopped without the Edit), and induced a new failure mode (GLM emitted the
+  args object with **no tool name** → nothing to anchor → no call). Net-negative.
+- **The 5-task matrix is too noisy to measure small deltas.** The control exposed it directly:
+  claude×test flipped **0↔1 across two nudge-OFF runs of the identical config**. A ±1-cell
+  single-run delta on these toy tasks is variance, not signal — only a *reliably reproduced*
+  shift (the fix regression) or a multi-run mean is trustworthy. Don't read one matrix run as a
+  verdict.
+
+**Conclusion.** GLM-4-32B-0414's agentic ceiling is a tool-use *decision* property — movable by
+prompting, not *fixably* so without regressing the stable behavior. The robust fix is model-side
+(a tool-calling-tuned GLM variant). For agentic driving, rozum already has Qwen3.6-35B (15/15);
+GLM-4 is the parity-exact chat/code model with hardened tool-calling when it does invoke.
