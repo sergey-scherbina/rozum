@@ -83,8 +83,14 @@ when admission would otherwise refuse the model. For models that fit, never stre
     is "droppable instead of compressible" (eases the jetsam-pressure path + enables bigger models),
     not "free GPU memory". **Bigger-models-now still routes to GGUF/llama.cpp** (already mmaps) or
     the x86 leaf; #7 is the MLX-native path when graph ownership matters.
-  - REMAINING for a full P0 number: repeat the `vmmap` dirty-vs-clean split on a BIG model (27B)
-    to size the recoverable anonymous footprint precisely (slot-heavy).
+  - **Confirmed at scale (gpt-oss-20b, ~11 GB weights):** `vmmap` physical footprint **10.6 GB,
+    essentially ALL dirty/anonymous** (resident 11.2 G / dirty 10.6 G; the small `__DATA_DIRTY` is
+    565 KB — the Metal weight buffers are the rest). So MLX copies the **entire** weight set into
+    anonymous Metal buffers at every scale → **the recoverable headroom ≈ the full weight footprint**
+    (a 35B's ~19 GB → ~1 layer if streamed). That makes #7 genuinely high-value (run much bigger
+    models / large co-residency headroom) — but it is realized only by the deep mmap-in-place +
+    per-layer-residency change in MLX weight loading, not a knob. **P0 gate: PASSED** (there is real,
+    large headroom to recover); P1 is the (large) implementation, slot + MLX-forward = engine owner.
 - **P1 — per-layer weight streaming** in the MLX forward (vendored mlx-rs or the rozum forward):
   load→compute→release each layer; `ROZUM_STREAM_LAYERS` LRU window. **Gate:** a model larger
   than the cap loads + greedy-parity vs a reference on a fixed prompt; peak Metal ≤ cap.
