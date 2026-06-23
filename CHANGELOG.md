@@ -1,5 +1,24 @@
 # Changelog
 
+## perf-baseline — code-grounded micro-perf lever audit (prep; run is slot-gated)
+Completed: 2026-06-23
+
+Analysis half of `#3 Micro-perf → perf-baseline`, done without the host model slot (held by the
+matrix). New spec `docs/specs/perf-baseline.md` + concrete `perf-<lever>` tasks in `SPRINT.md`.
+
+Key finding from a code audit: 2 of the 4 candidate levers are **already realized** — cross-turn
+prefix-cache reuse is DONE for the mainline serving path (LRU `PrefixStore`, longest-prefix
+truncate + suffix-only prefill, default-ON, byte-exact) and the KV cache layout is DONE
+(pre-allocated 256-block in-place cache, no per-step O(context) concat). async_eval pipelining +
+retained command buffers also done. So the open levers are not a from-scratch build:
+**perf-batch-default-on** (continuous concurrent-request batching is built + wired but ships off —
+`ROZUM_BATCH` default 1; benches prove ~1.98× at B=2 → validate-and-flip), **perf-compiled-decode**
+(decode is ~92% CPU graph-build; the structural fix is a compiled fixed-shape decode graph, go/no-go
+via the existing plain-`compile` probe), plus batch arch-coverage (GLM-4/gpt-oss), prefix-reuse for
+the plookup/spec-decode fast-paths, non-batchable-row batching, and a KV ctx-sweep verification. The
+measurement tooling already exists (`scripts/bench/run.sh` + the in-code `#[ignore]` throughput
+benches); the spec gives the run plan + per-model targets for when the slot frees.
+
 ## meeting .ssc client — rebuild against current Rust backend
 Completed: 2026-06-23
 

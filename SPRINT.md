@@ -387,9 +387,41 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
 
 #### 3. Micro-perf
 
-- [ ] **perf-baseline** — measure current single-stream + batched t/s per model on
-  `origin/master`; file one `perf-<lever>` task per opportunity (prefix-cache reuse,
-  further batching, FFI/CPU-build-cost per the hybrid-decode findings, KV layout).
+- [~] **perf-baseline** — PREP DONE (sunny-civet 2026-06-23, spec `docs/specs/perf-baseline.md`).
+  Code-grounded lever audit done; the measurement RUN is slot-gated (needs the host model slot).
+  KEY FINDING: 2 of the 4 candidate levers are **already realized** — prefix-cache reuse is DONE for
+  the mainline serving path (LRU `PrefixStore`, longest-prefix truncate+suffix-prefill, default-ON,
+  byte-exact; `mlx_native_backend.rs:826/1130`), and the KV layout is DONE (pre-allocated 256-block
+  in-place cache, no per-step concat; `mlx-lm/src/cache.rs:80`). async_eval pipelining + retain-fix
+  also done. So the open levers are the two below + follow-ups, NOT a from-scratch build.
+  - Tooling already exists (don't rebuild): `scripts/bench/run.sh` (single-stream per-model: TTFT,
+    decode t/s excl. prefill, peak RAM) + the in-code `#[ignore]` benches
+    (`mlx_{dense,moe}_backend_chat_tps`, `mlx_hybrid_batched_decode_throughput`,
+    `mlx_qwen35_moe_decode_bench` incl. `ROZUM_CTXSWEEP` + build-vs-eval split, `mlx_compile_probe_plain`).
+    RUN plan + per-model targets in the spec. Follow the 🛑 REBOOT-SAFETY PROTOCOL on the run.
+- [ ] **perf-batch-default-on** — biggest near-term win, LOW risk. Continuous concurrent-request
+  batching is built+wired (`worker_main` → one `run_batch`/`run_batch_hybrid` forward) but ships OFF:
+  `batch_cap()` = `ROZUM_BATCH` default **1 = serial** (`mlx_native_backend.rs:713`). Benches prove
+  **~1.98× at B=2**. Validate the A/B through the gateway under real concurrent agent load (byte-exact
+  + no single-stream latency regression), then flip the default or document why it stays opt-in. *(slot)*
+- [ ] **perf-compiled-decode** — the structural lever: decode is **~92% CPU graph-build** (~400
+  op-build FFI calls/token, `:5790`). async_eval+retain done; remaining fix = a **compiled fixed-shape
+  decode graph** (plain `compile`, the net-positive candidate; `compile_with_state` is net-negative).
+  Go/no-go via `mlx_compile_probe_plain` (`:5542`); if positive, wire fixed-shape KV + compiled step
+  into `Generate`/`run_job` (the old decode-gap-remainder Stages 1–3). Helps small/dense where batching
+  can't. Higher effort/risk. *(slot)*
+- [ ] **perf-batch-arch-coverage** — `is_batchable_arch` (`:736`) excludes **Glm4 + GptOss** → they
+  serialize even at `ROZUM_BATCH>1`, despite being hot agentic models. Add their batch paths + a
+  ragged byte-exact test (mirror `mlx_batched_ragged_byte_exact` `:5665`). *(slot)*
+- [ ] **perf-prefix-reuse-fastpaths** — `run_plookup_job` + `run_spec_job` use **fresh KV** (forgone
+  reuse, comments `:655/:1735/:1831`) → re-prefill the whole conversation each turn. Thread the existing
+  `PrefixStore` truncate/restore into both (same `MlxDenseTarget`, KV shape matches) → unlocks
+  plookup/spec-decode for multi-turn agents. *(slot)*
+- [ ] **perf-batch-nonbatchable-rows** — `is_batchable` (`:760`) serializes rep-penalty / explicit-seed
+  / constrained-tool rows. Add per-row RNG keys + per-row penalty in `run_batch` (`mlx_rope_per_row_probe`
+  `:5620` shows per-row offsets are feasible) or quantify+document the loss. Lower priority. *(slot)*
+- [ ] **perf-kv-ctxsweep-verify** — verification-only: `ROZUM_CTXSWEEP=1 mlx_qwen35_moe_decode_bench`,
+  assert decode t/s flat across context (proves the pre-allocated KV has no O(context)/token regress). *(slot)*
 
 ### Workspace split — monolith → layered Cargo workspace (spec-gated, `docs/specs/workspace-split.md`)
 
