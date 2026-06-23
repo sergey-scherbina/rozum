@@ -414,11 +414,21 @@ file, `>` emitted as `>`, prose where the `{cmd}` JSON goes → an 11 GB codex r
 = 4/4 in a clean probe). Strategy: give the model the structured tools it is reliable at and let
 the gateway own the fragile shell translation. Levers to try (one task each, all matrix-gated):
 
-- [ ] **gptoss-inject-write-file** (TOP) — inject a structured `write_file({path,content})` (and
-  `edit_file`) tool for codex×gpt-oss (mirror the existing `ROZUM_CODEX_INJECT_APPLY_PATCH` inject)
-  + reroute the model's call to a clean `synth_create_command` write; steer `LEAN_CODING_PROMPT` to
-  it. Sidesteps the dominant build/test fail class (heredoc mangling) by meeting the model at its
-  4/4 strength. Verify REPS≥4 vs current; watch for no-regress on edit.
+- [~] **gptoss-inject-write-file** — TRIED (plucky-finch 2026-06-23), reverted as a WASH + a key
+  insight. Implemented the inject + reroute (write_file → clean `cat >` overwrite) + prompt. It WORKS
+  (writes land clean), and surfaced a real bug: **a successful `cat >` is SILENT, so the model read
+  the empty result as failure and re-wrote Cargo.toml in a LOOP** (apply_patch doesn't loop because
+  `patch` prints "patching file …"). Adding a confirmation `echo "wrote …"` to the reroute fixed the
+  loop (build 0/4 → 2/4). BUT overall it was a WASH vs the committed clean-delivery state (build 3/4
+  vs 2/4, test 1/4, debug 4/4 — within N=4 noise). **CONCLUSION: delivery is no longer the bottleneck**
+  — the writes land clean either way; the residual build/test fails are now `cargo run -> ''` (the
+  model's `main` prints nothing) and `cargo test red` (e.g. `reverse` without `.collect()`) = CODE
+  QUALITY. So the next levers must target code-quality + measurement noise, not delivery:
+  - **PIVOT — DELIVERY SOLVED, attack CODE QUALITY + NOISE.** debug is a solid 4/4 (V4A + `>`
+    decode). build/test hover ~2-3/4 with huge N=4 swings, bottlenecked by the model's CODE, not our
+    stack. The remaining levers (below) are the RIGHT conditions: reasoning-per-shape (does the model
+    catch its own `main`-prints-nothing bug with more deliberation?), sampling/temperature for code
+    completeness, and HIGHER N (REPS≥8) to make any delta measurable above the noise.
 - [ ] **gptoss-exec-decode-loopbreak** — (a) decode `\uXXXX` in exec_command `cmd` (model emits `>`
   as `>` → `cat > file` fails to redirect); (b) loop-breaker: when exec_command args are
   non-JSON PROSE, codex errors "expected value at line 1 col 1" and RETRIES → the 11 GB runaway;
