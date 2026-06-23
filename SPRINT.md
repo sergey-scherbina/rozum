@@ -12,6 +12,38 @@
   free-RAM lever refused now loads at a reduced n_ctx; unit tests on fit_model_params; admission stays the
   final safety gate (never overcommits).
 
+- [x] **admission-pressure-guard** — DONE (plucky-finch 2026-06-23, operator-requested "improvement B").
+  Add the kernel's OWN memory-pressure level (`kern.memorystatus_vm_pressure_level` via existing
+  `shed::read_host_pressure()`) as a THIRD admission lever alongside the ledger + free-RAM levers: refuse
+  a load if the host is already at warn/critical, independent of the byte arithmetic (which can read
+  "fits" moments before pressure spikes — the kernel computes availability better than page math).
+  WHY: the `shed` runtime watchdog already keys on this signal; extend the SAME signal to LOAD-time
+  admission. SAFETY: only ever ADDS refusals (never rescues a byte-over-budget load), fail-safe to Normal
+  on an unreadable level → never blocks spuriously. HOW: `admits(.., pressure)` 6th param (kept pure,
+  caller reads), wired into `acquire_residency` + `dry_run_admission` (+ `AdmissionReport.pressure`);
+  surfaced in `gateway --dry-run` ("host pressure: normal/warn/critical"). Unit test
+  `admits_refuses_under_elevated_pressure`; 6 admits tests green. NOTE: this is the SAFE half of the
+  "account for reclaimable memory" question — measurement (vm_stat page classes) PROVED our `available`
+  already counts all reclaimable-without-swap memory (free+inactive+spec+purge); the uncounted "active"
+  is ~100% ANONYMOUS (needs swap/compression to reclaim = the jetsam path) so excluding it is CORRECT.
+  We do NOT loosen `available` — we add the kernel's pressure signal instead. See [[reference-mlx-memory-cap-semantics]].
+
+- [ ] **footprint-estimate-accuracy** (operator-requested "improvement A"; validation-gated, NOT a quick
+  ship) — the admission gate OVER-refuses big models because `estimate_model_footprint_bytes` →
+  `runtime_footprint_bytes` is conservative: it bakes a fixed ~1.5 GiB activation reserve + the cache cap
+  on top of weights + KV (e.g. 35B floor = 21.60 GiB est. vs a likely ~20.5–21 real peak at n_ctx 4096 +
+  small prompts). The estimate is NOT artificially inflated (ROZUM_GATEWAY_FOOTPRINT_INFLATE default 1.0)
+  — the padding is the real-but-pessimistic activation reserve. IDEA: measure the REAL peak (MLX
+  `get_peak_memory` / `/usr/bin/time -l` max RSS the matrix already captures) after a successful load and
+  cache it per (model, n_ctx-bucket), then admit on `min(conservative_est, measured_peak + margin)` so it
+  TIGHTENS only, never below an observed peak. RISK (why validation-gated, do NOT flip casually): a future
+  request with a bigger prefill can exceed a peak measured at small prompt → under-estimate → OOM →
+  REBOOT (the exact failure we avoid). Must (a) cache a running MAX, keyed to n_ctx; (b) keep keep-free as
+  the variance buffer; (c) validate empirically — load the big model with the new figure, watch
+  `kern.memorystatus_vm_pressure_level`/jetsam, prove 0 reboots over N loads — BEFORE shipping default-on.
+  Lower priority than B; the estimate is already fairly tight, so the win is ~0.5–1 GiB. Compose with
+  `admission-pressure-guard` (the pressure lever backstops a slightly-too-tight estimate).
+
 - [ ] **glm-synth-validate-default-on** — THE remaining 'works by default' win (slot-gated, watcher re-armed). multi-rep A/B for the GLM artifact synth (now WORKS, master
   201c3f2, opt-in ROZUM_GLM_ARTIFACT_SYNTH=1): create lift across N reps + edit/chat NO-regress (fix was
   2/2) + false-write fuzz (chat code blocks must NOT write files). If clean -> flip default-ON for GLM so

@@ -415,11 +415,24 @@ pub fn available_ram_for_admission() -> Option<u64> {
 /// A `None` for either input means that lever can't measure ⇒ it doesn't block (fail-open on the
 /// unknown lever; the other still gates). Refusing here turns "B loads → host overcommits → OS jetsam
 /// kills a model mid-work / reboot" into "B is refused or waits" — the no-reboot invariant.
-fn admits(in_use: u64, footprint: u64, budget: Option<u64>, available: Option<u64>, min_free: u64) -> bool {
+fn admits(
+    in_use: u64,
+    footprint: u64,
+    budget: Option<u64>,
+    available: Option<u64>,
+    min_free: u64,
+    pressure: crate::shed::PressureLevel,
+) -> bool {
     let ledger_fits =
         in_use == 0 || budget.is_some_and(|b| in_use.saturating_add(footprint) <= b);
     let ram_fits = available.map_or(true, |a| footprint.saturating_add(min_free) <= a);
-    ledger_fits && ram_fits
+    // 3. **Kernel memory-pressure (the OS's own jetsam signal):** the page arithmetic above can read
+    //    "fits" moments before pressure spikes; the kernel computes availability far better than we do
+    //    (same signal the [`crate::shed`] runtime watchdog keys on). If the host is ALREADY at warn /
+    //    critical, a big new model is exactly what tips it into the jetsam→reboot cascade — refuse,
+    //    independent of the byte math. Fail-safe: an unreadable level reports `Normal` ⇒ doesn't block.
+    let pressure_ok = matches!(pressure, crate::shed::PressureLevel::Normal);
+    ledger_fits && ram_fits && pressure_ok
 }
 
 /// A non-mutating snapshot of the admission decision for `footprint_bytes` at the CURRENT host
@@ -436,17 +449,27 @@ pub struct AdmissionReport {
     pub min_free: u64,
     pub ledger_fits: bool,
     pub ram_fits: bool,
+    pub pressure: crate::shed::PressureLevel,
+    pub pressure_ok: bool,
     pub admit: bool,
+}
+
+/// The host's current kernel memory-pressure level as a label (`normal`/`warn`/`critical`) — the
+/// jetsam ladder the admission gate now also keys on. For `--dry-run` display.
+pub fn host_pressure_label() -> &'static str {
+    crate::shed::read_host_pressure().as_str()
 }
 
 pub fn dry_run_admission(footprint_bytes: u64) -> AdmissionReport {
     let available = available_ram_for_admission();
     let min_free = min_free_ram_bytes();
+    let pressure = crate::shed::read_host_pressure();
     if concurrent_resident_allowed() {
         // Operator override (ROZUM_ALLOW_CONCURRENT_RESIDENT=1): no gating — always admits.
         return AdmissionReport {
             footprint: footprint_bytes, in_use: 0, holders: Vec::new(), budget: None,
-            available, min_free, ledger_fits: true, ram_fits: true, admit: true,
+            available, min_free, ledger_fits: true, ram_fits: true,
+            pressure, pressure_ok: true, admit: true,
         };
     }
     let mypid = std::process::id();
@@ -455,9 +478,10 @@ pub fn dry_run_admission(footprint_bytes: u64) -> AdmissionReport {
     let ledger_fits =
         in_use == 0 || budget.is_some_and(|b| in_use.saturating_add(footprint_bytes) <= b);
     let ram_fits = available.map_or(true, |a| footprint_bytes.saturating_add(min_free) <= a);
+    let pressure_ok = matches!(pressure, crate::shed::PressureLevel::Normal);
     AdmissionReport {
         footprint: footprint_bytes, in_use, holders, budget, available, min_free,
-        ledger_fits, ram_fits, admit: ledger_fits && ram_fits,
+        ledger_fits, ram_fits, pressure, pressure_ok, admit: ledger_fits && ram_fits && pressure_ok,
     }
 }
 
@@ -678,7 +702,8 @@ pub fn acquire_residency(
                 let budget = host_ram_budget_bytes();
                 let available = available_ram_for_admission();
                 let min_free = min_free_ram_bytes();
-                let fits = admits(in_use, footprint_bytes, budget, available, min_free);
+                let pressure = crate::shed::read_host_pressure();
+                let fits = admits(in_use, footprint_bytes, budget, available, min_free, pressure);
                 if fits {
                     // Reserve: own `residents/<pid>` and hold its flock for life.
                     match reserve(mypid, model, footprint_bytes) {
@@ -794,34 +819,53 @@ mod tests {
     // OS jetsam killing a model mid-work / reboot).
     #[test]
     fn admits_requires_both_ledger_and_actual_free_ram() {
+        use crate::shed::PressureLevel::Normal;
         let budget = Some(27 * GIB); // 36 GiB * 0.75
         let min_free = 3 * GIB;
         // Sole model that fits free RAM → admit.
-        assert!(admits(0, 20 * GIB, budget, Some(26 * GIB), min_free));
+        assert!(admits(0, 20 * GIB, budget, Some(26 * GIB), min_free, Normal));
         // HOLE #3 closed: a SOLE model that does NOT fit actual free RAM is REFUSED (used to be an
         // unconditional admit) — 20 + 3 > 18 available.
-        assert!(!admits(0, 20 * GIB, budget, Some(18 * GIB), min_free));
+        assert!(!admits(0, 20 * GIB, budget, Some(18 * GIB), min_free, Normal));
         // Second model: ledger fits (10 + 12 ≤ 27) AND RAM fits (12 + 3 ≤ 20) → admit.
-        assert!(admits(10 * GIB, 12 * GIB, budget, Some(20 * GIB), min_free));
+        assert!(admits(10 * GIB, 12 * GIB, budget, Some(20 * GIB), min_free, Normal));
         // HOLES #1/#2 closed: ledger says OK (10 + 12 ≤ 27) but ACTUAL free RAM is low (heavy
         // non-model use, or a sibling gateway not in the ledger) → REFUSED. 12 + 3 > 8 available.
-        assert!(!admits(10 * GIB, 12 * GIB, budget, Some(8 * GIB), min_free));
+        assert!(!admits(10 * GIB, 12 * GIB, budget, Some(8 * GIB), min_free, Normal));
         // Ledger overcommits (20 + 12 > 27) even though RAM looks fine → refused.
-        assert!(!admits(20 * GIB, 12 * GIB, budget, Some(30 * GIB), min_free));
+        assert!(!admits(20 * GIB, 12 * GIB, budget, Some(30 * GIB), min_free, Normal));
     }
 
     #[test]
     fn admits_fail_open_per_lever_when_unmeasurable() {
+        use crate::shed::PressureLevel::Normal;
         let min_free = 3 * GIB;
         // available unknown (vm_stat failed) → the RAM lever doesn't block; the ledger still gates.
-        assert!(admits(0, 20 * GIB, Some(27 * GIB), None, min_free)); // sole, ledger ok
-        assert!(!admits(20 * GIB, 12 * GIB, Some(27 * GIB), None, min_free)); // ledger overcommit
+        assert!(admits(0, 20 * GIB, Some(27 * GIB), None, min_free, Normal)); // sole, ledger ok
+        assert!(!admits(20 * GIB, 12 * GIB, Some(27 * GIB), None, min_free, Normal)); // ledger overcommit
         // budget unknown → only a sole model is admitted (RAM permitting); a 2nd is refused.
-        assert!(admits(0, 20 * GIB, None, Some(30 * GIB), min_free));
-        assert!(!admits(5 * GIB, 5 * GIB, None, Some(30 * GIB), min_free));
+        assert!(admits(0, 20 * GIB, None, Some(30 * GIB), min_free, Normal));
+        assert!(!admits(5 * GIB, 5 * GIB, None, Some(30 * GIB), min_free, Normal));
         // Both unknown → fail-open to the old sole-only behavior.
-        assert!(admits(0, 99 * GIB, None, None, min_free));
-        assert!(!admits(1, 1 * GIB, None, None, min_free));
+        assert!(admits(0, 99 * GIB, None, None, min_free, Normal));
+        assert!(!admits(1, 1 * GIB, None, None, min_free, Normal));
+    }
+
+    // Kernel memory-pressure guard: even when both byte levers say "fits", an elevated OS pressure
+    // level (the jetsam ladder) REFUSES — loading a big model under warn/critical is what tips the
+    // host into the jetsam→reboot cascade. Normal pressure leaves the byte decision unchanged.
+    #[test]
+    fn admits_refuses_under_elevated_pressure() {
+        use crate::shed::PressureLevel::{Critical, Normal, Warn};
+        let budget = Some(27 * GIB);
+        let min_free = 3 * GIB;
+        // A load that fits both byte levers comfortably (20 + 3 ≤ 30):
+        assert!(admits(0, 20 * GIB, budget, Some(30 * GIB), min_free, Normal));
+        // …is REFUSED the instant the host is at warn or critical, regardless of the headroom.
+        assert!(!admits(0, 20 * GIB, budget, Some(30 * GIB), min_free, Warn));
+        assert!(!admits(0, 20 * GIB, budget, Some(30 * GIB), min_free, Critical));
+        // The pressure guard only ADDS refusals — it never rescues a byte-over-budget load.
+        assert!(!admits(0, 40 * GIB, budget, Some(10 * GIB), min_free, Normal));
     }
 
     fn sample() -> ActiveGateway {

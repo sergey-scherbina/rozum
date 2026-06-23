@@ -1220,6 +1220,7 @@ fn run_gateway_dry_run(model: &str, n_ctx: Option<u32>) {
     println!("  weights on disk:   {:.2} GiB", gib(m.size_bytes));
     println!("  available RAM:     {}", available.map(|a| format!("{:.2} GiB (free+inactive+spec+purgeable)", gib(a))).unwrap_or_else(|| "unmeasurable → free-RAM lever fails open".into()));
     println!("  keep-free margin:  {:.2} GiB", gib(min_free));
+    println!("  host pressure:     {} (kernel jetsam level; warn/critical ⇒ refuse)", rozum::share::host_pressure_label());
 
     // Adaptive fit — the SAME fit_model_params the load path runs (skipped when adaptive is off).
     let fit = if adaptive_off {
@@ -1266,7 +1267,10 @@ fn run_gateway_dry_run(model: &str, n_ctx: Option<u32>) {
     } else {
         let need = footprint.saturating_add(min_free);
         let short = need.saturating_sub(report.available.unwrap_or(0));
-        if !report.ram_fits {
+        if !report.pressure_ok {
+            println!("  VERDICT: ⛔ WOULD REFUSE — host memory pressure is '{}' (kernel jetsam ladder): \
+                      loading a model now risks tipping the host into the jetsam→reboot cascade.", report.pressure.as_str());
+        } else if !report.ram_fits {
             println!("  VERDICT: ⛔ WOULD REFUSE — need footprint {:.2} + keep-free {:.2} = {:.2} GiB, available {:.2} GiB → short by {:.2} GiB.",
                 gib(footprint), gib(min_free), gib(need), gib(report.available.unwrap_or(0)), gib(short));
         } else {

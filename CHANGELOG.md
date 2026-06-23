@@ -1,5 +1,27 @@
 # Changelog
 
+## admission — kernel memory-pressure guard (third no-reboot lever)
+Completed: 2026-06-23
+
+The residency admission gate now consults the kernel's OWN memory-pressure level
+(`kern.memorystatus_vm_pressure_level`, via the existing `shed::read_host_pressure()`) as a third lever
+beside the cross-process ledger and the free-RAM check: a load is refused if the host is already at
+warn/critical, independent of the byte arithmetic (which can read "fits" moments before pressure spikes —
+the kernel computes availability better than page math, and the `shed` runtime watchdog already keys on
+this same signal). Safety-only: it can only ADD refusals (never rescues a byte-over-budget load) and
+fail-safes to Normal on an unreadable level, so it never blocks spuriously.
+
+This is the safe outcome of investigating "should we count reclaimable-active memory in `available`?":
+measuring the vm_stat page classes proved our `available` (free+inactive+speculative+purgeable) already
+captures all reclaimable-without-swap memory — the uncounted "active" pool is ~100% anonymous (reclaiming
+it needs swap/compression = the jetsam→reboot path), so excluding it is correct. We do NOT loosen
+`available`; we add the kernel's pressure signal. `admits()` gains a `pressure` param (kept pure),
+wired into `acquire_residency` + `dry_run_admission` (+ `AdmissionReport.pressure`), and surfaced in
+`gateway --dry-run` ("host pressure: normal/warn/critical"). Unit test
+`admits_refuses_under_elevated_pressure`; 115 rozum-core tests green. (The complementary
+`footprint-estimate-accuracy` lever — tighten the over-conservative estimate via measured peaks — is
+filed in SPRINT as validation-gated, since under-estimating risks the reboot it must prevent.)
+
 ## meetings — show identity names (drop "· animal") + auto-hello instruction
 Completed: 2026-06-23
 
