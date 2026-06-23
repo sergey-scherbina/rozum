@@ -22,13 +22,14 @@ Portable subset only (no model-DSL / no dataTable — both have react client-mod
 [badge](std/ui/display.ssc)
 [card, cardWithHeader](std/ui/containers.ssc)
 [signalText_](std/ui/reactive.ssc)
-[signalActionButton](std/ui/input.ssc)
+[actionButton](std/ui/input.ssc)
 [remoteTable](std/ui/data.ssc)
 
 ## Live data
 ```scalascript
 val refresh = signal("refresh", 0)
 val st      = fetchUrlSignal("status", "/control/status", refresh)
+val stRes   = fetchUrlSignal("residents", "/control/status", refresh)
 
 def gib(b: Double): String = {
   val t = (b / 107374182.4).toInt
@@ -42,12 +43,16 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
   vstack(gap = 6)(
     hstack(gap = 8)(
       text("source:"), badge("rozum control-API (always-up)", "success"),
-      signalActionButton(incSignal(refresh), "↻ refresh")
+      actionButton(incSignal(refresh), "↻ refresh")
     ),
     hstack(gap = 8)(text("available:"),   signalText_(availTxt)),
     hstack(gap = 8)(text("host budget:"), signalText_(budgetTxt)),
     hstack(gap = 8)(text("committed:"),   signalText_(committedTxt))
   )
+)
+
+val residentsCard = cardWithHeader(heading(2, "Resident models (in memory now)"))(
+  remoteTable(stRes, [fieldColumn("PID", "pid"), fieldColumn("Model", "model")], "residency.residents")
 )
 
 val catCard = cardWithHeader(heading(2, "Installed catalog"))(
@@ -74,6 +79,8 @@ val view = vstack(gap = 16)(
   heading(1, "rozum — control center"),
   divider(),
   gwCard,
+  divider(),
+  residentsCard,
   divider(),
   catCard,
   divider(),
