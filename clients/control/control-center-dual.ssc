@@ -1,23 +1,26 @@
 #!/usr/bin/env ssc
 ---
 name: rozum-control-center
-version: 0.3.0
-description: rozum UCC — LIVE + STRUCTURED (fetchUrlSignal + jsonValue parse + computedSignal). Web (react).
-backends: [int]
+version: 0.4.0
+description: rozum UCC — ONE std/ui app -> web (React) AND terminal (ratatui). Live via /control/status.
 frontend: react
 ---
 # rozum — control center
 
-Live snapshot from ONE `fetchUrlSignal` GET, parsed client-side with `jsonValue(...)` and
-projected into structured fields (+ GiB formatting) via `computedSignal` + `signalText_`.
-Portable subset only (no model-DSL / no dataTable — both have react client-mode gaps, see spec).
+One `std/ui` app that compiles to **both** web (React SPA) and **TUI** (ratatui),
+selected only by the frontend backend (`frontend: react` / `--frontend tui`).
+No web-specific `serve(...)` in the source — the runner auto-runs `def view()`.
+
+Live snapshot from ONE `fetchUrlSignal` GET `/control/status`: residency parsed
+client-side (`jsonValue` + `computedSignal`, GiB-formatted) and the installed
+catalog rendered from the nested `.installed` field via `remoteTable(..., "installed")`.
 
 ## Setup
-[signal, emit, serve, fetchUrlSignal, incSignal, computedSignal, fieldColumn](std/ui/primitives.ssc)
+[signal, fetchUrlSignal, incSignal, computedSignal, fieldColumn](std/ui/primitives.ssc)
 [jsonValue](std/json.ssc)
 [lower](std/ui/lower.ssc)
 [defaultTheme](std/ui/theme.ssc)
-[vstack, hstack, divider, spacer](std/ui/layout.ssc)
+[vstack, hstack, divider](std/ui/layout.ssc)
 [heading, text](std/ui/typography.ssc)
 [badge](std/ui/display.ssc)
 [card, cardWithHeader](std/ui/containers.ssc)
@@ -25,7 +28,7 @@ Portable subset only (no model-DSL / no dataTable — both have react client-mod
 [signalActionButton](std/ui/input.ssc)
 [remoteTable](std/ui/data.ssc)
 
-## Live data
+## App
 ```scalascript
 val refresh = signal("refresh", 0)
 val st      = fetchUrlSignal("status", "/control/status", refresh)
@@ -51,12 +54,13 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
 )
 
 val catCard = cardWithHeader(heading(2, "Installed catalog"))(
-  remoteTable(st, [fieldColumn("Model", "spec"), fieldColumn("Size (bytes)", "size_bytes")], "installed")
+  remoteTable(
+    st,
+    [fieldColumn("Model", "spec"), fieldColumn("Size (bytes)", "size_bytes")],
+    "installed"
+  )
 )
-```
 
-## Meetings panel
-```scalascript
 val meetingsCard = cardWithHeader(heading(2, "Meetings — room: rozum"))(
   vstack(gap = 6)(
     hstack(gap = 8)(text("sunny-civet"),  badge("agent", "success")),
@@ -66,20 +70,18 @@ val meetingsCard = cardWithHeader(heading(2, "Meetings — room: rozum"))(
     hstack(gap = 8)(text("Sergiy"),       badge("operator", "neutral"))
   )
 )
-```
 
-## Compose + serve
-```scalascript
-val view = vstack(gap = 16)(
-  heading(1, "rozum — control center"),
-  text("LIVE structured models/gateway/residency via the rozum control-API"),
-  divider(),
-  gwCard,
-  divider(),
-  catCard,
-  divider(),
-  meetingsCard
+def view() = lower(
+  vstack(gap = 16)(
+    heading(1, "rozum — control center"),
+    text("ONE .ssc -> web + TUI — live models/gateway/residency via the rozum control-API"),
+    divider(),
+    gwCard,
+    divider(),
+    catCard,
+    divider(),
+    meetingsCard
+  ),
+  defaultTheme
 )
-
-serve(lower(view, defaultTheme), 8410)
 ```
