@@ -104,6 +104,18 @@
   `adaptive-cascade-residency` (#2) is REQUIRED, and its "eager-if-fits" branch MUST EXCLUDE MLX×MLX local
   pairs (force lazy). The advisor consecutive-user fix is still correct (it changed the failure from a
   template-raise to the underlying eval, i.e. the framing now reaches the model).**
+  **LAZY BUILT + ISOLATED (2026-06-24):** `LazyPipelineBackend` (rozum-agent) — per request resolves
+  tier0→plans→tears-down→resolves tierN→answers→tears-down, serialized, never co-resident; admission
+  reserves MAX(local tier) not SUM; wired in `build_cascade_from_spec` (Pipeline→lazy). VALIDATED: no
+  co-residency crash (round-robin survives), and a SAME-MODEL lazy pipeline (`Qwen3-4B,Qwen3-4B`) works
+  e2e → the load→teardown→load MECHANISM is sound. REMAINING BUG (precisely isolated): `GLM-9B→Qwen3-4B`
+  lazy fails the EXECUTOR's first eval (`mlx: eval failed`) = GLM-specific cross-model contamination
+  (GLM-9B's gen leaves pending MLX-stream async-eval state a DIFFERENT next model inherits). FIXABLE — the
+  gateway Switchboard (`POST /control/switch`) swaps GLM-9B→Qwen3-4B in-process CLEANLY (drained swap
+  flushes the stream). Fix = flush the MLX stream at teardown, but mlx-rs exposes only `eval` not
+  `synchronize` → needs `mlx_synchronize` in the mlx-rs fork (focused multi-repo change, reboot-sensitive
+  Metal area → own session). Plain settle delay does NOT fix it (tested 1.5s). NEXT: expose mlx_synchronize
+  + flush at MlxNativeBackend teardown; robust path today = solve.sh (separate processes).
 - [ ] **adaptive-cascade-residency** (operator idea 2026-06-23; now the residency half of `pipeline-cascade`)
   — make the cascade EAGER if its local
   tiers co-fit, LAZY (one resident at a time, swap on escalation) if not. Today `build_cascade` is

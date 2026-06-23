@@ -89,6 +89,20 @@ exactly what `solve.sh` does by hand with two sequential gateway processes — b
 > forced LAZY** (one resident at a time, the other fully torn down first — `solve.sh`'s proven model).
 > This makes lazy residency mandatory, not an optimization, for the common local-model case.
 
+> **LAZY STATUS (built + isolated 2026-06-24).** `LazyPipelineBackend` is implemented: per request it
+> resolves tier 0 (planner) → plans → tears it down → resolves tier N (executor) → answers → tears down,
+> serialized, never co-resident. Admission reserves MAX(local tier) not SUM. **Validated:** no
+> co-residency crash (gateway survives round-robin), and a **same-model** lazy pipeline
+> (`Qwen3-4B,Qwen3-4B`) works end-to-end — so the load→teardown→load mechanism is sound. **Remaining
+> bug (precisely isolated):** a `GLM-9B → Qwen3-4B` lazy pipeline fails the *executor's* first eval
+> (`mlx: eval failed`). It is GLM-specific cross-model contamination: GLM-9B's generation leaves pending
+> MLX-stream state (its kernels pre-build/async-eval the next token) that a *different* next model's eval
+> inherits. Proof it's fixable: the gateway `Switchboard` swaps GLM-9B→Qwen3-4B in-process cleanly (its
+> drained swap flushes the stream). The fix is to flush the MLX stream at teardown — but mlx-rs exposes
+> only `eval`, not `synchronize`, so the clean fix needs `mlx_synchronize` exposed in the mlx-rs fork (a
+> focused multi-repo change). Until then: `solve.sh` (separate processes per stage) is the robust path
+> for GLM-involving chains; same-model and non-GLM small pairs work in-process.
+
 **Cost (honest):** in lazy mode every prompt pays `N-1` swaps in + the swap back to tier 0 for the next
 prompt — i.e. ~2 model loads per agent turn (load = seconds to tens of seconds for 20–32B). Eager pays
 nothing. The two reference models (GLM-4-32B ≈18 GB + gpt-oss-20b ≈11 GB ≈ 29 GB + MLX cache peaks) sit

@@ -99,6 +99,17 @@ pub type LazyResolver = Arc<
 /// process with only one model resident (no co-residency).
 async fn teardown_tier(backend: Arc<dyn ChatBackend>) {
     let _ = tokio::task::spawn_blocking(move || drop(backend)).await;
+    // Optional inter-tier settle (`ROZUM_PIPELINE_SWAP_SETTLE_MS`, default 0/off). A plain delay does
+    // NOT fix the cross-model contamination (proven: 1.5 s didn't help GLM-9B→Qwen3-4B) — the real fix
+    // is flushing the MLX stream at teardown (a `synchronize` the mlx-rs fork must expose). Kept as a
+    // tunable knob for experiments; same-model swaps and non-GLM pairs work without it.
+    let ms = std::env::var("ROZUM_PIPELINE_SWAP_SETTLE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    if ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
 }
 
 /// A **lazy** pipeline: same planner→…→executor semantics as [`RoutingStrategy::Pipeline`] on
