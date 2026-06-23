@@ -1,5 +1,27 @@
 # Backlog
 
+## Agentic drivers
+
+- [ ] **glm-artifact-write-synth** (idea, NOT committed — clean workaround exists) — let GLM-4-32B
+  drive CREATE-from-scratch agentic flows by synthesizing a `Write` tool call when GLM emits a
+  labeled file artifact instead of naming the tool. Today GLM names tools cleanly for edit/debug
+  (logit-constraint `99c6081`) but on create-from-scratch shows `Cargo.toml`/`main.rs` content in
+  fenced blocks — a GLM-4-0414 model decision property, proven NOT prompt-induced (claude's captured
+  prompt has zero framing; glm4-bringup § ROOT CAUSE). Precedent: codex's `synthesize_write_from_obj`
+  (gateway.rs ~1982) does this from a structured `{path,content}`. **Why only an idea / why hard:**
+  (1) GLM's artifact is UNSTRUCTURED free text — the synth must recover the file PATH from the label
+  ("Cargo.toml:", a `// src/main.rs` first-line comment, or a ```rust:path info-string); needs REAL
+  GLM output samples to build against (slot-gated — do NOT build blind, that's the framing-strawman
+  mistake). (2) FALSE-POSITIVE RISK: a GLM CHAT answer with an example code block + a filename mention
+  would get wrongly written to disk — needs tight guards (only when a Write tool is offered AND no
+  tool call parsed AND the turn is clearly a create request). (3) It INVENTS a call the model didn't
+  make (unlike codex's case, which had explicit `{path,content}` intent). **Decision:** the clean
+  answer "use Qwen3.6-35B for create-from-scratch, GLM-4-32B for edit/debug/chat" already covers the
+  need, so this stays a backlog idea. If pursued: capture real GLM create output via a KEEP=1 probe
+  (slot-claimed), build+unit-test the path-extractor offline, gate default-OFF, live-A/B before on.
+  Integration point: `serving::parse_tool_calls` returns empty → synth at the mlx call site
+  (mlx_native_backend.rs ~2115); needs tool-names + GLM-family threaded into scope (not there today).
+
 ## Host safety
 
 - [x] **residency-gate-v2-ramledger** — DONE (`feature/gateway-residency-ram-ledger`, `sunny-civet`).
