@@ -1,5 +1,16 @@
 # Sprint
 
+- [ ] **glm-artifact-write-synth** — ACTIVE (operator-chosen 2026-06-23). Make GLM-4-32B a full
+  create-from-scratch agent driver by synthesizing a `Write` call when it prints a labeled file
+  artifact instead of naming the tool. **Spec: docs/specs/glm-artifact-write-synth.md** (design +
+  5 guards + integration point + validation plan). DISCIPLINE: do NOT build the parser blind —
+  capture REAL GLM create-from-scratch output first (slot-gated model-only probe), then build the
+  format matchers against it (the narration-strawman lesson). Default-OFF `ROZUM_GLM_ARTIFACT_SYNTH`;
+  ship default-ON only if live A/B lifts create + zero edit/chat regression + false-write fuzz clean.
+  Steps: (1) capture real output, (2) build+unit-test matchers vs fixtures, (3) thread tool-names +
+  GLM-family to mlx_native_backend.rs ~2115 + synth at empty-parse, (4) live A/B, (5) fuzz gate.
+
+
 (Formerly `WORK_QUEUE.md`; renamed to `SPRINT.md` per `AGENTS.md` / the
 multi-agent skill.)
 

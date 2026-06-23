@@ -1,0 +1,90 @@
+# GLM artifact → Write synthesis
+
+**Goal.** Make GLM-4-32B-0414 a full agentic driver — including **create-from-scratch** — by
+synthesizing a `Write` tool call when GLM emits a labeled file **artifact** instead of *naming* the
+tool. Today GLM is reliable for edit/debug/chat (it names `Read`/`Edit`/`Bash` cleanly + the shipped
+logit-constraint `99c6081` makes args schema-valid), but on create-from-scratch it shows file content
+in fenced blocks (`Cargo.toml` / `src/main.rs`) and names nothing → no tool call → `turns=1 tools=0
+pass=0`. This is a **GLM-4-0414 model decision property**, proven NOT prompt-induced (claude's captured
+system prompt has zero narration framing and pushes toward tools — see `glm4-bringup.md` § ROOT CAUSE),
+so it can't be fixed prompt-side without regressing edits. The synth meets the model where it is.
+
+Precedent: codex's `synthesize_write_from_obj` (gateway.rs ~1982) already does this for a structured
+`{path, content}`. The GLM case is harder because the artifact is **unstructured free text** — the
+synth must recover the file PATH from how GLM labels each block.
+
+## Status: SPEC + plan only — DO NOT build the parser blind
+The phenomenon (GLM prints labeled file artifacts on create) is real (documented from prior live
+transcripts), but the exact label FORMAT is unverified — there is no real GLM create-from-scratch
+output on disk (gateway logs are startup-only; agent work dirs weren't kept). **Building a format
+parser against assumptions is exactly the strawman mistake that sank the narration-framing sanitizer**
+(`glm4-bringup.md` § Real A/B). So: capture real GLM output FIRST (slot-gated), then build the parser
+against it.
+
+## Design
+
+### Trigger guards (ALL must hold — false-positive prevention is the whole game)
+A chat answer that merely *includes* an example code block with a filename mention must NEVER be
+written to disk. Synthesize ONLY when:
+1. **GLM family** — `dialect.uses_glm_envelope()` (no effect on Qwen/gpt-oss/other models).
+2. **A file-write tool is offered** — the request's tools include `Write` (or the active toolset's
+   create-file tool); gives the exact tool name + confirms the agent *can* accept the call.
+3. **No tool call was parsed** — `serving::parse_tool_calls(text)` returned empty (GLM named nothing).
+   On edit tasks GLM names `Edit` → a call exists → synth never fires → zero edit regression.
+4. **Artifact-dominant + recoverable path** — ≥1 fenced block whose file path is recoverable AND the
+   fenced content is the bulk of the response (not prose with one incidental snippet). Reject if the
+   only fence has no path, or the response is mostly prose.
+5. **Path safety** — recovered path is a *relative* file path, no `..`, no absolute paths; else skip.
+
+### Extraction (format matchers — CONFIRM against real samples before trusting)
+Parse labeled fenced blocks → `(path, content)` pairs; emit one `Write{file_path, content}` per block
+(multi-file create = multiple Writes). Candidate label formats to support (ranked, confirm which GLM
+actually uses):
+- (a) **Preceding label line**: `` `Cargo.toml`: `` / `Cargo.toml:` / `**src/main.rs**` immediately
+  before the fence.
+- (b) **Fence info-string**: ```` ```rust:src/main.rs ```` or ```` ```Cargo.toml ````.
+- (c) **First-line path comment** inside the fence: `// src/main.rs`, `# Cargo.toml`.
+- (d) Inline imperative: "create `src/main.rs`:" on the lead-in line.
+The extractor is a list of independent matchers; adding the real-sample format = adding one matcher +
+its fixture. Content = the fence body verbatim (minus the path-comment line for (c)).
+
+### Plumbing (integration point)
+`serving::parse_tool_calls(&self.full_text)` is called at generation-finish
+(`mlx_native_backend.rs` ~2115) and only takes `text` — it has neither the offered tool names nor the
+GLM-family flag in scope. Thread both to the finish path:
+- the request's tool names (already known where the job is built),
+- the GLM-family flag (already computed: `dialect_for(template).uses_glm_envelope()`, see
+  `mlx_native_backend.rs:997`).
+Then: `if calls.is_empty() && glm && has_write_tool { calls = synth_glm_writes(text, &tool_names) }`,
+and the existing loop (2120-2131) emits `ToolUseStart/Delta/End` for the synthesized calls unchanged —
+so both the OpenAI and Anthropic streaming paths get real `tool_use` blocks with no extra wiring.
+
+### Flag
+`ROZUM_GLM_ARTIFACT_SYNTH` — **default OFF (opt-in)** until the live A/B confirms a lift with no
+regression. Same discipline as every other GLM lever here.
+
+## Validation plan (slot-gated — the gate on shipping)
+1. **Capture real output** (model-only, no agent): load GLM-4-32B, `curl /v1/chat/completions` with a
+   create-from-scratch task + a `Write` tool, capture the raw `content`. Confirms the actual label
+   format(s) → becomes the unit-test fixtures. (Claim the slot per the 🛑 REBOOT-SAFETY PROTOCOL; one
+   model; graceful teardown.)
+2. **Build + unit-test** the matchers against the real fixtures (offline, deterministic).
+3. **Live A/B**: `agentic.sh` claude×GLM-4-32B, synth OFF vs ON, on `build` (create) AND `fix` (edit):
+   - create cells: pass-rate must LIFT (the win), tools>0.
+   - edit cells: must NOT regress (guard #3 ⇒ they shouldn't even trigger the synth).
+4. **False-write fuzz**: feed GLM chat prompts whose answers contain example code blocks; assert the
+   synth does NOT fire (guard #4). Any false write = block shipping.
+5. **Decision gate**: default-ON only if (3) lifts create + zero edit/chat regression + (4) clean.
+   Otherwise stays opt-in / backlog (the clean workaround — Qwen3.6-35B for create — already covers
+   the need).
+
+## Risks
+- **False synthesis** (chat code → file write) — the dominant risk; mitigated by the 5 guards +
+  default-OFF + the fuzz gate.
+- **Inventing a call the model didn't make** — unlike codex's structured case; acceptable only because
+  the guards make it fire just on clear, path-labeled, tool-available create turns.
+- **Path ambiguity** — if GLM doesn't label a recoverable path, the synth can't fire (guard #4) and
+  the cell stays a miss (no worse than today). That's the floor, and it's safe.
+
+Pairs with `glm4-bringup.md` (decision gap, ROOT CAUSE), `project-codex-patch-barrier`
+(synthesize_write_from_obj precedent), BACKLOG `glm-artifact-write-synth`.
