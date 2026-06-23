@@ -14,6 +14,17 @@
   scratch A/B — planner→executor build pass-rate > max(GLM-alone, gpt-oss-alone), control gpt-oss-plans→
   gpt-oss-executes to confirm the win is the PLAN, 0 reboot. Pays off on non-trivial/plan-heavy tasks; skip
   for trivial or pure-edit (single model is fine there).
+  **MECHANISM PROVEN, handoff-value INCONCLUSIVE (plucky-finch 2026-06-23):** the lazy-swap pipeline works
+  end-to-end live — GLM-32B produced a clean one-shot solution (Cargo.toml+main.rs text), unloaded, gpt-oss
+  loaded and executed, ONE model resident at a time, 0 reboot (this IS `adaptive-cascade-residency`'s
+  sequential swap, demonstrated). BUT the does-the-plan-help A/B was CONFOUNDED: (a) my executor probe sent
+  raw `exec_command` over `/v1/chat`, which bypasses the gateway's codex-path delivery fixes (heredoc-
+  redirect etc. live in `normalize_codex_tool_args` on `/v1/responses`), so gpt-oss's writes failed →
+  baseline 0/6 (vs the real ~50-65%); (b) reverse-cli is too TRIVIAL for a plan to add reasoning value
+  ('skip for trivial'). Result 0/6→1/6 is dominated by the broken probe, not a real signal. PROPER
+  validation = a COMPLEX task (planning matters) + the REAL executor (codex/opencode via the gateway with
+  delivery fixes, i.e. the matrix harness with GLM's plan injected into the task). Next: build the
+  `Pipeline` mechanism + `rozum solve`, validate on the matrix harness with a from-scratch-hard task.
 - [ ] **adaptive-cascade-residency** (operator idea 2026-06-23) — make the cascade EAGER if its local
   tiers co-fit, LAZY (one resident at a time, swap on escalation) if not. Today `build_cascade` is
   eager-ONLY (`CascadeBackend` holds a live `Arc<dyn ChatBackend>` per tier), so on a 36 GB host a cascade
