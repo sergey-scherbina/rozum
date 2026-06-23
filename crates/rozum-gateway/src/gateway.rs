@@ -1861,6 +1861,13 @@ fn parse_bare_file_block(block: &str) -> Option<(String, String)> {
 /// `format!` below). Shared by the apply_patch *shell-command* bridge (Method B) and the
 /// apply_patch-*function* re-route (gpt-oss). None when there are no change lines to anchor on.
 fn apply_patch_block_to_fuzz(block: &str) -> Option<String> {
+    // gpt-oss over-escapes patch text — it emits `>` as `>` (and `&`/`<` likewise) inside the
+    // patch body, so a context line like `pub fn add(a,b) -> i32 {` no longer matches the file's
+    // `-> i32 {` → `patch` fails or fuzz-corrupts (observed: debug edits silently not landing). The
+    // function-call path already decodes; the `{patch}` / `apply_patch <<EOF` shell-heredoc forms
+    // reach here undecoded, so decode here too (idempotent — a no-op once there is no `\u`).
+    let decoded = decode_unicode_escapes(block);
+    let block = decoded.as_str();
     // Explicit `*** Add File:` / `*** Create File:` directives → real file writes (the dominant
     // gpt-oss create-from-scratch shape). One directive can carry several files; write each.
     let creates = parse_create_directives(block);
@@ -2267,12 +2274,22 @@ fn codex_lean_keep(name: &str) -> bool {
 /// emits empty content, no tool call), while a ~20-byte prompt is 3/3. `codex_lean_keep` trims
 /// only TOOLS; this trims the INSTRUCTIONS too. The tool *schemas* (kept by lean) carry the
 /// argument shapes, so a short prompt suffices.
-const LEAN_CODING_PROMPT: &str = "You are a coding agent working in a sandboxed shell, already \
-in the project's working directory. Use the provided tools to complete the user's task directly. \
-Run shell commands with the exec_command tool — including creating files (e.g. \
-`cat > path <<'EOF'` … `EOF`), building, and running. To EDIT an existing file, call apply_patch \
-with a patch in EXACTLY this format (leading space = unchanged context line, `-` = removed, \
-`+` = added):\n\
+const LEAN_CODING_PROMPT: &str = "You are a coding agent in a sandboxed shell, already in the \
+project directory. Complete the WHOLE task before you stop — never stop after a single command; \
+keep going until every file is written and the success check passes.\n\
+\n\
+Run shell with the exec_command tool. Every call's argument is a JSON object {\"cmd\": \"…\"} — \
+NEVER put prose or reasoning there, only the shell command.\n\
+\n\
+To CREATE files, make the directory first, then write each file with a heredoc — one exec_command \
+per command, IN THIS ORDER:\n\
+  {\"cmd\": \"mkdir -p src\"}\n\
+  {\"cmd\": \"cat > Cargo.toml <<'EOF'\\n…full file…\\nEOF\"}\n\
+  {\"cmd\": \"cat > src/main.rs <<'EOF'\\n…full file…\\nEOF\"}\n\
+Write EVERY required file, then build/run/test to verify.\n\
+\n\
+To EDIT an existing file, call the apply_patch TOOL directly (do NOT run `apply_patch` as a shell \
+command or heredoc). Its patch is EXACTLY (leading space = context, `-` = removed, `+` = added):\n\
 *** Begin Patch\n\
 *** Update File: <relative/path>\n\
 @@\n\
@@ -2280,8 +2297,9 @@ with a patch in EXACTLY this format (leading space = unchanged context line, `-`
 -<old line>\n\
 +<new line>\n\
 *** End Patch\n\
-Do the task, verify it works, then reply with one short confirmation line and stop. Do not ask \
-for confirmation or permission.";
+\n\
+When the task's success condition is met, reply with one short confirmation line and stop. Do not \
+ask for confirmation or permission.";
 
 /// Models whose tool-calling collapses under a large context (so they get [`LEAN_CODING_PROMPT`]
 /// instead of codex's full instructions). gpt-oss reasons 4-8× more than Qwen3.6-35B and emits no
@@ -5015,6 +5033,19 @@ mod tests {
         let fixed = normalize_codex_tool_args(&args);
         assert!(fixed.contains("patch -p0 --fuzz"), "Method B not applied: {fixed}");
         assert!(!fixed.contains("apply_patch"), "apply_patch should be gone: {fixed}");
+    }
+
+    #[test]
+    fn apply_patch_block_decodes_unicode_escaped_operators() {
+        // gpt-oss over-escapes `>`/`&`/`<` in the patch body (observed in debug edits): a context
+        // line `pub fn add(a,b) -> i32 {` arrives as `... -> i32 {`, which would never match
+        // the file's `->`. apply_patch_block_to_fuzz must decode it so `patch` finds the context.
+        let block = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n\
+            -pub fn add(a: i32, b: i32) -\\u003e i32 {\n-    a - b\n\
+            +pub fn add(a: i32, b: i32) -> i32 {\n+    a + b\n*** End Patch";
+        let cmd = apply_patch_block_to_fuzz(block).expect("reconstructable");
+        assert!(!cmd.contains("\\u003e"), "literal \\u003e survived into the patch: {cmd}");
+        assert!(cmd.contains("-pub fn add(a: i32, b: i32) -> i32 {"), "decoded context missing: {cmd}");
     }
 
     #[test]
