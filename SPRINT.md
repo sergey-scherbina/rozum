@@ -60,7 +60,21 @@
   pipeline (100%) beats gpt-oss-alone (50%); on a TRIVIAL task (reverse-cli) gpt-oss alone is fine and the
   plan adds nothing — exactly the spec's 'pays off on plan-heavy, skip for trivial'. 0 reboot throughout,
   one model resident at a time. The user's 'lazy cascade = pipeline' insight, working + validated.
-- [ ] **adaptive-cascade-residency** (operator idea 2026-06-23) — make the cascade EAGER if its local
+- [ ] **pipeline-cascade** (operator vision 2026-06-23) — `rozum launch --model A,B <agent>` = a LIVE,
+  transparent pipeline: the agent sees ONE endpoint; on EVERY request the gateway runs all tiers in order
+  (tier 0 planner produces guidance → last tier executor consumes [request+guidance], emits the real
+  tool-calls back to the agent), then the next request restarts at tier 0 (round-robin per prompt). This is
+  the in-process counterpart to batch `solve.sh`. NEW `RoutingStrategy::Pipeline` on the existing
+  `CascadeBackend` (today caps at escalation: AlwaysCheapest/ClassifyThenStart/Learned + Verdict::Escalate).
+  Spec `docs/specs/pipeline-cascade.md`. Operator chose cadence = **every turn** (A advises B on each agent
+  step). Build order: (1) eager Pipeline strategy [task] — all tiers run per chat(), forward-output handoff,
+  unit-test w/ Echo; (2) `adaptive-cascade-residency` (below) for eager/lazy; (3) CLI opt-in (`--model A,B`
+  → pipeline under an agent; escalation stays named/explicit) + planner framing; (4) live A/B through codex
+  (eager small pair → deterministic mechanism proof; then GLM+gpt-oss lazy, measure per-turn swap cost,
+  0 reboot). Done-when: transparent live pipeline through a real agent, eager+lazy both work, swap cost
+  measured, value A/B ≥ the batch planner→executor result (3/3 vs 2/4 on RPN).
+- [ ] **adaptive-cascade-residency** (operator idea 2026-06-23; now the residency half of `pipeline-cascade`)
+  — make the cascade EAGER if its local
   tiers co-fit, LAZY (one resident at a time, swap on escalation) if not. Today `build_cascade` is
   eager-ONLY (`CascadeBackend` holds a live `Arc<dyn ChatBackend>` per tier), so on a 36 GB host a cascade
   with a big local tier + another local is correctly refused (SUM > available, per `cascade-admission-
