@@ -161,3 +161,12 @@ the synth; chat false-write is guarded by the `synth_skips_chat_and_ambiguous` u
 `glm_artifact_synth_enabled` flipped to **default ON** (opt-out `ROZUM_GLM_ARTIFACT_SYNTH=0`). GLM-4-32B
 now drives create-from-scratch out of the box. The synth only fires for a GLM model that named no tool
 (`model_is_glm` + empty parse), so edit/chat are untouched.
+
+### Opt-in root-cause variant: constrain bare tool-args to valid JSON (a2d3534)
+Alongside the post-hoc synth (default-ON), an OPT-IN logit-constraint (`ROZUM_GLM_CONSTRAIN_ARGS=1`,
+default OFF) prevents GLM's malformed args at the SOURCE: `find_glm_bare_args` anchors the existing
+`ToolConstraint` on a bare tool-args object (first key = a REQUIRED param of an offered tool, so prose /
+non-tool JSON / Rust struct literals aren't grabbed) and forces valid JSON to that tool's schema during
+decode — the same proven `Constraint::Json(arg_schema)` machinery as the name-line trigger. Default off
+because the synth + tolerant parse already absorb the observed malformations; enable it for callers who
+want valid args without the repair. Made safe-to-ship by being opt-in (no default chat-regression risk).
