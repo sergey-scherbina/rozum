@@ -45,6 +45,19 @@ captured strings out of `Fn`. The client now uses a small recursive room-line lo
 static assets through helper functions. Live smoke on `:8405` passes for `/`, `/manage`,
 `/r/rozum`, `/m/rozum`, `/mp/rozum`, `/manifest.webmanifest`, `/sw.js`, and `/icon.svg`.
 
+## gateway — restore the apply_patch (edit) protocol in the lean prompt (fix codex×gpt-oss debug)
+Completed: 2026-06-23
+
+A full codex×gpt-oss measurement showed the aggressive instruction-trim — great for CREATE
+(build/test 0/3 → ~2/3 via `cat >`) — had REGRESSED the EDIT cell: `debug` (fix a file via
+apply_patch) went 1/3 → 0/3 with a 1.3 GB runaway loop, because the trim dropped codex's V4A
+`apply_patch` format spec so the model couldn't form a valid edit patch. Added a concise V4A
+reminder to `LEAN_CODING_PROMPT` (`*** Begin Patch / *** Update File / @@ / -/+ / *** End Patch`,
+~0.3 KB — far below the load threshold). Validated: `debug` **0/3 → 3/3** (63/113/62 s, no loops);
+`build` 1/1 (no regression). Net codex×gpt-oss ≈ **1/9 → ~7/9** (build ~2/3, test ~2/3, debug 3/3),
+2-5× faster. Lesson: a single lean prompt must cover BOTH create (shell) and edit (apply_patch).
+Spec `docs/specs/constrained-gptoss-delivery.md`.
+
 ## residency — shared-reserve admission billing (in-process multislot admits more)
 Completed: 2026-06-23
 

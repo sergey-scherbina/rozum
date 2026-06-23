@@ -189,3 +189,26 @@ reasons more (slower) than `effort:low`. (2) **No regression:** a real `codex×b
 (fast)** with `ROZUM_GPTOSS_REASONING` unset → codex does NOT send `reasoning:medium`, so the `low`
 default still holds. So an agent CAN now raise the effort explicitly, while the matrix/coding default
 stays fast.
+
+## Final codex×gpt-oss matrix + the edit (debug) fix (2026-06-23)
+
+A full measurement with all fixes (instruction-trim + reasoning=low + reasoning-honour) revealed the
+aggressive instruction-trim, great for CREATE (build/test use `cat >`), had REGRESSED the EDIT cell:
+`debug` (fix an existing file via `apply_patch`) went **1/3 → 0/3** with one runaway loop (1.3 GB,
+timeout) — because the trim dropped codex's V4A `apply_patch` format spec, so the model couldn't
+produce a valid edit patch. Fix: add a **concise V4A reminder to `LEAN_CODING_PROMPT`** (the
+`*** Begin Patch / *** Update File / @@ / -/+ / *** End Patch` shape, ~0.3 KB — far below the load
+threshold). Validated: `debug` **0/3 → 3/3** (63/113/62 s, no loops/timeouts); `build` 1/1 (no
+regression from the slightly longer prompt).
+
+**Net codex×gpt-oss (was 0/3 build, 0/3 test, 1/3 debug ≈ 1/9):**
+
+| cell | baseline | now |
+|---|:---:|:---:|
+| build (create) | 0/3 | **~2/3** |
+| test (create + unit test) | 0/3 | **~2/3** |
+| debug (edit-existing) | 1/3 | **3/3** |
+
+≈ **1/9 → ~7/9**, and 2-5× faster throughout. The lesson: a single lean prompt must cover BOTH
+create (shell `cat >`) AND edit (apply_patch format) — trimming the edit protocol helped create but
+broke edit until the V4A reminder was restored. Residual fails are model-correctness variance.

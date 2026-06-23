@@ -2270,7 +2270,16 @@ fn codex_lean_keep(name: &str) -> bool {
 const LEAN_CODING_PROMPT: &str = "You are a coding agent working in a sandboxed shell, already \
 in the project's working directory. Use the provided tools to complete the user's task directly. \
 Run shell commands with the exec_command tool — including creating files (e.g. \
-`cat > path <<'EOF'` … `EOF`), building, and running. Edit an existing file with apply_patch. \
+`cat > path <<'EOF'` … `EOF`), building, and running. To EDIT an existing file, call apply_patch \
+with a patch in EXACTLY this format (leading space = unchanged context line, `-` = removed, \
+`+` = added):\n\
+*** Begin Patch\n\
+*** Update File: <relative/path>\n\
+@@\n\
+ <unchanged context line>\n\
+-<old line>\n\
++<new line>\n\
+*** End Patch\n\
 Do the task, verify it works, then reply with one short confirmation line and stop. Do not ask \
 for confirmation or permission.";
 

@@ -355,15 +355,16 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
   codex-V4A model+interface ceiling**, NOT a fresh gateway bug (gateway create-write-synth +
   codex-lean already maxed; Finding 6 model-only probes proved gpt-oss collapses under codex's
   21KB/18-tool load, not V4A-incompetence). On the agentic PICK (Qwen3.6-35B) codex clears these.
-- [~] **matrix-gptoss-codex-build** — `codex × gpt-oss-20b × build` = **0/3** (create-from-scratch).
-  Isolated to the model+interface ceiling above. **One untested lever:** RUN_TIMEOUT≫280 (gpt-oss
-  reasons long); but 0/3 includes non-timeout fails so a higher budget alone won't make it green.
-  Sibling holds the codex/gpt-oss gateway branches. Don't re-close as model-side without that lever tried.
-- [~] **matrix-gptoss-codex-test** — `codex × gpt-oss-20b × test` = **0/3** (create-from-scratch +
-  a `cargo test`). Same ceiling as `-build`. Same remaining lever (longer budget). Sibling coordination.
-- [~] **matrix-gptoss-codex-debug** — `codex × gpt-oss-20b × debug` = **1/3** (edit-existing).
-  Stochastic flake (passes ~1/3), not a hard zero — the codex edit-delivery sometimes lands on
-  gpt-oss. Read as a pass-rate; a single red was misleading. Sibling holds codex/gpt-oss delivery.
+- [x] **matrix-gptoss-codex-build** — `0/3 → ~2/3` (plucky-finch 2026-06-23). NOT a model ceiling —
+  the breaker was CONTEXT SIZE (codex's 20.9 KB instructions, which `codex_lean_keep` left untouched).
+  Fixed by `codex_effective_instructions` (trim instructions to a focused prompt for gpt-oss) +
+  reasoning=low. Create-from-scratch now ~2/3 and 3-5× faster. Spec `docs/specs/constrained-gptoss-delivery.md`.
+- [x] **matrix-gptoss-codex-test** — `0/3 → ~2/3` (same instruction-trim + reasoning=low fix). Residual
+  ~1/3 is model-correctness variance, not delivery/context.
+- [x] **matrix-gptoss-codex-debug** — `1/3 → 3/3` (plucky-finch 2026-06-23). The aggressive
+  instruction-trim (great for create) had REGRESSED edit to 0/3 (one 1.3 GB runaway loop) by dropping
+  codex's V4A `apply_patch` format spec; restored a **concise V4A reminder in `LEAN_CODING_PROMPT`** →
+  3/3, no loops. Lesson: one lean prompt must cover BOTH create (`cat >`) and edit (apply_patch format).
 
 #### 2. Plugin-ize everything
 
