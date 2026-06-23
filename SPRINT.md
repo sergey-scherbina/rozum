@@ -546,8 +546,29 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   run blocked). Tighten the per-model estimate (or measure-then-cache the real peak) so the guard
   admits what truly fits. Compose with the new adaptive loading (`426cf7e`). Goal: load when safe,
   never reboot, never false-refuse.
-- [ ] **gptoss-codex-cascade** (stretch) — gpt-oss for speed, auto-fall-back to 35B on a failed cell
-  (the `CascadeBackend` exists). Best-of-both: fast when gpt-oss succeeds, reliable when it doesn't.
+- [~] **glm-shell-delivery-fix** — INVESTIGATED + REFUTED as a lever (plucky-finch 2026-06-23, isolate
+  skill, operator-requested). After the full 3-model matrix (GLM-32B 4/15), dug into GLM's create-from-
+  scratch failures. Model-only probe + DETERMINISTIC A/B (multi-turn, real cargo execution, fix toggled
+  — no agent flakiness) revealed GLM's failure is **multi-layered, NOT one fixable delivery bug** (unlike
+  the gpt-oss heredoc fix): (1) `cargo new <name>` → SUBDIR, files not in cwd (5/5 deterministic, refutes
+  my earlier echo-quoting guess); (2) fragile `echo 'multiline\n…' > file` (literal `\n`, `>` inside
+  quotes); (3) **GLM's Read/Write tool-call JSON written INTO the file AS CONTENT** (`file_path: …`,
+  `Read {"file_path":…}` seen in main.rs); (4) hallucinated "DONE" before a working program; (5) correct
+  code that lands in the wrong place (subdir). Built the full delivery cascade (cargo-new→`cargo init` +
+  strip `<name>/` prefix + echo→heredoc with `\n` decode) and A/B'd it: **files-in-cwd 0/4 → 4/4 (delivery
+  FIXED, proven) but build-passes 0/4 → 0/4 (UNCHANGED)** — fixing delivery does NOT fix the build, because
+  layers 3-5 (tool-call-as-content, hallucination, code-correctness) remain. CONCLUSION: GLM's create-from-
+  scratch is deep model-quality tool-use non-robustness, not a single delivery bug; a fragile GLM-specific
+  rewrite cascade = real complexity + regression risk for ZERO matrix benefit → DON'T SHIP (tested in a
+  probe BEFORE touching the gateway, so nothing to revert). The right GLM lever is the cascade below (mask
+  with 35B), or use GLM for chat/code not agentic. Third hypothesis→powered-A/B→refutation of the session
+  (after verify-gate and "prompt degrades gpt-oss code") — the discipline keeps catching necessary-but-
+  insufficient fixes before they ship.
+- [ ] **gptoss-codex-cascade** (stretch, now ALSO the GLM lever) — gpt-oss/GLM for speed, auto-fall-back
+  to 35B on a failed cell (the `CascadeBackend` exists). Best-of-both: fast when the small model succeeds,
+  35B-reliable when it doesn't. The matrix proved 35B is the agentic driver (14/15) and GLM is not (4/15,
+  multi-layered tool-use non-robustness per `glm-shell-delivery-fix` above) → cascade is the highest-
+  leverage RELIABILITY lever for the weaker models, without fighting their nature.
 
 #### 2. Plugin-ize everything
 
