@@ -3614,7 +3614,9 @@ mod inner {
         let dialect = dialect_for(template);
         // GLM-only: strip narration framing from system prompts when tools are present — the
         // framing ("explain in prose / show code in markdown") flips GLM to printing the artifact
-        // instead of naming the tool (glm4-bringup § UPDATE). Opt-out: ROZUM_GLM_STRIP_FRAMING=0.
+        // instead of naming the tool (glm4-bringup § UPDATE). Opt-IN (default OFF): the real agent
+        // CLIs don't inject such framing (verified — claude's captured prompt has none), so this is
+        // a no-op for them; enable with ROZUM_GLM_STRIP_FRAMING=1 for callers that do narrate.
         let glm_stripped: Vec<Message>;
         let messages: &[Message] = if dialect.uses_glm_envelope()
             && !tools.is_empty()
@@ -3751,11 +3753,20 @@ fn select_mlx_mem_limit_bytes(env_mem_gb: Option<u64>, share_bytes: u64, total_b
 // proven; a counter-instruction does NOT reliably override the framing, so REMOVING
 // it is the lever). Applied only to GLM system prompts when tools are present.
 
-/// True when `ROZUM_GLM_STRIP_FRAMING` is not explicitly disabled (default ON for GLM).
+/// True only when `ROZUM_GLM_STRIP_FRAMING` is explicitly enabled (default OFF — opt-in).
+///
+/// Default-OFF because the trigger this strips — a system prompt that tells the model to
+/// "explain in prose / show code in markdown before each tool call" — is NOT produced by the
+/// real agent CLIs. Verified by capturing claude's actual `/v1/messages` request against a mock
+/// (glm4-bringup § Real A/B): claude's system prompt has zero such framing and actively pushes
+/// toward tools ("prefer the dedicated file/search tools", "do not narrate options"). So for
+/// claude this strip is a no-op; GLM's artifact-instead-of-tool behavior on create-from-scratch
+/// is a GLM-4-0414 decision property, not prompt-induced. The lever is kept as an opt-in for any
+/// caller that DOES inject narration framing (set `=1`/`true`/`on`).
 fn glm_strip_framing_enabled() -> bool {
-    !matches!(
+    matches!(
         std::env::var("ROZUM_GLM_STRIP_FRAMING").ok().as_deref(),
-        Some("0" | "false" | "off")
+        Some("1" | "true" | "on")
     )
 }
 

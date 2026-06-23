@@ -320,3 +320,39 @@ prompt contain the narration framing and in what words, (b) did the sanitizer st
 returned (artifact text? why turns=1). Then tune `is_glm_narration_directive` to the real phrasing, or —
 if claude's prompt has no such framing — the claude×GLM gap has a different lever and the sanitizer only
 helps direct-API / lean-prompt callers. (Slot was taken by a sibling matrix mid-investigation.)
+
+### ROOT CAUSE of the no-lift: claude's prompt has NO narration framing (mock capture, 2026-06-23)
+Captured claude's **actual** `/v1/messages` request by pointing `claude -p "<create task>"` at a mock
+Anthropic server (`/tmp/mock_anthropic.py`, no model loaded — pure prompt capture; same technique as
+the codex `mockcodex` probe). Claude Code v2.1.185 sends a **5817-char system prompt with ZERO
+narration framing** and **`tool_choice` absent** (does not force a tool call). Far from telling the
+model to "explain in prose / show code in markdown before each call", the prompt **pushes toward
+tools and against narration**:
+- *"Prefer the dedicated file/search tools over shell commands when one fits."*
+- *"…or narrate options you will not pursue."* (an instruction NOT to narrate)
+- *"give a recommendation, not an exhaustive survey"*, *"state it plainly without hedging"*.
+
+**So the framing my synthetic A/B stripped was MY OWN invention, not claude's behavior** — which is
+exactly why the real claude×GLM A/B showed no lift: the sanitizer had nothing to strip. The earlier
+inference "the agents bake in narration framing" is **FALSIFIED for claude**. GLM-4-32B emitting the
+artifact (```rust) instead of naming `Write` on create-from-scratch is therefore a **GLM-4-0414
+model decision property** that fires regardless of the agent prompt — consistent with the prior KEY
+FINDING (no tool-name line ⇒ no constraint anchor) and NOT gateway-fixable without regressing edits
+(the decision-nudge regressed stable cells).
+
+**Action:** the GLM narration-framing sanitizer is flipped to **opt-in / default-OFF**
+(`ROZUM_GLM_STRIP_FRAMING=1` to enable). It stays as a documented lever for any caller that *does*
+inject narration framing, but for claude/codex it is a no-op, so default-on was firing on a strawman.
+Kept: the shipped logit-constraint (`99c6081`) that hardens GLM's tool-call *format* when it names a
+tool — that addresses a real, observed path.
+
+### HOW TO USE GLM RELIABLY WITH AGENTS — the evidence-based answer
+1. **Edit / debug / chat / code-Q&A agentic flows → GLM-4-32B is reliable.** When the task is to
+   modify existing files it names `Read`/`Edit`/`Bash` cleanly and the logit-constraint makes the
+   args schema-valid (proven: claude×fix clean → pass=1, no regression).
+2. **Create-from-scratch / scaffolding agentic flows → use Qwen3.6-35B-A3B (15/15).** GLM-4-0414
+   shows the file content as a fenced artifact instead of naming `Write`; this is a model tuning
+   property, not prompt- or gateway-fixable without regressing (1).
+3. **Direct-API use with a controlled tool-first prompt → GLM names tools reliably** (model-only
+   probe 3/3). The framing-sensitivity only bites when a caller injects narration framing.
+4. No special gateway config needed; the format hardening is always on.
