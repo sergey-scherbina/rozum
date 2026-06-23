@@ -3,11 +3,15 @@
 [exec, ProcessOptions](std/process.ssc)
 [renderHtml, element, textNode](std/ui/primitives.ssc)
 ```scalascript
-val roomsDir = "/Users/sergiy/.local/state/rozum/rooms"
-val rooms    = ["demo", "rozum"]
 val palette  = ["#6ee7a8", "#7ab8ff", "#f0a868", "#c79bff", "#ff9ec4", "#5fd3c8", "#e6d264", "#9fd0ff"]
-val delPy = "import json,sys,shutil\np='/Users/sergiy/.local/state/rozum/rooms.json'\nn=sys.argv[1]\nd=json.load(open(p))\nR=d if isinstance(d,list) else d.get('rooms',[])\n[shutil.rmtree(r['root'],ignore_errors=True) for r in R if r.get('name')==n and not r.get('project') and r.get('root')]\nN=[r for r in R if not (r.get('name')==n and not r.get('project'))]\njson.dump(N if isinstance(d,list) else dict(d,rooms=N), open(p,'w'))"
-val cleanPy = "import json,os,shutil,glob\np='/Users/sergiy/.local/state/rozum/rooms.json'\nd=json.load(open(p))\nR=d if isinstance(d,list) else d.get('rooms',[])\ndef emp(r):\n root=r.get('root')\n if not root or not os.path.isdir(root): return True\n return not any(os.path.getsize(f)>0 for f in glob.glob(root+'/*.jsonl'))\n[shutil.rmtree(r['root'],ignore_errors=True) for r in R if (not r.get('project')) and emp(r) and r.get('root')]\nK=[r for r in R if r.get('project') or not emp(r)]\njson.dump(K if isinstance(d,list) else dict(d,rooms=K), open(p,'w'))"
+val delPy = "import json,os,sys,shutil\nbase=os.environ.get('XDG_STATE_HOME') or os.path.join(os.path.expanduser('~'),'.local','state')\np=os.path.join(base,'rozum','rooms.json')\nif not os.path.exists(p): sys.exit(0)\nn=sys.argv[1]\nd=json.load(open(p))\nR=d if isinstance(d,list) else d.get('rooms',[])\n[shutil.rmtree(r['root'],ignore_errors=True) for r in R if r.get('name')==n and not r.get('project') and r.get('root')]\nN=[r for r in R if not (r.get('name')==n and not r.get('project'))]\njson.dump(N if isinstance(d,list) else dict(d,rooms=N), open(p,'w'))"
+val cleanPy = "import json,os,sys,shutil,glob\nbase=os.environ.get('XDG_STATE_HOME') or os.path.join(os.path.expanduser('~'),'.local','state')\np=os.path.join(base,'rozum','rooms.json')\nif not os.path.exists(p): sys.exit(0)\nd=json.load(open(p))\nR=d if isinstance(d,list) else d.get('rooms',[])\ndef emp(r):\n root=r.get('root')\n if not root or not os.path.isdir(root): return True\n return not any(os.path.getsize(f)>0 for f in glob.glob(root+'/*.jsonl'))\n[shutil.rmtree(r['root'],ignore_errors=True) for r in R if (not r.get('project')) and emp(r) and r.get('root')]\nK=[r for r in R if r.get('project') or not emp(r)]\njson.dump(K if isinstance(d,list) else dict(d,rooms=K), open(p,'w'))"
+
+def stateRoot(): String =
+  exec("sh", ["-c", "printf '%s' \"${XDG_STATE_HOME:-$HOME/.local/state}/rozum\""], ProcessOptions(None, Map(), None)).stdout.trim
+
+def roomsDir(): String =
+  s"${stateRoot()}/rooms"
 
 def statusOut(): String =
   exec("rozum", ["meetings", "status"], ProcessOptions(None, Map(), None)).stdout
@@ -21,7 +25,15 @@ def projOf(l: String): String =
   if a.length < 2 then "-" else a(1).trim
 
 def roomNames(): List[String] =
-  statusOut().split("\n").filter(l => l.contains("project:")).map(roomLineName).toList
+  val lines = roomStatusLines()
+  if lines.length < 1 then ["demo"] else lines.map(l => roomLineName(l)).toList
+
+def roomStatusLines(): List[String] =
+  statusOut().split("\n").filter(l => l.contains("project:")).toList
+
+def roomStatusLine(name: String): String =
+  val mine = roomStatusLines().filter(l => roomLineName(l) == name).toList
+  if mine.length < 1 then "" else mine(0) + ""
 
 def afterPrefix(p: String): String =
   val parts = p.split("/")
@@ -33,14 +45,12 @@ def firstLine(s: String): String =
   b(0).trim
 
 def roomDir(name: String): String =
-  val daemonDir = s"$roomsDir/$name"
-  if isDir(daemonDir) then daemonDir
+  val line = roomStatusLine(name)
+  if line != "" then
+    val proj = projOf(line)
+    if proj == "-" then s"${roomsDir()}/$name" else s"$proj/.rozum/room"
   else
-    val mine = statusOut().split("\n").filter(l => l.contains("project:")).filter(l => roomLineName(l) == name).toList
-    if mine.length < 1 then daemonDir
-    else
-      val proj = projOf(mine(0) + "")
-      if proj == "-" then daemonDir else s"$proj/.rozum/room"
+    s"${roomsDir()}/$name"
 
 def readRoom(name: String): String =
   val dir = roomDir(name)

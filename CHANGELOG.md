@@ -1,5 +1,19 @@
 # Changelog
 
+## meeting .ssc client — harden room paths and status docs
+Completed: 2026-06-23
+
+The shipped ScalaScript/Rust meeting web no longer assumes the operator's absolute
+`~/.local/state` path for room transcripts. It resolves project rooms from
+`rozum meetings status` to `<project>/.rozum/room` and resolves global/ad-hoc
+rooms through `$XDG_STATE_HOME/rozum/rooms` (falling back to `~/.local/state`).
+
+The meeting client docs and sprint tracker now match the implementation:
+dynamic room selector/prefix routes, `/manage` room cleanup, model list/rm,
+gateway status/switch/stop/unload, and per-room model-participant start/stop
+are marked shipped. Generic interactive `rozum launch` from the web remains
+deferred until there is a non-TTY supervisor contract.
+
 ## mlx — gpt-oss reasoning effort default `low` (the residual-timeout cause)
 Completed: 2026-06-23
 

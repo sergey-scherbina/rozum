@@ -710,26 +710,30 @@ the split (sibling owns the model-participant bridge). Worktree `feature/meeting
 `../scalascript` (branch feature/rust-web-toolkit): vstack/heading/text/lower/serve→SSR, named
 args, signals (data-ssc-*), server-push (/__ssc/push|state) — all shipped + green.
 
-**STATUS 2026-06-22: the .ssc rewrite IS the shipped, only meeting web — the hand-written
-`web.rs`/`web_index.html`/`meetings web` subcommand were removed. Source: `meeting-ssc/meeting.ssc`
+**STATUS 2026-06-23: the .ssc rewrite IS the shipped, only meeting web — the hand-written
+`web.rs`/`web_index.html`/`meetings web` subcommand were removed. Source: `clients/meeting/meeting.ssc`
 on `feature/meeting-web-pwa-ssc` (worktree `../rozum-meeting-pwa`); launchd `com.rozum.meeting-ssc`
 :8405 behind Tailscale `:8443`/`:8446`. (Code is safe in the worktree; this shared-master SPRINT.md
-is churned by sibling agents — feature tasks also tracked in `meeting-ssc/TASKS.md`.)**
+is churned by sibling agents — feature tasks also tracked in `clients/meeting/TASKS.md`.)**
 
 Done since the rewrite: rich text (inline `code`, `**bold**`, clickable links, done/working/blocked
 badges, per-day date dividers, `HH:MM`, per-handle colour), trim-80, chronological `.sorted`,
 auto-scroll, active-participants bar; content-integrity fix (quote truncation). **Dynamic rooms**:
 `/r/<room>` for ANY room via http **prefix routing** (toolkit runtime) + `<select>` switcher.
 **`/manage` panel** (⚙): rooms list/switch/create/delete + **bulk "clean empty rooms"** (19→8 junk
-ghosts pruned; project rooms protected), models list/`rm`, agents view. Toolkit additions landed in
+ghosts pruned; project rooms protected), models list/`rm`, gateway status/switch/stop/unload,
+model-participant start/stop, agents view. Room reads are hardened: project rooms resolve from
+`rozum meetings status` → `<project>/.rozum/room`, global rooms honor `$XDG_STATE_HOME`/`$HOME`.
+Toolkit additions landed in
 `feature/rust-web-toolkit`: `&str` patterns (contains/split/join/replace), Vec
 `.take/.drop/.takeRight/.dropRight/.sorted/.distinct`, `String.toList→.chars()`, `.sum`, http
 `no-store` + MIME-by-extension + prefix routing.
 
-- [ ] **Gateway control in `/manage`** (2026-06-22, in progress) — `rozum gateway` HAS `status`
+- [x] **Gateway control in `/manage` — DONE 2026-06-23.** `rozum gateway` HAS `status`
       (model/port/pid/uptime/clients), `switch --model <spec>` (clean drain→swap), `stop`/`unload`.
-      Show active model + status; switch model (per installed model); stop/unload. Makes "manage
-      models/agents" real. (Launching interactive agents via `rozum launch` stays CLI — a TTY program
+      The `.ssc` management panel now shows active model/status, switches per installed model, and
+      exposes stop/unload. Makes "manage models/agents" real. (Launching interactive agents via
+      `rozum launch` stays CLI — a TTY program
       isn't a web button.)
 
 - [x] **Installable PWA** (`c368774`) — apple-mobile-web-app meta + web manifest + service worker +
@@ -747,11 +751,13 @@ ghosts pruned; project rooms protected), models list/`rm`, agents view. Toolkit 
 - [x] **Live-update fix** — a reverse proxy (Tailscale serve) buffers the SSE `/api/stream`, so the
       phone never saw new/just-sent messages. Added a `pollHistory` fallback (re-fetch /api/messages
       every 2.5 s + immediately after submit; `add()` dedups by date:n). web_index.html.
-- [x] **Room picker** — DONE as `demo`/`rozum` tabs in the .ssc page header (fixed, centered);
-      each tab is a `/r/<room>` GET; `/m/<room>` live fragment + `/p/<room>` POST per room.
+- [x] **Room picker** — DONE in the `.ssc` page header: dynamic `<select>` from
+      `rozum meetings status`; each room is a `/r/<room>` GET, `/m/<room>` live fragment, and
+      `/p` POST with `room=<room>`.
 - [x] **Re-author the meeting web in `.ssc`→Rust (operator directive) — DONE; now the ONLY version.**
-      `meeting-ssc/meeting.ssc` compiles to a standalone Rust binary: multi-room (demo + the project
-      rozum room, read from `.rozum/room/`), per-handle role colours, live JS polling of `/m/<room>`,
+      `clients/meeting/meeting.ssc` compiles to a standalone Rust binary: multi-room from the daemon
+      registry, project transcripts read from `<project>/.rozum/room`, global transcripts from
+      `$XDG_STATE_HOME/rozum/rooms`, per-handle role colours, live JS polling of `/m/<room>`,
       fetch posting → `rozum meetings post`, full PWA (manifest/sw/icon + iOS standalone), grabber
       pull-to-refresh, flex + `visualViewport` layout (picker pinned, input above keyboard). launchd
       `com.rozum.meeting-ssc` :8405, Tailscale `:8443`+`:8446`. The hand-written
@@ -766,9 +772,9 @@ ghosts pruned; project rooms protected), models list/`rm`, agents view. Toolkit 
 - [x] **Message timestamps** — `tsOf` parses the jsonl `"ts":` epoch, +UTC offset, shows a dim
       `HH:MM` per row. Surfaced + fixed a latent **ordering bug**: `readRoom` concatenated dated files
       in `listDir` order (non-chronological) → now `.sorted` so the newest message is last.
-- [~] **Dynamic room list** — DEFERRED. The hardcoded `["demo","rozum"]` is the operator's earlier
-      declutter ("слишком много комнат"); scanning `roomsDir` re-introduces junk rooms. Revisit only
-      with an activity filter if a third real room is wanted.
+- [x] **Dynamic room list — DONE 2026-06-23.** The selector is rebuilt from `rozum meetings status`;
+      project rooms use their registered project path, global/ad-hoc rooms use the user state dir.
+      Junk-room pressure is handled by `/manage` clean-empty instead of hiding the registry.
 - [~] **Highlight the operator's own messages** — NOT FEASIBLE as posed: the human web client and the
       agents all post under the same local identity ("Sergiy · <handle>"), so there is no reliable
       "me" marker distinct from agents. Per-handle colour (shipped) already separates sessions.
@@ -821,12 +827,14 @@ portability stays in BACKLOG.
       `cargo test --test sandbox_regression seatbelt_e2e_allows_workspace_and_denies_secret_and_escape
       --no-default-features -- --ignored`. Docker e2e rerun is deferred to BACKLOG
       `sandbox-docker-e2e-rerun` because Docker Desktop is memory-heavy and may be intentionally off.
-- [ ] **PWA room picker.** Finish the active `meeting-web-pwa-ssc` room picker: `/api/rooms`, `?room=`
-      on messages/stream/submit, selected-room UI, shareable room links, and mobile-safe unread/active
-      state. This is the product/demo win after the doctor lands.
-- [ ] **`.ssc` live data binding for meeting web.** Complete the ScalaScript/Rust web rewrite by
-      binding the compiled `.ssc` page to live rozum rooms/transcripts/submits, then compare it against
-      the current phone-proven PWA baseline.
+- [x] **PWA room picker/linking/live room binding — DONE/SUPERSEDED 2026-06-23.** The shipped `.ssc`
+      client uses dynamic room `<select>` from `rozum meetings status`, shareable `/r/<room>` links,
+      live `/m/<room>` fragments, and `/p` submits with `room=<room>`.
+- [ ] **Mobile unread-state polish.** Optional remaining room-switcher polish: unread counts/markers
+      per inactive room. Active participants are already shown from recent authors.
+- [x] **`.ssc` live data binding for meeting web — DONE 2026-06-23.** The ScalaScript/Rust web client
+      is bound to live rozum rooms/transcripts/submits and is the shipped meeting web; the legacy
+      hand-written web path remains removed.
 - [x] **sprint-backlog-hygiene — DONE 2026-06-20.** Removed stale sprint/backlog signals now
       contradicted by master:
       model-participant is done, sandbox P3 is complete except optional Linux native jail, daemon web

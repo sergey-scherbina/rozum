@@ -7,9 +7,15 @@ churned by sibling agents switching branches — commits there don't stick.)
 - Pure .ssc → Rust meeting PWA; hand-written removed.
 - Rich text: code/bold/links/badges/date-dividers/timestamps/per-handle colour.
 - Dynamic rooms (http prefix routing) + `<select>` switcher.
-- `/manage`: rooms list/switch/create/delete (project rooms protected), models list/rm, agents view.
+- Room transcript path hardening: project rooms read `<project>/.rozum/room`;
+  ad-hoc rooms honor `$XDG_STATE_HOME`/`$HOME`.
+- `/manage`: rooms list/switch/create/delete (project rooms protected), bulk clean-empty,
+  models list/rm, gateway status/switch/stop/unload, model-participant start/stop.
 
 ## Management round 2 (2026-06-22, operator: "все задачи в спринт и делай")
-- [ ] Bulk cleanup of junk rooms — one button: delete all EMPTY global rooms (0 msgs); project rooms safe.
-- [ ] Gateway active model — show current + switch (restart gateway with new --model).
-- [ ] Stop / launch agents — launch via `rozum launch`, stop via kill; feasibility TBD (processes).
+- [x] Bulk cleanup of junk rooms — one button deletes EMPTY global rooms; project rooms safe.
+- [x] Gateway active model — show current model, switch loaded model, stop, unload.
+- [x] Model participant controls — start/stop `rozum meetings participant` per room.
+- [~] Generic interactive `rozum launch` agents from the web — deferred until there is an explicit
+      non-TTY supervisor contract; a TTY program should stay CLI-only for now.
+- [ ] Replace shell/Python management actions with daemon REST management endpoints when those APIs exist.
