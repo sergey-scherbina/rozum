@@ -12,7 +12,7 @@ license = "Apache-2.0"
 # See docs/specs/mlx-native-runtime.md.
 
 [features]
-mlx-native = ["dep:mlx-rs", "dep:mlx-lm", "dep:mlx-lm-utils"]
+mlx-native = ["dep:mlx-rs", "dep:mlx-lm", "dep:mlx-lm-utils", "dep:mlx-sys"]
 
 [dependencies]
 rozum-core = { path = "../rozum-core" }
@@ -31,6 +31,10 @@ tracing = "0.1"
 mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "12fac5c0cb077d987aeaec23db2a509e7eb9f21b", optional = true }
 mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "12fac5c0cb077d987aeaec23db2a509e7eb9f21b", optional = true }
 mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "12fac5c0cb077d987aeaec23db2a509e7eb9f21b", optional = true }
+# Raw C bindings (same pin) — for `mlx_synchronize` at model teardown (flush pending GPU work so it
+# doesn't leak into the next model loaded in-process; the lazy-pipeline swap fix). Unified with the
+# instance mlx-rs already builds (same git rev) → no extra C++ compile.
+mlx-sys = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "12fac5c0cb077d987aeaec23db2a509e7eb9f21b", optional = true }
 
 [dev-dependencies]
 # For the prompt-lookup accept-rate measurement (`specdecode_plookup` ignored test):

@@ -5056,6 +5056,7 @@ dependencies = [
  "mlx-lm",
  "mlx-lm-utils",
  "mlx-rs",
+ "mlx-sys",
  "rozum-core",
  "rozum-models",
  "serde",

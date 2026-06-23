@@ -116,6 +116,20 @@
   `synchronize` → needs `mlx_synchronize` in the mlx-rs fork (focused multi-repo change, reboot-sensitive
   Metal area → own session). Plain settle delay does NOT fix it (tested 1.5s). NEXT: expose mlx_synchronize
   + flush at MlxNativeBackend teardown; robust path today = solve.sh (separate processes).
+  **FIX #5 ATTEMPTED + EXHAUSTIVELY DIAGNOSED (2026-06-24): synchronize flush does NOT fix it.** Exposed
+  `mlx_synchronize` (mlx-sys already binds it; `Stream::as_ptr` is public) and call it at MlxNativeBackend
+  teardown (worker_main, before the model frees). Confirmed it RUNS (rc=0). But the GLM-9B→Qwen3-4B lazy
+  executor STILL fails. Ruled out, each tested live: stream-flush (synchronize), MLX cache-evict
+  (set_cache_limit 0/restore), peak-reset, settle-before-build (1.5s), settle-after-build (2s), inline-drop
+  vs spawn_blocking. Build path is IDENTICAL (gateway builder calls the same build_from_config). Control:
+  the gateway Switchboard (`/control/switch`) swaps GLM-9B→Qwen3-4B in-process CLEANLY even after a LONG
+  GLM gen (1780 chars). And Qwen3-4B→Qwen3-4B lazy works. ⇒ ROOT CAUSE is STRUCTURAL: the Switchboard runs
+  each model as a SEPARATE top-level gateway request; the lazy pipeline runs both NESTED in one request —
+  and it's specific to GLM-as-first-tier. NOT an MLX stream/cache/timing issue. NEXT (real fix): route the
+  lazy pipeline's per-tier load/gen through the gateway's separate-request swap path (architectural), or
+  keep using solve.sh (separate processes, proven). KEPT WINS: `mlx_synchronize` flush (teardown hygiene) +
+  `reset_peak_memory` at teardown (fixes the lazy footprint-cache poisoning — each swapped model records its
+  OWN peak instead of the running max).
 - [ ] **adaptive-cascade-residency** (operator idea 2026-06-23; now the residency half of `pipeline-cascade`)
   — make the cascade EAGER if its local
   tiers co-fit, LAZY (one resident at a time, swap on escalation) if not. Today `build_cascade` is
