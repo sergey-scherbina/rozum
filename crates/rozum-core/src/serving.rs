@@ -402,26 +402,149 @@ fn repair_tool_object(b: &[u8], start: usize) -> Option<(String, usize)> {
 /// with an incidental code block is never written. The CALLER still gates on (GLM family) AND
 /// (`parse_tool_calls` returned empty). `tools` is the request's offered tool set.
 pub fn synth_glm_tool_calls(text: &str, tools: &[crate::backend::ToolDef]) -> Vec<(String, String)> {
-    // Mode 2: bare tool-args JSON objects (fenced or not — fence markers aren't braces, so
-    // balanced_json_objects finds the object inside a ```json fence directly).
+    // ONE pass over the fenced blocks. A ```json fence (or any fence whose body is a JSON object) is
+    // mode-2: tool ARGS without a name → recover the tool by matching keys to a schema. Any other
+    // fence (```toml/```rust raw file content) is mode-1: filename from the preceding prose. Handling
+    // both in one pass is what keeps mode-1 from grabbing a mode-2 JSON-args body as "file content"
+    // (the bug that wrote `{"file_path":…}` INTO Cargo.toml).
+    let write_tool = resolve_write_tool_name(tools);
     let mut out = Vec::new();
-    for obj in balanced_json_objects(text) {
-        let Ok(Value::Object(m)) = serde_json::from_str::<Value>(obj) else { continue };
-        if m.contains_key("name") {
-            continue; // a full {name, arguments} call → parse_tool_calls's job, not ours
+    let mut pos = 0usize; // scan cursor
+    let mut prose_start = 0usize; // start of the prose preceding the current fence
+    while let Some(rel) = text[pos..].find("```") {
+        let open = pos + rel;
+        let preceding = &text[prose_start..open];
+        let after = &text[open + 3..];
+        let Some(nl) = after.find('\n') else { break }; // unterminated fence header → stop
+        let lang = after[..nl].trim().to_ascii_lowercase();
+        let body_start = open + 3 + nl + 1;
+        let (body_end, next) = match text[body_start..].find("```") {
+            Some(c) => (body_start + c, body_start + c + 3),
+            None => (text.len(), text.len()),
+        };
+        let body = text[body_start..body_end].trim();
+        if lang == "json" || body.starts_with('{') {
+            // Mode-2: bare tool-args JSON (GLM's common create form). Lenient parse tolerates GLM's
+            // mismatched closing bracket (`]`/`)` for `}`); a `name` field means it's a full call →
+            // parse_tool_calls's job, not ours.
+            if let Some(m) = parse_tool_args_lenient(body) {
+                if !m.contains_key("name") {
+                    if let Some(name) = match_tool_by_args(&m, tools) {
+                        out.push((name, Value::Object(m).to_string()));
+                    }
+                }
+            }
+        } else if let (Some(path), Some(wt)) = (last_safe_filename(preceding), write_tool.as_deref()) {
+            // Mode-1: raw file content; filename from the preceding prose.
+            let mut m = serde_json::Map::new();
+            m.insert("file_path".into(), Value::String(path));
+            m.insert("content".into(), Value::String(format!("{}\n", body.trim_end_matches('\n'))));
+            out.push((wt.to_string(), Value::Object(m).to_string()));
         }
-        if let Some(name) = match_tool_by_args(&m, tools) {
-            out.push((name, Value::Object(m).to_string()));
+        prose_start = next;
+        pos = next;
+        if pos >= text.len() {
+            break;
         }
     }
-    if !out.is_empty() {
-        return out;
+    // Also catch a bare (un-fenced) JSON args object, if no fence yielded anything.
+    if out.is_empty() {
+        for obj in balanced_json_objects(text) {
+            if let Some(m) = parse_tool_args_lenient(obj) {
+                if !m.contains_key("name") {
+                    if let Some(name) = match_tool_by_args(&m, tools) {
+                        out.push((name, Value::Object(m).to_string()));
+                    }
+                }
+            }
+        }
     }
-    // Mode 1 fallback: raw file content in a fence + filename in the preceding prose.
-    if let Some(write_tool) = resolve_write_tool_name(tools) {
-        return synth_writes_from_prose(text, &write_tool);
+    out
+}
+
+/// Parse a tool-args JSON object, tolerating GLM's frequent mismatched closing bracket (it ends the
+/// args object with `]` or `)` instead of `}` — the real captured malformation that made strict
+/// `balanced_json_objects` miss it). Strict parse first; on failure, swap a single trailing
+/// wrong-bracket for `}` and retry. `None` if it still isn't a JSON object.
+fn parse_tool_args_lenient(body: &str) -> Option<serde_json::Map<String, Value>> {
+    let t = body.trim();
+    if let Ok(Value::Object(m)) = serde_json::from_str::<Value>(t) {
+        return Some(m);
     }
-    Vec::new()
+    // Tier 2: GLM closes the object with the wrong bracket (`]`/`)` for `}`).
+    if t.starts_with('{') {
+        if let Some(stripped) = t.strip_suffix(']').or_else(|| t.strip_suffix(')')) {
+            let repaired = format!("{stripped}}}");
+            if let Ok(Value::Object(m)) = serde_json::from_str::<Value>(&repaired) {
+                return Some(m);
+            }
+        }
+    }
+    // Tier 3: GLM leaves UNESCAPED quotes inside `content` (e.g. `println!("{}", x)`), which no
+    // bracket fix can save. Extract the known tool-arg shapes key-by-key instead.
+    glm_kv_extract(t)
+}
+
+/// Tolerant key-by-key extraction of GLM's two tool-arg shapes from mangled JSON: the file-write
+/// `{file_path|path, content}` and the shell `{command}`. The clean values (path/command) read to
+/// their first quote; `content` reads to the LAST quote in the object, so unescaped inner quotes in
+/// code are kept literally. JSON escapes (`\n`, `\"`, …) are decoded. `None` if neither shape is found.
+fn glm_kv_extract(t: &str) -> Option<serde_json::Map<String, Value>> {
+    let mut m = serde_json::Map::new();
+    if let Some(path) = glm_clean_str(t, "file_path").or_else(|| glm_clean_str(t, "path")) {
+        let content = glm_content_str(t)?;
+        m.insert("file_path".into(), Value::String(path));
+        m.insert("content".into(), Value::String(content));
+        return Some(m);
+    }
+    if let Some(cmd) = glm_clean_str(t, "command") {
+        m.insert("command".into(), Value::String(cmd));
+        return Some(m);
+    }
+    None
+}
+
+/// The string after `"key": "`, read to the FIRST closing quote — for CLEAN values (paths, commands)
+/// that don't contain quotes. JSON-unescaped.
+fn glm_clean_str(t: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\"");
+    let after = &t[t.find(&pat)? + pat.len()..];
+    let after = after[after.find(':')? + 1..].trim_start().strip_prefix('"')?;
+    Some(glm_json_unescape(&after[..after.find('"')?]))
+}
+
+/// The `content` value, read to the LAST quote in the object — tolerant of GLM's unescaped inner
+/// quotes (the value is code/text; the real terminator is the quote before the closing bracket).
+fn glm_content_str(t: &str) -> Option<String> {
+    let after = &t[t.find("\"content\"")? + "\"content\"".len()..];
+    let after = after[after.find(':')? + 1..].trim_start().strip_prefix('"')?;
+    Some(glm_json_unescape(&after[..after.rfind('"')?]))
+}
+
+/// Decode the JSON string escapes GLM did emit (`\n \t \r \" \\ \/`); leave anything else verbatim.
+fn glm_json_unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('/') => out.push('/'),
+            Some(o) => {
+                out.push('\\');
+                out.push(o);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// The offered tool whose argument schema `args` fits — its keys ⊆ the tool's `properties` and all the
@@ -471,38 +594,6 @@ fn resolve_write_tool_name(tools: &[crate::backend::ToolDef]) -> Option<String> 
                 .is_some_and(|p| p.contains_key("content") && (p.contains_key("file_path") || p.contains_key("path")))
         })
         .map(|t| t.name.clone())
-}
-
-/// Mode-1 extractor: each fenced block whose file path is recoverable from the PRECEDING PROSE becomes
-/// a `Write{file_path, content=fence body}`; fences with no recoverable filename are skipped.
-fn synth_writes_from_prose(text: &str, write_tool: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let mut pos = 0usize; // scan cursor
-    let mut prose_start = 0usize; // start of the prose preceding the current fence
-    while let Some(rel) = text[pos..].find("```") {
-        let open = pos + rel;
-        let preceding = &text[prose_start..open];
-        let after = &text[open + 3..];
-        let Some(nl) = after.find('\n') else { break }; // unterminated fence header → stop
-        let body_start = open + 3 + nl + 1;
-        let (body_end, next) = match text[body_start..].find("```") {
-            Some(c) => (body_start + c, body_start + c + 3),
-            None => (text.len(), text.len()), // unterminated body: take the rest, stop after
-        };
-        if let Some(path) = last_safe_filename(preceding) {
-            let mut m = serde_json::Map::new();
-            m.insert("file_path".into(), Value::String(path));
-            let content = format!("{}\n", text[body_start..body_end].trim_end_matches('\n'));
-            m.insert("content".into(), Value::String(content));
-            out.push((write_tool.to_string(), Value::Object(m).to_string()));
-        }
-        prose_start = next;
-        pos = next;
-        if pos >= text.len() {
-            break;
-        }
-    }
-    out
 }
 
 /// The LAST safe relative filename mentioned in `prose` (a fence's preceding text), or `None`. A token
@@ -594,6 +685,33 @@ mod tests {
         assert!(a0["content"].as_str().unwrap().contains("[package]"));
         let a2: Value = serde_json::from_str(&calls[2].1).unwrap();
         assert!(a2["command"].as_str().unwrap().contains("cargo run"));
+    }
+
+    #[test]
+    fn synth_repairs_malformed_json_and_writes_real_content() {
+        // The REAL live failure: GLM closes the args object with `]` instead of `}`. The synth must
+        // still recover Write{file_path, content=THE TOML/CODE} — NOT write the JSON wrapper into the
+        // file (the bug that put `{"file_path":…}` into Cargo.toml).
+        let malformed = include_str!("../tests/fixtures/glm_create_artifact_malformed_json.txt");
+        let calls = synth_glm_tool_calls(malformed, &claude_tools());
+        // 4 fences: Cargo.toml + src/main.rs (Write) then two `cargo run` (Bash).
+        assert_eq!(calls.len(), 4, "got: {calls:?}");
+        assert_eq!(calls[0].0, "Write");
+        assert_eq!(calls[1].0, "Write");
+        assert_eq!(calls[2].0, "Bash");
+        let a0: Value = serde_json::from_str(&calls[0].1).unwrap();
+        // file_path is GLM's full path, content is the ACTUAL toml — not the JSON wrapper.
+        assert!(a0["file_path"].as_str().unwrap().ends_with("Cargo.toml"));
+        let c0 = a0["content"].as_str().unwrap();
+        assert!(c0.starts_with("[package]"), "content must be the toml, got: {c0:?}");
+        assert!(!c0.contains("file_path"), "the JSON wrapper must NOT leak into the file content");
+        // main.rs had UNESCAPED inner quotes (`println!(\"{}\")`) AND the `]` malformation — the
+        // tolerant extractor must still recover the real code.
+        let a1: Value = serde_json::from_str(&calls[1].1).unwrap();
+        let c1 = a1["content"].as_str().unwrap();
+        assert!(c1.contains("fn main"), "got: {c1:?}");
+        assert!(c1.contains("println!(\"{}\""), "inner unescaped quotes preserved: {c1:?}");
+        assert!(!c1.contains("file_path"), "no wrapper leak");
     }
 
     #[test]

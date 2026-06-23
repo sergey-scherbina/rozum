@@ -449,6 +449,8 @@ mod inner {
                 eos: Vec::new(), // EOS/EOG handled in the token iterator above
                 model_type: String::new(),
                 harmony: false, // GGUF serves Qwen-style `<tool_call>` models, not harmony
+                glm_synth: false, // GLM-artifact synth is MLX-native-only for now
+                tools: Vec::new(),
             };
 
             // `consume_tokens` streams TextDelta / ToolUse* / Done itself (incl. parsing

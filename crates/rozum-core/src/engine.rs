@@ -33,6 +33,15 @@ pub struct EngineMeta {
     /// gpt-oss **harmony** channel format (`drive` picks `harmony::parse_harmony`)
     /// vs the Qwen `<tool_call>` parser (`serving::parse_tool_calls`).
     pub harmony: bool,
+    /// GLM create-from-scratch artifact synthesis is armed for this request (GLM family AND
+    /// `ROZUM_GLM_ARTIFACT_SYNTH` enabled — computed engine-side). When set, `consume_tokens`
+    /// falls back to [`crate::serving::synth_glm_tool_calls`] over `tools` if the normal parse
+    /// finds no call (docs/specs/glm-artifact-write-synth.md). GLM is a DENSE arch → it finalizes
+    /// here in the engine seam, not in the mlx batch path.
+    pub glm_synth: bool,
+    /// The request's offered tools — the schema source the GLM artifact synth matches bare JSON
+    /// args against to recover the tool name. Empty unless `glm_synth`.
+    pub tools: Vec<crate::backend::ToolDef>,
 }
 
 /// Construction knobs common to local engines.
@@ -127,6 +136,8 @@ where
             eos: m.eos.clone(),
             model_type: m.model_type.clone(),
             harmony: m.harmony,
+            glm_synth: m.glm_synth,
+            tools: m.tools.clone(),
         }
     };
     let prompt_len = prompt.len();
@@ -372,7 +383,25 @@ where
     } else if meta.harmony {
         crate::harmony::parse_harmony(&full_text).tool_calls
     } else {
-        crate::serving::parse_tool_calls(&full_text)
+        let mut calls = crate::serving::parse_tool_calls(&full_text);
+        // GLM create-from-scratch artifact fallback: GLM (a DENSE arch) finalizes HERE, not in the
+        // mlx batch path. When it named no tool but showed the work (tool-args JSON, or labeled file
+        // content), synthesize the calls so the file/command actually lands
+        // (docs/specs/glm-artifact-write-synth.md). `synth_glm_tool_calls` returns empty unless a
+        // bare JSON object matches an offered tool's schema or a safe prose filename is found.
+        if calls.is_empty() && meta.glm_synth {
+            calls = crate::serving::synth_glm_tool_calls(&full_text, &meta.tools);
+        }
+        if meta.glm_synth {
+            crate::obs::log_event(serde_json::json!({
+                "event": "glm_artifact_synth",
+                "stop": format!("{stop_reason:?}"),
+                "synth_calls": calls.len(),
+                "n_tools": meta.tools.len(),
+                "text_len": full_text.len(),
+            }));
+        }
+        calls
     };
     if !tool_calls.is_empty() {
         for (name, args) in tool_calls.iter() {
@@ -422,6 +451,8 @@ mod tests {
             eos,
             model_type: "test".into(),
             harmony,
+            glm_synth: false,
+            tools: Vec::new(),
         }
     }
 

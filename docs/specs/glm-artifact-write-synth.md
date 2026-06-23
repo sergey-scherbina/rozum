@@ -124,3 +124,27 @@ regression. Same discipline as every other GLM lever here.
 
 Pairs with `glm4-bringup.md` (decision gap, ROOT CAUSE), `project-codex-patch-barrier`
 (synthesize_write_from_obj precedent), BACKLOG `glm-artifact-write-synth`.
+
+### RESOLVED — synth works end-to-end, GLM create-from-scratch PASSES (2026-06-23)
+Two bugs found + fixed; final live cell `claude×GLM-4-32B×build` = **pass=1, turns=6, tools=3** (was
+turns=1 tools=0 pass=0).
+
+1. **Firing bug — wrong finalize path.** The synth was wired into `BatchSeq::finalize` (the mlx
+   batch/hybrid path), but GLM-4 is a **DENSE arch** → a single request finalizes in the
+   native-engine-spi seam `engine::consume_tokens`, never reaching BatchSeq. Fix: thread the gate +
+   tools through `EngineMeta { glm_synth, tools }` (set in the mlx dense dispatch) and run the synth
+   in `consume_tokens`'s finalize. (Batched GLM still synthesizes in BatchSeq.) `finalize_dbg`
+   instrumentation pinned this: the event never fired → finalize never ran on that path.
+
+2. **GLM emits MALFORMED JSON.** Its tool-args objects are doubly broken: it closes with `]` instead
+   of `}`, AND leaves UNESCAPED inner quotes in `content` (`println!("{}", x)`). `balanced_json_objects`
+   couldn't extract them → mode-2 missed → mode-1 wrote the raw JSON wrapper INTO the file. Fix: a
+   single fence-aware pass (json-fence→mode-2, content-fence→mode-1, so they never cross-contaminate)
+   + `parse_tool_args_lenient` (strict → bracket-repair → key-by-key extraction reading `content` to
+   the LAST quote, tolerating unescaped inner quotes). Unit-tested against the real captured fixtures
+   (well-formed + `]`-malformed + unescaped-quote). rozum-core 113 green.
+
+**Status: opt-in (`ROZUM_GLM_ARTIFACT_SYNTH=1`), PROVEN on one cell. Recommend a multi-rep A/B
+(create lift + edit/chat no-regression — earlier fix=2/2) before flipping the global default.** GLM
+is now usable for create-from-scratch with the synth enabled; the model's JSON is messy but the
+tolerant parser absorbs its two common malformations.

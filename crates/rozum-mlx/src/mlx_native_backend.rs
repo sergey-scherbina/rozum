@@ -1271,6 +1271,11 @@ mod inner {
                     eos: eos.to_vec(),
                     model_type: String::new(),
                     harmony,
+                    // GLM is a dense arch → it finalizes in the engine seam (consume_tokens), not the
+                    // mlx batch path; arm the artifact synth here.
+                    glm_synth: super::model_is_glm(&job.model_id)
+                        && super::glm_artifact_synth_enabled(),
+                    tools: job.tools.clone(),
                 },
             };
             crate::engine::drive(
@@ -2115,43 +2120,20 @@ mod inner {
 
         /// Parse any tool calls, emit them (or the held-back text), then `Done`.
         fn finalize(&mut self) {
-            rozum_core::obs::log_event(serde_json::json!({
-                "event": "finalize_dbg",
-                "stop": format!("{:?}", self.stop),
-                "model": &self.job.model_id,
-                "is_glm": super::model_is_glm(&self.job.model_id),
-                "parsed_calls": crate::serving::parse_tool_calls(&self.full_text).len(),
-                "text_len": self.full_text.len(),
-                "synth_enabled": super::glm_artifact_synth_enabled(),
-            }));
             let tool_calls = if matches!(self.stop, StopReason::Cancelled) {
                 Vec::new()
             } else {
                 let mut calls = crate::serving::parse_tool_calls(&self.full_text);
-                // GLM create-from-scratch artifact fallback (opt-in, default OFF): when a GLM model
-                // named no tool but showed the work (tool-args JSON, or labeled file content),
-                // synthesize the calls so the files/commands actually land
-                // (docs/specs/glm-artifact-write-synth.md). `synth_glm_tool_calls` returns empty unless
-                // a bare JSON object matches an offered tool's schema or a safe prose filename is found,
-                // so chat snippets aren't synthesized. Logged (with the enabled flag) so a no-fire is
-                // diagnosable from the gateway event log.
-                if calls.is_empty() && super::model_is_glm(&self.job.model_id) {
-                    let enabled = super::glm_artifact_synth_enabled();
-                    let synth = if enabled {
-                        crate::serving::synth_glm_tool_calls(&self.full_text, &self.job.tools)
-                    } else {
-                        Vec::new()
-                    };
-                    rozum_core::obs::log_event(serde_json::json!({
-                        "event": "glm_artifact_synth",
-                        "model": self.job.model_id,
-                        "enabled": enabled,
-                        "n_tools": self.job.tools.len(),
-                        "synth_calls": synth.len(),
-                    }));
-                    if enabled {
-                        calls = synth;
-                    }
+                // GLM create-from-scratch artifact fallback for the BATCHED path (≥2 concurrent GLM
+                // requests route here; a single GLM request — dense arch — finalizes in the engine
+                // seam, see engine::consume_tokens). Opt-in (default OFF). `synth_glm_tool_calls`
+                // returns empty unless a bare JSON object matches an offered tool's schema or a safe
+                // prose filename is found, so chat snippets aren't synthesized.
+                if calls.is_empty()
+                    && super::glm_artifact_synth_enabled()
+                    && super::model_is_glm(&self.job.model_id)
+                {
+                    calls = crate::serving::synth_glm_tool_calls(&self.full_text, &self.job.tools);
                 }
                 calls
             };
@@ -3510,6 +3492,9 @@ mod inner {
             eos: eos.to_vec(),
             model_type: String::new(),
             harmony,
+            // Hybrid path; GLM is dense so this is false in practice, but compute it uniformly.
+            glm_synth: super::model_is_glm(&job.model_id) && super::glm_artifact_synth_enabled(),
+            tools: job.tools.clone(),
         };
         let mut ids = PipelinedIds::new(generate, pipeline);
         crate::engine::consume_tokens(
