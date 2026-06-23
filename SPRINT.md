@@ -589,6 +589,17 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   rewrite): strip `cd <name> &&` + `<name>/` so files land in cwd, decode literal `\n`/stray-`\n` in echo.
   Still bounded by GLM's chaining variance. Lesson (again): read the raw bytes before theorizing "model
   nature."
+  **CLEAN delivery fix BUILT + A/B-REFUTED (operator "Да", plucky-finch 2026-06-23):** strip `cd <dir> &&`
+  + echo→`printf '%b'` (decode the literal `\n`, drop the stray `\n` before `>`), NOT the harmful cargo-
+  init rewrite. UNIT-PROVEN on GLM's EXACT raw turn-2 command (files land in cwd, `cargo run -- hello` →
+  **olleh**). But the live multi-turn A/B (N=6): files-in-cwd 0/6→2/6 (marginal), **build 0/6 → 0/6 (no
+  change)** — the fix is correct on its target shape, but GLM's run-to-run VARIANCE (different command
+  forms + different stop points each run) means it rarely produces that shape end-to-end. So a shape-
+  specific delivery fix is necessary-but-not-sufficient; the dominant factor is GLM's UNRELIABILITY
+  (variance), not one shape. NOT shipped (marginal, fragile GLM-specific code, zero build lift; tested in
+  a probe → gateway clean). FINAL on GLM: capable but too variable for a gateway fix — the lever is the
+  35B cascade below. (4th hypothesis→A/B→refutation of the session: verify-gate, prompt-degrades-code,
+  cargo-init-cascade, clean-delivery — the discipline pays every time.)
 - [ ] **gptoss-codex-cascade** (stretch, now ALSO the GLM lever) — gpt-oss/GLM for speed, auto-fall-back
   to 35B on a failed cell (the `CascadeBackend` exists). Best-of-both: fast when the small model succeeds,
   35B-reliable when it doesn't. The matrix proved 35B is the agentic driver (14/15) and GLM is not (4/15,
