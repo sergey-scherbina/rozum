@@ -2234,6 +2234,18 @@ mod inner {
         !matches!(std::env::var("ROZUM_MLX_CONSTRAIN").ok().as_deref(), Some("0" | "false" | "off"))
     }
 
+    /// **Opt-in (default OFF):** also constrain GLM's BARE tool-args object (`{"file_path":…}` with no
+    /// name line — the create-from-scratch artifact) to the matching tool's schema during decode, so
+    /// GLM emits valid JSON args at the SOURCE rather than relying on the post-hoc tolerant repair.
+    /// Default off because the synth + `parse_tool_args_lenient` already absorb GLM's observed
+    /// malformations; enable with `ROZUM_GLM_CONSTRAIN_ARGS=1` for root-cause robustness.
+    fn glm_constrain_bare_args_enabled() -> bool {
+        matches!(
+            std::env::var("ROZUM_GLM_CONSTRAIN_ARGS").ok().as_deref(),
+            Some("1" | "true" | "on")
+        )
+    }
+
     /// Runtime driver that constrains a tool call to the tool schemas. Built from a job's
     /// `tools`; once the model opens a `<tool_call>` the body is constrained — JSON Hermes
     /// (`{"name":…,"arguments":…}`) or the Qwen3.6 XML form (`<function=…>`), whichever the
@@ -2243,6 +2255,9 @@ mod inner {
     struct ToolConstraint {
         names: Vec<String>,
         arg_schemas: Vec<crate::constrain::Schema>,
+        /// Per-tool required-param keys — the bare-args anchor ([`find_glm_bare_args`]) matches a
+        /// `{"<required_key>"` object start to a tool when `glm_constrain_bare_args_enabled`.
+        req_keys: Vec<Vec<String>>,
         cons: crate::constrain::Constraint,
         active: bool,
         done: bool,
@@ -2285,6 +2300,32 @@ mod inner {
             let pos = i + rel;
             if text[pos + 1..].trim_start().starts_with("\"name\"") {
                 return Some(pos);
+            }
+            i = pos + 1;
+        }
+        None
+    }
+
+    /// **Opt-in** GLM bare-args anchor (`ROZUM_GLM_CONSTRAIN_ARGS`): GLM sometimes emits a tool's ARG
+    /// object (`{"file_path":…}`) with NO preceding name line — the create-from-scratch artifact, where
+    /// it also tends to leave malformed JSON (unescaped quotes / wrong bracket). Find the first `{`
+    /// whose FIRST key is a REQUIRED param of an offered tool → `(tool_index, brace_offset)`, so the
+    /// constraint can force VALID JSON to that tool's schema *during decode* — preventing the
+    /// malformation at the source instead of repairing it after. Requires a required-param first key
+    /// (not any `{`), so a brace in prose or a non-tool JSON example isn't grabbed. Default OFF (the
+    /// post-hoc synth + tolerant parser already handle the observed malformations); this is the
+    /// root-cause robustness lever for callers who want valid args at the source.
+    pub(crate) fn find_glm_bare_args(text: &str, req_keys: &[Vec<String>]) -> Option<(usize, usize)> {
+        let mut i = 0;
+        while let Some(rel) = text[i..].find('{') {
+            let pos = i + rel;
+            if let Some(rest) = text[pos + 1..].trim_start().strip_prefix('"') {
+                if let Some(qend) = rest.find('"') {
+                    let key = &rest[..qend];
+                    if let Some(idx) = req_keys.iter().position(|keys| keys.iter().any(|k| k == key)) {
+                        return Some((idx, pos));
+                    }
+                }
             }
             i = pos + 1;
         }
@@ -2345,11 +2386,23 @@ mod inner {
                 .iter()
                 .map(|t| crate::constrain::Schema::parse(&t.input_schema))
                 .collect();
+            let req_keys: Vec<Vec<String>> = job
+                .tools
+                .iter()
+                .map(|t| {
+                    t.input_schema
+                        .get("required")
+                        .and_then(|r| r.as_array())
+                        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                        .unwrap_or_default()
+                })
+                .collect();
             // Placeholder until the format is picked at activation.
             let cons = crate::constrain::Constraint::Json(crate::constrain::Schema::Any);
             Some(Self {
                 names,
                 arg_schemas,
+                req_keys,
                 cons,
                 active: false,
                 done: false,
@@ -2375,7 +2428,15 @@ mod inner {
                 // lands, constrain the args object directly to that tool's schema. Until then
                 // (and for a pure prose answer, which never names a tool on a line) → free.
                 if !self.active {
-                    let (idx, off) = find_glm_tool_call(full_text, &self.names)?;
+                    // Primary: a `{tool_name}\n` line → constrain that tool's args object.
+                    // Opt-in fallback: GLM emitted BARE args (`{"file_path":…}`) with no name line →
+                    // anchor on the object whose first key is a required param of an offered tool.
+                    let anchor = find_glm_tool_call(full_text, &self.names).or_else(|| {
+                        glm_constrain_bare_args_enabled()
+                            .then(|| find_glm_bare_args(full_text, &self.req_keys))
+                            .flatten()
+                    });
+                    let (idx, off) = anchor?;
                     self.cons = Constraint::Json(self.arg_schemas[idx].clone());
                     self.active = true;
                     self.body_start = off;
@@ -4210,6 +4271,28 @@ mod tests {
         // A pure prose answer (no tool-name line) never anchors — final-answer path stays free.
         assert_eq!(find_glm_tool_call("I have fixed the bug by editing main.rs.\n", &names), None);
         assert_eq!(find_glm_tool_call("Reading the file now.\nDone.", &names), None);
+    }
+
+    #[test]
+    fn find_glm_bare_args_anchors_on_required_key() {
+        use super::inner::find_glm_bare_args;
+        // req_keys per offered tool: Write {file_path, content}, Bash {command}.
+        let req = vec![
+            vec!["file_path".to_string(), "content".to_string()],
+            vec!["command".to_string()],
+        ];
+        // Bare Write args (no name line) → anchor on the `{`, tool index 0.
+        let t = "First, I'll create the Cargo.toml file:\n```json\n{\"file_path\": \"Cargo.toml\", \"content\": \"x\"}";
+        assert_eq!(find_glm_bare_args(t, &req), Some((0, t.find('{').unwrap())));
+        // Bare Bash args → tool index 1.
+        let b = "Now run it:\n{\"command\": \"cargo run\"}";
+        assert_eq!(find_glm_bare_args(b, &req), Some((1, b.find('{').unwrap())));
+        // A `{` whose first key is NOT a required param (prose / non-tool JSON) → no anchor.
+        assert_eq!(find_glm_bare_args("Here is data: {\"foo\": 1, \"bar\": 2}", &req), None);
+        // A brace with no quoted key (a Rust struct literal in a code example) → no anchor.
+        assert_eq!(find_glm_bare_args("let c = Config { path: \"x\" };", &req), None);
+        // Pure prose → none.
+        assert_eq!(find_glm_bare_args("I'll create the files now.", &req), None);
     }
 
     #[test]
