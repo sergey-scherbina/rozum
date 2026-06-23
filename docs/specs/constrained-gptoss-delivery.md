@@ -166,4 +166,11 @@ Fix: `apply_reasoning_level` (in `sanitize_chat_template`) rewrites the template
 = "medium"` default to `ROZUM_GPTOSS_REASONING` (`low`|`medium`|`high`, **default `low`** — rozum runs
 gpt-oss for agentic coding, where the tasks are simple and medium CoT is wasted). No fork rev-bump
 (string-substitution on the template, not an args field); `medium` is a no-op (the template default);
-non-harmony templates are untouched. Pure `apply_reasoning_level` unit-tested. Validation pending.
+non-harmony templates are untouched. Pure `apply_reasoning_level` unit-tested.
+
+**A/B validated (2026-06-23, codex×gpt-oss×build ×3):** medium (control) = 1/3, times
+280(timeout)/126/221 s, 1 timeout; **low (fix) = 2/3, times 106/59/105 s, 0 timeouts.** `low` is
+**~2.3× faster** (avg ~90 s vs ~209 s) and **eliminates the timeout** (the actual failure mode),
+lifting build 1/3 → 2/3. Confirms the cause (medium CoT → long times + timeouts) and the fix. The
+residual 1/3 fail at `low` (105 s, NOT a timeout) is model-correctness variance, not reasoning.
+Shipped on master.
