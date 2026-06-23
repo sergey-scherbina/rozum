@@ -43,9 +43,39 @@ use async_trait::async_trait;
 use futures::StreamExt;
 
 use crate::backend::{
-    ChatBackend, ChatEvent, ChatRequest, ChatStream, ModelError, ModelResult, StopReason,
+    ChatBackend, ChatEvent, ChatRequest, ChatStream, ContentBlock, Message, ModelError,
+    ModelResult, Role, StopReason,
 };
 use acceptance::pipeline_verdict;
+
+/// Sampling temperature for an advisor/planner tier — low, for a stable, deterministic-ish plan.
+const PLANNER_TEMPERATURE: f32 = 0.2;
+/// Token budget for an advisor's plan (the executor gets the full budget; a plan stays concise).
+const PLANNER_MAX_TOKENS: u32 = 800;
+/// The framing handed to every non-final (advisor) tier in a `Pipeline` cascade.
+const PLANNER_FRAMING: &str = "You are the PLANNER in a multi-stage pipeline. Do NOT call tools, write \
+files, or run anything. Think the task through and output a concise, concrete plan for the next model to \
+execute: the approach, the key steps in order, and any critical code or structure it must get right. Be \
+specific and brief — this plan is the only thing the executor receives from you.";
+/// How an advisor's plan is framed when forwarded into the next tier's input.
+const PLAN_PREFIX: &str = "[Plan from the advisor model — follow it to complete the task]\n";
+
+/// Forward an advisor's plan into the conversation the next tier sees (the forward-output handoff).
+/// Appends to the trailing user-text message when there is one (keeps role alternation intact for
+/// strict chat templates); otherwise adds a new user message.
+fn forward_plan(messages: &mut Vec<Message>, plan: &str) {
+    let note = format!("{PLAN_PREFIX}{plan}");
+    if let Some(last) = messages.last_mut() {
+        if last.role == Role::User {
+            if let Some(ContentBlock::Text { text }) = last.content.last_mut() {
+                text.push_str("\n\n");
+                text.push_str(&note);
+                return;
+            }
+        }
+    }
+    messages.push(Message::user(note));
+}
 
 /// Where a model runs — local (its own resource limits, e.g. memory) vs remote (the network +
 /// the provider's quota/rate limits). A `Network` failure parks *all* remote models at once.
@@ -193,7 +223,8 @@ impl CascadeBackend {
     /// evidence is thin. Never exceeds the top tier.
     fn start_index(&self, req: &ChatRequest, difficulty: f32, n: usize) -> usize {
         match self.config.strategy {
-            RoutingStrategy::AlwaysCheapest => 0,
+            // `Pipeline` runs every tier from 0 and never consults `start_index`; 0 is a safe default.
+            RoutingStrategy::AlwaysCheapest | RoutingStrategy::Pipeline => 0,
             RoutingStrategy::ClassifyThenStart => Self::classify_start(difficulty, n),
             RoutingStrategy::Learned => {
                 if let Some(stats) = &self.config.stats {
@@ -263,6 +294,65 @@ impl CascadeBackend {
                 concurrency: 0,
                 resource: ResourceSnapshot::default(),
             });
+        }
+    }
+
+    /// The **pipeline** pass (`RoutingStrategy::Pipeline`): every request flows through all tiers in
+    /// cost order. Each non-final tier is an *advisor* — it gets the conversation-so-far plus a
+    /// planning framing, **no tools**, and its text is forwarded as guidance into the next tier. The
+    /// final tier is the *executor* — it gets the real tools and its answer goes back to the caller.
+    /// One prompt → all tiers → back to tier 0 for the next prompt (the operator's round-robin). See
+    /// `docs/specs/pipeline-cascade.md`. Eager: tiers are already-resident `Arc`s here; lazy-swap
+    /// residency layers on in `adaptive-cascade-residency`.
+    async fn run_pipeline(&self, req: ChatRequest) -> ModelResult<ChatStream> {
+        let models = &self.config.models;
+        let last = models.len() - 1; // ≥1: single-model is handled by the caller
+        // The conversation we forward, growing by one advisor note per planner stage.
+        let mut messages = req.messages.clone();
+
+        // Advisor tiers (0..last): plan only, then forward the plan to the next tier.
+        for card in &models[..last] {
+            // An advisor in health cooldown is skipped — degrade to the executor without its plan.
+            if !self.health.is_available(&card.id) {
+                continue;
+            }
+            let mut preq = req.clone();
+            preq.tools = Vec::new(); // an advisor never calls tools — it plans
+            preq.sampling.temperature = Some(PLANNER_TEMPERATURE);
+            preq.sampling.response_schema = None; // never constrain a planner to a tool schema
+            preq.sampling.max_tokens = Some(PLANNER_MAX_TOKENS);
+            let mut pmsgs = messages.clone();
+            pmsgs.push(Message::user(PLANNER_FRAMING));
+            preq.messages = pmsgs;
+
+            let outcome = {
+                let _lane = self.lanes.enter(&card.lane).await;
+                run_attempt(&card.backend, preq).await
+            };
+            if let Some(e) = &outcome.error {
+                self.health.record_failure(&card.id, classify(e));
+                tracing::debug!(model = %card.id, "pipeline: advisor failed, continuing without its plan");
+                continue;
+            }
+            self.health.record_success(&card.id);
+            let plan = outcome.text.trim();
+            if !plan.is_empty() {
+                forward_plan(&mut messages, plan);
+            }
+        }
+
+        // Executor tier (last): the real request + tools; buffered back to the caller (consistent
+        // with the escalation path; live-stream passthrough is a later optimization).
+        let exec = &models[last];
+        let mut ereq = req;
+        ereq.messages = messages;
+        let outcome = {
+            let _lane = self.lanes.enter(&exec.lane).await;
+            run_attempt(&exec.backend, ereq).await
+        };
+        match outcome.error {
+            Some(e) => Err(ModelError::BackendUnavailable(e)),
+            None => Ok(buffered(outcome_events(&outcome, None))),
         }
     }
 }
@@ -343,6 +433,10 @@ impl ChatBackend for CascadeBackend {
         // Single model → passthrough (keeps live streaming; no arbitration).
         if models.len() == 1 {
             return models[0].backend.chat(req).await;
+        }
+        // Pipeline (not escalation): every request flows through all tiers, planner→…→executor.
+        if matches!(self.config.strategy, RoutingStrategy::Pipeline) {
+            return self.run_pipeline(req).await;
         }
 
         let cap = self.config.budget.max_escalations.saturating_add(1);
@@ -1040,5 +1134,120 @@ mod tests {
         assert_eq!(out, "better", "an unproven model is held to the base threshold and escalates");
         assert_eq!(cc.load(Ordering::SeqCst), 1);
         assert_eq!(sc.load(Ordering::SeqCst), 1);
+    }
+
+    // ── Pipeline strategy (planner → executor, every tier every request) ─────────────────────────
+
+    /// A backend that records the text + tool-count of the request it received, then replies
+    /// with a fixed string — so a test can assert what each pipeline tier actually saw.
+    struct CapMock {
+        reply: &'static str,
+        seen_text: Arc<std::sync::Mutex<String>>,
+        seen_tools: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ChatBackend for CapMock {
+        async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen_tools.store(req.tools.len(), Ordering::SeqCst);
+            let mut buf = String::new();
+            for m in &req.messages {
+                for c in &m.content {
+                    if let ContentBlock::Text { text } = c {
+                        buf.push_str(text);
+                        buf.push('\n');
+                    }
+                }
+            }
+            *self.seen_text.lock().unwrap() = buf;
+            let evs: Vec<ModelResult<ChatEvent>> = vec![
+                Ok(ChatEvent::TextDelta { text: self.reply.into() }),
+                Ok(ChatEvent::Done {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    stop_reason: StopReason::EndTurn,
+                }),
+            ];
+            Ok(Box::pin(futures::stream::iter(evs)))
+        }
+        fn context_window(&self) -> u32 {
+            u32::MAX
+        }
+    }
+
+    fn cap_card(
+        id: &str,
+        tier: u32,
+        reply: &'static str,
+    ) -> (ModelCard, Arc<std::sync::Mutex<String>>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let seen_text = Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_tools = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mc = ModelCard {
+            id: id.to_string(),
+            tier,
+            location: Location::Local,
+            lane: Lane::default_for(Location::Local),
+            backend: Arc::new(CapMock {
+                reply,
+                seen_text: seen_text.clone(),
+                seen_tools: seen_tools.clone(),
+                calls: calls.clone(),
+            }),
+        };
+        (mc, seen_text, seen_tools, calls)
+    }
+
+    #[tokio::test]
+    async fn pipeline_runs_all_tiers_and_forwards_plan() {
+        let (planner, p_seen, p_tools, p_calls) = cap_card("planner", 0, "STEP-A then STEP-B");
+        let (exec, e_seen, e_tools, e_calls) = cap_card("exec", 1, "FINAL");
+        let mut cfg = CascadeConfig::new(vec![planner, exec]);
+        cfg.strategy = RoutingStrategy::Pipeline;
+        let be = CascadeBackend::new(cfg);
+
+        let mut req = ChatRequest::simple("solve the task");
+        req.tools = vec![crate::backend::ToolDef {
+            name: "write_file".into(),
+            description: "write a file".into(),
+            input_schema: json!({"type": "object"}),
+        }];
+
+        let out = collect(be.chat(req).await.unwrap()).await;
+
+        assert_eq!(out, "FINAL", "the executor's answer is what the caller receives");
+        assert_eq!(p_calls.load(Ordering::SeqCst), 1, "the planner ran exactly once");
+        assert_eq!(e_calls.load(Ordering::SeqCst), 1, "the executor ran exactly once");
+        // Forward-output handoff: the executor saw the planner's plan.
+        assert!(
+            e_seen.lock().unwrap().contains("STEP-A then STEP-B"),
+            "the executor received the planner's plan"
+        );
+        // The advisor plans without tools; only the executor gets the real tools.
+        assert_eq!(p_tools.load(Ordering::SeqCst), 0, "the advisor is given no tools");
+        assert_eq!(e_tools.load(Ordering::SeqCst), 1, "the executor is given the real tools");
+        // The advisor saw the planning framing; the original task is still present for the executor.
+        assert!(p_seen.lock().unwrap().contains("PLANNER"), "the advisor got the planning framing");
+        assert!(e_seen.lock().unwrap().contains("solve the task"), "the original task reaches the executor");
+    }
+
+    #[tokio::test]
+    async fn pipeline_degrades_when_advisor_fails() {
+        // The advisor errors; the executor must still run (without a plan) and answer.
+        let (bad_planner, _bc) = card("planner", 0, Script::Err("advisor down"));
+        let (exec, e_seen, _e_tools, e_calls) = cap_card("exec", 1, "FINAL");
+        let mut cfg = CascadeConfig::new(vec![bad_planner, exec]);
+        cfg.strategy = RoutingStrategy::Pipeline;
+        let be = CascadeBackend::new(cfg);
+
+        let out = collect(be.chat(ChatRequest::simple("do it")).await.unwrap()).await;
+        assert_eq!(out, "FINAL", "a failed advisor degrades to the executor, it still answers");
+        assert_eq!(e_calls.load(Ordering::SeqCst), 1, "the executor ran");
+        assert!(
+            !e_seen.lock().unwrap().contains("[Plan from the advisor"),
+            "no plan note is forwarded when the advisor failed"
+        );
     }
 }

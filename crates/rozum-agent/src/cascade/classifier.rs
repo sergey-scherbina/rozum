@@ -29,6 +29,12 @@ pub enum RoutingStrategy {
     /// Start at the cheapest tier that the **learned stats** show has been good enough for this
     /// task-class; fall back to `ClassifyThenStart` when there's not enough evidence (Phase 7).
     Learned,
+    /// **Pipeline** (not escalation): every request flows through ALL tiers in cost order — each
+    /// non-final tier is a *planner/advisor* (produces guidance, no tools), and its output is
+    /// forwarded into the next tier's input; the final tier is the *executor* (gets the real tools,
+    /// streams the answer back). A chain of models behind one endpoint, where the first tells the
+    /// next what to do. See `docs/specs/pipeline-cascade.md`.
+    Pipeline,
 }
 
 /// A free, deterministic difficulty heuristic over the prompt's surface features: length, code

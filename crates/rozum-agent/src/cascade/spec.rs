@@ -65,6 +65,9 @@ pub enum StrategyName {
     Cheapest,
     Classify,
     Learned,
+    /// Run every tier in order as a planner→…→executor pipeline (not escalation). See
+    /// `docs/specs/pipeline-cascade.md`.
+    Pipeline,
 }
 
 impl StrategyName {
@@ -75,6 +78,7 @@ impl StrategyName {
             "cheapest" | "cheap" | "alwayscheapest" => Some(StrategyName::Cheapest),
             "classify" | "classifythenstart" => Some(StrategyName::Classify),
             "learned" | "learn" => Some(StrategyName::Learned),
+            "pipeline" | "pipe" => Some(StrategyName::Pipeline),
             _ => None,
         }
     }
@@ -86,6 +90,7 @@ impl From<StrategyName> for RoutingStrategy {
             StrategyName::Cheapest => RoutingStrategy::AlwaysCheapest,
             StrategyName::Classify => RoutingStrategy::ClassifyThenStart,
             StrategyName::Learned => RoutingStrategy::Learned,
+            StrategyName::Pipeline => RoutingStrategy::Pipeline,
         }
     }
 }
