@@ -109,11 +109,32 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
     Router::new()
         .route("/rooms/{name}/days", get(days))
         .route("/rooms/{name}/messages/{date}", get(messages))
+        .route("/rooms/{name}/inbox/{handle}", get(inbox))
+        .route("/roster", get(roster))
         .layer(middleware::from_fn_with_state(
             AuthCfg { secret },
             auth_layer,
         ))
         .with_state(RestState { registry })
+}
+
+/// `GET /rooms/{name}/inbox/{handle}` — turns that ADDRESS `handle` (`@h`/`-> h`). Returns ALL such
+/// turns; a remote client tracks its own seen-state (the local cursor is a CLI-local concern).
+async fn inbox(
+    State(state): State<RestState>,
+    AxumPath((name, handle)): AxumPath<(String, String)>,
+) -> Response {
+    let Some(root) = room_root(&state.registry, &name) else {
+        return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
+    };
+    let mentions = super::client::inbox(&root, &handle, true);
+    Json(json!({ "room": name, "handle": handle, "count": mentions.len(), "messages": mentions }))
+        .into_response()
+}
+
+/// `GET /roster` — the live agent principals (handle → session/cwd/started/ts), most-recent first.
+async fn roster() -> Response {
+    Json(json!({ "agents": super::client::roster() })).into_response()
 }
 
 async fn days(State(state): State<RestState>, AxumPath(name): AxumPath<String>) -> Response {
@@ -345,6 +366,39 @@ mod tests {
             .unwrap();
         assert_eq!(missing["messages"].as_array().unwrap().len(), 0);
         assert!(root.join("index.json").exists(), "seed wrote the index");
+    }
+
+    #[tokio::test]
+    async fn inbox_endpoint_returns_addressed_messages() {
+        let dir = tempdir().unwrap();
+        seed_room(dir.path(), "beta", &["-> bob ping you", "hi everyone"]);
+        let (addr, _shutdown) = start(dir.path().to_path_buf(), "sekret").await;
+        let client = reqwest::Client::new();
+
+        let inbox: Value = client
+            .get(format!("http://{addr}/rooms/beta/inbox/bob"))
+            .basic_auth("", Some("sekret"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(inbox["handle"], "bob");
+        assert_eq!(inbox["count"], 1);
+        assert_eq!(inbox["messages"][0]["content"], "-> bob ping you");
+
+        // someone not addressed has an empty inbox
+        let other: Value = client
+            .get(format!("http://{addr}/rooms/beta/inbox/alice"))
+            .basic_auth("", Some("sekret"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(other["count"], 0);
     }
 
     #[tokio::test]

@@ -1,5 +1,14 @@
 # Changelog
 
+## meetings — REST parity: inbox + roster over HTTP
+Completed: 2026-06-23
+
+The daemon's `rest_read` axum surface gains `GET /rooms/{name}/inbox/{handle}` (turns addressing a
+handle, via `client::inbox`) and `GET /roster` (the live agent principals, via `client::roster`) — so a
+remote/web client (and the future UCC web target) can fetch the same operations as JSON instead of
+shelling out or reading the disk format. End-to-end test for the inbox endpoint. (POST-over-HTTP is
+deferred — the socket submit path + auth is a separate write task.) Spec docs/specs/services-and-clients.md.
+
 ## meetings — client API write-side (identity/status through one contract)
 Completed: 2026-06-23
 

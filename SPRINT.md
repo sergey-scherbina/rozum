@@ -618,8 +618,10 @@ the CLIENT layer; no binary split (process separation already gives (a)).
 - [x] **svc-meeting-client-api-write** — DONE. `client::post_identity` (the single agent-vs-human posting
   rule), `whoami` (Identity enum), `establish` (hello), `daemon_status` added; the bin's post/whoami/hello/
   status handlers are thin over them. 80 tests; live whoami/status verified. CLI now fully thin over the API.
-- [ ] **svc-meeting-http-parity** — extend the daemon's `rest_read` axum surface to inbox/roster/post so
-  web/remote clients use the API, not disk/exec.
+- [x] **svc-meeting-http-parity** — DONE (read side). `rest_read` axum surface gains `GET /rooms/{name}/
+  inbox/{handle}` (mentions addressing a handle) + `GET /roster` (live agent principals), both over
+  `client::inbox`/`client::roster`. End-to-end test (inbox endpoint). So remote/web/UCC can fetch JSON,
+  not disk/exec. (POST-over-HTTP deferred — the socket submit path + auth is a separate write task.)
 - [ ] **svc-migrate-web-tui** — migrate the web `.ssc` + the Rust TUI to the client API (drop direct disk/exec).
 - [ ] **svc-gateway-api-doc** — models side already a clean service; document the gateway API contract.
 
