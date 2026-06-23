@@ -82,6 +82,127 @@ fn forward_plan(messages: &mut Vec<Message>, plan: &str) {
     append_user_text(messages, &format!("{PLAN_PREFIX}{plan}"));
 }
 
+/// Resolves a tier's backend on demand (loads the model), returning `None` if it can't be built. The
+/// lazy pipeline calls this once per tier per request and tears the backend down before the next
+/// tier loads — so only ONE model is ever resident. Required for local MLX tiers: two MLX models
+/// co-resident in one process crash on Metal (the GPU command-buffer watchdog kills a generation
+/// that runs while another model's weights share the heap). See `docs/specs/pipeline-cascade.md`.
+pub type LazyResolver = Arc<
+    dyn Fn(TierSpec) -> futures::future::BoxFuture<'static, Option<Arc<dyn ChatBackend>>>
+        + Send
+        + Sync,
+>;
+
+/// Tear a resolved tier down OFF the async runtime — an MLX backend's `Drop` joins its worker thread
+/// (frees the Metal buffers) and BLOCKS for seconds; doing it on a blocking thread keeps the executor
+/// responsive. Returns once the model's memory is actually freed, so the next tier loads into a
+/// process with only one model resident (no co-residency).
+async fn teardown_tier(backend: Arc<dyn ChatBackend>) {
+    let _ = tokio::task::spawn_blocking(move || drop(backend)).await;
+}
+
+/// A **lazy** pipeline: same planner→…→executor semantics as [`RoutingStrategy::Pipeline`] on
+/// [`CascadeBackend`], but it holds tier SPECS (not live backends) and resolves + tears down ONE
+/// tier at a time per request — never co-resident. This is the no-co-residency residency required
+/// for local MLX tiers (the eager `CascadeBackend` pipeline holds all tiers live, which crashes
+/// MLX×MLX on Metal). The in-process automation of `solve.sh`'s sequential two-process flow. Passes
+/// are serialized (one model loading/resident at a time). See `docs/specs/pipeline-cascade.md`.
+pub struct LazyPipelineBackend {
+    /// Ordered tiers: `[0]` = planner/advisor … `[last]` = executor.
+    specs: Vec<TierSpec>,
+    resolve: LazyResolver,
+    ctx_window: u32,
+    /// Serialize passes: lazy swaps one model at a time, so two concurrent passes would race the
+    /// single Metal context (and momentarily co-reside two models).
+    gate: tokio::sync::Mutex<()>,
+}
+
+impl LazyPipelineBackend {
+    pub fn new(specs: Vec<TierSpec>, resolve: LazyResolver, ctx_window: u32) -> Self {
+        Self { specs, resolve, ctx_window, gate: tokio::sync::Mutex::new(()) }
+    }
+
+    fn obs(stage: &str, model: &str, extra: serde_json::Value) {
+        let mut e = serde_json::json!({
+            "event": "pipeline_stage", "stage": stage, "model": model, "lazy": true,
+        });
+        if let (serde_json::Value::Object(m), serde_json::Value::Object(x)) = (&mut e, extra) {
+            m.extend(x);
+        }
+        rozum_core::obs::log_event(e);
+    }
+}
+
+#[async_trait]
+impl ChatBackend for LazyPipelineBackend {
+    async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream> {
+        // One pass at a time — never two models loading/resident at once.
+        let _pass = self.gate.lock().await;
+        let n = self.specs.len();
+        if n == 0 {
+            return Err(ModelError::BackendUnavailable("lazy pipeline: no tiers".into()));
+        }
+        let last = n - 1;
+        let mut messages = req.messages.clone();
+
+        // Advisor tiers (0..last): load → plan (no tools) → tear down → forward the plan.
+        for spec in &self.specs[..last] {
+            let backend = match (self.resolve)(spec.clone()).await {
+                Some(b) => b,
+                None => {
+                    Self::obs("advisor_failed", &spec.model, serde_json::json!({"error": "load failed"}));
+                    continue; // degrade: run the executor without this advisor's plan
+                }
+            };
+            let mut preq = req.clone();
+            preq.tools = Vec::new();
+            preq.sampling.temperature = Some(PLANNER_TEMPERATURE);
+            preq.sampling.response_schema = None;
+            preq.sampling.max_tokens = Some(PLANNER_MAX_TOKENS);
+            let mut pmsgs = messages.clone();
+            append_user_text(&mut pmsgs, PLANNER_FRAMING);
+            preq.messages = pmsgs;
+            let outcome = run_attempt(&backend, preq).await;
+            teardown_tier(backend).await; // FREE before the next tier loads (no co-residency)
+            if let Some(e) = &outcome.error {
+                Self::obs("advisor_failed", &spec.model, serde_json::json!({ "error": e }));
+                continue;
+            }
+            let plan = outcome.text.trim();
+            Self::obs("advisor", &spec.model, serde_json::json!({ "plan_chars": plan.len() }));
+            if !plan.is_empty() {
+                forward_plan(&mut messages, plan);
+            }
+        }
+
+        // Executor tier (last): load → run with the real tools + plan → tear down → buffered result.
+        let exec = &self.specs[last];
+        Self::obs("executor", &exec.model, serde_json::json!({ "tiers": n }));
+        let backend = (self.resolve)(exec.clone()).await.ok_or_else(|| {
+            ModelError::BackendUnavailable(format!(
+                "lazy pipeline: executor '{}' failed to load",
+                exec.model
+            ))
+        })?;
+        let mut ereq = req;
+        ereq.messages = messages;
+        let outcome = run_attempt(&backend, ereq).await;
+        teardown_tier(backend).await;
+        match outcome.error {
+            Some(e) => Err(ModelError::BackendUnavailable(e)),
+            None => Ok(buffered(outcome_events(&outcome, None))),
+        }
+    }
+
+    fn context_window(&self) -> u32 {
+        self.ctx_window
+    }
+
+    fn label(&self) -> &'static str {
+        "pipeline-lazy"
+    }
+}
+
 /// Where a model runs — local (its own resource limits, e.g. memory) vs remote (the network +
 /// the provider's quota/rate limits). A `Network` failure parks *all* remote models at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -1267,5 +1388,44 @@ mod tests {
             !e_seen.lock().unwrap().contains("[Plan from the advisor"),
             "no plan note is forwarded when the advisor failed"
         );
+    }
+
+    #[tokio::test]
+    async fn lazy_pipeline_resolves_each_tier_in_order_and_forwards_plan() {
+        use std::sync::Mutex;
+        // Records the order tiers are resolved — proves ONE AT A TIME (planner, then executor).
+        let resolved: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let exec_seen: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let r = resolved.clone();
+        let es = exec_seen.clone();
+        let resolve: LazyResolver = Arc::new(move |tier: TierSpec| {
+            let r = r.clone();
+            let es = es.clone();
+            Box::pin(async move {
+                r.lock().unwrap().push(tier.model.clone());
+                let reply: &'static str =
+                    if tier.model.contains("planner") { "PLAN-XYZ" } else { "FINAL" };
+                let b: Arc<dyn ChatBackend> = Arc::new(CapMock {
+                    reply,
+                    seen_text: es.clone(), // executor runs last → ends holding what the executor saw
+                    seen_tools: Arc::new(AtomicUsize::new(0)),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                });
+                Some(b)
+            }) as futures::future::BoxFuture<'static, Option<Arc<dyn ChatBackend>>>
+        });
+        let specs = vec![classify_model_name("planner-x"), classify_model_name("exec-y")];
+        let be = LazyPipelineBackend::new(specs, resolve, 4096);
+
+        let out = collect(be.chat(ChatRequest::simple("do it")).await.unwrap()).await;
+
+        assert_eq!(out, "FINAL", "the executor's answer is returned");
+        assert_eq!(
+            *resolved.lock().unwrap(),
+            vec!["planner-x".to_string(), "exec-y".to_string()],
+            "tiers are resolved ONE AT A TIME, planner then executor"
+        );
+        assert!(exec_seen.lock().unwrap().contains("PLAN-XYZ"), "the executor received the plan");
+        assert!(exec_seen.lock().unwrap().contains("do it"), "the original task reaches the executor");
     }
 }

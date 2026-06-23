@@ -1146,9 +1146,11 @@ fn cascade_local_footprint(cfg: &rozum::RuntimeConfig, model: &str, n_ctx: u32) 
             .map(|x| x.trim().to_string())
             .filter(|x| !x.is_empty())
             .collect();
-        (names.len() >= 2).then(|| rozum::cascade::from_model_list(&names))
+        // Order/cost-rank don't matter for a footprint SUM/MAX — use the pipeline (input-order)
+        // builder; the strategy (which decides MAX vs SUM below) is set from the env override.
+        (names.len() >= 2).then(|| rozum::cascade::from_model_pipeline(&names))
     };
-    let spec = if let Some(name) = rozum::cascade::parse_cascade_model(model) {
+    let mut spec = if let Some(name) = rozum::cascade::parse_cascade_model(model) {
         // `cascade:a,b` → an ad-hoc list; `cascade:foo` → a named config table.
         if name.contains(',') {
             as_list(&name)?
@@ -1160,13 +1162,29 @@ fn cascade_local_footprint(cfg: &rozum::RuntimeConfig, model: &str, n_ctx: u32) 
     } else {
         return None;
     };
-    let sum = spec
+    // Mirror `build_cascade_from_spec`: `ROZUM_CASCADE_STRATEGY` overrides; default (comma-list) is
+    // Pipeline.
+    if let Some(st) = std::env::var("ROZUM_CASCADE_STRATEGY")
+        .ok()
+        .and_then(|v| rozum::cascade::StrategyName::parse_cli(&v))
+    {
+        spec.strategy = st;
+    }
+    let locals: Vec<u64> = spec
         .tiers
         .iter()
         .filter(|t| matches!(t.location, rozum::cascade::Location::Local))
         .map(|t| estimate_model_footprint_bytes(&t.model, n_ctx))
-        .fold(0u64, u64::saturating_add);
-    Some(sum)
+        .collect();
+    // A **pipeline** runs LAZY — one tier resident at a time, the previous torn down before the next
+    // loads (MLX models can't co-reside) — so peak host RAM = MAX local tier, NOT the sum. An
+    // escalation cascade is eager (all tiers live) → reserve the SUM. See docs/specs/pipeline-cascade.md.
+    let total = if matches!(spec.strategy, rozum::cascade::StrategyName::Pipeline) {
+        locals.into_iter().max().unwrap_or(0)
+    } else {
+        locals.into_iter().fold(0u64, u64::saturating_add)
+    };
+    Some(total)
 }
 
 async fn acquire_residency_or_exit(
@@ -4722,6 +4740,36 @@ async fn build_cascade_from_spec(
         spec.strategy = st;
     }
     let n_tiers = spec.tiers.len();
+
+    // Pipeline → LAZY residency: resolve + tear down ONE tier at a time per request (planner →
+    // executor, never co-resident). Required for local MLX tiers — two MLX models in one process
+    // crash on Metal (the GPU command-buffer watchdog). The in-process automation of solve.sh's
+    // sequential two-process flow. See docs/specs/pipeline-cascade.md.
+    if matches!(spec.strategy, rozum::cascade::StrategyName::Pipeline) {
+        let cfg_lazy = std::sync::Arc::clone(cfg);
+        let resolve: rozum::cascade::LazyResolver =
+            std::sync::Arc::new(move |tier: rozum::cascade::TierSpec| {
+                let cfg = std::sync::Arc::clone(&cfg_lazy);
+                Box::pin(async move {
+                    match tier.location {
+                        rozum::cascade::Location::Local => {
+                            build_from_config(&cfg, &tier.model, n_ctx).await
+                        }
+                        rozum::cascade::Location::Remote => build_remote_tier(&tier),
+                    }
+                }) as futures::future::BoxFuture<
+                    'static,
+                    Option<std::sync::Arc<dyn rozum::ChatBackend>>,
+                >
+            });
+        rozum::obs::log_event(serde_json::json!({
+            "event": "cascade_built", "config": label, "tiers": n_tiers,
+            "residency": "lazy-pipeline",
+        }));
+        let be = rozum::cascade::LazyPipelineBackend::new(spec.tiers.clone(), resolve, n_ctx);
+        return Some(std::sync::Arc::new(be) as std::sync::Arc<dyn rozum::ChatBackend>);
+    }
+
     let cfg = std::sync::Arc::clone(cfg);
     let resolver = move |tier: rozum::cascade::TierSpec| {
         let cfg = std::sync::Arc::clone(&cfg);
