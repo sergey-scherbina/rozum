@@ -314,15 +314,18 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
   noise remains, so the agentic matrix must be read as an N-run PASS-RATE, not a single binary
   cell** (echoes the GLM "5-task matrix too noisy" meta-finding). Spec
   `docs/specs/matrix-nondeterminism.md` (to update). Optional: OpenAI `seed` request-field parse.
-- [ ] **matrix-glm32-agentic** — GLM-4-32B emits file *content* (```toml/```rust) or raw
-  ```shell instead of *naming* Write/shell. Isolate WHERE in **our** stack it's lost
-  (prompt render, tool-schema presentation, chat-template). Do NOT close as a model
-  decision-gap until a clean-prompt model-only probe proves the model itself can't.
-  Filed from the `matrix-baseline` fail map (one task per red, all codex). Repro any cell with
-  (under the 🛑 REBOOT-SAFETY PROTOCOL — claim the slot, one model at a time):
-  `BENCH_BIN=<release> AGENTS=codex AGENTIC_MODELS="<spec>" TASKS=<task> KEEP=1 RUN_TIMEOUT=300 scripts/bench/agentic.sh`
-  (seed is pinned to 1234 by the harness ⇒ reproducible). `verify_task` scores by **final file
-  state**, not rc. Do NOT close any as "model too weak / model-side" until isolated from all sides.
+- [x] **matrix-glm32-agentic** — CLOSED 2026-06-23: isolated from ALL sides → it IS a GLM-4-0414
+  **model decision property**, not lost in our stack. Evidence chain: (1) clean-prompt model-only
+  probe → GLM NAMES tools 3/3 (so render/schema/template are NOT dropping it); (2) my synthetic
+  "narration-framing" sanitizer passed a strawman A/B but gave **NO lift** on the real
+  claude×GLM-4-32B×build cell (both arms `turns=1 tools=0`); (3) ROOT CAUSE via **mock-capturing
+  claude's actual `/v1/messages`** (`/tmp/mock_anthropic.py`, no model loaded): Claude Code v2.1.185
+  sends a 5817-char system prompt with **ZERO narration framing** + `tool_choice` absent, and pushes
+  TOWARD tools — so the framing I stripped was my own invention. ⇒ GLM emits the ```rust artifact on
+  create-from-scratch regardless of the agent prompt; not gateway-fixable without regressing edits.
+  Sanitizer flipped to opt-in/default-OFF (`ROZUM_GLM_STRIP_FRAMING=1`; 56b37f3). **HOW TO USE:
+  GLM-4-32B for edit/debug/chat (reliable); Qwen3.6-35B for create-from-scratch.** Full chain in
+  docs/specs/glm4-bringup.md § Real A/B + ROOT CAUSE + HOW TO USE; memory project-glm4-native-port.
 
 - [x] **matrix-35b-codex-test** — RESOLVED, **not a structural fail — a Layer-A flake** (isolated
   plucky-finch 2026-06-22). The baseline `codex×35B×test` FAIL (24.7s, rc=0, anomalously fast) did
