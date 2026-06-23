@@ -79,6 +79,16 @@ The swap engine already exists: gateway `Switchboard` ("never two resident — n
 from spec", `gateway.rs:111`). Lazy residency = the pipeline driving that load/unload between tiers,
 exactly what `solve.sh` does by hand with two sequential gateway processes — but in-process and automatic.
 
+> **HARD CONSTRAINT (validated 2026-06-23, reproducible): two MLX models must NOT be co-resident in one
+> process.** Live testing GLM-9B+Qwen3-4B eager (both loaded, ~7 GiB total, RAM not the issue) showed that
+> when one model runs a generation while the other's weights also sit in the Metal heap, the GPU command
+> buffer exceeds the watchdog → `[METAL] Command buffer execution failed: GPU Timeout Error
+> (kIOGPUCommandBufferCallbackErrorTimeout)` → uncaught C++ exception → the gateway process crashes (no
+> kernel panic / no reboot, but the whole gateway dies). Reproduced on a clean system with settled GPU.
+> Therefore the **eager** branch below is for **remote / non-MLX** tiers only; **any MLX×MLX local pair is
+> forced LAZY** (one resident at a time, the other fully torn down first — `solve.sh`'s proven model).
+> This makes lazy residency mandatory, not an optimization, for the common local-model case.
+
 **Cost (honest):** in lazy mode every prompt pays `N-1` swaps in + the swap back to tier 0 for the next
 prompt — i.e. ~2 model loads per agent turn (load = seconds to tens of seconds for 20–32B). Eager pays
 nothing. The two reference models (GLM-4-32B ≈18 GB + gpt-oss-20b ≈11 GB ≈ 29 GB + MLX cache peaks) sit

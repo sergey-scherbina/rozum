@@ -88,6 +88,22 @@
   is a LAZY case (needs #2). GLM-9B + Qwen3-4B (~10 GiB) co-fits → eager. (d) GLM-**9B** is too weak a
   PLANNER (its one-shot RPN code didn't compile: `Vec<&String>.join` + `?`-on-Utf8Error — proven by
   standalone rebuild) — use GLM-**32B** (RPN 3/3). The pipeline is only as good as its planner.
+  **CORRECTION + DECISIVE FINDINGS (later same day, fully isolated):** (a) was WRONG to call the Metal
+  crash "transient". (b2) BUG FOUND+FIXED: process-global `get_peak_memory()` recorded under co-residency
+  POISONED the footprint cache (Qwen3-4B cached @12 GiB vs real 2.25; GLM-9B 5.37→7.35) → admission then
+  refused fitting loads. Fix: `LIVE_RESIDENTS` sole-residency gate in rozum-mlx (commit 19fa3fe); VALIDATED
+  — solo loads record clean 4.98/2.25 GiB, the co-resident run leaves them UNCHANGED. (b3) **DECISIVE,
+  REPRODUCIBLE (clean system + clean peaks + settled GPU): eager co-residency of two MLX models in ONE
+  process is NOT VIABLE. When GLM-9B (advisor) runs its FIRST generation co-resident with Qwen3-4B, the
+  Metal command buffer exceeds the GPU watchdog → `[METAL] Command buffer execution failed: GPU Timeout
+  Error (kIOGPUCommandBufferCallbackErrorTimeout)` → the gateway crashes (uncaught C++ exception; NO kernel
+  panic, NO reboot — clean app death, uptime held 1 day). The earlier run only "survived" because the
+  advisor failed BEFORE its GPU eval (the template bug), so only Qwen3-4B ran. ⇒ DESIGN PIVOT: the pipeline
+  must run MLX local tiers LAZY — one resident at a time, separated in time/process (solve.sh's proven
+  model) — NOT eager co-resident. Eager stays viable only for remote / non-MLX tiers. So
+  `adaptive-cascade-residency` (#2) is REQUIRED, and its "eager-if-fits" branch MUST EXCLUDE MLX×MLX local
+  pairs (force lazy). The advisor consecutive-user fix is still correct (it changed the failure from a
+  template-raise to the underlying eval, i.e. the framing now reaches the model).**
 - [ ] **adaptive-cascade-residency** (operator idea 2026-06-23; now the residency half of `pipeline-cascade`)
   — make the cascade EAGER if its local
   tiers co-fit, LAZY (one resident at a time, swap on escalation) if not. Today `build_cascade` is
