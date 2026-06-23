@@ -601,6 +601,12 @@ enum GatewayAction {
         #[arg(long)]
         json: bool,
     },
+    /// Serve the control snapshot over HTTP (always-up, no gateway needed) for a dashboard / the UCC.
+    ControlServe {
+        /// Port for `GET /control/status` (with permissive CORS).
+        #[arg(long, default_value_t = 8411)]
+        port: u16,
+    },
     /// Stop the active shared gateway (refused if clients are attached, unless --force).
     Stop {
         #[arg(long)]
@@ -828,6 +834,11 @@ async fn main() {
                 run_gateway(port, model, n_ctx, cfg).await;
             }
             Some(GatewayAction::Status { json }) => run_gateway_status(json).await,
+            Some(GatewayAction::ControlServe { port }) => {
+                if let Err(e) = rozum::control::serve(port).await {
+                    eprintln!("control serve: {e}");
+                }
+            }
             Some(GatewayAction::Stop { force }) => run_gateway_stop(force),
             Some(GatewayAction::Switch {
                 model,

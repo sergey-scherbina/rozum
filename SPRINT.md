@@ -664,6 +664,14 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
 - [ ] **ucc-tui-backend** — new `scalascript/frontend/tui` implementing `FrontendFrameworkSpi.emit` →
   Rust ratatui + crossterm, lowering the `View` AST (signals→state, handlers→key events, vstack/hstack
   →Layout/Constraint), modeled on `frontend/react`+`frontend/swing`. Co-own w/ plucky-fox (compiler). *(scalascript)*
+- [x] **ucc-control-serve** — DONE. Always-up control HTTP (`rozum gateway control-serve --port 8411`):
+  `GET /control/status` serves the live snapshot from disk (NO gateway needed) + permissive CORS. Live-
+  verified (shows the running matrix gateway + residency + catalog). The data layer for the UCC web is now
+  reachable without a model loaded. NOTE: wiring the WEB app to client-fetch it needs the React CODEGEN
+  build (`ssc run --frontend react --mode client/server`), NOT the interpreter+emit (which only does static).
+  That codegen path has toolchain friction (server-mode: Scala compile error `value backend is not a member
+  of scalascript`; client-mode: hangs) — plucky-fox's domain (the n=50 build-pipeline questions). The model-
+  DSL (ModelView/ForModel) IS web-capable (global builtins, not native-only) — confirmed.
 - [x] **ucc-poc-web** — DONE (2026-06-23). PROVED the Tk→web half end-to-end: `clients/control/control-center.ssc`
   (`std/ui`: vstack/hstack/card/table/badge/heading) compiled to a React SPA FIRST TRY (no lowering errors),
   served live via `bin/ssc` (SSR shell + react app.js), headless-render shows the full control-center (Gateway/

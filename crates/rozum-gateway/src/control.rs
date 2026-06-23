@@ -6,6 +6,22 @@
 
 use serde::Serialize;
 
+/// Run a tiny always-up HTTP server exposing the control snapshot, independent of any running
+/// gateway (it reads the host residency ledger + catalog from disk). `GET /control/status` → the
+/// `status()` JSON, with permissive CORS so a web/UCC client on another origin can fetch it. For the
+/// Tailscale path-routed case the client fetches it same-origin and CORS is moot.
+pub async fn serve(port: u16) -> std::io::Result<()> {
+    use axum::{response::IntoResponse, routing::get, Router};
+    async fn status_route() -> impl IntoResponse {
+        ([(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], axum::Json(status().await))
+    }
+    let app = Router::new().route("/control/status", get(status_route));
+    let addr = format!("127.0.0.1:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    eprintln!("control server: http://{addr}/control/status");
+    axum::serve(listener, app).await
+}
+
 /// A coherent snapshot of the models/gateway service.
 #[derive(Debug, Clone, Serialize)]
 pub struct ControlStatus {
