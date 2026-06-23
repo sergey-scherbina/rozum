@@ -268,6 +268,24 @@ impl Default for WarmConfig {
     }
 }
 
+/// Combine a process's per-model footprints (primary + each warm resident) into the single
+/// reservation it publishes to the host ledger, counting the **process-shared** activation reserve
+/// (the MLX buffer cache + prefill spike — one process-global pool) ONCE instead of once per model.
+///
+/// `primary_fp` and every `warm_fps[i]` are full `runtime_footprint_bytes`, each of which already
+/// bundles one reserve. For N co-resident models only ONE reserve is physically real (`set_cache_limit`
+/// is process-global; prefill serializes under `max_num_seqs`), so the naive `Σ fp_i` over-reserves by
+/// (N-1) reserves and needlessly refuses co-residents that actually fit. We subtract those (N-1)
+/// redundant reserves using `process_reserve_bytes(0)` — the SMALLEST possible reserve — so the result
+/// is provably never below the real co-resident peak (`Σ active_i + max reserve`); admission stays
+/// reboot-safe, it just stops over-refusing. Single-model (no warm) ⇒ bare `primary_fp`, unchanged.
+fn published_reservation(primary_fp: u64, warm_fps: &[u64]) -> u64 {
+    let naive = warm_fps.iter().fold(primary_fp, |a, &b| a.saturating_add(b));
+    let redundant =
+        rozum_models::model_source::process_reserve_bytes(0).saturating_mul(warm_fps.len() as u64);
+    naive.saturating_sub(redundant)
+}
+
 impl Switchboard {
     fn current(&self) -> Option<Arc<dyn ChatBackend>> {
         self.backend.read().unwrap().clone()
@@ -364,8 +382,8 @@ impl Switchboard {
     async fn sweep_idle_warm(&self, idle_secs: u64) {
         let now = crate::share::now_unix();
         let mut removed_any = false;
-        // Evict under the lock; capture the surviving warm total to republish after release.
-        let warm_total: u64 = {
+        // Evict under the lock; capture the surviving warm footprints to republish after release.
+        let warm_fps: Vec<u64> = {
             let mut warm = self.warm.lock().await;
             let victims: Vec<String> = warm
                 .iter()
@@ -383,13 +401,17 @@ impl Switchboard {
                     crate::obs::log_event(json!({ "event": "warm_idle_evicted", "model": m }));
                 }
             }
-            warm.values().map(|e| e.weight_bytes).sum()
+            warm.values().map(|e| e.weight_bytes).collect()
         };
         // Republish the reduced total reservation (residency-unify U1 wiring) only when the
         // set changed. `model_id` is read with the warm lock RELEASED → no lock-order risk.
+        // The process-shared activation reserve is counted ONCE (see `published_reservation`).
         if removed_any {
             let primary_fp = (self.warm_cfg.weight)(&self.model_id()).unwrap_or(0);
-            crate::share::update_my_reservation(&self.model_id(), primary_fp.saturating_add(warm_total));
+            crate::share::update_my_reservation(
+                &self.model_id(),
+                published_reservation(primary_fp, &warm_fps),
+            );
         }
     }
 
@@ -474,8 +496,8 @@ impl Switchboard {
         // wiring). `primary_id` is in hand and `update_my_reservation` does ledger-file IO
         // only — no map/spec lock — so this is deadlock-safe under the held `warm` lock.
         let primary_fp = (self.warm_cfg.weight)(&primary_id).unwrap_or(0);
-        let total = warm.values().map(|e| e.weight_bytes).fold(primary_fp, u64::saturating_add);
-        crate::share::update_my_reservation(&primary_id, total);
+        let warm_fps: Vec<u64> = warm.values().map(|e| e.weight_bytes).collect();
+        crate::share::update_my_reservation(&primary_id, published_reservation(primary_fp, &warm_fps));
         self.usage.record(model, weight, now);
         crate::obs::log_event(json!({ "event": "warm_built", "model": model }));
         Some((backend, handle))
@@ -4144,6 +4166,30 @@ mod tests {
                 .as_deref(),
             Some(big.as_str())
         );
+    }
+
+    #[test]
+    fn published_reservation_counts_shared_reserve_once() {
+        const GB: u64 = 1 << 30;
+        let reserve = rozum_models::model_source::process_reserve_bytes(0);
+        // Footprints are realistic: a full runtime_footprint_bytes is ALWAYS ≥ one reserve
+        // (weights + KV + reserve), so build each as reserve + an "active" (weights+KV) part.
+        let (a_p, a_w1, a_w2) = (4 * GB, 3 * GB, 2 * GB); // per-model active parts
+        let primary = reserve + a_p;
+        let warm1 = reserve + a_w1;
+        let warm2 = reserve + a_w2;
+        // Single model (no warm): unchanged — exactly the primary footprint.
+        assert_eq!(published_reservation(primary, &[]), primary);
+        // Primary + 1 warm: two footprints each carry one reserve, but the cache+prefill pool is
+        // shared → publish Σ fp − ONE redundant reserve = Σ active + ONE reserve.
+        assert_eq!(published_reservation(primary, &[warm1]), a_p + a_w1 + reserve);
+        // Primary + 2 warm: subtract the (N-1)=2 redundant reserves.
+        let pub2 = published_reservation(primary, &[warm1, warm2]);
+        assert_eq!(pub2, a_p + a_w1 + a_w2 + reserve, "= Σ active + ONE reserve");
+        // SAFETY: never below the real co-resident peak — at least the primary's own footprint,
+        // and at least Σ(weights+KV)+one reserve (here equal, since default-cache reserves match).
+        assert!(pub2 >= primary, "never under-reserves below the primary footprint");
+        assert!(pub2 >= a_p + a_w1 + a_w2, "covers every model's active bytes + a reserve");
     }
 
     #[test]

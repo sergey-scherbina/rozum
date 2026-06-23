@@ -323,3 +323,36 @@ co-residents fit (very conservative, ~0.4 — but that mostly disables co-reside
 ## Reboot-safety protocol
 Unchanged and load-bearing — see `SPRINT.md` "🛑 REBOOT-SAFETY PROTOCOL": one slot claim
 in-room + `ps`/lockfile check before any model load; never run two matrices at once.
+
+## Shared-reserve accounting (admit more co-residents, still reboot-safe) — 2026-06-23
+**Problem.** `runtime_footprint_bytes` = weights + KV + a 5.5 GiB activation reserve (MLX buffer
+cache + prefill spike). The reserve is calibrated **per process**, but the in-process Switchboard
+published its total reservation as `Σ runtime_footprint_bytes(model_i)` — i.e. one reserve **per
+model**. The MLX buffer cache is a single process-global pool (`set_cache_limit` is process-wide)
+and prefill serializes under `max_num_seqs`, so for N co-resident models only ONE reserve is
+physically real. The naive sum over-reserved by (N-1)×5.5 GiB and made other gateways (and the
+host ledger) needlessly refuse co-residents that actually fit — fighting the "run several models
+at once" goal.
+
+**Fix (numbers + U1 republish wiring — nimble-raven).**
+- `rozum_models::model_source`: split `runtime_footprint_bytes` into `runtime_active_bytes`
+  (weights + KV, the genuinely per-model part) + `process_reserve_bytes(max_weight)` (the shared
+  cache+prefill pool, counted once). `runtime_footprint_bytes == active + reserve` exactly (unit
+  test) → the single-model admission gate is byte-unchanged.
+- `rozum-gateway::published_reservation(primary_fp, &warm_fps)` (both republish sites,
+  `ensure_warm` + `sweep_idle_warm`): publishes `Σ fp_i − (N-1)·process_reserve_bytes(0)` =
+  `Σ active_i + ONE reserve`. Subtracting the **smallest possible** reserve makes the published
+  total **provably never below** the real co-resident peak (`Σ active + max reserve`), so admission
+  stays reboot-safe — it just stops over-refusing. Single-model (no warm) ⇒ bare `primary_fp`,
+  unchanged. Unit-tested (`published_reservation_counts_shared_reserve_once`).
+
+**Effect.** Each extra in-process co-resident now needs only its own weights+KV (not +5.5 GiB),
+and the cross-process `committed_by_others` total is accurate → siblings admit more too. On a
+36 GiB host (~27 GiB budget) this is the difference between admitting a 2nd small model or not.
+
+**Follow-up for sunny-civet (admission MECHANISM owner).** The intra-process `plan_residency`
+budget check still sums full per-model footprints (each with its own reserve) against
+`host_budget − committed_by_others`, so the in-process multislot planner is still conservative by
+(N-1) reserves. To let one gateway's OWN multislot admit as many co-residents as the math allows,
+the planner should bill per-model `runtime_active_bytes` against `(budget − one process_reserve)`.
+The numbers (`runtime_active_bytes` / `process_reserve_bytes`) are now in place for that wiring.

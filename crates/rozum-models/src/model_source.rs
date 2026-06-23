@@ -202,25 +202,67 @@ fn activation_reserve_bytes(weight_bytes: u64) -> u64 {
 /// Conservative throughout (saturating, rounds up). See
 /// `docs/specs/safe-multi-model-residency.md`.
 pub fn runtime_footprint_bytes(spec: &str, n_ctx: u32, weight_bytes: u64) -> u64 {
+    runtime_active_bytes(spec, n_ctx, weight_bytes).saturating_add(process_reserve_bytes(weight_bytes))
+}
+
+/// A model's **per-model** resident bytes — weights + KV cache at `n_ctx`, WITHOUT the
+/// process-shared activation reserve. This is the part that genuinely scales with the number
+/// of co-resident models: each model holds its own weights and its own KV cache.
+///
+/// Split out from [`runtime_footprint_bytes`] for the **shared-reserve** accounting: when N
+/// models co-reside in ONE process they share a single MLX buffer cache (`set_cache_limit` is
+/// process-global) and serialize prefill (`max_num_seqs`), so the activation reserve
+/// ([`process_reserve_bytes`]) is real ONCE per process — not per model. The correct
+/// in-process multi-model peak is therefore `Σ runtime_active_bytes(model_i) +
+/// process_reserve_bytes(max weight)`, which counts the cache+prefill pool a single time.
+/// For a single-model process this + the reserve is exactly `runtime_footprint_bytes`.
+pub fn runtime_active_bytes(spec: &str, n_ctx: u32, weight_bytes: u64) -> u64 {
     let kv = resolve_model_dir(spec)
         .and_then(|dir| std::fs::read_to_string(dir.join("config.json")).ok())
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
         .and_then(|cfg| kv_bytes_per_position(&cfg))
         .map(|per| per.saturating_mul(n_ctx as u64))
         .unwrap_or(0);
-    weight_bytes
-        .saturating_add(kv)
-        .saturating_add(activation_reserve_bytes(weight_bytes))
+    weight_bytes.saturating_add(kv)
+}
+
+/// The **process-shared** activation reserve (MLX buffer cache + prefill spike), counted ONCE
+/// per process no matter how many models co-reside (see [`runtime_active_bytes`]). Public wrapper
+/// over the calibrated [`activation_reserve_bytes`]. `max_weight_bytes` only matters for the
+/// cache-DISABLED fallback (`ROZUM_MLX_CACHE_GB=0`), where the unbounded cache scales with the
+/// largest resident's weights; pass the biggest co-resident weight (or `0` for the smallest,
+/// always-safe floor). With the default cache cap the reserve is a weight-independent constant.
+pub fn process_reserve_bytes(max_weight_bytes: u64) -> u64 {
+    activation_reserve_bytes(max_weight_bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        activation_reserve_bytes, config_model_type, kv_bytes_per_position, resolve_model_dir,
-        runtime_footprint_bytes, spec_to_hf_repo,
+        activation_reserve_bytes, config_model_type, kv_bytes_per_position, process_reserve_bytes,
+        resolve_model_dir, runtime_active_bytes, runtime_footprint_bytes, spec_to_hf_repo,
     };
 
     const GB: u64 = 1 << 30;
+
+    // The active/reserve split must reconstruct the original footprint exactly (no behavior
+    // change for the single-model admission gate), and the reserve must be the process-shared
+    // part so co-resident models count it ONCE. `spec` here is unresolvable ⇒ KV folds to 0, so
+    // active == weight; the identity still holds whatever the KV term is.
+    #[test]
+    fn active_plus_reserve_equals_footprint() {
+        let weight = 3 * GB;
+        let spec = "definitely/not-a-real-model-xyzzy"; // unresolvable ⇒ KV = 0
+        let active = runtime_active_bytes(spec, 8192, weight);
+        let reserve = process_reserve_bytes(weight);
+        assert_eq!(active.saturating_add(reserve), runtime_footprint_bytes(spec, 8192, weight));
+        // Active is strictly the per-model part (weights + KV), below the full footprint.
+        assert!(active < runtime_footprint_bytes(spec, 8192, weight));
+        assert_eq!(active, weight); // KV unresolved ⇒ 0
+        // process_reserve_bytes(0) is the smallest possible reserve (always-safe subtraction floor):
+        // with the default cache cap the reserve is weight-independent, so it equals the full one.
+        assert!(process_reserve_bytes(0) <= reserve);
+    }
 
     #[test]
     fn spec_to_hf_repo_forms() {
