@@ -14,6 +14,16 @@
   scratch A/B — planner→executor build pass-rate > max(GLM-alone, gpt-oss-alone), control gpt-oss-plans→
   gpt-oss-executes to confirm the win is the PLAN, 0 reboot. Pays off on non-trivial/plan-heavy tasks; skip
   for trivial or pure-edit (single model is fine there).
+- [ ] **adaptive-cascade-residency** (operator idea 2026-06-23) — make the cascade EAGER if its local
+  tiers co-fit, LAZY (one resident at a time, swap on escalation) if not. Today `build_cascade` is
+  eager-ONLY (`CascadeBackend` holds a live `Arc<dyn ChatBackend>` per tier), so on a 36 GB host a cascade
+  with a big local tier + another local is correctly refused (SUM > available, per `cascade-admission-
+  cascade-spec`). The lazy machinery ALREADY EXISTS — the gateway Switchboard (`gateway.rs:111`: "never two
+  resident — next chat lazily rebuilds from spec"). Wire it: when `cascade_local_footprint` (SUM) doesn't
+  fit but the MAX single tier does → build the cascade holding tier SPECS, load the cheapest on demand,
+  unload+load the next on escalation (admission per-swap = MAX). Reuses the same sequential-swap as
+  `planner-executor`. Done-when: a big-tier cascade loads lazily + escalates with a swap, 0 reboot;
+  eager path unchanged when tiers co-fit.
 - [x] **cascade-admission-cascade-spec** — DONE (plucky-finch 2026-06-23). The host-RAM admission gate
   (BUG-003, this session's work) wrongly REFUSED a cascade load: `estimate_model_footprint_bytes("cascade:
   …"/"a,b")` finds no installed model → unknown-size sentinel `u64::MAX/4` → "loading this model

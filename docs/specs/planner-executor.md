@@ -9,7 +9,26 @@ time — safe on a 36 GB no-reboot host, no co-residency overcommit.
 
 This is **decomposition** (split the task by ROLE: think vs do), distinct from the
 [cascade router](cascade-router.md) which is **escalation** (same task, retry on a stronger model when
-the cheap one fails). They are complementary; this spec is the planner→executor pipeline.
+the cheap one fails).
+
+## Unification — both are one "lazy sequential model pipeline" (operator insight 2026-06-23)
+
+Planner→executor and a **lazy cascade** are the SAME mechanism: a sequential pipeline of stages, each a
+model, **one resident at a time, swapped between stages** (the no-reboot fit). They differ only in two
+per-stage policies:
+
+| | transition (when to advance) | handoff (what the next stage gets) |
+|---|---|---|
+| **lazy cascade** | escalate **on a verdict** (cheap tier failed/uncertain → next) | the **same input** flows on |
+| **planner→executor** | **always advance** (after the plan) | **stage-1's output → stage-2's input** |
+
+So the implementation is ONE thing — a `Pipeline { stages: Vec<Stage> }` where each `Stage` carries a
+model + a `transition` (always / on-verdict / stop) + a `handoff` (forward-output / same-input). The
+cascade already supplies the verdict/acceptance logic; the missing SHARED piece is **sequential-swap
+residency** (load → use → unload → load next), which the gateway Switchboard already provides
+(`gateway.rs`: "never two resident — next chat lazily rebuilds from spec"). `planner-executor` =
+`always-advance + forward-output`; `lazy-cascade` (SPRINT `adaptive-cascade-residency`) =
+`escalate-on-verdict + same-input`. Build the pipeline once; the two features are two configs of it.
 
 ## Motivation (grounded in the matrix data, 2026-06-23)
 
