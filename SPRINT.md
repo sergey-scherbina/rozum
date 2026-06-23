@@ -465,17 +465,25 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   (it runs cargo itself), inserting the `>` makes the correct code land → build passes even when the model
   never ran cargo. unit test `heredoc_redirect_repairs_missing_gt_and_spares_valid_forms` (exact OzUnnR
   input + 5 negatives), 80/80 gateway tests green.
-- [ ] **gptoss-verify-before-done** (NEW — autopsy run 95pRjT, the OTHER build fail; termination/verify,
-  NOT delivery) — gpt-oss patched its first compile error correctly (`unwrap_or_default(|| …)` →
-  `unwrap_or_default()`, LANDED via `patch`), then REDUNDANTLY `cat >`-rewrote the whole file and
-  REINTRODUCED a compile error (`unwrap_or_default("")`), then declared "done" WITHOUT re-running cargo.
-  The model has compiler feedback available but stops before its LAST edit is verified. Levers to A/B
-  (each risky — prompt changes regressed before; matrix-gate each): (a) a tight "after your FINAL edit,
-  run `cargo build`; only say done after it compiles AND `cargo run` prints the expected output" line in
-  LEAN_CODING_PROMPT; (b) detect the anti-pattern "successful `patch` immediately followed by a full-file
-  `cat >` rewrite" and suppress the redundant rewrite (hard/risky — defer); (c) higher reasoning for the
-  verify phase. NOTE: heredoc-redirect (above) does NOT help 95pRjT (it used `cat >` correctly) — this is
-  a genuinely separate termination bug, filed separately per the isolate skill (correctness vs termination).
+- [~] **gptoss-verify-before-done** — TRIED + REFUTED by a powered A/B (plucky-finch 2026-06-23), reverted.
+  Hypothesis: the residual build reds are the model shipping NON-COMPILING final code (`.rev()` missing
+  `.collect()` = E0308; `unwrap_or_default(closure)`/`unwrap_or_default("")` = E0061; a malformed Cargo.toml
+  `authors = "Bob\n"` multi-line + a U+2011 non-ASCII hyphen in the package name) and declaring "the program
+  works" WITHOUT running cargo after its last edit. Built a hard run-before-stop `VERIFY_GATE_CLAUSE`
+  appended to LEAN_CODING_PROMPT (gated `ROZUM_CODEX_VERIFY_GATE`, default on). **BEHAVIOURALLY it worked**
+  — with the gate the model ran cargo 2-3× in 6/6 build cells (vs OzUnnR/mVFvoN never running it). **BUT the
+  pass-rate effect is NOISE.** First A/B looked great (OFF 2/6 → ON 5/6) but did NOT replicate; the POWERED
+  A/B (build REPS=10 each) gave **OFF 8/10 vs ON 5/10** — i.e. the gate, if anything, is slightly WORSE, and
+  the whole cell is dominated by variance (samples seen: 1/3, 2/4, 2/6, 5/6, 8/10, 5/10). So the verify gate
+  is NOT a fix → reverted (uncommitted, never shipped). **LESSON (isolate skill realized): a fix shipped on
+  a 5/6 hunch would have silently regressed; the powered A/B saved it. Read this cell as an N≥10 pass-rate,
+  never a single run.** ROOT TRUTH: after the heredoc fix, the residual codex×gpt-oss build reds are a LONG
+  TAIL of DISTINCT small model-correctness mistakes (a different tiny error each run) + the irreducible
+  agent-layer trajectory noise ([[project-matrix-nondeterminism]] Layer-A: session-id/timestamp per run) —
+  NOT a single gateway-fixable bug. A prompt nudge cannot beat that. The one DETERMINISTIC, provable lever
+  in this space was heredoc-redirect (above), and it shipped. Possible future: (b) the U+2011-hyphen /
+  multi-line-TOML are deterministic gateway-normalizable in heredoc bodies (risky — could corrupt intended
+  unicode; defer), or (c) `gptoss-codex-cascade` (fall back to 35B) to mask the model-correctness tail.
 - [ ] **footprint-estimate-accuracy** (reliability/no-reboot) — 35B is ESTIMATED ~30 GB but the
   ACTUAL peak is ~24 GB, so the residency guard refuses a model that would fit (today's codex×35B
   run blocked). Tighten the per-model estimate (or measure-then-cache the real peak) so the guard
