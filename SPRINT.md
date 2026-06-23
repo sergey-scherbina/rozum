@@ -664,6 +664,13 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
 - [ ] **ucc-tui-backend** — new `scalascript/frontend/tui` implementing `FrontendFrameworkSpi.emit` →
   Rust ratatui + crossterm, lowering the `View` AST (signals→state, handlers→key events, vstack/hstack
   →Layout/Constraint), modeled on `frontend/react`+`frontend/swing`. Co-own w/ plucky-fox (compiler). *(scalascript)*
+- [x] **ucc-poc-web** — DONE (2026-06-23). PROVED the Tk→web half end-to-end: `clients/control/control-center.ssc`
+  (`std/ui`: vstack/hstack/card/table/badge/heading) compiled to a React SPA FIRST TRY (no lowering errors),
+  served live via `bin/ssc` (SSR shell + react app.js), headless-render shows the full control-center (Gateway/
+  residency + installed catalog + meetings panels). ANSWERS the open questions: backend = `frontend: react`
+  frontmatter (not a build flag); entrypoints `serve(view, port)` / `emit(view, dir)`; run via `bin/ssc app.ssc`.
+  Data is static placeholder — next: bind live via the control-API (`/control/status` + meetings `rest_read`) with
+  `std/ui/fetch-json`. The SAME `.ssc` compiles to TUI once `frontend/tui` lands.
 - [ ] **ucc-poc-msglist** — read-only meeting message-list as a Tk component built to BOTH targets
   (new tui backend + web island); success = identical render + live update from one `.ssc` source.
 - [ ] **ucc-meetings-in-tk** — rewrite the meeting client in `std/ui` Tk (composer + switcher + unread),
