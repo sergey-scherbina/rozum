@@ -291,6 +291,15 @@ mod inner {
 
     impl Drop for MlxNativeBackend {
         fn drop(&mut self) {
+            // Footprint-estimate-accuracy (admission improvement A): record the REAL peak unified
+            // memory this (model, n_ctx) load reached so the NEXT admission can tighten its
+            // conservative estimate toward observed reality. `get_peak_memory()` is a process-global
+            // high-water mark (it survives the teardown below) + the live cache = the actual resident
+            // footprint at peak. Recorded as a running MAX; best-effort. Read BEFORE closing the
+            // channel, while the model is still resident and the peak is definitely set.
+            let peak = mlx_rs::memory::get_peak_memory() as u64;
+            let cache = mlx_rs::memory::get_cache_memory() as u64;
+            crate::footprint::record_peak(&self.model_id, peak.saturating_add(cache));
             // Close the job channel so the worker's `blocking_recv` returns `None` and it
             // exits its loop + drops the model, THEN join it. Without the join, ~8-15 GB of
             // MLX buffers free asynchronously and race a subsequent model load on the

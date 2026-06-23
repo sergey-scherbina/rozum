@@ -8,6 +8,7 @@ pub mod backend;
 pub mod concurrency;
 pub mod constrain;
 pub mod engine;
+pub mod footprint;
 pub mod harmony;
 pub mod obs;
 pub mod prefetch;

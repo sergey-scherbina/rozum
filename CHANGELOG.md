@@ -14,6 +14,28 @@ same operations can be served over HTTP (the daemon's existing `rest_read` axum 
 Models↔meetings were already separate services (separate crates, no code dep, coupling only via the
 gateway HTTP API) — kept as-is. Spec `docs/specs/services-and-clients.md`.
 
+## admission — tighten the footprint estimate toward the measured real peak
+Completed: 2026-06-23
+
+The residency admission estimate was conservative by design — weights + KV + a fixed activation reserve —
+so it OVER-refused models that would actually fit. It now tightens toward each model's REAL measured peak:
+the MLX backend's `Drop` records `get_peak_memory()+get_cache_memory()` (a process-global high-water mark)
+into a small running-MAX cache (`~/.local/state/rozum/gateway/footprint-peaks.json`, keyed by model), and
+`estimate_model_footprint_bytes` returns `min(conservative, max(weights+KV+1GiB, peak+margin))`.
+
+Safe by construction (this is why it shipped only after live validation): a peak measured under a LIGHT
+request (short prompt → little KV) does NOT bound a future full-context load, so the estimate is floored at
+the TARGET n_ctx's full weights+KV plus a fixed 1 GiB scratch reserve — a light measurement can never
+under-provision; the measured peak can only push the estimate UP toward the conservative upper bound,
+never below the safe floor. keep-free and the kernel pressure-guard backstop the remainder. Opt-out
+`ROZUM_GATEWAY_MEASURED_FOOTPRINT=0`; surfaced in `gateway --dry-run` ("measured peak: …").
+
+Live-validated on gpt-oss (real load + request + graceful stop recorded an 11.16 GiB peak): the dry-run
+estimate dropped 17.53 → 16.03 GiB (−1.5) with the lever vs without, and the floor correctly ignored the
+unrepresentative light peak (kept full KV). Two bugs caught in validation and fixed: a key mismatch
+(backend `model_id` slash vs CLI spec colon) and an n_ctx-exact key that adaptive loading's drifting n_ctx
+never hit (now keyed by model only). 3 footprint unit tests + 117 rozum-core tests green.
+
 ## admission — kernel memory-pressure guard (third no-reboot lever)
 Completed: 2026-06-23
 

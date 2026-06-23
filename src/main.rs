@@ -1085,10 +1085,29 @@ fn estimate_model_footprint_bytes(model: &str, n_ctx: u32) -> u64 {
     {
         Some(m) => {
             let fp = rozum::model_source::runtime_footprint_bytes(model, n_ctx, m.size_bytes);
-            ((fp as f64) * inflate) as u64
+            let conservative = ((fp as f64) * inflate) as u64;
+            // Improvement A (footprint-estimate-accuracy): if a prior load of this (model, n_ctx)
+            // recorded its REAL peak, tighten the conservative estimate toward it — capped at the
+            // conservative figure, floored at weights+KV + a margin (never under-estimates an observed
+            // peak). The keep-free margin + kernel pressure-guard (improvement B) backstop. Opt out
+            // with ROZUM_GATEWAY_MEASURED_FOOTPRINT=0 (use the pure conservative estimate).
+            if measured_footprint_enabled() {
+                let active = rozum::model_source::runtime_active_bytes(model, n_ctx, m.size_bytes);
+                rozum::footprint::tighten(model, conservative, active)
+            } else {
+                conservative
+            }
         }
         None => u64::MAX / 4, // unknown size → only admits when nothing else resident
     }
+}
+
+/// Whether admission tightens its estimate with a model's measured real peak (improvement A).
+/// Default ON; `ROZUM_GATEWAY_MEASURED_FOOTPRINT=0` falls back to the pure conservative estimate.
+fn measured_footprint_enabled() -> bool {
+    std::env::var("ROZUM_GATEWAY_MEASURED_FOOTPRINT")
+        .map(|v| v != "0")
+        .unwrap_or(true)
 }
 
 /// Reserve host RAM for a model about to load (BUG-003 v2), or exit with a clear
@@ -1253,6 +1272,9 @@ fn run_gateway_dry_run(model: &str, n_ctx: Option<u32>) {
         println!("  adaptive fit:      ✓ full — n_ctx {load_n_ctx}, cache {cache_gib} GiB");
     } else {
         println!("  adaptive fit:      ↓ reduced — n_ctx {load_n_ctx} (req {req_n_ctx}), cache {cache_gib} GiB");
+    }
+    if let Some(peak) = rozum::footprint::cached_peak(model).filter(|_| measured_footprint_enabled()) {
+        println!("  measured peak:     {:.2} GiB (real high-water from a prior load → estimate tightened toward it)", gib(peak));
     }
     println!("  est. footprint:    {:.2} GiB at those params", gib(footprint));
     if !report.holders.is_empty() {

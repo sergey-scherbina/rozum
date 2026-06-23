@@ -28,21 +28,22 @@
   is ~100% ANONYMOUS (needs swap/compression to reclaim = the jetsam path) so excluding it is CORRECT.
   We do NOT loosen `available` — we add the kernel's pressure signal instead. See [[reference-mlx-memory-cap-semantics]].
 
-- [ ] **footprint-estimate-accuracy** (operator-requested "improvement A"; validation-gated, NOT a quick
-  ship) — the admission gate OVER-refuses big models because `estimate_model_footprint_bytes` →
-  `runtime_footprint_bytes` is conservative: it bakes a fixed ~1.5 GiB activation reserve + the cache cap
-  on top of weights + KV (e.g. 35B floor = 21.60 GiB est. vs a likely ~20.5–21 real peak at n_ctx 4096 +
-  small prompts). The estimate is NOT artificially inflated (ROZUM_GATEWAY_FOOTPRINT_INFLATE default 1.0)
-  — the padding is the real-but-pessimistic activation reserve. IDEA: measure the REAL peak (MLX
-  `get_peak_memory` / `/usr/bin/time -l` max RSS the matrix already captures) after a successful load and
-  cache it per (model, n_ctx-bucket), then admit on `min(conservative_est, measured_peak + margin)` so it
-  TIGHTENS only, never below an observed peak. RISK (why validation-gated, do NOT flip casually): a future
-  request with a bigger prefill can exceed a peak measured at small prompt → under-estimate → OOM →
-  REBOOT (the exact failure we avoid). Must (a) cache a running MAX, keyed to n_ctx; (b) keep keep-free as
-  the variance buffer; (c) validate empirically — load the big model with the new figure, watch
-  `kern.memorystatus_vm_pressure_level`/jetsam, prove 0 reboots over N loads — BEFORE shipping default-on.
-  Lower priority than B; the estimate is already fairly tight, so the win is ~0.5–1 GiB. Compose with
-  `admission-pressure-guard` (the pressure lever backstops a slightly-too-tight estimate).
+- [x] **footprint-estimate-accuracy** — DONE + LIVE-VALIDATED (plucky-finch 2026-06-23, operator-requested
+  "improvement A"). Admission now TIGHTENS its conservative estimate toward the model's REAL measured peak.
+  HOW: the MLX backend `Drop` records `get_peak_memory()+get_cache_memory()` (a process-global high-water
+  mark) into `rozum_core::footprint` (running-MAX, persisted `~/.local/state/rozum/gateway/footprint-peaks.json`,
+  keyed by MODEL only — adaptive n_ctx drifts so an n_ctx-exact key never hits). `estimate_model_footprint_bytes`
+  then returns `footprint::tighten = min(conservative, max(weights+KV+1GiB, peak+margin))`. SAFETY (the reason
+  it was validation-gated): a peak from a LIGHT request (short prompt → little KV) does NOT bound a future
+  full-context load — caught by flooring at the TARGET n_ctx's full weights+KV + a fixed 1 GiB scratch
+  reserve, so a light measurement can NEVER under-provision; the peak can only push the estimate UP toward
+  conservative, never below the safe floor. keep-free + the pressure-guard (improvement B) backstop the rest.
+  Opt-out `ROZUM_GATEWAY_MEASURED_FOOTPRINT=0`. LIVE VALIDATION (gpt-oss, real load+request+graceful stop):
+  recorded real peak 11.16 GiB; dry-run est **17.53 → 16.03 GiB (−1.5)** with A vs without; the floor correctly
+  ignored the unrepresentative light peak (kept full KV). Caught + fixed two bugs in validation: (1) key
+  mismatch (backend `model_id` slash vs CLI spec colon → normalize `:`→`/`); (2) n_ctx-exact key never hit
+  (adaptive picks 131072→101376→100352 across loads) → key by model only. 3 footprint unit tests + 117
+  rozum-core green. Composes with B: A tightens, B backstops a too-tight estimate.
 
 - [ ] **glm-synth-validate-default-on** — THE remaining 'works by default' win (slot-gated, watcher re-armed). multi-rep A/B for the GLM artifact synth (now WORKS, master
   201c3f2, opt-in ROZUM_GLM_ARTIFACT_SYNTH=1): create lift across N reps + edit/chat NO-regress (fix was
