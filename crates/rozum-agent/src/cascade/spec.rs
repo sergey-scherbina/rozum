@@ -312,6 +312,20 @@ pub fn from_model_list<S: AsRef<str>>(names: &[S]) -> CascadeSpec {
     }
 }
 
+/// Build a **pipeline** spec from an ORDERED model list, preserving the operator's order: the
+/// first model named is the planner/advisor (tier 0), the last is the executor (top tier). Unlike
+/// [`from_model_list`], the tiers are NOT cost-ranked — a pipeline runs them in the stated order
+/// (the first tells the next what to do). Strategy = [`StrategyName::Pipeline`]. See
+/// `docs/specs/pipeline-cascade.md`.
+pub fn from_model_pipeline<S: AsRef<str>>(names: &[S]) -> CascadeSpec {
+    CascadeSpec {
+        tiers: names.iter().map(|n| classify_model_name(n.as_ref())).collect(),
+        max_escalations: None,
+        strategy: StrategyName::Pipeline,
+        router_model: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

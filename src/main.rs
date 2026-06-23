@@ -4687,7 +4687,22 @@ async fn build_cascade_from_list(
     if names.len() < 2 {
         return None; // a single name isn't a cascade — let the normal path build it
     }
-    let spec = rozum::cascade::from_model_list(&names);
+    // The operator's "chain of models" (`--model A,B`) is a PIPELINE by default: run A→…→B every
+    // request, A's plan handed to B, in the ORDER named (first = planner, last = executor). Set
+    // `ROZUM_CASCADE_STRATEGY=cheapest|classify|learned` to get the escalation cascade instead
+    // (cost-ranked tiers, climb only on a bad answer). See docs/specs/pipeline-cascade.md.
+    let escalation = std::env::var("ROZUM_CASCADE_STRATEGY")
+        .ok()
+        .and_then(|v| rozum::cascade::StrategyName::parse_cli(&v))
+        .filter(|s| *s != rozum::cascade::StrategyName::Pipeline);
+    let spec = match escalation {
+        Some(st) => {
+            let mut s = rozum::cascade::from_model_list(&names);
+            s.strategy = st;
+            s
+        }
+        None => rozum::cascade::from_model_pipeline(&names),
+    };
     build_cascade_from_spec(cfg, spec, n_ctx, "auto").await
 }
 

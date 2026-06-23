@@ -26,8 +26,8 @@ pub use judge::{HeuristicJudge, Judge, JudgeConfig, ModelJudge};
 pub use scheduler::{Lane, LaneSet};
 pub use self_signal::{escalation_tools, EscalationAffordance, SelfSignalCheck};
 pub use spec::{
-    build_cascade, classify_model_name, from_model_list, parse_cascade_model, CascadeSpec,
-    RemoteApi, StrategyName, TierSpec,
+    build_cascade, classify_model_name, from_model_list, from_model_pipeline, parse_cascade_model,
+    CascadeSpec, RemoteApi, StrategyName, TierSpec,
 };
 pub use stats::{
     AttemptRecord, DiffBucket, ModelTaskStat, ResourceSnapshot, StatsStore, TaskClass, TaskShape,
@@ -336,6 +336,10 @@ impl CascadeBackend {
             }
             self.health.record_success(&card.id);
             let plan = outcome.text.trim();
+            rozum_core::obs::log_event(serde_json::json!({
+                "event": "pipeline_stage", "stage": "advisor",
+                "model": card.id, "plan_chars": plan.len(),
+            }));
             if !plan.is_empty() {
                 forward_plan(&mut messages, plan);
             }
@@ -344,6 +348,9 @@ impl CascadeBackend {
         // Executor tier (last): the real request + tools; buffered back to the caller (consistent
         // with the escalation path; live-stream passthrough is a later optimization).
         let exec = &models[last];
+        rozum_core::obs::log_event(serde_json::json!({
+            "event": "pipeline_stage", "stage": "executor", "model": exec.id, "tiers": models.len(),
+        }));
         let mut ereq = req;
         ereq.messages = messages;
         let outcome = {
