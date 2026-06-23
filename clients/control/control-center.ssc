@@ -1,73 +1,79 @@
 #!/usr/bin/env ssc
 ---
 name: rozum-control-center
-version: 0.1.0
-description: rozum unified control center (UCC) — one std/ui app, web target (react). PoC.
-backends: [int]
+version: 1.0.0
+description: rozum UCC — ONE std/ui app -> web (React) AND terminal (ratatui). Single source, no workarounds.
 frontend: react
 ---
 # rozum — control center
 
-A first `std/ui` (Tk) slice of the unified control center, rendered to the **web** backend.
-The same `.ssc` will compile to **TUI** once the `frontend/tui` backend lands.
+One `std/ui` app, ONE `fetchUrlSignal` of `/control/status`, ONE `def view()` —
+compiles to **web** (`frontend: react`) and **terminal** (`--frontend tui`) with no
+per-target workarounds (scalascript ≥ c80f7be11: F1 multi-table-per-signal, E3 client-mode
+`def view()` mount, E2 tui transpile, portable `computedSignal`).
 
 ## Setup
-[signal, emit, serve](std/ui/primitives.ssc)
+[signal, fetchUrlSignal, incSignal, computedSignal, fieldColumn](std/ui/primitives.ssc)
+[jsonValue](std/json.ssc)
 [lower](std/ui/lower.ssc)
 [defaultTheme](std/ui/theme.ssc)
-[vstack, hstack, divider, spacer](std/ui/layout.ssc)
+[vstack, hstack, divider](std/ui/layout.ssc)
 [heading, text](std/ui/typography.ssc)
 [badge](std/ui/display.ssc)
 [card, cardWithHeader](std/ui/containers.ssc)
-[tableCol, tableRow, table](std/ui/data.ssc)
+[signalText_](std/ui/reactive.ssc)
+[actionButton](std/ui/input.ssc)
+[remoteTable, lcol](std/ui/data.ssc)
 
-## Models / gateway panel
+## App
 ```scalascript
-val gatewayCard = cardWithHeader(heading(2, "Gateway / residency"))(
+val refresh = signal("refresh", 0)
+val st      = fetchUrlSignal("status", "/control/status", refresh)
+
+def gib(b: Double): String = {
+  val t = (b / 107374182.4).toInt
+  (t / 10).toString + "." + (t % 10).toString + " GiB"
+}
+val availTxt     = computedSignal(() => gib(jsonValue(st()).get("residency").get("available_bytes").asDouble))
+val budgetTxt    = computedSignal(() => gib(jsonValue(st()).get("residency").get("host_budget_bytes").asDouble))
+val committedTxt = computedSignal(() => gib(jsonValue(st()).get("residency").get("committed_bytes").asDouble))
+
+val meetingsCard = cardWithHeader(heading(2, "Meetings"))(
+  remoteTable(st, [lcol("Room", "room", "https://busi.tail1174e2.ts.net:8443/r/:value")], "meetings")
+)
+
+val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
   vstack(gap = 6)(
-    hstack(gap = 8)(text("shared gateway:"), badge("none running", "neutral")),
-    text("host RAM budget:   27.0 GiB"),
-    text("available now:     23.4 GiB"),
-    text("committed:         0 B"),
-    text("resident models:   none")
+    hstack(gap = 8)(
+      text("source:"), badge("rozum control-API (always-up)", "success"),
+      actionButton(incSignal(refresh), "↻ refresh")
+    ),
+    hstack(gap = 8)(text("available:"),   signalText_(availTxt)),
+    hstack(gap = 8)(text("host budget:"), signalText_(budgetTxt)),
+    hstack(gap = 8)(text("committed:"),   signalText_(committedTxt))
   )
 )
 
-val catalogTable = table(
-  List(tableCol("Installed model", "model"), tableCol("Size", "size")),
-  List(
-    tableRow(text("GLM-4-32B-0414-4bit"), text("17.1 GiB")),
-    tableRow(text("GLM-4-9B-0414-4bit"),  text("4.9 GiB")),
-    tableRow(text("Qwen3-4B-4bit"),       text("2.1 GiB")),
-    tableRow(text("Qwen3-0.6B-4bit"),     text("0.3 GiB"))
-  )
-)
-val modelsCard = cardWithHeader(heading(2, "Installed catalog"))(catalogTable)
-```
-
-## Meetings panel
-```scalascript
-val meetingsCard = cardWithHeader(heading(2, "Meetings — room: rozum"))(
-  vstack(gap = 6)(
-    hstack(gap = 8)(text("sunny-civet"),  badge("agent", "success")),
-    hstack(gap = 8)(text("nimble-raven"), badge("agent", "success")),
-    hstack(gap = 8)(text("plucky-finch"), badge("agent", "success")),
-    hstack(gap = 8)(text("plucky-fox"),   badge("agent", "success")),
-    hstack(gap = 8)(text("Sergiy"),       badge("operator", "neutral"))
-  )
-)
-```
-
-## Compose + serve
-```scalascript
-val view = vstack(gap = 16)(
-  heading(1, "rozum — control center"),
-  text("one .ssc -> web (and TUI, once frontend/tui lands) -- data via the rozum control-API"),
-  divider(),
-  hstack(gap = 16)(gatewayCard, modelsCard),
-  divider(),
-  meetingsCard
+val residentsCard = cardWithHeader(heading(2, "Resident models (in memory now)"))(
+  remoteTable(st, [fieldColumn("PID", "pid"), fieldColumn("Model", "model")], "residency.residents")
 )
 
-serve(lower(view, defaultTheme), 8410)
+val catCard = cardWithHeader(heading(2, "Installed catalog"))(
+  remoteTable(st, [fieldColumn("Model", "spec"), fieldColumn("Size", "size_gib")], "installed")
+)
+
+def view() = lower(
+  vstack(gap = 16)(
+    heading(1, "rozum — control center"),
+    divider(),
+    meetingsCard,
+    divider(),
+    gwCard,
+    divider(),
+    residentsCard,
+    divider(),
+    catCard
+  ),
+  defaultTheme
+)
 ```
