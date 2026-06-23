@@ -32,7 +32,11 @@ ROZUM_GATEWAY_IDLE_SECS=0 ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0 "$BIN" gateway --mode
 wait_ready || { echo "!! planner did not load"; grep -iE 'refus|overcommit' "$WORK/planner_gw.log"|tail -2; exit 1; }
 PLAN_PROMPT="$TASK
 
-Produce the COMPLETE solution as the full final contents of every file needed. Show each file in a fenced block headed by its path. Do NOT run anything — just give the files and a one-line build/run command."
+Output the COMPLETE solution — every file's full final contents — each EXACTLY in this structured format (NO markdown code fences):
+=== FILE: <relative/path> ===
+<the full raw file contents>
+=== END ===
+Emit one such block per file (e.g. Cargo.toml, src/main.rs). Do NOT run anything; just emit the files."
 python3 - "$BASE" "$PLAN_PROMPT" >"$WORK/solution.md" <<'PY'
 import json,sys,urllib.request
 base,prompt=sys.argv[1],sys.argv[2]
@@ -44,23 +48,31 @@ PY
 echo "  solution: $(wc -l <"$WORK/solution.md") lines, $(wc -c <"$WORK/solution.md") bytes → $WORK/solution.md"
 echo "  ↓ unloading planner (lazy swap)"; stop_gw
 
-echo "═══ STAGE 2 — EXECUTOR ($AGENT @ $EXECUTOR): implement the solution ═══"
-# `rozum launch --model` starts the executor gateway itself (one model resident; the planner is already
-# unloaded above) and runs the REAL agent through it — so the gateway's delivery fixes apply (the fair test).
-EXEC_PROMPT="$TASK
-
-A vetted, correct solution is provided below. IMPLEMENT it exactly: create each file with the given contents, then build/run/test and fix any error until it actually works.
-
-<solution>
-$(cat "$WORK/solution.md")
-</solution>"
-( cd "$WORK" && case "$AGENT" in
-    codex)    "$BIN" launch --model "$EXECUTOR" codex exec "$EXEC_PROMPT" --dangerously-bypass-approvals-and-sandbox ;;
-    opencode) "$BIN" launch --model "$EXECUTOR" opencode run "$EXEC_PROMPT" ;;
-    claude)   "$BIN" launch --model "$EXECUTOR" claude -p "$EXEC_PROMPT" --dangerously-skip-permissions ;;
-    *) echo "unknown AGENT=$AGENT"; exit 2 ;;
-  esac ) >"$WORK/executor_agent.log" 2>&1
-stop_gw
+echo "═══ STAGE 2a — deterministic handoff: write the planner's files, verify ═══"
+# The forward-output handoff is DETERMINISTIC (parse + write the planner's files) — for create-from-scratch
+# the bottleneck is landing CORRECT code reliably, not an agent loop. The agentic executor only runs as a
+# FIX fallback when the planner's code doesn't build (gpt-oss's strength: fix/debug, not from-scratch).
+WROTE=$(python3 "$here/write_solution.py" "$WORK" "$WORK/solution.md")
+echo "  wrote: $(echo "$WROTE" | tr '\n' ' ')"
+# Make WORK a cargo WORKSPACE ROOT so `cargo` does NOT walk UP the tree and pick up a stray parent
+# Cargo.toml (e.g. a leftover in /tmp) as the workspace — which would fail the build spuriously.
+[ -f "$WORK/Cargo.toml" ] && ! grep -q '\[workspace\]' "$WORK/Cargo.toml" && printf '\n[workspace]\n' >> "$WORK/Cargo.toml"
+build_ok(){ ( cd "$WORK" && cargo build -q 2>"$WORK/build.err" ); }
+if build_ok; then
+  echo "  ✅ the planner's solution BUILDS as-is — no executor needed"
+else
+  echo "═══ STAGE 2b — EXECUTOR ($AGENT @ $EXECUTOR): fix the build ═══"
+  ERR="$(tail -8 "$WORK/build.err" 2>/dev/null)"
+  FIX_PROMPT="There is a Rust project in the current directory that does not build. Fix it so that \"cargo run -- hello\" works. Make the minimal change. The build error is:
+$ERR"
+  ( cd "$WORK" && case "$AGENT" in
+      codex)    "$BIN" launch --model "$EXECUTOR" codex exec "$FIX_PROMPT" --dangerously-bypass-approvals-and-sandbox ;;
+      opencode) "$BIN" launch --model "$EXECUTOR" opencode run "$FIX_PROMPT" ;;
+      claude)   "$BIN" launch --model "$EXECUTOR" claude -p "$FIX_PROMPT" --dangerously-skip-permissions ;;
+      *) echo "unknown AGENT=$AGENT"; exit 2 ;;
+    esac ) >"$WORK/executor_agent.log" 2>&1
+  stop_gw
+fi
 echo "═══ RESULT (in $WORK) ═══"
 ( cd "$WORK" && ls -1 *.toml src/*.rs 2>/dev/null; echo "--- cargo run -- hello ---"; timeout 60 cargo run -- hello 2>&1 | tail -2 )
 echo "kept: $WORK"

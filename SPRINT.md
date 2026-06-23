@@ -38,6 +38,19 @@
   then run the fair A/B (planner→executor vs gpt-oss-alone) on a from-scratch-hard task. Also: `solve.sh`
   cleanup now stops the launch-spawned shared gateway (it persisted). The pipeline + planner are proven;
   the executor wiring is the one remaining bug.
+  **RESOLVED + WORKING (plucky-finch 2026-06-23).** The codex-executor HANG was avoided by a better design
+  that the matrix data pointed to: for create-from-scratch the bottleneck is LANDING correct code, not an
+  agent loop. New stage 2 = a DETERMINISTIC forward-output handoff: the planner is asked for a STRUCTURED
+  format (`=== FILE: path ===` … `=== END ===`, robust to parse — no fragile free-markdown), `scripts/bench/
+  write_solution.py` parses + WRITES the files (unit-tested on both the structured + GLM-markdown shapes →
+  cargo run olleh), then verify; the agentic executor (gpt-oss) only runs as a FIX FALLBACK when the
+  planner's code doesn't build. Full live run CLEAN: GLM-32B planned (one-shot, structured) → lazy-swap
+  unloaded → deterministic write → **"BUILDS as-is, no executor needed" → cargo run -- hello → olleh**,
+  0 reboot, one model at a time. Also fixed a sneaky env bug: a stray `/tmp/Cargo.toml` (from an earlier
+  test) made `cargo` walk UP and adopt it as the workspace root → spurious build failure; solve.sh now
+  appends `[workspace]` to the WORK Cargo.toml so cargo can't walk up. REMAINING: validate the FIX-fallback
+  path (a task where GLM's code is wrong → gpt-oss fixes it) + the fair A/B (planner-pipeline vs gpt-oss-
+  alone) on a from-scratch-HARD task where the plan adds value. Shipped: `solve.sh` + `write_solution.py`.
 - [ ] **adaptive-cascade-residency** (operator idea 2026-06-23) — make the cascade EAGER if its local
   tiers co-fit, LAZY (one resident at a time, swap on escalation) if not. Today `build_cascade` is
   eager-ONLY (`CascadeBackend` holds a live `Arc<dyn ChatBackend>` per tier), so on a 36 GB host a cascade
