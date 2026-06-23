@@ -615,7 +615,9 @@ the CLIENT layer; no binary split (process separation already gives (a)).
   handlers are now thin presentation over it (no inline jsonl/principal/cursor parsing in the binary).
   Behavior-preserving (80 meeting tests green; live read/inbox/who verified). The storage format is now
   internal to the crate — the contract for web/TUI/UCC to consume next.
-- [ ] **svc-meeting-client-api-write** — add `post`/`status`/`hello`/`whoami` to the module; CLI fully thin.
+- [x] **svc-meeting-client-api-write** — DONE. `client::post_identity` (the single agent-vs-human posting
+  rule), `whoami` (Identity enum), `establish` (hello), `daemon_status` added; the bin's post/whoami/hello/
+  status handlers are thin over them. 80 tests; live whoami/status verified. CLI now fully thin over the API.
 - [ ] **svc-meeting-http-parity** — extend the daemon's `rest_read` axum surface to inbox/roster/post so
   web/remote clients use the API, not disk/exec.
 - [ ] **svc-migrate-web-tui** — migrate the web `.ssc` + the Rust TUI to the client API (drop direct disk/exec).

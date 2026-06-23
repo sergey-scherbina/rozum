@@ -2255,26 +2255,9 @@ async fn run_meetings_post(text: String, room: Option<String>, as_display: Optio
     // Identity: an explicit `--as`/$ROZUM_MEETING_AS label (a hook/agent) posts with that
     // display under an ephemeral token; otherwise this is the human → use the stable local
     // identity (one participant across launches/clients).
-    // Principal resolution (docs/specs/meeting-identity-roster.md): an explicit override, else THIS
-    // session's Agent principal (so an agent posts as ITSELF, established once via `meetings hello`),
-    // else the human (the stable account/local identity). No mixing — an agent session is never the
-    // operator, a bare shell is never an agent.
-    let explicit = as_display
-        .or_else(|| std::env::var("ROZUM_MEETING_AS").ok())
-        .filter(|s| !s.trim().is_empty());
-    let (display, token) = match explicit {
-        Some(d) => (d, None),
-        None => match rozum::meeting::agent_identity::current() {
-            Some(agent) => {
-                rozum::meeting::agent_identity::touch(); // keep the roster's liveness fresh
-                (agent.display, Some(agent.principal_id))
-            }
-            None => {
-                let id = rozum::meeting::local_identity::load_or_create();
-                (id.display, Some(id.token))
-            }
-        },
-    };
+    // Principal resolution lives in the client API — the single agent-vs-human posting rule.
+    // See docs/specs/meeting-identity-roster.md.
+    let (display, token) = rozum::meeting::client::post_identity(as_display);
     // Room precedence: explicit --room, then a configured shared room (ROZUM_MEETING_ROOM, so
     // hook posts land where the agents are), then the cwd project's room.
     let shared = std::env::var("ROZUM_MEETING_ROOM")
@@ -2394,9 +2377,7 @@ fn worktree_leaf(cwd: &str) -> &str {
 
 /// `rozum meetings hello [name]` — establish this session's Agent principal (once) + label the tab.
 fn run_meetings_hello(name: Option<String>) {
-    use rozum::meeting::agent_identity;
-    let project = rozum::meeting::daemon_proxy::detect_project();
-    match agent_identity::establish(name, project) {
+    match rozum::meeting::client::establish(name) {
         Some(p) => {
             // Terminal title (an inert no-op on the app/web): label the tab with the handle.
             let proj = p.project.as_deref().map(worktree_leaf).unwrap_or("");
@@ -2417,16 +2398,13 @@ fn run_meetings_hello(name: Option<String>) {
 
 /// `rozum meetings whoami` — who does this session act as?
 fn run_meetings_whoami() {
-    use rozum::meeting::agent_identity;
-    match agent_identity::current() {
-        Some(p) => println!("{} (agent · session {})", p.display, short_id(&p.session_id)),
-        None if agent_identity::session_id().is_some() => {
-            println!("(agent session, no identity yet — run `rozum meetings hello <your-name>`)");
+    use rozum::meeting::client::{whoami, Identity};
+    match whoami() {
+        Identity::Agent(p) => println!("{} (agent · session {})", p.display, short_id(&p.session_id)),
+        Identity::AgentUnnamed => {
+            println!("(agent session, no identity yet — run `rozum meetings hello <your-name>`)")
         }
-        None => {
-            let id = rozum::meeting::local_identity::load_or_create();
-            println!("{} (human · account)", id.display);
-        }
+        Identity::Human(display) => println!("{display} (human · account)"),
     }
 }
 
@@ -2679,22 +2657,20 @@ fn run_meetings_stop() {
 }
 
 async fn run_meetings_status() {
-    use rozum::meeting::daemon::{daemon_alive, daemon_rooms};
+    use rozum::meeting::client::daemon_status;
     use rozum::meeting::room_path::meeting_sock;
     let sock = meeting_sock();
-    if !daemon_alive(&sock).await {
-        println!("meeting daemon: not running ({})", sock.display());
-        return;
-    }
-    println!("meeting daemon: running ({})", sock.display());
-    match daemon_rooms(&sock).await {
-        Ok(rooms) if rooms.is_empty() => println!("  (no rooms yet)"),
-        Ok(rooms) => {
+    match daemon_status().await {
+        None => println!("meeting daemon: not running ({})", sock.display()),
+        Some(rooms) => {
+            println!("meeting daemon: running ({})", sock.display());
+            if rooms.is_empty() {
+                println!("  (no rooms yet)");
+            }
             for (name, project) in rooms {
                 println!("  {name}   project: {}", project.as_deref().unwrap_or("-"));
             }
         }
-        Err(e) => eprintln!("  rooms.list failed: {e}"),
     }
 }
 

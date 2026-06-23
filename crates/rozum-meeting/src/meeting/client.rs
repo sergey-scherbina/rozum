@@ -93,3 +93,67 @@ pub fn advance_inbox_cursor(root: &Path, handle: &str, date: &str, n: u64) {
 pub fn roster() -> Vec<AgentPrincipal> {
     super::agent_identity::list()
 }
+
+// ── identity (who am I) ──────────────────────────────────────────────────────
+
+/// Who a post is authored as, by the principal priority: an explicit `as_display` /
+/// `$ROZUM_MEETING_AS` override → THIS session's Agent principal (touched for roster liveness) → the
+/// human (the stable local identity). `token = None` ⇒ an ephemeral explicit post. The single place
+/// the agent-vs-human posting rule lives, so every client resolves identity identically.
+pub fn post_identity(as_display: Option<String>) -> (String, Option<String>) {
+    let explicit = as_display
+        .or_else(|| std::env::var("ROZUM_MEETING_AS").ok())
+        .filter(|s| !s.trim().is_empty());
+    match explicit {
+        Some(d) => (d, None),
+        None => match super::agent_identity::current() {
+            Some(agent) => {
+                super::agent_identity::touch();
+                (agent.display, Some(agent.principal_id))
+            }
+            None => {
+                let id = super::local_identity::load_or_create();
+                (id.display, Some(id.token))
+            }
+        },
+    }
+}
+
+/// Who this session acts as.
+pub enum Identity {
+    /// An established Agent principal.
+    Agent(AgentPrincipal),
+    /// An agent session that hasn't run `hello` yet (has a session id, no principal).
+    AgentUnnamed,
+    /// The human, by account/login display.
+    Human(String),
+}
+
+/// Resolve this session's identity (agent principal / un-named agent / human).
+pub fn whoami() -> Identity {
+    match super::agent_identity::current() {
+        Some(p) => Identity::Agent(p),
+        None if super::agent_identity::session_id().is_some() => Identity::AgentUnnamed,
+        None => Identity::Human(super::local_identity::load_or_create().display),
+    }
+}
+
+/// Establish this session's Agent principal (once; `name = None` mints a stable one). `None` outside
+/// an agent session (no `$CLAUDE_CODE_SESSION_ID`).
+pub fn establish(name: Option<String>) -> Option<AgentPrincipal> {
+    let project = super::daemon_proxy::detect_project();
+    super::agent_identity::establish(name, project)
+}
+
+// ── daemon status ────────────────────────────────────────────────────────────
+
+/// The meeting daemon's status: `None` if it isn't running, else its rooms (`(name, project)`).
+pub async fn daemon_status() -> Option<Vec<(String, Option<String>)>> {
+    use super::daemon::{daemon_alive, daemon_rooms};
+    use super::room_path::meeting_sock;
+    let sock = meeting_sock();
+    if !daemon_alive(&sock).await {
+        return None;
+    }
+    Some(daemon_rooms(&sock).await.unwrap_or_default())
+}

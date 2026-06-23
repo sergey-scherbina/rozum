@@ -1,5 +1,15 @@
 # Changelog
 
+## meetings — client API write-side (identity/status through one contract)
+Completed: 2026-06-23
+
+Second increment of the meetings client API. `rozum-meeting::client` now also owns the write/identity
+operations: `post_identity` (the single agent-vs-human posting rule, was inline in the bin), `whoami`
+(an `Identity` enum), `establish` (hello), and `daemon_status`. The `rozum` binary's post/whoami/hello/
+status handlers are thin presentation over them — no identity/daemon logic left in the bin. 80 meeting
+tests green; live whoami/status verified. With the read side (prior commit), the CLI is now fully thin
+over the client contract — the seam web/TUI/UCC consume next. Spec docs/specs/services-and-clients.md.
+
 ## meetings — a client API (clients stop knowing the storage format)
 Completed: 2026-06-23
 
