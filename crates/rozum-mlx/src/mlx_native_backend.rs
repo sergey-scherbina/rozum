@@ -2126,14 +2126,14 @@ mod inner {
                 let mut calls = crate::serving::parse_tool_calls(&self.full_text);
                 // GLM create-from-scratch artifact fallback for the BATCHED path (≥2 concurrent GLM
                 // requests route here; a single GLM request — dense arch — finalizes in the engine
-                // seam, see engine::consume_tokens). Opt-in (default OFF). `synth_glm_tool_calls`
-                // returns empty unless a bare JSON object matches an offered tool's schema or a safe
-                // prose filename is found, so chat snippets aren't synthesized.
-                if calls.is_empty()
-                    && super::glm_artifact_synth_enabled()
-                    && super::model_is_glm(&self.job.model_id)
-                {
-                    calls = crate::serving::synth_glm_tool_calls(&self.full_text, &self.job.tools);
+                // seam, see engine::consume_tokens). Opt-in (default OFF). ADDITIVE + deduped, same as
+                // the engine seam: keeps both a named call and an artifact in a mixed response.
+                if super::glm_artifact_synth_enabled() && super::model_is_glm(&self.job.model_id) {
+                    for c in crate::serving::synth_glm_tool_calls(&self.full_text, &self.job.tools) {
+                        if !calls.contains(&c) {
+                            calls.push(c);
+                        }
+                    }
                 }
                 calls
             };

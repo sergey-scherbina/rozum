@@ -385,18 +385,27 @@ where
     } else {
         let mut calls = crate::serving::parse_tool_calls(&full_text);
         // GLM create-from-scratch artifact fallback: GLM (a DENSE arch) finalizes HERE, not in the
-        // mlx batch path. When it named no tool but showed the work (tool-args JSON, or labeled file
-        // content), synthesize the calls so the file/command actually lands
-        // (docs/specs/glm-artifact-write-synth.md). `synth_glm_tool_calls` returns empty unless a
-        // bare JSON object matches an offered tool's schema or a safe prose filename is found.
-        if calls.is_empty() && meta.glm_synth {
-            calls = crate::serving::synth_glm_tool_calls(&full_text, &meta.tools);
-        }
+        // mlx batch path. When it showed the work (tool-args JSON, or labeled file content) instead of
+        // (or in addition to) NAMING tools, synthesize those calls so the files/commands actually land
+        // (docs/specs/glm-artifact-write-synth.md). ADDITIVE: parse (named calls) and synth (nameless
+        // args) are complementary — `synth_glm_tool_calls` skips objects that already carry a `name`,
+        // and returns empty unless a bare JSON object matches an offered tool's schema or a safe prose
+        // filename is found — so a MIXED response (1 named call + N artifacts) keeps both. Dedup by
+        // exact (name, args) guards the rare overlap.
         if meta.glm_synth {
+            let synth = crate::serving::synth_glm_tool_calls(&full_text, &meta.tools);
+            let synth_n = synth.len();
+            for c in synth {
+                if !calls.contains(&c) {
+                    calls.push(c);
+                }
+            }
             crate::obs::log_event(serde_json::json!({
                 "event": "glm_artifact_synth",
                 "stop": format!("{stop_reason:?}"),
-                "synth_calls": calls.len(),
+                "parsed_calls": calls.len().saturating_sub(synth_n.min(calls.len())),
+                "synth_calls": synth_n,
+                "total_calls": calls.len(),
                 "n_tools": meta.tools.len(),
                 "text_len": full_text.len(),
             }));
