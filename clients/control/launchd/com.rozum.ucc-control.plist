@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.rozum.ucc-control</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sergiy/.rozum/bin/rozum-ctrl</string>
+    <string>gateway</string>
+    <string>control-serve</string>
+    <string>--port</string>
+    <string>8411</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/Users/sergiy</string>
+    <key>PATH</key><string>/Users/sergiy/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/sergiy/work/my/rozum</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/sergiy/.rozum-ucc-control.log</string>
+  <key>StandardErrorPath</key><string>/Users/sergiy/.rozum-ucc-control.log</string>
+</dict>
+</plist>

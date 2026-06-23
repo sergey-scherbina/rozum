@@ -193,3 +193,23 @@ own form. tui's `emit()` throws — only `emitNative(Platform.Terminal)` → a r
 
 scalascript is registered in `REPOS.md` (`../scalascript`). The `frontend/tui` backend lands there;
 the control-center app + control-API land in rozum. Coordinate the compiler-side work with plucky-fox.
+
+## Durable deployment (2026-06-23, sunny-civet)
+
+The web control-center runs as two macOS user LaunchAgents (RunAtLoad + KeepAlive — verified
+respawn on kill), fronted by Tailscale serve (`--bg`, persists across reboots):
+
+| Service | LaunchAgent | Listens | Command |
+| --- | --- | --- | --- |
+| control-API | `com.rozum.ucc-control` | `127.0.0.1:8411` | `~/.rozum/bin/rozum-ctrl gateway control-serve --port 8411` |
+| SPA static  | `com.rozum.ucc-web`     | `127.0.0.1:8410` | `python3 -m http.server 8410 --directory ~/.rozum/ucc/site` |
+
+Tailscale: `:8447 → 8410` (SPA), `:8448 → 8411` (control-API, `Access-Control-Allow-Origin: *`).
+Operator opens `https://busi.tail1174e2.ts.net:8447/`. The SPA is a self-contained `index.html`
+snapshot (built with the `:8448` Tailscale URL as the injected backend base) under
+`~/.rozum/ucc/site/`; the control-API binary is a stable copy at `~/.rozum/bin/rozum-ctrl`
+(rebuild-proof — `~/.cargo/bin/rozum` predates `control-serve`).
+
+Plist templates: `clients/control/launchd/`. Rebuild + redeploy: `clients/control/deploy-ucc-web.sh`
+(`SSC=<ssc cli> TS_BASE=<control-api url> ./deploy-ucc-web.sh`). NOTE: the control binary must be
+built from `master` (has `gateway control-serve`); the warm workspace target makes it a ~15s incremental.
