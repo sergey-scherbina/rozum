@@ -147,6 +147,48 @@ traversal). Decide whether this lives in the Tk core (so all backends agree) or 
 - **Maturity of Tk:** backends are tested, but how production-ready is `std/ui` for a real multi-screen
   app? De-risk on the PoC before committing the full rewrite.
 
+## Live binding + dual-target — RESOLVED / DELEGATED (2026-06-23, sunny-civet)
+
+**Web target works (proven in headless Chrome against live `/control/status`):**
+
+- Build/run a Tk `.ssc` web app: `ssc run --frontend react --mode client --server-url <BASE> app.ssc`
+  → emits a self-contained `index.html` (runtime + fetch + `useState` inline; `app.js` empty) and runs a
+  dev server that injects `globalThis.__sscBackendBaseUrl=<BASE>`. Durable static deploy: `curl` that
+  `index.html` → `ssc serve <port> <dir>`. NOT `bin/ssc app.ssc` — the interpreter cannot run the
+  reactive codegen externs (`signalText`/`fetchUrlSignal`) → `InterpretError: signalText(signal)`.
+- Frontend is selected by front-matter `frontend: react` (NOT a `ssc build` flag).
+- A signal gets a React `useState` ONLY if it is **mutated**. A fetch-only `refreshTick` must be anchored
+  by a mutator (`signalActionButton(incSignal(refresh), "↻ refresh")`) or the page throws
+  `ReferenceError: refresh is not defined` → blank page. (This was the "Пусто" bug.)
+- Live scalar fields: `fetchJsonValue(name,url,tick,headers)` (`std/ui/fetch-json`) → navigable
+  `JsonValue`; read via `computedSignal(() => st().get("residency").get("available_bytes").asString)` +
+  `signalText_`. Stays inside the working `std/ui` + `serve(lower(view, theme), port)` entrypoint.
+- jsdom is unreliable here (chokes on the runtime's Worker-based fetch); verify with real headless Chrome
+  (`--headless=new --virtual-time-budget=7000 --dump-dom`).
+
+**Dual-compile mechanism:** `react` (browser SPA) and `tui` (ratatui) are both `FrontendFrameworkSpi`
+backends consuming ONE lowered `FrontendModule` (View IR). The view lowers once; each backend emits its
+own form. tui's `emit()` throws — only `emitNative(Platform.Terminal)` → a ratatui+crossterm crate → `cargo run`.
+
+**Portable subset (web ∩ tui) today:** `Column`/`Row`/`Text`/`Divider` + signals + `DataTable` +
+`fetchUrlSignal` (tui slice 5 → ureq). NOT portable: model-DSL (`fetchJsonSignal`/`ModelView`/`ForModel`)
+= react-only (renders empty in react client-mode; `def view()` not auto-discovered there).
+
+**Two gaps blocking "one `.ssc` → web + tui" — DELEGATED to scalascript (room, 2026-06-23):**
+
+- **[A] Portable dynamic table from a NESTED JSON field.** `dataTable(sig, cols)` needs a `FetchUrlSignal`
+  whose value is a *list of row-maps* — works only when the array is at the response ROOT (local-first
+  `dataTable(fetchUrlSignal("notes","/api/notes",tick), cols)`). Rendering a table from a nested field
+  (`status.installed`) of a single fetch fails: `dataTable(computedSignal(()=>jsonStringify(st().get("installed"))), cols)`
+  yields one EMPTY row (value is a JSON *string*, not row-maps). Need a nested-field source working in BOTH
+  backends (e.g. `jsonTable(sig, path, cols)` or a normalizing computedSignal) + a tui DataTable-from-fetched-JSON
+  test. (= scalascript's flagged "typed-model dynamic tables from fetched JSON, needs serde_json".)
+- **[B] Common entrypoint.** Web = `serve(lower(view,theme),port)` (web-specific); tui = `emitNative`
+  (no port); `--frontend tui` is NOT in `validFrontendNames` and there is NO native-emit CLI command
+  (emit-* = `build-rust`/`emit-js`/`emit-rust`/`emit-spa`/`emit-scala`/`emit-spark` — none emit a
+  terminal crate). Need one render-trigger (proposed `def view()` + runner dispatches serve-vs-emitNative
+  by `frontend:`) + wire `--frontend tui`. Empirically confirmed on toolchain `8eea211f8` (tui slices 0-5).
+
 ## Registry
 
 scalascript is registered in `REPOS.md` (`../scalascript`). The `frontend/tui` backend lands there;
