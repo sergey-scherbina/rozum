@@ -2118,7 +2118,21 @@ mod inner {
             let tool_calls = if matches!(self.stop, StopReason::Cancelled) {
                 Vec::new()
             } else {
-                crate::serving::parse_tool_calls(&self.full_text)
+                let mut calls = crate::serving::parse_tool_calls(&self.full_text);
+                // GLM create-from-scratch artifact fallback (opt-in, default OFF): when GLM named no
+                // tool but printed labeled file content, synthesize Write calls so the file actually
+                // lands (docs/specs/glm-artifact-write-synth.md). Guards: GLM family + a Write tool
+                // offered; `synth_glm_writes` itself returns empty unless a SAFE filename is
+                // recoverable from the prose preceding a fence (so chat snippets aren't written).
+                if calls.is_empty()
+                    && super::glm_artifact_synth_enabled()
+                    && super::model_is_glm(&self.job.model_id)
+                {
+                    if let Some(wt) = super::resolve_write_tool(&self.job.tools) {
+                        calls = crate::serving::synth_glm_writes(&self.full_text, &wt);
+                    }
+                }
+                calls
             };
             if !tool_calls.is_empty() {
                 for (name, args) in tool_calls.iter() {
@@ -3786,6 +3800,42 @@ fn glm_strip_framing_enabled() -> bool {
         std::env::var("ROZUM_GLM_STRIP_FRAMING").ok().as_deref(),
         Some("1" | "true" | "on")
     )
+}
+
+/// Opt-in (default OFF): synthesize `Write` tool calls from a GLM **create-from-scratch artifact** —
+/// the failure mode where GLM-4-0414, under a heavy agent prompt, narrates + shows labeled file
+/// contents in fences instead of naming the Write tool (so the file never lands: the captured
+/// `turns=1 tools=0` cell). See `docs/specs/glm-artifact-write-synth.md`. Default OFF until the live
+/// A/B confirms a create lift with no edit/chat regression; enable with `ROZUM_GLM_ARTIFACT_SYNTH=1`.
+fn glm_artifact_synth_enabled() -> bool {
+    matches!(
+        std::env::var("ROZUM_GLM_ARTIFACT_SYNTH").ok().as_deref(),
+        Some("1" | "true" | "on")
+    )
+}
+
+/// Proxy for the GLM tool-call family (the artifact-instead-of-Write behavior is a GLM-4-0414 trait).
+/// `model_id`-based (e.g. `mlx-community:GLM-4-32B-0414-4bit`) — sufficient for this default-OFF,
+/// heavily-guarded fallback; the precise source is the template dialect's `uses_glm_envelope`.
+fn model_is_glm(model_id: &str) -> bool {
+    model_id.to_ascii_lowercase().contains("glm")
+}
+
+/// The offered file-writing tool's exact name, if any, so a synthesized call matches what the agent
+/// will actually execute. Prefers an exact `Write`; else a tool whose name looks like a file writer.
+/// `None` (no such tool offered) ⇒ no synthesis (one of the spec's guards).
+fn resolve_write_tool(tools: &[crate::backend::ToolDef]) -> Option<String> {
+    if let Some(t) = tools.iter().find(|t| t.name == "Write") {
+        return Some(t.name.clone());
+    }
+    tools
+        .iter()
+        .map(|t| &t.name)
+        .find(|n| {
+            let l = n.to_ascii_lowercase();
+            l == "write_file" || l == "create_file" || l == "createfile" || l.contains("write")
+        })
+        .cloned()
 }
 
 /// Is `sentence` a narration *directive* (tell-the-model-to-show-prose/markdown)? Conservative:
