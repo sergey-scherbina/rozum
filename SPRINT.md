@@ -444,6 +444,26 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
 - [ ] **perf-kv-ctxsweep-verify** — verification-only: `ROZUM_CTXSWEEP=1 mlx_qwen35_moe_decode_bench`,
   assert decode t/s flat across context (proves the pre-allocated KV has no O(context)/token regress). *(slot)*
 
+### Unified control center — one `.ssc` UI for TUI + web/PWA (operator vision 2026-06-23, spec `docs/specs/unified-control-center.md`)
+TUI + web + `.ssc` + PWA = ONE app, one `.ssc` source, compiled twice (TUI + web/React/PWA), for ALL
+of rozum (meetings, models, gateway/residency, …). KEY RECON FINDING: ssc already ships **Tk** — a
+mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backends** (`react`/`solid`/
+`vue`/`swing`/`javafx`/`swiftui`/`electron`/…) + SSR (`Ssr.renderToHtml`) behind one SPI
+(`FrontendFrameworkSpi.emit`). So most of the vision EXISTS; the real gap is a **TUI (ratatui) backend**
++ rewriting rozum's UI in Tk. Operator chose: hybrid SSR+islands × meetings-first.
+- [ ] **ucc-tui-backend** — new `scalascript/frontend/tui` implementing `FrontendFrameworkSpi.emit` →
+  Rust ratatui + crossterm, lowering the `View` AST (signals→state, handlers→key events, vstack/hstack
+  →Layout/Constraint), modeled on `frontend/react`+`frontend/swing`. Co-own w/ plucky-fox (compiler). *(scalascript)*
+- [ ] **ucc-poc-msglist** — read-only meeting message-list as a Tk component built to BOTH targets
+  (new tui backend + web island); success = identical render + live update from one `.ssc` source.
+- [ ] **ucc-meetings-in-tk** — rewrite the meeting client in `std/ui` Tk (composer + switcher + unread),
+  reach parity with the 1389-line hand-written Rust TUI, then retire it.
+- [ ] **ucc-control-api** — normalize rooms/messages/models/gateway/residency into `/api/*` JSON +
+  in-process equivalents, bound to Tk signals (`std/ui/fetch-json`); consumed by both targets.
+- [ ] **ucc-models-panel** — models/gateway/residency control screen (proves "beyond meetings").
+- Open: build-flag to select the frontend backend (not yet located); signal→redraw loop; focus/keyboard
+  model (Tk-core vs tui-backend); Tk web-target ↔ existing SSR meeting server reconciliation. See spec.
+
 ### Workspace split — monolith → layered Cargo workspace (spec-gated, `docs/specs/workspace-split.md`)
 
 Goal: decompose the single ~47K-LOC `rozum` crate into a **Cargo workspace of ~7–8
