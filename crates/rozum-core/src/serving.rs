@@ -427,7 +427,7 @@ pub fn synth_glm_tool_calls(text: &str, tools: &[crate::backend::ToolDef]) -> Ve
             // Mode-2: bare tool-args JSON (GLM's common create form). Lenient parse tolerates GLM's
             // mismatched closing bracket (`]`/`)` for `}`); a `name` field means it's a full call →
             // parse_tool_calls's job, not ours.
-            if let Some(m) = parse_tool_args_lenient(body) {
+            if let Some(m) = parse_tool_args_lenient(body, tools) {
                 if !m.contains_key("name") {
                     if let Some(name) = match_tool_by_args(&m, tools) {
                         out.push((name, Value::Object(m).to_string()));
@@ -450,7 +450,7 @@ pub fn synth_glm_tool_calls(text: &str, tools: &[crate::backend::ToolDef]) -> Ve
     // Also catch a bare (un-fenced) JSON args object, if no fence yielded anything.
     if out.is_empty() {
         for obj in balanced_json_objects(text) {
-            if let Some(m) = parse_tool_args_lenient(obj) {
+            if let Some(m) = parse_tool_args_lenient(obj, tools) {
                 if !m.contains_key("name") {
                     if let Some(name) = match_tool_by_args(&m, tools) {
                         out.push((name, Value::Object(m).to_string()));
@@ -466,7 +466,7 @@ pub fn synth_glm_tool_calls(text: &str, tools: &[crate::backend::ToolDef]) -> Ve
 /// args object with `]` or `)` instead of `}` — the real captured malformation that made strict
 /// `balanced_json_objects` miss it). Strict parse first; on failure, swap a single trailing
 /// wrong-bracket for `}` and retry. `None` if it still isn't a JSON object.
-fn parse_tool_args_lenient(body: &str) -> Option<serde_json::Map<String, Value>> {
+fn parse_tool_args_lenient(body: &str, tools: &[crate::backend::ToolDef]) -> Option<serde_json::Map<String, Value>> {
     let t = body.trim();
     if let Ok(Value::Object(m)) = serde_json::from_str::<Value>(t) {
         return Some(m);
@@ -480,26 +480,63 @@ fn parse_tool_args_lenient(body: &str) -> Option<serde_json::Map<String, Value>>
             }
         }
     }
-    // Tier 3: GLM leaves UNESCAPED quotes inside `content` (e.g. `println!("{}", x)`), which no
-    // bracket fix can save. Extract the known tool-arg shapes key-by-key instead.
-    glm_kv_extract(t)
+    // Tier 3: GLM leaves UNESCAPED quotes inside a value (e.g. `println!("{}", x)`), which no bracket
+    // fix can save. Extract key-by-key, driven by the OFFERED tool SCHEMAS (not hardcoded names).
+    glm_kv_extract(t, tools)
 }
 
-/// Tolerant key-by-key extraction of GLM's two tool-arg shapes from mangled JSON: the file-write
-/// `{file_path|path, content}` and the shell `{command}`. The clean values (path/command) read to
-/// their first quote; `content` reads to the LAST quote in the object, so unescaped inner quotes in
-/// code are kept literally. JSON escapes (`\n`, `\"`, …) are decoded. `None` if neither shape is found.
-fn glm_kv_extract(t: &str) -> Option<serde_json::Map<String, Value>> {
-    let mut m = serde_json::Map::new();
-    if let Some(path) = glm_clean_str(t, "file_path").or_else(|| glm_clean_str(t, "path")) {
-        let content = glm_content_str(t)?;
-        m.insert("file_path".into(), Value::String(path));
-        m.insert("content".into(), Value::String(content));
-        return Some(m);
-    }
-    if let Some(cmd) = glm_clean_str(t, "command") {
-        m.insert("command".into(), Value::String(cmd));
-        return Some(m);
+/// Tolerant key-by-key extraction of a tool's args from MANGLED JSON, driven by the OFFERED tool
+/// schemas (works for ANY agent's tool/arg names, not just claude's). For each tool whose required
+/// params are all string-typed, read each required key from `t`: a **trailing** key — one with no
+/// other property key after it (e.g. Write's `content`) — reads to the LAST quote in the object,
+/// tolerating unescaped inner quotes in code; a non-trailing key (e.g. Bash's `command`, with
+/// `description` after it) reads to its first quote. Returns the first tool whose required args fully
+/// extract. `None` if none do.
+fn glm_kv_extract(t: &str, tools: &[crate::backend::ToolDef]) -> Option<serde_json::Map<String, Value>> {
+    for tool in tools {
+        let Some(props) = tool.input_schema.get("properties").and_then(|p| p.as_object()) else {
+            continue;
+        };
+        let required: Vec<&str> = tool
+            .input_schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        // Only attempt tools whose required params are all string-typed (text args the synth recovers).
+        if required.is_empty()
+            || !required.iter().all(|k| {
+                props.get(*k).and_then(|p| p.get("type")).and_then(|v| v.as_str()) == Some("string")
+            })
+        {
+            continue;
+        }
+        let prop_keys: Vec<&str> = props.keys().map(String::as_str).collect();
+        let mut m = serde_json::Map::new();
+        let mut ok = true;
+        for &k in &required {
+            let Some(kpos) = t.find(&format!("\"{k}\"")) else {
+                ok = false;
+                break;
+            };
+            // "trailing" = no OTHER property key appears after this key → its value runs to the
+            // object's last quote (so unescaped inner quotes are kept). Otherwise stop at the first.
+            let after_key = &t[kpos + k.len() + 2..];
+            let trailing = !prop_keys.iter().any(|o| *o != k && after_key.contains(&format!("\"{o}\"")));
+            let val = if trailing { glm_str_to_last_quote(t, k) } else { glm_clean_str(t, k) };
+            match val {
+                Some(v) => {
+                    m.insert(k.to_string(), Value::String(v));
+                }
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok && !m.is_empty() {
+            return Some(m);
+        }
     }
     None
 }
@@ -513,10 +550,12 @@ fn glm_clean_str(t: &str, key: &str) -> Option<String> {
     Some(glm_json_unescape(&after[..after.find('"')?]))
 }
 
-/// The `content` value, read to the LAST quote in the object — tolerant of GLM's unescaped inner
-/// quotes (the value is code/text; the real terminator is the quote before the closing bracket).
-fn glm_content_str(t: &str) -> Option<String> {
-    let after = &t[t.find("\"content\"")? + "\"content\"".len()..];
+/// The value after `"key": "`, read to the LAST quote in the object — tolerant of GLM's unescaped
+/// inner quotes (the value is code/text; the real terminator is the quote before the closing bracket).
+/// Only safe for a TRAILING key (see [`glm_kv_extract`]).
+fn glm_str_to_last_quote(t: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\"");
+    let after = &t[t.find(&pat)? + pat.len()..];
     let after = after[after.find(':')? + 1..].trim_start().strip_prefix('"')?;
     Some(glm_json_unescape(&after[..after.rfind('"')?]))
 }
@@ -712,6 +751,50 @@ mod tests {
         assert!(c1.contains("fn main"), "got: {c1:?}");
         assert!(c1.contains("println!(\"{}\""), "inner unescaped quotes preserved: {c1:?}");
         assert!(!c1.contains("file_path"), "no wrapper leak");
+    }
+
+    #[test]
+    fn synth_generalizes_to_any_agent_tool_schema() {
+        use crate::backend::ToolDef;
+        // A NON-claude agent: tool "save_file" with args {filename, source} (source is the trailing
+        // big-text field) and a shell tool "run" with {cmd, note} (cmd is first, note after).
+        let tools = vec![
+            ToolDef {
+                name: "save_file".into(),
+                description: "save".into(),
+                input_schema: serde_json::json!({
+                    "type":"object",
+                    "properties":{"filename":{"type":"string"},"source":{"type":"string"}},
+                    "required":["filename","source"]
+                }),
+            },
+            ToolDef {
+                name: "run".into(),
+                description: "run".into(),
+                input_schema: serde_json::json!({
+                    "type":"object",
+                    "properties":{"cmd":{"type":"string"},"note":{"type":"string"}},
+                    "required":["cmd"]
+                }),
+            },
+        ];
+        // MALFORMED (unescaped inner quotes + `]` bracket) with NON-claude key names → schema-driven
+        // extraction must still recover the real source via the trailing-field detection.
+        let art = "Make it:\n```json\n{\"filename\": \"hi.py\", \"source\": \"print(\"hi\")\nx = 1\"]\n```";
+        let calls = synth_glm_tool_calls(art, &tools);
+        assert_eq!(calls.len(), 1, "got: {calls:?}");
+        assert_eq!(calls[0].0, "save_file");
+        let a: Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(a["filename"].as_str().unwrap(), "hi.py");
+        let src = a["source"].as_str().unwrap();
+        assert!(src.contains("print(\"hi\")") && src.contains("x = 1"), "source: {src:?}");
+        // Non-trailing field: `cmd` is read to its FIRST quote, NOT over-reading into `note`.
+        let bash = "```json\n{\"cmd\": \"ls -la\", \"note\": \"list\"}\n```";
+        let c2 = synth_glm_tool_calls(bash, &tools);
+        assert_eq!(c2.len(), 1);
+        assert_eq!(c2[0].0, "run");
+        let a2: Value = serde_json::from_str(&c2[0].1).unwrap();
+        assert_eq!(a2["cmd"].as_str().unwrap(), "ls -la"); // not "ls -la\", \"note\": \"list"
     }
 
     #[test]
