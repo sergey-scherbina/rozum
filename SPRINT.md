@@ -602,6 +602,24 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
 - [ ] **perf-kv-ctxsweep-verify** — verification-only: `ROZUM_CTXSWEEP=1 mlx_qwen35_moe_decode_bench`,
   assert decode t/s flat across context (proves the pre-allocated KV has no O(context)/token regress). *(slot)*
 
+### Services & clients — separate services, clean APIs, one client (operator 2026-06-23, spec `docs/specs/services-and-clients.md`)
+Drivers: ALL THREE — (a) failure isolation, (b) one client over clean APIs (UCC), (c) cleanliness.
+GROUNDED: models↔meetings ALREADY separated (separate crates, no code dep, separate processes, coupling
+only via gateway HTTP) — keep. The one real gap is server↔clients for MEETINGS: clients read the
+jsonl/principal/cursor files DIRECTLY → depend on storage format. Fix: ONE `rozum-meeting::client` API
+(operations, not format), local in-process + same ops over HTTP. Separate at the SERVICE layer, unify at
+the CLIENT layer; no binary split (process separation already gives (a)).
+- [x] **svc-meeting-client-api-read** — DONE. New `rozum-meeting::client` API encapsulates
+  `resolve_room_root`/`read`/`inbox`(+`InboxCursor`/cursor)/`roster`; the `rozum` bin's read/inbox/who
+  handlers are now thin presentation over it (no inline jsonl/principal/cursor parsing in the binary).
+  Behavior-preserving (80 meeting tests green; live read/inbox/who verified). The storage format is now
+  internal to the crate — the contract for web/TUI/UCC to consume next.
+- [ ] **svc-meeting-client-api-write** — add `post`/`status`/`hello`/`whoami` to the module; CLI fully thin.
+- [ ] **svc-meeting-http-parity** — extend the daemon's `rest_read` axum surface to inbox/roster/post so
+  web/remote clients use the API, not disk/exec.
+- [ ] **svc-migrate-web-tui** — migrate the web `.ssc` + the Rust TUI to the client API (drop direct disk/exec).
+- [ ] **svc-gateway-api-doc** — models side already a clean service; document the gateway API contract.
+
 ### Unified control center — one `.ssc` UI for TUI + web/PWA (operator vision 2026-06-23, spec `docs/specs/unified-control-center.md`)
 TUI + web + `.ssc` + PWA = ONE app, one `.ssc` source, compiled twice (TUI + web/React/PWA), for ALL
 of rozum (meetings, models, gateway/residency, …). KEY RECON FINDING: ssc already ships **Tk** — a

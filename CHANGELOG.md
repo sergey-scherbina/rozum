@@ -1,5 +1,19 @@
 # Changelog
 
+## meetings — a client API (clients stop knowing the storage format)
+Completed: 2026-06-23
+
+First increment of the services-and-clients architecture (operator: failure isolation + one unified
+client + cleanliness). New `rozum-meeting::client` module is the single contract for room operations —
+`resolve_room_root`, `read`, `inbox` (+ the `InboxCursor`), `roster` — so a client consumes *operations*
+rather than parsing the on-disk jsonl / principal / cursor files. The `rozum` binary's `read`/`inbox`/
+`who` handlers are now thin presentation over it (the inline disk parsing is gone from the bin); the
+storage format is internal to the crate. Behavior-preserving (80 meeting tests green; live read/inbox/who
+verified). This is the seam the web `.ssc` + the Rust TUI + the future UCC client will consume, and the
+same operations can be served over HTTP (the daemon's existing `rest_read` axum surface) for remote/web.
+Models↔meetings were already separate services (separate crates, no code dep, coupling only via the
+gateway HTTP API) — kept as-is. Spec `docs/specs/services-and-clients.md`.
+
 ## admission — kernel memory-pressure guard (third no-reboot lever)
 Completed: 2026-06-23
 

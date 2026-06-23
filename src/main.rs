@@ -2283,34 +2283,14 @@ async fn run_meetings_post(text: String, room: Option<String>, as_display: Optio
 /// Resolve a room's on-disk transcript root. The cwd project's room is read directly (no daemon
 /// needed). A named room is resolved via the daemon's registry (a project room → `<project>/.rozum/
 /// room`), falling back to an ad-hoc room dir under `rooms_dir()`. Exits on no-project-and-no-room.
-async fn resolve_room_root(room: Option<String>, cmd: &str) -> std::path::PathBuf {
-    use rozum::meeting::daemon_proxy::detect_project;
-    use rozum::meeting::room_path::rooms_dir;
-    match room {
-        None => match detect_project() {
-            Some(p) => std::path::PathBuf::from(p).join(".rozum").join("room"),
-            None => {
-                eprintln!("meetings {cmd}: no project detected — run inside a repo, or pass --room");
-                std::process::exit(1);
-            }
-        },
-        Some(name) => {
-            let project = {
-                use rozum::meeting::daemon::{daemon_alive, daemon_rooms};
-                use rozum::meeting::room_path::meeting_sock;
-                let sock = meeting_sock();
-                if daemon_alive(&sock).await {
-                    daemon_rooms(&sock).await.ok().and_then(|rooms| {
-                        rooms.into_iter().find(|(n, _)| n == &name).and_then(|(_, p)| p)
-                    })
-                } else {
-                    None
-                }
-            };
-            match project {
-                Some(p) => std::path::PathBuf::from(p).join(".rozum").join("room"),
-                None => rooms_dir().join(&name),
-            }
+/// Resolve a room to its transcript root via the client API, exiting with a CLI error when there's no
+/// project AND no `--room` (the API itself never exits the process).
+async fn resolve_room_or_exit(room: Option<String>, cmd: &str) -> std::path::PathBuf {
+    match rozum::meeting::client::resolve_room_root(room).await {
+        Some(r) => r,
+        None => {
+            eprintln!("meetings {cmd}: no project detected — run inside a repo, or pass --room");
+            std::process::exit(1);
         }
     }
 }
@@ -2322,75 +2302,44 @@ fn hhmm_of(ts: u64) -> String {
 }
 
 async fn run_meetings_read(room: Option<String>, count: usize) {
-    use rozum::meeting::store;
-    let root = resolve_room_root(room, "read").await;
+    use rozum::meeting::client;
+    let root = resolve_room_or_exit(room, "read").await;
     if !root.exists() {
         eprintln!("meetings read: no messages yet ({})", root.display());
         return;
     }
-    let turns = store::read_since(&root, None, 0);
+    let turns = client::read(&root, count);
     if turns.is_empty() {
         println!("(no messages)");
         return;
     }
-    let start = turns.len().saturating_sub(count);
-    for t in &turns[start..] {
+    for t in &turns {
         println!("[{}] {}: {}", hhmm_of(t.ts), t.display_name, t.content);
     }
 }
 
-/// Per-handle seen-cursor: the `(date, n)` position of the last mention this handle has been shown.
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-struct InboxCursor {
-    date: String,
-    n: u64,
-}
-
 /// `rozum meetings inbox --as <handle>` — messages that address you, since you last looked.
 async fn run_meetings_inbox(handle: String, room: Option<String>, peek: bool, all: bool, count: usize) {
-    use rozum::meeting::mention::{addresses, handle_of};
-    use rozum::meeting::store;
-
-    let root = resolve_room_root(room, "inbox").await;
+    use rozum::meeting::client;
+    use rozum::meeting::mention::handle_of;
+    let root = resolve_room_or_exit(room, "inbox").await;
     if !root.exists() {
         println!("(no new messages for {handle})");
         return;
     }
-    let turns = store::read_since(&root, None, 0);
-
-    // The cursor lives on disk next to the transcript, so the inbox survives offline and across
-    // sessions regardless of whether a proxy was ever connected.
-    let cursor_path = root.join(".inbox").join(format!("{handle}.json"));
-    let cursor: InboxCursor = std::fs::read_to_string(&cursor_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-
-    // Turns that address me, optionally only those past my seen-cursor.
-    let mine: Vec<_> = turns
-        .iter()
-        .filter(|t| addresses(&t.content, &handle))
-        .filter(|t| all || (t.date.as_str(), t.n) > (cursor.date.as_str(), cursor.n))
-        .collect();
-
+    let mine = client::inbox(&root, &handle, all);
     if mine.is_empty() {
         println!("(no new messages for {handle})");
         return;
     }
-
     let start = mine.len().saturating_sub(count);
     for t in &mine[start..] {
         println!("[{}] {}: {}", hhmm_of(t.ts), handle_of(&t.display_name), t.content);
     }
-
     // Advance the seen-cursor to the latest mention shown (unless peeking / showing all).
     if !peek && !all {
         if let Some(last) = mine.last() {
-            let next = InboxCursor { date: last.date.clone(), n: last.n };
-            let _ = std::fs::create_dir_all(cursor_path.parent().unwrap());
-            if let Ok(s) = serde_json::to_string(&next) {
-                let _ = std::fs::write(&cursor_path, s);
-            }
+            client::advance_inbox_cursor(&root, &handle, &last.date, last.n);
         }
     }
 }
@@ -2461,10 +2410,9 @@ fn run_meetings_whoami() {
 
 /// `rozum meetings who` — roster mapping each handle to a findable session.
 async fn run_meetings_who(long: bool) {
-    use rozum::meeting::agent_identity;
     const TTL: u64 = 15 * 60;
     let now = now_epoch_secs();
-    let agents = agent_identity::list();
+    let agents = rozum::meeting::client::roster();
 
     if long {
         println!("{:<16} {:<5} {:<5} {:<10} CWD", "HANDLE", "LIVE", "AGE", "SESSION");

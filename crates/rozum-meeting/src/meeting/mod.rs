@@ -1,5 +1,6 @@
 pub mod agent_identity;
 pub mod budget;
+pub mod client;
 pub mod daemon;
 pub mod daemon_proxy;
 pub mod identity;
