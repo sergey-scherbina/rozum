@@ -1227,9 +1227,18 @@ fn run_gateway_dry_run(model: &str, n_ctx: Option<u32>) {
     } else {
         available.and_then(|a| rozum::model_source::fit_model_params(model, m.size_bytes, req_n_ctx, a, min_free, N_CTX_FLOOR))
     };
+    let default_cache = std::env::var("ROZUM_MLX_CACHE_GB")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(4);
     let (load_n_ctx, cache_gib) = match fit {
         Some((n, c)) => (n, c),
-        None => (req_n_ctx, std::env::var("ROZUM_MLX_CACHE_GB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(4)),
+        // Adaptive OFF: the real load attempts the FULL requested params → show that footprint/shortfall.
+        None if adaptive_off => (req_n_ctx, default_cache),
+        // Adaptive ON but even the floor doesn't fit: show the MINIMAL footprint (floor n_ctx + 1 GiB
+        // cache) so the shortfall is the real "free this much and it loads at minimum params", not the
+        // full-context footprint (which would 5× the reported gap).
+        None => (N_CTX_FLOOR, 1),
     };
     // Make the footprint estimate agree with the chosen cache (both read this env), exactly as the load path does.
     unsafe { std::env::set_var("ROZUM_MLX_CACHE_GB", cache_gib.to_string()) };
