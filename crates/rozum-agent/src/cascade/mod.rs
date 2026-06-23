@@ -60,21 +60,26 @@ specific and brief — this plan is the only thing the executor receives from yo
 /// How an advisor's plan is framed when forwarded into the next tier's input.
 const PLAN_PREFIX: &str = "[Plan from the advisor model — follow it to complete the task]\n";
 
-/// Forward an advisor's plan into the conversation the next tier sees (the forward-output handoff).
-/// Appends to the trailing user-text message when there is one (keeps role alternation intact for
-/// strict chat templates); otherwise adds a new user message.
-fn forward_plan(messages: &mut Vec<Message>, plan: &str) {
-    let note = format!("{PLAN_PREFIX}{plan}");
+/// Append `text` to the trailing user-text message when there is one; otherwise add a new user
+/// message. Merging (rather than pushing a second user turn) keeps role alternation intact — strict
+/// chat templates like GLM-4's RAISE on two consecutive `user` messages, which silently failed the
+/// advisor stage. Used both for the planner framing (advisor input) and the plan handoff.
+fn append_user_text(messages: &mut Vec<Message>, text: &str) {
     if let Some(last) = messages.last_mut() {
         if last.role == Role::User {
-            if let Some(ContentBlock::Text { text }) = last.content.last_mut() {
-                text.push_str("\n\n");
-                text.push_str(&note);
+            if let Some(ContentBlock::Text { text: t }) = last.content.last_mut() {
+                t.push_str("\n\n");
+                t.push_str(text);
                 return;
             }
         }
     }
-    messages.push(Message::user(note));
+    messages.push(Message::user(text.to_string()));
+}
+
+/// Forward an advisor's plan into the conversation the next tier sees (the forward-output handoff).
+fn forward_plan(messages: &mut Vec<Message>, plan: &str) {
+    append_user_text(messages, &format!("{PLAN_PREFIX}{plan}"));
 }
 
 /// Where a model runs — local (its own resource limits, e.g. memory) vs remote (the network +
@@ -322,7 +327,9 @@ impl CascadeBackend {
             preq.sampling.response_schema = None; // never constrain a planner to a tool schema
             preq.sampling.max_tokens = Some(PLANNER_MAX_TOKENS);
             let mut pmsgs = messages.clone();
-            pmsgs.push(Message::user(PLANNER_FRAMING));
+            // Merge the framing into the last user turn — NOT a second `user` message (GLM-4's
+            // template raises on consecutive same-role turns, which silently failed the advisor).
+            append_user_text(&mut pmsgs, PLANNER_FRAMING);
             preq.messages = pmsgs;
 
             let outcome = {
@@ -331,7 +338,11 @@ impl CascadeBackend {
             };
             if let Some(e) = &outcome.error {
                 self.health.record_failure(&card.id, classify(e));
-                tracing::debug!(model = %card.id, "pipeline: advisor failed, continuing without its plan");
+                rozum_core::obs::log_event(serde_json::json!({
+                    "event": "pipeline_stage", "stage": "advisor_failed",
+                    "model": card.id, "error": e,
+                }));
+                tracing::debug!(model = %card.id, error = %e, "pipeline: advisor failed, continuing without its plan");
                 continue;
             }
             self.health.record_success(&card.id);

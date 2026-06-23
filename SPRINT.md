@@ -73,6 +73,21 @@
   (eager small pair → deterministic mechanism proof; then GLM+gpt-oss lazy, measure per-turn swap cost,
   0 reboot). Done-when: transparent live pipeline through a real agent, eager+lazy both work, swap cost
   measured, value A/B ≥ the batch planner→executor result (3/3 vs 2/4 on RPN).
+  **PROGRESS (plucky-finch 2026-06-23):** (1)+(3) DONE+pushed — `RoutingStrategy::Pipeline` (eager) +
+  `from_model_pipeline` (order-preserving: first=planner, last=executor) + comma-default-pipeline +
+  `pipeline_stage` obs + unit tests (forward-output / advisor-no-tools / degrade-on-fail). LIVE findings
+  (isolate skill, real loads): (a) `--model A,B` builds `cascade_built tiers:2`, admission passes,
+  BOTH MLX models load co-resident in ONE process @ ~10–12 GiB — works (de-risked: a first run hit a Metal
+  GPU **Command-Buffer Timeout** crash but it was a TRANSIENT — GPU warm-stressed from a back-to-back
+  gpt-oss run; clean retry served fine, NO reboot). (b) BUG FOUND+FIXED: the advisor stage (tier 0)
+  silently failed because the planner framing was appended as a 2nd consecutive `user` message →
+  GLM-4's chat template RAISES on consecutive same-role turns → advisor errored fast (~0.6s) and the
+  pipeline degraded to executor-only. Fix: `append_user_text` MERGES framing/plan into the last user
+  turn (no 2nd user msg). (c) Co-fit reality on a 36 GB host w/ Claude Code running (~22 GiB used):
+  GLM-9B(7) + gpt-oss-20b(17) = 24.6 GiB > ~20.8 free → eager REFUSED (no-reboot, correct) ⇒ that pair
+  is a LAZY case (needs #2). GLM-9B + Qwen3-4B (~10 GiB) co-fits → eager. (d) GLM-**9B** is too weak a
+  PLANNER (its one-shot RPN code didn't compile: `Vec<&String>.join` + `?`-on-Utf8Error — proven by
+  standalone rebuild) — use GLM-**32B** (RPN 3/3). The pipeline is only as good as its planner.
 - [ ] **adaptive-cascade-residency** (operator idea 2026-06-23; now the residency half of `pipeline-cascade`)
   — make the cascade EAGER if its local
   tiers co-fit, LAZY (one resident at a time, swap on escalation) if not. Today `build_cascade` is
