@@ -13,6 +13,23 @@ too. (2) `AGENTS.md` now instructs every agent to run `rozum meetings hello <you
 a session, so it posts as itself (not the operator) by default — the operator does nothing. 80 meeting
 tests green.
 
+## gateway — `--dry-run`: show the adaptive-load fit + admission verdict without loading
+Completed: 2026-06-23
+
+`rozum gateway --model <m> --dry-run` reports how a model WOULD load at the current free RAM — the
+adaptive `n_ctx`/cache shrink it would pick and the host-RAM admission verdict (would-load / would-load-
+reduced / would-refuse, and by how many GiB) — then exits WITHOUT loading anything. It reuses the EXACT
+load-path math (`fit_model_params` + `estimate_model_footprint_bytes` + a new non-mutating
+`share::dry_run_admission` that mirrors `admits` over the same ledger/RAM inputs without taking the admit
+lock), so a real run does exactly what the dry-run reports. Purpose: plan a matrix run (which models fit,
+at what n_ctx, how much RAM to free) with zero load risk, and make the no-reboot guarantee legible — the
+output spells out that a refusal is a clean exit before any weights load (a matrix FAIL, never a reboot).
+
+Example (36 GB host, ~25 GiB free): `Qwen3.6-35B-A3B-4bit` → adaptive ↓ n_ctx 262144→35840, cache 1 GiB,
+footprint 22.21 GiB → ✅ would load; `gpt-oss-20b` → ✓ full n_ctx 131072, cache 4 GiB, 21.94 GiB → ✅.
+Confirms adaptive loading is ON by default (opt-out `ROZUM_GATEWAY_ADAPTIVE_LOAD=0`). rozum-core admits +
+rozum-models fit tests green; release builds clean.
+
 ## meetings — clean Human vs Agent identities + a `who` roster
 Completed: 2026-06-23
 

@@ -223,6 +223,14 @@ enum Command {
         #[command(flatten)]
         tuning: TuningOpts,
 
+        /// Dry-run: report how this model WOULD load (adaptive n_ctx/cache fit + the
+        /// host-RAM admission verdict) at the current free RAM, then exit WITHOUT
+        /// loading anything. Reuses the exact load-path math (no model is touched), so
+        /// it shows whether a real `--model` run would load-reduced, load-full, or be
+        /// refused (and by how much) — the no-load way to plan a matrix run.
+        #[arg(long)]
+        dry_run: bool,
+
         /// `status` or `stop` the shared gateway; omit to run the daemon.
         #[command(subcommand)]
         action: Option<GatewayAction>,
@@ -777,6 +785,7 @@ async fn main() {
             enable_thinking,
             draft_model,
             tuning,
+            dry_run,
             action,
         }) => match action {
             None => {
@@ -807,6 +816,10 @@ async fn main() {
                     );
                     std::process::exit(2);
                 };
+                if dry_run {
+                    run_gateway_dry_run(&model, n_ctx.or(cfg.n_ctx));
+                    return;
+                }
                 run_gateway(port, model, n_ctx, cfg).await;
             }
             Some(GatewayAction::Status) => run_gateway_status().await,
@@ -1176,6 +1189,85 @@ fn adapt_n_ctx_to_fit(model: &str, req_n_ctx: u32) -> u32 {
             n_ctx
         }
         None => req_n_ctx, // won't fit even at the floor → let admission refuse with its message
+    }
+}
+
+/// `--dry-run`: print how `model` WOULD load at the CURRENT free RAM — the adaptive n_ctx/cache fit
+/// and the host-RAM admission verdict — WITHOUT loading anything. Reuses the exact load-path math
+/// ([`adapt_n_ctx_to_fit`]'s pieces + [`estimate_model_footprint_bytes`] + [`rozum::share::dry_run_admission`]),
+/// so a real `gateway --model` run does exactly what this reports. The no-load way to plan a matrix.
+fn run_gateway_dry_run(model: &str, n_ctx: Option<u32>) {
+    const GIB: f64 = (1u64 << 30) as f64;
+    const N_CTX_FLOOR: u32 = 4096;
+    let gib = |b: u64| b as f64 / GIB;
+    let req_n_ctx = resolve_n_ctx(model, n_ctx);
+    let adaptive_off = matches!(
+        std::env::var("ROZUM_GATEWAY_ADAPTIVE_LOAD").ok().as_deref(),
+        Some("0" | "false" | "off")
+    );
+
+    println!("rozum gateway --dry-run: {model}");
+    println!("  adaptive loading:  {}", if adaptive_off { "OFF (ROZUM_GATEWAY_ADAPTIVE_LOAD=0)" } else { "ON (default)" });
+    println!("  requested n_ctx:   {req_n_ctx}");
+
+    let Some(m) = rozum::models::scan_all_installed().into_iter().find(|m| m.spec == model) else {
+        println!("  model not cached locally → a real run resolves/downloads first, then the SAME");
+        println!("  admission gate runs. No fit estimate possible without local weights.");
+        return;
+    };
+    let available = rozum::share::available_ram_for_admission();
+    let min_free = rozum::share::min_free_ram_bytes();
+    println!("  weights on disk:   {:.2} GiB", gib(m.size_bytes));
+    println!("  available RAM:     {}", available.map(|a| format!("{:.2} GiB (free+inactive+spec+purgeable)", gib(a))).unwrap_or_else(|| "unmeasurable → free-RAM lever fails open".into()));
+    println!("  keep-free margin:  {:.2} GiB", gib(min_free));
+
+    // Adaptive fit — the SAME fit_model_params the load path runs (skipped when adaptive is off).
+    let fit = if adaptive_off {
+        None
+    } else {
+        available.and_then(|a| rozum::model_source::fit_model_params(model, m.size_bytes, req_n_ctx, a, min_free, N_CTX_FLOOR))
+    };
+    let (load_n_ctx, cache_gib) = match fit {
+        Some((n, c)) => (n, c),
+        None => (req_n_ctx, std::env::var("ROZUM_MLX_CACHE_GB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(4)),
+    };
+    // Make the footprint estimate agree with the chosen cache (both read this env), exactly as the load path does.
+    unsafe { std::env::set_var("ROZUM_MLX_CACHE_GB", cache_gib.to_string()) };
+    let footprint = estimate_model_footprint_bytes(model, load_n_ctx);
+    let report = rozum::share::dry_run_admission(footprint);
+
+    println!();
+    if !adaptive_off && available.is_some() && fit.is_none() {
+        println!("  adaptive fit:      ✗ cannot fit even floor n_ctx={N_CTX_FLOOR} + 1 GiB cache — weights alone overflow the budget");
+    } else if load_n_ctx == req_n_ctx && cache_gib >= 4 {
+        println!("  adaptive fit:      ✓ full — n_ctx {load_n_ctx}, cache {cache_gib} GiB");
+    } else {
+        println!("  adaptive fit:      ↓ reduced — n_ctx {load_n_ctx} (req {req_n_ctx}), cache {cache_gib} GiB");
+    }
+    println!("  est. footprint:    {:.2} GiB at those params", gib(footprint));
+    if !report.holders.is_empty() {
+        let who: Vec<String> = report.holders.iter().map(|(p, mm)| format!("pid {p} {mm}")).collect();
+        println!("  other residents:   {:.2} GiB [{}]", gib(report.in_use), who.join(", "));
+    }
+
+    println!();
+    if report.admit {
+        println!("  VERDICT: ✅ WOULD LOAD — footprint {:.2} + keep-free {:.2} = {:.2} GiB ≤ available {:.2} GiB.",
+            gib(footprint), gib(min_free), gib(footprint + min_free), gib(report.available.unwrap_or(0)));
+    } else {
+        let need = footprint.saturating_add(min_free);
+        let short = need.saturating_sub(report.available.unwrap_or(0));
+        if !report.ram_fits {
+            println!("  VERDICT: ⛔ WOULD REFUSE — need footprint {:.2} + keep-free {:.2} = {:.2} GiB, available {:.2} GiB → short by {:.2} GiB.",
+                gib(footprint), gib(min_free), gib(need), gib(report.available.unwrap_or(0)), gib(short));
+        } else {
+            println!("  VERDICT: ⛔ WOULD REFUSE — ledger: {:.2} GiB reserved by other residents would overcommit the host budget.", gib(report.in_use));
+        }
+        println!("           Refusal = clean process exit BEFORE any weights load → a matrix FAIL, never a reboot.");
+        if short > 0 {
+            println!("           To make it load: free ~{:.1} GiB more RAM, or pass a lower --n-ctx, or lower keep-free", gib(short));
+            println!("           (ROZUM_GATEWAY_MIN_FREE_RAM_BYTES — reduces the no-reboot safety headroom).");
+        }
     }
 }
 

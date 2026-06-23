@@ -422,6 +422,45 @@ fn admits(in_use: u64, footprint: u64, budget: Option<u64>, available: Option<u6
     ledger_fits && ram_fits
 }
 
+/// A non-mutating snapshot of the admission decision for `footprint_bytes` at the CURRENT host
+/// state — the SAME inputs [`acquire_residency`] reads (ledger reservations, host budget, live free
+/// RAM, keep-free), run through the SAME [`admits`] math, but WITHOUT taking the admit lock or
+/// reserving anything. Powers `gateway --dry-run`: report whether a load would be admitted, and why.
+#[derive(Clone, Debug)]
+pub struct AdmissionReport {
+    pub footprint: u64,
+    pub in_use: u64,
+    pub holders: Vec<(u32, String)>,
+    pub budget: Option<u64>,
+    pub available: Option<u64>,
+    pub min_free: u64,
+    pub ledger_fits: bool,
+    pub ram_fits: bool,
+    pub admit: bool,
+}
+
+pub fn dry_run_admission(footprint_bytes: u64) -> AdmissionReport {
+    let available = available_ram_for_admission();
+    let min_free = min_free_ram_bytes();
+    if concurrent_resident_allowed() {
+        // Operator override (ROZUM_ALLOW_CONCURRENT_RESIDENT=1): no gating — always admits.
+        return AdmissionReport {
+            footprint: footprint_bytes, in_use: 0, holders: Vec::new(), budget: None,
+            available, min_free, ledger_fits: true, ram_fits: true, admit: true,
+        };
+    }
+    let mypid = std::process::id();
+    let (in_use, holders) = scan_residents(mypid);
+    let budget = host_ram_budget_bytes();
+    let ledger_fits =
+        in_use == 0 || budget.is_some_and(|b| in_use.saturating_add(footprint_bytes) <= b);
+    let ram_fits = available.map_or(true, |a| footprint_bytes.saturating_add(min_free) <= a);
+    AdmissionReport {
+        footprint: footprint_bytes, in_use, holders, budget, available, min_free,
+        ledger_fits, ram_fits, admit: ledger_fits && ram_fits,
+    }
+}
+
 /// One resident gateway's reservation (the content of `residents/<pid>`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ResidentEntry {
