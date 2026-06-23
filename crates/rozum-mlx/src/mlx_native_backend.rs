@@ -277,6 +277,39 @@ mod inner {
         (n_ctx, eos, model_type, kv_per_pos)
     }
 
+    /// Live MLX backends' "I was co-resident" flags. `get_peak_memory()` is process-GLOBAL, so a
+    /// peak observed while >1 model is resident (the eager pipeline-cascade) mis-attributes the other
+    /// models' memory to whichever backend records it — inflating the footprint cache and breaking
+    /// future admission. When a 2nd backend loads, every currently-live backend (and the newcomer) is
+    /// flagged contaminated, and contaminated peaks are NOT recorded. Single-model gateways and lazy
+    /// (one-at-a-time) swaps never set the flag, so they record clean peaks as before.
+    static LIVE_RESIDENTS: std::sync::Mutex<Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+        std::sync::Mutex::new(Vec::new());
+
+    /// Register a newly-resident model; returns its contamination flag. If others are already
+    /// resident, this one AND all of them are marked co-resident (their peaks are now entangled).
+    fn register_resident() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut live = LIVE_RESIDENTS.lock().unwrap_or_else(|e| e.into_inner());
+        if !live.is_empty() {
+            flag.store(true, SeqCst);
+            for f in live.iter() {
+                f.store(true, SeqCst);
+            }
+        }
+        live.push(flag.clone());
+        flag
+    }
+
+    /// Deregister a resident on drop.
+    fn deregister_resident(flag: &std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        let mut live = LIVE_RESIDENTS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = live.iter().position(|f| std::sync::Arc::ptr_eq(f, flag)) {
+            live.remove(pos);
+        }
+    }
+
     pub struct MlxNativeBackend {
         /// `Option` so [`Drop`] can close the channel (drop the sender) BEFORE joining the
         /// worker — otherwise the live sender keeps `blocking_recv` parked and join deadlocks.
@@ -287,6 +320,9 @@ mod inner {
         worker: Option<thread::JoinHandle<()>>,
         model_id: String,
         n_ctx: u32,
+        /// Set if this model was ever co-resident with another (its process-global peak is then
+        /// contaminated → not recorded to the footprint cache). See [`LIVE_RESIDENTS`].
+        co_resident: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl Drop for MlxNativeBackend {
@@ -297,9 +333,15 @@ mod inner {
             // high-water mark (it survives the teardown below) + the live cache = the actual resident
             // footprint at peak. Recorded as a running MAX; best-effort. Read BEFORE closing the
             // channel, while the model is still resident and the peak is definitely set.
-            let peak = mlx_rs::memory::get_peak_memory() as u64;
-            let cache = mlx_rs::memory::get_cache_memory() as u64;
-            crate::footprint::record_peak(&self.model_id, peak.saturating_add(cache));
+            // Deregister from the residency set FIRST, then record the peak only if this model was
+            // never co-resident — a process-global peak observed while another model shared the
+            // process is contaminated and would inflate the footprint cache (eager-pipeline bug).
+            deregister_resident(&self.co_resident);
+            if !self.co_resident.load(std::sync::atomic::Ordering::SeqCst) {
+                let peak = mlx_rs::memory::get_peak_memory() as u64;
+                let cache = mlx_rs::memory::get_cache_memory() as u64;
+                crate::footprint::record_peak(&self.model_id, peak.saturating_add(cache));
+            }
             // Close the job channel so the worker's `blocking_recv` returns `None` and it
             // exits its loop + drops the model, THEN join it. Without the join, ~8-15 GB of
             // MLX buffers free asynchronously and race a subsequent model load on the
@@ -352,6 +394,7 @@ mod inner {
                         worker: Some(worker),
                         model_id,
                         n_ctx,
+                        co_resident: register_resident(),
                     })
                 }
                 Ok(Err(e)) => Err(ModelError::BackendUnavailable(e)),
@@ -2051,6 +2094,7 @@ mod inner {
                         worker: Some(worker),
                         model_id: target_id,
                         n_ctx,
+                        co_resident: register_resident(),
                     })
                 }
                 Ok(Err(e)) => Err(ModelError::BackendUnavailable(e)),
