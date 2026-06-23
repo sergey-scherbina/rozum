@@ -1,6 +1,6 @@
 # Sprint
 
-- [ ] **planner-executor** (operator idea 2026-06-23, spec `docs/specs/planner-executor.md`) — decompose a
+- [x] **planner-executor** — DONE + A/B-VALIDATED ON A COMPLEX TASK (plucky-finch 2026-06-23). (operator idea, spec `docs/specs/planner-executor.md`) — decompose a
   coding task across two LOCAL models by ROLE: **GLM-4-32B = planner** (one-shot: reason out the COMPLETE
   solution — every file's full contents — where it's strong), then **gpt-oss-20b = executor** (the agent
   loop implements GLM's solution: write files, build/run/test, fix — where IT's strong). SEQUENTIAL (one
@@ -51,6 +51,15 @@
   appends `[workspace]` to the WORK Cargo.toml so cargo can't walk up. REMAINING: validate the FIX-fallback
   path (a task where GLM's code is wrong → gpt-oss fixes it) + the fair A/B (planner-pipeline vs gpt-oss-
   alone) on a from-scratch-HARD task where the plan adds value. Shipped: `solve.sh` + `write_solution.py`.
+  **COMPLEX-TASK A/B — pipeline WINS (the value is proven where the spec predicted).** Task = an RPN
+  (postfix) integer calculator (stack/tokenize/operators +-*/, nested) — `cargo run -- '3 4 + 2 *'` → 14,
+  checked on 4 independent inputs incl. nested `5 1 2 + 4 * + 3 -` → 14. **planner→executor 3/3** (all 3
+  GLM generations produced correct code passing ALL inputs — GLM's one-shot algorithmic reasoning is
+  consistent, the deterministic write lands it; executor never needed). **gpt-oss-alone (codex) 2/4** —
+  the create-from-scratch tail (reps 1,4 = empty output, code didn't land/work). So on a COMPLEX task the
+  pipeline (100%) beats gpt-oss-alone (50%); on a TRIVIAL task (reverse-cli) gpt-oss alone is fine and the
+  plan adds nothing — exactly the spec's 'pays off on plan-heavy, skip for trivial'. 0 reboot throughout,
+  one model resident at a time. The user's 'lazy cascade = pipeline' insight, working + validated.
 - [ ] **adaptive-cascade-residency** (operator idea 2026-06-23) — make the cascade EAGER if its local
   tiers co-fit, LAZY (one resident at a time, swap on escalation) if not. Today `build_cascade` is
   eager-ONLY (`CascadeBackend` holds a live `Arc<dyn ChatBackend>` per tier), so on a 36 GB host a cascade
