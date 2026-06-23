@@ -2119,17 +2119,29 @@ mod inner {
                 Vec::new()
             } else {
                 let mut calls = crate::serving::parse_tool_calls(&self.full_text);
-                // GLM create-from-scratch artifact fallback (opt-in, default OFF): when GLM named no
-                // tool but printed labeled file content, synthesize Write calls so the file actually
-                // lands (docs/specs/glm-artifact-write-synth.md). Guards: GLM family + a Write tool
-                // offered; `synth_glm_writes` itself returns empty unless a SAFE filename is
-                // recoverable from the prose preceding a fence (so chat snippets aren't written).
-                if calls.is_empty()
-                    && super::glm_artifact_synth_enabled()
-                    && super::model_is_glm(&self.job.model_id)
-                {
-                    if let Some(wt) = super::resolve_write_tool(&self.job.tools) {
-                        calls = crate::serving::synth_glm_writes(&self.full_text, &wt);
+                // GLM create-from-scratch artifact fallback (opt-in, default OFF): when a GLM model
+                // named no tool but showed the work (tool-args JSON, or labeled file content),
+                // synthesize the calls so the files/commands actually land
+                // (docs/specs/glm-artifact-write-synth.md). `synth_glm_tool_calls` returns empty unless
+                // a bare JSON object matches an offered tool's schema or a safe prose filename is found,
+                // so chat snippets aren't synthesized. Logged (with the enabled flag) so a no-fire is
+                // diagnosable from the gateway event log.
+                if calls.is_empty() && super::model_is_glm(&self.job.model_id) {
+                    let enabled = super::glm_artifact_synth_enabled();
+                    let synth = if enabled {
+                        crate::serving::synth_glm_tool_calls(&self.full_text, &self.job.tools)
+                    } else {
+                        Vec::new()
+                    };
+                    rozum_core::obs::log_event(serde_json::json!({
+                        "event": "glm_artifact_synth",
+                        "model": self.job.model_id,
+                        "enabled": enabled,
+                        "n_tools": self.job.tools.len(),
+                        "synth_calls": synth.len(),
+                    }));
+                    if enabled {
+                        calls = synth;
                     }
                 }
                 calls
@@ -3821,22 +3833,6 @@ fn model_is_glm(model_id: &str) -> bool {
     model_id.to_ascii_lowercase().contains("glm")
 }
 
-/// The offered file-writing tool's exact name, if any, so a synthesized call matches what the agent
-/// will actually execute. Prefers an exact `Write`; else a tool whose name looks like a file writer.
-/// `None` (no such tool offered) ⇒ no synthesis (one of the spec's guards).
-fn resolve_write_tool(tools: &[crate::backend::ToolDef]) -> Option<String> {
-    if let Some(t) = tools.iter().find(|t| t.name == "Write") {
-        return Some(t.name.clone());
-    }
-    tools
-        .iter()
-        .map(|t| &t.name)
-        .find(|n| {
-            let l = n.to_ascii_lowercase();
-            l == "write_file" || l == "create_file" || l == "createfile" || l.contains("write")
-        })
-        .cloned()
-}
 
 /// Is `sentence` a narration *directive* (tell-the-model-to-show-prose/markdown)? Conservative:
 /// needs a narration verb AND a prose/markdown object AND is NOT about tools (so an anti-framing

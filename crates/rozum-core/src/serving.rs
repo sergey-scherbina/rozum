@@ -380,22 +380,102 @@ fn repair_tool_object(b: &[u8], start: usize) -> Option<(String, usize)> {
     None
 }
 
-/// Synthesize `Write` tool calls from a GLM **create-from-scratch artifact** — the failure mode
-/// where GLM-4-0414, under a heavy agent prompt, *narrates and shows* labeled file contents in fenced
-/// blocks instead of *naming* the Write tool (so `parse_tool_calls` finds nothing, the agent gets a
-/// text answer, and no file is written: the captured `turns=1 tools=0` cell). Returns one
-/// `(write_tool, args_json)` per recoverable file, matching the REAL captured format
-/// (`docs/specs/glm-artifact-write-synth.md` § REAL artifact captured): the filename lives in the
-/// PROSE sentence that precedes each fence ("I'll create the `Cargo.toml` file:" → ```toml block),
-/// the fence info-string is the language, and command fences (` ```bash ` `cargo run …`) carry no
-/// filename so they are skipped.
+/// Synthesize tool calls from a GLM **create-from-scratch artifact** — the failure mode where
+/// GLM-4-0414, under a heavy agent prompt, shows the work instead of *naming* the tool, so
+/// `parse_tool_calls` finds nothing and no file is written (the captured `turns=1 tools=0` cell).
+/// Returns one `(tool_name, args_json)` per recovered call. Two REAL captured modes
+/// (`docs/specs/glm-artifact-write-synth.md`), tried in order:
 ///
-/// **Returns EMPTY unless a guard holds**, so an ordinary chat answer with an incidental code block is
-/// never turned into a file write: a fence is converted only when its preceding prose yields a
-/// **safe relative** filename. The CALLER must additionally gate this on (GLM family) AND
-/// (`parse_tool_calls` returned empty) AND (`write_tool` is actually offered) — see the spec's 5
-/// guards. `write_tool` is the offered file-writing tool's exact name (e.g. `Write`).
-pub fn synth_glm_writes(text: &str, write_tool: &str) -> Vec<(String, String)> {
+/// **Mode 2 (primary) — tool ARGS as JSON, no name.** GLM emits the offered tool's argument object in
+/// a ```json fence (or bare): `{"file_path":…,"content":…}` (Write), `{"command":…}` (Bash). The name
+/// is recovered by **matching the object's keys to an offered tool's `input_schema`**
+/// ([`match_tool_by_args`]): the object's keys must be a subset of the tool's properties and include
+/// all of its `required` — so `{file_path,content}` matches *only* Write, `{command,…}` *only* Bash.
+/// An object that matches zero or ≥2 tools is skipped (no guess). Objects that already carry a `name`
+/// are left to `parse_tool_calls`.
+///
+/// **Mode 1 (fallback) — raw content + prose filename.** Only if mode 2 found nothing: a ```toml/```rust
+/// fence whose file path is named in the PRECEDING PROSE ("I'll create the `Cargo.toml` file:") becomes
+/// a `Write`; fences with no recoverable filename (a ```bash `cargo run` command) are skipped.
+///
+/// **Returns EMPTY unless a guard holds** (a schema match, or a safe prose filename), so a chat answer
+/// with an incidental code block is never written. The CALLER still gates on (GLM family) AND
+/// (`parse_tool_calls` returned empty). `tools` is the request's offered tool set.
+pub fn synth_glm_tool_calls(text: &str, tools: &[crate::backend::ToolDef]) -> Vec<(String, String)> {
+    // Mode 2: bare tool-args JSON objects (fenced or not — fence markers aren't braces, so
+    // balanced_json_objects finds the object inside a ```json fence directly).
+    let mut out = Vec::new();
+    for obj in balanced_json_objects(text) {
+        let Ok(Value::Object(m)) = serde_json::from_str::<Value>(obj) else { continue };
+        if m.contains_key("name") {
+            continue; // a full {name, arguments} call → parse_tool_calls's job, not ours
+        }
+        if let Some(name) = match_tool_by_args(&m, tools) {
+            out.push((name, Value::Object(m).to_string()));
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
+    // Mode 1 fallback: raw file content in a fence + filename in the preceding prose.
+    if let Some(write_tool) = resolve_write_tool_name(tools) {
+        return synth_writes_from_prose(text, &write_tool);
+    }
+    Vec::new()
+}
+
+/// The offered tool whose argument schema `args` fits — its keys ⊆ the tool's `properties` and all the
+/// tool's `required` present — or `None` if zero or ≥2 tools match (ambiguous ⇒ never guess). This is
+/// how mode-2 recovers the tool NAME GLM omitted. Empty `args` never matches.
+fn match_tool_by_args(
+    args: &serde_json::Map<String, Value>,
+    tools: &[crate::backend::ToolDef],
+) -> Option<String> {
+    if args.is_empty() {
+        return None;
+    }
+    let mut hit: Option<String> = None;
+    for t in tools {
+        let Some(props) = t.input_schema.get("properties").and_then(|p| p.as_object()) else {
+            continue;
+        };
+        let keys_subset = args.keys().all(|k| props.contains_key(k));
+        let required_present = t
+            .input_schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).all(|r| args.contains_key(r)))
+            .unwrap_or(true);
+        if keys_subset && required_present {
+            if hit.is_some() {
+                return None; // ambiguous — matches more than one offered tool
+            }
+            hit = Some(t.name.clone());
+        }
+    }
+    hit
+}
+
+/// The offered file-writing tool's name (for the mode-1 prose fallback): an exact `Write`, else a tool
+/// whose schema is exactly a `{file_path|path, content}`-shaped writer.
+fn resolve_write_tool_name(tools: &[crate::backend::ToolDef]) -> Option<String> {
+    if let Some(t) = tools.iter().find(|t| t.name == "Write") {
+        return Some(t.name.clone());
+    }
+    tools
+        .iter()
+        .find(|t| {
+            t.input_schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .is_some_and(|p| p.contains_key("content") && (p.contains_key("file_path") || p.contains_key("path")))
+        })
+        .map(|t| t.name.clone())
+}
+
+/// Mode-1 extractor: each fenced block whose file path is recoverable from the PRECEDING PROSE becomes
+/// a `Write{file_path, content=fence body}`; fences with no recoverable filename are skipped.
+fn synth_writes_from_prose(text: &str, write_tool: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut pos = 0usize; // scan cursor
     let mut prose_start = 0usize; // start of the prose preceding the current fence
@@ -412,7 +492,6 @@ pub fn synth_glm_writes(text: &str, write_tool: &str) -> Vec<(String, String)> {
         if let Some(path) = last_safe_filename(preceding) {
             let mut m = serde_json::Map::new();
             m.insert("file_path".into(), Value::String(path));
-            // fence body is the file content; normalize a single trailing newline
             let content = format!("{}\n", text[body_start..body_end].trim_end_matches('\n'));
             m.insert("content".into(), Value::String(content));
             out.push((write_tool.to_string(), Value::Object(m).to_string()));
@@ -473,34 +552,75 @@ mod tests {
 
     // The REAL captured GLM-4-32B create-from-scratch artifact (agentic.sh KEEP=1, turns=1 tools=0).
     const GLM_ARTIFACT: &str = include_str!("../tests/fixtures/glm_create_artifact.txt");
+    const GLM_ARTIFACT_JSON: &str = include_str!("../tests/fixtures/glm_create_artifact_jsonmode.txt");
 
-    #[test]
-    fn synth_glm_writes_extracts_real_create_artifact() {
-        let calls = synth_glm_writes(GLM_ARTIFACT, "Write");
-        // Two FILE fences (Cargo.toml + src/main.rs) become Write calls; the ```bash `cargo run` fence
-        // has no filename in its preceding prose → skipped (the command-vs-file guard).
-        assert_eq!(calls.len(), 2, "got: {calls:?}");
-        for (name, _) in &calls {
-            assert_eq!(name, "Write");
-        }
-        let args: Vec<Value> = calls.iter().map(|(_, a)| serde_json::from_str(a).unwrap()).collect();
-        let paths: Vec<&str> = args.iter().map(|a| a["file_path"].as_str().unwrap()).collect();
-        assert_eq!(paths, vec!["Cargo.toml", "src/main.rs"]);
-        // Contents are the fence bodies, not the prose.
-        assert!(args[0]["content"].as_str().unwrap().contains("[package]"));
-        assert!(args[1]["content"].as_str().unwrap().contains("fn main"));
-        // The command never leaks in as a file.
-        assert!(!paths.iter().any(|p| p.contains("cargo")));
+    // claude's real Write + Bash schemas, the matcher's input.
+    fn claude_tools() -> Vec<crate::backend::ToolDef> {
+        use crate::backend::ToolDef;
+        vec![
+            ToolDef {
+                name: "Write".into(),
+                description: "Write a file".into(),
+                input_schema: serde_json::json!({
+                    "type":"object",
+                    "properties":{"file_path":{"type":"string"},"content":{"type":"string"}},
+                    "required":["file_path","content"]
+                }),
+            },
+            ToolDef {
+                name: "Bash".into(),
+                description: "Run a command".into(),
+                input_schema: serde_json::json!({
+                    "type":"object",
+                    "properties":{"command":{"type":"string"},"timeout":{"type":"number"},
+                        "description":{"type":"string"},"run_in_background":{"type":"boolean"}},
+                    "required":["command"]
+                }),
+            },
+        ]
     }
 
     #[test]
-    fn synth_glm_writes_skips_chat_code_blocks() {
-        // A chat answer that merely shows example code — no "create the X file" filename in the prose
-        // → no synthesis (the false-positive guard that keeps us from writing example snippets).
+    fn synth_mode2_schema_matches_bare_json_args() {
+        // The REAL captured format: tool ARGS as ```json fences, no name. Recover the name by schema.
+        let calls = synth_glm_tool_calls(GLM_ARTIFACT_JSON, &claude_tools());
+        // {file_path,content}->Write x2, {command,...}->Bash x1.
+        assert_eq!(calls.len(), 3, "got: {calls:?}");
+        assert_eq!(calls[0].0, "Write");
+        assert_eq!(calls[1].0, "Write");
+        assert_eq!(calls[2].0, "Bash");
+        let a0: Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert!(a0["file_path"].as_str().unwrap().ends_with("Cargo.toml"));
+        assert!(a0["content"].as_str().unwrap().contains("[package]"));
+        let a2: Value = serde_json::from_str(&calls[2].1).unwrap();
+        assert!(a2["command"].as_str().unwrap().contains("cargo run"));
+    }
+
+    #[test]
+    fn synth_mode1_prose_fallback_when_no_json_args() {
+        // The other captured mode: raw content fences + filename in the preceding prose.
+        let calls = synth_glm_tool_calls(GLM_ARTIFACT, &claude_tools());
+        assert_eq!(calls.len(), 2, "got: {calls:?}");
+        let paths: Vec<String> = calls
+            .iter()
+            .map(|(_, a)| serde_json::from_str::<Value>(a).unwrap()["file_path"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(paths, vec!["Cargo.toml", "src/main.rs"]);
+        assert!(calls.iter().all(|(n, _)| n == "Write"));
+    }
+
+    #[test]
+    fn synth_skips_chat_and_ambiguous() {
+        let tools = claude_tools();
+        // Chat example code: no JSON args, no "create the X file" prose → empty.
         let chat = "Here's how a Rust loop works:\n```rust\nfor i in 0..3 { println!(\"{i}\"); }\n```\nThat iterates three times.";
-        assert!(synth_glm_writes(chat, "Write").is_empty());
-        // Pure prose, no fence → empty.
-        assert!(synth_glm_writes("I would create a Cargo.toml with the usual fields.", "Write").is_empty());
+        assert!(synth_glm_tool_calls(chat, &tools).is_empty());
+        // Pure prose → empty.
+        assert!(synth_glm_tool_calls("I would create a Cargo.toml with the usual fields.", &tools).is_empty());
+        // A bare JSON object matching NO offered tool's schema → empty (no guess).
+        assert!(synth_glm_tool_calls("```json\n{\"unrelated_key\": 1}\n```", &tools).is_empty());
+        // An object that already carries a name is left to parse_tool_calls (not synthesized here).
+        assert!(synth_glm_tool_calls("```json\n{\"name\":\"Write\",\"file_path\":\"a\",\"content\":\"b\"}\n```", &tools).is_empty());
     }
 
     #[test]
