@@ -51,7 +51,7 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
 )
 
 val catCard = cardWithHeader(heading(2, "Installed catalog"))(
-  remoteTable(st, [fieldColumn("Model", "spec"), fieldColumn("Size (bytes)", "size_bytes")], "installed")
+  remoteTable(st, [fieldColumn("Model", "spec"), fieldColumn("Size", "size_gib")], "installed")
 )
 ```
 

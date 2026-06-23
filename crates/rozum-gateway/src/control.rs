@@ -31,6 +31,10 @@ pub struct ControlStatus {
     pub residency: ResidencyStatus,
     /// Installed local models (the catalog).
     pub installed: Vec<InstalledBrief>,
+    /// Flat, display-ready residency metrics (gateway label + GiB-formatted RAM). An ARRAY so a
+    /// declarative table (`remoteTable(st, cols, "residency_metrics")`) renders them identically on
+    /// web AND tui — no client-side `computedSignal` (which the tui backend can't recompute).
+    pub residency_metrics: Vec<MetricBrief>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +67,20 @@ pub struct ResidentBrief {
 pub struct InstalledBrief {
     pub spec: String,
     pub size_bytes: u64,
+    /// GiB-formatted size for direct display in a declarative table column.
+    pub size_gib: String,
+}
+
+/// A flat `{metric, value}` pair — a row in the display-ready `residency_metrics` table.
+#[derive(Debug, Clone, Serialize)]
+pub struct MetricBrief {
+    pub metric: String,
+    pub value: String,
+}
+
+/// Format a byte count as a one-decimal GiB string (e.g. `"25.1 GiB"`).
+fn fmt_gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0)
 }
 
 /// Aggregate the live models/gateway control status — the active gateway (if any), the host residency
@@ -93,9 +111,25 @@ pub async fn status() -> ControlStatus {
     };
     let installed = rozum_models::models::scan_all_installed()
         .into_iter()
-        .map(|m| InstalledBrief { spec: m.spec, size_bytes: m.size_bytes })
+        .map(|m| InstalledBrief { size_gib: fmt_gib(m.size_bytes), spec: m.spec, size_bytes: m.size_bytes })
         .collect();
-    ControlStatus { gateway, residency, installed }
+    let residency_metrics = vec![
+        MetricBrief {
+            metric: "gateway".into(),
+            value: gateway.as_ref().map(|g| g.model.clone()).unwrap_or_else(|| "none running".into()),
+        },
+        MetricBrief {
+            metric: "available".into(),
+            value: residency.available_bytes.map(fmt_gib).unwrap_or_else(|| "—".into()),
+        },
+        MetricBrief {
+            metric: "host budget".into(),
+            value: residency.host_budget_bytes.map(fmt_gib).unwrap_or_else(|| "—".into()),
+        },
+        MetricBrief { metric: "committed".into(), value: fmt_gib(residency.committed_bytes) },
+        MetricBrief { metric: "residents".into(), value: residency.residents.len().to_string() },
+    ];
+    ControlStatus { gateway, residency, installed, residency_metrics }
 }
 
 #[cfg(test)]
