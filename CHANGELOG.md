@@ -1,5 +1,15 @@
 # Changelog
 
+## meeting .ssc client — rebuild against current Rust backend
+Completed: 2026-06-23
+
+Rebuilt and reloaded the live launchd meeting client from current source. The rebuild exposed
+two ScalaScript/Rust backend edge cases in the client source: filtering room status lines through
+`roomLineName` passed a borrowed `String`, and static `sw.js`/`icon.svg` route closures moved
+captured strings out of `Fn`. The client now uses a small recursive room-line lookup and returns
+static assets through helper functions. Live smoke on `:8405` passes for `/`, `/manage`,
+`/r/rozum`, `/m/rozum`, `/mp/rozum`, `/manifest.webmanifest`, `/sw.js`, and `/icon.svg`.
+
 ## residency — shared-reserve admission billing (in-process multislot admits more)
 Completed: 2026-06-23
 

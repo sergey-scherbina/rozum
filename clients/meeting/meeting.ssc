@@ -32,8 +32,13 @@ def roomStatusLines(): List[String] =
   statusOut().split("\n").filter(l => l.contains("project:")).toList
 
 def roomStatusLine(name: String): String =
-  val mine = roomStatusLines().filter(l => roomLineName(l) == name).toList
-  if mine.length < 1 then "" else mine(0) + ""
+  firstRoomStatusLine(roomStatusLines(), name)
+
+def firstRoomStatusLine(lines: List[String], name: String): String =
+  if lines.length < 1 then "" else
+    val line = lines(0) + ""
+    if roomLineName(line + "") == name then line
+    else firstRoomStatusLine(lines.drop(1).toList, name)
 
 def afterPrefix(p: String): String =
   val parts = p.split("/")
@@ -181,6 +186,10 @@ val head = "<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" conte
 val swjs = "self.addEventListener('install',function(e){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.map(function(k){return caches.delete(k)}))}).then(function(){return self.registration.unregister()}).then(function(){return self.clients.matchAll({type:'window'})}).then(function(cs){cs.forEach(function(c){c.navigate(c.url)})}).catch(function(e){}))});"
 
 val iconSvg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"512\" height=\"512\" viewBox=\"0 0 512 512\"><rect width=\"512\" height=\"512\" rx=\"115\" fill=\"#1b1e24\"/><path d=\"M150 128 h212 a44 44 0 0 1 44 44 v140 a44 44 0 0 1 -44 44 H252 l-78 66 v-66 h-24 a44 44 0 0 1 -44 -44 V172 a44 44 0 0 1 44 -44 z\" fill=\"#2f6feb\"/><circle cx=\"198\" cy=\"242\" r=\"22\" fill=\"#6ee7a8\"/><circle cx=\"266\" cy=\"242\" r=\"22\" fill=\"#dfeaff\"/><circle cx=\"334\" cy=\"242\" r=\"22\" fill=\"#f0a868\"/></svg>"
+
+def serviceWorkerJs(): String = swjs + ""
+
+def iconSvgDoc(): String = iconSvg + ""
 
 def authorChip(name: String): View =
   element("span", ["style" -> ("color:" + roleColor(name) + "; background:#1f242c; font-size:12px; padding:2px 9px; border-radius:11px; white-space:nowrap")], Map(), [textNode(name)])
@@ -444,8 +453,8 @@ def doAction(body: String): String =
   route("POST", "/do", req => doAction(req))
   route("GET",  "/manage", req => managePage())
   route("GET",  "/manifest.webmanifest", req => manifest())
-  route("GET",  "/sw.js",   req => swjs)
-  route("GET",  "/icon.svg", req => iconSvg)
+  route("GET",  "/sw.js",   req => serviceWorkerJs())
+  route("GET",  "/icon.svg", req => iconSvgDoc())
   route("GET",  "/", req => page("demo"))
   serve(8405)
 ```

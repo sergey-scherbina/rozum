@@ -11,6 +11,8 @@ churned by sibling agents switching branches — commits there don't stick.)
   ad-hoc rooms honor `$XDG_STATE_HOME`/`$HOME`.
 - `/manage`: rooms list/switch/create/delete (project rooms protected), bulk clean-empty,
   models list/rm, gateway status/switch/stop/unload, model-participant start/stop.
+- Live launchd client rebuilt/reloaded from current `.ssc` source on 2026-06-23; `:8405`
+  smoke covers the app, management, room fragments, PWA manifest, service worker, and icon.
 
 ## Management round 2 (2026-06-22, operator: "все задачи в спринт и делай")
 - [x] Bulk cleanup of junk rooms — one button deletes EMPTY global rooms; project rooms safe.
