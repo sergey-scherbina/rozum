@@ -397,12 +397,48 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
   the breaker was CONTEXT SIZE (codex's 20.9 KB instructions, which `codex_lean_keep` left untouched).
   Fixed by `codex_effective_instructions` (trim instructions to a focused prompt for gpt-oss) +
   reasoning=low. Create-from-scratch now ~2/3 and 3-5× faster. Spec `docs/specs/constrained-gptoss-delivery.md`.
-- [x] **matrix-gptoss-codex-test** — `0/3 → ~2/3` (same instruction-trim + reasoning=low fix). Residual
-  ~1/3 is model-correctness variance, not delivery/context.
+- [x] **matrix-gptoss-codex-test** — `0/3 → ~2/3` (instruction-trim + reasoning=low). Residual ~1/3 is
+  NOT "model nature" — KEEP=1 autopsy shows it's SHELL-MECHANICS delivery (dropped `>`, unclosed
+  heredoc, `>` escaping, premature stop). Being attacked by the levers below.
 - [x] **matrix-gptoss-codex-debug** — `1/3 → 3/3` (plucky-finch 2026-06-23). The aggressive
   instruction-trim (great for create) had REGRESSED edit to 0/3 (one 1.3 GB runaway loop) by dropping
   codex's V4A `apply_patch` format spec; restored a **concise V4A reminder in `LEAN_CODING_PROMPT`** →
   3/3, no loops. Lesson: one lean prompt must cover BOTH create (`cat >`) and edit (apply_patch format).
+
+##### gpt-oss×codex — find the RIGHT conditions for the model (autopsy-driven; "model nature" is NOT an answer)
+
+KEEP=1 autopsies (plucky-finch 2026-06-23): gpt-oss writes correct CONTENT but fails the SHELL
+MECHANICS (`cat <<EOF` with a dropped `>`, an unclosed heredoc that leaks the delimiter into the
+file, `>` emitted as `>`, prose where the `{cmd}` JSON goes → an 11 GB codex retry-loop, and
+`mkdir` then a premature stop) — yet it nails STRUCTURED tool calls (`write_file({path,content})`
+= 4/4 in a clean probe). Strategy: give the model the structured tools it is reliable at and let
+the gateway own the fragile shell translation. Levers to try (one task each, all matrix-gated):
+
+- [ ] **gptoss-inject-write-file** (TOP) — inject a structured `write_file({path,content})` (and
+  `edit_file`) tool for codex×gpt-oss (mirror the existing `ROZUM_CODEX_INJECT_APPLY_PATCH` inject)
+  + reroute the model's call to a clean `synth_create_command` write; steer `LEAN_CODING_PROMPT` to
+  it. Sidesteps the dominant build/test fail class (heredoc mangling) by meeting the model at its
+  4/4 strength. Verify REPS≥4 vs current; watch for no-regress on edit.
+- [ ] **gptoss-exec-decode-loopbreak** — (a) decode `\uXXXX` in exec_command `cmd` (model emits `>`
+  as `>` → `cat > file` fails to redirect); (b) loop-breaker: when exec_command args are
+  non-JSON PROSE, codex errors "expected value at line 1 col 1" and RETRIES → the 11 GB runaway;
+  detect + drop/repair so the loop can't form. Both observed.
+- [ ] **gptoss-reasoning-per-shape** — sweep reasoning low/medium BY TASK SHAPE: `low` under-plans
+  multi-step CREATE (mkdir → premature stop), `medium` is slower. Find the sweet spot or a
+  CREATE-aware default. A/B build/test at low vs medium.
+- [ ] **gptoss-temp-codequality** — sweep temperature/top_p (+ `ROZUM_GPTOSS_TOP_P`) for code
+  COMPLETENESS (observed: `reverse` without `.collect()`; a `main` that prints nothing). Does a
+  lower/clipped sampling produce more complete, compiling code? A/B.
+- [ ] **gptoss-catheredoc-normalize-v2** — the reverted v1 over-fired (turned `cat file <<EOF`
+  READS into writes). Precise v2: normalize ONLY on clear write-intent (`>` present OR a to-be-created
+  path + file-shaped content), fixing dropped-`>`/unclosed-EOF without mis-classifying reads. No-regress gated.
+- [ ] **footprint-estimate-accuracy** (reliability/no-reboot) — 35B is ESTIMATED ~30 GB but the
+  ACTUAL peak is ~24 GB, so the residency guard refuses a model that would fit (today's codex×35B
+  run blocked). Tighten the per-model estimate (or measure-then-cache the real peak) so the guard
+  admits what truly fits. Compose with the new adaptive loading (`426cf7e`). Goal: load when safe,
+  never reboot, never false-refuse.
+- [ ] **gptoss-codex-cascade** (stretch) — gpt-oss for speed, auto-fall-back to 35B on a failed cell
+  (the `CascadeBackend` exists). Best-of-both: fast when gpt-oss succeeds, reliable when it doesn't.
 
 #### 2. Plugin-ize everything
 
