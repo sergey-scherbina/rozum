@@ -127,9 +127,17 @@
   each model as a SEPARATE top-level gateway request; the lazy pipeline runs both NESTED in one request —
   and it's specific to GLM-as-first-tier. NOT an MLX stream/cache/timing issue. NEXT (real fix): route the
   lazy pipeline's per-tier load/gen through the gateway's separate-request swap path (architectural), or
-  keep using solve.sh (separate processes, proven). KEPT WINS: `mlx_synchronize` flush (teardown hygiene) +
-  `reset_peak_memory` at teardown (fixes the lazy footprint-cache poisoning — each swapped model records its
-  OWN peak instead of the running max).
+  keep using solve.sh (separate processes, proven).
+  **CORRECTION (2026-06-24): fix #5 was HARMFUL — REVERTED in 1482dd7.** A/B proved the teardown
+  `mlx_synchronize`+`reset_peak_memory` flush did not just fail to fix the lazy bug, it BROKE in-process
+  model swapping: flush ON → the gateway's own Switchboard swap (GLM-9B→Qwen3-4B via /control/switch) fails
+  the next gen (HTTP 500); flush OFF → swap works BOTH directions. It ran at EVERY teardown → regressed
+  model-switching for ALL models. Reverted (removed flush + mlx-sys dep); verified swap works by default,
+  29 tests pass. My mid-session 'GPU degradation' read was ALSO this self-inflicted bug. CLEAN STATE:
+  Switchboard swap works; the LAZY pipeline GLM-9B→Qwen3-4B STILL fails even with flush off (genuine,
+  SEPARATE structural bug — nested-in-one-request vs the Switchboard's separate top-level requests;
+  build/drop identical, cause unpinned). ⇒ task #6 (route lazy through the Switchboard) is VIABLE (the
+  Switchboard works) but is a real gateway-orchestration change. Robust today: solve.sh.
 - [ ] **adaptive-cascade-residency** (operator idea 2026-06-23; now the residency half of `pipeline-cascade`)
   — make the cascade EAGER if its local
   tiers co-fit, LAZY (one resident at a time, swap on escalation) if not. Today `build_cascade` is
