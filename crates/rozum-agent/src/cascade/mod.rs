@@ -97,6 +97,13 @@ pub type LazyResolver = Arc<
 /// (frees the Metal buffers) and BLOCKS for seconds; doing it on a blocking thread keeps the executor
 /// responsive. Returns once the model's memory is actually freed, so the next tier loads into a
 /// process with only one model resident (no co-residency).
+/// Run one tier's generation then tear it down (free its model before the next tier loads).
+async fn run_and_teardown(backend: Arc<dyn ChatBackend>, req: ChatRequest) -> TurnOutcome {
+    let o = run_attempt(&backend, req).await;
+    teardown_tier(backend).await;
+    o
+}
+
 async fn teardown_tier(backend: Arc<dyn ChatBackend>) {
     let _ = tokio::task::spawn_blocking(move || drop(backend)).await;
     // Optional inter-tier settle (`ROZUM_PIPELINE_SWAP_SETTLE_MS`, default 0/off). A plain delay does
@@ -173,8 +180,7 @@ impl ChatBackend for LazyPipelineBackend {
             let mut pmsgs = messages.clone();
             append_user_text(&mut pmsgs, PLANNER_FRAMING);
             preq.messages = pmsgs;
-            let outcome = run_attempt(&backend, preq).await;
-            teardown_tier(backend).await; // FREE before the next tier loads (no co-residency)
+            let outcome = run_and_teardown(backend, preq).await; // FREE before the next tier loads
             if let Some(e) = &outcome.error {
                 Self::obs("advisor_failed", &spec.model, serde_json::json!({ "error": e }));
                 continue;
@@ -197,8 +203,7 @@ impl ChatBackend for LazyPipelineBackend {
         })?;
         let mut ereq = req;
         ereq.messages = messages;
-        let outcome = run_attempt(&backend, ereq).await;
-        teardown_tier(backend).await;
+        let outcome = run_and_teardown(backend, ereq).await;
         match outcome.error {
             Some(e) => Err(ModelError::BackendUnavailable(e)),
             None => Ok(buffered(outcome_events(&outcome, None))),

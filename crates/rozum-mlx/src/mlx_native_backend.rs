@@ -761,30 +761,6 @@ mod inner {
                 run_job(&mut model, &mut tokenizer, &template, &eos, kv_per_pos, &mut store, job);
             }
         }
-        // The job queue closed → this model is being torn down. FLUSH the MLX stream so any pending
-        // async-eval'd work (the decode loop pre-builds/async-evals the NEXT token before yielding the
-        // current one) COMPLETES here, before `model` frees. Otherwise that pending work leaks onto the
-        // shared process Metal stream and the NEXT model loaded in this process fails its first eval
-        // (`mlx: eval failed`) — the lazy-pipeline GLM-9B→Qwen3-4B bug. Safe: just waits on the GPU
-        // stream (no free/reset). See docs/specs/pipeline-cascade.md.
-        flush_default_stream();
-    }
-
-    /// Block until the default-device MLX stream has finished all queued work. Used at model teardown
-    /// so one model's pending GPU work can't contaminate the next model loaded in the same process.
-    fn flush_default_stream() {
-        // Teardown hygiene, run on the worker thread before `model` frees:
-        // 1. Flush the default-device MLX stream so any pending async-eval'd work (the decode loop
-        //    pre-builds/async-evals the next token) completes before the model's buffers free.
-        let stream = mlx_rs::Stream::new();
-        unsafe {
-            let _ = mlx_sys::mlx_synchronize(stream.as_ptr());
-        }
-        // 2. Reset the process-global peak high-water so the NEXT model loaded in this process records
-        //    its OWN peak. `get_peak_memory()` is monotonic, so across a lazy swap each model otherwise
-        //    records the running max → inflates the admission footprint cache (the lazy cache-poisoning
-        //    fix; Qwen3-4B was cached at 7.7 GiB vs its real 2.25). See docs/specs/pipeline-cascade.md.
-        mlx_rs::memory::reset_peak_memory();
     }
 
     /// Batched-decode capacity from `ROZUM_BATCH` (default 1 = serial).
