@@ -147,13 +147,28 @@ pub struct ResidentPlan {
 pub struct ResidentRequest<'a> {
     /// The model this request needs (it must end up resident).
     pub requested: &'a str,
-    /// Its resident weight in bytes.
+    /// Its resident weight in bytes — the caller passes the **full** per-model footprint
+    /// (`runtime_footprint_bytes` = weights + KV + one activation reserve). The same value flows
+    /// to the cross-process `published_reservation`, so it must stay the full footprint here;
+    /// the planner backs out the shared reserve itself via [`ResidentRequest::process_reserve_bytes`].
     pub requested_weight: u64,
-    /// The currently-resident models.
+    /// The currently-resident models (their `weight_bytes` are also full footprints).
     pub residents: &'a [ResidentInfo],
     /// Usable memory budget for resident model weights (bytes) — the caller derives it from free
     /// RAM × a safety fraction.
     pub budget_bytes: u64,
+    /// The process-shared activation reserve (MLX buffer cache + prefill spike), counted ONCE per
+    /// process no matter how many models co-reside — `model_source::process_reserve_bytes(0)`.
+    ///
+    /// Each model's `weight_bytes`/`requested_weight` is a full footprint that *includes* its own
+    /// reserve, but the MLX cache is a single process-global pool and prefill serializes, so for N
+    /// co-residents only ONE reserve is physically real. The planner therefore bills each model's
+    /// `weight − reserve` (its genuine per-model `runtime_active_bytes`) against `budget − reserve`,
+    /// charging the shared reserve a single time instead of N times. `0` reproduces the old
+    /// reserve-per-model behavior. A single-model request is **provably unchanged**: the keep test
+    /// `requested − reserve ≤ budget − reserve` ⇔ `requested ≤ budget`. See
+    /// `docs/specs/safe-multi-model-residency.md` § Shared-reserve accounting.
+    pub process_reserve_bytes: u64,
 }
 
 /// Decide the resident set for a request: **keep the highest-utility models that fit, always
@@ -167,9 +182,19 @@ pub fn plan_residency(req: &ResidentRequest, utility: impl Fn(&str) -> f64) -> R
         return ResidentPlan { load: false, evict: Vec::new(), oversubscribed: false };
     }
 
-    // Mandatory residents we can't drop: busy ones + the requested model.
-    let busy_bytes: u64 = req.residents.iter().filter(|r| r.busy).map(|r| r.weight_bytes).sum();
-    let mandatory = busy_bytes.saturating_add(req.requested_weight);
+    // Shared-reserve accounting: each `weight_bytes` is a full footprint that bundles ONE
+    // activation reserve, but co-residents share a single process-global MLX cache + serialized
+    // prefill, so only one reserve is real. Bill each model's per-model part (`weight − reserve` =
+    // its `runtime_active_bytes`) against a budget that has the single shared reserve removed once.
+    // This admits co-residents the old reserve-per-model sum wrongly refused, while keeping the
+    // single-model gate identical (`req − reserve ≤ budget − reserve` ⇔ `req ≤ budget`).
+    let reserve = req.process_reserve_bytes;
+    let active = |footprint: u64| footprint.saturating_sub(reserve);
+    let eff_budget = req.budget_bytes.saturating_sub(reserve);
+
+    // Mandatory residents we can't drop: busy ones + the requested model (all in active bytes).
+    let busy_bytes: u64 = req.residents.iter().filter(|r| r.busy).map(|r| active(r.weight_bytes)).sum();
+    let mandatory = busy_bytes.saturating_add(active(req.requested_weight));
 
     // Idle residents are the candidates to keep (high utility) or evict (to free room), ranked.
     let mut idle: Vec<&ResidentInfo> = req.residents.iter().filter(|r| !r.busy).collect();
@@ -181,7 +206,7 @@ pub fn plan_residency(req: &ResidentRequest, utility: impl Fn(&str) -> f64) -> R
             .then_with(|| a.model.cmp(&b.model))
     });
 
-    if mandatory > req.budget_bytes {
+    if mandatory > eff_budget {
         // Even with no idle co-residents, the request (+ busy) overflows → evict all idle and let
         // the caller over-subscribe / swap. This is the big-model thrash case.
         return ResidentPlan {
@@ -196,8 +221,8 @@ pub fn plan_residency(req: &ResidentRequest, utility: impl Fn(&str) -> f64) -> R
     let mut used = mandatory;
     let mut evict = Vec::new();
     for r in idle {
-        if used.saturating_add(r.weight_bytes) <= req.budget_bytes {
-            used += r.weight_bytes; // keep this useful idle resident
+        if used.saturating_add(active(r.weight_bytes)) <= eff_budget {
+            used += active(r.weight_bytes); // keep this useful idle resident
         } else {
             evict.push(r.model.clone());
         }
@@ -262,6 +287,7 @@ mod tests {
             requested: "B",
             requested_weight: 2 * GB,
             residents: &residents,
+            process_reserve_bytes: 0, // these tests bill raw weights; the reserve split has its own test
             budget_bytes: 8 * GB,
         };
         let plan = plan_residency(&req, flat_utility);
@@ -280,6 +306,7 @@ mod tests {
             requested: "B",
             requested_weight: 3 * GB,
             residents: &residents,
+            process_reserve_bytes: 0, // these tests bill raw weights; the reserve split has its own test
             budget_bytes: 7 * GB,
         };
         let plan = plan_residency(&req, util);
@@ -297,6 +324,7 @@ mod tests {
             requested: "BIG",
             requested_weight: 20 * GB,
             residents: &residents,
+            process_reserve_bytes: 0, // these tests bill raw weights; the reserve split has its own test
             budget_bytes: 16 * GB,
         };
         let plan = plan_residency(&req, flat_utility);
@@ -313,6 +341,7 @@ mod tests {
             requested: "B",
             requested_weight: 4 * GB,
             residents: &residents,
+            process_reserve_bytes: 0, // these tests bill raw weights; the reserve split has its own test
             budget_bytes: 7 * GB,
         };
         let plan = plan_residency(&req, flat_utility);
@@ -322,12 +351,72 @@ mod tests {
     }
 
     #[test]
+    fn shared_reserve_counted_once_admits_a_second_model() {
+        // The real shared-reserve case. Reserve = 5 GB; budget = 20 GB. Model A (footprint 12 =
+        // 7 active + 5 reserve) is resident; request B (footprint 11 = 6 active + 5 reserve).
+        //   Old reserve-per-model sum: 12 + 11 = 23 > 20  → would EVICT A (wrong: refuses a fit).
+        //   Shared-reserve:  active 7 + 6 = 13, + ONE 5 GB reserve = 18 ≤ 20 → both co-reside.
+        const RES: u64 = 5 * GB;
+        let residents = [resident("A", 12, false)];
+        let req = ResidentRequest {
+            requested: "B",
+            requested_weight: 11 * GB,
+            residents: &residents,
+            process_reserve_bytes: RES,
+            budget_bytes: 20 * GB,
+        };
+        let plan = plan_residency(&req, flat_utility);
+        assert!(plan.load);
+        assert!(plan.evict.is_empty(), "A is kept — counting the reserve once leaves room for both");
+        assert!(!plan.oversubscribed);
+
+        // Control: with the same numbers but the reserve charged per-model (reserve = 0 means the
+        // full footprints are billed as-is), the 12 + 11 = 23 > 20 sum forces A out — proving the
+        // single-reserve accounting is what admits the co-resident.
+        let req_naive = ResidentRequest { process_reserve_bytes: 0, ..req };
+        let plan_naive = plan_residency(&req_naive, flat_utility);
+        assert_eq!(plan_naive.evict, vec!["A".to_string()], "reserve-per-model wrongly evicts A");
+    }
+
+    #[test]
+    fn single_model_gate_is_identical_with_or_without_reserve() {
+        // A lone request must decide load/oversubscribe identically whether or not a reserve is set:
+        // `requested − reserve ≤ budget − reserve` ⇔ `requested ≤ budget`. Footprint 18, budget 20,
+        // reserve 5: fits either way (18 ≤ 20). Footprint 22 > 20: oversubscribes either way.
+        for (req_w, want_oversub) in [(18u64, false), (22u64, true)] {
+            let plan_r = plan_residency(
+                &ResidentRequest {
+                    requested: "M",
+                    requested_weight: req_w * GB,
+                    residents: &[],
+                    process_reserve_bytes: 5 * GB,
+                    budget_bytes: 20 * GB,
+                },
+                flat_utility,
+            );
+            let plan_0 = plan_residency(
+                &ResidentRequest {
+                    requested: "M",
+                    requested_weight: req_w * GB,
+                    residents: &[],
+                    process_reserve_bytes: 0,
+                    budget_bytes: 20 * GB,
+                },
+                flat_utility,
+            );
+            assert_eq!(plan_r.oversubscribed, want_oversub);
+            assert_eq!(plan_r, plan_0, "single-model decision must not depend on the shared reserve");
+        }
+    }
+
+    #[test]
     fn already_resident_just_serves() {
         let residents = [resident("A", 2, false)];
         let req = ResidentRequest {
             requested: "A",
             requested_weight: 2 * GB,
             residents: &residents,
+            process_reserve_bytes: 0, // these tests bill raw weights; the reserve split has its own test
             budget_bytes: 8 * GB,
         };
         let plan = plan_residency(&req, flat_utility);

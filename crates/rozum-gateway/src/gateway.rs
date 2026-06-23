@@ -220,10 +220,14 @@ impl WarmHandle {
 
 /// Injectable memory inputs for the warm-cache admission decision (real on the daemon; deterministic
 /// stubs in tests). `weight(spec)` = a model's resident bytes (`None` ⇒ not a known cached local ⇒
-/// not warmable); `budget()` = usable model-memory bytes.
+/// not warmable); `budget()` = usable model-memory bytes; `reserve()` = the process-shared activation
+/// reserve baked into each `weight`, which the planner charges ONCE across all co-residents (must be
+/// consistent with the `weight` model: production weights are full footprints ⇒ a real reserve;
+/// reserve-less test weights ⇒ `0`).
 struct WarmConfig {
     weight: Arc<dyn Fn(&str) -> Option<u64> + Send + Sync>,
     budget: Arc<dyn Fn() -> u64 + Send + Sync>,
+    reserve: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
 impl WarmConfig {
@@ -249,6 +253,10 @@ impl WarmConfig {
                     .unwrap_or(0)
                     .saturating_sub(crate::share::committed_by_others_bytes(std::process::id()))
             }),
+            // The shared MLX cache + prefill pool, baked into every `weight` footprint above. The
+            // planner backs out all-but-one of these across co-residents; `(0)` = the smallest,
+            // always-reboot-safe reserve (weight-independent with the default cache cap).
+            reserve: Arc::new(|| rozum_models::model_source::process_reserve_bytes(0)),
         }
     }
 }
@@ -264,6 +272,8 @@ impl Default for WarmConfig {
             budget: Arc::new(|| {
                 crate::concurrency::total_ram_bytes().map(|t| (t as f64 * 0.8) as u64).unwrap_or(0)
             }),
+            // Legacy weights-only sizing carries no reserve ⇒ nothing to back out.
+            reserve: Arc::new(|| 0),
         }
     }
 }
@@ -462,6 +472,11 @@ impl Switchboard {
             requested: model,
             requested_weight: weight,
             residents: &residents,
+            // `weight`/`weight_bytes` are full `runtime_footprint_bytes` (each bundles one activation
+            // reserve), but co-residents share a single process-global MLX cache + serialized prefill,
+            // so the planner backs out all-but-one reserve. The same full footprints still flow to
+            // `published_reservation` below, keeping the cross-process ledger reboot-safe.
+            process_reserve_bytes: (self.warm_cfg.reserve)(),
             budget_bytes: (self.warm_cfg.budget)(),
         };
         let plan = crate::resident::plan_residency(&req, |m| self.usage.utility(m, now));
@@ -5321,7 +5336,32 @@ mod tests {
         WarmConfig {
             weight: Arc::new(move |spec: &str| map.get(spec).copied()),
             budget: Arc::new(move || budget_gb * GB),
+            // These stubs model raw weights (no reserve baked in) ⇒ reserve-less world. The
+            // shared-reserve accounting itself is unit-tested in `resident::tests`.
+            reserve: Arc::new(|| 0),
         }
+    }
+
+    /// Like [`warm_cfg`] but with a non-zero shared reserve baked into every `weight` footprint —
+    /// the production shape (footprints from `runtime_footprint_bytes`, reserve from
+    /// `process_reserve_bytes`). The planner charges `reserve_gb` once across all co-residents.
+    fn warm_cfg_reserve(budget_gb: u64, reserve_gb: u64, weights: &[(&'static str, u64)]) -> WarmConfig {
+        let mut cfg = warm_cfg(budget_gb, weights);
+        cfg.reserve = Arc::new(move || reserve_gb * GB);
+        cfg
+    }
+
+    #[tokio::test]
+    async fn warm_admits_a_co_resident_by_counting_reserve_once() {
+        // The production accounting, end-to-end through `ensure_warm`. Budget 18, reserve 5; each
+        // footprint bundles one reserve: model-old 10 (= 5 active + 5), warm-b 9 (= 4 active + 5).
+        //   Per-model-reserve sum 10 + 9 = 19 > 18 → would refuse warm-b (cf. the `_doesnt_fit` test).
+        //   Shared reserve once: active 5 + 4 + ONE 5 = 14 ≤ 18 → warm-b co-resides.
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg_reserve(18, 5, &[("model-old", 10), ("warm-b", 9)]));
+        let lease = sb.enter(Some("warm-b")).await.expect("admitted, not refused");
+        assert_eq!(lease.model_id, "warm-b", "warm-b co-resides because the shared reserve is charged once");
+        assert!(sb.warm.lock().await.contains_key("warm-b"));
+        assert!(sb.current().is_some(), "the primary is untouched");
     }
 
     #[tokio::test]

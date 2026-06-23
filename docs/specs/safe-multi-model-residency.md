@@ -350,9 +350,22 @@ at once" goal.
 and the cross-process `committed_by_others` total is accurate → siblings admit more too. On a
 36 GiB host (~27 GiB budget) this is the difference between admitting a 2nd small model or not.
 
-**Follow-up for sunny-civet (admission MECHANISM owner).** The intra-process `plan_residency`
-budget check still sums full per-model footprints (each with its own reserve) against
-`host_budget − committed_by_others`, so the in-process multislot planner is still conservative by
-(N-1) reserves. To let one gateway's OWN multislot admit as many co-residents as the math allows,
-the planner should bill per-model `runtime_active_bytes` against `(budget − one process_reserve)`.
-The numbers (`runtime_active_bytes` / `process_reserve_bytes`) are now in place for that wiring.
+**Admission-mechanism wiring — DONE (sunny-civet, 2026-06-23).** `plan_residency` no longer sums
+full per-model footprints. `ResidentRequest` gains a `process_reserve_bytes` input; the planner
+bills each model's `weight − reserve` (its genuine `runtime_active_bytes`, since the caller still
+passes full footprints) against `budget − one reserve`, charging the shared activation pool a
+**single** time instead of once per co-resident. So one gateway's own multislot now admits as many
+co-residents as `Σ active_i + ONE reserve ≤ budget` allows — no longer conservative by (N-1)
+reserves.
+
+The reserve is **injectable** (`WarmConfig.reserve`) so it stays consistent with the `weight`
+model: production passes `process_reserve_bytes(0)` alongside `runtime_footprint_bytes` weights;
+the reserve-less test stubs pass `0`. Crucially the full footprints are **unchanged** at the call
+site, so the values flowing to `published_reservation` (the cross-process ledger) still carry their
+reserve and stay **reboot-safe** — this change only relaxes the *in-process* admit decision.
+
+Provably single-model-identical: the lone-request keep test `requested − reserve ≤ budget − reserve`
+⇔ `requested ≤ budget`. Tests: `resident::tests::{shared_reserve_counted_once_admits_a_second_model,
+single_model_gate_is_identical_with_or_without_reserve}` (unit) +
+`gateway::tests::warm_admits_a_co_resident_by_counting_reserve_once` (end-to-end through
+`ensure_warm`).

@@ -1,5 +1,24 @@
 # Changelog
 
+## residency — shared-reserve admission billing (in-process multislot admits more)
+Completed: 2026-06-23
+
+Completes nimble-raven's shared-reserve handoff on the admission-mechanism side. The in-process
+`plan_residency` planner no longer sums a full per-model activation reserve (~5.5 GiB) for every
+co-resident — the MLX buffer cache is a single process-global pool and prefill serializes, so only
+ONE reserve is physically real per process. `ResidentRequest` gains a `process_reserve_bytes` input;
+the planner bills each model's `weight − reserve` (its genuine `runtime_active_bytes`, the caller
+still passing full footprints) against `budget − one reserve`. On a 36 GiB host (~27 GiB budget)
+this is the difference between admitting a 2nd small co-resident or needlessly refusing it.
+
+Reboot-safety preserved: the call site still passes full `runtime_footprint_bytes`, so the values
+flowing to the cross-process `published_reservation` ledger keep their reserve — only the in-process
+admit decision is relaxed. The reserve is injectable (`WarmConfig.reserve`: production
+`process_reserve_bytes(0)`, reserve-less test stubs `0`), keeping it consistent with the weight
+model. Provably single-model-identical (`req − reserve ≤ budget − reserve` ⇔ `req ≤ budget`).
+Tests: two `resident::tests` units + an end-to-end `warm_admits_a_co_resident_by_counting_reserve_once`.
+Spec: `docs/specs/safe-multi-model-residency.md` § Shared-reserve accounting.
+
 ## gateway/mlx — honour the client's reasoning.effort (codex can now control gpt-oss reasoning)
 Completed: 2026-06-23
 
