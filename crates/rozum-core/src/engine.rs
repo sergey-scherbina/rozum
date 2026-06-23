@@ -377,6 +377,12 @@ where
         );
     }
 
+    // Diagnostic: the EXACT raw text the model generated, before tool-call parsing (any arch, not
+    // just harmony) — to see whether a "no tool call" turn is genuinely prose or a lost/malformed call.
+    if std::env::var_os("ROZUM_RAW_DUMP").is_some() {
+        eprintln!("─── RAW_DUMP (stop={stop_reason:?} out_tokens={output_tokens}) ───\nRAW: {full_text:?}");
+    }
+
     // Finalize: a cancelled run reports as-is; otherwise parse any tool calls.
     let tool_calls = if matches!(stop_reason, StopReason::Cancelled) {
         Vec::new()
