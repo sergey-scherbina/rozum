@@ -42,6 +42,14 @@ struct Cli {
     /// the meeting daemon. `--web-port` implies this.
     #[arg(long)]
     legacy_room: bool,
+
+    /// Set a `ROZUM_*` tuning option on the command line — repeatable, e.g.
+    /// `--set ROZUM_GATEWAY_ADAPTIVE_LOAD=0 --set ROZUM_GLM_ARTIFACT_SYNTH=0`.
+    /// Highest precedence (CLI `--set` > env > config `[options]` > default). The
+    /// same knobs are settable as env vars or in the config's `[options]` table.
+    /// Only `ROZUM_`-prefixed keys are accepted.
+    #[arg(long = "set", value_name = "KEY=VALUE", global = true)]
+    set: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -552,6 +560,12 @@ async fn main() {
     rozum::mlx_native_backend::register_telemetry();
 
     let cli = Cli::parse_from(reorder_launch_args(std::env::args().collect()));
+
+    // Apply `--set KEY=VALUE` CLI options to the environment FIRST (highest precedence: CLI > env >
+    // config > default). Config `[options]` are applied (only-if-unset) when the config loads. Both
+    // feed the same env-var knobs the model/residency/GLM code reads, so every option is settable
+    // three ways. Only ROZUM_* keys; must run before any option-reading code.
+    apply_cli_set_options(&cli.set);
 
     // The default subcommand launches a TUI. Anything written to stderr
     // (tracing output, stray eprintln!) corrupts the terminal because
@@ -4007,11 +4021,37 @@ fn status_service() {
 /// not silently fall back. See `docs/specs/runtime-config.md`.
 fn load_runtime_config_or_exit() -> rozum::RuntimeConfig {
     match rozum::RuntimeConfig::load() {
-        Ok(c) => c,
+        Ok(c) => {
+            // Export config `[options]` into the env (only-if-unset, so CLI `--set` + the user's env
+            // win). Lets every ROZUM_* option be set in the config too.
+            let applied = c.apply_options_to_env();
+            if !applied.is_empty() {
+                eprintln!("rozum: applied {} config [options]: {}", applied.len(), applied.join(", "));
+            }
+            c
+        }
         Err(e) => {
             eprintln!("rozum: {e}");
             std::process::exit(2);
         }
+    }
+}
+
+/// Apply `--set KEY=VALUE` CLI options to the environment (force — the highest-precedence source:
+/// CLI > env > config > default). Each is split on the first `=`; only `ROZUM_`-prefixed keys are
+/// honored, so `--set` can't clobber `PATH`/`HOME`/etc. Runs at startup before any option-reading code.
+fn apply_cli_set_options(sets: &[String]) {
+    for s in sets {
+        let Some((k, v)) = s.split_once('=') else {
+            eprintln!("rozum: --set '{s}' ignored — expected KEY=VALUE");
+            continue;
+        };
+        if !k.starts_with("ROZUM_") {
+            eprintln!("rozum: --set '{k}' ignored — only ROZUM_* keys are allowed");
+            continue;
+        }
+        // SAFETY: single-threaded startup, before any env-reading option code runs.
+        unsafe { std::env::set_var(k, v) };
     }
 }
 

@@ -278,3 +278,36 @@ signatures never accepted, so `master` failed to build on default features
 `ChannelWakeup` through and applying `flags_for()` — which also completes the
 `channel-wakeup-launch-flag` mechanism (a capable `claude` now gets
 `--dangerously-load-development-channels` appended at launch).
+
+## Tuning options — env, CLI `--set`, or config `[options]` (2026-06-23)
+Every `ROZUM_*` tuning knob is settable **three ways**, in precedence order **CLI `--set` > env var >
+config `[options]` > built-in default**:
+- **CLI:** `rozum gateway --model X --set ROZUM_GATEWAY_ADAPTIVE_LOAD=0 --set ROZUM_MLX_CACHE_GB=2`
+  (`--set KEY=VALUE` is a global, repeatable flag; only `ROZUM_`-prefixed keys are accepted).
+- **env:** `ROZUM_GATEWAY_ADAPTIVE_LOAD=0 rozum gateway …` (as before).
+- **config `rozum.toml`:**
+  ```toml
+  [options]
+  ROZUM_GATEWAY_ADAPTIVE_LOAD = "0"
+  ROZUM_MLX_CACHE_GB = "2"
+  ```
+  `RuntimeConfig::apply_options_to_env` exports these at startup **only if not already set**, so the
+  env and `--set` win. Non-`ROZUM_` keys are refused (a config can't clobber `PATH`/`HOME`).
+
+Wiring: `main` applies `--set` first (force), `load_runtime_config_or_exit` applies `[options]`
+(only-if-unset) — both before any option-reading code. Generic by design: any present or future
+`ROZUM_*` knob works without per-option plumbing.
+
+**Key user-facing knobs** (residency / adaptive load / GLM):
+| option | default | what |
+|---|---|---|
+| `ROZUM_GATEWAY_ADAPTIVE_LOAD` | on | auto-shrink n_ctx/cache to the best fit instead of refusing |
+| `ROZUM_GATEWAY_MIN_FREE_RAM_BYTES` | 3 GiB | RAM kept free after a load (the no-overcommit headroom) |
+| `ROZUM_GATEWAY_AVAILABLE_RAM_BYTES` | (measured) | pin available RAM (be conservative on a shared host) |
+| `ROZUM_GATEWAY_RAM_BUDGET_FRAC` | 0.75 | reserved-footprint budget = total × this |
+| `ROZUM_GATEWAY_RAM_BUDGET_BYTES` | — | absolute reserved-footprint budget override |
+| `ROZUM_MLX_CACHE_GB` | 4 | MLX buffer-cache cap (also the per-process reserve) |
+| `ROZUM_GLM_ARTIFACT_SYNTH` | on | GLM create-from-scratch artifact → tool-call synth |
+| `ROZUM_GLM_CONSTRAIN_ARGS` | off | force valid JSON args for GLM bare-args during decode (opt-in) |
+| `ROZUM_GLM_STRIP_FRAMING` | off | strip narration framing from GLM system prompts (opt-in) |
+| `ROZUM_ALLOW_CONCURRENT_RESIDENT` | off | bypass the host residency gate (override the no-overcommit safety) |

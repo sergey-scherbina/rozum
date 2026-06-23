@@ -98,6 +98,12 @@ pub struct RuntimeConfig {
     /// The `[sandbox]` table — persistent sandbox policy (the path lists env can't express).
     /// See `docs/specs/model-sandbox.md` "Config surface". Env vars override these.
     pub sandbox: SandboxConfig,
+    /// The `[options]` table — a generic name→value map of `ROZUM_*` tuning knobs (e.g.
+    /// `ROZUM_GATEWAY_ADAPTIVE_LOAD = "0"`). [`apply_options_to_env`](Self::apply_options_to_env)
+    /// exports each into the environment **if not already set**, so any env-var option is also
+    /// settable in the config; the existing env (and the `--set` CLI flag) take precedence. Only
+    /// `ROZUM_`-prefixed keys are accepted (a config can't clobber `PATH`/`HOME`/…).
+    pub options: HashMap<String, String>,
 }
 
 /// `[sandbox]` config (docs/specs/model-sandbox.md). The path lists are the value
@@ -135,6 +141,9 @@ struct RawConfig {
     /// The `[sandbox]` table.
     #[serde(default)]
     sandbox: RawSandbox,
+    /// The `[options]` table — generic `ROZUM_*` env-knob name→value map.
+    #[serde(default)]
+    options: HashMap<String, String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -239,6 +248,7 @@ impl Default for RuntimeConfig {
             single_backend: None,
             cascades: HashMap::new(),
             sandbox: SandboxConfig::default(),
+            options: HashMap::new(),
         }
     }
 }
@@ -335,7 +345,28 @@ impl RuntimeConfig {
                 network: raw.sandbox.network,
                 backend: raw.sandbox.backend,
             },
+            options: raw.options,
         })
+    }
+
+    /// Export the `[options]` table into the process environment **if the key is not already set** —
+    /// so the existing env (and the `--set` CLI flag, applied before this) win over the config. Only
+    /// `ROZUM_`-prefixed keys are honored, so a config can't clobber `PATH`/`HOME`/etc. Call once at
+    /// startup, before any option-reading code runs. Returns the keys it actually set (for logging).
+    pub fn apply_options_to_env(&self) -> Vec<String> {
+        let mut set = Vec::new();
+        for (k, v) in &self.options {
+            if !k.starts_with("ROZUM_") {
+                eprintln!("rozum config: ignoring [options] key '{k}' — only ROZUM_* keys are allowed");
+                continue;
+            }
+            if std::env::var_os(k).is_none() {
+                // SAFETY: single-threaded startup, before any env-reading option code runs.
+                unsafe { std::env::set_var(k, v) };
+                set.push(k.clone());
+            }
+        }
+        set
     }
 
     /// The cascade config selected by a `model:` string: `""` (i.e. `model: "cascade"`) → the
@@ -410,6 +441,34 @@ mod tests {
     /// Serialize the env-mutating `load()` tests so a `ROZUM_CONFIG` set by one
     /// doesn't leak into another running in parallel.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn options_table_parses_and_applies_if_unset() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let toml = "[options]\n\
+                    ROZUM_TEST_OPT_APPLY = \"42\"\n\
+                    ROZUM_TEST_OPT_KEPT = \"from_config\"\n\
+                    PATH = \"hacked\"\n";
+        let cfg = RuntimeConfig::from_toml_str(toml).unwrap();
+        assert_eq!(cfg.options.get("ROZUM_TEST_OPT_APPLY").map(String::as_str), Some("42"));
+        // A pre-set env var WINS over the config (only-if-unset).
+        // SAFETY: single-threaded under ENV_LOCK.
+        unsafe {
+            std::env::remove_var("ROZUM_TEST_OPT_APPLY");
+            std::env::set_var("ROZUM_TEST_OPT_KEPT", "from_env");
+        }
+        let applied = cfg.apply_options_to_env();
+        assert_eq!(std::env::var("ROZUM_TEST_OPT_APPLY").as_deref(), Ok("42"), "unset key applied");
+        assert_eq!(std::env::var("ROZUM_TEST_OPT_KEPT").as_deref(), Ok("from_env"), "pre-set env wins");
+        assert!(applied.contains(&"ROZUM_TEST_OPT_APPLY".to_string()));
+        assert!(!applied.contains(&"ROZUM_TEST_OPT_KEPT".to_string()));
+        // Non-ROZUM_ keys are NEVER applied (can't clobber PATH).
+        assert_ne!(std::env::var("PATH").as_deref(), Ok("hacked"));
+        unsafe {
+            std::env::remove_var("ROZUM_TEST_OPT_APPLY");
+            std::env::remove_var("ROZUM_TEST_OPT_KEPT");
+        }
+    }
 
     #[test]
     fn load_reads_explicit_config_and_errors_when_missing() {
