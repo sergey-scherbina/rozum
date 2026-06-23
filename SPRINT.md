@@ -668,8 +668,13 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   (new tui backend + web island); success = identical render + live update from one `.ssc` source.
 - [ ] **ucc-meetings-in-tk** — rewrite the meeting client in `std/ui` Tk (composer + switcher + unread),
   reach parity with the 1389-line hand-written Rust TUI, then retire it.
-- [ ] **ucc-control-api** — normalize rooms/messages/models/gateway/residency into `/api/*` JSON +
-  in-process equivalents, bound to Tk signals (`std/ui/fetch-json`); consumed by both targets.
+- [~] **ucc-control-api** — IN PROGRESS (data layer, no scalascript dep). Meetings side DONE
+  (`rozum-meeting::client` + `rest_read` HTTP, the services-and-clients track). Models/gateway side
+  STARTED: `rozum-gateway::control::status()` aggregates the active gateway + host residency
+  (budget/committed/available/residents) + the installed catalog into one Serialize snapshot;
+  surfaced as `rozum gateway status --json` (live-verified). `share::list_residents()` added. So the
+  UCC's models/gateway data is now a clean in-process + JSON contract. Next: an HTTP endpoint + write
+  actions (start/stop/swap) when wiring the Tk app. 117 core + 81 gateway tests green.
 - [ ] **ucc-models-panel** — models/gateway/residency control screen (proves "beyond meetings").
 - Open: build-flag to select the frontend backend (not yet located); signal→redraw loop; focus/keyboard
   model (Tk-core vs tui-backend); Tk web-target ↔ existing SSR meeting server reconciliation. See spec.

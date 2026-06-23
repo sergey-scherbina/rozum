@@ -564,6 +564,13 @@ pub fn committed_by_others_bytes(skip_pid: u32) -> u64 {
     scan_residents(skip_pid).0
 }
 
+/// The live resident model gateways on this host — `(pid, model)` per held reservation. A read for
+/// status/control surfaces (the control-API dashboard); reaps any dead reservation it probes, like
+/// [`committed_by_others_bytes`]. Empty if the ledger is empty/unreadable.
+pub fn list_residents() -> Vec<(u32, String)> {
+    scan_residents(0).1
+}
+
 /// Update THIS process's published reservation footprint, if a reservation file exists
 /// (i.e. a [`ResidencyGuard`] is held). The convenient wiring API for the in-process
 /// Switchboard (residency-unify): call on each warm load/evict to republish the process's

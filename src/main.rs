@@ -595,7 +595,12 @@ enum MeetingsAction {
 #[derive(Subcommand)]
 enum GatewayAction {
     /// Show the active shared gateway (model, port, pid, uptime, clients).
-    Status,
+    Status {
+        /// Emit the full control snapshot (gateway + residency + installed catalog) as JSON — the
+        /// machine/dashboard contract (`rozum-gateway::control::status`).
+        #[arg(long)]
+        json: bool,
+    },
     /// Stop the active shared gateway (refused if clients are attached, unless --force).
     Stop {
         #[arg(long)]
@@ -822,7 +827,7 @@ async fn main() {
                 }
                 run_gateway(port, model, n_ctx, cfg).await;
             }
-            Some(GatewayAction::Status) => run_gateway_status().await,
+            Some(GatewayAction::Status { json }) => run_gateway_status(json).await,
             Some(GatewayAction::Stop { force }) => run_gateway_stop(force),
             Some(GatewayAction::Switch {
                 model,
@@ -2780,8 +2785,15 @@ fn run_meetings_uninstall() {
     println!("uninstalled systemd meeting service ({})", path.display());
 }
 
-async fn run_gateway_status() {
+async fn run_gateway_status(json: bool) {
     use rozum::share;
+    if json {
+        // The full control snapshot (gateway + residency + installed catalog) — the dashboard/UCC
+        // contract via the models/gateway control-API.
+        let snap = rozum::control::status().await;
+        println!("{}", serde_json::to_string_pretty(&snap).unwrap_or_else(|_| "{}".into()));
+        return;
+    }
     let Some(active) = share::read_active() else {
         println!("no shared gateway running");
         return;

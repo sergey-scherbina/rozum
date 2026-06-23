@@ -6,6 +6,7 @@
 // `crate::backend::…` / `crate::obs::…` / `crate::models::…` paths resolve unchanged.
 // It reads MLX telemetry through `crate::obs` (the rozum-core hook), never the engine.
 pub mod anthropic_http;
+pub mod control;
 pub mod gateway;
 pub mod openai_http;
 

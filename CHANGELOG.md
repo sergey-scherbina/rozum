@@ -1,5 +1,18 @@
 # Changelog
 
+## models/gateway — a control-API snapshot (UCC data layer, no scalascript dep)
+Completed: 2026-06-23
+
+The models/gateway half of the UCC control-API (the meetings half shipped earlier as
+`rozum-meeting::client`). New `rozum-gateway::control::status()` aggregates a coherent snapshot — the
+active shared gateway (model/port/pid/uptime/clients/health), host residency (RAM budget / committed /
+available / the resident set), and the installed model catalog — into one `Serialize` `ControlStatus`.
+Surfaced as `rozum gateway status --json` (the machine/dashboard contract; live-verified). Adds a
+read-only `share::list_residents()`. This is the data layer the future UCC dashboard binds to (and the
+same snapshot can be served over the gateway's HTTP surface) — buildable now, parallel to and
+independent of the scalascript `frontend/tui` backend. 117 core + 81 gateway tests green. Spec
+docs/specs/services-and-clients.md.
+
 ## meetings — REST parity: inbox + roster over HTTP
 Completed: 2026-06-23
 
