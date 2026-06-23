@@ -1,7 +1,7 @@
 #!/usr/bin/env ssc
 ---
 name: rozum-control-center
-version: 0.5.0
+version: 0.6.0
 description: rozum UCC — ONE std/ui app -> web (React) AND terminal (ratatui). Fully declarative.
 frontend: react
 ---
@@ -11,11 +11,13 @@ One `std/ui` app that compiles to **both** web (React SPA) and **TUI** (ratatui)
 selected only by the frontend backend (`frontend: react` / `--frontend tui`). No
 web-specific `serve(...)` in the source — the runner auto-runs `def view()`.
 
-Everything binds **declaratively** from ONE `fetchUrlSignal` GET `/control/status`:
-the residency metrics (`.residency_metrics`, GiB-formatted server-side) and the
-installed catalog (`.installed`) are both arrays rendered with `remoteTable(st, cols,
-rowsPath)`. No client-side `computedSignal` (which the tui backend can't recompute) —
-so the SAME source renders identically on web and terminal.
+Everything binds **declaratively** from `/control/status`: residency metrics
+(`.residency_metrics`), resident models (`.residency.residents`) and the installed
+catalog (`.installed`) are all arrays rendered with `remoteTable(sig, cols, rowsPath)`.
+No client-side `computedSignal` (which the tui backend can't recompute). Each table
+gets its OWN `fetchUrlSignal` of the same endpoint — a separate signal per table
+sidesteps the two-remoteTables-on-one-signal collision (F1). The SAME source renders
+on web and terminal.
 
 ## Setup
 [signal, fetchUrlSignal, incSignal, fieldColumn](std/ui/primitives.ssc)
@@ -31,7 +33,9 @@ so the SAME source renders identically on web and terminal.
 ## App
 ```scalascript
 val refresh = signal("refresh", 0)
-val st      = fetchUrlSignal("status", "/control/status", refresh)
+val stMetrics   = fetchUrlSignal("metrics",   "/control/status", refresh)
+val stResidents = fetchUrlSignal("residents", "/control/status", refresh)
+val stCatalog   = fetchUrlSignal("catalog",   "/control/status", refresh)
 
 val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
   vstack(gap = 6)(
@@ -39,12 +43,16 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
       text("source:"), badge("rozum control-API (always-up)", "success"),
       actionButton(incSignal(refresh), "↻ refresh")
     ),
-    remoteTable(st, [fieldColumn("Metric", "metric"), fieldColumn("Value", "value")], "residency_metrics")
+    remoteTable(stMetrics, [fieldColumn("Metric", "metric"), fieldColumn("Value", "value")], "residency_metrics")
   )
 )
 
+val residentsCard = cardWithHeader(heading(2, "Resident models (in memory now)"))(
+  remoteTable(stResidents, [fieldColumn("PID", "pid"), fieldColumn("Model", "model")], "residency.residents")
+)
+
 val catCard = cardWithHeader(heading(2, "Installed catalog"))(
-  remoteTable(st, [fieldColumn("Model", "spec"), fieldColumn("Size", "size_gib")], "installed")
+  remoteTable(stCatalog, [fieldColumn("Model", "spec"), fieldColumn("Size", "size_gib")], "installed")
 )
 
 val meetingsCard = cardWithHeader(heading(2, "Meetings — room: rozum"))(
@@ -60,9 +68,10 @@ val meetingsCard = cardWithHeader(heading(2, "Meetings — room: rozum"))(
 def view() = lower(
   vstack(gap = 16)(
     heading(1, "rozum — control center"),
-    text("ONE .ssc -> web + TUI — live models/gateway/residency via the rozum control-API"),
     divider(),
     gwCard,
+    divider(),
+    residentsCard,
     divider(),
     catCard,
     divider(),
