@@ -1,19 +1,18 @@
 #!/usr/bin/env ssc
 ---
 name: rozum-control-center
-version: 1.0.0
-description: rozum UCC — ONE std/ui app -> web (React) AND terminal (ratatui). Single source, no workarounds.
+version: 1.1.0
+description: rozum UCC — dashboard + native chat, one ssc PWA. Web (React) deploy build.
 frontend: react
 ---
-# rozum — control center
+# rozum — control center (+ chat)
 
-One `std/ui` app, ONE `fetchUrlSignal` of `/control/status`, ONE `def view()` —
-compiles to **web** (`frontend: react`) and **terminal** (`--frontend tui`) with no
-per-target workarounds (scalascript ≥ c80f7be11: F1 multi-table-per-signal, E3 client-mode
-`def view()` mount, E2 tui transpile, portable `computedSignal`).
+One std/ui app: a dashboard (live `/control/status`) AND a native chat view per room
+(messages from `/chat/messages?room=…`, post via `/chat/post`) — same origin, so it all
+stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the view in place.
 
 ## Setup
-[signal, emit, serve, fetchUrlSignal, incSignal, computedSignal, fieldColumn](std/ui/primitives.ssc)
+[signal, emit, serve, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, incSignal, computedSignal, fieldColumn, hashSignal, onNavigate](std/ui/primitives.ssc)
 [jsonValue](std/json.ssc)
 [lower](std/ui/lower.ssc)
 [defaultTheme](std/ui/theme.ssc)
@@ -22,14 +21,29 @@ per-target workarounds (scalascript ≥ c80f7be11: F1 multi-table-per-signal, E3
 [badge](std/ui/display.ssc)
 [card, cardWithHeader](std/ui/containers.ssc)
 [signalText_](std/ui/reactive.ssc)
-[actionButton](std/ui/input.ssc)
+[actionButton, textField](std/ui/input.ssc)
 [remoteTable, lcol](std/ui/data.ssc)
+[route, router](std/ui/routing.ssc)
 
-## App
+## State + routing
 ```scalascript
 val refresh = signal("refresh", 0)
 val st      = fetchUrlSignal("status", "/control/status", refresh)
 
+val hash = hashSignal()
+val room = computedSignal(() => {
+  val h = hash()
+  if h.contains("/chat/") then h.split("/chat/").last else ""
+})
+val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else "home")
+
+val chatTick = signal("chatTick", 0)
+val msgUrl   = computedSignal(() => "/chat/messages?room=" + room())
+val messages = fetchUrlSignalTo("messages", msgUrl, chatTick)
+```
+
+## Dashboard
+```scalascript
 def gib(b: Double): String = {
   val t = (b / 107374182.4).toInt
   (t / 10).toString + "." + (t % 10).toString + " GiB"
@@ -39,9 +53,8 @@ val budgetTxt    = computedSignal(() => gib(jsonValue(st()).get("residency").get
 val committedTxt = computedSignal(() => gib(jsonValue(st()).get("residency").get("committed_bytes").asDouble))
 
 val meetingsCard = cardWithHeader(heading(2, "Meetings"))(
-  remoteTable(st, [lcol("Room", "room", "https://busi.tail1174e2.ts.net:8443/r/:value")], "meetings")
+  remoteTable(st, [lcol("Room", "room", "#/chat/:value")], "meetings")
 )
-
 val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
   vstack(gap = 6)(
     hstack(gap = 8)(
@@ -53,29 +66,57 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
     hstack(gap = 8)(text("committed:"),   signalText_(committedTxt))
   )
 )
-
 val residentsCard = cardWithHeader(heading(2, "Resident models (in memory now)"))(
   remoteTable(st, [fieldColumn("PID", "pid"), fieldColumn("Model", "model")], "residency.residents")
 )
-
 val catCard = cardWithHeader(heading(2, "Installed catalog"))(
   remoteTable(st, [fieldColumn("Model", "spec"), fieldColumn("Size", "size_gib")], "installed")
 )
 
-val view = lower(
-  vstack(gap = 16)(
-    heading(1, "rozum — control center"),
-    divider(),
-    meetingsCard,
-    divider(),
-    gwCard,
-    divider(),
-    residentsCard,
-    divider(),
-    catCard
-  ),
-  defaultTheme
+val dashboard = vstack(gap = 16)(
+  heading(1, "rozum — control center"),
+  divider(),
+  meetingsCard,
+  divider(),
+  gwCard,
+  divider(),
+  residentsCard,
+  divider(),
+  catCard
 )
+```
 
-serve(view, 8410)
+## Chat view
+```scalascript
+val chatHeader = hstack(gap = 10)(
+  actionButton(onNavigate("#/"), "← back"),
+  signalText_(computedSignal(() => "room: " + room())),
+  actionButton(incSignal(chatTick), "↻")
+)
+val draft      = signal("draft", "")
+val roomHeader = computedSignal(() => "{\"X-Room\":\"" + room() + "\"}")
+val composer = hstack(gap = 8)(
+  textField(draft, "message…"),
+  actionButton(fetchActionClear("POST", "/chat/post", draft, chatTick, roomHeader), "send")
+)
+val chatBody = vstack(gap = 12)(
+  chatHeader,
+  divider(),
+  remoteTable(messages, [
+    fieldColumn("", "time"),
+    fieldColumn("", "author"),
+    fieldColumn("", "content")
+  ], ""),
+  composer
+)
+```
+
+## Compose + serve
+```scalascript
+val view = router(mode, [
+  route("home", [dashboard]),
+  route("chat", [chatBody])
+])
+
+serve(lower(view, defaultTheme), 8410)
 ```
