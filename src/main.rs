@@ -1131,8 +1131,50 @@ fn measured_footprint_enabled() -> bool {
 /// is resident (binding it at the caller's function scope is enough). Runs the
 /// (possibly long) blocking wait off the async runtime. `None` = gate bypassed /
 /// unavailable → loading proceeds (the gate is a safety net, not correctness).
-async fn acquire_residency_or_exit(model: &str, n_ctx: u32) -> Option<rozum::share::ResidencyGuard> {
-    let footprint = estimate_model_footprint_bytes(model, n_ctx);
+/// A cascade spec (`cascade:name` or a comma-list) is NOT a single installed model, so the normal
+/// footprint estimate returns the unknown-size sentinel (`u64::MAX/4`) and admission wrongly REFUSES it
+/// (the bug: `loading this model (~4398046511103 MB) would overcommit`). Estimate the cascade's real
+/// resident cost instead: the SUM of its LOCAL tiers' footprints (remote/cloud tiers use no host RAM).
+/// Conservative by design — a cascade of two big locals is correctly refused (they don't co-fit on a
+/// 36 GB host), while a small-local + cloud cascade admits. Returns `None` when `model` is not a cascade.
+fn cascade_local_footprint(cfg: &rozum::RuntimeConfig, model: &str, n_ctx: u32) -> Option<u64> {
+    // Resolve the same way `try_cascade_backend` does: a `cascade:<name>` table from config, OR a
+    // comma-list (with or without the `cascade:` prefix) auto-ordered into a spec.
+    let as_list = |s: &str| -> Option<rozum::cascade::CascadeSpec> {
+        let names: Vec<String> = s
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect();
+        (names.len() >= 2).then(|| rozum::cascade::from_model_list(&names))
+    };
+    let spec = if let Some(name) = rozum::cascade::parse_cascade_model(model) {
+        // `cascade:a,b` → an ad-hoc list; `cascade:foo` → a named config table.
+        if name.contains(',') {
+            as_list(&name)?
+        } else {
+            load_cascade_spec(cfg, &name)?
+        }
+    } else if model.contains(',') {
+        as_list(model)?
+    } else {
+        return None;
+    };
+    let sum = spec
+        .tiers
+        .iter()
+        .filter(|t| matches!(t.location, rozum::cascade::Location::Local))
+        .map(|t| estimate_model_footprint_bytes(&t.model, n_ctx))
+        .fold(0u64, u64::saturating_add);
+    Some(sum)
+}
+
+async fn acquire_residency_or_exit(
+    model: &str,
+    n_ctx: u32,
+    footprint_override: Option<u64>,
+) -> Option<rozum::share::ResidencyGuard> {
+    let footprint = footprint_override.unwrap_or_else(|| estimate_model_footprint_bytes(model, n_ctx));
     let model_owned = model.to_string();
     match tokio::task::spawn_blocking(move || {
         rozum::share::acquire_residency(&model_owned, footprint)
@@ -1329,8 +1371,10 @@ async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: roz
     // Host-wide RAM gate: reserve this model's footprint before loading so the
     // resident models can't overcommit host RAM (whole-system OOM → watchdog kernel
     // panic → reboot, BUG-003). Held for this process's lifetime; covers the initial
-    // load below plus every lazy reload / `switch` (all same-process).
-    let _residency = acquire_residency_or_exit(&model_spec, n_ctx).await;
+    // load below plus every lazy reload / `switch` (all same-process). A cascade spec reserves the SUM
+    // of its LOCAL tiers (so admission understands it instead of refusing on the unknown-size sentinel).
+    let casc_fp = cascade_local_footprint(&cfg, &model_spec, n_ctx);
+    let _residency = acquire_residency_or_exit(&model_spec, n_ctx, casc_fp).await;
     // Speculative decoding: if a draft model is configured (`--draft-model` /
     // `ROZUM_DRAFT_MODEL`), build the target+draft pair; else the plain target.
     // Spec: docs/specs/speculative-decoding.md.
@@ -2056,7 +2100,9 @@ async fn run_launch_dedicated(
     // resident gateway. Held for this launch's lifetime (drops when `exec_agent` returns).
     // Adaptive: shrink n_ctx/cache to the best fit first so a tight host loads rather than refuses.
     let n_ctx = adapt_n_ctx_to_fit(&model_spec, n_ctx);
-    let _residency = acquire_residency_or_exit(&model_spec, n_ctx).await;
+    // A cascade spec reserves the SUM of its LOCAL tiers (config-loaded for the named-cascade case).
+    let casc_fp = cascade_local_footprint(&load_runtime_config_or_exit(), &model_spec, n_ctx);
+    let _residency = acquire_residency_or_exit(&model_spec, n_ctx, casc_fp).await;
     let backend = match build_gateway_backend(&model_spec, n_ctx).await {
         Some(b) => b,
         None => {

@@ -1,5 +1,30 @@
 # Sprint
 
+- [ ] **planner-executor** (operator idea 2026-06-23, spec `docs/specs/planner-executor.md`) — decompose a
+  coding task across two LOCAL models by ROLE: **GLM-4-32B = planner** (one-shot: reason out the COMPLETE
+  solution — every file's full contents — where it's strong), then **gpt-oss-20b = executor** (the agent
+  loop implements GLM's solution: write files, build/run/test, fix — where IT's strong). SEQUENTIAL (one
+  model resident at a time → fits 36 GB no-reboot; peak = max(planner,executor), not the sum). WHY: the
+  matrix proved the asymmetry — GLM writes correct code but can't deliver agentically (4/15, variance,
+  irreducible per `glm-shell-delivery-fix`); gpt-oss delivers reliably (12/15) but has a from-scratch
+  correctness tail. Composed, each covers the other. STAGES: (1) one-shot `/v1/chat/completions` to a GLM
+  gateway → solution text; (2) unload GLM, `rozum launch` gpt-oss with task+`<solution>` injected → agentic
+  delivery. INVOCATION: `rozum solve --planner GLM --executor gpt-oss -- <agent> "<task>"`. Reuses the
+  existing sequential-load/switch + admission machinery (per stage). VALIDATE (slot-gated): create-from-
+  scratch A/B — planner→executor build pass-rate > max(GLM-alone, gpt-oss-alone), control gpt-oss-plans→
+  gpt-oss-executes to confirm the win is the PLAN, 0 reboot. Pays off on non-trivial/plan-heavy tasks; skip
+  for trivial or pure-edit (single model is fine there).
+- [x] **cascade-admission-cascade-spec** — DONE (plucky-finch 2026-06-23). The host-RAM admission gate
+  (BUG-003, this session's work) wrongly REFUSED a cascade load: `estimate_model_footprint_bytes("cascade:
+  …"/"a,b")` finds no installed model → unknown-size sentinel `u64::MAX/4` → "loading this model
+  (~4398046511103 MB) would overcommit" → the cascade never loads. Fix: `cascade_local_footprint(cfg,
+  model, n_ctx)` resolves the cascade (named-config OR comma-list, with/without `cascade:` prefix) and
+  reserves the SUM of its LOCAL tiers (remote/cloud tiers = 0 host RAM); `acquire_residency_or_exit` gains
+  a footprint override, wired at both call sites (run_gateway + run_launch_dedicated). Conservative — two
+  big locals correctly refuse (don't co-fit on 36 GB), small-local + cloud admits. Exposed by composing
+  the new admission gate with the pre-existing (pre-BUG-003) cascade. Validated: `--model A,B` cascade now
+  loads + serves where it previously refused.
+
 - [x] **adaptive-model-loading** — DONE (426cf7e, operator priority 2026-06-23). When a model's footprint
   at the requested n_ctx/cache exceeds available RAM, AUTO-SHRINK to the best params that still fit
   safely (largest n_ctx, then step the MLX cache 4->2->1 GiB) instead of refusing — so it loads with the
