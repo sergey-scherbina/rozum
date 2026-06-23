@@ -174,3 +174,18 @@ non-harmony templates are untouched. Pure `apply_reasoning_level` unit-tested.
 lifting build 1/3 → 2/3. Confirms the cause (medium CoT → long times + timeouts) and the fix. The
 residual 1/3 fail at `low` (105 s, NOT a timeout) is model-correctness variance, not reasoning.
 Shipped on master.
+
+### Honour the client's `reasoning.effort` (agent override; precedence request > env > low)
+
+Originally the gateway dropped codex's reasoning entirely (`RespReq` had no field), so the model
+always got the engine default. Now `reasoning.effort` from the OpenAI Responses request is parsed
+(`reasoning_effort_of`), carried on `SamplingParams.reasoning_effort`, and applied at the gpt-oss
+harmony render via a per-job thread-local (`REQ_REASONING`, set at `run_job` — gpt-oss tool jobs are
+constrained → serial, so it is exact). **Precedence: request `reasoning.effort` > `ROZUM_GPTOSS_REASONING`
+env > `low` default.** Other models ignore it. Unit-tested (parse + precedence).
+
+**Validated (2026-06-23):** (1) honouring works — a direct `/v1/responses` probe with `effort:high`
+reasons more (slower) than `effort:low`. (2) **No regression:** a real `codex×build` ran in **37 s
+(fast)** with `ROZUM_GPTOSS_REASONING` unset → codex does NOT send `reasoning:medium`, so the `low`
+default still holds. So an agent CAN now raise the effort explicitly, while the matrix/coding default
+stays fast.

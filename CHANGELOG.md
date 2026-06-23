@@ -1,5 +1,23 @@
 # Changelog
 
+## gateway/mlx — honour the client's reasoning.effort (codex can now control gpt-oss reasoning)
+Completed: 2026-06-23
+
+Previously the gateway dropped codex's reasoning entirely (`RespReq` had no field), so gpt-oss
+always ran at the engine default. Now the OpenAI Responses `reasoning.effort` is honoured:
+parsed (`reasoning_effort_of`), carried on `SamplingParams.reasoning_effort` (a Default field — no
+constructor churn), and applied at the gpt-oss harmony render via a per-job thread-local
+(`REQ_REASONING`, set at `run_job`; gpt-oss tool jobs are constrained → serial, so it's exact).
+
+- **Precedence: request `reasoning.effort` > `ROZUM_GPTOSS_REASONING` env > `low` default.** Other
+  models ignore it. `reasoning_effort_of` + the parse/precedence are unit-tested; gateway 77/77,
+  `rozum-mlx --features mlx-native` compiles, `--no-default-features` green.
+- Validated: (1) honouring works — a direct `/v1/responses` probe with `effort:high` reasons more
+  (slower) than `effort:low`; (2) NO regression — a real codex×build ran fast (37 s) with the env
+  unset, i.e. codex does NOT send `reasoning:medium`, so the `low` default still holds. An agent can
+  now raise the effort explicitly while the coding default stays fast. Spec
+  `docs/specs/constrained-gptoss-delivery.md`.
+
 ## meeting .ssc client — harden room paths and status docs
 Completed: 2026-06-23
 

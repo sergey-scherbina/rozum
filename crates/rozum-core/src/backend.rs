@@ -161,6 +161,10 @@ pub struct SamplingParams {
     /// (native MLX) guarantees the output parses + conforms; others ignore it. See
     /// `docs/specs/constrained-tool-decoding.md`.
     pub response_schema: Option<serde_json::Value>,
+    /// Per-request reasoning effort (`low`|`medium`|`high`), from the client (e.g. codex's
+    /// `reasoning.effort`). Only gpt-oss's harmony render honours it; when `None` the engine
+    /// falls back to `ROZUM_GPTOSS_REASONING` (default `low`). Other backends ignore it.
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Clone, Debug)]

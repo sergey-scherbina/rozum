@@ -1521,6 +1521,16 @@ struct RespReq {
     top_p: Option<f32>,
     max_output_tokens: Option<u32>,
     top_k: Option<u32>,
+    /// OpenAI Responses reasoning control: `{ "effort": "low"|"medium"|"high" }`. Honoured for
+    /// gpt-oss (overrides the `ROZUM_GPTOSS_REASONING` default); ignored by other models.
+    #[serde(default)]
+    reasoning: Option<Value>,
+}
+
+/// The `effort` out of an OpenAI Responses `reasoning` object, lower-cased + validated.
+fn reasoning_effort_of(reasoning: &Option<Value>) -> Option<String> {
+    let e = reasoning.as_ref()?.get("effort")?.as_str()?.trim().to_ascii_lowercase();
+    matches!(e.as_str(), "low" | "medium" | "high").then_some(e)
 }
 
 /// Responses-API tools are FLAT (`{type:"function", name, description, parameters}`),
@@ -3278,6 +3288,9 @@ async fn responses_handler(
             top_p: req.top_p,
             max_tokens: req.max_output_tokens,
             top_k: req.top_k,
+            // codex's `reasoning.effort` → gpt-oss harmony reasoning level (overrides the
+            // ROZUM_GPTOSS_REASONING default); ignored by other models.
+            reasoning_effort: reasoning_effort_of(&req.reasoning),
             ..Default::default()
         }),
         cancel: cancel.clone(),
@@ -4145,6 +4158,17 @@ pub async fn serve_on(
 mod tests {
     use super::*;
     use crate::backend::{ChatEvent, HelloBackend, StopReason};
+
+    #[test]
+    fn reasoning_effort_of_parses_and_validates() {
+        let eff = |v: serde_json::Value| reasoning_effort_of(&Some(v));
+        assert_eq!(eff(json!({"effort": "high"})).as_deref(), Some("high"));
+        assert_eq!(eff(json!({"effort": "LOW"})).as_deref(), Some("low")); // lower-cased
+        assert_eq!(eff(json!({"effort": "  medium  "})).as_deref(), Some("medium")); // trimmed
+        assert_eq!(eff(json!({"effort": "ultra"})), None); // invalid level rejected
+        assert_eq!(eff(json!({"summary": "auto"})), None); // no effort key
+        assert_eq!(reasoning_effort_of(&None), None); // no reasoning object
+    }
 
     #[test]
     fn codex_lean_prompt_trims_only_load_sensitive_models() {

@@ -986,6 +986,9 @@ mod inner {
         store: &mut PrefixStore,
         job: Job,
     ) {
+        // Make this job's reasoning override visible to the harmony render (apply_gptoss_reasoning).
+        // gpt-oss tool jobs are constrained → serial here, so a per-job thread-local is exact.
+        REQ_REASONING.with(|c| *c.borrow_mut() = job.sampling.reasoning_effort.clone());
         // Schema-constrained decode: a separate B=1 loop that masks the sampler. Hybrid Qwen3.6
         // takes the `LayerCache` path; every dense arch takes the KV-cache path. Two triggers:
         //   1. tool-call constraining — ON by default (opt out with `ROZUM_MLX_CONSTRAIN=0`).
@@ -3558,11 +3561,26 @@ mod inner {
     /// accumulates into RUN_TIMEOUTs (the instruction-trim cut it ~3-5× by shrinking the context;
     /// this cuts the reasoning at its source). `ROZUM_GPTOSS_REASONING` (`low`|`medium`|`high`,
     /// default `low` — rozum runs gpt-oss for agentic coding where the tasks are simple) rewrites
-    /// the template's default. Pure core split out so it is testable without env.
+    /// the template's default. Precedence: the per-request override (the client's
+    /// `reasoning.effort`, e.g. from codex — set on `REQ_REASONING` for the current job) > the
+    /// `ROZUM_GPTOSS_REASONING` env > the `low` default. Pure core split out so it is testable.
     fn apply_gptoss_reasoning(t: &str) -> String {
-        let lvl = std::env::var("ROZUM_GPTOSS_REASONING").ok();
-        let lvl = lvl.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("low");
+        let req = REQ_REASONING.with(|c| c.borrow().clone());
+        let env = std::env::var("ROZUM_GPTOSS_REASONING").ok();
+        let lvl = req
+            .as_deref()
+            .or(env.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("low");
         apply_reasoning_level(t, lvl)
+    }
+
+    thread_local! {
+        /// The current job's `reasoning_effort` override (the client's `reasoning.effort`), read by
+        /// [`apply_gptoss_reasoning`] during the harmony render. Set at the top of [`run_job`] (the
+        /// single-threaded MLX worker processes one job at a time); cleared/overwritten per job.
+        static REQ_REASONING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     }
 
     pub(crate) fn apply_reasoning_level(t: &str, level: &str) -> String {
