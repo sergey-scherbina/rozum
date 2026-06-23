@@ -20,6 +20,29 @@ rather than gating on display-name-derived handles. Spec `docs/specs/meeting-men
 unit tests + 78 meeting tests green; `meetings read` refactored onto a shared `resolve_room_root`. The
 push-side `mentioned` flag (Tier-1/3 wakeup) is the remaining follow-up (`wakeup-mentioned-flag`).
 
+## gateway — repair `cat PATH <<EOF` missing-`>` (gpt-oss lost-write build red)
+Completed: 2026-06-23
+
+Live autopsy of the codex×gpt-oss `build` reds (KEEP=1, run OzUnnR): gpt-oss writes the CORRECT final
+`src/main.rs` but delivers it as `cat src/main.rs <<'EOF' … EOF` **without the `>` redirect**. Without
+`>`, `cat` takes the path as a positional arg and **ignores stdin** (the heredoc) — the write is a
+silent no-op read, the file never lands, the earlier broken version stays on disk, `cargo run` prints
+nothing → build red. Since the matrix grades `build` by FINAL FILE STATE (it runs cargo itself),
+landing the correct code makes the cell pass even when the model never re-ran cargo.
+
+Fix: `repair_heredoc_write` in `crates/rozum-gateway/src/gateway.rs` rewrites `cat <path> <<DELIM` →
+`cat > <path> <<DELIM` when there is a real path arg, a heredoc body, and no existing redirect —
+`cat <path> <<DELIM` is never a meaningful command (cat discards the heredoc given a file arg), so the
+write-intent is unambiguous. Heredoc-aware (tracks the delimiter so body lines starting with `cat …`
+are never rewritten); spares `cat > x`, plain `cat x` reads, and stdout `cat <<EOF`. Wired into
+`normalize_codex_tool_args` (the codex tool-call path), gated `ROZUM_HEREDOC_REDIRECT_FIX` (default on).
+
+Unit-proven on the exact OzUnnR input + 5 negatives (`heredoc_redirect_repairs_missing_gt_and_spares_valid_forms`),
+80/80 gateway tests green. Live-validated codex×gpt-oss (REPS=4): the repair fires 2× in the real flow,
+`test` 3/3→4/4 (no regression), the lost-write failure mode is eliminated — the residual build reds are
+now a SEPARATE class (model emits non-compiling final code and declares done without re-running cargo;
+filed as `gptoss-verify-before-done` in SPRINT).
+
 ## meeting client — unread badges in the room-switcher
 Completed: 2026-06-23
 

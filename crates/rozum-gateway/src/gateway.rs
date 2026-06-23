@@ -2161,6 +2161,72 @@ fn repair_broken_read(cmd: &str) -> Option<String> {
 /// (Finding 4). The patch text is nested inside the shell tool's command (and JSON-escaped), so we
 /// parse, recurse over every string value, and re-serialize — keeping escaping correct. A no-op for
 /// non-codex agents (only the Responses path calls this) and for well-formed / non-patch args.
+fn heredoc_redirect_enabled() -> bool {
+    std::env::var("ROZUM_HEREDOC_REDIRECT_FIX")
+        .map(|v| v != "0")
+        .unwrap_or(true)
+}
+
+/// gpt-oss frequently emits `cat <path> <<'EOF' … EOF` *without* the `>` redirect when it means to
+/// WRITE the file. Without `>`, `cat` takes `<path>` as a positional arg and **ignores stdin** (the
+/// heredoc) → the file is merely read (or errors if absent) and the intended write is **silently
+/// lost**. Live autopsy (codex×gpt-oss build, run OzUnnR): the model's correct *final* `main.rs`
+/// (`input.chars().rev().collect()`) was sent this way → it never landed, the earlier broken version
+/// stayed on disk → `cargo run` printed nothing → build red. `cat <path> <<DELIM` is **never** a
+/// meaningful command (cat discards the heredoc when given a file arg), so the write-intent is
+/// unambiguous and the repair is safe: insert the missing `>`. Heredoc-aware (tracks the delimiter so
+/// body lines that happen to start with `cat …` are never rewritten); only the opener line is fixed.
+/// Leaves well-formed `cat > x <<EOF`, plain reads (`cat x`), and stdout heredocs (`cat <<EOF`) alone.
+fn repair_heredoc_write(cmd: &str) -> Option<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut changed = false;
+    let mut in_heredoc: Option<String> = None;
+    for line in cmd.lines() {
+        if let Some(delim) = &in_heredoc {
+            let done = line.trim() == delim.as_str();
+            out.push(line.to_string());
+            if done {
+                in_heredoc = None;
+            }
+            continue;
+        }
+        if let Some(p) = line.find("<<") {
+            // delimiter word after `<<` (strip an optional surrounding quote)
+            let after = line[p + 2..].trim_start();
+            let raw = after.trim_start_matches(['\'', '"']);
+            let delim: String = raw
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let head = &line[..p];
+            let t = head.trim_start();
+            // botched `cat <path> <<` write: starts with `cat `, a real path arg, no `>` redirect
+            if t.starts_with("cat ") && !head.contains('>') {
+                let cat_at = head.find("cat ").unwrap();
+                let path = head[cat_at + 4..].trim();
+                if !path.is_empty() && !path.starts_with('-') && !path.starts_with('<') {
+                    let ins = cat_at + 4;
+                    out.push(format!("{}> {}", &line[..ins], &line[ins..]));
+                    changed = true;
+                    if !delim.is_empty() {
+                        in_heredoc = Some(delim);
+                    }
+                    continue;
+                }
+            }
+            if !delim.is_empty() {
+                in_heredoc = Some(delim);
+            }
+        }
+        out.push(line.to_string());
+    }
+    if changed {
+        Some(out.join("\n"))
+    } else {
+        None
+    }
+}
+
 fn normalize_codex_tool_args(args: &str) -> String {
     let mut v: Value = match serde_json::from_str(args) {
         Ok(v) => v,
@@ -2238,6 +2304,18 @@ fn normalize_codex_tool_args(args: &str) -> String {
                         .and_then(repair_broken_read)
                     {
                         eprintln!("[read-repair] broken file-read → {fixed}");
+                        o.insert("cmd".into(), Value::String(fixed));
+                    }
+                }
+                // `cat <path> <<EOF` (missing `>`) → `cat > <path> <<EOF`: without the redirect the
+                // heredoc write is a silent no-op read and the file never lands (build-red autopsy).
+                if heredoc_redirect_enabled() {
+                    if let Some(fixed) = o
+                        .get("cmd")
+                        .and_then(Value::as_str)
+                        .and_then(repair_heredoc_write)
+                    {
+                        eprintln!("[heredoc-redirect] `cat PATH <<EOF` missing `>` → write (was a no-op read)");
                         o.insert("cmd".into(), Value::String(fixed));
                     }
                 }
@@ -5125,6 +5203,44 @@ mod tests {
         assert!(!cmd.contains("\\u00"), "literal \\uXXXX escape survived into the patch: {cmd}");
         assert!(cmd.contains("collect::<String>()"), "generic not decoded: {cmd}");
         assert!(cmd.contains("&str") && cmd.contains("-> String"), "&/-> not decoded: {cmd}");
+    }
+
+    #[test]
+    fn heredoc_redirect_repairs_missing_gt_and_spares_valid_forms() {
+        // The exact build-red shape (codex×gpt-oss run OzUnnR): the model's CORRECT final main.rs
+        // was sent as `cat src/main.rs <<'EOF' … EOF` WITHOUT `>`, so the write was a no-op read and
+        // the file never landed. Repair must insert the `>`.
+        let botched = "cat src/main.rs <<'EOF'\nfn main() {\n    let x = 1;\n}\nEOF";
+        let fixed = repair_heredoc_write(botched).expect("missing `>` should be repaired");
+        assert!(
+            fixed.starts_with("cat > src/main.rs <<'EOF'"),
+            "redirect not inserted: {fixed}"
+        );
+        // the body and delimiter are untouched
+        assert!(fixed.contains("fn main() {") && fixed.ends_with("EOF"));
+
+        // Negatives — must NOT fire:
+        // (a) well-formed write already has `>`
+        assert!(repair_heredoc_write("cat > src/main.rs <<'EOF'\nx\nEOF").is_none());
+        assert!(repair_heredoc_write("cat >> log.txt <<'EOF'\nx\nEOF").is_none());
+        // (b) a plain read (no heredoc) is a real read, leave it
+        assert!(repair_heredoc_write("cat src/main.rs").is_none());
+        // (c) a stdout heredoc (no file arg) is legitimate
+        assert!(repair_heredoc_write("cat <<'EOF'\nhello\nEOF").is_none());
+        // (d) a body line that itself starts with `cat … <<` must NOT be rewritten (heredoc-aware)
+        let nested = "cat > note.txt <<'EOF'\ncat data.bin <<X is just prose here\nEOF";
+        assert!(
+            repair_heredoc_write(nested).is_none(),
+            "rewrote inside a heredoc body"
+        );
+        // end-to-end through normalize_codex_tool_args (the real call path)
+        let args = json!({ "cmd": botched }).to_string();
+        let out = normalize_codex_tool_args(&args);
+        let cmd = serde_json::from_str::<Value>(&out).unwrap()["cmd"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(cmd.starts_with("cat > src/main.rs"), "normalize didn't repair: {cmd}");
     }
 
     #[test]

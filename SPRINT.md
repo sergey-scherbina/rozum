@@ -407,6 +407,20 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
 
 ##### gpt-oss×codex — find the RIGHT conditions for the model (autopsy-driven; "model nature" is NOT an answer)
 
+> **CORRECTION (plucky-finch 2026-06-23) — "CODE QUALITY is the bottleneck" (the pivot below, lines
+> ~423-431) is REFUTED as a probe artifact. DO NOT chase code quality.** A model-only probe gave
+> CLEAN 5/5 vs LOADED 1/5 correct `main.rs` → looked like the loaded prompt degrades the code. But
+> "look before you guess" (dumping the output) showed the "broken main.rs" was literally **Cargo.toml
+> content** — the bench task asks for TWO files, gpt-oss writes Cargo.toml in turn-1 and main.rs in a
+> LATER turn, and my **single-turn** probe scored the turn-1 Cargo.toml as a broken main.rs. A
+> corrected **multi-turn agent-loop probe** (execute writes, feed results back, check FINAL src/main.rs
+> as the matrix does): **CLEAN 5/5 AND LOADED 5/5**. ⇒ gpt-oss's code is correct under the loaded
+> prompt; there is **no code-quality bug**. The residual codex×gpt-oss build/test reds are in the
+> **delivery seam** (the `gptoss-exec-decode-loopbreak` lever — `\uXXXX` in cmd, prose-as-args loop) +
+> **measurement noise** (N=3-4 swings), NOT model code ability. `gptoss-temp-codequality` is
+> de-prioritised (its premise is false). Method lesson: a model-only probe MUST mirror the agent's
+> multi-turn loop; a single-turn capture of a multi-file task measures the wrong file.
+
 KEEP=1 autopsies (plucky-finch 2026-06-23): gpt-oss writes correct CONTENT but fails the SHELL
 MECHANICS (`cat <<EOF` with a dropped `>`, an unclosed heredoc that leaks the delimiter into the
 file, `>` emitted as `>`, prose where the `{cmd}` JSON goes → an 11 GB codex retry-loop, and
@@ -439,9 +453,29 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
 - [ ] **gptoss-temp-codequality** — sweep temperature/top_p (+ `ROZUM_GPTOSS_TOP_P`) for code
   COMPLETENESS (observed: `reverse` without `.collect()`; a `main` that prints nothing). Does a
   lower/clipped sampling produce more complete, compiling code? A/B.
-- [ ] **gptoss-catheredoc-normalize-v2** — the reverted v1 over-fired (turned `cat file <<EOF`
-  READS into writes). Precise v2: normalize ONLY on clear write-intent (`>` present OR a to-be-created
-  path + file-shaped content), fixing dropped-`>`/unclosed-EOF without mis-classifying reads. No-regress gated.
+- [x] **gptoss-catheredoc-normalize-v2** — DONE (plucky-finch 2026-06-23), live-autopsy-driven +
+  unit-proven. The v1 over-fire is avoided by a PRECISE, heredoc-AWARE condition: `repair_heredoc_write`
+  rewrites `cat <path> <<DELIM … DELIM` (NO `>`) → `cat > <path> <<DELIM` ONLY when there is a real path
+  arg, a heredoc body, and no existing redirect — `cat <path> <<DELIM` is NEVER a meaningful read (cat
+  discards the heredoc given a file arg), so write-intent is unambiguous. Tracks the heredoc delimiter so
+  body lines that start with `cat …` are never touched; spares `cat > x`, plain `cat x` reads, and stdout
+  `cat <<EOF`. Gated `ROZUM_HEREDOC_REDIRECT_FIX` (default on). Root cause it fixes (autopsy run OzUnnR):
+  gpt-oss's CORRECT final `main.rs` was sent via `cat src/main.rs <<'EOF'` (no `>`) → silent no-op read →
+  file never landed → `cargo run` empty → build red. Since the matrix grades build by FINAL FILE STATE
+  (it runs cargo itself), inserting the `>` makes the correct code land → build passes even when the model
+  never ran cargo. unit test `heredoc_redirect_repairs_missing_gt_and_spares_valid_forms` (exact OzUnnR
+  input + 5 negatives), 80/80 gateway tests green.
+- [ ] **gptoss-verify-before-done** (NEW — autopsy run 95pRjT, the OTHER build fail; termination/verify,
+  NOT delivery) — gpt-oss patched its first compile error correctly (`unwrap_or_default(|| …)` →
+  `unwrap_or_default()`, LANDED via `patch`), then REDUNDANTLY `cat >`-rewrote the whole file and
+  REINTRODUCED a compile error (`unwrap_or_default("")`), then declared "done" WITHOUT re-running cargo.
+  The model has compiler feedback available but stops before its LAST edit is verified. Levers to A/B
+  (each risky — prompt changes regressed before; matrix-gate each): (a) a tight "after your FINAL edit,
+  run `cargo build`; only say done after it compiles AND `cargo run` prints the expected output" line in
+  LEAN_CODING_PROMPT; (b) detect the anti-pattern "successful `patch` immediately followed by a full-file
+  `cat >` rewrite" and suppress the redundant rewrite (hard/risky — defer); (c) higher reasoning for the
+  verify phase. NOTE: heredoc-redirect (above) does NOT help 95pRjT (it used `cat >` correctly) — this is
+  a genuinely separate termination bug, filed separately per the isolate skill (correctness vs termination).
 - [ ] **footprint-estimate-accuracy** (reliability/no-reboot) — 35B is ESTIMATED ~30 GB but the
   ACTUAL peak is ~24 GB, so the residency guard refuses a model that would fit (today's codex×35B
   run blocked). Tighten the per-model estimate (or measure-then-cache the real peak) so the guard
