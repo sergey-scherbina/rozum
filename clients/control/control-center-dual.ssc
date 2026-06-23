@@ -69,13 +69,13 @@ def view() = lower(
   vstack(gap = 16)(
     heading(1, "rozum — control center"),
     divider(),
+    meetingsCard,
+    divider(),
     gwCard,
     divider(),
     residentsCard,
     divider(),
-    catCard,
-    divider(),
-    meetingsCard
+    catCard
   ),
   defaultTheme
 )
