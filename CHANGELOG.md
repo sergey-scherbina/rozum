@@ -1,5 +1,16 @@
 # Changelog
 
+## gateway — `GET /control/status` HTTP (control snapshot for the web/UCC)
+Completed: 2026-06-23
+
+The control snapshot (`rozum-gateway::control::status`) is now also served over HTTP: `GET
+/control/status` on the gateway, alongside the existing `/control/{switch,unload,reload}` — so a web /
+the future UCC client fetches the same models/gateway data (active gateway + residency + catalog) as
+JSON instead of shelling out. Available while a gateway runs (consistent with the other `/control/*`);
+an always-up control surface so the dashboard works with no model loaded is a noted follow-up (fall
+back to `rozum gateway status --json` meanwhile). Hosted on the gateway, NOT the meeting daemon, to
+keep the two services separate (rozum-meeting deps neither core nor models). 81 gateway tests green.
+
 ## models/gateway — a control-API snapshot (UCC data layer, no scalascript dep)
 Completed: 2026-06-23
 

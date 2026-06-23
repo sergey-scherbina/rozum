@@ -674,7 +674,9 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   (budget/committed/available/residents) + the installed catalog into one Serialize snapshot;
   surfaced as `rozum gateway status --json` (live-verified). `share::list_residents()` added. So the
   UCC's models/gateway data is now a clean in-process + JSON contract. Next: an HTTP endpoint + write
-  actions (start/stop/swap) when wiring the Tk app. 117 core + 81 gateway tests green.
+  actions (start/stop/swap) when wiring the Tk app. HTTP: `GET /control/status` added to the gateway's
+  `/control/*` surface (serves the same snapshot for the web/UCC target; always-up host is a follow-up —
+  fall back to `gateway status --json` meanwhile). 117 core + 81 gateway tests green.
 - [ ] **ucc-models-panel** — models/gateway/residency control screen (proves "beyond meetings").
 - Open: build-flag to select the frontend backend (not yet located); signal→redraw loop; focus/keyboard
   model (Tk-core vs tui-backend); Tk web-target ↔ existing SSR meeting server reconciliation. See spec.

@@ -3844,6 +3844,12 @@ async fn control_switch(
 
 /// `POST /control/unload` — free the resident model but keep the daemon; the
 /// next chat lazily reloads it.
+/// `GET /control/status` — the models/gateway control snapshot (active gateway + host residency +
+/// installed catalog) as JSON, for a dashboard / the UCC web target. Read-only; no gateway state.
+async fn control_status_handler() -> Response {
+    axum::Json(crate::control::status().await).into_response()
+}
+
 async fn control_unload(State(state): State<GatewayState>) -> Response {
     match state.sb.unload().await {
         Ok(generation) => axum::Json(json!({
@@ -4254,6 +4260,7 @@ pub async fn serve_on(
         .route("/v1/chat/completions", post(oai_chat_handler))
         .route("/v1/responses", post(responses_handler))
         .route("/v1/messages", post(anthropic_handler))
+        .route("/control/status", get(control_status_handler))
         .route("/control/switch", post(control_switch))
         .route("/control/unload", post(control_unload))
         .route("/control/reload", post(control_reload))

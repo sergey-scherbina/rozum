@@ -75,6 +75,11 @@ No client touches the jsonl/principal/cursor format.
 - *inference*: OpenAI `POST /v1/chat/completions` + `/v1/responses`, Anthropic `POST /v1/messages`
   (the dialects Claude Code / Codex / `model_participant` consume);
 - *control*: gateway status + the host residency/share ledger (`rozum-core::share`).
+- *control snapshot*: `GET /control/status` → the `control::status()` JSON (active gateway + residency
+  + installed catalog) for a dashboard / the UCC web target, alongside the existing
+  `/control/{switch,unload,reload}`. Available while a gateway runs; an always-up control surface (the
+  gateway-as-daemon, or a light control server, so the dashboard works with NO model loaded) is a
+  follow-up — until then a client falls back to `rozum gateway status --json` (the CLI always works).
 `rozum-meeting::model_participant` consumes **only** `{gateway_url}/v1/chat/completions` — the sole
 meetings↔models coupling, an HTTP seam, not a code dependency. Keep it API-only.
 
