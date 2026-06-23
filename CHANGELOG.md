@@ -1,5 +1,17 @@
 # Changelog
 
+## meetings — wakeup push flags "for you" mentions (Tier-1/3)
+Completed: 2026-06-23
+
+Completes the mention-inbox work on the PUSH side. The `daemon_proxy` wakeup pusher now checks whether
+each new room delta (from someone else) addresses the proxy's own handle (`@you` / `-> you`, via
+`mention::addresses`) and, when it does, sets `mentioned`/`your_turn` on the `notifications/claude/channel`
+event and prefixes the Tier-3 piggyback injection with `‹for you›`. The proxy instructions teach the agent
+that `mentioned="true"` means the message addresses it (prioritize), and point at
+`rozum meetings inbox --as <handle>`. So a connected agent is now told "this one is for you" instead of
+treating every room turn as equal chatter; the durable pull inbox covers the offline case. 78 meeting
+tests green.
+
 ## meetings — `inbox`: durable "messages that address you" (mention detection)
 Completed: 2026-06-23
 

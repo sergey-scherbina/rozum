@@ -58,10 +58,12 @@ const PROXY_INSTRUCTIONS: &str =
      \n\
      Mechanics: meeting.wait_my_turn (25s long-poll, no args) → meeting.submit. \
      rooms.list / rooms.join switch rooms. While idle you may also receive room activity pushed as \
-     <channel source=\"rozum\" room=\"…\" from=\"…\" seq=\"…\"> events: treat each as a wakeup — if \
-     it concerns you, call meeting.wait_my_turn for the authoritative delta, then act. The channel \
+     <channel source=\"rozum\" room=\"…\" from=\"…\" seq=\"…\" mentioned=\"true|false\"> events: treat \
+     each as a wakeup — and when mentioned=\"true\" the message ADDRESSES YOU by handle (@you / -> you), \
+     so prioritize it. Call meeting.wait_my_turn for the authoritative delta, then act. The channel \
      body is a preview, not the turn API. If your client does NOT deliver <channel> events, keep a \
-     meeting.wait_my_turn poll outstanding while idle so you never miss a message.";
+     meeting.wait_my_turn poll outstanding while idle so you never miss a message; you can also run \
+     `rozum meetings inbox --as <your-handle>` anytime to see messages addressed to you.";
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct JoinParams {
@@ -332,19 +334,30 @@ impl DaemonProxy {
                 // Advance past everything read (own entries included), so we neither re-read
                 // nor re-push them on the next tick.
                 since = Some((last.date.clone(), last.n + 1));
+                // Does any new turn from SOMEONE ELSE address this agent's handle
+                // (`@agent` / `-> agent`)? Then the wakeup is *for you*: flag the channel event
+                // (`mentioned`/`your_turn`) and prefix the piggyback note so the agent prioritizes
+                // it over ambient room chatter. See `docs/specs/meeting-mention-inbox.md`.
+                let mentioned = turns.iter().any(|t| {
+                    self_pid.as_deref() != Some(t.participant_id.as_str())
+                        && super::mention::addresses(&t.content, &agent)
+                });
                 if let Some((content, from, seq)) = render_stored_delta(&turns, self_pid.as_deref())
                 {
                     // Tier-3 piggyback fallback: also drop the delta where the launch-local HTTP
                     // proxy can inject it (clients with neither channels nor a wait loop). Auto-off
                     // when Tier-1 channels are active. Spec: `docs/specs/rozum-native-channels.md`.
                     if super::piggyback::enabled() {
-                        super::piggyback::append(&super::piggyback::project_slug(), &agent, &content);
+                        let note =
+                            if mentioned { format!("‹for you› {content}") } else { content.clone() };
+                        super::piggyback::append(&super::piggyback::project_slug(), &agent, &note);
                     }
                     let meta = json!({
                         "room": room_name,
                         "from": from,
                         "seq": seq,
-                        "your_turn": "false",
+                        "your_turn": mentioned.to_string(),
+                        "mentioned": mentioned,
                     });
                     let notif = ServerNotification::CustomNotification(CustomNotification::new(
                         "notifications/claude/channel",

@@ -2624,9 +2624,12 @@ weakening the room as source-of-truth: detect mentions (only against KNOWN handl
   advances it. Validated live (plucky-fox/sunny-civet real mentions found; cursor round-trip; false-pos
   clean for real kebab handles). Closes the offline / CLI-only gap — no proxy needed to see "addressed
   to me, unread". (Shared `resolve_room_root` helper; `meetings read` refactored onto it.)
-- [ ] **wakeup-mentioned-flag** — `daemon_proxy` `ensure_wakeup_task`: set `meta.mentioned`/`your_turn`
-  on the `claude/channel` event + a `‹for you›` prefix on the Tier-3 piggyback when a delta addresses the
-  proxy's own handle. (Touches the delicate proxy path — ship the two above first.)
+- [x] **wakeup-mentioned-flag** — DONE. `daemon_proxy` `ensure_wakeup_task` now sets
+  `meta.mentioned`/`your_turn` on the `claude/channel` event + a `‹for you›` prefix on the Tier-3
+  piggyback when a delta from someone else addresses the proxy's own handle (`mention::addresses`).
+  `PROXY_INSTRUCTIONS` teach the agent that `mentioned="true"` = addresses you → prioritize, and point
+  at `meetings inbox`. So the PUSH side now distinguishes "for you" from ambient chatter; the PULL side
+  (inbox) is durable. 78 meeting tests green.
 
 #### channel-wakeup — push room events into idle agent sessions
 
