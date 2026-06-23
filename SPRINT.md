@@ -564,6 +564,18 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   with 35B), or use GLM for chat/code not agentic. Third hypothesis→powered-A/B→refutation of the session
   (after verify-gate and "prompt degrades gpt-oss code") — the discipline keeps catching necessary-but-
   insufficient fixes before they ship.
+  **DEEPER ROOT (verbose isolation dump, 3/3 deterministic, operator "dig further"):** the real blocker is
+  NOT delivery at all — GLM runs `cargo new reverse-cli` (×2), then responds with INTENT TEXT *"Let me
+  create the directory first and then initialize the project."* and emits **NO tool call** → the agent
+  loop ends → the reverse code is NEVER written → `src/main.rs` stays the cargo-default `Hello, world!` →
+  build fails. This is GLM's **agentic no-follow-through / decision gap** ("emits prose instead of naming a
+  tool", [[project-glm4-native-port]]), a MODEL property — GLM doesn't even REACH the delivery step, so no
+  shell-delivery fix can touch it. WORSE: the `cargo new→cargo init` rewrite was actively HARMFUL — the
+  2nd `cargo init` errors "directory already exists", confusing GLM into stopping even faster. artifact-
+  synth can't help either (it synthesizes a write from file CONTENT in the text; here the text is pure
+  intent, no content). Definitive: GLM create-from-scratch fails because GLM stops after step 1 announcing
+  step 2 without doing it. Lever = 35B cascade (a model that follows through), or constrained tool-emission
+  (the interface-change route the isolate skill warns backfires — gpt-oss constrained was 0/4).
 - [ ] **gptoss-codex-cascade** (stretch, now ALSO the GLM lever) — gpt-oss/GLM for speed, auto-fall-back
   to 35B on a failed cell (the `CascadeBackend` exists). Best-of-both: fast when the small model succeeds,
   35B-reliable when it doesn't. The matrix proved 35B is the agentic driver (14/15) and GLM is not (4/15,
