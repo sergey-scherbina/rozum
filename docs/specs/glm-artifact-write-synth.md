@@ -13,6 +13,42 @@ Precedent: codex's `synthesize_write_from_obj` (gateway.rs ~1982) already does t
 `{path, content}`. The GLM case is harder because the artifact is **unstructured free text** — the
 synth must recover the file PATH from how GLM labels each block.
 
+## REAL artifact captured (2026-06-23) — the format is now known
+Captured via `agentic.sh KEEP=1` (claude×GLM-4-32B×build, the real condition: `turns=1 tools=0`,
+35s). Raw at `/tmp/glm_artifact_agentlog.json`. GLM's actual output:
+```
+First, I'll create the Cargo.toml file:
+` ` `toml
+[package]
+name = "reverse-cli"
+version = "0.1.0"
+edition = "2021"
+` ` `
+Now, I'll create the src/main.rs file with the code ...:
+` ` `rust
+use std::env;
+fn main() { ... }
+` ` `
+Now I'll run the program with the command "cargo run -- hello":
+` ` `bash
+cargo run -- hello
+` ` `
+```
+**The real format (overrides the speculative matchers below):**
+1. **Filename lives in the PRECEDING PROSE sentence** — "I'll create the **Cargo.toml** file:", "the
+   **src/main.rs** file" — NOT a fence info-string, NOT a `path:` label, NOT a first-line comment.
+2. **Fence info-string = the language** (`toml`/`rust`/`bash`), not the path.
+3. **Command fences exist and must be excluded** — the ` ```bash ` block is `cargo run -- hello` (a
+   command to RUN, not a file). Its preceding prose has NO filename → the "recoverable filename in
+   preceding prose" guard naturally excludes it. (Optionally map such a block to a `Bash` tool call.)
+4. GLM's content is CORRECT (valid Cargo.toml + main.rs) — it just narrates + shows instead of calling
+   `Write`. So a synth that recovers (filename, fence-body) genuinely fixes the cell.
+
+**⇒ Extractor = for each fenced block, scan the immediately-preceding prose (last ~1-2 lines/sentence)
+for a filename token** (`Cargo.toml`, `src/main.rs`, or `[\w./-]+\.(rs|toml|md|txt|json|py|toml|cfg|lock|sh)`;
+backtick-quoted or bare). Found + path-safe ⇒ `Write{file_path, content=fence body}`. No filename ⇒ skip
+(handles the command fence). This is the matcher to build + unit-test against the captured fixture.
+
 ## Status: SPEC + plan only — DO NOT build the parser blind
 The phenomenon (GLM prints labeled file artifacts on create) is real (documented from prior live
 transcripts), but the exact label FORMAT is unverified — there is no real GLM create-from-scratch

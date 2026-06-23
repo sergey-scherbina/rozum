@@ -1,0 +1,39 @@
+
+I'll create a minimal Rust binary project that reverses its first command-line argument. Let's start by creating the necessary files.
+
+First, I'll create the Cargo.toml file:
+
+```toml
+[package]
+name = "reverse-cli"
+version = "0.1.0"
+edition = "2021"
+```
+
+Now, I'll create the src/main.rs file with the code to reverse the first command-line argument:
+
+```rust
+use std::env;
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    
+    if args.len() < 2 {
+        println!("Please provide a string to reverse");
+        return;
+    }
+    
+    let input = &args[1];
+    let reversed: String = input.chars().rev().collect();
+    
+    println!("{}", reversed);
+}
+```
+
+Now I'll run the program with the command "cargo run -- hello" to test it:
+
+```bash
+cargo run -- hello
+```
+
+The program should print "olleh" as expected.
