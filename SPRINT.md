@@ -410,17 +410,26 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
     (`mlx_{dense,moe}_backend_chat_tps`, `mlx_hybrid_batched_decode_throughput`,
     `mlx_qwen35_moe_decode_bench` incl. `ROZUM_CTXSWEEP` + build-vs-eval split, `mlx_compile_probe_plain`).
     RUN plan + per-model targets in the spec. Follow the 🛑 REBOOT-SAFETY PROTOCOL on the run.
-- [ ] **perf-batch-default-on** — biggest near-term win, LOW risk. Continuous concurrent-request
-  batching is built+wired (`worker_main` → one `run_batch`/`run_batch_hybrid` forward) but ships OFF:
-  `batch_cap()` = `ROZUM_BATCH` default **1 = serial** (`mlx_native_backend.rs:713`). Benches prove
-  **~1.98× at B=2**. Validate the A/B through the gateway under real concurrent agent load (byte-exact
-  + no single-stream latency regression), then flip the default or document why it stays opt-in. *(slot)*
-- [ ] **perf-compiled-decode** — the structural lever: decode is **~92% CPU graph-build** (~400
-  op-build FFI calls/token, `:5790`). async_eval+retain done; remaining fix = a **compiled fixed-shape
-  decode graph** (plain `compile`, the net-positive candidate; `compile_with_state` is net-negative).
-  Go/no-go via `mlx_compile_probe_plain` (`:5542`); if positive, wire fixed-shape KV + compiled step
-  into `Generate`/`run_job` (the old decode-gap-remainder Stages 1–3). Helps small/dense where batching
-  can't. Higher effort/risk. *(slot)*
+- [ ] **perf-batch-gather-shortcircuit** (prereq for default-on, CODE — no slot to write). With
+  `ROZUM_BATCH>1` a **lone** request waits the FULL `batch_window_ms` (10) before the partition finds
+  it's alone (`worker_main` gather :676-687) → a single-agent TTFT tax with zero benefit. Fix: after
+  `first`, one non-blocking `try_recv`; if Empty AND admission in-flight ≤1, go serial immediately (no
+  wait); still wait/batch when a 2nd job is admitted/queued. Re-run `*_two_concurrent` +
+  `continuous_admit_three` to prove batching still triggers and the lone path no longer waits *(those
+  tests need the slot)*.
+- [ ] **perf-batch-default-on** — biggest near-term win, but NOT a free flip (needs
+  `perf-batch-gather-shortcircuit` first). Continuous batching is built+wired but ships OFF:
+  `batch_cap()` = `ROZUM_BATCH` default **1 = serial** (`mlx_native_backend.rs:713`); benches prove
+  **~1.98× at B=2** and batched==serial correctness is already well-covered (byte-exact ragged + per-arch
+  concurrent + continuous-admit tests). After the short-circuit lands: A/B `ROZUM_BATCH=1` vs `2`/`4`
+  under real concurrent load — confirm single-stream TTFT unchanged + the ~1.98× win — then flip the
+  default (or keep opt-in if Metal-stream contention erodes it). *(slot)*
+- [ ] **perf-compiled-decode** — **ON-ICE (Stage-0 probe was NO-GO, `f6b20a3`).** Decode is ~92% CPU
+  graph-build, so a compiled fixed-shape graph was the obvious lever — but `mlx_compile_probe_plain` on
+  Qwen3-0.6B already showed compiled decode is SLOWER (T=1 0.69×, T=16 0.58×), matching the
+  `compile_with_state` net-negative; decision recorded: don't build Stages 1/2 (batching was the real
+  lever). Only the caveats remain (27B vs 0.6B, fixed-shape vs growing cache) — low-confidence. **Don't
+  re-run the 0.6B probe; it's answered.** Re-open only for a 27B + fixed-shape re-probe. *(slot, low pri)*
 - [ ] **perf-batch-arch-coverage** — `is_batchable_arch` (`:736`) excludes **Glm4 + GptOss** → they
   serialize even at `ROZUM_BATCH>1`, despite being hot agentic models. Add their batch paths + a
   ragged byte-exact test (mirror `mlx_batched_ragged_byte_exact` `:5665`). *(slot)*

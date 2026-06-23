@@ -1,5 +1,21 @@
 # Changelog
 
+## perf-baseline — correct two lever calls (verify-before-build on the spec itself)
+Completed: 2026-06-23
+
+Git-history check corrected two claims in the just-filed perf-baseline spec/tasks, so the next agent
+doesn't burn a slot-session on a wrong premise:
+- **perf-compiled-decode is NOT the open structural lever — it's on-ice.** Commit `f6b20a3`
+  (2026-06-22) already ran `mlx_compile_probe_plain` on Qwen3-0.6B and found compiled decode SLOWER
+  (T=1 0.69×, T=16 0.58×), matching the `compile_with_state` net-negative; decision was "don't build
+  Stages 1/2 — batching was the real lever". Only the 27B / fixed-shape-cache caveats remain
+  (low-confidence). Don't re-run the answered 0.6B probe.
+- **perf-batch-default-on is not a free flip.** With `ROZUM_BATCH>1` a *lone* request waits the full
+  `batch_window_ms` (10) in the gather loop before discovering it's alone → a single-agent TTFT tax
+  with no benefit. Added a prereq task **perf-batch-gather-shortcircuit** (skip the window when no 2nd
+  job is queued/admitted) that must land — and its scheduler tests pass — before flipping the default.
+  Batched==serial correctness itself is already well-covered.
+
 ## perf-baseline — code-grounded micro-perf lever audit (prep; run is slot-gated)
 Completed: 2026-06-23
 
