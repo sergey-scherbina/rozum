@@ -72,7 +72,6 @@ val meetingsCard = cardWithHeader(heading(2, "Meetings — room: rozum"))(
 ```scalascript
 val view = vstack(gap = 16)(
   heading(1, "rozum — control center"),
-  text("LIVE structured models/gateway/residency via the rozum control-API"),
   divider(),
   gwCard,
   divider(),
