@@ -1,6 +1,6 @@
 # Sprint
 
-- [ ] **adaptive-model-loading** — IN PROGRESS (operator priority 2026-06-23). When a model's footprint
+- [x] **adaptive-model-loading** — DONE (426cf7e, operator priority 2026-06-23). When a model's footprint
   at the requested n_ctx/cache exceeds available RAM, AUTO-SHRINK to the best params that still fit
   safely (largest n_ctx, then step the MLX cache 4->2->1 GiB) instead of refusing — so it loads with the
   best-possible parameters, only refusing if even the floor (n_ctx 4096 + 1 GiB cache) overflows (weights
@@ -12,27 +12,27 @@
   free-RAM lever refused now loads at a reduced n_ctx; unit tests on fit_model_params; admission stays the
   final safety gate (never overcommits).
 
-- [ ] **glm-synth-validate-default-on** — multi-rep A/B for the GLM artifact synth (now WORKS, master
+- [ ] **glm-synth-validate-default-on** — THE remaining 'works by default' win (slot-gated, watcher re-armed). multi-rep A/B for the GLM artifact synth (now WORKS, master
   201c3f2, opt-in ROZUM_GLM_ARTIFACT_SYNTH=1): create lift across N reps + edit/chat NO-regress (fix was
   2/2) + false-write fuzz (chat code blocks must NOT write files). If clean -> flip default-ON for GLM so
   it works out-of-the-box. Slot-gated. Spec glm-artifact-write-synth § RESOLVED.
 
-- [ ] **glm-synth-mixed-responses** — the synth fires ONLY when parse_tool_calls is empty (engine.rs:392),
+- [x] **glm-synth-mixed-responses** — DONE (851b15f): synth now ADDITIVE + deduped in both finalize paths. WAS: fired ONLY when parse_tool_calls is empty (engine.rs:392),
   so a MIXED GLM response (1 valid <tool_call> + N artifacts) drops the artifacts. Run the synth ADDITIVELY
   (synthesize from artifact regions even when some calls parsed), dedup vs the parsed calls. Offline.
   (Not yet observed live — GLM tends to be all-tool or all-artifact — but the gap is real.)
 
-- [ ] **glm-constrain-valid-json** (root-cause robustness) — instead of REPAIRING GLM's malformed args
+- [~] **glm-constrain-valid-json** (root-cause robustness — DEFERRED, the repair WORKS + is tested). Logit-constraint extension to force VALID JSON at the source is the cleaner long-term fix but a bigger investment (constrain.rs); the tolerant parse_tool_args_lenient already absorbs GLM's two observed malformations (]-for-} + unescaped quotes) and the synth passes live. Revisit if new malformations appear. — instead of REPAIRING GLM's malformed args
   JSON (parse_tool_args_lenient handles `]`-for-`}` + unescaped inner quotes), extend the logit-constraint
   to anchor on a bare tool-args object start (`{"file_path"` / `{"command"`) and force VALID JSON to the
   matching offered tool's schema. Then GLM emits valid args at the source -> no repair, robust to ANY
   malformation. Machinery: constrain.rs / ToolConstraint / find_glm_tool_call. Higher effort.
 
-- [ ] **glm-synth-generalize-tool-names** — glm_kv_extract hardcodes file_path/path/content/command (claude
+- [~] **glm-synth-generalize-tool-names** — DEFERRED (low value + risk). The WELL-FORMED path (match_tool_by_args) is ALREADY schema-driven for any agent; only the malformed-JSON FALLBACK is claude-tuned, and it's CORRECT for the observed Write-content malformation. A schema-driven version would mis-read non-last text fields (e.g. Bash {command,description} — command is first, not read-to-last-quote). Do only when a real non-claude+GLM+malformed case appears. WAS: glm_kv_extract hardcodes file_path/path/content/command (claude
   tool names). For codex/opencode (different arg names) it won't match. Derive the arg key names from the
   offered tool SCHEMAS instead of hardcoding. Offline, incremental.
 
-- [ ] **glm-repeat-loop** (LOW, partly model-inherent) — observed GLM repeat a command 3x (loop-breaker
+- [x] **glm-repeat-loop** — RESOLVED by the content fix (201c3f2): the 3x repeat was GLM retrying a GARBAGE Cargo.toml; with correct content the pass=1 run did 6 turns / 1 Bash (no loop). Residual = model state-tracking, loop-breaker handles it. WAS: observed GLM repeat a command 3x (loop-breaker
   caught + stopped). Render already puts tool RESULT in the `observation` role (correct for GLM). Residual
   = weak model state-tracking (doesn't register 'done'). Investigate whether the synthesized-toolcall
   round-trip (rendered as `name\njson`, not GLM's original artifact) confuses it; otherwise model-side.
