@@ -380,9 +380,142 @@ fn repair_tool_object(b: &[u8], start: usize) -> Option<(String, usize)> {
     None
 }
 
+/// Synthesize `Write` tool calls from a GLM **create-from-scratch artifact** — the failure mode
+/// where GLM-4-0414, under a heavy agent prompt, *narrates and shows* labeled file contents in fenced
+/// blocks instead of *naming* the Write tool (so `parse_tool_calls` finds nothing, the agent gets a
+/// text answer, and no file is written: the captured `turns=1 tools=0` cell). Returns one
+/// `(write_tool, args_json)` per recoverable file, matching the REAL captured format
+/// (`docs/specs/glm-artifact-write-synth.md` § REAL artifact captured): the filename lives in the
+/// PROSE sentence that precedes each fence ("I'll create the `Cargo.toml` file:" → ```toml block),
+/// the fence info-string is the language, and command fences (` ```bash ` `cargo run …`) carry no
+/// filename so they are skipped.
+///
+/// **Returns EMPTY unless a guard holds**, so an ordinary chat answer with an incidental code block is
+/// never turned into a file write: a fence is converted only when its preceding prose yields a
+/// **safe relative** filename. The CALLER must additionally gate this on (GLM family) AND
+/// (`parse_tool_calls` returned empty) AND (`write_tool` is actually offered) — see the spec's 5
+/// guards. `write_tool` is the offered file-writing tool's exact name (e.g. `Write`).
+pub fn synth_glm_writes(text: &str, write_tool: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut pos = 0usize; // scan cursor
+    let mut prose_start = 0usize; // start of the prose preceding the current fence
+    while let Some(rel) = text[pos..].find("```") {
+        let open = pos + rel;
+        let preceding = &text[prose_start..open];
+        let after = &text[open + 3..];
+        let Some(nl) = after.find('\n') else { break }; // unterminated fence header → stop
+        let body_start = open + 3 + nl + 1;
+        let (body_end, next) = match text[body_start..].find("```") {
+            Some(c) => (body_start + c, body_start + c + 3),
+            None => (text.len(), text.len()), // unterminated body: take the rest, stop after
+        };
+        if let Some(path) = last_safe_filename(preceding) {
+            let mut m = serde_json::Map::new();
+            m.insert("file_path".into(), Value::String(path));
+            // fence body is the file content; normalize a single trailing newline
+            let content = format!("{}\n", text[body_start..body_end].trim_end_matches('\n'));
+            m.insert("content".into(), Value::String(content));
+            out.push((write_tool.to_string(), Value::Object(m).to_string()));
+        }
+        prose_start = next;
+        pos = next;
+        if pos >= text.len() {
+            break;
+        }
+    }
+    out
+}
+
+/// The LAST safe relative filename mentioned in `prose` (a fence's preceding text), or `None`. A token
+/// is a filename if it is a known extensionless name (`Cargo.toml`, `Makefile`, …) or ends in a known
+/// source/config extension; it must be a safe relative path ([`is_safe_relpath`]). "LAST" because GLM
+/// names the file in the sentence right before its fence ("…create the `src/main.rs` file:"). Prose
+/// with no such token (a command fence's "run `cargo run -- hello`") yields `None` → that fence is
+/// skipped, which is the command-vs-file guard.
+fn last_safe_filename(prose: &str) -> Option<String> {
+    const KNOWN: &[&str] =
+        &["Cargo.toml", "Cargo.lock", "Makefile", "Dockerfile", ".gitignore", "build.rs"];
+    const EXTS: &[&str] = &[
+        "rs", "toml", "md", "txt", "json", "yaml", "yml", "py", "cfg", "lock", "sh", "js", "ts",
+        "tsx", "html", "css", "c", "h", "cpp", "hpp", "go", "java", "rb", "kt", "scala",
+    ];
+    let mut best = None;
+    for raw in prose.split(|c: char| c.is_whitespace() || "`\"'(){}<>,;".contains(c)) {
+        // strip surrounding quote/paren/sentence punctuation, but NOT a leading '.' (".gitignore")
+        let tok = raw.trim_matches(|c: char| "`\"'():;,".contains(c));
+        let tok = tok.strip_suffix('.').unwrap_or(tok); // trailing sentence period
+        if tok.is_empty() {
+            continue;
+        }
+        let is_file = KNOWN.contains(&tok)
+            || tok.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && EXTS.contains(&ext));
+        if is_file && is_safe_relpath(tok) {
+            best = Some(tok.to_string()); // keep scanning; the LAST match wins
+        }
+    }
+    best
+}
+
+/// A path is safe to synthesize a write for only if it is **relative** and stays in-tree: no absolute
+/// (`/…`) or home (`~…`) root, no `..` segment, and a sane length. Refusing anything else keeps a
+/// synthesized `Write` from escaping the workdir.
+fn is_safe_relpath(p: &str) -> bool {
+    !p.is_empty()
+        && p.len() < 200
+        && !p.starts_with('/')
+        && !p.starts_with('~')
+        && !p.split('/').any(|seg| seg == "..")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The REAL captured GLM-4-32B create-from-scratch artifact (agentic.sh KEEP=1, turns=1 tools=0).
+    const GLM_ARTIFACT: &str = include_str!("../tests/fixtures/glm_create_artifact.txt");
+
+    #[test]
+    fn synth_glm_writes_extracts_real_create_artifact() {
+        let calls = synth_glm_writes(GLM_ARTIFACT, "Write");
+        // Two FILE fences (Cargo.toml + src/main.rs) become Write calls; the ```bash `cargo run` fence
+        // has no filename in its preceding prose → skipped (the command-vs-file guard).
+        assert_eq!(calls.len(), 2, "got: {calls:?}");
+        for (name, _) in &calls {
+            assert_eq!(name, "Write");
+        }
+        let args: Vec<Value> = calls.iter().map(|(_, a)| serde_json::from_str(a).unwrap()).collect();
+        let paths: Vec<&str> = args.iter().map(|a| a["file_path"].as_str().unwrap()).collect();
+        assert_eq!(paths, vec!["Cargo.toml", "src/main.rs"]);
+        // Contents are the fence bodies, not the prose.
+        assert!(args[0]["content"].as_str().unwrap().contains("[package]"));
+        assert!(args[1]["content"].as_str().unwrap().contains("fn main"));
+        // The command never leaks in as a file.
+        assert!(!paths.iter().any(|p| p.contains("cargo")));
+    }
+
+    #[test]
+    fn synth_glm_writes_skips_chat_code_blocks() {
+        // A chat answer that merely shows example code — no "create the X file" filename in the prose
+        // → no synthesis (the false-positive guard that keeps us from writing example snippets).
+        let chat = "Here's how a Rust loop works:\n```rust\nfor i in 0..3 { println!(\"{i}\"); }\n```\nThat iterates three times.";
+        assert!(synth_glm_writes(chat, "Write").is_empty());
+        // Pure prose, no fence → empty.
+        assert!(synth_glm_writes("I would create a Cargo.toml with the usual fields.", "Write").is_empty());
+    }
+
+    #[test]
+    fn last_safe_filename_and_path_safety() {
+        assert_eq!(last_safe_filename("First, I'll create the Cargo.toml file:").as_deref(), Some("Cargo.toml"));
+        assert_eq!(last_safe_filename("the src/main.rs file with the code").as_deref(), Some("src/main.rs"));
+        // Command prose → no filename.
+        assert_eq!(last_safe_filename("run the program with `cargo run -- hello`"), None);
+        // Path safety: reject escapes/absolute even if extension matches.
+        assert!(is_safe_relpath("src/main.rs"));
+        assert!(!is_safe_relpath("/etc/passwd.txt"));
+        assert!(!is_safe_relpath("../escape.rs"));
+        assert!(!is_safe_relpath("~/secret.toml"));
+        assert_eq!(last_safe_filename("write to /abs/path/main.rs please"), None, "absolute path refused");
+    }
 
     #[test]
     fn glm4_tool_call_form() {
