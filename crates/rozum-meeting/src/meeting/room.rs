@@ -211,10 +211,11 @@ impl DaemonRoom {
             .unwrap_or_else(|| id.0.clone())
     }
 
-    /// The author label written into the transcript: `base_name · handle` (e.g.
-    /// `claude · keen-sable`) so readers see WHO posted (the agent/human name), not just
-    /// the opaque handle. The base name comes from the joining client (`--as`, the agent's
-    /// name, or `$USER`); falls back to the handle when no base name is recorded.
+    /// The author label written into the transcript: the participant's **identity name** — the
+    /// agent's own name or the human's account (`sunny-civet`, `Sergiy`), so readers see WHO posted
+    /// and a human never looks like an agent. The base name comes from the joining client (the
+    /// agent's `hello`/`--as`, or `$USER`); falls back to the minted handle when no base name is
+    /// recorded. (The handle stays internal for uniqueness — see `identity::display_name`.)
     pub fn display_for(&self, id: &ParticipantId) -> String {
         self.roster
             .participants

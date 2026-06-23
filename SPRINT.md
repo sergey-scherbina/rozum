@@ -2653,11 +2653,15 @@ Realizes the Agent side of the `Principal` model already designed in `agent-meet
 - [x] **meetings hello / whoami / who** — DONE. `hello [name]` establishes (once) + emits the terminal-
   title OSC; `whoami` says agent-vs-human; `who` = roster `handle → live/age/cwd-worktree` (+ the human),
   so a meeting handle maps to a findable session.
-- [ ] **human-display cleanup** — drop the `"$USER · <random-animal>"` mashup so a human never looks
-  like an agent (display = the account name). Touches the daemon participant→display formatting — careful
-  follow-up.
-- [ ] **auto-hello at startup** — wire `AGENTS.md` / proxy instructions so each agent runs
-  `rozum meetings hello <name>` at session start (so this is on by default, not opt-in per agent).
+- [x] **human-display cleanup** — DONE. `identity::display_name` (used by `room.rs::display_for` to
+  write the transcript author label) now returns the **identity name** — `Sergiy`/`sunny-civet`, not
+  `Sergiy · plucky-fox` — falling back to the minted handle only for an un-named client. The handle
+  stays internal (uniqueness). Takes effect on the next daemon restart (the roster stores base+handle
+  separately, recomputed live → existing participants get clean labels too). 80 meeting tests green.
+- [x] **auto-hello at startup** — DONE (instruction). `AGENTS.md` now tells every agent: first thing in
+  a session, `rozum meetings hello <your-handle>` — so it posts as itself, not the operator. (The
+  operator does nothing; agents follow AGENTS.md at startup. A daemon-side auto-mint-on-join is a
+  possible further nicety but the instruction is the reliable, universal mechanism for CLI agents.)
 
 #### channel-wakeup — push room events into idle agent sessions
 

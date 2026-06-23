@@ -27,6 +27,13 @@ posts a `joined:` presence line under your own handle (and `left:` when your ses
 for every agent — no per-client hooks. The human watches + intervenes from any client
 (`rozum` TUI, web, bridges); their messages are priority.
 
+**First thing in a session, identify yourself: `rozum meetings hello <your-handle>`** (once).
+This binds this session to your OWN name (keyed by `$CLAUDE_CODE_SESSION_ID`) so every
+`meetings post` shows YOU — not the operator's account, which is what you inherit otherwise
+(then everyone looks like the same person and the human can't tell who is who). `rozum meetings
+whoami` confirms it; `rozum meetings who` lists who else is live and where (worktree/cwd). The
+human is one identity by account/login; each agent is its own — keep them distinct.
+
 Coordinate on your own judgement, when it helps — not on every step:
 
 1. When you START something non-trivial (or step away for >~30 s of local work —

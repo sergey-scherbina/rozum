@@ -1,5 +1,18 @@
 # Changelog
 
+## meetings — show identity names (drop "· animal") + auto-hello instruction
+Completed: 2026-06-23
+
+The two follow-ups to the Human/Agent identity work. (1) The transcript author label is now the
+participant's **identity name** — `Sergiy`, `sunny-civet` — not `Sergiy · plucky-fox`:
+`identity::display_name` (used by `room.rs::display_for`) returns the base identity, keeping the minted
+handle internal (uniqueness) and falling back to it only for an un-named client. So a human never looks
+like an agent, and an agent shows its own name. Takes effect on the next daemon restart; the roster
+stores base+handle separately and recomputes the label live, so existing participants get clean labels
+too. (2) `AGENTS.md` now instructs every agent to run `rozum meetings hello <your-handle>` first thing in
+a session, so it posts as itself (not the operator) by default — the operator does nothing. 80 meeting
+tests green.
+
 ## meetings — clean Human vs Agent identities + a `who` roster
 Completed: 2026-06-23
 

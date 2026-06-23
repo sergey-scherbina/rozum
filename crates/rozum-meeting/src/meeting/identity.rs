@@ -103,9 +103,17 @@ impl Roster {
     }
 }
 
-/// How a handle is shown next to its base name: `claude · eager-otter`.
+/// How a participant is shown: by its **identity name** (the human's account / the agent's own
+/// name). The minted `handle` stays internal (uniqueness, plus a distinct label for an un-named
+/// client) but is no longer mashed into the display — so a human never looks like an agent
+/// (`Sergiy`, not `Sergiy · plucky-fox`) and a named agent shows its own name. Falls back to the
+/// handle only when there is no base name. See `docs/specs/meeting-identity-roster.md`.
 pub fn display_name(base_name: &str, handle: &str) -> String {
-    format!("{base_name} · {handle}")
+    if base_name.trim().is_empty() {
+        handle.to_string()
+    } else {
+        base_name.to_string()
+    }
 }
 
 const ADJECTIVES: &[&str] = &[
@@ -182,11 +190,10 @@ mod tests {
         assert!(!id.0.contains('#'), "no positional #N suffix");
         assert!(!handle.contains('#'));
         assert_eq!(id.0.len(), 32, "uuid simple form");
-        // base_name kept separately, decorated for display.
-        assert_eq!(
-            display_name("claude", &handle),
-            format!("claude · {handle}")
-        );
+        // Display is the identity name; the minted handle stays internal (not mashed in).
+        assert_eq!(display_name("claude", &handle), "claude");
+        // An un-named client still gets a distinct label from its handle.
+        assert_eq!(display_name("", &handle), handle);
     }
 
     #[test]
