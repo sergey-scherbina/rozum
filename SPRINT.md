@@ -25,6 +25,19 @@
   validation = a COMPLEX task (planning matters) + the REAL executor (codex/opencode via the gateway with
   delivery fixes, i.e. the matrix harness with GLM's plan injected into the task). Next: build the
   `Pipeline` mechanism + `rozum solve`, validate on the matrix harness with a from-scratch-hard task.
+  **BUILD STARTED (plucky-finch 2026-06-23): `scripts/bench/solve.sh` — planner→executor orchestrator.**
+  Stage 1 (planner gateway + one-shot chat → solution.md) WORKS — GLM-32B emits a clean, correct solution
+  (Cargo.toml + main.rs). Lazy-swap WORKS (planner unloaded, executor loaded, one model at a time, 0
+  reboot). Stage 2 (executor = REAL codex via `rozum launch`) HANGS — codex connects ("routed at the rozum
+  gateway") but the gateway log shows NO incoming request and no agent actions (16 min, src/ never
+  created). Tried both `rozum launch --model X codex` and the agentic.sh pattern (pre-start gateway +
+  `rozum launch` reuse) — same hang. Suspect: the large solution-embedded prompt (markdown fences/code/
+  special chars) or a codex-exec wiring specific stops codex before it sends a request. REMAINING: debug
+  the codex-exec executor wiring (try opencode as executor, or strip markdown / pass the solution via a
+  file the executor reads, or compare to a plain agentic.sh codex run to isolate the prompt-size factor),
+  then run the fair A/B (planner→executor vs gpt-oss-alone) on a from-scratch-hard task. Also: `solve.sh`
+  cleanup now stops the launch-spawned shared gateway (it persisted). The pipeline + planner are proven;
+  the executor wiring is the one remaining bug.
 - [ ] **adaptive-cascade-residency** (operator idea 2026-06-23) — make the cascade EAGER if its local
   tiers co-fit, LAZY (one resident at a time, swap on escalation) if not. Today `build_cascade` is
   eager-ONLY (`CascadeBackend` holds a live `Arc<dyn ChatBackend>` per tier), so on a 36 GB host a cascade
