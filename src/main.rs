@@ -453,6 +453,26 @@ enum MeetingsAction {
         count: usize,
     },
 
+    /// Establish THIS agent session's identity (once, at startup) so it posts as ITSELF.
+    ///
+    /// Keyed by `$CLAUDE_CODE_SESSION_ID`; run from your start hook / first action. Pass your own
+    /// name (the one the operator sees); omit it to get a stable minted one. Idempotent — the name is
+    /// assigned once. After this, `meetings post` shows your name, not the operator's.
+    Hello {
+        /// Your agent name (e.g. `sunny-civet`). Omit to mint a stable one from the session id.
+        name: Option<String>,
+    },
+
+    /// Print who THIS session acts as — agent principal (by session id) or the human (by account).
+    Whoami {},
+
+    /// Roster: list the live agent principals with locators, so a handle maps to a real session.
+    Who {
+        /// Also show session_id / principal_id / started.
+        #[arg(long)]
+        long: bool,
+    },
+
     /// Join a room as a LIVE AI participant backed by a local model (via the gateway).
     ///
     /// The model reads the room and replies like any other participant — no moderator,
@@ -805,6 +825,9 @@ async fn main() {
             MeetingsAction::Inbox { as_handle, room, peek, all, count } => {
                 run_meetings_inbox(as_handle, room, peek, all, count).await
             }
+            MeetingsAction::Hello { name } => run_meetings_hello(name),
+            MeetingsAction::Whoami {} => run_meetings_whoami(),
+            MeetingsAction::Who { long } => run_meetings_who(long).await,
             MeetingsAction::Participant {
                 model,
                 room,
@@ -2022,15 +2045,25 @@ async fn run_meetings_post(text: String, room: Option<String>, as_display: Optio
     // Identity: an explicit `--as`/$ROZUM_MEETING_AS label (a hook/agent) posts with that
     // display under an ephemeral token; otherwise this is the human → use the stable local
     // identity (one participant across launches/clients).
+    // Principal resolution (docs/specs/meeting-identity-roster.md): an explicit override, else THIS
+    // session's Agent principal (so an agent posts as ITSELF, established once via `meetings hello`),
+    // else the human (the stable account/local identity). No mixing — an agent session is never the
+    // operator, a bare shell is never an agent.
     let explicit = as_display
         .or_else(|| std::env::var("ROZUM_MEETING_AS").ok())
         .filter(|s| !s.trim().is_empty());
     let (display, token) = match explicit {
         Some(d) => (d, None),
-        None => {
-            let id = rozum::meeting::local_identity::load_or_create();
-            (id.display, Some(id.token))
-        }
+        None => match rozum::meeting::agent_identity::current() {
+            Some(agent) => {
+                rozum::meeting::agent_identity::touch(); // keep the roster's liveness fresh
+                (agent.display, Some(agent.principal_id))
+            }
+            None => {
+                let id = rozum::meeting::local_identity::load_or_create();
+                (id.display, Some(id.token))
+            }
+        },
     };
     // Room precedence: explicit --room, then a configured shared room (ROZUM_MEETING_ROOM, so
     // hook posts land where the agents are), then the cwd project's room.
@@ -2171,6 +2204,102 @@ async fn run_meetings_inbox(handle: String, room: Option<String>, peek: bool, al
                 let _ = std::fs::write(&cursor_path, s);
             }
         }
+    }
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
+fn fmt_age(secs: u64) -> String {
+    if secs < 90 {
+        format!("{secs}s")
+    } else if secs < 5400 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h", secs / 3600)
+    }
+}
+
+/// The trailing path component (worktree / project leaf) of a cwd, for a compact locator.
+fn worktree_leaf(cwd: &str) -> &str {
+    cwd.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(cwd)
+}
+
+/// `rozum meetings hello [name]` — establish this session's Agent principal (once) + label the tab.
+fn run_meetings_hello(name: Option<String>) {
+    use rozum::meeting::agent_identity;
+    let project = rozum::meeting::daemon_proxy::detect_project();
+    match agent_identity::establish(name, project) {
+        Some(p) => {
+            // Terminal title (an inert no-op on the app/web): label the tab with the handle.
+            let proj = p.project.as_deref().map(worktree_leaf).unwrap_or("");
+            print!("\x1b]0;{} · {}\x07", p.display, proj);
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            println!("hello: you are '{}' (agent · session {})", p.display, short_id(&p.session_id));
+            println!("  posts from this session now show '{}' — not the operator.", p.display);
+        }
+        None => {
+            eprintln!(
+                "meetings hello: no $CLAUDE_CODE_SESSION_ID — this isn't an agent session, nothing to establish."
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `rozum meetings whoami` — who does this session act as?
+fn run_meetings_whoami() {
+    use rozum::meeting::agent_identity;
+    match agent_identity::current() {
+        Some(p) => println!("{} (agent · session {})", p.display, short_id(&p.session_id)),
+        None if agent_identity::session_id().is_some() => {
+            println!("(agent session, no identity yet — run `rozum meetings hello <your-name>`)");
+        }
+        None => {
+            let id = rozum::meeting::local_identity::load_or_create();
+            println!("{} (human · account)", id.display);
+        }
+    }
+}
+
+/// `rozum meetings who` — roster mapping each handle to a findable session.
+async fn run_meetings_who(long: bool) {
+    use rozum::meeting::agent_identity;
+    const TTL: u64 = 15 * 60;
+    let now = now_epoch_secs();
+    let agents = agent_identity::list();
+
+    if long {
+        println!("{:<16} {:<5} {:<5} {:<10} CWD", "HANDLE", "LIVE", "AGE", "SESSION");
+    } else {
+        println!("{:<16} {:<5} {:<5} CWD / WORKTREE", "HANDLE", "LIVE", "AGE");
+    }
+    for p in &agents {
+        let age = now.saturating_sub(p.ts);
+        let live = if age <= TTL { "●" } else { "○" };
+        if long {
+            println!(
+                "{:<16} {:<5} {:<5} {:<10} {}",
+                p.display, live, fmt_age(age), short_id(&p.session_id), p.cwd
+            );
+        } else {
+            println!("{:<16} {:<5} {:<5} {}", p.display, live, fmt_age(age), worktree_leaf(&p.cwd));
+        }
+    }
+    // The human, for contrast — always one stable account identity, never an agent.
+    let id = rozum::meeting::local_identity::load_or_create();
+    println!("{:<16} {:<5} {:<5} {}", id.display, "—", "—", "(operator · human account)");
+    if agents.is_empty() {
+        println!("\n(no agents have introduced themselves yet — each runs `rozum meetings hello <name>` at startup)");
     }
 }
 

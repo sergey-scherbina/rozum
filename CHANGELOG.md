@@ -1,5 +1,25 @@
 # Changelog
 
+## meetings — clean Human vs Agent identities + a `who` roster
+Completed: 2026-06-23
+
+Puts the identity model in order. Before: agents called `meetings post` without identifying, so they
+inherited the ONE machine-local identity (`$USER · <animal>`) — the operator — and every agent showed up
+as the same `Sergiy · plucky-fox`, with the real handle only in free-text. Now there are two distinct
+principals that never mix: the **human** is the account/login identity, and each **agent** has its OWN
+name, assigned ONCE at session start.
+
+New `meeting::agent_identity`: a per-session Agent principal keyed by `$CLAUDE_CODE_SESSION_ID` (the
+stable env key — there's no tty, and shell env doesn't persist between calls, so it lives on disk).
+`run_meetings_post` resolves identity as `--as`/`$ROZUM_MEETING_AS` → the session's Agent principal →
+the human — so an agent always posts as itself and a bare shell always as the operator. New commands:
+`rozum meetings hello [<name>]` establishes the identity once (idempotent; mints a stable name if none
+given; emits a terminal-title escape), `meetings whoami` reports agent-vs-human, and `meetings who` is a
+roster mapping each live handle to a findable session (worktree/cwd, age, liveness) — so a meeting
+mention maps to "which window is that". Realizes the Agent side of the `Principal` model from
+`docs/specs/agent-meeting-coordination.md`; spec `docs/specs/meeting-identity-roster.md`. 80 meeting
+tests green. Follow-ups: drop the human's `· <animal>` mashup; auto-`hello` at session start.
+
 ## meetings — wakeup push flags "for you" mentions (Tier-1/3)
 Completed: 2026-06-23
 

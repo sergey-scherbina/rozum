@@ -2631,6 +2631,26 @@ weakening the room as source-of-truth: detect mentions (only against KNOWN handl
   at `meetings inbox`. So the PUSH side now distinguishes "for you" from ambient chatter; the PULL side
   (inbox) is durable. 78 meeting tests green.
 
+#### meeting-identity — clean Human vs Agent principals (operator: "navesti poryadok") 2026-06-23
+Spec `docs/specs/meeting-identity-roster.md`. The identity was a mess: agents posted WITHOUT `--as` →
+inherited the ONE machine-local identity (`$USER · <animal>`) = the operator → everyone showed as
+"Sergiy · plucky-fox" (so `plucky-fox` is the HUMAN), real handle only in free-text. Operator directive:
+each agent has its OWN name (assigned once at startup), the human is by account/login, NEVER mixed.
+Realizes the Agent side of the `Principal` model already designed in `agent-meeting-coordination.md`.
+- [x] **agent-principal + resolution** — DONE. New `meeting::agent_identity`: per-session Agent
+  principal keyed by `$CLAUDE_CODE_SESSION_ID` (env-stable; no tty; shell env doesn't persist → disk).
+  `run_meetings_post` resolves `--as`/`$ROZUM_MEETING_AS` → Agent principal (this session) → human —
+  no mixing. Name assigned ONCE (`hello <name>`; idempotent re-hello keeps it; mint fallback). Live
+  validated: whoami before/after, idempotency keeps the name, principal persisted. 80 meeting tests green.
+- [x] **meetings hello / whoami / who** — DONE. `hello [name]` establishes (once) + emits the terminal-
+  title OSC; `whoami` says agent-vs-human; `who` = roster `handle → live/age/cwd-worktree` (+ the human),
+  so a meeting handle maps to a findable session.
+- [ ] **human-display cleanup** — drop the `"$USER · <random-animal>"` mashup so a human never looks
+  like an agent (display = the account name). Touches the daemon participant→display formatting — careful
+  follow-up.
+- [ ] **auto-hello at startup** — wire `AGENTS.md` / proxy instructions so each agent runs
+  `rozum meetings hello <name>` at session start (so this is on by default, not opt-in per agent).
+
 #### channel-wakeup — push room events into idle agent sessions
 
 Turn `rozum mcp-proxy` into a one-way Claude Code **channel** so a joined-but-idle
