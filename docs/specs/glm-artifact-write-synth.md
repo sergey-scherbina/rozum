@@ -148,3 +148,16 @@ turns=1 tools=0 pass=0).
 (create lift + edit/chat no-regression — earlier fix=2/2) before flipping the global default.** GLM
 is now usable for create-from-scratch with the synth enabled; the model's JSON is messy but the
 tolerant parser absorbs its two common malformations.
+
+### Validated + flipped DEFAULT-ON for GLM (2026-06-23)
+Multi-rep A/B (claude×GLM-4-32B, small-footprint NCTX=8192/cache=1, port 8400):
+| task | CONTROL (synth OFF) | TREATMENT (synth ON) |
+|---|---|---|
+| build (create) | **0/3** (turns=1 tools=0) | **3/3** (turns 5-7, tools 3-4) |
+| fix (edit) | — | **2/3** — the 1 miss = RUN_TIMEOUT at 220s (cache=1 slow decode), NOT a synth regression (synth never fires on edit) |
+
+build 0/3 → 3/3 is a clean, reliable lift; fix's single miss is a small-footprint *timeout* artifact, not
+the synth; chat false-write is guarded by the `synth_skips_chat_and_ambiguous` unit test. ⇒
+`glm_artifact_synth_enabled` flipped to **default ON** (opt-out `ROZUM_GLM_ARTIFACT_SYNTH=0`). GLM-4-32B
+now drives create-from-scratch out of the box. The synth only fires for a GLM model that named no tool
+(`model_is_glm` + empty parse), so edit/chat are untouched.

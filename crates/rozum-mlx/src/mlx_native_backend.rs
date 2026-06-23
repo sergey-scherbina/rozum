@@ -2126,7 +2126,7 @@ mod inner {
                 let mut calls = crate::serving::parse_tool_calls(&self.full_text);
                 // GLM create-from-scratch artifact fallback for the BATCHED path (≥2 concurrent GLM
                 // requests route here; a single GLM request — dense arch — finalizes in the engine
-                // seam, see engine::consume_tokens). Opt-in (default OFF). ADDITIVE + deduped, same as
+                // seam, see engine::consume_tokens). Default ON for GLM. ADDITIVE + deduped, same as
                 // the engine seam: keeps both a named call and an artifact in a mixed response.
                 if super::glm_artifact_synth_enabled() && super::model_is_glm(&self.job.model_id) {
                     for c in crate::serving::synth_glm_tool_calls(&self.full_text, &self.job.tools) {
@@ -3808,15 +3808,18 @@ fn glm_strip_framing_enabled() -> bool {
     )
 }
 
-/// Opt-in (default OFF): synthesize `Write` tool calls from a GLM **create-from-scratch artifact** —
-/// the failure mode where GLM-4-0414, under a heavy agent prompt, narrates + shows labeled file
-/// contents in fences instead of naming the Write tool (so the file never lands: the captured
-/// `turns=1 tools=0` cell). See `docs/specs/glm-artifact-write-synth.md`. Default OFF until the live
-/// A/B confirms a create lift with no edit/chat regression; enable with `ROZUM_GLM_ARTIFACT_SYNTH=1`.
+/// **Default ON for GLM** (the synth only fires for a GLM model that named no tool — `model_is_glm` +
+/// empty parse): synthesize `Write`/`Bash` calls from a GLM **create-from-scratch artifact** — the
+/// failure mode where GLM-4-0414, under a heavy agent prompt, narrates + shows labeled file contents
+/// (or bare tool-args JSON) instead of naming the tool (so the file never lands: the captured
+/// `turns=1 tools=0` cell). See `docs/specs/glm-artifact-write-synth.md`. **Flipped default-ON
+/// 2026-06-23 after the live A/B: build (create) 0/3 → 3/3, fix (edit) no regression (synth doesn't
+/// fire on edit), chat false-write guarded (`synth_skips_chat_and_ambiguous`).** Opt-OUT with
+/// `ROZUM_GLM_ARTIFACT_SYNTH=0`.
 fn glm_artifact_synth_enabled() -> bool {
-    matches!(
+    !matches!(
         std::env::var("ROZUM_GLM_ARTIFACT_SYNTH").ok().as_deref(),
-        Some("1" | "true" | "on")
+        Some("0" | "false" | "off")
     )
 }
 
