@@ -408,6 +408,19 @@ enum MeetingsAction {
         #[arg(long = "as")]
         as_display: Option<String>,
     },
+    /// Read recent messages from a room (the cwd project's room by default).
+    ///
+    /// The read counterpart to `post` — a direct-read of the room transcript (no daemon
+    /// needed for the cwd project's room), so an agent or human can scan recent coordination
+    /// from a script/shell without the TUI or the MCP tools.
+    Read {
+        /// Room name (from `rozum meetings status`); default = the cwd project's room.
+        #[arg(long)]
+        room: Option<String>,
+        /// How many most-recent messages to show.
+        #[arg(long, short = 'n', default_value_t = 20)]
+        count: usize,
+    },
 
     /// Join a room as a LIVE AI participant backed by a local model (via the gateway).
     ///
@@ -751,6 +764,7 @@ async fn main() {
             MeetingsAction::Post { text, room, as_display } => {
                 run_meetings_post(text, room, as_display).await
             }
+            MeetingsAction::Read { room, count } => run_meetings_read(room, count).await,
             MeetingsAction::Participant {
                 model,
                 room,
@@ -1951,6 +1965,61 @@ async fn run_meetings_post(text: String, room: Option<String>, as_display: Optio
             eprintln!("meetings post: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// `rozum meetings read` — print a room's most-recent messages (a direct transcript read).
+async fn run_meetings_read(room: Option<String>, count: usize) {
+    use rozum::meeting::daemon_proxy::detect_project;
+    use rozum::meeting::room_path::rooms_dir;
+    use rozum::meeting::store;
+
+    // Resolve the room's on-disk transcript root. The cwd project's room is read directly
+    // (no daemon needed). A named room is resolved via the daemon's registry (a project room
+    // → `<project>/.rozum/room`), falling back to an ad-hoc room dir under `rooms_dir()`.
+    let root = match room {
+        None => match detect_project() {
+            Some(p) => std::path::PathBuf::from(p).join(".rozum").join("room"),
+            None => {
+                eprintln!("meetings read: no project detected — run inside a repo, or pass --room");
+                std::process::exit(1);
+            }
+        },
+        Some(name) => {
+            let project = {
+                use rozum::meeting::daemon::{daemon_alive, daemon_rooms};
+                use rozum::meeting::room_path::meeting_sock;
+                let sock = meeting_sock();
+                if daemon_alive(&sock).await {
+                    daemon_rooms(&sock).await.ok().and_then(|rooms| {
+                        rooms.into_iter().find(|(n, _)| n == &name).and_then(|(_, p)| p)
+                    })
+                } else {
+                    None
+                }
+            };
+            match project {
+                Some(p) => std::path::PathBuf::from(p).join(".rozum").join("room"),
+                None => rooms_dir().join(&name),
+            }
+        }
+    };
+
+    if !root.exists() {
+        eprintln!("meetings read: no messages yet ({})", root.display());
+        return;
+    }
+    let turns = store::read_since(&root, None, 0);
+    if turns.is_empty() {
+        println!("(no messages)");
+        return;
+    }
+    let start = turns.len().saturating_sub(count);
+    for t in &turns[start..] {
+        let hhmm = chrono::DateTime::from_timestamp(t.ts as i64, 0)
+            .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
+            .unwrap_or_else(|| "--:--".to_string());
+        println!("[{hhmm}] {}: {}", t.display_name, t.content);
     }
 }
 

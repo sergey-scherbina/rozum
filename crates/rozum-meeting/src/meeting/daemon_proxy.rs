@@ -286,6 +286,10 @@ impl DaemonProxy {
             return;
         }
         let state = Arc::clone(&self.state);
+        // Room activity keeps this proxy alive (see the bump below): an agent that
+        // coordinates via `rozum meetings post` / the TUI rather than the MCP tools should
+        // not lose its push channel to the idle watchdog while the room is live.
+        let last_active = Arc::clone(&self.last_active);
         s.wakeup_task = Some(tokio::spawn(async move {
             // The room this loop is primed against, and the next `(date, n)` to deliver
             // (one past the last delivered entry — `read_since` is inclusive of `n`).
@@ -320,6 +324,11 @@ impl DaemonProxy {
                 };
                 let turns = store::read_since(&root, sd, sn);
                 let Some(last) = turns.last() else { continue };
+                // Room activity (any new turn, incl. a `meetings post` from this agent's own
+                // CLI) refreshes the idle watchdog, so a CLI-active agent keeps its push
+                // channel. A truly-dead agent still exits on stdin-EOF; the watchdog still
+                // reaps a proxy once BOTH its MCP traffic and the room go quiet for the window.
+                last_active.store(now_epoch(), Ordering::Relaxed);
                 // Advance past everything read (own entries included), so we neither re-read
                 // nor re-push them on the next tick.
                 since = Some((last.date.clone(), last.n + 1));
