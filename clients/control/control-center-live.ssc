@@ -2,19 +2,19 @@
 ---
 name: rozum-control-center
 version: 0.3.0
-description: rozum UCC — LIVE + STRUCTURED (fetchJsonValue + computedSignal + dataTable). Web (react).
+description: rozum UCC — LIVE + STRUCTURED (fetchUrlSignal + jsonValue parse + computedSignal). Web (react).
 backends: [int]
 frontend: react
 ---
 # rozum — control center
 
-Live snapshot parsed into structured fields via `fetchJsonValue` (navigable
-`JsonValue`) + `computedSignal`, with the installed catalog in a `dataTable`.
+Live snapshot from ONE `fetchUrlSignal` GET, parsed client-side with `jsonValue(...)` and
+projected into structured fields (+ GiB formatting) via `computedSignal` + `signalText_`.
+Portable subset only (no model-DSL / no dataTable — both have react client-mode gaps, see spec).
 
 ## Setup
 [signal, emit, serve, fetchUrlSignal, incSignal, computedSignal](std/ui/primitives.ssc)
-[fetchJsonValue](std/ui/fetch-json.ssc)
-[jsonStringify](std/json.ssc)
+[jsonValue](std/json.ssc)
 [lower](std/ui/lower.ssc)
 [defaultTheme](std/ui/theme.ssc)
 [vstack, hstack, divider, spacer](std/ui/layout.ssc)
@@ -23,18 +23,23 @@ Live snapshot parsed into structured fields via `fetchJsonValue` (navigable
 [card, cardWithHeader](std/ui/containers.ssc)
 [signalText_](std/ui/reactive.ssc)
 [signalActionButton](std/ui/input.ssc)
-[tableCol, dataTable](std/ui/data.ssc)
 
 ## Live data
 ```scalascript
 val refresh = signal("refresh", 0)
-val emptyH  = signal("emptyH", "")
-val st      = fetchJsonValue("status", "/control/status", refresh, emptyH)
+val st      = fetchUrlSignal("status", "/control/status", refresh)
 
-val availTxt     = computedSignal(() => st().get("residency").get("available_bytes").asString)
-val budgetTxt    = computedSignal(() => st().get("residency").get("host_budget_bytes").asString)
-val committedTxt = computedSignal(() => st().get("residency").get("committed_bytes").asString)
-val installedArr = computedSignal(() => jsonStringify(st().get("installed")))
+def gib(b: Double): String = {
+  val t = (b / 107374182.4).toInt
+  (t / 10).toString + "." + (t % 10).toString + " GiB"
+}
+val availTxt     = computedSignal(() => gib(jsonValue(st()).get("residency").get("available_bytes").asDouble))
+val budgetTxt    = computedSignal(() => gib(jsonValue(st()).get("residency").get("host_budget_bytes").asDouble))
+val committedTxt = computedSignal(() => gib(jsonValue(st()).get("residency").get("committed_bytes").asDouble))
+val catalogTxt   = computedSignal(() => {
+  val xs = jsonValue(st()).get("installed").asList
+  xs.length.toString + " models: " + xs.map(m => m.get("spec").asString.split(":").last).mkString(", ")
+})
 
 val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
   vstack(gap = 6)(
@@ -42,17 +47,14 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
       text("source:"), badge("rozum control-API (always-up)", "success"),
       signalActionButton(incSignal(refresh), "↻ refresh")
     ),
-    hstack(gap = 8)(text("available bytes:"),   signalText_(availTxt)),
-    hstack(gap = 8)(text("host budget bytes:"), signalText_(budgetTxt)),
-    hstack(gap = 8)(text("committed bytes:"),   signalText_(committedTxt))
+    hstack(gap = 8)(text("available:"),   signalText_(availTxt)),
+    hstack(gap = 8)(text("host budget:"), signalText_(budgetTxt)),
+    hstack(gap = 8)(text("committed:"),   signalText_(committedTxt))
   )
 )
 
 val catCard = cardWithHeader(heading(2, "Installed catalog"))(
-  dataTable(installedArr, List(
-    tableCol("Installed model", "spec"),
-    tableCol("Size (bytes)",    "size_bytes")
-  ))
+  vstack(gap = 6)(signalText_(catalogTxt))
 )
 ```
 
