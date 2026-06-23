@@ -98,10 +98,21 @@ exactly what `solve.sh` does by hand with two sequential gateway processes — b
 > (`mlx: eval failed`). It is GLM-specific cross-model contamination: GLM-9B's generation leaves pending
 > MLX-stream state (its kernels pre-build/async-eval the next token) that a *different* next model's eval
 > inherits. Proof it's fixable: the gateway `Switchboard` swaps GLM-9B→Qwen3-4B in-process cleanly (its
-> drained swap flushes the stream). The fix is to flush the MLX stream at teardown — but mlx-rs exposes
-> only `eval`, not `synchronize`, so the clean fix needs `mlx_synchronize` exposed in the mlx-rs fork (a
-> focused multi-repo change). Until then: `solve.sh` (separate processes per stage) is the robust path
-> for GLM-involving chains; same-model and non-GLM small pairs work in-process.
+> drained swap flushes the stream).
+>
+> **UPDATE (fix #5 attempted + exhaustively diagnosed 2026-06-24): a teardown stream flush does NOT fix
+> it.** `mlx_synchronize` is now exposed (mlx-sys already binds it; `Stream::as_ptr` is public) and called
+> at `MlxNativeBackend` teardown — confirmed running (rc=0) — but GLM-9B→Qwen3-4B still fails. Ruled out,
+> each tested live: stream-flush, MLX cache-evict, peak-reset, settle-before-build, settle-after-build,
+> inline-vs-spawn_blocking drop. The build path is IDENTICAL (the gateway builder calls the same
+> `build_from_config`). Controls: the gateway `Switchboard` swaps GLM-9B→Qwen3-4B in-process cleanly even
+> after a long GLM generation; and Qwen3-4B→Qwen3-4B lazy works. **⇒ The root cause is STRUCTURAL, not MLX
+> state: the Switchboard runs each model as a SEPARATE top-level gateway request; the lazy pipeline runs
+> both NESTED in one request — failure is specific to GLM as the first tier.** The real fix is to route the
+> lazy pipeline's per-tier load/generate through the gateway's separate-request swap path (architectural).
+> Kept wins: the `mlx_synchronize` flush (teardown hygiene) + `reset_peak_memory` at teardown (fixes the
+> lazy footprint-cache poisoning). Robust path today: `solve.sh` (separate processes) for GLM chains;
+> same-model and non-GLM small pairs work in-process.
 
 **Cost (honest):** in lazy mode every prompt pays `N-1` swaps in + the swap back to tier 0 for the next
 prompt — i.e. ~2 model loads per agent turn (load = seconds to tens of seconds for 20–32B). Eager pays
