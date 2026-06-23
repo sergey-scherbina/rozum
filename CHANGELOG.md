@@ -1,5 +1,20 @@
 # Changelog
 
+## meeting client — unread badges in the room-switcher
+Completed: 2026-06-23
+
+The `.ssc` meeting web now shows unread counts per inactive room in the room-switcher `<select>`:
+each option renders as `name (N)` when that room has messages you haven't seen. A new `GET /u` route
+returns `name|count` lines (per-room message count via `readRoom`, counting `"content":"` lines — the
+same source the active-author chips use). The client polls `/u` every 5 s, keeps a per-room last-seen
+map in `localStorage` (`rozumSeen`), badges the unread delta, always marks the current room read, and
+treats the very first load as all-read so it doesn't show everything as unread. Additive: no server or
+schema change, the existing chat/poll path is untouched.
+
+Built with the current `ssc` toolchain (the `5408689` `.map`/list-index lowering fix on
+scalascript `origin/main`) and validated live on :8405 — `/u` returns the counts, the page still
+renders 200, the room-switcher shows the badges.
+
 ## perf-baseline — correct two lever calls (verify-before-build on the spec itself)
 Completed: 2026-06-23
 

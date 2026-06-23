@@ -883,8 +883,12 @@ portability stays in BACKLOG.
 - [x] **PWA room picker/linking/live room binding — DONE/SUPERSEDED 2026-06-23.** The shipped `.ssc`
       client uses dynamic room `<select>` from `rozum meetings status`, shareable `/r/<room>` links,
       live `/m/<room>` fragments, and `/p` submits with `room=<room>`.
-- [ ] **Mobile unread-state polish.** Optional remaining room-switcher polish: unread counts/markers
-      per inactive room. Active participants are already shown from recent authors.
+- [x] **Mobile unread-state polish — DONE 2026-06-23 (sunny-civet).** Room-switcher `<select>` now
+      shows `name (N)` unread badges per inactive room. New `/u` route returns `name|count` per room
+      (`roomCount` counts `"content":"` lines via `readRoom`); the client polls it every 5 s, tracks
+      per-room last-seen in `localStorage` (`rozumSeen`), badges unread, marks the current room read,
+      and treats the first-ever load as all-read (no all-unread noise). Built with the updated `ssc`
+      (the `5408689` lowering fix), validated live on :8405 (`/u` returns counts, page 200).
 - [x] **`.ssc` live data binding for meeting web — DONE 2026-06-23.** The ScalaScript/Rust web client
       is bound to live rozum rooms/transcripts/submits and is the shipped meeting web; the legacy
       hand-written web path remains removed.
