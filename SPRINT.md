@@ -576,6 +576,19 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   intent, no content). Definitive: GLM create-from-scratch fails because GLM stops after step 1 announcing
   step 2 without doing it. Lever = 35B cascade (a model that follows through), or constrained tool-emission
   (the interface-change route the isolate skill warns backfires — gpt-oss constrained was 0/4).
+  **CORRECTION — the "decision gap / model property" claim above was an OVER-ASSUMPTION; the RAW tokens
+  refute it (operator "don't assume, find what's actually happening", `ROZUM_RAW_DUMP` added, 4f60433).**
+  Per-turn raw generated text shows GLM DOES chain tool calls and IS capable: turn0 `cargo new`, turn1
+  prose+`cargo init` toolcall, turn2 prose+a toolcall that writes Cargo.toml+main.rs with CORRECT reverse
+  code (`args[1].chars().rev().collect::<String>()`), turn3 prose "Now let's run cargo run" (stops at the
+  verify step). So GLM is NOT failing for "can't follow through" — it writes correct code and chains. The
+  REAL failures are **delivery** (`cd reverse-cli` → subdir not cwd; broken `echo '…\n…' \n > file` —
+  literal `\n` with no `-e` + a stray `\n` before the `>`) **plus chaining variance** (some runs stop
+  early, confused by the 2nd cargo-new's "already exists"). CLOSER to fixable (delivery, like gpt-oss
+  heredoc) than the over-claimed model-ceiling. A cleaner delivery fix to try (NOT the harmful cargo-init
+  rewrite): strip `cd <name> &&` + `<name>/` so files land in cwd, decode literal `\n`/stray-`\n` in echo.
+  Still bounded by GLM's chaining variance. Lesson (again): read the raw bytes before theorizing "model
+  nature."
 - [ ] **gptoss-codex-cascade** (stretch, now ALSO the GLM lever) — gpt-oss/GLM for speed, auto-fall-back
   to 35B on a failed cell (the `CascadeBackend` exists). Best-of-both: fast when the small model succeeds,
   35B-reliable when it doesn't. The matrix proved 35B is the agentic driver (14/15) and GLM is not (4/15,
