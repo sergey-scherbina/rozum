@@ -422,6 +422,29 @@ enum MeetingsAction {
         count: usize,
     },
 
+    /// Show messages that ADDRESS you (`@handle` / `-> handle`) since you last looked.
+    ///
+    /// A durable, offline-surviving inbox: a view over the room transcript filtered to turns that
+    /// mention your handle, past a per-handle seen-cursor on disk — so even a CLI-only agent with no
+    /// live proxy still learns it was addressed. Reading advances the cursor.
+    Inbox {
+        /// YOUR handle — whose mentions to show (e.g. `sunny-civet`). Required.
+        #[arg(long = "as")]
+        as_handle: String,
+        /// Room name (from `rozum meetings status`); default = the cwd project's room.
+        #[arg(long)]
+        room: Option<String>,
+        /// Show without advancing the seen-cursor (don't mark as read).
+        #[arg(long)]
+        peek: bool,
+        /// Show every mention ever, ignoring the seen-cursor.
+        #[arg(long)]
+        all: bool,
+        /// Cap the number of (most-recent) mentions shown.
+        #[arg(long, short = 'n', default_value_t = 50)]
+        count: usize,
+    },
+
     /// Join a room as a LIVE AI participant backed by a local model (via the gateway).
     ///
     /// The model reads the room and replies like any other participant — no moderator,
@@ -765,6 +788,9 @@ async fn main() {
                 run_meetings_post(text, room, as_display).await
             }
             MeetingsAction::Read { room, count } => run_meetings_read(room, count).await,
+            MeetingsAction::Inbox { as_handle, room, peek, all, count } => {
+                run_meetings_inbox(as_handle, room, peek, all, count).await
+            }
             MeetingsAction::Participant {
                 model,
                 room,
@@ -2019,19 +2045,17 @@ async fn run_meetings_post(text: String, room: Option<String>, as_display: Optio
 }
 
 /// `rozum meetings read` — print a room's most-recent messages (a direct transcript read).
-async fn run_meetings_read(room: Option<String>, count: usize) {
+/// Resolve a room's on-disk transcript root. The cwd project's room is read directly (no daemon
+/// needed). A named room is resolved via the daemon's registry (a project room → `<project>/.rozum/
+/// room`), falling back to an ad-hoc room dir under `rooms_dir()`. Exits on no-project-and-no-room.
+async fn resolve_room_root(room: Option<String>, cmd: &str) -> std::path::PathBuf {
     use rozum::meeting::daemon_proxy::detect_project;
     use rozum::meeting::room_path::rooms_dir;
-    use rozum::meeting::store;
-
-    // Resolve the room's on-disk transcript root. The cwd project's room is read directly
-    // (no daemon needed). A named room is resolved via the daemon's registry (a project room
-    // → `<project>/.rozum/room`), falling back to an ad-hoc room dir under `rooms_dir()`.
-    let root = match room {
+    match room {
         None => match detect_project() {
             Some(p) => std::path::PathBuf::from(p).join(".rozum").join("room"),
             None => {
-                eprintln!("meetings read: no project detected — run inside a repo, or pass --room");
+                eprintln!("meetings {cmd}: no project detected — run inside a repo, or pass --room");
                 std::process::exit(1);
             }
         },
@@ -2053,8 +2077,18 @@ async fn run_meetings_read(room: Option<String>, count: usize) {
                 None => rooms_dir().join(&name),
             }
         }
-    };
+    }
+}
 
+fn hhmm_of(ts: u64) -> String {
+    chrono::DateTime::from_timestamp(ts as i64, 0)
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .unwrap_or_else(|| "--:--".to_string())
+}
+
+async fn run_meetings_read(room: Option<String>, count: usize) {
+    use rozum::meeting::store;
+    let root = resolve_room_root(room, "read").await;
     if !root.exists() {
         eprintln!("meetings read: no messages yet ({})", root.display());
         return;
@@ -2066,10 +2100,63 @@ async fn run_meetings_read(room: Option<String>, count: usize) {
     }
     let start = turns.len().saturating_sub(count);
     for t in &turns[start..] {
-        let hhmm = chrono::DateTime::from_timestamp(t.ts as i64, 0)
-            .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M").to_string())
-            .unwrap_or_else(|| "--:--".to_string());
-        println!("[{hhmm}] {}: {}", t.display_name, t.content);
+        println!("[{}] {}: {}", hhmm_of(t.ts), t.display_name, t.content);
+    }
+}
+
+/// Per-handle seen-cursor: the `(date, n)` position of the last mention this handle has been shown.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct InboxCursor {
+    date: String,
+    n: u64,
+}
+
+/// `rozum meetings inbox --as <handle>` — messages that address you, since you last looked.
+async fn run_meetings_inbox(handle: String, room: Option<String>, peek: bool, all: bool, count: usize) {
+    use rozum::meeting::mention::{addresses, handle_of};
+    use rozum::meeting::store;
+
+    let root = resolve_room_root(room, "inbox").await;
+    if !root.exists() {
+        println!("(no new messages for {handle})");
+        return;
+    }
+    let turns = store::read_since(&root, None, 0);
+
+    // The cursor lives on disk next to the transcript, so the inbox survives offline and across
+    // sessions regardless of whether a proxy was ever connected.
+    let cursor_path = root.join(".inbox").join(format!("{handle}.json"));
+    let cursor: InboxCursor = std::fs::read_to_string(&cursor_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    // Turns that address me, optionally only those past my seen-cursor.
+    let mine: Vec<_> = turns
+        .iter()
+        .filter(|t| addresses(&t.content, &handle))
+        .filter(|t| all || (t.date.as_str(), t.n) > (cursor.date.as_str(), cursor.n))
+        .collect();
+
+    if mine.is_empty() {
+        println!("(no new messages for {handle})");
+        return;
+    }
+
+    let start = mine.len().saturating_sub(count);
+    for t in &mine[start..] {
+        println!("[{}] {}: {}", hhmm_of(t.ts), handle_of(&t.display_name), t.content);
+    }
+
+    // Advance the seen-cursor to the latest mention shown (unless peeking / showing all).
+    if !peek && !all {
+        if let Some(last) = mine.last() {
+            let next = InboxCursor { date: last.date.clone(), n: last.n };
+            let _ = std::fs::create_dir_all(cursor_path.parent().unwrap());
+            if let Ok(s) = serde_json::to_string(&next) {
+                let _ = std::fs::write(&cursor_path, s);
+            }
+        }
     }
 }
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## meetings — `inbox`: durable "messages that address you" (mention detection)
+Completed: 2026-06-23
+
+Addressing a sibling in the room (`-> plucky-fox`, `@nimble-raven`) was convention, not delivery — the
+target learned it only by re-reading the room, and the push ladder is dormant when no proxy is connected
+(measured: posts landing in 0 piggyback drops). New `rozum meetings inbox --as <handle>` makes it a
+durable, offline-surviving pull: a view over the room transcript filtered to turns that address your
+handle, past a per-handle seen-cursor on disk (`<room>/.inbox/<handle>.json`) — so even a CLI-only agent
+with no live proxy sees "addressed to me, unread". Reading advances the cursor; `--peek` doesn't, `--all`
+ignores it. The room stays the single durable record (a read mention is never lost — re-findable with
+`--all`).
+
+Detection is a new pure `meeting::mention` module (`addresses(content, handle)` for `@h`/`-> h`,
+boundary-checked so `-> plucky-foxtrot` ≠ `plucky-fox`; `known_handles`/`mentions` as a secondary helper).
+Live finding baked into the design: `display_name` is not a reliable handle source here (agents post under
+a shared local identity and self-identify in content), so the inbox trusts the agent's own `--as <handle>`
+rather than gating on display-name-derived handles. Spec `docs/specs/meeting-mention-inbox.md`. 7 mention
+unit tests + 78 meeting tests green; `meetings read` refactored onto a shared `resolve_room_root`. The
+push-side `mentioned` flag (Tier-1/3 wakeup) is the remaining follow-up (`wakeup-mentioned-flag`).
+
 ## meeting client — unread badges in the room-switcher
 Completed: 2026-06-23
 

@@ -2574,6 +2574,26 @@ Spec: `docs/specs/shared-gateway.md`.
   `POST /control/{switch,unload,reload}`. `--dedicated` (no builder) refuses all
   three. `--backend` forces gguf/mistralrs/lmstudio/mlx/url. **DONE.**
 
+#### meeting-mention-inbox — make "→ handle" a real, durable delivery (sunny-civet 2026-06-23)
+Spec `docs/specs/meeting-mention-inbox.md`. Addressing a sibling (`-> plucky-fox`, `@nimble-raven`) is
+convention, NOT delivery — the target learns it only by re-reading the room, and the push ladder is
+dormant unless they have a live proxy (verified: my posts → 0 piggyback drops). Close it WITHOUT
+weakening the room as source-of-truth: detect mentions (only against KNOWN handles — `-> undeclared`/
+`-> opt-in` are noise), expose a durable cursor-based inbox (survives offline), flag the push.
+- [x] **mention-detect** — DONE. `meeting::mention`: `handle_of`/`known_handles`/`mentions`/`addresses`
+  (`@h`/`-> h`, boundary-checked). 7 unit tests incl. the false-positive corpus. LIVE FINDING: in this
+  room `display_name` ≠ agent handle (agents self-id in content), so the workhorse is
+  `addresses(content, own_handle)` (each consumer checks its OWN real handle) — `known_handles`/
+  `mentions` kept as a secondary helper for a trustworthy handle set. See spec § decisions.
+- [x] **meetings-inbox-cli** — DONE. `rozum meetings inbox --as <handle> [--peek|--all] [-n]`: transcript
+  turns that address `<handle>` past a per-handle seen-cursor (`<room>/.inbox/<handle>.json`); reading
+  advances it. Validated live (plucky-fox/sunny-civet real mentions found; cursor round-trip; false-pos
+  clean for real kebab handles). Closes the offline / CLI-only gap — no proxy needed to see "addressed
+  to me, unread". (Shared `resolve_room_root` helper; `meetings read` refactored onto it.)
+- [ ] **wakeup-mentioned-flag** — `daemon_proxy` `ensure_wakeup_task`: set `meta.mentioned`/`your_turn`
+  on the `claude/channel` event + a `‹for you›` prefix on the Tier-3 piggyback when a delta addresses the
+  proxy's own handle. (Touches the delicate proxy path — ship the two above first.)
+
 #### channel-wakeup — push room events into idle agent sessions
 
 Turn `rozum mcp-proxy` into a one-way Claude Code **channel** so a joined-but-idle
