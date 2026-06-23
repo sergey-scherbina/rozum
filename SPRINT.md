@@ -1,5 +1,43 @@
 # Sprint
 
+- [ ] **adaptive-model-loading** — IN PROGRESS (operator priority 2026-06-23). When a model's footprint
+  at the requested n_ctx/cache exceeds available RAM, AUTO-SHRINK to the best params that still fit
+  safely (largest n_ctx, then step the MLX cache 4->2->1 GiB) instead of refusing — so it loads with the
+  best-possible parameters, only refusing if even the floor (n_ctx 4096 + 1 GiB cache) overflows (weights
+  too big). HOW: pure `rozum_models::fit_model_params(spec, weight_bytes, req_n_ctx, available, min_free,
+  floor) -> Option<(n_ctx, cache_gib)>` (reads kv-per-pos from config) + `adapt_n_ctx_to_fit` in main.rs
+  between resolve_n_ctx and acquire_residency (sets ROZUM_MLX_CACHE_GB, logs the reduction); wire in
+  run_gateway + run_launch_dedicated. Opt-out ROZUM_GATEWAY_ADAPTIVE_LOAD=0 (strict refuse). Bonus: makes
+  co-residency admit MORE (shrink the 2nd model to fit alongside the 1st). Done-when: a model that the
+  free-RAM lever refused now loads at a reduced n_ctx; unit tests on fit_model_params; admission stays the
+  final safety gate (never overcommits).
+
+- [ ] **glm-synth-validate-default-on** — multi-rep A/B for the GLM artifact synth (now WORKS, master
+  201c3f2, opt-in ROZUM_GLM_ARTIFACT_SYNTH=1): create lift across N reps + edit/chat NO-regress (fix was
+  2/2) + false-write fuzz (chat code blocks must NOT write files). If clean -> flip default-ON for GLM so
+  it works out-of-the-box. Slot-gated. Spec glm-artifact-write-synth § RESOLVED.
+
+- [ ] **glm-synth-mixed-responses** — the synth fires ONLY when parse_tool_calls is empty (engine.rs:392),
+  so a MIXED GLM response (1 valid <tool_call> + N artifacts) drops the artifacts. Run the synth ADDITIVELY
+  (synthesize from artifact regions even when some calls parsed), dedup vs the parsed calls. Offline.
+  (Not yet observed live — GLM tends to be all-tool or all-artifact — but the gap is real.)
+
+- [ ] **glm-constrain-valid-json** (root-cause robustness) — instead of REPAIRING GLM's malformed args
+  JSON (parse_tool_args_lenient handles `]`-for-`}` + unescaped inner quotes), extend the logit-constraint
+  to anchor on a bare tool-args object start (`{"file_path"` / `{"command"`) and force VALID JSON to the
+  matching offered tool's schema. Then GLM emits valid args at the source -> no repair, robust to ANY
+  malformation. Machinery: constrain.rs / ToolConstraint / find_glm_tool_call. Higher effort.
+
+- [ ] **glm-synth-generalize-tool-names** — glm_kv_extract hardcodes file_path/path/content/command (claude
+  tool names). For codex/opencode (different arg names) it won't match. Derive the arg key names from the
+  offered tool SCHEMAS instead of hardcoding. Offline, incremental.
+
+- [ ] **glm-repeat-loop** (LOW, partly model-inherent) — observed GLM repeat a command 3x (loop-breaker
+  caught + stopped). Render already puts tool RESULT in the `observation` role (correct for GLM). Residual
+  = weak model state-tracking (doesn't register 'done'). Investigate whether the synthesized-toolcall
+  round-trip (rendered as `name\njson`, not GLM's original artifact) confuses it; otherwise model-side.
+
+
 - [ ] **glm-artifact-write-synth** — ACTIVE (operator-chosen 2026-06-23). Make GLM-4-32B a full
   create-from-scratch agent driver by synthesizing a `Write` call when it prints a labeled file
   artifact instead of naming the tool. **Spec: docs/specs/glm-artifact-write-synth.md** (design +

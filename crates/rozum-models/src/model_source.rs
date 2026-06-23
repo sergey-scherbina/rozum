@@ -236,14 +236,115 @@ pub fn process_reserve_bytes(max_weight_bytes: u64) -> u64 {
     activation_reserve_bytes(max_weight_bytes)
 }
 
+/// **Adaptive loading**: the best model params that fit `available` RAM while keeping `min_free` free,
+/// or `None` if the model can't fit even at the floor (its weights are too big for this host).
+///
+/// Returns `(n_ctx, cache_gib)` to load with. The policy maximizes the user-facing **context window**:
+///  1. Keep the requested `req_n_ctx` if it fits — preferring the largest MLX cache cap (4 → 2 → 1 GiB).
+///  2. If even `req_n_ctx` with a 1 GiB cache overflows, the host is tight: pin the cache at 1 GiB (most
+///     room for KV) and reduce `n_ctx` to the largest multiple of 1024 that fits, down to `n_ctx_floor`.
+///  3. If `n_ctx_floor` + 1 GiB cache still overflows → `None` (weights alone don't fit; refuse).
+///
+/// `weight_bytes` is the catalog/on-disk weights; KV-per-position is read from the model's `config.json`
+/// (`spec` resolves the dir). This only shrinks — it never returns a larger n_ctx than requested. The
+/// caller applies `cache_gib` (e.g. `ROZUM_MLX_CACHE_GB`) and `n_ctx` to BOTH the footprint estimate and
+/// the actual load, so the residency gate still admits and never overcommits.
+pub fn fit_model_params(
+    spec: &str,
+    weight_bytes: u64,
+    req_n_ctx: u32,
+    available: u64,
+    min_free: u64,
+    n_ctx_floor: u32,
+) -> Option<(u32, u64)> {
+    let kv_per_pos = resolve_model_dir(spec)
+        .and_then(|dir| std::fs::read_to_string(dir.join("config.json")).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|cfg| kv_bytes_per_position(&cfg))
+        .unwrap_or(0);
+    // Start from the user's cache preference (default 4 GiB) and only ever shrink it.
+    let max_cache_gib = std::env::var("ROZUM_MLX_CACHE_GB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(4)
+        .clamp(1, 8);
+    fit_params_with_kv(weight_bytes, kv_per_pos, req_n_ctx, available, min_free, n_ctx_floor, max_cache_gib)
+}
+
+/// The pure fitting math (see [`fit_model_params`]) over an explicit `kv_per_pos` + cache ceiling —
+/// unit-testable without a model on disk. The cache is tried from `max_cache_gib` down (halving) to
+/// 1 GiB, so it never exceeds the caller's preference.
+fn fit_params_with_kv(
+    weight_bytes: u64,
+    kv_per_pos: u64,
+    req_n_ctx: u32,
+    available: u64,
+    min_free: u64,
+    n_ctx_floor: u32,
+    max_cache_gib: u64,
+) -> Option<(u32, u64)> {
+    const GB: u64 = 1 << 30;
+    let budget = available.saturating_sub(min_free);
+    let reserve = |cache_gib: u64| cache_gib.saturating_mul(GB).saturating_add(GB + GB / 2);
+    let footprint = |n_ctx: u64, cache_gib: u64| {
+        weight_bytes
+            .saturating_add(kv_per_pos.saturating_mul(n_ctx))
+            .saturating_add(reserve(cache_gib))
+    };
+    // 1. Requested context fits → keep it; prefer the largest cache (≤ the ceiling) that still fits.
+    let mut cache_gib = max_cache_gib.max(1);
+    loop {
+        if footprint(req_n_ctx as u64, cache_gib) <= budget {
+            return Some((req_n_ctx, cache_gib));
+        }
+        if cache_gib <= 1 {
+            break;
+        }
+        cache_gib = (cache_gib / 2).max(1);
+    }
+    // 2. RAM-constrained: smallest cache (most KV room), shrink n_ctx to the largest 1024-multiple.
+    if kv_per_pos == 0 {
+        return None; // can't shrink without a KV term, and the request didn't fit
+    }
+    let room = budget.saturating_sub(weight_bytes.saturating_add(reserve(1)));
+    let max_n_ctx = (room / kv_per_pos / 1024) * 1024;
+    let n_ctx = max_n_ctx.min(req_n_ctx as u64);
+    (n_ctx >= n_ctx_floor as u64).then_some((n_ctx as u32, 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        activation_reserve_bytes, config_model_type, kv_bytes_per_position, process_reserve_bytes,
-        resolve_model_dir, runtime_active_bytes, runtime_footprint_bytes, spec_to_hf_repo,
+        activation_reserve_bytes, config_model_type, fit_params_with_kv, kv_bytes_per_position,
+        process_reserve_bytes, resolve_model_dir, runtime_active_bytes, runtime_footprint_bytes,
+        spec_to_hf_repo,
     };
 
     const GB: u64 = 1 << 30;
+
+    // Adaptive loading: pick the best (largest n_ctx, then largest cache) params that fit available
+    // RAM; refuse only if the weights themselves don't fit. KV = 128 KiB/token (so n_ctx 8192 ⇒ 1 GiB).
+    #[test]
+    fn fit_params_keeps_context_then_shrinks_cache_then_n_ctx() {
+        const KV: u64 = 128 * 1024; // 128 KiB/token → 8192 ctx = exactly 1 GiB KV
+        let w = 17 * GB; // weights
+        let min_free = 3 * GB;
+        let floor = 4096;
+        // Roomy: 8192 ctx fits with the full 4 GiB cache.
+        assert_eq!(fit_params_with_kv(w, KV, 8192, 28 * GB, min_free, floor, 4), Some((8192, 4)));
+        // Tighter: 8192 fits only once the cache drops to 2 GiB (keeps full context).
+        assert_eq!(fit_params_with_kv(w, KV, 8192, 26 * GB, min_free, floor, 4), Some((8192, 2)));
+        // RAM-constrained: a 32768 request can't fit even at 1 GiB cache → shrink n_ctx to the largest
+        // 1024-multiple, cache pinned at 1 GiB. 15 GiB weights, budget 19 GiB → room 1.5 GiB → 12288.
+        assert_eq!(fit_params_with_kv(15 * GB, KV, 32768, 22 * GB, min_free, floor, 4), Some((12288, 1)));
+        // Never returns MORE than requested.
+        assert_eq!(fit_params_with_kv(w, KV, 4096, 28 * GB, min_free, floor, 4), Some((4096, 4)));
+        // Weights too big for the host (even floor n_ctx + 1 GiB cache overflows) → refuse.
+        assert_eq!(fit_params_with_kv(30 * GB, KV, 8192, 22 * GB, min_free, floor, 4), None);
+        // Unknown KV (config unreadable): can only keep-or-refuse, never shrink n_ctx.
+        assert_eq!(fit_params_with_kv(10 * GB, 0, 8192, 22 * GB, min_free, floor, 4), Some((8192, 4)));
+        assert_eq!(fit_params_with_kv(30 * GB, 0, 8192, 22 * GB, min_free, floor, 4), None);
+    }
 
     // The active/reserve split must reconstruct the original footprint exactly (no behavior
     // change for the single-model admission gate), and the reserve must be the process-shared

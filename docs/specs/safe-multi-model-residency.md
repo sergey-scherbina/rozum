@@ -408,3 +408,23 @@ actual_free_ram`, `admits_fail_open_per_lever_when_unmeasurable`; integration:
 `residency_refuses_even_sole_model_that_overcommits_actual_free_ram`. So "B loads → host overcommits →
 jetsam kills A mid-work / reboot" becomes "B is refused or waits" — the no-reboot invariant, now
 robust to non-model RAM and non-ledger gateways.
+
+## Adaptive model loading (best-fit params instead of refuse) — 2026-06-23
+The free-RAM lever (above) REFUSES a load that would overcommit — safe, but a big model on a busy host
+just won't start. Adaptive loading turns "refuse" into "load with the best params that fit": when the
+footprint at the requested n_ctx/cache exceeds available RAM, auto-shrink to the largest n_ctx (then
+step the MLX cache 4→2→1 GiB) that still fits, refusing only if even the floor (n_ctx 4096 + 1 GiB
+cache) overflows (weights too big for this host).
+
+- `rozum_models::fit_model_params(spec, weight_bytes, req_n_ctx, available, min_free, floor)` (pure
+  `fit_params_with_kv` + config-read for KV-per-position): policy = keep the requested context with the
+  largest cache ≤ the user's `ROZUM_MLX_CACHE_GB` ceiling that fits; only when even a 1 GiB cache can't
+  hold `req_n_ctx` does it pin cache=1 and reduce n_ctx to the largest 1024-multiple ≥ floor. Never
+  returns MORE than requested. Unit-tested (`fit_params_keeps_context_then_shrinks_cache_then_n_ctx`).
+- `main.rs::adapt_n_ctx_to_fit` runs between `resolve_n_ctx` and `acquire_residency_or_exit` in BOTH
+  `run_gateway` and `run_launch_dedicated`: it sets `ROZUM_MLX_CACHE_GB` (so the footprint estimate +
+  `set_cache_limit` agree) and logs the reduction. Opt-out `ROZUM_GATEWAY_ADAPTIVE_LOAD=0` (strict
+  refuse). Admission stays the FINAL safety gate (re-checks the reduced footprint; never overcommits).
+- **Bonus:** because `available` already excludes resident models, this admits MORE co-residency —
+  the 2nd model auto-shrinks to fit alongside the 1st. Validated live: GLM-4-32B that the lever refused
+  at ~27 GB free now loads at a reduced n_ctx/cache.

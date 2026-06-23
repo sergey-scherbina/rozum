@@ -986,8 +986,56 @@ async fn acquire_residency_or_exit(model: &str, n_ctx: u32) -> Option<rozum::sha
     }
 }
 
+/// **Adaptive loading**: shrink `req_n_ctx` (and the MLX cache cap) to the best params that fit
+/// available host RAM, so a model the free-RAM gate would otherwise REFUSE instead loads at
+/// reduced-but-usable params. Returns the n_ctx to load with, and sets `ROZUM_MLX_CACHE_GB` when it
+/// shrinks the cache (so the footprint estimate AND `set_cache_limit` agree). No-op (returns
+/// `req_n_ctx`) when the request already fits, the model/RAM is unknown, or
+/// `ROZUM_GATEWAY_ADAPTIVE_LOAD=0`. If it can't fit even at the floor it returns `req_n_ctx` and lets
+/// [`acquire_residency_or_exit`] refuse with its full message — admission stays the final safety gate.
+fn adapt_n_ctx_to_fit(model: &str, req_n_ctx: u32) -> u32 {
+    if matches!(
+        std::env::var("ROZUM_GATEWAY_ADAPTIVE_LOAD").ok().as_deref(),
+        Some("0" | "false" | "off")
+    ) {
+        return req_n_ctx;
+    }
+    let Some(m) = rozum::models::scan_all_installed().into_iter().find(|m| m.spec == model) else {
+        return req_n_ctx; // unknown model (download/sentinel path) → admission handles it
+    };
+    let Some(available) = rozum::share::available_ram_for_admission() else {
+        return req_n_ctx; // can't measure free RAM → don't adapt
+    };
+    let min_free = rozum::share::min_free_ram_bytes();
+    const N_CTX_FLOOR: u32 = 4096; // below this the model can't even hold an agent prompt
+    let default_cache = std::env::var("ROZUM_MLX_CACHE_GB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(4);
+    match rozum::model_source::fit_model_params(model, m.size_bytes, req_n_ctx, available, min_free, N_CTX_FLOOR)
+    {
+        Some((n_ctx, cache_gib)) => {
+            if n_ctx != req_n_ctx || cache_gib != default_cache {
+                eprintln!(
+                    "rozum gateway: adaptive load — '{model}' at n_ctx {req_n_ctx} won't fit free RAM \
+                     (~{} MB, keep-free ~{} MB); loading with n_ctx {n_ctx} + {cache_gib} GiB cache \
+                     (best fit; ROZUM_GATEWAY_ADAPTIVE_LOAD=0 to refuse instead).",
+                    available / 1_048_576,
+                    min_free / 1_048_576,
+                );
+                // SAFETY: single-threaded startup, before any backend builds; the footprint estimate
+                // and MLX `set_cache_limit` both read this env at load time, so they agree.
+                unsafe { std::env::set_var("ROZUM_MLX_CACHE_GB", cache_gib.to_string()) };
+            }
+            n_ctx
+        }
+        None => req_n_ctx, // won't fit even at the floor → let admission refuse with its message
+    }
+}
+
 async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: rozum::RuntimeConfig) {
     let n_ctx = resolve_n_ctx(&model_spec, n_ctx.or(cfg.n_ctx));
+    let n_ctx = adapt_n_ctx_to_fit(&model_spec, n_ctx);
     let cfg = std::sync::Arc::new(cfg);
     // Host-wide RAM gate: reserve this model's footprint before loading so the
     // resident models can't overcommit host RAM (whole-system OOM → watchdog kernel
@@ -1717,6 +1765,8 @@ async fn run_launch_dedicated(
     // Same host-wide RAM gate as `run_gateway` (BUG-003): a dedicated in-process
     // model reserves its footprint so it can't overcommit host RAM next to another
     // resident gateway. Held for this launch's lifetime (drops when `exec_agent` returns).
+    // Adaptive: shrink n_ctx/cache to the best fit first so a tight host loads rather than refuses.
+    let n_ctx = adapt_n_ctx_to_fit(&model_spec, n_ctx);
     let _residency = acquire_residency_or_exit(&model_spec, n_ctx).await;
     let backend = match build_gateway_backend(&model_spec, n_ctx).await {
         Some(b) => b,

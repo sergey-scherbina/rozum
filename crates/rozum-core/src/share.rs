@@ -391,7 +391,7 @@ pub fn min_free_ram_bytes() -> u64 {
 /// if set (lets an operator pin a conservative figure on a shared host, and lets tests isolate the
 /// ledger lever), else the live measurement [`crate::concurrency::available_ram_bytes`]. `None` ⇒
 /// can't measure ⇒ the free-RAM lever doesn't gate (see [`admits`]).
-fn available_ram_for_admission() -> Option<u64> {
+pub fn available_ram_for_admission() -> Option<u64> {
     if let Some(v) = std::env::var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
