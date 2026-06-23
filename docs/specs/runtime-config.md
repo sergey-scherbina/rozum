@@ -298,6 +298,21 @@ Wiring: `main` applies `--set` first (force), `load_runtime_config_or_exit` appl
 (only-if-unset) — both before any option-reading code. Generic by design: any present or future
 `ROZUM_*` knob works without per-option plumbing.
 
+### Named CLI flags (the friendly way) — `gateway` + `launch`
+For the common knobs, named flags are nicer than `--set`; they set the same env var at CLI precedence:
+| named flag | env it sets |
+|---|---|
+| `--no-adaptive-load` | `ROZUM_GATEWAY_ADAPTIVE_LOAD=0` |
+| `--no-glm-synth` | `ROZUM_GLM_ARTIFACT_SYNTH=0` |
+| `--glm-constrain-args` | `ROZUM_GLM_CONSTRAIN_ARGS=1` |
+| `--allow-concurrent-resident` | `ROZUM_ALLOW_CONCURRENT_RESIDENT=1` |
+| `--min-free-ram-gb <GIB>` | `ROZUM_GATEWAY_MIN_FREE_RAM_BYTES` (GiB→bytes) |
+| `--ram-budget-frac <FRAC>` | `ROZUM_GATEWAY_RAM_BUDGET_FRAC` |
+| `--mlx-cache-gb <GIB>` | `ROZUM_MLX_CACHE_GB` |
+e.g. `rozum launch --model X --no-adaptive-load --mlx-cache-gb 2 -- claude`. Defined once in a flattened
+`TuningOpts` struct, applied via `tuning.apply_to_env()` in both dispatches. Anything without a named
+flag still works via `--set` / env / config `[options]`.
+
 **Key user-facing knobs** (residency / adaptive load / GLM):
 | option | default | what |
 |---|---|---|

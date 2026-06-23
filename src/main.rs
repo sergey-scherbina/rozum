@@ -1,4 +1,73 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+
+/// Named model-load tuning flags — friendly sugar over `--set ROZUM_*`, flattened into `gateway` and
+/// `launch`. Each flag, when given, sets the corresponding env var at CLI precedence (CLI > env >
+/// config > default); absent leaves the env / config / default in effect. Prefer these to `--set` for
+/// the common knobs; don't pass both a flag and `--set` for the same option.
+#[derive(Args, Debug, Default)]
+struct TuningOpts {
+    /// Disable adaptive loading: refuse a model that doesn't fit RAM instead of auto-shrinking
+    /// n_ctx/cache to the best fit (ROZUM_GATEWAY_ADAPTIVE_LOAD=0).
+    #[arg(long)]
+    no_adaptive_load: bool,
+
+    /// Disable the GLM create-from-scratch artifact→tool synth (ROZUM_GLM_ARTIFACT_SYNTH=0).
+    #[arg(long)]
+    no_glm_synth: bool,
+
+    /// Opt-in: constrain GLM bare tool-args to valid JSON during decode, for robustness
+    /// (ROZUM_GLM_CONSTRAIN_ARGS=1).
+    #[arg(long)]
+    glm_constrain_args: bool,
+
+    /// Bypass the host residency gate — overrides the no-overcommit safety; only with care
+    /// (ROZUM_ALLOW_CONCURRENT_RESIDENT=1).
+    #[arg(long)]
+    allow_concurrent_resident: bool,
+
+    /// RAM in GiB to keep free after a model loads — the no-overcommit headroom (default 3).
+    #[arg(long, value_name = "GIB")]
+    min_free_ram_gb: Option<f64>,
+
+    /// Reserved-footprint RAM budget as a fraction of total RAM (default 0.75).
+    #[arg(long, value_name = "FRAC")]
+    ram_budget_frac: Option<f64>,
+
+    /// MLX buffer-cache cap in GiB — also the per-process reserve (default 4).
+    #[arg(long, value_name = "GIB")]
+    mlx_cache_gb: Option<u64>,
+}
+
+impl TuningOpts {
+    /// Set the env for each given flag (force — CLI precedence). Run before any model load.
+    fn apply_to_env(&self) {
+        // SAFETY: single-threaded startup, before the backend worker thread spawns.
+        unsafe {
+            if self.no_adaptive_load {
+                std::env::set_var("ROZUM_GATEWAY_ADAPTIVE_LOAD", "0");
+            }
+            if self.no_glm_synth {
+                std::env::set_var("ROZUM_GLM_ARTIFACT_SYNTH", "0");
+            }
+            if self.glm_constrain_args {
+                std::env::set_var("ROZUM_GLM_CONSTRAIN_ARGS", "1");
+            }
+            if self.allow_concurrent_resident {
+                std::env::set_var("ROZUM_ALLOW_CONCURRENT_RESIDENT", "1");
+            }
+            if let Some(g) = self.min_free_ram_gb {
+                let bytes = (g.max(0.0) * (1u64 << 30) as f64) as u64;
+                std::env::set_var("ROZUM_GATEWAY_MIN_FREE_RAM_BYTES", bytes.to_string());
+            }
+            if let Some(f) = self.ram_budget_frac {
+                std::env::set_var("ROZUM_GATEWAY_RAM_BUDGET_FRAC", f.to_string());
+            }
+            if let Some(c) = self.mlx_cache_gb {
+                std::env::set_var("ROZUM_MLX_CACHE_GB", c.to_string());
+            }
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "rozum", about = "rozum meeting-room agent")]
@@ -150,6 +219,10 @@ enum Command {
         #[arg(long)]
         draft_model: Option<String>,
 
+        /// Model-load tuning (adaptive load, RAM budget, GLM synth, …).
+        #[command(flatten)]
+        tuning: TuningOpts,
+
         /// `status` or `stop` the shared gateway; omit to run the daemon.
         #[command(subcommand)]
         action: Option<GatewayAction>,
@@ -254,6 +327,10 @@ enum Command {
         /// run it unconfined. No-op off macOS (the jail is macOS-only there anyway).
         #[arg(long)]
         no_sandbox: bool,
+
+        /// Model-load tuning (adaptive load, RAM budget, GLM synth, …).
+        #[command(flatten)]
+        tuning: TuningOpts,
 
         /// Program to launch and its arguments
         #[arg(trailing_var_arg = true, required = true)]
@@ -699,9 +776,12 @@ async fn main() {
             n_ctx,
             enable_thinking,
             draft_model,
+            tuning,
             action,
         }) => match action {
             None => {
+                // Named model-load tuning flags → env (CLI precedence), before the model loads.
+                tuning.apply_to_env();
                 // Reasoning models think by default in their chat template; the
                 // gateway disables it (clean CC/Codex output) unless --enable-thinking
                 // (or ROZUM_ENABLE_THINKING) is set. The native backend reads this env
@@ -753,8 +833,11 @@ async fn main() {
             backend_url,
             lean,
             no_sandbox,
+            tuning,
             mut program,
         }) => {
+            // Named model-load tuning flags → env (CLI precedence), before the model loads.
+            tuning.apply_to_env();
             apply_cascade_strategy(strategy.as_deref());
             apply_offline(offline);
             apply_lean_flags(&mut program, lean);
