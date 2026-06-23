@@ -122,8 +122,16 @@ traversal). Decide whether this lives in the Tk core (so all backends agree) or 
 
 ## Open questions / risks
 
-- **Build-target selection:** how does `ssc build` pick a frontend backend (react vs tui)? Not yet
-  found in `bin/ssc`/CLI — confirm before the PoC.
+- **Build-target selection — PARTLY ANSWERED (recon 2026-06-23):** it is NOT a `ssc build` CLI flag.
+  The backend is `FrontendFrameworks.current()` (a registered framework; default `frontend-custom`,
+  with `react`/`vue`/`solid`/`swing`/… registered impls). The app PATTERN: build a `View` with the
+  `std/ui` builders (`vstack`/`hstack`/`text`/`card`/`signal`/…) and call the entrypoint intrinsic
+  **`serve(view, port)`** (or `emit(view, outDir)` → `index.html` + `app.js`). So a `.ssc` Tk app is
+  written against `std/ui` + `serve`; the `frontend-plugin` lowers it via `FrontendFrameworks.current()`.
+  STILL FUZZY (needs plucky-fox / a toolchain run): the exact *user-facing build/run command* for a Tk
+  `.ssc` web app (does `serve` run via interpret, or `ssc build-rust`/`build-js`?), how to *select* a
+  non-default framework (react), and whether the new `frontend/tui` registers the same way. Live react
+  E2E tests (`frontend/react/src/test/.../ReactCounterE2ETest`) are the working template for the build.
 - **Signals → terminal redraw loop:** Tk reactivity is push (`ReactiveSignal`); ratatui is a pull
   redraw loop. Map signal-dirty → schedule redraw; confirm no per-frame rebuild blow-up.
 - **Focus model:** terminal needs an explicit focus ring + key traversal with no web analog — core vs
