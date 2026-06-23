@@ -45,6 +45,30 @@
   (adaptive picks 131072→101376→100352 across loads) → key by model only. 3 footprint unit tests + 117
   rozum-core green. Composes with B: A tightens, B backstops a too-tight estimate.
 
+- [x] **keep-free-2-validated** — DONE + VALIDATED + SEEDED (plucky-finch 2026-06-23, operator-requested).
+  Default `min_free` keep-free margin lowered 3→2 GiB in `min_free_ram_bytes()`. VALIDATION (live, pressure-
+  monitored): gpt-oss at kf=2 + a heavy prefill request held kernel pressure at Normal (free→10.4 GiB);
+  then the A-BOOTSTRAP seed loaded GLM-32B (free→7.5) and 35B-A3B (free→8.8) each at kf=2 with a real
+  request — **kernel pressure stayed Normal throughout, 0 reboot** (a pressure auto-abort-on-critical guard
+  was armed, never fired). Seeded all three real peaks into the footprint cache → A now tightens: gpt-oss
+  21.94→17.44 (−4.5), GLM 24.49→19.99 (−4.5), 35B 24.94→23.46 (−1.5; MoE big-n_ctx-dominated, tightens more
+  at reduced n_ctx). All three now WOULD LOAD. Composes: A folds the real prefill peak INTO the footprint,
+  B refuses under pressure, the ledger blocks concurrent overcommit → keep-free is just the single-load
+  external-growth cushion, 2 GiB suffices. CAVEAT: free never reached the exact 2 GiB floor in validation
+  (smallest was 7.5), so the boundary is reasoned (A+B+ledger) not stress-proven; B + the conservative-
+  leaning estimate backstop.
+  ORIGINAL NOTES — lower the default `min_free` keep-free
+  margin 3→2 GiB. WHY now-safe (was the leading prefill-spike buffer): (a) improvement A makes the
+  footprint estimate CAPTURE the real prefill peak (measured high-water), so keep-free no longer has to
+  cover the spike; (b) improvement B (pressure-guard) refuses at admission when the host is already
+  stressed; (c) the host-wide ledger — NOT keep-free — is what prevents concurrent overcommit (the
+  2026-06-22 reboot was 3 models @61 GiB, a 25 GiB overcommit keep-free size never gated). So keep-free is
+  now just the single-load external-growth buffer; 2 GiB suffices with A+B. WIN: ~1 GiB less required per
+  model → weight-bound 35B/GLM-32B fit closer. VALIDATION (before flipping the default): load a model near
+  the 2 GiB boundary with `ROZUM_GATEWAY_MIN_FREE_RAM_BYTES=2147483648`, send a real request (prefill
+  spike), watch `kern.memorystatus_vm_pressure_level` stay Normal throughout + 0 reboot. Then flip the
+  default in `min_free_ram_bytes()`. Composes with A-bootstrap (seed big-model peaks first).
+
 - [ ] **glm-synth-validate-default-on** — THE remaining 'works by default' win (slot-gated, watcher re-armed). multi-rep A/B for the GLM artifact synth (now WORKS, master
   201c3f2, opt-in ROZUM_GLM_ARTIFACT_SYNTH=1): create lift across N reps + edit/chat NO-regress (fix was
   2/2) + false-write fuzz (chat code blocks must NOT write files). If clean -> flip default-ON for GLM so

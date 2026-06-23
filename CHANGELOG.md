@@ -19,6 +19,24 @@ status handlers are thin presentation over them — no identity/daemon logic lef
 tests green; live whoami/status verified. With the read side (prior commit), the CLI is now fully thin
 over the client contract — the seam web/TUI/UCC consume next. Spec docs/specs/services-and-clients.md.
 
+## admission — lower the keep-free margin 3→2 GiB (validated)
+Completed: 2026-06-23
+
+The default `min_free` keep-free margin (the headroom the residency gate preserves above a model's
+footprint) is lowered 3→2 GiB. It used to be the *leading* buffer for the prefill spike; that role is now
+covered structurally: improvement A folds each model's REAL measured peak (incl. the spike) into the
+footprint estimate, and improvement B refuses at admission under kernel memory-pressure. The host-wide
+ledger — not this margin — is what blocks concurrent overcommit (the 2026-06-22 reboot was a ~25 GiB
+overcommit no keep-free size would have gated). So keep-free is now just the single-load external-growth
+cushion, and 2 GiB suffices. Net: ~1 GiB less required per model, so the weight-bound 35B / GLM-32B fit.
+
+Live-validated and the footprint cache seeded in one pass: gpt-oss, then GLM-4-32B (free → 7.5 GiB) and
+Qwen3.6-35B (free → 8.8 GiB) each loaded at keep-free=2 with a heavy prefill request — kernel pressure
+stayed Normal throughout, 0 reboot (a pressure auto-abort-on-critical guard was armed and never fired).
+The three real peaks now seed improvement A: dry-run estimates drop gpt-oss 21.94→17.44, GLM 24.49→19.99,
+35B 24.94→23.46 GiB. Caveat: validation never drove free to the exact 2 GiB floor (smallest was 7.5), so
+the boundary rests on the A+B+ledger reasoning; override with `ROZUM_GATEWAY_MIN_FREE_RAM_BYTES`.
+
 ## meetings — a client API (clients stop knowing the storage format)
 Completed: 2026-06-23
 

@@ -376,15 +376,22 @@ pub fn host_ram_budget_bytes() -> Option<u64> {
 
 /// RAM (bytes) to keep **actually free** after a model loads — the headroom the actual-free-RAM
 /// admission lever ([`admits`]) preserves on top of the model's own footprint, for the OS and
-/// non-model spikes. Default **3 GiB**; override `ROZUM_GATEWAY_MIN_FREE_RAM_BYTES`. This is what
+/// non-model spikes. Default **2 GiB**; override `ROZUM_GATEWAY_MIN_FREE_RAM_BYTES`. This is what
 /// keeps a load from driving the host toward the ~0-free state that triggered the jetsam/watchdog
 /// reboot ([[project-reboot-watchdog-oom]]).
+///
+/// Lowered 3→2 GiB (2026-06-23) now that keep-free is no longer the *leading* prefill-spike buffer:
+/// improvement A folds the model's REAL measured peak (incl. the prefill spike) INTO the footprint
+/// estimate, and improvement B refuses at admission under kernel memory-pressure — so keep-free is now
+/// just the single-load external-growth cushion. The host-wide *ledger* (not this margin) is what
+/// blocks concurrent overcommit (the reboot was a 25 GiB overcommit no keep-free size would have
+/// gated). Validated: gpt-oss loaded at 2 GiB + a heavy prefill request held kernel pressure at Normal.
 pub fn min_free_ram_bytes() -> u64 {
     const GIB: u64 = 1 << 30;
     std::env::var("ROZUM_GATEWAY_MIN_FREE_RAM_BYTES")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(3 * GIB)
+        .unwrap_or(2 * GIB)
 }
 
 /// RAM available for the admission decision: the absolute override `ROZUM_GATEWAY_AVAILABLE_RAM_BYTES`
