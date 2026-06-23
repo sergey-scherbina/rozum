@@ -295,3 +295,28 @@ now a reliable tool-caller under narration-framing prompts. REMAINING (separate,
 claude/codex×GLM **matrix-cell** A/B to confirm the conservative matcher catches the *actual* agent
 phrasings (tune `is_glm_narration_directive` from a captured prompt if it misses) and to read the
 score lift. Mechanism + default-on path are proven.
+
+### Real claude×GLM A/B — INCONCLUSIVE; the synthetic A/B did NOT transfer (2026-06-23)
+Ran the real cell (`agentic.sh`, GLM-4-32B × claude × build, REPS=2, strip OFF vs ON):
+
+| arm | result |
+|---|---|
+| strip OFF (control) | `turns=1 tools=0 pass=0` (×2) |
+| strip ON (default)  | `turns=1 tools=0 pass=0` (×2) |
+
+**Both arms identical + degenerate.** `turns=1` = claude made ONE call, GLM returned the
+artifact as TEXT (no tool_use to execute), claude stopped → no file → pass=0. The sanitizer made
+**no difference** in the real claude path, even though the model-only probe was NAMED 3/3.
+**Conclusion: the synthetic-prompt validation did NOT transfer** — either `is_glm_narration_directive`
+does not catch **claude's actual** framing phrasing (claude `-p --lean` may frame it differently or
+elsewhere), or the env didn't differentiate, or the degeneracy masks the effect. So the sanitizer is
+**proven as a mechanism (model-only) but NOT YET confirmed to fix real claude×GLM.** Correcting the
+premature "GLM is reliable now" — it is reliable on the direct API with a controlled prompt; the
+claude/codex CLI path is unconfirmed.
+
+**Next (slot-gated): capture + tune.** Run ONE `rozum launch claude -p "<create task>" --lean` against a
+GLM gateway with request capture (KEEP=1 + a system-prompt dump), inspect (a) does claude's real system
+prompt contain the narration framing and in what words, (b) did the sanitizer strip it, (c) what GLM
+returned (artifact text? why turns=1). Then tune `is_glm_narration_directive` to the real phrasing, or —
+if claude's prompt has no such framing — the claude×GLM gap has a different lever and the sanitizer only
+helps direct-API / lean-prompt callers. (Slot was taken by a sibling matrix mid-investigation.)
