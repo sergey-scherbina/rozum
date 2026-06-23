@@ -35,6 +35,10 @@ pub struct ControlStatus {
     /// declarative table (`remoteTable(st, cols, "residency_metrics")`) renders them identically on
     /// web AND tui — no client-side `computedSignal` (which the tui backend can't recompute).
     pub residency_metrics: Vec<MetricBrief>,
+    /// The meeting rooms (read-only, from the meeting daemon's on-disk registry) so the UCC can list
+    /// them with a link to each room's web view. Read directly from `rooms.json` to avoid a
+    /// rozum-gateway → rozum-meeting crate dependency.
+    pub meetings: Vec<MeetingBrief>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +80,40 @@ pub struct InstalledBrief {
 pub struct MetricBrief {
     pub metric: String,
     pub value: String,
+}
+
+/// A meeting room — its `room` name is the path segment of the meeting web view (`/r/<room>`).
+#[derive(Debug, Clone, Serialize)]
+pub struct MeetingBrief {
+    pub room: String,
+}
+
+/// List the meeting rooms from the daemon's on-disk registry (`$XDG_STATE_HOME|~/.local/state` →
+/// `rozum/rooms.json`). Read-only, best-effort: a missing/garbled file yields an empty list. Test and
+/// worktree rooms (project under `/tmp` or `/.worktrees/`) are filtered out so the dashboard lists the
+/// real rooms (global + project).
+fn list_meetings() -> Vec<MeetingBrief> {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state")));
+    let Some(path) = base.map(|b| b.join("rozum/rooms.json")) else {
+        return Vec::new();
+    };
+    let Ok(bytes) = std::fs::read(&path) else { return Vec::new() };
+    let Ok(rooms) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) else {
+        return Vec::new();
+    };
+    rooms
+        .iter()
+        .filter_map(|r| {
+            let name = r.get("name")?.as_str()?;
+            let project = r.get("project").and_then(|p| p.as_str()).unwrap_or("");
+            if project.contains("/tmp/") || project.contains("/.worktrees/") {
+                return None;
+            }
+            Some(MeetingBrief { room: name.to_string() })
+        })
+        .collect()
 }
 
 /// Format a byte count as a one-decimal GiB string (e.g. `"25.1 GiB"`).
@@ -129,7 +167,8 @@ pub async fn status() -> ControlStatus {
         MetricBrief { metric: "committed".into(), value: fmt_gib(residency.committed_bytes) },
         MetricBrief { metric: "residents".into(), value: residency.residents.len().to_string() },
     ];
-    ControlStatus { gateway, residency, installed, residency_metrics }
+    let meetings = list_meetings();
+    ControlStatus { gateway, residency, installed, residency_metrics, meetings }
 }
 
 #[cfg(test)]

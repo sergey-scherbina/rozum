@@ -23,13 +23,14 @@ Portable subset only (no model-DSL / no dataTable — both have react client-mod
 [card, cardWithHeader](std/ui/containers.ssc)
 [signalText_](std/ui/reactive.ssc)
 [actionButton](std/ui/input.ssc)
-[remoteTable](std/ui/data.ssc)
+[remoteTable, lcol](std/ui/data.ssc)
 
 ## Live data
 ```scalascript
 val refresh = signal("refresh", 0)
 val st      = fetchUrlSignal("status", "/control/status", refresh)
 val stRes   = fetchUrlSignal("residents", "/control/status", refresh)
+val stMeet  = fetchUrlSignal("meetings",  "/control/status", refresh)
 
 def gib(b: Double): String = {
   val t = (b / 107374182.4).toInt
@@ -62,14 +63,8 @@ val catCard = cardWithHeader(heading(2, "Installed catalog"))(
 
 ## Meetings panel
 ```scalascript
-val meetingsCard = cardWithHeader(heading(2, "Meetings — room: rozum"))(
-  vstack(gap = 6)(
-    hstack(gap = 8)(text("sunny-civet"),  badge("agent", "success")),
-    hstack(gap = 8)(text("nimble-raven"), badge("agent", "success")),
-    hstack(gap = 8)(text("plucky-finch"), badge("agent", "success")),
-    hstack(gap = 8)(text("plucky-fox"),   badge("agent", "success")),
-    hstack(gap = 8)(text("Sergiy"),       badge("operator", "neutral"))
-  )
+val meetingsCard = cardWithHeader(heading(2, "Meetings"))(
+  remoteTable(stMeet, [lcol("Room", "room", "https://busi.tail1174e2.ts.net:8443/r/:value")], "meetings")
 )
 ```
 
