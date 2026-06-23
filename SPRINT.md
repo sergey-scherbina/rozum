@@ -622,8 +622,13 @@ the CLIENT layer; no binary split (process separation already gives (a)).
   inbox/{handle}` (mentions addressing a handle) + `GET /roster` (live agent principals), both over
   `client::inbox`/`client::roster`. End-to-end test (inbox endpoint). So remote/web/UCC can fetch JSON,
   not disk/exec. (POST-over-HTTP deferred — the socket submit path + auth is a separate write task.)
-- [ ] **svc-migrate-web-tui** — migrate the web `.ssc` + the Rust TUI to the client API (drop direct disk/exec).
-- [ ] **svc-gateway-api-doc** — models side already a clean service; document the gateway API contract.
+- [~] **svc-migrate-web-tui** — DEFERRED / largely superseded. The web `.ssc` already consumes the client
+  API indirectly (execs `rozum meetings …`, now thin over it); the hand-written Rust TUI is REPLACED by the
+  UCC `Tk` app → migrating it now is throwaway. Re-open only if a need predates UCC (web exec→HTTP, which
+  also needs the REST server on by default).
+- [x] **svc-gateway-api-doc** — DONE. Gateway service API contract documented in the spec (inference:
+  OpenAI /v1/chat/completions+/v1/responses, Anthropic /v1/messages; control: status + share ledger;
+  the sole meetings↔models seam = model_participant → /v1/chat/completions, HTTP not code).
 
 ### Unified control center — one `.ssc` UI for TUI + web/PWA (operator vision 2026-06-23, spec `docs/specs/unified-control-center.md`)
 TUI + web + `.ssc` + PWA = ONE app, one `.ssc` source, compiled twice (TUI + web/React/PWA), for ALL

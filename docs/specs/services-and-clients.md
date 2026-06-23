@@ -60,16 +60,35 @@ versioning cost with no benefit on one host.
 4. **rozum-core stays the shared core** (identity, residency/host-safety, obs) — used by both services,
    never duplicated.
 
+## The two service API contracts
+
+**Meetings service — `rozum-meeting::client` (DONE) + HTTP (`rest_read`).** The single contract:
+- *reads*: `resolve_room_root`, `read`, `inbox`(+`InboxCursor`), `roster`;
+- *identity/write*: `post_identity` (the agent-vs-human posting rule), `whoami` (`Identity` enum),
+  `establish` (hello), `daemon_status`;
+- *HTTP* (`maybe_spawn_from_env`, basic-auth): `GET /rooms/{name}/{days,messages/{date}}`,
+  `GET /rooms/{name}/inbox/{handle}`, `GET /roster`.
+Local clients call the module in-process (it reads disk behind the API); remote/web fetch the HTTP JSON.
+No client touches the jsonl/principal/cursor format.
+
+**Models/gateway service — the gateway's HTTP API.** Already a clean service (`rozum gateway`):
+- *inference*: OpenAI `POST /v1/chat/completions` + `/v1/responses`, Anthropic `POST /v1/messages`
+  (the dialects Claude Code / Codex / `model_participant` consume);
+- *control*: gateway status + the host residency/share ledger (`rozum-core::share`).
+`rozum-meeting::model_participant` consumes **only** `{gateway_url}/v1/chat/completions` — the sole
+meetings↔models coupling, an HTTP seam, not a code dependency. Keep it API-only.
+
 ## Sequencing
 
-1. **`rozum-meeting::client` (read side) — FIRST, this PR.** Move the inline disk/parse logic out of the
-   `rozum` bin into a `client` module: `resolve_room_root`, `read`, `inbox` (+ cursor), `roster`. The CLI
-   handlers become thin presentation over it. Removes storage-format knowledge from the binary.
-2. **Client API: write side** — add `post`/`status`/`hello`/`whoami` to the module; CLI fully thin.
-3. **Serve the same operations over HTTP** — extend `rest_read` to cover inbox/roster/post so web/remote
-   clients use the API, not disk/exec.
-4. **Migrate the web `.ssc` + the Rust TUI** to consume the API (drops their direct disk/exec reads).
-5. **Models side already clean** — keep; document the gateway API contract if it isn't already.
+1. **`rozum-meeting::client` (read side)** — DONE (`c838655`).
+2. **Client API write side** (`post_identity`/`whoami`/`establish`/`daemon_status`) — DONE (`2826a1d`).
+3. **HTTP parity** (inbox + roster over `rest_read`) — DONE (`a653cff`); POST-over-HTTP deferred.
+4. **Document the gateway service API contract** — DONE (above).
+5. **Migrate the web `.ssc` + Rust TUI to the API** — **DEFERRED / largely superseded.** The web `.ssc`
+   already consumes the client API *indirectly* (it execs `rozum meetings …`, now thin over the API),
+   and the hand-written Rust TUI is **replaced** by the UCC `Tk` app (`unified-control-center.md`) —
+   migrating it now is throwaway work. Re-open only if a need predates UCC (e.g. the web switching from
+   exec to HTTP fetch, which also needs the REST server enabled by default).
 
 ## Out of scope
 
