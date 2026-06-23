@@ -2115,6 +2115,15 @@ mod inner {
 
         /// Parse any tool calls, emit them (or the held-back text), then `Done`.
         fn finalize(&mut self) {
+            rozum_core::obs::log_event(serde_json::json!({
+                "event": "finalize_dbg",
+                "stop": format!("{:?}", self.stop),
+                "model": &self.job.model_id,
+                "is_glm": super::model_is_glm(&self.job.model_id),
+                "parsed_calls": crate::serving::parse_tool_calls(&self.full_text).len(),
+                "text_len": self.full_text.len(),
+                "synth_enabled": super::glm_artifact_synth_enabled(),
+            }));
             let tool_calls = if matches!(self.stop, StopReason::Cancelled) {
                 Vec::new()
             } else {

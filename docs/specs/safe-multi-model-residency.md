@@ -369,3 +369,42 @@ Provably single-model-identical: the lone-request keep test `requested − reser
 single_model_gate_is_identical_with_or_without_reserve}` (unit) +
 `gateway::tests::warm_admits_a_co_resident_by_counting_reserve_once` (end-to-end through
 `ensure_warm`).
+
+## Can a 2nd model disrupt a 1st model mid-work? — hazard analysis + free-RAM admission lever (2026-06-23)
+Operator question: while model A is mid-generation, can model B's arrival stop A from finishing?
+
+**Our own mechanisms protect in-flight work (verified):**
+- **Warm eviction** (`plan_residency`): busy residents (`inflight>0`) are *mandatory* — never in the
+  evict set; only idle residents are evicted.
+- **Governor** (`shed::should_shed`): returns `false` while `inflight>0` ("never interrupts in-flight
+  work"); only sheds its OWN idle model (≥`min_idle_secs`) under real OS pressure. Test
+  `never_sheds_while_serving_even_under_critical`.
+
+⇒ Nothing in our logic interrupts a model that is mid-generation.
+
+**The real hazard was OS jetsam from RAM overcommit.** The admission gate (`acquire_residency`) decided
+purely on (a) other gateways' **reserved footprints** (the ledger) and (b) a fixed budget
+`total_RAM × 0.75`. It did **not** consult actual free RAM, so it over-admitted in three cases →
+physical overcommit → the OS jetsam-kills a victim (possibly A mid-work) or the watchdog reboots:
+1. heavy **non-model RAM** (browsers/builds) beyond the ~25% headroom the fixed budget assumes;
+2. a gateway **not in the ledger** (a stale / other-worktree binary that doesn't reserve) — invisible
+   to `in_use` (this caused a live nimble-raven×plucky-finch collision on :8300, 2026-06-23);
+3. the **sole model** was admitted unconditionally (`in_use==0`), so one large model + heavy non-model
+   RAM could overcommit on its own.
+
+**Fix — a second, truth-based admission lever (`share::admits`, default ON):** admit iff BOTH
+- **ledger** (sole OR reserved total ≤ budget) — coordinates our gateways with each other, AND
+- **actual free RAM**: `footprint + min_free ≤ available_now`. `available_now` (free+inactive+
+  speculative+purgeable, `concurrency::available_ram_bytes`) already excludes any resident model's RAM,
+  so for a co-resident it asks "does this fit in what's left", and it sees non-model RAM and
+  non-ledger processes too. Independent of the ledger, so it closes all three holes — including
+  refusing a *sole* model that would overcommit.
+
+Knobs: `ROZUM_GATEWAY_MIN_FREE_RAM_BYTES` (keep-free headroom after a load, default **3 GiB**);
+`ROZUM_GATEWAY_AVAILABLE_RAM_BYTES` (pin the available figure — conservative on a shared host, or
+test isolation); `ROZUM_ALLOW_CONCURRENT_RESIDENT=1` (full bypass). Each lever fail-opens if its
+input can't be measured (the other still gates). Pure unit tests: `admits_requires_both_ledger_and_
+actual_free_ram`, `admits_fail_open_per_lever_when_unmeasurable`; integration:
+`residency_refuses_even_sole_model_that_overcommits_actual_free_ram`. So "B loads → host overcommits →
+jetsam kills A mid-work / reboot" becomes "B is refused or waits" — the no-reboot invariant, now
+robust to non-model RAM and non-ledger gateways.

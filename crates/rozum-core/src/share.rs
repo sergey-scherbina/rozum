@@ -374,6 +374,54 @@ pub fn host_ram_budget_bytes() -> Option<u64> {
     crate::concurrency::total_ram_bytes().map(|t| (t as f64 * frac) as u64)
 }
 
+/// RAM (bytes) to keep **actually free** after a model loads — the headroom the actual-free-RAM
+/// admission lever ([`admits`]) preserves on top of the model's own footprint, for the OS and
+/// non-model spikes. Default **3 GiB**; override `ROZUM_GATEWAY_MIN_FREE_RAM_BYTES`. This is what
+/// keeps a load from driving the host toward the ~0-free state that triggered the jetsam/watchdog
+/// reboot ([[project-reboot-watchdog-oom]]).
+pub fn min_free_ram_bytes() -> u64 {
+    const GIB: u64 = 1 << 30;
+    std::env::var("ROZUM_GATEWAY_MIN_FREE_RAM_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(3 * GIB)
+}
+
+/// RAM available for the admission decision: the absolute override `ROZUM_GATEWAY_AVAILABLE_RAM_BYTES`
+/// if set (lets an operator pin a conservative figure on a shared host, and lets tests isolate the
+/// ledger lever), else the live measurement [`crate::concurrency::available_ram_bytes`]. `None` ⇒
+/// can't measure ⇒ the free-RAM lever doesn't gate (see [`admits`]).
+fn available_ram_for_admission() -> Option<u64> {
+    if let Some(v) = std::env::var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        return Some(v);
+    }
+    crate::concurrency::available_ram_bytes()
+}
+
+/// The admission decision, pure + unit-testable. Loading `footprint` is admitted iff BOTH levers pass:
+///
+/// 1. **Ledger (cross-process reservations):** the model is the SOLE resident (`in_use == 0`) or the
+///    reserved total (others + this) fits the reserved-footprint `budget`. This coordinates *our own*
+///    gateways with each other.
+/// 2. **Actual free RAM (the truth lever):** `footprint + min_free` fits in the RAM `available` right
+///    now. This is independent of the ledger, so it ALSO catches what the ledger can't see — heavy
+///    non-model RAM (browsers/builds), gateways not in the ledger (a stale/other-worktree binary), and
+///    even a sole model that would overcommit on its own. `available` already excludes any resident
+///    model's RAM, so for a co-resident it correctly asks "does this fit in what's left".
+///
+/// A `None` for either input means that lever can't measure ⇒ it doesn't block (fail-open on the
+/// unknown lever; the other still gates). Refusing here turns "B loads → host overcommits → OS jetsam
+/// kills a model mid-work / reboot" into "B is refused or waits" — the no-reboot invariant.
+fn admits(in_use: u64, footprint: u64, budget: Option<u64>, available: Option<u64>, min_free: u64) -> bool {
+    let ledger_fits =
+        in_use == 0 || budget.is_some_and(|b| in_use.saturating_add(footprint) <= b);
+    let ram_fits = available.map_or(true, |a| footprint.saturating_add(min_free) <= a);
+    ledger_fits && ram_fits
+}
+
 /// One resident gateway's reservation (the content of `residents/<pid>`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ResidentEntry {
@@ -589,8 +637,9 @@ pub fn acquire_residency(
                 // ── critical section: scan → decide → reserve (atomic across procs)
                 let (in_use, holders) = scan_residents(mypid);
                 let budget = host_ram_budget_bytes();
-                let fits = in_use == 0
-                    || budget.is_some_and(|b| in_use.saturating_add(footprint_bytes) <= b);
+                let available = available_ram_for_admission();
+                let min_free = min_free_ram_bytes();
+                let fits = admits(in_use, footprint_bytes, budget, available, min_free);
                 if fits {
                     // Reserve: own `residents/<pid>` and hold its flock for life.
                     match reserve(mypid, model, footprint_bytes) {
@@ -608,14 +657,18 @@ pub fn acquire_residency(
                         .collect::<Vec<_>>()
                         .join(", ");
                     let b = budget.map(|b| b / 1_048_576).unwrap_or(0);
+                    let avail_mb = available.map(|a| (a / 1_048_576).to_string()).unwrap_or_else(|| "?".into());
                     eprintln!(
                         "rozum gateway: loading this model (~{} MB) would overcommit host RAM \
-                         — {} MB already reserved by [{}], budget ~{} MB. Waiting up to {}s for \
-                         it to free (ROZUM_ALLOW_CONCURRENT_RESIDENT=1 to override) …",
+                         — {} MB already reserved by [{}], budget ~{} MB; actual free RAM ~{} MB, \
+                         keep-free ~{} MB. Waiting up to {}s for it to free \
+                         (ROZUM_ALLOW_CONCURRENT_RESIDENT=1 to override) …",
                         footprint_bytes / 1_048_576,
                         in_use / 1_048_576,
                         who,
                         b,
+                        avail_mb,
+                        min_free / 1_048_576,
                         wait_secs,
                     );
                 }
@@ -694,6 +747,43 @@ pub async fn health_ok(port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const GIB: u64 = 1 << 30;
+
+    // The admission decision must pass BOTH levers: the cross-process reserved-footprint ledger AND
+    // the actual free-RAM check (the truth lever that prevents a load from overcommitting the host →
+    // OS jetsam killing a model mid-work / reboot).
+    #[test]
+    fn admits_requires_both_ledger_and_actual_free_ram() {
+        let budget = Some(27 * GIB); // 36 GiB * 0.75
+        let min_free = 3 * GIB;
+        // Sole model that fits free RAM → admit.
+        assert!(admits(0, 20 * GIB, budget, Some(26 * GIB), min_free));
+        // HOLE #3 closed: a SOLE model that does NOT fit actual free RAM is REFUSED (used to be an
+        // unconditional admit) — 20 + 3 > 18 available.
+        assert!(!admits(0, 20 * GIB, budget, Some(18 * GIB), min_free));
+        // Second model: ledger fits (10 + 12 ≤ 27) AND RAM fits (12 + 3 ≤ 20) → admit.
+        assert!(admits(10 * GIB, 12 * GIB, budget, Some(20 * GIB), min_free));
+        // HOLES #1/#2 closed: ledger says OK (10 + 12 ≤ 27) but ACTUAL free RAM is low (heavy
+        // non-model use, or a sibling gateway not in the ledger) → REFUSED. 12 + 3 > 8 available.
+        assert!(!admits(10 * GIB, 12 * GIB, budget, Some(8 * GIB), min_free));
+        // Ledger overcommits (20 + 12 > 27) even though RAM looks fine → refused.
+        assert!(!admits(20 * GIB, 12 * GIB, budget, Some(30 * GIB), min_free));
+    }
+
+    #[test]
+    fn admits_fail_open_per_lever_when_unmeasurable() {
+        let min_free = 3 * GIB;
+        // available unknown (vm_stat failed) → the RAM lever doesn't block; the ledger still gates.
+        assert!(admits(0, 20 * GIB, Some(27 * GIB), None, min_free)); // sole, ledger ok
+        assert!(!admits(20 * GIB, 12 * GIB, Some(27 * GIB), None, min_free)); // ledger overcommit
+        // budget unknown → only a sole model is admitted (RAM permitting); a 2nd is refused.
+        assert!(admits(0, 20 * GIB, None, Some(30 * GIB), min_free));
+        assert!(!admits(5 * GIB, 5 * GIB, None, Some(30 * GIB), min_free));
+        // Both unknown → fail-open to the old sole-only behavior.
+        assert!(admits(0, 99 * GIB, None, None, min_free));
+        assert!(!admits(1, 1 * GIB, None, None, min_free));
+    }
 
     fn sample() -> ActiveGateway {
         ActiveGateway {
@@ -786,6 +876,10 @@ mod tests {
             std::env::set_var("ROZUM_GATEWAY_RAM_BUDGET_BYTES", budget_bytes.to_string());
             std::env::remove_var("ROZUM_GATEWAY_RAM_BUDGET_FRAC");
             std::env::remove_var("ROZUM_ALLOW_CONCURRENT_RESIDENT");
+            // These tests exercise the cross-process LEDGER lever; pin actual-available RAM huge so the
+            // separate free-RAM lever never interferes (it has its own pure tests). Override cleared by
+            // `residency_env_clear`.
+            std::env::set_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES", (1u64 << 60).to_string());
         }
         dir
     }
@@ -797,6 +891,7 @@ mod tests {
             std::env::remove_var("XDG_STATE_HOME");
             std::env::remove_var("ROZUM_GATEWAY_RESIDENCY_WAIT_SECS");
             std::env::remove_var("ROZUM_GATEWAY_RAM_BUDGET_BYTES");
+            std::env::remove_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES");
         }
     }
 
@@ -829,6 +924,23 @@ mod tests {
             .expect("sole model never denied")
             .expect("a guard for the sole model");
         drop(g);
+        residency_env_clear(&dir);
+    }
+
+    #[test]
+    fn residency_refuses_even_sole_model_that_overcommits_actual_free_ram() {
+        let _env = POISON_ENV_LOCK.lock().unwrap();
+        // Huge budget (ledger lever is permissive) but only ~10 GiB ACTUALLY free → a sole 20 GiB
+        // model is REFUSED, because loading it would overcommit the host (jetsam/reboot). This is the
+        // hole the free-RAM lever closes that the reserved-footprint ledger alone could not.
+        let dir = residency_env(1000 * GB);
+        unsafe {
+            std::env::set_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES", (10 * GB).to_string());
+            std::env::set_var("ROZUM_GATEWAY_MIN_FREE_RAM_BYTES", (3 * GB).to_string());
+        }
+        let denied = acquire_residency("big/model", 20 * GB);
+        assert!(denied.is_err(), "20 GiB must be refused with only 10 GiB free, even as the sole model");
+        unsafe { std::env::remove_var("ROZUM_GATEWAY_MIN_FREE_RAM_BYTES") }
         residency_env_clear(&dir);
     }
 
