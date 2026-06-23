@@ -57,13 +57,15 @@ echo "  wrote: $(echo "$WROTE" | tr '\n' ' ')"
 # Make WORK a cargo WORKSPACE ROOT so `cargo` does NOT walk UP the tree and pick up a stray parent
 # Cargo.toml (e.g. a leftover in /tmp) as the workspace — which would fail the build spuriously.
 [ -f "$WORK/Cargo.toml" ] && ! grep -q '\[workspace\]' "$WORK/Cargo.toml" && printf '\n[workspace]\n' >> "$WORK/Cargo.toml"
-build_ok(){ ( cd "$WORK" && cargo build -q 2>"$WORK/build.err" ); }
-if build_ok; then
-  echo "  ✅ the planner's solution BUILDS as-is — no executor needed"
+# Verify = build + `cargo run -- <VERIFY_ARG>` whose output must EQUAL VERIFY_EXPECT (defaults: hello/olleh).
+VERIFY_ARG="${VERIFY_ARG:-hello}"; VERIFY_EXPECT="${VERIFY_EXPECT:-olleh}"
+verify(){ ( cd "$WORK" && cargo build -q 2>"$WORK/build.err" && out="$(timeout 60 cargo run -q -- "$VERIFY_ARG" 2>/dev/null)" && [ "$out" = "$VERIFY_EXPECT" ] ); }
+if verify; then
+  echo "  ✅ the planner's solution WORKS as-is (build + run '$VERIFY_ARG' = '$VERIFY_EXPECT') — no executor needed"
 else
-  echo "═══ STAGE 2b — EXECUTOR ($AGENT @ $EXECUTOR): fix the build ═══"
-  ERR="$(tail -8 "$WORK/build.err" 2>/dev/null)"
-  FIX_PROMPT="There is a Rust project in the current directory that does not build. Fix it so that \"cargo run -- hello\" works. Make the minimal change. The build error is:
+  echo "═══ STAGE 2b — EXECUTOR ($AGENT @ $EXECUTOR): fix until it works ═══"
+  ERR="$(tail -10 "$WORK/build.err" 2>/dev/null); got=$( ( cd "$WORK" && timeout 60 cargo run -q -- "$VERIFY_ARG" 2>&1 ) | tail -3 )"
+  FIX_PROMPT="There is a Rust project in the current directory. It must make \"cargo run -- $VERIFY_ARG\" print exactly \"$VERIFY_EXPECT\", but it does not (build error or wrong output below). Fix it so it does. Make the minimal change.
 $ERR"
   ( cd "$WORK" && case "$AGENT" in
       codex)    "$BIN" launch --model "$EXECUTOR" codex exec "$FIX_PROMPT" --dangerously-bypass-approvals-and-sandbox ;;
@@ -74,5 +76,8 @@ $ERR"
   stop_gw
 fi
 echo "═══ RESULT (in $WORK) ═══"
-( cd "$WORK" && ls -1 *.toml src/*.rs 2>/dev/null; echo "--- cargo run -- hello ---"; timeout 60 cargo run -- hello 2>&1 | tail -2 )
+( cd "$WORK" && ls -1 *.toml src/*.rs 2>/dev/null
+  echo "--- cargo run -- $VERIFY_ARG (expect: $VERIFY_EXPECT) ---"
+  out="$(timeout 60 cargo run -q -- "$VERIFY_ARG" 2>&1)"; echo "$out" | tail -3
+  [ "$out" = "$VERIFY_EXPECT" ] && echo "  ✅ PASS" || echo "  ❌ FAIL" )
 echo "kept: $WORK"
