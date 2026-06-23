@@ -3552,9 +3552,36 @@ mod inner {
     /// `tojson(indent=4, ensure_ascii=False)`; minijinja's `tojson` rejects the `ensure_ascii` kwarg
     /// ("unknown keyword argument 'ensure_ascii'"), and Rust's tojson is already unicode-aware, so
     /// dropping it is a no-op. Only touches templates that contain it (others render unchanged).
-    fn sanitize_chat_template(t: &str) -> String {
-        if !t.contains("ensure_ascii") {
+    /// gpt-oss's harmony template defaults `reasoning_effort = "medium"` (our
+    /// `ApplyChatTemplateArgs` doesn't pass it), so the model emits a substantial chain-of-thought
+    /// in its `analysis` channel before EVERY tool call. Across a multi-turn agentic loop that
+    /// accumulates into RUN_TIMEOUTs (the instruction-trim cut it ~3-5× by shrinking the context;
+    /// this cuts the reasoning at its source). `ROZUM_GPTOSS_REASONING` (`low`|`medium`|`high`,
+    /// default `low` — rozum runs gpt-oss for agentic coding where the tasks are simple) rewrites
+    /// the template's default. Pure core split out so it is testable without env.
+    fn apply_gptoss_reasoning(t: &str) -> String {
+        let lvl = std::env::var("ROZUM_GPTOSS_REASONING").ok();
+        let lvl = lvl.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("low");
+        apply_reasoning_level(t, lvl)
+    }
+
+    pub(crate) fn apply_reasoning_level(t: &str, level: &str) -> String {
+        // Only `low`/`high` rewrite; `medium` IS the template default (no-op), and an unknown
+        // value leaves it untouched. The match is the harmony default-set, distinct from the
+        // doc comment `defaults to "medium"` (which has no `= `).
+        if !matches!(level, "low" | "high") {
             return t.to_string();
+        }
+        t.replace(
+            "reasoning_effort = \"medium\"",
+            &format!("reasoning_effort = \"{level}\""),
+        )
+    }
+
+    fn sanitize_chat_template(t: &str) -> String {
+        let t = apply_gptoss_reasoning(t);
+        if !t.contains("ensure_ascii") {
+            return t;
         }
         t.replace(", ensure_ascii=False", "")
             .replace(",ensure_ascii=False", "")
@@ -4072,6 +4099,24 @@ mod tests {
         // A `{` in ordinary prose / a code example (no leading "name") is NOT a tool call.
         assert_eq!(find_loose_tool_json("the struct is { x: 1 }"), None);
         assert_eq!(find_loose_tool_json(r#"{"file_path":"a","content":"b"}"#), None);
+    }
+
+    #[test]
+    fn gptoss_reasoning_rewrites_only_for_low_high() {
+        use super::inner::apply_reasoning_level;
+        // The harmony default-set line, like the real gpt-oss chat template.
+        let tpl = "{%- if reasoning_effort is not defined %}\n  {%- set reasoning_effort = \"medium\" %}\n{%- endif %}\nReasoning effort defaults to \"medium\".";
+        // low/high rewrite the assignment...
+        assert!(apply_reasoning_level(tpl, "low").contains("reasoning_effort = \"low\""));
+        assert!(!apply_reasoning_level(tpl, "low").contains("reasoning_effort = \"medium\""));
+        assert!(apply_reasoning_level(tpl, "high").contains("reasoning_effort = \"high\""));
+        // ...but the doc-comment `defaults to "medium"` (no `= `) is untouched.
+        assert!(apply_reasoning_level(tpl, "low").contains("defaults to \"medium\""));
+        // medium = the template default → no-op; unknown → leave untouched.
+        assert_eq!(apply_reasoning_level(tpl, "medium"), tpl);
+        assert_eq!(apply_reasoning_level(tpl, "nonsense"), tpl);
+        // A non-harmony template (no reasoning_effort default) is unchanged for any level.
+        assert_eq!(apply_reasoning_level("hello {{ x }}", "low"), "hello {{ x }}");
     }
 
     #[test]

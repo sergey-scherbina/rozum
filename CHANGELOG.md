@@ -1,5 +1,21 @@
 # Changelog
 
+## mlx — gpt-oss reasoning effort default `low` (the residual-timeout cause)
+Completed: 2026-06-23
+
+WHY gpt-oss reasons long (the residual ~1/3 codex×gpt-oss timeouts): its harmony chat template
+defaults `reasoning_effort = "medium"` *"if not defined"*, and `ApplyChatTemplateArgs` never passes
+it → gpt-oss always gets **`Reasoning: medium`** and emits a substantial `analysis` chain-of-thought
+before EVERY tool call; the multi-turn loop accumulates into RUN_TIMEOUTs. (`enable_thinking=false`
+is unrelated — it governs how *prior* messages' `thinking` render.) The reasoning is productive, not
+a loop — it scaled 3-5× with context (the instruction-trim), which a loop wouldn't.
+
+- `apply_reasoning_level` (in `sanitize_chat_template`) rewrites the template's `reasoning_effort =
+  "medium"` default to `ROZUM_GPTOSS_REASONING` (`low`|`medium`|`high`, **default `low`** — rozum runs
+  gpt-oss for agentic coding where medium CoT is wasted on simple tasks). String-substitution on the
+  template (no fork rev-bump); `medium` is a no-op; non-harmony templates untouched. Pure
+  `apply_reasoning_level` unit-tested; `--features mlx-native` compiles + the existing suite green.
+
 ## gateway — codex instruction-lean for load-sensitive models (help gpt-oss deliver)
 Completed: 2026-06-22
 

@@ -148,5 +148,22 @@ codex×gpt-oss with the trim, vs the 0/3 baseline:
 The instruction-trim recovers BOTH create-from-scratch cells from 0/3 to ~2/3 **and is 3-5× faster**
 — a 1/3-size context = far fewer tokens, which also cuts the long-reasoning timeouts. Confirms the
 bisection (context size was the dominant breaker). Residual ~1/3 failures are the model occasionally
-going down a long reasoning path → timeout (secondary lever: lower gpt-oss's reasoning effort —
-separate task). Qwen3.6-35B keeps codex's full instructions verbatim → no regression. Shipped on master.
+going down a long reasoning path → timeout. Qwen3.6-35B keeps codex's full instructions verbatim →
+no regression. Shipped on master.
+
+## Secondary lever — gpt-oss reasoning effort (the residual-timeout cause)
+
+WHY gpt-oss reasons long, isolated from the model's own chat template: harmony defaults
+`reasoning_effort = "medium"` *"if not defined"*, and our `ApplyChatTemplateArgs` never passes it
+(it carries `tools`/`enable_thinking` but no reasoning field) → gpt-oss always gets **`Reasoning:
+medium`** in its system prompt and emits a substantial `analysis` chain-of-thought before EVERY
+tool call; the multi-turn agentic loop accumulates that into RUN_TIMEOUTs. `enable_thinking=false`
+is unrelated (it governs how *prior* messages' `thinking` fields render, not current effort). The
+reasoning is *productive*, not a loop — it scaled 3-5× with context (the instruction-trim above),
+which a degenerate loop would not.
+
+Fix: `apply_reasoning_level` (in `sanitize_chat_template`) rewrites the template's `reasoning_effort
+= "medium"` default to `ROZUM_GPTOSS_REASONING` (`low`|`medium`|`high`, **default `low`** — rozum runs
+gpt-oss for agentic coding, where the tasks are simple and medium CoT is wasted). No fork rev-bump
+(string-substitution on the template, not an args field); `medium` is a no-op (the template default);
+non-harmony templates are untouched. Pure `apply_reasoning_level` unit-tested. Validation pending.
