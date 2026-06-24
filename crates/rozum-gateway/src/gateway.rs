@@ -585,9 +585,13 @@ impl Switchboard {
         self.resume.notify_waiters();
     }
 
-    /// In-place model/backend swap: drain → drop old (frees RAM) → build new →
-    /// bump generation → resume. Sequential, never two models resident. On build
-    /// failure the spec reverts so the next request lazily reloads the old model.
+    /// In-place model swap. With multislot ON (default) this is **cache-when-fits**: if the target
+    /// is already a warm resident it is promoted with no rebuild, and the old primary is kept warm
+    /// when the planner says both fit — so a later switch back (or the next run / the matrix) reuses
+    /// the resident copy instead of paying a full reload. When they don't fit (or multislot is off /
+    /// a custom backend / a different n_ctx) it falls back to the destructive single-resident swap
+    /// (drain → drop old → build new). Co-residency is RAM-gated by the same planner the warm cache
+    /// uses (reboot-safe) and was proven crash-free (`tests/mlx_evals.rs` co-residency probe).
     async fn switch(
         &self,
         model: String,
@@ -616,19 +620,32 @@ impl Switchboard {
             });
         }
         self.begin_drain().await?;
-        let old = self.spec.lock().unwrap().clone();
-        let new = ModelSpec {
-            model_id: model.clone(),
-            n_ctx: n_ctx.unwrap_or(old.n_ctx),
-            backend,
+        let out = if multislot_enabled() {
+            self.switch_cached(&builder, model, n_ctx, backend).await
+        } else {
+            let old = self.spec.lock().unwrap().clone();
+            let new = ModelSpec { model_id: model, n_ctx: n_ctx.unwrap_or(old.n_ctx), backend };
+            self.swap_destructive(&builder, old, new).await
         };
-        // Drop the current model first so the new one never coexists with it.
+        self.end_drain();
+        out
+    }
+
+    /// The destructive single-resident swap: drop the old model first (frees RAM — they never
+    /// coexist), build the new one, bump generation. On build failure the spec reverts so the next
+    /// request lazily reloads the old model. Caller must hold the drain (`begin_drain`).
+    async fn swap_destructive(
+        &self,
+        builder: &BackendBuilder,
+        old: ModelSpec,
+        new: ModelSpec,
+    ) -> Result<u64, String> {
         *self.backend.write().unwrap() = None;
         *self.spec.lock().unwrap() = new.clone();
         crate::obs::log_event(json!({
             "event": "gateway_switch_start", "from": old.model_id, "to": new.model_id, "n_ctx": new.n_ctx,
         }));
-        let out = match builder(new.model_id.clone(), new.n_ctx, new.backend.clone()).await {
+        match builder(new.model_id.clone(), new.n_ctx, new.backend.clone()).await {
             Some(b) => {
                 *self.backend.write().unwrap() = Some(b);
                 let g = self.bump_and_republish(&new);
@@ -638,16 +655,198 @@ impl Switchboard {
                 Ok(g)
             }
             None => {
-                // Revert so a lazy reload restores the previous model on demand.
                 *self.spec.lock().unwrap() = old;
+                crate::obs::log_event(json!({
+                    "event": "gateway_switch_failed", "model": new.model_id,
+                }));
+                Err(format!("failed to load model '{}'", new.model_id))
+            }
+        }
+    }
+
+    /// Drop every IDLE warm resident (frees their RAM), restoring the single-resident invariant
+    /// before a destructive swap. A busy warm model (in-flight > 0) is left in place.
+    async fn evict_all_idle_warm(&self) {
+        let mut warm = self.warm.lock().await;
+        let victims: Vec<String> = warm
+            .iter()
+            .filter(|(_, e)| e.handle.inflight.load(Ordering::SeqCst) == 0)
+            .map(|(m, _)| m.clone())
+            .collect();
+        for m in victims {
+            if let Some(removed) = warm.remove(&m) {
+                let b = removed.backend;
+                tokio::task::spawn_blocking(move || drop(b)); // join the !Send worker off-thread
+                crate::obs::log_event(json!({ "event": "warm_evicted", "model": m }));
+            }
+        }
+    }
+
+    /// Republish this process's TOTAL reservation (primary + the current warm set) to the host
+    /// ledger, counting the process-shared activation reserve once. Caller holds the `warm` guard.
+    fn republish_warm_reservation(
+        &self,
+        primary_id: &str,
+        warm: &std::collections::HashMap<String, WarmEntry>,
+    ) {
+        let primary_fp = (self.warm_cfg.weight)(primary_id).unwrap_or(0);
+        let warm_fps: Vec<u64> = warm.values().map(|e| e.weight_bytes).collect();
+        crate::share::update_my_reservation(primary_id, published_reservation(primary_fp, &warm_fps));
+    }
+
+    /// Cache-when-fits swap (multislot on). Promotes a warm target with no rebuild; otherwise plans
+    /// whether the old primary can stay resident (warm) while the target builds. Falls back to the
+    /// warm-clearing destructive swap when the pair can't co-reside or the swap isn't cacheable.
+    async fn switch_cached(
+        &self,
+        builder: &BackendBuilder,
+        model: String,
+        n_ctx: Option<u32>,
+        backend: Option<String>,
+    ) -> Result<u64, String> {
+        let old = self.spec.lock().unwrap().clone();
+        let new_n_ctx = n_ctx.unwrap_or(old.n_ctx);
+        let new = ModelSpec { model_id: model.clone(), n_ctx: new_n_ctx, backend: backend.clone() };
+        let now = crate::share::now_unix();
+
+        let old_weight = (self.warm_cfg.weight)(&old.model_id);
+        let new_weight = (self.warm_cfg.weight)(&model);
+        // Cacheable only for a plain local model swap whose footprints we know and whose n_ctx
+        // matches the warm set (warm residents are all built at one n_ctx). Otherwise restore the
+        // single-resident invariant (drop every idle warm) and do the destructive swap.
+        let cacheable = backend.is_none()
+            && new_n_ctx == old.n_ctx
+            && model != old.model_id
+            && old_weight.is_some()
+            && new_weight.is_some();
+        if !cacheable {
+            self.evict_all_idle_warm().await;
+            let out = self.swap_destructive(builder, old, new.clone()).await;
+            if out.is_ok() {
+                let warm = self.warm.lock().await;
+                self.republish_warm_reservation(&new.model_id, &warm);
+            }
+            return out;
+        }
+        let old_weight = old_weight.unwrap();
+        let new_weight = new_weight.unwrap();
+        let primary_id = old.model_id.clone();
+
+        let mut warm = self.warm.lock().await;
+
+        // CASE A — the target is already a warm resident: promote it to primary with NO rebuild and
+        // demote the old primary into the warm set. They were already co-resident, so this is a
+        // memory-neutral relabeling (the win that makes a switch-back / re-run instant).
+        if let Some(entry) = warm.remove(&model) {
+            let new_primary = entry.backend.clone();
+            let old_backend = { self.backend.write().unwrap().replace(new_primary) };
+            if let Some(ob) = old_backend {
+                warm.insert(
+                    primary_id.clone(),
+                    WarmEntry { backend: ob, weight_bytes: old_weight, handle: WarmHandle::new(now) },
+                );
+            }
+            *self.spec.lock().unwrap() = new.clone();
+            let g = self.bump_and_republish(&new);
+            self.republish_warm_reservation(&new.model_id, &warm);
+            self.usage.record(&model, new_weight, now);
+            crate::obs::log_event(json!({
+                "event": "gateway_switch_promote", "from": primary_id, "to": new.model_id, "generation": g,
+            }));
+            return Ok(g);
+        }
+
+        // CASE B — the target must be built. Plan whether the old primary (and existing warm) can
+        // stay resident alongside it. The old primary is idle here (we drained), so it's evictable.
+        let mut residents = vec![crate::resident::ResidentInfo {
+            model: primary_id.clone(),
+            weight_bytes: old_weight,
+            busy: false,
+        }];
+        for (m, e) in warm.iter() {
+            residents.push(crate::resident::ResidentInfo {
+                model: m.clone(),
+                weight_bytes: e.weight_bytes,
+                busy: e.handle.inflight.load(Ordering::SeqCst) > 0,
+            });
+        }
+        let req = crate::resident::ResidentRequest {
+            requested: &model,
+            requested_weight: new_weight,
+            residents: &residents,
+            process_reserve_bytes: (self.warm_cfg.reserve)(),
+            budget_bytes: (self.warm_cfg.budget)(),
+        };
+        let plan = crate::resident::plan_residency(&req, |m| self.usage.utility(m, now));
+        let drop_old = plan.oversubscribed || plan.evict.iter().any(|m| *m == primary_id);
+
+        // Evict the planned idle warm victims (not the primary — handled via `drop_old`) BEFORE the
+        // build so it never coexists with models the budget can't hold (overcommit-safe). On
+        // oversubscription, free the whole warm set (thrash).
+        let evict: Vec<String> = if plan.oversubscribed {
+            warm.keys().cloned().collect()
+        } else {
+            plan.evict.iter().filter(|m| **m != primary_id).cloned().collect()
+        };
+        for victim in evict {
+            if let Some(removed) = warm.remove(&victim) {
+                if removed.handle.inflight.load(Ordering::SeqCst) == 0 {
+                    let b = removed.backend;
+                    tokio::task::spawn_blocking(move || drop(b));
+                    crate::obs::log_event(json!({ "event": "warm_evicted", "model": victim }));
+                } else {
+                    warm.insert(victim, removed); // a busy warm model can't be dropped — keep it
+                }
+            }
+        }
+
+        // Free the old primary up-front when it can't co-reside with the target.
+        if drop_old {
+            let ob = { self.backend.write().unwrap().take() };
+            if let Some(b) = ob {
+                tokio::task::spawn_blocking(move || drop(b));
+            }
+        }
+
+        match builder(model.clone(), new_n_ctx, None).await {
+            Some(b) => {
+                if !drop_old {
+                    // Keep the old primary resident as a warm secondary (the cache).
+                    let ob = { self.backend.read().unwrap().clone() };
+                    if let Some(ob) = ob {
+                        warm.insert(
+                            primary_id.clone(),
+                            WarmEntry {
+                                backend: ob,
+                                weight_bytes: old_weight,
+                                handle: WarmHandle::new(now),
+                            },
+                        );
+                    }
+                }
+                *self.backend.write().unwrap() = Some(b);
+                *self.spec.lock().unwrap() = new.clone();
+                let g = self.bump_and_republish(&new);
+                self.republish_warm_reservation(&new.model_id, &warm);
+                self.usage.record(&model, new_weight, now);
+                crate::obs::log_event(json!({
+                    "event": "gateway_switch_cached", "from": primary_id, "to": new.model_id,
+                    "kept_old_warm": !drop_old, "generation": g,
+                }));
+                Ok(g)
+            }
+            None => {
+                if drop_old {
+                    // The old model was freed → revert the spec so the next request lazily reloads it.
+                    *self.spec.lock().unwrap() = old;
+                }
+                // else: the old primary is still resident and the spec is unchanged → keep serving it.
                 crate::obs::log_event(json!({
                     "event": "gateway_switch_failed", "model": new.model_id,
                 }));
                 Err(format!("failed to load model '{model}'"))
             }
-        };
-        self.end_drain();
-        out
+        }
     }
 
     /// True while a model is resident (vs freed by `unload`/idle-unload).
@@ -5712,6 +5911,95 @@ mod tests {
         assert!(
             !sb.draining.load(Ordering::SeqCst),
             "drain cleared after failure"
+        );
+    }
+
+    // ── Cache-when-fits switch (multislot Phase 2: promote-from-warm + keep-old-warm) ───────
+
+    /// A builder that counts how many times it actually BUILDS a model — proves a promote reuses the
+    /// warm resident (no rebuild) while a co-reside build invokes it exactly once.
+    fn counting_builder(calls: Arc<AtomicU64>) -> BackendBuilder {
+        Arc::new(move |_m, _n, _b| {
+            let c = Arc::clone(&calls);
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Some(Arc::new(HelloBackend::new()) as Arc<dyn ChatBackend>)
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn switch_keeps_old_primary_warm_when_both_fit() {
+        // Budget 16; model-old(2) + warm-b(2) co-reside → switching to warm-b keeps model-old warm
+        // (the cache) instead of dropping it, so a switch back is free.
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(16, &[("model-old", 2), ("warm-b", 2)]));
+        let g0 = sb.generation();
+        let g1 = sb.switch("warm-b".into(), None, None).await.unwrap();
+        assert_eq!(g1, g0 + 1, "generation bumps on a cached switch");
+        assert_eq!(sb.model_id(), "warm-b", "target is now primary");
+        assert!(sb.current().is_some(), "target is resident");
+        assert!(
+            sb.warm.lock().await.contains_key("model-old"),
+            "the old primary is kept warm (cache-when-fits), not dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_promotes_a_warm_target_without_rebuilding() {
+        // model-old(2) primary; warm-b(2) warmed first (1 build). Switching to warm-b PROMOTES the
+        // resident copy — no extra build — and demotes model-old into the warm set.
+        let calls = Arc::new(AtomicU64::new(0));
+        let sb = test_sb_cfg(
+            Some(counting_builder(Arc::clone(&calls))),
+            true,
+            warm_cfg(16, &[("model-old", 2), ("warm-b", 2)]),
+        );
+        drop(sb.enter(Some("warm-b")).await.expect("warm-b warmed")); // build #1, then idle
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "warming built warm-b once");
+        let warm_arc = sb.warm.lock().await.get("warm-b").unwrap().backend.clone();
+
+        let g0 = sb.generation();
+        let g1 = sb.switch("warm-b".into(), None, None).await.unwrap();
+        assert_eq!(g1, g0 + 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "promote did NOT rebuild the target");
+        assert_eq!(sb.model_id(), "warm-b", "target promoted to primary");
+        assert!(
+            Arc::ptr_eq(&warm_arc, &sb.current().unwrap()),
+            "the promoted primary IS the exact warm backend (no rebuild)"
+        );
+        assert!(
+            sb.warm.lock().await.contains_key("model-old"),
+            "the old primary is demoted into the warm set"
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_drops_old_when_target_cannot_coreside() {
+        // Budget 4; model-old(3) + big(3) = 6 > 4 → can't co-reside → the old model is dropped (the
+        // destructive swap), NOT kept warm.
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(4, &[("model-old", 3), ("big", 3)]));
+        sb.switch("big".into(), None, None).await.unwrap();
+        assert_eq!(sb.model_id(), "big");
+        assert!(sb.current().is_some(), "the big model is resident as sole primary");
+        assert!(
+            !sb.warm.lock().await.contains_key("model-old"),
+            "old is dropped (couldn't co-reside), not kept warm"
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_clears_warm_on_a_noncacheable_swap() {
+        // A different n_ctx is not cacheable (warm residents share one n_ctx) → the warm set is
+        // cleared (RAM freed) and the switch is destructive.
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(16, &[("model-old", 2), ("warm-b", 2)]));
+        drop(sb.enter(Some("warm-b")).await.expect("warm-b warmed"));
+        assert!(sb.warm.lock().await.contains_key("warm-b"));
+        sb.switch("other".into(), Some(200), None).await.unwrap();
+        assert_eq!(sb.model_id(), "other");
+        assert_eq!(sb.n_ctx(), 200);
+        assert!(
+            sb.warm.lock().await.is_empty(),
+            "the warm set is cleared before a non-cacheable destructive swap"
         );
     }
 
