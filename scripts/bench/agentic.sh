@@ -227,6 +227,11 @@ echo
 idx=0
 for spec in "${MODELS[@]}"; do
   port=$((PORT_BASE + idx)); idx=$((idx + 1)); base="http://127.0.0.1:$port"
+  # CSV-safe model label: a pipeline spec ("A,B") has a comma that would split the CSV's
+  # comma-delimited columns (corrupting the model column AND every naive `-F,` reader below —
+  # the footprint backfill, `column -s,`, the summary). Replace it with `+` so every row keeps
+  # exactly 13 fields; the label reads "A+B" (a pipeline). The full spec stays in `$spec`.
+  spec_csv="${spec//,/+}"
   glog="$OUT/runs/${spec//[:\/]/_}.gateway.log"
   echo "================ model: $spec  (port $port) ================"
 
@@ -316,7 +321,7 @@ for spec in "${MODELS[@]}"; do
         "$agent" "$task" "$secs" "$tflag" "$pass" "$agent_mb" "$peak_cpu" "$turns" "$tools"
       echo "$detail"
       printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$agent" "$spec" "$task" "$diff" "$secs" "$pass" "$rc" "$tmo" "$turns" "$tools" "$agent_mb" "$peak_cpu" "" >> "$CSV"
+        "$agent" "$spec_csv" "$task" "$diff" "$secs" "$pass" "$rc" "$tmo" "$turns" "$tools" "$agent_mb" "$peak_cpu" "" >> "$CSV"
 
       [ "${KEEP:-0}" = 1 ] && echo "    kept: $work" || rm -rf "$work"
     done
@@ -345,7 +350,7 @@ for spec in "${MODELS[@]}"; do
   # remove_memory_object race).
   sleep "$GPU_SETTLE"
   foot=$(grep -m1 'peak memory footprint' "$glog" | awk '{printf "%.0f", $1/1048576}')
-  awk -F, -v m="$spec" -v f="${foot:-}" 'BEGIN{OFS=","} NR==1{print;next} $2==m{$13=f} {print}' "$CSV" > "$CSV.tmp" && mv "$CSV.tmp" "$CSV"
+  awk -F, -v m="$spec_csv" -v f="${foot:-}" 'BEGIN{OFS=","} NR==1{print;next} $2==m{$13=f} {print}' "$CSV" > "$CSV.tmp" && mv "$CSV.tmp" "$CSV"
   echo "  model footprint: ${foot:-n/a}MB"
   echo
 done
