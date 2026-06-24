@@ -37,6 +37,9 @@
 #   MAX_TURNS       Claude --max-turns (default 15 — caps the re-edit/retry loop
 #                   weak models fall into; see SPRINT.md "agentic-loop-root-cause")
 #   NCTX            override gateway context (default: omit -> model max, auto)
+#   REPAIR          verify-repair retries: on a verified FAIL, feed the real build/test error
+#                   back and let the agent fix it, same workdir, up to N more times (default 0).
+#                   The deterministic net for "almost-right code + hallucinated success".
 #   BENCH_BIN       rozum binary (default target/release/rozum, absolute)
 #   BENCH_OUT       output dir (default scripts/bench/results/agentic-<ts>)
 #   KEEP=1          keep per-run workdirs
@@ -52,6 +55,12 @@ RUN_TIMEOUT="${RUN_TIMEOUT:-600}"
 GEN_TIMEOUT="${GEN_TIMEOUT:-300}"
 MAX_TURNS="${MAX_TURNS:-15}"
 PORT_BASE="${BENCH_PORT_BASE:-8300}"
+# Verify-repair: after the agent reports "done", DON'T trust it — `verify_task` runs the real
+# build/test; if it FAILS, feed the actual compiler/test error back and let the agent fix it, up
+# to REPAIR more attempts (same workdir, files persist). 0 = off (legacy behavior). This is the
+# deterministic safety net for the "almost-right code + hallucinated success" failure (a missing
+# `;` the model never saw because it never really compiled). Helps every model; weak ones most.
+REPAIR="${REPAIR:-0}"
 OUT="${BENCH_OUT:-$here/results/agentic-$(date +%Y%m%d-%H%M%S)}"
 NCTX_OPT=(); [ -n "${NCTX:-}" ] && NCTX_OPT=(--n-ctx "$NCTX")
 
@@ -100,7 +109,7 @@ command -v cargo >/dev/null || { echo "need cargo" >&2; exit 1; }
 
 mkdir -p "$OUT/runs"
 CSV="$OUT/per-run.csv"
-echo "agent,model,task,difficulty,seconds,pass,rc,timeout,turns,tool_uses,agent_peak_mb,peak_cpu_pct,model_footprint_mb" > "$CSV"
+echo "agent,model,task,difficulty,seconds,pass,rc,timeout,turns,tool_uses,agent_peak_mb,peak_cpu_pct,model_footprint_mb,repairs" > "$CSV"
 declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -214,12 +223,41 @@ verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0
     esac )
 }
 
+# Ground-truth diagnostic for a failed cell — the REAL compiler/test output (not the model's
+# self-report). First check it compiles; if so, check the task's runtime behavior. This is the
+# exact text fed back to the agent for repair. Echoes a short, actionable diagnostic.
+repair_diagnostic() { # $1=task  $2=workdir
+  ( cd "$2" 2>/dev/null || exit 0
+    if ! berr="$(cargo build 2>&1)"; then
+      echo "The project does NOT compile. \`cargo build\` reports:"
+      printf '%s\n' "$berr" | grep -vE '^\s*Compiling|^\s*Finished|^\s*Updating|Blocking|Downloaded' | head -40
+      exit 0
+    fi
+    case "$1" in
+      test|debug)
+        echo "It compiles, but \`cargo test\` is RED:"
+        cargo test 2>&1 | grep -vE '^\s*Compiling|^\s*Finished|running [0-9]' | head -40 ;;
+      rpn)
+        o1="$(cargo run -q -- "3 4 + 5 *" 2>&1)"; o2="$(cargo run -q -- "5 1 2 + 4 * + 3 -" 2>&1)"
+        echo "It compiles, but the result is wrong: \`cargo run -- \"3 4 + 5 *\"\` printed '$o1' (must be 35); \`cargo run -- \"5 1 2 + 4 * + 3 -\"\` printed '$o2' (must be 14). Evaluate ANY valid RPN expression with a stack." ;;
+      *)
+        o="$(cargo run -q -- hello 2>&1)"
+        echo "It compiles, but \`cargo run -- hello\` printed '$o' (must be exactly: olleh)." ;;
+    esac )
+}
+
+# The repair instruction handed back to the agent — model-agnostic. Forbids starting over,
+# pins the exact error, and demands a REAL run before claiming success (kills the false "done").
+repair_prompt() { # $1=diagnostic
+  printf 'The Rust project in the CURRENT directory is NOT correct yet — do NOT start over or recreate files, FIX what is there.\n\n%s\n\nMake the minimal change to fix exactly this, then ACTUALLY RUN the build/test yourself and read the output. Only confirm success if the command really succeeded; if it still fails, keep fixing.' "$1"
+}
+
 # ── main loop ────────────────────────────────────────────────────────────────
 
 echo "rozum agentic benchmark (real rozum launch)"
 echo "  binary       : $BIN"
 echo "  agents       : ${AGENT_RUN[*]}    models: ${#MODELS[@]}    tasks: ${TASK_LIST[*]}"
-echo "  run timeout  : ${RUN_TIMEOUT}s   gen timeout: ${GEN_TIMEOUT}s   ctx: ${NCTX:-auto(max)}"
+echo "  run timeout  : ${RUN_TIMEOUT}s   gen timeout: ${GEN_TIMEOUT}s   ctx: ${NCTX:-auto(max)}   verify-repair: $([ "$REPAIR" -gt 0 ] && echo "ON (up to $REPAIR retries)" || echo off)"
 echo "  out          : $OUT"
 echo
 
@@ -268,60 +306,72 @@ for spec in "${MODELS[@]}"; do
       diff=${DIFF[$task]:-0}
       work="$(mktemp -d /tmp/rozum-agentic-XXXXXX)"
       setup_task "$task" "$work"
-      prompt="$(prompt_for "$task")"
       alog="$work/agent.log"; sfile="$work/samples.txt"
-      # Build the runner per agent. ALL THREE route through `rozum launch` (no --model): it
-      # reuses the resident shared gateway AND jails the agent (Seatbelt sandbox, default-on).
-      # claude via Anthropic env, codex via injected provider flags, opencode via a written
-      # provider config (+ `-m rozum/local`).
-      if [ "$agent" = claude ]; then
-        # --lean strips non-coding tools (incl. AskUserQuestion, which in headless `-p`
-        # can't be answered → a model that calls it to "verify" loops until the timeout)
-        # from claude's request: 33 tools / ~4.9K schema tokens → 4 / ~0.8K. Big win on a
-        # local model's context/KV/prefill, and fewer ways for a weak model to derail.
-        aargs=(claude -p "$prompt" --output-format stream-json --verbose
-               --dangerously-skip-permissions --max-turns "$MAX_TURNS")
-        runner=("$BIN" launch --no-channel-wakeup --no-piggyback --lean "${aargs[@]}")
-      elif [ "$agent" = codex ]; then
-        aargs=(codex exec "$prompt" --dangerously-bypass-approvals-and-sandbox)
-        runner=("$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}")
-      else  # opencode — `rozum launch` wires the gateway provider + -m rozum/local
-        aargs=(opencode run "$prompt")
-        runner=("$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}")
-      fi
+      prompt="$(prompt_for "$task")"
+      # Verify-repair loop. Attempt 1 = the task; if `verify_task` (the REAL build/test, not the
+      # model's self-report) FAILS, feed the actual compiler/test error back and let the agent fix
+      # it, in the SAME workdir, up to REPAIR more attempts. REPAIR=0 → exactly one attempt (legacy).
+      pass=0; repairs=0; secs_total=0; rc=0; turns="-"; tools="-"; tmo=0; detail=""
+      attempts=$(( REPAIR + 1 ))
+      for attempt in $(seq 1 "$attempts"); do
+        # Build the runner per agent from the CURRENT $prompt (task prompt, or the repair prompt on
+        # a retry). ALL THREE route through `rozum launch` (no --model): reuse the resident shared
+        # gateway + jail the agent (Seatbelt). claude via Anthropic env, codex via injected provider
+        # flags, opencode via a written provider config (+ `-m rozum/local`).
+        if [ "$agent" = claude ]; then
+          # --lean strips non-coding tools (incl. AskUserQuestion, which in headless `-p` can't be
+          # answered → a model that calls it to "verify" loops till timeout): 33 tools/~4.9K → 4/~0.8K.
+          aargs=(claude -p "$prompt" --output-format stream-json --verbose
+                 --dangerously-skip-permissions --max-turns "$MAX_TURNS")
+          runner=("$BIN" launch --no-channel-wakeup --no-piggyback --lean "${aargs[@]}")
+        elif [ "$agent" = codex ]; then
+          aargs=(codex exec "$prompt" --dangerously-bypass-approvals-and-sandbox)
+          runner=("$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}")
+        else  # opencode — `rozum launch` wires the gateway provider + -m rozum/local
+          aargs=(opencode run "$prompt")
+          runner=("$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}")
+        fi
 
-      start=$(perl -MTime::HiRes=time -e 'printf "%.2f", time')
-      ( cd "$work"; exec "${runner[@]}" ) </dev/null >"$alog" 2>&1 &
-      LP=$!
-      # Agent-tree RSS + (agent + gateway) CPU; the model's RAM is the gateway footprint.
-      ( while kill -0 "$LP" 2>/dev/null; do
-          read ar ac < <(tree_sample "$LP")
-          gc=$(ps -o pcpu= -p "$GW_PID" 2>/dev/null | tr -d ' '); gc=${gc:-0}
-          awk -v ar="${ar:-0}" -v ac="${ac:-0}" -v gc="$gc" 'BEGIN{printf "%d %.1f\n", ar, ac+gc}' >>"$sfile"
-          sleep 2
-        done ) & SAMP=$!
-      ( sleep "$RUN_TIMEOUT"; kill_descendants "$LP"; kill -TERM "$LP" 2>/dev/null ) & WD=$!
-      wait "$LP"; rc=$?
-      kill "$WD" "$SAMP" 2>/dev/null; wait "$SAMP" 2>/dev/null
-      secs=$(perl -MTime::HiRes=time -e 'printf "%.1f", time-'"$start")
-      tmo=$(awk -v s="$secs" -v t="$RUN_TIMEOUT" 'BEGIN{print (s>=t-2)?1:0}')
+        start=$(perl -MTime::HiRes=time -e 'printf "%.2f", time')
+        ( cd "$work"; exec "${runner[@]}" ) </dev/null >"$alog" 2>&1 &
+        LP=$!
+        # Agent-tree RSS + (agent + gateway) CPU; the model's RAM is the gateway footprint.
+        ( while kill -0 "$LP" 2>/dev/null; do
+            read ar ac < <(tree_sample "$LP")
+            gc=$(ps -o pcpu= -p "$GW_PID" 2>/dev/null | tr -d ' '); gc=${gc:-0}
+            awk -v ar="${ar:-0}" -v ac="${ac:-0}" -v gc="$gc" 'BEGIN{printf "%d %.1f\n", ar, ac+gc}' >>"$sfile"
+            sleep 2
+          done ) & SAMP=$!
+        ( sleep "$RUN_TIMEOUT"; kill_descendants "$LP"; kill -TERM "$LP" 2>/dev/null ) & WD=$!
+        wait "$LP"; rc=$?
+        kill "$WD" "$SAMP" 2>/dev/null; wait "$SAMP" 2>/dev/null
+        asecs=$(perl -MTime::HiRes=time -e 'printf "%.1f", time-'"$start")
+        secs_total=$(awk -v a="$secs_total" -v b="$asecs" 'BEGIN{printf "%.1f", a+b}')
+        tmo=$(awk -v s="$asecs" -v t="$RUN_TIMEOUT" 'BEGIN{print (s>=t-2)?1:0}')
+
+        detail="$(verify_task "$task" "$work" "$alog")"; pass=$([ $? = 0 ] && echo 1 || echo 0)
+        [ "$pass" = 1 ] && break
+        [ "$attempt" -lt "$attempts" ] || break   # last attempt — no more repair
+        repairs=$((repairs + 1))
+        diag="$(repair_diagnostic "$task" "$work")"
+        prompt="$(repair_prompt "$diag")"
+        echo "    ↻ repair $repairs/$REPAIR — verify FAILED, feeding the real build/test error back to $agent"
+      done
 
       agent_mb=$(awk '{if($1>m)m=$1}END{printf "%.0f", m/1024}' "$sfile" 2>/dev/null | tr -dc '0-9'); agent_mb=${agent_mb:-0}
       peak_cpu=$(awk '{if($2>m)m=$2}END{printf "%.0f", m}' "$sfile" 2>/dev/null | tr -dc '0-9'); peak_cpu=${peak_cpu:-0}
-
-      turns="-"; tools="-"
       if [ "$agent" = claude ]; then
         turns=$(grep -c '"type":"assistant"' "$alog" 2>/dev/null | tr -dc '0-9'); turns=${turns:-0}
         tools=$(grep -o '"type":"tool_use"' "$alog" 2>/dev/null | wc -l | tr -dc '0-9'); tools=${tools:-0}
       fi
 
-      detail="$(verify_task "$task" "$work" "$alog")"; pass=$([ $? = 0 ] && echo 1 || echo 0)
       [ "$tmo" = 1 ] && tflag=" (RUN_TIMEOUT)" || tflag=""
-      printf "  [%s] %-6s %ss%s  pass=%s  agent=%sMB  cpu=%s%%  turns=%s tools=%s\n" \
-        "$agent" "$task" "$secs" "$tflag" "$pass" "$agent_mb" "$peak_cpu" "$turns" "$tools"
+      rflag=""; [ "$repairs" -gt 0 ] && rflag=" repairs=$repairs"
+      printf "  [%s] %-6s %ss%s  pass=%s%s  agent=%sMB  cpu=%s%%  turns=%s tools=%s\n" \
+        "$agent" "$task" "$secs_total" "$tflag" "$pass" "$rflag" "$agent_mb" "$peak_cpu" "$turns" "$tools"
       echo "$detail"
-      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$agent" "$spec_csv" "$task" "$diff" "$secs" "$pass" "$rc" "$tmo" "$turns" "$tools" "$agent_mb" "$peak_cpu" "" >> "$CSV"
+      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$agent" "$spec_csv" "$task" "$diff" "$secs_total" "$pass" "$rc" "$tmo" "$turns" "$tools" "$agent_mb" "$peak_cpu" "" "$repairs" >> "$CSV"
 
       [ "${KEEP:-0}" = 1 ] && echo "    kept: $work" || rm -rf "$work"
     done
