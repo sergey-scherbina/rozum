@@ -1,5 +1,33 @@
 # Sprint
 
+- [ ] **verification-gated model chain — orchestration + generalized target (operator 2026-06-24)** —
+  spec: `docs/specs/pipeline-cascade.md` (§ full frame, § target, § tool curation). The chain = one
+  composite smarter "model": try a model → VERIFY against a `target` → if not met, escalate to the NEXT
+  model with (original task + best result so far) → … until met or chain exhausted; cloud tiers LAST.
+  **DONE so far (merry-tapir):** `rozum launch` deterministic verify-gate (`resolve_verify_cmd`/`run_verify`/
+  `repair_prompt` + the exec_agent loop, `25926aa`) re-invokes the SAME model with the real cargo error;
+  backend verifier role + repair in `LazyPipelineBackend` (`cfdefbf`); swap + MemAvailable admission keep
+  any N on 36 GB no-reboot. Proven: 1-model gate fires+bounds (4B couldn't fix a Cargo.toml; 35B-class
+  converges per solve.sh A/B). **TO BUILD, in priority:**
+  1. **Generalize `target`** (the KEY open question): abstract verification from "cargo build+test" to a
+     CI/CD-style target — kinds: command/script (exit 0, the strong deterministic case), predicate,
+     Q&A-with-known-answer (LLM-judge), Q&A-open → quality stage (LLM judge and/or human: variants /
+     yes-no / continue-stop / direction). Resolution precedence: explicit (`ROZUM_VERIFY` is the command
+     form — generalize) → guess-if-obvious → solicit ("pick from a list or give your own"). Deterministic
+     command-target first (it preserves no-false-success); open/human target later.
+  2. **Escalate ACROSS the chain** on persistent target-miss — switch gateway to the next model
+     (swap-fix) with (task + best result + the real error), not just re-invoke the same one; cloud last.
+  3. **Tool curation** per role/model — planner/verifier get NO write/exec tools (already `tools=[]` in
+     the tiers → make it the named policy); executor gets curated coding tools; smaller sets for weaker
+     models (`--lean` is the start); verifier may get only the target-check tool.
+  4. **Adaptive residency policy** — cache-when-fits vs swap-when-not as an explicit chain policy
+     (machinery exists: admission/footprint/MemAvailable/swap).
+  5. **Role-aware quality stats + auto-exclude** a consistently-bad model when an alternative exists
+     (extends `Learned`/`Verdict`/acceptance).
+  6. **Cloud-last ordering** with availability/limit checks + local fallback when cloud is down/over-limit.
+  Open design point to discuss: the human-in-the-loop target UX (agent interaction). Build order = 1→2
+  first (the generalized deterministic target + cross-chain escalation), then 3–6.
+
 - [x] **in-process model-swap bug — FIXED (merry-tapir 2026-06-24)** — the lazy in-process model-swap
   failure that broke `--model A,B` and `/control/switch` (executor's first decode → `mlx: eval failed`)
   is resolved. Fresh-boot `scripts/bench/pipeline-swap-repro.sh` settled it: a REAL MLX bug, not RAM

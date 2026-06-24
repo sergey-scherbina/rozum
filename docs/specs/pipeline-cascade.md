@@ -201,3 +201,40 @@ ACROSS the chain on persistent verify-failure — switch to the NEXT model with 
 not just re-invoke the same one; (b) cache-when-fits vs swap-when-not as an explicit residency policy for
 the chain; (c) role-aware quality stats + auto-exclude; (d) cloud-last ordering with availability/limit
 checks + local fallback. These layer onto the existing cascade/escalation + residency infrastructure.
+
+## Target — the generalized verification (operator, 2026-06-24)
+
+Verification must NOT assume we know the check (cargo build + test was the easy case — we knew it in
+advance). Generalize the acceptance criterion to a **target** (a CI/CD-style gate): the chain runs and
+escalates until the target is met. A `target` is one of:
+
+- **command / script** — exit 0 = pass. The deterministic case (`cargo test`, any CI step, a shell
+  predicate). What the `rozum launch` verify-gate does today; strongest (no false-success).
+- **condition / predicate** over the produced output or files.
+- **Q&A, known answer** — pose a question to (an LLM judge over) the result; the answer must match a known
+  expected value (exact, or judged-equivalent).
+- **Q&A, open** — no fixed answer → a quality-evaluation stage: an LLM judge and/or the **user**
+  (human-in-the-loop): present variants; ask yes/no, continue/stop, which direction, etc.
+
+**Target resolution** (precedence): (1) **explicit** — the user gives the target (command / script /
+condition / question; `ROZUM_VERIFY` is the command form today — generalize to the other kinds); (2)
+**guess** — infer an obvious target from context (a Cargo project → `cargo build [+ test]`; a "compute X"
+task → check the answer), only when confident; (3) **solicit** — when not obvious, ask a leading question
+("pick a target from this list, or give your own"), then proceed with the chosen one.
+
+The chain's escalation gate is exactly "target not yet met". The deterministic command-target keeps the
+no-false-success guarantee; the open/human target is the fallback when correctness isn't machine-checkable.
+
+## Tool curation (per role / per model)
+
+Which tools a model gets is a quality lever, not a constant — curate per role and per model:
+
+- **planner / verifier**: no execution/write tools — they reason/judge, they don't act (the backend
+  already sets `tools = []` for these tiers; make it the explicit, named policy).
+- **executor**: the real coding tools (write/edit/shell), but curated — a weak model derails on too many
+  tools or a proprietary edit format (measured: gpt-oss/codex V4A). `--lean` already strips non-coding
+  tools; extend to per-MODEL tool sets (smaller for weaker models; the verifier may get only the
+  target-check tool). Goal: the MINIMAL tools each role needs — fewer ways to derail, smaller context/KV.
+
+The deterministic command-target + role-curated tools are the near-term increments; the open / human-in-
+the-loop target and dynamic per-model tool sets are later refinements.
