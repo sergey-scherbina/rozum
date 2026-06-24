@@ -3304,6 +3304,83 @@ fn sandboxed_command(program_name: &str) -> std::process::Command {
 
 /// Build the agent child command (env wiring) and exec it, exiting with its code.
 /// `model_for_alias` is the model the gateway is actually serving.
+/// Index in `program` of the agent's task-prompt arg (the thing rewritten for a repair round):
+/// claude `-p/--print <prompt>`, codex `exec <prompt>`, opencode `run <prompt>`. `None` for
+/// interactive/unknown invocations → the verify-gate stays off (it needs a prompt to repair).
+fn agent_prompt_index(program: &[String]) -> Option<usize> {
+    let name = program.first().map(|s| s.rsplit('/').next().unwrap_or(s)).unwrap_or("");
+    let verb_at = |verbs: &[&str]| program.iter().position(|a| verbs.contains(&a.as_str()));
+    let after = |i: usize| (i + 1 < program.len() && !program[i + 1].starts_with('-')).then_some(i + 1);
+    match name {
+        "claude" => verb_at(&["-p", "--print"]).and_then(after),
+        "codex" => verb_at(&["exec"]).and_then(after),
+        "opencode" => verb_at(&["run"]).and_then(after),
+        _ => None,
+    }
+}
+
+/// The DETERMINISTIC verify command — the ground-truth gate that decides "solved", not the model's
+/// word (that is the false-success trap). `ROZUM_VERIFY` if set (`0`/`off`/empty disables); else
+/// auto-detected from the cwd (a Cargo project → `cargo build`, plus `cargo test` when tests exist).
+/// `None` → no gate: the agent runs once exactly as before.
+fn resolve_verify_cmd() -> Option<String> {
+    match std::env::var("ROZUM_VERIFY").ok().map(|v| v.trim().to_string()) {
+        Some(v) if matches!(v.as_str(), "0" | "off" | "false" | "") => return None,
+        Some(v) => return Some(v),
+        None => {}
+    }
+    let cwd = std::env::current_dir().ok()?;
+    if cwd.join("Cargo.toml").is_file() {
+        let has_tests = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("grep -rqs '#\\[test\\]' src tests 2>/dev/null")
+            .current_dir(&cwd)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        return Some(
+            if has_tests { "cargo build -q && cargo test -q" } else { "cargo build -q" }.to_string(),
+        );
+    }
+    None
+}
+
+/// Run the verify command in `cwd`. Returns `(passed, tail-of-the-real-output)` for the repair prompt.
+async fn run_verify(cmd: &str, cwd: &std::path::Path) -> (bool, String) {
+    let (cmd, cwd) = (cmd.to_string(), cwd.to_path_buf());
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("sh").arg("-c").arg(&cmd).current_dir(&cwd).output()
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok());
+    match out {
+        Some(o) => {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            let lines: Vec<&str> = s
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !t.starts_with("Compiling") && !t.starts_with("Finished") && !t.starts_with("Running")
+                })
+                .collect();
+            let tail = lines[lines.len().saturating_sub(40)..].join("\n");
+            (o.status.success(), tail)
+        }
+        None => (false, "verify command failed to run".to_string()),
+    }
+}
+
+/// The repair prompt for a re-invocation: the original task + the REAL error + a fix directive.
+fn repair_prompt(original: &str, err: &str) -> String {
+    format!(
+        "{original}\n\n[Your previous attempt did NOT pass the project's check. The exact error is \
+         below — do NOT start over, FIX the existing files with the minimal change, then make sure \
+         the check passes before you stop.]\n{err}"
+    )
+}
+
 async fn exec_agent(
     mut program: Vec<String>,
     model_for_alias: &str,
@@ -3317,75 +3394,115 @@ async fn exec_agent(
     if let Some(flags) = channel_flags {
         program.extend(flags);
     }
-    let (program_name, args) = program
-        .split_first()
-        .expect("clap requires at least one arg");
     let claude_alias = rozum::gateway::claude_model_alias(model_for_alias);
-    eprintln!("  → running: {} {}", program_name, args.join(" "));
-
-    // Gateway host: the host loopback normally, `host.docker.internal` under an active
-    // Docker jail (the container's own loopback isn't the host). Every URL below derives
-    // from `base`, so this one choke point makes them all container-correct.
+    // Gateway host: the host loopback normally, `host.docker.internal` under an active Docker jail.
     let base = format!("http://{}:{port}", sandbox_gateway_host());
-    // Optionally jail the agent (docs/specs/model-sandbox.md) — `sandboxed_command`
-    // returns the `sandbox-exec`/`docker run` wrapper when the jail is on, else a plain
-    // command; every later `cmd.args(...)` / `cmd.env(...)` appends to it.
-    let mut cmd = sandboxed_command(program_name);
-    cmd.args(args);
-    cmd.env("ANTHROPIC_BASE_URL", &base);
-    cmd.env("ANTHROPIC_AUTH_TOKEN", "rozum-local");
-    cmd.env_remove("ANTHROPIC_API_KEY");
-    // Tier-3 piggyback: export the launch's decision so the agent's mcp-proxy
-    // writer matches the launch-local proxy reader exactly (both on, or both off).
-    cmd.env("ROZUM_PIGGYBACK", if piggyback { "1" } else { "0" });
-    cmd.env("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
-    cmd.env("ANTHROPIC_MODEL", &claude_alias);
-    cmd.env("ANTHROPIC_DEFAULT_OPUS_MODEL", &claude_alias);
-    cmd.env("ANTHROPIC_DEFAULT_SONNET_MODEL", &claude_alias);
-    cmd.env("ANTHROPIC_DEFAULT_HAIKU_MODEL", &claude_alias);
-    cmd.env("OPENAI_BASE_URL", format!("{base}/v1"));
-    cmd.env("OPENAI_API_KEY", "rozum-local");
-    cmd.env("ROZUM_GATEWAY_URL", &base);
 
-    // Codex ignores `OPENAI_BASE_URL` — it needs an explicit model provider, and
-    // (≥ 0.137) the Responses API. Inject `-c` overrides on top of the user's config
-    // (their `~/.codex` is left intact) so `rozum launch codex` just works, like
-    // Claude does. Mirrors what the e2e runner sets.
-    let is_codex = program_name == "codex" || program_name.ends_with("/codex");
-    if is_codex {
-        let has_model = args
-            .iter()
-            .any(|a| a == "-m" || a == "--model" || a.starts_with("--model="));
-        cmd.args(codex_provider_flags(&base, has_model));
-        // Codex inherits the user's global `model_reasoning_effort` (often `xhigh`), which on a
-        // LOCAL model burns long reasoning chains for little gain — measured codex on Qwen3-30B-A3B
-        // at 7+ min/task. Default the rozum-launched codex to `medium`; skip if the user sets it.
-        if !args.iter().any(|a| a.contains("model_reasoning_effort")) {
-            cmd.args(["-c", "model_reasoning_effort=medium"]);
+    // Build the agent command from a (possibly repair-rewritten) program. A closure so the
+    // verify-gate can rebuild it each repair round; one-shot launches build it exactly once.
+    let build = |program: &[String]| -> std::process::Command {
+        let (program_name, args) = program.split_first().expect("clap requires at least one arg");
+        // Optionally jail the agent (docs/specs/model-sandbox.md); env/args append to the wrapper.
+        let mut cmd = sandboxed_command(program_name);
+        cmd.args(args);
+        cmd.env("ANTHROPIC_BASE_URL", &base);
+        cmd.env("ANTHROPIC_AUTH_TOKEN", "rozum-local");
+        cmd.env_remove("ANTHROPIC_API_KEY");
+        cmd.env("ROZUM_PIGGYBACK", if piggyback { "1" } else { "0" });
+        cmd.env("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
+        cmd.env("ANTHROPIC_MODEL", &claude_alias);
+        cmd.env("ANTHROPIC_DEFAULT_OPUS_MODEL", &claude_alias);
+        cmd.env("ANTHROPIC_DEFAULT_SONNET_MODEL", &claude_alias);
+        cmd.env("ANTHROPIC_DEFAULT_HAIKU_MODEL", &claude_alias);
+        cmd.env("OPENAI_BASE_URL", format!("{base}/v1"));
+        cmd.env("OPENAI_API_KEY", "rozum-local");
+        cmd.env("ROZUM_GATEWAY_URL", &base);
+        // Codex ignores OPENAI_BASE_URL — inject its provider + Responses API + a sane reasoning
+        // default (its global xhigh burns long chains on a local model). The user's ~/.codex is intact.
+        let is_codex = program_name == "codex" || program_name.ends_with("/codex");
+        if is_codex {
+            let has_model = args.iter().any(|a| a == "-m" || a == "--model" || a.starts_with("--model="));
+            cmd.args(codex_provider_flags(&base, has_model));
+            if !args.iter().any(|a| a.contains("model_reasoning_effort")) {
+                cmd.args(["-c", "model_reasoning_effort=medium"]);
+            }
         }
-        eprintln!("  → codex: routed at the rozum gateway (model_provider=rozum, wire_api=responses, reasoning=medium)");
+        // opencode reads providers from a config file — write one pointing at the gateway.
+        let is_opencode = program_name == "opencode" || program_name.ends_with("/opencode");
+        if is_opencode {
+            if let Some(path) = write_opencode_config(&base) {
+                cmd.env("OPENCODE_CONFIG", &path);
+            }
+            let has_model = args.iter().any(|a| a == "-m" || a == "--model" || a.starts_with("--model="));
+            if !has_model {
+                cmd.args(["-m", "rozum/local"]);
+            }
+        }
+        apply_rozum_agent_env(&mut cmd);
+        cmd
+    };
+
+    let program_name = program[0].clone();
+
+    // No rewritable task-prompt (interactive session / unknown agent) → no deterministic repair is
+    // possible → run the agent once, exactly as before.
+    let Some(pidx) = agent_prompt_index(&program) else {
+        eprintln!("  → running: {} {}", program_name, program[1..].join(" "));
+        spawn_agent_and_exit(build(&program), &program_name).await
+    };
+
+    // ── The deterministic verify-repair gate (the "soul"): the agent DRIVES; after it stops, rozum
+    // runs the ground-truth check (cargo etc. — NOT the model's word) in the cwd and, on failure,
+    // re-invokes the SAME agent with the REAL error appended, up to ROZUM_VERIFY_ROUNDS — so a model
+    // can't falsely "finish" on a broken build. Works for one model and for the --model role chain.
+    // The check is resolved AFTER each run, so a create-from-scratch project (no Cargo.toml at
+    // launch) is detected once the agent has created it.
+    let original_prompt = program[pidx].clone();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let rounds: usize =
+        std::env::var("ROZUM_VERIFY_ROUNDS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(2);
+    let mut verified: Option<bool> = None; // None = no gate ran (not a verifiable project)
+    let mut last_code = 1;
+    let mut announced = false;
+    for round in 0..=rounds {
+        let tag = if round > 0 { format!("   [repair round {round}]") } else { String::new() };
+        eprintln!("  → running: {} {}{tag}", program_name, program[1..].join(" "));
+        let mut cmd = build(&program);
+        last_code = tokio::task::spawn_blocking(move || cmd.status())
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .and_then(|s| s.code())
+            .unwrap_or(1);
+        // Resolve the check now — the project may have just been created this round.
+        let Some(vcmd) = resolve_verify_cmd() else { break };
+        if !announced {
+            eprintln!("rozum launch: verify-gate — `{vcmd}` (up to {rounds} repair round(s); ROZUM_VERIFY=0 to disable)");
+            announced = true;
+        }
+        let (ok, err) = run_verify(&vcmd, &cwd).await;
+        if ok {
+            verified = Some(true);
+            break;
+        }
+        verified = Some(false);
+        if round == rounds {
+            eprintln!("rozum launch: ❌ verify still failing after {rounds} repair round(s):");
+            eprintln!("{}", err.lines().take(8).collect::<Vec<_>>().join("\n"));
+            break;
+        }
+        eprintln!("rozum launch: ↻ verify FAILED — re-running {program_name} with the real error");
+        program[pidx] = repair_prompt(&original_prompt, &err);
     }
-
-    // opencode reads providers from a config file, not env. Write one that adds an
-    // OpenAI-compatible `rozum` provider at the gateway and point OPENCODE_CONFIG at it.
-    // opencode's own tools (edit/bash/read/…) are built in, so a provider-only config is
-    // enough. Default the model to `rozum/local` if the user didn't pass `-m`.
-    let is_opencode = program_name == "opencode" || program_name.ends_with("/opencode");
-    if is_opencode {
-        if let Some(path) = write_opencode_config(&base) {
-            cmd.env("OPENCODE_CONFIG", &path);
+    rozum::share::remove_lease(std::process::id());
+    match verified {
+        Some(true) => {
+            eprintln!("rozum launch: ✅ verify passed");
+            std::process::exit(0);
         }
-        let has_model = args
-            .iter()
-            .any(|a| a == "-m" || a == "--model" || a.starts_with("--model="));
-        if !has_model {
-            cmd.args(["-m", "rozum/local"]);
-        }
-        eprintln!("  → opencode: routed at the rozum gateway (provider=rozum, OpenAI-compatible)");
+        Some(false) => std::process::exit(if last_code != 0 { last_code } else { 1 }),
+        None => std::process::exit(last_code), // no verifiable project — a plain one-shot run
     }
-
-    apply_rozum_agent_env(&mut cmd);
-    spawn_agent_and_exit(cmd, program_name).await
 }
 
 /// Codex CLI `-c` overrides that point it at the local rozum gateway over the
