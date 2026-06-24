@@ -15,6 +15,12 @@
 #   critic   = MODELS[2] if ≥3 else MODELS[0] — interprets a real failure into a fix (35B/GLM)
 # (critic falls back to the planner — both are reasoning roles — and executor to the planner.)
 #
+# ORDER MATTERS — put your STRONGEST reasoner first (it plans, and critiques when N<3). The critic
+# drives convergence: it turns a real failure into the next fix. A WEAK critic gives useless/empty
+# guidance and the loop stalls. Measured A/B on rpn from the SAME buggy gpt-oss plan: critic=gpt-oss
+# → NOT SOLVED in 3 rounds; critic=Qwen3.6-35B → SOLVED in 2 (compile fix → arg-split fix →
+# stderr→stdout fix). So spend your best model on PLAN and CRITIC; the executor can be cheaper.
+#
 # Pipeline (per task):
 #   1. PLAN    planner → the complete solution as structured files (=== FILE: path ===).
 #   2. LAND    write_solution.py writes them (deterministic — most reliable for create-from-scratch).
