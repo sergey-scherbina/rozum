@@ -29,20 +29,20 @@ derivation (single + multi-model), deterministic verify-gate + repair, escalatio
 quality stats + auto-exclude, cloud-last by ordering, backend planner/executor/verifier roles. These are
 the deferred follow-ups (operator-triaged 2026-06-24, none urgent):
 
-- [ ] **chain-cache-when-fits** (NOW VIABLE — co-residency crash refuted) — cache a second (or Nth) chain
-  model resident instead of always swapping, when it FITS. The blocker was the belief that two MLX models
-  co-resident crash Metal (`kIOGPUCommandBufferCallbackErrorTimeout`); that is **REFUTED** by
-  `tests/mlx_evals.rs::coresidency_two_mlx_models_one_process` (commit `d63c9e4`): two MLX models in one
-  process survive sequential AND concurrent eval — Qwen3-0.6B+4B (~2.5GB) and GLM-9B+Qwen-4B (~7GB, cross
-  family). Almost certainly fixed by the swap self-heal patch (same thread_local stream root cause). **Build:**
-  gate caching on the EXISTING admission gate (footprint + MemAvailable, `share::admits`) and the scheduler's
-  multi-resident slots (`Lane::Pool` slots>1, `cascade/scheduler.rs` — already supports N>1); cache iff the
-  pair fits the conservative budget, else fall back to swap (the current behavior). **Value:** moderate — a
-  forward-only chain rarely revisits a link, so the swap cost is paid ~once per escalation; caching mainly
-  helps when a chain is re-entered many times (round-robin pipeline) or links ping-pong. **SAFETY (hard):**
-  never cache two BIG models — did NOT test two large models concurrently (forbidden + reboot risk); a
-  load-dependent watchdog timeout under simultaneous heavy prefill is unproven and the RAM-overcommit reboot
-  is real. Keep the admission gate as the sole authority on "does the 2nd model fit"; cache only within it.
+- [x] **chain-cache-when-fits** — DONE (`2fcc051`). The gateway's `/control/switch` (the chain's
+  escalation path) is now **cache-when-fits** instead of always destroy+rebuild: PROMOTE a warm target
+  with no rebuild (Arc swap; live ~22ms vs a full reload) + KEEP the old primary warm when the residency
+  planner says both fit, so a switch-back / re-run / the matrix reuses the resident copy. Falls back to
+  the destructive single-resident swap (clearing warm first) when the pair can't co-reside, or the swap
+  isn't cacheable (multislot off / custom backend / different n_ctx). The chain inherits it transparently
+  — no chain code change. Gated by the SAME memory planner the warm cache already used
+  (`plan_residency`: host_ram_budget − committed_by_others, shared reserve once → reboot-safe), unblocked
+  by the co-residency refutation (`d63c9e4`). The destructive path is byte-preserved as `swap_destructive`
+  (used verbatim when multislot off → single-resident behavior unchanged). 4 new unit tests + 85/85
+  gateway green + live smoke (0.6B↔4B real MLX: cached → promote(22ms) → promote(22ms), no reboot).
+  **SAFETY held:** the planner stays the sole "does the 2nd fit" authority; an oversubscribed pair (big
+  models) drops the old model (destructive) rather than co-residing → no overcommit. Idle warm residents
+  are swept after `ROZUM_GATEWAY_UNLOAD_IDLE_SECS` (no permanent RAM hold). Off-switch: `ROZUM_MULTISLOT=0`.
 
 - [ ] **chain-per-model-executor-tools** (marginal, not urgent) — per-MODEL executor tool curation in the
   chain: a weaker link gets a smaller tool set than a strong one. Today the real levers are already pulled —

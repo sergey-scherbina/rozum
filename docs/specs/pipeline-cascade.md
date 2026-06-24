@@ -202,12 +202,13 @@ to the NEXT link carrying (task + current broken files + real error), proven liv
 (4B miss → ⤴ 35B fix → ✅, no reboot); **(c) role-aware quality stats + auto-exclude** (per-(model,role)
 pass/attempt ledger, skip a link below the pass-rate floor after MIN_SAMPLES); **(d) cloud-last** via
 explicit chain ordering + skip-unreachable on switch failure; **target derivation** (single + multi-model,
-the latter derived on the first link). **(b) cache-when-fits — UNBLOCKED, backlogged:** the premise (two MLX
-models co-resident crash Metal) is REFUTED by a direct probe (`tests/mlx_evals.rs`, `d63c9e4` — Qwen
-0.6B+4B and GLM-9B+Qwen-4B survive sequential+concurrent eval, no crash/reboot; likely the swap self-heal
-fixed it). Caching is viable, gated on the existing admission gate + scheduler multi-resident slots; not
-urgent (swap-cost is ~once per escalation in a forward-only chain) and never cache two BIG models
-(untested, reboot risk). **Remaining (low value):**
+the latter derived on the first link). **(b) cache-when-fits — DONE (`2fcc051`):** the premise (two MLX models
+co-resident crash Metal) is REFUTED by a direct probe (`tests/mlx_evals.rs`, `d63c9e4`), so the gateway's
+`/control/switch` is now warm-aware — PROMOTE a warm target with no rebuild (live ~22ms) + KEEP the old
+primary warm when the residency planner says both fit; destructive single-resident swap otherwise (off /
+can't co-reside / non-cacheable). The chain inherits it via `/control/switch`. Gated by `plan_residency`
+(host budget − others, shared reserve once → reboot-safe); oversubscribed → drop-old (no overcommit). 4
+unit tests + live 0.6B↔4B smoke, no reboot. Off: `ROZUM_MULTISLOT=0`. **Remaining (low value):**
 per-MODEL executor tool sets (the `--lean` 33→4 cut + `tools=[]` planner/verifier are the real levers);
 interactive confirm of a guessed target (now: logged + ROZUM_VERIFY-overridable); non-command target
 kinds (predicate / Q&A-judge) beyond the cargo-command target.

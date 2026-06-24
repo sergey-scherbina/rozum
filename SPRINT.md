@@ -32,14 +32,15 @@
      (cfdefbf) and `--lean` cuts the executor's set 33→4 (the big lever). REMAINING (marginal): per-MODEL
      executor tool sets (weaker model → even fewer) — low value since the executor needs the core coding
      tools; revisit only if a weak link is shown to derail on a specific tool.
-  4. **Adaptive residency policy (cache-vs-swap)** — ✅ UNBLOCKED (the "two MLX co-resident crash Metal"
-     premise is REFUTED — probe `tests/mlx_evals.rs::coresidency_two_mlx_models_one_process`, commit
-     `d63c9e4`: Qwen 0.6B+4B AND GLM-9B+Qwen-4B survive sequential+concurrent eval, no crash/reboot;
-     likely the swap self-heal patch fixed it too). So cache-when-fits IS viable → backlogged as
-     `chain-cache-when-fits` (gate on the existing admission gate + scheduler multi-resident slots).
-     NOT urgent: a forward-only chain rarely revisits a link, so swap-cost is ~once per escalation;
-     caching mainly helps a re-entered/round-robin chain. HARD safety: never cache two BIG models
-     (untested — forbidden + reboot risk); the admission gate stays the sole "does it fit" authority.
+  4. **Adaptive residency policy (cache-vs-swap)** — ✅ DONE (`2fcc051`). Co-residency crash REFUTED
+     (probe `coresidency_two_mlx_models_one_process`, `d63c9e4`) → the gateway's `/control/switch` is now
+     **cache-when-fits**: PROMOTE a warm target (no rebuild, live ~22ms) + KEEP the old primary warm when
+     the planner says both fit; destructive single-resident swap otherwise (multislot off / can't
+     co-reside / non-cacheable). The chain inherits it via `/control/switch` (no chain change). Gated by
+     `plan_residency` (host budget − others' reservations, shared reserve once → reboot-safe); oversubscribed
+     pair → drop-old (no overcommit). 4 new tests, 85/85 gateway green, live 0.6B↔4B smoke no reboot.
+     HARD safety preserved: the planner is the sole "does it fit" authority; never co-resides a pair it
+     refuses. Off: `ROZUM_MULTISLOT=0`.
   5. **Role-aware quality stats + auto-exclude** — ✅ DONE (merry-tapir): per-(model, role) pass/attempt
      stats persist in `gateway_dir()/model_stats.json`; the chain records each link's terminal outcome
      (`record_model_outcome`) and SKIPS a link with a consistently-bad record (`model_skip_decision`:
