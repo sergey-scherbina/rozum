@@ -1,0 +1,19 @@
+[package]
+name = "rozum-tui"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# Thin frontend binary: attach a ratatui TUI to the meeting daemon. Links only rozum-meeting —
+# NO model engines, so it builds in seconds. The legacy in-process room (model-as-participant)
+# stays in the umbrella `rozum` binary; this is the daemon-attached client. Part of the binary
+# split (docs/specs/binary-split.md).
+
+[[bin]]
+name = "rozum-tui"
+path = "src/main.rs"
+
+[dependencies]
+rozum-meeting = { path = "../rozum-meeting" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }

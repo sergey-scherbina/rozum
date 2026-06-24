@@ -5135,6 +5135,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rozum-tui"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rozum-meeting",
+ "tokio",
+]
+
+[[package]]
+name = "rozum-web"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rozum-meeting",
+ "tokio",
+]
+
+[[package]]
 name = "rozum-x86"
 version = "0.1.0"
 dependencies = [

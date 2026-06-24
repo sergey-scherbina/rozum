@@ -1,0 +1,18 @@
+[package]
+name = "rozum-web"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# Thin frontend binary: expose a rozum meeting room over HTTP/WebSocket. Links only
+# rozum-meeting — NO model engines, so it builds in seconds. Part of the binary split
+# (docs/specs/binary-split.md).
+
+[[bin]]
+name = "rozum-web"
+path = "src/main.rs"
+
+[dependencies]
+rozum-meeting = { path = "../rozum-meeting" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
