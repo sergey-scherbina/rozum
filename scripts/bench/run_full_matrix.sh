@@ -43,6 +43,7 @@ env "${EXTRA_ENV[@]}" \
   AGENTS="claude codex opencode" \
   TASKS="greet build fix test debug rpn" \
   REPS=1 KEEP=1 RUN_TIMEOUT="${RUN_TIMEOUT:-900}" NCTX="${NCTX:-32768}" \
+  REPAIR="${REPAIR:-0}" \
   ROZUM_SAMPLING_SEED=1234 \
   BENCH_BIN="$BIN" BENCH_OUT="$OUT" \
   bash scripts/bench/agentic.sh 2>&1 | tee "$LOG"
