@@ -18,8 +18,14 @@
      `ROZUM_VERIFY` > derived (single model) > cargo floor. **PENDING:** multi-model derivation via the
      planner role; interactive confirm of a guessed target (now: logged + overridable); the non-command
      target kinds (predicate / Q&A-known / Q&A-open → LLM-judge or human). Kept deterministic-first.
-  2. **Escalate ACROSS the chain** on persistent target-miss — switch gateway to the next model
-     (swap-fix) with (task + best result + the real error), not just re-invoke the same one; cloud last.
+  2. **Escalate ACROSS the chain** — ✅ DONE (merry-tapir): the `rozum launch` verify-gate now walks the
+     `--model` chain — each link gets up to ROZUM_VERIFY_ROUNDS self-repair attempts, then on persistent
+     target-miss it ESCALATES to the next link, switching the gateway model in-process (swap fix) and
+     carrying (task + the current broken files + the real error) forward; `switch_gateway_model` via
+     /control/switch (proxy forwards it). One link = single-model behavior. Proven live end-to-end:
+     `--model Qwen3-4B,Qwen3.6-35B` on reverse-cli → link 1 (4B) failed → ⤴ escalated → switched to link 2
+     (35B) → 35B fixed it → ✅ target met, NO reboot (uptime held through the swap). Cloud last = operator
+     orders cloud links last (explicit ordering for now; availability/limit checks = item 6).
   3. **Tool curation** per role/model — planner/verifier get NO write/exec tools (already `tools=[]` in
      the tiers → make it the named policy); executor gets curated coding tools; smaller sets for weaker
      models (`--lean` is the start); verifier may get only the target-check tool.

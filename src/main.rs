@@ -3426,6 +3426,24 @@ async fn derive_target(base: &str, task: &str) -> Option<String> {
     (parts.len() > 1).then(|| parts.join(" && "))
 }
 
+/// Switch the gateway to `model` in-process (the fixed swap) for chain escalation. Best-effort;
+/// returns whether the swap succeeded (so the gate can skip a link that won't load).
+async fn switch_gateway_model(base: &str, model: &str) -> bool {
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/control/switch"))
+        .json(&serde_json::json!({ "model": model }))
+        .timeout(std::time::Duration::from_secs(240))
+        .send()
+        .await;
+    match resp {
+        Ok(r) => match r.text().await {
+            Ok(t) => t.contains("switched"),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
 /// The repair prompt for a re-invocation: the original task + the REAL error + a fix directive.
 fn repair_prompt(original: &str, err: &str) -> String {
     format!(
@@ -3534,39 +3552,71 @@ async fn exec_agent(
         }
     };
 
+    // The escalation CHAIN: the `--model` list in order (cloud links last — the operator orders them).
+    // The gate tries each link with up to `rounds` self-repair attempts; on persistent target-miss it
+    // ESCALATES to the next link with (task + the current result/files + the real error) — switching the
+    // gateway model in-process (the swap fix). One link = today's single-model behavior (no switch).
+    let chain: Vec<String> = model_for_alias
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let multi = chain.len() > 1;
+    let ctl = format!("http://127.0.0.1:{port}");
     let mut verified: Option<bool> = None; // None = no gate ran (not a verifiable project)
     let mut last_code = 1;
     let mut announced = false;
-    for round in 0..=rounds {
-        let tag = if round > 0 { format!("   [repair round {round}]") } else { String::new() };
-        eprintln!("  → running: {} {}{tag}", program_name, program[1..].join(" "));
-        let mut cmd = build(&program);
-        last_code = tokio::task::spawn_blocking(move || cmd.status())
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .and_then(|s| s.code())
-            .unwrap_or(1);
-        // The fixed derived target wins; else resolve per-round (explicit ROZUM_VERIFY or the cargo
-        // floor — re-checked each round so a just-created project is picked up).
-        let Some(vcmd) = derived_target.clone().or_else(resolve_verify_cmd) else { break };
-        if !announced {
-            eprintln!("rozum launch: verify-gate — `{vcmd}` (up to {rounds} repair round(s); ROZUM_VERIFY=0 to disable)");
-            announced = true;
+    'chain: for (mi, model) in chain.iter().enumerate() {
+        if multi {
+            eprintln!("rozum launch: ── chain link {}/{}: {model} ──", mi + 1, chain.len());
+            if !switch_gateway_model(&ctl, model).await {
+                eprintln!("rozum launch: ↻ could not switch to {model} — skipping this link");
+                continue;
+            }
         }
-        let (ok, err) = run_verify(&vcmd, &cwd).await;
-        if ok {
-            verified = Some(true);
-            break;
+        for round in 0..=rounds {
+            let tag = if round > 0 || mi > 0 {
+                format!("   [link {}/{}, repair {round}]", mi + 1, chain.len())
+            } else {
+                String::new()
+            };
+            eprintln!("  → running: {} {}{tag}", program_name, program[1..].join(" "));
+            let mut cmd = build(&program);
+            last_code = tokio::task::spawn_blocking(move || cmd.status())
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .and_then(|s| s.code())
+                .unwrap_or(1);
+            // Fixed derived target wins; else resolve per-round (explicit ROZUM_VERIFY or cargo floor —
+            // re-checked each round so a just-created project is picked up).
+            let Some(vcmd) = derived_target.clone().or_else(resolve_verify_cmd) else {
+                break 'chain; // no verifiable project → no gate
+            };
+            if !announced {
+                eprintln!("rozum launch: verify-gate — `{vcmd}` (ROZUM_VERIFY=0 to disable; {} link(s) × {rounds} repair)", chain.len());
+                announced = true;
+            }
+            let (ok, err) = run_verify(&vcmd, &cwd).await;
+            if ok {
+                verified = Some(true);
+                break 'chain;
+            }
+            verified = Some(false);
+            // Carry the task + real error forward (the next attempt/link sees the broken files + why).
+            program[pidx] = repair_prompt(&original_prompt, &err);
+            if round == rounds {
+                let last_link = mi + 1 == chain.len();
+                if last_link {
+                    eprintln!("rozum launch: ❌ target still not met after the whole chain:");
+                    eprintln!("{}", err.lines().take(8).collect::<Vec<_>>().join("\n"));
+                    break 'chain;
+                }
+                eprintln!("rozum launch: ⤴ escalating to the next model with (task + result + error)");
+                continue 'chain;
+            }
+            eprintln!("rozum launch: ↻ target not met — re-running {model} with the real error");
         }
-        verified = Some(false);
-        if round == rounds {
-            eprintln!("rozum launch: ❌ verify still failing after {rounds} repair round(s):");
-            eprintln!("{}", err.lines().take(8).collect::<Vec<_>>().join("\n"));
-            break;
-        }
-        eprintln!("rozum launch: ↻ verify FAILED — re-running {program_name} with the real error");
-        program[pidx] = repair_prompt(&original_prompt, &err);
     }
     rozum::share::remove_lease(std::process::id());
     match verified {
