@@ -682,16 +682,16 @@ pub fn total_ram_bytes() -> Option<u64> {
     })
 }
 
-/// RAM available right now (free + inactive + speculative + purgeable), cached ~1s. Public
-/// shared free-RAM source for preflight sizing / observability — an alternative to the
-/// bin's `#[cfg(feature="mistralrs")]` duplicate. (The `shed` watchdog keys on the OS
-/// jetsam pressure level, not this; this stays useful for preflight estimates.)
+/// RAM available right now — a macOS **MemAvailable**: everything the OS can hand to a new
+/// allocation WITHOUT swapping or jetsam-killing a process. Cached ~1s. Public shared free-RAM
+/// source for preflight sizing, the admission lever ([`crate::share::admits`]) and the `shed`
+/// headroom signal. (The `shed` watchdog ALSO keys on the kernel jetsam pressure level as a
+/// final backstop; this is the byte-level estimate.)
 pub fn available_ram_bytes() -> Option<u64> {
     available_ram_bytes_cached()
 }
 
-/// RAM available right now (macOS `vm_stat`: free + inactive + speculative + purgeable pages),
-/// cached for ~1s so the adaptive loop never spawns a subprocess per request.
+/// macOS MemAvailable, cached ~1s so the adaptive loop never spawns a subprocess per request.
 fn available_ram_bytes_cached() -> Option<u64> {
     use std::time::{Duration, Instant};
     static CACHE: std::sync::OnceLock<Mutex<Option<(Instant, Option<u64>)>>> =
@@ -707,6 +707,23 @@ fn available_ram_bytes_cached() -> Option<u64> {
     fresh
 }
 
+/// macOS MemAvailable = total RAM − the **non-reclaimable** resident set:
+///   wired (kernel/GPU/drivers) + anonymous (app heaps, incl. any resident model's weights)
+///   + the compressor's own pages.
+/// Everything else — ALL file-backed cache (active *and* inactive), free, speculative, purgeable
+/// — is reclaimable: the OS evicts clean file pages on demand to satisfy a large allocation
+/// (e.g. a model load reclaiming stale weight-file cache from a prior load), so a model that
+/// fits by reclaiming cache is admitted WITHOUT needing a reboot. Anonymous is EXCLUDED, so a
+/// genuine overcommit (a 2nd model's weights while one is resident — which the OS could only
+/// satisfy by compressing/swapping → the vm-compressor-shortage jetsam→watchdog reboot of
+/// [[project-reboot-watchdog-oom]]) is still refused. That asymmetry is the whole point: count
+/// reclaimable cache as free, never count anonymous as free.
+///
+/// The previous metric summed `free + inactive + speculative + purgeable`, which both MISSED
+/// active file-backed cache (recently-touched stale model weights → loads refused with GBs of
+/// reclaimable RAM, demanding a reboot) and over-counted inactive-anonymous (dirty, needs the
+/// compressor) — wrong in both directions. Falls back to that older sum on a macOS that lacks
+/// the `Anonymous pages` / `Pages occupied by compressor` lines.
 fn probe_available_ram_bytes() -> Option<u64> {
     let out = std::process::Command::new("vm_stat").output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
@@ -717,6 +734,23 @@ fn probe_available_ram_bytes() -> Option<u64> {
         .and_then(|r| r.split(' ').next())
         .and_then(|n| n.parse::<u64>().ok())
         .unwrap_or(16384);
+    let pg = |label: &str| -> Option<u64> {
+        s.lines().find_map(|l| {
+            l.strip_prefix(label)
+                .and_then(|r| r.trim().trim_end_matches('.').parse::<u64>().ok())
+        })
+    };
+    // Preferred: total − non-reclaimable (wired + anonymous + compressor).
+    if let (Some(total), Some(wired), Some(anon), Some(comp)) = (
+        total_ram_bytes(),
+        pg("Pages wired down:"),
+        pg("Anonymous pages:"),
+        pg("Pages occupied by compressor:"),
+    ) {
+        let non_reclaimable = wired.saturating_add(anon).saturating_add(comp) * page_size;
+        return Some(total.saturating_sub(non_reclaimable));
+    }
+    // Fallback for older macOS without the anonymous/compressor lines.
     let mut pages = 0u64;
     for line in s.lines() {
         for label in ["Pages free:", "Pages inactive:", "Pages speculative:", "Pages purgeable:"] {

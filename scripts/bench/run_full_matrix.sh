@@ -34,11 +34,15 @@ echo ">> out=$OUT  log=$LOG"
 # RUN_TIMEOUT=900: the GLM-32B,gpt-oss lazy pipeline reloads both tiers per agent turn (~1–2 min each),
 # so a multi-turn task needs far more wall-clock than a single resident model. The fast Qwen3.6-35B runs
 # still finish quickly under the same ceiling. Override RUN_TIMEOUT to taste.
+# NCTX=32768: the matrix tasks are small (prompts + a little code), so a 32k window is ample.
+# Capping it (vs the model's 262k max) shrinks the reserved KV → smaller footprint → the big 35B
+# loads with MORE free-RAM headroom left for the agent's per-request prefill/decode (safer margin;
+# the admission gate + MemAvailable already prevent overcommit, this just keeps runtime comfortable).
 env "${EXTRA_ENV[@]}" \
   AGENTIC_MODELS="$MODELS" \
   AGENTS="claude codex opencode" \
   TASKS="greet build fix test debug rpn" \
-  REPS=1 KEEP=1 RUN_TIMEOUT="${RUN_TIMEOUT:-900}" \
+  REPS=1 KEEP=1 RUN_TIMEOUT="${RUN_TIMEOUT:-900}" NCTX="${NCTX:-32768}" \
   ROZUM_SAMPLING_SEED=1234 \
   BENCH_BIN="$BIN" BENCH_OUT="$OUT" \
   bash scripts/bench/agentic.sh 2>&1 | tee "$LOG"

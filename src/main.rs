@@ -1313,7 +1313,7 @@ fn run_gateway_dry_run(model: &str, n_ctx: Option<u32>) {
     let available = rozum::share::available_ram_for_admission();
     let min_free = rozum::share::min_free_ram_bytes();
     println!("  weights on disk:   {:.2} GiB", gib(m.size_bytes));
-    println!("  available RAM:     {}", available.map(|a| format!("{:.2} GiB (free+inactive+spec+purgeable)", gib(a))).unwrap_or_else(|| "unmeasurable → free-RAM lever fails open".into()));
+    println!("  available RAM:     {}", available.map(|a| format!("{:.2} GiB (MemAvailable: total − wired − anonymous − compressor; counts reclaimable file cache)", gib(a))).unwrap_or_else(|| "unmeasurable → free-RAM lever fails open".into()));
     println!("  keep-free margin:  {:.2} GiB", gib(min_free));
     println!("  host pressure:     {} (kernel jetsam level; warn/critical ⇒ refuse)", rozum::share::host_pressure_label());
 
