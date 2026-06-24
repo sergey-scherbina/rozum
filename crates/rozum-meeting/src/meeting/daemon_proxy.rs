@@ -128,7 +128,7 @@ fn now_epoch() -> u64 {
 /// records NOTHING on a clean `exit(0)` (the idle reap) and only an opaque transport-close on a
 /// crash. So without this an "MCP tools vanished" incident is invisible. Best-effort, lock-free
 /// (an append is atomic enough for low-volume lifecycle lines); off with `ROZUM_MCP_PROXY_LOG=0`.
-fn proxy_log(msg: &str) {
+pub(crate) fn proxy_log(msg: &str) {
     if std::env::var_os("ROZUM_MCP_PROXY_LOG").is_some_and(|v| v == "0") {
         return;
     }
@@ -148,7 +148,7 @@ fn proxy_log(msg: &str) {
 
 /// Log a panic (payload + location) to the proxy log before the default hook runs — otherwise a
 /// panic in the serve path dies with no rozum-side trace (Claude Code only sees the pipe close).
-fn install_panic_logger() {
+pub(crate) fn install_panic_logger() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let loc = info
@@ -195,6 +195,15 @@ impl Default for DaemonProxy {
 impl DaemonProxy {
     pub fn new() -> Self {
         Self::build(meeting_sock(), detect_project(), "agent".to_string(), true)
+    }
+
+    /// Like `new()` but with the project pinned explicitly instead of detected from the process
+    /// cwd. The HTTP transport (`http_proxy`) needs this: one long-lived daemon serves many
+    /// clients, so the project must come from the request (URL), not the server's cwd. `None`
+    /// falls back to cwd detection (single-project / dev use).
+    pub fn for_project(project: Option<String>) -> Self {
+        let project = project.or_else(detect_project);
+        Self::build(meeting_sock(), project, "agent".to_string(), true)
     }
 
     fn build(sock: PathBuf, project: Option<String>, client: String, auto_spawn: bool) -> Self {

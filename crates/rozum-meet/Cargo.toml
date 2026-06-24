@@ -1,0 +1,20 @@
+[package]
+name = "rozum-meet"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# Thin meeting-room frontend binary: the MCP bridges (stdio `mcp-proxy` + HTTP `mcp-http`) and
+# nothing else. Depends ONLY on rozum-meeting — NO model engines (mlx-sys / llama-cpp-2), so it
+# builds in seconds and a frontend fix (e.g. BUG-004) never triggers the heavy C++ rebuild. This
+# is the first slice of the binary split (docs/specs/binary-split.md): heavy backend binaries vs
+# thin frontends.
+
+[[bin]]
+name = "rozum-meet"
+path = "src/main.rs"
+
+[dependencies]
+rozum-meeting = { path = "../rozum-meeting", features = ["mcp-http"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+clap = { version = "4", features = ["derive"] }

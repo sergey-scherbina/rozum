@@ -10,6 +10,16 @@ license = "Apache-2.0"
 # model-runtime side of rozum — this is the first crate extracted in the
 # workspace split (docs/specs/workspace-split.md, Phase 1).
 
+[features]
+# The HTTP MCP transport (`rozum mcp-http`): hosts the meeting tools over rmcp's streamable-HTTP
+# so Claude Code connects via `{type:"http", url}` and reconnects on drop — no per-session stdio
+# child to crash (docs/specs/mcp-proxy-resilience.md Phase 2). Off by default: keeps the stdio
+# path and the thin-frontend build lean.
+mcp-http = [
+    "rmcp/transport-streamable-http-server",
+    "rmcp/transport-streamable-http-server-session",
+]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"

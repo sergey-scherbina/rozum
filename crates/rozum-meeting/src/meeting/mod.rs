@@ -3,6 +3,8 @@ pub mod budget;
 pub mod client;
 pub mod daemon;
 pub mod daemon_proxy;
+#[cfg(feature = "mcp-http")]
+pub mod http_proxy;
 pub mod identity;
 pub mod list;
 pub mod local_identity;
