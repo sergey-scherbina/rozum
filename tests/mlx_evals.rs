@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use rozum::ChatBackend;
 use rozum::ToolDef;
+use rozum::{ChatRequest, SamplingParams, collect_to_string};
 use rozum::agent::{AgentStop, Budget, CallbackToolSource, ToolError, run_agent};
 use rozum::mlx_native_backend::{MlxNativeBackend, ensure_model_dir};
 use rozum::rag_lite::LexicalIndex;
@@ -185,4 +186,71 @@ async fn rag_worker_eval() {
         s.contains("owner") || s.contains("scope"),
         "summary not grounded in the passage"
     );
+}
+
+// ─── Co-residency probe (operator 2026-06-24) ───────────────────────────────
+//
+// Settles the open question: does running TWO MLX models CO-RESIDENT in one
+// process still crash Metal (kIOGPUCommandBufferCallbackErrorTimeout, gateway
+// dies)? That finding forced the lazy one-at-a-time swap. Both models are TINY
+// (Qwen3-0.6B 335 MB + Qwen3-4B 2.1 GB ≈ 2.5 GB total) so there is no RAM /
+// reboot risk — this isolates the GPU-contention crash, which is size-independent.
+//
+// Reaching the final assert = no abort = co-residency survives. If the kIOGPU
+// crash still fires, the test binary aborts (signal, not an assertion failure).
+//
+//   cargo test --features mlx-native --test mlx_evals -- --ignored --nocapture coresidency
+async fn ask(b: &MlxNativeBackend, q: &str) -> String {
+    let req = ChatRequest {
+        sampling: SamplingParams { max_tokens: Some(24), ..SamplingParams::default() },
+        ..ChatRequest::simple(q)
+    };
+    let stream = b.chat(req).await.expect("chat dispatch");
+    collect_to_string(stream).await.expect("drain stream")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "heavy+risky: loads TWO MLX models co-resident (Qwen3-0.6B + Qwen3-4B)"]
+async fn coresidency_two_mlx_models_one_process() {
+    // Default tiny pair (no RAM risk); override to probe a heavier-but-fitting pair.
+    let spec_a =
+        std::env::var("ROZUM_CORESIDENCY_A").unwrap_or_else(|_| "mlx-community:Qwen3-0.6B-4bit".into());
+    let spec_b =
+        std::env::var("ROZUM_CORESIDENCY_B").unwrap_or_else(|_| "mlx-community:Qwen3-4B-4bit".into());
+    let (spec_a, spec_b) = (spec_a.as_str(), spec_b.as_str());
+    let dir_a = ensure_model_dir(spec_a).await.expect("resolve 0.6B");
+    let dir_b = ensure_model_dir(spec_b).await.expect("resolve 4B");
+
+    eprintln!("CORESIDENCY: loading BOTH models into one process…");
+    let a = MlxNativeBackend::new(dir_a, spec_a.replace(':', "/"), None)
+        .await
+        .expect("load 0.6B");
+    let b = MlxNativeBackend::new(dir_b, spec_b.replace(':', "/"), None)
+        .await
+        .expect("load 4B");
+    eprintln!("CORESIDENCY: both resident. Phase A — sequential interleave (pipeline pattern)…");
+
+    // Phase A: A.chat() then B.chat(), repeatedly — exactly the eager pipeline's
+    // planner→executor access pattern that was reported to crash.
+    for round in 0..3 {
+        let ta = ask(&a, "Reply with one word: ping.").await;
+        let tb = ask(&b, "Reply with one word: pong.").await;
+        eprintln!("  round {round}: A={:?} B={:?}", ta.trim(), tb.trim());
+        assert!(!ta.trim().is_empty(), "model A produced nothing (round {round})");
+        assert!(!tb.trim().is_empty(), "model B produced nothing (round {round})");
+    }
+
+    eprintln!("CORESIDENCY: Phase B — CONCURRENT eval (the strongest GPU-contention test)…");
+    // Phase B: two MLX evals genuinely overlapping in time.
+    for round in 0..3 {
+        let (ta, tb) = tokio::join!(
+            ask(&a, "Name a color in one word."),
+            ask(&b, "Name an animal in one word."),
+        );
+        eprintln!("  concurrent round {round}: A={:?} B={:?}", ta.trim(), tb.trim());
+        assert!(!ta.trim().is_empty(), "concurrent A empty (round {round})");
+        assert!(!tb.trim().is_empty(), "concurrent B empty (round {round})");
+    }
+
+    eprintln!("CORESIDENCY: SURVIVED — two MLX models co-resident did NOT crash Metal.");
 }
