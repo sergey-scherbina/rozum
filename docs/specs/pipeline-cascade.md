@@ -170,3 +170,34 @@ named/explicit opt-in, so the common case is the operator's one-liner.
   to a budget; don't accumulate across turns (each turn re-plans from the current agent state).
 - **Streaming**: the final (executor) tier streams to the agent as normal; planner tiers are awaited fully
   (their text is internal). No change to the agent-facing streaming contract.
+
+## The full frame — a verification-gated escalation chain (operator, 2026-06-24)
+
+The chain combines several models into ONE composite, smarter "model" by **correct sequential use +
+adaptive resource management**. The unifying mechanism is **verification-gated escalation with feedback**
+— broader than fixed planner→executor→verifier roles (those are one configuration of it):
+
+1. **Try → verify → escalate.** Load a model, use it, then **verify the result**. If it is not good
+   enough, hand the result **together with the original task** to the NEXT model in the chain, and repeat
+   — until a result we accept, or the chain is exhausted. Each model is an *attempt*; verification is the
+   gate; the imperfect result is the *feedback* carried forward (not thrown away).
+2. **Verification = the soul (already built).** The deterministic gate (`cargo` etc., run by rozum on the
+   workdir — `rozum launch` verify-gate) is ground truth; a model-verifier (the backend's verifier role)
+   is an optional pre-flight review. A model never decides "done" — the check does.
+3. **Adaptive residency.** If RAM allows, **cache** (keep models resident) for speed; if not, **swap**
+   (unload one, load the next). Same admission/footprint/swap machinery already in place
+   ([[safe-multi-model-residency]], MemAvailable, the in-process swap fix). Parallelism where it fits.
+4. **Role-aware quality stats + exclusion.** Track each model's quality *per role* over runs; a model that
+   is consistently bad gets **dropped from the chain** when there is an alternative. (Extends the existing
+   `Learned` routing / `Verdict`/acceptance signal.)
+5. **Cloud tiers last.** The final links may be **remote cloud** models — used only when local links
+   haven't produced an acceptable result, AND the cloud is reachable + within limits — so cloud usage is
+   *saved*. If cloud is down/over-limit, fall back to local links used optimally (per the above).
+
+**Status.** Done: sequential one-at-a-time chain + swap (no-reboot); the verification + feedback +
+orchestration core — `rozum launch` deterministic verify-gate (re-invokes the same model with the real
+error) + backend verifier role + repair; adaptive load/swap admission. **To build:** (a) escalation
+ACROSS the chain on persistent verify-failure — switch to the NEXT model with (task + best-result-so-far),
+not just re-invoke the same one; (b) cache-when-fits vs swap-when-not as an explicit residency policy for
+the chain; (c) role-aware quality stats + auto-exclude; (d) cloud-last ordering with availability/limit
+checks + local fallback. These layer onto the existing cascade/escalation + residency infrastructure.
