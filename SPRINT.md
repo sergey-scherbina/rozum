@@ -137,7 +137,14 @@
   Switchboard swap works; the LAZY pipeline GLM-9B→Qwen3-4B STILL fails even with flush off (genuine,
   SEPARATE structural bug — nested-in-one-request vs the Switchboard's separate top-level requests;
   build/drop identical, cause unpinned). ⇒ task #6 (route lazy through the Switchboard) is VIABLE (the
-  Switchboard works) but is a real gateway-orchestration change. Robust today: solve.sh.
+  Switchboard works) but is a real gateway-orchestration change. Robust today: solve.sh. **HANDOFF for a fresh-boot session: `scripts/bench/pipeline-swap-repro.sh` + `docs/pipeline-swap-bug.md`.**
+  Re-validation (post-revert) showed the swap-failure reproduces via the gateway's OWN /control/switch and
+  correlates with a LONG executor prompt + LOW free RAM (~6 GiB, session-degraded) — single Qwen handled a
+  1449-word prompt fine when RAM was ample (~22 GiB). So task #6 (route through Switchboard) would NOT fix
+  it (the swap path itself fails), and the open question (real MLX swap bug vs RAM/session degradation) needs
+  a FRESH BOOT to settle. The repro script runs the A/B matrix + verdict guide; the doc lists what's ruled
+  out (incl. the HARMFUL teardown flush — do not re-add) and where to look if it's real (per-load MLX
+  memory/cache-limit reset in the worker load path). solve.sh robust meanwhile.
 - [ ] **adaptive-cascade-residency** (operator idea 2026-06-23; now the residency half of `pipeline-cascade`)
   — make the cascade EAGER if its local
   tiers co-fit, LAZY (one resident at a time, swap on escalation) if not. Today `build_cascade` is
