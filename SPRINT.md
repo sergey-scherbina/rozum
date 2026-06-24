@@ -31,9 +31,15 @@
      models (`--lean` is the start); verifier may get only the target-check tool.
   4. **Adaptive residency policy** — cache-when-fits vs swap-when-not as an explicit chain policy
      (machinery exists: admission/footprint/MemAvailable/swap).
-  5. **Role-aware quality stats + auto-exclude** a consistently-bad model when an alternative exists
-     (extends `Learned`/`Verdict`/acceptance).
-  6. **Cloud-last ordering** with availability/limit checks + local fallback when cloud is down/over-limit.
+  5. **Role-aware quality stats + auto-exclude** — ✅ DONE (merry-tapir): per-(model, role) pass/attempt
+     stats persist in `gateway_dir()/model_stats.json`; the chain records each link's terminal outcome
+     (`record_model_outcome`) and SKIPS a link with a consistently-bad record (`model_skip_decision`:
+     ≥5 samples & <20% pass, tunable `ROZUM_MODEL_MIN_SAMPLES`/`_MIN_PASS_PCT`) — but only when a later
+     link exists (never the last resort). Unit-tested (chain_tests: model_skip_rule, agent_prompt_index).
+  6. **Cloud-last ordering** — ✅ mostly covered by the chain DESIGN: cloud links are last in the operator's
+     `--model` order (order = intent, we don't reorder), so they run only after locals fail; an
+     unreachable/unloadable cloud link → `switch_gateway_model` fails → the gate SKIPS it (local fallback
+     already happened earlier). PENDING: explicit rate-limit/quota checks (vs just reachability).
   Open design point to discuss: the human-in-the-loop target UX (agent interaction). Build order = 1→2
   first (the generalized deterministic target + cross-chain escalation), then 3–6.
 

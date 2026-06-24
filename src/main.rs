@@ -3444,6 +3444,59 @@ async fn switch_gateway_model(base: &str, model: &str) -> bool {
     }
 }
 
+/// Per-(model, role) quality stats persisted across runs, so the chain can DROP a model that is
+/// consistently bad in a role — when a later link exists to take over (operator vision: exclude bad
+/// models). Keyed `"<model>|<role>"`; role is e.g. "executor" for a launch-chain link.
+fn model_stats_path() -> std::path::PathBuf {
+    rozum::share::gateway_dir().join("model_stats.json")
+}
+
+/// Pure skip rule (unit-tested): enough samples AND pass-rate below the floor → skip. Tunable via
+/// `ROZUM_MODEL_MIN_SAMPLES` (default 5) and `ROZUM_MODEL_MIN_PASS_PCT` (default 20).
+fn model_skip_decision(passes: u64, attempts: u64) -> bool {
+    let min_samples: u64 =
+        std::env::var("ROZUM_MODEL_MIN_SAMPLES").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+    let min_pass_pct: u64 =
+        std::env::var("ROZUM_MODEL_MIN_PASS_PCT").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    attempts >= min_samples && passes.saturating_mul(100) < min_pass_pct.saturating_mul(attempts)
+}
+
+fn model_stats_load() -> serde_json::Value {
+    std::fs::read_to_string(model_stats_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// Record a link's terminal outcome for `(model, role)` — best-effort, atomic write.
+fn record_model_outcome(model: &str, role: &str, passed: bool) {
+    let mut stats = model_stats_load();
+    let Some(obj) = stats.as_object_mut() else { return };
+    let e = obj
+        .entry(format!("{model}|{role}"))
+        .or_insert_with(|| serde_json::json!({"attempts": 0, "passes": 0}));
+    let a = e["attempts"].as_u64().unwrap_or(0) + 1;
+    let p = e["passes"].as_u64().unwrap_or(0) + u64::from(passed);
+    *e = serde_json::json!({"attempts": a, "passes": p});
+    let path = model_stats_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, stats.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+/// Track record of `(model, role)`: `(should_skip, passes, attempts)`. The caller only acts on
+/// `should_skip` when a later link exists (never skip the last resort).
+fn model_track_record(model: &str, role: &str) -> (bool, u64, u64) {
+    let stats = model_stats_load();
+    let e = &stats[format!("{model}|{role}")];
+    let (p, a) = (e["passes"].as_u64().unwrap_or(0), e["attempts"].as_u64().unwrap_or(0));
+    (model_skip_decision(p, a), p, a)
+}
+
 /// The repair prompt for a re-invocation: the original task + the REAL error + a fix directive.
 fn repair_prompt(original: &str, err: &str) -> String {
     format!(
@@ -3567,6 +3620,16 @@ async fn exec_agent(
     let mut last_code = 1;
     let mut announced = false;
     'chain: for (mi, model) in chain.iter().enumerate() {
+        let has_alt = mi + 1 < chain.len();
+        // Auto-exclude: drop a link with a consistently-bad track record in this role — but only
+        // when a later link can take over (never skip the last resort). Stats accrue across runs.
+        if multi && has_alt {
+            let (skip, p, a) = model_track_record(model, "executor");
+            if skip {
+                eprintln!("rozum launch: ⤳ skipping {model} — poor track record ({p}/{a} passed); trying the next link");
+                continue;
+            }
+        }
         if multi {
             eprintln!("rozum launch: ── chain link {}/{}: {model} ──", mi + 1, chain.len());
             if !switch_gateway_model(&ctl, model).await {
@@ -3600,12 +3663,19 @@ async fn exec_agent(
             let (ok, err) = run_verify(&vcmd, &cwd).await;
             if ok {
                 verified = Some(true);
+                if multi {
+                    record_model_outcome(model, "executor", true);
+                }
                 break 'chain;
             }
             verified = Some(false);
             // Carry the task + real error forward (the next attempt/link sees the broken files + why).
             program[pidx] = repair_prompt(&original_prompt, &err);
             if round == rounds {
+                // This link is exhausted — record its outcome for the track-record stats.
+                if multi {
+                    record_model_outcome(model, "executor", false);
+                }
                 let last_link = mi + 1 == chain.len();
                 if last_link {
                     eprintln!("rozum launch: ❌ target still not met after the whole chain:");
@@ -5861,6 +5931,31 @@ fn init_tui_logging() {
                 .with_writer(std::io::sink)
                 .try_init();
         }
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+
+    #[test]
+    fn model_skip_rule() {
+        assert!(!model_skip_decision(0, 4)); // below the sample floor → never skip
+        assert!(model_skip_decision(0, 5)); // 0/5 with enough samples → skip
+        assert!(!model_skip_decision(1, 5)); // 1/5 = 20% is NOT below the 20% floor → keep
+        assert!(model_skip_decision(1, 10)); // 1/10 = 10% → skip
+        assert!(!model_skip_decision(8, 10)); // a solid record is kept
+    }
+
+    #[test]
+    fn agent_prompt_index_finds_the_task() {
+        assert_eq!(
+            agent_prompt_index(&["claude".into(), "-p".into(), "do X".into(), "--verbose".into()]),
+            Some(2)
+        );
+        assert_eq!(agent_prompt_index(&["codex".into(), "exec".into(), "do X".into()]), Some(2));
+        assert_eq!(agent_prompt_index(&["opencode".into(), "run".into(), "do X".into()]), Some(2));
+        assert_eq!(agent_prompt_index(&["claude".into()]), None); // interactive → no gate
     }
 }
 
