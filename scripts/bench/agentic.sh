@@ -68,12 +68,20 @@ case "$BIN" in /*) ;; *) BIN="$repo/$BIN" ;; esac   # launch runs in a temp cwd 
 # (Qwen2.5-0.5B, Qwen3-0.6B, Llama-3.2-1B) only manage `greet` even with the
 # JSON-repair, and template-less / incompatible models (gemma, Phi-3, SmolLM2,
 # Mistral-v0.3) can't drive tools at all — all dropped. Override with AGENTIC_MODELS.
-# Standardized on the two kept models: Qwen3.6-35B-A3B (strongest local agentic coder, clears
-# codex's apply_patch bar) + gpt-oss-20b (OpenAI reasoning MoE). Override with
-# AGENTIC_MODELS="spec1 spec2 ...".
-DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit mlx-community:gpt-oss-20b-MXFP4-Q4"
+# Two models, by operator request — the pipeline-cascade value A/B (now that the in-process
+# model-swap bug is fixed, see docs/pipeline-swap-bug.md):
+#   1. Qwen3.6-35B-A3B — the single strongest local agentic coder (clears codex's apply_patch bar).
+#   2. GLM-4-32B,gpt-oss-20b — the LAZY in-process pipeline (comma-spec): GLM-4-32B plans (one-shot,
+#      strong at correct code), gpt-oss-20b executes (reliable agentic delivery). One model resident
+#      at a time (max(planner,executor) ~18 GB, fits 36 GB no-reboot). NOTE: the pipeline reloads
+#      both tiers per request (lazy), so it is SLOW per agent turn — give it a generous RUN_TIMEOUT.
+# Each space-separated entry is one `gateway --model <spec>`; a comma inside an entry = pipeline.
+# Override with AGENTIC_MODELS="spec1 spec2 ...".
+DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit mlx-community:GLM-4-32B-0414-4bit,mlx-community:gpt-oss-20b-MXFP4-Q4"
 read -r -a MODELS <<<"${AGENTIC_MODELS:-$DEFAULT_MODELS}"
-read -r -a TASK_LIST <<<"${TASKS:-greet build fix test debug}"
+# Tasks: greet build fix test debug (the originals) + rpn (a from-scratch-hard RPN calculator —
+# create-from-scratch where a planner→executor pipeline should help most; see verify_task/prompt_for).
+read -r -a TASK_LIST <<<"${TASKS:-greet build fix test debug rpn}"
 # REPS>1 runs every cell N times (fresh workdir each) so the report is a PASS-RATE, not a
 # single sample. The agentic matrix is irreducibly noisy — agent CLIs inject a per-run
 # session-id/timestamp, so a cell varies run-to-run even at a fixed ROZUM_SAMPLING_SEED
@@ -93,7 +101,7 @@ command -v cargo >/dev/null || { echo "need cargo" >&2; exit 1; }
 mkdir -p "$OUT/runs"
 CSV="$OUT/per-run.csv"
 echo "agent,model,task,difficulty,seconds,pass,rc,timeout,turns,tool_uses,agent_peak_mb,peak_cpu_pct,model_footprint_mb" > "$CSV"
-declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 )
+declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -130,6 +138,7 @@ prompt_for() {
     test)  echo 'In the CURRENT directory (put files here directly — do NOT wrap them in a new project folder via `cargo new`; the standard `src/` directory for `src/main.rs` is expected and fine), create a minimal Rust BINARY project: a Cargo.toml (package "reverse-cli", edition 2021, no dependencies) and src/main.rs. Implement `fn reverse(s: &str) -> String` that reverses by characters; main reads its first CLI argument and prints reverse(arg). ALSO add a `#[cfg(test)]` unit test asserting `reverse("hello") == "olleh"`. Then run "cargo test" (must pass) and "cargo run -- hello" (must print olleh). Actually implement reverse; do not just scaffold. Keep it minimal. The moment the program prints "olleh", you are DONE — reply with one short confirmation line and STOP; do not run it again.' ;;
     fix)   echo 'There is a Rust project in the current directory. Running "cargo run -- hello" should print "olleh" (the reverse of the argument) but it prints "hello". Find and fix the bug in src/main.rs, then run "cargo run -- hello" to confirm it prints "olleh". Make the minimal change; do not rewrite the whole file. Apply the fix ONCE: if an edit fails with "String to replace not found", the change is already applied — do NOT retry the edit, just run the program. The moment it prints "olleh", you are DONE — reply with one short confirmation line and STOP.' ;;
     debug) echo 'There is a Rust library in the current directory. "cargo test" fails because of a bug in src/lib.rs. Fix the bug so the test passes. Do NOT modify the test. Then run "cargo test" to confirm it passes. Make the minimal change. Apply the fix ONCE: if an edit fails with "String to replace not found", the change is already applied — do NOT retry the edit, just run the test. The moment the test passes, you are DONE — reply with one short confirmation line and STOP.' ;;
+    rpn)   echo 'In the CURRENT directory (put files here directly — do NOT wrap them in a new project folder via `cargo new`; the standard `src/` directory for `src/main.rs` is expected and fine), create a minimal Rust binary project: a Cargo.toml (package name "rpn-calc", edition 2021, no dependencies) and src/main.rs. The program evaluates a Reverse Polish Notation (postfix) expression passed as its first command-line argument: space-separated integer tokens and the binary operators + - * / , evaluated left-to-right with a stack (integer arithmetic). Print ONLY the integer result (no extra text). It must work for ANY valid RPN expression, not just the example. Example: `cargo run -- "3 4 + 5 *"` must print 35. Then run `cargo run -- "3 4 + 5 *"` and confirm it prints 35. Keep it minimal. The moment it prints 35, you are DONE — reply with one short confirmation line and STOP; do not run it again.' ;;
   esac
 }
 
@@ -180,6 +189,17 @@ verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0
   ( cd "$w"
     case "$t" in
       greet) grep -qiE '\bpong\b' "$log" && { echo "    PASS  said pong"; exit 0; } || { echo "    FAIL  no 'pong'"; exit 1; } ;;
+      rpn)
+        # From-scratch RPN evaluator. Verify a GENERAL implementation, not just the prompted
+        # example: "3 4 + 5 *" -> 35 (the example) AND "5 1 2 + 4 * + 3 -" -> 14 (deeper nesting:
+        # 5 + (1+2)*4 - 3). A hack that only handles the example fails the second.
+        [ -f Cargo.toml ] || { echo "    FAIL  Cargo.toml missing"; fail=1; }
+        ls src/*.rs >/dev/null 2>&1 || { echo "    FAIL  no src/*.rs"; fail=1; }
+        o1="$(cargo run -q -- "3 4 + 5 *" 2>"$w/run.err" | tr -d '[:space:]')"
+        [ "$o1" = 35 ] && echo "    PASS  '3 4 + 5 *' -> 35" || { echo "    FAIL  '3 4 + 5 *' -> '$o1'"; fail=1; }
+        o2="$(cargo run -q -- "5 1 2 + 4 * + 3 -" 2>>"$w/run.err" | tr -d '[:space:]')"
+        [ "$o2" = 14 ] && echo "    PASS  '5 1 2 + 4 * + 3 -' -> 14" || { echo "    FAIL  '5 1 2 + 4 * + 3 -' -> '$o2'"; fail=1; }
+        exit $fail ;;
       *)
         [ -f Cargo.toml ] || { echo "    FAIL  Cargo.toml missing"; fail=1; }
         ls src/*.rs >/dev/null 2>&1 || { echo "    FAIL  no src/*.rs"; fail=1; }
