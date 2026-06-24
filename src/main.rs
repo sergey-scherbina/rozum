@@ -3372,6 +3372,60 @@ async fn run_verify(cmd: &str, cwd: &std::path::Path) -> (bool, String) {
     }
 }
 
+/// Shell-quote a model-provided string so it is safe inside the derived check command (no injection).
+fn shquote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// "Understand the goal": ask the loaded model to FORMALIZE the task into a deterministic check, as
+/// STRUCTURED data — `{"checkable":bool,"cargo_test":bool,"run":[{"arg":..,"expect":..}]}`. We BUILD
+/// the shell command ourselves (shell-quoting the model's strings), so a model can't inject arbitrary
+/// shell. Returns the `cargo …`-only command, or `None` (→ the gate falls back to auto-detect / floor).
+/// Best-effort, short timeout; only meaningful for a project whose check is a build/run/test.
+async fn derive_target(base: &str, task: &str) -> Option<String> {
+    let prompt = format!(
+        "Set up the acceptance CHECK for this coding task. Reply with ONLY a JSON object, no prose:\n\
+         {{\"checkable\": <true|false>, \"cargo_test\": <true|false>, \"run\": [{{\"arg\": \"<argument VALUE only>\", \"expect\": \"<exact stdout>\"}}]}}\n\
+         - \"run\": one entry per concrete example the task states as `cargo run -- X` printing `Y`.\n\
+           `arg` is JUST the argument value X — e.g. for \"cargo run -- hello prints olleh\", arg is \
+           \"hello\" (NOT \"cargo run -- hello\"); `expect` is JUST Y, e.g. \"olleh\". Omit if no example.\n\
+         - cargo_test=true ONLY if the task explicitly requires a unit test to pass.\n\
+         - checkable=false if the task has no machine-checkable build/run/test criterion.\n\n\
+         Task:\n{task}"
+    );
+    let body = serde_json::json!({
+        "model": "x", "temperature": 0.0, "max_tokens": 300,
+        "messages": [{"role": "user", "content": prompt}],
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(180))
+        .send()
+        .await
+        .ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    let text = v["choices"][0]["message"]["content"].as_str()?;
+    // Tolerant: pull the first {...} object out of the reply.
+    let j: serde_json::Value = serde_json::from_str(&text[text.find('{')?..=text.rfind('}')?]).ok()?;
+    if !j["checkable"].as_bool().unwrap_or(false) {
+        return None;
+    }
+    let mut parts = vec!["cargo build -q".to_string()];
+    if j["cargo_test"].as_bool().unwrap_or(false) {
+        parts.push("cargo test -q".to_string());
+    }
+    if let Some(runs) = j["run"].as_array() {
+        for r in runs {
+            if let (Some(arg), Some(exp)) = (r["arg"].as_str(), r["expect"].as_str()) {
+                parts.push(format!("[ \"$(cargo run -q -- {})\" = {} ]", shquote(arg), shquote(exp)));
+            }
+        }
+    }
+    // Only worth it if it checks more than a bare build (else the floor already does).
+    (parts.len() > 1).then(|| parts.join(" && "))
+}
+
 /// The repair prompt for a re-invocation: the original task + the REAL error + a fix directive.
 fn repair_prompt(original: &str, err: &str) -> String {
     format!(
@@ -3461,6 +3515,25 @@ async fn exec_agent(
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let rounds: usize =
         std::env::var("ROZUM_VERIFY_ROUNDS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(2);
+
+    // DERIVE THE TARGET up-front ("understand the goal"), held FIXED for the run so it doesn't drift.
+    // Precedence: explicit ROZUM_VERIFY (handled per-round by resolve_verify_cmd) > a model-formalized
+    // deterministic check from the prompt (single model only — multi-model derivation via the planner
+    // role is a later step) > per-round auto-detect (the cargo floor) in the loop.
+    let derived_target: Option<String> = if std::env::var("ROZUM_VERIFY").is_ok()
+        || model_for_alias.contains(',')
+    {
+        None
+    } else {
+        match derive_target(&format!("http://127.0.0.1:{port}"), &original_prompt).await {
+            Some(t) => {
+                eprintln!("rozum launch: derived target — `{t}`  (override with ROZUM_VERIFY)");
+                Some(t)
+            }
+            None => None,
+        }
+    };
+
     let mut verified: Option<bool> = None; // None = no gate ran (not a verifiable project)
     let mut last_code = 1;
     let mut announced = false;
@@ -3474,8 +3547,9 @@ async fn exec_agent(
             .and_then(|r| r.ok())
             .and_then(|s| s.code())
             .unwrap_or(1);
-        // Resolve the check now — the project may have just been created this round.
-        let Some(vcmd) = resolve_verify_cmd() else { break };
+        // The fixed derived target wins; else resolve per-round (explicit ROZUM_VERIFY or the cargo
+        // floor — re-checked each round so a just-created project is picked up).
+        let Some(vcmd) = derived_target.clone().or_else(resolve_verify_cmd) else { break };
         if !announced {
             eprintln!("rozum launch: verify-gate — `{vcmd}` (up to {rounds} repair round(s); ROZUM_VERIFY=0 to disable)");
             announced = true;

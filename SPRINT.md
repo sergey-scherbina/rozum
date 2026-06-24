@@ -9,12 +9,15 @@
   backend verifier role + repair in `LazyPipelineBackend` (`cfdefbf`); swap + MemAvailable admission keep
   any N on 36 GB no-reboot. Proven: 1-model gate fires+bounds (4B couldn't fix a Cargo.toml; 35B-class
   converges per solve.sh A/B). **TO BUILD, in priority:**
-  1. **Generalize `target`** (the KEY open question): abstract verification from "cargo build+test" to a
-     CI/CD-style target — kinds: command/script (exit 0, the strong deterministic case), predicate,
-     Q&A-with-known-answer (LLM-judge), Q&A-open → quality stage (LLM judge and/or human: variants /
-     yes-no / continue-stop / direction). Resolution precedence: explicit (`ROZUM_VERIFY` is the command
-     form — generalize) → guess-if-obvious → solicit ("pick from a list or give your own"). Deterministic
-     command-target first (it preserves no-false-success); open/human target later.
+  1. **Generalize `target`** — ✅ FIRST CUT DONE (merry-tapir): `rozum launch` DERIVES the target from the
+     prompt — `derive_target` asks the loaded model to formalize the task as structured `{checkable,
+     cargo_test, run:[{arg,expect}]}`; rozum BUILDS the shell-quoted `cargo …` command (no injection),
+     uses it as the verify-gate target, logs it ("derived target — `…` (override with ROZUM_VERIFY)"),
+     falls back to cargo-detect. Proven: Qwen3-4B derived `cargo build && [ "$(cargo run -q -- 'hello')"
+     = 'olleh' ]` from a reverse-cli prompt; sharper prompt fixed an arg-misuse. Precedence: explicit
+     `ROZUM_VERIFY` > derived (single model) > cargo floor. **PENDING:** multi-model derivation via the
+     planner role; interactive confirm of a guessed target (now: logged + overridable); the non-command
+     target kinds (predicate / Q&A-known / Q&A-open → LLM-judge or human). Kept deterministic-first.
   2. **Escalate ACROSS the chain** on persistent target-miss — switch gateway to the next model
      (swap-fix) with (task + best result + the real error), not just re-invoke the same one; cloud last.
   3. **Tool curation** per role/model — planner/verifier get NO write/exec tools (already `tools=[]` in
