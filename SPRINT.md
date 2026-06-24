@@ -28,11 +28,15 @@
      `--model Qwen3-4B,Qwen3.6-35B` on reverse-cli → link 1 (4B) failed → ⤴ escalated → switched to link 2
      (35B) → 35B fixed it → ✅ target met, NO reboot (uptime held through the swap). Cloud last = operator
      orders cloud links last (explicit ordering for now; availability/limit checks = item 6).
-  3. **Tool curation** per role/model — planner/verifier get NO write/exec tools (already `tools=[]` in
-     the tiers → make it the named policy); executor gets curated coding tools; smaller sets for weaker
-     models (`--lean` is the start); verifier may get only the target-check tool.
-  4. **Adaptive residency policy** — cache-when-fits vs swap-when-not as an explicit chain policy
-     (machinery exists: admission/footprint/MemAvailable/swap).
+  3. **Tool curation** — ✅ core covered: backend planner/verifier tiers already run with `tools=[]`
+     (cfdefbf) and `--lean` cuts the executor's set 33→4 (the big lever). REMAINING (marginal): per-MODEL
+     executor tool sets (weaker model → even fewer) — low value since the executor needs the core coding
+     tools; revisit only if a weak link is shown to derail on a specific tool.
+  4. **Adaptive residency policy (cache-vs-swap)** — ⛔ constrained by physics, not a build: two MLX
+     models CO-RESIDENT crash Metal (kIOGPUCommandBufferCallbackErrorTimeout — [[project-pipeline-cascade]]),
+     so for MLX chains SWAP (one resident at a time) is REQUIRED, not optional — which the chain already
+     does safely (admission/MemAvailable/swap). "Cache-when-fits" is viable only for small/non-MLX links
+     and is low value for a forward-only chain (it rarely revisits a link). Left as-is (swap is correct).
   5. **Role-aware quality stats + auto-exclude** — ✅ DONE (merry-tapir): per-(model, role) pass/attempt
      stats persist in `gateway_dir()/model_stats.json`; the chain records each link's terminal outcome
      (`record_model_outcome`) and SKIPS a link with a consistently-bad record (`model_skip_decision`:

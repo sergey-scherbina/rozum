@@ -194,13 +194,20 @@ adaptive resource management**. The unifying mechanism is **verification-gated e
    haven't produced an acceptable result, AND the cloud is reachable + within limits — so cloud usage is
    *saved*. If cloud is down/over-limit, fall back to local links used optimally (per the above).
 
-**Status.** Done: sequential one-at-a-time chain + swap (no-reboot); the verification + feedback +
-orchestration core — `rozum launch` deterministic verify-gate (re-invokes the same model with the real
-error) + backend verifier role + repair; adaptive load/swap admission. **To build:** (a) escalation
-ACROSS the chain on persistent verify-failure — switch to the NEXT model with (task + best-result-so-far),
-not just re-invoke the same one; (b) cache-when-fits vs swap-when-not as an explicit residency policy for
-the chain; (c) role-aware quality stats + auto-exclude; (d) cloud-last ordering with availability/limit
-checks + local fallback. These layer onto the existing cascade/escalation + residency infrastructure.
+**Status (2026-06-24 — core chain SHIPPED).** Done: sequential one-at-a-time chain + swap (no-reboot);
+the verification + feedback + orchestration core — `rozum launch` deterministic verify-gate (re-invokes
+the same model with the real error) + backend verifier role + repair; adaptive load/swap admission;
+**(a) escalation ACROSS the chain** on persistent verify-failure — on target-miss it switches in-process
+to the NEXT link carrying (task + current broken files + real error), proven live `--model 4B,35B`
+(4B miss → ⤴ 35B fix → ✅, no reboot); **(c) role-aware quality stats + auto-exclude** (per-(model,role)
+pass/attempt ledger, skip a link below the pass-rate floor after MIN_SAMPLES); **(d) cloud-last** via
+explicit chain ordering + skip-unreachable on switch failure; **target derivation** (single + multi-model,
+the latter derived on the first link). **Not building:** (b) cache-when-fits — two MLX models co-resident
+crash Metal, so SWAP is required not optional for MLX chains (the chain already swaps safely); caching is
+viable only for small/non-MLX links and low value for a forward-only chain. **Remaining (low value):**
+per-MODEL executor tool sets (the `--lean` 33→4 cut + `tools=[]` planner/verifier are the real levers);
+interactive confirm of a guessed target (now: logged + ROZUM_VERIFY-overridable); non-command target
+kinds (predicate / Q&A-judge) beyond the cargo-command target.
 
 ## Target — the generalized verification (operator, 2026-06-24)
 
@@ -238,3 +245,27 @@ Which tools a model gets is a quality lever, not a constant — curate per role 
 
 The deterministic command-target + role-curated tools are the near-term increments; the open / human-in-
 the-loop target and dynamic per-model tool sets are later refinements.
+
+### Deriving the target from the prompt (operator, 2026-06-24)
+
+The prompt ("write code that…", "fix this bug…", "find+fix the bug", "answer this question…") *implies*
+the goal; "understanding the target" = turning that intent into a **checkable** criterion, keeping it
+deterministic whenever possible. Source order:
+
+1. **In the prompt** — many prompts state the criterion (`cargo run -- hello` → `olleh`; "make `cargo
+   test` pass"; "must return X for Y"). Extract → use directly. Most reliable, no guessing.
+2. **Model-formalized** — the PLANNER (first model, which already reads the prompt) emits a *structured*
+   target alongside the plan: a single shell command that exits 0 iff done (or input→expected examples).
+   This is the general "understand the goal" step, made explicit + checkable.
+3. **Judgment** — only when genuinely not machine-checkable → human / LLM judge.
+
+Guard against false-success: prefer a **derived DETERMINISTIC** target (command / tests / examples) over
+"a model judges". So "guess the target" really means "**synthesize a checkable target**", not "ask a
+model to grade itself". A safety allowlist bounds an auto-derived command (e.g. must be a `cargo …` form)
+so a model can't emit a dangerous shell line; an explicit `ROZUM_VERIFY` is the user's own, unrestricted.
+
+Two principles: **derive once, up front** (the planner; hold it FIXED for the whole chain so the goal
+doesn't drift model-to-model); **confirm a guessed target** before committing ("I'll verify by `<cmd>` —
+ok?") — solving against a WRONG target is worse than none; an explicit/in-prompt target needs no confirm.
+Per task type: create → compiles + stated behavior (examples / synth tests); fix/debug → the failing
+build/test goes green; Q&A → known-answer compare, else judgment.
