@@ -3587,24 +3587,6 @@ async fn exec_agent(
     let rounds: usize =
         std::env::var("ROZUM_VERIFY_ROUNDS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(2);
 
-    // DERIVE THE TARGET up-front ("understand the goal"), held FIXED for the run so it doesn't drift.
-    // Precedence: explicit ROZUM_VERIFY (handled per-round by resolve_verify_cmd) > a model-formalized
-    // deterministic check from the prompt (single model only — multi-model derivation via the planner
-    // role is a later step) > per-round auto-detect (the cargo floor) in the loop.
-    let derived_target: Option<String> = if std::env::var("ROZUM_VERIFY").is_ok()
-        || model_for_alias.contains(',')
-    {
-        None
-    } else {
-        match derive_target(&format!("http://127.0.0.1:{port}"), &original_prompt).await {
-            Some(t) => {
-                eprintln!("rozum launch: derived target — `{t}`  (override with ROZUM_VERIFY)");
-                Some(t)
-            }
-            None => None,
-        }
-    };
-
     // The escalation CHAIN: the `--model` list in order (cloud links last — the operator orders them).
     // The gate tries each link with up to `rounds` self-repair attempts; on persistent target-miss it
     // ESCALATES to the next link with (task + the current result/files + the real error) — switching the
@@ -3616,6 +3598,28 @@ async fn exec_agent(
         .collect();
     let multi = chain.len() > 1;
     let ctl = format!("http://127.0.0.1:{port}");
+    // What the gateway currently serves. A multi-model launch starts as the lazy pipeline spec; the
+    // first link (below + the loop) switches it to chain[0]. We only swap on a real change.
+    let mut current: String = model_for_alias.to_string();
+
+    // DERIVE THE TARGET up-front ("understand the goal") via the FIRST link, held FIXED for the run so it
+    // doesn't drift. Precedence: explicit ROZUM_VERIFY (resolved per-round) > a model-formalized
+    // deterministic check from the prompt > per-round auto-detect (the cargo floor) in the loop.
+    let derived_target: Option<String> = if std::env::var("ROZUM_VERIFY").is_ok() {
+        None
+    } else {
+        // For a chain, switch to the first link so the derivation runs on ONE model, not the pipeline.
+        if multi && switch_gateway_model(&ctl, &chain[0]).await {
+            current = chain[0].clone();
+        }
+        match derive_target(&ctl, &original_prompt).await {
+            Some(t) => {
+                eprintln!("rozum launch: derived target — `{t}`  (override with ROZUM_VERIFY)");
+                Some(t)
+            }
+            None => None,
+        }
+    };
     let mut verified: Option<bool> = None; // None = no gate ran (not a verifiable project)
     let mut last_code = 1;
     let mut announced = false;
@@ -3632,9 +3636,12 @@ async fn exec_agent(
         }
         if multi {
             eprintln!("rozum launch: ── chain link {}/{}: {model} ──", mi + 1, chain.len());
-            if !switch_gateway_model(&ctl, model).await {
-                eprintln!("rozum launch: ↻ could not switch to {model} — skipping this link");
-                continue;
+            if *model != current {
+                if !switch_gateway_model(&ctl, model).await {
+                    eprintln!("rozum launch: ↻ could not switch to {model} — skipping this link");
+                    continue;
+                }
+                current = model.clone();
             }
         }
         for round in 0..=rounds {

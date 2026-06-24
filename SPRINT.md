@@ -15,8 +15,10 @@
      uses it as the verify-gate target, logs it ("derived target — `…` (override with ROZUM_VERIFY)"),
      falls back to cargo-detect. Proven: Qwen3-4B derived `cargo build && [ "$(cargo run -q -- 'hello')"
      = 'olleh' ]` from a reverse-cli prompt; sharper prompt fixed an arg-misuse. Precedence: explicit
-     `ROZUM_VERIFY` > derived (single model) > cargo floor. **PENDING:** multi-model derivation via the
-     planner role; interactive confirm of a guessed target (now: logged + overridable); the non-command
+     `ROZUM_VERIFY` > derived > cargo floor. Multi-model: ✅ derivation runs via the FIRST link (switch to
+     chain[0], derive on one model not the whole pipeline; `current` tracks the loaded model so the chain
+     loop skips the redundant re-swap). **PENDING:** interactive confirm of a guessed target (now: logged
+     + overridable); the non-command
      target kinds (predicate / Q&A-known / Q&A-open → LLM-judge or human). Kept deterministic-first.
   2. **Escalate ACROSS the chain** — ✅ DONE (merry-tapir): the `rozum launch` verify-gate now walks the
      `--model` chain — each link gets up to ROZUM_VERIFY_ROUNDS self-repair attempts, then on persistent
