@@ -5,6 +5,59 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-004 — `mcp-proxy` dies mid-session → `mcp__rozum__*` tools vanish (no rozum-side trace)
+
+- **Status:** fixed on `feature/mcp-proxy-resilience` (cargo check clean). Pending: install
+  to `~/.cargo/bin/rozum` + a live away-session soak. The fix is the inverse correction to
+  BUG-002: that one made the watchdog reap orphans, this one stops it reaping *live* sessions.
+- **Reporter:** operator — mid-session the `mcp__rozum__*` tools disappeared (harness emitted
+  "MCP servers have disconnected: rozum") while the meeting daemon stayed up and the CLI kept
+  working. Correctly diagnosed by the operator: the **stdio `mcp-proxy`** bridging this Claude
+  Code session to the daemon died; the daemon + CLI are an independent path. "MCP off" ≠ "rozum
+  down".
+- **Severity:** P2 — no data loss, but the agent silently loses room coordination for the rest
+  of the session (Claude Code does **not** re-spawn a dead stdio MCP server; recovery today is a
+  manual `/mcp` reconnect or a CC restart — neither doable by the agent itself).
+
+**Symptom.** `rozum mcp-proxy` (the per-session stdio child Claude Code spawns from
+`~/.claude.json`: `{type:stdio, command:rozum, args:[mcp-proxy]}`) exits during a live session.
+The only trace was `eprintln!("proxy error")` → Claude Code's per-server MCP log, which records
+nothing on a clean `exit(0)` and only an opaque transport-close otherwise → root cause
+**uninspectable after the fact**.
+
+**Root cause (two parts).**
+1. **No observability.** The proxy had no log of its own, so an exit reason could not be
+   recovered.
+2. **The idle watchdog reaped live sessions.** BUG-002's fix reaps a proxy idle past
+   `ROZUM_MCP_PROXY_IDLE_SECS` (default 2 h) with an unconditional `exit(0)`. Its safety
+   assumption — "an actively room-using agent calls `meeting.wait_my_turn` ~every 25 s, so only
+   an abandoned proxy goes silent that long" — is **false for an interactive human-driven CC
+   session**: the human is coding/chatting, not running a room poll loop. Step away >2 h and the
+   still-wanted proxy is reaped → tools vanish. (A `serve()`/transport error → `exit(1)` is the
+   other, now-logged, candidate.)
+
+**Fix** (`crates/rozum-meeting/src/meeting/daemon_proxy.rs`):
+- **Observability:** `proxy_log()` writes lifecycle lines (start, initialize, daemon-connect,
+  every exit + reason) to `$RUNTIME/mcp-proxy.log` (rotates at 256 KiB; `ROZUM_MCP_PROXY_LOG=0`
+  to disable). `install_panic_logger()` records panics (payload + location) before the process
+  dies. `run_daemon_proxy` now logs `serve-error` / `stdin-eof` / `join-error` distinctly.
+- **Watchdog (the real fix):** past the soft window it reaps **only if the client transport is
+  actually gone** (`Peer::is_transport_closed()` — flips when the rmcp loop tears down, i.e. CC
+  disconnected). A live-but-idle session keeps its transport open → **not reaped**. A stuck
+  orphan whose pipe never closed (the BUG-002 case) is bounded by a new generous hard cap
+  `ROZUM_MCP_PROXY_MAX_IDLE_SECS` (default 24 h, `0` disables). `ROZUM_MCP_PROXY_IDLE_SECS=0`
+  still disables the watchdog entirely. This keeps BUG-002's orphan-cleanup while closing the
+  live-session false-reap.
+
+**Strategic follow-up (HTTP transport).** The deeper fragility is structural: a *per-session
+stdio child* is a single point of failure that Claude Code won't restart in-session. rmcp 1.7
+ships a `streamable_http_server` transport and Claude Code supports `type:"http"` MCP servers —
+the long-lived daemon could expose an HTTP MCP endpoint that CC connects to and **reconnects**
+to on drop, with no per-session child to crash. Bigger lift (session identity / per-client cwd /
+project detection move off the child); deserves its own spec. See the resilience analysis.
+
+---
+
 ## BUG-003 — concurrent model-loaded gateways exhaust host RAM → watchdog kernel panic → reboot
 
 - **Status:** fixed on master (`3bcee03` v1 single-flight) + **v2 RAM-ledger**

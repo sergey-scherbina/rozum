@@ -29,7 +29,7 @@ use tokio::sync::Mutex;
 
 use super::daemon::daemon_alive;
 use super::room_client::{RoomConnection, tool_result_text_json};
-use super::room_path::meeting_sock;
+use super::room_path::{meeting_sock, rozum_runtime_dir};
 use super::store;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(35);
@@ -123,6 +123,69 @@ fn now_epoch() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// Append a timestamped line to the proxy's OWN log (`$RUNTIME/mcp-proxy.log`). The proxy's
+/// only other trace is `eprintln!` captured into Claude Code's per-server MCP log — which
+/// records NOTHING on a clean `exit(0)` (the idle reap) and only an opaque transport-close on a
+/// crash. So without this an "MCP tools vanished" incident is invisible. Best-effort, lock-free
+/// (an append is atomic enough for low-volume lifecycle lines); off with `ROZUM_MCP_PROXY_LOG=0`.
+fn proxy_log(msg: &str) {
+    if std::env::var_os("ROZUM_MCP_PROXY_LOG").is_some_and(|v| v == "0") {
+        return;
+    }
+    use std::io::Write;
+    let path = rozum_runtime_dir().join("mcp-proxy.log");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Rotate once past ~256 KiB so the log can't grow unbounded across many sessions.
+    if std::fs::metadata(&path).map(|m| m.len() > 256 * 1024).unwrap_or(false) {
+        let _ = std::fs::rename(&path, path.with_extension("log.1"));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{} pid={} {msg}", now_epoch(), std::process::id());
+    }
+}
+
+/// Log a panic (payload + location) to the proxy log before the default hook runs — otherwise a
+/// panic in the serve path dies with no rozum-side trace (Claude Code only sees the pipe close).
+fn install_panic_logger() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic>".to_string());
+        proxy_log(&format!("PANIC at {loc}: {msg}"));
+        prev(info);
+    }));
+}
+
+/// Soft idle window: after this long with no MCP traffic AND no room activity, the watchdog
+/// considers reaping — but only actually reaps if the client transport is also gone (see
+/// `spawn_idle_watchdog`). Default 2h; `0` disables the watchdog entirely.
+fn idle_secs() -> u64 {
+    std::env::var("ROZUM_MCP_PROXY_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(7200)
+}
+
+/// Hard cap: reap unconditionally after this long idle even if the client is still connected, to
+/// bound a truly-stuck orphan (agent abandoned us without closing the pipe). Default 24h; `0`
+/// disables the hard cap so a live session is never reaped while its transport stays open.
+fn max_idle_secs() -> u64 {
+    std::env::var("ROZUM_MCP_PROXY_MAX_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(86400)
+}
+
 impl Default for DaemonProxy {
     fn default() -> Self {
         Self::new()
@@ -214,6 +277,10 @@ impl DaemonProxy {
             }
         }
         s.conn = Some(conn);
+        proxy_log(&format!(
+            "daemon-connect room={:?} reconnect={}",
+            s.room_name, s.presence_announced
+        ));
         // Announce presence ONCE (not on reconnects), via this same session so it carries the
         // agent's handle — unifies the join line with the agent's messages and works for every
         // agent (no per-client hooks). Best-effort.
@@ -522,6 +589,7 @@ impl ServerHandler for DaemonProxy {
             }
             // Hold the session peer so the channel-wakeup task can push to it.
             s.upstream_peer = Some(context.peer.clone());
+            proxy_log(&format!("initialize client={:?} project={:?}", s.client_info_name, s.project));
         }
         // Interactive Claude Code registers a channel listener for this experimental
         // capability; clients that ignore it fall back to `wait_my_turn` unchanged.
@@ -538,13 +606,35 @@ impl ServerHandler for DaemonProxy {
 /// Serve the proxy over stdio (the entry point for `rozum mcp-proxy`).
 pub async fn run_daemon_proxy() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::{ServiceExt, transport::stdio};
+    install_panic_logger();
+    proxy_log(&format!(
+        "start version={} idle_secs={} max_idle_secs={}",
+        env!("CARGO_PKG_VERSION"),
+        idle_secs(),
+        max_idle_secs()
+    ));
     let server = DaemonProxy::new();
     let presence = server.clone(); // shares the Arc<State>; serve() consumes `server`
     // Spawn the idle watchdog BEFORE serve(): serve() blocks until the MCP `initialize`
     // handshake, so a proxy abandoned before (or after) initialize must still be reaped.
     spawn_idle_watchdog(server.clone());
-    let service = server.serve(stdio()).await?;
-    service.waiting().await?;
+    let service = match server.serve(stdio()).await {
+        Ok(s) => s,
+        Err(e) => {
+            // A serve() error here means the stdio handshake itself failed — there is no client to
+            // keep serving, so exiting is correct; we just record WHY (previously silent).
+            proxy_log(&format!("exit reason=serve-error err={e}"));
+            return Err(e.into());
+        }
+    };
+    // `waiting()` returns when the stdio transport ends. For a single-pipe stdio server that is
+    // the genuine end of the session (the client closed it / went away) — there is no second
+    // channel to recover on, so we exit. The win over the old code is that we now log the reason
+    // and never surface a spurious non-zero exit for an ordinary EOF.
+    match service.waiting().await {
+        Ok(reason) => proxy_log(&format!("exit reason=stdin-eof quit={reason:?}")),
+        Err(e) => proxy_log(&format!("exit reason=join-error err={e}")),
+    }
     // The agent's stdio session ended — post a best-effort `left:` before exiting.
     presence.announce_left().await;
     Ok(())
@@ -556,21 +646,47 @@ pub async fn run_daemon_proxy() -> Result<(), Box<dyn std::error::Error + Send +
 /// never closed this one's stdin — `service.waiting()` blocks forever and the process lingers
 /// (the orphaned `mpc-proxy` pile-up). An actively room-using agent calls `meeting.wait_my_turn`
 /// every ~25s (each request stamps `last_active`), so silence past the threshold means it has
-/// been abandoned. Default 2h; `ROZUM_MCP_PROXY_IDLE_SECS=0` disables.
+/// been abandoned.
+///
+/// BUG-FIX (mcp-proxy-resilience): the old watchdog reaped ANY proxy idle past the window with an
+/// unconditional `exit(0)` — so an *interactive* Claude Code session whose human merely stepped
+/// away for >2h lost all `mcp__rozum__*` tools mid-session (Claude Code does not re-spawn a dead
+/// stdio server). Now, past the soft window we reap only if the **client transport is actually
+/// gone** (`Peer::is_transport_closed()` — flips when the rmcp loop tears down, i.e. Claude Code
+/// disconnected). A live-but-idle session keeps its transport open → it is NOT reaped. A truly
+/// stuck orphan (agent abandoned us without closing the pipe, so the transport never closes) is
+/// still bounded by the generous hard cap. `ROZUM_MCP_PROXY_IDLE_SECS=0` disables the watchdog.
 fn spawn_idle_watchdog(proxy: DaemonProxy) {
-    let secs = std::env::var("ROZUM_MCP_PROXY_IDLE_SECS")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(7200);
+    let secs = idle_secs();
     if secs == 0 {
         return;
     }
+    let hard = max_idle_secs();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         loop {
             tick.tick().await;
             let idle = now_epoch().saturating_sub(proxy.last_active.load(Ordering::Relaxed));
-            if idle >= secs {
+            if idle < secs {
+                continue;
+            }
+            // Past the soft window. Reap only if the client is genuinely gone — a live but idle
+            // interactive session (human away) keeps its transport open and must NOT lose tools.
+            let peer_gone = {
+                let s = proxy.state.lock().await;
+                match &s.upstream_peer {
+                    Some(p) => p.is_transport_closed(),
+                    None => true, // never initialized → abandoned before the handshake
+                }
+            };
+            if peer_gone {
+                proxy_log(&format!("exit reason=idle-reap idle={idle}s peer=gone"));
+                std::process::exit(0);
+            }
+            // Client still connected: keep serving. Only the hard cap can reap it now, to bound a
+            // stuck orphan whose pipe never closed.
+            if hard != 0 && idle >= hard {
+                proxy_log(&format!("exit reason=idle-reap-hardcap idle={idle}s peer=alive"));
                 std::process::exit(0);
             }
         }
