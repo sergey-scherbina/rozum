@@ -16,7 +16,7 @@ MODEL="${MODEL:-mlx-community/Qwen3.6-27B-4bit}"
 PORT="${PORT:-8077}"
 CHUNK="${CHUNK:-512}"
 NCTX="${NCTX:-8192}"
-BIN=target/release/rozum
+BIN=target/release/rozum-gateway
 # Both runs need the in-process mistralrs backend; without this the preflight
 # can fall back to the LM Studio HTTP server and the comparison is meaningless.
 export ROZUM_FORCE_MISTRALRS=1

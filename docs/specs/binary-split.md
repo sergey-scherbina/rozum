@@ -1,8 +1,24 @@
 # Binary split — heavy backend binaries vs thin frontends
 
-Status: proposed. PoC landed: `crates/rozum-meet` (thin MCP frontend, links only `rozum-meeting`).
-Continuation of the workspace split (`docs/specs/workspace-split.md`, which split the *crates*);
-this splits the *binaries*.
+Status: implemented on `feature/binary-split-dispatcher` (awaiting operator merge). Thin frontends
+`rozum-meet` / `rozum-web` / `rozum-tui` are on master; the dispatcher (`rozum`) + the renamed
+engine binary (`rozum-gateway`) are on the branch. Continuation of the workspace split
+(`docs/specs/workspace-split.md`, which split the *crates*); this splits the *binaries*.
+
+## Install & usage (after the split)
+
+- `cargo install --path .`               → installs **`rozum-gateway`** (full CLI + engines).
+- `cargo install --path crates/rozum-cli` → installs **`rozum`** (the thin dispatcher).
+- `cargo install --path crates/rozum-meet` (and `rozum-web` / `rozum-tui`) → thin frontends.
+
+`rozum <cmd>` keeps working: the dispatcher `exec`s `rozum-meet` for `mcp-proxy`/`mcp-http` and
+`rozum-gateway` for everything else. Targets are resolved next to the dispatcher binary first,
+then `PATH`, so an uninstalled `target/release/rozum` finds its just-built siblings.
+
+Bench/e2e/smoke scripts that drive the gateway now resolve `…/rozum-gateway` (they need the
+engine binary directly, no dispatcher hop). The user's launchd services (`com.rozum.*`) call
+`rozum-meeting-ssc` / `rozum-ctrl` / python — NOT `rozum gateway` — so the rename does not touch
+them.
 
 ## Why
 

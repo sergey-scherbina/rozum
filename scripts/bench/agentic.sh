@@ -40,7 +40,7 @@
 #   REPAIR          verify-repair retries: on a verified FAIL, feed the real build/test error
 #                   back and let the agent fix it, same workdir, up to N more times (default 0).
 #                   The deterministic net for "almost-right code + hallucinated success".
-#   BENCH_BIN       rozum binary (default target/release/rozum, absolute)
+#   BENCH_BIN       rozum binary (default target/release/rozum-gateway, absolute)
 #   BENCH_OUT       output dir (default scripts/bench/results/agentic-<ts>)
 #   KEEP=1          keep per-run workdirs
 #
@@ -66,8 +66,8 @@ NCTX_OPT=(); [ -n "${NCTX:-}" ] && NCTX_OPT=(--n-ctx "$NCTX")
 
 BIN="${BENCH_BIN:-}"
 if [ -z "$BIN" ]; then
-  if   [ -x "$repo/target/release/rozum" ]; then BIN="$repo/target/release/rozum"
-  elif [ -x "$repo/target/debug/rozum"   ]; then BIN="$repo/target/debug/rozum"
+  if   [ -x "$repo/target/release/rozum-gateway" ]; then BIN="$repo/target/release/rozum-gateway"
+  elif [ -x "$repo/target/debug/rozum-gateway"   ]; then BIN="$repo/target/debug/rozum-gateway"
   else echo "no rozum binary; build with: cargo build --release --bin rozum" >&2; exit 1; fi
 fi
 case "$BIN" in /*) ;; *) BIN="$repo/$BIN" ;; esac   # launch runs in a temp cwd → need absolute

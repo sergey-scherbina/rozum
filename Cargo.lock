@@ -5003,6 +5003,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rozum-cli"
+version = "0.1.0"
+
+[[package]]
 name = "rozum-core"
 version = "0.1.0"
 dependencies = [

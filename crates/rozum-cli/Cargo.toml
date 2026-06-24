@@ -1,0 +1,14 @@
+[package]
+name = "rozum-cli"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# The thin `rozum` umbrella dispatcher (binary split, docs/specs/binary-split.md). Pure std, NO
+# dependencies — it only inspects argv[1] and `exec`s the right backend binary, so it builds in
+# well under a second and a frontend fix never drags the engine rebuild. Routes the engine-free
+# MCP hot path to `rozum-meet`; everything else to `rozum-gateway` (the full engine-linking CLI).
+
+[[bin]]
+name = "rozum"
+path = "src/main.rs"

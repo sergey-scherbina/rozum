@@ -7,6 +7,14 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 
+# The engine-linking binary is `rozum-gateway` (binary split, docs/specs/binary-split.md): the
+# full CLI + model engines. The thin `rozum` dispatcher lives in `crates/rozum-cli` and forwards
+# to this (and to `rozum-meet` for the engine-free MCP hot path). The lib crate stays named
+# `rozum` so `rozum::…` paths (lib, tests/mlx_evals.rs) resolve unchanged.
+[[bin]]
+name = "rozum-gateway"
+path = "src/main.rs"
+
 [features]
 # Default = the pure-Rust native MLX runtime (primary in-process backend) PLUS the
 # GGUF backend (the fallback for GGUF/llama.cpp files, tried after native MLX), so

@@ -13,7 +13,7 @@
 # Env:  ROZUM=<rozum binary>  MODEL=<spec>  PORT=<n>  KEEP=1
 set -uo pipefail
 
-ROZUM="${ROZUM:-$(cd "$(dirname "$0")/.." && pwd)/target/release/rozum}"
+ROZUM="${ROZUM:-$(cd "$(dirname "$0")/.." && pwd)/target/release/rozum-gateway}"
 MODEL="${MODEL:-mlx-community:Qwen3.6-35B-A3B-4bit}"
 PORT="${PORT:-8420}"
 TASK="${1:-build}"

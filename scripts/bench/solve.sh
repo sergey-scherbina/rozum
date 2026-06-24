@@ -34,7 +34,7 @@
 # change. One model resident at a time → fits a 36 GB no-reboot host (admission gate guards it).
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"; root="$(cd "$here/../.." && pwd)"
-BIN="${BIN:-$root/target/release/rozum}"
+BIN="${BIN:-$root/target/release/rozum-gateway}"
 
 # Model list → roles. MODELS wins; else the legacy PLANNER/EXECUTOR pair; else a sane default trio.
 if [ -n "${MODELS:-}" ]; then read -r -a M <<<"$MODELS"
@@ -67,7 +67,7 @@ GWPID=""; current=""
 stop_gw(){
   [ -n "$GWPID" ] && { kill -INT "$GWPID" 2>/dev/null; for _ in $(seq 1 90); do kill -0 "$GWPID" 2>/dev/null||break; sleep 1; done; GWPID=""; }
   "$BIN" gateway stop >/dev/null 2>&1 || true
-  for _ in $(seq 1 60); do pgrep -f 'release/rozum gateway --model' >/dev/null 2>&1 || break; sleep 1; done
+  for _ in $(seq 1 60); do pgrep -f 'release/rozum-gateway gateway --model' >/dev/null 2>&1 || break; sleep 1; done
 }
 trap stop_gw EXIT
 wait_ready(){ for _ in $(seq 1 240); do curl -s -m2 "$BASE/v1/models" >/dev/null 2>&1 && return 0; kill -0 "$GWPID" 2>/dev/null||return 1; sleep 1; done; return 1; }

@@ -5,7 +5,7 @@
 # (a model that doesn't fit is REFUSED cleanly before any weights load → a matrix FAIL, never a reboot).
 set -u
 cd "$(dirname "$0")/../.."                                   # repo root (worktree)
-BIN="$(pwd)/target/release/rozum"
+BIN="$(pwd)/target/release/rozum-gateway"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="scripts/bench/results/full-matrix-$STAMP"
 LOG="/tmp/full_matrix-$STAMP.log"

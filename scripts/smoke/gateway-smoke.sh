@@ -11,13 +11,13 @@
 #
 # Usage:  scripts/smoke/gateway-smoke.sh
 #   SMOKE_MODEL (default mlx-community/Qwen3-0.6B-4bit, must be cached + --offline-loadable)
-#   SMOKE_BIN   (default $HOME/.cargo/bin/rozum)   SMOKE_PORT (default 8396)
+#   SMOKE_BIN   (default $HOME/.cargo/bin/rozum-gateway)   SMOKE_PORT (default 8396)
 # Exit 0 = all pass, 1 = any fail.
 set -uo pipefail
 
 MODEL="${SMOKE_MODEL:-mlx-community/Qwen3-0.6B-4bit}"
 PORT="${SMOKE_PORT:-8396}"
-BIN="${SMOKE_BIN:-$HOME/.cargo/bin/rozum}"
+BIN="${SMOKE_BIN:-$HOME/.cargo/bin/rozum-gateway}"
 BASE="http://127.0.0.1:$PORT"
 GWLOG="$(mktemp -t rozum-smoke-gw.XXXXXX)"
 pass=0; fail=0

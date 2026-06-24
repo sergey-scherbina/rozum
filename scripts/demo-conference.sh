@@ -14,7 +14,7 @@
 # Ctrl-C stops everything it started.
 set -uo pipefail
 
-BIN="${ROZUM_BIN:-$(command -v rozum || echo ./target/release/rozum)}"
+BIN="${ROZUM_BIN:-$(command -v rozum || echo ./target/release/rozum-gateway)}"
 ROOM="${ROOM:-conference}"
 NCTX="${NCTX:-8192}"
 export ROZUM_MLX_CACHE_GB="${ROZUM_MLX_CACHE_GB:-1}"  # free MLX cache — two models on one box

@@ -32,7 +32,7 @@
 #     (separate processes) avoids it entirely.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"; root="$(cd "$here/../.." && pwd)"
-BIN="${BIN:-$root/target/release/rozum}"
+BIN="${BIN:-$root/target/release/rozum-gateway}"
 GLM="${GLM:-mlx-community:GLM-4-9B-0414-4bit}"
 QWEN="${QWEN:-mlx-community:Qwen3-4B-4bit}"
 NCTX="${NCTX:-4096}"

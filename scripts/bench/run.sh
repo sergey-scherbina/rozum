@@ -29,7 +29,7 @@
 #   BENCH_NCTX        context window passed to every model (default 8192)
 #   BENCH_LOAD_TIMEOUT  seconds to wait for a model to load before skipping (default 600)
 #   BENCH_PORT_BASE   first port; incremented per model (default 8101)
-#   BENCH_BIN         rozum binary (default target/debug/rozum, then target/release/rozum)
+#   BENCH_BIN         rozum binary (default target/debug/rozum-gateway, then target/release/rozum-gateway)
 #   BENCH_OUT         output dir (default scripts/bench/results/<timestamp>)
 #   BENCH_KILL_JAVA=1 pkill stray Bloop / scala-cli JVM daemons first (they skew RAM/CPU)
 #
@@ -55,8 +55,8 @@ WARMUP_MAX="${BENCH_WARMUP_MAX:-300}"
 
 BIN="${BENCH_BIN:-}"
 if [ -z "$BIN" ]; then
-  if   [ -x target/release/rozum ]; then BIN=target/release/rozum
-  elif [ -x target/debug/rozum   ]; then BIN=target/debug/rozum
+  if   [ -x target/release/rozum-gateway ]; then BIN=target/release/rozum-gateway
+  elif [ -x target/debug/rozum-gateway   ]; then BIN=target/debug/rozum-gateway
   else echo "no rozum binary; build with: cargo build --bin rozum" >&2; exit 1; fi
 fi
 
