@@ -32,11 +32,14 @@
      (cfdefbf) and `--lean` cuts the executor's set 33→4 (the big lever). REMAINING (marginal): per-MODEL
      executor tool sets (weaker model → even fewer) — low value since the executor needs the core coding
      tools; revisit only if a weak link is shown to derail on a specific tool.
-  4. **Adaptive residency policy (cache-vs-swap)** — ⛔ constrained by physics, not a build: two MLX
-     models CO-RESIDENT crash Metal (kIOGPUCommandBufferCallbackErrorTimeout — [[project-pipeline-cascade]]),
-     so for MLX chains SWAP (one resident at a time) is REQUIRED, not optional — which the chain already
-     does safely (admission/MemAvailable/swap). "Cache-when-fits" is viable only for small/non-MLX links
-     and is low value for a forward-only chain (it rarely revisits a link). Left as-is (swap is correct).
+  4. **Adaptive residency policy (cache-vs-swap)** — ✅ UNBLOCKED (the "two MLX co-resident crash Metal"
+     premise is REFUTED — probe `tests/mlx_evals.rs::coresidency_two_mlx_models_one_process`, commit
+     `d63c9e4`: Qwen 0.6B+4B AND GLM-9B+Qwen-4B survive sequential+concurrent eval, no crash/reboot;
+     likely the swap self-heal patch fixed it too). So cache-when-fits IS viable → backlogged as
+     `chain-cache-when-fits` (gate on the existing admission gate + scheduler multi-resident slots).
+     NOT urgent: a forward-only chain rarely revisits a link, so swap-cost is ~once per escalation;
+     caching mainly helps a re-entered/round-robin chain. HARD safety: never cache two BIG models
+     (untested — forbidden + reboot risk); the admission gate stays the sole "does it fit" authority.
   5. **Role-aware quality stats + auto-exclude** — ✅ DONE (merry-tapir): per-(model, role) pass/attempt
      stats persist in `gateway_dir()/model_stats.json`; the chain records each link's terminal outcome
      (`record_model_outcome`) and SKIPS a link with a consistently-bad record (`model_skip_decision`:

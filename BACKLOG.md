@@ -22,6 +22,57 @@
   Integration point: `serving::parse_tool_calls` returns empty → synth at the mlx call site
   (mlx_native_backend.rs ~2115); needs tool-names + GLM-family threaded into scope (not there today).
 
+## Model chain (verification-gated, `--model A,B,C`)
+
+The CORE chain shipped on master (spec `docs/specs/pipeline-cascade.md`, SPRINT top item): target
+derivation (single + multi-model), deterministic verify-gate + repair, escalation across links, role-aware
+quality stats + auto-exclude, cloud-last by ordering, backend planner/executor/verifier roles. These are
+the deferred follow-ups (operator-triaged 2026-06-24, none urgent):
+
+- [ ] **chain-cache-when-fits** (NOW VIABLE — co-residency crash refuted) — cache a second (or Nth) chain
+  model resident instead of always swapping, when it FITS. The blocker was the belief that two MLX models
+  co-resident crash Metal (`kIOGPUCommandBufferCallbackErrorTimeout`); that is **REFUTED** by
+  `tests/mlx_evals.rs::coresidency_two_mlx_models_one_process` (commit `d63c9e4`): two MLX models in one
+  process survive sequential AND concurrent eval — Qwen3-0.6B+4B (~2.5GB) and GLM-9B+Qwen-4B (~7GB, cross
+  family). Almost certainly fixed by the swap self-heal patch (same thread_local stream root cause). **Build:**
+  gate caching on the EXISTING admission gate (footprint + MemAvailable, `share::admits`) and the scheduler's
+  multi-resident slots (`Lane::Pool` slots>1, `cascade/scheduler.rs` — already supports N>1); cache iff the
+  pair fits the conservative budget, else fall back to swap (the current behavior). **Value:** moderate — a
+  forward-only chain rarely revisits a link, so the swap cost is paid ~once per escalation; caching mainly
+  helps when a chain is re-entered many times (round-robin pipeline) or links ping-pong. **SAFETY (hard):**
+  never cache two BIG models — did NOT test two large models concurrently (forbidden + reboot risk); a
+  load-dependent watchdog timeout under simultaneous heavy prefill is unproven and the RAM-overcommit reboot
+  is real. Keep the admission gate as the sole authority on "does the 2nd model fit"; cache only within it.
+
+- [ ] **chain-per-model-executor-tools** (marginal, not urgent) — per-MODEL executor tool curation in the
+  chain: a weaker link gets a smaller tool set than a strong one. Today the real levers are already pulled —
+  `--lean` cuts the executor surface 33→4 tools and backend planner/verifier tiers run `tools=[]`
+  (`cfdefbf`). **Why marginal:** the executor needs the core coding tools regardless of model; trimming
+  further risks removing a tool the model needs. **Build only if** a specific weak link is shown to derail
+  on a specific tool (e.g. a model that misuses `apply_patch`) → drop that one tool for that one model.
+  Needs a per-(model) tool-allow map threaded into the launch/exec path (`src/main.rs` exec_agent) +
+  evidence from the matrix that a named model+tool pairing regresses.
+
+- [ ] **chain-target-interactive-confirm** (not urgent) — when `rozum launch` DERIVES a target from the
+  prompt (no explicit `ROZUM_VERIFY`) and is UNSURE, confirm it with the operator before running the chain
+  against it instead of silently proceeding. Today: the derived target is logged ("derived target — `…`
+  (override with ROZUM_VERIFY)") and overridable, which covers the confident case. **Build:** have
+  `derive_target` emit a confidence/ambiguity signal (e.g. the model couldn't pin a deterministic check, or
+  produced a judge-only criterion) → in an interactive TTY, prompt "use this target? [y/edit/skip]"; in
+  non-interactive/autonomous runs, fall through to the logged default (never block a headless run). Gate the
+  prompt behind a TTY check so the matrix/cron paths are unaffected.
+
+- [ ] **chain-noncommand-target-kinds** (MUST do eventually, not urgent) — generalize the target beyond the
+  cargo-COMMAND kind (`cargo build && [ "$(cargo run -- arg)" = expect ]`). The spec (§ Target) defines four:
+  (1) command/script exit-0 ✅ done; (2) **predicate** (a check over the result/filesystem — file exists,
+  output matches a regex, a value is in range); (3) **Q&A known-answer** (the prompt has a checkable factual
+  answer → compare); (4) **Q&A open → judgment** (no deterministic check → a judge model scores, the weakest
+  acceptance, use only when nothing deterministic exists). **Build:** extend `derive_target`'s schema +
+  `resolve_verify_cmd`/`run_verify` (`src/main.rs`) to carry a tagged target kind and dispatch per kind;
+  keep the precedence deterministic-first (prefer a command/predicate over a judge). Judge-target is the
+  escape hatch, not the default — record per-kind so the quality stats don't trust a judge's PASS as much
+  as a deterministic one.
+
 ## Host safety
 
 - [x] **residency-gate-v2-ramledger** — DONE (`feature/gateway-residency-ram-ledger`, `sunny-civet`).

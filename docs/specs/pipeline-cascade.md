@@ -202,9 +202,12 @@ to the NEXT link carrying (task + current broken files + real error), proven liv
 (4B miss → ⤴ 35B fix → ✅, no reboot); **(c) role-aware quality stats + auto-exclude** (per-(model,role)
 pass/attempt ledger, skip a link below the pass-rate floor after MIN_SAMPLES); **(d) cloud-last** via
 explicit chain ordering + skip-unreachable on switch failure; **target derivation** (single + multi-model,
-the latter derived on the first link). **Not building:** (b) cache-when-fits — two MLX models co-resident
-crash Metal, so SWAP is required not optional for MLX chains (the chain already swaps safely); caching is
-viable only for small/non-MLX links and low value for a forward-only chain. **Remaining (low value):**
+the latter derived on the first link). **(b) cache-when-fits — UNBLOCKED, backlogged:** the premise (two MLX
+models co-resident crash Metal) is REFUTED by a direct probe (`tests/mlx_evals.rs`, `d63c9e4` — Qwen
+0.6B+4B and GLM-9B+Qwen-4B survive sequential+concurrent eval, no crash/reboot; likely the swap self-heal
+fixed it). Caching is viable, gated on the existing admission gate + scheduler multi-resident slots; not
+urgent (swap-cost is ~once per escalation in a forward-only chain) and never cache two BIG models
+(untested, reboot risk). **Remaining (low value):**
 per-MODEL executor tool sets (the `--lean` 33→4 cut + `tools=[]` planner/verifier are the real levers);
 interactive confirm of a guessed target (now: logged + ROZUM_VERIFY-overridable); non-command target
 kinds (predicate / Q&A-judge) beyond the cargo-command target.
