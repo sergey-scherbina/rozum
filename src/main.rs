@@ -3506,6 +3506,35 @@ fn repair_prompt(original: &str, err: &str) -> String {
     )
 }
 
+/// Detect the most common "the check fails but the code looks right" cause: the agent wrote its
+/// implementation to the WRONG path. `cargo` only builds `src/main.rs` (+ `src/lib.rs`, `src/bin/*`);
+/// if real code sits at the repo root while `src/main.rs` is missing or still the default
+/// "Hello, world!" stub, the build/run "passes" on the wrong file and the raw error tail never says
+/// why — so a repair round just thrashes. Surface the placement precisely so it can converge. Pure
+/// guidance: never moves files itself. (Matrix harness has the same check in `scripts/bench/agentic.sh`.)
+fn structural_hint(cwd: &std::path::Path) -> Option<String> {
+    let src_main = cwd.join("src").join("main.rs");
+    let src_main_missing = !src_main.exists();
+    let is_stub = std::fs::read_to_string(&src_main)
+        .map(|c| c.contains("Hello, world!") && c.lines().count() <= 5)
+        .unwrap_or(false);
+    if !(src_main_missing || is_stub) {
+        return None;
+    }
+    let stray = std::fs::read_dir(cwd).ok().and_then(|rd| {
+        rd.filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .find(|n| n.ends_with(".rs"))
+    })?;
+    Some(format!(
+        "WRONG FILE LOCATION: your code is in ./{stray}, but `cargo` ONLY builds src/main.rs \
+         (currently {}, so the program that actually runs is NOT your code). Move your implementation \
+         into src/main.rs: `mkdir -p src && mv ./{stray} src/main.rs` (overwrite the stub), then build \
+         and run.",
+        if src_main_missing { "missing" } else { "the default \"Hello, world!\" stub" }
+    ))
+}
+
 async fn exec_agent(
     mut program: Vec<String>,
     model_for_alias: &str,
@@ -3677,6 +3706,12 @@ async fn exec_agent(
             }
             verified = Some(false);
             // Carry the task + real error forward (the next attempt/link sees the broken files + why).
+            // Prepend a structural hint when the failure is a misplaced-source bug (code in the wrong
+            // file) — the raw error tail alone can't reveal that, so repair would otherwise thrash.
+            let err = match structural_hint(&cwd) {
+                Some(hint) => format!("{hint}\n\n{err}"),
+                None => err,
+            };
             program[pidx] = repair_prompt(&original_prompt, &err);
             if round == rounds {
                 // This link is exhausted — record its outcome for the track-record stats.
@@ -5963,6 +5998,23 @@ mod chain_tests {
         assert_eq!(agent_prompt_index(&["codex".into(), "exec".into(), "do X".into()]), Some(2));
         assert_eq!(agent_prompt_index(&["opencode".into(), "run".into(), "do X".into()]), Some(2));
         assert_eq!(agent_prompt_index(&["claude".into()]), None); // interactive → no gate
+    }
+
+    #[test]
+    fn structural_hint_flags_misplaced_source() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::create_dir(root.join("src")).unwrap();
+        // The confirmed bug: real code at ./main.rs, src/main.rs still the default stub.
+        std::fs::write(root.join("main.rs"), "fn main(){ /* real rpn code */ }").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {\n    println!(\"Hello, world!\");\n}\n").unwrap();
+        let h = structural_hint(root).expect("misplaced source must be flagged");
+        assert!(h.contains("WRONG FILE LOCATION") && h.contains("main.rs"), "got: {h}");
+
+        // A correct project (real code IN src/main.rs, no stray) → no hint.
+        std::fs::remove_file(root.join("main.rs")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main(){ let mut s=Vec::<i64>::new(); s.push(1); }").unwrap();
+        assert!(structural_hint(root).is_none(), "a correct project must not be flagged");
     }
 }
 

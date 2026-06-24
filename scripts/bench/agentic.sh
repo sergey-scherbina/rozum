@@ -228,6 +228,25 @@ verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0
 # exact text fed back to the agent for repair. Echoes a short, actionable diagnostic.
 repair_diagnostic() { # $1=task  $2=workdir
   ( cd "$2" 2>/dev/null || exit 0
+    # Structural check FIRST — agents commonly write code to the WRONG path. `cargo` only builds
+    # src/main.rs (+ src/lib.rs, src/bin/*); if the real implementation sits at the repo root while
+    # src/main.rs is missing or still the default "Hello, world!" stub, the build "passes" but the
+    # program that runs is NOT the agent's code — and a runtime-only diagnostic ("output is X") never
+    # reveals why. Surface the placement so repair can converge instead of thrashing.
+    src_is_stub=0
+    if [ -f src/main.rs ] && grep -q 'Hello, world!' src/main.rs && [ "$(wc -l < src/main.rs)" -le 5 ]; then
+      src_is_stub=1
+    fi
+    stray="$(find . -maxdepth 1 -name '*.rs' 2>/dev/null | sed 's#^\./##' | head -1)"
+    if [ -n "$stray" ] && { [ ! -f src/main.rs ] || [ "$src_is_stub" = 1 ]; }; then
+      echo "WRONG FILE LOCATION: your code is in ./$stray, but \`cargo\` ONLY builds src/main.rs (currently $([ -f src/main.rs ] && echo 'the default \"Hello, world!\" stub' || echo 'missing'), so the program that runs is NOT your code). Move your implementation into src/main.rs: \`mkdir -p src && mv ./$stray src/main.rs\` (overwrite the stub). Then build and run."
+      exit 0
+    fi
+    other_src="$(find src -maxdepth 1 -name '*.rs' ! -name 'main.rs' 2>/dev/null | tr '\n' ' ')"
+    if [ "$src_is_stub" = 1 ] && [ -n "$other_src" ]; then
+      echo "WRONG ENTRY POINT: src/main.rs is still the default \"Hello, world!\" stub, so cargo runs it and ignores your code in ${other_src}. Put the program's main() + logic in src/main.rs (or declare the other files as modules and call them from main)."
+      exit 0
+    fi
     if ! berr="$(cargo build 2>&1)"; then
       echo "The project does NOT compile. \`cargo build\` reports:"
       printf '%s\n' "$berr" | grep -vE '^\s*Compiling|^\s*Finished|^\s*Updating|Blocking|Downloaded' | head -40
