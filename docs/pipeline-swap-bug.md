@@ -1,5 +1,33 @@
 # In-process GLM→Qwen swap bug — fresh-system handoff
 
+## ✅ RESOLVED (2026-06-24, merry-tapir, fresh boot) — REAL MLX bug, fixed
+
+Verdict (fresh boot, ample RAM, `REPS=3`): **real in-process-swap bug, NOT RAM degradation.**
+`qwen_short 3/3, qwen_long 3/3` (Qwen handles long ALONE = RAM control passes) while
+`swap_short 0/3, swap_long 0/3, lazy_pipeline 0/3`. After the fix: **all 5 cells 3/3.** It was
+*not* prompt-length / prefill-cache (swap+short also failed) and **not** GLM-specific — **all four
+`/control/switch` permutations failed (incl. Qwen→Qwen)**: any model loaded on a *new worker thread*
+after another failed its first decode.
+
+**Root cause (in MLX core, `mlx/backend/metal/device.cpp`):** the metal command-encoder map is
+`static thread_local`, and a stream's encoder is registered (`gpu::new_stream` → `try_emplace`) **only
+on the thread that created the stream**. rozum runs each model on its own worker thread and tears it
+down on swap; the next model's fresh worker thread evaluates arrays still bound to the *previous*
+thread's stream → `get_command_encoder` misses → throws **"There is no Stream(gpu, N) in current
+thread."** (surfaced only after we replaced the swallowed bare `mlx: eval failed` with the real
+exception — that opacity had cost a prior session).
+
+**Fix:** an MLX-core **self-heal** patch — if `get_command_encoder` misses, *register* the encoder on
+the current thread instead of throwing. Shipped as a 2nd chained CMake `PATCH_COMMAND` in the
+`mlx-c` submodule of the vendored fork (`patches/mlx-stream-encoder-selfheal.patch`). General,
+culprit-agnostic, fires at most once per stream per thread. (NOT the handoff's per-load-cap
+hypothesis; NOT a teardown flush — that one was harmful and stays reverted.) Forks committed:
+`sergey-scherbina/mlx-c @ cd329a6`, `sergey-scherbina/mlx-rs @ 7922c10a` (was `12fac5c0`).
+
+The rest of this doc is the original pre-fix handoff, kept for context.
+
+---
+
 **One question to settle on a fresh boot:** is the in-process `GLM-9B → Qwen3-4B` swap failure a
 **real MLX bug** or **session/RAM degradation**? Run `scripts/bench/pipeline-swap-repro.sh` right after
 a reboot; its output answers it. This doc is the context so a fresh session nails it in one go.

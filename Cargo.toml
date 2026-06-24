@@ -101,3 +101,19 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # See patches/README.md and docs/specs/mistralrs-chunked-prefill.md.
 [patch.crates-io]
 mistralrs = { git = "https://github.com/sergey-scherbina/mistral.rs.git", rev = "6e98a45e23a834543c9ae611d579818b343a24f0" }
+
+# Build the vendored mlx-rs fork from the local multi-repo checkout (REPOS.md: .vendor/mlx-lm)
+# so its mlx-stream-encoder-selfheal MLX-core patch is applied — this fixes the in-process
+# model-swap crash ("There is no Stream(gpu, N) in current thread."; see
+# docs/pipeline-swap-bug.md). Local override, same spirit as the mistralrs path option above.
+# NOTE: an absolute path is used because a relative ".vendor/…" path resolves UNDER the
+# rozum workspace tree and cargo then misattributes the fork crates to this workspace
+# (edition-inheritance error). The fork crates committed locally:
+#   sergey-scherbina/mlx-c  @ cd329a6  (self-heal patch + chained CMake PATCH_COMMAND)
+#   sergey-scherbina/mlx-rs @ 7922c10a (submodule bump; was 12fac5c0)
+# DURABLE / PORTABLE SHIP: push both forks, then bump the rev in crates/rozum-mlx/Cargo.toml
+# (the 3 mlx-* deps) to 7922c10a and DELETE this [patch] block (matches the mistralrs rev pin).
+[patch."https://github.com/sergey-scherbina/mlx-rs.git"]
+mlx-rs = { path = "/Users/sergiy/work/my/rozum/.vendor/mlx-lm/mlx-rs" }
+mlx-lm = { path = "/Users/sergiy/work/my/rozum/.vendor/mlx-lm/mlx-lm" }
+mlx-lm-utils = { path = "/Users/sergiy/work/my/rozum/.vendor/mlx-lm/mlx-lm-utils" }

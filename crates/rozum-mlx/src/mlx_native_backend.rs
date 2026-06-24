@@ -3565,15 +3565,15 @@ mod inner {
             if self.pipeline {
                 // Pre-build + async_eval the NEXT token before blocking on the current.
                 let next = self.pull(true);
-                if eval([&token]).is_err() {
-                    return Some(Err("mlx: eval failed".into()));
+                if let Err(e) = eval([&token]) {
+                    return Some(Err(format!("mlx: eval failed: {e}")));
                 }
                 let id = token.item::<u32>();
                 self.cur = next;
                 Some(Ok(id))
             } else {
-                if eval([&token]).is_err() {
-                    return Some(Err("mlx: eval failed".into()));
+                if let Err(e) = eval([&token]) {
+                    return Some(Err(format!("mlx: eval failed: {e}")));
                 }
                 let id = token.item::<u32>();
                 self.needs_fetch = true; // fetch n+1 on the NEXT call, not now
