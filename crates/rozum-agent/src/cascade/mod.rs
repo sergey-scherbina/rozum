@@ -82,6 +82,45 @@ fn forward_plan(messages: &mut Vec<Message>, plan: &str) {
     append_user_text(messages, &format!("{PLAN_PREFIX}{plan}"));
 }
 
+/// Framing for the VERIFIER tier (3rd role in a ≥3-model pipeline). It does NOT write code/tools —
+/// it judges the executor's proposed solution and returns PASS or a concrete FIX, so the executor
+/// can revise BEFORE the driving agent acts on it. (The deterministic build/test check remains the
+/// driving agent's job — it runs cargo; this is a model-level pre-flight review of the proposal.)
+const VERIFIER_FRAMING: &str = "You are the VERIFIER in a multi-stage pipeline. Do NOT call tools or \
+rewrite the solution yourself. Judge the EXECUTOR's proposed solution against the task for \
+correctness and completeness — obvious bugs, syntax errors, missing pieces, wrong logic. If it is \
+correct and complete, reply with EXACTLY the single word: PASS. Otherwise reply: FIX: followed by \
+the specific minimal changes needed. Be concrete and brief.";
+
+/// How the verifier's fix is handed back to the executor for a revision round.
+const VERIFIER_FIX_PREFIX: &str = "[Verifier feedback — revise your solution to address EXACTLY this, \
+then produce the corrected solution]\n";
+
+/// Executor revision rounds the verifier may drive (`ROZUM_PIPELINE_REPAIR`, default 1; 0 = verify
+/// off even with a 3rd model). Bounded so latency stays predictable on the lazy (per-phase) path.
+fn pipeline_repair_rounds() -> usize {
+    std::env::var("ROZUM_PIPELINE_REPAIR")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+}
+
+/// The verifier's verdict: pass unless it explicitly says `FIX:`. Empty/uncertain → pass (don't
+/// loop on a non-answer); an explicit FIX is the only thing that triggers a repair round.
+fn verifier_passed(verdict: &str) -> bool {
+    !verdict.to_ascii_uppercase().contains("FIX:")
+}
+
+/// Serialize the executor's proposed solution (its text + each tool call's args, e.g. the file
+/// contents in a `Write`) so the verifier can review what the agent is ABOUT to act on.
+fn executor_solution_text(o: &TurnOutcome) -> String {
+    let mut s = o.text.trim().to_string();
+    for (_, name, args) in &o.tool_calls {
+        s.push_str(&format!("\n\n[proposed tool call: {name}]\n{args}"));
+    }
+    s
+}
+
 /// Resolves a tier's backend on demand (loads the model), returning `None` if it can't be built. The
 /// lazy pipeline calls this once per tier per request and tears the backend down before the next
 /// tier loads — so only ONE model is ever resident. Required for local MLX tiers: two MLX models
@@ -160,54 +199,108 @@ impl ChatBackend for LazyPipelineBackend {
         if n == 0 {
             return Err(ModelError::BackendUnavailable("lazy pipeline: no tiers".into()));
         }
-        let last = n - 1;
+        // Roles from the ORDERED list — planner → executor → verifier (the agent DRIVES the task;
+        // these are the model roles behind one request). N=1: the model is the executor alone (no
+        // overhead). N=2: planner + executor. N≥3: + verifier, which reviews the executor's proposed
+        // solution and drives up to `pipeline_repair_rounds()` revision rounds. Extra models (n>3)
+        // are ignored for now.
+        let executor = if n == 1 { &self.specs[0] } else { &self.specs[1] };
+        let planner = (n >= 2).then(|| &self.specs[0]);
+        let verifier = (n >= 3).then(|| &self.specs[2]);
+        if n > 3 {
+            Self::obs("extra_models_ignored", &self.specs[3].model, serde_json::json!({ "n": n }));
+        }
         let mut messages = req.messages.clone();
 
-        // Advisor tiers (0..last): load → plan (no tools) → tear down → forward the plan.
-        for spec in &self.specs[..last] {
-            let backend = match (self.resolve)(spec.clone()).await {
-                Some(b) => b,
-                None => {
-                    Self::obs("advisor_failed", &spec.model, serde_json::json!({"error": "load failed"}));
-                    continue; // degrade: run the executor without this advisor's plan
+        // 1. PLAN (planner): load → plan (no tools) → tear down → forward the plan into the executor's
+        //    input. Degrades to executor-only if the planner can't load or returns nothing.
+        if let Some(spec) = planner {
+            match (self.resolve)(spec.clone()).await {
+                Some(backend) => {
+                    let mut preq = req.clone();
+                    preq.tools = Vec::new();
+                    preq.sampling.temperature = Some(PLANNER_TEMPERATURE);
+                    preq.sampling.response_schema = None;
+                    preq.sampling.max_tokens = Some(PLANNER_MAX_TOKENS);
+                    let mut pmsgs = messages.clone();
+                    append_user_text(&mut pmsgs, PLANNER_FRAMING);
+                    preq.messages = pmsgs;
+                    let outcome = run_and_teardown(backend, preq).await; // FREE before the next tier
+                    match &outcome.error {
+                        Some(e) => Self::obs("advisor_failed", &spec.model, serde_json::json!({ "error": e })),
+                        None => {
+                            let plan = outcome.text.trim();
+                            Self::obs("advisor", &spec.model, serde_json::json!({ "plan_chars": plan.len() }));
+                            if !plan.is_empty() {
+                                forward_plan(&mut messages, plan);
+                            }
+                        }
+                    }
                 }
-            };
-            let mut preq = req.clone();
-            preq.tools = Vec::new();
-            preq.sampling.temperature = Some(PLANNER_TEMPERATURE);
-            preq.sampling.response_schema = None;
-            preq.sampling.max_tokens = Some(PLANNER_MAX_TOKENS);
-            let mut pmsgs = messages.clone();
-            append_user_text(&mut pmsgs, PLANNER_FRAMING);
-            preq.messages = pmsgs;
-            let outcome = run_and_teardown(backend, preq).await; // FREE before the next tier loads
-            if let Some(e) = &outcome.error {
-                Self::obs("advisor_failed", &spec.model, serde_json::json!({ "error": e }));
-                continue;
-            }
-            let plan = outcome.text.trim();
-            Self::obs("advisor", &spec.model, serde_json::json!({ "plan_chars": plan.len() }));
-            if !plan.is_empty() {
-                forward_plan(&mut messages, plan);
+                None => Self::obs("advisor_failed", &spec.model, serde_json::json!({ "error": "load failed" })),
             }
         }
 
-        // Executor tier (last): load → run with the real tools + plan → tear down → buffered result.
-        let exec = &self.specs[last];
-        Self::obs("executor", &exec.model, serde_json::json!({ "tiers": n }));
-        let backend = (self.resolve)(exec.clone()).await.ok_or_else(|| {
-            ModelError::BackendUnavailable(format!(
-                "lazy pipeline: executor '{}' failed to load",
-                exec.model
-            ))
-        })?;
-        let mut ereq = req;
-        ereq.messages = messages;
-        let outcome = run_and_teardown(backend, ereq).await;
-        match outcome.error {
-            Some(e) => Err(ModelError::BackendUnavailable(e)),
-            None => Ok(buffered(outcome_events(&outcome, None))),
-        }
+        // 2. EXECUTE  (+ 3. VERIFY → repair). The executor produces the answer (with the agent's real
+        //    tools); when a verifier is present it reviews that proposed solution and, on FIX, the
+        //    executor revises — up to `repair_rounds` times. One model resident at a time throughout.
+        let repair_rounds = if verifier.is_some() { pipeline_repair_rounds() } else { 0 };
+        let mut exec_messages = messages;
+        let mut round = 0usize;
+        let outcome = loop {
+            let backend = (self.resolve)(executor.clone()).await.ok_or_else(|| {
+                ModelError::BackendUnavailable(format!(
+                    "lazy pipeline: executor '{}' failed to load",
+                    executor.model
+                ))
+            })?;
+            Self::obs("executor", &executor.model, serde_json::json!({ "tiers": n, "round": round }));
+            let mut ereq = req.clone();
+            ereq.messages = exec_messages.clone();
+            let outcome = run_and_teardown(backend, ereq).await;
+            if let Some(e) = outcome.error {
+                return Err(ModelError::BackendUnavailable(e));
+            }
+
+            let Some(vspec) = verifier else { break outcome };
+            if round >= repair_rounds {
+                break outcome;
+            }
+            // 3. VERIFY: load verifier → judge the proposed solution → tear down.
+            let vbackend = match (self.resolve)(vspec.clone()).await {
+                Some(b) => b,
+                None => {
+                    Self::obs("verifier_failed", &vspec.model, serde_json::json!({ "error": "load failed" }));
+                    break outcome;
+                }
+            };
+            let mut vreq = req.clone();
+            vreq.tools = Vec::new();
+            vreq.sampling.temperature = Some(PLANNER_TEMPERATURE);
+            vreq.sampling.response_schema = None;
+            vreq.sampling.max_tokens = Some(PLANNER_MAX_TOKENS);
+            let mut vmsgs = exec_messages.clone();
+            append_user_text(
+                &mut vmsgs,
+                &format!(
+                    "{VERIFIER_FRAMING}\n\n[Executor's proposed solution]\n{}",
+                    executor_solution_text(&outcome)
+                ),
+            );
+            vreq.messages = vmsgs;
+            let voutcome = run_and_teardown(vbackend, vreq).await;
+            let verdict = voutcome.text.trim();
+            if voutcome.error.is_some() || verifier_passed(verdict) {
+                Self::obs("verifier", &vspec.model, serde_json::json!({ "verdict": "pass", "round": round }));
+                break outcome;
+            }
+            Self::obs("verifier", &vspec.model, serde_json::json!({ "verdict": "fix", "round": round, "fix_chars": verdict.len() }));
+            // Repair: hand the fix back to the executor and loop (it revises).
+            append_user_text(&mut exec_messages, &format!("{VERIFIER_FIX_PREFIX}{verdict}"));
+            round += 1;
+        };
+
+        Ok(buffered(outcome_events(&outcome, None)))
     }
 
     fn context_window(&self) -> u32 {
