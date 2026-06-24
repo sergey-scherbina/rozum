@@ -15,8 +15,10 @@
      uses it as the verify-gate target, logs it ("derived target — `…` (override with ROZUM_VERIFY)"),
      falls back to cargo-detect. Proven: Qwen3-4B derived `cargo build && [ "$(cargo run -q -- 'hello')"
      = 'olleh' ]` from a reverse-cli prompt; sharper prompt fixed an arg-misuse. Precedence: explicit
-     `ROZUM_VERIFY` > derived (single model) > cargo floor. **PENDING:** multi-model derivation via the
-     planner role; interactive confirm of a guessed target (now: logged + overridable); the non-command
+     `ROZUM_VERIFY` > derived > cargo floor. Multi-model: ✅ derivation runs via the FIRST link (switch to
+     chain[0], derive on one model not the whole pipeline; `current` tracks the loaded model so the chain
+     loop skips the redundant re-swap). **PENDING:** interactive confirm of a guessed target (now: logged
+     + overridable); the non-command
      target kinds (predicate / Q&A-known / Q&A-open → LLM-judge or human). Kept deterministic-first.
   2. **Escalate ACROSS the chain** — ✅ DONE (merry-tapir): the `rozum launch` verify-gate now walks the
      `--model` chain — each link gets up to ROZUM_VERIFY_ROUNDS self-repair attempts, then on persistent
@@ -26,11 +28,19 @@
      `--model Qwen3-4B,Qwen3.6-35B` on reverse-cli → link 1 (4B) failed → ⤴ escalated → switched to link 2
      (35B) → 35B fixed it → ✅ target met, NO reboot (uptime held through the swap). Cloud last = operator
      orders cloud links last (explicit ordering for now; availability/limit checks = item 6).
-  3. **Tool curation** per role/model — planner/verifier get NO write/exec tools (already `tools=[]` in
-     the tiers → make it the named policy); executor gets curated coding tools; smaller sets for weaker
-     models (`--lean` is the start); verifier may get only the target-check tool.
-  4. **Adaptive residency policy** — cache-when-fits vs swap-when-not as an explicit chain policy
-     (machinery exists: admission/footprint/MemAvailable/swap).
+  3. **Tool curation** — ✅ core covered: backend planner/verifier tiers already run with `tools=[]`
+     (cfdefbf) and `--lean` cuts the executor's set 33→4 (the big lever). REMAINING (marginal): per-MODEL
+     executor tool sets (weaker model → even fewer) — low value since the executor needs the core coding
+     tools; revisit only if a weak link is shown to derail on a specific tool.
+  4. **Adaptive residency policy (cache-vs-swap)** — ✅ DONE (`2fcc051`). Co-residency crash REFUTED
+     (probe `coresidency_two_mlx_models_one_process`, `d63c9e4`) → the gateway's `/control/switch` is now
+     **cache-when-fits**: PROMOTE a warm target (no rebuild, live ~22ms) + KEEP the old primary warm when
+     the planner says both fit; destructive single-resident swap otherwise (multislot off / can't
+     co-reside / non-cacheable). The chain inherits it via `/control/switch` (no chain change). Gated by
+     `plan_residency` (host budget − others' reservations, shared reserve once → reboot-safe); oversubscribed
+     pair → drop-old (no overcommit). 4 new tests, 85/85 gateway green, live 0.6B↔4B smoke no reboot.
+     HARD safety preserved: the planner is the sole "does it fit" authority; never co-resides a pair it
+     refuses. Off: `ROZUM_MULTISLOT=0`.
   5. **Role-aware quality stats + auto-exclude** — ✅ DONE (merry-tapir): per-(model, role) pass/attempt
      stats persist in `gateway_dir()/model_stats.json`; the chain records each link's terminal outcome
      (`record_model_outcome`) and SKIPS a link with a consistently-bad record (`model_skip_decision`:
