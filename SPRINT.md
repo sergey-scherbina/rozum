@@ -1,5 +1,18 @@
 # Sprint
 
+- [x] **in-process model-swap bug — FIXED (merry-tapir 2026-06-24)** — the lazy in-process model-swap
+  failure that broke `--model A,B` and `/control/switch` (executor's first decode → `mlx: eval failed`)
+  is resolved. Fresh-boot `scripts/bench/pipeline-swap-repro.sh` settled it: a REAL MLX bug, not RAM
+  (qwen_short/qwen_long 3/3 = RAM control vs swap_short/swap_long/lazy_pipeline 0/3 → all 3/3 after fix;
+  all four `/control/switch` perms green, incl. Qwen→Qwen → NOT GLM-specific). Root cause = MLX's metal
+  command-encoder map is `static thread_local`, registered only on the stream's creating thread; rozum's
+  per-model worker-thread teardown means the next model's fresh thread evals prior-stream arrays →
+  "There is no Stream(gpu, N) in current thread." Fix = MLX-core **self-heal** patch (register the encoder
+  on the current thread) chained in the `mlx-c` submodule. (NOT the per-load-cap hypothesis; teardown
+  flush stays reverted.) `feature/pipeline-swap-settle` b87a014; forks committed locally (mlx-c cd329a6,
+  mlx-rs 7922c10a). Durable ship = push both forks + bump rev + drop the `[patch]`. See
+  `docs/pipeline-swap-bug.md`. Unblocks the lazy `pipeline-cascade` path below.
+
 - [x] **planner-executor** — DONE + A/B-VALIDATED ON A COMPLEX TASK (plucky-finch 2026-06-23). (operator idea, spec `docs/specs/planner-executor.md`) — decompose a
   coding task across two LOCAL models by ROLE: **GLM-4-32B = planner** (one-shot: reason out the COMPLETE
   solution — every file's full contents — where it's strong), then **gpt-oss-20b = executor** (the agent
