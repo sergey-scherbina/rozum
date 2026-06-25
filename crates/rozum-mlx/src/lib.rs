@@ -9,7 +9,9 @@ pub mod specdecode;
 pub mod specdecode_backend;
 pub mod specdecode_plookup;
 
-pub(crate) use rozum_core::{backend, concurrency, constrain, engine, footprint, serving};
+pub(crate) use rozum_core::{
+    backend, concurrency, constrain, engine, footprint, harmony, serving,
+};
 pub(crate) use rozum_models::model_source;
 // mlx_native_backend.rs refers to the SPI types at the crate root (e.g.
 // `crate::ChatBackend`), as they were re-exported from the monolith's lib root —

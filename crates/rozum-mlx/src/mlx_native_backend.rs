@@ -1050,8 +1050,9 @@ mod inner {
             // GLM-4 uses a `name\n{json}` envelope (no `<tool_call>`); the tool dialect (from the
             // template markers) is the one place that decides this.
             let glm = dialect_for(template).uses_glm_envelope();
+            let harmony = matches!(model, LoadedModel::GptOss(_));
             let driver =
-                ToolConstraint::from_job(&job, glm).expect("constrained job has tools");
+                ToolConstraint::from_job(&job, glm, harmony).expect("constrained job has tools");
             return if is_hybrid_arch(model) {
                 run_constrained_hybrid(model, tokenizer, template, eos, job, driver)
             } else {
@@ -1838,6 +1839,7 @@ mod inner {
             max_tokens,
             finished: false,
             stop: StopReason::EndTurn,
+            harmony: false, // run_batch is dense Qwen only (Qwen `<tool_call>`, skip-special decode)
         };
         {
             // `check_finish` streams the token (text + tool-markup suppression) and
@@ -1927,6 +1929,7 @@ mod inner {
             max_tokens,
             finished: false,
             stop: StopReason::EndTurn,
+            harmony: false, // run_batch is dense Qwen only (Qwen `<tool_call>`, skip-special decode)
         };
         {
             let mut on_token = |tok: u32| -> bool { !check_finish(&mut seq, tok, eos, tokenizer) };
@@ -2118,6 +2121,11 @@ mod inner {
         max_tokens: usize,
         finished: bool,
         stop: StopReason,
+        /// gpt-oss **harmony**: decode KEEPING special tokens (so `<|channel|>`/`<|message|>`/
+        /// `to=functions.` markers are literal for the constraint + `parse_harmony`), stream only the
+        /// `final` channel, and finalize tool calls via `parse_harmony`. False for every other arch
+        /// (Qwen `<tool_call>` / GLM / loose JSON go through the generic skip-special path).
+        harmony: bool,
     }
 
     impl BatchSeq {
@@ -2126,6 +2134,25 @@ mod inner {
         fn push(&mut self, tok: u32, tokenizer: &mut Tokenizer) -> bool {
             self.out_ids.push(tok);
             self.output_tokens += 1;
+            // Harmony (gpt-oss) keeps special tokens so the channel markers stay literal (the
+            // constraint envelope + `parse_harmony` need them); everything else strips them.
+            if self.harmony {
+                if let Ok(marked) = tokenizer.decode(&self.out_ids, false) {
+                    let stable = marked.trim_end_matches('\u{FFFD}');
+                    self.full_text = stable.to_string();
+                    // Stream only the growing `final` channel (markers stripped) — analysis CoT and a
+                    // commentary tool call are not user-visible text. Mirrors engine::consume_tokens.
+                    let ft = crate::harmony::parse_harmony(stable).final_text;
+                    if ft.len() > self.emitted.len() && ft.starts_with(&self.emitted) {
+                        let delta = ft[self.emitted.len()..].to_string();
+                        self.emitted = ft;
+                        if self.job.events.send(Ok(ChatEvent::TextDelta { text: delta })).is_err() {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
             if let Ok(text) = tokenizer.decode(&self.out_ids, true) {
                 let stable = text.trim_end_matches('\u{FFFD}');
                 self.full_text = stable.to_string();
@@ -2175,6 +2202,9 @@ mod inner {
         fn finalize(&mut self) {
             let tool_calls = if matches!(self.stop, StopReason::Cancelled) {
                 Vec::new()
+            } else if self.harmony {
+                // gpt-oss: the markers are intact in `full_text` → parse the harmony channels.
+                crate::harmony::parse_harmony(&self.full_text).tool_calls
             } else {
                 let mut calls = crate::serving::parse_tool_calls(&self.full_text);
                 // GLM create-from-scratch artifact fallback for the BATCHED path (≥2 concurrent GLM
@@ -2204,9 +2234,11 @@ mod inner {
                     let _ = self.job.events.send(Ok(ChatEvent::ToolUseEnd { id }));
                 }
                 self.stop = StopReason::ToolUse;
-            } else if self.full_text.len() > self.emitted.len() {
+            } else if !self.harmony && self.full_text.len() > self.emitted.len() {
                 // Flush held-back text: suppressed tool markup that wasn't a parseable
-                // call, or a held-back ``` fence that turned out not to open one.
+                // call, or a held-back ``` fence that turned out not to open one. (Harmony
+                // already streamed its `final` channel in `push`; `full_text` here is marker-bearing,
+                // so flushing it raw would leak `<|channel|>` — skip it.)
                 let _ = self.job.events.send(Ok(ChatEvent::TextDelta {
                     text: self.full_text[self.emitted.len()..].to_string(),
                 }));
@@ -2269,7 +2301,19 @@ mod inner {
     fn should_constrain(job: &Job, model: &LoadedModel) -> bool {
         constrain_enabled()
             && !job.tools.is_empty()
-            && (is_dense(model) || is_hybrid_arch(model))
+            && (is_dense(model)
+                || is_hybrid_arch(model)
+                || (gptoss_constrain_enabled() && matches!(model, LoadedModel::GptOss(_))))
+    }
+
+    /// gpt-oss **harmony** tool-call constraining. Default **OFF** while it's validated — gpt-oss
+    /// passes simpler agentic tasks unconstrained (15/15), so this only earns its keep on dense-syntax
+    /// tasks (e.g. rpn) where the harmony executor narrates / garbles the call. Enable with
+    /// `ROZUM_GPTOSS_CONSTRAIN=1`. When on, gpt-oss tool jobs route through `run_constrained_dense`
+    /// with the harmony envelope (anchor on `to=functions.NAME`, constrain the bare args to the tool
+    /// schema), and `BatchSeq` keeps special tokens + finalizes via `parse_harmony`.
+    fn gptoss_constrain_enabled() -> bool {
+        matches!(std::env::var("ROZUM_GPTOSS_CONSTRAIN").ok().as_deref(), Some("1" | "true" | "on"))
     }
 
     /// Whether constrained tool decoding is enabled. **On by default**; opt out with
@@ -2319,6 +2363,11 @@ mod inner {
         /// the chat template's `<|observation|>` marker; switches `json_region` to the
         /// line-anchored GLM trigger ([`find_glm_tool_call`]).
         glm: bool,
+        /// gpt-oss harmony envelope (`commentary to=functions.NAME <|message|>{bare_args}`). Set for
+        /// `LoadedModel::GptOss` under `ROZUM_GPTOSS_CONSTRAIN`; switches `json_region` to the
+        /// recipient-anchored harmony trigger ([`find_harmony_tool_call`]). Like GLM, the name is
+        /// outside the JSON and the args are a bare object.
+        harmony: bool,
     }
 
     /// GLM-4 tool-call trigger: the byte offset just past a `{name}\n` line whose `name` is one
@@ -2339,6 +2388,35 @@ mod inner {
                 best = Some((i, rel + 1)); // just past this '\n'
             }
             line_start = rel + 1;
+        }
+        best
+    }
+
+    /// gpt-oss **harmony** tool-call trigger: find `to=functions.NAME` (NAME an offered tool)
+    /// followed by `<|message|>`, return `(tool_index, byte offset of the bare-args object start)`.
+    /// The harmony call is `<|channel|>commentary to=functions.NAME <|constrain|>json<|message|>{args}<|call|>`
+    /// — the name is OUTSIDE the JSON (like GLM), the args are the bare object after `<|message|>`. The
+    /// LAST match wins (the call follows the analysis/preamble channels). A pure `final`-channel answer
+    /// has no `to=functions.` recipient → no match → free decode (the model's answer turn is untouched).
+    /// Requires `BatchSeq` to keep special tokens so `<|message|>` is literal in `text`.
+    pub(crate) fn find_harmony_tool_call(text: &str, names: &[String]) -> Option<(usize, usize)> {
+        const KEY: &str = "to=functions.";
+        const MSG: &str = "<|message|>";
+        let mut best: Option<(usize, usize)> = None;
+        let mut search = 0usize;
+        while let Some(rel) = text[search..].find(KEY) {
+            let name_start = search + rel + KEY.len();
+            let name_end = text[name_start..]
+                .find(|c: char| c.is_whitespace() || c == '<')
+                .map(|p| name_start + p)
+                .unwrap_or(text.len());
+            let name = &text[name_start..name_end];
+            if let Some(i) = names.iter().position(|n| n == name) {
+                if let Some(mrel) = text[name_end..].find(MSG) {
+                    best = Some((i, name_end + mrel + MSG.len()));
+                }
+            }
+            search = name_start;
         }
         best
     }
@@ -2429,7 +2507,7 @@ mod inner {
     }
 
     impl ToolConstraint {
-        fn from_job(job: &Job, glm: bool) -> Option<Self> {
+        fn from_job(job: &Job, glm: bool, harmony: bool) -> Option<Self> {
             if job.tools.is_empty() {
                 return None;
             }
@@ -2461,6 +2539,7 @@ mod inner {
                 done: false,
                 body_start: 0,
                 glm,
+                harmony,
             })
         }
 
@@ -2474,6 +2553,27 @@ mod inner {
             use crate::constrain::{envelope, Constraint, Schema};
             if self.done {
                 return None;
+            }
+            if self.harmony {
+                // gpt-oss harmony: `commentary to=functions.NAME <|message|>{bare_args}` — name OUTSIDE
+                // the JSON (like GLM). Anchor on the `to=functions.NAME` recipient; once it lands,
+                // constrain the bare args object to that tool's schema. A pure final-channel answer (no
+                // recipient) never anchors → free decode.
+                if !self.active {
+                    let (idx, off) = find_harmony_tool_call(full_text, &self.names)?;
+                    self.cons = Constraint::Json(self.arg_schemas[idx].clone());
+                    self.active = true;
+                    self.body_start = off;
+                }
+                let json = &full_text[self.body_start..];
+                if json.trim().is_empty() {
+                    return Some(json); // recipient committed, args not started — force the object open
+                }
+                if self.cons.is_complete(json) {
+                    self.done = true;
+                    return None;
+                }
+                return Some(json);
             }
             if self.glm {
                 // GLM-4 envelope: `{tool_name}\n{bare_args}` (name OUTSIDE the JSON, no
@@ -2877,6 +2977,10 @@ mod inner {
             max_tokens,
             finished: false,
             stop: StopReason::EndTurn,
+            // Harmony decode/finalize only for gpt-oss under the constrained path (so the markers
+            // survive for the harmony envelope + `parse_harmony`). gpt-oss is never a hybrid arch, so
+            // this is false at the hybrid prefill.
+            harmony: gptoss_constrain_enabled() && matches!(model, LoadedModel::GptOss(_)),
         };
         Some((seq, cache, row))
     }
@@ -3189,6 +3293,10 @@ mod inner {
             max_tokens,
             finished: false,
             stop: StopReason::EndTurn,
+            // Harmony decode/finalize only for gpt-oss under the constrained path (so the markers
+            // survive for the harmony envelope + `parse_harmony`). gpt-oss is never a hybrid arch, so
+            // this is false at the hybrid prefill.
+            harmony: gptoss_constrain_enabled() && matches!(model, LoadedModel::GptOss(_)),
         };
         Some((seq, cache, row))
     }
@@ -4324,6 +4432,29 @@ mod tests {
         // A pure prose answer (no tool-name line) never anchors — final-answer path stays free.
         assert_eq!(find_glm_tool_call("I have fixed the bug by editing main.rs.\n", &names), None);
         assert_eq!(find_glm_tool_call("Reading the file now.\nDone.", &names), None);
+    }
+
+    #[test]
+    fn find_harmony_tool_call_anchors_on_recipient() {
+        use super::inner::find_harmony_tool_call;
+        let names = vec!["write_file".to_string(), "read_file".to_string()];
+        // gpt-oss harmony call: name in `to=functions.NAME`, bare args after `<|message|>`.
+        let t = "<|channel|>commentary to=functions.write_file <|constrain|>json<|message|>{\"path\":\"a\"}<|call|>";
+        let off = t.find("<|message|>").unwrap() + "<|message|>".len();
+        assert_eq!(find_harmony_tool_call(t, &names), Some((0, off)));
+        // After an analysis preamble channel → still anchors on the recipient.
+        let n = "<|channel|>analysis<|message|>I should read the file.<|end|>\
+                 <|start|>assistant<|channel|>commentary to=functions.read_file <|message|>{}<|call|>";
+        assert_eq!(find_harmony_tool_call(n, &names).unwrap().0, 1);
+        // A pure final-channel answer (no `to=functions.` recipient) never anchors — answer stays free.
+        let f = "<|channel|>final<|message|>The result is 35.<|return|>";
+        assert_eq!(find_harmony_tool_call(f, &names), None);
+        // An UNKNOWN recipient (not an offered tool) doesn't anchor.
+        let u = "<|channel|>commentary to=functions.nonsuch <|message|>{}<|call|>";
+        assert_eq!(find_harmony_tool_call(u, &names), None);
+        // The LAST recipient wins (the call follows any earlier mention).
+        let m = "to=functions.read_file<|message|>{}<|call|> ... to=functions.write_file <|message|>{\"path\":\"b\"}";
+        assert_eq!(find_harmony_tool_call(m, &names).unwrap().0, 0);
     }
 
     #[test]
