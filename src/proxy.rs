@@ -261,6 +261,18 @@ async fn forward(State(state): State<ProxyState>, req: Request) -> Response {
         Err(e) => return bad_gateway(&format!("failed reading request body: {e}")),
     };
 
+    // Debug tap (off by default): dump the exact agent→gateway request + the raw model response
+    // bytes to `ROZUM_PROXY_TAP`, so a failing agentic run can be inspected at the boundary the
+    // agent actually sees (gateway has no completion log). Verbatim — no transform.
+    if let Some(tap) = std::env::var_os("ROZUM_PROXY_TAP") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&tap) {
+            let _ = writeln!(f, "\n========== REQUEST {path_and_query} ({}B) ==========", body_bytes.len());
+            let _ = f.write_all(&body_bytes);
+            let _ = writeln!(f);
+        }
+    }
+
     let port = state.daemon_port();
     let url = format!("http://127.0.0.1:{port}{path_and_query}");
     let policy = &state.retry;
@@ -466,11 +478,22 @@ fn stream_back(resp: reqwest::Response, guard: Option<AdmitGuard>) -> Response {
     if let Some(headers) = response.headers_mut() {
         copy_response_headers(resp.headers(), headers);
     }
+    let tap = std::env::var_os("ROZUM_PROXY_TAP");
     let stream = async_stream::stream! {
         let _guard = guard;
+        let mut tapf = tap.and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok());
+        if let Some(f) = tapf.as_mut() {
+            use std::io::Write as _;
+            let _ = writeln!(f, "\n========== RESPONSE ({status}) ==========");
+        }
         let mut bytes = resp.bytes_stream();
         while let Some(chunk) = bytes.next().await {
-            yield chunk.map_err(std::io::Error::other);
+            let chunk = chunk.map_err(std::io::Error::other);
+            if let (Ok(b), Some(f)) = (&chunk, tapf.as_mut()) {
+                use std::io::Write as _;
+                let _ = f.write_all(b);
+            }
+            yield chunk;
         }
     };
     response

@@ -2895,7 +2895,19 @@ mod inner {
         job: Job,
         driver: D,
     ) {
-        let opts = sampler_opts_of(&job);
+        let mut opts = sampler_opts_of(&job);
+        // gpt-oss CoT collapses into a repetition loop under greedy/near-greedy decode (no tool call →
+        // timeout) — `sampler_opts_of` defaults temp to 0.0, and the non-constrained path's floor (the
+        // worker's `temp.max(ROZUM_GPTOSS_MIN_TEMP)`) is bypassed when we route here. Apply the same
+        // floor: the masked region still forces valid tokens (temp only picks AMONG the valid set), the
+        // free analysis region samples at ~1.0 so the CoT doesn't loop. Fixes the constrained 1/5 timeout.
+        if matches!(model, LoadedModel::GptOss(_)) {
+            let min_temp = std::env::var("ROZUM_GPTOSS_MIN_TEMP")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1.0);
+            opts.temp = opts.temp.max(min_temp);
+        }
         if let Some(s) = job.sampling.seed {
             let _ = mlx_rs::random::seed(s);
         }
