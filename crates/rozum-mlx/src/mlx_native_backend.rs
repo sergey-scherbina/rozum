@@ -24,7 +24,8 @@ mod inner {
 
     use mlx_lm::cache::ConcatKeyValueCache;
     use mlx_lm::models::{
-        deepseek_v2, gemma3, glm4, gpt_oss, llama, qwen2, qwen3, qwen3_5, qwen3_5_moe, qwen3_moe,
+        deepseek_v2, gemma3, glm4, glm4_moe_lite, gpt_oss, llama, qwen2, qwen3, qwen3_5,
+        qwen3_5_moe, qwen3_moe,
     };
     use mlx_lm_utils::tokenizer::{
         ApplyChatTemplateArgs, Chat, Conversation, Tokenizer, load_model_chat_template_from_file,
@@ -114,6 +115,7 @@ mod inner {
         Qwen2(qwen2::Model),
         Glm4(glm4::Model),
         DeepseekV2(deepseek_v2::Model),
+        Glm4MoeLite(glm4_moe_lite::Model),
         Gemma3(gemma3::Model),
         GptOss(gpt_oss::Model),
     }
@@ -183,6 +185,10 @@ mod inner {
                 "deepseek_v2" => deepseek_v2::load_deepseek_v2_model(dir)
                     .map(LoadedModel::DeepseekV2)
                     .map_err(|e| format!("mlx: load deepseek_v2 {}: {e}", dir.display())),
+                // GLM-4.7-Flash (absorbed MLA + DeepSeek-V3 MoE routing).
+                "glm4_moe_lite" => glm4_moe_lite::load_glm4_moe_lite_model(dir)
+                    .map(LoadedModel::Glm4MoeLite)
+                    .map_err(|e| format!("mlx: load glm4_moe_lite {}: {e}", dir.display())),
                 other => Err(format!("mlx: unsupported model_type '{other}'")),
             }
         }
@@ -1024,6 +1030,7 @@ mod inner {
                 LoadedModel::Qwen2(m) => dense!(qwen2::Generate::new(m, cache, temp, pt)),
                 LoadedModel::Glm4(m) => dense!(glm4::Generate::new(m, cache, temp, pt)),
                 LoadedModel::DeepseekV2(m) => dense!(deepseek_v2::Generate::new(m, cache, temp, pt)),
+                LoadedModel::Glm4MoeLite(m) => dense!(glm4_moe_lite::Generate::new(m, cache, temp, pt)),
                 LoadedModel::Gemma3(m) => dense!(gemma3::Generate::new(m, cache, temp, pt)),
                 // Hybrid arches never reach here — run_job routes them to stream_generation.
                 LoadedModel::Qwen35(_) | LoadedModel::Qwen35Moe(_) => Box::new(std::iter::once(
