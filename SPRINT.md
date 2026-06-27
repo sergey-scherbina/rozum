@@ -676,7 +676,13 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   f32 mask must cast to bf16 query dtype for SDPA. **Parity: greedy byte-matches Python ~27 tokens on
   identical prompt ids**, then near-tie flip = irreducible quantized-MoE non-determinism
   ([[project-spec-decode-moe-numerics]]), forward numerically faithful (coherent correct code+haiku).
-  Spec `docs/specs/glm4-moe-lite-native.md`. NEXT: agentic smoke w/ tool-injection (low-peak coder).
+  Spec `docs/specs/glm4-moe-lite-native.md`. **TOOL-CALLING FIXED + SHIPPED (master e016921):** GLM-4.5/
+  4.6/4.7 emit `<tool_call>`/`<arg_key>`/`<arg_value>` as SPECIAL tokens → (1) the skip-special decode
+  stripped them (delivery: `EngineMeta.keep_special` + `serving::parse_glm_arg_kv`), (2) `dialect_for`
+  mis-rendered prior calls as GLM-4 `name\n{json}` → multi-turn loops (`GlmArgKvDialect` renders the
+  native `<tool_call><arg_key>` form). **Agentic smoke claude×REPS=2: 0/10 → 3/10** (build, test×2; RAM
+  healthy ~400 MB not 16 GB). Remaining fails (fix 67t, rpn/debug timeout) = the orthogonal agentic-loop
+  ([[project-agentic-loop-root-cause]]), not a GLM gateway bug. NEXT: loop-breaker for edit/debug.
 - [x] **verify-standalone** — DONE (clean box, 2026-06-27, results scripts/bench/results/agentic-*).
   **VERDICTS:** (1) **Qwen3-Coder-30B-A3B** — strong EDIT (fix/test/debug 6/6, smoke #1); but
   create-from-scratch **0/6 clean** (rpn 0/3 + build 0/3). ⚠️ CAUSE **NOT isolated** — do NOT call it
