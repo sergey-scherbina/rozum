@@ -700,6 +700,20 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   Qwen3-Coder-30B-A3B (re-run `rpn build` — smoke #1 was contended), Devstral-Small-2507
   (verify-first: Mistral tool-use), Qwen3-32B (dense), Qwen3.6-27B, Phi-4, Gemma-3-27B. Drop any that
   don't beat the incumbent at equal/lower peak.
+- [x] **mla-deepseek-v2 → matrix smoke** — DeepSeek-Coder-V2-Lite (validated MLA port) agentic smoke
+  (2026-06-27): **0/10, tools=0 on EVERY cell** (turns=3-4, tools=0; 15 GB footprint). The PORT is
+  byte-validated (it RUNS), but it emits no tool calls the agent loop executes — same as Devstral.
+  → feeds `toolcall-delivery-isolate` below. Not a green-matrix candidate as-is.
+- [~] **toolcall-delivery-isolate** (HIGH LEVERAGE, autonomous 2026-06-27) — THREE low-footprint
+  non-Qwen/GLM/gpt-oss models score **tools=0 on every agentic cell** (Devstral 0/10, DeepSeek-Coder-
+  V2-Lite 0/10). The deepseek_v2 PORT is VALIDATED, so the model RUNS — it just emits no executable
+  tool calls. Per the repo rule (never close as "model can't"), CAUSE NOT ISOLATED: suspect the
+  gateway doesn't render/parse the tool format of these models' chat templates (it's tuned for Qwen
+  `<tool_call>` / GLM `name\njson` / gpt-oss harmony; DeepSeek + Mistral use their own). If it's a
+  gateway gap, ONE fix unlocks several low-footprint matrix candidates → highest-leverage item for
+  green-matrix-min-footprint. NEXT: live capture (start the model gateway, send an Anthropic tools
+  request, read the RAW emitted text) → what tool form it emits + whether `serving::parse_tool_calls`
+  handles it. Same isolate as Qwen3-Coder create-delivery.
 - [~] **verify-pipelines** — FIRST pair run (2026-06-27): GLM-4-32B→Qwen3-Coder on rpn/build =
   **0/2 + 0/2** (peak ~25 GB; one rpn looped 541 turns/497 tools). Pairing a planner with the
   Qwen3-Coder EXECUTOR did NOT fix create-from-scratch — the executor still delivers the file, and
