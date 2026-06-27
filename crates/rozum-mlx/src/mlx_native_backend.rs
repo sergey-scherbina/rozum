@@ -24,7 +24,7 @@ mod inner {
 
     use mlx_lm::cache::ConcatKeyValueCache;
     use mlx_lm::models::{
-        gemma3, glm4, gpt_oss, llama, qwen2, qwen3, qwen3_5, qwen3_5_moe, qwen3_moe,
+        deepseek_v2, gemma3, glm4, gpt_oss, llama, qwen2, qwen3, qwen3_5, qwen3_5_moe, qwen3_moe,
     };
     use mlx_lm_utils::tokenizer::{
         ApplyChatTemplateArgs, Chat, Conversation, Tokenizer, load_model_chat_template_from_file,
@@ -113,6 +113,7 @@ mod inner {
         Llama(llama::Model),
         Qwen2(qwen2::Model),
         Glm4(glm4::Model),
+        DeepseekV2(deepseek_v2::Model),
         Gemma3(gemma3::Model),
         GptOss(gpt_oss::Model),
     }
@@ -178,6 +179,10 @@ mod inner {
                 "glm4" => glm4::load_glm4_model(dir)
                     .map(LoadedModel::Glm4)
                     .map_err(|e| format!("mlx: load glm4 {}: {e}", dir.display())),
+                // DeepSeek-V2 family (MLA latent attention + DeepSeek MoE); e.g. DeepSeek-Coder-V2-Lite.
+                "deepseek_v2" => deepseek_v2::load_deepseek_v2_model(dir)
+                    .map(LoadedModel::DeepseekV2)
+                    .map_err(|e| format!("mlx: load deepseek_v2 {}: {e}", dir.display())),
                 other => Err(format!("mlx: unsupported model_type '{other}'")),
             }
         }
@@ -1018,6 +1023,7 @@ mod inner {
                 LoadedModel::Llama(m) => dense!(llama::Generate::new(m, cache, temp, pt)),
                 LoadedModel::Qwen2(m) => dense!(qwen2::Generate::new(m, cache, temp, pt)),
                 LoadedModel::Glm4(m) => dense!(glm4::Generate::new(m, cache, temp, pt)),
+                LoadedModel::DeepseekV2(m) => dense!(deepseek_v2::Generate::new(m, cache, temp, pt)),
                 LoadedModel::Gemma3(m) => dense!(gemma3::Generate::new(m, cache, temp, pt)),
                 // Hybrid arches never reach here — run_job routes them to stream_generation.
                 LoadedModel::Qwen35(_) | LoadedModel::Qwen35Moe(_) => Box::new(std::iter::once(
