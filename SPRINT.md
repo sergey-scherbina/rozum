@@ -626,14 +626,18 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
   Qwen3.6-35B/gpt-oss baseline (🛑 REBOOT-SAFETY: one model-gateway at a time, claim the slot first).
   Code edit (catalog) shipped; the smoke run is the slot-gated remainder.
 
-- [ ] **mlx-glm4-moe** — port GLM-4 **MoE** to native MLX (`glm4_moe` = GLM-4.5-Air/4.6;
-  `glm4_moe_lite` = GLM-4.7-Flash, 4bit 16.9 GB, fits 36 GiB; incl. Claude-Opus-4.5 reasoning-distill
-  for RPN). Gives the matrix a 2nd reliable family besides Qwen (GLM is matrix-proven). **Multi-repo,
-  medium effort** (NOT a plain graft — GLM-4 MoE routing is DeepSeek-V3-style: sigmoid + grouped
-  top-k + correction-bias + shared experts + `first_k_dense_layers` + drop MTP). Full plan, reuse map
-  (glm4.rs attention/4-norm + qwen3_moe SwitchGlu), config fields, and parity-oracle (slot-gated):
-  **`docs/specs/glm4-moe-native.md`**. Branches: fork `feature/glm4-moe`
-  (`.vendor/mlx-lm/.../models/glm4_moe.rs`) + rozum `feature/mlx-glm4-moe` (dispatch + rev bump).
+- [ ] **mlx-glm4-moe** — port GLM-4 MoE to native MLX. **REPRIORITIZED → bigger than thought**
+  (checkpoint inspection 2026-06-27, spec `docs/specs/glm4-moe-native.md`): the family splits by
+  attention and it's adversarial — `glm4_moe` (GLM-4.5-Air/4.6) is easy GQA but **too big for 36 GiB**;
+  `glm4_moe_lite` (**GLM-4.7-Flash**, 16.9 GB, the only one that FITS) uses **MLA** (DeepSeek-V2-style
+  latent attention: q_a/q_b + kv_a, q_lora 768 / kv_lora 512 / qk_nope 192 / qk_rope 64 / v 256) —
+  a NEW attention we don't have → **HIGH effort, same work as `mlx-port-deepseek-v2` (do together)**.
+  The "reuse glm4.rs attention" plan was WRONG (verified before writing code — discipline paid off).
+  MoE side IS adaptable (sigmoid + correction-bias + flat top-k(4, n_group=1) + shared expert +
+  routed_scaling 1.8; naming `mlp.switch_mlp.*`/`mlp.shared_experts.*`/`mlp.gate.e_score_correction_bias`;
+  first_k_dense_layers=1 ⇒ mixed dense/MoE, which the fork doesn't yet handle). **Decision: defer the
+  MLA port; the matrix win is `matrix-add-coders` (Qwen3-Coder, zero port) — run that first.** Fork
+  scaffold parked: `feature/glm4-moe` (`.vendor/mlx-lm/.../models/glm4_moe.rs`, NOT in mod.rs).
 
 - [x] **matrix-baseline** — DONE (plucky-finch 2026-06-22, seed-pinned, release@master,
   reboot-safe single-box, **0 panic/0 reboot/0 rc2**). claude+codex × {Qwen3.6-35B-A3B,

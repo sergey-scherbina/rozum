@@ -7,10 +7,13 @@
   did for Qwen3.6; new state-space layer). Consider only if the matrix wants an IBM/tool-tuned family.
 - [ ] **mlx-port-seed-oss** — ByteDance `Seed-OSS-36B-Instruct` (`seed_oss`, 4bit 20.3 GB):
   own arch, long context; 20 GB is borderline on 36 GiB. Payoff unclear vs Qwen3-Coder/GLM-MoE.
-- [ ] **mlx-port-deepseek-v2** — `DeepSeek-Coder-V2-Lite` (`deepseek_v2`, 16B-A2.4B): requires
-  **MLA** (multi-head latent attention, compressed-KV) — a genuinely new attention kernel we don't
-  have → high effort; model is 2024-era. Only worth it as a stepping stone to the DeepSeek-V3 lineage.
-  (The GLM-4 MoE port `mlx-glm4-moe` reuses some of the same DeepSeek-style routing — do it first.)
+- [ ] **mlx-mla-attention** (DeepSeek-V2 + GLM-4.7-Flash share this) — implement **MLA**
+  (multi-head latent attention, compressed-KV: q_a/q_b low-rank, kv_a_proj_with_mqa, decoupled
+  nope/rope head dims). It's the HIGH-effort blocker shared by `DeepSeek-Coder-V2-Lite`
+  (`deepseek_v2`) AND `glm4_moe_lite` (GLM-4.7-Flash, the only 36 GiB-fitting GLM-MoE — checkpoint-
+  confirmed MLA 2026-06-27, see `mlx-glm4-moe` / `docs/specs/glm4-moe-native.md`). Do the MLA kernel
+  once, then both ports reduce to their MoE/FFN specifics. Build only if a 2nd reliable agentic
+  family beyond Qwen is still wanted after the `matrix-add-coders` (Qwen3-Coder, zero-port) smoke.
 
 ## Agentic drivers
 

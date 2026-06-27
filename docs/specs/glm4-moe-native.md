@@ -1,7 +1,38 @@
 # Native MLX support for GLM-4 MoE (`glm4_moe` / `glm4_moe_lite`)
 
-Status: planned (operator 2026-06-27). Spec-first per `spec-dev`; the port itself is multi-repo
-(the model lives in the vendored `mlx-lm` fork, not in `rozum`).
+Status: planned, REPRIORITIZED after checkpoint inspection (operator 2026-06-27). Spec-first per
+`spec-dev`; the port itself is multi-repo (the model lives in the vendored `mlx-lm` fork).
+
+## ⚠️ CHECKPOINT FINDING (2026-06-27) — the cheap-port premise was WRONG; verify-before-build paid off
+
+Inspecting the real mlx-community checkpoints + base configs (no model loaded) splits the family by
+ATTENTION, and the split is adversarial to this host:
+
+| family | model | attention | MoE FFN | fits 36 GiB? | port effort |
+|---|---|---|---|---|---|
+| `glm4_moe` | GLM-4.5-Air / GLM-4.6 | **standard GQA** (`q_proj/k_proj/v_proj/o_proj`) | sigmoid+shared | **NO** (too big) | medium (glm4 attn + MoE FFN) |
+| `glm4_moe_lite` | **GLM-4.7-Flash** (16.9 GB) | **MLA** (`q_a_proj`/`q_a_layernorm`/`q_b_proj`, `kv_a_proj_with_mqa`/`kv_a_layernorm`; `q_lora_rank=768 kv_lora_rank=512 qk_nope=192 qk_rope=64 v_head_dim=256`) | sigmoid+shared | **YES** | **HIGH** (DeepSeek-V2-style latent attention — a NEW attention we don't have) |
+
+So the GLM-MoE that RUNS on 36 GiB (Flash) is the HARD one (MLA); the easy GQA one is too big to
+run here. The original "reuse `glm4.rs` attention verbatim" plan holds ONLY for `glm4_moe` (GQA),
+which is unrunnable on this box. **`glm4_moe_lite` (Flash) needs the same MLA work as
+`mlx-port-deepseek-v2` — do them together, treat as HIGH effort, NOT a quick graft.**
+
+**Revised recommendation:** the matrix win is **Qwen3-Coder-30B-A3B** (`matrix-add-coders`, native
+`qwen3_moe`, ZERO port) — run that first. The GLM-MoE/MLA port is a larger, separate effort with no
+cheap path on this hardware; pursue only if a second reliable family is still wanted after the
+Qwen3-Coder smoke, and fold the MLA work in with DeepSeek-V2.
+
+### Checkpoint-verified naming (mlx-community/GLM-4.7-Flash-4bit)
+- `first_k_dense_layers = 1`: layer 0 is dense, layers 1..N are MoE (mixed — the fork's qwen3_moe
+  currently *fails loud* on mixed dense/MoE, so this needs new handling).
+- Dense layer FFN: `mlp.{gate_proj,up_proj,down_proj}` — **split, NOT the fused `gate_up_proj`** of
+  glm4 dense. (So even the dense FFN differs from glm4.rs.)
+- MoE FFN: `mlp.gate` (router) + `mlp.gate.e_score_correction_bias` + `mlp.switch_mlp.{gate,up,down}_proj`
+  (stacked experts, matches `qwen3_moe::SwitchGlu`) + `mlp.shared_experts.{gate,up,down}_proj`.
+- Routing (n_group=1 for ALL current GLM ⇒ no grouped top-k): sigmoid → +correction_bias for
+  SELECTION → flat top-k(4) → gather original sigmoid scores → norm_topk_prob → ×routed_scaling(1.8)
+  → + shared_expert(x). `attention_bias=False`, `tie_word_embeddings=False`, rope_theta=1e6.
 
 ## Why / which tasks
 
