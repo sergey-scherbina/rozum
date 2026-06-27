@@ -1075,6 +1075,39 @@ const EDIT_CHURN_BACKSTOP: usize = 6;
 /// heredoc alike. Lines are normalized (leading `+`/`-` and surrounding whitespace stripped)
 /// for content comparison; `+++`/`---`/`@@`/`***` header lines are not change lines.
 fn edit_target_and_lines(input: &Value) -> Option<(String, Vec<String>, Vec<String>)> {
+    // Claude Code's structured edit tools (Edit / MultiEdit / Write) carry the target as a
+    // `file_path` key with `old_string`/`new_string` (or `content`, or an `edits` array) — NOT a
+    // diff/apply_patch body, so the codex-format scan below is blind to them and signature-3 churn
+    // never fired for the CC harness (its 67-turn `fix` loops ran to timeout). Handle them directly.
+    if let Some(file) = input.get("file_path").and_then(|v| v.as_str()) {
+        fn lines(s: &str) -> Vec<String> {
+            s.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()
+        }
+        let mut removed = Vec::new();
+        let mut added = Vec::new();
+        if let Some(s) = input.get("old_string").and_then(|v| v.as_str()) {
+            removed.extend(lines(s));
+        }
+        if let Some(s) = input.get("new_string").and_then(|v| v.as_str()) {
+            added.extend(lines(s));
+        }
+        // `Write` overwrites the whole file — count it as an edit (its content is the "added" side).
+        if let Some(s) = input.get("content").and_then(|v| v.as_str()) {
+            added.extend(lines(s));
+        }
+        // `MultiEdit`: each entry is an old/new pair.
+        if let Some(edits) = input.get("edits").and_then(|v| v.as_array()) {
+            for e in edits {
+                if let Some(s) = e.get("old_string").and_then(|v| v.as_str()) {
+                    removed.extend(lines(s));
+                }
+                if let Some(s) = e.get("new_string").and_then(|v| v.as_str()) {
+                    added.extend(lines(s));
+                }
+            }
+        }
+        return Some((file.to_string(), removed, added));
+    }
     // Pull every string leaf out of the input so we see the patch body whatever key holds it.
     fn collect_strings(v: &Value, out: &mut String) {
         match v {
@@ -4793,6 +4826,50 @@ mod tests {
             patch_call("d2", "src/main.rs", "line_c", "line_c2"),
         ];
         assert!(detect_stuck_loop(&fwd).is_none(), "linear forward edits are not churn");
+    }
+
+    /// Claude Code's structured Edit tool: `file_path` + `old_string`/`new_string` (no diff body),
+    /// the form that ran to a 67-turn timeout because the codex-format scan couldn't see it.
+    fn cc_edit(id: &str, file: &str, old: &str, new: &str) -> Message {
+        asst(tool_use(id, "Edit", json!({ "file_path": file, "old_string": old, "new_string": new })))
+    }
+
+    #[test]
+    fn stuck_loop_fires_on_claude_edit_churn() {
+        // Ping-pong: edit #3 re-adds the line edit #2 removed (different, mostly-succeeding edits).
+        let pp = vec![
+            Message::user("fix the reverse bug"),
+            cc_edit("c0", "src/main.rs", "s.to_string()", "s.chars().rev().collect::<String>()"),
+            cc_edit("c1", "src/main.rs", "s.chars().rev().collect::<String>()", "s.chars().rev().collect()"),
+            cc_edit("c2", "src/main.rs", "s.chars().rev().collect()", "s.chars().rev().collect::<String>()"),
+        ];
+        assert!(detect_stuck_loop(&pp).is_some(), "claude Edit ping-pong churn must trip");
+
+        // Six Edits to one file (no strict ping-pong) → the >=6 backstop trips.
+        let mut six = vec![Message::user("fix")];
+        for i in 0..6 {
+            six.push(cc_edit(&format!("e{i}"), "src/main.rs", &format!("old{i}"), &format!("new{i}")));
+        }
+        assert!(detect_stuck_loop(&six).is_some(), "six claude Edits to one file must trip backstop");
+
+        // A Write-churn loop (re-overwriting one file) also trips the backstop.
+        let mut writes = vec![Message::user("create it")];
+        for i in 0..6 {
+            writes.push(asst(tool_use(
+                &format!("w{i}"),
+                "Write",
+                json!({ "file_path": "src/main.rs", "content": format!("fn main() {{ /* v{i} */ }}") }),
+            )));
+        }
+        assert!(detect_stuck_loop(&writes).is_some(), "six Writes to one file must trip backstop");
+
+        // Healthy: two forward Edits to DISTINCT files → not churn.
+        let ok = vec![
+            Message::user("fix"),
+            cc_edit("a", "src/main.rs", "x", "y"),
+            cc_edit("b", "src/lib.rs", "p", "q"),
+        ];
+        assert!(detect_stuck_loop(&ok).is_none(), "two forward CC edits to distinct files are not churn");
     }
 
     #[tokio::test]
