@@ -674,10 +674,17 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   correction-bias + shared expert + first_k_dense=1, ref `mlx_lm.models.deepseek_v3`). Standalone
   (small, low peak) AND a strong pipeline-planner candidate. See `docs/specs/glm4-moe-native.md`.
 - [x] **verify-standalone** — DONE (clean box, 2026-06-27, results scripts/bench/results/agentic-*).
-  **VERDICTS:** (1) **Qwen3-Coder-30B-A3B** — strong EDIT (fix/test/debug 6/6, smoke #1) but
-  create-from-scratch **0/6 on a CLEAN box** (rpn 0/3 + build 0/3; one rpn spun 523 turns/500 tools).
-  The earlier contention caveat is SETTLED: it's a real weakness, not saturation → Qwen3-Coder is an
-  EDIT/executor model, does NOT beat Qwen3.6-35B (15/15) standalone. (2) **Devstral-Small-2507** —
+  **VERDICTS:** (1) **Qwen3-Coder-30B-A3B** — strong EDIT (fix/test/debug 6/6, smoke #1); but
+  create-from-scratch **0/6 clean** (rpn 0/3 + build 0/3). ⚠️ CAUSE **NOT isolated** — do NOT call it
+  a capability limit (repo rule: that's been premature+wrong before). Symptoms are delivery-shaped:
+  an rpn run spun **523 turns/500 tools** (loop = undelivered/again tool call, [[project-agentic-loop-root-cause]]);
+  build fails "no src/*.rs" with 9 tools (likely subdir-path vs verify, or content edge-case). NOTE:
+  `serving.rs` DOES parse Qwen3-Coder's `<function=…><parameter=…>` XML form, so it's NOT a trivial
+  format gap → suspect parser edge-case on real multi-line `content`, OR subdir path, OR loop-stop.
+  **NEXT (isolate skill): a live create-from-scratch probe with payload capture** (enable gateway
+  request/response logging or mock) → read the actual emitted tool call + where the file landed,
+  BEFORE any capability verdict. Also confirmed: it does not (yet) beat Qwen3.6-35B (15/15) on create.
+  (2) **Devstral-Small-2507** —
   **0/10, tools=0 on every cell** → emits no tool calls, can't drive the agent loop (Mistral tool-use
   gap, as the matrix history predicted). **DROPPED.** Implication for verify-pipelines: pair a
   create-capable PLANNER (GLM-4-32B RPN 3/3 / Qwen3.6-35B) with Qwen3-Coder/gpt-oss as the EXECUTOR.
@@ -687,7 +694,12 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   Qwen3-Coder-30B-A3B (re-run `rpn build` — smoke #1 was contended), Devstral-Small-2507
   (verify-first: Mistral tool-use), Qwen3-32B (dense), Qwen3.6-27B, Phi-4, Gemma-3-27B. Drop any that
   don't beat the incumbent at equal/lower peak.
-- [ ] **verify-pipelines** — test complementary `A,B` pairs for the LOWEST green-matrix peak, e.g.
+- [~] **verify-pipelines** — FIRST pair run (2026-06-27): GLM-4-32B→Qwen3-Coder on rpn/build =
+  **0/2 + 0/2** (peak ~25 GB; one rpn looped 541 turns/497 tools). Pairing a planner with the
+  Qwen3-Coder EXECUTOR did NOT fix create-from-scratch — the executor still delivers the file, and
+  that delivery is the unisolated failure above. So isolate Qwen3-Coder's create-delivery FIRST; for
+  a known-good create executor use gpt-oss (the GLM→gpt-oss pair the sibling runs) or Qwen3.6-35B
+  standalone. test complementary `A,B` pairs for the LOWEST green-matrix peak, e.g.
   Qwen3-Coder(plan)→gpt-oss(exec), GLM-4-9B/Qwen3-14B(plan)→Qwen3-Coder(exec), and (post-port)
   DeepSeek-V2-Lite / GLM-4.7-Flash tiers. Winner = the pair that greens `rpn build fix test debug` at
   the smallest MAX-tier footprint. Record peak via the gateway footprint telemetry.
