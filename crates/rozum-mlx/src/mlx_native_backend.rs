@@ -3794,6 +3794,36 @@ mod inner {
         }
     }
 
+    /// Does the chat template render tool definitions? A tool-aware template references the `tools`
+    /// jinja var (Qwen/GLM/gpt-oss) or Mistral's `[AVAILABLE_TOOLS]`. A bare template (e.g.
+    /// DeepSeek-Coder-V2-Lite) has none → the `tools:` arg is dropped, so we must inject instead.
+    fn template_renders_tools(template: &str) -> bool {
+        template.contains("tools")
+            || template.contains("AVAILABLE_TOOLS")
+            || template.contains("tool_call")
+    }
+
+    /// A synthetic system message describing `tools` + the `<tool_call>{name,arguments}` format that
+    /// `serving::parse_tool_calls` parses — injected for template-less models so they can call tools.
+    fn tools_system_message(tools: &[crate::backend::ToolDef]) -> Message {
+        let mut s = String::from(
+            "You have access to the following tools. When the user's request needs one, you MUST \
+             call it rather than answering in prose.\n\n# Tools\n",
+        );
+        for t in tools {
+            s.push_str(&format!(
+                "## {}\n{}\nArguments (JSON Schema): {}\n\n",
+                t.name, t.description, t.input_schema
+            ));
+        }
+        s.push_str(
+            "To call a tool, output EXACTLY one line and nothing else:\n\
+             <tool_call>{\"name\": \"<tool name>\", \"arguments\": <arguments as a JSON object>}</tool_call>\n\
+             If no tool is needed, answer the user normally.",
+        );
+        Message::system(s)
+    }
+
     fn render_prompt(
         tokenizer: &mut Tokenizer,
         template: &str,
@@ -3896,6 +3926,24 @@ mod inner {
         {
             glm_stripped = messages.iter().map(super::strip_glm_framing_msg).collect();
             &glm_stripped
+        } else {
+            messages
+        };
+        // Template-less tool support: a chat template that never references `tools` (e.g.
+        // DeepSeek-Coder-V2-Lite's bare `User:/Assistant:` template) silently DROPS the tool defs
+        // passed below → the model never sees them → tools=0 (live-capture isolated, BUGS/sprint).
+        // Inject a synthetic system message describing the tools + the `<tool_call>` format that
+        // `serving::parse_tool_calls` already understands, so such a model can call them. Off with
+        // ROZUM_INJECT_TOOLS=0.
+        let injected: Vec<Message>;
+        let messages: &[Message] = if !tools.is_empty()
+            && !template_renders_tools(template)
+            && std::env::var_os("ROZUM_INJECT_TOOLS").map(|v| v != "0").unwrap_or(true)
+        {
+            injected = std::iter::once(tools_system_message(tools))
+                .chain(messages.iter().cloned())
+                .collect();
+            &injected
         } else {
             messages
         };
