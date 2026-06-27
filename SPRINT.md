@@ -662,23 +662,21 @@ Two levers, both tracked here:
 VERIFY EACH PROMISING MODEL IN THE MODE THAT FITS (record peak RAM + pass-rate per config; 🛑 one
 model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count — [[project-matrix-nondeterminism]]):
 
-- [x] **mla-deepseek-v2** (PORT — **VALIDATED 2026-06-27**, fork branch `feature/mla-deepseek-v2` @1e8ed172, rozum wire `feature/rozum-deepseek-v2-wire` @dfec7ff)
-  latent attention + DeepSeek MoE in `mlx-lm/.../models/deepseek_v2.rs`, ported from the Python
-  **DONE: DeepSeek-Coder-V2-Lite-Instruct-4bit (16B-A2.4B, low peak) generates byte-identical output
-  to Python mlx_lm greedy (`def add(a,b): return a+b…`). 4 bugs found+fixed via the live parity probe
-  (the isolate discipline): (1) q_lora_rank null→Option (load); (2) router gate is bf16, not
-  #[quantizable] (forward crash); (3) YaRN attention-scale ×mscale²; (4) faithful DeepSeek YaRN rope
-  (traditional + correct mscale). NEXT: glm4_moe_lite (GLM-4.7-Flash) reuses this MLA kernel; land to
-  master after the fork branch hits fork-main + a stable rev is pinned.** Original plan:
-  `mlx_lm.models.deepseek_v2` reference (q_a/q_b + kv_a/kv_b low-rank, decoupled nope/rope dims,
-  YaRN mscale rope, MQA k_pe broadcast). Unlocks **DeepSeek-Coder-V2-Lite** (16B-A2.4B → very low
-  peak) AND is the shared MLA kernel for GLM-4.7-Flash. Spec `docs/specs/mlx-mla-attention.md`.
-  Byte-parity oracle vs Python (slot-gated). Reuse `qwen3_moe::SwitchGlu` for experts.
-- [ ] **mlx-glm4-moe-lite** (PORT, after mla-deepseek-v2) — GLM-4.7-Flash (`glm4_moe_lite`, 16.9 GB,
-  fits): MLA kernel from above **+ GLM extras** (`self_attn.embed_q`/`unembed_out` — NOT in vanilla
-  DeepSeek MLA, reverse-engineer or wait for upstream mlx_lm) + DeepSeek-V3-style routing (sigmoid +
-  correction-bias + shared expert + first_k_dense=1, ref `mlx_lm.models.deepseek_v3`). Standalone
-  (small, low peak) AND a strong pipeline-planner candidate. See `docs/specs/glm4-moe-native.md`.
+- [x] **mla-deepseek-v2** (PORT, DONE + landed origin/master, fork rev `1e8ed172`) — **MLA** latent
+  attention + DeepSeek MoE in `deepseek_v2.rs` (naive form: q_a/q_b + kv_a/kv_b low-rank, decoupled
+  nope/rope dims, YaRN mscale rope, MQA k_pe broadcast). Unlocks **DeepSeek-Coder-V2-Lite** (16B-A2.4B
+  → very low peak), the shared MLA base for GLM-4.7-Flash. **Byte-IDENTICAL** greedy vs Python mlx_lm
+  (4 bugs caught+fixed: q_lora_rank Option, bf16 router gate, YaRN scale-boost, faithful YaRN rope).
+- [x] **mlx-glm4-moe-lite** (PORT, DONE + VALIDATED, fork rev `60c78ca1`, wired
+  `feature/rozum-glm4-moe-lite-wire`) — **GLM-4.7-Flash** (`glm4_moe_lite`, 16.9 GB, fits) via the
+  **ABSORBED** MLA (`embed_q`/`unembed_out` = per-head `QuantizedMultiLinear`, compressed
+  kv_latent+k_pe cache, pe_scores additive SDPA mask, L==1 decode vs L>1 prefill branches) +
+  DeepSeek-V3 `noaux_tc` routing (sigmoid + e_score_correction_bias + norm_topk_prob ×
+  routed_scaling_factor + shared expert + first_k_dense=1). **1 forward bug** caught+fixed: pe_scores
+  f32 mask must cast to bf16 query dtype for SDPA. **Parity: greedy byte-matches Python ~27 tokens on
+  identical prompt ids**, then near-tie flip = irreducible quantized-MoE non-determinism
+  ([[project-spec-decode-moe-numerics]]), forward numerically faithful (coherent correct code+haiku).
+  Spec `docs/specs/glm4-moe-lite-native.md`. NEXT: agentic smoke w/ tool-injection (low-peak coder).
 - [x] **verify-standalone** — DONE (clean box, 2026-06-27, results scripts/bench/results/agentic-*).
   **VERDICTS:** (1) **Qwen3-Coder-30B-A3B** — strong EDIT (fix/test/debug 6/6, smoke #1); but
   create-from-scratch **0/6 clean** (rpn 0/3 + build 0/3). ⚠️ CAUSE **NOT isolated** — do NOT call it

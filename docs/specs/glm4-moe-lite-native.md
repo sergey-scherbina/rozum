@@ -1,9 +1,14 @@
 # Native MLX: GLM-4.7-Flash (`glm4_moe_lite`) — absorbed MLA + DeepSeek-V3 routing
 
-Status: scoped + scaffolded (operator 2026-06-27). Builds on the VALIDATED `deepseek_v2` MLA port
-(master `b83003c`). Reference: Python `mlx_lm.models.glm4_moe_lite` + `mlx_lm.models.mla`
-(MultiLinear) + `deepseek_v3` (routing). Target: GLM-4.7-Flash 4bit (16.9 GB, fits 36 GiB) — a
-low-peak GLM-family coder that (unlike DeepSeek-V2-Lite/Devstral) is more likely tool-capable.
+Status: **DONE + VALIDATED** (2026-06-27). Fork rev `60c78ca1` (gpt-oss-native), wired into rozum
+(`feature/rozum-glm4-moe-lite-wire`). GLM-4.7-Flash-4bit loads + generates coherent correct text;
+greedy **byte-matches Python mlx_lm ~27 tokens on identical prompt ids**, then near-tie flips =
+irreducible quantized-MoE non-determinism (gather_qmm not bit-invariant, [[project-spec-decode-moe-numerics]]),
+NOT a port bug. **ONE forward bug** found+fixed: the `pe_scores` additive SDPA mask is built in f32
+(q_pe*scale + f32::MIN where) but SDPA output is bf16 → "Mask type must promote to output type
+bfloat16"; cast `pe_scores` to `q_nope.dtype()` before SDPA. Builds reproducibly from the pinned rev
+alone (no local patch). Reference: Python `mlx_lm.models.glm4_moe_lite` + `mla` (MultiLinear) +
+`deepseek_v3` (routing). Builds on the VALIDATED `deepseek_v2` MLA port (origin/master rev `1e8ed172`).
 
 ## Why it's a NEW port (not just deepseek_v2 reuse)
 
