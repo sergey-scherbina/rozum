@@ -1338,9 +1338,8 @@ mod inner {
                     model_type: String::new(),
                     harmony,
                     // GLM is a dense arch → it finalizes in the engine seam (consume_tokens), not the
-                    // mlx batch path; arm the artifact synth here.
-                    glm_synth: super::model_is_glm(&job.model_id)
-                        && super::glm_artifact_synth_enabled(),
+                    // mlx batch path; arm the artifact synth here. GLM (default) OR universal synth.
+                    glm_synth: super::artifact_synth_active(&job.model_id),
                     tools: job.tools.clone(),
                 },
             };
@@ -2224,7 +2223,7 @@ mod inner {
                 // requests route here; a single GLM request — dense arch — finalizes in the engine
                 // seam, see engine::consume_tokens). Default ON for GLM. ADDITIVE + deduped, same as
                 // the engine seam: keeps both a named call and an artifact in a mixed response.
-                if super::glm_artifact_synth_enabled() && super::model_is_glm(&self.job.model_id) {
+                if super::artifact_synth_active(&self.job.model_id) {
                     for c in crate::serving::synth_glm_tool_calls(&self.full_text, &self.job.tools) {
                         if !calls.contains(&c) {
                             calls.push(c);
@@ -3740,7 +3739,7 @@ mod inner {
             model_type: String::new(),
             harmony,
             // Hybrid path; GLM is dense so this is false in practice, but compute it uniformly.
-            glm_synth: super::model_is_glm(&job.model_id) && super::glm_artifact_synth_enabled(),
+            glm_synth: super::artifact_synth_active(&job.model_id),
             tools: job.tools.clone(),
         };
         let mut ids = PipelinedIds::new(generate, pipeline);
@@ -4123,6 +4122,27 @@ fn glm_artifact_synth_enabled() -> bool {
 /// heavily-guarded fallback; the precise source is the template dialect's `uses_glm_envelope`.
 fn model_is_glm(model_id: &str) -> bool {
     model_id.to_ascii_lowercase().contains("glm")
+}
+
+/// Universal artifact-synth (`ROZUM_ARTIFACT_SYNTH=1`, default OFF): apply the create-artifact recovery
+/// to ANY model, not just the GLM family. The synth itself is already model-agnostic — Mode-2 matches a
+/// bare tool-args object to an OFFERED tool's `input_schema` (`match_tool_by_args`) and `glm_kv_extract`
+/// is schema-driven, both work for any agent's tool names (`synth_generalizes_to_any_agent_tool_schema`).
+/// Only the call-site gate was GLM-scoped. This unlocks **deterministic delivery without a big model**:
+/// a small reasoner narrates the code (which even tiny models do well), and the pipeline writes the file
+/// deterministically — so create-from-scratch lands without the model's fragile tool-call machinery, in
+/// far less RAM than a big tool-reliable executor. Still fires ONLY on an empty tool-parse AND a held
+/// guard (schema match / safe prose filename), so a correct tool-caller or a plain chat answer is left
+/// alone (`synth_skips_chat_and_ambiguous`).
+fn artifact_synth_universal() -> bool {
+    matches!(std::env::var("ROZUM_ARTIFACT_SYNTH").ok().as_deref(), Some("1" | "true" | "on"))
+}
+
+/// The full artifact-synth gate for a model: the GLM family (default-ON, opt-out `ROZUM_GLM_ARTIFACT_SYNTH=0`)
+/// OR any model under universal synth (opt-in `ROZUM_ARTIFACT_SYNTH=1`). Both paths still only act when
+/// the model named no tool and a guard holds — see [`crate::serving::synth_glm_tool_calls`].
+fn artifact_synth_active(model_id: &str) -> bool {
+    (model_is_glm(model_id) && glm_artifact_synth_enabled()) || artifact_synth_universal()
 }
 
 
