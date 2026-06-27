@@ -624,7 +624,15 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
   differ, but treat its tool-use as a hypothesis to confirm over N runs, not a given. Done = added to
   `agentic.sh` default set + a model-only/agentic smoke on `rpn build fix test debug` vs the
   Qwen3.6-35B/gpt-oss baseline (🛑 REBOOT-SAFETY: one model-gateway at a time, claim the slot first).
-  Code edit (catalog) shipped; the smoke run is the slot-gated remainder.
+  Code edit (catalog) shipped. **Smoke #1 RAN (2026-06-27, claude×Qwen3-Coder, REPS=2, results
+  `scripts/bench/results/agentic-20260627-115815`): 7/10 — fix 2/2, test 2/2, debug 2/2 (edit = 6/6
+  perfect), build 1/2, rpn 0/2 (one a 900s RUN_TIMEOUT).** ⚠️ INCONCLUSIVE on create-from-scratch:
+  a sibling experiment (`pipeline-swap-settle` matrix/router runs on :8300/:8500) was resident
+  THROUGHOUT → gateway contention (RAM hit 95 MB; the rpn 900s timeout smells like saturation, not
+  model-can't). Per [[project-matrix-nondeterminism]] a contended red ≠ verdict. **NEXT: clean re-run
+  of `rpn build` for Qwen3-Coder on a QUIET box** before any conclusion / promoting it over
+  Qwen3.6-35B. Devstral still un-run (verify-first). (Found+fixed BUG-005 here: offline+uncached →
+  bogus 4 PB overcommit; the queue now pre-downloads via uv+huggingface_hub.)
 
 - [ ] **mlx-glm4-moe** — port GLM-4 MoE to native MLX. **REPRIORITIZED → bigger than thought**
   (checkpoint inspection 2026-06-27, spec `docs/specs/glm4-moe-native.md`): the family splits by
