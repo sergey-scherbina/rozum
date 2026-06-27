@@ -704,7 +704,18 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   (2026-06-27): **0/10, tools=0 on EVERY cell** (turns=3-4, tools=0; 15 GB footprint). The PORT is
   byte-validated (it RUNS), but it emits no tool calls the agent loop executes — same as Devstral.
   → feeds `toolcall-delivery-isolate` below. Not a green-matrix candidate as-is.
-- [~] **toolcall-delivery-isolate** (HIGH LEVERAGE, autonomous 2026-06-27) — THREE low-footprint
+- [~] **toolcall-delivery-isolate** — **ROOT CAUSE FOUND (2026-06-27, live capture):** DeepSeek-Coder-
+  V2-Lite's chat_template (tokenizer_config.json, 459 chars) has **NO tools/tool_calls/function slot**
+  — it only renders `User:/Assistant:`. So the gateway's template-based tool rendering **silently
+  drops the tool defs** (proof: a request WITH a Write tool produced PROMPT_IDS len=23 = just the user
+  msg, no tools; the model replied in prose, stop_reason=end_turn, no tool_use). The model never SEES
+  the tools → tools=0. **This is a GATEWAY gap (template-less tool rendering), NOT a model verdict** —
+  the discipline held (don't blame the model). Affects DeepSeek + likely Mistral/Devstral (same
+  template class). **FIX (next, substantial gateway feature):** when a model's chat_template lacks
+  tool support, INJECT a tools section into the prompt (system-msg listing tools + the `<tool_call>`
+  format the parser already handles) instead of dropping them — like the existing codex/gpt-oss
+  delivery bridges. Caveat: a non-tool-trained model may still not comply; injection is the necessary
+  first step. One fix unlocks several low-footprint matrix candidates. (Original:) THREE low-footprint
   non-Qwen/GLM/gpt-oss models score **tools=0 on every agentic cell** (Devstral 0/10, DeepSeek-Coder-
   V2-Lite 0/10). The deepseek_v2 PORT is VALIDATED, so the model RUNS — it just emits no executable
   tool calls. Per the repo rule (never close as "model can't"), CAUSE NOT ISOLATED: suspect the
