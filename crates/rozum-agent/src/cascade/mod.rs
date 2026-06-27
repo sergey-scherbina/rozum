@@ -56,9 +56,48 @@ const PLANNER_MAX_TOKENS: u32 = 800;
 const PLANNER_FRAMING: &str = "You are the PLANNER in a multi-stage pipeline. Do NOT call tools, write \
 files, or run anything. Think the task through and output a concise, concrete plan for the next model to \
 execute: the approach, the key steps in order, and any critical code or structure it must get right. Be \
-specific and brief — this plan is the only thing the executor receives from you.";
+specific and brief — this plan is the only thing the executor receives from you.\n\n\
+Then, on the FINAL line, classify the task's REASONING difficulty for the executor:\n\
+`DIFFICULTY: HARD` — writing a non-trivial ALGORITHM or complex logic from scratch (a parser, an \
+evaluator, a stateful data structure, tricky edge cases).\n\
+`DIFFICULTY: ROUTINE` — edits to existing files, simple/boilerplate creation, or running commands.";
 /// How an advisor's plan is framed when forwarded into the next tier's input.
 const PLAN_PREFIX: &str = "[Plan from the advisor model — follow it to complete the task]\n";
+
+/// Marker the planner ends with so the pipeline can route the EXECUTOR by reasoning difficulty.
+const DIFFICULTY_HARD: &str = "DIFFICULTY: HARD";
+
+/// Difficulty-routing toggle (default **OFF** — opt in with `ROZUM_PIPELINE_ROUTE=1`): when the planner
+/// classifies a task `HARD`, the **planner's own model** (the stronger reasoner — e.g. GLM-32B) executes
+/// it instead of the routine executor (e.g. gpt-oss). Measured rationale (claude × N=3): on the dense
+/// `rpn` algorithm GLM-32B beats gpt-oss 2/3 vs 1/3, while gpt-oss wins the routine edits (fix/debug 2/3,
+/// 3/3) — so route the hard reasoning to the thinker, the routine doing to the doer. Default OFF until
+/// the full-matrix A/B (router vs the 14/18 no-router baseline) confirms it lifts the HARD class without
+/// regressing the routine tasks. No-op for a single-model pipeline (no planner to classify).
+fn route_hard_enabled() -> bool {
+    matches!(std::env::var("ROZUM_PIPELINE_ROUTE").ok().as_deref(), Some("1" | "true" | "on"))
+}
+
+/// `true` when the planner classified the task as reasoning-HARD (its final-line `DIFFICULTY: HARD`).
+/// Defaults to ROUTINE (false) when absent/unclear, so behaviour is unchanged unless the planner
+/// explicitly flags a hard task.
+fn plan_is_hard(plan: &str) -> bool {
+    // Anchor on the LAST occurrence (the classification line follows the plan body); a HARD line wins.
+    match (plan.rfind(DIFFICULTY_HARD), plan.rfind("DIFFICULTY: ROUTINE")) {
+        (Some(h), Some(r)) => h > r,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+/// Strip the trailing `DIFFICULTY: …` classification line from the plan before it is forwarded to the
+/// executor (it's routing metadata, not part of the plan the executor should follow).
+fn strip_difficulty(plan: &str) -> &str {
+    match plan.rfind("DIFFICULTY:") {
+        Some(i) => plan[..i].trim_end(),
+        None => plan,
+    }
+}
 
 /// Append `text` to the trailing user-text message when there is one; otherwise add a new user
 /// message. Merging (rather than pushing a second user turn) keeps role alternation intact — strict
@@ -204,7 +243,7 @@ impl ChatBackend for LazyPipelineBackend {
         // overhead). N=2: planner + executor. N≥3: + verifier, which reviews the executor's proposed
         // solution and drives up to `pipeline_repair_rounds()` revision rounds. Extra models (n>3)
         // are ignored for now.
-        let executor = if n == 1 { &self.specs[0] } else { &self.specs[1] };
+        let mut executor = if n == 1 { &self.specs[0] } else { &self.specs[1] };
         let planner = (n >= 2).then(|| &self.specs[0]);
         let verifier = (n >= 3).then(|| &self.specs[2]);
         if n > 3 {
@@ -230,7 +269,23 @@ impl ChatBackend for LazyPipelineBackend {
                         Some(e) => Self::obs("advisor_failed", &spec.model, serde_json::json!({ "error": e })),
                         None => {
                             let plan = outcome.text.trim();
-                            Self::obs("advisor", &spec.model, serde_json::json!({ "plan_chars": plan.len() }));
+                            // Difficulty routing: a HARD task is executed by the PLANNER's model (the
+                            // stronger reasoner) instead of the routine executor. Decided here, before
+                            // the executor loads, so only one model is ever resident.
+                            let hard = route_hard_enabled() && plan_is_hard(plan);
+                            Self::obs(
+                                "advisor",
+                                &spec.model,
+                                serde_json::json!({
+                                    "plan_chars": plan.len(),
+                                    "difficulty": if hard { "HARD" } else { "ROUTINE" },
+                                }),
+                            );
+                            if hard && n >= 2 {
+                                executor = spec; // the planner (the thinker) executes the hard task
+                                Self::obs("route_hard", &spec.model, serde_json::json!({ "executor": spec.model }));
+                            }
+                            let plan = strip_difficulty(plan); // drop the routing line from the handoff
                             if !plan.is_empty() {
                                 forward_plan(&mut messages, plan);
                             }
@@ -822,6 +877,25 @@ mod tests {
     use crate::backend::{collect_to_string, ModelResult, SamplingParams};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn difficulty_classification_and_strip() {
+        // HARD on the final line → route to the planner's model.
+        let hard = "Plan: build a stack RPN evaluator.\nDIFFICULTY: HARD";
+        assert!(plan_is_hard(hard));
+        assert_eq!(strip_difficulty(hard), "Plan: build a stack RPN evaluator.");
+        // ROUTINE → routine executor; the line is stripped from the handoff.
+        let routine = "Plan: fix the off-by-one.\nDIFFICULTY: ROUTINE";
+        assert!(!plan_is_hard(routine));
+        assert_eq!(strip_difficulty(routine), "Plan: fix the off-by-one.");
+        // Absent classification → defaults to ROUTINE (unchanged behaviour), nothing stripped.
+        let bare = "Just write the file.";
+        assert!(!plan_is_hard(bare));
+        assert_eq!(strip_difficulty(bare), bare);
+        // The LAST marker wins if both appear (e.g. HARD mentioned in prose, ROUTINE is the verdict).
+        assert!(!plan_is_hard("avoid the HARD path\nDIFFICULTY: ROUTINE"));
+        assert!(plan_is_hard("DIFFICULTY: ROUTINE was wrong\nDIFFICULTY: HARD"));
+    }
 
     enum Script {
         Text(&'static str),
