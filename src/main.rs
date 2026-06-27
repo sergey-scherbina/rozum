@@ -1126,6 +1126,30 @@ fn measured_footprint_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// The unknown-size sentinel `estimate_model_footprint_bytes` returns when a model isn't cached
+/// locally (`u64::MAX / 4`). Anything at or above half of it (`u64::MAX / 8`) is a not-cached
+/// figure, never a real model footprint — used to print an honest message instead of the bogus
+/// `~4398046511103 MB` (= the sentinel in MB) the gate would otherwise quote.
+const UNKNOWN_FOOTPRINT_FLOOR: u64 = u64::MAX / 8;
+
+/// Is this exact spec present in the local model cache? (`false` ⇒ size unknown ⇒ sentinel.)
+fn model_is_locally_cached(model: &str) -> bool {
+    rozum::models::scan_all_installed().iter().any(|m| m.spec == model)
+}
+
+/// A copy-pasteable pre-download command for an uncached spec, so an `--offline` refusal is
+/// actionable. `mlx-community:Foo` → `huggingface-cli download mlx-community/Foo`.
+fn hf_download_hint(model: &str) -> String {
+    let repo = model
+        .strip_prefix("mlx-community:")
+        .map(|r| format!("mlx-community/{r}"))
+        .or_else(|| (!model.contains(':') && !model.starts_with('/')).then(|| model.to_string()));
+    match repo {
+        Some(r) => format!("huggingface-cli download {r}"),
+        None => format!("load '{model}' once WITH network (drop --offline) to cache it"),
+    }
+}
+
 /// Reserve host RAM for a model about to load (BUG-003 v2), or exit with a clear
 /// message if it would overcommit. Hold the returned guard for as long as the model
 /// is resident (binding it at the caller's function scope is enough). Runs the
@@ -1192,6 +1216,22 @@ async fn acquire_residency_or_exit(
     n_ctx: u32,
     footprint_override: Option<u64>,
 ) -> Option<rozum::share::ResidencyGuard> {
+    // A single (non-cascade) model that isn't cached locally has no measurable size, so
+    // `estimate_model_footprint_bytes` returns the unknown-size sentinel (`u64::MAX/4` ≈
+    // 4_398_046_511_103 MB). That sentinel exceeds any real RAM, so the gate refuses the load even
+    // on a completely empty host — and under `--offline` the model can't be fetched to fix it. The
+    // old result was a baffling "(~4398046511103 MB) would overcommit host RAM" when the real
+    // problem is simply that the model isn't downloaded. Say that instead. (Online: fall through —
+    // the load path can still download; the sentinel stays a conservative empty-host-only estimate.)
+    if footprint_override.is_none() && is_offline() && !model_is_locally_cached(model) {
+        eprintln!(
+            "rozum gateway: model '{model}' is not downloaded locally and --offline (ROZUM_OFFLINE) \
+             is set, so it cannot be fetched. Pre-download it first (with network):\n  {hint}\n\
+             then retry the offline run.",
+            hint = hf_download_hint(model),
+        );
+        std::process::exit(1);
+    }
     let footprint = footprint_override.unwrap_or_else(|| estimate_model_footprint_bytes(model, n_ctx));
     let model_owned = model.to_string();
     match tokio::task::spawn_blocking(move || {
@@ -1212,23 +1252,38 @@ async fn acquire_residency_or_exit(
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            eprintln!(
-                "rozum gateway: refusing to load '{model}' (~{} MB) — it would overcommit host RAM. \
-                 {} MB already reserved by [{}]; budget {}. Waited {}s.",
-                mb(denied.footprint_bytes),
-                mb(denied.in_use_bytes),
-                who,
-                denied
-                    .budget_bytes
-                    .map(|b| format!("~{} MB", mb(b)))
-                    .unwrap_or_else(|| "unknown".into()),
-                denied.waited_secs,
-            );
-            eprintln!(
-                "  Loading models past host RAM can panic/reboot the machine (BUG-003). Stop a \
-                 resident gateway (`rozum gateway stop`), use a smaller model, raise \
-                 ROZUM_GATEWAY_RAM_BUDGET_FRAC, or set ROZUM_ALLOW_CONCURRENT_RESIDENT=1 to override."
-            );
+            if denied.footprint_bytes >= UNKNOWN_FOOTPRINT_FLOOR {
+                // The footprint is the unknown-size sentinel, not a real measurement: a model in
+                // this load isn't cached locally so its size can't be estimated (online uncached, or
+                // a cascade tier that isn't downloaded). Don't quote the absurd sentinel-in-MB.
+                eprintln!(
+                    "rozum gateway: refusing to load '{model}' — its size is UNKNOWN (a model in \
+                     this load is not downloaded locally, so its RAM cost can't be estimated). \
+                     {} MB reserved by [{}]. Pre-download the missing model first ({}), or set \
+                     ROZUM_ALLOW_CONCURRENT_RESIDENT=1 to bypass the gate (risks an OOM reboot, BUG-003).",
+                    mb(denied.in_use_bytes),
+                    who,
+                    hf_download_hint(model),
+                );
+            } else {
+                eprintln!(
+                    "rozum gateway: refusing to load '{model}' (~{} MB) — it would overcommit host RAM. \
+                     {} MB already reserved by [{}]; budget {}. Waited {}s.",
+                    mb(denied.footprint_bytes),
+                    mb(denied.in_use_bytes),
+                    who,
+                    denied
+                        .budget_bytes
+                        .map(|b| format!("~{} MB", mb(b)))
+                        .unwrap_or_else(|| "unknown".into()),
+                    denied.waited_secs,
+                );
+                eprintln!(
+                    "  Loading models past host RAM can panic/reboot the machine (BUG-003). Stop a \
+                     resident gateway (`rozum gateway stop`), use a smaller model, raise \
+                     ROZUM_GATEWAY_RAM_BUDGET_FRAC, or set ROZUM_ALLOW_CONCURRENT_RESIDENT=1 to override."
+                );
+            }
             std::process::exit(1);
         }
         // The blocking task itself failed (panic / cancel) — fail open rather than
@@ -1580,6 +1635,32 @@ fn resolve_piggyback(
         return false;
     }
     env_override.unwrap_or(!channels_active)
+}
+
+#[cfg(test)]
+mod footprint_uncached_tests {
+    use super::{hf_download_hint, UNKNOWN_FOOTPRINT_FLOOR};
+
+    #[test]
+    fn unknown_sentinel_is_above_the_floor_but_a_real_model_is_not() {
+        // The estimate's unknown-size sentinel (u64::MAX/4) must trip the "size unknown" branch…
+        assert!(u64::MAX / 4 >= UNKNOWN_FOOTPRINT_FLOOR);
+        // …while any plausible real footprint (e.g. a 1 TiB model) must NOT.
+        assert!(1024u64 * 1024 * 1024 * 1024 < UNKNOWN_FOOTPRINT_FLOOR);
+    }
+
+    #[test]
+    fn download_hint_maps_mlx_community_spec_to_hf_repo() {
+        assert_eq!(
+            hf_download_hint("mlx-community:Qwen3-Coder-30B-A3B-Instruct-4bit"),
+            "huggingface-cli download mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+        );
+        // A bare HF id (no scheme, not a path) is used as-is.
+        assert_eq!(hf_download_hint("org/model"), "huggingface-cli download org/model");
+        // A scheme'd spec or absolute path has no HF repo → generic guidance, no bogus repo.
+        assert!(hf_download_hint("lmstudio:foo/bar").contains("WITH network"));
+        assert!(hf_download_hint("/abs/path/model.gguf").contains("WITH network"));
+    }
 }
 
 #[cfg(test)]

@@ -5,6 +5,45 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-005 — uncached model under `--offline` refused with bogus "~4398046511103 MB overcommit"
+
+- **Status:** fixed on `feature/footprint-uncached-sentinel` (cargo check `--no-default-features` +
+  2 unit tests green). Found while queuing the `matrix-add-coders` Qwen3-Coder smoke.
+- **Reporter:** operator (smoke run "gateway not ready").
+- **Severity:** P2 — blocks loading any not-yet-downloaded model on the offline bench path with a
+  baffling, non-actionable error; no data loss / no reboot.
+
+**Symptom.** `rozum-gateway gateway --model mlx-community:Qwen3-Coder-30B-A3B-Instruct-4bit --offline`
+on an **empty** host (0 resident, ~20 GB free) refused:
+`loading this model (~4398046511103 MB) would overcommit host RAM … Waited 240s` → the bench saw
+"gateway not ready" and ran zero tasks. The baseline models worked only because they were already
+cached.
+
+**Root cause (two parts, both in `src/main.rs`).**
+1. `estimate_model_footprint_bytes` returns the unknown-size **sentinel `u64::MAX/4`** when a spec
+   isn't found in the local cache (`scan_all_installed`). `u64::MAX/4` bytes = **4_398_046_511_103
+   MB** — the exact number in the message. It was meant to mean "only admit on an empty host," but
+   it exceeds *any* physical RAM, so the gate (`share::admits`) refuses it **even on a totally empty
+   host** → the model can NEVER load via the gate when its size is unknown.
+2. Under `--offline` (which `agentic.sh` sets) the model also can't be downloaded to make its size
+   knowable → permanent dead-end, reported as a fake petabyte overcommit.
+
+**Fix.**
+- `acquire_residency_or_exit`: for a single (non-cascade) model that is **not locally cached** AND
+  `is_offline()`, exit early with a clear, actionable message naming the real problem and a
+  copy-pasteable pre-download command (`hf_download_hint`) — instead of feeding the sentinel to the
+  gate. Online is unchanged (the load path can still download).
+- The gate refusal message now detects a sentinel-sized footprint (`>= u64::MAX/8`,
+  `UNKNOWN_FOOTPRINT_FLOOR`) and prints "size is UNKNOWN (a model isn't downloaded locally)" with the
+  pre-download hint, instead of quoting the absurd sentinel-in-MB — covering online-uncached and the
+  cascade-with-an-uncached-tier paths too.
+- Operational: the bench needs models pre-cached (it runs `--offline`); the `matrix-add-coders`
+  smoke queue now pre-downloads via `uv + huggingface_hub` before starting the gateway.
+
+**Related:** distinct from `footprint-before-download` (a261fb0, which moved the *estimate* after
+download on the launch path) — this is the gateway path's unknown-size **sentinel** semantics +
+the offline dead-end.
+
 ## BUG-004 — `mcp-proxy` dies mid-session → `mcp__rozum__*` tools vanish (no rozum-side trace)
 
 - **Status:** fixed on `feature/mcp-proxy-resilience` (cargo check clean). Pending: install
