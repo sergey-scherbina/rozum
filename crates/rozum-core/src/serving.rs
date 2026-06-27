@@ -931,6 +931,27 @@ mod tests {
     }
 
     #[test]
+    fn qwen_coder_create_from_scratch_xml_multiline_content() {
+        // The REAL Qwen3-Coder create-from-scratch shape: a `<tool_call>` wrapping the Hermes
+        // `<function=…>` form whose `content` parameter is a multi-line Rust file with braces,
+        // quotes and `{}` interpolation. Isolation check (green-matrix-min-footprint): the parser
+        // MUST recover name + the content intact (braces/newlines must not unbalance or truncate).
+        let text = "<tool_call>\n<function=write_file>\n<parameter=path>src/main.rs</parameter>\n\
+            <parameter=content>\nfn reverse(s: &str) -> String { s.chars().rev().collect() }\n\
+            fn main() {\n    let a: Vec<String> = std::env::args().collect();\n    \
+            println!(\"{}\", reverse(&a[1]));\n}\n</parameter>\n</function>\n</tool_call>";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1, "expected one tool call, got: {calls:?}");
+        assert_eq!(calls[0].0, "write_file");
+        // content must survive verbatim-ish (key tokens present, not mangled to JSON/truncated).
+        assert!(calls[0].1.contains("src/main.rs"), "path lost: {}", calls[0].1);
+        assert!(calls[0].1.contains("fn reverse"), "content head lost: {}", calls[0].1);
+        assert!(calls[0].1.contains("reverse(&a[1])"), "content tail lost (truncated?): {}", calls[0].1);
+        // and the arguments string must be valid JSON the agent can consume.
+        assert!(serde_json::from_str::<serde_json::Value>(&calls[0].1).is_ok(), "args not JSON: {}", calls[0].1);
+    }
+
+    #[test]
     fn loose_markdown_json_fence_recovered() {
         // What weaker models emit when driven by a foreign tool schema: a fenced
         // ```json block with {name, arguments} and NO <tool_call> wrapper. The
