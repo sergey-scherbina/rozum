@@ -2558,15 +2558,22 @@ keep going until every file is written and the success check passes.\n\
 Run shell with the exec_command tool. Every call's argument is a JSON object {\"cmd\": \"…\"} — \
 NEVER put prose or reasoning there, only the shell command.\n\
 \n\
-To CREATE files, make the directory first, then write each file with a heredoc — one exec_command \
-per command, IN THIS ORDER:\n\
-  {\"cmd\": \"mkdir -p src\"}\n\
-  {\"cmd\": \"cat > Cargo.toml <<'EOF'\\n…full file…\\nEOF\"}\n\
-  {\"cmd\": \"cat > src/main.rs <<'EOF'\\n…full file…\\nEOF\"}\n\
-Write EVERY required file, then build/run/test to verify.\n\
+To CREATE or EDIT files, call the apply_patch TOOL (do NOT write files with a shell heredoc — \
+`cat <<EOF` mangles quotes/backslashes/newlines; the runtime writes apply_patch bodies byte-for-byte). \
+One apply_patch call can carry several files.\n\
 \n\
-To EDIT an existing file, call the apply_patch TOOL directly (do NOT run `apply_patch` as a shell \
-command or heredoc). Its patch is EXACTLY (leading space = context, `-` = removed, `+` = added):\n\
+CREATE a new file — `*** Add File:` then every line of the file prefixed with a single `+`:\n\
+*** Begin Patch\n\
+*** Add File: Cargo.toml\n\
++[package]\n\
++name = \"x\"\n\
+*** Add File: src/main.rs\n\
++fn main() {\n\
++    println!(\"hi\");\n\
++}\n\
+*** End Patch\n\
+\n\
+EDIT an existing file — `*** Update File:` (leading space = context, `-` = removed, `+` = added):\n\
 *** Begin Patch\n\
 *** Update File: <relative/path>\n\
 @@\n\
@@ -2574,6 +2581,8 @@ command or heredoc). Its patch is EXACTLY (leading space = context, `-` = remove
 -<old line>\n\
 +<new line>\n\
 *** End Patch\n\
+\n\
+Use exec_command only to RUN things (build/test/run), never to write file bodies.\n\
 \n\
 When the task's success condition is met, reply with one short confirmation line and stop. Do not \
 ask for confirmation or permission.";
@@ -2599,6 +2608,22 @@ fn codex_effective_instructions(model_id: &str, original: Option<&str>) -> Optio
         Some(LEAN_CODING_PROMPT.to_string())
     } else {
         original.map(str::to_string)
+    }
+}
+
+/// The reasoning effort to actually use for a codex request. A load-sensitive model (gpt-oss) on the
+/// lean path is forced to **low**: gpt-oss reasons 4-8× more than the 35B and emits a long `analysis`
+/// CoT before EVERY tool call, which across a multi-turn agentic loop accumulates into RUN_TIMEOUTs —
+/// codex sends `medium` per-request, which (without this) overrides the intended low default and times
+/// the model out. Same gate as the lean prompt; the requested effort passes through for every other
+/// model. Validated: codex×gpt-oss×rpn timed out 3/6 at medium.
+fn codex_effective_reasoning(model_id: &str, requested: Option<String>) -> Option<String> {
+    let force = std::env::var("ROZUM_CODEX_LEAN_PROMPT").ok();
+    let lean_tools = std::env::var("ROZUM_CODEX_LEAN").map(|v| v != "0").unwrap_or(true);
+    if lean_prompt_on(model_id, force.as_deref(), lean_tools) {
+        Some("low".to_string())
+    } else {
+        requested
     }
 }
 
@@ -3607,9 +3632,10 @@ async fn responses_handler(
             top_p: req.top_p,
             max_tokens: req.max_output_tokens,
             top_k: req.top_k,
-            // codex's `reasoning.effort` → gpt-oss harmony reasoning level (overrides the
-            // ROZUM_GPTOSS_REASONING default); ignored by other models.
-            reasoning_effort: reasoning_effort_of(&req.reasoning),
+            // codex's `reasoning.effort` → gpt-oss harmony reasoning level — but a load-sensitive
+            // model on the lean path is forced to `low` (codex's `medium` otherwise times it out on
+            // multi-turn agentic tasks); ignored by other models.
+            reasoning_effort: codex_effective_reasoning(&lease.model_id, reasoning_effort_of(&req.reasoning)),
             ..Default::default()
         }),
         cancel: cancel.clone(),
