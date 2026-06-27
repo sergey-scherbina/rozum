@@ -55,7 +55,38 @@ pub fn parse_tool_call_body(body: &str) -> Option<(String, String)> {
             return Some(call);
         }
     }
-    parse_xml_function(body)
+    parse_xml_function(body).or_else(|| parse_glm_arg_kv(body))
+}
+
+/// GLM-4.5/4.6/4.7 form inside `<tool_call>`: the function name is the leading run, then
+/// `<arg_key>K</arg_key><arg_value>V</arg_value>` pairs — e.g.
+/// `bash<arg_key>command</arg_key><arg_value>ls -la</arg_value>`. These tag tokens are SPECIAL in
+/// the GLM tokenizer, so the engine must decode this run keeping special tokens (else they're
+/// stripped and the body collapses to `bashcommandls -la`). Values are emitted raw (not tojson'd in
+/// generation) → parse as JSON, fall back to a string, mirroring `parse_xml_function`.
+fn parse_glm_arg_kv(body: &str) -> Option<(String, String)> {
+    let kstart = body.find("<arg_key>")?;
+    let name = body[..kstart].trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut args = serde_json::Map::new();
+    let mut p = &body[kstart..];
+    while let Some(ks) = p.find("<arg_key>") {
+        let a2 = &p[ks + "<arg_key>".len()..];
+        let Some(ke) = a2.find("</arg_key>") else { break };
+        let key = a2[..ke].trim().to_string();
+        let vrest = &a2[ke + "</arg_key>".len()..];
+        let Some(vs) = vrest.find("<arg_value>") else { break };
+        let v2 = &vrest[vs + "<arg_value>".len()..];
+        let Some(ve) = v2.find("</arg_value>") else { break };
+        let val = v2[..ve].trim();
+        let jval =
+            serde_json::from_str::<Value>(val).unwrap_or_else(|_| Value::String(val.to_string()));
+        args.insert(key, jval);
+        p = &v2[ve + "</arg_value>".len()..];
+    }
+    Some((name.to_string(), Value::Object(args).to_string()))
 }
 
 /// Extract just the tool name from a JSON body — the GGUF streaming detector only
@@ -903,6 +934,26 @@ mod tests {
         let calls = parse_tool_calls(two);
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[1].0, "b");
+    }
+
+    #[test]
+    fn glm_arg_kv_form() {
+        // GLM-4.5/4.6/4.7 form: name then <arg_key>/<arg_value> pairs (tags kept by a
+        // special-token-preserving decode). Two args, raw (un-quoted) values → strings.
+        let body = "bash<arg_key>command</arg_key><arg_value>ls -la</arg_value>\
+                    <arg_key>description</arg_key><arg_value>List files</arg_value>";
+        let (name, args) = parse_tool_call_body(body).unwrap();
+        assert_eq!(name, "bash");
+        let v: Value = serde_json::from_str(&args).unwrap();
+        assert_eq!(v["command"], "ls -la");
+        assert_eq!(v["description"], "List files");
+        // Whole-text parse with the `<tool_call>` envelope + leading prose.
+        let text = "I'll list them.<tool_call>bash<arg_key>command</arg_key>\
+                    <arg_value>ls</arg_value></tool_call>";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "bash");
+        assert!(calls[0].1.contains("ls"));
     }
 
     #[test]

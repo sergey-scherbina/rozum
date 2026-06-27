@@ -33,6 +33,13 @@ pub struct EngineMeta {
     /// gpt-oss **harmony** channel format (`drive` picks `harmony::parse_harmony`)
     /// vs the Qwen `<tool_call>` parser (`serving::parse_tool_calls`).
     pub harmony: bool,
+    /// Decode the run KEEPING special tokens (`skip_special_tokens=false`). Needed for GLM-4.5/4.6/4.7,
+    /// whose `<tool_call>` / `<arg_key>` / `<arg_value>` tool-call markers are SPECIAL tokens — the
+    /// default skip-special decode strips them, collapsing `<tool_call>bash<arg_key>command</arg_key>…`
+    /// to `bashcommand…` so `serving::parse_tool_calls` finds nothing. With this set, the markers
+    /// survive in `full_text` (and the stream splits prose from the held-back markup on `<tool_call>`),
+    /// and `parse_glm_arg_kv` recovers the call. Harmless for arches that emit no special tokens mid-run.
+    pub keep_special: bool,
     /// GLM create-from-scratch artifact synthesis is armed for this request (GLM family AND
     /// `ROZUM_GLM_ARTIFACT_SYNTH` enabled — computed engine-side). When set, `consume_tokens`
     /// falls back to [`crate::serving::synth_glm_tool_calls`] over `tools` if the normal parse
@@ -136,6 +143,7 @@ where
             eos: m.eos.clone(),
             model_type: m.model_type.clone(),
             harmony: m.harmony,
+            keep_special: m.keep_special,
             glm_synth: m.glm_synth,
             tools: m.tools.clone(),
         }
@@ -324,7 +332,7 @@ where
                     }
                 }
             }
-        } else if let Some(text) = decode(&out_ids, true) {
+        } else if let Some(text) = decode(&out_ids, !meta.keep_special) {
             let stable = text.trim_end_matches('\u{FFFD}');
             full_text = stable.to_string();
             if !tool_seen {
@@ -466,6 +474,7 @@ mod tests {
             eos,
             model_type: "test".into(),
             harmony,
+            keep_special: false,
             glm_synth: false,
             tools: Vec::new(),
         }

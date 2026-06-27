@@ -1337,6 +1337,9 @@ mod inner {
                     eos: eos.to_vec(),
                     model_type: String::new(),
                     harmony,
+                    // GLM-4.5/4.6/4.7 tool markers are special tokens → keep them so the call survives
+                    // to `parse_tool_calls` (GLM-4.7-Flash is dense → finalizes in this seam).
+                    keep_special: super::template_uses_argkv_tools(template),
                     // GLM is a dense arch → it finalizes in the engine seam (consume_tokens), not the
                     // mlx batch path; arm the artifact synth here. GLM (default) OR universal synth.
                     glm_synth: super::artifact_synth_active(&job.model_id),
@@ -3738,6 +3741,9 @@ mod inner {
             eos: eos.to_vec(),
             model_type: String::new(),
             harmony,
+            // Hybrid path = Qwen3.6 (plain-text `<tool_call>`); the GLM arg_kv special-token form is
+            // dense-only, so keeping special tokens is never needed here.
+            keep_special: false,
             // Hybrid path; GLM is dense so this is false in practice, but compute it uniformly.
             glm_synth: super::artifact_synth_active(&job.model_id),
             tools: job.tools.clone(),
@@ -4143,6 +4149,15 @@ fn artifact_synth_universal() -> bool {
 /// the model named no tool and a guard holds — see [`crate::serving::synth_glm_tool_calls`].
 fn artifact_synth_active(model_id: &str) -> bool {
     (model_is_glm(model_id) && glm_artifact_synth_enabled()) || artifact_synth_universal()
+}
+
+/// GLM-4.5/4.6/4.7 emit their tool-call markers (`<tool_call>` / `<arg_key>` / `<arg_value>`) as
+/// SPECIAL tokens — the skip-special decode strips them, so the engine must keep special tokens for
+/// these models or the call collapses to unparseable text (`bashcommandls -la`). The chat template
+/// that renders the `<arg_key>` form is the reliable signal (GLM-4 dense uses `name\n{json}` and has
+/// no `<arg_key>`; Qwen's `<tool_call>` is plain text, not special). See `EngineMeta::keep_special`.
+fn template_uses_argkv_tools(template: &str) -> bool {
+    template.contains("<arg_key>")
 }
 
 
