@@ -673,7 +673,15 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   DeepSeek MLA, reverse-engineer or wait for upstream mlx_lm) + DeepSeek-V3-style routing (sigmoid +
   correction-bias + shared expert + first_k_dense=1, ref `mlx_lm.models.deepseek_v3`). Standalone
   (small, low peak) AND a strong pipeline-planner candidate. See `docs/specs/glm4-moe-native.md`.
-- [~] **verify-standalone** — QUEUED (slot-watcher, 2026-06-27): pre-downloads Devstral, waits for a
+- [x] **verify-standalone** — DONE (clean box, 2026-06-27, results scripts/bench/results/agentic-*).
+  **VERDICTS:** (1) **Qwen3-Coder-30B-A3B** — strong EDIT (fix/test/debug 6/6, smoke #1) but
+  create-from-scratch **0/6 on a CLEAN box** (rpn 0/3 + build 0/3; one rpn spun 523 turns/500 tools).
+  The earlier contention caveat is SETTLED: it's a real weakness, not saturation → Qwen3-Coder is an
+  EDIT/executor model, does NOT beat Qwen3.6-35B (15/15) standalone. (2) **Devstral-Small-2507** —
+  **0/10, tools=0 on every cell** → emits no tool calls, can't drive the agent loop (Mistral tool-use
+  gap, as the matrix history predicted). **DROPPED.** Implication for verify-pipelines: pair a
+  create-capable PLANNER (GLM-4-32B RPN 3/3 / Qwen3.6-35B) with Qwen3-Coder/gpt-oss as the EXECUTOR.
+  QUEUED (slot-watcher, 2026-06-27): pre-downloads Devstral, waits for a
   clean box, then re-runs Qwen3-Coder `rpn build` (REPS=3, the contended ones) + Devstral full set
   (REPS=2). clean-box smoke (no sibling) of each native-now model, peak + pass-rate:
   Qwen3-Coder-30B-A3B (re-run `rpn build` — smoke #1 was contended), Devstral-Small-2507
