@@ -588,6 +588,41 @@ mod inner {
         Conversation { role, content: text, tool_calls: None }
     }
 
+    /// Render a message for **GLM-4.5/4.6/4.7** (the `<arg_key>` template). Their trained call format
+    /// is `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value>…</tool_call>` (special-token
+    /// markers, the inverse of [`crate::serving::parse_glm_arg_kv`]); tool RESULTS come back under the
+    /// `observation` role like GLM-4. Rendering a prior assistant call in GLM-4's `name\n{json}` form
+    /// (the bug this fixes) makes the model re-issue calls it already made → multi-turn agentic loops.
+    /// String args render raw (the model emits un-quoted values); non-strings render as JSON.
+    fn glm_argkv_conversation(msg: &Message) -> Conversation<&'static str, String> {
+        let mut text = String::new();
+        for b in &msg.content {
+            match b {
+                ContentBlock::Text { text: t } => text.push_str(t),
+                ContentBlock::ToolResult { content, .. } => text.push_str(content),
+                ContentBlock::ToolUse { name, input, .. } => {
+                    text.push_str("<tool_call>");
+                    text.push_str(name);
+                    if let Some(obj) = input.as_object() {
+                        for (k, v) in obj {
+                            text.push_str("<arg_key>");
+                            text.push_str(k);
+                            text.push_str("</arg_key><arg_value>");
+                            match v {
+                                serde_json::Value::String(s) => text.push_str(s),
+                                other => text.push_str(&other.to_string()),
+                            }
+                            text.push_str("</arg_value>");
+                        }
+                    }
+                    text.push_str("</tool_call>");
+                }
+            }
+        }
+        let role = if matches!(msg.role, Role::Tool) { "observation" } else { role_str(&msg.role) };
+        Conversation { role, content: text, tool_calls: None }
+    }
+
     /// The model-family **tool dialect** — the single seam for how a model family emits and
     /// consumes tool calls. Replaces the inline `template.contains("<|channel|>" / "<|observation|>")`
     /// sniffing that was scattered across the render and constraint paths. Stateless;
@@ -634,10 +669,25 @@ mod inner {
         }
     }
 
+    /// **GLM-4.5/4.6/4.7**: `<tool_call>name<arg_key>…</tool_call>` calls (special-token markers) +
+    /// `observation`-role results ([`glm_argkv_conversation`]). NOT the `name\n{json}` envelope, so
+    /// `uses_glm_envelope` stays false; these arches are unconstrained (`is_dense`=false) and deliver
+    /// via the keep-special decode + [`crate::serving::parse_glm_arg_kv`].
+    struct GlmArgKvDialect;
+    impl ToolDialect for GlmArgKvDialect {
+        fn render_message(&self, msg: &Message) -> Conversation<&'static str, String> {
+            glm_argkv_conversation(msg)
+        }
+    }
+
     /// Pick the tool dialect from the chat template's family markers (the one place this is decided).
+    /// GLM-4.5/4.6/4.7 carry BOTH `<|observation|>` AND `<arg_key>` — match `<arg_key>` first so they
+    /// get the `<tool_call>`-form render, not GLM-4's `name\n{json}`.
     fn dialect_for(template: &str) -> &'static dyn ToolDialect {
         if template.contains("<|channel|>") {
             &HarmonyDialect
+        } else if template.contains("<arg_key>") {
+            &GlmArgKvDialect
         } else if template.contains("<|observation|>") {
             &GlmDialect
         } else {
