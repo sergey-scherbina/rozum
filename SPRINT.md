@@ -662,8 +662,14 @@ Two levers, both tracked here:
 VERIFY EACH PROMISING MODEL IN THE MODE THAT FITS (record peak RAM + pass-rate per config; 🛑 one
 model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count — [[project-matrix-nondeterminism]]):
 
-- [~] **mla-deepseek-v2** (PORT, IN PROGRESS, fork `feature/mla-deepseek-v2`) — implement **MLA**
+- [x] **mla-deepseek-v2** (PORT — **VALIDATED 2026-06-27**, fork branch `feature/mla-deepseek-v2` @1e8ed172, rozum wire `feature/rozum-deepseek-v2-wire` @dfec7ff)
   latent attention + DeepSeek MoE in `mlx-lm/.../models/deepseek_v2.rs`, ported from the Python
+  **DONE: DeepSeek-Coder-V2-Lite-Instruct-4bit (16B-A2.4B, low peak) generates byte-identical output
+  to Python mlx_lm greedy (`def add(a,b): return a+b…`). 4 bugs found+fixed via the live parity probe
+  (the isolate discipline): (1) q_lora_rank null→Option (load); (2) router gate is bf16, not
+  #[quantizable] (forward crash); (3) YaRN attention-scale ×mscale²; (4) faithful DeepSeek YaRN rope
+  (traditional + correct mscale). NEXT: glm4_moe_lite (GLM-4.7-Flash) reuses this MLA kernel; land to
+  master after the fork branch hits fork-main + a stable rev is pinned.** Original plan:
   `mlx_lm.models.deepseek_v2` reference (q_a/q_b + kv_a/kv_b low-rank, decoupled nope/rope dims,
   YaRN mscale rope, MQA k_pe broadcast). Unlocks **DeepSeek-Coder-V2-Lite** (16B-A2.4B → very low
   peak) AND is the shared MLA kernel for GLM-4.7-Flash. Spec `docs/specs/mlx-mla-attention.md`.
