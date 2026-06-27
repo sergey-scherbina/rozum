@@ -647,6 +647,41 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
   MLA port; the matrix win is `matrix-add-coders` (Qwen3-Coder, zero port) — run that first.** Fork
   scaffold parked: `feature/glm4-moe` (`.vendor/mlx-lm/.../models/glm4_moe.rs`, NOT in mod.rs).
 
+###### ★ green-matrix-min-footprint (operator 2026-06-27) — full e2e matrix green AT lower peak RAM
+
+GOAL: every e2e cell (`rpn build fix test debug` × agents) PASS, **while minimizing peak host RAM**.
+Two levers, both tracked here:
+- **Complementary pipelines (low peak):** a `--model A,B` pipeline runs LAZY — one tier resident at a
+  time, prev torn down before next (MLX can't co-reside) → peak = MAX(tier), not sum
+  ([[project-pipeline-cascade]]). A small strong-planner + small reliable-executor can green the
+  matrix at a fraction of one big model's peak. Pick each pair complementary (planner =
+  correct-code/reasoning; executor = reliable tool-delivery — the GLM-32B→gpt-oss precedent).
+- **Small low-active-param MoE ports:** tiny active params peak low (DeepSeek-Coder-V2-Lite
+  16B-**A2.4B**, GLM-4.7-Flash 64e/4-active). Porting them widens the low-footprint toolbox.
+
+VERIFY EACH PROMISING MODEL IN THE MODE THAT FITS (record peak RAM + pass-rate per config; 🛑 one
+model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count — [[project-matrix-nondeterminism]]):
+
+- [~] **mla-deepseek-v2** (PORT, IN PROGRESS, fork `feature/mla-deepseek-v2`) — implement **MLA**
+  latent attention + DeepSeek MoE in `mlx-lm/.../models/deepseek_v2.rs`, ported from the Python
+  `mlx_lm.models.deepseek_v2` reference (q_a/q_b + kv_a/kv_b low-rank, decoupled nope/rope dims,
+  YaRN mscale rope, MQA k_pe broadcast). Unlocks **DeepSeek-Coder-V2-Lite** (16B-A2.4B → very low
+  peak) AND is the shared MLA kernel for GLM-4.7-Flash. Spec `docs/specs/mlx-mla-attention.md`.
+  Byte-parity oracle vs Python (slot-gated). Reuse `qwen3_moe::SwitchGlu` for experts.
+- [ ] **mlx-glm4-moe-lite** (PORT, after mla-deepseek-v2) — GLM-4.7-Flash (`glm4_moe_lite`, 16.9 GB,
+  fits): MLA kernel from above **+ GLM extras** (`self_attn.embed_q`/`unembed_out` — NOT in vanilla
+  DeepSeek MLA, reverse-engineer or wait for upstream mlx_lm) + DeepSeek-V3-style routing (sigmoid +
+  correction-bias + shared expert + first_k_dense=1, ref `mlx_lm.models.deepseek_v3`). Standalone
+  (small, low peak) AND a strong pipeline-planner candidate. See `docs/specs/glm4-moe-native.md`.
+- [ ] **verify-standalone** — clean-box smoke (no sibling) of each native-now model, peak + pass-rate:
+  Qwen3-Coder-30B-A3B (re-run `rpn build` — smoke #1 was contended), Devstral-Small-2507
+  (verify-first: Mistral tool-use), Qwen3-32B (dense), Qwen3.6-27B, Phi-4, Gemma-3-27B. Drop any that
+  don't beat the incumbent at equal/lower peak.
+- [ ] **verify-pipelines** — test complementary `A,B` pairs for the LOWEST green-matrix peak, e.g.
+  Qwen3-Coder(plan)→gpt-oss(exec), GLM-4-9B/Qwen3-14B(plan)→Qwen3-Coder(exec), and (post-port)
+  DeepSeek-V2-Lite / GLM-4.7-Flash tiers. Winner = the pair that greens `rpn build fix test debug` at
+  the smallest MAX-tier footprint. Record peak via the gateway footprint telemetry.
+
 - [x] **matrix-baseline** — DONE (plucky-finch 2026-06-22, seed-pinned, release@master,
   reboot-safe single-box, **0 panic/0 reboot/0 rc2**). claude+codex × {Qwen3.6-35B-A3B,
   gpt-oss-20b} × 5 tasks = **16/20 in this single run** (claude 10/10, codex 6/10). NOTE: a
