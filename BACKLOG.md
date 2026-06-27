@@ -1,5 +1,17 @@
 # Backlog
 
+## Native MLX model ports (matrix coverage, lower priority — operator 2026-06-27)
+
+- [ ] **mlx-port-granite4** — IBM `granite-4.0-h-small` (`granitemoehybrid`, 4bit 18.1 GB):
+  Mamba2-SSM + MoE hybrid, tool-use-tuned. Medium-high effort (SSM ≠ the GDN hybrid we already
+  did for Qwen3.6; new state-space layer). Consider only if the matrix wants an IBM/tool-tuned family.
+- [ ] **mlx-port-seed-oss** — ByteDance `Seed-OSS-36B-Instruct` (`seed_oss`, 4bit 20.3 GB):
+  own arch, long context; 20 GB is borderline on 36 GiB. Payoff unclear vs Qwen3-Coder/GLM-MoE.
+- [ ] **mlx-port-deepseek-v2** — `DeepSeek-Coder-V2-Lite` (`deepseek_v2`, 16B-A2.4B): requires
+  **MLA** (multi-head latent attention, compressed-KV) — a genuinely new attention kernel we don't
+  have → high effort; model is 2024-era. Only worth it as a stepping stone to the DeepSeek-V3 lineage.
+  (The GLM-4 MoE port `mlx-glm4-moe` reuses some of the same DeepSeek-style routing — do it first.)
+
 ## Agentic drivers
 
 - [ ] **glm-artifact-write-synth** (idea, NOT committed — clean workaround exists) — let GLM-4-32B

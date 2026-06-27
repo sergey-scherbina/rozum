@@ -612,6 +612,29 @@ concrete bug **in our stack**, to isolate **fully and from all sides (the `isola
 BEFORE any conclusion**. Never close a cell as "model too weak / model-side" — that has been
 premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One task per fail.
 
+##### Matrix model coverage (operator 2026-06-27) — stronger/newer local coders for the e2e tasks
+
+- [~] **matrix-add-coders** — IN PROGRESS (`feature/matrix-add-coders`). Add two stronger agentic
+  coders to the matrix; **both already load natively** (no porting): **Qwen3-Coder-30B-A3B-Instruct**
+  (`qwen3_moe`, 4bit 17.2 GB / DWQ for ~8-bit quality) — purpose-built agentic coder, the cheapest
+  upgrade over the unreliable gpt-oss-20b executor ([[project-gptoss-agentic-codegen-unreliable]]);
+  and **Devstral-Small-2507** (`mistral`→llama loader, 4bit 13.3 GB) — Mistral SWE/edit specialist,
+  small → big context. **CAVEAT to verify, do NOT assume:** the matrix history *dropped* old
+  Mistral-v0.3 as unable to drive tools (agentic.sh header) — Devstral is agentic-tool-tuned so may
+  differ, but treat its tool-use as a hypothesis to confirm over N runs, not a given. Done = added to
+  `agentic.sh` default set + a model-only/agentic smoke on `rpn build fix test debug` vs the
+  Qwen3.6-35B/gpt-oss baseline (🛑 REBOOT-SAFETY: one model-gateway at a time, claim the slot first).
+  Code edit (catalog) shipped; the smoke run is the slot-gated remainder.
+
+- [ ] **mlx-glm4-moe** — port GLM-4 **MoE** to native MLX (`glm4_moe` = GLM-4.5-Air/4.6;
+  `glm4_moe_lite` = GLM-4.7-Flash, 4bit 16.9 GB, fits 36 GiB; incl. Claude-Opus-4.5 reasoning-distill
+  for RPN). Gives the matrix a 2nd reliable family besides Qwen (GLM is matrix-proven). **Multi-repo,
+  medium effort** (NOT a plain graft — GLM-4 MoE routing is DeepSeek-V3-style: sigmoid + grouped
+  top-k + correction-bias + shared experts + `first_k_dense_layers` + drop MTP). Full plan, reuse map
+  (glm4.rs attention/4-norm + qwen3_moe SwitchGlu), config fields, and parity-oracle (slot-gated):
+  **`docs/specs/glm4-moe-native.md`**. Branches: fork `feature/glm4-moe`
+  (`.vendor/mlx-lm/.../models/glm4_moe.rs`) + rozum `feature/mlx-glm4-moe` (dispatch + rev bump).
+
 - [x] **matrix-baseline** — DONE (plucky-finch 2026-06-22, seed-pinned, release@master,
   reboot-safe single-box, **0 panic/0 reboot/0 rc2**). claude+codex × {Qwen3.6-35B-A3B,
   gpt-oss-20b} × 5 tasks = **16/20 in this single run** (claude 10/10, codex 6/10). NOTE: a
