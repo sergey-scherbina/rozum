@@ -673,7 +673,9 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   DeepSeek MLA, reverse-engineer or wait for upstream mlx_lm) + DeepSeek-V3-style routing (sigmoid +
   correction-bias + shared expert + first_k_dense=1, ref `mlx_lm.models.deepseek_v3`). Standalone
   (small, low peak) AND a strong pipeline-planner candidate. See `docs/specs/glm4-moe-native.md`.
-- [ ] **verify-standalone** — clean-box smoke (no sibling) of each native-now model, peak + pass-rate:
+- [~] **verify-standalone** — QUEUED (slot-watcher, 2026-06-27): pre-downloads Devstral, waits for a
+  clean box, then re-runs Qwen3-Coder `rpn build` (REPS=3, the contended ones) + Devstral full set
+  (REPS=2). clean-box smoke (no sibling) of each native-now model, peak + pass-rate:
   Qwen3-Coder-30B-A3B (re-run `rpn build` — smoke #1 was contended), Devstral-Small-2507
   (verify-first: Mistral tool-use), Qwen3-32B (dense), Qwen3.6-27B, Phi-4, Gemma-3-27B. Drop any that
   don't beat the incumbent at equal/lower peak.
