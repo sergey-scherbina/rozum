@@ -137,6 +137,35 @@ def renderContent(c: String): View =
 def badge(label: String, color: String): View =
   element("span", ["style" -> ("background:" + color + "; color:#fff; font-size:11px; font-weight:700; padding:1px 6px; border-radius:5px; margin-right:5px")], Map(), [textNode(label)])
 
+def emptyView(): View =
+  element("span", Map(), Map(), [])
+
+// Extract a flat string field `"key":"value"` from a serialized StoredTurn line (same crude split
+// approach as who/msg). Empty if the key is absent — so a plain note (no kind/severity) shows no badge.
+def field(line: String, key: String): String =
+  val parts = line.split("\"" + key + "\":\"")
+  if parts.length < 2 then "" else
+    val bits = parts(1).split("\"")
+    bits(0) + ""
+
+// Support metadata badges (mirror the CLI/console model): incident kind + severity.
+def kindBadge(line: String): View =
+  val k = field(line, "kind")
+  if k == "alert" then badge("ALERT", "#d97706")
+  else if k == "resolution" then badge("RESOLVED", "#16a34a")
+  else if k == "event" then badge("EVENT", "#0891b2")
+  else if k == "question" then badge("ASK", "#7c3aed")
+  else emptyView()
+
+def sevBadge(line: String): View =
+  val s = field(line, "severity")
+  if s == "critical" then badge("CRIT", "#dc2626")
+  else if s == "high" then badge("HIGH", "#ea580c")
+  else if s == "medium" then badge("MED", "#d97706")
+  else if s == "low" then badge("low", "#2563eb")
+  else if s == "info" then badge("info", "#6b7280")
+  else emptyView()
+
 def afterColon(c: String): String =
   val parts = c.split(": ")
   if parts.length < 2 then c else
@@ -157,6 +186,8 @@ def row(line: String): View =
   element("div", ["style" -> "margin:0 0 9px; overflow-wrap:anywhere"], Map(), [
     element("span", ["style" -> "color:#5b626d; font-size:12px; margin-right:6px"], Map(), [textNode(tsOf(line))]),
     element("span", ["style" -> ("color:" + roleColor(w) + "; font-weight:600; margin-right:6px")], Map(), [textNode(w)]),
+    kindBadge(line),
+    sevBadge(line),
     contentView(msg(line))
   ])
 
