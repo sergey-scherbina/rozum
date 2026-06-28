@@ -457,6 +457,15 @@ async function renderThread(id) {
   main.appendChild(acts);
   if (!ctx.messages || !ctx.messages.length) { main.appendChild(el("div", "empty", "No messages in this thread yet.")); return; }
   for (const m of ctx.messages) main.appendChild(msgRow(m, { showThread: false }));
+  // Auto-gathered related context (lead-up + same-tag elsewhere) — not formally in the thread.
+  if (ctx.related && ctx.related.length) {
+    const sep = el("div", "lane-title");
+    sep.appendChild(el("span", null, "related context · auto-gathered"));
+    sep.appendChild(el("span", "n", String(ctx.related.length)));
+    sep.style.marginTop = "18px";
+    main.appendChild(sep);
+    for (const m of ctx.related) main.appendChild(msgRow(m, { showThread: true, showDate: true }));
+  }
 }
 
 // ── Refresh cycle ────────────────────────────────────────────

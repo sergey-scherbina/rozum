@@ -2766,10 +2766,20 @@ fn print_incident(v: &serde_json::Value) {
     println!("  {count} msgs · {people} people");
     let messages: Vec<StoredTurn> =
         serde_json::from_value(v["messages"].clone()).unwrap_or_default();
+    let line = |m: &StoredTurn| match m.badge() {
+        Some(b) => println!("  [{}] {} {} {}: {}", hhmm_of(m.ts), m.id(), b, m.display_name, m.content),
+        None => println!("  [{}] {} {}: {}", hhmm_of(m.ts), m.id(), m.display_name, m.content),
+    };
     for m in &messages {
-        match m.badge() {
-            Some(b) => println!("  [{}] {} {} {}: {}", hhmm_of(m.ts), m.id(), b, m.display_name, m.content),
-            None => println!("  [{}] {} {}: {}", hhmm_of(m.ts), m.id(), m.display_name, m.content),
+        line(m);
+    }
+    // Auto-gathered related context (lead-up + same-tag elsewhere), if any.
+    let related: Vec<StoredTurn> =
+        serde_json::from_value(v["related"].clone()).unwrap_or_default();
+    if !related.is_empty() {
+        println!("  — related context (auto-gathered) —");
+        for m in &related {
+            line(m);
         }
     }
 }

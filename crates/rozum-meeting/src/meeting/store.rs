@@ -884,12 +884,19 @@ pub fn read_threads(root: &Path) -> BTreeMap<String, Thread> {
 /// `Room::thread_context`, for surfaces that only have a room root.
 pub fn thread_context(root: &Path, thread_id: &str) -> serde_json::Value {
     let thread = read_threads(root).remove(thread_id);
-    let msgs: Vec<StoredTurn> = read_since(root, None, 0)
-        .into_iter()
-        .filter(|m| m.id() == thread_id || m.thread_id.as_deref() == Some(thread_id))
-        .collect();
+    let all = read_since(root, None, 0);
+    let in_thread =
+        |m: &StoredTurn| m.id() == thread_id || m.thread_id.as_deref() == Some(thread_id);
+    let msgs: Vec<StoredTurn> = all.iter().filter(|m| in_thread(m)).cloned().collect();
     let participants: std::collections::BTreeSet<&str> =
         msgs.iter().map(|m| m.display_name.as_str()).collect();
+    // Auto-gathered context: relevant messages NOT formally in the thread (the lead-up before the
+    // anchor + same-tag messages elsewhere) — what a responder would otherwise dig for by hand.
+    let related = msgs
+        .iter()
+        .find(|m| m.id() == thread_id)
+        .map(|anchor| gather_related(&all, anchor, thread_id))
+        .unwrap_or_default();
     serde_json::json!({
         "thread": thread,
         "message_count": msgs.len(),
@@ -897,7 +904,47 @@ pub fn thread_context(root: &Path, thread_id: &str) -> serde_json::Value {
         "first_ts": msgs.first().map(|m| m.ts),
         "last_ts": msgs.last().map(|m| m.ts),
         "messages": msgs,
+        "related": related,
     })
+}
+
+/// Auto-gather context related to an incident anchor that isn't formally in the thread: the lead-up
+/// (the few messages immediately before the anchor) plus messages elsewhere sharing any of the
+/// anchor's tags. Deduped by id, excludes thread members, oldest-first, capped. `all` must be the
+/// room's whole history in chronological order (as `read_since(.., None, 0)` returns it).
+fn gather_related(all: &[StoredTurn], anchor: &StoredTurn, thread_id: &str) -> Vec<StoredTurn> {
+    const LEAD_WINDOW: usize = 5;
+    const CAP: usize = 20;
+    let in_thread =
+        |m: &StoredTurn| m.id() == thread_id || m.thread_id.as_deref() == Some(thread_id);
+    let tags = &anchor.meta.tags;
+
+    // Lead-up: the last LEAD_WINDOW non-thread messages strictly before the anchor (chronological).
+    let mut lead: Vec<&StoredTurn> = all
+        .iter()
+        .filter(|m| !in_thread(m) && (m.ts, m.n) < (anchor.ts, anchor.n))
+        .collect();
+    let lead = lead.split_off(lead.len().saturating_sub(LEAD_WINDOW));
+
+    // Same-tag messages anywhere else (only if the anchor carries tags).
+    let same_tag: Vec<&StoredTurn> = if tags.is_empty() {
+        vec![]
+    } else {
+        all.iter()
+            .filter(|m| !in_thread(m) && m.meta.tags.iter().any(|t| tags.contains(t)))
+            .collect()
+    };
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out: Vec<StoredTurn> = Vec::new();
+    for m in lead.into_iter().chain(same_tag) {
+        if seen.insert(m.id()) {
+            out.push(m.clone());
+        }
+    }
+    out.sort_by_key(|m| (m.ts, m.n));
+    out.truncate(CAP);
+    out
 }
 
 /// Resolving metrics over a room's threads: totals, a per-state histogram, and the
@@ -1255,6 +1302,44 @@ mod tests {
         let hits = search_messages(&root, &f, 1);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].content, "cosmetic timeout in UI");
+    }
+
+    #[test]
+    fn thread_context_auto_gathers_related() {
+        let dir = tempdir().unwrap();
+        let paths = RoomPaths::ad_hoc_in(dir.path(), "ops");
+        let root = paths.root.clone();
+        let mut w = TranscriptWriter::new(paths, "ops", "topic", None, dir.path().to_path_buf());
+        // Lead-up chatter (not in the thread).
+        w.append("p", "A", "deploy 1234 going out", 1_718_000_000).unwrap(); // 0
+        w.append("p", "A", "metrics look fine", 1_718_000_010).unwrap(); // 1
+        // The incident anchor (tag db) → opened as a thread.
+        let mut alert = PostMeta::default();
+        alert.kind = MsgKind::Alert;
+        alert.meta.tags = vec!["db".into()];
+        let anchor = w.append_with_meta("p", "A", "DB is down", 1_718_000_100, alert).unwrap(); // 2
+        let id = anchor.id();
+        w.open_thread(&id, "DB outage", ThreadKind::Incident, 1_718_000_101).unwrap();
+        // A reply IN the thread.
+        let mut reply = PostMeta::default();
+        reply.thread_id = Some(id.clone());
+        w.append_with_meta("p", "B", "on it", 1_718_000_200, reply).unwrap(); // 3
+        // A same-tag message elsewhere (NOT in the thread) — should be auto-gathered.
+        let mut tagged = PostMeta::default();
+        tagged.meta.tags = vec!["db".into()];
+        w.append_with_meta("p", "C", "db replica also flaky last week", 1_718_000_300, tagged).unwrap(); // 4
+
+        let ctx = thread_context(&root, &id);
+        // The thread itself = anchor + the in-thread reply.
+        assert_eq!(ctx["message_count"], 2);
+        let related = ctx["related"].as_array().unwrap();
+        let contents: Vec<&str> = related.iter().map(|m| m["content"].as_str().unwrap()).collect();
+        // Lead-up (the 2 messages before the anchor) + the same-tag message elsewhere are gathered;
+        // the in-thread reply is NOT (it's already in `messages`).
+        assert!(contents.contains(&"deploy 1234 going out"), "lead-up gathered: {contents:?}");
+        assert!(contents.contains(&"metrics look fine"));
+        assert!(contents.contains(&"db replica also flaky last week"), "same-tag gathered");
+        assert!(!contents.contains(&"on it"), "in-thread reply excluded from related");
     }
 
     // P1b: append_with_meta persists metadata; plain append stays plain.

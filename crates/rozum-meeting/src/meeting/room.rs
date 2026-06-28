@@ -312,21 +312,9 @@ impl DaemonRoom {
     /// messages (the anchor + members by `thread_id`) + participants + timespan — in one place, so an
     /// agent or human picking up the incident has everything. Reads the room's messages back + filters.
     pub fn thread_context(&self, thread_id: &str) -> serde_json::Value {
-        let thread = self.writer.thread(thread_id).cloned();
-        let msgs: Vec<StoredTurn> = super::store::read_since(self.writer.root(), None, 0)
-            .into_iter()
-            .filter(|m| m.id() == thread_id || m.thread_id.as_deref() == Some(thread_id))
-            .collect();
-        let participants: std::collections::BTreeSet<&str> =
-            msgs.iter().map(|m| m.display_name.as_str()).collect();
-        serde_json::json!({
-            "thread": thread,
-            "message_count": msgs.len(),
-            "participants": participants,
-            "first_ts": msgs.first().map(|m| m.ts),
-            "last_ts": msgs.last().map(|m| m.ts),
-            "messages": msgs,
-        })
+        // Delegate to the disk-reading store version so the MCP path and the REST/console path share
+        // ONE implementation (incl. the auto-gathered `related` context).
+        super::store::thread_context(self.writer.root(), thread_id)
     }
 
     pub fn end(&mut self) {
