@@ -3256,10 +3256,65 @@ fn ensure_meetings_log_dir() {
     let _ = std::fs::create_dir_all(dir);
 }
 
+/// The env that makes the installed daemon ALSO serve the support console (`rest_read.rs`): a Basic-auth
+/// secret (taken from `$ROZUM_WEB_SECRET`, else a persisted one, else freshly generated + saved 0600) and
+/// the loopback bind. Returns the env pairs + the (secret, bind) for the post-install hint.
+fn meetings_console_env() -> (Vec<(String, String)>, String, String) {
+    use std::io::Write;
+    let secret = std::env::var("ROZUM_WEB_SECRET")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let path = rozum::meeting::store::rozum_state_dir().join("web-secret");
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                let s = s.trim().to_string();
+                if !s.is_empty() {
+                    return s;
+                }
+            }
+            let s = uuid::Uuid::new_v4().simple().to_string();
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Ok(mut f) = std::fs::File::create(&path) {
+                let _ = f.write_all(s.as_bytes());
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+            s
+        });
+    let bind = std::env::var("ROZUM_MEETINGS_REST_BIND")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "127.0.0.1:8401".to_string());
+    let env = vec![
+        ("ROZUM_WEB_SECRET".to_string(), secret.clone()),
+        ("ROZUM_MEETINGS_REST_BIND".to_string(), bind.clone()),
+    ];
+    (env, secret, bind)
+}
+
+/// Print how to reach + expose the just-installed support console.
+fn print_console_hint(secret: &str, bind: &str) {
+    let port = bind.rsplit(':').next().unwrap_or("8401");
+    eprintln!("\nsupport console (incident dashboard) is now served by the daemon:");
+    eprintln!("  local:     http://{bind}/   (Basic auth — any username, password = the secret)");
+    eprintln!("  secret:    {secret}");
+    eprintln!("  secret file: {}", rozum::meeting::store::rozum_state_dir().join("web-secret").display());
+    eprintln!("  expose via Tailscale (HTTPS):");
+    eprintln!("    tailscale serve --bg --https=8443 http://127.0.0.1:{port}");
+}
+
 #[cfg(target_os = "macos")]
 fn run_meetings_install() {
     let (program, args) = meetings_service_spec();
-    let plist = rozum::service::meetings_launchd_plist(&program, &args, &[]);
+    let (env, secret, bind) = meetings_console_env();
+    let plist = rozum::service::meetings_launchd_plist(&program, &args, &env);
     let path = rozum::service::meetings_launchd_plist_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -3283,6 +3338,7 @@ fn run_meetings_install() {
             path.display()
         ),
     );
+    print_console_hint(&secret, &bind);
 }
 
 #[cfg(target_os = "macos")]
@@ -3299,7 +3355,8 @@ fn run_meetings_uninstall() {
 #[cfg(not(target_os = "macos"))]
 fn run_meetings_install() {
     let (program, args) = meetings_service_spec();
-    let unit = rozum::service::meetings_systemd_unit(&program, &args, &[]);
+    let (env, secret, bind) = meetings_console_env();
+    let unit = rozum::service::meetings_systemd_unit(&program, &args, &env);
     let path = rozum::service::meetings_systemd_unit_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -3327,6 +3384,7 @@ fn run_meetings_install() {
             path.display()
         ),
     );
+    print_console_hint(&secret, &bind);
 }
 
 #[cfg(not(target_os = "macos"))]
