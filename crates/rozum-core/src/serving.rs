@@ -11,6 +11,14 @@ use serde_json::Value;
 const TOOL_OPEN: &str = "<tool_call>";
 const TOOL_CLOSE: &str = "</tool_call>";
 
+// DeepSeek-V2/V3 native tool-call markers. They are ADDED tokens with `special=false`, so the
+// engine's skip-special decode KEEPS them (verified on the DeepSeek-Coder-V2-Lite tokenizer) — the
+// markers reach the parser intact; only the parser was missing. The name sits OUTSIDE the JSON
+// (after the sep), so the Qwen `<tool_call>{json}` loop and the loose-JSON fallback both miss it.
+const DS_CALL_BEGIN: &str = "<｜tool▁call▁begin｜>";
+const DS_CALL_END: &str = "<｜tool▁call▁end｜>";
+const DS_SEP: &str = "<｜tool▁sep｜>";
+
 /// Parse tool calls from a model's raw output into `(name, arguments_json)` pairs.
 ///
 /// The primary, trained form is Qwen `<tool_call>{…}</tool_call>` (JSON or
@@ -21,6 +29,15 @@ const TOOL_CLOSE: &str = "</tool_call>";
 /// when there were no native blocks, so a legitimate ```json example inside an
 /// ordinary answer is never mistaken for a tool call.
 pub fn parse_tool_calls(text: &str) -> Vec<(String, String)> {
+    // DeepSeek-V2/V3 native format: name is OUTSIDE the JSON (after `<｜tool▁sep｜>`), wrapped in
+    // `<｜tool▁call▁begin｜>…<｜tool▁call▁end｜>` special-token markers → the `<tool_call>` loop and the
+    // loose-JSON fallback both miss it. Parse it first when its markers are present.
+    if text.contains(DS_CALL_BEGIN) {
+        let ds = parse_deepseek_tool_calls(text);
+        if !ds.is_empty() {
+            return ds;
+        }
+    }
     let mut calls = Vec::new();
     let mut rest = text;
     while let Some(open) = rest.find(TOOL_OPEN) {
@@ -41,6 +58,40 @@ pub fn parse_tool_calls(text: &str) -> Vec<(String, String)> {
     }
     if calls.is_empty() {
         calls = parse_loose_tool_calls(text);
+    }
+    calls
+}
+
+/// DeepSeek-V2/V3 native tool calls:
+/// `<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>NAME\n```json\n{args}\n```<｜tool▁call▁end｜>…`
+/// (repeated per call). The name is the first line after `<｜tool▁sep｜>`; the args are the first
+/// balanced JSON object after it (the ```json fence is incidental — the brace scan finds the object
+/// whether fenced or bare). Tolerates a missing `<｜tool▁call▁end｜>` (EOS mid-call).
+fn parse_deepseek_tool_calls(text: &str) -> Vec<(String, String)> {
+    let mut calls = Vec::new();
+    let mut rest = text;
+    while let Some(b) = rest.find(DS_CALL_BEGIN) {
+        let after = &rest[b + DS_CALL_BEGIN.len()..];
+        let (body, next) = match after.find(DS_CALL_END) {
+            Some(e) => (&after[..e], &after[e + DS_CALL_END.len()..]),
+            None => (after, ""),
+        };
+        if let Some(sep) = body.find(DS_SEP) {
+            let post = body[sep + DS_SEP.len()..].trim_start();
+            let name = post.lines().next().unwrap_or("").trim();
+            if !name.is_empty() {
+                let args = balanced_json_objects(post)
+                    .into_iter()
+                    .find_map(|o| serde_json::from_str::<Value>(o).ok().filter(Value::is_object))
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "{}".to_string());
+                calls.push((name.to_string(), args));
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        rest = next;
     }
     calls
 }
@@ -954,6 +1005,31 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "bash");
         assert!(calls[0].1.contains("ls"));
+    }
+
+    #[test]
+    fn deepseek_v2_native_tool_call() {
+        // DeepSeek-V2/V3 form: name after <｜tool▁sep｜>, args in a ```json fence, special-token markers.
+        let text = "Sure.<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>bash\n\
+                    ```json\n{\"command\": \"ls -la\"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1, "one deepseek call");
+        assert_eq!(calls[0].0, "bash");
+        assert!(calls[0].1.contains("ls -la"));
+        // Two calls, unfenced args (robustness).
+        let two = "<｜tool▁calls▁begin｜>\
+                   <｜tool▁call▁begin｜>function<｜tool▁sep｜>read\n{\"path\":\"a\"}<｜tool▁call▁end｜>\
+                   <｜tool▁call▁begin｜>function<｜tool▁sep｜>write\n{\"path\":\"b\"}<｜tool▁call▁end｜>\
+                   <｜tool▁calls▁end｜>";
+        let c2 = parse_tool_calls(two);
+        assert_eq!(c2.len(), 2);
+        assert_eq!(c2[0].0, "read");
+        assert_eq!(c2[1].0, "write");
+        // Missing close marker (EOS mid-call) still recovers the call.
+        let cut = "<｜tool▁call▁begin｜>function<｜tool▁sep｜>bash\n{\"command\":\"pwd\"}";
+        let cc = parse_tool_calls(cut);
+        assert_eq!(cc.len(), 1);
+        assert_eq!(cc[0].0, "bash");
     }
 
     #[test]
