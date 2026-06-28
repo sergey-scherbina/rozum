@@ -15,7 +15,7 @@ use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use tokio::sync::mpsc;
@@ -23,7 +23,7 @@ use tokio::task::JoinHandle;
 
 use crate::meeting::daemon::daemon_alive;
 use crate::meeting::room_path::meeting_sock;
-use crate::meeting::store::StoredTurn;
+use crate::meeting::store::{self, StoredTurn};
 use crate::meeting::tui_client::{MeetingClient, RoomInfo};
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
@@ -229,13 +229,27 @@ fn draw(
                         )));
                         last_date = Some(t.date.as_str());
                     }
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("{}: ", t.display_name),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(t.content.clone()),
-                    ]));
+                    let mut spans = Vec::new();
+                    if let Some(badge) = t.badge() {
+                        // Colour the incident badge by severity/kind so the eye catches it.
+                        let colour = match t.meta.severity {
+                            Some(store::Severity::Critical | store::Severity::High) => Color::Red,
+                            Some(store::Severity::Medium) => Color::Yellow,
+                            _ if t.kind == store::MsgKind::Resolution => Color::Green,
+                            _ if t.kind == store::MsgKind::Alert => Color::Yellow,
+                            _ => Color::Cyan,
+                        };
+                        spans.push(Span::styled(
+                            format!("{badge} "),
+                            Style::default().fg(colour).add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                    spans.push(Span::styled(
+                        format!("{}: ", t.display_name),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::raw(t.content.clone()));
+                    lines.push(Line::from(spans));
                 }
                 let body = Paragraph::new(lines).block(
                     Block::default()

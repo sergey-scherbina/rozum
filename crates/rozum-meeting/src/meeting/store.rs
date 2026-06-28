@@ -65,6 +65,16 @@ impl MsgKind {
             _ => return None,
         })
     }
+    /// Short uppercase badge label for display; `None` for a plain note (no badge).
+    pub fn label(&self) -> Option<&'static str> {
+        match self {
+            Self::Note => None,
+            Self::Question => Some("ASK"),
+            Self::Event => Some("EVENT"),
+            Self::Alert => Some("ALERT"),
+            Self::Resolution => Some("RESOLVED"),
+        }
+    }
 }
 
 /// Incident severity (the jetsam ladder of support).
@@ -87,6 +97,16 @@ impl Severity {
             "critical" => Self::Critical,
             _ => return None,
         })
+    }
+    /// Short label for display badges.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Low => "low",
+            Self::Medium => "med",
+            Self::High => "HIGH",
+            Self::Critical => "CRIT",
+        }
     }
 }
 
@@ -148,6 +168,30 @@ impl StoredTurn {
     /// The stable message id — derived `<date>/<n>` (already unique per room). Not stored.
     pub fn id(&self) -> String {
         format!("{}/{}", self.date, self.n)
+    }
+
+    /// A compact one-line support badge (e.g. `[ALERT CRIT ⤷2026-06-28/3 #db]`), or `None` for a
+    /// plain note carrying no metadata/thread. Shared by the CLI read and the TUI render so both
+    /// surfaces show the same incident signal.
+    pub fn badge(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(k) = self.kind.label() {
+            parts.push(k.to_string());
+        }
+        if let Some(sev) = self.meta.severity {
+            parts.push(sev.label().to_string());
+        }
+        if let Some(t) = &self.thread_id {
+            parts.push(format!("⤷{t}"));
+        }
+        for tag in &self.meta.tags {
+            parts.push(format!("#{tag}"));
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(format!("[{}]", parts.join(" ")))
+        }
     }
 }
 
@@ -1010,6 +1054,36 @@ mod tests {
         let s = serde_json::to_string(&rich).unwrap();
         assert!(s.contains(r#""kind":"alert""#) && s.contains(r#""severity":"high""#) && s.contains(r#""tags":["db"]"#));
         assert_eq!(serde_json::from_str::<StoredTurn>(&s).unwrap(), rich);
+    }
+
+    #[test]
+    fn badge_renders_metadata_and_is_empty_for_plain_notes() {
+        // A plain note carries no badge (the common case stays uncluttered).
+        let plain = StoredTurn {
+            date: "2026-06-28".into(),
+            n: 3,
+            participant_id: "p".into(),
+            display_name: "P".into(),
+            content: "hi".into(),
+            ts: 42,
+            ..Default::default()
+        };
+        assert_eq!(plain.badge(), None);
+        // An alert with severity + thread + tag renders a compact, ordered badge.
+        let alert = StoredTurn {
+            kind: MsgKind::Alert,
+            thread_id: Some("2026-06-28/0".into()),
+            meta: MsgMeta {
+                severity: Some(Severity::Critical),
+                tags: vec!["db".into(), "prod".into()],
+                ..Default::default()
+            },
+            ..plain.clone()
+        };
+        assert_eq!(alert.badge().as_deref(), Some("[ALERT CRIT ⤷2026-06-28/0 #db #prod]"));
+        // A bare question (kind only) still badges.
+        let q = StoredTurn { kind: MsgKind::Question, ..plain };
+        assert_eq!(q.badge().as_deref(), Some("[ASK]"));
     }
 
     // P1b: append_with_meta persists metadata; plain append stays plain.

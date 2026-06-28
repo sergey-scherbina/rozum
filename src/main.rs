@@ -2546,7 +2546,10 @@ async fn run_meetings_read(room: Option<String>, count: usize) {
         return;
     }
     for t in &turns {
-        println!("[{}] {}: {}", hhmm_of(t.ts), t.display_name, t.content);
+        match t.badge() {
+            Some(b) => println!("[{}] {} {}: {}", hhmm_of(t.ts), b, t.display_name, t.content),
+            None => println!("[{}] {}: {}", hhmm_of(t.ts), t.display_name, t.content),
+        }
     }
 }
 
@@ -2566,7 +2569,10 @@ async fn run_meetings_inbox(handle: String, room: Option<String>, peek: bool, al
     }
     let start = mine.len().saturating_sub(count);
     for t in &mine[start..] {
-        println!("[{}] {}: {}", hhmm_of(t.ts), handle_of(&t.display_name), t.content);
+        match t.badge() {
+            Some(b) => println!("[{}] {} {}: {}", hhmm_of(t.ts), b, handle_of(&t.display_name), t.content),
+            None => println!("[{}] {}: {}", hhmm_of(t.ts), handle_of(&t.display_name), t.content),
+        }
     }
     // Advance the seen-cursor to the latest mention shown (unless peeking / showing all).
     if !peek && !all {
