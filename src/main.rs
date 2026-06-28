@@ -509,6 +509,9 @@ enum MeetingsAction {
         /// Thread/incident id to post into (an `<date>/<n>` message id).
         #[arg(long)]
         thread: Option<String>,
+        /// Reply to a specific message (a `<date>/<n>` id) — builds a reply-chain.
+        #[arg(long = "reply-to")]
+        reply_to: Option<String>,
         /// Tag(s) (repeatable: --tag db --tag prod).
         #[arg(long = "tag")]
         tags: Vec<String>,
@@ -1059,8 +1062,8 @@ async fn main() {
             }
             MeetingsAction::Install => run_meetings_install(),
             MeetingsAction::Uninstall => run_meetings_uninstall(),
-            MeetingsAction::Post { text, room, as_display, kind, severity, thread, tags } => {
-                run_meetings_post(text, room, as_display, kind, severity, thread, tags).await
+            MeetingsAction::Post { text, room, as_display, kind, severity, thread, reply_to, tags } => {
+                run_meetings_post(text, room, as_display, kind, severity, thread, reply_to, tags).await
             }
             MeetingsAction::Read { room, count } => run_meetings_read(room, count).await,
             MeetingsAction::Search { query, room, kind, severity, tag, thread, since, count } => {
@@ -2546,6 +2549,7 @@ async fn run_meetings_post(
     kind: Option<String>,
     severity: Option<String>,
     thread: Option<String>,
+    reply_to: Option<String>,
     tags: Vec<String>,
 ) {
     use rozum::meeting::daemon::daemon_alive;
@@ -2590,6 +2594,9 @@ async fn run_meetings_post(
     }
     if let Some(t) = &thread {
         meta.insert("thread_id".into(), serde_json::json!(t));
+    }
+    if let Some(r) = &reply_to {
+        meta.insert("in_reply_to".into(), serde_json::json!(r));
     }
     if !tags.is_empty() {
         meta.insert("tags".into(), serde_json::json!(tags));

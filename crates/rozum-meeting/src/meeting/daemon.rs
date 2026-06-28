@@ -87,6 +87,9 @@ pub struct SubmitParams {
     /// Optional tags.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Optional id of the message this one replies to (a `<date>/<n>` id) — builds a reply-chain.
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -395,12 +398,12 @@ impl MeetingServer {
             let pm = store::PostMeta {
                 kind: p.kind.as_deref().and_then(store::MsgKind::parse).unwrap_or_default(),
                 thread_id: p.thread_id.clone(),
+                in_reply_to: p.in_reply_to.clone(),
                 meta: store::MsgMeta {
                     severity: p.severity.as_deref().and_then(store::Severity::parse),
                     tags: p.tags.clone(),
                     ..Default::default()
                 },
-                ..Default::default()
             };
             let res = room.lock().await.submit_with_meta(&id, &p.content, pm);
             match res {
