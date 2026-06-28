@@ -39,7 +39,13 @@
 
 ## Context management (operator 2026-06-28 — "make it just work without limits")
 
-- [ ] **gateway-auto-context** — a gateway-side context-management layer so a request that exceeds
+- [~] **gateway-auto-context** — **P1 DONE (`4310a63`):** sliding-window trim — `fit_to_context()` at all 3
+  request paths drops oldest non-system turns until the prompt fits the window (keep system + recent +
+  reply headroom), so the conversation-overflow case NEVER returns context_length_exceeded; default ON
+  (`ROZUM_AUTO_CONTEXT=0` = legacy error), unit-tested, obs `auto_context_trim`. **REMAINING:** (i) summarize
+  the dropped turns (rolling summary) instead of hard-drop; (ii) lazy tool-schemas / slim for a fat SYSTEM
+  prompt (codex's 18-tools case — turn-dropping can't help that, it's all system+1). Original design below.
+  A gateway-side context-management layer so a request that exceeds
   the model's `n_ctx` **never returns `context_length_exceeded`** to the client — it transparently
   fits the window instead, for ANY agent (claude/codex/opencode) against ANY model. This is North-Star
   ("intelligence on any model/hardware"): the agent shouldn't have to know the model's window.
