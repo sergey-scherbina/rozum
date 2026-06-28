@@ -40,10 +40,11 @@
   }
   header .brand { font-weight: 700; letter-spacing: .3px; }
   header .brand small { color: var(--muted); font-weight: 500; }
-  select, button {
+  select, button, header input[type=text] {
     font: inherit; color: var(--fg); background: var(--chip);
     border: 1px solid var(--border); border-radius: 7px; padding: 5px 9px;
   }
+  header .hideres { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; cursor: pointer; }
   button { cursor: pointer; }
   button:hover { border-color: var(--accent); }
   .metrics { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
@@ -141,6 +142,8 @@
 <header>
   <div class="brand">rozum <small>· support console</small></div>
   <select id="room" title="room"></select>
+  <input id="q" type="text" placeholder="filter…" title="filter incidents + feed" style="width:130px">
+  <label class="hideres" title="hide resolved/closed incidents"><input type="checkbox" id="hideres" checked> active only</label>
   <button id="refresh" title="refresh now">↻</button>
   <span class="dot-live" id="live" title="auto-refresh"></span>
   <div class="metrics" id="metrics"></div>
@@ -281,12 +284,17 @@ function renderRail(threads) {
   live.onclick = () => { SELECTED = null; refresh(); };
   rail.appendChild(live);
 
-  if (!threads.length) {
-    rail.appendChild(el("div", "empty", "no incidents yet"));
+  const q = $("q").value.trim().toLowerCase();
+  const hideRes = $("hideres").checked;
+  let shown = threads;
+  if (hideRes) shown = shown.filter(t => t.state !== "resolved" && t.state !== "closed");
+  if (q) shown = shown.filter(t => `${t.title} ${t.owner || ""} ${t.id} ${t.severity || ""}`.toLowerCase().includes(q));
+  if (!shown.length) {
+    rail.appendChild(el("div", "empty", threads.length ? "no incidents match" : "no incidents yet"));
     return;
   }
   const byState = {};
-  for (const t of threads) (byState[t.state] ||= []).push(t);
+  for (const t of shown) (byState[t.state] ||= []).push(t);
   for (const [key, label] of STATES) {
     const list = byState[key];
     if (!list || !list.length) continue;
@@ -362,8 +370,13 @@ async function renderLive() {
   if (!date) { main.appendChild(el("div", "empty", "No messages yet.")); return; }
   const { messages } = await api(`rooms/${enc(ROOM)}/messages/${enc(date)}?count=500`);
   if (!messages.length) { main.appendChild(el("div", "empty", "No messages today.")); return; }
+  const q = $("q").value.trim().toLowerCase();
+  const shown = q
+    ? messages.filter(m => `${m.content} ${m.display_name} ${m.kind || ""} ${(m.meta && m.meta.severity) || ""} ${((m.meta && m.meta.tags) || []).join(" ")}`.toLowerCase().includes(q))
+    : messages;
+  if (!shown.length) { main.appendChild(el("div", "empty", "No messages match the filter.")); return; }
   const atBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 80;
-  for (const m of messages) main.appendChild(msgRow(m, { showThread: true }));
+  for (const m of shown) main.appendChild(msgRow(m, { showThread: true }));
   if (atBottom) main.scrollTop = main.scrollHeight;
 }
 
@@ -445,6 +458,9 @@ async function boot() {
   $("refresh").onclick = refresh;
   $("c-send").onclick = send;
   $("c-text").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+  // Filters apply on the next render; refresh() re-runs it (the inflight guard dedups rapid typing).
+  $("q").addEventListener("input", () => refresh());
+  $("hideres").addEventListener("change", () => refresh());
   if (timer) clearInterval(timer);
   timer = setInterval(refresh, 4000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
