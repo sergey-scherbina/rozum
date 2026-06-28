@@ -20,7 +20,9 @@ use tokio::sync::{Notify, broadcast};
 use super::identity::Roster;
 use super::participant::ParticipantId;
 use super::state::{POLLING_STALE_SECS, RESPONDING_STALE_SECS, unix_ts};
-use super::store::{HighWater, PostMeta, RoomPaths, StoredTurn, TranscriptWriter};
+use super::store::{
+    HighWater, PostMeta, RoomPaths, StoredTurn, Thread, ThreadKind, ThreadState, TranscriptWriter,
+};
 
 /// Shrunk coordination events — **no message content**. Clients read the bytes
 /// from disk using the `(date, n, end_offset)` high-water.
@@ -281,6 +283,19 @@ impl DaemonRoom {
         }
         self.notify.notify_waiters();
         Ok(turn)
+    }
+
+    // P2/P4 thread ops (delegate to the writer; the daemon exposes these as MCP tools).
+    pub fn open_thread(&mut self, anchor_id: &str, title: &str, kind: ThreadKind) -> Result<Thread, String> {
+        self.writer.open_thread(anchor_id, title, kind, unix_ts()).map_err(|e| e.to_string())
+    }
+
+    pub fn set_thread_state(&mut self, id: &str, state: ThreadState) -> Result<Option<Thread>, String> {
+        self.writer.set_thread_state(id, state, unix_ts()).map_err(|e| e.to_string())
+    }
+
+    pub fn threads(&self) -> Vec<Thread> {
+        self.writer.threads().values().cloned().collect()
     }
 
     pub fn end(&mut self) {

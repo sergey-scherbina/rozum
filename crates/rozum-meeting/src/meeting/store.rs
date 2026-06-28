@@ -54,6 +54,17 @@ impl MsgKind {
     fn is_note(&self) -> bool {
         matches!(self, MsgKind::Note)
     }
+    /// Parse a kind name (case-insensitive); `None` if unrecognized.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "note" => Self::Note,
+            "question" => Self::Question,
+            "event" => Self::Event,
+            "alert" => Self::Alert,
+            "resolution" => Self::Resolution,
+            _ => return None,
+        })
+    }
 }
 
 /// Incident severity (the jetsam ladder of support).
@@ -65,6 +76,18 @@ pub enum Severity {
     Medium,
     High,
     Critical,
+}
+impl Severity {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "info" => Self::Info,
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "critical" => Self::Critical,
+            _ => return None,
+        })
+    }
 }
 
 /// Per-message support status.
@@ -145,6 +168,15 @@ pub enum ThreadKind {
     Topic,
     Incident,
 }
+impl ThreadKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "topic" => Self::Topic,
+            "incident" => Self::Incident,
+            _ => return None,
+        })
+    }
+}
 
 /// Incident lifecycle — the resolving state machine (spec § resolving).
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -156,6 +188,18 @@ pub enum ThreadState {
     Escalated,
     Resolved,
     Closed,
+}
+impl ThreadState {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "open" => Self::Open,
+            "triaging" => Self::Triaging,
+            "escalated" => Self::Escalated,
+            "resolved" => Self::Resolved,
+            "closed" => Self::Closed,
+            _ => return None,
+        })
+    }
 }
 
 /// A thread = an incident/topic (P2). Membership (which messages) is DERIVED from messages' `thread_id`;

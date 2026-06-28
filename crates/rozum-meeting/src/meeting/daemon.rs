@@ -74,6 +74,38 @@ pub struct RoomsNewParams {
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SubmitParams {
     pub content: String,
+    /// Optional message kind: note|question|event|alert|resolution (default note). Support metadata —
+    /// all optional + back-compat (an old client sends only `content`).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Optional thread id to post into (an incident/topic thread).
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    /// Optional severity: info|low|medium|high|critical.
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// Optional tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ThreadOpenParams {
+    /// Message id (`<date>/<n>`) the thread is anchored on — the message that starts it.
+    pub anchor_id: String,
+    /// Human title for the thread/incident.
+    pub title: String,
+    /// `topic` (default) or `incident`.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ThreadStateParams {
+    /// The thread id.
+    pub id: String,
+    /// New state: open|triaging|escalated|resolved|closed.
+    pub state: String,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -332,13 +364,84 @@ impl MeetingServer {
             let (Some(room), Some(id)) = (room, id) else {
                 return err_result("not-joined: call _join_internal first");
             };
-            let res = room.lock().await.submit(&id, &params.0.content);
+            let p = &params.0;
+            let pm = store::PostMeta {
+                kind: p.kind.as_deref().and_then(store::MsgKind::parse).unwrap_or_default(),
+                thread_id: p.thread_id.clone(),
+                meta: store::MsgMeta {
+                    severity: p.severity.as_deref().and_then(store::Severity::parse),
+                    tags: p.tags.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let res = room.lock().await.submit_with_meta(&id, &p.content, pm);
             match res {
-                Ok(turn) => {
-                    text_result(&serde_json::json!({ "date": turn.date, "n": turn.n }).to_string())
-                }
+                Ok(turn) => text_result(
+                    &serde_json::json!({ "date": turn.date, "n": turn.n, "id": turn.id() }).to_string(),
+                ),
                 Err(e) => err_result(&e),
             }
+        })
+        .await
+    }
+
+    /// Open (or get) a thread/incident anchored on a message id. Messages join it by posting with
+    /// `thread_id = <this id>`.
+    #[tool(
+        name = "meeting.thread_open",
+        description = "Open (or get) a thread/incident anchored on a message id (anchor_id). kind: topic|incident."
+    )]
+    pub async fn thread_open(&self, params: Parameters<ThreadOpenParams>) -> CallToolResult {
+        guard("meeting.thread_open", async move {
+            let (room, _id) = self.session_room().await;
+            let Some(room) = room else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let p = &params.0;
+            let kind = p.kind.as_deref().and_then(store::ThreadKind::parse).unwrap_or_default();
+            match room.lock().await.open_thread(&p.anchor_id, &p.title, kind) {
+                Ok(t) => text_result(&serde_json::to_string(&t).unwrap_or_default()),
+                Err(e) => err_result(&e),
+            }
+        })
+        .await
+    }
+
+    /// Move a thread/incident through the resolving state machine.
+    #[tool(
+        name = "meeting.thread_set_state",
+        description = "Set a thread/incident state: open|triaging|escalated|resolved|closed."
+    )]
+    pub async fn thread_set_state(&self, params: Parameters<ThreadStateParams>) -> CallToolResult {
+        guard("meeting.thread_set_state", async move {
+            let (room, _id) = self.session_room().await;
+            let Some(room) = room else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let p = &params.0;
+            let Some(state) = store::ThreadState::parse(&p.state) else {
+                return err_result("bad state (open|triaging|escalated|resolved|closed)");
+            };
+            match room.lock().await.set_thread_state(&p.id, state) {
+                Ok(Some(t)) => text_result(&serde_json::to_string(&t).unwrap_or_default()),
+                Ok(None) => err_result("unknown thread id"),
+                Err(e) => err_result(&e),
+            }
+        })
+        .await
+    }
+
+    /// List the room's threads/incidents (metadata; membership is derived from messages).
+    #[tool(name = "meeting.threads", description = "List the room's threads/incidents.")]
+    pub async fn threads(&self) -> CallToolResult {
+        guard("meeting.threads", async move {
+            let (room, _id) = self.session_room().await;
+            let Some(room) = room else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let ts = room.lock().await.threads();
+            text_result(&serde_json::to_string(&ts).unwrap_or_default())
         })
         .await
     }
