@@ -157,8 +157,13 @@ load an un-admitted combination to "see if it reboots."
   `set_cache_limit` — it was uncapped-cache from old runs, not a live risk. **VERDICT:
   resident = active (weights + KV, bounded by `n_ctx`) + cache (bounded by `set_cache_limit`);
   neither is unbounded ⇒ co-residency is SAFE by construction** (admission reserves ≥ real
-  peak). Caveat: a big-model FULL-context/full-prefill peak wasn't directly measured (the
-  structural bound + chunked prefill cover it; nice-to-confirm later).
+  peak). ✅ **CAVEAT CLOSED 2026-06-28 (smmr-D direct measurement):** Qwen3.6-35B-A3B @ n_ctx 16384,
+  driven with a ~12.8K-token full-context prefill → active 18605→20402 MB (the prefill spike is only
+  +1.8 GB), cache 0→4090 MB → **measured peak footprint (peak+cache) = 23.92 GiB ≤ reserved 24.84 GiB
+  (0.92 GiB margin).** The big-model full-prefill peak IS covered by the conservative+tightened
+  footprint — the structural bound holds, confirmed by data not just argued. Admission does NOT
+  under-reserve → no prefill-spike jetsam. (A runtime cache-squeeze under pressure remains an optional
+  throughput add — not a safety need, since the footprint already covers the spike.)
 - ✅ **LIVE CO-RESIDENCY PROVEN (2026-06-22) — the headline goal end-to-end.** Two distinct
   models in two gateways (Qwen3-4B :8298 + GLM-4-9B :8299, n_ctx 8192): B was **admitted
   alongside A → both resident, both served chat simultaneously** (reply ok each); host free
