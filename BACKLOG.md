@@ -90,6 +90,18 @@ on the existing meeting stack (`docs/specs/agent-meetings-daemon.md`, `meeting-i
 `meeting-mention-inbox.md`, `meetings-rest-read.md`; daily disk-backed rooms, session-token identity,
 single-writer daemon). Each item below is its own spec+build later — listed to set the trajectory.
 
+- [ ] **mtg-retention** (operator 2026-06-28, persistence audit) — day files (`YYYY-MM-DD.jsonl`) grow
+  unbounded. Opt-in age-based prune (`ROZUM_MEETINGS_RETAIN_DAYS`, default off = keep all) that deletes day
+  files older than N days at daemon start, BUT never prunes a day holding messages of a non-terminal
+  (open) incident — so incident context is never lost. Rewrites `index.json` after pruning.
+- [ ] **mtg-event-sourced-threads** (operator 2026-06-28, persistence audit) — deeper resilience: log every
+  incident lifecycle transition (open/assign/escalate/state/resolve/pin/severity) AS a structured message in
+  the JSONL, so `threads.json` is fully REBUILDABLE from the log even if both it and its `.bak` are lost.
+  Today escalate/resolve post event notes (partial); make ALL transitions structured + add a rebuild fn.
+- [ ] **mtg-msg-link-react-edit** (operator 2026-06-28) — the remaining `mtg-message-ops` verbs:
+  link/reference (retroactively attach a message to a thread via a reference record — append-only store),
+  react (emoji tally), edit/redact (a redaction record, not a mutation). Smaller than the above.
+
 - [ ] **mtg-rich-rooms** — a richer room model beyond the daily-file chat: rooms with a **lifecycle**
   (a support queue / a per-product channel / a per-incident room), durable identity, membership/roles
   (reporter, assignee, on-call, observer), and a room **kind** (chat | queue | incident). Today: one
