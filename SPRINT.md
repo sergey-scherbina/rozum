@@ -1,5 +1,17 @@
 # Sprint
 
+- [ ] **meetings → support/incident platform — FOUNDATION (operator 2026-06-28, strategic)** — spec
+  `docs/specs/meetings-incident-platform.md`. The data-model hinge the support verbs build on. **P1 (do
+  FIRST, alone, prove zero regression on plain rooms):** extend `StoredTurn` (`crates/rozum-meeting/.../
+  store.rs`) with `#[serde(default, skip_serializing_if=…)]` metadata — `kind` (note|question|event|alert|
+  resolution), `thread_id`, `in_reply_to`, `meta{severity,status,assignee,tags,links}`; message `id` =
+  derived `<date>/<n>` (not stored). BYTE-IDENTICAL plain-room files (skip-when-default); old lines read as
+  notes. Thread it through the daemon write path + TUI/REST/MCP read. **P2** threads (`thread_id` +
+  rebuildable `threads.json`); **P3** room kinds (`Meta.kind` chat|queue|incident + members/roles). Then the
+  verbs (own specs): ops / escalation (ties into the model-chain) / resolving (thread state machine) /
+  incident-context (agent auto-gathers logs+obs+repro into a thread — highest leverage). Back-compat +
+  single-writer + agent-native are HARD constraints. BACKLOG `## Meetings → product-support` lists the 7 tasks.
+
 - [x] **residency admission QUEUE — event-driven, priority, preemptive (operator 2026-06-28, `pipeline-swap-settle`)** —
   **DONE + VALIDATED UNDER CONTENTION.** P1 ordered queue (`2a7bee9`), P2 actual-free grant (`0ed5825`,
   inherited from admits), P3 2-tier priority (`0ed5825`), P1b notify event-wake (`5b9b564`), oracle-wrap
