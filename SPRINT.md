@@ -30,7 +30,10 @@
   console now ESCALATES/TRIAGES/RESOLVES/REOPENS incidents, opens an incident on any message, and composes
   posts with kind+severity — the REST server reaches the single-writer path by connecting to the daemon's
   own socket (reusing `call_once`). Live test: open→escalate→post→resolve over HTTP wrote the full lifecycle;
-  the dashboard reflected it.
+  the dashboard reflected it. **HISTORY SEARCH DONE (`c422764`, `mtg-message-ops`):** `store::search_messages`
+  (text · kind · MIN-severity · tag · thread · since) → REST `/rooms/{n}/search`, CLI `meetings search`, and
+  the console filter box (now spans ALL history server-side). Fixed a latent `resolve_room_root` bug
+  (read/inbox/search `--room <shared>` resolved to the wrong dir). 91/91 meeting tests.
   **INCIDENT CLI DONE + LIVE-PROVEN (`976bd83`):** `rozum meetings incident open|escalate|resolve|state|list|
   show|metrics` — human/script shell verbs driving the daemon's `meeting.*` thread tools over its socket
   (new `tui_client::call_once`). A human runs the whole lifecycle from the shell; makes the console populate

@@ -102,10 +102,16 @@ single-writer daemon). Each item below is its own spec+build later — listed to
 - [ ] **mtg-threads** — group related messages into a **thread = an incident/topic**: a thread id, a
   parent message, reply-chains, thread-level state (open/triaging/escalated/resolved/closed) + SLA/owner.
   This is what turns a stream into trackable incidents. Needs thread storage + a thread-aware reader/TUI.
-- [ ] **mtg-message-ops** — **working with messages**: search (full-text + by metadata/tag/assignee/state),
-  link/reference, react, edit/redact, pin, assign, and **resolve** (close a message/thread with a
-  resolution record). The verbs that make it a support tool, not a log. Needs an index + a richer
-  MCP/TUI/REST surface over the store.
+- [~] **mtg-message-ops** — **working with messages**. **SEARCH DONE + LIVE-PROVEN (`c422764`):**
+  `store::search_messages` (AND filter: text substring · kind · MIN severity · tag · thread · since;
+  `Severity::rank` for `>=`) over a room's whole history, surfaced three ways — REST
+  `GET /rooms/{n}/search?q=&kind=&severity=&tag=&thread=&since=&limit=` (bad kind/severity → 400), CLI
+  `rozum meetings search [--kind --severity --tag --thread --since] <q>`, and the console filter box
+  (now spans ALL history server-side, was today-only). Also fixed `resolve_room_root` (read/inbox/search
+  `--room <name>` for SHARED rooms resolved to the wrong dir → now consults the registry root).
+  **REMAINING:** link/reference (retroactively attach a message to a thread — append-only store, so a
+  reference record, not a mutation), react, edit/redact, pin, assign. Resolve/close already shipped (the
+  incident verbs). Search currently scans day files; an index is only needed if rooms get very large.
 - [ ] **mtg-escalation** — **escalation**: route/escalate an incident by severity/tier/on-call (to a
   specific agent, a stronger model, or a human), with an escalation policy + an audit trail of who/when.
   Ties into the model-chain (escalate to a stronger model) + identity-roster (who's on-call). The
