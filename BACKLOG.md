@@ -90,17 +90,20 @@ on the existing meeting stack (`docs/specs/agent-meetings-daemon.md`, `meeting-i
 `meeting-mention-inbox.md`, `meetings-rest-read.md`; daily disk-backed rooms, session-token identity,
 single-writer daemon). Each item below is its own spec+build later — listed to set the trajectory.
 
-- [ ] **mtg-retention** (operator 2026-06-28, persistence audit) — day files (`YYYY-MM-DD.jsonl`) grow
-  unbounded. Opt-in age-based prune (`ROZUM_MEETINGS_RETAIN_DAYS`, default off = keep all) that deletes day
-  files older than N days at daemon start, BUT never prunes a day holding messages of a non-terminal
-  (open) incident — so incident context is never lost. Rewrites `index.json` after pruning.
-- [ ] **mtg-event-sourced-threads** (operator 2026-06-28, persistence audit) — deeper resilience: log every
-  incident lifecycle transition (open/assign/escalate/state/resolve/pin/severity) AS a structured message in
-  the JSONL, so `threads.json` is fully REBUILDABLE from the log even if both it and its `.bak` are lost.
-  Today escalate/resolve post event notes (partial); make ALL transitions structured + add a rebuild fn.
-- [ ] **mtg-msg-link-react-edit** (operator 2026-06-28) — the remaining `mtg-message-ops` verbs:
-  link/reference (retroactively attach a message to a thread via a reference record — append-only store),
-  react (emoji tally), edit/redact (a redaction record, not a mutation). Smaller than the above.
+- [x] **mtg-retention** — DONE (`7bec5a1`). `store::prune_old_days` deletes `<date>.jsonl` older than N
+  days + rewrites `index.json`, NEVER pruning a day holding an open incident's messages; wired into daemon
+  start, gated `ROZUM_MEETINGS_RETAIN_DAYS` (default off). Test.
+- [~] **mtg-event-sourced-threads** — RECOVERY DONE (`d7095d8`+`5e3e0a4`): `store::rebuild_threads`
+  reconstructs incidents (membership + severity + approx state + best-effort owner + title) from the message
+  log; `repair_threads` + CLI `meetings repair-threads`. The rebuild gap is closed — `thread_open` now posts
+  an `opened incident: <title>` audit message (thread_id = anchor) on first open, so even a reply-less
+  incident is recoverable. **REMAINING:** make ALL transitions (assign/state/pin/severity) carry STRUCTURED
+  op metadata (not prose) for exact (not best-effort) rebuild — the full event-sourcing.
+- [~] **mtg-msg-link-react-edit** — LINK DONE (`5e3e0a4`): `Thread.links` + `store::set_linked`;
+  `meeting.thread_link`, CLI `incident link|unlink`, REST `/threads/{id}/link`, console 🔗; thread_context
+  resolves links (external context) into a `linked` bundle. REACT skipped (low value for an incident
+  platform). **REMAINING:** edit/redact (a redaction tombstone record — readers hide the redacted content;
+  compliance value).
 
 - [ ] **mtg-rich-rooms** — a richer room model beyond the daily-file chat: rooms with a **lifecycle**
   (a support queue / a per-product channel / a per-incident room), durable identity, membership/roles

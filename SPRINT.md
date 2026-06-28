@@ -22,8 +22,12 @@
   `write_json_atomic` now fsyncs (temp + dir) and the message append fsyncs before the index records it
   (gated `ROZUM_MEETINGS_FSYNC=0`) — closes the rename-without-fsync data-loss window on this panic-prone
   box; and `threads.json` (the non-rebuildable incident state) keeps a `.bak` that every load falls back to
-  on a corrupt/empty primary. 96/96 meeting lib tests. Remaining = v3 polish (react/edit/link, full
-  lifecycle/incident-lanes port into the `.ssc` PWA) — BACKLOG `## Meetings → product-support`. Detail below ↓
+  on a corrupt/empty primary. **(+) retention** (`7bec5a1`): opt-in `prune_old_days` (ROZUM_MEETINGS_RETAIN_DAYS,
+  protects open-incident days). **(+) recovery** (`d7095d8`+`5e3e0a4`): `rebuild_threads` + CLI `repair-threads`
+  reconstruct incidents from the log; `thread_open` posts an `opened incident` audit line so even reply-less
+  incidents recover. **(+) link** (`5e3e0a4`): `Thread.links` + `incident link|unlink` + console 🔗 pulls
+  external context into the bundle. 99/99 meeting lib tests. Remaining = full structured event-sourcing,
+  edit/redact, `.ssc` lifecycle port — BACKLOG `## Meetings → product-support`. Detail below ↓
 
 - [~] **meetings — original sprint notes (superseded by the line above)** — spec
   `docs/specs/meetings-incident-platform.md`. **FOUNDATION (P1-P3) DONE — the data-model + store ops, all
