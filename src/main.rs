@@ -720,6 +720,20 @@ enum IncidentAction {
         /// The message id to unpin.
         msg_id: String,
     },
+    /// Link a message (often from outside the thread) as relevant context for an incident.
+    Link {
+        /// The incident/thread id.
+        id: String,
+        /// The message id to link (`<date>/<n>`).
+        msg_id: String,
+    },
+    /// Unlink a previously-linked message from an incident.
+    Unlink {
+        /// The incident/thread id.
+        id: String,
+        /// The message id to unlink.
+        msg_id: String,
+    },
     /// Set an incident's state directly: open|triaging|escalated|resolved|closed.
     State {
         /// The incident/thread id.
@@ -2760,6 +2774,16 @@ async fn run_meetings_incident(
             serde_json::json!({ "id": id, "msg_id": msg_id, "pin": false }),
             IncidentRender::Ok,
         ),
+        IncidentAction::Link { id, msg_id } => (
+            "meeting.thread_link",
+            serde_json::json!({ "id": id, "msg_id": msg_id, "link": true }),
+            IncidentRender::Ok,
+        ),
+        IncidentAction::Unlink { id, msg_id } => (
+            "meeting.thread_link",
+            serde_json::json!({ "id": id, "msg_id": msg_id, "link": false }),
+            IncidentRender::Ok,
+        ),
         IncidentAction::State { id, state } => (
             "meeting.thread_set_state",
             serde_json::json!({ "id": id, "state": state }),
@@ -2857,6 +2881,14 @@ fn print_incident(v: &serde_json::Value) {
     }
     for m in &messages {
         line(m);
+    }
+    // Operator-linked context (messages attached from elsewhere), if any.
+    let linked: Vec<StoredTurn> = serde_json::from_value(v["linked"].clone()).unwrap_or_default();
+    if !linked.is_empty() {
+        println!("  🔗 linked:");
+        for m in &linked {
+            line(m);
+        }
     }
     // Auto-gathered related context (lead-up + same-tag elsewhere), if any.
     let related: Vec<StoredTurn> =

@@ -150,6 +150,17 @@ pub struct PinParams {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LinkParams {
+    /// The thread/incident id.
+    pub id: String,
+    /// The message id (`<date>/<n>`) to link/unlink (often from outside the thread).
+    pub msg_id: String,
+    /// Link (true, default) or unlink (false).
+    #[serde(default)]
+    pub link: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WaitParams {
     /// Day of the last message seen (`YYYY-MM-DD`). Omit to receive all.
     #[serde(default)]
@@ -435,14 +446,29 @@ impl MeetingServer {
     )]
     pub async fn thread_open(&self, params: Parameters<ThreadOpenParams>) -> CallToolResult {
         guard("meeting.thread_open", async move {
-            let (room, _id) = self.session_room().await;
-            let Some(room) = room else {
+            let (room, caller) = self.session_room().await;
+            let (Some(room), Some(caller)) = (room, caller) else {
                 return err_result("not-joined: call _join_internal first");
             };
             let p = &params.0;
             let kind = p.kind.as_deref().and_then(store::ThreadKind::parse).unwrap_or_default();
-            match room.lock().await.open_thread(&p.anchor_id, &p.title, kind) {
-                Ok(t) => text_result(&serde_json::to_string(&t).unwrap_or_default()),
+            let mut r = room.lock().await;
+            let is_new = !r.threads().iter().any(|t| t.id == p.anchor_id);
+            match r.open_thread(&p.anchor_id, &p.title, kind) {
+                Ok(t) => {
+                    // On FIRST open, leave a trace in the message log (thread_id = the anchor) so the
+                    // incident is recoverable via `repair-threads` even if it never gets a reply, and so
+                    // the timeline carries an "opened" audit line. Idempotent re-opens stay silent.
+                    if is_new {
+                        let pm = store::PostMeta {
+                            kind: store::MsgKind::Event,
+                            thread_id: Some(p.anchor_id.clone()),
+                            ..Default::default()
+                        };
+                        let _ = r.submit_with_meta(&caller, &format!("opened incident: {}", t.title), pm);
+                    }
+                    text_result(&serde_json::to_string(&t).unwrap_or_default())
+                }
                 Err(e) => err_result(&e),
             }
         })
@@ -592,6 +618,31 @@ impl MeetingServer {
             match room.lock().await.set_pinned(&p.id, &p.msg_id, pin) {
                 Ok(Some(t)) => text_result(
                     &serde_json::json!({ "thread": p.id, "pinned": t.pinned }).to_string(),
+                ),
+                Ok(None) => err_result("unknown thread id"),
+                Err(e) => err_result(&e),
+            }
+        })
+        .await
+    }
+
+    /// Link (or unlink) a message to an incident — relevant context, often from OUTSIDE the thread; it's
+    /// pulled into the incident's context bundle.
+    #[tool(
+        name = "meeting.thread_link",
+        description = "Link (link=true, default) or unlink (link=false) a message id as context for a thread."
+    )]
+    pub async fn thread_link(&self, params: Parameters<LinkParams>) -> CallToolResult {
+        guard("meeting.thread_link", async move {
+            let (room, _id) = self.session_room().await;
+            let Some(room) = room else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let p = &params.0;
+            let link = p.link.unwrap_or(true);
+            match room.lock().await.set_linked(&p.id, &p.msg_id, link) {
+                Ok(Some(t)) => text_result(
+                    &serde_json::json!({ "thread": p.id, "links": t.links }).to_string(),
                 ),
                 Ok(None) => err_result("unknown thread id"),
                 Err(e) => err_result(&e),

@@ -359,6 +359,15 @@ function msgRow(m, opts) {
         .then(() => { SELECTED = mid; }), "incident opened");
     };
     l1.appendChild(oi);
+    // Link this message as context to an existing incident.
+    const lk = el("span", "openinc", "🔗 link");
+    lk.title = "link this message to an incident";
+    lk.onclick = (e) => {
+      e.stopPropagation();
+      const tid = prompt("Link to incident id (<date>/<n>):"); if (!tid) return;
+      act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(tid)}/link`, { msg_id: mid, link: true }), "linked");
+    };
+    l1.appendChild(lk);
   }
   if (m.in_reply_to) {
     const ir = el("span", "thread-link", "↩ " + m.in_reply_to);
@@ -484,6 +493,21 @@ async function renderThread(id) {
     main.appendChild(el("div", "lane-title", "")).appendChild(el("span", null, "all messages"));
   }
   for (const m of ctx.messages) main.appendChild(msgRow(m, pinOpts));
+  // Operator-linked context (messages attached from elsewhere).
+  if (ctx.linked && ctx.linked.length) {
+    const lh = el("div", "lane-title");
+    lh.appendChild(el("span", null, "🔗 linked"));
+    lh.appendChild(el("span", "n", String(ctx.linked.length)));
+    lh.style.marginTop = "18px";
+    main.appendChild(lh);
+    for (const m of ctx.linked) {
+      const row = msgRow(m, { showThread: true, showDate: true });
+      const un = el("span", "openinc", "🔗 unlink");
+      un.onclick = () => act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/link`, { msg_id: `${m.date}/${m.n}`, link: false }), "unlinked");
+      row.querySelector(".line1").appendChild(un);
+      main.appendChild(row);
+    }
+  }
   // Auto-gathered related context (lead-up + same-tag elsewhere) — not formally in the thread.
   if (ctx.related && ctx.related.length) {
     const sep = el("div", "lane-title");

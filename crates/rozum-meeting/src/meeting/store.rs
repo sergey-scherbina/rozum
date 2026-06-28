@@ -288,6 +288,11 @@ pub struct Thread {
     /// responder should see first. Back-compat: absent/empty on old threads.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pinned: Vec<String>,
+    /// Linked message ids — messages (often from OUTSIDE the thread) an operator attached as relevant
+    /// context. Unlike `pinned` (key thread members), links pull EXTERNAL messages into the context
+    /// bundle. Back-compat: absent/empty on old threads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<String>,
     pub created_ts: u64,
     pub updated_ts: u64,
 }
@@ -725,6 +730,7 @@ impl TranscriptWriter {
                 owner: None,
                 severity: anchor_sev,
                 pinned: vec![],
+                links: vec![],
                 created_ts: ts,
                 updated_ts: ts,
             })
@@ -791,6 +797,31 @@ impl TranscriptWriter {
             }
         } else {
             t.pinned.retain(|m| m != msg_id);
+        }
+        t.updated_ts = ts;
+        let updated = t.clone();
+        self.persist_threads()?;
+        Ok(Some(updated))
+    }
+
+    /// Link (`link=true`) or unlink a message id to a thread — relevant context, often from OUTSIDE the
+    /// thread (links pull external messages into the context bundle). Idempotent; `None` if unknown.
+    pub fn set_linked(
+        &mut self,
+        thread_id: &str,
+        msg_id: &str,
+        link: bool,
+        ts: u64,
+    ) -> std::io::Result<Option<Thread>> {
+        let Some(t) = self.threads.get_mut(thread_id) else {
+            return Ok(None);
+        };
+        if link {
+            if !t.links.iter().any(|m| m == msg_id) {
+                t.links.push(msg_id.to_string());
+            }
+        } else {
+            t.links.retain(|m| m != msg_id);
         }
         t.updated_ts = ts;
         let updated = t.clone();
@@ -933,8 +964,11 @@ pub fn rebuild_threads(root: &Path) -> BTreeMap<String, Thread> {
         if members.is_empty() {
             continue;
         }
-        let title = anchor
-            .map(|a| a.content.chars().take(60).collect::<String>())
+        // Title: prefer the "opened incident: X" audit line (the real title); else the anchor content.
+        let title = members
+            .iter()
+            .find_map(|m| m.content.strip_prefix("opened incident: ").map(str::to_owned))
+            .or_else(|| anchor.map(|a| a.content.chars().take(60).collect::<String>()))
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| tid.clone());
         let severity = anchor.and_then(|a| a.meta.severity);
@@ -967,6 +1001,7 @@ pub fn rebuild_threads(root: &Path) -> BTreeMap<String, Thread> {
                 owner,
                 severity,
                 pinned: vec![],
+                links: vec![],
                 created_ts: created,
                 updated_ts: updated,
             },
@@ -1037,6 +1072,13 @@ pub fn thread_context(root: &Path, thread_id: &str) -> serde_json::Value {
         .find(|m| m.id() == thread_id)
         .map(|anchor| gather_related(&all, anchor, thread_id))
         .unwrap_or_default();
+    // Operator-linked messages: resolve the thread's `links` ids to their full messages (often from
+    // OUTSIDE the thread), in link order, so the bundle carries the curated context.
+    let link_ids = thread.as_ref().map(|t| t.links.clone()).unwrap_or_default();
+    let linked: Vec<&StoredTurn> = link_ids
+        .iter()
+        .filter_map(|id| all.iter().find(|m| &m.id() == id))
+        .collect();
     serde_json::json!({
         "thread": thread,
         "message_count": msgs.len(),
@@ -1045,6 +1087,7 @@ pub fn thread_context(root: &Path, thread_id: &str) -> serde_json::Value {
         "last_ts": msgs.last().map(|m| m.ts),
         "messages": msgs,
         "related": related,
+        "linked": linked,
     })
 }
 
@@ -1552,6 +1595,7 @@ mod tests {
             owner: None,
             severity: sev,
             pinned: vec![],
+                links: vec![],
             created_ts: 0,
             updated_ts: updated,
         };
@@ -1589,6 +1633,30 @@ mod tests {
         assert!(t.pinned.is_empty());
         // Unknown thread → None.
         assert!(w.set_pinned("nope/0", &m.id(), true, 1_718_000_400).unwrap().is_none());
+    }
+
+    #[test]
+    fn linking_pulls_external_messages_into_context() {
+        let dir = tempdir().unwrap();
+        let paths = RoomPaths::ad_hoc_in(dir.path(), "ops");
+        let root = paths.root.clone();
+        let mut w = TranscriptWriter::new(paths, "ops", "topic", None, dir.path().to_path_buf());
+        // An UNRELATED earlier message, then the incident anchor (no shared tag → not auto-gathered).
+        let ext = w.append("p", "A", "FYI: vendor maintenance window tonight", 1_718_000_000).unwrap();
+        let anchor = w.append("p", "B", "API erroring", 1_718_000_500).unwrap();
+        let id = anchor.id();
+        w.open_thread(&id, "API outage", ThreadKind::Incident, 1_718_000_501).unwrap();
+        // Link the external message; it should appear in the context bundle's `linked`.
+        let t = w.set_linked(&id, &ext.id(), true, 1_718_000_600).unwrap().unwrap();
+        assert_eq!(t.links, vec![ext.id()]);
+        let ctx = thread_context(&root, &id);
+        let linked = ctx["linked"].as_array().unwrap();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0]["content"], "FYI: vendor maintenance window tonight");
+        // Unlink removes it; persists.
+        w.set_linked(&id, &ext.id(), false, 1_718_000_700).unwrap();
+        assert!(read_threads(&root).get(&id).unwrap().links.is_empty());
+        assert!(thread_context(&root, &id)["linked"].as_array().unwrap().is_empty());
     }
 
     #[test]
