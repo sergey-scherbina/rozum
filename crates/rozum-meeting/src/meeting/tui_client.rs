@@ -268,10 +268,18 @@ impl MeetingClient {
 
     /// Post a message as the human.
     pub async fn submit(&mut self, content: &str) -> ClientResult<()> {
-        let r = self
-            .conn
-            .call_tool("meeting.submit", json!({ "content": content }), T)
-            .await?;
+        self.submit_with_meta(content, json!({})).await
+    }
+
+    /// Post with optional support metadata (kind/thread_id/severity/tags) merged into the submit args.
+    pub async fn submit_with_meta(&mut self, content: &str, meta: Value) -> ClientResult<()> {
+        let mut args = json!({ "content": content });
+        if let (Value::Object(a), Value::Object(m)) = (&mut args, &meta) {
+            for (k, v) in m {
+                a.insert(k.clone(), v.clone());
+            }
+        }
+        let r = self.conn.call_tool("meeting.submit", args, T).await?;
         if r.get("isError").and_then(Value::as_bool) == Some(true) {
             return Err(format!("submit rejected: {r}").into());
         }
@@ -460,6 +468,7 @@ pub async fn post_once(
     display: &str,
     token: Option<&str>,
     text: &str,
+    meta: Value,
 ) -> ClientResult<String> {
     let mut client = match token {
         Some(t) => MeetingClient::connect_as(sock, display, t).await?,
@@ -479,7 +488,7 @@ pub async fn post_once(
             name
         }
     };
-    client.submit(text).await?;
+    client.submit_with_meta(text, meta).await?;
     Ok(room)
 }
 
@@ -609,9 +618,16 @@ mod tests {
 
         let project = tempdir().unwrap();
         let proj = project.path().to_string_lossy().into_owned();
-        let room = post_once(&sock, PostTarget::Project(proj.clone()), "tester", None, "joined: working on X")
-            .await
-            .expect("post_once succeeds");
+        let room = post_once(
+            &sock,
+            PostTarget::Project(proj.clone()),
+            "tester",
+            None,
+            "joined: working on X",
+            json!({}),
+        )
+        .await
+        .expect("post_once succeeds");
         assert!(!room.is_empty());
 
         // A fresh client sees the posted message in the room transcript.
@@ -623,15 +639,19 @@ mod tests {
         );
 
         // An unknown named room is a clean error, not a panic.
-        assert!(post_once(&sock, PostTarget::Named("nope".into()), "tester", None, "x").await.is_err());
+        assert!(
+            post_once(&sock, PostTarget::Named("nope".into()), "tester", None, "x", json!({}))
+                .await
+                .is_err()
+        );
 
         // Shared(name) create-or-opens the room (no prior existence needed), and a second
         // post reuses it.
-        let r1 = post_once(&sock, PostTarget::Shared("commons".into()), "a", None, "hi commons")
+        let r1 = post_once(&sock, PostTarget::Shared("commons".into()), "a", None, "hi commons", json!({}))
             .await
             .expect("shared post creates + posts");
         assert_eq!(r1, "commons");
-        post_once(&sock, PostTarget::Shared("commons".into()), "b", None, "again")
+        post_once(&sock, PostTarget::Shared("commons".into()), "b", None, "again", json!({}))
             .await
             .expect("second shared post reuses the room");
         let mut reader = MeetingClient::connect(&sock, "reader2").await.unwrap();

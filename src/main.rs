@@ -500,6 +500,18 @@ enum MeetingsAction {
         /// Author display name (default: $USER, or $ROZUM_MEETING_AS). Hooks pass the agent's name.
         #[arg(long = "as")]
         as_display: Option<String>,
+        /// Message kind: note|question|event|alert|resolution (support metadata; default note).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Severity: info|low|medium|high|critical.
+        #[arg(long)]
+        severity: Option<String>,
+        /// Thread/incident id to post into (an `<date>/<n>` message id).
+        #[arg(long)]
+        thread: Option<String>,
+        /// Tag(s) (repeatable: --tag db --tag prod).
+        #[arg(long = "tag")]
+        tags: Vec<String>,
     },
     /// Read recent messages from a room (the cwd project's room by default).
     ///
@@ -952,8 +964,8 @@ async fn main() {
             }
             MeetingsAction::Install => run_meetings_install(),
             MeetingsAction::Uninstall => run_meetings_uninstall(),
-            MeetingsAction::Post { text, room, as_display } => {
-                run_meetings_post(text, room, as_display).await
+            MeetingsAction::Post { text, room, as_display, kind, severity, thread, tags } => {
+                run_meetings_post(text, room, as_display, kind, severity, thread, tags).await
             }
             MeetingsAction::Read { room, count } => run_meetings_read(room, count).await,
             MeetingsAction::Inbox { as_handle, room, peek, all, count } => {
@@ -2425,7 +2437,16 @@ fn spawn_detached_meetings() -> std::io::Result<std::process::Child> {
 
 /// `rozum meetings post <text>` — one-shot post to a room (project room by default).
 /// Auto-spawns the daemon if down. Author display = `--as`, else $ROZUM_MEETING_AS, else $USER.
-async fn run_meetings_post(text: String, room: Option<String>, as_display: Option<String>) {
+#[allow(clippy::too_many_arguments)]
+async fn run_meetings_post(
+    text: String,
+    room: Option<String>,
+    as_display: Option<String>,
+    kind: Option<String>,
+    severity: Option<String>,
+    thread: Option<String>,
+    tags: Vec<String>,
+) {
     use rozum::meeting::daemon::daemon_alive;
     use rozum::meeting::daemon_proxy::{detect_project, spawn_daemon};
     use rozum::meeting::room_path::meeting_sock;
@@ -2458,7 +2479,30 @@ async fn run_meetings_post(text: String, room: Option<String>, as_display: Optio
             }
         },
     };
-    match post_once(&sock, target, &display, token.as_deref(), &text).await {
+    // Optional support metadata (kind/severity/thread/tags) → merged into the submit args.
+    let mut meta = serde_json::Map::new();
+    if let Some(k) = &kind {
+        meta.insert("kind".into(), serde_json::json!(k));
+    }
+    if let Some(s) = &severity {
+        meta.insert("severity".into(), serde_json::json!(s));
+    }
+    if let Some(t) = &thread {
+        meta.insert("thread_id".into(), serde_json::json!(t));
+    }
+    if !tags.is_empty() {
+        meta.insert("tags".into(), serde_json::json!(tags));
+    }
+    match post_once(
+        &sock,
+        target,
+        &display,
+        token.as_deref(),
+        &text,
+        serde_json::Value::Object(meta),
+    )
+    .await
+    {
         Ok(room) => eprintln!("posted to '{room}' as {display}"),
         Err(e) => {
             eprintln!("meetings post: {e}");
