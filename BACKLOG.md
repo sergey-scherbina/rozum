@@ -39,12 +39,16 @@
 
 ## Context management (operator 2026-06-28 — "make it just work without limits")
 
-- [~] **gateway-auto-context** — **P1 DONE (`4310a63`):** sliding-window trim — `fit_to_context()` at all 3
-  request paths drops oldest non-system turns until the prompt fits the window (keep system + recent +
-  reply headroom), so the conversation-overflow case NEVER returns context_length_exceeded; default ON
-  (`ROZUM_AUTO_CONTEXT=0` = legacy error), unit-tested, obs `auto_context_trim`. **REMAINING:** (i) summarize
-  the dropped turns (rolling summary) instead of hard-drop; (ii) lazy tool-schemas / slim for a fat SYSTEM
-  prompt (codex's 18-tools case — turn-dropping can't help that, it's all system+1). Original design below.
+- [~] **gateway-auto-context** — **MOSTLY DONE.** `fit_to_context()` at all 3 request paths so
+  `context_length_exceeded` is NEVER returned: (1) **sliding-window turn trim** (`4310a63`) — drop oldest
+  non-system turns; (2) **elision breadcrumb** (`057bd48`) — a tiny system note so the model knows history
+  was trimmed; (3) **lazy-tools** (`23a330f`) — when turn-dropping can't fit (fat system + many tool
+  schemas, codex's case), STRIP tool descriptions (every tool kept, no capability loss). Default ON
+  (`ROZUM_AUTO_CONTEXT=0` = legacy error), unit-tested, obs `auto_context_trim{dropped,tools_compressed}`.
+  **REMAINING (each its own focused build):** (i) full **LLM rolling-summary** of dropped turns (preserve
+  their content, not just a breadcrumb) — needs a summarizer GENERATION in the request path (nested gen +
+  latency design); (ii) true **on-demand lazy tool LOADING** (a meta-tool to fetch a schema when the model
+  asks) vs the current deterministic description-strip. Original design below.
   A gateway-side context-management layer so a request that exceeds
   the model's `n_ctx` **never returns `context_length_exceeded`** to the client — it transparently
   fits the window instead, for ANY agent (claude/codex/opencode) against ANY model. This is North-Star
