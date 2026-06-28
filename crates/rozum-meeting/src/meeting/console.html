@@ -77,6 +77,8 @@
   }
   .incident:hover { border-color: var(--accent); }
   .incident.sel { background: var(--sel); border-color: var(--accent); }
+  .incident.stale { box-shadow: 0 0 0 1px var(--sev-crit) inset; }
+  .stalemark { color: var(--sev-crit); }
   .incident .t { font-weight: 600; }
   .incident .meta { color: var(--muted); font-size: 12px; margin-top: 3px; display: flex; gap: 8px; flex-wrap: wrap; }
   .empty { color: var(--muted); padding: 24px 10px; text-align: center; }
@@ -271,6 +273,7 @@ function renderMetrics(m) {
   };
   add("incidents", m.total || 0);
   add("open", open, open > 0);
+  add("attention", m.needs_attention || 0, (m.needs_attention || 0) > 0);
   add("escalated", by.escalated || 0, (by.escalated || 0) > 0);
   add("resolved", m.resolved || 0);
   add("MTTR", fmtDur(m.avg_time_to_resolve_secs));
@@ -310,9 +313,11 @@ function renderRail(threads) {
   }
 }
 function incidentCard(t) {
-  const c = el("div", "incident" + (SELECTED === t.id ? " sel" : ""));
+  const c = el("div", "incident" + (SELECTED === t.id ? " sel" : "") + (t.stale ? " stale" : ""));
   if (t.severity) c.style.borderLeftColor = `var(--sev-${t.severity})`;
-  c.appendChild(el("div", "t", t.title || t.id));
+  const title = el("div", "t", t.title || t.id);
+  if (t.stale) title.prepend(el("span", "stalemark", "⚠ "));
+  c.appendChild(title);
   const meta = el("div", "meta");
   meta.appendChild(stBadge(t.state));
   if (t.severity) meta.appendChild(sevBadge(t.severity));

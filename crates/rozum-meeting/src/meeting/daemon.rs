@@ -623,10 +623,17 @@ impl MeetingServer {
                 }
             }
             let avg_ttr = if terminal > 0 { ttr_sum / terminal } else { 0 };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let needs_attention =
+                threads.iter().filter(|t| store::thread_is_stale(t, now)).count();
             text_result(
                 &serde_json::json!({
                     "total": total, "by_state": by_state,
                     "resolved": terminal, "avg_time_to_resolve_secs": avg_ttr,
+                    "needs_attention": needs_attention,
                 })
                 .to_string(),
             )

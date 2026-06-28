@@ -694,6 +694,12 @@ impl TranscriptWriter {
         }
         let id = anchor_id.into();
         let title = title.into();
+        // Inherit the anchor message's severity — an incident opened on a `critical` alert IS critical,
+        // so its SLA/staleness window is meaningful instead of the lax no-severity default.
+        let anchor_sev = read_since(&self.paths.root, None, 0)
+            .into_iter()
+            .find(|m| m.id() == id)
+            .and_then(|m| m.meta.severity);
         let t = self
             .threads
             .entry(id.clone())
@@ -703,7 +709,7 @@ impl TranscriptWriter {
                 kind,
                 state: ThreadState::Open,
                 owner: None,
-                severity: None,
+                severity: anchor_sev,
                 created_ts: ts,
                 updated_ts: ts,
             })
@@ -945,6 +951,24 @@ fn gather_related(all: &[StoredTurn], anchor: &StoredTurn, thread_id: &str) -> V
     out.sort_by_key(|m| (m.ts, m.n));
     out.truncate(CAP);
     out
+}
+
+/// Default SLA window per severity — how long an ACTIVE incident may sit without an update before it
+/// "needs attention" (goes stale). Conservative defaults; an unset severity is treated as low-priority.
+pub fn sla_secs(sev: Option<Severity>) -> u64 {
+    match sev {
+        Some(Severity::Critical) => 15 * 60,
+        Some(Severity::High) => 60 * 60,
+        Some(Severity::Medium) => 4 * 3600,
+        Some(Severity::Low) => 8 * 3600,
+        _ => 24 * 3600,
+    }
+}
+
+/// Is this incident stale as of `now` — active (not resolved/closed) AND no update within its
+/// severity's SLA window? The signal that an incident is rotting and needs a human.
+pub fn thread_is_stale(t: &Thread, now: u64) -> bool {
+    !t.state.is_terminal() && now.saturating_sub(t.updated_ts) > sla_secs(t.severity)
 }
 
 /// Resolving metrics over a room's threads: totals, a per-state histogram, and the
@@ -1302,6 +1326,31 @@ mod tests {
         let hits = search_messages(&root, &f, 1);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].content, "cosmetic timeout in UI");
+    }
+
+    #[test]
+    fn thread_staleness_respects_severity_sla_and_terminal_state() {
+        let mk = |state: ThreadState, sev: Option<Severity>, updated: u64| Thread {
+            id: "2026-06-28/0".into(),
+            title: "x".into(),
+            kind: ThreadKind::Incident,
+            state,
+            owner: None,
+            severity: sev,
+            created_ts: 0,
+            updated_ts: updated,
+        };
+        let now = 100_000u64;
+        // Critical SLA = 15m: updated 20m ago → stale; updated 10m ago → fresh.
+        assert!(thread_is_stale(&mk(ThreadState::Open, Some(Severity::Critical), now - 20 * 60), now));
+        assert!(!thread_is_stale(&mk(ThreadState::Open, Some(Severity::Critical), now - 10 * 60), now));
+        // High SLA = 1h: 20m old critical-vs-high differ — 20m high is still fresh.
+        assert!(!thread_is_stale(&mk(ThreadState::Escalated, Some(Severity::High), now - 20 * 60), now));
+        // A resolved incident is never stale, however old.
+        assert!(!thread_is_stale(&mk(ThreadState::Resolved, Some(Severity::Critical), 0), now));
+        // No severity → low-priority 24h window.
+        assert!(!thread_is_stale(&mk(ThreadState::Open, None, now - 3600), now));
+        assert!(thread_is_stale(&mk(ThreadState::Open, None, now - 25 * 3600), now));
     }
 
     #[test]

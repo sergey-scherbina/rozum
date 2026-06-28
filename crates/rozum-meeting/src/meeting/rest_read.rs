@@ -167,13 +167,42 @@ async fn threads(State(state): State<RestState>, AxumPath(name): AxumPath<String
         return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
     };
     let threads: Vec<store::Thread> = store::read_threads(&root).into_values().collect();
+    let now = now_secs();
+    // Augment each thread with derived SLA signals (stale + age) — the support dashboard's
+    // "needs attention" cue — without changing the stored `Thread` shape.
+    let mut needs_attention = 0u64;
+    let augmented: Vec<Value> = threads
+        .iter()
+        .map(|t| {
+            let stale = store::thread_is_stale(t, now);
+            if stale {
+                needs_attention += 1;
+            }
+            let mut v = serde_json::to_value(t).unwrap_or_else(|_| json!({}));
+            if let Value::Object(o) = &mut v {
+                o.insert("stale".into(), json!(stale));
+                o.insert("age_secs".into(), json!(now.saturating_sub(t.created_ts)));
+            }
+            v
+        })
+        .collect();
+    let mut metrics = store::thread_metrics(&root);
+    metrics["needs_attention"] = json!(needs_attention);
     Json(json!({
         "room": name,
-        "count": threads.len(),
-        "threads": threads,
-        "metrics": store::thread_metrics(&root),
+        "count": augmented.len(),
+        "threads": augmented,
+        "metrics": metrics,
     }))
     .into_response()
+}
+
+/// Current unix time in seconds (for SLA/staleness derivation).
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// `GET /rooms/{name}/threads/{id}` — one incident's whole picture (thread record
@@ -194,8 +223,14 @@ async fn metrics(State(state): State<RestState>, AxumPath(name): AxumPath<String
     let Some(root) = room_root(&state.registry, &name) else {
         return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
     };
+    let now = now_secs();
+    let needs_attention = store::read_threads(&root)
+        .values()
+        .filter(|t| store::thread_is_stale(t, now))
+        .count();
     let mut out = store::thread_metrics(&root);
     out["room"] = json!(name);
+    out["needs_attention"] = json!(needs_attention);
     Json(out).into_response()
 }
 

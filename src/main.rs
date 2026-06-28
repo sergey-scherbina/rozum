@@ -2736,18 +2736,24 @@ enum IncidentRender {
 }
 
 /// Render `meeting.threads` as a readable incident list (one line each, newest-update first).
+/// Stale incidents (active + past their severity SLA) are flagged with a leading `⚠`.
 fn print_incident_list(v: &serde_json::Value) {
-    use rozum::meeting::store::Thread;
+    use rozum::meeting::store::{self, Thread};
     let mut threads: Vec<Thread> = serde_json::from_value(v.clone()).unwrap_or_default();
     if threads.is_empty() {
         println!("(no incidents)");
         return;
     }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     threads.sort_by(|a, b| b.updated_ts.cmp(&a.updated_ts));
     for t in &threads {
         let sev = t.severity.map(|s| format!(" {}", s.label())).unwrap_or_default();
         let owner = t.owner.as_deref().map(|o| format!(" @{o}")).unwrap_or_default();
-        println!("{}  {}  [{}{}{}]", t.id, t.title, t.state.as_str(), sev, owner);
+        let mark = if store::thread_is_stale(t, now) { "⚠ " } else { "" };
+        println!("{}{}  {}  [{}{}{}]", mark, t.id, t.title, t.state.as_str(), sev, owner);
     }
 }
 
