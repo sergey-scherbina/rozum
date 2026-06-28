@@ -26,9 +26,14 @@
   4s-poll, Basic-auth). Live smoke: daemon spawned REST, `meetings post --kind/--severity/--tag` → disk →
   console + endpoints returned it (401 without creds). **REMAINING:** (a) the standalone mcp_server (state.rs
   Meeting) path metadata (low priority — daemon is production). (b) `mtg-frontend` v2 — UI write actions
-  (escalate/assign/resolve via a daemon write path), filter/search, fold into the .ssc PWA. (c) new
-  `mtg-incident-cli` — human shell verbs (open/escalate/resolve/list/show/metrics) so the dashboard populates
-  in real use. BACKLOG `## Meetings → product-support`.
+  (escalate/assign/resolve via a daemon write path), filter/search, fold into the .ssc PWA.
+  **INCIDENT CLI DONE + LIVE-PROVEN (`976bd83`):** `rozum meetings incident open|escalate|resolve|state|list|
+  show|metrics` — human/script shell verbs driving the daemon's `meeting.*` thread tools over its socket
+  (new `tui_client::call_once`). A human runs the whole lifecycle from the shell; makes the console populate
+  in real use. Live test (isolated daemon): open→escalate→resolve → threads.json → REST + console showed the
+  resolved incident + 3-msg context bundle (alert→event→resolution). The strategic meetings→support platform
+  is now COMPLETE across all three surfaces: agent-native MCP, human CLI, and the web console. Remaining is
+  polish (mtg-frontend v2 write-actions, mtg-registry-dup-name sharp edge). BACKLOG `## Meetings → product-support`.
 
 - [x] **residency admission QUEUE — event-driven, priority, preemptive (operator 2026-06-28, `pipeline-swap-settle`)** —
   **DONE + VALIDATED UNDER CONTENTION.** P1 ordered queue (`2a7bee9`), P2 actual-free grant (`0ed5825`,

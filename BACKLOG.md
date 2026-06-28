@@ -136,13 +136,22 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   (`project-rozum-meeting-ssc-pwa`) so the production launchd web + this console converge on one model.
   Pairs with **mtg-incident-cli** (human shell verbs to drive the lifecycle so the dashboard populates).
 
-- [ ] **mtg-incident-cli** — the human/script SHELL surface for the incident lifecycle, mirroring the
-  agent-native MCP verbs (`meeting.thread_open` / `escalate` / `resolve` / `thread_metrics` /
-  `thread_context`). Today a human can POST metadata (`meetings post --kind/--severity/--thread`) but cannot
-  OPEN, ESCALATE, or RESOLVE a thread from the shell — only agents can (over MCP). Add `rozum meetings
-  incident open <anchor-id> <title> [--kind incident]` / `escalate <id> --to <h> [--note]` / `resolve <id>
-  [--note]` / `list` / `show <id>` / `metrics`, each driving the daemon over its socket (same path the web
-  bridge uses). Makes the `mtg-frontend` console populate in real use and gives operators a no-UI lever.
+- [x] **mtg-incident-cli** — DONE + LIVE-PROVEN (`976bd83`). `rozum meetings incident open|escalate|resolve|
+  state|list|show|metrics` — the human/script twin of the agent-native MCP thread verbs. Each drives the
+  daemon over its socket (new `tui_client::call_once` + `MeetingClient::call`, mirroring `post_once`), calling
+  the same `meeting.*` thread tools the agents use. A human now runs the WHOLE lifecycle from the shell
+  (open on a message id → escalate to an on-call handle → resolve) and inspects it (list / show context
+  bundle / metrics), no agent + no UI. Makes the `mtg-frontend` console populate in real use. Live test
+  (isolated daemon): open→escalate→resolve wrote `threads.json`; REST + console reflected the resolved
+  incident, owner, and the 3-message context bundle (alert→event→resolution).
+
+- [ ] **mtg-registry-dup-name** (sharp edge surfaced 2026-06-28) — `RoomRegistry` persists to a GLOBAL
+  `~/.local/state/rozum/rooms.json` (keyed off `XDG_STATE_HOME`, NOT `XDG_RUNTIME_DIR`), and
+  `rest_read::room_root` / `list().find(name==X)` returns the FIRST match — so two rooms that derive the same
+  name (two project dirs both basenamed `proj`) resolve ambiguously (REST may read the wrong/empty room).
+  Pre-existing, low-severity (real project rooms have distinct names). Fix options: de-dup `rooms.json` on
+  write (last-writer-wins by name, or key by root), or resolve by (name, project) pair. Also: tests/demos
+  that spawn a daemon should override `XDG_STATE_HOME` to avoid polluting the operator's global registry.
 
 ## Model chain (verification-gated, `--model A,B,C`)
 
