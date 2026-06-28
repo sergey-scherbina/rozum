@@ -18,9 +18,17 @@
   meeting.submit (plain posts byte-identical). **DISPLAY DONE (`e4ee5e7`):** one shared `StoredTurn::badge()`
   (kind/severity/thread/tags → `[ALERT CRIT ⤷date/n #tag]`) wired into `rozum meetings read`, `inbox`, and the
   daemon-attached TUI (severity/kind-coloured); plain notes stay un-badged. 86/86 meeting lib tests green.
-  **REMAINING:** (a) the standalone mcp_server (state.rs Meeting) path metadata (lower priority — daemon is
-  production). (b) `mtg-frontend` — the support-grade web UI (BIG, separate; the .ssc→Rust PWA gains threads/
-  incident lanes/severity/escalate+resolve actions). BACKLOG `## Meetings → product-support`.
+  **FRONTEND V1 DONE + LIVE-PROVEN (`7f79ce5`):** a support-grade incident dashboard served by the daemon's
+  read-only REST server (`rest_read.rs`, reads the SAME disk rooms — metadata + threads.json surface free).
+  New endpoints `/rooms`, `/rooms/{n}/threads`(+metrics), `/threads/{id}` (context bundle), `/metrics`;
+  `GET /` serves `console.html` — a dependency-free SPA (header metrics, severity-coloured incident lanes by
+  state, live today-feed with kind/severity/thread badges, click-through incident drill-down; dark-mode,
+  4s-poll, Basic-auth). Live smoke: daemon spawned REST, `meetings post --kind/--severity/--tag` → disk →
+  console + endpoints returned it (401 without creds). **REMAINING:** (a) the standalone mcp_server (state.rs
+  Meeting) path metadata (low priority — daemon is production). (b) `mtg-frontend` v2 — UI write actions
+  (escalate/assign/resolve via a daemon write path), filter/search, fold into the .ssc PWA. (c) new
+  `mtg-incident-cli` — human shell verbs (open/escalate/resolve/list/show/metrics) so the dashboard populates
+  in real use. BACKLOG `## Meetings → product-support`.
 
 - [x] **residency admission QUEUE — event-driven, priority, preemptive (operator 2026-06-28, `pipeline-swap-settle`)** —
   **DONE + VALIDATED UNDER CONTENTION.** P1 ordered queue (`2a7bee9`), P2 actual-free grant (`0ed5825`,

@@ -119,15 +119,30 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   one place. The "gather everything about this incident" primitive; the highest agent-leverage piece
   (an agent can assemble the context bundle automatically). Builds on obs + the meeting store.
 
-- [ ] **mtg-frontend** (operator 2026-06-28 — separate task) — a GOOD frontend for meetings: the
-  support/incident UI on top of the platform model (rooms, threads, messages + metadata). Today there's a
-  `.ssc`→Rust PWA (`project-rozum-meeting-ssc-pwa`; per-handle colours, HH:MM, iOS-tuned) + a TUI client —
-  chat-grade, not support-grade. Target: **incident-centric UX** — a queue/inbox of threads with state +
-  severity + assignee; a thread view (reply-chains, the incident's gathered context bundle, the resolution);
-  filter/search by metadata; escalate/assign/resolve actions; live updates. Agent-native: an agent's posts +
-  context-bundles render first-class. Web (the `.ssc`→Rust toolkit) + the TUI both consume the same model.
-  Depends on the platform foundation (`meetings-incident-platform.md` P1-P3) landing first; own spec when the
-  model is stable. Reuses the existing `.ssc` web pipeline + `meetings-rest-read` + the MCP surface.
+- [~] **mtg-frontend** (operator 2026-06-28 — separate task) — a GOOD frontend for meetings: the
+  support/incident UI on top of the platform model (rooms, threads, messages + metadata). **V1 DONE +
+  LIVE-PROVEN (`7f79ce5`):** a self-contained incident dashboard served by the daemon's read-only REST
+  server (`rest_read.rs`), reading the SAME disk rooms the production single-writer daemon backs — so every
+  StoredTurn's metadata + `threads.json` surface with no new plumbing. New endpoints `GET /rooms`,
+  `/rooms/{name}/threads` (+ metrics), `/threads/{id}` (whole-incident context bundle), `/metrics`, and
+  `GET /` serves `console.html` — a dependency-free SPA: header metrics (incidents / open / escalated /
+  resolved / MTTR), a left rail of incident lanes grouped by state + severity-coloured, a live today-feed
+  with kind/severity/thread badges, click-through incident drill-down (thread record + all messages +
+  participants + timespan). Dark-mode aware, polls 4s, behind the existing Basic-auth secret. Live smoke
+  test: daemon spawned the REST server, `meetings post --kind/--severity/--tag` wrote metadata to disk, the
+  console + all endpoints returned it (auth 401 without creds). 88/88 meeting lib tests green.
+  **REMAINING (v2):** write actions from the UI (escalate/assign/resolve — needs a daemon write path, since
+  rest_read is read-only); filter/search by metadata; reply-chain rendering; fold into the `.ssc`→Rust PWA
+  (`project-rozum-meeting-ssc-pwa`) so the production launchd web + this console converge on one model.
+  Pairs with **mtg-incident-cli** (human shell verbs to drive the lifecycle so the dashboard populates).
+
+- [ ] **mtg-incident-cli** — the human/script SHELL surface for the incident lifecycle, mirroring the
+  agent-native MCP verbs (`meeting.thread_open` / `escalate` / `resolve` / `thread_metrics` /
+  `thread_context`). Today a human can POST metadata (`meetings post --kind/--severity/--thread`) but cannot
+  OPEN, ESCALATE, or RESOLVE a thread from the shell — only agents can (over MCP). Add `rozum meetings
+  incident open <anchor-id> <title> [--kind incident]` / `escalate <id> --to <h> [--note]` / `resolve <id>
+  [--note]` / `list` / `show <id>` / `metrics`, each driving the daemon over its socket (same path the web
+  bridge uses). Makes the `mtg-frontend` console populate in real use and gives operators a no-UI lever.
 
 ## Model chain (verification-gated, `--model A,B,C`)
 
