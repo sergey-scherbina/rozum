@@ -698,7 +698,13 @@ pub fn acquire_residency(
     let mypid = std::process::id();
     let prio = residency_prio();
     let wait_secs = residency_wait_secs();
-    let mut waited = 0u64;
+    let start = std::time::Instant::now();
+    let deadline = start + std::time::Duration::from_secs(wait_secs);
+    // Event-driven wake (P1b): a watcher fires on any residents/ or waiters/ change (a model freed, the
+    // queue moved) so we re-check IMMEDIATELY instead of only on a 2s tick. The 2s cap stays as a safety
+    // fallback so a missed/unsupported event still makes progress (degrades to the old poll, never worse).
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let _watcher = watch_residency(tx);
     let mut announced = false;
     let mut ticket: Option<WaiterTicket> = None; // our place in the admission queue (P1/P3)
     loop {
@@ -775,37 +781,65 @@ pub fn acquire_residency(
                         wait_secs,
                     );
                 }
-                if waited >= wait_secs {
+                if std::time::Instant::now() >= deadline {
                     return Err(ResidencyDenied {
                         footprint_bytes,
                         in_use_bytes: in_use,
                         budget_bytes: budget,
-                        waited_secs: waited,
+                        waited_secs: start.elapsed().as_secs(),
                         holders,
                     });
                 }
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                waited += 2;
+                wait_for_change(&rx, deadline);
             }
             Err(std::fs::TryLockError::WouldBlock) => {
                 // Another gateway is mid-admit (or a v1 holds this for life) — brief wait.
-                if waited >= wait_secs {
+                if std::time::Instant::now() >= deadline {
                     let (in_use, holders) = scan_residents(mypid);
                     return Err(ResidencyDenied {
                         footprint_bytes,
                         in_use_bytes: in_use,
                         budget_bytes: host_ram_budget_bytes(),
-                        waited_secs: waited,
+                        waited_secs: start.elapsed().as_secs(),
                         holders,
                     });
                 }
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                waited += 2;
+                wait_for_change(&rx, deadline);
             }
             // FS without advisory locks → fail open.
             Err(std::fs::TryLockError::Error(_)) => return Ok(None),
         }
     }
+}
+
+/// Watch `residents/` + `waiters/` for changes; every event pings `tx` so a blocked admission re-checks
+/// immediately. The watcher thread lives as long as the returned handle (held for the wait's duration).
+/// `None` if the platform watcher can't start → caller degrades to the pure 2s poll fallback.
+fn watch_residency(tx: std::sync::mpsc::Sender<()>) -> Option<notify::RecommendedWatcher> {
+    use notify::{RecursiveMode, Watcher};
+    let _ = std::fs::create_dir_all(residents_dir());
+    let _ = std::fs::create_dir_all(waiters_dir());
+    let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if res.is_ok() {
+            let _ = tx.send(()); // coalesced; the waiter drains extras
+        }
+    })
+    .ok()?;
+    w.watch(&residents_dir(), RecursiveMode::NonRecursive).ok()?;
+    let _ = w.watch(&waiters_dir(), RecursiveMode::NonRecursive); // best-effort second watch
+    Some(w)
+}
+
+/// Block until the next residency/queue change event, or ~2s (the safety fallback), whichever first —
+/// but never past `deadline`. Drains coalesced events so we don't spin.
+fn wait_for_change(rx: &std::sync::mpsc::Receiver<()>, deadline: std::time::Instant) {
+    let now = std::time::Instant::now();
+    if now >= deadline {
+        return;
+    }
+    let cap = std::time::Duration::from_secs(2).min(deadline - now);
+    let _ = rx.recv_timeout(cap); // wakes on the first event, else after the fallback cap
+    while rx.try_recv().is_ok() {} // drain extras
 }
 
 /// Create + flock `residents/<pid>` and write the reservation. `None` if the file
