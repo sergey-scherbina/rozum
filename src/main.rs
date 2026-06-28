@@ -602,6 +602,71 @@ enum MeetingsAction {
         #[arg(long = "persona-file")]
         persona_file: Option<std::path::PathBuf>,
     },
+
+    /// Drive the incident lifecycle from the shell — the human/script twin of the agent-native MCP
+    /// thread verbs (open / escalate / resolve / list / show / metrics). Makes the support console
+    /// (`mtg-frontend`) populate without an agent, and gives operators a no-UI lever.
+    Incident {
+        #[command(subcommand)]
+        action: IncidentAction,
+        /// Target room (default = the cwd project's room).
+        #[arg(long, global = true)]
+        room: Option<String>,
+        /// Author display (default: $USER, or $ROZUM_MEETING_AS).
+        #[arg(long = "as", global = true)]
+        as_display: Option<String>,
+    },
+}
+
+/// The incident-lifecycle verbs (`rozum meetings incident …`). Each drives the daemon over its socket,
+/// calling the same `meeting.*` thread tools the agents use.
+#[derive(Subcommand)]
+enum IncidentAction {
+    /// Open an incident thread anchored on a message id (a `<date>/<n>` id from `meetings read`).
+    Open {
+        /// The anchor message id (e.g. `2026-06-28/3`).
+        anchor_id: String,
+        /// The incident title (free text; no quotes needed).
+        title: Vec<String>,
+        /// Open as a plain topic thread instead of a tracked incident.
+        #[arg(long)]
+        topic: bool,
+    },
+    /// Escalate an incident to someone (sets state=escalated + owner + an event note).
+    Escalate {
+        /// The incident/thread id.
+        id: String,
+        /// Who to escalate to (a handle).
+        #[arg(long)]
+        to: String,
+        /// An optional note explaining why.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Resolve an incident (sets state=resolved + a resolution note).
+    Resolve {
+        /// The incident/thread id.
+        id: String,
+        /// An optional resolution note.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Set an incident's state directly: open|triaging|escalated|resolved|closed.
+    State {
+        /// The incident/thread id.
+        id: String,
+        /// The new state.
+        state: String,
+    },
+    /// List the room's incident/topic threads.
+    List,
+    /// Show one incident's whole-context bundle (thread + all messages + participants + timespan).
+    Show {
+        /// The incident/thread id.
+        id: String,
+    },
+    /// Resolving metrics for the room (totals / by-state / mean time-to-resolve).
+    Metrics,
 }
 
 #[derive(Subcommand)]
@@ -995,6 +1060,9 @@ async fn main() {
                     persona_file,
                 )
                 .await
+            }
+            MeetingsAction::Incident { action, room, as_display } => {
+                run_meetings_incident(action, room, as_display).await
             }
         },
         Some(Command::CommitMsg { model, n_ctx }) => run_commit_msg(model, n_ctx).await,
@@ -2506,6 +2574,94 @@ async fn run_meetings_post(
         Ok(room) => eprintln!("posted to '{room}' as {display}"),
         Err(e) => {
             eprintln!("meetings post: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `rozum meetings incident <verb>` — drive the incident lifecycle from the shell. Connects to the
+/// daemon and calls the same `meeting.*` thread tools the agents use, so a human/script can open,
+/// escalate, resolve, and inspect incidents without an agent or the web UI.
+async fn run_meetings_incident(
+    action: IncidentAction,
+    room: Option<String>,
+    as_display: Option<String>,
+) {
+    use rozum::meeting::daemon::daemon_alive;
+    use rozum::meeting::daemon_proxy::{detect_project, spawn_daemon};
+    use rozum::meeting::room_path::meeting_sock;
+    use rozum::meeting::tui_client::{PostTarget, call_once};
+
+    let sock = meeting_sock();
+    if !daemon_alive(&sock).await {
+        spawn_daemon().await;
+    }
+    let (display, token) = rozum::meeting::client::post_identity(as_display);
+    let shared = std::env::var("ROZUM_MEETING_ROOM")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let target = match (room, shared) {
+        (Some(name), _) => PostTarget::Named(name),
+        (None, Some(name)) => PostTarget::Shared(name),
+        (None, None) => match detect_project() {
+            Some(p) => PostTarget::Project(p),
+            None => {
+                eprintln!("meetings incident: no project detected — run inside a repo, or pass --room");
+                std::process::exit(1);
+            }
+        },
+    };
+
+    // Map the verb → (MCP tool, args, success-line). `pretty` verbs print the JSON payload.
+    let (tool, args, pretty): (&str, serde_json::Value, bool) = match action {
+        IncidentAction::Open { anchor_id, title, topic } => {
+            let title = title.join(" ");
+            let title = if title.is_empty() { anchor_id.clone() } else { title };
+            (
+                "meeting.thread_open",
+                serde_json::json!({
+                    "anchor_id": anchor_id,
+                    "title": title,
+                    "kind": if topic { "topic" } else { "incident" },
+                }),
+                false,
+            )
+        }
+        IncidentAction::Escalate { id, to, note } => (
+            "meeting.escalate",
+            serde_json::json!({ "id": id, "to": to, "note": note.unwrap_or_default() }),
+            false,
+        ),
+        IncidentAction::Resolve { id, note } => (
+            "meeting.resolve",
+            serde_json::json!({ "id": id, "note": note.unwrap_or_default() }),
+            false,
+        ),
+        IncidentAction::State { id, state } => (
+            "meeting.thread_set_state",
+            serde_json::json!({ "id": id, "state": state }),
+            false,
+        ),
+        IncidentAction::List => ("meeting.threads", serde_json::json!({}), true),
+        IncidentAction::Show { id } => (
+            "meeting.thread_context",
+            serde_json::json!({ "thread_id": id }),
+            true,
+        ),
+        IncidentAction::Metrics => ("meeting.thread_metrics", serde_json::json!({}), true),
+    };
+
+    match call_once(&sock, target, &display, token.as_deref(), tool, args).await {
+        Ok(v) => {
+            if pretty {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()));
+            } else {
+                eprintln!("ok: {}", serde_json::to_string(&v).unwrap_or_else(|_| v.to_string()));
+            }
+        }
+        Err(e) => {
+            eprintln!("meetings incident: {e}");
             std::process::exit(1);
         }
     }

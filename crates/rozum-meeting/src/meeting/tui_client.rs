@@ -286,6 +286,17 @@ impl MeetingClient {
         Ok(())
     }
 
+    /// Call an arbitrary room MCP tool (e.g. `meeting.thread_open`, `meeting.escalate`) and return its
+    /// parsed JSON payload (the text content decoded as JSON, or the raw result if it isn't JSON text).
+    /// Errors if the tool reports `isError`. The generic lever behind the `meetings incident` verbs.
+    pub async fn call(&mut self, tool: &str, args: Value) -> ClientResult<Value> {
+        let r = self.conn.call_tool(tool, args, T).await?;
+        if r.get("isError").and_then(Value::as_bool) == Some(true) {
+            return Err(format!("{tool} rejected: {}", result_text(&r)).into());
+        }
+        Ok(result_json(&r))
+    }
+
     /// Long-poll for new messages; append them to the transcript and return them.
     pub async fn poll(&mut self) -> ClientResult<Vec<StoredTurn>> {
         let since_cursor = self.cursor.clone();
@@ -490,6 +501,58 @@ pub async fn post_once(
     };
     client.submit_with_meta(text, meta).await?;
     Ok(room)
+}
+
+/// Extract the first text content of an MCP `CallToolResult` value as a string (empty if absent).
+fn result_text(r: &Value) -> String {
+    r.get("content")
+        .and_then(Value::as_array)
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Decode an MCP `CallToolResult`'s text content as JSON; falls back to the raw value if it isn't JSON.
+fn result_json(r: &Value) -> Value {
+    let text = result_text(r);
+    serde_json::from_str(&text).unwrap_or_else(|_| r.clone())
+}
+
+/// One-shot room tool call: connect as `display`, join `target`, call `tool(args)`, return its JSON.
+/// The shared transport for the `rozum meetings incident …` verbs (thread open/escalate/resolve/…),
+/// mirroring `post_once` but for the thread MCP tools. The daemon must already be reachable at `sock`.
+pub async fn call_once(
+    sock: &Path,
+    target: PostTarget,
+    display: &str,
+    token: Option<&str>,
+    tool: &str,
+    args: Value,
+) -> ClientResult<Value> {
+    let mut client = match token {
+        Some(t) => MeetingClient::connect_as(sock, display, t).await?,
+        None => MeetingClient::connect(sock, display).await?,
+    };
+    match target {
+        PostTarget::Project(p) => {
+            client.enter_project(&p).await?;
+        }
+        PostTarget::Shared(name) => {
+            client.enter_or_create(&name).await?;
+        }
+        PostTarget::Named(name) => {
+            let info = client
+                .list_rooms()
+                .await?
+                .into_iter()
+                .find(|r| r.name == name)
+                .ok_or_else(|| format!("no room named '{name}'"))?;
+            client.enter_named(&info).await?;
+        }
+    };
+    client.call(tool, args).await
 }
 
 #[cfg(test)]
