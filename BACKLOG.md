@@ -99,11 +99,12 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   an `opened incident: <title>` audit message (thread_id = anchor) on first open, so even a reply-less
   incident is recoverable. **REMAINING:** make ALL transitions (assign/state/pin/severity) carry STRUCTURED
   op metadata (not prose) for exact (not best-effort) rebuild — the full event-sourcing.
-- [~] **mtg-msg-link-react-edit** — LINK DONE (`5e3e0a4`): `Thread.links` + `store::set_linked`;
-  `meeting.thread_link`, CLI `incident link|unlink`, REST `/threads/{id}/link`, console 🔗; thread_context
-  resolves links (external context) into a `linked` bundle. REACT skipped (low value for an incident
-  platform). **REMAINING:** edit/redact (a redaction tombstone record — readers hide the redacted content;
-  compliance value).
+- [x] **mtg-msg-link-react-edit** — DONE (LINK `5e3e0a4` + REDACT `4a5ba09`). LINK: `Thread.links` +
+  `meeting.thread_link` + CLI `incident link|unlink` + REST + console 🔗; thread_context resolves links into
+  a `linked` bundle. REDACT (edit/redact): `redactions.json` tombstone applied on READ in `read_day` — every
+  surface shows `[redacted: reason]`, original bytes preserved, reversible, zero-cost when none;
+  `meeting.redact` + CLI `meetings redact [--undo]` + REST + console ⊘. REACT deliberately skipped (low value
+  for an incident platform).
 
 - [ ] **mtg-rich-rooms** — a richer room model beyond the daily-file chat: rooms with a **lifecycle**
   (a support queue / a per-product channel / a per-incident room), durable identity, membership/roles

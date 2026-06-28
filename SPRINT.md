@@ -26,8 +26,11 @@
   protects open-incident days). **(+) recovery** (`d7095d8`+`5e3e0a4`): `rebuild_threads` + CLI `repair-threads`
   reconstruct incidents from the log; `thread_open` posts an `opened incident` audit line so even reply-less
   incidents recover. **(+) link** (`5e3e0a4`): `Thread.links` + `incident link|unlink` + console 🔗 pulls
-  external context into the bundle. 99/99 meeting lib tests. Remaining = full structured event-sourcing,
-  edit/redact, `.ssc` lifecycle port — BACKLOG `## Meetings → product-support`. Detail below ↓
+  external context into the bundle. **(+) redact** (`4a5ba09`): `redactions.json` tombstone applied on read in
+  `read_day` — every surface shows `[redacted: reason]`, original preserved, reversible; `meeting.redact` +
+  CLI `meetings redact` + console ⊘. 100/100 meeting lib tests. Remaining = full structured event-sourcing
+  (exact, not best-effort, rebuild) + the `.ssc` lifecycle/incident-lanes port — BACKLOG `## Meetings →
+  product-support`. Detail below ↓
 
 - [~] **meetings — original sprint notes (superseded by the line above)** — spec
   `docs/specs/meetings-incident-platform.md`. **FOUNDATION (P1-P3) DONE — the data-model + store ops, all
