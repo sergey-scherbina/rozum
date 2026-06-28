@@ -113,9 +113,12 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   `meetings post --reply-to <id>`, console reply affordance (↩ button + cancellable hint + `↩ <id>`
   indicator on replies). **ASSIGN DONE (`0f9007b`):** `meeting.thread_assign` (owner only, no state change —
   orthogonal to the lifecycle), CLI `meetings incident assign <id> --to <h>`, REST `/threads/{id}/assign`,
-  console 'Assign' button. **REMAINING:** link/reference (retroactively attach a message to a thread —
-  append-only store, so a reference record, not a mutation), react, edit/redact, pin. Resolve/close already
-  shipped (the incident verbs). Search scans day files; an index is only needed if rooms get large.
+  console 'Assign' button. **PIN DONE (`21f0b1a`):** `Thread.pinned` + `store::set_pinned`;
+  `meeting.thread_pin`, CLI `incident pin|unpin` + `show` pinned-first, REST `/threads/{id}/pin`, console 📌
+  toggle. **SLA/STALENESS DONE (`57caa56`):** per-severity windows + `needs_attention` metric + ⚠ on stale
+  cards/list; `open_thread` inherits the anchor alert's severity. **REMAINING:** link/reference
+  (retroactively attach a message to a thread — append-only store, so a reference record, not a mutation),
+  react, edit/redact. Resolve/close already shipped. Search scans day files; index only if rooms get large.
 - [ ] **mtg-escalation** — **escalation**: route/escalate an incident by severity/tier/on-call (to a
   specific agent, a stronger model, or a human), with an escalation policy + an audit trail of who/when.
   Ties into the model-chain (escalate to a stronger model) + identity-roster (who's on-call). The
