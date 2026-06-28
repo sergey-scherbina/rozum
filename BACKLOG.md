@@ -119,6 +119,16 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   one place. The "gather everything about this incident" primitive; the highest agent-leverage piece
   (an agent can assemble the context bundle automatically). Builds on obs + the meeting store.
 
+- [ ] **mtg-frontend** (operator 2026-06-28 — separate task) — a GOOD frontend for meetings: the
+  support/incident UI on top of the platform model (rooms, threads, messages + metadata). Today there's a
+  `.ssc`→Rust PWA (`project-rozum-meeting-ssc-pwa`; per-handle colours, HH:MM, iOS-tuned) + a TUI client —
+  chat-grade, not support-grade. Target: **incident-centric UX** — a queue/inbox of threads with state +
+  severity + assignee; a thread view (reply-chains, the incident's gathered context bundle, the resolution);
+  filter/search by metadata; escalate/assign/resolve actions; live updates. Agent-native: an agent's posts +
+  context-bundles render first-class. Web (the `.ssc`→Rust toolkit) + the TUI both consume the same model.
+  Depends on the platform foundation (`meetings-incident-platform.md` P1-P3) landing first; own spec when the
+  model is stable. Reuses the existing `.ssc` web pipeline + `meetings-rest-read` + the MCP surface.
+
 ## Model chain (verification-gated, `--model A,B,C`)
 
 The CORE chain shipped on master (spec `docs/specs/pipeline-cascade.md`, SPRINT top item): target

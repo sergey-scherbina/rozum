@@ -38,7 +38,71 @@ pub fn date_of_ts(ts: u64) -> String {
 /// One stored message. Self-describing: `date` is its day file and `n` is its
 /// line within that file (both redundant with location, kept so a line stands
 /// alone for grep and the future REST read).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Message kind (P1, spec `meetings-incident-platform.md`). Drives rendering + filtering. `Note` is the
+/// default so old plain lines (no `kind`) read as notes and serialize WITHOUT the field (byte-identical).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MsgKind {
+    #[default]
+    Note,
+    Question,
+    Event,
+    Alert,
+    Resolution,
+}
+impl MsgKind {
+    fn is_note(&self) -> bool {
+        matches!(self, MsgKind::Note)
+    }
+}
+
+/// Incident severity (the jetsam ladder of support).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+/// Per-message support status.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MsgStatus {
+    Open,
+    Acknowledged,
+    Resolved,
+    Closed,
+}
+
+/// Structured support metadata on a message — all optional; absent when empty so plain messages stay
+/// byte-identical.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MsgMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<MsgStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<String>,
+}
+impl MsgMeta {
+    fn is_empty(&self) -> bool {
+        self.severity.is_none()
+            && self.status.is_none()
+            && self.assignee.is_none()
+            && self.tags.is_empty()
+            && self.links.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct StoredTurn {
     pub date: String,
     pub n: u64,
@@ -46,6 +110,22 @@ pub struct StoredTurn {
     pub display_name: String,
     pub content: String,
     pub ts: u64,
+    // P1 message metadata — all `#[serde(default, skip_serializing_if=…)]`, so a plain message (no
+    // metadata) serializes to EXACTLY the v1 JSON (no new keys) and an old line reads with these defaults.
+    #[serde(default, skip_serializing_if = "MsgKind::is_note")]
+    pub kind: MsgKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<String>,
+    #[serde(default, skip_serializing_if = "MsgMeta::is_empty")]
+    pub meta: MsgMeta,
+}
+impl StoredTurn {
+    /// The stable message id — derived `<date>/<n>` (already unique per room). Not stored.
+    pub fn id(&self) -> String {
+        format!("{}/{}", self.date, self.n)
+    }
 }
 
 /// Per-day counts, the body of `index.json`.
@@ -294,6 +374,7 @@ impl TranscriptWriter {
             display_name: display_name.into(),
             content: content.clone(),
             ts,
+            ..Default::default() // P1: plain post; the metadata write API populates these (P1b)
         };
         let mut line = serde_json::to_string(&turn).map_err(std::io::Error::other)?;
         line.push('\n');
@@ -590,6 +671,44 @@ mod tests {
         1_718_000_000 + date_marker * 86_400
     }
 
+    // P1 message-metadata: a plain message must serialize BYTE-IDENTICALLY to the v1 JSON (no new keys)
+    // and an old v1 line must read back with default metadata — so existing rooms are untouched.
+    #[test]
+    fn stored_turn_metadata_is_backward_compatible() {
+        let v1 = r#"{"date":"2026-06-28","n":3,"participant_id":"p","display_name":"P","content":"hi","ts":42}"#;
+        // Old line parses → defaults; derived id.
+        let t: StoredTurn = serde_json::from_str(v1).unwrap();
+        assert_eq!(t.kind, MsgKind::Note);
+        assert!(t.thread_id.is_none() && t.in_reply_to.is_none() && t.meta.is_empty());
+        assert_eq!(t.id(), "2026-06-28/3");
+        // A plain turn serializes to EXACTLY the v1 string (no metadata keys) → byte-identical rooms.
+        let plain = StoredTurn {
+            date: "2026-06-28".into(),
+            n: 3,
+            participant_id: "p".into(),
+            display_name: "P".into(),
+            content: "hi".into(),
+            ts: 42,
+            ..Default::default()
+        };
+        assert_eq!(serde_json::to_string(&plain).unwrap(), v1);
+        // A metadata-rich turn round-trips (kind + severity + tags emit + parse back).
+        let rich = StoredTurn {
+            kind: MsgKind::Alert,
+            thread_id: Some("2026-06-28/0".into()),
+            meta: MsgMeta {
+                severity: Some(Severity::High),
+                status: Some(MsgStatus::Open),
+                tags: vec!["db".into()],
+                ..Default::default()
+            },
+            ..plain.clone()
+        };
+        let s = serde_json::to_string(&rich).unwrap();
+        assert!(s.contains(r#""kind":"alert""#) && s.contains(r#""severity":"high""#) && s.contains(r#""tags":["db"]"#));
+        assert_eq!(serde_json::from_str::<StoredTurn>(&s).unwrap(), rich);
+    }
+
     #[test]
     fn append_assigns_date_and_zero_based_n() {
         let dir = tempdir().unwrap();
@@ -769,6 +888,7 @@ mod tests {
             display_name: "P".into(),
             content: "ok".into(),
             ts: 1,
+            ..Default::default()
         })
         .unwrap();
         std::fs::write(

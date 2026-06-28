@@ -147,6 +147,7 @@ mod tests {
             display_name: dn.into(),
             content: "x".into(),
             ts: 0,
+            ..Default::default()
         };
         let turns =
             vec![turn("Sergiy · plucky-fox"), turn("Sergiy · plucky-fox"), turn("Sergiy · nimble-raven")];

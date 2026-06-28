@@ -227,6 +227,7 @@ mod tests {
             display_name: name.into(),
             content: content.into(),
             ts: 0,
+            ..Default::default()
         }
     }
 
