@@ -71,6 +71,46 @@
   dedicated summarizer. Chunked-PREFILL (`Generate` edit, exists) is orthogonal — it cuts the memory
   spike of a long-but-FITTING prompt, it does NOT extend the window.
 
+## Meetings → product-support / incident platform (STRATEGIC — operator 2026-06-28)
+
+**Direction:** rozum meetings are not just agent chat — they are the substrate for **product support
+with escalation + resolving + per-incident context collection**, where AI agents are first-class
+participants (triage, gather context, escalate, resolve) alongside humans. Think Slack+Zendesk+PagerDuty,
+agent-native. A room/thread IS an incident; context (logs, history, related messages, artifacts) accretes
+to it; messages carry support metadata; agents drive it toward resolution. Big perspective tasks, built
+on the existing meeting stack (`docs/specs/agent-meetings-daemon.md`, `meeting-identity-roster.md`,
+`meeting-mention-inbox.md`, `meetings-rest-read.md`; daily disk-backed rooms, session-token identity,
+single-writer daemon). Each item below is its own spec+build later — listed to set the trajectory.
+
+- [ ] **mtg-rich-rooms** — a richer room model beyond the daily-file chat: rooms with a **lifecycle**
+  (a support queue / a per-product channel / a per-incident room), durable identity, membership/roles
+  (reporter, assignee, on-call, observer), and a room **kind** (chat | queue | incident). Today: one
+  flat daily room per project. Needs a room registry with typed metadata + a migration from the daily
+  files. The hinge the rest hangs on.
+- [ ] **mtg-message-metadata** — messages carry **structured metadata**: type (note | question | event |
+  alert | resolution), severity, status, assignee, tags, links to artifacts/logs, and a stable message
+  id. Today a message is handle+text+timestamp. Needs a versioned message schema (back-compat with the
+  plain lines) + write/read paths that preserve it.
+- [ ] **mtg-threads** — group related messages into a **thread = an incident/topic**: a thread id, a
+  parent message, reply-chains, thread-level state (open/triaging/escalated/resolved/closed) + SLA/owner.
+  This is what turns a stream into trackable incidents. Needs thread storage + a thread-aware reader/TUI.
+- [ ] **mtg-message-ops** — **working with messages**: search (full-text + by metadata/tag/assignee/state),
+  link/reference, react, edit/redact, pin, assign, and **resolve** (close a message/thread with a
+  resolution record). The verbs that make it a support tool, not a log. Needs an index + a richer
+  MCP/TUI/REST surface over the store.
+- [ ] **mtg-escalation** — **escalation**: route/escalate an incident by severity/tier/on-call (to a
+  specific agent, a stronger model, or a human), with an escalation policy + an audit trail of who/when.
+  Ties into the model-chain (escalate to a stronger model) + identity-roster (who's on-call). The
+  "P" of PagerDuty.
+- [ ] **mtg-resolving** — **resolving**: an incident state machine (open → triaging → escalated →
+  resolved → closed), resolution records, reopen, and metrics (time-to-resolve, escalation rate). Turns
+  threads into accountable units of work.
+- [ ] **mtg-incident-context** — **per-incident context collection**: a thread auto-accretes the relevant
+  context — attach logs/gateway.jsonl slices, link related messages/threads, capture the workdir/repro,
+  snapshot the model/agent state — so an agent (or human) picking up an incident has the full picture in
+  one place. The "gather everything about this incident" primitive; the highest agent-leverage piece
+  (an agent can assemble the context bundle automatically). Builds on obs + the meeting store.
+
 ## Model chain (verification-gated, `--model A,B,C`)
 
 The CORE chain shipped on master (spec `docs/specs/pipeline-cascade.md`, SPRINT top item): target
