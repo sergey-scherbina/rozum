@@ -190,6 +190,19 @@ pub enum ThreadState {
     Closed,
 }
 impl ThreadState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Triaging => "triaging",
+            Self::Escalated => "escalated",
+            Self::Resolved => "resolved",
+            Self::Closed => "closed",
+        }
+    }
+    /// A resolved/closed thread is terminal (for metrics: time-to-resolve).
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Resolved | Self::Closed)
+    }
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
             "open" => Self::Open,

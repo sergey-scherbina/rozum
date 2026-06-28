@@ -109,6 +109,27 @@ pub struct ThreadStateParams {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EscalateParams {
+    /// The thread id.
+    pub id: String,
+    /// Who/what to escalate to (an agent handle, on-call, a tier). Becomes the thread assignee.
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Optional escalation note.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ResolveParams {
+    /// The thread id.
+    pub id: String,
+    /// The resolution note.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WaitParams {
     /// Day of the last message seen (`YYYY-MM-DD`). Omit to receive all.
     #[serde(default)]
@@ -442,6 +463,120 @@ impl MeetingServer {
             };
             let ts = room.lock().await.threads();
             text_result(&serde_json::to_string(&ts).unwrap_or_default())
+        })
+        .await
+    }
+
+    /// Escalate a thread/incident: state→escalated, set the assignee, post an escalation note.
+    #[tool(
+        name = "meeting.escalate",
+        description = "Escalate a thread/incident: state→escalated, set assignee (to), post a note."
+    )]
+    pub async fn escalate(&self, params: Parameters<EscalateParams>) -> CallToolResult {
+        guard("meeting.escalate", async move {
+            let (room, caller) = self.session_room().await;
+            let (Some(room), Some(caller)) = (room, caller) else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let p = &params.0;
+            let mut r = room.lock().await;
+            match r.set_thread_state(&p.id, store::ThreadState::Escalated) {
+                Ok(None) => return err_result("unknown thread id"),
+                Err(e) => return err_result(&e),
+                Ok(Some(_)) => {}
+            }
+            if let Some(to) = &p.to {
+                let _ = r.set_thread_owner(&p.id, Some(to.clone()), None);
+            }
+            let to = p.to.clone().unwrap_or_else(|| "on-call".into());
+            let note = p.note.clone().unwrap_or_default();
+            let content = if note.is_empty() {
+                format!("escalated to {to}")
+            } else {
+                format!("escalated to {to}: {note}")
+            };
+            let pm = store::PostMeta {
+                kind: store::MsgKind::Event,
+                thread_id: Some(p.id.clone()),
+                ..Default::default()
+            };
+            match r.submit_with_meta(&caller, &content, pm) {
+                Ok(turn) => text_result(
+                    &serde_json::json!({ "thread": p.id, "state": "escalated", "to": to, "msg_id": turn.id() })
+                        .to_string(),
+                ),
+                Err(e) => err_result(&e),
+            }
+        })
+        .await
+    }
+
+    /// Resolve a thread/incident: state→resolved, post a resolution note.
+    #[tool(
+        name = "meeting.resolve",
+        description = "Resolve a thread/incident: state→resolved, post a resolution note."
+    )]
+    pub async fn resolve(&self, params: Parameters<ResolveParams>) -> CallToolResult {
+        guard("meeting.resolve", async move {
+            let (room, caller) = self.session_room().await;
+            let (Some(room), Some(caller)) = (room, caller) else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let p = &params.0;
+            let mut r = room.lock().await;
+            match r.set_thread_state(&p.id, store::ThreadState::Resolved) {
+                Ok(None) => return err_result("unknown thread id"),
+                Err(e) => return err_result(&e),
+                Ok(Some(_)) => {}
+            }
+            let note = p.note.clone().unwrap_or_else(|| "resolved".into());
+            let pm = store::PostMeta {
+                kind: store::MsgKind::Resolution,
+                thread_id: Some(p.id.clone()),
+                ..Default::default()
+            };
+            match r.submit_with_meta(&caller, &note, pm) {
+                Ok(turn) => text_result(
+                    &serde_json::json!({ "thread": p.id, "state": "resolved", "msg_id": turn.id() })
+                        .to_string(),
+                ),
+                Err(e) => err_result(&e),
+            }
+        })
+        .await
+    }
+
+    /// Support metrics for the room's threads: counts by state + average time-to-resolve.
+    #[tool(
+        name = "meeting.thread_metrics",
+        description = "Room thread/incident metrics: counts by state + average time-to-resolve (secs)."
+    )]
+    pub async fn thread_metrics(&self) -> CallToolResult {
+        guard("meeting.thread_metrics", async move {
+            let (room, _id) = self.session_room().await;
+            let Some(room) = room else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let threads = room.lock().await.threads();
+            let total = threads.len();
+            let mut by_state: std::collections::BTreeMap<&'static str, usize> = Default::default();
+            let mut ttr_sum = 0u64;
+            let mut terminal = 0u64;
+            for t in &threads {
+                *by_state.entry(t.state.as_str()).or_default() += 1;
+                if t.state.is_terminal() {
+                    ttr_sum += t.updated_ts.saturating_sub(t.created_ts);
+                    terminal += 1;
+                }
+            }
+            let avg_ttr = if terminal > 0 { ttr_sum / terminal } else { 0 };
+            text_result(
+                &serde_json::json!({
+                    "total": total, "by_state": by_state,
+                    "resolved": terminal, "avg_time_to_resolve_secs": avg_ttr,
+                })
+                .to_string(),
+            )
         })
         .await
     }

@@ -21,7 +21,8 @@ use super::identity::Roster;
 use super::participant::ParticipantId;
 use super::state::{POLLING_STALE_SECS, RESPONDING_STALE_SECS, unix_ts};
 use super::store::{
-    HighWater, PostMeta, RoomPaths, StoredTurn, Thread, ThreadKind, ThreadState, TranscriptWriter,
+    HighWater, PostMeta, RoomPaths, Severity, StoredTurn, Thread, ThreadKind, ThreadState,
+    TranscriptWriter,
 };
 
 /// Shrunk coordination events — **no message content**. Clients read the bytes
@@ -292,6 +293,15 @@ impl DaemonRoom {
 
     pub fn set_thread_state(&mut self, id: &str, state: ThreadState) -> Result<Option<Thread>, String> {
         self.writer.set_thread_state(id, state, unix_ts()).map_err(|e| e.to_string())
+    }
+
+    pub fn set_thread_owner(
+        &mut self,
+        id: &str,
+        owner: Option<String>,
+        severity: Option<Severity>,
+    ) -> Result<Option<Thread>, String> {
+        self.writer.set_thread_owner_severity(id, owner, severity, unix_ts()).map_err(|e| e.to_string())
     }
 
     pub fn threads(&self) -> Vec<Thread> {
