@@ -909,6 +909,25 @@ async fn serve_daemon_until(
     tracing::info!("meeting daemon listening on {}", socket_path.display());
     super::rest_read::maybe_spawn_from_env(Arc::clone(&registry), shutdown.clone());
 
+    // Retention: prune day files older than ROZUM_MEETINGS_RETAIN_DAYS (default off = keep everything),
+    // per registered room. Never prunes a day holding an OPEN incident's messages (see prune_old_days).
+    if let Some(retain) = std::env::var("ROZUM_MEETINGS_RETAIN_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&d| d > 0)
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        for loc in registry.list() {
+            let pruned = store::prune_old_days(&loc.root, retain, now);
+            if !pruned.is_empty() {
+                tracing::info!(room = %loc.name, count = pruned.len(), "retention pruned old day files");
+            }
+        }
+    }
+
     // Idle-evict watchdog: sweep long-idle rooms out of the open set (files stay,
     // they reopen on demand). `ROZUM_MEETINGS_IDLE_SECS=0` disables it.
     let idle_secs = std::env::var("ROZUM_MEETINGS_IDLE_SECS")

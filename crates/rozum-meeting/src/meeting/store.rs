@@ -1119,6 +1119,57 @@ pub fn search_messages(root: &Path, filter: &MsgFilter, limit: usize) -> Vec<Sto
     hits
 }
 
+/// Prune day files older than `retain_days` from `root` (opt-in retention; `retain_days == 0` keeps
+/// everything). A day is NEVER pruned if it holds a message belonging to a non-terminal (open) incident
+/// — incident context must survive. Rewrites `index.json` to drop the pruned days. Returns the pruned
+/// dates. `now_ts` is the current unix time (the cutoff is `now − retain_days`).
+pub fn prune_old_days(root: &Path, retain_days: u64, now_ts: u64) -> Vec<String> {
+    if retain_days == 0 {
+        return vec![];
+    }
+    let cutoff = date_of_ts(now_ts.saturating_sub(retain_days.saturating_mul(86_400)));
+    // Anchor/thread ids of OPEN incidents — their days are protected.
+    let open_ids: BTreeMap<String, ()> = read_threads(root)
+        .values()
+        .filter(|t| !t.state.is_terminal())
+        .map(|t| (t.id.clone(), ()))
+        .collect();
+    let mut pruned = vec![];
+    for date in day_dates(root) {
+        if date.as_str() >= cutoff.as_str() {
+            continue; // within the retention window
+        }
+        // Protect a day that carries any open-incident anchor or member (or that we can't read).
+        let protected = !open_ids.is_empty()
+            && read_day(root, &date, 0, None)
+                .map(|msgs| {
+                    msgs.iter().any(|m| {
+                        open_ids.contains_key(&m.id())
+                            || m.thread_id.as_deref().is_some_and(|t| open_ids.contains_key(t))
+                    })
+                })
+                .unwrap_or(true);
+        if protected {
+            continue;
+        }
+        if std::fs::remove_file(root.join(format!("{date}.jsonl"))).is_ok() {
+            pruned.push(date);
+        }
+    }
+    if !pruned.is_empty() {
+        let idx_path = root.join("index.json");
+        if let Ok(bytes) = std::fs::read(&idx_path) {
+            if let Ok(mut index) = serde_json::from_slice::<Index>(&bytes) {
+                for d in &pruned {
+                    index.days.remove(d);
+                }
+                let _ = write_json_atomic(&idx_path, &index);
+            }
+        }
+    }
+    pruned
+}
+
 /// Read every message at or after the cursor `(since_date, since_n)` from disk.
 /// `since_date = None` returns the whole history. This is how direct-read clients
 /// fetch a `wait` delta — content never transits the daemon.
@@ -1752,6 +1803,35 @@ mod tests {
         let rooms = list_registered(&state);
         assert_eq!(rooms.len(), 1);
         assert_eq!(rooms[0].name, "renamed");
+    }
+
+    #[test]
+    fn retention_prunes_old_days_but_protects_open_incidents() {
+        let dir = tempdir().unwrap();
+        let paths = RoomPaths::ad_hoc_in(dir.path(), "ops");
+        let root = paths.root.clone();
+        let mut w = TranscriptWriter::new(paths, "ops", "topic", None, dir.path().to_path_buf());
+        // Day 1 (old, plain chatter), day 2 (old, holds an OPEN incident), day "now" (recent).
+        let d1 = 1_700_000_000u64; // ~2023-11
+        let d2 = d1 + 86_400 * 2;
+        let now = d1 + 86_400 * 30; // 30 days later
+        w.append("p", "A", "old chatter", d1).unwrap();
+        let anchor = w.append("p", "A", "DB down", d2).unwrap();
+        let id = anchor.id();
+        w.open_thread(&id, "DB outage", ThreadKind::Incident, d2).unwrap(); // stays OPEN
+        w.append("p", "A", "recent", now).unwrap();
+        let dates_before = day_dates(&root);
+        assert_eq!(dates_before.len(), 3, "three day files: {dates_before:?}");
+
+        // Retain 7 days → day 1 + day 2 are both "old", but day 2 holds the open incident → protected.
+        let pruned = prune_old_days(&root, 7, now);
+        assert_eq!(pruned, vec![date_of_ts(d1)], "only the plain old day pruned: {pruned:?}");
+        let after = day_dates(&root);
+        assert!(!after.contains(&date_of_ts(d1)), "old chatter day removed");
+        assert!(after.contains(&date_of_ts(d2)), "open-incident day protected");
+        assert!(after.contains(&date_of_ts(now)), "recent day kept");
+        // retain_days = 0 is a no-op.
+        assert!(prune_old_days(&root, 0, now).is_empty());
     }
 
     #[test]
