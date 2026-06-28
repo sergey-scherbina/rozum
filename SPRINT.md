@@ -1,6 +1,13 @@
 # Sprint
 
-- [ ] **residency admission QUEUE — event-driven, priority, preemptive (operator 2026-06-28, `pipeline-swap-settle`)** —
+- [x] **residency admission QUEUE — event-driven, priority, preemptive (operator 2026-06-28, `pipeline-swap-settle`)** —
+  **DONE + VALIDATED UNDER CONTENTION.** P1 ordered queue (`2a7bee9`), P2 actual-free grant (`0ed5825`,
+  inherited from admits), P3 2-tier priority (`0ed5825`), P1b notify event-wake (`5b9b564`), oracle-wrap
+  `rozum gateway admit` (`de23e9f`), P4 cooperative preemption (`8b242fd`). P5 (`scripts/bench/contention.sh`):
+  batch GLM-32B antagonist vs interactive Qwen3-4B matrix → **antagonist preempted @ load, matrix ran 6/6,
+  0 dead cells (was 19), 0 jetsam, no reboot; batch then correctly waited 240s (never preempts interactive)**.
+  REMAINING (separate, parallel): smmr-D (honest cache-dominated peak) for true zero-jetsam — the queue is
+  strictly safer than today regardless. Original spec/sprint commit `37080ef`.
   spec: `docs/specs/residency-admission-queue.md`. Kill contention-jetsam properly (NOT retries): replace the
   check-then-poll-240s-then-jetsam admission with an **ordered cross-process wait queue** over the existing
   flock RAM-ledger (`share.rs`), **kqueue**-notified (event-driven, no poll), `actual-free-RAM` grant (sees
