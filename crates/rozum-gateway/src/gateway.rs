@@ -942,6 +942,62 @@ fn new_id(prefix: &str) -> String {
 /// **tool schemas** (which the chat template renders into the prompt — easily ~5K tokens
 /// of Claude Code's ~33 tools). Counting only `Text` blocks under-counts a real coding
 /// turn several-fold and can let an over-long prompt slip past the overflow guard.
+/// gateway-auto-context (spec/backlog `gateway-auto-context`): token headroom reserved for the model's
+/// reply so a fitted prompt doesn't fill 100% of the window leaving 0 for output.
+const AUTO_CONTEXT_REPLY_RESERVE: u32 = 1024;
+
+/// Auto-context on by default; `ROZUM_AUTO_CONTEXT=0` restores the legacy "error on overflow".
+fn auto_context_enabled() -> bool {
+    !matches!(std::env::var("ROZUM_AUTO_CONTEXT").ok().as_deref(), Some("0" | "false" | "off"))
+}
+
+/// Make `messages` fit `ctx_win` so a request NEVER returns `context_length_exceeded` — drop the OLDEST
+/// non-system turns (sliding window) until the prompt fits, keeping all system messages + the most recent
+/// turns + reply headroom. Lossy-but-graceful: a transformer cannot attend beyond `n_ctx`, so we choose
+/// what to drop (oldest detail) instead of erroring. The conversation-overflow case (the common one);
+/// summarizing dropped turns + lazy tool-schemas (a fat system prompt) are BACKLOG refinements. With
+/// auto-context OFF, preserves the legacy error. `Err(resp)` only in the OFF case.
+fn fit_to_context(
+    mut messages: Vec<Message>,
+    tools: &[ToolDef],
+    ctx_win: u32,
+) -> Result<Vec<Message>, Response> {
+    if ctx_win == 0 {
+        return Ok(messages); // unknown window → don't touch it
+    }
+    let budget = ctx_win.saturating_sub(AUTO_CONTEXT_REPLY_RESERVE);
+    if estimate_prompt_tokens(&messages, tools) <= budget {
+        return Ok(messages); // already fits — no-op
+    }
+    if !auto_context_enabled() {
+        return Err(error_json(
+            StatusCode::BAD_REQUEST,
+            &format!("prompt exceeds model context window of {ctx_win} tokens"),
+            "context_length_exceeded",
+        ));
+    }
+    let mut dropped = 0usize;
+    while estimate_prompt_tokens(&messages, tools) > budget {
+        // Keep at least one non-system turn (and all system messages) — can't trim a single huge
+        // turn / a fat system prompt this way (that's the lazy-tools/summarize refinement; BACKLOG).
+        if messages.iter().filter(|m| !matches!(m.role, Role::System)).count() <= 1 {
+            break;
+        }
+        let Some(i) = messages.iter().position(|m| !matches!(m.role, Role::System)) else {
+            break;
+        };
+        messages.remove(i);
+        dropped += 1;
+    }
+    if dropped > 0 {
+        tracing::info!(dropped, ctx_win, "gateway-auto-context: trimmed oldest turns to fit the window");
+        crate::obs::log_event(serde_json::json!({
+            "event": "auto_context_trim", "dropped": dropped, "ctx_win": ctx_win,
+        }));
+    }
+    Ok(messages)
+}
+
 fn estimate_prompt_tokens(messages: &[Message], tools: &[ToolDef]) -> u32 {
     let mut chars = 0usize;
     for m in messages {
@@ -3493,15 +3549,13 @@ async fn oai_chat_handler(
     );
 
     // Approximate context overflow check
-    let est = estimate_prompt_tokens(&messages, &tools);
+    // gateway-auto-context: fit the prompt to the window (drop oldest turns) instead of erroring.
     let ctx_win = lease.backend.context_window();
-    if ctx_win > 0 && est > ctx_win {
-        return error_json(
-            StatusCode::BAD_REQUEST,
-            &format!("prompt exceeds model context window of {ctx_win} tokens"),
-            "context_length_exceeded",
-        );
-    }
+    let messages = match fit_to_context(messages, &tools, ctx_win) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let est = estimate_prompt_tokens(&messages, &tools); // post-fit token estimate (for obs)
 
     let (n_messages, n_tools) = (messages.len(), tools.len());
     let cancel = CancellationToken::new();
@@ -3645,15 +3699,13 @@ async fn responses_handler(
         inject_ap,
     );
 
-    let est = estimate_prompt_tokens(&messages, &tools);
+    // gateway-auto-context: fit the prompt to the window (drop oldest turns) instead of erroring.
     let ctx_win = lease.backend.context_window();
-    if ctx_win > 0 && est > ctx_win {
-        return error_json(
-            StatusCode::BAD_REQUEST,
-            &format!("prompt exceeds model context window of {ctx_win} tokens"),
-            "context_length_exceeded",
-        );
-    }
+    let messages = match fit_to_context(messages, &tools, ctx_win) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let est = estimate_prompt_tokens(&messages, &tools); // post-fit token estimate (for obs)
 
     let (n_messages, n_tools) = (messages.len(), tools.len());
     let cancel = CancellationToken::new();
@@ -4008,15 +4060,13 @@ async fn anthropic_handler(
     );
 
     // Approximate context overflow check
-    let est = estimate_prompt_tokens(&messages, &tools);
+    // gateway-auto-context: fit the prompt to the window (drop oldest turns) instead of erroring.
     let ctx_win = lease.backend.context_window();
-    if ctx_win > 0 && est > ctx_win {
-        return error_json(
-            StatusCode::BAD_REQUEST,
-            &format!("prompt exceeds model context window of {ctx_win} tokens"),
-            "context_length_exceeded",
-        );
-    }
+    let messages = match fit_to_context(messages, &tools, ctx_win) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let est = estimate_prompt_tokens(&messages, &tools); // post-fit token estimate (for obs)
 
     let (n_messages, n_tools) = (messages.len(), tools.len());
     let cancel = CancellationToken::new();
@@ -4983,6 +5033,43 @@ mod tests {
             "expected Anthropic SSE events, got {}",
             events.len()
         );
+    }
+
+    #[test]
+    fn auto_context_trims_oldest_keeps_system_and_recent() {
+        let txt = |s: &str| Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: s.into() }],
+        };
+        let sys = Message {
+            role: Role::System,
+            content: vec![ContentBlock::Text { text: "SYSTEM PROMPT".into() }],
+        };
+        // No-op when the prompt already fits a generous window.
+        let small = vec![sys.clone(), txt("hi")];
+        assert_eq!(fit_to_context(small, &[], 8192).unwrap().len(), 2);
+        // Overflow: many turns + a tiny window → trims to system + the single most-recent turn.
+        let mut many = vec![sys];
+        for i in 0..30 {
+            many.push(txt(&format!("turn {i} word word word word word word word word word")));
+        }
+        let fitted = fit_to_context(many, &[], 64).unwrap(); // budget 64−1024 saturates to 0 → trims hard
+        assert!(fitted.iter().any(|m| matches!(m.role, Role::System)), "system message kept");
+        assert_eq!(
+            fitted.iter().filter(|m| !matches!(m.role, Role::System)).count(),
+            1,
+            "exactly one (most-recent) turn kept"
+        );
+        let kept = fitted.iter().rev().find(|m| !matches!(m.role, Role::System)).unwrap();
+        if let ContentBlock::Text { text } = &kept.content[0] {
+            assert!(text.contains("turn 29"), "kept the MOST RECENT turn, got: {text}");
+        }
+        // OFF → legacy error (Err) on overflow.
+        // SAFETY: test-local env toggle.
+        unsafe { std::env::set_var("ROZUM_AUTO_CONTEXT", "0") };
+        let over = vec![txt(&"word ".repeat(1000))];
+        assert!(fit_to_context(over, &[], 64).is_err(), "auto-context OFF → legacy error");
+        unsafe { std::env::remove_var("ROZUM_AUTO_CONTEXT") };
     }
 
     #[test]
