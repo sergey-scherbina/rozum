@@ -1488,6 +1488,38 @@ fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
              avoid corrupting the file in a churn loop; verify it builds and report in one line."
         ));
     }
+
+    // ── Signature 4: windowed identical tool-call recurrence ──
+    // The no-stop-after-success loop (observed: Qwen3-Coder-30B burning 482 tool calls to
+    // timeout on a task it had ALREADY passed): the model re-issues the SAME tool call — re-run
+    // the same `cargo run`/test command, re-read the same file, re-write the same content — turn
+    // after turn. The repeats aren't strictly consecutive and don't error (sig 1 misses), the
+    // prose around them varies each turn (sig 2 misses), and the dominant repeated calls are
+    // Bash/Read "verification" calls, not an edit-patch on one file (sig 3, edits-only, misses).
+    // Fire when one byte-identical (name+input) call recurs `TOOL_REPEAT_THRESHOLD` times within
+    // the recent window. The threshold is 4 — one higher than the text/structured signatures —
+    // so the healthy "build a few times while fixing a compile error, then it passes" rhythm and
+    // the existing "3 identical successful calls are not a loop" contract don't trip it; 4
+    // byte-identical calls in a 12-call window is a spin, not convergence.
+    const TOOL_WINDOW: usize = 12;
+    const TOOL_REPEAT_THRESHOLD: usize = 4;
+    {
+        let win = &calls[calls.len().saturating_sub(TOOL_WINDOW)..];
+        let mut tool_counts: HashMap<(&str, String), usize> = HashMap::new();
+        for &(name, input, _) in win {
+            let c = tool_counts.entry((name, input.to_string())).or_default();
+            *c += 1;
+            if *c >= TOOL_REPEAT_THRESHOLD {
+                return Some(format!(
+                    "The `{name}` tool was called {TOOL_REPEAT_THRESHOLD} times with identical \
+                     arguments in the last {TOOL_WINDOW} tool calls — the agent is repeating the \
+                     same action without making progress (commonly re-verifying a change that has \
+                     already been applied). Stopping to avoid an infinite loop; verify the current \
+                     result and report it in one short line."
+                ));
+            }
+        }
+    }
     None
 }
 
@@ -5152,6 +5184,47 @@ mod tests {
             cc_edit("b", "src/lib.rs", "p", "q"),
         ];
         assert!(detect_stuck_loop(&ok).is_none(), "two forward CC edits to distinct files are not churn");
+    }
+
+    /// Signature 4 — the no-stop-after-success loop: the model re-runs the SAME verification
+    /// command / re-reads the same file turn after turn, with varying prose and no errors, so
+    /// signatures 1–3 (errored-consecutive / identical-text / edit-churn) all miss it. Modeled on
+    /// a real Qwen3-Coder-30B transcript (`cargo run -- hello 2>&1` issued 8×, interleaved Reads),
+    /// the shape that burned 482 tool calls to timeout on a task it had already passed.
+    #[test]
+    fn stuck_loop_fires_on_repeated_bash_verification() {
+        let run = json!({ "command": "cargo run -- hello 2>&1", "description": "run it" });
+        let mut msgs = vec![Message::user("debug the failing program")];
+        // 4 byte-identical Bash runs, each its own turn with DIFFERENT prose and a non-error
+        // result, interleaved with distinct Reads — only the windowed-recurrence signature sees it.
+        for i in 0..4 {
+            msgs.push(Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text { text: format!("Let me try approach {i} and run it again.") },
+                    tool_use(&format!("b{i}"), "Bash", run.clone()),
+                ],
+            });
+            msgs.push(tool_err(&format!("b{i}"), false)); // succeeds (produces output, not an error)
+            msgs.push(asst(tool_use(&format!("r{i}"), "Read", json!({ "file_path": "src/main.rs", "offset": i }))));
+            msgs.push(tool_err(&format!("r{i}"), false));
+        }
+        assert!(detect_stuck_loop(&msgs).is_some(), "4 identical Bash verifications must trip sig-4");
+    }
+
+    #[test]
+    fn stuck_loop_ignores_few_identical_verifications() {
+        // Healthy convergence: build a few times while applying DIFFERENT fixes between runs.
+        // 3 identical builds (below the 4-threshold) interleaved with real forward edits — must
+        // NOT trip, preserving the "3 identical calls are not a loop" contract for non-edits too.
+        let build = json!({ "command": "cargo build", "description": "build" });
+        let mut msgs = vec![Message::user("make it compile")];
+        for i in 0..3 {
+            msgs.push(asst(tool_use(&format!("b{i}"), "Bash", build.clone())));
+            msgs.push(tool_err(&format!("b{i}"), false));
+            msgs.push(cc_edit(&format!("e{i}"), "src/main.rs", &format!("bad{i}"), &format!("good{i}")));
+        }
+        assert!(detect_stuck_loop(&msgs).is_none(), "3 identical builds amid real edits are not a loop");
     }
 
     #[tokio::test]
