@@ -951,27 +951,26 @@ fn auto_context_enabled() -> bool {
     !matches!(std::env::var("ROZUM_AUTO_CONTEXT").ok().as_deref(), Some("0" | "false" | "off"))
 }
 
-/// Make a request fit `ctx_win` so it NEVER returns `context_length_exceeded`, in two graceful steps:
+/// Make a request fit `ctx_win` so it NEVER returns `context_length_exceeded`, in two graceful steps,
+/// returning the DROPPED turns (so the caller can attach an elision note — see [`with_elision_note`]):
 ///   1. **sliding-window trim** — drop the OLDEST non-system turns until it fits (keep all system msgs +
 ///      the most recent turns + reply headroom). The conversation-overflow case (the common one).
 ///   2. **tool-schema compression** (lazy-tools) — if turns alone can't fit (few turns but a fat
 ///      system + many tool schemas, e.g. codex's ~18 tools > a small window), STRIP tool `description`s
-///      — keeps every tool (no capability loss), just terser docs. Handles the fat-system case that
-///      turn-dropping can't.
-/// Lossy-but-graceful: a transformer cannot attend beyond `n_ctx`, so we choose what to shrink instead
-/// of erroring. Summarizing the dropped turns (vs hard-drop) + true on-demand lazy tool LOADING stay
-/// BACKLOG refinements. With auto-context OFF, preserves the legacy error. `Err(resp)` only in the OFF case.
+///      — keeps every tool (no capability loss), just terser docs.
+/// Lossy-but-graceful: a transformer cannot attend beyond `n_ctx`, so we choose what to shrink instead of
+/// erroring. With auto-context OFF, preserves the legacy error (`Err(resp)` only in the OFF case).
 fn fit_to_context(
     mut messages: Vec<Message>,
     mut tools: Vec<ToolDef>,
     ctx_win: u32,
-) -> Result<(Vec<Message>, Vec<ToolDef>), Response> {
+) -> Result<(Vec<Message>, Vec<ToolDef>, Vec<Message>), Response> {
     if ctx_win == 0 {
-        return Ok((messages, tools)); // unknown window → don't touch it
+        return Ok((messages, tools, vec![])); // unknown window → don't touch it
     }
     let budget = ctx_win.saturating_sub(AUTO_CONTEXT_REPLY_RESERVE);
     if estimate_prompt_tokens(&messages, &tools) <= budget {
-        return Ok((messages, tools)); // already fits — no-op
+        return Ok((messages, tools, vec![])); // already fits — no-op
     }
     if !auto_context_enabled() {
         return Err(error_json(
@@ -980,11 +979,9 @@ fn fit_to_context(
             "context_length_exceeded",
         ));
     }
-    // Step 1 — drop oldest non-system turns (keep ≥1 non-system turn + all system msgs), collecting a
-    // short EXTRACTIVE summary (the topic of each dropped turn — the first ~80 chars of its text) so the
-    // breadcrumb carries WHAT was elided, not just a count. Deterministic, no model call.
-    let mut dropped = 0usize;
-    let mut topics: Vec<String> = Vec::new();
+    // Step 1 — drop oldest non-system turns (keep ≥1 non-system turn + all system msgs), keeping the
+    // dropped turns so the caller can summarize them into an elision note.
+    let mut dropped: Vec<Message> = Vec::new();
     while estimate_prompt_tokens(&messages, &tools) > budget {
         if messages.iter().filter(|m| !matches!(m.role, Role::System)).count() <= 1 {
             break;
@@ -992,44 +989,7 @@ fn fit_to_context(
         let Some(i) = messages.iter().position(|m| !matches!(m.role, Role::System)) else {
             break;
         };
-        let removed = messages.remove(i);
-        dropped += 1;
-        // Snippet the first Text block (skip tool-result dumps — not useful "topics"), cap to 6 turns.
-        if topics.len() < 6 {
-            if let Some(ContentBlock::Text { text }) = removed.content.first() {
-                let snip: String = text.chars().take(80).collect::<String>().replace('\n', " ");
-                if !snip.trim().is_empty() {
-                    topics.push(snip.trim().to_string());
-                }
-            }
-        }
-    }
-    // If turns were elided, leave a breadcrumb so the model KNOWS history was trimmed (won't assume full
-    // context) AND what it covered (extractive topics). Tiny, fits inside the reply reserve. A full LLM
-    // abstractive rolling-SUMMARY (a summarizer generation that preserves content, not just topics) is the
-    // BACKLOG refinement. Inserted after the real system messages, before the kept turns.
-    if dropped > 0 {
-        let note_text = if topics.is_empty() {
-            format!(
-                "[Note: {dropped} earlier turn(s) were omitted to fit the model's {ctx_win}-token \
-                 context window — you may not have the full prior history.]"
-            )
-        } else {
-            let joined = topics.iter().map(|t| format!("\u{201c}{t}\u{2026}\u{201d}")).collect::<Vec<_>>().join("; ");
-            format!(
-                "[Note: {dropped} earlier turn(s) were omitted to fit the {ctx_win}-token window — you may \
-                 not have the full prior history. They covered (truncated): {joined}]"
-            )
-        };
-        let note = Message {
-            role: Role::System,
-            content: vec![ContentBlock::Text { text: note_text }],
-        };
-        let pos = messages
-            .iter()
-            .position(|m| !matches!(m.role, Role::System))
-            .unwrap_or(messages.len());
-        messages.insert(pos, note);
+        dropped.push(messages.remove(i));
     }
     // Step 2 — if it still doesn't fit, compress tool schemas: strip descriptions (the bulk of a fat
     // tool surface) while keeping every tool callable. Last resort before serving an over-long prompt.
@@ -1042,16 +1002,152 @@ fn fit_to_context(
             }
         }
     }
-    if dropped > 0 || compressed > 0 {
+    if !dropped.is_empty() || compressed > 0 {
         tracing::info!(
-            dropped, compressed, ctx_win,
+            dropped = dropped.len(), compressed, ctx_win,
             "gateway-auto-context: fitted prompt to the window (trimmed turns / compressed tool schemas)"
         );
         crate::obs::log_event(serde_json::json!({
-            "event": "auto_context_trim", "dropped": dropped, "tools_compressed": compressed, "ctx_win": ctx_win,
+            "event": "auto_context_trim", "dropped": dropped.len(), "tools_compressed": compressed, "ctx_win": ctx_win,
         }));
     }
-    Ok((messages, tools))
+    Ok((messages, tools, dropped))
+}
+
+/// Abstractive LLM rolling-summary (`ROZUM_AUTO_CONTEXT_SUMMARIZE=1`, default OFF): instead of an
+/// extractive topic breadcrumb, generate a real summary of the dropped turns via the resident model.
+/// Default OFF — it adds a summarizer generation per overflowing request (latency); the deterministic
+/// extractive note is the safe default. The summary gen completes before the real generation (the worker
+/// serializes them) so it can't deadlock; on any failure it falls back to the extractive note.
+fn auto_context_summarize_enabled() -> bool {
+    matches!(std::env::var("ROZUM_AUTO_CONTEXT_SUMMARIZE").ok().as_deref(), Some("1" | "true" | "on"))
+}
+
+/// Flatten a message's content to plain text (Text + tool-result bodies) for summarization/snippets.
+fn message_text(m: &Message) -> String {
+    let mut s = String::new();
+    for b in &m.content {
+        let piece = match b {
+            ContentBlock::Text { text } => text.as_str(),
+            ContentBlock::ToolResult { content, .. } => content.as_str(),
+            _ => continue,
+        };
+        if !s.is_empty() {
+            s.push(' ');
+        }
+        s.push_str(piece);
+    }
+    s
+}
+
+/// The deterministic EXTRACTIVE elision note: the topic of each dropped turn (first ~80 chars, cap 6).
+fn extractive_note(dropped: &[Message], ctx_win: u32) -> Message {
+    let topics: Vec<String> = dropped
+        .iter()
+        .filter_map(|m| {
+            let s: String = message_text(m).chars().take(80).collect::<String>().replace('\n', " ");
+            let s = s.trim().to_string();
+            (!s.is_empty()).then_some(s)
+        })
+        .take(6)
+        .collect();
+    let n = dropped.len();
+    let text = if topics.is_empty() {
+        format!(
+            "[Note: {n} earlier turn(s) were omitted to fit the model's {ctx_win}-token context window — \
+             you may not have the full prior history.]"
+        )
+    } else {
+        let joined = topics.iter().map(|t| format!("\u{201c}{t}\u{2026}\u{201d}")).collect::<Vec<_>>().join("; ");
+        format!(
+            "[Note: {n} earlier turn(s) were omitted to fit the {ctx_win}-token window — you may not have \
+             the full prior history. They covered (truncated): {joined}]"
+        )
+    };
+    Message { role: Role::System, content: vec![ContentBlock::Text { text }] }
+}
+
+/// Abstractive summary of the dropped turns via the resident model. `None` on any failure (caller falls
+/// back to the extractive note).
+async fn summarize_dropped(
+    dropped: &[Message],
+    backend: &Arc<dyn ChatBackend>,
+) -> Option<Message> {
+    let mut convo = String::new();
+    for m in dropped {
+        let role = match m.role {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+            Role::System => "System",
+            Role::Tool => "Tool",
+        };
+        let t = message_text(m);
+        let t = t.trim();
+        if !t.is_empty() {
+            convo.push_str(role);
+            convo.push_str(": ");
+            convo.push_str(t);
+            convo.push('\n');
+        }
+    }
+    if convo.trim().is_empty() {
+        return None;
+    }
+    let req = ChatRequest {
+        messages: vec![
+            Message {
+                role: Role::System,
+                content: vec![ContentBlock::Text {
+                    text: "Compress conversation history. Reply with a terse 1-3 sentence summary of the \
+                           key facts, decisions, and context in the turns below — no preamble, no markdown."
+                        .into(),
+                }],
+            },
+            Message { role: Role::User, content: vec![ContentBlock::Text { text: convo }] },
+        ],
+        tools: vec![],
+        sampling: SamplingParams { temperature: Some(0.2), max_tokens: Some(256), ..Default::default() },
+        cancel: CancellationToken::new(),
+        session_id: None,
+    };
+    let mut stream = backend.chat(req).await.ok()?;
+    let mut out = String::new();
+    while let Some(ev) = stream.next().await {
+        if let Ok(ChatEvent::TextDelta { text }) = ev {
+            out.push_str(&text);
+        }
+    }
+    let s = out.trim();
+    if s.is_empty() {
+        return None;
+    }
+    Some(Message {
+        role: Role::System,
+        content: vec![ContentBlock::Text {
+            text: format!("[Summary of {} earlier omitted turn(s): {s}]", dropped.len()),
+        }],
+    })
+}
+
+/// Insert an elision note (extractive by default; abstractive LLM summary when opted in) after the real
+/// system messages, when turns were dropped. No-op when nothing was dropped (the common/no-overflow case).
+async fn with_elision_note(
+    mut messages: Vec<Message>,
+    dropped: Vec<Message>,
+    ctx_win: u32,
+    backend: &Arc<dyn ChatBackend>,
+) -> Vec<Message> {
+    if dropped.is_empty() {
+        return messages;
+    }
+    let note = if auto_context_summarize_enabled() {
+        summarize_dropped(&dropped, backend).await.unwrap_or_else(|| extractive_note(&dropped, ctx_win))
+    } else {
+        extractive_note(&dropped, ctx_win)
+    };
+    let pos = messages.iter().position(|m| !matches!(m.role, Role::System)).unwrap_or(messages.len());
+    messages.insert(pos, note);
+    messages
 }
 
 fn estimate_prompt_tokens(messages: &[Message], tools: &[ToolDef]) -> u32 {
@@ -3606,12 +3702,13 @@ async fn oai_chat_handler(
 
     // Approximate context overflow check
     // gateway-auto-context: fit the prompt to the window (drop oldest turns, then compress tool
-    // schemas) instead of erroring.
+    // schemas) instead of erroring, then attach an elision note for the dropped turns.
     let ctx_win = lease.backend.context_window();
-    let (messages, tools) = match fit_to_context(messages, tools, ctx_win) {
-        Ok(mt) => mt,
+    let (messages, tools, dropped) = match fit_to_context(messages, tools, ctx_win) {
+        Ok(t) => t,
         Err(resp) => return resp,
     };
+    let messages = with_elision_note(messages, dropped, ctx_win, &lease.backend).await;
     let est = estimate_prompt_tokens(&messages, &tools); // post-fit token estimate (for obs)
 
     let (n_messages, n_tools) = (messages.len(), tools.len());
@@ -3757,12 +3854,13 @@ async fn responses_handler(
     );
 
     // gateway-auto-context: fit the prompt to the window (drop oldest turns, then compress tool
-    // schemas) instead of erroring.
+    // schemas) instead of erroring, then attach an elision note for the dropped turns.
     let ctx_win = lease.backend.context_window();
-    let (messages, tools) = match fit_to_context(messages, tools, ctx_win) {
-        Ok(mt) => mt,
+    let (messages, tools, dropped) = match fit_to_context(messages, tools, ctx_win) {
+        Ok(t) => t,
         Err(resp) => return resp,
     };
+    let messages = with_elision_note(messages, dropped, ctx_win, &lease.backend).await;
     let est = estimate_prompt_tokens(&messages, &tools); // post-fit token estimate (for obs)
 
     let (n_messages, n_tools) = (messages.len(), tools.len());
@@ -4119,12 +4217,13 @@ async fn anthropic_handler(
 
     // Approximate context overflow check
     // gateway-auto-context: fit the prompt to the window (drop oldest turns, then compress tool
-    // schemas) instead of erroring.
+    // schemas) instead of erroring, then attach an elision note for the dropped turns.
     let ctx_win = lease.backend.context_window();
-    let (messages, tools) = match fit_to_context(messages, tools, ctx_win) {
-        Ok(mt) => mt,
+    let (messages, tools, dropped) = match fit_to_context(messages, tools, ctx_win) {
+        Ok(t) => t,
         Err(resp) => return resp,
     };
+    let messages = with_elision_note(messages, dropped, ctx_win, &lease.backend).await;
     let est = estimate_prompt_tokens(&messages, &tools); // post-fit token estimate (for obs)
 
     let (n_messages, n_tools) = (messages.len(), tools.len());
@@ -5121,15 +5220,18 @@ mod tests {
             role: Role::System,
             content: vec![ContentBlock::Text { text: "SYSTEM PROMPT".into() }],
         };
-        // No-op when the prompt already fits a generous window.
+        // No-op when the prompt already fits a generous window (nothing dropped).
         let small = vec![sys.clone(), txt("hi")];
-        assert_eq!(fit_to_context(small, vec![], 8192).unwrap().0.len(), 2);
-        // Overflow: many turns + a tiny window → trims to system + the single most-recent turn.
+        let (m, _, d) = fit_to_context(small, vec![], 8192).unwrap();
+        assert_eq!(m.len(), 2);
+        assert!(d.is_empty(), "nothing dropped when it fits");
+        // Overflow: many turns + a tiny window → trims to system + the single most-recent turn; the
+        // dropped turns are returned (oldest first) for the elision note.
         let mut many = vec![sys];
         for i in 0..30 {
             many.push(txt(&format!("turn {i} word word word word word word word word word")));
         }
-        let (fitted, _) = fit_to_context(many, vec![], 64).unwrap(); // budget 64−1024 → 0 → trims hard
+        let (fitted, _, dropped) = fit_to_context(many, vec![], 64).unwrap(); // budget 64−1024 → 0
         assert!(fitted.iter().any(|m| matches!(m.role, Role::System)), "system message kept");
         assert_eq!(
             fitted.iter().filter(|m| !matches!(m.role, Role::System)).count(),
@@ -5140,16 +5242,18 @@ mod tests {
         if let ContentBlock::Text { text } = &kept.content[0] {
             assert!(text.contains("turn 29"), "kept the MOST RECENT turn, got: {text}");
         }
-        // Elision breadcrumb with EXTRACTIVE topics: the model is told history was trimmed AND what the
-        // oldest dropped turn covered (so it has the gist, not just a count).
-        assert!(
-            fitted.iter().any(|m| matches!(m.role, Role::System)
-                && matches!(&m.content[0], ContentBlock::Text { text }
-                    if text.contains("omitted") && text.contains("covered") && text.contains("turn 0"))),
-            "breadcrumb carries the dropped turns' topics (extractive summary)"
-        );
-        // Step-2 lazy-tools: ONE turn (turn-dropping can't help) + fat tool descriptions → descriptions
-        // get STRIPPED but every tool is KEPT (no capability loss). The codex fat-system case.
+        assert!(!dropped.is_empty(), "dropped turns returned for the elision note");
+        // The EXTRACTIVE note tells the model history was trimmed AND what the oldest dropped turn
+        // covered (so it has the gist, not just a count). (Abstractive LLM summary is the opt-in path.)
+        let note = extractive_note(&dropped, 64);
+        if let ContentBlock::Text { text } = &note.content[0] {
+            assert!(
+                text.contains("omitted") && text.contains("covered") && text.contains("turn 0"),
+                "extractive note carries the oldest dropped turn's topic, got: {text}"
+            );
+        }
+        // lazy-tools: ONE turn (turn-dropping can't help) + fat tool descriptions → descriptions get
+        // STRIPPED but every tool is KEPT (no capability loss). The codex fat-system case.
         let fat_tools: Vec<ToolDef> = (0..10)
             .map(|i| ToolDef {
                 name: format!("tool{i}"),
@@ -5157,7 +5261,7 @@ mod tests {
                 input_schema: json!({"type":"object","properties":{"x":{"type":"string"}}}),
             })
             .collect();
-        let (msgs2, tools2) = fit_to_context(vec![txt("do it")], fat_tools, 64).unwrap();
+        let (msgs2, tools2, _) = fit_to_context(vec![txt("do it")], fat_tools, 64).unwrap();
         assert_eq!(msgs2.len(), 1, "the single turn is kept");
         assert_eq!(tools2.len(), 10, "all tools KEPT (compressed, not dropped)");
         assert!(tools2.iter().all(|t| t.description.is_empty()), "tool descriptions stripped to fit");
