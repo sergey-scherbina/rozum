@@ -304,6 +304,10 @@ impl DaemonRoom {
         self.writer.set_thread_owner_severity(id, owner, severity, unix_ts()).map_err(|e| e.to_string())
     }
 
+    pub fn set_pinned(&mut self, thread_id: &str, msg_id: &str, pin: bool) -> Result<Option<Thread>, String> {
+        self.writer.set_pinned(thread_id, msg_id, pin, unix_ts()).map_err(|e| e.to_string())
+    }
+
     pub fn threads(&self) -> Vec<Thread> {
         self.writer.threads().values().cloned().collect()
     }

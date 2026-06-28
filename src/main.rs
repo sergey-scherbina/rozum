@@ -695,6 +695,20 @@ enum IncidentAction {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Pin a key message in an incident (current status / root cause), shown first to responders.
+    Pin {
+        /// The incident/thread id.
+        id: String,
+        /// The message id to pin (`<date>/<n>`).
+        msg_id: String,
+    },
+    /// Unpin a previously-pinned message from an incident.
+    Unpin {
+        /// The incident/thread id.
+        id: String,
+        /// The message id to unpin.
+        msg_id: String,
+    },
     /// Set an incident's state directly: open|triaging|escalated|resolved|closed.
     State {
         /// The incident/thread id.
@@ -2694,6 +2708,16 @@ async fn run_meetings_incident(
             serde_json::json!({ "id": id, "to": to, "note": note.unwrap_or_default() }),
             IncidentRender::Ok,
         ),
+        IncidentAction::Pin { id, msg_id } => (
+            "meeting.thread_pin",
+            serde_json::json!({ "id": id, "msg_id": msg_id, "pin": true }),
+            IncidentRender::Ok,
+        ),
+        IncidentAction::Unpin { id, msg_id } => (
+            "meeting.thread_pin",
+            serde_json::json!({ "id": id, "msg_id": msg_id, "pin": false }),
+            IncidentRender::Ok,
+        ),
         IncidentAction::State { id, state } => (
             "meeting.thread_set_state",
             serde_json::json!({ "id": id, "state": state }),
@@ -2776,6 +2800,19 @@ fn print_incident(v: &serde_json::Value) {
         Some(b) => println!("  [{}] {} {} {}: {}", hhmm_of(m.ts), m.id(), b, m.display_name, m.content),
         None => println!("  [{}] {} {}: {}", hhmm_of(m.ts), m.id(), m.display_name, m.content),
     };
+    // Pinned messages first (the incident's key status / root cause) — only when present in the thread.
+    let pinned: Vec<String> = thread["pinned"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+    let pinned_msgs: Vec<&StoredTurn> = messages.iter().filter(|m| pinned.contains(&m.id())).collect();
+    if !pinned_msgs.is_empty() {
+        println!("  📌 pinned:");
+        for m in &pinned_msgs {
+            line(m);
+        }
+        println!("  — timeline —");
+    }
     for m in &messages {
         line(m);
     }

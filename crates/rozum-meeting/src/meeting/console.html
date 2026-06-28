@@ -372,6 +372,16 @@ function msgRow(m, opts) {
     const rb = el("span", "openinc", "↩ reply");
     rb.onclick = (e) => { e.stopPropagation(); REPLY_TO = mid; updateReplyHint(); $("c-text").focus(); };
     l1.appendChild(rb);
+    // Pin toggle (only in the incident view).
+    if (opts.pinnable && opts.threadId) {
+      const on = opts.pinnedSet && opts.pinnedSet.has(mid);
+      const pb = el("span", "openinc", on ? "📌 unpin" : "📌 pin");
+      pb.onclick = (e) => {
+        e.stopPropagation();
+        act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(opts.threadId)}/pin`, { msg_id: mid, pin: !on }), on ? "unpinned" : "pinned");
+      };
+      l1.appendChild(pb);
+    }
   }
   row.appendChild(l1);
   row.appendChild(el("div", "body", m.content || ""));
@@ -461,7 +471,19 @@ async function renderThread(id) {
   }
   main.appendChild(acts);
   if (!ctx.messages || !ctx.messages.length) { main.appendChild(el("div", "empty", "No messages in this thread yet.")); return; }
-  for (const m of ctx.messages) main.appendChild(msgRow(m, { showThread: false }));
+  const pinned = (t.pinned || []);
+  const pinnedSet = new Set(pinned);
+  const pinOpts = { showThread: false, pinnable: true, threadId: id, pinnedSet };
+  // Pinned messages first — the incident's key status / root cause.
+  if (pinned.length) {
+    const ph = el("div", "lane-title");
+    ph.appendChild(el("span", null, "📌 pinned"));
+    ph.appendChild(el("span", "n", String(pinned.length)));
+    main.appendChild(ph);
+    for (const m of ctx.messages.filter(m => pinnedSet.has(`${m.date}/${m.n}`))) main.appendChild(msgRow(m, pinOpts));
+    main.appendChild(el("div", "lane-title", "")).appendChild(el("span", null, "all messages"));
+  }
+  for (const m of ctx.messages) main.appendChild(msgRow(m, pinOpts));
   // Auto-gathered related context (lead-up + same-tag elsewhere) — not formally in the thread.
   if (ctx.related && ctx.related.length) {
     const sep = el("div", "lane-title");

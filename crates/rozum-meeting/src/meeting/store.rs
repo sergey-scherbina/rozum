@@ -284,6 +284,10 @@ pub struct Thread {
     pub owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub severity: Option<Severity>,
+    /// Pinned message ids (`<date>/<n>`) — the incident's key messages (current status / root cause) a
+    /// responder should see first. Back-compat: absent/empty on old threads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned: Vec<String>,
     pub created_ts: u64,
     pub updated_ts: u64,
 }
@@ -710,6 +714,7 @@ impl TranscriptWriter {
                 state: ThreadState::Open,
                 owner: None,
                 severity: anchor_sev,
+                pinned: vec![],
                 created_ts: ts,
                 updated_ts: ts,
             })
@@ -751,6 +756,31 @@ impl TranscriptWriter {
         }
         if severity.is_some() {
             t.severity = severity;
+        }
+        t.updated_ts = ts;
+        let updated = t.clone();
+        self.persist_threads()?;
+        Ok(Some(updated))
+    }
+
+    /// Pin (`pin=true`) or unpin a message id within a thread — the incident's key messages. Idempotent;
+    /// `None` if the thread id is unknown. Newest-pin-last ordering is preserved.
+    pub fn set_pinned(
+        &mut self,
+        thread_id: &str,
+        msg_id: &str,
+        pin: bool,
+        ts: u64,
+    ) -> std::io::Result<Option<Thread>> {
+        let Some(t) = self.threads.get_mut(thread_id) else {
+            return Ok(None);
+        };
+        if pin {
+            if !t.pinned.iter().any(|m| m == msg_id) {
+                t.pinned.push(msg_id.to_string());
+            }
+        } else {
+            t.pinned.retain(|m| m != msg_id);
         }
         t.updated_ts = ts;
         let updated = t.clone();
@@ -1337,6 +1367,7 @@ mod tests {
             state,
             owner: None,
             severity: sev,
+            pinned: vec![],
             created_ts: 0,
             updated_ts: updated,
         };
@@ -1351,6 +1382,29 @@ mod tests {
         // No severity → low-priority 24h window.
         assert!(!thread_is_stale(&mk(ThreadState::Open, None, now - 3600), now));
         assert!(thread_is_stale(&mk(ThreadState::Open, None, now - 25 * 3600), now));
+    }
+
+    #[test]
+    fn pinning_messages_persists_and_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let paths = RoomPaths::ad_hoc_in(dir.path(), "ops");
+        let root = paths.root.clone();
+        let mut w = TranscriptWriter::new(paths, "ops", "topic", None, dir.path().to_path_buf());
+        let anchor = w.append("p", "A", "DB down", 1_718_000_000).unwrap();
+        let id = anchor.id();
+        w.open_thread(&id, "DB outage", ThreadKind::Incident, 1_718_000_001).unwrap();
+        let m = w.append("p", "A", "root cause: bad deploy", 1_718_000_100).unwrap();
+        // Pin is idempotent.
+        w.set_pinned(&id, &m.id(), true, 1_718_000_200).unwrap();
+        let t = w.set_pinned(&id, &m.id(), true, 1_718_000_201).unwrap().unwrap();
+        assert_eq!(t.pinned, vec![m.id()]);
+        // Persists across reload.
+        assert_eq!(read_threads(&root).get(&id).unwrap().pinned, vec![m.id()]);
+        // Unpin removes it.
+        let t = w.set_pinned(&id, &m.id(), false, 1_718_000_300).unwrap().unwrap();
+        assert!(t.pinned.is_empty());
+        // Unknown thread → None.
+        assert!(w.set_pinned("nope/0", &m.id(), true, 1_718_000_400).unwrap().is_none());
     }
 
     #[test]

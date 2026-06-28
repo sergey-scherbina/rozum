@@ -130,6 +130,7 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
         .route("/rooms/{name}/threads/{id}/assign", post(thread_assign))
         .route("/rooms/{name}/threads/{id}/resolve", post(thread_resolve))
         .route("/rooms/{name}/threads/{id}/state", post(thread_state))
+        .route("/rooms/{name}/threads/{id}/pin", post(thread_pin))
         .route("/rooms/{name}/messages", post(submit))
         .route("/rooms/{name}/metrics", get(metrics))
         .route("/rooms/{name}/search", get(search))
@@ -474,6 +475,16 @@ async fn thread_assign(
 ) -> Response {
     body["id"] = json!(id);
     console_call(&name, &user, "meeting.thread_assign", body).await
+}
+
+/// `POST /rooms/{name}/threads/{id}/pin` — body `{ "msg_id": "<date>/<n>", "pin": true|false }`.
+async fn thread_pin(
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    AxumPath((name, id)): AxumPath<(String, String)>,
+    Json(mut body): Json<Value>,
+) -> Response {
+    body["id"] = json!(id);
+    console_call(&name, &user, "meeting.thread_pin", body).await
 }
 
 /// `POST /rooms/{name}/threads/{id}/resolve` — body `{ "note": "..." }`.

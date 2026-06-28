@@ -139,6 +139,17 @@ pub struct ThreadContextParams {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PinParams {
+    /// The thread/incident id.
+    pub id: String,
+    /// The message id (`<date>/<n>`) to pin/unpin.
+    pub msg_id: String,
+    /// Pin (true, default) or unpin (false).
+    #[serde(default)]
+    pub pin: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WaitParams {
     /// Day of the last message seen (`YYYY-MM-DD`). Omit to receive all.
     #[serde(default)]
@@ -558,6 +569,31 @@ impl MeetingServer {
                     &serde_json::json!({ "thread": p.id, "assigned_to": to, "msg_id": turn.id() })
                         .to_string(),
                 ),
+                Err(e) => err_result(&e),
+            }
+        })
+        .await
+    }
+
+    /// Pin (or unpin) a key message within an incident — its current status / root cause / runbook, so a
+    /// responder picking it up sees the essentials first.
+    #[tool(
+        name = "meeting.thread_pin",
+        description = "Pin (pin=true, default) or unpin (pin=false) a message id within a thread/incident."
+    )]
+    pub async fn thread_pin(&self, params: Parameters<PinParams>) -> CallToolResult {
+        guard("meeting.thread_pin", async move {
+            let (room, _id) = self.session_room().await;
+            let Some(room) = room else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let p = &params.0;
+            let pin = p.pin.unwrap_or(true);
+            match room.lock().await.set_pinned(&p.id, &p.msg_id, pin) {
+                Ok(Some(t)) => text_result(
+                    &serde_json::json!({ "thread": p.id, "pinned": t.pinned }).to_string(),
+                ),
+                Ok(None) => err_result("unknown thread id"),
                 Err(e) => err_result(&e),
             }
         })
