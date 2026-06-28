@@ -475,6 +475,16 @@ impl MeetingServer {
                         let pm = store::PostMeta {
                             kind: store::MsgKind::Event,
                             thread_id: Some(p.anchor_id.clone()),
+                            meta: store::MsgMeta {
+                                thread_op: Some(store::ThreadOp {
+                                    opened: Some(true),
+                                    title: Some(t.title.clone()),
+                                    kind: Some(kind),
+                                    severity: t.severity,
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
                             ..Default::default()
                         };
                         let _ = r.submit_with_meta(&caller, &format!("opened incident: {}", t.title), pm);
@@ -556,6 +566,14 @@ impl MeetingServer {
             let pm = store::PostMeta {
                 kind: store::MsgKind::Event,
                 thread_id: Some(p.id.clone()),
+                meta: store::MsgMeta {
+                    thread_op: Some(store::ThreadOp {
+                        state: Some(store::ThreadState::Escalated),
+                        owner: p.to.clone(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             match r.submit_with_meta(&caller, &content, pm) {
@@ -600,6 +618,13 @@ impl MeetingServer {
             let pm = store::PostMeta {
                 kind: store::MsgKind::Event,
                 thread_id: Some(p.id.clone()),
+                meta: store::MsgMeta {
+                    thread_op: Some(store::ThreadOp {
+                        owner: Some(to.clone()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             match r.submit_with_meta(&caller, &content, pm) {
@@ -714,6 +739,13 @@ impl MeetingServer {
             let pm = store::PostMeta {
                 kind: store::MsgKind::Resolution,
                 thread_id: Some(p.id.clone()),
+                meta: store::MsgMeta {
+                    thread_op: Some(store::ThreadOp {
+                        state: Some(store::ThreadState::Resolved),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             match r.submit_with_meta(&caller, &note, pm) {

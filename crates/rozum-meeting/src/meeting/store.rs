@@ -144,6 +144,10 @@ pub struct MsgMeta {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<String>,
+    /// Structured lifecycle transition this message records (P5 event-sourcing) — lets `threads.json` be
+    /// rebuilt EXACTLY from the log. Absent on plain messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_op: Option<ThreadOp>,
 }
 impl MsgMeta {
     fn is_empty(&self) -> bool {
@@ -152,7 +156,32 @@ impl MsgMeta {
             && self.assignee.is_none()
             && self.tags.is_empty()
             && self.links.is_empty()
+            && self.thread_op.is_none()
     }
+}
+
+/// A structured incident lifecycle transition carried on a message (event-sourcing). Each field is the
+/// NEW value set by this transition; absent fields are unchanged. Replaying these in order rebuilds the
+/// thread exactly. Compound ops (escalate = state + owner) set several fields at once.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadOp {
+    /// Marks the message that OPENED the thread (carries title + kind).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ThreadKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<ThreadState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpin: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1006,6 +1035,51 @@ pub fn rebuild_threads(root: &Path) -> BTreeMap<String, Thread> {
                 updated_ts: updated,
             },
         );
+    }
+    // EXACT replay: messages carrying a structured `thread_op` override the best-effort guesses in
+    // chronological order, so a structured log reconstructs the thread precisely (incl. pin/exact state).
+    for m in &msgs {
+        let Some(op) = &m.meta.thread_op else { continue };
+        let Some(tid) = m.thread_id.clone() else { continue };
+        let t = out.entry(tid.clone()).or_insert_with(|| Thread {
+            id: tid,
+            title: String::new(),
+            kind: ThreadKind::Incident,
+            state: ThreadState::Open,
+            owner: None,
+            severity: None,
+            pinned: vec![],
+            links: vec![],
+            created_ts: m.ts,
+            updated_ts: m.ts,
+        });
+        if op.opened == Some(true) {
+            t.created_ts = m.ts;
+        }
+        if let Some(title) = &op.title {
+            t.title = title.clone();
+        }
+        if let Some(k) = op.kind {
+            t.kind = k;
+        }
+        if let Some(s) = op.state {
+            t.state = s;
+        }
+        if let Some(o) = &op.owner {
+            t.owner = Some(o.clone());
+        }
+        if let Some(sev) = op.severity {
+            t.severity = Some(sev);
+        }
+        if let Some(p) = &op.pin {
+            if !t.pinned.contains(p) {
+                t.pinned.push(p.clone());
+            }
+        }
+        if let Some(u) = &op.unpin {
+            t.pinned.retain(|x| x != u);
+        }
+        t.updated_ts = m.ts;
     }
     out
 }
@@ -2068,6 +2142,39 @@ mod tests {
         assert!(after.contains(&date_of_ts(now)), "recent day kept");
         // retain_days = 0 is a no-op.
         assert!(prune_old_days(&root, 0, now).is_empty());
+    }
+
+    #[test]
+    fn rebuild_replays_structured_thread_ops_exactly() {
+        let dir = tempdir().unwrap();
+        let paths = RoomPaths::ad_hoc_in(dir.path(), "ops");
+        let root = paths.root.clone();
+        let mut w = TranscriptWriter::new(paths, "ops", "topic", None, dir.path().to_path_buf());
+        let anchor = w.append("p", "A", "API erroring", 1_718_000_000).unwrap();
+        let id = anchor.id();
+        // The structured transition messages the daemon now posts (open → assign → escalate → resolve).
+        let opmsg = |op: ThreadOp, ts: u64| {
+            let mut pm = PostMeta::default();
+            pm.kind = MsgKind::Event;
+            pm.thread_id = Some(id.clone());
+            pm.meta.thread_op = Some(op);
+            pm
+        };
+        w.append_with_meta("p", "A", "opened incident: API outage",
+            1_718_000_001, opmsg(ThreadOp { opened: Some(true), title: Some("API outage".into()), kind: Some(ThreadKind::Incident), severity: Some(Severity::High), ..Default::default() }, 0)).unwrap();
+        w.append_with_meta("p", "A", "assigned to alice",
+            1_718_000_100, opmsg(ThreadOp { owner: Some("alice".into()), ..Default::default() }, 0)).unwrap();
+        w.append_with_meta("p", "A", "escalated to oncall",
+            1_718_000_200, opmsg(ThreadOp { state: Some(ThreadState::Escalated), owner: Some("oncall".into()), ..Default::default() }, 0)).unwrap();
+
+        // Wipe state, rebuild from the structured log — exact, not best-effort.
+        let rebuilt = rebuild_threads(&root);
+        let t = rebuilt.get(&id).expect("incident reconstructed");
+        assert_eq!(t.title, "API outage");
+        assert_eq!(t.kind, ThreadKind::Incident);
+        assert_eq!(t.severity, Some(Severity::High));
+        assert_eq!(t.state, ThreadState::Escalated, "last structured state wins");
+        assert_eq!(t.owner.as_deref(), Some("oncall"), "structured owner (assign→alice then escalate→oncall)");
     }
 
     #[test]
