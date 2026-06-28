@@ -20,7 +20,7 @@ use tokio::sync::{Notify, broadcast};
 use super::identity::Roster;
 use super::participant::ParticipantId;
 use super::state::{POLLING_STALE_SECS, RESPONDING_STALE_SECS, unix_ts};
-use super::store::{HighWater, RoomPaths, StoredTurn, TranscriptWriter};
+use super::store::{HighWater, PostMeta, RoomPaths, StoredTurn, TranscriptWriter};
 
 /// Shrunk coordination events — **no message content**. Clients read the bytes
 /// from disk using the `(date, n, end_offset)` high-water.
@@ -241,6 +241,17 @@ impl DaemonRoom {
     /// single writer, clears the sender's responding marker, emits a shrunk
     /// `Posted`, and wakes long-polls. Errors if ended or not a member.
     pub fn submit(&mut self, id: &ParticipantId, content: &str) -> Result<StoredTurn, String> {
+        self.submit_with_meta(id, content, PostMeta::default())
+    }
+
+    /// Submit a message WITH support metadata (kind / thread / severity / …). `submit` is the plain
+    /// wrapper; metadata defaults make a plain post identical to before (back-compat).
+    pub fn submit_with_meta(
+        &mut self,
+        id: &ParticipantId,
+        content: &str,
+        pm: PostMeta,
+    ) -> Result<StoredTurn, String> {
         if self.phase == Phase::Ended {
             return Err("meeting-ended".into());
         }
@@ -251,7 +262,7 @@ impl DaemonRoom {
         let display = self.display_for(id);
         let turn = self
             .writer
-            .append(&id.0, display, content, unix_ts())
+            .append_with_meta(&id.0, display, content, unix_ts(), pm)
             .map_err(|e| e.to_string())?;
         self.clear_responding(id);
 
