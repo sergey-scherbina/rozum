@@ -696,10 +696,11 @@ pub fn acquire_residency(
     let _ = ensure_dir();
     let _ = std::fs::create_dir_all(residents_dir());
     let mypid = std::process::id();
+    let prio = residency_prio();
     let wait_secs = residency_wait_secs();
     let mut waited = 0u64;
     let mut announced = false;
-    let mut ticket: Option<WaiterTicket> = None; // our place in the admission queue (P1)
+    let mut ticket: Option<WaiterTicket> = None; // our place in the admission queue (P1/P3)
     loop {
         let admit = match std::fs::OpenOptions::new()
             .create(true)
@@ -715,7 +716,7 @@ pub fn acquire_residency(
                 // ── critical section: enqueue → scan → decide (front-that-fits) → reserve.
                 // Join the queue once (seq assigned under this lock → globally ordered arrival).
                 if ticket.is_none() {
-                    ticket = enqueue_waiter(mypid, footprint_bytes);
+                    ticket = enqueue_waiter(mypid, footprint_bytes, prio);
                 }
                 let (in_use, holders) = scan_residents(mypid);
                 let budget = host_ram_budget_bytes();
@@ -734,7 +735,7 @@ pub fn acquire_residency(
                             available,
                             min_free,
                             pressure,
-                        ) == Some((t.seq, t.pid))
+                        ) == Some((t.prio, t.seq, t.pid))
                     }
                     None => admits(in_use, footprint_bytes, budget, available, min_free, pressure),
                 };
@@ -850,9 +851,23 @@ fn waiter_seq_path() -> PathBuf {
     waiters_dir().join(".seq")
 }
 
+/// Queue priority tier (P3). Lower = served first. `interactive` = a live agent load (`rozum launch`);
+/// `batch` = a bench/matrix sweep that should YIELD to interactive (`ROZUM_RESIDENCY_PRIO=batch`).
+pub const PRIO_INTERACTIVE: u8 = 0;
+pub const PRIO_BATCH: u8 = 1;
+
+/// This process's queue priority. Default interactive (a real load); a sweep tags itself batch.
+pub fn residency_prio() -> u8 {
+    match std::env::var("ROZUM_RESIDENCY_PRIO").ok().as_deref() {
+        Some("batch" | "1" | "low") => PRIO_BATCH,
+        _ => PRIO_INTERACTIVE,
+    }
+}
+
 /// A held place in the admission queue. Drop (incl. on the OS reaping our flock at death) removes the
 /// ticket file, so we leave the queue the instant we reserve, give up, or crash.
 struct WaiterTicket {
+    prio: u8,
     seq: u64,
     pid: u32,
     path: PathBuf,
@@ -874,14 +889,14 @@ fn next_waiter_seq() -> u64 {
     next
 }
 
-/// Enqueue this loader: write a flock-held `waiters/<seq>.<pid>` (seq zero-padded so the filename sorts
-/// numerically) with the footprint in the body. Call under the admit lock. `None` if we can't create/
-/// lock the ticket (→ caller falls back to a direct admits check, never blocks on a queue it can't join).
-fn enqueue_waiter(pid: u32, footprint_bytes: u64) -> Option<WaiterTicket> {
+/// Enqueue this loader: write a flock-held `waiters/<prio>.<seq>.<pid>` (prio + zero-padded seq so the
+/// filename sorts numerically by (prio, seq)) with the footprint in the body. Call under the admit lock.
+/// `None` if we can't create/lock the ticket (→ caller falls back to a direct admits check).
+fn enqueue_waiter(pid: u32, footprint_bytes: u64, prio: u8) -> Option<WaiterTicket> {
     use std::io::Write as _;
     let _ = std::fs::create_dir_all(waiters_dir());
     let seq = next_waiter_seq();
-    let path = waiters_dir().join(format!("{seq:020}.{pid}"));
+    let path = waiters_dir().join(format!("{prio}.{seq:020}.{pid}"));
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -892,12 +907,12 @@ fn enqueue_waiter(pid: u32, footprint_bytes: u64) -> Option<WaiterTicket> {
     file.try_lock().ok()?;
     let _ = write!(file, "{footprint_bytes}");
     let _ = file.flush();
-    Some(WaiterTicket { seq, pid, path, _lock: file })
+    Some(WaiterTicket { prio, seq, pid, path, _lock: file })
 }
 
-/// Scan the queue: parse `(seq, pid, footprint)` per live ticket, reaping any whose owner died (its
-/// flock is free → `try_lock` succeeds). Never reaps `mypid` (our own ticket's flock would block).
-fn scan_waiters(mypid: u32) -> Vec<(u64, u32, u64)> {
+/// Scan the queue: parse `(prio, seq, pid, footprint)` per live ticket, reaping any whose owner died
+/// (its flock is free → `try_lock` succeeds). Never reaps `mypid` (our own ticket's flock would block).
+fn scan_waiters(mypid: u32) -> Vec<(u8, u64, u32, u64)> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(waiters_dir()) else {
         return out;
@@ -908,10 +923,12 @@ fn scan_waiters(mypid: u32) -> Vec<(u64, u32, u64)> {
         if name.starts_with('.') {
             continue; // the .seq counter
         }
-        let Some((s, p)) = name.split_once('.') else {
+        // `<prio>.<seq>.<pid>`
+        let parts: Vec<&str> = name.splitn(3, '.').collect();
+        let [pr, s, p] = parts[..] else {
             continue;
         };
-        let (Ok(seq), Ok(pid)) = (s.parse::<u64>(), p.parse::<u32>()) else {
+        let (Ok(prio), Ok(seq), Ok(pid)) = (pr.parse::<u8>(), s.parse::<u64>(), p.parse::<u32>()) else {
             continue;
         };
         // Reap a dead waiter (not ourselves): if we can flock it, its owner is gone.
@@ -927,27 +944,30 @@ fn scan_waiters(mypid: u32) -> Vec<(u64, u32, u64)> {
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(u64::MAX); // unreadable → treat as huge so it never wrongly "fits"
-        out.push((seq, pid, footprint));
+        out.push((prio, seq, pid, footprint));
     }
     out
 }
 
-/// The waiter that should proceed: the lowest-`seq` ticket whose footprint fits the current budget.
-/// Pure (queue passed in) so the ordering logic is unit-tested without the filesystem. `None` = no
-/// queued waiter fits right now (everyone keeps waiting for a resident to free).
+/// The waiter that should proceed: the highest-priority, then lowest-`seq`, ticket whose footprint fits
+/// the current budget. Pure (queue passed in) so the ordering is unit-tested without the filesystem.
+/// `None` = no queued waiter fits right now (everyone keeps waiting for a resident to free). Priority
+/// ordering means an interactive load is served before a batch one even if the batch queued first —
+/// but only among waiters that FIT (a high-prio load too big for the current budget never blocks a
+/// smaller lower-prio one; that's what cooperative preemption (P4) is for, not the queue).
 fn pick_front_that_fits(
-    waiters: &[(u64, u32, u64)],
+    waiters: &[(u8, u64, u32, u64)],
     in_use: u64,
     budget: Option<u64>,
     available: Option<u64>,
     min_free: u64,
     pressure: crate::shed::PressureLevel,
-) -> Option<(u64, u32)> {
+) -> Option<(u8, u64, u32)> {
     let mut w = waiters.to_vec();
-    w.sort_by_key(|&(seq, _, _)| seq);
-    for &(seq, pid, fp) in &w {
+    w.sort_by_key(|&(prio, seq, _, _)| (prio, seq));
+    for &(prio, seq, pid, fp) in &w {
         if admits(in_use, fp, budget, available, min_free, pressure) {
-            return Some((seq, pid));
+            return Some((prio, seq, pid));
         }
     }
     None
@@ -1036,19 +1056,24 @@ mod tests {
         let budget = Some(27 * GIB);
         let avail = Some(30 * GIB);
         let min_free = 3 * GIB;
-        // #1 (seq 1) huge 40 GiB won't fit; #2/#3 (10 GiB) fit → head-of-line AVOIDED, #2 goes.
-        let waiters = vec![(1u64, 100u32, 40 * GIB), (2, 200, 10 * GIB), (3, 300, 10 * GIB)];
-        assert_eq!(pick_front_that_fits(&waiters, 0, budget, avail, min_free, Normal), Some((2, 200)));
-        // Unsorted input, all fit → strict FIFO by seq (lowest seq, here 3 → pid 2).
-        let small = vec![(5u64, 1u32, 5 * GIB), (3, 2, 5 * GIB), (9, 3, 5 * GIB)];
-        assert_eq!(pick_front_that_fits(&small, 0, budget, avail, min_free, Normal), Some((3, 2)));
+        // All interactive (prio 0). #1 (seq 1) huge 40 GiB won't fit; #2/#3 (10 GiB) fit → head-of-line
+        // AVOIDED, #2 goes.
+        let waiters = vec![(0u8, 1u64, 100u32, 40 * GIB), (0, 2, 200, 10 * GIB), (0, 3, 300, 10 * GIB)];
+        assert_eq!(pick_front_that_fits(&waiters, 0, budget, avail, min_free, Normal), Some((0, 2, 200)));
+        // Unsorted, all fit, same prio → FIFO by seq (lowest seq 3 → pid 2).
+        let small = vec![(0u8, 5u64, 1u32, 5 * GIB), (0, 3, 2, 5 * GIB), (0, 9, 3, 5 * GIB)];
+        assert_eq!(pick_front_that_fits(&small, 0, budget, avail, min_free, Normal), Some((0, 3, 2)));
         // Nothing fits → None (all keep waiting for a resident to free; no spin-load).
-        let toobig = vec![(1u64, 1u32, 50 * GIB)];
+        let toobig = vec![(0u8, 1u64, 1u32, 50 * GIB)];
         assert_eq!(pick_front_that_fits(&toobig, 0, budget, avail, min_free, Normal), None);
-        // A resident already eats budget (in_use 20): the 10 GiB front no longer fits (20+10>27), the
-        // 5 GiB behind it does (20+5≤27) → the smaller one is served, not blocked.
-        let mixed = vec![(1u64, 1u32, 10 * GIB), (2, 2, 5 * GIB)];
-        assert_eq!(pick_front_that_fits(&mixed, 20 * GIB, budget, avail, min_free, Normal), Some((2, 2)));
+        // A resident eats budget (in_use 20): the 10 GiB front no longer fits (20+10>27), the 5 GiB
+        // behind it does (20+5≤27) → the smaller one is served, not blocked.
+        let mixed = vec![(0u8, 1u64, 1u32, 10 * GIB), (0, 2, 2, 5 * GIB)];
+        assert_eq!(pick_front_that_fits(&mixed, 20 * GIB, budget, avail, min_free, Normal), Some((0, 2, 2)));
+        // P3: an INTERACTIVE (prio 0) that queued LATER (seq 9) beats a BATCH (prio 1) that queued first
+        // (seq 1) when both fit — priority wins over arrival order.
+        let prio_mix = vec![(PRIO_BATCH, 1u64, 50u32, 5 * GIB), (PRIO_INTERACTIVE, 9, 60, 5 * GIB)];
+        assert_eq!(pick_front_that_fits(&prio_mix, 0, budget, avail, min_free, Normal), Some((0, 9, 60)));
     }
 
     fn sample() -> ActiveGateway {
