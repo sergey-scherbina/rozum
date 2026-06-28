@@ -13,8 +13,12 @@
   (lead-up before the anchor + same-tag elsewhere), shown in console drill-down + `incident show`; (2)
   **console deploy** (`d2af282`) — `meetings install` wires the console into the daemon service (generated
   0600 secret + bind + Tailscale hint); (3) **.ssc convergence start** (`00878b3`) — severity/kind badges
-  in the production PWA (deploy via `clients/meeting/build.sh`). Remaining = v3 polish (react/pin/edit/link,
-  full lifecycle/incident-lanes port into the `.ssc` PWA) — BACKLOG `## Meetings → product-support`. Detail below ↓
+  in the production PWA (deploy via `clients/meeting/build.sh`). **(+) SLA/staleness signals** (`57caa56`) —
+  per-severity SLA windows (`store::sla_secs`/`thread_is_stale`); REST/daemon metrics gain `needs_attention`,
+  threads gain `stale`+`age_secs`; console shows a red 'attention' metric + ⚠ on stale cards; CLI `incident
+  list` flags ⚠. Also `open_thread` now INHERITS the anchor alert's severity (so the SLA is meaningful).
+  Remaining = v3 polish (react/pin/edit/link, full lifecycle/incident-lanes port into the `.ssc` PWA) —
+  BACKLOG `## Meetings → product-support`. Detail below ↓
 
 - [~] **meetings — original sprint notes (superseded by the line above)** — spec
   `docs/specs/meetings-incident-platform.md`. **FOUNDATION (P1-P3) DONE — the data-model + store ops, all
