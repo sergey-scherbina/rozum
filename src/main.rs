@@ -527,6 +527,36 @@ enum MeetingsAction {
         count: usize,
     },
 
+    /// Search a room's whole history by text + support metadata (kind/severity/tag/thread).
+    ///
+    /// A direct-read over every day file (no daemon needed for the cwd room). `--severity` is a
+    /// MINIMUM (that level and above). Example: `meetings search --severity high --tag db "timeout"`.
+    Search {
+        /// Free-text to find in message content (case-insensitive substring). Optional.
+        query: Option<String>,
+        /// Room name; default = the cwd project's room.
+        #[arg(long)]
+        room: Option<String>,
+        /// Only this kind: note|question|event|alert|resolution.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Minimum severity: info|low|medium|high|critical (this level and above).
+        #[arg(long)]
+        severity: Option<String>,
+        /// A tag the message must carry.
+        #[arg(long = "tag")]
+        tag: Option<String>,
+        /// Restrict to one thread/incident id (`<date>/<n>`).
+        #[arg(long)]
+        thread: Option<String>,
+        /// Only messages on or after this date (`YYYY-MM-DD`).
+        #[arg(long)]
+        since: Option<String>,
+        /// Cap the number of (most-recent) matches shown.
+        #[arg(long, short = 'n', default_value_t = 50)]
+        count: usize,
+    },
+
     /// Show messages that ADDRESS you (`@handle` / `-> handle`) since you last looked.
     ///
     /// A durable, offline-surviving inbox: a view over the room transcript filtered to turns that
@@ -1033,6 +1063,9 @@ async fn main() {
                 run_meetings_post(text, room, as_display, kind, severity, thread, tags).await
             }
             MeetingsAction::Read { room, count } => run_meetings_read(room, count).await,
+            MeetingsAction::Search { query, room, kind, severity, tag, thread, since, count } => {
+                run_meetings_search(query, room, kind, severity, tag, thread, since, count).await
+            }
             MeetingsAction::Inbox { as_handle, room, peek, all, count } => {
                 run_meetings_inbox(as_handle, room, peek, all, count).await
             }
@@ -2705,6 +2738,67 @@ async fn run_meetings_read(room: Option<String>, count: usize) {
         match t.badge() {
             Some(b) => println!("[{}] {} {}: {}", hhmm_of(t.ts), b, t.display_name, t.content),
             None => println!("[{}] {}: {}", hhmm_of(t.ts), t.display_name, t.content),
+        }
+    }
+}
+
+/// `rozum meetings search` — full-history search by text + support metadata (a direct disk read).
+#[allow(clippy::too_many_arguments)]
+async fn run_meetings_search(
+    query: Option<String>,
+    room: Option<String>,
+    kind: Option<String>,
+    severity: Option<String>,
+    tag: Option<String>,
+    thread: Option<String>,
+    since: Option<String>,
+    count: usize,
+) {
+    use rozum::meeting::store::{self, MsgFilter};
+    let root = resolve_room_or_exit(room, "search").await;
+    if !root.exists() {
+        eprintln!("meetings search: no messages yet ({})", root.display());
+        return;
+    }
+    // Parse the metadata filters up front; a typo'd kind/severity is a hard error, not silent.
+    let kind = match kind.as_deref() {
+        Some(s) => match store::MsgKind::parse(s) {
+            Some(k) => Some(k),
+            None => {
+                eprintln!("meetings search: bad --kind '{s}' (note|question|event|alert|resolution)");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+    let min_severity = match severity.as_deref() {
+        Some(s) => match store::Severity::parse(s) {
+            Some(v) => Some(v),
+            None => {
+                eprintln!("meetings search: bad --severity '{s}' (info|low|medium|high|critical)");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+    let filter = MsgFilter {
+        text: query.as_deref().filter(|s| !s.is_empty()),
+        kind,
+        min_severity,
+        tag: tag.as_deref(),
+        thread_id: thread.as_deref(),
+        since_date: since.as_deref(),
+    };
+    let hits = store::search_messages(&root, &filter, count);
+    if hits.is_empty() {
+        println!("(no matches)");
+        return;
+    }
+    for t in &hits {
+        let id = t.id();
+        match t.badge() {
+            Some(b) => println!("[{}] {} {} {}: {}", hhmm_of(t.ts), id, b, t.display_name, t.content),
+            None => println!("[{}] {} {}: {}", hhmm_of(t.ts), id, t.display_name, t.content),
         }
     }
 }

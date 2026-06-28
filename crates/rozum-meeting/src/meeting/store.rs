@@ -108,6 +108,16 @@ impl Severity {
             Self::Critical => "CRIT",
         }
     }
+    /// Ordinal for `>=` filtering (info=0 … critical=4) — "show high and above".
+    pub fn rank(&self) -> u8 {
+        match self {
+            Self::Info => 0,
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+            Self::Critical => 4,
+        }
+    }
 }
 
 /// Per-message support status.
@@ -916,6 +926,69 @@ pub fn thread_metrics(root: &Path) -> serde_json::Value {
     })
 }
 
+/// A message-search filter over a room's whole history (`mtg-message-ops`). All fields are AND-ed;
+/// `None`/empty means "don't filter on this". `severity` matches that level AND ABOVE (min-severity).
+#[derive(Debug, Default, Clone)]
+pub struct MsgFilter<'a> {
+    /// Case-insensitive substring of the message content.
+    pub text: Option<&'a str>,
+    /// Exact message kind (note|question|event|alert|resolution).
+    pub kind: Option<MsgKind>,
+    /// Minimum severity (this level and above).
+    pub min_severity: Option<Severity>,
+    /// A tag the message must carry.
+    pub tag: Option<&'a str>,
+    /// Restrict to one thread/incident (anchor id or members).
+    pub thread_id: Option<&'a str>,
+    /// Only messages on or after this date (`YYYY-MM-DD`).
+    pub since_date: Option<&'a str>,
+}
+impl MsgFilter<'_> {
+    fn matches(&self, m: &StoredTurn) -> bool {
+        if let Some(t) = self.text {
+            if !m.content.to_lowercase().contains(&t.to_lowercase()) {
+                return false;
+            }
+        }
+        if let Some(k) = self.kind {
+            if m.kind != k {
+                return false;
+            }
+        }
+        if let Some(min) = self.min_severity {
+            match m.meta.severity {
+                Some(s) if s.rank() >= min.rank() => {}
+                _ => return false,
+            }
+        }
+        if let Some(tag) = self.tag {
+            if !m.meta.tags.iter().any(|t| t == tag) {
+                return false;
+            }
+        }
+        if let Some(tid) = self.thread_id {
+            if m.id() != tid && m.thread_id.as_deref() != Some(tid) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Search a room's whole on-disk history for messages matching `filter`, newest-last, capped at
+/// `limit` (the most-recent `limit` matches). The read-side of `mtg-message-ops` — spans every day
+/// file + thread, unlike the console's client-side filter over just today's feed.
+pub fn search_messages(root: &Path, filter: &MsgFilter, limit: usize) -> Vec<StoredTurn> {
+    let mut hits: Vec<StoredTurn> = read_since(root, filter.since_date, 0)
+        .into_iter()
+        .filter(|m| filter.matches(m))
+        .collect();
+    if hits.len() > limit {
+        hits.drain(0..hits.len() - limit);
+    }
+    hits
+}
+
 /// Read every message at or after the cursor `(since_date, since_n)` from disk.
 /// `since_date = None` returns the whole history. This is how direct-read clients
 /// fetch a `wait` delta — content never transits the daemon.
@@ -1148,6 +1221,40 @@ mod tests {
         // A bare question (kind only) still badges.
         let q = StoredTurn { kind: MsgKind::Question, ..plain };
         assert_eq!(q.badge().as_deref(), Some("[ASK]"));
+    }
+
+    #[test]
+    fn search_messages_filters_by_text_and_metadata() {
+        let dir = tempdir().unwrap();
+        let paths = RoomPaths::ad_hoc_in(dir.path(), "ops");
+        let root = paths.root.clone();
+        let mut w = TranscriptWriter::new(paths, "ops", "topic", None, dir.path().to_path_buf());
+        let mut alert = PostMeta::default();
+        alert.kind = MsgKind::Alert;
+        alert.meta.severity = Some(Severity::Critical);
+        alert.meta.tags = vec!["db".into()];
+        w.append_with_meta("p", "A", "DB connection timeout", 1_718_000_000, alert).unwrap();
+        let mut low = PostMeta::default();
+        low.meta.severity = Some(Severity::Low);
+        w.append_with_meta("p", "A", "cosmetic timeout in UI", 1_718_000_010, low).unwrap();
+        w.append("p", "A", "unrelated chatter", 1_718_000_020).unwrap();
+
+        // Text substring (case-insensitive) matches both "timeout" lines.
+        let f = MsgFilter { text: Some("TIMEOUT"), ..Default::default() };
+        assert_eq!(search_messages(&root, &f, 100).len(), 2);
+        // Min-severity high → only the critical alert (low is below).
+        let f = MsgFilter { min_severity: Some(Severity::High), ..Default::default() };
+        let hits = search_messages(&root, &f, 100);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].content, "DB connection timeout");
+        // Tag + kind narrow to the same single alert.
+        let f = MsgFilter { tag: Some("db"), kind: Some(MsgKind::Alert), ..Default::default() };
+        assert_eq!(search_messages(&root, &f, 100).len(), 1);
+        // limit keeps the most-recent N.
+        let f = MsgFilter { text: Some("timeout"), ..Default::default() };
+        let hits = search_messages(&root, &f, 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].content, "cosmetic timeout in UI");
     }
 
     // P1b: append_with_meta persists metadata; plain append stays plain.

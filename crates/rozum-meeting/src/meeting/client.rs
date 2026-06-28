@@ -20,6 +20,18 @@ pub async fn resolve_room_root(room: Option<String>) -> Option<PathBuf> {
     match room {
         None => detect_project().map(|p| PathBuf::from(p).join(".rozum").join("room")),
         Some(name) => {
+            // The registry (`rooms.json`) holds the authoritative root for a registered room —
+            // including SHARED rooms (project=None) which live under `$XDG_STATE_HOME/rozum/rooms`,
+            // not the runtime dir. Prefer a same-name entry whose root still exists (mtg-registry-dup-name).
+            let registered: Vec<PathBuf> = store::list_registered(&store::rozum_state_dir())
+                .into_iter()
+                .filter(|loc| loc.name == name)
+                .map(|loc| loc.root)
+                .collect();
+            if let Some(root) = registered.iter().find(|r| r.exists()).cloned().or_else(|| registered.into_iter().next_back()) {
+                return Some(root);
+            }
+            // Not registered: fall back to a daemon-reported project, else the ad-hoc rooms dir.
             let project = {
                 use super::daemon::{daemon_alive, daemon_rooms};
                 use super::room_path::meeting_sock;

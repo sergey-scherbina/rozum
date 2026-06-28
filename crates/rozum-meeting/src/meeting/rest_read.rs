@@ -46,6 +46,17 @@ struct PageQuery {
     count: Option<u64>,
 }
 
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: Option<String>,
+    kind: Option<String>,
+    severity: Option<String>,
+    tag: Option<String>,
+    thread: Option<String>,
+    since: Option<String>,
+    limit: Option<u64>,
+}
+
 #[derive(Serialize)]
 struct DayJson {
     date: String,
@@ -120,6 +131,7 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
         .route("/rooms/{name}/threads/{id}/state", post(thread_state))
         .route("/rooms/{name}/messages", post(submit))
         .route("/rooms/{name}/metrics", get(metrics))
+        .route("/rooms/{name}/search", get(search))
         .route("/roster", get(roster))
         .layer(middleware::from_fn_with_state(
             AuthCfg { secret },
@@ -184,6 +196,44 @@ async fn metrics(State(state): State<RestState>, AxumPath(name): AxumPath<String
     let mut out = store::thread_metrics(&root);
     out["room"] = json!(name);
     Json(out).into_response()
+}
+
+/// `GET /rooms/{name}/search?q=&kind=&severity=&tag=&thread=&since=&limit=` — full-history message
+/// search (`mtg-message-ops`). `severity` is a MIN (that level and above). Unparseable kind/severity
+/// values are a 400 so a typo isn't silently ignored.
+async fn search(
+    State(state): State<RestState>,
+    AxumPath(name): AxumPath<String>,
+    Query(q): Query<SearchQuery>,
+) -> Response {
+    let Some(root) = room_root(&state.registry, &name) else {
+        return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
+    };
+    let kind = match q.kind.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => match store::MsgKind::parse(s) {
+            Some(k) => Some(k),
+            None => return (StatusCode::BAD_REQUEST, format!("bad kind: {s}\n")).into_response(),
+        },
+        None => None,
+    };
+    let min_severity = match q.severity.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => match store::Severity::parse(s) {
+            Some(v) => Some(v),
+            None => return (StatusCode::BAD_REQUEST, format!("bad severity: {s}\n")).into_response(),
+        },
+        None => None,
+    };
+    let filter = store::MsgFilter {
+        text: q.q.as_deref().filter(|s| !s.is_empty()),
+        kind,
+        min_severity,
+        tag: q.tag.as_deref().filter(|s| !s.is_empty()),
+        thread_id: q.thread.as_deref().filter(|s| !s.is_empty()),
+        since_date: q.since.as_deref().filter(|s| !s.is_empty()),
+    };
+    let limit = q.limit.unwrap_or(DEFAULT_COUNT).min(MAX_COUNT) as usize;
+    let hits = store::search_messages(&root, &filter, limit);
+    Json(json!({ "room": name, "count": hits.len(), "messages": hits })).into_response()
 }
 
 /// `GET /rooms/{name}/inbox/{handle}` — turns that ADDRESS `handle` (`@h`/`-> h`). Returns ALL such
@@ -611,6 +661,33 @@ mod tests {
         assert_eq!(ctx["participants"].as_array().unwrap().len(), 2);
         assert_eq!(ctx["messages"][0]["content"], "DB is down");
         assert_eq!(ctx["messages"][0]["meta"]["severity"], "critical");
+    }
+
+    #[tokio::test]
+    async fn search_endpoint_filters_by_metadata() {
+        let dir = tempdir().unwrap();
+        let (_d, _id, _root) = seed_incident(dir.path(), "ops");
+        let (addr, _shutdown) = start(dir.path().to_path_buf(), "sekret").await;
+        let client = reqwest::Client::new();
+        let get = |url: String| {
+            let c = client.clone();
+            async move { c.get(&url).basic_auth("", Some("sekret")).send().await.unwrap() }
+        };
+        // seed_incident posts: anchor alert "DB is down" (critical, tag db) + reply event "looking".
+        let r: Value = get(format!("http://{addr}/rooms/ops/search?severity=high"))
+            .await.json().await.unwrap();
+        assert_eq!(r["count"], 1);
+        assert_eq!(r["messages"][0]["content"], "DB is down");
+        let r: Value = get(format!("http://{addr}/rooms/ops/search?q=looking"))
+            .await.json().await.unwrap();
+        assert_eq!(r["count"], 1);
+        assert_eq!(r["messages"][0]["kind"], "event");
+        let r: Value = get(format!("http://{addr}/rooms/ops/search?tag=db&kind=alert"))
+            .await.json().await.unwrap();
+        assert_eq!(r["count"], 1);
+        // A typo'd severity is a 400, not a silent empty result.
+        let bad = get(format!("http://{addr}/rooms/ops/search?severity=urgent")).await;
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -333,7 +333,8 @@ function msgRow(m, opts) {
   const sev = m.meta && m.meta.severity;
   if (sev) l1.appendChild(sevBadge(sev));
   l1.appendChild(el("span", "who", m.display_name || m.speaker || "?"));
-  l1.appendChild(el("span", "when", hhmm(m.ts)));
+  const when = opts.showDate && m.date ? `${m.date} ${hhmm(m.ts)}` : hhmm(m.ts);
+  l1.appendChild(el("span", "when", when));
   if (opts.showThread && m.thread_id) {
     const tl = el("span", "thread-link", "⤷ " + m.thread_id);
     tl.onclick = () => { SELECTED = m.thread_id; refresh(); };
@@ -357,27 +358,38 @@ function msgRow(m, opts) {
   return row;
 }
 
-// ── Live feed (today's messages) ─────────────────────────────
+// ── Live feed (today's messages) — or a history search when the filter box is set ──
 async function renderLive() {
   const main = $("main");
+  const q = $("q").value.trim();
+  // With a filter active, search the WHOLE history (server-side) instead of just today's feed.
+  if (q) return renderSearch(q);
   const { days } = await api(`rooms/${enc(ROOM)}/days`);
   const date = days && days.length ? days[days.length - 1].date : null;
   main.innerHTML = "";
   const head = el("div", "pane-head");
-  head.appendChild(Object.assign(el("h2", null, "Live feed"), {}));
+  head.appendChild(el("h2", null, "Live feed"));
   head.appendChild(el("span", "sub", date ? date : "no messages yet"));
   main.appendChild(head);
   if (!date) { main.appendChild(el("div", "empty", "No messages yet.")); return; }
   const { messages } = await api(`rooms/${enc(ROOM)}/messages/${enc(date)}?count=500`);
   if (!messages.length) { main.appendChild(el("div", "empty", "No messages today.")); return; }
-  const q = $("q").value.trim().toLowerCase();
-  const shown = q
-    ? messages.filter(m => `${m.content} ${m.display_name} ${m.kind || ""} ${(m.meta && m.meta.severity) || ""} ${((m.meta && m.meta.tags) || []).join(" ")}`.toLowerCase().includes(q))
-    : messages;
-  if (!shown.length) { main.appendChild(el("div", "empty", "No messages match the filter.")); return; }
   const atBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 80;
-  for (const m of shown) main.appendChild(msgRow(m, { showThread: true }));
+  for (const m of messages) main.appendChild(msgRow(m, { showThread: true }));
   if (atBottom) main.scrollTop = main.scrollHeight;
+}
+
+// ── History search (server-side, spans every day file) ───────
+async function renderSearch(q) {
+  const main = $("main");
+  const { messages, count } = await api(`rooms/${enc(ROOM)}/search?q=${enc(q)}&limit=300`);
+  main.innerHTML = "";
+  const head = el("div", "pane-head");
+  head.appendChild(el("h2", null, "Search"));
+  head.appendChild(el("span", "sub", `“${q}” · ${count} match${count === 1 ? "" : "es"} across history`));
+  main.appendChild(head);
+  if (!messages.length) { main.appendChild(el("div", "empty", "No messages match.")); return; }
+  for (const m of messages) main.appendChild(msgRow(m, { showThread: true, showDate: true }));
 }
 
 // ── Thread drill-down ────────────────────────────────────────
