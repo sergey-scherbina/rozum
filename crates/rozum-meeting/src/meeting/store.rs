@@ -527,10 +527,7 @@ impl TranscriptWriter {
             members: meta.as_ref().map(|m| m.members.clone()).unwrap_or_default(),
             phase: meta.map(|m| m.phase).unwrap_or_else(|| "Active".into()),
             index,
-            threads: std::fs::read(paths.threads_path())
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok())
-                .unwrap_or_default(),
+            threads: load_threads_map(&paths.threads_path()),
             paths,
             registry_state_dir,
         })
@@ -619,6 +616,12 @@ impl TranscriptWriter {
             .open(self.paths.day_file(&date))?;
         f.write_all(line.as_bytes())?;
         f.flush()?;
+        // Durability: get the message bytes onto disk BEFORE `persist_meta_index` records the new
+        // count — otherwise a crash could leave the index claiming a message the JSONL never durably
+        // got. (No-op under ROZUM_MEETINGS_FSYNC=0 / tmpfs.)
+        if fsync_enabled() {
+            f.sync_all()?;
+        }
 
         self.end_offset += line.len() as u64;
         self.next_n += 1;
@@ -644,11 +647,11 @@ impl TranscriptWriter {
         }
         self.created_at = ts;
         // Load existing thread metadata (P2). Membership is derived from messages; this is the
-        // not-derivable part (state/owner/severity). Absent file → no threads yet.
-        if let Ok(bytes) = std::fs::read(self.paths.threads_path()) {
-            if let Ok(t) = serde_json::from_slice::<BTreeMap<String, Thread>>(&bytes) {
-                self.threads = t;
-            }
+        // not-derivable part (state/owner/severity/pinned). Absent file → no threads yet; a corrupt
+        // primary falls back to the `.bak` (see load_threads_map). Only overwrite if we found some.
+        let loaded = load_threads_map(&self.paths.threads_path());
+        if !loaded.is_empty() {
+            self.threads = loaded;
         }
         let _ = register_room(
             &self.registry_state_dir,
@@ -679,7 +682,14 @@ impl TranscriptWriter {
     }
 
     fn persist_threads(&self) -> std::io::Result<()> {
-        write_json_atomic(&self.paths.threads_path(), &self.threads)
+        let path = self.paths.threads_path();
+        // Keep the last-good version as a `.bak` before overwriting — `threads.json` holds the
+        // incident state (state/owner/severity/pinned), which is NOT rebuildable from the message log,
+        // so a recent backup is the recovery path if the live file is ever lost/corrupted.
+        if path.exists() {
+            let _ = std::fs::copy(&path, threads_bak_path(&path));
+        }
+        write_json_atomic(&path, &self.threads)
     }
 
     // ── P2: thread / incident operations ───────────────────────────────────────────────────────
@@ -903,15 +913,34 @@ pub fn day_dates(root: &Path) -> Vec<String> {
     dates
 }
 
-/// Read the per-room thread map from `threads.json` (P2) given just a room root.
-/// Empty if the file is absent or unreadable — threads are an additive overlay,
-/// so a room with no incidents simply has no map. Used by direct-read surfaces
-/// (the REST support console) that don't hold the daemon's live writer.
-pub fn read_threads(root: &Path) -> BTreeMap<String, Thread> {
-    std::fs::read(root.join("threads.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
+/// The `.bak` sibling of a `threads.json` (last-good copy, the recovery source).
+fn threads_bak_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".bak");
+    PathBuf::from(s)
+}
+
+/// Load a `threads.json` map, falling back to its `.bak` if the primary is missing/empty/unparseable.
+/// The incident state isn't rebuildable from the message log, so this two-file recovery is the safety
+/// net behind the durable (fsync'd, atomic) write.
+fn load_threads_map(path: &Path) -> BTreeMap<String, Thread> {
+    let try_one = |p: &Path| -> Option<BTreeMap<String, Thread>> {
+        let bytes = std::fs::read(p).ok()?;
+        if bytes.is_empty() {
+            return None;
+        }
+        serde_json::from_slice(&bytes).ok()
+    };
+    try_one(path)
+        .or_else(|| try_one(&threads_bak_path(path)))
         .unwrap_or_default()
+}
+
+/// Read the per-room thread map from `threads.json` (P2) given just a room root, with `.bak` fallback.
+/// Empty if neither the file nor its backup is present/parseable — threads are an additive overlay,
+/// so a room with no incidents simply has no map. Used by direct-read surfaces (the REST console).
+pub fn read_threads(root: &Path) -> BTreeMap<String, Thread> {
+    load_threads_map(&root.join("threads.json"))
 }
 
 /// Assemble an incident's whole picture from disk — the `Thread` record + every
@@ -1220,14 +1249,43 @@ pub fn read_meta(root: &Path) -> Option<Meta> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Write `value` as JSON to `path` atomically AND durably: serialize to a sibling `.tmp`, fsync the
+/// data, rename over `path`, then fsync the directory so the rename entry itself survives a power loss /
+/// kernel panic. Without the fsyncs the rename can be reordered ahead of the data write and expose an
+/// empty/stale file after a crash — and `threads.json` (the incident state) is not rebuildable. This is
+/// the durability backstop for the support platform's persisted state on a box that has panicked before.
+/// `ROZUM_MEETINGS_FSYNC=0` drops the fsyncs (faster, but not crash-durable) — for tmpfs/tests.
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("tmp");
     let bytes = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
-    std::fs::write(&tmp, &bytes)?;
-    std::fs::rename(&tmp, path)
+    let fsync = fsync_enabled();
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&bytes)?;
+        if fsync {
+            f.sync_all()?;
+        }
+    }
+    std::fs::rename(&tmp, path)?;
+    if fsync {
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether persisted writes are fsync'd to physical disk (default on). Off = page-cache only (faster,
+/// not crash-durable) — appropriate for tmpfs-backed runtime dirs and tests.
+fn fsync_enabled() -> bool {
+    std::env::var("ROZUM_MEETINGS_FSYNC")
+        .map(|v| v != "0")
+        .unwrap_or(true)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1694,6 +1752,47 @@ mod tests {
         let rooms = list_registered(&state);
         assert_eq!(rooms.len(), 1);
         assert_eq!(rooms[0].name, "renamed");
+    }
+
+    #[test]
+    fn threads_recover_from_bak_when_primary_is_corrupt() {
+        let dir = tempdir().unwrap();
+        let paths = RoomPaths::ad_hoc_in(dir.path(), "ops");
+        let root = paths.root.clone();
+        let mut w = TranscriptWriter::new(paths, "ops", "topic", None, dir.path().to_path_buf());
+        let a = w.append("p", "A", "DB down", 1_718_000_000).unwrap();
+        let id = a.id();
+        w.open_thread(&id, "DB outage", ThreadKind::Incident, 1_718_000_001).unwrap();
+        // A second write makes the previous good version land in `.bak`.
+        w.set_thread_state(&id, ThreadState::Escalated, 1_718_000_002).unwrap();
+        let tp = root.join("threads.json");
+        assert!(threads_bak_path(&tp).exists(), "a .bak should exist after the 2nd write");
+        // Simulate a corrupt/half-written primary (what a crash-without-fsync could leave).
+        std::fs::write(&tp, b"{ this is not json").unwrap();
+        // read_threads recovers the incident from the .bak instead of losing it.
+        let recovered = read_threads(&root);
+        assert!(recovered.contains_key(&id), "incident recovered from .bak: {recovered:?}");
+        // An empty primary also falls back.
+        std::fs::write(&tp, b"").unwrap();
+        assert!(read_threads(&root).contains_key(&id));
+    }
+
+    #[test]
+    fn write_json_atomic_round_trips_and_leaves_no_tmp() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sub").join("threads.json");
+        let mut m = BTreeMap::new();
+        m.insert("k".to_string(), 42u64);
+        write_json_atomic(&path, &m).unwrap();
+        // Content is correct and the sibling .tmp is gone (renamed, not left behind).
+        let back: BTreeMap<String, u64> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(back.get("k"), Some(&42));
+        assert!(!path.with_extension("tmp").exists(), "tmp not cleaned up");
+        // Overwrite is also clean (atomic replace).
+        m.insert("k".to_string(), 7);
+        write_json_atomic(&path, &m).unwrap();
+        let back: BTreeMap<String, u64> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(back.get("k"), Some(&7));
     }
 
     #[test]
