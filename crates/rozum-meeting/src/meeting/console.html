@@ -30,7 +30,7 @@
   body {
     font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--bg); color: var(--fg);
-    display: grid; grid-template-rows: auto 1fr; height: 100vh;
+    display: grid; grid-template-rows: auto 1fr auto; height: 100vh;
   }
   /* ── Header ─────────────────────────────────────────────── */
   header {
@@ -108,6 +108,33 @@
   .st-open { background: var(--st-open); } .st-triaging { background: var(--st-triaging); }
   .st-escalated { background: var(--st-escalated); } .st-resolved { background: var(--st-resolved); }
   .st-closed { background: var(--st-closed); }
+  /* ── Actions + compose ──────────────────────────────────── */
+  .actions { display: flex; gap: 6px; margin: 6px 0 4px; flex-wrap: wrap; }
+  .act {
+    font-size: 12px; padding: 3px 9px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--chip); color: var(--fg);
+  }
+  .act:hover { border-color: var(--accent); }
+  .act.go { background: var(--st-escalated); color: #fff; border-color: transparent; }
+  .act.ok { background: var(--st-resolved); color: #fff; border-color: transparent; }
+  .openinc { font-size: 11px; color: var(--accent); cursor: pointer; opacity: .6; }
+  .openinc:hover { opacity: 1; }
+  footer {
+    display: flex; gap: 8px; align-items: center; padding: 8px 14px;
+    background: var(--panel); border-top: 1px solid var(--border); flex-wrap: wrap;
+  }
+  footer input[type=text] {
+    flex: 1; min-width: 160px; font: inherit; color: var(--fg);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 7px 10px;
+  }
+  footer .send { background: var(--accent); color: var(--accent-fg); border-color: transparent; padding: 7px 14px; }
+  .toast {
+    position: fixed; bottom: 64px; left: 50%; transform: translateX(-50%);
+    background: var(--st-resolved); color: #fff; padding: 8px 16px; border-radius: 8px;
+    font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 10;
+  }
+  .toast.show { opacity: .96; }
+  .toast.err { background: var(--sev-crit); }
 </style>
 </head>
 <body>
@@ -122,6 +149,26 @@
   <aside id="rail"></aside>
   <main id="main"><div class="empty">Loading…</div></main>
 </div>
+<footer>
+  <select id="c-kind" title="message kind">
+    <option value="note">note</option>
+    <option value="question">question</option>
+    <option value="event">event</option>
+    <option value="alert">alert</option>
+    <option value="resolution">resolution</option>
+  </select>
+  <select id="c-sev" title="severity">
+    <option value="">— severity —</option>
+    <option value="info">info</option>
+    <option value="low">low</option>
+    <option value="medium">medium</option>
+    <option value="high">high</option>
+    <option value="critical">critical</option>
+  </select>
+  <input id="c-text" type="text" placeholder="post to the room…  (Enter to send)" autocomplete="off">
+  <button class="send" id="c-send">Send</button>
+</footer>
+<div class="toast" id="toast"></div>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -130,6 +177,28 @@ const api = (p) => fetch(p, { headers: { "Accept": "application/json" } }).then(
   if (!r.ok) throw new Error(p + " → " + r.status);
   return r.json();
 });
+async function postJSON(p, body) {
+  const r = await fetch(p, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const text = await r.text();
+  if (!r.ok) throw new Error((text || r.status).toString().slice(0, 200));
+  try { return JSON.parse(text); } catch { return {}; }
+}
+let toastTimer = null;
+function toast(msg, isErr) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "toast show" + (isErr ? " err" : "");
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = "toast"; }, 2600);
+}
+async function act(promise, okMsg) {
+  try { await promise; toast(okMsg); await refresh(); }
+  catch (e) { toast(e.message, true); }
+}
 
 const STATES = [
   ["open", "Open"], ["triaging", "Triaging"], ["escalated", "Escalated"],
@@ -261,6 +330,18 @@ function msgRow(m, opts) {
     const tl = el("span", "thread-link", "⤷ " + m.thread_id);
     tl.onclick = () => { SELECTED = m.thread_id; refresh(); };
     l1.appendChild(tl);
+  } else if (opts.showThread && m.date != null && m.n != null) {
+    // Not yet in a thread → offer to open an incident anchored on this message.
+    const mid = `${m.date}/${m.n}`;
+    const oi = el("span", "openinc", "⛑ incident");
+    oi.title = "open an incident on this message";
+    oi.onclick = (e) => {
+      e.stopPropagation();
+      const title = prompt("Incident title:", (m.content || "").slice(0, 60)); if (!title) return;
+      act(postJSON(`rooms/${enc(ROOM)}/threads`, { anchor_id: mid, title, kind: "incident" })
+        .then(() => { SELECTED = mid; }), "incident opened");
+    };
+    l1.appendChild(oi);
   }
   for (const tag of (m.meta && m.meta.tags) || []) l1.appendChild(el("span", "tag", "#" + tag));
   row.appendChild(l1);
@@ -303,6 +384,26 @@ async function renderThread(id) {
   const span = (ctx.first_ts && ctx.last_ts) ? `${hhmm(ctx.first_ts)}–${hhmm(ctx.last_ts)}` : "";
   head.appendChild(el("span", "sub", `${ctx.message_count} msgs · ${(ctx.participants || []).length} people · ${span}`));
   main.appendChild(head);
+
+  // Lifecycle actions on this incident.
+  const terminal = t.state === "resolved" || t.state === "closed";
+  const acts = el("div", "actions");
+  const btn = (label, cls, fn) => { const b = el("button", "act " + (cls || ""), label); b.onclick = fn; acts.appendChild(b); };
+  if (!terminal) {
+    btn("Escalate", "go", () => {
+      const to = prompt("Escalate to (handle):"); if (!to) return;
+      const note = prompt("Note (optional):") || "";
+      act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/escalate`, { to, note }), "escalated → " + to);
+    });
+    btn("Triage", "", () => act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/state`, { state: "triaging" }), "set triaging"));
+    btn("Resolve", "ok", () => {
+      const note = prompt("Resolution note (optional):") || "";
+      act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/resolve`, { note }), "resolved");
+    });
+  } else {
+    btn("Reopen", "", () => act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/state`, { state: "open" }), "reopened"));
+  }
+  main.appendChild(acts);
   if (!ctx.messages || !ctx.messages.length) { main.appendChild(el("div", "empty", "No messages in this thread yet.")); return; }
   for (const m of ctx.messages) main.appendChild(msgRow(m, { showThread: false }));
 }
@@ -327,10 +428,23 @@ async function refresh() {
   }
 }
 
+async function send() {
+  const text = $("c-text").value.trim();
+  if (!text || !ROOM) return;
+  const body = { content: text, kind: $("c-kind").value };
+  const sev = $("c-sev").value;
+  if (sev) body.severity = sev;
+  if (SELECTED) body.thread_id = SELECTED;   // posting inside an open incident → attach to it
+  $("c-text").value = "";
+  await act(postJSON(`rooms/${enc(ROOM)}/messages`, body), "posted");
+}
+
 async function boot() {
   await loadRooms();
   await refresh();
   $("refresh").onclick = refresh;
+  $("c-send").onclick = send;
+  $("c-text").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
   if (timer) clearInterval(timer);
   timer = setInterval(refresh, 4000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });

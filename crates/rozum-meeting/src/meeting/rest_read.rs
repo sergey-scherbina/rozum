@@ -9,13 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Extension, Router,
     extract::{Path as AxumPath, Query, State},
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Json, Response},
-    routing::get,
+    routing::{get, post},
 };
+use serde_json::Value;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -112,8 +113,12 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
         .route("/rooms/{name}/days", get(days))
         .route("/rooms/{name}/messages/{date}", get(messages))
         .route("/rooms/{name}/inbox/{handle}", get(inbox))
-        .route("/rooms/{name}/threads", get(threads))
+        .route("/rooms/{name}/threads", get(threads).post(thread_open))
         .route("/rooms/{name}/threads/{id}", get(thread_one))
+        .route("/rooms/{name}/threads/{id}/escalate", post(thread_escalate))
+        .route("/rooms/{name}/threads/{id}/resolve", post(thread_resolve))
+        .route("/rooms/{name}/threads/{id}/state", post(thread_state))
+        .route("/rooms/{name}/messages", post(submit))
         .route("/rooms/{name}/metrics", get(metrics))
         .route("/roster", get(roster))
         .layer(middleware::from_fn_with_state(
@@ -124,8 +129,9 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
 }
 
 /// `GET /` — the support console (single-page incident dashboard). Static HTML;
-/// it reads `?room=<name>` from its own URL and fetches the JSON endpoints with
-/// the Basic-auth credentials the browser already holds.
+/// it reads `?room=<name>` from its own URL and drives the JSON endpoints (GET to
+/// read, POST to act — escalate / resolve / open / compose) with the Basic-auth
+/// credentials the browser already holds.
 async fn console() -> Html<&'static str> {
     Html(include_str!("console.html"))
 }
@@ -312,14 +318,87 @@ async fn auth_layer(
     let Ok(dec) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
         return unauth();
     };
-    let pass = std::str::from_utf8(&dec)
-        .ok()
-        .and_then(|c| c.split_once(':').map(|(_, p)| p.to_owned()))
-        .unwrap_or_default();
+    let creds = std::str::from_utf8(&dec).ok().and_then(|c| c.split_once(':'));
+    let (user, pass) = match creds {
+        Some((u, p)) => (u.to_owned(), p.to_owned()),
+        None => return unauth(),
+    };
     if pass != cfg.secret {
         return unauth();
     }
+    // The Basic-auth username becomes the console actor for write attribution (the daemon still
+    // mints/uses a participant for it). Empty username → a generic console identity.
+    let actor = if user.is_empty() { "console".to_string() } else { user };
+    let mut req = req;
+    req.extensions_mut().insert(ConsoleUser(actor));
     next.run(req).await
+}
+
+/// The authenticated console actor (the Basic-auth username), attached by `auth_layer` and used to
+/// attribute write actions (open/escalate/resolve/submit) when the console drives the daemon.
+#[derive(Clone)]
+struct ConsoleUser(String);
+
+/// Drive a room MCP tool on behalf of the console user (the in-process REST server connects to the
+/// daemon's own socket as an MCP client — the same path the incident CLI uses — so writes go through
+/// the single-writer + identity machinery unchanged). Returns the tool's JSON payload.
+async fn console_call(name: &str, user: &str, tool: &str, args: Value) -> Response {
+    use super::room_path::meeting_sock;
+    use super::tui_client::{PostTarget, call_once};
+    match call_once(&meeting_sock(), PostTarget::Named(name.to_string()), user, None, tool, args).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("{tool}: {e}\n")).into_response(),
+    }
+}
+
+/// `POST /rooms/{name}/threads` — open an incident/topic thread on an anchor message id.
+/// Body: `{ "anchor_id": "<date>/<n>", "title": "...", "kind": "incident"|"topic" }`.
+async fn thread_open(
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    console_call(&name, &user, "meeting.thread_open", body).await
+}
+
+/// `POST /rooms/{name}/threads/{id}/escalate` — body `{ "to": "<handle>", "note": "..." }`.
+async fn thread_escalate(
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    AxumPath((name, id)): AxumPath<(String, String)>,
+    Json(mut body): Json<Value>,
+) -> Response {
+    body["id"] = json!(id);
+    console_call(&name, &user, "meeting.escalate", body).await
+}
+
+/// `POST /rooms/{name}/threads/{id}/resolve` — body `{ "note": "..." }`.
+async fn thread_resolve(
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    AxumPath((name, id)): AxumPath<(String, String)>,
+    Json(mut body): Json<Value>,
+) -> Response {
+    body["id"] = json!(id);
+    console_call(&name, &user, "meeting.resolve", body).await
+}
+
+/// `POST /rooms/{name}/threads/{id}/state` — body `{ "state": "triaging"|... }`.
+async fn thread_state(
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    AxumPath((name, id)): AxumPath<(String, String)>,
+    Json(mut body): Json<Value>,
+) -> Response {
+    body["id"] = json!(id);
+    console_call(&name, &user, "meeting.thread_set_state", body).await
+}
+
+/// `POST /rooms/{name}/messages` — post a message with optional support metadata. Body:
+/// `{ "content": "...", "kind": "alert", "severity": "high", "thread_id": "...", "tags": [...] }`.
+async fn submit(
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    console_call(&name, &user, "meeting.submit", body).await
 }
 
 #[cfg(test)]
