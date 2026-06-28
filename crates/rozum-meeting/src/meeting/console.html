@@ -434,6 +434,12 @@ async function renderThread(id) {
   const terminal = t.state === "resolved" || t.state === "closed";
   const acts = el("div", "actions");
   const btn = (label, cls, fn) => { const b = el("button", "act " + (cls || ""), label); b.onclick = fn; acts.appendChild(b); };
+  // Assign is orthogonal to state — available in any state.
+  btn("Assign", "", () => {
+    const to = prompt("Assign to (handle):", t.owner || ""); if (!to) return;
+    const note = prompt("Note (optional):") || "";
+    act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/assign`, { to, note }), "assigned → " + to);
+  });
   if (!terminal) {
     btn("Escalate", "go", () => {
       const to = prompt("Escalate to (handle):"); if (!to) return;

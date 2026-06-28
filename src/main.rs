@@ -684,6 +684,17 @@ enum IncidentAction {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Assign an incident owner WITHOUT changing its state (use `state`/`escalate`/`resolve` for state).
+    Assign {
+        /// The incident/thread id.
+        id: String,
+        /// Who to assign it to (a handle).
+        #[arg(long)]
+        to: String,
+        /// An optional note.
+        #[arg(long)]
+        note: Option<String>,
+    },
     /// Set an incident's state directly: open|triaging|escalated|resolved|closed.
     State {
         /// The incident/thread id.
@@ -2676,6 +2687,11 @@ async fn run_meetings_incident(
         IncidentAction::Resolve { id, note } => (
             "meeting.resolve",
             serde_json::json!({ "id": id, "note": note.unwrap_or_default() }),
+            false,
+        ),
+        IncidentAction::Assign { id, to, note } => (
+            "meeting.thread_assign",
+            serde_json::json!({ "id": id, "to": to, "note": note.unwrap_or_default() }),
             false,
         ),
         IncidentAction::State { id, state } => (

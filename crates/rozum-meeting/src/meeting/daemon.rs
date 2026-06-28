@@ -520,6 +520,50 @@ impl MeetingServer {
         .await
     }
 
+    /// Assign a thread/incident owner WITHOUT changing its state (assignment is orthogonal to the
+    /// lifecycle — use thread_set_state / escalate / resolve for state). Posts an event note.
+    #[tool(
+        name = "meeting.thread_assign",
+        description = "Assign a thread/incident owner (to) without changing state; posts an event note."
+    )]
+    pub async fn thread_assign(&self, params: Parameters<EscalateParams>) -> CallToolResult {
+        guard("meeting.thread_assign", async move {
+            let (room, caller) = self.session_room().await;
+            let (Some(room), Some(caller)) = (room, caller) else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let p = &params.0;
+            let Some(to) = p.to.clone() else {
+                return err_result("assign requires 'to'");
+            };
+            let mut r = room.lock().await;
+            match r.set_thread_owner(&p.id, Some(to.clone()), None) {
+                Ok(None) => return err_result("unknown thread id"),
+                Err(e) => return err_result(&e),
+                Ok(Some(_)) => {}
+            }
+            let note = p.note.clone().unwrap_or_default();
+            let content = if note.is_empty() {
+                format!("assigned to {to}")
+            } else {
+                format!("assigned to {to}: {note}")
+            };
+            let pm = store::PostMeta {
+                kind: store::MsgKind::Event,
+                thread_id: Some(p.id.clone()),
+                ..Default::default()
+            };
+            match r.submit_with_meta(&caller, &content, pm) {
+                Ok(turn) => text_result(
+                    &serde_json::json!({ "thread": p.id, "assigned_to": to, "msg_id": turn.id() })
+                        .to_string(),
+                ),
+                Err(e) => err_result(&e),
+            }
+        })
+        .await
+    }
+
     /// Resolve a thread/incident: state→resolved, post a resolution note.
     #[tool(
         name = "meeting.resolve",

@@ -127,6 +127,7 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
         .route("/rooms/{name}/threads", get(threads).post(thread_open))
         .route("/rooms/{name}/threads/{id}", get(thread_one))
         .route("/rooms/{name}/threads/{id}/escalate", post(thread_escalate))
+        .route("/rooms/{name}/threads/{id}/assign", post(thread_assign))
         .route("/rooms/{name}/threads/{id}/resolve", post(thread_resolve))
         .route("/rooms/{name}/threads/{id}/state", post(thread_state))
         .route("/rooms/{name}/messages", post(submit))
@@ -428,6 +429,16 @@ async fn thread_escalate(
 ) -> Response {
     body["id"] = json!(id);
     console_call(&name, &user, "meeting.escalate", body).await
+}
+
+/// `POST /rooms/{name}/threads/{id}/assign` — body `{ "to": "<handle>", "note": "..." }` (no state change).
+async fn thread_assign(
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    AxumPath((name, id)): AxumPath<(String, String)>,
+    Json(mut body): Json<Value>,
+) -> Response {
+    body["id"] = json!(id);
+    console_call(&name, &user, "meeting.thread_assign", body).await
 }
 
 /// `POST /rooms/{name}/threads/{id}/resolve` — body `{ "note": "..." }`.
