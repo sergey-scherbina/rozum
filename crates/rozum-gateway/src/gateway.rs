@@ -992,6 +992,27 @@ fn fit_to_context(
         messages.remove(i);
         dropped += 1;
     }
+    // If turns were elided, leave a tiny breadcrumb so the model KNOWS history was trimmed and won't
+    // assume it has the full prior context. Deterministic + ~tiny (fits inside the reply reserve). A
+    // full LLM rolling-SUMMARY of the dropped turns (preserving their content, not just a marker) is the
+    // BACKLOG refinement — it needs a summarizer generation in the request path. Inserted after the real
+    // system messages, before the kept turns.
+    if dropped > 0 {
+        let note = Message {
+            role: Role::System,
+            content: vec![ContentBlock::Text {
+                text: format!(
+                    "[Note: {dropped} earlier turn(s) were omitted to fit the model's {ctx_win}-token \
+                     context window — you may not have the full prior history.]"
+                ),
+            }],
+        };
+        let pos = messages
+            .iter()
+            .position(|m| !matches!(m.role, Role::System))
+            .unwrap_or(messages.len());
+        messages.insert(pos, note);
+    }
     // Step 2 — if it still doesn't fit, compress tool schemas: strip descriptions (the bulk of a fat
     // tool surface) while keeping every tool callable. Last resort before serving an over-long prompt.
     let mut compressed = 0usize;
@@ -5101,6 +5122,12 @@ mod tests {
         if let ContentBlock::Text { text } = &kept.content[0] {
             assert!(text.contains("turn 29"), "kept the MOST RECENT turn, got: {text}");
         }
+        // Elision breadcrumb: the model is told history was trimmed (won't assume full context).
+        assert!(
+            fitted.iter().any(|m| matches!(m.role, Role::System)
+                && matches!(&m.content[0], ContentBlock::Text { text } if text.contains("omitted"))),
+            "elision breadcrumb inserted when turns were dropped"
+        );
         // Step-2 lazy-tools: ONE turn (turn-dropping can't help) + fat tool descriptions → descriptions
         // get STRIPPED but every tool is KEPT (no capability loss). The codex fat-system case.
         let fat_tools: Vec<ToolDef> = (0..10)
