@@ -5,12 +5,16 @@
   back-compat, 13/13 store tests:** P1 message metadata (`407ae4a`, StoredTurn + kind/thread_id/in_reply_to/
   meta, byte-identical plain rooms) + P1b `append_with_meta` write API (`4472489`); P2 threads (`1e32ea8`,
   Thread + threads.json + open/set_state/owner ops, incident=thread); P3 room kinds (`2fa5a6d`, Meta.kind
-  chat|queue|incident + members/roles). **REMAINING (next phase, each focused):** (a) the SURFACE — thread
-  metadata through the daemon socket protocol (3 `SubmitParams`: mcp_server→daemon_proxy→daemon→Meeting→
-  room→store) + thread MCP tools (`thread_open`/`thread_set_state`) + TUI/REST render. DEEP production-
-  protocol change — do carefully. (b) the VERBS (own specs): ops (search/link/resolve), escalation (ties
-  into the model-chain), resolving (state-machine + metrics), incident-context (agent auto-gathers logs+obs+
-  repro into a thread). (c) `mtg-frontend` (support-grade UI). BACKLOG `## Meetings → product-support`.
+  chat|queue|incident + members/roles). **AGENT-NATIVE SURFACE DONE (`07961e9`+`7681663`):** the production
+  daemon (single-writer Room path, daemon.rs) exposes it over MCP, all back-compat — `meeting.submit` gains
+  optional kind/thread_id/severity/tags → Room::submit_with_meta → store; `meeting.thread_open` /
+  `thread_set_state` / `threads`. Read flows free (REST/raw = serialized StoredTurn). An MCP agent can
+  triage→open-incident→escalate→resolve end-to-end (85/85 meeting tests). **REMAINING (next phase):** (a)
+  human/CLI surface — `rozum meetings post --kind/--severity/--thread` (client daemon_proxy SubmitParams +
+  socket) + TUI metadata render + the standalone mcp_server (state.rs Meeting) path. (b) the VERBS (own
+  specs, NEW functionality): ops (search/link), escalation routing (model-chain + on-call), resolving
+  metrics, incident-context (agent auto-gathers logs+obs+repro into a thread — highest leverage). (c)
+  `mtg-frontend` (support-grade UI). BACKLOG `## Meetings → product-support`.
 
 - [x] **residency admission QUEUE — event-driven, priority, preemptive (operator 2026-06-28, `pipeline-swap-settle`)** —
   **DONE + VALIDATED UNDER CONTENTION.** P1 ordered queue (`2a7bee9`), P2 actual-free grant (`0ed5825`,
