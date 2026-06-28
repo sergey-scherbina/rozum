@@ -137,6 +137,46 @@ pub struct PostMeta {
     pub meta: MsgMeta,
 }
 
+/// A thread's role (P2): a topic discussion, or a tracked INCIDENT with a lifecycle.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadKind {
+    #[default]
+    Topic,
+    Incident,
+}
+
+/// Incident lifecycle — the resolving state machine (spec § resolving).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadState {
+    #[default]
+    Open,
+    Triaging,
+    Escalated,
+    Resolved,
+    Closed,
+}
+
+/// A thread = an incident/topic (P2). Membership (which messages) is DERIVED from messages' `thread_id`;
+/// this record holds the thread's own metadata (state/owner/severity — the part not derivable). Stored in
+/// `threads.json` (a `{id → Thread}` map), rebuildable in the membership sense from the daily lines.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Thread {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub kind: ThreadKind,
+    #[serde(default)]
+    pub state: ThreadState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
+    pub created_ts: u64,
+    pub updated_ts: u64,
+}
+
 /// Per-day counts, the body of `index.json`.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DayStat {
@@ -225,6 +265,11 @@ impl RoomPaths {
     pub fn index_path(&self) -> PathBuf {
         self.root.join("index.json")
     }
+
+    /// `threads.json` — the per-room thread metadata map (P2). Membership is derived from messages.
+    pub fn threads_path(&self) -> PathBuf {
+        self.root.join("threads.json")
+    }
     pub fn roster_path(&self) -> PathBuf {
         self.root.join("roster.json")
     }
@@ -256,6 +301,7 @@ pub struct TranscriptWriter {
     next_n: u64,
     end_offset: u64,
     index: Index,
+    threads: BTreeMap<String, Thread>,
     budget_chars: u64,
     materialized: bool,
     name: String,
@@ -284,6 +330,7 @@ impl TranscriptWriter {
             next_n: 0,
             end_offset: 0,
             index: Index::default(),
+            threads: BTreeMap::new(),
             budget_chars: 0,
             materialized: false,
             name: name.into(),
@@ -321,6 +368,10 @@ impl TranscriptWriter {
             created_at: meta.as_ref().map(|m| m.created_at).unwrap_or(0),
             phase: meta.map(|m| m.phase).unwrap_or_else(|| "Active".into()),
             index,
+            threads: std::fs::read(paths.threads_path())
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default(),
             paths,
             registry_state_dir,
         })
@@ -433,6 +484,13 @@ impl TranscriptWriter {
             }
         }
         self.created_at = ts;
+        // Load existing thread metadata (P2). Membership is derived from messages; this is the
+        // not-derivable part (state/owner/severity). Absent file → no threads yet.
+        if let Ok(bytes) = std::fs::read(self.paths.threads_path()) {
+            if let Ok(t) = serde_json::from_slice::<BTreeMap<String, Thread>>(&bytes) {
+                self.threads = t;
+            }
+        }
         let _ = register_room(
             &self.registry_state_dir,
             &RoomLocation {
@@ -457,6 +515,92 @@ impl TranscriptWriter {
         write_json_atomic(&self.paths.meta_path(), &meta)?;
         write_json_atomic(&self.paths.index_path(), &self.index)?;
         Ok(())
+    }
+
+    fn persist_threads(&self) -> std::io::Result<()> {
+        write_json_atomic(&self.paths.threads_path(), &self.threads)
+    }
+
+    // ── P2: thread / incident operations ───────────────────────────────────────────────────────
+    /// Open (or return) a thread anchored on `anchor_id` (a message id — the message that started it).
+    /// Idempotent on the id: re-opening returns the existing thread unchanged. Messages join it by
+    /// setting `thread_id = anchor_id` when posted (`append_with_meta`).
+    pub fn open_thread(
+        &mut self,
+        anchor_id: impl Into<String>,
+        title: impl Into<String>,
+        kind: ThreadKind,
+        ts: u64,
+    ) -> std::io::Result<Thread> {
+        if !self.materialized {
+            self.materialize(ts)?;
+        }
+        let id = anchor_id.into();
+        let title = title.into();
+        let t = self
+            .threads
+            .entry(id.clone())
+            .or_insert_with(|| Thread {
+                id: id.clone(),
+                title,
+                kind,
+                state: ThreadState::Open,
+                owner: None,
+                severity: None,
+                created_ts: ts,
+                updated_ts: ts,
+            })
+            .clone();
+        self.persist_threads()?;
+        Ok(t)
+    }
+
+    /// Move a thread through the resolving state machine. `None` if the thread id is unknown.
+    pub fn set_thread_state(
+        &mut self,
+        id: &str,
+        state: ThreadState,
+        ts: u64,
+    ) -> std::io::Result<Option<Thread>> {
+        let Some(t) = self.threads.get_mut(id) else {
+            return Ok(None);
+        };
+        t.state = state;
+        t.updated_ts = ts;
+        let updated = t.clone();
+        self.persist_threads()?;
+        Ok(Some(updated))
+    }
+
+    /// Set a thread's owner/assignee + severity (best-effort; `None` if the id is unknown).
+    pub fn set_thread_owner_severity(
+        &mut self,
+        id: &str,
+        owner: Option<String>,
+        severity: Option<Severity>,
+        ts: u64,
+    ) -> std::io::Result<Option<Thread>> {
+        let Some(t) = self.threads.get_mut(id) else {
+            return Ok(None);
+        };
+        if owner.is_some() {
+            t.owner = owner;
+        }
+        if severity.is_some() {
+            t.severity = severity;
+        }
+        t.updated_ts = ts;
+        let updated = t.clone();
+        self.persist_threads()?;
+        Ok(Some(updated))
+    }
+
+    pub fn thread(&self, id: &str) -> Option<&Thread> {
+        self.threads.get(id)
+    }
+
+    pub fn threads(&self) -> &BTreeMap<String, Thread> {
+        &self.threads
     }
 }
 
@@ -754,6 +898,47 @@ mod tests {
         let plain = w.append("p2", "P2", "hi", ts_for(0)).unwrap();
         assert_eq!(plain.kind, MsgKind::Note);
         assert!(plain.meta.is_empty());
+    }
+
+    // P2: open a thread, escalate it, and confirm it persists across a writer reload (threads.json).
+    #[test]
+    fn threads_open_escalate_and_persist() {
+        let dir = tempdir().unwrap();
+        let anchor;
+        {
+            let mut w = writer_in(dir.path());
+            let m = w
+                .append_with_meta(
+                    "p",
+                    "P",
+                    "DB is down",
+                    ts_for(0),
+                    PostMeta { kind: MsgKind::Alert, ..Default::default() },
+                )
+                .unwrap();
+            anchor = m.id();
+            let th = w.open_thread(anchor.clone(), "DB outage", ThreadKind::Incident, ts_for(0)).unwrap();
+            assert_eq!(th.state, ThreadState::Open);
+            // A reply joins the thread.
+            w.append_with_meta(
+                "p2",
+                "P2",
+                "looking",
+                ts_for(0),
+                PostMeta { thread_id: Some(anchor.clone()), in_reply_to: Some(anchor.clone()), ..Default::default() },
+            )
+            .unwrap();
+            let esc = w.set_thread_state(&anchor, ThreadState::Escalated, ts_for(0)).unwrap().unwrap();
+            assert_eq!(esc.state, ThreadState::Escalated);
+            assert_eq!(w.threads().len(), 1);
+        }
+        // Fresh writer → threads.json reloaded with the escalated state.
+        let mut w = writer_in(dir.path());
+        w.append("p3", "P3", "x", ts_for(0)).unwrap(); // triggers materialize → loads threads.json
+        let th = w.thread(&anchor).expect("thread persisted");
+        assert_eq!(th.state, ThreadState::Escalated);
+        assert_eq!(th.kind, ThreadKind::Incident);
+        assert_eq!(th.title, "DB outage");
     }
 
     #[test]
