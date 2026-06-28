@@ -346,10 +346,23 @@ pub struct BatchStats {
 
 static MLX_MEMORY: OnceLock<fn() -> Option<(u64, u64, u64)>> = OnceLock::new();
 static MLX_BATCH: OnceLock<fn() -> Option<BatchStats>> = OnceLock::new();
+static MLX_SQUEEZE: OnceLock<fn() -> u64> = OnceLock::new();
 
 /// Register the native-MLX unified-memory accessor (active/peak/cache MB).
 pub fn register_mlx_memory(f: fn() -> Option<(u64, u64, u64)>) {
     let _ = MLX_MEMORY.set(f);
+}
+
+/// Register the native-MLX cache-squeeze (frees the reclaimable Metal buffer cache, returns bytes freed).
+pub fn register_mlx_squeeze_cache(f: fn() -> u64) {
+    let _ = MLX_SQUEEZE.set(f);
+}
+
+/// Free the native-MLX reclaimable buffer cache (a light graceful step under memory pressure — frees GB
+/// of reclaimable RAM cross-process without unloading a whole model). Returns bytes freed; 0 if the MLX
+/// engine is absent or nothing was cached. Call only when the model is idle (no generation in flight).
+pub fn mlx_squeeze_cache() -> u64 {
+    MLX_SQUEEZE.get().map(|f| f()).unwrap_or(0)
 }
 
 /// Register the native-MLX batched-decode occupancy accessor.

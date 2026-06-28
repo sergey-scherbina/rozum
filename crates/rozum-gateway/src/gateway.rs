@@ -4504,6 +4504,23 @@ pub async fn serve_on(
                     }
                 }
 
+                // 2-pre. Cache-squeeze (smmr-D light lever): under host pressure, free the reclaimable
+                // MLX buffer cache (often several GB) BEFORE evicting any warm/primary model — the
+                // cheapest graceful reclaim, keeps every model serving. Idle-only (generating==0) so it
+                // can't race an in-flight allocation. After the first squeeze the cache is ~0 so repeats
+                // free nothing (the freed>0 log fires once); it rebuilds on the next generation.
+                if shed_active
+                    && sb.generating.load(Ordering::SeqCst) == 0
+                    && crate::shed::read_host_pressure() != crate::shed::PressureLevel::Normal
+                {
+                    let freed = crate::obs::mlx_squeeze_cache();
+                    if freed > 0 {
+                        crate::obs::log_event(serde_json::json!({
+                            "event": "gateway_cache_squeeze", "freed_mb": freed / (1024 * 1024),
+                        }));
+                    }
+                }
+
                 // 2a. Pressure-evict WARM secondaries first (residency-unify U2): under
                 // genuine host pressure, free the supplementary co-resident models before
                 // touching the primary — graceful degradation that keeps the primary serving.

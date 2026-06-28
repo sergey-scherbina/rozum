@@ -4413,6 +4413,19 @@ pub fn mlx_memory_mb() -> Option<(u64, u64, u64)> {
     None
 }
 
+/// Free the reclaimable Metal buffer cache: `set_cache_limit(0)` evicts the cache pool, then we restore
+/// the previous limit so future allocations can cache again. Returns bytes freed (cache before − after).
+/// A global allocator op (no stream affinity), but only SAFE when no generation is in flight (a
+/// concurrent allocation could race the eviction) — the caller (shed watchdog) gates on idle.
+#[cfg(feature = "mlx-native")]
+fn squeeze_cache() -> u64 {
+    let before = mlx_rs::memory::get_cache_memory() as u64;
+    let prev = mlx_rs::memory::set_cache_limit(0); // evict the pool; returns the previous limit
+    mlx_rs::memory::set_cache_limit(prev); // restore so future allocations can cache again
+    let after = mlx_rs::memory::get_cache_memory() as u64;
+    before.saturating_sub(after)
+}
+
 /// Register this engine's telemetry accessors with `rozum-core::obs` so the gateway
 /// can report MLX memory + batch occupancy through the core without depending on
 /// this engine crate (inversion of control). The binary calls this at startup; a
@@ -4420,6 +4433,7 @@ pub fn mlx_memory_mb() -> Option<(u64, u64, u64)> {
 #[cfg(feature = "mlx-native")]
 pub fn register_telemetry() {
     rozum_core::obs::register_mlx_memory(mlx_memory_mb);
+    rozum_core::obs::register_mlx_squeeze_cache(squeeze_cache);
     rozum_core::obs::register_mlx_batch_stats(|| {
         batch_stats().map(|b| rozum_core::obs::BatchStats {
             runs: b.runs,
