@@ -970,10 +970,15 @@ fn registry_path(state_dir: &Path) -> PathBuf {
     state_dir.join("rooms.json")
 }
 
-/// Upsert a room (keyed by `root`) into `<state_dir>/rooms.json`.
+/// Upsert a room (keyed by `root`) into `<state_dir>/rooms.json`. Also prunes any *other* entry that
+/// shares this room's `name` but points at a root that no longer exists on disk — so a stale duplicate
+/// (e.g. a deleted/moved project that once held a same-named room) can't shadow the live one when a
+/// surface resolves a room by name. See `mtg-registry-dup-name`.
 pub fn register_room(state_dir: &Path, loc: &RoomLocation) -> std::io::Result<()> {
     std::fs::create_dir_all(state_dir)?;
     let mut rooms = list_registered(state_dir);
+    // Drop stale same-name dupes (different root that's gone). Keep this room's own root regardless.
+    rooms.retain(|r| r.root == loc.root || r.name != loc.name || r.root.exists());
     if let Some(existing) = rooms.iter_mut().find(|r| r.root == loc.root) {
         *existing = loc.clone();
     } else {
@@ -1394,6 +1399,31 @@ mod tests {
         let rooms = list_registered(&state);
         assert_eq!(rooms.len(), 1);
         assert_eq!(rooms[0].name, "renamed");
+    }
+
+    #[test]
+    fn registry_prunes_stale_same_name_dupes() {
+        let dir = tempdir().unwrap();
+        let state = dir.path().join("state");
+        // A stale registration: a same-named room whose root no longer exists (deleted project).
+        let stale_root = dir.path().join("gone");
+        register_room(
+            &state,
+            &RoomLocation { name: "proj".into(), root: stale_root.clone(), project: None },
+        )
+        .unwrap();
+        // A live room of the same name registers (its root exists).
+        let live_root = dir.path().join("live");
+        std::fs::create_dir_all(&live_root).unwrap();
+        register_room(
+            &state,
+            &RoomLocation { name: "proj".into(), root: live_root.clone(), project: None },
+        )
+        .unwrap();
+        // The stale same-name entry is pruned; only the live one remains.
+        let rooms = list_registered(&state);
+        assert_eq!(rooms.len(), 1, "stale same-name dupe pruned: {rooms:?}");
+        assert_eq!(rooms[0].root, live_root);
     }
 
     #[test]

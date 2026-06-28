@@ -251,11 +251,20 @@ async fn messages(
 }
 
 fn room_root(registry: &RoomRegistry, name: &str) -> Option<PathBuf> {
-    registry
+    // A room name is not guaranteed unique (two projects can derive the same basename). Among
+    // same-name entries, prefer one whose root still exists on disk, so a stale registration (a
+    // deleted/moved project) never shadows the live room. See `mtg-registry-dup-name`.
+    let matches: Vec<PathBuf> = registry
         .list()
         .into_iter()
-        .find(|loc| loc.name == name)
+        .filter(|loc| loc.name == name)
         .map(|loc| loc.root)
+        .collect();
+    matches
+        .iter()
+        .find(|r| r.exists())
+        .cloned()
+        .or_else(|| matches.into_iter().next_back())
 }
 
 fn day_listing(root: &Path) -> Vec<DayJson> {
