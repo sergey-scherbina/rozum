@@ -2544,6 +2544,18 @@ fn read_repair_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// Exec-arg unicode decode (gptoss-exec-decode-loopbreak (a)) is ON by default. gpt-oss sometimes emits
+/// shell metacharacters JSON-double-escaped — `cat > file` instead of `cat > file` — so the
+/// redirect (`>` = `>`, `<` = `<`, `|` = `|`, `&` = `&`) lands as a literal token and
+/// the command silently does the wrong thing (`cat > file` becomes a no-op read → the file never lands).
+/// Decoding the `\uXXXX` in the exec command restores the operator. Conservative: `decode_unicode_escapes`
+/// only rewrites valid 4-hex `\uXXXX` and is a no-op otherwise. `ROZUM_CODEX_EXEC_DECODE=0` turns it off.
+fn exec_decode_enabled() -> bool {
+    std::env::var("ROZUM_CODEX_EXEC_DECODE")
+        .map(|v| v != "0")
+        .unwrap_or(true)
+}
+
 /// A token that looks like a source-file path the model wants to view (has a slash, or a known
 /// code/text extension). Used to recognize a file-read intent in a malformed command.
 fn is_source_path(w: &str) -> bool {
@@ -2695,6 +2707,30 @@ fn normalize_codex_tool_args(args: &str) -> String {
             }
             Value::Array(a) => a.iter_mut().for_each(walk),
             Value::Object(o) => {
+                // gptoss-exec-decode-loopbreak (a): decode `\uXXXX` in the exec command FIRST, so a
+                // JSON-double-escaped shell operator (`cat > f` → `cat > f`) redirects instead of
+                // landing as a literal token (a silent no-op read). Covers both the `cmd` string and the
+                // `command` argv-array shapes. `decode_unicode_escapes` is a no-op without a valid `\uXXXX`.
+                if exec_decode_enabled() {
+                    if let Some(Value::String(c)) = o.get_mut("cmd") {
+                        if c.contains("\\u") {
+                            let d = decode_unicode_escapes(c);
+                            if d != *c {
+                                eprintln!("[exec-decode] decoded \\uXXXX in exec cmd → shell operators restored");
+                                *c = d;
+                            }
+                        }
+                    }
+                    if let Some(Value::Array(a)) = o.get_mut("command") {
+                        for el in a.iter_mut() {
+                            if let Value::String(c) = el {
+                                if c.contains("\\u") {
+                                    *c = decode_unicode_escapes(c);
+                                }
+                            }
+                        }
+                    }
+                }
                 // The dominant gpt-oss edit-delivery shape: a bare `apply_patch` command with the
                 // patch stranded in a sibling field. codex runs bare `apply_patch` (ignoring the
                 // sibling) → "Usage: apply_patch 'PATCH'" and the edit is lost. Fold the sibling
@@ -5859,6 +5895,28 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(cmd.starts_with("cat > src/main.rs"), "normalize didn't repair: {cmd}");
+    }
+
+    #[test]
+    fn exec_command_decodes_unicode_escaped_operators() {
+        // gptoss-exec-decode-loopbreak (a): the model emits `>` as the JSON escape `>`, so a
+        // redirect never happens (`cat > f` lands as a literal token). Decode it back.
+        let args = "{\"cmd\":\"cat \\u003e src/main.rs\"}";
+        let out = normalize_codex_tool_args(args);
+        let cmd = serde_json::from_str::<Value>(&out).unwrap()["cmd"].as_str().unwrap().to_string();
+        assert_eq!(cmd, "cat > src/main.rs", "operator not decoded: {cmd}");
+
+        // The argv-array shape too: {"command":["bash","-lc","echo hi > f"]}.
+        let args = "{\"command\":[\"bash\",\"-lc\",\"echo hi \\u003e f\"]}";
+        let out = normalize_codex_tool_args(args);
+        let arr = serde_json::from_str::<Value>(&out).unwrap();
+        assert_eq!(arr["command"][2].as_str().unwrap(), "echo hi > f");
+
+        // A normal command with no escapes is untouched (no false rewrite).
+        assert_eq!(
+            normalize_codex_tool_args("{\"cmd\":\"cargo build\"}"),
+            "{\"cmd\":\"cargo build\"}"
+        );
     }
 
     #[test]

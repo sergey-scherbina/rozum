@@ -8,8 +8,13 @@
   min-severity · tag · thread · since) on REST+CLI+console; **reply-chains** (`in_reply_to`); **assign**
   (owner without state change); readable `incident list`/`show` timelines; and the `mtg-registry-dup-name`
   fix. Three surfaces: agent-native MCP (daemon), human CLI (`meetings post`/`incident …`/`search`), web
-  console (`rest_read.rs`). 91/91 meeting lib tests. Remaining = v3 polish (react/pin/edit/link, fold the
-  console model into the `.ssc` PWA) — BACKLOG `## Meetings → product-support`. Detail below ↓
+  console (`rest_read.rs`). 92/92 meeting lib tests. **Operator follow-on (2026-06-28, all 4 directions):**
+  (1) **incident-context auto-gather** (`203fef2`) — `thread_context` now auto-assembles `related` context
+  (lead-up before the anchor + same-tag elsewhere), shown in console drill-down + `incident show`; (2)
+  **console deploy** (`d2af282`) — `meetings install` wires the console into the daemon service (generated
+  0600 secret + bind + Tailscale hint); (3) **.ssc convergence start** (`00878b3`) — severity/kind badges
+  in the production PWA (deploy via `clients/meeting/build.sh`). Remaining = v3 polish (react/pin/edit/link,
+  full lifecycle/incident-lanes port into the `.ssc` PWA) — BACKLOG `## Meetings → product-support`. Detail below ↓
 
 - [~] **meetings — original sprint notes (superseded by the line above)** — spec
   `docs/specs/meetings-incident-platform.md`. **FOUNDATION (P1-P3) DONE — the data-model + store ops, all
