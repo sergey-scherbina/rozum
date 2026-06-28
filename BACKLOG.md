@@ -131,10 +131,17 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   participants + timespan). Dark-mode aware, polls 4s, behind the existing Basic-auth secret. Live smoke
   test: daemon spawned the REST server, `meetings post --kind/--severity/--tag` wrote metadata to disk, the
   console + all endpoints returned it (auth 401 without creds). 88/88 meeting lib tests green.
-  **REMAINING (v2):** write actions from the UI (escalate/assign/resolve — needs a daemon write path, since
-  rest_read is read-only); filter/search by metadata; reply-chain rendering; fold into the `.ssc`→Rust PWA
+  **V2 DONE + LIVE-PROVEN (`6281d2e`):** the console is now INTERACTIVE — escalate / triage / resolve /
+  reopen an incident, open an incident on any live-feed message, compose posts with kind + severity
+  (auto-attached to the open incident). The REST server (in-process with the daemon) reaches the
+  single-writer path by connecting to the daemon's own socket as an MCP client (reusing
+  `tui_client::call_once`, the incident-CLI route), so writes go through identity + single-writer unchanged.
+  New POST endpoints `/threads` (open), `/threads/{id}/escalate|resolve|state`, `/messages` (submit); the
+  Basic-auth username = the console actor. Live test over HTTP: open→escalate→post→resolve wrote the whole
+  lifecycle (4-msg context bundle), the dashboard reflected resolved/owner.
+  **REMAINING (v3):** filter/search by metadata; reply-chain rendering; fold into the `.ssc`→Rust PWA
   (`project-rozum-meeting-ssc-pwa`) so the production launchd web + this console converge on one model.
-  Pairs with **mtg-incident-cli** (human shell verbs to drive the lifecycle so the dashboard populates).
+  Pairs with **mtg-incident-cli** (DONE — human shell verbs drive the same lifecycle).
 
 - [x] **mtg-incident-cli** — DONE + LIVE-PROVEN (`976bd83`). `rozum meetings incident open|escalate|resolve|
   state|list|show|metrics` — the human/script twin of the agent-native MCP thread verbs. Each drives the

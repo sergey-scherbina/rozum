@@ -25,8 +25,12 @@
   state, live today-feed with kind/severity/thread badges, click-through incident drill-down; dark-mode,
   4s-poll, Basic-auth). Live smoke: daemon spawned REST, `meetings post --kind/--severity/--tag` → disk →
   console + endpoints returned it (401 without creds). **REMAINING:** (a) the standalone mcp_server (state.rs
-  Meeting) path metadata (low priority — daemon is production). (b) `mtg-frontend` v2 — UI write actions
-  (escalate/assign/resolve via a daemon write path), filter/search, fold into the .ssc PWA.
+  Meeting) path metadata (low priority — daemon is production). (b) `mtg-frontend` v3 — filter/search,
+  reply-chains, fold into the .ssc PWA. **CONSOLE V2 (interactive) DONE + LIVE-PROVEN (`6281d2e`):** the web
+  console now ESCALATES/TRIAGES/RESOLVES/REOPENS incidents, opens an incident on any message, and composes
+  posts with kind+severity — the REST server reaches the single-writer path by connecting to the daemon's
+  own socket (reusing `call_once`). Live test: open→escalate→post→resolve over HTTP wrote the full lifecycle;
+  the dashboard reflected it.
   **INCIDENT CLI DONE + LIVE-PROVEN (`976bd83`):** `rozum meetings incident open|escalate|resolve|state|list|
   show|metrics` — human/script shell verbs driving the daemon's `meeting.*` thread tools over its socket
   (new `tui_client::call_once`). A human runs the whole lifecycle from the shell; makes the console populate
