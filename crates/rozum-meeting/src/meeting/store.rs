@@ -1325,7 +1325,72 @@ pub fn read_day(
     if let Some(c) = count {
         turns.truncate(c as usize);
     }
+    apply_redactions(root, &mut turns);
     Ok(turns)
+}
+
+// ── Redactions (`redactions.json`) ────────────────────────────────────────────
+
+/// A redaction tombstone — the append-only log can't be mutated, so redacted content is replaced on
+/// READ (everywhere, via `read_day`). The original bytes stay on disk; only what surfaces see changes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Redaction {
+    pub by: String,
+    pub ts: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
+fn redactions_path(root: &Path) -> PathBuf {
+    root.join("redactions.json")
+}
+
+/// The room's redaction set (`{msg_id → Redaction}`); empty if none.
+pub fn load_redactions(root: &Path) -> BTreeMap<String, Redaction> {
+    std::fs::read(redactions_path(root))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Redact (`redact=true`) or un-redact a message id. Persisted durably. Returns the new set size.
+pub fn set_redacted(
+    root: &Path,
+    msg_id: &str,
+    redact: bool,
+    by: &str,
+    reason: &str,
+    ts: u64,
+) -> std::io::Result<usize> {
+    let mut m = load_redactions(root);
+    if redact {
+        m.insert(msg_id.to_string(), Redaction { by: by.to_string(), ts, reason: reason.to_string() });
+    } else {
+        m.remove(msg_id);
+    }
+    write_json_atomic(&redactions_path(root), &m)?;
+    Ok(m.len())
+}
+
+/// Replace the CONTENT of redacted messages with a placeholder (metadata kept). No-op (and no file
+/// read) when the room has no redactions — so the common case pays nothing.
+fn apply_redactions(root: &Path, turns: &mut [StoredTurn]) {
+    if turns.is_empty() || !redactions_path(root).exists() {
+        return;
+    }
+    let red = load_redactions(root);
+    if red.is_empty() {
+        return;
+    }
+    for t in turns.iter_mut() {
+        if let Some(r) = red.get(&t.id()) {
+            t.content = if r.reason.is_empty() {
+                "[redacted]".to_string()
+            } else {
+                format!("[redacted: {}]", r.reason)
+            };
+        }
+    }
 }
 
 // ── Registry (`rooms.json`) ──────────────────────────────────────────────────
@@ -1633,6 +1698,34 @@ mod tests {
         assert!(t.pinned.is_empty());
         // Unknown thread → None.
         assert!(w.set_pinned("nope/0", &m.id(), true, 1_718_000_400).unwrap().is_none());
+    }
+
+    #[test]
+    fn redaction_hides_content_everywhere_on_read() {
+        let dir = tempdir().unwrap();
+        let paths = RoomPaths::ad_hoc_in(dir.path(), "ops");
+        let root = paths.root.clone();
+        let mut w = TranscriptWriter::new(paths, "ops", "topic", None, dir.path().to_path_buf());
+        let secret = w.append("p", "A", "password is hunter2", 1_718_000_000).unwrap();
+        w.append("p", "A", "normal message", 1_718_000_010).unwrap();
+        let date = secret.date.clone();
+
+        // No redactions yet → content intact (and no file read overhead).
+        assert_eq!(read_day(&root, &date, 0, None).unwrap()[0].content, "password is hunter2");
+
+        // Redact the secret with a reason → every read shows the placeholder, metadata intact.
+        set_redacted(&root, &secret.id(), true, "alice", "secret", 1_718_000_100).unwrap();
+        let turns = read_day(&root, &date, 0, None).unwrap();
+        assert_eq!(turns[0].content, "[redacted: secret]");
+        assert_eq!(turns[1].content, "normal message", "only the redacted message changes");
+        // read_since (search/context path) honors it too.
+        assert!(read_since(&root, None, 0).iter().all(|t| t.content != "password is hunter2"));
+        // The original bytes are still on disk (append-only; redaction is read-time).
+        let raw = std::fs::read_to_string(root.join(format!("{date}.jsonl"))).unwrap();
+        assert!(raw.contains("hunter2"), "original preserved on disk");
+        // Un-redact restores it.
+        set_redacted(&root, &secret.id(), false, "alice", "", 1_718_000_200).unwrap();
+        assert_eq!(read_day(&root, &date, 0, None).unwrap()[0].content, "password is hunter2");
     }
 
     #[test]

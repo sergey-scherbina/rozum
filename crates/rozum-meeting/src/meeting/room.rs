@@ -308,6 +308,12 @@ impl DaemonRoom {
         self.writer.set_linked(thread_id, msg_id, link, unix_ts()).map_err(|e| e.to_string())
     }
 
+    /// Redact (or un-redact) a message's content for all readers (the bytes stay on disk).
+    pub fn set_redacted(&mut self, msg_id: &str, redact: bool, by: &str, reason: &str) -> Result<usize, String> {
+        super::store::set_redacted(self.writer.root(), msg_id, redact, by, reason, unix_ts())
+            .map_err(|e| e.to_string())
+    }
+
     pub fn set_pinned(&mut self, thread_id: &str, msg_id: &str, pin: bool) -> Result<Option<Thread>, String> {
         self.writer.set_pinned(thread_id, msg_id, pin, unix_ts()).map_err(|e| e.to_string())
     }

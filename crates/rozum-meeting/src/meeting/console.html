@@ -374,6 +374,19 @@ function msgRow(m, opts) {
     ir.title = "in reply to " + m.in_reply_to;
     l1.appendChild(ir);
   }
+  // Redact affordance — hide leaked PII/secrets (the bytes stay on disk).
+  if (m.date != null && m.n != null) {
+    const mid = `${m.date}/${m.n}`;
+    const rd = el("span", "openinc", "⊘");
+    rd.title = "redact this message's content";
+    rd.onclick = (e) => {
+      e.stopPropagation();
+      if (!confirm("Redact this message's content for all readers?")) return;
+      const reason = prompt("Reason (optional, e.g. PII/secret):") || "";
+      act(postJSON(`rooms/${enc(ROOM)}/redact`, { msg_id: mid, redact: true, reason }), "redacted");
+    };
+    l1.appendChild(rd);
+  }
   for (const tag of (m.meta && m.meta.tags) || []) l1.appendChild(el("span", "tag", "#" + tag));
   // Reply affordance — sets the compose box to reply to this message.
   if (m.date != null && m.n != null) {

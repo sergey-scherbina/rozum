@@ -133,6 +133,7 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
         .route("/rooms/{name}/threads/{id}/pin", post(thread_pin))
         .route("/rooms/{name}/threads/{id}/link", post(thread_link))
         .route("/rooms/{name}/messages", post(submit))
+        .route("/rooms/{name}/redact", post(redact))
         .route("/rooms/{name}/metrics", get(metrics))
         .route("/rooms/{name}/search", get(search))
         .route("/roster", get(roster))
@@ -516,6 +517,15 @@ async fn thread_state(
 ) -> Response {
     body["id"] = json!(id);
     console_call(&name, &user, "meeting.thread_set_state", body).await
+}
+
+/// `POST /rooms/{name}/redact` — body `{ "msg_id": "<date>/<n>", "redact": true|false, "reason": "..." }`.
+async fn redact(
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    console_call(&name, &user, "meeting.redact", body).await
 }
 
 /// `POST /rooms/{name}/messages` — post a message with optional support metadata. Body:

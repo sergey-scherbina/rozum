@@ -530,6 +530,21 @@ enum MeetingsAction {
         count: usize,
     },
 
+    /// Redact a message's content for all readers (leaked PII/secrets). The bytes stay on disk.
+    Redact {
+        /// The message id (`<date>/<n>`) to redact.
+        msg_id: String,
+        /// Room name; default = the cwd project's room.
+        #[arg(long)]
+        room: Option<String>,
+        /// Reason shown in place of the content (e.g. "PII").
+        #[arg(long)]
+        reason: Option<String>,
+        /// Un-redact instead (restore the content).
+        #[arg(long)]
+        undo: bool,
+    },
+
     /// Rebuild a room's `threads.json` (incident state) from the message log — disaster recovery.
     ///
     /// Use only if the incident state was lost (threads.json + its .bak both gone). Best-effort:
@@ -1117,6 +1132,9 @@ async fn main() {
             }
             MeetingsAction::Read { room, count } => run_meetings_read(room, count).await,
             MeetingsAction::RepairThreads { room } => run_meetings_repair_threads(room).await,
+            MeetingsAction::Redact { msg_id, room, reason, undo } => {
+                run_meetings_redact(msg_id, room, reason, undo).await
+            }
             MeetingsAction::Search { query, room, kind, severity, tag, thread, since, count } => {
                 run_meetings_search(query, room, kind, severity, tag, thread, since, count).await
             }
@@ -2939,6 +2957,31 @@ async fn run_meetings_read(room: Option<String>, count: usize) {
         match t.badge() {
             Some(b) => println!("[{}] {} {}: {}", hhmm_of(t.ts), b, t.display_name, t.content),
             None => println!("[{}] {}: {}", hhmm_of(t.ts), t.display_name, t.content),
+        }
+    }
+}
+
+/// `rozum meetings redact` — redact (or un-redact) a message's content for all readers (direct disk).
+async fn run_meetings_redact(msg_id: String, room: Option<String>, reason: Option<String>, undo: bool) {
+    use rozum::meeting::store;
+    let root = resolve_room_or_exit(room, "redact").await;
+    if !root.exists() {
+        eprintln!("meetings redact: no such room ({})", root.display());
+        std::process::exit(1);
+    }
+    let (by, _token) = rozum::meeting::client::post_identity(None);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match store::set_redacted(&root, &msg_id, !undo, &by, &reason.unwrap_or_default(), now) {
+        Ok(n) => println!(
+            "{} {msg_id} (room now has {n} redaction(s))",
+            if undo { "un-redacted" } else { "redacted" }
+        ),
+        Err(e) => {
+            eprintln!("meetings redact: {e}");
+            std::process::exit(1);
         }
     }
 }

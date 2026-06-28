@@ -161,6 +161,18 @@ pub struct LinkParams {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RedactParams {
+    /// The message id (`<date>/<n>`) to redact/un-redact.
+    pub msg_id: String,
+    /// Redact (true, default) or un-redact (false).
+    #[serde(default)]
+    pub redact: Option<bool>,
+    /// Optional reason shown in place of the content (e.g. "PII", "secret").
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WaitParams {
     /// Day of the last message seen (`YYYY-MM-DD`). Omit to receive all.
     #[serde(default)]
@@ -645,6 +657,35 @@ impl MeetingServer {
                     &serde_json::json!({ "thread": p.id, "links": t.links }).to_string(),
                 ),
                 Ok(None) => err_result("unknown thread id"),
+                Err(e) => err_result(&e),
+            }
+        })
+        .await
+    }
+
+    /// Redact (or un-redact) a message's content for ALL readers — for leaked PII/secrets. The original
+    /// bytes stay on disk (append-only); only what surfaces show changes.
+    #[tool(
+        name = "meeting.redact",
+        description = "Redact (redact=true, default) or un-redact (false) a message's content for all readers."
+    )]
+    pub async fn redact(&self, params: Parameters<RedactParams>) -> CallToolResult {
+        guard("meeting.redact", async move {
+            let (room, caller) = self.session_room().await;
+            let (Some(room), Some(caller)) = (room, caller) else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let p = &params.0;
+            let redact = p.redact.unwrap_or(true);
+            let reason = p.reason.clone().unwrap_or_default();
+            match room
+                .lock()
+                .await
+                .set_redacted(&p.msg_id, redact, caller.0.as_str(), &reason)
+            {
+                Ok(n) => text_result(
+                    &serde_json::json!({ "msg_id": p.msg_id, "redacted": redact, "total": n }).to_string(),
+                ),
                 Err(e) => err_result(&e),
             }
         })
