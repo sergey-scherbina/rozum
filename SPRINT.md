@@ -9,12 +9,18 @@
   daemon (single-writer Room path, daemon.rs) exposes it over MCP, all back-compat — `meeting.submit` gains
   optional kind/thread_id/severity/tags → Room::submit_with_meta → store; `meeting.thread_open` /
   `thread_set_state` / `threads`. Read flows free (REST/raw = serialized StoredTurn). An MCP agent can
-  triage→open-incident→escalate→resolve end-to-end (85/85 meeting tests). **REMAINING (next phase):** (a)
-  human/CLI surface — `rozum meetings post --kind/--severity/--thread` (client daemon_proxy SubmitParams +
-  socket) + TUI metadata render + the standalone mcp_server (state.rs Meeting) path. (b) the VERBS (own
-  specs, NEW functionality): ops (search/link), escalation routing (model-chain + on-call), resolving
-  metrics, incident-context (agent auto-gathers logs+obs+repro into a thread — highest leverage). (c)
-  `mtg-frontend` (support-grade UI). BACKLOG `## Meetings → product-support`.
+  triage→open-incident→escalate→resolve end-to-end (85/85 meeting tests). **VERBS DONE (daemon MCP):**
+  `meeting.escalate` (state=escalated + set_thread_owner + event note), `meeting.resolve` (state=resolved +
+  resolution note), `meeting.thread_metrics` (total / by_state / resolved / avg_time_to_resolve_secs),
+  `meeting.thread_context` (Room::thread_context bundle — thread + participants + first/last ts + all
+  messages, the incident-context gather). **HUMAN/CLI SURFACE DONE (`a627eee`):** `rozum meetings post
+  --kind/--severity/--thread/--tag` threads metadata through post_once → MeetingClient::submit_with_meta →
+  meeting.submit (plain posts byte-identical). **DISPLAY DONE (`e4ee5e7`):** one shared `StoredTurn::badge()`
+  (kind/severity/thread/tags → `[ALERT CRIT ⤷date/n #tag]`) wired into `rozum meetings read`, `inbox`, and the
+  daemon-attached TUI (severity/kind-coloured); plain notes stay un-badged. 86/86 meeting lib tests green.
+  **REMAINING:** (a) the standalone mcp_server (state.rs Meeting) path metadata (lower priority — daemon is
+  production). (b) `mtg-frontend` — the support-grade web UI (BIG, separate; the .ssc→Rust PWA gains threads/
+  incident lanes/severity/escalate+resolve actions). BACKLOG `## Meetings → product-support`.
 
 - [x] **residency admission QUEUE — event-driven, priority, preemptive (operator 2026-06-28, `pipeline-swap-settle`)** —
   **DONE + VALIDATED UNDER CONTENTION.** P1 ordered queue (`2a7bee9`), P2 actual-free grant (`0ed5825`,
