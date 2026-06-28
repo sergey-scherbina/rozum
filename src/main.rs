@@ -530,6 +530,17 @@ enum MeetingsAction {
         count: usize,
     },
 
+    /// Rebuild a room's `threads.json` (incident state) from the message log — disaster recovery.
+    ///
+    /// Use only if the incident state was lost (threads.json + its .bak both gone). Best-effort:
+    /// recovers membership + severity + approximate state; title from the anchor, pinned not recovered.
+    /// Restart the meeting daemon afterwards so it reloads the rebuilt state.
+    RepairThreads {
+        /// Room name; default = the cwd project's room.
+        #[arg(long)]
+        room: Option<String>,
+    },
+
     /// Search a room's whole history by text + support metadata (kind/severity/tag/thread).
     ///
     /// A direct-read over every day file (no daemon needed for the cwd room). `--severity` is a
@@ -1091,6 +1102,7 @@ async fn main() {
                 run_meetings_post(text, room, as_display, kind, severity, thread, reply_to, tags).await
             }
             MeetingsAction::Read { room, count } => run_meetings_read(room, count).await,
+            MeetingsAction::RepairThreads { room } => run_meetings_repair_threads(room).await,
             MeetingsAction::Search { query, room, kind, severity, tag, thread, since, count } => {
                 run_meetings_search(query, room, kind, severity, tag, thread, since, count).await
             }
@@ -2895,6 +2907,26 @@ async fn run_meetings_read(room: Option<String>, count: usize) {
         match t.badge() {
             Some(b) => println!("[{}] {} {}: {}", hhmm_of(t.ts), b, t.display_name, t.content),
             None => println!("[{}] {}: {}", hhmm_of(t.ts), t.display_name, t.content),
+        }
+    }
+}
+
+/// `rozum meetings repair-threads` — rebuild a room's incident state from the message log (recovery).
+async fn run_meetings_repair_threads(room: Option<String>) {
+    use rozum::meeting::store;
+    let root = resolve_room_or_exit(room, "repair-threads").await;
+    if !root.exists() {
+        eprintln!("meetings repair-threads: no such room ({})", root.display());
+        std::process::exit(1);
+    }
+    match store::repair_threads(&root) {
+        Ok(n) => {
+            println!("rebuilt threads.json from the message log: {n} incident(s) recovered");
+            println!("(best-effort — restart the meeting daemon so it reloads the rebuilt state)");
+        }
+        Err(e) => {
+            eprintln!("meetings repair-threads: {e}");
+            std::process::exit(1);
         }
     }
 }

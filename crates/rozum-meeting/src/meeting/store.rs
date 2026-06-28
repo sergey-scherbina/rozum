@@ -913,6 +913,81 @@ pub fn day_dates(root: &Path) -> Vec<String> {
     dates
 }
 
+/// Best-effort reconstruction of the thread map from the message log ALONE — the last-resort recovery
+/// path when both `threads.json` and its `.bak` are gone. Recovers membership + the anchor's severity +
+/// an approximate state (a `resolution` message → resolved; an `escalated …` event → escalated) + a
+/// best-effort owner (parsed from `escalated to X` / `assigned to X`). Title is the anchor's content;
+/// pinned + exact state aren't recoverable. Exposed via `rozum meetings repair-threads`.
+pub fn rebuild_threads(root: &Path) -> BTreeMap<String, Thread> {
+    let msgs = read_since(root, None, 0);
+    let by_id: BTreeMap<String, &StoredTurn> = msgs.iter().map(|m| (m.id(), m)).collect();
+    let tids: std::collections::BTreeSet<String> =
+        msgs.iter().filter_map(|m| m.thread_id.clone()).collect();
+    let mut out = BTreeMap::new();
+    for tid in tids {
+        let anchor = by_id.get(&tid).copied();
+        let members: Vec<&StoredTurn> = msgs
+            .iter()
+            .filter(|m| m.id() == tid || m.thread_id.as_deref() == Some(tid.as_str()))
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let title = anchor
+            .map(|a| a.content.chars().take(60).collect::<String>())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| tid.clone());
+        let severity = anchor.and_then(|a| a.meta.severity);
+        let mut state = ThreadState::Open;
+        let mut owner = None;
+        for m in &members {
+            if m.kind == MsgKind::Resolution {
+                state = ThreadState::Resolved;
+            }
+            if m.kind == MsgKind::Event {
+                if let Some(rest) = m.content.strip_prefix("escalated to ") {
+                    state = ThreadState::Escalated;
+                    let who = rest.split([':', ' ']).next().unwrap_or("").to_string();
+                    owner = Some(who).filter(|s| !s.is_empty());
+                } else if let Some(rest) = m.content.strip_prefix("assigned to ") {
+                    let who = rest.split([':', ' ']).next().unwrap_or("").to_string();
+                    owner = Some(who).filter(|s| !s.is_empty());
+                }
+            }
+        }
+        let created = anchor.map(|a| a.ts).or_else(|| members.first().map(|m| m.ts)).unwrap_or(0);
+        let updated = members.last().map(|m| m.ts).unwrap_or(created);
+        out.insert(
+            tid.clone(),
+            Thread {
+                id: tid,
+                title,
+                kind: ThreadKind::Incident,
+                state,
+                owner,
+                severity,
+                pinned: vec![],
+                created_ts: created,
+                updated_ts: updated,
+            },
+        );
+    }
+    out
+}
+
+/// Rebuild `threads.json` from the message log and persist it durably (keeping a `.bak` of any current
+/// file). Returns the recovered incident count. The recovery action behind `rozum meetings repair-threads`
+/// — run it (then restart the daemon) when the incident state was lost.
+pub fn repair_threads(root: &Path) -> std::io::Result<usize> {
+    let rebuilt = rebuild_threads(root);
+    let path = root.join("threads.json");
+    if path.exists() {
+        let _ = std::fs::copy(&path, threads_bak_path(&path));
+    }
+    write_json_atomic(&path, &rebuilt)?;
+    Ok(rebuilt.len())
+}
+
 /// The `.bak` sibling of a `threads.json` (last-good copy, the recovery source).
 fn threads_bak_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
@@ -1832,6 +1907,45 @@ mod tests {
         assert!(after.contains(&date_of_ts(now)), "recent day kept");
         // retain_days = 0 is a no-op.
         assert!(prune_old_days(&root, 0, now).is_empty());
+    }
+
+    #[test]
+    fn rebuild_threads_reconstructs_incidents_from_the_log() {
+        let dir = tempdir().unwrap();
+        let paths = RoomPaths::ad_hoc_in(dir.path(), "ops");
+        let root = paths.root.clone();
+        let mut w = TranscriptWriter::new(paths, "ops", "topic", None, dir.path().to_path_buf());
+        // An alert anchor (critical), opened, escalated, resolved — the messages escalate/resolve post.
+        let mut alert = PostMeta::default();
+        alert.kind = MsgKind::Alert;
+        alert.meta.severity = Some(Severity::Critical);
+        let anchor = w.append_with_meta("p", "A", "DB down", 1_718_000_000, alert).unwrap();
+        let id = anchor.id();
+        w.open_thread(&id, "DB outage", ThreadKind::Incident, 1_718_000_001).unwrap();
+        let mut ev = PostMeta::default();
+        ev.kind = MsgKind::Event;
+        ev.thread_id = Some(id.clone());
+        w.append_with_meta("p", "A", "escalated to oncall: paging", 1_718_000_100, ev).unwrap();
+        let mut res = PostMeta::default();
+        res.kind = MsgKind::Resolution;
+        res.thread_id = Some(id.clone());
+        w.append_with_meta("p", "A", "failover done", 1_718_000_200, res).unwrap();
+
+        // Wipe BOTH threads.json and its .bak — simulate total incident-state loss.
+        let tp = root.join("threads.json");
+        let _ = std::fs::remove_file(&tp);
+        let _ = std::fs::remove_file(threads_bak_path(&tp));
+        assert!(read_threads(&root).is_empty(), "state truly gone");
+
+        let rebuilt = rebuild_threads(&root);
+        let t = rebuilt.get(&id).expect("incident reconstructed from the log");
+        assert_eq!(t.severity, Some(Severity::Critical), "severity from anchor");
+        assert_eq!(t.state, ThreadState::Resolved, "resolution → resolved");
+        assert_eq!(t.owner.as_deref(), Some("oncall"), "owner from 'escalated to oncall'");
+        assert_eq!(t.title, "DB down", "title from anchor content");
+        // repair_threads persists it.
+        assert_eq!(repair_threads(&root).unwrap(), 1);
+        assert!(read_threads(&root).contains_key(&id));
     }
 
     #[test]
