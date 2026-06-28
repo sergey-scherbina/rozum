@@ -699,6 +699,7 @@ pub fn acquire_residency(
     let wait_secs = residency_wait_secs();
     let mut waited = 0u64;
     let mut announced = false;
+    let mut ticket: Option<WaiterTicket> = None; // our place in the admission queue (P1)
     loop {
         let admit = match std::fs::OpenOptions::new()
             .create(true)
@@ -711,21 +712,44 @@ pub fn acquire_residency(
         };
         match admit.try_lock() {
             Ok(()) => {
-                // ── critical section: scan → decide → reserve (atomic across procs)
+                // ── critical section: enqueue → scan → decide (front-that-fits) → reserve.
+                // Join the queue once (seq assigned under this lock → globally ordered arrival).
+                if ticket.is_none() {
+                    ticket = enqueue_waiter(mypid, footprint_bytes);
+                }
                 let (in_use, holders) = scan_residents(mypid);
                 let budget = host_ram_budget_bytes();
                 let available = available_ram_for_admission();
                 let min_free = min_free_ram_bytes();
                 let pressure = crate::shed::read_host_pressure();
-                let fits = admits(in_use, footprint_bytes, budget, available, min_free, pressure);
-                if fits {
-                    // Reserve: own `residents/<pid>` and hold its flock for life.
+                // ORDERED admission: only the front-most queued waiter whose footprint fits proceeds —
+                // no herd racing the instant budget frees. If we couldn't enqueue (ticket None), fall
+                // back to a direct admits check (never block on a queue we couldn't join).
+                let my_turn = match ticket.as_ref() {
+                    Some(t) => {
+                        pick_front_that_fits(
+                            &scan_waiters(mypid),
+                            in_use,
+                            budget,
+                            available,
+                            min_free,
+                            pressure,
+                        ) == Some((t.seq, t.pid))
+                    }
+                    None => admits(in_use, footprint_bytes, budget, available, min_free, pressure),
+                };
+                if my_turn {
+                    // front-that-fits == us already implies admits(our footprint) holds → reserve:
+                    // own `residents/<pid>` and hold its flock for life.
                     match reserve(mypid, model, footprint_bytes) {
-                        Some(guard) => return Ok(Some(guard)),
+                        Some(guard) => {
+                            drop(ticket); // leave the queue immediately
+                            return Ok(Some(guard));
+                        }
                         None => return Ok(None), // couldn't write reservation → fail open
                     }
                 }
-                // Not admitted — drop the admit lock before sleeping so others proceed.
+                // Not our turn — drop the admit lock before sleeping so others proceed.
                 drop(admit);
                 if !announced {
                     announced = true;
@@ -807,6 +831,128 @@ fn reserve(pid: u32, model: &str, footprint_bytes: u64) -> Option<ResidencyGuard
     Some(ResidencyGuard { _lock: file, path })
 }
 
+// ── P1: the admission WAIT QUEUE (spec docs/specs/residency-admission-queue.md) ───────────────
+// When a load doesn't fit, the gateway ENQUEUES (a flock'd `waiters/<seq>.<pid>` file, footprint in
+// the body) instead of every arrival racing to grab budget the instant it frees. Only the front-most
+// waiter whose footprint FITS the current budget proceeds (evaluated under the admit lock, so it is
+// serialized → no herd, no admit-TOCTOU). "Front-most-that-fits" (not strict FIFO) avoids head-of-line
+// blocking: a small load behind a too-big one still proceeds. Crash-safe like the ledger — the OS drops
+// the flock on death, so a dead waiter is reaped (its try_lock succeeds). Replaces the lone 240 s poll
+// with COORDINATION; the poll stays as the wake for now (P1b swaps it for a kqueue event).
+
+/// Directory of per-pid wait-queue tickets (parallel to [`residents_dir`]).
+pub fn waiters_dir() -> PathBuf {
+    gateway_dir().join("waiters")
+}
+
+/// The monotonic ticket counter (bumped under the admit lock → globally ordered arrivals).
+fn waiter_seq_path() -> PathBuf {
+    waiters_dir().join(".seq")
+}
+
+/// A held place in the admission queue. Drop (incl. on the OS reaping our flock at death) removes the
+/// ticket file, so we leave the queue the instant we reserve, give up, or crash.
+struct WaiterTicket {
+    seq: u64,
+    pid: u32,
+    path: PathBuf,
+    _lock: std::fs::File,
+}
+impl Drop for WaiterTicket {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Assign the next global ticket number. MUST be called while holding the admit lock (the read-bump-
+/// write is only atomic across processes under that lock).
+fn next_waiter_seq() -> u64 {
+    let p = waiter_seq_path();
+    let cur = std::fs::read_to_string(&p).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+    let next = cur.wrapping_add(1);
+    let _ = std::fs::write(&p, next.to_string());
+    next
+}
+
+/// Enqueue this loader: write a flock-held `waiters/<seq>.<pid>` (seq zero-padded so the filename sorts
+/// numerically) with the footprint in the body. Call under the admit lock. `None` if we can't create/
+/// lock the ticket (→ caller falls back to a direct admits check, never blocks on a queue it can't join).
+fn enqueue_waiter(pid: u32, footprint_bytes: u64) -> Option<WaiterTicket> {
+    use std::io::Write as _;
+    let _ = std::fs::create_dir_all(waiters_dir());
+    let seq = next_waiter_seq();
+    let path = waiters_dir().join(format!("{seq:020}.{pid}"));
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .ok()?;
+    file.try_lock().ok()?;
+    let _ = write!(file, "{footprint_bytes}");
+    let _ = file.flush();
+    Some(WaiterTicket { seq, pid, path, _lock: file })
+}
+
+/// Scan the queue: parse `(seq, pid, footprint)` per live ticket, reaping any whose owner died (its
+/// flock is free → `try_lock` succeeds). Never reaps `mypid` (our own ticket's flock would block).
+fn scan_waiters(mypid: u32) -> Vec<(u64, u32, u64)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(waiters_dir()) else {
+        return out;
+    };
+    for ent in entries.flatten() {
+        let fname = ent.file_name();
+        let name = fname.to_string_lossy();
+        if name.starts_with('.') {
+            continue; // the .seq counter
+        }
+        let Some((s, p)) = name.split_once('.') else {
+            continue;
+        };
+        let (Ok(seq), Ok(pid)) = (s.parse::<u64>(), p.parse::<u32>()) else {
+            continue;
+        };
+        // Reap a dead waiter (not ourselves): if we can flock it, its owner is gone.
+        if pid != mypid {
+            if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(ent.path()) {
+                if f.try_lock().is_ok() {
+                    let _ = std::fs::remove_file(ent.path());
+                    continue;
+                }
+            }
+        }
+        let footprint = std::fs::read_to_string(ent.path())
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(u64::MAX); // unreadable → treat as huge so it never wrongly "fits"
+        out.push((seq, pid, footprint));
+    }
+    out
+}
+
+/// The waiter that should proceed: the lowest-`seq` ticket whose footprint fits the current budget.
+/// Pure (queue passed in) so the ordering logic is unit-tested without the filesystem. `None` = no
+/// queued waiter fits right now (everyone keeps waiting for a resident to free).
+fn pick_front_that_fits(
+    waiters: &[(u64, u32, u64)],
+    in_use: u64,
+    budget: Option<u64>,
+    available: Option<u64>,
+    min_free: u64,
+    pressure: crate::shed::PressureLevel,
+) -> Option<(u64, u32)> {
+    let mut w = waiters.to_vec();
+    w.sort_by_key(|&(seq, _, _)| seq);
+    for &(seq, pid, fp) in &w {
+        if admits(in_use, fp, budget, available, min_free, pressure) {
+            return Some((seq, pid));
+        }
+    }
+    None
+}
+
 /// Does a gateway answer on this port? The authoritative liveness signal (a stale
 /// registry whose process is gone simply won't respond).
 pub async fn health_ok(port: u16) -> bool {
@@ -880,6 +1026,29 @@ mod tests {
         assert!(!admits(0, 20 * GIB, budget, Some(30 * GIB), min_free, Critical));
         // The pressure guard only ADDS refusals — it never rescues a byte-over-budget load.
         assert!(!admits(0, 40 * GIB, budget, Some(10 * GIB), min_free, Normal));
+    }
+
+    // P1 queue ordering: the front-most waiter that FITS proceeds — strict FIFO when all fit, but a
+    // too-big front waiter does NOT head-of-line-block a smaller one behind it (it just keeps waiting).
+    #[test]
+    fn queue_picks_front_most_waiter_that_fits() {
+        use crate::shed::PressureLevel::Normal;
+        let budget = Some(27 * GIB);
+        let avail = Some(30 * GIB);
+        let min_free = 3 * GIB;
+        // #1 (seq 1) huge 40 GiB won't fit; #2/#3 (10 GiB) fit → head-of-line AVOIDED, #2 goes.
+        let waiters = vec![(1u64, 100u32, 40 * GIB), (2, 200, 10 * GIB), (3, 300, 10 * GIB)];
+        assert_eq!(pick_front_that_fits(&waiters, 0, budget, avail, min_free, Normal), Some((2, 200)));
+        // Unsorted input, all fit → strict FIFO by seq (lowest seq, here 3 → pid 2).
+        let small = vec![(5u64, 1u32, 5 * GIB), (3, 2, 5 * GIB), (9, 3, 5 * GIB)];
+        assert_eq!(pick_front_that_fits(&small, 0, budget, avail, min_free, Normal), Some((3, 2)));
+        // Nothing fits → None (all keep waiting for a resident to free; no spin-load).
+        let toobig = vec![(1u64, 1u32, 50 * GIB)];
+        assert_eq!(pick_front_that_fits(&toobig, 0, budget, avail, min_free, Normal), None);
+        // A resident already eats budget (in_use 20): the 10 GiB front no longer fits (20+10>27), the
+        // 5 GiB behind it does (20+5≤27) → the smaller one is served, not blocked.
+        let mixed = vec![(1u64, 1u32, 10 * GIB), (2, 2, 5 * GIB)];
+        assert_eq!(pick_front_that_fits(&mixed, 20 * GIB, budget, avail, min_free, Normal), Some((2, 2)));
     }
 
     fn sample() -> ActiveGateway {
