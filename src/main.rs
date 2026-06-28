@@ -2664,8 +2664,8 @@ async fn run_meetings_incident(
         },
     };
 
-    // Map the verb → (MCP tool, args, success-line). `pretty` verbs print the JSON payload.
-    let (tool, args, pretty): (&str, serde_json::Value, bool) = match action {
+    // Map the verb → (MCP tool, args, how to render the reply).
+    let (tool, args, render): (&str, serde_json::Value, IncidentRender) = match action {
         IncidentAction::Open { anchor_id, title, topic } => {
             let title = title.join(" ");
             let title = if title.is_empty() { anchor_id.clone() } else { title };
@@ -2676,49 +2676,100 @@ async fn run_meetings_incident(
                     "title": title,
                     "kind": if topic { "topic" } else { "incident" },
                 }),
-                false,
+                IncidentRender::Ok,
             )
         }
         IncidentAction::Escalate { id, to, note } => (
             "meeting.escalate",
             serde_json::json!({ "id": id, "to": to, "note": note.unwrap_or_default() }),
-            false,
+            IncidentRender::Ok,
         ),
         IncidentAction::Resolve { id, note } => (
             "meeting.resolve",
             serde_json::json!({ "id": id, "note": note.unwrap_or_default() }),
-            false,
+            IncidentRender::Ok,
         ),
         IncidentAction::Assign { id, to, note } => (
             "meeting.thread_assign",
             serde_json::json!({ "id": id, "to": to, "note": note.unwrap_or_default() }),
-            false,
+            IncidentRender::Ok,
         ),
         IncidentAction::State { id, state } => (
             "meeting.thread_set_state",
             serde_json::json!({ "id": id, "state": state }),
-            false,
+            IncidentRender::Ok,
         ),
-        IncidentAction::List => ("meeting.threads", serde_json::json!({}), true),
+        IncidentAction::List => ("meeting.threads", serde_json::json!({}), IncidentRender::List),
         IncidentAction::Show { id } => (
             "meeting.thread_context",
             serde_json::json!({ "thread_id": id }),
-            true,
+            IncidentRender::Show,
         ),
-        IncidentAction::Metrics => ("meeting.thread_metrics", serde_json::json!({}), true),
+        IncidentAction::Metrics => ("meeting.thread_metrics", serde_json::json!({}), IncidentRender::Json),
     };
 
     match call_once(&sock, target, &display, token.as_deref(), tool, args).await {
-        Ok(v) => {
-            if pretty {
-                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()));
-            } else {
-                eprintln!("ok: {}", serde_json::to_string(&v).unwrap_or_else(|_| v.to_string()));
+        Ok(v) => match render {
+            IncidentRender::Ok => {
+                eprintln!("ok: {}", serde_json::to_string(&v).unwrap_or_else(|_| v.to_string()))
             }
-        }
+            IncidentRender::Json => {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()))
+            }
+            IncidentRender::List => print_incident_list(&v),
+            IncidentRender::Show => print_incident(&v),
+        },
         Err(e) => {
             eprintln!("meetings incident: {e}");
             std::process::exit(1);
+        }
+    }
+}
+
+/// How `meetings incident` renders a tool reply: `Ok` = one-line confirm, `Json` = pretty JSON,
+/// `List`/`Show` = the human-readable incident views.
+enum IncidentRender {
+    Ok,
+    Json,
+    List,
+    Show,
+}
+
+/// Render `meeting.threads` as a readable incident list (one line each, newest-update first).
+fn print_incident_list(v: &serde_json::Value) {
+    use rozum::meeting::store::Thread;
+    let mut threads: Vec<Thread> = serde_json::from_value(v.clone()).unwrap_or_default();
+    if threads.is_empty() {
+        println!("(no incidents)");
+        return;
+    }
+    threads.sort_by(|a, b| b.updated_ts.cmp(&a.updated_ts));
+    for t in &threads {
+        let sev = t.severity.map(|s| format!(" {}", s.label())).unwrap_or_default();
+        let owner = t.owner.as_deref().map(|o| format!(" @{o}")).unwrap_or_default();
+        println!("{}  {}  [{}{}{}]", t.id, t.title, t.state.as_str(), sev, owner);
+    }
+}
+
+/// Render `meeting.thread_context` as a readable incident: a header + the chronological message
+/// timeline (each with its badge + id), so an operator reads the whole incident at a glance.
+fn print_incident(v: &serde_json::Value) {
+    use rozum::meeting::store::StoredTurn;
+    let thread = &v["thread"];
+    let title = thread["title"].as_str().unwrap_or("(unknown incident)");
+    let state = thread["state"].as_str().unwrap_or("open");
+    let sev = thread["severity"].as_str().map(|s| format!(" · {s}")).unwrap_or_default();
+    let owner = thread["owner"].as_str().map(|o| format!(" · @{o}")).unwrap_or_default();
+    let count = v["message_count"].as_u64().unwrap_or(0);
+    let people = v["participants"].as_array().map(|a| a.len()).unwrap_or(0);
+    println!("incident — {title}  [{state}{sev}{owner}]");
+    println!("  {count} msgs · {people} people");
+    let messages: Vec<StoredTurn> =
+        serde_json::from_value(v["messages"].clone()).unwrap_or_default();
+    for m in &messages {
+        match m.badge() {
+            Some(b) => println!("  [{}] {} {} {}: {}", hhmm_of(m.ts), m.id(), b, m.display_name, m.content),
+            None => println!("  [{}] {} {}: {}", hhmm_of(m.ts), m.id(), m.display_name, m.content),
         }
     }
 }
