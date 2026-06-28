@@ -39,16 +39,17 @@
 
 ## Context management (operator 2026-06-28 — "make it just work without limits")
 
-- [~] **gateway-auto-context** — **MOSTLY DONE.** `fit_to_context()` at all 3 request paths so
-  `context_length_exceeded` is NEVER returned: (1) **sliding-window turn trim** (`4310a63`) — drop oldest
-  non-system turns; (2) **elision breadcrumb** (`057bd48`) — a tiny system note so the model knows history
-  was trimmed; (3) **lazy-tools** (`23a330f`) — when turn-dropping can't fit (fat system + many tool
-  schemas, codex's case), STRIP tool descriptions (every tool kept, no capability loss). Default ON
-  (`ROZUM_AUTO_CONTEXT=0` = legacy error), unit-tested, obs `auto_context_trim{dropped,tools_compressed}`.
-  **REMAINING (each its own focused build):** (i) full **LLM rolling-summary** of dropped turns (preserve
-  their content, not just a breadcrumb) — needs a summarizer GENERATION in the request path (nested gen +
-  latency design); (ii) true **on-demand lazy tool LOADING** (a meta-tool to fetch a schema when the model
-  asks) vs the current deterministic description-strip. Original design below.
+- [x] **gateway-auto-context** — **DONE** (mechanisms complete; `context_length_exceeded` is NEVER returned
+  on any of the 3 request paths). `fit_to_context()`: (1) **sliding-window turn trim** (`4310a63`); (2)
+  **extractive rolling-summary breadcrumb** (`057bd48`+`a307401`) — a system note telling the model history
+  was trimmed AND the topics it covered (first ~80 chars of each dropped turn, no model call); (3)
+  **lazy-tools** (`23a330f`) — strip tool descriptions when a fat system+tools surface can't be fit by
+  turn-dropping (every tool kept). Default ON (`ROZUM_AUTO_CONTEXT=0` = legacy error), unit-tested, obs
+  `auto_context_trim{dropped,tools_compressed}`. **OPTIONAL REFINEMENTS (own focused build, NOT blocking —
+  the deterministic versions already cover the cases):** (i) ABSTRACTIVE LLM rolling-summary (a summarizer
+  generation preserving dropped content vs topics) — needs a nested gen + latency/caching design, default
+  OFF; (ii) true on-demand lazy tool LOADING (a meta-tool the model calls to fetch a schema) — LOW VALUE,
+  superseded by the description-strip (weak models won't reliably request schemas anyway). Original design below.
   A gateway-side context-management layer so a request that exceeds
   the model's `n_ctx` **never returns `context_length_exceeded`** to the client — it transparently
   fits the window instead, for ANY agent (claude/codex/opencode) against ANY model. This is North-Star
