@@ -190,9 +190,42 @@ pub struct Index {
     pub days: BTreeMap<String, DayStat>,
 }
 
+/// Room role (P3): a plain chat (today), a support intake queue, or a room scoped to one incident.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomKind {
+    #[default]
+    Chat,
+    Queue,
+    Incident,
+}
+impl RoomKind {
+    fn is_chat(&self) -> bool {
+        matches!(self, RoomKind::Chat)
+    }
+}
+
+/// A room member's role.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberRole {
+    #[default]
+    Observer,
+    Reporter,
+    Assignee,
+    Oncall,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Member {
+    pub handle: String,
+    #[serde(default)]
+    pub role: MemberRole,
+}
+
 /// `meta.json` — small room metadata. `budget_chars` is the running total so a
 /// reopen restores the budget without re-reading every day file.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Meta {
     pub name: String,
     pub topic: String,
@@ -200,6 +233,11 @@ pub struct Meta {
     pub phase: String,
     pub created_at: u64,
     pub budget_chars: u64,
+    // P3 room kind + members (serde-default + skip → plain `chat` rooms' meta.json is unchanged).
+    #[serde(default, skip_serializing_if = "RoomKind::is_chat")]
+    pub kind: RoomKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<Member>,
 }
 
 /// What the writer publishes on each append; clients read up to `end_offset`.
@@ -302,6 +340,8 @@ pub struct TranscriptWriter {
     end_offset: u64,
     index: Index,
     threads: BTreeMap<String, Thread>,
+    room_kind: RoomKind,
+    members: Vec<Member>,
     budget_chars: u64,
     materialized: bool,
     name: String,
@@ -331,6 +371,8 @@ impl TranscriptWriter {
             end_offset: 0,
             index: Index::default(),
             threads: BTreeMap::new(),
+            room_kind: RoomKind::default(),
+            members: Vec::new(),
             budget_chars: 0,
             materialized: false,
             name: name.into(),
@@ -366,6 +408,8 @@ impl TranscriptWriter {
             topic: meta.as_ref().map(|m| m.topic.clone()).unwrap_or_default(),
             project: meta.as_ref().and_then(|m| m.project.clone()),
             created_at: meta.as_ref().map(|m| m.created_at).unwrap_or(0),
+            room_kind: meta.as_ref().map(|m| m.kind).unwrap_or_default(),
+            members: meta.as_ref().map(|m| m.members.clone()).unwrap_or_default(),
             phase: meta.map(|m| m.phase).unwrap_or_else(|| "Active".into()),
             index,
             threads: std::fs::read(paths.threads_path())
@@ -511,6 +555,8 @@ impl TranscriptWriter {
             phase: self.phase.clone(),
             created_at: self.created_at,
             budget_chars: self.budget_chars,
+            kind: self.room_kind,
+            members: self.members.clone(),
         };
         write_json_atomic(&self.paths.meta_path(), &meta)?;
         write_json_atomic(&self.paths.index_path(), &self.index)?;
@@ -601,6 +647,33 @@ impl TranscriptWriter {
 
     pub fn threads(&self) -> &BTreeMap<String, Thread> {
         &self.threads
+    }
+
+    // ── P3: room kind + members ────────────────────────────────────────────────────────────────
+    /// Set the room kind (chat|queue|incident); persisted to meta.json.
+    pub fn set_room_kind(&mut self, kind: RoomKind, ts: u64) -> std::io::Result<()> {
+        if !self.materialized {
+            self.materialize(ts)?;
+        }
+        self.room_kind = kind;
+        self.persist_meta_index()
+    }
+
+    /// Replace the room members; persisted to meta.json.
+    pub fn set_members(&mut self, members: Vec<Member>, ts: u64) -> std::io::Result<()> {
+        if !self.materialized {
+            self.materialize(ts)?;
+        }
+        self.members = members;
+        self.persist_meta_index()
+    }
+
+    pub fn room_kind(&self) -> RoomKind {
+        self.room_kind
+    }
+
+    pub fn members(&self) -> &[Member] {
+        &self.members
     }
 }
 
@@ -939,6 +1012,27 @@ mod tests {
         assert_eq!(th.state, ThreadState::Escalated);
         assert_eq!(th.kind, ThreadKind::Incident);
         assert_eq!(th.title, "DB outage");
+    }
+
+    // P3: room kind + members persist to meta.json across a reopen; plain rooms stay `chat`.
+    #[test]
+    fn room_kind_and_members_persist() {
+        let dir = tempdir().unwrap();
+        {
+            let mut w = writer_in(dir.path());
+            w.set_room_kind(RoomKind::Incident, ts_for(0)).unwrap();
+            w.set_members(
+                vec![Member { handle: "alice".into(), role: MemberRole::Assignee }],
+                ts_for(0),
+            )
+            .unwrap();
+        }
+        let w =
+            TranscriptWriter::open(RoomPaths::for_project(dir.path()), dir.path().join("state")).unwrap();
+        assert_eq!(w.room_kind(), RoomKind::Incident);
+        assert_eq!(w.members().len(), 1);
+        assert_eq!(w.members()[0].handle, "alice");
+        assert_eq!(w.members()[0].role, MemberRole::Assignee);
     }
 
     #[test]
