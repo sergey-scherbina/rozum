@@ -497,6 +497,16 @@ pub fn dry_run_admission(footprint_bytes: u64) -> AdmissionReport {
 struct ResidentEntry {
     model: String,
     footprint_bytes: u64,
+    /// Queue tier of the owner (P4): an interactive waiter may preempt a `batch` resident, never an
+    /// interactive one. `#[serde(default)]` so old entries (no field) read back as interactive (0) —
+    /// the conservative default (never wrongly preemptible).
+    #[serde(default)]
+    prio: u8,
+}
+impl ResidentEntry {
+    fn new(model: &str, footprint_bytes: u64) -> Self {
+        Self { model: model.to_string(), footprint_bytes, prio: residency_prio() }
+    }
 }
 
 /// Held for the lifetime of a resident model: the exclusive `flock` on this
@@ -522,11 +532,7 @@ impl ResidencyGuard {
     /// Best-effort: IO errors are swallowed (the gate is a safety net, not correctness).
     pub fn update_footprint(&self, model: &str, footprint_bytes: u64) {
         use std::io::{Seek, SeekFrom, Write};
-        let body = serde_json::to_vec(&ResidentEntry {
-            model: model.to_string(),
-            footprint_bytes,
-        })
-        .unwrap_or_default();
+        let body = serde_json::to_vec(&ResidentEntry::new(model, footprint_bytes)).unwrap_or_default();
         let mut f: &std::fs::File = &self._lock;
         let _ = f.seek(SeekFrom::Start(0));
         let _ = f.write_all(&body); // overwrites from 0; a grow extends, never shortens mid-read
@@ -589,11 +595,7 @@ pub fn update_my_reservation(model: &str, footprint_bytes: u64) {
     else {
         return;
     };
-    let body = serde_json::to_vec(&ResidentEntry {
-        model: model.to_string(),
-        footprint_bytes,
-    })
-    .unwrap_or_default();
+    let body = serde_json::to_vec(&ResidentEntry::new(model, footprint_bytes)).unwrap_or_default();
     let _ = f.seek(SeekFrom::Start(0));
     let _ = f.write_all(&body);
     let _ = f.set_len(body.len() as u64);
@@ -632,7 +634,7 @@ fn scan_residents(skip_pid: u32) -> (u64, Vec<(u32, String)>) {
         }
         let ent: ResidentEntry = match std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
             Some(e) => e,
-            None => ResidentEntry { model: String::new(), footprint_bytes: 0 },
+            None => ResidentEntry { model: String::new(), footprint_bytes: 0, prio: 0 },
         };
         sum = sum.saturating_add(ent.footprint_bytes);
         holders.push((pid, ent.model));
@@ -758,6 +760,16 @@ pub fn acquire_residency(
                 }
                 // Not our turn — drop the admit lock before sleeping so others proceed.
                 drop(admit);
+                // P4: if we're INTERACTIVE and blocked, ask a strictly-lower-priority (batch) resident
+                // to yield — best-effort, re-touched each tick so it stays fresh while we wait. The
+                // victim frees its RAM the instant it's idle, waking us via the residents/ fs-event.
+                if prio == PRIO_INTERACTIVE {
+                    if let Some(victim) = pick_preempt_victim(
+                        prio, footprint_bytes, in_use, budget, available, min_free, pressure, mypid,
+                    ) {
+                        request_preemption(victim);
+                    }
+                }
                 if !announced {
                     announced = true;
                     let who = holders
@@ -856,11 +868,7 @@ fn reserve(pid: u32, model: &str, footprint_bytes: u64) -> Option<ResidencyGuard
         .ok()?;
     // Hold the lifetime flock.
     file.try_lock().ok()?;
-    let body = serde_json::to_vec(&ResidentEntry {
-        model: model.to_string(),
-        footprint_bytes,
-    })
-    .unwrap_or_default();
+    let body = serde_json::to_vec(&ResidentEntry::new(model, footprint_bytes)).unwrap_or_default();
     let _ = file.write_all(&body);
     let _ = file.flush();
     Some(ResidencyGuard { _lock: file, path })
@@ -1002,6 +1010,118 @@ fn pick_front_that_fits(
     for &(prio, seq, pid, fp) in &w {
         if admits(in_use, fp, budget, available, min_free, pressure) {
             return Some((prio, seq, pid));
+        }
+    }
+    None
+}
+
+// ── P4: cooperative preemption ────────────────────────────────────────────────────────────────
+// A blocked INTERACTIVE load may ask a strictly-lower-priority (batch) RESIDENT to yield: write
+// `preempt/<victim-pid>`. The victim's gateway watchdog sees it and, the moment it is idle (no
+// in-flight request / generation), EXITS — the OS drops its flock (reservation) + frees the model RAM,
+// so the interactive load (woken by the residents/ fs-event) proceeds. The batch's driver (a loop /
+// managed failover) reloads later = auto-requeue. NEVER interrupts a generation (the idle guard), and
+// an interactive load NEVER preempts another interactive one (only strictly-lower-priority victims).
+
+pub fn preempt_dir() -> PathBuf {
+    gateway_dir().join("preempt")
+}
+fn preempt_path(pid: u32) -> PathBuf {
+    preempt_dir().join(pid.to_string())
+}
+
+/// TTL for a preempt request — a stale one (requester gone / victim slow) is ignored + reaped, so a
+/// victim never yields for a load nobody is still waiting on.
+const PREEMPT_TTL_SECS: u64 = 90;
+
+/// A higher-priority waiter is asking THIS gateway (`mypid`) to yield, and the request is fresh. The
+/// gateway watchdog checks this; on idle it yields. Stale requests are reaped here.
+pub fn preempt_requested(mypid: u32) -> bool {
+    let p = preempt_path(mypid);
+    match std::fs::metadata(&p).and_then(|m| m.modified()) {
+        Ok(mtime) => {
+            let age = std::time::SystemTime::now()
+                .duration_since(mtime)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if age > PREEMPT_TTL_SECS {
+                let _ = std::fs::remove_file(&p);
+                false
+            } else {
+                true
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// Clear our own preempt request (called by the victim as it yields; also lazily TTL-reaped).
+pub fn clear_preemption(mypid: u32) {
+    let _ = std::fs::remove_file(preempt_path(mypid));
+}
+
+/// Ask `victim_pid` to yield (best-effort, idempotent). Re-touches an existing request so it stays fresh
+/// while we keep waiting.
+fn request_preemption(victim_pid: u32) {
+    let _ = std::fs::create_dir_all(preempt_dir());
+    let _ = std::fs::write(preempt_path(victim_pid), b"");
+}
+
+/// Residents as `(pid, prio, footprint)` for the victim search.
+fn scan_residents_prio(skip_pid: u32) -> Vec<(u32, u8, u64)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(residents_dir()) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(pid) = path.file_name().and_then(|n| n.to_str()).and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == skip_pid {
+            continue;
+        }
+        // Skip an obviously-dead reservation (its flock is free).
+        if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+            if f.try_lock().is_ok() {
+                continue;
+            }
+        }
+        if let Some(e) = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<ResidentEntry>(&b).ok())
+        {
+            out.push((pid, e.prio, e.footprint_bytes));
+        }
+    }
+    out
+}
+
+/// Pick a preemptible victim: a resident with STRICTLY lower priority (higher prio number) whose
+/// eviction would free enough for `my_footprint` to fit. Smallest sufficient victim (least disruption).
+/// `None` if no lower-prio resident helps → the waiter just keeps waiting.
+#[allow(clippy::too_many_arguments)]
+fn pick_preempt_victim(
+    my_prio: u8,
+    my_footprint: u64,
+    in_use: u64,
+    budget: Option<u64>,
+    available: Option<u64>,
+    min_free: u64,
+    pressure: crate::shed::PressureLevel,
+    skip_pid: u32,
+) -> Option<u32> {
+    let mut cands: Vec<(u32, u8, u64)> = scan_residents_prio(skip_pid)
+        .into_iter()
+        .filter(|&(_, prio, _)| prio > my_prio) // strictly lower priority (e.g. batch)
+        .collect();
+    cands.sort_by_key(|&(_, _, fp)| fp); // smallest sufficient victim = least disruption
+    for (pid, _, fp) in cands {
+        let freed_in_use = in_use.saturating_sub(fp);
+        let freed_avail = available.map(|a| a.saturating_add(fp));
+        if admits(freed_in_use, my_footprint, budget, freed_avail, min_free, pressure) {
+            return Some(pid);
         }
     }
     None

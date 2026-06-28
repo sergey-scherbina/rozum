@@ -4418,6 +4418,27 @@ pub async fn serve_on(
                     }
                 }
 
+                // 1b. Cooperative preemption (P4): a higher-priority load asked us to yield our RAM.
+                // The instant we're idle (no in-flight request, nothing generating), exit — the OS
+                // frees our reservation + model RAM for it. NEVER mid-generation (the idle guard).
+                // Auto-requeue: our driver / managed failover reloads when RAM frees again.
+                {
+                    let mypid = std::process::id();
+                    if activity.in_flight.load(Ordering::Relaxed) == 0
+                        && sb.generating.load(Ordering::SeqCst) == 0
+                        && crate::share::preempt_requested(mypid)
+                    {
+                        crate::share::clear_preemption(mypid);
+                        crate::obs::log_event(serde_json::json!({
+                            "event": "gateway_exit", "reason": "preempted",
+                        }));
+                        if let Some(pid) = registered_pid {
+                            crate::share::remove_active_if_mine(pid);
+                        }
+                        std::process::exit(0);
+                    }
+                }
+
                 // 2. idle-unload: model resident, nothing generating, quiet for
                 // `unload_secs`. `is_loaded()` makes this fire once, not every tick.
                 if unload_on_idle
