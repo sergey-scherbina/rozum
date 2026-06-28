@@ -1,16 +1,16 @@
 # Sprint
 
-- [ ] **meetings → support/incident platform — FOUNDATION (operator 2026-06-28, strategic)** — spec
-  `docs/specs/meetings-incident-platform.md`. The data-model hinge the support verbs build on. **P1 (do
-  FIRST, alone, prove zero regression on plain rooms):** extend `StoredTurn` (`crates/rozum-meeting/.../
-  store.rs`) with `#[serde(default, skip_serializing_if=…)]` metadata — `kind` (note|question|event|alert|
-  resolution), `thread_id`, `in_reply_to`, `meta{severity,status,assignee,tags,links}`; message `id` =
-  derived `<date>/<n>` (not stored). BYTE-IDENTICAL plain-room files (skip-when-default); old lines read as
-  notes. Thread it through the daemon write path + TUI/REST/MCP read. **P2** threads (`thread_id` +
-  rebuildable `threads.json`); **P3** room kinds (`Meta.kind` chat|queue|incident + members/roles). Then the
-  verbs (own specs): ops / escalation (ties into the model-chain) / resolving (thread state machine) /
-  incident-context (agent auto-gathers logs+obs+repro into a thread — highest leverage). Back-compat +
-  single-writer + agent-native are HARD constraints. BACKLOG `## Meetings → product-support` lists the 7 tasks.
+- [~] **meetings → support/incident platform (operator 2026-06-28, strategic)** — spec
+  `docs/specs/meetings-incident-platform.md`. **FOUNDATION (P1-P3) DONE — the data-model + store ops, all
+  back-compat, 13/13 store tests:** P1 message metadata (`407ae4a`, StoredTurn + kind/thread_id/in_reply_to/
+  meta, byte-identical plain rooms) + P1b `append_with_meta` write API (`4472489`); P2 threads (`1e32ea8`,
+  Thread + threads.json + open/set_state/owner ops, incident=thread); P3 room kinds (`2fa5a6d`, Meta.kind
+  chat|queue|incident + members/roles). **REMAINING (next phase, each focused):** (a) the SURFACE — thread
+  metadata through the daemon socket protocol (3 `SubmitParams`: mcp_server→daemon_proxy→daemon→Meeting→
+  room→store) + thread MCP tools (`thread_open`/`thread_set_state`) + TUI/REST render. DEEP production-
+  protocol change — do carefully. (b) the VERBS (own specs): ops (search/link/resolve), escalation (ties
+  into the model-chain), resolving (state-machine + metrics), incident-context (agent auto-gathers logs+obs+
+  repro into a thread). (c) `mtg-frontend` (support-grade UI). BACKLOG `## Meetings → product-support`.
 
 - [x] **residency admission QUEUE — event-driven, priority, preemptive (operator 2026-06-28, `pipeline-swap-settle`)** —
   **DONE + VALIDATED UNDER CONTENTION.** P1 ordered queue (`2a7bee9`), P2 actual-free grant (`0ed5825`,
