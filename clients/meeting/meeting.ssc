@@ -67,6 +67,18 @@ def readRoom(name: String): String =
 def roomCount(name: String): Int =
   readRoom(name).split("\n").filter(l => l.contains("\"content\":\"")).toList.length
 
+// Active (non-terminal) incident count for a room — read straight from threads.json (the support
+// model), counting open/triaging/escalated states. Crude string-count (same approach as the JSONL
+// parsing), so no JSON lib needed. The production PWA's incident-awareness signal.
+def activeIncidents(name: String): Int =
+  val dir = roomDir(name)
+  if isDir(dir) && listDir(dir).filter(f => f.endsWith("threads.json")).toList.length > 0 then
+    val t = readFile(s"$dir/threads.json")
+    (t.split("\"state\":\"open\"").toList.length - 1) +
+      (t.split("\"state\":\"triaging\"").toList.length - 1) +
+      (t.split("\"state\":\"escalated\"").toList.length - 1)
+  else 0
+
 def roomCountLine(n: String): String =
   n + "|" + roomCount(n).toString
 
@@ -248,7 +260,10 @@ def page(cur: String): String =
   val mpLink  = element("a", ["href" -> ("/mp/" + cur), "style" -> "flex:0 0 auto; text-decoration:none; font-size:20px; line-height:1; padding:3px 5px"], Map(), [textNode("🤖")])
   val gear    = element("a", ["href" -> "/manage", "style" -> "flex:0 0 auto; text-decoration:none; font-size:21px; line-height:1; padding:3px 6px"], Map(), [textNode("⚙")])
   val ccLink  = element("a", ["href" -> "https://busi.tail1174e2.ts.net:8447/", "title" -> "control center", "style" -> "flex:0 0 auto; text-decoration:none; font-size:20px; line-height:1; padding:3px 6px"], Map(), [textNode("🎛")])
-  val tabsRow = element("div", ["style" -> "display:flex; gap:8px; align-items:center; width:100%"], Map(), [ccLink, sel, mpLink, gear])
+  val incN    = activeIncidents(cur)
+  val incChip = if incN < 1 then element("span", Map(), Map(), [])
+                else element("span", ["title" -> "active incidents", "style" -> "flex:0 0 auto; font-size:13px; font-weight:700; color:#fff; background:#dc2626; padding:2px 8px; border-radius:11px; white-space:nowrap"], Map(), [textNode("🛟 " + incN.toString)])
+  val tabsRow = element("div", ["style" -> "display:flex; gap:8px; align-items:center; width:100%"], Map(), [ccLink, sel, incChip, mpLink, gear])
   val handle  = element("div", ["style" -> "width:56px; height:6px; border-radius:3px; background:#3a414d"], Map(), [])
   val nav     = element("div", ["id" -> "nav", "style" -> "flex:0 0 auto; display:flex; flex-direction:column; align-items:center; gap:9px; padding:max(8px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) 8px max(12px,env(safe-area-inset-left)); background:#1b1e24; border-bottom:1px solid #2a2e36"], Map(), [tabsRow, handle])
   val list  = element("div", ["id" -> "list", "style" -> "flex:1 1 auto; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px max(14px,env(safe-area-inset-right)) 12px max(14px,env(safe-area-inset-left)); color:#e6e6e6; font:15px/1.5 -apple-system,system-ui,sans-serif"], Map(), [msgsView(cur)])
