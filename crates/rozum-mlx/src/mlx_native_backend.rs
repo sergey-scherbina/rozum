@@ -3865,10 +3865,22 @@ mod inner {
     /// Does the chat template render tool definitions? A tool-aware template references the `tools`
     /// jinja var (Qwen/GLM/gpt-oss) or Mistral's `[AVAILABLE_TOOLS]`. A bare template (e.g.
     /// DeepSeek-Coder-V2-Lite) has none → the `tools:` arg is dropped, so we must inject instead.
-    fn template_renders_tools(template: &str) -> bool {
-        template.contains("tools")
-            || template.contains("AVAILABLE_TOOLS")
-            || template.contains("tool_call")
+    pub(crate) fn template_renders_tools(template: &str) -> bool {
+        // Match an ACTUAL tool-rendering mechanism, not the bare word "tools" — Devstral-Small-2507's
+        // template mentions "tools" only in PROSE (a system prompt about find/grep/git), with no slot,
+        // so the loose `contains("tools")` false-positived → injection was skipped → the model flew
+        // blind and emitted a degenerate `name\ncommand` instead of a tool call. Require a Jinja
+        // reference to the `tools` variable (a real loop/conditional) or a known call marker.
+        template.contains("tool_call") // Qwen/GLM `<tool_call>` rendering
+            || template.contains("tool_calls") // structured tool_calls field
+            || template.contains("AVAILABLE_TOOLS") // Mistral native
+            || template.contains("in tools") // `{% for t in tools %}`
+            || template.contains("if tools") // `{%- if tools %}`
+            || template.contains("{{ tools")
+            || template.contains("{{- tools")
+            || template.contains("tools %}")
+            || template.contains("tools|")
+            || template.contains("tools is")
     }
 
     /// A synthetic system message describing `tools` + the `<tool_call>{name,arguments}` format that
@@ -4569,6 +4581,23 @@ mod tests {
         assert_eq!(apply_reasoning_level(tpl, "nonsense"), tpl);
         // A non-harmony template (no reasoning_effort default) is unchanged for any level.
         assert_eq!(apply_reasoning_level("hello {{ x }}", "low"), "hello {{ x }}");
+    }
+
+    #[test]
+    fn template_renders_tools_ignores_prose_tools() {
+        use super::inner::template_renders_tools;
+        // Devstral-Small-2507: "tools" only in PROSE (a find/grep/git system prompt) — must NOT count
+        // as a tool-rendering template, else injection is skipped and the model flies blind.
+        assert!(!template_renders_tools(
+            "You are an agent. Use efficient tools like find, grep, and git to explore the codebase."
+        ));
+        // Real tool-rendering templates still detected.
+        assert!(template_renders_tools("{% for tool in tools %}{{ tool.name }}{% endfor %}"));
+        assert!(template_renders_tools("{%- if tools %}...{%- endif %}"));
+        assert!(template_renders_tools("emit <tool_call>{...}</tool_call>"));
+        assert!(template_renders_tools("[AVAILABLE_TOOLS]{{ tools|tojson }}[/AVAILABLE_TOOLS]"));
+        // DeepSeek-Coder-V2-Lite has no tools slot → injection (correctly) fires.
+        assert!(!template_renders_tools("{{ bos }}{% for m in messages %}{{ m.content }}{% endfor %}"));
     }
 
     #[test]
