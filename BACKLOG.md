@@ -152,13 +152,13 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   (isolated daemon): open→escalate→resolve wrote `threads.json`; REST + console reflected the resolved
   incident, owner, and the 3-message context bundle (alert→event→resolution).
 
-- [ ] **mtg-registry-dup-name** (sharp edge surfaced 2026-06-28) — `RoomRegistry` persists to a GLOBAL
-  `~/.local/state/rozum/rooms.json` (keyed off `XDG_STATE_HOME`, NOT `XDG_RUNTIME_DIR`), and
-  `rest_read::room_root` / `list().find(name==X)` returns the FIRST match — so two rooms that derive the same
-  name (two project dirs both basenamed `proj`) resolve ambiguously (REST may read the wrong/empty room).
-  Pre-existing, low-severity (real project rooms have distinct names). Fix options: de-dup `rooms.json` on
-  write (last-writer-wins by name, or key by root), or resolve by (name, project) pair. Also: tests/demos
-  that spawn a daemon should override `XDG_STATE_HOME` to avoid polluting the operator's global registry.
+- [x] **mtg-registry-dup-name** — DONE (`054e670`). Room names aren't unique (two project dirs can derive
+  the same basename) and `rooms.json` is a global registry, so a stale registration (a deleted/moved project
+  that once held a same-named room) could shadow the live room when a surface resolved by name (the REST
+  console read the wrong/empty room). Two-sided fix: `register_room` prunes any other same-name entry whose
+  root no longer exists on register; `rest_read::room_root` prefers a same-name match whose root still exists
+  (falling back to the most-recent). Test `registry_prunes_stale_same_name_dupes`. NOTE for tooling: tests/
+  demos that spawn a daemon should override `XDG_STATE_HOME` to avoid polluting the operator's global registry.
 
 ## Model chain (verification-gated, `--model A,B,C`)
 
