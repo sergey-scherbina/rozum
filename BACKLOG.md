@@ -37,6 +37,34 @@
   Integration point: `serving::parse_tool_calls` returns empty → synth at the mlx call site
   (mlx_native_backend.rs ~2115); needs tool-names + GLM-family threaded into scope (not there today).
 
+## Context management (operator 2026-06-28 — "make it just work without limits")
+
+- [ ] **gateway-auto-context** — a gateway-side context-management layer so a request that exceeds
+  the model's `n_ctx` **never returns `context_length_exceeded`** to the client — it transparently
+  fits the window instead, for ANY agent (claude/codex/opencode) against ANY model. This is North-Star
+  ("intelligence on any model/hardware"): the agent shouldn't have to know the model's window.
+  **Honest physics first:** a transformer attends over ≤ `n_ctx` tokens per forward — you CANNOT
+  losslessly fit more in one pass. So "without limits" = **never-error + arbitrary length, with
+  *managed* loss**, not infinite full-fidelity attention. Pick what to drop, deliberately, instead of
+  erroring. Mechanisms, dispatched by WHAT overflows:
+  (a) **conversation > window** (the agentic case): **rolling compaction** — keep system + last-K turns
+      verbatim + a running summary of the evicted older turns (a cheap side-call summarizes the middle;
+      "split into several prompts" literally). Unbounded session, graceful. This is what Claude Code
+      itself does client-side — we do it server-side, for all agents.
+  (b) **one giant input** (a huge file/message): **map-reduce** — chunk → process each → reduce. Literal
+      multi-prompt. For understand/summarize-a-huge-thing.
+  (c) **giant static prompt** (codex: system + 18 tool schemas > window): **slim** — codex-lean (have it)
+      + **lazy tool-schemas** (offer a few; fetch the rest on demand via a meta-tool). Can't split an
+      indivisible "use these tools" coherently — shrink the floor instead.
+  (d) **knowledge too big**: RAG — index outside, retrieve top-K relevant into a bounded window.
+  **Caveat that bounds the win:** the floor is the model's `n_ctx`; the *effective* context is unbounded
+  but lossy. Note: `context_length_exceeded` was NOT a real prod issue for codex-on-Qwen3-4B (auto-ctx
+  = 40960 fits its prompt; it only bit when I hand-set `--n-ctx 8192`). The real target is (a) long
+  agentic sessions + (b)/(d) big inputs. **Open design Qs (operator to weigh):** how aggressive the trim
+  (how many turns verbatim?), and summarize with the SAME model (cheap, lower quality) vs a small
+  dedicated summarizer. Chunked-PREFILL (`Generate` edit, exists) is orthogonal — it cuts the memory
+  spike of a long-but-FITTING prompt, it does NOT extend the window.
+
 ## Model chain (verification-gated, `--model A,B,C`)
 
 The CORE chain shipped on master (spec `docs/specs/pipeline-cascade.md`, SPRINT top item): target

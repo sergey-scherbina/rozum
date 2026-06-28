@@ -1,5 +1,19 @@
 # Sprint
 
+- [ ] **residency admission QUEUE — event-driven, priority, preemptive (operator 2026-06-28, `pipeline-swap-settle`)** —
+  spec: `docs/specs/residency-admission-queue.md`. Kill contention-jetsam properly (NOT retries): replace the
+  check-then-poll-240s-then-jetsam admission with an **ordered cross-process wait queue** over the existing
+  flock RAM-ledger (`share.rs`), **kqueue**-notified (event-driven, no poll), `actual-free-RAM` grant (sees
+  non-participants like the `uv mlx_lm` oracle), **priority** (interactive > batch) + **cooperative preemption**
+  (a high-prio load makes an idle low-prio resident gracefully unload — never mid-generation). Daemon-LESS
+  (keep flock crash-safety; broker-daemon rejected as a SPOF). Lift the in-process `concurrency.rs`
+  admit-then-queue pattern cross-process. **Acceptance = the matrix under REAL contention** (scripted GLM-32B
+  antagonist loop): 0 jetsam, 0 dead cells, gateway survives, loads serialize, interactive preempts batch,
+  pass-rates match the free-host run. Phases P1 queue+kqueue → P2 actual-free grant → P3 priority → P4 preemption
+  → **P5 contention validation harness (the deliverable)**. Parallel dep (not blocking): smmr-D (honest
+  cache-dominated peak) for true zero-jetsam; the queue is strictly safer than today regardless. Root-cause
+  fix for the agentic-bench dead-cells (which were contention, NOT clients_gone).
+
 - [ ] **verification-gated model chain — orchestration + generalized target (operator 2026-06-24)** —
   spec: `docs/specs/pipeline-cascade.md` (§ full frame, § target, § tool curation). The chain = one
   composite smarter "model": try a model → VERIFY against a `target` → if not met, escalate to the NEXT
