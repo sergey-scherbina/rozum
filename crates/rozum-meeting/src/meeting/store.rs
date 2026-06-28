@@ -128,6 +128,15 @@ impl StoredTurn {
     }
 }
 
+/// Support metadata supplied when posting a message (P1b write API). `Default` = a plain message.
+#[derive(Clone, Debug, Default)]
+pub struct PostMeta {
+    pub kind: MsgKind,
+    pub thread_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub meta: MsgMeta,
+}
+
 /// Per-day counts, the body of `index.json`.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DayStat {
@@ -353,6 +362,18 @@ impl TranscriptWriter {
         content: impl Into<String>,
         ts: u64,
     ) -> std::io::Result<StoredTurn> {
+        self.append_with_meta(participant_id, display_name, content, ts, PostMeta::default())
+    }
+
+    /// Append one message WITH support metadata (P1b). `append` is the plain (no-metadata) wrapper.
+    pub fn append_with_meta(
+        &mut self,
+        participant_id: impl Into<String>,
+        display_name: impl Into<String>,
+        content: impl Into<String>,
+        ts: u64,
+        pm: PostMeta,
+    ) -> std::io::Result<StoredTurn> {
         let content = content.into();
         let date = date_of_ts(ts);
 
@@ -374,7 +395,10 @@ impl TranscriptWriter {
             display_name: display_name.into(),
             content: content.clone(),
             ts,
-            ..Default::default() // P1: plain post; the metadata write API populates these (P1b)
+            kind: pm.kind,
+            thread_id: pm.thread_id,
+            in_reply_to: pm.in_reply_to,
+            meta: pm.meta,
         };
         let mut line = serde_json::to_string(&turn).map_err(std::io::Error::other)?;
         line.push('\n');
@@ -707,6 +731,29 @@ mod tests {
         let s = serde_json::to_string(&rich).unwrap();
         assert!(s.contains(r#""kind":"alert""#) && s.contains(r#""severity":"high""#) && s.contains(r#""tags":["db"]"#));
         assert_eq!(serde_json::from_str::<StoredTurn>(&s).unwrap(), rich);
+    }
+
+    // P1b: append_with_meta persists metadata; plain append stays plain.
+    #[test]
+    fn append_with_meta_persists_metadata() {
+        let dir = tempdir().unwrap();
+        let mut w = writer_in(dir.path());
+        let pm = PostMeta {
+            kind: MsgKind::Alert,
+            meta: MsgMeta {
+                severity: Some(Severity::High),
+                tags: vec!["db".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let turn = w.append_with_meta("p", "P", "DB is down", ts_for(0), pm).unwrap();
+        assert_eq!(turn.kind, MsgKind::Alert);
+        assert_eq!(turn.meta.severity, Some(Severity::High));
+        assert_eq!(turn.meta.tags, vec!["db".to_string()]);
+        let plain = w.append("p2", "P2", "hi", ts_for(0)).unwrap();
+        assert_eq!(plain.kind, MsgKind::Note);
+        assert!(plain.meta.is_empty());
     }
 
     #[test]
