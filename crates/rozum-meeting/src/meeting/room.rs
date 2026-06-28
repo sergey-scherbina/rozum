@@ -308,6 +308,27 @@ impl DaemonRoom {
         self.writer.threads().values().cloned().collect()
     }
 
+    /// Incident-context gather (P4): assemble an incident's whole picture — the thread record + all its
+    /// messages (the anchor + members by `thread_id`) + participants + timespan — in one place, so an
+    /// agent or human picking up the incident has everything. Reads the room's messages back + filters.
+    pub fn thread_context(&self, thread_id: &str) -> serde_json::Value {
+        let thread = self.writer.thread(thread_id).cloned();
+        let msgs: Vec<StoredTurn> = super::store::read_since(self.writer.root(), None, 0)
+            .into_iter()
+            .filter(|m| m.id() == thread_id || m.thread_id.as_deref() == Some(thread_id))
+            .collect();
+        let participants: std::collections::BTreeSet<&str> =
+            msgs.iter().map(|m| m.display_name.as_str()).collect();
+        serde_json::json!({
+            "thread": thread,
+            "message_count": msgs.len(),
+            "participants": participants,
+            "first_ts": msgs.first().map(|m| m.ts),
+            "last_ts": msgs.last().map(|m| m.ts),
+            "messages": msgs,
+        })
+    }
+
     pub fn end(&mut self) {
         if self.phase != Phase::Ended {
             self.phase = Phase::Ended;

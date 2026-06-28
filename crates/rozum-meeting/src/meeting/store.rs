@@ -706,6 +706,11 @@ impl TranscriptWriter {
         &self.threads
     }
 
+    /// The room's root dir (for reading messages back — incident-context gather).
+    pub fn root(&self) -> &Path {
+        self.paths.root.as_path()
+    }
+
     // ── P3: room kind + members ────────────────────────────────────────────────────────────────
     /// Set the room kind (chat|queue|incident); persisted to meta.json.
     pub fn set_room_kind(&mut self, kind: RoomKind, ts: u64) -> std::io::Result<()> {

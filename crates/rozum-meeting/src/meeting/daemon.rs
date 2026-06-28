@@ -130,6 +130,12 @@ pub struct ResolveParams {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ThreadContextParams {
+    /// The thread id to gather context for.
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WaitParams {
     /// Day of the last message seen (`YYYY-MM-DD`). Omit to receive all.
     #[serde(default)]
@@ -577,6 +583,24 @@ impl MeetingServer {
                 })
                 .to_string(),
             )
+        })
+        .await
+    }
+
+    /// Incident-context gather — the whole incident in one bundle (thread + its messages + participants
+    /// + timespan), so an agent or human picking it up has the full picture. The highest-leverage verb.
+    #[tool(
+        name = "meeting.thread_context",
+        description = "Gather an incident's full context: the thread + all its messages + participants + timespan."
+    )]
+    pub async fn thread_context(&self, params: Parameters<ThreadContextParams>) -> CallToolResult {
+        guard("meeting.thread_context", async move {
+            let (room, _id) = self.session_room().await;
+            let Some(room) = room else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let bundle = room.lock().await.thread_context(&params.0.thread_id);
+            text_result(&bundle.to_string())
         })
         .await
     }
