@@ -980,8 +980,11 @@ fn fit_to_context(
             "context_length_exceeded",
         ));
     }
-    // Step 1 — drop oldest non-system turns (keep ≥1 non-system turn + all system msgs).
+    // Step 1 — drop oldest non-system turns (keep ≥1 non-system turn + all system msgs), collecting a
+    // short EXTRACTIVE summary (the topic of each dropped turn — the first ~80 chars of its text) so the
+    // breadcrumb carries WHAT was elided, not just a count. Deterministic, no model call.
     let mut dropped = 0usize;
+    let mut topics: Vec<String> = Vec::new();
     while estimate_prompt_tokens(&messages, &tools) > budget {
         if messages.iter().filter(|m| !matches!(m.role, Role::System)).count() <= 1 {
             break;
@@ -989,23 +992,38 @@ fn fit_to_context(
         let Some(i) = messages.iter().position(|m| !matches!(m.role, Role::System)) else {
             break;
         };
-        messages.remove(i);
+        let removed = messages.remove(i);
         dropped += 1;
+        // Snippet the first Text block (skip tool-result dumps — not useful "topics"), cap to 6 turns.
+        if topics.len() < 6 {
+            if let Some(ContentBlock::Text { text }) = removed.content.first() {
+                let snip: String = text.chars().take(80).collect::<String>().replace('\n', " ");
+                if !snip.trim().is_empty() {
+                    topics.push(snip.trim().to_string());
+                }
+            }
+        }
     }
-    // If turns were elided, leave a tiny breadcrumb so the model KNOWS history was trimmed and won't
-    // assume it has the full prior context. Deterministic + ~tiny (fits inside the reply reserve). A
-    // full LLM rolling-SUMMARY of the dropped turns (preserving their content, not just a marker) is the
-    // BACKLOG refinement — it needs a summarizer generation in the request path. Inserted after the real
-    // system messages, before the kept turns.
+    // If turns were elided, leave a breadcrumb so the model KNOWS history was trimmed (won't assume full
+    // context) AND what it covered (extractive topics). Tiny, fits inside the reply reserve. A full LLM
+    // abstractive rolling-SUMMARY (a summarizer generation that preserves content, not just topics) is the
+    // BACKLOG refinement. Inserted after the real system messages, before the kept turns.
     if dropped > 0 {
+        let note_text = if topics.is_empty() {
+            format!(
+                "[Note: {dropped} earlier turn(s) were omitted to fit the model's {ctx_win}-token \
+                 context window — you may not have the full prior history.]"
+            )
+        } else {
+            let joined = topics.iter().map(|t| format!("\u{201c}{t}\u{2026}\u{201d}")).collect::<Vec<_>>().join("; ");
+            format!(
+                "[Note: {dropped} earlier turn(s) were omitted to fit the {ctx_win}-token window — you may \
+                 not have the full prior history. They covered (truncated): {joined}]"
+            )
+        };
         let note = Message {
             role: Role::System,
-            content: vec![ContentBlock::Text {
-                text: format!(
-                    "[Note: {dropped} earlier turn(s) were omitted to fit the model's {ctx_win}-token \
-                     context window — you may not have the full prior history.]"
-                ),
-            }],
+            content: vec![ContentBlock::Text { text: note_text }],
         };
         let pos = messages
             .iter()
@@ -5122,11 +5140,13 @@ mod tests {
         if let ContentBlock::Text { text } = &kept.content[0] {
             assert!(text.contains("turn 29"), "kept the MOST RECENT turn, got: {text}");
         }
-        // Elision breadcrumb: the model is told history was trimmed (won't assume full context).
+        // Elision breadcrumb with EXTRACTIVE topics: the model is told history was trimmed AND what the
+        // oldest dropped turn covered (so it has the gist, not just a count).
         assert!(
             fitted.iter().any(|m| matches!(m.role, Role::System)
-                && matches!(&m.content[0], ContentBlock::Text { text } if text.contains("omitted"))),
-            "elision breadcrumb inserted when turns were dropped"
+                && matches!(&m.content[0], ContentBlock::Text { text }
+                    if text.contains("omitted") && text.contains("covered") && text.contains("turn 0"))),
+            "breadcrumb carries the dropped turns' topics (extractive summary)"
         );
         // Step-2 lazy-tools: ONE turn (turn-dropping can't help) + fat tool descriptions → descriptions
         // get STRIPPED but every tool is KEPT (no capability loss). The codex fat-system case.
