@@ -1363,15 +1363,45 @@ fn cascade_local_footprint(cfg: &rozum::RuntimeConfig, model: &str, n_ctx: u32) 
         .filter(|t| matches!(t.location, rozum::cascade::Location::Local))
         .map(|t| estimate_model_footprint_bytes(&t.model, n_ctx))
         .collect();
-    // A **pipeline** runs LAZY — one tier resident at a time, the previous torn down before the next
-    // loads (MLX models can't co-reside) — so peak host RAM = MAX local tier, NOT the sum. An
-    // escalation cascade is eager (all tiers live) → reserve the SUM. See docs/specs/pipeline-cascade.md.
+    // Residency reservation. EAGER (all tiers co-resident — the MLX co-residency crash is fixed, see
+    // `tests/mlx_evals.rs::coresidency_two_mlx_models_one_process`) reserves the SUM; LAZY (one tier
+    // at a time, torn down before the next loads) reserves MAX. A pipeline now runs eager when the SUM
+    // is admissible (no per-request swap → far faster + measured higher pass-rate), falling back to
+    // lazy only when the SUM would overcommit. Must match the build-time choice in `build_cascade_from_spec`.
+    let sum = locals.iter().fold(0u64, |a, &b| a.saturating_add(b));
+    let max = locals.iter().copied().max().unwrap_or(0);
     let total = if matches!(spec.strategy, rozum::cascade::StrategyName::Pipeline) {
-        locals.into_iter().max().unwrap_or(0)
+        if pipeline_is_eager(&spec, n_ctx) { sum } else { max }
     } else {
-        locals.into_iter().fold(0u64, u64::saturating_add)
+        sum
     };
     Some(total)
+}
+
+/// Does this pipeline run EAGER (all tiers co-resident, no per-request swap) vs LAZY (one tier at a
+/// time)? The MLX co-residency crash that once forced lazy is fixed (thread_local metal command-encoder
+/// self-heal; `tests/mlx_evals.rs::coresidency_two_mlx_models_one_process` survives), and eager is far
+/// faster (no load/teardown per request) AND scored higher in the agentic sweep (e.g. Qwen3-4B→Coder-7B
+/// 9/10 @ ~9.4 GB eager vs the slow lazy swap). Eager when the SUM of tier footprints is admissible,
+/// else lazy fallback (so a pair that would overcommit still runs, one model at a time, at MAX peak).
+/// `ROZUM_PIPELINE_EAGER=1`/`0` forces the choice. Non-pipeline strategies are always eager (return false
+/// here only gates the lazy-pipeline backend).
+fn pipeline_is_eager(spec: &rozum::cascade::CascadeSpec, n_ctx: u32) -> bool {
+    if !matches!(spec.strategy, rozum::cascade::StrategyName::Pipeline) {
+        return false;
+    }
+    match std::env::var("ROZUM_PIPELINE_EAGER").ok().as_deref() {
+        Some("1" | "true" | "on") => return true,
+        Some("0" | "false" | "off") => return false,
+        _ => {}
+    }
+    let sum = spec
+        .tiers
+        .iter()
+        .filter(|t| matches!(t.location, rozum::cascade::Location::Local))
+        .map(|t| estimate_model_footprint_bytes(&t.model, n_ctx))
+        .fold(0u64, u64::saturating_add);
+    rozum::share::dry_run_admission(sum).admit
 }
 
 async fn acquire_residency_or_exit(
@@ -5764,10 +5794,18 @@ async fn build_cascade_from_spec(
     let n_tiers = spec.tiers.len();
 
     // Pipeline → LAZY residency: resolve + tear down ONE tier at a time per request (planner →
-    // executor, never co-resident). Required for local MLX tiers — two MLX models in one process
-    // crash on Metal (the GPU command-buffer watchdog). The in-process automation of solve.sh's
-    // sequential two-process flow. See docs/specs/pipeline-cascade.md.
-    if matches!(spec.strategy, rozum::cascade::StrategyName::Pipeline) {
+    // executor, never co-resident). The in-process automation of solve.sh's sequential two-process
+    // flow. See docs/specs/pipeline-cascade.md.
+    //
+    // The original "two MLX models co-resident crash Metal (GPU command-buffer watchdog)" constraint
+    // that FORCED this is now OBSOLETE — the thread_local metal command-encoder self-heal (fork
+    // 7922c10a+) fixed it; `tests/mlx_evals.rs::coresidency_two_mlx_models_one_process` SURVIVES both
+    // sequential AND concurrent eval. So an MLX×MLX pipeline CAN be eager (both resident, residency
+    // lanes serialize) → no per-request swap → fast enough for the agentic loop. `ROZUM_PIPELINE_EAGER=1`
+    // opts into the eager `build_cascade` path below; default stays lazy until eager-if-fits ships.
+    if matches!(spec.strategy, rozum::cascade::StrategyName::Pipeline)
+        && !pipeline_is_eager(&spec, n_ctx)
+    {
         let cfg_lazy = std::sync::Arc::clone(cfg);
         let resolve: rozum::cascade::LazyResolver =
             std::sync::Arc::new(move |tier: rozum::cascade::TierSpec| {

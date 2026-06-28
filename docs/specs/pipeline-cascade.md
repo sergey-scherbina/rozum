@@ -79,15 +79,18 @@ The swap engine already exists: gateway `Switchboard` ("never two resident — n
 from spec", `gateway.rs:111`). Lazy residency = the pipeline driving that load/unload between tiers,
 exactly what `solve.sh` does by hand with two sequential gateway processes — but in-process and automatic.
 
-> **HARD CONSTRAINT (validated 2026-06-23, reproducible): two MLX models must NOT be co-resident in one
-> process.** Live testing GLM-9B+Qwen3-4B eager (both loaded, ~7 GiB total, RAM not the issue) showed that
-> when one model runs a generation while the other's weights also sit in the Metal heap, the GPU command
-> buffer exceeds the watchdog → `[METAL] Command buffer execution failed: GPU Timeout Error
-> (kIOGPUCommandBufferCallbackErrorTimeout)` → uncaught C++ exception → the gateway process crashes (no
-> kernel panic / no reboot, but the whole gateway dies). Reproduced on a clean system with settled GPU.
-> Therefore the **eager** branch below is for **remote / non-MLX** tiers only; **any MLX×MLX local pair is
-> forced LAZY** (one resident at a time, the other fully torn down first — `solve.sh`'s proven model).
-> This makes lazy residency mandatory, not an optimization, for the common local-model case.
+> **~~HARD CONSTRAINT~~ — OBSOLETE (lifted 2026-06-28).** The 2026-06-23 finding that two MLX models
+> co-resident in one process crash Metal (`kIOGPUCommandBufferCallbackErrorTimeout`) was a SYMPTOM of the
+> thread_local metal command-encoder bug — **the self-heal patch (fork 7922c10a+, fix `b87a014`) fixed it.**
+> `tests/mlx_evals.rs::coresidency_two_mlx_models_one_process` now SURVIVES both sequential interleave AND
+> concurrent eval (re-confirmed on the current rev 2026-06-28). **MLX×MLX pairs CAN co-reside.** So the
+> pipeline runs **EAGER by default when the SUM of tier footprints is admissible** (`pipeline_is_eager`):
+> all tiers stay resident, residency lanes serialize generations, **no per-request swap** → far faster.
+> It falls back to **LAZY** (MAX-peak, one at a time) only when the eager SUM would overcommit, or when
+> `ROZUM_PIPELINE_EAGER=0` forces it. **Measured win:** `Qwen3-4B→Qwen2.5-Coder-7B` eager scored **9/10
+> agentic at ~9.4 GB peak** (bounded cache) — vs the slow lazy swap, and at HALF the peak of the 35B
+> champion (10/10 @ ~22 GB). Pipeline synergy needs BOTH tiers capable (a 0.6B planner or a weak executor
+> → 0/10). The eager branch below is now the DEFAULT for fitting local pairs, not remote-only.
 
 > **LAZY STATUS (built + isolated 2026-06-24).** `LazyPipelineBackend` is implemented: per request it
 > resolves tier 0 (planner) → plans → tears it down → resolves tier N (executor) → answers → tears down,
