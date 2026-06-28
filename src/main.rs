@@ -631,6 +631,25 @@ enum GatewayAction {
     Reload,
     /// Free the resident model but keep the daemon (lazy-reload on next request).
     Unload,
+    /// Run a RAM-heavy NON-rozum command (e.g. the python `mlx_lm` oracle, a bench sweep) THROUGH the
+    /// host-wide admission queue, so it can't overcommit RAM behind rozum's back. Acquires a reservation
+    /// for `--footprint` (or `--model`'s estimate), WAITS its turn in the queue, runs the command holding
+    /// the reservation, releases on exit. Tag `--batch` so it yields to interactive loads.
+    /// Example: `rozum gateway admit --footprint 8G -- uv run --with mlx-lm python scripts/mlx_ref.py`
+    Admit {
+        /// Reserve this much RAM (e.g. `8G`, `8192M`, or raw bytes). Required unless --model is given.
+        #[arg(long)]
+        footprint: Option<String>,
+        /// Estimate the footprint from a model spec instead of --footprint.
+        #[arg(long)]
+        model: Option<String>,
+        /// Queue as batch (yields to interactive loads); default interactive.
+        #[arg(long)]
+        batch: bool,
+        /// The command to run once admitted (after `--`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        program: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -847,6 +866,9 @@ async fn main() {
             }) => run_gateway_switch(model, n_ctx, backend).await,
             Some(GatewayAction::Reload) => run_gateway_reload().await,
             Some(GatewayAction::Unload) => run_gateway_unload().await,
+            Some(GatewayAction::Admit { footprint, model, batch, program }) => {
+                run_gateway_admit(footprint, model, batch, program).await
+            }
         },
         Some(Command::Launch {
             model,
@@ -3032,6 +3054,87 @@ async fn gateway_control_post(
             .and_then(|m| m.as_str())
             .unwrap_or("control request failed");
         Err(format!("{status}: {msg}"))
+    }
+}
+
+/// Parse a human RAM size (`8G`, `8192M`, `8000000000`, `8g`) to bytes. `None` if unparseable.
+fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last()?.to_ascii_uppercase() {
+        'G' => (&s[..s.len() - 1], 1u64 << 30),
+        'M' => (&s[..s.len() - 1], 1u64 << 20),
+        'K' => (&s[..s.len() - 1], 1u64 << 10),
+        'B' => (&s[..s.len() - 1], 1),
+        _ => (s, 1),
+    };
+    num.trim().parse::<f64>().ok().map(|v| (v * mult as f64) as u64)
+}
+
+/// Oracle-wrap (spec residency-admission-queue.md): run a RAM-heavy NON-rozum command THROUGH the
+/// host-wide admission queue, so a python `mlx_lm` oracle / external sweep can't overcommit behind
+/// rozum's back. Acquires a reservation (queues + waits its turn), runs the command holding the guard,
+/// releases on exit. `--batch` makes it yield to interactive loads.
+async fn run_gateway_admit(
+    footprint: Option<String>,
+    model: Option<String>,
+    batch: bool,
+    program: Vec<String>,
+) {
+    if program.is_empty() {
+        eprintln!("rozum gateway admit: a command is required after `--`");
+        std::process::exit(2);
+    }
+    if batch {
+        // SAFETY: single-threaded CLI startup, before any worker thread.
+        unsafe { std::env::set_var("ROZUM_RESIDENCY_PRIO", "batch") };
+    }
+    let bytes = match (footprint.as_deref(), model.as_deref()) {
+        (Some(f), _) => parse_size(f).unwrap_or_else(|| {
+            eprintln!("rozum gateway admit: bad --footprint '{f}' (try 8G / 8192M / bytes)");
+            std::process::exit(2);
+        }),
+        (None, Some(m)) => estimate_model_footprint_bytes(m, 8192),
+        (None, None) => {
+            eprintln!("rozum gateway admit: --footprint or --model is required");
+            std::process::exit(2);
+        }
+    };
+    let label = model.clone().unwrap_or_else(|| program[0].clone());
+    eprintln!(
+        "rozum gateway admit: queueing for ~{} MB ({label}; prio {}) …",
+        bytes / 1_048_576,
+        if batch { "batch" } else { "interactive" },
+    );
+    let lbl = label.clone();
+    let guard = match tokio::task::spawn_blocking(move || rozum::share::acquire_residency(&lbl, bytes))
+        .await
+    {
+        Ok(Ok(g)) => g, // Some(guard) = reserved; None = override / fail-open
+        Ok(Err(denied)) => {
+            eprintln!(
+                "rozum gateway admit: refused — ~{} MB would overcommit the host (waited {}s)",
+                bytes / 1_048_576,
+                denied.waited_secs,
+            );
+            std::process::exit(1);
+        }
+        Err(_) => None,
+    };
+    eprintln!("rozum gateway admit: granted → running: {}", program.join(" "));
+    let prog = program.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&prog[0]).args(&prog[1..]).status()
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok());
+    drop(guard); // release the reservation the moment the command exits
+    match status {
+        Some(s) => std::process::exit(s.code().unwrap_or(1)),
+        None => {
+            eprintln!("rozum gateway admit: failed to run `{}`", program.join(" "));
+            std::process::exit(1);
+        }
     }
 }
 
