@@ -28,9 +28,9 @@ tracing = "0.1"
 
 # The vendored MLX fork, pinned to a fork rev so a clean clone builds reproducibly
 # (same pin as the old root Cargo.toml). mlx-sys builds MLX C++ from source.
-mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "60c78ca1e9ad747fdcf827d116f246fe54239edd", optional = true }
-mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "60c78ca1e9ad747fdcf827d116f246fe54239edd", optional = true }
-mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "60c78ca1e9ad747fdcf827d116f246fe54239edd", optional = true }
+mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "43053327e3794cef800acf9556c1e29f5eed0a2d", optional = true }
+mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "43053327e3794cef800acf9556c1e29f5eed0a2d", optional = true }
+mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "43053327e3794cef800acf9556c1e29f5eed0a2d", optional = true }
 
 [dev-dependencies]
 # For the prompt-lookup accept-rate measurement (`specdecode_plookup` ignored test):
