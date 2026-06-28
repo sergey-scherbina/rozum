@@ -951,23 +951,27 @@ fn auto_context_enabled() -> bool {
     !matches!(std::env::var("ROZUM_AUTO_CONTEXT").ok().as_deref(), Some("0" | "false" | "off"))
 }
 
-/// Make `messages` fit `ctx_win` so a request NEVER returns `context_length_exceeded` — drop the OLDEST
-/// non-system turns (sliding window) until the prompt fits, keeping all system messages + the most recent
-/// turns + reply headroom. Lossy-but-graceful: a transformer cannot attend beyond `n_ctx`, so we choose
-/// what to drop (oldest detail) instead of erroring. The conversation-overflow case (the common one);
-/// summarizing dropped turns + lazy tool-schemas (a fat system prompt) are BACKLOG refinements. With
-/// auto-context OFF, preserves the legacy error. `Err(resp)` only in the OFF case.
+/// Make a request fit `ctx_win` so it NEVER returns `context_length_exceeded`, in two graceful steps:
+///   1. **sliding-window trim** — drop the OLDEST non-system turns until it fits (keep all system msgs +
+///      the most recent turns + reply headroom). The conversation-overflow case (the common one).
+///   2. **tool-schema compression** (lazy-tools) — if turns alone can't fit (few turns but a fat
+///      system + many tool schemas, e.g. codex's ~18 tools > a small window), STRIP tool `description`s
+///      — keeps every tool (no capability loss), just terser docs. Handles the fat-system case that
+///      turn-dropping can't.
+/// Lossy-but-graceful: a transformer cannot attend beyond `n_ctx`, so we choose what to shrink instead
+/// of erroring. Summarizing the dropped turns (vs hard-drop) + true on-demand lazy tool LOADING stay
+/// BACKLOG refinements. With auto-context OFF, preserves the legacy error. `Err(resp)` only in the OFF case.
 fn fit_to_context(
     mut messages: Vec<Message>,
-    tools: &[ToolDef],
+    mut tools: Vec<ToolDef>,
     ctx_win: u32,
-) -> Result<Vec<Message>, Response> {
+) -> Result<(Vec<Message>, Vec<ToolDef>), Response> {
     if ctx_win == 0 {
-        return Ok(messages); // unknown window → don't touch it
+        return Ok((messages, tools)); // unknown window → don't touch it
     }
     let budget = ctx_win.saturating_sub(AUTO_CONTEXT_REPLY_RESERVE);
-    if estimate_prompt_tokens(&messages, tools) <= budget {
-        return Ok(messages); // already fits — no-op
+    if estimate_prompt_tokens(&messages, &tools) <= budget {
+        return Ok((messages, tools)); // already fits — no-op
     }
     if !auto_context_enabled() {
         return Err(error_json(
@@ -976,10 +980,9 @@ fn fit_to_context(
             "context_length_exceeded",
         ));
     }
+    // Step 1 — drop oldest non-system turns (keep ≥1 non-system turn + all system msgs).
     let mut dropped = 0usize;
-    while estimate_prompt_tokens(&messages, tools) > budget {
-        // Keep at least one non-system turn (and all system messages) — can't trim a single huge
-        // turn / a fat system prompt this way (that's the lazy-tools/summarize refinement; BACKLOG).
+    while estimate_prompt_tokens(&messages, &tools) > budget {
         if messages.iter().filter(|m| !matches!(m.role, Role::System)).count() <= 1 {
             break;
         }
@@ -989,13 +992,27 @@ fn fit_to_context(
         messages.remove(i);
         dropped += 1;
     }
-    if dropped > 0 {
-        tracing::info!(dropped, ctx_win, "gateway-auto-context: trimmed oldest turns to fit the window");
+    // Step 2 — if it still doesn't fit, compress tool schemas: strip descriptions (the bulk of a fat
+    // tool surface) while keeping every tool callable. Last resort before serving an over-long prompt.
+    let mut compressed = 0usize;
+    if estimate_prompt_tokens(&messages, &tools) > budget {
+        for t in &mut tools {
+            if !t.description.is_empty() {
+                t.description = String::new();
+                compressed += 1;
+            }
+        }
+    }
+    if dropped > 0 || compressed > 0 {
+        tracing::info!(
+            dropped, compressed, ctx_win,
+            "gateway-auto-context: fitted prompt to the window (trimmed turns / compressed tool schemas)"
+        );
         crate::obs::log_event(serde_json::json!({
-            "event": "auto_context_trim", "dropped": dropped, "ctx_win": ctx_win,
+            "event": "auto_context_trim", "dropped": dropped, "tools_compressed": compressed, "ctx_win": ctx_win,
         }));
     }
-    Ok(messages)
+    Ok((messages, tools))
 }
 
 fn estimate_prompt_tokens(messages: &[Message], tools: &[ToolDef]) -> u32 {
@@ -3549,10 +3566,11 @@ async fn oai_chat_handler(
     );
 
     // Approximate context overflow check
-    // gateway-auto-context: fit the prompt to the window (drop oldest turns) instead of erroring.
+    // gateway-auto-context: fit the prompt to the window (drop oldest turns, then compress tool
+    // schemas) instead of erroring.
     let ctx_win = lease.backend.context_window();
-    let messages = match fit_to_context(messages, &tools, ctx_win) {
-        Ok(m) => m,
+    let (messages, tools) = match fit_to_context(messages, tools, ctx_win) {
+        Ok(mt) => mt,
         Err(resp) => return resp,
     };
     let est = estimate_prompt_tokens(&messages, &tools); // post-fit token estimate (for obs)
@@ -3699,10 +3717,11 @@ async fn responses_handler(
         inject_ap,
     );
 
-    // gateway-auto-context: fit the prompt to the window (drop oldest turns) instead of erroring.
+    // gateway-auto-context: fit the prompt to the window (drop oldest turns, then compress tool
+    // schemas) instead of erroring.
     let ctx_win = lease.backend.context_window();
-    let messages = match fit_to_context(messages, &tools, ctx_win) {
-        Ok(m) => m,
+    let (messages, tools) = match fit_to_context(messages, tools, ctx_win) {
+        Ok(mt) => mt,
         Err(resp) => return resp,
     };
     let est = estimate_prompt_tokens(&messages, &tools); // post-fit token estimate (for obs)
@@ -4060,10 +4079,11 @@ async fn anthropic_handler(
     );
 
     // Approximate context overflow check
-    // gateway-auto-context: fit the prompt to the window (drop oldest turns) instead of erroring.
+    // gateway-auto-context: fit the prompt to the window (drop oldest turns, then compress tool
+    // schemas) instead of erroring.
     let ctx_win = lease.backend.context_window();
-    let messages = match fit_to_context(messages, &tools, ctx_win) {
-        Ok(m) => m,
+    let (messages, tools) = match fit_to_context(messages, tools, ctx_win) {
+        Ok(mt) => mt,
         Err(resp) => return resp,
     };
     let est = estimate_prompt_tokens(&messages, &tools); // post-fit token estimate (for obs)
@@ -5064,13 +5084,13 @@ mod tests {
         };
         // No-op when the prompt already fits a generous window.
         let small = vec![sys.clone(), txt("hi")];
-        assert_eq!(fit_to_context(small, &[], 8192).unwrap().len(), 2);
+        assert_eq!(fit_to_context(small, vec![], 8192).unwrap().0.len(), 2);
         // Overflow: many turns + a tiny window → trims to system + the single most-recent turn.
         let mut many = vec![sys];
         for i in 0..30 {
             many.push(txt(&format!("turn {i} word word word word word word word word word")));
         }
-        let fitted = fit_to_context(many, &[], 64).unwrap(); // budget 64−1024 saturates to 0 → trims hard
+        let (fitted, _) = fit_to_context(many, vec![], 64).unwrap(); // budget 64−1024 → 0 → trims hard
         assert!(fitted.iter().any(|m| matches!(m.role, Role::System)), "system message kept");
         assert_eq!(
             fitted.iter().filter(|m| !matches!(m.role, Role::System)).count(),
@@ -5081,11 +5101,24 @@ mod tests {
         if let ContentBlock::Text { text } = &kept.content[0] {
             assert!(text.contains("turn 29"), "kept the MOST RECENT turn, got: {text}");
         }
+        // Step-2 lazy-tools: ONE turn (turn-dropping can't help) + fat tool descriptions → descriptions
+        // get STRIPPED but every tool is KEPT (no capability loss). The codex fat-system case.
+        let fat_tools: Vec<ToolDef> = (0..10)
+            .map(|i| ToolDef {
+                name: format!("tool{i}"),
+                description: "a long tool description ".repeat(40),
+                input_schema: json!({"type":"object","properties":{"x":{"type":"string"}}}),
+            })
+            .collect();
+        let (msgs2, tools2) = fit_to_context(vec![txt("do it")], fat_tools, 64).unwrap();
+        assert_eq!(msgs2.len(), 1, "the single turn is kept");
+        assert_eq!(tools2.len(), 10, "all tools KEPT (compressed, not dropped)");
+        assert!(tools2.iter().all(|t| t.description.is_empty()), "tool descriptions stripped to fit");
         // OFF → legacy error (Err) on overflow.
         // SAFETY: test-local env toggle.
         unsafe { std::env::set_var("ROZUM_AUTO_CONTEXT", "0") };
         let over = vec![txt(&"word ".repeat(1000))];
-        assert!(fit_to_context(over, &[], 64).is_err(), "auto-context OFF → legacy error");
+        assert!(fit_to_context(over, vec![], 64).is_err(), "auto-context OFF → legacy error");
         unsafe { std::env::remove_var("ROZUM_AUTO_CONTEXT") };
     }
 
