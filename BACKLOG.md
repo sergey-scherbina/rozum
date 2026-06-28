@@ -109,9 +109,11 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   `rozum meetings search [--kind --severity --tag --thread --since] <q>`, and the console filter box
   (now spans ALL history server-side, was today-only). Also fixed `resolve_room_root` (read/inbox/search
   `--room <name>` for SHARED rooms resolved to the wrong dir → now consults the registry root).
-  **REMAINING:** link/reference (retroactively attach a message to a thread — append-only store, so a
-  reference record, not a mutation), react, edit/redact, pin, assign. Resolve/close already shipped (the
-  incident verbs). Search currently scans day files; an index is only needed if rooms get very large.
+  **REPLY-CHAINS DONE (`d738f8c`):** `in_reply_to` wired through — daemon `meeting.submit` param, CLI
+  `meetings post --reply-to <id>`, console reply affordance (↩ button + cancellable hint + `↩ <id>`
+  indicator on replies). **REMAINING:** link/reference (retroactively attach a message to a thread —
+  append-only store, so a reference record, not a mutation), react, edit/redact, pin, assign. Resolve/close
+  already shipped (the incident verbs). Search scans day files; an index is only needed if rooms get large.
 - [ ] **mtg-escalation** — **escalation**: route/escalate an incident by severity/tier/on-call (to a
   specific agent, a stronger model, or a human), with an escalation policy + an audit trail of who/when.
   Ties into the model-chain (escalate to a stronger model) + identity-roster (who's on-call). The
