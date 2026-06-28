@@ -45,11 +45,14 @@
   was trimmed AND the topics it covered (first ~80 chars of each dropped turn, no model call); (3)
   **lazy-tools** (`23a330f`) — strip tool descriptions when a fat system+tools surface can't be fit by
   turn-dropping (every tool kept). Default ON (`ROZUM_AUTO_CONTEXT=0` = legacy error), unit-tested, obs
-  `auto_context_trim{dropped,tools_compressed}`. **OPTIONAL REFINEMENTS (own focused build, NOT blocking —
-  the deterministic versions already cover the cases):** (i) ABSTRACTIVE LLM rolling-summary (a summarizer
-  generation preserving dropped content vs topics) — needs a nested gen + latency/caching design, default
-  OFF; (ii) true on-demand lazy tool LOADING (a meta-tool the model calls to fetch a schema) — LOW VALUE,
-  superseded by the description-strip (weak models won't reliably request schemas anyway). Original design below.
+  `auto_context_trim{dropped,tools_compressed}`. (4) **ABSTRACTIVE LLM rolling-summary** (`89de0b9`, opt-in
+  `ROZUM_AUTO_CONTEXT_SUMMARIZE=1`, default OFF) — `with_elision_note` generates a terse summary of the
+  dropped turns via the resident model (the summary gen serializes before the real gen; falls back to the
+  extractive note on any failure). Default OFF = production hot path untouched; opt-in adds a summarizer
+  gen per overflowing request. **ONLY OPTIONAL REMAINING (LOW VALUE, NOT blocking):** true on-demand lazy
+  tool LOADING (a meta-tool the model calls to fetch a schema) — superseded by the description-strip (weak
+  models won't reliably request schemas anyway); + a summary CACHE so consecutive overflowing requests
+  don't re-summarize the same dropped prefix (a perf nicety for the opt-in path). Original design below.
   A gateway-side context-management layer so a request that exceeds
   the model's `n_ctx` **never returns `context_length_exceeded`** to the client — it transparently
   fits the window instead, for ANY agent (claude/codex/opencode) against ANY model. This is North-Star
