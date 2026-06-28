@@ -1,6 +1,17 @@
 # Sprint
 
-- [~] **meetings → support/incident platform (operator 2026-06-28, strategic)** — spec
+- [x] **meetings → support/incident platform (operator 2026-06-28, strategic)** — COMPLETE across all
+  three surfaces + polished (foundation → agent-native MCP → human CLI → web console). Capabilities shipped
+  & live-proven this sprint: message metadata + badges; threads/incidents with the full lifecycle
+  (open/triage/escalate/assign/resolve/reopen); per-incident context bundle; thread metrics (MTTR); the
+  interactive web console (dashboard + write actions + filters); full-history **search** (text · kind ·
+  min-severity · tag · thread · since) on REST+CLI+console; **reply-chains** (`in_reply_to`); **assign**
+  (owner without state change); readable `incident list`/`show` timelines; and the `mtg-registry-dup-name`
+  fix. Three surfaces: agent-native MCP (daemon), human CLI (`meetings post`/`incident …`/`search`), web
+  console (`rest_read.rs`). 91/91 meeting lib tests. Remaining = v3 polish (react/pin/edit/link, fold the
+  console model into the `.ssc` PWA) — BACKLOG `## Meetings → product-support`. Detail below ↓
+
+- [~] **meetings — original sprint notes (superseded by the line above)** — spec
   `docs/specs/meetings-incident-platform.md`. **FOUNDATION (P1-P3) DONE — the data-model + store ops, all
   back-compat, 13/13 store tests:** P1 message metadata (`407ae4a`, StoredTurn + kind/thread_id/in_reply_to/
   meta, byte-identical plain rooms) + P1b `append_with_meta` write API (`4472489`); P2 threads (`1e32ea8`,
