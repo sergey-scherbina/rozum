@@ -28,9 +28,11 @@
   incidents recover. **(+) link** (`5e3e0a4`): `Thread.links` + `incident link|unlink` + console 🔗 pulls
   external context into the bundle. **(+) redact** (`4a5ba09`): `redactions.json` tombstone applied on read in
   `read_day` — every surface shows `[redacted: reason]`, original preserved, reversible; `meeting.redact` +
-  CLI `meetings redact` + console ⊘. 100/100 meeting lib tests. Remaining = full structured event-sourcing
-  (exact, not best-effort, rebuild) + the `.ssc` lifecycle/incident-lanes port — BACKLOG `## Meetings →
-  product-support`. Detail below ↓
+  CLI `meetings redact` + console ⊘. **(+) exact event-sourcing** (`c367167`): the posted transitions carry a
+  structured `MsgMeta.thread_op`, so `rebuild_threads` replays them EXACTLY (title/state/owner/severity) —
+  prose is the old-log fallback; no new messages, plain msgs byte-identical. 100/100 meeting lib tests.
+  **Remaining = only the `.ssc` lifecycle/incident-lanes port** (external toolchain, big) + minor (manual
+  state/pin event-sourcing, react) — BACKLOG `## Meetings → product-support`. Detail below ↓
 
 - [~] **meetings — original sprint notes (superseded by the line above)** — spec
   `docs/specs/meetings-incident-platform.md`. **FOUNDATION (P1-P3) DONE — the data-model + store ops, all

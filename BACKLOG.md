@@ -93,12 +93,14 @@ single-writer daemon). Each item below is its own spec+build later — listed to
 - [x] **mtg-retention** — DONE (`7bec5a1`). `store::prune_old_days` deletes `<date>.jsonl` older than N
   days + rewrites `index.json`, NEVER pruning a day holding an open incident's messages; wired into daemon
   start, gated `ROZUM_MEETINGS_RETAIN_DAYS` (default off). Test.
-- [~] **mtg-event-sourced-threads** — RECOVERY DONE (`d7095d8`+`5e3e0a4`): `store::rebuild_threads`
-  reconstructs incidents (membership + severity + approx state + best-effort owner + title) from the message
-  log; `repair_threads` + CLI `meetings repair-threads`. The rebuild gap is closed — `thread_open` now posts
-  an `opened incident: <title>` audit message (thread_id = anchor) on first open, so even a reply-less
-  incident is recoverable. **REMAINING:** make ALL transitions (assign/state/pin/severity) carry STRUCTURED
-  op metadata (not prose) for exact (not best-effort) rebuild — the full event-sourcing.
+- [x] **mtg-event-sourced-threads** — DONE (`d7095d8`+`5e3e0a4`+`c367167`). `store::rebuild_threads` +
+  `repair_threads` + CLI `meetings repair-threads` reconstruct incidents from the message log; `thread_open`
+  posts an `opened incident` audit message so even reply-less incidents recover. **EXACT (`c367167`):** the
+  posted transitions (open/escalate/resolve/assign) carry a structured `MsgMeta.thread_op` (opened/title/kind/
+  state/owner/severity/pin/unpin); `rebuild_threads` REPLAYS them exactly (prose parsing is the fallback for
+  old logs). thread_op is skip-when-none → no new messages, plain msgs byte-identical. Live-proven: wipe +
+  repair recovered title/severity/state/owner exactly. Residual: manual `incident state`/`pin` don't post a
+  message → still best-effort (they'd need to post a structured audit line; deferred as low-value).
 - [x] **mtg-msg-link-react-edit** — DONE (LINK `5e3e0a4` + REDACT `4a5ba09`). LINK: `Thread.links` +
   `meeting.thread_link` + CLI `incident link|unlink` + REST + console 🔗; thread_context resolves links into
   a `linked` bundle. REDACT (edit/redact): `redactions.json` tombstone applied on READ in `read_day` — every
