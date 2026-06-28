@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>rozum · support console</title>
+<style>
+  /* Theme tokens — light defaults, dark via prefers-color-scheme. */
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --panel: #ffffff; --fg: #16181d; --muted: #6b7280;
+    --border: #e3e6ea; --rail: #fbfcfd; --accent: #2563eb; --accent-fg: #fff;
+    --chip: #eef1f5; --sel: #e8f0fe;
+    --sev-crit: #dc2626; --sev-high: #ea580c; --sev-med: #d97706;
+    --sev-low: #2563eb; --sev-info: #6b7280;
+    --st-open: #dc2626; --st-triaging: #d97706; --st-escalated: #db2777;
+    --st-resolved: #16a34a; --st-closed: #6b7280;
+    --k-alert: #d97706; --k-resolution: #16a34a; --k-event: #0891b2;
+    --k-question: #7c3aed;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d0f12; --panel: #15181d; --fg: #e6e8eb; --muted: #9aa3af;
+      --border: #262b32; --rail: #11141a; --accent: #3b82f6; --chip: #1c2128;
+      --sel: #1b2740;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--fg);
+    display: grid; grid-template-rows: auto 1fr; height: 100vh;
+  }
+  /* ── Header ─────────────────────────────────────────────── */
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 10px 16px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  header .brand { font-weight: 700; letter-spacing: .3px; }
+  header .brand small { color: var(--muted); font-weight: 500; }
+  select, button {
+    font: inherit; color: var(--fg); background: var(--chip);
+    border: 1px solid var(--border); border-radius: 7px; padding: 5px 9px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .metrics { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+  .metric {
+    display: flex; flex-direction: column; align-items: center;
+    min-width: 56px; padding: 4px 10px; border-radius: 8px;
+    background: var(--chip); border: 1px solid var(--border);
+  }
+  .metric b { font-size: 17px; line-height: 1; }
+  .metric span { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-top: 2px; }
+  .metric.alarm b { color: var(--sev-crit); }
+  .dot-live { width: 8px; height: 8px; border-radius: 50%; background: var(--st-resolved); }
+  .dot-live.stale { background: var(--muted); }
+  /* ── Body: rail + main ──────────────────────────────────── */
+  .body { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
+  @media (max-width: 720px) { .body { grid-template-columns: 1fr; } aside { display: none; } aside.show { display: block; } }
+  aside {
+    background: var(--rail); border-right: 1px solid var(--border);
+    overflow-y: auto; padding: 8px;
+  }
+  .lane-title {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+    color: var(--muted); margin: 12px 6px 4px; display: flex; gap: 6px; align-items: center;
+  }
+  .lane-title .n { background: var(--chip); border-radius: 10px; padding: 0 7px; font-size: 10px; }
+  .incident {
+    border: 1px solid var(--border); border-left: 3px solid var(--muted);
+    border-radius: 8px; padding: 8px 10px; margin: 5px 2px; cursor: pointer;
+    background: var(--panel);
+  }
+  .incident:hover { border-color: var(--accent); }
+  .incident.sel { background: var(--sel); border-color: var(--accent); }
+  .incident .t { font-weight: 600; }
+  .incident .meta { color: var(--muted); font-size: 12px; margin-top: 3px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .empty { color: var(--muted); padding: 24px 10px; text-align: center; }
+  /* ── Main pane ──────────────────────────────────────────── */
+  main { overflow-y: auto; padding: 14px 18px; min-height: 0; }
+  .pane-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .pane-head h2 { margin: 0; font-size: 17px; }
+  .pane-head .sub { color: var(--muted); font-size: 13px; }
+  .back { font-size: 13px; }
+  .msg { padding: 7px 2px; border-bottom: 1px solid var(--border); }
+  .msg .line1 { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .msg .who { font-weight: 600; }
+  .msg .when { color: var(--muted); font-size: 12px; }
+  .msg .body { margin-top: 2px; white-space: pre-wrap; word-break: break-word; }
+  .msg.injected .body { color: var(--muted); font-style: italic; }
+  /* ── Badges ─────────────────────────────────────────────── */
+  .badge {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .3px;
+    padding: 1px 6px; border-radius: 5px; color: #fff; text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .tag { font-size: 11px; color: var(--muted); background: var(--chip); border-radius: 5px; padding: 1px 6px; }
+  .thread-link { font-size: 11px; color: var(--accent); cursor: pointer; }
+  .sev-critical { background: var(--sev-crit); } .sev-high { background: var(--sev-high); }
+  .sev-medium { background: var(--sev-med); } .sev-low { background: var(--sev-low); }
+  .sev-info { background: var(--sev-info); }
+  .k-alert { background: var(--k-alert); } .k-resolution { background: var(--k-resolution); }
+  .k-event { background: var(--k-event); } .k-question { background: var(--k-question); }
+  .st { font-size: 11px; font-weight: 700; padding: 0 6px; border-radius: 4px; color: #fff; }
+  .st-open { background: var(--st-open); } .st-triaging { background: var(--st-triaging); }
+  .st-escalated { background: var(--st-escalated); } .st-resolved { background: var(--st-resolved); }
+  .st-closed { background: var(--st-closed); }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">rozum <small>· support console</small></div>
+  <select id="room" title="room"></select>
+  <button id="refresh" title="refresh now">↻</button>
+  <span class="dot-live" id="live" title="auto-refresh"></span>
+  <div class="metrics" id="metrics"></div>
+</header>
+<div class="body">
+  <aside id="rail"></aside>
+  <main id="main"><div class="empty">Loading…</div></main>
+</div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const enc = encodeURIComponent;
+const api = (p) => fetch(p, { headers: { "Accept": "application/json" } }).then(r => {
+  if (!r.ok) throw new Error(p + " → " + r.status);
+  return r.json();
+});
+
+const STATES = [
+  ["open", "Open"], ["triaging", "Triaging"], ["escalated", "Escalated"],
+  ["resolved", "Resolved"], ["closed", "Closed"],
+];
+const SEV_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+
+let ROOM = null;
+let SELECTED = null;   // selected thread id, or null = live feed
+let timer = null;
+
+function relTime(ts) {
+  if (!ts) return "";
+  const s = Math.floor(Date.now() / 1000) - ts;
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+function hhmm(ts) {
+  if (!ts) return "";
+  const d = new Date(ts * 1000);
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+function fmtDur(secs) {
+  if (secs == null) return "—";
+  if (secs < 60) return secs + "s";
+  if (secs < 3600) return Math.round(secs / 60) + "m";
+  if (secs < 86400) return (secs / 3600).toFixed(1) + "h";
+  return (secs / 86400).toFixed(1) + "d";
+}
+function el(tag, cls, txt) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (txt != null) e.textContent = txt;
+  return e;
+}
+
+// ── Rooms ────────────────────────────────────────────────────
+async function loadRooms() {
+  const { rooms } = await api("rooms");
+  const sel = $("room");
+  sel.innerHTML = "";
+  for (const r of rooms) {
+    const o = el("option", null, r); o.value = r; sel.appendChild(o);
+  }
+  const want = new URLSearchParams(location.search).get("room");
+  ROOM = (want && rooms.includes(want)) ? want : rooms[0] || null;
+  if (ROOM) sel.value = ROOM;
+  sel.onchange = () => { ROOM = sel.value; SELECTED = null; const u = new URL(location); u.searchParams.set("room", ROOM); history.replaceState(0, "", u); refresh(); };
+}
+
+// ── Header metrics ───────────────────────────────────────────
+function renderMetrics(m) {
+  const by = m.by_state || {};
+  const open = (by.open || 0) + (by.triaging || 0) + (by.escalated || 0);
+  const box = $("metrics");
+  box.innerHTML = "";
+  const add = (label, val, alarm) => {
+    const d = el("div", "metric" + (alarm ? " alarm" : ""));
+    d.appendChild(el("b", null, String(val)));
+    d.appendChild(el("span", null, label));
+    box.appendChild(d);
+  };
+  add("incidents", m.total || 0);
+  add("open", open, open > 0);
+  add("escalated", by.escalated || 0, (by.escalated || 0) > 0);
+  add("resolved", m.resolved || 0);
+  add("MTTR", fmtDur(m.avg_time_to_resolve_secs));
+}
+
+// ── Left rail: incident lanes ────────────────────────────────
+function renderRail(threads) {
+  const rail = $("rail");
+  rail.innerHTML = "";
+  const live = el("div", "incident" + (SELECTED == null ? " sel" : ""));
+  live.style.borderLeftColor = "var(--accent)";
+  live.appendChild(el("div", "t", "📡 Live feed"));
+  live.appendChild(el("div", "meta", "today's whole transcript"));
+  live.onclick = () => { SELECTED = null; refresh(); };
+  rail.appendChild(live);
+
+  if (!threads.length) {
+    rail.appendChild(el("div", "empty", "no incidents yet"));
+    return;
+  }
+  const byState = {};
+  for (const t of threads) (byState[t.state] ||= []).push(t);
+  for (const [key, label] of STATES) {
+    const list = byState[key];
+    if (!list || !list.length) continue;
+    const title = el("div", "lane-title");
+    title.appendChild(el("span", null, label));
+    title.appendChild(el("span", "n", String(list.length)));
+    rail.appendChild(title);
+    list.sort((a, b) => (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9) || b.updated_ts - a.updated_ts);
+    for (const t of list) rail.appendChild(incidentCard(t));
+  }
+}
+function incidentCard(t) {
+  const c = el("div", "incident" + (SELECTED === t.id ? " sel" : ""));
+  if (t.severity) c.style.borderLeftColor = `var(--sev-${t.severity})`;
+  c.appendChild(el("div", "t", t.title || t.id));
+  const meta = el("div", "meta");
+  meta.appendChild(stBadge(t.state));
+  if (t.severity) meta.appendChild(sevBadge(t.severity));
+  if (t.kind === "incident") meta.appendChild(el("span", "tag", "incident"));
+  if (t.owner) meta.appendChild(el("span", "tag", "@" + t.owner));
+  meta.appendChild(el("span", null, relTime(t.updated_ts)));
+  c.appendChild(meta);
+  c.onclick = () => { SELECTED = t.id; refresh(); };
+  return c;
+}
+function stBadge(state) { return el("span", "st st-" + state, state); }
+function sevBadge(sev) { const b = el("span", "badge sev-" + sev, sev); return b; }
+
+// ── Message rendering (shared by live + thread) ──────────────
+function msgRow(m, opts) {
+  opts = opts || {};
+  const row = el("div", "msg" + (m.injected ? " injected" : ""));
+  const l1 = el("div", "line1");
+  const k = m.kind && m.kind !== "note" ? m.kind : null;
+  if (k) l1.appendChild(el("span", "badge k-" + k, k === "resolution" ? "resolved" : k));
+  const sev = m.meta && m.meta.severity;
+  if (sev) l1.appendChild(sevBadge(sev));
+  l1.appendChild(el("span", "who", m.display_name || m.speaker || "?"));
+  l1.appendChild(el("span", "when", hhmm(m.ts)));
+  if (opts.showThread && m.thread_id) {
+    const tl = el("span", "thread-link", "⤷ " + m.thread_id);
+    tl.onclick = () => { SELECTED = m.thread_id; refresh(); };
+    l1.appendChild(tl);
+  }
+  for (const tag of (m.meta && m.meta.tags) || []) l1.appendChild(el("span", "tag", "#" + tag));
+  row.appendChild(l1);
+  row.appendChild(el("div", "body", m.content || ""));
+  return row;
+}
+
+// ── Live feed (today's messages) ─────────────────────────────
+async function renderLive() {
+  const main = $("main");
+  const { days } = await api(`rooms/${enc(ROOM)}/days`);
+  const date = days && days.length ? days[days.length - 1].date : null;
+  main.innerHTML = "";
+  const head = el("div", "pane-head");
+  head.appendChild(Object.assign(el("h2", null, "Live feed"), {}));
+  head.appendChild(el("span", "sub", date ? date : "no messages yet"));
+  main.appendChild(head);
+  if (!date) { main.appendChild(el("div", "empty", "No messages yet.")); return; }
+  const { messages } = await api(`rooms/${enc(ROOM)}/messages/${enc(date)}?count=500`);
+  if (!messages.length) { main.appendChild(el("div", "empty", "No messages today.")); return; }
+  const atBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 80;
+  for (const m of messages) main.appendChild(msgRow(m, { showThread: true }));
+  if (atBottom) main.scrollTop = main.scrollHeight;
+}
+
+// ── Thread drill-down ────────────────────────────────────────
+async function renderThread(id) {
+  const main = $("main");
+  const ctx = await api(`rooms/${enc(ROOM)}/threads/${enc(id)}`);
+  main.innerHTML = "";
+  const back = el("a", "back", "‹ back to live feed"); back.href = "#";
+  back.onclick = (e) => { e.preventDefault(); SELECTED = null; refresh(); };
+  main.appendChild(back);
+  const t = ctx.thread || { id, title: id };
+  const head = el("div", "pane-head");
+  head.appendChild(el("h2", null, t.title || id));
+  if (t.state) head.appendChild(stBadge(t.state));
+  if (t.severity) head.appendChild(sevBadge(t.severity));
+  if (t.owner) head.appendChild(el("span", "tag", "owner @" + t.owner));
+  const span = (ctx.first_ts && ctx.last_ts) ? `${hhmm(ctx.first_ts)}–${hhmm(ctx.last_ts)}` : "";
+  head.appendChild(el("span", "sub", `${ctx.message_count} msgs · ${(ctx.participants || []).length} people · ${span}`));
+  main.appendChild(head);
+  if (!ctx.messages || !ctx.messages.length) { main.appendChild(el("div", "empty", "No messages in this thread yet.")); return; }
+  for (const m of ctx.messages) main.appendChild(msgRow(m, { showThread: false }));
+}
+
+// ── Refresh cycle ────────────────────────────────────────────
+let inflight = false;
+async function refresh() {
+  if (!ROOM || inflight) return;
+  inflight = true;
+  $("live").classList.remove("stale");
+  try {
+    const t = await api(`rooms/${enc(ROOM)}/threads`);
+    renderMetrics(t.metrics || {});
+    renderRail(t.threads || []);
+    if (SELECTED) await renderThread(SELECTED); else await renderLive();
+  } catch (e) {
+    $("main").innerHTML = "";
+    $("main").appendChild(el("div", "empty", "Error: " + e.message));
+    $("live").classList.add("stale");
+  } finally {
+    inflight = false;
+  }
+}
+
+async function boot() {
+  await loadRooms();
+  await refresh();
+  $("refresh").onclick = refresh;
+  if (timer) clearInterval(timer);
+  timer = setInterval(refresh, 4000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+}
+boot().catch(e => { $("main").innerHTML = '<div class="empty">Boot error: ' + e.message + '</div>'; });
+</script>
+</body>
+</html>

@@ -857,6 +857,65 @@ pub fn day_dates(root: &Path) -> Vec<String> {
     dates
 }
 
+/// Read the per-room thread map from `threads.json` (P2) given just a room root.
+/// Empty if the file is absent or unreadable — threads are an additive overlay,
+/// so a room with no incidents simply has no map. Used by direct-read surfaces
+/// (the REST support console) that don't hold the daemon's live writer.
+pub fn read_threads(root: &Path) -> BTreeMap<String, Thread> {
+    std::fs::read(root.join("threads.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Assemble an incident's whole picture from disk — the `Thread` record + every
+/// message in it (the anchor `id == thread_id` plus members by `thread_id`) +
+/// the distinct participants + the timespan. The read-only twin of
+/// `Room::thread_context`, for surfaces that only have a room root.
+pub fn thread_context(root: &Path, thread_id: &str) -> serde_json::Value {
+    let thread = read_threads(root).remove(thread_id);
+    let msgs: Vec<StoredTurn> = read_since(root, None, 0)
+        .into_iter()
+        .filter(|m| m.id() == thread_id || m.thread_id.as_deref() == Some(thread_id))
+        .collect();
+    let participants: std::collections::BTreeSet<&str> =
+        msgs.iter().map(|m| m.display_name.as_str()).collect();
+    serde_json::json!({
+        "thread": thread,
+        "message_count": msgs.len(),
+        "participants": participants,
+        "first_ts": msgs.first().map(|m| m.ts),
+        "last_ts": msgs.last().map(|m| m.ts),
+        "messages": msgs,
+    })
+}
+
+/// Resolving metrics over a room's threads: totals, a per-state histogram, and the
+/// mean time-to-resolve (created→updated) across terminal (resolved/closed) threads.
+pub fn thread_metrics(root: &Path) -> serde_json::Value {
+    let threads = read_threads(root);
+    let mut by_state: BTreeMap<String, u64> = BTreeMap::new();
+    let mut resolve_secs: Vec<u64> = Vec::new();
+    for t in threads.values() {
+        *by_state.entry(t.state.as_str().to_string()).or_default() += 1;
+        if t.state.is_terminal() {
+            resolve_secs.push(t.updated_ts.saturating_sub(t.created_ts));
+        }
+    }
+    let resolved = resolve_secs.len() as u64;
+    let avg = if resolved == 0 {
+        None
+    } else {
+        Some(resolve_secs.iter().sum::<u64>() / resolved)
+    };
+    serde_json::json!({
+        "total": threads.len(),
+        "by_state": by_state,
+        "resolved": resolved,
+        "avg_time_to_resolve_secs": avg,
+    })
+}
+
 /// Read every message at or after the cursor `(since_date, since_n)` from disk.
 /// `since_date = None` returns the whole history. This is how direct-read clients
 /// fetch a `wait` delta — content never transits the daemon.

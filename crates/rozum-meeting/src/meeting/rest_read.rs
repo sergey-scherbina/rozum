@@ -13,7 +13,7 @@ use axum::{
     extract::{Path as AxumPath, Query, State},
     http::{StatusCode, header},
     middleware::{self, Next},
-    response::{IntoResponse, Json, Response},
+    response::{Html, IntoResponse, Json, Response},
     routing::get,
 };
 use base64::Engine;
@@ -107,15 +107,77 @@ pub async fn serve(
 
 fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
     Router::new()
+        .route("/", get(console))
+        .route("/rooms", get(rooms))
         .route("/rooms/{name}/days", get(days))
         .route("/rooms/{name}/messages/{date}", get(messages))
         .route("/rooms/{name}/inbox/{handle}", get(inbox))
+        .route("/rooms/{name}/threads", get(threads))
+        .route("/rooms/{name}/threads/{id}", get(thread_one))
+        .route("/rooms/{name}/metrics", get(metrics))
         .route("/roster", get(roster))
         .layer(middleware::from_fn_with_state(
             AuthCfg { secret },
             auth_layer,
         ))
         .with_state(RestState { registry })
+}
+
+/// `GET /` — the support console (single-page incident dashboard). Static HTML;
+/// it reads `?room=<name>` from its own URL and fetches the JSON endpoints with
+/// the Basic-auth credentials the browser already holds.
+async fn console() -> Html<&'static str> {
+    Html(include_str!("console.html"))
+}
+
+/// `GET /rooms` — the registered rooms (so the console can offer a picker).
+async fn rooms(State(state): State<RestState>) -> Response {
+    let names: Vec<String> = state
+        .registry
+        .list()
+        .into_iter()
+        .map(|loc| loc.name)
+        .collect();
+    Json(json!({ "rooms": names })).into_response()
+}
+
+/// `GET /rooms/{name}/threads` — the incident/topic threads + a metrics summary,
+/// the support console's left rail. Reads `threads.json` directly from disk.
+async fn threads(State(state): State<RestState>, AxumPath(name): AxumPath<String>) -> Response {
+    let Some(root) = room_root(&state.registry, &name) else {
+        return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
+    };
+    let threads: Vec<store::Thread> = store::read_threads(&root).into_values().collect();
+    Json(json!({
+        "room": name,
+        "count": threads.len(),
+        "threads": threads,
+        "metrics": store::thread_metrics(&root),
+    }))
+    .into_response()
+}
+
+/// `GET /rooms/{name}/threads/{id}` — one incident's whole picture (thread record
+/// + every message in it + participants + timespan). `{id}` is a `<date>/<n>`
+/// message id, URL-encoded by the client (the `/` becomes `%2F`).
+async fn thread_one(
+    State(state): State<RestState>,
+    AxumPath((name, id)): AxumPath<(String, String)>,
+) -> Response {
+    let Some(root) = room_root(&state.registry, &name) else {
+        return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
+    };
+    Json(store::thread_context(&root, &id)).into_response()
+}
+
+/// `GET /rooms/{name}/metrics` — resolving metrics (totals / by-state / MTTR).
+async fn metrics(State(state): State<RestState>, AxumPath(name): AxumPath<String>) -> Response {
+    let Some(root) = room_root(&state.registry, &name) else {
+        return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
+    };
+    let mut out = store::thread_metrics(&root);
+    out["room"] = json!(name);
+    Json(out).into_response()
 }
 
 /// `GET /rooms/{name}/inbox/{handle}` — turns that ADDRESS `handle` (`@h`/`-> h`). Returns ALL such
@@ -399,6 +461,101 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(other["count"], 0);
+    }
+
+    /// Seed a room that has an incident: an anchor message, two replies into the
+    /// thread, the thread opened + escalated (owner/severity), then resolved.
+    fn seed_incident(state: &Path, name: &str) -> (String, String, PathBuf) {
+        use store::{MsgKind, PostMeta, Severity, ThreadKind, ThreadState};
+        let paths = store::RoomPaths::ad_hoc_in(state, name);
+        let root = paths.root.clone();
+        let mut w = store::TranscriptWriter::new(paths, name, "topic", None, state.to_path_buf());
+        let mut pm = PostMeta::default();
+        pm.kind = MsgKind::Alert;
+        pm.meta.severity = Some(Severity::Critical);
+        pm.meta.tags = vec!["db".into()];
+        let anchor = w.append_with_meta("p", "Alice", "DB is down", 1_718_000_000, pm).unwrap();
+        let id = anchor.id();
+        w.open_thread(&id, "DB outage", ThreadKind::Incident, 1_718_000_001).unwrap();
+        let mut reply = PostMeta::default();
+        reply.thread_id = Some(id.clone());
+        reply.kind = MsgKind::Event;
+        w.append_with_meta("p2", "Bob", "looking", 1_718_000_100, reply).unwrap();
+        w.set_thread_owner_severity(&id, Some("oncall".into()), Some(Severity::High), 1_718_000_200)
+            .unwrap();
+        w.set_thread_state(&id, ThreadState::Escalated, 1_718_000_200).unwrap();
+        w.set_thread_state(&id, ThreadState::Resolved, 1_718_003_600).unwrap();
+        (store::date_of_ts(1_718_000_000), id, root)
+    }
+
+    #[tokio::test]
+    async fn threads_metrics_and_context_endpoints() {
+        let dir = tempdir().unwrap();
+        let (_date, id, _root) = seed_incident(dir.path(), "ops");
+        let (addr, _shutdown) = start(dir.path().to_path_buf(), "sekret").await;
+        let client = reqwest::Client::new();
+        let get = |url: String| {
+            let c = client.clone();
+            async move { c.get(&url).basic_auth("", Some("sekret")).send().await.unwrap().json::<Value>().await.unwrap() }
+        };
+
+        // /threads — the incident plus a metrics summary.
+        let t = get(format!("http://{addr}/rooms/ops/threads")).await;
+        assert_eq!(t["count"], 1);
+        assert_eq!(t["threads"][0]["title"], "DB outage");
+        assert_eq!(t["threads"][0]["state"], "resolved");
+        assert_eq!(t["threads"][0]["owner"], "oncall");
+        assert_eq!(t["metrics"]["total"], 1);
+        assert_eq!(t["metrics"]["resolved"], 1);
+        assert_eq!(t["metrics"]["by_state"]["resolved"], 1);
+        // thread opened at 1_718_000_001 → resolved 1_718_003_600 = 3599s MTTR.
+        assert_eq!(t["metrics"]["avg_time_to_resolve_secs"], 3599);
+
+        // /metrics — same numbers, room-tagged.
+        let m = get(format!("http://{addr}/rooms/ops/metrics")).await;
+        assert_eq!(m["room"], "ops");
+        assert_eq!(m["avg_time_to_resolve_secs"], 3599);
+
+        // /threads/{id} — the whole incident picture (anchor + reply = 2 msgs).
+        let ctx = get(format!("http://{addr}/rooms/ops/threads/{}", enc(&id))).await;
+        assert_eq!(ctx["thread"]["title"], "DB outage");
+        assert_eq!(ctx["message_count"], 2);
+        assert_eq!(ctx["participants"].as_array().unwrap().len(), 2);
+        assert_eq!(ctx["messages"][0]["content"], "DB is down");
+        assert_eq!(ctx["messages"][0]["meta"]["severity"], "critical");
+    }
+
+    #[tokio::test]
+    async fn console_and_rooms_served() {
+        let dir = tempdir().unwrap();
+        seed_room(dir.path(), "alpha", &["hi"]);
+        let (addr, _shutdown) = start(dir.path().to_path_buf(), "sekret").await;
+        let client = reqwest::Client::new();
+
+        let html = client
+            .get(format!("http://{addr}/"))
+            .basic_auth("", Some("sekret"))
+            .send()
+            .await
+            .unwrap();
+        assert!(html.status().is_success());
+        let body = html.text().await.unwrap();
+        assert!(body.contains("support console") && body.contains("rooms/"));
+
+        let rooms: Value = client
+            .get(format!("http://{addr}/rooms"))
+            .basic_auth("", Some("sekret"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(rooms["rooms"].as_array().unwrap().iter().any(|r| r == "alpha"));
+    }
+
+    fn enc(s: &str) -> String {
+        s.replace('/', "%2F")
     }
 
     #[tokio::test]
