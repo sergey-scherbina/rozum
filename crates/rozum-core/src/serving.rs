@@ -523,6 +523,11 @@ pub fn synth_glm_tool_calls(text: &str, tools: &[crate::backend::ToolDef]) -> Ve
                     }
                 }
             }
+        } else if body_is_fenced_tool_call(body) {
+            // The fence body is a GLM/Qwen `Name\n{json}` tool CALL (e.g. ```bash\nRead\n{"file_path":…}```),
+            // which `parse_tool_calls` already claims — it is NOT file content. Skip it: without this, the
+            // mode-1 prose-filename fallback below would write the call's TEXT into the named file (the
+            // GLM-4 fix-task corruption that overwrote src/main.rs with `Read\n{…}`).
         } else if let (Some(path), Some(wt)) = (last_safe_filename(preceding), write_tool.as_deref()) {
             // Mode-1: raw file content; filename from the preceding prose.
             let mut m = serde_json::Map::new();
@@ -737,6 +742,20 @@ fn resolve_write_tool_name(tools: &[crate::backend::ToolDef]) -> Option<String> 
                 .is_some_and(|p| p.contains_key("content") && (p.contains_key("file_path") || p.contains_key("path")))
         })
         .map(|t| t.name.clone())
+}
+
+/// Is the fence body a GLM/Qwen `Name\n{json}` tool CALL (a bare identifier line followed by a JSON
+/// object), not raw file content? GLM-4 dense wraps its calls this way (`` ```bash\nRead\n{…}``` ``) and
+/// `parse_tool_calls` claims them — so the synth must NOT also write the call's text into a prose-named
+/// file. Conservative: real file content (`use std::…`, `[package]`, `import os`) never matches because
+/// the first line isn't a bare identifier; a JSON file starts with `{` and is handled by mode-2 above.
+fn body_is_fenced_tool_call(body: &str) -> bool {
+    let mut lines = body.trim_start().splitn(2, '\n');
+    let first = lines.next().unwrap_or("").trim();
+    let rest = lines.next().unwrap_or("").trim_start();
+    !first.is_empty()
+        && first.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && rest.starts_with('{')
 }
 
 /// Mode-1b is scoped to the UNIVERSAL artifact-synth opt-in (`ROZUM_ARTIFACT_SYNTH=1`), NOT the GLM
@@ -967,6 +986,27 @@ mod tests {
         assert!(synth_glm_tool_calls("Here is the code:\n```rust\nfn main(){}\n```", &[]).is_empty());
 
         unsafe { std::env::remove_var("ROZUM_ARTIFACT_SYNTH") }; // restore
+    }
+
+    #[test]
+    fn synth_skips_fenced_tool_call_with_prose_filename() {
+        // REAL GLM-4-32B fix-task output (captured): a fenced `Read\n{json}` tool call with the target
+        // filename in the PRECEDING prose. Mode-1 used to grab the fence body as file content → it
+        // overwrote src/main.rs with the literal `Read\n{…}` text (the consistent GLM fix 0/2 corruption).
+        let glm = "I'll fix the bug. Let's start by examining the src/main.rs file:\n\n```bash\nRead\n{\"file_path\": \"/tmp/p/src/main.rs\"}\n```\n\nBased on that, …";
+        assert!(
+            synth_glm_tool_calls(glm, &claude_tools()).is_empty(),
+            "a fenced Name\\n{{json}} tool call must NOT be synthesized into a file write"
+        );
+        // parse_tool_calls is what legitimately claims it (as the Read call) — verified end-to-end.
+        let calls = parse_tool_calls(glm);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "Read");
+        // The guard is narrow: real file content whose first line is a bare identifier is rare, but a
+        // genuine `[package]` / `use std::…` / fenced JSON body is unaffected (mode-1 / mode-2 still run).
+        assert!(!body_is_fenced_tool_call("[package]\nname = \"x\""));
+        assert!(!body_is_fenced_tool_call("use std::env;\nfn main() {}"));
+        assert!(body_is_fenced_tool_call("Read\n{\"file_path\": \"a\"}"));
     }
 
     #[test]
