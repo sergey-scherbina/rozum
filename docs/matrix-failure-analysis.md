@@ -177,8 +177,10 @@ shell-echo corruption / approval-stall (1a/1b); edit-existing → unified-diff v
 (codex tool-surface / apply-patch preference, decode speed), while the model code-quality factor is a
 ceiling for a given model. Verdicts per fail will be recorded above as each is fixed or proven structural.
 
-**Still to do:** raw codex tool-call capture (1a/1b); repro the `fix`/`debug`/`test` reds (edit-on-
-existing-file, a different shape than create-from-scratch); A/B any candidate fix; re-run the matrix.
+**Status update:** raw codex tool-call capture is now done (`ROZUM_CODEX_TOOL_CAPTURE=1`; see
+`docs/specs/codex-tool-call-capture.md`) and Finding 5 below used it to identify the malformed
+create-from-scratch write intent. Remaining: repro the `fix`/`debug`/`test` reds (edit-on-existing-file,
+a different shape than create-from-scratch); A/B any candidate fix; re-run the matrix.
 
 ---
 
@@ -308,7 +310,8 @@ insurance for the intermittent modes.
 
 ## Finding 5 (2026-06-21) — codex create-from-scratch is a gateway-fixable malformed write-intent, NOT a model limit
 
-Finding 1b parked the create-path root cause on "capture the raw tool calls" — never done; the
+Finding 1b parked the create-path root cause on "capture the raw tool calls" — not done yet at the
+time; the
 `apply_patch create-if-missing` attempt was then discarded as a **model limit** (SPRINT) *without* that
 data. I captured it: `ROZUM_CODEX_TOOL_CAPTURE=1` on a real `codex × gpt-oss-20b × build` run (the
 gateway records `codex_tool_call`). **10 of 11 tool calls were one consistent malformed shape**, e.g.:

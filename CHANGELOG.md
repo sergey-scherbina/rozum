@@ -1,5 +1,13 @@
 # Changelog
 
+## docs — Codex raw tool-call capture status de-staled
+Completed: 2026-06-29
+
+Updated `docs/matrix-failure-analysis.md` so the old "Still to do: raw codex tool-call capture" note
+matches current master: capture shipped as `ROZUM_CODEX_TOOL_CAPTURE=1`, is specified in
+`docs/specs/codex-tool-call-capture.md`, and was used by Finding 5 to isolate the malformed
+create-from-scratch write-intent shape. No runtime changes.
+
 ## UCC — browser write-proxy hardening + terminal attach guard
 Completed: 2026-06-29
 
