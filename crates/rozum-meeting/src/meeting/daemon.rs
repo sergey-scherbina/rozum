@@ -504,16 +504,33 @@ impl MeetingServer {
     )]
     pub async fn thread_set_state(&self, params: Parameters<ThreadStateParams>) -> CallToolResult {
         guard("meeting.thread_set_state", async move {
-            let (room, _id) = self.session_room().await;
-            let Some(room) = room else {
+            let (room, caller) = self.session_room().await;
+            let (Some(room), Some(caller)) = (room, caller) else {
                 return err_result("not-joined: call _join_internal first");
             };
             let p = &params.0;
             let Some(state) = store::ThreadState::parse(&p.state) else {
                 return err_result("bad state (open|triaging|escalated|resolved|closed)");
             };
-            match room.lock().await.set_thread_state(&p.id, state) {
-                Ok(Some(t)) => text_result(&serde_json::to_string(&t).unwrap_or_default()),
+            let mut r = room.lock().await;
+            match r.set_thread_state(&p.id, state) {
+                Ok(Some(t)) => {
+                    // Audit + event-source the transition so repair-threads rebuilds it exactly.
+                    let pm = store::PostMeta {
+                        kind: store::MsgKind::Event,
+                        thread_id: Some(p.id.clone()),
+                        meta: store::MsgMeta {
+                            thread_op: Some(store::ThreadOp {
+                                state: Some(state),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    let _ = r.submit_with_meta(&caller, &format!("state → {}", state.as_str()), pm);
+                    text_result(&serde_json::to_string(&t).unwrap_or_default())
+                }
                 Ok(None) => err_result("unknown thread id"),
                 Err(e) => err_result(&e),
             }
@@ -646,16 +663,31 @@ impl MeetingServer {
     )]
     pub async fn thread_pin(&self, params: Parameters<PinParams>) -> CallToolResult {
         guard("meeting.thread_pin", async move {
-            let (room, _id) = self.session_room().await;
-            let Some(room) = room else {
+            let (room, caller) = self.session_room().await;
+            let (Some(room), Some(caller)) = (room, caller) else {
                 return err_result("not-joined: call _join_internal first");
             };
             let p = &params.0;
             let pin = p.pin.unwrap_or(true);
-            match room.lock().await.set_pinned(&p.id, &p.msg_id, pin) {
-                Ok(Some(t)) => text_result(
-                    &serde_json::json!({ "thread": p.id, "pinned": t.pinned }).to_string(),
-                ),
+            let mut r = room.lock().await;
+            match r.set_pinned(&p.id, &p.msg_id, pin) {
+                Ok(Some(t)) => {
+                    // Audit + event-source so a pin survives a threads.json rebuild from the log.
+                    let op = if pin {
+                        store::ThreadOp { pin: Some(p.msg_id.clone()), ..Default::default() }
+                    } else {
+                        store::ThreadOp { unpin: Some(p.msg_id.clone()), ..Default::default() }
+                    };
+                    let pm = store::PostMeta {
+                        kind: store::MsgKind::Event,
+                        thread_id: Some(p.id.clone()),
+                        meta: store::MsgMeta { thread_op: Some(op), ..Default::default() },
+                        ..Default::default()
+                    };
+                    let verb = if pin { "pinned" } else { "unpinned" };
+                    let _ = r.submit_with_meta(&caller, &format!("{verb} {}", p.msg_id), pm);
+                    text_result(&serde_json::json!({ "thread": p.id, "pinned": t.pinned }).to_string())
+                }
                 Ok(None) => err_result("unknown thread id"),
                 Err(e) => err_result(&e),
             }
