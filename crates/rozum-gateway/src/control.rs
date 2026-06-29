@@ -198,7 +198,9 @@ fn read_room_messages(room: &str, limit: usize) -> Vec<ChatMessage> {
             if line.is_empty() { continue; }
             let Ok(m) = serde_json::from_str::<serde_json::Value>(line) else { continue; };
             let Some(content) = m.get("content").and_then(|v| v.as_str()) else { continue; };
-            let author = m.get("author").and_then(|v| v.as_str()).unwrap_or("?");
+            let author = m.get("display_name")
+                .or_else(|| m.get("author"))
+                .and_then(|v| v.as_str()).unwrap_or("?");
             let ts = m.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
             let time = { let h = (ts / 3600) % 24; let min = (ts / 60) % 60; format!("{h:02}:{min:02}") };
             out.push(ChatMessage { time, author: author.to_string(), content: content.to_string() });
