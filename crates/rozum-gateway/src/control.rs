@@ -4,22 +4,319 @@
 //! served over the gateway's HTTP surface for the web/UCC target. See
 //! `docs/specs/services-and-clients.md`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 /// Run a tiny always-up HTTP server exposing the control snapshot, independent of any running
 /// gateway (it reads the host residency ledger + catalog from disk). `GET /control/status` → the
 /// `status()` JSON, with permissive CORS so a web/UCC client on another origin can fetch it. For the
 /// Tailscale path-routed case the client fetches it same-origin and CORS is moot.
+///
+/// Beyond the read snapshot it now also exposes WRITE actions so the UCC can drive agents from a
+/// phone: `POST /control/agent/launch|stop`, `/control/gateway/load`, `/control/task`. Every action
+/// that loads a model is admission-gated (`rozum gateway switch` runs the residency gate itself), and
+/// the launch reports a refusal verdict rather than risking an OOM.
 pub async fn serve(port: u16) -> std::io::Result<()> {
-    use axum::{response::IntoResponse, routing::get, Router};
+    use axum::{response::IntoResponse, routing::{get, post}, Router};
     async fn status_route() -> impl IntoResponse {
         ([(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], axum::Json(status().await))
     }
-    let app = Router::new().route("/control/status", get(status_route));
+    let app = Router::new()
+        .route("/control/status", get(status_route))
+        .route("/control/gateway/load", post(gateway_load_route))
+        .route("/control/agent/launch", post(agent_launch_route))
+        .route("/control/agent/stop", post(agent_stop_route))
+        .route("/control/task", post(task_route));
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!("control server: http://{addr}/control/status");
+    eprintln!("control server: http://{addr}/control/status (+POST actions)");
     axum::serve(listener, app).await
+}
+
+// ── Agent registry + actions (write side of the control API) ─────────────────────────────────────
+//
+// Chat-agents are `rozum meetings participant` processes. There is no built-in registry, so we keep a
+// small JSON file (`<state>/rozum/ucc-agents.json`) the launch/stop maintain, keyed by a generated id,
+// and check liveness with `kill(pid, 0)`. Actions exec the `rozum` CLI via the current binary (which IS
+// the full gateway CLI) so there is no extra crate dependency, mirroring `list_meetings`' read-only
+// disk approach.
+
+/// One launched chat-agent we track. Persisted to the registry; `alive` is computed per status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRecord {
+    pub id: String,
+    pub model: String,
+    pub room: String,
+    pub handle: String,
+    pub policy: String,
+    pub pid: u32,
+    pub started_at: u64,
+}
+
+/// Display brief for a running agent (registry entry + liveness), in `ControlStatus.agents`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentBrief {
+    pub id: String,
+    pub model: String,
+    pub room: String,
+    pub handle: String,
+    pub policy: String,
+    pub pid: u32,
+    pub alive: bool,
+}
+
+fn state_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .map(|b| b.join("rozum"))
+}
+
+fn agents_registry_path() -> Option<PathBuf> {
+    state_dir().map(|d| d.join("ucc-agents.json"))
+}
+
+fn load_agents() -> Vec<AgentRecord> {
+    agents_registry_path()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_agents(agents: &[AgentRecord]) {
+    if let Some(p) = agents_registry_path() {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(body) = serde_json::to_vec_pretty(agents) {
+            let tmp = p.with_extension("json.tmp");
+            if std::fs::write(&tmp, &body).is_ok() {
+                let _ = std::fs::rename(&tmp, &p);
+            }
+        }
+    }
+}
+
+/// Is `pid` still alive? `kill(pid, 0)` returns 0 for a live process we can signal.
+fn pid_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+/// The agents we currently know about, with a fresh liveness check; prunes dead ones from the registry.
+fn live_agents() -> Vec<AgentBrief> {
+    let all = load_agents();
+    let (alive, dead): (Vec<_>, Vec<_>) = all.into_iter().partition(|a| pid_alive(a.pid));
+    if !dead.is_empty() {
+        save_agents(&alive); // self-heal: drop processes that have exited
+    }
+    alive
+        .into_iter()
+        .map(|a| AgentBrief {
+            id: a.id, model: a.model, room: a.room, handle: a.handle, policy: a.policy,
+            pid: a.pid, alive: true,
+        })
+        .collect()
+}
+
+/// Run a `rozum` subcommand to completion, capturing output. Uses the current binary (the full gateway
+/// CLI), so no PATH dependency. Returns (success, combined stdout+stderr).
+fn run_rozum(args: &[&str]) -> (bool, String) {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
+    match Command::new(&exe).args(args).output() {
+        Ok(out) => {
+            let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&out.stderr));
+            (out.status.success(), s)
+        }
+        Err(e) => (false, format!("spawn failed: {e}")),
+    }
+}
+
+/// Ensure the shared gateway serves `model`. Reuses it if already serving; else `gateway switch`
+/// (which runs the residency admission gate itself and exits non-zero if it won't fit). Returns the
+/// gateway port on success, or an error message (incl. an admission refusal) on failure.
+fn ensure_gateway(model: &str) -> Result<u16, String> {
+    if let Some(g) = crate::share::read_active() {
+        if g.model == model {
+            return Ok(g.port);
+        }
+    }
+    let (ok, out) = run_rozum(&["gateway", "switch", "--model", model]);
+    if !ok {
+        return Err(format!("could not load {model}: {}", out.trim()));
+    }
+    crate::share::read_active().map(|g| g.port).ok_or_else(|| "gateway not running after load".into())
+}
+
+/// Spawn `rozum meetings participant …` DETACHED (own process group, output → a per-agent log), so it
+/// survives a control-serve restart. Returns the child pid.
+fn spawn_participant(model: &str, room: &str, policy: &str, persona: &str, gw_port: u16) -> std::io::Result<u32> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
+    let gw_url = format!("http://127.0.0.1:{gw_port}/v1");
+    let log_path = state_dir()
+        .map(|d| d.join("logs"))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let _ = std::fs::create_dir_all(&log_path);
+    let log = std::fs::OpenOptions::new()
+        .create(true).append(true)
+        .open(log_path.join(format!("agent-{}-{}.log", sanitize(room), sanitize(model))))?;
+    let log2 = log.try_clone()?;
+    let mut cmd = Command::new(&exe);
+    cmd.args(["meetings", "participant", "--model", model, "--room", room, "--reply-policy", policy]);
+    if !persona.is_empty() {
+        cmd.args(["--persona", persona]);
+    }
+    cmd.args(["--gateway-url", &gw_url]);
+    cmd.stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(log2));
+    cmd.process_group(0); // detach from control-serve's group so it survives a service restart
+    Ok(cmd.spawn()?.id())
+}
+
+fn sanitize(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
+}
+
+// ── Action route handlers ────────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct GatewayLoadReq { model: String }
+
+async fn gateway_load_route(axum::Json(req): axum::Json<GatewayLoadReq>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let model = req.model.trim().to_string();
+    if model.is_empty() {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "model required");
+    }
+    match ensure_gateway(&model) {
+        Ok(port) => axum::Json(serde_json::json!({ "ok": true, "model": model, "port": port })).into_response(),
+        Err(e) => json_err(axum::http::StatusCode::CONFLICT, &e),
+    }
+}
+
+#[derive(Deserialize)]
+struct AgentLaunchReq {
+    model: String,
+    room: String,
+    #[serde(default = "default_policy")]
+    policy: String,
+    #[serde(default)]
+    persona: String,
+}
+fn default_policy() -> String { "mention".into() }
+
+async fn agent_launch_route(axum::Json(req): axum::Json<AgentLaunchReq>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let model = req.model.trim().to_string();
+    let room = req.room.trim().to_string();
+    if model.is_empty() || room.is_empty() {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "model and room required");
+    }
+    // 1) Ensure the gateway serves the model — admission-gated; a refusal returns the verdict.
+    let port = match ensure_gateway(&model) {
+        Ok(p) => p,
+        Err(e) => {
+            let report = footprint_report(&model);
+            return (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({ "ok": false, "error": e, "admission": report })),
+            ).into_response();
+        }
+    };
+    // 2) Spawn the participant detached + register it.
+    match spawn_participant(&model, &room, &req.policy, req.persona.trim(), port) {
+        Ok(pid) => {
+            let handle = derive_handle(&model);
+            let id = format!("{}-{}", sanitize(&room), pid);
+            let mut agents = load_agents();
+            agents.push(AgentRecord {
+                id: id.clone(), model: model.clone(), room: room.clone(),
+                handle: handle.clone(), policy: req.policy.clone(), pid,
+                started_at: crate::share::now_unix(),
+            });
+            save_agents(&agents);
+            axum::Json(serde_json::json!({ "ok": true, "id": id, "handle": handle, "pid": pid })).into_response()
+        }
+        Err(e) => json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("spawn: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct AgentStopReq { id: String }
+
+async fn agent_stop_route(axum::Json(req): axum::Json<AgentStopReq>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut agents = load_agents();
+    let Some(pos) = agents.iter().position(|a| a.id == req.id) else {
+        return json_err(axum::http::StatusCode::NOT_FOUND, "no such agent");
+    };
+    let a = agents.remove(pos);
+    unsafe { libc::kill(a.pid as libc::pid_t, libc::SIGTERM); }
+    save_agents(&agents);
+    axum::Json(serde_json::json!({ "ok": true, "id": a.id })).into_response()
+}
+
+#[derive(Deserialize)]
+struct TaskReq {
+    room: String,
+    text: String,
+    #[serde(default)]
+    to: String,
+}
+
+async fn task_route(axum::Json(req): axum::Json<TaskReq>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let room = req.room.trim();
+    let text = req.text.trim();
+    if room.is_empty() || text.is_empty() {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "room and text required");
+    }
+    // Prefix @handle so a `mention`-policy agent fires on the task.
+    let msg = if req.to.trim().is_empty() { text.to_string() } else { format!("@{} {}", req.to.trim(), text) };
+    let (ok, out) = run_rozum(&["meetings", "post", "--room", room, &msg]);
+    if ok {
+        axum::Json(serde_json::json!({ "ok": true })).into_response()
+    } else {
+        json_err(axum::http::StatusCode::BAD_GATEWAY, out.trim())
+    }
+}
+
+/// The model's admission verdict (for a 409 body): its estimated footprint vs the live ledger.
+fn footprint_report(model: &str) -> serde_json::Value {
+    let report = crate::share::dry_run_admission(footprint_for(model));
+    serde_json::json!({
+        "footprint_bytes": report.footprint,
+        "available_bytes": report.available,
+        "budget_bytes": report.budget,
+        "fits": report.admit,
+        "ledger_fits": report.ledger_fits,
+        "ram_fits": report.ram_fits,
+        "pressure_ok": report.pressure_ok,
+    })
+}
+
+/// Estimate a model's resident footprint from its catalog weight size at a conservative ctx.
+fn footprint_for(model: &str) -> u64 {
+    let weight = rozum_models::models::scan_all_installed()
+        .into_iter()
+        .find(|m| m.spec == model)
+        .map(|m| m.size_bytes)
+        .unwrap_or(0);
+    rozum_models::model_source::runtime_footprint_bytes(model, 8192, weight)
+}
+
+/// Derive the roster handle the participant uses, mirroring `model_participant::derive_handle` (the
+/// short family name after the last `:` / `/`, before the first `-`), so the UI can @mention it.
+fn derive_handle(model: &str) -> String {
+    let tail = model.rsplit(['/', ':']).next().unwrap_or(model);
+    let base = tail.split('-').next().unwrap_or(tail);
+    base.to_lowercase()
+}
+
+fn json_err(code: axum::http::StatusCode, msg: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (code, axum::Json(serde_json::json!({ "ok": false, "error": msg }))).into_response()
 }
 
 /// A coherent snapshot of the models/gateway service.
@@ -39,6 +336,9 @@ pub struct ControlStatus {
     /// them with a link to each room's web view. Read directly from `rooms.json` to avoid a
     /// rozum-gateway → rozum-meeting crate dependency.
     pub meetings: Vec<MeetingBrief>,
+    /// The chat-agents (model-participants) launched through the control API, with liveness — so the
+    /// UCC can show a cross-room "running agents" view and stop them.
+    pub agents: Vec<AgentBrief>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -168,7 +468,8 @@ pub async fn status() -> ControlStatus {
         MetricBrief { metric: "residents".into(), value: residency.residents.len().to_string() },
     ];
     let meetings = list_meetings();
-    ControlStatus { gateway, residency, installed, residency_metrics, meetings }
+    let agents = live_agents();
+    ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents }
 }
 
 #[cfg(test)]

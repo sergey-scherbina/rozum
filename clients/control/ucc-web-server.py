@@ -5,7 +5,7 @@
 #   GET /chat/messages?room=X   -> the room's messages as JSON (read the daemon's jsonl)
 #   POST /chat/post             -> post a message (proxy the meeting web's single-writer /p)
 # One origin => clicking a meeting opens the native chat view IN the standalone PWA.
-import json, os, glob, urllib.request, urllib.parse
+import json, os, glob, urllib.request, urllib.parse, urllib.error
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
@@ -109,6 +109,22 @@ class H(SimpleHTTPRequestHandler):
                                              headers={"Content-Type": "text/plain"}, method="POST")
                 urllib.request.urlopen(req, timeout=6).read()
                 return self._send_json({"ok": True})
+            except Exception as e:
+                return self._send_json({"error": str(e)}, 502)
+        # Control-API write actions (agent launch/stop, gateway load, task) — proxy to control-serve
+        # (:8411), forwarding the JSON body AND the status code (so a 409 admission refusal + its verdict
+        # reach the SPA). Same-origin so the standalone PWA can drive agents.
+        if self.path.split("?")[0].startswith("/control/"):
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            body = self.rfile.read(n) if n else b""
+            url = "http://127.0.0.1:8411" + self.path
+            try:
+                req = urllib.request.Request(url, data=body,
+                                             headers={"Content-Type": "application/json"}, method="POST")
+                resp = urllib.request.urlopen(req, timeout=45)
+                return self._send_raw(resp.read(), resp.status)
+            except urllib.error.HTTPError as e:
+                return self._send_raw(e.read(), e.code)   # forward 4xx/5xx (admission verdict) verbatim
             except Exception as e:
                 return self._send_json({"error": str(e)}, 502)
         self.send_response(404); self.end_headers()
