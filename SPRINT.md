@@ -1,5 +1,28 @@
 # Sprint
 
+### ▶ weak-coder delivery (operator 2026-06-29: "поизучай слабых новых моделей — у них есть что-то чего мы не замечаем")
+- [x] **weak-coders-under-measured-by-delivery** — DONE. The weak/new coders' low create scores are a
+  tool-call DELIVERY artifact, not capability: they narrate a correct solution in a markdown ```rust
+  fence and never name Write → nothing lands → 0/N. PROVEN: Coder-7B's narrated rpn code (scored 0/2),
+  written to src/main.rs, compiles + passes both verify cases (35, 14). Fix = synth **Mode-1b** (master
+  `179f48d`): unlabeled full-program (`fn main`) fence → Write src/main.rs. Live A/B: Coder-7B build
+  **0/2 → 2/2** (files land in all workdirs); rpn stays 0/2 = honest correctness variance, not delivery.
+  **GATED to the universal opt-in `ROZUM_ARTIFACT_SYNTH=1`** (master `ae75753`) after a GLM-4-32B
+  regression sweep — so the GLM family default-on synth path is byte-identical. Method now in memory
+  [[project-downloaded-models-toolcall-dwq]]: a 0/N CREATE score is a delivery signal first — extract
+  the model's ```rust fence and compile it standalone before calling the model weak.
+- [ ] **glm-fix-readcall-corruption** — NEW (found via the Mode-1b regression sweep, 2026-06-29).
+  GLM-4-32B-0414 fails the `fix` task **0/2 consistently** (both reps RUN_TIMEOUT, `cargo run -> ''`):
+  src/main.rs ends up containing a `Read\n{"file_path":...}` tool-call's TEXT instead of code. ROOT
+  CAUSE (likely, from the kept workdir): GLM-4 dense emits tool calls as `name\n{json}`; when it wraps a
+  `Read\n{json}` call in a ``` fence with the filename in nearby prose, synth **Mode-1** (prose-filename
+  fallback) grabs the fence body as file content → overwrites src/main.rs with the Read-call text.
+  PRE-EXISTING (not Mode-1b — that needs `fn main`, which Read-text lacks; confirmed by code logic).
+  debug + build PASS (so it is fix-flow-specific). FIX DIRECTION: Mode-1 must not treat a fenced
+  `Name\n{json}` GLM tool-call as raw file content (let parse_tool_calls claim it first / skip fences
+  whose body is a bare `identifier\n{json}`). Repro: `AGENTIC_MODELS=mlx-community:GLM-4-32B-0414-4bit
+  TASKS=fix REPS=2 KEEP=1 scripts/bench/agentic.sh`, inspect the kept src/main.rs.
+
 ### ▶ agentic-reliability (operator 2026-06-29: "сделай всё, занеси в спринт, порядок выбери сам")
 Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall (stall depends on sweep data).
 - [x] **loopbreaker-sig4** — DONE (master `142846c`). `detect_stuck_loop` signature 4: windowed
