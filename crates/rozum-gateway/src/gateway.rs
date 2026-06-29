@@ -1520,44 +1520,6 @@ fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
             }
         }
     }
-
-    // ── Signature 5: edits keep FAILING, nothing lands (varied-args thrash) ──
-    // A model that misreads/hallucinates the file content edits text that ISN'T there → "String to
-    // replace not found", with DIFFERENT args each retry, padded with re-reads — observed live on
-    // GLM-4.7-Flash (read the file, then edited code that didn't exist; looped 23 turns, file never
-    // changed). The failing edits aren't byte-identical (sig 1 & 4 miss them) and stay under the
-    // per-file churn backstop (sig 3). Fire when, in a SUSTAINED run, the recent window holds
-    // >=FAILED_EDIT_THRESHOLD failed edits AND not one edit LANDED — the agent keeps trying to edit
-    // and nothing applies. Guards against false positives: a healthy fix lands >=1 edit (resets it),
-    // pure exploration makes no edits (never trips), and the MIN_THRASH_CALLS gate preserves the
-    // existing "3 varied-failing edits is not yet a loop" contract (that case is only 3 calls long).
-    const MIN_THRASH_CALLS: usize = 8;
-    const FAILED_EDIT_THRESHOLD: usize = 3;
-    if calls.len() >= MIN_THRASH_CALLS {
-        let win = &calls[calls.len().saturating_sub(TOOL_WINDOW)..];
-        // A MUTATION call only — by tool name or an old/new-string payload. NOT `edit_target_and_lines`
-        // (which matches any `file_path`, counting a Read as an edit) and NOT a Read/Bash/Grep.
-        let is_edit = |name: &str, input: &Value| {
-            matches!(name, "Edit" | "MultiEdit" | "Write" | "apply_patch")
-                || input.get("old_string").is_some()
-                || input.get("new_string").is_some()
-        };
-        let mut failed_edits = 0usize;
-        let mut landed_edit = false;
-        for &(name, input, err) in win {
-            if is_edit(name, input) {
-                if err { failed_edits += 1 } else { landed_edit = true }
-            }
-        }
-        if failed_edits >= FAILED_EDIT_THRESHOLD && !landed_edit {
-            return Some(format!(
-                "{failed_edits} edit attempts failed (e.g. \"String to replace not found\") and not \
-                 one edit landed — the agent is editing text that isn't in the file, usually after \
-                 misreading it, and is making no progress. Stopping to avoid an infinite retry loop; \
-                 re-read the file's CURRENT contents and report in one short line."
-            ));
-        }
-    }
     None
 }
 
@@ -5263,50 +5225,6 @@ mod tests {
             msgs.push(cc_edit(&format!("e{i}"), "src/main.rs", &format!("bad{i}"), &format!("good{i}")));
         }
         assert!(detect_stuck_loop(&msgs).is_none(), "3 identical builds amid real edits are not a loop");
-    }
-
-    /// Signature 5 — failing edits, nothing lands (the GLM-4.7-Flash loop): the model reads the file,
-    /// then Edits text that ISN'T there (hallucinated, DIFFERENT each retry) → all fail, padded with
-    /// re-reads, looping while the file never changes. Varied args dodge sig 1/4; <6 edits/file dodge
-    /// sig 3. Sig 5 catches it via "sustained run + >=3 failed edits + 0 landed".
-    #[test]
-    fn stuck_loop_fires_on_failing_edits_no_progress() {
-        let mut msgs = vec![Message::user("fix the bug")];
-        for i in 0..4 {
-            // a (distinct) build then a DIFFERENT failed edit — Bash padding so sig-3 (edit-churn,
-            // which over-counts file_path ops) doesn't fire; this isolates sig-5.
-            let bid = format!("b{i}");
-            msgs.push(asst(tool_use(&bid, "Bash", json!({ "command": format!("cargo build {i}") }))));
-            msgs.push(tool_err(&bid, false));
-            let eid = format!("e{i}");
-            msgs.push(cc_edit(&eid, "src/main.rs", &format!("nonexistent code {i}"), "y"));
-            msgs.push(tool_err(&eid, true)); // "String to replace not found"
-        }
-        // 8 tool calls: 4 ok builds + 4 failed edits, 0 landed.
-        assert!(detect_stuck_loop(&msgs).is_some(), "sustained failing edits with nothing landing must trip sig-5");
-    }
-
-    #[test]
-    fn stuck_loop_ignores_long_run_that_lands_an_edit() {
-        // Same length/shape, but at least one edit LANDS → healthy iteration, not thrash.
-        let mut msgs = vec![Message::user("refactor")];
-        for i in 0..4 {
-            let bid = format!("b{i}");
-            msgs.push(asst(tool_use(&bid, "Bash", json!({ "command": format!("cargo build {i}") }))));
-            msgs.push(tool_err(&bid, false));
-            let eid = format!("e{i}");
-            msgs.push(cc_edit(&eid, "src/main.rs", &format!("a{i}"), &format!("b{i}")));
-            msgs.push(tool_err(&eid, i < 3)); // 3 fail, the LAST one lands
-        }
-        assert!(detect_stuck_loop(&msgs).is_none(), "a sustained run that lands an edit is not thrash");
-        // And the short 3-varied-failing-edits contract is still NOT a loop (under MIN_THRASH_CALLS).
-        let mut short = vec![Message::user("go")];
-        for i in 0..3 {
-            let id = format!("v{i}");
-            short.push(cc_edit(&id, "src/main.rs", &format!("x{i}"), "z"));
-            short.push(tool_err(&id, true));
-        }
-        assert!(detect_stuck_loop(&short).is_none(), "3 varied failing edits (short run) stays not-a-loop");
     }
 
     #[tokio::test]
