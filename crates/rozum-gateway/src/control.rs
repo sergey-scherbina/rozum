@@ -22,8 +22,16 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
     async fn status_route() -> impl IntoResponse {
         ([(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], axum::Json(status().await))
     }
-    let app = Router::new()
+    // Public: the read snapshot (so the SPA can render the login screen) + the auth ceremony endpoints.
+    let public = Router::new()
         .route("/control/status", get(status_route))
+        .route("/control/auth/status", get(auth_status_route))
+        .route("/control/auth/register/begin", post(register_begin_route))
+        .route("/control/auth/register/finish", post(register_finish_route))
+        .route("/control/auth/login/begin", post(login_begin_route))
+        .route("/control/auth/login/finish", post(login_finish_route));
+    // Protected by `require_auth` (own Face ID session OR busi SSO): every write action + the terminal WS.
+    let protected = Router::new()
         .route("/control/gateway/load", post(gateway_load_route))
         .route("/control/agent/launch", post(agent_launch_route))
         .route("/control/agent/stop", post(agent_stop_route))
@@ -33,7 +41,9 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         .route("/control/coder/log", get(coder_log_route))
         .route("/control/session/launch", post(session_launch_route))
         .route("/control/session/stop", post(session_stop_route))
-        .route("/control/session/attach/{id}", get(session_attach_route));
+        .route("/control/session/attach/{id}", get(session_attach_route))
+        .route_layer(axum::middleware::from_fn(require_auth));
+    let app = public.merge(protected);
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     eprintln!("control server: http://{addr}/control/status (+POST actions)");
@@ -700,6 +710,181 @@ async fn session_ws_bridge(mut socket: axum::extract::ws::WebSocket, id: String)
         }
     }
     let _ = child.kill(); // end the `tmux attach` (NOT the session — it stays detached for reconnect)
+}
+
+// ── Phase 4a: auth gate — own Face ID (WebAuthn) OR busi SSO ─────────────────────────────────────────
+//
+// Two auth sources, either suffices: (1) the UCC's OWN passkey (Face ID) via webauthn-rs — a `rozum_sess`
+// cookie after login; (2) busi SSO — a `busi_device` cookie that is a paired busi token. The gate protects
+// every control action + the terminal WS. RP ID = the Tailscale host (same passkey domain as busi).
+
+use std::sync::{Mutex, OnceLock};
+use webauthn_rs::prelude::*;
+
+fn rp_id() -> String {
+    std::env::var("ROZUM_UCC_RP_ID").unwrap_or_else(|_| "busi.tail1174e2.ts.net".into())
+}
+fn rp_origin() -> String {
+    std::env::var("ROZUM_UCC_ORIGIN").unwrap_or_else(|_| "https://busi.tail1174e2.ts.net:8447".into())
+}
+fn operator_uuid() -> Uuid { Uuid::from_u128(0x_524f_5a55_4d00_0000_0000_0000_0000_0001) }
+
+fn webauthn() -> Option<&'static Webauthn> {
+    static W: OnceLock<Option<Webauthn>> = OnceLock::new();
+    W.get_or_init(|| {
+        let origin = url::Url::parse(&rp_origin()).ok()?;
+        WebauthnBuilder::new(&rp_id(), &origin).ok()?.rp_name("rozum control").build().ok()
+    }).as_ref()
+}
+
+fn creds_path() -> Option<PathBuf> { state_dir().map(|d| d.join("ucc-credentials.json")) }
+fn load_creds() -> Vec<Passkey> {
+    creds_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+fn save_creds(c: &[Passkey]) {
+    if let Some(p) = creds_path() {
+        if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
+        if let Ok(b) = serde_json::to_vec_pretty(c) {
+            let tmp = p.with_extension("json.tmp");
+            if std::fs::write(&tmp, &b).is_ok() { let _ = std::fs::rename(&tmp, &p); }
+        }
+    }
+}
+
+// In-flight ceremony state — single operator, so one slot each is enough.
+fn reg_inflight() -> &'static Mutex<Option<PasskeyRegistration>> {
+    static S: OnceLock<Mutex<Option<PasskeyRegistration>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(None))
+}
+fn auth_inflight() -> &'static Mutex<Option<PasskeyAuthentication>> {
+    static S: OnceLock<Mutex<Option<PasskeyAuthentication>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(None))
+}
+
+const SESSION_TTL_SECS: u64 = 30 * 24 * 3600;
+fn sess_path() -> Option<PathBuf> { state_dir().map(|d| d.join("ucc-auth-sessions.json")) }
+fn load_auth_sessions() -> Vec<(String, u64)> {
+    sess_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+fn save_auth_sessions(s: &[(String, u64)]) {
+    if let Some(p) = sess_path() {
+        if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
+        if let Ok(b) = serde_json::to_vec(s) {
+            let tmp = p.with_extension("json.tmp");
+            if std::fs::write(&tmp, &b).is_ok() { let _ = std::fs::rename(&tmp, &p); }
+        }
+    }
+}
+fn mint_session() -> String {
+    let token = Uuid::new_v4().simple().to_string();
+    let now = crate::share::now_unix();
+    let mut s = load_auth_sessions();
+    s.retain(|(_, exp)| *exp > now); // prune expired
+    s.push((token.clone(), now + SESSION_TTL_SECS));
+    save_auth_sessions(&s);
+    token
+}
+fn valid_session(token: &str) -> bool {
+    let now = crate::share::now_unix();
+    load_auth_sessions().iter().any(|(t, exp)| t == token && *exp > now)
+}
+
+/// Parse a `name=value; …` Cookie header into a lookup.
+fn cookie(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    let h = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    h.split(';').find_map(|p| {
+        let (k, v) = p.split_once('=')?;
+        (k.trim() == name).then(|| v.trim().to_string())
+    })
+}
+
+/// busi SSO: the `busi_device` cookie must be a paired busi token (membership in ~/.busi/tokens.txt) —
+/// exactly busi v2's `isPaired`.
+fn busi_authed(headers: &axum::http::HeaderMap) -> bool {
+    let Some(tok) = cookie(headers, "busi_device") else { return false };
+    if tok.is_empty() { return false; }
+    let path = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".busi/tokens.txt"));
+    let Some(path) = path else { return false };
+    let Ok(content) = std::fs::read_to_string(path) else { return false };
+    content.lines().any(|l| l.trim() == tok)
+}
+
+/// Authenticated iff a valid own session (`rozum_sess`) OR a valid busi session (`busi_device`).
+fn authed(headers: &axum::http::HeaderMap) -> bool {
+    if let Some(s) = cookie(headers, "rozum_sess") {
+        if valid_session(&s) { return true; }
+    }
+    busi_authed(headers)
+}
+
+/// Middleware: 401 unless authenticated. Applied to every action route + the terminal WS (NOT to
+/// `/control/status` or `/control/auth/*`, which must be reachable to render the login screen + log in).
+async fn require_auth(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if authed(req.headers()) {
+        next.run(req).await
+    } else {
+        (axum::http::StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "auth required" }))).into_response()
+    }
+}
+
+fn set_cookie(name: &str, value: &str, max_age: u64) -> [(axum::http::HeaderName, String); 1] {
+    [(axum::http::header::SET_COOKIE,
+      format!("{name}={value}; Path=/; Max-Age={max_age}; Secure; HttpOnly; SameSite=None"))]
+}
+
+async fn auth_status_route(headers: axum::http::HeaderMap) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    axum::Json(serde_json::json!({
+        "authed": authed(&headers),
+        "has_credential": !load_creds().is_empty(),
+        "webauthn_ok": webauthn().is_some(),
+    })).into_response()
+}
+
+async fn register_begin_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(w) = webauthn() else { return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "webauthn init failed"); };
+    let exclude: Vec<CredentialID> = load_creds().iter().map(|p| p.cred_id().clone()).collect();
+    match w.start_passkey_registration(operator_uuid(), "operator", "operator", Some(exclude)) {
+        Ok((ccr, state)) => { *reg_inflight().lock().unwrap() = Some(state); axum::Json(ccr).into_response() }
+        Err(e) => json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:?}")),
+    }
+}
+
+async fn register_finish_route(axum::Json(reg): axum::Json<RegisterPublicKeyCredential>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(w) = webauthn() else { return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "webauthn init failed"); };
+    let Some(state) = reg_inflight().lock().unwrap().take() else { return json_err(axum::http::StatusCode::BAD_REQUEST, "no registration in flight"); };
+    match w.finish_passkey_registration(&reg, &state) {
+        Ok(pk) => { let mut c = load_creds(); c.push(pk); save_creds(&c); axum::Json(serde_json::json!({ "ok": true })).into_response() }
+        Err(e) => json_err(axum::http::StatusCode::BAD_REQUEST, &format!("{e:?}")),
+    }
+}
+
+async fn login_begin_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(w) = webauthn() else { return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "webauthn init failed"); };
+    let creds = load_creds();
+    if creds.is_empty() { return json_err(axum::http::StatusCode::BAD_REQUEST, "no passkey enrolled"); }
+    match w.start_passkey_authentication(&creds) {
+        Ok((rcr, state)) => { *auth_inflight().lock().unwrap() = Some(state); axum::Json(rcr).into_response() }
+        Err(e) => json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:?}")),
+    }
+}
+
+async fn login_finish_route(axum::Json(auth): axum::Json<PublicKeyCredential>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(w) = webauthn() else { return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "webauthn init failed"); };
+    let Some(state) = auth_inflight().lock().unwrap().take() else { return json_err(axum::http::StatusCode::BAD_REQUEST, "no login in flight"); };
+    match w.finish_passkey_authentication(&auth, &state) {
+        Ok(_) => {
+            let token = mint_session();
+            (set_cookie("rozum_sess", &token, SESSION_TTL_SECS),
+             axum::Json(serde_json::json!({ "ok": true }))).into_response()
+        }
+        Err(e) => json_err(axum::http::StatusCode::UNAUTHORIZED, &format!("{e:?}")),
+    }
 }
 
 /// A coherent snapshot of the models/gateway service.

@@ -111,8 +111,13 @@ class H(SimpleHTTPRequestHandler):
         # Other control-API reads (e.g. /control/coder/log?id=&tail=) → proxy to :8411, query and all.
         if path.startswith("/control/"):
             try:
-                body = urllib.request.urlopen("http://127.0.0.1:8411" + self.path, timeout=8).read()
-                return self._send_raw(body, 200)
+                hdrs = {}
+                ck = self.headers.get("Cookie")
+                if ck:
+                    hdrs["Cookie"] = ck
+                req = urllib.request.Request("http://127.0.0.1:8411" + self.path, headers=hdrs)
+                resp = urllib.request.urlopen(req, timeout=8)
+                return self._send_raw(resp.read(), resp.status, resp.headers.get_all("Set-Cookie"))
             except urllib.error.HTTPError as e:
                 return self._send_raw(e.read(), e.code)
             except Exception as e:
@@ -150,20 +155,26 @@ class H(SimpleHTTPRequestHandler):
             body = self.rfile.read(n) if n else b""
             url = "http://127.0.0.1:8411" + self.path
             try:
-                req = urllib.request.Request(url, data=body,
-                                             headers={"Content-Type": "application/json"}, method="POST")
+                # forward the caller's Cookie so control-serve can authenticate (session/SSO)
+                hdrs = {"Content-Type": "application/json"}
+                ck = self.headers.get("Cookie")
+                if ck:
+                    hdrs["Cookie"] = ck
+                req = urllib.request.Request(url, data=body, headers=hdrs, method="POST")
                 resp = urllib.request.urlopen(req, timeout=45)
-                return self._send_raw(resp.read(), resp.status)
+                return self._send_raw(resp.read(), resp.status, resp.headers.get_all("Set-Cookie"))
             except urllib.error.HTTPError as e:
-                return self._send_raw(e.read(), e.code)   # forward 4xx/5xx (admission verdict) verbatim
+                return self._send_raw(e.read(), e.code)   # forward 4xx/5xx (admission verdict / 401) verbatim
             except Exception as e:
                 return self._send_json({"error": str(e)}, 502)
         self.send_response(404); self.end_headers()
 
-    def _send_raw(self, body, code):
+    def _send_raw(self, body, code, set_cookies=None):
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")
+        for c in (set_cookies or []):
+            self.send_header("Set-Cookie", c)   # forward the login session cookie from control-serve
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

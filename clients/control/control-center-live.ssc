@@ -18,7 +18,7 @@ stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the vie
 [defaultTheme](std/ui/theme.ssc)
 [vstack, hstack, divider](std/ui/layout.ssc)
 [heading, text](std/ui/typography.ssc)
-[badge](std/ui/display.ssc)
+[badge, link](std/ui/display.ssc)
 [card, cardWithHeader](std/ui/containers.ssc)
 [signalText_](std/ui/reactive.ssc)
 [actionButton, textField](std/ui/input.ssc)
@@ -35,7 +35,7 @@ val room = computedSignal(() => {
   val h = hash()
   if h.contains("/chat/") then h.split("/chat/").last else ""
 })
-val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else if hash().contains("/coders") then "coders" else "home")
+val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else if hash().contains("/coders") then "coders" else if hash().contains("/sessions") then "sessions" else "home")
 
 val chatTick = signal("chatTick", 0)
 val msgUrl   = computedSignal(() => "/chat/messages?room=" + room())
@@ -77,7 +77,7 @@ val catCard = cardWithHeader(heading(2, "Installed catalog"))(
 
 val dashboard = vstack(gap = 16)(
   heading(1, "rozum — control center"),
-  hstack(gap = 10)(actionButton(onNavigate("#/agents"), "🤖 Агенты"), actionButton(onNavigate("#/coders"), "💻 Кодеры")),
+  hstack(gap = 10)(actionButton(onNavigate("#/agents"), "🤖 Агенты"), actionButton(onNavigate("#/coders"), "💻 Кодеры"), actionButton(onNavigate("#/sessions"), "🖥 Сессии"), link("/login.html", "🔐 вход")),
   divider(),
   meetingsCard,
   divider(),
@@ -248,13 +248,64 @@ val codersBody = vstack(gap = 16)(
 )
 ```
 
+## Sessions
+```scalascript
+val seAgent   = signal("seAgent", "claude")
+val seModel   = signal("seModel", "")
+val seWorkdir = signal("seWorkdir", "")
+val sePrompt  = signal("sePrompt", "")
+val seStopId  = signal("seStopId", "")
+
+val sessionsList = cardWithHeader(heading(2, "Живые сессии (терминал)"))(
+  remoteTable(st, [
+    fieldColumn("агент", "agent"),
+    fieldColumn("модель", "model"),
+    fieldColumn("репо", "workdir"),
+    lcol("🖥 терминал", "id", "/terminal.html?id=:value")
+  ], "sessions")
+)
+
+val sessionLaunch = cardWithHeader(heading(2, "Новая интерактивная сессия"))(
+  vstack(gap = 8)(
+    hstack(gap = 8)(text("свободно RAM:"), signalText_(availTxt)),
+    textField(seAgent, "агент: claude | codex | opencode"),
+    textField(seModel, "модель — спец из каталога…"),
+    textField(seWorkdir, "рабочая папка (абсолютный путь)…"),
+    textField(sePrompt, "первое задание (необязательно)…"),
+    actionButton(
+      fetchActionWith("POST", "/control/session/launch",
+        formBody([("agent", "seAgent"), ("model", "seModel"), ("workdir", "seWorkdir"), ("prompt", "sePrompt")]),
+        [onBumpTick(refresh)]),
+      "🖥 запустить сессию")
+  )
+)
+
+val sessionStop = cardWithHeader(heading(2, "Остановить сессию"))(
+  hstack(gap = 8)(
+    textField(seStopId, "id сессии…"),
+    actionButton(fetchActionWith("POST", "/control/session/stop", formBody([("id", "seStopId")]), [onBumpTick(refresh)]), "стоп")
+  )
+)
+
+val sessionsBody = vstack(gap = 16)(
+  hstack(gap = 10)(actionButton(onNavigate("#/"), "← назад"), heading(1, "Сессии"), actionButton(incSignal(refresh), "↻"), link("/login.html", "🔐 вход")),
+  divider(),
+  sessionsList,
+  divider(),
+  sessionLaunch,
+  divider(),
+  sessionStop
+)
+```
+
 ## Compose + serve
 ```scalascript
 val view = router(mode, [
   route("home", [dashboard]),
   route("chat", [chatBody]),
   route("agents", [agentsBody]),
-  route("coders", [codersBody])
+  route("coders", [codersBody]),
+  route("sessions", [sessionsBody])
 ])
 
 serve(lower(view, defaultTheme), 8410)
