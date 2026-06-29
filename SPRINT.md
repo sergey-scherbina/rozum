@@ -43,9 +43,13 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   console sends an operator handle (👤 chip → localStorage → `X-Rozum-Actor`); `auth_layer` attributes the
   write to it (proven: a console escalate showed `op1:` not the secret). (5) **frontend smoke** (`7146b40`) —
   structural test asserts every feature's wiring is in the served HTML + no `prompt()`. Live: console 200,
-  SSE `init`, escalate via console attributed to op1. **REMAINING DEPTH (deferred, honest):** real
-  per-token auth + RBAC roles (observer/responder/admin), behavioral Playwright e2e, list pagination/
-  virtualization at scale, fold these into the `.ssc` PWA (its incident UI is thinner). 102 meeting tests.
+  SSE `init`, escalate via console attributed to op1. **(+) per-token auth + RBAC DONE (`f64fd2a`):**
+  `tokens.json` + CLI `meetings token issue|list|revoke`; `auth_layer` resolves the password as a token
+  (trusted handle+role) or the shared secret (admin); enforces reads=observer / writes=responder /
+  redact=admin; `GET /whoami` drives console role-gating (observers get no compose/actions). Live: observer
+  POST→403, responder posts as its handle but redact→403. 104 meeting tests. **REMAINING DEPTH (honest):**
+  token expiry/rotation + per-room roles (auth is global now); behavioral Playwright e2e; list pagination at
+  scale; fold these into the `.ssc` PWA (thinner).
 
 - [x] **meetings → support/incident platform (operator 2026-06-28, strategic)** — COMPLETE across all
   three surfaces + polished (foundation → agent-native MCP → human CLI → web console). Capabilities shipped
