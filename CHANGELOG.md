@@ -1,5 +1,12 @@
 # Changelog
 
+## ucc — model selection in launch forms
+Completed: 2026-06-29
+
+Agent and coder launch forms now select models from the live installed catalog instead of asking the
+operator to type a model spec manually. Each form embeds a compact `installed` table with a `выбрать`
+row action that writes the selected `spec` into the existing launch payload signal.
+
 ## ucc — hash navigation and deploy script refreshed
 Completed: 2026-06-29
 

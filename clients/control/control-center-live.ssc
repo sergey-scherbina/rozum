@@ -22,7 +22,7 @@ stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the vie
 [card, cardWithHeader](std/ui/containers.ssc)
 [signalText_](std/ui/reactive.ssc)
 [actionButton, textField](std/ui/input.ssc)
-[remoteTable, lcol](std/ui/data.ssc)
+[remoteTable, lcol, rowLink](std/ui/data.ssc)
 [route, router](std/ui/routing.ssc)
 
 ## State + routing
@@ -74,6 +74,7 @@ val residentsCard = cardWithHeader(heading(2, "Resident models (in memory now)")
 val catCard = cardWithHeader(heading(2, "Installed catalog"))(
   remoteTable(st, [fieldColumn("Model", "spec"), fieldColumn("Size", "size_gib")], "installed")
 )
+val modelSelectCols = [fieldColumn("модель", "spec"), fieldColumn("GiB", "size_gib")]
 
 val dashboard = vstack(gap = 16)(
   heading(1, "rozum — control center"),
@@ -141,11 +142,13 @@ val agentsList = cardWithHeader(heading(2, "Запущенные агенты"))
     fieldColumn("id", "id")
   ], "agents")
 )
+val agentModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", agModel, "spec")])
 
 val launchForm = cardWithHeader(heading(2, "Запустить агента (модель в комнате)"))(
   vstack(gap = 8)(
     hstack(gap = 8)(text("свободно RAM:"), signalText_(availTxt)),
-    textField(agModel, "модель — спец из каталога ниже…"),
+    hstack(gap = 8)(text("модель:"), signalText_(agModel)),
+    agentModelList,
     textField(agRoom, "комната…"),
     textField(agPolicy, "когда отвечать: mention | always | manual"),
     textField(agPersona, "персона / контекст (необязательно)…"),
@@ -205,12 +208,14 @@ val codersList = cardWithHeader(heading(2, "Запущенные кодеры"))
     fieldColumn("id", "id")
   ], "coders")
 )
+val coderModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", cdModel, "spec")])
 
 val coderLaunch = cardWithHeader(heading(2, "Запустить кодера (реальная работа в репо)"))(
   vstack(gap = 8)(
     hstack(gap = 8)(text("свободно RAM:"), signalText_(availTxt)),
     textField(cdAgent, "агент: claude | codex | opencode"),
-    textField(cdModel, "модель — спец из каталога…"),
+    hstack(gap = 8)(text("модель:"), signalText_(cdModel)),
+    coderModelList,
     textField(cdWorkdir, "рабочая папка (абсолютный путь к репо)…"),
     textField(cdPrompt, "задание…"),
     actionButton(
