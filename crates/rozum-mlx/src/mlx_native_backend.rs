@@ -4308,6 +4308,73 @@ mod smmr_cap_tests {
 }
 
 #[cfg(test)]
+mod artifact_synth_gate_tests {
+    use super::artifact_synth_active;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn with_synth_env<R>(
+        glm: Option<&str>,
+        universal: Option<&str>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old_glm = std::env::var("ROZUM_GLM_ARTIFACT_SYNTH").ok();
+        let old_universal = std::env::var("ROZUM_ARTIFACT_SYNTH").ok();
+
+        // Edition 2024 makes process env mutation unsafe. These tests serialize the two
+        // relevant keys and restore them before releasing the lock.
+        unsafe {
+            match glm {
+                Some(v) => std::env::set_var("ROZUM_GLM_ARTIFACT_SYNTH", v),
+                None => std::env::remove_var("ROZUM_GLM_ARTIFACT_SYNTH"),
+            }
+            match universal {
+                Some(v) => std::env::set_var("ROZUM_ARTIFACT_SYNTH", v),
+                None => std::env::remove_var("ROZUM_ARTIFACT_SYNTH"),
+            }
+        }
+
+        let out = f();
+
+        unsafe {
+            match old_glm {
+                Some(v) => std::env::set_var("ROZUM_GLM_ARTIFACT_SYNTH", v),
+                None => std::env::remove_var("ROZUM_GLM_ARTIFACT_SYNTH"),
+            }
+            match old_universal {
+                Some(v) => std::env::set_var("ROZUM_ARTIFACT_SYNTH", v),
+                None => std::env::remove_var("ROZUM_ARTIFACT_SYNTH"),
+            }
+        }
+
+        out
+    }
+
+    #[test]
+    fn glm_artifact_synth_is_default_on_but_opt_out() {
+        with_synth_env(None, None, || {
+            assert!(artifact_synth_active("mlx-community:GLM-4-32B-0414-4bit"));
+            assert!(artifact_synth_active("mlx-community:GLM-4.7-Flash-4bit"));
+            assert!(!artifact_synth_active("mlx-community:Qwen2.5-Coder-7B-Instruct-4bit"));
+        });
+
+        with_synth_env(Some("0"), None, || {
+            assert!(!artifact_synth_active("mlx-community:GLM-4-32B-0414-4bit"));
+        });
+    }
+
+    #[test]
+    fn universal_artifact_synth_opts_in_non_glm_models() {
+        with_synth_env(Some("0"), Some("1"), || {
+            assert!(artifact_synth_active("mlx-community:Qwen2.5-Coder-7B-Instruct-4bit"));
+            assert!(artifact_synth_active("mlx-community:GLM-4-32B-0414-4bit"));
+        });
+    }
+}
+
+#[cfg(test)]
 mod glm_framing_tests {
     use super::{is_glm_narration_directive, strip_glm_framing_msg, strip_glm_narration_framing};
     use crate::backend::{ContentBlock, Message, Role};

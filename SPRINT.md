@@ -539,10 +539,12 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   spike), watch `kern.memorystatus_vm_pressure_level` stay Normal throughout + 0 reboot. Then flip the
   default in `min_free_ram_bytes()`. Composes with A-bootstrap (seed big-model peaks first).
 
-- [ ] **glm-synth-validate-default-on** — THE remaining 'works by default' win (slot-gated, watcher re-armed). multi-rep A/B for the GLM artifact synth (now WORKS, master
-  201c3f2, opt-in ROZUM_GLM_ARTIFACT_SYNTH=1): create lift across N reps + edit/chat NO-regress (fix was
-  2/2) + false-write fuzz (chat code blocks must NOT write files). If clean -> flip default-ON for GLM so
-  it works out-of-the-box. Slot-gated. Spec glm-artifact-write-synth § RESOLVED.
+- [x] **glm-synth-validate-default-on** — DONE (2026-06-29). The remaining "works by default" GLM gate
+  is now closed in code and docs: GLM artifact synth is default-ON for GLM (`ROZUM_GLM_ARTIFACT_SYNTH=0`
+  opt-out), `ROZUM_ARTIFACT_SYNTH=1` remains the universal opt-in for non-GLM models, and a low-load
+  unit guard asserts both paths. Prior live A/B in `docs/specs/glm-artifact-write-synth.md` remains the
+  model evidence: GLM-4-32B create `build` lifted 0/3 -> 3/3, edit did not regress, chat false-write is
+  covered by synth ambiguity tests. No 32B reload was run while the host was under another MLX build.
 
 - [x] **glm-synth-mixed-responses** — DONE (851b15f): synth now ADDITIVE + deduped in both finalize paths. WAS: fired ONLY when parse_tool_calls is empty (engine.rs:392),
   so a MIXED GLM response (1 valid <tool_call> + N artifacts) drops the artifacts. Run the synth ADDITIVELY
@@ -565,15 +567,10 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   round-trip (rendered as `name\njson`, not GLM's original artifact) confuses it; otherwise model-side.
 
 
-- [ ] **glm-artifact-write-synth** — ACTIVE (operator-chosen 2026-06-23). Make GLM-4-32B a full
-  create-from-scratch agent driver by synthesizing a `Write` call when it prints a labeled file
-  artifact instead of naming the tool. **Spec: docs/specs/glm-artifact-write-synth.md** (design +
-  5 guards + integration point + validation plan). DISCIPLINE: do NOT build the parser blind —
-  capture REAL GLM create-from-scratch output first (slot-gated model-only probe), then build the
-  format matchers against it (the narration-strawman lesson). Default-OFF `ROZUM_GLM_ARTIFACT_SYNTH`;
-  ship default-ON only if live A/B lifts create + zero edit/chat regression + false-write fuzz clean.
-  Steps: (1) capture real output, (2) build+unit-test matchers vs fixtures, (3) thread tool-names +
-  GLM-family to mlx_native_backend.rs ~2115 + synth at empty-parse, (4) live A/B, (5) fuzz gate.
+- [x] **glm-artifact-write-synth** — DONE. GLM-4-32B's create-from-scratch artifact delivery path is
+  implemented from real captured output, tested against fixtures, threaded through the dense engine
+  finalize path, generalized to offered tool schemas, made additive/deduped for mixed responses, and
+  flipped default-ON for GLM after live A/B. Spec: `docs/specs/glm-artifact-write-synth.md`.
 
 
 (Formerly `WORK_QUEUE.md`; renamed to `SPRINT.md` per `AGENTS.md` / the

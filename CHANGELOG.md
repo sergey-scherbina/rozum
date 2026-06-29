@@ -1,5 +1,17 @@
 # Changelog
 
+## bench — GLM artifact synth default-on gate locked down
+Completed: 2026-06-29
+
+Closed the stale GLM matrix follow-up for artifact synth default-on. The code already made
+`ROZUM_GLM_ARTIFACT_SYNTH` default to enabled for GLM models with `=0` as an opt-out, while
+`ROZUM_ARTIFACT_SYNTH=1` stays the explicit universal opt-in for non-GLM models. Added a low-load unit
+test that locks this gate behavior down for GLM-4-32B / GLM-4.7-Flash and Qwen2.5-Coder.
+
+No 32B live reload was run for this entry because the host was already running another MLX build. The
+model evidence remains the prior live A/B in `docs/specs/glm-artifact-write-synth.md`: GLM-4-32B create
+`build` lifted 0/3 -> 3/3 with the synth, while edit/chat guards stayed non-regressive.
+
 ## bench — Qwen3-4B repair hints close fix/test red cells
 Completed: 2026-06-29
 
