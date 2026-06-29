@@ -12,21 +12,27 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   path (channel-wakeup off, what the bench uses) now adds `--strict-mcp-config` → drops ALL ambient
   MCP robustly; channel-on keeps the ambient config loadable (`server:rozum`) + enumerates
   `mcp__jetbrains`. 7/7 lean_tests.
-- [~] **sig4-pareto-live** — sig4 VALIDATED LIVE (2026-06-29). End-to-end through the real OpenAI HTTP
-  path on a loaded 0.6B gateway: a crafted conversation with **4 identical Bash calls → the sig4
-  synthetic stop** (exact message, `finish_reason: stop`, model NOT invoked = short-circuit works);
-  **3 identical calls → model runs normally** (K=4 boundary holds both ways, no false-positive). The
-  Coder-7B scoped sweep (rpn+fix ×2, gate-safe) was 0/2 each but with **NO loop / NO stall / NO timeout**
-  (clean fast fails, 22–80s) → the no-stop loop + rpn stall are **Coder-30B-specific, not reproduced on
-  safe small models**. DEFERRED (needs a fully-clear host — Coder-30B peaks ~30 GB, reboot-safety edge):
-  the Coder-30B sig4-stops-the-482-loop measurement, keep/delete, and the DWQ-35B/gpt-oss Pareto pairs.
-  Coder-7B = KEEP regardless (it is the executor in the 9.4 GB champion pipeline).
-- [ ] **gen-stall-guard** — DEFERRED (not built — correct call). The `rpn` timeout survives ALL existing
-  guards (inactivity 300s + per-gen ceiling 8192 + repeat_guard + sig 1–4) → long non-repetitive
-  non-converging reasoning, not a clean pattern; it did NOT reproduce on Coder-7B (which fast-fails, no
-  stall), so it is a **Coder-30B model property**. Building a guard blind would false-positive real long
-  tasks. Re-open ONLY with a real Coder-30B `rpn` transcript (run with `KEEP=1` on a clear host) showing
-  a detectable signature; otherwise it stays documented as model-side, not a gateway gap.
+- [x] **sig4-pareto-live** — DONE (2026-06-29). (1) **sig4 VALIDATED LIVE** end-to-end through the real
+  OpenAI HTTP path on a loaded 0.6B gateway: 4 identical Bash calls → the sig4 synthetic stop (exact msg,
+  `finish_reason: stop`, model NOT invoked); 3 identical → model runs normally (K=4 boundary both ways,
+  no false-positive). (2) **Coder-30B sweep (rpn+fix ×2, KEEP=1, single big model ~20.5 GB peak, gate
+  admitted, compressor 0, clean teardown, NO reboot):** `fix` **2/2 PASS** (~50 s, 9 turns) — the
+  prior 482-call/480s loop did NOT reproduce → it is INTERMITTENT matrix-nondeterminism, not a reliable
+  repro. `rpn` 0/2 (300s budget). (3) sig4 correctly stayed SILENT on the real Coder-30B run (no
+  false-positive). Pipeline-pair Pareto expansion (DWQ-35B/gpt-oss) left as optional future work.
+- [x] **gen-stall-guard** — CLOSED, NOT BUILT (data-supported, the correct call). Captured the real
+  `rpn` stall (KEEP=1): it is NOT a loop, NOT verbose reasoning, NOT a delivery-format failure (calls
+  execute structured, 8–11 of them, ≤1 leaked as text), and NOT exact-recurrence (diverse Write/Bash/
+  Edit/Read → sig4 rightly silent). ROOT CAUSE = **model capability**: Coder-30B writes non-compiling
+  Rust (`match s.as_str() { '+' => …}` char-vs-&str), frequently doesn't `cargo build`/test to catch it,
+  rewrites diverse content, and the 30B's per-turn latency × many turns exhausts the budget. A generic
+  wall-clock/no-progress guard would ABORT genuine (if slow/wrong) work → wrong fix. The existing guards
+  (inactivity 300s + ceiling 8192 + repeat_guard + sig 1–4) are the right coverage; this is model-side
+  ([[project-downloaded-models-toolcall-dwq]]: Coder-30B is a weak agentic create-from-scratch coder),
+  not a gateway gap. NOTE: `rpn` had 3 identical `Cargo.toml` Writes (a near-miss for sig4's threshold-4)
+  — a same-content-Write refinement could catch it, but it would only FAIL faster, not fix delivery, so
+  not worth the false-positive surface. **Recommendation: DELETE Coder-30B** — dominated by DWQ-35B
+  (30 GB peak + intermittent-loop/0-2-rpn vs 22 GB + 10/10); operator's call (re-download cost).
 
 - [x] **meetings → support/incident platform (operator 2026-06-28, strategic)** — COMPLETE across all
   three surfaces + polished (foundation → agent-native MCP → human CLI → web console). Capabilities shipped
