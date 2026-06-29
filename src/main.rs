@@ -532,6 +532,20 @@ enum MeetingsAction {
         count: usize,
     },
 
+    /// React to a message with an emoji (toggle).
+    React {
+        /// The message id (`<date>/<n>`).
+        msg_id: String,
+        /// The emoji (e.g. 👍 ✅ 👀).
+        emoji: String,
+        /// Room name; default = the cwd project's room.
+        #[arg(long)]
+        room: Option<String>,
+        /// Remove the reaction instead of adding it.
+        #[arg(long)]
+        off: bool,
+    },
+
     /// Redact a message's content for all readers (leaked PII/secrets). The bytes stay on disk.
     Redact {
         /// The message id (`<date>/<n>`) to redact.
@@ -1134,6 +1148,9 @@ async fn main() {
             }
             MeetingsAction::Read { room, count } => run_meetings_read(room, count).await,
             MeetingsAction::RepairThreads { room } => run_meetings_repair_threads(room).await,
+            MeetingsAction::React { msg_id, emoji, room, off } => {
+                run_meetings_react(msg_id, emoji, room, off).await
+            }
             MeetingsAction::Redact { msg_id, room, reason, undo } => {
                 run_meetings_redact(msg_id, room, reason, undo).await
             }
@@ -2959,6 +2976,24 @@ async fn run_meetings_read(room: Option<String>, count: usize) {
         match t.badge() {
             Some(b) => println!("[{}] {} {}: {}", hhmm_of(t.ts), b, t.display_name, t.content),
             None => println!("[{}] {}: {}", hhmm_of(t.ts), t.display_name, t.content),
+        }
+    }
+}
+
+/// `rozum meetings react` — toggle an emoji reaction on a message (direct disk).
+async fn run_meetings_react(msg_id: String, emoji: String, room: Option<String>, off: bool) {
+    use rozum::meeting::store;
+    let root = resolve_room_or_exit(room, "react").await;
+    if !root.exists() {
+        eprintln!("meetings react: no such room ({})", root.display());
+        std::process::exit(1);
+    }
+    let (who, _token) = rozum::meeting::client::post_identity(None);
+    match store::set_reaction(&root, &msg_id, &emoji, &who, !off) {
+        Ok(n) => println!("{emoji} {msg_id} → {n}"),
+        Err(e) => {
+            eprintln!("meetings react: {e}");
+            std::process::exit(1);
         }
     }
 }

@@ -101,6 +101,10 @@
     white-space: nowrap;
   }
   .tag { font-size: 11px; color: var(--muted); background: var(--chip); border-radius: 5px; padding: 1px 6px; }
+  .reacts { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 4px; align-items: center; }
+  .react-chip { font-size: 12px; background: var(--sel); border: 1px solid var(--border); border-radius: 11px; padding: 1px 8px; cursor: pointer; }
+  .react-add { font-size: 12px; color: var(--muted); cursor: pointer; opacity: .55; }
+  .react-add:hover { opacity: 1; }
   .thread-link { font-size: 11px; color: var(--accent); cursor: pointer; }
   .sev-critical { background: var(--sev-crit); } .sev-high { background: var(--sev-high); }
   .sev-medium { background: var(--sev-med); } .sev-low { background: var(--sev-low); }
@@ -216,6 +220,7 @@ const SEV_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
 let ROOM = null;
 let SELECTED = null;   // selected thread id, or null = live feed
 let REPLY_TO = null;   // message id the compose box is replying to, or null
+let REACTIONS = {};    // msg_id → emoji → [who], refreshed each cycle
 let timer = null;
 
 function relTime(ts) {
@@ -407,6 +412,27 @@ function msgRow(m, opts) {
   }
   row.appendChild(l1);
   row.appendChild(el("div", "body", m.content || ""));
+  // Reactions: existing emoji-count chips + a quick 👍 toggle.
+  if (m.date != null && m.n != null) {
+    const mid = `${m.date}/${m.n}`;
+    const rx = REACTIONS[mid] || {};
+    const rrow = el("div", "reacts");
+    for (const emoji of Object.keys(rx)) {
+      const n = (rx[emoji] || []).length;
+      if (!n) continue;
+      const chip = el("span", "react-chip", `${emoji} ${n}`);
+      chip.onclick = () => act(postJSON(`rooms/${enc(ROOM)}/react`, { msg_id: mid, emoji, add: true }), "reacted");
+      rrow.appendChild(chip);
+    }
+    const add = el("span", "react-add", "＋😀");
+    add.title = "react";
+    add.onclick = () => {
+      const emoji = prompt("Emoji:", "👍"); if (!emoji) return;
+      act(postJSON(`rooms/${enc(ROOM)}/react`, { msg_id: mid, emoji, add: true }), "reacted");
+    };
+    rrow.appendChild(add);
+    row.appendChild(rrow);
+  }
   return row;
 }
 function updateReplyHint() {
@@ -542,6 +568,7 @@ async function refresh() {
     const t = await api(`rooms/${enc(ROOM)}/threads`);
     renderMetrics(t.metrics || {});
     renderRail(t.threads || []);
+    try { REACTIONS = (await api(`rooms/${enc(ROOM)}/reactions`)).reactions || {}; } catch { REACTIONS = {}; }
     if (SELECTED) await renderThread(SELECTED); else await renderLive();
   } catch (e) {
     $("main").innerHTML = "";

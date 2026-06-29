@@ -134,6 +134,8 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
         .route("/rooms/{name}/threads/{id}/link", post(thread_link))
         .route("/rooms/{name}/messages", post(submit))
         .route("/rooms/{name}/redact", post(redact))
+        .route("/rooms/{name}/reactions", get(reactions))
+        .route("/rooms/{name}/react", post(react))
         .route("/rooms/{name}/metrics", get(metrics))
         .route("/rooms/{name}/search", get(search))
         .route("/roster", get(roster))
@@ -517,6 +519,23 @@ async fn thread_state(
 ) -> Response {
     body["id"] = json!(id);
     console_call(&name, &user, "meeting.thread_set_state", body).await
+}
+
+/// `GET /rooms/{name}/reactions` — the room's reaction map (`msg_id → emoji → [who]`).
+async fn reactions(State(state): State<RestState>, AxumPath(name): AxumPath<String>) -> Response {
+    let Some(root) = room_root(&state.registry, &name) else {
+        return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
+    };
+    Json(json!({ "room": name, "reactions": store::load_reactions(&root) })).into_response()
+}
+
+/// `POST /rooms/{name}/react` — body `{ "msg_id": "<date>/<n>", "emoji": "👍", "add": true|false }`.
+async fn react(
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    console_call(&name, &user, "meeting.react", body).await
 }
 
 /// `POST /rooms/{name}/redact` — body `{ "msg_id": "<date>/<n>", "redact": true|false, "reason": "..." }`.

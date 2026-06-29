@@ -1467,6 +1467,57 @@ fn apply_redactions(root: &Path, turns: &mut [StoredTurn]) {
     }
 }
 
+// ── Reactions (`reactions.json`) ──────────────────────────────────────────────
+
+/// A room's reactions: `msg_id → emoji → [participant_id…]`. Stored separately from the append-only
+/// log so a reaction can be toggled on/off without rewriting messages.
+pub type Reactions = BTreeMap<String, BTreeMap<String, Vec<String>>>;
+
+fn reactions_path(root: &Path) -> PathBuf {
+    root.join("reactions.json")
+}
+
+/// The room's reaction map; empty if none.
+pub fn load_reactions(root: &Path) -> Reactions {
+    std::fs::read(reactions_path(root))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Toggle a reaction: `add` puts `who` under `msg_id → emoji` (idempotent), else removes them. Empty
+/// emoji/message entries are pruned. Persisted durably. Returns the new participant count for that emoji.
+pub fn set_reaction(
+    root: &Path,
+    msg_id: &str,
+    emoji: &str,
+    who: &str,
+    add: bool,
+) -> std::io::Result<usize> {
+    let mut m = load_reactions(root);
+    let count = {
+        let by_emoji = m.entry(msg_id.to_string()).or_default();
+        let who_list = by_emoji.entry(emoji.to_string()).or_default();
+        if add {
+            if !who_list.iter().any(|w| w == who) {
+                who_list.push(who.to_string());
+            }
+        } else {
+            who_list.retain(|w| w != who);
+        }
+        let c = who_list.len();
+        if c == 0 {
+            by_emoji.remove(emoji);
+        }
+        c
+    };
+    if m.get(msg_id).map(|e| e.is_empty()).unwrap_or(false) {
+        m.remove(msg_id);
+    }
+    write_json_atomic(&reactions_path(root), &m)?;
+    Ok(count)
+}
+
 // ── Registry (`rooms.json`) ──────────────────────────────────────────────────
 
 /// One entry in the room-location registry.
@@ -1772,6 +1823,28 @@ mod tests {
         assert!(t.pinned.is_empty());
         // Unknown thread → None.
         assert!(w.set_pinned("nope/0", &m.id(), true, 1_718_000_400).unwrap().is_none());
+    }
+
+    #[test]
+    fn reactions_toggle_and_persist() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("room");
+        std::fs::create_dir_all(&root).unwrap();
+        // Two people 👍 a message → count 2; idempotent; un-react drops to 1.
+        assert_eq!(set_reaction(&root, "2026-06-29/0", "👍", "alice", true).unwrap(), 1);
+        assert_eq!(set_reaction(&root, "2026-06-29/0", "👍", "alice", true).unwrap(), 1); // idempotent
+        assert_eq!(set_reaction(&root, "2026-06-29/0", "👍", "bob", true).unwrap(), 2);
+        assert_eq!(set_reaction(&root, "2026-06-29/0", "✅", "alice", true).unwrap(), 1);
+        let r = load_reactions(&root);
+        assert_eq!(r["2026-06-29/0"]["👍"], vec!["alice".to_string(), "bob".to_string()]);
+        assert_eq!(r["2026-06-29/0"]["✅"], vec!["alice".to_string()]);
+        // Remove alice's 👍 → count 1; the emoji entry stays (bob remains).
+        assert_eq!(set_reaction(&root, "2026-06-29/0", "👍", "alice", false).unwrap(), 1);
+        // Remove bob → emoji pruned; ✅ remains so the message entry stays.
+        assert_eq!(set_reaction(&root, "2026-06-29/0", "👍", "bob", false).unwrap(), 0);
+        let r = load_reactions(&root);
+        assert!(!r["2026-06-29/0"].contains_key("👍"), "empty emoji pruned");
+        assert!(r["2026-06-29/0"].contains_key("✅"));
     }
 
     #[test]

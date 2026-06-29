@@ -314,6 +314,11 @@ impl DaemonRoom {
             .map_err(|e| e.to_string())
     }
 
+    /// Toggle a reaction (emoji) on a message by `who`.
+    pub fn set_reaction(&mut self, msg_id: &str, emoji: &str, who: &str, add: bool) -> Result<usize, String> {
+        super::store::set_reaction(self.writer.root(), msg_id, emoji, who, add).map_err(|e| e.to_string())
+    }
+
     pub fn set_pinned(&mut self, thread_id: &str, msg_id: &str, pin: bool) -> Result<Option<Thread>, String> {
         self.writer.set_pinned(thread_id, msg_id, pin, unix_ts()).map_err(|e| e.to_string())
     }

@@ -161,6 +161,17 @@ pub struct LinkParams {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ReactParams {
+    /// The message id (`<date>/<n>`) to react to.
+    pub msg_id: String,
+    /// The emoji (e.g. "👍", "✅", "👀").
+    pub emoji: String,
+    /// Add the reaction (true, default) or remove it (false).
+    #[serde(default)]
+    pub add: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RedactParams {
     /// The message id (`<date>/<n>`) to redact/un-redact.
     pub msg_id: String,
@@ -714,6 +725,33 @@ impl MeetingServer {
                     &serde_json::json!({ "thread": p.id, "links": t.links }).to_string(),
                 ),
                 Ok(None) => err_result("unknown thread id"),
+                Err(e) => err_result(&e),
+            }
+        })
+        .await
+    }
+
+    /// React to a message with an emoji (or remove your reaction).
+    #[tool(
+        name = "meeting.react",
+        description = "Toggle an emoji reaction on a message (add=true default, false to remove)."
+    )]
+    pub async fn react(&self, params: Parameters<ReactParams>) -> CallToolResult {
+        guard("meeting.react", async move {
+            let (room, caller) = self.session_room().await;
+            let (Some(room), Some(caller)) = (room, caller) else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let p = &params.0;
+            let add = p.add.unwrap_or(true);
+            match room
+                .lock()
+                .await
+                .set_reaction(&p.msg_id, &p.emoji, caller.0.as_str(), add)
+            {
+                Ok(n) => text_result(
+                    &serde_json::json!({ "msg_id": p.msg_id, "emoji": p.emoji, "count": n }).to_string(),
+                ),
                 Err(e) => err_result(&e),
             }
         })
