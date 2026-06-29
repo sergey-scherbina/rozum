@@ -90,6 +90,13 @@ on the existing meeting stack (`docs/specs/agent-meetings-daemon.md`, `meeting-i
 `meeting-mention-inbox.md`, `meetings-rest-read.md`; daily disk-backed rooms, session-token identity,
 single-writer daemon). Each item below is its own spec+build later — listed to set the trajectory.
 
+- [ ] **mtg-ssc-request-handlers** (operator 2026-06-29) — the `.ssc` PWA route handlers receive a path/body
+  STRING (the generated `_http_route` passes `afterPrefix(req)` / `doPost(req)` a string), not the full
+  std `Request` — so they CAN'T read cookies/headers. That blocks token-auth + RBAC roles in the `.ssc`
+  (done in the console). Migrate the `.ssc` route layer to `Request`-based handlers (`req.cookies`,
+  `req.headers`), then resolve a `rozum_token` cookie → handle + per-room role (read `tokens.json`), gate the
+  incident action forms, and attribute actions (`rozum meetings incident --as <handle>`). Until then the
+  `.ssc` is a Tailscale-network-trusted responder surface; realtime + alerts already shipped (`465c0c1`).
 - [x] **mtg-retention** — DONE (`7bec5a1`). `store::prune_old_days` deletes `<date>.jsonl` older than N
   days + rewrites `index.json`, NEVER pruning a day holding an open incident's messages; wired into daemon
   start, gated `ROZUM_MEETINGS_RETAIN_DAYS` (default off). Test.
