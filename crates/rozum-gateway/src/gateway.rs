@@ -1521,20 +1521,20 @@ fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
         }
     }
 
-    // ── Signature 5: edits keep FAILING, nothing EVER lands (no-progress thrash) ──
+    // ── Signature 5: edits keep FAILING, nothing lands (varied-args thrash) ──
     // A model that misreads/hallucinates the file content edits text that ISN'T there → "String to
     // replace not found", with DIFFERENT args each retry, padded with re-reads — observed live on
-    // GLM-4.7-Flash (read the file, then edited code that didn't exist; looped 25 turns, file never
-    // changed). The failing edits aren't byte-identical (sig 1 & 4 miss them), stay under the per-file
-    // churn backstop (sig 3), and are spread thin across many re-reads so a recent-WINDOW count misses
-    // them. So count over the WHOLE run: fire when a SUSTAINED run (>=MIN_THRASH_CALLS tool calls) has
-    // >=FAILED_EDIT_THRESHOLD failed edits AND not ONE edit ever LANDED — the agent has been editing
-    // and nothing has applied, no progress at all. Guards: a healthy fix lands >=1 edit (a single
-    // success disqualifies it), pure exploration makes no edits (never trips), and the >=8-call gate
-    // preserves the existing "3 short varied-failing edits is not yet a loop" contract (only 3 calls).
+    // GLM-4.7-Flash (read the file, then edited code that didn't exist; looped 23 turns, file never
+    // changed). The failing edits aren't byte-identical (sig 1 & 4 miss them) and stay under the
+    // per-file churn backstop (sig 3). Fire when, in a SUSTAINED run, the recent window holds
+    // >=FAILED_EDIT_THRESHOLD failed edits AND not one edit LANDED — the agent keeps trying to edit
+    // and nothing applies. Guards against false positives: a healthy fix lands >=1 edit (resets it),
+    // pure exploration makes no edits (never trips), and the MIN_THRASH_CALLS gate preserves the
+    // existing "3 varied-failing edits is not yet a loop" contract (that case is only 3 calls long).
     const MIN_THRASH_CALLS: usize = 8;
     const FAILED_EDIT_THRESHOLD: usize = 3;
     if calls.len() >= MIN_THRASH_CALLS {
+        let win = &calls[calls.len().saturating_sub(TOOL_WINDOW)..];
         // A MUTATION call only — by tool name or an old/new-string payload. NOT `edit_target_and_lines`
         // (which matches any `file_path`, counting a Read as an edit) and NOT a Read/Bash/Grep.
         let is_edit = |name: &str, input: &Value| {
@@ -1544,7 +1544,7 @@ fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
         };
         let mut failed_edits = 0usize;
         let mut landed_edit = false;
-        for &(name, input, err) in &calls {
+        for &(name, input, err) in win {
             if is_edit(name, input) {
                 if err { failed_edits += 1 } else { landed_edit = true }
             }
