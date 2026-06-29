@@ -726,6 +726,18 @@ enum TokenAction {
         #[arg(long)]
         ttl: Option<String>,
     },
+    /// Grant (or clear) a per-room role override for a handle — e.g. admin in `incidents`, observer
+    /// elsewhere. The base role (from `issue`) applies to rooms without an override.
+    Grant {
+        /// The operator handle.
+        handle: String,
+        /// The room to scope the role to.
+        #[arg(long)]
+        room: String,
+        /// Role for that room: observer|responder|admin, or `none`/`clear` to remove the override.
+        #[arg(long)]
+        role: String,
+    },
     /// Revoke by token, or by handle (revokes all of that handle's tokens).
     Revoke {
         /// A token string or an operator handle.
@@ -3104,7 +3116,41 @@ fn run_meetings_token(action: TokenAction) {
                 } else {
                     format!("in {}", fmt_secs(info.expires_ts.saturating_sub(n)))
                 };
-                println!("{short}…  {}  [{}]  expires: {exp}", info.handle, info.role.as_str());
+                let per_room = if info.rooms.is_empty() {
+                    String::new()
+                } else {
+                    let g: Vec<String> = info.rooms.iter().map(|(r, role)| format!("{r}={}", role.as_str())).collect();
+                    format!("  rooms:{{{}}}", g.join(", "))
+                };
+                println!("{short}…  {}  [{}]  expires: {exp}{per_room}", info.handle, info.role.as_str());
+            }
+        }
+        TokenAction::Grant { handle, room, role } => {
+            let role_opt = if matches!(role.trim().to_ascii_lowercase().as_str(), "none" | "clear" | "") {
+                None
+            } else {
+                match Role::parse(&role) {
+                    Some(r) => Some(r),
+                    None => {
+                        eprintln!("token grant: bad role '{role}' (observer|responder|admin|none)");
+                        std::process::exit(1);
+                    }
+                }
+            };
+            match store::grant_room_role(&sd, &handle, &room, role_opt) {
+                Ok(0) => {
+                    eprintln!("token grant: no token for '{handle}' (issue one first)");
+                    std::process::exit(1);
+                }
+                Ok(n) => println!(
+                    "{} {handle} in {room}{} ({n} token(s))",
+                    if role_opt.is_some() { "granted" } else { "cleared" },
+                    role_opt.map(|r| format!(" = {}", r.as_str())).unwrap_or_default()
+                ),
+                Err(e) => {
+                    eprintln!("token grant: {e}");
+                    std::process::exit(1);
+                }
             }
         }
         TokenAction::Revoke { token_or_handle } => match store::revoke_token(&sd, &token_or_handle) {

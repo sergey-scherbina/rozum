@@ -150,6 +150,7 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
         .route("/rooms/{name}/events", get(events))
         .route("/rooms/{name}/search", get(search))
         .route("/whoami", get(whoami))
+        .route("/rooms/{name}/whoami", get(whoami))
         .route("/roster", get(roster))
         .layer(middleware::from_fn_with_state(
             AuthCfg { secret, state_dir },
@@ -470,9 +471,13 @@ async fn auth_layer(
     };
     // The password is EITHER an issued token (→ a trusted handle + role) OR the shared secret (→ admin,
     // back-compat). A token's handle is authoritative (ignore the self-asserted X-Rozum-Actor); the
-    // shared-secret path keeps the actor-header convenience.
+    // shared-secret path keeps the actor-header convenience. The role is the token's EFFECTIVE role for
+    // the room in the path (per-room override else global) — so a token can be admin in one room, observer
+    // in another.
+    let path_room = room_in_path(req.uri().path());
     let (actor, role) = if let Some(info) = store::resolve_token(&cfg.state_dir, &pass, now_secs()) {
-        (info.handle, info.role)
+        let role = info.effective_role(path_room.as_deref());
+        (info.handle, role)
     } else if pass == cfg.secret {
         let header_actor = req
             .headers()
@@ -502,6 +507,17 @@ async fn auth_layer(
     req.extensions_mut().insert(ConsoleUser(actor));
     req.extensions_mut().insert(ConsoleRole(role));
     next.run(req).await
+}
+
+/// Extract the room name from a `/rooms/<name>/…` path (URL-decoded by axum), for per-room role lookup.
+fn room_in_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/rooms/")?;
+    let name = rest.split('/').next()?;
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 /// The role a request needs: writes (POST) need Responder, a redact needs Admin, reads need Observer.

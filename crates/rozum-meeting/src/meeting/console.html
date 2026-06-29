@@ -311,7 +311,7 @@ async function loadRooms() {
   const want = new URLSearchParams(location.search).get("room");
   ROOM = (want && rooms.includes(want)) ? want : rooms[0] || null;
   if (ROOM) sel.value = ROOM;
-  sel.onchange = () => { ROOM = sel.value; SELECTED = null; FEED_WINDOW = 150; const u = new URL(location); u.searchParams.set("room", ROOM); history.replaceState(0, "", u); if (typeof subscribe === "function") subscribe(); refresh(); };
+  sel.onchange = async () => { ROOM = sel.value; SELECTED = null; FEED_WINDOW = 150; const u = new URL(location); u.searchParams.set("room", ROOM); history.replaceState(0, "", u); if (typeof subscribe === "function") subscribe(); await loadWhoami(); refresh(); };
 }
 
 // ── Header metrics ───────────────────────────────────────────
@@ -659,28 +659,39 @@ async function send() {
   await act(postJSON(`rooms/${enc(ROOM)}/messages`, body), "posted");
 }
 
+// Identity + role can differ PER ROOM (a token may be admin in one room, observer in another), so we
+// fetch the room-scoped whoami and re-apply the gating on every room switch.
+async function loadWhoami() {
+  try {
+    const w = await api(ROOM ? `rooms/${enc(ROOM)}/whoami` : "whoami");
+    ROLE = w.role || "admin"; WHO = w.handle || "";
+  } catch { ROLE = "admin"; }
+  applyRole();
+}
+function tokenFixed() { return WHO && WHO !== "console"; }
+function paintActor() {
+  const name = tokenFixed() ? WHO : (ACTOR || "set name");
+  $("actor").textContent = `👤 ${name} · ${ROLE}`;
+  $("actor").style.opacity = ROLE === "observer" ? "0.7" : "1";
+}
+function applyRole() {
+  paintActor();
+  const f = document.querySelector("footer");
+  if (f) f.style.display = can("responder") ? "" : "none";   // observers can't post
+}
+async function setActor() {
+  if (tokenFixed()) { toast("identity is fixed by your token"); return; }
+  const v = await askForm("Your handle", [{ name: "name", label: "Shown as the actor on your actions", value: ACTOR }], "Save");
+  if (v && v.name) { ACTOR = v.name; localStorage.setItem("rozumActor", ACTOR); paintActor(); }
+}
+
 async function boot() {
-  try { const w = await api("whoami"); ROLE = w.role || "admin"; WHO = w.handle || ""; } catch { ROLE = "admin"; }
   await loadRooms();
+  await loadWhoami();   // ROOM is set → fetch the per-room role before the first render
   await refresh();
   $("refresh").onclick = refresh;
-  // Operator identity + role. A token fixes the handle server-side (WHO from /whoami); with the shared
-  // secret the handle is self-set (X-Rozum-Actor). The chip shows handle · role.
-  const tokenFixed = WHO && WHO !== "console";
-  const paintActor = () => {
-    const name = tokenFixed ? WHO : (ACTOR || "set name");
-    $("actor").textContent = `👤 ${name} · ${ROLE}`;
-    $("actor").style.opacity = ROLE === "observer" ? "0.7" : "1";
-  };
-  const setActor = async () => {
-    if (tokenFixed) { toast("identity is fixed by your token"); return; }
-    const v = await askForm("Your handle", [{ name: "name", label: "Shown as the actor on your actions", value: ACTOR }], "Save");
-    if (v && v.name) { ACTOR = v.name; localStorage.setItem("rozumActor", ACTOR); paintActor(); }
-  };
   $("actor").onclick = setActor;
-  paintActor();
-  if (!tokenFixed && !ACTOR) setActor();   // shared-secret first visit → ask once
-  if (!can("responder")) document.querySelector("footer").style.display = "none";   // observers can't post
+  if (!tokenFixed() && !ACTOR) setActor();   // shared-secret first visit → ask once
   // Desktop alerts toggle: request permission on click; reflect state on the bell.
   const paintBell = () => {
     const ok = window.Notification && Notification.permission === "granted";

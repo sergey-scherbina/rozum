@@ -1592,7 +1592,12 @@ impl Role {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenInfo {
     pub handle: String,
+    /// The default role — used for any room without a per-room override (and non-room endpoints).
     pub role: Role,
+    /// Per-room role overrides (room → role), so an operator can be admin in one room + observer in
+    /// another. Empty (default) = the global `role` everywhere — back-compat.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rooms: BTreeMap<String, Role>,
     #[serde(default)]
     pub created_ts: u64,
     /// Unix expiry; `0` = never expires.
@@ -1602,6 +1607,10 @@ pub struct TokenInfo {
 impl TokenInfo {
     pub fn is_expired(&self, now: u64) -> bool {
         self.expires_ts != 0 && now >= self.expires_ts
+    }
+    /// The effective role for a request: the per-room override if `room` has one, else the global role.
+    pub fn effective_role(&self, room: Option<&str>) -> Role {
+        room.and_then(|r| self.rooms.get(r).copied()).unwrap_or(self.role)
     }
 }
 
@@ -1638,10 +1647,43 @@ pub fn issue_token(
     let mut m = load_tokens(state_dir);
     m.insert(
         token.clone(),
-        TokenInfo { handle: handle.to_string(), role, created_ts: now, expires_ts },
+        TokenInfo {
+            handle: handle.to_string(),
+            role,
+            rooms: BTreeMap::new(),
+            created_ts: now,
+            expires_ts,
+        },
     );
     write_json_atomic(&tokens_path(state_dir), &m)?;
     Ok(token)
+}
+
+/// Set (or, with `role = None`, clear) a per-room role override for ALL of `handle`'s tokens. Returns
+/// the number of tokens updated (0 if the handle has none).
+pub fn grant_room_role(
+    state_dir: &Path,
+    handle: &str,
+    room: &str,
+    role: Option<Role>,
+) -> std::io::Result<usize> {
+    let mut m = load_tokens(state_dir);
+    let mut n = 0;
+    for info in m.values_mut().filter(|i| i.handle == handle) {
+        match role {
+            Some(r) => {
+                info.rooms.insert(room.to_string(), r);
+            }
+            None => {
+                info.rooms.remove(room);
+            }
+        }
+        n += 1;
+    }
+    if n > 0 {
+        write_json_atomic(&tokens_path(state_dir), &m)?;
+    }
+    Ok(n)
 }
 
 /// Rotate `handle`'s access: revoke all their existing tokens and issue a fresh one (same role/ttl).
@@ -1963,6 +2005,18 @@ mod tests {
         let t1b = rotate_token(&sd, "alice", 0, 2_000).unwrap().unwrap();
         assert!(resolve_token(&sd, &t1, 2_000).is_none(), "old token revoked by rotate");
         assert_eq!(resolve_token(&sd, &t1b, 2_000).unwrap().role, Role::Responder, "role preserved");
+        // Per-room role override: bob (observer global) becomes admin in "incidents".
+        assert_eq!(grant_room_role(&sd, "bob", "incidents", Some(Role::Admin)).unwrap(), 1);
+        let bob = resolve_token(&sd, &t2, 2_000).unwrap();
+        assert_eq!(bob.effective_role(Some("incidents")), Role::Admin, "per-room override applies");
+        assert_eq!(bob.effective_role(Some("other")), Role::Observer, "global role elsewhere");
+        assert_eq!(bob.effective_role(None), Role::Observer, "global role for non-room");
+        // Clearing the override reverts to global.
+        assert_eq!(grant_room_role(&sd, "bob", "incidents", None).unwrap(), 1);
+        assert_eq!(resolve_token(&sd, &t2, 2_000).unwrap().effective_role(Some("incidents")), Role::Observer);
+        // Grant for an unknown handle → 0.
+        assert_eq!(grant_room_role(&sd, "ghost", "x", Some(Role::Admin)).unwrap(), 0);
+
         // Revoke by handle removes alice's token; bob's remains.
         assert_eq!(revoke_token(&sd, "alice").unwrap(), 1);
         assert!(resolve_token(&sd, &t1b, 2_000).is_none());
