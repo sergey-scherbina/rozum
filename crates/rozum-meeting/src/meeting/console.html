@@ -202,6 +202,9 @@ const api = (p) => fetch(p, { headers: { "Accept": "application/json" } }).then(
   return r.json();
 });
 let ACTOR = localStorage.getItem("rozumActor") || "";
+let ROLE = "admin", WHO = "";          // from /whoami; gates which actions render
+const RANK = { observer: 0, responder: 1, admin: 2 };
+const can = (min) => (RANK[ROLE] ?? 2) >= (RANK[min] ?? 9);
 async function postJSON(p, body) {
   const headers = { "Content-Type": "application/json", "Accept": "application/json" };
   if (ACTOR) headers["X-Rozum-Actor"] = ACTOR;   // attribute the write to this operator
@@ -396,7 +399,7 @@ function msgRow(m, opts) {
     const tl = el("span", "thread-link", "⤷ " + m.thread_id);
     tl.onclick = () => { SELECTED = m.thread_id; refresh(); };
     l1.appendChild(tl);
-  } else if (opts.showThread && m.date != null && m.n != null) {
+  } else if (opts.showThread && m.date != null && m.n != null && can("responder")) {
     // Not yet in a thread → offer to open an incident anchored on this message.
     const mid = `${m.date}/${m.n}`;
     const oi = el("span", "openinc", "⛑ incident");
@@ -425,8 +428,8 @@ function msgRow(m, opts) {
     ir.title = "in reply to " + m.in_reply_to;
     l1.appendChild(ir);
   }
-  // Redact affordance — hide leaked PII/secrets (the bytes stay on disk).
-  if (m.date != null && m.n != null) {
+  // Redact affordance — hide leaked PII/secrets (admin only; the bytes stay on disk).
+  if (m.date != null && m.n != null && can("admin")) {
     const mid = `${m.date}/${m.n}`;
     const rd = el("span", "openinc", "⊘");
     rd.title = "redact this message's content";
@@ -439,8 +442,8 @@ function msgRow(m, opts) {
     l1.appendChild(rd);
   }
   for (const tag of (m.meta && m.meta.tags) || []) l1.appendChild(el("span", "tag", "#" + tag));
-  // Reply affordance — sets the compose box to reply to this message.
-  if (m.date != null && m.n != null) {
+  // Reply / pin affordances — writes, so responder+ only.
+  if (m.date != null && m.n != null && can("responder")) {
     const mid = `${m.date}/${m.n}`;
     const rb = el("span", "openinc", "↩ reply");
     rb.onclick = (e) => { e.stopPropagation(); REPLY_TO = mid; updateReplyHint(); $("c-text").focus(); };
@@ -467,9 +470,11 @@ function msgRow(m, opts) {
       const n = (rx[emoji] || []).length;
       if (!n) continue;
       const chip = el("span", "react-chip", `${emoji} ${n}`);
-      chip.onclick = () => act(postJSON(`rooms/${enc(ROOM)}/react`, { msg_id: mid, emoji, add: true }), "reacted");
+      if (can("responder")) chip.onclick = () => act(postJSON(`rooms/${enc(ROOM)}/react`, { msg_id: mid, emoji, add: true }), "reacted");
+      else chip.style.cursor = "default";
       rrow.appendChild(chip);
     }
+    if (!can("responder")) { if (rrow.childNodes.length) row.appendChild(rrow); return row; }
     const add = el("span", "react-add", "＋😀");
     add.title = "react";
     add.onclick = async () => {
@@ -543,7 +548,7 @@ async function renderThread(id) {
   // Lifecycle actions on this incident.
   const terminal = t.state === "resolved" || t.state === "closed";
   const acts = el("div", "actions");
-  const btn = (label, cls, fn) => { const b = el("button", "act " + (cls || ""), label); b.onclick = fn; acts.appendChild(b); };
+  const btn = (label, cls, fn) => { if (!can("responder")) return; const b = el("button", "act " + (cls || ""), label); b.onclick = fn; acts.appendChild(b); };
   // Assign is orthogonal to state — available in any state.
   btn("Assign", "", async () => {
     const v = await askForm("Assign incident", [{ name: "to", label: "Assign to (handle)", value: t.owner || "" }, { name: "note", label: "Note (optional)" }], "Assign");
@@ -642,18 +647,27 @@ async function send() {
 }
 
 async function boot() {
+  try { const w = await api("whoami"); ROLE = w.role || "admin"; WHO = w.handle || ""; } catch { ROLE = "admin"; }
   await loadRooms();
   await refresh();
   $("refresh").onclick = refresh;
-  // Operator identity: actions are attributed to this handle (sent as X-Rozum-Actor).
-  const paintActor = () => { $("actor").textContent = ACTOR ? "👤 " + ACTOR : "👤 set name"; };
+  // Operator identity + role. A token fixes the handle server-side (WHO from /whoami); with the shared
+  // secret the handle is self-set (X-Rozum-Actor). The chip shows handle · role.
+  const tokenFixed = WHO && WHO !== "console";
+  const paintActor = () => {
+    const name = tokenFixed ? WHO : (ACTOR || "set name");
+    $("actor").textContent = `👤 ${name} · ${ROLE}`;
+    $("actor").style.opacity = ROLE === "observer" ? "0.7" : "1";
+  };
   const setActor = async () => {
+    if (tokenFixed) { toast("identity is fixed by your token"); return; }
     const v = await askForm("Your handle", [{ name: "name", label: "Shown as the actor on your actions", value: ACTOR }], "Save");
     if (v && v.name) { ACTOR = v.name; localStorage.setItem("rozumActor", ACTOR); paintActor(); }
   };
   $("actor").onclick = setActor;
   paintActor();
-  if (!ACTOR) setActor();   // first visit → ask once
+  if (!tokenFixed && !ACTOR) setActor();   // shared-secret first visit → ask once
+  if (!can("responder")) document.querySelector("footer").style.display = "none";   // observers can't post
   // Desktop alerts toggle: request permission on click; reflect state on the bell.
   const paintBell = () => {
     const ok = window.Notification && Notification.permission === "granted";

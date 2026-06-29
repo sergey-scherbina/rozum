@@ -532,6 +532,12 @@ enum MeetingsAction {
         count: usize,
     },
 
+    /// Manage support-console access tokens (per-operator identity + RBAC role).
+    Token {
+        #[command(subcommand)]
+        action: TokenAction,
+    },
+
     /// React to a message with an emoji (toggle).
     React {
         /// The message id (`<date>/<n>`).
@@ -695,6 +701,27 @@ enum MeetingsAction {
 
 /// The incident-lifecycle verbs (`rozum meetings incident …`). Each drives the daemon over its socket,
 /// calling the same `meeting.*` thread tools the agents use.
+/// Support-console access-token verbs (`rozum meetings token …`).
+#[derive(Subcommand)]
+enum TokenAction {
+    /// Issue a token for an operator with a role (observer|responder|admin). Prints the token.
+    Issue {
+        /// The operator's handle (shown as the actor on their actions).
+        #[arg(long)]
+        handle: String,
+        /// Role: observer (read) | responder (lifecycle) | admin (+redact).
+        #[arg(long, default_value = "responder")]
+        role: String,
+    },
+    /// List issued tokens (handle, role; the token is shown truncated).
+    List,
+    /// Revoke by token, or by handle (revokes all of that handle's tokens).
+    Revoke {
+        /// A token string or an operator handle.
+        token_or_handle: String,
+    },
+}
+
 #[derive(Subcommand)]
 enum IncidentAction {
     /// Open an incident thread anchored on a message id (a `<date>/<n>` id from `meetings read`).
@@ -1151,6 +1178,7 @@ async fn main() {
             MeetingsAction::React { msg_id, emoji, room, off } => {
                 run_meetings_react(msg_id, emoji, room, off).await
             }
+            MeetingsAction::Token { action } => run_meetings_token(action),
             MeetingsAction::Redact { msg_id, room, reason, undo } => {
                 run_meetings_redact(msg_id, room, reason, undo).await
             }
@@ -2977,6 +3005,56 @@ async fn run_meetings_read(room: Option<String>, count: usize) {
             Some(b) => println!("[{}] {} {}: {}", hhmm_of(t.ts), b, t.display_name, t.content),
             None => println!("[{}] {}: {}", hhmm_of(t.ts), t.display_name, t.content),
         }
+    }
+}
+
+/// `rozum meetings token …` — manage support-console access tokens (global, in the state dir).
+fn run_meetings_token(action: TokenAction) {
+    use rozum::meeting::store::{self, Role};
+    let sd = store::rozum_state_dir();
+    match action {
+        TokenAction::Issue { handle, role } => {
+            let Some(role) = Role::parse(&role) else {
+                eprintln!("token issue: bad role '{role}' (observer|responder|admin)");
+                std::process::exit(1);
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            match store::issue_token(&sd, &handle, role, now) {
+                Ok(tok) => {
+                    println!("{tok}");
+                    eprintln!("issued for {handle} ({}). Give them this token as the console password.", role.as_str());
+                }
+                Err(e) => {
+                    eprintln!("token issue: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        TokenAction::List => {
+            let m = store::load_tokens(&sd);
+            if m.is_empty() {
+                println!("(no tokens)");
+                return;
+            }
+            for (tok, info) in &m {
+                let short = tok.get(..8).unwrap_or(tok);
+                println!("{short}…  {}  [{}]", info.handle, info.role.as_str());
+            }
+        }
+        TokenAction::Revoke { token_or_handle } => match store::revoke_token(&sd, &token_or_handle) {
+            Ok(0) => {
+                eprintln!("token revoke: nothing matched '{token_or_handle}'");
+                std::process::exit(1);
+            }
+            Ok(n) => println!("revoked {n} token(s)"),
+            Err(e) => {
+                eprintln!("token revoke: {e}");
+                std::process::exit(1);
+            }
+        },
     }
 }
 

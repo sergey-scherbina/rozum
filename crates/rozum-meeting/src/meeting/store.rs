@@ -1557,6 +1557,87 @@ pub fn list_registered(state_dir: &Path) -> Vec<RoomLocation> {
     }
 }
 
+// ── Access tokens + roles (`tokens.json`) ─────────────────────────────────────
+
+/// An operator's role — the RBAC ladder for the support console. `Observer` reads only; `Responder`
+/// drives the incident lifecycle (escalate/assign/resolve/state/pin/link/react/post); `Admin` also does
+/// sensitive ops (redact) + anything an operator can.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    #[default]
+    Observer,
+    Responder,
+    Admin,
+}
+impl Role {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Observer => "observer",
+            Self::Responder => "responder",
+            Self::Admin => "admin",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "observer" | "read" | "viewer" => Self::Observer,
+            "responder" | "operator" | "write" => Self::Responder,
+            "admin" => Self::Admin,
+            _ => return None,
+        })
+    }
+}
+
+/// What a token grants: an operator handle + a role. Stored in `tokens.json` (`{token → TokenInfo}`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenInfo {
+    pub handle: String,
+    pub role: Role,
+    #[serde(default)]
+    pub created_ts: u64,
+}
+
+fn tokens_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("tokens.json")
+}
+
+/// The token map (`token → TokenInfo`); empty if none issued.
+pub fn load_tokens(state_dir: &Path) -> BTreeMap<String, TokenInfo> {
+    std::fs::read(tokens_path(state_dir))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Resolve a token → its (handle, role), or `None` if unknown.
+pub fn resolve_token(state_dir: &Path, token: &str) -> Option<TokenInfo> {
+    load_tokens(state_dir).remove(token)
+}
+
+/// Mint a new token for `handle` with `role`, persist it, return the token string.
+pub fn issue_token(state_dir: &Path, handle: &str, role: Role, ts: u64) -> std::io::Result<String> {
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let mut m = load_tokens(state_dir);
+    m.insert(
+        token.clone(),
+        TokenInfo { handle: handle.to_string(), role, created_ts: ts },
+    );
+    write_json_atomic(&tokens_path(state_dir), &m)?;
+    Ok(token)
+}
+
+/// Revoke by token, or by handle (removes all of that handle's tokens). Returns how many were removed.
+pub fn revoke_token(state_dir: &Path, token_or_handle: &str) -> std::io::Result<usize> {
+    let mut m = load_tokens(state_dir);
+    let before = m.len();
+    m.retain(|tok, info| tok != token_or_handle && info.handle != token_or_handle);
+    let removed = before - m.len();
+    if removed > 0 {
+        write_json_atomic(&tokens_path(state_dir), &m)?;
+    }
+    Ok(removed)
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// `$XDG_STATE_HOME/rozum` (fallback `~/.local/state/rozum`).
@@ -1823,6 +1904,29 @@ mod tests {
         assert!(t.pinned.is_empty());
         // Unknown thread → None.
         assert!(w.set_pinned("nope/0", &m.id(), true, 1_718_000_400).unwrap().is_none());
+    }
+
+    #[test]
+    fn tokens_issue_resolve_revoke_and_role_ordering() {
+        let dir = tempdir().unwrap();
+        let sd = dir.path().join("state");
+        let t1 = issue_token(&sd, "alice", Role::Responder, 1).unwrap();
+        let t2 = issue_token(&sd, "bob", Role::Observer, 2).unwrap();
+        // Resolve token → handle + role.
+        assert_eq!(resolve_token(&sd, &t1).unwrap().handle, "alice");
+        assert_eq!(resolve_token(&sd, &t1).unwrap().role, Role::Responder);
+        assert_eq!(resolve_token(&sd, &t2).unwrap().role, Role::Observer);
+        assert!(resolve_token(&sd, "nope").is_none());
+        // Role ordering (the RBAC ladder): admin > responder > observer.
+        assert!(Role::Admin > Role::Responder && Role::Responder > Role::Observer);
+        assert_eq!(Role::parse("operator"), Some(Role::Responder));
+        // Revoke by handle removes alice's token; bob's remains.
+        assert_eq!(revoke_token(&sd, "alice").unwrap(), 1);
+        assert!(resolve_token(&sd, &t1).is_none());
+        assert!(resolve_token(&sd, &t2).is_some());
+        // Revoke by token.
+        assert_eq!(revoke_token(&sd, &t2).unwrap(), 1);
+        assert!(load_tokens(&sd).is_empty());
     }
 
     #[test]

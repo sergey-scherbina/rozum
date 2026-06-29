@@ -42,7 +42,12 @@ struct RestState {
 #[derive(Clone)]
 struct AuthCfg {
     secret: String,
+    state_dir: PathBuf,
 }
+
+/// The authenticated operator's RBAC role, attached by `auth_layer`.
+#[derive(Clone, Copy)]
+struct ConsoleRole(store::Role);
 
 #[derive(Deserialize)]
 struct PageQuery {
@@ -106,7 +111,7 @@ pub async fn serve(
     secret: String,
     mut shutdown: watch::Receiver<bool>,
 ) -> std::io::Result<()> {
-    let app = router(registry, secret);
+    let app = router(registry.clone(), secret);
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             loop {
@@ -122,6 +127,7 @@ pub async fn serve(
 }
 
 fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
+    let state_dir = registry.state_dir().clone();
     Router::new()
         .route("/", get(console))
         .route("/rooms", get(rooms))
@@ -143,12 +149,22 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
         .route("/rooms/{name}/metrics", get(metrics))
         .route("/rooms/{name}/events", get(events))
         .route("/rooms/{name}/search", get(search))
+        .route("/whoami", get(whoami))
         .route("/roster", get(roster))
         .layer(middleware::from_fn_with_state(
-            AuthCfg { secret },
+            AuthCfg { secret, state_dir },
             auth_layer,
         ))
         .with_state(RestState { registry })
+}
+
+/// `GET /whoami` — the authenticated operator's handle + role, so the console can label itself and
+/// hide actions the role can't perform.
+async fn whoami(
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    Extension(ConsoleRole(role)): Extension<ConsoleRole>,
+) -> Response {
+    Json(json!({ "handle": user, "role": role.as_str() })).into_response()
 }
 
 /// `GET /` — the support console (single-page incident dashboard). Static HTML;
@@ -452,28 +468,55 @@ async fn auth_layer(
         Some((u, p)) => (u.to_owned(), p.to_owned()),
         None => return unauth(),
     };
-    if pass != cfg.secret {
+    // The password is EITHER an issued token (→ a trusted handle + role) OR the shared secret (→ admin,
+    // back-compat). A token's handle is authoritative (ignore the self-asserted X-Rozum-Actor); the
+    // shared-secret path keeps the actor-header convenience.
+    let (actor, role) = if let Some(info) = store::resolve_token(&cfg.state_dir, &pass) {
+        (info.handle, info.role)
+    } else if pass == cfg.secret {
+        let header_actor = req
+            .headers()
+            .get("x-rozum-actor")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let actor = header_actor
+            .or_else(|| (!user.is_empty()).then_some(user))
+            .unwrap_or_else(|| "console".to_string());
+        (actor, store::Role::Admin)
+    } else {
         return unauth();
+    };
+
+    // RBAC: reads need Observer; writes need Responder; redact needs Admin.
+    let need = required_role(req.method(), req.uri().path());
+    if role < need {
+        return (
+            StatusCode::FORBIDDEN,
+            format!("403: {} requires {} (you are {})\n", req.uri().path(), need.as_str(), role.as_str()),
+        )
+            .into_response();
     }
-    // Write attribution: prefer an explicit `X-Rozum-Actor` (the operator's chosen handle, set by the
-    // console), else the Basic-auth username, else a generic identity. The daemon attributes the write
-    // to this name. This makes multi-operator attribution real without each typing a browser username.
-    let header_actor = req
-        .headers()
-        .get("x-rozum-actor")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let actor = header_actor
-        .or_else(|| (!user.is_empty()).then_some(user))
-        .unwrap_or_else(|| "console".to_string());
+
     let mut req = req;
     req.extensions_mut().insert(ConsoleUser(actor));
+    req.extensions_mut().insert(ConsoleRole(role));
     next.run(req).await
 }
 
-/// The authenticated console actor (the Basic-auth username), attached by `auth_layer` and used to
-/// attribute write actions (open/escalate/resolve/submit) when the console drives the daemon.
+/// The role a request needs: writes (POST) need Responder, a redact needs Admin, reads need Observer.
+fn required_role(method: &axum::http::Method, path: &str) -> store::Role {
+    if *method != axum::http::Method::POST {
+        store::Role::Observer
+    } else if path.ends_with("/redact") {
+        store::Role::Admin
+    } else {
+        store::Role::Responder
+    }
+}
+
+/// The authenticated console actor (handle), attached by `auth_layer` and used to attribute write
+/// actions (open/escalate/resolve/submit) when the console drives the daemon.
 #[derive(Clone)]
 struct ConsoleUser(String);
 
@@ -647,6 +690,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn rbac_tokens_gate_by_role() {
+        use store::Role;
+        let dir = tempdir().unwrap();
+        seed_room(dir.path(), "alpha", &["one"]);
+        // Tokens live in the registry's state_dir (= dir.path() here).
+        let obs = store::issue_token(dir.path(), "obs", Role::Observer, 0).unwrap();
+        let resp = store::issue_token(dir.path(), "resp", Role::Responder, 0).unwrap();
+        let adm = store::issue_token(dir.path(), "adm", Role::Admin, 0).unwrap();
+        let (addr, _s) = start(dir.path().to_path_buf(), "sekret").await;
+        let c = reqwest::Client::new();
+        let st = |b: reqwest::RequestBuilder| async move { b.send().await.unwrap().status() };
+
+        // A token authenticates as its handle (read works for the lowest role).
+        assert!(st(c.get(format!("http://{addr}/rooms/alpha/days")).basic_auth("x", Some(&obs))).await.is_success());
+        // Observer is read-only: a write (POST) is 403 (blocked in auth, never reaches the daemon).
+        assert_eq!(st(c.post(format!("http://{addr}/rooms/alpha/messages")).basic_auth("x", Some(&obs)).json(&json!({"content":"x"}))).await, StatusCode::FORBIDDEN);
+        // Responder can write, but redact needs Admin → 403 for responder.
+        assert_eq!(st(c.post(format!("http://{addr}/rooms/alpha/redact")).basic_auth("x", Some(&resp)).json(&json!({"msg_id":"a/0"}))).await, StatusCode::FORBIDDEN);
+        // An unknown token (not the secret) is 401.
+        assert_eq!(st(c.get(format!("http://{addr}/rooms/alpha/days")).basic_auth("x", Some("bogus"))).await, StatusCode::UNAUTHORIZED);
+        // whoami reflects the token's handle + role.
+        let who: Value = c.get(format!("http://{addr}/whoami")).basic_auth("x", Some(&adm)).send().await.unwrap().json().await.unwrap();
+        assert_eq!(who["handle"], "adm");
+        assert_eq!(who["role"], "admin");
+        // The shared secret still works (admin, back-compat): redact passes RBAC.
+        assert_ne!(st(c.get(format!("http://{addr}/whoami")).basic_auth("x", Some("sekret"))).await, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -853,6 +925,8 @@ mod tests {
             "id=\"modal\"",
             "X-Rozum-Actor",                   // named operator identity (4/5)
             "rozumActor",
+            "whoami",                          // RBAC role-awareness
+            "can(\"responder\")",
             // core action endpoints the UI must drive
             "/escalate",
             "/resolve",
