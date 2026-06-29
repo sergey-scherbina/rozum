@@ -152,7 +152,8 @@
   <input id="q" type="text" placeholder="filter…" title="filter incidents + feed" style="width:130px">
   <label class="hideres" title="hide resolved/closed incidents"><input type="checkbox" id="hideres" checked> active only</label>
   <button id="refresh" title="refresh now">↻</button>
-  <span class="dot-live" id="live" title="auto-refresh"></span>
+  <button id="bell" title="desktop alerts for new critical incidents / SLA breaches">🔔</button>
+  <span class="dot-live" id="live" title="realtime (SSE)"></span>
   <div class="metrics" id="metrics"></div>
 </header>
 <div class="body">
@@ -221,6 +222,8 @@ let ROOM = null;
 let SELECTED = null;   // selected thread id, or null = live feed
 let REPLY_TO = null;   // message id the compose box is replying to, or null
 let REACTIONS = {};    // msg_id → emoji → [who], refreshed each cycle
+const SEEN = {};       // incident id → "<state>|<stale>" last seen, for desktop-alert deltas
+let SEEN_INIT = false; // don't alert for incidents already present on first load
 let timer = null;
 
 function relTime(ts) {
@@ -567,6 +570,7 @@ async function refresh() {
   try {
     const t = await api(`rooms/${enc(ROOM)}/threads`);
     renderMetrics(t.metrics || {});
+    checkAlerts(t.threads || []);
     renderRail(t.threads || []);
     try { REACTIONS = (await api(`rooms/${enc(ROOM)}/reactions`)).reactions || {}; } catch { REACTIONS = {}; }
     if (SELECTED) await renderThread(SELECTED); else await renderLive();
@@ -596,6 +600,19 @@ async function boot() {
   await loadRooms();
   await refresh();
   $("refresh").onclick = refresh;
+  // Desktop alerts toggle: request permission on click; reflect state on the bell.
+  const paintBell = () => {
+    const ok = window.Notification && Notification.permission === "granted";
+    $("bell").style.opacity = ok ? "1" : "0.45";
+    $("bell").textContent = ok ? "🔔" : "🔕";
+  };
+  $("bell").onclick = () => {
+    if (!window.Notification) return;
+    if (Notification.permission === "granted") notify("rozum alerts on", "You'll get desktop alerts for new critical incidents + SLA breaches.");
+    else Notification.requestPermission().then(paintBell);
+    paintBell();
+  };
+  paintBell();
   $("c-send").onclick = send;
   $("c-text").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
@@ -610,6 +627,31 @@ async function boot() {
   if (timer) clearInterval(timer);
   timer = setInterval(refresh, 30000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+}
+
+// Desktop alerts: fire a Notification when an incident first appears as high/critical, or first goes
+// stale (SLA breach). The first load only seeds SEEN (no alert storm for pre-existing incidents).
+function notify(title, body) {
+  if (window.Notification && Notification.permission === "granted") {
+    try { new Notification(title, { body, tag: "rozum-incident" }); } catch {}
+  }
+}
+function checkAlerts(threads) {
+  const active = (s) => s !== "resolved" && s !== "closed";
+  for (const t of threads) {
+    const key = `${t.state}|${t.stale ? 1 : 0}`;
+    const prev = SEEN[t.id];
+    SEEN[t.id] = key;
+    if (!SEEN_INIT) continue;
+    const sev = t.severity || "";
+    const isHot = sev === "critical" || sev === "high";
+    if (prev === undefined && isHot && active(t.state)) {
+      notify(`🚨 ${sev.toUpperCase()} incident`, `${t.title || t.id}${t.owner ? " · @" + t.owner : ""}`);
+    } else if (t.stale && active(t.state) && (prev === undefined || !prev.endsWith("|1"))) {
+      notify(`⏰ Incident breaching SLA`, `${t.title || t.id} — no update past its ${sev || "default"} window`);
+    }
+  }
+  SEEN_INIT = true;
 }
 
 // Realtime: subscribe to the room's SSE stream; each `changed` event triggers a refresh (no 4s polling).
