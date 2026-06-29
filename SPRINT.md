@@ -12,16 +12,21 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   path (channel-wakeup off, what the bench uses) now adds `--strict-mcp-config` → drops ALL ambient
   MCP robustly; channel-on keeps the ambient config loadable (`server:rozum`) + enumerates
   `mcp__jetbrains`. 7/7 lean_tests.
-- [ ] **sig4-pareto-live** — ACTIVE. One model-slot agentic sweep, triple duty: (1) validate sig4 live
-  on Coder-30B (the 482-call fix loop should now stop early — confirm + measure pass-rate / wall-clock
-  delta), (2) settle Coder-30B keep/delete, (3) expand the eager-pipeline Pareto (Qwen3-4B→DWQ-35B,
-  gpt-oss-as-executor). PRESERVE the agent.logs (feeds stall-guard). Follow the 🛑 REBOOT-SAFETY
-  PROTOCOL: claim the slot, host-clear check, single model resident.
-- [ ] **gen-stall-guard** — BLOCKED on `sig4-pareto-live` data. The `rpn` timeout (23 turns / 11
-  tool_uses / 480s) survives ALL existing guards (inactivity 300s + per-gen ceiling 8192 + repeat_guard
-  + sig 1–4) → long non-repetitive non-converging reasoning, not a clean pattern. DO NOT build a guard
-  blind (false-positive risk on real long tasks). Capture the real `rpn` transcript first; build a
-  targeted fix only if it shows a detectable signature, else document as a Coder-30B model property.
+- [~] **sig4-pareto-live** — sig4 VALIDATED LIVE (2026-06-29). End-to-end through the real OpenAI HTTP
+  path on a loaded 0.6B gateway: a crafted conversation with **4 identical Bash calls → the sig4
+  synthetic stop** (exact message, `finish_reason: stop`, model NOT invoked = short-circuit works);
+  **3 identical calls → model runs normally** (K=4 boundary holds both ways, no false-positive). The
+  Coder-7B scoped sweep (rpn+fix ×2, gate-safe) was 0/2 each but with **NO loop / NO stall / NO timeout**
+  (clean fast fails, 22–80s) → the no-stop loop + rpn stall are **Coder-30B-specific, not reproduced on
+  safe small models**. DEFERRED (needs a fully-clear host — Coder-30B peaks ~30 GB, reboot-safety edge):
+  the Coder-30B sig4-stops-the-482-loop measurement, keep/delete, and the DWQ-35B/gpt-oss Pareto pairs.
+  Coder-7B = KEEP regardless (it is the executor in the 9.4 GB champion pipeline).
+- [ ] **gen-stall-guard** — DEFERRED (not built — correct call). The `rpn` timeout survives ALL existing
+  guards (inactivity 300s + per-gen ceiling 8192 + repeat_guard + sig 1–4) → long non-repetitive
+  non-converging reasoning, not a clean pattern; it did NOT reproduce on Coder-7B (which fast-fails, no
+  stall), so it is a **Coder-30B model property**. Building a guard blind would false-positive real long
+  tasks. Re-open ONLY with a real Coder-30B `rpn` transcript (run with `KEEP=1` on a clear host) showing
+  a detectable signature; otherwise it stays documented as model-side, not a gateway gap.
 
 - [x] **meetings → support/incident platform (operator 2026-06-28, strategic)** — COMPLETE across all
   three surfaces + polished (foundation → agent-native MCP → human CLI → web console). Capabilities shipped
