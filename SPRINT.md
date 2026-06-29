@@ -1,5 +1,28 @@
 # Sprint
 
+### ▶ agentic-reliability (operator 2026-06-29: "сделай всё, занеси в спринт, порядок выбери сам")
+Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall (stall depends on sweep data).
+- [x] **loopbreaker-sig4** — DONE (master `142846c`). `detect_stuck_loop` signature 4: windowed
+  identical tool-call recurrence (same `name+input` ≥4× in last 12 calls) → catches the
+  no-stop-after-success loop (Coder-30B 482 tool_uses to timeout on a PASSED fix) that sig 1/2/3
+  missed (calls succeed / non-consecutive / Bash-Read not edits). K=4 preserves "3 identical = not a
+  loop". 90/90 gateway tests.
+- [x] **lean-strict-mcp** — DONE (master `c4ee5cb`). `--lean` only enumerated `mcp__rozum`, so
+  jetbrains + the claude.ai Google MCP servers still leaked tool schemas into every request. Headless
+  path (channel-wakeup off, what the bench uses) now adds `--strict-mcp-config` → drops ALL ambient
+  MCP robustly; channel-on keeps the ambient config loadable (`server:rozum`) + enumerates
+  `mcp__jetbrains`. 7/7 lean_tests.
+- [ ] **sig4-pareto-live** — ACTIVE. One model-slot agentic sweep, triple duty: (1) validate sig4 live
+  on Coder-30B (the 482-call fix loop should now stop early — confirm + measure pass-rate / wall-clock
+  delta), (2) settle Coder-30B keep/delete, (3) expand the eager-pipeline Pareto (Qwen3-4B→DWQ-35B,
+  gpt-oss-as-executor). PRESERVE the agent.logs (feeds stall-guard). Follow the 🛑 REBOOT-SAFETY
+  PROTOCOL: claim the slot, host-clear check, single model resident.
+- [ ] **gen-stall-guard** — BLOCKED on `sig4-pareto-live` data. The `rpn` timeout (23 turns / 11
+  tool_uses / 480s) survives ALL existing guards (inactivity 300s + per-gen ceiling 8192 + repeat_guard
+  + sig 1–4) → long non-repetitive non-converging reasoning, not a clean pattern. DO NOT build a guard
+  blind (false-positive risk on real long tasks). Capture the real `rpn` transcript first; build a
+  targeted fix only if it shows a detectable signature, else document as a Coder-30B model property.
+
 - [x] **meetings → support/incident platform (operator 2026-06-28, strategic)** — COMPLETE across all
   three surfaces + polished (foundation → agent-native MCP → human CLI → web console). Capabilities shipped
   & live-proven this sprint: message metadata + badges; threads/incidents with the full lifecycle
