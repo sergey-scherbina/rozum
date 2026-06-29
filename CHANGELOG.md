@@ -1,5 +1,26 @@
 # Changelog
 
+## bench — agentic delivery triage for weak-model red cells
+Completed: 2026-06-29
+
+Added `scripts/bench/agentic_triage.py`, a local artifact classifier for agentic bench failures. It
+accepts result dirs, kept workdirs, `agent.log`, or `per-run.csv`, and emits compact text plus stable
+`--brief`, `--json`, and `--csv` forms. It distinguishes delivery/setup failures (`missing_project_files`,
+`wrong_entrypoint`, `manifest_invalid`, `edit_requires_read`, `edit_old_string_miss`,
+`false_success_after_error`, `source_syntax_artifact`) from model-quality evidence such as
+`compile_error`, `verifier_mismatch`, `timeout`, and `unknown_failed`.
+
+`scripts/bench/agentic.sh` now writes `agentic.meta` and `verify.out` into each workdir, prints a
+`TRIAGE class: reason` line on failed cells when the triage script is available, and enriches
+verify-repair diagnostics with bounded `Cargo.toml`/`src` snapshots plus a targeted manifest-edition
+hint. No hidden mutation: the runner still verifies the actual files the agent wrote.
+
+Validation stayed low-load: `bash -n scripts/bench/agentic.sh`, `python3 -m py_compile
+scripts/bench/agentic_triage.py`, real old GLM kept workdirs (`edit_requires_read`,
+`manifest_invalid`), a legacy GLM result CSV, and synthetic fixtures for missing project files, wrong
+entrypoint, old-string miss, false success after tool error, source corruption, verifier mismatch, and
+pass. No full matrix or model load was run.
+
 ## launch/bench — GLM-4.7-Flash claude smoke 5/5
 Completed: 2026-06-29
 

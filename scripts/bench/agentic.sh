@@ -116,6 +116,7 @@ command -v cargo >/dev/null || { echo "need cargo" >&2; exit 1; }
 
 mkdir -p "$OUT/runs"
 CSV="$OUT/per-run.csv"
+TRIAGE_PY="$here/agentic_triage.py"
 echo "agent,model,task,difficulty,seconds,pass,rc,timeout,turns,tool_uses,agent_peak_mb,peak_cpu_pct,model_footprint_mb,repairs" > "$CSV"
 declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 )
 
@@ -200,6 +201,18 @@ EOF
   esac
 }
 
+write_agentic_meta() { # $1=workdir $2=agent $3=model $4=task $5=pass $6=timeout $7=rc $8=repairs
+  {
+    printf 'agent=%s\n' "$2"
+    printf 'model=%s\n' "$3"
+    printf 'task=%s\n' "$4"
+    printf 'pass=%s\n' "$5"
+    printf 'timeout=%s\n' "$6"
+    printf 'rc=%s\n' "$7"
+    printf 'repairs=%s\n' "$8"
+  } >"$1/agentic.meta"
+}
+
 verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0=pass
   local t="$1" w="$2" log="$3" fail=0
   ( cd "$w"
@@ -230,6 +243,29 @@ verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0
     esac )
 }
 
+bounded_file_excerpt() { # $1=relative path
+  local rel="$1" bytes
+  [ -f "$rel" ] || return 0
+  bytes=$(wc -c < "$rel" 2>/dev/null | tr -d ' ')
+  if [ "${bytes:-0}" -gt 12000 ] 2>/dev/null; then
+    echo "--- $rel (skipped: ${bytes} bytes)"
+    return 0
+  fi
+  echo "--- $rel"
+  sed -n '1,220p' "$rel"
+}
+
+repair_context_snapshot() {
+  echo
+  echo "Current bounded source/manifest snapshot:"
+  bounded_file_excerpt Cargo.toml
+  bounded_file_excerpt src/main.rs
+  bounded_file_excerpt src/lib.rs
+  find src -maxdepth 1 -name '*.rs' ! -name main.rs ! -name lib.rs 2>/dev/null | head -3 | while read -r f; do
+    bounded_file_excerpt "$f"
+  done
+}
+
 # Ground-truth diagnostic for a failed cell — the REAL compiler/test output (not the model's
 # self-report). First check it compiles; if so, check the task's runtime behavior. This is the
 # exact text fed back to the agent for repair. Echoes a short, actionable diagnostic.
@@ -247,28 +283,37 @@ repair_diagnostic() { # $1=task  $2=workdir
     stray="$(find . -maxdepth 1 -name '*.rs' 2>/dev/null | sed 's#^\./##' | head -1)"
     if [ -n "$stray" ] && { [ ! -f src/main.rs ] || [ "$src_is_stub" = 1 ]; }; then
       echo "WRONG FILE LOCATION: your code is in ./$stray, but \`cargo\` ONLY builds src/main.rs (currently $([ -f src/main.rs ] && echo 'the default \"Hello, world!\" stub' || echo 'missing'), so the program that runs is NOT your code). Move your implementation into src/main.rs: \`mkdir -p src && mv ./$stray src/main.rs\` (overwrite the stub). Then build and run."
+      repair_context_snapshot
       exit 0
     fi
     other_src="$(find src -maxdepth 1 -name '*.rs' ! -name 'main.rs' 2>/dev/null | tr '\n' ' ')"
     if [ "$src_is_stub" = 1 ] && [ -n "$other_src" ]; then
       echo "WRONG ENTRY POINT: src/main.rs is still the default \"Hello, world!\" stub, so cargo runs it and ignores your code in ${other_src}. Put the program's main() + logic in src/main.rs (or declare the other files as modules and call them from main)."
+      repair_context_snapshot
       exit 0
     fi
     if ! berr="$(cargo build 2>&1)"; then
       echo "The project does NOT compile. \`cargo build\` reports:"
+      if printf '%s\n' "$berr" | grep -qiE 'failed to parse manifest|failed to parse the edition key|unknown edition|this version of Cargo is older'; then
+        echo "Manifest hint: use a Cargo.toml edition supported by this bench toolchain, normally edition = \"2021\"."
+      fi
       printf '%s\n' "$berr" | grep -vE '^\s*Compiling|^\s*Finished|^\s*Updating|Blocking|Downloaded' | head -40
+      repair_context_snapshot
       exit 0
     fi
     case "$1" in
       test|debug)
         echo "It compiles, but \`cargo test\` is RED:"
-        cargo test 2>&1 | grep -vE '^\s*Compiling|^\s*Finished|running [0-9]' | head -40 ;;
+        cargo test 2>&1 | grep -vE '^\s*Compiling|^\s*Finished|running [0-9]' | head -40
+        repair_context_snapshot ;;
       rpn)
         o1="$(cargo run -q -- "3 4 + 5 *" 2>&1)"; o2="$(cargo run -q -- "5 1 2 + 4 * + 3 -" 2>&1)"
-        echo "It compiles, but the result is wrong: \`cargo run -- \"3 4 + 5 *\"\` printed '$o1' (must be 35); \`cargo run -- \"5 1 2 + 4 * + 3 -\"\` printed '$o2' (must be 14). Evaluate ANY valid RPN expression with a stack." ;;
+        echo "It compiles, but the result is wrong: \`cargo run -- \"3 4 + 5 *\"\` printed '$o1' (must be 35); \`cargo run -- \"5 1 2 + 4 * + 3 -\"\` printed '$o2' (must be 14). Evaluate ANY valid RPN expression with a stack."
+        repair_context_snapshot ;;
       *)
         o="$(cargo run -q -- hello 2>&1)"
-        echo "It compiles, but \`cargo run -- hello\` printed '$o' (must be exactly: olleh)." ;;
+        echo "It compiles, but \`cargo run -- hello\` printed '$o' (must be exactly: olleh)."
+        repair_context_snapshot ;;
     esac )
 }
 
@@ -332,6 +377,7 @@ for spec in "${MODELS[@]}"; do
       diff=${DIFF[$task]:-0}
       work="$(mktemp -d /tmp/rozum-agentic-XXXXXX)"
       setup_task "$task" "$work"
+      write_agentic_meta "$work" "$agent" "$spec_csv" "$task" "" "" "" "0"
       alog="$work/agent.log"; sfile="$work/samples.txt"
       prompt="$(prompt_for "$task")"
       # Verify-repair loop. Attempt 1 = the task; if `verify_task` (the REAL build/test, not the
@@ -375,7 +421,9 @@ for spec in "${MODELS[@]}"; do
         secs_total=$(awk -v a="$secs_total" -v b="$asecs" 'BEGIN{printf "%.1f", a+b}')
         tmo=$(awk -v s="$asecs" -v t="$RUN_TIMEOUT" 'BEGIN{print (s>=t-2)?1:0}')
 
-        detail="$(verify_task "$task" "$work" "$alog")"; pass=$([ $? = 0 ] && echo 1 || echo 0)
+        detail="$(verify_task "$task" "$work" "$alog")"; verify_rc=$?
+        printf '%s\n' "$detail" >"$work/verify.out"
+        pass=$([ "$verify_rc" = 0 ] && echo 1 || echo 0)
         [ "$pass" = 1 ] && break
         [ "$attempt" -lt "$attempts" ] || break   # last attempt — no more repair
         repairs=$((repairs + 1))
@@ -393,9 +441,14 @@ for spec in "${MODELS[@]}"; do
 
       [ "$tmo" = 1 ] && tflag=" (RUN_TIMEOUT)" || tflag=""
       rflag=""; [ "$repairs" -gt 0 ] && rflag=" repairs=$repairs"
+      write_agentic_meta "$work" "$agent" "$spec_csv" "$task" "$pass" "$tmo" "$rc" "$repairs"
       printf "  [%s] %-6s %ss%s  pass=%s%s  agent=%sMB  cpu=%s%%  turns=%s tools=%s\n" \
         "$agent" "$task" "$secs_total" "$tflag" "$pass" "$rflag" "$agent_mb" "$peak_cpu" "$turns" "$tools"
       echo "$detail"
+      if [ "$pass" != 1 ] && [ -f "$TRIAGE_PY" ] && command -v python3 >/dev/null 2>&1; then
+        triage="$(python3 "$TRIAGE_PY" --brief "$work" 2>/dev/null || true)"
+        [ -n "$triage" ] && echo "    TRIAGE $triage"
+      fi
       printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$agent" "$spec_csv" "$task" "$diff" "$secs_total" "$pass" "$rc" "$tmo" "$turns" "$tools" "$agent_mb" "$peak_cpu" "" "$repairs" >> "$CSV"
 

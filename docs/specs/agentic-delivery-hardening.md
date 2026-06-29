@@ -20,6 +20,8 @@ the delivery-shaped cases.
   - `--root <repo>` optionally sets the repo root for relative result paths.
 - `scripts/bench/agentic.sh`
   - keeps its current benchmark contract.
+  - writes `agentic.meta` and `verify.out` into each workdir so local failure triage has task/result
+    context without parsing terminal output.
   - when a cell fails, it may print the triage class for the kept workdir if the triage script is
     available.
   - `repair_diagnostic` may include bounded source/manifest snapshots and targeted manifest/edit
@@ -27,25 +29,25 @@ the delivery-shaped cases.
 
 ## Behavior
 
-- [ ] A kept workdir with missing `Cargo.toml` or no `src/*.rs` is classified as delivery/setup, not
+- [x] A kept workdir with missing `Cargo.toml` or no `src/*.rs` is classified as delivery/setup, not
       reasoning.
-- [ ] A workdir with root-level `.rs` files while `src/main.rs` is missing or still a stub is classified
+- [x] A workdir with root-level `.rs` files while `src/main.rs` is missing or still a stub is classified
       as wrong-entrypoint delivery.
-- [ ] A Cargo unsupported-edition manifest error is classified as `manifest_invalid` and includes the
+- [x] A Cargo unsupported-edition manifest error is classified as `manifest_invalid` and includes the
       offending `Cargo.toml` path.
-- [ ] An agent log containing `File has not been read yet` after an `Edit` call is classified as
+- [x] An agent log containing `File has not been read yet` after an `Edit` call is classified as
       `edit_requires_read`.
-- [ ] An agent log containing `String to replace not found` after an `Edit` call is classified as
+- [x] An agent log containing `String to replace not found` after an `Edit` call is classified as
       `edit_old_string_miss`.
-- [ ] An agent log where the last tool result is an error and the assistant then claims success is
+- [x] An agent log where the last tool result is an error and the assistant then claims success is
       classified as `false_success_after_error`.
-- [ ] A workdir that compiles but fails the task's verifier with wrong output is classified separately
+- [x] A workdir that compiles but fails the task's verifier with wrong output is classified separately
       from source/setup delivery, so it remains model-quality evidence unless another delivery signal is
       present.
-- [ ] `agentic_triage.py --json` and `--csv` produce stable machine-readable output.
-- [ ] `agentic_triage.py --brief` produces a short human-readable summary suitable for failed bench
+- [x] `agentic_triage.py --json` and `--csv` produce stable machine-readable output.
+- [x] `agentic_triage.py --brief` produces a short human-readable summary suitable for failed bench
       cells.
-- [ ] `agentic.sh` repair diagnostics include source/manifest context without dumping large generated
+- [x] `agentic.sh` repair diagnostics include source/manifest context without dumping large generated
       targets or build artifacts.
 
 ## Out of scope
@@ -58,9 +60,9 @@ the delivery-shaped cases.
 ## Design
 
 The classifier is intentionally heuristic and evidence-first. It reads only local artifacts that already
-exist after a run: `agent.log`, `Cargo.toml`, `src/*.rs`, `run.err`, `cargo.err`, and `per-run.csv` when a
-result directory is supplied. Classification is ordered from concrete delivery signals to broader model
-quality signals:
+exist after a run: `agentic.meta`, `verify.out`, `agent.log`, `Cargo.toml`, `src/*.rs`, `run.err`,
+`cargo.err`, and `per-run.csv` when a result directory is supplied. Classification is ordered from
+concrete delivery signals to broader model quality signals:
 
 1. missing project/source files;
 2. wrong entrypoint/path;
@@ -91,4 +93,10 @@ tree dumps, no hidden mutation.
 
 ## Results
 
-Pending implementation.
+Implemented in `scripts/bench/agentic_triage.py` and the failed-cell path in `scripts/bench/agentic.sh`.
+Validation stayed local and low-load: shell/Python syntax checks, real old GLM kept workdirs
+(`/tmp/rozum-agentic-3rUFul` -> `edit_requires_read`, `/tmp/rozum-agentic-tZPNC7` ->
+`manifest_invalid`), a real result CSV (`glm47-flash-rpn-20260629-164229` -> failed row with
+`unknown_failed` because legacy CSVs do not record kept workdir paths), and synthetic fixtures covering
+missing project files, wrong entrypoint, old-string miss, false success after tool error, source syntax
+artifact, verifier mismatch, and pass.
