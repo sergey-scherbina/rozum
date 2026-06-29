@@ -147,17 +147,30 @@ def incidentCard(room: String, c: String): View =
     else [incActionForm("inc-triage", room + "", id + "", "triage", "#d97706"), incEscalateForm(room + "", id + ""), incActionForm("inc-resolve", room + "", id + "", "resolve", "#16a34a")])
   element("div", ["style" -> ("border:1px solid #23272e; border-left:3px solid " + sevColorOf(sev + "") + "; border-radius:8px; padding:10px 12px; margin:7px 0; background:#15181d")], Map(), [head, actions])
 
-def incidentsPage(room: String): String =
+// The incident cards as a swappable fragment (id "incs" + data-active = the live count, so the client
+// can fire a desktop alert when a new active incident appears). Polled by the page for near-realtime.
+def incidentsBody(room: String): View =
   val chunks = incidentChunks(room)
-  val cards  = chunks.map(c => incidentCard(room + "", c)).toList
+  val active = activeIncidents(room).toString
+  if chunks.length < 1 then
+    element("div", ["id" -> "incs", "data-active" -> active, "style" -> "color:#5b626d; padding:34px; text-align:center"], Map(), [textNode("нет инцидентов")])
+  else
+    val cards = chunks.map(c => incidentCard(room + "", c)).toList
+    element("div", ["id" -> "incs", "data-active" -> active], Map(), cards)
+
+def incidentsFrag(room: String): String =
+  renderHtml(incidentsBody(room))
+
+val incScript = "<script>var R=location.pathname.split('/').pop()||'demo';var last=-1;function tk(){fetch('/incfrag/'+R).then(function(r){return r.text()}).then(function(t){var c=document.getElementById('incs');if(c){c.outerHTML=t}var n=document.getElementById('incs');var a=n?parseInt(n.getAttribute('data-active')||'0',10):0;if(last>=0&&a>last&&window.Notification&&Notification.permission==='granted'){try{new Notification('🛟 новый инцидент',{body:R})}catch(e){}}last=a}).catch(function(e){})}window.addEventListener('load',function(){var n=document.getElementById('incs');last=n?parseInt(n.getAttribute('data-active')||'0',10):-1;var b=document.getElementById('bell');if(b){b.onclick=function(){if(window.Notification){Notification.requestPermission()}}}setInterval(tk,3000)});</script>"
+
+def incidentsPage(room: String): String =
   val back   = element("a", ["href" -> ("/r/" + room), "style" -> "color:#7ab8ff; text-decoration:none; font-size:15px; flex:0 0 auto"], Map(), [textNode("← чат")])
-  val ttl    = element("div", ["style" -> "font-weight:700; font-size:16px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis"], Map(), [textNode("🛟 инциденты · " + room)])
-  val header = element("div", ["style" -> "flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:max(10px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) 10px max(14px,env(safe-area-inset-left)); background:#1b1e24; border-bottom:1px solid #2a2e36"], Map(), [back, ttl])
-  val body   = if chunks.length < 1 then element("div", ["style" -> "color:#5b626d; padding:34px; text-align:center"], Map(), [textNode("нет инцидентов")])
-               else element("div", Map(), Map(), cards)
-  val list   = element("div", ["style" -> "flex:1 1 auto; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px max(14px,env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left))"], Map(), [body])
+  val ttl    = element("div", ["style" -> "font-weight:700; font-size:16px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1 1 auto"], Map(), [textNode("🛟 инциденты · " + room)])
+  val bell   = element("button", ["id" -> "bell", "title" -> "алерты о новых инцидентах", "style" -> "flex:0 0 auto; background:#2a2e36; color:#fff; border:0; border-radius:9px; padding:5px 9px; font-size:15px"], Map(), [textNode("🔔")])
+  val header = element("div", ["style" -> "flex:0 0 auto; display:flex; align-items:center; gap:12px; padding:max(10px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) 10px max(14px,env(safe-area-inset-left)); background:#1b1e24; border-bottom:1px solid #2a2e36"], Map(), [back, ttl, bell])
+  val list   = element("div", ["style" -> "flex:1 1 auto; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px max(14px,env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left))"], Map(), [incidentsBody(room)])
   val doc    = element("div", ["style" -> "display:flex; flex-direction:column; height:100dvh; overflow:hidden; background:#14161a; color:#e6e6e6; font:15px/1.5 -apple-system,system-ui,sans-serif"], Map(), [header, list])
-  head ++ renderHtml(doc)
+  head ++ renderHtml(doc) ++ incScript
 
 def roomCountLine(n: String): String =
   n + "|" + roomCount(n).toString
@@ -601,6 +614,7 @@ def doAction(body: String): String =
 @main def run(): Unit =
   route("GET",  "/r/", req => page(afterPrefix(req)))
   route("GET",  "/incidents/", req => incidentsPage(afterPrefix(req)))
+  route("GET",  "/incfrag/", req => incidentsFrag(afterPrefix(req)))
   route("GET",  "/m/", req => roomMsgs(afterPrefix(req)))
   route("GET",  "/mp/", req => mpPage(afterPrefix(req)))
   route("POST", "/p",  req => doPost(req))
