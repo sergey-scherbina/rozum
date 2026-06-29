@@ -1,5 +1,11 @@
 # Changelog
 
+## ucc — session launch model selection
+Completed: 2026-06-29
+
+The interactive session launch form now uses the same installed-catalog model picker as agent and coder
+launches. Selecting a row writes the model `spec` into the existing session launch payload.
+
 ## ucc — model selection in launch forms
 Completed: 2026-06-29
 

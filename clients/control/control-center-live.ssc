@@ -269,12 +269,14 @@ val sessionsList = cardWithHeader(heading(2, "Живые сессии (терм�
     lcol("🖥 терминал", "id", "/terminal.html?id=:value")
   ], "sessions")
 )
+val sessionModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", seModel, "spec")])
 
 val sessionLaunch = cardWithHeader(heading(2, "Новая интерактивная сессия"))(
   vstack(gap = 8)(
     hstack(gap = 8)(text("свободно RAM:"), signalText_(availTxt)),
     textField(seAgent, "агент: claude | codex | opencode"),
-    textField(seModel, "модель — спец из каталога…"),
+    hstack(gap = 8)(text("модель:"), signalText_(seModel)),
+    sessionModelList,
     textField(seWorkdir, "рабочая папка (абсолютный путь)…"),
     textField(sePrompt, "первое задание (необязательно)…"),
     actionButton(
