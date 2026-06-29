@@ -27,6 +27,12 @@
   `bash -n scripts/bench/agentic.sh`; Qwen3-4B `fix/test` **0/1 → 1/1 each** with `REPAIR=1`.
   Combined targeted evidence now covers Qwen3-4B `build/fix/test/debug/rpn` green, but `rpn` is slow
   (277s, 22 turns), so require multi-rep before making it a default agentic pick.
+- [x] **matrix-e2e-harness-summary** — DONE (2026-06-29). Fixed low-load e2e harness drift without
+  loading a model: `run_full_matrix.sh` now uses the same DWQ 35B default as `agentic.sh`, defaults
+  `REPAIR=1`, falls back to the debug binary when release is absent, prints the real `per-run.csv`
+  path, and auto-runs the summary. `summarize_matrix.py` now reads either the stdout log, a result dir,
+  or `per-run.csv` directly, keeps pipeline model labels intact, includes `rpn` in task order, and
+  reports pass-rates across reps instead of forcing operators to parse raw CSV.
 - [x] **glm-fix-readcall-corruption** — FIXED + VALIDATED (master `ea23b7a`, 2026-06-29). GLM-4-32B-0414
   failed `fix` **0/2 consistently**: src/main.rs ended up containing a `Read\n{"file_path":...}`
   tool-call's TEXT instead of code. ROOT CAUSE (captured real output): GLM-4 dense wraps its calls in a

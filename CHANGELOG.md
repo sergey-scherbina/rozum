@@ -1,5 +1,19 @@
 # Changelog
 
+## bench — e2e matrix wrapper and summary de-drifted
+Completed: 2026-06-29
+
+Fixed low-load e2e matrix harness drift. `scripts/bench/run_full_matrix.sh` now uses the same
+Qwen3.6-35B-A3B DWQ default as `agentic.sh`, defaults verify-repair to on (`REPAIR=1`), falls back to
+the debug gateway binary when a release binary is absent, prints the actual `per-run.csv` path, and
+runs the matrix summary automatically at the end.
+
+`scripts/bench/summarize_matrix.py` now accepts a full stdout log, a result directory, or
+`per-run.csv` directly. It preserves pipeline model labels, includes `rpn` in task ordering, and reports
+pass-rates across reps instead of requiring operators to inspect raw CSV manually. Verification was
+script-only: Python compile, Bash syntax, existing result CSVs, and a synthetic stdout log; no model was
+loaded.
+
 ## bench — GLM artifact synth default-on gate locked down
 Completed: 2026-06-29
 

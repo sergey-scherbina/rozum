@@ -5,17 +5,25 @@
 # (a model that doesn't fit is REFUSED cleanly before any weights load → a matrix FAIL, never a reboot).
 set -u
 cd "$(dirname "$0")/../.."                                   # repo root (worktree)
-BIN="$(pwd)/target/release/rozum-gateway"
+BIN="${BENCH_BIN:-$(pwd)/target/release/rozum-gateway}"
+if [ ! -x "$BIN" ]; then
+  if [ -x "$(pwd)/target/debug/rozum-gateway" ]; then
+    BIN="$(pwd)/target/debug/rozum-gateway"
+  else
+    echo "ABORT: no rozum-gateway binary; build with: cargo build --release --bin rozum-gateway" >&2
+    exit 1
+  fi
+fi
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="scripts/bench/results/full-matrix-$STAMP"
 LOG="/tmp/full_matrix-$STAMP.log"
 
 # Two models (operator request), the pipeline-cascade value A/B:
-#   1. Qwen3.6-35B-A3B — single strongest local agentic coder.
+#   1. Qwen3.6-35B-A3B-DWQ — single strongest local agentic coder in the current bench default set.
 #   2. GLM-4-32B,gpt-oss-20b — LAZY in-process pipeline (comma-spec): GLM-32B plans → gpt-oss executes,
 #      one resident at a time (in-process swap fixed: docs/pipeline-swap-bug.md). It RELOADS both tiers
 #      per agent turn, so it is slow → RUN_TIMEOUT is bumped well above the single-model 280 s below.
-MODELS="mlx-community:Qwen3.6-35B-A3B-4bit mlx-community:GLM-4-32B-0414-4bit,mlx-community:gpt-oss-20b-MXFP4-Q4"
+MODELS="${MODELS:-mlx-community:Qwen3.6-35B-A3B-4bit-DWQ mlx-community:GLM-4-32B-0414-4bit,mlx-community:gpt-oss-20b-MXFP4-Q4}"
 
 # Optional safety lever (DEFAULT keep the safe 3 GiB): to squeeze the 35B in when RAM is tight, the
 # operator may lower keep-free — pass KEEP_FREE_GIB=2 to this script. Left UNSET = the safe 3 GiB default.
@@ -43,10 +51,11 @@ env "${EXTRA_ENV[@]}" \
   AGENTS="claude codex opencode" \
   TASKS="greet build fix test debug rpn" \
   REPS=1 KEEP=1 RUN_TIMEOUT="${RUN_TIMEOUT:-900}" NCTX="${NCTX:-32768}" \
-  REPAIR="${REPAIR:-0}" \
+  REPAIR="${REPAIR:-1}" \
   ROZUM_SAMPLING_SEED=1234 \
   BENCH_BIN="$BIN" BENCH_OUT="$OUT" \
   bash scripts/bench/agentic.sh 2>&1 | tee "$LOG"
 
-echo ">> done. CSV: $OUT  | full log: $LOG"
+echo ">> done. CSV: $OUT/per-run.csv  | full log: $LOG"
+command -v python3 >/dev/null 2>&1 && python3 scripts/bench/summarize_matrix.py "$OUT/per-run.csv" || true
 echo ">> slot after:"; pgrep -fl 'gateway --model' 2>/dev/null | grep -v claude || echo "  clean"
