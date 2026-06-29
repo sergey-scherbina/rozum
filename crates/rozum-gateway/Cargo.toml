@@ -25,3 +25,7 @@ axum = { version = "0.8", features = ["ws"] }
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 libc = "0.2"
+# Phase 4 — live terminal sessions + Face ID auth (UCC).
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+portable-pty = "0.8"
+url = "2"

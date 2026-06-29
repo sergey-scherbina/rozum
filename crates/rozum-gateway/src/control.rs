@@ -30,7 +30,10 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         .route("/control/task", post(task_route))
         .route("/control/coder/launch", post(coder_launch_route))
         .route("/control/coder/stop", post(coder_stop_route))
-        .route("/control/coder/log", get(coder_log_route));
+        .route("/control/coder/log", get(coder_log_route))
+        .route("/control/session/launch", post(session_launch_route))
+        .route("/control/session/stop", post(session_stop_route))
+        .route("/control/session/attach/{id}", get(session_attach_route));
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     eprintln!("control server: http://{addr}/control/status (+POST actions)");
@@ -500,6 +503,205 @@ async fn coder_log_route(axum::extract::Query(q): axum::extract::Query<CoderLogQ
     axum::Json(serde_json::json!({ "id": c.id, "alive": pid_alive(c.pid), "log": tail })).into_response()
 }
 
+// ── Phase 4: live interactive terminal sessions (tmux + PTY ↔ WebSocket) ────────────────────────────
+//
+// A "session" is a coding-agent running INTERACTIVELY under a detached tmux session, so it survives the
+// phone sleeping / the WS dropping. `POST /control/session/launch` creates the tmux session; the WS
+// `GET /control/session/attach/:id` bridges a PTY running `tmux attach` to the browser xterm.js. tmux
+// is the source of truth for liveness; a small registry holds display metadata.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecord {
+    pub id: String,
+    pub agent: String,
+    pub model: String,
+    pub workdir: String,
+    pub prompt: String,
+    pub started_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionBrief {
+    pub id: String,
+    pub agent: String,
+    pub model: String,
+    pub workdir: String,
+    pub alive: bool,
+}
+
+fn sessions_registry_path() -> Option<PathBuf> {
+    state_dir().map(|d| d.join("ucc-sessions.json"))
+}
+fn load_sessions() -> Vec<SessionRecord> {
+    sessions_registry_path()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+fn save_sessions(s: &[SessionRecord]) {
+    if let Some(p) = sessions_registry_path() {
+        if let Some(dir) = p.parent() { let _ = std::fs::create_dir_all(dir); }
+        if let Ok(body) = serde_json::to_vec_pretty(s) {
+            let tmp = p.with_extension("json.tmp");
+            if std::fs::write(&tmp, &body).is_ok() { let _ = std::fs::rename(&tmp, &p); }
+        }
+    }
+}
+fn tmux_name(id: &str) -> String { format!("rozum-{id}") }
+
+/// Does the tmux session exist? (`tmux has-session` exit 0). The liveness source of truth.
+fn tmux_alive(id: &str) -> bool {
+    Command::new("tmux").args(["has-session", "-t", &tmux_name(id)])
+        .stdout(Stdio::null()).stderr(Stdio::null())
+        .status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Running sessions (registry ∩ live tmux); prunes dead registry entries.
+fn live_sessions() -> Vec<SessionBrief> {
+    let all = load_sessions();
+    let (alive, dead): (Vec<_>, Vec<_>) = all.into_iter().partition(|s| tmux_alive(&s.id));
+    if !dead.is_empty() { save_sessions(&alive); }
+    alive.into_iter()
+        .map(|s| SessionBrief { id: s.id, agent: s.agent, model: s.model, workdir: s.workdir, alive: true })
+        .collect()
+}
+
+#[derive(Deserialize)]
+struct SessionLaunchReq {
+    agent: String,
+    model: String,
+    workdir: String,
+    #[serde(default)]
+    prompt: String,
+}
+
+async fn session_launch_route(axum::Json(req): axum::Json<SessionLaunchReq>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let agent = req.agent.trim().to_string();
+    let model = req.model.trim().to_string();
+    let workdir = req.workdir.trim().to_string();
+    if agent.is_empty() || model.is_empty() || workdir.is_empty() {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "agent, model, workdir required");
+    }
+    if !std::path::Path::new(&workdir).is_dir() {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "workdir is not a directory");
+    }
+    // Admission-gate the model; `rozum launch` then reuses the shared gateway.
+    if let Err(e) = ensure_gateway(&model) {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            axum::Json(serde_json::json!({ "ok": false, "error": e, "admission": footprint_report(&model) })),
+        ).into_response();
+    }
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
+    let id = format!("{}-{}", sanitize(&agent), crate::share::now_unix());
+    let name = tmux_name(&id);
+    // Interactive agent under a detached tmux session in the workdir.
+    let inner = format!("{} launch --model {} {}", exe.to_string_lossy(), model, agent);
+    let ok = Command::new("tmux")
+        .args(["new-session", "-d", "-s", &name, "-c", &workdir, "-x", "120", "-y", "40", &inner])
+        .status().map(|s| s.success()).unwrap_or(false);
+    if !ok {
+        return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "tmux new-session failed");
+    }
+    // Seed the task prompt into the interactive agent, if given.
+    let prompt = req.prompt.trim().to_string();
+    if !prompt.is_empty() {
+        std::thread::sleep(std::time::Duration::from_millis(1500)); // let the agent's REPL come up
+        let _ = Command::new("tmux").args(["send-keys", "-t", &name, &prompt, "Enter"]).status();
+    }
+    let mut sessions = load_sessions();
+    sessions.push(SessionRecord {
+        id: id.clone(), agent, model, workdir, prompt, started_at: crate::share::now_unix(),
+    });
+    save_sessions(&sessions);
+    axum::Json(serde_json::json!({ "ok": true, "id": id })).into_response()
+}
+
+async fn session_stop_route(axum::Json(req): axum::Json<AgentStopReq>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let _ = Command::new("tmux").args(["kill-session", "-t", &tmux_name(&req.id)]).status();
+    let mut sessions = load_sessions();
+    sessions.retain(|s| s.id != req.id);
+    save_sessions(&sessions);
+    axum::Json(serde_json::json!({ "ok": true, "id": req.id })).into_response()
+}
+
+/// WS: bridge a PTY running `tmux attach -t rozum-<id>` to the browser terminal. Closing the WS ends the
+/// ATTACH (the tmux session persists → reconnect re-attaches). Text frame `{"resize":{cols,rows}}` resizes.
+async fn session_attach_route(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    if !tmux_alive(&id) {
+        return json_err(axum::http::StatusCode::NOT_FOUND, "no such session");
+    }
+    ws.on_upgrade(move |socket| session_ws_bridge(socket, id))
+}
+
+async fn session_ws_bridge(mut socket: axum::extract::ws::WebSocket, id: String) {
+    use axum::extract::ws::Message;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::{Read, Write};
+
+    let name = tmux_name(&id);
+    let pty = native_pty_system();
+    let pair = match pty.openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 }) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let mut cmd = CommandBuilder::new("tmux");
+    cmd.args(["attach", "-t", &name]);
+    let mut child = match pair.slave.spawn_command(cmd) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    drop(pair.slave);
+    let mut reader = match pair.master.try_clone_reader() { Ok(r) => r, Err(_) => return };
+    let writer = match pair.master.take_writer() { Ok(w) => w, Err(_) => return };
+    let writer = std::sync::Arc::new(std::sync::Mutex::new(writer));
+    let master = pair.master;
+
+    // PTY → channel (blocking std read on a worker thread).
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => { if tx.blocking_send(buf[..n].to_vec()).is_err() { break; } }
+            }
+        }
+    });
+
+    loop {
+        tokio::select! {
+            out = rx.recv() => match out {
+                Some(bytes) => { if socket.send(Message::Binary(bytes.into())).await.is_err() { break; } }
+                None => break, // PTY closed (attach ended)
+            },
+            inc = socket.recv() => match inc {
+                Some(Ok(Message::Binary(b))) => { let _ = writer.lock().unwrap().write_all(&b); }
+                Some(Ok(Message::Text(t))) => {
+                    let mut handled = false;
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
+                        if let Some(r) = v.get("resize") {
+                            let cols = r.get("cols").and_then(|x| x.as_u64()).unwrap_or(120) as u16;
+                            let rows = r.get("rows").and_then(|x| x.as_u64()).unwrap_or(40) as u16;
+                            let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                            handled = true;
+                        }
+                    }
+                    if !handled { let _ = writer.lock().unwrap().write_all(t.as_bytes()); }
+                }
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                _ => {}
+            },
+        }
+    }
+    let _ = child.kill(); // end the `tmux attach` (NOT the session — it stays detached for reconnect)
+}
+
 /// A coherent snapshot of the models/gateway service.
 #[derive(Debug, Clone, Serialize)]
 pub struct ControlStatus {
@@ -523,6 +725,9 @@ pub struct ControlStatus {
     /// The coding-agents (`rozum launch`) launched through the control API, with liveness — so the UCC
     /// can show running coders, tail their logs, and stop them.
     pub coders: Vec<CoderBrief>,
+    /// The live interactive terminal sessions (tmux-backed) — so the UCC can list them, open the
+    /// xterm.js terminal, and stop them.
+    pub sessions: Vec<SessionBrief>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -654,7 +859,8 @@ pub async fn status() -> ControlStatus {
     let meetings = list_meetings();
     let agents = live_agents();
     let coders = live_coders();
-    ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents, coders }
+    let sessions = live_sessions();
+    ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents, coders, sessions }
 }
 
 #[cfg(test)]
