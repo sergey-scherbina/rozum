@@ -27,3 +27,4 @@ pub use list::list_rooms;
 pub use proxy::run_proxy;
 pub use room_path::generate_room_name;
 pub use state::{Meeting, MeetingEvent};
+pub use store::{list_registered, prune_registered, rozum_state_dir, RoomLocation};

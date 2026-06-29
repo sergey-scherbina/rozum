@@ -1557,6 +1557,18 @@ pub fn list_registered(state_dir: &Path) -> Vec<RoomLocation> {
     }
 }
 
+/// Remove entries from the registry whose `root` directory no longer exists.
+/// Returns the names of the removed rooms.
+pub fn prune_registered(state_dir: &Path) -> std::io::Result<Vec<String>> {
+    let all = list_registered(state_dir);
+    let (keep, remove): (Vec<_>, Vec<_>) = all.into_iter().partition(|r| r.root.exists());
+    let removed: Vec<String> = remove.into_iter().map(|r| r.name).collect();
+    if !removed.is_empty() {
+        write_json_atomic(&registry_path(state_dir), &keep)?;
+    }
+    Ok(removed)
+}
+
 // ── Access tokens + roles (`tokens.json`) ─────────────────────────────────────
 
 /// An operator's role — the RBAC ladder for the support console. `Observer` reads only; `Responder`

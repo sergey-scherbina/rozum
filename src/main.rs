@@ -407,6 +407,22 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+
+    /// Manage the global room registry (~/.local/state/rozum/rooms.json).
+    Rooms {
+        #[command(subcommand)]
+        action: RoomsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum RoomsAction {
+    /// Remove registry entries whose root directory no longer exists.
+    ///
+    /// Rooms accumulate when agents work in worktrees or temp directories that
+    /// are later deleted. `prune` cleans up stale entries without affecting
+    /// rooms whose directories are still present.
+    Prune,
 }
 
 /// `rozum identity whoami|set-name` — the local human's stable meeting identity.
@@ -1260,6 +1276,9 @@ async fn main() {
             IdentityAction::SetName { name } => run_identity_set_name(&name),
         },
         Some(Command::Doctor { web_url, strict }) => run_doctor(web_url, strict).await,
+        Some(Command::Rooms { action }) => match action {
+            RoomsAction::Prune => run_rooms_prune(),
+        },
         Some(Command::Telegram { room, name }) => {
             let token = std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_else(|_| {
                 eprintln!("error: TELEGRAM_BOT_TOKEN not set");
@@ -1288,6 +1307,24 @@ async fn run_doctor(web_url: Option<String>, strict: bool) {
     print!("{}", report.render());
     if report.should_fail(strict) {
         std::process::exit(1);
+    }
+}
+
+fn run_rooms_prune() {
+    use rozum::meeting::{prune_registered, rozum_state_dir};
+    let state = rozum_state_dir();
+    match prune_registered(&state) {
+        Ok(removed) if removed.is_empty() => println!("rooms prune: nothing to remove"),
+        Ok(removed) => {
+            println!("rooms prune: removed {} stale entr{}:", removed.len(), if removed.len() == 1 { "y" } else { "ies" });
+            for name in &removed {
+                println!("  - {name}");
+            }
+        }
+        Err(e) => {
+            eprintln!("rooms prune: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -2684,6 +2721,12 @@ async fn run_meetings_start(foreground: bool) {
     let _ = std::fs::create_dir_all(&state_dir);
     let pid_path = state_dir.join("meetings.pid");
     let _ = std::fs::write(&pid_path, std::process::id().to_string());
+
+    if let Ok(removed) = rozum::meeting::prune_registered(&state_dir) {
+        for name in &removed {
+            eprintln!("meetings: pruned stale room '{name}'");
+        }
+    }
 
     let registry = std::sync::Arc::new(RoomRegistry::new(state_dir));
     if let Err(e) = serve_daemon(&sock, registry).await {
