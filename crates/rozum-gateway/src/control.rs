@@ -22,16 +22,21 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
     async fn status_route() -> impl IntoResponse {
         ([(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], axum::Json(status().await))
     }
-    // Public: the read snapshot (so the SPA can render the login screen) + the auth ceremony endpoints.
+    // Public: SPA static files + read snapshot + auth ceremony + chat reads.
     let public = Router::new()
+        .route("/", get(spa_root_route))
+        .route("/{*path}", get(spa_static_route))
         .route("/control/status", get(status_route))
         .route("/control/auth/status", get(auth_status_route))
         .route("/control/auth/register/begin", post(register_begin_route))
         .route("/control/auth/register/finish", post(register_finish_route))
         .route("/control/auth/login/begin", post(login_begin_route))
-        .route("/control/auth/login/finish", post(login_finish_route));
+        .route("/control/auth/login/finish", post(login_finish_route))
+        .route("/chat/messages", get(chat_messages_route))
+        .route("/chat/incidents", get(chat_incidents_route));
     // Protected by `require_auth` (own Face ID session OR busi SSO): every write action + the terminal WS.
     let protected = Router::new()
+        .route("/chat/post", post(chat_post_route))
         .route("/control/gateway/load", post(gateway_load_route))
         .route("/control/agent/launch", post(agent_launch_route))
         .route("/control/agent/stop", post(agent_stop_route))
@@ -46,8 +51,178 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
     let app = public.merge(protected);
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!("control server: http://{addr}/control/status (+POST actions)");
+    eprintln!("control server: http://{addr}/ (SPA + API, no Python proxy needed)");
     axum::serve(listener, app).await
+}
+
+// ── Static SPA file serving (replaces ucc-web-server.py) ─────────────────────────────────────────
+
+fn ucc_site_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".rozum/ucc/site")
+}
+
+fn serve_site_file(name: &str) -> axum::response::Response {
+    use axum::{http::{header, StatusCode}, response::IntoResponse};
+    let path = ucc_site_dir().join(name);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let mime = match path.extension().and_then(|e| e.to_str()) {
+                Some("html") => "text/html; charset=utf-8",
+                Some("js")   => "application/javascript",
+                Some("css")  => "text/css",
+                Some("svg")  => "image/svg+xml",
+                Some("png")  => "image/png",
+                Some("ico")  => "image/x-icon",
+                Some("webmanifest") => "application/manifest+json",
+                _ => "application/octet-stream",
+            };
+            ([(header::CONTENT_TYPE, mime)], bytes).into_response()
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn spa_root_route() -> axum::response::Response {
+    serve_site_file("index.html")
+}
+
+async fn spa_static_route(
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::{http::StatusCode, response::IntoResponse};
+    // Guard against path traversal; only serve known static extensions.
+    if path.contains("..") || path.starts_with('/') {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let allowed = matches!(
+        std::path::Path::new(&path).extension().and_then(|e| e.to_str()),
+        Some("html" | "js" | "css" | "svg" | "png" | "ico" | "webmanifest" | "txt")
+    );
+    if !allowed {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    serve_site_file(&path)
+}
+
+// ── Chat read/write endpoints (replaces ucc-web-server.py proxy logic) ───────────────────────────
+
+#[derive(serde::Deserialize)]
+struct RoomQuery { room: String }
+
+async fn chat_messages_route(
+    axum::extract::Query(q): axum::extract::Query<RoomQuery>,
+) -> axum::response::Response {
+    use axum::{http::StatusCode, response::IntoResponse};
+    if !valid_room_name(&q.room) { return StatusCode::BAD_REQUEST.into_response(); }
+    axum::Json(read_room_messages(&q.room, 80)).into_response()
+}
+
+async fn chat_incidents_route(
+    axum::extract::Query(q): axum::extract::Query<RoomQuery>,
+) -> axum::response::Response {
+    use axum::{http::StatusCode, response::IntoResponse};
+    if !valid_room_name(&q.room) { return StatusCode::BAD_REQUEST.into_response(); }
+    axum::Json(read_room_incidents(&q.room)).into_response()
+}
+
+async fn chat_post_route(
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::{http::StatusCode, response::IntoResponse};
+    let room = headers
+        .get("X-Room")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if !valid_room_name(&room) { return StatusCode::BAD_REQUEST.into_response(); }
+    // Proxy to the meeting daemon at :8405/p.
+    let client = reqwest::Client::new();
+    match client
+        .post("http://127.0.0.1:8405/p")
+        .header("X-Room", &room)
+        .header("Content-Type", "text/plain")
+        .body(body.to_vec())
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => StatusCode::OK.into_response(),
+        Ok(r) => (StatusCode::BAD_GATEWAY, r.status().as_str().to_string()).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
+}
+
+fn valid_room_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 128 && !name.chars().any(|c| matches!(c, '\r' | '\n' | '\0' | '/'))
+}
+
+fn rooms_json_path() -> Option<PathBuf> {
+    state_dir().map(|d| d.join("rooms.json"))
+}
+
+fn room_root(name: &str) -> Option<PathBuf> {
+    let path = rooms_json_path()?;
+    let val: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    let rooms = match &val {
+        serde_json::Value::Array(a) => a.clone(),
+        serde_json::Value::Object(o) => o.get("rooms").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
+        _ => return None,
+    };
+    for r in &rooms {
+        if r.get("name").and_then(|v| v.as_str()) == Some(name) {
+            return r.get("root").and_then(|v| v.as_str()).map(PathBuf::from);
+        }
+    }
+    None
+}
+
+#[derive(serde::Serialize)]
+struct ChatMessage { time: String, author: String, content: String }
+
+fn read_room_messages(room: &str, limit: usize) -> Vec<ChatMessage> {
+    let Some(root) = room_root(room) else { return vec![]; };
+    if !root.is_dir() { return vec![]; }
+    let mut files: Vec<_> = std::fs::read_dir(&root)
+        .into_iter().flatten().filter_map(|e| e.ok()).map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .collect();
+    files.sort();
+    let mut out = vec![];
+    for fp in &files {
+        let Ok(text) = std::fs::read_to_string(fp) else { continue; };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            let Ok(m) = serde_json::from_str::<serde_json::Value>(line) else { continue; };
+            let Some(content) = m.get("content").and_then(|v| v.as_str()) else { continue; };
+            let author = m.get("author").and_then(|v| v.as_str()).unwrap_or("?");
+            let ts = m.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
+            let time = { let h = (ts / 3600) % 24; let min = (ts / 60) % 60; format!("{h:02}:{min:02}") };
+            out.push(ChatMessage { time, author: author.to_string(), content: content.to_string() });
+        }
+    }
+    if out.len() > limit { out.drain(..out.len() - limit); }
+    out
+}
+
+#[derive(serde::Serialize)]
+struct Incident { severity: String, state: String, title: String, owner: String }
+
+fn read_room_incidents(room: &str) -> Vec<Incident> {
+    let Some(root) = room_root(room) else { return vec![]; };
+    let Ok(bytes) = std::fs::read(root.join("threads.json")) else { return vec![]; };
+    let Ok(serde_json::Value::Array(arr)) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return vec![]; };
+    arr.iter().filter_map(|t| {
+        Some(Incident {
+            title:    t.get("title")?.as_str()?.to_string(),
+            state:    t.get("state").and_then(|v| v.as_str()).unwrap_or("open").to_string(),
+            severity: t.get("severity").and_then(|v| v.as_str()).unwrap_or("low").to_string(),
+            owner:    t.get("owner").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        })
+    }).collect()
 }
 
 // ── Agent registry + actions (write side of the control API) ─────────────────────────────────────

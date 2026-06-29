@@ -1,0 +1,55 @@
+#!/usr/bin/env ssc
+---
+name: rozum-ucc-terminal
+version: 1.0.0
+description: rozum UCC — xterm.js terminal page. Compiled to terminal.html.
+---
+# rozum control — terminal
+
+Generates the xterm.js WebSocket terminal page served by control-serve.
+Compiled via: ssc run terminal.ssc → curl → terminal.html  (see deploy-ucc-web.sh)
+
+## Setup
+[route, serve](std/http.ssc)
+
+## Page
+```scalascript
+val barCss = "#bar{display:flex;gap:10px;align-items:center;padding:8px max(10px,env(safe-area-inset-right)) 8px max(10px,env(safe-area-inset-left));background:#151a23;border-bottom:1px solid #232a36}#bar a{color:#7ab8ff;text-decoration:none}#st{margin-left:auto;font-size:12px;color:#8a93a0}#term{height:calc(100% - 38px);padding:4px}"
+val bodyCss = "html,body{margin:0;height:100%;background:radial-gradient(130% 95% at 50% 36%,transparent 50%,rgba(2,3,7,.62) 100%),radial-gradient(135% 85% at 50% -12%,#163a50 0%,#0b1d2c 32%,#06090f 68%,#05070c 100%),radial-gradient(58% 48% at 16% 6%,rgba(44,84,120,.34),transparent 62%),radial-gradient(52% 44% at 88% 20%,rgba(74,46,104,.26),transparent 60%) fixed;color:#e6e6e6;font:14px -apple-system,system-ui,sans-serif}"
+
+val xtermJs = """
+const id = new URLSearchParams(location.search).get('id') || '';
+document.getElementById('sid').textContent = id || 'нет id сессии';
+const st = document.getElementById('st');
+const term = new Terminal({ cursorBlink:true, fontSize:13, theme:{ background:'#0b0e14' } });
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open(document.getElementById('term'));
+fit.fit();
+const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/control/session/attach/' + encodeURIComponent(id);
+let ws;
+function connect(){
+  if (!id) { st.textContent = '✗ нет id сессии'; term.writeln('Нет id сессии. Откройте терминал из списка сессий UCC.'); return; }
+  st.textContent = 'подключение…';
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { st.textContent = '● подключено'; sendResize(); term.focus(); };
+  ws.onmessage = (e) => { term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data)); };
+  ws.onclose = () => { st.textContent = '○ отключено — переподключиться?'; };
+  ws.onerror = () => { st.textContent = '✗ ошибка (нужен вход по Face ID?)'; };
+}
+function sendResize(){ if (ws && ws.readyState === 1) ws.send(JSON.stringify({ resize:{ cols: term.cols, rows: term.rows } })); }
+term.onData(d => { if (ws && ws.readyState === 1) ws.send(d); });
+window.addEventListener('resize', () => { fit.fit(); sendResize(); });
+st.onclick = () => { if (!ws || ws.readyState > 1) connect(); };
+if (id) connect(); else { st.textContent = '✗ нет id сессии'; term.writeln('Нет id сессии. Откройте терминал из списка сессий UCC.'); }
+"""
+
+val xtermCdn = "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0"
+val fitCdn   = "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0"
+
+val html = "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover\"><meta name=\"apple-mobile-web-app-capable\" content=\"yes\"><title>rozum · терминал</title><link rel=\"stylesheet\" href=\"" + xtermCdn + "/css/xterm.min.css\"><style>" + bodyCss + barCss + "</style></head><body><div id=\"bar\"><a href=\"/\">← UCC</a><b id=\"sid\"></b><span id=\"st\">…</span></div><div id=\"term\"></div><script src=\"" + xtermCdn + "/lib/xterm.min.js\"></script><script src=\"" + fitCdn + "/lib/addon-fit.min.js\"></script><script>" + xtermJs + "</script></body></html>"
+
+route("GET", "/", req => html)
+serve(8422)
+```
