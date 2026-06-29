@@ -11,17 +11,15 @@
   regression sweep — so the GLM family default-on synth path is byte-identical. Method now in memory
   [[project-downloaded-models-toolcall-dwq]]: a 0/N CREATE score is a delivery signal first — extract
   the model's ```rust fence and compile it standalone before calling the model weak.
-- [ ] **glm-fix-readcall-corruption** — NEW (found via the Mode-1b regression sweep, 2026-06-29).
-  GLM-4-32B-0414 fails the `fix` task **0/2 consistently** (both reps RUN_TIMEOUT, `cargo run -> ''`):
-  src/main.rs ends up containing a `Read\n{"file_path":...}` tool-call's TEXT instead of code. ROOT
-  CAUSE (likely, from the kept workdir): GLM-4 dense emits tool calls as `name\n{json}`; when it wraps a
-  `Read\n{json}` call in a ``` fence with the filename in nearby prose, synth **Mode-1** (prose-filename
-  fallback) grabs the fence body as file content → overwrites src/main.rs with the Read-call text.
-  PRE-EXISTING (not Mode-1b — that needs `fn main`, which Read-text lacks; confirmed by code logic).
-  debug + build PASS (so it is fix-flow-specific). FIX DIRECTION: Mode-1 must not treat a fenced
-  `Name\n{json}` GLM tool-call as raw file content (let parse_tool_calls claim it first / skip fences
-  whose body is a bare `identifier\n{json}`). Repro: `AGENTIC_MODELS=mlx-community:GLM-4-32B-0414-4bit
-  TASKS=fix REPS=2 KEEP=1 scripts/bench/agentic.sh`, inspect the kept src/main.rs.
+- [x] **glm-fix-readcall-corruption** — FIXED + VALIDATED (master `ea23b7a`, 2026-06-29). GLM-4-32B-0414
+  failed `fix` **0/2 consistently**: src/main.rs ended up containing a `Read\n{"file_path":...}`
+  tool-call's TEXT instead of code. ROOT CAUSE (captured real output): GLM-4 dense wraps its calls in a
+  fence (```bash\nRead\n{json}```) and names the file in the preceding prose; `parse_tool_calls` claims
+  the Read, but synth **Mode-1** (prose-filename fallback) ALSO grabbed the same fence body and wrote it
+  into src/main.rs. Pre-existing (NOT Mode-1b). FIX: `body_is_fenced_tool_call` skips a fence whose body
+  is a `Name\n{json}` tool call before Mode-1; conservative (real `[package]`/`use std::…` content never
+  matches). Test from the real GLM output; 123/123 core. **LIVE: GLM fix rep1 PASS (was 0/2), both
+  workdirs src/main.rs CLEAN (intact `use std::env;`, no Read-text).**
 
 ### ▶ agentic-reliability (operator 2026-06-29: "сделай всё, занеси в спринт, порядок выбери сам")
 Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall (stall depends on sweep data).
