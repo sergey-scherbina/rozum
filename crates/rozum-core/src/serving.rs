@@ -480,6 +480,12 @@ fn repair_tool_object(b: &[u8], start: usize) -> Option<(String, usize)> {
 /// fence whose file path is named in the PRECEDING PROSE ("I'll create the `Cargo.toml` file:") becomes
 /// a `Write`; fences with no recoverable filename (a ```bash `cargo run` command) are skipped.
 ///
+/// **Mode 1b (last fallback) — complete program, no filename anywhere.** A ```rust fence that is a FULL
+/// program (`fn main`) with no prose filename → a `Write` to the language default (`src/main.rs`). This
+/// catches the weak-coder pattern (a small model narrates the whole, often correct solution in a fence
+/// and never names Write) without firing on an incidental snippet (no entrypoint → skipped). See
+/// [`default_path_for_full_program`].
+///
 /// **Returns EMPTY unless a guard holds** (a schema match, or a safe prose filename), so a chat answer
 /// with an incidental code block is never written. The CALLER still gates on (GLM family) AND
 /// (`parse_tool_calls` returned empty). `tools` is the request's offered tool set.
@@ -518,6 +524,18 @@ pub fn synth_glm_tool_calls(text: &str, tools: &[crate::backend::ToolDef]) -> Ve
             }
         } else if let (Some(path), Some(wt)) = (last_safe_filename(preceding), write_tool.as_deref()) {
             // Mode-1: raw file content; filename from the preceding prose.
+            let mut m = serde_json::Map::new();
+            m.insert("file_path".into(), Value::String(path));
+            m.insert("content".into(), Value::String(format!("{}\n", body.trim_end_matches('\n'))));
+            out.push((wt.to_string(), Value::Object(m).to_string()));
+        } else if let (Some(path), Some(wt)) = (default_path_for_full_program(&lang, body), write_tool.as_deref()) {
+            // Mode-1b: a COMPLETE program in a known language with NO filename anywhere in the prose —
+            // the weak-coder failure we kept scoring as "incapable": the model narrates the whole, often
+            // CORRECT solution in a ```rust fence ("Here is the updated code:") and never names Write, so
+            // nothing lands. Materialize it to the language's conventional entrypoint. The full-program
+            // marker (an `fn main`) is the guard: an incidental snippet/example in a chat answer has none,
+            // so it is left alone (preserving `synth_skips_chat_and_ambiguous`); a partial function-only
+            // fence won't overwrite the whole file either.
             let mut m = serde_json::Map::new();
             m.insert("file_path".into(), Value::String(path));
             m.insert("content".into(), Value::String(format!("{}\n", body.trim_end_matches('\n'))));
@@ -717,6 +735,19 @@ fn resolve_write_tool_name(tools: &[crate::backend::ToolDef]) -> Option<String> 
         .map(|t| t.name.clone())
 }
 
+/// Mode-1b: a fence body with NO filename in the prose. If it is a COMPLETE standalone program in a
+/// recognized language (an entrypoint marker), return the language's conventional path so a model that
+/// narrates the whole solution instead of naming `Write` still lands it. Conservative on purpose —
+/// requires a full-program marker so an incidental snippet/example (no entrypoint) is NOT written, and
+/// a partial function-only fence won't clobber the whole file. Only Rust binaries today (the agentic
+/// create-from-scratch case); extend per measured need, not speculatively.
+fn default_path_for_full_program(lang: &str, body: &str) -> Option<String> {
+    match lang {
+        "rust" | "rs" => body.contains("fn main").then(|| "src/main.rs".to_string()),
+        _ => None,
+    }
+}
+
 /// The LAST safe relative filename mentioned in `prose` (a fence's preceding text), or `None`. A token
 /// is a filename if it is a known extensionless name (`Cargo.toml`, `Makefile`, …) or ends in a known
 /// source/config extension; it must be a safe relative path ([`is_safe_relpath`]). "LAST" because GLM
@@ -890,6 +921,35 @@ mod tests {
             .collect();
         assert_eq!(paths, vec!["Cargo.toml", "src/main.rs"]);
         assert!(calls.iter().all(|(n, _)| n == "Write"));
+    }
+
+    #[test]
+    fn synth_mode1b_materializes_unlabeled_full_program() {
+        let tools = claude_tools();
+        // The weak-coder pattern (REAL Coder-7B capture): narrates the WHOLE program in a ```rust fence
+        // with NO filename in the prose ("Here is the updated code:") and never names Write. A complete
+        // program (fn main) → src/main.rs so the (often correct) solution actually lands.
+        let text = "Here is the updated code:\n\n```rust\nuse std::env;\nfn main() {\n    let a = env::args().nth(1).unwrap_or_default();\n    println!(\"{}\", a);\n}\n```\nThat should work.";
+        let calls = synth_glm_tool_calls(text, &tools);
+        assert_eq!(calls.len(), 1, "got: {calls:?}");
+        assert_eq!(calls[0].0, "Write");
+        let v: Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(v["file_path"], "src/main.rs");
+        assert!(v["content"].as_str().unwrap().contains("fn main"));
+    }
+
+    #[test]
+    fn synth_mode1b_guards() {
+        let tools = claude_tools();
+        // A snippet with NO entrypoint (the chat-example shape) is left alone.
+        assert!(synth_glm_tool_calls("Here's a loop:\n```rust\nfor i in 0..3 { println!(\"{i}\"); }\n```", &tools).is_empty());
+        // An explicit prose filename still wins (mode-1), not the src/main.rs default.
+        let labeled = "I'll create src/bin/tool.rs:\n```rust\nfn main() {}\n```";
+        let v: Value = serde_json::from_str(&synth_glm_tool_calls(labeled, &tools)[0].1).unwrap();
+        assert_eq!(v["file_path"], "src/bin/tool.rs", "explicit filename wins over the default");
+        // No Write tool offered → nothing synthesized.
+        let no_write: Vec<crate::backend::ToolDef> = vec![];
+        assert!(synth_glm_tool_calls("Here is the code:\n```rust\nfn main(){}\n```", &no_write).is_empty());
     }
 
     #[test]
