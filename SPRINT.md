@@ -51,8 +51,11 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   `TokenInfo.expires_ts`, `token issue --ttl 30d`, `token rotate <handle>`, list shows expiry, expired
   tokens rejected. **(+) feed pagination (`f3028d3`):** the live feed pages the LATEST window (`from =
   count − FEED_WINDOW`, +load-older) — bounded DOM + fixed the oldest-500 bug. 104 meeting tests.
-  **REMAINING DEPTH (honest):** per-room roles (auth is global); behavioral Playwright e2e; fold SSE/alerts/
-  roles into the `.ssc` PWA (thinner).
+  **(+) per-room RBAC (`50e3bc7`):** a token carries a global role + per-room overrides
+  (`token grant <h> --room <r> --role admin`); auth_layer enforces the EFFECTIVE role per room,
+  `/rooms/{n}/whoami` is room-scoped, the console re-gates on room switch. Live: bob = observer global /
+  admin in `incidents`. **REMAINING DEPTH (honest):** behavioral Playwright e2e (needs node toolchain);
+  fold SSE/alerts/roles into the `.ssc` PWA (thinner; no auth there yet). The console is production-grade.
 
 - [x] **meetings → support/incident platform (operator 2026-06-28, strategic)** — COMPLETE across all
   three surfaces + polished (foundation → agent-native MCP → human CLI → web console). Capabilities shipped
