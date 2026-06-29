@@ -14,6 +14,33 @@ CONTROL = "http://127.0.0.1:8411/control/status"
 MEETING = "http://127.0.0.1:8405"          # meeting web (single-writer post endpoint)
 PORT = 8410
 
+DEFAULT_ALLOWED_ORIGINS = {
+    "http://127.0.0.1:8410",
+    "http://localhost:8410",
+    "https://busi.tail1174e2.ts.net:8447",
+}
+
+def _normal_origin(origin):
+    try:
+        p = urllib.parse.urlparse(origin)
+    except Exception:
+        return None
+    if p.scheme not in ("http", "https") or not p.hostname:
+        return None
+    port = p.port or (443 if p.scheme == "https" else 80)
+    return f"{p.scheme}://{p.hostname.lower()}:{port}"
+
+def _allowed_origins():
+    origins = set(DEFAULT_ALLOWED_ORIGINS)
+    configured = os.environ.get("ROZUM_UCC_ALLOWED_ORIGINS", "")
+    origins.update(o.strip() for o in configured.split(",") if o.strip())
+    if os.environ.get("ROZUM_UCC_ORIGIN"):
+        origins.add(os.environ["ROZUM_UCC_ORIGIN"].strip())
+    return {n for o in origins if (n := _normal_origin(o))}
+
+def _valid_room_name(room):
+    return bool(room) and len(room) <= 128 and not any(c in room for c in "\r\n\0")
+
 def _state_dir():
     base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
     return os.path.join(base, "rozum")
@@ -87,10 +114,36 @@ class H(SimpleHTTPRequestHandler):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _same_origin(self, origin):
+        try:
+            p = urllib.parse.urlparse(origin)
+        except Exception:
+            return False
+        return bool(p.netloc) and p.netloc.lower() == self.headers.get("Host", "").lower()
+
+    def _origin_allowed(self, origin):
+        if not origin:
+            return True
+        return self._same_origin(origin) or _normal_origin(origin) in _allowed_origins()
+
+    def _send_cors_headers(self):
+        origin = self.headers.get("Origin")
+        if origin and self._origin_allowed(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Credentials", "true")
+            self.send_header("Vary", "Origin")
+
+    def _reject_bad_origin(self):
+        origin = self.headers.get("Origin")
+        if origin and not self._origin_allowed(origin):
+            self._send_json({"error": "origin not allowed"}, 403)
+            return True
+        return False
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -125,16 +178,25 @@ class H(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_OPTIONS(self):
+        if self._reject_bad_origin():
+            return
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "X-Room, Content-Type")
+        self.send_header("Access-Control-Max-Age", "600")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_POST(self):
+        if self._reject_bad_origin():
+            return
         if self.path.split("?")[0] == "/chat/post":
-            room = self.headers.get("X-Room", "demo")
+            room = self.headers.get("X-Room", "demo").strip()
+            if not _valid_room_name(room):
+                return self._send_json({"error": "invalid room"}, 400)
+            if _room_root(room) is None:
+                return self._send_json({"error": "unknown room"}, 404)
             n = int(self.headers.get("Content-Length", 0) or 0)
             content = self.rfile.read(n).decode("utf-8", "replace") if n else ""
             if not content.strip():
@@ -172,7 +234,7 @@ class H(SimpleHTTPRequestHandler):
     def _send_raw(self, body, code, set_cookies=None):
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         for c in (set_cookies or []):
             self.send_header("Set-Cookie", c)   # forward the login session cookie from control-serve
         self.send_header("Content-Length", str(len(body)))

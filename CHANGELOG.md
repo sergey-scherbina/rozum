@@ -1,5 +1,21 @@
 # Changelog
 
+## UCC — browser write-proxy hardening + terminal attach guard
+Completed: 2026-06-29
+
+Took over a low-load UCC/control-center tail after the Phase 4 landing. The UCC web proxy no longer
+advertises wildcard CORS for local control/chat JSON: it echoes only same-origin or configured
+allowlisted origins (`ROZUM_UCC_ALLOWED_ORIGINS`, plus `ROZUM_UCC_ORIGIN`), rejects unsafe browser POST
+or preflight requests from foreign origins, and refuses `/chat/post` for invalid or unknown room names
+instead of forwarding them to the meeting web writer. This leaves same-origin PWA behavior intact while
+closing the "any web page can use localhost UCC as a write proxy" edge.
+
+The xterm terminal page now handles a missing `id` without opening `/control/session/attach/`, and it
+uses the local launchd control port (`8411`) when opened from `:8410` while preserving the Tailscale
+control port (`8448`) path.
+
+Light verification only: `python3 -m py_compile clients/control/ucc-web-server.py` and helper assertions.
+
 ## agentic synth — weak coders are under-measured by DELIVERY; GLM fix-task corruption fixed
 Completed: 2026-06-29
 

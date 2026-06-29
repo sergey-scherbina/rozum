@@ -21,7 +21,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script>
 const id = new URLSearchParams(location.search).get('id') || '';
-document.getElementById('sid').textContent = id;
+document.getElementById('sid').textContent = id || 'нет id сессии';
 const st = document.getElementById('st');
 const term = new Terminal({ cursorBlink:true, fontSize:13, theme:{ background:'#0b0e14' } });
 const fit = new FitAddon.FitAddon();
@@ -29,10 +29,12 @@ term.loadAddon(fit);
 term.open(document.getElementById('term'));
 fit.fit();
 
-// control-serve WS lives on :8448 (Tailscale control-API); the session cookie is host-scoped so it rides the upgrade.
-const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.hostname + ':8448/control/session/attach/' + encodeURIComponent(id);
+// control-serve WS lives on :8448 behind Tailscale and on :8411 for the local launchd pair.
+const controlPort = location.port === '8410' ? '8411' : '8448';
+const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.hostname + ':' + controlPort + '/control/session/attach/' + encodeURIComponent(id);
 let ws;
 function connect(){
+  if (!id) { st.textContent = '✗ нет id сессии'; term.writeln('Нет id сессии. Откройте терминал из списка сессий UCC.'); return; }
   st.textContent = 'подключение…';
   ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
@@ -45,7 +47,7 @@ function sendResize(){ if (ws && ws.readyState === 1) ws.send(JSON.stringify({ r
 term.onData(d => { if (ws && ws.readyState === 1) ws.send(d); });
 window.addEventListener('resize', () => { fit.fit(); sendResize(); });
 st.onclick = () => { if (!ws || ws.readyState > 1) connect(); };
-connect();
+if (id) connect(); else { st.textContent = '✗ нет id сессии'; term.writeln('Нет id сессии. Откройте терминал из списка сессий UCC.'); }
 </script>
 </body>
 </html>

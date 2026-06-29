@@ -21,3 +21,7 @@ churned by sibling agents switching branches — commits there don't stick.)
 - [~] Generic interactive `rozum launch` agents from the web — deferred until there is an explicit
       non-TTY supervisor contract; a TTY program should stay CLI-only for now.
 - [ ] Replace shell/Python management actions with daemon REST management endpoints when those APIs exist.
+      Audit 2026-06-29: not closeable yet. `rest_read.rs` now has HTTP messages/threads/reactions/
+      redactions/SSE, but `/manage` still needs daemon REST verbs for room create/delete/clean-empty,
+      model rm, gateway switch/stop/unload, and model-participant start/stop before the shell/Python
+      actions in `meeting.ssc` can be removed.
