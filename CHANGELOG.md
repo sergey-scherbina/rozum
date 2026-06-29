@@ -1,5 +1,50 @@
 # Changelog
 
+## agentic synth — weak coders are under-measured by DELIVERY; GLM fix-task corruption fixed
+Completed: 2026-06-29
+
+Deep isolation of why the new/weak coders "fail" create-from-scratch: it is a tool-call DELIVERY
+artifact, not capability. They narrate a correct solution in a markdown ```rust fence and never name
+Write, so nothing lands → empty output → 0/N. Proven by extracting Coder-7B's narrated rpn code (which
+it scored 0/2 on) and compiling it standalone — it passes both verify cases (`35`, `14`).
+
+- **Mode-1b** (`179f48d`): an unlabeled full-program (`fn main`) ```rust fence with no prose filename →
+  a Write to `src/main.rs`, so the narrated solution lands. Conservative guards (entrypoint marker;
+  explicit prose filename still wins; a Write tool must be offered; chat snippets without an entrypoint
+  are skipped). Live A/B: Coder-7B build **0/2 → 2/2**, `src/main.rs` lands in all workdirs.
+- **GLM fix-corruption** (`ea23b7a`): GLM-4-32B failed `fix` **0/2 consistently** — synth Mode-1 grabbed
+  GLM's fenced `Read\n{json}` tool-call and wrote its TEXT *into* `src/main.rs`. Fixed with
+  `body_is_fenced_tool_call` (skip a fence whose body is a `Name\n{json}` call — those belong to
+  `parse_tool_calls`). Live: GLM fix **0/2 → PASS**, file no longer clobbered.
+- **Gate cycle** (`ae75753` → `f6bff46`): Mode-1b was briefly gated to the `ROZUM_ARTIFACT_SYNTH=1`
+  opt-in after a GLM regression sweep, then re-enabled for the GLM family once the corruption fix landed
+  and GLM `fix`+`debug` validated PASS with zero corruption. It now fires wherever the synth is active.
+
+Method (now in memory): a 0/N CREATE score is a delivery signal first — extract the model's ```rust
+fence and compile it before calling the model weak.
+
+## agentic loop-breaker — signature 4 (windowed identical tool-call recurrence) + lean MCP-strip
+Completed: 2026-06-29
+
+- **sig-4** (`142846c`): `detect_stuck_loop` now catches the no-stop-after-success loop (Qwen3-Coder-30B
+  burned 482 tool calls to timeout on a task it had already PASSED) that signatures 1–3 missed (calls
+  succeed / non-consecutive / Bash-Read not edits). Fires when one byte-identical `(name+input)` call
+  recurs ≥4× in the last 12 tool calls; threshold 4 preserves the "3 identical = not a loop" contract.
+  Validated live through the HTTP path (4 identical → synthetic stop; 3 → model runs normally).
+- **`--lean` MCP-strip** (`c4ee5cb`): the headless launch now adds `--strict-mcp-config` so ALL ambient
+  MCP servers (jetbrains, the claude.ai Google servers, …) are dropped — robust schema-bloat removal for
+  weak local models, vs the old single enumerated `mcp__rozum`. Channel-wakeup keeps the ambient config.
+
+## models — Qwen3-Coder-30B retired; gen-stall-guard investigated and (correctly) NOT built
+Completed: 2026-06-29
+
+- Deleted `Qwen3-Coder-30B-A3B-4bit` (16 GB): dominated by the DWQ 35B (30 GB peak + intermittent
+  482-call loop + rpn 0/2, vs 22 GB + 10/10).
+- **gen-stall-guard CLOSED without code:** the `rpn` 300s "stall" was captured (`KEEP=1`) and is model
+  capability (Coder-30B writes non-compiling Rust, doesn't self-test) — not a gateway-detectable pattern.
+  A generic wall-clock guard would abort genuine work; the existing guards (inactivity, output ceiling,
+  repeat_guard, sig 1–4) are the right coverage.
+
 ## gateway — `GET /control/status` HTTP (control snapshot for the web/UCC)
 Completed: 2026-06-23
 
