@@ -1,5 +1,13 @@
 # Changelog
 
+## backlog — close stale meetings-rest-read item
+Completed: 2026-06-29
+
+Marked `BACKLOG.md`'s original `meetings-rest-read` follow-up as done. The daemon REST read-by-day API
+shipped on 2026-06-21 (`GET /rooms/{name}/days`,
+`GET /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`) and now lives in
+`crates/rozum-meeting/src/meeting/rest_read.rs`; later REST additions remain separate follow-ups.
+
 ## meeting .ssc — avoid direct function refs in map lowering
 Completed: 2026-06-29
 

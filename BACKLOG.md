@@ -703,11 +703,13 @@ polish (graceful drain, idle-evict, content-off-daemon, per-room `catch_unwind`,
 second poll-connection, bare-`rozum` cutover with `--legacy-room` escape hatch).
 Remaining:
 
-- [ ] meetings-rest-read — remote stateless read-by-day on the meeting daemon's
-  own HTTP listener: `GET /rooms/{name}/days`, `GET
-  /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`. Spec'd as "Future" in the
-  spec; lets a non-local reader fetch content (direct-disk needs a shared FS).
-  Verifiable (axum handler over the day files).
+- [x] meetings-rest-read — **DONE 2026-06-21.** Remote stateless read-by-day on the
+  meeting daemon's own HTTP listener: `GET /rooms/{name}/days`, `GET
+  /rooms/{name}/messages/YYYY-MM-DD?from=N&count=M`. Gated by `ROZUM_WEB_SECRET`,
+  opt-in bind via `ROZUM_MEETINGS_REST_BIND`, and implemented in
+  `crates/rozum-meeting/src/meeting/rest_read.rs`. The REST surface has since grown
+  beyond read-by-day (inbox/roster, incidents, messages, reactions, SSE/search), but
+  this original backlog item is closed.
 - [x] meetings-model-as-participant — **DONE 2026-06-20.** `rozum meetings participant`
   joins a daemon room as a live model participant, calls the local gateway over HTTP,
   obeys `mention`/`always`/`manual` reply policy, supports persona text/files and peer
