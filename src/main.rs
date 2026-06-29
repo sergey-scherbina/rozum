@@ -320,7 +320,9 @@ enum Command {
         /// Lean mode for local models: optimize Claude Code's request. (1) Strip non-coding
         /// tools via `--disallowedTools` (meeting-room MCP, plan/worktree/cron/task/workflow/
         /// skill/notebook/web) — CC otherwise ships ~33 tool schemas (~4.9K tokens) every
-        /// request; --lean cuts it to ~0.8K (Read/Write/Edit/Bash). (2) Add
+        /// request; --lean cuts it to ~0.8K (Read/Write/Edit/Bash). With channel-wakeup off
+        /// (headless/bench) it also adds `--strict-mcp-config` so ALL ambient MCP servers
+        /// (jetbrains, claude.ai Google, …) are dropped, not just enumerated ones. (2) Add
         /// `--exclude-dynamic-system-prompt-sections` so per-machine bits (incl. git status,
         /// which changes on every edit) leave the system prefix → it stays cacheable across
         /// turns instead of re-prefilling. CC's core system prompt is load-bearing and is left
@@ -1066,7 +1068,7 @@ async fn main() {
             tuning.apply_to_env();
             apply_cascade_strategy(strategy.as_deref());
             apply_offline(offline);
-            apply_lean_flags(&mut program, lean);
+            apply_lean_flags(&mut program, lean, !no_channel_wakeup);
             // `--no-sandbox` is sugar for `ROZUM_SANDBOX=0` — keep a single source of
             // truth so `sandbox_workspace()` (which reads the env) stays the only
             // place the jail decision lives. The flag wins; `=0` it explicitly.
@@ -4627,8 +4629,14 @@ async fn exec_agent_anthropic(mut program: Vec<String>, channel_flags: Option<Ve
 /// `rozum launch claude`): 33 tools / ~4,878 tool-schema tokens → 4 tools / ~761 (−84%).
 /// `--allowedTools` is a *permission* whitelist, not a request shaper (it left the count
 /// unchanged / higher) — `--disallowedTools` is what actually removes schemas from the
-/// request. `mcp__rozum` is a server-level wildcard that drops all rozum MCP tools.
+/// request. `mcp__<server>` is a server-level prefix that drops all of that server's tools.
 /// Names that aren't present are harmless no-ops, so the list can be a safe superset.
+///
+/// Per-server `mcp__*` entries only cover servers we enumerate; the robust strip for the
+/// headless case is `--strict-mcp-config` (added in `apply_lean_flags` when channel-wakeup is
+/// off), which makes claude ignore ALL ambient MCP configs — jetbrains, the claude.ai Google
+/// servers, anything — not just these names. The enumerated entries below still matter for the
+/// channel-wakeup-on path, where the ambient config must stay loadable for `server:rozum`.
 const LEAN_DISALLOW: &[&str] = &[
     "AskUserQuestion",
     "WebFetch",
@@ -4654,6 +4662,7 @@ const LEAN_DISALLOW: &[&str] = &[
     "Agent",
     "LSP",
     "mcp__rozum",
+    "mcp__jetbrains",
 ];
 
 /// `--lean`: optimize a launched `claude`'s request for a local model. No-op for non-`claude`
@@ -4668,10 +4677,16 @@ const LEAN_DISALLOW: &[&str] = &[
 ///      ~1.4K-token system+tools block *every turn*. Relocating it keeps the prefix
 ///      byte-identical → cached across turns. Safe (relocates, removes nothing). Skipped if
 ///      the operator set their own system prompt.
-///   2. `--disallowedTools <LEAN_DISALLOW>` — drop the non-coding tool schemas (33 tools /
+///   2. `--strict-mcp-config` — when channel-wakeup is OFF (the headless / bench path), nothing
+///      needs an ambient MCP server loaded, so tell claude to ignore ALL ambient MCP configs.
+///      This robustly drops every server's tool schemas — jetbrains, the claude.ai Google
+///      servers, anything — not just the `mcp__*` names we happen to enumerate. Skipped when
+///      channel-wakeup is on (the `server:<name>` channel resolves through the ambient config)
+///      or when the operator manages MCP config themselves.
+///   3. `--disallowedTools <LEAN_DISALLOW>` — drop the non-coding tool schemas (33 tools /
 ///      ~4.9K tokens → 4 / ~0.8K). Variadic flag, so it goes LAST. Skipped if the operator
 ///      manages the tool set (`--allowedTools`/`--disallowedTools`).
-fn apply_lean_flags(program: &mut Vec<String>, lean: bool) {
+fn apply_lean_flags(program: &mut Vec<String>, lean: bool, channel_wakeup: bool) {
     if !lean {
         return;
     }
@@ -4691,7 +4706,16 @@ fn apply_lean_flags(program: &mut Vec<String>, lean: bool) {
         program.push("--exclude-dynamic-system-prompt-sections".into());
     }
 
-    // (2) Strip non-coding tool schemas — variadic flag, must come last.
+    // (2) Drop ALL ambient MCP servers in the headless case (channel-wakeup off). Must precede
+    // the variadic --disallowedTools below (which would otherwise swallow this flag as a value).
+    let user_manages_mcp = program
+        .iter()
+        .any(|a| a.starts_with("--mcp-config") || a == "--strict-mcp-config");
+    if !channel_wakeup && !user_manages_mcp {
+        program.push("--strict-mcp-config".into());
+    }
+
+    // (3) Strip non-coding tool schemas — variadic flag, must come last.
     let user_manages_tools = program
         .iter()
         .any(|a| a.starts_with("--allowedTools") || a.starts_with("--disallowedTools"));
@@ -4900,9 +4924,17 @@ mod lean_tests {
 
     const EXCL: &str = "--exclude-dynamic-system-prompt-sections";
 
+    // channel-wakeup ON (the interactive default): the ambient MCP config must stay loadable for
+    // the `server:rozum` channel, so --strict-mcp-config is NOT added.
     fn lean(args: &[&str], on: bool) -> Vec<String> {
         let mut p: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        apply_lean_flags(&mut p, on);
+        apply_lean_flags(&mut p, on, /*channel_wakeup=*/ true);
+        p
+    }
+    // channel-wakeup OFF (the headless / bench path): nothing needs an ambient MCP server.
+    fn lean_headless(args: &[&str], on: bool) -> Vec<String> {
+        let mut p: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        apply_lean_flags(&mut p, on, /*channel_wakeup=*/ false);
         p
     }
     fn has(v: &[String], s: &str) -> bool {
@@ -4925,6 +4957,31 @@ mod lean_tests {
             &lean(&["/usr/bin/claude", "-p", "x"], true),
             "--disallowedTools"
         ));
+    }
+
+    #[test]
+    fn headless_lean_drops_all_mcp_via_strict_config() {
+        // channel-wakeup off: --strict-mcp-config is added (drops jetbrains / claude.ai Google /
+        // any unenumerated server) and comes BEFORE the variadic --disallowedTools.
+        let out = lean_headless(&["claude", "-p", "fix it"], true);
+        assert!(has(&out, "--strict-mcp-config"), "headless lean strips all ambient MCP");
+        let strict = out.iter().position(|a| a == "--strict-mcp-config").unwrap();
+        let disallow = out.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert!(strict < disallow, "--strict-mcp-config must precede the variadic --disallowedTools");
+        // The enumerated jetbrains entry exists for the channel-on path.
+        assert!(LEAN_DISALLOW.contains(&"mcp__jetbrains"));
+        // Respect an operator who manages MCP config themselves.
+        let owned = lean_headless(&["claude", "-p", "x", "--mcp-config", "my.json"], true);
+        assert!(!has(&owned, "--strict-mcp-config"), "don't override user --mcp-config");
+    }
+
+    #[test]
+    fn channel_wakeup_keeps_ambient_mcp_loadable() {
+        // channel-wakeup on (default): the `server:rozum` channel resolves through the ambient MCP
+        // config → must NOT add --strict-mcp-config; rely on the enumerated mcp__ disallows.
+        let out = lean(&["claude", "-p", "x"], true);
+        assert!(!has(&out, "--strict-mcp-config"), "channel-wakeup needs ambient MCP loadable");
+        assert!(has(&out, "mcp__rozum") && has(&out, "mcp__jetbrains"));
     }
 
     #[test]
