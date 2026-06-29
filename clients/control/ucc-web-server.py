@@ -86,6 +86,15 @@ class H(SimpleHTTPRequestHandler):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             room = (q.get("room") or ["demo"])[0]
             return self._send_json(_messages(room))
+        # Other control-API reads (e.g. /control/coder/log?id=&tail=) → proxy to :8411, query and all.
+        if path.startswith("/control/"):
+            try:
+                body = urllib.request.urlopen("http://127.0.0.1:8411" + self.path, timeout=8).read()
+                return self._send_raw(body, 200)
+            except urllib.error.HTTPError as e:
+                return self._send_raw(e.read(), e.code)
+            except Exception as e:
+                return self._send_json({"error": str(e)}, 502)
         return super().do_GET()
 
     def do_OPTIONS(self):

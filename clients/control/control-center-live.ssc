@@ -35,7 +35,7 @@ val room = computedSignal(() => {
   val h = hash()
   if h.contains("/chat/") then h.split("/chat/").last else ""
 })
-val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else "home")
+val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else if hash().contains("/coders") then "coders" else "home")
 
 val chatTick = signal("chatTick", 0)
 val msgUrl   = computedSignal(() => "/chat/messages?room=" + room())
@@ -75,7 +75,7 @@ val catCard = cardWithHeader(heading(2, "Installed catalog"))(
 
 val dashboard = vstack(gap = 16)(
   heading(1, "rozum — control center"),
-  hstack(gap = 10)(actionButton(onNavigate("#/agents"), "🤖 Агенты")),
+  hstack(gap = 10)(actionButton(onNavigate("#/agents"), "🤖 Агенты"), actionButton(onNavigate("#/coders"), "💻 Кодеры")),
   divider(),
   meetingsCard,
   divider(),
@@ -171,12 +171,78 @@ val agentsBody = vstack(gap = 16)(
 )
 ```
 
+## Coders
+```scalascript
+val cdAgent   = signal("cdAgent", "claude")
+val cdModel   = signal("cdModel", "")
+val cdWorkdir = signal("cdWorkdir", "")
+val cdPrompt  = signal("cdPrompt", "")
+val cdLogId   = signal("cdLogId", "")
+val cdStopId  = signal("cdStopId", "")
+val logTick   = signal("logTick", 0)
+val cdLogUrl  = computedSignal(() => "/control/coder/log?id=" + cdLogId() + "&tail=120")
+val cdLog     = fetchUrlSignalTo("coderLog", cdLogUrl, logTick)
+val cdLogText = computedSignal(() => jsonValue(cdLog()).get("log").asString)
+
+val codersList = cardWithHeader(heading(2, "Запущенные кодеры"))(
+  remoteTable(st, [
+    fieldColumn("агент", "agent"),
+    fieldColumn("модель", "model"),
+    fieldColumn("репо", "workdir"),
+    fieldColumn("жив", "alive"),
+    fieldColumn("id", "id")
+  ], "coders")
+)
+
+val coderLaunch = cardWithHeader(heading(2, "Запустить кодера (реальная работа в репо)"))(
+  vstack(gap = 8)(
+    hstack(gap = 8)(text("свободно RAM:"), signalText_(availTxt)),
+    textField(cdAgent, "агент: claude | codex | opencode"),
+    textField(cdModel, "модель — спец из каталога…"),
+    textField(cdWorkdir, "рабочая папка (абсолютный путь к репо)…"),
+    textField(cdPrompt, "задание…"),
+    actionButton(
+      fetchActionWith("POST", "/control/coder/launch",
+        formBody([("agent", "cdAgent"), ("model", "cdModel"), ("workdir", "cdWorkdir"), ("prompt", "cdPrompt")]),
+        [onBumpTick(refresh)]),
+      "💻 запустить (с проверкой памяти)")
+  )
+)
+
+val coderLogCard = cardWithHeader(heading(2, "Лог кодера"))(
+  vstack(gap = 8)(
+    hstack(gap = 8)(textField(cdLogId, "id кодера (из списка)…"), actionButton(incSignal(logTick), "↻ лог")),
+    signalText_(cdLogText)
+  )
+)
+
+val coderStop = cardWithHeader(heading(2, "Остановить кодера"))(
+  hstack(gap = 8)(
+    textField(cdStopId, "id кодера…"),
+    actionButton(fetchActionWith("POST", "/control/coder/stop", formBody([("id", "cdStopId")]), [onBumpTick(refresh)]), "стоп")
+  )
+)
+
+val codersBody = vstack(gap = 16)(
+  hstack(gap = 10)(actionButton(onNavigate("#/"), "← назад"), heading(1, "Кодеры"), actionButton(incSignal(refresh), "↻")),
+  divider(),
+  codersList,
+  divider(),
+  coderLaunch,
+  divider(),
+  coderLogCard,
+  divider(),
+  coderStop
+)
+```
+
 ## Compose + serve
 ```scalascript
 val view = router(mode, [
   route("home", [dashboard]),
   route("chat", [chatBody]),
-  route("agents", [agentsBody])
+  route("agents", [agentsBody]),
+  route("coders", [codersBody])
 ])
 
 serve(lower(view, defaultTheme), 8410)

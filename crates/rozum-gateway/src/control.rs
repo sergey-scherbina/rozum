@@ -27,7 +27,10 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         .route("/control/gateway/load", post(gateway_load_route))
         .route("/control/agent/launch", post(agent_launch_route))
         .route("/control/agent/stop", post(agent_stop_route))
-        .route("/control/task", post(task_route));
+        .route("/control/task", post(task_route))
+        .route("/control/coder/launch", post(coder_launch_route))
+        .route("/control/coder/stop", post(coder_stop_route))
+        .route("/control/coder/log", get(coder_log_route));
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     eprintln!("control server: http://{addr}/control/status (+POST actions)");
@@ -319,6 +322,184 @@ fn json_err(code: axum::http::StatusCode, msg: &str) -> axum::response::Response
     (code, axum::Json(serde_json::json!({ "ok": false, "error": msg }))).into_response()
 }
 
+// ── Phase 2: coding-agents (`rozum launch`) — detached supervisor + log ─────────────────────────────
+//
+// A coding-agent does real file work in a repo. `rozum launch` is foreground (it execs the agent), so
+// we spawn `rozum launch --model … <agent> <prompt>` DETACHED in the chosen workdir, with output → a
+// per-run log file, and track it in a coders registry. Admission is enforced up front (ensure_gateway),
+// and `rozum launch` then reuses that same shared gateway.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoderRecord {
+    pub id: String,
+    pub agent: String,
+    pub model: String,
+    pub workdir: String,
+    pub prompt: String,
+    pub log: String,
+    pub pid: u32,
+    pub started_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CoderBrief {
+    pub id: String,
+    pub agent: String,
+    pub model: String,
+    pub workdir: String,
+    pub prompt: String,
+    pub pid: u32,
+    pub alive: bool,
+}
+
+fn coders_registry_path() -> Option<PathBuf> {
+    state_dir().map(|d| d.join("ucc-coders.json"))
+}
+
+fn load_coders() -> Vec<CoderRecord> {
+    coders_registry_path()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_coders(coders: &[CoderRecord]) {
+    if let Some(p) = coders_registry_path() {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(body) = serde_json::to_vec_pretty(coders) {
+            let tmp = p.with_extension("json.tmp");
+            if std::fs::write(&tmp, &body).is_ok() {
+                let _ = std::fs::rename(&tmp, &p);
+            }
+        }
+    }
+}
+
+/// Running coders with a fresh liveness check; coders that have exited STAY in the registry (so their
+/// log is still reachable) but report `alive=false`. The UI lets the operator clear a finished one.
+fn live_coders() -> Vec<CoderBrief> {
+    load_coders()
+        .into_iter()
+        .map(|c| CoderBrief {
+            alive: pid_alive(c.pid),
+            id: c.id, agent: c.agent, model: c.model, workdir: c.workdir, prompt: c.prompt, pid: c.pid,
+        })
+        .collect()
+}
+
+/// The agent's own invocation for a non-interactive run: program + flags + the task prompt. claude runs
+/// autonomously (skip-permissions + a turn cap) so it never blocks on a phone-launched run.
+fn agent_invocation(agent: &str, prompt: &str) -> Vec<String> {
+    match agent {
+        "claude" => vec![
+            "claude".into(), "-p".into(), prompt.into(),
+            "--dangerously-skip-permissions".into(), "--max-turns".into(), "40".into(),
+        ],
+        "codex" => vec!["codex".into(), "exec".into(), prompt.into()],
+        "opencode" => vec!["opencode".into(), "run".into(), prompt.into()],
+        other => vec![other.into(), prompt.into()],
+    }
+}
+
+/// Spawn `rozum launch --model <m> <agent invocation>` DETACHED in `workdir`, output → a log file.
+/// Returns (pid, log_path).
+fn spawn_coder(agent: &str, model: &str, workdir: &str, prompt: &str) -> std::io::Result<(u32, PathBuf)> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
+    let log_dir = state_dir().map(|d| d.join("logs")).unwrap_or_else(|| PathBuf::from("/tmp"));
+    let _ = std::fs::create_dir_all(&log_dir);
+    let stamp = crate::share::now_unix();
+    let log_path = log_dir.join(format!("coder-{}-{}.log", sanitize(agent), stamp));
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
+    let log2 = log.try_clone()?;
+    let mut args: Vec<String> = vec!["launch".into(), "--model".into(), model.into()];
+    args.extend(agent_invocation(agent, prompt));
+    let mut cmd = Command::new(&exe);
+    cmd.args(&args)
+        .current_dir(workdir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log2))
+        .process_group(0);
+    Ok((cmd.spawn()?.id(), log_path))
+}
+
+#[derive(Deserialize)]
+struct CoderLaunchReq {
+    agent: String,
+    model: String,
+    workdir: String,
+    prompt: String,
+}
+
+async fn coder_launch_route(axum::Json(req): axum::Json<CoderLaunchReq>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let agent = req.agent.trim().to_string();
+    let model = req.model.trim().to_string();
+    let workdir = req.workdir.trim().to_string();
+    let prompt = req.prompt.trim().to_string();
+    if agent.is_empty() || model.is_empty() || workdir.is_empty() || prompt.is_empty() {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "agent, model, workdir, prompt required");
+    }
+    if !std::path::Path::new(&workdir).is_dir() {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "workdir is not a directory");
+    }
+    // Admission-gate the model load up front; `rozum launch` then reuses this shared gateway.
+    if let Err(e) = ensure_gateway(&model) {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            axum::Json(serde_json::json!({ "ok": false, "error": e, "admission": footprint_report(&model) })),
+        ).into_response();
+    }
+    match spawn_coder(&agent, &model, &workdir, &prompt) {
+        Ok((pid, log)) => {
+            let id = format!("{}-{}", sanitize(&agent), pid);
+            let mut coders = load_coders();
+            coders.push(CoderRecord {
+                id: id.clone(), agent, model, workdir, prompt,
+                log: log.to_string_lossy().into_owned(), pid, started_at: crate::share::now_unix(),
+            });
+            save_coders(&coders);
+            axum::Json(serde_json::json!({ "ok": true, "id": id, "pid": pid })).into_response()
+        }
+        Err(e) => json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("spawn: {e}")),
+    }
+}
+
+async fn coder_stop_route(axum::Json(req): axum::Json<AgentStopReq>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut coders = load_coders();
+    let Some(pos) = coders.iter().position(|c| c.id == req.id) else {
+        return json_err(axum::http::StatusCode::NOT_FOUND, "no such coder");
+    };
+    let c = coders.remove(pos);
+    unsafe { libc::kill(c.pid as libc::pid_t, libc::SIGTERM); }
+    save_coders(&coders);
+    axum::Json(serde_json::json!({ "ok": true, "id": c.id })).into_response()
+}
+
+#[derive(Deserialize)]
+struct CoderLogQuery {
+    id: String,
+    #[serde(default = "default_tail")]
+    tail: usize,
+}
+fn default_tail() -> usize { 120 }
+
+async fn coder_log_route(axum::extract::Query(q): axum::extract::Query<CoderLogQuery>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(c) = load_coders().into_iter().find(|c| c.id == q.id) else {
+        return json_err(axum::http::StatusCode::NOT_FOUND, "no such coder");
+    };
+    let text = std::fs::read_to_string(&c.log).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(q.tail.min(2000));
+    let tail = lines[start..].join("\n");
+    axum::Json(serde_json::json!({ "id": c.id, "alive": pid_alive(c.pid), "log": tail })).into_response()
+}
+
 /// A coherent snapshot of the models/gateway service.
 #[derive(Debug, Clone, Serialize)]
 pub struct ControlStatus {
@@ -339,6 +520,9 @@ pub struct ControlStatus {
     /// The chat-agents (model-participants) launched through the control API, with liveness — so the
     /// UCC can show a cross-room "running agents" view and stop them.
     pub agents: Vec<AgentBrief>,
+    /// The coding-agents (`rozum launch`) launched through the control API, with liveness — so the UCC
+    /// can show running coders, tail their logs, and stop them.
+    pub coders: Vec<CoderBrief>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -469,7 +653,8 @@ pub async fn status() -> ControlStatus {
     ];
     let meetings = list_meetings();
     let agents = live_agents();
-    ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents }
+    let coders = live_coders();
+    ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents, coders }
 }
 
 #[cfg(test)]
