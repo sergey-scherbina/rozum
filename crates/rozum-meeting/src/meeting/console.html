@@ -143,6 +143,16 @@
   }
   .toast.show { opacity: .96; }
   .toast.err { background: var(--sev-crit); }
+  /* ── Modal (inline action forms, replaces prompt/confirm) ── */
+  .modal-back { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; align-items: center; justify-content: center; z-index: 20; padding: 16px; }
+  .modal-back.show { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; width: min(420px, 100%); box-shadow: 0 12px 40px rgba(0,0,0,.4); }
+  .modal h3 { margin: 0 0 12px; font-size: 16px; }
+  .modal label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  .modal input, .modal select, .modal textarea { width: 100%; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .modal .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  .modal .row button { padding: 7px 16px; border-radius: 8px; }
+  .modal .ok { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
 </style>
 </head>
 <body>
@@ -181,6 +191,7 @@
   <button class="send" id="c-send">Send</button>
 </footer>
 <div class="toast" id="toast"></div>
+<div class="modal-back" id="modal-back"><div class="modal" id="modal"></div></div>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -210,6 +221,36 @@ function toast(msg, isErr) {
 async function act(promise, okMsg) {
   try { await promise; toast(okMsg); await refresh(); }
   catch (e) { toast(e.message, true); }
+}
+// Inline modal form (replaces prompt/confirm). fields: [{name,label,placeholder,value,type}].
+// Resolves to {name:value,…} on OK, or null on cancel. okLabel customises the confirm button.
+function askForm(title, fields, okLabel) {
+  return new Promise((resolve) => {
+    const m = $("modal");
+    m.innerHTML = "";
+    m.appendChild(el("h3", null, title));
+    const inputs = {};
+    for (const f of fields) {
+      if (f.label) m.appendChild(el("label", null, f.label));
+      const inp = el(f.type === "textarea" ? "textarea" : "input");
+      if (f.placeholder) inp.placeholder = f.placeholder;
+      if (f.value) inp.value = f.value;
+      inputs[f.name] = inp;
+      m.appendChild(inp);
+    }
+    const row = el("div", "row");
+    const cancel = el("button", null, "Cancel");
+    const ok = el("button", "ok", okLabel || "OK");
+    row.appendChild(cancel); row.appendChild(ok);
+    m.appendChild(row);
+    const close = (val) => { $("modal-back").classList.remove("show"); resolve(val); };
+    cancel.onclick = () => close(null);
+    $("modal-back").onclick = (e) => { if (e.target === $("modal-back")) close(null); };
+    ok.onclick = () => { const v = {}; for (const k in inputs) v[k] = inputs[k].value.trim(); close(v); };
+    $("modal-back").classList.add("show");
+    const first = fields.length ? inputs[fields[0].name] : ok;
+    setTimeout(() => { first.focus(); first.addEventListener && first.addEventListener("keydown", (e) => { if (e.key === "Enter" && first.tagName !== "TEXTAREA") ok.click(); if (e.key === "Escape") close(null); }); }, 30);
+  });
 }
 
 const STATES = [
@@ -360,20 +401,22 @@ function msgRow(m, opts) {
     const mid = `${m.date}/${m.n}`;
     const oi = el("span", "openinc", "⛑ incident");
     oi.title = "open an incident on this message";
-    oi.onclick = (e) => {
+    oi.onclick = async (e) => {
       e.stopPropagation();
-      const title = prompt("Incident title:", (m.content || "").slice(0, 60)); if (!title) return;
-      act(postJSON(`rooms/${enc(ROOM)}/threads`, { anchor_id: mid, title, kind: "incident" })
+      const v = await askForm("Open incident", [{ name: "title", label: "Incident title", value: (m.content || "").slice(0, 60) }], "Open");
+      if (!v || !v.title) return;
+      act(postJSON(`rooms/${enc(ROOM)}/threads`, { anchor_id: mid, title: v.title, kind: "incident" })
         .then(() => { SELECTED = mid; }), "incident opened");
     };
     l1.appendChild(oi);
     // Link this message as context to an existing incident.
     const lk = el("span", "openinc", "🔗 link");
     lk.title = "link this message to an incident";
-    lk.onclick = (e) => {
+    lk.onclick = async (e) => {
       e.stopPropagation();
-      const tid = prompt("Link to incident id (<date>/<n>):"); if (!tid) return;
-      act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(tid)}/link`, { msg_id: mid, link: true }), "linked");
+      const v = await askForm("Link to incident", [{ name: "tid", label: "Incident id (<date>/<n>)" }], "Link");
+      if (!v || !v.tid) return;
+      act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(v.tid)}/link`, { msg_id: mid, link: true }), "linked");
     };
     l1.appendChild(lk);
   }
@@ -387,11 +430,11 @@ function msgRow(m, opts) {
     const mid = `${m.date}/${m.n}`;
     const rd = el("span", "openinc", "⊘");
     rd.title = "redact this message's content";
-    rd.onclick = (e) => {
+    rd.onclick = async (e) => {
       e.stopPropagation();
-      if (!confirm("Redact this message's content for all readers?")) return;
-      const reason = prompt("Reason (optional, e.g. PII/secret):") || "";
-      act(postJSON(`rooms/${enc(ROOM)}/redact`, { msg_id: mid, redact: true, reason }), "redacted");
+      const v = await askForm("Redact message", [{ name: "reason", label: "Reason (optional, e.g. PII/secret) — hides content for ALL readers" }], "Redact");
+      if (!v) return;
+      act(postJSON(`rooms/${enc(ROOM)}/redact`, { msg_id: mid, redact: true, reason: v.reason }), "redacted");
     };
     l1.appendChild(rd);
   }
@@ -429,9 +472,10 @@ function msgRow(m, opts) {
     }
     const add = el("span", "react-add", "＋😀");
     add.title = "react";
-    add.onclick = () => {
-      const emoji = prompt("Emoji:", "👍"); if (!emoji) return;
-      act(postJSON(`rooms/${enc(ROOM)}/react`, { msg_id: mid, emoji, add: true }), "reacted");
+    add.onclick = async () => {
+      const v = await askForm("React", [{ name: "emoji", label: "Emoji", value: "👍" }], "React");
+      if (!v || !v.emoji) return;
+      act(postJSON(`rooms/${enc(ROOM)}/react`, { msg_id: mid, emoji: v.emoji, add: true }), "reacted");
     };
     rrow.appendChild(add);
     row.appendChild(rrow);
@@ -501,21 +545,22 @@ async function renderThread(id) {
   const acts = el("div", "actions");
   const btn = (label, cls, fn) => { const b = el("button", "act " + (cls || ""), label); b.onclick = fn; acts.appendChild(b); };
   // Assign is orthogonal to state — available in any state.
-  btn("Assign", "", () => {
-    const to = prompt("Assign to (handle):", t.owner || ""); if (!to) return;
-    const note = prompt("Note (optional):") || "";
-    act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/assign`, { to, note }), "assigned → " + to);
+  btn("Assign", "", async () => {
+    const v = await askForm("Assign incident", [{ name: "to", label: "Assign to (handle)", value: t.owner || "" }, { name: "note", label: "Note (optional)" }], "Assign");
+    if (!v || !v.to) return;
+    act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/assign`, { to: v.to, note: v.note }), "assigned → " + v.to);
   });
   if (!terminal) {
-    btn("Escalate", "go", () => {
-      const to = prompt("Escalate to (handle):"); if (!to) return;
-      const note = prompt("Note (optional):") || "";
-      act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/escalate`, { to, note }), "escalated → " + to);
+    btn("Escalate", "go", async () => {
+      const v = await askForm("Escalate incident", [{ name: "to", label: "Escalate to (handle)" }, { name: "note", label: "Note (optional)" }], "Escalate");
+      if (!v || !v.to) return;
+      act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/escalate`, { to: v.to, note: v.note }), "escalated → " + v.to);
     });
     btn("Triage", "", () => act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/state`, { state: "triaging" }), "set triaging"));
-    btn("Resolve", "ok", () => {
-      const note = prompt("Resolution note (optional):") || "";
-      act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/resolve`, { note }), "resolved");
+    btn("Resolve", "ok", async () => {
+      const v = await askForm("Resolve incident", [{ name: "note", label: "Resolution note (optional)", type: "textarea" }], "Resolve");
+      if (!v) return;
+      act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/resolve`, { note: v.note }), "resolved");
     });
   } else {
     btn("Reopen", "", () => act(postJSON(`rooms/${enc(ROOM)}/threads/${enc(id)}/state`, { state: "open" }), "reopened"));
