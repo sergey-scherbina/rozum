@@ -47,9 +47,12 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   `tokens.json` + CLI `meetings token issue|list|revoke`; `auth_layer` resolves the password as a token
   (trusted handle+role) or the shared secret (admin); enforces reads=observer / writes=responder /
   redact=admin; `GET /whoami` drives console role-gating (observers get no compose/actions). Live: observer
-  POST→403, responder posts as its handle but redact→403. 104 meeting tests. **REMAINING DEPTH (honest):**
-  token expiry/rotation + per-room roles (auth is global now); behavioral Playwright e2e; list pagination at
-  scale; fold these into the `.ssc` PWA (thinner).
+  POST→403, responder posts as its handle but redact→403. **(+) token expiry+rotation (`9241e3c`):**
+  `TokenInfo.expires_ts`, `token issue --ttl 30d`, `token rotate <handle>`, list shows expiry, expired
+  tokens rejected. **(+) feed pagination (`f3028d3`):** the live feed pages the LATEST window (`from =
+  count − FEED_WINDOW`, +load-older) — bounded DOM + fixed the oldest-500 bug. 104 meeting tests.
+  **REMAINING DEPTH (honest):** per-room roles (auth is global); behavioral Playwright e2e; fold SSE/alerts/
+  roles into the `.ssc` PWA (thinner).
 
 - [x] **meetings → support/incident platform (operator 2026-06-28, strategic)** — COMPLETE across all
   three surfaces + polished (foundation → agent-native MCP → human CLI → web console). Capabilities shipped
