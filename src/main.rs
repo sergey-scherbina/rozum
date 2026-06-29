@@ -712,9 +712,20 @@ enum TokenAction {
         /// Role: observer (read) | responder (lifecycle) | admin (+redact).
         #[arg(long, default_value = "responder")]
         role: String,
+        /// Optional expiry, e.g. `30d`, `12h`, `90m` (default: never expires).
+        #[arg(long)]
+        ttl: Option<String>,
     },
-    /// List issued tokens (handle, role; the token is shown truncated).
+    /// List issued tokens (handle, role, expiry; the token is shown truncated).
     List,
+    /// Rotate a handle's token: revoke the old, issue a fresh one (same role). Prints the new token.
+    Rotate {
+        /// The operator handle to rotate.
+        handle: String,
+        /// Optional new expiry, e.g. `30d` (default: never).
+        #[arg(long)]
+        ttl: Option<String>,
+    },
     /// Revoke by token, or by handle (revokes all of that handle's tokens).
     Revoke {
         /// A token string or an operator handle.
@@ -3008,21 +3019,49 @@ async fn run_meetings_read(room: Option<String>, count: usize) {
     }
 }
 
+/// Humanize a duration in seconds, coarsely (`5d` / `12h` / `30m` / `45s`).
+fn fmt_secs(s: u64) -> String {
+    if s >= 86_400 {
+        format!("{}d", s / 86_400)
+    } else if s >= 3_600 {
+        format!("{}h", s / 3_600)
+    } else if s >= 60 {
+        format!("{}m", s / 60)
+    } else {
+        format!("{s}s")
+    }
+}
+
 /// `rozum meetings token …` — manage support-console access tokens (global, in the state dir).
 fn run_meetings_token(action: TokenAction) {
     use rozum::meeting::store::{self, Role};
     let sd = store::rozum_state_dir();
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    };
+    // Parse a `30d` / `12h` / `90m` / `45s` duration → seconds; None → 0 (never).
+    let parse_ttl = |t: &Option<String>| -> u64 {
+        let Some(s) = t else { return 0 };
+        let s = s.trim();
+        let (num, mult) = match s.chars().last() {
+            Some('d') => (&s[..s.len() - 1], 86_400),
+            Some('h') => (&s[..s.len() - 1], 3_600),
+            Some('m') => (&s[..s.len() - 1], 60),
+            Some('s') => (&s[..s.len() - 1], 1),
+            _ => (s, 86_400), // bare number = days
+        };
+        num.trim().parse::<u64>().unwrap_or(0).saturating_mul(mult)
+    };
     match action {
-        TokenAction::Issue { handle, role } => {
+        TokenAction::Issue { handle, role, ttl } => {
             let Some(role) = Role::parse(&role) else {
                 eprintln!("token issue: bad role '{role}' (observer|responder|admin)");
                 std::process::exit(1);
             };
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            match store::issue_token(&sd, &handle, role, now) {
+            match store::issue_token(&sd, &handle, role, parse_ttl(&ttl), now()) {
                 Ok(tok) => {
                     println!("{tok}");
                     eprintln!("issued for {handle} ({}). Give them this token as the console password.", role.as_str());
@@ -3033,15 +3072,39 @@ fn run_meetings_token(action: TokenAction) {
                 }
             }
         }
+        TokenAction::Rotate { handle, ttl } => {
+            match store::rotate_token(&sd, &handle, parse_ttl(&ttl), now()) {
+                Ok(Some(tok)) => {
+                    println!("{tok}");
+                    eprintln!("rotated {handle} — the old token is now invalid.");
+                }
+                Ok(None) => {
+                    eprintln!("token rotate: no current token for '{handle}'");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("token rotate: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         TokenAction::List => {
             let m = store::load_tokens(&sd);
             if m.is_empty() {
                 println!("(no tokens)");
                 return;
             }
+            let n = now();
             for (tok, info) in &m {
                 let short = tok.get(..8).unwrap_or(tok);
-                println!("{short}…  {}  [{}]", info.handle, info.role.as_str());
+                let exp = if info.expires_ts == 0 {
+                    "never".to_string()
+                } else if info.is_expired(n) {
+                    "EXPIRED".to_string()
+                } else {
+                    format!("in {}", fmt_secs(info.expires_ts.saturating_sub(n)))
+                };
+                println!("{short}…  {}  [{}]  expires: {exp}", info.handle, info.role.as_str());
             }
         }
         TokenAction::Revoke { token_or_handle } => match store::revoke_token(&sd, &token_or_handle) {

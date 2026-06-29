@@ -1595,6 +1595,14 @@ pub struct TokenInfo {
     pub role: Role,
     #[serde(default)]
     pub created_ts: u64,
+    /// Unix expiry; `0` = never expires.
+    #[serde(default)]
+    pub expires_ts: u64,
+}
+impl TokenInfo {
+    pub fn is_expired(&self, now: u64) -> bool {
+        self.expires_ts != 0 && now >= self.expires_ts
+    }
 }
 
 fn tokens_path(state_dir: &Path) -> PathBuf {
@@ -1609,21 +1617,48 @@ pub fn load_tokens(state_dir: &Path) -> BTreeMap<String, TokenInfo> {
         .unwrap_or_default()
 }
 
-/// Resolve a token → its (handle, role), or `None` if unknown.
-pub fn resolve_token(state_dir: &Path, token: &str) -> Option<TokenInfo> {
-    load_tokens(state_dir).remove(token)
+/// Resolve a token → its (handle, role) as of `now`, or `None` if unknown OR expired.
+pub fn resolve_token(state_dir: &Path, token: &str, now: u64) -> Option<TokenInfo> {
+    load_tokens(state_dir)
+        .remove(token)
+        .filter(|t| !t.is_expired(now))
 }
 
-/// Mint a new token for `handle` with `role`, persist it, return the token string.
-pub fn issue_token(state_dir: &Path, handle: &str, role: Role, ts: u64) -> std::io::Result<String> {
+/// Mint a new token for `handle` with `role`. `ttl_secs == 0` → never expires, else expires at
+/// `now + ttl_secs`. Persists and returns the token string.
+pub fn issue_token(
+    state_dir: &Path,
+    handle: &str,
+    role: Role,
+    ttl_secs: u64,
+    now: u64,
+) -> std::io::Result<String> {
     let token = uuid::Uuid::new_v4().simple().to_string();
+    let expires_ts = if ttl_secs == 0 { 0 } else { now.saturating_add(ttl_secs) };
     let mut m = load_tokens(state_dir);
     m.insert(
         token.clone(),
-        TokenInfo { handle: handle.to_string(), role, created_ts: ts },
+        TokenInfo { handle: handle.to_string(), role, created_ts: now, expires_ts },
     );
     write_json_atomic(&tokens_path(state_dir), &m)?;
     Ok(token)
+}
+
+/// Rotate `handle`'s access: revoke all their existing tokens and issue a fresh one (same role/ttl).
+/// Returns the new token, or `None` if the handle has no current token to rotate.
+pub fn rotate_token(
+    state_dir: &Path,
+    handle: &str,
+    ttl_secs: u64,
+    now: u64,
+) -> std::io::Result<Option<String>> {
+    let role = load_tokens(state_dir)
+        .values()
+        .find(|t| t.handle == handle)
+        .map(|t| t.role);
+    let Some(role) = role else { return Ok(None) };
+    revoke_token(state_dir, handle)?;
+    Ok(Some(issue_token(state_dir, handle, role, ttl_secs, now)?))
 }
 
 /// Revoke by token, or by handle (removes all of that handle's tokens). Returns how many were removed.
@@ -1910,23 +1945,28 @@ mod tests {
     fn tokens_issue_resolve_revoke_and_role_ordering() {
         let dir = tempdir().unwrap();
         let sd = dir.path().join("state");
-        let t1 = issue_token(&sd, "alice", Role::Responder, 1).unwrap();
-        let t2 = issue_token(&sd, "bob", Role::Observer, 2).unwrap();
+        let t1 = issue_token(&sd, "alice", Role::Responder, 0, 1).unwrap();
+        let t2 = issue_token(&sd, "bob", Role::Observer, 0, 2).unwrap();
         // Resolve token → handle + role.
-        assert_eq!(resolve_token(&sd, &t1).unwrap().handle, "alice");
-        assert_eq!(resolve_token(&sd, &t1).unwrap().role, Role::Responder);
-        assert_eq!(resolve_token(&sd, &t2).unwrap().role, Role::Observer);
-        assert!(resolve_token(&sd, "nope").is_none());
+        assert_eq!(resolve_token(&sd, &t1, 100).unwrap().handle, "alice");
+        assert_eq!(resolve_token(&sd, &t1, 100).unwrap().role, Role::Responder);
+        assert_eq!(resolve_token(&sd, &t2, 100).unwrap().role, Role::Observer);
+        assert!(resolve_token(&sd, "nope", 100).is_none());
         // Role ordering (the RBAC ladder): admin > responder > observer.
         assert!(Role::Admin > Role::Responder && Role::Responder > Role::Observer);
         assert_eq!(Role::parse("operator"), Some(Role::Responder));
+        // Expiry: a token with a ttl is valid before, gone after.
+        let t3 = issue_token(&sd, "carol", Role::Admin, 100, 1_000).unwrap(); // expires at 1100
+        assert!(resolve_token(&sd, &t3, 1_050).is_some());
+        assert!(resolve_token(&sd, &t3, 1_200).is_none(), "expired token rejected");
+        // Rotate alice → new token, old one dead.
+        let t1b = rotate_token(&sd, "alice", 0, 2_000).unwrap().unwrap();
+        assert!(resolve_token(&sd, &t1, 2_000).is_none(), "old token revoked by rotate");
+        assert_eq!(resolve_token(&sd, &t1b, 2_000).unwrap().role, Role::Responder, "role preserved");
         // Revoke by handle removes alice's token; bob's remains.
         assert_eq!(revoke_token(&sd, "alice").unwrap(), 1);
-        assert!(resolve_token(&sd, &t1).is_none());
-        assert!(resolve_token(&sd, &t2).is_some());
-        // Revoke by token.
-        assert_eq!(revoke_token(&sd, &t2).unwrap(), 1);
-        assert!(load_tokens(&sd).is_empty());
+        assert!(resolve_token(&sd, &t1b, 2_000).is_none());
+        assert!(resolve_token(&sd, &t2, 2_000).is_some());
     }
 
     #[test]

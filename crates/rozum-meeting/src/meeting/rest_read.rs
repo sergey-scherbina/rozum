@@ -471,7 +471,7 @@ async fn auth_layer(
     // The password is EITHER an issued token (→ a trusted handle + role) OR the shared secret (→ admin,
     // back-compat). A token's handle is authoritative (ignore the self-asserted X-Rozum-Actor); the
     // shared-secret path keeps the actor-header convenience.
-    let (actor, role) = if let Some(info) = store::resolve_token(&cfg.state_dir, &pass) {
+    let (actor, role) = if let Some(info) = store::resolve_token(&cfg.state_dir, &pass, now_secs()) {
         (info.handle, info.role)
     } else if pass == cfg.secret {
         let header_actor = req
@@ -698,9 +698,9 @@ mod tests {
         let dir = tempdir().unwrap();
         seed_room(dir.path(), "alpha", &["one"]);
         // Tokens live in the registry's state_dir (= dir.path() here).
-        let obs = store::issue_token(dir.path(), "obs", Role::Observer, 0).unwrap();
-        let resp = store::issue_token(dir.path(), "resp", Role::Responder, 0).unwrap();
-        let adm = store::issue_token(dir.path(), "adm", Role::Admin, 0).unwrap();
+        let obs = store::issue_token(dir.path(), "obs", Role::Observer, 0, 0).unwrap();
+        let resp = store::issue_token(dir.path(), "resp", Role::Responder, 0, 0).unwrap();
+        let adm = store::issue_token(dir.path(), "adm", Role::Admin, 0, 0).unwrap();
         let (addr, _s) = start(dir.path().to_path_buf(), "sekret").await;
         let c = reqwest::Client::new();
         let st = |b: reqwest::RequestBuilder| async move { b.send().await.unwrap().status() };
