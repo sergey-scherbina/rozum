@@ -927,6 +927,8 @@ mod tests {
             "rozumActor",
             "whoami",                          // RBAC role-awareness
             "can(\"responder\")",
+            "FEED_WINDOW",                     // feed pagination (latest window + load-older)
+            "load older",
             // core action endpoints the UI must drive
             "/escalate",
             "/resolve",

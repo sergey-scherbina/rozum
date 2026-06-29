@@ -88,6 +88,8 @@
   .pane-head h2 { margin: 0; font-size: 17px; }
   .pane-head .sub { color: var(--muted); font-size: 13px; }
   .back { font-size: 13px; }
+  .loadolder { text-align: center; color: var(--accent); font-size: 13px; padding: 8px; cursor: pointer; border: 1px dashed var(--border); border-radius: 8px; margin-bottom: 8px; }
+  .loadolder:hover { background: var(--sel); }
   .msg { padding: 7px 2px; border-bottom: 1px solid var(--border); }
   .msg .line1 { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
   .msg .who { font-weight: 600; }
@@ -265,6 +267,7 @@ const SEV_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
 let ROOM = null;
 let SELECTED = null;   // selected thread id, or null = live feed
 let REPLY_TO = null;   // message id the compose box is replying to, or null
+let FEED_WINDOW = 150; // how many latest messages the live feed renders ("load older" grows it)
 let REACTIONS = {};    // msg_id → emoji → [who], refreshed each cycle
 const SEEN = {};       // incident id → "<state>|<stale>" last seen, for desktop-alert deltas
 let SEEN_INIT = false; // don't alert for incidents already present on first load
@@ -308,7 +311,7 @@ async function loadRooms() {
   const want = new URLSearchParams(location.search).get("room");
   ROOM = (want && rooms.includes(want)) ? want : rooms[0] || null;
   if (ROOM) sel.value = ROOM;
-  sel.onchange = () => { ROOM = sel.value; SELECTED = null; const u = new URL(location); u.searchParams.set("room", ROOM); history.replaceState(0, "", u); if (typeof subscribe === "function") subscribe(); refresh(); };
+  sel.onchange = () => { ROOM = sel.value; SELECTED = null; FEED_WINDOW = 150; const u = new URL(location); u.searchParams.set("room", ROOM); history.replaceState(0, "", u); if (typeof subscribe === "function") subscribe(); refresh(); };
 }
 
 // ── Header metrics ───────────────────────────────────────────
@@ -500,15 +503,25 @@ async function renderLive() {
   // With a filter active, search the WHOLE history (server-side) instead of just today's feed.
   if (q) return renderSearch(q);
   const { days } = await api(`rooms/${enc(ROOM)}/days`);
-  const date = days && days.length ? days[days.length - 1].date : null;
+  const day = days && days.length ? days[days.length - 1] : null;
+  const date = day ? day.date : null;
   main.innerHTML = "";
   const head = el("div", "pane-head");
   head.appendChild(el("h2", null, "Live feed"));
   head.appendChild(el("span", "sub", date ? date : "no messages yet"));
   main.appendChild(head);
   if (!date) { main.appendChild(el("div", "empty", "No messages yet.")); return; }
-  const { messages } = await api(`rooms/${enc(ROOM)}/messages/${enc(date)}?count=500`);
+  // Page the LATEST window (count grows via "load older"): from = total − window, so we always show the
+  // most recent FEED_WINDOW and never render the whole day's DOM. (Was: from=0&count=500 = the OLDEST 500.)
+  const total = day.count || 0;
+  const from = Math.max(0, total - FEED_WINDOW);
+  const { messages } = await api(`rooms/${enc(ROOM)}/messages/${enc(date)}?from=${from}&count=${FEED_WINDOW}`);
   if (!messages.length) { main.appendChild(el("div", "empty", "No messages today.")); return; }
+  if (from > 0) {
+    const more = el("div", "loadolder", `↑ ${from} earlier — load older`);
+    more.onclick = () => { FEED_WINDOW += 200; refresh(); };
+    main.appendChild(more);
+  }
   const atBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 80;
   for (const m of messages) main.appendChild(msgRow(m, { showThread: true }));
   if (atBottom) main.scrollTop = main.scrollHeight;
