@@ -455,9 +455,18 @@ async fn auth_layer(
     if pass != cfg.secret {
         return unauth();
     }
-    // The Basic-auth username becomes the console actor for write attribution (the daemon still
-    // mints/uses a participant for it). Empty username → a generic console identity.
-    let actor = if user.is_empty() { "console".to_string() } else { user };
+    // Write attribution: prefer an explicit `X-Rozum-Actor` (the operator's chosen handle, set by the
+    // console), else the Basic-auth username, else a generic identity. The daemon attributes the write
+    // to this name. This makes multi-operator attribution real without each typing a browser username.
+    let header_actor = req
+        .headers()
+        .get("x-rozum-actor")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let actor = header_actor
+        .or_else(|| (!user.is_empty()).then_some(user))
+        .unwrap_or_else(|| "console".to_string());
     let mut req = req;
     req.extensions_mut().insert(ConsoleUser(actor));
     next.run(req).await

@@ -158,6 +158,7 @@
 <body>
 <header>
   <div class="brand">rozum <small>· support console</small></div>
+  <button id="actor" title="you (click to change) — your actions are attributed to this handle">👤</button>
   <select id="room" title="room"></select>
   <input id="q" type="text" placeholder="filter…" title="filter incidents + feed" style="width:130px">
   <label class="hideres" title="hide resolved/closed incidents"><input type="checkbox" id="hideres" checked> active only</label>
@@ -200,12 +201,11 @@ const api = (p) => fetch(p, { headers: { "Accept": "application/json" } }).then(
   if (!r.ok) throw new Error(p + " → " + r.status);
   return r.json();
 });
+let ACTOR = localStorage.getItem("rozumActor") || "";
 async function postJSON(p, body) {
-  const r = await fetch(p, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Accept": "application/json" },
-    body: JSON.stringify(body || {}),
-  });
+  const headers = { "Content-Type": "application/json", "Accept": "application/json" };
+  if (ACTOR) headers["X-Rozum-Actor"] = ACTOR;   // attribute the write to this operator
+  const r = await fetch(p, { method: "POST", headers, body: JSON.stringify(body || {}) });
   const text = await r.text();
   if (!r.ok) throw new Error((text || r.status).toString().slice(0, 200));
   try { return JSON.parse(text); } catch { return {}; }
@@ -645,6 +645,15 @@ async function boot() {
   await loadRooms();
   await refresh();
   $("refresh").onclick = refresh;
+  // Operator identity: actions are attributed to this handle (sent as X-Rozum-Actor).
+  const paintActor = () => { $("actor").textContent = ACTOR ? "👤 " + ACTOR : "👤 set name"; };
+  const setActor = async () => {
+    const v = await askForm("Your handle", [{ name: "name", label: "Shown as the actor on your actions", value: ACTOR }], "Save");
+    if (v && v.name) { ACTOR = v.name; localStorage.setItem("rozumActor", ACTOR); paintActor(); }
+  };
+  $("actor").onclick = setActor;
+  paintActor();
+  if (!ACTOR) setActor();   // first visit → ask once
   // Desktop alerts toggle: request permission on click; reflect state on the bell.
   const paintBell = () => {
     const ok = window.Notification && Notification.permission === "granted";
