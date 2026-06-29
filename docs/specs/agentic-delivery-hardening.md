@@ -26,6 +26,8 @@ the delivery-shaped cases.
     available.
   - `repair_diagnostic` may include bounded source/manifest snapshots and targeted manifest/edit
     guidance, but it must not mutate files itself.
+  - repair prompts restate the task-specific acceptance criterion, so a repair does not stop at
+    "the project compiles" when the verifier requires `cargo run`/`cargo test` behavior.
 
 ## Behavior
 
@@ -39,6 +41,8 @@ the delivery-shaped cases.
       `edit_requires_read`.
 - [x] An agent log containing `String to replace not found` after an `Edit` call is classified as
       `edit_old_string_miss`.
+- [x] Prompt text that merely mentions `File has not been read yet` or `String to replace not found`
+      is not treated as a real edit-tool failure unless it appears in a tool-error result.
 - [x] An agent log where the last tool result is an error and the assistant then claims success is
       classified as `false_success_after_error`.
 - [x] A workdir that compiles but fails the task's verifier with wrong output is classified separately
@@ -100,3 +104,8 @@ Validation stayed local and low-load: shell/Python syntax checks, real old GLM k
 `unknown_failed` because legacy CSVs do not record kept workdir paths), and synthetic fixtures covering
 missing project files, wrong entrypoint, old-string miss, false success after tool error, source syntax
 artifact, verifier mismatch, and pass.
+
+Follow-up green sweep added task-specific repair goal hints after Qwen2.5-Coder-7B repaired a compile
+failure into a generic Hello World project. With the hint, the same `build` cell passed. The triage
+heuristic was also narrowed so stale or prompt-only edit/manifest wording does not override the final
+verifier evidence.

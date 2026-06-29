@@ -33,6 +33,21 @@
          matrix run on the overloaded box. Real examples: GLM old workdirs classified
          `edit_requires_read` and `manifest_invalid`; legacy result CSV rows degrade to `unknown_failed`
          when no kept workdir path was recorded.
+- [x] **capable-model-green-sweep** — DONE (`feature/capable-model-green-sweep`). Goal: make
+  the models that already demonstrate capability green by fixing/rerunning delivery-shaped reds only;
+  keep capability failures honest. Tasks:
+  1. [x] aggregate historical matrix cells into "has passed before" vs "never passed" candidates.
+  2. [x] targeted low-load reruns for installed capable candidates, starting with cheap/safe models.
+  3. [x] use `agentic_triage.py` output to decide whether a red is delivery-fixable or capability.
+  4. [x] land generic runner/prompt hardening found during reruns; no model-specific hidden patchers
+         and no full-matrix run while the box is memory constrained. Results: Qwen2.5-Coder-7B via
+         Claude is green on `build/test/fix/debug` after task-specific repair goal hints
+         (`build` rerun: PASS; `fix` required one repair); `gpt-oss-20b` via Claude is green on
+         `build/fix/test/debug` at `NCTX=8192`; GLM-4.7-Flash had already been proven green on
+         `build/fix/test/debug/rpn`. Not promoted: Qwen2.5-Coder-7B `rpn` still fails even with
+         `ROZUM_ARTIFACT_SYNTH=1` due synth/repair misplacement + Read-before-Write friction; GLM-4-32B
+         was stopped as operationally too slow on the first `build` cell; Qwen3.6-35B dry-run refused
+         under current memory headroom.
 
 ### ▶ agentic-reliability (operator 2026-06-29: "сделай всё, занеси в спринт, порядок выбери сам")
 Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall (stall depends on sweep data).

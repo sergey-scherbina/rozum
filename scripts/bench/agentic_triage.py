@@ -164,6 +164,20 @@ def last_tool_error_then_success(log_text: str) -> bool:
     return bool(SUCCESS_AFTER_ERROR_RE.search(tail))
 
 
+def has_actual_tool_error(log_text: str, pattern: re.Pattern[str]) -> bool:
+    for line in log_text.splitlines():
+        if not pattern.search(line):
+            continue
+        if (
+            '"is_error":true' in line
+            or "<tool_use_error>" in line
+            or '"tool_use_result":"Error:' in line
+            or ('"type":"tool_result"' in line and "Error:" in line)
+        ):
+            return True
+    return False
+
+
 def classify_workdir(path: Path, explicit_log: Path | None = None) -> dict[str, Any]:
     meta = read_meta(path)
     task = meta.get("task", "")
@@ -179,7 +193,8 @@ def classify_workdir(path: Path, explicit_log: Path | None = None) -> dict[str, 
     cargo_text = read_sample(path / "cargo.err", 200_000)
     run_text = read_sample(path / "run.err", 200_000)
     cargo_toml_text = read_sample(path / "Cargo.toml", 200_000)
-    combined = "\n".join([log_text, verify_text, cargo_text, run_text, cargo_toml_text])
+    final_error_text = "\n".join([verify_text, cargo_text, run_text])
+    combined = "\n".join([log_text, final_error_text, cargo_toml_text])
 
     if passed == "1" or (verify_text and "FAIL" not in verify_text and "PASS" in verify_text):
         return result(path, "pass", "verification passed", ["verify_pass"], task=task, agent=agent, model=model, passed="1", timeout=timeout, rc=rc)
@@ -236,7 +251,7 @@ def classify_workdir(path: Path, explicit_log: Path | None = None) -> dict[str, 
             rc=rc,
         )
 
-    if MANIFEST_INVALID_RE.search(combined):
+    if MANIFEST_INVALID_RE.search(final_error_text):
         return result(
             path,
             "manifest_invalid",
@@ -250,7 +265,7 @@ def classify_workdir(path: Path, explicit_log: Path | None = None) -> dict[str, 
             rc=rc,
         )
 
-    if EDIT_REQUIRES_READ_RE.search(log_text):
+    if has_actual_tool_error(log_text, EDIT_REQUIRES_READ_RE):
         return result(
             path,
             "edit_requires_read",
@@ -264,7 +279,7 @@ def classify_workdir(path: Path, explicit_log: Path | None = None) -> dict[str, 
             rc=rc,
         )
 
-    if EDIT_OLD_STRING_RE.search(log_text):
+    if has_actual_tool_error(log_text, EDIT_OLD_STRING_RE):
         return result(
             path,
             "edit_old_string_miss",

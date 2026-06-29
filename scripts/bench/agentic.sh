@@ -317,10 +317,22 @@ repair_diagnostic() { # $1=task  $2=workdir
     esac )
 }
 
+repair_goal_hint() { # $1=task
+  case "$1" in
+    build) echo 'Required final behavior: this must be the reverse-cli task. Cargo.toml package name "reverse-cli", edition "2021", and src/main.rs must reverse the first command-line argument. `cargo run -- hello` must print exactly `olleh`; a generic Hello World project is still wrong.' ;;
+    test) echo 'Required final behavior: implement reverse(s) plus the requested unit test. `cargo test` must pass and `cargo run -- hello` must print exactly `olleh`; scaffolding or Hello World is still wrong.' ;;
+    fix) echo 'Required final behavior: fix the existing reverse bug with a minimal change. `cargo run -- hello` must print exactly `olleh`; returning `hello` or merely compiling is still wrong.' ;;
+    debug) echo 'Required final behavior: fix src/lib.rs without changing the test. `cargo test` must pass; merely compiling is still wrong.' ;;
+    rpn) echo 'Required final behavior: implement a real stack-based RPN evaluator. `cargo run -- "3 4 + 5 *"` must print `35` and `cargo run -- "5 1 2 + 4 * + 3 -"` must print `14`; hard-coding one example is still wrong.' ;;
+    *) echo 'Required final behavior: satisfy the original task prompt and the verifier, not just the compiler.' ;;
+  esac
+}
+
 # The repair instruction handed back to the agent — model-agnostic. Forbids starting over,
-# pins the exact error, and demands a REAL run before claiming success (kills the false "done").
-repair_prompt() { # $1=diagnostic
-  printf 'The Rust project in the CURRENT directory is NOT correct yet — do NOT start over or recreate files, FIX what is there.\n\n%s\n\nMake the minimal change to fix exactly this, then ACTUALLY RUN the build/test yourself and read the output. If you use Edit, call Read on that file first and copy old_string exactly from the current file; if Edit says "String to replace not found", re-read the file or Write the tiny file. Only confirm success if the command really succeeded; if it still fails, keep fixing.' "$1"
+# pins the exact error, restates the task goal, and demands a REAL run before claiming success.
+repair_prompt() { # $1=task $2=diagnostic
+  local task="$1" diagnostic="$2"
+  printf 'The Rust project in the CURRENT directory is NOT correct yet — do NOT start over or recreate files, FIX what is there.\n\n%s\n\nCurrent verifier/build evidence:\n\n%s\n\nMake the minimal change to satisfy the REQUIRED FINAL BEHAVIOR, then ACTUALLY RUN the build/test yourself and read the output. Do not stop at `cargo build` if the required command is `cargo run` or `cargo test`. If you use Edit, call Read on that file first and copy old_string exactly from the current file; if Edit says "String to replace not found", re-read the file or Write the tiny file. Only confirm success if the required command really succeeded; if it still fails, keep fixing.' "$(repair_goal_hint "$task")" "$diagnostic"
 }
 
 # ── main loop ────────────────────────────────────────────────────────────────
@@ -428,7 +440,7 @@ for spec in "${MODELS[@]}"; do
         [ "$attempt" -lt "$attempts" ] || break   # last attempt — no more repair
         repairs=$((repairs + 1))
         diag="$(repair_diagnostic "$task" "$work")"
-        prompt="$(repair_prompt "$diag")"
+        prompt="$(repair_prompt "$task" "$diag")"
         echo "    ↻ repair $repairs/$REPAIR — verify FAILED, feeding the real build/test error back to $agent"
       done
 

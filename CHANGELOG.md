@@ -1,5 +1,29 @@
 # Changelog
 
+## bench — green sweep for delivery-capable local models
+Completed: 2026-06-29
+
+Ran a low-load targeted sweep for models that historical matrix data showed can pass but had red
+delivery-shaped cells. Added a generic repair-prompt hardening: every verify-repair now restates the
+task-specific acceptance criterion, so weak models do not "repair" a build failure into a compiling
+Hello World project when the verifier requires `cargo run -- hello -> olleh` or the RPN examples.
+
+Fresh targeted results:
+
+- `claude × Qwen2.5-Coder-7B-Instruct-4bit`: `build/test/fix/debug` are green. The first `build` run
+  failed by repairing into Hello World; after the new task-goal hint, `build` passed. `rpn` remains red:
+  without universal synth it writes no files; with `ROZUM_ARTIFACT_SYNTH=1` it lands files but still
+  misplaces manifest text into `src/main.rs` and trips Read-before-Write friction during repair.
+- `claude × gpt-oss-20b-MXFP4-Q4`: `build/fix/test/debug` are green at `NCTX=8192`.
+- `claude × GLM-4.7-Flash-4bit`: already green from the prior focused smoke (`build/fix/test/debug/rpn`).
+
+Kept the non-green cases honest: Qwen2.5-Coder-7B `rpn` needs a separate synth-pairing fix before it can
+be called green; GLM-4-32B was stopped after the first `build` cell proved operationally too slow on the
+loaded box; Qwen3.6-35B dry-run refused under current memory headroom. Also tightened
+`agentic_triage.py` so prompt text mentioning edit errors does not count as a real tool failure unless
+the phrase appears in a tool-error result, and stale manifest errors in logs do not override final
+verifier evidence.
+
 ## bench — agentic delivery triage for weak-model red cells
 Completed: 2026-06-29
 
