@@ -70,14 +70,94 @@ def roomCount(name: String): Int =
 // Active (non-terminal) incident count for a room — read straight from threads.json (the support
 // model), counting open/triaging/escalated states. Crude string-count (same approach as the JSONL
 // parsing), so no JSON lib needed. The production PWA's incident-awareness signal.
-def activeIncidents(name: String): Int =
+def threadsText(name: String): String =
   val dir = roomDir(name)
   if isDir(dir) && listDir(dir).filter(f => f.endsWith("threads.json")).toList.length > 0 then
-    val t = readFile(s"$dir/threads.json")
-    (t.split("\"state\":\"open\"").toList.length - 1) +
-      (t.split("\"state\":\"triaging\"").toList.length - 1) +
-      (t.split("\"state\":\"escalated\"").toList.length - 1)
-  else 0
+    readFile(s"$dir/threads.json")
+  else ""
+
+def activeIncidents(name: String): Int =
+  val t = threadsText(name)
+  (t.split("\"state\": \"open\"").toList.length - 1) +
+    (t.split("\"state\": \"triaging\"").toList.length - 1) +
+    (t.split("\"state\": \"escalated\"").toList.length - 1)
+
+// Crude per-incident field extraction from the pretty-printed threads.json (no JSON lib in the .ssc).
+// Splitting the whole map on `"id": "` yields one chunk per incident (id first, then its fields).
+def incidentChunks(name: String): List[String] =
+  threadsText(name).split("\"id\": \"").toList.drop(1)
+
+def incId(c: String): String =
+  val b = c.split("\"")
+  b(0) + ""
+
+def jget(c: String, key: String): String =
+  val parts = c.split("\"" + key + "\": \"")
+  if parts.length < 2 then ""
+  else
+    val b = parts(1).split("\"")
+    b(0) + ""
+
+def sevColorOf(s: String): String =
+  if (s + "") == "critical" then "#dc2626"
+  else if (s + "") == "high" then "#ea580c"
+  else if (s + "") == "medium" then "#d97706"
+  else if (s + "") == "low" then "#2563eb"
+  else "#6b7280"
+
+def stateColorOf(s: String): String =
+  if (s + "") == "open" then "#dc2626"
+  else if (s + "") == "triaging" then "#d97706"
+  else if (s + "") == "escalated" then "#db2777"
+  else if (s + "") == "resolved" then "#16a34a"
+  else "#6b7280"
+
+def incActionForm(act: String, room: String, id: String, label: String, color: String): View =
+  element("form", ["method" -> "post", "action" -> "/do", "enctype" -> "text/plain", "style" -> "display:inline; margin:0 5px 0 0"], Map(), [
+    element("input", ["type" -> "hidden", "name" -> "act", "value" -> act], Map(), []),
+    element("input", ["type" -> "hidden", "name" -> "room", "value" -> room], Map(), []),
+    element("input", ["type" -> "hidden", "name" -> "id", "value" -> id], Map(), []),
+    element("button", ["style" -> ("background:" + color + "; color:#fff; border:0; border-radius:6px; padding:5px 12px; font-size:13px")], Map(), [textNode(label)])
+  ])
+
+def incEscalateForm(room: String, id: String): View =
+  element("form", ["method" -> "post", "action" -> "/do", "enctype" -> "text/plain", "style" -> "display:inline-flex; gap:4px; align-items:center; margin:0 5px 0 0"], Map(), [
+    element("input", ["type" -> "hidden", "name" -> "act", "value" -> "inc-escalate"], Map(), []),
+    element("input", ["type" -> "hidden", "name" -> "room", "value" -> room], Map(), []),
+    element("input", ["type" -> "hidden", "name" -> "id", "value" -> id], Map(), []),
+    element("input", ["name" -> "to", "placeholder" -> "to…", "autocomplete" -> "off", "style" -> "width:72px; padding:4px 6px; border-radius:6px; border:1px solid #333a44; background:#0f1115; color:#e6e6e6; font-size:13px"], Map(), []),
+    element("button", ["style" -> "background:#db2777; color:#fff; border:0; border-radius:6px; padding:5px 10px; font-size:13px"], Map(), [textNode("escalate")])
+  ])
+
+def incidentCard(room: String, c: String): View =
+  val id    = incId(c)
+  val title = jget(c, "title")
+  val state = jget(c, "state")
+  val sev   = jget(c, "severity")
+  val owner = jget(c, "owner")
+  val terminal = (state + "") == "resolved" || (state + "") == "closed"
+  val head = element("div", ["style" -> "display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:7px"], Map(), [
+    badge(if (state + "") == "" then "open" else state + "", stateColorOf(state + "")),
+    (if sev != "" then badge(sev + "", sevColorOf(sev + "")) else emptyView()),
+    element("span", ["style" -> "font-weight:600"], Map(), [textNode(if (title + "") == "" then id + "" else title + "")]),
+    (if owner != "" then element("span", ["style" -> "color:#5b626d; font-size:13px"], Map(), [textNode("@" + owner)]) else emptyView())
+  ])
+  val actions = element("div", ["style" -> "display:flex; flex-wrap:wrap; gap:5px; align-items:center"], Map(),
+    if terminal then [incActionForm("inc-reopen", room + "", id + "", "reopen", "#3a414d")]
+    else [incActionForm("inc-triage", room + "", id + "", "triage", "#d97706"), incEscalateForm(room + "", id + ""), incActionForm("inc-resolve", room + "", id + "", "resolve", "#16a34a")])
+  element("div", ["style" -> ("border:1px solid #23272e; border-left:3px solid " + sevColorOf(sev + "") + "; border-radius:8px; padding:10px 12px; margin:7px 0; background:#15181d")], Map(), [head, actions])
+
+def incidentsPage(room: String): String =
+  val chunks = incidentChunks(room)
+  val cards  = chunks.map(c => incidentCard(room + "", c)).toList
+  val back   = element("a", ["href" -> ("/r/" + room), "style" -> "color:#7ab8ff; text-decoration:none; font-size:15px; flex:0 0 auto"], Map(), [textNode("← чат")])
+  val ttl    = element("div", ["style" -> "font-weight:700; font-size:16px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis"], Map(), [textNode("🛟 инциденты · " + room)])
+  val header = element("div", ["style" -> "flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:max(10px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) 10px max(14px,env(safe-area-inset-left)); background:#1b1e24; border-bottom:1px solid #2a2e36"], Map(), [back, ttl])
+  val body   = if chunks.length < 1 then element("div", ["style" -> "color:#5b626d; padding:34px; text-align:center"], Map(), [textNode("нет инцидентов")])
+               else element("div", Map(), Map(), cards)
+  val list   = element("div", ["style" -> "flex:1 1 auto; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px max(14px,env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left))"], Map(), [body])
+  val doc    = element("div", ["style" -> "display:flex; flex-direction:column; height:100dvh; overflow:hidden; background:#14161a; color:#e6e6e6; font:15px/1.5 -apple-system,system-ui,sans-serif"], Map(), [header, list])
+  head ++ renderHtml(doc)
 
 def roomCountLine(n: String): String =
   n + "|" + roomCount(n).toString
@@ -261,8 +341,9 @@ def page(cur: String): String =
   val gear    = element("a", ["href" -> "/manage", "style" -> "flex:0 0 auto; text-decoration:none; font-size:21px; line-height:1; padding:3px 6px"], Map(), [textNode("⚙")])
   val ccLink  = element("a", ["href" -> "https://busi.tail1174e2.ts.net:8447/", "title" -> "control center", "style" -> "flex:0 0 auto; text-decoration:none; font-size:20px; line-height:1; padding:3px 6px"], Map(), [textNode("🎛")])
   val incN    = activeIncidents(cur)
-  val incChip = if incN < 1 then element("span", Map(), Map(), [])
-                else element("span", ["title" -> "active incidents", "style" -> "flex:0 0 auto; font-size:13px; font-weight:700; color:#fff; background:#dc2626; padding:2px 8px; border-radius:11px; white-space:nowrap"], Map(), [textNode("🛟 " + incN.toString)])
+  val incBg   = if incN > 0 then "#dc2626" else "#2a2e36"
+  val incTxt  = if incN > 0 then "🛟 " + incN.toString else "🛟"
+  val incChip = element("a", ["href" -> ("/incidents/" + cur), "title" -> "инциденты", "style" -> ("flex:0 0 auto; text-decoration:none; font-size:13px; font-weight:700; color:#fff; background:" + incBg + "; padding:3px 9px; border-radius:11px; white-space:nowrap")], Map(), [textNode(incTxt)])
   val tabsRow = element("div", ["style" -> "display:flex; gap:8px; align-items:center; width:100%"], Map(), [ccLink, sel, incChip, mpLink, gear])
   val handle  = element("div", ["style" -> "width:56px; height:6px; border-radius:3px; background:#3a414d"], Map(), [])
   val nav     = element("div", ["id" -> "nav", "style" -> "flex:0 0 auto; display:flex; flex-direction:column; align-items:center; gap:9px; padding:max(8px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) 8px max(12px,env(safe-area-inset-left)); background:#1b1e24; border-bottom:1px solid #2a2e36"], Map(), [tabsRow, handle])
@@ -464,6 +545,10 @@ def doAction(body: String): String =
   val policy = if pp.length < 2 then "mention" else firstLine(pp(1) + "")
   val pe = body.split("persona=")
   val persona = if pe.length < 2 then "" else pe(1).trim
+  val ip = body.split("id=")
+  val incid = if ip.length < 2 then "" else firstLine(ip(1) + "")
+  val tp = body.split("to=")
+  val to = if tp.length < 2 then "" else firstLine(tp(1) + "")
   if act == "createroom" && name != "" then
     if hasBad(name) then "<!doctype html><meta http-equiv='refresh' content='0;url=/manage'>ok"
     else
@@ -499,10 +584,23 @@ def doAction(body: String): String =
   else if act == "mpstop" && room != "" then
     val r = exec("pkill", ["-f", s"meetings participant.*--room ${room + ""}"], ProcessOptions(None, Map(), None))
     s"<!doctype html><meta http-equiv='refresh' content='0;url=/mp/$room'>ok"
+  else if act == "inc-resolve" && incid != "" && room != "" then
+    val r = exec("rozum", ["meetings", "incident", "--room", room + "", "resolve", incid + ""], ProcessOptions(None, Map(), None))
+    s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>ok"
+  else if act == "inc-triage" && incid != "" && room != "" then
+    val r = exec("rozum", ["meetings", "incident", "--room", room + "", "state", incid + "", "triaging"], ProcessOptions(None, Map(), None))
+    s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>ok"
+  else if act == "inc-reopen" && incid != "" && room != "" then
+    val r = exec("rozum", ["meetings", "incident", "--room", room + "", "state", incid + "", "open"], ProcessOptions(None, Map(), None))
+    s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>ok"
+  else if act == "inc-escalate" && incid != "" && room != "" && to != "" then
+    val r = exec("rozum", ["meetings", "incident", "--room", room + "", "escalate", incid + "", "--to", to + ""], ProcessOptions(None, Map(), None))
+    s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>ok"
   else "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url=/manage\">ok"
 
 @main def run(): Unit =
   route("GET",  "/r/", req => page(afterPrefix(req)))
+  route("GET",  "/incidents/", req => incidentsPage(afterPrefix(req)))
   route("GET",  "/m/", req => roomMsgs(afterPrefix(req)))
   route("GET",  "/mp/", req => mpPage(afterPrefix(req)))
   route("POST", "/p",  req => doPost(req))
