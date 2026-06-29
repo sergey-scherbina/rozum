@@ -98,15 +98,18 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   posts an `opened incident` audit message so even reply-less incidents recover. **EXACT (`c367167`):** the
   posted transitions (open/escalate/resolve/assign) carry a structured `MsgMeta.thread_op` (opened/title/kind/
   state/owner/severity/pin/unpin); `rebuild_threads` REPLAYS them exactly (prose parsing is the fallback for
-  old logs). thread_op is skip-when-none → no new messages, plain msgs byte-identical. Live-proven: wipe +
-  repair recovered title/severity/state/owner exactly. Residual: manual `incident state`/`pin` don't post a
-  message → still best-effort (they'd need to post a structured audit line; deferred as low-value).
+  old logs). thread_op is skip-when-none → plain msgs byte-identical. **NOW EXACT FOR ALL TRANSITIONS
+  (`ad2de1f`):** thread_set_state + thread_pin also post a structured `thread_op` audit message, so manual
+  `incident state` and pin/unpin survive a rebuild too. Live-proven: wipe threads.json + .bak → repair
+  recovered title/severity/state(=triaging)/owner AND pinned exactly. Fully complete.
 - [x] **mtg-msg-link-react-edit** — DONE (LINK `5e3e0a4` + REDACT `4a5ba09`). LINK: `Thread.links` +
   `meeting.thread_link` + CLI `incident link|unlink` + REST + console 🔗; thread_context resolves links into
   a `linked` bundle. REDACT (edit/redact): `redactions.json` tombstone applied on READ in `read_day` — every
   surface shows `[redacted: reason]`, original bytes preserved, reversible, zero-cost when none;
-  `meeting.redact` + CLI `meetings redact [--undo]` + REST + console ⊘. REACT deliberately skipped (low value
-  for an incident platform).
+  `meeting.redact` + CLI `meetings redact [--undo]` + REST + console ⊘. **REACT DONE (`07a030e`):**
+  `reactions.json` (msg_id→emoji→[who]) + `store::set_reaction` + `meeting.react` + CLI `meetings react
+  <id> <emoji> [--off]` + REST GET `/reactions`/POST `/react` + console emoji-count chips. mtg-message-ops
+  is now FULLY complete (link + redact + react).
 
 - [ ] **mtg-rich-rooms** — a richer room model beyond the daily-file chat: rooms with a **lifecycle**
   (a support queue / a per-product channel / a per-incident room), durable identity, membership/roles

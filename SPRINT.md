@@ -65,8 +65,9 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   resolve applied via the PWA. **The meetings → support/incident platform is now COMPLETE — every planned
   item shipped** (foundation → MCP/CLI/console/PWA surfaces → lifecycle → search/reply/assign/pin/link/redact
   → SLA/staleness → auto-gather → crash-durable persistence + retention + event-sourced rebuild → both
-  frontends converged). Only true-minor residue (manual state/pin structured event-sourcing, emoji react).
-  BACKLOG `## Meetings → product-support`. Detail below ↓
+  frontends converged). **ZERO RESIDUE** — manual state/pin event-sourcing (`ad2de1f`, rebuild now exact for
+  ALL transitions) and emoji react (`07a030e`, store+MCP+CLI+REST+console) both shipped. The meetings →
+  product-support/incident platform is FULLY DONE. BACKLOG `## Meetings → product-support`. Detail below ↓
 
 - [~] **meetings — original sprint notes (superseded by the line above)** — spec
   `docs/specs/meetings-incident-platform.md`. **FOUNDATION (P1-P3) DONE — the data-model + store ops, all
