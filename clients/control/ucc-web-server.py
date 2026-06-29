@@ -56,6 +56,24 @@ def _messages(room, limit=80):
             continue
     return out[-limit:]
 
+def _threads(room):
+    # The room's incidents (threads.json), flattened for a declarative table — convergence Phase 3:
+    # the one UCC SPA shows meetings' incidents next to chat, not just the separate meeting PWA.
+    root = _room_root(room)
+    if not root:
+        return []
+    try:
+        m = json.load(open(os.path.join(root, "threads.json")))
+    except Exception:
+        return []
+    out = []
+    for tid, t in (m.items() if isinstance(m, dict) else []):
+        if not isinstance(t, dict):
+            continue
+        out.append({"id": t.get("id", tid), "title": t.get("title", ""), "state": t.get("state", "open"),
+                    "severity": t.get("severity", ""), "owner": t.get("owner", "")})
+    return out
+
 class H(SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     extensions_map = {**SimpleHTTPRequestHandler.extensions_map,
@@ -86,6 +104,10 @@ class H(SimpleHTTPRequestHandler):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             room = (q.get("room") or ["demo"])[0]
             return self._send_json(_messages(room))
+        if path == "/chat/incidents":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            room = (q.get("room") or ["demo"])[0]
+            return self._send_json(_threads(room))
         # Other control-API reads (e.g. /control/coder/log?id=&tail=) → proxy to :8411, query and all.
         if path.startswith("/control/"):
             try:

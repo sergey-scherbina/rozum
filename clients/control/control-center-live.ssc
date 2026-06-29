@@ -40,6 +40,8 @@ val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if
 val chatTick = signal("chatTick", 0)
 val msgUrl   = computedSignal(() => "/chat/messages?room=" + room())
 val messages = fetchUrlSignalTo("messages", msgUrl, chatTick)
+val incUrl   = computedSignal(() => "/chat/incidents?room=" + room())
+val incidents = fetchUrlSignalTo("incidents", incUrl, chatTick)
 ```
 
 ## Dashboard
@@ -100,8 +102,18 @@ val composer = hstack(gap = 8)(
   textField(draft, "message…"),
   actionButton(fetchActionClear("POST", "/chat/post", draft, chatTick, roomHeader), "send")
 )
+val incidentsCard = cardWithHeader(heading(2, "Инциденты комнаты"))(
+  remoteTable(incidents, [
+    fieldColumn("severity", "severity"),
+    fieldColumn("state", "state"),
+    fieldColumn("инцидент", "title"),
+    fieldColumn("owner", "owner")
+  ], "")
+)
 val chatBody = vstack(gap = 12)(
   chatHeader,
+  divider(),
+  incidentsCard,
   divider(),
   remoteTable(messages, [
     fieldColumn("", "time"),
