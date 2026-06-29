@@ -34,15 +34,18 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   not worth the false-positive surface. **Recommendation: DELETE Coder-30B** — dominated by DWQ-35B
   (30 GB peak + intermittent-loop/0-2-rpn vs 22 GB + 10/10); operator's call (re-download cost).
 
-- [~] **meetings-frontend-prod (operator 2026-06-29: "фронтенд на уровне? запиши все в спринт и сделай")** —
-  honest gap-audit of the meetings frontend → take it from functional/engineer-grade to production-grade.
-  Five, by leverage: (1) **SSE realtime** — replace the console's 4s full-refetch poll with a server-sent
-  event stream off the daemon's per-room `Notify`; live updates, no idle polling. (2) **alerting** — browser
-  Notification on a new critical incident / SLA breach (client detects the delta on refresh). (3) **inline
-  action forms** — replace `prompt()`/`confirm()` with inline forms/modals in the console. (4) **named
-  actor/roles** — stop attributing UI writes to the shared Basic-auth username; a per-operator handle
-  (localStorage → header) at minimum, real per-token identity/roles the deeper goal. (5) **frontend tests** —
-  the JS/.ssc have ZERO automated tests; add a smoke harness. Console = `rest_read.rs` + `console.html`.
+- [x] **meetings-frontend-prod (operator 2026-06-29)** — DONE + LIVE-PROVEN, all 5: (1) **SSE realtime**
+  (`10ce19f`) — `GET /rooms/{n}/events` streams `changed` off the daemon's per-room `Notify` (rest_read shares
+  the live `DaemonRoom`); console EventSource refreshes on each event, 4s poll → 30s fallback. (2) **alerts**
+  (`ff796b1`) — browser Notification on a new high/critical incident / SLA breach (🔔 toggle, seed-on-first-
+  load so no storm). (3) **inline forms** (`a4706b0`) — Promise-based `askForm` modal replaces all
+  prompt/confirm (escalate/assign/resolve/open/link/redact/react). (4) **named actor** (`682f6bb`) — the
+  console sends an operator handle (👤 chip → localStorage → `X-Rozum-Actor`); `auth_layer` attributes the
+  write to it (proven: a console escalate showed `op1:` not the secret). (5) **frontend smoke** (`7146b40`) —
+  structural test asserts every feature's wiring is in the served HTML + no `prompt()`. Live: console 200,
+  SSE `init`, escalate via console attributed to op1. **REMAINING DEPTH (deferred, honest):** real
+  per-token auth + RBAC roles (observer/responder/admin), behavioral Playwright e2e, list pagination/
+  virtualization at scale, fold these into the `.ssc` PWA (its incident UI is thinner). 102 meeting tests.
 
 - [x] **meetings → support/incident platform (operator 2026-06-28, strategic)** — COMPLETE across all
   three surfaces + polished (foundation → agent-native MCP → human CLI → web console). Capabilities shipped
