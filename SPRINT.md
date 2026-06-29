@@ -77,13 +77,16 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   `/rooms/{n}/whoami` is room-scoped, the console re-gates on room switch. Live: bob = observer global /
   admin in `incidents`. **(+) .ssc PWA realtime + alerts (`465c0c1`):** the incidents page auto-polls a
   swappable `/incfrag/<room>` fragment (3s, mirrors the chat `/m` tick — the .ssc reads disk in a separate
-  process so true Notify-SSE is console-only) + a 🔔 desktop alert when `data-active` rises. **ROLES in the
-  .ssc are ARCHITECTURALLY BLOCKED** (confirmed in the generated Rust): the .ssc's `_http_route` passes the
-  handler a path/body STRING, not the full `Request` — so handlers can't read cookies/headers, which
-  token-auth needs (a URL-query token would be insecure). The .ssc is a Tailscale-network-trusted responder
-  surface (no redact there); full RBAC is the console. Path forward = migrate the .ssc route layer to
-  `Request`-based handlers → backlog `mtg-ssc-request-handlers`. **REMAINING DEPTH:** behavioral Playwright
-  e2e (needs node). The console is production-grade.
+  process so true Notify-SSE is console-only) + a 🔔 desktop alert when `data-active` rises. **(+) ROLES in
+  the .ssc — DONE (`mtg-ssc-request-handlers`, 2026-06-29):** the architectural block (the `_http_route`
+  handler surface is a path/body STRING, no `Request` → no cookies) was solved NOT by rewriting the route
+  layer but with a narrow scalascript runtime capability **`requestCookie(name)`** (thread-local Cookie-header
+  snapshot, scalascript `feature/rust-request-cookie`). The .ssc now reads a `rozum_token` cookie → resolves
+  handle + per-room role via new CLI **`rozum meetings token resolve`**, gates the incident forms (observer =
+  read-only), re-checks the role server-side on POST `/do`, attributes actions via `--as <handle>`, + a
+  `/login` page + actor chip. PERMISSIVE default (no token = open, zero regression). Live-proven on `:8499`:
+  observer→denied, responder→resolved+attributed, per-room admin override. **REMAINING DEPTH:** behavioral
+  Playwright e2e (needs node); optional `.ssc` strict-mode env. The console + the .ssc are production-grade.
 
 - [x] **meetings → support/incident platform (operator 2026-06-28, strategic)** — COMPLETE across all
   three surfaces + polished (foundation → agent-native MCP → human CLI → web console). Capabilities shipped

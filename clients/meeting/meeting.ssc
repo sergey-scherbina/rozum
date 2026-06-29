@@ -1,4 +1,4 @@
-[route, serve](std/http.ssc)
+[route, serve, requestCookie](std/http.ssc)
 [readFile, listDir, isDir](std/fs.ssc)
 [exec, ProcessOptions](std/process.ssc)
 [renderHtml, element, textNode](std/ui/primitives.ssc)
@@ -112,6 +112,35 @@ def stateColorOf(s: String): String =
   else if (s + "") == "resolved" then "#16a34a"
   else "#6b7280"
 
+// ── Token-cookie identity + RBAC ──────────────────────────────────────────────
+// The PWA reads a `rozum_token` session cookie (set on /login), resolves it to a
+// handle + per-room role via `rozum meetings token resolve`, and uses that to (a)
+// gate the incident action forms and (b) attribute actions with `--as <handle>`.
+// Policy is PERMISSIVE: no token = the original open behavior (may act); an
+// `observer` token is read-only; `responder`/`admin` may act.
+
+def sessionToken(): String =
+  requestCookie("rozum_token").trim
+
+// "handle\trole" for the current cookie scoped to `room`, or "" (no/invalid token).
+def whoLine(room: String): String =
+  val tok = sessionToken()
+  if tok == "" then ""
+  else exec("rozum", ["meetings", "token", "resolve", tok + "", "--room", room + ""], ProcessOptions(None, Map(), None)).stdout.trim
+
+def handleOfLine(l: String): String =
+  val b = l.split("\t")
+  if b.length < 1 then "" else b(0).trim
+
+def roleOfLine(l: String): String =
+  val b = l.split("\t")
+  if b.length < 2 then "" else b(1).trim
+
+// May the holder of this resolved line act? No token (open) or responder/admin = yes; observer = no.
+def canActLine(l: String): Boolean =
+  val r = roleOfLine(l + "")
+  (r + "") == "" || (r + "") == "responder" || (r + "") == "admin"
+
 def incActionForm(act: String, room: String, id: String, label: String, color: String): View =
   element("form", ["method" -> "post", "action" -> "/do", "enctype" -> "text/plain", "style" -> "display:inline; margin:0 5px 0 0"], Map(), [
     element("input", ["type" -> "hidden", "name" -> "act", "value" -> act], Map(), []),
@@ -129,7 +158,7 @@ def incEscalateForm(room: String, id: String): View =
     element("button", ["style" -> "background:#db2777; color:#fff; border:0; border-radius:6px; padding:5px 10px; font-size:13px"], Map(), [textNode("escalate")])
   ])
 
-def incidentCard(room: String, c: String): View =
+def incidentCard(room: String, c: String, canAct: Boolean): View =
   val id    = incId(c)
   val title = jget(c, "title")
   val state = jget(c, "state")
@@ -142,9 +171,11 @@ def incidentCard(room: String, c: String): View =
     element("span", ["style" -> "font-weight:600"], Map(), [textNode(if (title + "") == "" then id + "" else title + "")]),
     (if owner != "" then element("span", ["style" -> "color:#5b626d; font-size:13px"], Map(), [textNode("@" + owner)]) else emptyView())
   ])
-  val actions = element("div", ["style" -> "display:flex; flex-wrap:wrap; gap:5px; align-items:center"], Map(),
-    if terminal then [incActionForm("inc-reopen", room + "", id + "", "reopen", "#3a414d")]
-    else [incActionForm("inc-triage", room + "", id + "", "triage", "#d97706"), incEscalateForm(room + "", id + ""), incActionForm("inc-resolve", room + "", id + "", "resolve", "#16a34a")])
+  val actions =
+    if canAct then element("div", ["style" -> "display:flex; flex-wrap:wrap; gap:5px; align-items:center"], Map(),
+      if terminal then [incActionForm("inc-reopen", room + "", id + "", "reopen", "#3a414d")]
+      else [incActionForm("inc-triage", room + "", id + "", "triage", "#d97706"), incEscalateForm(room + "", id + ""), incActionForm("inc-resolve", room + "", id + "", "resolve", "#16a34a")])
+    else element("div", ["style" -> "color:#5b626d; font-size:12px"], Map(), [textNode("только чтение")])
   element("div", ["style" -> ("border:1px solid #23272e; border-left:3px solid " + sevColorOf(sev + "") + "; border-radius:8px; padding:10px 12px; margin:7px 0; background:#15181d")], Map(), [head, actions])
 
 // The incident cards as a swappable fragment (id "incs" + data-active = the live count, so the client
@@ -152,10 +183,11 @@ def incidentCard(room: String, c: String): View =
 def incidentsBody(room: String): View =
   val chunks = incidentChunks(room)
   val active = activeIncidents(room).toString
+  val canAct = canActLine(whoLine(room + ""))
   if chunks.length < 1 then
     element("div", ["id" -> "incs", "data-active" -> active, "style" -> "color:#5b626d; padding:34px; text-align:center"], Map(), [textNode("нет инцидентов")])
   else
-    val cards = chunks.map(c => incidentCard(room + "", c)).toList
+    val cards = chunks.map(c => incidentCard(room + "", c, canAct)).toList
     element("div", ["id" -> "incs", "data-active" -> active], Map(), cards)
 
 def incidentsFrag(room: String): String =
@@ -164,10 +196,18 @@ def incidentsFrag(room: String): String =
 val incScript = "<script>var R=location.pathname.split('/').pop()||'demo';var last=-1;function tk(){fetch('/incfrag/'+R).then(function(r){return r.text()}).then(function(t){var c=document.getElementById('incs');if(c){c.outerHTML=t}var n=document.getElementById('incs');var a=n?parseInt(n.getAttribute('data-active')||'0',10):0;if(last>=0&&a>last&&window.Notification&&Notification.permission==='granted'){try{new Notification('🛟 новый инцидент',{body:R})}catch(e){}}last=a}).catch(function(e){})}window.addEventListener('load',function(){var n=document.getElementById('incs');last=n?parseInt(n.getAttribute('data-active')||'0',10):-1;var b=document.getElementById('bell');if(b){b.onclick=function(){if(window.Notification){Notification.requestPermission()}}}setInterval(tk,3000)});</script>"
 
 def incidentsPage(room: String): String =
+  val wl     = whoLine(room + "")
+  val h      = handleOfLine(wl + "")
+  val rl     = roleOfLine(wl + "")
+  val actor  =
+    if (h + "") == "" then
+      element("a", ["href" -> "/login", "title" -> "войти под токеном", "style" -> "flex:0 0 auto; text-decoration:none; color:#7ab8ff; font-size:16px"], Map(), [textNode("🔑")])
+    else
+      element("a", ["href" -> "/login", "title" -> "сессия — нажмите чтобы сменить", "style" -> "flex:0 0 auto; text-decoration:none; color:#8a93a0; font-size:12px; white-space:nowrap"], Map(), [textNode(s"👤 ${h}·${rl}")])
   val back   = element("a", ["href" -> ("/r/" + room), "style" -> "color:#7ab8ff; text-decoration:none; font-size:15px; flex:0 0 auto"], Map(), [textNode("← чат")])
   val ttl    = element("div", ["style" -> "font-weight:700; font-size:16px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1 1 auto"], Map(), [textNode("🛟 инциденты · " + room)])
   val bell   = element("button", ["id" -> "bell", "title" -> "алерты о новых инцидентах", "style" -> "flex:0 0 auto; background:#2a2e36; color:#fff; border:0; border-radius:9px; padding:5px 9px; font-size:15px"], Map(), [textNode("🔔")])
-  val header = element("div", ["style" -> "flex:0 0 auto; display:flex; align-items:center; gap:12px; padding:max(10px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) 10px max(14px,env(safe-area-inset-left)); background:#1b1e24; border-bottom:1px solid #2a2e36"], Map(), [back, ttl, bell])
+  val header = element("div", ["style" -> "flex:0 0 auto; display:flex; align-items:center; gap:12px; padding:max(10px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) 10px max(14px,env(safe-area-inset-left)); background:#1b1e24; border-bottom:1px solid #2a2e36"], Map(), [back, ttl, actor, bell])
   val list   = element("div", ["style" -> "flex:1 1 auto; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px max(14px,env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left))"], Map(), [incidentsBody(room)])
   val doc    = element("div", ["style" -> "display:flex; flex-direction:column; height:100dvh; overflow:hidden; background:#14161a; color:#e6e6e6; font:15px/1.5 -apple-system,system-ui,sans-serif"], Map(), [header, list])
   head ++ renderHtml(doc) ++ incScript
@@ -597,19 +637,52 @@ def doAction(body: String): String =
   else if act == "mpstop" && room != "" then
     val r = exec("pkill", ["-f", s"meetings participant.*--room ${room + ""}"], ProcessOptions(None, Map(), None))
     s"<!doctype html><meta http-equiv='refresh' content='0;url=/mp/$room'>ok"
-  else if act == "inc-resolve" && incid != "" && room != "" then
-    val r = exec("rozum", ["meetings", "incident", "--room", room + "", "resolve", incid + ""], ProcessOptions(None, Map(), None))
-    s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>ok"
-  else if act == "inc-triage" && incid != "" && room != "" then
-    val r = exec("rozum", ["meetings", "incident", "--room", room + "", "state", incid + "", "triaging"], ProcessOptions(None, Map(), None))
-    s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>ok"
-  else if act == "inc-reopen" && incid != "" && room != "" then
-    val r = exec("rozum", ["meetings", "incident", "--room", room + "", "state", incid + "", "open"], ProcessOptions(None, Map(), None))
-    s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>ok"
-  else if act == "inc-escalate" && incid != "" && room != "" && to != "" then
-    val r = exec("rozum", ["meetings", "incident", "--room", room + "", "escalate", incid + "", "--to", to + ""], ProcessOptions(None, Map(), None))
-    s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>ok"
+  else if act.startsWith("inc-") && incid != "" && room != "" then
+    // RBAC: resolve the cookie once. Observer (or any token without act rights) is rejected here too,
+    // not just hidden in the UI — a hand-crafted POST can't bypass the role. `--as <handle>` attributes
+    // the action to the operator when a token is present; no token = the original open/anonymous path.
+    val wl = whoLine(room + "")
+    if canActLine(wl + "") then
+      val h   = handleOfLine(wl + "")
+      val pre = if (h + "") == "" then ["meetings", "incident", "--room", room + ""]
+                else ["meetings", "incident", "--as", h + "", "--room", room + ""]
+      val verb =
+        if act == "inc-resolve" then ["resolve", incid + ""]
+        else if act == "inc-triage" then ["state", incid + "", "triaging"]
+        else if act == "inc-reopen" then ["state", incid + "", "open"]
+        else if act == "inc-escalate" && to != "" then ["escalate", incid + "", "--to", to + ""]
+        else []
+      if verb.length < 1 then s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>ok"
+      else
+        val r = exec("rozum", (pre ++ verb).toList, ProcessOptions(None, Map(), None))
+        s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>ok"
+    else
+      s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>denied"
   else "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url=/manage\">ok"
+
+// Cookie can't be set from a String-surface handler (no response headers), so /login sets it
+// client-side: the script writes `document.cookie` then navigates. Same-origin → the cookie rides
+// every later request and `requestCookie` picks it up. Not HttpOnly — fine for a Tailscale-internal tool
+// where the operator already holds the token.
+val loginScript = "<script>(function(){var s=document.getElementById('loginsave');var c=document.getElementById('loginclear');var t=document.getElementById('logintok');if(s){s.onclick=function(){var v=(t.value||'').trim();if(!v){return}document.cookie='rozum_token='+encodeURIComponent(v)+'; path=/; max-age=31536000; samesite=lax';location.href='/manage'}}if(t){t.addEventListener('keydown',function(e){if(e.key==='Enter'&&s){s.click()}})}if(c){c.onclick=function(){document.cookie='rozum_token=; path=/; max-age=0; samesite=lax';location.reload()}}})();</script>"
+
+def loginPage(): String =
+  val wl  = whoLine("")
+  val h   = handleOfLine(wl + "")
+  val rl  = roleOfLine(wl + "")
+  val cur =
+    if (h + "") == "" then element("div", ["style" -> "color:#5b626d; font-size:14px; margin-bottom:16px"], Map(), [textNode("сессия не установлена — открытый доступ")])
+    else element("div", ["style" -> "color:#9fd0ff; font-size:14px; margin-bottom:16px"], Map(), [textNode(s"вы вошли как 👤 ${h} · ${rl}")])
+  val inp  = element("input", ["id" -> "logintok", "type" -> "text", "placeholder" -> "вставьте токен…", "autocomplete" -> "off", "autocapitalize" -> "off", "autocorrect" -> "off", "spellcheck" -> "false", "style" -> "width:100%; padding:11px 12px; border-radius:9px; border:1px solid #333a44; background:#0f1115; color:#e6e6e6; font-size:16px; margin-bottom:12px"], Map(), [])
+  val save = element("button", ["id" -> "loginsave", "style" -> "flex:1 1 auto; background:#2f6feb; color:#fff; border:0; border-radius:9px; padding:11px; font-size:15px; font-weight:600"], Map(), [textNode("войти")])
+  val clr  = element("button", ["id" -> "loginclear", "style" -> "flex:0 0 auto; background:#2a2e36; color:#cbd2da; border:0; border-radius:9px; padding:11px 16px; font-size:15px"], Map(), [textNode("выйти")])
+  val btns = element("div", ["style" -> "display:flex; gap:8px"], Map(), [save, clr])
+  val hint = element("div", ["style" -> "color:#5b626d; font-size:12px; margin-top:16px; line-height:1.6"], Map(), [textNode("Токен выдаёт оператор: rozum meetings token issue --handle … --role observer|responder|admin. Роль определяет, можно ли менять инциденты.")])
+  val card = element("div", ["style" -> "background:#15181d; border:1px solid #23272e; border-radius:14px; padding:18px; max-width:440px; margin:0 auto"], Map(), [cur, inp, btns, hint])
+  val back = element("a", ["href" -> "/manage", "style" -> "color:#7ab8ff; text-decoration:none; font-size:15px"], Map(), [textNode("← управление")])
+  val ttl  = element("div", ["style" -> "font-weight:700; font-size:18px; margin:14px 0 18px"], Map(), [textNode("🔑 сессия")])
+  val doc  = element("div", ["style" -> "min-height:100dvh; background:#14161a; color:#e6e6e6; font:15px/1.5 -apple-system,system-ui,sans-serif; padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))"], Map(), [back, ttl, card])
+  head ++ renderHtml(doc) ++ loginScript
 
 @main def run(): Unit =
   route("GET",  "/r/", req => page(afterPrefix(req)))
@@ -620,6 +693,7 @@ def doAction(body: String): String =
   route("POST", "/p",  req => doPost(req))
   route("POST", "/do", req => doAction(req))
   route("GET",  "/manage", req => managePage())
+  route("GET",  "/login", req => loginPage())
   route("GET",  "/manifest.webmanifest", req => manifest())
   route("GET",  "/sw.js",   req => serviceWorkerJs())
   route("GET",  "/icon.svg", req => iconSvgDoc())

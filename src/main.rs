@@ -743,6 +743,16 @@ enum TokenAction {
         /// A token string or an operator handle.
         token_or_handle: String,
     },
+    /// Resolve a token → `handle<TAB>role` (the effective role for `--room`, else the base role).
+    /// Prints nothing and exits 1 if the token is unknown or expired. The machine bridge the `.ssc`
+    /// PWA uses to turn its `rozum_token` cookie into an actor + RBAC role.
+    Resolve {
+        /// The token string (from the operator's session cookie).
+        token: String,
+        /// Scope the role to this room (applies any per-room override); omit for the base role.
+        #[arg(long)]
+        room: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3163,6 +3173,13 @@ fn run_meetings_token(action: TokenAction) {
                 eprintln!("token revoke: {e}");
                 std::process::exit(1);
             }
+        },
+        TokenAction::Resolve { token, room } => match store::resolve_token(&sd, &token, now()) {
+            Some(info) => {
+                let role = info.effective_role(room.as_deref());
+                println!("{}\t{}", info.handle, role.as_str());
+            }
+            None => std::process::exit(1),
         },
     }
 }

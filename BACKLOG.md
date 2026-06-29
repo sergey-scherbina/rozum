@@ -90,13 +90,20 @@ on the existing meeting stack (`docs/specs/agent-meetings-daemon.md`, `meeting-i
 `meeting-mention-inbox.md`, `meetings-rest-read.md`; daily disk-backed rooms, session-token identity,
 single-writer daemon). Each item below is its own spec+build later — listed to set the trajectory.
 
-- [ ] **mtg-ssc-request-handlers** (operator 2026-06-29) — the `.ssc` PWA route handlers receive a path/body
-  STRING (the generated `_http_route` passes `afterPrefix(req)` / `doPost(req)` a string), not the full
-  std `Request` — so they CAN'T read cookies/headers. That blocks token-auth + RBAC roles in the `.ssc`
-  (done in the console). Migrate the `.ssc` route layer to `Request`-based handlers (`req.cookies`,
-  `req.headers`), then resolve a `rozum_token` cookie → handle + per-room role (read `tokens.json`), gate the
-  incident action forms, and attribute actions (`rozum meetings incident --as <handle>`). Until then the
-  `.ssc` is a Tailscale-network-trusted responder surface; realtime + alerts already shipped (`465c0c1`).
+- [x] **mtg-ssc-request-handlers** (operator 2026-06-29) — DONE + LIVE-PROVEN. The `.ssc` route handler
+  surface is a path/body STRING (no `Request`), so cookies were unreachable. Instead of migrating the whole
+  route layer to `Request`, added a narrow scalascript runtime capability **`requestCookie(name): String`**
+  (thread-local snapshot of the current request's Cookie header, published in `handle_request` right before
+  the sync handler — no `.await` between, so no cross-request leak; scalascript `feature/rust-request-cookie`
+  `9db95f21d`). On the rozum side: new CLI **`rozum meetings token resolve <tok> [--room R]`** → `handle\trole`
+  (the `.ssc`'s bridge), and `meeting.ssc` now reads the `rozum_token` cookie → resolves handle + per-room
+  role, **gates the incident action forms** (observer = "только чтение"), **re-checks the role server-side**
+  on POST `/do` (a hand-crafted POST can't bypass), **attributes actions** via `--as <handle>` (`incident --as`
+  already existed), plus a **`/login`** page (sets the cookie client-side) + an actor chip. Policy is
+  PERMISSIVE: no token = the original open behavior (graceful, zero regression even if the gateway lacks
+  `token resolve`); observer = read-only; responder/admin = act. Live isolated test (`:8499`): observer →
+  denied (incident stays open), responder → resolved + attributed `alice:`, per-room admin override resolves.
+  FOLLOW-UP (optional): `ROZUM_MEETING_REQUIRE_TOKEN=1` strict mode (no token = observer).
 - [x] **mtg-retention** — DONE (`7bec5a1`). `store::prune_old_days` deletes `<date>.jsonl` older than N
   days + rewrites `index.json`, NEVER pruning a day holding an open incident's messages; wired into daemon
   start, gated `ROZUM_MEETINGS_RETAIN_DAYS` (default off). Test.
