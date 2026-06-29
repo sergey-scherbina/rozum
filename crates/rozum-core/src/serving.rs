@@ -523,11 +523,14 @@ pub fn synth_glm_tool_calls(text: &str, tools: &[crate::backend::ToolDef]) -> Ve
                     }
                 }
             }
-        } else if body_is_fenced_tool_call(body) {
-            // The fence body is a GLM/Qwen `Name\n{json}` tool CALL (e.g. ```bash\nRead\n{"file_path":…}```),
-            // which `parse_tool_calls` already claims — it is NOT file content. Skip it: without this, the
-            // mode-1 prose-filename fallback below would write the call's TEXT into the named file (the
-            // GLM-4 fix-task corruption that overwrote src/main.rs with `Read\n{…}`).
+        } else if is_shell_command_lang(&lang) || body_is_fenced_tool_call(body) {
+            // This fence is a thing to RUN, not file content — skip it (without this, the mode-1
+            // prose-filename fallback below writes the command/call TEXT into the named file):
+            //  - a SHELL-language fence (```bash / ```sh): a command like `cargo run -- "3 4 + 5 *"`.
+            //    The model writes the program, then narrates "src/main.rs is ready, now let's run it:
+            //    ```sh cargo run```" — mode-1 saw `src/main.rs` in the prose and clobbered the program
+            //    with the run command (the rpn-task corruption; the model's code was correct).
+            //  - a GLM/Qwen `Name\n{json}` tool CALL (```bash\nRead\n{…}```), which parse_tool_calls owns.
         } else if let (Some(path), Some(wt)) = (last_safe_filename(preceding), write_tool.as_deref()) {
             // Mode-1: raw file content; filename from the preceding prose.
             let mut m = serde_json::Map::new();
@@ -755,6 +758,14 @@ fn body_is_fenced_tool_call(body: &str) -> bool {
     !first.is_empty()
         && first.chars().all(|c| c.is_alphanumeric() || c == '_')
         && rest.starts_with('{')
+}
+
+/// Is the fence's language a SHELL (a command to RUN, not file content)? A ```bash/```sh fence is the
+/// model saying "run this" (`cargo run …`, `cargo test`), never source-file content — the synth must not
+/// materialize it into the prose-named file. (A model that genuinely wants to write a shell SCRIPT names
+/// `Write` for it; the harm of clobbering `src/main.rs` with a run-command far outweighs that rare case.)
+fn is_shell_command_lang(lang: &str) -> bool {
+    matches!(lang, "bash" | "sh" | "shell" | "zsh" | "console" | "shell-session" | "shellsession")
 }
 
 /// Mode-1b: a fence body with NO filename in the prose. If it is a COMPLETE standalone program in a
@@ -987,6 +998,23 @@ mod tests {
         assert!(!body_is_fenced_tool_call("[package]\nname = \"x\""));
         assert!(!body_is_fenced_tool_call("use std::env;\nfn main() {}"));
         assert!(body_is_fenced_tool_call("Read\n{\"file_path\": \"a\"}"));
+    }
+
+    #[test]
+    fn synth_skips_shell_command_fence_after_filename_prose() {
+        // REAL Coder-7B rpn output (captured): a correct program, then "src/main.rs has been created,
+        // now let's run it: ```sh cargo run -- …```". Mode-1 saw `src/main.rs` in the prose and wrote the
+        // RUN COMMAND into src/main.rs, clobbering the correct program → compile error → 0/N. A shell
+        // fence is a command to RUN, never file content.
+        let real = "Cargo.toml and src/main.rs have been created. Now, let's run the program:\n\n```sh\ncargo run -- \"3 4 + 5 *\"\n```\n";
+        assert!(
+            synth_glm_tool_calls(real, &claude_tools()).is_empty(),
+            "a ```sh command fence must NOT be synthesized into a file write"
+        );
+        // ```bash too; and the lang predicate itself.
+        assert!(synth_glm_tool_calls("Run src/main.rs now:\n```bash\ncargo test\n```", &claude_tools()).is_empty());
+        assert!(is_shell_command_lang("bash") && is_shell_command_lang("sh"));
+        assert!(!is_shell_command_lang("rust") && !is_shell_command_lang("toml"));
     }
 
     #[test]
