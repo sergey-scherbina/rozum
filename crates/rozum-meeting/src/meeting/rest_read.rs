@@ -13,9 +13,13 @@ use axum::{
     extract::{Path as AxumPath, Query, State},
     http::{StatusCode, header},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Json, Response},
+    response::{
+        Html, IntoResponse, Json, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
+use futures::Stream;
 use serde_json::Value;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -137,6 +141,7 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
         .route("/rooms/{name}/reactions", get(reactions))
         .route("/rooms/{name}/react", post(react))
         .route("/rooms/{name}/metrics", get(metrics))
+        .route("/rooms/{name}/events", get(events))
         .route("/rooms/{name}/search", get(search))
         .route("/roster", get(roster))
         .layer(middleware::from_fn_with_state(
@@ -237,6 +242,30 @@ async fn metrics(State(state): State<RestState>, AxumPath(name): AxumPath<String
     out["room"] = json!(name);
     out["needs_attention"] = json!(needs_attention);
     Json(out).into_response()
+}
+
+/// `GET /rooms/{name}/events` — Server-Sent Events stream that emits a `changed` event whenever the room
+/// is written to (taps the daemon's per-room `Notify`, so it's event-driven, not polled). The console
+/// refreshes on each event → near-instant updates with no idle polling.
+async fn events(
+    State(state): State<RestState>,
+    AxumPath(name): AxumPath<String>,
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    // Resolve (and open) the live room so we share the writer's Notify; None → a stream that only
+    // keep-alives (the client still has its fallback poll).
+    let handle = state.registry.get_by_name(&name).ok().flatten();
+    let stream = async_stream::stream! {
+        // Fire once on connect so the client syncs immediately.
+        yield Ok(Event::default().event("changed").data("init"));
+        if let Some(handle) = handle {
+            let notify = { handle.lock().await.notify.clone() };
+            loop {
+                notify.notified().await;
+                yield Ok(Event::default().event("changed").data("x"));
+            }
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 /// `GET /rooms/{name}/search?q=&kind=&severity=&tag=&thread=&since=&limit=` — full-history message

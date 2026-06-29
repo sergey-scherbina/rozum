@@ -261,7 +261,7 @@ async function loadRooms() {
   const want = new URLSearchParams(location.search).get("room");
   ROOM = (want && rooms.includes(want)) ? want : rooms[0] || null;
   if (ROOM) sel.value = ROOM;
-  sel.onchange = () => { ROOM = sel.value; SELECTED = null; const u = new URL(location); u.searchParams.set("room", ROOM); history.replaceState(0, "", u); refresh(); };
+  sel.onchange = () => { ROOM = sel.value; SELECTED = null; const u = new URL(location); u.searchParams.set("room", ROOM); history.replaceState(0, "", u); if (typeof subscribe === "function") subscribe(); refresh(); };
 }
 
 // ── Header metrics ───────────────────────────────────────────
@@ -605,10 +605,26 @@ async function boot() {
   // Filters apply on the next render; refresh() re-runs it (the inflight guard dedups rapid typing).
   $("q").addEventListener("input", () => refresh());
   $("hideres").addEventListener("change", () => refresh());
+  subscribe();
+  // Long fallback poll (covers a dropped SSE / a notification missed between waiters).
   if (timer) clearInterval(timer);
-  timer = setInterval(refresh, 4000);
+  timer = setInterval(refresh, 30000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 }
+
+// Realtime: subscribe to the room's SSE stream; each `changed` event triggers a refresh (no 4s polling).
+let es = null;
+function subscribe() {
+  if (es) { es.close(); es = null; }
+  if (!ROOM) return;
+  try {
+    es = new EventSource(`rooms/${enc(ROOM)}/events`);
+    es.addEventListener("changed", () => refresh());
+    $("live").classList.remove("stale");
+    es.onerror = () => $("live").classList.add("stale"); // browser auto-reconnects
+  } catch (e) { /* fall back to the 30s poll */ }
+}
+
 boot().catch(e => { $("main").innerHTML = '<div class="empty">Boot error: ' + e.message + '</div>'; });
 </script>
 </body>
