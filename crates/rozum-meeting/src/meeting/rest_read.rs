@@ -841,6 +841,32 @@ mod tests {
         assert!(html.status().is_success());
         let body = html.text().await.unwrap();
         assert!(body.contains("support console") && body.contains("rooms/"));
+        // Structural smoke: the production-grade feature wiring must be present in the served console.
+        // Not a behavioral test (that needs a browser / Playwright — the remaining depth), but it locks
+        // in that a feature's wiring can't silently vanish from console.html.
+        for hook in [
+            "new EventSource",                 // SSE realtime (1/5)
+            "/events",
+            "checkAlerts",                     // desktop alerts (2/5)
+            "requestPermission",
+            "function askForm",                // inline modal forms (3/5)
+            "id=\"modal\"",
+            "X-Rozum-Actor",                   // named operator identity (4/5)
+            "rozumActor",
+            // core action endpoints the UI must drive
+            "/escalate",
+            "/resolve",
+            "/threads/",
+            "/messages",
+            "/redact",
+            "/react",
+            "/search",
+            "needs_attention",                 // SLA/staleness metric
+        ] {
+            assert!(body.contains(hook), "console.html missing feature hook: {hook}");
+        }
+        // No native dialogs should remain (replaced by askForm).
+        assert!(!body.contains("prompt("), "console still uses prompt()");
 
         let rooms: Value = client
             .get(format!("http://{addr}/rooms"))
