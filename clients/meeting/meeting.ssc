@@ -382,9 +382,9 @@ def authorChip(name: String): View =
 def activeView(cur: String): View =
   val all     = readRoom(cur).split("\n").filter(l => l.contains("\"content\":\""))
   val recent  = all.takeRight(25)
-  val authors = recent.map(who).toList.distinct
+  val authors = recent.map(l => who(l)).toList.distinct
   if authors.length < 1 then element("div", Map(), Map(), [])
-  else element("div", ["style" -> "flex:0 0 auto; display:flex; gap:7px; overflow-x:auto; padding:7px max(12px,env(safe-area-inset-right)) 7px max(12px,env(safe-area-inset-left)); background:#15181d; border-bottom:1px solid #23272e; -webkit-overflow-scrolling:touch"], Map(), authors.map(authorChip).toList)
+  else element("div", ["style" -> "flex:0 0 auto; display:flex; gap:7px; overflow-x:auto; padding:7px max(12px,env(safe-area-inset-right)) 7px max(12px,env(safe-area-inset-left)); background:#15181d; border-bottom:1px solid #23272e; -webkit-overflow-scrolling:touch"], Map(), authors.map(n => authorChip(n)).toList)
 
 def page(cur: String): String =
   val rnames  = roomNames()
@@ -459,9 +459,9 @@ def cleanForm(): View =
 def agentsView(): View =
   val all     = readRoom("rozum").split("\n").filter(l => l.contains("\"content\":\""))
   val recent  = all.takeRight(30)
-  val authors = recent.map(who).toList.distinct
+  val authors = recent.map(l => who(l)).toList.distinct
   if authors.length < 1 then element("div", ["style" -> "color:#5b626d"], Map(), [textNode("никого")])
-  else element("div", ["style" -> "display:flex; flex-wrap:wrap; gap:7px"], Map(), authors.map(authorChip).toList)
+  else element("div", ["style" -> "display:flex; flex-wrap:wrap; gap:7px"], Map(), authors.map(n => authorChip(n)).toList)
 
 def section(title: String, body: View): View =
   element("div", ["style" -> "margin:18px 0"], Map(), [
@@ -492,7 +492,7 @@ def gwView(): View =
   val hd = if running then element("div", ["style" -> "margin-bottom:10px"], Map(), [textNode("активна: "), element("code", ["style" -> "font-family:ui-monospace,Menlo,monospace; font-size:0.9em; background:#23272e; padding:1px 5px; border-radius:5px"], Map(), [textNode(gwModel(o))])]) else element("div", ["style" -> "color:#5b626d; margin-bottom:10px"], Map(), [textNode("гейтвей не запущен")])
   val mo = exec("rozum", ["models", "list"], ProcessOptions(None, Map(), None)).stdout
   val ml = mo.split("\n").filter(l => l.contains(":")).toList
-  val rows = ml.map(loadBtn).toList
+  val rows = ml.map(l => loadBtn(l)).toList
   val ctl = if running then element("div", ["style" -> "display:flex; gap:8px; margin-top:12px"], Map(), [confirmForm("gwstop", "x", "1", "🛑 стоп", "#b3431f", "Остановить гейтвей?"), confirmForm("gwunload", "x", "1", "выгрузить", "#3a414d", "Выгрузить модель (демон останется)?")]) else element("span", Map(), Map(), [])
   element("div", Map(), Map(), [hd, element("div", Map(), Map(), rows), ctl])
 
@@ -529,8 +529,8 @@ def mpPage(room: String): String =
   val running = sl.trim != ""
   val mo      = exec("rozum", ["models", "list"], ProcessOptions(None, Map(), None)).stdout
   val ml      = mo.split("\n").filter(l => l.contains(":")).toList
-  val mopts   = ml.map(mpOption).toList
-  val popts   = ["mention", "always", "manual"].map(policyOption).toList
+  val mopts   = ml.map(l => mpOption(l)).toList
+  val popts   = ["mention", "always", "manual"].map(p => policyOption(p)).toList
   val statusV = if running then
       element("div", ["style" -> "margin:8px 0 14px"], Map(), [
         element("span", Map(), Map(), [textNode("● запущена: ")]),
@@ -565,10 +565,10 @@ def mpPage(room: String): String =
 
 def managePage(): String =
   val rlines    = statusOut().split("\n").filter(l => l.contains("project:")).toList
-  val roomList  = element("div", Map(), Map(), rlines.map(roomItem).toList)
+  val roomList  = element("div", Map(), Map(), rlines.map(l => roomItem(l)).toList)
   val modelsOut = exec("rozum", ["models", "list"], ProcessOptions(None, Map(), None)).stdout
   val mlines    = modelsOut.split("\n").filter(l => l.contains(":")).toList
-  val modelList = element("div", Map(), Map(), mlines.map(modelItem).toList)
+  val modelList = element("div", Map(), Map(), mlines.map(l => modelItem(l)).toList)
   val back  = element("a", ["href" -> "/", "style" -> "color:#7ab8ff; text-decoration:none"], Map(), [textNode("← чат")])
   val title = element("h2", ["style" -> "margin:8px 0 2px"], Map(), [textNode("Управление")])
   val doc = element("div", ["style" -> "padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) 36px max(16px,env(safe-area-inset-left)); color:#e6e6e6; font:15px/1.5 -apple-system,system-ui,sans-serif; max-width:680px; margin:0 auto"], Map(), [

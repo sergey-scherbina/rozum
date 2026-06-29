@@ -1,5 +1,14 @@
 # Changelog
 
+## meeting .ssc — avoid direct function refs in map lowering
+Completed: 2026-06-29
+
+Follow-up hardening for the earlier `.map(roomLineName)` lowering regression: `clients/meeting/meeting.ssc`
+now uses explicit lambdas for the remaining `.map(functionName)` cases (`who`, `authorChip`, `loadBtn`,
+`mpOption`, `policyOption`, `roomItem`, `modelItem`). This avoids the same Rust lowering path without
+changing rendered behavior. Verification kept light: grep confirms no direct `.map(functionName)` remains
+in the meeting/control `.ssc` clients; no `ssc` build was run.
+
 ## docs — Codex raw tool-call capture status de-staled
 Completed: 2026-06-29
 
