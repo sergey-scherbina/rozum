@@ -531,8 +531,17 @@ pub fn synth_glm_tool_calls(text: &str, tools: &[crate::backend::ToolDef]) -> Ve
             //    ```sh cargo run```" — mode-1 saw `src/main.rs` in the prose and clobbered the program
             //    with the run command (the rpn-task corruption; the model's code was correct).
             //  - a GLM/Qwen `Name\n{json}` tool CALL (```bash\nRead\n{…}```), which parse_tool_calls owns.
-        } else if let (Some(path), Some(wt)) = (last_safe_filename(preceding), write_tool.as_deref()) {
-            // Mode-1: raw file content; filename from the preceding prose.
+        } else if let (Some(path), Some(wt)) = (
+            match ext_for_lang(&lang) {
+                Some(e) => last_safe_filename_ext(preceding, Some(e)),
+                None => last_safe_filename(preceding),
+            },
+            write_tool.as_deref(),
+        ) {
+            // Mode-1: raw file content, paired with the prose filename whose extension MATCHES the fence
+            // language — a ```toml body resolves to the `.toml` file, NOT the `.rs` file the prose also
+            // named. (Second rpn-corruption variant: the model narrates "src/main.rs … and the Cargo.toml:
+            // ```toml [package]…```" and the plain last-filename grab wrote the toml into src/main.rs.)
             let mut m = serde_json::Map::new();
             m.insert("file_path".into(), Value::String(path));
             m.insert("content".into(), Value::String(format!("{}\n", body.trim_end_matches('\n'))));
@@ -788,6 +797,35 @@ fn default_path_for_full_program(lang: &str, body: &str) -> Option<String> {
 /// with no such token (a command fence's "run `cargo run -- hello`") yields `None` → that fence is
 /// skipped, which is the command-vs-file guard.
 fn last_safe_filename(prose: &str) -> Option<String> {
+    last_safe_filename_ext(prose, None)
+}
+
+/// A fence language → its conventional file extension, for pairing a fence to the RIGHT prose filename.
+/// `None` for a language we don't map (and for shell, which is skipped upstream as a command) → the
+/// caller falls back to the last filename of any kind.
+fn ext_for_lang(lang: &str) -> Option<&'static str> {
+    Some(match lang {
+        "rust" | "rs" => "rs",
+        "toml" => "toml",
+        "python" | "py" => "py",
+        "json" => "json",
+        "yaml" | "yml" => "yaml",
+        "markdown" | "md" => "md",
+        "javascript" | "js" => "js",
+        "typescript" | "ts" => "ts",
+        "html" => "html",
+        "css" => "css",
+        "go" => "go",
+        "c" => "c",
+        "cpp" | "c++" => "cpp",
+        _ => return None,
+    })
+}
+
+/// The LAST safe relative filename in `prose`, optionally filtered to a required extension (`want_ext`).
+/// With `want_ext = Some("toml")`, only `*.toml` (incl. `Cargo.toml`) match — so a ```toml fence pairs
+/// with the `.toml` file even when the prose also names a `.rs` file more recently. `None` = any file.
+fn last_safe_filename_ext(prose: &str, want_ext: Option<&str>) -> Option<String> {
     const KNOWN: &[&str] =
         &["Cargo.toml", "Cargo.lock", "Makefile", "Dockerfile", ".gitignore", "build.rs"];
     const EXTS: &[&str] = &[
@@ -802,9 +840,11 @@ fn last_safe_filename(prose: &str) -> Option<String> {
         if tok.is_empty() {
             continue;
         }
-        let is_file = KNOWN.contains(&tok)
-            || tok.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && EXTS.contains(&ext));
-        if is_file && is_safe_relpath(tok) {
+        let tok_ext = tok.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()).map(|(_, e)| e);
+        let is_file = KNOWN.contains(&tok) || tok_ext.is_some_and(|e| EXTS.contains(&e));
+        // When an extension is required, the token's own extension must match it (Cargo.toml→toml).
+        let ext_ok = want_ext.is_none_or(|w| tok_ext == Some(w));
+        if is_file && ext_ok && is_safe_relpath(tok) {
             best = Some(tok.to_string()); // keep scanning; the LAST match wins
         }
     }
@@ -1015,6 +1055,24 @@ mod tests {
         assert!(synth_glm_tool_calls("Run src/main.rs now:\n```bash\ncargo test\n```", &claude_tools()).is_empty());
         assert!(is_shell_command_lang("bash") && is_shell_command_lang("sh"));
         assert!(!is_shell_command_lang("rust") && !is_shell_command_lang("toml"));
+    }
+
+    #[test]
+    fn synth_pairs_fence_to_matching_extension() {
+        let tools = claude_tools();
+        // Second rpn-corruption variant: the prose names src/main.rs FIRST, then a ```toml Cargo.toml
+        // fence. The plain last-filename grab wrote the toml into src/main.rs; lang-aware pairing routes
+        // it to the .toml file instead.
+        let real = "I've written src/main.rs. Here is the Cargo.toml:\n\n```toml\n[package]\nname = \"x\"\n```\n";
+        let calls = synth_glm_tool_calls(real, &tools);
+        assert_eq!(calls.len(), 1, "got: {calls:?}");
+        let v: Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(v["file_path"], "Cargo.toml", "a ```toml fence pairs with the .toml file, not src/main.rs");
+        // the lang→ext map + the ext-filtered lookup
+        assert_eq!(ext_for_lang("toml"), Some("toml"));
+        assert_eq!(ext_for_lang("bash"), None);
+        assert_eq!(last_safe_filename_ext("src/main.rs and Cargo.toml", Some("toml")).as_deref(), Some("Cargo.toml"));
+        assert_eq!(last_safe_filename_ext("src/main.rs and Cargo.toml", Some("rs")).as_deref(), Some("src/main.rs"));
     }
 
     #[test]
