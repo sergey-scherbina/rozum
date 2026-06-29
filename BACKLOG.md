@@ -150,8 +150,15 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   one place. The "gather everything about this incident" primitive; the highest agent-leverage piece
   (an agent can assemble the context bundle automatically). Builds on obs + the meeting store.
 
-- [~] **mtg-frontend** (operator 2026-06-28 — separate task) — a GOOD frontend for meetings: the
-  support/incident UI on top of the platform model (rooms, threads, messages + metadata). **V1 DONE +
+- [x] **mtg-frontend** (operator 2026-06-28 — separate task) — DONE across BOTH frontends. **The console
+  (`rest_read.rs`) is the full support UI** (v1 dashboard + v2 interactive + filters/search/staleness/pin/
+  link/redact). **The `.ssc` PWA convergence is now COMPLETE (`003994c`):** the production mobile web both
+  shows incident awareness (severity/kind badges + 🛟 count) AND manages incidents — a `/incidents/<room>`
+  page reads `threads.json` and renders severity-coloured cards with inline lifecycle actions (triage /
+  escalate-with-to / resolve / reopen) that POST to `/do` → `exec rozum meetings incident …`. Live-proven
+  (prod PWA temp-unloaded + restored): escalate→@dba + resolve applied via the PWA and persisted. So the
+  production launchd web and the console converge on ONE incident model. Detail of the console below ↓
+  **V1 DONE +
   LIVE-PROVEN (`7f79ce5`):** a self-contained incident dashboard served by the daemon's read-only REST
   server (`rest_read.rs`), reading the SAME disk rooms the production single-writer daemon backs — so every
   StoredTurn's metadata + `threads.json` surface with no new plumbing. New endpoints `GET /rooms`,

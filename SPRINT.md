@@ -54,8 +54,14 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   CLI `meetings redact` + console ⊘. **(+) exact event-sourcing** (`c367167`): the posted transitions carry a
   structured `MsgMeta.thread_op`, so `rebuild_threads` replays them EXACTLY (title/state/owner/severity) —
   prose is the old-log fallback; no new messages, plain msgs byte-identical. 100/100 meeting lib tests.
-  **Remaining = only the `.ssc` lifecycle/incident-lanes port** (external toolchain, big) + minor (manual
-  state/pin event-sourcing, react) — BACKLOG `## Meetings → product-support`. Detail below ↓
+  **(+) .ssc lifecycle port DONE** (`003994c`): the production mobile PWA now MANAGES incidents — a
+  `/incidents/<room>` page (reads threads.json, severity-coloured cards, inline triage/escalate/resolve/
+  reopen → `exec rozum meetings incident`). Live-proven (prod PWA temp-unloaded + restored): escalate→@dba +
+  resolve applied via the PWA. **The meetings → support/incident platform is now COMPLETE — every planned
+  item shipped** (foundation → MCP/CLI/console/PWA surfaces → lifecycle → search/reply/assign/pin/link/redact
+  → SLA/staleness → auto-gather → crash-durable persistence + retention + event-sourced rebuild → both
+  frontends converged). Only true-minor residue (manual state/pin structured event-sourcing, emoji react).
+  BACKLOG `## Meetings → product-support`. Detail below ↓
 
 - [~] **meetings — original sprint notes (superseded by the line above)** — spec
   `docs/specs/meetings-incident-platform.md`. **FOUNDATION (P1-P3) DONE — the data-model + store ops, all
