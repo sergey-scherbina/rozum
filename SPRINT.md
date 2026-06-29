@@ -932,6 +932,11 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   (`glm47-flash-build2-20260629-170340`, `glm47-flash-repair-20260629-163454`,
   `glm47-flash-buildtest-20260629-165806`, `glm47-flash-rpn2-20260629-165228`; peak ~24.5-25.0 GB).
   NEXT: run full multi-agent/reps matrix before claiming the whole GLM plane globally green.
+- [x] **native-mlx-gate-mla-families** — DONE (2026-06-29): keep the model download gate in sync with
+  the native loader. `LoadedModel` already supported `deepseek_v2` and `glm4_moe_lite`, but
+  `supported_model_type` still rejected those `config.json` model types for uncached specs, so a fresh
+  DeepSeek-Coder-V2-Lite / GLM-4.7-Flash matrix run could fail before downloading/loading weights.
+  Added both types to the gate and a no-MLX unit test to lock them down.
 - [x] **verify-standalone** — DONE (clean box, 2026-06-27, results scripts/bench/results/agentic-*).
   **VERDICTS:** (1) **Qwen3-Coder-30B-A3B** — strong EDIT (fix/test/debug 6/6, smoke #1); but
   create-from-scratch **0/6 clean** (rpn 0/3 + build 0/3). ⚠️ CAUSE **NOT isolated** — do NOT call it
@@ -944,9 +949,12 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   request/response logging or mock) → read the actual emitted tool call + where the file landed,
   BEFORE any capability verdict. Also confirmed: it does not (yet) beat Qwen3.6-35B (15/15) on create.
   (2) **Devstral-Small-2507** —
-  **0/10, tools=0 on every cell** → emits no tool calls, can't drive the agent loop (Mistral tool-use
-  gap, as the matrix history predicted). **DROPPED.** Implication for verify-pipelines: pair a
-  create-capable PLANNER (GLM-4-32B RPN 3/3 / Qwen3.6-35B) with Qwen3-Coder/gpt-oss as the EXECUTOR.
+  **pre-injection smoke: 0/10, tools=0 on every cell** → the run proved the model saw no executable
+  tool defs, not that Devstral is incapable. The template-less tool injection fix below landed after
+  that smoke, including the Devstral prose-"tools" detector regression; **NOT DROPPED anymore**.
+  NEXT: re-run Devstral over `rpn build fix test debug` on a quiet slot before deciding whether it can
+  join the low-footprint matrix set. Implication until then: use a create-capable PLANNER
+  (GLM-4-32B RPN 3/3 / Qwen3.6-35B) with Qwen3-Coder/gpt-oss as the EXECUTOR.
   QUEUED (slot-watcher, 2026-06-27): pre-downloads Devstral, waits for a
   clean box, then re-runs Qwen3-Coder `rpn build` (REPS=3, the contended ones) + Devstral full set
   (REPS=2). clean-box smoke (no sibling) of each native-now model, peak + pass-rate:
@@ -954,21 +962,23 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   (verify-first: Mistral tool-use), Qwen3-32B (dense), Qwen3.6-27B, Phi-4, Gemma-3-27B. Drop any that
   don't beat the incumbent at equal/lower peak.
 - [x] **mla-deepseek-v2 → matrix smoke** — DeepSeek-Coder-V2-Lite (validated MLA port) agentic smoke
-  (2026-06-27): **0/10, tools=0 on EVERY cell** (turns=3-4, tools=0; 15 GB footprint). The PORT is
-  byte-validated (it RUNS), but it emits no tool calls the agent loop executes — same as Devstral.
-  → feeds `toolcall-delivery-isolate` below. Not a green-matrix candidate as-is.
-- [~] **toolcall-delivery-isolate** — **ROOT CAUSE FOUND (2026-06-27, live capture):** DeepSeek-Coder-
+  (2026-06-27): **pre-injection 0/10, tools=0 on EVERY cell** (turns=3-4, tools=0; 15 GB footprint).
+  The PORT is byte-validated (it RUNS), and the red was fed into `toolcall-delivery-isolate` below.
+  Re-test after template-less tool injection before making a green-matrix verdict.
+- [x] **toolcall-delivery-isolate** — **ROOT CAUSE FOUND (2026-06-27, live capture):** DeepSeek-Coder-
   V2-Lite's chat_template (tokenizer_config.json, 459 chars) has **NO tools/tool_calls/function slot**
   — it only renders `User:/Assistant:`. So the gateway's template-based tool rendering **silently
   drops the tool defs** (proof: a request WITH a Write tool produced PROMPT_IDS len=23 = just the user
   msg, no tools; the model replied in prose, stop_reason=end_turn, no tool_use). The model never SEES
   the tools → tools=0. **This is a GATEWAY gap (template-less tool rendering), NOT a model verdict** —
   the discipline held (don't blame the model). Affects DeepSeek + likely Mistral/Devstral (same
-  template class). **FIX (next, substantial gateway feature):** when a model's chat_template lacks
-  tool support, INJECT a tools section into the prompt (system-msg listing tools + the `<tool_call>`
-  format the parser already handles) instead of dropping them — like the existing codex/gpt-oss
-  delivery bridges. Caveat: a non-tool-trained model may still not comply; injection is the necessary
-  first step. One fix unlocks several low-footprint matrix candidates. (Original:) THREE low-footprint
+  template class). **FIX LANDED:** when a model's chat_template lacks tool support, the MLX prompt
+  renderer now injects a synthetic system tools section with the `<tool_call>` format the parser
+  already handles; `ROZUM_INJECT_TOOLS=0` remains the opt-out. Regression coverage now locks both the
+  detector (Devstral prose "tools" is not enough) and the injected prompt contract. Caveat: a
+  non-tool-trained model may still not comply; injection is the necessary first step. One fix unlocks
+  several low-footprint matrix candidates. NEXT: quiet-slot live reruns for Devstral and
+  DeepSeek-Coder-V2-Lite. (Original:) THREE low-footprint
   non-Qwen/GLM/gpt-oss models score **tools=0 on every agentic cell** (Devstral 0/10, DeepSeek-Coder-
   V2-Lite 0/10). The deepseek_v2 PORT is VALIDATED, so the model RUNS — it just emits no executable
   tool calls. Per the repo rule (never close as "model can't"), CAUSE NOT ISOLATED: suspect the

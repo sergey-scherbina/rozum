@@ -1,5 +1,18 @@
 # Changelog
 
+## bench — template-less and MLA-family matrix candidates guarded
+Completed: 2026-06-29
+
+Tightened two low-load gates for matrix candidate models. The native MLX download gate now admits
+`deepseek_v2` and `glm4_moe_lite`, matching the loader variants already present for
+DeepSeek-Coder-V2-Lite and GLM-4.7-Flash. This prevents fresh uncached matrix runs from rejecting those
+families before weight download/loading.
+
+Also moved the template-less tools prompt helper into the portable surface and added a regression test
+for the injected system prompt contract (`# Tools`, schema text, and the `<tool_call>{name,arguments}`
+format). No live model was loaded; Devstral and DeepSeek still need quiet-slot reruns to measure whether
+the already-landed injection turns their pre-injection `tools=0` matrix reds into usable cells.
+
 ## bench — e2e matrix wrapper and summary de-drifted
 Completed: 2026-06-29
 

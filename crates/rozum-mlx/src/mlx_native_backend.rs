@@ -3883,27 +3883,6 @@ mod inner {
             || template.contains("tools is")
     }
 
-    /// A synthetic system message describing `tools` + the `<tool_call>{name,arguments}` format that
-    /// `serving::parse_tool_calls` parses — injected for template-less models so they can call tools.
-    fn tools_system_message(tools: &[crate::backend::ToolDef]) -> Message {
-        let mut s = String::from(
-            "You have access to the following tools. When the user's request needs one, you MUST \
-             call it rather than answering in prose.\n\n# Tools\n",
-        );
-        for t in tools {
-            s.push_str(&format!(
-                "## {}\n{}\nArguments (JSON Schema): {}\n\n",
-                t.name, t.description, t.input_schema
-            ));
-        }
-        s.push_str(
-            "To call a tool, output EXACTLY one line and nothing else:\n\
-             <tool_call>{\"name\": \"<tool name>\", \"arguments\": <arguments as a JSON object>}</tool_call>\n\
-             If no tool is needed, answer the user normally.",
-        );
-        Message::system(s)
-    }
-
     fn render_prompt(
         tokenizer: &mut Tokenizer,
         template: &str,
@@ -4020,7 +3999,7 @@ mod inner {
             && !template_renders_tools(template)
             && std::env::var_os("ROZUM_INJECT_TOOLS").map(|v| v != "0").unwrap_or(true)
         {
-            injected = std::iter::once(tools_system_message(tools))
+            injected = std::iter::once(super::tools_system_message(tools))
                 .chain(messages.iter().cloned())
                 .collect();
             &injected
@@ -4108,6 +4087,28 @@ mod inner {
 
 #[cfg(feature = "mlx-native")]
 pub use inner::Export as MlxNativeBackend;
+
+/// A synthetic system message describing `tools` + the `<tool_call>{name,arguments}` format that
+/// `serving::parse_tool_calls` parses — injected for template-less models so they can call tools.
+#[cfg(any(feature = "mlx-native", test))]
+fn tools_system_message(tools: &[crate::backend::ToolDef]) -> crate::backend::Message {
+    let mut s = String::from(
+        "You have access to the following tools. When the user's request needs one, you MUST \
+             call it rather than answering in prose.\n\n# Tools\n",
+    );
+    for t in tools {
+        s.push_str(&format!(
+            "## {}\n{}\nArguments (JSON Schema): {}\n\n",
+            t.name, t.description, t.input_schema
+        ));
+    }
+    s.push_str(
+        "To call a tool, output EXACTLY one line and nothing else:\n\
+             <tool_call>{\"name\": \"<tool name>\", \"arguments\": <arguments as a JSON object>}</tool_call>\n\
+             If no tool is needed, answer the user normally.",
+    );
+    crate::backend::Message::system(s)
+}
 
 /// Process-global MLX **soft** memory-limit override in bytes (`0` = unset). Set by the
 /// binary (smmr-A, `docs/specs/safe-multi-model-residency.md`) from this model's reserved
@@ -4540,6 +4541,8 @@ pub fn supported_model_type(model_type: &str) -> bool {
             | "gemma3_text"
             | "qwen2"
             | "glm4"
+            | "deepseek_v2"
+            | "glm4_moe_lite"
     )
 }
 
@@ -4550,7 +4553,7 @@ fn model_type_gate(cfg: &serde_json::Value) -> Result<(), String> {
     match crate::model_source::config_model_type(cfg) {
         Some(mt) if supported_model_type(mt) => Ok(()),
         Some(mt) => Err(format!(
-            "native MLX does not support model_type '{mt}' (Qwen2/Qwen3/Qwen3.6/Llama)"
+            "native MLX does not support model_type '{mt}' (Qwen2/Qwen3/Qwen3.6/Llama/DeepSeek-V2/GLM-4.7)"
         )),
         None => Err("config.json has no model_type".to_owned()),
     }
@@ -4562,6 +4565,62 @@ fn model_type_gate(cfg: &serde_json::Value) -> Result<(), String> {
 /// runtime's [`model_type_gate`]; kept so existing callers are unaffected.
 pub async fn ensure_model_dir(spec: &str) -> Option<std::path::PathBuf> {
     crate::model_source::ensure_model_dir(spec, model_type_gate).await
+}
+
+#[cfg(test)]
+mod native_model_surface_tests {
+    use super::{supported_model_type, tools_system_message};
+    use crate::backend::{ContentBlock, Role, ToolDef};
+
+    #[test]
+    fn native_download_gate_includes_mla_models() {
+        for model_type in [
+            "deepseek_v2",
+            "glm4_moe_lite",
+            "mistral",
+            "qwen3_moe",
+            "gpt_oss",
+        ] {
+            assert!(
+                supported_model_type(model_type),
+                "{model_type} must pass the native download gate"
+            );
+        }
+    }
+
+    #[test]
+    fn template_less_tool_injection_prompt_contract() {
+        let msg = tools_system_message(&[ToolDef {
+            name: "Write".into(),
+            description: "Write a UTF-8 file.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["file_path", "content"]
+            }),
+        }]);
+
+        assert_eq!(msg.role, Role::System);
+        let text = match &msg.content[..] {
+            [ContentBlock::Text { text }] => text,
+            other => panic!("expected one text block, got {other:?}"),
+        };
+
+        assert!(text.contains("# Tools"), "prompt: {text}");
+        assert!(text.contains("## Write"), "prompt: {text}");
+        assert!(text.contains("Write a UTF-8 file."), "prompt: {text}");
+        assert!(text.contains("\"file_path\""), "prompt: {text}");
+        assert!(text.contains("\"content\""), "prompt: {text}");
+        assert!(
+            text.contains(
+                "<tool_call>{\"name\": \"<tool name>\", \"arguments\": <arguments as a JSON object>}</tool_call>"
+            ),
+            "prompt: {text}"
+        );
+    }
 }
 
 // Gated on the feature: these tests reach into the `mlx-native`-only `inner` module, so they only
