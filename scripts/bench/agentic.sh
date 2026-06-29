@@ -93,7 +93,7 @@ case "$BIN" in /*) ;; *) BIN="$repo/$BIN" ;; esac   # launch runs in a temp cwd 
 # N runs before adding. Run it with: AGENTIC_MODELS="mlx-community:Devstral-Small-2507-4bit".
 # Each space-separated entry is one `gateway --model <spec>`; a comma inside an entry = pipeline.
 # Override with AGENTIC_MODELS="spec1 spec2 ...".
-DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit mlx-community:Qwen3-Coder-30B-A3B-Instruct-4bit mlx-community:GLM-4-32B-0414-4bit,mlx-community:gpt-oss-20b-MXFP4-Q4"
+DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit-DWQ mlx-community:GLM-4-32B-0414-4bit,mlx-community:gpt-oss-20b-MXFP4-Q4"
 read -r -a MODELS <<<"${AGENTIC_MODELS:-$DEFAULT_MODELS}"
 # Tasks: greet build fix test debug (the originals) + rpn (a from-scratch-hard RPN calculator —
 # create-from-scratch where a planner→executor pipeline should help most; see verify_task/prompt_for).

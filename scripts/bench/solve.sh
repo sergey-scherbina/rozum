@@ -7,7 +7,7 @@
 # plan→do→CHECK(cargo, the ground truth)→critique→fix it either converges or fails fast+honestly.
 #
 #   MODELS="A B C" scripts/bench/solve.sh "<task>"
-#   MODELS="mlx-community:Qwen3.6-35B-A3B-4bit" solve.sh "<task>"     # one model, all roles
+#   MODELS="mlx-community:Qwen3.6-35B-A3B-4bit-DWQ" solve.sh "<task>" # one model, all roles
 #
 # Roles from the ORDERED list (degrade gracefully):
 #   planner  = MODELS[0]                      — reasons out the complete solution (GLM/35B strong)
@@ -39,7 +39,7 @@ BIN="${BIN:-$root/target/release/rozum-gateway}"
 # Model list → roles. MODELS wins; else the legacy PLANNER/EXECUTOR pair; else a sane default trio.
 if [ -n "${MODELS:-}" ]; then read -r -a M <<<"$MODELS"
 elif [ -n "${PLANNER:-}${EXECUTOR:-}" ]; then M=("${PLANNER:-mlx-community:GLM-4-32B-0414-4bit}" "${EXECUTOR:-mlx-community:gpt-oss-20b-MXFP4-Q4}")
-else M=(mlx-community:GLM-4-32B-0414-4bit mlx-community:gpt-oss-20b-MXFP4-Q4 mlx-community:Qwen3.6-35B-A3B-4bit); fi
+else M=(mlx-community:GLM-4-32B-0414-4bit mlx-community:gpt-oss-20b-MXFP4-Q4 mlx-community:Qwen3.6-35B-A3B-4bit-DWQ); fi
 N=${#M[@]}
 PLANNER="${M[0]}"
 EXECUTOR="${M[$(( N>=2 ? 1 : 0 ))]}"

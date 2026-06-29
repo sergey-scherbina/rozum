@@ -60,10 +60,11 @@ if [ -z "$BIN" ]; then
   else echo "no rozum binary; build with: cargo build --bin rozum" >&2; exit 1; fi
 fi
 
-# Default: just Qwen3.6-35B-A3B — the standardized local model. Pass model specs as
-# args to benchmark a different/wider set (e.g. `run.sh spec1 spec2 ...`).
+# Default: just Qwen3.6-35B-A3B-4bit-DWQ — the standardized local model (DWQ = the better-quality
+# 8-bit-attention quant; the plain 4-bit twin was retired). Pass model specs as args to benchmark a
+# different/wider set (e.g. `run.sh spec1 spec2 ...`).
 DEFAULT_MODELS=(
-  mlx-community:Qwen3.6-35B-A3B-4bit
+  mlx-community:Qwen3.6-35B-A3B-4bit-DWQ
 )
 if [ "$#" -gt 0 ]; then MODELS=("$@"); else MODELS=("${DEFAULT_MODELS[@]}"); fi
 
