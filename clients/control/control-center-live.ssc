@@ -12,7 +12,7 @@ One std/ui app: a dashboard (live `/control/status`) AND a native chat view per 
 stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the view in place.
 
 ## Setup
-[signal, emit, serve, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, incSignal, computedSignal, fieldColumn, hashSignal, onNavigate](std/ui/primitives.ssc)
+[signal, emit, serve, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, fetchActionWith, formBody, onBumpTick, incSignal, computedSignal, fieldColumn, hashSignal, onNavigate](std/ui/primitives.ssc)
 [jsonValue](std/json.ssc)
 [lower](std/ui/lower.ssc)
 [defaultTheme](std/ui/theme.ssc)
@@ -35,7 +35,7 @@ val room = computedSignal(() => {
   val h = hash()
   if h.contains("/chat/") then h.split("/chat/").last else ""
 })
-val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else "home")
+val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else "home")
 
 val chatTick = signal("chatTick", 0)
 val msgUrl   = computedSignal(() => "/chat/messages?room=" + room())
@@ -75,6 +75,7 @@ val catCard = cardWithHeader(heading(2, "Installed catalog"))(
 
 val dashboard = vstack(gap = 16)(
   heading(1, "rozum — control center"),
+  hstack(gap = 10)(actionButton(onNavigate("#/agents"), "🤖 Агенты")),
   divider(),
   meetingsCard,
   divider(),
@@ -111,11 +112,71 @@ val chatBody = vstack(gap = 12)(
 )
 ```
 
+## Agents
+```scalascript
+val agModel   = signal("agModel", "")
+val agRoom    = signal("agRoom", "")
+val agPolicy  = signal("agPolicy", "mention")
+val agPersona = signal("agPersona", "")
+val stopId    = signal("stopId", "")
+
+val agentsList = cardWithHeader(heading(2, "Запущенные агенты"))(
+  remoteTable(st, [
+    fieldColumn("agent", "handle"),
+    fieldColumn("model", "model"),
+    lcol("room", "room", "#/chat/:value"),
+    fieldColumn("policy", "policy"),
+    fieldColumn("id", "id")
+  ], "agents")
+)
+
+val launchForm = cardWithHeader(heading(2, "Запустить агента (модель в комнате)"))(
+  vstack(gap = 8)(
+    hstack(gap = 8)(text("свободно RAM:"), signalText_(availTxt)),
+    textField(agModel, "модель — спец из каталога ниже…"),
+    textField(agRoom, "комната…"),
+    textField(agPolicy, "когда отвечать: mention | always | manual"),
+    textField(agPersona, "персона / контекст (необязательно)…"),
+    actionButton(
+      fetchActionWith("POST", "/control/agent/launch",
+        formBody([("model", "agModel"), ("room", "agRoom"), ("policy", "agPolicy"), ("persona", "agPersona")]),
+        [onBumpTick(refresh)]),
+      "🤖 запустить (с проверкой памяти)")
+  )
+)
+
+val stopForm = cardWithHeader(heading(2, "Остановить агента"))(
+  hstack(gap = 8)(
+    textField(stopId, "id агента (из списка)…"),
+    actionButton(
+      fetchActionWith("POST", "/control/agent/stop", formBody([("id", "stopId")]), [onBumpTick(refresh)]),
+      "стоп")
+  )
+)
+
+val agentsBody = vstack(gap = 16)(
+  hstack(gap = 10)(
+    actionButton(onNavigate("#/"), "← назад"),
+    heading(1, "Агенты"),
+    actionButton(incSignal(refresh), "↻")
+  ),
+  divider(),
+  agentsList,
+  divider(),
+  launchForm,
+  divider(),
+  stopForm,
+  divider(),
+  catCard
+)
+```
+
 ## Compose + serve
 ```scalascript
 val view = router(mode, [
   route("home", [dashboard]),
-  route("chat", [chatBody])
+  route("chat", [chatBody]),
+  route("agents", [agentsBody])
 ])
 
 serve(lower(view, defaultTheme), 8410)
