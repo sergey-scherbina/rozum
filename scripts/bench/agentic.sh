@@ -266,11 +266,53 @@ repair_context_snapshot() {
   done
 }
 
+bench_package_name() { # $1=task
+  case "$1" in
+    rpn) echo "rpn-calc" ;;
+    debug) echo "mathlib" ;;
+    *) echo "reverse-cli" ;;
+  esac
+}
+
+repair_tool_protocol_hint() {
+  if [ -f agent.log ] && grep -qi 'File has not been read yet' agent.log; then
+    cat <<'EOF'
+Tool-protocol hint: your previous run tried Edit/Write before a same-run Read, then stopped after
+saying you needed to read. Do NOT end with prose like "I will read it"; either make the Read tool call
+as your first file action in this run, or use Bash with a single-quoted heredoc / python exact replace
+to patch the tiny benchmark file. After patching, run the required cargo command.
+EOF
+  fi
+}
+
+repair_manifest_hint() { # $1=task $2=cargo-output
+  local pkg
+  pkg="$(bench_package_name "$1")"
+  if printf '%s\n' "$2" | grep -qiE 'missing either a `?\[package\]`?|missing field `package.name`|invalid type: string.*expected a map|expected a table'; then
+    cat <<EOF
+Manifest hint: Cargo.toml needs a TOML table named [package] (NOT package = "..."). For this task the
+minimal valid manifest is:
+
+[package]
+name = "$pkg"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+If the current manifest is malformed, replace the whole tiny Cargo.toml with that content.
+EOF
+  elif printf '%s\n' "$2" | grep -qiE 'failed to parse the edition key|unknown edition|this version of Cargo is older'; then
+    echo 'Manifest hint: use a Cargo.toml edition supported by this bench toolchain, normally edition = "2021".'
+  fi
+}
+
 # Ground-truth diagnostic for a failed cell — the REAL compiler/test output (not the model's
 # self-report). First check it compiles; if so, check the task's runtime behavior. This is the
 # exact text fed back to the agent for repair. Echoes a short, actionable diagnostic.
 repair_diagnostic() { # $1=task  $2=workdir
   ( cd "$2" 2>/dev/null || exit 0
+    repair_tool_protocol_hint
     # Structural check FIRST — agents commonly write code to the WRONG path. `cargo` only builds
     # src/main.rs (+ src/lib.rs, src/bin/*); if the real implementation sits at the repo root while
     # src/main.rs is missing or still the default "Hello, world!" stub, the build "passes" but the
@@ -294,9 +336,7 @@ repair_diagnostic() { # $1=task  $2=workdir
     fi
     if ! berr="$(cargo build 2>&1)"; then
       echo "The project does NOT compile. \`cargo build\` reports:"
-      if printf '%s\n' "$berr" | grep -qiE 'failed to parse manifest|failed to parse the edition key|unknown edition|this version of Cargo is older'; then
-        echo "Manifest hint: use a Cargo.toml edition supported by this bench toolchain, normally edition = \"2021\"."
-      fi
+      repair_manifest_hint "$1" "$berr"
       printf '%s\n' "$berr" | grep -vE '^\s*Compiling|^\s*Finished|^\s*Updating|Blocking|Downloaded' | head -40
       repair_context_snapshot
       exit 0
@@ -332,7 +372,7 @@ repair_goal_hint() { # $1=task
 # pins the exact error, restates the task goal, and demands a REAL run before claiming success.
 repair_prompt() { # $1=task $2=diagnostic
   local task="$1" diagnostic="$2"
-  printf 'The Rust project in the CURRENT directory is NOT correct yet — do NOT start over or recreate files, FIX what is there.\n\n%s\n\nCurrent verifier/build evidence:\n\n%s\n\nMake the minimal change to satisfy the REQUIRED FINAL BEHAVIOR, then ACTUALLY RUN the build/test yourself and read the output. Do not stop at `cargo build` if the required command is `cargo run` or `cargo test`. If you use Edit, call Read on that file first and copy old_string exactly from the current file; if Edit says "String to replace not found", re-read the file or Write the tiny file. Only confirm success if the required command really succeeded; if it still fails, keep fixing.' "$(repair_goal_hint "$task")" "$diagnostic"
+  printf 'The Rust project in the CURRENT directory is NOT correct yet — do NOT start over or recreate files, FIX what is there.\n\n%s\n\nCurrent verifier/build evidence:\n\n%s\n\nMake the minimal change to satisfy the REQUIRED FINAL BEHAVIOR, then ACTUALLY RUN the build/test yourself and read the output. Do not stop at `cargo build` if the required command is `cargo run` or `cargo test`. If you use Edit, call Read on that file first and copy old_string exactly from the current file; if Edit says "String to replace not found", re-read the file. For these tiny benchmark files, Bash heredoc/python replacement is acceptable and often safer than Edit/Write when a file already exists. Only confirm success if the required command really succeeded; if it still fails, keep fixing.' "$(repair_goal_hint "$task")" "$diagnostic"
 }
 
 # ── main loop ────────────────────────────────────────────────────────────────

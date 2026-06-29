@@ -1,5 +1,32 @@
 # Changelog
 
+## bench — Qwen3-4B repair hints close fix/test red cells
+Completed: 2026-06-29
+
+Qwen3-4B is now green in targeted single-run cells for all five agentic bench tasks. `build`, `rpn`,
+and `debug` passed without code changes; `fix` and `test` exposed repair-delivery failures:
+
+- `fix`: the model emitted a correct `Edit` but had not called `Read`, then stopped after saying it
+  needed to read. Verify-repair repeated the same pattern.
+- `test`: the model damaged `Cargo.toml`, then tried to repair the missing `[package]` table as
+  `package = "reverse-cli"`, which is invalid TOML for Cargo.
+
+Fixed `scripts/bench/agentic.sh` repair diagnostics, not the workdir contents: failed repair prompts now
+surface the prior same-run Read-before-Edit tool error from `agent.log`, explicitly tell weak agents not
+to end with prose like "I will read", allow Bash heredoc/python exact replacement for tiny benchmark
+files, and provide a canonical `[package]` manifest snippet for the current task.
+
+Validation:
+
+- `bash -n scripts/bench/agentic.sh`
+- Qwen3-4B baseline: `build` passed 1/1 (64.4s), `rpn` passed 1/1 (277.1s), `debug` passed 1/1 (129.0s);
+  `fix` failed 0/1 (`edit_requires_read`), `test` failed 0/1 (`manifest_invalid`).
+- After the repair hint change: Qwen3-4B `fix` passed 1/1 (97.5s, 1 repair) and `test` passed 1/1
+  (151.0s, 1 repair).
+
+Also verified `claude × gpt-oss-20b-MXFP4-Q4 × rpn` baseline: passed 1/1 in 35.9s, so gpt-oss now has
+targeted green evidence for `build/fix/test/debug/rpn`.
+
 ## bench — Qwen2.5-Coder rpn artifact sections now synthesize cleanly
 Completed: 2026-06-29
 

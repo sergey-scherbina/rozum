@@ -114,3 +114,10 @@ Follow-up sectioned artifact synth fixed the remaining Qwen2.5-Coder-7B `rpn` de
 first-line filename labels inside fenced artifacts (`# Cargo.toml`, `// src/main.rs`) are now split or
 stripped before the full-program fallback. Live `claude × Qwen2.5-Coder-7B-Instruct-4bit × rpn` with
 `ROZUM_ARTIFACT_SYNTH=1`, `NCTX=8192` passed 1/1 in 21.0s (turns=4, tools=2, repairs=0).
+
+Follow-up Qwen3-4B repair hardening closed two more delivery-shaped reds. The repair diagnostic now
+pulls same-run Read-before-Edit failures from `agent.log`, tells weak agents not to stop after merely
+saying they need to read, permits Bash heredoc/python exact replacement for tiny files, and emits a
+canonical `[package]` Cargo.toml snippet when the manifest is missing or malformed. Targeted validation:
+Qwen3-4B `fix` and `test` went 0/1 -> 1/1 with `REPAIR=1`; together with baseline `build/rpn/debug`
+passes, Qwen3-4B now has single-run green evidence across all five bench tasks, albeit slowly on `rpn`.

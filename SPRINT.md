@@ -18,6 +18,15 @@
   the full-program fallback; single first-line labels are stripped before write. Unit: 11/11 synth tests
   green. Live: `claude × Qwen2.5-Coder-7B-Instruct-4bit × rpn`, `ROZUM_ARTIFACT_SYNTH=1`, `NCTX=8192`:
   **PASS 1/1** in 21.0s, turns=4, tools=2, repairs=0, verifier outputs 35 and 14.
+- [x] **qwen3-4b-repair-hints** — DONE (`feature/qwen3-4b-repair-hints`, 2026-06-29). Cheap Qwen3-4B is
+  not just `greet`: targeted low-load cells show `build/rpn/debug` pass, while `fix/test` failed due
+  delivery-shaped repair issues (`edit_requires_read`, then malformed `Cargo.toml`). Fix: verify-repair
+  diagnostics now surface same-run Read-before-Edit failures from `agent.log`, tell weak agents not to
+  stop after saying "I will read", allow Bash heredoc/python exact replacement for tiny benchmark files,
+  and give a canonical `[package]` manifest hint (not `package = "..."`). Validation:
+  `bash -n scripts/bench/agentic.sh`; Qwen3-4B `fix/test` **0/1 → 1/1 each** with `REPAIR=1`.
+  Combined targeted evidence now covers Qwen3-4B `build/fix/test/debug/rpn` green, but `rpn` is slow
+  (277s, 22 turns), so require multi-rep before making it a default agentic pick.
 - [x] **glm-fix-readcall-corruption** — FIXED + VALIDATED (master `ea23b7a`, 2026-06-29). GLM-4-32B-0414
   failed `fix` **0/2 consistently**: src/main.rs ended up containing a `Read\n{"file_path":...}`
   tool-call's TEXT instead of code. ROOT CAUSE (captured real output): GLM-4 dense wraps its calls in a
@@ -51,9 +60,11 @@
          Claude is green on `build/test/fix/debug` after task-specific repair goal hints
          (`build` rerun: PASS; `fix` required one repair); follow-up `qwen25-rpn-sectioned-artifact-synth`
          fixed the remaining Qwen2.5-Coder-7B `rpn` delivery bug; `gpt-oss-20b` via Claude is green on
-         `build/fix/test/debug` at `NCTX=8192`; GLM-4.7-Flash had already been proven green on
-         `build/fix/test/debug/rpn`. Not promoted here: GLM-4-32B was stopped as operationally too slow
-         on the first `build` cell; Qwen3.6-35B dry-run refused under current memory headroom.
+         `build/fix/test/debug` at `NCTX=8192` and follow-up `rpn` baseline passed (35.9s); GLM-4.7-Flash
+         had already been proven green on `build/fix/test/debug/rpn`; Qwen3-4B now has targeted single
+         passes on all five tasks after `qwen3-4b-repair-hints`, but remains slow/noisy. Not promoted
+         here: GLM-4-32B was stopped as operationally too slow on the first `build` cell; Qwen3.6-35B
+         dry-run refused under current memory headroom.
 
 ### ▶ agentic-reliability (operator 2026-06-29: "сделай всё, занеси в спринт, порядок выбери сам")
 Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall (stall depends on sweep data).
@@ -1604,9 +1615,12 @@ Consolidated from the agentic matrix (`scripts/bench/agentic.sh`, sandbox on). R
     DECISION gap (GLM *shows* artifacts vs *names* Write/shell) — **prompt-movable but not
     prompt-fixable**; the robust fix is model-side (a tool-calling-tuned GLM variant). Qwen3.6-35B
     (15/15) remains the agentic driver; GLM-4 is the chat/code model. Spec `docs/specs/glm4-bringup.md`.
-- [x] **Qwen2.5-Coder-7B / Qwen3-4B** — below the **~27B agentic cliff**: can't reliably drive the
-  multi-step tool loop (2/5-ish). Not a bug; kept in `EXTRA` for non-agentic use. Don't surface as
-  default agentic picks.
+- [x] **Qwen2.5-Coder-7B / Qwen3-4B** — original 2026-06-19 verdict: below the **~27B agentic cliff**
+  and unreliable on multi-step tool loops. **Updated 2026-06-29:** after lean/headless repair hardening
+  and artifact synth fixes, both have targeted green evidence beyond the old 2/5-ish ceiling
+  (Qwen2.5-Coder-7B: `build/test/fix/debug/rpn`; Qwen3-4B: `build/fix/test/debug/rpn`). Still do not
+  surface as default agentic picks until multi-rep confirms stability; Qwen3-4B `rpn` is green but slow
+  (277s, 22 turns).
 
 #### model-sandbox (2026-06-19, operator-driven) — structural jail for agentic model runs
 
