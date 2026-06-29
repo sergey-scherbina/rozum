@@ -874,7 +874,16 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   mis-rendered prior calls as GLM-4 `name\n{json}` → multi-turn loops (`GlmArgKvDialect` renders the
   native `<tool_call><arg_key>` form). **Agentic smoke claude×REPS=2: 0/10 → 3/10** (build, test×2; RAM
   healthy ~400 MB not 16 GB). Remaining fails (fix 67t, rpn/debug timeout) = the orthogonal agentic-loop
-  ([[project-agentic-loop-root-cause]]), not a GLM gateway bug. NEXT: loop-breaker for edit/debug.
+  ([[project-agentic-loop-root-cause]]), not a GLM gateway bug.
+  **2026-06-29 follow-up (GLM-4.7-Flash green-plane attempt):** launch repair now emits diagnostic
+  `cargo run` mismatch errors, includes bounded `Cargo.toml`/`src` snapshots, adds an unsupported-edition
+  Cargo manifest hint, and reminds Claude Code that prompt snapshots do not satisfy the Read-before-Edit
+  guard. `scripts/bench/agentic.sh` no longer tells models that failed `Edit` means "already applied",
+  and its `rpn` prompt now exposes both verifier examples. Focused `claude × GLM-4.7-Flash` smoke at
+  `NCTX=8192`: **build/fix/test/debug/rpn = 5/5** across targeted runs
+  (`glm47-flash-build2-20260629-170340`, `glm47-flash-repair-20260629-163454`,
+  `glm47-flash-buildtest-20260629-165806`, `glm47-flash-rpn2-20260629-165228`; peak ~24.5-25.0 GB).
+  NEXT: run full multi-agent/reps matrix before claiming the whole GLM plane globally green.
 - [x] **verify-standalone** — DONE (clean box, 2026-06-27, results scripts/bench/results/agentic-*).
   **VERDICTS:** (1) **Qwen3-Coder-30B-A3B** — strong EDIT (fix/test/debug 6/6, smoke #1); but
   create-from-scratch **0/6 clean** (rpn 0/3 + build 0/3). ⚠️ CAUSE **NOT isolated** — do NOT call it

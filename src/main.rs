@@ -4424,6 +4424,16 @@ fn shquote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Build a diagnostic cargo-run check fragment. A plain `[ "$(cargo run ...)" = ... ]` fails
+/// silently, which leaves the repair round with an empty "real error" on stdout mismatches.
+fn cargo_run_check_fragment(arg: &str, exp: &str) -> String {
+    let arg_q = shquote(arg);
+    let exp_q = shquote(exp);
+    format!(
+        "{{ out=$(cargo run -q -- {arg_q}) && [ \"$out\" = {exp_q} ] || {{ printf 'cargo run -- %s printed <%s>; expected <%s>\\n' {arg_q} \"$out\" {exp_q} >&2; exit 1; }}; }}"
+    )
+}
+
 /// "Understand the goal": ask the loaded model to FORMALIZE the task into a deterministic check, as
 /// STRUCTURED data — `{"checkable":bool,"cargo_test":bool,"run":[{"arg":..,"expect":..}]}`. We BUILD
 /// the shell command ourselves (shell-quoting the model's strings), so a model can't inject arbitrary
@@ -4465,7 +4475,7 @@ async fn derive_target(base: &str, task: &str) -> Option<String> {
     if let Some(runs) = j["run"].as_array() {
         for r in runs {
             if let (Some(arg), Some(exp)) = (r["arg"].as_str(), r["expect"].as_str()) {
-                parts.push(format!("[ \"$(cargo run -q -- {})\" = {} ]", shquote(arg), shquote(exp)));
+                parts.push(cargo_run_check_fragment(arg, exp));
             }
         }
     }
@@ -4549,7 +4559,11 @@ fn repair_prompt(original: &str, err: &str) -> String {
     format!(
         "{original}\n\n[Your previous attempt did NOT pass the project's check. The exact error is \
          below — do NOT start over, FIX the existing files with the minimal change, then make sure \
-         the check passes before you stop.]\n{err}"
+         the check passes before you stop.]\n{err}\n\n[Repair rules: trust the check output over \
+         your previous conclusion. If you use Edit, old_string must be copied exactly from the \
+         current file content shown above, but this prompt snapshot does NOT count as a Read tool \
+         call; call Read on that file in this run before Edit. For invalid manifests or tiny broken \
+         source files, prefer Write to replace the whole tiny file.]"
     )
 }
 
@@ -4580,6 +4594,85 @@ fn structural_hint(cwd: &std::path::Path) -> Option<String> {
          and run.",
         if src_main_missing { "missing" } else { "the default \"Hello, world!\" stub" }
     ))
+}
+
+const REPAIR_SOURCE_MAX_BYTES: u64 = 12_000;
+const REPAIR_SOURCE_MAX_LINES: usize = 160;
+
+fn repair_source_snapshot(cwd: &std::path::Path) -> Option<String> {
+    let mut rels = vec!["Cargo.toml".to_string(), "src/main.rs".to_string(), "src/lib.rs".to_string()];
+    if let Ok(rd) = std::fs::read_dir(cwd.join("tests")) {
+        let mut tests: Vec<String> = rd
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.ends_with(".rs").then(|| format!("tests/{name}"))
+            })
+            .collect();
+        tests.sort();
+        rels.extend(tests.into_iter().take(4));
+    }
+
+    let sections: Vec<String> = rels
+        .into_iter()
+        .filter_map(|rel| repair_source_file(cwd, &rel).map(|body| format!("--- {rel} ---\n{body}")))
+        .collect();
+    (!sections.is_empty()).then(|| {
+        format!(
+            "CURRENT FILE CONTENT (for reasoning only; if using Edit, call Read first in this run; for a tiny file, Write may replace the whole file):\n{}",
+            sections.join("\n\n")
+        )
+    })
+}
+
+fn repair_source_file(cwd: &std::path::Path, rel: &str) -> Option<String> {
+    let path = cwd.join(rel);
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > REPAIR_SOURCE_MAX_BYTES {
+        return None;
+    }
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut lines: Vec<&str> = text.lines().take(REPAIR_SOURCE_MAX_LINES).collect();
+    let truncated = text.lines().count() > REPAIR_SOURCE_MAX_LINES;
+    if truncated {
+        lines.push("... (truncated)");
+    }
+    let lang = if rel.ends_with(".toml") { "toml" } else { "rust" };
+    Some(format!("```{lang}\n{}\n```", lines.join("\n")))
+}
+
+fn cargo_manifest_repair_hint(cwd: &std::path::Path, err: &str) -> Option<String> {
+    let lower = err.to_ascii_lowercase();
+    if !(lower.contains("failed to parse manifest") && lower.contains("edition")) {
+        return None;
+    }
+    let name = cargo_package_name(cwd).unwrap_or_else(|| "app".to_string());
+    Some(format!(
+        "CARGO MANIFEST FIX: Cargo cannot parse Cargo.toml. Rewrite Cargo.toml with a normal \
+         supported package header before changing Rust code:\n```toml\n[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n```"
+    ))
+}
+
+fn cargo_package_name(cwd: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(cwd.join("Cargo.toml")).ok()?;
+    for line in text.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("name") else {
+            continue;
+        };
+        let Some(value) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let name = value.trim().trim_matches('"');
+        if !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
 }
 
 async fn exec_agent(
@@ -4757,6 +4850,14 @@ async fn exec_agent(
             // file) — the raw error tail alone can't reveal that, so repair would otherwise thrash.
             let err = match structural_hint(&cwd) {
                 Some(hint) => format!("{hint}\n\n{err}"),
+                None => err,
+            };
+            let err = match cargo_manifest_repair_hint(&cwd, &err) {
+                Some(hint) => format!("{hint}\n\n{err}"),
+                None => err,
+            };
+            let err = match repair_source_snapshot(&cwd) {
+                Some(snapshot) => format!("{err}\n\n{snapshot}"),
                 None => err,
             };
             program[pidx] = repair_prompt(&original_prompt, &err);
@@ -7125,6 +7226,54 @@ mod chain_tests {
         std::fs::remove_file(root.join("main.rs")).unwrap();
         std::fs::write(root.join("src/main.rs"), "fn main(){ let mut s=Vec::<i64>::new(); s.push(1); }").unwrap();
         assert!(structural_hint(root).is_none(), "a correct project must not be flagged");
+    }
+
+    #[test]
+    fn derived_cargo_run_check_is_diagnostic() {
+        let check = cargo_run_check_fragment("hello", "olleh");
+        assert!(check.contains("cargo run -q -- 'hello'"), "got: {check}");
+        assert!(check.contains("printed <%s>; expected <%s>"), "got: {check}");
+        assert!(!check.starts_with("[ "), "silent shell tests are not useful repair diagnostics");
+    }
+
+    #[test]
+    fn repair_source_snapshot_includes_small_current_sources() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"reverse-cli\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            "fn reverse(s: &str) -> String {\n    s.to_string()\n}\n",
+        )
+        .unwrap();
+
+        let h = repair_source_snapshot(root).expect("small src/main.rs should be included");
+        assert!(h.contains("CURRENT FILE CONTENT"), "got: {h}");
+        assert!(h.contains("--- Cargo.toml ---"), "got: {h}");
+        assert!(h.contains("--- src/main.rs ---"), "got: {h}");
+        assert!(h.contains("s.to_string()"), "got: {h}");
+        assert!(h.contains("call Read first"), "got: {h}");
+    }
+
+    #[test]
+    fn cargo_manifest_repair_hint_pins_supported_edition() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"rpn-calc\"\nversion = \"5.5.5\"\nedition = \"2025\"\n",
+        )
+        .unwrap();
+        let err = "error: failed to parse manifest\nfailed to parse the `edition` key";
+        let h = cargo_manifest_repair_hint(root, err).expect("manifest edition error should be hinted");
+        assert!(h.contains("name = \"rpn-calc\""), "got: {h}");
+        assert!(h.contains("version = \"0.1.0\""), "got: {h}");
+        assert!(h.contains("edition = \"2021\""), "got: {h}");
     }
 }
 

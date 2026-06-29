@@ -1,5 +1,19 @@
 # Changelog
 
+## launch/bench — GLM-4.7-Flash claude smoke 5/5
+Completed: 2026-06-29
+
+Improved `rozum launch` verify-repair for weak local coding models: derived `cargo run` checks now emit
+real mismatch diagnostics instead of silent shell-test failures; repair prompts include bounded
+`Cargo.toml`/`src` snapshots, a Cargo unsupported-edition manifest hint, and explicit Read-before-Edit
+guidance for Claude Code. The agentic bench prompts were tightened so failed `Edit` no longer means
+"already applied"; `rpn` now states both verifier examples.
+
+Validation: `cargo test --no-default-features --bin rozum-gateway chain_tests:: -- --nocapture`,
+`cargo build --bin rozum-gateway`, and focused `claude × GLM-4.7-Flash` smoke at `NCTX=8192`: build,
+fix, test, debug, and rpn each passed in targeted runs. Full multi-agent/reps matrix still remains the
+next gate before calling the entire GLM plane green.
+
 ## backlog — close stale meetings-rest-read item
 Completed: 2026-06-29
 
