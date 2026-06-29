@@ -22,9 +22,9 @@ REPO="$(cd "$HERE/../.." && pwd)"
 
 mkdir -p "$SITE" "$(dirname "$BIN")"
 
-# 1) Build the control-serve binary (now also serves static files + chat).
-echo ">> building rozum (control-serve) ..."
-( cd "$REPO" && cargo build --bin rozum )
+# 1) Build the thin dispatcher used by launchd. It execs rozum-gateway for control-serve.
+echo ">> building rozum dispatcher ..."
+( cd "$REPO" && cargo build -p rozum-cli --bin rozum )
 cp "$REPO/target/debug/rozum" "$BIN"
 
 # Helper: compile a server-side .ssc file, serve briefly, capture HTML, shut down.
@@ -40,12 +40,7 @@ emit_html() {
 
 # 2) Compile the browser SPA (control-center-live.ssc → index.html).
 echo ">> emitting index.html (browser SPA) ..."
-"$SSC" run --frontend react --mode client "$HERE/control-center-live.ssc" &
-SSC_PID=$!
-sleep 6
-DEV=$(lsof -nP -iTCP -sTCP:LISTEN -a -p "$SSC_PID" 2>/dev/null | grep -oE ':[0-9]+' | tr -d ':' | head -1 || true)
-curl -sf "http://127.0.0.1:${DEV:-0}/" -o "$SITE/index.html" || true
-kill "$SSC_PID" 2>/dev/null || true
+"$SSC" emit-spa --frontend react "$HERE/control-center-live.ssc" > "$SITE/index.html"
 echo ">> index.html: $(wc -c < "$SITE/index.html") bytes"
 
 # 3) Compile login.ssc → login.html and terminal.ssc → terminal.html.

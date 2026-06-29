@@ -1,5 +1,17 @@
 # Changelog
 
+## ucc — hash navigation and deploy script refreshed
+Completed: 2026-06-29
+
+Restored UCC control-center hash navigation by using real `href="#/..."` links for the in-app views,
+so the fixed scalascript hash bridge can toggle the active `data-ssc-cond` branch immediately without a
+manual refresh.
+
+Updated the UCC deploy script for the current workspace shape and scalascript CLI: it now builds the
+`rozum-cli` dispatcher binary and emits the control-center SPA through `ssc emit-spa`. The login and
+terminal helper pages now use the current curried HTTP route syntax, allowing the full deploy script to
+regenerate all static pages cleanly.
+
 ## bench — template-less and MLA-family matrix candidates guarded
 Completed: 2026-06-29
 

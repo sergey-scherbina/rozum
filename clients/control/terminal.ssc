@@ -50,6 +50,6 @@ val fitCdn   = "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0"
 
 val html = "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover\"><meta name=\"apple-mobile-web-app-capable\" content=\"yes\"><title>rozum · терминал</title><link rel=\"stylesheet\" href=\"" + xtermCdn + "/css/xterm.min.css\"><style>" + bodyCss + barCss + "</style></head><body><div id=\"bar\"><a href=\"/\">← UCC</a><b id=\"sid\"></b><span id=\"st\">…</span></div><div id=\"term\"></div><script src=\"" + xtermCdn + "/lib/xterm.min.js\"></script><script src=\"" + fitCdn + "/lib/addon-fit.min.js\"></script><script>" + xtermJs + "</script></body></html>"
 
-route("GET", "/", req => html)
+route("GET", "/") { req => html }
 serve(8422)
 ```

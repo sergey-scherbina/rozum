@@ -12,7 +12,7 @@ One std/ui app: a dashboard (live `/control/status`) AND a native chat view per 
 stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the view in place.
 
 ## Setup
-[signal, emit, serve, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, fetchActionWith, formBody, onBumpTick, incSignal, computedSignal, fieldColumn, hashSignal, onNavigate](std/ui/primitives.ssc)
+[signal, emit, serve, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, fetchActionWith, formBody, onBumpTick, incSignal, computedSignal, fieldColumn, hashSignal](std/ui/primitives.ssc)
 [jsonValue](std/json.ssc)
 [lower](std/ui/lower.ssc)
 [defaultTheme](std/ui/theme.ssc)
@@ -77,7 +77,7 @@ val catCard = cardWithHeader(heading(2, "Installed catalog"))(
 
 val dashboard = vstack(gap = 16)(
   heading(1, "rozum — control center"),
-  hstack(gap = 10)(actionButton(onNavigate("#/agents"), "🤖 Агенты"), actionButton(onNavigate("#/coders"), "💻 Кодеры"), actionButton(onNavigate("#/sessions"), "🖥 Сессии"), link("/login.html", "🔐 вход")),
+  hstack(gap = 10)(link("#/agents", "🤖 Агенты"), link("#/coders", "💻 Кодеры"), link("#/sessions", "🖥 Сессии"), link("/login.html", "🔐 вход")),
   divider(),
   meetingsCard,
   divider(),
@@ -92,7 +92,7 @@ val dashboard = vstack(gap = 16)(
 ## Chat view
 ```scalascript
 val chatHeader = hstack(gap = 10)(
-  actionButton(onNavigate("#/"), "← back"),
+  link("#/", "← back"),
   signalText_(computedSignal(() => "room: " + room())),
   actionButton(incSignal(chatTick), "↻")
 )
@@ -168,7 +168,7 @@ val stopForm = cardWithHeader(heading(2, "Остановить агента"))(
 
 val agentsBody = vstack(gap = 16)(
   hstack(gap = 10)(
-    actionButton(onNavigate("#/"), "← назад"),
+    link("#/", "← назад"),
     heading(1, "Агенты"),
     actionButton(incSignal(refresh), "↻")
   ),
@@ -236,7 +236,7 @@ val coderStop = cardWithHeader(heading(2, "Остановить кодера"))(
 )
 
 val codersBody = vstack(gap = 16)(
-  hstack(gap = 10)(actionButton(onNavigate("#/"), "← назад"), heading(1, "Кодеры"), actionButton(incSignal(refresh), "↻")),
+  hstack(gap = 10)(link("#/", "← назад"), heading(1, "Кодеры"), actionButton(incSignal(refresh), "↻")),
   divider(),
   codersList,
   divider(),
@@ -288,7 +288,7 @@ val sessionStop = cardWithHeader(heading(2, "Остановить сессию")
 )
 
 val sessionsBody = vstack(gap = 16)(
-  hstack(gap = 10)(actionButton(onNavigate("#/"), "← назад"), heading(1, "Сессии"), actionButton(incSignal(refresh), "↻"), link("/login.html", "🔐 вход")),
+  hstack(gap = 10)(link("#/", "← назад"), heading(1, "Сессии"), actionButton(incSignal(refresh), "↻"), link("/login.html", "🔐 вход")),
   divider(),
   sessionsList,
   divider(),
