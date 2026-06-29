@@ -20,6 +20,17 @@
   is a `Name\n{json}` tool call before Mode-1; conservative (real `[package]`/`use std::…` content never
   matches). Test from the real GLM output; 123/123 core. **LIVE: GLM fix rep1 PASS (was 0/2), both
   workdirs src/main.rs CLEAN (intact `use std::env;`, no Read-text).**
+- [~] **agentic-delivery-hardening** — IN PROGRESS (`feature/agentic-delivery-hardening`,
+  spec `docs/specs/agentic-delivery-hardening.md`). Goal: make every red agentic matrix cell carry a
+  delivery-vs-reasoning verdict before model recommendations. Tasks:
+  1. [ ] add `scripts/bench/agentic_triage.py` for result dirs, kept workdirs, and `agent.log` files
+         with text/JSON/CSV/brief output.
+  2. [ ] hook failed `scripts/bench/agentic.sh` cells to print a local triage summary when `KEEP=1`
+         leaves a workdir.
+  3. [ ] extend repair diagnostics with bounded Cargo/source context plus targeted manifest/edit hints,
+         without hidden file mutation.
+  4. [ ] validate on known GLM delivery artifacts and at least one successful kept workdir, avoiding a
+         full matrix run on the overloaded box.
 
 ### ▶ agentic-reliability (operator 2026-06-29: "сделай всё, занеси в спринт, порядок выбери сам")
 Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall (stall depends on sweep data).
