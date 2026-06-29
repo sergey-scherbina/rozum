@@ -476,9 +476,11 @@ fn repair_tool_object(b: &[u8], start: usize) -> Option<(String, usize)> {
 /// An object that matches zero or ≥2 tools is skipped (no guess). Objects that already carry a `name`
 /// are left to `parse_tool_calls`.
 ///
-/// **Mode 1 (fallback) — raw content + prose filename.** Only if mode 2 found nothing: a ```toml/```rust
+/// **Mode 1 (fallback) — raw content + file label.** Only if mode 2 found nothing: a ```toml/```rust
 /// fence whose file path is named in the PRECEDING PROSE ("I'll create the `Cargo.toml` file:") becomes
-/// a `Write`; fences with no recoverable filename (a ```bash `cargo run` command) are skipped.
+/// a `Write`; sectioned bodies whose first lines are filename labels (`# Cargo.toml`,
+/// `// src/main.rs`) are split/stripped before writing. Fences with no recoverable filename (a ```bash
+/// `cargo run` command) are skipped.
 ///
 /// **Mode 1b (last fallback) — complete program, no filename anywhere.** A ```rust fence that is a FULL
 /// program (`fn main`) with no prose filename → a `Write` to the language default (`src/main.rs`). This
@@ -531,35 +533,40 @@ pub fn synth_glm_tool_calls(text: &str, tools: &[crate::backend::ToolDef]) -> Ve
             //    ```sh cargo run```" — mode-1 saw `src/main.rs` in the prose and clobbered the program
             //    with the run command (the rpn-task corruption; the model's code was correct).
             //  - a GLM/Qwen `Name\n{json}` tool CALL (```bash\nRead\n{…}```), which parse_tool_calls owns.
-        } else if let (Some(path), Some(wt)) = (
-            match ext_for_lang(&lang) {
+        } else if let Some(wt) = write_tool.as_deref() {
+            let sections = sectioned_file_body(body);
+            if sections.len() >= 2 {
+                // A weak coder may put several files into one fence (`// Cargo.toml`, then
+                // `// src/main.rs`). Split before Mode-1b, otherwise `[package]` lands in main.rs.
+                for (path, content) in sections {
+                    push_synth_write(&mut out, wt, path, &content);
+                }
+            } else if let Some(path) = match ext_for_lang(&lang) {
                 Some(e) => last_safe_filename_ext(preceding, Some(e)),
                 None => last_safe_filename(preceding),
-            },
-            write_tool.as_deref(),
-        ) {
-            // Mode-1: raw file content, paired with the prose filename whose extension MATCHES the fence
-            // language — a ```toml body resolves to the `.toml` file, NOT the `.rs` file the prose also
-            // named. (Second rpn-corruption variant: the model narrates "src/main.rs … and the Cargo.toml:
-            // ```toml [package]…```" and the plain last-filename grab wrote the toml into src/main.rs.)
-            let mut m = serde_json::Map::new();
-            m.insert("file_path".into(), Value::String(path));
-            m.insert("content".into(), Value::String(format!("{}\n", body.trim_end_matches('\n'))));
-            out.push((wt.to_string(), Value::Object(m).to_string()));
-        } else if let (Some(path), Some(wt)) = (default_path_for_full_program(&lang, body), write_tool.as_deref()) {
-            // Mode-1b: a COMPLETE program in a known language with NO filename anywhere in the prose —
-            // the weak-coder failure we kept scoring as "incapable": the model narrates the whole, often
-            // CORRECT solution in a ```rust fence ("Here is the updated code:") and never names Write, so
-            // nothing lands. Materialize it to the language's conventional entrypoint. The full-program
-            // marker (an `fn main`) is the guard: an incidental snippet/example in a chat answer has none,
-            // so it is left alone (preserving `synth_skips_chat_and_ambiguous`); a partial function-only
-            // fence won't overwrite the whole file either. Fires wherever the synth is active (GLM family
-            // default-on OR `ROZUM_ARTIFACT_SYNTH=1`) — the fenced-tool-call skip above keeps it (and
-            // mode-1) from mistaking a GLM `Name\n{json}` call for file content.
-            let mut m = serde_json::Map::new();
-            m.insert("file_path".into(), Value::String(path));
-            m.insert("content".into(), Value::String(format!("{}\n", body.trim_end_matches('\n'))));
-            out.push((wt.to_string(), Value::Object(m).to_string()));
+            } {
+                // Mode-1: raw file content, paired with the prose filename whose extension MATCHES the
+                // fence language. If the body repeats the filename as a first-line label, strip it.
+                let content = match sections.as_slice() {
+                    [(section_path, section_content)] if section_path == &path => section_content.as_str(),
+                    _ => body,
+                };
+                push_synth_write(&mut out, wt, path, content);
+            } else if let [(path, content)] = sections.as_slice() {
+                // Mode-1 header-only: no prose filename, but the fence itself starts with a safe filename.
+                push_synth_write(&mut out, wt, path.clone(), content);
+            } else if let Some(path) = default_path_for_full_program(&lang, body) {
+                // Mode-1b: a COMPLETE program in a known language with NO filename anywhere in the prose —
+                // the weak-coder failure we kept scoring as "incapable": the model narrates the whole, often
+                // CORRECT solution in a ```rust fence ("Here is the updated code:") and never names Write, so
+                // nothing lands. Materialize it to the language's conventional entrypoint. The full-program
+                // marker (an `fn main`) is the guard: an incidental snippet/example in a chat answer has none,
+                // so it is left alone (preserving `synth_skips_chat_and_ambiguous`); a partial function-only
+                // fence won't overwrite the whole file either. Fires wherever the synth is active (GLM family
+                // default-on OR `ROZUM_ARTIFACT_SYNTH=1`) — the fenced-tool-call skip above keeps it (and
+                // mode-1) from mistaking a GLM `Name\n{json}` call for file content.
+                push_synth_write(&mut out, wt, path, body);
+            }
         }
         prose_start = next;
         pos = next;
@@ -790,6 +797,13 @@ fn default_path_for_full_program(lang: &str, body: &str) -> Option<String> {
     }
 }
 
+fn push_synth_write(out: &mut Vec<(String, String)>, wt: &str, path: String, content: &str) {
+    let mut m = serde_json::Map::new();
+    m.insert("file_path".into(), Value::String(path));
+    m.insert("content".into(), Value::String(format!("{}\n", content.trim_end_matches('\n'))));
+    out.push((wt.to_string(), Value::Object(m).to_string()));
+}
+
 /// The LAST safe relative filename mentioned in `prose` (a fence's preceding text), or `None`. A token
 /// is a filename if it is a known extensionless name (`Cargo.toml`, `Makefile`, …) or ends in a known
 /// source/config extension; it must be a safe relative path ([`is_safe_relpath`]). "LAST" because GLM
@@ -822,16 +836,81 @@ fn ext_for_lang(lang: &str) -> Option<&'static str> {
     })
 }
 
+const KNOWN_FILENAMES: &[&str] =
+    &["Cargo.toml", "Cargo.lock", "Makefile", "Dockerfile", ".gitignore", "build.rs"];
+const KNOWN_FILE_EXTS: &[&str] = &[
+    "rs", "toml", "md", "txt", "json", "yaml", "yml", "py", "cfg", "lock", "sh", "js", "ts",
+    "tsx", "html", "css", "c", "h", "cpp", "hpp", "go", "java", "rb", "kt", "scala",
+];
+
+fn file_token_ext(tok: &str) -> Option<&str> {
+    tok.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()).map(|(_, e)| e)
+}
+
+fn safe_filename_token(tok: &str, want_ext: Option<&str>) -> Option<String> {
+    let tok_ext = file_token_ext(tok);
+    let is_file = KNOWN_FILENAMES.contains(&tok) || tok_ext.is_some_and(|e| KNOWN_FILE_EXTS.contains(&e));
+    let ext_ok = want_ext.is_none_or(|w| tok_ext == Some(w));
+    (is_file && ext_ok && is_safe_relpath(tok)).then(|| tok.to_string())
+}
+
+fn filename_marker_line(line: &str) -> Option<String> {
+    let mut marker = line.trim();
+    if marker.is_empty() {
+        return None;
+    }
+    if let Some(inner) = marker.strip_prefix("<!--").and_then(|s| s.strip_suffix("-->")) {
+        marker = inner.trim();
+    } else if let Some(rest) = marker.strip_prefix("//") {
+        marker = rest.trim();
+    } else if let Some(rest) = marker.strip_prefix('#') {
+        marker = rest.trim();
+    }
+    for prefix in ["File:", "file:", "Path:", "path:"] {
+        if let Some(rest) = marker.strip_prefix(prefix) {
+            marker = rest.trim();
+            break;
+        }
+    }
+    marker = marker.trim_matches('`').trim();
+    marker = marker.strip_suffix(':').unwrap_or(marker).trim();
+    if marker.split_whitespace().count() != 1 {
+        return None;
+    }
+    safe_filename_token(marker, None)
+}
+
+fn sectioned_file_body(body: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = body.lines().collect();
+    let Some(first_meaningful) = lines.iter().position(|line| !line.trim().is_empty()) else {
+        return Vec::new();
+    };
+    let markers: Vec<(usize, String)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| filename_marker_line(line).map(|path| (idx, path)))
+        .collect();
+    if markers.is_empty() || markers[0].0 != first_meaningful {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for (idx, (line_idx, path)) in markers.iter().enumerate() {
+        let start = line_idx + 1;
+        let end = markers.get(idx + 1).map(|(next_idx, _)| *next_idx).unwrap_or(lines.len());
+        let content = lines[start..end].join("\n");
+        if content.trim().is_empty() {
+            return Vec::new();
+        }
+        out.push((path.clone(), content));
+    }
+    out
+}
+
 /// The LAST safe relative filename in `prose`, optionally filtered to a required extension (`want_ext`).
 /// With `want_ext = Some("toml")`, only `*.toml` (incl. `Cargo.toml`) match — so a ```toml fence pairs
 /// with the `.toml` file even when the prose also names a `.rs` file more recently. `None` = any file.
 fn last_safe_filename_ext(prose: &str, want_ext: Option<&str>) -> Option<String> {
-    const KNOWN: &[&str] =
-        &["Cargo.toml", "Cargo.lock", "Makefile", "Dockerfile", ".gitignore", "build.rs"];
-    const EXTS: &[&str] = &[
-        "rs", "toml", "md", "txt", "json", "yaml", "yml", "py", "cfg", "lock", "sh", "js", "ts",
-        "tsx", "html", "css", "c", "h", "cpp", "hpp", "go", "java", "rb", "kt", "scala",
-    ];
     let mut best = None;
     for raw in prose.split(|c: char| c.is_whitespace() || "`\"'(){}<>,;".contains(c)) {
         // strip surrounding quote/paren/sentence punctuation, but NOT a leading '.' (".gitignore")
@@ -840,11 +919,7 @@ fn last_safe_filename_ext(prose: &str, want_ext: Option<&str>) -> Option<String>
         if tok.is_empty() {
             continue;
         }
-        let tok_ext = tok.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()).map(|(_, e)| e);
-        let is_file = KNOWN.contains(&tok) || tok_ext.is_some_and(|e| EXTS.contains(&e));
-        // When an extension is required, the token's own extension must match it (Cargo.toml→toml).
-        let ext_ok = want_ext.is_none_or(|w| tok_ext == Some(w));
-        if is_file && ext_ok && is_safe_relpath(tok) {
+        if safe_filename_token(tok, want_ext).is_some() {
             best = Some(tok.to_string()); // keep scanning; the LAST match wins
         }
     }
@@ -1073,6 +1148,41 @@ mod tests {
         assert_eq!(ext_for_lang("bash"), None);
         assert_eq!(last_safe_filename_ext("src/main.rs and Cargo.toml", Some("toml")).as_deref(), Some("Cargo.toml"));
         assert_eq!(last_safe_filename_ext("src/main.rs and Cargo.toml", Some("rs")).as_deref(), Some("src/main.rs"));
+    }
+
+    #[test]
+    fn synth_strips_filename_headers_inside_fences() {
+        let tools = claude_tools();
+        let real = "Let's fix the files.\n\n```toml\n# Cargo.toml\n[package]\nname = \"rpn-calc\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n```\n\n```rust\n// src/main.rs\nuse std::env;\n\nfn main() {\n    let _args: Vec<String> = env::args().collect();\n}\n```\n";
+        let calls = synth_glm_tool_calls(real, &tools);
+        assert_eq!(calls.len(), 2, "got: {calls:?}");
+        let cargo: Value = serde_json::from_str(&calls[0].1).unwrap();
+        let main: Value = serde_json::from_str(&calls[1].1).unwrap();
+        assert_eq!(cargo["file_path"], "Cargo.toml");
+        assert_eq!(main["file_path"], "src/main.rs");
+        let cargo_content = cargo["content"].as_str().unwrap();
+        let main_content = main["content"].as_str().unwrap();
+        assert!(cargo_content.starts_with("[package]"), "header stripped: {cargo_content:?}");
+        assert!(main_content.starts_with("use std::env;"), "header stripped: {main_content:?}");
+        assert!(!main_content.contains("[package]"), "toml must not leak into main.rs");
+    }
+
+    #[test]
+    fn synth_splits_sectioned_fence_before_full_program_default() {
+        let tools = claude_tools();
+        // Captured Qwen2.5-Coder rpn shape: one rust-ish artifact fence carries both files. The old
+        // Mode-1b saw `fn main` and wrote the WHOLE body, including `[package]`, into src/main.rs.
+        let real = "Here are the files:\n\n```rust\n// Cargo.toml\n[package]\nname = \"rpn-calc\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n\n// src/main.rs\nuse std::env;\n\nfn main() {\n    println!(\"ok\");\n}\n```\n";
+        let calls = synth_glm_tool_calls(real, &tools);
+        assert_eq!(calls.len(), 2, "got: {calls:?}");
+        let cargo: Value = serde_json::from_str(&calls[0].1).unwrap();
+        let main: Value = serde_json::from_str(&calls[1].1).unwrap();
+        assert_eq!(cargo["file_path"], "Cargo.toml");
+        assert_eq!(main["file_path"], "src/main.rs");
+        assert!(cargo["content"].as_str().unwrap().starts_with("[package]"));
+        let main_content = main["content"].as_str().unwrap();
+        assert!(main_content.starts_with("use std::env;"), "got: {main_content:?}");
+        assert!(!main_content.contains("[package]"), "toml must not leak into main.rs");
     }
 
     #[test]

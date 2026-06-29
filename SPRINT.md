@@ -11,6 +11,13 @@
   regression sweep — so the GLM family default-on synth path is byte-identical. Method now in memory
   [[project-downloaded-models-toolcall-dwq]]: a 0/N CREATE score is a delivery signal first — extract
   the model's ```rust fence and compile it standalone before calling the model weak.
+- [x] **qwen25-rpn-sectioned-artifact-synth** — DONE (`feature/qwen-rpn-artifact-synth`, 2026-06-29).
+  Qwen2.5-Coder-7B `rpn` was still red with universal synth because a rust-ish artifact fence could
+  contain both `// Cargo.toml` and `// src/main.rs`; Mode-1b saw `fn main` and wrote the whole section,
+  including `[package]`, into `src/main.rs`. Fix: sectioned first-line filename labels are split before
+  the full-program fallback; single first-line labels are stripped before write. Unit: 11/11 synth tests
+  green. Live: `claude × Qwen2.5-Coder-7B-Instruct-4bit × rpn`, `ROZUM_ARTIFACT_SYNTH=1`, `NCTX=8192`:
+  **PASS 1/1** in 21.0s, turns=4, tools=2, repairs=0, verifier outputs 35 and 14.
 - [x] **glm-fix-readcall-corruption** — FIXED + VALIDATED (master `ea23b7a`, 2026-06-29). GLM-4-32B-0414
   failed `fix` **0/2 consistently**: src/main.rs ended up containing a `Read\n{"file_path":...}`
   tool-call's TEXT instead of code. ROOT CAUSE (captured real output): GLM-4 dense wraps its calls in a
@@ -42,12 +49,11 @@
   4. [x] land generic runner/prompt hardening found during reruns; no model-specific hidden patchers
          and no full-matrix run while the box is memory constrained. Results: Qwen2.5-Coder-7B via
          Claude is green on `build/test/fix/debug` after task-specific repair goal hints
-         (`build` rerun: PASS; `fix` required one repair); `gpt-oss-20b` via Claude is green on
+         (`build` rerun: PASS; `fix` required one repair); follow-up `qwen25-rpn-sectioned-artifact-synth`
+         fixed the remaining Qwen2.5-Coder-7B `rpn` delivery bug; `gpt-oss-20b` via Claude is green on
          `build/fix/test/debug` at `NCTX=8192`; GLM-4.7-Flash had already been proven green on
-         `build/fix/test/debug/rpn`. Not promoted: Qwen2.5-Coder-7B `rpn` still fails even with
-         `ROZUM_ARTIFACT_SYNTH=1` due synth/repair misplacement + Read-before-Write friction; GLM-4-32B
-         was stopped as operationally too slow on the first `build` cell; Qwen3.6-35B dry-run refused
-         under current memory headroom.
+         `build/fix/test/debug/rpn`. Not promoted here: GLM-4-32B was stopped as operationally too slow
+         on the first `build` cell; Qwen3.6-35B dry-run refused under current memory headroom.
 
 ### ▶ agentic-reliability (operator 2026-06-29: "сделай всё, занеси в спринт, порядок выбери сам")
 Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall (stall depends on sweep data).

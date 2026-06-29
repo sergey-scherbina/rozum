@@ -109,3 +109,8 @@ Follow-up green sweep added task-specific repair goal hints after Qwen2.5-Coder-
 failure into a generic Hello World project. With the hint, the same `build` cell passed. The triage
 heuristic was also narrowed so stale or prompt-only edit/manifest wording does not override the final
 verifier evidence.
+
+Follow-up sectioned artifact synth fixed the remaining Qwen2.5-Coder-7B `rpn` delivery red:
+first-line filename labels inside fenced artifacts (`# Cargo.toml`, `// src/main.rs`) are now split or
+stripped before the full-program fallback. Live `claude × Qwen2.5-Coder-7B-Instruct-4bit × rpn` with
+`ROZUM_ARTIFACT_SYNTH=1`, `NCTX=8192` passed 1/1 in 21.0s (turns=4, tools=2, repairs=0).

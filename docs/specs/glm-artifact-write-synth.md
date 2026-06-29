@@ -162,6 +162,36 @@ the synth; chat false-write is guarded by the `synth_skips_chat_and_ambiguous` u
 now drives create-from-scratch out of the box. The synth only fires for a GLM model that named no tool
 (`model_is_glm` + empty parse), so edit/chat are untouched.
 
+### Universal opt-in sectioned artifacts (2026-06-29)
+`ROZUM_ARTIFACT_SYNTH=1` exposes the same artifact recovery to non-GLM models when a caller explicitly
+opts in. Qwen2.5-Coder-7B exposed a third create-from-scratch artifact shape on `rpn`: one rust-ish
+fence carried multiple files as first-line section labels:
+
+```
+// Cargo.toml
+[package]
+...
+
+// src/main.rs
+use std::env;
+fn main() { ... }
+```
+
+The previous Mode-1b guard saw `fn main` and materialized the entire fence to `src/main.rs`, so the
+manifest's `[package]` header became Rust source. The extractor now handles safe first-line filename
+labels before Mode-1b:
+
+- if a fence body starts with multiple filename labels (`// Cargo.toml`, `// src/main.rs`), split it
+  into one `Write` per section;
+- if a single fence starts with a filename label (`# Cargo.toml`, `// src/main.rs`), strip the label
+  before writing;
+- labels are accepted only when the first meaningful line is a safe relative known filename/path, so
+  incidental comments later in source do not trigger splitting.
+
+Validation: `cargo test --no-default-features -p rozum-core synth_ -- --nocapture` = 11/11. Live low-load
+run `claude × Qwen2.5-Coder-7B-Instruct-4bit × rpn`, `ROZUM_ARTIFACT_SYNTH=1`, `NCTX=8192` passed 1/1
+in 21.0s (turns=4, tools=2, repairs=0), verifying both RPN examples (35 and 14).
+
 ### Opt-in root-cause variant: constrain bare tool-args to valid JSON (a2d3534)
 Alongside the post-hoc synth (default-ON), an OPT-IN logit-constraint (`ROZUM_GLM_CONSTRAIN_ARGS=1`,
 default OFF) prevents GLM's malformed args at the SOURCE: `find_glm_bare_args` anchors the existing

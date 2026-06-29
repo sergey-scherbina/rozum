@@ -1,5 +1,21 @@
 # Changelog
 
+## bench — Qwen2.5-Coder rpn artifact sections now synthesize cleanly
+Completed: 2026-06-29
+
+Fixed the remaining `claude × Qwen2.5-Coder-7B-Instruct-4bit × rpn` delivery red. Universal artifact
+synth now recognizes first-line filename labels inside fenced artifacts (`# Cargo.toml`,
+`// src/main.rs`) and splits multi-file sectioned fences before the full-program `fn main -> src/main.rs`
+fallback. That prevents Cargo manifest text from being written into `src/main.rs`.
+
+Validation:
+
+- `cargo test --no-default-features -p rozum-core synth_ -- --nocapture`: 11/11 synth tests green.
+  `Cargo.lock` was restored after the local test/build updated an already-stale dev graph.
+- Live low-load run: `ROZUM_ARTIFACT_SYNTH=1`, `NCTX=8192`, `claude × Qwen2.5-Coder-7B-Instruct-4bit × rpn`
+  passed **1/1** in 21.0s, turns=4, tools=2, repairs=0, model footprint 9777 MB. Verifier examples:
+  `"3 4 + 5 *" -> 35`, `"5 1 2 + 4 * + 3 -" -> 14`.
+
 ## bench — green sweep for delivery-capable local models
 Completed: 2026-06-29
 
