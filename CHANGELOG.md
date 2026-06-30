@@ -1,5 +1,27 @@
 # Changelog
 
+## bench — matrix rerun, capability registry, and scheduler
+Completed: 2026-06-30
+
+Added a low-load follow-up path for the agentic e2e matrix. `scripts/bench/rerun_reds.py` reads a result
+directory, `per-run.csv`, or full stdout log, finds only verifier-red cells, reruns exact
+`agent/model/task` tuples one at a time, and writes a latest-wins merged CSV plus summary. Dry-run
+validation against the latest full matrix finds the 5 real red cells and ignores green `greet` cells
+whose agent process returned non-zero after a passed verifier.
+
+Added `scripts/bench/matrix_capabilities.py` for a machine-readable model/agent/task capability
+registry and wired `run_full_matrix.sh` to emit `capabilities.json`. The registry records pass-rate,
+status, timing, footprint, repair count, and latest row source, with an initial promotion policy:
+multi-run all-pass cells are green, partial/single-run evidence is yellow, zero-pass evidence is red,
+and gray is reserved for known-not-run/refused cases.
+
+Added `scripts/bench/plan_matrix_schedule.py` and an opt-in `MATRIX_RAM_SCHEDULE=1` path in
+`run_full_matrix.sh` so full runs can ask `rozum-gateway gateway --dry-run` for admission/footprint
+information before choosing model order. Repair prompts now include small agent-specific delivery
+profiles for opencode, codex, and claude. The MLX gpt-oss/harmony render path also drops orphan
+tool-result turns before chat-template render while preserving valid assistant ToolUse -> ToolResult
+loops.
+
 ## bench — GLM+gpt-oss matrix repair recipes hardened
 Completed: 2026-06-30
 

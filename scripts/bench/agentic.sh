@@ -559,16 +559,30 @@ EOF
   esac
 }
 
-# The repair instruction handed back to the agent — model-agnostic. Forbids starting over,
-# pins the exact error, restates the task goal, and demands a REAL run before claiming success.
-repair_prompt() { # $1=task $2=diagnostic
-  local task="$1" diagnostic="$2" recipe recipe_block
+repair_agent_profile_hint() { # $1=agent
+  case "$1" in
+    opencode)
+      echo 'Agent delivery profile: opencode tool calls are sensitive to JSON escaping. Prefer one-line Bash commands with printf arguments over nested heredocs or large multiline JSON strings.' ;;
+    codex)
+      echo 'Agent delivery profile: codex on weak local models often line-patches tiny corrupted files poorly. Prefer a single shell command that replaces the whole tiny file/project, then run the verifier.' ;;
+    claude)
+      echo 'Agent delivery profile: claude usually handles the normal Read/Edit/Bash path well; keep the repair minimal, then run the exact verifier command.' ;;
+    *)
+      echo 'Agent delivery profile: use the simplest tool call shape that writes the required files and runs the verifier.' ;;
+  esac
+}
+
+# The repair instruction handed back to the agent. It pins the exact error, restates the task goal,
+# includes an agent-specific delivery hint, and demands a REAL run before claiming success.
+repair_prompt() { # $1=task $2=diagnostic $3=agent
+  local task="$1" diagnostic="$2" agent="${3:-}" recipe profile
+  profile="$(repair_agent_profile_hint "$agent")"
   recipe="$(repair_benchmark_recipe "$task")"
   if [ -n "$recipe" ]; then
-    printf 'The Rust benchmark project in the CURRENT directory is NOT correct yet.\n\n%s\n\nCurrent verifier/build evidence:\n\n%s\n\nBENCHMARK REPAIR MODE: this is a tiny deterministic Rust benchmark, not a real application repo. The current files may be malformed. Do NOT use apply_patch, Edit, cargo init, sed/perl line patches, or a prose-only answer. Your next action should be ONE shell command in the CURRENT directory that runs the full benchmark repair script below exactly, replacing the tiny benchmark files. Then run the required cargo command(s) and stop only after they really pass.\n\n%s' "$(repair_goal_hint "$task")" "$diagnostic" "$recipe"
+    printf 'The Rust benchmark project in the CURRENT directory is NOT correct yet.\n\n%s\n\n%s\n\nCurrent verifier/build evidence:\n\n%s\n\nBENCHMARK REPAIR MODE: this is a tiny deterministic Rust benchmark, not a real application repo. The current files may be malformed. Do NOT use apply_patch, Edit, cargo init, sed/perl line patches, or a prose-only answer. Your next action should be ONE shell command in the CURRENT directory that runs the full benchmark repair script below exactly, replacing the tiny benchmark files. Then run the required cargo command(s) and stop only after they really pass.\n\n%s' "$(repair_goal_hint "$task")" "$profile" "$diagnostic" "$recipe"
     return
   fi
-  printf 'The Rust project in the CURRENT directory is NOT correct yet — do NOT start over or recreate files, FIX what is there.\n\n%s\n\nCurrent verifier/build evidence:\n\n%s\n\nMake the minimal change to satisfy the REQUIRED FINAL BEHAVIOR, then ACTUALLY RUN the build/test yourself and read the output. Do not stop at `cargo build` if the required command is `cargo run` or `cargo test`. If you use Edit, call Read on that file first and copy old_string exactly from the current file; if Edit says "String to replace not found", re-read the file. Only confirm success if the required command really succeeded; if it still fails, keep fixing.' "$(repair_goal_hint "$task")" "$diagnostic"
+  printf 'The Rust project in the CURRENT directory is NOT correct yet — do NOT start over or recreate files, FIX what is there.\n\n%s\n\n%s\n\nCurrent verifier/build evidence:\n\n%s\n\nMake the minimal change to satisfy the REQUIRED FINAL BEHAVIOR, then ACTUALLY RUN the build/test yourself and read the output. Do not stop at `cargo build` if the required command is `cargo run` or `cargo test`. If you use Edit, call Read on that file first and copy old_string exactly from the current file; if Edit says "String to replace not found", re-read the file. Only confirm success if the required command really succeeded; if it still fails, keep fixing.' "$(repair_goal_hint "$task")" "$profile" "$diagnostic"
 }
 
 # ── main loop ────────────────────────────────────────────────────────────────
@@ -676,7 +690,7 @@ for spec in "${MODELS[@]}"; do
         [ "$attempt" -lt "$attempts" ] || break   # last attempt — no more repair
         repairs=$((repairs + 1))
         diag="$(repair_diagnostic "$task" "$work")"
-        prompt="$(repair_prompt "$task" "$diag")"
+        prompt="$(repair_prompt "$task" "$diag" "$agent")"
         echo "    ↻ repair $repairs/$REPAIR — verify FAILED, feeding the real build/test error back to $agent"
       done
 

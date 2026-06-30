@@ -562,6 +562,61 @@ mod inner {
         }
     }
 
+    fn tool_use_count(msg: &Message) -> usize {
+        msg.content.iter().filter(|b| matches!(b, ContentBlock::ToolUse { .. })).count()
+    }
+
+    fn tool_result_count(msg: &Message) -> usize {
+        let block_results =
+            msg.content.iter().filter(|b| matches!(b, ContentBlock::ToolResult { .. })).count();
+        if matches!(msg.role, Role::Tool) {
+            block_results.max(1)
+        } else {
+            block_results
+        }
+    }
+
+    /// gpt-oss/harmony's template raises if it sees a `tool` role without a previous assistant
+    /// message carrying structured `tool_calls`. Some external agents can emit an invalid tool call
+    /// that their own tool runner rejects, then include a tool-result-shaped turn in the next request.
+    /// Drop only those orphan results; keep valid tool loops and ordinary text untouched.
+    pub(crate) fn sanitize_harmony_orphan_tool_results(messages: &[Message]) -> Vec<Message> {
+        let mut pending_tool_results = 0usize;
+        let mut out = Vec::with_capacity(messages.len());
+
+        for msg in messages {
+            let uses = tool_use_count(msg);
+            if uses > 0 {
+                pending_tool_results = pending_tool_results.saturating_add(uses);
+                out.push(msg.clone());
+                continue;
+            }
+
+            let results = tool_result_count(msg);
+            if results > 0 {
+                if pending_tool_results == 0 {
+                    if !matches!(msg.role, Role::Tool) {
+                        let content: Vec<ContentBlock> = msg
+                            .content
+                            .iter()
+                            .filter(|b| !matches!(b, ContentBlock::ToolResult { .. }))
+                            .cloned()
+                            .collect();
+                        if !content.is_empty() {
+                            out.push(Message { role: msg.role.clone(), content });
+                        }
+                    }
+                    continue;
+                }
+                pending_tool_results = pending_tool_results.saturating_sub(results);
+            }
+
+            out.push(msg.clone());
+        }
+
+        out
+    }
+
     /// Render a message for the **GLM-4** template (`<|observation|>` marker). GLM's trained
     /// tool-loop format is `<function_name>\n<json args>` in the assistant turn, and the tool
     /// RESULT comes back under the `observation` role (not `tool`). So: assistant `ToolUse` →
@@ -4006,6 +4061,13 @@ mod inner {
         } else {
             messages
         };
+        let harmony_sanitized: Vec<Message>;
+        let messages: &[Message] = if template.contains("<|channel|>") {
+            harmony_sanitized = sanitize_harmony_orphan_tool_results(messages);
+            &harmony_sanitized
+        } else {
+            messages
+        };
         let convo: Vec<Conversation<&'static str, String>> =
             messages.iter().map(|m| dialect.render_message(m)).collect();
         // Thinking is OFF by default (clean output for CC/Codex); the gateway's
@@ -4690,6 +4752,44 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "get_weather");
         assert!(calls[0].1.contains("Paris"), "args: {}", calls[0].1);
+    }
+
+    #[test]
+    fn harmony_sanitizer_drops_only_orphan_tool_results() {
+        use super::inner::sanitize_harmony_orphan_tool_results;
+        use crate::backend::{ContentBlock, Message, Role};
+
+        let orphan = Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "bad".into(),
+                content: "invalid tool json".into(),
+                is_error: true,
+            }],
+        };
+        assert!(
+            sanitize_harmony_orphan_tool_results(&[orphan]).is_empty(),
+            "orphan tool result would make harmony templates raise"
+        );
+
+        let assistant = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({ "command": "pwd" }),
+            }],
+        };
+        let result = Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "/tmp".into(),
+                is_error: false,
+            }],
+        };
+        let kept = sanitize_harmony_orphan_tool_results(&[assistant, result]);
+        assert_eq!(kept.len(), 2);
     }
 
     #[test]

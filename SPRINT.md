@@ -1,5 +1,36 @@
 # Sprint
 
+### ▶ matrix/model-agent improvement track (operator 2026-06-30)
+- [x] **matrix-rerun-reds-merge** — DONE (2026-06-30). Added
+  `scripts/bench/rerun_reds.py`: reads a result dir, `per-run.csv`, or full stdout log; finds only cells
+  whose verifier pass-rate is not fully green; reruns exact `(agent, model, task)` cells one at a time
+  (no accidental AGENTS×TASKS cross-product); and emits `rerun-plan.csv`, optional `rerun-per-run.csv`,
+  latest-wins `merged-per-run.csv`, and `summary.txt`. Dry-run on the full matrix correctly finds the 5
+  real red verifier cells, not green `greet` cells with non-zero agent rc.
+- [x] **opencode-tool-protocol-stabilization** — DONE (2026-06-30). Added a gpt-oss/harmony history
+  sanitizer in the MLX render path: orphan tool-result turns are dropped before chat-template render,
+  while valid assistant ToolUse → ToolResult loops are preserved. This prevents the observed
+  `tool role, but there was no previous assistant message with a tool call` template exception from
+  poisoning the next opencode/gpt-oss request after invalid tool JSON.
+- [x] **model-capability-registry** — DONE (2026-06-30). Added
+  `scripts/bench/matrix_capabilities.py`, which builds a machine-readable JSON registry from one or more
+  matrix CSVs/result dirs: model/agent/task pass-rate, status, mean/latest seconds, footprint, repairs,
+  and latest row source.
+- [x] **matrix-promotion-policy** — DONE (2026-06-30). The capability registry encodes the first policy:
+  `green = all runs pass and runs >= green_min_runs` (default 3), `yellow = at least one pass but partial
+  or single-run evidence`, `red = zero passing runs`, `gray = reserved for known-but-not-run/refused`.
+- [x] **matrix-ram-aware-scheduler** — DONE (2026-06-30). Added
+  `scripts/bench/plan_matrix_schedule.py`, which calls `rozum-gateway gateway --dry-run` per model,
+  parses the admission verdict/estimated footprint, orders loadable models by footprint, and can emit a
+  safe `MODELS` list. `run_full_matrix.sh` wires it behind opt-in `MATRIX_RAM_SCHEDULE=1`.
+- [x] **agent-specific-repair-profiles** — DONE (2026-06-30). `agentic.sh` repair prompts now include an
+  explicit delivery profile per agent: opencode gets JSON-safe one-line Bash guidance, codex gets
+  whole-file tiny-project replacement guidance, claude stays on normal minimal Read/Edit/Bash repair.
+  This is prompt-level guidance only, no hidden file mutation.
+- [x] **matrix-report-ui-data** — DONE (2026-06-30). Full matrix runs now emit `capabilities.json` next
+  to `per-run.csv`, and still print the human summary plus a ready `rerun_reds.py` command. This gives
+  future UCC/UI a stable JSON artifact with status/time/RAM/repair data instead of scraping logs.
+
 ### ▶ weak-coder delivery (operator 2026-06-29: "поизучай слабых новых моделей — у них есть что-то чего мы не замечаем")
 - [x] **weak-coders-under-measured-by-delivery** — DONE. The weak/new coders' low create scores are a
   tool-call DELIVERY artifact, not capability: they narrate a correct solution in a markdown ```rust

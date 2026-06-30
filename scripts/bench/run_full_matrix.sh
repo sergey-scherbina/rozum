@@ -25,6 +25,29 @@ LOG="/tmp/full_matrix-$STAMP.log"
 #      per agent turn, so it is slow → RUN_TIMEOUT is bumped well above the single-model 280 s below.
 MODELS="${MODELS:-mlx-community:Qwen3.6-35B-A3B-4bit-DWQ mlx-community:GLM-4-32B-0414-4bit,mlx-community:gpt-oss-20b-MXFP4-Q4}"
 
+if [ "${MATRIX_RAM_SCHEDULE:-0}" = 1 ] && command -v python3 >/dev/null 2>&1; then
+  PLAN_JSON="${OUT}.schedule.json"
+  if python3 scripts/bench/plan_matrix_schedule.py --models "$MODELS" --nctx "${NCTX:-32768}" --bench-bin "$BIN" --out "$PLAN_JSON"; then
+    PLANNED_MODELS="$(
+      python3 - "$PLAN_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    plan = json.load(f)
+print(" ".join(row["model"] for row in plan.get("models", []) if row.get("verdict") in ("load", "unknown")))
+PY
+    )"
+    if [ -n "$PLANNED_MODELS" ]; then
+      MODELS="$PLANNED_MODELS"
+      echo ">> RAM-aware model order: $MODELS"
+      echo ">> schedule: $PLAN_JSON"
+    fi
+  else
+    echo ">> RAM-aware scheduler failed; continuing with configured MODELS" >&2
+  fi
+fi
+
 # Optional safety lever (DEFAULT keep the safe 3 GiB): to squeeze the 35B in when RAM is tight, the
 # operator may lower keep-free — pass KEEP_FREE_GIB=2 to this script. Left UNSET = the safe 3 GiB default.
 EXTRA_ENV=()
@@ -36,7 +59,8 @@ fi
 echo ">> slot check"; pgrep -fl 'gateway --model|mlx_mem_probe' 2>/dev/null | grep -viE 'claude|mcp-proxy|grep' && { echo "ABORT: slot busy"; exit 1; }
 [ -f "$HOME/.rozum/residency.lock" ] && { echo "ABORT: residency lock present"; exit 1; }
 
-echo ">> launching: 2 models × {claude,codex,opencode} × {greet,build,fix,test,debug,rpn}, REPS=1, KEEP=1"
+MODEL_COUNT="$(printf '%s\n' "$MODELS" | awk '{print NF}')"
+echo ">> launching: $MODEL_COUNT models × {claude,codex,opencode} × {greet,build,fix,test,debug,rpn}, REPS=1, KEEP=1"
 echo ">> out=$OUT  log=$LOG"
 
 # RUN_TIMEOUT=900: the GLM-32B,gpt-oss lazy pipeline reloads both tiers per agent turn (~1–2 min each),
@@ -58,4 +82,7 @@ env "${EXTRA_ENV[@]}" \
 
 echo ">> done. CSV: $OUT/per-run.csv  | full log: $LOG"
 command -v python3 >/dev/null 2>&1 && python3 scripts/bench/summarize_matrix.py "$OUT/per-run.csv" || true
+command -v python3 >/dev/null 2>&1 && python3 scripts/bench/matrix_capabilities.py "$OUT/per-run.csv" --out "$OUT/capabilities.json" --green-min-runs "${GREEN_MIN_RUNS:-3}" || true
+echo ">> rerun reds only:"
+echo "   scripts/bench/rerun_reds.py \"$OUT\" --nctx ${NCTX:-32768} --run-timeout ${RUN_TIMEOUT:-900}"
 echo ">> slot after:"; pgrep -fl 'gateway --model' 2>/dev/null | grep -v claude || echo "  clean"
