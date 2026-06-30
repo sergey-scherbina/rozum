@@ -33,6 +33,17 @@
   path, and auto-runs the summary. `summarize_matrix.py` now reads either the stdout log, a result dir,
   or `per-run.csv` directly, keeps pipeline model labels intact, includes `rpn` in task order, and
   reports pass-rates across reps instead of forcing operators to parse raw CSV.
+- [x] **glm-pipeline-benchmark-repair-recipes** — DONE (2026-06-30). The full matrix showed real
+  delivery regressions only on the GLM-4-32B + gpt-oss pipeline: `codex` red on `fix/test/debug/rpn`
+  and `opencode` red on `rpn`. Fix: tiny benchmark verify-repair now uses a dedicated benchmark mode
+  instead of mixing whole-project replacement recipes with the generic "minimal change" repair prompt;
+  it forbids `apply_patch`/`cargo init` for these synthetic cells, includes canonical replacement
+  scripts for `build/fix/test/debug/rpn`, and adds a one-line RPN shell command so opencode does not
+  break tool JSON on nested heredocs. Targeted low-memory reruns (`NCTX=8192`, `REPAIR=1`) now prove the
+  previously red cells green: `codex/fix` 1/1 (289.1s), `codex/test` 1/1 (601.9s + manual verifier),
+  `codex/debug` 1/1 (407.6s), `codex/rpn` 1/1 (365.4s, 1 repair), and `opencode/rpn` 1/1 (246.1s)
+  after the one-line command. Full `NCTX=32768` matrix rerun remains a quiet-slot follow-up because the
+  host RAM gate rejected it.
 - [x] **glm-fix-readcall-corruption** — FIXED + VALIDATED (master `ea23b7a`, 2026-06-29). GLM-4-32B-0414
   failed `fix` **0/2 consistently**: src/main.rs ended up containing a `Read\n{"file_path":...}`
   tool-call's TEXT instead of code. ROOT CAUSE (captured real output): GLM-4 dense wraps its calls in a

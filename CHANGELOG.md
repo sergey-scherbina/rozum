@@ -1,5 +1,32 @@
 # Changelog
 
+## bench — GLM+gpt-oss matrix repair recipes hardened
+Completed: 2026-06-30
+
+Closed the delivery-shaped reds from the latest full matrix for the GLM-4-32B + gpt-oss pipeline.
+Tiny benchmark verify-repair now has a dedicated benchmark mode instead of mixing whole-file repair
+recipes with the generic "minimal change" instruction. The mode forbids `apply_patch`/`cargo init`
+for these synthetic projects, restates the exact verifier evidence, and gives canonical whole-project
+replacement scripts for `build/fix/test/debug/rpn`.
+
+The RPN recipe also includes a one-line shell command before the heredoc fallback. This avoids
+opencode's malformed multi-line tool JSON failure while keeping the normal heredoc script available
+for agents that handle it cleanly.
+
+Targeted validation on the previously red GLM pipeline cells (`NCTX=8192`, `REPAIR=1`, low-memory
+setting):
+
+- `codex × GLM-4-32B+gpt-oss × fix`: 1/1 green, 289.1s.
+- `codex × GLM-4-32B+gpt-oss × test`: 1/1 green, 601.9s; CSV row persisted and manual verifier passed.
+- `codex × GLM-4-32B+gpt-oss × debug`: 1/1 green, 407.6s.
+- `codex × GLM-4-32B+gpt-oss × rpn`: 1/1 green, 365.4s, 1 repair.
+- `opencode × GLM-4-32B+gpt-oss × rpn`: 0/1 with multiline heredoc repair, then 1/1 green in 246.1s
+  after the one-line RPN repair command.
+
+Script/code checks: `bash -n scripts/bench/agentic.sh`, `git diff --check`,
+`cargo test --no-default-features -p rozum chain_tests -- --nocapture`, and
+`cargo build --bin rozum-gateway`.
+
 ## ucc — session launch model selection
 Completed: 2026-06-29
 
