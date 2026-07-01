@@ -116,11 +116,15 @@ def stateColorOf(s: String): String =
 // The PWA reads a `rozum_token` session cookie (set on /login), resolves it to a
 // handle + per-room role via `rozum meetings token resolve`, and uses that to (a)
 // gate the incident action forms and (b) attribute actions with `--as <handle>`.
-// Policy is PERMISSIVE: no token = the original open behavior (may act); an
-// `observer` token is read-only; `responder`/`admin` may act.
+// Default policy is PERMISSIVE: no token = the original open behavior (may act); an
+// `observer` token is read-only; `responder`/`admin` may act. Set
+// ROZUM_MEETING_REQUIRE_TOKEN=1 to make no/invalid token read-only too.
 
 def sessionToken(): String =
   requestCookie("rozum_token").trim
+
+def strictTokenMode(): Boolean =
+  exec("sh", ["-c", "case \"${ROZUM_MEETING_REQUIRE_TOKEN:-0}\" in 1|true|TRUE|yes|YES|on|ON) printf 1;; *) printf 0;; esac"], ProcessOptions(None, Map(), None)).stdout.trim == "1"
 
 // "handle\trole" for the current cookie scoped to `room`, or "" (no/invalid token).
 def whoLine(room: String): String =
@@ -136,10 +140,11 @@ def roleOfLine(l: String): String =
   val b = l.split("\t")
   if b.length < 2 then "" else b(1).trim
 
-// May the holder of this resolved line act? No token (open) or responder/admin = yes; observer = no.
+// May the holder of this resolved line act? No token is open only outside strict mode.
 def canActLine(l: String): Boolean =
   val r = roleOfLine(l + "")
-  (r + "") == "" || (r + "") == "responder" || (r + "") == "admin"
+  if (r + "") == "" then strictTokenMode() == false
+  else (r + "") == "responder" || (r + "") == "admin"
 
 def incActionForm(act: String, room: String, id: String, label: String, color: String): View =
   element("form", ["method" -> "post", "action" -> "/do", "enctype" -> "text/plain", "style" -> "display:inline; margin:0 5px 0 0"], Map(), [
@@ -285,6 +290,9 @@ def badge(label: String, color: String): View =
 def emptyView(): View =
   element("span", Map(), Map(), [])
 
+def readOnlyNotice(msg: String): View =
+  element("div", ["style" -> "color:#8a93a0; font-size:13px; padding:9px 11px; border:1px solid #23272e; border-radius:8px; background:#15181d; margin:8px 0"], Map(), [textNode(msg)])
+
 // Extract a flat string field `"key":"value"` from a serialized StoredTurn line (same crude split
 // approach as who/msg). Empty if the key is absent — so a plain note (no kind/severity) shows no badge.
 def field(line: String, key: String): String =
@@ -387,6 +395,7 @@ def activeView(cur: String): View =
   else element("div", ["style" -> "flex:0 0 auto; display:flex; gap:7px; overflow-x:auto; padding:7px max(12px,env(safe-area-inset-right)) 7px max(12px,env(safe-area-inset-left)); background:#15181d; border-bottom:1px solid #23272e; -webkit-overflow-scrolling:touch"], Map(), authors.map(n => authorChip(n)).toList)
 
 def page(cur: String): String =
+  val canWrite = canActLine(whoLine(cur + ""))
   val rnames  = roomNames()
   val opts    = rnames.map(n => element("option", ["value" -> n], Map(), [textNode(n)])).toList
   val sel     = element("select", ["id" -> "rs", "style" -> "flex:1; min-width:0; padding:7px 10px; border-radius:8px; border:1px solid #333a44; background:#0f1115; color:#e6e6e6; font-size:15px"], Map(), opts)
@@ -401,10 +410,14 @@ def page(cur: String): String =
   val handle  = element("div", ["style" -> "width:56px; height:6px; border-radius:3px; background:#3a414d"], Map(), [])
   val nav     = element("div", ["id" -> "nav", "style" -> "flex:0 0 auto; display:flex; flex-direction:column; align-items:center; gap:9px; padding:max(8px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) 8px max(12px,env(safe-area-inset-left)); background:#1b1e24; border-bottom:1px solid #2a2e36"], Map(), [tabsRow, handle])
   val list  = element("div", ["id" -> "list", "style" -> "flex:1 1 auto; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px max(14px,env(safe-area-inset-right)) 12px max(14px,env(safe-area-inset-left)); color:#e6e6e6; font:15px/1.5 -apple-system,system-ui,sans-serif"], Map(), [msgsView(cur)])
-  val input = element("input", ["name" -> "content", "placeholder" -> "message…", "autocomplete" -> "off", "style" -> "flex:1; min-width:0; padding:10px 12px; border-radius:9px; border:1px solid #333a44; background:#0f1115; color:#e6e6e6; font-size:16px; line-height:1.2"], Map(), [])
-  val send  = element("button", ["type" -> "submit", "style" -> "flex:0 0 auto; white-space:nowrap; padding:10px 16px; border:0; border-radius:9px; background:#2f6feb; color:#fff; font-weight:600"], Map(), [textNode("send")])
+  val input =
+    if canWrite then element("input", ["name" -> "content", "placeholder" -> "message…", "autocomplete" -> "off", "style" -> "flex:1; min-width:0; padding:10px 12px; border-radius:9px; border:1px solid #333a44; background:#0f1115; color:#e6e6e6; font-size:16px; line-height:1.2"], Map(), [])
+    else element("input", ["name" -> "content", "placeholder" -> "только чтение — войдите responder/admin", "disabled" -> "disabled", "autocomplete" -> "off", "style" -> "flex:1; min-width:0; padding:10px 12px; border-radius:9px; border:1px solid #333a44; background:#101318; color:#8a93a0; font-size:16px; line-height:1.2"], Map(), [])
+  val send  =
+    if canWrite then element("button", ["type" -> "submit", "style" -> "flex:0 0 auto; white-space:nowrap; padding:10px 16px; border:0; border-radius:9px; background:#2f6feb; color:#fff; font-weight:600"], Map(), [textNode("send")])
+    else element("button", ["type" -> "submit", "disabled" -> "disabled", "style" -> "flex:0 0 auto; white-space:nowrap; padding:10px 16px; border:0; border-radius:9px; background:#2a2e36; color:#8a93a0; font-weight:600"], Map(), [textNode("read")])
   val rfield = element("input", ["type" -> "hidden", "name" -> "room", "value" -> cur], Map(), [])
-  val form  = element("form", ["id" -> "sb", "method" -> "post", "action" -> "/p", "enctype" -> "text/plain", "style" -> "flex:0 0 auto; display:flex; gap:8px; padding:9px max(12px,env(safe-area-inset-right)) calc(9px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left)); background:#1b1e24; border-top:1px solid #2a2e36"], Map(), [rfield, input, send])
+  val form  = element("form", ["id" -> "sb", "method" -> "post", "action" -> "/p", "enctype" -> "text/plain", "style" -> "flex:0 0 auto; display:flex; gap:8px; padding:9px max(12px,env(safe-area-inset-right)) calc(9px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left)); background:#1b1e24; border-top:1px solid #2a2e36"], Map(), [input, rfield, send])
   val doc   = element("div", ["id" -> "app", "style" -> "display:flex; flex-direction:column; height:100dvh; overflow:hidden; background:#14161a"], Map(), [nav, activeView(cur), list, form])
   head ++ renderHtml(doc) ++ script
 
@@ -419,8 +432,13 @@ def doPost(body: String): String =
   val room = if rp.length < 2 then "demo" else firstLine(rp(1) + "")
   val cp = body.split("content=")
   val content = if cp.length < 2 then "" else firstLine(cp(1) + "")
-  val r = exec("rozum", ["meetings", "post", "--room", room, content], ProcessOptions(None, Map(), None))
-  "ok"
+  val wl = whoLine(room + "")
+  if canActLine(wl + "") == false then "denied"
+  else
+    val h = handleOfLine(wl + "")
+    val args = if (h + "") == "" then ["meetings", "post", "--room", room, content] else ["meetings", "post", "--as", h + "", "--room", room, content]
+    val r = exec("rozum", args, ProcessOptions(None, Map(), None))
+    "ok"
 
 def confirmForm(act: String, key: String, value: String, label: String, color: String, confirmMsg: String): View =
   element("form", ["method" -> "post", "action" -> "/do", "enctype" -> "text/plain", "style" -> "display:inline", "onsubmit" -> ("return confirm('" + confirmMsg + "')")], Map(), [
@@ -429,18 +447,18 @@ def confirmForm(act: String, key: String, value: String, label: String, color: S
     element("button", ["style" -> ("background:" + color + "; color:#fff; border:0; border-radius:6px; padding:4px 11px; font-size:13px")], Map(), [textNode(label)])
   ])
 
-def roomItem(l: String): View =
+def roomItem(l: String, canManage: Boolean): View =
   val name = roomLineName(l)
   val proj = projOf(l)
   val link = element("a", ["href" -> ("/r/" + name), "style" -> "color:#7ab8ff; text-decoration:none; font-weight:600"], Map(), [textNode(name)])
   val tag  = element("span", ["style" -> "color:#5b626d; font-size:12px; margin-left:8px"], Map(), [textNode(if proj == "-" then "глобальная" else proj + "")])
-  val right = if proj == "-" then confirmForm("delroom", "name", name, "удалить", "#b3431f", "Удалить комнату " + name + "?") else element("span", ["style" -> "color:#5b626d; font-size:12px"], Map(), [textNode("проект")])
+  val right = if canManage && proj == "-" then confirmForm("delroom", "name", name, "удалить", "#b3431f", "Удалить комнату " + name + "?") else element("span", ["style" -> "color:#5b626d; font-size:12px"], Map(), [textNode(if proj == "-" then "только чтение" else "проект")])
   element("div", ["style" -> "display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 0; border-bottom:1px solid #23272e"], Map(), [element("span", Map(), Map(), [link, tag]), right])
 
-def modelItem(l: String): View =
+def modelItem(l: String, canManage: Boolean): View =
   val sp = l.split("GB")
   val spec = if sp.length < 2 then "" else sp(1).trim
-  val rm = if spec == "" then element("span", Map(), Map(), []) else confirmForm("rmmodel", "spec", spec, "удалить", "#b3431f", "Удалить модель " + spec + " (освободить диск)?")
+  val rm = if spec == "" || canManage == false then element("span", Map(), Map(), []) else confirmForm("rmmodel", "spec", spec, "удалить", "#b3431f", "Удалить модель " + spec + " (освободить диск)?")
   element("div", ["style" -> "display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 0; border-bottom:1px solid #23272e"], Map(), [element("span", ["style" -> "font-size:13px; overflow-wrap:anywhere"], Map(), [textNode(l)]), rm])
 
 def createForm(): View =
@@ -476,24 +494,24 @@ def gwModel(o: String): String =
   val a = o.split("model:")
   if a.length < 2 then "—" else firstLine(a(1) + "")
 
-def loadBtn(l: String): View =
+def loadBtn(l: String, canManage: Boolean): View =
   val sp = l.split("GB")
   if sp.length < 2 then element("span", Map(), Map(), [])
   else
     val spec = sp(1).trim
     element("div", ["style" -> "display:flex; justify-content:space-between; align-items:center; gap:8px; padding:7px 0; border-bottom:1px solid #23272e"], Map(), [
       element("span", ["style" -> "font-size:13px; overflow-wrap:anywhere"], Map(), [textNode(spec + "")]),
-      confirmForm("gwswitch", "spec", spec + "", "загрузить", "#2f6feb", "Загрузить эту модель в гейтвей?")
+      (if canManage then confirmForm("gwswitch", "spec", spec + "", "загрузить", "#2f6feb", "Загрузить эту модель в гейтвей?") else emptyView())
     ])
 
-def gwView(): View =
+def gwView(canManage: Boolean): View =
   val o = gwStatus()
   val running = o.contains("running")
   val hd = if running then element("div", ["style" -> "margin-bottom:10px"], Map(), [textNode("активна: "), element("code", ["style" -> "font-family:ui-monospace,Menlo,monospace; font-size:0.9em; background:#23272e; padding:1px 5px; border-radius:5px"], Map(), [textNode(gwModel(o))])]) else element("div", ["style" -> "color:#5b626d; margin-bottom:10px"], Map(), [textNode("гейтвей не запущен")])
   val mo = exec("rozum", ["models", "list"], ProcessOptions(None, Map(), None)).stdout
   val ml = mo.split("\n").filter(l => l.contains(":")).toList
-  val rows = ml.map(l => loadBtn(l)).toList
-  val ctl = if running then element("div", ["style" -> "display:flex; gap:8px; margin-top:12px"], Map(), [confirmForm("gwstop", "x", "1", "🛑 стоп", "#b3431f", "Остановить гейтвей?"), confirmForm("gwunload", "x", "1", "выгрузить", "#3a414d", "Выгрузить модель (демон останется)?")]) else element("span", Map(), Map(), [])
+  val rows = ml.map(l => loadBtn(l, canManage)).toList
+  val ctl = if running && canManage then element("div", ["style" -> "display:flex; gap:8px; margin-top:12px"], Map(), [confirmForm("gwstop", "x", "1", "🛑 стоп", "#b3431f", "Остановить гейтвей?"), confirmForm("gwunload", "x", "1", "выгрузить", "#3a414d", "Выгрузить модель (демон останется)?")]) else element("span", Map(), Map(), [])
   element("div", Map(), Map(), [hd, element("div", Map(), Map(), rows), ctl])
 
 def firstWord(s: String): String =
@@ -525,6 +543,7 @@ def policyOption(p: String): View =
   element("option", ["value" -> p], Map(), [textNode(p)])
 
 def mpPage(room: String): String =
+  val canManage = canActLine(whoLine(room + ""))
   val sl      = mpStatusLine(room)
   val running = sl.trim != ""
   val mo      = exec("rozum", ["models", "list"], ProcessOptions(None, Map(), None)).stdout
@@ -535,11 +554,11 @@ def mpPage(room: String): String =
       element("div", ["style" -> "margin:8px 0 14px"], Map(), [
         element("span", Map(), Map(), [textNode("● запущена: ")]),
         element("code", ["style" -> "font-family:ui-monospace,Menlo,monospace; font-size:0.9em; background:#23272e; padding:1px 6px; border-radius:5px; color:#6ee7a8"], Map(), [textNode(mpModelOf(firstLine(sl + "")))]),
-        element("form", ["method" -> "post", "action" -> "/do", "enctype" -> "text/plain", "style" -> "display:inline; margin-left:10px", "onsubmit" -> "return confirm('Остановить модель-участника?')"], Map(), [
+        (if canManage then element("form", ["method" -> "post", "action" -> "/do", "enctype" -> "text/plain", "style" -> "display:inline; margin-left:10px", "onsubmit" -> "return confirm('Остановить модель-участника?')"], Map(), [
           element("input", ["type" -> "hidden", "name" -> "act", "value" -> "mpstop"], Map(), []),
           element("input", ["type" -> "hidden", "name" -> "room", "value" -> room], Map(), []),
           element("button", ["style" -> "background:#b3431f; color:#fff; border:0; border-radius:6px; padding:4px 12px; font-size:13px"], Map(), [textNode("🛑 стоп")])
-        ])
+        ]) else emptyView())
       ])
     else element("div", ["style" -> "color:#5b626d; margin:8px 0 14px"], Map(), [textNode("модель-участник не запущена")])
   val startForm = element("form", ["method" -> "post", "action" -> "/do", "enctype" -> "text/plain", "style" -> "display:flex; flex-direction:column; gap:9px"], Map(), [
@@ -559,23 +578,25 @@ def mpPage(room: String): String =
     element("h2", ["style" -> "margin:8px 0 2px"], Map(), [textNode("Модель-участник")]),
     element("div", ["style" -> "font-size:13px; color:#6b7280; margin-bottom:8px"], Map(), [textNode("комната: " + room)]),
     statusV,
-    startForm
+    (if canManage then startForm else readOnlyNotice("только чтение — войдите responder/admin токеном, чтобы запускать или останавливать модель-участника"))
   ])
   head ++ renderHtml(doc)
 
 def managePage(): String =
+  val canManage = canActLine(whoLine(""))
   val rlines    = statusOut().split("\n").filter(l => l.contains("project:")).toList
-  val roomList  = element("div", Map(), Map(), rlines.map(l => roomItem(l)).toList)
+  val roomList  = element("div", Map(), Map(), rlines.map(l => roomItem(l, canManage)).toList)
   val modelsOut = exec("rozum", ["models", "list"], ProcessOptions(None, Map(), None)).stdout
   val mlines    = modelsOut.split("\n").filter(l => l.contains(":")).toList
-  val modelList = element("div", Map(), Map(), mlines.map(l => modelItem(l)).toList)
+  val modelList = element("div", Map(), Map(), mlines.map(l => modelItem(l, canManage)).toList)
   val back  = element("a", ["href" -> "/", "style" -> "color:#7ab8ff; text-decoration:none"], Map(), [textNode("← чат")])
   val title = element("h2", ["style" -> "margin:8px 0 2px"], Map(), [textNode("Управление")])
+  val ro = if canManage then emptyView() else readOnlyNotice("только чтение — для действий нужен responder/admin токен")
   val doc = element("div", ["style" -> "padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) 36px max(16px,env(safe-area-inset-left)); color:#e6e6e6; font:15px/1.5 -apple-system,system-ui,sans-serif; max-width:680px; margin:0 auto"], Map(), [
-    back, title,
-    section("Комнаты", element("div", Map(), Map(), [createForm(), cleanForm(), roomList])),
+    back, title, ro,
+    section("Комнаты", element("div", Map(), Map(), if canManage then [createForm(), cleanForm(), roomList] else [roomList])),
     section("Модели", modelList),
-    section("Гейтвей — модель для агентов", gwView()),
+    section("Гейтвей — модель для агентов", gwView(canManage)),
     section("Агенты — активны в rozum", agentsView())
   ])
   head ++ renderHtml(doc)
@@ -602,7 +623,12 @@ def doAction(body: String): String =
   val incid = if ip.length < 2 then "" else firstLine(ip(1) + "")
   val tp = body.split("to=")
   val to = if tp.length < 2 then "" else firstLine(tp(1) + "")
-  if act == "createroom" && name != "" then
+  val authRoom = if act.startsWith("inc-") || act.startsWith("mp") then room + "" else ""
+  if canActLine(whoLine(authRoom + "")) == false then
+    if act.startsWith("inc-") && room != "" then s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>denied"
+    else if act.startsWith("mp") && room != "" then s"<!doctype html><meta http-equiv='refresh' content='0;url=/mp/$room'>denied"
+    else "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url=/manage\">denied"
+  else if act == "createroom" && name != "" then
     if hasBad(name) then "<!doctype html><meta http-equiv='refresh' content='0;url=/manage'>ok"
     else
       val cmd = s"ROZUM_MEETING_ROOM=$name rozum meetings post 'комната создана'"
@@ -671,13 +697,13 @@ def loginPage(): String =
   val h   = handleOfLine(wl + "")
   val rl  = roleOfLine(wl + "")
   val cur =
-    if (h + "") == "" then element("div", ["style" -> "color:#5b626d; font-size:14px; margin-bottom:16px"], Map(), [textNode("сессия не установлена — открытый доступ")])
+    if (h + "") == "" then element("div", ["style" -> "color:#5b626d; font-size:14px; margin-bottom:16px"], Map(), [textNode(if strictTokenMode() then "сессия не установлена — только чтение" else "сессия не установлена — открытый доступ")])
     else element("div", ["style" -> "color:#9fd0ff; font-size:14px; margin-bottom:16px"], Map(), [textNode(s"вы вошли как 👤 ${h} · ${rl}")])
   val inp  = element("input", ["id" -> "logintok", "type" -> "text", "placeholder" -> "вставьте токен…", "autocomplete" -> "off", "autocapitalize" -> "off", "autocorrect" -> "off", "spellcheck" -> "false", "style" -> "width:100%; padding:11px 12px; border-radius:9px; border:1px solid #333a44; background:#0f1115; color:#e6e6e6; font-size:16px; margin-bottom:12px"], Map(), [])
   val save = element("button", ["id" -> "loginsave", "style" -> "flex:1 1 auto; background:#2f6feb; color:#fff; border:0; border-radius:9px; padding:11px; font-size:15px; font-weight:600"], Map(), [textNode("войти")])
   val clr  = element("button", ["id" -> "loginclear", "style" -> "flex:0 0 auto; background:#2a2e36; color:#cbd2da; border:0; border-radius:9px; padding:11px 16px; font-size:15px"], Map(), [textNode("выйти")])
   val btns = element("div", ["style" -> "display:flex; gap:8px"], Map(), [save, clr])
-  val hint = element("div", ["style" -> "color:#5b626d; font-size:12px; margin-top:16px; line-height:1.6"], Map(), [textNode("Токен выдаёт оператор: rozum meetings token issue --handle … --role observer|responder|admin. Роль определяет, можно ли менять инциденты.")])
+  val hint = element("div", ["style" -> "color:#5b626d; font-size:12px; margin-top:16px; line-height:1.6"], Map(), [textNode("Токен выдаёт оператор: rozum meetings token issue --handle … --role observer|responder|admin. В strict mode без responder/admin токена доступны только чтение и навигация.")])
   val card = element("div", ["style" -> "background:#15181d; border:1px solid #23272e; border-radius:14px; padding:18px; max-width:440px; margin:0 auto"], Map(), [cur, inp, btns, hint])
   val back = element("a", ["href" -> "/manage", "style" -> "color:#7ab8ff; text-decoration:none; font-size:15px"], Map(), [textNode("← управление")])
   val ttl  = element("div", ["style" -> "font-weight:700; font-size:18px; margin:14px 0 18px"], Map(), [textNode("🔑 сессия")])

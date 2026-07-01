@@ -13,6 +13,8 @@ churned by sibling agents switching branches — commits there don't stick.)
   models list/rm, gateway status/switch/stop/unload, model-participant start/stop.
 - Live launchd client rebuilt/reloaded from current `.ssc` source on 2026-06-23; `:8405`
   smoke covers the app, management, room fragments, PWA manifest, service worker, and icon.
+- `ROZUM_MEETING_REQUIRE_TOKEN=1` strict auth mode: no/invalid token becomes read-only; chat posting,
+  incident actions, room/model/gateway management, and model-participant controls require responder/admin.
 
 ## Management round 2 (2026-06-22, operator: "все задачи в спринт и делай")
 - [x] Bulk cleanup of junk rooms — one button deletes EMPTY global rooms; project rooms safe.

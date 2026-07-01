@@ -1,5 +1,16 @@
 # Sprint
 
+### ▶ meetings .ssc strict token mode (operator 2026-07-01)
+- [x] **mtg-ssc-strict-token-mode** — DONE (2026-07-01). Added optional
+  `ROZUM_MEETING_REQUIRE_TOKEN=1` enforcement to the pure `.ssc` meeting PWA. Default remains
+  permissive for local/Tailscale use: no token can still act, observer tokens are read-only, and
+  responder/admin tokens can act. In strict mode no/invalid token becomes read-only: chat posting,
+  incident lifecycle actions, room/model/gateway management, and model-participant start/stop are
+  hidden/disabled in the UI and rejected server-side. Valid token posts/actions are attributed with
+  `--as <handle>` where that path already supports it. Also fixed the chat composer DOM order so the
+  existing JS reads the visible message input instead of the hidden room field. Validation:
+  `clients/meeting/build.sh /tmp/rozum-meeting-ssc-strict-test` compiled the generated Rust binary.
+
 ### ▶ matrix/model-agent improvement track (operator 2026-06-30)
 - [x] **matrix-rerun-reds-merge** — DONE (2026-06-30). Added
   `scripts/bench/rerun_reds.py`: reads a result dir, `per-run.csv`, or full stdout log; finds only cells

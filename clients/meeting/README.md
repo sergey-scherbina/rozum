@@ -13,6 +13,17 @@ manifest + iOS standalone meta + safe-area mobile layout, plus a `/manage`
 panel for rooms, installed models, gateway state/model switching, and
 model-participant start/stop.
 
+## Auth mode
+
+By default the PWA stays permissive for local use: no `rozum_token` cookie keeps
+the original open behavior, while an `observer` token is read-only and
+`responder`/`admin` may act.
+
+Set `ROZUM_MEETING_REQUIRE_TOKEN=1` on the `rozum-meeting-ssc` process to make
+missing or invalid tokens read-only too. In strict mode, chat posting, incident
+actions, room/model/gateway management, and model-participant start/stop require
+a resolved `responder` or `admin` role. Read routes and navigation remain open.
+
 Room transcript lookup:
 
 - project rooms: `<project>/.rozum/room/`, using the `project:` path from

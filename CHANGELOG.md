@@ -1,5 +1,19 @@
 # Changelog
 
+## meeting .ssc — optional strict token mode
+Completed: 2026-07-01
+
+Added `ROZUM_MEETING_REQUIRE_TOKEN=1` for the pure ScalaScript meeting PWA. The default remains the
+existing permissive local mode, but strict mode treats missing or invalid `rozum_token` cookies as
+read-only: chat posting, incident actions, room/model/gateway management, and model-participant
+start/stop now require a resolved `responder` or `admin` token. The UI hides or disables write controls
+for read-only users, and `POST /p` plus `POST /do` reject hand-crafted writes server-side.
+
+Also fixed the chat composer's DOM order so the existing submit script reads the visible message input
+instead of the hidden room field. Validation: `clients/meeting/build.sh /tmp/rozum-meeting-ssc-strict-test`
+successfully compiled the generated Rust binary; live port 8405 was already occupied, so no temporary
+server was started.
+
 ## bench — matrix rerun, capability registry, and scheduler
 Completed: 2026-06-30
 
