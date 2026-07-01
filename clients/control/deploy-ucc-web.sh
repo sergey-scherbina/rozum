@@ -48,7 +48,7 @@ emit_html "$HERE/login.ssc"    8421 "$SITE/login.html"
 emit_html "$HERE/terminal.ssc" 8422 "$SITE/terminal.html"
 
 # 4) Copy PWA assets.
-for f in manifest.webmanifest icon.svg icon-180.png; do
+for f in manifest.webmanifest icon.svg icon-180.png sw.js; do
   [ -f "$HERE/pwa/$f" ] && cp "$HERE/pwa/$f" "$SITE/$f" && echo ">> copied $f"
 done
 

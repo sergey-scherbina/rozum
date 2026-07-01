@@ -15,13 +15,13 @@ stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the vie
 [signal, emit, serve, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, fetchActionWith, formBody, onBumpTick, incSignal, computedSignal, fieldColumn, hashSignal](std/ui/primitives.ssc)
 [jsonValue](std/json.ssc)
 [lower](std/ui/lower.ssc)
-[defaultTheme](std/ui/theme.ssc)
+[darkTheme](std/ui/theme.ssc)
 [vstack, hstack, divider](std/ui/layout.ssc)
 [heading, text](std/ui/typography.ssc)
 [badge, link](std/ui/display.ssc)
 [card, cardWithHeader](std/ui/containers.ssc)
 [signalText_](std/ui/reactive.ssc)
-[actionButton, textField](std/ui/input.ssc)
+[actionButton, textField, signalButton](std/ui/input.ssc)
 [remoteTable, lcol, rowLink](std/ui/data.ssc)
 [route, router](std/ui/routing.ssc)
 
@@ -35,7 +35,7 @@ val room = computedSignal(() => {
   val h = hash()
   if h.contains("/chat/") then h.split("/chat/").last else ""
 })
-val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else if hash().contains("/coders") then "coders" else if hash().contains("/sessions") then "sessions" else "home")
+val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else if hash().contains("/coders") then "coders" else if hash().contains("/sessions") then "coders" else "home")
 
 val chatTick = signal("chatTick", 0)
 val msgUrl   = computedSignal(() => "/chat/messages?room=" + room())
@@ -69,7 +69,7 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
   )
 )
 val residentsCard = cardWithHeader(heading(2, "Resident models (in memory now)"))(
-  remoteTable(st, [fieldColumn("PID", "pid"), fieldColumn("Model", "model")], "residency.residents")
+  remoteTable(st, [fieldColumn("PID", "pid"), fieldColumn("Model", "model"), fieldColumn("GiB", "size_gib")], "residency.residents")
 )
 val catCard = cardWithHeader(heading(2, "Installed catalog"))(
   remoteTable(st, [fieldColumn("Model", "spec"), fieldColumn("Size", "size_gib")], "installed")
@@ -144,6 +144,7 @@ val agentsList = cardWithHeader(heading(2, "Запущенные агенты"))
 )
 val agentModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", agModel, "spec")])
 
+val agentModelList = remoteTable(st, [fieldColumn("модель", "spec"), fieldColumn("GiB", "size_gib")], "installed", [rowLink("выбрать", agModel, "spec")])
 val launchForm = cardWithHeader(heading(2, "Запустить агента (модель в комнате)"))(
   vstack(gap = 8)(
     hstack(gap = 8)(text("свободно RAM:"), signalText_(availTxt)),
@@ -192,6 +193,7 @@ val cdAgent   = signal("cdAgent", "claude")
 val cdModel   = signal("cdModel", "")
 val cdWorkdir = signal("cdWorkdir", "")
 val cdPrompt  = signal("cdPrompt", "")
+val newProjectPath = signal("newProjectPath", "")
 val cdLogId   = signal("cdLogId", "")
 val cdStopId  = signal("cdStopId", "")
 val logTick   = signal("logTick", 0)
@@ -210,13 +212,22 @@ val codersList = cardWithHeader(heading(2, "Запущенные кодеры"))
 )
 val coderModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", cdModel, "spec")])
 
+val coderModelList = remoteTable(st, [fieldColumn("модель", "spec"), fieldColumn("GiB", "size_gib")], "installed", [rowLink("выбрать", cdModel, "spec")])
+val coderWorkdirList = remoteTable(st, [fieldColumn("проект", "name")], "projects", [rowLink("выбрать", cdWorkdir, "path")])
 val coderLaunch = cardWithHeader(heading(2, "Запустить кодера (реальная работа в репо)"))(
   vstack(gap = 8)(
     hstack(gap = 8)(text("свободно RAM:"), signalText_(availTxt)),
-    textField(cdAgent, "агент: claude | codex | opencode"),
+    vstack(gap = 4)(
+      hstack(gap = 8)(text("агент:"), signalText_(cdAgent)),
+      hstack(gap = 8)(signalButton(cdAgent, "claude", "claude"), signalButton(cdAgent, "codex", "codex"), signalButton(cdAgent, "opencode", "opencode"))
+    ),
     hstack(gap = 8)(text("модель:"), signalText_(cdModel)),
     coderModelList,
-    textField(cdWorkdir, "рабочая папка (абсолютный путь к репо)…"),
+    vstack(gap = 4)(
+      hstack(gap = 8)(text("папка:"), signalText_(cdWorkdir)),
+      coderWorkdirList,
+      hstack(gap = 8)(textField(newProjectPath, "имя проекта…"), actionButton(fetchActionWith("POST", "/control/project/add", formBody([("name", "newProjectPath")]), [onBumpTick(refresh)]), "＋ создать"))
+    ),
     textField(cdPrompt, "задание…"),
     actionButton(
       fetchActionWith("POST", "/control/coder/launch",
@@ -271,13 +282,22 @@ val sessionsList = cardWithHeader(heading(2, "Живые сессии (терм�
 )
 val sessionModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", seModel, "spec")])
 
+val sessionModelList = remoteTable(st, [fieldColumn("модель", "spec"), fieldColumn("GiB", "size_gib")], "installed", [rowLink("выбрать", seModel, "spec")])
+val sessionWorkdirList = remoteTable(st, [fieldColumn("проект", "name")], "projects", [rowLink("выбрать", seWorkdir, "path")])
 val sessionLaunch = cardWithHeader(heading(2, "Новая интерактивная сессия"))(
   vstack(gap = 8)(
     hstack(gap = 8)(text("свободно RAM:"), signalText_(availTxt)),
-    textField(seAgent, "агент: claude | codex | opencode"),
+    vstack(gap = 4)(
+      hstack(gap = 8)(text("агент:"), signalText_(seAgent)),
+      hstack(gap = 8)(signalButton(seAgent, "claude", "claude"), signalButton(seAgent, "codex", "codex"), signalButton(seAgent, "opencode", "opencode"))
+    ),
     hstack(gap = 8)(text("модель:"), signalText_(seModel)),
     sessionModelList,
-    textField(seWorkdir, "рабочая папка (абсолютный путь)…"),
+    vstack(gap = 4)(
+      hstack(gap = 8)(text("папка:"), signalText_(seWorkdir)),
+      sessionWorkdirList,
+      hstack(gap = 8)(textField(newProjectPath, "имя проекта…"), actionButton(fetchActionWith("POST", "/control/project/add", formBody([("name", "newProjectPath")]), [onBumpTick(refresh)]), "＋ создать"))
+    ),
     textField(sePrompt, "первое задание (необязательно)…"),
     actionButton(
       fetchActionWith("POST", "/control/session/launch",
@@ -315,5 +335,5 @@ val view = router(mode, [
   route("sessions", [sessionsBody])
 ])
 
-serve(lower(view, defaultTheme), 8410)
+serve(lower(view, darkTheme), 8410)
 ```

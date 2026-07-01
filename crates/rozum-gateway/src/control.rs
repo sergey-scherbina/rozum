@@ -18,22 +18,44 @@ use std::process::{Command, Stdio};
 /// that loads a model is admission-gated (`rozum gateway switch` runs the residency gate itself), and
 /// the launch reports a refusal verdict rather than risking an OOM.
 pub async fn serve(port: u16) -> std::io::Result<()> {
-    use axum::{response::IntoResponse, routing::{get, post}, Router};
+    use axum::{response::IntoResponse, routing::{delete, get, post, put}, Router};
     async fn status_route() -> impl IntoResponse {
         ([(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], axum::Json(status().await))
     }
+    ensure_rbac_initialized();
     // Public: SPA static files + read snapshot + auth ceremony + chat reads.
     let public = Router::new()
         .route("/", get(spa_root_route))
         .route("/{*path}", get(spa_static_route))
         .route("/control/status", get(status_route))
+        .route("/control/config", get(config_route))
         .route("/control/auth/status", get(auth_status_route))
         .route("/control/auth/register/begin", post(register_begin_route))
         .route("/control/auth/register/finish", post(register_finish_route))
         .route("/control/auth/login/begin", post(login_begin_route))
         .route("/control/auth/login/finish", post(login_finish_route))
+        .route("/control/invite/info", get(invite_info_route))
+        .route("/control/public/matrix", get(public_matrix_route))
+        .route("/control/public/matrix/live", get(public_matrix_live_route))
+        .route("/view/{token}", get(view_token_page_route))
         .route("/chat/messages", get(chat_messages_route))
         .route("/chat/incidents", get(chat_incidents_route));
+    // Admin sub-router (require_auth + require_admin both applied).
+    let admin = Router::new()
+        .route("/control/admin/users", get(admin_users_route))
+        .route("/control/admin/users/{id}/role", post(admin_set_role_route))
+        .route("/control/admin/users/{id}", delete(admin_delete_user_route))
+        .route("/control/admin/roles", get(admin_roles_route))
+        .route("/control/admin/roles", post(admin_create_role_route))
+        .route("/control/admin/roles/{id}", put(admin_update_role_route))
+        .route("/control/admin/roles/{id}", delete(admin_delete_role_route))
+        .route("/control/admin/invites", get(admin_invites_route))
+        .route("/control/admin/invites/create", post(admin_invite_create_route))
+        .route("/control/admin/invites/{token}", delete(admin_revoke_invite_route))
+        .route("/control/admin/view-tokens", get(admin_view_tokens_route))
+        .route("/control/admin/view-tokens/create", post(admin_view_token_create_route))
+        .route("/control/admin/view-tokens/{token}", delete(admin_view_token_revoke_route))
+        .route_layer(axum::middleware::from_fn(require_admin));
     // Protected by `require_auth` (own Face ID session OR busi SSO): every write action + the terminal WS.
     let protected = Router::new()
         .route("/chat/post", post(chat_post_route))
@@ -47,10 +69,22 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         .route("/control/session/launch", post(session_launch_route))
         .route("/control/session/stop", post(session_stop_route))
         .route("/control/session/attach/{id}", get(session_attach_route))
+        .route("/control/project/add", post(project_add_route))
+        .route("/control/matrix/run", post(matrix_run_route))
+        .route("/control/matrix/pause", post(matrix_pause_route))
+        .route("/control/matrix/resume", post(matrix_resume_route))
+        .route("/control/matrix/stop", post(matrix_stop_route))
+        .merge(admin)
         .route_layer(axum::middleware::from_fn(require_auth));
+    let public = public
+        .route("/control/matrix/status", get(matrix_status_route))
+        .route("/control/matrix/log", get(matrix_log_route))
+        .route("/control/matrix/cell", get(matrix_cell_route))
+        .route("/control/matrix/live", get(matrix_live_route));
     let app = public.merge(protected);
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    tokio::spawn(matrix_worker());
     eprintln!("control server: http://{addr}/ (SPA + API, no Python proxy needed)");
     axum::serve(listener, app).await
 }
@@ -65,11 +99,12 @@ fn ucc_site_dir() -> PathBuf {
 }
 
 fn serve_site_file(name: &str) -> axum::response::Response {
-    use axum::{http::{header, StatusCode}, response::IntoResponse};
+    use axum::{http::{header, HeaderValue, StatusCode}, response::IntoResponse};
     let path = ucc_site_dir().join(name);
     match std::fs::read(&path) {
-        Ok(bytes) => {
-            let mime = match path.extension().and_then(|e| e.to_str()) {
+        Ok(mut bytes) => {
+            let ext = path.extension().and_then(|e| e.to_str());
+            let mime = match ext {
                 Some("html") => "text/html; charset=utf-8",
                 Some("js")   => "application/javascript",
                 Some("css")  => "text/css",
@@ -79,7 +114,19 @@ fn serve_site_file(name: &str) -> axum::response::Response {
                 Some("webmanifest") => "application/manifest+json",
                 _ => "application/octet-stream",
             };
-            ([(header::CONTENT_TYPE, mime)], bytes).into_response()
+            if ext == Some("html") {
+                // Inject service-worker registration before </body> so PWA auto-updates
+                // without requiring a manual hard-refresh.
+                const SW_REG: &[u8] = b"<script>if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js')}</script>";
+                if let Some(pos) = std::str::from_utf8(&bytes).ok().and_then(|s| s.rfind("</body>")) {
+                    bytes.splice(pos..pos, SW_REG.iter().copied());
+                }
+            }
+            let mut resp = ([(header::CONTENT_TYPE, mime)], bytes).into_response();
+            if ext == Some("html") {
+                resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            }
+            resp
         }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
@@ -396,6 +443,8 @@ struct AgentLaunchReq {
     policy: String,
     #[serde(default)]
     persona: String,
+    #[serde(default)]
+    handle: String,
 }
 fn default_policy() -> String { "mention".into() }
 
@@ -420,7 +469,8 @@ async fn agent_launch_route(axum::Json(req): axum::Json<AgentLaunchReq>) -> axum
     // 2) Spawn the participant detached + register it.
     match spawn_participant(&model, &room, &req.policy, req.persona.trim(), port) {
         Ok(pid) => {
-            let handle = derive_handle(&model);
+            let h = req.handle.trim().to_string();
+            let handle = if h.is_empty() { derive_handle(&model) } else { h };
             let id = format!("{}-{}", sanitize(&room), pid);
             let mut agents = load_agents();
             agents.push(AgentRecord {
@@ -658,10 +708,11 @@ async fn coder_launch_route(axum::Json(req): axum::Json<CoderLaunchReq>) -> axum
     }
 }
 
-async fn coder_stop_route(axum::Json(req): axum::Json<AgentStopReq>) -> axum::response::Response {
+async fn coder_stop_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
+    let id = body.trim().to_string();
     let mut coders = load_coders();
-    let Some(pos) = coders.iter().position(|c| c.id == req.id) else {
+    let Some(pos) = coders.iter().position(|c| c.id == id) else {
         return json_err(axum::http::StatusCode::NOT_FOUND, "no such coder");
     };
     let c = coders.remove(pos);
@@ -805,13 +856,14 @@ async fn session_launch_route(axum::Json(req): axum::Json<SessionLaunchReq>) -> 
     axum::Json(serde_json::json!({ "ok": true, "id": id })).into_response()
 }
 
-async fn session_stop_route(axum::Json(req): axum::Json<AgentStopReq>) -> axum::response::Response {
+async fn session_stop_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let _ = Command::new("tmux").args(["kill-session", "-t", &tmux_name(&req.id)]).status();
+    let id = body.trim().to_string();
+    let _ = Command::new("tmux").args(["kill-session", "-t", &tmux_name(&id)]).status();
     let mut sessions = load_sessions();
-    sessions.retain(|s| s.id != req.id);
+    sessions.retain(|s| s.id != id);
     save_sessions(&sessions);
-    axum::Json(serde_json::json!({ "ok": true, "id": req.id })).into_response()
+    axum::Json(serde_json::json!({ "ok": true, "id": id })).into_response()
 }
 
 /// WS: bridge a PTY running `tmux attach -t rozum-<id>` to the browser terminal. Closing the WS ends the
@@ -889,6 +941,939 @@ async fn session_ws_bridge(mut socket: axum::extract::ws::WebSocket, id: String)
     let _ = child.kill(); // end the `tmux attach` (NOT the session — it stays detached for reconnect)
 }
 
+// ── Matrix benchmark queue ────────────────────────────────────────────────────────────────────────────
+//
+// Manages a persistent in-memory queue of matrix benchmark jobs. Each job runs `agentic.sh` with
+// scoped AGENTIC_MODELS / AGENTS / TASKS env vars. A background tokio task processes one job at a
+// time; the frontend polls `/control/matrix/status` for queue state + the latest per-run.csv cells.
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum MatrixJobStatus { Queued, Running, Paused, Done, Failed, Stopped }
+
+// Live state for the currently running matrix job (cleared when job finishes).
+struct MatrixLive {
+    job_id: String,
+    pgid: i32,
+    paused: bool,
+    done: bool,       // true after exit, panel stays visible for DONE_TTL_SECS
+    done_at: u64,
+    started_at: u64,
+    total_cells: usize,
+    log_path: String,
+    result_dir: String,
+}
+const DONE_TTL_SECS: u64 = 300; // keep panel visible 5 min after completion
+
+fn matrix_live() -> &'static Mutex<Option<MatrixLive>> {
+    use std::sync::OnceLock;
+    static L: OnceLock<Mutex<Option<MatrixLive>>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(None))
+}
+
+fn matrix_live_data() -> serde_json::Value {
+    let live = matrix_live().lock().unwrap();
+    let Some(ref l) = *live else {
+        return serde_json::json!({ "status": "idle" });
+    };
+    let now = crate::share::now_unix();
+    // If job finished and TTL has expired, treat as idle
+    if l.done && now.saturating_sub(l.done_at) > DONE_TTL_SECS {
+        drop(live);
+        *matrix_live().lock().unwrap() = None;
+        return serde_json::json!({ "status": "idle" });
+    }
+    let elapsed_s = if l.done { l.done_at.saturating_sub(l.started_at) } else { now.saturating_sub(l.started_at) };
+    // Count done cells from partial CSV
+    let result_path = PathBuf::from(&l.result_dir).join("per-run.csv");
+    let done = parse_matrix_csv(&result_path).len();
+    // Log tail
+    let log_tail = std::fs::read_to_string(&l.log_path).unwrap_or_default();
+    let tail_lines: Vec<&str> = log_tail.lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let tail_start = tail_lines.len().saturating_sub(8);
+    let log_recent = tail_lines[tail_start..].join("\n");
+    // Current task hint: prefer model/agent/task lines (contain "/"), fall back to TASK keyword lines
+    let current_hint = if l.done {
+        String::new()
+    } else {
+        tail_lines.iter().rev()
+            .find(|l| {
+                let t = l.trim();
+                !t.chars().all(|c| c == '=' || c == ' ' || c == '-')
+                    && (t.contains('/') || t.contains("TASK") || t.contains("task"))
+            })
+            .map(|s| s.trim().trim_matches('=').trim().to_string())
+            .unwrap_or_default()
+    };
+    // Memory from residency
+    let report = crate::share::dry_run_admission(0);
+    let available_gib = report.available.unwrap_or(0) as f64 / 1024.0 / 1024.0 / 1024.0;
+    let committed_gib = report.in_use as f64 / 1024.0 / 1024.0 / 1024.0;
+    let status = if l.done { "done" } else if l.paused { "paused" } else { "running" };
+    serde_json::json!({
+        "status": status,
+        "elapsed_s": elapsed_s,
+        "started_at": l.started_at,
+        "progress": { "done": done, "total": l.total_cells },
+        "memory": { "available_gib": (available_gib * 10.0).round() / 10.0,
+                    "committed_gib": (committed_gib * 10.0).round() / 10.0 },
+        "current_hint": current_hint,
+        "log_tail": log_recent,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MatrixJob {
+    id: String,
+    models: Option<Vec<String>>,
+    agents: Option<Vec<String>>,
+    tasks: Option<Vec<String>>,
+    status: MatrixJobStatus,
+    queued_at: u64,
+    started_at: Option<u64>,
+    finished_at: Option<u64>,
+    log_path: Option<String>,
+    result_dir: Option<String>,
+    exit_code: Option<i32>,
+}
+
+fn matrix_queue() -> &'static Mutex<Vec<MatrixJob>> {
+    use std::sync::OnceLock;
+    static Q: OnceLock<Mutex<Vec<MatrixJob>>> = OnceLock::new();
+    Q.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn matrix_notify() -> &'static tokio::sync::Notify {
+    use std::sync::OnceLock;
+    static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    N.get_or_init(tokio::sync::Notify::new)
+}
+
+fn bench_script() -> PathBuf {
+    std::env::current_dir().unwrap_or_default().join("scripts/bench/agentic.sh")
+}
+
+fn bench_results_dir() -> PathBuf {
+    std::env::current_dir().unwrap_or_default().join("scripts/bench/results")
+}
+
+fn latest_matrix_result() -> Option<(String, PathBuf)> {
+    let dir = bench_results_dir();
+    let mut entries: Vec<_> = std::fs::read_dir(&dir).ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            // only directories named agentic-*, skip .console/.log files
+            n.starts_with("agentic-") && !n.contains('.')
+        })
+        .filter(|e| e.path().join("per-run.csv").exists())
+        .collect();
+    entries.sort_by_key(|e| {
+        e.metadata().and_then(|m| m.modified()).ok()
+    });
+    let last = entries.last()?;
+    let stamp = last.file_name().to_string_lossy().to_string();
+    Some((stamp, last.path().join("per-run.csv")))
+}
+
+fn parse_matrix_csv(csv_path: &PathBuf) -> Vec<serde_json::Value> {
+    let text = match std::fs::read_to_string(csv_path) { Ok(t) => t, Err(_) => return vec![] };
+    let mut lines = text.lines();
+    let header: Vec<String> = match lines.next() {
+        Some(h) => h.split(',').map(|s| s.to_string()).collect(),
+        None => return vec![],
+    };
+    lines.filter(|l| !l.trim().is_empty()).map(|line| {
+        let vals: Vec<&str> = line.split(',').collect();
+        let mut obj = serde_json::Map::new();
+        for (i, key) in header.iter().enumerate() {
+            let v = vals.get(i).copied().unwrap_or("");
+            if let Ok(n) = v.parse::<i64>() {
+                obj.insert(key.clone(), serde_json::json!(n));
+            } else if let Ok(f) = v.parse::<f64>() {
+                obj.insert(key.clone(), serde_json::json!(f));
+            } else {
+                obj.insert(key.clone(), serde_json::json!(v));
+            }
+        }
+        serde_json::Value::Object(obj)
+    }).collect()
+}
+
+async fn matrix_status_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let queue: Vec<MatrixJob> = matrix_queue().lock().unwrap().clone();
+    let last = latest_matrix_result().map(|(stamp, csv)| {
+        let cells = parse_matrix_csv(&csv);
+        let total = cells.len();
+        let passed = cells.iter()
+            .filter(|c| c.get("pass").and_then(|v| v.as_i64()).unwrap_or(0) == 1)
+            .count();
+        serde_json::json!({ "stamp": stamp, "cells": cells, "total": total, "passed": passed })
+    });
+    let installed: Vec<String> = rozum_models::models::scan_all_installed()
+        .into_iter().map(|m| m.spec).collect();
+    axum::Json(serde_json::json!({ "queue": queue, "last": last, "installed": installed })).into_response()
+}
+
+#[derive(Deserialize)]
+struct MatrixRunReq {
+    models: Option<Vec<String>>,
+    agents: Option<Vec<String>>,
+    tasks: Option<Vec<String>>,
+}
+
+async fn matrix_run_route(axum::Json(req): axum::Json<MatrixRunReq>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let id = format!("job-{}", crate::share::now_unix());
+    let job = MatrixJob {
+        id: id.clone(),
+        models: req.models,
+        agents: req.agents,
+        tasks: req.tasks,
+        status: MatrixJobStatus::Queued,
+        queued_at: crate::share::now_unix(),
+        started_at: None, finished_at: None, log_path: None, result_dir: None, exit_code: None,
+    };
+    matrix_queue().lock().unwrap().push(job);
+    matrix_notify().notify_one();
+    axum::Json(serde_json::json!({ "ok": true, "id": id })).into_response()
+}
+
+#[derive(Deserialize)]
+struct MatrixLogQuery { job_id: String, #[serde(default = "default_tail")] tail: usize }
+
+async fn matrix_log_route(axum::extract::Query(q): axum::extract::Query<MatrixLogQuery>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let log_path = matrix_queue().lock().unwrap()
+        .iter().find(|j| j.id == q.job_id)
+        .and_then(|j| j.log_path.clone());
+    match log_path {
+        None => json_err(axum::http::StatusCode::NOT_FOUND, "no log for job"),
+        Some(path) => {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            let start = lines.len().saturating_sub(q.tail.min(2000));
+            axum::Json(serde_json::json!({ "log": lines[start..].join("\n") })).into_response()
+        }
+    }
+}
+
+async fn matrix_worker() {
+    loop {
+        matrix_notify().notified().await;
+        loop {
+            let job_id = {
+                let mut q = matrix_queue().lock().unwrap();
+                q.iter().position(|j| j.status == MatrixJobStatus::Queued)
+                    .map(|i| {
+                        q[i].status = MatrixJobStatus::Running;
+                        q[i].started_at = Some(crate::share::now_unix());
+                        q[i].id.clone()
+                    })
+            };
+            let Some(id) = job_id else { break };
+            run_matrix_job(&id).await;
+        }
+    }
+}
+
+async fn run_matrix_job(job_id: &str) {
+    let (models, agents, tasks) = {
+        let q = matrix_queue().lock().unwrap();
+        let Some(j) = q.iter().find(|j| j.id == job_id) else { return };
+        (j.models.clone(), j.agents.clone(), j.tasks.clone())
+    };
+
+    let log_dir = state_dir().map(|d| d.join("matrix-logs")).unwrap_or_else(|| PathBuf::from("/tmp"));
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join(format!("{job_id}.log"));
+
+    let stamp = crate::share::now_unix();
+    let result_dir = bench_results_dir().join(format!("agentic-ucc-{stamp}"));
+    let _ = std::fs::create_dir_all(&result_dir);
+
+    {
+        let mut q = matrix_queue().lock().unwrap();
+        if let Some(j) = q.iter_mut().find(|j| j.id == job_id) {
+            j.log_path = Some(log_path.to_string_lossy().into_owned());
+            j.result_dir = Some(result_dir.to_string_lossy().into_owned());
+        }
+    }
+
+    let log_out = match std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        Ok(f) => f, Err(_) => { matrix_fail(job_id); return; }
+    };
+    let log_err = match log_out.try_clone() { Ok(f) => f, Err(_) => { matrix_fail(job_id); return; } };
+
+    let all_models: Vec<String> = rozum_models::models::scan_all_installed().into_iter().map(|m| m.spec).collect();
+    let models_vec = models.unwrap_or(all_models);
+    let agents_vec = agents.unwrap_or_else(|| vec!["claude".into(), "codex".into(), "opencode".into()]);
+    let tasks_vec  = tasks.unwrap_or_else(|| vec!["greet".into(), "build".into(), "fix".into(), "test".into(), "debug".into()]);
+    let total_cells = models_vec.len() * agents_vec.len() * tasks_vec.len();
+    let models_str = models_vec.join(" ");
+    let agents_str = agents_vec.join(" ");
+    let tasks_str  = tasks_vec.join(" ");
+
+    let started_at = {
+        let q = matrix_queue().lock().unwrap();
+        q.iter().find(|j| j.id == job_id).and_then(|j| j.started_at).unwrap_or_else(crate::share::now_unix)
+    };
+
+    use std::os::unix::process::CommandExt as _;
+    let mut cmd = Command::new("bash");
+    cmd.arg(bench_script())
+        .env("AGENTIC_MODELS", &models_str)
+        .env("AGENTS", &agents_str)
+        .env("TASKS", &tasks_str)
+        .env("BENCH_OUT", &result_dir)
+        .env("ROZUM_SAMPLING_SEED", "1234")
+        .env("KEEP", "1") // preserve workdirs so we can archive cell logs
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_out))
+        .stderr(Stdio::from(log_err))
+        .process_group(0);
+
+    let exit_code = match cmd.spawn() {
+        Ok(mut child) => {
+            let pgid = child.id() as i32;
+            *matrix_live().lock().unwrap() = Some(MatrixLive {
+                job_id: job_id.to_string(), pgid, paused: false,
+                done: false, done_at: 0,
+                started_at, total_cells,
+                log_path: log_path.to_string_lossy().into_owned(),
+                result_dir: result_dir.to_string_lossy().into_owned(),
+            });
+            let code = tokio::task::spawn_blocking(move || child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1)).await.unwrap_or(-1);
+            let finish_ts = crate::share::now_unix();
+            if let Some(ref mut l) = *matrix_live().lock().unwrap() {
+                l.done = true;
+                l.done_at = finish_ts;
+            }
+            code
+        }
+        Err(e) => { eprintln!("matrix worker: spawn failed: {e}"); -1 }
+    };
+
+    // Archive kept workdirs into $OUT/cells/<agent>/<model_safe>/<task>/
+    archive_matrix_cells(&result_dir);
+
+    let status = if exit_code == 0 { MatrixJobStatus::Done } else { MatrixJobStatus::Failed };
+    let mut q = matrix_queue().lock().unwrap();
+    if let Some(j) = q.iter_mut().find(|j| j.id == job_id) {
+        j.status = status;
+        j.finished_at = Some(crate::share::now_unix());
+        j.exit_code = Some(exit_code);
+    }
+}
+
+/// After a KEEP=1 run: scan /tmp/rozum-agentic-* for workdirs whose agentic.meta
+/// matches this run, then copy them into $OUT/cells/<agent>/<model_safe>/<task>/.
+fn archive_matrix_cells(result_dir: &PathBuf) {
+    let cells_root = result_dir.join("cells");
+    let tmp = PathBuf::from("/tmp");
+    let entries = match std::fs::read_dir(&tmp) {
+        Ok(e) => e, Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("rozum-agentic-") { continue; }
+        let meta_path = entry.path().join("agentic.meta");
+        let Ok(meta_text) = std::fs::read_to_string(&meta_path) else { continue };
+        // Parse key=value
+        let kv: std::collections::HashMap<&str, &str> = meta_text.lines()
+            .filter_map(|l| l.split_once('='))
+            .collect();
+        let (agent, model, task) = match (kv.get("agent"), kv.get("model"), kv.get("task")) {
+            (Some(&a), Some(&m), Some(&t)) if !a.is_empty() && !t.is_empty() => (a, m, t),
+            _ => continue,
+        };
+        let safe_model = model.replace(['/', ':', ' '], "_");
+        let dest = cells_root.join(agent).join(&safe_model).join(task);
+        if dest.exists() { continue; } // already archived
+        let _ = std::fs::create_dir_all(&dest);
+        for file in ["agent.log", "verify.out", "agentic.meta", "cargo.err"] {
+            let src = entry.path().join(file);
+            if src.exists() { let _ = std::fs::copy(&src, dest.join(file)); }
+        }
+    }
+}
+
+/// Hardcoded task prompts and expected outputs matching agentic.sh's prompt_for().
+fn matrix_task_info(task: &str) -> serde_json::Value {
+    match task {
+        "greet" => serde_json::json!({
+            "label": "Greet",
+            "difficulty": 1,
+            "prompt": "Reply with exactly the single word: pong  (nothing else, no punctuation).",
+            "expected": "output contains \"pong\""
+        }),
+        "build" => serde_json::json!({
+            "label": "Build",
+            "difficulty": 2,
+            "prompt": "Create a minimal Rust binary project in the CURRENT directory: reverse-cli — reads its first CLI arg and prints it reversed. Then run `cargo run -- hello` and confirm it prints \"olleh\".",
+            "expected": "cargo run -- hello == olleh"
+        }),
+        "fix" => serde_json::json!({
+            "label": "Fix",
+            "difficulty": 3,
+            "prompt": "There is a Rust project in the current directory. `cargo run -- hello` prints \"hello\" instead of \"olleh\". Find and fix the one-line bug in src/main.rs, then confirm it prints \"olleh\".",
+            "expected": "cargo run -- hello == olleh"
+        }),
+        "test" => serde_json::json!({
+            "label": "Test",
+            "difficulty": 4,
+            "prompt": "Extend the reverse-cli project: implement a reverse() function and a #[test] that asserts reverse(\"hello\") == \"olleh\". Run `cargo test` (green) and `cargo run -- hello` (olleh).",
+            "expected": "cargo test green AND cargo run -- hello == olleh"
+        }),
+        "debug" => serde_json::json!({
+            "label": "Debug",
+            "difficulty": 5,
+            "prompt": "There is a Rust library in the current directory. `cargo test` fails due to a bug in src/lib.rs. Fix the bug (do NOT modify the test) so `cargo test` passes.",
+            "expected": "cargo test green"
+        }),
+        "rpn" => serde_json::json!({
+            "label": "RPN calc",
+            "difficulty": 6,
+            "prompt": "Create a Rust binary `rpn-calc` that evaluates a Reverse Polish Notation expression from its first CLI arg (space-separated tokens, integer arithmetic). Verify: `cargo run -- \"3 4 + 5 *\"` == 35 and `cargo run -- \"5 1 2 + 4 * + 3 -\"` == 14.",
+            "expected": "both RPN expressions produce correct integer results"
+        }),
+        _ => serde_json::json!({ "label": task, "difficulty": null, "prompt": null, "expected": null }),
+    }
+}
+
+#[derive(Deserialize)]
+struct MatrixCellQuery {
+    stamp: String,
+    agent: String,
+    model: String,
+    task: String,
+    #[serde(default = "default_tail")]
+    tail: usize,
+}
+
+async fn matrix_cell_route(axum::extract::Query(q): axum::extract::Query<MatrixCellQuery>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    // Find cell in the specified result dir
+    let csv_path = bench_results_dir().join(&q.stamp).join("per-run.csv");
+    let cell = parse_matrix_csv(&csv_path).into_iter().find(|c| {
+        c.get("agent").and_then(|v| v.as_str()) == Some(&q.agent) &&
+        c.get("model").and_then(|v| v.as_str()) == Some(&q.model) &&
+        c.get("task").and_then(|v| v.as_str()) == Some(&q.task)
+    });
+
+    // Check for archived cell logs
+    let safe_model = q.model.replace(['/', ':', ' '], "_");
+    let cell_dir = bench_results_dir().join(&q.stamp).join("cells").join(&q.agent).join(&safe_model).join(&q.task);
+
+    let agent_log = if cell_dir.join("agent.log").exists() {
+        let text = std::fs::read_to_string(cell_dir.join("agent.log")).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let start = lines.len().saturating_sub(q.tail.min(3000));
+        Some(lines[start..].join("\n"))
+    } else { None };
+
+    let verify_out = if cell_dir.join("verify.out").exists() {
+        std::fs::read_to_string(cell_dir.join("verify.out")).ok()
+    } else { None };
+
+    axum::Json(serde_json::json!({
+        "cell": cell,
+        "task_info": matrix_task_info(&q.task),
+        "agent_log": agent_log,
+        "verify_out": verify_out,
+        "has_logs": cell_dir.exists(),
+    })).into_response()
+}
+
+fn matrix_fail(job_id: &str) {
+    let mut q = matrix_queue().lock().unwrap();
+    if let Some(j) = q.iter_mut().find(|j| j.id == job_id) {
+        j.status = MatrixJobStatus::Failed;
+        j.finished_at = Some(crate::share::now_unix());
+    }
+}
+
+fn signal_matrix(sig: libc::c_int) -> bool {
+    let live = matrix_live().lock().unwrap();
+    if let Some(ref l) = *live {
+        unsafe { libc::killpg(l.pgid, sig) == 0 }
+    } else { false }
+}
+
+async fn matrix_pause_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let ok = signal_matrix(libc::SIGSTOP);
+    if ok {
+        let mut live = matrix_live().lock().unwrap();
+        if let Some(ref mut l) = *live {
+            l.paused = true;
+            let id = l.job_id.clone();
+            drop(live);
+            let mut q = matrix_queue().lock().unwrap();
+            if let Some(j) = q.iter_mut().find(|j| j.id == id) { j.status = MatrixJobStatus::Paused; }
+        }
+    }
+    axum::Json(serde_json::json!({ "ok": ok })).into_response()
+}
+
+async fn matrix_resume_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let ok = signal_matrix(libc::SIGCONT);
+    if ok {
+        let mut live = matrix_live().lock().unwrap();
+        if let Some(ref mut l) = *live {
+            l.paused = false;
+            let id = l.job_id.clone();
+            drop(live);
+            let mut q = matrix_queue().lock().unwrap();
+            if let Some(j) = q.iter_mut().find(|j| j.id == id) { j.status = MatrixJobStatus::Running; }
+        }
+    }
+    axum::Json(serde_json::json!({ "ok": ok })).into_response()
+}
+
+async fn matrix_stop_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // SIGCONT first to unfreeze if paused, then SIGTERM
+    signal_matrix(libc::SIGCONT);
+    let ok = signal_matrix(libc::SIGTERM);
+    axum::Json(serde_json::json!({ "ok": ok })).into_response()
+}
+
+async fn matrix_live_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    axum::Json(matrix_live_data()).into_response()
+}
+
+async fn public_matrix_live_route(
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let token = q.get("t").map(|s| s.as_str()).unwrap_or("");
+    if !check_view_token(token) {
+        return (axum::http::StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": "invalid or revoked token" }))).into_response();
+    }
+    axum::Json(matrix_live_data()).into_response()
+}
+
+// ── View tokens: secret public share links for the matrix ────────────────────────────────────────────
+//
+// A view token is a random 64-char hex string that grants read-only access to the matrix results
+// without any login. The admin creates/revokes tokens; anyone with the URL can view.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ViewToken {
+    token: String,
+    label: String,
+    created_at: u64,
+    revoked: bool,
+}
+
+fn view_tokens_path() -> Option<PathBuf> { state_dir().map(|d| d.join("ucc-view-tokens.json")) }
+fn load_view_tokens() -> Vec<ViewToken> { json_load(view_tokens_path()) }
+fn save_view_tokens(v: &[ViewToken]) { json_save_rbac(view_tokens_path(), v); }
+
+fn check_view_token(token: &str) -> bool {
+    load_view_tokens().iter().any(|t| t.token == token && !t.revoked)
+}
+
+async fn public_matrix_route(
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let token = q.get("t").map(|s| s.as_str()).unwrap_or("");
+    if !check_view_token(token) {
+        return (axum::http::StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({ "error": "invalid or revoked token" }))).into_response();
+    }
+    // Re-use the same matrix status logic
+    let queue: Vec<MatrixJob> = matrix_queue().lock().unwrap().clone();
+    let last = latest_matrix_result().map(|(stamp, csv)| {
+        let cells = parse_matrix_csv(&csv);
+        let total = cells.len();
+        let passed = cells.iter().filter(|c| c.get("pass").and_then(|v| v.as_i64()).unwrap_or(0) == 1).count();
+        serde_json::json!({ "stamp": stamp, "cells": cells, "total": total, "passed": passed })
+    });
+    axum::Json(serde_json::json!({ "queue": queue, "last": last })).into_response()
+}
+
+async fn view_token_page_route(
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::{http::{header, StatusCode}, response::IntoResponse};
+    if !check_view_token(&token) {
+        let body = "<!doctype html><html><head><meta charset=utf-8><title>Недоступно</title></head><body style='font:16px system-ui;text-align:center;padding:60px;background:#0f1117;color:#c9d1d9'>Эта ссылка недействительна или отозвана.</body></html>";
+        return (StatusCode::GONE, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response();
+    }
+    // Serve view.html with token injected as a meta tag
+    let page = serve_site_file("view.html");
+    // Inject token into page as a script var before </head>
+    use axum::body::Body;
+    let inject = format!("<script>window._VIEW_TOKEN='{token}';</script>");
+    // Re-read the file and inject
+    let path = ucc_site_dir().join("view.html");
+    match std::fs::read_to_string(&path) {
+        Err(_) => (StatusCode::NOT_FOUND, "view.html not found").into_response(),
+        Ok(html) => {
+            let patched = if let Some(pos) = html.find("</head>") {
+                format!("{}{}{}", &html[..pos], inject, &html[pos..])
+            } else {
+                format!("{inject}{html}")
+            };
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8"),
+              (header::CACHE_CONTROL, "no-store")],
+             patched).into_response()
+        }
+    }
+}
+
+// Admin view-token routes
+async fn admin_view_tokens_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let tokens = load_view_tokens();
+    let out: Vec<_> = tokens.iter().map(|t| serde_json::json!({
+        "token": t.token, "label": t.label, "created_at": t.created_at, "revoked": t.revoked,
+    })).collect();
+    axum::Json(serde_json::json!({ "tokens": out })).into_response()
+}
+
+#[derive(Deserialize)] struct ViewTokenCreateReq { #[serde(default)] label: String }
+
+async fn admin_view_token_create_route(
+    axum::Json(req): axum::Json<ViewTokenCreateReq>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let token = rand_token();
+    let mut tokens = load_view_tokens();
+    tokens.push(ViewToken { token: token.clone(), label: req.label, created_at: crate::share::now_unix(), revoked: false });
+    save_view_tokens(&tokens);
+    axum::Json(serde_json::json!({ "ok": true, "token": token })).into_response()
+}
+
+async fn admin_view_token_revoke_route(
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut tokens = load_view_tokens();
+    let Some(t) = tokens.iter_mut().find(|t| t.token == token) else {
+        return json_err(axum::http::StatusCode::NOT_FOUND, "token not found");
+    };
+    t.revoked = true;
+    save_view_tokens(&tokens);
+    axum::Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+// ── RBAC: users, roles, invites ──────────────────────────────────────────────────────────────────────
+//
+// Permissions: read | chat | agents | matrix | projects | admin (admin implies all).
+// Roles = named groups of flags. Built-in: readonly, operator, admin.
+// Users link one or more passkeys (one per device) to a role.
+// Invites = tokens generated by admin; encode the role; single-use by default.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UccUser {
+    id: String,
+    display_name: String,
+    role_ids: Vec<String>,
+    passkey_ids: Vec<String>, // hex-encoded cred IDs
+    created_at: u64,
+    created_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UccRole {
+    id: String,
+    name: String,
+    permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UccInvite {
+    token: String,
+    role_id: String,
+    label: String,
+    created_by: String,
+    created_at: u64,
+    expires_at: Option<u64>,
+    max_uses: Option<u32>,
+    uses: u32,
+    revoked: bool,
+}
+
+fn users_path()   -> Option<PathBuf> { state_dir().map(|d| d.join("ucc-users.json")) }
+fn roles_path()   -> Option<PathBuf> { state_dir().map(|d| d.join("ucc-roles.json")) }
+fn invites_path() -> Option<PathBuf> { state_dir().map(|d| d.join("ucc-invites.json")) }
+
+fn load_users()   -> Vec<UccUser>   { json_load(users_path())   }
+fn load_roles()   -> Vec<UccRole>   { json_load(roles_path())   }
+fn load_invites() -> Vec<UccInvite> { json_load(invites_path()) }
+fn save_users(v: &[UccUser])     { json_save_rbac(users_path(),   v); }
+fn save_roles(v: &[UccRole])     { json_save_rbac(roles_path(),   v); }
+fn save_invites(v: &[UccInvite]) { json_save_rbac(invites_path(), v); }
+
+fn json_load<T: serde::de::DeserializeOwned>(path: Option<PathBuf>) -> Vec<T> {
+    path.and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+fn json_save_rbac<T: Serialize + ?Sized>(path: Option<PathBuf>, val: &T) {
+    let Some(p) = path else { return };
+    if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
+    if let Ok(b) = serde_json::to_vec_pretty(val) {
+        let tmp = p.with_extension("json.tmp");
+        if std::fs::write(&tmp, &b).is_ok() { let _ = std::fs::rename(&tmp, &p); }
+    }
+}
+
+fn default_roles() -> Vec<UccRole> {
+    vec![
+        UccRole { id: "readonly".into(), name: "Только чтение".into(),
+            permissions: vec!["read".into()] },
+        UccRole { id: "operator".into(), name: "Оператор".into(),
+            permissions: vec!["read".into(),"chat".into(),"agents".into(),"matrix".into(),"projects".into()] },
+        UccRole { id: "admin".into(), name: "Администратор".into(),
+            permissions: vec!["admin".into()] },
+    ]
+}
+
+/// First-boot: if passkeys exist but no users file, create the admin user and default roles.
+fn ensure_rbac_initialized() {
+    let users_exist = users_path().map(|p| p.exists()).unwrap_or(false);
+    if users_exist { return; }
+    let creds = load_creds_raw();
+    if creds.is_empty() { return; }
+    if load_roles().is_empty() { save_roles(&default_roles()); }
+    let passkey_ids: Vec<String> = creds.iter().map(|p| cred_id_hex(p.cred_id())).collect();
+    save_users(&[UccUser {
+        id: Uuid::new_v4().to_string(),
+        display_name: "Admin".into(),
+        role_ids: vec!["admin".into()],
+        passkey_ids,
+        created_at: crate::share::now_unix(),
+        created_by: None,
+    }]);
+}
+
+fn cred_id_hex(id: &CredentialID) -> String {
+    id.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn find_user_by_cred(cred_hex: &str) -> Option<UccUser> {
+    load_users().into_iter().find(|u| u.passkey_ids.iter().any(|id| id == cred_hex))
+}
+
+fn user_has_perm(user_id: &str, perm: &str) -> bool {
+    if user_id == "busi-sso" { return true; }
+    let users = load_users();
+    let Some(user) = users.iter().find(|u| u.id == user_id) else { return false };
+    let roles = load_roles();
+    for rid in &user.role_ids {
+        let Some(role) = roles.iter().find(|r| r.id == *rid) else { continue };
+        if role.permissions.iter().any(|p| p == "admin" || p == perm) { return true; }
+    }
+    false
+}
+
+fn check_invite(token: &str) -> Result<UccInvite, &'static str> {
+    let now = crate::share::now_unix();
+    let Some(inv) = load_invites().into_iter().find(|i| i.token == token) else { return Err("invite not found"); };
+    if inv.revoked { return Err("invite revoked"); }
+    if let Some(exp) = inv.expires_at { if exp < now { return Err("invite expired"); } }
+    if inv.uses >= inv.max_uses.unwrap_or(1) { return Err("invite already used"); }
+    Ok(inv)
+}
+
+fn consume_invite(token: &str) {
+    let mut invites = load_invites();
+    if let Some(inv) = invites.iter_mut().find(|i| i.token == token) { inv.uses += 1; }
+    save_invites(&invites);
+}
+
+fn rand_token() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+// ── Admin RBAC route handlers ──────────────────────────────────────────────────────────────────────
+
+async fn admin_users_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let users = load_users();
+    let roles = load_roles();
+    let out: Vec<_> = users.iter().map(|u| {
+        let role_names: Vec<&str> = u.role_ids.iter()
+            .filter_map(|rid| roles.iter().find(|r| r.id == *rid).map(|r| r.name.as_str()))
+            .collect();
+        serde_json::json!({
+            "id": u.id, "display_name": u.display_name,
+            "role_ids": u.role_ids, "role_names": role_names,
+            "passkey_count": u.passkey_ids.len(), "created_at": u.created_at,
+        })
+    }).collect();
+    axum::Json(serde_json::json!({ "users": out, "roles": roles })).into_response()
+}
+
+#[derive(Deserialize)] struct SetRoleReq { role_ids: Vec<String> }
+
+async fn admin_set_role_route(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<SetRoleReq>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut users = load_users();
+    let Some(u) = users.iter_mut().find(|u| u.id == id) else {
+        return json_err(axum::http::StatusCode::NOT_FOUND, "user not found");
+    };
+    u.role_ids = req.role_ids;
+    save_users(&users);
+    axum::Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+async fn admin_delete_user_route(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut users = load_users();
+    let before = users.len();
+    users.retain(|u| u.id != id);
+    if users.len() == before { return json_err(axum::http::StatusCode::NOT_FOUND, "user not found"); }
+    save_users(&users);
+    axum::Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+async fn admin_roles_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let all_perms = ["read","chat","agents","matrix","projects","admin"];
+    axum::Json(serde_json::json!({ "roles": load_roles(), "all_permissions": all_perms })).into_response()
+}
+
+#[derive(Deserialize)] struct RoleReq { name: String, #[serde(default)] permissions: Vec<String> }
+
+async fn admin_create_role_route(axum::Json(req): axum::Json<RoleReq>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if req.name.trim().is_empty() { return json_err(axum::http::StatusCode::BAD_REQUEST, "name required"); }
+    let id = sanitize(&req.name.to_lowercase());
+    let mut roles = load_roles();
+    if roles.iter().any(|r| r.id == id) { return json_err(axum::http::StatusCode::CONFLICT, "role id exists"); }
+    roles.push(UccRole { id: id.clone(), name: req.name, permissions: req.permissions });
+    save_roles(&roles);
+    axum::Json(serde_json::json!({ "ok": true, "id": id })).into_response()
+}
+
+async fn admin_update_role_route(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<RoleReq>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut roles = load_roles();
+    let Some(r) = roles.iter_mut().find(|r| r.id == id) else {
+        return json_err(axum::http::StatusCode::NOT_FOUND, "role not found");
+    };
+    r.name = req.name; r.permissions = req.permissions;
+    save_roles(&roles);
+    axum::Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+async fn admin_delete_role_route(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if matches!(id.as_str(), "admin" | "operator" | "readonly") {
+        return json_err(axum::http::StatusCode::FORBIDDEN, "built-in roles cannot be deleted");
+    }
+    let mut roles = load_roles();
+    let before = roles.len();
+    roles.retain(|r| r.id != id);
+    if roles.len() == before { return json_err(axum::http::StatusCode::NOT_FOUND, "role not found"); }
+    save_roles(&roles);
+    axum::Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+async fn admin_invites_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let now = crate::share::now_unix();
+    let invites = load_invites();
+    let roles = load_roles();
+    let out: Vec<_> = invites.iter().map(|inv| {
+        let role_name = roles.iter().find(|r| r.id == inv.role_id).map(|r| r.name.as_str()).unwrap_or(&inv.role_id);
+        let active = !inv.revoked
+            && inv.expires_at.map(|e| e > now).unwrap_or(true)
+            && inv.uses < inv.max_uses.unwrap_or(1);
+        serde_json::json!({
+            "token": inv.token, "role_id": inv.role_id, "role_name": role_name,
+            "label": inv.label, "created_at": inv.created_at,
+            "expires_at": inv.expires_at, "max_uses": inv.max_uses,
+            "uses": inv.uses, "revoked": inv.revoked, "active": active,
+        })
+    }).collect();
+    axum::Json(serde_json::json!({ "invites": out })).into_response()
+}
+
+#[derive(Deserialize)]
+struct InviteCreateReq {
+    role_id: String,
+    #[serde(default)] label: String,
+    max_uses: Option<u32>,
+    ttl_hours: Option<u64>,
+}
+
+async fn admin_invite_create_route(
+    axum::extract::Extension(user_id): axum::extract::Extension<String>,
+    axum::Json(req): axum::Json<InviteCreateReq>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !load_roles().iter().any(|r| r.id == req.role_id) {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "unknown role_id");
+    }
+    let now = crate::share::now_unix();
+    let token = rand_token();
+    let mut invites = load_invites();
+    invites.push(UccInvite {
+        token: token.clone(), role_id: req.role_id, label: req.label,
+        created_by: user_id, created_at: now,
+        expires_at: req.ttl_hours.map(|h| now + h * 3600),
+        max_uses: req.max_uses, uses: 0, revoked: false,
+    });
+    save_invites(&invites);
+    axum::Json(serde_json::json!({ "ok": true, "token": token })).into_response()
+}
+
+async fn admin_revoke_invite_route(
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut invites = load_invites();
+    let Some(inv) = invites.iter_mut().find(|i| i.token == token) else {
+        return json_err(axum::http::StatusCode::NOT_FOUND, "invite not found");
+    };
+    inv.revoked = true;
+    save_invites(&invites);
+    axum::Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+#[derive(Deserialize)] struct InviteInfoQuery { token: String }
+
+async fn invite_info_route(
+    axum::extract::Query(q): axum::extract::Query<InviteInfoQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match check_invite(&q.token) {
+        Err(e) => json_err(axum::http::StatusCode::GONE, e),
+        Ok(inv) => {
+            let roles = load_roles();
+            let role = roles.iter().find(|r| r.id == inv.role_id);
+            axum::Json(serde_json::json!({
+                "valid": true, "role_id": inv.role_id,
+                "role_name": role.map(|r| r.name.as_str()).unwrap_or(&inv.role_id),
+                "permissions": role.map(|r| r.permissions.as_slice()).unwrap_or(&[]),
+                "label": inv.label,
+                "uses_remaining": inv.max_uses.map(|m| m - inv.uses),
+            })).into_response()
+        }
+    }
+}
+
 // ── Phase 4a: auth gate — own Face ID (WebAuthn) OR busi SSO ─────────────────────────────────────────
 //
 // Two auth sources, either suffices: (1) the UCC's OWN passkey (Face ID) via webauthn-rs — a `rozum_sess`
@@ -915,9 +1900,10 @@ fn webauthn() -> Option<&'static Webauthn> {
 }
 
 fn creds_path() -> Option<PathBuf> { state_dir().map(|d| d.join("ucc-credentials.json")) }
-fn load_creds() -> Vec<Passkey> {
+fn load_creds_raw() -> Vec<Passkey> {
     creds_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
+fn load_creds() -> Vec<Passkey> { load_creds_raw() }
 fn save_creds(c: &[Passkey]) {
     if let Some(p) = creds_path() {
         if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
@@ -928,9 +1914,10 @@ fn save_creds(c: &[Passkey]) {
     }
 }
 
-// In-flight ceremony state — single operator, so one slot each is enough.
-fn reg_inflight() -> &'static Mutex<Option<PasskeyRegistration>> {
-    static S: OnceLock<Mutex<Option<PasskeyRegistration>>> = OnceLock::new();
+// In-flight ceremony state.
+struct RegInflight { state: PasskeyRegistration, invite_token: Option<String>, display_name: String }
+fn reg_inflight() -> &'static Mutex<Option<RegInflight>> {
+    static S: OnceLock<Mutex<Option<RegInflight>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(None))
 }
 fn auth_inflight() -> &'static Mutex<Option<PasskeyAuthentication>> {
@@ -940,10 +1927,14 @@ fn auth_inflight() -> &'static Mutex<Option<PasskeyAuthentication>> {
 
 const SESSION_TTL_SECS: u64 = 30 * 24 * 3600;
 fn sess_path() -> Option<PathBuf> { state_dir().map(|d| d.join("ucc-auth-sessions.json")) }
-fn load_auth_sessions() -> Vec<(String, u64)> {
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessEntry { token: String, user_id: String, expires_at: u64 }
+
+fn load_auth_sessions() -> Vec<SessEntry> {
     sess_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
-fn save_auth_sessions(s: &[(String, u64)]) {
+fn save_auth_sessions(s: &[SessEntry]) {
     if let Some(p) = sess_path() {
         if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
         if let Ok(b) = serde_json::to_vec(s) {
@@ -952,19 +1943,20 @@ fn save_auth_sessions(s: &[(String, u64)]) {
         }
     }
 }
-fn mint_session() -> String {
+fn mint_session(user_id: &str) -> String {
     let token = Uuid::new_v4().simple().to_string();
     let now = crate::share::now_unix();
     let mut s = load_auth_sessions();
-    s.retain(|(_, exp)| *exp > now); // prune expired
-    s.push((token.clone(), now + SESSION_TTL_SECS));
+    s.retain(|e| e.expires_at > now);
+    s.push(SessEntry { token: token.clone(), user_id: user_id.to_string(), expires_at: now + SESSION_TTL_SECS });
     save_auth_sessions(&s);
     token
 }
-fn valid_session(token: &str) -> bool {
+fn session_user(token: &str) -> Option<String> {
     let now = crate::share::now_unix();
-    load_auth_sessions().iter().any(|(t, exp)| t == token && *exp > now)
+    load_auth_sessions().into_iter().find(|e| e.token == token && e.expires_at > now).map(|e| e.user_id)
 }
+fn valid_session(token: &str) -> bool { session_user(token).is_some() }
 
 /// Parse a `name=value; …` Cookie header into a lookup.
 fn cookie(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
@@ -986,22 +1978,36 @@ fn busi_authed(headers: &axum::http::HeaderMap) -> bool {
     content.lines().any(|l| l.trim() == tok)
 }
 
-/// Authenticated iff a valid own session (`rozum_sess`) OR a valid busi session (`busi_device`).
-fn authed(headers: &axum::http::HeaderMap) -> bool {
+/// Returns the authenticated user_id: "busi-sso" for busi users, actual UUID for webauthn users.
+fn authed_user_id(headers: &axum::http::HeaderMap) -> Option<String> {
     if let Some(s) = cookie(headers, "rozum_sess") {
-        if valid_session(&s) { return true; }
+        if let Some(uid) = session_user(&s) { return Some(uid); }
     }
-    busi_authed(headers)
+    if busi_authed(headers) { return Some("busi-sso".to_string()); }
+    None
+}
+fn authed(headers: &axum::http::HeaderMap) -> bool { authed_user_id(headers).is_some() }
+
+/// Middleware: 401 unless authenticated. Injects `Extension<String>` (user_id) for downstream use.
+async fn require_auth(mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match authed_user_id(req.headers()) {
+        Some(uid) => { req.extensions_mut().insert(uid); next.run(req).await }
+        None => (axum::http::StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "auth required" }))).into_response(),
+    }
 }
 
-/// Middleware: 401 unless authenticated. Applied to every action route + the terminal WS (NOT to
-/// `/control/status` or `/control/auth/*`, which must be reachable to render the login screen + log in).
-async fn require_auth(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+/// Inner middleware for admin-only routes: reads the user_id injected by `require_auth`, checks admin perm.
+async fn require_admin(
+    axum::extract::Extension(user_id): axum::extract::Extension<String>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
     use axum::response::IntoResponse;
-    if authed(req.headers()) {
+    if user_has_perm(&user_id, "admin") {
         next.run(req).await
     } else {
-        (axum::http::StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "auth required" }))).into_response()
+        (axum::http::StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": "admin required" }))).into_response()
     }
 }
 
@@ -1012,19 +2018,58 @@ fn set_cookie(name: &str, value: &str, max_age: u64) -> [(axum::http::HeaderName
 
 async fn auth_status_route(headers: axum::http::HeaderMap) -> axum::response::Response {
     use axum::response::IntoResponse;
+    let user_id = authed_user_id(&headers);
+    let user_info = user_id.as_deref().and_then(|uid| {
+        if uid == "busi-sso" {
+            return Some(serde_json::json!({ "id": "busi-sso", "display_name": "busi SSO", "permissions": ["admin"] }));
+        }
+        let users = load_users();
+        let user = users.iter().find(|u| u.id == uid)?;
+        let roles = load_roles();
+        let mut perms: Vec<String> = user.role_ids.iter()
+            .filter_map(|rid| roles.iter().find(|r| r.id == *rid))
+            .flat_map(|r| r.permissions.iter().cloned())
+            .collect::<std::collections::HashSet<_>>().into_iter().collect();
+        perms.sort();
+        Some(serde_json::json!({
+            "id": user.id, "display_name": user.display_name,
+            "roles": user.role_ids, "permissions": perms,
+        }))
+    });
     axum::Json(serde_json::json!({
-        "authed": authed(&headers),
+        "authed": user_id.is_some(),
         "has_credential": !load_creds().is_empty(),
         "webauthn_ok": webauthn().is_some(),
+        "user": user_info,
     })).into_response()
 }
 
-async fn register_begin_route() -> axum::response::Response {
+#[derive(Deserialize, Default)]
+struct RegisterBeginReq {
+    #[serde(default)] invite: Option<String>,
+    #[serde(default)] display_name: Option<String>,
+}
+
+async fn register_begin_route(body: axum::body::Bytes) -> axum::response::Response {
     use axum::response::IntoResponse;
+    let req: RegisterBeginReq = if body.is_empty() { Default::default() }
+        else { serde_json::from_slice(&body).unwrap_or_default() };
+    let users = load_users();
+    if !users.is_empty() {
+        let Some(ref tok) = req.invite else {
+            return json_err(axum::http::StatusCode::FORBIDDEN, "invite required");
+        };
+        if let Err(e) = check_invite(tok) { return json_err(axum::http::StatusCode::FORBIDDEN, e); }
+    }
     let Some(w) = webauthn() else { return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "webauthn init failed"); };
+    let display_name = req.display_name.clone().unwrap_or_else(|| "user".into());
+    let user_name = sanitize(&display_name.to_lowercase());
     let exclude: Vec<CredentialID> = load_creds().iter().map(|p| p.cred_id().clone()).collect();
-    match w.start_passkey_registration(operator_uuid(), "operator", "operator", Some(exclude)) {
-        Ok((ccr, state)) => { *reg_inflight().lock().unwrap() = Some(state); axum::Json(ccr).into_response() }
+    match w.start_passkey_registration(Uuid::new_v4(), &user_name, &display_name, Some(exclude)) {
+        Ok((ccr, state)) => {
+            *reg_inflight().lock().unwrap() = Some(RegInflight { state, invite_token: req.invite, display_name });
+            axum::Json(ccr).into_response()
+        }
         Err(e) => json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:?}")),
     }
 }
@@ -1032,9 +2077,40 @@ async fn register_begin_route() -> axum::response::Response {
 async fn register_finish_route(axum::Json(reg): axum::Json<RegisterPublicKeyCredential>) -> axum::response::Response {
     use axum::response::IntoResponse;
     let Some(w) = webauthn() else { return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "webauthn init failed"); };
-    let Some(state) = reg_inflight().lock().unwrap().take() else { return json_err(axum::http::StatusCode::BAD_REQUEST, "no registration in flight"); };
-    match w.finish_passkey_registration(&reg, &state) {
-        Ok(pk) => { let mut c = load_creds(); c.push(pk); save_creds(&c); axum::Json(serde_json::json!({ "ok": true })).into_response() }
+    let Some(inflight) = reg_inflight().lock().unwrap().take() else {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "no registration in flight");
+    };
+    match w.finish_passkey_registration(&reg, &inflight.state) {
+        Ok(pk) => {
+            let cred_hex = cred_id_hex(pk.cred_id());
+            let mut c = load_creds(); c.push(pk); save_creds(&c);
+            if load_roles().is_empty() { save_roles(&default_roles()); }
+            let mut users = load_users();
+            if let Some(ref tok) = inflight.invite_token {
+                if let Ok(inv) = check_invite(tok) {
+                    users.push(UccUser {
+                        id: Uuid::new_v4().to_string(), display_name: inflight.display_name,
+                        role_ids: vec![inv.role_id.clone()], passkey_ids: vec![cred_hex],
+                        created_at: crate::share::now_unix(), created_by: Some(inv.created_by),
+                    });
+                    save_users(&users);
+                    consume_invite(tok);
+                }
+            } else if let Some(admin) = users.iter_mut().find(|u| u.role_ids.contains(&"admin".to_string())) {
+                // Adding a new device to the existing admin account.
+                admin.passkey_ids.push(cred_hex);
+                save_users(&users);
+            } else {
+                // Brand-new install: create the first admin user.
+                users.push(UccUser {
+                    id: Uuid::new_v4().to_string(), display_name: "Admin".into(),
+                    role_ids: vec!["admin".into()], passkey_ids: vec![cred_hex],
+                    created_at: crate::share::now_unix(), created_by: None,
+                });
+                save_users(&users);
+            }
+            axum::Json(serde_json::json!({ "ok": true })).into_response()
+        }
         Err(e) => json_err(axum::http::StatusCode::BAD_REQUEST, &format!("{e:?}")),
     }
 }
@@ -1055,8 +2131,13 @@ async fn login_finish_route(axum::Json(auth): axum::Json<PublicKeyCredential>) -
     let Some(w) = webauthn() else { return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "webauthn init failed"); };
     let Some(state) = auth_inflight().lock().unwrap().take() else { return json_err(axum::http::StatusCode::BAD_REQUEST, "no login in flight"); };
     match w.finish_passkey_authentication(&auth, &state) {
-        Ok(_) => {
-            let token = mint_session();
+        Ok(auth_result) => {
+            ensure_rbac_initialized();
+            let cred_hex = cred_id_hex(auth_result.cred_id());
+            let user_id = find_user_by_cred(&cred_hex)
+                .map(|u| u.id)
+                .unwrap_or_else(|| "admin".to_string());
+            let token = mint_session(&user_id);
             (set_cookie("rozum_sess", &token, SESSION_TTL_SECS),
              axum::Json(serde_json::json!({ "ok": true }))).into_response()
         }
@@ -1090,6 +2171,8 @@ pub struct ControlStatus {
     /// The live interactive terminal sessions (tmux-backed) — so the UCC can list them, open the
     /// xterm.js terminal, and stop them.
     pub sessions: Vec<SessionBrief>,
+    /// Known project directories (from rooms.json), for workdir selection in the UCC launch forms.
+    pub projects: Vec<ProjectBrief>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1116,6 +2199,7 @@ pub struct ResidencyStatus {
 pub struct ResidentBrief {
     pub pid: u32,
     pub model: String,
+    pub size_gib: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1137,6 +2221,12 @@ pub struct MetricBrief {
 #[derive(Debug, Clone, Serialize)]
 pub struct MeetingBrief {
     pub room: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectBrief {
+    pub name: String,
+    pub path: String,
 }
 
 /// List the meeting rooms from the daemon's on-disk registry (`$XDG_STATE_HOME|~/.local/state` →
@@ -1167,6 +2257,122 @@ fn list_meetings() -> Vec<MeetingBrief> {
         .collect()
 }
 
+/// List known project directories from `rooms.json` for the workdir picker. Rooms without a
+/// project path, and test/worktree paths, are excluded.
+fn ucc_config_path() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".rozum/ucc/config.json")
+}
+
+fn read_projects_dir() -> String {
+    std::fs::read(ucc_config_path()).ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("projects_dir").and_then(|d| d.as_str()).map(|s| s.to_string()))
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| std::path::PathBuf::from(h).join("work").to_string_lossy().to_string())
+                .unwrap_or_else(|| "/tmp/projects".to_string())
+        })
+}
+
+fn projects_extra_path() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".rozum/ucc/projects.json")
+}
+
+async fn config_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    axum::Json(serde_json::json!({ "projects_dir": read_projects_dir() })).into_response()
+}
+
+fn list_projects() -> Vec<ProjectBrief> {
+    let mut out: Vec<ProjectBrief> = Vec::new();
+
+    // 1) rooms.json — project rooms from the meeting daemon
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state")));
+    if let Some(path) = base.map(|b| b.join("rozum/rooms.json")) {
+        if let Ok(bytes) = std::fs::read(&path) {
+            if let Ok(rooms) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) {
+                for r in &rooms {
+                    let Some(name) = r.get("name").and_then(|v| v.as_str()) else { continue };
+                    let Some(project) = r.get("project").and_then(|v| v.as_str()) else { continue };
+                    if project.is_empty() || project.contains("/tmp/") || project.contains("/.worktrees/") {
+                        continue;
+                    }
+                    if !out.iter().any(|p| p.path == project) {
+                        out.push(ProjectBrief { name: name.to_string(), path: project.to_string() });
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) ~/.rozum/ucc/projects.json — user-added projects via the UCC "создать" button
+    if let Ok(bytes) = std::fs::read(projects_extra_path()) {
+        if let Ok(extras) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) {
+            for r in &extras {
+                let Some(name) = r.get("name").and_then(|v| v.as_str()) else { continue };
+                let Some(path) = r.get("path").and_then(|v| v.as_str()) else { continue };
+                if !out.iter().any(|p| p.path == path) {
+                    out.push(ProjectBrief { name: name.to_string(), path: path.to_string() });
+                }
+            }
+        }
+    }
+
+    out
+}
+
+#[derive(serde::Deserialize)]
+struct ProjectAddRequest {
+    name: String,
+}
+
+async fn project_add_route(
+    axum::extract::Form(req): axum::extract::Form<ProjectAddRequest>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "name required");
+    }
+    if name.contains('/') || name.contains("..") {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "name must not contain path separators");
+    }
+    let base = read_projects_dir();
+    let path = format!("{}/{}", base.trim_end_matches('/'), name);
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        if let Err(e) = std::fs::create_dir_all(p) {
+            return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("mkdir: {e}"));
+        }
+    } else if !p.is_dir() {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "path exists but is not a directory");
+    }
+    let extra = projects_extra_path();
+    let mut projects: Vec<serde_json::Value> = if extra.exists() {
+        std::fs::read(&extra).ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if !projects.iter().any(|e| e.get("path").and_then(|v| v.as_str()) == Some(path.as_str())) {
+        projects.push(serde_json::json!({"name": name, "path": path}));
+        if let Some(parent) = extra.parent() { let _ = std::fs::create_dir_all(parent); }
+        if let Err(e) = std::fs::write(&extra, serde_json::to_vec(&projects).unwrap_or_default()) {
+            return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {e}"));
+        }
+    }
+    axum::Json(serde_json::json!({"ok": true})).into_response()
+}
+
 /// Format a byte count as a one-decimal GiB string (e.g. `"25.1 GiB"`).
 fn fmt_gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0)
@@ -1189,16 +2395,24 @@ pub async fn status() -> ControlStatus {
         }),
         None => None,
     };
+    let installed_catalog = rozum_models::models::scan_all_installed();
     let residency = ResidencyStatus {
         host_budget_bytes: share::host_ram_budget_bytes(),
         committed_bytes: share::committed_by_others_bytes(0), // skip nothing → the whole ledger
         available_bytes: share::available_ram_for_admission(),
         residents: share::list_residents()
             .into_iter()
-            .map(|(pid, model)| ResidentBrief { pid, model })
+            .map(|(pid, model)| {
+                let size_gib = installed_catalog
+                    .iter()
+                    .find(|m| m.spec == model)
+                    .map(|m| fmt_gib(m.size_bytes))
+                    .unwrap_or_default();
+                ResidentBrief { pid, model, size_gib }
+            })
             .collect(),
     };
-    let installed = rozum_models::models::scan_all_installed()
+    let installed = installed_catalog
         .into_iter()
         .map(|m| InstalledBrief { size_gib: fmt_gib(m.size_bytes), spec: m.spec, size_bytes: m.size_bytes })
         .collect();
@@ -1222,7 +2436,8 @@ pub async fn status() -> ControlStatus {
     let agents = live_agents();
     let coders = live_coders();
     let sessions = live_sessions();
-    ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents, coders, sessions }
+    let projects = list_projects();
+    ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents, coders, sessions, projects }
 }
 
 #[cfg(test)]
