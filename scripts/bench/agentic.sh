@@ -705,14 +705,19 @@ for spec in "${MODELS[@]}"; do
       #   0   = verify PASS
       #   2   = infra failure (gateway crash / clients_gone — rc=2 from rozum launch)
       #   10  = verify FAIL — agent ran to completion but task not solved (capability miss)
+      #   11  = verify SKIP — no project files written (delivery failure: agent never wrote code)
       #   124 = timeout (RUN_TIMEOUT fired)
       #   other = agent error (non-zero, non-infra: tool error, segfault, etc.)
       raw_rc=$rc
+      # rc=11 check: greet uses the agent log (no files needed); all other tasks require Cargo.toml
+      files_written=1
+      [ "$task" != greet ] && [ ! -f "$work/Cargo.toml" ] && files_written=0
       if   [ "$tmo"    = 1 ]; then rc=124
       elif [ "$raw_rc" = 2 ]; then rc=2
       elif [ "$pass"   = 1 ]; then rc=0
       elif [ "$raw_rc" != 0 ]; then rc=$raw_rc  # non-zero agent exit, not gateway crash
-      else                          rc=10         # verify FAIL on a clean agent exit
+      elif [ "$files_written" = 0 ]; then rc=11  # agent ran but wrote no project files
+      else                            rc=10       # verify FAIL on a clean agent exit
       fi
 
       [ "$tmo" = 1 ] && tflag=" (RUN_TIMEOUT)" || tflag=""
