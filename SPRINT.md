@@ -40,8 +40,8 @@
   - Done-when: kill and restart gateway mid-matrix-run; `/control/matrix/live` returns the
     in-progress state within one poll cycle.
 
-- [ ] **matrix-reps-default** — P2. agentic.sh already has `REPS` support (line 106: `REPS="${REPS:-1}"`).
-  Default is 1 (single run = high variance). Expose in matrix.html UI: an "N прогонов" selector
+- [x] **matrix-reps-default** — DONE (2026-07-02, master `221c09b`). agentic.sh already had `REPS` support (line 106: `REPS="${REPS:-1}"`).
+  Default is 1 (single run = high variance). Exposed in matrix.html UI: an "N прогонов" selector
   (1/3/5) that passes `REPS=N` in the env when launching the matrix. Also update the matrix
   results page to display cell pass-RATE (k/N) instead of pass/fail when REPS>1.
   - Where: `/Users/sergiy/.rozum/ucc/site/matrix.html` — run button → add `REPS` env param.
