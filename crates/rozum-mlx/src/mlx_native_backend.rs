@@ -854,15 +854,14 @@ mod inner {
 
             // Prompt-lookup (ROZUM_PLOOKUP, default off): a greedy, dense, unconstrained
             // job decodes via draft-free n-gram speculative decoding — byte-identical to
-            // plain greedy, big win on copy-heavy code generation. Verified by the same
-            // `MlxDenseTarget` the spec-decode path uses. (Fresh KV, so it forgoes
-            // cross-turn prefix reuse — opt-in for now; combining the two is a follow-up.)
+            // plain greedy, big win on copy-heavy code generation. The same PrefixStore
+            // backs cross-turn KV reuse here as for run_job (same MlxDenseTarget cache).
             if plookup_enabled()
                 && is_dense(&model)
                 && is_greedy_request(&first)
                 && !should_constrain(&first, &model)
             {
-                run_plookup_job(&mut model, &mut tokenizer, &template, &eos, first);
+                run_plookup_job(&mut model, &mut tokenizer, &template, &eos, &mut store, first);
                 continue;
             }
             // Fast path: batching off, or this model's arch isn't batchable → serial
@@ -1998,6 +1997,7 @@ mod inner {
         tokenizer: &mut Tokenizer,
         template: &str,
         eos: &[u32],
+        store: &mut PrefixStore,
         job: Job,
     ) {
         let prompt_ids =
@@ -2008,16 +2008,40 @@ mod inner {
                     return;
                 }
             };
+        // Conversation boundary for prefix-store keying.
+        let conv_len = render_prompt_opt(
+            tokenizer, template, &job.model_id, &job.messages, &job.tools, false,
+        )
+        .map(|c| c.len().min(prompt_ids.len()))
+        .unwrap_or(prompt_ids.len());
+
         let ceiling = output_ceiling();
         let max_tokens = {
             let want = job.sampling.max_tokens.map(|m| m as usize).unwrap_or(DEFAULT_MAX_TOKENS);
             if ceiling == 0 { want } else { want.min(ceiling) }
         };
         let k = spec_lookahead_k();
+
+        // Prefix-KV reuse for the TARGET (draft reconciles its own KV via `fed` tracking).
+        let prefix_enabled = !matches!(std::env::var("ROZUM_PREFIX_CACHE").as_deref(), Ok("0"));
+        let (init_cache, kv_len) = if prefix_enabled {
+            match store.take_dense(&prompt_ids) {
+                Some((rl, mut c)) => {
+                    for e in c.iter_mut().flatten() {
+                        e.truncate(rl as i32);
+                    }
+                    (c, rl)
+                }
+                None => (Vec::new(), 0),
+            }
+        } else {
+            (Vec::new(), 0)
+        };
+
         let mut tgt = MlxDenseTarget {
             model: target,
-            cache: Vec::new(),
-            kv_len: 0,
+            cache: init_cache,
+            kv_len,
             eos: eos.to_vec(),
             forwards: 0,
         };
@@ -2038,12 +2062,9 @@ mod inner {
             max_tokens,
             finished: false,
             stop: StopReason::EndTurn,
-            harmony: false, // run_batch is dense Qwen only (Qwen `<tool_call>`, skip-special decode)
+            harmony: false,
         };
         {
-            // `check_finish` streams the token (text + tool-markup suppression) and
-            // reports EOS / cancel / max-tokens / runaway — returning `false` here
-            // stops the orchestrator. EOS is consumed by `check_finish` (not shown).
             let mut on_token = |tok: u32| -> bool { !check_finish(&mut seq, tok, eos, tokenizer) };
             crate::specdecode::decode_streaming(
                 &prompt_ids,
@@ -2060,6 +2081,12 @@ mod inner {
                  plain greedy would be {} forwards",
                 tgt.forwards, seq.output_tokens, seq.output_tokens
             );
+        }
+        // Persist the advanced target cache for next-turn reuse.
+        if prefix_enabled && !tgt.cache.is_empty() {
+            if let Some(ids) = prompt_ids.get(..conv_len).map(<[u32]>::to_vec) {
+                store.put_dense(ids, tgt.cache);
+            }
         }
         seq.finalize();
     }
@@ -2093,6 +2120,7 @@ mod inner {
         tokenizer: &mut Tokenizer,
         template: &str,
         eos: &[u32],
+        store: &mut PrefixStore,
         job: Job,
     ) {
         let prompt_ids =
@@ -2103,16 +2131,40 @@ mod inner {
                     return;
                 }
             };
+        // Conversation boundary for prefix-store keying (same logic as run_job).
+        let conv_len = render_prompt_opt(
+            tokenizer, template, &job.model_id, &job.messages, &job.tools, false,
+        )
+        .map(|c| c.len().min(prompt_ids.len()))
+        .unwrap_or(prompt_ids.len());
+
         let ceiling = output_ceiling();
         let max_tokens = {
             let want = job.sampling.max_tokens.map(|m| m as usize).unwrap_or(DEFAULT_MAX_TOKENS);
             if ceiling == 0 { want } else { want.min(ceiling) }
         };
         let (ngram, k, window) = plookup_params();
+
+        // Prefix-KV reuse: same PrefixStore that run_job uses for the serial path.
+        let prefix_enabled = !matches!(std::env::var("ROZUM_PREFIX_CACHE").as_deref(), Ok("0"));
+        let (init_cache, kv_len) = if prefix_enabled {
+            match store.take_dense(&prompt_ids) {
+                Some((rl, mut c)) => {
+                    for e in c.iter_mut().flatten() {
+                        e.truncate(rl as i32);
+                    }
+                    (c, rl)
+                }
+                None => (Vec::new(), 0),
+            }
+        } else {
+            (Vec::new(), 0)
+        };
+
         let mut tgt = MlxDenseTarget {
             model: target,
-            cache: Vec::new(),
-            kv_len: 0,
+            cache: init_cache,
+            kv_len,
             eos: eos.to_vec(),
             forwards: 0,
         };
@@ -2128,7 +2180,7 @@ mod inner {
             max_tokens,
             finished: false,
             stop: StopReason::EndTurn,
-            harmony: false, // run_batch is dense Qwen only (Qwen `<tool_call>`, skip-special decode)
+            harmony: false,
         };
         {
             let mut on_token = |tok: u32| -> bool { !check_finish(&mut seq, tok, eos, tokenizer) };
@@ -2147,6 +2199,12 @@ mod inner {
                  plain greedy would be {} forwards",
                 tgt.forwards, seq.output_tokens, seq.output_tokens
             );
+        }
+        // Persist the advanced target cache for the next turn's reuse.
+        if prefix_enabled && !tgt.cache.is_empty() {
+            if let Some(ids) = prompt_ids.get(..conv_len).map(<[u32]>::to_vec) {
+                store.put_dense(ids, tgt.cache);
+            }
         }
         seq.finalize();
     }
@@ -2226,11 +2284,12 @@ mod inner {
             return;
         }
 
-        // Serial worker (cap-1): a `PrefixStore` backs the target-only fallback path.
+        // Serial worker (cap-1): a `PrefixStore` backs prefix-KV reuse for both the
+        // speculative path (target cache) and the plain-target fallback.
         let mut store = PrefixStore::new();
         while let Some(job) = jobs.blocking_recv() {
             if spec_job_eligible(&job, &target, &draft) {
-                run_spec_job(&mut target, &mut draft, &mut tokenizer, &template, eos.as_slice(), job);
+                run_spec_job(&mut target, &mut draft, &mut tokenizer, &template, eos.as_slice(), &mut store, job);
             } else {
                 run_job(&mut target, &mut tokenizer, &template, &eos, kv_per_pos, &mut store, job);
             }
