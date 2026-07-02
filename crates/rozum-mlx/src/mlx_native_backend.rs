@@ -951,12 +951,12 @@ mod inner {
         }
     }
 
-    /// Batched-decode capacity from `ROZUM_BATCH` (default 1 = serial).
+    /// Batched-decode capacity from `ROZUM_BATCH` (default 2; set to 1 to disable).
     fn batch_cap() -> usize {
         std::env::var("ROZUM_BATCH")
             .ok()
             .and_then(|s| s.trim().parse::<usize>().ok())
-            .unwrap_or(1)
+            .unwrap_or(2)
             .max(1)
     }
 
