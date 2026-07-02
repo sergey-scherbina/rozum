@@ -1,5 +1,14 @@
 # Changelog
 
+## feat(matrix): pass-rate aggregation for REPS>1 in matrix grid
+Completed: 2026-07-02 · `~/.rozum/ucc/site/matrix.html`
+
+`idx` now aggregates all rows with the same `(model,agent,task)` key into
+`{passCount, infraCount, timeoutCount, rows}`. Cells show `k/N` fractional pass-rate:
+full green ✓ when all reps pass, faded `1/3` when partial, ✗/⚡/⏱ for full fail.
+The total column sums fractional per-task pass-rates (e.g. `1.5/2`). Without REPS>1
+the display is byte-identical to before.
+
 ## feat(ucc): models panel — load/stop gateway from UCC dashboard
 Completed: 2026-07-02 · `8c64a47`
 

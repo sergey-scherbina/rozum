@@ -48,15 +48,14 @@
   - Done-when: kill and restart gateway mid-matrix-run; `/control/matrix/live` returns the
     in-progress state within one poll cycle.
 
-- [x] **matrix-reps-default** — DONE (2026-07-02, master `221c09b`). agentic.sh already had `REPS` support (line 106: `REPS="${REPS:-1}"`).
-  Default is 1 (single run = high variance). Exposed in matrix.html UI: an "N прогонов" selector
-  (1/3/5) that passes `REPS=N` in the env when launching the matrix. Also update the matrix
-  results page to display cell pass-RATE (k/N) instead of pass/fail when REPS>1.
-  - Where: `/Users/sergiy/.rozum/ucc/site/matrix.html` — run button → add `REPS` env param.
-    `crates/rozum-gateway/src/control.rs` `run_matrix_job` → thread REPS through the env.
-    CSV parse: aggregate cells with same (agent, model, task) into a pass-rate.
-  - Done-when: matrix UI shows a 1/3/5 picker; REPS=3 run emits 3 CSV rows per cell; results page
-    aggregates them.
+- [x] **matrix-reps-default** — DONE (2026-07-02, master `221c09b` + matrix.html patch 2026-07-02).
+  agentic.sh already had `REPS` support (line 106: `REPS="${REPS:-1}"`). Exposed in matrix.html UI:
+  "N прогонов" selector (1/3/5) that passes `REPS=N` in the request body. Backend `MatrixRunReq` /
+  `MatrixJob` gained `reps: Option<u32>`; `run_matrix_job` passes `REPS=N` to agentic.sh; `total_cells`
+  accounts for REPS. Matrix grid: `idx` now aggregates all rows for the same `(model,agent,task)` key
+  into `{passCount, infraCount, timeoutCount, rows}`; cells show `k/N` fractional pass-rate when N>1
+  (full green ✓, partial faded `1/3`, full fail ✗/⚡/⏱); `agentTotal` column is the sum of
+  per-task pass-rates (fractional when mixed). `~/.rozum/ucc/site/matrix.html` updated in-place.
 
 - [x] **mcp-proxy-http** — DONE (2026-07-02). BUG-004 Phase 2 deployed. `rozum mcp-http` (rmcp
   streamable-HTTP) was already implemented in `crates/rozum-meeting/src/meeting/http_proxy.rs` +
