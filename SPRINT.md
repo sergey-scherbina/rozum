@@ -1501,15 +1501,11 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   (new tui backend + web island); success = identical render + live update from one `.ssc` source.
 - [ ] **ucc-meetings-in-tk** — rewrite the meeting client in `std/ui` Tk (composer + switcher + unread),
   reach parity with the 1389-line hand-written Rust TUI, then retire it.
-- [~] **ucc-control-api** — IN PROGRESS (data layer, no scalascript dep). Meetings side DONE
-  (`rozum-meeting::client` + `rest_read` HTTP, the services-and-clients track). Models/gateway side
-  STARTED: `rozum-gateway::control::status()` aggregates the active gateway + host residency
-  (budget/committed/available/residents) + the installed catalog into one Serialize snapshot;
-  surfaced as `rozum gateway status --json` (live-verified). `share::list_residents()` added. So the
-  UCC's models/gateway data is now a clean in-process + JSON contract. Next: an HTTP endpoint + write
-  actions (start/stop/swap) when wiring the Tk app. HTTP: `GET /control/status` added to the gateway's
-  `/control/*` surface (serves the same snapshot for the web/UCC target; always-up host is a follow-up —
-  fall back to `gateway status --json` meanwhile). 117 core + 81 gateway tests green.
+- [x] **ucc-control-api** — DONE: write actions fully wired. Meetings side DONE
+  (`rozum-meeting::client` + `rest_read` HTTP). Models/gateway: `GET /control/status`
+  (snapshot: residency + residents + installed catalog) + `POST /control/gateway/load`
+  (ensure_gateway) + `POST /control/gateway/stop` (`8c64a47`, SIGTERM + ledger cleanup).
+  UCC dashboard shows load/stop/resident state live. 90 gateway tests green.
 - [x] **ucc-models-panel** — DONE: `8c64a47`. `POST /control/gateway/stop` added to control.rs
   (SIGTERM active gateway, 409 if clients attached). `modelsPanel` card in
   `control-center-live.ssc`: rowLink catalog picker (gwModel signal), "загрузить"
