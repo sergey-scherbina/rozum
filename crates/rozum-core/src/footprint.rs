@@ -7,7 +7,14 @@
 //! **running maximum** here. Admission then estimates `min(conservative, measured_peak + margin)` —
 //! capped at the conservative figure (never higher) and floored at the observed peak + a generous
 //! margin (never admits a load whose measured peak we've already seen, minus safety). The keep-free
-//! margin and the kernel pressure-guard (improvement B) backstop a too-tight estimate.
+//! margin and the kernel pressure-guard (improvement B) backstop the rest.
+//!
+//! **smmr-D: active/peak split.** Besides the total-peak (`get_peak_memory()`) we also record the
+//! steady-state *active* footprint (`get_active_memory()` read at model-unload time = weights + KV
+//! cache from the last request, after all activations are freed). The split lets the co-residency
+//! probe use the ACTIVE floor rather than the full peak: if model A's active fits in free RAM alongside
+//! model B's active, they can co-reside safely even if their TOTAL peaks (which include transient
+//! prefill activations) would exceed free RAM. Exposed via `cached_active_peak()`.
 //!
 //! Safety by construction: the stored value only ever GROWS (a running max never under-reports a seen
 //! peak), the estimate is capped at the conservative upper bound, and reads/writes are best-effort
@@ -20,6 +27,11 @@ use std::path::PathBuf;
 
 fn cache_path() -> PathBuf {
     crate::share::gateway_dir().join("footprint-peaks.json")
+}
+
+/// smmr-D: active-only footprint cache (weights + max KV, no transient activations).
+fn active_cache_path() -> PathBuf {
+    crate::share::gateway_dir().join("footprint-active.json")
 }
 
 /// Canonical key — by MODEL only (NOT n_ctx). Rationale: adaptive loading picks a different n_ctx as
@@ -40,7 +52,24 @@ fn load() -> HashMap<String, u64> {
         .unwrap_or_default()
 }
 
-/// Record an observed peak footprint (bytes) for `(model, n_ctx)` as a RUNNING MAX — it never
+fn load_active() -> HashMap<String, u64> {
+    std::fs::read(active_cache_path())
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn write_map(path: &PathBuf, m: &HashMap<String, u64>) {
+    let _ = crate::share::ensure_dir();
+    if let Ok(bytes) = serde_json::to_vec_pretty(m) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+}
+
+/// Record an observed peak footprint (bytes) for `model` as a RUNNING MAX — it never
 /// shrinks, so a later light-workload run can't lower a heavy run's recorded peak. Best-effort:
 /// IO/parse errors are swallowed (this cache is an optimization, never correctness). A no-op when
 /// `peak_bytes` is 0 or not greater than the stored value (the common steady state ⇒ no writes).
@@ -51,21 +80,37 @@ pub fn record_peak(spec: &str, peak_bytes: u64) {
     let mut m = load();
     let k = key(spec);
     if m.get(&k).copied().unwrap_or(0) >= peak_bytes {
-        return; // no growth → nothing to persist
+        return;
     }
     m.insert(k, peak_bytes);
-    let _ = crate::share::ensure_dir();
-    if let Ok(bytes) = serde_json::to_vec_pretty(&m) {
-        let tmp = cache_path().with_extension("json.tmp");
-        if std::fs::write(&tmp, &bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, cache_path());
-        }
+    write_map(&cache_path(), &m);
+}
+
+/// smmr-D: record the steady-state ACTIVE footprint (weights + KV, no transient activations) as a
+/// running MAX. Called from MLX backend Drop alongside `record_peak`. Zero/non-growing = no-op.
+pub fn record_active_peak(spec: &str, active_bytes: u64) {
+    if active_bytes == 0 {
+        return;
     }
+    let mut m = load_active();
+    let k = key(spec);
+    if m.get(&k).copied().unwrap_or(0) >= active_bytes {
+        return;
+    }
+    m.insert(k, active_bytes);
+    write_map(&active_cache_path(), &m);
 }
 
 /// The recorded running-max peak (bytes) for `model`, if any prior load recorded one.
 pub fn cached_peak(spec: &str) -> Option<u64> {
     load().get(&key(spec)).copied()
+}
+
+/// smmr-D: the recorded steady-state active footprint (weights + max KV) for `model`, if any prior
+/// load recorded one. Smaller than `cached_peak` by the transient prefill activation component.
+/// Use for co-residency probes: two models can co-reside when their active peaks + reserve fit free RAM.
+pub fn cached_active_peak(spec: &str) -> Option<u64> {
+    load_active().get(&key(spec)).copied()
 }
 
 /// The admission footprint after measured-peak tightening (improvement A). `conservative` is the
