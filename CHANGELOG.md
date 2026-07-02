@@ -1,5 +1,16 @@
 # Changelog
 
+## feat(matrix): rc=11 verify-skip + pass-rate aggregation (REPS>1)
+Completed: 2026-07-02 · `ee96e67` + matrix.html patches
+
+`agentic.sh`: rc=11 added — when agent exits cleanly but Cargo.toml absent (no files written),
+distinguish delivery failure (∅ skip) from capability miss (✗ rc=10). All 5 codes now wired:
+0=pass, 2=infra, 10=capability, 11=skip, 124=timeout.
+
+`~/.rozum/ucc/site/matrix.html`: (1) rc=11 renders as ∅/skip in grid and detail legend;
+(2) idx now aggregates multi-rep rows into pass-rate buckets — cells show `k/N`, total column
+shows fractional pass-rate sum (e.g. `1.5/2`).
+
 ## feat(matrix): pass-rate aggregation for REPS>1 in matrix grid
 Completed: 2026-07-02 · `~/.rozum/ucc/site/matrix.html`
 

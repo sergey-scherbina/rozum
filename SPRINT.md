@@ -25,19 +25,10 @@
     `footprint-peaks.json` contains `<model>:active_peak` keys. Unit test in `share.rs` covers the
     active-split path.
 
-- [x] **agentic-rc-structured** — DONE (2026-07-02, master `c489fc1`). agentic.sh now maps raw agent rc to semantic codes: 0=pass by verify,
-  everything else conflated (agent error, gateway crash rc=2, timeout, tool failure). The matrix CSV
-  has rc≠0 for 54/105 cells but can't tell capability-miss from infra-fail. Add structured codes:
-  - `rc=0` — verify PASS
-  - `rc=10` — verify FAIL (agent ran to completion, task not solved — capability miss)
-  - `rc=11` — verify SKIP (no verify result; agent never finished writing files)
-  - `rc=2`  — gateway crash (preserve: "clients_gone", exit before agent turn)
-  - `rc=124` — timeout (already implicit via `/usr/bin/time`, make explicit)
-  - Where: `scripts/bench/agentic.sh` lines 680-690 area (the `wait "$LP"; rc=$?` block).
-    `write_agentic_meta` and the CSV line both get the new codes.
-    Matrix results page: parse rc=10 as "capability", rc=2 as "infra" in the cell panel.
-  - Done-when: `agentic.sh` produces rc=10 on a task where verify fails cleanly. Matrix UI shows
-    "⚡ инфра" vs "❌ задача" based on rc.
+- [x] **agentic-rc-structured** — DONE (2026-07-02, `c489fc1` + `ee96e67`). All 5 codes implemented:
+  `rc=0` (pass), `rc=2` (infra), `rc=10` (verify FAIL — files written but wrong), `rc=11` (verify SKIP
+  — Cargo.toml absent after clean agent exit, delivery failure), `rc=124` (timeout). Matrix UI: ⚡инфра /
+  задача / ∅skip / ⏱ in cell grid + detail legend. `bash -n` clean.
 
 - [x] **matrix-live-persist** — DONE (2026-07-02, master `c489fc1`). `MatrixLive` now persists to `~/.local/state/rozum/matrix-live.json`; a `launchctl kickstart -k`
   mid-run resets it and the matrix panel shows nothing until the next poll cycle. Persist the struct
