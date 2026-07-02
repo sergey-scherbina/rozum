@@ -334,6 +334,11 @@ mod inner {
         /// Set if this model was ever co-resident with another (its process-global peak is then
         /// contaminated → not recorded to the footprint cache). See [`LIVE_RESIDENTS`].
         co_resident: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        /// Number of jobs currently sitting IN the `jobs` channel (sent but not yet received
+        /// by the worker). Used by the batch gather short-circuit: if this is 0 after the worker
+        /// pulls `first`, no other requests are queued → skip the batch window, go serial.
+        /// Incremented in `chat()` before `send()`, decremented in `worker_main` after `recv()`.
+        jobs_in_channel: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl Drop for MlxNativeBackend {
@@ -400,6 +405,8 @@ mod inner {
             let (jobs_tx, jobs_rx) = mpsc::unbounded_channel::<Job>();
             let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
             let label = model_id.clone();
+            let jobs_in_channel = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let jobs_in_channel_worker = jobs_in_channel.clone();
 
             // The worker loads the model on its own thread and owns it for life;
             // the `!Send` model never crosses a thread boundary. Keep the handle so the
@@ -407,7 +414,7 @@ mod inner {
             let worker = thread::Builder::new()
                 .name("mlx-native".into())
                 .spawn(move || {
-                    worker_main(model_dir, model_type, eos, kv_per_pos, jobs_rx, ready_tx)
+                    worker_main(model_dir, model_type, eos, kv_per_pos, jobs_rx, ready_tx, jobs_in_channel_worker)
                 })
                 .map_err(|e| ModelError::BackendUnavailable(format!("mlx: spawn worker: {e}")))?;
 
@@ -420,6 +427,7 @@ mod inner {
                         model_id,
                         n_ctx,
                         co_resident: register_resident(),
+                        jobs_in_channel,
                     })
                 }
                 Ok(Err(e)) => Err(ModelError::BackendUnavailable(e)),
@@ -484,11 +492,18 @@ mod inner {
                 cancel: req.cancel,
                 events: events_tx,
             };
-            self.jobs
+            // Increment BEFORE send: worker_main reads this after blocking_recv() to know how many
+            // jobs remain in the channel (for the batch gather short-circuit).
+            self.jobs_in_channel.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            if let Err(e) = self.jobs
                 .as_ref()
                 .ok_or_else(|| ModelError::BackendUnavailable("mlx: worker shut down".into()))?
                 .send(job)
-                .map_err(|_| ModelError::BackendUnavailable("mlx: worker gone".into()))?;
+            {
+                // Send failed (worker gone) — roll back the counter.
+                self.jobs_in_channel.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                return Err(ModelError::BackendUnavailable(format!("mlx: worker gone: {e}")));
+            }
             Ok(Box::pin(UnboundedReceiverStream::new(events_rx)))
         }
 
@@ -773,6 +788,7 @@ mod inner {
         kv_per_pos: Option<u64>,
         mut jobs: mpsc::UnboundedReceiver<Job>,
         ready: oneshot::Sender<Result<(), String>>,
+        jobs_in_channel: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     ) {
         let mut model = match LoadedModel::load(&model_type, &model_dir) {
             Ok(m) => m,
@@ -831,6 +847,11 @@ mod inner {
         let cap = batch_cap();
         let batchable_arch = is_batchable_arch(&model);
         while let Some(first) = jobs.blocking_recv() {
+            // Account for `first` — it is now out of the channel and in the worker's hands.
+            // If the counter reaches 0, no other jobs are currently queued (batch short-circuit).
+            let remaining_queued =
+                jobs_in_channel.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) - 1;
+
             // Prompt-lookup (ROZUM_PLOOKUP, default off): a greedy, dense, unconstrained
             // job decodes via draft-free n-gram speculative decoding — byte-identical to
             // plain greedy, big win on copy-heavy code generation. Verified by the same
@@ -853,19 +874,57 @@ mod inner {
             // Gather more already-admitted jobs (up to `cap`), waiting a small window
             // (`ROZUM_BATCH_WINDOW_MS`, default 10) for near-simultaneous requests to
             // arrive so they batch together instead of racing the worker.
+            // SHORT-CIRCUIT: if the channel is already empty (no other admitted jobs),
+            // skip the window entirely — a lone request shouldn't pay a 10 ms TTFT tax.
+            // If another request arrives simultaneously its counter increment is visible
+            // before the first `try_recv()` below (AcqRel ordering), so we won't miss it.
             let mut pending = vec![first];
-            let deadline =
-                std::time::Instant::now() + std::time::Duration::from_millis(batch_window_ms());
-            while pending.len() < cap {
-                match jobs.try_recv() {
-                    Ok(j) => pending.push(j),
-                    Err(_) => {
-                        if std::time::Instant::now() >= deadline {
-                            break;
+            if remaining_queued > 0 {
+                // Other jobs are already in the channel; run the full window to gather them.
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(batch_window_ms());
+                while pending.len() < cap {
+                    match jobs.try_recv() {
+                        Ok(j) => {
+                            jobs_in_channel.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                            pending.push(j);
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        Err(_) => {
+                            if std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
                     }
                 }
+            } else {
+                // Channel was empty — one immediate non-blocking try in case a request just
+                // arrived (AcqRel counter ensures we see any concurrent fetch_add in chat()).
+                if jobs_in_channel.load(std::sync::atomic::Ordering::Acquire) > 0 {
+                    if let Ok(j) = jobs.try_recv() {
+                        jobs_in_channel.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        pending.push(j);
+                        // Got a 2nd job — run the full window to look for more.
+                        let deadline = std::time::Instant::now()
+                            + std::time::Duration::from_millis(batch_window_ms());
+                        while pending.len() < cap {
+                            match jobs.try_recv() {
+                                Ok(j2) => {
+                                    jobs_in_channel
+                                        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                                    pending.push(j2);
+                                }
+                                Err(_) => {
+                                    if std::time::Instant::now() >= deadline {
+                                        break;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(1));
+                                }
+                            }
+                        }
+                    }
+                }
+                // else: truly lone — proceed with just `first`, no window
             }
             // Batch the batchable ones together (per-row sampling); run the rest serially.
             // The batch runs CONTINUOUSLY — it keeps pulling more batchable jobs from `jobs`
