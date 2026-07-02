@@ -1409,13 +1409,13 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
     (`mlx_{dense,moe}_backend_chat_tps`, `mlx_hybrid_batched_decode_throughput`,
     `mlx_qwen35_moe_decode_bench` incl. `ROZUM_CTXSWEEP` + build-vs-eval split, `mlx_compile_probe_plain`).
     RUN plan + per-model targets in the spec. Follow the 🛑 REBOOT-SAFETY PROTOCOL on the run.
-- [ ] **perf-batch-gather-shortcircuit** (prereq for default-on, CODE — no slot to write). With
-  `ROZUM_BATCH>1` a **lone** request waits the FULL `batch_window_ms` (10) before the partition finds
-  it's alone (`worker_main` gather :676-687) → a single-agent TTFT tax with zero benefit. Fix: after
-  `first`, one non-blocking `try_recv`; if Empty AND admission in-flight ≤1, go serial immediately (no
-  wait); still wait/batch when a 2nd job is admitted/queued. Re-run `*_two_concurrent` +
-  `continuous_admit_three` to prove batching still triggers and the lone path no longer waits *(those
-  tests need the slot)*.
+- [x] **perf-batch-gather-shortcircuit** — DONE (2026-07-02, master `a8efa27`). `jobs_in_channel:
+  Arc<AtomicUsize>` added to `MlxNativeBackend` — incremented in `chat()` before send, decremented in
+  `worker_main` after `blocking_recv()`. Short-circuit in gather loop: if counter==0 after `first`,
+  skip the 10 ms batch window (lone request, no TTFT tax). One final non-blocking `try_recv()` after
+  the counter-0 check guards the race; if counter>0, full window runs (behavior unchanged).
+  90 lib tests green. Slot-gated validation remaining: `*_two_concurrent` + `continuous_admit_three`
+  to confirm batching still fires; lone TTFT improvement measured live.
 - [ ] **perf-batch-default-on** — biggest near-term win, but NOT a free flip (needs
   `perf-batch-gather-shortcircuit` first). Continuous batching is built+wired but ships OFF:
   `batch_cap()` = `ROZUM_BATCH` default **1 = serial** (`mlx_native_backend.rs:713`); benches prove

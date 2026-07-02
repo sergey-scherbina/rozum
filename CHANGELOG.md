@@ -1,5 +1,15 @@
 # Changelog
 
+## perf: batch gather short-circuit — skip 10 ms window for lone requests
+Completed: 2026-07-02 · `a8efa27`
+
+`jobs_in_channel: Arc<AtomicUsize>` added to `MlxNativeBackend`: incremented in `chat()` before
+send, decremented in `worker_main` after `blocking_recv()`. When the counter is 0 after receiving
+`first` (no other jobs queued), the 10 ms batch window is skipped — lone requests (the common
+single-agent case at `ROZUM_BATCH>1`) pay zero TTFT tax. A single non-blocking `try_recv()` guards
+the near-simultaneous arrival race. When counter>0, the full window runs (concurrent batching
+unchanged). Prerequisite for `perf-batch-default-on`.
+
 ## smmr-D co-residency gate: count shared MLX reserve once for eager pipelines
 Completed: 2026-07-02 · `208fa73`
 
