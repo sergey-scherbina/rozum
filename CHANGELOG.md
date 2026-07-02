@@ -1,5 +1,13 @@
 # Changelog
 
+## matrix: REPS picker — multi-run support in UCC UI
+Completed: 2026-07-02 · `221c09b`
+
+Added a "прогонов" selector (1/3/5, default 3) to the matrix.html run buttons. Both "Все
+модели" and "Выборочно" send `reps` in the request body; `run_matrix_job` passes `REPS=N` to
+agentic.sh (which already supported `REPS` via env). `total_cells` in the progress bar now
+accounts for N×cells. Backend default remains 1 (no `reps` field = single run = old behavior).
+
 ## runtime: smmr-D active/peak split + structured rc + matrix-live persist
 Completed: 2026-07-02 · `c489fc1`
 
