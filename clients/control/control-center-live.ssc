@@ -76,6 +76,18 @@ val catCard = cardWithHeader(heading(2, "Installed catalog"))(
 )
 val modelSelectCols = [fieldColumn("модель", "spec"), fieldColumn("GiB", "size_gib")]
 
+val gwModel = signal("gwModel", "")
+val modelsPanel = cardWithHeader(heading(2, "Загрузить модель"))(
+  vstack(gap = 8)(
+    remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", gwModel, "spec")]),
+    hstack(gap = 8)(
+      signalText_(gwModel),
+      actionButton(fetchActionWith("POST", "/control/gateway/load", formBody([("model", "gwModel")]), [onBumpTick(refresh)]), "загрузить"),
+      actionButton(fetchActionWith("POST", "/control/gateway/stop", formBody([]), [onBumpTick(refresh)]), "остановить")
+    )
+  )
+)
+
 val dashboard = vstack(gap = 16)(
   heading(1, "rozum — control center"),
   hstack(gap = 10)(link("#/agents", "🤖 Агенты"), link("#/coders", "💻 Кодеры"), link("#/sessions", "🖥 Сессии"), link("/login.html", "🔐 вход")),
@@ -85,6 +97,8 @@ val dashboard = vstack(gap = 16)(
   gwCard,
   divider(),
   residentsCard,
+  divider(),
+  modelsPanel,
   divider(),
   catCard
 )

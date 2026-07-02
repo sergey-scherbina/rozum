@@ -60,6 +60,7 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
     let protected = Router::new()
         .route("/chat/post", post(chat_post_route))
         .route("/control/gateway/load", post(gateway_load_route))
+        .route("/control/gateway/stop", post(gateway_stop_route))
         .route("/control/agent/launch", post(agent_launch_route))
         .route("/control/agent/stop", post(agent_stop_route))
         .route("/control/task", post(task_route))
@@ -432,6 +433,30 @@ async fn gateway_load_route(axum::Json(req): axum::Json<GatewayLoadReq>) -> axum
     match ensure_gateway(&model) {
         Ok(port) => axum::Json(serde_json::json!({ "ok": true, "model": model, "port": port })).into_response(),
         Err(e) => json_err(axum::http::StatusCode::CONFLICT, &e),
+    }
+}
+
+async fn gateway_stop_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(active) = crate::share::read_active() else {
+        return json_err(axum::http::StatusCode::NOT_FOUND, "no shared gateway running");
+    };
+    let clients = crate::share::live_lease_count(crate::share::LEASE_FRESH_SECS);
+    if clients > 0 {
+        return json_err(
+            axum::http::StatusCode::CONFLICT,
+            &format!("{clients} client(s) attached; stop them first"),
+        );
+    }
+    let pid_str = active.pid.to_string();
+    let ok = std::process::Command::new("kill").arg(&pid_str).status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        crate::share::remove_active_if_mine(active.pid);
+        axum::Json(serde_json::json!({ "ok": true, "pid": active.pid })).into_response()
+    } else {
+        json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("kill {pid_str} failed"))
     }
 }
 
