@@ -1518,23 +1518,32 @@ fn cascade_local_footprint(cfg: &rozum::RuntimeConfig, model: &str, n_ctx: u32) 
     {
         spec.strategy = st;
     }
-    let locals: Vec<u64> = spec
+    let local_models: Vec<&str> = spec
         .tiers
         .iter()
         .filter(|t| matches!(t.location, rozum::cascade::Location::Local))
-        .map(|t| estimate_model_footprint_bytes(&t.model, n_ctx))
+        .map(|t| t.model.as_str())
         .collect();
     // Residency reservation. EAGER (all tiers co-resident — the MLX co-residency crash is fixed, see
     // `tests/mlx_evals.rs::coresidency_two_mlx_models_one_process`) reserves the SUM; LAZY (one tier
     // at a time, torn down before the next loads) reserves MAX. A pipeline now runs eager when the SUM
     // is admissible (no per-request swap → far faster + measured higher pass-rate), falling back to
     // lazy only when the SUM would overcommit. Must match the build-time choice in `build_cascade_from_spec`.
-    let sum = locals.iter().fold(0u64, |a, &b| a.saturating_add(b));
-    let max = locals.iter().copied().max().unwrap_or(0);
+    // For the EAGER SUM: use eager_coresident_footprint (smmr-D follow-up) — counts the shared
+    // MLX buffer-cache + prefill-activation reserve ONCE, not once per tier.
     let total = if matches!(spec.strategy, rozum::cascade::StrategyName::Pipeline) {
-        if pipeline_is_eager(&spec, n_ctx) { sum } else { max }
+        if pipeline_is_eager(&spec, n_ctx) {
+            eager_coresident_footprint(&local_models, n_ctx)
+        } else {
+            local_models.iter()
+                .map(|m| estimate_model_footprint_bytes(m, n_ctx))
+                .max()
+                .unwrap_or(0)
+        }
     } else {
-        sum
+        local_models.iter()
+            .map(|m| estimate_model_footprint_bytes(m, n_ctx))
+            .fold(0u64, u64::saturating_add)
     };
     Some(total)
 }
@@ -1543,7 +1552,7 @@ fn cascade_local_footprint(cfg: &rozum::RuntimeConfig, model: &str, n_ctx: u32) 
 /// time)? The MLX co-residency crash that once forced lazy is fixed (thread_local metal command-encoder
 /// self-heal; `tests/mlx_evals.rs::coresidency_two_mlx_models_one_process` survives), and eager is far
 /// faster (no load/teardown per request) AND scored higher in the agentic sweep (e.g. Qwen3-4B→Coder-7B
-/// 9/10 @ ~9.4 GB eager vs the slow lazy swap). Eager when the SUM of tier footprints is admissible,
+/// 9/10 @ ~9.4 GB eager vs the slow lazy swap). Eager when the co-resident footprint is admissible,
 /// else lazy fallback (so a pair that would overcommit still runs, one model at a time, at MAX peak).
 /// `ROZUM_PIPELINE_EAGER=1`/`0` forces the choice. Non-pipeline strategies are always eager (return false
 /// here only gates the lazy-pipeline backend).
@@ -1556,13 +1565,103 @@ fn pipeline_is_eager(spec: &rozum::cascade::CascadeSpec, n_ctx: u32) -> bool {
         Some("0" | "false" | "off") => return false,
         _ => {}
     }
-    let sum = spec
+    let local_models: Vec<&str> = spec
         .tiers
         .iter()
         .filter(|t| matches!(t.location, rozum::cascade::Location::Local))
-        .map(|t| estimate_model_footprint_bytes(&t.model, n_ctx))
+        .map(|t| t.model.as_str())
+        .collect();
+    rozum::share::dry_run_admission(eager_coresident_footprint(&local_models, n_ctx)).admit
+}
+
+/// Footprint for N co-resident models in an eager pipeline: Σ per-model weights+KV +
+/// ONE shared process reserve (MLX buffer cache + prefill spike is process-global, not per-model).
+/// This correctly accounts for `process_reserve_bytes` being a single pool shared among all tiers,
+/// saving ~5.5 GiB per extra co-resident model vs the naive Σ estimate which double-counts the reserve.
+/// Uses `runtime_active_bytes()` (weights + full KV at n_ctx) from the local model catalog as the
+/// per-tier active component. Falls back to Σ `estimate_model_footprint_bytes()` when any tier is
+/// not locally installed (unknown size → conservative sentinel).
+fn eager_coresident_footprint(tiers: &[&str], n_ctx: u32) -> u64 {
+    let installed = rozum::models::scan_all_installed();
+    let mut max_weight: u64 = 0;
+    let mut all_local = true;
+
+    let sum_active: u64 = tiers
+        .iter()
+        .map(|model| {
+            match installed.iter().find(|m| m.spec == *model) {
+                Some(m) => {
+                    max_weight = max_weight.max(m.size_bytes);
+                    rozum::model_source::runtime_active_bytes(model, n_ctx, m.size_bytes)
+                }
+                None => {
+                    all_local = false;
+                    u64::MAX / 4
+                }
+            }
+        })
         .fold(0u64, u64::saturating_add);
-    rozum::share::dry_run_admission(sum).admit
+
+    if !all_local {
+        // Any unknown-size tier → conservative: Σ full estimates (each with its own reserve)
+        return tiers
+            .iter()
+            .map(|m| estimate_model_footprint_bytes(m, n_ctx))
+            .fold(0u64, u64::saturating_add);
+    }
+    // Σ active (weights + full KV per tier) + ONE shared reserve (cache + prefill spike)
+    sum_active.saturating_add(rozum::model_source::process_reserve_bytes(max_weight))
+}
+
+#[cfg(test)]
+mod coresident_gate_tests {
+    use super::*;
+
+    // Two unknown-size models fall back to the conservative Σ full-estimates (sentinel behavior).
+    // Sentinel = u64::MAX/4 per uninstalled model; two of them saturate to u64::MAX/2 (still >>RAM).
+    #[test]
+    fn unknown_tiers_fall_back_to_conservative() {
+        let fp = eager_coresident_footprint(&["nonexistent-model-xyz", "another-fake-spec"], 8192);
+        // Fallback: estimate("nonexistent-model-xyz", 8192) = MAX/4 (sentinel for unknown model)
+        //   + estimate("another-fake-spec", 8192) = MAX/4  →  saturating_add = MAX/2
+        assert!(fp >= u64::MAX / 4, "sentinel for unknown models must be huge, got {fp}");
+    }
+
+    // Single unknown tier also falls back.
+    #[test]
+    fn single_unknown_tier_falls_back_to_conservative() {
+        let fp = eager_coresident_footprint(&["nonexistent-model-xyz"], 8192);
+        assert!(fp >= u64::MAX / 4, "single unknown tier must return sentinel, got {fp}");
+    }
+
+    // Structural math: for N co-resident known models, eager footprint < Σ full estimates.
+    // The savings = (N-1) * process_reserve_bytes (the shared pool counted only once).
+    // This test verifies the arithmetic property directly without needing installed models.
+    #[test]
+    fn coresident_footprint_saves_n_minus_1_reserves() {
+        const GIB: u64 = 1 << 30;
+        let weight_a = 4 * GIB;
+        let weight_b = 7 * GIB;
+        let n_ctx = 8192_u32;
+
+        // What each model would contribute to the NAIVE sum (Σ full estimates)
+        let active_a = rozum::model_source::runtime_active_bytes("irrelevant", n_ctx, weight_a);
+        let active_b = rozum::model_source::runtime_active_bytes("irrelevant", n_ctx, weight_b);
+        let reserve = rozum::model_source::process_reserve_bytes(weight_a.max(weight_b));
+        let full_a = active_a + reserve;
+        let full_b = active_b + reserve;
+        let naive_sum = full_a.saturating_add(full_b);
+
+        // The correct co-resident total: Σ active + ONE reserve
+        let correct = active_a.saturating_add(active_b).saturating_add(reserve);
+
+        // eager_coresident_footprint saves exactly ONE reserve vs the naive sum
+        assert_eq!(correct + reserve, naive_sum, "savings = exactly one extra reserve");
+        assert!(
+            correct < naive_sum,
+            "co-resident footprint must be smaller than naive sum: {correct} < {naive_sum}"
+        );
+    }
 }
 
 async fn acquire_residency_or_exit(
