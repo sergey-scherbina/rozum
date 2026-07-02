@@ -1,5 +1,14 @@
 # Changelog
 
+## perf(batch): Glm4 added to batchable arches
+Completed: 2026-07-02 · `ff14fa6`
+
+`LoadedModel::Glm4(_)` added to `is_batchable_arch()`. Glm4 attention already reads
+`BATCH_PAD_OFFSETS` for per-row rope (same pattern as Llama/Qwen2); `dense_forward` and
+`run_batch` both already handled `Glm4`. Now Glm4 requests at `ROZUM_BATCH>1` are decoded
+in batch rather than serialized. Scaffolded `mlx_glm4_batched_ragged_byte_exact` test.
+GptOss not yet batchable — its internal sliding-window masks use scalar offset.
+
 ## perf: batch gather short-circuit — skip 10 ms window for lone requests
 Completed: 2026-07-02 · `a8efa27`
 

@@ -1429,9 +1429,11 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   `compile_with_state` net-negative; decision recorded: don't build Stages 1/2 (batching was the real
   lever). Only the caveats remain (27B vs 0.6B, fixed-shape vs growing cache) — low-confidence. **Don't
   re-run the 0.6B probe; it's answered.** Re-open only for a 27B + fixed-shape re-probe. *(slot, low pri)*
-- [ ] **perf-batch-arch-coverage** — `is_batchable_arch` (`:736`) excludes **Glm4 + GptOss** → they
-  serialize even at `ROZUM_BATCH>1`, despite being hot agentic models. Add their batch paths + a
-  ragged byte-exact test (mirror `mlx_batched_ragged_byte_exact` `:5665`). *(slot)*
+- [x] **perf-batch-arch-coverage** — DONE: `ff14fa6`. Added `LoadedModel::Glm4(_)` to
+  `is_batchable_arch()` — Glm4 attention already reads `BATCH_PAD_OFFSETS` for per-row rope
+  (same pattern as Llama/Qwen2); `dense_forward` + `run_batch` already handled it. Scaffolded
+  `mlx_glm4_batched_ragged_byte_exact` test (needs slot). GptOss excluded — its internal
+  full/swa masks use scalar `cache.offset()`; fix requires per-row mask construction in model.
 - [ ] **perf-prefix-reuse-fastpaths** — `run_plookup_job` + `run_spec_job` use **fresh KV** (forgone
   reuse, comments `:655/:1735/:1831`) → re-prefill the whole conversation each turn. Thread the existing
   `PrefixStore` truncate/restore into both (same `MlxDenseTarget`, KV shape matches) → unlocks
