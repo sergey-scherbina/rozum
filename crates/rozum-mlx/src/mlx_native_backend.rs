@@ -349,9 +349,23 @@ mod inner {
             // process is contaminated and would inflate the footprint cache (eager-pipeline bug).
             deregister_resident(&self.co_resident);
             if !self.co_resident.load(std::sync::atomic::Ordering::SeqCst) {
+                // smmr-D: sample active BEFORE peak so both reflect the same moment (worker
+                // still holds the KV cache). `get_active_memory()` = weights + KV (steady-state);
+                // `get_peak_memory()` = high-water including transient prefill activations.
+                let active = mlx_rs::memory::get_active_memory() as u64;
                 let peak = mlx_rs::memory::get_peak_memory() as u64;
                 let cache = mlx_rs::memory::get_cache_memory() as u64;
+                crate::footprint::record_active_peak(&self.model_id, active);
                 crate::footprint::record_peak(&self.model_id, peak.saturating_add(cache));
+                if std::env::var("ROZUM_PEAK_DEBUG").is_ok() {
+                    eprintln!(
+                        "smmr-D {}: active={:.1} GB  peak={:.1} GB  cache={:.1} GB",
+                        self.model_id,
+                        active as f64 / 1e9,
+                        peak as f64 / 1e9,
+                        cache as f64 / 1e9,
+                    );
+                }
             }
             // Close the job channel so the worker's `blocking_recv` returns `None` and it
             // exits its loop + drops the model, THEN join it. Without the join, ~8-15 GB of

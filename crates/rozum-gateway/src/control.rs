@@ -952,6 +952,7 @@ async fn session_ws_bridge(mut socket: axum::extract::ws::WebSocket, id: String)
 enum MatrixJobStatus { Queued, Running, Paused, Done, Failed, Stopped }
 
 // Live state for the currently running matrix job (cleared when job finishes).
+#[derive(Serialize, Deserialize, Clone)]
 struct MatrixLive {
     job_id: String,
     pgid: i32,
@@ -964,11 +965,52 @@ struct MatrixLive {
     result_dir: String,
 }
 const DONE_TTL_SECS: u64 = 300; // keep panel visible 5 min after completion
+/// Stale on-disk state older than this is ignored on startup (the job is long gone).
+const LIVE_STALE_SECS: u64 = 1800;
+
+fn matrix_live_path() -> Option<PathBuf> {
+    state_dir().map(|d| d.join("matrix-live.json"))
+}
+
+fn persist_matrix_live(live: &Option<MatrixLive>) {
+    let Some(path) = matrix_live_path() else { return };
+    match live {
+        None => { let _ = std::fs::remove_file(&path); }
+        Some(l) => {
+            if let Ok(bytes) = serde_json::to_vec(l) {
+                let tmp = path.with_extension("json.tmp");
+                if std::fs::write(&tmp, &bytes).is_ok() {
+                    let _ = std::fs::rename(&tmp, &path);
+                }
+            }
+        }
+    }
+}
+
+fn load_matrix_live_from_disk() -> Option<MatrixLive> {
+    let path = matrix_live_path()?;
+    let bytes = std::fs::read(&path).ok()?;
+    let l: MatrixLive = serde_json::from_slice(&bytes).ok()?;
+    // Ignore stale state: done jobs older than LIVE_STALE_SECS, or in-progress jobs
+    // from a previous process that is no longer running (pgid dead).
+    let now = crate::share::now_unix();
+    if l.done && now.saturating_sub(l.done_at) > LIVE_STALE_SECS {
+        return None;
+    }
+    // For in-progress jobs, check if the process group is still alive.
+    if !l.done {
+        let alive = unsafe { libc::kill(-l.pgid, 0) } == 0;
+        if !alive {
+            return None;
+        }
+    }
+    Some(l)
+}
 
 fn matrix_live() -> &'static Mutex<Option<MatrixLive>> {
     use std::sync::OnceLock;
     static L: OnceLock<Mutex<Option<MatrixLive>>> = OnceLock::new();
-    L.get_or_init(|| Mutex::new(None))
+    L.get_or_init(|| Mutex::new(load_matrix_live_from_disk()))
 }
 
 fn matrix_live_data() -> serde_json::Value {
@@ -980,7 +1022,9 @@ fn matrix_live_data() -> serde_json::Value {
     // If job finished and TTL has expired, treat as idle
     if l.done && now.saturating_sub(l.done_at) > DONE_TTL_SECS {
         drop(live);
-        *matrix_live().lock().unwrap() = None;
+        let cleared = None;
+        persist_matrix_live(&cleared);
+        *matrix_live().lock().unwrap() = cleared;
         return serde_json::json!({ "status": "idle" });
     }
     let elapsed_s = if l.done { l.done_at.saturating_sub(l.started_at) } else { now.saturating_sub(l.started_at) };
@@ -1239,18 +1283,26 @@ async fn run_matrix_job(job_id: &str) {
     let exit_code = match cmd.spawn() {
         Ok(mut child) => {
             let pgid = child.id() as i32;
-            *matrix_live().lock().unwrap() = Some(MatrixLive {
-                job_id: job_id.to_string(), pgid, paused: false,
-                done: false, done_at: 0,
-                started_at, total_cells,
-                log_path: log_path.to_string_lossy().into_owned(),
-                result_dir: result_dir.to_string_lossy().into_owned(),
-            });
+            {
+                let new_live = Some(MatrixLive {
+                    job_id: job_id.to_string(), pgid, paused: false,
+                    done: false, done_at: 0,
+                    started_at, total_cells,
+                    log_path: log_path.to_string_lossy().into_owned(),
+                    result_dir: result_dir.to_string_lossy().into_owned(),
+                });
+                persist_matrix_live(&new_live);
+                *matrix_live().lock().unwrap() = new_live;
+            }
             let code = tokio::task::spawn_blocking(move || child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1)).await.unwrap_or(-1);
             let finish_ts = crate::share::now_unix();
-            if let Some(ref mut l) = *matrix_live().lock().unwrap() {
-                l.done = true;
-                l.done_at = finish_ts;
+            {
+                let mut lock = matrix_live().lock().unwrap();
+                if let Some(ref mut l) = *lock {
+                    l.done = true;
+                    l.done_at = finish_ts;
+                }
+                persist_matrix_live(&*lock);
             }
             code
         }
@@ -1408,11 +1460,16 @@ async fn matrix_pause_route() -> axum::response::Response {
     use axum::response::IntoResponse;
     let ok = signal_matrix(libc::SIGSTOP);
     if ok {
-        let mut live = matrix_live().lock().unwrap();
-        if let Some(ref mut l) = *live {
-            l.paused = true;
-            let id = l.job_id.clone();
-            drop(live);
+        let id = {
+            let mut live = matrix_live().lock().unwrap();
+            if let Some(ref mut l) = *live {
+                l.paused = true;
+                let id = l.job_id.clone();
+                persist_matrix_live(&*live);
+                id
+            } else { String::new() }
+        };
+        if !id.is_empty() {
             let mut q = matrix_queue().lock().unwrap();
             if let Some(j) = q.iter_mut().find(|j| j.id == id) { j.status = MatrixJobStatus::Paused; }
         }
@@ -1424,11 +1481,16 @@ async fn matrix_resume_route() -> axum::response::Response {
     use axum::response::IntoResponse;
     let ok = signal_matrix(libc::SIGCONT);
     if ok {
-        let mut live = matrix_live().lock().unwrap();
-        if let Some(ref mut l) = *live {
-            l.paused = false;
-            let id = l.job_id.clone();
-            drop(live);
+        let id = {
+            let mut live = matrix_live().lock().unwrap();
+            if let Some(ref mut l) = *live {
+                l.paused = false;
+                let id = l.job_id.clone();
+                persist_matrix_live(&*live);
+                id
+            } else { String::new() }
+        };
+        if !id.is_empty() {
             let mut q = matrix_queue().lock().unwrap();
             if let Some(j) = q.iter_mut().find(|j| j.id == id) { j.status = MatrixJobStatus::Running; }
         }
@@ -2200,6 +2262,13 @@ pub struct ResidentBrief {
     pub pid: u32,
     pub model: String,
     pub size_gib: String,
+    /// smmr-D: steady-state active footprint (weights + KV, no transient activations) in GiB.
+    /// None if no prior run has been measured yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_peak_gib: Option<String>,
+    /// smmr-D: process-wide total peak (active + cache + prefill spike) in GiB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_peak_gib: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2408,7 +2477,9 @@ pub async fn status() -> ControlStatus {
                     .find(|m| m.spec == model)
                     .map(|m| fmt_gib(m.size_bytes))
                     .unwrap_or_default();
-                ResidentBrief { pid, model, size_gib }
+                let active_peak_gib = rozum_core::footprint::cached_active_peak(&model).map(fmt_gib);
+                let total_peak_gib = rozum_core::footprint::cached_peak(&model).map(fmt_gib);
+                ResidentBrief { pid, model, size_gib, active_peak_gib, total_peak_gib }
             })
             .collect(),
     };
