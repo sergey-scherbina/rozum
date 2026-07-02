@@ -1,5 +1,74 @@
 # Sprint
 
+### ▶ runtime correctness + matrix quality (operator 2026-07-02)
+
+- [x] **smmr-D-active-split** — DONE (2026-07-02, master `c489fc1`). Track `get_active_memory()` (non-reclaimable: weights + KV +
+  activations) separately from `get_peak_memory()` (total = active + cache) during MLX generation.
+  Record both in `footprint-peaks.json`. Use the ACTIVE peak, not total peak, as the co-residency
+  gate: two models can co-reside when `active_A + active_B + active_reserve ≤ free_total`. Today the
+  gate uses `peak_total` and over-refuses valid co-resident pairs where cache dominates. Also expose
+  both values in the `/control/status` residency block (visible in UCC) and via `obs`.
+  - Where: `crates/rozum-mlx/src/mlx_native_backend.rs` — in `run_generation_loop` (or equivalent),
+    after `mlx::eval()`, sample `mlx_rs::memory::get_active_memory()` and keep a running max in the
+    worker state. Record in `crates/rozum-core/src/footprint.rs` under key `<model>:active_peak`.
+    Gate in `crates/rozum-core/src/share.rs`: `admits_coresident(a, b)` uses stored active peaks
+    when available, falls back to total peak otherwise.
+  - Done-when: `ROZUM_PEAK_DEBUG=1 rozum launch --model A claude …` logs `active_peak_mb / total_peak_mb`.
+    `footprint-peaks.json` contains `<model>:active_peak` keys. Unit test in `share.rs` covers the
+    active-split path.
+
+- [x] **agentic-rc-structured** — DONE (2026-07-02, master `c489fc1`). agentic.sh now maps raw agent rc to semantic codes: 0=pass by verify,
+  everything else conflated (agent error, gateway crash rc=2, timeout, tool failure). The matrix CSV
+  has rc≠0 for 54/105 cells but can't tell capability-miss from infra-fail. Add structured codes:
+  - `rc=0` — verify PASS
+  - `rc=10` — verify FAIL (agent ran to completion, task not solved — capability miss)
+  - `rc=11` — verify SKIP (no verify result; agent never finished writing files)
+  - `rc=2`  — gateway crash (preserve: "clients_gone", exit before agent turn)
+  - `rc=124` — timeout (already implicit via `/usr/bin/time`, make explicit)
+  - Where: `scripts/bench/agentic.sh` lines 680-690 area (the `wait "$LP"; rc=$?` block).
+    `write_agentic_meta` and the CSV line both get the new codes.
+    Matrix results page: parse rc=10 as "capability", rc=2 as "infra" in the cell panel.
+  - Done-when: `agentic.sh` produces rc=10 on a task where verify fails cleanly. Matrix UI shows
+    "⚡ инфра" vs "❌ задача" based on rc.
+
+- [x] **matrix-live-persist** — DONE (2026-07-02, master `c489fc1`). `MatrixLive` now persists to `~/.local/state/rozum/matrix-live.json`; a `launchctl kickstart -k`
+  mid-run resets it and the matrix panel shows nothing until the next poll cycle. Persist the struct
+  to `~/.rozum/matrix-live.json` on every update; read it at startup. Stale files (>30 min) are
+  ignored on startup.
+  - Where: `crates/rozum-gateway/src/control.rs` — `update_matrix_live` / `run_matrix_job`.
+    Add `persist_matrix_live(&MatrixLive)` and `load_matrix_live()` helper fns.
+  - Done-when: kill and restart gateway mid-matrix-run; `/control/matrix/live` returns the
+    in-progress state within one poll cycle.
+
+- [ ] **matrix-reps-default** — P2. agentic.sh already has `REPS` support (line 106: `REPS="${REPS:-1}"`).
+  Default is 1 (single run = high variance). Expose in matrix.html UI: an "N прогонов" selector
+  (1/3/5) that passes `REPS=N` in the env when launching the matrix. Also update the matrix
+  results page to display cell pass-RATE (k/N) instead of pass/fail when REPS>1.
+  - Where: `/Users/sergiy/.rozum/ucc/site/matrix.html` — run button → add `REPS` env param.
+    `crates/rozum-gateway/src/control.rs` `run_matrix_job` → thread REPS through the env.
+    CSV parse: aggregate cells with same (agent, model, task) into a pass-rate.
+  - Done-when: matrix UI shows a 1/3/5 picker; REPS=3 run emits 3 CSV rows per cell; results page
+    aggregates them.
+
+- [ ] **mcp-proxy-http** — P1. BUG-004 Phase 2: stdio mcp-proxy dies mid-session → all `mcp__rozum__*`
+  tools vanish; CC won't restart a dead stdio MCP. Phase 1 (crash log + watchdog) is on
+  `feature/mcp-proxy-resilience` (a6420c5, not pushed). Phase 2 = HTTP transport: `rozum mcp-proxy`
+  serves `/mcp` (rmcp streamable-http); Claude Code's `httpServer` MCP config reconnects automatically.
+  Spec: `docs/specs/mcp-proxy-resilience.md` § Phase 2.
+  - Where: `crates/rozum-gateway/src/mcp_proxy.rs` (or a new `crates/rozum-meeting/src/mcp_http.rs`).
+    Merge the Phase-1 branch first to avoid conflicts.
+  - Done-when: kill mcp-proxy process mid-session; MCP tools reappear in CC within ~10 s.
+
+- [ ] **tool-dialect-spi** — P0-arch. Extract tool-format handling (ToolDialect) from hand-branched
+  `if model.contains("GLM") … else if model.contains("codex") …` code in
+  `mlx_native_backend.rs`, `engine.rs`, `serving.rs` into a clean SPI trait:
+  `trait ToolDialect { fn render_tools(); fn parse_tool_call(); fn render_tool_result(); }`.
+  Implementations: `XmlDialect` (Qwen), `GlmDialect`, `DeepSeekDialect`, `HarmonyDialect`.
+  Registered at backend init; thread through request context instead of model-name string checks.
+  This is multi-day work — write `docs/specs/tool-dialect-spi.md` first.
+  - Done-when: zero `model.contains("GLM")` / `model.contains("codex")` in serving/engine/backend.
+    All 5 models pass their tool-call matrix row.
+
 ### ▶ meetings .ssc strict token mode (operator 2026-07-01)
 - [x] **mtg-ssc-strict-token-mode** — DONE (2026-07-01). Added optional
   `ROZUM_MEETING_REQUIRE_TOKEN=1` enforcement to the pure `.ssc` meeting PWA. Default remains

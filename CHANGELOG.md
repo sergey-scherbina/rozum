@@ -1,5 +1,31 @@
 # Changelog
 
+## runtime: smmr-D active/peak split + structured rc + matrix-live persist
+Completed: 2026-07-02 · `c489fc1`
+
+Three improvements from the runtime correctness track:
+
+**smmr-D — active/peak memory split.** The MLX backend now samples both `get_active_memory()`
+(steady-state: weights + KV, no transient activations) and `get_peak_memory()` (high-water
+including prefill spike) on model unload. Both are stored in separate footprint caches
+(`footprint-peaks.json` for total-peak, `footprint-active.json` for active-only). The
+`/control/status` `residents` block exposes `active_peak_gib` and `total_peak_gib` so the UCC
+dashboard can show the split. `ROZUM_PEAK_DEBUG=1` logs it live. This gives us the data needed
+to drive honest co-residency decisions (two models can co-reside when their active peaks + reserve
+fit free RAM, even if total peaks don't). The co-residency gate update (`admits_coresident`) is the
+smmr-D follow-up.
+
+**agentic-rc-structured.** `agentic.sh` now maps the raw agent exit code to a semantic code at
+the end of each cell run: `0`=verify PASS, `2`=infra failure (gateway crash), `10`=verify FAIL
+(capability miss — agent ran cleanly but task not solved), `124`=timeout. The matrix CSV `rc`
+column now distinguishes capability failures from infra failures, making matrix health metrics
+reliable.
+
+**matrix-live-persist.** `MatrixLive` (the in-progress matrix state) is now persisted to
+`~/.local/state/rozum/matrix-live.json` on every mutation. On startup, the file is loaded and
+validated (stale done-state >30 min and orphan in-progress runs with dead pgids are ignored).
+A `launchctl kickstart -k` mid-run no longer loses the panel state — the next poll recovers it.
+
 ## meeting .ssc — optional strict token mode
 Completed: 2026-07-01
 
