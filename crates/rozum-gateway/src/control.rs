@@ -1074,6 +1074,9 @@ struct MatrixJob {
     models: Option<Vec<String>>,
     agents: Option<Vec<String>>,
     tasks: Option<Vec<String>>,
+    /// REPS: how many runs per cell (default 1 = single-run pass/fail).
+    #[serde(default)]
+    reps: Option<u32>,
     status: MatrixJobStatus,
     queued_at: u64,
     started_at: Option<u64>,
@@ -1167,6 +1170,9 @@ struct MatrixRunReq {
     models: Option<Vec<String>>,
     agents: Option<Vec<String>>,
     tasks: Option<Vec<String>>,
+    /// REPS: how many times to repeat each cell (default 1). Passed as REPS=N to agentic.sh.
+    #[serde(default)]
+    reps: Option<u32>,
 }
 
 async fn matrix_run_route(axum::Json(req): axum::Json<MatrixRunReq>) -> axum::response::Response {
@@ -1177,6 +1183,7 @@ async fn matrix_run_route(axum::Json(req): axum::Json<MatrixRunReq>) -> axum::re
         models: req.models,
         agents: req.agents,
         tasks: req.tasks,
+        reps: req.reps,
         status: MatrixJobStatus::Queued,
         queued_at: crate::share::now_unix(),
         started_at: None, finished_at: None, log_path: None, result_dir: None, exit_code: None,
@@ -1225,10 +1232,10 @@ async fn matrix_worker() {
 }
 
 async fn run_matrix_job(job_id: &str) {
-    let (models, agents, tasks) = {
+    let (models, agents, tasks, reps) = {
         let q = matrix_queue().lock().unwrap();
         let Some(j) = q.iter().find(|j| j.id == job_id) else { return };
-        (j.models.clone(), j.agents.clone(), j.tasks.clone())
+        (j.models.clone(), j.agents.clone(), j.tasks.clone(), j.reps.unwrap_or(1))
     };
 
     let log_dir = state_dir().map(|d| d.join("matrix-logs")).unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -1256,7 +1263,7 @@ async fn run_matrix_job(job_id: &str) {
     let models_vec = models.unwrap_or(all_models);
     let agents_vec = agents.unwrap_or_else(|| vec!["claude".into(), "codex".into(), "opencode".into()]);
     let tasks_vec  = tasks.unwrap_or_else(|| vec!["greet".into(), "build".into(), "fix".into(), "test".into(), "debug".into()]);
-    let total_cells = models_vec.len() * agents_vec.len() * tasks_vec.len();
+    let total_cells = models_vec.len() * agents_vec.len() * tasks_vec.len() * reps as usize;
     let models_str = models_vec.join(" ");
     let agents_str = agents_vec.join(" ");
     let tasks_str  = tasks_vec.join(" ");
@@ -1275,6 +1282,7 @@ async fn run_matrix_job(job_id: &str) {
         .env("BENCH_OUT", &result_dir)
         .env("ROZUM_SAMPLING_SEED", "1234")
         .env("KEEP", "1") // preserve workdirs so we can archive cell logs
+        .env("REPS", reps.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_out))
         .stderr(Stdio::from(log_err))
