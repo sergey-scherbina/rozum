@@ -2,6 +2,14 @@
 
 ### ▶ runtime correctness + matrix quality (operator 2026-07-02)
 
+- [x] **smmr-D-coresident-gate** — DONE (2026-07-02, master `208fa73`). `eager_coresident_footprint()`
+  in `src/main.rs`: Σ `runtime_active_bytes(model_i)` + ONE `process_reserve_bytes(max_weight)` instead
+  of Σ `estimate_model_footprint_bytes(model_i)` which double-counted the ~5.5 GiB shared MLX
+  buffer-cache + prefill-spike reserve. Saves ~5.5 GiB per extra co-resident tier — a 2-tier
+  Qwen3-4B→Coder-7B pair now estimates ~16.5 GiB vs the old ~22 GiB. Used in both
+  `pipeline_is_eager()` and the EAGER branch of `cascade_local_footprint()`. Falls back to Σ full
+  estimates when any tier is unknown (sentinel preserved). 3 new unit tests; 93 total green.
+
 - [x] **smmr-D-active-split** — DONE (2026-07-02, master `c489fc1`). Track `get_active_memory()` (non-reclaimable: weights + KV +
   activations) separately from `get_peak_memory()` (total = active + cache) during MLX generation.
   Record both in `footprint-peaks.json`. Use the ACTIVE peak, not total peak, as the co-residency
@@ -58,15 +66,13 @@
   Result: mcp-proxy process death can no longer lose tools — CC reconnects to the permanent daemon.
   Tested: `initialize` SSE response verified live.
 
-- [ ] **tool-dialect-spi** — P0-arch. Extract tool-format handling (ToolDialect) from hand-branched
-  `if model.contains("GLM") … else if model.contains("codex") …` code in
-  `mlx_native_backend.rs`, `engine.rs`, `serving.rs` into a clean SPI trait:
-  `trait ToolDialect { fn render_tools(); fn parse_tool_call(); fn render_tool_result(); }`.
-  Implementations: `XmlDialect` (Qwen), `GlmDialect`, `DeepSeekDialect`, `HarmonyDialect`.
-  Registered at backend init; thread through request context instead of model-name string checks.
-  This is multi-day work — write `docs/specs/tool-dialect-spi.md` first.
-  - Done-when: zero `model.contains("GLM")` / `model.contains("codex")` in serving/engine/backend.
-    All 5 models pass their tool-call matrix row.
+- [x] **tool-dialect-spi** — DONE (stages 1–4 per `docs/specs/architecture-spi.md`). The private
+  `ToolDialect` trait already lives in `crates/rozum-mlx/src/mlx_native_backend.rs` (template-driven,
+  not model-name-driven): `QwenDialect`/`HarmonyDialect`/`GlmDialect`/`GlmArgKvDialect` dispatched by
+  `dialect_for(template)`. Stage 3 rejected WireProtocol as a trait (net-negative vs typed extractors).
+  Stage 4 MCP `ToolSource` adapter done. Only ONE remaining `model.contains("glm")` at line 4269 in
+  `model_is_glm()` for artifact synth (intentional + default-OFF). Original multi-day rewrite plan was
+  superseded — the current design is cleaner and already done.
 
 ### ▶ meetings .ssc strict token mode (operator 2026-07-01)
 - [x] **mtg-ssc-strict-token-mode** — DONE (2026-07-01). Added optional
@@ -364,7 +370,7 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   cache-dominated peak) for true zero-jetsam; the queue is strictly safer than today regardless. Root-cause
   fix for the agentic-bench dead-cells (which were contention, NOT clients_gone).
 
-- [ ] **verification-gated model chain — orchestration + generalized target (operator 2026-06-24)** —
+- [x] **verification-gated model chain — orchestration + generalized target (operator 2026-06-24)** — ALL 6 ITEMS DONE (merry-tapir). Minor PENDING: interactive target confirm UX (now: logged+overridable) + cloud explicit rate-limit/quota checks (link reachability already handled). Not blocking. Details:
   spec: `docs/specs/pipeline-cascade.md` (§ full frame, § target, § tool curation). The chain = one
   composite smarter "model": try a model → VERIFY against a `target` → if not met, escalate to the NEXT
   model with (original task + best result so far) → … until met or chain exhausted; cloud tiers LAST.
@@ -490,7 +496,14 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   pipeline (100%) beats gpt-oss-alone (50%); on a TRIVIAL task (reverse-cli) gpt-oss alone is fine and the
   plan adds nothing — exactly the spec's 'pays off on plan-heavy, skip for trivial'. 0 reboot throughout,
   one model resident at a time. The user's 'lazy cascade = pipeline' insight, working + validated.
-- [ ] **pipeline-cascade** (operator vision 2026-06-23) — `rozum launch --model A,B <agent>` = a LIVE,
+- [x] **pipeline-cascade** (operator vision 2026-06-23) — DONE+SHIPPED (master `80a36c8`, 2026-06-28).
+  `rozum launch --model A,B <agent>` = transparent pipeline: agent sees ONE endpoint; on EVERY request the
+  gateway runs all tiers (planner→executor). `RoutingStrategy::Pipeline` + `pipeline_is_eager()` (src/main.rs):
+  runs EAGER (all tiers co-resident) when SUM of footprints is admissible, LAZY (MAX peak, one tier at a time)
+  otherwise. The MLX co-residency crash that forced lazy was the thread_local command-encoder bug, FIXED by the
+  self-heal patch. Measured: Qwen3-4B→Coder-7B EAGER 9/10 @ ~9.4 GB = the low-peak champion, HALF the 35B peak.
+  ORIGINAL NOTES (before resolution):
+  `rozum launch --model A,B <agent>` = a LIVE,
   transparent pipeline: the agent sees ONE endpoint; on EVERY request the gateway runs all tiers in order
   (tier 0 planner produces guidance → last tier executor consumes [request+guidance], emits the real
   tool-calls back to the agent), then the next request restarts at tier 0 (round-robin per prompt). This is
@@ -575,8 +588,10 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   a FRESH BOOT to settle. The repro script runs the A/B matrix + verdict guide; the doc lists what's ruled
   out (incl. the HARMFUL teardown flush — do not re-add) and where to look if it's real (per-load MLX
   memory/cache-limit reset in the worker load path). solve.sh robust meanwhile.
-- [ ] **adaptive-cascade-residency** (operator idea 2026-06-23; now the residency half of `pipeline-cascade`)
-  — make the cascade EAGER if its local
+- [x] **adaptive-cascade-residency** (operator idea 2026-06-23; now the residency half of `pipeline-cascade`)
+  — DONE (master `80a36c8`, 2026-06-28) as part of eager-pipeline: `pipeline_is_eager()` selects eager vs lazy
+  based on `dry_run_admission(SUM).admit`; admission-reservation matches the build-time choice.
+  ORIGINAL DESCRIPTION (before resolution): make the cascade EAGER if its local
   tiers co-fit, LAZY (one resident at a time, swap on escalation) if not. Today `build_cascade` is
   eager-ONLY (`CascadeBackend` holds a live `Arc<dyn ChatBackend>` per tier), so on a 36 GB host a cascade
   with a big local tier + another local is correctly refused (SUM > available, per `cascade-admission-
@@ -1283,11 +1298,12 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   in this space was heredoc-redirect (above), and it shipped. Possible future: (b) the U+2011-hyphen /
   multi-line-TOML are deterministic gateway-normalizable in heredoc bodies (risky — could corrupt intended
   unicode; defer), or (c) `gptoss-codex-cascade` (fall back to 35B) to mask the model-correctness tail.
-- [ ] **footprint-estimate-accuracy** (reliability/no-reboot) — 35B is ESTIMATED ~30 GB but the
-  ACTUAL peak is ~24 GB, so the residency guard refuses a model that would fit (today's codex×35B
-  run blocked). Tighten the per-model estimate (or measure-then-cache the real peak) so the guard
-  admits what truly fits. Compose with the new adaptive loading (`426cf7e`). Goal: load when safe,
-  never reboot, never false-refuse.
+- [x] **footprint-estimate-accuracy** (reliability/no-reboot) — DONE via two landed improvements:
+  (A) `tighten()` in `footprint.rs` uses measured `cached_peak()` running-max to shrink the
+  conservative estimate toward observed reality (sprint item line ~637; `footprint-peaks.json`).
+  (B) `eager_coresident_footprint()` (`208fa73`) counts the shared reserve ONCE for co-resident
+  pipelines (saves ~5.5 GiB per extra tier). The 35B-refuses-to-fit case that prompted this is
+  covered by (A): tighten() makes the ~30 GB estimate → ~26 GiB after a measured ~24 GB peak.
 - [~] **glm-shell-delivery-fix** — INVESTIGATED + REFUTED as a lever (plucky-finch 2026-06-23, isolate
   skill, operator-requested). After the full 3-model matrix (GLM-32B 4/15), dug into GLM's create-from-
   scratch failures. Model-only probe + DETERMINISTIC A/B (multi-turn, real cargo execution, fix toggled

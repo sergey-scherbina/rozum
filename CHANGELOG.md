@@ -1,5 +1,20 @@
 # Changelog
 
+## smmr-D co-residency gate: count shared MLX reserve once for eager pipelines
+Completed: 2026-07-02 · `208fa73`
+
+`eager_coresident_footprint()` in `src/main.rs`: Σ `runtime_active_bytes(model_i)` + ONE
+`process_reserve_bytes(max_weight)` instead of Σ `estimate_model_footprint_bytes(model_i)` which
+double-counted the ~5.5 GiB process-global MLX buffer-cache + prefill-spike reserve. Saves ~5.5 GiB
+per extra co-resident tier — a 2-tier Qwen3-4B→Coder-7B pair estimates ~16.5 GiB vs the old ~22 GiB.
+Used in both `pipeline_is_eager()` (the eager/lazy decision) and the EAGER branch of
+`cascade_local_footprint()` (the actual reservation). Falls back to Σ full estimates for unknown-size
+models (sentinel preserved). 3 new unit tests; 93 total green.
+
+Also marked done: `tool-dialect-spi` (stages 1–4 in `architecture-spi.md`), `verification-gated
+model chain` (all 6 items done in merry-tapir), `footprint-estimate-accuracy` backlog item (covered
+by `tighten()` + this fix).
+
 ## BUG-004 Phase 2: mcp-proxy-http — permanent HTTP MCP transport
 Completed: 2026-07-02
 
