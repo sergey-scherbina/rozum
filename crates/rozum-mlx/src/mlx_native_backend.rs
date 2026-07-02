@@ -984,6 +984,12 @@ mod inner {
                 | LoadedModel::Llama(_)
                 | LoadedModel::Qwen2(_)
                 | LoadedModel::Gemma3(_)
+                // Glm4 attention reads BATCH_PAD_OFFSETS for per-row rope when set, falling
+                // back to scalar offset for serial decode — same pattern as Llama/Qwen2.
+                // dense_forward + run_batch both already handle LoadedModel::Glm4.
+                // GptOss excluded: builds per-layer full/swa masks from a single scalar
+                // cache.offset() — correct batching needs per-row mask construction.
+                | LoadedModel::Glm4(_)
         )
     }
 
@@ -6591,6 +6597,125 @@ mod tests {
             assert!(
                 gap < 0.5,
                 "row B (len 4) divergence at step {step} must be a bf16 near-tie (gap={gap}), not a structural error"
+            );
+        } else {
+            eprintln!("B: byte-exact too.");
+        }
+    }
+
+    // GLM4 ragged batched-decode byte-exact: same protocol as `mlx_batched_ragged_byte_exact`
+    // but using mlx_lm::models::glm4. The Glm4 attention reads BATCH_PAD_OFFSETS for
+    // per-row rope (identical pattern to Llama/Qwen2), so batch output must match serial.
+    //   cargo test --features mlx-native -- --ignored --nocapture mlx_glm4_batched_ragged_byte_exact
+    #[cfg(feature = "mlx-native")]
+    #[test]
+    #[ignore = "ragged batched-decode byte-exact; requires THUDM/glm-4-9b-chat-hf (any mlx-community GLM4-4bit)"]
+    fn mlx_glm4_batched_ragged_byte_exact() {
+        use mlx_lm::cache::ConcatKeyValueCache;
+        use mlx_lm::models::glm4::{load_glm4_model, set_batch_pad_offsets, Model, ModelInput};
+        use mlx_rs::ops::arange;
+        use mlx_rs::ops::indexing::{argmax_axis, IndexOp, NewAxis};
+        use mlx_rs::module::Module;
+        use mlx_rs::Array;
+
+        let dir = resolve_model_dir("mlx-community:glm-4-9b-chat-4bit")
+            .expect("GLM4-4bit not in HF cache");
+        let mut model = load_glm4_model(&dir).expect("load");
+        let n_decode = 16usize;
+
+        let a: Vec<u32> = vec![785, 6722, 315, 9625, 374, 220, 17]; // len 7
+        let b: Vec<u32> = vec![3838, 374, 279, 1429]; // len 4
+
+        let fwd = |m: &mut Model,
+                   inp: &Array,
+                   mask: Option<&Array>,
+                   cache: &mut Vec<Option<ConcatKeyValueCache>>|
+         -> Array {
+            let input = ModelInput { inputs: inp, mask, cache };
+            <Model as Module<ModelInput<'_, ConcatKeyValueCache>>>::forward(m, input).expect("fwd")
+        };
+        let argmax_row = |logits: &Array, row: i32| -> u32 {
+            argmax_axis(&logits.index((row, -1, ..)), -1, false).unwrap().item::<u32>()
+        };
+
+        let mut serial = |ids: &[u32], model: &mut Model| -> Vec<u32> {
+            let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
+            let mut logits = fwd(model, &Array::from(ids).index(NewAxis), None, &mut cache);
+            let mut out = Vec::new();
+            for _ in 0..n_decode {
+                let tok = argmax_row(&logits, 0);
+                out.push(tok);
+                let y = Array::from(&[tok][..]).index(NewAxis);
+                logits = fwd(model, &y, None, &mut cache);
+            }
+            out
+        };
+        let sa = serial(&a, &mut model);
+        let sb = serial(&b, &mut model);
+
+        use mlx_rs::ops::{concatenate_axis, zeros_dtype};
+        let max_l = a.len().max(b.len()) as i32;
+        let (pad_a, pad_b) = (max_l - a.len() as i32, max_l - b.len() as i32);
+        let pad_off = Array::from(&[pad_a, pad_b][..]);
+
+        let prefill = |m: &mut Model, ids: &[u32]| -> (Array, Vec<Option<ConcatKeyValueCache>>) {
+            let mut cache = Vec::new();
+            let logits = fwd(m, &Array::from(ids).index(NewAxis), None, &mut cache);
+            (logits, cache)
+        };
+        let (la0, ca) = prefill(&mut model, &a);
+        let (lb0, cb) = prefill(&mut model, &b);
+
+        let lpad = |x: &Array, pad: i32| -> Array {
+            if pad == 0 { return x.clone(); }
+            let s = x.shape();
+            let z = zeros_dtype(&[s[0], s[1], pad, s[3]], x.dtype()).unwrap();
+            concatenate_axis(&[&z, x], 2).unwrap()
+        };
+        let mut bcache: Vec<Option<ConcatKeyValueCache>> = Vec::with_capacity(ca.len());
+        for l in 0..ca.len() {
+            let (ka, va, _) = ca[l].as_ref().unwrap().kv_used().unwrap();
+            let (kb, vb, _) = cb[l].as_ref().unwrap().kv_used().unwrap();
+            let bk = concatenate_axis(&[&lpad(&ka, pad_a), &lpad(&kb, pad_b)], 0).unwrap();
+            let bv = concatenate_axis(&[&lpad(&va, pad_a), &lpad(&vb, pad_b)], 0).unwrap();
+            bcache.push(Some(ConcatKeyValueCache::from_kv(bk, bv, max_l)));
+        }
+
+        let mut ba = vec![argmax_row(&la0, 0)];
+        let mut bb = vec![argmax_row(&lb0, 0)];
+        let mut b_logits = vec![lb0.index((0, -1, ..))];
+        set_batch_pad_offsets(Some(pad_off.clone()));
+        for step in 0..(n_decode - 1) {
+            let y = Array::from(&[*ba.last().unwrap(), *bb.last().unwrap()][..])
+                .reshape(&[2, 1])
+                .unwrap();
+            let k_cur = max_l + step as i32 + 1;
+            let kidx = arange::<_, i32>(0, k_cur, None).unwrap().index((NewAxis, ..));
+            let padd = pad_off.index((.., NewAxis));
+            let dec_mask = kidx.ge(&padd).unwrap().index((.., NewAxis, NewAxis, ..));
+            let logits = fwd(&mut model, &y, Some(&dec_mask), &mut bcache);
+            ba.push(argmax_row(&logits, 0));
+            bb.push(argmax_row(&logits, 1));
+            b_logits.push(logits.index((1, -1, ..)));
+        }
+        set_batch_pad_offsets(None);
+
+        eprintln!("serial A: {sa:?}\nbatch  A: {ba:?}");
+        eprintln!("serial B: {sb:?}\nbatch  B: {bb:?}");
+        assert_eq!(sa, ba, "ragged batched row0 (A, len 7) must byte-match serial");
+        if let Some(step) = sb.iter().zip(&bb).position(|(s, b)| s != b) {
+            let lg = &b_logits[step];
+            let gs = lg.index(sb[step] as i32).item::<f32>();
+            let gb = lg.index(bb[step] as i32).item::<f32>();
+            let gap = (gb - gs).abs();
+            eprintln!(
+                "B: byte-exact for {step} tokens, then a near-tie flip \
+                 (serial tok {} logit={gs:.4} vs batched tok {} logit={gb:.4}, gap={gap:.4})",
+                sb[step], bb[step]
+            );
+            assert!(
+                gap < 0.5,
+                "row B divergence at step {step} must be a bf16 near-tie (gap={gap}), not a structural error"
             );
         } else {
             eprintln!("B: byte-exact too.");
