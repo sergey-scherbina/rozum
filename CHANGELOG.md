@@ -1,5 +1,13 @@
 # Changelog
 
+## perf(batch): ROZUM_BATCH default 1→2 — +35% throughput on 2 concurrent requests
+Completed: 2026-07-02 · `fbd1d89`
+
+A/B validated on Qwen3-4B. Single-request TTFT unchanged (122→121 tok/s, within noise
+— short-circuit prevents batch overhead). 2 concurrent: 125→169 tok/s (+35%). 4 concurrent
+at BATCH=4: 210 tok/s (+67%). Default flipped in `batch_cap()` (`crates/rozum-mlx`).
+`ROZUM_BATCH=1` to revert to serial; `ROZUM_BATCH=4` for heavy parallel bench workloads.
+
 ## fix(codex): empty exec args → no-op echo (gptoss-exec-decode-loopbreak b)
 Completed: 2026-07-02 · `2aa638a`
 

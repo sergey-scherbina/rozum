@@ -1405,13 +1405,11 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   the counter-0 check guards the race; if counter>0, full window runs (behavior unchanged).
   90 lib tests green. Slot-gated validation remaining: `*_two_concurrent` + `continuous_admit_three`
   to confirm batching still fires; lone TTFT improvement measured live.
-- [ ] **perf-batch-default-on** — biggest near-term win, but NOT a free flip (needs
-  `perf-batch-gather-shortcircuit` first). Continuous batching is built+wired but ships OFF:
-  `batch_cap()` = `ROZUM_BATCH` default **1 = serial** (`mlx_native_backend.rs:713`); benches prove
-  **~1.98× at B=2** and batched==serial correctness is already well-covered (byte-exact ragged + per-arch
-  concurrent + continuous-admit tests). After the short-circuit lands: A/B `ROZUM_BATCH=1` vs `2`/`4`
-  under real concurrent load — confirm single-stream TTFT unchanged + the ~1.98× win — then flip the
-  default (or keep opt-in if Metal-stream contention erodes it). *(slot)*
+- [x] **perf-batch-default-on** — DONE (2026-07-02, master `fbd1d89`). A/B on Qwen3-4B:
+  single-req TTFT unchanged (122→121 tok/s, noise); 2 concurrent 125→169 tok/s (+35%);
+  4 concurrent at BATCH=4 → 210 tok/s (+67%). `batch_cap()` default flipped 1→2 in
+  `crates/rozum-mlx/src/mlx_native_backend.rs`. `ROZUM_BATCH=1` to disable; `ROZUM_BATCH=4`
+  for heavier parallel workloads.
 - [ ] **perf-compiled-decode** — **ON-ICE (Stage-0 probe was NO-GO, `f6b20a3`).** Decode is ~92% CPU
   graph-build, so a compiled fixed-shape graph was the obvious lever — but `mlx_compile_probe_plain` on
   Qwen3-0.6B already showed compiled decode is SLOWER (T=1 0.69×, T=16 0.58×), matching the
