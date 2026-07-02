@@ -1510,7 +1510,11 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   actions (start/stop/swap) when wiring the Tk app. HTTP: `GET /control/status` added to the gateway's
   `/control/*` surface (serves the same snapshot for the web/UCC target; always-up host is a follow-up —
   fall back to `gateway status --json` meanwhile). 117 core + 81 gateway tests green.
-- [ ] **ucc-models-panel** — models/gateway/residency control screen (proves "beyond meetings").
+- [x] **ucc-models-panel** — DONE: `8c64a47`. `POST /control/gateway/stop` added to control.rs
+  (SIGTERM active gateway, 409 if clients attached). `modelsPanel` card in
+  `control-center-live.ssc`: rowLink catalog picker (gwModel signal), "загрузить"
+  (POST /gateway/load) + "остановить" (POST /gateway/stop) buttons, both refresh on
+  completion. Inserted between residentsCard and catCard. 90/90 gateway tests green.
 - Open: build-flag to select the frontend backend (not yet located); signal→redraw loop; focus/keyboard
   model (Tk-core vs tui-backend); Tk web-target ↔ existing SSR meeting server reconciliation. See spec.
 

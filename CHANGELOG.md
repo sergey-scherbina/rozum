@@ -1,5 +1,14 @@
 # Changelog
 
+## feat(ucc): models panel — load/stop gateway from UCC dashboard
+Completed: 2026-07-02 · `8c64a47`
+
+`POST /control/gateway/stop` added to `control.rs` (mirrors `rozum gateway stop`; 409 if
+clients attached, 404 if no gateway running). `modelsPanel` card added to
+`control-center-live.ssc` with a rowLink catalog picker (`gwModel` signal), "загрузить"
+(`POST /control/gateway/load`) and "остановить" (`POST /control/gateway/stop`) action
+buttons — both refresh the status panel on completion.
+
 ## perf: prefix-KV reuse in run_plookup_job + run_spec_job
 Completed: 2026-07-02 · `39535e6`
 
