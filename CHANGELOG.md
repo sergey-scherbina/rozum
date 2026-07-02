@@ -1,5 +1,14 @@
 # Changelog
 
+## fix(codex): empty exec args → no-op echo (gptoss-exec-decode-loopbreak b)
+Completed: 2026-07-02 · `2aa638a`
+
+`normalize_codex_tool_args`: when model returns empty function-call arguments,
+codex router fails "expected value at line 1 col 1" → retries → runaway loop.
+Now substitutes `{"cmd":"echo '[gateway: model emitted empty exec args]'"}` so
+codex can continue. Prose (non-empty non-JSON) still returned unchanged — live
+repro needed to fix that shape. 91/91 gateway tests green.
+
 ## feat(matrix): rc=11 verify-skip + pass-rate aggregation (REPS>1)
 Completed: 2026-07-02 · `ee96e67` + matrix.html patches
 

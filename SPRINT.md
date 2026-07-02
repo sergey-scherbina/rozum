@@ -1245,12 +1245,11 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
     stack. The remaining levers (below) are the RIGHT conditions: reasoning-per-shape (does the model
     catch its own `main`-prints-nothing bug with more deliberation?), sampling/temperature for code
     completeness, and HIGHER N (REPS≥8) to make any delta measurable above the noise.
-- [~] **gptoss-exec-decode-loopbreak** — **(a) DONE (`dba90c0`):** `normalize_codex_tool_args` decodes
-  `\uXXXX` in exec args (both `cmd` string + `command` argv-array) FIRST, restoring `>`/`<`/`|`/`&` so a
-  JSON-double-escaped redirect lands (was `cat > file` → no-op read). Reuses `decode_unicode_escapes`,
-  gated `ROZUM_CODEX_EXEC_DECODE=0` (default-on), test + 88/88 gateway lib tests. **(b) REMAINING:**
-  loop-breaker for non-JSON PROSE exec args (codex errors "expected value at line 1 col 1" → RETRIES → the
-  11 GB runaway) — detect + drop/repair; needs a live repro to characterize the prose shape.
+- [x] **gptoss-exec-decode-loopbreak** — **(a) DONE (`dba90c0`):** `normalize_codex_tool_args` decodes
+  `\uXXXX` in exec args (both `cmd` + `command` array). **(b) DONE (`2aa638a`):** empty exec args
+  (codex "expected value at line 1 col 1" → retry runaway) now substituted with a no-op echo so codex
+  continues. Prose args (non-empty, non-JSON) returned unchanged — live repro still needed to fix that
+  shape. Test `empty_exec_args_become_no_op_echo`; 91/91 gateway tests green.
 - [ ] **gptoss-reasoning-per-shape** — sweep reasoning low/medium BY TASK SHAPE: `low` under-plans
   multi-step CREATE (mkdir → premature stop), `medium` is slower. Find the sweet spot or a
   CREATE-aware default. A/B build/test at low vs medium.
