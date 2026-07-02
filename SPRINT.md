@@ -50,14 +50,13 @@
   - Done-when: matrix UI shows a 1/3/5 picker; REPS=3 run emits 3 CSV rows per cell; results page
     aggregates them.
 
-- [ ] **mcp-proxy-http** — P1. BUG-004 Phase 2: stdio mcp-proxy dies mid-session → all `mcp__rozum__*`
-  tools vanish; CC won't restart a dead stdio MCP. Phase 1 (crash log + watchdog) is on
-  `feature/mcp-proxy-resilience` (a6420c5, not pushed). Phase 2 = HTTP transport: `rozum mcp-proxy`
-  serves `/mcp` (rmcp streamable-http); Claude Code's `httpServer` MCP config reconnects automatically.
-  Spec: `docs/specs/mcp-proxy-resilience.md` § Phase 2.
-  - Where: `crates/rozum-gateway/src/mcp_proxy.rs` (or a new `crates/rozum-meeting/src/mcp_http.rs`).
-    Merge the Phase-1 branch first to avoid conflicts.
-  - Done-when: kill mcp-proxy process mid-session; MCP tools reappear in CC within ~10 s.
+- [x] **mcp-proxy-http** — DONE (2026-07-02). BUG-004 Phase 2 deployed. `rozum mcp-http` (rmcp
+  streamable-HTTP) was already implemented in `crates/rozum-meeting/src/meeting/http_proxy.rs` +
+  `crates/rozum-meet/src/main.rs`. Built release binary → `~/.rozum/bin/rozum-meet`. Installed
+  launchd service `com.rozum.mcp-http` (port 8779, project=/work/my/rozum, KeepAlive=true).
+  Changed `~/.claude.json` `mcpServers.rozum` → `{type:"http", url:"http://127.0.0.1:8779/mcp"}`.
+  Result: mcp-proxy process death can no longer lose tools — CC reconnects to the permanent daemon.
+  Tested: `initialize` SSE response verified live.
 
 - [ ] **tool-dialect-spi** — P0-arch. Extract tool-format handling (ToolDialect) from hand-branched
   `if model.contains("GLM") … else if model.contains("codex") …` code in

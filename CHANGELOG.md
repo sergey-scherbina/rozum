@@ -1,5 +1,15 @@
 # Changelog
 
+## BUG-004 Phase 2: mcp-proxy-http — permanent HTTP MCP transport
+Completed: 2026-07-02
+
+`rozum mcp-http` (already implemented in `crates/rozum-meeting/src/meeting/http_proxy.rs`)
+deployed as a permanent `launchd` service (`com.rozum.mcp-http`, port 8779, `KeepAlive=true`).
+`~/.claude.json` switched from `{type:"stdio", command:rozum-meet mcp-proxy}` to
+`{type:"http", url:"http://127.0.0.1:8779/mcp"}`. Claude Code now reconnects on proxy death
+instead of losing `mcp__rozum__*` tools for the rest of the session.
+Binary: `~/.rozum/bin/rozum-meet` (release). rmcp streamable-HTTP with stateful session resumption.
+
 ## matrix: REPS picker — multi-run support in UCC UI
 Completed: 2026-07-02 · `221c09b`
 
