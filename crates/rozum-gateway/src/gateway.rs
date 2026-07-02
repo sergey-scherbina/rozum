@@ -2712,6 +2712,12 @@ fn repair_heredoc_write(cmd: &str) -> Option<String> {
 }
 
 fn normalize_codex_tool_args(args: &str) -> String {
+    // gptoss-exec-decode-loopbreak (b): empty args cause "expected value at line 1 col 1" in codex's
+    // tool router → codex retries → runaway loop. Return a no-op echo so codex can continue.
+    if args.trim().is_empty() {
+        eprintln!("[exec-decode] empty exec args from model → substituting no-op echo");
+        return r#"{"cmd":"echo '[gateway: model emitted empty exec args]'"}"#.to_string();
+    }
     let mut v: Value = match serde_json::from_str(args) {
         Ok(v) => v,
         Err(_) => return args.to_string(),
@@ -5990,6 +5996,23 @@ mod tests {
             normalize_codex_tool_args("{\"cmd\":\"cargo build\"}"),
             "{\"cmd\":\"cargo build\"}"
         );
+    }
+
+    #[test]
+    fn empty_exec_args_become_no_op_echo() {
+        // gptoss-exec-decode-loopbreak (b): when the model emits empty function-call arguments,
+        // codex's router fails with "expected value at line 1 col 1" and retries → runaway loop.
+        // We substitute a no-op echo so codex can continue cleanly.
+        for empty in &["", "   ", "\t\n"] {
+            let out = normalize_codex_tool_args(empty);
+            let v: Value = serde_json::from_str(&out)
+                .unwrap_or_else(|e| panic!("empty args {empty:?} → not valid JSON: {e}\nout={out}"));
+            let cmd = v["cmd"].as_str().expect("cmd field missing");
+            assert!(cmd.starts_with("echo"), "expected echo no-op for empty {empty:?}, got: {cmd}");
+        }
+        // Non-empty non-JSON prose is returned unchanged (characterize live before fixing).
+        let prose = "Let me check the file first";
+        assert_eq!(normalize_codex_tool_args(prose), prose);
     }
 
     #[test]
