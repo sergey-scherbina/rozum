@@ -1434,10 +1434,11 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   (same pattern as Llama/Qwen2); `dense_forward` + `run_batch` already handled it. Scaffolded
   `mlx_glm4_batched_ragged_byte_exact` test (needs slot). GptOss excluded — its internal
   full/swa masks use scalar `cache.offset()`; fix requires per-row mask construction in model.
-- [ ] **perf-prefix-reuse-fastpaths** — `run_plookup_job` + `run_spec_job` use **fresh KV** (forgone
-  reuse, comments `:655/:1735/:1831`) → re-prefill the whole conversation each turn. Thread the existing
-  `PrefixStore` truncate/restore into both (same `MlxDenseTarget`, KV shape matches) → unlocks
-  plookup/spec-decode for multi-turn agents. *(slot)*
+- [x] **perf-prefix-reuse-fastpaths** — DONE: `39535e6`. `run_plookup_job` + `run_spec_job`
+  both accept `&mut PrefixStore`, compute `conv_len`, `take_dense` on entry (truncate + set
+  `MlxDenseTarget::kv_len`), `put_dense` after decode. Draft reconciles its own KV via
+  `fed` tracking — no separate draft-side reuse needed. `ROZUM_PREFIX_CACHE=0` disables.
+  Multi-turn plookup/spec-decode now skip the re-prefill of the whole conversation.
 - [ ] **perf-batch-nonbatchable-rows** — `is_batchable` (`:760`) serializes rep-penalty / explicit-seed
   / constrained-tool rows. Add per-row RNG keys + per-row penalty in `run_batch` (`mlx_rope_per_row_probe`
   `:5620` shows per-row offsets are feasible) or quantify+document the loss. Lower priority. *(slot)*

@@ -1,5 +1,16 @@
 # Changelog
 
+## perf: prefix-KV reuse in run_plookup_job + run_spec_job
+Completed: 2026-07-02 · `39535e6`
+
+Multi-turn plookup and spec-decode requests were re-prefilling the whole growing
+conversation each turn. Both `run_plookup_job` and `run_spec_job` now accept
+`&mut PrefixStore`, compute the conversation boundary via `render_prompt_opt`,
+`take_dense` on entry (truncate and seed `MlxDenseTarget::kv_len = reuse_len`),
+and `put_dense` the advanced target cache after decode. The draft model
+(`MlxDenseDraft`) reconciles its own KV via `fed` tracking — no separate draft-side
+reuse needed. `ROZUM_PREFIX_CACHE=0` disables all three paths consistently.
+
 ## perf(batch): Glm4 added to batchable arches
 Completed: 2026-07-02 · `ff14fa6`
 
