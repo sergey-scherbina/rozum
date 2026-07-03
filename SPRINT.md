@@ -1446,7 +1446,7 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   4 concurrent at BATCH=4 → 210 tok/s (+67%). `batch_cap()` default flipped 1→2 in
   `crates/rozum-mlx/src/mlx_native_backend.rs`. `ROZUM_BATCH=1` to disable; `ROZUM_BATCH=4`
   for heavier parallel workloads.
-- [ ] **perf-compiled-decode** — **ON-ICE (Stage-0 probe was NO-GO, `f6b20a3`).** Decode is ~92% CPU
+- [x] **perf-compiled-decode** — **ON-ICE (Stage-0 probe was NO-GO, `f6b20a3`).** Decode is ~92% CPU
   graph-build, so a compiled fixed-shape graph was the obvious lever — but `mlx_compile_probe_plain` on
   Qwen3-0.6B already showed compiled decode is SLOWER (T=1 0.69×, T=16 0.58×), matching the
   `compile_with_state` net-negative; decision recorded: don't build Stages 1/2 (batching was the real
@@ -1733,7 +1733,7 @@ Consolidated from the agentic matrix (`scripts/bench/agentic.sh`, sandbox on). R
     duplicate `[package]`, never reaches `src/main.rs`). Being addressed by `codex-create-write-synth`
     (apply_patch `{path,content}` → synthesize a `cat >` write). REASONING model → must sample (temp~1.0),
     greedy loops its CoT.
-- [ ] **GLM-4-32B-0414** (new MLX-native port, byte-parity) — agentic matrix **4/15**. Symptom: in
+- [x] **GLM-4-32B-0414** (new MLX-native port, byte-parity) — agentic matrix **4/15**. Symptom: in
   agent runs it **narrates tool use in markdown** (` ```zsh\ncat src/main.rs\n``` ` / ` ```bash\nRead\n{json}\n``` `,
   + ` ```prose\n…\n``` `, repeating blocks) instead of emitting a structured call → not parsed → not
   executed. **ROOT CAUSE ISOLATED (`isolate` skill — my first read "GLM is a weak driver / model
@@ -2049,9 +2049,9 @@ before concluding.
   `ROZUM_CODEX_TOOL_CAPTURE=1` JSONL events for the Codex `/v1/responses` tool
   inventory and completed tool calls, preserving raw vs post-rewrite names/args
   across streaming and non-streaming paths.
-- [ ] **Still to do:** repro the `fix`/`debug`/`test` reds (edit-existing-file,
-  different shape); per-fail verdict (fix vs structural); A/B candidate fixes;
-  re-run the matrix. Full evidence + verdicts in `docs/matrix-failure-analysis.md`.
+- [x] **Still to do (superseded 2026-07-03):** repro the `fix`/`debug`/`test` reds was done via
+  subsequent gateway fixes (codex-patch-barrier, catheredoc-normalize-v2, write-synth, exec-decode-loopbreak)
+  and matrix re-runs (16/20→27/30). See the `gateway reliability` entry above for the verdict per fix.
 
 > Note (2026-06-18): staged on branch `docs/matrix-analysis` (off master) because a co-agent occupies
 > the master worktree; fast-forward / merge into master when it's free.
@@ -2197,7 +2197,7 @@ are clients and can go in parallel, P6 is the service):
       `state/meetings/service.log`. *Verified:* generation unit tests + CLI `--help`
       wires up; the real `launchctl`/`systemctl` call is operator-validated (same
       convention as the gateway service — not run against the dev machine).
-- [ ] **Deferred (not now):** Future REST read-by-day on the meeting daemon's HTTP
+- [x] **Deferred (not now):** Future REST read-by-day on the meeting daemon's HTTP
       (`/rooms/{name}/days`, `/messages/<date>`). Model-as-participant via gateway
       local HTTP is DONE as `rozum meetings participant`.
 
@@ -2410,7 +2410,7 @@ the constrain-OFF fast path), per-task gateway (robust under MLX memory growth),
   `--lean` (the estimate stayed flat as the tool count swung 27→35). New estimate sums all block types +
   each tool's name+description+schema. Unit test covers tool-result + tool-schema contributions.
 
-- [ ] ~~cc-system-prompt-strip~~ — **INVESTIGATED, WON'T DO (2026-06-16).** Tried to cut the other half
+- [x] ~~cc-system-prompt-strip~~ — **INVESTIGATED, WON'T DO (2026-06-16).** Tried to cut the other half
   of the prompt overhead (CC's ~1,400-token system prompt). CLI levers measured: `--bare` → sys ~27 tok
   (est −71%), `--system-prompt <minimal>` → sys ~49 tok (est −48%). **Both break the agent on local
   models:** `--bare` 0/3 on `fix` (model runs but can't complete the tool loop) + flaky `build`;
@@ -2915,11 +2915,9 @@ cache + buffer-donating kernel = the token-2 divergence hazard).
   the *only* thing that could still flip it is a probe on 27B WITH the fixed-shape cache — but
   given two net-negative compile results, that is a deliberate, slot-heavy bet, not a default.
   Recommend keeping single-stream perf on the shipped batching lever.
-- [ ] **Stage 1 — fixed-shape KV cache** (preallocate + in-place slice-update +
-  offset). Byte-exact vs the current `ConcatKeyValueCache`.
-- [ ] **Stage 2 — compiled decode step** (plain `compile`, weights captured, args =
-  token+cache; custom kernel kept out / O(T) ops path at T=1). Byte-exact vs oracle.
-- [ ] **Stage 3 — clean A/B on 27B**; target ~22 t/s.
+- [x] **Stage 1 — fixed-shape KV cache** — ON-ICE (parent perf-compiled-decode NO-GO).
+- [x] **Stage 2 — compiled decode step** — ON-ICE (parent perf-compiled-decode NO-GO).
+- [x] **Stage 3 — clean A/B on 27B** — ON-ICE (parent perf-compiled-decode NO-GO).
 
 **⚠ RESUME CHECKPOINT — read this first after any reboot, then continue.**
 The machine has rebooted from memory pressure mid-experiment before; this block is the
@@ -3746,13 +3744,13 @@ Ordered cheapest → most strategic. Pick up the first one that lands; downstrea
 ones still pay off long-term but the user-facing Qwen3.6 problem is solved as
 soon as any single track succeeds.
 
-- [ ] llamacpp-qwen36-patch - Upstream PR to llama.cpp accepting `qwen35moe.rope.dimension_sections` length 3.
+- [x] llamacpp-qwen36-patch - SUPERSEDED by mlx-native-runtime (Qwen3.6 solved on the native MLX path). Upstream PR to llama.cpp accepting `qwen35moe.rope.dimension_sections` length 3.
   - Single hyperparam loader fix (~50 LoC). Concrete error logged with Qwen3.6 GGUF from `unsloth/Qwen3.6-35B-A3B-GGUF`.
   - Patched llama.cpp → patched llama-cpp-2 version bump → `cargo update` in rozum and `--features gguf` works for Qwen3.6.
   - Estimated effort: ~1 week active + upstream review cycle.
   - Spec: `docs/specs/llamacpp-qwen36-patch.md`.
 
-- [ ] mistralrs-qwen36-pr - Upstream PR to mistralrs registering Qwen3.5/3.6 as an alias of the existing `qwen3_next` model.
+- [x] mistralrs-qwen36-pr - SUPERSEDED by mlx-native-runtime (Qwen3.6 solved). Upstream PR to mistralrs registering Qwen3.5/3.6 as an alias of the existing `qwen3_next` model.
   - Discovery: mistralrs already has all the hybrid linear-attention layer code in `qwen3_next.rs` (GatedDeltaNet, full-attention, SparseMoeBlock, MoE routing). mlx-lm's `qwen3_5.py` re-uses `qwen3_next.py` classes verbatim — same architecture.
   - The PR is therefore not new layer code; it's: (a) register `model_type: "qwen3_5_moe"` and `architectures: ["Qwen3_5MoeForConditionalGeneration"]` to dispatch to the existing `Qwen3NextLoader`; (b) tolerate the nested `text_config` block + explicit `layer_types` array in the config parser; (c) handle `attn_output_gate` if it changes behaviour.
   - Correctness gate: byte-for-byte token match against `mlx_lm.generate --temp 0`.
@@ -3760,7 +3758,7 @@ soon as any single track succeeds.
   - Estimated effort: ~1 week active (down from 2-3 weeks after the qwen3_next discovery).
   - Spec: `docs/specs/mistralrs-qwen36-pr.md`.
 
-- [ ] mlx-native-port - Native MLX runtime in rozum on top of `mlx-rs`, porting `mlx_lm` Python piece by piece.
+- [x] mlx-native-port - SUPERSEDED by mlx-native-runtime (built on oxideai/mlx-lm crate; see P0 section above). Native MLX runtime in rozum on top of `mlx-rs`, porting `mlx_lm` Python piece by piece.
   - Phased: Phase 0 (bootstrap) → Phase 1 (Qwen3-4B dense) → Phase 2 (Qwen3 MoE) → Phase 3 (Qwen3.6 hybrid). Each phase has a numerical-match exit criterion.
   - Removes our dependency on mistralrs / llama-cpp-2 release cycles entirely; new model families become ~3-5 day port tasks instead of "wait for upstream".
   - New crate feature `mlx-native` (off by default — heavy compile, big code surface).
@@ -3925,7 +3923,7 @@ soon as any single track succeeds.
   in `tools_json` (matches transformers; truthiness-guarded templates unaffected —
   gpt-oss regression-checked). Added to `src/models.rs`. Fork rev bumped to e5ebe9d2.
 
-- [ ] glm4-bringup — **QUEUED 2026-06-21.** Port GLM-4 (dense) to the MLX-native crate:
+- [x] glm4-bringup — **DONE.** Port GLM-4 (dense) to the MLX-native crate:
   add `.vendor/mlx-lm/mlx-lm/src/models/glm4.rs` + register in `models/mod.rs` + dispatch
   `"glm4" => glm4::load_glm4_model(dir)` in `src/mlx_native_backend.rs`. Same playbook as
   [[project-gptoss-native-port]]: byte-exact greedy parity vs Python `mlx_lm.glm4`
