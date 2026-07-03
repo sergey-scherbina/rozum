@@ -67,13 +67,55 @@ check_js_syntax() {
       try { new vm.Script(m[1], { filename: `${process.argv[1]}#inline-${count}` }); }
       catch (e) { failed = true; console.error(`  ✗ ${process.argv[1]} inline <script> #${count}: ${e.message}`); }
     }
-    // An empty/truncated emit (e.g. $SSC pointed at a missing binary, "$SSC" ... > out.html
-    // silently redirecting nothing) has ZERO script blocks and would otherwise sail through as
-    // "0 checked, 0 failed" — this bit for real (2026-07-03): a wrong $SSC produced a 0-byte
-    // index.html that this same guard, before this line existed, happily approved.
-    if (html.trim().length === 0 || count === 0) { failed = true; console.error(`  ✗ ${process.argv[1]}: empty or no inline <script> blocks found (expected at least 1)`); }
+    if (html.trim().length === 0 || count === 0) { failed = true; console.error(`  ✗ ${process.argv[1]}: empty or no inline <script> blocks found`); }
     if (failed) process.exit(1);
     console.error(`  ✓ ${process.argv[1]}: ${count} inline <script> block(s) parse OK`);
+  ' "$html_file"
+}
+
+# Runtime init check for index.html only: runs the compiled JS in a Node sandbox with browser
+# stubs to catch ReferenceErrors (undefined variables) that syntax-check misses. Catches cases
+# like a refactor removing a val that other code still references — this bit us twice (modelSelectCols,
+# catCard): syntax was valid but the page was blank on load due to a JS ReferenceError.
+check_js_runtime() {
+  local html_file="$1"
+  command -v node >/dev/null 2>&1 || return 0
+  node -e '
+    const fs=require("fs"),vm=require("vm");
+    const html=fs.readFileSync(process.argv[1],"utf8");
+    const m=html.match(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/);
+    if (!m) { console.error("  ✗ no inline script"); process.exit(1); }
+    function el() {
+      const e={style:{},classList:{add:()=>{},remove:()=>{},toggle:()=>{}}};
+      e.setAttribute=()=>{}; e.getAttribute=()=>null; e.addEventListener=()=>{}; e.removeEventListener=()=>{};
+      e.appendChild=(c)=>c; e.removeChild=()=>{}; e.insertBefore=(c)=>c; e.replaceChild=()=>{};
+      e.querySelector=()=>el(); e.querySelectorAll=()=>[];
+      e.remove=()=>{}; e.closest=()=>null;
+      e.getBoundingClientRect=()=>({top:0,left:0,bottom:0,right:0,width:0,height:0});
+      Object.defineProperty(e,"innerHTML",{set:()=>{},get:()=>""});
+      Object.defineProperty(e,"textContent",{set:()=>{},get:()=>""});
+      Object.defineProperty(e,"innerText",{set:()=>{},get:()=>""});
+      return e;
+    }
+    const ctx={
+      window:{addEventListener:()=>{},removeEventListener:()=>{},location:{hash:"",href:""},history:{pushState:()=>{},replaceState:()=>{}}},
+      document:{getElementById:()=>el(),querySelector:()=>el(),querySelectorAll:()=>[],createElement:()=>el(),createTextNode:()=>el(),body:el(),head:el(),documentElement:el(),addEventListener:()=>{}},
+      fetch:()=>Promise.resolve({ok:true,json:()=>Promise.resolve({}),text:()=>Promise.resolve("")}),
+      console,setTimeout:()=>0,clearTimeout:()=>{},setInterval:()=>0,clearInterval:()=>{},
+      navigator:{serviceWorker:undefined,userAgent:"node"},performance:{now:()=>0},location:{hash:""},
+      MutationObserver:class{constructor(cb){}observe(){}disconnect(){}},
+      ResizeObserver:class{constructor(cb){}observe(){}disconnect(){}},
+      CustomEvent:class{constructor(t,d){this.type=t;this.detail=d?.detail}},
+      Event:class{constructor(t){this.type=t}},
+    };
+    ctx.self=ctx; ctx.globalThis=ctx;
+    try {
+      new vm.Script(m[1]).runInContext(vm.createContext(ctx));
+      console.error("  ✓ "+process.argv[1]+": runtime init OK");
+    } catch(e) {
+      console.error("  ✗ "+process.argv[1]+": RUNTIME ERROR: "+e.message);
+      process.exit(1);
+    }
   ' "$html_file"
 }
 
@@ -89,6 +131,7 @@ echo ">> index.html: $(wc -c < "$SITE/index.html") bytes"
 # extraCss (or derives body background from the theme) at the language level.
 sed -i '' 's/body{margin:0;padding:0;background:#fff;/body{margin:0;padding:0;background:#111827;/' "$SITE/index.html"
 check_js_syntax "$SITE/index.html"
+check_js_runtime "$SITE/index.html"
 
 # 3) Compile login.ssc → login.html and terminal.ssc → terminal.html.
 emit_html "$HERE/login.ssc"    8421 "$SITE/login.html"
