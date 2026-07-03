@@ -1,5 +1,14 @@
 # Sprint
 
+### ▶ matrix baseline — 5 DEFAULT_MODELS × claude × REPS=3 (operator 2026-07-03)
+
+- [ ] **matrix-baseline-2026-07-03** — run full DEFAULT_MODELS matrix (claude agent, REPS=3, all 6
+  tasks: greet rpn build fix test debug) to establish an updated agentic baseline now that all 5 models
+  are in DEFAULT_MODELS: 35B-DWQ, Qwen3-Coder-30B, Devstral-Small-2507, GLM-4.7-Flash, GLM-32B→gpt-oss.
+  Key gaps: Devstral only REPS=1 proven; Qwen3-Coder only REPS=2; others already 15/15.
+  - Command: `REPS=3 AGENTS=claude scripts/bench/agentic.sh`
+  - Done-when: results dir created, per-run.csv has 5×3×6=90 rows, CHANGELOG updated.
+
 ### ▶ deploy-ucc-web.sh gateway-binary gap (found 2026-07-03 while verifying the security fix below)
 
 - [x] **ucc-deploy-script-stale-binary** — DONE. After landing `feature/ucc-security-hardening`
