@@ -1,5 +1,16 @@
 # Changelog
 
+## fix(mlx): remap Role::Tool to user for templates that don't support tool role
+Completed: 2026-07-03 · `b3c8ab6`
+
+Devstral/Mistral/DeepSeek templates only support user/system/assistant. When
+`anthropic_messages_to_internal()` converts tool_result blocks to `Role::Tool` (for Qwen3),
+`QwenDialect` rendered them with role="tool" → template raised: "Only user, system and
+assistant roles are supported!" → 500 on EVERY request after the first tool call → claude
+retried 10× → task never completes. Fix: `template_supports_tool_role()` detects templates
+lacking a "tool" role branch; `render_prompt_opt` remaps `Role::Tool → Role::User` for such
+templates before rendering. Third and final fix needed for Devstral to function multi-turn.
+
 ## fix(mlx): pass eos_token to chat template rendering
 Completed: 2026-07-03 · `3a6baa2`
 
