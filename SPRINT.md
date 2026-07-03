@@ -1066,7 +1066,8 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   `NCTX=8192`: **build/fix/test/debug/rpn = 5/5** across targeted runs
   (`glm47-flash-build2-20260629-170340`, `glm47-flash-repair-20260629-163454`,
   `glm47-flash-buildtest-20260629-165806`, `glm47-flash-rpn2-20260629-165228`; peak ~24.5-25.0 GB).
-  NEXT: run full multi-agent/reps matrix before claiming the whole GLM plane globally green.
+  **2026-07-03 FULL MATRIX (agentic-20260703-120113, claude × REPS=3, n_ctx=14336 adaptive, peak
+  24.1 GB): **15/15** — rpn 3/3, build 3/3, fix 3/3, test 3/3, debug 3/3. Added to DEFAULT_MODELS.**
 - [x] **native-mlx-gate-mla-families** — DONE (2026-06-29): keep the model download gate in sync with
   the native loader. `LoadedModel` already supported `deepseek_v2` and `glm4_moe_lite`, but
   `supported_model_type` still rejected those `config.json` model types for uncached specs, so a fresh

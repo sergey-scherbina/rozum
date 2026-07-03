@@ -1,5 +1,17 @@
 # Changelog
 
+## feat(matrix): add GLM-4.7-Flash-4bit to DEFAULT_MODELS — 15/15 full matrix
+Completed: 2026-07-03
+
+GLM-4.7-Flash-4bit validated on a full multi-rep matrix (REPS=3, claude agent, all 5 tasks,
+`agentic-20260703-120113`): **15/15 PASS** (rpn 3/3, build 3/3, fix 3/3, test 3/3, debug 3/3).
+Model: glm4_moe_lite architecture (absorbed MLA, DeepSeek-V3 noaux_tc routing). Footprint: ~17 GB
+weights / 24.1 GB peak at n_ctx=14336 adaptive (202752 ctx won't fit ~26 GB free → auto-adapts).
+**Perfect score across all tasks and reps** — the strongest all-tasks result in the default matrix.
+Added as model 5 in DEFAULT_MODELS. Prior focused smoke at NCTX=8192 (5/5, 2026-06-29) confirmed;
+this is the full-context multi-rep verdict. Gateway fix that made it work: tool-call parsing for
+GLM's `<tool_call>/<arg_key>/<arg_value>` special tokens (master e016921).
+
 ## feat(matrix): add Qwen3-Coder-30B-A3B + Devstral-Small-2507 to DEFAULT_MODELS
 Completed: 2026-07-03
 

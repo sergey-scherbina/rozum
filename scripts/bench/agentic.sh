@@ -92,9 +92,13 @@ case "$BIN" in /*) ;; *) BIN="$repo/$BIN" ;; esac   # launch runs in a temp cwd 
 #      ~13.3 GB. Clean-box verdict (2026-07-03): 5/5 all tasks PASS (rpn+build+fix+test+debug). Four
 #      gateway bugs fixed before it worked (52bf4f7 injection-merge, 3a6baa2 eos_token, b3c8ab6
 #      role-remap). Best low-footprint agentic matrix member.
+#   5. GLM-4.7-Flash-4bit — GLM MoE-lite (glm4_moe_lite, absorbed MLA, DeepSeek-V3 routing); 4bit
+#      ~17 GB weights, 24.1 GB peak at n_ctx=14336 (adaptive). Full matrix (2026-07-03, agentic-
+#      20260703-120113): claude **15/15** — rpn 3/3, build 3/3, fix 3/3, test 3/3, debug 3/3.
+#      Strongest all-tasks score; loads adaptively to fit 26 GB free RAM.
 # Each space-separated entry is one `gateway --model <spec>`; a comma inside an entry = pipeline.
 # Override with AGENTIC_MODELS="spec1 spec2 ...".
-DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit-DWQ mlx-community:Qwen3-Coder-30B-A3B-Instruct-4bit mlx-community:Devstral-Small-2507-4bit mlx-community:GLM-4-32B-0414-4bit,mlx-community:gpt-oss-20b-MXFP4-Q4"
+DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit-DWQ mlx-community:Qwen3-Coder-30B-A3B-Instruct-4bit mlx-community:Devstral-Small-2507-4bit mlx-community:GLM-4.7-Flash-4bit mlx-community:GLM-4-32B-0414-4bit,mlx-community:gpt-oss-20b-MXFP4-Q4"
 read -r -a MODELS <<<"${AGENTIC_MODELS:-$DEFAULT_MODELS}"
 # Tasks: greet build fix test debug (the originals) + rpn (a from-scratch-hard RPN calculator —
 # create-from-scratch where a planner→executor pipeline should help most; see verify_task/prompt_for).
