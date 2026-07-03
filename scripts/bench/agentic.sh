@@ -84,16 +84,17 @@ case "$BIN" in /*) ;; *) BIN="$repo/$BIN" ;; esac   # launch runs in a temp cwd 
 #      strong at correct code), gpt-oss-20b executes (reliable agentic delivery). One model resident
 #      at a time (max(planner,executor) ~18 GB, fits 36 GB no-reboot). NOTE: the pipeline reloads
 #      both tiers per request (lazy), so it is SLOW per agent turn — give it a generous RUN_TIMEOUT.
-#   3. Qwen3-Coder-30B-A3B — purpose-built agentic coder (matrix-add-coders, operator 2026-06-27);
-#      native `qwen3_moe`, 4bit ~17 GB, A3B = fast. Direct single-model upgrade over the unreliable
-#      gpt-oss-20b executor ([[project-gptoss-agentic-codegen-unreliable]]).
-# CANDIDATE to verify-then-promote (NOT in the default set): Devstral-Small-2507 (Mistral SWE/edit
-# specialist, native via the mistral→llama loader, 4bit ~13 GB). The matrix once dropped Mistral-v0.3
-# as unable to drive tools — Devstral is agentic-tool-tuned so MAY differ; confirm its tool-use over
-# N runs before adding. Run it with: AGENTIC_MODELS="mlx-community:Devstral-Small-2507-4bit".
+#   3. Qwen3-Coder-30B-A3B — purpose-built agentic coder; native qwen3_moe 4bit ~20.5 GB. Clean-box
+#      verdict (2026-07-03): rpn+build 6/6, test+debug 4/4 ✓; fix 0/2 ✗ (model encodes multiline
+#      old_string with spaces not \n in JSON format → Edit miss → 284-tool loop). Strong on
+#      create-from-scratch; known weakness on multi-line Edit fix tasks.
+#   4. Devstral-Small-2507 — Mistral SWE/edit specialist; native via mistral→llama loader, 4bit
+#      ~13.3 GB. Clean-box verdict (2026-07-03): 5/5 all tasks PASS (rpn+build+fix+test+debug). Four
+#      gateway bugs fixed before it worked (52bf4f7 injection-merge, 3a6baa2 eos_token, b3c8ab6
+#      role-remap). Best low-footprint agentic matrix member.
 # Each space-separated entry is one `gateway --model <spec>`; a comma inside an entry = pipeline.
 # Override with AGENTIC_MODELS="spec1 spec2 ...".
-DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit-DWQ mlx-community:GLM-4-32B-0414-4bit,mlx-community:gpt-oss-20b-MXFP4-Q4"
+DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit-DWQ mlx-community:Qwen3-Coder-30B-A3B-Instruct-4bit mlx-community:Devstral-Small-2507-4bit mlx-community:GLM-4-32B-0414-4bit,mlx-community:gpt-oss-20b-MXFP4-Q4"
 read -r -a MODELS <<<"${AGENTIC_MODELS:-$DEFAULT_MODELS}"
 # Tasks: greet build fix test debug (the originals) + rpn (a from-scratch-hard RPN calculator —
 # create-from-scratch where a planner→executor pipeline should help most; see verify_task/prompt_for).

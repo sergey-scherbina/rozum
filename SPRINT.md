@@ -980,7 +980,7 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
 
 ##### Matrix model coverage (operator 2026-06-27) — stronger/newer local coders for the e2e tasks
 
-- [~] **matrix-add-coders** — IN PROGRESS (`feature/matrix-add-coders`). Add two stronger agentic
+- [x] **matrix-add-coders** — DONE (2026-07-03). Add two stronger agentic
   coders to the matrix; **both already load natively** (no porting): **Qwen3-Coder-30B-A3B-Instruct**
   (`qwen3_moe`, 4bit 17.2 GB / DWQ for ~8-bit quality) — purpose-built agentic coder, the cheapest
   upgrade over the unreliable gpt-oss-20b executor ([[project-gptoss-agentic-codegen-unreliable]]);

@@ -1,5 +1,16 @@
 # Changelog
 
+## feat(matrix): add Qwen3-Coder-30B-A3B + Devstral-Small-2507 to DEFAULT_MODELS
+Completed: 2026-07-03
+
+Both models validated on a clean box and added to `agentic.sh` DEFAULT_MODELS:
+- **Devstral-Small-2507-4bit** (13.3 GB, 5/5 all tasks — the low-footprint winner)
+- **Qwen3-Coder-30B-A3B-Instruct-4bit** (20.5 GB, 14/16 — strong on create-from-scratch,
+  known fix-task weakness: encodes newlines as spaces in JSON Edit old_string)
+
+Closes `matrix-add-coders`. DEFAULT_MODELS now: Qwen3.6-35B, Qwen3-Coder-30B,
+Devstral, GLM-4-32B→gpt-oss pipeline.
+
 ## bench: Qwen3-Coder-30B-A3B clean-box verdict — rpn+build+test+debug green, fix weak
 Completed: 2026-07-03 · results `agentic-20260703-104314`, `agentic-20260703-112045`, `agentic-20260703-112358`
 
