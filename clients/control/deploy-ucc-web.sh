@@ -130,6 +130,11 @@ echo ">> index.html: $(wc -c < "$SITE/index.html") bytes"
 # post-emit to match this app's `darkTheme.colors.background` (#111827) until scalascript exposes
 # extraCss (or derives body background from the theme) at the language level.
 sed -i '' 's/body{margin:0;padding:0;background:#fff;/body{margin:0;padding:0;background:#111827;/' "$SITE/index.html"
+# Models panel action buttons.  The `lcol` link text = field value, so CSS hides the raw text
+# (font-size:0) and shows the real label via ::before.  Empty-value links are hidden with display:none.
+# Note: </head> (line 7) is in the actual HTML head — NOT inside JS strings (those are </style> at ~4k).
+CSS='a[href^="/control/gateway/load?model="]:not([href$="model="]){display:inline-block;padding:3px 10px;border-radius:4px;background:#3b82f6;color:#fff;text-decoration:none;cursor:pointer;white-space:nowrap;font-size:0}a[href^="/control/gateway/load?model="]:not([href$="model="])::before{content:"загрузить";font-size:13px;color:#fff}a[href$="?model="]{display:none}a[href^="/control/gateway/stop?k="]:not([href$="?k="]){display:inline-block;padding:3px 10px;border-radius:4px;background:#374151;color:#fff;text-decoration:none;cursor:pointer;white-space:nowrap;font-size:0}a[href^="/control/gateway/stop?k="]:not([href$="?k="])::before{content:"выгрузить";font-size:13px;color:#fff}a[href$="?k="]{display:none}'
+sed -i '' "s|</head>|<style>${CSS}</style></head>|" "$SITE/index.html"
 check_js_syntax "$SITE/index.html"
 check_js_runtime "$SITE/index.html"
 

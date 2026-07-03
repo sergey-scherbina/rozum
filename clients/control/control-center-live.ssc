@@ -22,7 +22,7 @@ stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the vie
 [card, cardWithHeader](std/ui/containers.ssc)
 [signalText_](std/ui/reactive.ssc)
 [actionButton, textField, signalButton](std/ui/input.ssc)
-[remoteTable, lcol, rowLink](std/ui/data.ssc)
+[remoteTable, lcol, rowLink, rowPostAction, fieldPayload](std/ui/data.ssc)
 [route, router](std/ui/routing.ssc)
 
 ## State + routing
@@ -75,10 +75,12 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
 )
 val modelSelectCols = [fieldColumn("Модель", "spec"), fieldColumn("GiB", "size_gib")]
 val modelsPanel = cardWithHeader(heading(2, "Модели"))(
-  vstack(gap = 0)(
-    remoteTable(st, [lcol("Модель", "model", "#/detail/:value"), fieldColumn("GiB", "size_gib")], "residency.residents", [rowPostAction("выгрузить", "POST", "/control/gateway/stop", fieldPayload("model"), refresh)]),
-    remoteTable(st, [lcol("Модель", "spec",  "#/detail/:value"), fieldColumn("GiB", "size_gib")], "not_loaded",           [rowPostAction("загрузить", "POST", "/control/gateway/load", fieldPayload("spec"),  refresh)])
-  )
+  remoteTable(st, [
+    lcol("Модель", "spec",       "#/detail/:value"),
+    fieldColumn("GiB", "size_gib"),
+    lcol("",       "stop_label", "/control/gateway/stop?k=:value"),
+    lcol("",       "load_spec",  "/control/gateway/load?model=:value")
+  ], "models")
 )
 
 val dashboard = vstack(gap = 16)(

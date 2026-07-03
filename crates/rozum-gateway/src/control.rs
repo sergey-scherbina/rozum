@@ -2546,8 +2546,9 @@ pub struct ControlStatus {
     pub sessions: Vec<SessionBrief>,
     /// Known project directories (from rooms.json), for workdir selection in the UCC launch forms.
     pub projects: Vec<ProjectBrief>,
-    /// Installed models NOT currently loaded — for the "загрузить" table in the models panel.
-    pub not_loaded: Vec<InstalledBrief>,
+    /// All installed models merged with live residency, sorted by size desc.
+    /// Each row carries `stop_label`/`load_spec` for per-row conditional action buttons in the UCC.
+    pub models: Vec<UnifiedModelBrief>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2590,6 +2591,18 @@ pub struct InstalledBrief {
     pub size_bytes: u64,
     /// GiB-formatted size for direct display in a declarative table column.
     pub size_gib: String,
+}
+
+/// One row in the unified models panel — installed catalog merged with live residency.
+#[derive(Debug, Clone, Serialize)]
+pub struct UnifiedModelBrief {
+    pub spec: String,
+    pub size_gib: String,
+    pub size_bytes: u64,
+    /// "выгрузить" when the model is currently resident; "" when not (hides the stop button via CSS).
+    pub stop_label: String,
+    /// spec value when the model is not loaded (drives the load URL); "" when already resident.
+    pub load_spec: String,
 }
 
 /// A flat `{metric, value}` pair — a row in the display-ready `residency_metrics` table.
@@ -2823,11 +2836,18 @@ pub async fn status() -> ControlStatus {
     let projects = list_projects();
     let resident_specs: std::collections::HashSet<&str> =
         residency.residents.iter().map(|r| r.model.as_str()).collect();
-    let not_loaded = installed_catalog.iter()
-        .filter(|m| !resident_specs.contains(m.spec.as_str()))
-        .map(|m| InstalledBrief { spec: m.spec.clone(), size_bytes: m.size_bytes, size_gib: fmt_gib(m.size_bytes) })
-        .collect();
-    ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents, coders, sessions, projects, not_loaded }
+    let mut models: Vec<UnifiedModelBrief> = installed_catalog.iter().map(|m| {
+        let loaded = resident_specs.contains(m.spec.as_str());
+        UnifiedModelBrief {
+            spec: m.spec.clone(),
+            size_gib: fmt_gib(m.size_bytes),
+            size_bytes: m.size_bytes,
+            stop_label: if loaded { "выгрузить".to_string() } else { String::new() },
+            load_spec: if loaded { String::new() } else { m.spec.clone() },
+        }
+    }).collect();
+    models.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents, coders, sessions, projects, models }
 }
 
 #[cfg(test)]
