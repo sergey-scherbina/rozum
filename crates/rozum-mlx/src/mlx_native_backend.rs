@@ -69,6 +69,16 @@ mod inner {
     pub(crate) static BATCH_MAX: std::sync::atomic::AtomicUsize =
         std::sync::atomic::AtomicUsize::new(0);
 
+    /// Jobs routed to the serial path because they had an explicit RNG seed.
+    pub(crate) static BATCH_SERIAL_SEED: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    /// Jobs routed to the serial path because they had repeat_penalty != 1.0.
+    pub(crate) static BATCH_SERIAL_PENALTY: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    /// Jobs routed to the serial path because they were tool-constrained.
+    pub(crate) static BATCH_SERIAL_CONSTRAINED: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
     /// Record `added` new rows entering a batch and the resulting `peak` occupancy into the
     /// global counters (initial assembly: `added == peak == B`; a mid-decode admit:
     /// `added == 1`, `peak ==` the batch size after the admit).
@@ -1005,11 +1015,15 @@ mod inner {
     /// history scattered into the logits) and explicit seeds (need per-row RNG keys) are not
     /// supported in the batched path yet, so those rows run serially.
     fn is_batchable(job: &Job) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
         let s = &job.sampling;
-        // Constrained tool jobs need the B=1 masked loop (`run_constrained_dense`), so keep
-        // them out of the batched path.
         let constrained = constrain_enabled() && !job.tools.is_empty();
-        !constrained && s.repeat_penalty.unwrap_or(1.0) == 1.0 && s.seed.is_none()
+        let has_penalty = s.repeat_penalty.unwrap_or(1.0) != 1.0;
+        let has_seed = s.seed.is_some();
+        if constrained { BATCH_SERIAL_CONSTRAINED.fetch_add(1, Relaxed); }
+        if has_penalty { BATCH_SERIAL_PENALTY.fetch_add(1, Relaxed); }
+        if has_seed { BATCH_SERIAL_SEED.fetch_add(1, Relaxed); }
+        !constrained && !has_penalty && !has_seed
     }
 
     /// Per-row sampling params `(temp, top_k, top_p)` for `qwen3::sample_rows`, with the
@@ -4767,12 +4781,16 @@ mod glm_framing_tests {
 /// number of batched-decode invocations (≥2 rows), `rows` the total rows they served (initial
 /// members + mid-decode admits), `admits` the continuous mid-decode admissions, and `max` the
 /// peak rows in a single batch. `rows / runs` ≈ average batch occupancy.
+/// `serial_{seed,penalty,constrained}` count jobs that bypassed batching; see `is_batchable`.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct BatchStats {
     pub runs: u64,
     pub rows: u64,
     pub admits: u64,
     pub max: u64,
+    pub serial_seed: u64,
+    pub serial_penalty: u64,
+    pub serial_constrained: u64,
 }
 
 /// Snapshot the global batched-decode counters. Returns `None` when nothing has batched yet
@@ -4789,6 +4807,9 @@ pub fn batch_stats() -> Option<BatchStats> {
         rows: inner::BATCH_ROWS_TOTAL.load(Relaxed) as u64,
         admits: inner::BATCH_ADMIT_COUNT.load(Relaxed) as u64,
         max: inner::BATCH_MAX.load(Relaxed) as u64,
+        serial_seed: inner::BATCH_SERIAL_SEED.load(Relaxed) as u64,
+        serial_penalty: inner::BATCH_SERIAL_PENALTY.load(Relaxed) as u64,
+        serial_constrained: inner::BATCH_SERIAL_CONSTRAINED.load(Relaxed) as u64,
     })
 }
 

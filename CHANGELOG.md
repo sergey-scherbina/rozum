@@ -1,5 +1,14 @@
 # Changelog
 
+## feat(batch): add serial-reason counters to BatchStats — quantify non-batchable rows
+Completed: 2026-07-03
+
+Added `BATCH_SERIAL_{SEED,PENALTY,CONSTRAINED}` atomics incremented by `is_batchable()` when a job
+is routed to the serial path; exposed as `serial_seed`, `serial_penalty`, `serial_constrained` in
+`BatchStats` (the `/stats` endpoint). Closes `perf-batch-nonbatchable-rows` — the "quantify" path:
+agentic penalty/seed rows are near-zero; the real serialization is `serial_constrained` (all
+tool-call requests when `ROZUM_CONSTRAIN=1`), which needs per-row mask construction to fix.
+
 ## chore(perf): run perf-baseline — 35B-DWQ: 81–83 t/s, 20.7 GB, 5 s load; KV flatness confirmed
 Completed: 2026-07-03
 

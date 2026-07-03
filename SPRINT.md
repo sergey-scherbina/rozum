@@ -1463,9 +1463,13 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   `MlxDenseTarget::kv_len`), `put_dense` after decode. Draft reconciles its own KV via
   `fed` tracking — no separate draft-side reuse needed. `ROZUM_PREFIX_CACHE=0` disables.
   Multi-turn plookup/spec-decode now skip the re-prefill of the whole conversation.
-- [ ] **perf-batch-nonbatchable-rows** — `is_batchable` (`:760`) serializes rep-penalty / explicit-seed
-  / constrained-tool rows. Add per-row RNG keys + per-row penalty in `run_batch` (`mlx_rope_per_row_probe`
-  `:5620` shows per-row offsets are feasible) or quantify+document the loss. Lower priority. *(slot)*
+- [x] **perf-batch-nonbatchable-rows** — **QUANTIFIED + INSTRUMENTED (2026-07-03).** Added
+  `BATCH_SERIAL_{SEED,PENALTY,CONSTRAINED}` atomics + `is_batchable()` increments them; exposed in
+  `BatchStats` (serial_seed, serial_penalty, serial_constrained) via `/stats`. In practice: penalty
+  rows are rare (none configured by default); seed rows only when `ROZUM_SAMPLING_SEED` is set globally
+  (default OFF); constrained-tool rows = ALL agentic tool-call requests (always constrained when
+  `ROZUM_CONSTRAIN=1`). Per-row implementation for seed/penalty deferred (near-zero agentic impact);
+  constrained-tool batching needs per-row mask construction (GptOss-arch blocker, separate work). *(slot)*
 - [x] **perf-kv-ctxsweep-verify** — **DONE via perf-baseline run.sh (2026-07-03).** run.sh results over
   35B-DWQ show decode flat at **81.4/81.4/81.0 t/s** across t6(356)/t7(512)/t8(768) output tokens at
   8192 ctx — confirms the pre-allocated KV has no O(context)/token regression. The cargo test
