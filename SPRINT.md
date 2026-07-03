@@ -38,7 +38,10 @@
   are in DEFAULT_MODELS: 35B-DWQ, Qwen3-Coder-30B, Devstral-Small-2507, GLM-4.7-Flash, GLM-32B→gpt-oss.
   Key gaps: Devstral only REPS=1 proven; Qwen3-Coder only REPS=2; others already 15/15.
   - Command: `REPS=3 AGENTS=claude scripts/bench/agentic.sh`
-  - Done-when: results dir created, per-run.csv has 5×3×6=90 rows, CHANGELOG updated.
+  - ISSUE (2026-07-03 first run): 35B-DWQ (~25.8 GB) and Coder-30B (min ~22.5 GB) FAIL admission
+    — free RAM was only 21.4 GB (XProtect + 3 CC sessions + Chrome). Devstral loaded fine.
+    To retry: close Chrome + spare CC windows, then rerun.
+  - Done-when: per-run.csv has rows for all 5 models × 3 reps × 6 tasks, CHANGELOG updated.
 
 ### ▶ deploy-ucc-web.sh gateway-binary gap (found 2026-07-03 while verifying the security fix below)
 
