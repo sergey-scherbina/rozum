@@ -74,28 +74,13 @@ Record into `scripts/bench/results/perf-baseline-<date>/`. Follow the 🛑 REBOO
 
 ## Open levers → tasks
 
-### perf-batch-default-on — biggest near-term win, but NOT a free flip *(needs slot to measure)*
-Continuous concurrent-request batching is **built and wired** (`worker_main` gathers ≤`cap` admitted
-jobs in a `ROZUM_BATCH_WINDOW_MS` window → one `run_batch`/`run_batch_hybrid` forward, pulling new
-jobs into freed slots mid-decode) but ships **off by default**: `batch_cap()` = `ROZUM_BATCH` default
-**1 = serial** (:713). The throughput benches prove ~1.98× at B=2, and batched==serial **correctness is
-already well-covered** (byte-exact ragged `mlx_batched_ragged_byte_exact` :5665 / `_hybrid` :5895; per-arch
-`mlx_{,llama_,qwen2_,gemma3_}batched_two_concurrent`; `mlx_continuous_admit_three` :6459; sampling :6519).
-
-**The blocker is latency, not correctness — and it's a real code gap, not a config flip.** With
-`ROZUM_BATCH>1` on a batchable arch, the gather loop (`worker_main` :676-687) waits the **full**
-`batch_window_ms()` (default 10) for a 2nd job; a **lone** request therefore eats up to 10 ms of TTFT
-before the partition discovers it's alone and falls back to serial. For the common single-agent case
-(one request in flight) that's a pure TTFT regression with zero benefit. So the task is **two-step**:
-1. **`perf-batch-gather-shortcircuit` (prereq, code):** skip the window when no concurrency is
-   present — e.g. one non-blocking `try_recv` after `first`; if Empty AND the admission in-flight count
-   is ≤1, go straight to serial (no wait). Must still wait/batch when a 2nd job is admitted/queued, so
-   re-run the `*_two_concurrent` + `continuous_admit_three` scheduler tests to prove batching still
-   triggers and the lone path no longer waits. **Run those tests before flipping anything.**
-2. **flip + A/B (slot):** with the lone-request tax gone, run `ROZUM_BATCH=1` vs `2`/`4` through the
-   gateway under real concurrent agent load; confirm single-stream TTFT unchanged + the ~1.98×
-   concurrent win + byte-exact, then flip the default (or keep opt-in if Metal-stream contention under
-   mixed load erodes it). The primitives are proven; the gather short-circuit is the only new code.
+### perf-batch-default-on — **DONE (2026-07-02)**
+Both steps shipped:
+1. **`perf-batch-gather-shortcircuit`** (prereq) — `a8efa27`. `jobs_in_channel` short-circuits the
+   window when in-flight ≤1 → lone requests no longer wait; concurrent paths unaffected.
+2. **flip + A/B** — `fbd1d89`. Qwen3-4B: single-req TTFT unchanged (122→121 tok/s, noise); 2
+   concurrent +35% (125→169 t/s); 4 concurrent +67% (→210 t/s). Default flipped 1→2.
+   `ROZUM_BATCH=1` to disable; `ROZUM_BATCH=4` for heavier loads.
 
 ### perf-batch-arch-coverage — extend batching to GLM-4 + gpt-oss *(needs slot)*
 `is_batchable_arch` (:736) admits Qwen3/Qwen3Moe/Qwen35/Qwen35Moe/Llama/Qwen2/Gemma3 only — **Glm4 and
@@ -103,12 +88,12 @@ GptOss serialize** even when `ROZUM_BATCH>1`. Both are heavily used agentic mode
 per-row-rope/cache batch paths (GLM-4 is qwen2-shaped; gpt-oss needs sink/sliding-window batch
 handling) with a byte-exact ragged test mirroring `mlx_batched_ragged_byte_exact` (:5665).
 
-### perf-batch-nonbatchable-rows — stop serializing penalty/seed/constrained rows *(needs slot)*
-`is_batchable` (:760) drops rep-penalty (logits need per-row history), explicit-seed (per-row RNG
-keys) and constrained tool jobs (B=1 masked loop) to the serial path. Under agentic load these are
-common (tool jobs especially). Task: per-row RNG keys + per-row penalty application in `run_batch`
-(the `mlx_rope_per_row_probe` :5620 already shows per-row offsets are feasible), or quantify the loss
-and document. Lower priority than default-on.
+### perf-batch-nonbatchable-rows — **QUANTIFIED (2026-07-03)**
+Added `BATCH_SERIAL_{SEED,PENALTY,CONSTRAINED}` atomics in `is_batchable()` exposed via `/stats`
+(commit `28eacb7`). Finding: in agentic workloads, constrained-tool rows dominate serial usage (all
+tool-call requests when `ROZUM_CONSTRAIN=1`); seed/penalty rows are near-zero with defaults.
+Per-row implementation deferred — constrained-tool batching needs per-row mask construction
+(non-trivial; GptOss arch needs per-layer masks from `cache.offset()`). Document-as-closed.
 
 ### perf-compiled-decode — mostly CLOSED (Stage-0 probe was NO-GO) *(deprioritized)*
 Decode is **~92% CPU graph-build** (~400 op-build FFI calls/token; comment :5790), so a compiled
