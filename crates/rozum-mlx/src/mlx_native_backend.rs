@@ -832,9 +832,10 @@ mod inner {
                     return;
                 }
             };
-        // Expose the model's BOS token to templates that emit it themselves (Gemma).
-        MODEL_BOS_TOKEN
-            .with(|c| *c.borrow_mut() = read_bos_token(&model_dir.join("tokenizer_config.json")));
+        // Expose the model's BOS/EOS tokens to templates that reference them directly.
+        let cfg = model_dir.join("tokenizer_config.json");
+        MODEL_BOS_TOKEN.with(|c| *c.borrow_mut() = read_bos_token(&cfg));
+        MODEL_EOS_TOKEN.with(|c| *c.borrow_mut() = read_eos_token(&cfg));
         if ready.send(Ok(())).is_err() {
             return; // caller gave up before load finished
         }
@@ -2278,8 +2279,9 @@ mod inner {
                     return;
                 }
             };
-        MODEL_BOS_TOKEN
-            .with(|c| *c.borrow_mut() = read_bos_token(&target_dir.join("tokenizer_config.json")));
+        let cfg = target_dir.join("tokenizer_config.json");
+        MODEL_BOS_TOKEN.with(|c| *c.borrow_mut() = read_bos_token(&cfg));
+        MODEL_EOS_TOKEN.with(|c| *c.borrow_mut() = read_eos_token(&cfg));
         if ready.send(Ok(())).is_err() {
             return;
         }
@@ -4044,18 +4046,31 @@ mod inner {
         /// once at worker startup (single worker thread → thread-local is fine).
         static MODEL_BOS_TOKEN: std::cell::RefCell<Option<String>> =
             const { std::cell::RefCell::new(None) };
+        /// EOS token string for templates that concatenate it directly (e.g. Devstral's
+        /// `{{- message['content'] + eos_token }}`) — crashes with `string + none` when
+        /// `ApplyChatTemplateArgs.eos_token` is `None`.
+        static MODEL_EOS_TOKEN: std::cell::RefCell<Option<String>> =
+            const { std::cell::RefCell::new(None) };
     }
 
-    /// Read `bos_token` from a tokenizer_config.json (a plain string or a `{content}` object).
-    fn read_bos_token(path: &Path) -> Option<String> {
+    /// Read a special-token string from a tokenizer_config.json field (plain string or `{content}`).
+    fn read_special_token(path: &Path, field: &str) -> Option<String> {
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-        match v.get("bos_token")? {
+        match v.get(field)? {
             serde_json::Value::String(s) => Some(s.clone()),
             serde_json::Value::Object(o) => {
                 o.get("content").and_then(|c| c.as_str()).map(String::from)
             }
             _ => None,
         }
+    }
+
+    fn read_bos_token(path: &Path) -> Option<String> {
+        read_special_token(path, "bos_token")
+    }
+
+    fn read_eos_token(path: &Path) -> Option<String> {
+        read_special_token(path, "eos_token")
     }
 
     /// Does the chat template render tool definitions? A tool-aware template references the `tools`
@@ -4248,7 +4263,7 @@ mod inner {
             continue_final_message: None,
             enable_thinking: Some(enable_thinking),
             bos_token: MODEL_BOS_TOKEN.with(|c| c.borrow().clone()),
-            eos_token: None,
+            eos_token: MODEL_EOS_TOKEN.with(|c| c.borrow().clone()),
         };
         let encodings = tokenizer
             .apply_chat_template_and_encode(sanitize_chat_template(template), args)
