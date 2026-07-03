@@ -7,13 +7,12 @@
   did for Qwen3.6; new state-space layer). Consider only if the matrix wants an IBM/tool-tuned family.
 - [ ] **mlx-port-seed-oss** — ByteDance `Seed-OSS-36B-Instruct` (`seed_oss`, 4bit 20.3 GB):
   own arch, long context; 20 GB is borderline on 36 GiB. Payoff unclear vs Qwen3-Coder/GLM-MoE.
-- [ ] **mlx-mla-attention** (DeepSeek-V2 + GLM-4.7-Flash share this) — implement **MLA**
-  (multi-head latent attention, compressed-KV: q_a/q_b low-rank, kv_a_proj_with_mqa, decoupled
-  nope/rope head dims). It's the HIGH-effort blocker shared by `DeepSeek-Coder-V2-Lite`
-  (`deepseek_v2`) AND `glm4_moe_lite` (GLM-4.7-Flash, the only 36 GiB-fitting GLM-MoE — checkpoint-
-  confirmed MLA 2026-06-27, see `mlx-glm4-moe` / `docs/specs/glm4-moe-native.md`). Do the MLA kernel
-  once, then both ports reduce to their MoE/FFN specifics. Build only if a 2nd reliable agentic
-  family beyond Qwen is still wanted after the `matrix-add-coders` (Qwen3-Coder, zero-port) smoke.
+- [ ] **mlx-mla-attention** (DeepSeek-V2-Lite only — GLM-4.7-Flash DONE) — **absorbed-MLA for
+  GLM-4.7-Flash (`glm4_moe_lite`) is SHIPPED (e8c060a, 2026-07-03).** Remaining work: full
+  DeepSeek-V2-style MLA (non-absorbed: `q_a/q_b` low-rank, `kv_a_proj_with_mqa`, decoupled
+  nope/rope head dims) for `DeepSeek-Coder-V2-Lite` (`deepseek_v2`). Low priority given we now have
+  3 model families (Qwen, GLM, Devstral) covering all tasks. DeepSeek-Coder-V2-Lite ≈17 GB but
+  previously scored 2/5 (edit tasks only). Revisit only if a 4th diverse family is needed.
 
 ## Agentic drivers
 
