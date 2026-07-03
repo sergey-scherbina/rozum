@@ -35,7 +35,7 @@ val room = computedSignal(() => {
   val h = hash()
   if h.contains("/chat/") then h.split("/chat/").last else ""
 })
-val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else if hash().contains("/coders") then "coders" else if hash().contains("/sessions") then "coders" else "home")
+val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else if hash().contains("/coders") then "coders" else if hash().contains("/sessions") then "sessions" else "home")
 
 val chatTick = signal("chatTick", 0)
 val msgUrl   = computedSignal(() => "/chat/messages?room=" + room())
@@ -90,7 +90,7 @@ val modelsPanel = cardWithHeader(heading(2, "Загрузить модель"))(
 
 val dashboard = vstack(gap = 16)(
   heading(1, "rozum — control center"),
-  hstack(gap = 10)(link("#/agents", "🤖 Агенты"), link("#/coders", "💻 Кодеры"), link("#/sessions", "🖥 Сессии"), link("/login.html", "🔐 вход")),
+  hstack(gap = 10)(link("#/agents", "🤖 Агенты"), link("#/coders", "💻 Кодеры"), link("#/sessions", "🖥 Сессии"), link("/matrix.html", "📊 Матрица"), link("/login.html", "🔐 вход")),
   divider(),
   meetingsCard,
   divider(),
