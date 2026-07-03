@@ -297,7 +297,7 @@ Four follow-ups from the loop-breaker work. Order: lean → live-sweep → stall
   ALL transitions) and emoji react (`07a030e`, store+MCP+CLI+REST+console) both shipped. The meetings →
   product-support/incident platform is FULLY DONE. BACKLOG `## Meetings → product-support`. Detail below ↓
 
-- [~] **meetings — original sprint notes (superseded by the line above)** — spec
+- [x] **meetings — original sprint notes (superseded by the line above)** — spec
   `docs/specs/meetings-incident-platform.md`. **FOUNDATION (P1-P3) DONE — the data-model + store ops, all
   back-compat, 13/13 store tests:** P1 message metadata (`407ae4a`, StoredTurn + kind/thread_id/in_reply_to/
   meta, byte-identical plain rooms) + P1b `append_with_meta` write API (`4472489`); P2 threads (`1e32ea8`,
@@ -1266,7 +1266,7 @@ file, `>` emitted as `>`, prose where the `{cmd}` JSON goes → an 11 GB codex r
 = 4/4 in a clean probe). Strategy: give the model the structured tools it is reliable at and let
 the gateway own the fragile shell translation. Levers to try (one task each, all matrix-gated):
 
-- [~] **gptoss-inject-write-file** — TRIED (plucky-finch 2026-06-23), reverted as a WASH + a key
+- [x] **gptoss-inject-write-file** — TRIED (plucky-finch 2026-06-23), reverted as a WASH + a key
   insight. Implemented the inject + reroute (write_file → clean `cat >` overwrite) + prompt. It WORKS
   (writes land clean), and surfaced a real bug: **a successful `cat >` is SILENT, so the model read
   the empty result as failure and re-wrote Cargo.toml in a LOOP** (apply_patch doesn't loop because
@@ -1304,7 +1304,7 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   (it runs cargo itself), inserting the `>` makes the correct code land → build passes even when the model
   never ran cargo. unit test `heredoc_redirect_repairs_missing_gt_and_spares_valid_forms` (exact OzUnnR
   input + 5 negatives), 80/80 gateway tests green.
-- [~] **gptoss-verify-before-done** — TRIED + REFUTED by a powered A/B (plucky-finch 2026-06-23), reverted.
+- [x] **gptoss-verify-before-done** — TRIED + REFUTED by a powered A/B (plucky-finch 2026-06-23), reverted.
   Hypothesis: the residual build reds are the model shipping NON-COMPILING final code (`.rev()` missing
   `.collect()` = E0308; `unwrap_or_default(closure)`/`unwrap_or_default("")` = E0061; a malformed Cargo.toml
   `authors = "Bob\n"` multi-line + a U+2011 non-ASCII hyphen in the package name) and declaring "the program
@@ -1329,7 +1329,7 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   (B) `eager_coresident_footprint()` (`208fa73`) counts the shared reserve ONCE for co-resident
   pipelines (saves ~5.5 GiB per extra tier). The 35B-refuses-to-fit case that prompted this is
   covered by (A): tighten() makes the ~30 GB estimate → ~26 GiB after a measured ~24 GB peak.
-- [~] **glm-shell-delivery-fix** — INVESTIGATED + REFUTED as a lever (plucky-finch 2026-06-23, isolate
+- [x] **glm-shell-delivery-fix** — INVESTIGATED + REFUTED as a lever (plucky-finch 2026-06-23, isolate
   skill, operator-requested). After the full 3-model matrix (GLM-32B 4/15), dug into GLM's create-from-
   scratch failures. Model-only probe + DETERMINISTIC A/B (multi-turn, real cargo execution, fix toggled
   — no agent flakiness) revealed GLM's failure is **multi-layered, NOT one fixable delivery bug** (unlike
@@ -1487,7 +1487,7 @@ the CLIENT layer; no binary split (process separation already gives (a)).
   inbox/{handle}` (mentions addressing a handle) + `GET /roster` (live agent principals), both over
   `client::inbox`/`client::roster`. End-to-end test (inbox endpoint). So remote/web/UCC can fetch JSON,
   not disk/exec. (POST-over-HTTP deferred — the socket submit path + auth is a separate write task.)
-- [~] **svc-migrate-web-tui** — DEFERRED / largely superseded. The web `.ssc` already consumes the client
+- [x] **svc-migrate-web-tui** — DEFERRED / largely superseded. The web `.ssc` already consumes the client
   API indirectly (execs `rozum meetings …`, now thin over it); the hand-written Rust TUI is REPLACED by the
   UCC `Tk` app → migrating it now is throwaway. Re-open only if a need predates UCC (web exec→HTTP, which
   also needs the REST server on by default).
@@ -1924,7 +1924,7 @@ Toolkit additions landed in
 - [x] **Dynamic room list — DONE 2026-06-23.** The selector is rebuilt from `rozum meetings status`;
       project rooms use their registered project path, global/ad-hoc rooms use the user state dir.
       Junk-room pressure is handled by `/manage` clean-empty instead of hiding the registry.
-- [~] **Highlight the operator's own messages** — NOT FEASIBLE as posed: the human web client and the
+- [x] **Highlight the operator's own messages** — NOT FEASIBLE as posed: the human web client and the
       agents all post under the same local identity ("Sergiy · <handle>"), so there is no reliable
       "me" marker distinct from agents. Per-handle colour (shipped) already separates sessions.
 
@@ -2218,7 +2218,7 @@ swap later). Spec: `docs/specs/agent-meeting-coordination.md`. Phased P1–P4.
   instead of the bare handle, so readers see WHO posted (the `--as`/agent name). Verified live
   (auto-spawn → post → on disk → author shows the name) + `post_once` unit test (lands in room,
   unknown-room errors cleanly). 380 fast tests green.
-- [~] **P1.2 — shared room (DONE) / true multi-room (deferred).** `ROZUM_MEETING_ROOM=<name>`
+- [x] **P1.2 — shared room (DONE) / true multi-room (deferred).** `ROZUM_MEETING_ROOM=<name>`
   routes an agent into ONE shared room (e.g. `commons`) instead of its per-project room: the
   proxy's auto-join uses `rooms.new` (create-or-open) when set, and `rozum meetings post` honors it
   (precedence `--room` > `ROZUM_MEETING_ROOM` > project) so hook posts land where the agents are.
@@ -3449,7 +3449,7 @@ Spec: `docs/specs/mistralrs-mlx-direct.md`. Decisions: targeted quant-ops ·
   - Cross-check vs `mlx_lm` not run (not installed); ON==OFF vs the mlx_lm-
     validated candle path stands in.
 
-- [~] mlx-direct-p1b - Phase 1b: bridge perf. **PARTIAL.** (fork `c5986e13d`)
+- [x] mlx-direct-p1b - Phase 1b: bridge perf. **PARTIAL — SUPERSEDED by mlx-native-runtime.** (fork `c5986e13d`)
   - Weight-array cache (memoize candle->MLX of constant AFQ weights by Metal
     buffer addr): Qwen3-4B-4bit decode **2.89 -> 11.76 T/s (~4x)**, output still
     byte-identical. Banked.
@@ -3774,7 +3774,7 @@ soon as any single track succeeds.
 > occasional one-line edit but fail multi-step `build`/`test`. They ARE fast
 > (~8 GB, high tok/s) and fine for narrow single-shot work. Two concrete roles:
 
-- [~] spec-decode-draft - **Speculative decoding: a small draft accelerates a big target. SPEC WRITTEN — NEXT P0, build architecturally.** Spec: `docs/specs/speculative-decoding.md`.
+- [x] spec-decode-draft - **Speculative decoding: P0+P1 DONE, verdict: off-by-default (net-negative on MoE target). Stays opt-in via `--draft-model`.** Spec: `docs/specs/speculative-decoding.md`.
   - A small model (e.g. `Qwen3-4B-4bit`) proposes k tokens; the big target
     (e.g. `Qwen3.6-35B-A3B-4bit`) verifies them in one forward and accepts the
     longest correct prefix. Net: fewer big-model forwards → faster decode with
