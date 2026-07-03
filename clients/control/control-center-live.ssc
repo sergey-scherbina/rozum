@@ -19,7 +19,7 @@ stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the vie
 [vstack, hstack, divider](std/ui/layout.ssc)
 [heading, text](std/ui/typography.ssc)
 [badge, link](std/ui/display.ssc)
-[card, cardWithHeader](std/ui/containers.ssc)
+[card, cardWithHeader, modal](std/ui/containers.ssc)
 [signalText_](std/ui/reactive.ssc)
 [actionButton, textField, signalButton](std/ui/input.ssc)
 [remoteTable, lcol, rowLink, rowPostAction, fieldPayload](std/ui/data.ssc)
@@ -35,7 +35,8 @@ val room = computedSignal(() => {
   val h = hash()
   if h.contains("/chat/") then h.split("/chat/").last else ""
 })
-val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else if hash().contains("/coders") then "coders" else if hash().contains("/sessions") then "sessions" else if hash().contains("/detail/") then "detail" else "home")
+val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else if hash().contains("/coders") then "coders" else if hash().contains("/sessions") then "sessions" else "home")
+val isDetailOpen = computedSignal(() => hash().contains("/detail/"))
 
 val detailSpec = computedSignal(() => { val h = hash(); if h.contains("/detail/") then h.split("/detail/").last else "" })
 val detailUrl  = computedSignal(() => "/control/model/info?spec=" + detailSpec())
@@ -343,39 +344,37 @@ val detailPid         = computedSignal(() => jsonValue(detailData()).get("reside
 val detailPort        = computedSignal(() => jsonValue(detailData()).get("resident").get("port").asString)
 val detailResidentTxt = computedSignal(() => { val pid = detailPid(); if pid == "" || pid == "0" then "нет" else "да  (PID " + pid + ", порт " + detailPort() + ")" })
 
-val detailBody = vstack(gap = 16)(
-  hstack(gap = 10)(link("#/", "← Модели"), actionButton(incSignal(detailTick), "↻")),
-  cardWithHeader(signalText_(detailName))(
-    vstack(gap = 8)(
-      hstack(gap = 8)(text("Spec:"),        signalText_(detailSpec_)),
-      hstack(gap = 8)(text("Источник:"),    signalText_(detailSrc)),
-      hstack(gap = 8)(text("Архитектура:"), signalText_(detailModelType)),
-      hstack(gap = 8)(text("Квантизация:"), signalText_(detailQuant)),
-      hstack(gap = 8)(text("Контекст:"),    signalText_(detailMaxCtx)),
-      hstack(gap = 8)(text("Слои:"),        signalText_(detailLayers)),
-      hstack(gap = 8)(text("Attn heads:"),  signalText_(detailAttnHeads)),
-      hstack(gap = 8)(text("KV heads:"),    signalText_(detailKvHeads)),
-      hstack(gap = 8)(text("Hidden size:"), signalText_(detailHidden)),
-      hstack(gap = 8)(text("MoE:"),         signalText_(detailExperts)),
-      hstack(gap = 8)(text("Размер:"),      signalText_(detailGib)),
-      hstack(gap = 8)(text("В памяти:"),    signalText_(detailResidentTxt)),
-      hstack(gap = 8)(text("Путь:"),        signalText_(detailPath)),
-      hstack(gap = 8)(text("Примечание:"),  signalText_(detailNotes))
-    )
+val detailModal = modal(isDetailOpen, "Характеристики модели")(
+  vstack(gap = 10)(
+    hstack(gap = 8)(signalText_(detailName), link("#/", "✕")),
+    hstack(gap = 8)(text("Spec:"),        signalText_(detailSpec_)),
+    hstack(gap = 8)(text("Архитектура:"), signalText_(detailModelType)),
+    hstack(gap = 8)(text("Квантизация:"), signalText_(detailQuant)),
+    hstack(gap = 8)(text("Контекст:"),    signalText_(detailMaxCtx)),
+    hstack(gap = 8)(text("Слои:"),        signalText_(detailLayers)),
+    hstack(gap = 8)(text("Attn:"),        signalText_(detailAttnHeads)),
+    hstack(gap = 8)(text("KV:"),          signalText_(detailKvHeads)),
+    hstack(gap = 8)(text("Hidden:"),      signalText_(detailHidden)),
+    hstack(gap = 8)(text("MoE:"),         signalText_(detailExperts)),
+    hstack(gap = 8)(text("Размер:"),      signalText_(detailGib)),
+    hstack(gap = 8)(text("В памяти:"),    signalText_(detailResidentTxt)),
+    hstack(gap = 8)(text("Примечание:"),  signalText_(detailNotes))
   )
 )
 ```
 
 ## Compose + serve
 ```scalascript
-val view = router(mode, [
-  route("home", [dashboard]),
-  route("chat", [chatBody]),
-  route("agents", [agentsBody]),
-  route("coders", [codersBody]),
-  route("sessions", [sessionsBody]),
-  route("detail", [detailBody])
-])
+val view = vstack(gap = 0)(
+  router(mode, [
+    route("home",     [dashboard]),
+    route("chat",     [chatBody]),
+    route("agents",   [agentsBody]),
+    route("coders",   [codersBody]),
+    route("sessions", [sessionsBody])
+  ]),
+  detailModal
+)
 
 serve(lower(view, darkTheme), 8410)
 ```
