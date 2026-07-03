@@ -2356,6 +2356,9 @@ mod inner {
                         model_id: target_id,
                         n_ctx,
                         co_resident: register_resident(),
+                        jobs_in_channel: std::sync::Arc::new(
+                            std::sync::atomic::AtomicUsize::new(0),
+                        ),
                     })
                 }
                 Ok(Err(e)) => Err(ModelError::BackendUnavailable(e)),
@@ -4187,14 +4190,35 @@ mod inner {
         // Inject a synthetic system message describing the tools + the `<tool_call>` format that
         // `serving::parse_tool_calls` already understands, so such a model can call them. Off with
         // ROZUM_INJECT_TOOLS=0.
+        //
+        // Merging rule: when the caller (e.g. Claude Code) already provides a system message as
+        // messages[0], prepending a *second* system message confuses models whose templates wrap
+        // each one in its own `[SYSTEM_PROMPT]…[/SYSTEM_PROMPT]` block (Devstral, Mistral-family).
+        // The model sees two system blocks, the second (caller's) dominates, and the `<tool_call>`
+        // format is forgotten → output degrades to raw `ToolName{json}`.  Fix: append the tool
+        // instructions *into* the existing system message so the model sees exactly one.
         let injected: Vec<Message>;
         let messages: &[Message] = if !tools.is_empty()
             && !template_renders_tools(template)
             && std::env::var_os("ROZUM_INJECT_TOOLS").map(|v| v != "0").unwrap_or(true)
         {
-            injected = std::iter::once(super::tools_system_message(tools))
-                .chain(messages.iter().cloned())
-                .collect();
+            let instr = super::tools_instruction_text(tools);
+            if messages.first().map(|m| m.role == Role::System).unwrap_or(false) {
+                let mut merged = messages[0].clone();
+                match merged.content.first_mut() {
+                    Some(ContentBlock::Text { text }) => {
+                        text.push_str("\n\n");
+                        text.push_str(&instr);
+                    }
+                    _ => merged.content.push(ContentBlock::Text { text: instr }),
+                }
+                injected =
+                    std::iter::once(merged).chain(messages[1..].iter().cloned()).collect();
+            } else {
+                injected = std::iter::once(Message::system(instr))
+                    .chain(messages.iter().cloned())
+                    .collect();
+            }
             &injected
         } else {
             messages
@@ -4288,10 +4312,9 @@ mod inner {
 #[cfg(feature = "mlx-native")]
 pub use inner::Export as MlxNativeBackend;
 
-/// A synthetic system message describing `tools` + the `<tool_call>{name,arguments}` format that
-/// `serving::parse_tool_calls` parses — injected for template-less models so they can call tools.
+/// The raw instruction text for template-less tool injection.
 #[cfg(any(feature = "mlx-native", test))]
-fn tools_system_message(tools: &[crate::backend::ToolDef]) -> crate::backend::Message {
+pub(crate) fn tools_instruction_text(tools: &[crate::backend::ToolDef]) -> String {
     let mut s = String::from(
         "You have access to the following tools. When the user's request needs one, you MUST \
              call it rather than answering in prose.\n\n# Tools\n",
@@ -4307,7 +4330,14 @@ fn tools_system_message(tools: &[crate::backend::ToolDef]) -> crate::backend::Me
              <tool_call>{\"name\": \"<tool name>\", \"arguments\": <arguments as a JSON object>}</tool_call>\n\
              If no tool is needed, answer the user normally.",
     );
-    crate::backend::Message::system(s)
+    s
+}
+
+/// A synthetic system message describing `tools` + the `<tool_call>{name,arguments}` format that
+/// `serving::parse_tool_calls` parses — injected for template-less models so they can call tools.
+#[cfg(any(feature = "mlx-native", test))]
+fn tools_system_message(tools: &[crate::backend::ToolDef]) -> crate::backend::Message {
+    crate::backend::Message::system(tools_instruction_text(tools))
 }
 
 /// Process-global MLX **soft** memory-limit override in bytes (`0` = unset). Set by the
@@ -4771,6 +4801,7 @@ pub async fn ensure_model_dir(spec: &str) -> Option<std::path::PathBuf> {
 mod native_model_surface_tests {
     use super::{supported_model_type, tools_system_message};
     use crate::backend::{ContentBlock, Role, ToolDef};
+    use crate::mlx_native_backend::tools_instruction_text;
 
     #[test]
     fn native_download_gate_includes_mla_models() {
@@ -4820,6 +4851,67 @@ mod native_model_surface_tests {
             ),
             "prompt: {text}"
         );
+    }
+
+    #[test]
+    fn tool_injection_merges_into_existing_system_message() {
+        use crate::backend::Message;
+        let tools = &[ToolDef {
+            name: "Write".into(),
+            description: "Write a file.".into(),
+            input_schema: serde_json::json!({"type":"object","properties":{"file_path":{"type":"string"}}}),
+        }];
+        let instr = tools_instruction_text(tools);
+
+        // Case A: no existing system message → prepend standalone system message
+        {
+            let msgs = vec![Message::user("Do the task")];
+            let first_is_sys = msgs.first().map(|m| m.role == Role::System).unwrap_or(false);
+            assert!(!first_is_sys);
+            let injected: Vec<Message> = std::iter::once(Message::system(&instr))
+                .chain(msgs.iter().cloned())
+                .collect();
+            assert_eq!(injected[0].role, Role::System);
+            assert_eq!(injected[1].role, crate::backend::Role::User);
+            // Tool instructions are in the first system block
+            let text = match &injected[0].content[..] {
+                [ContentBlock::Text { text }] => text,
+                other => panic!("{other:?}"),
+            };
+            assert!(text.contains("## Write"), "{text}");
+        }
+
+        // Case B: existing system message (Devstral + Claude Code path) → merge, not prepend
+        {
+            let caller_sys = "You are a helpful assistant.";
+            let msgs = vec![Message::system(caller_sys), Message::user("Do the task")];
+            assert_eq!(msgs[0].role, Role::System);
+
+            // Simulate the merge: append instr to the first system message
+            let mut merged = msgs[0].clone();
+            match merged.content.first_mut() {
+                Some(ContentBlock::Text { text }) => {
+                    text.push_str("\n\n");
+                    text.push_str(&instr);
+                }
+                _ => panic!("unexpected content"),
+            }
+            let injected: Vec<Message> =
+                std::iter::once(merged).chain(msgs[1..].iter().cloned()).collect();
+
+            // Still exactly one system message (no double-block)
+            let sys_count = injected.iter().filter(|m| m.role == Role::System).count();
+            assert_eq!(sys_count, 1, "must be exactly one system message after merge");
+
+            let text = match &injected[0].content[..] {
+                [ContentBlock::Text { text }] => text,
+                other => panic!("{other:?}"),
+            };
+            // Both caller system and tool instructions are in the same block
+            assert!(text.contains(caller_sys), "caller system must be preserved");
+            assert!(text.contains("## Write"), "tool instructions must be present");
+            assert!(text.contains("<tool_call>"), "format hint must be present");
+        }
     }
 }
 
