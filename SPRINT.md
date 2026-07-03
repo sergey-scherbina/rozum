@@ -119,7 +119,9 @@
     Identical across all 3 reps (ROZUM_SAMPLING_SEED=1234 = fully deterministic). Other tasks pass 3/3.
     NOT a capability issue — the model never gets to generate src/main.rs. Logged as BUG below.
   - Devstral DONE: 15/18 (greet 3/3✓, build 3/3✓, fix 3/3✓, test 0/3✗ infra, debug 3/3✓, rpn 3/3✓)
-  - IN PROGRESS: GLM-4.7-Flash running (port 8303, n_ctx=15360 adaptive), GLM-4-32B→gpt-oss queued
+  - GLM-4.7-Flash DONE: 17/18 (greet/build/fix/test/debug 3/3✓, rpn 2/3 — rep2 rc=11 delivery).
+    test 3/3✓ confirms bench-test-gateway-500 is Devstral-specific, not shared infra.
+  - IN PROGRESS: GLM-4-32B→gpt-oss cascade running (port 8304, n_ctx=32768)
   - Done-when: per-run.csv has rows for all 3 loaded models × 3 reps × 6 tasks, CHANGELOG updated.
 
 - [ ] **bench-test-gateway-500** — BUG (found 2026-07-03 Devstral matrix run). The `test` task
