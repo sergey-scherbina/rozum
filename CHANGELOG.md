@@ -1,5 +1,26 @@
 # Changelog
 
+## fix(ucc): remove duplicate top-level `val`s that broke the SPA with a blank white page
+Completed: 2026-07-03
+
+Owner reported a blank white page on the phone after opening the control-center link.
+`control-center-live.ssc` declared `agentModelList`/`coderModelList`/`sessionModelList` twice each
+(stale leftover definitions from an earlier edit, unrelated to the security-hardening work). The
+interpreter tolerates `val` redeclaration but the React/JS codegen emits each as a `const` in one
+script scope — `SyntaxError: Identifier '...' has already been declared`, a parse-time failure that
+stops the whole inline script from running, so nothing mounts. Removed the three stale duplicates
+(kept the ones actually referenced downstream). Confirmed the fix with Playwright against the live
+page: zero `pageerror`s, full dashboard content renders.
+
+Added a `check_js_syntax` guard to `deploy-ucc-web.sh`: parses every inline `<script>` in each
+emitted HTML with Node's `vm.Script` and aborts the deploy on any failure (would have caught this
+automatically) — also rejects an empty/scriptless file, after a second incident during this same fix
+where an accidental `source deploy-ucc-web.sh` (with `$SSC` unset in that shell) wrote a 0-byte
+`index.html` straight to the live site; the original guard's "0 checked, 0 failed" trivially passed.
+Caught and fixed immediately (regenerated from the correct path, live-verified). Root cause of that
+second incident: sourcing a `set -e` script under `|| true` silently suspends `errexit` for the
+entire sourced execution, so a failing step didn't stop the later launchd restart.
+
 ## fix(ucc): gate the first WebAuthn registration behind a one-shot bootstrap token
 Completed: 2026-07-03
 

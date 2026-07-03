@@ -49,14 +49,45 @@ emit_html() {
   kill "$ssc_pid" 2>/dev/null || true
 }
 
+# Guard: parse every inline <script> block in an emitted HTML file with Node (syntax-check only, no
+# DOM/fetch needed) and abort the deploy if any fails. Catches codegen bugs like the duplicate
+# top-level `const agentModelList` (ucc-duplicate-const-fix) BEFORE they ship as a silent blank page
+# — the browser gave no server-side signal at all when that shipped.
+check_js_syntax() {
+  local html_file="$1"
+  command -v node >/dev/null 2>&1 || { echo "  (node not found — skipping JS syntax check for $html_file)" >&2; return 0; }
+  node -e '
+    const fs = require("fs");
+    const vm = require("vm");
+    const html = fs.readFileSync(process.argv[1], "utf8");
+    const re = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g;
+    let m, count = 0, failed = false;
+    while ((m = re.exec(html))) {
+      count++;
+      try { new vm.Script(m[1], { filename: `${process.argv[1]}#inline-${count}` }); }
+      catch (e) { failed = true; console.error(`  ✗ ${process.argv[1]} inline <script> #${count}: ${e.message}`); }
+    }
+    // An empty/truncated emit (e.g. $SSC pointed at a missing binary, "$SSC" ... > out.html
+    // silently redirecting nothing) has ZERO script blocks and would otherwise sail through as
+    // "0 checked, 0 failed" — this bit for real (2026-07-03): a wrong $SSC produced a 0-byte
+    // index.html that this same guard, before this line existed, happily approved.
+    if (html.trim().length === 0 || count === 0) { failed = true; console.error(`  ✗ ${process.argv[1]}: empty or no inline <script> blocks found (expected at least 1)`); }
+    if (failed) process.exit(1);
+    console.error(`  ✓ ${process.argv[1]}: ${count} inline <script> block(s) parse OK`);
+  ' "$html_file"
+}
+
 # 2) Compile the browser SPA (control-center-live.ssc → index.html).
 echo ">> emitting index.html (browser SPA) ..."
 "$SSC" emit-spa --frontend react "$HERE/control-center-live.ssc" > "$SITE/index.html"
 echo ">> index.html: $(wc -c < "$SITE/index.html") bytes"
+check_js_syntax "$SITE/index.html"
 
 # 3) Compile login.ssc → login.html and terminal.ssc → terminal.html.
 emit_html "$HERE/login.ssc"    8421 "$SITE/login.html"
 emit_html "$HERE/terminal.ssc" 8422 "$SITE/terminal.html"
+check_js_syntax "$SITE/login.html"
+check_js_syntax "$SITE/terminal.html"
 
 # 4) Copy PWA assets.
 for f in manifest.webmanifest icon.svg icon-180.png sw.js; do

@@ -157,8 +157,6 @@ val agentsList = cardWithHeader(heading(2, "Запущенные агенты"))
   ], "agents")
 )
 val agentModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", agModel, "spec")])
-
-val agentModelList = remoteTable(st, [fieldColumn("модель", "spec"), fieldColumn("GiB", "size_gib")], "installed", [rowLink("выбрать", agModel, "spec")])
 val launchForm = cardWithHeader(heading(2, "Запустить агента (модель в комнате)"))(
   vstack(gap = 8)(
     hstack(gap = 8)(text("свободно RAM:"), signalText_(availTxt)),
@@ -225,8 +223,6 @@ val codersList = cardWithHeader(heading(2, "Запущенные кодеры"))
   ], "coders")
 )
 val coderModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", cdModel, "spec")])
-
-val coderModelList = remoteTable(st, [fieldColumn("модель", "spec"), fieldColumn("GiB", "size_gib")], "installed", [rowLink("выбрать", cdModel, "spec")])
 val coderWorkdirList = remoteTable(st, [fieldColumn("проект", "name")], "projects", [rowLink("выбрать", cdWorkdir, "path")])
 val coderLaunch = cardWithHeader(heading(2, "Запустить кодера (реальная работа в репо)"))(
   vstack(gap = 8)(
@@ -295,8 +291,6 @@ val sessionsList = cardWithHeader(heading(2, "Живые сессии (терм�
   ], "sessions")
 )
 val sessionModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", seModel, "spec")])
-
-val sessionModelList = remoteTable(st, [fieldColumn("модель", "spec"), fieldColumn("GiB", "size_gib")], "installed", [rowLink("выбрать", seModel, "spec")])
 val sessionWorkdirList = remoteTable(st, [fieldColumn("проект", "name")], "projects", [rowLink("выбрать", seWorkdir, "path")])
 val sessionLaunch = cardWithHeader(heading(2, "Новая интерактивная сессия"))(
   vstack(gap = 8)(

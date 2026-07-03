@@ -1,5 +1,43 @@
 # Sprint
 
+### ▶ UCC dashboard blank-page incident (owner reported 2026-07-03: "На телефоне — просто пустая
+    белая страница" after opening the control-center link from busi's IT-consulting site)
+
+- [x] **ucc-duplicate-const-fix** — DONE. `control-center-live.ssc` declared `agentModelList`,
+  `coderModelList`, and `sessionModelList` TWICE each at the top level (an old, differently-styled
+  definition immediately followed by the one actually referenced downstream — dead leftover code
+  from an earlier edit, not a security-hardening regression). The ScalaScript interpreter tolerates
+  `val` redeclaration, but `emit-spa`'s React/JS codegen emits each as a plain `const` in the SAME
+  script scope — a JS `SyntaxError: Identifier '...' has already been declared`. That's a PARSE-time
+  error: the entire inline `<script>` fails to run, nothing mounts, the page is blank white with
+  zero console signal beyond the one pageerror event (which a phone user never sees). Confirmed via
+  Playwright (`chromium`, channel `chrome`) loading the live page and capturing `pageerror` — this is
+  the fastest way to catch this class of "silent blank page" bug; grepping generated HTML for
+  duplicate `const <name>` also works and needs no browser.
+  - Where: `clients/control/control-center-live.ssc` (removed the 3 stale duplicate `val`s, keeping
+    the ones each downstream `val` actually references — all three now match the codebase convention
+    of reusing the shared `modelSelectCols`, same as `coderModelList`/`sessionModelList` already did
+    for their surviving definition).
+  - Verified: `grep -oE '^val [A-Za-z0-9_]+' control-center-live.ssc | sort | uniq -c` shows no
+    duplicates; regenerated `index.html` has exactly one `const` per name; Playwright load of the
+    live public Funnel URL shows zero `pageerror`s and full dashboard text content.
+  - **Also added a deploy-time guard** (`check_js_syntax` in `deploy-ucc-web.sh`): parses every
+    inline `<script>` in each emitted HTML with Node's `vm.Script` (syntax-check only, no
+    DOM/fetch/execution) and aborts the deploy on any parse failure — would have caught this bug
+    automatically before it ever shipped, since deploys today have zero automated verification of
+    the emitted SPA. Also fails on an EMPTY html file / zero script blocks found (a real second
+    incident during this same fix: an accidental `source deploy-ucc-web.sh` in a shell where `$SSC`
+    wasn't set correctly wrote a 0-byte `index.html` to the LIVE site — `count === 0` trivially
+    "passed" the original guard with nothing to check; the guard now explicitly rejects that).
+  - **Live incident recap**: the accidental sourced run (see above) briefly took the real
+    `~/.rozum/ucc/site/index.html` down to 0 bytes on the production box. Caught immediately via
+    `wc -c`, fixed by regenerating from the correct `$SSC` path and copying over; Playwright-verified
+    the live public URL renders cleanly afterward. **Lesson: never `source` a deploy script (or any
+    `set -e` script) under `|| true` / inside a conditional — bash's `errexit` is silently suspended
+    for the ENTIRE sourced script's execution in that context, so a failing step doesn't stop later,
+    more dangerous steps (here: it still reached the launchd restart). Run it as a real subprocess
+    (`bash script.sh`), or copy just the function you need, never `source` under a conditional.**
+
 ### ▶ UCC first-registration TOFU race (owner 2026-07-03: revisiting the deferred item from the
     security-hardening pass above — "Да" to fixing it now)
 
