@@ -40,8 +40,17 @@
   - Command: `REPS=3 AGENTS=claude scripts/bench/agentic.sh`
   - ISSUE (2026-07-03 first run): 35B-DWQ (~25.8 GB) and Coder-30B (min ~22.5 GB) FAIL admission
     — free RAM was only 21.4 GB (XProtect + 3 CC sessions + Chrome). Devstral loaded fine.
-    To retry: close Chrome + spare CC windows, then rerun.
-  - Done-when: per-run.csv has rows for all 5 models × 3 reps × 6 tasks, CHANGELOG updated.
+    To retry those two: close Chrome + spare CC windows, then rerun.
+  - ISSUE (greet verify-gate): `rozum launch`'s `derive_target` asked Devstral to formalize
+    the greet prompt ("Reply with exactly the single word: pong") → model returned a cargo
+    run/verify command → repair loop ran for the full 600s RUN_TIMEOUT → greet timed out with
+    timeout=1 but pass=1 (pong was already in the log from turn 1). FIXED in agentic.sh: added
+    `ROZUM_VERIFY=0` env to the runner so the gateway's repair loop is disabled (bench has its
+    own `verify_task`). Affects reps 2+3 of greet in the current run (still unclean), fixed for
+    all future runs.
+  - IN PROGRESS: Devstral running (greet ✓ pass=1/timeout, build ✓ pass=1/151s), GLM-4.7-Flash
+    and GLM-4-32B→gpt-oss queued after Devstral finishes all 18 tasks.
+  - Done-when: per-run.csv has rows for all 3 loaded models × 3 reps × 6 tasks, CHANGELOG updated.
 
 ### ▶ deploy-ucc-web.sh gateway-binary gap (found 2026-07-03 while verifying the security fix below)
 

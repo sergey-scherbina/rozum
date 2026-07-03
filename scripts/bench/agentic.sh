@@ -672,7 +672,10 @@ for spec in "${MODELS[@]}"; do
         fi
 
         start=$(perl -MTime::HiRes=time -e 'printf "%.2f", time')
-        ( cd "$work"; exec "${runner[@]}" ) </dev/null >"$alog" 2>&1 &
+        # ROZUM_VERIFY=0: bench has its own verify_task; the gateway's derive_target
+        # misclassifies pure-text tasks (e.g. greet) as cargo projects via the model's
+        # interpretation of the prompt, spawning a repair loop that wastes the full RUN_TIMEOUT.
+        ( cd "$work"; exec env ROZUM_VERIFY=0 "${runner[@]}" ) </dev/null >"$alog" 2>&1 &
         LP=$!
         # Agent-tree RSS + (agent + gateway) CPU; the model's RAM is the gateway footprint.
         ( while kill -0 "$LP" 2>/dev/null; do
