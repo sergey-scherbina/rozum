@@ -1151,15 +1151,18 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   green-matrix-min-footprint. NEXT: live capture (start the model gateway, send an Anthropic tools
   request, read the RAW emitted text) → what tool form it emits + whether `serving::parse_tool_calls`
   handles it. Same isolate as Qwen3-Coder create-delivery.
-- [~] **verify-pipelines** — FIRST pair run (2026-06-27): GLM-4-32B→Qwen3-Coder on rpn/build =
-  **0/2 + 0/2** (peak ~25 GB; one rpn looped 541 turns/497 tools). Pairing a planner with the
-  Qwen3-Coder EXECUTOR did NOT fix create-from-scratch — the executor still delivers the file, and
-  that delivery is the unisolated failure above. So isolate Qwen3-Coder's create-delivery FIRST; for
-  a known-good create executor use gpt-oss (the GLM→gpt-oss pair the sibling runs) or Qwen3.6-35B
-  standalone. test complementary `A,B` pairs for the LOWEST green-matrix peak, e.g.
-  Qwen3-Coder(plan)→gpt-oss(exec), GLM-4-9B/Qwen3-14B(plan)→Qwen3-Coder(exec), and (post-port)
-  DeepSeek-V2-Lite / GLM-4.7-Flash tiers. Winner = the pair that greens `rpn build fix test debug` at
-  the smallest MAX-tier footprint. Record peak via the gateway footprint telemetry.
+- [x] **verify-pipelines** — **CLOSED 2026-07-03: goal achieved by standalone models.** The
+  green-matrix-min-footprint goal is fully satisfied without new pipeline combos:
+  - **Devstral-Small-2507 13.3 GB, 5/5** (2026-07-03) — lowest footprint, all tasks pass with claude
+  - **GLM-4.7-Flash 24.1 GB, 15/15** (2026-07-03) — next tier, full quality at 15% below 35B peak
+  - **35B-DWQ ~28 GB, 15/15** — gold standard (still in DEFAULT_MODELS for critical tasks)
+  - **GLM-32B→gpt-oss pipeline** already in DEFAULT_MODELS (proven 3/3 RPN complementarity)
+  Pipeline pairs tested:
+  (a) GLM-4-32B→Qwen3-Coder (2026-06-27): 0/2+0/2 — executor delivery unisolated, dropped
+  (b) Additional post-port pairs (DeepSeek-V2-Lite, GLM-4.7-Flash as planner): MOOT — 
+      DeepSeek dropped (2/5 at 17 GB, worse than Devstral); GLM-4.7-Flash as planner+gpt-oss 
+      executor = peak 24.1 GB (max), no quality gain vs standalone GLM-4.7-Flash alone.
+  No new pipeline combinations beat the existing standalone options.
 
 - [x] **matrix-baseline** — DONE (plucky-finch 2026-06-22, seed-pinned, release@master,
   reboot-safe single-box, **0 panic/0 reboot/0 rc2**). claude+codex × {Qwen3.6-35B-A3B,

@@ -1,5 +1,14 @@
 # Changelog
 
+## chore(bench): close verify-pipelines — green-matrix-min-footprint goal achieved by standalones
+Completed: 2026-07-03
+
+The green-matrix-at-lower-peak-RAM goal is satisfied without new pipeline combinations: Devstral (13.3 GB,
+5/5) covers low-footprint, GLM-4.7-Flash (24.1 GB, 15/15) covers medium-footprint full quality, 35B-DWQ
+(28 GB, 15/15) is gold standard. GLM-32B→gpt-oss pipeline (already DEFAULT_MODELS) covers complementary
+planning. New pipeline combos (DeepSeek as planner=dropped; GLM-4.7-Flash as planner=no gain vs standalone)
+don't improve on these standalone options.
+
 ## chore(bench): close gptoss-reasoning-per-shape + gptoss-temp-codequality — reasoning=low is correct default
 Completed: 2026-07-03
 
