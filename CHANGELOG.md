@@ -1,5 +1,14 @@
 # Changelog
 
+## fix(mlx): pass eos_token to chat template rendering
+Completed: 2026-07-03 · `3a6baa2`
+
+Devstral's template concatenates `eos_token` directly (`{{- content + eos_token }}`).
+With `eos_token: None` in template args, the second prompt (after a tool_use round trip)
+crashed with `string + none` → 500 error → Devstral could only make 1 tool call total.
+All subsequent turns fell back to prose. Fix: read `eos_token` from `tokenizer_config.json`
+(same format as `bos_token`) and pass it in `ApplyChatTemplateArgs`.
+
 ## fix(mlx): merge tool injection into existing system message
 Completed: 2026-07-03 · `52bf4f7`
 

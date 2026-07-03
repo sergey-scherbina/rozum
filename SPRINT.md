@@ -1083,7 +1083,10 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   blocks → second block (Claude Code's) dominated → `<tool_call>` format forgotten → model emitted raw
   `Write{json}` (not parsed). **FIXED 2026-07-03 (master `52bf4f7`)**: injection now MERGES into the
   existing system message when one is present. Live-verified: `stop_reason` tool_use restored.
-  NEXT: re-run Devstral `rpn build fix test debug` (REPS=2) on quiet box with new binary to get
+  **THIRD BUG found+fixed (2026-07-03, `3a6baa2`):** `eos_token: None` in template args caused
+  `string + none` crash on the SECOND prompt (after first tool_use round-trip) → 500 error → only
+  1 tool_use total across 5 turns. Fix: read `eos_token` from tokenizer_config.json and pass it.
+  NEXT: re-run Devstral `rpn build fix test debug` (REPS=2) on quiet box with LATEST binary to get
   a CLEAN verdict on whether Devstral is a viable low-footprint matrix member.
   QUEUED (slot-watcher, 2026-06-27): pre-downloads Devstral, waits for a
   clean box, then re-runs Qwen3-Coder `rpn build` (REPS=3, the contended ones) + Devstral full set
