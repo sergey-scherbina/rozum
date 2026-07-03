@@ -78,8 +78,8 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
     // Everything that can launch/drive an agent, coder, or interactive shell — gated by `agents`
     // (readonly/no-role users could previously reach these once merely authenticated).
     let agents = Router::new()
-        .route("/control/gateway/load", post(gateway_load_route))
-        .route("/control/gateway/stop", post(gateway_stop_route))
+        .route("/control/gateway/load", post(gateway_load_route).get(gateway_load_get_route))
+        .route("/control/gateway/stop", post(gateway_stop_route).get(gateway_stop_get_route))
         .route("/control/agent/launch", post(agent_launch_route))
         .route("/control/agent/stop", post(agent_stop_route))
         .route("/control/task", post(task_route))
@@ -487,6 +487,37 @@ async fn gateway_stop_route() -> axum::response::Response {
     } else {
         json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("kill {pid_str} failed"))
     }
+}
+
+// GET variants for SPA per-row links: load/stop via a plain anchor → redirect back to /.
+#[derive(Deserialize)]
+struct GatewayLoadQuery { model: String }
+
+async fn gateway_load_get_route(
+    axum::extract::Query(q): axum::extract::Query<GatewayLoadQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let model = q.model.trim().to_string();
+    if model.is_empty() {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "model required");
+    }
+    let _ = ensure_gateway(&model);
+    axum::response::Redirect::to("/").into_response()
+}
+
+async fn gateway_stop_get_route() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Some(active) = crate::share::read_active() {
+        if crate::share::live_lease_count(crate::share::LEASE_FRESH_SECS) == 0 {
+            let pid_str = active.pid.to_string();
+            if std::process::Command::new("kill").arg(&pid_str).status()
+                .map(|s| s.success()).unwrap_or(false)
+            {
+                crate::share::remove_active_if_mine(active.pid);
+            }
+        }
+    }
+    axum::response::Redirect::to("/").into_response()
 }
 
 #[derive(Deserialize)]

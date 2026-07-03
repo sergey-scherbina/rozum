@@ -68,23 +68,10 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
     hstack(gap = 8)(text("committed:"),   signalText_(committedTxt))
   )
 )
-val residentsCard = cardWithHeader(heading(2, "Resident models (in memory now)"))(
-  remoteTable(st, [fieldColumn("PID", "pid"), fieldColumn("Model", "model"), fieldColumn("GiB", "size_gib")], "residency.residents")
-)
-val catCard = cardWithHeader(heading(2, "Installed catalog"))(
-  remoteTable(st, [fieldColumn("Model", "spec"), fieldColumn("Size", "size_gib")], "installed")
-)
-val modelSelectCols = [fieldColumn("модель", "spec"), fieldColumn("GiB", "size_gib")]
-
-val gwModel = signal("gwModel", "")
-val modelsPanel = cardWithHeader(heading(2, "Загрузить модель"))(
+val modelsPanel = cardWithHeader(heading(2, "Модели"))(
   vstack(gap = 8)(
-    remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", gwModel, "spec")]),
-    hstack(gap = 8)(
-      signalText_(gwModel),
-      actionButton(fetchActionWith("POST", "/control/gateway/load", formBody([("model", "gwModel")]), [onBumpTick(refresh)]), "загрузить"),
-      actionButton(fetchActionWith("POST", "/control/gateway/stop", formBody([]), [onBumpTick(refresh)]), "остановить")
-    )
+    remoteTable(st, [fieldColumn("Модель", "model"), fieldColumn("GiB", "size_gib"), lcol("", "model", "/control/gateway/stop")], "residency.residents"),
+    remoteTable(st, [fieldColumn("Модель", "spec"), fieldColumn("GiB", "size_gib"), lcol("загрузить", "spec", "/control/gateway/load?model=:value")], "installed")
   )
 )
 
@@ -96,11 +83,7 @@ val dashboard = vstack(gap = 16)(
   divider(),
   gwCard,
   divider(),
-  residentsCard,
-  divider(),
-  modelsPanel,
-  divider(),
-  catCard
+  modelsPanel
 )
 ```
 
