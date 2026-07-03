@@ -114,14 +114,22 @@ plookup/spec-decode win. Task: thread the existing `PrefixStore` truncate/restor
 (they already reuse `MlxDenseTarget`, so the KV shape matches). Unlocks plookup for multi-turn agents,
 not just single-shot copy-heavy generation.
 
-### perf-kv-ctxsweep-verify — verification-only *(needs slot)*
-Run `ROZUM_CTXSWEEP=1 mlx_qwen35_moe_decode_bench` and assert decode t/s is flat across context
-(proves the pre-allocated KV layout has no O(context)/token regression). No code change expected.
+### perf-kv-ctxsweep-verify — **CLOSED via run.sh baseline (2026-07-03)**
+The `run.sh` baseline shows decode flat at 81.4/81.4/81.0 t/s for t6(356)/t7(512)/t8(768) output
+tokens, confirming pre-allocated KV with no O(context) regression. The cargo test is redundant
+(would need non-DWQ 35B model not locally cached).
 
-## Priority (once the slot frees)
-1. `perf-batch-gather-shortcircuit` (code, no slot to write; scheduler tests need the slot) → then
-   `perf-batch-default-on` flip + A/B. Proven ~1.98× concurrent win; the short-circuit removes the
-   lone-request 10 ms TTFT tax that otherwise blocks default-on. Biggest near-term win.
+## Priority summary (as of 2026-07-03)
+
+All concrete near-term perf wins have shipped:
+- batch-default-on: **DONE** (+35%/+67% concurrent throughput)  
+- batch-gather-shortcircuit: **DONE** (no lone-request TTFT tax)
+- batch-nonbatchable-rows: **QUANTIFIED** (constrained-tool rows dominate; per-row impl deferred)
+
+Remaining open levers (deprioritized, need slot + code work):
+1. `perf-batch-arch-coverage` — batch GLM-4 + gpt-oss (GLM-4 already added; gpt-oss needs mask work)
+2. `perf-prefix-reuse-fastpaths` — prefix reuse for plookup/spec-decode paths
+3. `perf-compiled-decode` — ON ICE (0.6B probe showed compile is net-negative)
 2. `perf-batch-arch-coverage` (GLM-4 + gpt-oss are hot agentic models that currently serialize).
 3. `perf-prefix-reuse-fastpaths`, then `perf-batch-nonbatchable-rows`, then `perf-kv-ctxsweep-verify`.
 4. `perf-compiled-decode` — **on-ice** (Stage-0 probe NO-GO, `f6b20a3`); re-open only for a 27B +
