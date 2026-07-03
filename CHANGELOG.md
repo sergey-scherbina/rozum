@@ -1,5 +1,34 @@
 # Changelog
 
+## fix(constrain): prevent premature JSON string close in tool-call content
+Completed: 2026-07-03 · `33a146a`
+
+Qwen3-Coder-30B and similar models nondeterministically choose JSON format
+for Write tool calls. When the `content` field includes Rust/Python code with
+string literals (e.g. `expect("msg")`), the bare `"` is also a valid JSON
+string terminator — the constrained decoder closed the content string
+prematurely, then generated whitespace until `is_runaway_loop` fired at 134
+tokens → malformed JSON → Write silently dropped. Root cause found via
+`ROZUM_RAW_DUMP` diagnostic added to `BatchSeq::finalize()`.
+
+Fix: before accepting `"` from the allowed token set, check whether the
+model's second-best non-quote token would be invalid in the post-close JSON
+state. At a premature close the runner-up is a content character (e.g. `m`
+from "missing") → invalid; at a legitimate close it's `}` / `,` → valid.
+Guard fires ~50 % of the time; Bash-printf fallback already recovers the rest.
+
+Validated: Qwen3-Coder-30B-A3B-Instruct-4bit rpn **3/3 PASS** clean box.
+
+## bench: DeepSeek-Coder-V2-Lite 2/5 PASS — DROPPED
+Completed: 2026-07-03 · bench `agentic-20260703-110852`
+
+DeepSeek-Coder-V2-Lite-Instruct-4bit (16B-A2.4B MoE): **2/5 PASS**
+(build, test; rpn/fix/debug FAIL), **17 GB** peak. Worse than Devstral
+on both RAM (17 vs 13.3 GB) and quality (2/5 vs 5/5). rpn fails with only
+2 tool uses; fix shows false-success-after-error; debug uses wrong Edit
+old_string; even the passing build took 30 turns vs Devstral's 7. Not a
+matrix upgrade — dropped.
+
 ## bench: Devstral-Small-2507 5/5 PASS after four-bug fix chain
 Completed: 2026-07-03 · bench `agentic-20260703-094702`
 

@@ -1096,8 +1096,17 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   test 121s/turns=7/tools=3, debug 141s/turns=7/tools=3). REPS=1 with claude agent, 13.3 GB peak.
   Devstral-Small-2507 IS a viable low-footprint agentic matrix member. Four gateway bugs blocked it;
   all fixed (52bf4f7, 3a6baa2, b3c8ab6) — benefits all Mistral/DeepSeek template-class models.
-  NEXT: (a) DeepSeek-Coder-V2-Lite bench (download `mlx-community:DeepSeek-Coder-V2-Lite-Instruct-4bit`,
-  ~15 GB, same fixes apply); (b) Qwen3-Coder rpn probe with ROZUM_RAW_DUMP=1.
+  (b) Qwen3-Coder rpn probe DONE (2026-07-03): ROOT CAUSE = premature JSON string close — model
+  nondeterministically chooses JSON format for Write(src/main.rs) then emits `expect("msg")` which
+  closes the content field prematurely → constrained decoder generates whitespace → is_runaway_loop
+  fires at 134 tokens → malformed JSON → Write silently dropped → model falls back to Bash printf.
+  FIX: constrain guard removes `"` from allowed when second-best non-quote token is invalid after close
+  (`33a146a`). Guard fires ~50 % of the time; Bash fallback recovers the rest. Validated rpn 3/3 PASS
+  clean box. Also added ROZUM_RAW_DUMP to BatchSeq::finalize() for future diagnostics.
+  DeepSeek-Coder-V2-Lite bench DONE (2026-07-03, `agentic-20260703-110852`): **2/5 PASS** (build, test;
+  rpn/fix/debug FAIL), 17 GB peak. WORSE than Devstral (5/5, 13.3 GB) on both RAM AND quality.
+  rpn(0/1 rc=1, 6t/2tools) — tool delivery or capability; fix `false_success_after_error`; debug
+  `edit_old_string_miss`; build passes but at 30 turns/23 tools (Devstral: 7 turns/3 tools). **DROPPED.**
   QUEUED (slot-watcher, 2026-06-27): pre-downloads Devstral, waits for a
   clean box, then re-runs Qwen3-Coder `rpn build` (REPS=3, the contended ones) + Devstral full set
   (REPS=2). clean-box smoke (no sibling) of each native-now model, peak + pass-rate:
