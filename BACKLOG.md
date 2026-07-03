@@ -1,5 +1,19 @@
 # Backlog
 
+## scalascript language gap: theme page-background never reaches `serve(view, port)` (found 2026-07-03, ucc-theme-bg)
+
+- [ ] **ssc-serve-extracss-or-theme-body** — `std/ui/primitives.ssc`'s `serve(tree: View, port: Int)`
+  extern def has no way to set the document/body background from `.ssc`, even though the JS-side
+  `_ssc_ui_serve(tree, port, extraCss)` already accepts a third `extraCss` param — nothing in the
+  `.ssc` language surface can reach it. `lower(view, theme)` correctly themes every widget it has a
+  hook for (surface/onSurface/etc.), but the emitted base template hardcodes
+  `body{background:#fff}`, so a themed app (e.g. `darkTheme`) renders correctly-dark cards on a
+  white page canvas. Currently patched around in `rozum`'s `deploy-ucc-web.sh` with a `sed` on the
+  emitted HTML — a rozum-only workaround, not a real fix. Real fix (either works): expose `extraCss`
+  on the `.ssc` `serve` extern def, or have `emit-spa`/`_ssc_ui_serve` derive the base body
+  background from the theme passed to `lower` automatically. Lives in `scalascript`, not `rozum` —
+  belongs in that repo's own spec/BACKLOG when picked up.
+
 ## Native MLX model ports (matrix coverage, lower priority — operator 2026-06-27)
 
 - [ ] **mlx-port-granite4** — IBM `granite-4.0-h-small` (`granitemoehybrid`, 4bit 18.1 GB):

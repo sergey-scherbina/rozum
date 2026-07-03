@@ -1,5 +1,21 @@
 # Changelog
 
+## fix(ucc): patch the emitted SPA's page background to match darkTheme
+Completed: 2026-07-03
+
+Owner reported the background went white right after the blank-page fix made the dashboard visible
+for the first time — not a regression from that fix or the security hardening, a pre-existing gap
+that was simply invisible while the page crashed. Cards and text are correctly dark-themed
+(`theme.colors.surface`/`onSurface` flow through `lower.ssc` everywhere it has a hook), but nothing
+wires `theme.colors.background` to the page canvas: `serve(view, port)`'s `.ssc` extern signature has
+no `extraCss` param even though the JS-side `_ssc_ui_serve` already accepts one, so the emitted base
+template's hardcoded `body{background:#fff}` never gets overridden. `deploy-ucc-web.sh` now `sed`s
+that to `#111827` (`darkTheme.colors.background`) right after emitting `index.html` — a rozum-side
+workaround; the real fix (expose `extraCss` at the language level, or derive body background from the
+theme automatically) belongs in `scalascript` (`BACKLOG.md`: `ssc-serve-extracss-or-theme-body`).
+Playwright-verified: computed `body` background is exactly `rgb(17, 24, 39)`, zero JS errors; live on
+the public Funnel URL.
+
 ## fix(ucc): remove duplicate top-level `val`s that broke the SPA with a blank white page
 Completed: 2026-07-03
 

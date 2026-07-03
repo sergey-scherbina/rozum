@@ -81,6 +81,13 @@ check_js_syntax() {
 echo ">> emitting index.html (browser SPA) ..."
 "$SSC" emit-spa --frontend react "$HERE/control-center-live.ssc" > "$SITE/index.html"
 echo ">> index.html: $(wc -c < "$SITE/index.html") bytes"
+# Framework gap (ucc-theme-bg): `serve(view, port)`'s extern signature has no extraCss param yet,
+# so an .ssc app has no way to override the emitted base template's hardcoded
+# `body{background:#fff}` — every card/text DOES pick up darkTheme correctly (theme.colors.surface/
+# onSurface flow through `lower`), only the page canvas stays white behind/around them. Patch it
+# post-emit to match this app's `darkTheme.colors.background` (#111827) until scalascript exposes
+# extraCss (or derives body background from the theme) at the language level.
+sed -i '' 's/body{margin:0;padding:0;background:#fff;/body{margin:0;padding:0;background:#111827;/' "$SITE/index.html"
 check_js_syntax "$SITE/index.html"
 
 # 3) Compile login.ssc → login.html and terminal.ssc → terminal.html.

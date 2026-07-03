@@ -1,5 +1,31 @@
 # Sprint
 
+### ▶ UCC theme page-background gap (owner reported 2026-07-03: "цветовая тема испортилась немного —
+    фон стал белый", right after the blank-page fix made the dashboard visible for the first time)
+
+- [x] **ucc-theme-bg** — DONE. Not a regression from the blank-page fix or the security hardening —
+  a pre-existing framework gap that was simply invisible until the page could render at all.
+  `darkTheme` (std/ui/theme.ssc) IS applied correctly everywhere `lower.ssc` has a hook for it: card
+  backgrounds use `theme.colors.surface` (#1f2937, confirmed live), text uses `theme.colors.onSurface`
+  (#f9fafb, confirmed on actual leaf text nodes — an earlier same-session check of a container div's
+  *inherited* color looked like black-on-dark and was a false alarm from checking the wrong DOM
+  level). The one thing never wired anywhere: `theme.colors.background` (#111827) never reaches the
+  page canvas — `serve(view, port)`'s extern signature (`std/ui/primitives.ssc`) has no `extraCss`
+  param, even though the JS-side `_ssc_ui_serve(tree, port, extraCss)` already supports one; the
+  emitted base template hardcodes `body{background:#fff}` with no override path from `.ssc`. Visible
+  as a plain white canvas around/behind the (correctly) dark cards.
+  - Where (workaround, rozum-side only): `clients/control/deploy-ucc-web.sh` — `sed` patches
+    `body{margin:0;padding:0;background:#fff;` → `...background:#111827;` in the freshly emitted
+    `index.html`, right after step 2, before `check_js_syntax`. Scoped to `index.html` only —
+    `login.html`/`terminal.html` are hand-rolled pages with their own already-dark CSS, not affected.
+  - Real fix belongs in `scalascript` (language-level, shared by every `ssc emit-spa` app, out of
+    scope for a rozum-only patch): either expose `extraCss` on the `.ssc` `serve` extern def, or have
+    `emit-spa`/`_ssc_ui_serve` derive the base body background from the theme passed to `lower`
+    automatically. Left as a BACKLOG item for scalascript, not blocking here.
+  - Verified: Playwright load of the patched `index.html` shows `body` computed
+    `background-color: rgb(17, 24, 39)` (`#111827`, exact `darkTheme.colors.background`), zero
+    `pageerror`s; live-deployed and confirmed on the public Funnel URL.
+
 ### ▶ UCC dashboard blank-page incident (owner reported 2026-07-03: "На телефоне — просто пустая
     белая страница" after opening the control-center link from busi's IT-consulting site)
 
