@@ -35,7 +35,12 @@ val room = computedSignal(() => {
   val h = hash()
   if h.contains("/chat/") then h.split("/chat/").last else ""
 })
-val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else if hash().contains("/coders") then "coders" else if hash().contains("/sessions") then "sessions" else "home")
+val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else if hash().contains("/coders") then "coders" else if hash().contains("/sessions") then "sessions" else if hash().contains("/detail/") then "detail" else "home")
+
+val detailSpec = computedSignal(() => { val h = hash(); if h.contains("/detail/") then h.split("/detail/").last else "" })
+val detailUrl  = computedSignal(() => "/control/model/info?spec=" + detailSpec())
+val detailTick = signal("detailTick", 0)
+val detailData = fetchUrlSignalTo("modelDetail", detailUrl, detailTick)
 
 val chatTick = signal("chatTick", 0)
 val msgUrl   = computedSignal(() => "/chat/messages?room=" + room())
@@ -70,8 +75,8 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
 )
 val modelsPanel = cardWithHeader(heading(2, "Модели"))(
   vstack(gap = 8)(
-    remoteTable(st, [fieldColumn("Модель", "model"), fieldColumn("GiB", "size_gib"), lcol("", "model", "/control/gateway/stop")], "residency.residents"),
-    remoteTable(st, [fieldColumn("Модель", "spec"), fieldColumn("GiB", "size_gib"), lcol("загрузить", "spec", "/control/gateway/load?model=:value")], "installed")
+    remoteTable(st, [lcol("В памяти", "model", "#/detail/:value"), fieldColumn("GiB", "size_gib"), lcol("выгрузить", "model", "/control/gateway/stop")], "residency.residents"),
+    remoteTable(st, [lcol("Модель", "spec", "#/detail/:value"), fieldColumn("GiB", "size_gib"), lcol("загрузить", "spec", "/control/gateway/load?model=:value")], "installed")
   )
 )
 
@@ -316,6 +321,34 @@ val sessionsBody = vstack(gap = 16)(
 )
 ```
 
+## Model detail
+```scalascript
+val detailName  = computedSignal(() => jsonValue(detailData()).get("name").asString)
+val detailSpec_ = computedSignal(() => jsonValue(detailData()).get("spec").asString)
+val detailSrc   = computedSignal(() => jsonValue(detailData()).get("source").asString)
+val detailGib   = computedSignal(() => jsonValue(detailData()).get("size_gib").asString + " GiB")
+val detailPath  = computedSignal(() => jsonValue(detailData()).get("path").asString)
+val detailPid   = computedSignal(() => jsonValue(detailData()).get("resident").get("pid").asString)
+val detailPort  = computedSignal(() => jsonValue(detailData()).get("resident").get("port").asString)
+val detailResidentTxt = computedSignal(() => {
+  val pid = detailPid()
+  if pid == "" || pid == "0" then "нет" else "да  (PID " + pid + ", порт " + detailPort() + ")"
+})
+
+val detailBody = vstack(gap = 16)(
+  hstack(gap = 10)(link("#/", "← Модели"), actionButton(incSignal(detailTick), "↻")),
+  cardWithHeader(signalText_(detailName))(
+    vstack(gap = 8)(
+      hstack(gap = 8)(text("Spec:"),     signalText_(detailSpec_)),
+      hstack(gap = 8)(text("Источник:"), signalText_(detailSrc)),
+      hstack(gap = 8)(text("Размер:"),   signalText_(detailGib)),
+      hstack(gap = 8)(text("В памяти:"), signalText_(detailResidentTxt)),
+      hstack(gap = 8)(text("Путь:"),     signalText_(detailPath))
+    )
+  )
+)
+```
+
 ## Compose + serve
 ```scalascript
 val view = router(mode, [
@@ -323,7 +356,8 @@ val view = router(mode, [
   route("chat", [chatBody]),
   route("agents", [agentsBody]),
   route("coders", [codersBody]),
-  route("sessions", [sessionsBody])
+  route("sessions", [sessionsBody]),
+  route("detail", [detailBody])
 ])
 
 serve(lower(view, darkTheme), 8410)

@@ -71,6 +71,7 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         .route("/control/matrix/log", get(matrix_log_route))
         .route("/control/matrix/cell", get(matrix_cell_route))
         .route("/control/matrix/live", get(matrix_live_route))
+        .route("/control/model/info", get(model_info_route))
         .route_layer(axum::middleware::from_fn(require_perm_read));
     let chat = Router::new()
         .route("/chat/post", post(chat_post_route))
@@ -518,6 +519,43 @@ async fn gateway_stop_get_route() -> axum::response::Response {
         }
     }
     axum::response::Redirect::to("/").into_response()
+}
+
+#[derive(Deserialize)]
+struct ModelInfoQuery { spec: String }
+
+async fn model_info_route(
+    axum::extract::Query(q): axum::extract::Query<ModelInfoQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let spec = q.spec.trim().to_string();
+    if spec.is_empty() {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "spec required");
+    }
+    let installed = rozum_models::models::scan_all_installed();
+    let Some(model) = installed.iter().find(|m| m.spec == spec) else {
+        return json_err(axum::http::StatusCode::NOT_FOUND, "not found");
+    };
+    let source = spec.splitn(2, ':').next().unwrap_or("local").to_string();
+    let name   = spec.splitn(2, ':').nth(1).unwrap_or(&spec).to_string();
+    let path   = model.path.to_string_lossy().to_string();
+    // GiB helper is defined lower in the file; inline it here to avoid forward-ref issues.
+    let gib = |b: u64| format!("{:.2}", b as f64 / 1_073_741_824.0);
+    let size_gib = gib(model.size_bytes);
+    let resident = crate::share::read_active().and_then(|a| {
+        if a.model == spec {
+            Some(serde_json::json!({ "pid": a.pid, "port": a.port }))
+        } else { None }
+    });
+    axum::Json(serde_json::json!({
+        "spec":       spec,
+        "source":     source,
+        "name":       name,
+        "size_gib":   size_gib,
+        "size_bytes": model.size_bytes,
+        "path":       path,
+        "resident":   resident,
+    })).into_response()
 }
 
 #[derive(Deserialize)]
