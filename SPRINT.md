@@ -1078,9 +1078,13 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   **pre-injection smoke: 0/10, tools=0 on every cell** → the run proved the model saw no executable
   tool defs, not that Devstral is incapable. The template-less tool injection fix below landed after
   that smoke, including the Devstral prose-"tools" detector regression; **NOT DROPPED anymore**.
-  NEXT: re-run Devstral over `rpn build fix test debug` on a quiet slot before deciding whether it can
-  join the low-footprint matrix set. Implication until then: use a create-capable PLANNER
-  (GLM-4-32B RPN 3/3 / Qwen3.6-35B) with Qwen3-Coder/gpt-oss as the EXECUTOR.
+  **Post-injection bench (2026-07-03, REPS=2, 10 tasks): 0/10 — tools=0–1 still.** Root cause
+  isolated: injection PREPENDED a second system message → Devstral template created two `[SYSTEM_PROMPT]`
+  blocks → second block (Claude Code's) dominated → `<tool_call>` format forgotten → model emitted raw
+  `Write{json}` (not parsed). **FIXED 2026-07-03 (master `52bf4f7`)**: injection now MERGES into the
+  existing system message when one is present. Live-verified: `stop_reason` tool_use restored.
+  NEXT: re-run Devstral `rpn build fix test debug` (REPS=2) on quiet box with new binary to get
+  a CLEAN verdict on whether Devstral is a viable low-footprint matrix member.
   QUEUED (slot-watcher, 2026-06-27): pre-downloads Devstral, waits for a
   clean box, then re-runs Qwen3-Coder `rpn build` (REPS=3, the contended ones) + Devstral full set
   (REPS=2). clean-box smoke (no sibling) of each native-now model, peak + pass-rate:
@@ -1103,8 +1107,9 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   already handles; `ROZUM_INJECT_TOOLS=0` remains the opt-out. Regression coverage now locks both the
   detector (Devstral prose "tools" is not enough) and the injected prompt contract. Caveat: a
   non-tool-trained model may still not comply; injection is the necessary first step. One fix unlocks
-  several low-footprint matrix candidates. NEXT: quiet-slot live reruns for Devstral and
-  DeepSeek-Coder-V2-Lite. (Original:) THREE low-footprint
+  several low-footprint matrix candidates. **Second gap found (2026-07-03) and FIXED (`52bf4f7`):**
+  injection into an EXISTING system message was broken — prepend created two `[SYSTEM_PROMPT]` blocks
+  on Mistral templates; now merges. NEXT: quiet-slot live reruns for Devstral and DeepSeek-Coder-V2-Lite. (Original:) THREE low-footprint
   non-Qwen/GLM/gpt-oss models score **tools=0 on every agentic cell** (Devstral 0/10, DeepSeek-Coder-
   V2-Lite 0/10). The deepseek_v2 PORT is VALIDATED, so the model RUNS — it just emits no executable
   tool calls. Per the repo rule (never close as "model can't"), CAUSE NOT ISOLATED: suspect the

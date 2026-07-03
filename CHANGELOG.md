@@ -1,5 +1,21 @@
 # Changelog
 
+## fix(mlx): merge tool injection into existing system message
+Completed: 2026-07-03 · `52bf4f7`
+
+When Claude Code (or any caller) provides a `system` parameter, the gateway was
+prepending a *second* system message for tool injection. On Devstral/Mistral-family
+models whose template wraps each system block in `[SYSTEM_PROMPT]…[/SYSTEM_PROMPT]`,
+the second block dominated and the model output raw `ToolName{json}` instead of the
+parseable `<tool_call>` format (bench: `tools=0` on all create-from-scratch tasks).
+
+Fix: when `messages[0]` is already a system message, append the tool instructions
+*into* it — the model sees exactly one `[SYSTEM_PROMPT]` block.
+
+Live-verified on Devstral-Small-2507-4bit: `stop_reason` changed from `end_turn`
+(raw text) to `tool_use` (parsed `<tool_call>`) when a system message is present.
+Also fixed a pre-existing spec-decode constructor compile error (`jobs_in_channel`).
+
 ## perf(batch): ROZUM_BATCH default 1→2 — +35% throughput on 2 concurrent requests
 Completed: 2026-07-02 · `fbd1d89`
 
