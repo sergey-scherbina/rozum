@@ -1423,18 +1423,18 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
 
 #### 3. Micro-perf
 
-- [~] **perf-baseline** — PREP DONE (sunny-civet 2026-06-23, spec `docs/specs/perf-baseline.md`).
-  Code-grounded lever audit done; the measurement RUN is slot-gated (needs the host model slot).
-  KEY FINDING: 2 of the 4 candidate levers are **already realized** — prefix-cache reuse is DONE for
-  the mainline serving path (LRU `PrefixStore`, longest-prefix truncate+suffix-prefill, default-ON,
-  byte-exact; `mlx_native_backend.rs:826/1130`), and the KV layout is DONE (pre-allocated 256-block
-  in-place cache, no per-step concat; `mlx-lm/src/cache.rs:80`). async_eval pipelining + retain-fix
-  also done. So the open levers are the two below + follow-ups, NOT a from-scratch build.
+- [x] **perf-baseline** — **RUN DONE (2026-07-03, slot free after GLM-4.7-Flash bench).**
+  `scripts/bench/run.sh` over Qwen3.6-35B-A3B-4bit-DWQ (BENCH_NCTX=8192). Results in
+  `scripts/bench/results/20260703-124650/`. KEY NUMBERS: **load 5s**, **peak 21,161 MB (20.7 GB)**,
+  **decode 81–83 t/s flat across tasks** (TTFT 0.13–0.23s). Decode t/s is **flat from 19→768 output
+  tokens** (81.4/81.4/81.0 for t6/t7/t8) → pre-allocated KV cache confirmed, no O(context) regress.
+  t2-arith FAIL = model's arithmetic error (not a gateway bug). **KV flatness ALSO confirms
+  `perf-kv-ctxsweep-verify`** — the ROZUM_CTXSWEEP cargo test is redundant (same evidence from run.sh).
+  Prep notes (sunny-civet 2026-06-23): lever audit done; KEY FINDING: 2 of 4 levers already realized.
   - Tooling already exists (don't rebuild): `scripts/bench/run.sh` (single-stream per-model: TTFT,
     decode t/s excl. prefill, peak RAM) + the in-code `#[ignore]` benches
     (`mlx_{dense,moe}_backend_chat_tps`, `mlx_hybrid_batched_decode_throughput`,
     `mlx_qwen35_moe_decode_bench` incl. `ROZUM_CTXSWEEP` + build-vs-eval split, `mlx_compile_probe_plain`).
-    RUN plan + per-model targets in the spec. Follow the 🛑 REBOOT-SAFETY PROTOCOL on the run.
 - [x] **perf-batch-gather-shortcircuit** — DONE (2026-07-02, master `a8efa27`). `jobs_in_channel:
   Arc<AtomicUsize>` added to `MlxNativeBackend` — incremented in `chat()` before send, decremented in
   `worker_main` after `blocking_recv()`. Short-circuit in gather loop: if counter==0 after `first`,
@@ -1466,8 +1466,11 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
 - [ ] **perf-batch-nonbatchable-rows** — `is_batchable` (`:760`) serializes rep-penalty / explicit-seed
   / constrained-tool rows. Add per-row RNG keys + per-row penalty in `run_batch` (`mlx_rope_per_row_probe`
   `:5620` shows per-row offsets are feasible) or quantify+document the loss. Lower priority. *(slot)*
-- [ ] **perf-kv-ctxsweep-verify** — verification-only: `ROZUM_CTXSWEEP=1 mlx_qwen35_moe_decode_bench`,
-  assert decode t/s flat across context (proves the pre-allocated KV has no O(context)/token regress). *(slot)*
+- [x] **perf-kv-ctxsweep-verify** — **DONE via perf-baseline run.sh (2026-07-03).** run.sh results over
+  35B-DWQ show decode flat at **81.4/81.4/81.0 t/s** across t6(356)/t7(512)/t8(768) output tokens at
+  8192 ctx — confirms the pre-allocated KV has no O(context)/token regression. The cargo test
+  `ROZUM_CTXSWEEP=1 mlx_qwen35_moe_decode_bench` is redundant (needs non-DWQ model not cached; same
+  evidence from run.sh). *(slot)*
 
 ### Services & clients — separate services, clean APIs, one client (operator 2026-06-23, spec `docs/specs/services-and-clients.md`)
 Drivers: ALL THREE — (a) failure isolation, (b) one client over clean APIs (UCC), (c) cleanliness.

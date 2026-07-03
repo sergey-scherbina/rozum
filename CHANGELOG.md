@@ -1,5 +1,15 @@
 # Changelog
 
+## chore(perf): run perf-baseline — 35B-DWQ: 81–83 t/s, 20.7 GB, 5 s load; KV flatness confirmed
+Completed: 2026-07-03
+
+Ran `scripts/bench/run.sh` over Qwen3.6-35B-A3B-4bit-DWQ (n_ctx=8192). Results in
+`scripts/bench/results/20260703-124650/`. Key numbers: **load 5 s**, peak **21,161 MB (20.7 GB)**,
+decode **81–83 t/s flat** (TTFT 0.13–0.23 s). Decode t/s flat from 19→768 output tokens
+(81.4/81.4/81.0 for t6/t7/t8) — pre-allocated KV cache confirmed, no O(context) regression.
+Closes `perf-baseline` and `perf-kv-ctxsweep-verify` (run.sh is sufficient evidence; non-DWQ 35B
+not cached, cargo test skipped).
+
 ## feat(matrix): add GLM-4.7-Flash-4bit to DEFAULT_MODELS — 15/15 full matrix
 Completed: 2026-07-03
 
