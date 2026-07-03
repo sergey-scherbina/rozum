@@ -130,9 +130,10 @@ echo ">> index.html: $(wc -c < "$SITE/index.html") bytes"
 # post-emit to match this app's `darkTheme.colors.background` (#111827) until scalascript exposes
 # extraCss (or derives body background from the theme) at the language level.
 sed -i '' 's/body{margin:0;padding:0;background:#fff;/body{margin:0;padding:0;background:#111827;/' "$SITE/index.html"
-# Hide links whose href="#noop" — used by the unified models table to suppress the
-# inapplicable action (load_url="#noop" for loaded models; stop_url="#noop" for unloaded).
-sed -i '' 's|</style>|a[href="#noop"]{display:none}</style>|' "$SITE/index.html"
+# Models panel action buttons. The link text IS the field value (spec / "STOP"), but CSS
+# overrides it with the correct label via ::before and hides the raw text with font-size:0.
+# Empty hrefs (?model= or ?k=) are produced for the inapplicable action and hidden.
+sed -i '' 's|</style>|a[href^="/control/gateway/load"]{display:inline-block;padding:2px 10px;border:1px solid #374151;border-radius:4px;background:#1f2937;text-decoration:none;font-size:0;cursor:pointer}a[href^="/control/gateway/load"]:hover{background:#374151;border-color:#6b7280}a[href^="/control/gateway/load"]:not([href$="model="])::before{content:"загрузить";font-size:13px;color:#d1d5db}a[href$="?model="]{display:none}a[href^="/control/gateway/stop"]{display:inline-block;padding:2px 10px;border:1px solid #374151;border-radius:4px;background:#1f2937;text-decoration:none;font-size:0;cursor:pointer}a[href^="/control/gateway/stop"]:hover{background:#374151;border-color:#6b7280}a[href="/control/gateway/stop?k=STOP"]::before{content:"выгрузить";font-size:13px;color:#ef4444}a[href$="?k="]{display:none}</style>|' "$SITE/index.html"
 check_js_syntax "$SITE/index.html"
 check_js_runtime "$SITE/index.html"
 

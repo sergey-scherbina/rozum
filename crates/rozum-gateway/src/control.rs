@@ -2552,10 +2552,12 @@ pub struct ControlStatus {
 pub struct UnifiedModelBrief {
     pub spec: String,
     pub size_gib: String,
-    /// "/control/gateway/load?model=<spec>" when not loaded, "#noop" when loaded.
-    pub load_url: String,
-    /// "/control/gateway/stop" when loaded, "#noop" when not loaded.
-    pub stop_url: String,
+    /// The model spec substituted into the load URL. Empty string when already loaded
+    /// (produces `/control/gateway/load?model=` which CSS hides via `[href$="model="]`).
+    pub load_spec: String,
+    /// Non-empty ("STOP") when this model is loaded — substituted into the stop URL so
+    /// CSS can show the "выгрузить" button. Empty when not loaded (CSS hides via `[href$="?k="]`).
+    pub stop_marker: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2835,8 +2837,8 @@ pub async fn status() -> ControlStatus {
         UnifiedModelBrief {
             spec: m.spec.clone(),
             size_gib: fmt_gib(m.size_bytes),
-            load_url: if loaded { "#noop".into() } else { format!("/control/gateway/load?model={}", m.spec) },
-            stop_url: if loaded { "/control/gateway/stop".into() } else { "#noop".into() },
+            load_spec:   if loaded { String::new() } else { m.spec.clone() },
+            stop_marker: if loaded { "STOP".into() } else { String::new() },
         }
     }).collect();
     ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents, coders, sessions, projects, models }

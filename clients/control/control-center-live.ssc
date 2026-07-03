@@ -78,8 +78,8 @@ val modelsPanel = cardWithHeader(heading(2, "Модели"))(
   remoteTable(st, [
     lcol("Модель", "spec", "#/detail/:value"),
     fieldColumn("GiB", "size_gib"),
-    lcol("загрузить", "load_url", ":value"),
-    lcol("выгрузить", "stop_url", ":value")
+    lcol("", "load_spec", "/control/gateway/load?model=:value"),
+    lcol("", "stop_marker", "/control/gateway/stop?k=:value")
   ], "models")
 )
 
