@@ -336,12 +336,16 @@ pub fn meter(
 // is absent or its feature is off), exactly as the old `#[cfg(not)]` stubs returned.
 
 /// Batched-decode occupancy snapshot (native MLX). `avg_occupancy = rows/runs`.
+/// `serial_{seed,penalty,constrained}` count jobs that bypassed the batch path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BatchStats {
     pub runs: u64,
     pub rows: u64,
     pub admits: u64,
     pub max: u64,
+    pub serial_seed: u64,
+    pub serial_penalty: u64,
+    pub serial_constrained: u64,
 }
 
 static MLX_MEMORY: OnceLock<fn() -> Option<(u64, u64, u64)>> = OnceLock::new();

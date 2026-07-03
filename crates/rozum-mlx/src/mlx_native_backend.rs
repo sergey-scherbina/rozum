@@ -4865,6 +4865,9 @@ pub fn register_telemetry() {
             rows: b.rows,
             admits: b.admits,
             max: b.max,
+            serial_seed: b.serial_seed,
+            serial_penalty: b.serial_penalty,
+            serial_constrained: b.serial_constrained,
         })
     });
 }

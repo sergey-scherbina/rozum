@@ -3638,6 +3638,9 @@ async fn stats_handler(State(state): State<GatewayState>) -> impl IntoResponse {
                     "admits": b.admits,
                     "max": b.max,
                     "avg_occupancy": (avg * 100.0).round() / 100.0,
+                    "serial_seed": b.serial_seed,
+                    "serial_penalty": b.serial_penalty,
+                    "serial_constrained": b.serial_constrained,
                 }),
             );
         }
