@@ -1,5 +1,22 @@
 # Changelog
 
+## bench: Qwen3-Coder-30B-A3B clean-box verdict — rpn+build+test+debug green, fix weak
+Completed: 2026-07-03 · results `agentic-20260703-104314`, `agentic-20260703-112045`, `agentic-20260703-112358`
+
+Qwen3-Coder-30B-A3B-Instruct-4bit clean-box results after constrain fix:
+- **rpn 3/3, build 3/3, test 2/2, debug 2/2** — all PASS
+- **fix 0/2** — consistent `edit_old_string_miss` loop (259–284 tool uses)
+
+Root cause of fix failure: model nondeterministically uses JSON format for Edit
+tool calls; when old_string spans multiple lines, it encodes newlines as spaces
+instead of `\n` → old_string never matches the file → 284-tool loop.
+The smoke #1 fix 2/2 was likely lucky XML-format path under contention.
+
+**Matrix verdict:** strong on create-from-scratch (6/6) and focused-edit tasks
+where only a 1-line change is needed (4/4). Known weakness: multi-line Edit
+in JSON format (fix 0/2). Add for create-from-scratch; not a drop-in Devstral
+replacement. Peak 20.5 GB.
+
 ## fix(constrain): prevent premature JSON string close in tool-call content
 Completed: 2026-07-03 · `33a146a`
 

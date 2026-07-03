@@ -995,9 +995,18 @@ premature and wrong before (codex×gpt-oss was *our* gateway bug twice). One tas
   perfect), build 1/2, rpn 0/2 (one a 900s RUN_TIMEOUT).** ⚠️ INCONCLUSIVE on create-from-scratch:
   a sibling experiment (`pipeline-swap-settle` matrix/router runs on :8300/:8500) was resident
   THROUGHOUT → gateway contention (RAM hit 95 MB; the rpn 900s timeout smells like saturation, not
-  model-can't). Per [[project-matrix-nondeterminism]] a contended red ≠ verdict. **NEXT: clean re-run
-  of `rpn build` for Qwen3-Coder on a QUIET box** before any conclusion / promoting it over
-  Qwen3.6-35B. Devstral still un-run (verify-first). (Found+fixed BUG-005 here: offline+uncached →
+  model-can't). Per [[project-matrix-nondeterminism]] a contended red ≠ verdict.
+  **CLEAN-BOX RESULTS (2026-07-03):** rpn 3/3 ✓, build 3/3 ✓ (constrain fix `33a146a` helps),
+  test 2/2 ✓, debug 2/2 ✓. fix 0/2 ✗ — ROOT CAUSE: model nondeterministically uses JSON format
+  for Edit; when old_string spans multiple lines (e.g. the full Rust file), model encodes newlines
+  as SPACES (`"fn reverse...  fn main..."`) instead of `\n` → old_string never matches → 284-tool
+  loop. Was 2/2 in smoke #1 likely because contention pushed the model toward XML format (which
+  handles newlines correctly). VERDICT: Qwen3-Coder-30B-A3B is STRONG on create-from-scratch
+  (rpn+build 6/6) and fine on focused-edit (test+debug 4/4 where only a 1-line change is needed),
+  but loops on multi-line Edit (fix 0/2). Add to matrix for create-from-scratch scenarios; known
+  fix-task weakness ([[project-agentic-loop-root-cause]]). Not proposed fix yet — option: fuzzy
+  old_string matching in gateway (normalize whitespace → newline) or force XML-only for Edit.
+  (Found+fixed BUG-005 here: offline+uncached →
   bogus 4 PB overcommit; the queue now pre-downloads via uv+huggingface_hub.)
 
 - [ ] **mlx-glm4-moe** — port GLM-4 MoE to native MLX. **REPRIORITIZED → bigger than thought**
