@@ -1,5 +1,13 @@
 # Changelog
 
+## bench: Devstral-Small-2507 5/5 PASS after four-bug fix chain
+Completed: 2026-07-03 · bench `agentic-20260703-094702`
+
+After four sequential gateway bugs found+fixed (52bf4f7 injection-merge, 3a6baa2 eos_token,
+b3c8ab6 Role::Tool remap), Devstral-Small-2507-4bit achieves **5/5 PASS** on
+rpn+build+fix+test+debug (claude agent, REPS=1, 13.3 GB peak). Verdict: viable low-footprint
+agentic matrix member. The same four fixes benefit all Mistral/DeepSeek template-class models.
+
 ## fix(mlx): remap Role::Tool to user for templates that don't support tool role
 Completed: 2026-07-03 · `b3c8ab6`
 
