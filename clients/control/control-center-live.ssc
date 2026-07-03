@@ -73,6 +73,7 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
     hstack(gap = 8)(text("committed:"),   signalText_(committedTxt))
   )
 )
+val modelSelectCols = [fieldColumn("Модель", "spec"), fieldColumn("GiB", "size_gib")]
 val modelsPanel = cardWithHeader(heading(2, "Модели"))(
   vstack(gap = 8)(
     remoteTable(st, [lcol("В памяти", "model", "#/detail/:value"), fieldColumn("GiB", "size_gib"), lcol("выгрузить", "model", "/control/gateway/stop")], "residency.residents"),
@@ -181,9 +182,7 @@ val agentsBody = vstack(gap = 16)(
   divider(),
   launchForm,
   divider(),
-  stopForm,
-  divider(),
-  catCard
+  stopForm
 )
 ```
 
