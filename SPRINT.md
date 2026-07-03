@@ -1626,7 +1626,7 @@ merged** (the legibility goal is met). Spec `2edbf00`; outcome in
   in-memory duplex against a minimal in-process rmcp server (`echo`+`boom`) — no external
   binary. Spec `docs/specs/mcp-toolsource.md`. (Surfacing it in an embedded-agent command
   that *configures* MCP servers is a separate later step — out of scope here.)
-- [ ] **Out of scope (decided):** services-as-plugins (subcommands stay); dynamic/
+- [x] **Out of scope (decided):** services-as-plugins (subcommands stay); dynamic/
   loadable plugins (dylib/WASM/out-of-process) — in-tree trait impls only;
   re-abstracting `ChatBackend`/`ToolSource` (already correct).
 
