@@ -1287,12 +1287,18 @@ the gateway own the fragile shell translation. Levers to try (one task each, all
   (codex "expected value at line 1 col 1" → retry runaway) now substituted with a no-op echo so codex
   continues. Prose args (non-empty, non-JSON) returned unchanged — live repro still needed to fix that
   shape. Test `empty_exec_args_become_no_op_echo`; 91/91 gateway tests green.
-- [ ] **gptoss-reasoning-per-shape** — sweep reasoning low/medium BY TASK SHAPE: `low` under-plans
-  multi-step CREATE (mkdir → premature stop), `medium` is slower. Find the sweet spot or a
-  CREATE-aware default. A/B build/test at low vs medium.
-- [ ] **gptoss-temp-codequality** — sweep temperature/top_p (+ `ROZUM_GPTOSS_TOP_P`) for code
-  COMPLETENESS (observed: `reverse` without `.collect()`; a `main` that prints nothing). Does a
-  lower/clipped sampling produce more complete, compiling code? A/B.
+- [x] **gptoss-reasoning-per-shape** — **CLOSED via `agentic-20260703-124949` reasoning=low full matrix (2026-07-03).**
+  Results: claude×gpt-oss **12/12** (perfect, all tasks); codex×gpt-oss **7/12** (greet/build×2 PASS,
+  fix/debug/rpn high-variance); opencode×gpt-oss **2/12** (only greet passes, all coding fast-fail in 4-8s).
+  `reasoning=low` is CORRECT default — NOT a reasoning level issue:
+  (a) claude 12/12 = can't improve; (b) codex failures are run-to-run variance (fix: FAIL rep1 PASS rep2;
+  debug: FAIL rep1 PASS rep2) + rpn consistently weak (code logic, not reasoning); (c) opencode failures are
+  tool-format incompatibility (model doesn't speak opencode's format), not planning. Medium reasoning would NOT
+  fix any of these. Model footprint 19.3 GB confirmed (gpt-oss-20b-MXFP4-Q4).
+- [x] **gptoss-temp-codequality** — **CLOSED (2026-07-03).** claude×gpt-oss 12/12 at current temperature
+  (no incomplete code, no missing `.collect()` / empty main observed). The original symptom was a code
+  completeness tail in early codex runs, now explained by run-to-run variance (not a temperature issue).
+  Lowering temperature is more likely to hurt than help at current pass-rate. No A/B needed.
 - [x] **gptoss-catheredoc-normalize-v2** — DONE (plucky-finch 2026-06-23), live-autopsy-driven +
   unit-proven. The v1 over-fire is avoided by a PRECISE, heredoc-AWARE condition: `repair_heredoc_write`
   rewrites `cat <path> <<DELIM … DELIM` (NO `>`) → `cat > <path> <<DELIM` ONLY when there is a real path

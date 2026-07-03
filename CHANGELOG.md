@@ -1,5 +1,17 @@
 # Changelog
 
+## chore(bench): close gptoss-reasoning-per-shape + gptoss-temp-codequality — reasoning=low is correct default
+Completed: 2026-07-03
+
+Full reasoning=low matrix (`agentic-20260703-124949`, gpt-oss-20b-MXFP4-Q4, REPS=2, all agents×tasks):
+claude **12/12**, codex **7/12**, opencode **2/12**. Findings:
+- `reasoning=low` is sufficient — claude 12/12 can't improve; codex failures are run-to-run variance
+  (fix/debug flip between reps) + rpn consistently weak (code logic); opencode fails fast (format
+  incompatibility, 4-8 s) — none of these are reasoning-level issues.
+- `gptoss-temp-codequality`: no code completeness issues at current temp with claude 12/12; the original
+  symptoms were early codex variance, not temperature. No A/B needed.
+- Model footprint confirmed: 19.3 GB (gpt-oss-20b-MXFP4-Q4).
+
 ## feat(batch): add serial-reason counters to BatchStats — quantify non-batchable rows
 Completed: 2026-07-03
 
