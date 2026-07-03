@@ -2463,6 +2463,12 @@ mod inner {
 
         /// Parse any tool calls, emit them (or the held-back text), then `Done`.
         fn finalize(&mut self) {
+            if std::env::var_os("ROZUM_RAW_DUMP").is_some() {
+                eprintln!(
+                    "─── RAW_DUMP/batch (stop={:?} out_tokens={}) ───\nRAW: {:?}",
+                    self.stop, self.output_tokens, self.full_text
+                );
+            }
             let tool_calls = if matches!(self.stop, StopReason::Cancelled) {
                 Vec::new()
             } else if self.harmony {
@@ -2994,6 +3000,7 @@ mod inner {
         tokenizer: &Tokenizer,
         opts: &qwen3::SamplerOpts,
         recent: &[u32],
+        quote_tok: Option<u32>,
     ) -> u32 {
         use crate::constrain::Prefix;
         // Materialize a contiguous CPU copy of the row (the `+0` forces it).
@@ -3036,6 +3043,52 @@ mod inner {
         }
         if allowed.is_empty() {
             return argmax_u32(&dense);
+        }
+
+        // Guard against premature JSON string close: if `"` is in `allowed` and would
+        // close the string but leave the JSON body incomplete, AND the model's
+        // unconstrained argmax would be invalid after the close (typical of a Rust/Python
+        // string literal `expect("msg")` inside a `content` field), remove `"` from
+        // allowed so the model is forced to emit `\"` (the escape) instead. Only fires
+        // when at least one other token remains, so we never strand the decoder.
+        if let Some(qid) = quote_tok {
+            if allowed.contains(&(qid as i32)) {
+                let after_close = {
+                    let mut s = String::with_capacity(json.len() + 1);
+                    s.push_str(json);
+                    s.push('"');
+                    s
+                };
+                if !cons.is_complete(&after_close) {
+                    // Use the second-best non-quote token to detect premature close:
+                    // at a premature close the model's runner-up is a content char (invalid
+                    // after the close); at a legitimate close the runner-up is `}` / `,`
+                    // (valid after the close). This is more reliable than checking the argmax
+                    // itself, which is `"` in BOTH the premature and legitimate cases.
+                    let second_best = row.iter().enumerate()
+                        .filter(|&(i, _)| i != qid as usize)
+                        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                        .map(|(i, _)| i)
+                        .unwrap_or(usize::MAX);
+                    let second_blocks_after_close = second_best < vocab && tokenizer
+                        .decode(&[second_best as u32], false)
+                        .ok()
+                        .filter(|t| !t.is_empty())
+                        .map(|t| {
+                            let mut probe = after_close.clone();
+                            probe.push_str(&t);
+                            cons.prefix(&probe) == Prefix::Invalid
+                        })
+                        .unwrap_or(false);
+                    if second_blocks_after_close {
+                        let without_quote: Vec<i32> =
+                            allowed.iter().copied().filter(|&id| id != qid as i32).collect();
+                        if !without_quote.is_empty() {
+                            allowed = without_quote;
+                        }
+                    }
+                }
+            }
         }
 
         let mut bias = vec![f32::NEG_INFINITY; vocab];
@@ -3086,6 +3139,14 @@ mod inner {
         forward: fn(&mut LoadedModel, &Array, &mut Vec<C>) -> Result<Array, Exception>,
     ) {
         use mlx_rs::ops::indexing::{IndexOp, NewAxis};
+        // Precompute the `"` (double-quote) token ID once — used by the premature-string-close
+        // guard in sample_constrained. Scanning the vocab each step would be O(vocab); do it
+        // once here and pass the id down. `None` when the tokenizer has no single-char `"` token
+        // (guard becomes a no-op, which is safe).
+        let vocab_size = logits.shape()[1] as usize;
+        let quote_tok: Option<u32> = (0..vocab_size as u32).find(|&id| {
+            tokenizer.decode(&[id], false).ok().as_deref() == Some("\"")
+        });
         loop {
             let recent: &[u32] = if opts.repeat_penalty != 1.0 {
                 qwen3::repeat_window(&seq.out_ids)
@@ -3097,7 +3158,7 @@ mod inner {
             let tok = {
                 match driver.region(&seq.full_text) {
                     Some((region, cons)) => {
-                        sample_constrained(&logits, region, cons, tokenizer, &opts, recent)
+                        sample_constrained(&logits, region, cons, tokenizer, &opts, recent, quote_tok)
                     }
                     None => {
                         let t = qwen3::sample_with(&logits, &opts, recent).expect("sample_with");
