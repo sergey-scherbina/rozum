@@ -75,10 +75,12 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
 )
 val modelSelectCols = [fieldColumn("Модель", "spec"), fieldColumn("GiB", "size_gib")]
 val modelsPanel = cardWithHeader(heading(2, "Модели"))(
-  vstack(gap = 8)(
-    remoteTable(st, [lcol("В памяти", "model", "#/detail/:value"), fieldColumn("GiB", "size_gib"), lcol("выгрузить", "model", "/control/gateway/stop")], "residency.residents"),
-    remoteTable(st, [lcol("Модель", "spec", "#/detail/:value"), fieldColumn("GiB", "size_gib"), lcol("загрузить", "spec", "/control/gateway/load?model=:value")], "installed")
-  )
+  remoteTable(st, [
+    lcol("Модель", "spec", "#/detail/:value"),
+    fieldColumn("GiB", "size_gib"),
+    lcol("загрузить", "load_url", ":value"),
+    lcol("выгрузить", "stop_url", ":value")
+  ], "models")
 )
 
 val dashboard = vstack(gap = 16)(

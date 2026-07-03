@@ -130,6 +130,9 @@ echo ">> index.html: $(wc -c < "$SITE/index.html") bytes"
 # post-emit to match this app's `darkTheme.colors.background` (#111827) until scalascript exposes
 # extraCss (or derives body background from the theme) at the language level.
 sed -i '' 's/body{margin:0;padding:0;background:#fff;/body{margin:0;padding:0;background:#111827;/' "$SITE/index.html"
+# Hide links whose href="#noop" — used by the unified models table to suppress the
+# inapplicable action (load_url="#noop" for loaded models; stop_url="#noop" for unloaded).
+sed -i '' 's|</style>|a[href="#noop"]{display:none}</style>|' "$SITE/index.html"
 check_js_syntax "$SITE/index.html"
 check_js_runtime "$SITE/index.html"
 

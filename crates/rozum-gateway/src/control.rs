@@ -542,8 +542,25 @@ async fn model_info_route(
     let gib = |b: u64| format!("{:.2}", b as f64 / 1_073_741_824.0);
     let size_gib = gib(model.size_bytes);
 
-    // Read config.json for architecture metadata.
-    let cfg_path = model.path.join("config.json");
+    // Find config.json. For HuggingFace hub models the layout is:
+    //   models--owner--name/refs/main   → snapshot hash
+    //   models--owner--name/snapshots/<hash>/config.json
+    // For flat model dirs (LMStudio, Ollama, local) config.json is directly in path.
+    let cfg_path = {
+        let refs_main = model.path.join("refs").join("main");
+        if let Ok(hash) = std::fs::read_to_string(&refs_main) {
+            let p = model.path.join("snapshots").join(hash.trim()).join("config.json");
+            if p.exists() { p } else { model.path.join("config.json") }
+        } else {
+            // Fallback: first snapshot dir
+            model.path.join("snapshots").read_dir().ok()
+                .and_then(|mut rd| rd.next())
+                .and_then(|e| e.ok())
+                .map(|e| e.path().join("config.json"))
+                .filter(|p| p.exists())
+                .unwrap_or_else(|| model.path.join("config.json"))
+        }
+    };
     let cfg: serde_json::Value = std::fs::read_to_string(&cfg_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -2526,6 +2543,19 @@ pub struct ControlStatus {
     pub sessions: Vec<SessionBrief>,
     /// Known project directories (from rooms.json), for workdir selection in the UCC launch forms.
     pub projects: Vec<ProjectBrief>,
+    /// Unified model list for the models panel: installed catalog merged with resident state.
+    /// Each entry has `load_url` or `stop_url` set; the other is "#noop" (hidden by CSS).
+    pub models: Vec<UnifiedModelBrief>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UnifiedModelBrief {
+    pub spec: String,
+    pub size_gib: String,
+    /// "/control/gateway/load?model=<spec>" when not loaded, "#noop" when loaded.
+    pub load_url: String,
+    /// "/control/gateway/stop" when loaded, "#noop" when not loaded.
+    pub stop_url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2775,8 +2805,8 @@ pub async fn status() -> ControlStatus {
             .collect(),
     };
     let installed = installed_catalog
-        .into_iter()
-        .map(|m| InstalledBrief { size_gib: fmt_gib(m.size_bytes), spec: m.spec, size_bytes: m.size_bytes })
+        .iter()
+        .map(|m| InstalledBrief { size_gib: fmt_gib(m.size_bytes), spec: m.spec.clone(), size_bytes: m.size_bytes })
         .collect();
     let residency_metrics = vec![
         MetricBrief {
@@ -2799,7 +2829,17 @@ pub async fn status() -> ControlStatus {
     let coders = live_coders();
     let sessions = live_sessions();
     let projects = list_projects();
-    ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents, coders, sessions, projects }
+    let resident_spec = gateway.as_ref().map(|g| g.model.as_str()).unwrap_or("");
+    let models = installed_catalog.iter().map(|m| {
+        let loaded = m.spec == resident_spec;
+        UnifiedModelBrief {
+            spec: m.spec.clone(),
+            size_gib: fmt_gib(m.size_bytes),
+            load_url: if loaded { "#noop".into() } else { format!("/control/gateway/load?model={}", m.spec) },
+            stop_url: if loaded { "/control/gateway/stop".into() } else { "#noop".into() },
+        }
+    }).collect();
+    ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents, coders, sessions, projects, models }
 }
 
 #[cfg(test)]
