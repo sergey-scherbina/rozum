@@ -4094,6 +4094,16 @@ mod inner {
             || template.contains("tools is")
     }
 
+    /// Whether the chat template explicitly handles the `"tool"` role for tool results.
+    /// Templates that lack this branch (Devstral/DeepSeek bare User:/Assistant:) raise on any
+    /// message with role="tool" → those must be remapped to "user" before rendering.
+    pub(crate) fn template_supports_tool_role(template: &str) -> bool {
+        template.contains("'tool'")         // role == 'tool' anywhere
+            || template.contains("\"tool\"") // role == "tool" anywhere
+            || template.contains("<|observation|>") // GLM uses observation not tool
+            || template.contains("<|channel|>") // harmony has its own path
+    }
+
     fn render_prompt(
         tokenizer: &mut Tokenizer,
         template: &str,
@@ -4242,6 +4252,26 @@ mod inner {
         let messages: &[Message] = if template.contains("<|channel|>") {
             harmony_sanitized = sanitize_harmony_orphan_tool_results(messages);
             &harmony_sanitized
+        } else {
+            messages
+        };
+        // Template-less models (Devstral/DeepSeek/Mistral) only support
+        // user/system/assistant roles — they raise on "tool". Remap Role::Tool → Role::User
+        // so tool results appear as user messages. Qwen3 templates handle "tool" natively
+        // (they contain the tool-role branch), so only remap when template lacks it.
+        let tool_role_mapped: Vec<Message>;
+        let messages: &[Message] = if !template_supports_tool_role(template) {
+            tool_role_mapped = messages
+                .iter()
+                .map(|m| {
+                    if m.role == Role::Tool {
+                        Message { role: Role::User, content: m.content.clone() }
+                    } else {
+                        m.clone()
+                    }
+                })
+                .collect();
+            &tool_role_mapped
         } else {
             messages
         };
@@ -4816,7 +4846,7 @@ pub async fn ensure_model_dir(spec: &str) -> Option<std::path::PathBuf> {
 mod native_model_surface_tests {
     use super::{supported_model_type, tools_system_message};
     use crate::backend::{ContentBlock, Role, ToolDef};
-    use crate::mlx_native_backend::tools_instruction_text;
+    use crate::mlx_native_backend::{tools_instruction_text};
 
     #[test]
     fn native_download_gate_includes_mla_models() {
@@ -4928,6 +4958,7 @@ mod native_model_surface_tests {
             assert!(text.contains("<tool_call>"), "format hint must be present");
         }
     }
+
 }
 
 // Gated on the feature: these tests reach into the `mlx-native`-only `inner` module, so they only
@@ -5083,6 +5114,22 @@ mod tests {
         assert!(template_renders_tools("[AVAILABLE_TOOLS]{{ tools|tojson }}[/AVAILABLE_TOOLS]"));
         // DeepSeek-Coder-V2-Lite has no tools slot → injection (correctly) fires.
         assert!(!template_renders_tools("{{ bos }}{% for m in messages %}{{ m.content }}{% endfor %}"));
+    }
+
+    #[test]
+    fn tool_role_not_supported_by_devstral_template() {
+        use super::inner::template_supports_tool_role;
+        // Devstral / Mistral-family only support user/system/assistant — raises on "tool".
+        // render_prompt_opt must remap Role::Tool → Role::User for such templates.
+        let devstral_tmpl = "{%- elif message['role'] == 'assistant' %}…{%- else %}{{- raise_exception('Only user, system and assistant roles are supported!') }}{%- endif %}";
+        assert!(!template_supports_tool_role(devstral_tmpl), "Devstral must NOT be treated as supporting tool role");
+        // Templates that explicitly handle tool role.
+        assert!(template_supports_tool_role("{% if role == 'tool' %}…{% endif %}"));
+        assert!(template_supports_tool_role("{% elif message['role'] == 'tool' %}…{% endif %}"));
+        assert!(template_supports_tool_role("<|observation|>")); // GLM uses observation not "tool"
+        assert!(template_supports_tool_role("<|channel|>"));     // harmony has its own path
+        // DeepSeek-Coder-V2-Lite bare template has no tool-role branch.
+        assert!(!template_supports_tool_role("{{ bos }}{% for m in messages %}{{ m.content }}{% endfor %}"));
     }
 
     #[test]
