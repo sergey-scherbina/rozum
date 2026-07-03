@@ -1086,8 +1086,18 @@ model-gateway at a time, slot-claim first; REPS≥2; contended runs don't count 
   **THIRD BUG found+fixed (2026-07-03, `3a6baa2`):** `eos_token: None` in template args caused
   `string + none` crash on the SECOND prompt (after first tool_use round-trip) → 500 error → only
   1 tool_use total across 5 turns. Fix: read `eos_token` from tokenizer_config.json and pass it.
-  NEXT: re-run Devstral `rpn build fix test debug` (REPS=2) on quiet box with LATEST binary to get
-  a CLEAN verdict on whether Devstral is a viable low-footprint matrix member.
+  **FOURTH BUG found+fixed (2026-07-03, `b3c8ab6`):** `anthropic_messages_to_internal()` converts
+  `tool_result` blocks to `Role::Tool`; `QwenDialect` renders them as role="tool"; Devstral template
+  raises "Only user, system and assistant roles are supported!" → 500 on EVERY second turn →
+  `api_retry` 10× → task never completes. Fix: `template_supports_tool_role()` detects templates
+  lacking "tool" branch; `render_prompt_opt` remaps `Role::Tool → Role::User` before rendering.
+  **CLEAN BENCH PARTIAL RESULTS (2026-07-03, all 4 bugs fixed, log
+  `/tmp/devstral-all3fixes-20260703-094702.log`):** rpn PASS(185s,turns=9,tools=4),
+  build PASS(143s,turns=7,tools=3), fix PASS(141s,turns=7,tools=3) — test+debug pending.
+  NEXT: wait for test+debug results, then run DeepSeek-Coder-V2-Lite with same fixes.
+  **QWEN3-CODER PROBE PLAN (blocked on RAM until Devstral bench done):** run
+  `ROZUM_RAW_DUMP=1 TASKS="rpn" AGENTS=claude AGENTIC_MODELS="mlx-community:Qwen3-Coder-30B-A3B-Instruct-4bit" bash scripts/bench/agentic.sh`
+  and watch gateway stderr for raw model output → diagnose the 523-turn loop.
   QUEUED (slot-watcher, 2026-06-27): pre-downloads Devstral, waits for a
   clean box, then re-runs Qwen3-Coder `rpn build` (REPS=3, the contended ones) + Devstral full set
   (REPS=2). clean-box smoke (no sibling) of each native-now model, peak + pass-rate:
