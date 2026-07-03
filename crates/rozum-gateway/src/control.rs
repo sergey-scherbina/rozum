@@ -454,9 +454,12 @@ fn shell_safe(s: &str) -> bool {
 #[derive(Deserialize)]
 struct GatewayLoadReq { model: String }
 
-async fn gateway_load_route(axum::Json(req): axum::Json<GatewayLoadReq>) -> axum::response::Response {
+async fn gateway_load_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let model = req.model.trim().to_string();
+    // Accept JSON {"model":"..."} (from the chat form) OR plain-text spec (from rowPost table action).
+    let model = serde_json::from_str::<GatewayLoadReq>(&body)
+        .map(|r| r.model)
+        .unwrap_or_else(|_| body.trim().to_string());
     if model.is_empty() {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "model required");
     }
@@ -2543,21 +2546,8 @@ pub struct ControlStatus {
     pub sessions: Vec<SessionBrief>,
     /// Known project directories (from rooms.json), for workdir selection in the UCC launch forms.
     pub projects: Vec<ProjectBrief>,
-    /// Unified model list for the models panel: installed catalog merged with resident state.
-    /// Each entry has `load_url` or `stop_url` set; the other is "#noop" (hidden by CSS).
-    pub models: Vec<UnifiedModelBrief>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct UnifiedModelBrief {
-    pub spec: String,
-    pub size_gib: String,
-    /// The model spec substituted into the load URL. Empty string when already loaded
-    /// (produces `/control/gateway/load?model=` which CSS hides via `[href$="model="]`).
-    pub load_spec: String,
-    /// Non-empty ("STOP") when this model is loaded — substituted into the stop URL so
-    /// CSS can show the "выгрузить" button. Empty when not loaded (CSS hides via `[href$="?k="]`).
-    pub stop_marker: String,
+    /// Installed models NOT currently loaded — for the "загрузить" table in the models panel.
+    pub not_loaded: Vec<InstalledBrief>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2831,17 +2821,13 @@ pub async fn status() -> ControlStatus {
     let coders = live_coders();
     let sessions = live_sessions();
     let projects = list_projects();
-    let resident_spec = gateway.as_ref().map(|g| g.model.as_str()).unwrap_or("");
-    let models = installed_catalog.iter().map(|m| {
-        let loaded = m.spec == resident_spec;
-        UnifiedModelBrief {
-            spec: m.spec.clone(),
-            size_gib: fmt_gib(m.size_bytes),
-            load_spec:   if loaded { String::new() } else { m.spec.clone() },
-            stop_marker: if loaded { "STOP".into() } else { String::new() },
-        }
-    }).collect();
-    ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents, coders, sessions, projects, models }
+    let resident_specs: std::collections::HashSet<&str> =
+        residency.residents.iter().map(|r| r.model.as_str()).collect();
+    let not_loaded = installed_catalog.iter()
+        .filter(|m| !resident_specs.contains(m.spec.as_str()))
+        .map(|m| InstalledBrief { spec: m.spec.clone(), size_bytes: m.size_bytes, size_gib: fmt_gib(m.size_bytes) })
+        .collect();
+    ControlStatus { gateway, residency, installed, residency_metrics, meetings, agents, coders, sessions, projects, not_loaded }
 }
 
 #[cfg(test)]

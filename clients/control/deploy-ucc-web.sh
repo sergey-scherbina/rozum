@@ -130,10 +130,6 @@ echo ">> index.html: $(wc -c < "$SITE/index.html") bytes"
 # post-emit to match this app's `darkTheme.colors.background` (#111827) until scalascript exposes
 # extraCss (or derives body background from the theme) at the language level.
 sed -i '' 's/body{margin:0;padding:0;background:#fff;/body{margin:0;padding:0;background:#111827;/' "$SITE/index.html"
-# Models panel action buttons. The link text IS the field value (spec / "STOP"), but CSS
-# overrides it with the correct label via ::before and hides the raw text with font-size:0.
-# Empty hrefs (?model= or ?k=) are produced for the inapplicable action and hidden.
-sed -i '' 's|</style>|a[href^="/control/gateway/load"],a[href^="/control/gateway/stop"]{display:inline-block;padding:3px 12px;border:1px solid #4b5563;border-radius:4px;background:#374151;text-decoration:none;font-size:0;cursor:pointer;color:#f9fafb}a[href^="/control/gateway/load"]:hover,a[href^="/control/gateway/stop"]:hover{background:#4b5563}a[href^="/control/gateway/load"]:not([href$="model="])::before{content:"загрузить";font-size:13px}a[href$="?model="]{display:none}a[href="/control/gateway/stop?k=STOP"]::before{content:"выгрузить";font-size:13px}a[href$="?k="]{display:none}</style>|' "$SITE/index.html"
 check_js_syntax "$SITE/index.html"
 check_js_runtime "$SITE/index.html"
 
