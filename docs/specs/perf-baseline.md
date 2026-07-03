@@ -1,9 +1,24 @@
 # Perf-baseline — current t/s + the open micro-perf levers
 
-Status: prep done (sunny-civet, 2026-06-23); the measurement RUN is slot-gated (needs the host
-model slot, held by the matrix). This is the analysis half of the sprint's `#3 Micro-perf →
-perf-baseline` item: catalog what is already realized, what the existing tooling measures, and file
-one `perf-<lever>` task per genuine opportunity — grounded in code so the run is just "invoke these."
+Status: **DONE (2026-07-03, nimble-raven).** Run: `scripts/bench/results/20260703-124650/`.
+
+Prep: sunny-civet, 2026-06-23 — lever audit done, tooling documented. RUN: slot freed after
+GLM-4.7-Flash bench. This is the analysis half of the sprint's `#3 Micro-perf → perf-baseline`
+item: catalog what is already realized, what the existing tooling measures, and file one
+`perf-<lever>` task per genuine opportunity — grounded in code so the run is just "invoke these."
+
+### Actual baseline numbers (Qwen3.6-35B-A3B-4bit-DWQ, n_ctx=8192, 2026-07-03)
+
+| Metric          | Value               |
+|-----------------|---------------------|
+| Load time       | 5 s                 |
+| Peak footprint  | 21,161 MB (20.7 GB) |
+| TTFT            | 0.13–0.23 s         |
+| Decode t/s (1 tok out) | 72.5 t/s   |
+| Decode t/s (19–768 tok) | **81–83 t/s flat** |
+
+**KV flatness confirmed:** t6(356 out)=81.4, t7(512)=81.4, t8(768)=81.0 — no O(context) regression.
+Closes `perf-kv-ctxsweep-verify` (the ROZUM_CTXSWEEP cargo test is redundant; non-DWQ not cached).
 
 All line refs are `crates/rozum-mlx/src/mlx_native_backend.rs` unless noted; the per-token `forward`,
 the `Generate` iterator and `ConcatKeyValueCache` live in the pinned `mlx-rs` fork
