@@ -97,7 +97,7 @@
 
 ### ▶ matrix baseline — 5 DEFAULT_MODELS × claude × REPS=3 (operator 2026-07-03)
 
-- [ ] **matrix-baseline-2026-07-03** — run full DEFAULT_MODELS matrix (claude agent, REPS=3, all 6
+- [x] **matrix-baseline-2026-07-03** — run full DEFAULT_MODELS matrix (claude agent, REPS=3, all 6
   tasks: greet rpn build fix test debug) to establish an updated agentic baseline now that all 5 models
   are in DEFAULT_MODELS: 35B-DWQ, Qwen3-Coder-30B, Devstral-Small-2507, GLM-4.7-Flash, GLM-32B→gpt-oss.
   Key gaps: Devstral only REPS=1 proven; Qwen3-Coder only REPS=2; others already 15/15.
@@ -121,8 +121,11 @@
   - Devstral DONE: 15/18 (greet 3/3✓, build 3/3✓, fix 3/3✓, test 0/3✗ infra, debug 3/3✓, rpn 3/3✓)
   - GLM-4.7-Flash DONE: 17/18 (greet/build/fix/test/debug 3/3✓, rpn 2/3 — rep2 rc=11 delivery).
     test 3/3✓ confirms bench-test-gateway-500 is Devstral-specific, not shared infra.
-  - IN PROGRESS: GLM-4-32B→gpt-oss cascade running (port 8304, n_ctx=32768)
-  - Done-when: per-run.csv has rows for all 3 loaded models × 3 reps × 6 tasks, CHANGELOG updated.
+  - GLM-32B+gpt-oss DONE: 16/18 (greet/build/fix/test/debug 3/3✓, rpn 1/3 — reps 1+2 rc=1 capability).
+  - **RESULT (3 of 5 models, 35B-DWQ + Coder-30B skipped — RAM):**
+    Devstral 15/18 · GLM-4.7-Flash 17/18 · GLM-32B+gpt-oss 16/18 = **48/54 (89%)**
+    results: `scripts/bench/results/agentic-20260703-145343/per-run.csv`
+  - Remaining: rerun 35B-DWQ + Coder-30B after freeing RAM (close Chrome + spare CC windows).
 
 - [ ] **bench-test-gateway-500** — BUG (found 2026-07-03 Devstral matrix run). The `test` task
   (create Cargo.toml + src/main.rs with fn reverse + #[cfg(test)] + run cargo test + cargo run)

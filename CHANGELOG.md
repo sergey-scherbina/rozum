@@ -1,5 +1,28 @@
 # Changelog
 
+## fix(ucc): matrix nav link + sessions mode fix
+Completed: 2026-07-03 · `bc94717`
+
+Added "📊 Матрица" link to the UCC nav bar (→ `/matrix.html`). Fixed a routing bug
+from `2e0781a` where `#/sessions` mapped to mode `"coders"` instead of `"sessions"`,
+causing the Сессии tab to show the Кодеры panel. Redeployed via deploy-ucc-web.sh.
+
+## chore(matrix): baseline 2026-07-03 — 48/54 across 3 models
+Completed: 2026-07-03 · `scripts/bench/results/agentic-20260703-145343/per-run.csv`
+
+Full DEFAULT_MODELS matrix (claude agent, REPS=3, 6 tasks) for the 3 models that fit
+in available RAM (35B-DWQ + Coder-30B blocked by admission — need to free ~5 GB first):
+
+| Model | Pass | Notes |
+|---|---|---|
+| Devstral-Small-2507-4bit | 15/18 | test 0/3 — gateway HTTP 500 on 2nd gen (seed=1234 deterministic, filed as bench-test-gateway-500) |
+| GLM-4.7-Flash-4bit | 17/18 | rpn rep2 rc=11 delivery failure |
+| GLM-4-32B+gpt-oss cascade | 16/18 | rpn reps 1+2 rc=1 (capability miss) |
+| **TOTAL** | **48/54 (89%)** | |
+
+Infra fixes landed during this run: `ROZUM_VERIFY=0` in bench runner (greet verify-gate
+bug); `check_js_syntax` guard in deploy script.
+
 ## fix(ucc): patch the emitted SPA's page background to match darkTheme
 Completed: 2026-07-03
 
