@@ -86,9 +86,26 @@
     `ROZUM_VERIFY=0` env to the runner so the gateway's repair loop is disabled (bench has its
     own `verify_task`). Affects reps 2+3 of greet in the current run (still unclean), fixed for
     all future runs.
-  - IN PROGRESS: Devstral running (greet ✓ pass=1/timeout, build ✓ pass=1/151s), GLM-4.7-Flash
-    and GLM-4-32B→gpt-oss queued after Devstral finishes all 18 tasks.
+  - ISSUE (Devstral test 0/3 — gateway 500): the test task consistently fails with rc=1 (5 turns,
+    1 tool use, ~200s). Root cause: gateway returns HTTP 500 on the SECOND generation after the
+    agent writes Cargo.toml. The 500 triggers claude's retry loop → after 5 retries the failover
+    watchdog fires and tries to respawn the gateway. The src/main.rs is never written → verify FAIL.
+    Identical across all 3 reps (ROZUM_SAMPLING_SEED=1234 = fully deterministic). Other tasks pass 3/3.
+    NOT a capability issue — the model never gets to generate src/main.rs. Logged as BUG below.
+  - Devstral DONE: 15/18 (greet 3/3✓, build 3/3✓, fix 3/3✓, test 0/3✗ infra, debug 3/3✓, rpn 3/3✓)
+  - IN PROGRESS: GLM-4.7-Flash running (port 8303, n_ctx=15360 adaptive), GLM-4-32B→gpt-oss queued
   - Done-when: per-run.csv has rows for all 3 loaded models × 3 reps × 6 tasks, CHANGELOG updated.
+
+- [ ] **bench-test-gateway-500** — BUG (found 2026-07-03 Devstral matrix run). The `test` task
+  (create Cargo.toml + src/main.rs with fn reverse + #[cfg(test)] + run cargo test + cargo run)
+  consistently fails with rc=1 for Devstral-Small-2507-4bit (REPS=3, all 3 reps, 0/3 pass).
+  Root cause: gateway returns HTTP 500 after the Write Cargo.toml tool result, when the model
+  tries to generate the next response (create src/main.rs). With ROZUM_SAMPLING_SEED=1234 the
+  sequence is fully deterministic. The model WOULD likely pass but never gets to generate
+  src/main.rs. To reproduce: `TASKS=test REPS=1 AGENTS=claude scripts/bench/agentic.sh`.
+  Debug angle: try `ROZUM_SAMPLING_SEED=` (unset) to check if a different seed avoids the 500;
+  also check gateway stderr for MLX errors during the second generation. If seed-sensitive, likely
+  a specific generated token sequence triggers an MLX error.
 
 ### ▶ deploy-ucc-web.sh gateway-binary gap (found 2026-07-03 while verifying the security fix below)
 
