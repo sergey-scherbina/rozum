@@ -1,5 +1,20 @@
 # Changelog
 
+## fix(ucc): deploy-ucc-web.sh now actually rebuilds the engine binary it runs
+Completed: 2026-07-03
+
+Found while verifying the `ucc-auth-status-leak` security fix (previous entry): after running
+`deploy-ucc-web.sh` and restarting the service, `/control/status` still leaked unauthenticated. Cause:
+`rozum-cli`'s `rozum` bin is a pure-std dispatcher — it `exec`s a sibling `rozum-gateway` binary at
+runtime rather than linking it in. The deploy script only built+copied the dispatcher; the real engine
+binary it execs fell through to a stale `~/.cargo/bin/rozum-gateway` (`cargo install`ed days earlier),
+so every control.rs change silently never reached the running service. Added a build+copy step for
+`rozum-gateway` next to the dispatcher (`resolve()` prefers a sibling over `PATH`, so this doesn't touch
+the separately-managed global copy `com.rozum.meeting-daemon` uses directly). Also hardened the
+`launchctl bootstrap` retry (bootout is async; an immediate bootstrap can race) and fixed the script's
+own smoke-check, which was asserting `/control/status` returns 200 unauthed — exactly the leak just
+fixed; now checks `/control/auth/status` instead.
+
 ## fix(ucc): security hardening — auth-gate the dashboard reads, close the tmux shell injection, enforce RBAC
 Completed: 2026-07-03
 

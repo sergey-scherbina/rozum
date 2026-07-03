@@ -17,15 +17,26 @@ set -euo pipefail
 SSC="${SSC:-/tmp/ssc-tk/bin/ssc}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SITE="$HOME/.rozum/ucc/site"
-BIN="$HOME/.rozum/bin/rozum-ctrl"
+BINDIR="$HOME/.rozum/bin"
+BIN="$BINDIR/rozum-ctrl"
 REPO="$(cd "$HERE/../.." && pwd)"
 
-mkdir -p "$SITE" "$(dirname "$BIN")"
+mkdir -p "$SITE" "$BINDIR"
 
 # 1) Build the thin dispatcher used by launchd. It execs rozum-gateway for control-serve.
 echo ">> building rozum dispatcher ..."
 ( cd "$REPO" && cargo build -p rozum-cli --bin rozum )
 cp "$REPO/target/debug/rozum" "$BIN"
+
+# 1b) Build the ACTUAL engine binary the dispatcher execs for every subcommand incl. control-serve
+# (`rozum-cli` is a pure-std shim with no dependency on `rozum-gateway` — rebuilding just the
+# dispatcher above does NOT rebuild this, so a control.rs change would silently keep serving the
+# OLD binary otherwise). `resolve()` in rozum-cli looks next to the dispatcher first, so dropping
+# it in the same bin dir takes effect without touching a global `cargo install`ed copy elsewhere
+# on PATH (which other rozum services may reference directly).
+echo ">> building rozum-gateway (the engine binary control-serve actually runs) ..."
+( cd "$REPO" && cargo build -p rozum --bin rozum-gateway --release )
+cp "$REPO/target/release/rozum-gateway" "$BINDIR/rozum-gateway"
 
 # Helper: compile a server-side .ssc file, serve briefly, capture HTML, shut down.
 emit_html() {
@@ -56,9 +67,17 @@ done
 UID_=$(id -u)
 plist="$HOME/Library/LaunchAgents/com.rozum.ucc-control.plist"
 launchctl bootout "gui/$UID_/com.rozum.ucc-control" 2>/dev/null || true
-launchctl bootstrap "gui/$UID_" "$plist"
+sleep 1  # bootout is async; bootstrapping immediately after can race and fail with "Input/output error"
+if ! launchctl bootstrap "gui/$UID_" "$plist"; then
+  echo ">> bootstrap failed, retrying once ..." >&2
+  sleep 1
+  launchctl bootstrap "gui/$UID_" "$plist"
+fi
 sleep 2
-curl -sf --max-time 4 http://127.0.0.1:8411/ -o /dev/null -w "spa+api :8411 -> %{http_code}\n"
-curl -sf --max-time 4 http://127.0.0.1:8411/control/status -o /dev/null -w "status  :8411 -> %{http_code}\n"
+curl -sf --max-time 4 http://127.0.0.1:8411/ -o /dev/null -w "spa+api        :8411 -> %{http_code}\n"
+# /control/status now requires auth (401 without a session is CORRECT, not a failure — see
+# ucc-auth-status-leak) — /control/auth/status is the genuinely-public route to smoke-check instead.
+curl -sf --max-time 4 http://127.0.0.1:8411/control/auth/status -o /dev/null -w "auth/status    :8411 -> %{http_code}\n"
+curl -s  --max-time 4 http://127.0.0.1:8411/control/status -o /dev/null -w "status (expect 401 unauthed) :8411 -> %{http_code}\n"
 echo ">> done. open https://busi.tail1174e2.ts.net:8448/"
 echo ">> (Tailscale: tailscale serve --bg --https=8448 http://127.0.0.1:8411)"

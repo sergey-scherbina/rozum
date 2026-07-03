@@ -1,5 +1,27 @@
 # Sprint
 
+### ▶ deploy-ucc-web.sh gateway-binary gap (found 2026-07-03 while verifying the security fix below)
+
+- [x] **ucc-deploy-script-stale-binary** — DONE. After landing `feature/ucc-security-hardening`
+  (control.rs) and running `deploy-ucc-web.sh`, `/control/status` STILL returned 200 unauthed on the
+  live `:8411` service. Root cause: `rozum-cli`'s `rozum` bin is a pure-std dispatcher with NO
+  dependency on `rozum-gateway` — it `exec`s a sibling `rozum-gateway` binary at runtime (resolved
+  next to itself, else `PATH`). The deploy script only ever built+copied the thin dispatcher
+  (`target/debug/rozum` → `~/.rozum/bin/rozum-ctrl`); the actual engine binary the dispatcher execs
+  fell through to a STALE `~/.cargo/bin/rozum-gateway` (`cargo install`ed 2026-07-01, untouched by
+  this script) — so every control.rs fix silently never reached the running service.
+  - Where: `clients/control/deploy-ucc-web.sh`.
+  - Result: added a step building `cargo build -p rozum --bin rozum-gateway --release` and copying
+    it to `~/.rozum/bin/rozum-gateway` (sibling to the dispatcher, so `resolve()` picks it up first
+    — doesn't touch the global `~/.cargo/bin/rozum-gateway` that `com.rozum.meeting-daemon` uses
+    directly and unrelatedly). Also: a `sleep 1` + one retry around `launchctl bootstrap` (bootout is
+    async and an immediate bootstrap intermittently fails "Input/output error" — hit this live), and
+    the final smoke-check now hits `/control/auth/status` (genuinely public) instead of
+    `/control/status` (401-unauthed is now the CORRECT result there, not a failure).
+  - Live-verified end to end: rebuilt `rozum-gateway --release`, copied next to the dispatcher,
+    restarted `com.rozum.ucc-control` — `/control/status`/`/chat/messages`/`/control/matrix/status`
+    now 401 unauthed; `/`, `/control/auth/status`, `/control/public/matrix` unaffected (still public).
+
 ### ▶ UCC control-center security hardening (owner 2026-07-03: about to link the tailnet-only
     control-center URL from busi's public "IT Consulting" site; asked for a security double-check
     first — a static review of `crates/rozum-gateway/src/control.rs` found it is NOT safe to expose
