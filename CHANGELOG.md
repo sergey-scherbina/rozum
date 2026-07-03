@@ -1,5 +1,22 @@
 # Changelog
 
+## fix(ucc): gate the first WebAuthn registration behind a one-shot bootstrap token
+Completed: 2026-07-03
+
+Last deferred finding from the security-hardening pass: `register_begin_route` required no invite
+while `users.is_empty()`, so whoever reached `/control/auth/register/begin`+`finish` first (right
+after a fresh deploy or a full credential wipe) became the permanent admin — no allowlist. Added
+`ensure_bootstrap_token`/`bootstrap_token_path`/`consume_bootstrap_token`: a random token generated
+once at startup, persisted (`0600`) and printed to the log with a ready `?token=` login URL, required
+as the `invite` field on that first registration only, then deleted (one-shot, like an invite with
+`max_uses: 1`). Restructured `register_finish_route` to branch on `users.is_empty()` first, since the
+bootstrap token isn't a real stored invite and would otherwise have been looked up via `check_invite`
+and silently no-op — caught this before shipping. `login.ssc`/`login.html` now read a `?token=` query
+param and forward it as `invite` on register/begin; regenerated `login.html` from source (also fixed
+a pre-existing drift where the committed HTML predated a text change in `login.ssc`). 95 tests green
+(1 new); live-smoke-tested with an isolated HOME/port: no token → 403, wrong token → 403, correct
+token → 200 + WebAuthn challenge, token file confirmed `0600`.
+
 ## fix(ucc): deploy-ucc-web.sh now actually rebuilds the engine binary it runs
 Completed: 2026-07-03
 

@@ -1,5 +1,36 @@
 # Sprint
 
+### ▶ UCC first-registration TOFU race (owner 2026-07-03: revisiting the deferred item from the
+    security-hardening pass above — "Да" to fixing it now)
+
+- [x] **ucc-tofu-bootstrap-token** — DONE. The last deferred finding from `ucc-tofu-bootstrap-note`:
+  `register_begin_route` requires no invite while `users.is_empty()` — whoever reaches
+  `/control/auth/register/begin`+`finish` first (right after a fresh deploy or a full credential
+  wipe) becomes the permanent admin, no allowlist. Fix: generate a random bootstrap token at
+  startup (mirrors busi's own phone-pairing "code shown on the computer" pattern), persist it to a
+  state file + print it to the log, and require it as the `invite` field on the FIRST registration
+  only (same code path `check_invite` already gates subsequent registrations with, so no new
+  concept). Consume/delete the token once the first admin is created — one-shot, like an invite
+  with `max_uses:1`. Update `login.ssc`/`login.html` to read a `?token=` query param and forward it
+  as `invite` on `register/begin` so the owner can actually supply it (open
+  `https://.../login?token=<token>`, token read from the log or state file).
+  - Where: `crates/rozum-gateway/src/control.rs` (`register_begin_route`, `register_finish_route`,
+    a new `ensure_bootstrap_token`/`bootstrap_token_path`/`consume_bootstrap_token` near
+    `check_invite`), `clients/control/login.ssc` + `login.html`.
+  - Done-when: a register/begin with no matching token while `users.is_empty()` is rejected 403;
+    with the correct token it proceeds; after the first admin exists, the token file is gone and
+    normal invite-gating (already correct) takes over unchanged.
+  - Result: `ensure_bootstrap_token`/`bootstrap_token_path`/`consume_bootstrap_token` added; startup
+    prints the token + a ready-to-use `?token=` login URL when `users.is_empty()`.
+    `register_begin_route` now requires it (`bootstrap_token_matches`, unit-tested); restructured
+    `register_finish_route`'s branching to key off `users.is_empty()` first so the bootstrap token
+    (carried in `inflight.invite_token`) isn't wrongly looked up as a real stored invite (which would
+    have silently no-op'd — caught before shipping). `login.ssc`/`login.html` read `?token=` and
+    forward it as `invite` on `register/begin`; regenerated `login.html` from source via
+    `ssc run login.ssc` (also fixed a pre-existing drift: the committed HTML predated a login.ssc
+    text change). 95 tests green (1 new); live-smoke-tested with an isolated HOME/port: no-token →
+    403, wrong-token → 403, correct-token → 200 + WebAuthn challenge; token file confirmed `0600`.
+
 ### ▶ matrix baseline — 5 DEFAULT_MODELS × claude × REPS=3 (operator 2026-07-03)
 
 - [ ] **matrix-baseline-2026-07-03** — run full DEFAULT_MODELS matrix (claude agent, REPS=3, all 6

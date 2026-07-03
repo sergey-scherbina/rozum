@@ -23,6 +23,12 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         ([(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], axum::Json(status().await))
     }
     ensure_rbac_initialized();
+    if load_users().is_empty() {
+        if let Some(token) = ensure_bootstrap_token() {
+            eprintln!("control server: no admin registered yet — first-registration bootstrap token: {token}");
+            eprintln!("control server: open the login page with ?token={token} appended to register, e.g. https://<host>/login?token={token}");
+        }
+    }
     // Public: SPA static files + auth ceremony + the deliberately-scoped anonymous view-token routes.
     // NOTE: `/control/status`, `/chat/*`, and the plain `/control/matrix/*` reads used to live here —
     // that was an unauthenticated full-dashboard data leak (workdirs, task prompts, chat transcripts,
@@ -1825,6 +1831,43 @@ fn rand_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
+fn bootstrap_token_path() -> Option<PathBuf> { state_dir().map(|d| d.join("ucc-bootstrap-token.txt")) }
+
+/// First-registration TOFU hardening (ucc-tofu-bootstrap-token): while `users.is_empty()`, whoever
+/// reaches `/control/auth/register/begin`+`finish` first would otherwise become the permanent admin
+/// with no allowlist. A random token is generated once (persisted + logged, mirrors busi's own
+/// "code shown on the computer" phone-pairing pattern) and required as the `invite` field on that
+/// FIRST registration only — the same `check_invite`-gated mechanism every later registration
+/// already uses, just bootstrapped before any admin/invite exists to issue one.
+fn ensure_bootstrap_token() -> Option<String> {
+    let path = bootstrap_token_path()?;
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let t = existing.trim().to_string();
+        if !t.is_empty() { return Some(t); }
+    }
+    let token = rand_token();
+    if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
+    std::fs::write(&path, &token).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Some(token)
+}
+
+/// One-shot: deleted once the first admin is created, like an invite with `max_uses: 1`.
+fn consume_bootstrap_token() {
+    if let Some(path) = bootstrap_token_path() { let _ = std::fs::remove_file(path); }
+}
+
+/// Constant-shape comparison isn't needed here (the token is single-use and file-based, not a
+/// timing oracle worth defending) — this just centralizes the "both present and equal" rule so it
+/// has one definition and one test, instead of being reconstructed inline at the call site.
+fn bootstrap_token_matches(provided: Option<&str>, expected: Option<&str>) -> bool {
+    provided.zip(expected).is_some_and(|(a, b)| a == b)
+}
+
 // ── Admin RBAC route handlers ──────────────────────────────────────────────────────────────────────
 
 async fn admin_users_route() -> axum::response::Response {
@@ -2250,6 +2293,13 @@ async fn register_begin_route(body: axum::body::Bytes) -> axum::response::Respon
             return json_err(axum::http::StatusCode::FORBIDDEN, "invite required");
         };
         if let Err(e) = check_invite(tok) { return json_err(axum::http::StatusCode::FORBIDDEN, e); }
+    } else {
+        // First-ever registration (ucc-tofu-bootstrap-token): gated by the bootstrap token instead
+        // of being open to whoever reaches the server first.
+        let expected = ensure_bootstrap_token();
+        if !bootstrap_token_matches(req.invite.as_deref(), expected.as_deref()) {
+            return json_err(axum::http::StatusCode::FORBIDDEN, "bootstrap token required");
+        }
     }
     let Some(w) = webauthn() else { return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "webauthn init failed"); };
     let display_name = req.display_name.clone().unwrap_or_else(|| "user".into());
@@ -2276,7 +2326,19 @@ async fn register_finish_route(axum::Json(reg): axum::Json<RegisterPublicKeyCred
             let mut c = load_creds(); c.push(pk); save_creds(&c);
             if load_roles().is_empty() { save_roles(&default_roles()); }
             let mut users = load_users();
-            if let Some(ref tok) = inflight.invite_token {
+            if users.is_empty() {
+                // First-ever registration — `register_begin_route` already validated the bootstrap
+                // token (ucc-tofu-bootstrap-token) before this ceremony was allowed to start.
+                // `inflight.invite_token` holds that bootstrap token, not a real stored invite, so
+                // it must NOT be looked up via `check_invite` below (that would silently no-op).
+                users.push(UccUser {
+                    id: Uuid::new_v4().to_string(), display_name: "Admin".into(),
+                    role_ids: vec!["admin".into()], passkey_ids: vec![cred_hex],
+                    created_at: crate::share::now_unix(), created_by: None,
+                });
+                save_users(&users);
+                consume_bootstrap_token();
+            } else if let Some(ref tok) = inflight.invite_token {
                 if let Ok(inv) = check_invite(tok) {
                     users.push(UccUser {
                         id: Uuid::new_v4().to_string(), display_name: inflight.display_name,
@@ -2289,14 +2351,6 @@ async fn register_finish_route(axum::Json(reg): axum::Json<RegisterPublicKeyCred
             } else if let Some(admin) = users.iter_mut().find(|u| u.role_ids.contains(&"admin".to_string())) {
                 // Adding a new device to the existing admin account.
                 admin.passkey_ids.push(cred_hex);
-                save_users(&users);
-            } else {
-                // Brand-new install: create the first admin user.
-                users.push(UccUser {
-                    id: Uuid::new_v4().to_string(), display_name: "Admin".into(),
-                    role_ids: vec!["admin".into()], passkey_ids: vec![cred_hex],
-                    created_at: crate::share::now_unix(), created_by: None,
-                });
                 save_users(&users);
             }
             axum::Json(serde_json::json!({ "ok": true })).into_response()
@@ -2686,5 +2740,17 @@ mod tests {
         assert!(user_has_perm("busi-sso", "matrix"));
         assert!(user_has_perm("busi-sso", "projects"));
         assert!(!user_has_perm("busi-sso", "admin"));
+    }
+
+    #[test]
+    fn bootstrap_token_matches_requires_exact_equal_and_both_present() {
+        // Regression guard for ucc-tofu-bootstrap-token: the first registration (no users, no
+        // invite system to consult yet) must require the bootstrap token, not silently pass when
+        // either side is absent.
+        assert!(bootstrap_token_matches(Some("abc"), Some("abc")));
+        assert!(!bootstrap_token_matches(Some("abc"), Some("xyz")));
+        assert!(!bootstrap_token_matches(None, Some("abc")));
+        assert!(!bootstrap_token_matches(Some("abc"), None));
+        assert!(!bootstrap_token_matches(None, None));
     }
 }
