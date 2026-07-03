@@ -539,22 +539,62 @@ async fn model_info_route(
     let source = spec.splitn(2, ':').next().unwrap_or("local").to_string();
     let name   = spec.splitn(2, ':').nth(1).unwrap_or(&spec).to_string();
     let path   = model.path.to_string_lossy().to_string();
-    // GiB helper is defined lower in the file; inline it here to avoid forward-ref issues.
     let gib = |b: u64| format!("{:.2}", b as f64 / 1_073_741_824.0);
     let size_gib = gib(model.size_bytes);
+
+    // Read config.json for architecture metadata.
+    let cfg_path = model.path.join("config.json");
+    let cfg: serde_json::Value = std::fs::read_to_string(&cfg_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let root = cfg.get("text_config").unwrap_or(&cfg);
+    let str_field = |v: &serde_json::Value, k: &str| {
+        v.get(k).and_then(|x| x.as_u64()).map(|n| n.to_string()).unwrap_or_default()
+    };
+    let model_type        = root.get("model_type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let max_ctx           = str_field(root, "max_position_embeddings");
+    let num_layers        = str_field(root, "num_hidden_layers");
+    let num_attn_heads    = str_field(root, "num_attention_heads");
+    let num_kv_heads      = str_field(root, "num_key_value_heads");
+    let hidden_size       = str_field(root, "hidden_size");
+    let quant_bits        = cfg.get("quantization").or_else(|| cfg.get("quantization_config"))
+        .and_then(|q| q.get("bits")).and_then(|b| b.as_u64())
+        .map(|b| format!("{b}-bit")).unwrap_or_default();
+    let n_experts         = str_field(root, "n_routed_experts");
+    let experts_per_tok   = str_field(root, "num_experts_per_tok");
+
+    // Catalog notes/display_name (RECOMMENDED + EXTRA).
+    let catalog_entry = rozum_models::models::RECOMMENDED.iter()
+        .chain(rozum_models::models::EXTRA.iter())
+        .find(|m| m.spec == spec);
+    let display_name  = catalog_entry.map(|m| m.display_name).unwrap_or("").to_string();
+    let notes         = catalog_entry.map(|m| m.notes).unwrap_or("").to_string();
+
     let resident = crate::share::read_active().and_then(|a| {
         if a.model == spec {
             Some(serde_json::json!({ "pid": a.pid, "port": a.port }))
         } else { None }
     });
     axum::Json(serde_json::json!({
-        "spec":       spec,
-        "source":     source,
-        "name":       name,
-        "size_gib":   size_gib,
-        "size_bytes": model.size_bytes,
-        "path":       path,
-        "resident":   resident,
+        "spec":           spec,
+        "display_name":   display_name,
+        "source":         source,
+        "name":           name,
+        "size_gib":       size_gib,
+        "size_bytes":     model.size_bytes,
+        "path":           path,
+        "model_type":     model_type,
+        "max_ctx":        max_ctx,
+        "num_layers":     num_layers,
+        "num_attn_heads": num_attn_heads,
+        "num_kv_heads":   num_kv_heads,
+        "hidden_size":    hidden_size,
+        "quant":          quant_bits,
+        "n_experts":      n_experts,
+        "experts_per_tok":experts_per_tok,
+        "notes":          notes,
+        "resident":       resident,
     })).into_response()
 }
 

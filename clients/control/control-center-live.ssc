@@ -323,27 +323,43 @@ val sessionsBody = vstack(gap = 16)(
 
 ## Model detail
 ```scalascript
-val detailName  = computedSignal(() => jsonValue(detailData()).get("name").asString)
-val detailSpec_ = computedSignal(() => jsonValue(detailData()).get("spec").asString)
-val detailSrc   = computedSignal(() => jsonValue(detailData()).get("source").asString)
-val detailGib   = computedSignal(() => jsonValue(detailData()).get("size_gib").asString + " GiB")
-val detailPath  = computedSignal(() => jsonValue(detailData()).get("path").asString)
-val detailPid   = computedSignal(() => jsonValue(detailData()).get("resident").get("pid").asString)
-val detailPort  = computedSignal(() => jsonValue(detailData()).get("resident").get("port").asString)
-val detailResidentTxt = computedSignal(() => {
-  val pid = detailPid()
-  if pid == "" || pid == "0" then "нет" else "да  (PID " + pid + ", порт " + detailPort() + ")"
-})
+val detailDisplayName = computedSignal(() => jsonValue(detailData()).get("display_name").asString)
+val detailName        = computedSignal(() => { val n = detailDisplayName(); if n != "" then n else jsonValue(detailData()).get("name").asString })
+val detailSpec_       = computedSignal(() => jsonValue(detailData()).get("spec").asString)
+val detailSrc         = computedSignal(() => jsonValue(detailData()).get("source").asString)
+val detailGib         = computedSignal(() => jsonValue(detailData()).get("size_gib").asString + " GiB")
+val detailPath        = computedSignal(() => jsonValue(detailData()).get("path").asString)
+val detailModelType   = computedSignal(() => jsonValue(detailData()).get("model_type").asString)
+val detailMaxCtx      = computedSignal(() => { val c = jsonValue(detailData()).get("max_ctx").asString; if c != "" then c + " tokens" else "" })
+val detailLayers      = computedSignal(() => jsonValue(detailData()).get("num_layers").asString)
+val detailAttnHeads   = computedSignal(() => jsonValue(detailData()).get("num_attn_heads").asString)
+val detailKvHeads     = computedSignal(() => jsonValue(detailData()).get("num_kv_heads").asString)
+val detailHidden      = computedSignal(() => jsonValue(detailData()).get("hidden_size").asString)
+val detailQuant       = computedSignal(() => jsonValue(detailData()).get("quant").asString)
+val detailExperts     = computedSignal(() => { val n = jsonValue(detailData()).get("n_experts").asString; val k = jsonValue(detailData()).get("experts_per_tok").asString; if n != "" then n + " experts, top-" + k else "" })
+val detailNotes       = computedSignal(() => jsonValue(detailData()).get("notes").asString)
+val detailPid         = computedSignal(() => jsonValue(detailData()).get("resident").get("pid").asString)
+val detailPort        = computedSignal(() => jsonValue(detailData()).get("resident").get("port").asString)
+val detailResidentTxt = computedSignal(() => { val pid = detailPid(); if pid == "" || pid == "0" then "нет" else "да  (PID " + pid + ", порт " + detailPort() + ")" })
 
 val detailBody = vstack(gap = 16)(
   hstack(gap = 10)(link("#/", "← Модели"), actionButton(incSignal(detailTick), "↻")),
   cardWithHeader(signalText_(detailName))(
     vstack(gap = 8)(
-      hstack(gap = 8)(text("Spec:"),     signalText_(detailSpec_)),
-      hstack(gap = 8)(text("Источник:"), signalText_(detailSrc)),
-      hstack(gap = 8)(text("Размер:"),   signalText_(detailGib)),
-      hstack(gap = 8)(text("В памяти:"), signalText_(detailResidentTxt)),
-      hstack(gap = 8)(text("Путь:"),     signalText_(detailPath))
+      hstack(gap = 8)(text("Spec:"),        signalText_(detailSpec_)),
+      hstack(gap = 8)(text("Источник:"),    signalText_(detailSrc)),
+      hstack(gap = 8)(text("Архитектура:"), signalText_(detailModelType)),
+      hstack(gap = 8)(text("Квантизация:"), signalText_(detailQuant)),
+      hstack(gap = 8)(text("Контекст:"),    signalText_(detailMaxCtx)),
+      hstack(gap = 8)(text("Слои:"),        signalText_(detailLayers)),
+      hstack(gap = 8)(text("Attn heads:"),  signalText_(detailAttnHeads)),
+      hstack(gap = 8)(text("KV heads:"),    signalText_(detailKvHeads)),
+      hstack(gap = 8)(text("Hidden size:"), signalText_(detailHidden)),
+      hstack(gap = 8)(text("MoE:"),         signalText_(detailExperts)),
+      hstack(gap = 8)(text("Размер:"),      signalText_(detailGib)),
+      hstack(gap = 8)(text("В памяти:"),    signalText_(detailResidentTxt)),
+      hstack(gap = 8)(text("Путь:"),        signalText_(detailPath)),
+      hstack(gap = 8)(text("Примечание:"),  signalText_(detailNotes))
     )
   )
 )
