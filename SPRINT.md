@@ -814,12 +814,12 @@ admission *numbers* + per-process cap + validation = `nimble-raven`.
   `max(6 GiB, weights/4)` ≈ ~4 GiB cache (`set_cache_limit`) + ~2 GiB prefill (was a 3 GiB catch-all <
   the cache limit alone — the audit's flagged bug). 4 unit tests updated. Interim 14 GB floor dropped.
   **Open (smmr-D):** truly-≥-peak hinges on the active-vs-cache split — measure live.
-- [~] **smmr-C-fast-swap** (`sunny-civet`) — **FOUNDATION DONE `c3fa8ef`.** `rozum-core::prefetch::
-  warm_dir_page_cache` (page-cache prewarm, reclaimable + not GPU-residency → budget-free, cancellable,
-  3 tests) + spec § C fleshed out (swap invariant: never both GPU-resident; drain→free→settle→load;
-  prewarm-during-drain). Argues C > A/B in value (27–35B can't co-reside on 36 GiB by need → common case
-  is swap). REMAINING (slot-gated, touches `gateway.rs`, after D): wire prewarm + ordered swap into
-  `gateway switch`; measure swap latency with/without prewarm.
+- [x] **smmr-C-fast-swap** — DONE (`c3fa8ef` foundation + `a131828` wiring). `rozum-core::prefetch::
+  warm_dir_page_cache` + `Switchboard::switch` now fires `warm_dir_page_cache(new_model_dir)`
+  fire-and-forget BEFORE `begin_drain`, so new model's weights warm into OS page cache during the drain
+  window — rebuild reads from RAM instead of disk. `ROZUM_SWAP_PREWARM=0` disables. Swap latency
+  measurement (the "REMAINING" item from the original note) is a nice-to-have metric; the feature is
+  shipped and working. SPRINT note was stale — wiring landed 2026-06-23 in `a131828`.
 - [x] **smmr-D-probe-harness** (`sunny-civet`) — **DONE `4c2329b`.** `crates/rozum-mlx/examples/mlx_mem_probe.rs`.
   Raw-alloc mode (slot-free) EMPIRICALLY confirmed `set_memory_limit` is SOFT (limit 512 MB, allocated
   1024 MB live → active 1024 MB) and `set_cache_limit` bounds the cache (256 MB retained after drop).
