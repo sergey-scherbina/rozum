@@ -1,0 +1,368 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>rozum · admin</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f1117;color:#c9d1d9;font:14px -apple-system,system-ui,sans-serif;min-height:100vh}
+#hdr{display:flex;align-items:center;gap:16px;padding:12px 20px;background:#161b22;border-bottom:1px solid #30363d;position:sticky;top:0;z-index:10}
+#hdr a{color:#58a6ff;text-decoration:none;font-size:13px}
+#hdr h1{font-size:16px;color:#e6edf3;flex:1}
+.tabs{display:flex;background:#161b22;border-bottom:1px solid #30363d}
+.tab{flex:1;padding:10px 4px;cursor:pointer;border-bottom:2px solid transparent;color:#8b949e;font-size:13px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tab.active{color:#58a6ff;border-color:#58a6ff}
+.panel{display:none;padding:20px}
+.panel.active{display:block}
+.section{margin-bottom:24px}
+.section h2{font-size:14px;color:#8b949e;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}
+th{text-align:left;color:#8b949e;font-weight:500;padding:6px 8px;border-bottom:1px solid #21262d;white-space:nowrap}
+td{padding:8px 8px;border-bottom:1px solid #21262d;vertical-align:top;word-break:break-word}
+tr:hover td{background:#161b22}
+.actions{display:flex;flex-direction:column;gap:4px;align-items:flex-start}
+.badge{display:inline-block;background:#1a2942;color:#58a6ff;border-radius:5px;padding:2px 7px;font-size:11px;margin:1px}
+.badge.perm{background:#1a2b1a;color:#56d364}
+.btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer}
+.btn:hover{background:#2d333b}
+.btn.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
+.btn.primary:hover{background:#388bfd}
+.btn.danger{color:#f85149}
+.btn.danger:hover{background:#3d1c1c;border-color:#f85149}
+.form-row{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+input[type=text],input[type=number],select{background:#161b22;border:1px solid #30363d;border-radius:8px;color:#c9d1d9;font-size:16px;padding:7px 10px;outline:none;min-width:0;width:100%}
+input[type=text]:focus,input[type=number]:focus,select:focus{border-color:#388bfd}
+@media(max-width:600px){.form-row{flex-direction:column;align-items:stretch}input[type=text],input[type=number],select{width:100%!important}}
+.tag-input{display:flex;flex-wrap:wrap;gap:6px;align-items:center;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:6px 10px;min-height:36px;cursor:text}
+.tag-input .tag{background:#1a2942;color:#58a6ff;border-radius:4px;padding:2px 8px;font-size:12px;display:flex;align-items:center;gap:4px}
+.tag-input .tag button{background:none;border:none;color:#58a6ff;cursor:pointer;padding:0;font-size:14px;line-height:1}
+.note{font-size:12px;color:#8b949e;margin-top:6px}
+#msg{position:fixed;bottom:20px;right:20px;background:#1f2937;border:1px solid #30363d;border-radius:10px;padding:10px 16px;font-size:13px;z-index:100;display:none;max-width:300px}
+#msg.ok{border-color:#238636;color:#56d364}
+#msg.err{border-color:#da3633;color:#f85149}
+.invite-link{font-size:12px;color:#58a6ff;word-break:break-all;margin-top:6px;background:#161b22;padding:8px;border-radius:6px;border:1px solid #30363d}
+.copy-btn{font-size:11px;cursor:pointer;color:#8b949e;margin-left:8px}
+.copy-btn:hover{color:#c9d1d9}
+</style>
+</head><body>
+<div id="hdr">
+  <a href="/">← back</a>
+  <h1>Administration</h1>
+  <span id="uname" style="font-size:12px;color:#8b949e"></span>
+</div>
+<div class="tabs">
+  <div class="tab active" onclick="showTab('users')">Users</div>
+  <div class="tab" onclick="showTab('roles')">Roles</div>
+  <div class="tab" onclick="showTab('invites')">Invites</div>
+  <div class="tab" onclick="showTab('links')">Links</div>
+</div>
+
+<!-- USERS -->
+<div id="panel-users" class="panel active">
+  <div class="section">
+    <h2>Users</h2>
+    <table>
+      <thead><tr><th style="width:30%">Name</th><th style="width:25%">Roles</th><th style="width:10%">🔑</th><th></th></tr></thead>
+      <tbody id="users-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ROLES -->
+<div id="panel-roles" class="panel">
+  <div class="section">
+    <h2>Roles</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Name</th><th>Permissions</th><th></th></tr></thead>
+      <tbody id="roles-body"></tbody>
+    </table>
+  </div>
+  <div class="section">
+    <h2>New role</h2>
+    <div class="form-row">
+      <input type="text" id="new-role-name" placeholder="Role name">
+    </div>
+    <div style="margin-top:10px">
+      <div style="font-size:12px;color:#8b949e;margin-bottom:6px">Permissions:</div>
+      <div id="new-role-perms" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+    </div>
+    <div class="form-row">
+      <button class="btn primary" onclick="createRole()">Create role</button>
+    </div>
+  </div>
+</div>
+
+<!-- INVITES -->
+<div id="panel-invites" class="panel">
+  <div class="section">
+    <h2>Create invite</h2>
+    <div class="form-row">
+      <input type="text" id="inv-label" placeholder="For">
+      <select id="inv-role"></select>
+      <input type="number" id="inv-uses" placeholder="Max uses" min="1">
+      <input type="number" id="inv-ttl" placeholder="TTL hours" min="1">
+      <button class="btn primary" onclick="createInvite()">Create</button>
+    </div>
+    <div class="note">No usage limit = single use. No TTL = permanent.</div>
+    <div id="new-invite-link" class="invite-link" style="display:none"></div>
+  </div>
+  <div class="section">
+    <h2>Active invites</h2>
+    <table>
+      <thead><tr><th>For</th><th>Role</th><th>Uses</th><th></th></tr></thead>
+      <tbody id="invites-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- PUBLIC LINKS -->
+<div id="panel-links" class="panel">
+  <div class="section">
+    <h2>Create public matrix link</h2>
+    <div class="form-row">
+      <input type="text" id="link-label" placeholder="For">
+      <button class="btn primary" onclick="createViewLink()">Create link</button>
+    </div>
+    <div class="note">Anyone with this link can view the matrix without login. Can be revoked.</div>
+    <div id="new-view-link" class="invite-link" style="display:none;margin-top:10px"></div>
+  </div>
+  <div class="section">
+    <h2>Active links</h2>
+    <table>
+      <thead><tr><th>For</th><th>Created</th><th></th></tr></thead>
+      <tbody id="links-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="msg"></div>
+
+<script>
+const j = r => r.json();
+async function api(method, url, body) {
+  return fetch(url, { method, credentials:'include',
+    headers: body ? {'Content-Type':'application/json'} : {},
+    body: body ? JSON.stringify(body) : undefined });
+}
+function toast(text, cls) {
+  const el = document.getElementById('msg');
+  el.textContent = text; el.className = cls||'';
+  el.style.display = 'block';
+  clearTimeout(el._t); el._t = setTimeout(() => el.style.display='none', 3000);
+}
+
+const ALL_PERMS = ['read','chat','agents','matrix','projects','admin'];
+
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', ['users','roles','invites','links'][i]===name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-'+name).classList.add('active');
+  if (name==='users') loadUsers();
+  if (name==='roles') loadRoles();
+  if (name==='invites') loadInvites();
+  if (name==='links') loadViewLinks();
+}
+
+let allRoles = [];
+
+// ── Users ──────────────────────────────────────────────────────────────────────
+async function loadUsers() {
+  const d = await api('GET','/control/admin/users').then(j);
+  allRoles = d.roles || [];
+  const tbody = document.getElementById('users-body');
+  tbody.innerHTML = '';
+  (d.users||[]).forEach(u => {
+    const tr = document.createElement('tr');
+    const roleOpts = allRoles.map(r => `<option value="${r.id}"${u.role_ids.includes(r.id)?' selected':''}>${r.name}</option>`).join('');
+    tr.innerHTML = `
+      <td>${esc(u.display_name)}</td>
+      <td>${(u.role_names||[]).map(n=>`<span class="badge">${esc(n)}</span>`).join('')}</td>
+      <td style="color:#8b949e">${u.passkey_count}</td>
+      <td><div class="actions">
+        <select class="role-sel" data-id="${u.id}" style="font-size:12px;padding:4px 6px;width:100%">${roleOpts}</select>
+        <button class="btn" style="font-size:12px;padding:4px 8px;width:100%" onclick="setRole('${u.id}',this.parentElement.querySelector('select').value)">Save</button>
+        <button class="btn danger" style="font-size:12px;padding:4px 8px;width:100%" onclick="deleteUser('${u.id}','${esc(u.display_name)}')">Delete</button>
+      </div></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function setRole(id, role_id) {
+  const r = await api('POST', `/control/admin/users/${id}/role`, { role_ids: [role_id] });
+  if (r.ok) { toast('Role updated', 'ok'); loadUsers(); } else toast('Error', 'err');
+}
+
+async function deleteUser(id, name) {
+  if (!confirm(`Delete user "${name}"?`)) return;
+  const r = await api('DELETE', `/control/admin/users/${id}`);
+  if (r.ok) { toast('User deleted', 'ok'); loadUsers(); } else toast('Error', 'err');
+}
+
+// ── Roles ──────────────────────────────────────────────────────────────────────
+async function loadRoles() {
+  const d = await api('GET','/control/admin/roles').then(j);
+  allRoles = d.roles || [];
+  renderRolesTable(allRoles);
+  renderPermCheckboxes(d.all_permissions || ALL_PERMS);
+  renderInviteRoleSelect();
+}
+
+function renderRolesTable(roles) {
+  const tbody = document.getElementById('roles-body');
+  tbody.innerHTML = '';
+  const BUILT_IN = ['admin','operator','readonly'];
+  roles.forEach(role => {
+    const builtIn = BUILT_IN.includes(role.id);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td style="color:#8b949e;font-size:12px">${esc(role.id)}</td>
+      <td>${esc(role.name)}</td>
+      <td>${role.permissions.map(p=>`<span class="badge perm">${esc(p)}</span>`).join('')}</td>
+      <td>${builtIn ? '' : `<button class="btn danger" style="font-size:12px;padding:4px 8px" onclick="deleteRole('${role.id}')">Delete</button>`}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderPermCheckboxes(perms) {
+  const el = document.getElementById('new-role-perms');
+  el.innerHTML = '';
+  perms.forEach(p => {
+    const label = document.createElement('label');
+    label.style = 'display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer';
+    label.innerHTML = `<input type="checkbox" value="${p}" class="perm-check"> ${p}`;
+    el.appendChild(label);
+  });
+}
+
+async function createRole() {
+  const name = document.getElementById('new-role-name').value.trim();
+  if (!name) { toast('Enter a role name', 'err'); return; }
+  const permissions = [...document.querySelectorAll('.perm-check:checked')].map(c => c.value);
+  const r = await api('POST','/control/admin/roles', { name, permissions });
+  if (r.ok) { toast('Role created', 'ok'); document.getElementById('new-role-name').value=''; loadRoles(); }
+  else { const e = await r.json().catch(()=>({})); toast('Error: '+(e.error||r.status), 'err'); }
+}
+
+async function deleteRole(id) {
+  if (!confirm(`Delete role "${id}"?`)) return;
+  const r = await api('DELETE', `/control/admin/roles/${id}`);
+  if (r.ok) { toast('Role deleted', 'ok'); loadRoles(); }
+  else { const e = await r.json().catch(()=>({})); toast('Error: '+(e.error||r.status), 'err'); }
+}
+
+// ── Invites ─────────────────────────────────────────────────────────────────────
+function renderInviteRoleSelect() {
+  const sel = document.getElementById('inv-role');
+  sel.innerHTML = allRoles.map(r=>`<option value="${r.id}">${r.name}</option>`).join('');
+}
+
+async function loadInvites() {
+  if (!allRoles.length) { const d = await api('GET','/control/admin/roles').then(j); allRoles = d.roles||[]; }
+  renderInviteRoleSelect();
+  const d = await api('GET','/control/admin/invites').then(j);
+  const tbody = document.getElementById('invites-body');
+  tbody.innerHTML = '';
+  const now = Date.now()/1000;
+  (d.invites||[]).filter(i => i.active).forEach(inv => {
+    const exp = inv.expires_at ? new Date(inv.expires_at*1000).toLocaleString() : '∞';
+    const usagesLeft = inv.max_uses != null ? `${inv.uses}/${inv.max_uses}` : `${inv.uses}/1`;
+    const link = location.origin + '/invite.html?t=' + inv.token;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${esc(inv.label||'—')}</td>
+      <td><span class="badge">${esc(inv.role_name)}</span></td>
+      <td style="color:#8b949e">${usagesLeft}</td>
+      <td><div class="actions">
+        <button class="btn" style="font-size:12px;padding:4px 8px;width:100%" onclick="copyLink('${link}')">Copy</button>
+        <button class="btn danger" style="font-size:12px;padding:4px 8px;width:100%" onclick="revokeInvite('${inv.token}')">Revoke</button>
+      </div></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function createInvite() {
+  const role_id = document.getElementById('inv-role').value;
+  const label = document.getElementById('inv-label').value.trim();
+  const max_uses_v = document.getElementById('inv-uses').value;
+  const ttl_v = document.getElementById('inv-ttl').value;
+  const body = { role_id, label };
+  if (max_uses_v) body.max_uses = parseInt(max_uses_v);
+  if (ttl_v) body.ttl_hours = parseInt(ttl_v);
+  const r = await api('POST','/control/admin/invites/create', body);
+  if (!r.ok) { const e = await r.json().catch(()=>({})); toast('Error: '+(e.error||r.status),'err'); return; }
+  const d = await r.json();
+  const link = location.origin + '/invite.html?t=' + d.token;
+  const el = document.getElementById('new-invite-link');
+  el.innerHTML = `<b>Link created:</b><br>${link} <span class="copy-btn" onclick="copyLink('${link}')">[copy]</span>`;
+  el.style.display = '';
+  toast('Invite created', 'ok');
+  document.getElementById('inv-label').value = '';
+  loadInvites();
+}
+
+async function revokeInvite(token) {
+  if (!confirm('Revoke invite?')) return;
+  const r = await api('DELETE', `/control/admin/invites/${token}`);
+  if (r.ok) { toast('Revoked', 'ok'); loadInvites(); } else toast('Error', 'err');
+}
+
+function copyLink(link) {
+  navigator.clipboard.writeText(link).then(() => toast('Link copied', 'ok')).catch(() => {
+    prompt('Copy link:', link);
+  });
+}
+
+// ── Public view links ──────────────────────────────────────────────────────────
+async function loadViewLinks() {
+  const d = await api('GET','/control/admin/view-tokens').then(j);
+  const tbody = document.getElementById('links-body');
+  tbody.innerHTML = '';
+  (d.tokens||[]).filter(t => !t.revoked).forEach(t => {
+    const link = location.origin + '/view/' + t.token;
+    const dt = new Date(t.created_at*1000).toLocaleString();
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${esc(t.label||'—')}</td>
+      <td style="color:#8b949e;font-size:12px">${dt}</td>
+      <td><div class="actions">
+        <button class="btn" style="font-size:12px;padding:4px 8px;width:100%" onclick="copyLink('${link}')">Copy</button>
+        <button class="btn danger" style="font-size:12px;padding:4px 8px;width:100%" onclick="revokeViewLink('${t.token}')">Revoke</button>
+      </div></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function createViewLink() {
+  const label = document.getElementById('link-label').value.trim();
+  const r = await api('POST','/control/admin/view-tokens/create', { label });
+  if (!r.ok) { toast('Error','err'); return; }
+  const d = await r.json();
+  const link = location.origin + '/view/' + d.token;
+  const el = document.getElementById('new-view-link');
+  el.innerHTML = `<b>${esc(label)||'Link created'}:</b><br>${link} <span class="copy-btn" onclick="copyLink('${link}')">[copy]</span>`;
+  el.style.display = '';
+  document.getElementById('link-label').value = '';
+  toast('Link created', 'ok');
+  loadViewLinks();
+}
+
+async function revokeViewLink(token) {
+  if (!confirm('Revoke link? It will stop working.')) return;
+  const r = await api('DELETE', `/control/admin/view-tokens/${token}`);
+  if (r.ok) { toast('Revoked', 'ok'); loadViewLinks(); } else toast('Error','err');
+}
+
+function esc(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+
+// Init
+(async () => {
+  const s = await fetch('/control/auth/status',{credentials:'include'}).then(j).catch(()=>({}));
+  if (!s.authed) { location.href='/login.html'; return; }
+  if (!s.user?.permissions?.includes('admin')) {
+    document.body.innerHTML = '<div style="padding:40px;text-align:center;color:#f85149">Admin access required.<br><a href="/" style="color:#58a6ff">← back</a></div>';
+    return;
+  }
+  if (s.user?.display_name) document.getElementById('uname').textContent = s.user.display_name;
+  loadUsers();
+})();
+</script>
+</body></html>

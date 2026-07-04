@@ -1,0 +1,517 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>rozum · matrix</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f1117;color:#c9d1d9;font:13px 'SF Mono','Fira Code',monospace;min-height:100vh}
+#hdr{padding:14px 20px;background:#161b22;border-bottom:1px solid #30363d;display:flex;align-items:center;gap:12px}
+#hdr h1{font-size:15px;color:#e6edf3;font-family:-apple-system,system-ui,sans-serif}
+#hdr .meta{font-size:12px;color:#8b949e;margin-left:auto}
+.tabs{display:flex;background:#161b22;border-bottom:1px solid #30363d}
+.tab{flex:1;padding:9px 4px;text-align:center;cursor:pointer;border-bottom:2px solid transparent;color:#8b949e;font-size:13px;font-family:-apple-system,system-ui,sans-serif}
+.tab.active{color:#58a6ff;border-color:#58a6ff}
+.panel{display:none}
+.panel.active{display:block}
+#ptr{position:fixed;top:0;left:0;right:0;z-index:200;display:flex;justify-content:center;align-items:center;height:0;overflow:hidden;background:#0f1117;transition:height .2s}
+#ptr .s{width:20px;height:20px;border:2px solid #30363d;border-top-color:#58a6ff;border-radius:50%}
+#ptr.pulling .s{animation:none;transform:rotate(var(--deg,0deg))}
+#ptr.loading .s{animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#main{padding:16px 20px;overflow-x:auto}
+.summary{display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.stat{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:10px 14px;text-align:center;flex:1;min-width:60px}
+.stat .n{font-size:24px;font-weight:700;color:#e6edf3}
+.stat .l{font-size:11px;color:#8b949e;margin-top:2px}
+.stat.green .n{color:#56d364}
+.stat.red .n{color:#f85149}
+table{border-collapse:collapse;width:100%;min-width:400px}
+th{text-align:left;color:#8b949e;font-size:11px;font-weight:500;padding:6px 8px;border-bottom:1px solid #21262d;white-space:nowrap}
+th.task{text-align:center}
+td{padding:5px 8px;border-bottom:1px solid #161b22;vertical-align:middle}
+td.model{color:#79c0ff;white-space:normal;word-break:break-word;max-width:160px;font-size:11px}
+td.agent{color:#8b949e;font-size:11px}
+td.cell{text-align:center;cursor:pointer;border-radius:6px;padding:5px 4px}
+td.cell:hover{background:#21262d}
+.pass{font-size:16px;display:block;line-height:1}
+.cell-time{font-size:10px;color:#8b949e;margin-top:2px;display:block}
+.stamp{font-size:11px;color:#8b949e;margin-bottom:12px}
+.model-stats{margin-top:20px;border-top:1px solid #21262d;padding-top:16px}
+.model-stats h3{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;font-family:-apple-system,system-ui,sans-serif}
+.model-stats table{min-width:0}
+.model-stats td,.model-stats th{padding:5px 8px;font-size:12px}
+.bar-inline{display:inline-block;height:6px;border-radius:3px;background:#1f6feb;vertical-align:middle;margin-left:6px}
+/* overlay */
+#overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;overflow-y:auto;padding:20px}
+#overlay.show{display:flex;align-items:flex-start;justify-content:center}
+.overlay-card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:24px;max-width:680px;width:100%;margin:auto}
+.overlay-card h2{font-size:16px;color:#e6edf3;margin-bottom:12px;font-family:-apple-system,system-ui,sans-serif}
+.close-btn{float:right;background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer;line-height:1;margin-top:-4px}
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:12px 0}
+@media(max-width:480px){.metrics{grid-template-columns:repeat(2,1fr)}}
+.metric{background:#0f1117;border-radius:8px;padding:8px 10px}
+.metric .v{font-size:15px;font-weight:600;color:#e6edf3}
+.metric .k{font-size:10px;color:#8b949e;margin-top:2px}
+.prompt-box{background:#0f1117;border-radius:8px;padding:12px;font-size:12px;line-height:1.6;color:#c9d1d9;margin:10px 0;white-space:pre-wrap;word-break:break-word}
+.verify-box{background:#0d1f0d;border:1px solid #1a4a1a;border-radius:8px;padding:10px;font-size:12px;color:#56d364;margin:10px 0;white-space:pre-wrap}
+.verify-fail{background:#1f0d0d;border-color:#4a1a1a;color:#f85149}
+.section-label{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.05em;margin:12px 0 6px}
+#err{color:#f85149;padding:40px;text-align:center}
+/* charts tab */
+#charts-panel{padding:16px 12px}
+.chart-card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:16px;margin-bottom:16px}
+.chart-card h3{font-size:13px;color:#e6edf3;margin-bottom:12px;font-family:-apple-system,system-ui,sans-serif}
+.chart-wrap{position:relative;width:100%}
+</style>
+</head><body>
+<div id="ptr"><div class="s"></div></div>
+<div id="hdr">
+  <h1>📊 rozum matrix</h1>
+  <div class="meta" id="meta-line">loading…</div>
+</div>
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('matrix')" data-i18n="tab_matrix">Matrix</div>
+  <div class="tab" onclick="switchTab('charts')" data-i18n="tab_charts">Charts</div>
+</div>
+<!-- Live run banner (visible to everyone when matrix is running) -->
+<div id="live-banner" style="display:none;background:#0d1a0d;border-bottom:1px solid #238636;padding:10px 16px">
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+    <span id="lb-badge" style="font-size:12px;font-weight:600;color:#56d364">▶ running</span>
+    <span id="lb-progress" style="font-size:12px;color:#8b949e"></span>
+    <span id="lb-elapsed" style="font-size:12px;color:#8b949e"></span>
+    <span id="lb-ram" style="font-size:12px;color:#8b949e"></span>
+  </div>
+  <div style="background:#21262d;border-radius:3px;height:4px;overflow:hidden">
+    <div id="lb-bar" style="height:100%;background:#238636;border-radius:3px;transition:width .5s;width:0%"></div>
+  </div>
+  <div id="lb-hint" style="font-size:10px;color:#6e7681;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
+</div>
+
+<div id="panel-matrix" class="panel active">
+  <div id="main"><div id="err" style="display:none"></div><div id="content"></div></div>
+</div>
+<div id="panel-charts" class="panel">
+  <div id="charts-panel">
+<div class="chart-card"><h3 data-i18n="chart_time">Avg time (sec) by task</h3><div class="chart-wrap"><canvas id="chart-time"></canvas></div></div>
+    <div class="chart-card"><h3 data-i18n="chart_scatter">Model RAM vs pass rate</h3><div class="chart-wrap" style="height:260px"><canvas id="chart-scatter"></canvas></div></div>
+  </div>
+</div>
+
+<!-- Cell detail overlay -->
+<div id="overlay" onclick="if(event.target===this)closeOverlay()">
+  <div class="overlay-card">
+    <button class="close-btn" onclick="closeOverlay()">×</button>
+    <h2 id="ov-title"></h2>
+    <div class="metrics" id="ov-metrics"></div>
+    <div id="ov-prompt-wrap" style="display:none">
+      <div class="section-label" data-i18n="section_task">Task</div>
+      <div class="prompt-box" id="ov-prompt"></div>
+    </div>
+    <div id="ov-verify-wrap" style="display:none">
+      <div class="section-label" data-i18n="section_verify">Verify output</div>
+      <div class="verify-box" id="ov-verify"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+const _VLG = (localStorage.getItem('rozum_lang') || navigator.language.split('-')[0] || 'en');
+const _VS = {};
+_VS.en = {
+  tab_matrix:'Matrix', tab_charts:'Charts', loading:'loading…',
+  invalid_token:'This link is invalid or has been revoked.',
+  err_status:'Error ', err_network:'Network error: ',
+  no_data:'No run data available.',
+  stat_total:'tasks', stat_passed:'passed', stat_failed:'failed', stat_rate:'success',
+  run_label:'Run:', col_model:'Model', col_agent:'Agent',
+  model_compare:'Model comparison', col_avg_time:'Avg time',
+  chart_time:'Avg time (sec) by task', chart_scatter:'Model RAM vs pass rate',
+  chart_x_ram:'Model RAM (GB)',
+  section_task:'Task', section_verify:'Verify output',
+  cell_pass:'pass', cell_yes:'✅ yes', cell_no:'❌ no',
+  cell_time:'time', cell_turns:'turns', cell_tools:'tools',
+  cell_ram_m:'model RAM', cell_ram_a:'agent RAM', cell_cpu:'CPU peak', cell_diff:'difficulty',
+  live_running:'▶ running', live_paused:'⏸ paused', live_done:'✅ done',
+  live_tasks:'tasks', live_free:'💾 free', el_h:'h', el_m:'m', el_s:'s',
+};
+_VS.ru = { ..._VS.en,
+  tab_matrix:'Матрица', tab_charts:'Графики', loading:'загрузка…',
+  invalid_token:'Эта ссылка недействительна или отозвана.',
+  err_status:'Ошибка ', err_network:'Ошибка сети: ',
+  no_data:'Нет данных о запусках.',
+  stat_total:'задач', stat_passed:'прошли', stat_failed:'упали', stat_rate:'успех',
+  run_label:'Прогон:', col_model:'Модель', col_agent:'Агент',
+  model_compare:'Сравнение моделей', col_avg_time:'Ср. время',
+  chart_time:'Среднее время (сек) по задачам', chart_scatter:'RAM модели vs успешность',
+  chart_x_ram:'RAM модели (GB)',
+  section_task:'Задача', section_verify:'Результат верификации',
+  cell_pass:'pass', cell_yes:'✅ да', cell_no:'❌ нет',
+  cell_time:'время', cell_turns:'ходов', cell_tools:'инструм.',
+  cell_ram_m:'RAM модели', cell_ram_a:'RAM агента', cell_cpu:'CPU пик', cell_diff:'сложность',
+  live_running:'▶ запущено', live_paused:'⏸ пауза', live_done:'✅ завершено',
+  live_tasks:'задач', live_free:'💾 свободно', el_h:'ч', el_m:'м', el_s:'с',
+};
+_VS.uk = { ..._VS.en,
+  tab_matrix:'Матриця', tab_charts:'Графіки', loading:'завантаження…',
+  invalid_token:'Це посилання недійсне або відкликане.',
+  err_status:'Помилка ', err_network:'Помилка мережі: ',
+  no_data:'Немає даних про запуски.',
+  stat_total:'завдань', stat_passed:'пройшли', stat_failed:'провалились', stat_rate:'успіх',
+  run_label:'Прогін:', col_model:'Модель', col_agent:'Агент',
+  model_compare:'Порівняння моделей', col_avg_time:'Сер. час',
+  chart_time:'Середній час (сек) по задачах', chart_scatter:'RAM моделі vs успішність',
+  chart_x_ram:'RAM моделі (GB)',
+  section_task:'Завдання', section_verify:'Результат верифікації',
+  cell_pass:'pass', cell_yes:'✅ так', cell_no:'❌ ні',
+  cell_time:'час', cell_turns:'ходів', cell_tools:'інстр.',
+  cell_ram_m:'RAM моделі', cell_ram_a:'RAM агента', cell_cpu:'CPU пік', cell_diff:'складність',
+  live_running:'▶ запущено', live_paused:'⏸ пауза', live_done:'✅ завершено',
+  live_tasks:'завдань', live_free:'💾 вільно', el_h:'г', el_m:'хв', el_s:'с',
+};
+let _vlang = _VS[_VLG] ? _VLG : 'en';
+document.documentElement.lang = _vlang;
+function t(k) { return (_VS[_vlang]||_VS.en)[k] ?? k; }
+function _applyI18n() {
+  document.querySelectorAll('[data-i18n]').forEach(function(el){ el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('.rl-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.lang===_vlang); });
+}
+function _setLang(l) {
+  localStorage.setItem('rozum_lang', l);
+  _vlang = _VS[l] ? l : 'en';
+  document.documentElement.lang = _vlang;
+  _applyI18n();
+}
+(function(){
+  var css = '#rozum-lang{position:fixed;bottom:16px;right:16px;display:flex;gap:1px;z-index:999;box-shadow:0 2px 8px rgba(0,0,0,.5)}.rl-btn{background:#21262d;color:#6e7681;border:1px solid #30363d;padding:4px 8px;cursor:pointer;font-size:11px;font-weight:600;letter-spacing:.03em}.rl-btn:first-child{border-radius:5px 0 0 5px}.rl-btn:last-child{border-radius:0 5px 5px 0}.rl-btn.active{background:#1f3a28;border-color:#2ea043;color:#56d364}';
+  var s=document.createElement('style'); s.textContent=css; document.head.appendChild(s);
+  var d=document.createElement('div'); d.id='rozum-lang';
+  ['en','ru','uk'].forEach(function(l){
+    var b=document.createElement('button'); b.className='rl-btn'; b.textContent=l.toUpperCase();
+    b.dataset.lang=l; b.onclick=function(){_setLang(l);};
+    if(l===_vlang)b.classList.add('active'); d.appendChild(b);
+  });
+  document.body.appendChild(d);
+  _applyI18n();
+})();
+
+const TOKEN = (window._VIEW_TOKEN) || new URLSearchParams(location.search).get('t') || '';
+let lastData = null;
+let charts = {};
+let chartsReady = false;
+
+Chart.defaults.color = '#8b949e';
+Chart.defaults.borderColor = '#21262d';
+Chart.defaults.font.family = '-apple-system,system-ui,sans-serif';
+Chart.defaults.font.size = 11;
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', ['matrix','charts'][i]===name));
+  document.getElementById('panel-matrix').classList.toggle('active', name==='matrix');
+  document.getElementById('panel-charts').classList.toggle('active', name==='charts');
+  if (name==='charts' && lastData && !chartsReady) buildCharts(lastData);
+}
+
+async function load() {
+  try {
+    const r = await fetch('/control/public/matrix?t=' + encodeURIComponent(TOKEN));
+    if (r.status === 403) { showErr(t('invalid_token')); return; }
+    if (!r.ok) { showErr(t('err_status') + r.status); return; }
+    lastData = await r.json();
+    render(lastData);
+    if (chartsReady) { destroyCharts(); chartsReady = false; }
+    if (document.getElementById('panel-charts').classList.contains('active')) buildCharts(lastData);
+  } catch(e) { showErr(t('err_network') + e.message); }
+}
+
+function showErr(msg) {
+  document.getElementById('err').style.display = '';
+  document.getElementById('err').textContent = msg;
+  document.getElementById('content').innerHTML = '';
+  document.getElementById('meta-line').textContent = '';
+}
+
+function shortModel(m){ return m.split('/').pop().replace(/-4bit$/i,'').replace(/-MXFP4-Q4$/i,''); }
+
+function render(d) {
+  const last = d.last;
+  if (!last) {
+    document.getElementById('content').innerHTML = '<div style="padding:40px;text-align:center;color:#8b949e">Нет данных о запусках.</div>';
+    document.getElementById('meta-line').textContent = '';
+    return;
+  }
+  const cells = last.cells || [];
+  const stamp = last.stamp || '';
+  const dt = stamp.replace('agentic-','').replace('agentic_ucc-','').replace(/-(\d{8})-(\d{6})$/, (_, d, t) => ` ${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6)} ${t.slice(0,2)}:${t.slice(2,4)}`);
+  document.getElementById('meta-line').textContent = dt;
+
+  const agents = [...new Set(cells.map(c=>c.agent))].sort();
+  const models = [...new Set(cells.map(c=>c.model))].sort();
+  const taskOrder = {greet:1,build:2,fix:3,test:4,debug:5,rpn:6};
+  const tasks = [...new Set(cells.map(c=>c.task))].sort((a,b)=>(taskOrder[a]||9)-(taskOrder[b]||9));
+
+  const passed = last.passed || 0, total = last.total || 0, failed = total - passed;
+  const pct = total ? Math.round(passed/total*100) : 0;
+
+  let html = `<div class="summary">
+    <div class="stat"><div class="n">${total}</div><div class="l">${t('stat_total')}</div></div>
+    <div class="stat green"><div class="n">${passed}</div><div class="l">${t('stat_passed')}</div></div>
+    <div class="stat${failed>0?' red':''}"><div class="n">${failed}</div><div class="l">${t('stat_failed')}</div></div>
+    <div class="stat"><div class="n">${pct}%</div><div class="l">${t('stat_rate')}</div></div>
+  </div>
+  <div class=\"stamp\">${t('run_label')} ${stamp}</div>
+  <table>
+    <thead><tr>
+      <th>${t('col_model')}</th><th>${t('col_agent')}</th>
+      ${tasks.map(t=>`<th class="task">${t}</th>`).join('')}
+    </tr></thead>
+    <tbody>`;
+
+  for (const model of models) {
+    for (const agent of agents) {
+      const row = {};
+      cells.filter(c=>c.model===model&&c.agent===agent).forEach(c=>row[c.task]=c);
+      if (!Object.keys(row).length) continue;
+      html += `<tr>
+        <td class="model">${shortModel(model)}</td>
+        <td class="agent">${agent}</td>
+        ${tasks.map(t => {
+          const c = row[t];
+          if (!c) return '<td></td>';
+          const ok = c.pass === 1;
+          return `<td class="cell" onclick="openCell('${stamp}','${agent}','${encodeURIComponent(model)}','${t}')" title="RAM агента: ${c.agent_peak_mb||'?'} MB  CPU: ${c.peak_cpu_pct||'?'}%">
+            <span class="pass">${ok ? '✅' : '❌'}</span>
+            <span class="cell-time">${c.seconds?.toFixed(1)||'?'}s</span>
+          </td>`;
+        }).join('')}
+      </tr>`;
+    }
+  }
+  html += '</tbody></table>';
+
+  // per-model summary
+  const byModel = {};
+  cells.forEach(c => {
+    if (!byModel[c.model]) byModel[c.model] = { footprint: c.model_footprint_mb||0, times:[], passes:0, total:0 };
+    byModel[c.model].total++;
+    if (c.pass===1) byModel[c.model].passes++;
+    if (c.seconds) byModel[c.model].times.push(c.seconds);
+  });
+  const modelList = Object.entries(byModel).sort((a,b)=>b[1].footprint-a[1].footprint);
+  const maxTime = Math.max(...modelList.map(([,v])=>v.times.length?v.times.reduce((a,b)=>a+b)/v.times.length:0),1);
+
+  html += `<div class="model-stats"><h3>${t("model_compare")}</h3>
+  <table><thead><tr><th>${t('col_model')}</th><th>RAM</th><th>${t('col_avg_time')}</th><th>Pass</th></tr></thead><tbody>`;
+  for (const [model, v] of modelList) {
+    const gb = (v.footprint/1024).toFixed(1);
+    const avg = v.times.length ? v.times.reduce((a,b)=>a+b)/v.times.length : 0;
+    const avgStr = avg ? avg.toFixed(1)+'s' : '—';
+    const barW = Math.round(avg/maxTime*70);
+    const pct2 = v.total ? Math.round(v.passes/v.total*100) : 0;
+    const col = pct2>=80?'#56d364':pct2>=50?'#e3b341':'#f85149';
+    html += `<tr>
+      <td style="color:#79c0ff;font-size:11px">${shortModel(model)}</td>
+      <td style="color:#e6edf3">${gb} GB</td>
+      <td><span style="color:#e6edf3">${avgStr}</span>${avg?`<span class="bar-inline" style="width:${barW}px"></span>`:''}</td>
+      <td style="color:${col};font-weight:600">${v.passes}/${v.total}</td>
+    </tr>`;
+  }
+  html += '</tbody></table></div>';
+
+  document.getElementById('content').innerHTML = html;
+  document.getElementById('err').style.display = 'none';
+}
+
+// ── Charts ──────────────────────────────────────────────────────────────────
+function destroyCharts() {
+  Object.values(charts).forEach(c => c.destroy());
+  charts = {};
+}
+
+function buildCharts(d) {
+  if (!d.last) return;
+  const cells = d.last.cells || [];
+  const models = [...new Set(cells.map(c=>c.model))].sort();
+  const tasks   = [...new Set(cells.map(c=>c.task))].sort();
+  const COLORS = ['#58a6ff','#56d364','#e3b341','#f78166','#bc8cff','#39d353'];
+  const BG_PASS = '#1f6feb', BG_FAIL = '#da3633';
+
+  // 1. Avg time per task grouped by model (grouped bar)
+  {
+    const taskOrder = {greet:1,build:2,fix:3,test:4,debug:5,rpn:6};
+    const sortedTasks = [...tasks].sort((a,b)=>(taskOrder[a]||9)-(taskOrder[b]||9));
+    const datasets = models.map((m,i) => ({
+      label: shortModel(m),
+      data: sortedTasks.map(t => {
+        const mc = cells.filter(c=>c.model===m&&c.task===t&&c.seconds);
+        return mc.length ? +(mc.reduce((s,c)=>s+c.seconds,0)/mc.length).toFixed(1) : 0;
+      }),
+      backgroundColor: COLORS[i % COLORS.length] + 'cc',
+      borderColor: COLORS[i % COLORS.length],
+      borderWidth: 1,
+      borderRadius: 4,
+    }));
+    charts.time = new Chart(document.getElementById('chart-time'), {
+      type:'bar',
+      data:{ labels: sortedTasks, datasets },
+      options:{
+        responsive:true,
+        plugins:{ legend:{ labels:{boxWidth:10,font:{size:10}} } },
+        scales:{
+          x:{ grid:{display:false} },
+          y:{ grid:{color:'#21262d'}, ticks:{callback:v=>v+'s'} }
+        }
+      }
+    });
+  }
+
+  // 3. Scatter: RAM footprint (GB) vs pass rate; point size = avg time
+  {
+    const scatterData = models.map((m,i) => {
+      const mc = cells.filter(c=>c.model===m);
+      const passRate = mc.length ? mc.filter(c=>c.pass===1).length/mc.length*100 : 0;
+      const fp = mc[0]?.model_footprint_mb || 0;
+      const avgTime = mc.filter(c=>c.seconds).length
+        ? mc.filter(c=>c.seconds).reduce((s,c)=>s+c.seconds,0)/mc.filter(c=>c.seconds).length : 0;
+      return { x: +(fp/1024).toFixed(1), y: +passRate.toFixed(1), r: Math.max(6, Math.min(30, avgTime/3)), label: shortModel(m), color: COLORS[i%COLORS.length] };
+    });
+    charts.scatter = new Chart(document.getElementById('chart-scatter'), {
+      type:'bubble',
+      data:{
+        datasets: scatterData.map(p => ({
+          label: p.label,
+          data: [{ x:p.x, y:p.y, r:p.r }],
+          backgroundColor: p.color+'88',
+          borderColor: p.color,
+          borderWidth:2,
+        }))
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{
+          legend:{ labels:{boxWidth:10,font:{size:10}} },
+          tooltip:{ callbacks:{ label: ctx => {
+            const d = ctx.raw;
+            return `${ctx.dataset.label}: ${d.x} GB, ${d.y}% pass`;
+          }}}
+        },
+        scales:{
+          x:{ title:{display:true,text:t('chart_x_ram'),color:'#8b949e'}, grid:{color:'#21262d'} },
+          y:{ min:0, max:100, title:{display:true,text:'Pass rate %',color:'#8b949e'}, grid:{color:'#21262d'}, ticks:{callback:v=>v+'%'} }
+        }
+      }
+    });
+  }
+
+  chartsReady = true;
+}
+
+// ── Cell overlay ─────────────────────────────────────────────────────────────
+async function openCell(stamp, agent, modelEnc, task) {
+  const model = decodeURIComponent(modelEnc);
+  document.getElementById('ov-title').textContent = `${agent} × ${shortModel(model)} × ${task}`;
+  document.getElementById('ov-metrics').innerHTML = '<span style="color:#8b949e">'+t('loading')+'</span>';
+  document.getElementById('ov-prompt-wrap').style.display = 'none';
+  document.getElementById('ov-verify-wrap').style.display = 'none';
+  document.getElementById('overlay').className = 'show';
+
+  try {
+    const r = await fetch(`/control/public/matrix/cell?t=${encodeURIComponent(TOKEN)}&stamp=${encodeURIComponent(stamp)}&agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}&task=${encodeURIComponent(task)}`);
+    const d = await r.json();
+    const c = d.cell || {}, ti = d.task_info || {};
+    const ramGb = c.model_footprint_mb ? (c.model_footprint_mb/1024).toFixed(1)+' GB' : '—';
+    const metrics = [
+      [t('cell_pass'),     c.pass===1?t('cell_yes'):t('cell_no')],
+      [t('cell_time'),    (c.seconds?.toFixed(1)||'—')+'s'],
+      [t('cell_turns'),   c.turns??'—'],
+      [t('cell_tools'),   c.tool_uses??'—'],
+      [t('cell_ram_m'),   ramGb],
+      [t('cell_ram_a'),   c.agent_peak_mb ? c.agent_peak_mb+' MB' : '—'],
+      [t('cell_cpu'),     c.peak_cpu_pct  ? c.peak_cpu_pct+'%'   : '—'],
+      [t('cell_diff'),    '★'.repeat(ti.difficulty||0)||'—'],
+    ];
+    document.getElementById('ov-metrics').innerHTML = metrics.map(([k,v])=>
+      `<div class="metric"><div class="v">${v}</div><div class="k">${k}</div></div>`
+    ).join('');
+    if (ti.prompt) {
+      document.getElementById('ov-prompt').textContent = ti.prompt;
+      document.getElementById('ov-prompt-wrap').style.display = '';
+    }
+    if (d.verify_out) {
+      const vEl = document.getElementById('ov-verify');
+      vEl.textContent = d.verify_out;
+      vEl.className = 'verify-box' + (c.pass===1?'':' verify-fail');
+      document.getElementById('ov-verify-wrap').style.display = '';
+    }
+    if (d.triage_out && d.triage_out.trim()) {
+      const tc = d.triage_out.trim();
+      const tc_col = tc.startsWith('pass')?'#56d364':tc.startsWith('timeout')?'#e3b341':'#f85149';
+      const tri = document.createElement('div');
+      tri.style.cssText='font-size:11px;color:'+tc_col+';margin-top:8px;padding:6px 10px;background:#0f1117;border-radius:6px';
+      tri.textContent = '🔍 '+tc;
+      document.getElementById('overlay').querySelector('.overlay-card').appendChild(tri);
+    }
+  } catch(e) {
+    document.getElementById('ov-metrics').innerHTML = '<span style="color:#f85149">'+e.message+'</span>';
+  }
+}
+function closeOverlay() { document.getElementById('overlay').className = ''; }
+
+// ── Pull-to-refresh ───────────────────────────────────────────────────────────
+(function(){
+  const ptr = document.getElementById('ptr'), THRESHOLD = 64;
+  let startY=0, pulling=false, refreshing=false;
+  document.addEventListener('touchstart', e=>{ if(window.scrollY===0){startY=e.touches[0].clientY;pulling=true;}},{passive:true});
+  document.addEventListener('touchmove', e=>{
+    if(!pulling||refreshing)return;
+    const dy=Math.max(0,e.touches[0].clientY-startY);
+    ptr.style.height=Math.min(dy*.5,THRESHOLD*.5)+'px';
+    ptr.style.setProperty('--deg',Math.round(Math.min(dy/THRESHOLD,1)*270)+'deg');
+    ptr.classList.toggle('pulling',dy>8);
+  },{passive:true});
+  document.addEventListener('touchend', async()=>{
+    if(!pulling)return; pulling=false;
+    if(parseFloat(ptr.style.height)>=THRESHOLD*.4){
+      refreshing=true; ptr.style.height='44px'; ptr.classList.remove('pulling'); ptr.classList.add('loading');
+      await load();
+      ptr.classList.remove('loading');
+    }
+    ptr.style.height='0'; ptr.classList.remove('pulling'); refreshing=false;
+  });
+})();
+
+async function loadLiveBanner() {
+  if (!TOKEN) return;
+  try {
+    const r = await fetch('/control/public/matrix/live?t=' + encodeURIComponent(TOKEN));
+    if (!r.ok) return;
+    const d = await r.json();
+    const banner = document.getElementById('live-banner');
+    const active = d.status === 'running' || d.status === 'paused' || d.status === 'done';
+    banner.style.display = active ? '' : 'none';
+    if (!active) return;
+    const done = d.progress?.done ?? 0, total = d.progress?.total ?? 0;
+    const pct = total ? Math.round(done / total * 100) : 0;
+    const el = d.elapsed_s || 0;
+    const elStr = el >= 3600 ? `${Math.floor(el/3600)}${t('el_h')} ${Math.floor(el%3600/60)}${t('el_m')}`
+                : el >= 60   ? `${Math.floor(el/60)}${t('el_m')} ${el%60}${t('el_s')}`
+                : `${el}${t('el_s')}`;
+    const mem = d.memory || {};
+    const badge = document.getElementById('lb-badge');
+    badge.textContent = d.status==='paused'?t('live_paused'):d.status==='done'?t('live_done'):t('live_running');
+    badge.style.color = d.status === 'paused' ? '#e3b341' : '#56d364';
+    document.getElementById('lb-progress').textContent = `${done}/${total} ${t('live_tasks')}`;
+    document.getElementById('lb-elapsed').textContent  = `⏱ ${elStr}`;
+    document.getElementById('lb-ram').textContent      = mem.available_gib != null
+      ? `${t('live_free')} ${mem.available_gib.toFixed(1)} GB` : '';
+    document.getElementById('lb-bar').style.width = pct + '%';
+    document.getElementById('lb-hint').textContent = d.current_hint || '';
+  } catch(e) {}
+}
+
+load();
+loadLiveBanner();
+setInterval(load, 30000);
+setInterval(loadLiveBanner, 4000);
+</script>
+</body></html>

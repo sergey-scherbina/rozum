@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rozum · coder log</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0f1117; color: #c9d1d9; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; overscroll-behavior-y: contain; }
+  #ptr { position: fixed; top: 0; left: 0; right: 0; z-index: 200; display: flex; justify-content: center; align-items: center; height: 0; overflow: hidden; background: #0f1117; transition: height .2s; }
+  #ptr .ptr-spinner { width: 20px; height: 20px; border: 2px solid #30363d; border-top-color: #58a6ff; border-radius: 50%; }
+  #ptr.pulling .ptr-spinner { animation: none; transform: rotate(var(--deg,0deg)); }
+  #ptr.loading .ptr-spinner { animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: #161b22; border-bottom: 1px solid #30363d; position: sticky; top: 0; }
+  #header a { color: #58a6ff; text-decoration: none; }
+  #id { color: #79c0ff; font-weight: bold; }
+  #status { font-size: 11px; color: #8b949e; }
+  #log { padding: 16px; white-space: pre-wrap; word-break: break-all; line-height: 1.5; min-height: 100vh; }
+  .err { color: #f85149; }
+</style>
+</head>
+<body>
+<div id="ptr"><div class="ptr-spinner"></div></div>
+<div id="header">
+  <a href="javascript:history.back()">← back</a>
+  <span id="id"></span>
+  <span id="status">loading…</span>
+</div>
+<pre id="log"></pre>
+<script>
+const id = new URLSearchParams(location.search).get('id') || '';
+document.getElementById('id').textContent = id;
+document.title = 'log: ' + id;
+
+let errCount = 0;
+async function load() {
+  try {
+    const r = await fetch('/control/coder/log?id=' + encodeURIComponent(id) + '&tail=300');
+    if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+    const data = await r.json();
+    document.getElementById('log').textContent = data.log || '(empty)';
+    document.getElementById('status').textContent = 'updated ' + new Date().toLocaleTimeString();
+    errCount = 0;
+    // scroll to bottom on first load
+    if (!window._loaded) { window.scrollTo(0, document.body.scrollHeight); window._loaded = true; }
+  } catch(e) {
+    errCount++;
+    document.getElementById('status').innerHTML = '<span class="err">error: ' + e.message + '</span>';
+  }
+}
+load();
+setInterval(load, 3000);
+(function() {
+  const ptr = document.getElementById('ptr');
+  const THRESHOLD = 64;
+  let startY = 0, pulling = false, refreshing = false;
+  document.addEventListener('touchstart', e => { if (window.scrollY === 0) { startY = e.touches[0].clientY; pulling = true; } }, { passive: true });
+  document.addEventListener('touchmove', e => {
+    if (!pulling || refreshing) return;
+    const dy = Math.max(0, e.touches[0].clientY - startY);
+    ptr.style.height = Math.min(dy * 0.5, THRESHOLD * 0.5) + 'px';
+    ptr.style.setProperty('--deg', Math.round(Math.min(dy / THRESHOLD, 1) * 270) + 'deg');
+    ptr.classList.toggle('pulling', dy > 8);
+  }, { passive: true });
+  document.addEventListener('touchend', async () => {
+    if (!pulling) return; pulling = false;
+    if (parseFloat(ptr.style.height) >= THRESHOLD * 0.4) {
+      refreshing = true; ptr.style.height = '44px'; ptr.classList.remove('pulling'); ptr.classList.add('loading');
+      await load();
+      ptr.classList.remove('loading');
+    }
+    ptr.style.height = '0'; ptr.classList.remove('pulling'); refreshing = false;
+  });
+})();
+</script>
+</body>
+</html>

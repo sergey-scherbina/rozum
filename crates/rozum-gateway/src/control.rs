@@ -1933,11 +1933,11 @@ fn json_save_rbac<T: Serialize + ?Sized>(path: Option<PathBuf>, val: &T) {
 
 fn default_roles() -> Vec<UccRole> {
     vec![
-        UccRole { id: "readonly".into(), name: "Только чтение".into(),
+        UccRole { id: "readonly".into(), name: "Read only".into(),
             permissions: vec!["read".into()] },
-        UccRole { id: "operator".into(), name: "Оператор".into(),
+        UccRole { id: "operator".into(), name: "Operator".into(),
             permissions: vec!["read".into(),"chat".into(),"agents".into(),"matrix".into(),"projects".into()] },
-        UccRole { id: "admin".into(), name: "Администратор".into(),
+        UccRole { id: "admin".into(), name: "Administrator".into(),
             permissions: vec!["admin".into()] },
     ]
 }

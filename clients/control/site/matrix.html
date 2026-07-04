@@ -1,0 +1,1124 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Matrix — rozum</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0f1117; color: #c9d1d9; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; overscroll-behavior-y: contain; }
+
+#ptr { position: fixed; top: 0; left: 0; right: 0; z-index: 200; display: flex; justify-content: center; align-items: center; height: 0; overflow: hidden; background: #0f1117; transition: height .2s; }
+#ptr .ptr-spinner { width: 20px; height: 20px; border: 2px solid #30363d; border-top-color: #58a6ff; border-radius: 50%; }
+#ptr.pulling .ptr-spinner { animation: none; transform: rotate(var(--deg,0deg)); }
+#ptr.loading .ptr-spinner { animation: spin .6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+#header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: #161b22; border-bottom: 1px solid #30363d; position: sticky; top: 0; z-index: 10; flex-wrap: wrap; }
+#header a { color: #58a6ff; text-decoration: none; font-size: 12px; }
+#header h1 { font-size: 16px; color: #e6edf3; }
+#header .spacer { flex: 1; }
+#status-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #21262d; color: #8b949e; }
+#status-badge.running { background: #1f3a28; color: #56d364; }
+#status-badge.paused  { background: #2d2016; color: #e3b341; }
+#status-badge.queued  { background: #2d2016; color: #e3b341; }
+#refresh-btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+#refresh-btn:hover { background: #30363d; }
+.ctrl-btn { border: none; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 12px; font-weight: 600; }
+#lang-switch { display: flex; gap: 1px; margin-left: 4px; }
+.lang-btn { background: #21262d; color: #6e7681; border: 1px solid #30363d; padding: 3px 7px; cursor: pointer; font-size: 11px; font-weight: 600; }
+.lang-btn:first-child { border-radius: 5px 0 0 5px; }
+.lang-btn:last-child  { border-radius: 0 5px 5px 0; }
+.lang-btn.active { background: #1f3a28; border-color: #2ea043; color: #56d364; }
+#btn-pause  { background: #9e6a03; color: #fff; }
+#btn-resume { background: #238636; color: #fff; }
+#btn-stop   { background: #da3633; color: #fff; }
+.ctrl-btn:hover { opacity: .85; }
+/* Live panel */
+#live-panel { display: none; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; }
+#live-panel.active { display: block; }
+.live-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px,1fr)); gap: 8px; margin-bottom: 10px; }
+.live-stat { background: #161b22; border-radius: 6px; padding: 8px 10px; }
+.live-stat .lv { font-size: 18px; font-weight: 700; color: #e6edf3; }
+.live-stat .lk { font-size: 10px; color: #8b949e; margin-top: 2px; }
+.progress-bar { background: #21262d; border-radius: 4px; height: 6px; overflow: hidden; margin: 6px 0; }
+.progress-fill { height: 100%; background: #1f6feb; border-radius: 4px; transition: width .5s; }
+.live-hint { font-size: 11px; color: #8b949e; font-family: 'SF Mono','Fira Code',monospace; white-space: pre-wrap; word-break: break-all; max-height: 60px; overflow: hidden; margin-top: 6px; }
+
+main { padding: 16px; max-width: 1400px; }
+
+/* Queue */
+.section-title { font-size: 13px; font-weight: bold; color: #79c0ff; margin: 16px 0 8px; }
+.queue-item { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px 14px; margin-bottom: 6px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.queue-item .job-id { color: #8b949e; font-size: 11px; }
+.queue-item .scope { color: #c9d1d9; flex: 1; }
+.queue-item .job-status { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+.st-queued  { background: #2d2016; color: #e3b341; }
+.st-running { background: #1f3a28; color: #56d364; }
+.st-done    { background: #0d2830; color: #39d353; }
+.st-failed  { background: #2d1017; color: #f85149; }
+.job-time { color: #8b949e; font-size: 11px; }
+.log-link { color: #58a6ff; text-decoration: none; font-size: 11px; }
+.log-link:hover { text-decoration: underline; }
+
+/* Run controls */
+.run-panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+.run-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 10px; align-items: flex-start; }
+.picker-group { display: flex; flex-direction: column; gap: 4px; }
+.picker-group label { color: #8b949e; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 2px; }
+.chip-row { display: flex; gap: 4px; flex-wrap: wrap; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 16px; border: 1px solid #30363d; background: #21262d; color: #8b949e; cursor: pointer; font-size: 12px; user-select: none; transition: all .1s; }
+.chip.on { background: #1f3a28; border-color: #2ea043; color: #56d364; }
+.chip:hover { border-color: #58a6ff; color: #c9d1d9; }
+#run-btn { background: #1f6feb; color: #fff; border: none; border-radius: 6px; padding: 7px 18px; cursor: pointer; font-size: 13px; font-weight: bold; }
+#run-btn:hover { background: #388bfd; }
+#run-btn:disabled { background: #21262d; color: #8b949e; cursor: not-allowed; }
+#run-msg { font-size: 12px; margin-left: 8px; }
+
+/* Summary */
+.summary-bar { display: flex; gap: 20px; align-items: center; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px 14px; margin-bottom: 10px; }
+.summary-bar .sval { font-size: 15px; font-weight: bold; color: #56d364; }
+.summary-bar .sval.bad { color: #f85149; }
+.summary-bar .slabel { color: #8b949e; font-size: 11px; }
+.summary-bar .sstamp { color: #58a6ff; font-size: 11px; }
+
+/* Matrix table */
+.matrix-wrap { overflow-x: auto; }
+table.matrix { border-collapse: collapse; min-width: 600px; width: 100%; }
+table.matrix th, table.matrix td { border: 1px solid #21262d; padding: 5px 8px; white-space: nowrap; text-align: center; }
+table.matrix thead th { background: #161b22; color: #8b949e; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+table.matrix thead th.row-head { text-align: left; }
+table.matrix tbody td.row-head { text-align: left; background: #161b22; color: #8b949e; font-size: 11px; position: sticky; left: 0; }
+table.matrix tbody td.row-head.model-cell { color: #79c0ff; font-weight: bold; white-space: normal; word-break: break-word; max-width: 140px; }
+table.matrix tbody td.row-head.agent-cell { color: #c9d1d9; padding-left: 16px; }
+table.matrix tbody tr:hover td { background: #1c2128; }
+.cell-pass { color: #56d364; }
+.cell-fail { color: #f85149; }
+.cell-timeout { color: #e3b341; }
+.cell-secs { font-size: 10px; color: #6e7681; }
+.cell-empty { color: #30363d; }
+.cell-rc { font-size: 10px; color: #8b949e; }
+
+/* Raw data table */
+table.raw { border-collapse: collapse; table-layout: auto; width: max-content; min-width: 100%; }
+table.raw th, table.raw td { border: 1px solid #21262d; padding: 4px 8px; font-size: 11px; text-align: right; white-space: nowrap; }
+table.raw th { background: #161b22; color: #8b949e; text-transform: uppercase; letter-spacing: .04em; cursor: pointer; user-select: none; }
+table.raw th:hover { color: #c9d1d9; }
+table.raw th:nth-child(1), table.raw td:nth-child(1) { text-align: left; }
+table.raw th:nth-child(2), table.raw td:nth-child(2) { text-align: left; white-space: normal; word-break: break-word; max-width: 160px; }
+table.raw th:nth-child(3), table.raw td:nth-child(3) { text-align: left; }
+table.raw tbody tr:hover td { background: #1c2128; }
+.pass1 { color: #56d364; }
+.pass0 { color: #f85149; }
+
+/* Log viewer */
+#log-panel { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 100; justify-content: center; align-items: center; }
+#log-panel.open { display: flex; }
+#log-box { background: #0f1117; border: 1px solid #30363d; border-radius: 8px; width: 90vw; max-width: 1000px; height: 80vh; display: flex; flex-direction: column; }
+#log-box header { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-bottom: 1px solid #30363d; }
+#log-box header span { flex: 1; color: #79c0ff; font-size: 12px; }
+#log-close { background: none; border: none; color: #8b949e; font-size: 18px; cursor: pointer; }
+#log-content { flex: 1; overflow: auto; padding: 12px 14px; font-size: 11px; white-space: pre-wrap; word-break: break-all; line-height: 1.5; }
+
+/* Model info panel */
+#model-panel { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75); z-index: 120; justify-content: center; align-items: center; }
+#model-panel.open { display: flex; }
+#model-box { position: relative; background: #161b22; border: 1px solid #30363d; border-radius: 10px; width: 90vw; max-width: 480px; max-height: 88vh; overflow-y: auto; padding: 20px 20px 16px; }
+#model-close { position: absolute; top: 8px; right: 10px; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; background: rgba(255,255,255,0.08); border: none; border-radius: 50%; color: #e5e7eb; font-size: 20px; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.5); }
+#model-box h3 { margin: 0 36px 12px 0; color: #c9d1d9; font-size: 15px; }
+.minfo-row { display: flex; gap: 8px; font-size: 13px; margin-bottom: 6px; }
+.minfo-label { color: #8b949e; min-width: 110px; flex-shrink: 0; }
+.minfo-value { color: #c9d1d9; word-break: break-word; }
+.minfo-notes { margin-top: 10px; font-size: 12px; color: #8b949e; line-height: 1.5; }
+
+/* Cell detail panel */
+#cell-panel { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75); z-index: 110; justify-content: center; align-items: center; }
+#cell-panel.open { display: flex; }
+#cell-box { background: #0f1117; border: 1px solid #30363d; border-radius: 8px; width: 94vw; max-width: 1100px; height: 88vh; display: flex; flex-direction: column; }
+#cell-box header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid #30363d; flex-shrink: 0; }
+#cell-title { flex: 1; color: #e6edf3; font-size: 14px; font-weight: bold; }
+#cell-close { background: none; border: none; color: #8b949e; font-size: 20px; cursor: pointer; line-height: 1; }
+#cell-body { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; }
+.cell-section { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px 14px; }
+.cell-section h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #8b949e; margin-bottom: 8px; }
+.cell-section .prompt-text { color: #c9d1d9; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+.cell-section .expected { color: #56d364; font-size: 11px; margin-top: 6px; }
+.metrics-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+.metric-item { background: #21262d; border-radius: 4px; padding: 6px 10px; }
+.metric-item .mk { font-size: 10px; color: #8b949e; text-transform: uppercase; }
+.metric-item .mv { font-size: 14px; font-weight: bold; color: #c9d1d9; }
+.metric-item .mv.pass { color: #56d364; }
+.metric-item .mv.fail { color: #f85149; }
+.no-logs-note { color: #8b949e; font-size: 11px; font-style: italic; }
+#cell-agent-log { font-size: 11px; white-space: pre-wrap; word-break: break-all; line-height: 1.5; color: #c9d1d9; max-height: 400px; overflow-y: auto; }
+/* Dialog tabs */
+.cell-tabs { display: flex; gap: 6px; padding: 0 16px 0; border-bottom: 1px solid #30363d; flex-shrink: 0; }
+.cell-tab { background: none; border: none; border-bottom: 2px solid transparent; color: #8b949e; font-size: 12px; padding: 8px 12px; cursor: pointer; }
+.cell-tab.active { color: #e6edf3; border-bottom-color: #1f6feb; }
+/* Chat dialog bubbles */
+.dialog-wrap { display: flex; flex-direction: column; gap: 10px; }
+.turn { display: flex; flex-direction: column; gap: 3px; }
+.turn-label { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: #8b949e; }
+.turn-user .turn-bubble { background: #1c2333; border: 1px solid #1f6feb44; border-radius: 8px 8px 8px 2px; padding: 10px 12px; color: #c9d1d9; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+.turn-assistant .turn-bubble { background: #0d1117; border: 1px solid #238636aa; border-radius: 8px 8px 2px 8px; padding: 10px 12px; color: #e6edf3; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; align-self: flex-end; }
+.turn-tool { margin-left: 12px; }
+.turn-tool .tool-header { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #79c0ff; cursor: pointer; user-select: none; }
+.turn-tool .tool-header::before { content: '🔧'; }
+.turn-tool .tool-body { background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 8px 10px; font-size: 10px; font-family: monospace; color: #8b949e; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; margin-top: 4px; }
+.turn-tool-result { margin-left: 24px; }
+.turn-tool-result .result-body { background: #0f1117; border-left: 2px solid #30363d; padding: 4px 8px; font-size: 10px; font-family: monospace; color: #6e7681; white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto; }
+.turn-result { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; font-size: 11px; color: #8b949e; }
+.turn-result.ok { border-color: #238636; color: #56d364; }
+.turn-result.err { border-color: #6e2328; color: #f85149; }
+</style>
+</head>
+<body>
+<div id="ptr"><div class="ptr-spinner"></div></div>
+<div id="header">
+  <a href="/" data-i18n="back">← back</a>
+  <h1>📊 <span data-i18n="page_h1">Matrix</span></h1>
+  <span id="status-badge">—</span>
+  <span class="spacer"></span>
+  <button id="btn-pause"  class="ctrl-btn" style="display:none" onclick="matrixCtrl('pause')" data-i18n="btn_pause">⏸ Pause</button>
+  <button id="btn-resume" class="ctrl-btn" style="display:none" onclick="matrixCtrl('resume')" data-i18n="btn_resume">▶ Resume</button>
+  <button id="btn-stop"   class="ctrl-btn" style="display:none" onclick="matrixCtrl('stop')" data-i18n="btn_stop">⏹ Stop</button>
+  <button id="refresh-btn" onclick="load()">↻</button>
+  <div id="lang-switch">
+    <button class="lang-btn" data-lang="en" onclick="setLang('en')">EN</button>
+    <button class="lang-btn" data-lang="ru" onclick="setLang('ru')">RU</button>
+    <button class="lang-btn" data-lang="uk" onclick="setLang('uk')">UK</button>
+  </div>
+</div>
+
+<main>
+  <!-- Live panel -->
+  <div id="live-panel">
+    <div class="live-grid" id="live-grid"></div>
+    <div class="progress-bar"><div class="progress-fill" id="live-progress" style="width:0%"></div></div>
+    <div class="live-hint" id="live-hint"></div>
+  </div>
+
+  <!-- Run controls -->
+  <div class="section-title" data-i18n="queue_run">Queue a run</div>
+  <div class="run-panel">
+    <div class="run-row">
+      <div class="picker-group">
+        <label data-i18n="label_models">Models</label>
+        <div class="chip-row" id="model-chips"><!-- filled by JS --></div>
+      </div>
+    </div>
+    <div class="run-row">
+      <div class="picker-group">
+        <label data-i18n="label_agents">Agents</label>
+        <div class="chip-row" id="agent-chips"></div>
+      </div>
+      <div class="picker-group">
+        <label data-i18n="label_tasks">Tasks</label>
+        <div class="chip-row" id="task-chips"></div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap;">
+      <button id="run-all-btn" onclick="enqueueAll()" style="background:#238636;color:#fff;border:none;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px;font-weight:bold;" data-i18n="btn_all">🚀 All models</button>
+      <button id="run-btn" onclick="enqueue()" data-i18n="btn_selected">▶ Selected</button>
+      <label style="color:#8b949e;font-size:12px;margin-left:4px;" data-i18n="label_reps">runs:</label>
+      <select id="reps-select" style="background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:4px;padding:4px 6px;font-size:12px;">
+        <option value="1" data-i18n="opt_1">1 (fast)</option>
+        <option value="3" selected data-i18n="opt_3">3 (reliable)</option>
+        <option value="5" data-i18n="opt_5">5 (accurate)</option>
+      </select>
+      <span id="run-msg"></span>
+    </div>
+  </div>
+
+  <!-- Queue -->
+  <div id="queue-section" style="display:none">
+    <div class="section-title" data-i18n="sec_queue">Queue</div>
+    <div id="queue-list"></div>
+  </div>
+
+  <!-- Results summary -->
+  <div id="result-section" style="display:none">
+    <div class="section-title" data-i18n="sec_results">Last results</div>
+    <div class="summary-bar" id="summary-bar"></div>
+    <div class="section-title" style="margin-top:12px" data-i18n="sec_matrix">Matrix view</div>
+    <div class="matrix-wrap"><table class="matrix" id="matrix-table"></table></div>
+    <div class="section-title" style="margin-top:16px" data-i18n="sec_raw">All runs (raw)</div>
+    <div style="overflow-x:auto"><table class="raw" id="raw-table"></table></div>
+  </div>
+</main>
+
+<!-- Log viewer overlay -->
+<div id="log-panel">
+  <div id="log-box">
+    <header><span id="log-title">Log</span><button id="log-close" onclick="closeLog()">✕</button></header>
+    <pre id="log-content">Loading…</pre>
+  </div>
+</div>
+
+<!-- Model info overlay -->
+<div id="model-panel" onclick="if(event.target===this)closeModelInfo()">
+  <div id="model-box">
+    <button id="model-close" onclick="closeModelInfo()">✕</button>
+    <h3 id="model-info-name">…</h3>
+    <div id="model-info-body"></div>
+  </div>
+</div>
+
+<!-- Cell detail overlay -->
+<div id="cell-panel" onclick="if(event.target===this)closeCell()">
+  <div id="cell-box">
+    <header>
+      <span id="cell-title">Cell detail</span>
+      <button id="cell-close" onclick="closeCell()">✕</button>
+    </header>
+    <div class="cell-tabs">
+      <button class="cell-tab active" onclick="switchCellTab('metrics',this)" data-i18n="tab_metrics">Results</button>
+      <button class="cell-tab" onclick="switchCellTab('dialog',this)" data-i18n="tab_dialog">Dialog</button>
+      <button class="cell-tab" onclick="switchCellTab('log',this)" data-i18n="tab_log">Raw log</button>
+    </div>
+    <div id="cell-body">Loading…</div>
+  </div>
+</div>
+
+<script>
+// ── i18n ──────────────────────────────────────────────────────────────────────
+const STRINGS = {};
+STRINGS.en = {
+  page_title:'Matrix — rozum', page_h1:'Matrix', back:'← back',
+  btn_pause:'⏸ Pause', btn_resume:'▶ Resume', btn_stop:'⏹ Stop',
+  status_running:'● running', status_paused:'⏸ paused', status_queued:'⏳ queued', status_waiting:'waiting',
+  live_tasks:'tasks done', live_progress:'progress', live_elapsed:'elapsed', live_ram_free:'RAM free', live_ram_used:'RAM used', live_status:'status',
+  live_s_paused:'⏸ paused', live_s_done:'✅ done', live_s_running:'▶ running',
+  queue_run:'Queue a run', label_models:'Models', label_agents:'Agents', label_tasks:'Tasks',
+  btn_all:'🚀 All models', btn_selected:'▶ Selected', label_reps:'runs:',
+  opt_1:'1 (fast)', opt_3:'3 (reliable)', opt_5:'5 (accurate)',
+  msg_launching:'Launching…', msg_queuing:'Queuing…', msg_queued_ok:'✓ queued: ', msg_error:'error: ',
+  msg_select:'Select at least one agent and one task.',
+  sec_queue:'Queue', sec_results:'Last results', sec_matrix:'Matrix view', sec_raw:'All runs (raw)',
+  lbl_passed:'passed', lbl_rate:'pass rate', lbl_run:'run: ',
+  col_model_agent:'model / agent', col_total:'total',
+  cell_infra:'infra', cell_task:'task',
+  col_agent:'agent', col_model:'model', col_task:'task', col_diff:'diff', col_pass:'pass',
+  col_secs:'sec', col_rc:'rc', col_to:'t/o', col_turns:'turns', col_tools:'tools',
+  col_mb:'mb', col_cpu:'cpu%', col_weight:'weight mb',
+  log_empty:'(empty)',
+  mi_loading:'Loading…', mi_not_found:'Model not found', mi_error:'Load error',
+  mi_pipeline:'Pipeline ({n} models)', mi_planner:'① Planner', mi_executor:'② Executor',
+  mi_add:'Add to run', mi_added:'In run', mi_chip_tip:'tap — info · hold — toggle',
+  mc_spec:'Spec:', mc_arch:'Architecture:', mc_quant:'Quantization:', mc_ctx:'Context:',
+  mc_layers:'Layers:', mc_attn:'Attn:', mc_kv:'KV:', mc_hidden:'Hidden:', mc_moe:'MoE:',
+  mc_size:'Size:', mc_mem:'Resident:', mc_notes:'Notes:', mc_yes:'yes', mc_no:'no',
+  ti_type:'Type:', ti_no_desc:'No description.',
+  task_greet_type:'Basic communication', task_greet_desc:'Greet and give a simple answer. Tests basic instruction-following and response format.',
+  task_build_type:'Create from scratch', task_build_desc:"Create a new project from a description: files, code, build. Tests the agent's ability to scaffold a project end-to-end.",
+  task_fix_type:'Bug fix', task_fix_desc:'Receive a broken project, find and fix the bug. The project must build and pass tests after the fix.',
+  task_test_type:'Testing', task_test_desc:'Write tests for existing code or investigate failing test suite issues.',
+  task_debug_type:'Debugging', task_debug_desc:'Reproduce and fix a complex problem with an unclear description. Harder than fix due to greater input ambiguity.',
+  task_rpn_type:'Algorithm', task_rpn_desc:'Implement a reverse-polish notation calculator. An algorithmic task for precise code generation.',
+  tab_metrics:'Results', tab_dialog:'Dialog', tab_log:'Raw log',
+  rc_0:'0 (pass)', rc_2:'2 ⚡ infra (gateway crash)', rc_10:'10 ✗ task (capability miss)',
+  rc_11:'11 ∅ skip (no files written)', rc_124:'124 ⏱ timeout',
+  no_prompt:'(prompt not available)', expected:'✓ expected:',
+  no_log_missing:'Log directory exists but agent.log not found.',
+  no_log_general:'Agent log not available — only UCC-triggered runs (with KEEP=1) save logs.',
+  no_log_simple:'Agent log not available.',
+  dialog_empty:'Dialog is empty or format not recognized.',
+  turn_task:'🙋 Task', turn_model:'🤖 Model', turn_user:'🙋 User',
+};
+STRINGS.ru = {
+  ...STRINGS.en,
+  page_title:'Matrix — rozum', page_h1:'Matrix', back:'← назад',
+  btn_pause:'⏸ Пауза', btn_resume:'▶ Продолжить', btn_stop:'⏹ Стоп',
+  status_running:'● запущено', status_paused:'⏸ пауза', status_queued:'⏳ в очереди', status_waiting:'ожидание',
+  live_tasks:'задач выполнено', live_progress:'прогресс', live_elapsed:'прошло времени',
+  live_ram_free:'RAM свободно', live_ram_used:'RAM занято', live_status:'статус',
+  live_s_paused:'⏸ пауза', live_s_done:'✅ завершено', live_s_running:'▶ работает',
+  queue_run:'Поставить в очередь', label_models:'Модели', label_agents:'Агенты', label_tasks:'Задачи',
+  btn_all:'🚀 Все модели', btn_selected:'▶ Выборочно', label_reps:'прогонов:',
+  opt_1:'1 (быстро)', opt_3:'3 (надёжно)', opt_5:'5 (точно)',
+  msg_launching:'Запускаю…', msg_queuing:'Добавляю…', msg_queued_ok:'✓ добавлено: ', msg_error:'ошибка: ',
+  msg_select:'Выберите хотя бы одного агента и одну задачу.',
+  sec_queue:'Очередь', sec_results:'Последние результаты',
+  lbl_passed:'выполнено', lbl_rate:'процент прохождения', lbl_run:'запуск: ',
+  col_model_agent:'модель / агент', col_total:'итого',
+  cell_infra:'инфра', cell_task:'задача',
+  col_agent:'агент', col_model:'модель', col_task:'задача', col_secs:'сек',
+  col_turns:'шаги', col_weight:'вес мб',
+  log_empty:'(пусто)',
+  mi_loading:'Загрузка…', mi_not_found:'Модель не найдена', mi_error:'Ошибка загрузки',
+  mi_pipeline:'Пайплайн ({n} модели)', mi_planner:'① Планировщик', mi_executor:'② Исполнитель',
+  mi_add:'Включить в запуск', mi_added:'Включено в запуск', mi_chip_tip:'тап — инфо · удержание — выбрать',
+  mc_arch:'Архитектура:', mc_quant:'Квантизация:', mc_ctx:'Контекст:',
+  mc_layers:'Слои:', mc_size:'Размер:', mc_mem:'В памяти:', mc_notes:'Примечание:',
+  mc_yes:'да', mc_no:'нет',
+  ti_type:'Тип:', ti_no_desc:'Нет описания.',
+  task_greet_type:'Базовая коммуникация', task_greet_desc:'Поздороваться и дать простой ответ. Проверяет базовый instruction-following и формат ответа.',
+  task_build_type:'Создание с нуля', task_build_desc:'Создать новый проект по описанию: файлы, код, сборка. Проверяет способность агента разворачивать проект от начала до конца.',
+  task_fix_type:'Исправление бага', task_fix_desc:'Получить сломанный проект, найти и починить баг. Проект должен собираться и проходить тесты после исправления.',
+  task_test_type:'Тестирование', task_test_desc:'Написать тесты для существующего кода или разобраться с падениями тест-сьюта.',
+  task_debug_type:'Отладка', task_debug_desc:'Воспроизвести и устранить сложную проблему с неопределённым описанием. Отличается от fix большей неопределённостью входных данных.',
+  task_rpn_type:'Алгоритм', task_rpn_desc:'Реализовать калькулятор с обратной польской нотацией. Алгоритмическая задача для точной кодогенерации.',
+  tab_metrics:'Результаты', tab_dialog:'Диалог', tab_log:'Сырой лог',
+  rc_2:'2 ⚡ инфра (падение шлюза)', rc_10:'10 ✗ задача (модель не справилась)',
+  rc_11:'11 ∅ skip (файлы не созданы)', rc_124:'124 ⏱ timeout',
+  no_prompt:'(подсказка недоступна)', expected:'✓ ожидается:',
+  no_log_missing:'Директория логов есть, но agent.log не найден.',
+  no_log_general:'Лог агента недоступен — только запуски через UCC (с KEEP=1) сохраняют логи.',
+  no_log_simple:'Лог агента недоступен.',
+  dialog_empty:'Диалог пустой или формат не распознан.',
+  turn_task:'🙋 Задание', turn_model:'🤖 Модель', turn_user:'🙋 Пользователь',
+};
+STRINGS.uk = {
+  ...STRINGS.en,
+  page_title:'Matrix — rozum', page_h1:'Matrix', back:'← назад',
+  btn_pause:'⏸ Пауза', btn_resume:'▶ Продовжити', btn_stop:'⏹ Стоп',
+  status_running:'● запущено', status_paused:'⏸ пауза', status_queued:'⏳ в черзі', status_waiting:'очікування',
+  live_tasks:'завдань виконано', live_progress:'прогрес', live_elapsed:'пройшло часу',
+  live_ram_free:'RAM вільно', live_ram_used:'RAM зайнято', live_status:'статус',
+  live_s_paused:'⏸ пауза', live_s_done:'✅ завершено', live_s_running:'▶ працює',
+  queue_run:'Поставити в чергу', label_models:'Моделі', label_agents:'Агенти', label_tasks:'Завдання',
+  btn_all:'🚀 Всі моделі', btn_selected:'▶ Вибірково', label_reps:'прогонів:',
+  opt_1:'1 (швидко)', opt_3:'3 (надійно)', opt_5:'5 (точно)',
+  msg_launching:'Запускаю…', msg_queuing:'Додаю…', msg_queued_ok:'✓ додано: ', msg_error:'помилка: ',
+  msg_select:'Оберіть хоча б одного агента та одне завдання.',
+  sec_queue:'Черга', sec_results:'Останні результати',
+  lbl_passed:'виконано', lbl_rate:'відсоток проходження', lbl_run:'запуск: ',
+  col_model_agent:'модель / агент', col_total:'разом',
+  cell_infra:'інфра', cell_task:'завдання',
+  col_agent:'агент', col_model:'модель', col_task:'завдання', col_secs:'сек',
+  col_turns:'кроки', col_weight:'вага мб',
+  log_empty:'(порожньо)',
+  mi_loading:'Завантаження…', mi_not_found:'Модель не знайдена', mi_error:'Помилка завантаження',
+  mi_pipeline:'Конвеєр ({n} моделі)', mi_planner:'① Планувальник', mi_executor:'② Виконавець',
+  mi_add:'Додати до запуску', mi_added:'Додано до запуску', mi_chip_tip:'тап — інфо · утримання — вибрати',
+  mc_arch:'Архітектура:', mc_quant:'Квантизація:', mc_ctx:'Контекст:',
+  mc_layers:'Шари:', mc_size:'Розмір:', mc_mem:"У пам'яті:", mc_notes:'Примітка:',
+  mc_yes:'так', mc_no:'ні',
+  ti_type:'Тип:', ti_no_desc:'Немає опису.',
+  task_greet_type:'Базова комунікація', task_greet_desc:'Привітатися та дати просту відповідь. Перевіряє базовий instruction-following та формат відповіді.',
+  task_build_type:'Створення з нуля', task_build_desc:'Створити новий проект за описом: файли, код, збірка. Перевіряє здатність агента розгортати проект від початку до кінця.',
+  task_fix_type:'Виправлення бага', task_fix_desc:'Отримати зламаний проект, знайти та виправити баг. Проект має збиратися та проходити тести після виправлення.',
+  task_test_type:'Тестування', task_test_desc:'Написати тести для існуючого коду або розібратися з падіннями тест-сьюту.',
+  task_debug_type:'Налагодження', task_debug_desc:'Відтворити та усунути складну проблему з невизначеним описом. Відрізняється від fix більшою невизначеністю вхідних даних.',
+  task_rpn_type:'Алгоритм', task_rpn_desc:'Реалізувати калькулятор з оберненим польським записом. Алгоритмічне завдання для точної кодогенерації.',
+  tab_metrics:'Результати', tab_dialog:'Діалог', tab_log:'Сирий лог',
+  rc_2:'2 ⚡ інфра (падіння шлюзу)', rc_10:'10 ✗ завдання (модель не впоралась)',
+  rc_11:'11 ∅ skip (файли не створені)',
+  no_prompt:'(підказка недоступна)', expected:'✓ очікується:',
+  no_log_missing:'Директорія логів є, але agent.log не знайдено.',
+  no_log_general:'Лог агента недоступний — тільки запуски через UCC (з KEEP=1) зберігають логи.',
+  no_log_simple:'Лог агента недоступний.',
+  dialog_empty:'Діалог порожній або формат не розпізнано.',
+  turn_task:'🙋 Завдання', turn_model:'🤖 Модель', turn_user:'🙋 Користувач',
+};
+
+let _lang = (localStorage.getItem('rozum_lang') || navigator.language.split('-')[0] || 'en');
+if (!STRINGS[_lang]) _lang = 'en';
+function t(key) { return (STRINGS[_lang]||STRINGS.en)[key] ?? STRINGS.en[key] ?? key; }
+function setLang(lang) {
+  localStorage.setItem('rozum_lang', lang);
+  _lang = STRINGS[lang] ? lang : 'en';
+  applyI18n();
+}
+function applyI18n() {
+  document.title = t('page_title');
+  document.documentElement.lang = _lang;
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-opt]').forEach(el => { el.textContent = t(el.dataset.i18nOpt); });
+  document.querySelectorAll('.lang-btn').forEach(b => b.classList.toggle('active', b.dataset.lang === _lang));
+}
+
+const AGENTS_DEFAULT = ['claude', 'codex', 'opencode'];
+const TASKS_DEFAULT  = ['greet', 'build', 'fix', 'test', 'debug', 'rpn'];
+
+// ── Chip toggles ───────────────────────────────────────────────────────────────
+function makeChips(containerId, items, allOn, onInfo) {
+  const c = document.getElementById(containerId);
+  c.innerHTML = '';
+  items.forEach(item => {
+    const b = document.createElement('span');
+    b.className = 'chip' + (allOn ? ' on' : '');
+    b.textContent = item;
+    b.dataset.val = item;
+    if (onInfo) {
+      b.title = t('mi_chip_tip');
+      let timer = null, moved = false;
+      b.addEventListener('contextmenu', e => e.preventDefault());
+      b.addEventListener('pointerdown', () => {
+        moved = false;
+        timer = setTimeout(() => { timer = null; b.classList.toggle('on'); }, 400);
+      });
+      b.addEventListener('pointermove', () => { moved = true; });
+      b.addEventListener('pointerup', () => {
+        if (timer !== null) { clearTimeout(timer); timer = null; if (!moved) onInfo(item); }
+      });
+      b.addEventListener('pointercancel', () => { clearTimeout(timer); timer = null; });
+    } else {
+      b.onclick = () => b.classList.toggle('on');
+    }
+    c.appendChild(b);
+  });
+}
+function selectedChips(containerId) {
+  return Array.from(document.querySelectorAll('#' + containerId + ' .chip.on')).map(b => b.dataset.val);
+}
+
+// ── Locale helper ──────────────────────────────────────────────────────────────
+function ts(unix) {
+  if (!unix) return '—';
+  return new Date(unix * 1000).toLocaleString();
+}
+function elapsed(a, b) {
+  if (!a || !b) return '';
+  const s = b - a;
+  if (s < 60) return s + 's';
+  return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+}
+
+// ── Data ──────────────────────────────────────────────────────────────────────
+let _data = null;
+
+async function load() {
+  try {
+    const r = await fetch('/control/matrix/status');
+    if (!r.ok) { if (r.status === 401) { location.href = '/login.html'; return; } throw new Error(r.status); }
+    _data = await r.json();
+    render(_data);
+  } catch(e) {
+    document.getElementById('status-badge').textContent = 'error: ' + e.message;
+  }
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────────
+function render(data) {
+  renderBadge(data.queue);
+  renderQueue(data.queue || []);
+  if (data.last) renderResults(data.last);
+  // populate model chips from installed catalog (all available, not just past results)
+  const modelChips = document.getElementById('model-chips');
+  if ((data.installed||[]).length && !modelChips.dataset.populated) {
+    makeChips('model-chips', data.installed, true, spec => openModelInfo(spec));
+    modelChips.dataset.populated = '1';
+  }
+}
+
+function renderBadge(queue) {
+  const badge = document.getElementById('status-badge');
+  const running = (queue || []).find(j => j.status === 'running');
+  const paused  = (queue || []).find(j => j.status === 'paused');
+  const queued  = (queue || []).find(j => j.status === 'queued');
+  const active  = paused || running;
+  document.getElementById('btn-pause').style.display  = running ? '' : 'none';
+  document.getElementById('btn-resume').style.display = paused  ? '' : 'none';
+  document.getElementById('btn-stop').style.display   = active  ? '' : 'none';
+  if (running) { badge.textContent = t('status_running'); badge.className = 'running'; }
+  else if (paused) { badge.textContent = t('status_paused'); badge.className = 'paused'; }
+  else if (queued) { badge.textContent = t('status_queued'); badge.className = 'queued'; }
+  else { badge.textContent = t('status_waiting'); badge.className = ''; }
+}
+
+function scopeLabel(job) {
+  const m = job.models ? job.models.join(', ') : 'all models';
+  const a = job.agents ? job.agents.join('+') : 'all agents';
+  const t = job.tasks  ? job.tasks.join('+')  : 'all tasks';
+  return m + ' / ' + a + ' / ' + t;
+}
+
+function renderQueue(queue) {
+  const sec = document.getElementById('queue-section');
+  const list = document.getElementById('queue-list');
+  if (!queue.length) { sec.style.display = 'none'; return; }
+  sec.style.display = '';
+  list.innerHTML = queue.map(j => `
+    <div class="queue-item">
+      <span class="job-id">${j.id}</span>
+      <span class="scope">${scopeLabel(j)}</span>
+      <span class="job-status st-${j.status}">${j.status}</span>
+      <span class="job-time">queued ${ts(j.queued_at)}${j.started_at ? ' · started ' + ts(j.started_at) : ''}${j.finished_at ? ' · ' + elapsed(j.started_at, j.finished_at) : ''}</span>
+      ${j.log_path ? `<a class="log-link" href="#" onclick="openLog('${j.id}','${escHtml(j.log_path)}');return false">📄 log</a>` : ''}
+    </div>
+  `).join('');
+}
+
+function renderResults(last) {
+  document.getElementById('result-section').style.display = '';
+
+  // Summary bar
+  const pct = last.total ? Math.round(last.passed / last.total * 100) : 0;
+  document.getElementById('summary-bar').innerHTML = `
+    <span><span class="sval${last.passed < last.total ? ' bad' : ''}">${last.passed}/${last.total}</span><br><span class="slabel">${t('lbl_passed')}</span></span>
+    <span><span class="sval">${pct}%</span><br><span class="slabel">${t('lbl_rate')}</span></span>
+    <span class="sstamp">${t('lbl_run')}${last.stamp}</span>
+  `;
+
+  const cells = last.cells || [];
+  if (!cells.length) return;
+
+  // Compute axes
+  const models = [...new Set(cells.map(c => c.model))];
+  const agents = [...new Set(cells.map(c => c.agent))];
+  const tasks  = [...new Set(cells.map(c => c.task))].sort((a,b) => {
+    const ord = ['greet','build','fix','test','debug','rpn'];
+    return (ord.indexOf(a) + 1 || 99) - (ord.indexOf(b) + 1 || 99);
+  });
+
+  // Index — aggregate multi-rep rows into pass-rate buckets
+  const idx = {};
+  cells.forEach(c => {
+    const key = c.model + '|' + c.agent + '|' + c.task;
+    if (!idx[key]) idx[key] = { rows: [], passCount: 0, infraCount: 0, timeoutCount: 0 };
+    idx[key].rows.push(c);
+    if (c.pass) idx[key].passCount++;
+    const rcN = typeof c.rc === 'number' ? c.rc : parseInt(c.rc, 10);
+    if (rcN === 2) idx[key].infraCount++;
+    if (c.timeout || rcN === 124) idx[key].timeoutCount++;
+  });
+
+  // Build 2D table: rows = model × agent, cols = tasks
+  const thead = `<thead><tr>
+    <th class="row-head" colspan="2">${t('col_model_agent')}</th>
+    ${tasks.map(tn => `<th>${tn}</th>`).join('')}
+    <th>${t('col_total')}</th>
+  </tr></thead>`;
+
+  let tbody = '<tbody>';
+  models.forEach(model => {
+    const mShort = model.split('/').pop().replace(/-4bit$/,'').replace(/-MXFP4-Q4$/,'').replace(/[-:]/g, m => m + '<wbr>');
+    agents.forEach((agent, ai) => {
+      // total = sum of pass-rates across tasks (fractional when REPS>1)
+      const agentTotal = tasks.reduce((s, tn) => {
+        const g = idx[model+'|'+agent+'|'+tn];
+        return g ? s + g.passCount / g.rows.length : s;
+      }, 0);
+      const agentAll = tasks.filter(tn => idx[model+'|'+agent+'|'+tn]).length;
+      const totalCell = agentAll ? `<span class="${agentTotal < agentAll ? 'pass0':'pass1'}">${agentTotal % 1 === 0 ? agentTotal : agentTotal.toFixed(1)}/${agentAll}</span>` : '—';
+
+      // task cells with click handler for detail
+      const rowCells = tasks.map(task => {
+        const g = idx[model + '|' + agent + '|' + task];
+        if (!g) return '<td class="cell-empty">—</td>';
+        const n = g.rows.length;
+        const last = g.rows[n - 1];
+        // Structured rc codes (agentic-rc-structured): 0=pass, 2=infra, 10=capability miss, 124=timeout
+        const rcN = typeof last.rc === 'number' ? last.rc : parseInt(last.rc, 10);
+        const isInfra = g.infraCount > 0 && g.passCount === 0;
+        const isCap   = !isInfra && g.passCount === 0 && rcN === 10;
+        const isSkip  = !isInfra && g.passCount === 0 && rcN === 11;
+        const isTimeout = g.timeoutCount > 0 && g.passCount === 0;
+        const icon = isTimeout ? '<span class="cell-timeout">⏱</span>'
+                    : isInfra ? '<span class="cell-fail" title="infra failure (gateway)">⚡</span>'
+                    : isSkip  ? '<span class="cell-fail" title="no files written" style="opacity:.6">∅</span>'
+                    : g.passCount === n ? '<span class="cell-pass">✓</span>'
+                    : g.passCount > 0 ? `<span class="cell-pass" style="opacity:.65">${g.passCount}/${n}</span>`
+                    : '<span class="cell-fail">✗</span>';
+        const secs = typeof last.seconds === 'number' ? `<div class="cell-secs">${last.seconds}s</div>` : '';
+        const rcLabel = isInfra ? `<div class="cell-rc" style="color:#f85149">${t('cell_infra')}</div>`
+                      : isCap  ? `<div class="cell-rc" style="color:#8b949e">${t('cell_task')}</div>`
+                      : isSkip  ? `<div class="cell-rc" style="color:#8b949e">skip</div>`
+                      : n > 1 && g.passCount < n ? `<div class="cell-rc">${g.passCount}/${n}</div>` : '';
+        const onclick = `onclick="openCell('${escHtml(last.stamp)}','${escHtml(agent)}','${escHtml(model)}','${escHtml(task)}')"`;
+        return `<td ${onclick} style="cursor:pointer" title="click for details">${icon}${secs}${rcLabel}</td>`;
+      }).join('');
+
+      if (ai === 0) {
+        tbody += `<tr>
+          <td class="row-head model-cell" rowspan="${agents.length}" style="cursor:pointer" onclick="openModelInfo('${escHtml(model)}')" title="${escHtml(model)}">${mShort}</td>
+          <td class="row-head agent-cell">${agent}</td>
+          ${rowCells}<td>${totalCell}</td></tr>`;
+      } else {
+        tbody += `<tr><td class="row-head agent-cell">${agent}</td>${rowCells}<td>${totalCell}</td></tr>`;
+      }
+    });
+  });
+  tbody += '</tbody>';
+  document.getElementById('matrix-table').innerHTML = thead + tbody;
+
+  // Raw table
+  const cols = ['agent','model','task','difficulty','pass','seconds','rc','timeout','turns','tool_uses','agent_peak_mb','peak_cpu_pct','model_footprint_mb'];
+  const COL_LABELS = {agent:t('col_agent'),model:t('col_model'),task:t('col_task'),difficulty:t('col_diff'),pass:t('col_pass'),seconds:t('col_secs'),rc:t('col_rc'),timeout:t('col_to'),turns:t('col_turns'),tool_uses:t('col_tools'),agent_peak_mb:t('col_mb'),peak_cpu_pct:t('col_cpu'),model_footprint_mb:t('col_weight')};
+  const rawHead = `<thead><tr>${cols.map(c => `<th title="${c}">${COL_LABELS[c]||c}</th>`).join('')}</tr></thead>`;
+  const rawBody = '<tbody>' + cells.map(c =>
+    '<tr>' + cols.map(col => {
+      const v = c[col] ?? '—';
+      if (col === 'pass') return `<td class="pass${v}">${v ? '✓' : '✗'}</td>`;
+      if (col === 'model') return `<td style="cursor:pointer;color:#60a5fa;text-align:left" onclick="openModelInfo('${escHtml(String(v))}')">${escHtml(String(v))}</td>`;
+      return `<td>${escHtml(String(v))}</td>`;
+    }).join('') + '</tr>'
+  ).join('') + '</tbody>';
+  document.getElementById('raw-table').innerHTML = rawHead + rawBody;
+}
+
+// ── Live panel ─────────────────────────────────────────────────────────────────
+async function loadLive() {
+  try {
+    const r = await fetch('/control/matrix/live');
+    if (!r.ok) return;
+    const d = await r.json();
+    const panel = document.getElementById('live-panel');
+    const isActive = d.status === 'running' || d.status === 'paused' || d.status === 'done';
+    panel.classList.toggle('active', isActive);
+    if (!isActive) return;
+
+    const done  = d.progress?.done  ?? 0;
+    const total = d.progress?.total ?? 0;
+    const pct   = total ? Math.round(done / total * 100) : 0;
+    const elH   = Math.floor((d.elapsed_s||0) / 3600);
+    const elM   = Math.floor(((d.elapsed_s||0) % 3600) / 60);
+    const elS   = (d.elapsed_s||0) % 60;
+    const elStr = elH ? `${elH}ч ${elM}м` : elM ? `${elM}м ${elS}с` : `${elS}с`;
+
+    const statusColor = d.status === 'paused' ? '#e3b341' : d.status === 'done' ? '#56d364' : '#56d364';
+    const statusLabel = d.status === 'paused' ? t('live_s_paused') : d.status === 'done' ? t('live_s_done') : t('live_s_running');
+    const mem = d.memory || {};
+    document.getElementById('live-grid').innerHTML = `
+      <div class="live-stat"><div class="lv">${done}/${total}</div><div class="lk">${t('live_tasks')}</div></div>
+      <div class="live-stat"><div class="lv">${pct}%</div><div class="lk">${t('live_progress')}</div></div>
+      <div class="live-stat"><div class="lv">${elStr}</div><div class="lk">${t('live_elapsed')}</div></div>
+      <div class="live-stat"><div class="lv">${mem.available_gib?.toFixed(1) ?? '—'} GB</div><div class="lk">${t('live_ram_free')}</div></div>
+      <div class="live-stat"><div class="lv">${mem.committed_gib?.toFixed(1) ?? '—'} GB</div><div class="lk">${t('live_ram_used')}</div></div>
+      <div class="live-stat"><div class="lv" style="color:${statusColor}">${statusLabel}</div><div class="lk">${t('live_status')}</div></div>
+    `;
+    document.getElementById('live-progress').style.width = pct + '%';
+    document.getElementById('live-hint').textContent = d.current_hint || '';
+  } catch(e) {}
+}
+
+async function matrixCtrl(action) {
+  try {
+    await fetch('/control/matrix/' + action, { method: 'POST', credentials: 'include' });
+    await load();
+    await loadLive();
+  } catch(e) {}
+}
+
+// ── Enqueue ────────────────────────────────────────────────────────────────────
+async function enqueueAll() {
+  const msg = document.getElementById('run-msg');
+  msg.textContent = t('msg_launching'); msg.style.color = '';
+  try {
+    const reps = parseInt(document.getElementById('reps-select')?.value || '1', 10);
+    const body = reps > 1 ? { reps } : {};
+    const r = await fetch('/control/matrix/run', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { if (r.status === 401) { location.href = '/login.html'; return; } throw new Error(r.status); }
+    const d = await r.json();
+    msg.style.color = '#56d364'; msg.textContent = '✓ ' + d.id;
+    setTimeout(() => { msg.textContent = ''; msg.style.color = ''; }, 4000);
+    load();
+  } catch(e) { msg.style.color = '#f85149'; msg.textContent = t('msg_error') + e.message; }
+}
+
+async function enqueue() {
+  const btn = document.getElementById('run-btn');
+  const msg = document.getElementById('run-msg');
+  const models = selectedChips('model-chips');
+  const agents = selectedChips('agent-chips');
+  const tasks  = selectedChips('task-chips');
+  if (!agents.length || !tasks.length) { msg.textContent = t('msg_select'); return; }
+
+  btn.disabled = true;
+  msg.textContent = t('msg_queuing');
+  try {
+    const reps = parseInt(document.getElementById('reps-select')?.value || '1', 10);
+    const body = {};
+    if (models.length && document.querySelectorAll('#model-chips .chip').length !== models.length) body.models = models;
+    if (agents.length && agents.length !== AGENTS_DEFAULT.length) body.agents = agents;
+    if (tasks.length  && tasks.length  !== TASKS_DEFAULT.length)  body.tasks  = tasks;
+    if (reps > 1) body.reps = reps;
+    const r = await fetch('/control/matrix/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { if (r.status === 401) { location.href = '/login.html'; return; } throw new Error(r.status); }
+    const d = await r.json();
+    msg.style.color = '#56d364';
+    msg.textContent = t('msg_queued_ok') + d.id;
+    setTimeout(() => { msg.textContent = ''; msg.style.color = ''; }, 4000);
+    load();
+  } catch(e) {
+    msg.style.color = '#f85149';
+    msg.textContent = t('msg_error') + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Info overlay (models + tasks) ──────────────────────────────────────────────
+function closeModelInfo() {
+  document.getElementById('model-panel').classList.remove('open');
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModelInfo(); });
+
+function _appendToggle(container, chip, labelOff, labelOn) {
+  const btn = document.createElement('button');
+  btn.style.cssText = 'margin-top:14px;width:100%;padding:8px 12px;border-radius:6px;border-width:1px;border-style:solid;cursor:pointer;font-size:13px;font-weight:500;display:block';
+  const upd = () => {
+    const on = chip.classList.contains('on');
+    btn.textContent = on ? '✓ ' + labelOn : '+ ' + labelOff;
+    btn.style.background = on ? '#1f3a28' : '#21262d';
+    btn.style.borderColor = on ? '#2ea043' : '#30363d';
+    btn.style.color = on ? '#56d364' : '#8b949e';
+  };
+  upd();
+  btn.onclick = () => { chip.classList.toggle('on'); upd(); };
+  container.appendChild(btn);
+}
+
+function _renderModelCard(d) {
+  const row = (label, val) => val ? `<div class="minfo-row"><span class="minfo-label">${label}</span><span class="minfo-value">${escHtml(String(val))}</span></div>` : '';
+  const inMem = d.resident ? `${t('mc_yes')} (pid ${d.resident.pid}, :${d.resident.port})` : t('mc_no');
+  return row(t('mc_spec'), d.spec) +
+    row(t('mc_arch'), d.model_type) +
+    row(t('mc_quant'), d.quant) +
+    row(t('mc_ctx'), d.max_ctx ? d.max_ctx + ' tokens' : '') +
+    row(t('mc_layers'), d.num_layers) +
+    row(t('mc_attn'), d.num_attn_heads) +
+    row(t('mc_kv'), d.num_kv_heads) +
+    row(t('mc_hidden'), d.hidden_size) +
+    row(t('mc_moe'), d.n_experts ? `${d.n_experts} experts, ${d.experts_per_tok} active` : '') +
+    row(t('mc_size'), d.size_gib ? d.size_gib + ' GiB' : '') +
+    row(t('mc_mem'), inMem) +
+    (d.notes ? `<div class="minfo-notes">${escHtml(d.notes)}</div>` : '');
+}
+async function _fetchModelInfo(spec) {
+  const r = await fetch('/control/model/info?spec=' + encodeURIComponent(spec));
+  if (!r.ok) return null;
+  try { return await r.json(); } catch { return null; }
+}
+async function openModelInfo(spec) {
+  const parts = spec.split('+').map(s => s.trim()).filter(Boolean);
+  const nameEl = document.getElementById('model-info-name');
+  const bodyEl = document.getElementById('model-info-body');
+  nameEl.textContent = parts.length > 1 ? t('mi_pipeline').replace('{n}', parts.length) : spec;
+  bodyEl.textContent = t('mi_loading');
+  document.getElementById('model-panel').classList.add('open');
+  try {
+    if (parts.length > 1) {
+      const results = await Promise.all(parts.map(_fetchModelInfo));
+      let html = '';
+      parts.forEach((p, i) => {
+        const d = results[i];
+        html += `<div style="border-top:1px solid #30363d;margin-top:10px;padding-top:10px">`;
+        html += `<div style="font-size:12px;color:#8b949e;margin-bottom:6px">${i === 0 ? t('mi_planner') : t('mi_executor')}</div>`;
+        html += d ? _renderModelCard(d) : `<div class="minfo-row"><span class="minfo-value" style="color:#8b949e">${escHtml(p)}</span></div>`;
+        html += '</div>';
+      });
+      bodyEl.innerHTML = html;
+    } else {
+      const d = await _fetchModelInfo(spec);
+      if (!d) { bodyEl.textContent = t('mi_not_found'); return; }
+      nameEl.textContent = d.display_name || d.name || spec;
+      bodyEl.innerHTML = _renderModelCard(d);
+    }
+  } catch(e) {
+    bodyEl.textContent = t('mi_error');
+  }
+  // Toggle button — only if this model has a chip in the run selector
+  const chip = Array.from(document.querySelectorAll('#model-chips .chip')).find(c => c.dataset.val === spec);
+  if (chip) _appendToggle(bodyEl, chip, t('mi_add'), t('mi_added'));
+}
+
+function getTaskInfo() {
+  return {
+    greet: { label: 'Greet', type: t('task_greet_type'), desc: t('task_greet_desc') },
+    build: { label: 'Build', type: t('task_build_type'), desc: t('task_build_desc') },
+    fix:   { label: 'Fix',   type: t('task_fix_type'),   desc: t('task_fix_desc')   },
+    test:  { label: 'Test',  type: t('task_test_type'),  desc: t('task_test_desc')  },
+    debug: { label: 'Debug', type: t('task_debug_type'), desc: t('task_debug_desc') },
+    rpn:   { label: 'RPN',   type: t('task_rpn_type'),   desc: t('task_rpn_desc')   },
+  };
+}
+function openTaskInfo(task) {
+  const info = getTaskInfo()[task] || { label: task, type: '', desc: t('ti_no_desc') };
+  const row = (label, val) => val ? `<div class="minfo-row"><span class="minfo-label">${label}</span><span class="minfo-value">${escHtml(String(val))}</span></div>` : '';
+  document.getElementById('model-info-name').textContent = info.label;
+  const bodyEl = document.getElementById('model-info-body');
+  bodyEl.innerHTML = row(t('ti_type'), info.type) + `<div class="minfo-notes" style="margin-top:8px">${escHtml(info.desc)}</div>`;
+  document.getElementById('model-panel').classList.add('open');
+  const chip = Array.from(document.querySelectorAll('#task-chips .chip')).find(c => c.dataset.val === task);
+  if (chip) _appendToggle(bodyEl, chip, t('mi_add'), t('mi_added'));
+}
+
+// ── Log overlay ────────────────────────────────────────────────────────────────
+let _logInterval = null;
+async function openLog(jobId, logPath) {
+  document.getElementById('log-panel').classList.add('open');
+  document.getElementById('log-title').textContent = logPath.split('/').pop();
+  await fetchLog(jobId);
+  clearInterval(_logInterval);
+  _logInterval = setInterval(() => fetchLog(jobId), 3000);
+}
+async function fetchLog(jobId) {
+  try {
+    const r = await fetch('/control/matrix/log?job_id=' + encodeURIComponent(jobId) + '&tail=300');
+    if (!r.ok) return;
+    const d = await r.json();
+    const el = document.getElementById('log-content');
+    el.textContent = d.log || t('log_empty');
+  } catch{}
+}
+function closeLog() {
+  clearInterval(_logInterval);
+  document.getElementById('log-panel').classList.remove('open');
+}
+
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ── Cell detail ───────────────────────────────────────────────────────────────
+async function openCell(stamp, agent, model, task) {
+  const panel = document.getElementById('cell-panel');
+  const body  = document.getElementById('cell-body');
+  document.getElementById('cell-title').textContent = `${agent} × ${model.split('/').pop()} × ${task}`;
+  body.innerHTML = `<div style="color:#8b949e;padding:20px">${t('mi_loading')}</div>`;
+  panel.classList.add('open');
+
+  try {
+    const url = `/control/matrix/cell?stamp=${encodeURIComponent(stamp)}&agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}&task=${encodeURIComponent(task)}&tail=500`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    body.innerHTML = renderCellDetail(d, agent, model, task);
+  } catch(e) {
+    body.innerHTML = `<div style="color:#f85149">Error: ${escHtml(e.message)}</div>`;
+  }
+}
+
+let _cellData = null; // cached for tab switching
+
+function switchCellTab(name, btn) {
+  document.querySelectorAll('.cell-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  if (!_cellData) return;
+  const body = document.getElementById('cell-body');
+  if (name === 'metrics') body.innerHTML = renderMetrics(_cellData);
+  else if (name === 'dialog') body.innerHTML = renderDialog(_cellData);
+  else body.innerHTML = renderRawLog(_cellData);
+}
+
+function renderCellDetail(d, agent, model, task) {
+  _cellData = { ...d, agent, model, task };
+  // reset to metrics tab
+  document.querySelectorAll('.cell-tab').forEach((b,i) => b.classList.toggle('active', i===0));
+  return renderMetrics(_cellData);
+}
+
+function renderMetrics(d) {
+  const c = d.cell || {}, ti = d.task_info || {};
+  const DIFF = ['','★','★★','★★★','★★★★','★★★★','★★★★★★'];
+  let html = `<div class="cell-section">
+    <h3>Task — ${escHtml(ti.label || d.task)} ${ti.difficulty ? DIFF[ti.difficulty]||'' : ''}</h3>
+    <div class="prompt-text">${escHtml(ti.prompt || t('no_prompt'))}</div>
+    ${ti.expected ? `<div class="expected">${t('expected')} ${escHtml(ti.expected)}</div>` : ''}
+  </div>`;
+  const passVal = c.pass !== undefined ? (c.pass == 1 ? '✓ pass' : '✗ fail') : '—';
+  const passClass = c.pass == 1 ? 'pass' : (c.pass !== undefined ? 'fail' : '');
+  const metrics = [
+    { k: 'result',     v: passVal,              cls: passClass },
+    { k: 'seconds',    v: c.seconds ?? '—' },
+    { k: 'turns',      v: c.turns   ?? '—' },
+    { k: 'tool uses',  v: c.tool_uses ?? '—' },
+    { k: 'rc', v: (() => {
+        const rcN = typeof c.rc === 'number' ? c.rc : parseInt(c.rc, 10);
+        if (!rcN && rcN !== 0) return '—';
+        const rcLabels = { 0: t('rc_0'), 2: t('rc_2'), 10: t('rc_10'), 11: t('rc_11'), 124: t('rc_124') };
+        return rcLabels[rcN] ?? String(rcN);
+      })() },
+    { k: 'timeout',    v: c.timeout == 1 ? '⏱ yes' : (c.timeout !== undefined ? 'no' : '—') },
+    { k: 'agent RAM',  v: c.agent_peak_mb  ? c.agent_peak_mb  + ' MB' : '—' },
+    { k: 'peak CPU',   v: c.peak_cpu_pct   ? c.peak_cpu_pct   + '%'   : '—' },
+    { k: 'model VRAM', v: c.model_footprint_mb ? (c.model_footprint_mb/1024).toFixed(1)+' GiB' : '—' },
+  ];
+  html += `<div class="cell-section"><h3>Metrics</h3><div class="metrics-grid">
+    ${metrics.map(m => `<div class="metric-item"><div class="mk">${escHtml(m.k)}</div><div class="mv${m.cls?' '+m.cls:''}">${escHtml(String(m.v))}</div></div>`).join('')}
+  </div></div>`;
+  if (d.triage_out && d.triage_out.trim()) {
+    const tc = d.triage_out.trim();
+    const tcolor = tc.startsWith('pass') ? '#56d364' : tc.startsWith('timeout') ? '#e3b341' : '#f85149';
+    html += `<div class="cell-section"><h3 style="display:flex;gap:8px;align-items:center">🔍 Triage <span style="font-size:11px;font-weight:400;color:${tcolor}">${escHtml(tc)}</span></h3></div>`;
+  }
+  if (d.verify_out) {
+    html += `<div class="cell-section"><h3>Verify output</h3><pre style="font-size:11px;white-space:pre-wrap;color:#c9d1d9">${escHtml(d.verify_out.trim())}</pre></div>`;
+  }
+  return html;
+}
+
+function renderRawLog(d) {
+  if (!d.agent_log) {
+    const note = d.has_logs ? t('no_log_missing') : t('no_log_general');
+    return `<div class="cell-section"><p class="no-logs-note">${note}</p></div>`;
+  }
+  return `<div class="cell-section"><pre id="cell-agent-log">${escHtml(d.agent_log)}</pre></div>`;
+}
+
+// ── Dialog parser ──────────────────────────────────────────────────────────────
+
+function parseClaudeJsonl(log) {
+  const turns = [];
+  const toolMap = {}; // id → tool name
+  for (const line of log.split('\n')) {
+    if (!line.startsWith('{')) continue;
+    let obj; try { obj = JSON.parse(line); } catch { continue; }
+    if (obj.type === 'assistant' && obj.message?.content) {
+      const parts = [];
+      for (const c of obj.message.content) {
+        if (c.type === 'text' && c.text?.trim()) parts.push({ kind: 'text', text: c.text.trim() });
+        else if (c.type === 'tool_use') {
+          toolMap[c.id] = c.name;
+          const inputStr = typeof c.input === 'object' ? JSON.stringify(c.input, null, 2) : String(c.input||'');
+          parts.push({ kind: 'tool', name: c.name, input: inputStr, id: c.id });
+        }
+      }
+      if (parts.length) turns.push({ role: 'assistant', parts });
+    } else if (obj.type === 'user' && obj.message?.content) {
+      for (const c of (Array.isArray(obj.message.content) ? obj.message.content : [])) {
+        if (c.type === 'tool_result') {
+          const content = Array.isArray(c.content) ? c.content.map(x => x.text||'').join('')
+            : (typeof c.content === 'string' ? c.content : JSON.stringify(c.content||''));
+          turns.push({ role: 'tool_result', tool_use_id: c.tool_use_id, tool_name: toolMap[c.tool_use_id]||'', content: content.trim() });
+        }
+      }
+    } else if (obj.type === 'result') {
+      turns.push({ role: 'result', ok: !obj.is_error, text: obj.result||'', ms: obj.duration_ms });
+    }
+  }
+  return turns;
+}
+
+function parseCodexPlain(log) {
+  const ROLES = new Set(['user','codex','opencode','exec','assistant']);
+  const turns = [];
+  let role = null, buf = [];
+  for (const line of log.split('\n')) {
+    const tr = line.trim();
+    if (ROLES.has(tr)) {
+      if (role && buf.join('\n').trim()) turns.push({ role, text: buf.join('\n').trim() });
+      role = tr; buf = [];
+    } else {
+      buf.push(line);
+    }
+  }
+  if (role && buf.join('\n').trim()) turns.push({ role, text: buf.join('\n').trim() });
+  return turns;
+}
+
+function renderDialog(d) {
+  if (!d.agent_log) {
+    return `<div class="cell-section"><p class="no-logs-note">${t('no_log_simple')}</p></div>`;
+  }
+  const log = d.agent_log;
+  const isJsonl = log.includes('"type":"assistant"') || log.includes('"type":"result"');
+  const turns = isJsonl ? parseClaudeJsonl(log) : parseCodexPlain(log);
+
+  if (!turns.length) {
+    return `<div class="cell-section"><p class="no-logs-note">${t('dialog_empty')}</p></div>`;
+  }
+
+  let html = '<div class="dialog-wrap">';
+  // Show task prompt first
+  const ti = d.task_info || {};
+  if (ti.prompt) {
+    html += `<div class="turn turn-user"><div class="turn-label">${t('turn_task')}</div><div class="turn-bubble">${escHtml(ti.prompt)}</div></div>`;
+  }
+
+  for (const turn of turns) {
+    if (turn.role === 'assistant') {
+      for (const part of turn.parts) {
+        if (part.kind === 'text') {
+          html += `<div class="turn turn-assistant"><div class="turn-label">${t('turn_model')}</div><div class="turn-bubble">${escHtml(part.text)}</div></div>`;
+        } else if (part.kind === 'tool') {
+          const uid = 'td' + Math.random().toString(36).slice(2);
+          html += `<div class="turn turn-tool">
+            <div class="tool-header" onclick="document.getElementById('${uid}').style.display=document.getElementById('${uid}').style.display==='none'?'':'none'">
+              ${escHtml(part.name)} <span style="color:#8b949e;font-size:10px">▼</span>
+            </div>
+            <div class="tool-body" id="${uid}">${escHtml(part.input)}</div>
+          </div>`;
+        }
+      }
+    } else if (turn.role === 'tool_result') {
+      const preview = turn.content.length > 500 ? turn.content.slice(0, 500) + '\n…' : turn.content;
+      html += `<div class="turn turn-tool-result"><div class="result-body">${escHtml(preview)}</div></div>`;
+    } else if (turn.role === 'result') {
+      const ms = turn.ms ? ` (${(turn.ms/1000).toFixed(1)}s)` : '';
+      html += `<div class="turn-result ${turn.ok?'ok':'err'}">${turn.ok?'✅':'❌'} ${escHtml(turn.text||'')}${ms}</div>`;
+    } else if (turn.role === 'user') {
+      html += `<div class="turn turn-user"><div class="turn-label">${t('turn_user')}</div><div class="turn-bubble">${escHtml(turn.text)}</div></div>`;
+    } else if (turn.role === 'codex' || turn.role === 'opencode' || turn.role === 'assistant') {
+      html += `<div class="turn turn-assistant"><div class="turn-label">${t('turn_model')}</div><div class="turn-bubble">${escHtml(turn.text)}</div></div>`;
+    } else if (turn.role === 'exec') {
+      const uid = 'td' + Math.random().toString(36).slice(2);
+      const lines = turn.text.split('\n');
+      const cmd = lines[0] || '';
+      const out = lines.slice(1).join('\n').trim();
+      html += `<div class="turn turn-tool">
+        <div class="tool-header" onclick="document.getElementById('${uid}').style.display=document.getElementById('${uid}').style.display==='none'?'':'none'">
+          exec: ${escHtml(cmd)} <span style="color:#8b949e;font-size:10px">▼</span>
+        </div>
+        <div class="tool-body" id="${uid}">${escHtml(out)}</div>
+      </div>`;
+    }
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function closeCell() {
+  document.getElementById('cell-panel').classList.remove('open');
+  _cellData = null;
+}
+
+// ── Pull-to-refresh ────────────────────────────────────────────────────────────
+(function() {
+  const ptr = document.getElementById('ptr');
+  const THRESHOLD = 64;
+  let startY = 0, pulling = false, refreshing = false;
+
+  document.addEventListener('touchstart', e => {
+    if (window.scrollY === 0) { startY = e.touches[0].clientY; pulling = true; }
+  }, { passive: true });
+
+  document.addEventListener('touchmove', e => {
+    if (!pulling || refreshing) return;
+    const dy = Math.max(0, e.touches[0].clientY - startY);
+    const progress = Math.min(dy / THRESHOLD, 1);
+    const h = Math.min(dy * 0.5, THRESHOLD * 0.5);
+    ptr.style.height = h + 'px';
+    ptr.style.setProperty('--deg', Math.round(progress * 270) + 'deg');
+    ptr.classList.toggle('pulling', dy > 8);
+  }, { passive: true });
+
+  document.addEventListener('touchend', async () => {
+    if (!pulling) return;
+    pulling = false;
+    const h = parseFloat(ptr.style.height) || 0;
+    if (h >= THRESHOLD * 0.4) {
+      refreshing = true;
+      ptr.style.height = '44px';
+      ptr.classList.remove('pulling');
+      ptr.classList.add('loading');
+      await load();
+      ptr.classList.remove('loading');
+    }
+    ptr.style.height = '0';
+    ptr.classList.remove('pulling');
+    refreshing = false;
+  });
+})();
+
+// ── Init ───────────────────────────────────────────────────────────────────────
+applyI18n();
+makeChips('agent-chips', AGENTS_DEFAULT, true);
+makeChips('task-chips', TASKS_DEFAULT, true, task => openTaskInfo(task));
+makeChips('model-chips', [], false, spec => openModelInfo(spec)); // filled after first load
+load();
+loadLive();
+setInterval(load, 8000);
+setInterval(loadLive, 3000);
+</script>
+</body>
+</html>

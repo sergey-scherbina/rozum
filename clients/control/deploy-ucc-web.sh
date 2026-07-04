@@ -383,6 +383,12 @@ for f in manifest.webmanifest icon.svg icon-180.png sw.js; do
   [ -f "$HERE/pwa/$f" ] && cp "$HERE/pwa/$f" "$SITE/$f" && echo ">> copied $f"
 done
 
+# 4b) Copy hand-authored site pages (admin, invite, matrix, view, coder-log).
+#     These are NOT compiled from .ssc — they live in clients/control/site/ in the repo.
+for f in admin.html invite.html coder-log.html matrix.html view.html; do
+  [ -f "$HERE/site/$f" ] && cp "$HERE/site/$f" "$SITE/$f" && echo ">> copied $f"
+done
+
 # 5) (Re)load only com.rozum.ucc-control (no more ucc-web Python service).
 UID_=$(id -u)
 plist="$HOME/Library/LaunchAgents/com.rozum.ucc-control.plist"
