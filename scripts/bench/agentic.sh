@@ -52,7 +52,7 @@ repo="$(cd "$here/../.." && pwd)"
 cd "$repo"
 
 RUN_TIMEOUT="${RUN_TIMEOUT:-600}"
-GEN_TIMEOUT="${GEN_TIMEOUT:-300}"
+GEN_TIMEOUT="${GEN_TIMEOUT:-120}"
 MAX_TURNS="${MAX_TURNS:-15}"
 PORT_BASE="${BENCH_PORT_BASE:-8300}"
 # Verify-repair: after the agent reports "done", DON'T trust it — `verify_task` runs the real
@@ -220,6 +220,16 @@ write_agentic_meta() { # $1=workdir $2=agent $3=model $4=task $5=pass $6=timeout
 
 verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0=pass
   local t="$1" w="$2" log="$3" fail=0
+  # Auto-rescue: opencode (and some models) create a subdirectory (e.g. reverse-cli/) instead of
+  # putting files directly in the workdir. If Cargo.toml is missing but exactly one first-level
+  # subdir has it, move the contents up silently so the verifier doesn't penalise a layout bug.
+  if [ "$t" != greet ] && [ ! -f "$w/Cargo.toml" ]; then
+    for sub in "$w"/*/; do
+      if [ -f "${sub}Cargo.toml" ]; then
+        cp -a "${sub}." "$w/" 2>/dev/null; rm -rf "$sub"; break
+      fi
+    done
+  fi
   ( cd "$w"
     case "$t" in
       greet) grep -qiE '\bpong\b' "$log" && { echo "    PASS  said pong"; exit 0; } || { echo "    FAIL  no 'pong'"; exit 1; } ;;
@@ -323,6 +333,17 @@ repair_diagnostic() { # $1=task  $2=workdir
     # src/main.rs is missing or still the default "Hello, world!" stub, the build "passes" but the
     # program that runs is NOT the agent's code — and a runtime-only diagnostic ("output is X") never
     # reveals why. Surface the placement so repair can converge instead of thrashing.
+    # Check for the common opencode/weak-model mistake: creating a subdirectory (e.g. reverse-cli/)
+    # instead of writing directly to the workdir. The auto-rescue in verify_task already moves
+    # contents up, but if we reach repair_diagnostic after a non-rescued state, surface it clearly.
+    if [ ! -f Cargo.toml ]; then
+      for sub in */; do
+        if [ -f "${sub}Cargo.toml" ]; then
+          echo "WRONG DIRECTORY: your files are in ./${sub} but the benchmark expects them in the current directory ($(pwd)). Fix: cd .. && mv ${sub}* . && mv ${sub}src . 2>/dev/null; rm -rf ${sub}"
+          exit 0
+        fi
+      done
+    fi
     src_is_stub=0
     if [ -f src/main.rs ] && grep -q 'Hello, world!' src/main.rs && [ "$(wc -l < src/main.rs)" -le 5 ]; then
       src_is_stub=1

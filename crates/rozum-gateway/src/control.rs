@@ -1472,6 +1472,8 @@ async fn run_matrix_job(job_id: &str) {
         .env("ROZUM_SAMPLING_SEED", "1234")
         .env("KEEP", "1") // preserve workdirs so we can archive cell logs
         .env("REPS", reps.to_string())
+        .env("REPAIR", "1") // one verify-repair retry: feeds real compiler error back on first fail
+        .env("GEN_TIMEOUT", "120") // 120s per-generation; frozen model fails fast, leaves room for retry
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_out))
         .stderr(Stdio::from(log_err))
