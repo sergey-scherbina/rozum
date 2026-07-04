@@ -133,8 +133,223 @@ sed -i '' 's/body{margin:0;padding:0;background:#fff;/body{margin:0;padding:0;ba
 # Models panel action buttons.  The `lcol` link text = field value, so CSS hides the raw text
 # (font-size:0) and shows the real label via ::before.  Empty-value links are hidden with display:none.
 # Note: </head> (line 7) is in the actual HTML head — NOT inside JS strings (those are </style> at ~4k).
-CSS='a[href^="#/detail/"]{color:#60a5fa;text-decoration:none}a[href^="/control/gateway/load?model="]:not([href$="model="]){display:inline-block;padding:3px 6px;border-radius:4px;background:#3b82f6;color:#fff;text-decoration:none;cursor:pointer;white-space:nowrap;font-size:0}a[href^="/control/gateway/load?model="]:not([href$="model="])::before{content:"загрузить";font-size:12px;color:#fff}a[href$="?model="]{display:none}a[href^="/control/gateway/stop?k="]:not([href$="?k="]){display:inline-block;padding:3px 6px;border-radius:4px;background:#374151;color:#fff;text-decoration:none;cursor:pointer;white-space:nowrap;font-size:0}a[href^="/control/gateway/stop?k="]:not([href$="?k="])::before{content:"выгрузить";font-size:12px;color:#fff}a[href$="?k="]{display:none}[data-ssc-fetch-table]{max-width:100%;overflow:hidden}[data-ssc-fetch-table] table{table-layout:fixed;width:100%}[data-ssc-fetch-table] td,[data-ssc-fetch-table] th{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px 6px}[role="dialog"]{max-height:82vh;overflow-y:auto}'
-sed -i '' "s|</head>|<style>${CSS}</style></head>|" "$SITE/index.html"
+# All post-emit HTML patches via Python — avoids sed & escaping pitfalls.
+# The compiled SPA JS contains </head> and </body> in a template literal (line ~4134),
+# so plain sed hits the wrong occurrences.  Python targets the FIRST </head> (real
+# HTML head at line 7) and the LAST </body> (real HTML body close), skipping the ones
+# inside the JS template literal.
+python3 - "$SITE/index.html" <<'PYEOF'
+import sys
+p = sys.argv[1]
+h = open(p).read()
+
+css = (
+    'a[href^="#/detail/"]{color:#60a5fa;text-decoration:none}'
+    'a[href^="/control/gateway/load?model="]:not([href$="model="]){display:inline-block;padding:3px 6px;border-radius:4px;background:#3b82f6;color:#fff;text-decoration:none;cursor:pointer;white-space:nowrap;font-size:0}'
+    'a[href^="/control/gateway/load?model="]:not([href$="model="])::before{content:"load";font-size:11px;color:#fff}'
+    'a[href$="?model="]{display:none}'
+    'a[href^="/control/gateway/stop?k="]:not([href$="?k="]){display:inline-block;padding:3px 6px;border-radius:4px;background:#374151;color:#fff;text-decoration:none;cursor:pointer;white-space:nowrap;font-size:0}'
+    'a[href^="/control/gateway/stop?k="]:not([href$="?k="])::before{content:"unload";font-size:11px;color:#fff}'
+    'a[href$="?k="]{display:none}'
+    'a[href^="#/chat/"]{color:#60a5fa!important;text-decoration:none}'
+    'a[href^="#/chat/"]:visited{color:#60a5fa!important}'
+    '[data-ssc-datatable] thead{background:#1f2937!important}'
+    '[data-ssc-datatable] th{color:#6b7280!important;border-bottom-color:#374151!important}'
+    '[data-ssc-datatable]{max-width:100%;overflow:hidden}'
+    '[data-ssc-datatable] table{table-layout:auto;width:100%}'
+    '[data-ssc-datatable] td,[data-ssc-datatable] th{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px 6px}'
+    '[data-ssc-datatable] td:nth-child(1),[data-ssc-datatable] th:nth-child(1){white-space:normal;word-break:break-word}'
+    '[role="dialog"]{position:relative;max-height:82vh;overflow-y:auto}'
+    '[role="dialog"] a[href="#/"]{position:absolute;top:8px;right:10px;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;font-size:22px;font-weight:300;color:#e5e7eb;text-decoration:none;line-height:1;z-index:1;border-radius:50%;background:rgba(255,255,255,0.08);box-shadow:0 2px 8px rgba(0,0,0,0.55),0 1px 2px rgba(0,0,0,0.35)}'
+    '#rozum-lang{position:fixed;bottom:16px;right:16px;display:flex;gap:1px;z-index:999;box-shadow:0 2px 8px rgba(0,0,0,.5)}'
+    '.rl-btn{background:#21262d;color:#6e7681;border:1px solid #30363d;padding:4px 8px;cursor:pointer;font-size:11px;font-weight:600;letter-spacing:.03em}'
+    '.rl-btn:first-child{border-radius:5px 0 0 5px}.rl-btn:last-child{border-radius:0 5px 5px 0}'
+    '.rl-btn.active{background:#1f3a28;border-color:#2ea043;color:#56d364}'
+    # CSS-driven translations for the load/unload button labels via lang attribute on <html>
+    'html[lang=ru] a[href^="/control/gateway/load?model="]:not([href$="model="])::before{content:"загрузить"}'
+    'html[lang=ru] a[href^="/control/gateway/stop?k="]:not([href$="?k="])::before{content:"выгрузить"}'
+    'html[lang=uk] a[href^="/control/gateway/load?model="]:not([href$="model="])::before{content:"завантажити"}'
+    'html[lang=uk] a[href^="/control/gateway/stop?k="]:not([href$="?k="])::before{content:"вивантажити"}'
+)
+# FIRST </head> = real HTML head close (line 7); JS template literal </head> is further down
+h = h.replace('</head>', '<style>' + css + '</style></head>', 1)
+
+# Translation maps: EN (native) → RU and UK
+TR_RU = {
+    # nav
+    '🤖 Agents':'🤖 Агенты','💻 Coders':'💻 Кодеры','🖥 Sessions':'🖥 Сессии',
+    '📊 Matrix':'📊 Матрица','🔐 Login':'🔐 Вход',
+    # dashboard cards
+    'Gateway / residency':'Шлюз / резидентность',
+    'source:':'источник:','available:':'доступно:','host budget:':'бюджет:','committed:':'используется:',
+    '↻ refresh':'↻ обновить','Models':'Модели','Model':'Модель',
+    # chat
+    '← back':'← назад','send':'отправить','message…':'сообщение…',
+    'Room incidents':'Инциденты комнаты','incident':'инцидент',
+    # agents
+    'Agents':'Агенты','Running agents':'Запущенные агенты','select':'выбрать',
+    'Launch agent (model + room)':'Запустить агента','free RAM:':'свободно RAM:',
+    'model:':'модель:','room…':'комната…',
+    'reply policy: mention | always | manual':'когда отвечать: mention | always | manual',
+    'persona / context (optional)…':'персона / контекст (необязательно)…',
+    '🤖 launch (RAM check)':'🤖 запустить (проверка памяти)',
+    'Stop agent':'Остановить агента','agent id (from list)…':'id агента (из списка)…','stop':'стоп',
+    # coders
+    'Coders':'Кодеры','Running coders':'Запущенные кодеры',
+    'Launch coder (real work in repo)':'Запустить кодера (реальная работа)',
+    'agent:':'агент:','folder:':'папка:','project':'проект',
+    'project name…':'имя проекта…','task…':'задание…','＋ create':'＋ создать',
+    '💻 launch (RAM check)':'💻 запустить (проверка памяти)',
+    'Coder log':'Лог кодера','coder id (from list)…':'id кодера (из списка)…',
+    '↻ log':'↻ лог','Stop coder':'Остановить кодера','coder id…':'id кодера…',
+    # sessions
+    'Sessions':'Сессии','Live sessions (terminal)':'Живые сессии (терминал)',
+    '🖥 terminal':'🖥 терминал','New interactive session':'Новая интерактивная сессия',
+    'first task (optional)…':'первое задание (необязательно)…',
+    '🖥 launch session':'🖥 запустить сессию','Stop session':'Остановить сессию',
+    'session id…':'id сессии…',
+    # model detail modal
+    'Model details':'Характеристики модели',
+    'Architecture:':'Архитектура:','Quantization:':'Квантизация:','Context:':'Контекст:',
+    'Layers:':'Слои:','Size:':'Размер:','Resident:':'В памяти:','Notes:':'Примечание:',
+    'no':'нет',
+}
+TR_UK = {
+    '🤖 Agents':'🤖 Агенти','💻 Coders':'💻 Кодери','🖥 Sessions':'🖥 Сесії',
+    '📊 Matrix':'📊 Матриця','🔐 Login':'🔐 Вхід',
+    'Gateway / residency':'Шлюз / резидентність',
+    'source:':'джерело:','available:':'доступно:','host budget:':"бюджет хоста:",'committed:':'зайнято:',
+    '↻ refresh':'↻ оновити','Models':'Моделі','Model':'Модель',
+    '← back':'← назад','send':'надіслати','message…':'повідомлення…',
+    'Room incidents':'Інциденти кімнати','incident':'інцидент',
+    'Agents':'Агенти','Running agents':'Запущені агенти','select':'вибрати',
+    'Launch agent (model + room)':'Запустити агента','free RAM:':'вільно RAM:',
+    'model:':'модель:','room…':'кімната…',
+    'reply policy: mention | always | manual':'коли відповідати: mention | always | manual',
+    "persona / context (optional)…":"персона / контекст (необов'язково)…",
+    '🤖 launch (RAM check)':'🤖 запустити (перевірка RAM)',
+    'Stop agent':'Зупинити агента','agent id (from list)…':'id агента (зі списку)…','stop':'стоп',
+    'Coders':'Кодери','Running coders':'Запущені кодери',
+    'Launch coder (real work in repo)':'Запустити кодера (реальна робота)',
+    'agent:':'агент:','folder:':'папка:','project':'проект',
+    'project name…':'назва проекту…','task…':'завдання…','＋ create':'＋ створити',
+    '💻 launch (RAM check)':'💻 запустити (перевірка RAM)',
+    'Coder log':'Лог кодера','coder id (from list)…':'id кодера (зі списку)…',
+    '↻ log':'↻ лог','Stop coder':'Зупинити кодера','coder id…':'id кодера…',
+    'Sessions':'Сесії','Live sessions (terminal)':'Живі сесії (термінал)',
+    '🖥 terminal':'🖥 термінал','New interactive session':'Нова інтерактивна сесія',
+    "first task (optional)…":"перше завдання (необов'язково)…",
+    '🖥 launch session':'🖥 запустити сесію','Stop session':'Зупинити сесію',
+    'session id…':'id сесії…',
+    'Model details':'Характеристики моделі',
+    'Architecture:':'Архітектура:','Quantization:':'Квантизація:','Context:':'Контекст:',
+    'Layers:':'Шари:','Size:':'Розмір:','Resident:':'У пам\'яті:','Notes:':'Примітка:',
+    'no':'ні',
+}
+
+import json
+tr_ru_js = json.dumps(TR_RU, ensure_ascii=False)
+tr_uk_js = json.dumps(TR_UK, ensure_ascii=False)
+
+# LAST </body> = real HTML body close
+script = ('<script>'
+    # i18n overlay: text-node replacement + placeholder translation
+    'var _ROZUM_TR={'
+    '"ru":' + tr_ru_js + ','
+    '"uk":' + tr_uk_js +
+    '};'
+    'var _rlang=(localStorage.getItem("rozum_lang")||navigator.language.split("-")[0]||"en");'
+    'if(!_ROZUM_TR[_rlang])_rlang="en";'
+    'document.documentElement.lang=_rlang;'
+    'function _rlApply(){'
+    '  var map=_ROZUM_TR[_rlang];'
+    '  if(!map)return;'
+    '  var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null);'
+    '  var n;'
+    '  while((n=w.nextNode())){'
+    '    var tx=n.textContent.trim();'
+    '    if(map[tx])n.textContent=map[tx];'
+    '  }'
+    '  document.querySelectorAll("[placeholder]").forEach(function(el){'
+    '    if(map[el.placeholder])el.placeholder=map[el.placeholder];'
+    '  });'
+    '  document.querySelectorAll(".rl-btn").forEach(function(b){'
+    '    b.classList.toggle("active",b.dataset.lang===_rlang);'
+    '  });'
+    '}'
+    'function _rlSet(lang){'
+    '  localStorage.setItem("rozum_lang",lang);'
+    '  _rlang=_ROZUM_TR[lang]?lang:"en";'
+    '  document.documentElement.lang=_rlang;'
+    '  _rlApply();'
+    '}'
+    # lang toggle button (fixed bottom-right)
+    '(function(){'
+    '  var d=document.createElement("div");'
+    '  d.id="rozum-lang";'
+    '  ["en","ru","uk"].forEach(function(l){'
+    '    var b=document.createElement("button");'
+    '    b.className="rl-btn";b.textContent=l.toUpperCase();'
+    '    b.dataset.lang=l;b.onclick=function(){_rlSet(l);};'
+    '    if(l===_rlang)b.classList.add("active");'
+    '    d.appendChild(b);'
+    '  });'
+    '  document.body.appendChild(d);'
+    '})();'
+    # Apply on load + on hash navigation
+    'setTimeout(_rlApply,300);'
+    'window.addEventListener("hashchange",function(){setTimeout(_rlApply,150);});'
+    # MutationObserver for data tables (rows added dynamically)
+    '(function(){'
+    '  var pend=false,obs=new MutationObserver(function(ms){'
+    '    if(pend)return;'
+    '    var ok=ms.some(function(m){'
+    '      return Array.from(m.addedNodes).some(function(n){'
+    '        return n.nodeType===1&&(n.tagName==="TR"||n.tagName==="TBODY"||n.tagName==="TABLE");'
+    '      });'
+    '    });'
+    '    if(!ok)return;'
+    '    pend=true;requestAnimationFrame(function(){_rlApply();pend=false;});'
+    '  });'
+    # Load/stop button column merge
+    '  var SV="[href^=\'/control/gateway/stop?k=\']:not([href$=\'?k=\'])";'
+    '  function fix(){'
+    '    document.querySelectorAll("[data-ssc-datatable]").forEach(function(w){'
+    '      if(!w.querySelector("[href^=\'/control/gateway/\']"))return;'
+    '      var th4=w.querySelector("thead th:nth-child(4)");'
+    '      if(th4)th4.style.display="none";'
+    '      w.querySelectorAll("tbody tr").forEach(function(tr){'
+    '        var tds=tr.querySelectorAll(":scope>td");'
+    '        if(tds.length<4)return;'
+    '        var t3=tds[2],t4=tds[3];'
+    '        if(t3.dataset.bf)return;'
+    '        var stop=t4.querySelector(SV);'
+    '        if(stop)t3.appendChild(stop);'
+    '        t4.style.display="none";'
+    '        t3.dataset.bf="1";'
+    '      });'
+    '    });'
+    '    _rlApply();'
+    '  }'
+    '  document.addEventListener("click",function(e){'
+    '    if(document.querySelector("[role=dialog]")&&!e.target.closest("[role=dialog]"))'
+    '    {window.location.hash="/"}'
+    '  });'
+    '  function init(){'
+    '    fix();'
+    '    document.querySelectorAll("[data-ssc-datatable]").forEach(function(el){'
+    '      obs.observe(el,{childList:true,subtree:true});'
+    '    });'
+    '  }'
+    '  if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",init);'
+    '  else init();'
+    '})();'
+    '<' + '/script>')
+i = h.rfind('</body>')
+h = h[:i] + script + h[i:]
+
+open(p, 'w').write(h)
+PYEOF
 check_js_syntax "$SITE/index.html"
 check_js_runtime "$SITE/index.html"
 

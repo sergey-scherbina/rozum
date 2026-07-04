@@ -74,19 +74,19 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
     hstack(gap = 8)(text("committed:"),   signalText_(committedTxt))
   )
 )
-val modelSelectCols = [fieldColumn("Модель", "spec"), fieldColumn("GiB", "size_gib")]
-val modelsPanel = cardWithHeader(heading(2, "Модели"))(
+val modelSelectCols = [fieldColumn("Model", "spec"), fieldColumn("GiB", "size_gib")]
+val modelsPanel = cardWithHeader(heading(2, "Models"))(
   remoteTable(st, [
-    lcol("Модель", "spec",       "#/detail/:value"),
+    lcol("Model", "spec",       "#/detail/:value"),
     fieldColumn("GiB", "size_gib"),
-    lcol("",       "stop_label", "/control/gateway/stop?k=:value"),
-    lcol("",       "load_spec",  "/control/gateway/load?model=:value")
+    lcol("",       "load_spec",  "/control/gateway/load?model=:value"),
+    lcol("",       "stop_label", "/control/gateway/stop?k=:value")
   ], "models")
 )
 
 val dashboard = vstack(gap = 16)(
   heading(1, "rozum — control center"),
-  hstack(gap = 10)(link("#/agents", "🤖 Агенты"), link("#/coders", "💻 Кодеры"), link("#/sessions", "🖥 Сессии"), link("/matrix.html", "📊 Матрица"), link("/login.html", "🔐 вход")),
+  hstack(gap = 10)(link("#/agents", "🤖 Agents"), link("#/coders", "💻 Coders"), link("#/sessions", "🖥 Sessions"), link("/matrix.html", "📊 Matrix"), link("/login.html", "🔐 Login")),
   divider(),
   meetingsCard,
   divider(),
@@ -109,11 +109,11 @@ val composer = hstack(gap = 8)(
   textField(draft, "message…"),
   actionButton(fetchActionClear("POST", "/chat/post", draft, chatTick, roomHeader), "send")
 )
-val incidentsCard = cardWithHeader(heading(2, "Инциденты комнаты"))(
+val incidentsCard = cardWithHeader(heading(2, "Room incidents"))(
   remoteTable(incidents, [
     fieldColumn("severity", "severity"),
     fieldColumn("state", "state"),
-    fieldColumn("инцидент", "title"),
+    fieldColumn("incident", "title"),
     fieldColumn("owner", "owner")
   ], "")
 )
@@ -139,7 +139,7 @@ val agPolicy  = signal("agPolicy", "mention")
 val agPersona = signal("agPersona", "")
 val stopId    = signal("stopId", "")
 
-val agentsList = cardWithHeader(heading(2, "Запущенные агенты"))(
+val agentsList = cardWithHeader(heading(2, "Running agents"))(
   remoteTable(st, [
     fieldColumn("agent", "handle"),
     fieldColumn("model", "model"),
@@ -148,36 +148,36 @@ val agentsList = cardWithHeader(heading(2, "Запущенные агенты"))
     fieldColumn("id", "id")
   ], "agents")
 )
-val agentModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", agModel, "spec")])
-val launchForm = cardWithHeader(heading(2, "Запустить агента (модель в комнате)"))(
+val agentModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", agModel, "spec")])
+val launchForm = cardWithHeader(heading(2, "Launch agent (model + room)"))(
   vstack(gap = 8)(
-    hstack(gap = 8)(text("свободно RAM:"), signalText_(availTxt)),
-    hstack(gap = 8)(text("модель:"), signalText_(agModel)),
+    hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
+    hstack(gap = 8)(text("model:"), signalText_(agModel)),
     agentModelList,
-    textField(agRoom, "комната…"),
-    textField(agPolicy, "когда отвечать: mention | always | manual"),
-    textField(agPersona, "персона / контекст (необязательно)…"),
+    textField(agRoom, "room…"),
+    textField(agPolicy, "reply policy: mention | always | manual"),
+    textField(agPersona, "persona / context (optional)…"),
     actionButton(
       fetchActionWith("POST", "/control/agent/launch",
         formBody([("model", "agModel"), ("room", "agRoom"), ("policy", "agPolicy"), ("persona", "agPersona")]),
         [onBumpTick(refresh)]),
-      "🤖 запустить (с проверкой памяти)")
+      "🤖 launch (RAM check)")
   )
 )
 
-val stopForm = cardWithHeader(heading(2, "Остановить агента"))(
+val stopForm = cardWithHeader(heading(2, "Stop agent"))(
   hstack(gap = 8)(
-    textField(stopId, "id агента (из списка)…"),
+    textField(stopId, "agent id (from list)…"),
     actionButton(
       fetchActionWith("POST", "/control/agent/stop", formBody([("id", "stopId")]), [onBumpTick(refresh)]),
-      "стоп")
+      "stop")
   )
 )
 
 val agentsBody = vstack(gap = 16)(
   hstack(gap = 10)(
-    link("#/", "← назад"),
-    heading(1, "Агенты"),
+    link("#/", "← back"),
+    heading(1, "Agents"),
     actionButton(incSignal(refresh), "↻")
   ),
   divider(),
@@ -203,56 +203,56 @@ val cdLogUrl  = computedSignal(() => "/control/coder/log?id=" + cdLogId() + "&ta
 val cdLog     = fetchUrlSignalTo("coderLog", cdLogUrl, logTick)
 val cdLogText = computedSignal(() => jsonValue(cdLog()).get("log").asString)
 
-val codersList = cardWithHeader(heading(2, "Запущенные кодеры"))(
+val codersList = cardWithHeader(heading(2, "Running coders"))(
   remoteTable(st, [
-    fieldColumn("агент", "agent"),
-    fieldColumn("модель", "model"),
-    fieldColumn("репо", "workdir"),
-    fieldColumn("жив", "alive"),
+    fieldColumn("agent", "agent"),
+    fieldColumn("model", "model"),
+    fieldColumn("repo", "workdir"),
+    fieldColumn("alive", "alive"),
     fieldColumn("id", "id")
   ], "coders")
 )
-val coderModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", cdModel, "spec")])
-val coderWorkdirList = remoteTable(st, [fieldColumn("проект", "name")], "projects", [rowLink("выбрать", cdWorkdir, "path")])
-val coderLaunch = cardWithHeader(heading(2, "Запустить кодера (реальная работа в репо)"))(
+val coderModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", cdModel, "spec")])
+val coderWorkdirList = remoteTable(st, [fieldColumn("project", "name")], "projects", [rowLink("select", cdWorkdir, "path")])
+val coderLaunch = cardWithHeader(heading(2, "Launch coder (real work in repo)"))(
   vstack(gap = 8)(
-    hstack(gap = 8)(text("свободно RAM:"), signalText_(availTxt)),
+    hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
     vstack(gap = 4)(
-      hstack(gap = 8)(text("агент:"), signalText_(cdAgent)),
+      hstack(gap = 8)(text("agent:"), signalText_(cdAgent)),
       hstack(gap = 8)(signalButton(cdAgent, "claude", "claude"), signalButton(cdAgent, "codex", "codex"), signalButton(cdAgent, "opencode", "opencode"))
     ),
-    hstack(gap = 8)(text("модель:"), signalText_(cdModel)),
+    hstack(gap = 8)(text("model:"), signalText_(cdModel)),
     coderModelList,
     vstack(gap = 4)(
-      hstack(gap = 8)(text("папка:"), signalText_(cdWorkdir)),
+      hstack(gap = 8)(text("folder:"), signalText_(cdWorkdir)),
       coderWorkdirList,
-      hstack(gap = 8)(textField(newProjectPath, "имя проекта…"), actionButton(fetchActionWith("POST", "/control/project/add", formBody([("name", "newProjectPath")]), [onBumpTick(refresh)]), "＋ создать"))
+      hstack(gap = 8)(textField(newProjectPath, "project name…"), actionButton(fetchActionWith("POST", "/control/project/add", formBody([("name", "newProjectPath")]), [onBumpTick(refresh)]), "＋ create"))
     ),
-    textField(cdPrompt, "задание…"),
+    textField(cdPrompt, "task…"),
     actionButton(
       fetchActionWith("POST", "/control/coder/launch",
         formBody([("agent", "cdAgent"), ("model", "cdModel"), ("workdir", "cdWorkdir"), ("prompt", "cdPrompt")]),
         [onBumpTick(refresh)]),
-      "💻 запустить (с проверкой памяти)")
+      "💻 launch (RAM check)")
   )
 )
 
-val coderLogCard = cardWithHeader(heading(2, "Лог кодера"))(
+val coderLogCard = cardWithHeader(heading(2, "Coder log"))(
   vstack(gap = 8)(
-    hstack(gap = 8)(textField(cdLogId, "id кодера (из списка)…"), actionButton(incSignal(logTick), "↻ лог")),
+    hstack(gap = 8)(textField(cdLogId, "coder id (from list)…"), actionButton(incSignal(logTick), "↻ log")),
     signalText_(cdLogText)
   )
 )
 
-val coderStop = cardWithHeader(heading(2, "Остановить кодера"))(
+val coderStop = cardWithHeader(heading(2, "Stop coder"))(
   hstack(gap = 8)(
-    textField(cdStopId, "id кодера…"),
-    actionButton(fetchActionWith("POST", "/control/coder/stop", formBody([("id", "cdStopId")]), [onBumpTick(refresh)]), "стоп")
+    textField(cdStopId, "coder id…"),
+    actionButton(fetchActionWith("POST", "/control/coder/stop", formBody([("id", "cdStopId")]), [onBumpTick(refresh)]), "stop")
   )
 )
 
 val codersBody = vstack(gap = 16)(
-  hstack(gap = 10)(link("#/", "← назад"), heading(1, "Кодеры"), actionButton(incSignal(refresh), "↻")),
+  hstack(gap = 10)(link("#/", "← back"), heading(1, "Coders"), actionButton(incSignal(refresh), "↻")),
   divider(),
   codersList,
   divider(),
@@ -272,48 +272,48 @@ val seWorkdir = signal("seWorkdir", "")
 val sePrompt  = signal("sePrompt", "")
 val seStopId  = signal("seStopId", "")
 
-val sessionsList = cardWithHeader(heading(2, "Живые сессии (терминал)"))(
+val sessionsList = cardWithHeader(heading(2, "Live sessions (terminal)"))(
   remoteTable(st, [
-    fieldColumn("агент", "agent"),
-    fieldColumn("модель", "model"),
-    fieldColumn("репо", "workdir"),
-    lcol("🖥 терминал", "id", "/terminal.html?id=:value")
+    fieldColumn("agent", "agent"),
+    fieldColumn("model", "model"),
+    fieldColumn("repo", "workdir"),
+    lcol("🖥 terminal", "id", "/terminal.html?id=:value")
   ], "sessions")
 )
-val sessionModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("выбрать", seModel, "spec")])
-val sessionWorkdirList = remoteTable(st, [fieldColumn("проект", "name")], "projects", [rowLink("выбрать", seWorkdir, "path")])
-val sessionLaunch = cardWithHeader(heading(2, "Новая интерактивная сессия"))(
+val sessionModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", seModel, "spec")])
+val sessionWorkdirList = remoteTable(st, [fieldColumn("project", "name")], "projects", [rowLink("select", seWorkdir, "path")])
+val sessionLaunch = cardWithHeader(heading(2, "New interactive session"))(
   vstack(gap = 8)(
-    hstack(gap = 8)(text("свободно RAM:"), signalText_(availTxt)),
+    hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
     vstack(gap = 4)(
-      hstack(gap = 8)(text("агент:"), signalText_(seAgent)),
+      hstack(gap = 8)(text("agent:"), signalText_(seAgent)),
       hstack(gap = 8)(signalButton(seAgent, "claude", "claude"), signalButton(seAgent, "codex", "codex"), signalButton(seAgent, "opencode", "opencode"))
     ),
-    hstack(gap = 8)(text("модель:"), signalText_(seModel)),
+    hstack(gap = 8)(text("model:"), signalText_(seModel)),
     sessionModelList,
     vstack(gap = 4)(
-      hstack(gap = 8)(text("папка:"), signalText_(seWorkdir)),
+      hstack(gap = 8)(text("folder:"), signalText_(seWorkdir)),
       sessionWorkdirList,
-      hstack(gap = 8)(textField(newProjectPath, "имя проекта…"), actionButton(fetchActionWith("POST", "/control/project/add", formBody([("name", "newProjectPath")]), [onBumpTick(refresh)]), "＋ создать"))
+      hstack(gap = 8)(textField(newProjectPath, "project name…"), actionButton(fetchActionWith("POST", "/control/project/add", formBody([("name", "newProjectPath")]), [onBumpTick(refresh)]), "＋ create"))
     ),
-    textField(sePrompt, "первое задание (необязательно)…"),
+    textField(sePrompt, "first task (optional)…"),
     actionButton(
       fetchActionWith("POST", "/control/session/launch",
         formBody([("agent", "seAgent"), ("model", "seModel"), ("workdir", "seWorkdir"), ("prompt", "sePrompt")]),
         [onBumpTick(refresh)]),
-      "🖥 запустить сессию")
+      "🖥 launch session")
   )
 )
 
-val sessionStop = cardWithHeader(heading(2, "Остановить сессию"))(
+val sessionStop = cardWithHeader(heading(2, "Stop session"))(
   hstack(gap = 8)(
-    textField(seStopId, "id сессии…"),
-    actionButton(fetchActionWith("POST", "/control/session/stop", formBody([("id", "seStopId")]), [onBumpTick(refresh)]), "стоп")
+    textField(seStopId, "session id…"),
+    actionButton(fetchActionWith("POST", "/control/session/stop", formBody([("id", "seStopId")]), [onBumpTick(refresh)]), "stop")
   )
 )
 
 val sessionsBody = vstack(gap = 16)(
-  hstack(gap = 10)(link("#/", "← назад"), heading(1, "Сессии"), actionButton(incSignal(refresh), "↻"), link("/login.html", "🔐 вход")),
+  hstack(gap = 10)(link("#/", "← back"), heading(1, "Sessions"), actionButton(incSignal(refresh), "↻"), link("/login.html", "🔐 Login")),
   divider(),
   sessionsList,
   divider(),
@@ -342,25 +342,27 @@ val detailExperts     = computedSignal(() => { val n = jsonValue(detailData()).g
 val detailNotes       = computedSignal(() => jsonValue(detailData()).get("notes").asString)
 val detailPid         = computedSignal(() => jsonValue(detailData()).get("resident").get("pid").asString)
 val detailPort        = computedSignal(() => jsonValue(detailData()).get("resident").get("port").asString)
-val detailResidentTxt = computedSignal(() => { val pid = detailPid(); if pid == "" || pid == "0" then "нет" else "да  (PID " + pid + ", порт " + detailPort() + ")" })
+val detailResidentTxt = computedSignal(() => { val pid = detailPid(); if pid == "" || pid == "0" then "no" else "yes  (PID " + pid + ", port " + detailPort() + ")" })
 
-val detailModal = modal(isDetailOpen, "Характеристики модели")(
+val detailModal = modal(isDetailOpen, "Model details")(
+  link("#/", "✕"),
   vstack(gap = 10)(
-    hstack(gap = 8)(signalText_(detailName), link("#/", "✕")),
-    hstack(gap = 8)(text("Spec:"),        signalText_(detailSpec_)),
-    hstack(gap = 8)(text("Архитектура:"), signalText_(detailModelType)),
-    hstack(gap = 8)(text("Квантизация:"), signalText_(detailQuant)),
-    hstack(gap = 8)(text("Контекст:"),    signalText_(detailMaxCtx)),
-    hstack(gap = 8)(text("Слои:"),        signalText_(detailLayers)),
-    hstack(gap = 8)(text("Attn:"),        signalText_(detailAttnHeads)),
-    hstack(gap = 8)(text("KV:"),          signalText_(detailKvHeads)),
-    hstack(gap = 8)(text("Hidden:"),      signalText_(detailHidden)),
-    hstack(gap = 8)(text("MoE:"),         signalText_(detailExperts)),
-    hstack(gap = 8)(text("Размер:"),      signalText_(detailGib)),
-    hstack(gap = 8)(text("В памяти:"),    signalText_(detailResidentTxt)),
-    hstack(gap = 8)(text("Примечание:"),  signalText_(detailNotes))
+    signalText_(detailName),
+    hstack(gap = 8)(text("Spec:"),          signalText_(detailSpec_)),
+    hstack(gap = 8)(text("Architecture:"),  signalText_(detailModelType)),
+    hstack(gap = 8)(text("Quantization:"),  signalText_(detailQuant)),
+    hstack(gap = 8)(text("Context:"),       signalText_(detailMaxCtx)),
+    hstack(gap = 8)(text("Layers:"),        signalText_(detailLayers)),
+    hstack(gap = 8)(text("Attn:"),          signalText_(detailAttnHeads)),
+    hstack(gap = 8)(text("KV:"),            signalText_(detailKvHeads)),
+    hstack(gap = 8)(text("Hidden:"),        signalText_(detailHidden)),
+    hstack(gap = 8)(text("MoE:"),           signalText_(detailExperts)),
+    hstack(gap = 8)(text("Size:"),          signalText_(detailGib)),
+    hstack(gap = 8)(text("Resident:"),      signalText_(detailResidentTxt)),
+    hstack(gap = 8)(text("Notes:"),         signalText_(detailNotes))
   )
 )
+
 ```
 
 ## Compose + serve
