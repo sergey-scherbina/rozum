@@ -1451,7 +1451,7 @@ async fn run_matrix_job(job_id: &str) {
     let all_models: Vec<String> = rozum_models::models::scan_all_installed().into_iter().map(|m| m.spec).collect();
     let models_vec = models.unwrap_or(all_models);
     let agents_vec = agents.unwrap_or_else(|| vec!["claude".into(), "codex".into(), "opencode".into()]);
-    let tasks_vec  = tasks.unwrap_or_else(|| vec!["greet".into(), "build".into(), "fix".into(), "test".into(), "debug".into()]);
+    let tasks_vec  = tasks.unwrap_or_else(|| vec!["greet".into(), "build".into(), "fix".into(), "test".into(), "debug".into(), "rpn".into()]);
     let total_cells = models_vec.len() * agents_vec.len() * tasks_vec.len() * reps as usize;
     let models_str = models_vec.join(" ");
     let agents_str = agents_vec.join(" ");
@@ -1545,7 +1545,7 @@ fn archive_matrix_cells(result_dir: &PathBuf) {
         let dest = cells_root.join(agent).join(&safe_model).join(task);
         if dest.exists() { continue; } // already archived
         let _ = std::fs::create_dir_all(&dest);
-        for file in ["agent.log", "verify.out", "agentic.meta", "cargo.err"] {
+        for file in ["agent.log", "verify.out", "triage.out", "agentic.meta", "cargo.err"] {
             let src = entry.path().join(file);
             if src.exists() { let _ = std::fs::copy(&src, dest.join(file)); }
         }
@@ -1631,11 +1631,16 @@ async fn matrix_cell_route(axum::extract::Query(q): axum::extract::Query<MatrixC
         std::fs::read_to_string(cell_dir.join("verify.out")).ok()
     } else { None };
 
+    let triage_out = if cell_dir.join("triage.out").exists() {
+        std::fs::read_to_string(cell_dir.join("triage.out")).ok()
+    } else { None };
+
     axum::Json(serde_json::json!({
         "cell": cell,
         "task_info": matrix_task_info(&q.task),
         "agent_log": agent_log,
         "verify_out": verify_out,
+        "triage_out": triage_out,
         "has_logs": cell_dir.exists(),
     })).into_response()
 }
