@@ -45,6 +45,7 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         .route("/control/invite/info", get(invite_info_route))
         .route("/control/public/matrix", get(public_matrix_route))
         .route("/control/public/matrix/live", get(public_matrix_live_route))
+        .route("/control/public/matrix/cell", get(public_matrix_cell_route))
         .route("/view/{token}", get(view_token_page_route));
     // Admin sub-router (require_auth + require_admin both applied).
     let admin = Router::new()
@@ -1765,6 +1766,43 @@ async fn public_matrix_route(
         serde_json::json!({ "stamp": stamp, "cells": cells, "total": total, "passed": passed })
     });
     axum::Json(serde_json::json!({ "queue": queue, "last": last })).into_response()
+}
+
+async fn public_matrix_cell_route(
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let token = q.get("t").map(|s| s.as_str()).unwrap_or("");
+    if !check_view_token(token) {
+        return (axum::http::StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({ "error": "invalid or revoked token" }))).into_response();
+    }
+    let stamp = q.get("stamp").map(|s| s.as_str()).unwrap_or("");
+    let agent = q.get("agent").map(|s| s.as_str()).unwrap_or("");
+    let model = q.get("model").map(|s| s.as_str()).unwrap_or("");
+    let task  = q.get("task").map(|s| s.as_str()).unwrap_or("");
+    let tail: usize = q.get("tail").and_then(|s| s.parse().ok()).unwrap_or(200);
+    let csv_path = bench_results_dir().join(stamp).join("per-run.csv");
+    let cell = parse_matrix_csv(&csv_path).into_iter().find(|c| {
+        c.get("agent").and_then(|v| v.as_str()) == Some(agent) &&
+        c.get("model").and_then(|v| v.as_str()) == Some(model) &&
+        c.get("task").and_then(|v| v.as_str()) == Some(task)
+    });
+    let safe_model = model.replace(['/', ':', ' '], "_");
+    let cell_dir = bench_results_dir().join(stamp).join("cells").join(agent).join(&safe_model).join(task);
+    let agent_log = if cell_dir.join("agent.log").exists() {
+        let text = std::fs::read_to_string(cell_dir.join("agent.log")).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let start = lines.len().saturating_sub(tail.min(3000));
+        Some(lines[start..].join("\n"))
+    } else { None };
+    let verify_out = std::fs::read_to_string(cell_dir.join("verify.out")).ok();
+    let triage_out = std::fs::read_to_string(cell_dir.join("triage.out")).ok();
+    axum::Json(serde_json::json!({
+        "cell": cell, "task_info": matrix_task_info(task),
+        "agent_log": agent_log, "verify_out": verify_out,
+        "triage_out": triage_out, "has_logs": cell_dir.exists(),
+    })).into_response()
 }
 
 async fn view_token_page_route(
