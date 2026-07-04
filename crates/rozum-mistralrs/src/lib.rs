@@ -6,4 +6,5 @@
 // unchanged.
 pub mod mistralrs_backend;
 
+#[cfg(feature = "mistralrs")]
 pub(crate) use rozum_core::{backend, concurrency};

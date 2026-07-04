@@ -6,4 +6,4 @@
 // `crate::serving::…` paths resolve unchanged.
 pub mod gguf;
 
-pub(crate) use rozum_core::{backend, engine, sampler, serving};
+pub(crate) use rozum_core::{backend, engine, sampler};

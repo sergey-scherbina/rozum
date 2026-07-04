@@ -5,4 +5,4 @@
 // `crate::backend::…` / `crate::engine::…` / `crate::sampler::…` resolve unchanged.
 pub mod x86;
 
-pub(crate) use rozum_core::{backend, engine, sampler};
+pub(crate) use rozum_core::{backend, engine};

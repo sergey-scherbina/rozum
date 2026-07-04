@@ -3926,6 +3926,7 @@ mod inner {
     }
 
     const TOOL_OPEN: &str = "<tool_call>";
+    #[allow(dead_code)]
     const TOOL_CLOSE: &str = "</tool_call>";
 
     // Tool-call parsing (`<tool_call>` JSON/XML + the bare/```json fallback for
@@ -4456,6 +4457,7 @@ pub(crate) fn tools_instruction_text(tools: &[crate::backend::ToolDef]) -> Strin
 /// A synthetic system message describing `tools` + the `<tool_call>{name,arguments}` format that
 /// `serving::parse_tool_calls` parses — injected for template-less models so they can call tools.
 #[cfg(any(feature = "mlx-native", test))]
+#[allow(dead_code)]
 fn tools_system_message(tools: &[crate::backend::ToolDef]) -> crate::backend::Message {
     crate::backend::Message::system(tools_instruction_text(tools))
 }

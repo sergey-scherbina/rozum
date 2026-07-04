@@ -1813,10 +1813,7 @@ async fn view_token_page_route(
         let body = "<!doctype html><html><head><meta charset=utf-8><title>rozum · link expired</title></head><body style='font:16px system-ui;text-align:center;padding:60px;background:#0f1117;color:#c9d1d9'>This link is invalid or has been revoked.</body></html>";
         return (StatusCode::GONE, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response();
     }
-    // Serve view.html with token injected as a meta tag
-    let page = serve_site_file("view.html");
-    // Inject token into page as a script var before </head>
-    use axum::body::Body;
+    // Inject token into view.html as a script var before </head>
     let inject = format!("<script>window._VIEW_TOKEN='{token}';</script>");
     // Re-read the file and inject
     let path = ucc_site_dir().join("view.html");
@@ -2240,6 +2237,7 @@ fn rp_origin() -> String {
     // browser's actual origin against this, so a stale port here would reject every login/register.
     std::env::var("ROZUM_UCC_ORIGIN").unwrap_or_else(|_| "https://busi.tail1174e2.ts.net:8448".into())
 }
+#[allow(dead_code)]
 fn operator_uuid() -> Uuid { Uuid::from_u128(0x_524f_5a55_4d00_0000_0000_0000_0000_0001) }
 
 fn webauthn() -> Option<&'static Webauthn> {
@@ -2307,6 +2305,7 @@ fn session_user(token: &str) -> Option<String> {
     let now = crate::share::now_unix();
     load_auth_sessions().into_iter().find(|e| e.token == token && e.expires_at > now).map(|e| e.user_id)
 }
+#[allow(dead_code)]
 fn valid_session(token: &str) -> bool { session_user(token).is_some() }
 
 /// Parse a `name=value; …` Cookie header into a lookup.
@@ -2337,6 +2336,7 @@ fn authed_user_id(headers: &axum::http::HeaderMap) -> Option<String> {
     if busi_authed(headers) { return Some("busi-sso".to_string()); }
     None
 }
+#[allow(dead_code)]
 fn authed(headers: &axum::http::HeaderMap) -> bool { authed_user_id(headers).is_some() }
 
 /// Middleware: 401 unless authenticated. Injects `Extension<String>` (user_id) for downstream use.
