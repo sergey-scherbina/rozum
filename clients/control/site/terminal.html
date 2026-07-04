@@ -1,0 +1,27 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><title>rozum · терминал</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"><style>html,body{margin:0;height:100%;background:radial-gradient(130% 95% at 50% 36%,transparent 50%,rgba(2,3,7,.62) 100%),radial-gradient(135% 85% at 50% -12%,#163a50 0%,#0b1d2c 32%,#06090f 68%,#05070c 100%),radial-gradient(58% 48% at 16% 6%,rgba(44,84,120,.34),transparent 62%),radial-gradient(52% 44% at 88% 20%,rgba(74,46,104,.26),transparent 60%) fixed;color:#e6e6e6;font:14px -apple-system,system-ui,sans-serif}#bar{display:flex;gap:10px;align-items:center;padding:8px max(10px,env(safe-area-inset-right)) 8px max(10px,env(safe-area-inset-left));background:#151a23;border-bottom:1px solid #232a36}#bar a{color:#7ab8ff;text-decoration:none}#st{margin-left:auto;font-size:12px;color:#8a93a0}#term{height:calc(100% - 38px);padding:4px}#rozum-lang{position:fixed;bottom:16px;right:16px;display:flex;gap:1px;z-index:999;box-shadow:0 2px 8px rgba(0,0,0,.5)}.rl-btn{background:#21262d;color:#6e7681;border:1px solid #30363d;padding:4px 8px;cursor:pointer;font-size:11px;font-weight:600;letter-spacing:.03em}.rl-btn:first-child{border-radius:5px 0 0 5px}.rl-btn:last-child{border-radius:0 5px 5px 0}.rl-btn.active{background:#1f3a28;border-color:#2ea043;color:#56d364}</style></head><body><div id="bar"><a href="/">← UCC</a><b id="sid"></b><span id="st">…</span></div><div id="term"></div><script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script><script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script><script>
+const id = new URLSearchParams(location.search).get('id') || '';
+document.getElementById('sid').textContent = id || 'нет id сессии';
+const st = document.getElementById('st');
+const term = new Terminal({ cursorBlink:true, fontSize:13, theme:{ background:'#0b0e14' } });
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open(document.getElementById('term'));
+fit.fit();
+const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/control/session/attach/' + encodeURIComponent(id);
+let ws;
+function connect(){
+  if (!id) { st.textContent = '✗ нет id сессии'; term.writeln('Нет id сессии. Откройте терминал из списка сессий UCC.'); return; }
+  st.textContent = 'подключение…';
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { st.textContent = '● подключено'; sendResize(); term.focus(); };
+  ws.onmessage = (e) => { term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data)); };
+  ws.onclose = () => { st.textContent = '○ отключено — переподключиться?'; };
+  ws.onerror = () => { st.textContent = '✗ ошибка (нужен вход по Face ID?)'; };
+}
+function sendResize(){ if (ws && ws.readyState === 1) ws.send(JSON.stringify({ resize:{ cols: term.cols, rows: term.rows } })); }
+term.onData(d => { if (ws && ws.readyState === 1) ws.send(d); });
+window.addEventListener('resize', () => { fit.fit(); sendResize(); });
+st.onclick = () => { if (!ws || ws.readyState > 1) connect(); };
+if (id) connect(); else { st.textContent = '✗ нет id сессии'; term.writeln('Нет id сессии. Откройте терминал из списка сессий UCC.'); }
+</script><script>var _LG=localStorage.getItem("rozum_lang")||navigator.language.split("-")[0]||"ru";if(_LG!=="en"&&_LG!=="uk")_LG="ru";var _LT={"en":{"нет id сессии":"no session id","Нет id сессии. Откройте терминал из списка сессий UCC.":"No session id. Open terminal from the UCC sessions list.","подключение…":"connecting…","● подключено":"● connected","○ отключено — переподключиться?":"○ disconnected — reconnect?","✗ ошибка (нужен вход по Face ID?)":"✗ error (Face ID login required?)","rozum · терминал":"rozum · terminal"},"uk":{"нет id сессии":"немає id сесії","Нет id сессии. Откройте терминал из списка сессий UCC.":"Немає id сесії. Відкрийте термінал зі списку сесій UCC.","подключение…":"підключення…","● подключено":"● підключено","○ отключено — переподключиться?":"○ відключено — перепідключитися?","✗ ошибка (нужен вход по Face ID?)":"✗ помилка (потрібен вхід через Face ID?)","rozum · терминал":"rozum · термінал"}};function _lt(s){var m=_LT[_LG];return(m&&m[s])||s;}document.documentElement.lang=_LG;if(_LT[_LG]&&_LT[_LG]["rozum · терминал"])document.title=_LT[_LG]["rozum · терминал"];(function(){  var d=document.createElement("div");d.id="rozum-lang";  ["en","ru","uk"].forEach(function(l){    var b=document.createElement("button");b.className="rl-btn";b.textContent=l.toUpperCase();    b.dataset.lang=l;b.onclick=function(){localStorage.setItem("rozum_lang",l);location.reload();};    if(l===_LG)b.classList.add("active");d.appendChild(b);  });document.body.appendChild(d);})();</script></body></html>

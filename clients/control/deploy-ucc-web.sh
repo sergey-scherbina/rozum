@@ -39,13 +39,24 @@ echo ">> building rozum-gateway (the engine binary control-serve actually runs) 
 cp "$REPO/target/release/rozum-gateway" "$BINDIR/rozum-gateway"
 
 # Helper: compile a server-side .ssc file, serve briefly, capture HTML, shut down.
+# Falls back to the pre-built site/<basename> if SSC compilation fails (e.g. when the
+# SSC binary's interpreter doesn't register std/http.ssc extern defs like `route`).
 emit_html() {
   local ssc_file="$1" port="$2" out="$3"
+  local base
+  base="$(basename "$out")"
   echo ">> emitting $out (from $(basename "$ssc_file")) ..."
   "$SSC" run "$ssc_file" &
   local ssc_pid=$!
   sleep 4
-  curl -sf "http://127.0.0.1:${port}/" -o "$out" || echo "  (warn: curl failed for $out)"
+  if ! curl -sf "http://127.0.0.1:${port}/" -o "$out"; then
+    if [ -f "$HERE/site/$base" ]; then
+      cp "$HERE/site/$base" "$out"
+      echo "  (SSC emit failed — used pre-built site/$base)"
+    else
+      echo "  (warn: SSC emit failed and no site/$base fallback)"
+    fi
+  fi
   kill "$ssc_pid" 2>/dev/null || true
 }
 
