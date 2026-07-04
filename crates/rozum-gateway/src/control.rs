@@ -1810,7 +1810,7 @@ async fn view_token_page_route(
 ) -> axum::response::Response {
     use axum::{http::{header, StatusCode}, response::IntoResponse};
     if !check_view_token(&token) {
-        let body = "<!doctype html><html><head><meta charset=utf-8><title>Недоступно</title></head><body style='font:16px system-ui;text-align:center;padding:60px;background:#0f1117;color:#c9d1d9'>Эта ссылка недействительна или отозвана.</body></html>";
+        let body = "<!doctype html><html><head><meta charset=utf-8><title>rozum · link expired</title></head><body style='font:16px system-ui;text-align:center;padding:60px;background:#0f1117;color:#c9d1d9'>This link is invalid or has been revoked.</body></html>";
         return (StatusCode::GONE, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response();
     }
     // Serve view.html with token injected as a meta tag
