@@ -171,8 +171,27 @@ css = (
     'html[lang=uk] a[href^="/control/gateway/load?model="]:not([href$="model="])::before{content:"завантажити"}'
     'html[lang=uk] a[href^="/control/gateway/stop?k="]:not([href$="?k="])::before{content:"вивантажити"}'
 )
+# Global 401 interceptor: any API returning 401 → redirect to login.html.
+# Skips auth endpoints and public routes to avoid redirect loops.
+fetch_interceptor = (
+    '<script>'
+    '(function(){'
+    'var _f=window.fetch;'
+    'window.fetch=function(){'
+    'var args=Array.from(arguments);'
+    'return _f.apply(this,args).then(function(r){'
+    'if(r.status===401){'
+    'var url=String(args[0]||"");'
+    'if(url.indexOf("/control/auth/")<0&&url.indexOf("/control/public/")<0)'
+    '{location.href="/login.html";}'
+    '}'
+    'return r;'
+    '});};'
+    '})();'
+    '</script>'
+)
 # FIRST </head> = real HTML head close (line 7); JS template literal </head> is further down
-h = h.replace('</head>', '<style>' + css + '</style></head>', 1)
+h = h.replace('</head>', '<style>' + css + '</style>' + fetch_interceptor + '</head>', 1)
 
 # Translation maps: EN (native) → RU and UK
 TR_RU = {
