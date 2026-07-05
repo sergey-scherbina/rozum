@@ -58,7 +58,15 @@ Ordered by value. #1 is the active queue; do it the moment the GPU slot is free.
   rollup, and confirm the slot torn down clean (`pgrep -f 'gateway --model'`). It holds the GPU slot → do
   NOT start any other model run until it exits.
 
-- [ ] **codex-opencode-create-delivery** (HIGH — biggest failure bucket; the real next fix) — see BACKLOG
+- [~] **codex-opencode-create-delivery** — FIX IMPLEMENTED + VERIFIED on `feature/codex-create-delivery`
+  (`3d03a35`). `rewrite_json_wrapped_apply_patch` decodes the gpt-oss `-patches '[{"content":…}]'` JSON
+  form before `apply_patch_block_to_fuzz`. Unit test green (7/7 apply_patch). E2E codex×gpt-oss×build:
+  the `apply_patch-bridge` fired 8× and **build delivery went 0/3-land → 3/3-land (0 rc11; baseline was
+  all rc11)**, 1 build PASS, `accepts exactly one argument` eliminated. No regression (raw shell path
+  unchanged). Merging. RESIDUALS (follow-up, NOT blockers): (1) rpn still throws 1 rc11 — a create form
+  the bridge doesn't fully land (capture the rpn `-patches` shape and cover it); (2) the remaining build
+  reds are rc10 = gpt-oss writes wrong CODE (model capability, not delivery). Original evidence below:
+- [ ] **codex-opencode-create-delivery (original notes)** — see BACKLOG
   `codex-opencode-create-delivery` for the full evidence. ROOT CAUSE PINNED: gpt-oss (via codex) emits
   `apply_patch -patches '[{"content":"*** Begin Patch\n*** Add File: …*** End Patch"}]'` (patch wrapped in
   a JSON array under `-patches`, body JSON-escaped `\n`/`\"`). `rewrite_apply_patch_command`
