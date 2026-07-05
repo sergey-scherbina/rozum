@@ -54,7 +54,16 @@ slot). Status tracker:
   generation STALL (only a Bash call, file untouched, 600s timeout) — infra/variance, not entities. So
   Qwen-Coder fix/test reds = model variance ([[project-matrix-nondeterminism]]); R2.1 covers the entity
   slice, nothing more to fix in the gateway.
-- [ ] **R2.3 — rpn create-delivery residual** — IN PROGRESS (capture run). run codex×gpt-oss×rpn with `ROZUM_CODEX_TOOL_CAPTURE=1`
+- [~] **R2.3 — rpn create-delivery residual** — FIX IMPLEMENTED + unit-tested (`feature/gateway-toolcall-round2`),
+  e2e verifying. CAPTURED the exact form with `ROZUM_CODEX_TOOL_CAPTURE`: it is NOT a V4A patch — codex
+  emits a STRUCTURED `{"cmd":"apply_patch","patches":[{"path":"Cargo.toml","content":"…"},{"path":"src/main.rs","content":"…"}]}`
+  (each entry a whole file, no `*** Add File:` markers). Round-1's fix keys off V4A markers and
+  `synthesize_write_from_obj` only handles a single top-level `{path,content}`, so this array shape fell
+  through → shim can't parse JSON → nothing lands (rc11, capture baseline confirmed rpn 0/2). Fix =
+  `synthesize_writes_from_patches` (writes each `{path,content}` via the shared heredoc), wired into the
+  `normalize_codex_tool_args {cmd:apply_patch}` branch. Unit-tested; 8 apply_patch tests green. NB: gpt-oss
+  emits this form NONDETERMINISTICALLY (some runs use the round-1 shell form or Write), so e2e effect is
+  probabilistic. Original notes: run codex×gpt-oss×rpn with `ROZUM_CODEX_TOOL_CAPTURE=1`
   to capture the exact `apply_patch` form the round-1 bridge misses (likely `*** Update File:` vs a file
   that doesn't exist, or a non-`content` JSON key), then extend `rewrite_json_wrapped_apply_patch` /
   `apply_patch_block_to_fuzz` to cover it. Unit-test + e2e codex×gpt-oss×rpn.
