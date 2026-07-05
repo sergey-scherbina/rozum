@@ -696,8 +696,10 @@ for spec in "${MODELS[@]}"; do
       # model's self-report) FAILS, feed the actual compiler/test error back and let the agent fix
       # it, in the SAME workdir, up to REPAIR more attempts. REPAIR=0 → exactly one attempt (legacy).
       pass=0; repairs=0; secs_total=0; rc=0; turns="-"; tools="-"; tmo=0; detail=""
-      attempts=$(( REPAIR + 1 ))
-      for attempt in $(seq 1 "$attempts"); do
+      attempts=$(( REPAIR + 1 )); bonus_used=0; attempt=0
+      # `while` (not `for`) so a one-time bonus repair attempt can extend `attempts` mid-loop (R2.5).
+      while [ "$attempt" -lt "$attempts" ]; do
+        attempt=$((attempt + 1))
         # Build the runner per agent from the CURRENT $prompt (task prompt, or the repair prompt on
         # a retry). ALL THREE route through `rozum launch` (no --model): reuse the resident shared
         # gateway + jail the agent (Seatbelt). claude via Anthropic env, codex via injected provider
@@ -740,6 +742,16 @@ for spec in "${MODELS[@]}"; do
         printf '%s\n' "$detail" >"$work/verify.out"
         pass=$([ "$verify_rc" = 0 ] && echo 1 || echo 0)
         [ "$pass" = 1 ] && break
+        # R2.5: a repair attempt that fell into an Edit-before-Read churn loop ("File has not been
+        # read yet") burns the whole RUN_TIMEOUT without converging, and `repair_tool_protocol_hint`
+        # (which keys off exactly that marker) fires one attempt too late — the loop is in the FINAL
+        # attempt, so no further attempt applies the hint. Grant ONE bonus attempt when the marker
+        # first appears so the hint actually gets a shot.
+        if [ "$attempt" -ge "$attempts" ] && [ "$bonus_used" = 0 ] \
+           && grep -qi 'File has not been read yet' "$alog" 2>/dev/null; then
+          bonus_used=1; attempts=$((attempts + 1))
+          echo "    + bonus repair attempt (Edit-before-Read loop detected → applying tool-protocol hint)"
+        fi
         [ "$attempt" -lt "$attempts" ] || break   # last attempt — no more repair
         repairs=$((repairs + 1))
         diag="$(repair_diagnostic "$task" "$work")"
