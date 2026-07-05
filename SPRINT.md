@@ -38,6 +38,29 @@
       ad-hoc runs (fail-fast is the better signal there). Left at 0, with a comment recording why.
   - Verify: `bash -n` + py-compile clean; B1 branch unit-tested on a synthetic Cargo.toml-no-src dir;
     live 3-rep slice run (kept workdirs). A verified on the real ucc CSV (89% headline).
+### ▶ DOING ALL — round-2 gateway/harness tool-call fixes (operator 2026-07-05: "делай всё")
+
+Working on `feature/gateway-toolcall-round2`. Execution order (verify each; GPU-gated ones need a free
+slot). Status tracker:
+- [ ] **R2.1 — `&quot;` html-entity decode** in `parse_xml_function` + `parse_glm_arg_kv`
+  (`crates/rozum-core/src/serving.rs`). Models emit `&quot;`/`&lt;`/`&gt;`/`&#39;` in tool-arg string
+  values (Qwen3-Coder edit path); the parser passes them through verbatim (grep-proven: zero entity
+  decode in the gateway). Decode in the plain-string fallback (not valid-JSON values). Pure parser →
+  UNIT-testable, no GPU. Clean win regardless of the newline question.
+- [ ] **R2.2 — Qwen3-Coder newline diagnosis** — run Qwen3-Coder×fix with `ROZUM_RAW_DUMP=1` (dumps the
+  raw model `full_text` via `{:?}`; real newline → `\n`, one-line → none), grep the gateway.log `RAW:`
+  line for the Write content. If raw HAS newlines but claude got one-line → parser/engine strips them →
+  gateway fix; if raw is one-line → the model emits it → gateway can't recover, R2.1 is the only win.
+- [ ] **R2.3 — rpn create-delivery residual** — run codex×gpt-oss×rpn with `ROZUM_CODEX_TOOL_CAPTURE=1`
+  to capture the exact `apply_patch` form the round-1 bridge misses (likely `*** Update File:` vs a file
+  that doesn't exist, or a non-`content` JSON key), then extend `rewrite_json_wrapped_apply_patch` /
+  `apply_patch_block_to_fuzz` to cover it. Unit-test + e2e codex×gpt-oss×rpn.
+- [ ] **R2.4 — glm32b-codex-timeout** — GLM-4-32B times out under codex/opencode (rc124, dense 32B fits
+  resident). Keep it resident (EAGER / no per-turn reload) or a driver-specific higher RUN_TIMEOUT.
+- [ ] **R2.5 — test-cell-repair-failfast** — grant ONE bonus repair attempt AFTER
+  `repair_tool_protocol_hint` first fires (so the hint can apply), and/or fail-fast on a detected
+  Edit-before-Read churn instead of burning RUN_TIMEOUT.
+
 ### ▶ NEXT — what I'm doing now (matrix improvement, continuation of the above; cold-resumable)
 
 Ordered by value. #1 is the active queue; do it the moment the GPU slot is free.
