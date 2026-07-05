@@ -5,7 +5,13 @@
 The honest read of the curated tier is claude 89% / codex 33% / opencode 47% (summarize_matrix.py now
 shows this + fail-mode rollup). The two big NON-model levers, ranked:
 
-- [ ] **codex-opencode-create-delivery** (HIGH value — biggest single failure bucket) — a THIRD+ of
+- [x] **codex-opencode-create-delivery** — DONE (master `73b6d64`, `rewrite_json_wrapped_apply_patch`).
+  E2E-verified: build delivery 0/3→3/3 land (0 rc11), bridge fired 8×, 1 pass, shim error gone. RESIDUAL
+  follow-up: **rpn still emits 1 rc11** — capture the rpn `-patches` shape (kept workdir under
+  `/tmp/rozum-agentic-*` from the verify-codex-create run) and cover the form the bridge misses (likely an
+  `*** Update File:` against an absent file, or a non-`content` JSON key). Remaining build reds are rc10 =
+  gpt-oss wrong CODE (model capability, separate from delivery). Original evidence:
+- [ ] **codex-opencode-create-delivery (original evidence)** — a THIRD+ of
   codex/opencode curated-tier failures are `deliver` (rc11 = wrote NO project files) on create-from-scratch
   (`build`/`test`), NOT wrong code. Kept-workdir evidence: codex emits an `apply_patch` *Add File* that
   never lands in the jail (the file isn't created), codex then re-verifies a "change already applied",
