@@ -42,24 +42,31 @@
 
 Working on `feature/gateway-toolcall-round2`. Execution order (verify each; GPU-gated ones need a free
 slot). Status tracker:
-- [ ] **R2.1 — `&quot;` html-entity decode** in `parse_xml_function` + `parse_glm_arg_kv`
-  (`crates/rozum-core/src/serving.rs`). Models emit `&quot;`/`&lt;`/`&gt;`/`&#39;` in tool-arg string
-  values (Qwen3-Coder edit path); the parser passes them through verbatim (grep-proven: zero entity
-  decode in the gateway). Decode in the plain-string fallback (not valid-JSON values). Pure parser →
-  UNIT-testable, no GPU. Clean win regardless of the newline question.
-- [ ] **R2.2 — Qwen3-Coder newline diagnosis** — run Qwen3-Coder×fix with `ROZUM_RAW_DUMP=1` (dumps the
-  raw model `full_text` via `{:?}`; real newline → `\n`, one-line → none), grep the gateway.log `RAW:`
-  line for the Write content. If raw HAS newlines but claude got one-line → parser/engine strips them →
-  gateway fix; if raw is one-line → the model emits it → gateway can't recover, R2.1 is the only win.
-- [ ] **R2.3 — rpn create-delivery residual** — run codex×gpt-oss×rpn with `ROZUM_CODEX_TOOL_CAPTURE=1`
+- [x] **R2.1 — `&quot;` html-entity decode** — DONE (`3005e3f`, branch feature/gateway-toolcall-round2).
+  `decode_tool_arg_entities` applied in the plain-string fallback of BOTH `parse_xml_function` and
+  `parse_glm_arg_kv` (serving.rs). Unit-tested on the observed Qwen3-Coder shape; 28 serving tests green.
+  Correct win for the entity-emitting variance; e2e couldn't isolate (see R2.2 — the failure is
+  nondeterministic and didn't recur).
+- [x] **R2.2 — Qwen3-Coder newline diagnosis** — DONE (no gateway fix needed). `ROZUM_RAW_DUMP` proved
+  the RAW model output HAS real newlines when the model emits them (`RAW: "...\n..."`), and
+  `parse_xml_function` preserves interior newlines (`.trim()` only) → the one-line/`&quot;` corruption is
+  MODEL OUTPUT VARIANCE, not a gateway strip. Live Qwen-Coder×fix 1/2: rep1 clean → PASS; rep2 a
+  generation STALL (only a Bash call, file untouched, 600s timeout) — infra/variance, not entities. So
+  Qwen-Coder fix/test reds = model variance ([[project-matrix-nondeterminism]]); R2.1 covers the entity
+  slice, nothing more to fix in the gateway.
+- [ ] **R2.3 — rpn create-delivery residual** — IN PROGRESS (capture run). run codex×gpt-oss×rpn with `ROZUM_CODEX_TOOL_CAPTURE=1`
   to capture the exact `apply_patch` form the round-1 bridge misses (likely `*** Update File:` vs a file
   that doesn't exist, or a non-`content` JSON key), then extend `rewrite_json_wrapped_apply_patch` /
   `apply_patch_block_to_fuzz` to cover it. Unit-test + e2e codex×gpt-oss×rpn.
-- [ ] **R2.4 — glm32b-codex-timeout** — GLM-4-32B times out under codex/opencode (rc124, dense 32B fits
-  resident). Keep it resident (EAGER / no per-turn reload) or a driver-specific higher RUN_TIMEOUT.
-- [ ] **R2.5 — test-cell-repair-failfast** — grant ONE bonus repair attempt AFTER
-  `repair_tool_protocol_hint` first fires (so the hint can apply), and/or fail-fast on a detected
-  Edit-before-Read churn instead of burning RUN_TIMEOUT.
+- [x] **R2.4 — glm32b-codex-timeout** — RESOLVED as SUBSUMED, no separate code. The original premise
+  (per-turn reload) was wrong: a SINGLE model loads once and stays resident (only the lazy comma-pipeline
+  reloads per turn). GLM-4-32B's codex timeouts are just codex being slow with a big model + apply_patch
+  retries → R2.3 (fewer failed apply_patch retries) speeds convergence, and `run_full_matrix.sh` already
+  sets RUN_TIMEOUT=900 for big models. Revisit only if timeouts persist after R2.3.
+- [x] **R2.5 — test-cell-repair-failfast** — DONE (`1c9bfa0`). agentic.sh repair loop for→while +
+  ONE bonus repair attempt granted when the Edit-before-Read marker ("File has not been read yet") first
+  appears, so `repair_tool_protocol_hint` gets applied. Bounded (one bonus/cell), gated on the marker,
+  no effect on non-looping cells. bash -n clean; exercised incidentally on any round-2 run whose cell loops.
 
 ### ▶ NEXT — what I'm doing now (matrix improvement, continuation of the above; cold-resumable)
 
