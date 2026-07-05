@@ -2,13 +2,20 @@
 
 ### ▶ Cumulative-effect measurement + opencode delivery diagnosis (operator 2026-07-05: "продовжуй поліпшувати")
 
-- [ ] **r3-cumulative-and-opencode** — measure whether round-1+round-2 gateway fixes lifted the delivery
-  drivers (ucc baseline: codex 33%, opencode 47% on curated), and capture opencode's residual delivery
-  form (its curated kept-workdirs were cleaned; codex forms are now covered — gateway.jsonl mining showed
-  only patches-array (R2.3) + v4a (round-1), no new codex gap). Running:
-  `codex+opencode × {gpt-oss, Devstral} × {build,fix,test,rpn} × REPS=1`, KEEP=1,
-  ROZUM_CODEX_TOOL_CAPTURE=1, master binary (all fixes, built 15:08) → summarize with the new tier/fail-mode
-  reporter (delivery=rc11 should drop), then inspect opencode rc11 workdirs for the next gateway gap.
+- [x] **r3-cumulative-and-opencode** — DONE (measured + acted). RESULTS: **codex×gpt-oss delivery FIXED**
+  (0 rc11: build+fix pass, test+rpn land-but-wrong) — round-1+round-2 confirmed working. Two residuals
+  surfaced, both handled/triaged:
+  1. **codex×Devstral create = DRIVER MISMATCH** (not a gateway bug, merged generalization `4d90235`).
+     Capture showed Devstral invents a new malformed apply_patch structure almost every generation:
+     exec `{cmd:apply_patch, patches:[{file,content}]}`, function-call `{patches:[{op:Add,path,content}]}`,
+     `{file_changes:[{path}]}`, `{files:[…]}`, `{ops:[{op:replace}]}`, CLI `apply_patch -p X -c Y`,
+     `write_stdin`, `cat<<EOF`. Unbounded whack-a-mole (Devstral isn't codex-trained). Shipped R3
+     (file_changes alias) + R3b (path|file|filename + files array) — correct additive generalizations
+     that reduce the surface + help codex×gpt-oss, but CANNOT make codex×Devstral reliable. **Operational
+     answer: route Devstral through CLAUDE (5/6), not codex.** Remaining forms (function-call array, ops,
+     CLI) deliberately NOT chased — diminishing returns on a driver mismatch.
+  2. **opencode /v1/messages 500** → BACKLOG `opencode-500-v1-messages` (0/8 rc=1; separate issue, likely
+     not the tool-call fixes — they don't touch /v1/messages request handling).
 
 ### ▶ Matrix hygiene + test-cell delivery fix (operator 2026-07-05: "як результати матриці? що можна покращити?" → A+B)
 
