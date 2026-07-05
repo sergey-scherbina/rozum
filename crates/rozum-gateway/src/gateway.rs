@@ -2575,6 +2575,32 @@ fn synthesize_write_from_obj(o: &serde_json::Map<String, Value>) -> Option<Strin
     Some(synthesize_file_write(path, &content))
 }
 
+/// codex's STRUCTURED multi-file apply_patch: `{"cmd":"apply_patch","patches":[{"path":…,"content":…}, …]}`
+/// — each entry is a WHOLE file (raw content, no V4A `*** Add File:` markers). Neither the V4A fold nor
+/// the single-file `synthesize_write_from_obj` handles this shape, so the bare shim gets JSON it can't
+/// parse and nothing lands. Return one shell command that writes each well-formed `{path, content}` entry
+/// via the shared heredoc (skipping malformed entries); None if there's no usable `patches` array.
+fn synthesize_writes_from_patches(o: &serde_json::Map<String, Value>) -> Option<String> {
+    let arr = o.get("patches")?.as_array()?;
+    let mut cmd = String::new();
+    for e in arr {
+        let Some(eo) = e.as_object() else { continue };
+        let Some(path) = eo
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        else {
+            continue;
+        };
+        let Some(content) = eo.get("content").and_then(Value::as_str) else {
+            continue;
+        };
+        cmd.push_str(&synthesize_file_write(path, &decode_unicode_escapes(content)));
+    }
+    (!cmd.is_empty()).then_some(cmd)
+}
+
 /// Render a verbatim file write as one shell command: `mkdir -p <dir>` (so a nested target like
 /// `src/main.rs` into a fresh dir doesn't fail on a missing directory) then a *single-quoted* heredoc
 /// `cat > <path>` so the body lands byte-for-byte — no `$`/backtick/`\` expansion. The path is
@@ -2859,6 +2885,17 @@ fn normalize_codex_tool_args(args: &str) -> String {
                         o.insert("cmd".into(), Value::String(write));
                         o.remove("path");
                         o.remove("content");
+                    } else if let Some(writes) = synthesize_writes_from_patches(o) {
+                        // codex's STRUCTURED multi-file form: {cmd:apply_patch, patches:[{path,content},…]}
+                        // — each entry is a whole file (raw content, no V4A markers), so neither the V4A
+                        // fold nor the single-file synth fires and the bare shim can't consume the JSON →
+                        // nothing lands (the gpt-oss rpn create-delivery residual, R2.3). Synthesize one
+                        // shell write per entry so every file lands.
+                        eprintln!(
+                            "[apply_patch-bridge] synthesized file writes from {{cmd:apply_patch, patches:[…]}}"
+                        );
+                        o.insert("cmd".into(), Value::String(writes));
+                        o.remove("patches");
                     }
                 }
                 // Read-repair: gpt-oss frequently emits broken file reads (`sed -n 'src/main.rs'`,
@@ -6156,6 +6193,30 @@ mod tests {
         let pathonly = json!({ "cmd": "apply_patch", "path": "Cargo.toml" }).to_string();
         let po = serde_json::from_str::<Value>(&normalize_codex_tool_args(&pathonly)).unwrap();
         assert_eq!(po["cmd"].as_str().unwrap(), "apply_patch", "should be left untouched: {po}");
+    }
+
+    #[test]
+    fn structured_apply_patch_patches_array_synthesizes_multi_file_writes() {
+        // codex's STRUCTURED multi-file create form (the gpt-oss rpn residual, R2.3):
+        // {cmd:apply_patch, patches:[{path,content},…]} — each entry is a whole file, no V4A markers.
+        // Neither the V4A fold nor the single-file synth fires; without this the bare shim gets JSON it
+        // can't parse → nothing lands (rc11). Every entry must become a real file write.
+        let args = json!({
+            "cmd": "apply_patch",
+            "patches": [
+                { "path": "Cargo.toml", "content": "[package]\nname = \"rpn-calc\"\nedition = \"2021\"\n[dependencies]" },
+                { "path": "src/main.rs", "content": "fn main() {\n    println!(\"{}\", 42);\n}" }
+            ]
+        })
+        .to_string();
+        let out = normalize_codex_tool_args(&args);
+        let o = serde_json::from_str::<Value>(&out).unwrap();
+        let c = o["cmd"].as_str().unwrap();
+        assert!(c.contains("cat > 'Cargo.toml'"), "Cargo.toml write missing: {c}");
+        assert!(c.contains("cat > 'src/main.rs'"), "src/main.rs write missing: {c}");
+        assert!(c.contains("name = \"rpn-calc\""), "content not written verbatim: {c}");
+        assert!(o.get("patches").is_none(), "patches key should be consumed: {o}");
+        assert!(!c.contains("apply_patch"), "bare apply_patch should be gone: {c}");
     }
 
     #[test]
