@@ -221,11 +221,24 @@ def summarize(cells: list[dict[str, Any]], refused: dict[str, bool]) -> None:
         print(f"    {mp:>2}/{mt:<2} {pct(mp, mt)}  {m:34s} {cells_str}")
 
     # DRIVERS over the curated tier (the fair driver comparison)
-    print("\n▶ DRIVERS  (over curated tier only)")
+    print("\n▶ DRIVERS  (over curated tier only)  —  fail modes: "
+          "deliver=wrote no files (rc11), wrong=verify red (rc10), timeout (124), broke=runner/infra (rc1/2)")
     for a in agents:
         rows = [c for c in cells if tier[c["model"]] == "capable" and c["agent"] == a]
         p, t = rate(rows)
-        print(f"    {a:9s} {p:>3}/{t:<3} {pct(p, t)}")
+        fails = [c for c in rows if not c["pass"]]
+        # rc is mutually exclusive per agentic.sh (tmo→124, rc2→2, pass→0, non-zero→raw, no-files→11,
+        # else→10), so these buckets partition the failures with no double-count.
+        deliver = sum(1 for c in fails if c.get("rc") == "11")
+        wrong = sum(1 for c in fails if c.get("rc") == "10")
+        tout = sum(1 for c in fails if c.get("rc") == "124" or c["timeout"])
+        broke = sum(1 for c in fails if c.get("rc") in NON_CAPABILITY_RC)
+        other = len(fails) - deliver - wrong - tout - broke
+        modes = [f"{lbl} {n}" for lbl, n in
+                 (("deliver", deliver), ("wrong", wrong), ("timeout", tout), ("broke", broke), ("other", other))
+                 if n]
+        modestr = ("   fails: " + ", ".join(modes)) if modes else ""
+        print(f"    {a:9s} {p:>3}/{t:<3} {pct(p, t)}{modestr}")
 
     # BROKEN backends — excluded from every rate above
     if broken_models:
