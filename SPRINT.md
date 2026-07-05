@@ -7,27 +7,27 @@ capability is RELATIONAL (model × driver), and OBSERVABILITY is what surfaces t
 first, then the strategic bets.
 
 **QUICK WINS (hours, do first):**
-- [ ] **QW1 — auto-scale RUN_TIMEOUT for big/MoE models under codex/opencode** — codex×GLM-4.7-Flash all
+- [x] **QW1 — auto-scale RUN_TIMEOUT for big/MoE models under codex/opencode** — codex×GLM-4.7-Flash all
   hit rc124 at 300s though 3/5 passed (slow, not wrong: MoE-lite adaptive load + codex overhead). In
   `agentic.sh` (or run_full_matrix), bump the per-run timeout when the model is large/MoE OR the driver is
   codex/opencode (e.g. min 600–900s), so slow-but-correct cells stop reading as false negatives.
-- [ ] **QW2 — bake fail-mode + capture into the default matrix flow** — always run `summarize_matrix.py`
+- [x] **QW2 — bake fail-mode + capture into the default matrix flow** — always run `summarize_matrix.py`
   (already does tier/driver/fail-mode) AND default `ROZUM_CODEX_TOOL_CAPTURE=1` in `run_full_matrix.sh`
   so the next malformed-form bug is captured automatically (observability always-on; it paid off all
   session — `~/.rozum/gateway.jsonl` + `ROZUM_RAW_DUMP`).
 
 **STRATEGIC BETS (bigger; the durable value is in the seam + routing):**
-- [ ] **B1 — universal seam normalizer** (replaces per-form whack-a-mole) — one recursive extractor: for
+- [x] **B1 — universal seam normalizer** (replaces per-form whack-a-mole) — one recursive extractor: for
   ANY codex tool call, find `{path-like, content}` pairs (keys path|file|filename + content) under ANY
   array key (patches|file_changes|files|changes|ops) OR nested, and synthesize file writes. Catches
   FUTURE malformed shapes without new per-form code. Generalizes what R3/R3b did piecemeal. gateway.rs
   `synthesize_writes_from_patches` + the normalize/function-call paths. Unit-test against every captured
   shape in `~/.rozum/gateway.jsonl`.
-- [ ] **B2 — one authoritative full matrix** (the real baseline + the data for routing) — now all 3
+- [~] **B2 — one authoritative full matrix** (the real baseline + the data for routing) — now all 3
   drivers work + all fixes in: `claude+codex+opencode × curated-tier × all tasks`, `RUN_TIMEOUT=900`,
   REPS≥1, capture on. Produces (a) the authoritative honest number, (b) the `model × driver` capability
   table that B3 needs. Slot-gated, ~2h — run in background.
-- [ ] **B3 — model→driver routing at `rozum launch`** (operationalizes "capability is relational") —
+- [x] **B3 — model→driver routing at `rozum launch`** (operationalizes "capability is relational") —
   from the B2 table, warn or auto-select the driver a model is trained for (Devstral→claude-style,
   gpt-oss→codex ok, …). Converts driver-mismatch into reliability with NO new gateway code. The
   North-Star-aligned durable feature (value lives in the launch/gateway seam).
