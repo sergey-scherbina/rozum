@@ -2579,9 +2579,13 @@ fn synthesize_write_from_obj(o: &serde_json::Map<String, Value>) -> Option<Strin
 /// — each entry is a WHOLE file (raw content, no V4A `*** Add File:` markers). Neither the V4A fold nor
 /// the single-file `synthesize_write_from_obj` handles this shape, so the bare shim gets JSON it can't
 /// parse and nothing lands. Return one shell command that writes each well-formed `{path, content}` entry
-/// via the shared heredoc (skipping malformed entries); None if there's no usable `patches` array.
+/// via the shared heredoc (skipping malformed entries); None if there's no usable array.
+/// The file array appears under several key names across models: gpt-oss uses `patches`, Devstral uses
+/// `file_changes` (also seen: `changes`) — accept any of them (r3-cumulative capture, 2026-07-05).
 fn synthesize_writes_from_patches(o: &serde_json::Map<String, Value>) -> Option<String> {
-    let arr = o.get("patches")?.as_array()?;
+    let arr = ["patches", "file_changes", "changes"]
+        .iter()
+        .find_map(|k| o.get(*k).and_then(Value::as_array))?;
     let mut cmd = String::new();
     for e in arr {
         let Some(eo) = e.as_object() else { continue };
@@ -2892,10 +2896,12 @@ fn normalize_codex_tool_args(args: &str) -> String {
                         // nothing lands (the gpt-oss rpn create-delivery residual, R2.3). Synthesize one
                         // shell write per entry so every file lands.
                         eprintln!(
-                            "[apply_patch-bridge] synthesized file writes from {{cmd:apply_patch, patches:[…]}}"
+                            "[apply_patch-bridge] synthesized file writes from {{cmd:apply_patch, patches/file_changes:[…]}}"
                         );
                         o.insert("cmd".into(), Value::String(writes));
                         o.remove("patches");
+                        o.remove("file_changes");
+                        o.remove("changes");
                     }
                 }
                 // Read-repair: gpt-oss frequently emits broken file reads (`sed -n 'src/main.rs'`,
@@ -6217,6 +6223,18 @@ mod tests {
         assert!(c.contains("name = \"rpn-calc\""), "content not written verbatim: {c}");
         assert!(o.get("patches").is_none(), "patches key should be consumed: {o}");
         assert!(!c.contains("apply_patch"), "bare apply_patch should be gone: {c}");
+
+        // Devstral uses the SAME structure under a different key: `file_changes` (r3-cumulative capture).
+        let dev = json!({
+            "cmd": "apply_patch",
+            "file_changes": [{ "path": "src/main.rs", "content": "fn main() { println!(\"hi\"); }" }]
+        })
+        .to_string();
+        let od = serde_json::from_str::<Value>(&normalize_codex_tool_args(&dev)).unwrap();
+        let cd = od["cmd"].as_str().unwrap();
+        assert!(cd.contains("cat > 'src/main.rs'"), "file_changes not synthesized: {cd}");
+        assert!(od.get("file_changes").is_none(), "file_changes key should be consumed: {od}");
+        assert!(!cd.contains("apply_patch"), "bare apply_patch should be gone: {cd}");
     }
 
     #[test]
