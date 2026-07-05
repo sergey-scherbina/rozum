@@ -1,5 +1,31 @@
 # Backlog
 
+## Matrix improvement levers (found 2026-07-05 during the matrix-hygiene analysis; evidence in agentic-ucc-1783166880)
+
+The honest read of the curated tier is claude 89% / codex 33% / opencode 47% (summarize_matrix.py now
+shows this + fail-mode rollup). The two big NON-model levers, ranked:
+
+- [ ] **codex-opencode-create-delivery** (HIGH value — biggest single failure bucket) — a THIRD+ of
+  codex/opencode curated-tier failures are `deliver` (rc11 = wrote NO project files) on create-from-scratch
+  (`build`/`test`), NOT wrong code. Kept-workdir evidence: codex emits an `apply_patch` *Add File* that
+  never lands in the jail (the file isn't created), codex then re-verifies a "change already applied",
+  trips its OWN loop-breaker ("Stopping to avoid an infinite loop"), and exits with an empty workdir →
+  rc11. The gateway already has Method B (apply_patch→`patch --fuzz`) + an Add-File→shell rewrite
+  (gateway.rs ~2264) for the EDIT case; the CREATE case still leaks for the curated models (Devstral/GLM
+  emit the Add-File envelope in a shape the rewrite misses). Lever: extend the apply_patch Add-File→shell
+  `cat > <path>` rewrite to cover the shapes these models emit; verify with codex×{Devstral,GLM-4-32B}×build.
+  REQUIRES a gateway rebuild + GPU-free slot to test (do NOT run while a matrix holds the slot).
+- [ ] **glm32b-codex-timeout** (MED) — GLM-4-32B under codex/opencode times out (rc124) on ~7 curated
+  cells; it's a dense 32B that fits resident, so the cost is per-turn reload/slowness under those drivers,
+  not OOM. Lever: EAGER co-residency / keep-resident for GLM-4-32B alone, or a driver-specific higher
+  RUN_TIMEOUT. Cheap wall-clock win (each timeout burns the full ceiling).
+- [ ] **test-cell-repair-failfast** (LOW, from B) — when a repair attempt hits an Edit-before-Read churn
+  loop it burns the whole RUN_TIMEOUT (rc124) without converging; `repair_tool_protocol_hint` fires one
+  attempt too late (loop is in the FINAL attempt). Lever: detect the churn live and fail-fast, and/or grant
+  ONE bonus repair attempt AFTER the protocol hint is first triggered so the hint can actually apply.
+  Note: harness already feeds the whole-file `repair_benchmark_recipe` ("replace the file, don't use Edit")
+  on repair — Devstral ignores it, so this is bounded by model compliance, not just harness logic.
+
 ## scalascript language gap: theme page-background never reaches `serve(view, port)` (found 2026-07-03, ucc-theme-bg)
 
 - [ ] **ssc-serve-extracss-or-theme-body** — `std/ui/primitives.ssc`'s `serve(tree: View, port: Int)`
