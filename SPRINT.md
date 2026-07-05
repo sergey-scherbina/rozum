@@ -23,7 +23,18 @@ first, then the strategic bets.
   FUTURE malformed shapes without new per-form code. Generalizes what R3/R3b did piecemeal. gateway.rs
   `synthesize_writes_from_patches` + the normalize/function-call paths. Unit-test against every captured
   shape in `~/.rozum/gateway.jsonl`.
-- [~] **B2 — one authoritative full matrix** (the real baseline + the data for routing) — now all 3
+- [⏸] **B2 — one authoritative full matrix** — DEFERRED (external RAM contention, NOT a code issue).
+  Both launch attempts (22:16, 22:25) hit the gateway's BUG-003 admission refusal: ~13.9 GB of external
+  `java` (13 procs, sibling/IDE work) left only ~4–12 GB actually free (`vm_stat`), and a curated model
+  is ~17–18 GB. The gateway correctly refused (forcing it risks a reboot). Stopped cleanly via TaskStop
+  (no orphan gateway, no lock, machine up — no BUG-001). The r4 partial run ALREADY gave the conclusive
+  aggregate (claude 100% / codex 33%→70% / opencode 0-broken→50%), so B2 is confirmation, not new signal.
+  RE-RUN verbatim when the machine has ~20 GB free (`memory_pressure` / `vm_stat` free+inactive):
+    `BENCH_BIN=./target/release/rozum-gateway BENCH_OUT=scripts/bench/results/b2-authoritative-$(date +%Y%m%d-%H%M%S) \`
+    `AGENTIC_MODELS="mlx-community:gpt-oss-20b-MXFP4-Q4 mlx-community:GLM-4.7-Flash-4bit" AGENTS="claude codex opencode" \`
+    `TASKS="build fix test rpn debug" REPS=1 KEEP=1 RUN_TIMEOUT=500 REPAIR=1 ROZUM_CODEX_TOOL_CAPTURE=1 bash scripts/bench/agentic.sh`
+  (original plan below)
+- [ ] **B2 (original) — one authoritative full matrix** (the real baseline + the data for routing) — now all 3
   drivers work + all fixes in: `claude+codex+opencode × curated-tier × all tasks`, `RUN_TIMEOUT=900`,
   REPS≥1, capture on. Produces (a) the authoritative honest number, (b) the `model × driver` capability
   table that B3 needs. Slot-gated, ~2h — run in background.
