@@ -75,6 +75,27 @@ Ordered by value. #1 is the active queue; do it the moment the GPU slot is free.
   actually land (no "accepts exactly one argument"). Do it on a `feature/codex-create-delivery` worktree
   off origin/master; do not push until verified.
 
+- [ ] **qwen-coder-edit-toolarg-decode** (HIGH — found in the clean baseline; the weakest curated model
+  is a GATEWAY bug, not a weak model) — on the curated claude baseline, Qwen3-Coder-30B scored 4/6, and
+  BOTH failures (`fix`, `test`) are UPSTREAM tool-arg corruption, not reasoning. CONTROL PROOF: the same
+  model through the same gateway sends a CLEAN multiline Write on `build` (6 real newlines, no entities),
+  but on `fix`/`test` the Write content claude receives is ONE LINE with `&quot;` instead of `"` — e.g.
+  `use std::env;  /// Reverse a string by characters. fn reverse(s:&str)->String {…} fn main(){… println!(&quot;{}&quot;, …);}`
+  → the one-line `///` doc comment eats the whole file → `expected item after doc comment` / `unclosed
+  delimiter` → rc10. Kept workdirs: `/tmp/rozum-agentic-kpRyaW` (fix), `/tmp/rozum-agentic-N7yOBw` (test).
+  TWO gateway gaps, both in the XML `<parameter=KEY>…</parameter>` tool-call decode path (constrain.rs /
+  serving.rs): (a) NO HTML-entity decoding exists anywhere in the gateway (grep-confirmed) → `&quot;`,
+  `&amp;`, `&lt;`, `&gt;`, `&#39;` leak into file content verbatim; (b) newline loss on the edit path (the
+  FATAL one here). EXACT STEPS: (1) add an html-entity-decode of extracted tool-arg STRING values in the
+  qwen/hermes `<parameter>` parser (safe: these entities never legitimately appear in file content/commands
+  a model intends); (2) capture the RAW model output for a `fix` request from the per-model
+  `runs/*.gateway.log` and compare to the decoded `<parameter=content>` value to prove whether the newline
+  collapse is the gateway parser or the model itself — if gateway, preserve the literal newlines; if model,
+  consider a normalization. VERIFY (GPU-gated): `AGENTIC_MODELS=…Qwen3-Coder-30B-A3B-Instruct-4bit
+  AGENTS=claude TASKS="fix test" REPS=3 REPAIR=1 KEEP=1` → expect fix/test 0→pass and a kept workdir whose
+  src/main.rs is real multiline with real `"`. Same theme as codex-create-delivery + the historical
+  per-family tool-format fixes ([[project-downloaded-models-toolcall-dwq]]).
+
 - [ ] **glm32b-codex-timeout** (MED, cheap wall-clock) — GLM-4-32B under codex/opencode times out (rc124)
   on ~7 curated cells; dense 32B fits resident, so cost is per-turn reload/slowness, not OOM. Lever: keep
   GLM-4-32B resident (EAGER) for the run, or a driver-specific higher RUN_TIMEOUT. See BACKLOG.
