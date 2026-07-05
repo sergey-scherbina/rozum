@@ -38,10 +38,10 @@
       ad-hoc runs (fail-fast is the better signal there). Left at 0, with a comment recording why.
   - Verify: `bash -n` + py-compile clean; B1 branch unit-tested on a synthetic Cargo.toml-no-src dir;
     live 3-rep slice run (kept workdirs). A verified on the real ucc CSV (89% headline).
-### ▶ DOING ALL — round-2 gateway/harness tool-call fixes (operator 2026-07-05: "делай всё")
+### ▶ DOING ALL — round-2 gateway/harness tool-call fixes (operator 2026-07-05: "делай всё") — ✅ MERGED `0ddce40`
 
-Working on `feature/gateway-toolcall-round2`. Execution order (verify each; GPU-gated ones need a free
-slot). Status tracker:
+All five items resolved. R2.1/R2.3/R2.5 shipped (unit-tested; R2.3 e2e rpn 0/2→2/3 pass, patches-bridge
+fired). R2.2 diagnosed as model variance (no gateway fix). R2.4 subsumed by R2.3. Status tracker:
 - [x] **R2.1 — `&quot;` html-entity decode** — DONE (`3005e3f`, branch feature/gateway-toolcall-round2).
   `decode_tool_arg_entities` applied in the plain-string fallback of BOTH `parse_xml_function` and
   `parse_glm_arg_kv` (serving.rs). Unit-tested on the observed Qwen3-Coder shape; 28 serving tests green.
@@ -54,8 +54,8 @@ slot). Status tracker:
   generation STALL (only a Bash call, file untouched, 600s timeout) — infra/variance, not entities. So
   Qwen-Coder fix/test reds = model variance ([[project-matrix-nondeterminism]]); R2.1 covers the entity
   slice, nothing more to fix in the gateway.
-- [~] **R2.3 — rpn create-delivery residual** — FIX IMPLEMENTED + unit-tested (`feature/gateway-toolcall-round2`),
-  e2e verifying. CAPTURED the exact form with `ROZUM_CODEX_TOOL_CAPTURE`: it is NOT a V4A patch — codex
+- [x] **R2.3 — rpn create-delivery residual** — DONE (`2c14a33`, merged `0ddce40`). E2E: rpn 0/2 (rc11)
+  → **2/3 PASS, 0 rc11**; the patches-array bridge fired. CAPTURED the exact form with `ROZUM_CODEX_TOOL_CAPTURE`: it is NOT a V4A patch — codex
   emits a STRUCTURED `{"cmd":"apply_patch","patches":[{"path":"Cargo.toml","content":"…"},{"path":"src/main.rs","content":"…"}]}`
   (each entry a whole file, no `*** Add File:` markers). Round-1's fix keys off V4A markers and
   `synthesize_write_from_obj` only handles a single top-level `{path,content}`, so this array shape fell
