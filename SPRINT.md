@@ -2,8 +2,10 @@
 
 ### ▶ Matrix hygiene + test-cell delivery fix (operator 2026-07-05: "як результати матриці? що можна покращити?" → A+B)
 
-- [ ] **matrix-hygiene-and-test-cell** (branch `feature/matrix-hygiene-and-test-cell`) — the Jul-5 broad
-  matrix (`agentic-ucc-1783166880`, 9 models × 3 drivers × 5 tasks) read as "top 67%", but that headline
+- [x] **matrix-hygiene-and-test-cell** — DONE + MERGED to master (`d20d176` merge of `bf8dea1`; follow-ups
+  `e17dee2` fail-mode rollup, `6a287b7`+`cf355b8` BACKLOG). A (honest summarizer) + B (test-cell delivery
+  fix) shipped. Detail below. Open follow-ups pulled into the **NEXT** block at the end of this entry.
+  The Jul-5 broad matrix (`agentic-ucc-1783166880`, 9 models × 3 drivers × 5 tasks) read as "top 67%", but that headline
   BLENDED a broken backend + toy models + weak drivers into one average. Honest read: **claude × curated
   tier = 40/45 (89%)** — GLM-4-32B 15/15, Devstral 13/15, gpt-oss 12/15; `ollama:qwen2.5-coder:7b` is a
   broken backend (36× rc=1, 0 capability signal); codex 33% / opencode 47% drag the blend.
@@ -36,10 +38,51 @@
       ad-hoc runs (fail-fast is the better signal there). Left at 0, with a comment recording why.
   - Verify: `bash -n` + py-compile clean; B1 branch unit-tested on a synthetic Cargo.toml-no-src dir;
     live 3-rep slice run (kept workdirs). A verified on the real ucc CSV (89% headline).
-  - NEXT lever for `test` (separate follow-up, NOT this branch): make the repair loop fail-fast on a
-    detected Edit-before-Read loop instead of burning RUN_TIMEOUT (server loop-breaker / earlier hint),
-    and/or give the repair one extra attempt AFTER the protocol hint fires. Model-side #2 is a Devstral
-    property — track as a known weak cell, don't chase to green.
+### ▶ NEXT — what I'm doing now (matrix improvement, continuation of the above; cold-resumable)
+
+Ordered by value. #1 is the active queue; do it the moment the GPU slot is free.
+
+- [ ] **IN FLIGHT — curated-tier baseline matrix** (`scripts/bench/results/curated-baseline-<stamp>/`).
+  Running now in the background (task launched from the main checkout): `AGENTS=claude`, curated single
+  models `Devstral, gpt-oss-20b, Qwen3-Coder-30B, Qwen3.6-35B-DWQ, GLM-4.7-Flash, GLM-4-32B`, all 6 tasks,
+  REPS=1, REPAIR=1, RUN_TIMEOUT=360, NCTX=32768, KEEP=1, BENCH_BIN=target/release/rozum-gateway.
+  Purpose: the AUTHORITATIVE clean headline (the ucc run was a polluted zoo) + end-to-end validation of the
+  new summarizer on fresh data. WHEN IT FINISHES: run `python3 scripts/bench/summarize_matrix.py
+  scripts/bench/results/curated-baseline-<stamp>/per-run.csv`, report the CAPABILITY headline + fail-mode
+  rollup, and confirm the slot torn down clean (`pgrep -f 'gateway --model'`). It holds the GPU slot → do
+  NOT start any other model run until it exits.
+
+- [ ] **codex-opencode-create-delivery** (HIGH — biggest failure bucket; the real next fix) — see BACKLOG
+  `codex-opencode-create-delivery` for the full evidence. ROOT CAUSE PINNED: gpt-oss (via codex) emits
+  `apply_patch -patches '[{"content":"*** Begin Patch\n*** Add File: …*** End Patch"}]'` (patch wrapped in
+  a JSON array under `-patches`, body JSON-escaped `\n`/`\"`). `rewrite_apply_patch_command`
+  (crates/rozum-gateway/src/gateway.rs ~2232) only undoes SHELL double-quote escaping, not JSON, so the
+  block keeps literal `\n`, `apply_patch_block_to_fuzz` can't parse the `*** Add File:` directives, the
+  rewrite returns None, the original runs against the real shim → `apply_patch accepts exactly one
+  argument` → no files → codex loop-breaker → rc11. On the ucc run this is `deliver 12` (codex) + `deliver
+  13` (opencode) of the curated-tier failures.
+  EXACT STEPS: (1) in `rewrite_apply_patch_command`, before the shell-unescape, detect the JSON-wrapped
+  form — an `apply_patch` arg that is (or contains) a JSON array/object with a `content` field; when so,
+  `serde_json`-decode each object's `content` into a real-newline V4A patch string and run each through the
+  existing `apply_patch_block_to_fuzz` (which already yields `synth_create_command` `cat > <path>` heredocs
+  for `*** Add File:`), concatenating the results. Keep the existing raw/heredoc path for the non-JSON form.
+  (2) Also capture codex×Devstral×build's rc11 emission shape (kept workdir `/tmp/rozum-agentic-Rf1YJM`
+  showed nothing on the first grep — re-inspect) and cover it if different. (3) `cargo build -p rozum`
+  (builds the gateway bin — NOT target/release/rozum; see [[reference-rozum-binary-split]]).
+  VERIFY (GPU-gated, slot must be free): `AGENTIC_MODELS="mlx-community:gpt-oss-20b-MXFP4-Q4" AGENTS=codex
+  TASKS=build REPS=3 REPAIR=1 KEEP=1 BENCH_BIN=./target/release/rozum-gateway bash scripts/bench/agentic.sh`
+  — expect build to go from 0/3 → passing, and inspect a kept workdir to confirm Cargo.toml + src/main.rs
+  actually land (no "accepts exactly one argument"). Do it on a `feature/codex-create-delivery` worktree
+  off origin/master; do not push until verified.
+
+- [ ] **glm32b-codex-timeout** (MED, cheap wall-clock) — GLM-4-32B under codex/opencode times out (rc124)
+  on ~7 curated cells; dense 32B fits resident, so cost is per-turn reload/slowness, not OOM. Lever: keep
+  GLM-4-32B resident (EAGER) for the run, or a driver-specific higher RUN_TIMEOUT. See BACKLOG.
+
+- [ ] **test-cell-repair-failfast** (LOW) — repair Edit-before-Read churn burns the full RUN_TIMEOUT
+  (rc124) without converging; grant ONE bonus repair attempt AFTER `repair_tool_protocol_hint` first fires,
+  and/or detect the churn live and fail-fast. Model-side assertion bug (Devstral writes `reverse("")`) is a
+  known weak cell — do NOT chase to green. See BACKLOG `test-cell-repair-failfast`.
 
 ### ▶ UCC theme page-background gap (owner reported 2026-07-03: "цветовая тема испортилась немного —
     фон стал белый", right after the blank-page fix made the dashboard visible for the first time)
