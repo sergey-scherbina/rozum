@@ -132,8 +132,8 @@ fn parse_glm_arg_kv(body: &str) -> Option<(String, String)> {
         let v2 = &vrest[vs + "<arg_value>".len()..];
         let Some(ve) = v2.find("</arg_value>") else { break };
         let val = v2[..ve].trim();
-        let jval =
-            serde_json::from_str::<Value>(val).unwrap_or_else(|_| Value::String(val.to_string()));
+        let jval = serde_json::from_str::<Value>(val)
+            .unwrap_or_else(|_| Value::String(decode_tool_arg_entities(val)));
         args.insert(key, jval);
         p = &v2[ve + "</arg_value>".len()..];
     }
@@ -171,6 +171,25 @@ fn tool_call_from_value(v: &Value, strict: bool) -> Option<(String, String)> {
     Some((name.to_string(), args))
 }
 
+/// Decode the handful of HTML/XML entities some models (notably Qwen3-Coder on edit paths) emit inside
+/// tool-call string arguments — `&quot;`→`"`, `&#34;`→`"`, `&apos;`/`&#39;`→`'`, `&lt;`→`<`, `&gt;`→`>`
+/// — so the literal chars the model meant land in the file/command instead of raw entity text (e.g. a
+/// `println!(&quot;{}&quot;)` that never compiles). `&amp;` is decoded LAST so `&amp;lt;` → `&lt;`, not
+/// `<`. Applied ONLY to the plain-string fallback (a value that did NOT parse as JSON), where the model
+/// clearly emitted raw text — a properly JSON-encoded string carries its own escaping and is left alone.
+fn decode_tool_arg_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    s.replace("&quot;", "\"")
+        .replace("&#34;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
 /// XML / Hermes form: `<function=NAME> <parameter=KEY>VALUE</parameter> … </function>`.
 fn parse_xml_function(body: &str) -> Option<(String, String)> {
     let fstart = body.find("<function=")?;
@@ -190,7 +209,7 @@ fn parse_xml_function(body: &str) -> Option<(String, String)> {
         let Some(ve) = vrest.find("</parameter>") else { break };
         let val = vrest[..ve].trim();
         let jval = serde_json::from_str::<Value>(val)
-            .unwrap_or_else(|_| Value::String(val.to_string()));
+            .unwrap_or_else(|_| Value::String(decode_tool_arg_entities(val)));
         args.insert(key, jval);
         p = &vrest[ve + "</parameter>".len()..];
     }
@@ -1369,6 +1388,23 @@ mod tests {
         assert!(calls[0].1.contains("reverse(&a[1])"), "content tail lost (truncated?): {}", calls[0].1);
         // and the arguments string must be valid JSON the agent can consume.
         assert!(serde_json::from_str::<serde_json::Value>(&calls[0].1).is_ok(), "args not JSON: {}", calls[0].1);
+    }
+
+    #[test]
+    fn qwen_coder_edit_path_decodes_html_entities() {
+        // Observed Qwen3-Coder edit-path (fix/test) corruption: it XML-escapes quotes/angles in the
+        // `content` parameter — `println!(&quot;{}&quot;, &lt;x&gt;)` — which the parser used to pass
+        // through verbatim, so the written file never compiled. The `<parameter>` string fallback now
+        // html-entity-decodes, so the literal chars the model meant land in the file.
+        let text = "<tool_call>\n<function=write_file>\n<parameter=path>src/main.rs</parameter>\n\
+            <parameter=content>fn main() { println!(&quot;{}&quot;, &lt;x&gt;); }</parameter>\n\
+            </function>\n</tool_call>";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1, "expected one tool call, got: {calls:?}");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        let content = args["content"].as_str().unwrap();
+        assert!(content.contains("println!(\"{}\", <x>)"), "entities not decoded: {content}");
+        assert!(!content.contains("&quot;") && !content.contains("&lt;"), "entity leaked: {content}");
     }
 
     #[test]
