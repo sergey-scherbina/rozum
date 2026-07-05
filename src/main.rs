@@ -1183,6 +1183,13 @@ async fn main() {
             // twice). Piggyback (Tier 3) is the fallback — auto-off when channels
             // (Tier 1) are active, unless forced by `--no-piggyback`/`ROZUM_PIGGYBACK`.
             let wakeup = WakeupPolicy::resolve(&channels, no_piggyback, &program[0]);
+            // B3: capability is RELATIONAL (model × driver) — surface a known driver↔model mismatch so
+            // the operator can pick the right driver. Warn only; never block or auto-switch.
+            if std::env::var_os("ROZUM_NO_MATCH_WARN").is_none() {
+                if let Some(w) = driver_model_mismatch_warning(&program[0], model.as_deref()) {
+                    eprintln!("{w}");
+                }
+            }
             match backend_url {
                 // External OpenAI-compatible server (Ollama/vLLM/…): force it,
                 // skip the local-model resolution + shared daemon entirely.
@@ -2030,6 +2037,30 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
 }
 
 /// What `rozum launch` should run the agent against.
+/// B3 (model→driver routing): the warning text for a known-poor driver↔model pairing, or `None`.
+/// Capability is RELATIONAL — the codex/opencode CLIs are built around the OpenAI apply_patch tool
+/// surface, and a model NOT trained on it (Devstral/Mistral) invents endlessly-malformed tool calls
+/// under them (driver mismatch, not a gateway bug — measured: Devstral 5/6 under claude vs ~0 under
+/// codex; see SPRINT). The gateway cannot reliably fix an unbounded malformed-form surface; the lever
+/// is running the model under the driver it was trained for. This surfaces the mismatch — it never
+/// blocks or auto-switches (the operator stays in control; `ROZUM_NO_MATCH_WARN=1` silences it).
+fn driver_model_mismatch_warning(agent: &str, model: Option<&str>) -> Option<String> {
+    let model = model?;
+    let agent = std::path::Path::new(agent)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(agent);
+    let poorly_matched = model.contains("Devstral") || model.contains("Mistral");
+    if matches!(agent, "codex" | "opencode") && poorly_matched {
+        return Some(format!(
+            "rozum launch: ⚠ {agent} × {model} is a poor driver↔model match — {model} is not trained on \
+             the {agent} tool protocol and emits malformed tool calls, so create/edit often won't land. \
+             Prefer `claude` for this model (measured far more reliable). Set ROZUM_NO_MATCH_WARN=1 to silence."
+        ));
+    }
+    None
+}
+
 enum LaunchTarget {
     /// Run a local model spec, gateway-backed (or `--dedicated`).
     Local(String),
@@ -7721,6 +7752,21 @@ mod tests {
 
     fn reorder(args: &[&str]) -> Vec<String> {
         reorder_launch_args(args.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn driver_model_mismatch_warns_only_for_poor_pairs() {
+        // B3: codex/opencode × Devstral/Mistral → warn; claude (universal) or a matched model → none.
+        assert!(driver_model_mismatch_warning("codex", Some("mlx-community:Devstral-Small-2507-4bit")).is_some());
+        assert!(driver_model_mismatch_warning("opencode", Some("mlx-community:Devstral-Small-2507-4bit")).is_some());
+        // agent arg may be a full path — basename is what matters.
+        assert!(driver_model_mismatch_warning("/usr/local/bin/codex", Some("some-Mistral-7b")).is_some());
+        // claude is the universal driver — never warned.
+        assert!(driver_model_mismatch_warning("claude", Some("mlx-community:Devstral-Small-2507-4bit")).is_none());
+        // a codex-trained model under codex is a good match — no warn.
+        assert!(driver_model_mismatch_warning("codex", Some("mlx-community:gpt-oss-20b-MXFP4-Q4")).is_none());
+        // no model → nothing to warn about.
+        assert!(driver_model_mismatch_warning("codex", None).is_none());
     }
 
     #[test]

@@ -2526,6 +2526,17 @@ fn patch_fuzz() -> u8 {
 /// args JSON, or None when there is no reconstructable patch (caller keeps the original args).
 fn rewrite_apply_patch_function_args(args: &str) -> Option<String> {
     let v: Value = serde_json::from_str(args).ok()?;
+    // B1 (universal seam): a multi-file CREATE can also arrive as the apply_patch FUNCTION call with a
+    // whole-file array and NO patch string — Devstral emits `{"patches":[{"op":"Add","path":…,"content":…}]}`
+    // (also `file_changes`/`files`, path key `path`/`file`/`filename`). The patch-string extraction below
+    // then returns None and the create is lost. Reuse the same synthesizer the exec_command path uses so
+    // every {path,content} entry lands, regardless of which path (exec vs function) or key the model chose.
+    if let Some(o) = v.as_object() {
+        if let Some(writes) = synthesize_writes_from_patches(o) {
+            eprintln!("[apply_patch-fn] synthesized file writes from function-call array {{…:[{{path,content}}]}}");
+            return Some(json!({ "cmd": writes, "login": true }).to_string());
+        }
+    }
     // The model passes the patch text in one of a few shapes:
     //   {"command":["apply_patch","<patch>"]}  (gpt-oss, observed) — the last array string is it
     //   {"input":"<patch>"} / {"patch":"<patch>"} / a bare string
@@ -6042,6 +6053,21 @@ mod tests {
         // A non-patch exec call is left untouched (None → caller keeps the original args).
         let plain = json!({ "cmd": "cargo run", "login": true }).to_string();
         assert!(rewrite_apply_patch_function_args(&plain).is_none());
+
+        // B1: a multi-file CREATE arriving as a function-call ARRAY (no patch string) — Devstral's
+        // captured `{patches:[{op:Add,path,content}]}` form — must synthesize writes, not be lost.
+        let fnarr = json!({
+            "patches": [
+                { "op": "Add", "path": "Cargo.toml", "content": "[package]\nname = \"rpn-calc\"" },
+                { "op": "Add", "path": "src/main.rs", "content": "fn main() {}" }
+            ]
+        })
+        .to_string();
+        let fo: Value = serde_json::from_str(&rewrite_apply_patch_function_args(&fnarr).expect("fn-array reroutable")).unwrap();
+        assert_eq!(fo["login"], true);
+        let fc = fo["cmd"].as_str().unwrap();
+        assert!(fc.contains("cat > 'Cargo.toml'") && fc.contains("cat > 'src/main.rs'"), "fn-array not synthesized: {fc}");
+        assert!(!fc.contains("apply_patch"), "no bare apply_patch: {fc}");
     }
 
     #[test]
