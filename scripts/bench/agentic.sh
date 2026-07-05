@@ -60,6 +60,14 @@ PORT_BASE="${BENCH_PORT_BASE:-8300}"
 # to REPAIR more attempts (same workdir, files persist). 0 = off (legacy behavior). This is the
 # deterministic safety net for the "almost-right code + hallucinated success" failure (a missing
 # `;` the model never saw because it never really compiled). Helps every model; weak ones most.
+# REPAIR default stays 0 (exactly one attempt). Flipping it to 1 was CONSIDERED (a near-miss like
+# "wrote Cargo.toml, dropped src/main.rs, stopped" only recovers if a repair attempt runs) but a live
+# Devstral×test slice (2026-07-05) showed the flip has a real downside I don't yet mitigate: when the
+# repair attempt hits an Edit-before-Read loop it never converges and instead burns the whole
+# RUN_TIMEOUT — turning a fast rc=10 (~57 s) into a slow rc=124 (~360 s) for the SAME red. Every real
+# launcher already opts in explicitly (run_full_matrix.sh, control.rs matrix job both set REPAIR=1),
+# so the default only governs ad-hoc runs, where fail-fast is the more useful signal. Set REPAIR=1 to
+# enable the verify-repair retry (recommended for full matrices; see the repair_diagnostic branches).
 REPAIR="${REPAIR:-0}"
 OUT="${BENCH_OUT:-$here/results/agentic-$(date +%Y%m%d-%H%M%S)}"
 NCTX_OPT=(); [ -n "${NCTX:-}" ] && NCTX_OPT=(--n-ctx "$NCTX")
@@ -164,7 +172,7 @@ prompt_for() {
   case "$task" in
     greet) echo 'Reply with exactly the single word: pong  (nothing else, no punctuation).' ;;
     build) echo "In the CURRENT directory (put files here directly — do NOT wrap them in a new project folder via \`cargo new\`; the standard \`src/\` directory for \`src/main.rs\` is expected and fine), create a minimal Rust binary project: a Cargo.toml (package name \"reverse-cli\", version 0.1.0, edition 2021, no dependencies) and src/main.rs. The program reverses its first command-line argument (by characters) and prints the result. Then run \"cargo run -- hello\" and confirm it prints \"olleh\". Keep it minimal. The moment the program prints \"olleh\", you are DONE — reply with one short confirmation line and STOP; do not run it again.${tool_hint}" ;;
-    test)  echo "In the CURRENT directory (put files here directly — do NOT wrap them in a new project folder via \`cargo new\`; the standard \`src/\` directory for \`src/main.rs\` is expected and fine), create a minimal Rust BINARY project: a Cargo.toml (package \"reverse-cli\", version 0.1.0, edition 2021, no dependencies) and src/main.rs. Implement \`fn reverse(s: &str) -> String\` that reverses by characters; main reads its first CLI argument and prints reverse(arg). ALSO add a \`#[cfg(test)]\` unit test asserting \`reverse(\"hello\") == \"olleh\"\`. Then run \"cargo test\" (must pass) and \"cargo run -- hello\" (must print olleh). Actually implement reverse; do not just scaffold. Keep it minimal. The moment the program prints \"olleh\", you are DONE — reply with one short confirmation line and STOP; do not run it again.${tool_hint}" ;;
+    test)  echo "In the CURRENT directory (put files here directly — do NOT wrap them in a new project folder via \`cargo new\`; the standard \`src/\` directory for \`src/main.rs\` is expected and fine), create a minimal Rust BINARY project. You MUST create BOTH files before you stop: a Cargo.toml (package \"reverse-cli\", version 0.1.0, edition 2021, no dependencies) AND src/main.rs — do NOT stop after writing only the Cargo.toml; a manifest with no src/main.rs has no build target and fails. In src/main.rs implement \`fn reverse(s: &str) -> String\` that reverses by characters; main reads its first CLI argument and prints reverse(arg). ALSO add a \`#[cfg(test)]\` unit test asserting \`reverse(\"hello\") == \"olleh\"\`. Then run \"cargo test\" (must pass) and \"cargo run -- hello\" (must print olleh). Actually implement reverse; do not just scaffold. Keep it minimal. You are DONE only once BOTH \`cargo test\` passes AND \`cargo run -- hello\` prints \"olleh\" — then reply with one short confirmation line and STOP; do not run them again.${tool_hint}" ;;
     fix)   echo "There is a Rust project in the current directory. Running \"cargo run -- hello\" should print \"olleh\" (the reverse of the argument) but it prints \"hello\". Find and fix the bug in src/main.rs, then run \"cargo run -- hello\" to confirm it prints \"olleh\". Make the minimal change; do not rewrite the whole file. Before editing, read the file and copy the exact current text for Edit.old_string. If Edit says \"String to replace not found\", re-read the file and use an exact current substring (or Write the tiny file); do not claim success until the command really prints \"olleh\". The moment it prints \"olleh\", you are DONE — reply with one short confirmation line and STOP.${tool_hint}" ;;
     debug) echo "There is a Rust library in the current directory. \"cargo test\" fails because of a bug in src/lib.rs. Fix the bug so the test passes. Do NOT modify the test. Then run \"cargo test\" to confirm it passes. Make the minimal change. Before editing, read the file and copy the exact current text for Edit.old_string. If Edit says \"String to replace not found\", re-read the file and use an exact current substring (or Write the tiny file); do not claim success until the test command really passes. The moment the test passes, you are DONE — reply with one short confirmation line and STOP.${tool_hint}" ;;
     rpn)   echo "In the CURRENT directory (put files here directly — do NOT wrap them in a new project folder via \`cargo new\`; the standard \`src/\` directory for \`src/main.rs\` is expected and fine), create a minimal Rust binary project: a Cargo.toml (package name \"rpn-calc\", version 0.1.0, edition 2021, no dependencies) and src/main.rs. The program evaluates a Reverse Polish Notation (postfix) expression passed as its first command-line argument: use \`std::env::args().nth(1)\` as the whole expression string. Tokens are space-separated integers and the binary operators + - * /, evaluated left-to-right with a stack using integer arithmetic. After evaluation, print ONLY the final integer result from the stack (no extra text). It must work for ANY valid RPN expression, not just one example. Verify BOTH: \`cargo run -- \"3 4 + 5 *\"\` must print 35, and \`cargo run -- \"5 1 2 + 4 * + 3 -\"\` must print 14. Keep it minimal. The moment both commands print the expected numbers, you are DONE — reply with one short confirmation line and STOP; do not run them again.${tool_hint}" ;;
@@ -364,6 +372,15 @@ repair_diagnostic() { # $1=task  $2=workdir
     other_src="$(find src -maxdepth 1 -name '*.rs' ! -name 'main.rs' 2>/dev/null | tr '\n' ' ')"
     if [ "$src_is_stub" = 1 ] && [ -n "$other_src" ]; then
       echo "WRONG ENTRY POINT: src/main.rs is still the default \"Hello, world!\" stub, so cargo runs it and ignores your code in ${other_src}. Put the program's main() + logic in src/main.rs (or declare the other files as modules and call them from main)."
+      repair_context_snapshot
+      exit 0
+    fi
+    # Manifest present but NO build target at all: the model wrote Cargo.toml and stopped without
+    # ever creating src/main.rs (the dominant `test`-cell near-miss — reasoning was fine, delivery
+    # was incomplete). `cargo build` here only emits the opaque "no targets specified in the manifest";
+    # give a DIRECTIVE fix instead so the retry actually lands the missing file.
+    if [ -f Cargo.toml ] && ! ls src/*.rs >/dev/null 2>&1; then
+      echo "INCOMPLETE PROJECT: Cargo.toml exists but there is NO src/main.rs, so \`cargo\` has no build target (\"no targets specified in the manifest\"). You created the manifest and stopped — you must ALSO create src/main.rs with the actual implementation. Create it now, then run the required cargo command(s)."
       repair_context_snapshot
       exit 0
     fi
