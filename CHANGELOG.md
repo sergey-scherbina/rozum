@@ -1,5 +1,34 @@
 # Changelog
 
+## feat(matrix+gateway): honest reporting + gateway tool-call delivery fixes + model→driver routing
+Completed: 2026-07-05 · `d20d176`…`cefe46f` (35 commits)
+
+Turned "how are the matrix results?" into a measured lift. **Central finding: what looks like local-model
+incapability is almost always the model↔tools translation SEAM, not the model** — and capability is
+RELATIONAL (model × driver). Measured effect (r4 aggregate, all 3 drivers): **claude 100% · codex 33%→70%
+· opencode 0/8-broken→50%**.
+
+Shipped, each unit/logic-tested + (where possible) e2e-verified:
+- **Honest reporting** — `summarize_matrix.py` is tier-aware + per-driver + fail-mode (deliver/wrong/
+  timeout/broke); a blended TOTAL is no longer quoted as capability. Clean baseline: claude × curated 83%,
+  Qwen3.6-35B & GLM-4.7-Flash 6/6.
+- **Gateway tool-call delivery** (the main theme) — codex `apply_patch` in every captured form:
+  `-patches '[JSON]'` (`73b6d64`), structured `{cmd:apply_patch, patches|file_changes|files:[{path|file|
+  filename, content}]}` + function-call arrays (`0ddce40`/`4d90235`/`b4978e4`); Qwen-Coder `&quot;`
+  html-entity decode; test-cell delivery repair branch + bonus-attempt. Captured each malformed shape with
+  `ROZUM_CODEX_TOOL_CAPTURE`/`ROZUM_RAW_DUMP` before fixing.
+- **opencode 0/8 → working** — diagnosed as opencode-side (its SQLite DB missing `replacement_seq` after
+  the v1.16.2 update; reproduced with NO gateway), reset the DB (reversible backup).
+- **Quick wins** — QW1 driver/model-aware `RUN_TIMEOUT` autoscale (slow-but-correct cells stop reading as
+  rc124); QW2 always-on `ROZUM_CODEX_TOOL_CAPTURE` in `run_full_matrix`.
+- **B3 model→driver routing** — `rozum launch` now WARNS on a known-poor pairing (codex/opencode × Devstral/
+  Mistral → suggests claude; warn-only, `ROZUM_NO_MATCH_WARN=1` silences). Operationalizes "capability is
+  relational" — the answer to a driver mismatch is routing, not more gateway code.
+
+Deliberately NOT chased: gateway whack-a-mole for driver-mismatched pairs (→ routing); model ceilings
+(Devstral test-assertion, gpt-oss wrong-code, Qwen newline variance). The one authoritative full matrix
+(B2) is deferred on external host-RAM pressure — re-run command in SPRINT.
+
 ## fix(ucc): matrix nav link + sessions mode fix
 Completed: 2026-07-03 · `bc94717`
 
