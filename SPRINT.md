@@ -42,8 +42,14 @@
 
 Ordered by value. #1 is the active queue; do it the moment the GPU slot is free.
 
-- [ ] **IN FLIGHT — curated-tier baseline matrix** (`scripts/bench/results/curated-baseline-<stamp>/`).
-  Running now in the background (task launched from the main checkout): `AGENTS=claude`, curated single
+- [x] **DONE — curated-tier baseline matrix** (`scripts/bench/results/curated-baseline-20260705-*`).
+  RESULT: **claude × curated = 30/36 (83%)**, REPS=1, 0 infra failures, slot torn down clean. Perfect:
+  Qwen3.6-35B-DWQ 6/6, GLM-4.7-Flash 6/6. All 6 reds map to already-diagnosed levers (none are reasoning):
+  Qwen-Coder fix+test = tool-arg decode bug (below); gpt-oss rpn + GLM-4-32B rpn = create-from-scratch
+  delivery (apply_patch / GLM decision-gap); GLM-4-32B build = GLM create weakness + REPS=1 noise (was 3/3
+  in ucc); Devstral test = known repair loop. 83% vs the ucc-derived 89% = REPS=1 single-sample noise +
+  `rpn` added. Validates the new summarizer end-to-end on fresh data.
+  (superseded IN FLIGHT note): `AGENTS=claude`, curated single
   models `Devstral, gpt-oss-20b, Qwen3-Coder-30B, Qwen3.6-35B-DWQ, GLM-4.7-Flash, GLM-4-32B`, all 6 tasks,
   REPS=1, REPAIR=1, RUN_TIMEOUT=360, NCTX=32768, KEEP=1, BENCH_BIN=target/release/rozum-gateway.
   Purpose: the AUTHORITATIVE clean headline (the ucc run was a polluted zoo) + end-to-end validation of the
