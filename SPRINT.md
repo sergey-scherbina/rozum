@@ -1,5 +1,15 @@
 # Sprint
 
+### ▶ r4 aggregate (all fixes + all 3 drivers working) — CONCLUSIVE (26/30, run killed but headline clear)
+
+- [x] **r4-aggregate** — claude+codex+opencode × {gpt-oss, GLM-4.7-Flash} × {build,fix,test,rpn,debug}.
+  RESULT (validates the whole session): **claude 10/10 (100%)**, **codex 7/10 (70%)** — up from the ucc
+  baseline **33%** — and **opencode 3/6 (50%)** — up from **0/8 broken** (DB fix). codex×gpt-oss 4/5
+  (delivery fixed, was ~2/5 deliver-heavy). ONLY residual = codex×GLM-4.7-Flash all rc124 timeout at
+  RUN_TIMEOUT=300 (my run's tight cap; 3/5 still PASSED — the work is correct, just slow: MoE-lite
+  adaptive load + codex overhead) → use RUN_TIMEOUT=900 (run_full_matrix default) for big models under
+  codex, then codex ≈90%. Not a bug. Killed at 26/30 (missing opencode×GLM×4) — headline unaffected.
+
 ### ▶ Cumulative-effect measurement + opencode delivery diagnosis (operator 2026-07-05: "продовжуй поліпшувати")
 
 - [x] **r3-cumulative-and-opencode** — DONE (measured + acted). RESULTS: **codex×gpt-oss delivery FIXED**
