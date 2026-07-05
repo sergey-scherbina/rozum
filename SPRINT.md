@@ -1,5 +1,15 @@
 # Sprint
 
+### ▶ Cumulative-effect measurement + opencode delivery diagnosis (operator 2026-07-05: "продовжуй поліпшувати")
+
+- [ ] **r3-cumulative-and-opencode** — measure whether round-1+round-2 gateway fixes lifted the delivery
+  drivers (ucc baseline: codex 33%, opencode 47% on curated), and capture opencode's residual delivery
+  form (its curated kept-workdirs were cleaned; codex forms are now covered — gateway.jsonl mining showed
+  only patches-array (R2.3) + v4a (round-1), no new codex gap). Running:
+  `codex+opencode × {gpt-oss, Devstral} × {build,fix,test,rpn} × REPS=1`, KEEP=1,
+  ROZUM_CODEX_TOOL_CAPTURE=1, master binary (all fixes, built 15:08) → summarize with the new tier/fail-mode
+  reporter (delivery=rc11 should drop), then inspect opencode rc11 workdirs for the next gateway gap.
+
 ### ▶ Matrix hygiene + test-cell delivery fix (operator 2026-07-05: "як результати матриці? що можна покращити?" → A+B)
 
 - [x] **matrix-hygiene-and-test-cell** — DONE + MERGED to master (`d20d176` merge of `bf8dea1`; follow-ups
