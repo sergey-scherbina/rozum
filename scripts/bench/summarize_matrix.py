@@ -1,10 +1,29 @@
 #!/usr/bin/env python3
-"""Summarize full agentic-matrix output.
+"""Summarize full agentic-matrix output — HONESTLY.
 
 Usage:
   summarize_matrix.py /tmp/full_matrix-<stamp>.log
   summarize_matrix.py scripts/bench/results/full-matrix-<stamp>/per-run.csv
   summarize_matrix.py scripts/bench/results/full-matrix-<stamp>
+
+Why this exists / what changed (2026-07-05, matrix-hygiene):
+  A blended "TOTAL X/Y green" is MISLEADING when a run mixes three very different
+  things into one average:
+    1. CAPABLE tier   — the curated agentic coders we actually ship/measure.
+    2. PROBE tier      — small / experimental models kept for context; most only
+                          clear `greet` (the known 7B→27B capability cliff).
+    3. BROKEN backends — a spec the gateway cannot even serve (e.g. an `ollama:`
+                          model with no ollama running) fails every cell with
+                          rc=1 (agent error) or rc=2 (infra). That is an
+                          INTEGRATION failure, NOT a capability signal, and it
+                          must never drag the headline down as if the model
+                          "scored 20%".
+  It is also misleading to average the three DRIVERS (claude / codex / opencode)
+  into one number — they differ by ~2x. So the honest read is:
+    • CAPABILITY headline = claude × the curated tier only.
+    • DRIVERS compared over the curated tier, side by side.
+    • BROKEN backends listed and EXCLUDED from every rate.
+    • PROBE models shown for context, separately.
 """
 from __future__ import annotations
 
@@ -17,9 +36,33 @@ from typing import Any
 
 TASK_ORDER = {name: i for i, name in enumerate(["greet", "build", "fix", "test", "debug", "rpn"])}
 
+# The curated CAPABLE tier — keep in sync with DEFAULT_MODELS in agentic.sh. A model
+# is "capable tier" if its display name contains any of these substrings. These are the
+# models whose score is a real agentic-capability signal; the headline is computed over
+# them (claude driver). Everything else is PROBE (context only) unless it is BROKEN.
+CAPABLE_SUBSTRINGS = (
+    "Qwen3.6-35B-A3B",
+    "Qwen3-Coder-30B-A3B",
+    "Devstral-Small-2507",
+    "GLM-4.7-Flash",
+    "GLM-4-32B-0414",
+    "gpt-oss-20b",
+)
+
+# rc codes that mean "this was NOT a capability measurement":
+#   1 = agent error (tool error / segfault / the runner itself failed)
+#   2 = infra failure (gateway crash / clients_gone)
+# A model whose non-greet cells are DOMINATED by these is a broken/unsupported backend.
+NON_CAPABILITY_RC = {"1", "2"}
+BROKEN_RC_SHARE = 0.5  # >= this share of cells in {1,2} → BROKEN (for non-curated models)
+
 
 def display_model(model: str) -> str:
     return model.replace("mlx-community:", "")
+
+
+def is_capable(model: str) -> bool:
+    return any(s in model for s in CAPABLE_SUBSTRINGS)
 
 
 def cell(
@@ -30,6 +73,7 @@ def cell(
     passed: str,
     timeout: bool = False,
     reasons: list[str] | None = None,
+    rc: str | None = None,
 ) -> dict[str, Any]:
     return {
         "model": display_model(model),
@@ -39,6 +83,7 @@ def cell(
         "pass": passed == "1",
         "timeout": timeout,
         "reasons": reasons or [],
+        "rc": rc,
     }
 
 
@@ -93,6 +138,7 @@ def parse_csv(path: Path) -> tuple[list[dict[str, Any]], dict[str, bool]]:
                     row.get("pass", "0"),
                     row.get("timeout") == "1",
                     reasons,
+                    rc=row.get("rc"),
                 )
             )
     return cells, {}
@@ -112,20 +158,109 @@ def read_input(arg: str) -> tuple[list[dict[str, Any]], dict[str, bool]]:
     return parse_log(path.read_text(errors="replace").splitlines())
 
 
+def classify(model: str, rows: list[dict[str, Any]]) -> str:
+    """Return 'capable' | 'probe' | 'broken'.
+
+    Curated models are always 'capable' (their infra flakes are surfaced but they are
+    never demoted). Any other model whose cells are dominated by rc∈{1,2} is 'broken'
+    (unsupported/crashing backend — not a capability measurement). The rest are 'probe'.
+    """
+    if is_capable(model):
+        return "capable"
+    if rows:
+        bad = sum(1 for r in rows if r.get("rc") in NON_CAPABILITY_RC)
+        if bad / len(rows) >= BROKEN_RC_SHARE:
+            return "broken"
+    return "probe"
+
+
+def rate(rows: list[dict[str, Any]]) -> tuple[int, int]:
+    return sum(1 for r in rows if r["pass"]), len(rows)
+
+
+def pct(p: int, t: int) -> str:
+    return f"{100 * p / t:3.0f}%" if t else "  -%"
+
+
 def summarize(cells: list[dict[str, Any]], refused: dict[str, bool]) -> None:
     models = list(refused.keys())
     for c in cells:
         if c["model"] not in models:
             models.append(c["model"])
 
+    tier: dict[str, str] = {m: classify(m, [c for c in cells if c["model"] == m]) for m in models}
+    capable_models = [m for m in models if tier[m] == "capable"]
+    probe_models = [m for m in models if tier[m] == "probe"]
+    broken_models = [m for m in models if tier[m] == "broken"]
+
+    agents = sorted({c["agent"] for c in cells})
+    infra_rc = sum(1 for c in cells if c.get("rc") in NON_CAPABILITY_RC)
+    to = sum(1 for c in cells if c["timeout"])
+
+    # ── HONEST HEADLINE ───────────────────────────────────────────────────────
     print("=" * 78)
+    print("AGENTIC MATRIX — honest read (capability tier ≠ probe ≠ broken backend)")
+    print("=" * 78)
+
+    cap_claude = [c for c in cells if tier[c["model"]] == "capable" and c["agent"] == "claude"]
+    p, t = rate(cap_claude)
+    print(f"\n▶ CAPABILITY  (claude × curated tier)   {p}/{t}  {pct(p, t)}   ← the headline")
+    for m in capable_models:
+        rows = [c for c in cells if c["model"] == m and c["agent"] == "claude"]
+        if not rows:
+            continue
+        mp, mt = rate(rows)
+        # per-task mini-breakdown, ordered
+        bytask = defaultdict(list)
+        for r in rows:
+            bytask[r["task"]].append(r)
+        cells_str = " ".join(
+            f"{tk}:{rate(bytask[tk])[0]}/{rate(bytask[tk])[1]}"
+            for tk in sorted(bytask, key=lambda x: TASK_ORDER.get(x, 99))
+        )
+        print(f"    {mp:>2}/{mt:<2} {pct(mp, mt)}  {m:34s} {cells_str}")
+
+    # DRIVERS over the curated tier (the fair driver comparison)
+    print("\n▶ DRIVERS  (over curated tier only)")
+    for a in agents:
+        rows = [c for c in cells if tier[c["model"]] == "capable" and c["agent"] == a]
+        p, t = rate(rows)
+        print(f"    {a:9s} {p:>3}/{t:<3} {pct(p, t)}")
+
+    # BROKEN backends — excluded from every rate above
+    if broken_models:
+        print("\n▶ BROKEN / unsupported backends  (EXCLUDED from rates — not a capability signal)")
+        for m in broken_models:
+            rows = [c for c in cells if c["model"] == m]
+            bad = sum(1 for r in rows if r.get("rc") in NON_CAPABILITY_RC)
+            rcs = defaultdict(int)
+            for r in rows:
+                if r.get("rc") in NON_CAPABILITY_RC:
+                    rcs[r["rc"]] += 1
+            rcstr = ", ".join(f"{n}× rc={k}" for k, n in sorted(rcs.items()))
+            print(f"    ⛔ {m:34s} {bad}/{len(rows)} cells failed at the runner/gateway ({rcstr})")
+        print("    → fix or drop these specs from the matrix selection; they measure integration, not skill.")
+
+    # PROBE models — context only
+    if probe_models:
+        print("\n▶ PROBE / small models  (context only — most clear `greet` and little else)")
+        for m in probe_models:
+            rows = [c for c in cells if c["model"] == m and c["agent"] == "claude"]
+            p, t = rate(rows)
+            ng_p, ng_t = rate([r for r in rows if r["task"] != "greet"])
+            print(f"    {m:34s} claude {p}/{t} {pct(p, t)}  (non-greet {ng_p}/{ng_t})")
+
+    # ── PER-MODEL DETAIL (unchanged, still useful for drill-down) ──────────────
+    print("\n" + "=" * 78)
+    print("PER-MODEL DETAIL")
     for model in models:
         rows = [c for c in cells if c["model"] == model]
         if refused.get(model) and not rows:
             print(f"\n■ {model}:  ⛔ NOT LOADED (gateway refused/failed to start)")
             print("   every cell for this model was skipped")
             continue
-        print(f"\n■ {model}")
+        badge = {"capable": "", "probe": "  [probe]", "broken": "  [BROKEN backend]"}[tier[model]]
+        print(f"\n■ {model}{badge}")
         npass = sum(1 for c in rows if c["pass"])
         print(f"   {npass}/{len(rows)} green")
 
@@ -148,15 +283,24 @@ def summarize(cells: list[dict[str, Any]], refused: dict[str, bool]) -> None:
                 why = "  ·  " + "; ".join(failed_reasons[:4])
             print(f"   {mark} {agent:9s} {task:6s} {passed}/{total}  avg={avg:7.1f}s{why}")
 
+    # ── TIERED FOOTER ──────────────────────────────────────────────────────────
     print("\n" + "=" * 78)
-    total = len(cells)
-    passed = sum(1 for c in cells if c["pass"])
+    cap_p, cap_t = rate([c for c in cells if tier[c["model"]] == "capable"])
+    all_p, all_t = rate(cells)
     not_loaded = sum(
         1
         for model, is_refused in refused.items()
         if is_refused and not any(c["model"] == model for c in cells)
     )
-    print(f"TOTAL ran: {passed}/{total} green   ({not_loaded} model(s) not loaded)")
+    print(f"CAPABILITY tier (all drivers): {cap_p}/{cap_t} {pct(cap_p, cap_t)}   "
+          f"|  claude-only: " + pct(*rate(cap_claude)))
+    print(f"ALL runs incl. probe/broken:   {all_p}/{all_t} {pct(all_p, all_t)}  "
+          f"← do NOT quote this as 'capability'")
+    if broken_models:
+        print(f"  ⚠ {len(broken_models)} broken backend(s) excluded from the capability rate: "
+              + ", ".join(broken_models))
+    print(f"  infra/runner-error cells (rc∈{{1,2}}): {infra_rc}   timeouts: {to}   "
+          f"models not loaded: {not_loaded}")
 
 
 def main() -> None:

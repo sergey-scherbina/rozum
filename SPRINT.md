@@ -1,5 +1,46 @@
 # Sprint
 
+### ▶ Matrix hygiene + test-cell delivery fix (operator 2026-07-05: "як результати матриці? що можна покращити?" → A+B)
+
+- [ ] **matrix-hygiene-and-test-cell** (branch `feature/matrix-hygiene-and-test-cell`) — the Jul-5 broad
+  matrix (`agentic-ucc-1783166880`, 9 models × 3 drivers × 5 tasks) read as "top 67%", but that headline
+  BLENDED a broken backend + toy models + weak drivers into one average. Honest read: **claude × curated
+  tier = 40/45 (89%)** — GLM-4-32B 15/15, Devstral 13/15, gpt-oss 12/15; `ollama:qwen2.5-coder:7b` is a
+  broken backend (36× rc=1, 0 capability signal); codex 33% / opencode 47% drag the blend.
+  - **A (report hygiene, done):** rewrote `scripts/bench/summarize_matrix.py` — tier-aware + per-driver.
+    Leads with CAPABILITY (claude × curated tier), lists BROKEN backends (rc∈{1,2}-dominated) EXCLUDED
+    from every rate, shows PROBE/small models separately, and a tiered footer that explicitly says the
+    all-runs blend is NOT "capability". Verified on the real ucc CSV: headline 40/45 89%. Pure reporting,
+    no behaviour change. Curated tier = CAPABLE_SUBSTRINGS, kept in sync with agentic.sh DEFAULT_MODELS.
+  - **B (test-cell — DIAGNOSED + delivery fixed; cell still red, honestly):** the weakest real cell
+    (`test`, Devstral 1/3). Live slice (Devstral × test × claude × REPS, new harness, RUN_TIMEOUT=300,
+    REPAIR=1) decomposed it into THREE independent causes, only one of which is a harness bug:
+    1. **Delivery near-miss (FIXED):** claude(Devstral) writes a valid Cargo.toml with ONE Write, then
+       stops; src/main.rs never lands → `no targets specified` (rc=10/rc=11). Fix (B1) = new
+       `repair_diagnostic` branch: Cargo.toml present but no `src/*.rs` → DIRECTIVE "create src/main.rs
+       now". PROVEN: in every verified rep `cargo run -- hello -> olleh` now PASSES (src lands via repair).
+    2. **Test-assertion transcription (MODEL bug, not fixable here):** Devstral writes
+       `assert_eq!(reverse(""), "olleh")` — empty string instead of `"hello"` — although the prompt says
+       `reverse("hello")` explicitly. `cargo test` correctly stays red.
+    3. **Repair-time Edit-before-Read loop (the real remaining lever):** fed "cargo test red", the driver
+       loops on Edit-before-Read ("File has not been read yet" ×2) and burns the whole RUN_TIMEOUT → rc=124.
+       `repair_tool_protocol_hint` exists for exactly this but fires one attempt too late (the loop is in
+       the FINAL repair attempt, no further attempt to apply the hint).
+    - Net: Devstral×test did NOT go green (still 0/3 in the slice) — its ceiling here is model-side (#2)
+      + the repair loop (#3), NOT delivery. B1 is still a correct, general win (delivery near-misses now
+      converge). B3 = tightened `test` prompt (MUST create BOTH files; DONE only once `cargo test` passes
+      AND olleh prints) — clearer, harmless.
+    - **B2 was CONSIDERED then REVERTED:** flipping `REPAIR` default 0→1 looked right on paper, but the
+      live slice showed it converts a fast rc=10 (~57 s) into a slow non-converging rc=124 (~360 s) via
+      the #3 edit-loop. Every real launcher already sets REPAIR=1 explicitly, so the default only governs
+      ad-hoc runs (fail-fast is the better signal there). Left at 0, with a comment recording why.
+  - Verify: `bash -n` + py-compile clean; B1 branch unit-tested on a synthetic Cargo.toml-no-src dir;
+    live 3-rep slice run (kept workdirs). A verified on the real ucc CSV (89% headline).
+  - NEXT lever for `test` (separate follow-up, NOT this branch): make the repair loop fail-fast on a
+    detected Edit-before-Read loop instead of burning RUN_TIMEOUT (server loop-breaker / earlier hint),
+    and/or give the repair one extra attempt AFTER the protocol hint fires. Model-side #2 is a Devstral
+    property — track as a known weak cell, don't chase to green.
+
 ### ▶ UCC theme page-background gap (owner reported 2026-07-03: "цветовая тема испортилась немного —
     фон стал белый", right after the blank-page fix made the dashboard visible for the first time)
 
