@@ -14,8 +14,11 @@
      that reduce the surface + help codex×gpt-oss, but CANNOT make codex×Devstral reliable. **Operational
      answer: route Devstral through CLAUDE (5/6), not codex.** Remaining forms (function-call array, ops,
      CLI) deliberately NOT chased — diminishing returns on a driver mismatch.
-  2. **opencode /v1/messages 500** → BACKLOG `opencode-500-v1-messages` (0/8 rc=1; separate issue, likely
-     not the tool-call fixes — they don't touch /v1/messages request handling).
+  2. **opencode 0/8 (rc=1) → RESOLVED** (BACKLOG `opencode-500-v1-messages`). Ruled out the gateway by
+     reproducing in isolation: `opencode run "hi"` failed even with NO gateway. Its own log showed
+     `SQLiteError: no such column: replacement_seq` — opencode v1.16.2's DB was on a stale schema. Backed
+     up the broken DB (reversible) → opencode recreated it → `opencode run` returns `ok`. NOT a rozum bug,
+     NOT the tool-call fixes. opencode is unblocked for future matrices.
 
 ### ▶ Matrix hygiene + test-cell delivery fix (operator 2026-07-05: "як результати матриці? що можна покращити?" → A+B)
 
