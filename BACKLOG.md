@@ -11,10 +11,20 @@ shows this + fail-mode rollup). The two big NON-model levers, ranked:
   never lands in the jail (the file isn't created), codex then re-verifies a "change already applied",
   trips its OWN loop-breaker ("Stopping to avoid an infinite loop"), and exits with an empty workdir →
   rc11. The gateway already has Method B (apply_patch→`patch --fuzz`) + an Add-File→shell rewrite
-  (gateway.rs ~2264) for the EDIT case; the CREATE case still leaks for the curated models (Devstral/GLM
-  emit the Add-File envelope in a shape the rewrite misses). Lever: extend the apply_patch Add-File→shell
-  `cat > <path>` rewrite to cover the shapes these models emit; verify with codex×{Devstral,GLM-4-32B}×build.
-  REQUIRES a gateway rebuild + GPU-free slot to test (do NOT run while a matrix holds the slot).
+  (gateway.rs ~2264) for the EDIT case; the CREATE case still leaks for the curated models. **EXACT root
+  cause (kept workdir, codex×gpt-oss×build):** gpt-oss emits
+  `/bin/zsh -lc "apply_patch -patches '[{\"content\":\"*** Begin Patch\\n*** Add File: Cargo.toml\\n+…\\n*** Add File: src/main.rs\\n+…*** End Patch\"}]'"`
+  — the patch is wrapped in a JSON array under a `-patches` flag, so the V4A body is JSON-escaped
+  (`\\n`, `\\\"`). `rewrite_apply_patch_command` (gateway.rs ~2232) locates `*** Begin Patch…*** End Patch`
+  but only undoes SHELL double-quote escaping, not JSON escaping — so the extracted block keeps literal
+  `\\n` (not real newlines), `apply_patch_block_to_fuzz` can't parse the `*** Add File:` directives, the
+  rewrite returns None, the ORIGINAL `apply_patch -patches '[…]'` runs against the real shim →
+  `Error: apply_patch accepts exactly one argument` → nothing written → codex re-verifies → its own
+  loop-breaker → rc11. **Fix:** in `rewrite_apply_patch_command`, detect the `-patches '[{...}]'` /
+  JSON-wrapped form, `serde_json`-decode each object's `content` (→ a real-newline V4A patch), then feed
+  each through the existing `apply_patch_block_to_fuzz` / `synth_create_command` path. Verify:
+  codex×gpt-oss×build (+ re-check codex×Devstral×build — its rc11 emission shape still TBD, capture while
+  implementing). REQUIRES a gateway rebuild + GPU-free slot to test (do NOT run while a matrix holds the slot).
 - [ ] **glm32b-codex-timeout** (MED) — GLM-4-32B under codex/opencode times out (rc124) on ~7 curated
   cells; it's a dense 32B that fits resident, so the cost is per-turn reload/slowness under those drivers,
   not OOM. Lever: EAGER co-residency / keep-resident for GLM-4-32B alone, or a driver-specific higher
