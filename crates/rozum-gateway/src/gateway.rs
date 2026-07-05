@@ -2233,6 +2233,17 @@ fn rewrite_apply_patch_command(cmd: &str) -> Option<String> {
     if !cmd.contains("apply_patch") {
         return None;
     }
+    // gpt-oss (OpenAI tool surface) wraps the patch in a JSON payload under a flag, e.g.
+    //   apply_patch -patches '[{"content":"*** Begin Patch\n*** Add File: …*** End Patch"}]'
+    // The V4A body is then a JSON-escaped STRING (`\n`, `\"`), so the raw shell-unescape below leaves
+    // literal `\n` and `apply_patch_block_to_fuzz` can't see the `*** Add File:` line structure → the
+    // rewrite fails, the ORIGINAL `apply_patch -patches '[…]'` runs against the real shim →
+    // `apply_patch accepts exactly one argument` → nothing written (matrix rc11, the biggest
+    // codex/opencode create-from-scratch failure bucket). JSON-decode each carried patch FIRST (→ real
+    // newlines) and run each through the shared block parser.
+    if let Some(out) = rewrite_json_wrapped_apply_patch(cmd) {
+        return Some(out);
+    }
     let begin = cmd.find("*** Begin Patch")?;
     let end_rel = cmd[begin..].find("*** End Patch")?;
     let end = begin + end_rel + "*** End Patch".len();
@@ -2243,6 +2254,49 @@ fn rewrite_apply_patch_command(cmd: &str) -> Option<String> {
         .replace("\\`", "`")
         .replace("\\\\", "\\");
     apply_patch_block_to_fuzz(&block)
+}
+
+/// gpt-oss/OpenAI form: the `apply_patch` argument is JSON that carries the V4A patch as a string —
+/// `-patches '[{"content":"*** Begin Patch…"}]'`, a single `{"patch":"…"}`, or a bare JSON string.
+/// Parse the FIRST self-delimiting JSON value embedded in the command (ignoring trailing shell text
+/// like the closing quote), pull every string field that holds a patch, and turn each into shell
+/// writes via the shared block parser. `None` when the command has no JSON-wrapped patch — a raw
+/// `*** Begin Patch` shell string (whose body may itself contain a `{`) fails the JSON parse here and
+/// the caller falls back to the shell-string path.
+fn rewrite_json_wrapped_apply_patch(cmd: &str) -> Option<String> {
+    let after = &cmd[cmd.find("apply_patch")?..];
+    let jstart = after.find(['[', '{'])?;
+    let val = serde_json::Deserializer::from_str(&after[jstart..])
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()?;
+    let mut patches = Vec::new();
+    collect_patch_strings(&val, &mut patches);
+    if patches.is_empty() {
+        return None;
+    }
+    let out: String = patches.iter().filter_map(|p| apply_patch_block_to_fuzz(p)).collect();
+    (!out.is_empty()).then_some(out)
+}
+
+/// Collect every string inside a JSON value that looks like a V4A patch (carries `*** Begin Patch`
+/// or an `*** Add/Create/Update File:` directive), recursing through arrays/objects. Shape-agnostic:
+/// models wrap the patch under different keys (`content`, `patch`, `input`), sometimes in an array.
+fn collect_patch_strings(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::String(s) => {
+            if s.contains("*** Begin Patch")
+                || s.contains("*** Add File:")
+                || s.contains("*** Create File:")
+                || s.contains("*** Update File:")
+            {
+                out.push(s.clone());
+            }
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|e| collect_patch_strings(e, out)),
+        serde_json::Value::Object(o) => o.values().for_each(|e| collect_patch_strings(e, out)),
+        _ => {}
+    }
 }
 
 /// Render a verbatim file-create as a shell command: write `content` to `path` ONLY if the path is
@@ -5847,6 +5901,28 @@ mod tests {
         let fixed = normalize_codex_tool_args(&args);
         assert!(fixed.contains("patch -p0 --fuzz"), "Method B not applied: {fixed}");
         assert!(!fixed.contains("apply_patch"), "apply_patch should be gone: {fixed}");
+    }
+
+    #[test]
+    fn apply_patch_json_wrapped_patches_flag_creates_files() {
+        // gpt-oss (OpenAI tool surface) emits the create as a JSON payload under `-patches`, with the
+        // V4A body JSON-escaped (`\n`, `\"`). Before the fix this fell through the shell-unescape path
+        // (literal `\n` → no `*** Add File:` lines parsed → apply_patch ran raw → "accepts exactly one
+        // argument" → nothing written, matrix rc11). Now each JSON `content` is decoded → file writes.
+        let cmd = r#"apply_patch -patches '[{"content":"*** Begin Patch\n*** Add File: Cargo.toml\n+[package]\n+name = \"reverse-cli\"\n*** Add File: src/main.rs\n+fn main() { println!(\"hi\"); }\n*** End Patch"}]'"#;
+        let rw = rewrite_apply_patch_command(cmd).expect("JSON-wrapped apply_patch should rewrite");
+        // Both files created via the shared synth_create_command heredoc.
+        assert!(rw.contains("cat > 'Cargo.toml'"), "Cargo.toml not created: {rw}");
+        assert!(rw.contains("cat > 'src/main.rs'"), "src/main.rs not created: {rw}");
+        // Content JSON-DECODED: real quotes, no literal `\n`, no V4A directive leaking through.
+        assert!(rw.contains("name = \"reverse-cli\""), "quotes not decoded: {rw}");
+        assert!(rw.contains("[package]"), "manifest body missing: {rw}");
+        assert!(!rw.contains("\\n"), "literal backslash-n leaked (not decoded): {rw}");
+        assert!(!rw.contains("*** Add File:"), "V4A directive leaked into output: {rw}");
+        // A raw (non-JSON) apply_patch shell string has no JSON bracket → falls back to shell path.
+        assert!(
+            rewrite_json_wrapped_apply_patch("apply_patch \"*** Begin Patch\n*** End Patch\"").is_none()
+        );
     }
 
     #[test]
