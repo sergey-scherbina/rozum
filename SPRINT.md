@@ -23,7 +23,7 @@ first, then the strategic bets.
   FUTURE malformed shapes without new per-form code. Generalizes what R3/R3b did piecemeal. gateway.rs
   `synthesize_writes_from_patches` + the normalize/function-call paths. Unit-test against every captured
   shape in `~/.rozum/gateway.jsonl`.
-- [~] **B2 — one authoritative full matrix** — RUNNING (2026-07-05, after freeing RAM). Was blocked by
+- [x] **B2 — authoritative matrix** — DONE for gpt-oss (GLM-4.7-Flash RAM-blocked: sbt daemons respawned mid-run). RESULT (b2-authoritative-20260705-225020) — the DEFINITIVE delivery validation on the codex-trained model: **claude 5/5, codex 2/5, opencode 4/5 — with 0 delivery failures (0 rc11) across ALL drivers**. Every codex fail is rc10 = gpt-oss wrong CODE (model ceiling), not delivery. vs ucc baseline codex×gpt-oss ~2/5 deliver-heavy + opencode broken → delivery is SOLVED for gpt-oss. (GLM-4.7-Flash half needs a quieter machine; claude×GLM-4.7-Flash is already 6/6 from r4.) Was blocked by
   ~13.9 GB of external `java` (13 procs, sibling/IDE work) left only ~4–12 GB actually free (`vm_stat`), and a curated model
   is ~17–18 GB. The gateway correctly refused (forcing it risks a reboot). Stopped cleanly via TaskStop
   (no orphan gateway, no lock, machine up — no BUG-001). The r4 partial run ALREADY gave the conclusive
