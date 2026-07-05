@@ -1,5 +1,18 @@
 # Backlog
 
+## opencode → gateway `/v1/messages` 500 (found 2026-07-05, r3-cumulative run)
+
+- [ ] **opencode-500-v1-messages** — in the r3-cumulative run opencode scored **0/8, ALL rc=1**: every
+  opencode cell died with `Error: {"name":"UnknownError","data":{"message":"Unexpected server error.
+  Check server logs for details.","ref":"err_19444974"}}` — i.e. opencode got a 5xx from the gateway on
+  `/v1/messages` (opencode uses `model=claude-rozum-…`, `/v1/messages`). opencode WORKED at 47% in the
+  ucc run (Jul-5 02:43, pre-fix binary), so it's either an opencode version/config change or a gateway
+  `/v1/messages` bug. LIKELY NOT the round-1/round-2 fixes: those touch the codex `/v1/responses`
+  normalize path + `parse_tool_calls` (entity-decode = string replace, can't 500); `/v1/messages` request
+  handling was untouched. Needs a focused repro: run opencode alone, capture the gateway's actual 5xx
+  (obs `~/.rozum/gateway.jsonl` request_error, or gateway stderr) to see the failing request shape/panic.
+  Until diagnosed, treat opencode results as a BROKEN driver (like ollama:7b) — exclude from capability.
+
 ## Matrix improvement levers (found 2026-07-05 during the matrix-hygiene analysis; evidence in agentic-ucc-1783166880)
 
 The honest read of the curated tier is claude 89% / codex 33% / opencode 47% (summarize_matrix.py now
