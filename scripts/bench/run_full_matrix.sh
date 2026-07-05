@@ -77,6 +77,7 @@ env "${EXTRA_ENV[@]}" \
   REPS=1 KEEP=1 RUN_TIMEOUT="${RUN_TIMEOUT:-900}" NCTX="${NCTX:-32768}" \
   REPAIR="${REPAIR:-1}" \
   ROZUM_SAMPLING_SEED=1234 \
+  ROZUM_CODEX_TOOL_CAPTURE="${ROZUM_CODEX_TOOL_CAPTURE:-1}" \
   BENCH_BIN="$BIN" BENCH_OUT="$OUT" \
   bash scripts/bench/agentic.sh 2>&1 | tee "$LOG"
 

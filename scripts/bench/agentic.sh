@@ -52,6 +52,24 @@ repo="$(cd "$here/../.." && pwd)"
 cd "$repo"
 
 RUN_TIMEOUT="${RUN_TIMEOUT:-600}"
+# QW1: the codex/opencode drivers reload/parse more per turn than claude, and big/MoE/pipeline models
+# are slow to load+serve — so a slow-but-CORRECT cell reads as a rc124 false negative under a tight
+# ceiling (observed: codex×GLM-4.7-Flash 3/5 PASSED but every cell hit 300s). Raise the per-cell ceiling
+# to a floor for those cases only; claude is fast so its RUN_TIMEOUT is left as-is, and a user-set
+# RUN_TIMEOUT already above the floor is never scaled DOWN. Disable with AGENTIC_TIMEOUT_AUTOSCALE=0.
+effective_run_timeout() { # $1=agent  $2=model-spec  → echoes seconds
+  local agent="$1" spec="$2" eff="$RUN_TIMEOUT" floor=0
+  [ "${AGENTIC_TIMEOUT_AUTOSCALE:-1}" = 0 ] && { echo "$eff"; return; }
+  case "$agent" in
+    codex|opencode)
+      floor=600
+      case "$spec" in
+        *35B*|*32B*|*30B*|*GLM*|*Coder*|*Devstral*|*A3B*|*MoE*|*,*) floor=900 ;;
+      esac ;;
+  esac
+  [ "$eff" -lt "$floor" ] && eff="$floor"
+  echo "$eff"
+}
 GEN_TIMEOUT="${GEN_TIMEOUT:-120}"
 MAX_TURNS="${MAX_TURNS:-15}"
 PORT_BASE="${BENCH_PORT_BASE:-8300}"
@@ -687,6 +705,7 @@ for spec in "${MODELS[@]}"; do
   for agent in "${AGENT_RUN[@]}"; do
     for task in "${TASK_LIST[@]}"; do
       diff=${DIFF[$task]:-0}
+      eff_timeout="$(effective_run_timeout "$agent" "$spec")"   # QW1: per-cell ceiling (driver/model-aware)
       work="$(mktemp -d /tmp/rozum-agentic-XXXXXX)"
       setup_task "$task" "$work"
       write_agentic_meta "$work" "$agent" "$spec_csv" "$task" "" "" "" "0"
@@ -731,12 +750,12 @@ for spec in "${MODELS[@]}"; do
             awk -v ar="${ar:-0}" -v ac="${ac:-0}" -v gc="$gc" 'BEGIN{printf "%d %.1f\n", ar, ac+gc}' >>"$sfile"
             sleep 2
           done ) & SAMP=$!
-        ( sleep "$RUN_TIMEOUT"; kill_descendants "$LP"; kill -TERM "$LP" 2>/dev/null ) & WD=$!
+        ( sleep "$eff_timeout"; kill_descendants "$LP"; kill -TERM "$LP" 2>/dev/null ) & WD=$!
         wait "$LP"; rc=$?
         kill "$WD" "$SAMP" 2>/dev/null; wait "$SAMP" 2>/dev/null
         asecs=$(perl -MTime::HiRes=time -e 'printf "%.1f", time-'"$start")
         secs_total=$(awk -v a="$secs_total" -v b="$asecs" 'BEGIN{printf "%.1f", a+b}')
-        tmo=$(awk -v s="$asecs" -v t="$RUN_TIMEOUT" 'BEGIN{print (s>=t-2)?1:0}')
+        tmo=$(awk -v s="$asecs" -v t="$eff_timeout" 'BEGIN{print (s>=t-2)?1:0}')
 
         detail="$(verify_task "$task" "$work" "$alog")"; verify_rc=$?
         printf '%s\n' "$detail" >"$work/verify.out"
