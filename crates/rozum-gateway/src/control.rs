@@ -23,6 +23,7 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         ([(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], axum::Json(status().await))
     }
     ensure_rbac_initialized();
+    harden_state_perms();
     if load_users().is_empty() {
         if let Some(token) = ensure_bootstrap_token() {
             eprintln!("control server: no admin registered yet — first-registration bootstrap token: {token}");
@@ -450,6 +451,63 @@ fn shell_safe(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@' | '+'))
 }
 
+/// True if `s` is safe to use as a SINGLE filesystem path segment (matrix `stamp`/`agent`/`task` etc.)
+/// — non-empty, not `.`/`..`, and containing no path separator or NUL. Rejects rather than mangles, so a
+/// crafted `../../etc` walk cannot escape the results dir the segment is joined onto (path-traversal fix).
+fn safe_path_seg(s: &str) -> bool {
+    !s.is_empty() && s != "." && s != ".." && !s.chars().any(|c| matches!(c, '/' | '\\' | '\0'))
+}
+
+/// CSRF guard for state-changing GET routes (the SPA drives gateway load/stop via same-origin `<a>`
+/// anchors). Browsers send `Sec-Fetch-Site: same-origin` for the SPA's own links, `none` for a typed
+/// URL/bookmark, and `cross-site` for an attacker's cross-site link/redirect — reject only the last so a
+/// cross-site navigation can't ride the SameSite=Lax session cookie. Absent header (non-browser) → allow.
+fn same_site_get(headers: &axum::http::HeaderMap) -> bool {
+    match headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        Some(s) => matches!(s, "same-origin" | "same-site" | "none"),
+        None => true,
+    }
+}
+
+/// Atomically write `bytes` to `path` (tmp + rename) with 0600 perms so on-disk secrets (session
+/// tokens, WebAuthn credentials, RBAC state, view tokens) are not world-readable. Best-effort like the
+/// callers it replaces.
+fn atomic_write_private(path: &std::path::Path, bytes: &[u8]) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, bytes).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// On startup, tighten perms on any pre-existing secret files (some may have been written 0644 before
+/// this hardening) and the state dir, so a redeploy remediates them without waiting for the next write.
+#[cfg(unix)]
+fn harden_state_perms() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(dir) = state_dir() else { return };
+    if dir.exists() { let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)); }
+    for name in ["ucc-auth-sessions.json", "ucc-credentials.json", "ucc-view-tokens.json",
+                 "ucc-users.json", "ucc-roles.json", "ucc-invites.json", "ucc-bootstrap-token.txt"] {
+        let p = dir.join(name);
+        if p.exists() { let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)); }
+    }
+}
+#[cfg(not(unix))]
+fn harden_state_perms() {}
+
 // ── Action route handlers ────────────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -499,9 +557,13 @@ async fn gateway_stop_route() -> axum::response::Response {
 struct GatewayLoadQuery { model: String }
 
 async fn gateway_load_get_route(
+    headers: axum::http::HeaderMap,
     axum::extract::Query(q): axum::extract::Query<GatewayLoadQuery>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
+    if !same_site_get(&headers) {
+        return json_err(axum::http::StatusCode::FORBIDDEN, "cross-site request refused");
+    }
     let model = q.model.trim().to_string();
     if model.is_empty() {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "model required");
@@ -510,8 +572,11 @@ async fn gateway_load_get_route(
     axum::response::Redirect::to("/").into_response()
 }
 
-async fn gateway_stop_get_route() -> axum::response::Response {
+async fn gateway_stop_get_route(headers: axum::http::HeaderMap) -> axum::response::Response {
     use axum::response::IntoResponse;
+    if !same_site_get(&headers) {
+        return json_err(axum::http::StatusCode::FORBIDDEN, "cross-site request refused");
+    }
     if let Some(active) = crate::share::read_active() {
         if crate::share::live_lease_count(crate::share::LEASE_FRESH_SECS) == 0 {
             let pid_str = active.pid.to_string();
@@ -1609,6 +1674,13 @@ struct MatrixCellQuery {
 async fn matrix_cell_route(axum::extract::Query(q): axum::extract::Query<MatrixCellQuery>) -> axum::response::Response {
     use axum::response::IntoResponse;
 
+    // Reject path-traversal in the segments joined onto the results dir below (stamp/agent/task raw,
+    // model after its `/`→`_` normalization) — a crafted `../…` must not walk outside bench_results_dir.
+    let safe_model = q.model.replace(['/', ':', ' '], "_");
+    if !(safe_path_seg(&q.stamp) && safe_path_seg(&q.agent) && safe_path_seg(&q.task) && safe_path_seg(&safe_model)) {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "invalid stamp/agent/model/task segment");
+    }
+
     // Find cell in the specified result dir
     let csv_path = bench_results_dir().join(&q.stamp).join("per-run.csv");
     let cell = parse_matrix_csv(&csv_path).into_iter().find(|c| {
@@ -1618,7 +1690,6 @@ async fn matrix_cell_route(axum::extract::Query(q): axum::extract::Query<MatrixC
     });
 
     // Check for archived cell logs
-    let safe_model = q.model.replace(['/', ':', ' '], "_");
     let cell_dir = bench_results_dir().join(&q.stamp).join("cells").join(&q.agent).join(&safe_model).join(&q.task);
 
     let agent_log = if cell_dir.join("agent.log").exists() {
@@ -1782,13 +1853,19 @@ async fn public_matrix_cell_route(
     let model = q.get("model").map(|s| s.as_str()).unwrap_or("");
     let task  = q.get("task").map(|s| s.as_str()).unwrap_or("");
     let tail: usize = q.get("tail").and_then(|s| s.parse().ok()).unwrap_or(200);
+    // A view token grants read of the matrix results ONLY — reject path-traversal segments so an
+    // anonymous token holder cannot walk `cell_dir`/`csv_path` outside bench_results_dir (arbitrary
+    // file read + a dir-existence oracle otherwise).
+    let safe_model = model.replace(['/', ':', ' '], "_");
+    if !(safe_path_seg(stamp) && safe_path_seg(agent) && safe_path_seg(task) && safe_path_seg(&safe_model)) {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "invalid stamp/agent/model/task segment");
+    }
     let csv_path = bench_results_dir().join(stamp).join("per-run.csv");
     let cell = parse_matrix_csv(&csv_path).into_iter().find(|c| {
         c.get("agent").and_then(|v| v.as_str()) == Some(agent) &&
         c.get("model").and_then(|v| v.as_str()) == Some(model) &&
         c.get("task").and_then(|v| v.as_str()) == Some(task)
     });
-    let safe_model = model.replace(['/', ':', ' '], "_");
     let cell_dir = bench_results_dir().join(stamp).join("cells").join(agent).join(&safe_model).join(task);
     let agent_log = if cell_dir.join("agent.log").exists() {
         let text = std::fs::read_to_string(cell_dir.join("agent.log")).unwrap_or_default();
@@ -1921,10 +1998,8 @@ fn json_load<T: serde::de::DeserializeOwned>(path: Option<PathBuf>) -> Vec<T> {
 }
 fn json_save_rbac<T: Serialize + ?Sized>(path: Option<PathBuf>, val: &T) {
     let Some(p) = path else { return };
-    if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
     if let Ok(b) = serde_json::to_vec_pretty(val) {
-        let tmp = p.with_extension("json.tmp");
-        if std::fs::write(&tmp, &b).is_ok() { let _ = std::fs::rename(&tmp, &p); }
+        atomic_write_private(&p, &b); // 0600 — users/roles/invites/view-tokens are sensitive
     }
 }
 
@@ -2079,10 +2154,19 @@ async fn admin_delete_user_route(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let mut users = load_users();
-    let before = users.len();
-    users.retain(|u| u.id != id);
-    if users.len() == before { return json_err(axum::http::StatusCode::NOT_FOUND, "user not found"); }
+    let Some(pos) = users.iter().position(|u| u.id == id) else {
+        return json_err(axum::http::StatusCode::NOT_FOUND, "user not found");
+    };
+    let removed = users.remove(pos);
     save_users(&users);
+    // Revoke the deleted user's passkeys too — otherwise the credential still passes the WebAuthn
+    // ceremony and `login_finish` would issue a session for an unlinked credential. (delete = revoke)
+    if !removed.passkey_ids.is_empty() {
+        let creds: Vec<Passkey> = load_creds().into_iter()
+            .filter(|p| !removed.passkey_ids.contains(&cred_id_hex(p.cred_id())))
+            .collect();
+        save_creds(&creds);
+    }
     axum::Json(serde_json::json!({ "ok": true })).into_response()
 }
 
@@ -2255,10 +2339,8 @@ fn load_creds_raw() -> Vec<Passkey> {
 fn load_creds() -> Vec<Passkey> { load_creds_raw() }
 fn save_creds(c: &[Passkey]) {
     if let Some(p) = creds_path() {
-        if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
         if let Ok(b) = serde_json::to_vec_pretty(c) {
-            let tmp = p.with_extension("json.tmp");
-            if std::fs::write(&tmp, &b).is_ok() { let _ = std::fs::rename(&tmp, &p); }
+            atomic_write_private(&p, &b); // 0600 — WebAuthn credentials
         }
     }
 }
@@ -2285,10 +2367,8 @@ fn load_auth_sessions() -> Vec<SessEntry> {
 }
 fn save_auth_sessions(s: &[SessEntry]) {
     if let Some(p) = sess_path() {
-        if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
         if let Ok(b) = serde_json::to_vec(s) {
-            let tmp = p.with_extension("json.tmp");
-            if std::fs::write(&tmp, &b).is_ok() { let _ = std::fs::rename(&tmp, &p); }
+            atomic_write_private(&p, &b); // 0600 — holds live rozum_sess bearer tokens
         }
     }
 }
@@ -2552,10 +2632,12 @@ async fn login_finish_route(axum::Json(auth): axum::Json<PublicKeyCredential>) -
         Ok(auth_result) => {
             ensure_rbac_initialized();
             let cred_hex = cred_id_hex(auth_result.cred_id());
-            let user_id = find_user_by_cred(&cred_hex)
-                .map(|u| u.id)
-                .unwrap_or_else(|| "admin".to_string());
-            let token = mint_session(&user_id);
+            // Reject a credential that passed the ceremony but is not linked to any user (e.g. a
+            // deleted user's leftover passkey) — do NOT fall back to a literal "admin" user_id.
+            let Some(user) = find_user_by_cred(&cred_hex) else {
+                return json_err(axum::http::StatusCode::UNAUTHORIZED, "credential not linked to a user");
+            };
+            let token = mint_session(&user.id);
             (set_cookie("rozum_sess", &token, SESSION_TTL_SECS),
              axum::Json(serde_json::json!({ "ok": true }))).into_response()
         }
@@ -2726,7 +2808,14 @@ fn projects_extra_path() -> std::path::PathBuf {
 
 async fn config_route() -> axum::response::Response {
     use axum::response::IntoResponse;
-    axum::Json(serde_json::json!({ "projects_dir": read_projects_dir() })).into_response()
+    // Public (pre-auth) endpoint — collapse $HOME to `~` so it doesn't leak the absolute home path / OS
+    // username to an unauthenticated caller.
+    let dir = read_projects_dir();
+    let shown = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() && dir.starts_with(&h) => format!("~{}", &dir[h.len()..]),
+        _ => dir,
+    };
+    axum::Json(serde_json::json!({ "projects_dir": shown })).into_response()
 }
 
 fn list_projects() -> Vec<ProjectBrief> {
@@ -2954,5 +3043,35 @@ mod tests {
         assert!(!bootstrap_token_matches(None, Some("abc")));
         assert!(!bootstrap_token_matches(Some("abc"), None));
         assert!(!bootstrap_token_matches(None, None));
+    }
+
+    #[test]
+    fn safe_path_seg_rejects_traversal() {
+        // Regression guard for the matrix-cell path-traversal fix: a single path segment must carry no
+        // separator, `..`, `.`, or NUL, so a crafted stamp/agent/task can't walk outside the bench
+        // results dir (arbitrary file read + a dir-existence oracle otherwise).
+        assert!(safe_path_seg("1783166880"));
+        assert!(safe_path_seg("claude"));
+        assert!(safe_path_seg("task-01"));
+        assert!(!safe_path_seg(".."));
+        assert!(!safe_path_seg("."));
+        assert!(!safe_path_seg(""));
+        assert!(!safe_path_seg("../../etc"));
+        assert!(!safe_path_seg("a/b"));
+        assert!(!safe_path_seg("a\\b"));
+        assert!(!safe_path_seg("a\0b"));
+    }
+
+    #[test]
+    fn same_site_get_rejects_only_cross_site() {
+        // Regression guard for the CSRF-on-GET fix: reject a cross-site navigation, allow the SPA's own
+        // same-origin anchors, a typed URL (`none`), and non-browser clients (absent header).
+        use axum::http::HeaderMap;
+        let hm = |v: &str| { let mut h = HeaderMap::new(); h.insert("sec-fetch-site", v.parse().unwrap()); h };
+        assert!(same_site_get(&hm("same-origin")));
+        assert!(same_site_get(&hm("same-site")));
+        assert!(same_site_get(&hm("none")));
+        assert!(!same_site_get(&hm("cross-site")));
+        assert!(same_site_get(&HeaderMap::new()));
     }
 }
