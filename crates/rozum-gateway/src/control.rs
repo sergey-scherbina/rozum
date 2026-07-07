@@ -741,7 +741,10 @@ async fn agent_launch_route(body: String) -> axum::response::Response {
 
 async fn agent_stop_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let id = parse_id_body(&body);
+    let id = match parse_id_body(&body) {
+        Ok(id) => id,
+        Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
+    };
     let mut agents = load_agents();
     let Some(pos) = agents.iter().position(|a| a.id == id) else {
         return json_err(axum::http::StatusCode::NOT_FOUND, "no such agent");
@@ -823,20 +826,30 @@ struct IdBody {
     id: String,
 }
 
-fn parse_id_body(body: &str) -> String {
+fn parse_id_body(body: &str) -> Result<String, String> {
     let body = body.trim();
     if body.is_empty() {
-        return String::new();
+        return Err("id required".into());
     }
-    if let Ok(req) = serde_json::from_str::<IdBody>(body) {
-        return req.id.trim().to_string();
+    if body.starts_with('{') || body.starts_with('[') {
+        let req: IdBody =
+            serde_json::from_str(body).map_err(|e| format!("invalid JSON body: {e}"))?;
+        let id = req.id.trim().to_string();
+        if id.is_empty() {
+            return Err("id required".into());
+        }
+        return Ok(id);
     }
     for (k, v) in url::form_urlencoded::parse(body.as_bytes()) {
         if k == "id" {
-            return v.trim().to_string();
+            let id = v.trim().to_string();
+            if id.is_empty() {
+                return Err("id required".into());
+            }
+            return Ok(id);
         }
     }
-    body.to_string()
+    Ok(body.to_string())
 }
 
 fn parse_project_add_body(body: &str) -> Result<ProjectAddRequest, String> {
@@ -844,7 +857,9 @@ fn parse_project_add_body(body: &str) -> Result<ProjectAddRequest, String> {
     if body.is_empty() {
         return Err("name required".into());
     }
-    if let Ok(req) = serde_json::from_str::<ProjectAddRequest>(body) {
+    if body.starts_with('{') || body.starts_with('[') {
+        let req: ProjectAddRequest =
+            serde_json::from_str(body).map_err(|e| format!("invalid JSON body: {e}"))?;
         return Ok(req);
     }
     for (k, v) in url::form_urlencoded::parse(body.as_bytes()) {
@@ -1007,7 +1022,10 @@ async fn coder_launch_route(body: String) -> axum::response::Response {
 
 async fn coder_stop_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let id = parse_id_body(&body);
+    let id = match parse_id_body(&body) {
+        Ok(id) => id,
+        Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
+    };
     let mut coders = load_coders();
     let Some(pos) = coders.iter().position(|c| c.id == id) else {
         return json_err(axum::http::StatusCode::NOT_FOUND, "no such coder");
@@ -1165,7 +1183,10 @@ async fn session_launch_route(body: String) -> axum::response::Response {
 
 async fn session_stop_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let id = parse_id_body(&body);
+    let id = match parse_id_body(&body) {
+        Ok(id) => id,
+        Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
+    };
     let _ = Command::new("tmux").args(["kill-session", "-t", &tmux_name(&id)]).status();
     let mut sessions = load_sessions();
     sessions.retain(|s| s.id != id);
@@ -3099,9 +3120,11 @@ mod tests {
 
     #[test]
     fn ucc_stop_id_accepts_json_form_and_legacy_plain_body() {
-        assert_eq!(parse_id_body(r#"{"id":"claude-123"}"#), "claude-123");
-        assert_eq!(parse_id_body("id=claude-123"), "claude-123");
-        assert_eq!(parse_id_body("claude-123"), "claude-123");
+        assert_eq!(parse_id_body(r#"{"id":"claude-123"}"#).unwrap(), "claude-123");
+        assert_eq!(parse_id_body("id=claude-123").unwrap(), "claude-123");
+        assert_eq!(parse_id_body("claude-123").unwrap(), "claude-123");
+        assert!(parse_id_body(r#"{"missing":"id"}"#).is_err());
+        assert!(parse_id_body("").is_err());
     }
 
     #[test]
@@ -3109,6 +3132,7 @@ mod tests {
         assert_eq!(parse_project_add_body(r#"{"name":"demo"}"#).unwrap().name, "demo");
         assert_eq!(parse_project_add_body("name=demo").unwrap().name, "demo");
         assert_eq!(parse_project_add_body("demo").unwrap().name, "demo");
+        assert!(parse_project_add_body(r#"{"missing":"name"}"#).is_err());
         assert!(parse_project_add_body("").is_err());
     }
 
