@@ -1,5 +1,18 @@
 # Sprint
 
+- [x] **ucc-sessions-ux** (operator 2026-07-07: "выбор кнопки отмечать визуально; модели отсортировать
+  по адекватности/рейтингу в матрице + звёздочки; секцию Stop session убрать — вместо неё кнопка
+  закрыть в списке живых сессий после кнопки войти") — all three source-level, no new injections:
+  (1) agent pickers (sessions + coders) switched `signalButton` → `signalLabelButton` with computed
+  "✓ <agent>" labels — the selected button shows the mark; (2) `/control/status` `installed[]` now
+  carries a `stars` display field from a static `model_stars` table (control.rs — distilled matrix
+  results, GLM-4.7-Flash=5★ … Qwen3-0.6B=1★, unknown unrated) and is sorted best-first; model
+  pickers gained a ★ column (`modelSelectCols`); (3) `Stop session` card removed, `sessionsList`
+  gained `rowPostAction("✕ close", POST /control/session/stop, fieldPayload(id), refresh)` — the
+  close button sits in each live-session row after the 🖥 terminal link. TR maps updated (✕ close →
+  закрыть/закрити). Later/right: stars *under* the model name need a two-line cell primitive in
+  std/ui; rating could come from live matrix CSVs instead of the static table.
+
 - [x] **ucc-gateway-cold-start (BUG-007)** — the next bug behind "запуск моделей/агентов через веб
   не работает": with BUG-006's body parsing fixed, an authenticated `POST /control/session/launch`
   on a cold host still 409'd with `rozum gateway switch: no shared gateway running` (admission said

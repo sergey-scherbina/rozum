@@ -2851,6 +2851,30 @@ pub struct InstalledBrief {
     pub size_bytes: u64,
     /// GiB-formatted size for direct display in a declarative table column.
     pub size_gib: String,
+    /// "★★★★" adequacy rating for direct display (empty when unrated). See `model_stars`.
+    pub stars: String,
+}
+
+/// UCC model "adequacy" rating (1–5) — distilled from the agentic matrix results (SPRINT/CHANGELOG
+/// matrix sessions): how reliably the model completes agentic coding tasks under its best driver on
+/// this machine. Substring match on the spec; unknown models get `None` (sorted last, shown
+/// unrated). The UCC model pickers sort by this and show it as stars.
+fn model_stars(spec: &str) -> Option<u8> {
+    const RATINGS: &[(&str, u8)] = &[
+        ("GLM-4.7-Flash", 5),          // 15/15 full matrix, in DEFAULT_MODELS
+        ("Qwen3.6-35B-A3B", 4),        // reliable under claude after the delivery fixes
+        ("gpt-oss-20b", 4),            // claude 5/5; codex fails are model-ceiling (rc10)
+        ("GLM-4-32B", 4),              // reliable edit/debug/chat; artifact-synth covers create
+        ("Qwen3.6-27B", 3),
+        ("DeepSeek-Coder-V2-Lite", 3),
+        ("Qwen3-Coder-30B", 3),        // open edit-corruption issue (&quot;/newline)
+        ("Devstral", 3),               // good under claude; poor codex/opencode match (B3)
+        ("Qwen2.5-Coder-7B", 2),
+        ("GLM-4-9B", 2),
+        ("Qwen3-4B", 2),               // fine cascade planner, weak solo coder
+        ("Qwen3-0.6B", 1),
+    ];
+    RATINGS.iter().find(|(k, _)| spec.contains(k)).map(|(_, s)| *s)
 }
 
 /// One row in the unified models panel — installed catalog merged with live residency.
@@ -3078,10 +3102,22 @@ pub async fn status() -> ControlStatus {
             })
             .collect(),
     };
-    let installed = installed_catalog
+    // Model pickers show this list top-down: best-rated first (see `model_stars`), unrated last.
+    let mut installed: Vec<InstalledBrief> = installed_catalog
         .iter()
-        .map(|m| InstalledBrief { size_gib: fmt_gib(m.size_bytes), spec: m.spec.clone(), size_bytes: m.size_bytes })
+        .map(|m| InstalledBrief {
+            size_gib: fmt_gib(m.size_bytes),
+            stars: model_stars(&m.spec).map(|n| "★".repeat(n as usize)).unwrap_or_default(),
+            spec: m.spec.clone(),
+            size_bytes: m.size_bytes,
+        })
         .collect();
+    installed.sort_by(|a, b| {
+        model_stars(&b.spec)
+            .unwrap_or(0)
+            .cmp(&model_stars(&a.spec).unwrap_or(0))
+            .then_with(|| a.spec.cmp(&b.spec))
+    });
     let residency_metrics = vec![
         MetricBrief {
             metric: "gateway".into(),

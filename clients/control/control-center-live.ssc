@@ -21,7 +21,7 @@ stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the vie
 [badge, link](std/ui/display.ssc)
 [card, cardWithHeader, modal](std/ui/containers.ssc)
 [signalText_](std/ui/reactive.ssc)
-[actionButton, textField, signalButton](std/ui/input.ssc)
+[actionButton, textField, signalLabelButton](std/ui/input.ssc)
 [remoteTable, lcol, rowLink, rowPostAction, fieldPayload](std/ui/data.ssc)
 [route, router](std/ui/routing.ssc)
 
@@ -74,7 +74,7 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
     hstack(gap = 8)(text("committed:"),   signalText_(committedTxt))
   )
 )
-val modelSelectCols = [fieldColumn("Model", "spec"), fieldColumn("GiB", "size_gib")]
+val modelSelectCols = [fieldColumn("Model", "spec"), fieldColumn("★", "stars"), fieldColumn("GiB", "size_gib")]
 val modelsPanel = cardWithHeader(heading(2, "Models"))(
   remoteTable(st, [
     lcol("Model", "spec",       "#/detail/:value"),
@@ -203,6 +203,10 @@ val cdLogUrl  = computedSignal(() => "/control/coder/log?id=" + cdLogId() + "&ta
 val cdLog     = fetchUrlSignalTo("coderLog", cdLogUrl, logTick)
 val cdLogText = computedSignal(() => jsonValue(cdLog()).get("log").asString)
 
+val cdAgentClaudeLbl   = computedSignal(() => if cdAgent() == "claude"   then "✓ claude"   else "claude")
+val cdAgentCodexLbl    = computedSignal(() => if cdAgent() == "codex"    then "✓ codex"    else "codex")
+val cdAgentOpencodeLbl = computedSignal(() => if cdAgent() == "opencode" then "✓ opencode" else "opencode")
+
 val codersList = cardWithHeader(heading(2, "Running coders"))(
   remoteTable(st, [
     fieldColumn("agent", "agent"),
@@ -219,7 +223,7 @@ val coderLaunch = cardWithHeader(heading(2, "Launch coder (real work in repo)"))
     hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
     vstack(gap = 4)(
       hstack(gap = 8)(text("agent:"), signalText_(cdAgent)),
-      hstack(gap = 8)(signalButton(cdAgent, "claude", "claude"), signalButton(cdAgent, "codex", "codex"), signalButton(cdAgent, "opencode", "opencode"))
+      hstack(gap = 8)(signalLabelButton(cdAgent, "claude", cdAgentClaudeLbl), signalLabelButton(cdAgent, "codex", cdAgentCodexLbl), signalLabelButton(cdAgent, "opencode", cdAgentOpencodeLbl))
     ),
     hstack(gap = 8)(text("model:"), signalText_(cdModel)),
     coderModelList,
@@ -270,7 +274,10 @@ val seAgent   = signal("seAgent", "claude")
 val seModel   = signal("seModel", "")
 val seWorkdir = signal("seWorkdir", "")
 val sePrompt  = signal("sePrompt", "")
-val seStopId  = signal("seStopId", "")
+
+val seAgentClaudeLbl   = computedSignal(() => if seAgent() == "claude"   then "✓ claude"   else "claude")
+val seAgentCodexLbl    = computedSignal(() => if seAgent() == "codex"    then "✓ codex"    else "codex")
+val seAgentOpencodeLbl = computedSignal(() => if seAgent() == "opencode" then "✓ opencode" else "opencode")
 
 val sessionsList = cardWithHeader(heading(2, "Live sessions (terminal)"))(
   remoteTable(st, [
@@ -278,7 +285,7 @@ val sessionsList = cardWithHeader(heading(2, "Live sessions (terminal)"))(
     fieldColumn("model", "model"),
     fieldColumn("repo", "workdir"),
     lcol("🖥 terminal", "id", "/terminal.html?id=:value")
-  ], "sessions")
+  ], "sessions", [rowPostAction("✕ close", "POST", "/control/session/stop", fieldPayload("id"), refresh)])
 )
 val sessionModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", seModel, "spec")])
 val sessionWorkdirList = remoteTable(st, [fieldColumn("project", "name")], "projects", [rowLink("select", seWorkdir, "path")])
@@ -287,7 +294,7 @@ val sessionLaunch = cardWithHeader(heading(2, "New interactive session"))(
     hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
     vstack(gap = 4)(
       hstack(gap = 8)(text("agent:"), signalText_(seAgent)),
-      hstack(gap = 8)(signalButton(seAgent, "claude", "claude"), signalButton(seAgent, "codex", "codex"), signalButton(seAgent, "opencode", "opencode"))
+      hstack(gap = 8)(signalLabelButton(seAgent, "claude", seAgentClaudeLbl), signalLabelButton(seAgent, "codex", seAgentCodexLbl), signalLabelButton(seAgent, "opencode", seAgentOpencodeLbl))
     ),
     hstack(gap = 8)(text("model:"), signalText_(seModel)),
     sessionModelList,
@@ -305,21 +312,12 @@ val sessionLaunch = cardWithHeader(heading(2, "New interactive session"))(
   )
 )
 
-val sessionStop = cardWithHeader(heading(2, "Stop session"))(
-  hstack(gap = 8)(
-    textField(seStopId, "session id…"),
-    actionButton(fetchActionWith("POST", "/control/session/stop", formBody([("id", "seStopId")]), [onBumpTick(refresh)]), "stop")
-  )
-)
-
 val sessionsBody = vstack(gap = 16)(
   hstack(gap = 10)(link("#/", "← back"), heading(1, "Sessions"), actionButton(incSignal(refresh), "↻"), link("/login.html", "🔐 Login")),
   divider(),
   sessionsList,
   divider(),
-  sessionLaunch,
-  divider(),
-  sessionStop
+  sessionLaunch
 )
 ```
 
