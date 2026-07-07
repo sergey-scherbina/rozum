@@ -24,6 +24,7 @@ stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the vie
 [actionButton, textField, signalLabelButton](std/ui/input.ssc)
 [remoteTable, lcol, rowLink, rowPostAction, fieldPayload](std/ui/data.ssc)
 [route, router](std/ui/routing.ssc)
+[jobPanel](std/ui/patterns.ssc)
 
 ## State + routing
 ```scalascript
@@ -138,24 +139,6 @@ val agRoom    = signal("agRoom", "")
 val agPolicy  = signal("agPolicy", "mention")
 val agPersona = signal("agPersona", "")
 
-// The async-launch UI pattern shared by agents/coders/sessions: a registry table (rows carry a
-// server-maintained `status`: starting…/running/failed:…/exited) with a per-row ✕ close, plus a
-// launch form whose POST returns instantly ({ok,id,status:"starting"}) and bumps the shared
-// refresh tick — the new row IS the click feedback. Server contract: the collection rows carry
-// `status` and `id`; the stop URL accepts {"id": …}.
-def jobPanel(listTitle: String, listCols: List[Any], collection: String, stopUrl: String,
-             formTitle: String, form: Any,
-             launchLabel: String, launchUrl: String, fields: List[Any]): Any =
-  vstack(gap = 16)(
-    cardWithHeader(heading(2, listTitle))(
-      remoteTable(st, listCols, collection,
-        [rowPostAction("✕ close", "POST", stopUrl, fieldPayload("id"), refresh)])),
-    divider(),
-    cardWithHeader(heading(2, formTitle))(
-      vstack(gap = 8)(
-        form,
-        actionButton(fetchActionWith("POST", launchUrl, formBody(fields), [onBumpTick(refresh)]), launchLabel))))
-
 val agentModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", agModel, "spec")])
 val agentForm = vstack(gap = 8)(
   hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
@@ -173,7 +156,7 @@ val agentsBody = vstack(gap = 16)(
     actionButton(incSignal(refresh), "↻")
   ),
   divider(),
-  jobPanel("Running agents", [
+  jobPanel(st, refresh, "Running agents", [
       fieldColumn("agent", "handle"),
       fieldColumn("model", "model"),
       lcol("room", "room", "#/chat/:value"),
@@ -231,7 +214,7 @@ val coderLogCard = cardWithHeader(heading(2, "Coder log"))(
 val codersBody = vstack(gap = 16)(
   hstack(gap = 10)(link("#/", "← back"), heading(1, "Coders"), actionButton(incSignal(refresh), "↻")),
   divider(),
-  jobPanel("Running coders", [
+  jobPanel(st, refresh, "Running coders", [
       fieldColumn("agent", "agent"),
       fieldColumn("model", "model"),
       fieldColumn("repo", "workdir"),
@@ -278,7 +261,7 @@ val sessionForm = vstack(gap = 8)(
 val sessionsBody = vstack(gap = 16)(
   hstack(gap = 10)(link("#/", "← back"), heading(1, "Sessions"), actionButton(incSignal(refresh), "↻"), link("/login.html", "🔐 Login")),
   divider(),
-  jobPanel("Live sessions (terminal)", [
+  jobPanel(st, refresh, "Live sessions (terminal)", [
       fieldColumn("agent", "agent"),
       fieldColumn("model", "model"),
       fieldColumn("repo", "workdir"),

@@ -1,5 +1,16 @@
 # Sprint
 
+- [x] **ucc-jobpanel-pattern** (operator: "Асинхронный паттерн можно выразить как скаласкрипт
+  функцию и тулкит выражение? … Делай а б в г") — the async-job pattern is now expressed ONCE per
+  side: (а) `jobPanel` .ssc function in center.ssc — agents/coders/sessions became three calls;
+  agents+coders gained the per-row ✕ close, the Stop-agent/Stop-coder textField cards are gone;
+  (б) PROMOTED to `std/ui/patterns.ssc` (scalascript `89168f717`) with conformance
+  `std-ui-jobpanel` (INT+JS, node-tree shape) — center.ssc now imports it; (в) Rust half folded
+  into `control.rs spawn_launch_task(model,id,still_wanted,set_failed,do_spawn)` — the three launch
+  routes keep only validation + registry push + their spawn closure; (г) `ucc-ssc-backend`
+  (server half as a scalascript function on a .ssc→Rust UCC server) recorded in BACKLOG with the
+  missing-toolkit inventory (WebAuthn, PTY↔WS, process registry, launchd, admission FFI).
+
 - [x] **ucc-sessions-ux** (operator 2026-07-07: "выбор кнопки отмечать визуально; модели отсортировать
   по адекватности/рейтингу в матрице + звёздочки; секцию Stop session убрать — вместо неё кнопка
   закрыть в списке живых сессий после кнопки войти") — all three source-level, no new injections:

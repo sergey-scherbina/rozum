@@ -1,5 +1,20 @@
 # Backlog
 
+## UCC backend on .ssc→Rust (strategic, 2026-07-07)
+
+- [ ] **ucc-ssc-backend** — express the UCC server half in ScalaScript, like the meeting web
+  (`rozum-meeting-ssc` is already a pure .ssc→Rust server). Motivation: the async-job pattern now
+  exists twice — `std/ui/patterns.ssc jobPanel` (client, toolkit expression) + `control.rs
+  spawn_launch_task` (server, Rust) — a .ssc server would let the SERVER half be a scalascript
+  function too (`route` + actor `spawn*` + a status registry), one language end-to-end, dogfooding
+  the toolkit per the North Star. What the toolkit is MISSING for this today: WebAuthn/passkeys,
+  PTY↔WebSocket bridging (the tmux terminal), process spawn/kill + registry primitives, launchd
+  deployment story, and access to rozum's residency/admission API (would need an FFI seam or a
+  sidecar). Path: start with the read-only status/dashboard routes as .ssc behind the same origin,
+  migrate action routes once spawn/registry primitives exist, keep terminal+auth in Rust longest.
+  Effort: large (weeks, cross-repo). Value: single-language UCC, the toolkit gains the server-side
+  job pattern as a first-class function.
+
 ## opencode → gateway `/v1/messages` 500 (found 2026-07-05, r3-cumulative run)
 
 - [x] **opencode-500-v1-messages** — RESOLVED (2026-07-05). NOT a rozum/gateway bug and NOT the tool-call
