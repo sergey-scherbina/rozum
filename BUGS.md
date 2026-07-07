@@ -5,6 +5,41 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-007 — UCC web launch fails on a cold host: "no shared gateway running"
+
+- **Status:** fixed on `feature/ucc-gateway-cold-start`.
+- **Reporter:** operator — "Что у нас за проблемы с запуском моделей и агентов через веб
+  интерфейс? Почему это не работает?" (2026-07-07, after the BUG-006 deploy).
+- **Severity:** P1 — the next bug in the BUG-006 chain: with the body parsing fixed, launching
+  models/agents from the web still only works if someone already started a shared gateway from a
+  terminal.
+
+**Symptom.** Authenticated `POST /control/session/launch` (same for agent/coder launch and chat)
+returns 409: `could not load <model>: rozum gateway switch: no shared gateway running` — while the
+attached admission report says `fits: true`. On a cold host (after reboot, or after the gateway
+idle-exited) every model-needing UCC action fails.
+
+**Root cause.** `control.rs::ensure_gateway` knew only two cases: reuse the registered gateway if
+it already serves the model, else `rozum gateway switch`. But `switch` swaps the model on a
+*running* daemon and refuses when none is running. The CLI path (`rozum launch` →
+`ensure_shared_gateway`, src/main.rs) handles cold start by spawning a detached daemon; the UCC
+duplicate never got that branch.
+
+**Fix.** `ensure_gateway` (now async): health-check the registry record (a stale record from a
+crashed gateway falls through instead of returning a dead port); `switch` only when a healthy
+gateway serves a different model; otherwise cold-start a detached `rozum gateway --model … --port
+8089` daemon (own process group, output → gateway.log — the same shape as `rozum launch`'s
+`spawn_detached_gateway`) and wait ≤300s for it to register and answer health. The daemon runs the
+residency admission gate itself and idle-exits per `ROZUM_GATEWAY_IDLE_SECS` (default 900s), so a
+web-started gateway frees RAM when unused.
+
+**Verified.** `cargo test -p rozum-gateway ucc_` + `control::tests::`; live authenticated smoke on
+:8411 (busi SSO cookie, SPA-shaped JSON body without Content-Type): cold host → launch returns
+`{"ok":true,"id":…}`, gateway self-starts and registers on :8089, tmux session appears, session
+stop works.
+
+---
+
 ## BUG-006 — UCC session launch buttons silently do nothing
 
 - **Status:** fixed on `e451e6a` + hardened on `0a537df`; deployed to control-serve 2026-07-07.

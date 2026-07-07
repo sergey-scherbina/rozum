@@ -1,5 +1,17 @@
 # Sprint
 
+- [x] **ucc-gateway-cold-start (BUG-007)** — the next bug behind "запуск моделей/агентов через веб
+  не работает": with BUG-006's body parsing fixed, an authenticated `POST /control/session/launch`
+  on a cold host still 409'd with `rozum gateway switch: no shared gateway running` (admission said
+  `fits: true`). `control.rs::ensure_gateway` only knew reuse/`switch`; `switch` refuses when no
+  daemon runs, so every model-needing UCC action (session/agent/coder launch, chat) required a
+  terminal-started gateway first. Fix: ensure_gateway is async, health-checks the registry record
+  (stale → fresh start), switches only a healthy different-model gateway, and otherwise cold-starts
+  a detached `rozum gateway --model … --port 8089` (same shape as `rozum launch`'s
+  spawn_detached_gateway) and waits ≤300s for register+health. Verified: unit tests + live
+  authenticated smoke (busi SSO, SPA-shaped body): cold host → `{"ok":true}`, gateway self-starts on
+  :8089, tmux session up, stop works. Details: BUGS.md BUG-007.
+
 - [x] **ucc-action-json-bodies** — fixed the UCC web action contract for sessions/coders/agents/projects.
   Repro: `formBody(...)` emits JSON but no `Content-Type`, so Axum `Json<T>` rejected
   `/control/session/launch` before the handler; the browser only saw a failed fetch and appeared idle.

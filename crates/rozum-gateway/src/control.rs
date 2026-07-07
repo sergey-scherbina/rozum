@@ -399,20 +399,80 @@ fn run_rozum(args: &[&str]) -> (bool, String) {
     }
 }
 
-/// Ensure the shared gateway serves `model`. Reuses it if already serving; else `gateway switch`
-/// (which runs the residency admission gate itself and exits non-zero if it won't fit). Returns the
-/// gateway port on success, or an error message (incl. an admission refusal) on failure.
-fn ensure_gateway(model: &str) -> Result<u16, String> {
+/// Ensure the shared gateway serves `model`. Reuses it if already serving; `gateway switch` swaps
+/// the resident model in place when a different one is loaded (the switch runs the residency
+/// admission gate itself and exits non-zero if it won't fit); when NO gateway is running at all —
+/// the cold-start case `gateway switch` refuses — spawn a detached daemon like `rozum launch` does
+/// and wait for it to come up. Returns the gateway port on success, or an error message (incl. an
+/// admission refusal) on failure.
+async fn ensure_gateway(model: &str) -> Result<u16, String> {
     if let Some(g) = crate::share::read_active() {
-        if g.model == model {
-            return Ok(g.port);
+        if crate::share::health_ok(g.port).await {
+            if g.model == model {
+                return Ok(g.port);
+            }
+            let (ok, out) = run_rozum(&["gateway", "switch", "--model", model]);
+            if !ok {
+                return Err(format!("could not load {model}: {}", out.trim()));
+            }
+            return crate::share::read_active()
+                .map(|g| g.port)
+                .ok_or_else(|| "gateway not running after load".into());
         }
+        // Stale registry record (gateway died without cleanup): fall through to a fresh
+        // start — the new daemon bumps `generation` and overwrites the record.
     }
-    let (ok, out) = run_rozum(&["gateway", "switch", "--model", model]);
-    if !ok {
-        return Err(format!("could not load {model}: {}", out.trim()));
+    cold_start_gateway(model).await
+}
+
+/// Spawn a detached `rozum gateway --model … --port <default>` daemon — the same shape
+/// `rozum launch`'s spawn_detached_gateway uses — and wait for it to register and answer health.
+/// The daemon runs the residency admission gate on startup and exits non-zero on refusal, which
+/// surfaces here as the error; model-load progress/errors land in gateway.log.
+async fn cold_start_gateway(model: &str) -> Result<u16, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let dir = crate::share::gateway_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let log_path = dir.join("gateway.log");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("open {}: {e}", log_path.display()))?;
+    let log2 = log.try_clone().map_err(|e| e.to_string())?;
+    let port = crate::share::DEFAULT_GATEWAY_PORT;
+    let mut cmd = Command::new(&exe);
+    cmd.args(["gateway", "--model", model, "--port", &port.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log2));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0); // detach from control-serve's group so it survives a service restart
     }
-    crate::share::read_active().map(|g| g.port).ok_or_else(|| "gateway not running after load".into())
+    let mut child = cmd.spawn().map_err(|e| format!("spawn gateway daemon: {e}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        if crate::share::health_ok(port).await {
+            return crate::share::read_active()
+                .map(|g| g.port)
+                .ok_or_else(|| "gateway healthy but not registered".into());
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!(
+                "gateway daemon exited before becoming ready ({status}); see {}",
+                log_path.display()
+            ));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "gateway not ready after 300s (still loading/downloading?); see {}",
+                log_path.display()
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }
 
 /// Spawn `rozum meetings participant …` DETACHED (own process group, output → a per-agent log), so it
@@ -523,7 +583,7 @@ async fn gateway_load_route(body: String) -> axum::response::Response {
     if model.is_empty() {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "model required");
     }
-    match ensure_gateway(&model) {
+    match ensure_gateway(&model).await {
         Ok(port) => axum::Json(serde_json::json!({ "ok": true, "model": model, "port": port })).into_response(),
         Err(e) => json_err(axum::http::StatusCode::CONFLICT, &e),
     }
@@ -569,7 +629,7 @@ async fn gateway_load_get_route(
     if model.is_empty() {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "model required");
     }
-    let _ = ensure_gateway(&model);
+    let _ = ensure_gateway(&model).await;
     axum::response::Redirect::to("/").into_response()
 }
 
@@ -710,7 +770,7 @@ async fn agent_launch_route(body: String) -> axum::response::Response {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "model and room required");
     }
     // 1) Ensure the gateway serves the model — admission-gated; a refusal returns the verdict.
-    let port = match ensure_gateway(&model) {
+    let port = match ensure_gateway(&model).await {
         Ok(p) => p,
         Err(e) => {
             let report = footprint_report(&model);
@@ -999,7 +1059,7 @@ async fn coder_launch_route(body: String) -> axum::response::Response {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "workdir is not a directory");
     }
     // Admission-gate the model load up front; `rozum launch` then reuses this shared gateway.
-    if let Err(e) = ensure_gateway(&model) {
+    if let Err(e) = ensure_gateway(&model).await {
         return (
             axum::http::StatusCode::CONFLICT,
             axum::Json(serde_json::json!({ "ok": false, "error": e, "admission": footprint_report(&model) })),
@@ -1150,7 +1210,7 @@ async fn session_launch_route(body: String) -> axum::response::Response {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "workdir is not a directory");
     }
     // Admission-gate the model; `rozum launch` then reuses the shared gateway.
-    if let Err(e) = ensure_gateway(&model) {
+    if let Err(e) = ensure_gateway(&model).await {
         return (
             axum::http::StatusCode::CONFLICT,
             axum::Json(serde_json::json!({ "ok": false, "error": e, "admission": footprint_report(&model) })),
