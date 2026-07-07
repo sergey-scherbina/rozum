@@ -7,7 +7,13 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ## BUG-007 — UCC web launch fails on a cold host: "no shared gateway running"
 
-- **Status:** fixed on `feature/ucc-gateway-cold-start`.
+- **Status:** fixed on `452e192` (+ deploy-script fix `0094bee`), merged to master and DEPLOYED to
+  control-serve 2026-07-07; verified live end-to-end (cold start, switch, stop, inference).
+- **Open note (minor, pre-existing):** the `prompt` field seeding uses `tmux send-keys … Enter`;
+  in a HEADLESS tmux (no client attached) the CC REPL received the text but Enter did not always
+  submit during shell testing — from the phone terminal (real xterm.js attach) typing is
+  interactive so this shouldn't bite. Watch it when the operator validates the terminal from the
+  browser; if seeded prompts sit unsubmitted, delay + retry the Enter or submit after first attach.
 - **Reporter:** operator — "Что у нас за проблемы с запуском моделей и агентов через веб
   интерфейс? Почему это не работает?" (2026-07-07, after the BUG-006 deploy).
 - **Severity:** P1 — the next bug in the BUG-006 chain: with the body parsing fixed, launching
