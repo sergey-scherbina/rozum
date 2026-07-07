@@ -465,5 +465,14 @@ curl -sf --max-time 4 http://127.0.0.1:8411/ -o /dev/null -w "spa+api        :84
 # ucc-auth-status-leak) — /control/auth/status is the genuinely-public route to smoke-check instead.
 curl -sf --max-time 4 http://127.0.0.1:8411/control/auth/status -o /dev/null -w "auth/status    :8411 -> %{http_code}\n"
 curl -s  --max-time 4 http://127.0.0.1:8411/control/status -o /dev/null -w "status (expect 401 unauthed) :8411 -> %{http_code}\n"
+
+# Browser smoke gate — the 2026-07-07 bug classes (blank init, dead navigation, click-eater,
+# empty formBody, missing status column) checked against the LIVE page in headless Chrome.
+# Soft-skips when node/Chrome/token/puppeteer-core are absent; a real CHECK failure fails
+# the deploy. UCC_SMOKE=0 to skip explicitly.
+if [ "${UCC_SMOKE:-1}" = "1" ] && command -v node >/dev/null 2>&1; then
+  echo ">> browser smoke (ucc-smoke.js) ..."
+  ( cd "$HERE" && node ucc-smoke.js ) || { echo "✗ ucc-smoke FAILED — deployed page is broken" >&2; exit 1; }
+fi
 echo ">> done. open https://busi.tail1174e2.ts.net:8448/"
 echo ">> (Tailscale: tailscale serve --bg --https=8448 http://127.0.0.1:8411)"

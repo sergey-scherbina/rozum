@@ -5,3 +5,4 @@
 .vendor/
 /.worktrees/
 /scripts/bench/results/
+node_modules

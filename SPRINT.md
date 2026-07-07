@@ -508,11 +508,9 @@ Ordered by value. #1 is the active queue; do it the moment the GPU slot is free.
   `ROZUM_UCC_ORIGIN` override — so every WebAuthn ceremony's origin check was failing against the
   live `:8448` origin. Fixed the default to `:8448`; also fixed the same stale `:8447` link in
   `clients/meeting/meeting.ssc`'s 🎛 control-center toolbar link.
-- [ ] **ucc-tofu-bootstrap-note** — LOW/deferred. First WebAuthn registration is open to anyone
-  while the user list is empty (no allowlist for user #1) — only matters at first deploy or after a
-  full credential wipe, and the tailnet-only reachability already narrows this a lot. Documented, not
-  fixed; revisit only if the box is ever reprovisioned with the service reachable before the owner's
-  first login.
+- [x] **ucc-tofu-bootstrap-note** — CLOSED as implemented by `ucc-tofu-bootstrap-token` (see the
+  2026-07-03 entry above): while `users.is_empty()` registration requires the 0600 bootstrap token
+  printed to the service log (no-token → 403). Stale board entry cleaned 2026-07-07.
 
 `cargo build --workspace` + `cargo test -p rozum-gateway` (94 passed) green; live-smoke-tested the
 router changes on a throwaway port/HOME (401s where expected, public routes unaffected). NEXT: go

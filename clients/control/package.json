@@ -1,0 +1,6 @@
+{
+  "name": "ucc-web-tooling",
+  "private": true,
+  "description": "Deploy-time tooling for the UCC web (ucc-smoke.js browser gate). npm i once to enable the smoke gate.",
+  "dependencies": { "puppeteer-core": "^24" }
+}
