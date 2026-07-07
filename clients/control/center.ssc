@@ -145,6 +145,7 @@ val agentsList = cardWithHeader(heading(2, "Running agents"))(
     fieldColumn("model", "model"),
     lcol("room", "room", "#/chat/:value"),
     fieldColumn("policy", "policy"),
+    fieldColumn("status", "status"),
     fieldColumn("id", "id")
   ], "agents")
 )
@@ -212,7 +213,7 @@ val codersList = cardWithHeader(heading(2, "Running coders"))(
     fieldColumn("agent", "agent"),
     fieldColumn("model", "model"),
     fieldColumn("repo", "workdir"),
-    fieldColumn("alive", "alive"),
+    fieldColumn("status", "status"),
     fieldColumn("id", "id")
   ], "coders")
 )

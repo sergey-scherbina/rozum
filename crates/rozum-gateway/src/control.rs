@@ -316,8 +316,12 @@ pub struct AgentRecord {
     pub room: String,
     pub handle: String,
     pub policy: String,
+    /// 0 until the background launch has spawned the process.
     pub pid: u32,
     pub started_at: u64,
+    /// "starting…" / "running" / "failed: …"; empty on legacy records (= running).
+    #[serde(default)]
+    pub status: String,
 }
 
 /// Display brief for a running agent (registry entry + liveness), in `ControlStatus.agents`.
@@ -330,6 +334,7 @@ pub struct AgentBrief {
     pub policy: String,
     pub pid: u32,
     pub alive: bool,
+    pub status: String,
 }
 
 fn state_dir() -> Option<PathBuf> {
@@ -365,24 +370,42 @@ fn save_agents(agents: &[AgentRecord]) {
 }
 
 /// Is `pid` still alive? `kill(pid, 0)` returns 0 for a live process we can signal.
+/// pid 0 is the "not spawned yet" placeholder on starting records — never alive (and never
+/// passed to kill: `kill(0, sig)` would signal our own whole process group).
 fn pid_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-/// The agents we currently know about, with a fresh liveness check; prunes dead ones from the registry.
+/// Agents for the UCC table: live processes plus in-flight ("starting…") and failed launches.
+/// Only records whose launch COMPLETED are pruned when their pid dies; a failed row stays
+/// visible until the user stops it — that's how launch errors reach the phone.
 fn live_agents() -> Vec<AgentBrief> {
     let all = load_agents();
-    let (alive, dead): (Vec<_>, Vec<_>) = all.into_iter().partition(|a| pid_alive(a.pid));
+    let (keep, dead): (Vec<_>, Vec<_>) = all.into_iter().partition(|a| {
+        a.status.starts_with("starting") || a.status.starts_with("failed") || pid_alive(a.pid)
+    });
     if !dead.is_empty() {
-        save_agents(&alive); // self-heal: drop processes that have exited
+        save_agents(&keep); // self-heal: drop processes that have exited
     }
-    alive
-        .into_iter()
-        .map(|a| AgentBrief {
-            id: a.id, model: a.model, room: a.room, handle: a.handle, policy: a.policy,
-            pid: a.pid, alive: true,
+    keep.into_iter()
+        .map(|a| {
+            let alive = pid_alive(a.pid);
+            let status = if !a.status.is_empty() { a.status.clone() } else { "running".into() };
+            AgentBrief {
+                id: a.id, model: a.model, room: a.room, handle: a.handle, policy: a.policy,
+                pid: a.pid, alive, status,
+            }
         })
         .collect()
+}
+
+/// Rewrite one agent record in place (no-op if it was stopped meanwhile).
+fn update_agent_record(id: &str, f: impl FnOnce(&mut AgentRecord)) {
+    let mut agents = load_agents();
+    if let Some(a) = agents.iter_mut().find(|a| a.id == id) {
+        f(a);
+        save_agents(&agents);
+    }
 }
 
 /// Run a `rozum` subcommand to completion, capturing output. Uses the current binary (the full gateway
@@ -769,34 +792,45 @@ async fn agent_launch_route(body: String) -> axum::response::Response {
     if model.is_empty() || room.is_empty() {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "model and room required");
     }
-    // 1) Ensure the gateway serves the model — admission-gated; a refusal returns the verdict.
-    let port = match ensure_gateway(&model).await {
-        Ok(p) => p,
-        Err(e) => {
-            let report = footprint_report(&model);
-            return (
-                axum::http::StatusCode::CONFLICT,
-                axum::Json(serde_json::json!({ "ok": false, "error": e, "admission": report })),
-            ).into_response();
+    // Record NOW ("starting…"), do the slow model load + spawn in the background — the phone's
+    // fetch returns instantly and errors land in the row's status (same pattern as sessions).
+    let h = req.handle.trim().to_string();
+    let handle = if h.is_empty() { derive_handle(&model) } else { h };
+    let id = format!("{}-{}", sanitize(&room), crate::share::now_unix());
+    let mut agents = load_agents();
+    agents.push(AgentRecord {
+        id: id.clone(), model: model.clone(), room: room.clone(),
+        handle: handle.clone(), policy: req.policy.clone(), pid: 0,
+        started_at: crate::share::now_unix(),
+        status: "starting…".into(),
+    });
+    save_agents(&agents);
+    let task_id = id.clone();
+    let policy = req.policy.clone();
+    let persona = req.persona.trim().to_string();
+    tokio::spawn(async move {
+        // Gateway serves the model — admission-gated; a refusal lands in the row status.
+        let port = match ensure_gateway(&model).await {
+            Ok(p) => p,
+            Err(e) => {
+                let msg: String = e.chars().take(120).collect();
+                update_agent_record(&task_id, |a| a.status = format!("failed: {msg}"));
+                return;
+            }
+        };
+        // The user may have stopped the row while the model loaded.
+        if !load_agents().iter().any(|a| a.id == task_id) {
+            return;
         }
-    };
-    // 2) Spawn the participant detached + register it.
-    match spawn_participant(&model, &room, &req.policy, req.persona.trim(), port) {
-        Ok(pid) => {
-            let h = req.handle.trim().to_string();
-            let handle = if h.is_empty() { derive_handle(&model) } else { h };
-            let id = format!("{}-{}", sanitize(&room), pid);
-            let mut agents = load_agents();
-            agents.push(AgentRecord {
-                id: id.clone(), model: model.clone(), room: room.clone(),
-                handle: handle.clone(), policy: req.policy.clone(), pid,
-                started_at: crate::share::now_unix(),
-            });
-            save_agents(&agents);
-            axum::Json(serde_json::json!({ "ok": true, "id": id, "handle": handle, "pid": pid })).into_response()
+        match spawn_participant(&model, &room, &policy, &persona, port) {
+            Ok(pid) => update_agent_record(&task_id, |a| {
+                a.pid = pid;
+                a.status = "running".into();
+            }),
+            Err(e) => update_agent_record(&task_id, |a| a.status = format!("failed: spawn: {e}")),
         }
-        Err(e) => json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("spawn: {e}")),
-    }
+    });
+    axum::Json(serde_json::json!({ "ok": true, "id": id, "handle": handle, "status": "starting" })).into_response()
 }
 
 async fn agent_stop_route(body: String) -> axum::response::Response {
@@ -810,7 +844,9 @@ async fn agent_stop_route(body: String) -> axum::response::Response {
         return json_err(axum::http::StatusCode::NOT_FOUND, "no such agent");
     };
     let a = agents.remove(pos);
-    unsafe { libc::kill(a.pid as libc::pid_t, libc::SIGTERM); }
+    if a.pid != 0 {
+        unsafe { libc::kill(a.pid as libc::pid_t, libc::SIGTERM); }
+    }
     save_agents(&agents);
     axum::Json(serde_json::json!({ "ok": true, "id": a.id })).into_response()
 }
@@ -945,8 +981,12 @@ pub struct CoderRecord {
     pub workdir: String,
     pub prompt: String,
     pub log: String,
+    /// 0 until the background launch has spawned the process.
     pub pid: u32,
     pub started_at: u64,
+    /// "starting…" / "running" / "failed: …"; empty on legacy records (= running).
+    #[serde(default)]
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -958,6 +998,7 @@ pub struct CoderBrief {
     pub prompt: String,
     pub pid: u32,
     pub alive: bool,
+    pub status: String,
 }
 
 fn coders_registry_path() -> Option<PathBuf> {
@@ -987,14 +1028,36 @@ fn save_coders(coders: &[CoderRecord]) {
 
 /// Running coders with a fresh liveness check; coders that have exited STAY in the registry (so their
 /// log is still reachable) but report `alive=false`. The UI lets the operator clear a finished one.
+/// Status: "starting…"/"failed: …" verbatim from the record; a completed launch shows "running"
+/// while the process lives and "exited" once it's done (a coder run finishing is normal).
 fn live_coders() -> Vec<CoderBrief> {
     load_coders()
         .into_iter()
-        .map(|c| CoderBrief {
-            alive: pid_alive(c.pid),
-            id: c.id, agent: c.agent, model: c.model, workdir: c.workdir, prompt: c.prompt, pid: c.pid,
+        .map(|c| {
+            let alive = pid_alive(c.pid);
+            let status = if c.status.starts_with("starting") || c.status.starts_with("failed") {
+                c.status.clone()
+            } else if alive {
+                "running".into()
+            } else {
+                "exited".into()
+            };
+            CoderBrief {
+                alive,
+                id: c.id, agent: c.agent, model: c.model, workdir: c.workdir, prompt: c.prompt,
+                pid: c.pid, status,
+            }
         })
         .collect()
+}
+
+/// Rewrite one coder record in place (no-op if it was stopped meanwhile).
+fn update_coder_record(id: &str, f: impl FnOnce(&mut CoderRecord)) {
+    let mut coders = load_coders();
+    if let Some(c) = coders.iter_mut().find(|c| c.id == id) {
+        f(c);
+        save_coders(&coders);
+    }
 }
 
 /// The agent's own invocation for a non-interactive run: program + flags + the task prompt. claude runs
@@ -1058,26 +1121,43 @@ async fn coder_launch_route(body: String) -> axum::response::Response {
     if !std::path::Path::new(&workdir).is_dir() {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "workdir is not a directory");
     }
-    // Admission-gate the model load up front; `rozum launch` then reuses this shared gateway.
-    if let Err(e) = ensure_gateway(&model).await {
-        return (
-            axum::http::StatusCode::CONFLICT,
-            axum::Json(serde_json::json!({ "ok": false, "error": e, "admission": footprint_report(&model) })),
-        ).into_response();
-    }
-    match spawn_coder(&agent, &model, &workdir, &prompt) {
-        Ok((pid, log)) => {
-            let id = format!("{}-{}", sanitize(&agent), pid);
-            let mut coders = load_coders();
-            coders.push(CoderRecord {
-                id: id.clone(), agent, model, workdir, prompt,
-                log: log.to_string_lossy().into_owned(), pid, started_at: crate::share::now_unix(),
-            });
-            save_coders(&coders);
-            axum::Json(serde_json::json!({ "ok": true, "id": id, "pid": pid })).into_response()
+    // Record NOW ("starting…"), do the slow model load + spawn in the background — the phone's
+    // fetch returns instantly and errors land in the row's status (same pattern as sessions).
+    let id = format!("{}-{}", sanitize(&agent), crate::share::now_unix());
+    let mut coders = load_coders();
+    coders.push(CoderRecord {
+        id: id.clone(),
+        agent: agent.clone(),
+        model: model.clone(),
+        workdir: workdir.clone(),
+        prompt: prompt.clone(),
+        log: String::new(),
+        pid: 0,
+        started_at: crate::share::now_unix(),
+        status: "starting…".into(),
+    });
+    save_coders(&coders);
+    let task_id = id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = ensure_gateway(&model).await {
+            let msg: String = e.chars().take(120).collect();
+            update_coder_record(&task_id, |c| c.status = format!("failed: {msg}"));
+            return;
         }
-        Err(e) => json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("spawn: {e}")),
-    }
+        // The user may have stopped the row while the model loaded.
+        if !load_coders().iter().any(|c| c.id == task_id) {
+            return;
+        }
+        match spawn_coder(&agent, &model, &workdir, &prompt) {
+            Ok((pid, log)) => update_coder_record(&task_id, |c| {
+                c.pid = pid;
+                c.log = log.to_string_lossy().into_owned();
+                c.status = "running".into();
+            }),
+            Err(e) => update_coder_record(&task_id, |c| c.status = format!("failed: spawn: {e}")),
+        }
+    });
+    axum::Json(serde_json::json!({ "ok": true, "id": id, "status": "starting" })).into_response()
 }
 
 async fn coder_stop_route(body: String) -> axum::response::Response {
@@ -1091,7 +1171,9 @@ async fn coder_stop_route(body: String) -> axum::response::Response {
         return json_err(axum::http::StatusCode::NOT_FOUND, "no such coder");
     };
     let c = coders.remove(pos);
-    unsafe { libc::kill(c.pid as libc::pid_t, libc::SIGTERM); }
+    if c.pid != 0 {
+        unsafe { libc::kill(c.pid as libc::pid_t, libc::SIGTERM); }
+    }
     save_coders(&coders);
     axum::Json(serde_json::json!({ "ok": true, "id": c.id })).into_response()
 }
