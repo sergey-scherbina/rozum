@@ -284,6 +284,7 @@ val sessionsList = cardWithHeader(heading(2, "Live sessions (terminal)"))(
     fieldColumn("agent", "agent"),
     fieldColumn("model", "model"),
     fieldColumn("repo", "workdir"),
+    fieldColumn("status", "status"),
     lcol("🖥 terminal", "id", "/terminal.html?id=:value")
   ], "sessions", [rowPostAction("✕ close", "POST", "/control/session/stop", fieldPayload("id"), refresh)])
 )

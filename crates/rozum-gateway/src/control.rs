@@ -1131,6 +1131,10 @@ pub struct SessionRecord {
     pub workdir: String,
     pub prompt: String,
     pub started_at: u64,
+    /// "starting…" (background launch in flight) / "running" / "failed: …".
+    /// Empty on legacy records — treated as "running" (tmux is the source of truth for those).
+    #[serde(default)]
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1140,6 +1144,7 @@ pub struct SessionBrief {
     pub model: String,
     pub workdir: String,
     pub alive: bool,
+    pub status: String,
 }
 
 fn sessions_registry_path() -> Option<PathBuf> {
@@ -1169,13 +1174,22 @@ fn tmux_alive(id: &str) -> bool {
         .status().map(|s| s.success()).unwrap_or(false)
 }
 
-/// Running sessions (registry ∩ live tmux); prunes dead registry entries.
+/// Sessions for the UCC table: live tmux sessions plus in-flight ("starting…") and failed launches.
+/// Only records whose launch COMPLETED ("running"/legacy-empty) are pruned when their tmux is gone —
+/// a starting row's tmux doesn't exist yet, and a failed row must stay visible until the user
+/// closes it (that's how launch errors reach the phone).
 fn live_sessions() -> Vec<SessionBrief> {
     let all = load_sessions();
-    let (alive, dead): (Vec<_>, Vec<_>) = all.into_iter().partition(|s| tmux_alive(&s.id));
-    if !dead.is_empty() { save_sessions(&alive); }
-    alive.into_iter()
-        .map(|s| SessionBrief { id: s.id, agent: s.agent, model: s.model, workdir: s.workdir, alive: true })
+    let (keep, dead): (Vec<_>, Vec<_>) = all.into_iter().partition(|s| {
+        s.status.starts_with("starting") || s.status.starts_with("failed") || tmux_alive(&s.id)
+    });
+    if !dead.is_empty() { save_sessions(&keep); }
+    keep.into_iter()
+        .map(|s| {
+            let alive = tmux_alive(&s.id);
+            let status = if !s.status.is_empty() { s.status } else { "running".into() };
+            SessionBrief { id: s.id, agent: s.agent, model: s.model, workdir: s.workdir, alive, status }
+        })
         .collect()
 }
 
@@ -1209,36 +1223,74 @@ async fn session_launch_route(body: String) -> axum::response::Response {
     if !std::path::Path::new(&workdir).is_dir() {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "workdir is not a directory");
     }
-    // Admission-gate the model; `rozum launch` then reuses the shared gateway.
-    if let Err(e) = ensure_gateway(&model).await {
-        return (
-            axum::http::StatusCode::CONFLICT,
-            axum::Json(serde_json::json!({ "ok": false, "error": e, "admission": footprint_report(&model) })),
-        ).into_response();
-    }
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
-    let id = format!("{}-{}", sanitize(&agent), crate::share::now_unix());
-    let name = tmux_name(&id);
-    // Interactive agent under a detached tmux session in the workdir.
-    let inner = format!("{} launch --model {} {}", exe.to_string_lossy(), model, agent);
-    let ok = Command::new("tmux")
-        .args(["new-session", "-d", "-s", &name, "-c", &workdir, "-x", "120", "-y", "40", &inner])
-        .status().map(|s| s.success()).unwrap_or(false);
-    if !ok {
-        return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "tmux new-session failed");
-    }
-    // Seed the task prompt into the interactive agent, if given.
+    // Record the session NOW ("starting…") and do the slow work (model load can take minutes on a
+    // cold host) in the background: the phone's fetch returns instantly, the row appears in the
+    // live-sessions table as feedback, and a proxy (Tailscale funnel) can't time the request out.
+    // Errors land in the row's status ("failed: …") and stay visible until the user closes the row.
     let prompt = req.prompt.trim().to_string();
-    if !prompt.is_empty() {
-        std::thread::sleep(std::time::Duration::from_millis(1500)); // let the agent's REPL come up
-        let _ = Command::new("tmux").args(["send-keys", "-t", &name, &prompt, "Enter"]).status();
-    }
+    let id = format!("{}-{}", sanitize(&agent), crate::share::now_unix());
     let mut sessions = load_sessions();
     sessions.push(SessionRecord {
-        id: id.clone(), agent, model, workdir, prompt, started_at: crate::share::now_unix(),
+        id: id.clone(),
+        agent: agent.clone(),
+        model: model.clone(),
+        workdir: workdir.clone(),
+        prompt: prompt.clone(),
+        started_at: crate::share::now_unix(),
+        status: "starting…".into(),
     });
     save_sessions(&sessions);
-    axum::Json(serde_json::json!({ "ok": true, "id": id })).into_response()
+    let task_id = id.clone();
+    tokio::spawn(async move {
+        // Admission-gate + load the model; `rozum launch` inside tmux then reuses the gateway.
+        if let Err(e) = ensure_gateway(&model).await {
+            let msg: String = e.chars().take(120).collect();
+            update_session_status(&task_id, &format!("failed: {msg}"));
+            return;
+        }
+        // The user may have closed the row while the model loaded.
+        if !load_sessions().iter().any(|s| s.id == task_id) {
+            return;
+        }
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
+        let name = tmux_name(&task_id);
+        // Interactive agent under a detached tmux session in the workdir.
+        let inner = format!("{} launch --model {} {}", exe.to_string_lossy(), model, agent);
+        let ok = Command::new("tmux")
+            .args(["new-session", "-d", "-s", &name, "-c", &workdir, "-x", "120", "-y", "40", &inner])
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            update_session_status(&task_id, "failed: tmux new-session");
+            return;
+        }
+        if !load_sessions().iter().any(|s| s.id == task_id) {
+            // Closed during tmux creation — don't leave an orphan terminal behind.
+            let _ = Command::new("tmux").args(["kill-session", "-t", &name]).status();
+            return;
+        }
+        update_session_status(&task_id, "running");
+        // Seed the task prompt into the interactive agent, if given.
+        if !prompt.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await; // let the REPL come up
+            let _ = Command::new("tmux").args(["send-keys", "-t", &name, &prompt, "Enter"]).status();
+        }
+    });
+    axum::Json(serde_json::json!({ "ok": true, "id": id, "status": "starting" })).into_response()
+}
+
+/// Rewrite one session's status in the registry (no-op if the record was closed meanwhile).
+fn update_session_status(id: &str, status: &str) {
+    let mut sessions = load_sessions();
+    let mut hit = false;
+    for s in sessions.iter_mut() {
+        if s.id == id {
+            s.status = status.to_string();
+            hit = true;
+        }
+    }
+    if hit {
+        save_sessions(&sessions);
+    }
 }
 
 async fn session_stop_route(body: String) -> axum::response::Response {

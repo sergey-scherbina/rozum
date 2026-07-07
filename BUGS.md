@@ -5,6 +5,37 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-010 — «запустить сессию» does nothing: formBody posted EMPTY fields (framework bug)
+
+- **Status:** fixed (scalascript `3edbf883a` + rozum async launch), deployed 2026-07-07.
+- **Reporter:** operator — "Я здесь нажимаю «запустить сессию» - ничего не происходит" (from the
+  phone, sessions form fully filled).
+- **Severity:** P1 — the launch POST fired instantly but carried
+  `{"agent":"","model":"","workdir":"","prompt":""}` → 400, silently.
+
+**Root cause (framework, std/ui SPA bridge).** `.ssc` forms reference field signals by NAME —
+`formBody([("agent","seAgent"),…])` — but `_ssc_ui_signal(name, init)` DISCARDED the name, and the
+submit-time store `_sv` is keyed by NUMERIC signal id, so `sv["seAgent"]` resolved to `''` for every
+field. Every by-name formBody in every emitted SPA posted empties. Repro'd live in headless Chrome
+with request capture (body was key-correct but value-empty while the page visibly showed all
+values).
+
+**Fix 1 (scalascript `3edbf883a`).** `_signalsByName` registry (+ registration in
+`_ssc_ui_signal`/`_ssc_ui_seedSignal`) and `_ssc_ui_resolveFormFields`: the render walk resolves
+field refs to bridge ids AND collects the signals so their `_sv` entries stay fresh; unresolved
+refs pass through verbatim. Regression test `SpaFormBodyNamedSignalsTest` (real JsRuntimeSignals,
+headless node).
+
+**Fix 2 (rozum, same operator symptom).** Even with the body fixed, a cold-start launch blocks for
+minutes with zero feedback and the Tailscale funnel can time the request out. `session_launch_route`
+is now ASYNC: validates fast, records the session as `starting…` immediately (the row in Live
+sessions IS the feedback), loads the gateway + creates tmux in a background task, flips status to
+`running` / `failed: <reason>`. Failed rows stay visible until closed (✕) — launch errors finally
+reach the phone. `live_sessions()` prunes only completed records whose tmux died. New `status`
+column in the sessions table.
+
+---
+
 ## BUG-009 — every UCC page click bounced to #/ — agent/model pickers "did nothing"
 
 - **Status:** fixed on `f8cf165`, redeployed 2026-07-07 ~05:3x; verified in a real browser.

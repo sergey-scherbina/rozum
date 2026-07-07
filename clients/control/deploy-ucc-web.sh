@@ -275,7 +275,7 @@ TR_RU = {
     'Sessions':'Сессии','Live sessions (terminal)':'Живые сессии (терминал)',
     '🖥 terminal':'🖥 терминал','New interactive session':'Новая интерактивная сессия',
     'first task (optional)…':'первое задание (необязательно)…',
-    '🖥 launch session':'🖥 запустить сессию','✕ close':'✕ закрыть',
+    '🖥 launch session':'🖥 запустить сессию','✕ close':'✕ закрыть','status':'статус',
     # model detail modal
     'Model details':'Характеристики модели',
     'Architecture:':'Архитектура:','Quantization:':'Квантизация:','Context:':'Контекст:',
@@ -307,7 +307,7 @@ TR_UK = {
     'Sessions':'Сесії','Live sessions (terminal)':'Живі сесії (термінал)',
     '🖥 terminal':'🖥 термінал','New interactive session':'Нова інтерактивна сесія',
     "first task (optional)…":"перше завдання (необов'язково)…",
-    '🖥 launch session':'🖥 запустити сесію','✕ close':'✕ закрити',
+    '🖥 launch session':'🖥 запустити сесію','✕ close':'✕ закрити','status':'статус',
     'Model details':'Характеристики моделі',
     'Architecture:':'Архітектура:','Quantization:':'Квантизація:','Context:':'Контекст:',
     'Layers:':'Шари:','Size:':'Розмір:','Resident:':'У пам\'яті:','Notes:':'Примітка:',
