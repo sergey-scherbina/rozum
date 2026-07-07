@@ -1,5 +1,22 @@
 # Changelog
 
+## fix(ucc): web session launch accepts ScalaScript action bodies
+Completed: 2026-07-07 · `e451e6a`, `0a537df`
+
+Control-serve now accepts the JSON body emitted by ScalaScript `formBody(...)` even when the browser
+request has no `Content-Type: application/json`. This fixes the UCC Sessions page appearing idle when
+launching `claude` with Qwen3.6: the old Axum `Json<T>` extractor rejected `/control/session/launch`
+before the handler ran.
+
+Also covered sibling UCC actions: agent/coder/session launch parse raw JSON bodies; stop routes accept
+browser JSON ids plus legacy plain/form ids; project creation accepts JSON names plus legacy form/plain
+names; malformed JSON-like action bodies return structured 400s. Deployed with
+`clients/control/deploy-ucc-web.sh`.
+
+Verified: `cargo test -p rozum-gateway ucc_`; `cargo test -p rozum-gateway control::tests::`; deploy
+SPA/runtime checks and launchd reload; local unauthenticated session-launch smoke returns auth 401
+instead of the old extractor rejection.
+
 ## feat(matrix+gateway): honest reporting + gateway tool-call delivery fixes + model→driver routing
 Completed: 2026-07-05 · `d20d176`…`cefe46f` (35 commits)
 

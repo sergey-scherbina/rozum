@@ -1,11 +1,15 @@
 # Sprint
 
-- [ ] **ucc-action-json-bodies** — fix the UCC web action contract for sessions/coders/agents/projects.
-  Repro: `formBody(...)` emits JSON but no `Content-Type`, so Axum `Json<T>` rejects
-  `/control/session/launch` before the handler; the browser only sees a failed fetch and appears idle.
-  Spec: `docs/specs/ucc-action-json-bodies.md`. Done when control action parsers accept the SPA body
-  shape, tests cover session launch/stop JSON bodies, and deployed UCC can start `claude` +
-  `Qwen3.6` interactive sessions when memory admission passes.
+- [x] **ucc-action-json-bodies** — fixed the UCC web action contract for sessions/coders/agents/projects.
+  Repro: `formBody(...)` emits JSON but no `Content-Type`, so Axum `Json<T>` rejected
+  `/control/session/launch` before the handler; the browser only saw a failed fetch and appeared idle.
+  Fixed by `e451e6a` + `0a537df`: control action parsers now accept the SPA JSON body shape without
+  relying on `Content-Type`, retain legacy plain/form bodies for stop/project actions, and return 400
+  for malformed JSON-like action bodies. Verified with `cargo test -p rozum-gateway ucc_`,
+  `cargo test -p rozum-gateway control::tests::`, `clients/control/deploy-ucc-web.sh`, and a local
+  unauthenticated session-launch smoke that now reaches auth middleware (401) instead of extractor reject.
+  Authenticated live launch is still subject to WebAuthn login and the existing model memory admission gate.
+  Spec: `docs/specs/ucc-action-json-bodies.md`.
 
 ### ▶ GO-FORWARD PLAN (operator 2026-07-05: "спочатку швидкі виграші, потім усе що зможеш — зроби")
 

@@ -24,15 +24,26 @@ the HTTP `Content-Type` header is absent or generic.
 
 ## Behavior
 
-- [ ] UCC `formBody(...)` POST bodies reach the control handlers and are parsed as JSON objects
+- [x] UCC `formBody(...)` POST bodies reach the control handlers and are parsed as JSON objects
       without requiring `Content-Type: application/json`.
-- [ ] Interactive session launch accepts `agent`, `model`, `workdir`, and optional `prompt` from
+- [x] Interactive session launch accepts `agent`, `model`, `workdir`, and optional `prompt` from
       the browser body, then follows the existing admission gate and tmux launch path.
-- [ ] Stop endpoints accept browser JSON `{ "id": "..." }` and retain backwards-compatible plain
+- [x] Stop endpoints accept browser JSON `{ "id": "..." }` and retain backwards-compatible plain
       id text for scripts.
-- [ ] Project creation accepts browser JSON `{ "name": "..." }` and retains the existing validation.
-- [ ] Malformed or missing required fields still return structured 400 errors instead of launching
+- [x] Project creation accepts browser JSON `{ "name": "..." }` and retains the existing validation.
+- [x] Malformed or missing required fields still return structured 400 errors instead of launching
       anything.
+
+## Results
+
+- Implemented in `crates/rozum-gateway/src/control.rs` (`e451e6a`, `0a537df`).
+- Regression coverage: `cargo test -p rozum-gateway ucc_` and
+  `cargo test -p rozum-gateway control::tests::`.
+- Deployed with `clients/control/deploy-ucc-web.sh` on 2026-07-07; SPA/runtime checks passed and
+  control-serve reloaded on port 8411.
+- Smoke: unauthenticated `POST /control/session/launch` with the ScalaScript-style JSON body now returns
+  the expected auth 401, showing the request reaches middleware instead of being rejected by Axum's
+  content-type-sensitive JSON extractor.
 
 ## Out of scope
 

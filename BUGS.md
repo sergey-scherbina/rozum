@@ -7,22 +7,27 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ## BUG-006 — UCC session launch buttons silently do nothing
 
-- **Status:** open.
+- **Status:** fixed on `e451e6a` + hardened on `0a537df`; deployed to control-serve 2026-07-07.
 - **Reporter:** operator — "В контрол центре не работает выбор агента и модели в сессии; хочу через веб интерфейс запустить сессию клауди и квен3.6, но ничего не происходит".
 - **Severity:** P1 — blocks the phone/web control-center path for interactive coding sessions.
 
 **Symptom.** In the UCC `#/sessions` page, selecting an agent/model/workdir and pressing
 `launch session` leaves the UI unchanged and no tmux-backed session appears.
 
-**Likely root cause.** The ScalaScript SPA's `formBody(...)` sends a JSON string body without
+**Root cause.** The ScalaScript SPA's `formBody(...)` sends a JSON string body without
 `Content-Type: application/json`. Axum `Json<T>` extractors on `/control/session/launch`
 and sibling action routes reject those requests before handler execution, while the SPA does
 not surface the non-2xx response. Stop/project actions also need to accept the same JSON body
 shape instead of treating raw body text as the id/name.
 
-**Fix plan.** Make UCC write routes parse the browser body shape directly: accept JSON objects
-from `formBody(...)` regardless of content type, keep backwards-compatible raw/plain forms where
-they existed, and add regression tests for launch/stop request parsing.
+**Fix.** UCC write routes now parse the browser body directly: agent/coder/session launch accept
+JSON objects regardless of content type; stop routes accept JSON `{ "id": ... }` plus legacy
+form/plain ids; project creation accepts JSON `{ "name": ... }` plus legacy form/plain names.
+Malformed JSON-like bodies and missing ids/names return structured 400s instead of falling through.
+
+**Verified.** `cargo test -p rozum-gateway ucc_`; `cargo test -p rozum-gateway control::tests::`;
+`clients/control/deploy-ucc-web.sh`; unauthenticated `POST /control/session/launch` now reaches auth
+middleware and returns 401 rather than the old extractor failure.
 
 ---
 
