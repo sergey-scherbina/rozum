@@ -4,6 +4,7 @@
 //! served over the gateway's HTTP surface for the web/UCC target. See
 //! `docs/specs/services-and-clients.md`.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -697,8 +698,12 @@ struct AgentLaunchReq {
 }
 fn default_policy() -> String { "mention".into() }
 
-async fn agent_launch_route(axum::Json(req): axum::Json<AgentLaunchReq>) -> axum::response::Response {
+async fn agent_launch_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
+    let req: AgentLaunchReq = match parse_action_json(&body) {
+        Ok(req) => req,
+        Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
+    };
     let model = req.model.trim().to_string();
     let room = req.room.trim().to_string();
     if model.is_empty() || room.is_empty() {
@@ -734,13 +739,11 @@ async fn agent_launch_route(axum::Json(req): axum::Json<AgentLaunchReq>) -> axum
     }
 }
 
-#[derive(Deserialize)]
-struct AgentStopReq { id: String }
-
-async fn agent_stop_route(axum::Json(req): axum::Json<AgentStopReq>) -> axum::response::Response {
+async fn agent_stop_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
+    let id = parse_id_body(&body);
     let mut agents = load_agents();
-    let Some(pos) = agents.iter().position(|a| a.id == req.id) else {
+    let Some(pos) = agents.iter().position(|a| a.id == id) else {
         return json_err(axum::http::StatusCode::NOT_FOUND, "no such agent");
     };
     let a = agents.remove(pos);
@@ -809,6 +812,47 @@ fn derive_handle(model: &str) -> String {
 fn json_err(code: axum::http::StatusCode, msg: &str) -> axum::response::Response {
     use axum::response::IntoResponse;
     (code, axum::Json(serde_json::json!({ "ok": false, "error": msg }))).into_response()
+}
+
+fn parse_action_json<T: DeserializeOwned>(body: &str) -> Result<T, String> {
+    serde_json::from_str::<T>(body.trim()).map_err(|e| format!("invalid JSON body: {e}"))
+}
+
+#[derive(Deserialize)]
+struct IdBody {
+    id: String,
+}
+
+fn parse_id_body(body: &str) -> String {
+    let body = body.trim();
+    if body.is_empty() {
+        return String::new();
+    }
+    if let Ok(req) = serde_json::from_str::<IdBody>(body) {
+        return req.id.trim().to_string();
+    }
+    for (k, v) in url::form_urlencoded::parse(body.as_bytes()) {
+        if k == "id" {
+            return v.trim().to_string();
+        }
+    }
+    body.to_string()
+}
+
+fn parse_project_add_body(body: &str) -> Result<ProjectAddRequest, String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("name required".into());
+    }
+    if let Ok(req) = serde_json::from_str::<ProjectAddRequest>(body) {
+        return Ok(req);
+    }
+    for (k, v) in url::form_urlencoded::parse(body.as_bytes()) {
+        if k == "name" {
+            return Ok(ProjectAddRequest { name: v.into_owned() });
+        }
+    }
+    Ok(ProjectAddRequest { name: body.to_string() })
 }
 
 // ── Phase 2: coding-agents (`rozum launch`) — detached supervisor + log ─────────────────────────────
@@ -923,8 +967,12 @@ struct CoderLaunchReq {
     prompt: String,
 }
 
-async fn coder_launch_route(axum::Json(req): axum::Json<CoderLaunchReq>) -> axum::response::Response {
+async fn coder_launch_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
+    let req: CoderLaunchReq = match parse_action_json(&body) {
+        Ok(req) => req,
+        Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
+    };
     let agent = req.agent.trim().to_string();
     let model = req.model.trim().to_string();
     let workdir = req.workdir.trim().to_string();
@@ -959,7 +1007,7 @@ async fn coder_launch_route(axum::Json(req): axum::Json<CoderLaunchReq>) -> axum
 
 async fn coder_stop_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let id = body.trim().to_string();
+    let id = parse_id_body(&body);
     let mut coders = load_coders();
     let Some(pos) = coders.iter().position(|c| c.id == id) else {
         return json_err(axum::http::StatusCode::NOT_FOUND, "no such coder");
@@ -1062,8 +1110,12 @@ struct SessionLaunchReq {
     prompt: String,
 }
 
-async fn session_launch_route(axum::Json(req): axum::Json<SessionLaunchReq>) -> axum::response::Response {
+async fn session_launch_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
+    let req: SessionLaunchReq = match parse_action_json(&body) {
+        Ok(req) => req,
+        Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
+    };
     let agent = req.agent.trim().to_string();
     let model = req.model.trim().to_string();
     let workdir = req.workdir.trim().to_string();
@@ -1113,7 +1165,7 @@ async fn session_launch_route(axum::Json(req): axum::Json<SessionLaunchReq>) -> 
 
 async fn session_stop_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let id = body.trim().to_string();
+    let id = parse_id_body(&body);
     let _ = Command::new("tmux").args(["kill-session", "-t", &tmux_name(&id)]).status();
     let mut sessions = load_sessions();
     sessions.retain(|s| s.id != id);
@@ -2863,10 +2915,12 @@ struct ProjectAddRequest {
     name: String,
 }
 
-async fn project_add_route(
-    axum::extract::Form(req): axum::extract::Form<ProjectAddRequest>,
-) -> axum::response::Response {
+async fn project_add_route(body: String) -> axum::response::Response {
     use axum::response::IntoResponse;
+    let req = match parse_project_add_body(&body) {
+        Ok(req) => req,
+        Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
+    };
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "name required");
@@ -3019,6 +3073,43 @@ mod tests {
         assert!(!shell_safe("codex\nrm -rf /"));
         assert!(!shell_safe("has space"));
         assert!(!shell_safe(""));
+    }
+
+    #[test]
+    fn ucc_form_body_json_parses_session_launch_without_content_type() {
+        let req: SessionLaunchReq = parse_action_json(
+            r#"{"agent":"claude","model":"mlx-community:Qwen3.6-35B-A3B-4bit","workdir":"/tmp","prompt":""}"#,
+        )
+        .unwrap();
+        assert_eq!(req.agent, "claude");
+        assert_eq!(req.model, "mlx-community:Qwen3.6-35B-A3B-4bit");
+        assert_eq!(req.workdir, "/tmp");
+        assert_eq!(req.prompt, "");
+    }
+
+    #[test]
+    fn ucc_form_body_json_parses_defaulted_agent_launch() {
+        let req: AgentLaunchReq =
+            parse_action_json(r#"{"model":"m","room":"rozum","persona":"brief"}"#).unwrap();
+        assert_eq!(req.model, "m");
+        assert_eq!(req.room, "rozum");
+        assert_eq!(req.policy, "mention");
+        assert_eq!(req.persona, "brief");
+    }
+
+    #[test]
+    fn ucc_stop_id_accepts_json_form_and_legacy_plain_body() {
+        assert_eq!(parse_id_body(r#"{"id":"claude-123"}"#), "claude-123");
+        assert_eq!(parse_id_body("id=claude-123"), "claude-123");
+        assert_eq!(parse_id_body("claude-123"), "claude-123");
+    }
+
+    #[test]
+    fn ucc_project_add_accepts_json_form_and_plain_body() {
+        assert_eq!(parse_project_add_body(r#"{"name":"demo"}"#).unwrap().name, "demo");
+        assert_eq!(parse_project_add_body("name=demo").unwrap().name, "demo");
+        assert_eq!(parse_project_add_body("demo").unwrap().name, "demo");
+        assert!(parse_project_add_body("").is_err());
     }
 
     #[test]
