@@ -23,28 +23,28 @@ REPO="$(cd "$HERE/../.." && pwd)"
 
 mkdir -p "$SITE" "$BINDIR"
 
-# Bootstrap the ssc-tk launcher if absent or misconfigured.
-# Root cause: ssc.lib.path must point at the scalascript root (not v1/)
-# so the CLI auto-loads plugin .sscpkg files from bin/lib/compiler/plugins/
-# at startup; without them BackendRegistry.inProcess never sees HttpIntrinsics
-# and `route` / `serve` (extern defs in std/http.ssc) fail to resolve in the
-# child interpreter.  ssc.std.path overrides std/ resolution independently.
+# Bootstrap the ssc-tk launcher. When the operator's canonical launcher exists
+# (~/work/my/scalascript/bin/ssc — kept fresh together with bin/lib by the
+# scalascript repo itself), the /tmp launcher DELEGATES to it, so we can never
+# again emit with a compiler that skews from the live std/plugins tree: the
+# 2026-07-07 nav regression came exactly from a hand-rolled /tmp launcher pinning
+# a Jun-29 ssc.jar against a Jul-7 std — the emitted SPA lost the
+# `hashchange → _syncBridgeSignals()` hook and menu clicks stopped re-rendering.
+# The heredoc below remains only as a fallback for hosts without the canonical
+# launcher. Never rewrite a caller-provided $SSC (env override).
 _SSC_ROOT_DEFAULT="$HOME/work/my/scalascript"
 _SSC_JAR_DIR_DEFAULT="$HOME/work/my/scalascript/bin/lib"
 _SSC_STD_DEFAULT="$HOME/work/my/scalascript/v1/runtime"
-_NEED_REGEN=0
-if [ ! -f "$SSC" ]; then
-  _NEED_REGEN=1
-elif ! grep -q "ssc.std.path" "$SSC" 2>/dev/null; then
-  # Old launcher without ssc.std.path — plugins won't auto-load with /v1 lib path
-  _NEED_REGEN=1
-elif ! grep -q "$_SSC_JAR_DIR_DEFAULT" "$SSC" 2>/dev/null; then
-  # Launcher points at a stale jar dir (e.g. the removed coord-main worktree —
-  # java then dies with ClassNotFoundException: scalascript.cli.ssc)
-  _NEED_REGEN=1
-fi
-if [ "$_NEED_REGEN" = "1" ] && [ -d "$_SSC_JAR_DIR_DEFAULT" ]; then
-  echo ">> bootstrapping $SSC (coord-main + std.path fix) ..."
+_SSC_CANONICAL="$_SSC_ROOT_DEFAULT/bin/ssc"
+if [ "$SSC" = "/tmp/ssc-tk/bin/ssc" ] && [ -x "$_SSC_CANONICAL" ]; then
+  mkdir -p "$(dirname "$SSC")"
+  printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$_SSC_CANONICAL" > "$SSC"
+  chmod +x "$SSC"
+elif [ ! -f "$SSC" ] && [ -d "$_SSC_JAR_DIR_DEFAULT" ]; then
+  # Fallback (no canonical launcher): ssc.lib.path must point at the scalascript
+  # root (not v1/) so the CLI auto-loads plugin .sscpkg files from
+  # bin/lib/compiler/plugins/; ssc.std.path overrides std/ resolution independently.
+  echo ">> bootstrapping $SSC (fallback jar launcher) ..."
   mkdir -p "$(dirname "$SSC")"
   cat > "$SSC" <<LAUNCHER
 #!/usr/bin/env bash
