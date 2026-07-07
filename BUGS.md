@@ -5,6 +5,36 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-008 — UCC menu navigation dead after the 03:27 redeploy (compiler/std skew)
+
+- **Status:** fixed on `9a39a60` + site re-emitted and redeployed 2026-07-07 ~05:0x.
+- **Reporter:** operator — "Опять не работает навигация в контрол центре."
+- **Severity:** P1 — menu taps change the URL hash but the page never re-renders.
+
+**Symptom.** After the BUG-007 deploy (03:27), tapping UCC menu items did nothing (hash changed,
+view didn't). The 02:21 page was fine.
+
+**Root cause.** The 03:27 SPA was emitted with a SKEWED toolchain: the repaired `/tmp/ssc-tk/bin/ssc`
+launcher pinned the **Jun-29** `ssc.jar` from `~/work/my/scalascript/bin/lib` while `ssc.lib.path`/
+`ssc.std.path` pointed at the **Jul-7** live std/plugins tree. That jar predates the std/ui React
+bridge fix that registers `window.addEventListener('hashchange', () => _syncBridgeSignals())` — so
+the emitted SPA never resynced bridge signals on hash change and navigation went dead. (Earlier
+deploys used the since-removed `coord-main` worktree build, which had the fix; scalascript refreshed
+`bin/lib` to a fresh consistent build at 03:59, after our emit.) Diff proof: old-jar emit vs
+fresh-jar emit differ by exactly that one hashchange hook.
+
+**Fix.** `deploy-ucc-web.sh` now makes the `/tmp/ssc-tk/bin/ssc` launcher a one-line DELEGATE to the
+operator's canonical `~/work/my/scalascript/bin/ssc` (kept in lockstep with `bin/lib` by the
+scalascript repo), so compiler and std can never skew again; the jar heredoc stays only as a
+fallback, and a caller-provided `$SSC` is never rewritten. Site re-emitted with the canonical ssc.
+
+**Verified.** Deployed page contains the `_syncBridgeSignals` hashchange hook; Node sandbox check:
+2 hashchange listeners registered, `#/sessions`/`#/coders`/`#/agents`/`#/matrix`/`#/` all run
+clean; deploy JS syntax + runtime-init checks green; `cache-control: no-store` + non-caching SW →
+a plain reload on the phone picks it up.
+
+---
+
 ## BUG-007 — UCC web launch fails on a cold host: "no shared gateway running"
 
 - **Status:** fixed on `452e192` (+ deploy-script fix `0094bee`), merged to master and DEPLOYED to
