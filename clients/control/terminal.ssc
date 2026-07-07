@@ -20,7 +20,7 @@ val bodyCss = "html,body{margin:0;height:100%;background:radial-gradient(130% 95
 val xtermJs = """
 // i18n
 var _LG=localStorage.getItem('rozum_lang')||navigator.language.split('-')[0]||'en';
-var _LT={'ru':{'← UCC':'← UCC','no session id':'нет id сессии','No session id. Open terminal from the UCC sessions list.':'Нет id сессии. Откройте терминал из списка сессий UCC.','connecting…':'подключение…','● connected':'● подключено','○ disconnected — reconnect?':'○ отключено — переподключиться?','✗ error (Face ID login required?)':'✗ ошибка (нужен вход по Face ID?)','rozum · terminal':'rozum · терминал'},'uk':{'← UCC':'← UCC','no session id':'немає id сесії','No session id. Open terminal from the UCC sessions list.':'Немає id сесії. Відкрийте термінал зі списку сесій UCC.','connecting…':'підключення…','● connected':'● підключено','○ disconnected — reconnect?':'○ відключено — перепідключитися?','✗ error (Face ID login required?)':'✗ помилка (потрібен вхід через Face ID?)','rozum · terminal':'rozum · термінал'}};
+var _LT={'ru':{'← UCC':'← UCC','no session id':'нет id сессии','No session id. Open terminal from the UCC sessions list.':'Нет id сессии. Откройте терминал из списка сессий UCC.','connecting…':'подключение…','● connected':'● подключено','○ disconnected — reconnect?':'○ отключено — переподключиться?','○ reconnecting…':'○ переподключение…','✗ error (Face ID login required?)':'✗ ошибка (нужен вход по Face ID?)','rozum · terminal':'rozum · терминал'},'uk':{'← UCC':'← UCC','no session id':'немає id сесії','No session id. Open terminal from the UCC sessions list.':'Немає id сесії. Відкрийте термінал зі списку сесій UCC.','connecting…':'підключення…','● connected':'● підключено','○ disconnected — reconnect?':'○ відключено — перепідключитися?','○ reconnecting…':'○ перепідключення…','✗ error (Face ID login required?)':'✗ помилка (потрібен вхід через Face ID?)','rozum · terminal':'rozum · термінал'}};
 function _lt(s){var m=_LT[_LG];return(m&&m[s])||s;}
 document.documentElement.lang=_LG;
 if(_LT[_LG]&&_LT[_LG]['rozum · terminal'])document.title=_LT[_LG]['rozum · terminal'];
@@ -35,14 +35,20 @@ term.open(document.getElementById('term'));
 fit.fit();
 const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/control/session/attach/' + encodeURIComponent(id);
 let ws;
+let retries = 0;
 function connect(){
   if (!id) { st.textContent = '✗ ' + _lt('no session id'); term.writeln(_lt('No session id. Open terminal from the UCC sessions list.')); return; }
   st.textContent = _lt('connecting…');
   ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => { st.textContent = _lt('● connected'); sendResize(); term.focus(); };
+  ws.onopen = () => { retries = 0; st.textContent = _lt('● connected'); sendResize(); term.focus(); };
   ws.onmessage = (e) => { term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data)); };
-  ws.onclose = () => { st.textContent = _lt('○ disconnected — reconnect?'); };
+  ws.onclose = () => {
+    // Auto-retry: the session may still be warming up (attach 404s until tmux exists after a
+    // control-serve restart) or the network blipped. ~3 min of retries, then manual.
+    if (retries < 60) { retries++; st.textContent = _lt('○ reconnecting…') + ' (' + retries + ')'; setTimeout(connect, 3000); }
+    else { st.textContent = _lt('○ disconnected — reconnect?'); }
+  };
   ws.onerror = () => { st.textContent = _lt('✗ error (Face ID login required?)'); };
 }
 function sendResize(){ if (ws && ws.readyState === 1) ws.send(JSON.stringify({ resize:{ cols: term.cols, rows: term.rows } })); }

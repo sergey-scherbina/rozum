@@ -12,7 +12,7 @@ One std/ui app: a dashboard (live `/control/status`) AND a native chat view per 
 stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the view in place.
 
 ## Setup
-[signal, emit, serve, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, fetchActionWith, formBody, onBumpTick, incSignal, computedSignal, fieldColumn, stackedColumn, hashSignal](std/ui/primitives.ssc)
+[signal, emit, serve, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, fetchActionWith, formBody, onBumpTick, incSignal, computedSignal, fieldColumn, stackedColumn, hashSignal, onOpenJson](std/ui/primitives.ssc)
 [jsonValue](std/json.ssc)
 [lower](std/ui/lower.ssc)
 [darkTheme](std/ui/theme.ssc)
@@ -270,7 +270,8 @@ val sessionsBody = vstack(gap = 16)(
     ], "sessions", "/control/session/stop",
     "New interactive session", sessionForm,
     "🖥 launch session", "/control/session/launch",
-    [("agent", "seAgent"), ("model", "seModel"), ("workdir", "seWorkdir"), ("prompt", "sePrompt")])
+    [("agent", "seAgent"), ("model", "seModel"), ("workdir", "seWorkdir"), ("prompt", "sePrompt")],
+    [onOpenJson("/terminal.html?id=:value", "id")])
 )
 ```
 
