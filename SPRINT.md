@@ -1,5 +1,12 @@
 # Sprint
 
+- [ ] **ucc-action-json-bodies** — fix the UCC web action contract for sessions/coders/agents/projects.
+  Repro: `formBody(...)` emits JSON but no `Content-Type`, so Axum `Json<T>` rejects
+  `/control/session/launch` before the handler; the browser only sees a failed fetch and appears idle.
+  Spec: `docs/specs/ucc-action-json-bodies.md`. Done when control action parsers accept the SPA body
+  shape, tests cover session launch/stop JSON bodies, and deployed UCC can start `claude` +
+  `Qwen3.6` interactive sessions when memory admission passes.
+
 ### ▶ GO-FORWARD PLAN (operator 2026-07-05: "спочатку швидкі виграші, потім усе що зможеш — зроби")
 
 Ordered execution. Grounded in the session's thesis: the bottleneck is the model↔tools translation SEAM,

@@ -5,6 +5,27 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-006 — UCC session launch buttons silently do nothing
+
+- **Status:** open.
+- **Reporter:** operator — "В контрол центре не работает выбор агента и модели в сессии; хочу через веб интерфейс запустить сессию клауди и квен3.6, но ничего не происходит".
+- **Severity:** P1 — blocks the phone/web control-center path for interactive coding sessions.
+
+**Symptom.** In the UCC `#/sessions` page, selecting an agent/model/workdir and pressing
+`launch session` leaves the UI unchanged and no tmux-backed session appears.
+
+**Likely root cause.** The ScalaScript SPA's `formBody(...)` sends a JSON string body without
+`Content-Type: application/json`. Axum `Json<T>` extractors on `/control/session/launch`
+and sibling action routes reject those requests before handler execution, while the SPA does
+not surface the non-2xx response. Stop/project actions also need to accept the same JSON body
+shape instead of treating raw body text as the id/name.
+
+**Fix plan.** Make UCC write routes parse the browser body shape directly: accept JSON objects
+from `formBody(...)` regardless of content type, keep backwards-compatible raw/plain forms where
+they existed, and add regression tests for launch/stop request parsing.
+
+---
+
 ## BUG-005 — uncached model under `--offline` refused with bogus "~4398046511103 MB overcommit"
 
 - **Status:** fixed on `feature/footprint-uncached-sentinel` (cargo check `--no-default-features` +
