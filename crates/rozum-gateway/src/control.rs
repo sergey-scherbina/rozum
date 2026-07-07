@@ -408,6 +408,36 @@ fn update_agent_record(id: &str, f: impl FnOnce(&mut AgentRecord)) {
     }
 }
 
+/// The async-launch skeleton shared by the session/agent/coder launch routes. The route validates,
+/// records the job as "starting…" and returns instantly; this runs the slow half in the background:
+/// load the model via the shared gateway, re-check the record wasn't closed while it loaded, then
+/// run the job-specific spawn (which owns its success status). A gateway failure lands in the
+/// record's status as "failed: …" (truncated — statuses are phone-visible table cells).
+fn spawn_launch_task<Fut>(
+    model: String,
+    task_id: String,
+    still_wanted: impl Fn(&str) -> bool + Send + 'static,
+    set_failed: impl Fn(&str, String) + Send + 'static,
+    do_spawn: impl FnOnce(String, u16) -> Fut + Send + 'static,
+) where
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let port = match ensure_gateway(&model).await {
+            Ok(p) => p,
+            Err(e) => {
+                let msg: String = e.chars().take(120).collect();
+                set_failed(&task_id, format!("failed: {msg}"));
+                return;
+            }
+        };
+        if !still_wanted(&task_id) {
+            return;
+        }
+        do_spawn(task_id, port).await;
+    });
+}
+
 /// Run a `rozum` subcommand to completion, capturing output. Uses the current binary (the full gateway
 /// CLI), so no PATH dependency. Returns (success, combined stdout+stderr).
 fn run_rozum(args: &[&str]) -> (bool, String) {
@@ -805,31 +835,24 @@ async fn agent_launch_route(body: String) -> axum::response::Response {
         status: "starting…".into(),
     });
     save_agents(&agents);
-    let task_id = id.clone();
     let policy = req.policy.clone();
     let persona = req.persona.trim().to_string();
-    tokio::spawn(async move {
-        // Gateway serves the model — admission-gated; a refusal lands in the row status.
-        let port = match ensure_gateway(&model).await {
-            Ok(p) => p,
-            Err(e) => {
-                let msg: String = e.chars().take(120).collect();
-                update_agent_record(&task_id, |a| a.status = format!("failed: {msg}"));
-                return;
+    let spawn_model = model.clone();
+    spawn_launch_task(
+        model,
+        id.clone(),
+        |id| load_agents().iter().any(|a| a.id == id),
+        |id, s| update_agent_record(id, |a| a.status = s),
+        move |task_id, port| async move {
+            match spawn_participant(&spawn_model, &room, &policy, &persona, port) {
+                Ok(pid) => update_agent_record(&task_id, |a| {
+                    a.pid = pid;
+                    a.status = "running".into();
+                }),
+                Err(e) => update_agent_record(&task_id, |a| a.status = format!("failed: spawn: {e}")),
             }
-        };
-        // The user may have stopped the row while the model loaded.
-        if !load_agents().iter().any(|a| a.id == task_id) {
-            return;
-        }
-        match spawn_participant(&model, &room, &policy, &persona, port) {
-            Ok(pid) => update_agent_record(&task_id, |a| {
-                a.pid = pid;
-                a.status = "running".into();
-            }),
-            Err(e) => update_agent_record(&task_id, |a| a.status = format!("failed: spawn: {e}")),
-        }
-    });
+        },
+    );
     axum::Json(serde_json::json!({ "ok": true, "id": id, "handle": handle, "status": "starting" })).into_response()
 }
 
@@ -1137,26 +1160,23 @@ async fn coder_launch_route(body: String) -> axum::response::Response {
         status: "starting…".into(),
     });
     save_coders(&coders);
-    let task_id = id.clone();
-    tokio::spawn(async move {
-        if let Err(e) = ensure_gateway(&model).await {
-            let msg: String = e.chars().take(120).collect();
-            update_coder_record(&task_id, |c| c.status = format!("failed: {msg}"));
-            return;
-        }
-        // The user may have stopped the row while the model loaded.
-        if !load_coders().iter().any(|c| c.id == task_id) {
-            return;
-        }
-        match spawn_coder(&agent, &model, &workdir, &prompt) {
-            Ok((pid, log)) => update_coder_record(&task_id, |c| {
-                c.pid = pid;
-                c.log = log.to_string_lossy().into_owned();
-                c.status = "running".into();
-            }),
-            Err(e) => update_coder_record(&task_id, |c| c.status = format!("failed: spawn: {e}")),
-        }
-    });
+    let spawn_model = model.clone();
+    spawn_launch_task(
+        model,
+        id.clone(),
+        |id| load_coders().iter().any(|c| c.id == id),
+        |id, s| update_coder_record(id, |c| c.status = s),
+        move |task_id, _port| async move {
+            match spawn_coder(&agent, &spawn_model, &workdir, &prompt) {
+                Ok((pid, log)) => update_coder_record(&task_id, |c| {
+                    c.pid = pid;
+                    c.log = log.to_string_lossy().into_owned();
+                    c.status = "running".into();
+                }),
+                Err(e) => update_coder_record(&task_id, |c| c.status = format!("failed: spawn: {e}")),
+            }
+        },
+    );
     axum::Json(serde_json::json!({ "ok": true, "id": id, "status": "starting" })).into_response()
 }
 
@@ -1322,41 +1342,38 @@ async fn session_launch_route(body: String) -> axum::response::Response {
         status: "starting…".into(),
     });
     save_sessions(&sessions);
-    let task_id = id.clone();
-    tokio::spawn(async move {
-        // Admission-gate + load the model; `rozum launch` inside tmux then reuses the gateway.
-        if let Err(e) = ensure_gateway(&model).await {
-            let msg: String = e.chars().take(120).collect();
-            update_session_status(&task_id, &format!("failed: {msg}"));
-            return;
-        }
-        // The user may have closed the row while the model loaded.
-        if !load_sessions().iter().any(|s| s.id == task_id) {
-            return;
-        }
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
-        let name = tmux_name(&task_id);
-        // Interactive agent under a detached tmux session in the workdir.
-        let inner = format!("{} launch --model {} {}", exe.to_string_lossy(), model, agent);
-        let ok = Command::new("tmux")
-            .args(["new-session", "-d", "-s", &name, "-c", &workdir, "-x", "120", "-y", "40", &inner])
-            .status().map(|s| s.success()).unwrap_or(false);
-        if !ok {
-            update_session_status(&task_id, "failed: tmux new-session");
-            return;
-        }
-        if !load_sessions().iter().any(|s| s.id == task_id) {
-            // Closed during tmux creation — don't leave an orphan terminal behind.
-            let _ = Command::new("tmux").args(["kill-session", "-t", &name]).status();
-            return;
-        }
-        update_session_status(&task_id, "running");
-        // Seed the task prompt into the interactive agent, if given.
-        if !prompt.is_empty() {
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await; // let the REPL come up
-            let _ = Command::new("tmux").args(["send-keys", "-t", &name, &prompt, "Enter"]).status();
-        }
-    });
+    let spawn_model = model.clone();
+    spawn_launch_task(
+        model,
+        id.clone(),
+        |id| load_sessions().iter().any(|s| s.id == id),
+        |id, s| update_session_status(id, &s),
+        move |task_id, _port| async move {
+            let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
+            let name = tmux_name(&task_id);
+            // Interactive agent under a detached tmux session in the workdir; `rozum launch`
+            // inside it reuses the gateway spawn_launch_task just brought up.
+            let inner = format!("{} launch --model {} {}", exe.to_string_lossy(), spawn_model, agent);
+            let ok = Command::new("tmux")
+                .args(["new-session", "-d", "-s", &name, "-c", &workdir, "-x", "120", "-y", "40", &inner])
+                .status().map(|s| s.success()).unwrap_or(false);
+            if !ok {
+                update_session_status(&task_id, "failed: tmux new-session");
+                return;
+            }
+            if !load_sessions().iter().any(|s| s.id == task_id) {
+                // Closed during tmux creation — don't leave an orphan terminal behind.
+                let _ = Command::new("tmux").args(["kill-session", "-t", &name]).status();
+                return;
+            }
+            update_session_status(&task_id, "running");
+            // Seed the task prompt into the interactive agent, if given.
+            if !prompt.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await; // let the REPL come up
+                let _ = Command::new("tmux").args(["send-keys", "-t", &name, &prompt, "Enter"]).status();
+            }
+        },
+    );
     axum::Json(serde_json::json!({ "ok": true, "id": id, "status": "starting" })).into_response()
 }
 

@@ -137,42 +137,33 @@ val agModel   = signal("agModel", "")
 val agRoom    = signal("agRoom", "")
 val agPolicy  = signal("agPolicy", "mention")
 val agPersona = signal("agPersona", "")
-val stopId    = signal("stopId", "")
 
-val agentsList = cardWithHeader(heading(2, "Running agents"))(
-  remoteTable(st, [
-    fieldColumn("agent", "handle"),
-    fieldColumn("model", "model"),
-    lcol("room", "room", "#/chat/:value"),
-    fieldColumn("policy", "policy"),
-    fieldColumn("status", "status"),
-    fieldColumn("id", "id")
-  ], "agents")
-)
+// The async-launch UI pattern shared by agents/coders/sessions: a registry table (rows carry a
+// server-maintained `status`: starting…/running/failed:…/exited) with a per-row ✕ close, plus a
+// launch form whose POST returns instantly ({ok,id,status:"starting"}) and bumps the shared
+// refresh tick — the new row IS the click feedback. Server contract: the collection rows carry
+// `status` and `id`; the stop URL accepts {"id": …}.
+def jobPanel(listTitle: String, listCols: List[Any], collection: String, stopUrl: String,
+             formTitle: String, form: Any,
+             launchLabel: String, launchUrl: String, fields: List[Any]): Any =
+  vstack(gap = 16)(
+    cardWithHeader(heading(2, listTitle))(
+      remoteTable(st, listCols, collection,
+        [rowPostAction("✕ close", "POST", stopUrl, fieldPayload("id"), refresh)])),
+    divider(),
+    cardWithHeader(heading(2, formTitle))(
+      vstack(gap = 8)(
+        form,
+        actionButton(fetchActionWith("POST", launchUrl, formBody(fields), [onBumpTick(refresh)]), launchLabel))))
+
 val agentModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", agModel, "spec")])
-val launchForm = cardWithHeader(heading(2, "Launch agent (model + room)"))(
-  vstack(gap = 8)(
-    hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
-    hstack(gap = 8)(text("model:"), signalText_(agModel)),
-    agentModelList,
-    textField(agRoom, "room…"),
-    textField(agPolicy, "reply policy: mention | always | manual"),
-    textField(agPersona, "persona / context (optional)…"),
-    actionButton(
-      fetchActionWith("POST", "/control/agent/launch",
-        formBody([("model", "agModel"), ("room", "agRoom"), ("policy", "agPolicy"), ("persona", "agPersona")]),
-        [onBumpTick(refresh)]),
-      "🤖 launch (RAM check)")
-  )
-)
-
-val stopForm = cardWithHeader(heading(2, "Stop agent"))(
-  hstack(gap = 8)(
-    textField(stopId, "agent id (from list)…"),
-    actionButton(
-      fetchActionWith("POST", "/control/agent/stop", formBody([("id", "stopId")]), [onBumpTick(refresh)]),
-      "stop")
-  )
+val agentForm = vstack(gap = 8)(
+  hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
+  hstack(gap = 8)(text("model:"), signalText_(agModel)),
+  agentModelList,
+  textField(agRoom, "room…"),
+  textField(agPolicy, "reply policy: mention | always | manual"),
+  textField(agPersona, "persona / context (optional)…")
 )
 
 val agentsBody = vstack(gap = 16)(
@@ -182,11 +173,16 @@ val agentsBody = vstack(gap = 16)(
     actionButton(incSignal(refresh), "↻")
   ),
   divider(),
-  agentsList,
-  divider(),
-  launchForm,
-  divider(),
-  stopForm
+  jobPanel("Running agents", [
+      fieldColumn("agent", "handle"),
+      fieldColumn("model", "model"),
+      lcol("room", "room", "#/chat/:value"),
+      fieldColumn("policy", "policy"),
+      fieldColumn("status", "status")
+    ], "agents", "/control/agent/stop",
+    "Launch agent (model + room)", agentForm,
+    "🤖 launch (RAM check)", "/control/agent/launch",
+    [("model", "agModel"), ("room", "agRoom"), ("policy", "agPolicy"), ("persona", "agPersona")])
 )
 ```
 
@@ -198,7 +194,6 @@ val cdWorkdir = signal("cdWorkdir", "")
 val cdPrompt  = signal("cdPrompt", "")
 val newProjectPath = signal("newProjectPath", "")
 val cdLogId   = signal("cdLogId", "")
-val cdStopId  = signal("cdStopId", "")
 val logTick   = signal("logTick", 0)
 val cdLogUrl  = computedSignal(() => "/control/coder/log?id=" + cdLogId() + "&tail=120")
 val cdLog     = fetchUrlSignalTo("coderLog", cdLogUrl, logTick)
@@ -208,38 +203,22 @@ val cdAgentClaudeLbl   = computedSignal(() => if cdAgent() == "claude"   then "�
 val cdAgentCodexLbl    = computedSignal(() => if cdAgent() == "codex"    then "✓ codex"    else "codex")
 val cdAgentOpencodeLbl = computedSignal(() => if cdAgent() == "opencode" then "✓ opencode" else "opencode")
 
-val codersList = cardWithHeader(heading(2, "Running coders"))(
-  remoteTable(st, [
-    fieldColumn("agent", "agent"),
-    fieldColumn("model", "model"),
-    fieldColumn("repo", "workdir"),
-    fieldColumn("status", "status"),
-    fieldColumn("id", "id")
-  ], "coders")
-)
 val coderModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", cdModel, "spec")])
 val coderWorkdirList = remoteTable(st, [fieldColumn("project", "name")], "projects", [rowLink("select", cdWorkdir, "path")])
-val coderLaunch = cardWithHeader(heading(2, "Launch coder (real work in repo)"))(
-  vstack(gap = 8)(
-    hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
-    vstack(gap = 4)(
-      hstack(gap = 8)(text("agent:"), signalText_(cdAgent)),
-      hstack(gap = 8)(signalLabelButton(cdAgent, "claude", cdAgentClaudeLbl), signalLabelButton(cdAgent, "codex", cdAgentCodexLbl), signalLabelButton(cdAgent, "opencode", cdAgentOpencodeLbl))
-    ),
-    hstack(gap = 8)(text("model:"), signalText_(cdModel)),
-    coderModelList,
-    vstack(gap = 4)(
-      hstack(gap = 8)(text("folder:"), signalText_(cdWorkdir)),
-      coderWorkdirList,
-      hstack(gap = 8)(textField(newProjectPath, "project name…"), actionButton(fetchActionWith("POST", "/control/project/add", formBody([("name", "newProjectPath")]), [onBumpTick(refresh)]), "＋ create"))
-    ),
-    textField(cdPrompt, "task…"),
-    actionButton(
-      fetchActionWith("POST", "/control/coder/launch",
-        formBody([("agent", "cdAgent"), ("model", "cdModel"), ("workdir", "cdWorkdir"), ("prompt", "cdPrompt")]),
-        [onBumpTick(refresh)]),
-      "💻 launch (RAM check)")
-  )
+val coderForm = vstack(gap = 8)(
+  hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
+  vstack(gap = 4)(
+    hstack(gap = 8)(text("agent:"), signalText_(cdAgent)),
+    hstack(gap = 8)(signalLabelButton(cdAgent, "claude", cdAgentClaudeLbl), signalLabelButton(cdAgent, "codex", cdAgentCodexLbl), signalLabelButton(cdAgent, "opencode", cdAgentOpencodeLbl))
+  ),
+  hstack(gap = 8)(text("model:"), signalText_(cdModel)),
+  coderModelList,
+  vstack(gap = 4)(
+    hstack(gap = 8)(text("folder:"), signalText_(cdWorkdir)),
+    coderWorkdirList,
+    hstack(gap = 8)(textField(newProjectPath, "project name…"), actionButton(fetchActionWith("POST", "/control/project/add", formBody([("name", "newProjectPath")]), [onBumpTick(refresh)]), "＋ create"))
+  ),
+  textField(cdPrompt, "task…")
 )
 
 val coderLogCard = cardWithHeader(heading(2, "Coder log"))(
@@ -249,23 +228,21 @@ val coderLogCard = cardWithHeader(heading(2, "Coder log"))(
   )
 )
 
-val coderStop = cardWithHeader(heading(2, "Stop coder"))(
-  hstack(gap = 8)(
-    textField(cdStopId, "coder id…"),
-    actionButton(fetchActionWith("POST", "/control/coder/stop", formBody([("id", "cdStopId")]), [onBumpTick(refresh)]), "stop")
-  )
-)
-
 val codersBody = vstack(gap = 16)(
   hstack(gap = 10)(link("#/", "← back"), heading(1, "Coders"), actionButton(incSignal(refresh), "↻")),
   divider(),
-  codersList,
+  jobPanel("Running coders", [
+      fieldColumn("agent", "agent"),
+      fieldColumn("model", "model"),
+      fieldColumn("repo", "workdir"),
+      fieldColumn("status", "status"),
+      fieldColumn("id", "id")
+    ], "coders", "/control/coder/stop",
+    "Launch coder (real work in repo)", coderForm,
+    "💻 launch (RAM check)", "/control/coder/launch",
+    [("agent", "cdAgent"), ("model", "cdModel"), ("workdir", "cdWorkdir"), ("prompt", "cdPrompt")]),
   divider(),
-  coderLaunch,
-  divider(),
-  coderLogCard,
-  divider(),
-  coderStop
+  coderLogCard
 )
 ```
 
@@ -280,46 +257,37 @@ val seAgentClaudeLbl   = computedSignal(() => if seAgent() == "claude"   then "�
 val seAgentCodexLbl    = computedSignal(() => if seAgent() == "codex"    then "✓ codex"    else "codex")
 val seAgentOpencodeLbl = computedSignal(() => if seAgent() == "opencode" then "✓ opencode" else "opencode")
 
-val sessionsList = cardWithHeader(heading(2, "Live sessions (terminal)"))(
-  remoteTable(st, [
-    fieldColumn("agent", "agent"),
-    fieldColumn("model", "model"),
-    fieldColumn("repo", "workdir"),
-    fieldColumn("status", "status"),
-    lcol("🖥 terminal", "id", "/terminal.html?id=:value")
-  ], "sessions", [rowPostAction("✕ close", "POST", "/control/session/stop", fieldPayload("id"), refresh)])
-)
 val sessionModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", seModel, "spec")])
 val sessionWorkdirList = remoteTable(st, [fieldColumn("project", "name")], "projects", [rowLink("select", seWorkdir, "path")])
-val sessionLaunch = cardWithHeader(heading(2, "New interactive session"))(
-  vstack(gap = 8)(
-    hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
-    vstack(gap = 4)(
-      hstack(gap = 8)(text("agent:"), signalText_(seAgent)),
-      hstack(gap = 8)(signalLabelButton(seAgent, "claude", seAgentClaudeLbl), signalLabelButton(seAgent, "codex", seAgentCodexLbl), signalLabelButton(seAgent, "opencode", seAgentOpencodeLbl))
-    ),
-    hstack(gap = 8)(text("model:"), signalText_(seModel)),
-    sessionModelList,
-    vstack(gap = 4)(
-      hstack(gap = 8)(text("folder:"), signalText_(seWorkdir)),
-      sessionWorkdirList,
-      hstack(gap = 8)(textField(newProjectPath, "project name…"), actionButton(fetchActionWith("POST", "/control/project/add", formBody([("name", "newProjectPath")]), [onBumpTick(refresh)]), "＋ create"))
-    ),
-    textField(sePrompt, "first task (optional)…"),
-    actionButton(
-      fetchActionWith("POST", "/control/session/launch",
-        formBody([("agent", "seAgent"), ("model", "seModel"), ("workdir", "seWorkdir"), ("prompt", "sePrompt")]),
-        [onBumpTick(refresh)]),
-      "🖥 launch session")
-  )
+val sessionForm = vstack(gap = 8)(
+  hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
+  vstack(gap = 4)(
+    hstack(gap = 8)(text("agent:"), signalText_(seAgent)),
+    hstack(gap = 8)(signalLabelButton(seAgent, "claude", seAgentClaudeLbl), signalLabelButton(seAgent, "codex", seAgentCodexLbl), signalLabelButton(seAgent, "opencode", seAgentOpencodeLbl))
+  ),
+  hstack(gap = 8)(text("model:"), signalText_(seModel)),
+  sessionModelList,
+  vstack(gap = 4)(
+    hstack(gap = 8)(text("folder:"), signalText_(seWorkdir)),
+    sessionWorkdirList,
+    hstack(gap = 8)(textField(newProjectPath, "project name…"), actionButton(fetchActionWith("POST", "/control/project/add", formBody([("name", "newProjectPath")]), [onBumpTick(refresh)]), "＋ create"))
+  ),
+  textField(sePrompt, "first task (optional)…")
 )
 
 val sessionsBody = vstack(gap = 16)(
   hstack(gap = 10)(link("#/", "← back"), heading(1, "Sessions"), actionButton(incSignal(refresh), "↻"), link("/login.html", "🔐 Login")),
   divider(),
-  sessionsList,
-  divider(),
-  sessionLaunch
+  jobPanel("Live sessions (terminal)", [
+      fieldColumn("agent", "agent"),
+      fieldColumn("model", "model"),
+      fieldColumn("repo", "workdir"),
+      fieldColumn("status", "status"),
+      lcol("🖥 terminal", "id", "/terminal.html?id=:value")
+    ], "sessions", "/control/session/stop",
+    "New interactive session", sessionForm,
+    "🖥 launch session", "/control/session/launch",
+    [("agent", "seAgent"), ("model", "seModel"), ("workdir", "seWorkdir"), ("prompt", "sePrompt")])
 )
 ```
 
