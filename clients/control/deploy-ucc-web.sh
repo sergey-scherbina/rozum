@@ -401,7 +401,14 @@ script = ('<script>'
     '    _rlApply();'
     '  }'
     '  document.addEventListener("click",function(e){'
-    '    if(document.querySelector("[role=dialog]")&&!e.target.closest("[role=dialog]"))'
+    # Close-on-click-outside must fire only when the dialog is actually VISIBLE.
+    # The modal sits in an always-present data-ssc-cond branch (display:none when
+    # closed), and querySelector finds hidden nodes too — the unguarded version
+    # sent EVERY page click to #/ (BUG-009: agent/model pickers "did nothing").
+    # getClientRects().length is 0 inside display:none subtrees regardless of
+    # position:fixed (unlike offsetParent).
+    '    var _dlg=document.querySelector("[role=dialog]");'
+    '    if(_dlg&&_dlg.getClientRects().length&&!e.target.closest("[role=dialog]"))'
     '    {window.location.hash="/"}'
     '  });'
     '  function init(){'
