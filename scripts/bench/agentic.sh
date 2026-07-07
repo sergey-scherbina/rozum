@@ -37,6 +37,8 @@
 #   MAX_TURNS       Claude --max-turns (default 15 — caps the re-edit/retry loop
 #                   weak models fall into; see SPRINT.md "agentic-loop-root-cause")
 #   NCTX            override gateway context (default: omit -> model max, auto)
+#   GW_READY_SECS   gateway readiness wait, default 240; raise together with
+#                   ROZUM_GATEWAY_RESIDENCY_WAIT_SECS to queue behind other RAM users
 #   REPAIR          verify-repair retries: on a verified FAIL, feed the real build/test error
 #                   back and let the agent fix it, same workdir, up to N more times (default 0).
 #                   The deterministic net for "almost-right code + hallucinated success".
@@ -697,7 +699,11 @@ for spec in "${MODELS[@]}"; do
   TIME_PID=$!
   GW_PID=""; for _ in $(seq 1 40); do GW_PID="$(pgrep -P "$TIME_PID" 2>/dev/null | head -1)"; [ -n "$GW_PID" ] && break; sleep 0.25; done
   ok=0
-  for _ in $(seq 1 240); do curl -s -m2 "$base/v1/models" >/dev/null 2>&1 && { ok=1; break; }
+  # GW_READY_SECS: how long to wait for the gateway to answer. Default 240 covers a plain
+  # load; raise it (with ROZUM_GATEWAY_RESIDENCY_WAIT_SECS) when the gateway may sit in the
+  # host-wide admission QUEUE behind other RAM users (e.g. a sibling's sbt test) — the queue
+  # is the coordination mechanism, the bench just has to be patient enough to use it.
+  for _ in $(seq 1 "${GW_READY_SECS:-240}"); do curl -s -m2 "$base/v1/models" >/dev/null 2>&1 && { ok=1; break; }
     kill -0 "$TIME_PID" 2>/dev/null || break; sleep 1; done
   if [ "$ok" != 1 ]; then echo "  ! gateway not ready (see $glog)"; kill -INT "$GW_PID" 2>/dev/null; wait "$TIME_PID" 2>/dev/null; continue; fi
   echo "  model loaded once; running ${#TASK_LIST[@]} tasks × ${#AGENT_RUN[@]} agent(s)"

@@ -87,8 +87,14 @@ first, then the strategic bets.
   aggregate (claude 100% / codex 33%→70% / opencode 0-broken→50%), so B2 is confirmation, not new signal.
   RE-RUN verbatim when the machine has ~20 GB free (`memory_pressure` / `vm_stat` free+inactive):
     `BENCH_BIN=./target/release/rozum-gateway BENCH_OUT=scripts/bench/results/b2-authoritative-$(date +%Y%m%d-%H%M%S) \`
+    `NCTX=14336 GW_READY_SECS=7500 ROZUM_GATEWAY_RESIDENCY_WAIT_SECS=7200 \`
     `AGENTIC_MODELS="mlx-community:gpt-oss-20b-MXFP4-Q4 mlx-community:GLM-4.7-Flash-4bit" AGENTS="claude codex opencode" \`
-    `TASKS="build fix test rpn debug" REPS=1 KEEP=1 RUN_TIMEOUT=500 REPAIR=1 ROZUM_CODEX_TOOL_CAPTURE=1 bash scripts/bench/agentic.sh`
+    `TASKS="build fix test rpn debug" REPS=1 KEEP=1 RUN_TIMEOUT=900 REPAIR=1 ROZUM_CODEX_TOOL_CAPTURE=1 bash scripts/bench/agentic.sh`
+  ⚠ 2026-07-07: the original command (no NCTX) fails DETERMINISTICALLY for GLM-4.7-Flash — at
+  ctx=auto(max) the footprint estimate is ~91 GB and admission refuses before adaptive load can cap
+  it (run_full_matrix.sh always sets NCTX, which is why the 07-03 full matrix loaded fine). And
+  without the RESIDENCY_WAIT/GW_READY_SECS bump the gateway gives up after 240 s instead of queuing
+  behind a sibling's RAM (sbt tests) — the July-5 "sbt daemons" failure was BOTH of these.
   (original plan below)
 - [ ] **B2 (original) — one authoritative full matrix** (the real baseline + the data for routing) — now all 3
   drivers work + all fixes in: `claude+codex+opencode × curated-tier × all tasks`, `RUN_TIMEOUT=900`,
