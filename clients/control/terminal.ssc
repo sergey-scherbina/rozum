@@ -52,7 +52,14 @@ function connect(){
   ws.onerror = () => { st.textContent = _lt('✗ error (Face ID login required?)'); };
 }
 function sendResize(){ if (ws && ws.readyState === 1) ws.send(JSON.stringify({ resize:{ cols: term.cols, rows: term.rows } })); }
-term.onData(d => { if (ws && ws.readyState === 1) ws.send(d); });
+// A phone tap/drag makes xterm.js emit mouse reports (Claude Code requests mouse tracking,
+// tmux forwards) and CC's parser leaks them into its input line as literal ^[[<35;17;45M
+// garbage. Keep ONLY wheel reports (64/65 — finger scroll works via tmux mouse mode) and
+// focus events out; everything a keyboard produces passes untouched.
+function filterInput(d){
+  return d.replace(/\x1b\[<(?!6[45];)[0-9;]+[Mm]/g, '').replace(/\x1b\[[IO]/g, '');
+}
+term.onData(d => { const f = filterInput(d); if (f && ws && ws.readyState === 1) ws.send(f); });
 window.addEventListener('resize', () => { fit.fit(); sendResize(); });
 st.onclick = () => { if (!ws || ws.readyState > 1) connect(); };
 if (id) connect(); else { st.textContent = '✗ ' + _lt('no session id'); term.writeln(_lt('No session id. Open terminal from the UCC sessions list.')); }
