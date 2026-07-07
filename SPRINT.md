@@ -10,8 +10,14 @@
   pickers gained a ★ column (`modelSelectCols`); (3) `Stop session` card removed, `sessionsList`
   gained `rowPostAction("✕ close", POST /control/session/stop, fieldPayload(id), refresh)` — the
   close button sits in each live-session row after the 🖥 terminal link. TR maps updated (✕ close →
-  закрыть/закрити). Later/right: stars *under* the model name need a two-line cell primitive in
-  std/ui; rating could come from live matrix CSVs instead of the static table.
+  закрыть/закрити). DONE-RIGHT follow-ups (same day): (a) stars now render UNDER the model name via
+  the new std/ui `stackedColumn` (scalascript `cc5af9e39`, additive 'stacked' column kind in the
+  js-runtime; rozum side `2741c17`); (b) ratings now come from the LIVE matrix results —
+  `scripts/bench/export_model_ratings.py` aggregates claude-driver pass-rates over all non-archived
+  `results/*/per-run.csv` (greet + rc=2 excluded for honesty, >=5 runs to rate) into
+  `~/.rozum/ucc/model-ratings.json`; control-serve prefers it over the static table (exact-spec
+  match) and run_full_matrix.sh refreshes it after every matrix; (c) source file renamed
+  `control-center-live.ssc` -> `center.ssc` (operator request).
 
 - [x] **ucc-gateway-cold-start (BUG-007)** — the next bug behind "запуск моделей/агентов через веб
   не работает": with BUG-006's body parsing fixed, an authenticated `POST /control/session/launch`

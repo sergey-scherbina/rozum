@@ -2855,11 +2855,33 @@ pub struct InstalledBrief {
     pub stars: String,
 }
 
-/// UCC model "adequacy" rating (1–5) — distilled from the agentic matrix results (SPRINT/CHANGELOG
-/// matrix sessions): how reliably the model completes agentic coding tasks under its best driver on
-/// this machine. Substring match on the spec; unknown models get `None` (sorted last, shown
-/// unrated). The UCC model pickers sort by this and show it as stars.
-fn model_stars(spec: &str) -> Option<u8> {
+/// Live matrix-derived ratings: `~/.rozum/ucc/model-ratings.json`, written by
+/// `scripts/bench/export_model_ratings.py` after a matrix run (claude-driver pass-rate over the
+/// real coding tasks; greet + rc=2 excluded). Loaded once per status request; exact spec keys.
+fn load_live_ratings() -> std::collections::HashMap<String, u8> {
+    let mut out = std::collections::HashMap::new();
+    let Some(home) = std::env::var_os("HOME") else { return out };
+    let path = PathBuf::from(home).join(".rozum/ucc/model-ratings.json");
+    let Ok(body) = std::fs::read_to_string(path) else { return out };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&body) else { return out };
+    if let Some(models) = doc.get("models").and_then(|m| m.as_object()) {
+        for (spec, v) in models {
+            if let Some(stars) = v.get("stars").and_then(|s| s.as_u64()) {
+                out.insert(spec.clone(), stars.min(5) as u8);
+            }
+        }
+    }
+    out
+}
+
+/// UCC model "adequacy" rating (1–5): the live matrix export when present (exact spec match),
+/// else the static fallback distilled from past matrix sessions — how reliably the model completes
+/// agentic coding tasks under its best driver on this machine. Unknown models get `None` (sorted
+/// last, shown unrated). The UCC model pickers sort by this and show it as stars.
+fn model_stars(spec: &str, live: &std::collections::HashMap<String, u8>) -> Option<u8> {
+    if let Some(s) = live.get(spec) {
+        return Some(*s);
+    }
     const RATINGS: &[(&str, u8)] = &[
         ("GLM-4.7-Flash", 5),          // 15/15 full matrix, in DEFAULT_MODELS
         ("Qwen3.6-35B-A3B", 4),        // reliable under claude after the delivery fixes
@@ -3103,19 +3125,20 @@ pub async fn status() -> ControlStatus {
             .collect(),
     };
     // Model pickers show this list top-down: best-rated first (see `model_stars`), unrated last.
+    let live_ratings = load_live_ratings();
     let mut installed: Vec<InstalledBrief> = installed_catalog
         .iter()
         .map(|m| InstalledBrief {
             size_gib: fmt_gib(m.size_bytes),
-            stars: model_stars(&m.spec).map(|n| "★".repeat(n as usize)).unwrap_or_default(),
+            stars: model_stars(&m.spec, &live_ratings).map(|n| "★".repeat(n as usize)).unwrap_or_default(),
             spec: m.spec.clone(),
             size_bytes: m.size_bytes,
         })
         .collect();
     installed.sort_by(|a, b| {
-        model_stars(&b.spec)
+        model_stars(&b.spec, &live_ratings)
             .unwrap_or(0)
-            .cmp(&model_stars(&a.spec).unwrap_or(0))
+            .cmp(&model_stars(&a.spec, &live_ratings).unwrap_or(0))
             .then_with(|| a.spec.cmp(&b.spec))
     });
     let residency_metrics = vec![

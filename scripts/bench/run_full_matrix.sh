@@ -84,6 +84,8 @@ env "${EXTRA_ENV[@]}" \
 echo ">> done. CSV: $OUT/per-run.csv  | full log: $LOG"
 command -v python3 >/dev/null 2>&1 && python3 scripts/bench/summarize_matrix.py "$OUT/per-run.csv" || true
 command -v python3 >/dev/null 2>&1 && python3 scripts/bench/matrix_capabilities.py "$OUT/per-run.csv" --out "$OUT/capabilities.json" --green-min-runs "${GREEN_MIN_RUNS:-3}" || true
+# Refresh the UCC model-picker star ratings from the accumulated results (~/.rozum/ucc/model-ratings.json).
+command -v python3 >/dev/null 2>&1 && python3 scripts/bench/export_model_ratings.py || true
 echo ">> rerun reds only:"
 echo "   scripts/bench/rerun_reds.py \"$OUT\" --nctx ${NCTX:-32768} --run-timeout ${RUN_TIMEOUT:-900}"
 echo ">> slot after:"; pgrep -fl 'gateway --model' 2>/dev/null | grep -v claude || echo "  clean"
