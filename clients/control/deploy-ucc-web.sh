@@ -60,6 +60,7 @@ fi
 # 1) Build the thin dispatcher used by launchd. It execs rozum-gateway for control-serve.
 echo ">> building rozum dispatcher ..."
 ( cd "$REPO" && cargo build -p rozum-cli --bin rozum )
+rm -f "$BIN"
 cp "$REPO/target/debug/rozum" "$BIN"
 
 # 1b) Build the ACTUAL engine binary the dispatcher execs for every subcommand incl. control-serve
@@ -70,6 +71,10 @@ cp "$REPO/target/debug/rozum" "$BIN"
 # on PATH (which other rozum services may reference directly).
 echo ">> building rozum-gateway (the engine binary control-serve actually runs) ..."
 ( cd "$REPO" && cargo build -p rozum --bin rozum-gateway --release )
+# rm BEFORE cp: overwriting a running Mach-O in place poisons the kernel's per-inode
+# code-signature cache and every subsequent exec dies with SIGKILL (rc=137, no output) —
+# hit live 2026-07-07. A fresh inode sidesteps it.
+rm -f "$BINDIR/rozum-gateway"
 cp "$REPO/target/release/rozum-gateway" "$BINDIR/rozum-gateway"
 
 # Helper: compile a server-side .ssc file, serve briefly, capture HTML, shut down.
