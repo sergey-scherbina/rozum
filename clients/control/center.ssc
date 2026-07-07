@@ -12,7 +12,7 @@ One std/ui app: a dashboard (live `/control/status`) AND a native chat view per 
 stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the view in place.
 
 ## Setup
-[signal, emit, serve, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, fetchActionWith, formBody, onBumpTick, incSignal, computedSignal, fieldColumn, hashSignal](std/ui/primitives.ssc)
+[signal, emit, serve, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, fetchActionWith, formBody, onBumpTick, incSignal, computedSignal, fieldColumn, stackedColumn, hashSignal](std/ui/primitives.ssc)
 [jsonValue](std/json.ssc)
 [lower](std/ui/lower.ssc)
 [darkTheme](std/ui/theme.ssc)
@@ -74,7 +74,7 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
     hstack(gap = 8)(text("committed:"),   signalText_(committedTxt))
   )
 )
-val modelSelectCols = [fieldColumn("Model", "spec"), fieldColumn("★", "stars"), fieldColumn("GiB", "size_gib")]
+val modelSelectCols = [stackedColumn("Model", "spec", "stars"), fieldColumn("GiB", "size_gib")]
 val modelsPanel = cardWithHeader(heading(2, "Models"))(
   remoteTable(st, [
     lcol("Model", "spec",       "#/detail/:value"),
