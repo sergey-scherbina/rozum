@@ -1430,6 +1430,10 @@ async fn session_ws_bridge(mut socket: axum::extract::ws::WebSocket, id: String)
     };
     let mut cmd = CommandBuilder::new("tmux");
     cmd.args(["attach", "-t", &name]);
+    // control-serve runs under launchd, whose environment has NO TERM — the tmux client then
+    // refuses the PTY with "open terminal failed: terminal does not support clear" and the WS
+    // drops immediately (BUG-011, first real phone attach). xterm.js is xterm-compatible.
+    cmd.env("TERM", "xterm-256color");
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
         Err(_) => return,

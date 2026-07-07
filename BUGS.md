@@ -5,6 +5,26 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-011 — phone terminal: "open terminal failed: terminal does not support clear"
+
+- **Status:** fixed, deployed 2026-07-07 ~20:1x.
+- **Reporter:** operator — first REAL phone attach to a session terminal (screenshot: the error
+  text + immediate «отключено — переподключиться?»). This was the last never-browser-validated
+  UCC piece (P4 terminal byte-flow).
+- **Severity:** P1 — the terminal view was unusable from the phone.
+
+**Root cause.** `session_ws_bridge` spawns the PTY child `tmux attach -t rozum-<id>` with the
+inherited environment — and control-serve runs under launchd, which has NO `TERM`. The tmux
+client refuses a terminal without a usable terminfo entry ("terminal does not support clear"),
+exits, and the WebSocket closes right after the error bytes reach xterm.js.
+
+**Fix.** `cmd.env("TERM", "xterm-256color")` on the PTY child (xterm.js is xterm-compatible).
+
+**Verified.** Headless-Chrome attach to a live tmux session via `terminal.html?id=…` over the
+funnel: the xterm screen shows the actual claude REPL content (no error), input round-trips.
+
+---
+
 ## BUG-010 — «запустить сессию» does nothing: formBody posted EMPTY fields (framework bug)
 
 - **Status:** fixed (scalascript `3edbf883a` + rozum async launch), deployed 2026-07-07.
