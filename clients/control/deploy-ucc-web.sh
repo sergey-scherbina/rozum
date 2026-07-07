@@ -9,7 +9,7 @@
 # Operator opens  https://busi.tail1174e2.ts.net:8448/
 #
 # ScalaScript sources:
-#   control-center-live.ssc  ->  site/index.html   (browser SPA, reactive)
+#   center.ssc  ->  site/index.html   (browser SPA, reactive)
 #   login.ssc                ->  site/login.html   (Face ID / WebAuthn page)
 #   terminal.ssc             ->  site/terminal.html (xterm.js WebSocket terminal)
 set -euo pipefail
@@ -164,12 +164,12 @@ check_js_runtime() {
   ' "$html_file"
 }
 
-# 2) Compile the browser SPA (control-center-live.ssc → index.html).
+# 2) Compile the browser SPA (center.ssc → index.html).
 # Emit to a temp file and mv into place only on success — a direct `> "$SITE/index.html"`
 # truncates the LIVE page before ssc even starts, so an ssc failure (set -e) leaves
 # production serving a 0-byte blank dashboard (this happened 2026-07-07).
 echo ">> emitting index.html (browser SPA) ..."
-"$SSC" emit-spa --frontend react "$HERE/control-center-live.ssc" > "$SITE/index.html.new"
+"$SSC" emit-spa --frontend react "$HERE/center.ssc" > "$SITE/index.html.new"
 [ -s "$SITE/index.html.new" ] || { echo "✗ emit-spa produced an empty index.html — aborting (live page untouched)" >&2; exit 1; }
 mv "$SITE/index.html.new" "$SITE/index.html"
 echo ">> index.html: $(wc -c < "$SITE/index.html") bytes"
