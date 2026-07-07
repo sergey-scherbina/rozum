@@ -30,13 +30,17 @@ mkdir -p "$SITE" "$BINDIR"
 # and `route` / `serve` (extern defs in std/http.ssc) fail to resolve in the
 # child interpreter.  ssc.std.path overrides std/ resolution independently.
 _SSC_ROOT_DEFAULT="$HOME/work/my/scalascript"
-_SSC_JAR_DIR_DEFAULT="$HOME/work/my/scalascript/.worktrees/coord-main/bin/lib"
+_SSC_JAR_DIR_DEFAULT="$HOME/work/my/scalascript/bin/lib"
 _SSC_STD_DEFAULT="$HOME/work/my/scalascript/v1/runtime"
 _NEED_REGEN=0
 if [ ! -f "$SSC" ]; then
   _NEED_REGEN=1
 elif ! grep -q "ssc.std.path" "$SSC" 2>/dev/null; then
   # Old launcher without ssc.std.path — plugins won't auto-load with /v1 lib path
+  _NEED_REGEN=1
+elif ! grep -q "$_SSC_JAR_DIR_DEFAULT" "$SSC" 2>/dev/null; then
+  # Launcher points at a stale jar dir (e.g. the removed coord-main worktree —
+  # java then dies with ClassNotFoundException: scalascript.cli.ssc)
   _NEED_REGEN=1
 fi
 if [ "$_NEED_REGEN" = "1" ] && [ -d "$_SSC_JAR_DIR_DEFAULT" ]; then
@@ -161,8 +165,13 @@ check_js_runtime() {
 }
 
 # 2) Compile the browser SPA (control-center-live.ssc → index.html).
+# Emit to a temp file and mv into place only on success — a direct `> "$SITE/index.html"`
+# truncates the LIVE page before ssc even starts, so an ssc failure (set -e) leaves
+# production serving a 0-byte blank dashboard (this happened 2026-07-07).
 echo ">> emitting index.html (browser SPA) ..."
-"$SSC" emit-spa --frontend react "$HERE/control-center-live.ssc" > "$SITE/index.html"
+"$SSC" emit-spa --frontend react "$HERE/control-center-live.ssc" > "$SITE/index.html.new"
+[ -s "$SITE/index.html.new" ] || { echo "✗ emit-spa produced an empty index.html — aborting (live page untouched)" >&2; exit 1; }
+mv "$SITE/index.html.new" "$SITE/index.html"
 echo ">> index.html: $(wc -c < "$SITE/index.html") bytes"
 # Framework gap (ucc-theme-bg): `serve(view, port)`'s extern signature has no extraCss param yet,
 # so an .ssc app has no way to override the emitted base template's hardcoded

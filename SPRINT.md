@@ -10,7 +10,11 @@
   a detached `rozum gateway --model … --port 8089` (same shape as `rozum launch`'s
   spawn_detached_gateway) and waits ≤300s for register+health. Verified: unit tests + live
   authenticated smoke (busi SSO, SPA-shaped body): cold host → `{"ok":true}`, gateway self-starts on
-  :8089, tmux session up, stop works. Details: BUGS.md BUG-007.
+  :8089, tmux session up with claude REPL, stop works; switch branch verified with the operator's
+  target Qwen3.6-35B-A3B-4bit-DWQ (in-place swap, gen 1→2). Also fixed `deploy-ucc-web.sh` fallout
+  found during deploy: stale SSC launcher jar path (removed coord-main worktree) + `emit-spa`
+  truncating the LIVE index.html to 0 bytes on failure — now emits to a temp file and `mv`s only on
+  success. Details: BUGS.md BUG-007.
 
 - [x] **ucc-action-json-bodies** — fixed the UCC web action contract for sessions/coders/agents/projects.
   Repro: `formBody(...)` emits JSON but no `Content-Type`, so Axum `Json<T>` rejected

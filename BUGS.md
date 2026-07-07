@@ -35,8 +35,19 @@ web-started gateway frees RAM when unused.
 
 **Verified.** `cargo test -p rozum-gateway ucc_` + `control::tests::`; live authenticated smoke on
 :8411 (busi SSO cookie, SPA-shaped JSON body without Content-Type): cold host → launch returns
-`{"ok":true,"id":…}`, gateway self-starts and registers on :8089, tmux session appears, session
-stop works.
+`{"ok":true,"id":…}`, gateway self-starts and registers on :8089, tmux session appears with the
+claude REPL up, session stop works. The switch branch verified too: second launch with
+`mlx-community:Qwen3.6-35B-A3B-4bit-DWQ` (the operator's target) swapped the model in place
+(generation 1→2, same pid) and the claude session came up against it.
+
+**Deploy fallout fixed along the way (same branch).** `deploy-ucc-web.sh` died mid-run on this
+deploy and TRUNCATED the live `~/.rozum/ucc/site/index.html` to 0 bytes (the incident class
+`ucc-duplicate-const-fix` warned about): the SSC launcher `/tmp/ssc-tk/bin/ssc` pointed at the
+since-removed `scalascript/.worktrees/coord-main/bin/lib` jar dir (java: ClassNotFoundException),
+and line 165's `emit-spa > "$SITE/index.html"` truncates the target before java starts. Fixed:
+emit to `index.html.new` + non-empty check + `mv` (a failed emit leaves the live page untouched);
+launcher default jar dir → the main checkout `scalascript/bin/lib`; launcher auto-regens when it
+references a stale jar dir. Page regenerated and redeployed (414478 bytes, JS checks green).
 
 ---
 
