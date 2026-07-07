@@ -1343,6 +1343,10 @@ async fn session_launch_route(body: String) -> axum::response::Response {
         return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "tmux new-session failed");
     }
     let _ = Command::new("tmux").args(["set-option", "-t", &name, "remain-on-exit", "on"]).status();
+    // mouse on: tmux consumes the client's mouse/touch reports itself (finger-scroll = tmux
+    // scrollback) instead of piping them to the agent, where a phone tap leaked as literal
+    // "^[[<35;17;45M" garbage into the REPL input (SGR mouse reports, seen live 2026-07-07).
+    let _ = Command::new("tmux").args(["set-option", "-t", &name, "mouse", "on"]).status();
     let mut sessions = load_sessions();
     sessions.push(SessionRecord {
         id: id.clone(),
