@@ -5,6 +5,35 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-009 — every UCC page click bounced to #/ — agent/model pickers "did nothing"
+
+- **Status:** fixed on `f8cf165`, redeployed 2026-07-07 ~05:3x; verified in a real browser.
+- **Reporter:** operator — "Теперь не работает выбор агента в сессии" (after BUG-008 restored
+  navigation). Almost certainly ALSO the UI half of the original BUG-006 complaint ("не работает
+  выбор агента и модели в сессии") — it predates today's deploys.
+- **Severity:** P1 — every in-page button (agent picker, model select, …) appeared dead.
+
+**Symptom.** On `#/sessions`, tapping claude/codex/opencode (or a model `select`) visually did
+nothing. Browser repro showed why it LOOKED dead: the click actually fired AND the signal set, but
+the page instantly navigated `#/sessions` → `#/`, hiding the form again.
+
+**Root cause.** The deploy script's injected close-on-click-outside handler:
+`if(document.querySelector("[role=dialog]") && !e.target.closest("[role=dialog]")) location.hash="/"`.
+The Model-details modal lives in an always-present `data-ssc-cond` branch (`display:none` when
+closed) and `querySelector` finds hidden nodes — so the condition was true on EVERY click anywhere,
+and any click outside the (invisible) dialog warped to home. Menu links survived only because their
+own `href="#/…"` default action re-set the hash afterward.
+
+**Fix.** Guard on real visibility: `_dlg.getClientRects().length` (0 inside `display:none` subtrees,
+and unlike `offsetParent` it works under `position:fixed`).
+
+**Verified** (puppeteer-core + system Chrome, busi-SSO cookie): agent picker claude→codex→opencode→
+claude all update the label with hash staying `#/sessions`; model `select` fills the form model;
+dialog still opens via `#/detail/…` and still closes to `#/` on a genuine outside click. Repro/verify
+scripts: scratchpad `ucc-repro3.js` / `ucc-verify.js` pattern.
+
+---
+
 ## BUG-008 — UCC menu navigation dead after the 03:27 redeploy (compiler/std skew)
 
 - **Status:** fixed on `9a39a60` + site re-emitted and redeployed 2026-07-07 ~05:0x.
