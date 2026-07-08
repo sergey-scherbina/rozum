@@ -72,13 +72,20 @@ val gwCard = cardWithHeader(hstack(gap = 10)(heading(2, "Memory"), actionButton(
   )
 )
 val modelSelectCols = [stackedColumn("Model", "spec", "rating_line"), fieldColumn("GiB", "size_gib")]
+// Models panel: Model + GiB, and ONE conditional action per row. The server sets exactly one of
+// load_spec/stop_label (the other ""), so each rowPost auto-hides when its body is empty (std/ui
+// skip-empty) — a load button for a not-loaded model, an unload button for the resident one; never
+// both, never an empty column. rowPost is an async POST with immediate click feedback (the model
+// load takes seconds; the button greys + shows … so it doesn't look dead). /gateway/stop ignores
+// its body (stops the sole resident gateway), so stop_label doubles as the show/hide flag.
 val modelsPanel = cardWithHeader(heading(2, "Models"))(
   remoteTable(st, [
-    lcol("Model", "spec",       "#/detail/:value"),
-    fieldColumn("GiB", "size_gib"),
-    lcol("",       "load_spec",  "/control/gateway/load?model=:value"),
-    lcol("",       "stop_label", "/control/gateway/stop?k=:value")
-  ], "models")
+    lcol("Model", "spec", "#/detail/:value"),
+    fieldColumn("GiB", "size_gib")
+  ], "models", [
+    rowPostAction("load",   "POST", "/control/gateway/load", "load_spec",  refresh),
+    rowPostAction("unload", "POST", "/control/gateway/stop", "stop_label", refresh)
+  ])
 )
 
 val dashboard = vstack(gap = 16)(

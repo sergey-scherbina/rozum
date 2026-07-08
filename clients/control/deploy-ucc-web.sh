@@ -198,12 +198,6 @@ h = open(p).read()
 
 css = (
     'a[href^="#/detail/"]{color:#60a5fa;text-decoration:none}'
-    'a[href^="/control/gateway/load?model="]:not([href$="model="]){display:inline-block;padding:3px 6px;border-radius:4px;background:#3b82f6;color:#fff;text-decoration:none;cursor:pointer;white-space:nowrap;font-size:0}'
-    'a[href^="/control/gateway/load?model="]:not([href$="model="])::before{content:"load";font-size:11px;color:#fff}'
-    'a[href$="?model="]{display:none}'
-    'a[href^="/control/gateway/stop?k="]:not([href$="?k="]){display:inline-block;padding:3px 6px;border-radius:4px;background:#374151;color:#fff;text-decoration:none;cursor:pointer;white-space:nowrap;font-size:0}'
-    'a[href^="/control/gateway/stop?k="]:not([href$="?k="])::before{content:"unload";font-size:11px;color:#fff}'
-    'a[href$="?k="]{display:none}'
     'a[href^="#/chat/"]{color:#60a5fa!important;text-decoration:none}'
     'a[href^="#/chat/"]:visited{color:#60a5fa!important}'
     '[data-ssc-datatable] thead{background:#1f2937!important}'
@@ -218,17 +212,6 @@ css = (
     # char — and the container scrolls horizontally if the row still exceeds the card width.
     '[data-ssc-datatable] th:nth-child(1){white-space:nowrap}'
     '[data-ssc-datatable] td:nth-child(1){white-space:normal;overflow-wrap:break-word;word-break:normal;min-width:110px;max-width:150px}'
-    # Dashboard Models panel ONLY (the table with gateway load/unload links — :has targets it, so
-    # the session/coder/agent pickers keep their own layout). It has 4 columns (Model+GiB+load+
-    # unload) that overflowed a 390px phone, pushing the выгрузить button off the right edge. Fit it:
-    # let the table size to content (not stretch to 100%, which bloated GiB), cap the Model column so
-    # the row is compact but the full name still wraps (readable — ellipsis would hide the
-    # distinguishing tail after "mlx-community:"), and collapse the now-empty 4th column (the merge
-    # JS moves the unload button into column 3). Result: table ~304px, both buttons always visible.
-    '[data-ssc-datatable]:has(a[href*="/control/gateway/"]) table{width:auto;min-width:0}'
-    '[data-ssc-datatable]:has(a[href*="/control/gateway/"]) td:nth-child(1){max-width:130px;min-width:90px}'
-    '[data-ssc-datatable]:has(a[href*="/control/gateway/"]) td:nth-child(2),[data-ssc-datatable]:has(a[href*="/control/gateway/"]) th:nth-child(2){white-space:nowrap}'
-    '[data-ssc-datatable]:has(a[href*="/control/gateway/"]) td:nth-child(4),[data-ssc-datatable]:has(a[href*="/control/gateway/"]) th:nth-child(4){display:none}'
     '[role="dialog"]{position:relative;max-height:82vh;overflow-y:auto}'
     '[role="dialog"] a[href="#/"]{position:absolute;top:8px;right:10px;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;font-size:22px;font-weight:300;color:#e5e7eb;text-decoration:none;line-height:1;z-index:1;border-radius:50%;background:rgba(255,255,255,0.08);box-shadow:0 2px 8px rgba(0,0,0,0.55),0 1px 2px rgba(0,0,0,0.35)}'
     '#rozum-lang{position:fixed;bottom:16px;right:16px;display:flex;gap:1px;z-index:999;box-shadow:0 2px 8px rgba(0,0,0,.5)}'
@@ -236,10 +219,6 @@ css = (
     '.rl-btn:first-child{border-radius:5px 0 0 5px}.rl-btn:last-child{border-radius:0 5px 5px 0}'
     '.rl-btn.active{background:#1f3a28;border-color:#2ea043;color:#56d364}'
     # CSS-driven translations for the load/unload button labels via lang attribute on <html>
-    'html[lang=ru] a[href^="/control/gateway/load?model="]:not([href$="model="])::before{content:"загрузить"}'
-    'html[lang=ru] a[href^="/control/gateway/stop?k="]:not([href$="?k="])::before{content:"выгрузить"}'
-    'html[lang=uk] a[href^="/control/gateway/load?model="]:not([href$="model="])::before{content:"завантажити"}'
-    'html[lang=uk] a[href^="/control/gateway/stop?k="]:not([href$="?k="])::before{content:"вивантажити"}'
 )
 # Global 401 interceptor: any API returning 401 → redirect to login.html.
 # Skips auth endpoints and public routes to avoid redirect loops.
@@ -271,7 +250,7 @@ TR_RU = {
     # dashboard cards
     'Memory':'Память',
     'free:':'свободно:','limit:':'лимит:','used:':'занято:',
-    '↻ refresh':'↻ обновить','Models':'Модели','Model':'Модель','Driver':'Драйвер',
+    '↻ refresh':'↻ обновить','Models':'Модели','Model':'Модель','Driver':'Драйвер','load':'загрузить','unload':'выгрузить',
     # chat
     '← back':'← назад','send':'отправить','message…':'сообщение…',
     'Room incidents':'Инциденты комнаты','incident':'инцидент',
@@ -307,7 +286,7 @@ TR_UK = {
     '📊 Matrix':'📊 Матриця','🔐 Login':'🔐 Вхід',
     'Memory':"Пам'ять",
     'free:':'вільно:','limit:':'ліміт:','used:':'зайнято:',
-    '↻ refresh':'↻ оновити','Models':'Моделі','Model':'Модель','Driver':'Драйвер',
+    '↻ refresh':'↻ оновити','Models':'Моделі','Model':'Модель','Driver':'Драйвер','load':'завантажити','unload':'вивантажити',
     '← back':'← назад','send':'надіслати','message…':'повідомлення…',
     'Room incidents':'Інциденти кімнати','incident':'інцидент',
     'Agents':'Агенти','Running agents':'Запущені агенти','select':'вибрати',
@@ -398,26 +377,6 @@ script = ('<script>'
     '    if(!ok)return;'
     '    pend=true;requestAnimationFrame(function(){_rlApply();pend=false;});'
     '  });'
-    # Load/stop button column merge
-    '  var SV="[href^=\'/control/gateway/stop?k=\']:not([href$=\'?k=\'])";'
-    '  function fix(){'
-    '    document.querySelectorAll("[data-ssc-datatable]").forEach(function(w){'
-    '      if(!w.querySelector("[href^=\'/control/gateway/\']"))return;'
-    '      var th4=w.querySelector("thead th:nth-child(4)");'
-    '      if(th4)th4.style.display="none";'
-    '      w.querySelectorAll("tbody tr").forEach(function(tr){'
-    '        var tds=tr.querySelectorAll(":scope>td");'
-    '        if(tds.length<4)return;'
-    '        var t3=tds[2],t4=tds[3];'
-    '        if(t3.dataset.bf)return;'
-    '        var stop=t4.querySelector(SV);'
-    '        if(stop)t3.appendChild(stop);'
-    '        t4.style.display="none";'
-    '        t3.dataset.bf="1";'
-    '      });'
-    '    });'
-    '    _rlApply();'
-    '  }'
     '  document.addEventListener("click",function(e){'
     # Close-on-click-outside must fire only when the dialog is actually VISIBLE.
     # The modal sits in an always-present data-ssc-cond branch (display:none when
@@ -430,7 +389,7 @@ script = ('<script>'
     '    {window.location.hash="/"}'
     '  });'
     '  function init(){'
-    '    fix();'
+    '    _rlApply();'
     '    document.querySelectorAll("[data-ssc-datatable]").forEach(function(el){'
     '      obs.observe(el,{childList:true,subtree:true});'
     '    });'
