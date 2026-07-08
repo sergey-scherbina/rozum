@@ -72,12 +72,22 @@ function filterInput(d){
     // Focus in/out (ESC[I / ESC[O) — leaked as literal text on attach/detach.
     .replace(/\x1b\[[IO]/g, '');
 }
-term.onData(d => { const f = filterInput(d); if (f && ws && ws.readyState === 1) ws.send(f); });
+// The iOS software keyboard's Return arrives via the hidden textarea as a bare LF ("\n"), which a
+// terminal app (Claude Code / ink) treats as "insert newline in the input", NOT "submit" — so
+// typed lines pile up and nothing is sent. A real terminal Enter is CR ("\r"). Rewrite a lone
+// Return chunk to CR so the keyboard's return submits; multi-char input (pastes) is left intact so
+// embedded newlines are preserved.
+function submitFix(d){ return (d === '\n' || d === '\r\n') ? '\r' : d; }
+term.onData(d => { const f = submitFix(filterInput(d)); if (f && ws && ws.readyState === 1) ws.send(f); });
 // Special keys the iOS keyboard lacks (Esc/Tab/Ctrl — Claude Code shortcuts are unreachable
 // without them). Sent as raw sequences straight over the WS. preventDefault on touchstart/
 // mousedown keeps focus in xterm so tapping a key does NOT close the phone keyboard.
 (function(){
+  // '⏎ отпр.' is the explicit submit (CR) — the reliable way to send the message to the agent when
+  // the keyboard Return does something unexpected. Esc/Tab/⇧Tab/arrows/^C/^U cover the shortcuts
+  // the iOS keyboard has no keys for.
   const KEYS = [
+    ['⏎ отпр.', '\r'],
     ['Esc', '\u001b'], ['Tab', '\t'], ['⇧Tab', '\u001b[Z'],
     ['←', '\u001b[D'], ['↑', '\u001b[A'], ['↓', '\u001b[B'], ['→', '\u001b[C'],
     ['^C', '\u0003'], ['^U', '\u0015']
