@@ -5334,7 +5334,12 @@ fn write_opencode_config(base: &str) -> Option<std::path::PathBuf> {
         }
     });
     let dir = std::fs::canonicalize("/tmp").unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
-    let path = dir.join(format!("rozum-opencode-{}.json", std::process::id()));
+    // Unique per call: pid alone collides when two writers share a process (parallel unit tests, or
+    // two agents launched from one rozum process in the same instant) — one's remove_file races the
+    // other's write. A per-process atomic counter makes each config a distinct file.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!("rozum-opencode-{}-{}.json", std::process::id(), seq));
     std::fs::write(&path, cfg.to_string()).ok().map(|_| path)
 }
 
