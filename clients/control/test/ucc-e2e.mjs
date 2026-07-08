@@ -100,7 +100,17 @@ async function testMemory(browser) {
 async function testModels(browser) {
   const page = await newPage(browser);
   const posts = [];
-  page.on('request', r => { if (/\/control\/gateway\/(load|stop)/.test(r.url())) posts.push(r.method() + ' ' + new URL(r.url()).pathname); });
+  // IMPORTANT: intercept the gateway load/stop POST and answer 200 ourselves — tapping a real load
+  // button would otherwise actually load a (multi-GB) model as a test side effect. We still record
+  // that the POST fired (proves the button is wired) without touching the server.
+  await page.setRequestInterception(true);
+  page.on('request', req => {
+    const u = req.url();
+    if (/\/control\/gateway\/(load|stop)/.test(u) && req.method() === 'POST') {
+      posts.push('POST ' + new URL(u).pathname);
+      req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, mocked: true }) });
+    } else req.continue();
+  });
   await page.goto(BASE + '/#/', { waitUntil: 'networkidle2', timeout: 30000 });
   await settle();
   const info = await page.evaluate(() => {
