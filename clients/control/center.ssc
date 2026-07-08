@@ -127,9 +127,7 @@ val chatBody = vstack(gap = 12)(
   incidentsCard,
   divider(),
   remoteTable(messages, [
-    fieldColumn("", "time"),
-    fieldColumn("", "author"),
-    fieldColumn("", "content")
+    stackedColumn("", "content", "author")
   ], ""),
   composer
 )
