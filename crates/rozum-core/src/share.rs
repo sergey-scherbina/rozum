@@ -119,14 +119,31 @@ pub fn remove_lease(pid: u32) {
     let _ = std::fs::remove_file(lease_path(pid));
 }
 
-/// Count leases heartbeated within `fresh_secs`, reaping clearly-dead ones
-/// (mtime older than 10× the freshness window).
+/// Count leases from clients that are BOTH alive and freshly heartbeated, reaping the rest.
+///
+/// The lease filename is the client PID. mtime freshness alone is not enough: a client that CRASHES
+/// (rather than exiting cleanly) leaves a lease whose mtime stays fresh for `fresh_secs`, so it kept
+/// counting as an attached client and blocked `gateway stop` — the phone's "выгрузить" then silently
+/// 409'd on a dead client (seen live 2026-07-08, pid gone but lease 41s old inside the 60s window).
+/// So also verify the PID is alive via `kill(pid, 0)`; a dead-PID lease is reaped immediately.
 pub fn live_lease_count(fresh_secs: u64) -> usize {
     let mut live = 0;
     let Ok(entries) = std::fs::read_dir(leases_dir()) else {
         return 0;
     };
     for entry in entries.flatten() {
+        // Filename → PID. `kill(pid, 0) == 0` ⇒ the process exists (matches control.rs `pid_alive`).
+        // An unparseable name isn't a client PID → don't judge it by liveness, fall back to mtime.
+        let alive = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+            .map(|pid| pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0)
+            .unwrap_or(true);
+        if !alive {
+            let _ = std::fs::remove_file(entry.path()); // reap dead-PID lease now
+            continue;
+        }
         let age = entry
             .metadata()
             .and_then(|m| m.modified())

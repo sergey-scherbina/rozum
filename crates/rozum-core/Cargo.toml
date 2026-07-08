@@ -30,6 +30,7 @@ rand = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 notify = "6"  # cross-platform fs watch (kqueue/FSEvents/inotify) → event-driven admission-queue wake (P1b)
+libc = "0.2"  # pid-liveness (kill(pid,0)) for lease reaping — a dead client must not block gateway stop
 candle = { package = "candle-core", version = "0.10.2", optional = true }
 candle-transformers = { version = "0.10.2", optional = true }
 tokenizers = { version = "0.22.0", features = ["onig"], optional = true }
