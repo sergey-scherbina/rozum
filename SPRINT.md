@@ -274,26 +274,20 @@ Ordered by value. #1 is the active queue; do it the moment the GPU slot is free.
   actually land (no "accepts exactly one argument"). Do it on a `feature/codex-create-delivery` worktree
   off origin/master; do not push until verified.
 
-- [ ] **qwen-coder-edit-toolarg-decode** (HIGH — found in the clean baseline; the weakest curated model
-  is a GATEWAY bug, not a weak model) — on the curated claude baseline, Qwen3-Coder-30B scored 4/6, and
-  BOTH failures (`fix`, `test`) are UPSTREAM tool-arg corruption, not reasoning. CONTROL PROOF: the same
-  model through the same gateway sends a CLEAN multiline Write on `build` (6 real newlines, no entities),
-  but on `fix`/`test` the Write content claude receives is ONE LINE with `&quot;` instead of `"` — e.g.
-  `use std::env;  /// Reverse a string by characters. fn reverse(s:&str)->String {…} fn main(){… println!(&quot;{}&quot;, …);}`
-  → the one-line `///` doc comment eats the whole file → `expected item after doc comment` / `unclosed
-  delimiter` → rc10. Kept workdirs: `/tmp/rozum-agentic-kpRyaW` (fix), `/tmp/rozum-agentic-N7yOBw` (test).
-  TWO gateway gaps, both in the XML `<parameter=KEY>…</parameter>` tool-call decode path (constrain.rs /
-  serving.rs): (a) NO HTML-entity decoding exists anywhere in the gateway (grep-confirmed) → `&quot;`,
-  `&amp;`, `&lt;`, `&gt;`, `&#39;` leak into file content verbatim; (b) newline loss on the edit path (the
-  FATAL one here). EXACT STEPS: (1) add an html-entity-decode of extracted tool-arg STRING values in the
-  qwen/hermes `<parameter>` parser (safe: these entities never legitimately appear in file content/commands
-  a model intends); (2) capture the RAW model output for a `fix` request from the per-model
-  `runs/*.gateway.log` and compare to the decoded `<parameter=content>` value to prove whether the newline
-  collapse is the gateway parser or the model itself — if gateway, preserve the literal newlines; if model,
-  consider a normalization. VERIFY (GPU-gated): `AGENTIC_MODELS=…Qwen3-Coder-30B-A3B-Instruct-4bit
-  AGENTS=claude TASKS="fix test" REPS=3 REPAIR=1 KEEP=1` → expect fix/test 0→pass and a kept workdir whose
-  src/main.rs is real multiline with real `"`. Same theme as codex-create-delivery + the historical
-  per-family tool-format fixes ([[project-downloaded-models-toolcall-dwq]]).
+- [ ] **qwen-coder-edit-toolarg-decode** (HIGH; board updated 2026-07-08 — the entry was stale) —
+  Qwen3-Coder edit-path (fix/test) corruption: XML-entity escaping in `<parameter>` values.
+  (a) DONE `3005e3f` (R2.1, 2026-07-05): html-entity decode (`&quot;` `&lt;` `&gt;` `&apos;` `&amp;`)
+  in the `<parameter>` string fallback, unit-tested. The board previously said "no decoding exists" —
+  that predated R2.1.
+  (b) newline loss: hypothesis — same escaping mode encodes line breaks NUMERICALLY (`&#10;`), so a
+  multiline file arrives as one line. DONE (this commit): `&#10;`/`&#13;`/`&#9;` decode + unit test
+  reproducing the exact one-line-doc-comment failure shape. Additive/safe: numeric whitespace
+  entities never legitimately appear in intended file content.
+  REMAINING (GPU-gated, queued in the RAM window behind the B2-GLM matrix): live verify
+  `AGENTIC_MODELS=Qwen3-Coder-30B AGENTS=claude TASKS="fix test" REPS=3 REPAIR=1 KEEP=1
+  ROZUM_RAW_DUMP=1` → expect fix/test pass + a kept workdir with real multiline src/main.rs; RAW_DUMP
+  settles the hypothesis if cells still fail (then the collapse is model-side and needs a different
+  lever). Original kept workdirs are gone (/tmp cleaned) — RAW_DUMP recaptures evidence.
 
 - [ ] **glm32b-codex-timeout** (MED, cheap wall-clock) — GLM-4-32B under codex/opencode times out (rc124)
   on ~7 curated cells; dense 32B fits resident, so cost is per-turn reload/slowness, not OOM. Lever: keep

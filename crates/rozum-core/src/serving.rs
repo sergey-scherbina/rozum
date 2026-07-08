@@ -172,11 +172,14 @@ fn tool_call_from_value(v: &Value, strict: bool) -> Option<(String, String)> {
 }
 
 /// Decode the handful of HTML/XML entities some models (notably Qwen3-Coder on edit paths) emit inside
-/// tool-call string arguments — `&quot;`→`"`, `&#34;`→`"`, `&apos;`/`&#39;`→`'`, `&lt;`→`<`, `&gt;`→`>`
-/// — so the literal chars the model meant land in the file/command instead of raw entity text (e.g. a
-/// `println!(&quot;{}&quot;)` that never compiles). `&amp;` is decoded LAST so `&amp;lt;` → `&lt;`, not
-/// `<`. Applied ONLY to the plain-string fallback (a value that did NOT parse as JSON), where the model
-/// clearly emitted raw text — a properly JSON-encoded string carries its own escaping and is left alone.
+/// tool-call string arguments — `&quot;`→`"`, `&#34;`→`"`, `&apos;`/`&#39;`→`'`, `&lt;`→`<`, `&gt;`→`>`,
+/// plus the numeric WHITESPACE entities `&#10;`/`&#13;`/`&#9;` (newline/CR/tab: a model that switched
+/// into entity-escaping mode encodes line breaks the same way, which is how a whole multiline file
+/// arrives as ONE line — qwen-coder-edit-toolarg-decode part (b)) — so the literal chars the model
+/// meant land in the file/command instead of raw entity text (e.g. a `println!(&quot;{}&quot;)` that
+/// never compiles). `&amp;` is decoded LAST so `&amp;lt;` → `&lt;`, not `<`. Applied ONLY to the
+/// plain-string fallback (a value that did NOT parse as JSON), where the model clearly emitted raw
+/// text — a properly JSON-encoded string carries its own escaping and is left alone.
 fn decode_tool_arg_entities(s: &str) -> String {
     if !s.contains('&') {
         return s.to_string();
@@ -185,6 +188,9 @@ fn decode_tool_arg_entities(s: &str) -> String {
         .replace("&#34;", "\"")
         .replace("&apos;", "'")
         .replace("&#39;", "'")
+        .replace("&#10;", "\n")
+        .replace("&#13;", "\r")
+        .replace("&#9;", "\t")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&")
@@ -1405,6 +1411,26 @@ mod tests {
         let content = args["content"].as_str().unwrap();
         assert!(content.contains("println!(\"{}\", <x>)"), "entities not decoded: {content}");
         assert!(!content.contains("&quot;") && !content.contains("&lt;"), "entity leaked: {content}");
+    }
+
+    #[test]
+    fn qwen_coder_edit_path_decodes_numeric_whitespace_entities() {
+        // Part (b) of qwen-coder-edit-toolarg-decode: in the same entity-escaping mode the model
+        // encodes LINE BREAKS numerically, so a whole source file arrives as ONE line — the doc
+        // comment then swallows everything after it (`expected item after doc comment`). Numeric
+        // whitespace entities must decode back into real newlines/tabs.
+        let text = "<tool_call>\n<function=write_file>\n<parameter=path>src/main.rs</parameter>\n\
+            <parameter=content>use std::env;&#10;/// Reverse a string.&#10;fn reverse(s: &amp;str) -> String {&#10;&#9;s.chars().rev().collect()&#10;}&#10;fn main() { println!(&quot;{}&quot;, reverse(&quot;ab&quot;)); }&#10;</parameter>\n\
+            </function>\n</tool_call>";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1, "expected one tool call, got: {calls:?}");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        let content = args["content"].as_str().unwrap();
+        assert_eq!(content.lines().count(), 6, "newlines not restored: {content:?}");
+        assert!(content.contains("/// Reverse a string.\nfn reverse(s: &str) -> String {"),
+            "doc comment must end at a real newline: {content:?}");
+        assert!(content.contains("\ts.chars()"), "tab entity not decoded: {content:?}");
+        assert!(!content.contains("&#10;") && !content.contains("&#9;"), "numeric entity leaked: {content:?}");
     }
 
     #[test]
