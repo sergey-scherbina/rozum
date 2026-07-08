@@ -35,9 +35,15 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 **Verified.** `cargo test --workspace` 635/0 (incl. new next_launch_seq + starting-TTL tests);
 live: two simultaneous `/session/launch` → distinct ids `…-0`/`…-1`, both running, 2 tmux, no 500;
 coder launch + immediate stop → 0 rows, 0 stray processes. Also removed `footprint_report`/
-`footprint_for` (orphaned when launches went async). Not fixed (LOW, noted): `remain-on-exit` set
-just after `new-session` has a sub-ms window on an instant-failing launch (cold-start takes seconds,
-so not reachable in practice); non-SGR/modified-wheel mouse reports (CC uses SGR only).
+`footprint_for` (orphaned when launches went async).
+
+**Residuals — now FIXED too (`f686c61`, deployed 2026-07-08).** (a) `remain-on-exit` race: the tmux
+launch is wrapped so the pane HOLDS after `rozum launch` exits (`…; printf exit-code; exec sleep`)
+instead of relying on a post-create `set-option` — race-free; verified an instant-failing launch
+(exit 127) keeps its output on screen. (b) mouse filter now parses the SGR button code and keeps
+wheel (bit 6 — bare AND modified wheel scroll), strips press/drag/release/motion + legacy X10
+(`ESC[M`+3) + focus reports; 15-case unit check confirms every keyboard sequence (CSI/SS3 arrows,
+shift-tab, ^C, esc, typed text) passes untouched.
 
 ---
 
