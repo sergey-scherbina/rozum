@@ -67,10 +67,20 @@ function connect(){
 function sendResize(){ if (ws && ws.readyState === 1) ws.send(JSON.stringify({ resize:{ cols: term.cols, rows: term.rows } })); }
 // A phone tap/drag makes xterm.js emit mouse reports (Claude Code requests mouse tracking,
 // tmux forwards) and CC's parser leaks them into its input line as literal ^[[<35;17;45M
-// garbage. Keep ONLY wheel reports (64/65 — finger scroll works via tmux mouse mode) and
-// focus events out; everything a keyboard produces passes untouched.
+// garbage. Strip every mouse report EXCEPT wheel (so finger-scroll still reaches tmux
+// scrollback), plus focus in/out. Keyboard input has none of these forms, so it passes
+// untouched (the special-keys row bypasses this entirely via ws.send).
 function filterInput(d){
-  return d.replace(/\x1b\[<(?!6[45];)[0-9;]+[Mm]/g, '').replace(/\x1b\[[IO]/g, '');
+  return d
+    // SGR mouse (ESC[<Cb;Cx;Cy M|m): keep only wheel events — button bit 6 (64) set. This
+    // forwards bare AND modified wheel (68/69/80/81 = ctrl/shift+wheel) and drops press/
+    // release/drag/motion, which the old bare-64/65 lookahead stripped.
+    .replace(/\x1b\[<(\d+);\d+;\d+[Mm]/g, function(m, cb){ return ((+cb) & 64) ? m : ''; })
+    // Legacy X10 mouse (ESC[M + 3 raw bytes, any value incl. newline): always strip — CC uses
+    // SGR, so any X10 report here is injected by the webview, never keyboard.
+    .replace(/\x1b\[M[\s\S]{3}/g, '')
+    // Focus in/out (ESC[I / ESC[O) — leaked as literal text on attach/detach.
+    .replace(/\x1b\[[IO]/g, '');
 }
 term.onData(d => { const f = filterInput(d); if (f && ws && ws.readyState === 1) ws.send(f); });
 // Special keys the iOS keyboard lacks (Esc/Tab/Ctrl — Claude Code shortcuts are unreachable

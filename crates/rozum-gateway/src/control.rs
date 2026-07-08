@@ -1377,23 +1377,31 @@ async fn session_launch_route(body: String) -> axum::response::Response {
     // Create the tmux session RIGHT AWAY and run `rozum launch` inside it: the CLI handles the
     // gateway cold-start itself (admission gate included) and PRINTS its progress, so the terminal
     // the launch button opens (onOpenJson) shows the WHOLE startup live — gateway spawn, model
-    // load, agent REPL. remain-on-exit keeps a failed launch's output on screen until the row is
-    // ✕-closed: errors are read in the terminal, not squeezed into a status cell. tmux creation is
-    // instant, so the phone's fetch returns immediately (no funnel-timeout window).
+    // load, agent REPL. tmux creation is instant, so the phone's fetch returns immediately (no
+    // funnel-timeout window).
     let prompt = req.prompt.trim().to_string();
     // seq suffix: two launches of the same agent in one wall-clock second would otherwise share a
     // tmux name → the second `new-session` fails with a duplicate-name error (500, no record).
     let id = format!("{}-{}-{}", sanitize(&agent), crate::share::now_unix(), next_launch_seq());
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
     let name = tmux_name(&id);
-    let inner = format!("{} launch --model {} {}", exe.to_string_lossy(), model, agent);
+    // Wrap the launch so the pane HOLDS after `rozum launch` exits (any reason) instead of closing:
+    // print the exit code, then block on `sleep`. This keeps a failed launch's output on screen
+    // until the row is ✕-closed — race-free, unlike a separate `set-option remain-on-exit` which
+    // a sub-millisecond failure could beat (BUG-012 residual). model/agent are shell_safe-validated;
+    // the exe path is single-quoted against spaces.
+    let inner = format!(
+        "'{}' launch --model {} {}; rc=$?; printf '\\n[rozum launch exited: %s — ✕ to close this session]\\n' \"$rc\"; exec sleep 2147483647",
+        exe.to_string_lossy(),
+        model,
+        agent,
+    );
     let ok = Command::new("tmux")
         .args(["new-session", "-d", "-s", &name, "-c", &workdir, "-x", "120", "-y", "40", &inner])
         .status().map(|s| s.success()).unwrap_or(false);
     if !ok {
         return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "tmux new-session failed");
     }
-    let _ = Command::new("tmux").args(["set-option", "-t", &name, "remain-on-exit", "on"]).status();
     // mouse on: tmux consumes the client's mouse/touch reports itself (finger-scroll = tmux
     // scrollback) instead of piping them to the agent, where a phone tap leaked as literal
     // "^[[<35;17;45M" garbage into the REPL input (SGR mouse reports, seen live 2026-07-07).
