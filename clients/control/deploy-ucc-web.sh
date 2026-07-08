@@ -269,8 +269,8 @@ TR_RU = {
     '🤖 Agents':'🤖 Агенты','💻 Coders':'💻 Кодеры','🖥 Sessions':'🖥 Сессии',
     '📊 Matrix':'📊 Матрица','🔐 Login':'🔐 Вход',
     # dashboard cards
-    'Gateway / residency':'Шлюз / резидентность',
-    'source:':'источник:','available:':'доступно:','host budget:':'бюджет:','committed:':'используется:',
+    'Memory':'Память',
+    'free:':'свободно:','limit:':'лимит:','used:':'занято:',
     '↻ refresh':'↻ обновить','Models':'Модели','Model':'Модель','Driver':'Драйвер',
     # chat
     '← back':'← назад','send':'отправить','message…':'сообщение…',
@@ -305,8 +305,8 @@ TR_RU = {
 TR_UK = {
     '🤖 Agents':'🤖 Агенти','💻 Coders':'💻 Кодери','🖥 Sessions':'🖥 Сесії',
     '📊 Matrix':'📊 Матриця','🔐 Login':'🔐 Вхід',
-    'Gateway / residency':'Шлюз / резидентність',
-    'source:':'джерело:','available:':'доступно:','host budget:':"бюджет хоста:",'committed:':'зайнято:',
+    'Memory':"Пам'ять",
+    'free:':'вільно:','limit:':'ліміт:','used:':'зайнято:',
     '↻ refresh':'↻ оновити','Models':'Моделі','Model':'Модель','Driver':'Драйвер',
     '← back':'← назад','send':'надіслати','message…':'повідомлення…',
     'Room incidents':'Інциденти кімнати','incident':'інцидент',

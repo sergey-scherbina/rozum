@@ -18,7 +18,7 @@ stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the vie
 [darkTheme](std/ui/theme.ssc)
 [vstack, hstack, divider](std/ui/layout.ssc)
 [heading, text](std/ui/typography.ssc)
-[badge, link](std/ui/display.ssc)
+[link](std/ui/display.ssc)
 [card, cardWithHeader, modal](std/ui/containers.ssc)
 [signalText_](std/ui/reactive.ssc)
 [actionButton, textField, signalLabelButton](std/ui/input.ssc)
@@ -64,15 +64,11 @@ val committedTxt = computedSignal(() => gib(jsonValue(st()).get("residency").get
 val meetingsCard = cardWithHeader(heading(2, "Meetings"))(
   remoteTable(st, [lcol("Room", "room", "#/chat/:value")], "meetings")
 )
-val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
+val gwCard = cardWithHeader(hstack(gap = 10)(heading(2, "Memory"), actionButton(incSignal(refresh), "↻")))(
   vstack(gap = 6)(
-    hstack(gap = 8)(
-      text("source:"), badge("rozum control-API (always-up)", "success"),
-      actionButton(incSignal(refresh), "↻ refresh")
-    ),
-    hstack(gap = 8)(text("available:"),   signalText_(availTxt)),
-    hstack(gap = 8)(text("host budget:"), signalText_(budgetTxt)),
-    hstack(gap = 8)(text("committed:"),   signalText_(committedTxt))
+    hstack(gap = 8)(text("free:"),  signalText_(availTxt)),
+    hstack(gap = 8)(text("limit:"), signalText_(budgetTxt)),
+    hstack(gap = 8)(text("used:"),  signalText_(committedTxt))
   )
 )
 val modelSelectCols = [stackedColumn("Model", "spec", "rating_line"), fieldColumn("GiB", "size_gib")]
