@@ -178,13 +178,8 @@ echo ">> emitting index.html (browser SPA) ..."
 [ -s "$SITE/index.html.new" ] || { echo "✗ emit-spa produced an empty index.html — aborting (live page untouched)" >&2; exit 1; }
 mv "$SITE/index.html.new" "$SITE/index.html"
 echo ">> index.html: $(wc -c < "$SITE/index.html") bytes"
-# Framework gap (ucc-theme-bg): `serve(view, port)`'s extern signature has no extraCss param yet,
-# so an .ssc app has no way to override the emitted base template's hardcoded
-# `body{background:#fff}` — every card/text DOES pick up darkTheme correctly (theme.colors.surface/
-# onSurface flow through `lower`), only the page canvas stays white behind/around them. Patch it
-# post-emit to match this app's `darkTheme.colors.background` (#111827) until scalascript exposes
-# extraCss (or derives body background from the theme) at the language level.
-sed -i '' 's/body{margin:0;padding:0;background:#fff;/body{margin:0;padding:0;background:#111827;/' "$SITE/index.html"
+# Page canvas background: now set at the language level via `serve(view, port, extraCss)`
+# (center.ssc passes `body{background:#111827}`), so the old post-emit sed of body{#fff} is gone.
 # Models panel action buttons.  The `lcol` link text = field value, so CSS hides the raw text
 # (font-size:0) and shows the real label via ::before.  Empty-value links are hidden with display:none.
 # Note: </head> (line 7) is in the actual HTML head — NOT inside JS strings (those are </style> at ~4k).

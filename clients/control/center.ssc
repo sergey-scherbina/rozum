@@ -330,5 +330,5 @@ val view = vstack(gap = 0)(
   detailModal
 )
 
-serve(lower(view, darkTheme), 8410)
+serve(lower(view, darkTheme), 8410, "body{background:#111827}")
 ```
