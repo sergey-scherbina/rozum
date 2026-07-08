@@ -212,6 +212,12 @@ css = (
     # char — and the container scrolls horizontally if the row still exceeds the card width.
     '[data-ssc-datatable] th:nth-child(1){white-space:nowrap}'
     '[data-ssc-datatable] td:nth-child(1){white-space:normal;overflow-wrap:break-word;word-break:normal;min-width:110px;max-width:150px}'
+    # Dashboard Models panel (targeted by its rows-path, the only stable handle now that load/unload
+    # are rowPost BUTTONS, not gateway anchor links): Model + GiB + one button = 361px overflowed the
+    # 316px card. Cap the model column (name still wraps whole) and shrink the action button — its
+    # inline runtime style needs !important — so the row fits with the button fully on-screen.
+    '[data-ssc-datatable][data-ssc-datatable-rows-path="models"] td:nth-child(1){max-width:120px}'
+    '[data-ssc-datatable][data-ssc-datatable-rows-path="models"] tbody button{font-size:12px!important;padding:5px 8px!important}'
     # Single-column tables (chat messages, meetings): the one cell spans the full card and wraps
     # — the picker-oriented nth-child(1) max-width must NOT cap a chat message to 150px, so a
     # long message shows all at once instead of scrolling horizontally in one line.
