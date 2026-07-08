@@ -5,6 +5,42 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-012 — UCC launch registries: concurrency races + terminal reconnect loop (audit sweep)
+
+- **Status:** fixed on `a1c073c`, deployed 2026-07-08; live-verified (concurrent launch, stop-during-start).
+- **Source:** adversarial audit of the day's async-launch + terminal work (two review agents), not a
+  field report — caught before the operator hit them.
+- **Severity:** P2 — real races, but they need concurrent actions / restarts / same-second launches
+  to trigger; the happy path was already working.
+
+**Findings + fixes (all in `control.rs` + `terminal.ssc`).**
+1. Lost update: `live_sessions/agents/coders` rewrite the registry on the STATUS-POLL path, so a
+   poll's save could clobber a concurrent launch → orphan process / row stuck `starting…`. Fixed:
+   `registry_lock()` serializes every load-modify-save.
+2. Orphan on stop-during-spawn: a stop that removed a `starting…` (pid 0) record while the bg task
+   was mid-spawn left an untracked participant/coder process. Fixed: `update_*_record` returns
+   whether it hit; the spawn kills the just-spawned pid if the record is gone.
+3. Eternal `starting…`: a control-serve restart mid-launch orphaned the row forever (prune kept all
+   `starting…`). Fixed: `STARTING_TTL_SECS` (900s) prune / show-failed.
+4. ID collision: two launches of the same agent in one second shared a tmux name → the 2nd
+   `new-session` 500'd (sessions) or updated the wrong record (agents/coders). Fixed:
+   `next_launch_seq()` suffix.
+5. Terminal infinite reconnect: `onopen` reset the retry budget every cycle, so an
+   open-then-immediately-close (session already ended) looped forever. Fixed: reset only after a 5s
+   stable connection.
+6. Terminal duplicate sockets: a tap during the retry wait + the pending timer both called
+   `connect()`, doubling output. Fixed: `clearTimeout` + already-opening guard; manual reconnect
+   resets the budget.
+
+**Verified.** `cargo test --workspace` 635/0 (incl. new next_launch_seq + starting-TTL tests);
+live: two simultaneous `/session/launch` → distinct ids `…-0`/`…-1`, both running, 2 tmux, no 500;
+coder launch + immediate stop → 0 rows, 0 stray processes. Also removed `footprint_report`/
+`footprint_for` (orphaned when launches went async). Not fixed (LOW, noted): `remain-on-exit` set
+just after `new-session` has a sub-ms window on an instant-failing launch (cold-start takes seconds,
+so not reachable in practice); non-SGR/modified-wheel mouse reports (CC uses SGR only).
+
+---
+
 ## BUG-011 — phone terminal: "open terminal failed: terminal does not support clear"
 
 - **Status:** fixed, deployed 2026-07-07 ~20:1x.
