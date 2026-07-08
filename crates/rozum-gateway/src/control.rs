@@ -3072,6 +3072,10 @@ pub struct InstalledBrief {
     pub stars: String,
     /// Short operator-facing driver hint. Capability is model × agent-driver, not model alone.
     pub driver_hint: String,
+    /// Combined rating + driver for a single stacked sub-line under the model name in the pickers
+    /// (e.g. "★★★★  claude") — keeps the phone model picker to two columns so it fits without a
+    /// separate Driver column squeezing the name.
+    pub rating_line: String,
 }
 
 /// Live matrix-derived ratings: `~/.rozum/ucc/model-ratings.json`, written by
@@ -3368,12 +3372,23 @@ pub async fn status() -> ControlStatus {
     let live_ratings = load_live_ratings();
     let mut installed: Vec<InstalledBrief> = installed_catalog
         .iter()
-        .map(|m| InstalledBrief {
-            size_gib: fmt_gib(m.size_bytes),
-            stars: model_stars(&m.spec, &live_ratings).map(|n| "★".repeat(n as usize)).unwrap_or_default(),
-            driver_hint: model_driver_hint(&m.spec).to_string(),
-            spec: m.spec.clone(),
-            size_bytes: m.size_bytes,
+        .map(|m| {
+            let stars = model_stars(&m.spec, &live_ratings).map(|n| "★".repeat(n as usize)).unwrap_or_default();
+            let driver_hint = model_driver_hint(&m.spec).to_string();
+            let rating_line = match (stars.is_empty(), driver_hint.is_empty()) {
+                (false, false) => format!("{stars}  {driver_hint}"),
+                (false, true) => stars.clone(),
+                (true, false) => driver_hint.clone(),
+                (true, true) => String::new(),
+            };
+            InstalledBrief {
+                size_gib: fmt_gib(m.size_bytes),
+                stars,
+                driver_hint,
+                rating_line,
+                spec: m.spec.clone(),
+                size_bytes: m.size_bytes,
+            }
         })
         .collect();
     installed.sort_by(|a, b| {

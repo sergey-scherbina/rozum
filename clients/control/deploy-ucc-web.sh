@@ -205,10 +205,16 @@ css = (
     'a[href^="#/chat/"]:visited{color:#60a5fa!important}'
     '[data-ssc-datatable] thead{background:#1f2937!important}'
     '[data-ssc-datatable] th{color:#6b7280!important;border-bottom-color:#374151!important}'
-    '[data-ssc-datatable]{max-width:100%;overflow:hidden}'
+    '[data-ssc-datatable]{max-width:100%;overflow-x:auto}'
     '[data-ssc-datatable] table{table-layout:auto;width:100%}'
     '[data-ssc-datatable] td,[data-ssc-datatable] th{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px 6px}'
-    '[data-ssc-datatable] td:nth-child(1),[data-ssc-datatable] th:nth-child(1){white-space:normal;word-break:break-word}'
+    # First column (Model/name): header stays HORIZONTAL (short), body wraps at word/hyphen
+    # boundaries. min-width stops the column collapsing so narrow that word-break splits the model
+    # spec CHARACTER-BY-CHARACTER (the vertical-text bug on the phone model picker once a Driver
+    # column was added). overflow-wrap:break-word wraps only when a token would overflow — not per
+    # char — and the container scrolls horizontally if the row still exceeds the card width.
+    '[data-ssc-datatable] th:nth-child(1){white-space:nowrap}'
+    '[data-ssc-datatable] td:nth-child(1){white-space:normal;overflow-wrap:break-word;word-break:normal;min-width:130px}'
     '[role="dialog"]{position:relative;max-height:82vh;overflow-y:auto}'
     '[role="dialog"] a[href="#/"]{position:absolute;top:8px;right:10px;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;font-size:22px;font-weight:300;color:#e5e7eb;text-decoration:none;line-height:1;z-index:1;border-radius:50%;background:rgba(255,255,255,0.08);box-shadow:0 2px 8px rgba(0,0,0,0.55),0 1px 2px rgba(0,0,0,0.35)}'
     '#rozum-lang{position:fixed;bottom:16px;right:16px;display:flex;gap:1px;z-index:999;box-shadow:0 2px 8px rgba(0,0,0,.5)}'
