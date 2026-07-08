@@ -8,3 +8,4 @@
 node_modules
 
 .scala-build/
+clients/control/test/DEFECTS.md
