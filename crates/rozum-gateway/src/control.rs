@@ -1426,13 +1426,22 @@ async fn session_launch_route(body: String) -> axum::response::Response {
         });
         save_sessions(&sessions);
     }
-    // Seed the first task once the agent's REPL is actually up — the gateway may need minutes on
-    // a cold start, and keys sent into the loading phase would be swallowed. Poll the shared
-    // gateway registry for health, give the REPL a beat, then type the prompt.
-    if !prompt.is_empty() {
+    // Once the agent's REPL is actually up (gateway health can take minutes on a cold start, and keys
+    // sent into the loading phase would be swallowed): first CLEAR the terminal-probe garbage, then
+    // seed the launch prompt if any. Runs for EVERY session — an empty-prompt interactive session
+    // still needs its input cleaned.
+    //
+    // The garbage: Claude Code probes the terminal at startup (XTVERSION `^[[>q`, DA `^[[c`). tmux
+    // answers those into CC's stdin AFTER CC's read window, so the responses (`^[P>|tmux 3.7b^[\` +
+    // `^[[?1;2;4c`) land as literal text in the REPL input line. That not only looks like garbage — it
+    // WEDGES Return (submitting the garbage-laden line does nothing useful). This all happens inside
+    // the pty (tmux→CC), so the client-side xterm input filter can never reach it; a Ctrl-U from the
+    // host side, once the REPL is up, is what clears it. Verified live 2026-07-08.
+    {
         let seed_name = name.clone();
         let seed_model = model.clone();
         let seed_id = id.clone();
+        let seed_prompt = prompt.clone();
         tokio::spawn(async move {
             for _ in 0..600u32 {
                 if let Some(g) = crate::share::read_active() {
@@ -1443,8 +1452,17 @@ async fn session_launch_route(body: String) -> axum::response::Response {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
             tokio::time::sleep(std::time::Duration::from_secs(4)).await; // REPL warm-up
-            if load_sessions().iter().any(|s| s.id == seed_id) {
-                let _ = Command::new("tmux").args(["send-keys", "-t", &seed_name, &prompt, "Enter"]).status();
+            if !load_sessions().iter().any(|s| s.id == seed_id) {
+                return;
+            }
+            // Ctrl-U twice (800ms apart) clears the probe garbage — the second catches anything that
+            // landed slightly late during CC's init. Clearing an empty input line is a harmless no-op.
+            let _ = Command::new("tmux").args(["send-keys", "-t", &seed_name, "C-u"]).status();
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            let _ = Command::new("tmux").args(["send-keys", "-t", &seed_name, "C-u"]).status();
+            if !seed_prompt.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let _ = Command::new("tmux").args(["send-keys", "-t", &seed_name, &seed_prompt, "Enter"]).status();
             }
         });
     }
