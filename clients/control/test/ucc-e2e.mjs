@@ -136,6 +136,35 @@ async function testModels(browser) {
   await page.close();
 }
 
+// ── MODELS error surfacing ───────────────────────────────────────────────────
+// A rowPost that gets a non-2xx (guarded refusal) must SHOW the error, not swallow it. Force a 409
+// on the load POST via request interception and assert an alert fires with the server's message.
+async function testModelsError(browser) {
+  const page = await newPage(browser);
+  let dialogMsg = null;
+  page.on('dialog', async d => { dialogMsg = d.message(); await d.dismiss(); });
+  await page.setRequestInterception(true);
+  page.on('request', req => {
+    if (/\/control\/gateway\/(load|stop)/.test(req.url()) && req.method() === 'POST') {
+      req.respond({ status: 409, contentType: 'application/json', body: JSON.stringify({ ok: false, error: 'TEST-REFUSAL: busy' }) });
+    } else req.continue();
+  });
+  await page.goto(BASE + '/#/', { waitUntil: 'networkidle2', timeout: 30000 });
+  await settle();
+  const tapped = await page.evaluate(() => {
+    const btn = [...document.querySelectorAll('[data-ssc-datatable] tbody button')].find(b => /загрузить|load/.test(b.textContent) && b.offsetParent);
+    if (!btn) return false; btn.click(); return true;
+  });
+  await settle(1500);
+  const restored = await page.evaluate(() => {
+    const btn = [...document.querySelectorAll('[data-ssc-datatable] tbody button')].find(b => /загрузить|load/.test(b.textContent) && b.offsetParent);
+    return btn ? !btn.disabled : false;
+  });
+  if (!tapped) bad('models-error-surfaced', 'no load button to tap');
+  else (dialogMsg && /TEST-REFUSAL/.test(dialogMsg) && restored) ? ok('models-error-surfaced', `alert="${dialogMsg}"`) : bad('models-error-surfaced', `dialog=${JSON.stringify(dialogMsg)} restored=${restored}`);
+  await page.close();
+}
+
 // ── CHAT ─────────────────────────────────────────────────────────────────────
 async function testChat(browser) {
   const page = await newPage(browser);
@@ -210,6 +239,7 @@ async function testApi() {
     await testNav(browser);
     await testMemory(browser);
     await testModels(browser);
+    await testModelsError(browser);
     await testChat(browser);
     await testPickers(browser);
     await testApi();
