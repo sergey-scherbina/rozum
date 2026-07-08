@@ -6,3 +6,5 @@
 /.worktrees/
 /scripts/bench/results/
 node_modules
+
+.scala-build/
