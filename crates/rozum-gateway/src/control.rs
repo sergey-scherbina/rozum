@@ -1347,6 +1347,12 @@ async fn session_launch_route(body: String) -> axum::response::Response {
     // scrollback) instead of piping them to the agent, where a phone tap leaked as literal
     // "^[[<35;17;45M" garbage into the REPL input (SGR mouse reports, seen live 2026-07-07).
     let _ = Command::new("tmux").args(["set-option", "-t", &name, "mouse", "on"]).status();
+    // escape-time 0: forward a lone ESC (the on-screen Esc key) immediately instead of holding it
+    // to see whether a sequence follows — held ESC glues with later bytes and wedges the agent's
+    // input parser. focus-events off: on client detach tmux otherwise sends the app a focus-out
+    // (^[[O) which leaks into the input line as literal text (seen live 2026-07-08).
+    let _ = Command::new("tmux").args(["set-option", "-t", &name, "escape-time", "0"]).status();
+    let _ = Command::new("tmux").args(["set-option", "-t", &name, "focus-events", "off"]).status();
     let mut sessions = load_sessions();
     sessions.push(SessionRecord {
         id: id.clone(),
