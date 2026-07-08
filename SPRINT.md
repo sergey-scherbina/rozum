@@ -1,5 +1,12 @@
 # Sprint
 
+- [ ] **ucc-terminal-keys** (operator 2026-07-08: "Запиши в план и сделай. Давно было пора") — the
+  iOS keyboard has no Esc/Tab/Ctrl, so Claude Code shortcuts are unreachable from the phone
+  terminal. Add a special-keys row to terminal.html: Esc, Tab, ⇧Tab (CC mode cycling), ← ↑ ↓ →,
+  ^C — sent as raw sequences over the WS. iOS specifics: bar at the TOP (fixed bottom bars break
+  with the keyboard open — meeting-PWA lesson), preventDefault on touchstart so tapping a key does
+  not blur xterm/close the keyboard. Verify: type → tap Esc → input cleared (end-to-end).
+
 - [x] **ucc-jobpanel-pattern** (operator: "Асинхронный паттерн можно выразить как скаласкрипт
   функцию и тулкит выражение? … Делай а б в г") — the async-job pattern is now expressed ONCE per
   side: (а) `jobPanel` .ssc function in center.ssc — agents/coders/sessions became three calls;

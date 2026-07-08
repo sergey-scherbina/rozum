@@ -14,7 +14,7 @@ Compiled via: ssc run terminal.ssc → curl → terminal.html  (see deploy-ucc-w
 
 ## Page
 ```scalascript
-val barCss = "#bar{display:flex;gap:10px;align-items:center;padding:8px max(10px,env(safe-area-inset-right)) 8px max(10px,env(safe-area-inset-left));background:#151a23;border-bottom:1px solid #232a36}#bar a{color:#7ab8ff;text-decoration:none}#st{margin-left:auto;font-size:12px;color:#8a93a0}#term{height:calc(100% - 38px);padding:4px}"
+val barCss = "#bar{display:flex;gap:10px;align-items:center;padding:8px max(10px,env(safe-area-inset-right)) 8px max(10px,env(safe-area-inset-left));background:#151a23;border-bottom:1px solid #232a36}#bar a{color:#7ab8ff;text-decoration:none}#st{margin-left:auto;font-size:12px;color:#8a93a0}#keys{display:flex;gap:6px;padding:6px max(10px,env(safe-area-inset-right)) 6px max(10px,env(safe-area-inset-left));background:#10141c;border-bottom:1px solid #232a36;overflow-x:auto;-webkit-overflow-scrolling:touch}#keys button{flex:0 0 auto;min-width:44px;padding:7px 10px;background:#1c2330;color:#c9d4e3;border:1px solid #2c3648;border-radius:7px;font:13px -apple-system,system-ui,sans-serif;cursor:pointer}#keys button:active{background:#2a3850}#term{height:calc(100% - 84px);padding:4px}"
 val bodyCss = "html,body{margin:0;height:100%;background:radial-gradient(130% 95% at 50% 36%,transparent 50%,rgba(2,3,7,.62) 100%),radial-gradient(135% 85% at 50% -12%,#163a50 0%,#0b1d2c 32%,#06090f 68%,#05070c 100%),radial-gradient(58% 48% at 16% 6%,rgba(44,84,120,.34),transparent 62%),radial-gradient(52% 44% at 88% 20%,rgba(74,46,104,.26),transparent 60%) fixed;color:#e6e6e6;font:14px -apple-system,system-ui,sans-serif}"
 
 val xtermJs = """
@@ -60,6 +60,25 @@ function filterInput(d){
   return d.replace(/\x1b\[<(?!6[45];)[0-9;]+[Mm]/g, '').replace(/\x1b\[[IO]/g, '');
 }
 term.onData(d => { const f = filterInput(d); if (f && ws && ws.readyState === 1) ws.send(f); });
+// Special keys the iOS keyboard lacks (Esc/Tab/Ctrl — Claude Code shortcuts are unreachable
+// without them). Sent as raw sequences straight over the WS. preventDefault on touchstart/
+// mousedown keeps focus in xterm so tapping a key does NOT close the phone keyboard.
+(function(){
+  const KEYS = [
+    ['Esc', '\u001b'], ['Tab', '\t'], ['⇧Tab', '\u001b[Z'],
+    ['←', '\u001b[D'], ['↑', '\u001b[A'], ['↓', '\u001b[B'], ['→', '\u001b[C'],
+    ['^C', '\u0003'], ['^U', '\u0015']
+  ];
+  const bar = document.getElementById('keys');
+  KEYS.forEach(([label, seq]) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = label;
+    const fire = (e) => { e.preventDefault(); if (ws && ws.readyState === 1) ws.send(seq); };
+    b.addEventListener('touchstart', fire, { passive: false });
+    b.addEventListener('mousedown', fire);
+    bar.appendChild(b);
+  });
+})();
 window.addEventListener('resize', () => { fit.fit(); sendResize(); });
 st.onclick = () => { if (!ws || ws.readyState > 1) connect(); };
 if (id) connect(); else { st.textContent = '✗ ' + _lt('no session id'); term.writeln(_lt('No session id. Open terminal from the UCC sessions list.')); }
@@ -70,7 +89,7 @@ val langCss = "#rozum-lang{position:fixed;bottom:16px;right:16px;display:flex;ga
 val xtermCdn = "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0"
 val fitCdn   = "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0"
 
-val html = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover\"><meta name=\"apple-mobile-web-app-capable\" content=\"yes\"><title>rozum · terminal</title><link rel=\"stylesheet\" href=\"" + xtermCdn + "/css/xterm.min.css\"><style>" + bodyCss + barCss + langCss + "</style></head><body><div id=\"bar\"><a href=\"/\">← UCC</a><b id=\"sid\"></b><span id=\"st\">…</span></div><div id=\"term\"></div><script src=\"" + xtermCdn + "/lib/xterm.min.js\"></script><script src=\"" + fitCdn + "/lib/addon-fit.min.js\"></script><script>" + xtermJs + "</script></body></html>"
+val html = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover\"><meta name=\"apple-mobile-web-app-capable\" content=\"yes\"><title>rozum · terminal</title><link rel=\"stylesheet\" href=\"" + xtermCdn + "/css/xterm.min.css\"><style>" + bodyCss + barCss + langCss + "</style></head><body><div id=\"bar\"><a href=\"/\">← UCC</a><b id=\"sid\"></b><span id=\"st\">…</span></div><div id=\"keys\"></div><div id=\"term\"></div><script src=\"" + xtermCdn + "/lib/xterm.min.js\"></script><script src=\"" + fitCdn + "/lib/addon-fit.min.js\"></script><script>" + xtermJs + "</script></body></html>"
 
 route("GET", "/") { req => html }
 serve(8422)
