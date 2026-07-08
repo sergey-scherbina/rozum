@@ -2999,6 +2999,8 @@ pub struct InstalledBrief {
     pub size_gib: String,
     /// "★★★★" adequacy rating for direct display (empty when unrated). See `model_stars`.
     pub stars: String,
+    /// Short operator-facing driver hint. Capability is model × agent-driver, not model alone.
+    pub driver_hint: String,
 }
 
 /// Live matrix-derived ratings: `~/.rozum/ucc/model-ratings.json`, written by
@@ -3035,7 +3037,7 @@ fn model_stars(spec: &str, live: &std::collections::HashMap<String, u8>) -> Opti
         ("GLM-4-32B", 4),              // reliable edit/debug/chat; artifact-synth covers create
         ("Qwen3.6-27B", 3),
         ("DeepSeek-Coder-V2-Lite", 3),
-        ("Qwen3-Coder-30B", 3),        // open edit-corruption issue (&quot;/newline)
+        ("Qwen3-Coder-30B", 3),        // post-parser-fix needs a fresh full matrix before promotion
         ("Devstral", 3),               // good under claude; poor codex/opencode match (B3)
         ("Qwen2.5-Coder-7B", 2),
         ("GLM-4-9B", 2),
@@ -3043,6 +3045,27 @@ fn model_stars(spec: &str, live: &std::collections::HashMap<String, u8>) -> Opti
         ("Qwen3-0.6B", 1),
     ];
     RATINGS.iter().find(|(k, _)| spec.contains(k)).map(|(_, s)| *s)
+}
+
+/// Short UCC model-picker hint: the agent driver that best matches this model's tool dialect and
+/// measured matrix behaviour. Keep terse so the table remains scannable on mobile.
+fn model_driver_hint(spec: &str) -> &'static str {
+    if spec.contains("Qwen3.6-35B") {
+        "any"
+    } else if spec.contains("gpt-oss-20b") {
+        "claude/opencode"
+    } else if spec.contains("Qwen3-Coder")
+        || spec.contains("Qwen3-30B")
+        || spec.contains("Qwen3.6-27B")
+        || spec.contains("GLM-4.7")
+        || spec.contains("GLM-4-32B")
+    {
+        "claude"
+    } else if spec.contains("Devstral") || spec.contains("Mistral") {
+        "claude"
+    } else {
+        ""
+    }
 }
 
 /// One row in the unified models panel — installed catalog merged with live residency.
@@ -3277,6 +3300,7 @@ pub async fn status() -> ControlStatus {
         .map(|m| InstalledBrief {
             size_gib: fmt_gib(m.size_bytes),
             stars: model_stars(&m.spec, &live_ratings).map(|n| "★".repeat(n as usize)).unwrap_or_default(),
+            driver_hint: model_driver_hint(&m.spec).to_string(),
             spec: m.spec.clone(),
             size_bytes: m.size_bytes,
         })
@@ -3359,6 +3383,16 @@ mod tests {
         assert!(!shell_safe("codex\nrm -rf /"));
         assert!(!shell_safe("has space"));
         assert!(!shell_safe(""));
+    }
+
+    #[test]
+    fn model_driver_hints_capture_known_model_driver_matches() {
+        assert_eq!(model_driver_hint("mlx-community:Qwen3.6-35B-A3B-4bit-DWQ"), "any");
+        assert_eq!(model_driver_hint("mlx-community:gpt-oss-20b-MXFP4-Q4"), "claude/opencode");
+        assert_eq!(model_driver_hint("mlx-community:Qwen3-Coder-30B-A3B-Instruct-4bit"), "claude");
+        assert_eq!(model_driver_hint("mlx-community:GLM-4.7-Flash-4bit"), "claude");
+        assert_eq!(model_driver_hint("mlx-community:Devstral-Small-2507-4bit"), "claude");
+        assert_eq!(model_driver_hint("unknown:model"), "");
     }
 
     #[test]

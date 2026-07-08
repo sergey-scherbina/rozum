@@ -75,7 +75,7 @@ val gwCard = cardWithHeader(heading(2, "Gateway / residency"))(
     hstack(gap = 8)(text("committed:"),   signalText_(committedTxt))
   )
 )
-val modelSelectCols = [stackedColumn("Model", "spec", "stars"), fieldColumn("GiB", "size_gib")]
+val modelSelectCols = [stackedColumn("Model", "spec", "stars"), fieldColumn("Driver", "driver_hint"), fieldColumn("GiB", "size_gib")]
 val modelsPanel = cardWithHeader(heading(2, "Models"))(
   remoteTable(st, [
     lcol("Model", "spec",       "#/detail/:value"),
