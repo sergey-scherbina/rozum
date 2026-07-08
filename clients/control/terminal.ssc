@@ -36,17 +36,30 @@ fit.fit();
 const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/control/session/attach/' + encodeURIComponent(id);
 let ws;
 let retries = 0;
+let reconnectTimer = null;
+let stableTimer = null;
 function connect(){
   if (!id) { st.textContent = '✗ ' + _lt('no session id'); term.writeln(_lt('No session id. Open terminal from the UCC sessions list.')); return; }
+  // Guard against a double-connect (a tap during the retry wait + the pending timer both firing):
+  // cancel any queued retry, and no-op if a socket is already opening/open.
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (ws && ws.readyState <= 1) return;
   st.textContent = _lt('connecting…');
   ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => { retries = 0; st.textContent = _lt('● connected'); sendResize(); term.focus(); };
+  ws.onopen = () => {
+    // Reset the retry budget only after the connection PROVES stable (5s) — otherwise an
+    // open-then-immediately-close (session already ended) resets it every cycle → infinite loop.
+    if (stableTimer) clearTimeout(stableTimer);
+    stableTimer = setTimeout(() => { retries = 0; }, 5000);
+    st.textContent = _lt('● connected'); sendResize(); term.focus();
+  };
   ws.onmessage = (e) => { term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data)); };
   ws.onclose = () => {
-    // Auto-retry: the session may still be warming up (attach 404s until tmux exists after a
-    // control-serve restart) or the network blipped. ~3 min of retries, then manual.
-    if (retries < 60) { retries++; st.textContent = _lt('○ reconnecting…') + ' (' + retries + ')'; setTimeout(connect, 3000); }
+    if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
+    // Auto-retry with a bounded budget: the session may still be warming up (attach 404s until
+    // tmux exists after a control-serve restart) or the network blipped. ~3 min, then manual.
+    if (retries < 60) { retries++; st.textContent = _lt('○ reconnecting…') + ' (' + retries + ')'; reconnectTimer = setTimeout(connect, 3000); }
     else { st.textContent = _lt('○ disconnected — reconnect?'); }
   };
   ws.onerror = () => { st.textContent = _lt('✗ error (Face ID login required?)'); };
@@ -80,7 +93,9 @@ term.onData(d => { const f = filterInput(d); if (f && ws && ws.readyState === 1)
   });
 })();
 window.addEventListener('resize', () => { fit.fit(); sendResize(); });
-st.onclick = () => { if (!ws || ws.readyState > 1) connect(); };
+// Manual reconnect (tap the status): give a fresh retry budget so it doesn't fall straight back
+// to the giveup state after one failed attempt.
+st.onclick = () => { if (!ws || ws.readyState > 1) { retries = 0; connect(); } };
 if (id) connect(); else { st.textContent = '✗ ' + _lt('no session id'); term.writeln(_lt('No session id. Open terminal from the UCC sessions list.')); }
 """
 

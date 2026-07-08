@@ -344,6 +344,28 @@ fn state_dir() -> Option<PathBuf> {
         .map(|b| b.join("rozum"))
 }
 
+/// Serializes every read-modify-write of the ucc-{sessions,agents,coders}.json registries. The
+/// launch/stop routes and the status-poll prune paths all load→mutate→save the same small JSON
+/// files; without this a poll's save can clobber a concurrent launch (lost update → orphan process
+/// / row stuck at "starting…"). Held only around fast in-memory + file ops, so contention is nil.
+fn registry_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Monotonic per-process suffix so two launches of the same agent/room/model within one wall-clock
+/// second get distinct ids (and distinct tmux names). `now_unix()` alone is second-granularity —
+/// two `/session/launch` in the same second would collide on the tmux session name.
+fn next_launch_seq() -> u64 {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A `starting…` row whose in-process launch task died (control-serve restart / redeploy mid-launch)
+/// is never transitioned by anything, so the row would show `starting…` forever. Prune such rows
+/// once they're older than this. Also bounds a genuinely stuck cold-start.
+const STARTING_TTL_SECS: u64 = 900;
+
 fn agents_registry_path() -> Option<PathBuf> {
     state_dir().map(|d| d.join("ucc-agents.json"))
 }
@@ -380,9 +402,15 @@ fn pid_alive(pid: u32) -> bool {
 /// Only records whose launch COMPLETED are pruned when their pid dies; a failed row stays
 /// visible until the user stops it — that's how launch errors reach the phone.
 fn live_agents() -> Vec<AgentBrief> {
+    let _g = registry_lock();
+    let now = crate::share::now_unix();
     let all = load_agents();
     let (keep, dead): (Vec<_>, Vec<_>) = all.into_iter().partition(|a| {
-        a.status.starts_with("starting") || a.status.starts_with("failed") || pid_alive(a.pid)
+        // A `starting…` row is kept only while its launch task could still be running (TTL) —
+        // past that it's an orphan from a control-serve restart mid-launch.
+        let starting_fresh = a.status.starts_with("starting")
+            && now.saturating_sub(a.started_at) < STARTING_TTL_SECS;
+        starting_fresh || a.status.starts_with("failed") || pid_alive(a.pid)
     });
     if !dead.is_empty() {
         save_agents(&keep); // self-heal: drop processes that have exited
@@ -399,12 +427,17 @@ fn live_agents() -> Vec<AgentBrief> {
         .collect()
 }
 
-/// Rewrite one agent record in place (no-op if it was stopped meanwhile).
-fn update_agent_record(id: &str, f: impl FnOnce(&mut AgentRecord)) {
+/// Rewrite one agent record in place under the registry lock; returns whether a record was found
+/// (false ⇒ it was stopped meanwhile — the caller must clean up anything it already spawned).
+fn update_agent_record(id: &str, f: impl FnOnce(&mut AgentRecord)) -> bool {
+    let _g = registry_lock();
     let mut agents = load_agents();
     if let Some(a) = agents.iter_mut().find(|a| a.id == id) {
         f(a);
         save_agents(&agents);
+        true
+    } else {
+        false
     }
 }
 
@@ -826,15 +859,18 @@ async fn agent_launch_route(body: String) -> axum::response::Response {
     // fetch returns instantly and errors land in the row's status (same pattern as sessions).
     let h = req.handle.trim().to_string();
     let handle = if h.is_empty() { derive_handle(&model) } else { h };
-    let id = format!("{}-{}", sanitize(&room), crate::share::now_unix());
-    let mut agents = load_agents();
-    agents.push(AgentRecord {
-        id: id.clone(), model: model.clone(), room: room.clone(),
-        handle: handle.clone(), policy: req.policy.clone(), pid: 0,
-        started_at: crate::share::now_unix(),
-        status: "starting…".into(),
-    });
-    save_agents(&agents);
+    let id = format!("{}-{}-{}", sanitize(&room), crate::share::now_unix(), next_launch_seq());
+    {
+        let _g = registry_lock();
+        let mut agents = load_agents();
+        agents.push(AgentRecord {
+            id: id.clone(), model: model.clone(), room: room.clone(),
+            handle: handle.clone(), policy: req.policy.clone(), pid: 0,
+            started_at: crate::share::now_unix(),
+            status: "starting…".into(),
+        });
+        save_agents(&agents);
+    }
     let policy = req.policy.clone();
     let persona = req.persona.trim().to_string();
     let spawn_model = model.clone();
@@ -842,14 +878,21 @@ async fn agent_launch_route(body: String) -> axum::response::Response {
         model,
         id.clone(),
         |id| load_agents().iter().any(|a| a.id == id),
-        |id, s| update_agent_record(id, |a| a.status = s),
+        |id, s| { update_agent_record(id, |a| a.status = s); },
         move |task_id, port| async move {
             match spawn_participant(&spawn_model, &room, &policy, &persona, port) {
-                Ok(pid) => update_agent_record(&task_id, |a| {
-                    a.pid = pid;
-                    a.status = "running".into();
-                }),
-                Err(e) => update_agent_record(&task_id, |a| a.status = format!("failed: spawn: {e}")),
+                Ok(pid) => {
+                    // If stop removed the record while we were spawning, update_* returns false —
+                    // kill the just-spawned participant so it isn't orphaned (it holds the model).
+                    let kept = update_agent_record(&task_id, |a| {
+                        a.pid = pid;
+                        a.status = "running".into();
+                    });
+                    if !kept {
+                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+                    }
+                }
+                Err(e) => { update_agent_record(&task_id, |a| a.status = format!("failed: spawn: {e}")); }
             }
         },
     );
@@ -862,6 +905,7 @@ async fn agent_stop_route(body: String) -> axum::response::Response {
         Ok(id) => id,
         Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
     };
+    let _g = registry_lock();
     let mut agents = load_agents();
     let Some(pos) = agents.iter().position(|a| a.id == id) else {
         return json_err(axum::http::StatusCode::NOT_FOUND, "no such agent");
@@ -897,30 +941,6 @@ async fn task_route(axum::Json(req): axum::Json<TaskReq>) -> axum::response::Res
     } else {
         json_err(axum::http::StatusCode::BAD_GATEWAY, out.trim())
     }
-}
-
-/// The model's admission verdict (for a 409 body): its estimated footprint vs the live ledger.
-fn footprint_report(model: &str) -> serde_json::Value {
-    let report = crate::share::dry_run_admission(footprint_for(model));
-    serde_json::json!({
-        "footprint_bytes": report.footprint,
-        "available_bytes": report.available,
-        "budget_bytes": report.budget,
-        "fits": report.admit,
-        "ledger_fits": report.ledger_fits,
-        "ram_fits": report.ram_fits,
-        "pressure_ok": report.pressure_ok,
-    })
-}
-
-/// Estimate a model's resident footprint from its catalog weight size at a conservative ctx.
-fn footprint_for(model: &str) -> u64 {
-    let weight = rozum_models::models::scan_all_installed()
-        .into_iter()
-        .find(|m| m.spec == model)
-        .map(|m| m.size_bytes)
-        .unwrap_or(0);
-    rozum_models::model_source::runtime_footprint_bytes(model, 8192, weight)
 }
 
 /// Derive the roster handle the participant uses, mirroring `model_participant::derive_handle` (the
@@ -1054,11 +1074,21 @@ fn save_coders(coders: &[CoderRecord]) {
 /// Status: "starting…"/"failed: …" verbatim from the record; a completed launch shows "running"
 /// while the process lives and "exited" once it's done (a coder run finishing is normal).
 fn live_coders() -> Vec<CoderBrief> {
+    let _g = registry_lock();
+    let now = crate::share::now_unix();
     load_coders()
         .into_iter()
         .map(|c| {
             let alive = pid_alive(c.pid);
-            let status = if c.status.starts_with("starting") || c.status.starts_with("failed") {
+            let status = if c.status.starts_with("starting") {
+                // A launch task that never spawned (pid 0) past the TTL is a dead cold-start —
+                // show it as failed rather than an eternal "starting…".
+                if c.pid == 0 && now.saturating_sub(c.started_at) >= STARTING_TTL_SECS {
+                    "failed: launch interrupted".into()
+                } else {
+                    c.status.clone()
+                }
+            } else if c.status.starts_with("failed") {
                 c.status.clone()
             } else if alive {
                 "running".into()
@@ -1074,12 +1104,17 @@ fn live_coders() -> Vec<CoderBrief> {
         .collect()
 }
 
-/// Rewrite one coder record in place (no-op if it was stopped meanwhile).
-fn update_coder_record(id: &str, f: impl FnOnce(&mut CoderRecord)) {
+/// Rewrite one coder record in place under the registry lock; returns whether a record was found
+/// (false ⇒ stopped meanwhile — the caller must clean up anything it already spawned).
+fn update_coder_record(id: &str, f: impl FnOnce(&mut CoderRecord)) -> bool {
+    let _g = registry_lock();
     let mut coders = load_coders();
     if let Some(c) = coders.iter_mut().find(|c| c.id == id) {
         f(c);
         save_coders(&coders);
+        true
+    } else {
+        false
     }
 }
 
@@ -1146,34 +1181,43 @@ async fn coder_launch_route(body: String) -> axum::response::Response {
     }
     // Record NOW ("starting…"), do the slow model load + spawn in the background — the phone's
     // fetch returns instantly and errors land in the row's status (same pattern as sessions).
-    let id = format!("{}-{}", sanitize(&agent), crate::share::now_unix());
-    let mut coders = load_coders();
-    coders.push(CoderRecord {
-        id: id.clone(),
-        agent: agent.clone(),
-        model: model.clone(),
-        workdir: workdir.clone(),
-        prompt: prompt.clone(),
-        log: String::new(),
-        pid: 0,
-        started_at: crate::share::now_unix(),
-        status: "starting…".into(),
-    });
-    save_coders(&coders);
+    let id = format!("{}-{}-{}", sanitize(&agent), crate::share::now_unix(), next_launch_seq());
+    {
+        let _g = registry_lock();
+        let mut coders = load_coders();
+        coders.push(CoderRecord {
+            id: id.clone(),
+            agent: agent.clone(),
+            model: model.clone(),
+            workdir: workdir.clone(),
+            prompt: prompt.clone(),
+            log: String::new(),
+            pid: 0,
+            started_at: crate::share::now_unix(),
+            status: "starting…".into(),
+        });
+        save_coders(&coders);
+    }
     let spawn_model = model.clone();
     spawn_launch_task(
         model,
         id.clone(),
         |id| load_coders().iter().any(|c| c.id == id),
-        |id, s| update_coder_record(id, |c| c.status = s),
+        |id, s| { update_coder_record(id, |c| c.status = s); },
         move |task_id, _port| async move {
             match spawn_coder(&agent, &spawn_model, &workdir, &prompt) {
-                Ok((pid, log)) => update_coder_record(&task_id, |c| {
-                    c.pid = pid;
-                    c.log = log.to_string_lossy().into_owned();
-                    c.status = "running".into();
-                }),
-                Err(e) => update_coder_record(&task_id, |c| c.status = format!("failed: spawn: {e}")),
+                Ok((pid, log)) => {
+                    // Stopped mid-spawn → kill the orphan (it holds the model + a live agent run).
+                    let kept = update_coder_record(&task_id, |c| {
+                        c.pid = pid;
+                        c.log = log.to_string_lossy().into_owned();
+                        c.status = "running".into();
+                    });
+                    if !kept {
+                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+                    }
+                }
+                Err(e) => { update_coder_record(&task_id, |c| c.status = format!("failed: spawn: {e}")); }
             }
         },
     );
@@ -1186,6 +1230,7 @@ async fn coder_stop_route(body: String) -> axum::response::Response {
         Ok(id) => id,
         Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
     };
+    let _g = registry_lock();
     let mut coders = load_coders();
     let Some(pos) = coders.iter().position(|c| c.id == id) else {
         return json_err(axum::http::StatusCode::NOT_FOUND, "no such coder");
@@ -1281,9 +1326,13 @@ fn tmux_alive(id: &str) -> bool {
 /// a starting row's tmux doesn't exist yet, and a failed row must stay visible until the user
 /// closes it (that's how launch errors reach the phone).
 fn live_sessions() -> Vec<SessionBrief> {
+    let _g = registry_lock();
+    let now = crate::share::now_unix();
     let all = load_sessions();
     let (keep, dead): (Vec<_>, Vec<_>) = all.into_iter().partition(|s| {
-        s.status.starts_with("starting") || s.status.starts_with("failed") || tmux_alive(&s.id)
+        let starting_fresh = s.status.starts_with("starting")
+            && now.saturating_sub(s.started_at) < STARTING_TTL_SECS;
+        starting_fresh || s.status.starts_with("failed") || tmux_alive(&s.id)
     });
     if !dead.is_empty() { save_sessions(&keep); }
     keep.into_iter()
@@ -1332,7 +1381,9 @@ async fn session_launch_route(body: String) -> axum::response::Response {
     // ✕-closed: errors are read in the terminal, not squeezed into a status cell. tmux creation is
     // instant, so the phone's fetch returns immediately (no funnel-timeout window).
     let prompt = req.prompt.trim().to_string();
-    let id = format!("{}-{}", sanitize(&agent), crate::share::now_unix());
+    // seq suffix: two launches of the same agent in one wall-clock second would otherwise share a
+    // tmux name → the second `new-session` fails with a duplicate-name error (500, no record).
+    let id = format!("{}-{}-{}", sanitize(&agent), crate::share::now_unix(), next_launch_seq());
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
     let name = tmux_name(&id);
     let inner = format!("{} launch --model {} {}", exe.to_string_lossy(), model, agent);
@@ -1353,17 +1404,20 @@ async fn session_launch_route(body: String) -> axum::response::Response {
     // (^[[O) which leaks into the input line as literal text (seen live 2026-07-08).
     let _ = Command::new("tmux").args(["set-option", "-t", &name, "escape-time", "0"]).status();
     let _ = Command::new("tmux").args(["set-option", "-t", &name, "focus-events", "off"]).status();
-    let mut sessions = load_sessions();
-    sessions.push(SessionRecord {
-        id: id.clone(),
-        agent: agent.clone(),
-        model: model.clone(),
-        workdir: workdir.clone(),
-        prompt: prompt.clone(),
-        started_at: crate::share::now_unix(),
-        status: "running".into(),
-    });
-    save_sessions(&sessions);
+    {
+        let _g = registry_lock();
+        let mut sessions = load_sessions();
+        sessions.push(SessionRecord {
+            id: id.clone(),
+            agent: agent.clone(),
+            model: model.clone(),
+            workdir: workdir.clone(),
+            prompt: prompt.clone(),
+            started_at: crate::share::now_unix(),
+            status: "running".into(),
+        });
+        save_sessions(&sessions);
+    }
     // Seed the first task once the agent's REPL is actually up — the gateway may need minutes on
     // a cold start, and keys sent into the loading phase would be swallowed. Poll the shared
     // gateway registry for health, give the REPL a beat, then type the prompt.
@@ -1396,9 +1450,12 @@ async fn session_stop_route(body: String) -> axum::response::Response {
         Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
     };
     let _ = Command::new("tmux").args(["kill-session", "-t", &tmux_name(&id)]).status();
-    let mut sessions = load_sessions();
-    sessions.retain(|s| s.id != id);
-    save_sessions(&sessions);
+    {
+        let _g = registry_lock();
+        let mut sessions = load_sessions();
+        sessions.retain(|s| s.id != id);
+        save_sessions(&sessions);
+    }
     axum::Json(serde_json::json!({ "ok": true, "id": id })).into_response()
 }
 
@@ -3399,6 +3456,29 @@ mod tests {
         assert_eq!(model_driver_hint("mlx-community:GLM-4.7-Flash-4bit"), "claude");
         assert_eq!(model_driver_hint("mlx-community:Devstral-Small-2507-4bit"), "claude");
         assert_eq!(model_driver_hint("unknown:model"), "");
+    }
+
+    #[test]
+    fn next_launch_seq_is_monotonic_and_unique() {
+        // Two launches within one wall-clock second must get distinct ids; the seq is the tiebreaker.
+        let a = next_launch_seq();
+        let b = next_launch_seq();
+        let c = next_launch_seq();
+        assert!(a < b && b < c, "seq not strictly increasing: {a} {b} {c}");
+    }
+
+    #[test]
+    fn agent_record_starting_ttl_is_pruned_but_fresh_kept() {
+        // The prune predicate: a starting row past STARTING_TTL_SECS is dropped (dead launch task);
+        // a fresh one is kept. This mirrors the partition condition in live_agents/live_sessions.
+        let now = 1_000_000u64;
+        let fresh_ok = |started: u64, status: &str| {
+            status.starts_with("starting")
+                && now.saturating_sub(started) < STARTING_TTL_SECS
+        };
+        assert!(fresh_ok(now - 10, "starting…"), "fresh starting must be kept");
+        assert!(!fresh_ok(now - STARTING_TTL_SECS - 1, "starting…"), "stale starting must be pruned");
+        assert!(!fresh_ok(now - 10, "running"), "non-starting handled by other branches");
     }
 
     #[test]
