@@ -81,22 +81,25 @@ cp "$REPO/target/release/rozum-gateway" "$BINDIR/rozum-gateway"
 # Falls back to the pre-built site/<basename> if SSC compilation fails (e.g. when the
 # SSC binary's interpreter doesn't register std/http.ssc extern defs like `route`).
 emit_html() {
-  local ssc_file="$1" port="$2" out="$3"
-  local base
-  base="$(basename "$out")"
+  # $2 (port) is legacy/ignored — the static login+terminal pages now `println(html)` to stdout,
+  # which we capture directly. The old `ssc run` + serve-on-a-port + curl path silently fell back to
+  # a stale pre-built copy whenever http `serve` broke (an ssc regression once shipped a MONTHS-old
+  # terminal.html this way); stdout capture has no server, port, or timing dependency.
+  local ssc_file="$1" out="$3"
+  local base tmp
+  base="$(basename "$out")"; tmp="$out.emit"
   echo ">> emitting $out (from $(basename "$ssc_file")) ..."
-  "$SSC" run "$ssc_file" &
-  local ssc_pid=$!
-  sleep 4
-  if ! curl -sf "http://127.0.0.1:${port}/" -o "$out"; then
+  if "$SSC" run "$ssc_file" > "$tmp" 2>/dev/null && grep -qi '<!doctype html' "$tmp"; then
+    mv "$tmp" "$out"
+  else
+    rm -f "$tmp"
     if [ -f "$HERE/site/$base" ]; then
       cp "$HERE/site/$base" "$out"
-      echo "  (SSC emit failed — used pre-built site/$base)"
+      echo "  ✗ SSC emit failed (no <!doctype> in output) — used pre-built site/$base" >&2
     else
-      echo "  (warn: SSC emit failed and no site/$base fallback)"
+      echo "  ✗ SSC emit failed and no site/$base fallback" >&2
     fi
   fi
-  kill "$ssc_pid" 2>/dev/null || true
 }
 
 # Guard: parse every inline <script> block in an emitted HTML file with Node (syntax-check only, no

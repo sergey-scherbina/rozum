@@ -1,6 +1,13 @@
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><title>rozum · терминал</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"><style>html,body{margin:0;height:100%;background:radial-gradient(130% 95% at 50% 36%,transparent 50%,rgba(2,3,7,.62) 100%),radial-gradient(135% 85% at 50% -12%,#163a50 0%,#0b1d2c 32%,#06090f 68%,#05070c 100%),radial-gradient(58% 48% at 16% 6%,rgba(44,84,120,.34),transparent 62%),radial-gradient(52% 44% at 88% 20%,rgba(74,46,104,.26),transparent 60%) fixed;color:#e6e6e6;font:14px -apple-system,system-ui,sans-serif}#bar{display:flex;gap:10px;align-items:center;padding:8px max(10px,env(safe-area-inset-right)) 8px max(10px,env(safe-area-inset-left));background:#151a23;border-bottom:1px solid #232a36}#bar a{color:#7ab8ff;text-decoration:none}#st{margin-left:auto;font-size:12px;color:#8a93a0}#term{height:calc(100% - 38px);padding:4px}#rozum-lang{position:fixed;bottom:16px;right:16px;display:flex;gap:1px;z-index:999;box-shadow:0 2px 8px rgba(0,0,0,.5)}.rl-btn{background:#21262d;color:#6e7681;border:1px solid #30363d;padding:4px 8px;cursor:pointer;font-size:11px;font-weight:600;letter-spacing:.03em}.rl-btn:first-child{border-radius:5px 0 0 5px}.rl-btn:last-child{border-radius:0 5px 5px 0}.rl-btn.active{background:#1f3a28;border-color:#2ea043;color:#56d364}</style></head><body><div id="bar"><a href="/">← UCC</a><b id="sid"></b><span id="st">…</span></div><div id="term"></div><script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script><script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script><script>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><title>rozum · terminal</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"><style>html,body{margin:0;height:100%;background:radial-gradient(130% 95% at 50% 36%,transparent 50%,rgba(2,3,7,.62) 100%),radial-gradient(135% 85% at 50% -12%,#163a50 0%,#0b1d2c 32%,#06090f 68%,#05070c 100%),radial-gradient(58% 48% at 16% 6%,rgba(44,84,120,.34),transparent 62%),radial-gradient(52% 44% at 88% 20%,rgba(74,46,104,.26),transparent 60%) fixed;color:#e6e6e6;font:14px -apple-system,system-ui,sans-serif}#bar{display:flex;gap:10px;align-items:center;padding:8px max(10px,env(safe-area-inset-right)) 8px max(10px,env(safe-area-inset-left));background:#151a23;border-bottom:1px solid #232a36}#bar a{color:#7ab8ff;text-decoration:none}#st{margin-left:auto;font-size:12px;color:#8a93a0}#keys{display:flex;gap:6px;padding:6px max(10px,env(safe-area-inset-right)) 6px max(10px,env(safe-area-inset-left));background:#10141c;border-bottom:1px solid #232a36;overflow-x:auto;-webkit-overflow-scrolling:touch}#keys button{flex:0 0 auto;min-width:44px;padding:7px 10px;background:#1c2330;color:#c9d4e3;border:1px solid #2c3648;border-radius:7px;font:13px -apple-system,system-ui,sans-serif;cursor:pointer}#keys button:active{background:#2a3850}#term{height:calc(100% - 84px);padding:4px}#rozum-lang{position:fixed;bottom:16px;right:16px;display:flex;gap:1px;z-index:999;box-shadow:0 2px 8px rgba(0,0,0,.5)}.rl-btn{background:#21262d;color:#6e7681;border:1px solid #30363d;padding:4px 8px;cursor:pointer;font-size:11px;font-weight:600;letter-spacing:.03em}.rl-btn:first-child{border-radius:5px 0 0 5px}.rl-btn:last-child{border-radius:0 5px 5px 0}.rl-btn.active{background:#1f3a28;border-color:#2ea043;color:#56d364}</style></head><body><div id="bar"><a href="/">← UCC</a><b id="sid"></b><span id="st">…</span></div><div id="keys"></div><div id="term"></div><script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script><script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script><script>
+// i18n
+var _LG=localStorage.getItem('rozum_lang')||navigator.language.split('-')[0]||'en';
+var _LT={'ru':{'← UCC':'← UCC','no session id':'нет id сессии','No session id. Open terminal from the UCC sessions list.':'Нет id сессии. Откройте терминал из списка сессий UCC.','connecting…':'подключение…','● connected':'● подключено','○ disconnected — reconnect?':'○ отключено — переподключиться?','○ reconnecting…':'○ переподключение…','✗ error (Face ID login required?)':'✗ ошибка (нужен вход по Face ID?)','rozum · terminal':'rozum · терминал'},'uk':{'← UCC':'← UCC','no session id':'немає id сесії','No session id. Open terminal from the UCC sessions list.':'Немає id сесії. Відкрийте термінал зі списку сесій UCC.','connecting…':'підключення…','● connected':'● підключено','○ disconnected — reconnect?':'○ відключено — перепідключитися?','○ reconnecting…':'○ перепідключення…','✗ error (Face ID login required?)':'✗ помилка (потрібен вхід через Face ID?)','rozum · terminal':'rozum · термінал'}};
+function _lt(s){var m=_LT[_LG];return(m&&m[s])||s;}
+document.documentElement.lang=_LG;
+if(_LT[_LG]&&_LT[_LG]['rozum · terminal'])document.title=_LT[_LG]['rozum · terminal'];
+(function(){var d=document.createElement('div');d.id='rozum-lang';['en','ru','uk'].forEach(function(l){var b=document.createElement('button');b.className='rl-btn';b.textContent=l.toUpperCase();b.dataset.lang=l;b.onclick=function(){localStorage.setItem('rozum_lang',l);location.reload();};if(l===_LG)b.classList.add('active');d.appendChild(b);});document.body.appendChild(d);})();
 const id = new URLSearchParams(location.search).get('id') || '';
-document.getElementById('sid').textContent = id || 'нет id сессии';
+document.getElementById('sid').textContent = id || _lt('no session id');
 const st = document.getElementById('st');
 const term = new Terminal({ cursorBlink:true, fontSize:13, theme:{ background:'#0b0e14' } });
 const fit = new FitAddon.FitAddon();
@@ -9,19 +16,85 @@ term.open(document.getElementById('term'));
 fit.fit();
 const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/control/session/attach/' + encodeURIComponent(id);
 let ws;
+let retries = 0;
+let reconnectTimer = null;
+let stableTimer = null;
 function connect(){
-  if (!id) { st.textContent = '✗ нет id сессии'; term.writeln('Нет id сессии. Откройте терминал из списка сессий UCC.'); return; }
-  st.textContent = 'подключение…';
+  if (!id) { st.textContent = '✗ ' + _lt('no session id'); term.writeln(_lt('No session id. Open terminal from the UCC sessions list.')); return; }
+  // Guard against a double-connect (a tap during the retry wait + the pending timer both firing):
+  // cancel any queued retry, and no-op if a socket is already opening/open.
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (ws && ws.readyState <= 1) return;
+  st.textContent = _lt('connecting…');
   ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => { st.textContent = '● подключено'; sendResize(); term.focus(); };
+  ws.onopen = () => {
+    // Reset the retry budget only after the connection PROVES stable (5s) — otherwise an
+    // open-then-immediately-close (session already ended) resets it every cycle → infinite loop.
+    if (stableTimer) clearTimeout(stableTimer);
+    stableTimer = setTimeout(() => { retries = 0; }, 5000);
+    st.textContent = _lt('● connected'); sendResize(); term.focus();
+  };
   ws.onmessage = (e) => { term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data)); };
-  ws.onclose = () => { st.textContent = '○ отключено — переподключиться?'; };
-  ws.onerror = () => { st.textContent = '✗ ошибка (нужен вход по Face ID?)'; };
+  ws.onclose = () => {
+    if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
+    // Auto-retry with a bounded budget: the session may still be warming up (attach 404s until
+    // tmux exists after a control-serve restart) or the network blipped. ~3 min, then manual.
+    if (retries < 60) { retries++; st.textContent = _lt('○ reconnecting…') + ' (' + retries + ')'; reconnectTimer = setTimeout(connect, 3000); }
+    else { st.textContent = _lt('○ disconnected — reconnect?'); }
+  };
+  ws.onerror = () => { st.textContent = _lt('✗ error (Face ID login required?)'); };
 }
 function sendResize(){ if (ws && ws.readyState === 1) ws.send(JSON.stringify({ resize:{ cols: term.cols, rows: term.rows } })); }
-term.onData(d => { if (ws && ws.readyState === 1) ws.send(d); });
+// A phone tap/drag makes xterm.js emit mouse reports (Claude Code requests mouse tracking,
+// tmux forwards) and CC's parser leaks them into its input line as literal ^[[<35;17;45M
+// garbage. Strip every mouse report EXCEPT wheel (so finger-scroll still reaches tmux
+// scrollback), plus focus in/out. Keyboard input has none of these forms, so it passes
+// untouched (the special-keys row bypasses this entirely via ws.send).
+function filterInput(d){
+  return d
+    // SGR mouse (ESC[<Cb;Cx;Cy M|m): keep only wheel events — button bit 6 (64) set. This
+    // forwards bare AND modified wheel (68/69/80/81 = ctrl/shift+wheel) and drops press/
+    // release/drag/motion, which the old bare-64/65 lookahead stripped.
+    .replace(/\x1b\[<(\d+);\d+;\d+[Mm]/g, function(m, cb){ return ((+cb) & 64) ? m : ''; })
+    // Legacy X10 mouse (ESC[M + 3 raw bytes, any value incl. newline): always strip — CC uses
+    // SGR, so any X10 report here is injected by the webview, never keyboard.
+    .replace(/\x1b\[M[\s\S]{3}/g, '')
+    // Terminal query RESPONSES xterm.js auto-generates when the running app queries capabilities
+    // (replayed by tmux on attach) — a keyboard never sends these, so strip them before they leak
+    // into the agent's input line as literal garbage (seen live: `^[P>|tmux 3.7b^[\` + `^[[?1;2;4c`):
+    //   DCS ... ST  (ESC P … ESC \) — XTVERSION / termcap replies
+    .replace(/\x1bP[\s\S]*?\x1b\\/g, '')
+    //   Primary/secondary Device Attributes  (ESC[?…c  /  ESC[>…c)
+    .replace(/\x1b\[[?>][0-9;]*c/g, '')
+    //   Cursor-position / DSR report  (ESC[<row>;<col>R)
+    .replace(/\x1b\[\d+;\d+R/g, '')
+    // Focus in/out (ESC[I / ESC[O) — leaked as literal text on attach/detach.
+    .replace(/\x1b\[[IO]/g, '');
+}
+term.onData(d => { const f = filterInput(d); if (f && ws && ws.readyState === 1) ws.send(f); });
+// Special keys the iOS keyboard lacks (Esc/Tab/Ctrl — Claude Code shortcuts are unreachable
+// without them). Sent as raw sequences straight over the WS. preventDefault on touchstart/
+// mousedown keeps focus in xterm so tapping a key does NOT close the phone keyboard.
+(function(){
+  const KEYS = [
+    ['Esc', '\u001b'], ['Tab', '\t'], ['⇧Tab', '\u001b[Z'],
+    ['←', '\u001b[D'], ['↑', '\u001b[A'], ['↓', '\u001b[B'], ['→', '\u001b[C'],
+    ['^C', '\u0003'], ['^U', '\u0015']
+  ];
+  const bar = document.getElementById('keys');
+  KEYS.forEach(([label, seq]) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = label;
+    const fire = (e) => { e.preventDefault(); if (ws && ws.readyState === 1) ws.send(seq); };
+    b.addEventListener('touchstart', fire, { passive: false });
+    b.addEventListener('mousedown', fire);
+    bar.appendChild(b);
+  });
+})();
 window.addEventListener('resize', () => { fit.fit(); sendResize(); });
-st.onclick = () => { if (!ws || ws.readyState > 1) connect(); };
-if (id) connect(); else { st.textContent = '✗ нет id сессии'; term.writeln('Нет id сессии. Откройте терминал из списка сессий UCC.'); }
-</script><script>var _LG=localStorage.getItem("rozum_lang")||navigator.language.split("-")[0]||"ru";if(_LG!=="en"&&_LG!=="uk")_LG="ru";var _LT={"en":{"нет id сессии":"no session id","Нет id сессии. Откройте терминал из списка сессий UCC.":"No session id. Open terminal from the UCC sessions list.","подключение…":"connecting…","● подключено":"● connected","○ отключено — переподключиться?":"○ disconnected — reconnect?","✗ ошибка (нужен вход по Face ID?)":"✗ error (Face ID login required?)","rozum · терминал":"rozum · terminal"},"uk":{"нет id сессии":"немає id сесії","Нет id сессии. Откройте терминал из списка сессий UCC.":"Немає id сесії. Відкрийте термінал зі списку сесій UCC.","подключение…":"підключення…","● подключено":"● підключено","○ отключено — переподключиться?":"○ відключено — перепідключитися?","✗ ошибка (нужен вход по Face ID?)":"✗ помилка (потрібен вхід через Face ID?)","rozum · терминал":"rozum · термінал"}};function _lt(s){var m=_LT[_LG];return(m&&m[s])||s;}document.documentElement.lang=_LG;if(_LT[_LG]&&_LT[_LG]["rozum · терминал"])document.title=_LT[_LG]["rozum · терминал"];(function(){  var d=document.createElement("div");d.id="rozum-lang";  ["en","ru","uk"].forEach(function(l){    var b=document.createElement("button");b.className="rl-btn";b.textContent=l.toUpperCase();    b.dataset.lang=l;b.onclick=function(){localStorage.setItem("rozum_lang",l);location.reload();};    if(l===_LG)b.classList.add("active");d.appendChild(b);  });document.body.appendChild(d);})();</script></body></html>
+// Manual reconnect (tap the status): give a fresh retry budget so it doesn't fall straight back
+// to the giveup state after one failed attempt.
+st.onclick = () => { if (!ws || ws.readyState > 1) { retries = 0; connect(); } };
+if (id) connect(); else { st.textContent = '✗ ' + _lt('no session id'); term.writeln(_lt('No session id. Open terminal from the UCC sessions list.')); }
+</script></body></html>
