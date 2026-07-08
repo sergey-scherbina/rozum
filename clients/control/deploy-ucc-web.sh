@@ -214,7 +214,7 @@ css = (
     # column was added). overflow-wrap:break-word wraps only when a token would overflow — not per
     # char — and the container scrolls horizontally if the row still exceeds the card width.
     '[data-ssc-datatable] th:nth-child(1){white-space:nowrap}'
-    '[data-ssc-datatable] td:nth-child(1){white-space:normal;overflow-wrap:break-word;word-break:normal;min-width:130px}'
+    '[data-ssc-datatable] td:nth-child(1){white-space:normal;overflow-wrap:break-word;word-break:normal;min-width:110px;max-width:150px}'
     '[role="dialog"]{position:relative;max-height:82vh;overflow-y:auto}'
     '[role="dialog"] a[href="#/"]{position:absolute;top:8px;right:10px;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;font-size:22px;font-weight:300;color:#e5e7eb;text-decoration:none;line-height:1;z-index:1;border-radius:50%;background:rgba(255,255,255,0.08);box-shadow:0 2px 8px rgba(0,0,0,0.55),0 1px 2px rgba(0,0,0,0.35)}'
     '#rozum-lang{position:fixed;bottom:16px;right:16px;display:flex;gap:1px;z-index:999;box-shadow:0 2px 8px rgba(0,0,0,.5)}'
