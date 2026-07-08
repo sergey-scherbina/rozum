@@ -79,6 +79,15 @@ function filterInput(d){
     // Legacy X10 mouse (ESC[M + 3 raw bytes, any value incl. newline): always strip — CC uses
     // SGR, so any X10 report here is injected by the webview, never keyboard.
     .replace(/\x1b\[M[\s\S]{3}/g, '')
+    // Terminal query RESPONSES xterm.js auto-generates when the running app queries capabilities
+    // (replayed by tmux on attach) — a keyboard never sends these, so strip them before they leak
+    // into the agent's input line as literal garbage (seen live: `^[P>|tmux 3.7b^[\` + `^[[?1;2;4c`):
+    //   DCS ... ST  (ESC P … ESC \) — XTVERSION / termcap replies
+    .replace(/\x1bP[\s\S]*?\x1b\\/g, '')
+    //   Primary/secondary Device Attributes  (ESC[?…c  /  ESC[>…c)
+    .replace(/\x1b\[[?>][0-9;]*c/g, '')
+    //   Cursor-position / DSR report  (ESC[<row>;<col>R)
+    .replace(/\x1b\[\d+;\d+R/g, '')
     // Focus in/out (ESC[I / ESC[O) — leaked as literal text on attach/detach.
     .replace(/\x1b\[[IO]/g, '');
 }
