@@ -1906,6 +1906,17 @@ async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: roz
     // panic → reboot, BUG-003). Held for this process's lifetime; covers the initial
     // load below plus every lazy reload / `switch` (all same-process). A cascade spec reserves the SUM
     // of its LOCAL tiers (so admission understands it instead of refusing on the unknown-size sentinel).
+    //
+    // Download an uncached SINGLE model BEFORE admission. The footprint estimate (and thus the gate)
+    // needs the real weights size on disk — an uncached model otherwise estimates the unknown-size
+    // sentinel and is REFUSED before it ever downloads (chicken-and-egg: admission can't fit-check what
+    // isn't on disk, so the download that would make it checkable never runs). ensure_model_dir is a
+    // no-op when already cached, and returns None (harmless) for a cascade/non-repo spec — whose tiers
+    // download later in try_cascade_backend. Afterwards the estimate below is real and admission correct.
+    if rozum::model_source::resolve_model_dir(&model_spec).is_none() {
+        eprintln!("rozum gateway: '{model_spec}' not cached — downloading before the RAM gate …");
+        let _ = rozum::mlx_native_backend::ensure_model_dir(&model_spec).await;
+    }
     let casc_fp = cascade_local_footprint(&cfg, &model_spec, n_ctx);
     let _residency = acquire_residency_or_exit(&model_spec, n_ctx, casc_fp).await;
     // Speculative decoding: if a draft model is configured (`--draft-model` /
