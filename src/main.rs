@@ -1913,7 +1913,10 @@ async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: roz
     // isn't on disk, so the download that would make it checkable never runs). ensure_model_dir is a
     // no-op when already cached, and returns None (harmless) for a cascade/non-repo spec — whose tiers
     // download later in try_cascade_backend. Afterwards the estimate below is real and admission correct.
-    if rozum::model_source::resolve_model_dir(&model_spec).is_none() {
+    // ONLY for a single-model spec — a cascade ("A,B") or "cascade:…" is not one downloadable HF repo
+    // (querying the joined string 401s); its tiers resolve+download in try_cascade_backend below.
+    let is_single_spec = !model_spec.contains(',') && !model_spec.starts_with("cascade");
+    if is_single_spec && rozum::model_source::resolve_model_dir(&model_spec).is_none() {
         eprintln!("rozum gateway: '{model_spec}' not cached — downloading before the RAM gate …");
         let _ = rozum::mlx_native_backend::ensure_model_dir(&model_spec).await;
     }
