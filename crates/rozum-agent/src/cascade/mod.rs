@@ -321,16 +321,26 @@ const EDIT_FAILURE_MARKERS: &[&str] = &[
     "no replacement was performed",
 ];
 
-/// True when the tail of the conversation shows a FAILED Edit — the generalist just tried an edit that
-/// didn't land and is about to retry (its exact failure mode). Only the last few messages are scanned
-/// so a long-resolved failure doesn't sticky-route the whole session to the specialist.
+/// Markers that an Edit LANDED (used to flip routing back to the generalist once the specialist fixed
+/// the edit). Claude Code's Edit success message names the file update.
+const EDIT_SUCCESS_MARKERS: &[&str] = &["has been updated", "the file", "edited the file", "successfully"];
+
+/// STICKY edit-recovery routing: scan the tail newest→oldest for the most recent Edit-relevant
+/// tool_result. Route to the specialist while that most-recent signal is a FAILURE ("string not
+/// found") — and keep routing there across turns until an edit LANDS (success marker) or the failures
+/// scroll out of the window. A single specialist turn wasn't enough (measured: Qwen3-4B got one turn,
+/// didn't finish the edit, routing flipped back to the generalist which re-botched it) — this holds the
+/// specialist engaged until the edit is actually applied.
 fn recovering_from_edit_failure(messages: &[Message]) -> bool {
-    for m in messages.iter().rev().take(3) {
-        for b in &m.content {
+    for m in messages.iter().rev().take(12) {
+        for b in m.content.iter().rev() {
             if let ContentBlock::ToolResult { content, .. } = b {
                 let lc = content.to_lowercase();
                 if EDIT_FAILURE_MARKERS.iter().any(|k| lc.contains(k)) {
-                    return true;
+                    return true; // most recent edit signal was a failure → stay on the specialist
+                }
+                if EDIT_SUCCESS_MARKERS.iter().any(|k| lc.contains(k)) {
+                    return false; // an edit landed → hand back to the generalist
                 }
             }
         }
