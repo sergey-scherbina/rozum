@@ -6716,6 +6716,37 @@ async fn build_cascade_from_spec(
     }
     let n_tiers = spec.tiers.len();
 
+    // Reactive edit-router (opt-in, ROZUM_EDIT_ROUTER=1): a 2-tier Pipeline spec where tier[0] answers
+    // every request and tier[1] takes only requests recovering from a failed Edit. Intercept BEFORE the
+    // eager/lazy pipeline split — the router is inherently one-model-at-a-time (its own lazy resolver +
+    // resident cache), so it must NOT be diverted to the eager co-resident `build_cascade` pipeline.
+    if std::env::var("ROZUM_EDIT_ROUTER").is_ok_and(|v| v != "0")
+        && matches!(spec.strategy, rozum::cascade::StrategyName::Pipeline)
+        && spec.tiers.len() == 2
+    {
+        let cfg_r = std::sync::Arc::clone(cfg);
+        let resolve: rozum::cascade::LazyResolver =
+            std::sync::Arc::new(move |tier: rozum::cascade::TierSpec| {
+                let cfg = std::sync::Arc::clone(&cfg_r);
+                Box::pin(async move {
+                    match tier.location {
+                        rozum::cascade::Location::Local => build_from_config(&cfg, &tier.model, n_ctx).await,
+                        rozum::cascade::Location::Remote => build_remote_tier(&tier),
+                    }
+                }) as futures::future::BoxFuture<
+                    'static,
+                    Option<std::sync::Arc<dyn rozum::ChatBackend>>,
+                >
+            });
+        rozum::obs::log_event(serde_json::json!({
+            "event": "cascade_built", "config": label, "tiers": n_tiers, "residency": "edit-router",
+        }));
+        let be = rozum::cascade::EditRouterBackend::new(
+            spec.tiers[0].clone(), spec.tiers[1].clone(), resolve, n_ctx,
+        );
+        return Some(std::sync::Arc::new(be) as std::sync::Arc<dyn rozum::ChatBackend>);
+    }
+
     // Pipeline → LAZY residency: resolve + tear down ONE tier at a time per request (planner →
     // executor, never co-resident). The in-process automation of solve.sh's sequential two-process
     // flow. See docs/specs/pipeline-cascade.md.
@@ -6745,18 +6776,6 @@ async fn build_cascade_from_spec(
                     Option<std::sync::Arc<dyn rozum::ChatBackend>>,
                 >
             });
-        // Reactive edit-router (opt-in): with exactly 2 tiers and ROZUM_EDIT_ROUTER=1, tier[0] is the
-        // generalist that answers everything and tier[1] the edit-specialist that only takes requests
-        // whose tail shows a failed Edit. Same lazy (one-model-resident) residency as the pipeline.
-        if std::env::var("ROZUM_EDIT_ROUTER").is_ok_and(|v| v != "0") && spec.tiers.len() == 2 {
-            rozum::obs::log_event(serde_json::json!({
-                "event": "cascade_built", "config": label, "tiers": n_tiers, "residency": "edit-router",
-            }));
-            let be = rozum::cascade::EditRouterBackend::new(
-                spec.tiers[0].clone(), spec.tiers[1].clone(), resolve, n_ctx,
-            );
-            return Some(std::sync::Arc::new(be) as std::sync::Arc<dyn rozum::ChatBackend>);
-        }
         rozum::obs::log_event(serde_json::json!({
             "event": "cascade_built", "config": label, "tiers": n_tiers,
             "residency": "lazy-pipeline",
