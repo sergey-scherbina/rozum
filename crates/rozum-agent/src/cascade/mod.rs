@@ -312,6 +312,90 @@ impl ChatBackend for LazyPipelineBackend {
     }
 }
 
+/// The Edit-tool "old_string didn't match" failure the small generalist loops on. Claude Code's Edit
+/// tool returns this text on a miss (the bench prompts reference it verbatim). Case-insensitive.
+const EDIT_FAILURE_MARKERS: &[&str] = &[
+    "string to replace not found",
+    "to replace was not found",
+    "could not find the string to replace",
+    "no replacement was performed",
+];
+
+/// True when the tail of the conversation shows a FAILED Edit — the generalist just tried an edit that
+/// didn't land and is about to retry (its exact failure mode). Only the last few messages are scanned
+/// so a long-resolved failure doesn't sticky-route the whole session to the specialist.
+fn recovering_from_edit_failure(messages: &[Message]) -> bool {
+    for m in messages.iter().rev().take(3) {
+        for b in &m.content {
+            if let ContentBlock::ToolResult { content, .. } = b {
+                let lc = content.to_lowercase();
+                if EDIT_FAILURE_MARKERS.iter().any(|k| lc.contains(k)) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// A **reactive edit-router** (not a pipeline): the generalist (`primary`) answers every request EXCEPT
+/// one whose tail shows a failed Edit — that request is routed to the edit-`specialist`. Measured
+/// rationale: a small generalist (GLM-4-9B) is 100% on create/test/debug/chat but ~40% on precise edits
+/// (its `old_string` mis-matches); the specialist (Qwen3-4B) is 88% on edits. Routing on the ACTUAL
+/// failure — not an up-front task-type guess (fix is indistinguishable from debug by prompt) — avoids
+/// mis-routing the generalist's strong tasks. Lazy: one model resident at a time; `current` caches the
+/// resident backend so consecutive same-route requests reuse it and only a route CHANGE swaps (fits
+/// contended RAM — one ~12 GB model, never two).
+pub struct EditRouterBackend {
+    primary: TierSpec,
+    specialist: TierSpec,
+    resolve: LazyResolver,
+    ctx_window: u32,
+    /// (model_id, resident backend): reused across same-route requests, re-resolved on a route change.
+    current: tokio::sync::Mutex<Option<(String, Arc<dyn ChatBackend>)>>,
+}
+
+impl EditRouterBackend {
+    pub fn new(primary: TierSpec, specialist: TierSpec, resolve: LazyResolver, ctx_window: u32) -> Self {
+        Self { primary, specialist, resolve, ctx_window, current: tokio::sync::Mutex::new(None) }
+    }
+}
+
+#[async_trait]
+impl ChatBackend for EditRouterBackend {
+    async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream> {
+        let to_specialist = recovering_from_edit_failure(&req.messages);
+        let spec = if to_specialist { &self.specialist } else { &self.primary };
+        // Hold `current` across the whole call: serializes requests (never two models swapping/resident
+        // at once) and lets us reuse the resident backend when the route hasn't changed.
+        let mut cur = self.current.lock().await;
+        let reuse = matches!(&*cur, Some((m, _)) if m == &spec.model);
+        rozum_core::obs::log_event(serde_json::json!({
+            "event": "edit_router",
+            "route": if to_specialist { "specialist" } else { "primary" },
+            "model": spec.model, "swap": !reuse,
+        }));
+        let backend = if reuse {
+            cur.as_ref().unwrap().1.clone()
+        } else {
+            let b = (self.resolve)(spec.clone()).await.ok_or_else(|| {
+                ModelError::BackendUnavailable(format!("edit-router: '{}' failed to load", spec.model))
+            })?;
+            *cur = Some((spec.model.clone(), b.clone()));
+            b
+        };
+        backend.chat(req).await
+    }
+
+    fn context_window(&self) -> u32 {
+        self.ctx_window
+    }
+
+    fn label(&self) -> &'static str {
+        "edit-router"
+    }
+}
+
 /// Where a model runs — local (its own resource limits, e.g. memory) vs remote (the network +
 /// the provider's quota/rate limits). A `Network` failure parks *all* remote models at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
