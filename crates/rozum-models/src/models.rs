@@ -388,6 +388,16 @@ fn walk_lmstudio(root: &Path, dir: &Path, out: &mut Vec<InstalledModel>) {
             .any(|e| e.path().extension().map_or(false, |x| x == "safetensors"))
     });
     if has_config && has_safetensors {
+        // Skip vision-language variants: LM Studio ships many models as `*ForConditionalGeneration`
+        // with a `vision_config`, which rozum's native TEXT backend can't load (it prints
+        // "not yet ported" and exits). Don't surface a model the panel can't actually load.
+        let is_vl = std::fs::read_to_string(dir.join("config.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .map_or(false, |c| c.get("vision_config").is_some());
+        if is_vl {
+            return;
+        }
         let repo = dir
             .strip_prefix(root)
             .ok()
