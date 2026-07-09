@@ -80,9 +80,8 @@ val modelSelectCols = [stackedColumn("Model", "spec", "rating_line"), fieldColum
 // its body (stops the sole resident gateway), so stop_label doubles as the show/hide flag.
 val modelsPanel = cardWithHeader(heading(2, "Models"))(
   remoteTable(st, [
-    lcol("Model", "spec", "#/detail/:value"),
-    fieldColumn("GiB", "size_gib"),
-    fieldColumn("", "load_status")
+    stackedColumn("Model", "spec", "load_status"),
+    fieldColumn("GiB", "size_gib")
   ], "models", [
     rowPostAction("load",   "POST", "/control/gateway/load", "load_spec",  refresh),
     rowPostAction("unload", "POST", "/control/gateway/stop", "stop_label", refresh)
