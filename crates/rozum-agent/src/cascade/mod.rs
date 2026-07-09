@@ -55,10 +55,16 @@ const PLANNER_MAX_TOKENS: u32 = 800;
 /// The framing handed to every non-final (advisor) tier in a `Pipeline` cascade.
 const PLANNER_FRAMING: &str = "You are the PLANNER in a multi-stage pipeline. Do NOT call tools, write \
 files, or run anything. Think the task through and output a concise, concrete plan for the next model to \
-execute: the approach, the key steps in order, and any critical code or structure it must get right. Be \
-specific and brief — this plan is the only thing the executor receives from you.";
-/// How an advisor's plan is framed when forwarded into the next tier's input.
-const PLAN_PREFIX: &str = "[Plan from the advisor model — follow it to complete the task]\n";
+execute: the approach, the key steps in order, and the critical logic, function signatures, or exact edits \
+it must get right. Describe in prose what each file must contain and the tricky details — do NOT paste full \
+file contents or large code blocks; the executor authors the files itself with its own tools. Be specific \
+and brief — this plan is the only thing the executor receives from you.";
+/// How an advisor's plan is framed when forwarded into the next tier's input. It steers the executor to
+/// author files with its native Write/Edit tools — NOT to transcribe code through shell heredocs, which
+/// corrupt on multi-line content (measured: a strong solo executor drops from Write→heredoc under a plan
+/// carrying fenced code and fails create-from-scratch tasks it otherwise passes 100%).
+const PLAN_PREFIX: &str = "[Plan from the advisor model — follow its approach. Create and modify files with \
+your Write/Edit tools directly; do NOT echo file contents through shell heredocs or `cat >`.]\n";
 
 /// Append `text` to the trailing user-text message when there is one; otherwise add a new user
 /// message. Merging (rather than pushing a second user turn) keeps role alternation intact — strict
