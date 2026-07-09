@@ -81,7 +81,8 @@ val modelSelectCols = [stackedColumn("Model", "spec", "rating_line"), fieldColum
 val modelsPanel = cardWithHeader(heading(2, "Models"))(
   remoteTable(st, [
     lcol("Model", "spec", "#/detail/:value"),
-    fieldColumn("GiB", "size_gib")
+    fieldColumn("GiB", "size_gib"),
+    fieldColumn("", "load_status")
   ], "models", [
     rowPostAction("load",   "POST", "/control/gateway/load", "load_spec",  refresh),
     rowPostAction("unload", "POST", "/control/gateway/stop", "stop_label", refresh)

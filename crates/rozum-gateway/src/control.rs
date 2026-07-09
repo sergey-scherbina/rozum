@@ -511,11 +511,95 @@ async fn ensure_gateway(model: &str) -> Result<u16, String> {
     cold_start_gateway(model).await
 }
 
+/// In-flight model loads driven by `POST /control/gateway/load`. Presence = loading (async); a set
+/// `error` = the last attempt failed (kept so the panel shows why, cleared on retry). Lets an uncached
+/// model download for as long as it needs without the phone's request blocking or a false timeout.
+struct LoadState {
+    started: u64,
+    error: Option<String>,
+}
+fn loading_models() -> &'static std::sync::Mutex<std::collections::HashMap<String, LoadState>> {
+    use std::sync::OnceLock;
+    static L: OnceLock<std::sync::Mutex<std::collections::HashMap<String, LoadState>>> = OnceLock::new();
+    L.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// True while the model's HF cache still has `*.incomplete` shards — i.e. it's downloading, not yet
+/// loading. Best-effort: an unmapped spec (ollama/lmstudio/path) just reports "not downloading".
+fn model_is_downloading(spec: &str) -> bool {
+    let Some(rest) = spec.strip_prefix("mlx-community:").map(|r| format!("mlx-community/{r}"))
+        .or_else(|| spec.strip_prefix("hf:").map(|s| s.to_owned()))
+        .or_else(|| (!spec.contains(':') && spec.contains('/')).then(|| spec.to_owned()))
+    else {
+        return false;
+    };
+    let Some((org, name)) = rest.split_once('/') else { return false };
+    let Some(home) = std::env::var_os("HOME") else { return false };
+    let dir = PathBuf::from(home)
+        .join(".cache/huggingface/hub")
+        .join(format!("models--{org}--{name}"));
+    fn has_incomplete(dir: &std::path::Path) -> bool {
+        let Ok(rd) = std::fs::read_dir(dir) else { return false };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().map_or(false, |x| x == "incomplete") {
+                return true;
+            }
+            if p.is_dir() && has_incomplete(&p) {
+                return true;
+            }
+        }
+        false
+    }
+    has_incomplete(&dir)
+}
+
+/// Background load driven by `gateway_load_route`: the same resolution as `ensure_gateway` (reuse a
+/// healthy same-model gateway, else switch, else cold-start) but with a generous wait so a multi-GB
+/// download completes, and the outcome recorded in `loading_models()` for the status endpoint.
+async fn gateway_load_bg(model: String) {
+    let result: Result<u16, String> = async {
+        if let Some(g) = crate::share::read_active() {
+            if crate::share::health_ok(g.port).await {
+                if g.model == model {
+                    return Ok(g.port);
+                }
+                let (ok, out) = run_rozum(&["gateway", "switch", "--model", &model]);
+                if !ok {
+                    return Err(format!("could not load {model}: {}", out.trim()));
+                }
+                return crate::share::read_active()
+                    .map(|g| g.port)
+                    .ok_or_else(|| "gateway not running after load".into());
+            }
+        }
+        // 30 min ceiling: enough for the largest weights on a slow link; a real load stall still
+        // fails via child-exit long before this. The RAM gate's own refusal also lands here.
+        cold_start_gateway_wait(&model, std::time::Duration::from_secs(1800)).await
+    }
+    .await;
+    let mut l = loading_models().lock().unwrap();
+    match result {
+        Ok(_) => {
+            l.remove(&model); // now resident — the status endpoint shows the unload button
+        }
+        Err(e) => {
+            if let Some(s) = l.get_mut(&model) {
+                s.error = Some(e); // keep the entry so the panel surfaces why; cleared on retry
+            }
+        }
+    }
+}
+
 /// Spawn a detached `rozum gateway --model … --port <default>` daemon — the same shape
 /// `rozum launch`'s spawn_detached_gateway uses — and wait for it to register and answer health.
 /// The daemon runs the residency admission gate on startup and exits non-zero on refusal, which
 /// surfaces here as the error; model-load progress/errors land in gateway.log.
 async fn cold_start_gateway(model: &str) -> Result<u16, String> {
+    cold_start_gateway_wait(model, std::time::Duration::from_secs(300)).await
+}
+
+async fn cold_start_gateway_wait(model: &str, max_wait: std::time::Duration) -> Result<u16, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let dir = crate::share::gateway_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -538,7 +622,7 @@ async fn cold_start_gateway(model: &str) -> Result<u16, String> {
         cmd.process_group(0); // detach from control-serve's group so it survives a service restart
     }
     let mut child = cmd.spawn().map_err(|e| format!("spawn gateway daemon: {e}"))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let deadline = std::time::Instant::now() + max_wait;
     loop {
         if crate::share::health_ok(port).await {
             return crate::share::read_active()
@@ -553,7 +637,8 @@ async fn cold_start_gateway(model: &str) -> Result<u16, String> {
         }
         if std::time::Instant::now() >= deadline {
             return Err(format!(
-                "gateway not ready after 300s (still loading/downloading?); see {}",
+                "gateway not ready after {}s (still loading/downloading?); see {}",
+                max_wait.as_secs(),
                 log_path.display()
             ));
         }
@@ -669,10 +754,26 @@ async fn gateway_load_route(body: String) -> axum::response::Response {
     if model.is_empty() {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "model required");
     }
-    match ensure_gateway(&model).await {
-        Ok(port) => axum::Json(serde_json::json!({ "ok": true, "model": model, "port": port })).into_response(),
-        Err(e) => json_err(axum::http::StatusCode::CONFLICT, &e),
+    // Fast path: already resident+healthy for this exact model — nothing to do.
+    if let Some(g) = crate::share::read_active() {
+        if g.model == model && crate::share::health_ok(g.port).await {
+            return axum::Json(serde_json::json!({ "ok": true, "model": model, "port": g.port, "status": "resident" })).into_response();
+        }
     }
+    // ASYNC: a load can take minutes (a cold gateway, or a multi-GB download of an uncached model).
+    // Blocking the phone's request for that long timed out with a false "not ready" while the download
+    // ran on fine. Instead kick the load off in the background, track it in `loading_models()`, and
+    // return immediately — `/control/status` reports the model's status (загрузка…/✗ error) and the
+    // panel shows it. Idempotent: a second tap while loading is a no-op; a tap after a failure retries.
+    {
+        let mut l = loading_models().lock().unwrap();
+        if l.get(&model).map_or(false, |s| s.error.is_none()) {
+            return axum::Json(serde_json::json!({ "ok": true, "model": model, "status": "loading" })).into_response();
+        }
+        l.insert(model.clone(), LoadState { started: crate::share::now_unix(), error: None });
+    }
+    tokio::spawn(gateway_load_bg(model.clone()));
+    axum::Json(serde_json::json!({ "ok": true, "model": model, "status": "loading" })).into_response()
 }
 
 async fn gateway_stop_route() -> axum::response::Response {
@@ -3171,6 +3272,10 @@ pub struct UnifiedModelBrief {
     pub stop_label: String,
     /// spec value when the model is not loaded (drives the load URL); "" when already resident.
     pub load_spec: String,
+    /// Async-load status for the panel: "" idle, "downloading…"/"loading…" while a background load is
+    /// in flight (both action buttons hidden), or "✗ <error>" if the last load failed (load button
+    /// shown again so the user can retry). Driven by `loading_models()`.
+    pub load_status: String,
 }
 
 /// A flat `{metric, value}` pair — a row in the display-ready `residency_metrics` table.
@@ -3438,14 +3543,32 @@ pub async fn status() -> ControlStatus {
     let projects = list_projects();
     let resident_specs: std::collections::HashSet<&str> =
         residency.residents.iter().map(|r| r.model.as_str()).collect();
+    // Snapshot in-flight loads (drop stale failures so a week-old error doesn't haunt the panel).
+    let load_snapshot: std::collections::HashMap<String, Option<String>> = {
+        let mut l = loading_models().lock().unwrap();
+        let now = crate::share::now_unix();
+        l.retain(|_, s| s.error.is_none() || now.saturating_sub(s.started) < 600);
+        l.iter().map(|(k, s)| (k.clone(), s.error.clone())).collect()
+    };
     let mut models: Vec<UnifiedModelBrief> = installed_catalog.iter().map(|m| {
         let loaded = resident_specs.contains(m.spec.as_str());
+        // Async-load state: actively loading (no error) hides both buttons and shows a status; a failed
+        // load shows "✗ <err>" AND leaves the load button so the user can retry.
+        let load_entry = load_snapshot.get(&m.spec);
+        let loading_now = matches!(load_entry, Some(None));
+        let load_status = match load_entry {
+            Some(Some(err)) => format!("✗ {err}"),
+            Some(None) if model_is_downloading(&m.spec) => "downloading…".to_string(),
+            Some(None) => "loading…".to_string(),
+            None => String::new(),
+        };
         UnifiedModelBrief {
             spec: m.spec.clone(),
             size_gib: fmt_gib(m.size_bytes),
             size_bytes: m.size_bytes,
-            stop_label: if loaded { "выгрузить".to_string() } else { String::new() },
-            load_spec: if loaded { String::new() } else { m.spec.clone() },
+            stop_label: if loaded && !loading_now { "выгрузить".to_string() } else { String::new() },
+            load_spec: if !loaded && !loading_now { m.spec.clone() } else { String::new() },
+            load_status,
         }
     }).collect();
     models.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
