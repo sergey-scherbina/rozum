@@ -357,24 +357,57 @@ pub fn scan_ollama() -> Vec<InstalledModel> {
     out
 }
 
+/// LM Studio's store root — the dir that contains `models/`. Newer LM Studio uses `~/.lmstudio`;
+/// older builds used `~/.cache/lm-studio`. `ROZUM_LMSTUDIO_HOME` overrides. Shared with
+/// `model_source::resolve_model_dir` so scan-spec and load-path agree.
+pub(crate) fn lmstudio_root() -> PathBuf {
+    if let Some(h) = std::env::var_os("ROZUM_LMSTUDIO_HOME") {
+        return PathBuf::from(h);
+    }
+    let dot = home().join(".lmstudio");
+    if dot.join("models").is_dir() {
+        return dot;
+    }
+    home().join(".cache").join("lm-studio")
+}
+
 pub fn scan_lmstudio() -> Vec<InstalledModel> {
-    let root = std::env::var_os("ROZUM_LMSTUDIO_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".cache").join("lm-studio"))
-        .join("models");
+    let root = lmstudio_root().join("models");
     let mut out = Vec::new();
-    walk_for_gguf(&root, &root, &mut out);
+    walk_lmstudio(&root, &root, &mut out);
     out
 }
 
-fn walk_for_gguf(root: &Path, dir: &Path, out: &mut Vec<InstalledModel>) {
+fn walk_lmstudio(root: &Path, dir: &Path, out: &mut Vec<InstalledModel>) {
+    // MLX model dir: `config.json` + at least one `.safetensors` shard. LM Studio stores MLX models
+    // as plain HF-layout dirs (NOT gguf) — the old gguf-only scan missed every MLX download. Emit the
+    // DIR (that's what the MLX backend loads) and stop descending into it.
+    let has_config = dir.join("config.json").is_file();
+    let has_safetensors = std::fs::read_dir(dir).map_or(false, |rd| {
+        rd.flatten()
+            .any(|e| e.path().extension().map_or(false, |x| x == "safetensors"))
+    });
+    if has_config && has_safetensors {
+        let repo = dir
+            .strip_prefix(root)
+            .ok()
+            .map(|r| r.to_string_lossy().to_string())
+            .unwrap_or_default();
+        out.push(InstalledModel {
+            source: ModelSource::LMStudio,
+            spec: format!("lmstudio:{repo}"),
+            path: dir.to_path_buf(),
+            size_bytes: dir_size(dir),
+        });
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
-            walk_for_gguf(root, &p, out);
+            walk_lmstudio(root, &p, out);
         } else if p.extension().map_or(false, |e| e == "gguf") {
             let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
             // Spec = lmstudio:<repo-relative-to-root>, without the file name.

@@ -65,6 +65,13 @@ pub fn resolve_model_dir(spec: &str) -> Option<PathBuf> {
         return dir.join("config.json").is_file().then_some(dir);
     }
 
+    // LM Studio MLX models live under its store as plain HF-layout dirs; the spec is
+    // `lmstudio:<repo-relative-to models/>` (produced by models::scan_lmstudio). Resolve to that dir.
+    if let Some(rel) = spec.strip_prefix("lmstudio:") {
+        let dir = crate::models::lmstudio_root().join("models").join(rel);
+        return dir.join("config.json").is_file().then_some(dir);
+    }
+
     // Normalize the spec's `org/name`, mirroring mistralrs_backend::normalize_spec.
     let repo = if let Some(r) = spec.strip_prefix("mlx-community:") {
         format!("mlx-community/{r}")
