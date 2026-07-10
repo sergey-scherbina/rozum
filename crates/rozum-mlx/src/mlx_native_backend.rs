@@ -309,11 +309,21 @@ mod inner {
 
     /// Register a newly-resident model; returns its contamination flag. If others are already
     /// resident, this one AND all of them are marked co-resident (their peaks are now entangled).
+    pub(crate) fn should_reset_peak(live_residents: usize) -> bool {
+        live_residents == 0
+    }
+
     fn register_resident() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         use std::sync::atomic::Ordering::SeqCst;
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut live = LIVE_RESIDENTS.lock().unwrap_or_else(|e| e.into_inner());
-        if !live.is_empty() {
+        if should_reset_peak(live.len()) {
+            // MLX's peak counter is process-global and survives teardown. A sequentially loaded
+            // model must start a fresh generation high-water or it inherits the previous model's
+            // peak and poisons both `/stats` and the measured-footprint cache. Never reset while
+            // another resident is live: that would erase co-resident safety evidence.
+            mlx_rs::memory::reset_peak_memory();
+        } else {
             flag.store(true, SeqCst);
             for f in live.iter() {
                 f.store(true, SeqCst);
@@ -417,16 +427,25 @@ mod inner {
             let label = model_id.clone();
             let jobs_in_channel = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let jobs_in_channel_worker = jobs_in_channel.clone();
+            // Register BEFORE the worker allocates model weights: this resets a clean sequential
+            // generation's process-global peak before load, and marks overlapping loads co-resident.
+            let co_resident = register_resident();
 
             // The worker loads the model on its own thread and owns it for life;
             // the `!Send` model never crosses a thread boundary. Keep the handle so the
             // backend can join it on drop (clean teardown).
-            let worker = thread::Builder::new()
+            let worker = match thread::Builder::new()
                 .name("mlx-native".into())
                 .spawn(move || {
                     worker_main(model_dir, model_type, eos, kv_per_pos, jobs_rx, ready_tx, jobs_in_channel_worker)
                 })
-                .map_err(|e| ModelError::BackendUnavailable(format!("mlx: spawn worker: {e}")))?;
+            {
+                Ok(worker) => worker,
+                Err(e) => {
+                    deregister_resident(&co_resident);
+                    return Err(ModelError::BackendUnavailable(format!("mlx: spawn worker: {e}")));
+                }
+            };
 
             match ready_rx.await {
                 Ok(Ok(())) => {
@@ -436,14 +455,20 @@ mod inner {
                         worker: Some(worker),
                         model_id,
                         n_ctx,
-                        co_resident: register_resident(),
+                        co_resident,
                         jobs_in_channel,
                     })
                 }
-                Ok(Err(e)) => Err(ModelError::BackendUnavailable(e)),
-                Err(_) => Err(ModelError::BackendUnavailable(
-                    "mlx: worker died during load".into(),
-                )),
+                Ok(Err(e)) => {
+                    let _ = worker.join();
+                    deregister_resident(&co_resident);
+                    Err(ModelError::BackendUnavailable(e))
+                }
+                Err(_) => {
+                    let _ = worker.join();
+                    deregister_resident(&co_resident);
+                    Err(ModelError::BackendUnavailable("mlx: worker died during load".into()))
+                }
             }
         }
     }
@@ -854,7 +879,7 @@ mod inner {
         // tokio runtime, so it parks until the next job (or the queue closes).
         // `prefix` carries the previous dense request's KV across jobs for prefix
         // reuse (the worker is cap-1 serial, so no locking is needed).
-        let mut store = PrefixStore::new();
+        let mut store = PrefixStore::new(kv_per_pos);
         let cap = batch_cap();
         let batchable_arch = is_batchable_arch(&model);
         while let Some(first) = jobs.blocking_recv() {
@@ -1061,6 +1086,7 @@ mod inner {
     struct PrefixCache {
         ids: Vec<u32>,
         cache: Vec<Option<ConcatKeyValueCache>>,
+        estimated_bytes: u64,
     }
 
     /// Persisted hybrid (Qwen3.6) cache from the previous request, for prefix reuse.
@@ -1072,6 +1098,7 @@ mod inner {
         ids: Vec<u32>,
         cache: Vec<qwen3_5::LayerCache>,
         snap: Vec<qwen3_5::LinearSnap>,
+        estimated_bytes: u64,
     }
 
     /// Default number of prefix-cache slots (distinct conversations whose KV is kept
@@ -1080,6 +1107,12 @@ mod inner {
     /// thrashing one slot. Each slot holds a conversation's KV, so it costs memory —
     /// override via `ROZUM_PREFIX_CACHE_SLOTS` (lower it for very long contexts).
     const DEFAULT_PREFIX_SLOTS: usize = 4;
+    /// Budget for total retained prefix KV. A single active conversation is kept even when it
+    /// exceeds this estimate, because throwing it away would force a full prefill (often a larger
+    /// transient-memory spike) on every turn.
+    const DEFAULT_PREFIX_CACHE_MB: u64 = 1024;
+    /// Conservative fallback for models whose config did not expose exact KV bytes/position.
+    const FALLBACK_KV_BYTES_PER_POS: u64 = 128 * 1024;
 
     /// Small LRU of prefix caches on the (cap-1) worker, so concurrent/interleaved
     /// conversations each reuse their own KV. A worker serves one model, so only one
@@ -1088,16 +1121,79 @@ mod inner {
         dense: Vec<PrefixCache>,
         hybrid: Vec<HybridPrefix>,
         cap: usize,
+        byte_budget: u64,
+        kv_bytes_per_pos: u64,
     }
 
     impl PrefixStore {
-        fn new() -> Self {
+        fn new(kv_bytes_per_pos: Option<u64>) -> Self {
             let cap = std::env::var("ROZUM_PREFIX_CACHE_SLOTS")
                 .ok()
                 .and_then(|s| s.trim().parse::<usize>().ok())
                 .unwrap_or(DEFAULT_PREFIX_SLOTS)
                 .max(1);
-            Self { dense: Vec::new(), hybrid: Vec::new(), cap }
+            let byte_budget = std::env::var("ROZUM_PREFIX_CACHE_MB")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(DEFAULT_PREFIX_CACHE_MB)
+                .saturating_mul(1024 * 1024);
+            Self {
+                dense: Vec::new(),
+                hybrid: Vec::new(),
+                cap,
+                byte_budget,
+                kv_bytes_per_pos: kv_bytes_per_pos.unwrap_or(FALLBACK_KV_BYTES_PER_POS),
+            }
+        }
+
+        fn estimate_bytes(&self, resident_positions: usize) -> u64 {
+            self.kv_bytes_per_pos.saturating_mul(resident_positions as u64)
+        }
+
+        /// Entries are MRU-first. Keep at least one entry, then shrink the LRU tail until both the
+        /// slot ceiling and byte budget hold. Under real host pressure, collapse immediately to the
+        /// single MRU; the active request has already finished when insertion calls this.
+        pub(crate) fn retained_len(costs: &[u64], cap: usize, budget: u64) -> usize {
+            if costs.is_empty() {
+                return 0;
+            }
+            let mut keep = costs.len().min(cap.max(1));
+            while keep > 1 && costs[..keep].iter().copied().sum::<u64>() > budget {
+                keep -= 1;
+            }
+            keep
+        }
+
+        pub(crate) fn retention_policy_for(
+            cap: usize,
+            byte_budget: u64,
+            pressure: rozum_core::shed::PressureLevel,
+        ) -> (usize, u64) {
+            match pressure {
+                rozum_core::shed::PressureLevel::Normal => (cap, byte_budget),
+                rozum_core::shed::PressureLevel::Warn
+                | rozum_core::shed::PressureLevel::Critical => (1, 0),
+            }
+        }
+
+        fn retention_policy(&self) -> (usize, u64) {
+            Self::retention_policy_for(
+                self.cap,
+                self.byte_budget,
+                rozum_core::shed::read_host_pressure(),
+            )
+        }
+
+        fn trim_dense(&mut self) {
+            let (cap, budget) = self.retention_policy();
+            let costs: Vec<u64> = self.dense.iter().map(|entry| entry.estimated_bytes).collect();
+            self.dense.truncate(Self::retained_len(&costs, cap, budget));
+        }
+
+        fn trim_hybrid(&mut self) {
+            let (cap, budget) = self.retention_policy();
+            let costs: Vec<u64> = self.hybrid.iter().map(|entry| entry.estimated_bytes).collect();
+            self.hybrid.truncate(Self::retained_len(&costs, cap, budget));
         }
 
         /// Index of the entry whose `ids` is the LONGEST strict prefix of `ids` (the
@@ -1126,9 +1222,15 @@ mod inner {
             Some((e.ids.len(), e.cache))
         }
 
-        fn put_dense(&mut self, ids: Vec<u32>, cache: Vec<Option<ConcatKeyValueCache>>) {
-            self.dense.insert(0, PrefixCache { ids, cache });
-            self.dense.truncate(self.cap);
+        fn put_dense(
+            &mut self,
+            ids: Vec<u32>,
+            cache: Vec<Option<ConcatKeyValueCache>>,
+            resident_positions: usize,
+        ) {
+            let estimated_bytes = self.estimate_bytes(resident_positions);
+            self.dense.insert(0, PrefixCache { ids, cache, estimated_bytes });
+            self.trim_dense();
         }
 
         /// Take the hybrid entry this prompt extends. Returns `(reuse_len, cache, snap)`.
@@ -1146,9 +1248,11 @@ mod inner {
             ids: Vec<u32>,
             cache: Vec<qwen3_5::LayerCache>,
             snap: Vec<qwen3_5::LinearSnap>,
+            resident_positions: usize,
         ) {
-            self.hybrid.insert(0, HybridPrefix { ids, cache, snap });
-            self.hybrid.truncate(self.cap);
+            let estimated_bytes = self.estimate_bytes(resident_positions);
+            self.hybrid.insert(0, HybridPrefix { ids, cache, snap, estimated_bytes });
+            self.trim_hybrid();
         }
     }
 
@@ -1568,11 +1672,16 @@ mod inner {
             // leave the store untouched
         } else if let Some(ids) = conv_ids {
             if dense && !cache.is_empty() {
-                store.put_dense(ids, cache);
+                store.put_dense(ids, cache, prompt_ids.len().saturating_add(max_tokens));
             } else if let Some((hcache, Some(snap))) = hybrid_result {
                 // Only persist when prefill ran (snapshot present); a mid-prefill
                 // cancel yields no snapshot, so we don't poison the cache.
-                store.put_hybrid(ids, hcache, snap);
+                store.put_hybrid(
+                    ids,
+                    hcache,
+                    snap,
+                    prompt_ids.len().saturating_add(max_tokens),
+                );
             }
         }
     }
@@ -2100,7 +2209,11 @@ mod inner {
         // Persist the advanced target cache for next-turn reuse.
         if prefix_enabled && !tgt.cache.is_empty() {
             if let Some(ids) = prompt_ids.get(..conv_len).map(<[u32]>::to_vec) {
-                store.put_dense(ids, tgt.cache);
+                store.put_dense(
+                    ids,
+                    tgt.cache,
+                    prompt_ids.len().saturating_add(seq.output_tokens as usize),
+                );
             }
         }
         seq.finalize();
@@ -2218,7 +2331,11 @@ mod inner {
         // Persist the advanced target cache for the next turn's reuse.
         if prefix_enabled && !tgt.cache.is_empty() {
             if let Some(ids) = prompt_ids.get(..conv_len).map(<[u32]>::to_vec) {
-                store.put_dense(ids, tgt.cache);
+                store.put_dense(
+                    ids,
+                    tgt.cache,
+                    prompt_ids.len().saturating_add(seq.output_tokens as usize),
+                );
             }
         }
         seq.finalize();
@@ -2302,7 +2419,7 @@ mod inner {
 
         // Serial worker (cap-1): a `PrefixStore` backs prefix-KV reuse for both the
         // speculative path (target cache) and the plain-target fallback.
-        let mut store = PrefixStore::new();
+        let mut store = PrefixStore::new(kv_per_pos);
         while let Some(job) = jobs.blocking_recv() {
             if spec_job_eligible(&job, &target, &draft) {
                 run_spec_job(&mut target, &mut draft, &mut tokenizer, &template, eos.as_slice(), &mut store, job);
@@ -2346,7 +2463,8 @@ mod inner {
             let (jobs_tx, jobs_rx) = mpsc::unbounded_channel::<Job>();
             let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
             let label = target_id.clone();
-            let worker = thread::Builder::new()
+            let co_resident = register_resident();
+            let worker = match thread::Builder::new()
                 .name("mlx-spec".into())
                 .spawn(move || {
                     worker_main_spec(
@@ -2360,9 +2478,15 @@ mod inner {
                         ready_tx,
                     )
                 })
-                .map_err(|e| {
-                    ModelError::BackendUnavailable(format!("mlx: spawn spec worker: {e}"))
-                })?;
+            {
+                Ok(worker) => worker,
+                Err(e) => {
+                    deregister_resident(&co_resident);
+                    return Err(ModelError::BackendUnavailable(format!(
+                        "mlx: spawn spec worker: {e}"
+                    )));
+                }
+            };
             match ready_rx.await {
                 Ok(Ok(())) => {
                     eprintln!("mlx-native: spec-decode '{label}' + draft ready (context {n_ctx})");
@@ -2371,16 +2495,22 @@ mod inner {
                         worker: Some(worker),
                         model_id: target_id,
                         n_ctx,
-                        co_resident: register_resident(),
+                        co_resident,
                         jobs_in_channel: std::sync::Arc::new(
                             std::sync::atomic::AtomicUsize::new(0),
                         ),
                     })
                 }
-                Ok(Err(e)) => Err(ModelError::BackendUnavailable(e)),
-                Err(_) => Err(ModelError::BackendUnavailable(
-                    "mlx: spec worker died during load".into(),
-                )),
+                Ok(Err(e)) => {
+                    let _ = worker.join();
+                    deregister_resident(&co_resident);
+                    Err(ModelError::BackendUnavailable(e))
+                }
+                Err(_) => {
+                    let _ = worker.join();
+                    deregister_resident(&co_resident);
+                    Err(ModelError::BackendUnavailable("mlx: spec worker died during load".into()))
+                }
             }
         }
     }
@@ -5615,6 +5745,25 @@ mod tests {
         assert_eq!(m(&nested, &[1, 2, 3, 4]), Some(2));
         // An exact-length match is NOT reused (need a strict prefix to have a suffix).
         assert_eq!(m(&entries, &[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn prefix_store_byte_budget_keeps_mru_and_evicts_lru() {
+        use super::inner::{PrefixStore, should_reset_peak};
+        use rozum_core::shed::PressureLevel;
+        // MRU first: a 600-byte newest entry plus the next 500-byte entry exceeds 1,000,
+        // so only the newest survives. The one-entry exception also retains an oversized MRU.
+        assert_eq!(PrefixStore::retained_len(&[600, 500, 100], 4, 1_000), 1);
+        assert_eq!(PrefixStore::retained_len(&[1_500, 100], 4, 1_000), 1);
+        // Both constraints apply independently.
+        assert_eq!(PrefixStore::retained_len(&[400, 300, 200], 2, 1_000), 2);
+        assert_eq!(PrefixStore::retained_len(&[400, 300, 200], 4, 1_000), 3);
+        assert_eq!(PrefixStore::retained_len(&[], 4, 1_000), 0);
+        assert_eq!(PrefixStore::retention_policy_for(4, 1_000, PressureLevel::Normal), (4, 1_000));
+        assert_eq!(PrefixStore::retention_policy_for(4, 1_000, PressureLevel::Warn), (1, 0));
+        assert_eq!(PrefixStore::retention_policy_for(4, 1_000, PressureLevel::Critical), (1, 0));
+        assert!(should_reset_peak(0));
+        assert!(!should_reset_peak(1));
     }
 
     #[test]
