@@ -5201,13 +5201,21 @@ fn repair_source_file(cwd: &std::path::Path, rel: &str) -> Option<String> {
 
 fn cargo_manifest_repair_hint(cwd: &std::path::Path, err: &str) -> Option<String> {
     let lower = err.to_ascii_lowercase();
-    if !(lower.contains("failed to parse manifest") && lower.contains("edition")) {
+    // Two common manifest hard-stops that leave `cargo` unable to even PARSE the project (so the model
+    // never gets a useful code-level error to repair against): an unsupported `edition`, and a Cargo.toml
+    // with no `[package]` header at all — the latter is a frequent small-model create-from-scratch miss
+    // (measured: GLM-4-9B on rpn wrote `name = "rpn-calc"\n…` with no `[package]` → "manifest is missing
+    // either a `[package]` or a `[workspace]`", and every repair round thrashed on the same parse error).
+    let bad_edition = lower.contains("failed to parse manifest") && lower.contains("edition");
+    let missing_package = lower.contains("missing") && lower.contains("[package]");
+    if !(bad_edition || missing_package) {
         return None;
     }
     let name = cargo_package_name(cwd).unwrap_or_else(|| "app".to_string());
     Some(format!(
-        "CARGO MANIFEST FIX: Cargo cannot parse Cargo.toml. Rewrite Cargo.toml with a normal \
-         supported package header before changing Rust code:\n```toml\n[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n```"
+        "CARGO MANIFEST FIX: Cargo cannot parse Cargo.toml. Rewrite the WHOLE Cargo.toml with a normal \
+         package header (it must start with the `[package]` table) before changing any Rust code:\n\
+         ```toml\n[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n```"
     ))
 }
 
@@ -8095,6 +8103,20 @@ mod chain_tests {
         assert!(h.contains("name = \"rpn-calc\""), "got: {h}");
         assert!(h.contains("version = \"0.1.0\""), "got: {h}");
         assert!(h.contains("edition = \"2021\""), "got: {h}");
+    }
+
+    #[test]
+    fn cargo_manifest_repair_hint_catches_missing_package_header() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        // GLM-4-9B's observed rpn miss: a Cargo.toml with no [package] table at all.
+        std::fs::write(root.join("Cargo.toml"), "name = \"rpn-calc\"\nversion = \"0.1.0\"\n").unwrap();
+        let err = "error: failed to load manifest\nCaused by:\n  manifest is missing either a `[package]` or a `[workspace]`";
+        let h = cargo_manifest_repair_hint(root, err).expect("a missing [package] header must be hinted");
+        assert!(h.contains("[package]"), "got: {h}");
+        assert!(h.contains("must start with the `[package]` table"), "got: {h}");
+        // An unrelated compile error must NOT trigger the manifest hint.
+        assert!(cargo_manifest_repair_hint(root, "error[E0433]: failed to resolve").is_none());
     }
 
     #[test]
