@@ -68,6 +68,8 @@ pub enum StrategyName {
     /// Run every tier in order as a planner→…→executor pipeline (not escalation). See
     /// `docs/specs/pipeline-cascade.md`.
     Pipeline,
+    /// Leader-drives, specialist-rescues-from-a-clean-restart. The DEFAULT for a two-model `A,B` spec.
+    Solve,
 }
 
 impl StrategyName {
@@ -79,6 +81,7 @@ impl StrategyName {
             "classify" | "classifythenstart" => Some(StrategyName::Classify),
             "learned" | "learn" => Some(StrategyName::Learned),
             "pipeline" | "pipe" => Some(StrategyName::Pipeline),
+            "solve" => Some(StrategyName::Solve),
             _ => None,
         }
     }
@@ -91,6 +94,7 @@ impl From<StrategyName> for RoutingStrategy {
             StrategyName::Classify => RoutingStrategy::ClassifyThenStart,
             StrategyName::Learned => RoutingStrategy::Learned,
             StrategyName::Pipeline => RoutingStrategy::Pipeline,
+            StrategyName::Solve => RoutingStrategy::Solve,
         }
     }
 }
@@ -321,7 +325,9 @@ pub fn from_model_pipeline<S: AsRef<str>>(names: &[S]) -> CascadeSpec {
     CascadeSpec {
         tiers: names.iter().map(|n| classify_model_name(n.as_ref())).collect(),
         max_escalations: None,
-        strategy: StrategyName::Pipeline,
+        // Default for a two-model `A,B` spec: Solve (leader drives; specialist rescues from a clean
+        // restart). An explicit `--strategy pipeline` overrides this back to the planner→executor pipeline.
+        strategy: StrategyName::Solve,
         router_model: None,
     }
 }

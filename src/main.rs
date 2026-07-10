@@ -1538,7 +1538,13 @@ fn cascade_local_footprint(cfg: &rozum::RuntimeConfig, model: &str, n_ctx: u32) 
     // lazy only when the SUM would overcommit. Must match the build-time choice in `build_cascade_from_spec`.
     // For the EAGER SUM: use eager_coresident_footprint (smmr-D follow-up) — counts the shared
     // MLX buffer-cache + prefill-activation reserve ONCE, not once per tier.
-    let total = if matches!(spec.strategy, rozum::cascade::StrategyName::Pipeline) {
+    let total = if matches!(spec.strategy, rozum::cascade::StrategyName::Solve) {
+        // Solve is ALWAYS lazy (leader OR specialist resident, never both) → reserve MAX, not SUM.
+        local_models.iter()
+            .map(|m| estimate_model_footprint_bytes(m, n_ctx))
+            .max()
+            .unwrap_or(0)
+    } else if matches!(spec.strategy, rozum::cascade::StrategyName::Pipeline) {
         if pipeline_is_eager(&spec, n_ctx) {
             eager_coresident_footprint(&local_models, n_ctx)
         } else {
@@ -6716,14 +6722,11 @@ async fn build_cascade_from_spec(
     }
     let n_tiers = spec.tiers.len();
 
-    // Reactive edit-router (opt-in, ROZUM_EDIT_ROUTER=1): a 2-tier Pipeline spec where tier[0] answers
-    // every request and tier[1] takes only requests recovering from a failed Edit. Intercept BEFORE the
-    // eager/lazy pipeline split — the router is inherently one-model-at-a-time (its own lazy resolver +
-    // resident cache), so it must NOT be diverted to the eager co-resident `build_cascade` pipeline.
-    if std::env::var("ROZUM_EDIT_ROUTER").is_ok_and(|v| v != "0")
-        && matches!(spec.strategy, rozum::cascade::StrategyName::Pipeline)
-        && spec.tiers.len() == 2
-    {
+    // Solve — the DEFAULT for a two-model `A,B` spec: tier[0] leads the whole task; on the leader's
+    // stuck signal, tier[1] takes over from a clean restart. Intercept BEFORE the eager/lazy pipeline
+    // split — Solve is inherently one-model-at-a-time (its own lazy resolver + resident cache), so it
+    // must NOT be diverted to the eager co-resident `build_cascade` pipeline.
+    if matches!(spec.strategy, rozum::cascade::StrategyName::Solve) && spec.tiers.len() == 2 {
         let cfg_r = std::sync::Arc::clone(cfg);
         let resolve: rozum::cascade::LazyResolver =
             std::sync::Arc::new(move |tier: rozum::cascade::TierSpec| {
@@ -6739,9 +6742,9 @@ async fn build_cascade_from_spec(
                 >
             });
         rozum::obs::log_event(serde_json::json!({
-            "event": "cascade_built", "config": label, "tiers": n_tiers, "residency": "edit-router",
+            "event": "cascade_built", "config": label, "tiers": n_tiers, "residency": "solve",
         }));
-        let be = rozum::cascade::EditRouterBackend::new(
+        let be = rozum::cascade::SolveBackend::new(
             spec.tiers[0].clone(), spec.tiers[1].clone(), resolve, n_ctx,
         );
         return Some(std::sync::Arc::new(be) as std::sync::Arc<dyn rozum::ChatBackend>);

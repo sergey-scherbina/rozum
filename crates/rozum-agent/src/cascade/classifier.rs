@@ -35,6 +35,11 @@ pub enum RoutingStrategy {
     /// streams the answer back). A chain of models behind one endpoint, where the first tells the
     /// next what to do. See `docs/specs/pipeline-cascade.md`.
     Pipeline,
+    /// **Solve** (the default for a two-model `A,B` spec): the LEADER (tier 0) drives the whole task;
+    /// when it gets STUCK (its Edit tool loops on "string not found") the SPECIALIST (tier 1) takes over
+    /// from a CLEAN restart — it sees only the original task, never the leader's abandoned attempt (a
+    /// mid-session handoff of the leader's mess is measured to fail; a fresh restart is measured 100%).
+    Solve,
 }
 
 /// A free, deterministic difficulty heuristic over the prompt's surface features: length, code
