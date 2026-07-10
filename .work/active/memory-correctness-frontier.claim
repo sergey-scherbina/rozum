@@ -1,6 +1,6 @@
 feature/memory-correctness-frontier 2026-07-10T11:03:00Z
 agent: codex
-heartbeat: 2026-07-10T11:30:14Z
+heartbeat: 2026-07-10T12:03:56Z
 status: in-progress
-done-so-far: isolated worktree created from origin/master
-next: write and commit memory-correctness-frontier spec
+done-so-far: spec + metrics + byte-budgeted KV + 3-state verifier committed; tests green
+next: rebase on origin/master, push feature, integrate and release claim
