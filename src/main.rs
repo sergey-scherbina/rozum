@@ -4682,6 +4682,14 @@ async fn derive_target(base: &str, task: &str) -> Option<String> {
     (parts.len() > 1).then(|| parts.join(" && "))
 }
 
+/// True if the task actually asks for a Rust/cargo project, so a cargo-based verify is legitimate even
+/// before the project exists (create-from-scratch). Guards against `derive_target` hallucinating a cargo
+/// check for a non-code task (a chat "reply with pong" must NOT be gated on `cargo run`).
+fn task_mentions_cargo(prompt: &str) -> bool {
+    let p = prompt.to_ascii_lowercase();
+    ["cargo", "rust", "crate", "src/main.rs", "src/lib.rs", ".rs"].iter().any(|k| p.contains(k))
+}
+
 /// Semantic PASS/FAIL/UNKNOWN judge for a task with NO deterministic acceptance check — `derive_target` ruled
 /// it not machine-checkable (e.g. "refactor for clarity", "make the error message clearer"). Reads the
 /// task + the produced source and asks the model to rule. This is the semantic half of the default
@@ -5422,6 +5430,19 @@ async fn exec_agent(
             let Some(vcmd) = derived_target.clone().or_else(resolve_verify_cmd) else {
                 break 'chain; // no verifiable project → no gate
             };
+            // Hallucinated-check guard: derive_target (a small model formalizing the check) sometimes
+            // invents a cargo check for a task that has no project at all — e.g. the chat task "reply
+            // with pong" became `cargo run -- pong == gnop`. If the check needs cargo but there's no
+            // Cargo.toml AND the task never asked to create a Rust project, this is NOT a verifiable
+            // project: accept the agent's output instead of looping repairs+escalation to the timeout.
+            if std::env::var("ROZUM_VERIFY").is_err()
+                && vcmd.contains("cargo")
+                && !cwd.join("Cargo.toml").exists()
+                && !task_mentions_cargo(&original_prompt)
+            {
+                eprintln!("rozum launch: ⏭ verify skipped — task has no cargo project (the derived check could never pass)");
+                break 'chain;
+            }
             if !announced {
                 eprintln!("rozum launch: verify-gate — `{vcmd}` (ROZUM_VERIFY=0 to disable; {} link(s) × {rounds} repair)", chain.len());
                 announced = true;
@@ -8017,6 +8038,17 @@ mod chain_tests {
         let pass = updated_model_stat(&unknown, Some(true));
         assert_eq!(pass["attempts"], 1);
         assert_eq!(pass["passes"], 1);
+    }
+
+    #[test]
+    fn task_mentions_cargo_gates_only_code_tasks() {
+        // Chat tasks → false (a hallucinated `cargo run -- pong` check must NOT gate them).
+        assert!(!task_mentions_cargo("Reply with exactly the single word: pong"));
+        assert!(!task_mentions_cargo("Summarize this paragraph in one sentence."));
+        // Real code tasks (create + edit) → true.
+        assert!(task_mentions_cargo("create a minimal Rust binary project with a Cargo.toml"));
+        assert!(task_mentions_cargo("Fix the bug in src/main.rs so cargo run prints olleh"));
+        assert!(task_mentions_cargo("cargo test fails because of a bug in src/lib.rs"));
     }
 
     #[test]
