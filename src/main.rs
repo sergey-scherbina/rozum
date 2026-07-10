@@ -4320,6 +4320,14 @@ fn spawn_detached_gateway(
         .stdin(Stdio::null())
         .stdout(log_file.try_clone()?)
         .stderr(log_file);
+    // A multi-model launch drives the verify-repair CHAIN (exec_agent), which hosts ONE model per link
+    // and switches via /control/switch. An EAGER co-resident pipeline fights that switch — it loads BOTH
+    // models and thrashes (measured: rpn hung right after deriving the target, never reached link 1;
+    // under lazy the same run proceeds cleanly). So force LAZY residency for a chain's gateway unless the
+    // user explicitly set a preference. (A bare `rozum gateway --model A,B` pipeline is unaffected.)
+    if model_spec.contains(',') && std::env::var_os("ROZUM_PIPELINE_EAGER").is_none() {
+        cmd.env("ROZUM_PIPELINE_EAGER", "0");
+    }
     // Own process group so a Ctrl-C / terminal close on the launch doesn't kill
     // the shared daemon.
     #[cfg(unix)]
@@ -5275,9 +5283,13 @@ async fn exec_agent(
     let workdir_snapshot = if multi { snapshot_workdir(&cwd) } else { None };
     'chain: for (mi, model) in chain.iter().enumerate() {
         let has_alt = mi + 1 < chain.len();
-        // Auto-exclude: drop a link with a consistently-bad track record in this role — but only
-        // when a later link can take over (never skip the last resort). Stats accrue across runs.
-        if multi && has_alt {
+        // Auto-exclude: drop a MIDDLE link with a consistently-bad track record — but NEVER the
+        // LEADER (mi==0) and never the last resort (has_alt==false). The leader is the generalist
+        // that carries most task-classes; the per-role stat is NOT per-task, so its failures on one
+        // weakness (e.g. fix) would otherwise wrongly exclude it from its strengths (rpn/build/test)
+        // and collapse the complementary composition to the specialist alone. So a 2-model solve
+        // chain never auto-skips; only a genuinely redundant middle model (3+ links) can be dropped.
+        if multi && mi > 0 && has_alt {
             let (skip, p, a) = model_track_record(model, "executor");
             if skip {
                 eprintln!("rozum launch: ⤳ skipping {model} — poor track record ({p}/{a} passed); trying the next link");
