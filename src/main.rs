@@ -5235,6 +5235,25 @@ fn cargo_manifest_repair_hint(cwd: &std::path::Path, err: &str) -> Option<String
     ))
 }
 
+/// A required source file EXISTS but is 0 bytes after the agent ran. The measured cause is a botched
+/// chained shell heredoc — the model emits `cat > A <<'EOF' && cat > B <<'EOF' && cargo …` but drops the
+/// heredoc BODIES (chained heredocs are syntactically tricky; both GLM-4-9B on rpn and Qwen3-4B on test
+/// fall into it), so `cat` reads an empty heredoc → a 0-byte file. The gateway delivers content fine (a
+/// direct Write of 900+ chars arrives intact) — the fix is to steer the model to the reliable tool.
+fn empty_file_hint(cwd: &std::path::Path) -> Option<String> {
+    let is_empty = |rel: &str| cwd.join(rel).metadata().map(|m| m.len() == 0).unwrap_or(false);
+    if !(is_empty("Cargo.toml") || is_empty("src/main.rs") || is_empty("src/lib.rs")) {
+        return None;
+    }
+    Some(
+        "EMPTY FILE: a required file was written but is 0 bytes — this is a botched chained shell \
+         heredoc (`cat > f <<'EOF' … EOF` whose body was dropped). Do NOT create files with chained \
+         `cat <<EOF` heredocs. Use the Write tool: ONE Write call per file, passing the file's FULL \
+         content in the `content` argument (this delivers the content reliably)."
+            .to_string(),
+    )
+}
+
 /// A delimiter-balance compile error (an extra or missing `(`/`)`/`{`/`}`/`[`/`]`) is a frequent
 /// small-model slip that the raw error tail alone often isn't actionable enough for a weak model to
 /// self-repair (measured: Qwen3-4B on `test` wrote `println!("…"));` with a stray `)` and burned its
@@ -5565,6 +5584,10 @@ async fn exec_agent(
                 None => err,
             };
             let err = match syntax_delimiter_hint(&err) {
+                Some(hint) => format!("{hint}\n\n{err}"),
+                None => err,
+            };
+            let err = match empty_file_hint(&cwd) {
                 Some(hint) => format!("{hint}\n\n{err}"),
                 None => err,
             };
@@ -8202,6 +8225,21 @@ mod chain_tests {
         assert!(syntax_delimiter_hint("this file contains an unclosed delimiter").is_some());
         // A normal type error is not a delimiter problem.
         assert!(syntax_delimiter_hint("error[E0308]: mismatched types").is_none());
+    }
+
+    #[test]
+    fn empty_file_hint_steers_away_from_heredocs() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::create_dir(root.join("src")).unwrap();
+        // A non-empty project → no hint.
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+        assert!(empty_file_hint(root).is_none(), "a non-empty project must not be hinted");
+        // A 0-byte file (the botched-heredoc signature) → hint to use Write.
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        let h = empty_file_hint(root).expect("a 0-byte source file must be hinted");
+        assert!(h.contains("Write tool") && h.contains("heredoc"), "got: {h}");
     }
 
     #[test]
