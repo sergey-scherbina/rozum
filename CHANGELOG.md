@@ -1,5 +1,22 @@
 # Changelog
 
+## fix(launch): harden target derivation and manifest repair for small models
+Completed: 2026-07-10 · `b2dcb3b`…`787d953`
+
+Small models can no longer turn a plain-text task such as “reply with pong” into an impossible
+`cargo run` acceptance check: target derivation now explicitly declines non-code tasks, while a
+defense-in-depth guard skips a hallucinated Cargo check only when there is no manifest, the task did
+not request Rust/Cargo, and no explicit `ROZUM_VERIFY` was supplied. Real projects and operator checks
+remain authoritative.
+
+Repair prompts now recognize Cargo's “manifest is missing `[package]`” hard-stop and include a complete
+supported package header, allowing later rounds or chain links to reach useful code-level diagnostics.
+This removes deterministic verifier/repair thrash; it does not treat missing or malformed semantic
+evidence as success and preserves the `Pass/Fail/Unknown` contract.
+
+Verified: `cargo test -p rozum chain_tests` (13/13), including explicit-check, real-project, non-code,
+missing-manifest, and three-state judge boundaries.
+
 ## feat(runtime): memory × correctness frontier
 Completed: 2026-07-10 · `7a68094`…`f221497`
 
