@@ -5235,6 +5235,35 @@ fn cargo_manifest_repair_hint(cwd: &std::path::Path, err: &str) -> Option<String
     ))
 }
 
+/// Deterministically REPAIR an unparseable Cargo.toml in place. Small models write correct Rust but keep
+/// mangling the well-known `[package]` header — and won't fix it even when handed the exact template
+/// (measured: Qwen3-4B on `test` wrote perfect code + `package = "reverse-cli"` with no `[package]` table
+/// and never recovered across repair rounds). So don't ASK the weak model to fix a format it can't; write
+/// a valid minimal manifest ourselves, recovering the package name if the broken file still carries one.
+/// Returns true iff it rewrote the file. Only called when `cargo` already can't parse the manifest.
+fn heal_cargo_manifest(cwd: &std::path::Path) -> bool {
+    let path = cwd.join("Cargo.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let name = text
+        .lines()
+        .find_map(|l| {
+            let t = l.trim();
+            let rest = t.strip_prefix("name").or_else(|| t.strip_prefix("package"))?;
+            let val = rest.trim_start().strip_prefix('=')?.trim().trim_matches('"').trim();
+            (!val.is_empty() && val.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                .then(|| val.to_string())
+        })
+        .unwrap_or_else(|| "app".to_string());
+    let good =
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n");
+    if text.trim() == good.trim() {
+        return false; // already valid — the parse error is elsewhere; don't loop
+    }
+    std::fs::write(&path, good).is_ok()
+}
+
 /// A required source file EXISTS but is 0 bytes after the agent ran. The measured cause is a botched
 /// chained shell heredoc — the model emits `cat > A <<'EOF' && cat > B <<'EOF' && cargo …` but drops the
 /// heredoc BODIES (chained heredocs are syntactically tricky; both GLM-4-9B on rpn and Qwen3-4B on test
@@ -5525,6 +5554,16 @@ async fn exec_agent(
                 announced = true;
             }
             let (mut ok, mut err) = run_verify(&vcmd, &cwd).await;
+            // Deterministic self-heal: a malformed Cargo.toml is a well-known format the weak model keeps
+            // botching and won't fix from a hint — so rewrite it ourselves and re-check (measured:
+            // Qwen3-4B writes perfect code + a broken `[package]` header; healing the manifest flips
+            // `test` FAIL→PASS with no extra model round). Only fires when cargo genuinely can't parse it.
+            if !ok && cargo_manifest_repair_hint(&cwd, &err).is_some() && heal_cargo_manifest(&cwd) {
+                eprintln!("rozum launch: 🔧 auto-healed a malformed Cargo.toml — re-checking");
+                let (ok2, err2) = run_verify(&vcmd, &cwd).await;
+                ok = ok2;
+                err = err2;
+            }
             let mut unknown = false;
             // Semantic layer: when the structural check passed but there's no deterministic semantic
             // check (fuzzy task), let an independent model judge when the chain has one. Missing or
@@ -8225,6 +8264,23 @@ mod chain_tests {
         assert!(syntax_delimiter_hint("this file contains an unclosed delimiter").is_some());
         // A normal type error is not a delimiter problem.
         assert!(syntax_delimiter_hint("error[E0308]: mismatched types").is_none());
+    }
+
+    #[test]
+    fn heal_cargo_manifest_rewrites_broken_package_header() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        // Qwen3-4B's exact `test` miss: `package = "reverse-cli"` with no [package] table.
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "package = \"reverse-cli\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+        )
+        .unwrap();
+        assert!(heal_cargo_manifest(root), "a malformed manifest must be healed");
+        let fixed = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(fixed.starts_with("[package]\nname = \"reverse-cli\""), "name recovered + [package] table: {fixed}");
+        // An already-valid canonical manifest → no rewrite (don't loop).
+        assert!(!heal_cargo_manifest(root), "a canonical manifest must not be rewritten again");
     }
 
     #[test]
