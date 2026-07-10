@@ -150,7 +150,7 @@ command -v cargo >/dev/null || { echo "need cargo" >&2; exit 1; }
 mkdir -p "$OUT/runs"
 CSV="$OUT/per-run.csv"
 TRIAGE_PY="$here/agentic_triage.py"
-echo "agent,model,task,difficulty,seconds,pass,rc,timeout,turns,tool_uses,agent_peak_mb,peak_cpu_pct,model_footprint_mb,repairs" > "$CSV"
+echo "agent,model,task,difficulty,seconds,pass,rc,timeout,turns,tool_uses,agent_peak_mb,peak_cpu_pct,model_footprint_mb,repairs,verifier_kind,verdict,verdict_confidence,gateway_generation,context_window,mlx_active_mb,mlx_peak_mb,mlx_cache_mb" > "$CSV"
 declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -671,7 +671,7 @@ for spec in "${MODELS[@]}"; do
   # CSV-safe model label: a pipeline spec ("A,B") has a comma that would split the CSV's
   # comma-delimited columns (corrupting the model column AND every naive `-F,` reader below —
   # the footprint backfill, `column -s,`, the summary). Replace it with `+` so every row keeps
-  # exactly 13 fields; the label reads "A+B" (a pipeline). The full spec stays in `$spec`.
+  # a stable field count; the label reads "A+B" (a pipeline). The full spec stays in `$spec`.
   spec_csv="${spec//,/+}"
   glog="$OUT/runs/${spec//[:\/]/_}.gateway.log"
   echo "================ model: $spec  (port $port) ================"
@@ -821,8 +821,32 @@ for spec in "${MODELS[@]}"; do
         [ -n "$triage" ] && echo "    TRIAGE $triage"
         printf '%s\n' "${triage:-}" > "$work/triage.out"
       fi
-      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$agent" "$spec_csv" "$task" "$diff" "$secs_total" "$pass" "$rc" "$tmo" "$turns" "$tools" "$agent_mb" "$peak_cpu" "" "$repairs" >> "$CSV"
+
+      # Memory × correctness evidence. `/stats` exposes MLX unified-memory counters that process
+      # RSS misses. `peak` is generation-scoped by the native runtime; `active` and `cache` show what
+      # this run leaves resident (notably retained prefix KV + allocator cache).
+      # Missing stats are empty fields — remote/non-MLX backends remain valid CSV rows.
+      gw_generation=""; context_window=""; mlx_active=""; mlx_peak=""; mlx_cache=""
+      stats_json="$(curl -fsS -m2 "$base/stats" 2>/dev/null || true)"
+      if [ -n "$stats_json" ] && command -v jq >/dev/null 2>&1; then
+        gw_generation="$(printf '%s' "$stats_json" | jq -r '.generation // ""')"
+        context_window="$(printf '%s' "$stats_json" | jq -r '.context_window // ""')"
+        mlx_active="$(printf '%s' "$stats_json" | jq -r '.mlx_memory_mb.active // ""')"
+        mlx_peak="$(printf '%s' "$stats_json" | jq -r '.mlx_memory_mb.peak // ""')"
+        mlx_cache="$(printf '%s' "$stats_json" | jq -r '.mlx_memory_mb.cache // ""')"
+      fi
+      verifier_kind="benchmark-deterministic"
+      if [ "$pass" = 1 ]; then
+        verdict="pass"; verdict_confidence="1"
+      elif [ "$rc" = 2 ]; then
+        verdict="unknown"; verdict_confidence="0"
+      else
+        verdict="fail"; verdict_confidence="1"
+      fi
+
+      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$agent" "$spec_csv" "$task" "$diff" "$secs_total" "$pass" "$rc" "$tmo" "$turns" "$tools" "$agent_mb" "$peak_cpu" "" "$repairs" \
+        "$verifier_kind" "$verdict" "$verdict_confidence" "$gw_generation" "$context_window" "$mlx_active" "$mlx_peak" "$mlx_cache" >> "$CSV"
 
       [ "${KEEP:-0}" = 1 ] && echo "    kept: $work" || rm -rf "$work"
     done

@@ -60,6 +60,8 @@ def as_int(value: str) -> int | None:
 
 
 def passed(row: dict[str, str]) -> bool:
+    if row.get("verdict"):
+        return row.get("verdict") == "pass"
     return row.get("pass") == "1" and row.get("timeout") != "1"
 
 
@@ -83,6 +85,14 @@ def compact_row(row: dict[str, str]) -> dict[str, Any]:
         "repairs": as_int(row.get("repairs", "")),
         "agent_peak_mb": as_int(row.get("agent_peak_mb", "")),
         "model_footprint_mb": as_int(row.get("model_footprint_mb", "")),
+        "verifier_kind": row.get("verifier_kind", ""),
+        "verdict": row.get("verdict", ""),
+        "verdict_confidence": as_float(row.get("verdict_confidence", "")),
+        "gateway_generation": as_int(row.get("gateway_generation", "")),
+        "context_window": as_int(row.get("context_window", "")),
+        "mlx_active_mb": as_int(row.get("mlx_active_mb", "")),
+        "mlx_peak_mb": as_int(row.get("mlx_peak_mb", "")),
+        "mlx_cache_mb": as_int(row.get("mlx_cache_mb", "")),
     }
 
 
@@ -97,6 +107,9 @@ def build_registry(rows: list[dict[str, str]], green_min_runs: int) -> dict[str,
         total = len(reps)
         seconds = [v for row in reps if (v := as_float(row.get("seconds", ""))) is not None]
         footprints = [v for row in reps if (v := as_int(row.get("model_footprint_mb", ""))) is not None]
+        mlx_peaks = [v for row in reps if (v := as_int(row.get("mlx_peak_mb", ""))) is not None]
+        mlx_active = [v for row in reps if (v := as_int(row.get("mlx_active_mb", ""))) is not None]
+        mlx_cache = [v for row in reps if (v := as_int(row.get("mlx_cache_mb", ""))) is not None]
         repairs = [as_int(row.get("repairs", "")) or 0 for row in reps]
         latest = reps[-1]
         cells.append(
@@ -111,6 +124,9 @@ def build_registry(rows: list[dict[str, str]], green_min_runs: int) -> dict[str,
                 "mean_seconds": statistics.fmean(seconds) if seconds else None,
                 "latest_seconds": as_float(latest.get("seconds", "")),
                 "model_footprint_mb": max(footprints) if footprints else None,
+                "mlx_peak_mb": max(mlx_peaks) if mlx_peaks else None,
+                "mlx_active_mb": max(mlx_active) if mlx_active else None,
+                "mlx_cache_mb": max(mlx_cache) if mlx_cache else None,
                 "total_repairs": sum(repairs),
                 "latest": compact_row(latest),
             }

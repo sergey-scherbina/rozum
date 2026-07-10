@@ -84,6 +84,13 @@ env "${EXTRA_ENV[@]}" \
 echo ">> done. CSV: $OUT/per-run.csv  | full log: $LOG"
 command -v python3 >/dev/null 2>&1 && python3 scripts/bench/summarize_matrix.py "$OUT/per-run.csv" || true
 command -v python3 >/dev/null 2>&1 && python3 scripts/bench/matrix_capabilities.py "$OUT/per-run.csv" --out "$OUT/capabilities.json" --green-min-runs "${GREEN_MIN_RUNS:-3}" || true
+if command -v python3 >/dev/null 2>&1; then
+  python3 scripts/bench/memory_correctness_frontier.py "$OUT/per-run.csv" \
+    --min-correctness "${FRONTIER_MIN_CORRECTNESS:-0.80}" | tee "$OUT/memory-correctness-frontier.txt" || true
+  python3 scripts/bench/memory_correctness_frontier.py "$OUT/per-run.csv" \
+    --min-correctness "${FRONTIER_MIN_CORRECTNESS:-0.80}" --json \
+    > "$OUT/memory-correctness-frontier.json" || true
+fi
 # Refresh the UCC model-picker star ratings from the accumulated results (~/.rozum/ucc/model-ratings.json).
 command -v python3 >/dev/null 2>&1 && python3 scripts/bench/export_model_ratings.py || true
 echo ">> rerun reds only:"
