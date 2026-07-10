@@ -1,6 +1,6 @@
 feature/small-model-verify-hardening 2026-07-10T16:09:40Z
 agent: codex-memory-audit
-heartbeat: 2026-07-10T16:09:40Z
-status: not-started
-done-so-far: audited three local-only verifier/repair commits
-next: create isolated feature worktree and port fixes onto origin/master
+heartbeat: 2026-07-10T16:10:03Z
+status: in-progress
+done-so-far: audited commits; isolated feature worktree created from origin/master
+next: port fixes and reconcile verifier conflicts
