@@ -20,6 +20,10 @@ an unavailable semantic judge from being recorded as a successful verification.
 - `gateway_generation`, `context_window`;
 - `mlx_active_mb`, `mlx_peak_mb`, `mlx_cache_mb` sampled from `/stats` after the run.
 
+When a new MLX resident starts and no other MLX resident is live, its registration resets the
+process-global allocator peak. This makes the next `/stats` peak and footprint-cache observation
+generation-scoped. The peak is never reset while models are co-resident.
+
 `scripts/bench/memory_correctness_frontier.py <per-run.csv>...` emits a model × driver frontier.
 For each candidate it reports pass rate, a 95% Wilson lower bound, peak memory, mean time, and
 GiB-seconds per solved task (failed attempts count toward the cost). `--json` emits the same data as
@@ -67,6 +71,7 @@ model. The first chain link and last resort are never auto-skipped.
 ## Behavior
 
 - [ ] Existing matrix CSV readers continue to accept the appended evidence columns.
+- [ ] Sequential model generations do not inherit the previous model's allocator high-water peak.
 - [ ] The frontier includes failed attempts in memory-time cost and identifies dominated candidates.
 - [ ] A single run cannot be presented as high-confidence merely because it passed; the Wilson lower
       bound exposes the evidence count.
