@@ -5213,14 +5213,18 @@ fn repair_source_file(cwd: &std::path::Path, rel: &str) -> Option<String> {
 
 fn cargo_manifest_repair_hint(cwd: &std::path::Path, err: &str) -> Option<String> {
     let lower = err.to_ascii_lowercase();
-    // Two common manifest hard-stops that leave `cargo` unable to even PARSE the project (so the model
-    // never gets a useful code-level error to repair against): an unsupported `edition`, and a Cargo.toml
-    // with no `[package]` header at all — the latter is a frequent small-model create-from-scratch miss
-    // (measured: GLM-4-9B on rpn wrote `name = "rpn-calc"\n…` with no `[package]` → "manifest is missing
-    // either a `[package]` or a `[workspace]`", and every repair round thrashed on the same parse error).
-    let bad_edition = lower.contains("failed to parse manifest") && lower.contains("edition");
+    // ANY manifest parse/load failure leaves `cargo` unable to even PARSE the project, so the model
+    // never gets a useful code-level error and every repair round thrashes on the same manifest error.
+    // The fix is always the same — a correct `[package]` table — so hint it for the whole class:
+    //  - unsupported `edition` (GLM/Qwen wrote edition = "2025");
+    //  - no `[package]` header at all ("manifest is missing either a `[package]` or a `[workspace]`");
+    //  - a malformed `[package]` (measured: Qwen3-4B on `test` wrote a Cargo.toml that parsed as
+    //    "invalid type: string \"reverse-cli\", expected struct TomlPackage").
+    let manifest_parse_error =
+        lower.contains("failed to parse manifest") || lower.contains("failed to load manifest");
     let missing_package = lower.contains("missing") && lower.contains("[package]");
-    if !(bad_edition || missing_package) {
+    let malformed_package = lower.contains("tomlpackage"); // serde: expected struct TomlPackage
+    if !(manifest_parse_error || missing_package || malformed_package) {
         return None;
     }
     let name = cargo_package_name(cwd).unwrap_or_else(|| "app".to_string());
@@ -5229,6 +5233,29 @@ fn cargo_manifest_repair_hint(cwd: &std::path::Path, err: &str) -> Option<String
          package header (it must start with the `[package]` table) before changing any Rust code:\n\
          ```toml\n[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n```"
     ))
+}
+
+/// A delimiter-balance compile error (an extra or missing `(`/`)`/`{`/`}`/`[`/`]`) is a frequent
+/// small-model slip that the raw error tail alone often isn't actionable enough for a weak model to
+/// self-repair (measured: Qwen3-4B on `test` wrote `println!("…"));` with a stray `)` and burned its
+/// whole repair budget without fixing it). Surface it as a precise, mechanical instruction.
+fn syntax_delimiter_hint(err: &str) -> Option<String> {
+    let lower = err.to_ascii_lowercase();
+    let hit = lower.contains("closing delimiter") // "unexpected closing delimiter"
+        || lower.contains("unclosed delimiter")
+        || lower.contains("mismatched closing delimiter")
+        || lower.contains("missing open");
+    if !hit {
+        return None;
+    }
+    Some(
+        "SYNTAX FIX (delimiter balance): the compiler reports an UNBALANCED delimiter — an extra or \
+         missing `(`, `)`, `{`, `}`, `[`, or `]`. Re-read the flagged line and its immediate neighbours \
+         and make every opener have exactly ONE matching closer (a common slip is a stray `)` right \
+         after a `println!(...)` or a missing `}` closing a block). Change ONLY the delimiter; keep the \
+         logic as-is."
+            .to_string(),
+    )
 }
 
 fn cargo_package_name(cwd: &std::path::Path) -> Option<String> {
@@ -5417,7 +5444,14 @@ async fn exec_agent(
                 current = model.clone();
             }
         }
-        for round in 0..=rounds {
+        // Fast escalation: a NON-LAST link gets ONE shot (no repair rounds), the LAST resort keeps the
+        // full `rounds`. Measured rationale — an intermediate model that fails its first attempt rarely
+        // self-repairs (GLM-4-9B premature-stops or burns its whole max-turns budget), and every wasted
+        // repair round delays the capable specialist behind it (Qwen3-4B is 3/3 on rpn where GLM is 0/3)
+        // — often past the time budget, so the specialist never gets its clean shot. So: leader fails
+        // once → hand off immediately; give the repair budget to the model that can actually use it.
+        let link_rounds = if has_alt { 0 } else { rounds };
+        for round in 0..=link_rounds {
             // A distinct semantic judge may have been resident after the previous round. Restore the
             // executor before invoking its agent; still exactly one model is resident at a time.
             if multi && *model != current {
@@ -5530,12 +5564,16 @@ async fn exec_agent(
                 Some(hint) => format!("{hint}\n\n{err}"),
                 None => err,
             };
+            let err = match syntax_delimiter_hint(&err) {
+                Some(hint) => format!("{hint}\n\n{err}"),
+                None => err,
+            };
             let err = match repair_source_snapshot(&cwd) {
                 Some(snapshot) => format!("{err}\n\n{snapshot}"),
                 None => err,
             };
             program[pidx] = repair_prompt(&original_prompt, &err);
-            if round == rounds {
+            if round == link_rounds {
                 // This link is exhausted — record its outcome for the track-record stats.
                 record_model_outcome(
                     model,
@@ -8148,8 +8186,22 @@ mod chain_tests {
         let h = cargo_manifest_repair_hint(root, err).expect("a missing [package] header must be hinted");
         assert!(h.contains("[package]"), "got: {h}");
         assert!(h.contains("must start with the `[package]` table"), "got: {h}");
+        // A malformed [package] table (Qwen3-4B's `test` miss) parses as a TomlPackage type error.
+        let malformed = "error: failed to parse manifest\ninvalid type: string \"reverse-cli\", expected struct TomlPackage";
+        assert!(cargo_manifest_repair_hint(root, malformed).is_some(), "malformed [package] must be hinted");
         // An unrelated compile error must NOT trigger the manifest hint.
         assert!(cargo_manifest_repair_hint(root, "error[E0433]: failed to resolve").is_none());
+    }
+
+    #[test]
+    fn syntax_delimiter_hint_fires_on_unbalanced_delimiters() {
+        // Qwen3-4B's `test` slip: a stray `)` → "unexpected closing delimiter".
+        let err = "error: unexpected closing delimiter: `}`\n --> src/main.rs:13:1\n missing open `(` for this delimiter";
+        let h = syntax_delimiter_hint(err).expect("a delimiter mismatch must be hinted");
+        assert!(h.contains("delimiter balance") && h.contains("ONLY the delimiter"), "got: {h}");
+        assert!(syntax_delimiter_hint("this file contains an unclosed delimiter").is_some());
+        // A normal type error is not a delimiter problem.
+        assert!(syntax_delimiter_hint("error[E0308]: mismatched types").is_none());
     }
 
     #[test]
