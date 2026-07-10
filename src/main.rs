@@ -4646,7 +4646,10 @@ async fn derive_target(base: &str, task: &str) -> Option<String> {
            `arg` is JUST the argument value X — e.g. for \"cargo run -- hello prints olleh\", arg is \
            \"hello\" (NOT \"cargo run -- hello\"); `expect` is JUST Y, e.g. \"olleh\". Omit if no example.\n\
          - cargo_test=true ONLY if the task explicitly requires a unit test to pass.\n\
-         - checkable=false if the task has no machine-checkable build/run/test criterion.\n\n\
+         - checkable=false if the task has no machine-checkable build/run/test criterion. In particular, \
+         if the task is NOT about a Rust program — it only asks for a chat reply, an explanation, or \
+         plain text (e.g. \"reply with the word pong\") — return checkable=false. The acceptance is the \
+         reply itself, which is NOT a build/run/test; do NOT invent a `cargo run` or an argument for it.\n\n\
          Task:\n{task}"
     );
     let body = serde_json::json!({
