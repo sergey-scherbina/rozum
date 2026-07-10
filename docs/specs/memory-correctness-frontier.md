@@ -32,8 +32,8 @@ no greater peak memory, and no greater GiB-seconds per solve, with at least one 
 
 ### Prefix KV budget
 
-- `ROZUM_PREFIX_CACHE_MB=<MiB>` bounds *additional retained conversations* by estimated KV bytes;
-  default `1024` MiB.
+- `ROZUM_PREFIX_CACHE_MB=<MiB>` bounds total retained prefix KV by estimated bytes; default `1024`
+  MiB, with the one-MRU exception below.
 - `ROZUM_PREFIX_CACHE_SLOTS` remains a hard entry-count ceiling for compatibility.
 - The most-recent conversation may exceed the byte budget by itself: keeping the one active prefix
   avoids a full re-prefill; extra conversations are evicted LRU until both limits hold.
@@ -70,22 +70,22 @@ model. The first chain link and last resort are never auto-skipped.
 
 ## Behavior
 
-- [ ] Existing matrix CSV readers continue to accept the appended evidence columns.
-- [ ] Sequential model generations do not inherit the previous model's allocator high-water peak.
-- [ ] The frontier includes failed attempts in memory-time cost and identifies dominated candidates.
-- [ ] A single run cannot be presented as high-confidence merely because it passed; the Wilson lower
+- [x] Existing matrix CSV readers continue to accept the appended evidence columns.
+- [x] Sequential model generations do not inherit the previous model's allocator high-water peak.
+- [x] The frontier includes failed attempts in memory-time cost and identifies dominated candidates.
+- [x] A single run cannot be presented as high-confidence merely because it passed; the Wilson lower
       bound exposes the evidence count.
-- [ ] PrefixStore evicts LRU entries until the slot ceiling and byte budget hold, while retaining one
+- [x] PrefixStore evicts LRU entries until the slot ceiling and byte budget hold, while retaining one
       oversized MRU entry.
-- [ ] Host memory pressure evicts all but the most-recent prefix without interrupting the active
+- [x] Host memory pressure evicts all but the most-recent prefix without interrupting the active
       request.
-- [ ] Prefix reuse remains byte-identical to a fresh prefill; the policy changes retention only.
-- [ ] A missing or malformed model-judge response produces `Unknown` and cannot end a verified launch
+- [x] Prefix reuse remains byte-identical to a fresh prefill; the policy changes retention only.
+- [x] A missing or malformed model-judge response produces `Unknown` and cannot end a verified launch
       successfully.
-- [ ] A multi-model fuzzy-task judge uses a model distinct from the executor when one exists, without
+- [x] A multi-model fuzzy-task judge uses a model distinct from the executor when one exists, without
       co-residency.
-- [ ] Quality history for one task class cannot exclude the same model from another task class.
-- [ ] Multi-model Solve launches default to lazy residency unless the operator explicitly overrides
+- [x] Quality history for one task class cannot exclude the same model from another task class.
+- [x] Multi-model Solve launches default to lazy residency unless the operator explicitly overrides
       `ROZUM_PIPELINE_EAGER`.
 
 ## Out of scope
@@ -128,4 +128,33 @@ and follows the same bounded escalation path, but is recorded separately in benc
 
 ## Results
 
-To be filled after implementation and verification.
+Implemented 2026-07-10:
+
+- Agentic CSV now records verifier evidence plus generation/context and MLX active/peak/cache memory.
+  `run_full_matrix.sh` emits both text and JSON frontier artifacts automatically.
+- `memory_correctness_frontier.py` uses a 95% Wilson lower bound and charges failed attempts to
+  GiB-seconds-per-solve. Three pure tests cover confidence, failed-attempt cost, and Pareto dominance;
+  a historical matrix CSV was parsed successfully by the backward-compatible path.
+- PrefixStore now applies both the existing slot ceiling and a 1 GiB default byte budget, collapses
+  to one MRU under host pressure, and resets MLX peak accounting before a clean sequential load.
+- Semantic verification is three-state. A distinct chain model judges fuzzy work when available;
+  malformed/unreachable evidence is `Unknown`, follows bounded escalation, and does not count as a
+  pass or poison executor pass-rate history.
+- Verification: `cargo test -p rozum chain_tests` — 10/10; `cargo test -p rozum-mlx --features
+  mlx-native` — 37 passed, 46 hardware/model tests ignored; shell syntax checks green; Python 3/3.
+
+Prepared quiet-slot A/B (do not run while another gateway has a client):
+
+```bash
+ROZUM_PREFIX_CACHE=0 AGENTIC_MODELS="mlx-community:Qwen3-4B-4bit" AGENTS=claude \
+  TASKS="fix test rpn" REPS=3 REPAIR=1 NCTX=32768 RUN_TIMEOUT=600 KEEP=1 \
+  BENCH_OUT=scripts/bench/results/frontier-prefix-off bash scripts/bench/agentic.sh
+
+ROZUM_PREFIX_CACHE=1 ROZUM_PREFIX_CACHE_MB=1024 \
+  AGENTIC_MODELS="mlx-community:Qwen3-4B-4bit" AGENTS=claude \
+  TASKS="fix test rpn" REPS=3 REPAIR=1 NCTX=32768 RUN_TIMEOUT=600 KEEP=1 \
+  BENCH_OUT=scripts/bench/results/frontier-prefix-budget bash scripts/bench/agentic.sh
+
+python3 scripts/bench/memory_correctness_frontier.py \
+  scripts/bench/results/frontier-prefix-{off,budget}/per-run.csv
+```
