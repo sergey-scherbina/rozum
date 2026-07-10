@@ -1,0 +1,6 @@
+feature/small-model-combination-ab 2026-07-10T16:15:32Z
+agent: codex-memory-audit
+heartbeat: 2026-07-10T16:15:32Z
+status: not-started
+done-so-far: verifier hardening landed on master
+next: run five-repetition solo/order A/B on discriminating agentic tasks
