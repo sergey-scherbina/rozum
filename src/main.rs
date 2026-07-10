@@ -5212,6 +5212,9 @@ async fn exec_agent(
     let mut verified: Option<bool> = None; // None = no gate ran (not a verifiable project)
     let mut last_code = 1;
     let mut announced = false;
+    // Multi-model chain: snapshot the workdir so an escalation restores the ORIGINAL files (a clean
+    // shot for the next model, not the previous one's broken edits). Excludes target/ and .git.
+    let workdir_snapshot = if multi { snapshot_workdir(&cwd) } else { None };
     'chain: for (mi, model) in chain.iter().enumerate() {
         let has_alt = mi + 1 < chain.len();
         // Auto-exclude: drop a link with a consistently-bad track record in this role — but only
@@ -5292,7 +5295,17 @@ async fn exec_agent(
                     eprintln!("{}", err.lines().take(8).collect::<Vec<_>>().join("\n"));
                     break 'chain;
                 }
-                eprintln!("rozum launch: ⤴ escalating to the next model with (task + result + error)");
+                // CLEAN RESTART for the next model: restore the ORIGINAL files (drop the previous model's
+                // broken edits) and the ORIGINAL task. Measured: handing the specialist the leader's
+                // mid-attempt mess makes it patch the garbage and fail; a fresh restart on the original
+                // state lands it (Qwen3-4B fix 5/5 from scratch). Escalation ≠ same-model repair.
+                if let Some(snap) = workdir_snapshot.as_deref() {
+                    restore_workdir(&cwd, snap);
+                    program[pidx] = original_prompt.clone();
+                    eprintln!("rozum launch: ⤴ escalating to {} — CLEAN restart (original task + files)", chain[mi + 1]);
+                } else {
+                    eprintln!("rozum launch: ⤴ escalating to {} with (task + result + error)", chain[mi + 1]);
+                }
                 continue 'chain;
             }
             eprintln!("rozum launch: ↻ target not met — re-running {model} with the real error");
@@ -5307,6 +5320,56 @@ async fn exec_agent(
         Some(false) => std::process::exit(if last_code != 0 { last_code } else { 1 }),
         None => std::process::exit(last_code), // no verifiable project — a plain one-shot run
     }
+}
+
+/// Snapshot the source files of `cwd` (recursively, excluding `target/` and `.git/`) into a fresh temp
+/// dir so a Solve escalation can restore the original state. None on any failure (escalation then falls
+/// back to carrying the broken files forward — the pre-Solve behavior).
+fn snapshot_workdir(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dst = std::env::temp_dir().join(format!("rozum-solve-snapshot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dst);
+    copy_tree_contents(cwd, &dst).ok()?;
+    Some(dst)
+}
+
+/// Restore `cwd` to a snapshot: delete its current source entries (keep `target/`/`.git/` for speed),
+/// then copy the snapshot back. Best-effort.
+fn restore_workdir(cwd: &std::path::Path, snap: &std::path::Path) {
+    if let Ok(rd) = std::fs::read_dir(cwd) {
+        for e in rd.flatten() {
+            let name = e.file_name();
+            if name == "target" || name == ".git" {
+                continue;
+            }
+            let p = e.path();
+            let _ = if p.is_dir() {
+                std::fs::remove_dir_all(&p)
+            } else {
+                std::fs::remove_file(&p)
+            };
+        }
+    }
+    let _ = copy_tree_contents(snap, cwd);
+}
+
+/// Recursively copy the contents of `src` into `dst` (creating `dst`), skipping `target/` and `.git/`.
+fn copy_tree_contents(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "target" || name == ".git" {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        if from.is_dir() {
+            copy_tree_contents(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// Codex CLI `-c` overrides that point it at the local rozum gateway over the
