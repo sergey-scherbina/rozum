@@ -4706,9 +4706,17 @@ async fn model_judge(base: &str, task: &str, cwd: &std::path::Path) -> (bool, St
     let Some(text) = text else {
         return (true, String::new()); // judge unavailable → never block a passing build
     };
+    parse_judge_verdict(&text)
+}
+
+/// Parse the judge's reply into (pass, reason). CONSERVATIVE: pass=false ONLY on an explicit
+/// `"pass": false` in a parseable JSON object; a missing key, `pass:true`, or an unparseable reply
+/// all PASS — the judge must never false-gate a working build on a garbled answer.
+fn parse_judge_verdict(text: &str) -> (bool, String) {
     let parsed = text
         .find('{')
         .zip(text.rfind('}'))
+        .filter(|(a, b)| a <= b)
         .and_then(|(a, b)| serde_json::from_str::<serde_json::Value>(&text[a..=b]).ok());
     match parsed {
         Some(j) if j["pass"].as_bool() == Some(false) => {
@@ -7806,6 +7814,50 @@ mod chain_tests {
         assert!(h.contains("--- src/main.rs ---"), "got: {h}");
         assert!(h.contains("s.to_string()"), "got: {h}");
         assert!(h.contains("call Read first"), "got: {h}");
+    }
+
+    #[test]
+    fn judge_blocks_only_on_explicit_pass_false() {
+        // Explicit failure → block, carrying the reason.
+        let (ok, msg) = parse_judge_verdict("{\"pass\": false, \"reason\": \"ignores the second operand\"}");
+        assert!(!ok && msg.contains("ignores the second operand"), "explicit fail must block: {msg}");
+        // Tolerates prose around the JSON object.
+        let (ok, _) = parse_judge_verdict("Here is my verdict:\n{\"pass\": false, \"reason\": \"x\"}\nDone.");
+        assert!(!ok, "must find the object amid prose");
+        // Pass → never block.
+        assert!(parse_judge_verdict("{\"pass\": true, \"reason\": \"correct\"}").0);
+        // CONSERVATIVE: garbled / no JSON / missing key all PASS — never false-gate a working build.
+        assert!(parse_judge_verdict("the model rambled without JSON").0);
+        assert!(parse_judge_verdict("{ not valid json").0);
+        assert!(parse_judge_verdict("{\"note\": \"no pass key\"}").0);
+        assert!(parse_judge_verdict("").0);
+    }
+
+    #[test]
+    fn workdir_snapshot_restores_original_dropping_leader_edits() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() { /* ORIGINAL */ }").unwrap();
+        std::fs::create_dir(root.join("target")).unwrap();
+        std::fs::write(root.join("target/artifact"), "expensive build output").unwrap();
+
+        let snap = snapshot_workdir(root).expect("snapshot should succeed");
+
+        // A "leader" corrupts a file, adds a stray, and deletes another.
+        std::fs::write(root.join("src/main.rs"), "fn main() { GARBAGE }").unwrap();
+        std::fs::write(root.join("src/junk.rs"), "leftover").unwrap();
+        std::fs::remove_file(root.join("Cargo.toml")).unwrap();
+
+        restore_workdir(root, &snap);
+
+        // Original files restored, stray dropped …
+        assert_eq!(std::fs::read_to_string(root.join("src/main.rs")).unwrap(), "fn main() { /* ORIGINAL */ }");
+        assert_eq!(std::fs::read_to_string(root.join("Cargo.toml")).unwrap(), "[package]\nname = \"x\"\n");
+        assert!(!root.join("src/junk.rs").exists(), "stray file must be removed on restore");
+        // … and target/ is preserved (never snapshotted/wiped — keeps the expensive build cache).
+        assert_eq!(std::fs::read_to_string(root.join("target/artifact")).unwrap(), "expensive build output");
     }
 
     #[test]
