@@ -4693,6 +4693,18 @@ fn task_mentions_cargo(prompt: &str) -> bool {
     ["cargo", "rust", "crate", "src/main.rs", "src/lib.rs", ".rs"].iter().any(|k| p.contains(k))
 }
 
+fn should_skip_hallucinated_cargo_verify(
+    verify_cmd: &str,
+    cwd: &std::path::Path,
+    prompt: &str,
+    explicit_verify: bool,
+) -> bool {
+    !explicit_verify
+        && verify_cmd.contains("cargo")
+        && !cwd.join("Cargo.toml").exists()
+        && !task_mentions_cargo(prompt)
+}
+
 /// Semantic PASS/FAIL/UNKNOWN judge for a task with NO deterministic acceptance check — `derive_target` ruled
 /// it not machine-checkable (e.g. "refactor for clarity", "make the error message clearer"). Reads the
 /// task + the produced source and asks the model to rule. This is the semantic half of the default
@@ -5446,11 +5458,12 @@ async fn exec_agent(
             // with pong" became `cargo run -- pong == gnop`. If the check needs cargo but there's no
             // Cargo.toml AND the task never asked to create a Rust project, this is NOT a verifiable
             // project: accept the agent's output instead of looping repairs+escalation to the timeout.
-            if std::env::var("ROZUM_VERIFY").is_err()
-                && vcmd.contains("cargo")
-                && !cwd.join("Cargo.toml").exists()
-                && !task_mentions_cargo(&original_prompt)
-            {
+            if should_skip_hallucinated_cargo_verify(
+                &vcmd,
+                &cwd,
+                &original_prompt,
+                explicit_verify,
+            ) {
                 eprintln!("rozum launch: ⏭ verify skipped — task has no cargo project (the derived check could never pass)");
                 break 'chain;
             }
@@ -8060,6 +8073,26 @@ mod chain_tests {
         assert!(task_mentions_cargo("create a minimal Rust binary project with a Cargo.toml"));
         assert!(task_mentions_cargo("Fix the bug in src/main.rs so cargo run prints olleh"));
         assert!(task_mentions_cargo("cargo test fails because of a bug in src/lib.rs"));
+    }
+
+    #[test]
+    fn hallucinated_cargo_guard_never_overrides_real_evidence() {
+        let d = tempfile::tempdir().unwrap();
+        let chat = "Reply with exactly the single word: pong";
+        let cargo = "cargo run -q -- pong";
+
+        assert!(should_skip_hallucinated_cargo_verify(cargo, d.path(), chat, false));
+        assert!(!should_skip_hallucinated_cargo_verify(cargo, d.path(), chat, true));
+        assert!(!should_skip_hallucinated_cargo_verify(
+            cargo,
+            d.path(),
+            "Create a Rust project and run it with cargo",
+            false,
+        ));
+
+        std::fs::write(d.path().join("Cargo.toml"), "[package]\nname='x'\nversion='0.1.0'\n")
+            .unwrap();
+        assert!(!should_skip_hallucinated_cargo_verify(cargo, d.path(), chat, false));
     }
 
     #[test]
