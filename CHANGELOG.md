@@ -1,5 +1,22 @@
 # Changelog
 
+## feat(runtime): memory × correctness frontier
+Completed: 2026-07-10 · `7a68094`…`f221497`
+
+Joined model quality and memory into one measurable decision surface. Agentic matrix rows now carry
+three-state verifier evidence plus MLX active/peak/cache memory; the new frontier report uses a 95%
+Wilson lower bound and GiB-seconds per solved task, charging failed attempts to the cost.
+
+Native MLX retained-prefix caching is now byte-budgeted (`ROZUM_PREFIX_CACHE_MB`, 1 GiB default),
+LRU-evicts extra conversations, collapses to one MRU under host pressure, and resets allocator peak
+accounting before clean sequential model loads. Solve semantic verification is `Pass/Fail/Unknown`,
+uses a distinct chain model as judge when available, never treats malformed/unreachable evidence as
+success, and keys routing history by model × driver × task × verifier. Multi-model launches remain
+one-resident-at-a-time unless the operator explicitly requests eager residency.
+
+Verified: `cargo test -p rozum chain_tests` (10/10); `cargo test -p rozum-mlx --features mlx-native`
+(37 passed, 46 hardware/model tests ignored); Python frontier tests 3/3; shell syntax checks green.
+
 ## fix(ucc): web session launch accepts ScalaScript action bodies
 Completed: 2026-07-07 · `e451e6a`, `0a537df`
 
