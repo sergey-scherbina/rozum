@@ -4325,7 +4325,7 @@ fn spawn_detached_gateway(
     // models and thrashes (measured: rpn hung right after deriving the target, never reached link 1;
     // under lazy the same run proceeds cleanly). So force LAZY residency for a chain's gateway unless the
     // user explicitly set a preference. (A bare `rozum gateway --model A,B` pipeline is unaffected.)
-    if model_spec.contains(',') && std::env::var_os("ROZUM_PIPELINE_EAGER").is_none() {
+    if should_force_lazy_launch(model_spec, std::env::var_os("ROZUM_PIPELINE_EAGER").is_some()) {
         cmd.env("ROZUM_PIPELINE_EAGER", "0");
     }
     // Own process group so a Ctrl-C / terminal close on the launch doesn't kill
@@ -4336,6 +4336,10 @@ fn spawn_detached_gateway(
         cmd.process_group(0);
     }
     cmd.spawn()
+}
+
+fn should_force_lazy_launch(model_spec: &str, has_explicit_eager_policy: bool) -> bool {
+    model_spec.contains(',') && !has_explicit_eager_policy
 }
 
 /// The launch-env var **names** forwarded into a Docker-backend jail (`docker run
@@ -4678,15 +4682,22 @@ async fn derive_target(base: &str, task: &str) -> Option<String> {
     (parts.len() > 1).then(|| parts.join(" && "))
 }
 
-/// Semantic PASS/FAIL judge for a task with NO deterministic acceptance check — `derive_target` ruled
+/// Semantic PASS/FAIL/UNKNOWN judge for a task with NO deterministic acceptance check — `derive_target` ruled
 /// it not machine-checkable (e.g. "refactor for clarity", "make the error message clearer"). Reads the
 /// task + the produced source and asks the model to rule. This is the semantic half of the default
 /// verify ("structure = cargo build" + "model-judge = semantic correctness"): it only runs when we'd
 /// otherwise fall to a bare `cargo build` floor that can't see whether the task was actually done.
 ///
-/// CONSERVATIVE by design: only an explicit `pass:false` blocks; an unreachable or garbled judge PASSES,
-/// so it can never become a false gate on a working result (a false FAIL would wrongly escalate/loop).
-async fn model_judge(base: &str, task: &str, cwd: &std::path::Path) -> (bool, String) {
+/// Unknown evidence is deliberately not a pass: the bounded chain can escalate or return an honest
+/// unverified failure, but it cannot claim semantic correctness without a parseable verdict.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VerifyVerdict {
+    Pass,
+    Fail(String),
+    Unknown(String),
+}
+
+async fn model_judge(base: &str, task: &str, cwd: &std::path::Path) -> VerifyVerdict {
     let code = repair_source_snapshot(cwd).unwrap_or_else(|| "(no source found)".to_string());
     let prompt = format!(
         "You are a strict code reviewer judging whether the CODE accomplishes the TASK. Reply with ONLY \
@@ -4712,15 +4723,13 @@ async fn model_judge(base: &str, task: &str, cwd: &std::path::Path) -> (bool, St
     }
     .await;
     let Some(text) = text else {
-        return (true, String::new()); // judge unavailable → never block a passing build
+        return VerifyVerdict::Unknown("model-judge unavailable or timed out".to_string());
     };
     parse_judge_verdict(&text)
 }
 
-/// Parse the judge's reply into (pass, reason). CONSERVATIVE: pass=false ONLY on an explicit
-/// `"pass": false` in a parseable JSON object; a missing key, `pass:true`, or an unparseable reply
-/// all PASS — the judge must never false-gate a working build on a garbled answer.
-fn parse_judge_verdict(text: &str) -> (bool, String) {
+/// Parse the judge's reply. A parseable explicit boolean is evidence; everything else is Unknown.
+fn parse_judge_verdict(text: &str) -> VerifyVerdict {
     let parsed = text
         .find('{')
         .zip(text.rfind('}'))
@@ -4729,10 +4738,18 @@ fn parse_judge_verdict(text: &str) -> (bool, String) {
     match parsed {
         Some(j) if j["pass"].as_bool() == Some(false) => {
             let reason = j["reason"].as_str().unwrap_or("task requirement not met").trim().to_string();
-            (false, format!("model-judge ruled the task NOT accomplished: {reason}"))
+            VerifyVerdict::Fail(format!("model-judge ruled the task NOT accomplished: {reason}"))
         }
-        _ => (true, String::new()),
+        Some(j) if j["pass"].as_bool() == Some(true) => VerifyVerdict::Pass,
+        Some(_) => VerifyVerdict::Unknown("model-judge response has no boolean `pass` field".to_string()),
+        None => VerifyVerdict::Unknown("model-judge response is not valid verdict JSON".to_string()),
     }
+}
+
+/// Pick a judge distinct from the executor. The last distinct link is preferred because chains put
+/// the strongest fallback/cloud model last; residency remains sequential via `/control/switch`.
+fn independent_judge_model<'a>(chain: &'a [String], executor: &str) -> Option<&'a str> {
+    chain.iter().rev().find(|candidate| candidate.as_str() != executor).map(String::as_str)
 }
 
 /// Switch the gateway to `model` in-process (the fixed swap) for chain escalation. Best-effort;
@@ -4753,9 +4770,8 @@ async fn switch_gateway_model(base: &str, model: &str) -> bool {
     }
 }
 
-/// Per-(model, role) quality stats persisted across runs, so the chain can DROP a model that is
-/// consistently bad in a role — when a later link exists to take over (operator vision: exclude bad
-/// models). Keyed `"<model>|<role>"`; role is e.g. "executor" for a launch-chain link.
+/// Task-conditioned quality stats persisted across runs, so a redundant middle chain link can be
+/// dropped only when this model×driver×task×verifier combination has enough poor evidence.
 fn model_stats_path() -> std::path::PathBuf {
     rozum::share::gateway_dir().join("model_stats.json")
 }
@@ -4777,16 +4793,62 @@ fn model_stats_load() -> serde_json::Value {
         .unwrap_or_else(|| serde_json::json!({}))
 }
 
-/// Record a link's terminal outcome for `(model, role)` — best-effort, atomic write.
-fn record_model_outcome(model: &str, role: &str, passed: bool) {
+/// Coarse but stable task bucket for persisted routing evidence. Specific benchmark prompts map to
+/// their capability family; unknown prose remains isolated in `other` rather than contaminating all.
+fn task_class(task: &str) -> &'static str {
+    let task = task.to_ascii_lowercase();
+    if task.contains("reverse polish") || task.contains(" rpn") {
+        "create"
+    } else if task.contains("debug") || task.contains("diagnos") {
+        "debug"
+    } else if task.contains("fix") || task.contains("repair") || task.contains("bug") {
+        "fix"
+    } else if task.contains("test") {
+        "test"
+    } else if task.contains("refactor") {
+        "refactor"
+    } else if task.contains("document") || task.contains("readme") || task.contains("docs") {
+        "docs"
+    } else if task.contains("build") || task.contains("create") || task.contains("implement") {
+        "build"
+    } else {
+        "other"
+    }
+}
+
+fn model_stats_key(
+    model: &str,
+    driver: &str,
+    role: &str,
+    task: &str,
+    verifier: &str,
+) -> String {
+    format!("{model}|{driver}|{role}|{task}|{verifier}")
+}
+
+fn updated_model_stat(current: &serde_json::Value, passed: Option<bool>) -> serde_json::Value {
+    let attempts = current["attempts"].as_u64().unwrap_or(0) + u64::from(passed.is_some());
+    let passes = current["passes"].as_u64().unwrap_or(0) + u64::from(passed == Some(true));
+    let unknown = current["unknown"].as_u64().unwrap_or(0) + u64::from(passed.is_none());
+    serde_json::json!({"attempts": attempts, "passes": passes, "unknown": unknown})
+}
+
+/// `passed`: Some(true/false) is verified evidence; None is an unknown verifier outcome. Unknowns
+/// are counted for observability but do not poison the pass-rate used for routing.
+fn record_model_outcome(
+    model: &str,
+    driver: &str,
+    role: &str,
+    task: &str,
+    verifier: &str,
+    passed: Option<bool>,
+) {
     let mut stats = model_stats_load();
     let Some(obj) = stats.as_object_mut() else { return };
     let e = obj
-        .entry(format!("{model}|{role}"))
-        .or_insert_with(|| serde_json::json!({"attempts": 0, "passes": 0}));
-    let a = e["attempts"].as_u64().unwrap_or(0) + 1;
-    let p = e["passes"].as_u64().unwrap_or(0) + u64::from(passed);
-    *e = serde_json::json!({"attempts": a, "passes": p});
+        .entry(model_stats_key(model, driver, role, task, verifier))
+        .or_insert_with(|| serde_json::json!({"attempts": 0, "passes": 0, "unknown": 0}));
+    *e = updated_model_stat(e, passed);
     let path = model_stats_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -4797,11 +4859,17 @@ fn record_model_outcome(model: &str, role: &str, passed: bool) {
     }
 }
 
-/// Track record of `(model, role)`: `(should_skip, passes, attempts)`. The caller only acts on
-/// `should_skip` when a later link exists (never skip the last resort).
-fn model_track_record(model: &str, role: &str) -> (bool, u64, u64) {
+/// Task-conditioned track record: `(should_skip, passes, attempts)`. Unknown verifier outcomes do not
+/// increment attempts. The caller acts only for a redundant middle link.
+fn model_track_record(
+    model: &str,
+    driver: &str,
+    role: &str,
+    task: &str,
+    verifier: &str,
+) -> (bool, u64, u64) {
     let stats = model_stats_load();
-    let e = &stats[format!("{model}|{role}")];
+    let e = &stats[model_stats_key(model, driver, role, task, verifier)];
     let (p, a) = (e["passes"].as_u64().unwrap_or(0), e["attempts"].as_u64().unwrap_or(0));
     (model_skip_decision(p, a), p, a)
 }
@@ -5253,7 +5321,8 @@ async fn exec_agent(
     // DERIVE THE TARGET up-front ("understand the goal") via the FIRST link, held FIXED for the run so it
     // doesn't drift. Precedence: explicit ROZUM_VERIFY (resolved per-round) > a model-formalized
     // deterministic check from the prompt > per-round auto-detect (the cargo floor) in the loop.
-    let derived_target: Option<String> = if std::env::var("ROZUM_VERIFY").is_ok() {
+    let explicit_verify = std::env::var("ROZUM_VERIFY").is_ok();
+    let derived_target: Option<String> = if explicit_verify {
         None
     } else {
         // For a chain, switch to the first link so the derivation runs on ONE model, not the pipeline.
@@ -5274,7 +5343,18 @@ async fn exec_agent(
     // ROZUM_VERIFY and derive_target found no machine-checkable criterion (a fuzzy task). Deterministic
     // checks already cover semantics, so tasks with an exact expected output (the whole matrix) never
     // pay for the judge.
-    let use_judge = derived_target.is_none() && std::env::var("ROZUM_VERIFY").is_err();
+    let use_judge = derived_target.is_none() && !explicit_verify;
+    let verifier_kind = if explicit_verify {
+        "explicit"
+    } else if derived_target.is_some() {
+        "derived"
+    } else if use_judge {
+        "model-judge"
+    } else {
+        "structural"
+    };
+    let driver = program_name.rsplit('/').next().unwrap_or(&program_name).to_string();
+    let task_bucket = task_class(&original_prompt);
     let mut verified: Option<bool> = None; // None = no gate ran (not a verifiable project)
     let mut last_code = 1;
     let mut announced = false;
@@ -5285,12 +5365,12 @@ async fn exec_agent(
         let has_alt = mi + 1 < chain.len();
         // Auto-exclude: drop a MIDDLE link with a consistently-bad track record — but NEVER the
         // LEADER (mi==0) and never the last resort (has_alt==false). The leader is the generalist
-        // that carries most task-classes; the per-role stat is NOT per-task, so its failures on one
-        // weakness (e.g. fix) would otherwise wrongly exclude it from its strengths (rpn/build/test)
-        // and collapse the complementary composition to the specialist alone. So a 2-model solve
-        // chain never auto-skips; only a genuinely redundant middle model (3+ links) can be dropped.
+        // that carries most task-classes. The record is task+driver+verifier conditioned, so a
+        // weakness on fix cannot erase strengths on build/rpn/test. Thus a 2-model solve never
+        // auto-skips; only a genuinely redundant middle model (3+ links) can be dropped.
         if multi && mi > 0 && has_alt {
-            let (skip, p, a) = model_track_record(model, "executor");
+            let (skip, p, a) =
+                model_track_record(model, &driver, "executor", task_bucket, verifier_kind);
             if skip {
                 eprintln!("rozum launch: ⤳ skipping {model} — poor track record ({p}/{a} passed); trying the next link");
                 continue;
@@ -5307,6 +5387,23 @@ async fn exec_agent(
             }
         }
         for round in 0..=rounds {
+            // A distinct semantic judge may have been resident after the previous round. Restore the
+            // executor before invoking its agent; still exactly one model is resident at a time.
+            if multi && *model != current {
+                if !switch_gateway_model(&ctl, model).await {
+                    eprintln!("rozum launch: ↻ could not restore executor {model} — escalating");
+                    record_model_outcome(
+                        model,
+                        &driver,
+                        "executor",
+                        task_bucket,
+                        verifier_kind,
+                        None,
+                    );
+                    continue 'chain;
+                }
+                current = model.clone();
+            }
             let tag = if round > 0 || mi > 0 {
                 format!("   [link {}/{}, repair {round}]", mi + 1, chain.len())
             } else {
@@ -5330,21 +5427,50 @@ async fn exec_agent(
                 announced = true;
             }
             let (mut ok, mut err) = run_verify(&vcmd, &cwd).await;
+            let mut unknown = false;
             // Semantic layer: when the structural check passed but there's no deterministic semantic
-            // check (fuzzy task), let the model-judge rule. Only an explicit FAIL demotes the pass.
+            // check (fuzzy task), let an independent model judge when the chain has one. Missing or
+            // malformed evidence is UNKNOWN and cannot become a verified pass.
             if ok && use_judge {
-                let (jok, jerr) = model_judge(&ctl, &original_prompt, &cwd).await;
-                if !jok {
-                    eprintln!("rozum launch: ⚖ model-judge overrode the structural pass — {jerr}");
-                    ok = false;
-                    err = jerr;
+                let verdict = match independent_judge_model(&chain, model) {
+                    Some(judge) => {
+                        eprintln!("rozum launch: ⚖ independent semantic judge — {judge}");
+                        if switch_gateway_model(&ctl, judge).await {
+                            current = judge.to_string();
+                            model_judge(&ctl, &original_prompt, &cwd).await
+                        } else {
+                            VerifyVerdict::Unknown(format!(
+                                "could not load independent model-judge {judge}"
+                            ))
+                        }
+                    }
+                    None => model_judge(&ctl, &original_prompt, &cwd).await,
+                };
+                match verdict {
+                    VerifyVerdict::Pass => {}
+                    VerifyVerdict::Fail(reason) => {
+                        eprintln!("rozum launch: ⚖ model-judge rejected the structural pass — {reason}");
+                        ok = false;
+                        err = reason;
+                    }
+                    VerifyVerdict::Unknown(reason) => {
+                        eprintln!("rozum launch: ⚖ model-judge UNKNOWN — {reason}");
+                        ok = false;
+                        unknown = true;
+                        err = format!("semantic verification UNKNOWN: {reason}");
+                    }
                 }
             }
             if ok {
                 verified = Some(true);
-                if multi {
-                    record_model_outcome(model, "executor", true);
-                }
+                record_model_outcome(
+                    model,
+                    &driver,
+                    "executor",
+                    task_bucket,
+                    verifier_kind,
+                    Some(true),
+                );
                 break 'chain;
             }
             verified = Some(false);
@@ -5366,9 +5492,14 @@ async fn exec_agent(
             program[pidx] = repair_prompt(&original_prompt, &err);
             if round == rounds {
                 // This link is exhausted — record its outcome for the track-record stats.
-                if multi {
-                    record_model_outcome(model, "executor", false);
-                }
+                record_model_outcome(
+                    model,
+                    &driver,
+                    "executor",
+                    task_bucket,
+                    verifier_kind,
+                    (!unknown).then_some(false),
+                );
                 let last_link = mi + 1 == chain.len();
                 if last_link {
                     eprintln!("rozum launch: ❌ target still not met after the whole chain:");
@@ -7766,6 +7897,9 @@ mod chain_tests {
         assert!(!model_skip_decision(1, 5)); // 1/5 = 20% is NOT below the 20% floor → keep
         assert!(model_skip_decision(1, 10)); // 1/10 = 10% → skip
         assert!(!model_skip_decision(8, 10)); // a solid record is kept
+        assert!(should_force_lazy_launch("leader,specialist", false));
+        assert!(!should_force_lazy_launch("leader,specialist", true));
+        assert!(!should_force_lazy_launch("solo", false));
     }
 
     #[test]
@@ -7829,20 +7963,60 @@ mod chain_tests {
     }
 
     #[test]
-    fn judge_blocks_only_on_explicit_pass_false() {
+    fn judge_is_three_state_and_unknown_never_passes() {
         // Explicit failure → block, carrying the reason.
-        let (ok, msg) = parse_judge_verdict("{\"pass\": false, \"reason\": \"ignores the second operand\"}");
-        assert!(!ok && msg.contains("ignores the second operand"), "explicit fail must block: {msg}");
+        let verdict =
+            parse_judge_verdict("{\"pass\": false, \"reason\": \"ignores the second operand\"}");
+        assert!(
+            matches!(verdict, VerifyVerdict::Fail(ref msg) if msg.contains("ignores the second operand")),
+            "explicit fail must block: {verdict:?}"
+        );
         // Tolerates prose around the JSON object.
-        let (ok, _) = parse_judge_verdict("Here is my verdict:\n{\"pass\": false, \"reason\": \"x\"}\nDone.");
-        assert!(!ok, "must find the object amid prose");
-        // Pass → never block.
-        assert!(parse_judge_verdict("{\"pass\": true, \"reason\": \"correct\"}").0);
-        // CONSERVATIVE: garbled / no JSON / missing key all PASS — never false-gate a working build.
-        assert!(parse_judge_verdict("the model rambled without JSON").0);
-        assert!(parse_judge_verdict("{ not valid json").0);
-        assert!(parse_judge_verdict("{\"note\": \"no pass key\"}").0);
-        assert!(parse_judge_verdict("").0);
+        assert!(matches!(
+            parse_judge_verdict(
+                "Here is my verdict:\n{\"pass\": false, \"reason\": \"x\"}\nDone."
+            ),
+            VerifyVerdict::Fail(_)
+        ));
+        assert_eq!(
+            parse_judge_verdict("{\"pass\": true, \"reason\": \"correct\"}"),
+            VerifyVerdict::Pass
+        );
+        // Garbled / no JSON / missing key are UNKNOWN, never false success.
+        for reply in [
+            "the model rambled without JSON",
+            "{ not valid json",
+            "{\"note\": \"no pass key\"}",
+            "",
+        ] {
+            assert!(
+                matches!(parse_judge_verdict(reply), VerifyVerdict::Unknown(_)),
+                "must be unknown: {reply:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn judge_and_quality_keys_are_relational() {
+        let chain = vec!["leader".to_string(), "specialist".to_string(), "cloud".to_string()];
+        assert_eq!(independent_judge_model(&chain, "leader"), Some("cloud"));
+        assert_eq!(independent_judge_model(&chain, "cloud"), Some("specialist"));
+        assert_eq!(independent_judge_model(&["solo".to_string()], "solo"), None);
+
+        assert_eq!(task_class("Fix the parser bug and run tests"), "fix");
+        assert_eq!(task_class("Create a reverse polish notation calculator"), "create");
+        assert_eq!(task_class("Refactor this module for clarity"), "refactor");
+        assert_ne!(
+            model_stats_key("m", "claude", "executor", "fix", "derived"),
+            model_stats_key("m", "claude", "executor", "test", "derived")
+        );
+
+        let unknown = updated_model_stat(&serde_json::json!({}), None);
+        assert_eq!(unknown["attempts"], 0);
+        assert_eq!(unknown["unknown"], 1);
+        let pass = updated_model_stat(&unknown, Some(true));
+        assert_eq!(pass["attempts"], 1);
+        assert_eq!(pass["passes"], 1);
     }
 
     #[test]
