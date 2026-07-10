@@ -1,0 +1,6 @@
+feature/memory-correctness-frontier 2026-07-10T11:03:00Z
+agent: codex
+heartbeat: 2026-07-10T11:03:00Z
+status: not-started
+done-so-far: audit complete; scope agreed with operator
+next: create isolated worktree and commit feature spec
