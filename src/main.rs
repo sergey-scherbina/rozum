@@ -1538,13 +1538,7 @@ fn cascade_local_footprint(cfg: &rozum::RuntimeConfig, model: &str, n_ctx: u32) 
     // lazy only when the SUM would overcommit. Must match the build-time choice in `build_cascade_from_spec`.
     // For the EAGER SUM: use eager_coresident_footprint (smmr-D follow-up) — counts the shared
     // MLX buffer-cache + prefill-activation reserve ONCE, not once per tier.
-    let total = if matches!(spec.strategy, rozum::cascade::StrategyName::Solve) {
-        // Solve is ALWAYS lazy (leader OR specialist resident, never both) → reserve MAX, not SUM.
-        local_models.iter()
-            .map(|m| estimate_model_footprint_bytes(m, n_ctx))
-            .max()
-            .unwrap_or(0)
-    } else if matches!(spec.strategy, rozum::cascade::StrategyName::Pipeline) {
+    let total = if matches!(spec.strategy, rozum::cascade::StrategyName::Pipeline) {
         if pipeline_is_eager(&spec, n_ctx) {
             eager_coresident_footprint(&local_models, n_ctx)
         } else {
@@ -4676,6 +4670,55 @@ async fn derive_target(base: &str, task: &str) -> Option<String> {
     (parts.len() > 1).then(|| parts.join(" && "))
 }
 
+/// Semantic PASS/FAIL judge for a task with NO deterministic acceptance check — `derive_target` ruled
+/// it not machine-checkable (e.g. "refactor for clarity", "make the error message clearer"). Reads the
+/// task + the produced source and asks the model to rule. This is the semantic half of the default
+/// verify ("structure = cargo build" + "model-judge = semantic correctness"): it only runs when we'd
+/// otherwise fall to a bare `cargo build` floor that can't see whether the task was actually done.
+///
+/// CONSERVATIVE by design: only an explicit `pass:false` blocks; an unreachable or garbled judge PASSES,
+/// so it can never become a false gate on a working result (a false FAIL would wrongly escalate/loop).
+async fn model_judge(base: &str, task: &str, cwd: &std::path::Path) -> (bool, String) {
+    let code = repair_source_snapshot(cwd).unwrap_or_else(|| "(no source found)".to_string());
+    let prompt = format!(
+        "You are a strict code reviewer judging whether the CODE accomplishes the TASK. Reply with ONLY \
+         a JSON object, no prose: {{\"pass\": <true|false>, \"reason\": \"<one short sentence>\"}}.\n\
+         Rule pass=false ONLY if the code clearly fails a STATED requirement of the task; if it plausibly \
+         satisfies the task, pass=true. Do not invent requirements the task did not state.\n\n\
+         TASK:\n{task}\n\n{code}"
+    );
+    let body = serde_json::json!({
+        "model": "x", "temperature": 0.0, "max_tokens": 200,
+        "messages": [{"role": "user", "content": prompt}],
+    });
+    let text = async {
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/v1/chat/completions"))
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(180))
+            .send()
+            .await
+            .ok()?;
+        let v: serde_json::Value = resp.json().await.ok()?;
+        v["choices"][0]["message"]["content"].as_str().map(str::to_string)
+    }
+    .await;
+    let Some(text) = text else {
+        return (true, String::new()); // judge unavailable → never block a passing build
+    };
+    let parsed = text
+        .find('{')
+        .zip(text.rfind('}'))
+        .and_then(|(a, b)| serde_json::from_str::<serde_json::Value>(&text[a..=b]).ok());
+    match parsed {
+        Some(j) if j["pass"].as_bool() == Some(false) => {
+            let reason = j["reason"].as_str().unwrap_or("task requirement not met").trim().to_string();
+            (false, format!("model-judge ruled the task NOT accomplished: {reason}"))
+        }
+        _ => (true, String::new()),
+    }
+}
+
 /// Switch the gateway to `model` in-process (the fixed swap) for chain escalation. Best-effort;
 /// returns whether the swap succeeded (so the gate can skip a link that won't load).
 async fn switch_gateway_model(base: &str, model: &str) -> bool {
@@ -5209,6 +5252,13 @@ async fn exec_agent(
             None => None,
         }
     };
+    // Default verify = STRUCTURE + MODEL-JUDGE. The structural/deterministic half is `derived_target`
+    // (or the cargo floor); the model-judge adds the semantic correctness a deterministic check can't
+    // express. The judge runs ONLY when we'd otherwise fall to the bare floor — i.e. no explicit
+    // ROZUM_VERIFY and derive_target found no machine-checkable criterion (a fuzzy task). Deterministic
+    // checks already cover semantics, so tasks with an exact expected output (the whole matrix) never
+    // pay for the judge.
+    let use_judge = derived_target.is_none() && std::env::var("ROZUM_VERIFY").is_err();
     let mut verified: Option<bool> = None; // None = no gate ran (not a verifiable project)
     let mut last_code = 1;
     let mut announced = false;
@@ -5259,7 +5309,17 @@ async fn exec_agent(
                 eprintln!("rozum launch: verify-gate — `{vcmd}` (ROZUM_VERIFY=0 to disable; {} link(s) × {rounds} repair)", chain.len());
                 announced = true;
             }
-            let (ok, err) = run_verify(&vcmd, &cwd).await;
+            let (mut ok, mut err) = run_verify(&vcmd, &cwd).await;
+            // Semantic layer: when the structural check passed but there's no deterministic semantic
+            // check (fuzzy task), let the model-judge rule. Only an explicit FAIL demotes the pass.
+            if ok && use_judge {
+                let (jok, jerr) = model_judge(&ctl, &original_prompt, &cwd).await;
+                if !jok {
+                    eprintln!("rozum launch: ⚖ model-judge overrode the structural pass — {jerr}");
+                    ok = false;
+                    err = jerr;
+                }
+            }
             if ok {
                 verified = Some(true);
                 if multi {
@@ -6784,34 +6844,6 @@ async fn build_cascade_from_spec(
         spec.strategy = st;
     }
     let n_tiers = spec.tiers.len();
-
-    // Solve — the DEFAULT for a two-model `A,B` spec: tier[0] leads the whole task; on the leader's
-    // stuck signal, tier[1] takes over from a clean restart. Intercept BEFORE the eager/lazy pipeline
-    // split — Solve is inherently one-model-at-a-time (its own lazy resolver + resident cache), so it
-    // must NOT be diverted to the eager co-resident `build_cascade` pipeline.
-    if matches!(spec.strategy, rozum::cascade::StrategyName::Solve) && spec.tiers.len() == 2 {
-        let cfg_r = std::sync::Arc::clone(cfg);
-        let resolve: rozum::cascade::LazyResolver =
-            std::sync::Arc::new(move |tier: rozum::cascade::TierSpec| {
-                let cfg = std::sync::Arc::clone(&cfg_r);
-                Box::pin(async move {
-                    match tier.location {
-                        rozum::cascade::Location::Local => build_from_config(&cfg, &tier.model, n_ctx).await,
-                        rozum::cascade::Location::Remote => build_remote_tier(&tier),
-                    }
-                }) as futures::future::BoxFuture<
-                    'static,
-                    Option<std::sync::Arc<dyn rozum::ChatBackend>>,
-                >
-            });
-        rozum::obs::log_event(serde_json::json!({
-            "event": "cascade_built", "config": label, "tiers": n_tiers, "residency": "solve",
-        }));
-        let be = rozum::cascade::SolveBackend::new(
-            spec.tiers[0].clone(), spec.tiers[1].clone(), resolve, n_ctx,
-        );
-        return Some(std::sync::Arc::new(be) as std::sync::Arc<dyn rozum::ChatBackend>);
-    }
 
     // Pipeline → LAZY residency: resolve + tear down ONE tier at a time per request (planner →
     // executor, never co-resident). The in-process automation of solve.sh's sequential two-process

@@ -406,105 +406,6 @@ impl ChatBackend for EditRouterBackend {
     }
 }
 
-/// Index of the first Assistant message — everything before it is the task preamble (the original task
-/// + any system setup), which the specialist keeps across a Solve restart.
-fn task_prefix_len(messages: &[Message]) -> usize {
-    messages
-        .iter()
-        .position(|m| matches!(m.role, Role::Assistant))
-        .unwrap_or(messages.len())
-}
-
-/// Per-session escalation state for [`SolveBackend`]. One active session at a time (the agentic bench
-/// drives one gateway per model); concurrent sessions would need per-session keying.
-#[derive(Default)]
-struct SolveState {
-    escalated: bool,
-    /// Message count at escalation — messages in `[task_prefix_len .. cut)` are the leader's abandoned
-    /// attempt, hidden from the specialist's clean restart.
-    cut: usize,
-    resident: Option<(String, Arc<dyn ChatBackend>)>,
-}
-
-/// **Solve** — the DEFAULT for a two-model `A,B` spec. The LEADER (tier 0) drives the whole task; the
-/// moment it gets STUCK (its Edit tool loops on "string not found") the SPECIALIST (tier 1) takes over
-/// from a CLEAN RESTART: it is shown only the original task and its OWN subsequent turns, never the
-/// leader's abandoned attempt. Measured rationale: handing the specialist the leader's mid-session mess
-/// fails (0/3), but a fresh restart lands it (Qwen3-4B fix 5/5) — so the leader's 100% on
-/// create/test/debug/chat/rpn and the specialist's 100% on precise edits compose to 100% overall. Lazy:
-/// one model resident at a time.
-pub struct SolveBackend {
-    leader: TierSpec,
-    specialist: TierSpec,
-    resolve: LazyResolver,
-    ctx_window: u32,
-    state: tokio::sync::Mutex<SolveState>,
-}
-
-impl SolveBackend {
-    pub fn new(leader: TierSpec, specialist: TierSpec, resolve: LazyResolver, ctx_window: u32) -> Self {
-        Self { leader, specialist, resolve, ctx_window, state: tokio::sync::Mutex::new(SolveState::default()) }
-    }
-}
-
-#[async_trait]
-impl ChatBackend for SolveBackend {
-    async fn chat(&self, req: ChatRequest) -> ModelResult<ChatStream> {
-        let mut st = self.state.lock().await;
-        let prefix = task_prefix_len(&req.messages);
-        // New session (only the task preamble, no assistant turn yet) → reset escalation.
-        if req.messages.len() <= prefix {
-            st.escalated = false;
-            st.cut = 0;
-        }
-        // Escalate on the leader's stuck signal (a failed Edit) — once per session.
-        if !st.escalated && recovering_from_edit_failure(&req.messages) {
-            st.escalated = true;
-            st.cut = req.messages.len();
-            rozum_core::obs::log_event(serde_json::json!({
-                "event": "solve_escalate", "specialist": self.specialist.model, "cut": st.cut,
-            }));
-        }
-        // Pick the model + the message view it sees.
-        let (spec, messages) = if st.escalated {
-            // Clean restart: the original task preamble + ONLY the specialist's own turns (drop the leader's).
-            let mut m = req.messages[..prefix].to_vec();
-            if st.cut <= req.messages.len() {
-                m.extend_from_slice(&req.messages[st.cut..]);
-            }
-            (&self.specialist, m)
-        } else {
-            (&self.leader, req.messages.clone())
-        };
-        rozum_core::obs::log_event(serde_json::json!({
-            "event": "solve_turn", "role": if st.escalated { "specialist" } else { "leader" },
-            "model": spec.model,
-        }));
-        // Reuse the resident backend on the same model; swap on a route change.
-        let backend = match &st.resident {
-            Some((mdl, b)) if mdl == &spec.model => b.clone(),
-            _ => {
-                let b = (self.resolve)(spec.clone()).await.ok_or_else(|| {
-                    ModelError::BackendUnavailable(format!("solve: '{}' failed to load", spec.model))
-                })?;
-                st.resident = Some((spec.model.clone(), b.clone()));
-                b
-            }
-        };
-        let mut req2 = req;
-        req2.messages = messages;
-        backend.chat(req2).await
-    }
-
-    fn context_window(&self) -> u32 {
-        self.ctx_window
-    }
-
-    fn label(&self) -> &'static str {
-        "solve"
-    }
-}
-
 /// Where a model runs — local (its own resource limits, e.g. memory) vs remote (the network +
 /// the provider's quota/rate limits). A `Network` failure parks *all* remote models at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -652,8 +553,7 @@ impl CascadeBackend {
     fn start_index(&self, req: &ChatRequest, difficulty: f32, n: usize) -> usize {
         match self.config.strategy {
             // `Pipeline` runs every tier from 0 and never consults `start_index`; 0 is a safe default.
-            // `Solve` is intercepted in build_cascade_from_spec (never reaches this router); start at 0.
-            RoutingStrategy::AlwaysCheapest | RoutingStrategy::Pipeline | RoutingStrategy::Solve => 0,
+            RoutingStrategy::AlwaysCheapest | RoutingStrategy::Pipeline => 0,
             RoutingStrategy::ClassifyThenStart => Self::classify_start(difficulty, n),
             RoutingStrategy::Learned => {
                 if let Some(stats) = &self.config.stats {

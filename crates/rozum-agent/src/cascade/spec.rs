@@ -66,10 +66,9 @@ pub enum StrategyName {
     Classify,
     Learned,
     /// Run every tier in order as a planner→…→executor pipeline (not escalation). See
-    /// `docs/specs/pipeline-cascade.md`.
+    /// `docs/specs/pipeline-cascade.md`. Also the host strategy for a two-model `A,B` spec — the
+    /// real leader-drives/specialist-rescues logic lives in the launch-side verify-repair chain.
     Pipeline,
-    /// Leader-drives, specialist-rescues-from-a-clean-restart. The DEFAULT for a two-model `A,B` spec.
-    Solve,
 }
 
 impl StrategyName {
@@ -80,8 +79,7 @@ impl StrategyName {
             "cheapest" | "cheap" | "alwayscheapest" => Some(StrategyName::Cheapest),
             "classify" | "classifythenstart" => Some(StrategyName::Classify),
             "learned" | "learn" => Some(StrategyName::Learned),
-            "pipeline" | "pipe" => Some(StrategyName::Pipeline),
-            "solve" => Some(StrategyName::Solve),
+            "pipeline" | "pipe" | "solve" => Some(StrategyName::Pipeline),
             _ => None,
         }
     }
@@ -94,7 +92,6 @@ impl From<StrategyName> for RoutingStrategy {
             StrategyName::Classify => RoutingStrategy::ClassifyThenStart,
             StrategyName::Learned => RoutingStrategy::Learned,
             StrategyName::Pipeline => RoutingStrategy::Pipeline,
-            StrategyName::Solve => RoutingStrategy::Solve,
         }
     }
 }
@@ -325,9 +322,10 @@ pub fn from_model_pipeline<S: AsRef<str>>(names: &[S]) -> CascadeSpec {
     CascadeSpec {
         tiers: names.iter().map(|n| classify_model_name(n.as_ref())).collect(),
         max_escalations: None,
-        // Default for a two-model `A,B` spec: Solve (leader drives; specialist rescues from a clean
-        // restart). An explicit `--strategy pipeline` overrides this back to the planner→executor pipeline.
-        strategy: StrategyName::Solve,
+        // Two-model `A,B`: the launch-side verify-repair CHAIN (exec_agent) is the real Solve — leader
+        // drives, ground-truth verify, escalate-with-clean-restart to the next model. The gateway just
+        // hosts one switchable model at a time for it, so Pipeline (the lazy default) is the right host.
+        strategy: StrategyName::Pipeline,
         router_model: None,
     }
 }
