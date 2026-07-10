@@ -33,6 +33,8 @@ no greater peak memory, and no greater GiB-seconds per solve, with at least one 
 - `ROZUM_PREFIX_CACHE_SLOTS` remains a hard entry-count ceiling for compatibility.
 - The most-recent conversation may exceed the byte budget by itself: keeping the one active prefix
   avoids a full re-prefill; extra conversations are evicted LRU until both limits hold.
+- At host `warn` or `critical` memory pressure, the effective retention policy collapses to the one
+  most-recent conversation regardless of the configured extra-session budget.
 - `ROZUM_PREFIX_CACHE=0` still disables prefix persistence entirely.
 
 The estimate is `resident_positions × kv_bytes_per_position`. When architecture metadata is
@@ -70,6 +72,8 @@ model. The first chain link and last resort are never auto-skipped.
       bound exposes the evidence count.
 - [ ] PrefixStore evicts LRU entries until the slot ceiling and byte budget hold, while retaining one
       oversized MRU entry.
+- [ ] Host memory pressure evicts all but the most-recent prefix without interrupting the active
+      request.
 - [ ] Prefix reuse remains byte-identical to a fresh prefill; the policy changes retention only.
 - [ ] A missing or malformed model-judge response produces `Unknown` and cannot end a verified launch
       successfully.
