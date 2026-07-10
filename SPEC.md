@@ -26,6 +26,13 @@ memory to OOM, no splitting one model across mismatched devices, no needless dat
 paths. Make it run where it can with what there is; remove waste and breakage
 wherever they are found.
 
+Resource routing optimizes a measured memory × correctness frontier: choose the
+smallest-memory path that meets the required evidence threshold, not the smallest
+model unconditionally. Deterministic verification has precedence. Semantic model
+verification is three-state (`pass` / `fail` / `unknown`); unavailable or malformed
+evidence is never silently recorded as a verified pass. Spec:
+`docs/specs/memory-correctness-frontier.md`.
+
 ## Extension points
 
 Rozum varies along four axes. Two are already SPIs (in-tree Rust traits — add a
