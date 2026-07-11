@@ -5,128 +5,117 @@ version: 1.0.0
 
 # UCC acceptance e2e smoke test (headless, mocked Face ID)
 
-ScalaScript (`.ssc`) port of `ucc_e2e_smoke.py`, run on the JVM backend
-(`ssc run-jvm`) so the standard-`scala` fence has the full Java stdlib for the
-system bits (HTTP client, subprocess, file I/O) that the interpreter-only
-`std/process` + `std/fs` externs don't provide together on one backend.
+Native ScalaScript (`.ssc`) acceptance test for the UCC control-center PWA, run on the
+v2 VM with the std `http` / `process` / `fs` primitives:
 
-Headless + MOCKED — no browser, no Face ID hardware. Spins up an ISOLATED
-`control-serve` (temp `XDG_STATE_HOME`, `rp_id=localhost`) so it never touches the
-operator's real credentials/sessions, smoke-tests the unauthenticated surface +
-WebAuthn (Face ID) wiring, then MOCKS the Face ID login by injecting the session a
-real login would mint and verifies the authenticated surface.
+    ../scalascript/bin/ssc run scripts/test/ucc_e2e_smoke.ssc
 
-Run: `../scalascript/bin/ssc run-jvm scripts/test/ucc_e2e_smoke.ssc`  — non-zero exit on any failure.
+Headless + MOCKED — no browser, no Face ID hardware. Spins up an ISOLATED `control-serve`
+(temp `XDG_STATE_HOME`, `rp_id=localhost`) so it never touches the operator's real
+credentials/sessions, smoke-tests the unauthenticated surface + WebAuthn (Face ID)
+wiring, then MOCKS the Face ID login by injecting the session a real login would mint and
+verifies the authenticated surface. Non-zero exit on any failed check.
 
-```scala
-import java.net.URI
-import java.net.http.{HttpClient, HttpRequest}
-import java.net.http.HttpRequest.BodyPublishers
-import java.net.http.HttpResponse.BodyHandlers
-import java.nio.file.{Files, Paths}
-import java.time.Duration
+[exec, ProcessOptions](std/process.ssc)
+[readFile, writeFile, exists, mkdirs](std/fs.ssc)
+[httpGet, httpPost](std/http.ssc)
 
+```scalascript
 val bin =
-  if Files.exists(Paths.get("target/release/rozum-gateway")) then "target/release/rozum-gateway"
-  else sys.env("HOME") + "/.rozum/bin/rozum-gateway"
+  if exists("target/release/rozum-gateway") then "target/release/rozum-gateway"
+  else exec("bash", List("-c", "printf %s \"$HOME\""), ProcessOptions()).stdout + "/.rozum/bin/rozum-gateway"
 
 val port   = 18492
 val base   = s"http://127.0.0.1:$port"
 val origin = s"http://localhost:$port"
-val state  = Files.createTempDirectory("ucc-e2e-").toString
-val ucc    = state + "/rozum"            // state_dir() == $XDG_STATE_HOME/rozum
+val state  = "/tmp/ucc-e2e-ssc-state"
+val ucc    = s"$state/rozum"                 // state_dir() == $XDG_STATE_HOME/rozum
 
 var passed = 0
 var total  = 0
-def check(name: String, ok: Boolean, detail: String = ""): Unit =
-  total += 1
-  if ok then { passed += 1; println(s"  PASS  $name") }
-  else println(s"  FAIL  $name" + (if detail.nonEmpty then s"  -- $detail" else ""))
+def check(name: String, ok: Boolean, detail: String): Unit =
+  total = total + 1
+  if ok then
+    passed = passed + 1
+    println(s"  PASS  $name")
+  else
+    println(s"  FAIL  $name  -- $detail")
 
+// Smoke-level JSON assertion by substring (compact serde JSON, no spaces).
 def hasField(body: String, field: String, value: String): Boolean =
-  body.contains("\"" + field + "\":" + value)   // compact serde JSON, no spaces
+  body.contains("\"" + field + "\":" + value)
 
-val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build()
+// Clean + start an ISOLATED control-serve in the background (env inline so it inherits the
+// full parent env + our overrides; `echo $$!` returns the detached PID).
+exec("rm", List("-rf", state), ProcessOptions())
+val spawn =
+  s"XDG_STATE_HOME='$state' ROZUM_UCC_RP_ID=localhost ROZUM_UCC_ORIGIN='$origin' " +
+  s"nohup '$bin' gateway control-serve --port $port >/dev/null 2>&1 & echo $$!"
+val pid = exec("bash", List("-c", spawn), ProcessOptions()).stdout.trim()
 
-/** (status, body). status 0 == connection failed. */
-def req(method: String, path: String, cookie: String = "", body: String = ""): (Int, String) =
-  var b = HttpRequest.newBuilder(URI.create(base + path)).timeout(Duration.ofSeconds(8))
-  if cookie.nonEmpty then b = b.header("Cookie", cookie)
-  b =
-    if body.nonEmpty then b.header("Content-Type", "application/json").method(method, BodyPublishers.ofString(body))
-    else b.method(method, BodyPublishers.noBody())
-  try
-    val r = client.send(b.build(), BodyHandlers.ofString())
-    (r.statusCode(), r.body())
-  catch case _: Throwable => (0, "")
+println(s"== UCC acceptance e2e  (isolated :$port)  ==")
 
-def write(name: String, contents: String): Unit =
-  Files.write(Paths.get(ucc, name), contents.getBytes("UTF-8"))
+// Health: wait at the shell until the server is listening (httpGet throws on a refused
+// connection, and httpClient/httpRetry aren't bound on the v2 VM).
+val waitCmd = s"for _ in $$(seq 1 30); do curl -sf -o /dev/null '$base/' && exit 0; sleep 1; done; exit 1"
+val up = exec("bash", List("-c", waitCmd), ProcessOptions()).exitCode == 0
+check("control-serve comes up", up, "not up")
 
-// ---- start an ISOLATED control-serve ----
-val pb = ProcessBuilder(bin, "gateway", "control-serve", "--port", port.toString)
-pb.environment().put("XDG_STATE_HOME", state)
-pb.environment().put("ROZUM_UCC_RP_ID", "localhost")
-pb.environment().put("ROZUM_UCC_ORIGIN", origin)
-pb.redirectOutput(ProcessBuilder.Redirect.DISCARD)
-pb.redirectError(ProcessBuilder.Redirect.DISCARD)
-val proc = pb.start()
+println("")
+println("[Tier 1] unauthenticated surface + Face ID wiring")
+for pg <- List("/", "/login.html", "/terminal.html", "/admin.html", "/matrix.html") do
+  val r = httpGet(base + pg)
+  check(s"PWA serves $pg", r.status == 200, s"HTTP ${r.status}")
 
-try
-  println(s"== UCC acceptance e2e  (isolated :$port)  ==")
+check("gated /control/status -> 401 unauth", httpGet(base + "/control/status").status == 401, "")
+check("gated terminal attach -> 401 unauth", httpGet(base + "/control/session/attach/x").status == 401, "")
 
-  // health: poll until listening
-  var up = false
-  var tries = 0
-  while !up && tries < 30 do
-    if req("GET", "/")._1 == 200 then up = true else { Thread.sleep(1000); tries += 1 }
-  check("control-serve comes up", up, s"not up after $tries s")
+val as1 = httpGet(base + "/control/auth/status")
+check("auth/status webauthn_ok=true", as1.status == 200 && hasField(as1.body, "webauthn_ok", "true"), as1.body)
 
-  println("\n[Tier 1] unauthenticated surface + Face ID wiring")
-  for pg <- List("/", "/login.html", "/terminal.html", "/admin.html", "/matrix.html") do
-    val (s, _) = req("GET", pg)
-    check(s"PWA serves $pg", s == 200, s"HTTP $s")
+check("register/begin without token -> 403",
+  httpPost(base + "/control/auth/register/begin", "{}").status == 403, "")
 
-  check("gated /control/status -> 401 unauth", req("GET", "/control/status")._1 == 401)
-  check("gated terminal attach -> 401 unauth", req("GET", "/control/session/attach/x")._1 == 401)
+val boot = if exists(s"$ucc/ucc-bootstrap-token.txt") then readFile(s"$ucc/ucc-bootstrap-token.txt").trim() else ""
+check("bootstrap token issued for first registration", boot != "", "no token")
 
-  val (asS, asB) = req("GET", "/control/auth/status")
-  check("auth/status webauthn_ok=true", asS == 200 && hasField(asB, "webauthn_ok", "true"), asB)
+val rb = httpPost(base + "/control/auth/register/begin",
+  s"""{"invite":"$boot","display_name":"e2e"}""", Map("Content-Type" -> "application/json"))
+check("register/begin issues a valid passkey challenge (rp.id, challenge)",
+  rb.status == 200 && rb.body.contains("\"challenge\"") && rb.body.contains("localhost"), s"HTTP ${rb.status}")
 
-  check("register/begin without token -> 403", req("POST", "/control/auth/register/begin", body = "{}")._1 == 403)
+check("login/begin with no enrolled passkey -> 400",
+  httpPost(base + "/control/auth/login/begin", "").status == 400, "")
 
-  val bootPath = Paths.get(ucc, "ucc-bootstrap-token.txt")
-  val boot = if Files.exists(bootPath) then Files.readString(bootPath).trim else ""
-  check("bootstrap token issued for first registration", boot.nonEmpty, "no token")
+println("")
+println("[Tier 2] mocked Face ID auth (injected session)")
+mkdirs(ucc)
+writeFile(s"$ucc/ucc-roles.json",
+  """[{"id":"readonly","name":"Read only","permissions":["read"]},{"id":"admin","name":"Administrator","permissions":["admin"]}]""")
+writeFile(s"$ucc/ucc-users.json",
+  """[{"id":"e2e-mock","display_name":"E2E","role_ids":["admin"],"passkey_ids":[],"created_at":1,"created_by":null}]""")
+val tok = "e2e-mock-session-000000000000000000000000"
+writeFile(s"$ucc/ucc-auth-sessions.json",
+  s"""[{"token":"$tok","user_id":"e2e-mock","expires_at":9999999999}]""")
+val ck = Map("Cookie" -> s"rozum_sess=$tok")
 
-  val (rbS, rbB) = req("POST", "/control/auth/register/begin", body = s"""{"invite":"$boot","display_name":"e2e"}""")
-  check("register/begin issues a valid passkey challenge (rp.id, challenge)",
-    rbS == 200 && rbB.contains("\"challenge\"") && rbB.contains("localhost"), s"HTTP $rbS")
+check("valid session -> /control/status 200 (gate opens)",
+  httpGet(base + "/control/status", ck).status == 200, "")
+val as2 = httpGet(base + "/control/auth/status", ck)
+check("valid session -> auth/status authed=true", as2.status == 200 && hasField(as2.body, "authed", "true"), as2.body)
 
-  check("login/begin with no enrolled passkey -> 400", req("POST", "/control/auth/login/begin", body = "")._1 == 400)
+writeFile(s"$ucc/ucc-auth-sessions.json",
+  s"""[{"token":"$tok","user_id":"e2e-mock","expires_at":1}]""")
+check("EXPIRED session -> 401 (expiry enforced)",
+  httpGet(base + "/control/status", ck).status == 401, "")
+check("bogus session token -> 401",
+  httpGet(base + "/control/status", Map("Cookie" -> "rozum_sess=nope")).status == 401, "")
 
-  // ---- Tier 2: MOCK Face ID by injecting the session a real login would mint ----
-  println("\n[Tier 2] mocked Face ID auth (injected session)")
-  write("ucc-roles.json",
-    """[{"id":"readonly","name":"Read only","permissions":["read"]},{"id":"admin","name":"Administrator","permissions":["admin"]}]""")
-  write("ucc-users.json",
-    """[{"id":"e2e-mock","display_name":"E2E","role_ids":["admin"],"passkey_ids":[],"created_at":1,"created_by":null}]""")
-  val tok = "e2e-mock-session-000000000000000000000000"
-  write("ucc-auth-sessions.json", s"""[{"token":"$tok","user_id":"e2e-mock","expires_at":9999999999}]""")
-  val ck = s"rozum_sess=$tok"
+// Teardown
+exec("kill", List(pid), ProcessOptions())
+exec("rm", List("-rf", state), ProcessOptions())
 
-  check("valid session -> /control/status 200 (gate opens)", req("GET", "/control/status", cookie = ck)._1 == 200)
-  val (as2S, as2B) = req("GET", "/control/auth/status", cookie = ck)
-  check("valid session -> auth/status authed=true", as2S == 200 && hasField(as2B, "authed", "true"), as2B)
-
-  write("ucc-auth-sessions.json", s"""[{"token":"$tok","user_id":"e2e-mock","expires_at":1}]""")
-  check("EXPIRED session -> 401 (expiry enforced)", req("GET", "/control/status", cookie = ck)._1 == 401)
-  check("bogus session token -> 401", req("GET", "/control/status", cookie = "rozum_sess=nope")._1 == 401)
-
-finally
-  proc.destroy()
-  try { import scala.sys.process.*; Seq("rm", "-rf", state).! } catch case _: Throwable => ()
-
-println(s"\n== $passed/$total checks passed ==")
+println("")
+println(s"== $passed/$total checks passed ==")
 sys.exit(if passed == total then 0 else 1)
 ```
