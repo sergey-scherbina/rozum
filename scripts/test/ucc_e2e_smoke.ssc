@@ -18,7 +18,7 @@ verifies the authenticated surface. Non-zero exit on any failed check.
 
 [exec, ProcessOptions](std/process.ssc)
 [readFile, writeFile, exists, mkdirs](std/fs.ssc)
-[httpGet, httpPost](std/http.ssc)
+[httpGet, httpPost, httpTimeout, httpRetry](std/http.ssc)
 
 ```scalascript
 val bin =
@@ -55,10 +55,11 @@ val pid = exec("bash", List("-c", spawn), ProcessOptions()).stdout.trim()
 
 println(s"== UCC acceptance e2e  (isolated :$port)  ==")
 
-// Health: wait at the shell until the server is listening (httpGet throws on a refused
-// connection, and httpClient/httpRetry aren't bound on the v2 VM).
-val waitCmd = s"for _ in $$(seq 1 30); do curl -sf -o /dev/null '$base/' && exit 0; sleep 1; done; exit 1"
-val up = exec("bash", List("-c", waitCmd), ProcessOptions()).exitCode == 0
+// Health: httpRetry makes httpGet retry a refused connection until the server is listening
+// (httpRetry/httpTimeout bind on the v2 VM; the curried httpClient{} does not, so no block here).
+httpTimeout(3000)
+httpRetry(30, 1000)
+val up = httpGet(base + "/").status == 200
 check("control-serve comes up", up, "not up")
 
 println("")
