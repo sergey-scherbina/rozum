@@ -5225,7 +5225,15 @@ fn cargo_manifest_repair_hint(cwd: &std::path::Path, err: &str) -> Option<String
         lower.contains("failed to parse manifest") || lower.contains("failed to load manifest");
     let missing_package = lower.contains("missing") && lower.contains("[package]");
     let malformed_package = lower.contains("tomlpackage"); // serde: expected struct TomlPackage
-    if !(manifest_parse_error || missing_package || malformed_package) {
+    // Modern cargo prints a bare TOML syntax error that does NOT carry the "failed to parse manifest"
+    // wrapper — measured on Qwen3-4B `build`, which wrote `package` (no `[package]` table) and got only:
+    //   error: key with no value, expected `=`
+    //    --> Cargo.toml:1:8
+    // The `--> Cargo.toml` pointer is the tell: cargo's TOML parser is the ONLY thing that points at the
+    // manifest (rustc points at `src/*.rs`), so any `--> Cargo.toml` (or explicit "TOML parse error")
+    // means the manifest itself is malformed and heal-able.
+    let toml_syntax_error = lower.contains("--> cargo.toml") || lower.contains("toml parse error");
+    if !(manifest_parse_error || missing_package || malformed_package || toml_syntax_error) {
         return None;
     }
     let name = cargo_package_name(cwd).unwrap_or_else(|| "app".to_string());
@@ -8252,8 +8260,14 @@ mod chain_tests {
         // A malformed [package] table (Qwen3-4B's `test` miss) parses as a TomlPackage type error.
         let malformed = "error: failed to parse manifest\ninvalid type: string \"reverse-cli\", expected struct TomlPackage";
         assert!(cargo_manifest_repair_hint(root, malformed).is_some(), "malformed [package] must be hinted");
+        // Qwen3-4B's `build` miss: it wrote `package` (no brackets) and modern cargo prints a bare TOML
+        // syntax error WITHOUT the "failed to parse manifest" wrapper — only a `--> Cargo.toml` pointer.
+        let bare_toml = "error: key with no value, expected `=`\n --> Cargo.toml:1:8\n  |\n1 | package\n  |        ^\n";
+        assert!(cargo_manifest_repair_hint(root, bare_toml).is_some(), "bare `--> Cargo.toml` TOML error must be hinted");
         // An unrelated compile error must NOT trigger the manifest hint.
         assert!(cargo_manifest_repair_hint(root, "error[E0433]: failed to resolve").is_none());
+        // A Rust compile error pointing at src/main.rs must NOT be mistaken for a manifest error.
+        assert!(cargo_manifest_repair_hint(root, "error: expected `;`\n --> src/main.rs:3:10").is_none());
     }
 
     #[test]
