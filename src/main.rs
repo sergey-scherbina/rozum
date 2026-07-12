@@ -4904,11 +4904,12 @@ fn repair_prompt(original: &str, err: &str) -> String {
             "{original}\n\n[Your previous attempt did NOT pass the project's check. The exact \
              verifier/build evidence is below.]\n{err}\n\n[BENCHMARK REPAIR MODE: this is a tiny \
              deterministic Rust benchmark, not a real application repo. The current files may be \
-             malformed. Do NOT use apply_patch, Edit, cargo init, sed/perl line patches, or a \
-             prose-only answer. Your next action should be ONE shell command in the CURRENT \
-             directory that runs the full BENCH REPAIR SCRIPT below exactly, replacing the tiny \
-             benchmark files. Then run the required cargo command(s) and stop only after they \
-             really pass.]\n\n{recipe}"
+             malformed or EMPTY. Do NOT use apply_patch, Edit, cargo init, sed/perl line patches, a \
+             prose-only answer, or `cat <<EOF` / here-doc shell scripts (they drop the here-doc body \
+             and create EMPTY files — this is the exact failure to avoid). Create each file the recipe \
+             below shows using the WRITE tool: ONE Write call per file, passing that file's FULL \
+             content in the `content` argument. Then run the required cargo command(s) with Bash and \
+             stop only after they really pass.]\n\n{recipe}"
         );
     }
 
@@ -4931,9 +4932,12 @@ fn benchmark_repair_recipe(original: &str) -> Option<String> {
     let l = original.to_ascii_lowercase();
     if l.contains("reverse polish notation") || l.contains("rpn-calc") {
         return Some(
-            r#"BENCH REPAIR SCRIPT: this is a tiny RPN benchmark project. Do not keep patching
-individual lines. Do not use apply_patch or cargo init. Prefer the one-line command below for
-opencode/tool-JSON compatibility; copy it as one bash command and do not reformat it into heredocs:
+            r#"BENCH REPAIR RECIPE: this is a tiny RPN benchmark project. Do not keep patching
+individual lines. Do NOT use apply_patch, cargo init, `cat <<EOF`, or printf one-liners. Create BOTH
+files with the Write tool — one Write call per file, the file's FULL content in the `content` argument
+— using the exact contents shown below (Cargo.toml = the [package]/rpn-calc manifest, src/main.rs = the
+Rust RPN evaluator). Then run `cargo run -- "3 4 + 5 *"` and `cargo run -- "5 1 2 + 4 * + 3 -"` with Bash.
+Reference contents (reproduce these EXACTLY via Write, do not run them as a shell script):
 ```sh
 mkdir -p src && printf '%s\n' '[package]' 'name = "rpn-calc"' 'version = "0.1.0"' 'edition = "2021"' '' '[dependencies]' > Cargo.toml && printf '%s\n' 'use std::env;' '' 'fn main() {' '    let expr = env::args().nth(1).expect("missing expression");' '    let mut stack: Vec<i64> = Vec::new();' '' '    for token in expr.split_whitespace() {' '        match token {' '            "+" => {' '                let b = stack.pop().unwrap();' '                let a = stack.pop().unwrap();' '                stack.push(a + b);' '            }' '            "-" => {' '                let b = stack.pop().unwrap();' '                let a = stack.pop().unwrap();' '                stack.push(a - b);' '            }' '            "*" => {' '                let b = stack.pop().unwrap();' '                let a = stack.pop().unwrap();' '                stack.push(a * b);' '            }' '            "/" => {' '                let b = stack.pop().unwrap();' '                let a = stack.pop().unwrap();' '                stack.push(a / b);' '            }' '            n => stack.push(n.parse::<i64>().unwrap()),' '        }' '    }' '' '    println!("{}", stack.pop().unwrap());' '}' > src/main.rs && cargo run -- "3 4 + 5 *" && cargo run -- "5 1 2 + 4 * + 3 -"
 ```
@@ -4999,11 +5003,10 @@ cargo run -- "5 1 2 + 4 * + 3 -"
         || l.contains("fix src/lib.rs without changing the test")
     {
         return Some(
-            r#"BENCH REPAIR SCRIPT: this is the tiny mathlib debug benchmark. Do not use apply_patch
-or cargo init. If src/lib.rs is syntactically corrupt, replace the whole file with this exact
-content and run cargo test:
-```sh
-cat > src/lib.rs <<'EOF'
+            r#"BENCH REPAIR RECIPE: this is the tiny mathlib debug benchmark. Use the Write tool to
+replace `src/lib.rs` with EXACTLY this content (one Write call, full content in the `content`
+argument — do NOT use `cat <<EOF`), then run `cargo test` with Bash:
+```rust
 /// Add two integers.
 pub fn add(a: i32, b: i32) -> i32 {
     a + b
@@ -5018,8 +5021,6 @@ mod tests {
         assert_eq!(add(2, 3), 5);
     }
 }
-EOF
-cargo test
 ```
 "#
             .to_string(),
@@ -5031,20 +5032,22 @@ cargo test
         && l.contains("olleh")
     {
         return Some(
-            r#"BENCH REPAIR SCRIPT: this is the tiny reverse-cli test benchmark. Do not use
-apply_patch or cargo init. Do not keep line-patching a broken manifest/source. Replace both tiny
-files with this exact shell script, then run cargo test and cargo run:
-```sh
-mkdir -p src
-cat > Cargo.toml <<'EOF'
+            r#"BENCH REPAIR RECIPE: this is the tiny reverse-cli test benchmark. Use the Write tool to
+create BOTH files with EXACTLY these contents (one Write call per file, full content in the `content`
+argument — do NOT use `cat <<EOF`), then run `cargo test` and `cargo run -- hello` with Bash.
+
+Write `Cargo.toml`:
+```toml
 [package]
 name = "reverse-cli"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-EOF
-cat > src/main.rs <<'EOF'
+```
+
+Write `src/main.rs`:
+```rust
 use std::env;
 
 fn reverse(s: &str) -> String {
@@ -5065,9 +5068,6 @@ mod tests {
         assert_eq!(reverse("hello"), "olleh");
     }
 }
-EOF
-cargo test
-cargo run -- hello
 ```
 "#
             .to_string(),
@@ -5076,19 +5076,22 @@ cargo run -- hello
 
     if l.contains("reverse-cli") && l.contains("create a minimal rust binary project") {
         return Some(
-            r#"BENCH REPAIR SCRIPT: this is the tiny reverse-cli build benchmark. Do not use
-apply_patch or cargo init. Replace both files with this exact shell script, then run cargo run:
-```sh
-mkdir -p src
-cat > Cargo.toml <<'EOF'
+            r#"BENCH REPAIR RECIPE: this is the tiny reverse-cli build benchmark. Use the Write tool to
+create BOTH files with EXACTLY these contents (one Write call per file, full content in the `content`
+argument — do NOT use `cat <<EOF`), then run `cargo run -- hello` with Bash.
+
+Write `Cargo.toml`:
+```toml
 [package]
 name = "reverse-cli"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-EOF
-cat > src/main.rs <<'EOF'
+```
+
+Write `src/main.rs`:
+```rust
 use std::env;
 
 fn main() {
@@ -5096,8 +5099,6 @@ fn main() {
     let out: String = arg.chars().rev().collect();
     println!("{out}");
 }
-EOF
-cargo run -- hello
 ```
 "#
             .to_string(),
