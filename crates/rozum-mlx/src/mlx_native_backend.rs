@@ -869,9 +869,11 @@ mod inner {
         };
         // Chat turn-end tokens that end an assistant turn but aren't in the raw config
         // `eos_token_id` (Gemma's instruct models emit `<end_of_turn>` (106), but config eos
-        // is only `<eos>` (1) → the model over-runs into garbage past its answer). Add any
-        // such token the tokenizer knows; harmless for models without it (None).
-        for t in ["<end_of_turn>"] {
+        // is only `<eos>` (1) → the model over-runs into garbage past its answer; Qwen3.5's
+        // config eos is `<|endoftext|>` (248044) but its template ends turns with `<|im_end|>`
+        // (248046), so without this every turn over-runs → agentic tool-calls never parse).
+        // Add any such token the tokenizer knows; harmless for models without it (None).
+        for t in ["<end_of_turn>", "<|im_end|>"] {
             if let Some(id) = tokenizer.token_to_id(t) {
                 if !eos.contains(&id) {
                     eos.push(id);
@@ -2538,7 +2540,7 @@ mod inner {
                 return;
             }
         }
-        for t in ["<end_of_turn>"] {
+        for t in ["<end_of_turn>", "<|im_end|>"] {
             if let Some(id) = tokenizer.token_to_id(t) {
                 if !eos.contains(&id) {
                     eos.push(id);
