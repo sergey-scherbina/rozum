@@ -12,7 +12,7 @@ license = "Apache-2.0"
 # See docs/specs/mlx-native-runtime.md.
 
 [features]
-mlx-native = ["dep:mlx-rs", "dep:mlx-lm", "dep:mlx-lm-utils"]
+mlx-native = ["dep:mlx-rs", "dep:mlx-lm", "dep:mlx-lm-utils", "dep:image"]
 
 [dependencies]
 rozum-core = { path = "../rozum-core" }
@@ -28,9 +28,10 @@ tracing = "0.1"
 
 # The vendored MLX fork, pinned to a fork rev so a clean clone builds reproducibly
 # (same pin as the old root Cargo.toml). mlx-sys builds MLX C++ from source.
-mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "43053327e3794cef800acf9556c1e29f5eed0a2d", optional = true }
-mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "43053327e3794cef800acf9556c1e29f5eed0a2d", optional = true }
-mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "43053327e3794cef800acf9556c1e29f5eed0a2d", optional = true }
+mlx-rs = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "d4a629d61402d72d35f51bdbef7721cb6c2fd99a", optional = true }
+mlx-lm = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "d4a629d61402d72d35f51bdbef7721cb6c2fd99a", optional = true }
+mlx-lm-utils = { git = "https://github.com/sergey-scherbina/mlx-rs.git", rev = "d4a629d61402d72d35f51bdbef7721cb6c2fd99a", optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 
 [dev-dependencies]
 # For the prompt-lookup accept-rate measurement (`specdecode_plookup` ignored test):

@@ -71,6 +71,9 @@ fn block_text(b: &crate::backend::ContentBlock) -> Option<std::borrow::Cow<'_, s
         ContentBlock::ToolUse { name, input, .. } => {
             Some(std::borrow::Cow::Owned(format!("{name} {input}")))
         }
+        // The real image-token count is only known after preprocessing (grid); the
+        // char heuristic can't see it, so it contributes nothing here.
+        ContentBlock::Image { .. } => None,
     }
 }
 

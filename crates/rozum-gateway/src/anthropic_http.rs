@@ -80,6 +80,7 @@ fn messages_to_anthropic(messages: &[Message]) -> (String, Vec<Value>) {
             .iter()
             .map(|b| match b {
                 ContentBlock::Text { text } => json!({ "type": "text", "text": text }),
+                ContentBlock::Image { .. } => json!({ "type": "text", "text": "" }),
                 ContentBlock::ToolUse { id, name, input } => {
                     json!({ "type": "tool_use", "id": id, "name": name, "input": input })
                 }

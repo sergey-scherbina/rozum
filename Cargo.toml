@@ -109,3 +109,4 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # See patches/README.md and docs/specs/mistralrs-chunked-prefill.md.
 [patch.crates-io]
 mistralrs = { git = "https://github.com/sergey-scherbina/mistral.rs.git", rev = "6e98a45e23a834543c9ae611d579818b343a24f0" }
+

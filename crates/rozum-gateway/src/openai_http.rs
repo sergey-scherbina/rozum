@@ -109,6 +109,8 @@ fn messages_to_oai(messages: &[Message]) -> Vec<Value> {
                         tool_result_id = Some(tool_use_id.as_str());
                         tool_result_content = content.clone();
                     }
+                    // Not forwarded to upstream OpenAI-compatible endpoints.
+                    ContentBlock::Image { .. } => {}
                 }
             }
 

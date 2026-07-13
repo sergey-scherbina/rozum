@@ -117,6 +117,13 @@ pub enum ContentBlock {
         content: String,
         is_error: bool,
     },
+    /// An input image (raw encoded bytes: JPEG/PNG/…). Rendered into the prompt as
+    /// the model's vision placeholder; the multimodal backend preprocesses the
+    /// bytes and splices the vision embeddings. Backends without vision support
+    /// render it as empty text.
+    Image {
+        data: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug)]

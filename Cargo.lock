@@ -3706,7 +3706,7 @@ dependencies = [
 [[package]]
 name = "mlx-internal-macros"
 version = "0.25.3"
-source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=43053327e3794cef800acf9556c1e29f5eed0a2d#43053327e3794cef800acf9556c1e29f5eed0a2d"
+source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=d4a629d61402d72d35f51bdbef7721cb6c2fd99a#d4a629d61402d72d35f51bdbef7721cb6c2fd99a"
 dependencies = [
  "darling 0.21.3",
  "itertools 0.14.0",
@@ -3718,7 +3718,7 @@ dependencies = [
 [[package]]
 name = "mlx-lm"
 version = "0.0.1"
-source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=43053327e3794cef800acf9556c1e29f5eed0a2d#43053327e3794cef800acf9556c1e29f5eed0a2d"
+source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=d4a629d61402d72d35f51bdbef7721cb6c2fd99a#d4a629d61402d72d35f51bdbef7721cb6c2fd99a"
 dependencies = [
  "anyhow",
  "clap",
@@ -3736,7 +3736,7 @@ dependencies = [
 [[package]]
 name = "mlx-lm-utils"
 version = "0.0.1"
-source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=43053327e3794cef800acf9556c1e29f5eed0a2d#43053327e3794cef800acf9556c1e29f5eed0a2d"
+source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=d4a629d61402d72d35f51bdbef7721cb6c2fd99a#d4a629d61402d72d35f51bdbef7721cb6c2fd99a"
 dependencies = [
  "minijinja",
  "minijinja-contrib",
@@ -3749,7 +3749,7 @@ dependencies = [
 [[package]]
 name = "mlx-macros"
 version = "0.25.3"
-source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=43053327e3794cef800acf9556c1e29f5eed0a2d#43053327e3794cef800acf9556c1e29f5eed0a2d"
+source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=d4a629d61402d72d35f51bdbef7721cb6c2fd99a#d4a629d61402d72d35f51bdbef7721cb6c2fd99a"
 dependencies = [
  "darling 0.21.3",
  "proc-macro2",
@@ -3760,7 +3760,7 @@ dependencies = [
 [[package]]
 name = "mlx-rs"
 version = "0.25.3"
-source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=43053327e3794cef800acf9556c1e29f5eed0a2d#43053327e3794cef800acf9556c1e29f5eed0a2d"
+source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=d4a629d61402d72d35f51bdbef7721cb6c2fd99a#d4a629d61402d72d35f51bdbef7721cb6c2fd99a"
 dependencies = [
  "dyn-clone",
  "half",
@@ -3783,7 +3783,7 @@ dependencies = [
 [[package]]
 name = "mlx-sys"
 version = "0.2.0"
-source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=43053327e3794cef800acf9556c1e29f5eed0a2d#43053327e3794cef800acf9556c1e29f5eed0a2d"
+source = "git+https://github.com/sergey-scherbina/mlx-rs.git?rev=d4a629d61402d72d35f51bdbef7721cb6c2fd99a#d4a629d61402d72d35f51bdbef7721cb6c2fd99a"
 dependencies = [
  "bindgen",
  "cc",
@@ -5278,6 +5278,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "futures",
  "libc",
  "portable-pty",
@@ -5361,6 +5362,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "image",
  "mlx-lm",
  "mlx-lm-utils",
  "mlx-rs",
@@ -5814,7 +5816,7 @@ checksum = "4db5a4a562bcc0017c34cd0efbabf447be783f00576a2a516947f884e6a7ed57"
 dependencies = [
  "ahash",
  "annotate-snippets",
- "base64 0.22.1",
+ "base64 0.21.7",
  "encoding_rs_io",
  "nohash-hasher",
  "num-traits",
@@ -7895,7 +7897,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

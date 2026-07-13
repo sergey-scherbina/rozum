@@ -25,7 +25,7 @@ mod inner {
     use mlx_lm::cache::ConcatKeyValueCache;
     use mlx_lm::models::{
         deepseek_v2, gemma3, glm4, glm4_moe_lite, gpt_oss, llama, qwen2, qwen3, qwen3_5,
-        qwen3_5_moe, qwen3_moe,
+        qwen3_5_moe, qwen3_5_vision, qwen3_moe,
     };
     use mlx_lm_utils::tokenizer::{
         ApplyChatTemplateArgs, Chat, Conversation, Tokenizer, load_model_chat_template_from_file,
@@ -584,6 +584,9 @@ mod inner {
             match b {
                 ContentBlock::Text { text } => out.push_str(text),
                 ContentBlock::ToolResult { content, .. } => out.push_str(content),
+                ContentBlock::Image { .. } => {
+                    out.push_str("<|vision_start|><|image_pad|><|vision_end|>")
+                }
                 ContentBlock::ToolUse { name, input, .. } => {
                     let call = serde_json::json!({ "name": name, "arguments": input });
                     if !out.is_empty() {
@@ -611,6 +614,9 @@ mod inner {
             match b {
                 ContentBlock::Text { text: t } => text.push_str(t),
                 ContentBlock::ToolResult { content, .. } => text.push_str(content),
+                ContentBlock::Image { .. } => {
+                    text.push_str("<|vision_start|><|image_pad|><|vision_end|>")
+                }
                 ContentBlock::ToolUse { name, input, .. } => {
                     calls.push(serde_json::json!({
                         "type": "function",
@@ -693,6 +699,9 @@ mod inner {
             match b {
                 ContentBlock::Text { text: t } => text.push_str(t),
                 ContentBlock::ToolResult { content, .. } => text.push_str(content),
+                ContentBlock::Image { .. } => {
+                    text.push_str("<|vision_start|><|image_pad|><|vision_end|>")
+                }
                 ContentBlock::ToolUse { name, input, .. } => {
                     if !text.is_empty() {
                         text.push('\n');
@@ -719,6 +728,9 @@ mod inner {
             match b {
                 ContentBlock::Text { text: t } => text.push_str(t),
                 ContentBlock::ToolResult { content, .. } => text.push_str(content),
+                ContentBlock::Image { .. } => {
+                    text.push_str("<|vision_start|><|image_pad|><|vision_end|>")
+                }
                 ContentBlock::ToolUse { name, input, .. } => {
                     text.push_str("<tool_call>");
                     text.push_str(name);
@@ -832,6 +844,22 @@ mod inner {
                 return;
             }
         };
+        // Qwen3.5-VL: load the vision tower alongside the text stack so image
+        // requests can be spliced. Text-only / non-VL models leave this None.
+        let mut vision = if model_type == "qwen3_5" && config_has_vision(&model_dir) {
+            match qwen3_5_vision::load_vision_tower(&model_dir) {
+                Ok(v) => {
+                    eprintln!("mlx-native: Qwen3.5 vision tower loaded (VL enabled)");
+                    Some(v)
+                }
+                Err(e) => {
+                    eprintln!("mlx-native: vision tower load failed: {e} (text-only)");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut tokenizer = match Tokenizer::from_file(model_dir.join("tokenizer.json")) {
             Ok(t) => t,
             Err(e) => {
@@ -903,7 +931,16 @@ mod inner {
             // Fast path: batching off, or this model's arch isn't batchable → serial
             // (keeps the prefix-KV LRU).
             if cap <= 1 || !batchable_arch {
-                run_job(&mut model, &mut tokenizer, &template, &eos, kv_per_pos, &mut store, first);
+                run_job(
+                    &mut model,
+                    &mut tokenizer,
+                    &template,
+                    &eos,
+                    kv_per_pos,
+                    &mut store,
+                    vision.as_mut(),
+                    first,
+                );
                 continue;
             }
             // Gather more already-admitted jobs (up to `cap`), waiting a small window
@@ -982,7 +1019,16 @@ mod inner {
                 serial.extend(batchable);
             }
             for job in serial {
-                run_job(&mut model, &mut tokenizer, &template, &eos, kv_per_pos, &mut store, job);
+                run_job(
+                    &mut model,
+                    &mut tokenizer,
+                    &template,
+                    &eos,
+                    kv_per_pos,
+                    &mut store,
+                    vision.as_mut(),
+                    job,
+                );
             }
         }
     }
@@ -1342,6 +1388,92 @@ mod inner {
         }
     }
 
+    // ── Qwen3.5-VL multimodal ───────────────────────────────────────────────
+    const VL_IMAGE_TOKEN_ID: u32 = 248056;
+    const VL_ROTARY_DIM: i32 = 64; // head_dim(256) * partial_rotary_factor(0.25)
+    const VL_ROPE_THETA: f32 = 10_000_000.0;
+    const VL_SPATIAL_MERGE: i32 = 2;
+
+    /// True when `model_dir/config.json` declares a `vision_config` (a VLM whose
+    /// vision tower rozum can load — currently only Qwen3.5).
+    fn config_has_vision(model_dir: &std::path::Path) -> bool {
+        std::fs::read_to_string(model_dir.join("config.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .is_some_and(|c| c.get("vision_config").is_some())
+    }
+
+    /// Build the multimodal context for a Qwen3.5-VL request: preprocess the first
+    /// image in `messages`, run the vision tower, expand the single image-pad token
+    /// in `prompt_ids` to the image's token count, and produce the splice embeds +
+    /// M-RoPE. Returns `None` when there is no image. Mutates `prompt_ids` in place.
+    fn build_vl_context(
+        vision: &mut qwen3_5_vision::VisionModel,
+        messages: &[Message],
+        prompt_ids: &mut Vec<u32>,
+    ) -> Option<qwen3_5::MmContext> {
+        let bytes = messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .find_map(|b| match b {
+                ContentBlock::Image { data } => Some(data.clone()),
+                _ => None,
+            })?;
+        let img = image::load_from_memory(&bytes).ok()?.to_rgb8();
+        let (ow, oh) = (img.width() as i32, img.height() as i32);
+        let (hbar, wbar) =
+            qwen3_5_vision::smart_resize(oh, ow, 16 * VL_SPATIAL_MERGE, 65536, 16_777_216);
+        let resized = image::imageops::resize(
+            &img,
+            wbar as u32,
+            hbar as u32,
+            image::imageops::FilterType::CatmullRom,
+        );
+        let rgb = resized.into_raw();
+        let (pixels, (gh, gw)) = qwen3_5_vision::patchify_normalize(
+            &rgb,
+            hbar,
+            wbar,
+            16,
+            VL_SPATIAL_MERGE,
+            2,
+            [0.5, 0.5, 0.5],
+            [0.5, 0.5, 0.5],
+        );
+        let pv = Array::from_slice(&pixels, &[gh * gw, 1536]);
+        let embeds = vision.forward(&pv, (1, gh, gw)).ok()?;
+        embeds.eval().ok()?;
+        let n_img = embeds.shape()[0];
+
+        // Expand the single image-pad placeholder to `n_img` copies.
+        let pos = prompt_ids.iter().position(|&t| t == VL_IMAGE_TOKEN_ID)?;
+        let mut expanded = Vec::with_capacity(prompt_ids.len() + n_img as usize - 1);
+        expanded.extend_from_slice(&prompt_ids[..pos]);
+        expanded.extend(std::iter::repeat(VL_IMAGE_TOKEN_ID).take(n_img as usize));
+        expanded.extend_from_slice(&prompt_ids[pos + 1..]);
+        *prompt_ids = expanded;
+
+        let (positions, next_pos) = qwen3_5_vision::rope_index_single_image(
+            prompt_ids,
+            VL_IMAGE_TOKEN_ID,
+            (1, gh, gw),
+            VL_SPATIAL_MERGE,
+        );
+        let (cos, sin) = qwen3_5_vision::mrope_cos_sin(&positions, VL_ROTARY_DIM, VL_ROPE_THETA);
+        let seq = prompt_ids.len() as i32;
+        let cos_a = Array::from_slice(&cos, &[seq, VL_ROTARY_DIM]);
+        let sin_a = Array::from_slice(&sin, &[seq, VL_ROTARY_DIM]);
+        Some(qwen3_5::MmContext::new(
+            embeds,
+            pos as i32,
+            cos_a,
+            sin_a,
+            next_pos,
+            VL_ROTARY_DIM,
+            VL_ROPE_THETA,
+        ))
+    }
+
     /// Render the prompt and stream token events. Dispatches on the model
     /// architecture; each `Generate` iterator feeds the shared streaming loop.
     fn run_job(
@@ -1351,6 +1483,7 @@ mod inner {
         eos: &[u32],
         kv_per_pos: Option<u64>,
         store: &mut PrefixStore,
+        vision: Option<&mut qwen3_5_vision::VisionModel>,
         job: Job,
     ) {
         // Make this job's reasoning override visible to the harmony render (apply_gptoss_reasoning).
@@ -1382,7 +1515,7 @@ mod inner {
                 run_constrained_dense(model, tokenizer, template, eos, job, driver)
             };
         }
-        let prompt_ids = match render_prompt(
+        let mut prompt_ids = match render_prompt(
             tokenizer,
             template,
             &job.model_id,
@@ -1394,6 +1527,13 @@ mod inner {
                 let _ = job.events.send(Err(ModelError::BackendUnavailable(e)));
                 return;
             }
+        };
+        // Qwen3.5-VL: preprocess the image, run the vision tower, and expand the
+        // image-pad placeholder to the image's token count (mutates prompt_ids).
+        // `None` when the model has no vision tower or the request has no image.
+        let vl_mm = match vision {
+            Some(v) => build_vl_context(v, &job.messages, &mut prompt_ids),
+            None => None,
         };
         if std::env::var("ROZUM_MLX_DEBUG").is_ok() {
             eprintln!("PROMPT_IDS len={} {:?}", prompt_ids.len(), prompt_ids);
@@ -1517,6 +1657,9 @@ mod inner {
         // hybrid `Generate` builds a fresh one via `init_cache`).
         let mut hcache: Option<Vec<qwen3_5::LayerCache>> = None;
         let mut reuse_len = 0usize;
+        // VL requests can't reuse a token prefix: the vision embeds are spliced onto
+        // the image tokens and the mm prefill is single-pass over the whole prompt.
+        let prefix_enabled = prefix_enabled && vl_mm.is_none();
         if prefix_enabled && dense {
             if let Some((rl, c)) = store.take_dense(&prompt_ids) {
                 reuse_len = rl;
@@ -1572,6 +1715,10 @@ mod inner {
                     let c = job.cancel.clone();
                     generator.set_cancel(Box::new(move || c.is_cancelled()));
                     generator.set_sampler(top_p, top_k, repeat_penalty);
+                    // VL: attach the vision splice + M-RoPE (single-pass prefill).
+                    if let Some(mm) = vl_mm {
+                        generator.set_mm_context(mm);
+                    }
                     // Snapshot the Linear state at the conversation boundary (before the
                     // generation-prompt tail), so it matches the next turn's reuse offset.
                     generator.set_gen_prompt_len(gen_prompt_len as i32);
@@ -2424,7 +2571,16 @@ mod inner {
             if spec_job_eligible(&job, &target, &draft) {
                 run_spec_job(&mut target, &mut draft, &mut tokenizer, &template, eos.as_slice(), &mut store, job);
             } else {
-                run_job(&mut target, &mut tokenizer, &template, &eos, kv_per_pos, &mut store, job);
+                run_job(
+                    &mut target,
+                    &mut tokenizer,
+                    &template,
+                    &eos,
+                    kv_per_pos,
+                    &mut store,
+                    None,
+                    job,
+                );
             }
         }
     }

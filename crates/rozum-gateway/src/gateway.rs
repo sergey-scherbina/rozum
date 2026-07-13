@@ -1158,6 +1158,7 @@ fn estimate_prompt_tokens(messages: &[Message], tools: &[ToolDef]) -> u32 {
                 ContentBlock::Text { text } => text.len(),
                 ContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
                 ContentBlock::ToolResult { content, .. } => content.len(),
+                ContentBlock::Image { data } => data.len() / 8, // rough token proxy
             };
         }
     }
@@ -1607,6 +1608,21 @@ struct OaiFnCall {
 
 // ─── OpenAI conversion ────────────────────────────────────────────────────────
 
+/// Decode a `data:<mime>;base64,<b64>` image URI into raw bytes. Returns `None`
+/// for non-data URIs (remote URLs are not fetched — SSRF/complexity) or bad base64.
+fn decode_data_uri_image(url: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let rest = url.strip_prefix("data:")?;
+    let comma = rest.find(',')?;
+    let (meta, tail) = rest.split_at(comma);
+    if !meta.contains("base64") {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(tail[1..].as_bytes())
+        .ok()
+}
+
 fn oai_content_to_blocks(content: &Value, tool_calls: &[OaiToolCall]) -> Vec<ContentBlock> {
     let mut blocks = Vec::new();
 
@@ -1631,6 +1647,14 @@ fn oai_content_to_blocks(content: &Value, tool_calls: &[OaiToolCall]) -> Vec<Con
                             content: c,
                             is_error: is_err,
                         });
+                    }
+                    // OpenAI vision: {"type":"image_url","image_url":{"url":"data:...;base64,..."}}
+                    Some("image_url") => {
+                        if let Some(data) =
+                            item["image_url"]["url"].as_str().and_then(decode_data_uri_image)
+                        {
+                            blocks.push(ContentBlock::Image { data });
+                        }
                     }
                     _ => {}
                 }
@@ -3288,6 +3312,24 @@ fn anthropic_content_to_blocks(content: &Value) -> Vec<ContentBlock> {
                 Some("text") => {
                     let t = item["text"].as_str().unwrap_or("").to_owned();
                     Some(ContentBlock::Text { text: t })
+                }
+                // Anthropic image: {"type":"image","source":{"type":"base64","data":"..."}}
+                // or {"type":"url","url":"data:...;base64,..."}.
+                Some("image") => {
+                    let src = &item["source"];
+                    let data = match src.get("type").and_then(Value::as_str) {
+                        Some("base64") => {
+                            use base64::Engine;
+                            src["data"].as_str().and_then(|d| {
+                                base64::engine::general_purpose::STANDARD
+                                    .decode(d.as_bytes())
+                                    .ok()
+                            })
+                        }
+                        Some("url") => src["url"].as_str().and_then(decode_data_uri_image),
+                        _ => None,
+                    };
+                    data.map(|data| ContentBlock::Image { data })
                 }
                 Some("tool_use") => {
                     let id = item["id"].as_str().unwrap_or("").to_owned();

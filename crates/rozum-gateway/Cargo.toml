@@ -11,6 +11,7 @@ license = "Apache-2.0"
 # split (docs/specs/workspace-split.md).
 
 [dependencies]
+base64 = "0.22"
 rozum-core = { path = "../rozum-core" }
 rozum-models = { path = "../rozum-models" }
 tokio = { version = "1", features = ["full"] }
