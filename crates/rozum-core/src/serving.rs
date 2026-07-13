@@ -56,6 +56,26 @@ pub fn parse_tool_calls(text: &str) -> Vec<(String, String)> {
             None => break,
         }
     }
+    // Qwen3-Coder emits the XML `<function=…>` form sometimes WITHOUT a `<tool_call>`
+    // wrapper (only the closing marker leaks, or the opening special token is stripped
+    // during detok) — the `<tool_call>` loop above then finds nothing, the call is lost,
+    // and the agent stalls/loops even though the model's code is correct (the Qwen3-Coder
+    // 2/6 matrix result). Scan bare `<function=…>…</function>` blocks directly so the call
+    // still lands. Only runs when no `<tool_call>`/JSON/GLM call was found.
+    if calls.is_empty() && text.contains("<function=") {
+        let mut rest = text;
+        while let Some(fs) = rest.find("<function=") {
+            let blk = &rest[fs..];
+            let end = blk
+                .find("</function>")
+                .map(|e| e + "</function>".len())
+                .unwrap_or(blk.len());
+            if let Some(call) = parse_xml_function(&blk[..end]) {
+                calls.push(call);
+            }
+            rest = &blk[end..];
+        }
+    }
     if calls.is_empty() {
         calls = parse_loose_tool_calls(text);
     }
@@ -1431,6 +1451,22 @@ mod tests {
             "doc comment must end at a real newline: {content:?}");
         assert!(content.contains("\ts.chars()"), "tab entity not decoded: {content:?}");
         assert!(!content.contains("&#10;") && !content.contains("&#9;"), "numeric entity leaked: {content:?}");
+    }
+
+    #[test]
+    fn qwen_coder_xml_without_tool_call_wrapper() {
+        // Qwen3-Coder sometimes emits the `<function=…>` XML form with NO opening
+        // `<tool_call>` (only the closing marker leaks, or the opener is a stripped
+        // special token) — the `<tool_call>` scan then finds nothing and the call is
+        // lost (the Qwen3-Coder 2/6 matrix result). Parse the bare form directly.
+        let text = "I'll write the file:\n\n<function=Write>\n<parameter=file_path>\nsrc/main.rs\n</parameter>\n\
+            <parameter=content>\nfn main() { println!(\"hi\"); }\n</parameter>\n</function>\n</tool_call>";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1, "bare <function=> not parsed: {calls:?}");
+        assert_eq!(calls[0].0, "Write");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(args["file_path"].as_str().unwrap(), "src/main.rs");
+        assert!(args["content"].as_str().unwrap().contains("fn main"));
     }
 
     #[test]
