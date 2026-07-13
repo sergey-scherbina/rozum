@@ -1421,69 +1421,92 @@ mod inner {
             .is_some_and(|c| c.get("vision_config").is_some())
     }
 
-    /// Build the multimodal context for a Qwen3.5-VL request: preprocess the first
-    /// image in `messages`, run the vision tower, expand the single image-pad token
-    /// in `prompt_ids` to the image's token count, and produce the splice embeds +
-    /// M-RoPE. Returns `None` when there is no image. Mutates `prompt_ids` in place.
+    /// Build the multimodal context for a Qwen3.5-VL request: preprocess EVERY image
+    /// in `messages`, run the vision tower on each, expand each image-pad placeholder
+    /// in `prompt_ids` to that image's token count, and produce the per-image splice
+    /// embeds + combined 3D M-RoPE. Returns `None` when there is no image. Mutates
+    /// `prompt_ids` in place. The render emits one `<|image_pad|>` marker per image
+    /// (see the content-render arms), so the k-th placeholder maps to the k-th image.
     fn build_vl_context(
         vision: &mut qwen3_5_vision::VisionModel,
         messages: &[Message],
         prompt_ids: &mut Vec<u32>,
     ) -> Option<qwen3_5::MmContext> {
-        let bytes = messages
+        // Every image in the request, in message/content order.
+        let images: Vec<Vec<u8>> = messages
             .iter()
             .flat_map(|m| &m.content)
-            .find_map(|b| match b {
+            .filter_map(|b| match b {
                 ContentBlock::Image { data } => Some(data.clone()),
                 _ => None,
-            })?;
-        let img = image::load_from_memory(&bytes).ok()?.to_rgb8();
-        let (ow, oh) = (img.width() as i32, img.height() as i32);
-        let (hbar, wbar) =
-            qwen3_5_vision::smart_resize(oh, ow, 16 * VL_SPATIAL_MERGE, 65536, 16_777_216);
-        let resized = image::imageops::resize(
-            &img,
-            wbar as u32,
-            hbar as u32,
-            image::imageops::FilterType::CatmullRom,
-        );
-        let rgb = resized.into_raw();
-        let (pixels, (gh, gw)) = qwen3_5_vision::patchify_normalize(
-            &rgb,
-            hbar,
-            wbar,
-            16,
-            VL_SPATIAL_MERGE,
-            2,
-            [0.5, 0.5, 0.5],
-            [0.5, 0.5, 0.5],
-        );
-        let pv = Array::from_slice(&pixels, &[gh * gw, 1536]);
-        let embeds = vision.forward(&pv, (1, gh, gw)).ok()?;
-        embeds.eval().ok()?;
-        let n_img = embeds.shape()[0];
+            })
+            .collect();
+        if images.is_empty() {
+            return None;
+        }
 
-        // Expand the single image-pad placeholder to `n_img` copies.
-        let pos = prompt_ids.iter().position(|&t| t == VL_IMAGE_TOKEN_ID)?;
-        let mut expanded = Vec::with_capacity(prompt_ids.len() + n_img as usize - 1);
-        expanded.extend_from_slice(&prompt_ids[..pos]);
-        expanded.extend(std::iter::repeat(VL_IMAGE_TOKEN_ID).take(n_img as usize));
-        expanded.extend_from_slice(&prompt_ids[pos + 1..]);
-        *prompt_ids = expanded;
+        // Run the vision tower once per image → (embeds [n, hidden], n, grid).
+        let mut per_image: Vec<(Array, i32, (i32, i32, i32))> = Vec::with_capacity(images.len());
+        for bytes in &images {
+            let img = image::load_from_memory(bytes).ok()?.to_rgb8();
+            let (ow, oh) = (img.width() as i32, img.height() as i32);
+            let (hbar, wbar) =
+                qwen3_5_vision::smart_resize(oh, ow, 16 * VL_SPATIAL_MERGE, 65536, 16_777_216);
+            let resized = image::imageops::resize(
+                &img,
+                wbar as u32,
+                hbar as u32,
+                image::imageops::FilterType::CatmullRom,
+            );
+            let rgb = resized.into_raw();
+            let (pixels, (gh, gw)) = qwen3_5_vision::patchify_normalize(
+                &rgb,
+                hbar,
+                wbar,
+                16,
+                VL_SPATIAL_MERGE,
+                2,
+                [0.5, 0.5, 0.5],
+                [0.5, 0.5, 0.5],
+            );
+            let pv = Array::from_slice(&pixels, &[gh * gw, 1536]);
+            let embeds = vision.forward(&pv, (1, gh, gw)).ok()?;
+            embeds.eval().ok()?;
+            let n = embeds.shape()[0];
+            per_image.push((embeds, n, (1, gh, gw)));
+        }
 
-        let (positions, next_pos) = qwen3_5_vision::rope_index_single_image(
-            prompt_ids,
-            VL_IMAGE_TOKEN_ID,
-            (1, gh, gw),
-            VL_SPATIAL_MERGE,
-        );
+        // Rebuild prompt_ids: replace the k-th image-pad placeholder with n_k image
+        // tokens, recording each block's post-expansion start index + grid, in order.
+        let mut new_ids: Vec<u32> = Vec::with_capacity(prompt_ids.len());
+        let mut splice: Vec<(Array, i32)> = Vec::with_capacity(per_image.len());
+        let mut grids: Vec<(i32, i32, i32)> = Vec::with_capacity(per_image.len());
+        let mut img_i = 0usize;
+        for &t in prompt_ids.iter() {
+            if t == VL_IMAGE_TOKEN_ID && img_i < per_image.len() {
+                let (embeds, n, grid) = &per_image[img_i];
+                let start = new_ids.len() as i32;
+                new_ids.extend(std::iter::repeat(VL_IMAGE_TOKEN_ID).take(*n as usize));
+                splice.push((embeds.clone(), start));
+                grids.push(*grid);
+                img_i += 1;
+            } else {
+                new_ids.push(t);
+            }
+        }
+        if splice.is_empty() {
+            return None; // no image-pad placeholder in the rendered prompt
+        }
+        *prompt_ids = new_ids;
+
+        let (positions, next_pos) =
+            qwen3_5_vision::rope_index(prompt_ids, VL_IMAGE_TOKEN_ID, &grids, VL_SPATIAL_MERGE);
         let (cos, sin) = qwen3_5_vision::mrope_cos_sin(&positions, VL_ROTARY_DIM, VL_ROPE_THETA);
         let seq = prompt_ids.len() as i32;
         let cos_a = Array::from_slice(&cos, &[seq, VL_ROTARY_DIM]);
         let sin_a = Array::from_slice(&sin, &[seq, VL_ROTARY_DIM]);
         Some(qwen3_5::MmContext::new(
-            embeds,
-            pos as i32,
+            splice,
             cos_a,
             sin_a,
             next_pos,

@@ -48,25 +48,42 @@
   ALREADY scans `<tool_call>`/`<function=` anywhere in the final text — only the live
   stream display suppression is start-anchored, cosmetic).
 
-- [ ] **vl-followups** — Qwen3.5-VL shipped (single-image, bf16 vision + 4bit text, matrix 6/6). Next:
-  (a) multi-image per request (cu_seqlens block-diagonal attention in qwen3_5_vision + N image-token
-  blocks in the splice/rope index); (b) 4-bit vision quant in `load_vision_tower` (bf16-only today —
-  a fully-4bit VL checkpoint would fail; works now only because mlx-community keeps vision bf16);
-  (c) VL prefill projects ALL-position logits (wasteful for long prompts). ~~(d) extend the vision
-  load to qwen3_5_moe~~ DONE (`1a9463a` + mlx-lm `1dd3107b`): the flagship **Qwen3.6-35B-A3B now
-  describes images** — qwen3_5_moe reuses qwen3_5::Attention (M-RoPE hook was live), so only the
-  splice (shared `apply_mm_splice`) + an MmContext on the MoE Generate were needed; the config-driven
-  VisionModel loaded the 35B's larger ViT (depth 27, hidden 1152, out 2048) unchanged. Verified end-
-  to-end ('Two cats are sleeping on a pink couch'). See docs/specs/qwen3-5-vl-port.md.
+- [x] **vl-followups** — DONE (mlx-lm `7415d4f6`, rozum this commit). Qwen3.5-VL shipped single-image
+  first; all follow-ups now landed + verified end-to-end on the dense 4B (`mlx-community:Qwen3.5-4B-MLX-4bit`):
+  (a) **multi-image per request** — instead of cu_seqlens block-diagonal attention I run the vision
+  tower once PER image and splice each independently: `MM_SPLICE` / `MmContext.splice` became
+  `Vec<(embeds,start)>`, `apply_mm_splice` sorts + stitches all blocks in one pass (each is a
+  same-length replacement so blocks don't shift), `rope_index` generalises the single-image variant to
+  N grids (k-th image-token run consumes the k-th grid), and `build_vl_context` loops every image,
+  expands each `<|image_pad|>` in place, and builds the combined M-RoPE. Dense + MoE `Generate` updated
+  in lockstep. VERIFIED: cats+bear in one request → the model described BOTH ("two tabby cats on a pink
+  couch" + "a large brown bear in green grass"). (b) **quant-vision guard** — `load_vision_tower` now
+  detects a quantized tower (`vision_tower.*.scales`/`.biases`) and rejects it with a clear error
+  instead of loading garbage (VisionModel uses dense Linear; no quantized-vision checkpoint exists yet
+  — mlx-vlm keeps the tower bf16 even in 4-bit quants), and errors on zero matched vision weights
+  instead of a silently-random tower. (c) **last-position prefill logits** — VL prefill now runs the
+  backbone then projects ONLY the last position through `lm_head` (image-padded positions never feed
+  the vocab head), dropping the wasteful all-position projection. ~~(d) extend the vision load to
+  qwen3_5_moe~~ DONE earlier (`1a9463a` + mlx-lm `1dd3107b`): the flagship **Qwen3.6-35B-A3B describes
+  images** (config-driven ViT loaded its larger tower unchanged). Note: VL loads must use the canonical
+  COLON spec (`mlx-community:Qwen3.5-4B-MLX-4bit`); a raw snapshot-dir path isn't a recognized spec, so
+  the admission gate can't size it and refuses with a sentinel footprint (`ROZUM_ALLOW_CONCURRENT_RESIDENT=1`
+  overrides — see backlog note). See docs/specs/qwen3-5-vl-port.md.
 
-- [ ] **bench-infra-hardening** — the full matrix was flaky+slow for two structural reasons: (1) the
-  shared bench gateway self-exits under RAM pressure — cooperative preemption fires even on a
-  manually-loaded, non-`launch_managed` gateway → agents get 0.0s / can't connect between tasks; the
-  residency system should not evict a manually-pinned gateway (or the bench should pin it). (2) two
-  600s RUN_TIMEOUT tasks (a looping weak model) dominated wall time; a per-task "no-progress"
-  early-abort (0 tool_uses across N turns, or repeated identical tool calls) reclaims ~20 min/model.
-  Config lesson: run agentic at **NCTX ≥ 16384** — 4096 trim-thrashes CC's big system prompt (3×
-  slower + triggers the template-trim 500).
+- [~] **bench-infra-hardening** — (2) DONE + (config lesson recorded); (1) remains. The full matrix was
+  flaky+slow for two structural reasons: (1) the shared bench gateway self-exits under RAM pressure —
+  cooperative preemption fires even on a manually-loaded, non-`launch_managed` gateway → agents get
+  0.0s / can't connect between tasks; the residency system should not evict a manually-pinned gateway
+  (or the bench should pin it). Workaround today: `ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0`. Proper fix: gate
+  the `clients_gone` self-unload behind `launch_managed` (gateway.rs ~2872) — STILL OPEN.
+  (2) DONE (this commit) — a per-cell **no-progress early-abort** in `agentic.sh`: a background monitor
+  watches the claude stream-json and kills the cell the instant it stops making forward progress —
+  either the last `NP_REPEAT` (5) tool calls are byte-identical (churn the gateway loop-breaker can't
+  end at the agent level, since the CLI just re-issues next turn) or assistant turns run `NP_STALL_TURNS`
+  (8) ahead of tool_uses (talking, not acting). Reclaims the wall-clock a wedged cell burned to the
+  600s RUN_TIMEOUT. Off with `NP_ABORT=0`; logs the reason + seconds saved. Detection logic unit-tested
+  on synthetic churn/stall/healthy stream-json. Config lesson (no code): run agentic at **NCTX ≥ 16384**
+  — 4096 trim-thrashes CC's big system prompt (3× slower + triggers the template-trim 500).
 
 - [ ] **ucc-terminal-keys** (operator 2026-07-08: "Запиши в план и сделай. Давно было пора") — the
   iOS keyboard has no Esc/Tab/Ctrl, so Claude Code shortcuts are unreachable from the phone

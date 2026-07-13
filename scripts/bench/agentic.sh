@@ -176,6 +176,55 @@ tree_sample() { # $1=root_pid
     }'
 }
 
+# No-progress early-abort. Watches the agent's stream-json (`$alog`) while it runs and
+# kills the cell EARLY — instead of burning the full RUN_TIMEOUT — once the agent stops
+# making forward progress. Two signals:
+#   (1) churn  — the last NP_REPEAT tool calls are byte-identical (name+input). The
+#       gateway loop-breaker truncates each *generation*, but the agent CLI just re-issues
+#       the same call next turn; nothing at the agent level ends that, so a stuck cell
+#       otherwise loops to the timeout. This is the primary signal (mirrors loop-breaker Sig4).
+#   (2) stall  — assistant turns keep advancing but the tool_use count lags by NP_STALL_TURNS
+#       (the agent is talking, not acting). Secondary; only bites near the MAX_TURNS cap.
+# Off with NP_ABORT=0. Requires jq (already a hard dep). Writes the reason to $3 for the caller.
+NP_ABORT="${NP_ABORT:-1}"
+NP_REPEAT="${NP_REPEAT:-5}"
+NP_STALL_TURNS="${NP_STALL_TURNS:-8}"
+NP_POLL="${NP_POLL:-5}"
+NP_GRACE="${NP_GRACE:-25}"
+no_progress_monitor() { # $1=alog  $2=lp  $3=reasonfile
+  local alog="$1" lp="$2" rf="$3" sigs nt tail_uniq aturns reason
+  # Let the agent get going before judging progress (initial reasoning/prefill).
+  sleep "$NP_GRACE"
+  while kill -0 "$lp" 2>/dev/null; do
+    sleep "$NP_POLL"
+    kill -0 "$lp" 2>/dev/null || break
+    [ -s "$alog" ] || continue
+    # One line per tool_use so far: name + serialized input.
+    sigs=$(jq -rc 'select(.type=="assistant") | .message.content[]?
+                   | select(.type=="tool_use") | [.name, (.input|tostring)] | @tsv' \
+                   "$alog" 2>/dev/null)
+    [ -n "$sigs" ] || continue
+    nt=$(printf '%s\n' "$sigs" | grep -c .)
+    reason=""
+    # (1) churn: the last NP_REPEAT signatures are all identical.
+    tail_uniq=$(printf '%s\n' "$sigs" | tail -n "$NP_REPEAT" | sort -u | grep -c .)
+    if [ "$nt" -ge "$NP_REPEAT" ] && [ "$tail_uniq" = 1 ]; then
+      reason="churn: identical tool call x${NP_REPEAT}"
+    else
+      # (2) stall: turns advanced far past tool_uses.
+      aturns=$(grep -c '"type":"assistant"' "$alog" 2>/dev/null | tr -dc '0-9'); aturns=${aturns:-0}
+      if [ "$((aturns - nt))" -ge "$NP_STALL_TURNS" ]; then
+        reason="stall: ${aturns} turns / only ${nt} tool_uses"
+      fi
+    fi
+    if [ -n "$reason" ]; then
+      printf '%s\n' "$reason" >"$rf"
+      kill_descendants "$lp"; kill -TERM "$lp" 2>/dev/null
+      return
+    fi
+  done
+}
+
 # NOTE: the build/test parenthetical reads "put files here directly … src/ is expected and fine".
 # The older wording "do NOT create a subdirectory" was AMBIGUOUS: a cautious model (gpt-oss-20b)
 # read it literally and REFUSED to create src/ ("a valid Rust binary needs a src/ folder … I can't"),
@@ -802,6 +851,7 @@ for spec in "${MODELS[@]}"; do
         # ROZUM_VERIFY=0: bench has its own verify_task; the gateway's derive_target
         # misclassifies pure-text tasks (e.g. greet) as cargo projects via the model's
         # interpretation of the prompt, spawning a repair loop that wastes the full RUN_TIMEOUT.
+        npfile="$work/noprogress.reason"; rm -f "$npfile"
         ( cd "$work"; exec env ROZUM_VERIFY=0 "${runner[@]}" ) </dev/null >"$alog" 2>&1 &
         LP=$!
         # Agent-tree RSS + (agent + gateway) CPU; the model's RAM is the gateway footprint.
@@ -812,8 +862,17 @@ for spec in "${MODELS[@]}"; do
             sleep 2
           done ) & SAMP=$!
         ( sleep "$eff_timeout"; kill_descendants "$LP"; kill -TERM "$LP" 2>/dev/null ) & WD=$!
+        # No-progress early-abort (claude stream-json only). Kills LP itself on churn/stall,
+        # so `wait` returns before the timeout; the watchdog is a no-op in that case.
+        NPM=""
+        if [ "$agent" = claude ] && [ "$NP_ABORT" = 1 ]; then
+          no_progress_monitor "$alog" "$LP" "$npfile" & NPM=$!
+        fi
         wait "$LP"; rc=$?
-        kill "$WD" "$SAMP" 2>/dev/null; wait "$SAMP" 2>/dev/null
+        kill "$WD" "$SAMP" $NPM 2>/dev/null; wait "$SAMP" 2>/dev/null
+        if [ -s "$npfile" ]; then
+          echo "    ⨯ no-progress early-abort — $(cat "$npfile") (saved $(awk -v s="$(perl -MTime::HiRes=time -e 'printf "%.0f", time-'"$start")" -v t="$eff_timeout" 'BEGIN{d=t-s; print (d>0)?d:0}')s vs timeout)"
+        fi
         asecs=$(perl -MTime::HiRes=time -e 'printf "%.1f", time-'"$start")
         secs_total=$(awk -v a="$secs_total" -v b="$asecs" 'BEGIN{printf "%.1f", a+b}')
         tmo=$(awk -v s="$asecs" -v t="$eff_timeout" 'BEGIN{print (s>=t-2)?1:0}')
