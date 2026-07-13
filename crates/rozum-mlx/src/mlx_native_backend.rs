@@ -867,13 +867,22 @@ mod inner {
                 return;
             }
         };
-        // Chat turn-end tokens that end an assistant turn but aren't in the raw config
-        // `eos_token_id` (Gemma's instruct models emit `<end_of_turn>` (106), but config eos
-        // is only `<eos>` (1) → the model over-runs into garbage past its answer; Qwen3.5's
-        // config eos is `<|endoftext|>` (248044) but its template ends turns with `<|im_end|>`
-        // (248046), so without this every turn over-runs → agentic tool-calls never parse).
-        // Add any such token the tokenizer knows; harmless for models without it (None).
-        for t in ["<end_of_turn>", "<|im_end|>"] {
+        // Turn-end tokens that end an assistant turn but may be missing from the raw
+        // config `eos_token_id`. The PRINCIPLED source is the model's DECLARED
+        // `tokenizer_config.eos_token` — the token its chat template emits to terminate
+        // an assistant turn — not a guessed list: Qwen3.5's config eos_token_id is
+        // `<|endoftext|>` (248044) but its declared eos_token, and its template's turn
+        // terminator, is `<|im_end|>` (248046); without it every turn over-runs → agentic
+        // tool-calls never parse. Add the declared token, then the common cross-family
+        // turn-enders as a fallback for models that declare a generic eos but end turns
+        // with a distinct marker (Gemma `<end_of_turn>`, Llama-3 `<|eot_id|>`). Any token
+        // the tokenizer doesn't know is skipped (harmless).
+        let declared_eos = read_eos_token(&model_dir.join("tokenizer_config.json"));
+        for t in declared_eos
+            .as_deref()
+            .into_iter()
+            .chain(["<|im_end|>", "<end_of_turn>", "<|eot_id|>"])
+        {
             if let Some(id) = tokenizer.token_to_id(t) {
                 if !eos.contains(&id) {
                     eos.push(id);
@@ -904,6 +913,11 @@ mod inner {
         if ready.send(Ok(())).is_err() {
             return; // caller gave up before load finished
         }
+        // Load-time model-profile self-check (diagnostic): render a canonical agentic
+        // conversation so a new model's onboarding quirks — a strict chat template that
+        // 500s mid-loop, a missing turn-end token — surface in the LOAD log instead of
+        // as a mid-task failure on the first agent request.
+        probe_model_profile(&mut tokenizer, &template, &eos, &model_type);
 
         // `blocking_recv` is correct here: this is a plain OS thread with no
         // tokio runtime, so it parks until the next job (or the queue closes).
@@ -4466,6 +4480,62 @@ mod inner {
             || template.contains("\"tool\"") // role == "tool" anywhere
             || template.contains("<|observation|>") // GLM uses observation not tool
             || template.contains("<|channel|>") // harmony has its own path
+    }
+
+    /// Load-time model-profile self-check (part of gateway-model-onboarding). Renders a
+    /// canonical agentic conversation — system + user + assistant tool-call + tool result
+    /// — through the REAL render path (tool injection, Role remap, message normalization),
+    /// so the onboarding quirks that used to be found only on the first agent request show
+    /// up in the load log: a strict chat template that raises (Qwen3.5 "No user query" /
+    /// "system not first") and the resolved stop tokens (catching a config-vs-template eos
+    /// mismatch). Cheap: template render + tokenize, no model forward. Diagnostic only —
+    /// never fails the load.
+    fn probe_model_profile(tokenizer: &mut Tokenizer, template: &str, eos: &[u32], model_type: &str) {
+        let msgs = vec![
+            Message::system("You are a coding agent."),
+            Message::user("Fix the bug in src/main.rs so it builds."),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "probe0".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({ "file_path": "src/main.rs" }),
+                }],
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "probe0".into(),
+                    content: "fn main() {}".into(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let tools = vec![crate::backend::ToolDef {
+            name: "Read".into(),
+            description: "Read a file".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "file_path": { "type": "string" } }
+            }),
+        }];
+        let strict = template.contains("No user query found")
+            || template.contains("System message must be at the beginning");
+        match render_prompt(tokenizer, template, "probe", &msgs, &tools) {
+            Ok(ids) => eprintln!(
+                "mlx-native: model profile [{model_type}] — agentic render OK ({} tok){}; stop tokens {eos:?}",
+                ids.len(),
+                if strict {
+                    ", strict template → message-normalization active"
+                } else {
+                    ""
+                },
+            ),
+            Err(e) => eprintln!(
+                "mlx-native: ⚠ model profile [{model_type}] — agentic render FAILED: {e} \
+                 (multi-turn tool use may 500 — see gateway-model-onboarding)"
+            ),
+        }
     }
 
     fn render_prompt(
