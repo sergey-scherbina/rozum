@@ -52,9 +52,12 @@
   (a) multi-image per request (cu_seqlens block-diagonal attention in qwen3_5_vision + N image-token
   blocks in the splice/rope index); (b) 4-bit vision quant in `load_vision_tower` (bf16-only today —
   a fully-4bit VL checkpoint would fail; works now only because mlx-community keeps vision bf16);
-  (c) VL prefill projects ALL-position logits (wasteful for long prompts); (d) extend the vision load
-  to `qwen3_5_moe` (the 35B is `Qwen3_5MoeForConditionalGeneration` — has a vision tower rozum ignores).
-  See docs/specs/qwen3-5-vl-port.md.
+  (c) VL prefill projects ALL-position logits (wasteful for long prompts). ~~(d) extend the vision
+  load to qwen3_5_moe~~ DONE (`1a9463a` + mlx-lm `1dd3107b`): the flagship **Qwen3.6-35B-A3B now
+  describes images** — qwen3_5_moe reuses qwen3_5::Attention (M-RoPE hook was live), so only the
+  splice (shared `apply_mm_splice`) + an MmContext on the MoE Generate were needed; the config-driven
+  VisionModel loaded the 35B's larger ViT (depth 27, hidden 1152, out 2048) unchanged. Verified end-
+  to-end ('Two cats are sleeping on a pink couch'). See docs/specs/qwen3-5-vl-port.md.
 
 - [ ] **bench-infra-hardening** — the full matrix was flaky+slow for two structural reasons: (1) the
   shared bench gateway self-exits under RAM pressure — cooperative preemption fires even on a
