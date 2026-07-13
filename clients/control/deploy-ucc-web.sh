@@ -12,6 +12,7 @@
 #   center.ssc  ->  site/index.html   (browser SPA, reactive)
 #   login.ssc                ->  site/login.html   (Face ID / WebAuthn page)
 #   terminal.ssc             ->  site/terminal.html (xterm.js WebSocket terminal)
+#   session.ssc              ->  site/session.html (chat-style agent session — the default)
 set -euo pipefail
 
 SSC="${SSC:-/tmp/ssc-tk/bin/ssc}"
@@ -289,10 +290,10 @@ TR_RU = {
     'Coder log':'Лог кодера','coder id (from list)…':'id кодера (из списка)…',
     '↻ log':'↻ лог','Stop coder':'Остановить кодера','coder id…':'id кодера…',
     # sessions
-    'Sessions':'Сессии','Live sessions (terminal)':'Живые сессии (терминал)',
-    '🖥 terminal':'🖥 терминал','New interactive session':'Новая интерактивная сессия',
+    'Sessions':'Сессии','Live sessions':'Живые сессии','Live sessions (terminal)':'Живые сессии (терминал)',
+    '💬 chat':'💬 чат','🖥 term':'🖥 терм','🖥 terminal':'🖥 терминал','New interactive session':'Новая интерактивная сессия',
     'first task (optional)…':'первое задание (необязательно)…',
-    '🖥 launch session':'🖥 запустить сессию','✕ close':'✕ закрыть','status':'статус',
+    '💬 launch session':'💬 запустить сессию','🖥 launch session':'🖥 запустить сессию','✕ close':'✕ закрыть','status':'статус',
     # model detail modal
     'Model details':'Характеристики модели',
     'Architecture:':'Архитектура:','Quantization:':'Квантизация:','Context:':'Контекст:',
@@ -321,10 +322,10 @@ TR_UK = {
     '💻 launch (RAM check)':'💻 запустити (перевірка RAM)',
     'Coder log':'Лог кодера','coder id (from list)…':'id кодера (зі списку)…',
     '↻ log':'↻ лог','Stop coder':'Зупинити кодера','coder id…':'id кодера…',
-    'Sessions':'Сесії','Live sessions (terminal)':'Живі сесії (термінал)',
-    '🖥 terminal':'🖥 термінал','New interactive session':'Нова інтерактивна сесія',
+    'Sessions':'Сесії','Live sessions':'Живі сесії','Live sessions (terminal)':'Живі сесії (термінал)',
+    '💬 chat':'💬 чат','🖥 term':'🖥 терм','🖥 terminal':'🖥 термінал','New interactive session':'Нова інтерактивна сесія',
     "first task (optional)…":"перше завдання (необов'язково)…",
-    '🖥 launch session':'🖥 запустити сесію','✕ close':'✕ закрити','status':'статус',
+    '💬 launch session':'💬 запустити сесію','🖥 launch session':'🖥 запустити сесію','✕ close':'✕ закрити','status':'статус',
     'Model details':'Характеристики моделі',
     'Architecture:':'Архітектура:','Quantization:':'Квантизація:','Context:':'Контекст:',
     'Layers:':'Шари:','Size:':'Розмір:','Resident:':'У пам\'яті:','Notes:':'Примітка:',
@@ -424,11 +425,13 @@ PYEOF
 check_js_syntax "$SITE/index.html"
 check_js_runtime "$SITE/index.html"
 
-# 3) Compile login.ssc → login.html and terminal.ssc → terminal.html.
+# 3) Compile login.ssc → login.html, terminal.ssc → terminal.html, session.ssc → session.html.
 emit_html "$HERE/login.ssc"    8421 "$SITE/login.html"
 emit_html "$HERE/terminal.ssc" 8422 "$SITE/terminal.html"
+emit_html "$HERE/session.ssc"  8423 "$SITE/session.html"
 check_js_syntax "$SITE/login.html"
 check_js_syntax "$SITE/terminal.html"
+check_js_syntax "$SITE/session.html"
 
 # 4) Copy PWA assets.
 for f in manifest.webmanifest icon.svg icon-180.png sw.js; do

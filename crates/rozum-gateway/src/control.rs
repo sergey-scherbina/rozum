@@ -93,6 +93,10 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         .route("/control/session/launch", post(session_launch_route))
         .route("/control/session/stop", post(session_stop_route))
         .route("/control/session/attach/{id}", get(session_attach_route))
+        // Chat-style session I/O (session.html): read the pane as CLEAN text + send a line — no PTY,
+        // no xterm.js, so none of the escape-sequence / terminal-probe garbage the raw attach fights.
+        .route("/control/session/send", post(session_send_route))
+        .route("/control/session/output", get(session_output_route))
         .route_layer(axum::middleware::from_fn(require_perm_agents));
     let matrix = Router::new()
         .route("/control/matrix/run", post(matrix_run_route))
@@ -1584,6 +1588,94 @@ async fn session_stop_route(body: String) -> axum::response::Response {
         save_sessions(&sessions);
     }
     axum::Json(serde_json::json!({ "ok": true, "id": id })).into_response()
+}
+
+/// A session id is `<agent>-<unix>-<seq>` — a strict alnum/`-`/`_` charset. Validate before it becomes a
+/// tmux target (`rozum-<id>`), so no crafted id can reach an unintended pane.
+fn session_id_safe(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The only tmux key-names the chat page may inject as CONTROL keys (interactive agents need Esc / ^C /
+/// ^U). Everything the user types is sent as LITERAL text (`send-keys -l`) instead, so this stays tiny.
+fn allowed_session_key(k: &str) -> bool {
+    matches!(k, "Enter" | "Escape" | "Tab" | "BTab" | "Up" | "Down" | "Left" | "Right" | "C-c" | "C-u" | "C-d")
+}
+
+#[derive(Deserialize)]
+struct SessionSendReq {
+    id: String,
+    #[serde(default)]
+    input: String,
+    /// Optional control keys (whitelist) sent AFTER the literal input — e.g. `["Enter"]` to submit.
+    #[serde(default)]
+    keys: Vec<String>,
+    /// When true (default) and no explicit `keys`, an `Enter` is appended so the typed line submits.
+    #[serde(default = "default_true")]
+    submit: bool,
+}
+fn default_true() -> bool { true }
+
+/// POST `/control/session/send` — type a line into the agent's tmux session. Literal text via
+/// `send-keys -l` (tmux does NOT interpret key-names in it), then Enter (or the whitelisted keys).
+async fn session_send_route(body: String) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let req: SessionSendReq = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &format!("bad body: {e}")),
+    };
+    if !session_id_safe(&req.id) {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "bad session id");
+    }
+    if req.keys.iter().any(|k| !allowed_session_key(k)) {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "unsupported control key");
+    }
+    if !tmux_alive(&req.id) {
+        return json_err(axum::http::StatusCode::NOT_FOUND, "session not running");
+    }
+    let name = tmux_name(&req.id);
+    if !req.input.is_empty() {
+        // `-l` = literal: the input is data, never a key-name, so no metachar can trigger an action.
+        let _ = Command::new("tmux").args(["send-keys", "-t", &name, "-l", "--", &req.input]).status();
+    }
+    if !req.keys.is_empty() {
+        for k in &req.keys {
+            let _ = Command::new("tmux").args(["send-keys", "-t", &name, k]).status();
+        }
+    } else if req.submit {
+        let _ = Command::new("tmux").args(["send-keys", "-t", &name, "Enter"]).status();
+    }
+    axum::Json(serde_json::json!({ "ok": true, "id": req.id })).into_response()
+}
+
+#[derive(Deserialize)]
+struct SessionOutputQuery {
+    id: String,
+    #[serde(default = "default_scrollback")]
+    scrollback: usize,
+}
+fn default_scrollback() -> usize { 3000 }
+
+/// GET `/control/session/output?id=<id>` — the session pane as CLEAN text (`tmux capture-pane -p -J`
+/// strips every escape sequence and joins wrapped lines), including up to `scrollback` lines of history.
+/// This is what makes the chat view garbage-free — no raw PTY bytes, no terminal-probe replies.
+async fn session_output_route(
+    axum::extract::Query(q): axum::extract::Query<SessionOutputQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !session_id_safe(&q.id) {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "bad session id");
+    }
+    if !tmux_alive(&q.id) {
+        return axum::Json(serde_json::json!({ "id": q.id, "alive": false, "output": "" })).into_response();
+    }
+    let name = tmux_name(&q.id);
+    let start = format!("-{}", q.scrollback.min(10000));
+    let out = Command::new("tmux")
+        .args(["capture-pane", "-p", "-J", "-t", &name, "-S", &start])
+        .output();
+    let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    axum::Json(serde_json::json!({ "id": q.id, "alive": true, "output": text })).into_response()
 }
 
 /// WS: bridge a PTY running `tmux attach -t rozum-<id>` to the browser terminal. Closing the WS ends the

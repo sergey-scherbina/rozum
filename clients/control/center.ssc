@@ -262,17 +262,18 @@ val sessionForm = vstack(gap = 8)(
 val sessionsBody = vstack(gap = 16)(
   hstack(gap = 10)(link("#/", "← back"), heading(1, "Sessions"), actionButton(incSignal(refresh), "↻"), link("/login.html", "🔐 Login")),
   divider(),
-  jobPanel(st, refresh, "Live sessions (terminal)", [
+  jobPanel(st, refresh, "Live sessions", [
       fieldColumn("agent", "agent"),
       fieldColumn("model", "model"),
       fieldColumn("repo", "workdir"),
       fieldColumn("status", "status"),
-      lcol("🖥 terminal", "id", "/terminal.html?id=:value")
+      lcol("💬 chat", "id", "/session.html?id=:value"),
+      lcol("🖥 term", "id", "/terminal.html?id=:value")
     ], "sessions", "/control/session/stop",
     "New interactive session", sessionForm,
-    "🖥 launch session", "/control/session/launch",
+    "💬 launch session", "/control/session/launch",
     [("agent", "seAgent"), ("model", "seModel"), ("workdir", "seWorkdir"), ("prompt", "sePrompt")],
-    [onOpenJson("/terminal.html?id=:value", "id")])
+    [onOpenJson("/session.html?id=:value", "id")])
 )
 ```
 
