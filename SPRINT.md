@@ -37,6 +37,16 @@
   that degenerate on JSON-escaped code — kills the Coder-30B class at the source; (e) the streaming
   tool-call detector must find `<tool_call>`/`<function=` ANYWHERE in a turn (Coder-30B narrates then
   calls). Spec candidate: docs/specs/gateway-model-onboarding.md.
+  LANDED (`45acea9`): (a) load-time **model-profile probe** — renders a canonical agentic
+  conversation at load and logs `model profile [type] — agentic render OK/FAILED, strict
+  template → normalization active, stop tokens […]`, so onboarding quirks surface in the
+  load log; (b) **principled turn-end** — the eos set now takes the DECLARED
+  `tokenizer_config.eos_token` (+ Gemma/Llama-3 fallbacks) instead of a guessed list.
+  (c) template-safe message normalization already shipped (`f0c7366`). REMAINING: (d)
+  constrained decoding to force ONE reliable tool format for models that degenerate on
+  JSON-escaped code; (e) streaming tool-call detect-anywhere (note: `parse_tool_calls`
+  ALREADY scans `<tool_call>`/`<function=` anywhere in the final text — only the live
+  stream display suppression is start-anchored, cosmetic).
 
 - [ ] **vl-followups** — Qwen3.5-VL shipped (single-image, bf16 vision + 4bit text, matrix 6/6). Next:
   (a) multi-image per request (cu_seqlens block-diagonal attention in qwen3_5_vision + N image-token
