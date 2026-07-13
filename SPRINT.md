@@ -18,7 +18,15 @@
   `is_even` checks odd; fix both, cargo test green). Wired through TASK_LIST / DIFF / prompt_for /
   setup_task / verify_task / bench_package_name / repair_goal_hint; reference-verified.
 
-- [ ] **gateway-onboarding-hardening** — the VL port + the matrix fixes revealed that bringing a new
+- [x] **gateway-onboarding-hardening** — CLOSED (2026-07-13). (a) profile probe + (b) principled turn-end
+  landed (`45acea9`), (c) template-safe normalization shipped (`f0c7366`). (e) is a no-op:
+  `parse_tool_calls` already scans `<tool_call>`/`<function=` anywhere in the final text (only the live
+  stream-display suppression is start-anchored, cosmetic). (d) CONSTRAINED DECODING → **WON'T-DO**: its
+  sole target was the Qwen3-Coder-30B 4-bit class that degenerates emitting JSON-escaped code, and that
+  model was DELETED in `models-cleanup`. Building a logit-constraining tool-format enforcer for a model
+  class we no longer ship is speculative; revisit only if a future kept model shows the same
+  JSON-escape degeneration. Original detail below.
+  ~~[ ] gateway-onboarding-hardening~~ — the VL port + the matrix fixes revealed that bringing a new
   model up agentically is a series of SCATTERED patches, each in a different subsystem, each found by
   failure. Concrete evidence: (1) STOP TOKENS — Qwen3.5's config eos is `<|endoftext|>` but its
   template ends turns with `<|im_end|>`, so without the augment-list hack (`ce3948f`) every turn
@@ -70,12 +78,14 @@
   the admission gate can't size it and refuses with a sentinel footprint (`ROZUM_ALLOW_CONCURRENT_RESIDENT=1`
   overrides — see backlog note). See docs/specs/qwen3-5-vl-port.md.
 
-- [~] **bench-infra-hardening** — (2) DONE + (config lesson recorded); (1) remains. The full matrix was
-  flaky+slow for two structural reasons: (1) the shared bench gateway self-exits under RAM pressure —
-  cooperative preemption fires even on a manually-loaded, non-`launch_managed` gateway → agents get
-  0.0s / can't connect between tasks; the residency system should not evict a manually-pinned gateway
-  (or the bench should pin it). Workaround today: `ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0`. Proper fix: gate
-  the `clients_gone` self-unload behind `launch_managed` (gateway.rs ~2872) — STILL OPEN.
+- [x] **bench-infra-hardening** — both structural fixes now in place.
+  (1) DONE (already, verified 2026-07-13) — the `clients_gone` self-exit is ALREADY gated behind
+  `launch_managed` in the current gateway (`gateway.rs:4830`/`4838`; the old "MLX can_reload ⇒ un-gated
+  branch" memory note was STALE), and `agentic.sh:799` starts its shared gateway with
+  `ROZUM_GATEWAY_IDLE_SECS=0 ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0` and NOT launch-managed, so neither the
+  lifecycle exit nor the idle-unload fires between tasks. Only cooperative preemption (`4862`) can still
+  evict it, and that only if a higher-priority load arrives mid-matrix (shouldn't during a bench). No
+  code change needed.
   (2) DONE (this commit) — a per-cell **no-progress early-abort** in `agentic.sh`: a background monitor
   watches the claude stream-json and kills the cell the instant it stops making forward progress —
   either the last `NP_REPEAT` (5) tool calls are byte-identical (churn the gateway loop-breaker can't
