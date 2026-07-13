@@ -4639,6 +4639,48 @@ mod inner {
         } else {
             messages
         };
+        // Qwen3.5-style templates `raise` on (a) no plain user turn, or (b) a system
+        // message that isn't the first message. Context-trimming across an agentic
+        // loop can produce both: a big system prompt + a "[Note: N turns omitted]"
+        // SECOND system message + a tool result, with the user turn dropped — i.e.
+        // `[system, system, tool]`. That 500s the request mid-task and breaks edit
+        // tasks (fix/debug). Normalize for such strict templates: coalesce all system
+        // messages into one leading system turn, and synthesize a user turn if
+        // trimming dropped it. No-op for a normal `[system, user, …]` conversation.
+        let normalized: Vec<Message>;
+        let strict = template.contains("No user query found")
+            || template.contains("System message must be at the beginning");
+        let sys_count = messages.iter().filter(|m| m.role == Role::System).count();
+        let has_user = messages.iter().any(|m| m.role == Role::User);
+        let messages: &[Message] = if strict && (sys_count > 1 || !has_user) {
+            let mut sys_text = String::new();
+            let mut rest: Vec<Message> = Vec::new();
+            for m in messages {
+                if m.role == Role::System {
+                    if !sys_text.is_empty() {
+                        sys_text.push_str("\n\n");
+                    }
+                    sys_text.push_str(&message_text(m));
+                } else {
+                    rest.push(m.clone());
+                }
+            }
+            let mut v: Vec<Message> = Vec::new();
+            if !sys_text.is_empty() {
+                v.push(Message::system(sys_text));
+            }
+            if !rest.iter().any(|m| m.role == Role::User) {
+                v.push(Message::user(
+                    "(An earlier turn was truncated to fit the context window — \
+                     continue the task using the information above.)",
+                ));
+            }
+            v.extend(rest);
+            normalized = v;
+            &normalized
+        } else {
+            messages
+        };
         let convo: Vec<Conversation<&'static str, String>> =
             messages.iter().map(|m| dialect.render_message(m)).collect();
         // Thinking is OFF by default (clean output for CC/Codex); the gateway's
