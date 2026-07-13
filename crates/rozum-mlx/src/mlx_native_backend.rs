@@ -846,7 +846,9 @@ mod inner {
         };
         // Qwen3.5-VL: load the vision tower alongside the text stack so image
         // requests can be spliced. Text-only / non-VL models leave this None.
-        let mut vision = if model_type == "qwen3_5" && config_has_vision(&model_dir) {
+        let mut vision = if matches!(model_type.as_str(), "qwen3_5" | "qwen3_5_moe")
+            && config_has_vision(&model_dir)
+        {
             match qwen3_5_vision::load_vision_tower(&model_dir) {
                 Ok(v) => {
                     eprintln!("mlx-native: Qwen3.5 vision tower loaded (VL enabled)");
@@ -1761,6 +1763,10 @@ mod inner {
                     let c = job.cancel.clone();
                     generator.set_cancel(Box::new(move || c.is_cancelled()));
                     generator.set_sampler(top_p, top_k, repeat_penalty);
+                    // VL: attach the vision splice + M-RoPE (single-pass prefill).
+                    if let Some(mm) = vl_mm {
+                        generator.set_mm_context(mm);
+                    }
                     // Snapshot the Linear state at the conversation boundary (before the
                     // generation-prompt tail), so it matches the next turn's reuse offset.
                     generator.set_gen_prompt_len(gen_prompt_len as i32);
