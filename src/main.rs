@@ -5273,6 +5273,17 @@ fn heal_cargo_manifest(cwd: &std::path::Path) -> bool {
     std::fs::write(&path, good).is_ok()
 }
 
+/// Cheap gate for the EAGER healer: the Cargo.toml exists but carries NO `[package]` header line — the
+/// exact shape the weak model produces (`package`, brackets dropped). A valid manifest always has that
+/// header, so this never flags (and the eager healer never rewrites) a manifest that has real
+/// `[dependencies]`; only the genuinely-broken no-`[package]` case is touched.
+fn manifest_missing_package(cwd: &std::path::Path) -> bool {
+    match std::fs::read_to_string(cwd.join("Cargo.toml")) {
+        Ok(text) => !text.lines().any(|l| l.trim() == "[package]"),
+        Err(_) => false, // no manifest → nothing to heal
+    }
+}
+
 /// A required source file EXISTS but is 0 bytes after the agent ran. The measured cause is a botched
 /// chained shell heredoc — the model emits `cat > A <<'EOF' && cat > B <<'EOF' && cargo …` but drops the
 /// heredoc BODIES (chained heredocs are syntactically tricky; both GLM-4-9B on rpn and Qwen3-4B on test
@@ -5417,6 +5428,26 @@ async fn exec_agent(
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let rounds: usize =
         std::env::var("ROZUM_VERIFY_ROUNDS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(2);
+
+    // Eager manifest heal (ROZUM_EAGER_MANIFEST_HEAL=0 to disable). A weak model — measured: Qwen3-4B
+    // on `build` — stochastically writes a Cargo.toml with a broken `[package]` header (`package`, no
+    // brackets) and CANNOT self-fix it (3 consecutive Edits stayed broken), then thrashes EVERY `cargo`
+    // call for the whole session until the timeout — the slowest, most fragile task. The post-session
+    // verify already heals it, but only AFTER the wasted session. Normalize it the moment it appears
+    // (~1 s) so the model's next `cargo` succeeds and the session lands fast. Strictly gated on a
+    // genuinely-broken manifest (no `[package]` line), so a valid one — including one with real
+    // `[dependencies]` — is never rewritten. The task dies with the process (exec_agent always exits).
+    if std::env::var("ROZUM_EAGER_MANIFEST_HEAL").map(|v| v != "0").unwrap_or(true) {
+        let heal_cwd = cwd.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+                if manifest_missing_package(&heal_cwd) && heal_cargo_manifest(&heal_cwd) {
+                    eprintln!("rozum launch: 🔧 eager-healed a malformed Cargo.toml (mid-session)");
+                }
+            }
+        });
+    }
 
     // The escalation CHAIN: the `--model` list in order (cloud links last — the operator orders them).
     // The gate tries each link with up to `rounds` self-repair attempts; on persistent target-miss it
@@ -8296,6 +8327,24 @@ mod chain_tests {
         assert!(fixed.starts_with("[package]\nname = \"reverse-cli\""), "name recovered + [package] table: {fixed}");
         // An already-valid canonical manifest → no rewrite (don't loop).
         assert!(!heal_cargo_manifest(root), "a canonical manifest must not be rewritten again");
+    }
+
+    #[test]
+    fn manifest_missing_package_gates_the_eager_healer() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        // No manifest → nothing to heal.
+        assert!(!manifest_missing_package(root));
+        // The broken shape (no `[package]` line) → flagged.
+        std::fs::write(root.join("Cargo.toml"), "package\nname = \"reverse-cli\"\nedition = \"2021\"\n").unwrap();
+        assert!(manifest_missing_package(root), "a `package`-no-brackets manifest must be flagged");
+        // A VALID manifest WITH real dependencies → NOT flagged (the eager healer must never clobber it).
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nserde = \"1\"\ntokio = { version = \"1\", features = [\"full\"] }\n",
+        )
+        .unwrap();
+        assert!(!manifest_missing_package(root), "a valid [package] manifest with deps must NOT be flagged");
     }
 
     #[test]
