@@ -29,7 +29,7 @@
 #   TASKS="greet build" RUN_TIMEOUT=600 scripts/bench/agentic.sh
 #
 # Env knobs:
-#   AGENTIC_MODELS  space-separated specs (default: Qwen3.6-35B-A3B — the standard model)
+#   AGENTIC_MODELS  space-separated specs (default: the 3 installed models — Qwen3-4B, Qwen3.5-4B-VL, Qwen3.6-35B-A3B)
 #   AGENTS          subset of "claude codex opencode" (default all three, if installed)
 #   TASKS           subset of: greet build fix test debug (default all)
 #   RUN_TIMEOUT     whole-task wall ceiling, seconds (default 1200)
@@ -105,28 +105,19 @@ case "$BIN" in /*) ;; *) BIN="$repo/$BIN" ;; esac   # launch runs in a temp cwd 
 # (Qwen2.5-0.5B, Qwen3-0.6B, Llama-3.2-1B) only manage `greet` even with the
 # JSON-repair, and template-less / incompatible models (gemma, Phi-3, SmolLM2,
 # Mistral-v0.3) can't drive tools at all — all dropped. Override with AGENTIC_MODELS.
-# Two models, by operator request — the pipeline-cascade value A/B (now that the in-process
-# model-swap bug is fixed, see docs/pipeline-swap-bug.md):
-#   1. Qwen3.6-35B-A3B — the single strongest local agentic coder (clears codex's apply_patch bar).
-#   2. GLM-4-32B,gpt-oss-20b — the LAZY in-process pipeline (comma-spec): GLM-4-32B plans (one-shot,
-#      strong at correct code), gpt-oss-20b executes (reliable agentic delivery). One model resident
-#      at a time (max(planner,executor) ~18 GB, fits 36 GB no-reboot). NOTE: the pipeline reloads
-#      both tiers per request (lazy), so it is SLOW per agent turn — give it a generous RUN_TIMEOUT.
-#   3. Qwen3-Coder-30B-A3B — purpose-built agentic coder; native qwen3_moe 4bit ~20.5 GB. Clean-box
-#      verdict (2026-07-03): rpn+build 6/6, test+debug 4/4 ✓; fix 0/2 ✗ (model encodes multiline
-#      old_string with spaces not \n in JSON format → Edit miss → 284-tool loop). Strong on
-#      create-from-scratch; known weakness on multi-line Edit fix tasks.
-#   4. Devstral-Small-2507 — Mistral SWE/edit specialist; native via mistral→llama loader, 4bit
-#      ~13.3 GB. Clean-box verdict (2026-07-03): 5/5 all tasks PASS (rpn+build+fix+test+debug). Four
-#      gateway bugs fixed before it worked (52bf4f7 injection-merge, 3a6baa2 eos_token, b3c8ab6
-#      role-remap). Best low-footprint agentic matrix member.
-#   5. GLM-4.7-Flash-4bit — GLM MoE-lite (glm4_moe_lite, absorbed MLA, DeepSeek-V3 routing); 4bit
-#      ~17 GB weights, 24.1 GB peak at n_ctx=14336 (adaptive). Full matrix (2026-07-03, agentic-
-#      20260703-120113): claude **15/15** — rpn 3/3, build 3/3, fix 3/3, test 3/3, debug 3/3.
-#      Strongest all-tasks score; loads adaptively to fit 26 GB free RAM.
+# Default = the models actually installed locally after `models-cleanup` (2026-07-13): the older
+# curated catalog (Qwen3-Coder-30B, Devstral, GLM-4.7-Flash, GLM-4-32B, gpt-oss-20b, the -DWQ 35B)
+# was pruned, so the previous DEFAULT_MODELS pointed only at deleted specs and a bare run failed.
+# Keep this list in sync with `rozum-gateway models list`. Current three:
+#   1. Qwen3-4B-4bit — small dense baseline; fast, the floor for the capability cliff above.
+#   2. Qwen3.5-4B-MLX-4bit — dense 4B VISION-LANGUAGE (VL port: 4bit text + bf16 vision tower).
+#      Agentic matrix 6/6 (claude) once the eos + strict-template-trim gateway bugs were fixed.
+#   3. Qwen3.6-35B-A3B-4bit — flagship MoE (35B total / 3B active), ALSO vision-capable; the single
+#      strongest local agentic coder (clears codex's apply_patch bar). ~20.4 GB, ~24 GB peak — loads
+#      adaptively; SLOW per turn, but AGENTIC_TIMEOUT_AUTOSCALE bumps its RUN_TIMEOUT.
 # Each space-separated entry is one `gateway --model <spec>`; a comma inside an entry = pipeline.
 # Override with AGENTIC_MODELS="spec1 spec2 ...".
-DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit-DWQ mlx-community:Qwen3-Coder-30B-A3B-Instruct-4bit mlx-community:Devstral-Small-2507-4bit mlx-community:GLM-4.7-Flash-4bit mlx-community:GLM-4-32B-0414-4bit,mlx-community:gpt-oss-20b-MXFP4-Q4"
+DEFAULT_MODELS="mlx-community:Qwen3-4B-4bit mlx-community:Qwen3.5-4B-MLX-4bit mlx-community:Qwen3.6-35B-A3B-4bit"
 read -r -a MODELS <<<"${AGENTIC_MODELS:-$DEFAULT_MODELS}"
 # Tasks: greet build fix test debug (the originals) + rpn (a from-scratch-hard RPN calculator —
 # create-from-scratch where a planner→executor pipeline should help most; see verify_task/prompt_for).
