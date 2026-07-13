@@ -62,7 +62,7 @@ val budgetTxt    = computedSignal(() => gib(jsonValue(st()).get("residency").get
 val committedTxt = computedSignal(() => gib(jsonValue(st()).get("residency").get("committed_bytes").asDouble))
 
 val meetingsCard = cardWithHeader(heading(2, "Meetings"))(
-  remoteTable(st, [lcol("Room", "room", "#/chat/:value")], "meetings")
+  remoteTable(st, [lcol("Room", "room", "#/chat/:value")], "meetings", [], "room")
 )
 val gwCard = cardWithHeader(hstack(gap = 10)(heading(2, "Memory"), actionButton(incSignal(refresh), "↻")))(
   vstack(gap = 6)(
@@ -85,7 +85,7 @@ val modelsPanel = cardWithHeader(heading(2, "Models"))(
   ], "models", [
     rowPostAction("load",   "POST", "/control/gateway/load", "load_spec",  refresh),
     rowPostAction("unload", "POST", "/control/gateway/stop", "stop_label", refresh)
-  ])
+  ], "spec")
 )
 
 val dashboard = vstack(gap = 16)(
@@ -140,7 +140,7 @@ val agRoom    = signal("agRoom", "")
 val agPolicy  = signal("agPolicy", "mention")
 val agPersona = signal("agPersona", "")
 
-val agentModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", agModel, "spec")])
+val agentModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", agModel, "spec")], "spec")
 val agentForm = vstack(gap = 8)(
   hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
   hstack(gap = 8)(text("model:"), signalText_(agModel)),
@@ -187,8 +187,8 @@ val cdAgentClaudeLbl   = computedSignal(() => if cdAgent() == "claude"   then "�
 val cdAgentCodexLbl    = computedSignal(() => if cdAgent() == "codex"    then "✓ codex"    else "codex")
 val cdAgentOpencodeLbl = computedSignal(() => if cdAgent() == "opencode" then "✓ opencode" else "opencode")
 
-val coderModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", cdModel, "spec")])
-val coderWorkdirList = remoteTable(st, [fieldColumn("project", "name")], "projects", [rowLink("select", cdWorkdir, "path")])
+val coderModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", cdModel, "spec")], "spec")
+val coderWorkdirList = remoteTable(st, [fieldColumn("project", "name")], "projects", [rowLink("select", cdWorkdir, "path")], "path")
 val coderForm = vstack(gap = 8)(
   hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
   vstack(gap = 4)(
@@ -241,8 +241,8 @@ val seAgentClaudeLbl   = computedSignal(() => if seAgent() == "claude"   then "�
 val seAgentCodexLbl    = computedSignal(() => if seAgent() == "codex"    then "✓ codex"    else "codex")
 val seAgentOpencodeLbl = computedSignal(() => if seAgent() == "opencode" then "✓ opencode" else "opencode")
 
-val sessionModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", seModel, "spec")])
-val sessionWorkdirList = remoteTable(st, [fieldColumn("project", "name")], "projects", [rowLink("select", seWorkdir, "path")])
+val sessionModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", seModel, "spec")], "spec")
+val sessionWorkdirList = remoteTable(st, [fieldColumn("project", "name")], "projects", [rowLink("select", seWorkdir, "path")], "path")
 val sessionForm = vstack(gap = 8)(
   hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
   vstack(gap = 4)(
