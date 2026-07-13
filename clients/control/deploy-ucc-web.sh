@@ -176,8 +176,16 @@ check_js_runtime() {
 # Emit to a temp file and mv into place only on success — a direct `> "$SITE/index.html"`
 # truncates the LIVE page before ssc even starts, so an ssc failure (set -e) leaves
 # production serving a 0-byte blank dashboard (this happened 2026-07-07).
-echo ">> emitting index.html (browser SPA) ..."
-"$SSC" emit-spa --frontend react "$HERE/center.ssc" > "$SITE/index.html.new"
+#
+# `emit-spa` was moved to the OPTIONAL tools/compatibility tier in the latest ScalaScript
+# v2 — the standard `bin/ssc` now refuses it ("requires the optional ScalaScript
+# tools/compatibility tier; run ssc-tools explicitly"), which silently broke this deploy
+# (2026-07-13). Emit through `ssc-tools` when the canonical launcher exists; fall back to
+# `$SSC` for an older toolchain that still carried emit-spa in the standard tier.
+EMIT_SSC="$SSC"
+if [ -x "$_SSC_ROOT_DEFAULT/bin/ssc-tools" ]; then EMIT_SSC="$_SSC_ROOT_DEFAULT/bin/ssc-tools"; fi
+echo ">> emitting index.html (browser SPA, via $(basename "$EMIT_SSC")) ..."
+"$EMIT_SSC" emit-spa --frontend react "$HERE/center.ssc" > "$SITE/index.html.new"
 [ -s "$SITE/index.html.new" ] || { echo "✗ emit-spa produced an empty index.html — aborting (live page untouched)" >&2; exit 1; }
 mv "$SITE/index.html.new" "$SITE/index.html"
 echo ">> index.html: $(wc -c < "$SITE/index.html") bytes"
