@@ -130,7 +130,7 @@ DEFAULT_MODELS="mlx-community:Qwen3.6-35B-A3B-4bit-DWQ mlx-community:Qwen3-Coder
 read -r -a MODELS <<<"${AGENTIC_MODELS:-$DEFAULT_MODELS}"
 # Tasks: greet build fix test debug (the originals) + rpn (a from-scratch-hard RPN calculator —
 # create-from-scratch where a planner→executor pipeline should help most; see verify_task/prompt_for).
-read -r -a TASK_LIST <<<"${TASKS:-greet build fix test debug rpn}"
+read -r -a TASK_LIST <<<"${TASKS:-greet build fix test debug rpn wordcount multibug}"
 # REPS>1 runs every cell N times (fresh workdir each) so the report is a PASS-RATE, not a
 # single sample. The agentic matrix is irreducibly noisy — agent CLIs inject a per-run
 # session-id/timestamp, so a cell varies run-to-run even at a fixed ROZUM_SAMPLING_SEED
@@ -151,7 +151,7 @@ mkdir -p "$OUT/runs"
 CSV="$OUT/per-run.csv"
 TRIAGE_PY="$here/agentic_triage.py"
 echo "agent,model,task,difficulty,seconds,pass,rc,timeout,turns,tool_uses,agent_peak_mb,peak_cpu_pct,model_footprint_mb,repairs,verifier_kind,verdict,verdict_confidence,gateway_generation,context_window,mlx_active_mb,mlx_peak_mb,mlx_cache_mb" > "$CSV"
-declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 )
+declare -A DIFF=( [greet]=1 [build]=2 [fix]=3 [test]=4 [debug]=5 [rpn]=6 [wordcount]=7 [multibug]=8 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -196,6 +196,8 @@ prompt_for() {
     fix)   echo "There is a Rust project in the current directory. Running \"cargo run -- hello\" should print \"olleh\" (the reverse of the argument) but it prints \"hello\". Find and fix the bug in src/main.rs, then run \"cargo run -- hello\" to confirm it prints \"olleh\". Make the minimal change; do not rewrite the whole file. Before editing, read the file and copy the exact current text for Edit.old_string. If Edit says \"String to replace not found\", re-read the file and use an exact current substring (or Write the tiny file); do not claim success until the command really prints \"olleh\". The moment it prints \"olleh\", you are DONE — reply with one short confirmation line and STOP.${tool_hint}" ;;
     debug) echo "There is a Rust library in the current directory. \"cargo test\" fails because of a bug in src/lib.rs. Fix the bug so the test passes. Do NOT modify the test. Then run \"cargo test\" to confirm it passes. Make the minimal change. Before editing, read the file and copy the exact current text for Edit.old_string. If Edit says \"String to replace not found\", re-read the file and use an exact current substring (or Write the tiny file); do not claim success until the test command really passes. The moment the test passes, you are DONE — reply with one short confirmation line and STOP.${tool_hint}" ;;
     rpn)   echo "In the CURRENT directory (put files here directly — do NOT wrap them in a new project folder via \`cargo new\`; the standard \`src/\` directory for \`src/main.rs\` is expected and fine), create a minimal Rust binary project: a Cargo.toml (package name \"rpn-calc\", version 0.1.0, edition 2021, no dependencies) and src/main.rs. The program evaluates a Reverse Polish Notation (postfix) expression passed as its first command-line argument: use \`std::env::args().nth(1)\` as the whole expression string. Tokens are space-separated integers and the binary operators + - * /, evaluated left-to-right with a stack using integer arithmetic. After evaluation, print ONLY the final integer result from the stack (no extra text). It must work for ANY valid RPN expression, not just one example. Verify BOTH: \`cargo run -- \"3 4 + 5 *\"\` must print 35, and \`cargo run -- \"5 1 2 + 4 * + 3 -\"\` must print 14. Keep it minimal. The moment both commands print the expected numbers, you are DONE — reply with one short confirmation line and STOP; do not run them again.${tool_hint}" ;;
+    wordcount) echo "In the CURRENT directory (put files directly here — do NOT \`cargo new\` a subfolder; the standard \`src/\` for \`src/main.rs\` is fine), create a minimal Rust binary project: a Cargo.toml (package name \"wordcount\", version 0.1.0, edition 2021, no dependencies) and src/main.rs. The program reads a text file whose path is its first CLI argument (\`std::env::args().nth(1)\`), splits it into words on ASCII whitespace, counts each word case-INSENSITIVELY (lowercase it before counting), and prints the TOP 3 words by DESCENDING count — ties broken by ASCENDING alphabetical order — one per line, each line in the EXACT format \`word count\` (the lowercased word, one space, the integer count, no extra text). It must be a GENERAL solution for any input, not hardcoded. The file \`input.txt\` already exists in the directory; verify with \`cargo run -- input.txt\`. Keep it minimal. The moment it prints the correct 3 lines, you are DONE — reply with one short confirmation line and STOP; do not run it again.${tool_hint}" ;;
+    multibug) echo "There is a Rust library in the current directory. \"cargo test\" FAILS: there are TWO separate bugs in src/lib.rs, in two DIFFERENT functions. Fix BOTH so every test passes. Do NOT modify the tests. Then run \"cargo test\" to confirm ALL tests pass. Make minimal changes; read the file first, and if an Edit's old_string is not found, re-read and use an exact current substring. Do not claim success until \"cargo test\" really reports all tests passing. The moment it passes, reply with one short confirmation line and STOP.${tool_hint}" ;;
   esac
 }
 
@@ -234,6 +236,44 @@ mod tests {
     #[test]
     fn adds() {
         assert_eq!(add(2, 3), 5);
+    }
+}
+EOF
+      ;;
+    wordcount)
+      # From-scratch task: the agent creates Cargo.toml + src/main.rs; we only
+      # pre-seed the data file. Mixed case tests case-folding; two words tie at 3
+      # (apple/banana) to test the alphabetical tie-break. Expected top-3:
+      # `apple 3` / `banana 3` / `cherry 2`.
+      printf 'Apple banana apple Cherry BANANA apple date banana cherry\n' >"$2/input.txt"
+      ;;
+    multibug)
+      printf '[package]\nname = "twobugs"\nversion = "0.1.0"\nedition = "2021"\n' >"$2/Cargo.toml"
+      mkdir -p "$2/src"
+      cat >"$2/src/lib.rs" <<'EOF'
+/// Add two integers.
+pub fn add(a: i32, b: i32) -> i32 {
+    // BUG: subtracts instead of adding.
+    a - b
+}
+
+/// True when `n` is even.
+pub fn is_even(n: i32) -> bool {
+    // BUG: checks odd, not even.
+    n % 2 == 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn adds() {
+        assert_eq!(add(2, 3), 5);
+    }
+    #[test]
+    fn evenness() {
+        assert!(is_even(4));
+        assert!(!is_even(3));
     }
 }
 EOF
@@ -279,10 +319,21 @@ verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0
         o2="$(cargo run -q -- "5 1 2 + 4 * + 3 -" 2>>"$w/run.err" | tr -d '[:space:]')"
         [ "$o2" = 14 ] && echo "    PASS  '5 1 2 + 4 * + 3 -' -> 14" || { echo "    FAIL  '5 1 2 + 4 * + 3 -' -> '$o2'"; fail=1; }
         exit $fail ;;
+      wordcount)
+        # From-scratch top-3 word frequency. The seeded input.txt (mixed case + a 3-count
+        # tie apple/banana) case-folds to apple=3 banana=3 cherry=2 date=1 → top-3 desc,
+        # tie alpha → apple/banana/cherry. Tests HashMap + sort + tie-break + case-fold + I/O.
+        [ -f Cargo.toml ] || { echo "    FAIL  Cargo.toml missing"; fail=1; }
+        ls src/*.rs >/dev/null 2>&1 || { echo "    FAIL  no src/*.rs"; fail=1; }
+        got="$(cargo run -q -- input.txt 2>"$w/run.err" | tr -s ' \t' ' ' | sed 's/^ *//;s/ *$//' | grep -vE '^$')"
+        want=$'apple 3\nbanana 3\ncherry 2'
+        [ "$got" = "$want" ] && echo "    PASS  wordcount top-3 correct" \
+          || { echo "    FAIL  wordcount -> $(echo "$got" | tr '\n' '|')"; fail=1; }
+        exit $fail ;;
       *)
         [ -f Cargo.toml ] || { echo "    FAIL  Cargo.toml missing"; fail=1; }
         ls src/*.rs >/dev/null 2>&1 || { echo "    FAIL  no src/*.rs"; fail=1; }
-        if [ "$t" = test ] || [ "$t" = debug ]; then
+        if [ "$t" = test ] || [ "$t" = debug ] || [ "$t" = multibug ]; then
           cargo test -q >/dev/null 2>"$w/cargo.err" && echo "    PASS  cargo test green" || { echo "    FAIL  cargo test red"; fail=1; }
         fi
         if [ "$t" = build ] || [ "$t" = test ] || [ "$t" = fix ]; then
@@ -320,6 +371,8 @@ bench_package_name() { # $1=task
   case "$1" in
     rpn) echo "rpn-calc" ;;
     debug) echo "mathlib" ;;
+    wordcount) echo "wordcount" ;;
+    multibug) echo "twobugs" ;;
     *) echo "reverse-cli" ;;
   esac
 }
@@ -434,6 +487,8 @@ repair_goal_hint() { # $1=task
     fix) echo 'Required final behavior: fix the existing reverse bug with a minimal change. `cargo run -- hello` must print exactly `olleh`; returning `hello` or merely compiling is still wrong.' ;;
     debug) echo 'Required final behavior: fix src/lib.rs without changing the test. `cargo test` must pass; merely compiling is still wrong.' ;;
     rpn) echo 'Required final behavior: implement a real stack-based RPN evaluator. `cargo run -- "3 4 + 5 *"` must print `35` and `cargo run -- "5 1 2 + 4 * + 3 -"` must print `14`; hard-coding one example is still wrong.' ;;
+    wordcount) echo 'Required final behavior: read the file at argv[1], count words case-insensitively, print the top 3 by count (ties broken alphabetically) one per line as `word count`. `cargo run -- input.txt` must print exactly `apple 3` / `banana 3` / `cherry 2`; a hard-coded or count-only output is still wrong.' ;;
+    multibug) echo 'Required final behavior: fix BOTH bugs in src/lib.rs (add and is_even) without changing the tests. `cargo test` must pass ALL tests; fixing only one is still wrong.' ;;
     *) echo 'Required final behavior: satisfy the original task prompt and the verifier, not just the compiler.' ;;
   esac
 }

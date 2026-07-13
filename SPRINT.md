@@ -1,5 +1,60 @@
 # Sprint
 
+- [x] **models-cleanup** (2026-07-13, operator: "Удаляй лишние модели если не нужны") — pruned the
+  local model set to the matrix winners. DELETED `Qwen3.5-4B-MLX-bf16` (8.5 GB, redundant: the 4-bit
+  `Qwen3.5-4B-MLX-4bit` scores IDENTICALLY **6/6** AND does vision — no code change, the loaders
+  already split 4bit-text / bf16-vision, and the mlx-community 4-bit checkpoint keeps vision bf16) and
+  `Qwen3-Coder-30B-A3B` (16 GB, only **3/6** even after the tool-call fix; residual 4-bit degeneration
+  on escaped code — the 35B is strictly better). KEEP: `Qwen3.6-35B-A3B-4bit` (6/6, top coder),
+  `Qwen3.5-4B-MLX-4bit` (6/6 + vision), `Qwen3-4B-4bit` (5/6, fast). Cache 48 → 24 GB. Scores in
+  scripts/bench/results/agentic-fullmatrix/.
+
+- [x] **matrix-harder-tasks** (2026-07-13, operator: "В матрицу добавь какие нибудь еще более сложные
+  задачи") — two harder agentic tasks in scripts/bench/agentic.sh to differentiate models past the
+  single-file basics: `wordcount` (from-scratch — read a file arg, case-insensitive word frequency,
+  print top-3 by count with ALPHABETICAL tie-break as `word count`: HashMap + sort + tie-break + I/O +
+  case-fold; seeded input.txt has a 3-count tie apple/banana; verify `apple 3` / `banana 3` /
+  `cherry 2`) and `multibug` (debug — TWO bugs in two functions of src/lib.rs, `add` subtracts +
+  `is_even` checks odd; fix both, cargo test green). Wired through TASK_LIST / DIFF / prompt_for /
+  setup_task / verify_task / bench_package_name / repair_goal_hint; reference-verified.
+
+- [ ] **gateway-onboarding-hardening** — the VL port + the matrix fixes revealed that bringing a new
+  model up agentically is a series of SCATTERED patches, each in a different subsystem, each found by
+  failure. Concrete evidence: (1) STOP TOKENS — Qwen3.5's config eos is `<|endoftext|>` but its
+  template ends turns with `<|im_end|>`, so without the augment-list hack (`ce3948f`) every turn
+  over-ran → tool-calls never parsed. (2) CHAT TEMPLATE — Qwen3.5's template `raise`s on "no user
+  query" / "system not first"; a small window trimmed the user turn → 500 mid-loop (`f0c7366`
+  normalizes system+user — a targeted guard). (3) TOOL-CALL FORMAT — Qwen3-Coder emits `<function=…>`
+  XML sometimes WITHOUT a `<tool_call>` wrapper → the call was dropped (`8f115e4` scans bare
+  `<function=`), and the 4-bit model DEGENERATES emitting escaped code inside the JSON tool form,
+  which no parser can recover. PROPOSAL: (a) a load-time **model-profile probe** — render a canonical
+  agentic conversation (system + user + assistant-tool-call + tool-result) plus a forced tool call,
+  assert the template doesn't raise and the call round-trips, catching the eos/template/tool-format
+  quirks BEFORE serving instead of on the first agent; (b) principled turn-end resolution (collect
+  every stop marker the template emits, not just config eos); (c) a template-safe message builder that
+  enforces strict-template invariants generically (single leading system, ≥1 user turn, tool-result
+  wrapper); (d) CONSTRAINED DECODING to force ONE reliable tool format (XML raw-content) for models
+  that degenerate on JSON-escaped code — kills the Coder-30B class at the source; (e) the streaming
+  tool-call detector must find `<tool_call>`/`<function=` ANYWHERE in a turn (Coder-30B narrates then
+  calls). Spec candidate: docs/specs/gateway-model-onboarding.md.
+
+- [ ] **vl-followups** — Qwen3.5-VL shipped (single-image, bf16 vision + 4bit text, matrix 6/6). Next:
+  (a) multi-image per request (cu_seqlens block-diagonal attention in qwen3_5_vision + N image-token
+  blocks in the splice/rope index); (b) 4-bit vision quant in `load_vision_tower` (bf16-only today —
+  a fully-4bit VL checkpoint would fail; works now only because mlx-community keeps vision bf16);
+  (c) VL prefill projects ALL-position logits (wasteful for long prompts); (d) extend the vision load
+  to `qwen3_5_moe` (the 35B is `Qwen3_5MoeForConditionalGeneration` — has a vision tower rozum ignores).
+  See docs/specs/qwen3-5-vl-port.md.
+
+- [ ] **bench-infra-hardening** — the full matrix was flaky+slow for two structural reasons: (1) the
+  shared bench gateway self-exits under RAM pressure — cooperative preemption fires even on a
+  manually-loaded, non-`launch_managed` gateway → agents get 0.0s / can't connect between tasks; the
+  residency system should not evict a manually-pinned gateway (or the bench should pin it). (2) two
+  600s RUN_TIMEOUT tasks (a looping weak model) dominated wall time; a per-task "no-progress"
+  early-abort (0 tool_uses across N turns, or repeated identical tool calls) reclaims ~20 min/model.
+  Config lesson: run agentic at **NCTX ≥ 16384** — 4096 trim-thrashes CC's big system prompt (3×
+  slower + triggers the template-trim 500).
+
 - [ ] **ucc-terminal-keys** (operator 2026-07-08: "Запиши в план и сделай. Давно было пора") — the
   iOS keyboard has no Esc/Tab/Ctrl, so Claude Code shortcuts are unreachable from the phone
   terminal. Add a special-keys row to terminal.html: Esc, Tab, ⇧Tab (CC mode cycling), ← ↑ ↓ →,
