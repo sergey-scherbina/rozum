@@ -105,19 +105,17 @@ case "$BIN" in /*) ;; *) BIN="$repo/$BIN" ;; esac   # launch runs in a temp cwd 
 # (Qwen2.5-0.5B, Qwen3-0.6B, Llama-3.2-1B) only manage `greet` even with the
 # JSON-repair, and template-less / incompatible models (gemma, Phi-3, SmolLM2,
 # Mistral-v0.3) can't drive tools at all — all dropped. Override with AGENTIC_MODELS.
-# Default = the models actually installed locally after `models-cleanup` (2026-07-13): the older
-# curated catalog (Qwen3-Coder-30B, Devstral, GLM-4.7-Flash, GLM-4-32B, gpt-oss-20b, the -DWQ 35B)
-# was pruned, so the previous DEFAULT_MODELS pointed only at deleted specs and a bare run failed.
-# Keep this list in sync with `rozum-gateway models list`. Current three:
-#   1. Qwen3-4B-4bit — small dense baseline; fast, the floor for the capability cliff above.
-#   2. Qwen3.5-4B-MLX-4bit — dense 4B VISION-LANGUAGE (VL port: 4bit text + bf16 vision tower).
-#      Agentic matrix 6/6 (claude) once the eos + strict-template-trim gateway bugs were fixed.
-#   3. Qwen3.6-35B-A3B-4bit — flagship MoE (35B total / 3B active), ALSO vision-capable; the single
-#      strongest local agentic coder (clears codex's apply_patch bar). ~20.4 GB, ~24 GB peak — loads
-#      adaptively; SLOW per turn, but AGENTIC_TIMEOUT_AUTOSCALE bumps its RUN_TIMEOUT.
+# Default = the model(s) actually installed locally after `models-cleanup` (2026-07-13 / -14): the
+# older curated catalog (Qwen3-Coder-30B, Devstral, GLM-4.7-Flash, GLM-4-32B, gpt-oss-20b, the -DWQ
+# 35B) was pruned, then Qwen3-4B-4bit + Qwen3.6-35B-A3B were dropped too (the 35B is RAM-blocked on a
+# ~39 GB host: it needs ~23.6 GiB and only ~21.8 GiB is available). Keep this in sync with
+# `rozum-gateway models list`. Current single kept model:
+#   Qwen3.5-4B-MLX-4bit — dense 4B VISION-LANGUAGE (VL port: 4bit text + bf16 vision tower). The
+#   standout small model: agentic matrix 8/8 (claude, 2026-07-13) — every task incl. the hard
+#   fix/debug/rpn + wordcount/multibug — and ~2× faster than the old Qwen3-4B (which scored 5/8).
 # Each space-separated entry is one `gateway --model <spec>`; a comma inside an entry = pipeline.
 # Override with AGENTIC_MODELS="spec1 spec2 ...".
-DEFAULT_MODELS="mlx-community:Qwen3-4B-4bit mlx-community:Qwen3.5-4B-MLX-4bit mlx-community:Qwen3.6-35B-A3B-4bit"
+DEFAULT_MODELS="mlx-community:Qwen3.5-4B-MLX-4bit"
 read -r -a MODELS <<<"${AGENTIC_MODELS:-$DEFAULT_MODELS}"
 # Tasks: greet build fix test debug (the originals) + rpn (a from-scratch-hard RPN calculator —
 # create-from-scratch where a planner→executor pipeline should help most; see verify_task/prompt_for).
