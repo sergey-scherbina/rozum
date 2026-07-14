@@ -48,6 +48,14 @@
   in the vendored mlx-lm fork so a family's MODEL code (glm4.rs / deepseek_v2.rs / gpt_oss.rs) isn't compiled
   unless opted in; rozum's loader arms + parsers follow. Real leaner binary. Multi-repo: edit fork → rev-bump →
   MLX rebuild (~3-4 min/iter) → test lean + full combos. mistralrs part already done (off by default).
+  SCOPE FINDING (2026-07-14): the rozum side is a ~80-site cfg cascade — each family's `LoadedModel` enum
+  variant (GptOss/Glm4/DeepseekV2/Glm4MoeLite) is matched at ~20+ sites (loader, `Generate` dispatch,
+  harmony/constrain detection, forward), and gating the variant means `#[cfg(feature)]` on EVERY arm or the
+  exhaustive matches break under a feature combo. Combined with the 3-4 min MLX rebuild per iteration + the
+  fork edits, this is a large, slow, error-prone pass that genuinely warrants a focused session — NOT the tail
+  of a marathon where a missed arm surfaces only after a rebuild and risks the model-loading core. PLAN is
+  precise (fork: `#[cfg]` on model mods + Cargo features; rozum: gate variant + all arms + loader + parser;
+  test lean=qwen-only + `--all-features`). Ready to execute as a dedicated pass.
 
 ### ▶ Gateway improvements (operator 2026-07-14: "Что ещё можно улучшить в гейтвее? … Записывай всё и делай")
 
