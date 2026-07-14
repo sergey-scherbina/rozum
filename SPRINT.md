@@ -1,5 +1,35 @@
 # Sprint
 
+### ▶ Gateway round-2 (operator 2026-07-14: "Запиши в спринт и сделай …" — decisions confirmed via AskUserQuestion)
+
+- [x] **gw-cache-cap-by-size** — DONE (this commit): 4B footprint 8.60→6.60 GiB (cache cap 4→2). — scale the MLX buffer-cache cap by model size. Today it's a flat 4 GiB
+  (`ROZUM_MLX_CACHE_GB`), baked into the activation reserve (cache_cap + 1.5 GiB ≈ 5.5 GiB). A 4B model
+  uses ~1.2 GiB cache (smmr-D), so 4 GiB is generous → ~2 GiB of reservation is dead weight. Make the
+  default cap `min(4 GiB, max(1.5 GiB, weights/2))` so a small model reserves less (admits more / leaves
+  more free); env override + the calibrated floor preserved. Memory win realizes under co-residency /
+  bigger models; harmless for a single small model.
+
+- [ ] **gw-closed-loop-phase2** — measured mid-load OOM-abort behind `ROZUM_CLOSED_LOOP_ADMISSION`
+  (default OFF). After weights materialize, read `get_active_memory()`; if `active + keep_free > total_ram`
+  the first prefill will OOM → refuse NOW (clean error, don't serve) instead of a reboot. Unit-test the
+  decision logic + verify it does NOT false-fire on the 4B. The "actually prevents a reboot" claim stays
+  UNPROVEN until a big model + a push-to-jetsam rig (operator: flag-gated is acceptable). Spec
+  docs/specs/gateway-closed-loop-admission.md phase 2.
+
+- [ ] **gw-per-dialect-split** — the real architectural monolith split (after the 3 leaf extractions). Each
+  inbound dialect takes its OWN wire DTOs + mapping + handler + SSE into a module: `oai_api.rs`
+  (`OaiChatReq`/`OaiMsg` + `oai_messages_to_internal` + `oai_chat_handler` + `oai_sse_stream`/`oai_collect`),
+  `anthropic_api.rs`, `responses_api.rs`. gateway.rs keeps routing + `GatewayState` + admission-glue. Handlers
+  take state via axum `State` (already), so no cross-dialect coupling. Tests as the net; gateway.rs ~5688 → ~2500.
+
+- [ ] **gw-optional-families-cargo** — make the multi-backend/family machinery COMPILE-TIME optional via Cargo
+  features (operator chose compile-time over runtime — most is already runtime-gated). Default build = Qwen/MLX
+  only; opt-in `--features glm,deepseek,gptoss,devstral,mistralrs`. Gate together per family: its loader arm
+  (`LoadedModel::load`), its tool-format parser (serving.rs GLM `<arg_key>` / DeepSeek sep / harmony), its
+  backend helpers. `mistralrs` gates the rozum-mistralrs dep + `try_build_mistralrs_backend`. Leaner default
+  binary + smaller surface; the North Star is preserved (re-enable at build). Must keep BOTH `cargo build`
+  (lean) and `cargo build --all-features` green.
+
 ### ▶ Gateway improvements (operator 2026-07-14: "Что ещё можно улучшить в гейтвее? … Записывай всё и делай")
 
 Grounded in what this session's matrix work exposed + the gateway architecture. Ordered by value.

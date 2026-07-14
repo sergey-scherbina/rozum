@@ -201,8 +201,24 @@ pub fn kv_bytes_per_position(cfg: &serde_json::Value) -> Option<u64> {
 /// ([[reference-mlx-memory-cap-semantics]]); it must stay ≥ the real cache+prefill peak.
 /// If the cache cap is DISABLED (`ROZUM_MLX_CACHE_GB=0`) the cache is unbounded → no
 /// footprint can bound it → fall back to a large conservative reserve.
+/// Default MLX buffer-cache cap (GiB) for a model of `weight_bytes`, used when the operator hasn't
+/// pinned `ROZUM_MLX_CACHE_GB`. A small model doesn't benefit from a big cache — smmr-D measured a 4B
+/// pinning only ~1.2 GiB even at 14k ctx — so a flat 4 GiB over-reserves ~2 GiB of dead headroom on
+/// small models. Scale it: `clamp(weights_GiB / 2, 2, 4)`. Big models (≥8 GiB weights) keep the full
+/// 4 GiB cap; a 4B (~3 GiB weights) gets 2 GiB → ~2 GiB less reserved. Floored at 2 GiB, safely above
+/// the measured cache+prefill peak. The memory win realizes under co-residency / bigger models and is
+/// harmless for a single small model (just leaves more RAM free). `gw-cache-cap-by-size`.
+pub fn default_cache_cap_gib(weight_bytes: u64) -> u64 {
+    const GB: u64 = 1 << 30;
+    (weight_bytes / GB / 2).clamp(2, 4)
+}
+
 fn activation_reserve_bytes(weight_bytes: u64) -> u64 {
     const GB: u64 = 1 << 30;
+    // Reads the cap the load path already chose + published to the env (`fit_model_params` sets it,
+    // size-scaled, so estimate and the real `set_cache_limit` agree). Falls back to a flat 4 GiB only
+    // when nothing set it (adaptive-off) — matching the `cap_mlx_memory` fallback so the two stay
+    // consistent. `gw-cache-cap-by-size` does the scaling in `fit_model_params`, not here.
     let cache_gb = std::env::var("ROZUM_MLX_CACHE_GB")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
@@ -288,11 +304,12 @@ pub fn fit_model_params(
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
         .and_then(|cfg| kv_bytes_per_position(&cfg))
         .unwrap_or(0);
-    // Start from the user's cache preference (default 4 GiB) and only ever shrink it.
+    // Start from the operator's cache preference, else the size-scaled default (a small model gets a
+    // smaller cap — see `default_cache_cap_gib`), and only ever shrink it to fit.
     let max_cache_gib = std::env::var("ROZUM_MLX_CACHE_GB")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(4)
+        .unwrap_or_else(|| default_cache_cap_gib(weight_bytes))
         .clamp(1, 8);
     fit_params_with_kv(weight_bytes, kv_per_pos, req_n_ctx, available, min_free, n_ctx_floor, max_cache_gib)
 }
@@ -341,9 +358,9 @@ fn fit_params_with_kv(
 #[cfg(test)]
 mod tests {
     use super::{
-        activation_reserve_bytes, config_model_type, fit_params_with_kv, kv_bytes_per_position,
-        process_reserve_bytes, resolve_model_dir, runtime_active_bytes, runtime_footprint_bytes,
-        same_model, spec_to_hf_repo,
+        activation_reserve_bytes, config_model_type, default_cache_cap_gib, fit_params_with_kv,
+        kv_bytes_per_position, process_reserve_bytes, resolve_model_dir, runtime_active_bytes,
+        runtime_footprint_bytes, same_model, spec_to_hf_repo,
     };
 
     const GB: u64 = 1 << 30;
@@ -399,6 +416,17 @@ mod tests {
         // Non-HF specs are not repos.
         assert_eq!(spec_to_hf_repo("ollama:qwen3:8b"), None);
         assert_eq!(spec_to_hf_repo("/abs/path"), None);
+    }
+
+    #[test]
+    fn cache_cap_scales_with_model_size() {
+        // A 4B (~3 GiB weights) → floored at 2 GiB (not the flat 4) → ~2 GiB less reserved.
+        assert_eq!(default_cache_cap_gib(3 * GB), 2);
+        assert_eq!(default_cache_cap_gib(512 * 1024 * 1024), 2); // sub-GiB → floor 2
+        assert_eq!(default_cache_cap_gib(6 * GB), 3); // mid → weights/2
+        // Big models keep the full 4 GiB cap (capped).
+        assert_eq!(default_cache_cap_gib(8 * GB), 4);
+        assert_eq!(default_cache_cap_gib(20 * GB), 4);
     }
 
     #[test]
