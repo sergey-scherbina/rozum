@@ -18,12 +18,13 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="scripts/bench/results/full-matrix-$STAMP"
 LOG="/tmp/full_matrix-$STAMP.log"
 
-# Two models (operator request), the pipeline-cascade value A/B:
-#   1. Qwen3.6-35B-A3B-DWQ — single strongest local agentic coder in the current bench default set.
-#   2. GLM-4-32B,gpt-oss-20b — LAZY in-process pipeline (comma-spec): GLM-32B plans → gpt-oss executes,
-#      one resident at a time (in-process swap fixed: docs/pipeline-swap-bug.md). It RELOADS both tiers
-#      per agent turn, so it is slow → RUN_TIMEOUT is bumped well above the single-model 280 s below.
-MODELS="${MODELS:-mlx-community:Qwen3.6-35B-A3B-4bit-DWQ mlx-community:GLM-4-32B-0414-4bit,mlx-community:gpt-oss-20b-MXFP4-Q4}"
+# Default to the CURRENTLY-INSTALLED model set. The local cache was pruned to a single model
+# (operator 2026-07-14: "Удали все модели кроме Qwen3.5-4B-MLX-4bit") — Qwen3.5-4B-MLX-4bit, the
+# 6/6 + vision pick. The old default listed Qwen3.6-35B-A3B-DWQ / GLM-4-32B / gpt-oss-20b, which are
+# no longer on disk → a run would stall on a multi-GB re-download. Override with MODELS="spec1 spec2"
+# (comma = in-process pipeline) once heavier models are re-pulled; a spec that isn't cached is
+# refused cleanly by the admission gate (a matrix FAIL, never a reboot).
+MODELS="${MODELS:-mlx-community:Qwen3.5-4B-MLX-4bit}"
 
 if [ "${MATRIX_RAM_SCHEDULE:-0}" = 1 ] && command -v python3 >/dev/null 2>&1; then
   PLAN_JSON="${OUT}.schedule.json"
