@@ -182,7 +182,15 @@ fn tail_bytes(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_owned();
     }
-    let start = s.len() - max_bytes;
+    // `s.len() - max_bytes` can land INSIDE a multi-byte UTF-8 char (e.g. an em-dash `—`, 3 bytes) —
+    // slicing `s[start..]` there panics ("byte index N is not a char boundary"), which on the
+    // mcp-http bridge kills a tokio worker and drops the session (agents then reconnect and re-default
+    // to the pinned project room — the room-flap). Walk `start` forward to the next char boundary
+    // first; it drops at most a couple of leading bytes and we snap to the next line boundary anyway.
+    let mut start = s.len() - max_bytes;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
     let snap = s[start..].find('\n').map(|i| start + i + 1).unwrap_or(start);
     s[snap..].to_owned()
 }
@@ -273,5 +281,18 @@ mod tests {
         let t = tail_bytes(s, 6);
         assert!(t.ends_with("cccc\n"));
         assert!(!t.contains("aaaa"));
+    }
+
+    #[test]
+    fn tail_bytes_never_splits_a_multibyte_char() {
+        // Regression: `—` (em-dash, 3 bytes) landing at the `s.len() - max_bytes` cut point used to
+        // panic "byte index N is not a char boundary", killing an mcp-http worker → dropped session →
+        // room-flap. Exercise EVERY cut position over a string full of em-dashes; none may panic and
+        // each result must be a valid-UTF-8 suffix of the input.
+        let s = "line one — with an em-dash\nsecond — line here\nthird — final line\n";
+        for max in 1..=s.len() {
+            let t = tail_bytes(s, max); // must not panic at any cut position
+            assert!(s.ends_with(&t), "result must be a suffix of the input (max={max})");
+        }
     }
 }
