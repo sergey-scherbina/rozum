@@ -19,16 +19,26 @@
 - [ ] **gw-per-dialect-split** — the real architectural monolith split (after the 3 leaf extractions). Each
   inbound dialect takes its OWN wire DTOs + mapping + handler + SSE into a module: `oai_api.rs`
   (`OaiChatReq`/`OaiMsg` + `oai_messages_to_internal` + `oai_chat_handler` + `oai_sse_stream`/`oai_collect`),
-  `anthropic_api.rs`, `responses_api.rs`. gateway.rs keeps routing + `GatewayState` + admission-glue. Handlers
-  take state via axum `State` (already), so no cross-dialect coupling. Tests as the net; gateway.rs ~5688 → ~2500.
+  `anthropic_api.rs`, `responses_api.rs`. gateway.rs keeps routing + `GatewayState` + admission-glue. FINDING
+  (2026-07-14): unlike the 3 leaf clusters, the HANDLERS are entangled — `oai_chat_handler` alone calls
+  ~7 shared gateway helpers (`chat_or_loopbreak`, `fit_to_context`, `estimate_prompt_tokens`, `error_json`/
+  `chat_error_response`, `apply_tool_choice`, `with_gen_timeout`) + `GatewayState` (`state.observer`/`state.sb`).
+  So the split needs those helpers made `pub(crate)` + cross-module imports (architectural, many back-refs —
+  NOT a clean-leaf move like codex_patch). Doable with tests as the net, but it's the big careful pass. The
+  DTOs+mapping+SSE sub-parts are cleaner than the handler. Awaiting operator's go given the scope.
 
-- [ ] **gw-optional-families-cargo** — make the multi-backend/family machinery COMPILE-TIME optional via Cargo
-  features (operator chose compile-time over runtime — most is already runtime-gated). Default build = Qwen/MLX
-  only; opt-in `--features glm,deepseek,gptoss,devstral,mistralrs`. Gate together per family: its loader arm
-  (`LoadedModel::load`), its tool-format parser (serving.rs GLM `<arg_key>` / DeepSeek sep / harmony), its
-  backend helpers. `mistralrs` gates the rozum-mistralrs dep + `try_build_mistralrs_backend`. Leaner default
-  binary + smaller surface; the North Star is preserved (re-enable at build). Must keep BOTH `cargo build`
-  (lean) and `cargo build --all-features` green.
+- [~] **gw-optional-families-cargo** — MATERIAL FINDINGS on attempt (2026-07-14) change the value:
+  (1) **mistralrs is ALREADY compile-time-optional + OFF by default** — `default = ["mlx-native","gguf"]`
+  excludes `mistralrs = ["rozum-mistralrs/mistralrs"]`, and `try_build_mistralrs_backend` has a
+  `#[cfg(not(feature="mistralrs"))]` None-stub. The heavy candle/mistral.rs dep is NOT in the default build.
+  So the "make the fallback backend optional" ask is essentially satisfied (only the 434-line thin wrapper
+  crate is always pulled — negligible). (2) **Family gating buys little on the rozum side**: the family MODEL
+  code (glm4.rs / deepseek_v2.rs / gpt_oss.rs — the bulk) lives in the vendored **mlx-lm fork**, always
+  compiled under `mlx-native`; gating in rozum only removes the thin loader ARM (one match arm each, behind a
+  `LoadedModel` enum variant → cfg CASCADES across every match site) + the rozum-side parser. Small binary win,
+  real cfg-cascade risk. The genuine leaner-binary win needs per-model features in the mlx-lm FORK — a bigger,
+  separate effort. RECOMMENDATION: don't chase the rozum-side enum-cfg (low value / high fiddliness); families
+  are already runtime-inactive when unused. Awaiting operator's call given these findings.
 
 ### ▶ Gateway improvements (operator 2026-07-14: "Что ещё можно улучшить в гейтвее? … Записывай всё и делай")
 
