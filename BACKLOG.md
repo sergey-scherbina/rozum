@@ -364,15 +364,12 @@ the deferred follow-ups (operator-triaged 2026-06-24, none urgent):
   *admission*; the per-process MLX cap (`crates/rozum-mlx/.../mlx_native_backend.rs:~363`) is still
   flat `total−8`. Make it sibling-aware (`total−8−committed_by_others` from the ledger) so even an
   escape-hatch / unknown-path 2nd MLX process can't claim near-total RAM. Secondary to the ledger.
-- [ ] **admission-unknown-footprint-message** (LOW, cosmetic — found 2026-07-13 during VL multi-image
-  testing) — when `--model` is a spec the catalog can't size (e.g. a raw HF snapshot-DIR path instead
-  of the canonical `mlx-community:Name` colon spec), the `weight` closure (`gateway.rs:245`) returns
-  `None` and the admission gate falls back to a huge sentinel footprint, printing a confusing
-  "loading this model (~4398046511103 MB) would overcommit host RAM" (≈ 2^42 MB). It's a correct
-  fail-safe (unknown size ⇒ refuse unless `ROZUM_ALLOW_CONCURRENT_RESIDENT=1`), just surfaced as a
-  garbage number. Fix: detect the `None` footprint and emit an honest "could not determine footprint
-  for unrecognized spec '<spec>' — pass a canonical model id (see `models list`)" instead of the
-  sentinel. No safety impact; message-only.
+- [x] **admission-unknown-footprint-message** — DONE (2026-07-14, SPRINT `gw-spec-normalization`). The
+  root cause was broader than cosmetic: the SLASH/`hf:` spec forms never matched the catalog's colon
+  spec (exact `m.spec == spec` at 8 sites) → the sentinel fired for perfectly-valid specs. Fixed with
+  `model_source::same_model` everywhere + consolidated the sentinel into `share::UNSIZEABLE_FOOTPRINT_*`
+  and a short-circuit in `acquire_residency` (deny immediately, no 240s wait, no garbage "~N MB"; the
+  CLI's "size UNKNOWN" message keyed on the same threshold does the talking).
 
 ## MCP (deferred — decide the use, then build)
 

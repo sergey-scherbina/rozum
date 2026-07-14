@@ -245,7 +245,7 @@ impl WarmConfig {
             weight: Arc::new(move |spec: &str| {
                 crate::models::scan_all_installed()
                     .into_iter()
-                    .find(|m| m.spec == spec)
+                    .find(|m| rozum_models::model_source::same_model(&m.spec, spec))
                     .map(|m| rozum_models::model_source::runtime_footprint_bytes(spec, n_ctx, m.size_bytes))
             }),
             budget: Arc::new(|| {

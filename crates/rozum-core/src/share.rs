@@ -704,6 +704,20 @@ pub fn reap_orphan_residents() -> usize {
 ///   safety net, not a correctness requirement.
 /// - `Err(ResidencyDenied)` — admitting would overcommit and nothing freed in time.
 ///
+/// Sentinel footprint a caller passes when it CANNOT size a model (an unrecognized / raw-path spec
+/// that never matched the catalog). Astronomically larger than any real footprint yet finite, so
+/// [`acquire_residency`] can distinguish "couldn't size it" from a legitimately huge model and skip
+/// the wait + the garbage "~N MB overcommit" line. Callers that estimate a footprint MUST use this
+/// for their unknown-size branch (not a bare `u64::MAX/4`).
+pub const UNSIZEABLE_FOOTPRINT_BYTES: u64 = u64::MAX / 4;
+
+/// Detection THRESHOLD for the sentinel above: a footprint at or over this is a sizing failure, not a
+/// real model — no physical host holds ~2 EB. Below any conceivable real footprint (> 1 TB) yet below
+/// the sentinel value, so it catches [`UNSIZEABLE_FOOTPRINT_BYTES`] and any saturated sum of sentinels
+/// without ever tripping on a legitimately large model. Both the gate and the CLI's "size UNKNOWN"
+/// message key off this same constant.
+pub const UNSIZEABLE_FOOTPRINT_FLOOR: u64 = u64::MAX / 8;
+
 /// Blocking (polls every 2s while waiting). Call via `spawn_blocking` from async.
 pub fn acquire_residency(
     model: &str,
@@ -711,6 +725,23 @@ pub fn acquire_residency(
 ) -> Result<Option<ResidencyGuard>, ResidencyDenied> {
     if concurrent_resident_allowed() {
         return Ok(None);
+    }
+    // Unsizeable-spec short-circuit: a footprint at/over the sentinel threshold means the caller
+    // couldn't size the model (a raw snapshot-dir path, or an id that never matched the catalog →
+    // UNSIZEABLE_FOOTPRINT_BYTES). No real model is ~2 EB, so entering the wait loop would (a) quote
+    // the absurd sentinel in the `announced` "~N MB overcommit" line and (b) block up to `wait_secs`
+    // for an impossible amount to "free". Deny NOW; the CALLER — which knows the spec — prints the
+    // honest "size UNKNOWN, pass a canonical id / pre-download" message, keyed on this same threshold.
+    // (Threshold, NOT "> total RAM": a legitimately huge finite model must still reach normal
+    // admission, where the sole-resident path admits it.)
+    if footprint_bytes >= UNSIZEABLE_FOOTPRINT_FLOOR {
+        return Err(ResidencyDenied {
+            footprint_bytes,
+            in_use_bytes: 0,
+            budget_bytes: host_ram_budget_bytes(),
+            waited_secs: 0,
+            holders: Vec::new(),
+        });
     }
     let _ = ensure_dir();
     let _ = std::fs::create_dir_all(residents_dir());

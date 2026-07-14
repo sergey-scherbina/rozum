@@ -1428,7 +1428,7 @@ fn estimate_model_footprint_bytes(model: &str, n_ctx: u32) -> u64 {
         .unwrap_or(1.0);
     match rozum::models::scan_all_installed()
         .into_iter()
-        .find(|m| m.spec == model)
+        .find(|m| rozum::model_source::same_model(&m.spec, model))
     {
         Some(m) => {
             let fp = rozum::model_source::runtime_footprint_bytes(model, n_ctx, m.size_bytes);
@@ -1445,7 +1445,9 @@ fn estimate_model_footprint_bytes(model: &str, n_ctx: u32) -> u64 {
                 conservative
             }
         }
-        None => u64::MAX / 4, // unknown size → only admits when nothing else resident
+        // Unknown size (spec never matched the catalog) → the sentinel: admission replies with an
+        // honest "unsizeable spec" message instead of a garbage overcommit number.
+        None => rozum::share::UNSIZEABLE_FOOTPRINT_BYTES,
     }
 }
 
@@ -1461,11 +1463,13 @@ fn measured_footprint_enabled() -> bool {
 /// locally (`u64::MAX / 4`). Anything at or above half of it (`u64::MAX / 8`) is a not-cached
 /// figure, never a real model footprint — used to print an honest message instead of the bogus
 /// `~4398046511103 MB` (= the sentinel in MB) the gate would otherwise quote.
-const UNKNOWN_FOOTPRINT_FLOOR: u64 = u64::MAX / 8;
+const UNKNOWN_FOOTPRINT_FLOOR: u64 = rozum::share::UNSIZEABLE_FOOTPRINT_FLOOR;
 
 /// Is this exact spec present in the local model cache? (`false` ⇒ size unknown ⇒ sentinel.)
 fn model_is_locally_cached(model: &str) -> bool {
-    rozum::models::scan_all_installed().iter().any(|m| m.spec == model)
+    rozum::models::scan_all_installed()
+        .iter()
+        .any(|m| rozum::model_source::same_model(&m.spec, model))
 }
 
 /// A copy-pasteable pre-download command for an uncached spec, so an `--offline` refusal is
@@ -1596,7 +1600,7 @@ fn eager_coresident_footprint(tiers: &[&str], n_ctx: u32) -> u64 {
     let sum_active: u64 = tiers
         .iter()
         .map(|model| {
-            match installed.iter().find(|m| m.spec == *model) {
+            match installed.iter().find(|m| rozum::model_source::same_model(&m.spec, model)) {
                 Some(m) => {
                     max_weight = max_weight.max(m.size_bytes);
                     rozum::model_source::runtime_active_bytes(model, n_ctx, m.size_bytes)
@@ -1769,7 +1773,10 @@ fn adapt_n_ctx_to_fit(model: &str, req_n_ctx: u32) -> u32 {
     ) {
         return req_n_ctx;
     }
-    let Some(m) = rozum::models::scan_all_installed().into_iter().find(|m| m.spec == model) else {
+    let Some(m) = rozum::models::scan_all_installed()
+        .into_iter()
+        .find(|m| rozum::model_source::same_model(&m.spec, model))
+    else {
         return req_n_ctx; // unknown model (download/sentinel path) → admission handles it
     };
     let Some(available) = rozum::share::available_ram_for_admission() else {
@@ -1820,7 +1827,10 @@ fn run_gateway_dry_run(model: &str, n_ctx: Option<u32>) {
     println!("  adaptive loading:  {}", if adaptive_off { "OFF (ROZUM_GATEWAY_ADAPTIVE_LOAD=0)" } else { "ON (default)" });
     println!("  requested n_ctx:   {req_n_ctx}");
 
-    let Some(m) = rozum::models::scan_all_installed().into_iter().find(|m| m.spec == model) else {
+    let Some(m) = rozum::models::scan_all_installed()
+        .into_iter()
+        .find(|m| rozum::model_source::same_model(&m.spec, model))
+    else {
         println!("  model not cached locally → a real run resolves/downloads first, then the SAME");
         println!("  admission gate runs. No fit estimate possible without local weights.");
         return;
@@ -6386,7 +6396,7 @@ async fn run_models_rm(spec: &str, yes: bool) {
     use rozum::models::{self, ModelSource};
 
     let installed = models::scan_all_installed();
-    let Some(m) = installed.iter().find(|m| m.spec == spec) else {
+    let Some(m) = installed.iter().find(|m| rozum::model_source::same_model(&m.spec, spec)) else {
         eprintln!(
             "rozum models rm: '{spec}' is not installed. Run `rozum models list` for installed specs."
         );
@@ -6517,7 +6527,7 @@ async fn run_info(spec: &str) {
     println!();
 
     let installed = models::scan_all_installed();
-    let local = installed.iter().find(|m| m.spec == spec);
+    let local = installed.iter().find(|m| rozum::model_source::same_model(&m.spec, spec));
     match local {
         Some(m) => {
             println!("Status:      installed locally");

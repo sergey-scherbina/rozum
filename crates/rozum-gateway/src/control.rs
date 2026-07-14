@@ -854,7 +854,10 @@ async fn model_info_route(
         return json_err(axum::http::StatusCode::BAD_REQUEST, "spec required");
     }
     let installed = rozum_models::models::scan_all_installed();
-    let Some(model) = installed.iter().find(|m| m.spec == spec) else {
+    let Some(model) = installed
+        .iter()
+        .find(|m| rozum_models::model_source::same_model(&m.spec, &spec))
+    else {
         return json_err(axum::http::StatusCode::NOT_FOUND, "not found");
     };
     let source = spec.splitn(2, ':').next().unwrap_or("local").to_string();
@@ -905,7 +908,7 @@ async fn model_info_route(
     // Catalog notes/display_name (RECOMMENDED + EXTRA).
     let catalog_entry = rozum_models::models::RECOMMENDED.iter()
         .chain(rozum_models::models::EXTRA.iter())
-        .find(|m| m.spec == spec);
+        .find(|m| rozum_models::model_source::same_model(m.spec, &spec));
     let display_name  = catalog_entry.map(|m| m.display_name).unwrap_or("").to_string();
     let notes         = catalog_entry.map(|m| m.notes).unwrap_or("").to_string();
 
@@ -3574,7 +3577,7 @@ pub async fn status() -> ControlStatus {
             .map(|(pid, model)| {
                 let size_gib = installed_catalog
                     .iter()
-                    .find(|m| m.spec == model)
+                    .find(|m| rozum_models::model_source::same_model(&m.spec, &model))
                     .map(|m| fmt_gib(m.size_bytes))
                     .unwrap_or_default();
                 let active_peak_gib = rozum_core::footprint::cached_active_peak(&model).map(fmt_gib);

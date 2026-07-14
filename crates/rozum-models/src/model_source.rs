@@ -30,6 +30,25 @@ pub fn spec_to_hf_repo(spec: &str) -> Option<String> {
     }
 }
 
+/// True when two specs name the SAME model regardless of surface form —
+/// `mlx-community:Name`, the bare `mlx-community/Name`, and `hf:mlx-community/Name`
+/// all normalize to the same HuggingFace repo. Falls back to exact string equality
+/// for specs that don't map to an HF repo (raw dir paths, `lmstudio:`, `modelscope:`).
+///
+/// Callers that match a `--model` spec against the installed catalog (whose specs are
+/// the canonical colon form) MUST use this, not `==`: a user passing the slash form
+/// otherwise fails the exact match, the footprint can't be sized, and admission refuses
+/// with a sentinel estimate. Unit-tested.
+pub fn same_model(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (spec_to_hf_repo(a), spec_to_hf_repo(b)) {
+        (Some(x), Some(y)) => x.eq_ignore_ascii_case(&y),
+        _ => false,
+    }
+}
+
 /// The effective `model_type` of a parsed `config.json` — top-level, or the
 /// `text_config.model_type` of a multimodal wrapper (Qwen3.6 ships the latter).
 pub fn config_model_type(cfg: &serde_json::Value) -> Option<&str> {
@@ -324,7 +343,7 @@ mod tests {
     use super::{
         activation_reserve_bytes, config_model_type, fit_params_with_kv, kv_bytes_per_position,
         process_reserve_bytes, resolve_model_dir, runtime_active_bytes, runtime_footprint_bytes,
-        spec_to_hf_repo,
+        same_model, spec_to_hf_repo,
     };
 
     const GB: u64 = 1 << 30;
@@ -380,6 +399,18 @@ mod tests {
         // Non-HF specs are not repos.
         assert_eq!(spec_to_hf_repo("ollama:qwen3:8b"), None);
         assert_eq!(spec_to_hf_repo("/abs/path"), None);
+    }
+
+    #[test]
+    fn same_model_tolerates_surface_form() {
+        // The canonical catalog colon form matches the slash + hf: forms a user might pass.
+        assert!(same_model("mlx-community:Qwen3.5-4B-MLX-4bit", "mlx-community/Qwen3.5-4B-MLX-4bit"));
+        assert!(same_model("mlx-community:Qwen3.5-4B-MLX-4bit", "hf:mlx-community/Qwen3.5-4B-MLX-4bit"));
+        assert!(same_model("mlx-community/M", "mlx-community:M"));
+        // Distinct models don't collide; unrelated / unsizeable specs fall back to exact eq.
+        assert!(!same_model("mlx-community:A", "mlx-community:B"));
+        assert!(!same_model("mlx-community:A", "/some/raw/path"));
+        assert!(same_model("/same/path", "/same/path"));
     }
 
     #[test]

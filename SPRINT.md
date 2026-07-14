@@ -1,5 +1,65 @@
 # Sprint
 
+### ▶ Gateway improvements (operator 2026-07-14: "Что ещё можно улучшить в гейтвее? … Записывай всё и делай")
+
+Grounded in what this session's matrix work exposed + the gateway architecture. Ordered by value.
+
+- [x] **gw-spec-normalization + honest-footprint** — DONE (this commit). Two live-hit UX/robustness bugs:
+  (a) a `--model` spec in the SLASH form (`mlx-community/Qwen3.5-4B-MLX-4bit`) or `hf:` form never matched
+  the catalog's canonical COLON spec (exact `m.spec == spec` at EIGHT sizing/CLI call sites) → the
+  footprint couldn't be sized → the sentinel path fired (dry-run showed `4294967296 GiB`, load refused).
+  Fix = `model_source::same_model(a,b)` (normalizes both via `spec_to_hf_repo`; exact-eq fallback for
+  path/lmstudio/modelscope), applied everywhere a user spec is matched to the catalog: WarmConfig weight
+  closure, `estimate_model_footprint_bytes`, dry-run, `model_is_locally_cached`, `resolve_n_ctx`, the
+  co-residency sum, and `models rm`/`models info`. Unit-tested. Verified: slash dry-run → 8.60 GiB WOULD
+  LOAD; `models info mlx-community/…` → "installed locally". (b) A genuinely-unsizeable spec (raw
+  snapshot-DIR path, uncached id) still yields the sentinel; `acquire_residency` used to print a garbage
+  "~4398046511103 MB would overcommit" and WAIT 240s for an impossible amount to free. Fix = consolidated
+  the two ad-hoc sentinels into `share::UNSIZEABLE_FOOTPRINT_BYTES` (value) + `UNSIZEABLE_FOOTPRINT_FLOOR`
+  (detection threshold, `u64::MAX/8`, below any real footprint) and a short-circuit at the top of
+  `acquire_residency`: footprint ≥ floor → deny IMMEDIATELY (no wait, no garbage line); the CLI's existing
+  "size UNKNOWN → pass a canonical id / pre-download / bypass" message (keyed on the same const) does the
+  talking. Verified: raw path → honest message in 0s, not 240. Closes the BACKLOG cosmetic item too.
+
+- [x] **gw-prefix-reuse-driver-audit** — RESOLVED, NO CODE (investigated 2026-07-14). Hypothesis: codex/
+  opencode are 3–5× slower than claude on the SAME model because they miss the gateway's prefix reuse.
+  FALSE: `PrefixStore` keys on the TOKEN prefix and is driver-agnostic; it's disabled only per-request
+  for VL (image splice breaks the token prefix, mlx_native_backend.rs:1701), not per-driver, and the
+  matrix's codex/opencode tasks were text-only. So codex/opencode DO get prefix reuse; their slowness is
+  harness-side (more turns / apply_patch + Responses parsing per turn), not a gateway gap. No lever here.
+
+- [ ] **gw-closed-loop-admission** — the biggest architectural lever (spec `docs/specs/safe-multi-model-program.md`
+  already names it: "today's safety is estimate-based (open-loop); the GUARANTEE needs measured closed-loop
+  control"). Today's 35B refusal was on a pre-load ESTIMATE (footprint 21.6 GiB vs avail 21.75) — we never
+  learned if it would ACTUALLY fit. The estimate errs both ways: over-refuse (lost capability) and, rarely,
+  under-refuse (the real reboot risk). Design: load INCREMENTALLY and measure real `get_active_memory()`
+  during load, aborting + unloading if it crosses a live threshold — turning "refuse on a guess" into "load
+  and back off on measurement". The `shed` governor already reacts to jetsam pressure AFTER load; the missing
+  piece is a measured cutoff DURING admission. SAFETY-CRITICAL (touches the no-reboot invariant) → design +
+  a spec first, staged rollout behind a flag, NOT a rushed edit. HIGH value, HIGH care.
+
+- [ ] **gw-toolcall-parse-observability** — make driver tool-delivery failures instant to read. Today the
+  opencode absolute-path fail + codex forms took manual `ROZUM_RAW_DUMP` + kept-workdir forensics to
+  diagnose. Add a structured obs event at tool-call finalize (mlx_native_backend.rs `finalize`, ~2810):
+  `toolcall_parse { emitted_toolish_markers, parsed_calls, dropped_reason }` so "driver X emits tool text
+  the gateway parsed 0 of" shows up in `~/.rozum/gateway.jsonl` / `/stats` without a raw dump. Additive,
+  low-risk. MEDIUM value (turns hours of forensics into a grep).
+
+- [ ] **gw-toolcall-normalizer-corpus** — the recurring theme (this session: opencode absolute paths; memory:
+  codex apply_patch variants, Qwen-Coder `&quot;`/newline) is a pile of point patches = whack-a-mole across
+  `rewrite_apply_patch_*` / `normalize_codex_tool_args` / `parse_xml_function` / `parse_glm_arg_kv`. Capture
+  a GOLDEN CORPUS of the malformed forms (`ROZUM_CODEX_TOOL_CAPTURE` → gateway.jsonl, `ROZUM_RAW_DUMP`) and
+  consolidate the scattered rewriters behind one well-tested normalizer with that corpus as regression tests.
+  Refactor + hardening; do AFTER the observability item (which feeds the corpus). MEDIUM value.
+
+- [ ] **gw-monolith-decompose** — `gateway.rs` is **6837 lines**, `control.rs` **3833**. The crate/workspace
+  split is done but these two are internal monoliths — exactly the "scattered patches, each in a different
+  place" pain gateway-onboarding named. Split `gateway.rs` into focused modules along its existing seams:
+  HTTP surface (routing/handlers) · tool-call rewriting · lifecycle/watchdog (idle/shed/preempt) ·
+  admission-glue (WarmConfig/published_reservation) · streaming. Mechanical but LARGE and it's the operator's
+  live gateway → do it as one careful reviewed pass (preserve module paths + re-export), not piecemeal.
+  MEDIUM value (maintainability), LOW urgency.
+
 - [x] **models-cleanup** (2026-07-13, operator: "Удаляй лишние модели если не нужны") — pruned the
   local model set to the matrix winners. DELETED `Qwen3.5-4B-MLX-bf16` (8.5 GB, redundant: the 4-bit
   `Qwen3.5-4B-MLX-4bit` scores IDENTICALLY **6/6** AND does vision — no code change, the loaders
