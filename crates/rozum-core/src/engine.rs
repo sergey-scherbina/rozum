@@ -426,6 +426,25 @@ where
         }
         calls
     };
+    // Observability (gw-toolcall-parse-observability): tool-call markup present but NOTHING parsed —
+    // the driver/model tool-DELIVERY mismatch signature (a malformed apply_patch form, an unknown XML
+    // dialect, escaped-JSON code). Log the miss to `~/.rozum/gateway.jsonl` so it's grep-able instead
+    // of needing a manual `ROZUM_RAW_DUMP` re-run. Only the MISS is logged (a parse is the norm → no
+    // noise). This is the SINGLE-request seam; the batched mlx path logs the same event.
+    if tool_calls.is_empty() && !matches!(stop_reason, StopReason::Cancelled) {
+        let markers = crate::serving::toolish_markers(&full_text);
+        if !markers.is_empty() {
+            let n = full_text.chars().count();
+            let tail: String = full_text.chars().skip(n.saturating_sub(200)).collect();
+            crate::obs::log_event(serde_json::json!({
+                "event": "toolcall_parse_miss",
+                "model_type": meta.model_type,
+                "markers": markers,
+                "text_chars": n,
+                "tail": tail,
+            }));
+        }
+    }
     if !tool_calls.is_empty() {
         for (name, args) in tool_calls.iter() {
             let id = next_tool_call_id();

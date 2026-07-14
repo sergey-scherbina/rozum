@@ -38,12 +38,13 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   piece is a measured cutoff DURING admission. SAFETY-CRITICAL (touches the no-reboot invariant) → design +
   a spec first, staged rollout behind a flag, NOT a rushed edit. HIGH value, HIGH care.
 
-- [ ] **gw-toolcall-parse-observability** — make driver tool-delivery failures instant to read. Today the
-  opencode absolute-path fail + codex forms took manual `ROZUM_RAW_DUMP` + kept-workdir forensics to
-  diagnose. Add a structured obs event at tool-call finalize (mlx_native_backend.rs `finalize`, ~2810):
-  `toolcall_parse { emitted_toolish_markers, parsed_calls, dropped_reason }` so "driver X emits tool text
-  the gateway parsed 0 of" shows up in `~/.rozum/gateway.jsonl` / `/stats` without a raw dump. Additive,
-  low-risk. MEDIUM value (turns hours of forensics into a grep).
+- [x] **gw-toolcall-parse-observability** — DONE (this commit). Driver tool-delivery failures are now
+  grep-able instead of needing manual `ROZUM_RAW_DUMP` + kept-workdir forensics. `serving::toolish_markers`
+  (shared, unit-tested) lists the tool-call markup fragments across dialects; BOTH finalize seams — the
+  single-request engine seam (`engine::consume_tokens`) and the batched mlx seam
+  (`mlx_native_backend::finalize`) — emit `toolcall_parse_miss { model_type, markers, text_chars, tail }`
+  to `~/.rozum/gateway.jsonl` when a response carries tool markup but ZERO calls parsed (the exact
+  delivery-mismatch signature; only the miss is logged → no noise). Additive, low-risk.
 
 - [ ] **gw-toolcall-normalizer-corpus** — the recurring theme (this session: opencode absolute paths; memory:
   codex apply_patch variants, Qwen-Coder `&quot;`/newline) is a pile of point patches = whack-a-mole across

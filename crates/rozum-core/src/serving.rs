@@ -28,6 +28,25 @@ const DS_SEP: &str = "<｜tool▁sep｜>";
 /// recover those too, so the agent loop still works. The fallback runs *only*
 /// when there were no native blocks, so a legitimate ```json example inside an
 /// ordinary answer is never mistaken for a tool call.
+/// Tool-call markup fragments across the driver/model dialects that [`parse_tool_calls`] (and the
+/// harmony / GLM paths) understand. Their presence in a response from which ZERO tool calls parsed
+/// means the model TRIED to call a tool but the gateway couldn't decode it — the tool-DELIVERY
+/// failure signature. Observability only: the finalize seams log a `toolcall_parse_miss` event with
+/// the matched markers so a driver/model delivery mismatch is grep-able in `~/.rozum/gateway.jsonl`
+/// without a manual `ROZUM_RAW_DUMP` re-run.
+pub fn toolish_markers(text: &str) -> Vec<&'static str> {
+    const MARKERS: &[&str] = &[
+        "<tool_call>",
+        "<function=",
+        "apply_patch",
+        "\u{ff5c}tool\u{2581}sep\u{ff5c}", // DeepSeek `<｜tool▁sep｜>`
+        "<arg_key>",                       // GLM
+        "\"tool_call\"",
+        "functools",
+    ];
+    MARKERS.iter().copied().filter(|m| text.contains(m)).collect()
+}
+
 pub fn parse_tool_calls(text: &str) -> Vec<(String, String)> {
     // DeepSeek-V2/V3 native format: name is OUTSIDE the JSON (after `<｜tool▁sep｜>`), wrapped in
     // `<｜tool▁call▁begin｜>…<｜tool▁call▁end｜>` special-token markers → the `<tool_call>` loop and the
@@ -985,6 +1004,16 @@ fn is_safe_relpath(p: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toolish_markers_flags_delivery_signatures() {
+        // A parseable call carries a marker → flagged (the finalize seam only logs when calls==0).
+        assert_eq!(toolish_markers("<tool_call>{\"name\":\"x\"}</tool_call>"), vec!["<tool_call>"]);
+        assert_eq!(toolish_markers("<function=Write><parameter=file>a</parameter>"), vec!["<function="]);
+        assert!(toolish_markers("let me apply_patch this").contains(&"apply_patch"));
+        // Plain prose with no tool intent → nothing (no false miss).
+        assert!(toolish_markers("Here is the answer: 42. Done.").is_empty());
+    }
 
     // The REAL captured GLM-4-32B create-from-scratch artifact (agentic.sh KEEP=1, turns=1 tools=0).
     const GLM_ARTIFACT: &str = include_str!("../tests/fixtures/glm_create_artifact.txt");

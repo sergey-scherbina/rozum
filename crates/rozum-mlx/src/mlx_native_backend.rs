@@ -2834,6 +2834,26 @@ mod inner {
                 }
                 calls
             };
+            // Observability (gw-toolcall-parse-observability): the model emitted tool-call markup but
+            // NOTHING parsed — the exact signature of a driver/model tool-DELIVERY mismatch (a
+            // malformed apply_patch form, an unknown XML dialect, escaped-JSON code). Log the miss to
+            // `~/.rozum/gateway.jsonl` so "driver X emits tool text the gateway parsed 0 of" is grep-able
+            // instead of needing a manual `ROZUM_RAW_DUMP` re-run. Only the MISS is logged (a parsed
+            // call is the norm → no noise).
+            if tool_calls.is_empty() && !matches!(self.stop, StopReason::Cancelled) {
+                let markers = crate::serving::toolish_markers(&self.full_text);
+                if !markers.is_empty() {
+                    let n = self.full_text.chars().count();
+                    let tail: String = self.full_text.chars().skip(n.saturating_sub(200)).collect();
+                    rozum_core::obs::log_event(serde_json::json!({
+                        "event": "toolcall_parse_miss",
+                        "model": self.job.model_id,
+                        "markers": markers,
+                        "text_chars": n,
+                        "tail": tail,
+                    }));
+                }
+            }
             if !tool_calls.is_empty() {
                 for (name, args) in tool_calls.iter() {
                     let id = crate::engine::next_tool_call_id();
