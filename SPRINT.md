@@ -22,7 +22,7 @@
   UNPROVEN until a big model + a push-to-jetsam rig (operator: flag-gated is acceptable). Spec
   docs/specs/gateway-closed-loop-admission.md phase 2.
 
-- [ ] **gw-per-dialect-split** — the real architectural monolith split (after the 3 leaf extractions). Each
+- [x] **gw-per-dialect-split** — DONE: all 3 dialects (oai_api/anthropic_api/responses_api) extracted, handlers stay as composition roots, gateway.rs 6841→4256 (-38%), 106 tests + 3-dialect E2E green. — the real architectural monolith split (after the 3 leaf extractions). Each
   inbound dialect takes its OWN wire DTOs + mapping + handler + SSE into a module: `oai_api.rs`
   (`OaiChatReq`/`OaiMsg` + `oai_messages_to_internal` + `oai_chat_handler` + `oai_sse_stream`/`oai_collect`),
   `anthropic_api.rs`, `responses_api.rs`. gateway.rs keeps routing + `GatewayState` + admission-glue. FINDING
