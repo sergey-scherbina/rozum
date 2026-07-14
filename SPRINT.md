@@ -9,7 +9,7 @@
   more free); env override + the calibrated floor preserved. Memory win realizes under co-residency /
   bigger models; harmless for a single small model.
 
-- [ ] **gw-closed-loop-phase2** — measured mid-load OOM-abort behind `ROZUM_CLOSED_LOOP_ADMISSION`
+- [x] **gw-closed-loop-phase2** — DONE (this commit): flag-gated, validated no-false-fire on 4B (measured active 2257 MB, weights ARE materialized at load — not lazy). — measured mid-load OOM-abort behind `ROZUM_CLOSED_LOOP_ADMISSION`
   (default OFF). After weights materialize, read `get_active_memory()`; if `active + keep_free > total_ram`
   the first prefill will OOM → refuse NOW (clean error, don't serve) instead of a reboot. Unit-test the
   decision logic + verify it does NOT false-fire on the 4B. The "actually prevents a reboot" claim stays

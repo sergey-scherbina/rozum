@@ -846,6 +846,14 @@ mod inner {
         }
     }
 
+    /// Closed-loop admission decision (phase 2): true ⇒ REFUSE. The MEASURED resident footprint
+    /// (`active`, `get_active_memory()` after weights load) plus the `keep_free` headroom exceeds
+    /// host `total` RAM, so the first prefill's activation spike would OOM. Pure + unit-tested; the
+    /// worker gates the actual refusal behind `ROZUM_CLOSED_LOOP_ADMISSION`.
+    fn closed_loop_should_refuse(active: u64, keep_free: u64, total: u64) -> bool {
+        active.saturating_add(keep_free) > total
+    }
+
     /// Worker thread entry point. Loads the model (reporting load result over
     /// `ready`), then serves jobs until the queue closes.
     fn worker_main(
@@ -864,6 +872,37 @@ mod inner {
                 return;
             }
         };
+        // Closed-loop admission, phase 2 (gw-closed-loop-phase2, `ROZUM_CLOSED_LOOP_ADMISSION`,
+        // default OFF). The pre-load footprint was an ESTIMATE; now that the weights are resident,
+        // measure the REAL active memory. If the weights alone already leave less than the keep-free
+        // headroom, the first prefill's activation spike will drive real memory past RAM and OOM the
+        // host (BUG-003) → refuse NOW with a clean error instead of a reboot. Off by default: the
+        // "aborts before the kernel" guarantee can't be validated without a push-to-jetsam rig, and it
+        // only ever fires for a model too big for the host (none currently installed).
+        if std::env::var_os("ROZUM_CLOSED_LOOP_ADMISSION").is_some() {
+            let active = mlx_rs::memory::get_active_memory() as u64;
+            let total = crate::concurrency::total_ram_bytes().unwrap_or(u64::MAX);
+            let keep_free = rozum_core::share::min_free_ram_bytes();
+            if closed_loop_should_refuse(active, keep_free, total) {
+                let _ = ready.send(Err(format!(
+                    "mlx: closed-loop admission refused (model_type {model_type}) — measured resident \
+                     {} MB + keep-free {} MB exceeds host RAM {} MB; the first prefill would OOM \
+                     (BUG-003 guard). Use a smaller model or free RAM.",
+                    active / 1_048_576,
+                    keep_free / 1_048_576,
+                    total / 1_048_576,
+                )));
+                return;
+            }
+            if std::env::var_os("ROZUM_PEAK_DEBUG").is_some() {
+                eprintln!(
+                    "closed-loop: measured active {} MB (total {} MB, keep-free {} MB) → admitted",
+                    active / 1_048_576,
+                    total / 1_048_576,
+                    keep_free / 1_048_576,
+                );
+            }
+        }
         // Qwen3.5-VL: load the vision tower alongside the text stack so image
         // requests can be spliced. Text-only / non-VL models leave this None.
         let mut vision = if matches!(model_type.as_str(), "qwen3_5" | "qwen3_5_moe")
@@ -6062,6 +6101,19 @@ mod tests {
         let mut tail = varied.clone();
         tail.extend([9u32; 20]); // only 20 repeats, < REPEAT_WINDOW(64)
         assert!(!is_runaway_loop(&tail));
+    }
+
+    #[test]
+    fn closed_loop_refuse_logic() {
+        use super::inner::closed_loop_should_refuse;
+        const GB: u64 = 1 << 30;
+        // Weights leave the keep-free headroom → admit.
+        assert!(!closed_loop_should_refuse(20 * GB, 2 * GB, 38 * GB));
+        // active + keep_free exactly == total → admit (not strictly over).
+        assert!(!closed_loop_should_refuse(36 * GB, 2 * GB, 38 * GB));
+        // active + keep_free > total → refuse: the prefill spike would OOM.
+        assert!(closed_loop_should_refuse(37 * GB, 2 * GB, 38 * GB));
+        assert!(closed_loop_should_refuse(40 * GB, 2 * GB, 38 * GB));
     }
 
     #[test]
