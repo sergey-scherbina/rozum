@@ -51,12 +51,18 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   to `~/.rozum/gateway.jsonl` when a response carries tool markup but ZERO calls parsed (the exact
   delivery-mismatch signature; only the miss is logged → no noise). Additive, low-risk.
 
-- [ ] **gw-toolcall-normalizer-corpus** — the recurring theme (this session: opencode absolute paths; memory:
-  codex apply_patch variants, Qwen-Coder `&quot;`/newline) is a pile of point patches = whack-a-mole across
-  `rewrite_apply_patch_*` / `normalize_codex_tool_args` / `parse_xml_function` / `parse_glm_arg_kv`. Capture
-  a GOLDEN CORPUS of the malformed forms (`ROZUM_CODEX_TOOL_CAPTURE` → gateway.jsonl, `ROZUM_RAW_DUMP`) and
-  consolidate the scattered rewriters behind one well-tested normalizer with that corpus as regression tests.
-  Refactor + hardening; do AFTER the observability item (which feeds the corpus). MEDIUM value.
+- [x] **gw-toolcall-normalizer-corpus** — the valuable parts DONE; the risky part deferred with rationale.
+  (1) GOLDEN CORPUS already exists + is comprehensive (audited 2026-07-14): ~15 apply_patch regression tests
+  in gateway's test module (unified-diff bridge, method-B fuzz, JSON-wrapped `-patches`, exec-array /
+  `cmd:apply_patch` sibling, function-call reroute, unicode-escape decode, WS-fallback, structured
+  patches-array multi-file, create-vs-patch, path/file/filename key aliases) + 25 parse-dialect tests in
+  serving.rs (GLM `<arg_key>`, XML `<function=`, Qwen-Coder ±wrapper + `&quot;`/numeric-entity, DeepSeek
+  native, loose JSON, repair-unescaped-quotes, parameters alias). Every hard-won form from memory has a
+  test. (2) GROUPED: the previously-scattered `rewrite_apply_patch_*` / `normalize_codex_tool_args` /
+  file-write-synth rewriters are now ONE module (`codex_patch`, via gw-monolith-decompose). REMAINING
+  (deferred, LOW value / HIGH risk): merging them into a single dispatch function — a rewrite of
+  well-tested WORKING delivery code whose only gain is organizational; the corpus + the module grouping
+  already capture the value. Revisit only if a new malformed form needs a structurally different handler.
 
 - [~] **gw-monolith-decompose** — FIRST EXTRACTION DONE (this commit); pattern established for the rest.
   `gateway.rs` was **6841 lines**. Extracted the cohesive codex `apply_patch` / tool-arg rewriting cluster
