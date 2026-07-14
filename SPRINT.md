@@ -1,5 +1,27 @@
 # Sprint
 
+### ▶ Matrix reliability (operator 2026-07-14: "исправь и оно работало" re the last-run codex reds)
+
+- [x] **matrix-reliability-greedy-repair** — DONE + PROVEN + MERGED (`4df4e54`). The two codex reds
+  (`debug`, `rpn`) in the newbuild validation matrix were a MEASUREMENT artifact, not a gateway bug.
+  DIAGNOSIS (fact, not guess): (1) the same Qwen3.5-4B passes those cells 8/8 under claude AND opencode;
+  (2) a bare re-run of the two codex cells = 2/2 green — the model writes correct code (rpn `35`/`14`,
+  debug `cargo test` green), via heredoc `cat > src/main.rs`, not even apply_patch; (3) the new
+  `toolcall_parse_miss` obs logged exactly ONE benign miss in the whole run (a greet-task hybrid tool call
+  that still passed) → NOT a tool-delivery parser bug. ROOT CAUSE = irreducible Layer-A variance (the agent
+  CLIs stamp a fresh session-id + ts into every prompt, so the token stream differs run-to-run even at a
+  fixed seed) EXPOSED by a single-run cell whose validation launch had verify-repair OFF (`agentic.sh`
+  default `REPAIR=0`) — the failed cells show `repairs=0, pass=0`, impossible under `REPAIR=1` (a first-fail
+  would increment `repairs`), which nails REPAIR=0. FIX (both matrix launchers, env-overridable):
+  `run_full_matrix.sh` + the `control.rs` UCC matrix job now default `ROZUM_FORCE_GREEDY=1` (temperature 0 /
+  argmax — most reliable decode for these deterministic coding tasks, removes the gateway sampling RNG) and
+  `REPAIR=2` (a verified FAIL feeds the real compiler/test error back for up to two fresh attempts; costs
+  wall-clock only on cells that fail). PROOF: greedy + REPAIR=2, codex, Qwen3.5-4B, 3 reps each →
+  **debug 3/3, rpn 3/3 = 6/6 green**, and 3 of the 6 reached green via `repairs=1` (would have been hard
+  reds under the old single-shot REPAIR=0). `control.rs` compiles clean. The `run_full_matrix.sh` half is
+  LIVE immediately (script + existing `force_greedy` binary logic); the `control.rs` UCC half takes effect
+  once the deployed `~/.rozum/bin/rozum-gateway` (control-serve :8411) is rebuilt + restarted.
+
 ### ▶ Gateway round-2 (operator 2026-07-14: "Запиши в спринт и сделай …" — decisions confirmed via AskUserQuestion)
 
 - [x] **gw-default-mlx-native** — DONE (this commit): verified lean build compiles + native MLX serves. (operator 2026-07-14: "сделай default = [mlx-native]") — drop `gguf` from the
