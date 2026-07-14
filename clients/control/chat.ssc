@@ -1,0 +1,164 @@
+#!/usr/bin/env ssc
+---
+name: rozum-ucc-chat
+version: 1.0.0
+description: rozum UCC — chat app that drives a coding agent on the local model. Compiled to chat.html.
+---
+# rozum — chat (agent + model)
+
+A phone-first CHAT app that DRIVES a coding agent (claude/codex/opencode) running on the local
+model, working on a project. Unlike `session.ssc` (which needs a session created elsewhere first and
+shows the raw tmux pane), this app:
+
+- STARTS the agent itself — pick agent + model + project, tap ▶ — via `POST /control/session/launch`,
+  then chats with it (no jump to the UCC sessions list).
+- Presents the agent's live work in an app-like frame, with a big-thumb composer, quick control keys
+  (Enter/Esc/^C…), and one-tap "new session".
+- Remembers the active session (`?id=` / localStorage), so re-opening resumes the same agent.
+
+Backend contract (all same-origin, control-serve :8411, Face-ID-gated):
+- `POST /control/session/launch  {agent, model, workdir, prompt?}` → `{ok, id, status}`
+- `POST /control/session/send    {id, input, submit?, keys?}`
+- `GET  /control/session/output?id=` → `{id, alive, output}`
+- `POST /control/session/stop    {id}`
+- `GET  /control/status` → `{installed:[{spec,…}], projects:[{name,path}], sessions:[…], …}`
+
+Compiled via: ssc run chat.ssc → chat.html  (see deploy-ucc-web.sh)
+
+## Page
+```scalascript
+val bodyCss = "html,body{margin:0;height:100%;background:radial-gradient(130% 95% at 50% 36%,transparent 50%,rgba(2,3,7,.62) 100%),radial-gradient(135% 85% at 50% -12%,#163a50 0%,#0b1d2c 32%,#06090f 68%,#05070c 100%),radial-gradient(58% 48% at 16% 6%,rgba(44,84,120,.34),transparent 62%),radial-gradient(52% 44% at 88% 20%,rgba(74,46,104,.26),transparent 60%) fixed;color:#e6e6e6;font:15px -apple-system,system-ui,sans-serif}"
+
+val css = "#app{display:flex;flex-direction:column;height:100dvh}" +
+  "#bar{display:flex;gap:10px;align-items:center;padding:10px max(12px,env(safe-area-inset-right)) 10px max(12px,env(safe-area-inset-left));background:#151a23;border-bottom:1px solid #232a36;flex:0 0 auto}" +
+  "#bar a,#bar .ic{color:#7ab8ff;text-decoration:none;cursor:pointer;font-size:15px}#bar .meta{min-width:0;line-height:1.15}#bar .meta b{display:block;font-size:13px;color:#e6edf6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#bar .meta small{font-size:11px;color:#8a93a0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}#bar .sp{flex:1 1 auto}#st{font-size:12px;color:#8a93a0;flex:0 0 auto}" +
+  // start screen
+  "#start{flex:1 1 auto;overflow-y:auto;padding:18px max(14px,env(safe-area-inset-right)) 18px max(14px,env(safe-area-inset-left));max-width:640px;margin:0 auto;width:100%;box-sizing:border-box}" +
+  "#start h2{font-size:17px;margin:2px 0 14px;color:#e6edf6;font-weight:650}" +
+  ".grp{margin:0 0 16px}.grp .lbl{font-size:12px;color:#8a93a0;margin:0 0 6px;text-transform:uppercase;letter-spacing:.04em}" +
+  ".chips{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:9px 14px;background:#1c2330;color:#c9d4e3;border:1px solid #2c3648;border-radius:10px;font-size:14px;cursor:pointer}.chip.on{background:#1f3a28;border-color:#2ea043;color:#7ee29a}" +
+  ".sel,.txt{width:100%;box-sizing:border-box;padding:11px 12px;background:#0b0e14;color:#e6e6e6;border:1px solid #2c3648;border-radius:10px;font-size:16px;font-family:inherit}" +
+  "#go{width:100%;margin-top:6px;padding:14px;background:#1f3a28;color:#7ee29a;border:1px solid #2ea043;border-radius:12px;font-size:16px;font-weight:650;cursor:pointer}#go:active{background:#2a4d34}#go:disabled{opacity:.5}" +
+  ".resume{margin-top:14px;padding:12px;background:#141a24;border:1px solid #232a36;border-radius:10px;font-size:13px;color:#9fb0c4}.resume a{color:#7ab8ff;cursor:pointer;font-weight:600}" +
+  // chat screen
+  "#out{flex:1 1 auto;margin:0;padding:12px max(12px,env(safe-area-inset-right)) 12px max(12px,env(safe-area-inset-left));overflow-y:auto;-webkit-overflow-scrolling:touch;white-space:pre-wrap;word-break:break-word;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#d7dee8;background:#0b0e14}" +
+  ".hidden{display:none!important}" +
+  "#keys{display:flex;gap:6px;padding:6px max(10px,env(safe-area-inset-right)) 0 max(10px,env(safe-area-inset-left));background:#10141c;overflow-x:auto;-webkit-overflow-scrolling:touch;flex:0 0 auto}#keys button{flex:0 0 auto;min-width:42px;padding:7px 10px;background:#1c2330;color:#c9d4e3;border:1px solid #2c3648;border-radius:8px;font:13px -apple-system,system-ui,sans-serif;cursor:pointer}#keys button:active{background:#2a3850}" +
+  "#composer{display:flex;gap:8px;padding:8px max(10px,env(safe-area-inset-right)) max(8px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left));background:#10141c;border-top:1px solid #232a36;flex:0 0 auto}#inp{flex:1 1 auto;min-width:0;padding:11px 13px;background:#0b0e14;color:#e6e6e6;border:1px solid #2c3648;border-radius:11px;font-size:16px;font-family:-apple-system,system-ui,sans-serif;resize:none;max-height:38vh}#send{flex:0 0 auto;padding:0 17px;background:#1f3a28;color:#56d364;border:1px solid #2ea043;border-radius:11px;font-size:15px;font-weight:600;cursor:pointer}#send:active{background:#2a4d34}#send:disabled{opacity:.5}"
+
+val langCss = "#rozum-lang{position:fixed;top:9px;right:12px;display:flex;gap:1px;z-index:999}.rl-btn{background:#21262d;color:#6e7681;border:1px solid #30363d;padding:3px 7px;cursor:pointer;font-size:10px;font-weight:600;letter-spacing:.03em}.rl-btn:first-child{border-radius:5px 0 0 5px}.rl-btn:last-child{border-radius:0 5px 5px 0}.rl-btn.active{background:#1f3a28;border-color:#2ea043;color:#56d364}"
+
+val js = """
+var _LG=localStorage.getItem('rozum_lang')||navigator.language.split('-')[0]||'en';
+var _LT={'ru':{'← UCC':'← UCC','rozum · chat':'rozum · чат','New agent session':'Новая сессия','Agent':'Агент','Model':'Модель','Project':'Проект','First task (optional)':'Первая задача (необязательно)','task…':'задача…','▶ Start':'▶ Запустить','starting…':'запуск…','Resume last session':'Продолжить сессию','● live':'● на связи','○ ended':'○ завершена','✗ error':'✗ ошибка','message…':'сообщение…','send':'отпр.','+ new':'+ новая','(no output yet — the agent is starting on the local model; the first turn can take a bit)':'(вывода пока нет — агент стартует на локальной модели; первый ответ может занять время)','stop session?':'остановить сессию?'},'uk':{'← UCC':'← UCC','rozum · chat':'rozum · чат','New agent session':'Нова сесія','Agent':'Агент','Model':'Модель','Project':'Проєкт','First task (optional)':'Перше завдання (необовʼязково)','task…':'завдання…','▶ Start':'▶ Запустити','starting…':'запуск…','Resume last session':'Продовжити сесію','● live':'● на звʼязку','○ ended':'○ завершена','✗ error':'✗ помилка','message…':'повідомлення…','send':'надісл.','+ new':'+ нова','(no output yet — the agent is starting on the local model; the first turn can take a bit)':'(виводу поки немає — агент стартує на локальній моделі)','stop session?':'зупинити сесію?'}};
+function _lt(s){var m=_LT[_LG];return(m&&m[s])||s;}
+document.documentElement.lang=_LG;
+if(_LT[_LG]&&_LT[_LG]['rozum · chat'])document.title=_LT[_LG]['rozum · chat'];
+(function(){var d=document.createElement('div');d.id='rozum-lang';['en','ru','uk'].forEach(function(l){var b=document.createElement('button');b.className='rl-btn';b.textContent=l.toUpperCase();b.dataset.lang=l;b.onclick=function(){localStorage.setItem('rozum_lang',l);location.reload();};if(l===_LG)b.classList.add('active');d.appendChild(b);});document.body.appendChild(d);})();
+
+var DEF_MODEL='mlx-community:Qwen3.5-4B-MLX-4bit';
+var DEF_PROJECT='/Users/sergiy/work/my/rozum';
+var AGENTS=['claude','codex','opencode'];
+var pick={agent:localStorage.getItem('rozum_chat_agent')||'claude',model:DEF_MODEL,project:localStorage.getItem('rozum_chat_project')||DEF_PROJECT};
+
+var $=function(s){return document.getElementById(s);};
+var startEl=$('start'), outEl=$('out'), keysEl=$('keys'), compEl=$('composer'), stEl=$('st'), metaEl=$('meta');
+var inp=$('inp'), send=$('send');
+var id=new URLSearchParams(location.search).get('id')||localStorage.getItem('rozum_chat_sid')||'';
+
+function on401(r){ if(r.status===401){ location.href='/login.html'; throw 0; } return r; }
+function getJSON(u){ return fetch(u,{headers:{}}).then(on401).then(function(r){return r.json();}); }
+function postJSON(u,b){ return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(on401).then(function(r){return r.json();}); }
+
+/* ---------- start screen ---------- */
+function esc(s){return String(s).replace(/[&<>"]/g,function(m){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m];});}
+function renderStart(models,projects){
+  var agentChips=AGENTS.map(function(a){return '<span class="chip'+(pick.agent===a?' on':'')+'" data-agent="'+a+'">'+a+'</span>';}).join('');
+  var modelOpts=(models&&models.length?models:[{spec:DEF_MODEL}]).map(function(m){var s=m.spec||m.id||m;return '<option value="'+esc(s)+'"'+(s===pick.model?' selected':'')+'>'+esc(String(s).split('/').pop())+'</option>';}).join('');
+  var projOpts=(projects&&projects.length?projects:[{name:'rozum',path:DEF_PROJECT}]).map(function(p){var pa=p.path||p;return '<option value="'+esc(pa)+'"'+(pa===pick.project?' selected':'')+'>'+esc(p.name||String(pa).split('/').pop())+'</option>';}).join('');
+  var resume=id?('<div class="resume">'+_lt('Resume last session')+': <a id="resume">'+esc(id)+'</a></div>'):'';
+  startEl.innerHTML=
+    '<h2>'+_lt('New agent session')+'</h2>'+
+    '<div class="grp"><div class="lbl">'+_lt('Agent')+'</div><div class="chips" id="agents">'+agentChips+'</div></div>'+
+    '<div class="grp"><div class="lbl">'+_lt('Model')+'</div><select class="sel" id="mdl">'+modelOpts+'</select></div>'+
+    '<div class="grp"><div class="lbl">'+_lt('Project')+'</div><select class="sel" id="prj">'+projOpts+'</select></div>'+
+    '<div class="grp"><div class="lbl">'+_lt('First task (optional)')+'</div><textarea class="txt" id="task" rows="3" placeholder="'+_lt('task…')+'"></textarea></div>'+
+    '<button id="go">'+_lt('▶ Start')+'</button>'+resume;
+  $('agents').onclick=function(e){var c=e.target.closest('[data-agent]');if(!c)return;pick.agent=c.dataset.agent;localStorage.setItem('rozum_chat_agent',pick.agent);Array.prototype.forEach.call($('agents').children,function(x){x.classList.toggle('on',x.dataset.agent===pick.agent);});};
+  $('mdl').onchange=function(e){pick.model=e.target.value;};
+  $('prj').onchange=function(e){pick.project=e.target.value;localStorage.setItem('rozum_chat_project',pick.project);};
+  $('go').onclick=doStart;
+  if($('resume'))$('resume').onclick=function(){showChat();};
+}
+function doStart(){
+  var go=$('go'); go.disabled=true; go.textContent=_lt('starting…');
+  var task=($('task')&&$('task').value||'').trim();
+  postJSON('/control/session/launch',{agent:pick.agent,model:pick.model,workdir:pick.project,prompt:task})
+    .then(function(j){
+      if(!j||!j.id){ go.disabled=false; go.textContent=_lt('▶ Start'); stEl.textContent=_lt('✗ error'); return; }
+      id=j.id; localStorage.setItem('rozum_chat_sid',id);
+      history.replaceState(null,'','?id='+encodeURIComponent(id));
+      showChat();
+    })
+    .catch(function(e){ if(e!==0){ go.disabled=false; go.textContent=_lt('▶ Start'); stEl.textContent=_lt('✗ error'); } });
+}
+
+/* ---------- chat screen ---------- */
+function setMeta(){ metaEl.innerHTML='<b>'+esc(pick.agent)+' · '+esc(String(pick.model).split('/').pop())+'</b><small>'+esc(String(pick.project).split('/').pop())+' · '+esc(id)+'</small>'; }
+function showStart(){ startEl.classList.remove('hidden'); outEl.classList.add('hidden'); keysEl.classList.add('hidden'); compEl.classList.add('hidden'); metaEl.innerHTML=''; boot(); }
+function showChat(){ startEl.classList.add('hidden'); outEl.classList.remove('hidden'); keysEl.classList.remove('hidden'); compEl.classList.remove('hidden'); setMeta(); inp.placeholder=_lt('message…'); send.textContent=_lt('send'); poll(); if(!window._iv){window._iv=setInterval(poll,1500);} }
+
+function atBottom(){ return outEl.scrollHeight-outEl.scrollTop-outEl.clientHeight < 44; }
+var lastText='';
+function apply(text){ if(text===lastText)return; var stick=atBottom(); lastText=text; outEl.textContent=text.length?text:_lt('(no output yet — the agent is starting on the local model; the first turn can take a bit)'); if(stick)outEl.scrollTop=outEl.scrollHeight; }
+var polling=false;
+function poll(){ if(polling||!id||outEl.classList.contains('hidden'))return; polling=true;
+  getJSON('/control/session/output?id='+encodeURIComponent(id))
+    .then(function(j){ apply(j.output||''); stEl.textContent=j.alive?_lt('● live'):_lt('○ ended'); })
+    .catch(function(e){ if(e!==0)stEl.textContent=_lt('✗ error'); })
+    .then(function(){ polling=false; });
+}
+function doSend(){ var v=inp.value; if(!id||!v){inp.focus();return;} send.disabled=true;
+  postJSON('/control/session/send',{id:id,input:v,submit:true})
+    .then(function(){ inp.value=''; inp.style.height='auto'; })
+    .catch(function(){})
+    .then(function(){ send.disabled=false; inp.focus(); setTimeout(poll,250); setTimeout(poll,900); setTimeout(poll,1800); });
+}
+send.addEventListener('click',doSend);
+inp.addEventListener('keydown',function(e){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); doSend(); } });
+inp.addEventListener('input',function(){ inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,window.innerHeight*0.38)+'px'; });
+
+// control keys the agent REPL needs
+var KEYS=[['⏎','Enter'],['Esc','Escape'],['Tab','Tab'],['^C','C-c'],['^U','C-u'],['^D','C-d']];
+KEYS.forEach(function(k){ var b=document.createElement('button'); b.type='button'; b.textContent=k[0];
+  var fire=function(e){ e.preventDefault(); if(id)postJSON('/control/session/send',{id:id,input:'',keys:[k[1]]}).then(function(){setTimeout(poll,250);setTimeout(poll,900);}).catch(function(){}); };
+  b.addEventListener('touchstart',fire,{passive:false}); b.addEventListener('mousedown',fire); keysEl.appendChild(b);
+});
+
+// top bar: new session (stops current, back to start)
+$('newbtn').onclick=function(){ if(id&&confirm(_lt('stop session?'))){ postJSON('/control/session/stop',{id:id}).catch(function(){}); } id=''; localStorage.removeItem('rozum_chat_sid'); history.replaceState(null,'','?'); lastText=''; showStart(); };
+
+/* ---------- boot ---------- */
+function boot(){
+  getJSON('/control/status')
+    .then(function(s){ renderStart(s.installed||s.models||[], s.projects||[]); })
+    .catch(function(e){ if(e!==0)renderStart([],[]); });
+}
+if(id){ showChat(); } else { showStart(); }
+"""
+
+val html = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">" +
+  "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover\">" +
+  "<meta name=\"apple-mobile-web-app-capable\" content=\"yes\"><meta name=\"apple-mobile-web-app-status-bar-style\" content=\"black-translucent\">" +
+  "<title>rozum · chat</title><style>" + bodyCss + css + langCss + "</style></head><body>" +
+  "<div id=\"app\">" +
+    "<div id=\"bar\"><a href=\"/\">← UCC</a><div class=\"meta\" id=\"meta\"></div><span class=\"sp\"></span><span class=\"ic\" id=\"newbtn\">+ new</span><span id=\"st\">…</span></div>" +
+    "<div id=\"start\"></div>" +
+    "<pre id=\"out\" class=\"hidden\"></pre>" +
+    "<div id=\"keys\" class=\"hidden\"></div>" +
+    "<div id=\"composer\" class=\"hidden\"><textarea id=\"inp\" rows=\"1\" autocomplete=\"off\" autocapitalize=\"sentences\"></textarea><button id=\"send\" type=\"button\">send</button></div>" +
+  "</div><script>" + js + "</script></body></html>"
+
+// Static page: printed to stdout for the deploy to capture (control-serve serves the file).
+println(html)
+```

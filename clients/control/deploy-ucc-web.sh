@@ -12,7 +12,8 @@
 #   center.ssc  ->  site/index.html   (browser SPA, reactive)
 #   login.ssc                ->  site/login.html   (Face ID / WebAuthn page)
 #   terminal.ssc             ->  site/terminal.html (xterm.js WebSocket terminal)
-#   session.ssc              ->  site/session.html (chat-style agent session — the default)
+#   session.ssc              ->  site/session.html (raw-pane chat over an existing tmux session)
+#   chat.ssc                 ->  site/chat.html    (phone chat app: starts + drives an agent on the model)
 set -euo pipefail
 
 SSC="${SSC:-/tmp/ssc-tk/bin/ssc}"
@@ -429,9 +430,11 @@ check_js_runtime "$SITE/index.html"
 emit_html "$HERE/login.ssc"    8421 "$SITE/login.html"
 emit_html "$HERE/terminal.ssc" 8422 "$SITE/terminal.html"
 emit_html "$HERE/session.ssc"  8423 "$SITE/session.html"
+emit_html "$HERE/chat.ssc"     8424 "$SITE/chat.html"
 check_js_syntax "$SITE/login.html"
 check_js_syntax "$SITE/terminal.html"
 check_js_syntax "$SITE/session.html"
+check_js_syntax "$SITE/chat.html"
 
 # 4) Copy PWA assets.
 for f in manifest.webmanifest icon.svg icon-180.png sw.js; do
