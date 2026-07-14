@@ -70,7 +70,7 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   self-contained (zero `crate::`/`super::` refs, pure string/`serde_json::Value` transforms), made
   `pub(crate)`, glob-imported at gateway.rs so the request-handling call sites read unchanged, and its
   regression corpus (~15 apply_patch tests) stays in gateway's test module via `super::*`. Behaviour-
-  preserving — **all 106 gateway tests green**. gateway.rs now **6061 lines**. Also serves gw-toolcall-
+  preserving — **all 106 gateway tests green**. gateway.rs now **5688 lines** (codex_patch + loopbreak + codex_lean extracted, -17%). Also serves gw-toolcall-
   normalizer-corpus (the rewriters are now ONE module). REMAINING seams to peel the same way (each a
   standalone reviewed pass): HTTP surface (routing/handlers) · lifecycle/watchdog (idle/shed/preempt) ·
   admission-glue (WarmConfig/published_reservation) · streaming; plus `control.rs` (3833). MEDIUM value

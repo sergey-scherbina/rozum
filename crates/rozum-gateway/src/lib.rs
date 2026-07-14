@@ -9,6 +9,8 @@ pub mod anthropic_http;
 pub(crate) mod codex_patch;
 pub mod control;
 pub mod gateway;
+pub(crate) mod codex_lean;
+pub(crate) mod loopbreak;
 pub mod openai_http;
 
 pub(crate) use rozum_core::{backend, concurrency, obs, share, shed};
