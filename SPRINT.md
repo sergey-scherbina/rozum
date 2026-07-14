@@ -64,17 +64,20 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   well-tested WORKING delivery code whose only gain is organizational; the corpus + the module grouping
   already capture the value. Revisit only if a new malformed form needs a structurally different handler.
 
-- [~] **gw-monolith-decompose** — FIRST EXTRACTION DONE (this commit); pattern established for the rest.
-  `gateway.rs` was **6841 lines**. Extracted the cohesive codex `apply_patch` / tool-arg rewriting cluster
-  (21 fns + the WS-fallback const, ~780 lines) into `crates/rozum-gateway/src/codex_patch.rs` — verified
-  self-contained (zero `crate::`/`super::` refs, pure string/`serde_json::Value` transforms), made
-  `pub(crate)`, glob-imported at gateway.rs so the request-handling call sites read unchanged, and its
-  regression corpus (~15 apply_patch tests) stays in gateway's test module via `super::*`. Behaviour-
-  preserving — **all 106 gateway tests green**. gateway.rs now **5688 lines** (codex_patch + loopbreak + codex_lean extracted, -17%). Also serves gw-toolcall-
-  normalizer-corpus (the rewriters are now ONE module). REMAINING seams to peel the same way (each a
-  standalone reviewed pass): HTTP surface (routing/handlers) · lifecycle/watchdog (idle/shed/preempt) ·
-  admission-glue (WarmConfig/published_reservation) · streaming; plus `control.rs` (3833). MEDIUM value
-  (maintainability), LOW urgency — do incrementally, tests as the safety net.
+- [~] **gw-monolith-decompose** — the CLEANLY-SEPARABLE (zero-back-reference) leaf clusters are extracted;
+  the rest is an architectural refactor, not a mechanical peel. `gateway.rs` was **6841 lines**; now **5688**
+  (−17%) across 3 modules, **all 106 gateway tests green** at every step (behaviour-preserving):
+  `codex_patch.rs` (~780 lines — the apply_patch/tool-arg rewriters), `loopbreak.rs` (~265 — the stuck-loop
+  detector), `codex_lean.rs` (~110 — the codex tool/prompt-trim policy). Each verified truly self-contained
+  (no `crate::`/`super::` refs AND — the method lesson from an aborted `context_fit`/`codex_capture` attempt
+  — no UNQUALIFIED intra-gateway calls nor gateway-local param DTOs), made `pub(crate)`, glob-imported so
+  call sites + tests read unchanged. Also completes gw-toolcall-normalizer-corpus's "group the rewriters".
+  **BOUNDARY reached:** the remaining clusters aren't leaves — request-mapping needs gateway-local wire DTOs
+  (`OaiMsg`/`RespTool`/`AnthropicMsg`), auto-context calls `error_json` + streaming types, and the async
+  handlers are coupled to `GatewayState`. Peeling those cleanly is an ARCHITECTURAL pass (move each dialect's
+  wire types + their→internal mapping INTO `openai_http`/`anthropic_http`; extract an error-response module;
+  decouple handlers from state), not a move — a dedicated design effort with the tests as the net. `control.rs`
+  (3833) likewise. MEDIUM value, LOW urgency.
 
 - [x] **models-cleanup** (2026-07-13, operator: "Удаляй лишние модели если не нужны") — pruned the
   local model set to the matrix winners. DELETED `Qwen3.5-4B-MLX-bf16` (8.5 GB, redundant: the 4-bit
