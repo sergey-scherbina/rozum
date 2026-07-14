@@ -29,7 +29,7 @@ path = "src/main.rs"
 # builds + tests with no native toolchain; CI's `linux-core` job enforces it. The
 # native MLX/GGUF backends are Apple-Metal-bound (mlx-sys + llama-cpp-2 `metal`); a
 # true gguf-on-Linux (CPU/CUDA, non-metal) is the open `portability-cuda-gguf`.
-default = ["mlx-native", "gguf"]
+default = ["mlx-native"]
 local-models = ["rozum-core/local-models"]
 gguf = ["rozum-gguf/gguf"]
 mistralrs = ["rozum-mistralrs/mistralrs"]

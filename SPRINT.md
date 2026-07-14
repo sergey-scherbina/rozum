@@ -2,6 +2,12 @@
 
 ### ▶ Gateway round-2 (operator 2026-07-14: "Запиши в спринт и сделай …" — decisions confirmed via AskUserQuestion)
 
+- [x] **gw-default-mlx-native** — DONE (this commit): verified lean build compiles + native MLX serves. (operator 2026-07-14: "сделай default = [mlx-native]") — drop `gguf` from the
+  default feature set: `default = ["mlx-native"]` (was `["mlx-native", "gguf"]`). Leaner default build (no
+  llama-cpp-2 / llama.cpp cmake), Qwen/MLX out of the box; GGUF/lmstudio/ollama become opt-in `--features gguf`.
+  Safe: `try_build_gguf_backend` already has a `#[cfg(not(feature="gguf"))]` None-stub (same pattern as
+  mistralrs), so the lean build compiles + the native MLX path is unaffected. Verify native-MLX smoke stays green.
+
 - [x] **gw-cache-cap-by-size** — DONE (this commit): 4B footprint 8.60→6.60 GiB (cache cap 4→2). — scale the MLX buffer-cache cap by model size. Today it's a flat 4 GiB
   (`ROZUM_MLX_CACHE_GB`), baked into the activation reserve (cache_cap + 1.5 GiB ≈ 5.5 GiB). A 4B model
   uses ~1.2 GiB cache (smmr-D), so 4 GiB is generous → ~2 GiB of reservation is dead weight. Make the
@@ -25,7 +31,8 @@
   `chat_error_response`, `apply_tool_choice`, `with_gen_timeout`) + `GatewayState` (`state.observer`/`state.sb`).
   So the split needs those helpers made `pub(crate)` + cross-module imports (architectural, many back-refs —
   NOT a clean-leaf move like codex_patch). Doable with tests as the net, but it's the big careful pass. The
-  DTOs+mapping+SSE sub-parts are cleaner than the handler. Awaiting operator's go given the scope.
+  DTOs+mapping+SSE sub-parts are cleaner than the handler. **DECISION (operator): DO IT FULLY** — all 3
+  dialects, `pub(crate)` the shared helpers, tests + E2E as the net, dialect-by-dialect with a commit each.
 
 - [~] **gw-optional-families-cargo** — MATERIAL FINDINGS on attempt (2026-07-14) change the value:
   (1) **mistralrs is ALREADY compile-time-optional + OFF by default** — `default = ["mlx-native","gguf"]`
@@ -37,8 +44,10 @@
   compiled under `mlx-native`; gating in rozum only removes the thin loader ARM (one match arm each, behind a
   `LoadedModel` enum variant → cfg CASCADES across every match site) + the rozum-side parser. Small binary win,
   real cfg-cascade risk. The genuine leaner-binary win needs per-model features in the mlx-lm FORK — a bigger,
-  separate effort. RECOMMENDATION: don't chase the rozum-side enum-cfg (low value / high fiddliness); families
-  are already runtime-inactive when unused. Awaiting operator's call given these findings.
+  separate effort. **DECISION (operator via AskUserQuestion): do the FORK-LEVEL win** — per-model Cargo features
+  in the vendored mlx-lm fork so a family's MODEL code (glm4.rs / deepseek_v2.rs / gpt_oss.rs) isn't compiled
+  unless opted in; rozum's loader arms + parsers follow. Real leaner binary. Multi-repo: edit fork → rev-bump →
+  MLX rebuild (~3-4 min/iter) → test lean + full combos. mistralrs part already done (off by default).
 
 ### ▶ Gateway improvements (operator 2026-07-14: "Что ещё можно улучшить в гейтвее? … Записывай всё и делай")
 
