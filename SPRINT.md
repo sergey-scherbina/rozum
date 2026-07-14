@@ -58,13 +58,17 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   consolidate the scattered rewriters behind one well-tested normalizer with that corpus as regression tests.
   Refactor + hardening; do AFTER the observability item (which feeds the corpus). MEDIUM value.
 
-- [ ] **gw-monolith-decompose** — `gateway.rs` is **6837 lines**, `control.rs` **3833**. The crate/workspace
-  split is done but these two are internal monoliths — exactly the "scattered patches, each in a different
-  place" pain gateway-onboarding named. Split `gateway.rs` into focused modules along its existing seams:
-  HTTP surface (routing/handlers) · tool-call rewriting · lifecycle/watchdog (idle/shed/preempt) ·
-  admission-glue (WarmConfig/published_reservation) · streaming. Mechanical but LARGE and it's the operator's
-  live gateway → do it as one careful reviewed pass (preserve module paths + re-export), not piecemeal.
-  MEDIUM value (maintainability), LOW urgency.
+- [~] **gw-monolith-decompose** — FIRST EXTRACTION DONE (this commit); pattern established for the rest.
+  `gateway.rs` was **6841 lines**. Extracted the cohesive codex `apply_patch` / tool-arg rewriting cluster
+  (21 fns + the WS-fallback const, ~780 lines) into `crates/rozum-gateway/src/codex_patch.rs` — verified
+  self-contained (zero `crate::`/`super::` refs, pure string/`serde_json::Value` transforms), made
+  `pub(crate)`, glob-imported at gateway.rs so the request-handling call sites read unchanged, and its
+  regression corpus (~15 apply_patch tests) stays in gateway's test module via `super::*`. Behaviour-
+  preserving — **all 106 gateway tests green**. gateway.rs now **6061 lines**. Also serves gw-toolcall-
+  normalizer-corpus (the rewriters are now ONE module). REMAINING seams to peel the same way (each a
+  standalone reviewed pass): HTTP surface (routing/handlers) · lifecycle/watchdog (idle/shed/preempt) ·
+  admission-glue (WarmConfig/published_reservation) · streaming; plus `control.rs` (3833). MEDIUM value
+  (maintainability), LOW urgency — do incrementally, tests as the safety net.
 
 - [x] **models-cleanup** (2026-07-13, operator: "Удаляй лишние модели если не нужны") — pruned the
   local model set to the matrix winners. DELETED `Qwen3.5-4B-MLX-bf16` (8.5 GB, redundant: the 4-bit
