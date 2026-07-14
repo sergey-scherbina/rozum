@@ -70,13 +70,26 @@ echo ">> out=$OUT  log=$LOG"
 # Capping it (vs the model's 262k max) shrinks the reserved KV → smaller footprint → the big 35B
 # loads with MORE free-RAM headroom left for the agent's per-request prefill/decode (safer margin;
 # the admission gate + MemAvailable already prevent overcommit, this just keeps runtime comfortable).
+# Reliability of the matrix signal (matrix-reliability-greedy-repair, 2026-07-14): a single-run cell
+# on an irreducibly-nondeterministic agentic harness (the agent CLIs inject a fresh session-id + ts
+# into every prompt → the token stream varies run-to-run even at a fixed seed) turns a CAPABLE model's
+# unlucky sample into a HARD RED. Proven: codex×{debug,rpn} on Qwen3.5-4B read RED in a single-run
+# validation yet pass on re-run — the model writes correct code, the red is a measurement artifact.
+# Two cheap levers make the cell reflect capability, not luck:
+#   REPAIR=2      — a verified FAIL feeds the real compiler/test error back for up to TWO fresh attempts
+#                   (only costs wall-clock on cells that actually fail; passes are untouched).
+#   FORCE_GREEDY  — temperature 0 / argmax removes the gateway's sampling RNG entirely; for these
+#                   DETERMINISTIC coding tasks (one correct behaviour) argmax is the most reliable decode.
+# Both stay env-overridable (REPAIR=1 / ROZUM_FORCE_GREEDY=0) for an operator who wants the raw sampled
+# single-shot signal instead.
 env "${EXTRA_ENV[@]}" \
   AGENTIC_MODELS="$MODELS" \
   AGENTS="claude codex opencode" \
   TASKS="greet build fix test debug rpn" \
   REPS=1 KEEP=1 RUN_TIMEOUT="${RUN_TIMEOUT:-900}" NCTX="${NCTX:-32768}" \
-  REPAIR="${REPAIR:-1}" \
+  REPAIR="${REPAIR:-2}" \
   ROZUM_SAMPLING_SEED=1234 \
+  ROZUM_FORCE_GREEDY="${ROZUM_FORCE_GREEDY:-1}" \
   ROZUM_CODEX_TOOL_CAPTURE="${ROZUM_CODEX_TOOL_CAPTURE:-1}" \
   BENCH_BIN="$BIN" BENCH_OUT="$OUT" \
   bash scripts/bench/agentic.sh 2>&1 | tee "$LOG"

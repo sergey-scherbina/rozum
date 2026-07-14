@@ -2100,9 +2100,17 @@ async fn run_matrix_job(job_id: &str) {
         .env("TASKS", &tasks_str)
         .env("BENCH_OUT", &result_dir)
         .env("ROZUM_SAMPLING_SEED", "1234")
+        // Argmax decode: for these DETERMINISTIC coding tasks (one correct behaviour) greedy is the
+        // most reliable single decode and removes the gateway's sampling RNG — so a capable model's
+        // cell reflects capability, not a lucky/unlucky sample (matrix-reliability-greedy-repair).
+        .env("ROZUM_FORCE_GREEDY", "1")
         .env("KEEP", "1") // preserve workdirs so we can archive cell logs
         .env("REPS", reps.to_string())
-        .env("REPAIR", "1") // one verify-repair retry: feeds real compiler error back on first fail
+        // TWO verify-repair retries: a verified FAIL feeds the real compiler/test error back for up to
+        // two fresh attempts before the cell is recorded RED. Only costs wall-clock on cells that fail;
+        // absorbs the residual run-to-run variance (agent CLIs inject fresh session-id+ts per prompt) so
+        // a single unlucky sample on a capable model no longer reads as a hard red.
+        .env("REPAIR", "2")
         .env("GEN_TIMEOUT", "120") // 120s per-generation; frozen model fails fast, leaves room for retry
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_out))
