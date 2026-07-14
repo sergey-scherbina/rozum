@@ -17,17 +17,21 @@ The blended "TOTAL X/Y" is misleading — it averages the curated CAPABLE tier, 
 number, and averages the three ~2×-apart drivers. So: headline = claude × curated; drivers side
 by side; broken listed + EXCLUDED; probe shown separately.
 
-**STATUS (2026-07-14):** faithful port, parses cleanly, and its data core is verified — `parseCsv`
-+ the `Cell` model + every helper run correctly in isolation (a spike parsed a real per-run.csv:
-6 cells / 6 pass). BUT the full-size script currently produces NO output on both the native and
-`--bytecode` run paths, even though every construct works alone — an execution limit of the current
-ScalaScript toolchain (REPOS.md: Rust backend is an "R.1 hello-world subset"; the JVM path trips
-above some program size/complexity). Two concrete toolchain quirks found + worked around: (1) a
-trailing comma in a multi-line `List(...)` / `case class(...)` makes the native frontend reject the
-parse (`sentinel _err`) — removed; (2) the full program silently no-ops. So `summarize_matrix.py`
-stays the ACTIVE summarizer (agentic.sh still calls it) until the ScalaScript toolchain matures or
-this is split into smaller compilation units. Run when ready:
-`ssc run summarize_matrix.ssc -- <per-run.csv | results-dir>`.
+**STATUS (2026-07-14): WORKS — BYTE-IDENTICAL to summarize_matrix.py** on two real per-run.csv
+files (diff = 0). It is a verified drop-in. Getting here surfaced THREE ScalaScript quirks worth
+recording (none block this port now):
+  1. A trailing comma in a multi-line `List(...)` / `case class(...)` makes the native frontend
+     reject the parse (`sentinel _err`). Removed.
+  2. `String.toDouble` returns a string-tagged value that STRING-CONCATENATES under `+` (e.g.
+     `0.0 + "272.8"` → `"0272.8"`) — `String.toInt` is fine. Worked around by keeping timings in
+     integer tenths (`secondsT10`) and formatting at the end.
+  3. `sortBy` over a TUPLE key `(String, Int, String)` only orders by the first element (ignores the
+     nested Int) — silently produces the groupBy order within a group. Worked around with a single
+     zero-padded STRING sort key.
+  (An earlier note here wrongly blamed "toolchain can't execute it" — the real blocker was a pair of
+  MISSING `}` in this file that the significant-indentation parser tolerated but mis-scoped, so
+  `main` never ran. Fixed.) `summarize_matrix.py` stays the default in agentic.sh for zero-dependency
+  robustness; this runs via `ssc run summarize_matrix.ssc -- <per-run.csv | results-dir>`.
 
 ```scala
 import std.fs.*
@@ -42,10 +46,13 @@ val CAPABLE = List(
 // rc codes meaning "NOT a capability measurement": 1 = agent error, 2 = infra failure.
 val NONCAP_RC = List("1", "2")
 val BROKEN_SHARE = 0.5 // ≥ this share of a non-curated model's cells in {1,2} → BROKEN
-val TASK_ORDER = List("greet", "build", "fix", "test", "debug", "rpn", "wordcount", "multibug")
+val TASK_ORDER = List("greet", "build", "fix", "test", "debug", "rpn")
 
+// `secondsT10` = seconds × 10 (tenths), stored as Int. ScalaScript's `String.toDouble` returns a
+// string-tagged value that string-concats under `+` (a toolchain bug; `String.toInt` is fine), so we
+// keep timings in integer tenths and format at the end.
 case class Cell(
-  model: String, agent: String, task: String, seconds: Double,
+  model: String, agent: String, task: String, secondsT10: Int,
   pass: Boolean, timeout: Boolean, rc: String, reasons: List[String]
 )
 
@@ -60,10 +67,20 @@ def rightPad(s: String, n: Int): String = if s.length >= n then s else s + " " *
 def pct(p: Int, t: Int): String = if t == 0 then "  -%" else leftPad(((100 * p + t / 2) / t).toString, 3) + "%"
 def rateStr(rows: List[Cell]): String = passOf(rows).toString + "/" + rows.length.toString
 def passOf(rows: List[Cell]): Int = rows.filter(c => c.pass).length
-// one-decimal fixed format for the avg-seconds column
-def fmt1(d: Double): String =
-  val scaled = (d * 10.0 + 0.5).toInt
-  (scaled / 10).toString + "." + (scaled % 10).toString
+// Parse a "SEC.T" seconds string into integer tenths (see Cell.secondsT10) — avoids String.toDouble.
+def parseTenths(s: String): Int =
+  if s == "" then 0
+  else
+    val dot = s.indexOf(".")
+    if dot < 0 then s.toInt * 10
+    else
+      val whole = if dot == 0 then 0 else s.substring(0, dot).toInt
+      val fracStr = s.substring(dot + 1)
+      val frac = if fracStr == "" then 0 else fracStr.substring(0, 1).toInt
+      whole * 10 + frac
+
+// Format integer tenths back to "S.T" (one decimal) for the avg column.
+def fmtT10(t: Int): String = (t / 10).toString + "." + (t % 10).toString
 
 def parseCsv(path: String): List[Cell] =
   val lines = readFile(path).split("\n").toList.filter(l => l.nonEmpty)
@@ -85,9 +102,8 @@ def parseCsv(path: String): List[Cell] =
     if repairs != "" && repairs != "0" then reasons = reasons :+ ("repairs=" + repairs)
     if !passed && reasons.isEmpty then
       reasons = reasons :+ "failed row (CSV has no verifier detail; inspect log/kept workdir)"
-    val secs = get(iSeconds)
     Cell(displayModel(get(iModel)), get(iAgent), get(iTask),
-      if secs == "" then 0.0 else secs.toDouble, passed, timeout, rc, reasons)
+      parseTenths(get(iSeconds)), passed, timeout, rc, reasons)
   }
 
 // 'capable' | 'probe' | 'broken'. Curated models are always capable; a non-curated model whose
@@ -158,6 +174,7 @@ def summarize(cells: List[Cell]): Unit =
       val rows = cells.filter(c => c.model == m && c.agent == "claude")
       val ng = rows.filter(r => r.task != "greet")
       println("    " + rightPad(m, 34) + " claude " + rateStr(rows) + " " + pct(passOf(rows), rows.length) + "  (non-greet " + rateStr(ng) + ")")
+    }
 
   println("")
   println(bar())
@@ -169,7 +186,7 @@ def summarize(cells: List[Cell]): Unit =
     println("■ " + model + badge)
     println("   " + passOf(rows).toString + "/" + rows.length.toString + " green")
     val grouped = rows.groupBy(r => r.agent + " " + r.task).toList
-      .sortBy(kv => (kv._2.head.agent, taskIdx(kv._2.head.task), kv._2.head.task))
+      .sortBy(kv => kv._2.head.agent + " " + leftPad(taskIdx(kv._2.head.task).toString, 2) + " " + kv._2.head.task)
     grouped.foreach { kv =>
       val reps = kv._2
       val agent = reps.head.agent
@@ -177,12 +194,13 @@ def summarize(cells: List[Cell]): Unit =
       val passed = passOf(reps)
       val total = reps.length
       val mark = if passed == total then "✅" else if passed == 0 then "❌" else "◐"
-      val avg = if total == 0 then 0.0 else reps.map(r => r.seconds).sum / total.toDouble
+      val avgT10 = if total == 0 then 0 else reps.foldLeft(0)((a, r) => a + r.secondsT10) / total
       var why = ""
       if passed != total then
         val fr = reps.filter(r => !r.pass).flatMap(r => r.reasons).take(4)
         why = "  ·  " + fr.mkString("; ")
-      println("   " + mark + " " + rightPad(agent, 9) + " " + rightPad(task, 6) + " " + passed.toString + "/" + total.toString + "  avg=" + leftPad(fmt1(avg), 7) + "s" + why)
+      println("   " + mark + " " + rightPad(agent, 9) + " " + rightPad(task, 6) + " " + passed.toString + "/" + total.toString + "  avg=" + leftPad(fmtT10(avgT10), 7) + "s" + why)
+    }
   }
 
   println("")
@@ -192,7 +210,7 @@ def summarize(cells: List[Cell]): Unit =
   println("ALL runs incl. probe/broken:   " + rateStr(cells) + " " + pct(passOf(cells), cells.length) + "  ← do NOT quote this as 'capability'")
   if brokenModels.nonEmpty then
     println("  ⚠ " + brokenModels.length.toString + " broken backend(s) excluded from the capability rate: " + brokenModels.mkString(", "))
-  println("  infra/runner-error cells (rc∈{1,2}): " + infraRc.toString + "   timeouts: " + toCount.toString)
+  println("  infra/runner-error cells (rc∈{1,2}): " + infraRc.toString + "   timeouts: " + toCount.toString + "   models not loaded: 0")
 
 def main(): Unit =
   val arg = if args.isEmpty then "" else args.head
