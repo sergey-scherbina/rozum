@@ -63,6 +63,7 @@ use crate::codex_patch::*;
 use crate::loopbreak::*;
 // ...and the codex-lean tool/prompt-trimming policy helpers.
 use crate::codex_lean::*;
+use crate::oai_api::*;
 
 use crate::backend::{
     ChatBackend, ChatEvent, ChatRequest, ChatStream, ContentBlock, Message, ModelError,
@@ -154,7 +155,7 @@ struct Switchboard {
 /// Held by a chat handler for the whole request (prefill + stream). Keeps the
 /// chosen backend alive and counts against `generating` so a `switch` waits for
 /// real work to finish before swapping the model.
-struct ChatLease {
+pub(crate) struct ChatLease {
     backend: Arc<dyn ChatBackend>,
     model_id: String,
     sb: Arc<Switchboard>,
@@ -932,14 +933,14 @@ pub struct ServeConfig {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
 
-fn new_id(prefix: &str) -> String {
+pub(crate) fn new_id(prefix: &str) -> String {
     format!("{}-{}", prefix, Uuid::new_v4().simple())
 }
 
@@ -968,7 +969,7 @@ fn auto_context_enabled() -> bool {
 ///      — keeps every tool (no capability loss), just terser docs.
 /// Lossy-but-graceful: a transformer cannot attend beyond `n_ctx`, so we choose what to shrink instead of
 /// erroring. With auto-context OFF, preserves the legacy error (`Err(resp)` only in the OFF case).
-fn fit_to_context(
+pub(crate) fn fit_to_context(
     mut messages: Vec<Message>,
     mut tools: Vec<ToolDef>,
     ctx_win: u32,
@@ -1139,7 +1140,7 @@ async fn summarize_dropped(
 
 /// Insert an elision note (extractive by default; abstractive LLM summary when opted in) after the real
 /// system messages, when turns were dropped. No-op when nothing was dropped (the common/no-overflow case).
-async fn with_elision_note(
+pub(crate) async fn with_elision_note(
     mut messages: Vec<Message>,
     dropped: Vec<Message>,
     ctx_win: u32,
@@ -1158,7 +1159,7 @@ async fn with_elision_note(
     messages
 }
 
-fn estimate_prompt_tokens(messages: &[Message], tools: &[ToolDef]) -> u32 {
+pub(crate) fn estimate_prompt_tokens(messages: &[Message], tools: &[ToolDef]) -> u32 {
     let mut chars = 0usize;
     for m in messages {
         for b in &m.content {
@@ -1176,7 +1177,7 @@ fn estimate_prompt_tokens(messages: &[Message], tools: &[ToolDef]) -> u32 {
     (chars as f32 / 3.5) as u32 + 1
 }
 
-fn error_json(status: StatusCode, msg: &str, err_type: &str) -> Response {
+pub(crate) fn error_json(status: StatusCode, msg: &str, err_type: &str) -> Response {
     let body = json!({ "error": { "message": msg, "type": err_type } });
     (status, axum::Json(body)).into_response()
 }
@@ -1184,7 +1185,7 @@ fn error_json(status: StatusCode, msg: &str, err_type: &str) -> Response {
 /// Map a backend `chat()` error to an HTTP response. Overload sheds with 429 +
 /// `Retry-After` so clients back off; everything else is a 500 with the dialect's
 /// own error type (`backend_error` for OpenAI, `api_error` for Anthropic).
-fn chat_error_response(e: &ModelError, fallback_type: &str) -> Response {
+pub(crate) fn chat_error_response(e: &ModelError, fallback_type: &str) -> Response {
     match e {
         ModelError::Overloaded(msg) => {
             let mut resp = error_json(StatusCode::TOO_MANY_REQUESTS, msg, "overloaded");
@@ -1206,12 +1207,12 @@ fn chat_error_response(e: &ModelError, fallback_type: &str) -> Response {
 /// Wraps a `ChatStream` and cancels the token when dropped.
 /// When the axum Sse sink drops this stream (client disconnect), the backend
 /// stops generating on the next token check.
-struct CancelOnDrop {
-    stream: ChatStream,
-    cancel: CancellationToken,
+pub(crate) struct CancelOnDrop {
+    pub(crate) stream: ChatStream,
+    pub(crate) cancel: CancellationToken,
     /// Kept alive for the whole stream so a `switch` waits for streaming to
     /// finish (the lease counts against `generating`) before swapping the model.
-    _lease: Option<ChatLease>,
+    pub(crate) _lease: Option<ChatLease>,
 }
 
 impl Drop for CancelOnDrop {
@@ -1237,7 +1238,7 @@ impl Stream for CancelOnDrop {
 /// (default 300; `0` disables). Must exceed the worst legitimate gap — a cold
 /// hybrid/MoE first token (Metal kernel JIT + weight page-in) ran ~33s, and a big
 /// quantized model under memory pressure can stall longer, so keep headroom.
-fn gen_inactivity_timeout() -> Duration {
+pub(crate) fn gen_inactivity_timeout() -> Duration {
     std::env::var("ROZUM_GEN_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
@@ -1252,7 +1253,7 @@ fn gen_inactivity_timeout() -> Duration {
 /// pressure blocks inside one FFI call, so the decode loop's `is_cancelled()`
 /// check never runs until it returns. Cancelling here lets the worker abandon the
 /// job the moment it unblocks; the client gets an error instead of hanging.
-fn with_gen_timeout(mut stream: ChatStream, cancel: CancellationToken, dur: Duration) -> ChatStream {
+pub(crate) fn with_gen_timeout(mut stream: ChatStream, cancel: CancellationToken, dur: Duration) -> ChatStream {
     if dur.is_zero() {
         return stream;
     }
@@ -1278,7 +1279,7 @@ fn with_gen_timeout(mut stream: ChatStream, cancel: CancellationToken, dur: Dura
 }
 
 /// `backend.chat`, but first break a detected agentic stuck-loop with a synthetic stop.
-async fn chat_or_loopbreak(
+pub(crate) async fn chat_or_loopbreak(
     backend: &Arc<dyn ChatBackend>,
     req: ChatRequest,
 ) -> ModelResult<ChatStream> {
@@ -1289,70 +1290,12 @@ async fn chat_or_loopbreak(
     backend.chat(req).await
 }
 
-// ─── OpenAI wire types ────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct OaiChatReq {
-    #[serde(default)]
-    model: Option<String>,
-    messages: Vec<OaiMsg>,
-    #[serde(default)]
-    tools: Vec<OaiTool>,
-    #[serde(default)]
-    tool_choice: Value,
-    #[serde(default)]
-    response_format: Value,
-    #[serde(default)]
-    stream: Option<bool>,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
-    max_tokens: Option<u32>,
-    top_k: Option<u32>,
-}
-
-#[derive(Deserialize)]
-struct OaiMsg {
-    role: String,
-    /// String, array of content blocks, or null (for tool-call-only turns).
-    #[serde(default)]
-    content: Value,
-    #[serde(default)]
-    tool_calls: Vec<OaiToolCall>,
-    tool_call_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct OaiTool {
-    function: OaiFn,
-}
-
-#[derive(Deserialize)]
-struct OaiFn {
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    parameters: Option<Value>,
-}
-
-#[derive(Deserialize)]
-struct OaiToolCall {
-    id: String,
-    function: OaiFnCall,
-}
-
-#[derive(Deserialize)]
-struct OaiFnCall {
-    name: String,
-    #[serde(default)]
-    arguments: String,
-}
 
 // ─── OpenAI conversion ────────────────────────────────────────────────────────
 
 /// Decode a `data:<mime>;base64,<b64>` image URI into raw bytes. Returns `None`
 /// for non-data URIs (remote URLs are not fetched — SSRF/complexity) or bad base64.
-fn decode_data_uri_image(url: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_data_uri_image(url: &str) -> Option<Vec<u8>> {
     use base64::Engine;
     let rest = url.strip_prefix("data:")?;
     let comma = rest.find(',')?;
@@ -1365,143 +1308,6 @@ fn decode_data_uri_image(url: &str) -> Option<Vec<u8>> {
         .ok()
 }
 
-fn oai_content_to_blocks(content: &Value, tool_calls: &[OaiToolCall]) -> Vec<ContentBlock> {
-    let mut blocks = Vec::new();
-
-    match content {
-        Value::String(s) if !s.is_empty() => {
-            blocks.push(ContentBlock::Text { text: s.clone() });
-        }
-        Value::Array(arr) => {
-            for item in arr {
-                match item.get("type").and_then(Value::as_str) {
-                    Some("text") => {
-                        if let Some(t) = item["text"].as_str() {
-                            blocks.push(ContentBlock::Text { text: t.to_owned() });
-                        }
-                    }
-                    Some("tool_result") => {
-                        let id = item["tool_use_id"].as_str().unwrap_or("").to_owned();
-                        let c = item["content"].as_str().unwrap_or("").to_owned();
-                        let is_err = item["is_error"].as_bool().unwrap_or(false);
-                        blocks.push(ContentBlock::ToolResult {
-                            tool_use_id: id,
-                            content: c,
-                            is_error: is_err,
-                        });
-                    }
-                    // OpenAI vision: {"type":"image_url","image_url":{"url":"data:...;base64,..."}}
-                    Some("image_url") => {
-                        if let Some(data) =
-                            item["image_url"]["url"].as_str().and_then(decode_data_uri_image)
-                        {
-                            blocks.push(ContentBlock::Image { data });
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        _ => {}
-    }
-
-    for tc in tool_calls {
-        let input: Value = serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
-        blocks.push(ContentBlock::ToolUse {
-            id: tc.id.clone(),
-            name: tc.function.name.clone(),
-            input,
-        });
-    }
-
-    blocks
-}
-
-fn oai_messages_to_internal(msgs: &[OaiMsg]) -> Vec<Message> {
-    msgs.iter()
-        .filter_map(|m| {
-            let role = match m.role.as_str() {
-                "system" => Role::System,
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                "tool" => {
-                    let id = m.tool_call_id.clone().unwrap_or_default();
-                    let text = m.content.as_str().unwrap_or("").to_owned();
-                    return Some(Message {
-                        role: Role::Tool,
-                        content: vec![ContentBlock::ToolResult {
-                            tool_use_id: id,
-                            content: text,
-                            is_error: false,
-                        }],
-                    });
-                }
-                _ => return None,
-            };
-            let content = oai_content_to_blocks(&m.content, &m.tool_calls);
-            if content.is_empty() && m.role != "assistant" {
-                return None;
-            }
-            Some(Message { role, content })
-        })
-        .collect()
-}
-
-fn oai_tools_to_internal(tools: &[OaiTool]) -> Vec<ToolDef> {
-    tools
-        .iter()
-        .map(|t| ToolDef {
-            name: t.function.name.clone(),
-            description: t.function.description.clone().unwrap_or_default(),
-            input_schema: t
-                .function
-                .parameters
-                .clone()
-                .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
-        })
-        .collect()
-}
-
-// ─── tool_choice (Contract-1) ─────────────────────────────────────────────────
-
-/// Normalized tool-choice across the OpenAI / Anthropic wire formats. We honor it by
-/// transforming the tool set the backend sees (no SPI change): `None` removes all tools,
-/// `Named` restricts to that one tool. `Auto` (the default) and `Required` leave the set
-/// intact — `Required` is accepted but enforcement is best-effort (the model is not forced
-/// to start a call), so it is documented as such, not silently dropped.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) enum ToolChoice {
-    #[default]
-    Auto,
-    None,
-    Required,
-    Named(String),
-}
-
-/// Parse the OpenAI / Responses `tool_choice` value (string `auto`/`none`/`required`, or
-/// `{"type":"function","function":{"name":…}}` / flat `{"type":"function","name":…}`).
-fn parse_oai_tool_choice(v: &Value) -> ToolChoice {
-    match v {
-        Value::String(s) => match s.as_str() {
-            "none" => ToolChoice::None,
-            "required" => ToolChoice::Required,
-            _ => ToolChoice::Auto,
-        },
-        Value::Object(_) => {
-            // name may be nested under `function` (chat) or flat (responses).
-            let name = v
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .or_else(|| v.get("name"))
-                .and_then(Value::as_str);
-            match name {
-                Some(n) => ToolChoice::Named(n.to_string()),
-                None => ToolChoice::Auto,
-            }
-        }
-        _ => ToolChoice::Auto,
-    }
-}
 
 /// Parse the Anthropic `tool_choice` object (`{"type":"auto"|"any"|"none"|"tool","name":…}`).
 fn parse_anthropic_tool_choice(v: &Value) -> ToolChoice {
@@ -1519,7 +1325,7 @@ fn parse_anthropic_tool_choice(v: &Value) -> ToolChoice {
 /// Parse OpenAI `response_format` into the JSON Schema to constrain the response to (or
 /// `None` for free text). `{"type":"json_object"}` → any JSON object; `{"type":"json_schema",
 /// "json_schema":{"schema":{…}}}` → that schema; `{"type":"text"}` / absent → `None`.
-fn parse_response_format(v: &Value) -> Option<Value> {
+pub(crate) fn parse_response_format(v: &Value) -> Option<Value> {
     match v.get("type").and_then(Value::as_str) {
         Some("json_object") => Some(json!({ "type": "object" })),
         Some("json_schema") => v
@@ -1533,7 +1339,7 @@ fn parse_response_format(v: &Value) -> Option<Value> {
 
 /// Apply a [`ToolChoice`] to the resolved tool set: `None` → empty, `Named` → only that tool
 /// (empty if the client named a tool it didn't define), `Auto`/`Required` → unchanged.
-fn apply_tool_choice(tools: Vec<ToolDef>, choice: &ToolChoice) -> Vec<ToolDef> {
+pub(crate) fn apply_tool_choice(tools: Vec<ToolDef>, choice: &ToolChoice) -> Vec<ToolDef> {
     match choice {
         ToolChoice::Auto | ToolChoice::Required => tools,
         ToolChoice::None => Vec::new(),
@@ -1541,207 +1347,6 @@ fn apply_tool_choice(tools: Vec<ToolDef>, choice: &ToolChoice) -> Vec<ToolDef> {
     }
 }
 
-// ─── OpenAI SSE serialization ─────────────────────────────────────────────────
-
-/// Accumulated state while streaming tool calls for the OAI SSE format.
-struct OaiToolState {
-    index: usize,
-    #[allow(dead_code)]
-    id: String,
-    #[allow(dead_code)]
-    name: String,
-    args: String,
-}
-
-fn oai_chunk(completion_id: &str, model: &str, delta: Value, finish_reason: Option<&str>) -> Event {
-    let data = json!({
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "created": now_secs(),
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": delta,
-            "finish_reason": finish_reason,
-        }]
-    });
-    Event::default().data(data.to_string())
-}
-
-fn oai_sse_stream(
-    chat_stream: ChatStream,
-    cancel: CancellationToken,
-    model: String,
-    lease: Option<ChatLease>,
-) -> impl Stream<Item = Result<Event, Infallible>> {
-    let completion_id = new_id("chatcmpl");
-    async_stream::stream! {
-        let mut events = CancelOnDrop { stream: chat_stream, cancel, _lease: lease };
-        let mut tool: Option<OaiToolState> = None;
-        let mut role_sent = false;
-
-        while let Some(ev) = events.next().await {
-            match ev {
-                Ok(ChatEvent::TextDelta { text }) => {
-                    // Send role on first delta
-                    if !role_sent {
-                        yield Ok(oai_chunk(&completion_id, &model,
-                            json!({"role": "assistant", "content": ""}), None));
-                        role_sent = true;
-                    }
-                    yield Ok(oai_chunk(&completion_id, &model,
-                        json!({"content": text}), None));
-                }
-
-                Ok(ChatEvent::ToolUseStart { id, name }) => {
-                    if !role_sent {
-                        yield Ok(oai_chunk(&completion_id, &model,
-                            json!({"role": "assistant", "content": null}), None));
-                        role_sent = true;
-                    }
-                    let index = tool.as_ref().map(|t| t.index + 1).unwrap_or(0);
-                    // First chunk for this tool call: id + name + empty args
-                    let delta = json!({
-                        "tool_calls": [{
-                            "index": index,
-                            "id": id,
-                            "type": "function",
-                            "function": { "name": name, "arguments": "" }
-                        }]
-                    });
-                    yield Ok(oai_chunk(&completion_id, &model, delta, None));
-                    tool = Some(OaiToolState { index, id, name, args: String::new() });
-                }
-
-                Ok(ChatEvent::ToolUseDelta { input_json_delta, .. }) => {
-                    if let Some(ref t) = tool {
-                        let delta = json!({
-                            "tool_calls": [{
-                                "index": t.index,
-                                "function": { "arguments": input_json_delta }
-                            }]
-                        });
-                        yield Ok(oai_chunk(&completion_id, &model, delta, None));
-                        if let Some(ref mut t) = tool {
-                            t.args.push_str(&input_json_delta);
-                        }
-                    }
-                }
-
-                Ok(ChatEvent::ToolUseEnd { .. }) => {
-                    // Tool args complete; stop_reason will come with Done
-                }
-
-                Ok(ChatEvent::Done { stop_reason, .. }) => {
-                    let finish = match stop_reason {
-                        StopReason::ToolUse => "tool_calls",
-                        StopReason::MaxTokens => "length",
-                        StopReason::Cancelled => "stop",
-                        StopReason::EndTurn => "stop",
-                    };
-                    yield Ok(oai_chunk(&completion_id, &model, json!({}), Some(finish)));
-                    break;
-                }
-
-                Err(e) => {
-                    // Emit as a final error chunk and stop
-                    let data = json!({ "error": { "message": e.to_string() } });
-                    yield Ok(Event::default().data(data.to_string()));
-                    break;
-                }
-            }
-        }
-        yield Ok(Event::default().data("[DONE]"));
-    }
-}
-
-// ─── OpenAI non-streaming response ───────────────────────────────────────────
-
-async fn oai_collect(
-    chat_stream: ChatStream,
-    cancel: CancellationToken,
-    model: &str,
-    lease: Option<ChatLease>,
-) -> Response {
-    let completion_id = new_id("chatcmpl");
-    let mut events = CancelOnDrop {
-        stream: chat_stream,
-        cancel,
-        _lease: lease,
-    };
-    let mut text = String::new();
-    let mut tool_calls: Vec<Value> = Vec::new();
-    let mut current_tool: Option<(String, String, String)> = None; // (id, name, args)
-    let mut finish_reason = "stop";
-    let mut input_tokens = 0u32;
-    let mut output_tokens = 0u32;
-
-    while let Some(ev) = events.next().await {
-        match ev {
-            Ok(ChatEvent::TextDelta { text: t }) => text.push_str(&t),
-            Ok(ChatEvent::ToolUseStart { id, name }) => {
-                current_tool = Some((id, name, String::new()));
-            }
-            Ok(ChatEvent::ToolUseDelta {
-                input_json_delta, ..
-            }) => {
-                if let Some((_, _, ref mut args)) = current_tool {
-                    args.push_str(&input_json_delta);
-                }
-            }
-            Ok(ChatEvent::ToolUseEnd { .. }) => {
-                if let Some((id, name, args)) = current_tool.take() {
-                    tool_calls.push(json!({
-                        "id": id,
-                        "type": "function",
-                        "function": { "name": name, "arguments": args }
-                    }));
-                }
-            }
-            Ok(ChatEvent::Done {
-                stop_reason,
-                input_tokens: i,
-                output_tokens: o,
-            }) => {
-                finish_reason = match stop_reason {
-                    StopReason::ToolUse => "tool_calls",
-                    StopReason::MaxTokens => "length",
-                    _ => "stop",
-                };
-                input_tokens = i;
-                output_tokens = o;
-                break;
-            }
-            Err(e) => {
-                return error_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &e.to_string(),
-                    "backend_error",
-                );
-            }
-        }
-    }
-
-    let message = if tool_calls.is_empty() {
-        json!({ "role": "assistant", "content": text })
-    } else {
-        json!({ "role": "assistant", "content": null, "tool_calls": tool_calls })
-    };
-
-    let body = json!({
-        "id": completion_id,
-        "object": "chat.completion",
-        "created": now_secs(),
-        "model": model,
-        "choices": [{ "index": 0, "message": message, "finish_reason": finish_reason }],
-        "usage": {
-            "prompt_tokens": input_tokens,
-            "completion_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens,
-        }
-    });
-    axum::Json(body).into_response()
-}
 
 // ─── OpenAI Responses API (POST /v1/responses) ───────────────────────────────
 //
@@ -2727,7 +2332,7 @@ pub fn claude_model_alias(model_spec: &str) -> String {
 /// unless explicitly set (so it is purely a benchmark/diagnosis instrument here):
 ///   `ROZUM_SAMPLING_SEED=<u64>`   pin the RNG seed (only fills it when the client sent none)
 ///   `ROZUM_FORCE_GREEDY=1|true|on` force temperature 0 (argmax — removes the RNG entirely)
-fn apply_determinism_env(s: SamplingParams) -> SamplingParams {
+pub(crate) fn apply_determinism_env(s: SamplingParams) -> SamplingParams {
     let force_greedy = matches!(
         std::env::var("ROZUM_FORCE_GREEDY").ok().as_deref(),
         Some("1" | "true" | "on")
