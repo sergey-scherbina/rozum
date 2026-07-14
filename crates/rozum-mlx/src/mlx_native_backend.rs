@@ -380,8 +380,28 @@ mod inner {
                 let active = mlx_rs::memory::get_active_memory() as u64;
                 let peak = mlx_rs::memory::get_peak_memory() as u64;
                 let cache = mlx_rs::memory::get_cache_memory() as u64;
+                // Closed-loop admission signal (gw-closed-loop-admission, phase 1 = observability):
+                // read the estimate basis this model was ADMITTED against (the prior recorded peak,
+                // which `tighten` used, capped at the structural estimate) BEFORE we overwrite it.
+                let prior_estimate = crate::footprint::cached_peak(&self.model_id);
+                let measured_peak = peak.saturating_add(cache);
                 crate::footprint::record_active_peak(&self.model_id, active);
-                crate::footprint::record_peak(&self.model_id, peak.saturating_add(cache));
+                crate::footprint::record_peak(&self.model_id, measured_peak);
+                // If this load's REAL peak exceeded that estimate, admission UNDER-provisioned — the
+                // reboot-risk direction. `record_peak` (a running max) just corrected the cache upward
+                // so the NEXT load is safe; surface the correction so a persistent open-loop gap is
+                // visible in telemetry (~/.rozum/gateway.jsonl) rather than silent until an OOM.
+                if let Some(prior) = prior_estimate {
+                    if measured_peak > prior.saturating_add(prior / 20) {
+                        rozum_core::obs::log_event(serde_json::json!({
+                            "event": "footprint_underestimate",
+                            "model": self.model_id,
+                            "prior_estimate_mb": prior / 1_048_576,
+                            "measured_peak_mb": measured_peak / 1_048_576,
+                            "exceeded_by_mb": measured_peak.saturating_sub(prior) / 1_048_576,
+                        }));
+                    }
+                }
                 if std::env::var("ROZUM_PEAK_DEBUG").is_ok() {
                     eprintln!(
                         "smmr-D {}: active={:.1} GB  peak={:.1} GB  cache={:.1} GB",

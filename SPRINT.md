@@ -28,15 +28,20 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   matrix's codex/opencode tasks were text-only. So codex/opencode DO get prefix reuse; their slowness is
   harness-side (more turns / apply_patch + Responses parsing per turn), not a gateway gap. No lever here.
 
-- [ ] **gw-closed-loop-admission** — the biggest architectural lever (spec `docs/specs/safe-multi-model-program.md`
-  already names it: "today's safety is estimate-based (open-loop); the GUARANTEE needs measured closed-loop
-  control"). Today's 35B refusal was on a pre-load ESTIMATE (footprint 21.6 GiB vs avail 21.75) — we never
-  learned if it would ACTUALLY fit. The estimate errs both ways: over-refuse (lost capability) and, rarely,
-  under-refuse (the real reboot risk). Design: load INCREMENTALLY and measure real `get_active_memory()`
-  during load, aborting + unloading if it crosses a live threshold — turning "refuse on a guess" into "load
-  and back off on measurement". The `shed` governor already reacts to jetsam pressure AFTER load; the missing
-  piece is a measured cutoff DURING admission. SAFETY-CRITICAL (touches the no-reboot invariant) → design +
-  a spec first, staged rollout behind a flag, NOT a rushed edit. HIGH value, HIGH care.
+- [~] **gw-closed-loop-admission** — phase 1 SHIPPED, phase 2 SPEC'd (spec
+  `docs/specs/gateway-closed-loop-admission.md`). The biggest architectural lever: admission is open-loop
+  (a pre-load ESTIMATE — today's 35B refused at 21.6 GiB est vs 21.75 free, and we never learned if it'd
+  truly fit; the dangerous direction is UNDER-refuse → reboot). The measured-feedback half already existed
+  (smmr-D tightens the estimate toward prior measured peaks; `shed` reacts to jetsam AFTER load).
+  **Phase 1 DONE (this commit):** at the Drop measurement, compare the REAL peak against the estimate this
+  model was admitted against and emit `footprint_underestimate { model, prior_estimate_mb, measured_peak_mb,
+  exceeded_by_mb }` when reality exceeded it — surfacing the open-loop gap in telemetry (record_peak already
+  self-corrects the cache upward for the next load). Zero behavioural change. **Phase 2 (DESIGNED, not
+  rushed):** measured mid-load abort — a post-weights checkpoint + chunked-prefill watermark that reads
+  `get_active_memory()` and aborts BEFORE the spike crosses RAM, converting a guaranteed reboot into a clean
+  refusal. Safety-critical (no-reboot invariant + hot prefill path) and its failure path can't be exercised
+  without risking the host → behind `ROZUM_CLOSED_LOOP_ADMISSION`, validated on a push-to-jetsam rig, default-on
+  only once proven. See the spec.
 
 - [x] **gw-toolcall-parse-observability** — DONE (this commit). Driver tool-delivery failures are now
   grep-able instead of needing manual `ROZUM_RAW_DUMP` + kept-workdir forensics. `serving::toolish_markers`
