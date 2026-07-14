@@ -82,7 +82,18 @@ env "${EXTRA_ENV[@]}" \
   bash scripts/bench/agentic.sh 2>&1 | tee "$LOG"
 
 echo ">> done. CSV: $OUT/per-run.csv  | full log: $LOG"
-command -v python3 >/dev/null 2>&1 && python3 scripts/bench/summarize_matrix.py "$OUT/per-run.csv" || true
+# Summarize: prefer the ScalaScript port (verified byte-identical to the .py) when its toolchain is
+# present — `ssc` on PATH or the sibling checkout at `../scalascript/bin/ssc`; fall back to the
+# zero-dependency python (and again to python if the ssc run itself errors). Degrades gracefully so a
+# missing/half-built scalascript never breaks the matrix summary.
+SUMMARIZE_SSC="$(command -v ssc 2>/dev/null || echo ../scalascript/bin/ssc)"
+if [ -x "$SUMMARIZE_SSC" ] && [ -f scripts/bench/summarize_matrix.ssc ]; then
+  "$SUMMARIZE_SSC" run scripts/bench/summarize_matrix.ssc -- "$OUT/per-run.csv" 2>/dev/null \
+    || { command -v python3 >/dev/null 2>&1 && python3 scripts/bench/summarize_matrix.py "$OUT/per-run.csv"; } \
+    || true
+elif command -v python3 >/dev/null 2>&1; then
+  python3 scripts/bench/summarize_matrix.py "$OUT/per-run.csv" || true
+fi
 command -v python3 >/dev/null 2>&1 && python3 scripts/bench/matrix_capabilities.py "$OUT/per-run.csv" --out "$OUT/capabilities.json" --green-min-runs "${GREEN_MIN_RUNS:-3}" || true
 if command -v python3 >/dev/null 2>&1; then
   python3 scripts/bench/memory_correctness_frontier.py "$OUT/per-run.csv" \
