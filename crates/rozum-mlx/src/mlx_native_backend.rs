@@ -850,7 +850,7 @@ mod inner {
     /// (`active`, `get_active_memory()` after weights load) plus the `keep_free` headroom exceeds
     /// host `total` RAM, so the first prefill's activation spike would OOM. Pure + unit-tested; the
     /// worker gates the actual refusal behind `ROZUM_CLOSED_LOOP_ADMISSION`.
-    fn closed_loop_should_refuse(active: u64, keep_free: u64, total: u64) -> bool {
+    pub(crate) fn closed_loop_should_refuse(active: u64, keep_free: u64, total: u64) -> bool {
         active.saturating_add(keep_free) > total
     }
 
