@@ -225,7 +225,13 @@ prompt_for() {
   # tool calls. Append a concise tool-use reminder so the first attempt actually writes files.
   local tool_hint=""
   if [ "$agent" = codex ] || [ "$agent" = opencode ]; then
-    tool_hint=' IMPORTANT: use the Write tool or a Bash heredoc to create/modify files — outputting code as text or markdown is not sufficient.'
+    # Two failure modes measured on weak models via codex/opencode (2026-07-14, matrix diag):
+    #   (1) they emit code as prose instead of calling a file tool → nothing lands;
+    #   (2) on CREATE-from-scratch they write to an ABSOLUTE path — `/Cargo.toml` (opencode
+    #       rejects a write to filesystem root → rc11) or `/tmp/<name>/…` (writes OUTSIDE the
+    #       workdir → verifier sees no files → rc11). The SAME model lands EDITs fine because it
+    #       reuses the relative path from `Read`. So pin new files to RELATIVE paths in the cwd.
+    tool_hint=' IMPORTANT: use the Write tool or a Bash heredoc to create/modify files — outputting code as text or markdown is not sufficient. Write every file using a path RELATIVE to the current directory (e.g. `Cargo.toml`, `src/main.rs`); NEVER use an absolute path such as `/Cargo.toml` or `/tmp/...` — the files must land in the current working directory.'
   fi
   case "$task" in
     greet) echo 'Reply with exactly the single word: pong  (nothing else, no punctuation).' ;;
