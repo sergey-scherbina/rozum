@@ -720,14 +720,42 @@ pub fn detect_project() -> Option<String> {
     Some(cwd.to_string_lossy().into_owned())
 }
 
-pub async fn spawn_daemon() {
+/// Resolve a binary that actually has the `meetings` subcommand. The daemon lives in the ENGINE
+/// binary `rozum-gateway` (or behind the `rozum` dispatcher, which forwards `meetings` to it) — NOT
+/// in this thin bridge bin: `rozum-meet` only has `mcp-proxy`/`mcp-http`, so the old
+/// `current_exe meetings start` spawned `rozum-meet meetings start` → "unrecognized subcommand
+/// 'meetings'" and the bridge could never self-heal a dropped daemon. Prefer `current_exe` when it
+/// already is meetings-capable, else a sibling `rozum-gateway`/`rozum` (covers a target/release run
+/// finding its just-built siblings), else bare `rozum-gateway` so the OS searches `PATH`.
+fn meetings_binary() -> PathBuf {
+    let capable = |p: &std::path::Path| {
+        matches!(
+            p.file_name().and_then(|n| n.to_str()),
+            Some("rozum-gateway") | Some("rozum")
+        )
+    };
     if let Ok(exe) = std::env::current_exe() {
-        // `meetings start` spawns the detached daemon and waits for its socket.
-        let _ = tokio::process::Command::new(exe)
-            .args(["meetings", "start"])
-            .status()
-            .await;
+        if capable(&exe) {
+            return exe;
+        }
+        if let Some(dir) = exe.parent() {
+            for name in ["rozum-gateway", "rozum"] {
+                let cand = dir.join(name);
+                if cand.is_file() {
+                    return cand;
+                }
+            }
+        }
     }
+    PathBuf::from("rozum-gateway")
+}
+
+pub async fn spawn_daemon() {
+    // `meetings start` spawns the detached daemon and waits for its socket.
+    let _ = tokio::process::Command::new(meetings_binary())
+        .args(["meetings", "start"])
+        .status()
+        .await;
 }
 
 fn value_to_call_result(v: &Value) -> CallToolResult {
@@ -953,6 +981,19 @@ mod tests {
         let (content, from, _) = render_stored_delta(&turns, Some("me")).unwrap();
         assert_eq!(content, "carol: fresh news");
         assert_eq!(from, "carol");
+    }
+
+    #[test]
+    fn meetings_binary_never_resolves_to_a_non_meetings_bin() {
+        // Regression: the bridge used `current_exe meetings start`, but the thin `rozum-meet` bin has
+        // no `meetings` subcommand → self-heal broke. Whatever the current_exe (here the test runner),
+        // the resolver must yield a meetings-capable NAME (rozum-gateway / rozum), never the thin bin.
+        let bin = meetings_binary();
+        let name = bin.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        assert!(
+            name == "rozum-gateway" || name == "rozum",
+            "must resolve to a meetings-capable binary, got {name:?}"
+        );
     }
 
     /// Extract a tool result's text payload as JSON (the proxy returns the
