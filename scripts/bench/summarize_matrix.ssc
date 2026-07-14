@@ -1,0 +1,204 @@
+---
+name: summarize-matrix
+package: bench.summarize
+description: Summarize agentic-matrix per-run.csv HONESTLY (capability tier ≠ probe ≠ broken)
+---
+
+# summarize_matrix
+
+ScalaScript port of `summarize_matrix.py` (gw round-2, operator: "перепиши на scalascript").
+Reads a matrix `per-run.csv` (or a results dir containing one) and prints the tier-aware honest
+read: CAPABILITY headline (claude × curated tier), per-driver fail-modes, BROKEN backends
+(excluded), PROBE models, per-model detail, and the tiered footer. Run:
+`ssc run summarize_matrix.ssc -- <per-run.csv | results-dir>`.
+
+The blended "TOTAL X/Y" is misleading — it averages the curated CAPABLE tier, small PROBE models
+(the 7B→27B cliff), and BROKEN backends (rc∈{1,2} — integration failure, not skill) into one
+number, and averages the three ~2×-apart drivers. So: headline = claude × curated; drivers side
+by side; broken listed + EXCLUDED; probe shown separately.
+
+**STATUS (2026-07-14):** faithful port, parses cleanly, and its data core is verified — `parseCsv`
++ the `Cell` model + every helper run correctly in isolation (a spike parsed a real per-run.csv:
+6 cells / 6 pass). BUT the full-size script currently produces NO output on both the native and
+`--bytecode` run paths, even though every construct works alone — an execution limit of the current
+ScalaScript toolchain (REPOS.md: Rust backend is an "R.1 hello-world subset"; the JVM path trips
+above some program size/complexity). Two concrete toolchain quirks found + worked around: (1) a
+trailing comma in a multi-line `List(...)` / `case class(...)` makes the native frontend reject the
+parse (`sentinel _err`) — removed; (2) the full program silently no-ops. So `summarize_matrix.py`
+stays the ACTIVE summarizer (agentic.sh still calls it) until the ScalaScript toolchain matures or
+this is split into smaller compilation units. Run when ready:
+`ssc run summarize_matrix.ssc -- <per-run.csv | results-dir>`.
+
+```scala
+import std.fs.*
+import std.os.*
+
+// Curated CAPABLE tier — keep in sync with DEFAULT_MODELS in agentic.sh. A model is capable-tier
+// if its display name contains any of these; its score is a real capability signal.
+val CAPABLE = List(
+  "Qwen3.6-35B-A3B", "Qwen3-Coder-30B-A3B", "Devstral-Small-2507",
+  "GLM-4.7-Flash", "GLM-4-32B-0414", "gpt-oss-20b"
+)
+// rc codes meaning "NOT a capability measurement": 1 = agent error, 2 = infra failure.
+val NONCAP_RC = List("1", "2")
+val BROKEN_SHARE = 0.5 // ≥ this share of a non-curated model's cells in {1,2} → BROKEN
+val TASK_ORDER = List("greet", "build", "fix", "test", "debug", "rpn", "wordcount", "multibug")
+
+case class Cell(
+  model: String, agent: String, task: String, seconds: Double,
+  pass: Boolean, timeout: Boolean, rc: String, reasons: List[String]
+)
+
+def displayModel(m: String): String = m.replace("mlx-community:", "")
+def isCapable(m: String): Boolean = CAPABLE.exists(s => m.contains(s))
+def taskIdx(t: String): Int =
+  val i = TASK_ORDER.indexOf(t)
+  if i < 0 then 99 else i
+
+def leftPad(s: String, n: Int): String = if s.length >= n then s else " " * (n - s.length) + s
+def rightPad(s: String, n: Int): String = if s.length >= n then s else s + " " * (n - s.length)
+def pct(p: Int, t: Int): String = if t == 0 then "  -%" else leftPad(((100 * p + t / 2) / t).toString, 3) + "%"
+def rateStr(rows: List[Cell]): String = passOf(rows).toString + "/" + rows.length.toString
+def passOf(rows: List[Cell]): Int = rows.filter(c => c.pass).length
+// one-decimal fixed format for the avg-seconds column
+def fmt1(d: Double): String =
+  val scaled = (d * 10.0 + 0.5).toInt
+  (scaled / 10).toString + "." + (scaled % 10).toString
+
+def parseCsv(path: String): List[Cell] =
+  val lines = readFile(path).split("\n").toList.filter(l => l.nonEmpty)
+  val header = lines.head.split(",").toList
+  def col(name: String): Int = header.indexOf(name)
+  val iModel = col("model"); val iAgent = col("agent"); val iTask = col("task")
+  val iSeconds = col("seconds"); val iPass = col("pass"); val iRc = col("rc")
+  val iTimeout = col("timeout"); val iRepairs = col("repairs")
+  lines.tail.map { r =>
+    val c = r.split(",").toList
+    def get(i: Int): String = if i >= 0 && i < c.length then c(i) else ""
+    val rc = get(iRc)
+    val timeout = get(iTimeout) == "1"
+    val passed = get(iPass) == "1"
+    var reasons = List[String]()
+    if rc != "" && rc != "0" then reasons = reasons :+ ("rc=" + rc)
+    if timeout then reasons = reasons :+ "RUN_TIMEOUT"
+    val repairs = get(iRepairs)
+    if repairs != "" && repairs != "0" then reasons = reasons :+ ("repairs=" + repairs)
+    if !passed && reasons.isEmpty then
+      reasons = reasons :+ "failed row (CSV has no verifier detail; inspect log/kept workdir)"
+    val secs = get(iSeconds)
+    Cell(displayModel(get(iModel)), get(iAgent), get(iTask),
+      if secs == "" then 0.0 else secs.toDouble, passed, timeout, rc, reasons)
+  }
+
+// 'capable' | 'probe' | 'broken'. Curated models are always capable; a non-curated model whose
+// cells are dominated by rc∈{1,2} is broken; the rest are probe.
+def classify(model: String, rows: List[Cell]): String =
+  if isCapable(model) then "capable"
+  else if rows.nonEmpty && rows.filter(r => NONCAP_RC.contains(r.rc)).length.toDouble / rows.length.toDouble >= BROKEN_SHARE then "broken"
+  else "probe"
+
+def bar(): String = "=" * 78
+
+def summarize(cells: List[Cell]): Unit =
+  val models = cells.map(c => c.model).distinct
+  def tierOf(m: String): String = classify(m, cells.filter(c => c.model == m))
+  val capableModels = models.filter(m => tierOf(m) == "capable")
+  val probeModels = models.filter(m => tierOf(m) == "probe")
+  val brokenModels = models.filter(m => tierOf(m) == "broken")
+  val agents = cells.map(c => c.agent).distinct.sortBy(a => a)
+  val infraRc = cells.filter(c => NONCAP_RC.contains(c.rc)).length
+  val toCount = cells.filter(c => c.timeout).length
+
+  println(bar())
+  println("AGENTIC MATRIX — honest read (capability tier ≠ probe ≠ broken backend)")
+  println(bar())
+
+  val capClaude = cells.filter(c => tierOf(c.model) == "capable" && c.agent == "claude")
+  println("")
+  println("▶ CAPABILITY  (claude × curated tier)   " + rateStr(capClaude) + "  " + pct(passOf(capClaude), capClaude.length) + "   ← the headline")
+  capableModels.foreach { m =>
+    val rows = cells.filter(c => c.model == m && c.agent == "claude")
+    if rows.nonEmpty then
+      val byTask = rows.groupBy(r => r.task).toList.sortBy(kv => taskIdx(kv._1))
+      val cellsStr = byTask.map(kv => kv._1 + ":" + rateStr(kv._2)).mkString(" ")
+      println("    " + leftPad(passOf(rows).toString, 2) + "/" + rightPad(rows.length.toString, 2) + " " + pct(passOf(rows), rows.length) + "  " + rightPad(m, 34) + " " + cellsStr)
+  }
+
+  println("")
+  println("▶ DRIVERS  (over curated tier only)  —  fail modes: deliver=wrote no files (rc11), wrong=verify red (rc10), timeout (124), broke=runner/infra (rc1/2)")
+  agents.foreach { a =>
+    val rows = cells.filter(c => tierOf(c.model) == "capable" && c.agent == a)
+    val fails = rows.filter(c => !c.pass)
+    val deliver = fails.filter(c => c.rc == "11").length
+    val wrong = fails.filter(c => c.rc == "10").length
+    val tout = fails.filter(c => c.rc == "124" || c.timeout).length
+    val broke = fails.filter(c => NONCAP_RC.contains(c.rc)).length
+    val other = fails.length - deliver - wrong - tout - broke
+    val modes = List(("deliver", deliver), ("wrong", wrong), ("timeout", tout), ("broke", broke), ("other", other)).filter(kv => kv._2 > 0).map(kv => kv._1 + " " + kv._2.toString)
+    val modeStr = if modes.isEmpty then "" else "   fails: " + modes.mkString(", ")
+    println("    " + rightPad(a, 9) + " " + leftPad(passOf(rows).toString, 3) + "/" + rightPad(rows.length.toString, 3) + " " + pct(passOf(rows), rows.length) + modeStr)
+  }
+
+  if brokenModels.nonEmpty then
+    println("")
+    println("▶ BROKEN / unsupported backends  (EXCLUDED from rates — not a capability signal)")
+    brokenModels.foreach { m =>
+      val rows = cells.filter(c => c.model == m)
+      val bad = rows.filter(r => NONCAP_RC.contains(r.rc)).length
+      val rcs = rows.filter(r => NONCAP_RC.contains(r.rc)).groupBy(r => r.rc).toList.sortBy(kv => kv._1)
+      val rcStr = rcs.map(kv => kv._2.length.toString + "× rc=" + kv._1).mkString(", ")
+      println("    ⛔ " + rightPad(m, 34) + " " + bad.toString + "/" + rows.length.toString + " cells failed at the runner/gateway (" + rcStr + ")")
+    }
+    println("    → fix or drop these specs from the matrix selection; they measure integration, not skill.")
+
+  if probeModels.nonEmpty then
+    println("")
+    println("▶ PROBE / small models  (context only — most clear `greet` and little else)")
+    probeModels.foreach { m =>
+      val rows = cells.filter(c => c.model == m && c.agent == "claude")
+      val ng = rows.filter(r => r.task != "greet")
+      println("    " + rightPad(m, 34) + " claude " + rateStr(rows) + " " + pct(passOf(rows), rows.length) + "  (non-greet " + rateStr(ng) + ")")
+
+  println("")
+  println(bar())
+  println("PER-MODEL DETAIL")
+  models.foreach { model =>
+    val rows = cells.filter(c => c.model == model)
+    val badge = if tierOf(model) == "capable" then "" else if tierOf(model) == "probe" then "  [probe]" else "  [BROKEN backend]"
+    println("")
+    println("■ " + model + badge)
+    println("   " + passOf(rows).toString + "/" + rows.length.toString + " green")
+    val grouped = rows.groupBy(r => r.agent + " " + r.task).toList
+      .sortBy(kv => (kv._2.head.agent, taskIdx(kv._2.head.task), kv._2.head.task))
+    grouped.foreach { kv =>
+      val reps = kv._2
+      val agent = reps.head.agent
+      val task = reps.head.task
+      val passed = passOf(reps)
+      val total = reps.length
+      val mark = if passed == total then "✅" else if passed == 0 then "❌" else "◐"
+      val avg = if total == 0 then 0.0 else reps.map(r => r.seconds).sum / total.toDouble
+      var why = ""
+      if passed != total then
+        val fr = reps.filter(r => !r.pass).flatMap(r => r.reasons).take(4)
+        why = "  ·  " + fr.mkString("; ")
+      println("   " + mark + " " + rightPad(agent, 9) + " " + rightPad(task, 6) + " " + passed.toString + "/" + total.toString + "  avg=" + leftPad(fmt1(avg), 7) + "s" + why)
+  }
+
+  println("")
+  println(bar())
+  val capAll = cells.filter(c => tierOf(c.model) == "capable")
+  println("CAPABILITY tier (all drivers): " + rateStr(capAll) + " " + pct(passOf(capAll), capAll.length) + "   |  claude-only: " + pct(passOf(capClaude), capClaude.length))
+  println("ALL runs incl. probe/broken:   " + rateStr(cells) + " " + pct(passOf(cells), cells.length) + "  ← do NOT quote this as 'capability'")
+  if brokenModels.nonEmpty then
+    println("  ⚠ " + brokenModels.length.toString + " broken backend(s) excluded from the capability rate: " + brokenModels.mkString(", "))
+  println("  infra/runner-error cells (rc∈{1,2}): " + infraRc.toString + "   timeouts: " + toCount.toString)
+
+def main(): Unit =
+  val arg = if args.isEmpty then "" else args.head
+  val csv = if arg != "" && isDir(arg) then arg + "/per-run.csv" else arg
+  if csv == "" || !exists(csv) then
+    println("usage: ssc run summarize_matrix.ssc -- <per-run.csv | results-dir>")
+  else
+    summarize(parseCsv(csv))
+```
