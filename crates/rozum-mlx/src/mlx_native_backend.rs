@@ -254,14 +254,22 @@ mod inner {
     /// Minimal slice of `config.json` we read on the calling thread (plain JSON,
     /// no MLX), so the worker only ever touches the `!Send` model. The last field
     /// is the KV bytes-per-position for the large-context preflight.
-    fn read_config(dir: &Path) -> (u32, Vec<u32>, String, Option<u64>) {
+    pub(super) fn read_config(dir: &Path) -> (u32, Vec<u32>, String, Option<u64>) {
         let mut n_ctx = DEFAULT_N_CTX;
         let mut eos: Vec<u32> = Vec::new();
         let mut model_type = "qwen3".to_string();
         let mut kv_per_pos = None;
         if let Ok(text) = std::fs::read_to_string(dir.join("config.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(n) = v.get("max_position_embeddings").and_then(|x| x.as_u64()) {
+                // Multimodal snapshots nest the TEXT hyper-parameters under `text_config`
+                // (Qwen3.5-VL: top level holds only the vision/wrapper fields). Read those
+                // from there, exactly like `kv_bytes_per_position` and `model_max_ctx` do —
+                // reading them at the top level silently yields None and falls back to the
+                // 32k/Qwen3 defaults below. `model_type` stays TOP-level on purpose: it is
+                // the architecture dispatch key (`qwen3_5`), and `text_config`'s own value
+                // is the inner variant (`qwen3_5_text`), which no loader matches.
+                let text_cfg = v.get("text_config").unwrap_or(&v);
+                if let Some(n) = text_cfg.get("max_position_embeddings").and_then(|x| x.as_u64()) {
                     n_ctx = n as u32;
                 }
                 if let Some(t) = v.get("model_type").and_then(|x| x.as_str()) {
@@ -269,7 +277,7 @@ mod inner {
                 }
                 // eos_token_id is an int or a list; stop on ALL of them (Qwen3
                 // ships <|im_end|> 151645 + <|endoftext|> 151643).
-                match v.get("eos_token_id") {
+                match text_cfg.get("eos_token_id") {
                     Some(serde_json::Value::Number(n)) => {
                         eos.extend(n.as_u64().map(|id| id as u32));
                     }
@@ -6155,6 +6163,75 @@ mod tests {
         assert_eq!(PrefixStore::retention_policy_for(4, 1_000, PressureLevel::Critical), (1, 0));
         assert!(should_reset_peak(0));
         assert!(!should_reset_peak(1));
+    }
+
+    // Regression guard: a multimodal snapshot nests the text hyper-parameters under
+    // `text_config`, and reading them at the top level silently falls back to the 32k /
+    // Qwen3-vocab defaults. That bit Qwen3.5-4B (VL) in two ways at once: it served a
+    // 32768 window while the sizing layer advertised — and reserved KV for — its real
+    // 262144, and with no eos found it stopped on `QWEN3_EOS` (151645), which is not a
+    // special token in Qwen3.5's 248044-entry vocab but an ordinary Thai word.
+    #[test]
+    fn read_config_reads_nested_text_config() {
+        let tmp = std::env::temp_dir().join("rozum_mlx_nested_cfg_test");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(
+            tmp.join("config.json"),
+            r#"{
+                "model_type": "qwen3_5",
+                "vision_config": { "depth": 27 },
+                "text_config": {
+                    "model_type": "qwen3_5_text",
+                    "max_position_embeddings": 262144,
+                    "eos_token_id": 248044,
+                    "num_hidden_layers": 32,
+                    "full_attention_interval": 4,
+                    "num_key_value_heads": 4,
+                    "head_dim": 256
+                }
+            }"#,
+        )
+        .unwrap();
+        let (n_ctx, eos, model_type, kv_per_pos) = super::inner::read_config(&tmp);
+        assert_eq!(n_ctx, 262_144, "nested max_position_embeddings must win over the 32k fallback");
+        assert_eq!(eos, vec![248_044], "nested eos must win, so the Qwen3-vocab 151645 fallback stays out");
+        assert!(!eos.contains(&151_645), "151645 is ordinary Thai text in Qwen3.5's vocab, not a stop token");
+        assert_eq!(model_type, "qwen3_5", "dispatch key stays TOP-level, not text_config's qwen3_5_text");
+        assert_eq!(kv_per_pos, Some(2 * 8 * 4 * 256 * 2));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // The flat (text-only) layout must keep working: fields at the top level are read as-is.
+    #[test]
+    fn read_config_reads_flat_config() {
+        let tmp = std::env::temp_dir().join("rozum_mlx_flat_cfg_test");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(
+            tmp.join("config.json"),
+            r#"{
+                "model_type": "qwen3",
+                "max_position_embeddings": 40960,
+                "eos_token_id": [151645, 151643]
+            }"#,
+        )
+        .unwrap();
+        let (n_ctx, eos, model_type, _) = super::inner::read_config(&tmp);
+        assert_eq!(n_ctx, 40_960);
+        assert_eq!(eos, vec![151_645, 151_643]);
+        assert_eq!(model_type, "qwen3");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // No config at all → the documented defaults (and the Qwen3 eos fallback still applies).
+    #[test]
+    fn read_config_missing_config_falls_back() {
+        let tmp = std::env::temp_dir().join("rozum_mlx_absent_cfg_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::create_dir_all(&tmp);
+        let (n_ctx, eos, _, _) = super::inner::read_config(&tmp);
+        assert_eq!(n_ctx, 32_768);
+        assert_eq!(eos, vec![151_645]);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
