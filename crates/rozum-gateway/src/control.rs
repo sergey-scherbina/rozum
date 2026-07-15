@@ -1252,6 +1252,16 @@ fn spawn_coder(agent: &str, model: &str, workdir: &str, prompt: &str, verify: bo
     let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
     let log2 = log.try_clone()?;
     let mut args: Vec<String> = vec!["launch".into(), "--model".into(), model.into()];
+    // Chat turns declare a 32k window instead of the model's max (262k on Qwen3.5-4B). This is an
+    // ADMISSION lever, not a speed one: the residency gate reserves weights + KV(n_ctx) + reserve,
+    // and KV at 262k is ~8 GiB (vs ~1 GiB at 32k) — so an uncapped chat turn asks for ~14 GiB it
+    // will never touch (the KV cache itself grows lazily per token, it is not pre-allocated). On a
+    // busy host that oversized request is what makes a chat turn WAIT in the admission queue behind
+    // a resident model. 32k is ample for one conversational turn that reads a few files.
+    if !verify {
+        args.push("--n-ctx".into());
+        args.push("32768".into());
+    }
     args.extend(agent_invocation(agent, prompt));
     let mut cmd = Command::new(&exe);
     cmd.args(&args)
