@@ -1,26 +1,27 @@
 #!/usr/bin/env ssc
 ---
 name: rozum-ucc-chat
-version: 2.0.0
+version: 2.1.0
 description: rozum UCC — chat app that drives a coding agent on the local model. Compiled to chat.html.
 ---
 # rozum — chat (agent + model)
 
 A phone-first CHAT app that drives a coding agent (claude/codex/opencode) on the LOCAL model over a
 project. Each message runs the agent HEADLESS and non-interactively — `claude -p "<message>"` etc. via
-`POST /control/session`-free `/control/coder/launch` — the exact reliable path the matrix scores 18/18
-with. (v1 drove the interactive tmux REPL via send-keys, which wedged: Claude Code treats a
-send-keys `Enter` as a newline, so messages piled up unsent — the "echo camera" bug. Headless has no
-REPL/PTY to wedge.)
+`/control/coder/launch` — the reliable path the matrix scores 18/18 with (v1's interactive-tmux-REPL
+wedged: Claude Code treats a send-keys Enter as a newline, so messages piled up unsent — the "echo
+camera" bug; headless has no REPL/PTY to wedge).
 
-Flow: pick agent + model + project once (▶ chat) → then every message spawns a coder run
-(`verify:false` — a chat turn is not a cargo task) → its log streams back as the assistant's answer.
-The agent runs IN the project, so it can read + edit files + run commands to actually do the work.
+v2.1 improvements:
+- CLEAN bubbles — strips rozum-launch / claude-banner / sandbox / warning noise; shows the answer.
+- MEMORY — threads a compact history of the last turns into the prompt so the agent keeps context
+  (prompts stay lean — a heavy system prompt degrades a 4B, see the codex-lean lesson).
+- STATUS phases — "loading model…" while the shared gateway warms, "thinking…" while the agent runs.
+- PERSISTENCE — the conversation survives a reload (localStorage).
 
 Backend contract (same-origin, control-serve :8411, Face-ID-gated):
 - `POST /control/coder/launch  {agent, model, workdir, prompt, verify:false}` → `{id, …}`
 - `GET  /control/coder/log?id=&tail=` → `{id, alive, log}`
-- `POST /control/coder/stop     {id}`
 - `GET  /control/status` → `{installed:[{spec}], projects:[{name,path}], …}`
 
 Compiled via: ssc run chat.ssc → chat.html  (see deploy-ucc-web.sh)
@@ -33,28 +34,26 @@ val css = "#app{display:flex;flex-direction:column;height:100dvh}" +
   "#bar{display:flex;gap:10px;align-items:center;padding:10px max(12px,env(safe-area-inset-right)) 10px max(12px,env(safe-area-inset-left));background:#151a23;border-bottom:1px solid #232a36;flex:0 0 auto}" +
   "#bar a,#bar .ic{color:#7ab8ff;text-decoration:none;cursor:pointer;font-size:15px;flex:0 0 auto}#bar .meta{min-width:0;line-height:1.15;flex:1 1 auto}#bar .meta b{display:block;font-size:13px;color:#e6edf6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#bar .meta small{font-size:11px;color:#8a93a0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}#st{font-size:12px;color:#8a93a0;flex:0 0 auto}" +
   ".hidden{display:none!important}" +
-  // start screen
   "#start{flex:1 1 auto;overflow-y:auto;padding:18px max(14px,env(safe-area-inset-right)) 18px max(14px,env(safe-area-inset-left));max-width:640px;margin:0 auto;width:100%;box-sizing:border-box}" +
   "#start h2{font-size:17px;margin:2px 0 6px;color:#e6edf6;font-weight:650}#start .sub{font-size:12.5px;color:#8a93a0;margin:0 0 16px}" +
   ".grp{margin:0 0 16px}.grp .lbl{font-size:12px;color:#8a93a0;margin:0 0 6px;text-transform:uppercase;letter-spacing:.04em}" +
   ".chips{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:9px 14px;background:#1c2330;color:#c9d4e3;border:1px solid #2c3648;border-radius:10px;font-size:14px;cursor:pointer}.chip.on{background:#1f3a28;border-color:#2ea043;color:#7ee29a}" +
   ".sel{width:100%;box-sizing:border-box;padding:11px 12px;background:#0b0e14;color:#e6e6e6;border:1px solid #2c3648;border-radius:10px;font-size:16px;font-family:inherit}" +
   "#go{width:100%;margin-top:6px;padding:14px;background:#1f3a28;color:#7ee29a;border:1px solid #2ea043;border-radius:12px;font-size:16px;font-weight:650;cursor:pointer}#go:active{background:#2a4d34}" +
-  // thread
   "#thread{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px max(10px,env(safe-area-inset-right)) 10px max(10px,env(safe-area-inset-left));display:flex;flex-direction:column;gap:12px}" +
   ".msg{display:flex;flex-direction:column;gap:3px;max-width:100%}.msg .who{font-size:10.5px;color:#8a93a0;padding:0 3px}.bubble{padding:10px 13px;border-radius:15px;max-width:92%;overflow-wrap:anywhere;word-break:break-word}" +
   ".msg.user{align-items:flex-end}.msg.user .bubble{background:#1f6feb;color:#fff;border-bottom-right-radius:5px;white-space:pre-wrap}" +
-  ".msg.bot{align-items:flex-start}.msg.bot .bubble{background:#10141c;border:1px solid #232a36;border-bottom-left-radius:5px;white-space:pre-wrap;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#d7dee8;max-width:100%}" +
-  ".cur::after{content:'▍';color:#56d364;animation:bl 1s steps(2) infinite}@keyframes bl{50%{opacity:0}}" +
+  ".msg.bot{align-items:flex-start}.msg.bot .bubble{background:#10141c;border:1px solid #232a36;border-bottom-left-radius:5px;white-space:pre-wrap;font:13px/1.5 -apple-system,system-ui,sans-serif;color:#e2e8f2;max-width:100%}" +
+  ".msg.bot .bubble.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:#d7dee8}" +
+  ".phase{color:#e5a53b;font-style:italic}.cur::after{content:'▍';color:#56d364;animation:bl 1s steps(2) infinite}@keyframes bl{50%{opacity:0}}" +
   ".empty{color:#8a93a0;text-align:center;margin:16vh auto 0;max-width:300px;font-size:14px}.empty .big{font-size:38px;margin-bottom:8px}" +
-  // composer
   "#composer{display:flex;gap:8px;padding:8px max(10px,env(safe-area-inset-right)) max(8px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left));background:#10141c;border-top:1px solid #232a36;flex:0 0 auto}#inp{flex:1 1 auto;min-width:0;padding:11px 13px;background:#0b0e14;color:#e6e6e6;border:1px solid #2c3648;border-radius:11px;font-size:16px;font-family:-apple-system,system-ui,sans-serif;resize:none;max-height:38vh}#send{flex:0 0 auto;padding:0 17px;background:#1f3a28;color:#56d364;border:1px solid #2ea043;border-radius:11px;font-size:15px;font-weight:600;cursor:pointer}#send:active{background:#2a4d34}#send.busy{background:#3a2a1a;color:#e5a53b;border-color:#8a5a2a}"
 
 val langCss = "#rozum-lang{position:fixed;top:9px;right:12px;display:flex;gap:1px;z-index:999}.rl-btn{background:#21262d;color:#6e7681;border:1px solid #30363d;padding:3px 7px;cursor:pointer;font-size:10px;font-weight:600;letter-spacing:.03em}.rl-btn:first-child{border-radius:5px 0 0 5px}.rl-btn:last-child{border-radius:0 5px 5px 0}.rl-btn.active{background:#1f3a28;border-color:#2ea043;color:#56d364}"
 
 val js = """
 var _LG=localStorage.getItem('rozum_lang')||navigator.language.split('-')[0]||'en';
-var _LT={'ru':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат с твоим проектом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Выбери агента и проект. Каждое сообщение запускает агента на локальной модели в этом проекте.','Agent':'Агент','Model':'Модель','Project':'Проект','▶ Start chatting':'▶ Начать','message…':'сообщение…','send':'отпр.','working…':'работает…','⚙':'⚙','Ask the agent to do something in the project.':'Попроси агента что-нибудь сделать в проекте.','⚠ launch failed':'⚠ не удалось запустить','(agent produced no output)':'(агент ничего не вывел)'},'uk':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат з твоїм проєктом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Обери агента і проєкт. Кожне повідомлення запускає агента на локальній моделі в цьому проєкті.','Agent':'Агент','Model':'Модель','Project':'Проєкт','▶ Start chatting':'▶ Почати','message…':'повідомлення…','send':'надісл.','working…':'працює…','⚙':'⚙','Ask the agent to do something in the project.':'Попроси агента щось зробити в проєкті.','⚠ launch failed':'⚠ не вдалося запустити','(agent produced no output)':'(агент нічого не вивів)'}};
+var _LT={'ru':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат с твоим проектом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Выбери агента и проект. Каждое сообщение запускает агента на локальной модели в этом проекте.','Agent':'Агент','Model':'Модель','Project':'Проект','▶ Start chatting':'▶ Начать','message…':'сообщение…','send':'отпр.','working…':'работает…','loading model…':'гружу модель…','thinking…':'думаю…','Ask the agent to do something in the project.':'Попроси агента что-нибудь сделать в проекте.','⚠ launch failed':'⚠ не удалось запустить','(no answer)':'(нет ответа)'},'uk':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат з твоїм проєктом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Обери агента і проєкт. Кожне повідомлення запускає агента на локальній моделі в цьому проєкті.','Agent':'Агент','Model':'Модель','Project':'Проєкт','▶ Start chatting':'▶ Почати','message…':'повідомлення…','send':'надісл.','working…':'працює…','loading model…':'вантажу модель…','thinking…':'думаю…','Ask the agent to do something in the project.':'Попроси агента щось зробити в проєкті.','⚠ launch failed':'⚠ не вдалося запустити','(no answer)':'(немає відповіді)'}};
 function _lt(s){var m=_LT[_LG];return(m&&m[s])||s;}
 document.documentElement.lang=_LG;
 if(_LT[_LG]&&_LT[_LG]['rozum · chat'])document.title=_LT[_LG]['rozum · chat'];
@@ -65,23 +64,25 @@ var DEF_PROJECT='/Users/sergiy/work/my/rozum';
 var AGENTS=['claude','codex','opencode'];
 var cfg={agent:localStorage.getItem('rozum_chat_agent')||'claude',model:localStorage.getItem('rozum_chat_model')||DEF_MODEL,project:localStorage.getItem('rozum_chat_project')||DEF_PROJECT};
 var configured=localStorage.getItem('rozum_chat_ready')==='1';
-var msgs=[];   // {role:'user'|'bot', text}
+var msgs=loadMsgs();   // {role:'user'|'bot', text, phase?}
 var busy=false;
 
 var $=function(s){return document.getElementById(s);};
 var startEl=$('start'), threadEl=$('thread'), compEl=$('composer'), stEl=$('st'), metaEl=$('meta'), inp=$('inp'), send=$('send');
+
+function loadMsgs(){ try{var a=JSON.parse(localStorage.getItem('rozum_chat_msgs'));if(a&&a.length){a.forEach(function(m){m.streaming=false;});return a;}}catch(e){} return []; }
+function saveMsgs(){ try{localStorage.setItem('rozum_chat_msgs',JSON.stringify(msgs.slice(-40)));}catch(e){} }
 
 function on401(r){ if(r.status===401){ location.href='/login.html'; throw 0; } return r; }
 function getJSON(u){ return fetch(u,{headers:{}}).then(on401).then(function(r){return r.json();}); }
 function postJSON(u,b){ return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(on401).then(function(r){return r.json();}); }
 function esc(s){return String(s).replace(/[&<>]/g,function(m){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[m];});}
 
-/* strip rozum-launch's own preamble/footer so the bubble shows the agent's real output */
-function cleanLog(t){
-  if(!t)return '';
-  var drop=[/^rozum launch:/,/^context window:/,/^\s*→ running:/,/^\s*→ sandboxed/,/^⚠ claude\.ai/,/^\s*▐▛|^▝▜|^\s*▘▘/,/^\s*▎ /];
-  return t.split('\n').filter(function(l){return !drop.some(function(re){return re.test(l);});}).join('\n').replace(/^\s+|\s+$/g,'');
-}
+/* strip rozum-launch / claude-banner / sandbox / warning noise → the agent's real answer */
+var DROP=[/^rozum launch:/,/^context window:/,/^\s*→ /,/^⚠ /,/Claude Code v/,/dangerously-load-development-channels/,/^\s*Channels are not/,/^\s*▐|^\s*▝|^\s*▘|^\s*▎/,/mcp-proxy/,/^\s*\[rozum launch exited/];
+function cleanLog(t){ if(!t)return ''; return t.split('\n').filter(function(l){return !DROP.some(function(re){return re.test(l);});}).join('\n').replace(/^\s+|\s+$/g,''); }
+/* phase from the RAW log: gateway warming vs agent running */
+function phaseOf(raw){ if(/→ running:/.test(raw))return _lt('thinking…'); if(/starting shared gateway|loading|admission/i.test(raw))return _lt('loading model…'); return _lt('working…'); }
 
 /* ---------- start / config ---------- */
 function renderStart(models,projects){
@@ -112,36 +113,50 @@ function showChat(){ startEl.classList.add('hidden'); threadEl.classList.remove(
 function renderThread(){
   if(!msgs.length){ threadEl.innerHTML='<div class="empty"><div class="big">🤖</div><div>'+_lt('Ask the agent to do something in the project.')+'</div></div>'; return; }
   threadEl.innerHTML=msgs.map(function(m){
-    var who=m.role==='user'?'':'<div class="who">'+esc(cfg.agent)+'</div>';
-    var body=m.role==='user'?esc(m.text):(esc(m.text)+(m.streaming?'<span class="cur"></span>':''));
-    return '<div class="msg '+(m.role==='user'?'user':'bot')+'">'+who+'<div class="bubble">'+(body||(m.streaming?'':'<span style="color:#6b7280">'+_lt('(agent produced no output)')+'</span>'))+'</div></div>';
+    if(m.role==='user') return '<div class="msg user"><div class="bubble">'+esc(m.text)+'</div></div>';
+    var inner;
+    if(m.text){ inner=esc(m.text)+(m.streaming?'<span class="cur"></span>':''); }
+    else if(m.streaming){ inner='<span class="phase">'+esc(m.phase||_lt('working…'))+'</span><span class="cur"></span>'; }
+    else { inner='<span style="color:#6b7280">'+_lt('(no answer)')+'</span>'; }
+    return '<div class="msg bot"><div class="who">'+esc(cfg.agent)+'</div><div class="bubble'+(m.text?' mono':'')+'">'+inner+'</div></div>';
   }).join('');
   threadEl.scrollTop=threadEl.scrollHeight;
 }
-function setBusy(b){ busy=b; send.classList.toggle('busy',b); send.textContent=b?_lt('working…'):_lt('send'); stEl.textContent=b?'● '+_lt('working…'):''; }
+function setBusy(b){ busy=b; send.classList.toggle('busy',b); send.textContent=b?_lt('working…'):_lt('send'); }
+
+/* compact history threaded into the prompt so the agent keeps context (kept LEAN — a heavy prompt
+   degrades a 4B). Last few exchanges; assistant answers trimmed. */
+function buildPrompt(v){
+  var prior=msgs.filter(function(m){return m.text;});   // exclude the just-added empty bot placeholder
+  var pairs=[]; for(var i=0;i<prior.length;i++){ var m=prior[i]; if(m.role==='user')pairs.push('User: '+m.text); else pairs.push('You: '+m.text.slice(0,400)); }
+  pairs=pairs.slice(-8);   // ~4 exchanges
+  if(!pairs.length) return v;
+  return 'Earlier in this conversation:\n'+pairs.join('\n')+'\n\nNow reply to: '+v;
+}
 
 function doSend(){
   var v=inp.value.trim(); if(!v||busy)return;
+  var prompt=buildPrompt(v);
   msgs.push({role:'user',text:v});
-  var bot={role:'bot',text:'',streaming:true}; msgs.push(bot);
-  inp.value=''; inp.style.height='auto'; renderThread(); setBusy(true);
-  postJSON('/control/coder/launch',{agent:cfg.agent,model:cfg.model,workdir:cfg.project,prompt:v,verify:false})
+  var bot={role:'bot',text:'',phase:_lt('working…'),streaming:true}; msgs.push(bot);
+  inp.value=''; inp.style.height='auto'; renderThread(); saveMsgs(); setBusy(true);
+  postJSON('/control/coder/launch',{agent:cfg.agent,model:cfg.model,workdir:cfg.project,prompt:prompt,verify:false})
     .then(function(j){
-      if(!j||!j.id){ bot.streaming=false; bot.text='⚠ '+_lt('⚠ launch failed'); setBusy(false); renderThread(); return; }
+      if(!j||!j.id){ bot.streaming=false; bot.text='⚠ '+_lt('⚠ launch failed'); setBusy(false); renderThread(); saveMsgs(); return; }
       pollRun(j.id,bot);
     })
-    .catch(function(e){ if(e!==0){ bot.streaming=false; bot.text='⚠ '+_lt('⚠ launch failed'); setBusy(false); renderThread(); } });
+    .catch(function(e){ if(e!==0){ bot.streaming=false; bot.text='⚠ '+_lt('⚠ launch failed'); setBusy(false); renderThread(); saveMsgs(); } });
 }
 function pollRun(id,bot){
   var dead=0;
   var tick=function(){
     getJSON('/control/coder/log?id='+encodeURIComponent(id)+'&tail=600')
       .then(function(j){
-        bot.text=cleanLog(j.log||''); renderThread();
+        var raw=j.log||''; bot.text=cleanLog(raw); bot.phase=phaseOf(raw); renderThread();
         if(j.alive){ dead=0; setTimeout(tick,1200); }
-        else { dead++; if(dead<2){ setTimeout(tick,1200); } else { bot.streaming=false; setBusy(false); renderThread(); } }
+        else { dead++; if(dead<2){ setTimeout(tick,1200); } else { bot.streaming=false; setBusy(false); renderThread(); saveMsgs(); } }
       })
-      .catch(function(e){ if(e!==0){ bot.streaming=false; setBusy(false); renderThread(); } });
+      .catch(function(e){ if(e!==0){ bot.streaming=false; setBusy(false); renderThread(); saveMsgs(); } });
   };
   setTimeout(tick,700);
 }
@@ -149,7 +164,7 @@ function pollRun(id,bot){
 send.addEventListener('click',doSend);
 inp.addEventListener('keydown',function(e){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); doSend(); } });
 inp.addEventListener('input',function(){ inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,window.innerHeight*0.38)+'px'; });
-$('cfgbtn').onclick=function(){ configured=false; localStorage.setItem('rozum_chat_ready','0'); showStart(); };
+$('cfgbtn').onclick=function(){ if(confirm('Очистить этот диалог и сменить настройки?')){ msgs=[]; saveMsgs(); } configured=false; localStorage.setItem('rozum_chat_ready','0'); showStart(); };
 
 /* boot */
 if(configured){ showChat(); } else { showStart(); }
