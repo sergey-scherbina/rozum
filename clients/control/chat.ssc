@@ -124,14 +124,19 @@ function renderThread(){
 }
 function setBusy(b){ busy=b; send.classList.toggle('busy',b); send.textContent=b?_lt('working…'):_lt('send'); }
 
-/* compact history threaded into the prompt so the agent keeps context (kept LEAN — a heavy prompt
-   degrades a 4B). Last few exchanges; assistant answers trimmed. */
+/* Drive the agent the way the matrix does: an EXPLORE-then-answer frame so the model looks at the
+   project before replying (proven: greedy + this frame makes the 4B read the repo and summarise it
+   accurately) + a compact history for context. Kept short — a 4B follows a crisp instruction, but a
+   heavy system-prompt blob degrades it (the codex-lean lesson). */
+var FRAME='You are an assistant working INSIDE this project (the current directory), with tools to list/read/edit files and run commands. Before you answer, quickly EXPLORE what is relevant — list the files, read the README/AGENTS and the files the request is about — THEN respond concretely and concisely, grounded in what you actually saw. If the request is a task, do it. Do not answer from assumptions.';
 function buildPrompt(v){
   var prior=msgs.filter(function(m){return m.text;});   // exclude the just-added empty bot placeholder
   var pairs=[]; for(var i=0;i<prior.length;i++){ var m=prior[i]; if(m.role==='user')pairs.push('User: '+m.text); else pairs.push('You: '+m.text.slice(0,400)); }
   pairs=pairs.slice(-8);   // ~4 exchanges
-  if(!pairs.length) return v;
-  return 'Earlier in this conversation:\n'+pairs.join('\n')+'\n\nNow reply to: '+v;
+  var parts=[FRAME];
+  if(pairs.length) parts.push('Earlier in this conversation:\n'+pairs.join('\n'));
+  parts.push('Request: '+v);
+  return parts.join('\n\n');
 }
 
 function doSend(){

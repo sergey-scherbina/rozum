@@ -1260,9 +1260,14 @@ fn spawn_coder(agent: &str, model: &str, workdir: &str, prompt: &str, verify: bo
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log2))
         .process_group(0);
-    // Chat turns opt out of the post-agent cargo verify-gate (see CoderLaunchReq::verify).
+    // Chat turns (verify:false) opt out of the post-agent cargo verify-gate AND decode GREEDILY
+    // (argmax) — the same focus lever the matrix uses (ROZUM_FORCE_GREEDY). Both env vars propagate
+    // to the shared gateway `rozum launch` spawns, so a chat's model runs deterministic + focused
+    // rather than sampled + rambly. Proven: greedy + an "explore-then-answer" prompt makes the 4B
+    // read the repo and summarise it accurately.
     if !verify {
         cmd.env("ROZUM_VERIFY", "0");
+        cmd.env("ROZUM_FORCE_GREEDY", "1");
     }
     Ok((cmd.spawn()?.id(), log_path))
 }
