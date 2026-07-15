@@ -2431,10 +2431,15 @@ pub async fn serve_on(
 
 #[cfg(test)]
 mod tests {
-    // `super::*` re-exports gateway's `use crate::codex_patch::*`, so the moved
-    // apply_patch / codex-tool-arg rewriters' regression corpus below resolves unchanged.
     use super::*;
     use crate::backend::{ChatEvent, HelloBackend, StopReason};
+    // Imported explicitly, NOT via `use super::*`: the monolith split moved the apply_patch /
+    // codex-tool-arg rewriters to `codex_patch` and the SSE types to the dialect modules, which
+    // removed gateway.rs's own imports of both — and a glob of `super` can only re-export what
+    // `super` still imports. The regression corpus below is the only remaining caller here.
+    use crate::codex_patch::*;
+    use axum::response::sse::Event;
+    use std::convert::Infallible;
 
     #[test]
     fn reasoning_effort_of_parses_and_validates() {
