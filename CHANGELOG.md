@@ -1,5 +1,29 @@
 # Changelog
 
+## feat(mlx): per-family model features, and what they are actually worth
+Completed: 2026-07-15 · fork `2df597b7` · `0bc7007`
+
+Every one of the thirteen model architectures compiled into every build, whether or not a given
+rozum would ever load them. Each family in the vendored mlx-lm fork turns out to be a leaf —
+nothing references it but its own `pub mod` line — so they now sit behind per-family Cargo
+features, and rozum's loader arms, `LoadedModel` variants and parsers follow.
+
+Nothing about the shipped binary changes: the features are additive and on by default. What is
+new is that a lean build is now expressible — `--no-default-features --features mlx-native` keeps
+the native runtime and the Qwen core while compiling every other architecture out, and individual
+families can be added back one at a time. The Qwen core stays ungated deliberately: `qwen3` and
+`qwen3_5` reference each other, and cargo features must form a DAG.
+
+Two things worth recording, because both contradict what the plan assumed. The scope was roughly
+four times smaller than estimated — twenty-one call sites for the four families in question rather
+than the feared eighty, since most were `matches!` tests that collapse into a single family
+predicate, and the large dispatches already had catch-all arms. And the payoff is modest: the
+binary goes from 50.34 MB to 49.16 MB, a little over two percent. The mlx-lm rlib itself drops by
+two thirds, but only linked, monomorphized code reaches the binary. Build time does not move at
+all. MLX's own C++ — 33 MB of rlib and 715 MB of build artifacts — dominates both size and build
+time and is untouched by any of this; it is the only lever that would matter if a smaller rozum
+ever became a goal.
+
 ## fix(mlx): read the nested `text_config` — the flagship served 32k of its 262k context
 Completed: 2026-07-15 · `b2be8a0`…`5480e15`
 
