@@ -1,5 +1,31 @@
 # Changelog
 
+## fix(mlx): read the nested `text_config` — the flagship served 32k of its 262k context
+Completed: 2026-07-15 · `b2be8a0`…`5480e15`
+
+The native MLX backend read `max_position_embeddings` and `eos_token_id` from the top level of a
+model's `config.json`. Multimodal snapshots nest those under `text_config` — the top level carries
+only the vision and wrapper fields — so on Qwen3.5-4B both lookups quietly returned nothing and took
+their fallbacks. Two user-visible faults shared that one cause.
+
+The context window fell back to 32768 while the sizing layer, which reads `text_config` correctly,
+advertised the model's real 262144 and reserved KV cache for it. The flagship therefore served an
+eighth of the window it promised, trimmed prompts against a limit callers were never told about, and
+reserved roughly 8 GiB of KV it could not use. Separately, with no `eos_token_id` found, the backend
+fell back to the Qwen3 end-of-turn id 151645 — an ordinary Thai word token in Qwen3.5's larger
+vocabulary, and so an arbitrary piece of text wired in as a stop token. Chat worked only because the
+tokenizer config supplied the real turn terminator alongside it.
+
+Both fields are now read through the same `text_config`-aware lookup the sizing and KV-estimate paths
+already used. `model_type` stays top-level deliberately: it selects the architecture, and the nested
+value names an inner variant no loader matches. On the real model the backend now reports its full
+262144 window and stops on `<|endoftext|>` and `<|im_end|>` rather than on Thai prose, with generation
+and tool-calling unchanged.
+
+Chat turns still cap themselves at 32k, but for the reason that survives measurement: the KV cache
+grows lazily and costs nothing at load, so the cap buys admission headroom — about 7 GiB rather than
+14 — not the load-time saving it was originally credited with.
+
 ## fix(launch): harden target derivation and manifest repair for small models
 Completed: 2026-07-10 · `b2dcb3b`…`787d953`
 

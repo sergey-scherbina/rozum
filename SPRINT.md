@@ -1,5 +1,49 @@
 # Sprint
 
+### ▶ Post-reboot resume (operator 2026-07-15: "перезагрузился компьютер … продолжить работу дальше")
+
+- [x] **env-metal-toolchain-gone** — DONE (machine-level, no repo change). FALLOUT OF THE SYSTEM UPDATE:
+  Xcode 26.6 survived but the **Metal Toolchain component did not** (`xcrun -sdk macosx metal --version` →
+  "cannot execute tool 'metal' due to missing Metal Toolchain"). The RUNTIME is unaffected (the existing
+  `target/release/rozum-gateway` loads + serves models fine), so this hides until something compiles MLX
+  from scratch — i.e. **any fresh worktree / clean build** → mlx-sys build script dies with `Error 2`.
+  Fix = `xcodebuild -downloadComponent MetalToolchain` (restored: `Apple metal version 32023.883`).
+  WORKAROUND if it recurs and you don't want to wait for the download: point a fresh worktree at the warm
+  main target dir (`CARGO_TARGET_DIR=/Users/sergiy/work/my/rozum/target`) — mlx-sys is reused, build ≈ 6s.
+
+- [x] **mlx-nested-config-nctx** — DONE + PROVEN, branch `feature/mlx-nested-config-nctx` (`b2be8a0`,
+  `5480e15`). Found while auditing the chat `--n-ctx` change the previous session left uncommitted on
+  master. **REAL BUG, two symptoms, one cause**: `mlx_native_backend::read_config` read
+  `max_position_embeddings` / `eos_token_id` at the TOP level of `config.json`, but a multimodal snapshot
+  nests them under `text_config` (top level = vision/wrapper fields only) → both None → silent fallbacks:
+  (1) **the flagship Qwen3.5-4B served n_ctx 32768 while advertising 262144** — the sizing layer
+  (`src/main.rs::model_max_ctx`) DOES read text_config, so admission reserved ~8 GiB of KV the backend
+  could never use, and any prompt over 32k was trimmed against a window the user was told was 262k;
+  (2) eos came back empty → the `QWEN3_EOS` fallback (151645) applied, which is `<|im_end|>` in the *Qwen3*
+  vocab but an **ordinary Thai word token** in Qwen3.5's 248044-entry vocab — an arbitrary text token wired
+  in as a stop token (silent mid-answer truncation waiting to happen); the real eos `<|endoftext|>` 248044
+  was never added. Chat only worked because the tokenizer_config path supplies `<|im_end|>` 248046.
+  FIX = read both from the text_config-aware node (same idiom as `kv_bytes_per_position` / `model_max_ctx`).
+  **`model_type` deliberately stays TOP-level** — it is the arch dispatch key (`qwen3_5`); text_config's own
+  value is `qwen3_5_text`, which no loader matches (a blanket `unwrap_or(text_config)` would break VL).
+  PROOF on the real model — before: `ready (context 32768)` + stop tokens `[151645, 248046]`; after:
+  `ready (context 262144)` + `[248044, 248046]` (= the principled set this file's own comment describes).
+  Generation still finishes clean (`finish_reason=stop`), tool calls still parse (`finish_reason=tool_calls`),
+  rozum-mlx 41 tests green, and the new nested test FAILS on pre-fix code (32768 != 262144).
+  NOTE the diagnostic that already existed for exactly this — `probe_model_profile` logs "stop tokens …"
+  precisely to catch "a config-vs-template eos mismatch". It printed `151645` on every single load; nobody read it.
+  **Scope**: only nested-config (multimodal) snapshots. Today just Qwen3.5-4B is installed, but per the VL
+  port the flagship **Qwen3.6-35B-A3B also has vision** → same layout, same bug — re-check when installed.
+
+- [x] **chat-nctx-32k rationale corrected** (`5480e15`) — the previous session's uncommitted master change
+  (`--n-ctx 32768` for chat runs) was kept but its comment was WRONG: it claimed a 262k KV makes the cold
+  load take 1-2 min. It does not — KV grows **lazily** per token, never pre-allocated, so n_ctx costs
+  nothing at load. MEASURED (page-cache warm, load → first completion): **1.2s at default 262144 vs 1.4s at
+  32768** = noise. (It was also a no-op before the fix above, since the backend clamped to 32768 regardless.)
+  What the cap actually buys is **admission headroom**: the gate sizes weights + KV(n_ctx) + reserve, so an
+  uncapped chat turn reserves ~14 GiB vs ~7 GiB — and on a busy host THAT is what makes a chat turn queue
+  behind a resident model, the likeliest true source of the 1-2 min. Kept, comment rewritten to the measurable.
+
 ### ▶ Matrix reliability (operator 2026-07-14: "исправь и оно работало" re the last-run codex reds)
 
 - [x] **matrix-reliability-greedy-repair** — DONE + PROVEN + MERGED (`4df4e54`). The two codex reds
