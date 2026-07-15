@@ -1242,7 +1242,7 @@ fn agent_invocation(agent: &str, prompt: &str) -> Vec<String> {
 
 /// Spawn `rozum launch --model <m> <agent invocation>` DETACHED in `workdir`, output → a log file.
 /// Returns (pid, log_path).
-fn spawn_coder(agent: &str, model: &str, workdir: &str, prompt: &str) -> std::io::Result<(u32, PathBuf)> {
+fn spawn_coder(agent: &str, model: &str, workdir: &str, prompt: &str, verify: bool) -> std::io::Result<(u32, PathBuf)> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
     let log_dir = state_dir().map(|d| d.join("logs")).unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -1260,6 +1260,10 @@ fn spawn_coder(agent: &str, model: &str, workdir: &str, prompt: &str) -> std::io
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log2))
         .process_group(0);
+    // Chat turns opt out of the post-agent cargo verify-gate (see CoderLaunchReq::verify).
+    if !verify {
+        cmd.env("ROZUM_VERIFY", "0");
+    }
     Ok((cmd.spawn()?.id(), log_path))
 }
 
@@ -1269,6 +1273,11 @@ struct CoderLaunchReq {
     model: String,
     workdir: String,
     prompt: String,
+    /// Run `rozum launch`'s post-agent verify-gate (`cargo build && cargo test`, with repair rounds).
+    /// Default true keeps the coder-view behaviour. The chat app passes `false`: a conversational
+    /// turn is not a cargo task, so verifying the whole repo after every message is wrong + slow.
+    #[serde(default = "default_true")]
+    verify: bool,
 }
 
 async fn coder_launch_route(body: String) -> axum::response::Response {
@@ -1307,13 +1316,14 @@ async fn coder_launch_route(body: String) -> axum::response::Response {
         save_coders(&coders);
     }
     let spawn_model = model.clone();
+    let verify = req.verify;
     spawn_launch_task(
         model,
         id.clone(),
         |id| load_coders().iter().any(|c| c.id == id),
         |id, s| { update_coder_record(id, |c| c.status = s); },
         move |task_id, _port| async move {
-            match spawn_coder(&agent, &spawn_model, &workdir, &prompt) {
+            match spawn_coder(&agent, &spawn_model, &workdir, &prompt, verify) {
                 Ok((pid, log)) => {
                     // Stopped mid-spawn → kill the orphan (it holds the model + a live agent run).
                     let kept = update_coder_record(&task_id, |c| {
