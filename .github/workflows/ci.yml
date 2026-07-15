@@ -36,10 +36,14 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
-      - name: Build + test (default features)
+      # `--workspace` is load-bearing: without it cargo tests only the ROOT package, so the other
+      # nine crates' suites were never built here. That is exactly how rozum-gateway's 106 tests
+      # rotted to 62 compile errors unnoticed (`08c9d9a`) — `cargo check`/`cargo build` skip
+      # `#[cfg(test)]` code, so every signal we watched stayed green while 0 tests ran.
+      - name: Build + test (default features, ALL crates)
         run: |
           cargo build --lib --bin rozum
-          cargo test --lib
+          cargo test --workspace --lib
 
   linux-core:
     name: linux — portable core (no native backends)

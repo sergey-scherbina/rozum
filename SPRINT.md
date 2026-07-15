@@ -35,6 +35,24 @@
   **Scope**: only nested-config (multimodal) snapshots. Today just Qwen3.5-4B is installed, but per the VL
   port the flagship **Qwen3.6-35B-A3B also has vision** → same layout, same bug — re-check when installed.
 
+- [x] **gw-test-suite-not-compiling** — DONE (`08c9d9a`). Found by running `cargo test -p rozum-gateway`
+  right after the merge above (it is NOT part of any routine here). **The gateway's entire 106-test suite
+  had silently stopped running**: 62 compile errors, so 0 tests executed. PRE-EXISTING, not from today's
+  work — the identical 62 errors reproduce at `41be87a`. Cause: `gw-per-dialect-split` / the `codex_patch`
+  extraction moved the apply_patch + codex-tool-arg rewriters and the SSE types out of gateway.rs, which
+  removed gateway.rs's OWN imports of them (the handlers that used them had left). The test module leant on
+  `use super::*` to reach them — and even carried a comment asserting "`super::*` re-exports gateway's
+  `use crate::codex_patch::*`" — but **a glob of `super` can only re-export what `super` still imports**.
+  The LIB kept compiling the whole time, so `cargo check` stayed green and SPRINT's "106 tests green" note
+  went stale without anyone noticing. FIX = import the symbols explicitly in the test module + delete the
+  comment that asserted the broken mechanism. **106/106 pass again** — the exact count the split reported,
+  i.e. the corpus was intact all along, it just had not been BUILT since. Swept the rest of the workspace:
+  `cargo test --workspace` compiles clean and is green everywhere else (rozum-core 131, rozum-agent 121,
+  rozum-meeting 108, rozum 65, rozum-mlx 41, …) — gateway was the only rotted suite.
+  **LESSON (worth generalizing)**: `cargo check` does NOT build `#[cfg(test)]` code, so a test suite can rot
+  to zero while every green signal we look at stays green. A `cargo test --workspace --no-run` in CI would
+  have caught this the day it broke. Candidate follow-up — see BACKLOG.
+
 - [x] **chat-nctx-32k rationale corrected** (`5480e15`) — the previous session's uncommitted master change
   (`--n-ctx 32768` for chat runs) was kept but its comment was WRONG: it claimed a 262k KV makes the cold
   load take 1-2 min. It does not — KV grows **lazily** per token, never pre-allocated, so n_ctx costs

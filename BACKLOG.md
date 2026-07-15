@@ -1,5 +1,21 @@
 # Backlog
 
+## CI: extend the portable-core gate to the whole workspace (2026-07-15)
+
+- [ ] **ci-workspace-portable-core** — the macos job now runs `cargo test --workspace --lib`, after the
+  gateway's 106 tests were found rotted to 62 compile errors precisely because CI tested only the ROOT
+  package (`cargo test --lib` = 1 test binary; `--workspace --lib` = 10). The **linux** and **windows**
+  jobs still gate `--no-default-features --lib`, i.e. root-only, so a member crate's portable-core
+  breakage still can't be caught there. `cargo test --workspace --no-default-features --lib --no-run`
+  compiles clean LOCALLY (macOS, 0 errors), which is a decent signal for linux — but NOT for windows:
+  `rozum-gateway`'s `control.rs` imports `std::os::unix::process::CommandExt`, so `--workspace` on
+  `windows-latest` would likely fail the moment it builds that crate (consistent with ci.yml's own note
+  that "Windows-specific daemon IPC/service gaps stay tracked in BACKLOG"). Path: flip **linux** to
+  `--workspace` first and read the run; for windows, either cfg-gate the unix-only spawn paths behind
+  `#[cfg(unix)]` (the real portability work the gate is meant to expose) or scope the job to the crates
+  that genuinely claim windows support. Not done blind here — it needs a CI run to verify, and guessing
+  would just trade one silently-broken gate for another.
+
 ## UCC backend on .ssc→Rust (strategic, 2026-07-07)
 
 - [ ] **ucc-ssc-backend** — express the UCC server half in ScalaScript, like the meeting web
