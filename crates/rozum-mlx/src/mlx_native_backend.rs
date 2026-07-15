@@ -23,10 +23,28 @@ mod inner {
     };
 
     use mlx_lm::cache::ConcatKeyValueCache;
-    use mlx_lm::models::{
-        deepseek_v2, gemma3, glm4, glm4_moe_lite, gpt_oss, llama, qwen2, qwen3, qwen3_5,
-        qwen3_5_moe, qwen3_5_vision, qwen3_moe,
-    };
+    // The always-compiled core (see the fork's models/mod.rs: qwen3 <-> qwen3_5 are mutually
+    // referential, so they cannot be split into independent features).
+    use mlx_lm::models::{qwen3, qwen3_5, qwen3_5_vision};
+    // Opt-out families — each import follows its `model-*` feature, or the module does not exist.
+    #[cfg(feature = "model-deepseek-v2")]
+    use mlx_lm::models::deepseek_v2;
+    #[cfg(feature = "model-gemma3")]
+    use mlx_lm::models::gemma3;
+    #[cfg(feature = "model-glm4")]
+    use mlx_lm::models::glm4;
+    #[cfg(feature = "model-glm4-moe-lite")]
+    use mlx_lm::models::glm4_moe_lite;
+    #[cfg(feature = "model-gpt-oss")]
+    use mlx_lm::models::gpt_oss;
+    #[cfg(feature = "model-llama")]
+    use mlx_lm::models::llama;
+    #[cfg(feature = "model-qwen2")]
+    use mlx_lm::models::qwen2;
+    #[cfg(feature = "model-qwen3-5-moe")]
+    use mlx_lm::models::qwen3_5_moe;
+    #[cfg(feature = "model-qwen3-moe")]
+    use mlx_lm::models::qwen3_moe;
     use mlx_lm_utils::tokenizer::{
         ApplyChatTemplateArgs, Chat, Conversation, Tokenizer, load_model_chat_template_from_file,
     };
@@ -116,18 +134,71 @@ mod inner {
     /// A loaded MLX model, dispatched by `config.json`'s `model_type`. Each
     /// variant exposes the same `Generate` token iterator, so the streaming
     /// loop is architecture-agnostic.
+    ///
+    /// The qwen3/qwen3_5 CORE is always present; every other family is behind its `model-*`
+    /// feature (default ON via the binary's `mlx-native`), which also compiles the architecture
+    /// itself out of the fork. A family that is off simply has no variant, so `load` reports it
+    /// as unsupported — the same path as an architecture we never ported.
     enum LoadedModel {
         Qwen3(qwen3::Model),
-        Qwen3Moe(qwen3_moe::Model),
         Qwen35(qwen3_5::Model),
+        #[cfg(feature = "model-qwen3-moe")]
+        Qwen3Moe(qwen3_moe::Model),
+        #[cfg(feature = "model-qwen3-5-moe")]
         Qwen35Moe(qwen3_5_moe::Model),
+        #[cfg(feature = "model-llama")]
         Llama(llama::Model),
+        #[cfg(feature = "model-qwen2")]
         Qwen2(qwen2::Model),
+        #[cfg(feature = "model-glm4")]
         Glm4(glm4::Model),
+        #[cfg(feature = "model-deepseek-v2")]
         DeepseekV2(deepseek_v2::Model),
+        #[cfg(feature = "model-glm4-moe-lite")]
         Glm4MoeLite(glm4_moe_lite::Model),
+        #[cfg(feature = "model-gemma3")]
         Gemma3(gemma3::Model),
+        #[cfg(feature = "model-gpt-oss")]
         GptOss(gpt_oss::Model),
+    }
+
+    /// Family predicates. The `#[cfg]` lives HERE, once, instead of on every `matches!` call site
+    /// scattered through the generate/constrain paths — a family that is compiled out simply
+    /// answers `false`, and the callers stay cfg-free.
+    #[allow(unused_variables)]
+    fn is_gpt_oss(model: &LoadedModel) -> bool {
+        #[cfg(feature = "model-gpt-oss")]
+        {
+            return matches!(model, LoadedModel::GptOss(_));
+        }
+        #[cfg(not(feature = "model-gpt-oss"))]
+        false
+    }
+
+    /// Set (or clear) the per-row rope offsets on every dense arch's thread-local. Only the loaded
+    /// model's attention reads its own, so the extra setters are harmless no-ops — and a family
+    /// compiled out has no thread-local to set, which is why the cfgs live here rather than at the
+    /// call sites.
+    fn set_all_dense_batch_pad_offsets(v: Option<Array>) {
+        #[cfg(feature = "model-llama")]
+        llama::set_batch_pad_offsets(v.clone());
+        #[cfg(feature = "model-qwen2")]
+        qwen2::set_batch_pad_offsets(v.clone());
+        #[cfg(feature = "model-glm4")]
+        glm4::set_batch_pad_offsets(v.clone());
+        #[cfg(feature = "model-gemma3")]
+        gemma3::set_batch_pad_offsets(v.clone());
+        qwen3::set_batch_pad_offsets(v);
+    }
+
+    #[allow(unused_variables)]
+    fn is_glm4(model: &LoadedModel) -> bool {
+        #[cfg(feature = "model-glm4")]
+        {
+            return matches!(model, LoadedModel::Glm4(_));
+        }
+        #[cfg(not(feature = "model-glm4"))]
+        false
     }
 
     impl LoadedModel {
@@ -148,10 +219,12 @@ mod inner {
                 "qwen3" => qwen3::load_qwen3_model(dir)
                     .map(LoadedModel::Qwen3)
                     .map_err(|e| format!("mlx: load qwen3 {}: {e}", dir.display())),
+                #[cfg(feature = "model-qwen3-moe")]
                 "qwen3_moe" => qwen3_moe::load_qwen3_moe_model(dir)
                     .map(LoadedModel::Qwen3Moe)
                     .map_err(|e| format!("mlx: load qwen3_moe {}: {e}", dir.display())),
                 // OpenAI gpt-oss (MXFP4 MoE + attention sinks + sliding-window + YaRN).
+                #[cfg(feature = "model-gpt-oss")]
                 "gpt_oss" => gpt_oss::load_gpt_oss_model(dir)
                     .map(LoadedModel::GptOss)
                     .map_err(|e| format!("mlx: load gpt_oss {}: {e}", dir.display())),
@@ -160,6 +233,7 @@ mod inner {
                     .map(LoadedModel::Qwen35)
                     .map_err(|e| format!("mlx: load qwen3_5 {}: {e}", dir.display())),
                 // Qwen3.6 MoE (wrapper `qwen3_5_moe`, text `qwen3_5_moe_text`).
+                #[cfg(feature = "model-qwen3-5-moe")]
                 "qwen3_5_moe" | "qwen3_5_moe_text" => qwen3_5_moe::load_qwen3_5_moe_model(dir)
                     .map(LoadedModel::Qwen35Moe)
                     .map_err(|e| format!("mlx: load qwen3_5_moe {}: {e}", dir.display())),
@@ -169,36 +243,45 @@ mod inner {
                 // `mlx_lm`. The only delta is Mistral's sliding-window attention; the llama
                 // path runs full attention, so it matches the reference except for contexts
                 // beyond the window (4096), which the KV preflight already bounds.
+                #[cfg(feature = "model-llama")]
                 "llama" | "mistral" => llama::load_llama_model(dir)
                     .map(LoadedModel::Llama)
                     .map_err(|e| format!("mlx: load llama/mistral {}: {e}", dir.display())),
                 // Phi-3 (`model_type: "phi3"`) — the Llama arch with FUSED qkv / gate_up
                 // projections; the loader splits them and returns a `llama::Model`, so it runs
                 // on the existing Llama path (Generate, batched decode, etc.).
+                #[cfg(feature = "model-llama")]
                 "phi3" => llama::load_phi3_model(dir)
                     .map(LoadedModel::Llama)
                     .map_err(|e| format!("mlx: load phi3 {}: {e}", dir.display())),
                 // Gemma 3 (text). The wrapper config maps `text_config.model_type`, so both the
                 // text-only `gemma3_text` and the multimodal `gemma3` wrapper land here.
+                #[cfg(feature = "model-gemma3")]
                 "gemma3_text" | "gemma3" => gemma3::load_gemma3_model(dir)
                     .map(LoadedModel::Gemma3)
                     .map_err(|e| format!("mlx: load gemma3 {}: {e}", dir.display())),
                 // Qwen2 / Qwen2.5 / Qwen2.5-Coder (dense; qkv-bias, no q/k-norm).
+                #[cfg(feature = "model-qwen2")]
                 "qwen2" => qwen2::load_qwen2_model(dir)
                     .map(LoadedModel::Qwen2)
                     .map_err(|e| format!("mlx: load qwen2 {}: {e}", dir.display())),
                 // GLM-4 dense (qkv-bias, partial-traditional rope, 4-norm sandwich, fused gate_up).
+                #[cfg(feature = "model-glm4")]
                 "glm4" => glm4::load_glm4_model(dir)
                     .map(LoadedModel::Glm4)
                     .map_err(|e| format!("mlx: load glm4 {}: {e}", dir.display())),
                 // DeepSeek-V2 family (MLA latent attention + DeepSeek MoE); e.g. DeepSeek-Coder-V2-Lite.
+                #[cfg(feature = "model-deepseek-v2")]
                 "deepseek_v2" => deepseek_v2::load_deepseek_v2_model(dir)
                     .map(LoadedModel::DeepseekV2)
                     .map_err(|e| format!("mlx: load deepseek_v2 {}: {e}", dir.display())),
                 // GLM-4.7-Flash (absorbed MLA + DeepSeek-V3 MoE routing).
+                #[cfg(feature = "model-glm4-moe-lite")]
                 "glm4_moe_lite" => glm4_moe_lite::load_glm4_moe_lite_model(dir)
                     .map(LoadedModel::Glm4MoeLite)
                     .map_err(|e| format!("mlx: load glm4_moe_lite {}: {e}", dir.display())),
+                // A family compiled out lands here too — same message as one we never ported, which
+                // is honest: this binary genuinely cannot load it.
                 other => Err(format!("mlx: unsupported model_type '{other}'")),
             }
         }
@@ -1140,29 +1223,42 @@ mod inner {
     /// per-row-rope path; hybrid Qwen3.6 (`Qwen35`/`Qwen35Moe`) batches its full-attention
     /// layers the same way and STACKS the fixed-size GatedDeltaNet state per row. (Llama /
     /// Qwen2 have their own attention with no per-row-rope path yet.)
+    // A `match` with cfg'd ARMS rather than a `matches!` or-pattern: `#[cfg]` cannot sit on one
+    // alternative of a pattern, but it can on an arm. The `_` arm keeps the non-batchable
+    // families (GptOss/DeepseekV2/Glm4MoeLite) — and any compiled-out one — at false.
     fn is_batchable_arch(model: &LoadedModel) -> bool {
-        matches!(
-            model,
-            LoadedModel::Qwen3(_)
-                | LoadedModel::Qwen3Moe(_)
-                | LoadedModel::Qwen35(_)
-                | LoadedModel::Qwen35Moe(_)
-                | LoadedModel::Llama(_)
-                | LoadedModel::Qwen2(_)
-                | LoadedModel::Gemma3(_)
-                // Glm4 attention reads BATCH_PAD_OFFSETS for per-row rope when set, falling
-                // back to scalar offset for serial decode — same pattern as Llama/Qwen2.
-                // dense_forward + run_batch both already handle LoadedModel::Glm4.
-                // GptOss excluded: builds per-layer full/swa masks from a single scalar
-                // cache.offset() — correct batching needs per-row mask construction.
-                | LoadedModel::Glm4(_)
-        )
+        match model {
+            LoadedModel::Qwen3(_) | LoadedModel::Qwen35(_) => true,
+            #[cfg(feature = "model-qwen3-moe")]
+            LoadedModel::Qwen3Moe(_) => true,
+            #[cfg(feature = "model-qwen3-5-moe")]
+            LoadedModel::Qwen35Moe(_) => true,
+            #[cfg(feature = "model-llama")]
+            LoadedModel::Llama(_) => true,
+            #[cfg(feature = "model-qwen2")]
+            LoadedModel::Qwen2(_) => true,
+            #[cfg(feature = "model-gemma3")]
+            LoadedModel::Gemma3(_) => true,
+            // Glm4 attention reads BATCH_PAD_OFFSETS for per-row rope when set, falling
+            // back to scalar offset for serial decode — same pattern as Llama/Qwen2.
+            // dense_forward + run_batch both already handle LoadedModel::Glm4.
+            // GptOss excluded: builds per-layer full/swa masks from a single scalar
+            // cache.offset() — correct batching needs per-row mask construction.
+            #[cfg(feature = "model-glm4")]
+            LoadedModel::Glm4(_) => true,
+            _ => false,
+        }
     }
 
     /// Hybrid (Qwen3.6) arches — routed to [`run_batch_hybrid`] (heterogeneous cache)
     /// instead of the dense [`run_batch`].
     fn is_hybrid_arch(model: &LoadedModel) -> bool {
-        matches!(model, LoadedModel::Qwen35(_) | LoadedModel::Qwen35Moe(_))
+        match model {
+            LoadedModel::Qwen35(_) => true,
+            #[cfg(feature = "model-qwen3-5-moe")]
+            LoadedModel::Qwen35Moe(_) => true,
+            _ => false,
+        }
     }
 
     /// A request joins a batch if it needs neither a repetition penalty nor a fixed seed —
@@ -1392,13 +1488,16 @@ mod inner {
     /// internally and carries a non-truncatable GatedDeltaNet recurrent state, so it
     /// reuses via truncate-`Full` + restore-`Linear`-from-snapshot (`HybridPrefix`).
     fn is_dense(model: &LoadedModel) -> bool {
-        matches!(
-            model,
-            LoadedModel::Qwen3(_)
-                | LoadedModel::Qwen3Moe(_)
-                | LoadedModel::Llama(_)
-                | LoadedModel::Qwen2(_)
-        )
+        match model {
+            LoadedModel::Qwen3(_) => true,
+            #[cfg(feature = "model-qwen3-moe")]
+            LoadedModel::Qwen3Moe(_) => true,
+            #[cfg(feature = "model-llama")]
+            LoadedModel::Llama(_) => true,
+            #[cfg(feature = "model-qwen2")]
+            LoadedModel::Qwen2(_) => true,
+            _ => false,
+        }
     }
 
     // Process-unique tool-call id is shared: `crate::engine::next_tool_call_id`.
@@ -1457,18 +1556,30 @@ mod inner {
             }
             match &mut *self.model {
                 LoadedModel::Qwen3(m) => dense!(qwen3::Generate::new(m, cache, temp, pt)),
+                #[cfg(feature = "model-qwen3-moe")]
                 LoadedModel::Qwen3Moe(m) => dense!(qwen3_moe::Generate::new(m, cache, temp, pt)),
+                #[cfg(feature = "model-gpt-oss")]
                 LoadedModel::GptOss(m) => dense!(gpt_oss::Generate::new(m, cache, temp, pt)),
+                #[cfg(feature = "model-llama")]
                 LoadedModel::Llama(m) => dense!(llama::Generate::new(m, cache, temp, pt)),
+                #[cfg(feature = "model-qwen2")]
                 LoadedModel::Qwen2(m) => dense!(qwen2::Generate::new(m, cache, temp, pt)),
+                #[cfg(feature = "model-glm4")]
                 LoadedModel::Glm4(m) => dense!(glm4::Generate::new(m, cache, temp, pt)),
+                #[cfg(feature = "model-deepseek-v2")]
                 LoadedModel::DeepseekV2(m) => dense!(deepseek_v2::Generate::new(m, cache, temp, pt)),
+                #[cfg(feature = "model-glm4-moe-lite")]
                 LoadedModel::Glm4MoeLite(m) => dense!(glm4_moe_lite::Generate::new(m, cache, temp, pt)),
+                #[cfg(feature = "model-gemma3")]
                 LoadedModel::Gemma3(m) => dense!(gemma3::Generate::new(m, cache, temp, pt)),
                 // Hybrid arches never reach here — run_job routes them to stream_generation.
-                LoadedModel::Qwen35(_) | LoadedModel::Qwen35Moe(_) => Box::new(std::iter::once(
-                    Err("DenseMlxEngine: hybrid arch must use stream_generation".to_owned()),
-                )),
+                LoadedModel::Qwen35(_) => Box::new(std::iter::once(Err(
+                    "DenseMlxEngine: hybrid arch must use stream_generation".to_owned(),
+                ))),
+                #[cfg(feature = "model-qwen3-5-moe")]
+                LoadedModel::Qwen35Moe(_) => Box::new(std::iter::once(Err(
+                    "DenseMlxEngine: hybrid arch must use stream_generation".to_owned(),
+                ))),
             }
         }
     }
@@ -1606,7 +1717,7 @@ mod inner {
             // GLM-4 uses a `name\n{json}` envelope (no `<tool_call>`); the tool dialect (from the
             // template markers) is the one place that decides this.
             let glm = dialect_for(template).uses_glm_envelope();
-            let harmony = matches!(model, LoadedModel::GptOss(_));
+            let harmony = is_gpt_oss(model);
             let driver =
                 ToolConstraint::from_job(&job, glm, harmony).expect("constrained job has tools");
             return if is_hybrid_arch(model) {
@@ -1720,7 +1831,7 @@ mod inner {
         // structural tokens (<|channel|>, <|message|>, "functions", JSON punctuation),
         // so penalizing repeats corrupts the tool-call format. Verified: temp 1.0 +
         // no penalty completes 6/6 where greedy completes 0/6. Floor tunable via env.
-        if matches!(model, LoadedModel::GptOss(_)) {
+        if is_gpt_oss(model) {
             let min_temp = std::env::var("ROZUM_GPTOSS_MIN_TEMP")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -1759,7 +1870,7 @@ mod inner {
         // (which also gates the Qwen `<tool_call>` constraints that harmony must
         // avoid), so include it here explicitly. Without reuse every turn re-prefills
         // the whole growing conversation — brutally slow for multi-turn agents.
-        let dense = is_dense(model) || matches!(model, LoadedModel::GptOss(_));
+        let dense = is_dense(model) || is_gpt_oss(model);
         let mut cache: Vec<Option<ConcatKeyValueCache>> = Vec::new();
         // Hybrid: a pre-populated heterogeneous cache when reusing (else None → the
         // hybrid `Generate` builds a fresh one via `init_cache`).
@@ -1845,6 +1956,7 @@ mod inner {
                     );
                     hybrid_result = Some(generator.into_cache_and_snapshot());
                 }
+                #[cfg(feature = "model-qwen3-5-moe")]
                 LoadedModel::Qwen35Moe(m) => {
                     let mut generator = match hcache.take() {
                         Some(c) => qwen3_5_moe::Generate::with_cache(m, temp, &prompt_tokens, c),
@@ -1884,7 +1996,7 @@ mod inner {
             // prior per-arm `stream_generation` (same generator + same shared loop).
             let repeat_guard =
                 !matches!(std::env::var("ROZUM_REPEAT_GUARD").as_deref(), Ok("0"));
-            let harmony = matches!(model, LoadedModel::GptOss(_));
+            let harmony = is_gpt_oss(model);
             let mut engine = DenseMlxEngine {
                 model,
                 cache: &mut cache,
@@ -1958,6 +2070,7 @@ mod inner {
                 let input = qwen3::ModelInput { inputs: inp, mask, cache };
                 <qwen3::Model as Module<qwen3::ModelInput<'_, ConcatKeyValueCache>>>::forward(m, input)
             }
+            #[cfg(feature = "model-qwen3-moe")]
             LoadedModel::Qwen3Moe(m) => {
                 let input = qwen3::ModelInput { inputs: inp, mask, cache };
                 <qwen3_moe::Model as Module<qwen3::ModelInput<'_, ConcatKeyValueCache>>>::forward(
@@ -1966,6 +2079,7 @@ mod inner {
             }
             // gpt-oss reuses qwen3's `ModelInput`; it ignores the external `mask` and
             // builds its own per-layer full/sliding masks internally.
+            #[cfg(feature = "model-gpt-oss")]
             LoadedModel::GptOss(m) => {
                 let input = qwen3::ModelInput { inputs: inp, mask, cache };
                 <gpt_oss::Model as Module<qwen3::ModelInput<'_, ConcatKeyValueCache>>>::forward(
@@ -1975,18 +2089,21 @@ mod inner {
             // Llama family (Llama 3.x, Mistral, Phi-3, SmolLM …) — its `Attention` reads
             // `llama::BATCH_PAD_OFFSETS` for per-row rope and takes the key-pad mask via
             // `ModelInput.mask`, so the same ragged batched cache + masks drive it.
+            #[cfg(feature = "model-llama")]
             LoadedModel::Llama(m) => {
                 let input = llama::ModelInput { inputs: inp, mask, cache };
                 <llama::Model as Module<llama::ModelInput<'_, ConcatKeyValueCache>>>::forward(
                     m, input,
                 )
             }
+            #[cfg(feature = "model-qwen2")]
             LoadedModel::Qwen2(m) => {
                 let input = qwen2::ModelInput { inputs: inp, mask, cache };
                 <qwen2::Model as Module<qwen2::ModelInput<'_, ConcatKeyValueCache>>>::forward(
                     m, input,
                 )
             }
+            #[cfg(feature = "model-glm4")]
             LoadedModel::Glm4(m) => {
                 let input = glm4::ModelInput { inputs: inp, mask, cache };
                 <glm4::Model as Module<glm4::ModelInput<'_, ConcatKeyValueCache>>>::forward(
@@ -1995,6 +2112,7 @@ mod inner {
             }
             // Gemma 3: per-row rope (BATCH_PAD_OFFSETS) + it derives per-layer local masks from
             // the pad mask we pass (global) + its sliding window.
+            #[cfg(feature = "model-gemma3")]
             LoadedModel::Gemma3(m) => {
                 let input = gemma3::ModelInput { inputs: inp, mask, cache };
                 <gemma3::Model as Module<gemma3::ModelInput<'_, ConcatKeyValueCache>>>::forward(
@@ -3004,7 +3122,7 @@ mod inner {
             && !job.tools.is_empty()
             && (is_dense(model)
                 || is_hybrid_arch(model)
-                || (gptoss_constrain_enabled() && matches!(model, LoadedModel::GptOss(_))))
+                || (gptoss_constrain_enabled() && is_gpt_oss(model)))
     }
 
     /// gpt-oss **harmony** tool-call constraining. Default **OFF** while it's validated — gpt-oss
@@ -3657,7 +3775,7 @@ mod inner {
         // worker's `temp.max(ROZUM_GPTOSS_MIN_TEMP)`) is bypassed when we route here. Apply the same
         // floor: the masked region still forces valid tokens (temp only picks AMONG the valid set), the
         // free analysis region samples at ~1.0 so the CoT doesn't loop. Fixes the constrained 1/5 timeout.
-        if matches!(model, LoadedModel::GptOss(_)) {
+        if is_gpt_oss(model) {
             let min_temp = std::env::var("ROZUM_GPTOSS_MIN_TEMP")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -3748,7 +3866,7 @@ mod inner {
             // Harmony decode/finalize only for gpt-oss under the constrained path (so the markers
             // survive for the harmony envelope + `parse_harmony`). gpt-oss is never a hybrid arch, so
             // this is false at the hybrid prefill.
-            harmony: gptoss_constrain_enabled() && matches!(model, LoadedModel::GptOss(_)),
+            harmony: gptoss_constrain_enabled() && is_gpt_oss(model),
         };
         Some((seq, cache, row))
     }
@@ -3945,19 +4063,9 @@ mod inner {
             let kidx = arange::<_, i32>(0, k_cur, None).unwrap().index((NewAxis, ..));
             let padd = pad_off.index((.., NewAxis));
             let dec_mask = kidx.ge(&padd).unwrap().index((.., NewAxis, NewAxis, ..));
-            // Set the per-row offsets on every dense arch's thread-local — only the loaded
-            // model's attention reads its own, so the extra setters are harmless no-ops.
-            llama::set_batch_pad_offsets(Some(pad_off.clone()));
-            qwen2::set_batch_pad_offsets(Some(pad_off.clone()));
-            glm4::set_batch_pad_offsets(Some(pad_off.clone()));
-            gemma3::set_batch_pad_offsets(Some(pad_off.clone()));
-            set_batch_pad_offsets(Some(pad_off));
+            set_all_dense_batch_pad_offsets(Some(pad_off));
             let out = dense_forward(model, &y, Some(&dec_mask), &mut bcache);
-            set_batch_pad_offsets(None);
-            llama::set_batch_pad_offsets(None);
-            qwen2::set_batch_pad_offsets(None);
-            glm4::set_batch_pad_offsets(None);
-            gemma3::set_batch_pad_offsets(None);
+            set_all_dense_batch_pad_offsets(None);
             logits = match out {
                 Ok(l) => l.index((.., -1, ..)),
                 Err(e) => {
@@ -3980,6 +4088,7 @@ mod inner {
     fn hybrid_init_cache(model: &LoadedModel) -> Vec<qwen3_5::LayerCache> {
         match model {
             LoadedModel::Qwen35(m) => m.init_cache(),
+            #[cfg(feature = "model-qwen3-5-moe")]
             LoadedModel::Qwen35Moe(m) => m.init_cache(),
             _ => Vec::new(),
         }
@@ -3992,6 +4101,7 @@ mod inner {
     ) -> Result<Array, Exception> {
         match model {
             LoadedModel::Qwen35(m) => m.prefill(prompt, cache),
+            #[cfg(feature = "model-qwen3-5-moe")]
             LoadedModel::Qwen35Moe(m) => m.prefill(prompt, cache),
             _ => Err(Exception::custom("hybrid_prefill: non-hybrid arch")),
         }
@@ -4004,6 +4114,7 @@ mod inner {
     ) -> Result<Array, Exception> {
         match model {
             LoadedModel::Qwen35(m) => m.forward(inp, cache),
+            #[cfg(feature = "model-qwen3-5-moe")]
             LoadedModel::Qwen35Moe(m) => m.forward(inp, cache),
             _ => Err(Exception::custom("hybrid_forward: non-hybrid arch")),
         }
@@ -4064,7 +4175,7 @@ mod inner {
             // Harmony decode/finalize only for gpt-oss under the constrained path (so the markers
             // survive for the harmony envelope + `parse_harmony`). gpt-oss is never a hybrid arch, so
             // this is false at the hybrid prefill.
-            harmony: gptoss_constrain_enabled() && matches!(model, LoadedModel::GptOss(_)),
+            harmony: gptoss_constrain_enabled() && is_gpt_oss(model),
         };
         Some((seq, cache, row))
     }
@@ -6985,7 +7096,9 @@ mod tests {
     // (3B active). Python mlx_lm.generate does ~100 t/s on this; this measures
     // whether our native runtime is at parity on the MoE too. Run:
     //   cargo test --features mlx-native -- --ignored --nocapture mlx_qwen35_moe_decode_bench
-    #[cfg(feature = "mlx-native")]
+    // Gated on the FAMILY, not just the runtime: it loads a qwen3_5_moe checkpoint, whose
+    // architecture is compiled out unless `model-qwen3-5-moe` is on.
+    #[cfg(all(feature = "mlx-native", feature = "model-qwen3-5-moe"))]
     #[test]
     #[ignore = "perf bench; requires local mlx-community/Qwen3.6-35B-A3B-4bit"]
     fn mlx_qwen35_moe_decode_bench() {
@@ -7524,7 +7637,7 @@ mod tests {
     // but using mlx_lm::models::glm4. The Glm4 attention reads BATCH_PAD_OFFSETS for
     // per-row rope (identical pattern to Llama/Qwen2), so batch output must match serial.
     //   cargo test --features mlx-native -- --ignored --nocapture mlx_glm4_batched_ragged_byte_exact
-    #[cfg(feature = "mlx-native")]
+    #[cfg(all(feature = "mlx-native", feature = "model-glm4"))]
     #[test]
     #[ignore = "ragged batched-decode byte-exact; requires THUDM/glm-4-9b-chat-hf (any mlx-community GLM4-4bit)"]
     fn mlx_glm4_batched_ragged_byte_exact() {

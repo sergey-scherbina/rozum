@@ -35,6 +35,35 @@
   **Scope**: only nested-config (multimodal) snapshots. Today just Qwen3.5-4B is installed, but per the VL
   port the flagship **Qwen3.6-35B-A3B also has vision** → same layout, same bug — re-check when installed.
 
+- [x] **gw-optional-families-cargo** — DONE (fork `2df597b7`, rozum this commit). Executed the operator's
+  decision (fork-level per-model features). **TWO MATERIAL FINDINGS — read these before believing the old
+  estimate, both measured not guessed:**
+  1. **The scope estimate was ~4x too PESSIMISTIC.** The board said "~20+ sites per family / ~80-site cfg
+     cascade". Real count for the four named families: **21 sites** (GptOss 12, Glm4 5, Glm4MoeLite 2,
+     DeepseekV2 2); ~50 across all nine. And most were `matches!(model, LoadedModel::GptOss(_))`, which
+     collapse to ONE cfg via a family predicate (`is_gpt_oss`/`is_glm4`) instead of a cfg per call site.
+     The dreaded "cfg on every arm or exhaustive matches break" mostly did not materialize: the big
+     dispatches (`dense_forward`, hybrid init/prefill/forward) already had `_` fallbacks.
+  2. **The WIN is much smaller than "real leaner binary" implied: 50.34 MB -> 49.16 MB = 1.18 MB (2.3%).**
+     The mlx-lm rlib itself drops 7.02 -> 2.39 MB (-66%), but only monomorphized-and-linked code reaches
+     the binary, so 4.6 MB of rlib becomes ~1.2 MB of binary. Build time is unmoved (~1s of a 2m22s build):
+     **mlx-sys/MLX C++ dominates everything** (33 MB rlib, 715 MB of build artifacts) and is untouched by
+     any of this. If a genuinely smaller rozum is ever the goal, MLX C++ is the only lever that matters —
+     model gating is noise next to it.
+  SHIPPED ANYWAY because it is done, correct, default-ON (zero change to what rozum ships) and cheap to
+  keep: `default = ["mlx-native","all-models"]`, and `mlx-native` is now the RUNTIME only so lean is
+  reachable (`--no-default-features --features mlx-native` = qwen core; `+rozum-mlx/model-glm4` to pick).
+  Fork: families are leaves (nothing references them but their `pub mod` line) → `#[cfg]` + `[features]`,
+  `default = ["all-models"]` so other consumers are unaffected. The qwen3/qwen3_5/qwen3_5_vision/gated_delta
+  CORE is deliberately UNGATED: **qwen3 <-> qwen3_5 reference each other and cargo features must be a DAG**,
+  plus lib.rs impls ModelInput for qwen3. One edge survives: `qwen3-5-moe = ["qwen3-moe"]`.
+  VERIFIED: 7 feature combos compile (lib AND tests) incl. `--no-default-features`; lean binary genuinely
+  lacks the `mlx: load glm4|deepseek_v2|gpt_oss|glm4_moe_lite` loaders while keeping qwen + the
+  unsupported-type fallback; default binary unchanged at 50.34 MB, still loads + serves (context 262144);
+  609 workspace tests green. GOTCHA hit on the way: two `#[ignore]`d benches were gated on `mlx-native`
+  but loaded glm4/qwen3_5_moe checkpoints → they broke the LEAN *test* build only (the lib was fine) —
+  the same `cargo check` blind spot as gw-test-suite-not-compiling. Gated them on their family.
+
 - [x] **gw-test-suite-not-compiling** — DONE (`08c9d9a`). Found by running `cargo test -p rozum-gateway`
   right after the merge above (it is NOT part of any routine here). **The gateway's entire 106-test suite
   had silently stopped running**: 62 compile errors, so 0 tests executed. PRE-EXISTING, not from today's
@@ -118,7 +147,7 @@
   DTOs+mapping+SSE sub-parts are cleaner than the handler. **DECISION (operator): DO IT FULLY** — all 3
   dialects, `pub(crate)` the shared helpers, tests + E2E as the net, dialect-by-dialect with a commit each.
 
-- [~] **gw-optional-families-cargo** — MATERIAL FINDINGS on attempt (2026-07-14) change the value:
+- [x] **gw-optional-families-cargo** — SUPERSEDED by the DONE entry at the top of this sprint (executed 2026-07-15; the ~80-site estimate below proved ~4x pessimistic — real: 21 sites — and the win proved ~2.3% of binary, not "real leaner binary"). Original analysis kept for the record:
   (1) **mistralrs is ALREADY compile-time-optional + OFF by default** — `default = ["mlx-native","gguf"]`
   excludes `mistralrs = ["rozum-mistralrs/mistralrs"]`, and `try_build_mistralrs_backend` has a
   `#[cfg(not(feature="mistralrs"))]` None-stub. The heavy candle/mistral.rs dep is NOT in the default build.
