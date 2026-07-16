@@ -16,13 +16,12 @@ name = "rozum-gateway"
 path = "src/main.rs"
 
 [features]
-# Default = the pure-Rust native MLX runtime (primary in-process backend) PLUS the
-# GGUF backend (the fallback for GGUF/llama.cpp files, tried after native MLX), so
-# `cargo build` runs the Qwen3 / Qwen3.6 family out of the box AND opens local
-# `.gguf` / `lmstudio:` / `ollama:` models. Heavy first build: mlx-sys compiles
-# MLX C++ and llama-cpp-2 compiles llama.cpp (cmake + full Xcode). Use
-# `--no-default-features` for just the meeting-room runtime (no Metal toolchain),
-# or `--features mistralrs` for the broader-catalog candle backend.
+# Default = the pure-Rust native MLX runtime (primary in-process backend) plus every
+# ported model family. GGUF/llama.cpp is deliberately opt-in (`--features gguf`), so
+# the shipped default avoids the separate CMake/llama.cpp build while Qwen/MLX works
+# out of the box. The first MLX build is still heavy because mlx-sys compiles MLX C++.
+# Use `--no-default-features` for the engine-free durable host, `--features gguf` for
+# local GGUF/lmstudio/ollama assets, or `--features mistralrs` for the candle backend.
 #
 # PORTABLE / non-Mac build: `cargo build --no-default-features` — the durable core
 # (SPI, gateway w/ HTTP backends, agent, cascade, concurrency, config, meeting room)
@@ -120,4 +119,3 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # See patches/README.md and docs/specs/mistralrs-chunked-prefill.md.
 [patch.crates-io]
 mistralrs = { git = "https://github.com/sergey-scherbina/mistral.rs.git", rev = "6e98a45e23a834543c9ae611d579818b343a24f0" }
-

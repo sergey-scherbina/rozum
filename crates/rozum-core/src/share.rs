@@ -125,20 +125,21 @@ pub fn remove_lease(pid: u32) {
 /// (rather than exiting cleanly) leaves a lease whose mtime stays fresh for `fresh_secs`, so it kept
 /// counting as an attached client and blocked `gateway stop` — the phone's "выгрузить" then silently
 /// 409'd on a dead client (seen live 2026-07-08, pid gone but lease 41s old inside the 60s window).
-/// So also verify the PID is alive via `kill(pid, 0)`; a dead-PID lease is reaped immediately.
+/// So also verify the PID is alive using the platform process API; a dead-PID lease is reaped
+/// immediately.
 pub fn live_lease_count(fresh_secs: u64) -> usize {
     let mut live = 0;
     let Ok(entries) = std::fs::read_dir(leases_dir()) else {
         return 0;
     };
     for entry in entries.flatten() {
-        // Filename → PID. `kill(pid, 0) == 0` ⇒ the process exists (matches control.rs `pid_alive`).
+        // Filename → PID. The platform liveness probe must confirm that the process exists.
         // An unparseable name isn't a client PID → don't judge it by liveness, fall back to mtime.
         let alive = entry
             .file_name()
             .to_str()
             .and_then(|s| s.parse::<u32>().ok())
-            .map(|pid| pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0)
+            .map(pid_alive)
             .unwrap_or(true);
         if !alive {
             let _ = std::fs::remove_file(entry.path()); // reap dead-PID lease now
@@ -159,6 +160,35 @@ pub fn live_lease_count(fresh_secs: u64) -> usize {
         }
     }
     live
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+}
+
+#[cfg(windows)]
+fn pid_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    if pid == 0 {
+        return false;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        // Access denied means the process exists but is protected; only the documented
+        // "no such process" error is safe to reap. Unknown errors fail open.
+        return unsafe { GetLastError() } != ERROR_INVALID_PARAMETER;
+    }
+    let mut exit_code = 0;
+    let queried = unsafe { GetExitCodeProcess(handle, &mut exit_code) } != 0;
+    unsafe { CloseHandle(handle) };
+    !queried || exit_code == STILL_ACTIVE as u32
 }
 
 // ── Poison set (shared, TTL'd) ───────────────────────────────────────────────
@@ -1195,6 +1225,12 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn pid_liveness_recognizes_current_process_and_zero() {
+        assert!(pid_alive(std::process::id()));
+        assert!(!pid_alive(0));
+    }
 
     // The admission decision must pass BOTH levers: the cross-process reserved-footprint ledger AND
     // the actual free-RAM check (the truth lever that prevents a load from overcommitting the host →

@@ -212,11 +212,11 @@ fn symlink_into_snapshot(snap: &Path, path: &str, blob: &str) -> Result<(), Stri
     if let Some(parent) = link.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("hf: mkdir {}: {e}", parent.display()))?;
     }
-    let ups = 2 + path.matches('/').count();
-    let target = format!("{}blobs/{blob}", "../".repeat(ups));
     let _ = std::fs::remove_file(&link); // replace a stale link
     #[cfg(unix)]
     {
+        let ups = 2 + path.matches('/').count();
+        let target = format!("{}blobs/{blob}", "../".repeat(ups));
         std::os::unix::fs::symlink(&target, &link)
             .map_err(|e| format!("hf: symlink {}: {e}", link.display()))
     }

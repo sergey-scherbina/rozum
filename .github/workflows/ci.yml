@@ -1,7 +1,7 @@
 name: ci
 
 # Three gates:
-#  - macos: the default build (native MLX + GGUF, which need Xcode/Metal) + the lib tests.
+#  - macos: every shipped binary with the default native-MLX feature set + every library test.
 #  - linux: the **portable durable core** (`--no-default-features`: no native backends — the SPI,
 #    gateway w/ HTTP backends, agent runtime, cascade router, concurrency, config, meeting room).
 #    This enforces that the durable layer stays Linux-buildable, the central claim of
@@ -40,10 +40,10 @@ jobs:
       # nine crates' suites were never built here. That is exactly how rozum-gateway's 106 tests
       # rotted to 62 compile errors unnoticed (`08c9d9a`) — `cargo check`/`cargo build` skip
       # `#[cfg(test)]` code, so every signal we watched stayed green while 0 tests ran.
-      - name: Build + test (default features, ALL crates)
-        run: |
-          cargo build --lib --bin rozum
-          cargo test --workspace --lib
+      - name: Build every binary (shipped default features)
+        run: cargo build --workspace --bins
+      - name: Test every workspace library (shipped default features)
+        run: cargo test --workspace --lib
 
   linux-core:
     name: linux — portable core (no native backends)
@@ -61,11 +61,12 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
-      # No Metal/Xcode toolchain on Linux: build + test the durable core only.
-      - name: Build + test (--no-default-features)
-        run: |
-          cargo build --no-default-features --lib --bin rozum
-          cargo test --no-default-features --lib
+      # No Metal/Xcode toolchain on Linux: build every engine-free entrypoint and compile every
+      # workspace library's test target. `--workspace` is as load-bearing here as on macOS.
+      - name: Build every binary (--no-default-features)
+        run: cargo build --workspace --no-default-features --bins
+      - name: Test every workspace library (--no-default-features)
+        run: cargo test --workspace --no-default-features --lib
 
   windows-core:
     name: windows — portable core (no native backends)
@@ -83,9 +84,20 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
-      # No native backends: this is the durable-layer portability signal. Windows-specific
-      # daemon IPC/service gaps stay tracked in BACKLOG until this job exposes the next seam.
-      - name: Build + test (--no-default-features)
-        run: |
-          cargo build --no-default-features --lib --bin rozum
+      # Honest Windows scope: these packages contain the portable SPI/model/agent layers and
+      # feature-off engine interfaces. Excluded until their documented Unix seams are ported:
+      #   rozum-meeting/meet/tui/web — Unix-domain daemon IPC
+      #   rozum-gateway + root rozum-gateway — PTY/tmux/control-server/service-install paths
+      # The thin dispatcher itself is portable (spawn+wait on Windows, exec on Unix).
+      - name: Build the portable dispatcher
+        run: cargo build --no-default-features -p rozum-cli --bin rozum
+      - name: Test the declared portable-core packages
+        run: >-
           cargo test --no-default-features --lib
+          -p rozum-core
+          -p rozum-models
+          -p rozum-agent
+          -p rozum-gguf
+          -p rozum-mistralrs
+          -p rozum-mlx
+          -p rozum-x86
