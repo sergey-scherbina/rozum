@@ -1,6 +1,6 @@
 feature/ci-green-baseline 2026-07-16T20:02:49Z
 agent: codex-clear-lynx
-heartbeat: 2026-07-16T20:02:49Z
-status: not-started
-done-so-far: audited latest GitHub Actions failures and identified stale binary target plus Windows OpenSSL failure
-next: create isolated worktree and commit the CI truth/spec update before implementation
+heartbeat: 2026-07-16T20:03:08Z
+status: in-progress
+done-so-far: audited latest GitHub Actions failures; claim published; isolated worktree created
+next: write and commit the CI truth/spec update before implementation
