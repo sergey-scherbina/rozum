@@ -1028,10 +1028,11 @@ struct WaiterTicket {
     pid: u32,
     footprint_bytes: u64,
     path: PathBuf,
-    _lock: std::fs::File,
+    lock: Option<std::fs::File>,
 }
 impl Drop for WaiterTicket {
     fn drop(&mut self) {
+        drop(self.lock.take());
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -1072,7 +1073,7 @@ fn enqueue_waiter(pid: u32, footprint_bytes: u64, prio: u8) -> Option<WaiterTick
         pid,
         footprint_bytes,
         path,
-        _lock: file,
+        lock: Some(file),
     })
 }
 
@@ -1384,8 +1385,12 @@ mod tests {
         assert!(scanned.contains(&(first.prio, first.seq, first.pid, 5 * GB)));
         assert!(scanned.contains(&(second.prio, second.seq, second.pid, 9 * GB)));
 
+        let first_path = first.path.clone();
+        let second_path = second.path.clone();
         drop(second);
         drop(first);
+        assert!(!first_path.exists(), "first ticket removed after closing its lock");
+        assert!(!second_path.exists(), "second ticket removed after closing its lock");
         residency_env_clear(&dir);
     }
 
