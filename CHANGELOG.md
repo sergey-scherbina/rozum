@@ -1,5 +1,34 @@
 # Changelog
 
+## ci: truthful workspace gates on macOS, Linux, and Windows
+Completed: 2026-07-16 · `9506811`, `06de22c`, `645f5e7`, `5b675ea`, `a3595c6`
+
+CI had stopped testing the product after the binary split: every job still requested a root
+`--bin rozum`, but the root package now produces `rozum-gateway` and the thin `rozum` dispatcher
+lives in `rozum-cli`. All three jobs failed before reaching the broadened workspace tests, so the
+green-looking coverage plan and the executable workflow no longer described the same system.
+
+The restored gate builds every workspace binary and tests every workspace library on macOS with
+the shipped `mlx-native + all-models` defaults; Linux does the same with default features disabled.
+Windows builds the portable `.exe` dispatcher and tests an explicit allow-list of core/model/agent
+and feature-off engine packages. Meeting, TUI, web, control/PTTY, and service-install crates remain
+named Unix-seam exclusions, so the job does not pretend the full native-Windows host is supported.
+
+The real Windows runner then exposed lock semantics that Unix had hidden. The dispatcher now uses
+`.exe` sibling names and spawn/wait instead of Unix `exec`; PID liveness uses Win32 process APIs.
+Residency wait tickets publish footprint in their filename, and resident lifetime locks moved to
+sidecars while JSON metadata stays readable. This preserves queue ordering and RAM accounting when
+another process holds an exclusive Windows lock; legacy directly locked Unix reservations remain a
+supported read path. Drop paths close handles before unlinking, with regression assertions for both
+resident and waiter cleanup.
+
+GitHub Actions run
+[`29533946535`](https://github.com/sergey-scherbina/rozum/actions/runs/29533946535) is the first
+all-green macOS/Linux/Windows baseline. Local verification additionally passed all 133
+`rozum-core` tests, both workspace build/test profiles, focused residency/queue tests, and a Windows
+cross-target compile. README, install commands, feature/default descriptions, specs, sprint, and
+backlog now use the post-split binary names and the same CI support boundary.
+
 ## feat(mlx): per-family model features, and what they are actually worth
 Completed: 2026-07-15 · fork `2df597b7` · `0bc7007`
 

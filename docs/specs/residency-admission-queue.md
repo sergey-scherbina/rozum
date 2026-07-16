@@ -29,8 +29,9 @@ and nothing let an interactive load **preempt** a batch sibling. Brute force, no
 
 ## Design — event-driven admission QUEUE over the existing ledger
 
-Keep what works: the **daemon-less, flock-based, crash-safe** ledger (`residents/<pid>` +
-`residency.lock`; OS releases flocks on death incl. SIGKILL — no stuck reservation, no SPOF).
+Keep what works: the **daemon-less, lock-based, crash-safe** ledger (readable
+`residents/<pid>` metadata + `residents/.<pid>.lock` lifetime sidecar + `residency.lock`;
+the OS releases locks on death incl. SIGKILL — no stuck live reservation, no SPOF).
 Add coordination **on top**, same style.
 
 **Recommendation change (A→B), honest:** in discussion I leaned toward a **broker daemon** (A)
@@ -41,10 +42,12 @@ B keeps that property and still gives a real queue + event-driven wait. A stays 
 B's cross-process ordering proves too racy.
 
 ### 1. Wait queue (ordered, crash-safe)
-A waiter that doesn't fit **enqueues** instead of spin-polling: write `waiters/<prio>.<seq>.<pid>`
-(flock-held; OS-released on death) carrying `{pid, want_model, footprint, prio, ts}`. Order =
-`(prio, seq)`. A waiter is **eligible to try** when it is the lowest `(prio, seq)` whose footprint
-fits the *current* free budget. Serialized under `residency.lock` so two waiters can't both pass.
+A waiter that doesn't fit **enqueues** instead of spin-polling: write the lock-held
+`waiters/<prio>.<seq>.<pid>.<footprint>` ticket (the body repeats footprint for legacy readers).
+Publishing footprint in the filename is required on Windows, where another process cannot read
+through the live ticket lock. Order = `(prio, seq)`. A waiter is **eligible to try** when it is the
+lowest `(prio, seq)` whose footprint fits the *current* free budget. Serialized under
+`residency.lock` so two waiters cannot both pass.
 
 ### 2. Event-driven wake (kqueue, no poll)
 Replace the 2 s/240 s poll with a `kqueue` (`EVFILT_VNODE`) watch on `residents_dir()` +

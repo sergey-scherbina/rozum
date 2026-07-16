@@ -22,7 +22,7 @@ and clean stop/termination.
 
 | env | default | meaning |
 |---|---|---|
-| `ROZUM` | `target/release/rozum` (next to the script) | the rozum binary (must be built with `--features mlx-native` and current `master`) |
+| `ROZUM` | `target/release/rozum-gateway` (next to the script) | the engine-bearing rozum binary (current `master` defaults include `mlx-native`) |
 | `MODEL` | `mlx-community:Qwen3.6-35B-A3B-4bit` | model spec (any cached MLX model) |
 | `PORT` | `8400` | gateway port |
 | `E2E_MAX_TURNS` | `20` | Claude `--max-turns` bound (a local model can meander; this guarantees termination) |
@@ -66,7 +66,7 @@ the steps are allowed to vary.
 
 ## Prerequisites
 
-- `rozum` built: `cargo build --release --features mlx-native --bin rozum` (current master).
+- `rozum-gateway` built: `cargo build --release --bin rozum-gateway` (current master).
 - `claude` (Claude Code CLI ≥ 2.1) on `PATH`.
 - `cargo` on `PATH`.
 - The model cached locally (HF cache): `mlx-community/Qwen3.6-35B-A3B-4bit` (~19 GB).

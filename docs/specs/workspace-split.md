@@ -25,9 +25,9 @@ across crate boundaries) and the layering rule: a crate may only `use` crates in
 lower or equal tier.
 
 ```
-L4  rozum (bin)        main.rs, doctor, launch/CLI wiring, subcommand dispatch
-L3  rozum-meeting      meeting daemon + proxy + service + clients (tui/web/discord/telegram)
-L3  rozum-gateway      gateway, openai_http, anthropic_http, share
+L4  rozum (root pkg)   `rozum-gateway` bin: main, config, doctor, sandbox/service, launch
+L3  rozum-meeting      meeting daemon + proxy + clients (tui/web/discord/telegram)
+L3  rozum-gateway      gateway, openai_http, anthropic_http
 L2  rozum-agent        agent, cascade, router, rag_lite, builtin_tools, memory_store
 L1  rozum-mlx          mlx_native_backend, specdecode(+_backend)        [feature mlx-native]
 L1  rozum-gguf         gguf                                             [feature gguf]
@@ -36,7 +36,7 @@ L1  rozum-x86          x86/                                             [feature
 L1  rozum-models       models, model_source, hf_hub, modelscope, resident
 L1  rozum-hardware     NEW: device detect + placement policy            (North Star)
 L0  rozum-core         backend (SPI), concurrency, obs, engine, serving,
-                       sampler, constrain, harmony, config(base)
+                       sampler, constrain, harmony, share/residency
 ```
 
 Crate-name prefix `rozum-`; the engine bin is `rozum-gateway` and the dispatcher is `rozum`. Feature flags
@@ -46,7 +46,7 @@ forward to the engine crates as optional `dep:` — `cargo build` and
 
 ## Behavior
 - [x] Default-feature builds produce `rozum-gateway`; the thin `rozum` dispatcher preserves the CLI surface.
-- [x] `cargo build --no-default-features` (the `linux-core` seam) builds the portable graph with no Metal toolchain.
+- [x] `cargo build --workspace --no-default-features --bins` builds the portable graph with no Metal toolchain.
 - [x] Each feature flag (`mlx-native`/`gguf`/`mistralrs`/`x86-native`) forwards to its engine crate.
 - [x] No crate-boundary dependency cycle (`cargo` enforces this — a cycle fails to resolve).
 - [x] `rozum-meeting` builds and tests **without** any engine crate in its dep tree.
@@ -210,6 +210,7 @@ default (mlx on) + `--no-default-features` green; **118/118** rozum-agent + **71
 tests; all test targets (incl `tests/mlx_evals.rs` under mlx-native) compile.
 
 **End state: a multi-crate workspace** — `rozum-core` (SPI+share), `rozum-models`, `rozum-agent`,
-`rozum-gateway`, `rozum-meeting`, the four engines (`rozum-mlx`/`-gguf`/`-mistralrs`/`-x86`), and
-the engine-bearing `rozum-gateway`, and the thin frontend/dispatcher packages. Only
+the `rozum-gateway` library crate, `rozum-meeting`, the four engines
+(`rozum-mlx`/`-gguf`/`-mistralrs`/`-x86`), the root package's engine-bearing
+`rozum-gateway` binary, and the thin frontend/dispatcher packages. Only
 Phase 4 (`rozum-hardware`, new design work) remains.

@@ -45,16 +45,17 @@ any time — there are no fixed turns.
 git clone <repo-url> rozum
 cd rozum
 git submodule update --init --recursive
-cargo run                  # launch a meeting room with an auto-generated name
+cargo build --workspace --no-default-features --bins
+./target/debug/rozum       # launch a meeting room with an auto-generated name
 ```
 
 In another terminal, list the running rooms:
 
 ```bash
-cargo run -- list
+./target/debug/rozum list
 ```
 
-Point an MCP-capable agent at `rozum mcp-proxy` to join programmatically; see
+Point an MCP-capable agent at `./target/debug/rozum mcp-proxy` to join programmatically; see
 [USER_MANUAL.md](USER_MANUAL.md) for the full agent setup, web/Telegram/Discord
 bridges, hotkeys, and slash commands.
 
@@ -111,42 +112,42 @@ Named cascades can also live in `rozum.toml` (`[cascade.<name>]`). See
 ## Project layout
 
 ```
-src/
-├── main.rs                 CLI entry point (clap subcommands)
-├── lib.rs                  library entry
-├── backend.rs              ChatBackend SPI (the inference backend abstraction)
-├── gateway.rs              OpenAI/Anthropic HTTP gateway + switchboard
-├── sandbox.rs              Seatbelt/Docker jail for launched agents
-├── cascade/                frugal/escalation model router (CascadeBackend)
-├── concurrency.rs          admission control + adaptive per-model concurrency
-├── agent.rs                reference agent runtime (tool loop, escalation)
-├── config.rs               rozum.toml runtime config (backends, cascades)
-├── meeting/                room runtime, MCP server + proxy, persistence
-│   ├── app.rs              top-level room driver
-│   ├── state.rs            Meeting state machine, events, transcript
-│   ├── mcp_server.rs       Unix-socket MCP server (per room)
-│   ├── proxy.rs            stdio MCP proxy (agents)
-│   ├── budget.rs           per-room char budgets
-│   ├── participant.rs      human + agent participant identity types
-│   └── model_participant.rs local model as a live room participant (the conference bridge)
-├── tui/                    ratatui terminal UI for the operator
-├── web/                    HTTP + WebSocket bridge for browsers
-├── telegram/               Telegram bridge
-└── discord/                Discord bridge
+Cargo.toml                  workspace + `rozum-gateway` engine binary
+src/                        full CLI, config/sandbox/service, compatibility facade
+crates/
+├── rozum-cli/              thin user-facing `rozum` dispatcher
+├── rozum-meet/             engine-free `rozum-meet` MCP frontend
+├── rozum-meeting/          room runtime, persistence, bridges
+├── rozum-gateway/          OpenAI/Anthropic serving and switchboard
+├── rozum-core/             backend SPI, serving, admission, shared residency
+├── rozum-models/           model catalog and Hugging Face integration
+├── rozum-agent/            reference agent runtime and tool loop
+├── rozum-{mlx,gguf,...}/   optional in-process engine adapters
+└── rozum-{tui,web}/        operator frontends
+clients/                    UCC and other browser clients
+scripts/                    smoke, benchmark, deployment, and release helpers
 ```
 
 ## Development
 
 ```bash
-cargo build --lib --bin rozum   # feature-free core (no Xcode/Metal needed)
-cargo test --lib                # the core test suite — what CI runs
-cargo build --release           # full build with the in-process engines
+# Portable workspace (Linux/macOS; no native model engine):
+cargo build --workspace --no-default-features --bins
+cargo test --workspace --no-default-features --lib
+
+# Shipped macOS defaults (native MLX + every ported model family):
+cargo build --workspace --bins
+cargo test --workspace --lib
 ```
 
-The MLX / GGUF inference engines are behind cargo features (they need Xcode /
-Metal). The pure-Rust core — SPI, gateway, agent runtime, cascade router,
-concurrency, config — builds and tests without any toolchain; the `ci`
-GitHub Actions workflow gates exactly that on every push/PR to `master`.
+The shipped default feature set is `mlx-native + all-models`; it needs the macOS
+Metal toolchain. GGUF/llama.cpp is opt-in with `--features gguf`. The durable
+workspace builds without either engine under `--no-default-features`.
+
+The `ci` workflow gates shipped defaults and every workspace library on macOS,
+the whole no-default workspace on Linux, and an explicit portable-package
+allow-list on Windows. Native Windows meeting/control/service seams remain out
+of scope and are not presented as supported by that job.
 
 This repository uses
 [agent-plugins](vendor/agent-plugins) as a git submodule for

@@ -1,5 +1,12 @@
 # Sprint
 
+- [x] **ci-green-baseline — DONE 2026-07-16 (`9506811`, `06de22c`, `645f5e7`,
+  `5b675ea`, `a3595c6`).** Restored CI after the workspace/binary split: macOS gates shipped defaults
+  plus every workspace library, Linux gates the whole no-default workspace, and Windows gates the thin
+  dispatcher plus an honest portable-package allow-list. Real Actions run `29533946535` is green on
+  all three hosts. The real Windows runner also drove `.exe` dispatch/PID-liveness fixes and a
+  lock-safe residency queue/ledger design. Spec: `docs/specs/ci-green-baseline.md`.
+
 ### ▶ Post-reboot resume (operator 2026-07-15: "перезагрузился компьютер … продолжить работу дальше")
 
 - [x] **env-metal-toolchain-gone** — DONE (machine-level, no repo change). FALLOUT OF THE SYSTEM UPDATE:
@@ -344,12 +351,13 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   on synthetic churn/stall/healthy stream-json. Config lesson (no code): run agentic at **NCTX ≥ 16384**
   — 4096 trim-thrashes CC's big system prompt (3× slower + triggers the template-trim 500).
 
-- [ ] **ucc-terminal-keys** (operator 2026-07-08: "Запиши в план и сделай. Давно было пора") — the
-  iOS keyboard has no Esc/Tab/Ctrl, so Claude Code shortcuts are unreachable from the phone
-  terminal. Add a special-keys row to terminal.html: Esc, Tab, ⇧Tab (CC mode cycling), ← ↑ ↓ →,
-  ^C — sent as raw sequences over the WS. iOS specifics: bar at the TOP (fixed bottom bars break
-  with the keyboard open — meeting-PWA lesson), preventDefault on touchstart so tapping a key does
-  not blur xterm/close the keyboard. Verify: type → tap Esc → input cleared (end-to-end).
+- [x] **ucc-terminal-keys — DONE 2026-07-08 (`34c713e`).** The phone terminal has a top
+  special-keys row for Esc, Tab, ⇧Tab, ← ↑ ↓ →, ^C, and ^U; every button sends the raw terminal
+  sequence over the existing WebSocket. `touchstart` is non-passive and both touch/mouse handlers
+  call `preventDefault`, so xterm keeps focus and the iOS keyboard stays open. The source
+  (`clients/control/terminal.ssc`) and checked-in generated page
+  (`clients/control/site/terminal.html`) both contain the row; live phone interaction remains the
+  release smoke for browser/keyboard-specific behavior.
 
 - [x] **ucc-jobpanel-pattern** (operator: "Асинхронный паттерн можно выразить как скаласкрипт
   функцию и тулкит выражение? … Делай а б в г") — the async-job pattern is now expressed ONCE per

@@ -67,8 +67,8 @@ hard failures, while `--strict` treats warnings as a failing preflight.
 Verification:
 - `cargo test doctor --lib --no-default-features` — 5 passed.
 - `cargo test doctor --lib` — 5 passed.
-- `cargo build --bin rozum --no-default-features` — passed.
-- Live `target/debug/rozum doctor` on the dev machine reported: demo launcher ok,
+- `cargo build --bin rozum-gateway --no-default-features` — passed.
+- Live `target/debug/rozum-gateway doctor` on the dev machine reported: demo launcher ok,
   Tailscale CLI ok, meeting daemon running with 18 rooms, no active shared gateway
   registry (warn), Seatbelt sandbox enabled with `GatewayOnly`, Docker image skipped
   because Docker backend is not selected, web/PWA skipped because no `--web-url` was supplied.

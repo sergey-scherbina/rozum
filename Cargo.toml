@@ -16,18 +16,19 @@ name = "rozum-gateway"
 path = "src/main.rs"
 
 [features]
-# Default = the pure-Rust native MLX runtime (primary in-process backend) plus every
+# Default = the native in-process MLX runtime (primary backend) plus every
 # ported model family. GGUF/llama.cpp is deliberately opt-in (`--features gguf`), so
 # the shipped default avoids the separate CMake/llama.cpp build while Qwen/MLX works
 # out of the box. The first MLX build is still heavy because mlx-sys compiles MLX C++.
 # Use `--no-default-features` for the engine-free durable host, `--features gguf` for
 # local GGUF/lmstudio/ollama assets, or `--features mistralrs` for the candle backend.
 #
-# PORTABLE / non-Mac build: `cargo build --no-default-features` — the durable core
-# (SPI, gateway w/ HTTP backends, agent, cascade, concurrency, config, meeting room)
-# builds + tests with no native toolchain; CI's `linux-core` job enforces it. The
-# native MLX/GGUF backends are Apple-Metal-bound (mlx-sys + llama-cpp-2 `metal`); a
-# true gguf-on-Linux (CPU/CUDA, non-metal) is the open `portability-cuda-gguf`.
+# PORTABLE / non-Mac build: `cargo build --workspace --no-default-features --bins`
+# builds the durable workspace without a native model toolchain. CI enforces that
+# whole-workspace build + library-test contract on Linux; Windows separately gates
+# an explicit portable-package allow-list while its daemon/control seams remain Unix-only.
+# The native MLX/GGUF backends are Apple-Metal-bound (mlx-sys + llama-cpp-2 `metal`);
+# a true gguf-on-Linux (CPU/CUDA, non-metal) is the open `portability-cuda-gguf`.
 # `all-models` sits in DEFAULT rather than inside `mlx-native` so that the two are independently
 # selectable: a plain `cargo build` loads every architecture exactly as it always has, while a lean
 # build keeps the native runtime and drops only the families it never loads:
@@ -42,9 +43,9 @@ local-models = ["rozum-core/local-models"]
 all-models = ["rozum-mlx/all-models"]
 gguf = ["rozum-gguf/gguf"]
 mistralrs = ["rozum-mistralrs/mistralrs"]
-# Pure-Rust native MLX runtime (no Python, no subprocess). Builds MLX C++ from
-# source via the vendored fork, so it needs the Metal toolchain and is off by
-# default. See docs/specs/mlx-native-runtime.md.
+# Native MLX runtime (no Python, no subprocess). Builds MLX C++ from source via
+# the vendored fork, so it needs the Metal toolchain. It is in the default feature
+# set; that shipped default build contract is macOS-only. See docs/specs/mlx-native-runtime.md.
 # The RUNTIME only — the families come from `all-models` / `rozum-mlx/model-*` (see `default`).
 mlx-native = ["rozum-mlx/mlx-native"]
 # x86-native: the cross-vendor Vulkan iGPU engine (docs/specs/x86-native-runtime.md).

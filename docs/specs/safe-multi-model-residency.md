@@ -27,8 +27,9 @@ reboot fix (`docs/specs/gateway-residency-singleflight.md`, memory
 ## Where we are (master 644e8e8)
 
 - **v1** (`3bcee03`): host-wide `flock` single-flight — one resident model, 2nd refused.
-- **v2** (`644e8e8`): RAM-ledger — each gateway reserves an *estimated* footprint
-  (`residents/<pid>` flock file) before load; admit iff **sole OR `in_use + footprint ≤
+- **v2** (`644e8e8`, Windows-readable ledger follow-up 2026-07-16): each gateway reserves an
+  *estimated* footprint (readable `residents/<pid>` metadata + a lifetime-lock sidecar) before
+  load; admit iff **sole OR `in_use + footprint ≤
   total_ram × RAM_BUDGET_FRAC` (0.65)**. Footprint = `main.rs::estimate_model_footprint_bytes`
   = catalog `size_bytes × inflate + base`. Co-residency is now **on by default**, budget-gated.
 

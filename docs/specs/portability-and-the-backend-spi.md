@@ -147,9 +147,10 @@ The abstraction exists; a few sharp edges keep it from being clean portability:
      - **Filesystem & locks** — `.rozum/room/` daily files + the single-writer advisory lock should
        go through a cross-platform lock (`fs2` / `fd-lock`) rather than a raw `flock`, and path
        handling must stay `PathBuf`-based (no hardcoded `/`).
-   - Until those land, **rozum on Windows already works as a gateway/launcher** in front of HTTP
-     backends (Ollama / LM Studio / vLLM / any `/v1`) — that path is pure cross-platform Rust today;
-     the seams above only gate the *local meeting daemon* and *in-process* engines.
+   - The HTTP backend abstractions themselves are cross-platform, but the full root
+     gateway/launcher package still compiles control, PTY, and service-install modules with Unix
+     seams. Until those are gated or ported, the project makes no first-class native-Windows host
+     claim; only the packages in the CI allow-list are promoted as portable.
 2. **Lift the shared model infra above the seam.** Auto-download +
    hf_hub/ModelScope cache + spec resolution are hardware-agnostic and useful to
    *any* safetensors backend (mistralrs, a future runtime), but today they're wired

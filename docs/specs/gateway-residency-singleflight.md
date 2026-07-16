@@ -122,23 +122,24 @@ v1's two objections (this spec, "Why `flock`, not a RAM ledger") are both answer
    briefly-held admit lock** (`flock` on `residency.lock`), so the scan→decide→reserve
    is atomic across processes: two racing loaders serialize on the admit lock and the
    second sees the first's reservation even though neither has finished loading. No TOCTOU.
-2. **Liveness / stale state** ("needs PID reaping, racy"). Reservations use the **same
-   `flock` robustness as v1** — each resident holds an exclusive `flock` on its own
-   `residents/<pid>` file for its process lifetime; the OS releases it on death/SIGKILL.
-   Liveness needs no heartbeat and no `kill(pid,0)`: a reader `try_lock`s the file —
-   success ⇒ owner dead ⇒ reap; would-block ⇒ alive ⇒ count. Under-counting (the only
-   direction that could reboot) requires seeing a *live* holder as dead, which `flock`
-   cannot do.
+2. **Liveness / stale state** ("needs PID reaping, racy"). Reservations use the same
+   OS-lock robustness as v1 — each resident holds an exclusive lifetime lock on
+   `residents/.<pid>.lock`; the OS releases it on death/SIGKILL. Readable JSON lives
+   separately at `residents/<pid>` because a Windows lock denies reads through its byte
+   range. Liveness needs no heartbeat and no `kill(pid,0)`: a reader `try_lock`s the
+   sidecar — success ⇒ owner dead ⇒ reap both files; would-block ⇒ alive ⇒ read and count
+   metadata. When no sidecar exists, readers probe the old directly-locked file for
+   compatibility with a running legacy Unix gateway.
 
 ### Implementation (`crates/rozum-core/src/share.rs`) — DONE
 
-- Reservation ledger: `residents/<pid>` files, each holding an exclusive lifetime
-  `flock`; content = `{model, footprint_bytes}` (JSON). `residency.lock` is reused as
-  the **brief** admit mutex (NOT held for the model's lifetime in v2).
+- Reservation ledger: readable `{model, footprint_bytes, prio}` JSON in
+  `residents/<pid>` plus an exclusive lifetime lock in `residents/.<pid>.lock`.
+  `residency.lock` remains the **brief** admit mutex (NOT held for a model's lifetime).
 - `acquire_residency(model: &str, footprint_bytes: u64) -> Result<Option<ResidencyGuard>, ResidencyDenied>`:
   under the admit lock, `scan_residents` reaps dead files + sums live footprints;
-  admit iff `in_use == 0 || in_use + footprint <= budget`; on admit, `reserve()` owns
-  `residents/<pid>` and the guard holds its flock for life (Drop unlinks + releases).
+  admit iff `in_use == 0 || in_use + footprint <= budget`; on admit, `reserve()` publishes
+  metadata and the guard holds its sidecar lock for life (Drop unlinks both + releases).
   Same `Ok(None)` fail-open and `spawn_blocking` contract as v1.
 - `ResidencyDenied { footprint_bytes, in_use_bytes, budget_bytes, waited_secs, holders }`
   — the numbers + live `(pid, model)` holders, so the refusal explains exactly why.
@@ -202,7 +203,9 @@ v1's two objections (this spec, "Why `flock`, not a RAM ledger") are both answer
 3. Confirm fail-open: point `gateway_dir()` at a read-only path → load still proceeds
    (gate logs a warning, doesn't block).
 
-## Operational rule (until the gate is on master)
+## Operational rule
 
-On this Mac: **never hold >1 model-loaded gateway at once.** Don't start a
-matrix/launch if another is already serving a model. (Room-broadcast n=25/26.)
+The budgeted gate is on `master`: multiple model-loaded gateways are allowed only when
+admission says their conservative footprints fit. Do not use
+`ROZUM_ALLOW_CONCURRENT_RESIDENT=1` for overlapping large-model runs; it deliberately
+bypasses the reboot-prevention invariant.

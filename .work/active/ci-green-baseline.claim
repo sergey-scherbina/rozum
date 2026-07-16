@@ -1,6 +1,6 @@
 feature/ci-green-baseline 2026-07-16T20:02:49Z
 agent: codex-clear-lynx
-heartbeat: 2026-07-16T20:53:13Z
+heartbeat: 2026-07-16T21:00:17Z
 status: in-progress
-done-so-far: macOS and Linux real jobs green; Windows exposed locked residency metadata; sidecar/ticket portability fix and regression tests ready
-next: push the Windows follow-up, iterate on the real runner, then sync truth surfaces and release claims
+done-so-far: Actions 29533946535 is all-green on macOS/Linux/Windows; final waiter cleanup and truth-surface sync are committed locally
+next: push final commits, await the final all-green run, then release own and audited stale claims

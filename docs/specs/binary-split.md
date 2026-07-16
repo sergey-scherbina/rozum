@@ -10,9 +10,15 @@ dispatcher (`rozum`), and the engine binary (`rozum-gateway`) are all shipped. C
 - `cargo install --path crates/rozum-cli` → installs **`rozum`** (the thin dispatcher).
 - `cargo install --path crates/rozum-meet` (and `rozum-web` / `rozum-tui`) → thin frontends.
 
-`rozum <cmd>` keeps working: the dispatcher `exec`s `rozum-meet` for `mcp-proxy`/`mcp-http` and
-`rozum-gateway` for everything else. Targets are resolved next to the dispatcher binary first,
-then `PATH`, so an uninstalled `target/release/rozum` finds its just-built siblings.
+The root install uses shipped native-MLX defaults on macOS; Linux/WSL uses
+`cargo install --path . --no-default-features`. Install the dispatcher and whichever thin
+frontends it must route to alongside the root binary.
+
+`rozum <cmd>` keeps working: the dispatcher forwards to `rozum-meet` for
+`mcp-proxy`/`mcp-http` and `rozum-gateway` for everything else (`exec` on Unix; spawn/wait with
+the child exit code on Windows). Targets use the platform executable suffix and are resolved next
+to the dispatcher binary first, then `PATH`, so an uninstalled `target/release/rozum` finds its
+just-built siblings.
 
 Bench/e2e/smoke scripts that drive the gateway now resolve `…/rozum-gateway` (they need the
 engine binary directly, no dispatcher hop). The user's launchd services (`com.rozum.*`) call
@@ -54,8 +60,8 @@ a re-architecture.
 
 **Umbrella (UX continuity):**
 
-- `rozum` — a thin dispatcher. `rozum mcp-proxy` → exec `rozum-meet mcp-proxy`, `rozum gateway` →
-  exec `rozum-gateway`, etc. Preserves existing muscle memory AND the installed MCP config
+- `rozum` — a thin dispatcher. `rozum mcp-proxy` → `rozum-meet mcp-proxy`, `rozum gateway` →
+  `rozum-gateway`, etc. Preserves existing muscle memory AND the installed MCP config
   (`command: rozum, args: [mcp-proxy]`) while the heavy code lives only in `rozum-gateway`.
   Alternative: keep the fat `rozum` during migration and slim it last.
 

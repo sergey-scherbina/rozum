@@ -6,7 +6,8 @@ name: ci
 #    gateway w/ HTTP backends, agent runtime, cascade router, concurrency, config, meeting room).
 #    This enforces that the durable layer stays Linux-buildable, the central claim of
 #    `docs/specs/portability-and-the-backend-spi.md` — a regression there fails CI, not folklore.
-#  - windows: the same durable core gate on `windows-latest`, so Unix-only assumptions surface early.
+#  - windows: an explicit portable-package allow-list plus the thin dispatcher; known Unix-only
+#    daemon/control/service packages stay excluded until their platform seams are ported.
 
 on:
   push:
@@ -37,7 +38,7 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
       # `--workspace` is load-bearing: without it cargo tests only the ROOT package, so the other
-      # nine crates' suites were never built here. That is exactly how rozum-gateway's 106 tests
+      # workspace-member suites were never built here. That is exactly how rozum-gateway's 106 tests
       # rotted to 62 compile errors unnoticed (`08c9d9a`) — `cargo check`/`cargo build` skip
       # `#[cfg(test)]` code, so every signal we watched stayed green while 0 tests ran.
       - name: Build every binary (shipped default features)

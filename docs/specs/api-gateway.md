@@ -6,7 +6,7 @@ Expose rozum's `ChatBackend` registry as a local HTTP server that speaks both th
 
 ## Scope
 
-- `src/gateway.rs` — axum server with OpenAI and Anthropic routes.
+- `crates/rozum-gateway/src/gateway.rs` — axum server with OpenAI and Anthropic routes.
 - `src/main.rs` — new `rozum gateway` subcommand.
 - `Cargo.toml` — optional crate feature `gateway` (no new deps beyond already-used `axum`, `reqwest`, `serde_json`).
 
@@ -209,7 +209,7 @@ Both dialects share a single internal routing function `dispatch(req: ChatReques
 
 ## Results
 
-Implemented in `src/gateway.rs` + `src/main.rs`.
+Implemented in `crates/rozum-gateway/src/gateway.rs` + `src/main.rs`.
 
 - `cargo check` (default): ✓ (1 false-positive `unused_assignments` warning in async_stream loop)
 - `cargo build`: ✓
@@ -227,10 +227,10 @@ rozum gateway --port 8089 --model hello
 
 **Production use** (with GGUF model):
 ```bash
-cargo build --features gguf  # requires brew install cmake
+cargo build --no-default-features --features gguf --bin rozum-gateway  # requires cmake
 huggingface-cli download Qwen/Qwen2.5-Coder-32B-Instruct-GGUF \
   qwen2.5-coder-32b-instruct-q4_k_m.gguf --local-dir ~/models
-./target/debug/rozum gateway --port 8089 --model ~/models/qwen2.5-coder-32b-instruct-q4_k_m.gguf
+./target/debug/rozum-gateway gateway --port 8089 --model ~/models/qwen2.5-coder-32b-instruct-q4_k_m.gguf
 
 export ANTHROPIC_BASE_URL=http://localhost:8089
 export ANTHROPIC_API_KEY=dummy

@@ -191,7 +191,8 @@ joined as. If that name disappears for ≥ 18 s, fail loudly.
 ## Decisions
 
 - **Capped exponential backoff `200ms…5s`, max 10 attempts (~18 s)** —
-  long enough to cover a `cargo build && ./target/release/rozum`
+  long enough to cover an incremental
+  `cargo build --workspace --no-default-features --bins && ./target/debug/rozum`
   restart on a workstation; short enough not to hide a real failure.
   Rejected: indefinite retry (masks bugs).
 - **Re-issue `_join_internal` after reconnect** — the room treats

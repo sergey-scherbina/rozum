@@ -7402,7 +7402,7 @@ async fn build_gateway_backend(
         "event": "backend_select_start", "model": model_spec, "n_ctx": n_ctx,
     }));
 
-    // 1. Try the pure-Rust native MLX runtime (the primary in-process backend):
+    // 1. Try the native in-process MLX runtime (no Python/subprocess; primary backend):
     //    full native MLX forward, no candle, no Python. Covers the Qwen3 / Qwen3.6
     //    / Qwen2 / Llama families and auto-downloads HF / ModelScope MLX repos.
     //    Declines fast for `.gguf` files / `lmstudio:` / `ollama:` specs, so those
@@ -7414,7 +7414,7 @@ async fn build_gateway_backend(
         return Some(rozum::concurrency::admit_wrap(b));
     }
 
-    // 2. Try in-process GGUF (the GGUF/llama.cpp fallback, in the default build):
+    // 2. Try in-process GGUF (the opt-in `gguf`/llama.cpp fallback):
     //    local `.gguf` files, `lmstudio:<repo>`, `ollama:<name>` (cached blobs).
     if let Some(b) = try_build_gguf_backend(model_spec, n_ctx) {
         rozum::obs::log_event(

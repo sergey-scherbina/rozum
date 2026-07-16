@@ -2,19 +2,13 @@
 
 ## CI: extend the portable-core gate to the whole workspace (2026-07-15)
 
-- [ ] **ci-workspace-portable-core** — the macos job now runs `cargo test --workspace --lib`, after the
-  gateway's 106 tests were found rotted to 62 compile errors precisely because CI tested only the ROOT
-  package (`cargo test --lib` = 1 test binary; `--workspace --lib` = 10). The **linux** and **windows**
-  jobs still gate `--no-default-features --lib`, i.e. root-only, so a member crate's portable-core
-  breakage still can't be caught there. `cargo test --workspace --no-default-features --lib --no-run`
-  compiles clean LOCALLY (macOS, 0 errors), which is a decent signal for linux — but NOT for windows:
-  `rozum-gateway`'s `control.rs` imports `std::os::unix::process::CommandExt`, so `--workspace` on
-  `windows-latest` would likely fail the moment it builds that crate (consistent with ci.yml's own note
-  that "Windows-specific daemon IPC/service gaps stay tracked in BACKLOG"). Path: flip **linux** to
-  `--workspace` first and read the run; for windows, either cfg-gate the unix-only spawn paths behind
-  `#[cfg(unix)]` (the real portability work the gate is meant to expose) or scope the job to the crates
-  that genuinely claim windows support. Not done blind here — it needs a CI run to verify, and guessing
-  would just trade one silently-broken gate for another.
+- [x] **ci-workspace-portable-core — DONE 2026-07-16.** CI now builds every real workspace binary
+  and tests every workspace library on macOS (shipped defaults) and Linux
+  (`--no-default-features`). Windows builds the thin dispatcher and tests an explicit portable-core
+  package allow-list; Unix daemon/control/service packages are named exclusions, not implied support.
+  Real Actions run `29533946535` passed all three jobs. The Windows run also exposed and drove fixes
+  for `.exe` dispatch, PID liveness, and locked residency queue/ledger metadata; those paths now have
+  hosted behavioral coverage instead of a cross-compile-only claim. Spec: `docs/specs/ci-green-baseline.md`.
 
 ## UCC backend on .ssc→Rust (strategic, 2026-07-07)
 
@@ -370,11 +364,12 @@ the deferred follow-ups (operator-triaged 2026-06-24, none urgent):
 
 - [x] **residency-gate-v2-ramledger** — DONE (`feature/gateway-residency-ram-ledger`, `sunny-civet`).
   Replaced the BUG-003 v1 binary single-flight with a **RAM ledger**: each gateway reserves its
-  estimated footprint (`residents/<pid>` flock-held file) before loading; admit iff sole OR
+  estimated footprint (readable `residents/<pid>` metadata + lifetime-lock sidecar) before
+  loading; admit iff sole OR
   `in_use + footprint ≤ total_ram × ROZUM_GATEWAY_RAM_BUDGET_FRAC` (0.65). The v1 "racy / needs
   PID-reap" objections are answered: reservation is up-front **under a brief admit lock** (no
-  free-RAM-read TOCTOU), and liveness uses **per-pid `flock` probe** (same death-safety as v1, no
-  kill-reaper). Footprint estimated caller-side from the catalog (core stays model-free). Spec § v2;
+  free-RAM-read TOCTOU), and liveness uses a **per-pid lifetime-lock probe** (same death-safety as
+  v1, no kill-reaper). Footprint estimated caller-side from the catalog (core stays model-free). Spec § v2;
   4 unit tests + real-binary smoke; core 91/91, default+no-default green.
 - [ ] **residency-gate-cap-mlx-sibling-aware** (v3 hardening, NOT urgent) — the ledger refuses at
   *admission*; the per-process MLX cap (`crates/rozum-mlx/.../mlx_native_backend.rs:~363`) is still
@@ -961,18 +956,20 @@ These items turn "portable in principle" into "portable by `cargo build`".
     preserve RAM; the normal macOS Seatbelt path and no-default tests do not require Docker.
 
 - [ ] windows-portability - **Make rozum a first-class Windows host (durable core + CI).**
-  rozum-as-gateway/launcher already works on Windows today (HTTP backends are pure
-  cross-platform Rust); these sub-tasks close the gap for the **local meeting daemon** and
-  **in-process engines**. All hardware-independent except GPU validation. Spec:
+  The HTTP/backend abstractions and the package allow-list below are cross-platform, but the full
+  gateway/launcher package still compiles Unix control/PTTY/service seams and is not claimed as a
+  native-Windows host. These sub-tasks close that gap for the **local meeting daemon**, gateway
+  host, and **in-process engines**. All hardware-independent except GPU validation. Spec:
   `docs/specs/portability-and-the-backend-spi.md` (§ "Platform-aware build (Linux *and*
   Windows)"). Engines on Windows are tracked elsewhere and need NO separate item: GGUF via
   `portability-cuda-gguf` (non-`metal` llama-cpp-2 — CPU/CUDA/Vulkan; builds with MSVC), and
   the native iGPU path via `x86-native-runtime` (Vulkan is cross-platform — the SAME L5 engine
   runs on Windows; `VK_EXT_external_memory_host` zero-copy works there too). Sub-tasks:
-  - [x] windows-core-ci - **DONE 2026-06-20.** A `windows-core` CI job (`windows-latest`)
-    now mirrors `linux-core`: `cargo build --no-default-features --lib --bin rozum` +
-    `cargo test --no-default-features --lib` on every push/PR, so a Windows regression fails
-    CI, not folklore. Remaining Windows work is the concrete seams below.
+  - [x] windows-core-ci - **RESTORED + VERIFIED 2026-07-16.** The old 2026-06-20 root-only
+    command became dead after the binary/workspace split. `windows-latest` now builds package
+    `rozum-cli`'s real `rozum.exe` dispatcher and tests the declared portable packages
+    (`rozum-core`, models, agent, and feature-off engine interfaces). Run `29533946535` is green.
+    Full meeting/gateway host support remains the concrete Unix-seam work below.
   - [ ] windows-daemon-ipc - Abstract the meeting daemon's client transport. Today it's a
     Unix-domain socket (`meeting_sock()` / `UnixListener`), and `std::os::unix::net` does not
     exist on Windows. Put it behind a small transport with a Windows impl — AF_UNIX (Win10
@@ -1450,7 +1447,7 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
 
 - [ ] concurrency-engine-yield - **LOW PRIORITY (2026-06-15): mistralrs-only + non-default, and the
   default engine already does better.** This targets the **mistralrs fork** (`pipeline::step`), which
-  is **not in the default build** (`default = ["mlx-native", "gguf"]`). The default **mlx-native**
+  is **not in the default build** (`default = ["mlx-native", "all-models"]`). The default **mlx-native**
   engine already does **continuous batched decode** — new requests are admitted into a *live* decode
   batch mid-flight (`src/mlx_native_backend.rs`), which is the interleaving this was reaching for and
   more than mistralrs's admission-only fast lane. (A very long *prefill* in mlx-native still runs as a

@@ -65,9 +65,10 @@ Things that ARE worth doing live in `BACKLOG.md` (catalog expansion) and
 
 ## 5. GGUF / llama.cpp models through the *native MLX* runtime — NO (already covered)
 
-- **We DO have our own GGUF backend.** To be unambiguous: rozum ships a real
-  in-process GGUF backend — `src/gguf.rs`, in the default build, running llama.cpp
-  in-process via the `llama-cpp-2` Rust bindings (not a subprocess), with streaming
+- **We DO have our own GGUF backend.** To be unambiguous: rozum ships a real,
+  opt-in in-process GGUF backend — `crates/rozum-gguf/src/gguf.rs`, enabled with
+  `--features gguf`, running llama.cpp in-process via the `llama-cpp-2` Rust bindings
+  (not a subprocess), with streaming
   + tool-use, resolving local `.gguf` files / `lmstudio:` / `ollama:` specs. So
   "GGUF support" is **not** the non-goal.
 - The non-goal is narrower: (a) teaching the **native MLX runtime** to read the
