@@ -1,6 +1,0 @@
-feature/small-model-combination-ab 2026-07-10T16:15:32Z
-agent: codex-memory-audit
-heartbeat: 2026-07-10T16:15:55Z
-status: in-progress
-done-so-far: benchmark worktree created from master; host has 18.3 GiB readily free
-next: build release and run five-repetition solo/order A/B
