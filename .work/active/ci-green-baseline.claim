@@ -1,6 +1,6 @@
 feature/ci-green-baseline 2026-07-16T20:02:49Z
 agent: codex-clear-lynx
-heartbeat: 2026-07-16T20:13:59Z
+heartbeat: 2026-07-16T20:53:13Z
 status: in-progress
-done-so-far: spec committed; CI workflow corrected; Windows dispatcher and lease liveness ported; macOS/Linux-like local suites green
-next: commit implementation, push to master, and iterate on real GitHub Actions results
+done-so-far: macOS and Linux real jobs green; Windows exposed locked residency metadata; sidecar/ticket portability fix and regression tests ready
+next: push the Windows follow-up, iterate on the real runner, then sync truth surfaces and release claims

@@ -344,12 +344,14 @@ pub fn try_spawn_lock(stale_secs: u64) -> Option<SpawnLock> {
 // genuinely-small 2nd model can co-reside, while the case that reboots (two big
 // models) is refused. The ledger is host-wide and independent of port/run/worktree.
 //
-// Mechanism (all advisory `flock`, released by the OS on fd close incl. SIGKILL — no
-// stale-lock cleanup to get wrong):
-//   • Each resident gateway holds an exclusive `flock` on `residents/<pid>` for its
-//     process lifetime; the file's content is its `{model, footprint}` reservation.
-//     Liveness needs no heartbeat — a reader `try_lock`s the file: success ⇒ the
-//     holder died ⇒ reap; would-block ⇒ alive ⇒ count its footprint.
+// Mechanism (all advisory locks are released by the OS on fd close incl. SIGKILL):
+//   • Each resident gateway holds an exclusive lock on `residents/.<pid>.lock` for its
+//     process lifetime and publishes readable `{model, footprint}` metadata in
+//     `residents/<pid>`. Liveness needs no heartbeat — a reader `try_lock`s the sidecar:
+//     success ⇒ the holder died ⇒ reap; would-block ⇒ alive ⇒ count its footprint.
+//     Lock and metadata are separate because Windows locks deny reads through the
+//     locked byte range. Legacy Unix reservations that lock `residents/<pid>` directly
+//     remain readable and are probed through that file when no sidecar exists.
 //   • Admission is serialized by a *briefly*-held `flock` on `residency.lock`, so the
 //     scan→decide→reserve is atomic across processes (no admit TOCTOU).
 // A reservation up front (not a post-hoc free-RAM read) is what makes it correct: two
@@ -370,6 +372,41 @@ pub fn residents_dir() -> PathBuf {
 
 fn resident_path(pid: u32) -> PathBuf {
     residents_dir().join(pid.to_string())
+}
+
+fn resident_lock_path(pid: u32) -> PathBuf {
+    residents_dir().join(format!(".{pid}.lock"))
+}
+
+/// Probe one reservation's lifetime lock. Returns true for a live (or conservatively
+/// unprobeable) owner. An unlocked sidecar/legacy file is stale and both pieces are reaped.
+fn resident_is_live(pid: u32, metadata_path: &std::path::Path) -> bool {
+    let sidecar = resident_lock_path(pid);
+    let uses_sidecar = sidecar.exists();
+    let probe_path = if uses_sidecar {
+        sidecar.as_path()
+    } else {
+        metadata_path
+    };
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(probe_path)
+    else {
+        return true;
+    };
+    match file.try_lock() {
+        Ok(()) => {
+            drop(file); // Windows cannot unlink a file while this handle owns the lock.
+            let _ = std::fs::remove_file(metadata_path);
+            if uses_sidecar {
+                let _ = std::fs::remove_file(&sidecar);
+            }
+            false
+        }
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(_)) => true,
+    }
 }
 
 /// Seconds an arriving gateway waits for resident models to free enough budget
@@ -556,17 +593,36 @@ impl ResidentEntry {
     }
 }
 
-/// Held for the lifetime of a resident model: the exclusive `flock` on this
-/// gateway's `residents/<pid>` file. Dropping it — or the process dying — releases
-/// the reservation (the OS drops the `flock`; `Drop` also unlinks the file).
+fn write_resident_entry(
+    path: &std::path::Path,
+    model: &str,
+    footprint_bytes: u64,
+) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let body = serde_json::to_vec(&ResidentEntry::new(model, footprint_bytes)).unwrap_or_default();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&body)?; // grow writes the complete new entry before shortening any old tail
+    file.set_len(body.len() as u64)?;
+    file.flush()
+}
+
+/// Held for the lifetime of a resident model: the exclusive lock on this gateway's
+/// `residents/.<pid>.lock` sidecar. Dropping it — or the process dying — releases
+/// liveness; `Drop` also unlinks the sidecar and its readable metadata file.
 pub struct ResidencyGuard {
-    _lock: std::fs::File,
+    lock: Option<std::fs::File>,
     path: PathBuf,
+    lock_path: PathBuf,
 }
 
 impl ResidencyGuard {
     /// Update this process's published reservation footprint IN PLACE, keeping the held
-    /// `flock` (the reservation stays valid throughout). For the in-process Switchboard
+    /// lifetime lock (the reservation stays valid throughout). For the in-process Switchboard
     /// (residency-unify U1): a gateway holding several models should publish its **TOTAL**
     /// footprint (primary + warm) so other gateways' [`committed_by_others_bytes`] account
     /// for the warm set too — not just the primary reserved at load time.
@@ -578,20 +634,15 @@ impl ResidencyGuard {
     /// benign, since memory is being *freed* and the `shed` governor backstops any race.
     /// Best-effort: IO errors are swallowed (the gate is a safety net, not correctness).
     pub fn update_footprint(&self, model: &str, footprint_bytes: u64) {
-        use std::io::{Seek, SeekFrom, Write};
-        let body = serde_json::to_vec(&ResidentEntry::new(model, footprint_bytes)).unwrap_or_default();
-        let mut f: &std::fs::File = &self._lock;
-        let _ = f.seek(SeekFrom::Start(0));
-        let _ = f.write_all(&body); // overwrites from 0; a grow extends, never shortens mid-read
-        let _ = self._lock.set_len(body.len() as u64); // drop any old tail (shrink case)
-        let _ = f.flush();
+        let _ = write_resident_entry(&self.path, model, footprint_bytes);
     }
 }
 
 impl Drop for ResidencyGuard {
     fn drop(&mut self) {
+        drop(self.lock.take());
         let _ = std::fs::remove_file(&self.path);
-        // `_lock` (the File) closes after this, releasing the flock.
+        let _ = std::fs::remove_file(&self.lock_path);
     }
 }
 
@@ -628,28 +679,21 @@ pub fn list_residents() -> Vec<(u32, String)> {
 /// (i.e. a [`ResidencyGuard`] is held). The convenient wiring API for the in-process
 /// Switchboard (residency-unify): call on each warm load/evict to republish the process's
 /// **total** footprint (primary + Σ warm) so other gateways' [`committed_by_others_bytes`]
-/// account for the warm set, not just the primary reserved at load. Opens the EXISTING
-/// `residents/<pid>` (never creates — a stray file with no flock holder would just be
-/// reaped); write-then-truncate so a concurrent reader during a grow never under-counts in
+/// account for the warm set, not just the primary reserved at load. Updates the EXISTING
+/// `residents/<pid>` only while its lifetime-lock sidecar exists; write-then-truncate means
+/// a concurrent reader during a grow does not observe a truncate-first empty file in
 /// the memory-increasing direction (see [`ResidencyGuard::update_footprint`]). Best-effort;
 /// a no-op when no reservation is held (gate bypassed / not yet reserved).
 pub fn update_my_reservation(model: &str, footprint_bytes: u64) {
-    use std::io::{Seek, SeekFrom, Write};
-    let Ok(mut f) = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(resident_path(std::process::id()))
-    else {
+    let pid = std::process::id();
+    let path = resident_path(pid);
+    if !path.exists() || !resident_lock_path(pid).exists() {
         return;
-    };
-    let body = serde_json::to_vec(&ResidentEntry::new(model, footprint_bytes)).unwrap_or_default();
-    let _ = f.seek(SeekFrom::Start(0));
-    let _ = f.write_all(&body);
-    let _ = f.set_len(body.len() as u64);
-    let _ = f.flush();
+    }
+    let _ = write_resident_entry(&path, model, footprint_bytes);
 }
 
-/// Scan the ledger under the admit lock: reap dead reservations (their `flock` is
+/// Scan the ledger under the admit lock: reap dead reservations (their lifetime lock is
 /// free) and sum the live ones (skipping our own pid). Returns `(sum_bytes, holders)`.
 fn scan_residents(skip_pid: u32) -> (u64, Vec<(u32, String)>) {
     let mut sum = 0u64;
@@ -666,18 +710,8 @@ fn scan_residents(skip_pid: u32) -> (u64, Vec<(u32, String)>) {
         if pid == skip_pid {
             continue;
         }
-        // Liveness: a successful try_lock means nobody holds it ⇒ the owner died.
-        match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
-            Ok(f) => match f.try_lock() {
-                Ok(()) => {
-                    let _ = std::fs::remove_file(&path); // reap dead reservation
-                    continue;
-                }
-                Err(std::fs::TryLockError::WouldBlock) => {} // alive — fall through to count
-                // Can't probe (FS without locks): count it, conservatively (alive).
-                Err(std::fs::TryLockError::Error(_)) => {}
-            },
-            Err(_) => continue,
+        if !resident_is_live(pid, &path) {
+            continue;
         }
         let ent: ResidentEntry = match std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
             Some(e) => e,
@@ -689,7 +723,7 @@ fn scan_residents(skip_pid: u32) -> (u64, Vec<(u32, String)>) {
     (sum, holders)
 }
 
-/// Reap reservation files whose owning gateway has died — their `flock` is free, so a
+/// Reap reservation files whose owning gateway has died — their lifetime lock is free, so a
 /// `try_lock` succeeds. [`acquire_residency`] already reaps lazily on each admission;
 /// this standalone pass lets a long-lived host (or a `doctor`/maintenance path) clean
 /// up orphaned `residents/<pid>` files left by a `SIGKILL`'d gateway *between* loads,
@@ -702,20 +736,16 @@ pub fn reap_orphan_residents() -> usize {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        // Only numeric pid files are reservations.
-        let is_pid = path
+        // Only numeric metadata files are reservations; sidecar names are deliberately non-numeric.
+        let Some(pid) = path
             .file_name()
             .and_then(|n| n.to_str())
             .and_then(|s| s.parse::<u32>().ok())
-            .is_some();
-        if !is_pid {
+        else {
             continue;
-        }
-        if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
-            // try_lock success ⇒ nobody holds the flock ⇒ the owner died ⇒ reap.
-            if matches!(f.try_lock(), Ok(())) && std::fs::remove_file(&path).is_ok() {
-                reaped += 1;
-            }
+        };
+        if !resident_is_live(pid, &path) && !path.exists() {
+            reaped += 1;
         }
     }
     reaped
@@ -932,29 +962,35 @@ fn wait_for_change(rx: &std::sync::mpsc::Receiver<()>, deadline: std::time::Inst
     while rx.try_recv().is_ok() {} // drain extras
 }
 
-/// Create + flock `residents/<pid>` and write the reservation. `None` if the file
-/// can't be created/locked (→ caller fails open).
+/// Create + lock `residents/.<pid>.lock` and publish readable metadata in
+/// `residents/<pid>`. `None` if either piece cannot be created (→ caller fails open).
 fn reserve(pid: u32, model: &str, footprint_bytes: u64) -> Option<ResidencyGuard> {
-    use std::io::Write as _;
+    let _ = std::fs::create_dir_all(residents_dir());
     let path = resident_path(pid);
-    let mut file = std::fs::OpenOptions::new()
+    let lock_path = resident_lock_path(pid);
+    let lock = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
-        .truncate(true)
-        .open(&path)
+        .open(&lock_path)
         .ok()?;
-    // Hold the lifetime flock.
-    file.try_lock().ok()?;
-    let body = serde_json::to_vec(&ResidentEntry::new(model, footprint_bytes)).unwrap_or_default();
-    let _ = file.write_all(&body);
-    let _ = file.flush();
-    Some(ResidencyGuard { _lock: file, path })
+    lock.try_lock().ok()?;
+    if write_resident_entry(&path, model, footprint_bytes).is_err() {
+        drop(lock);
+        let _ = std::fs::remove_file(&lock_path);
+        return None;
+    }
+    Some(ResidencyGuard {
+        lock: Some(lock),
+        path,
+        lock_path,
+    })
 }
 
 // ── P1: the admission WAIT QUEUE (spec docs/specs/residency-admission-queue.md) ───────────────
-// When a load doesn't fit, the gateway ENQUEUES (a flock'd `waiters/<seq>.<pid>` file, footprint in
-// the body) instead of every arrival racing to grab budget the instant it frees. Only the front-most
+// When a load doesn't fit, the gateway ENQUEUES (a flock'd
+// `waiters/<prio>.<seq>.<pid>.<footprint>` file; the body repeats the footprint for compatibility)
+// instead of every arrival racing to grab budget the instant it frees. Only the front-most
 // waiter whose footprint FITS the current budget proceeds (evaluated under the admit lock, so it is
 // serialized → no herd, no admit-TOCTOU). "Front-most-that-fits" (not strict FIFO) avoids head-of-line
 // blocking: a small load behind a too-big one still proceeds. Crash-safe like the ledger — the OS drops
@@ -1010,14 +1046,16 @@ fn next_waiter_seq() -> u64 {
     next
 }
 
-/// Enqueue this loader: write a flock-held `waiters/<prio>.<seq>.<pid>` (prio + zero-padded seq so the
-/// filename sorts numerically by (prio, seq)) with the footprint in the body. Call under the admit lock.
+/// Enqueue this loader: write a flock-held `waiters/<prio>.<seq>.<pid>.<footprint>` (prio +
+/// zero-padded seq sort numerically). The footprint is part of the filename because Windows file locks
+/// prevent another process from reading a live ticket's body; the body is retained for compatibility
+/// with older readers. Call under the admit lock.
 /// `None` if we can't create/lock the ticket (→ caller falls back to a direct admits check).
 fn enqueue_waiter(pid: u32, footprint_bytes: u64, prio: u8) -> Option<WaiterTicket> {
     use std::io::Write as _;
     let _ = std::fs::create_dir_all(waiters_dir());
     let seq = next_waiter_seq();
-    let path = waiters_dir().join(format!("{prio}.{seq:020}.{pid}"));
+    let path = waiters_dir().join(format!("{prio}.{seq:020}.{pid}.{footprint_bytes}"));
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -1028,13 +1066,20 @@ fn enqueue_waiter(pid: u32, footprint_bytes: u64, prio: u8) -> Option<WaiterTick
     file.try_lock().ok()?;
     let _ = write!(file, "{footprint_bytes}");
     let _ = file.flush();
-    Some(WaiterTicket { prio, seq, pid, footprint_bytes, path, _lock: file })
+    Some(WaiterTicket {
+        prio,
+        seq,
+        pid,
+        footprint_bytes,
+        path,
+        _lock: file,
+    })
 }
 
 /// Scan the queue: parse `(prio, seq, pid, footprint)` per live ticket, reaping any whose owner died
-/// (its flock is free → `try_lock` succeeds). The caller supplies its own held ticket because Windows
-/// locks prevent reopening and reading the locked file; Unix flock permits that read, which hid the
-/// portability bug. Never reaps the caller's pid.
+/// (its flock is free → `try_lock` succeeds). New tickets publish footprint in the filename so every
+/// process can inspect live Windows tickets without reading through their exclusive lock. The body and
+/// caller's held value are fallbacks for legacy three-field tickets. Never reaps the caller's pid.
 fn scan_waiters(own: Option<&WaiterTicket>) -> Vec<(u8, u64, u32, u64)> {
     let mut out = Vec::new();
     let mypid = own.map(|t| t.pid);
@@ -1047,26 +1092,34 @@ fn scan_waiters(own: Option<&WaiterTicket>) -> Vec<(u8, u64, u32, u64)> {
         if name.starts_with('.') {
             continue; // the .seq counter
         }
-        // `<prio>.<seq>.<pid>`
-        let parts: Vec<&str> = name.splitn(3, '.').collect();
-        let [pr, s, p] = parts[..] else {
+        // `<prio>.<seq>.<pid>.<footprint>`; legacy tickets keep footprint in the body.
+        let parts: Vec<&str> = name.splitn(4, '.').collect();
+        let [pr, s, p, rest @ ..] = parts.as_slice() else {
             continue;
         };
-        let (Ok(prio), Ok(seq), Ok(pid)) = (pr.parse::<u8>(), s.parse::<u64>(), p.parse::<u32>()) else {
+        let (Ok(prio), Ok(seq), Ok(pid)) = (pr.parse::<u8>(), s.parse::<u64>(), p.parse::<u32>())
+        else {
             continue;
         };
+        let published_footprint = rest.first().and_then(|fp| fp.parse::<u64>().ok());
         // Reap a dead waiter (not ourselves): if we can flock it, its owner is gone.
         if Some(pid) != mypid {
-            if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(ent.path()) {
+            if let Ok(f) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(ent.path())
+            {
                 if f.try_lock().is_ok() {
                     let _ = std::fs::remove_file(ent.path());
                     continue;
                 }
             }
         }
-        let footprint = own
-            .filter(|t| (t.prio, t.seq, t.pid) == (prio, seq, pid))
-            .map(|t| t.footprint_bytes)
+        let footprint = published_footprint
+            .or_else(|| {
+                own.filter(|t| (t.prio, t.seq, t.pid) == (prio, seq, pid))
+                    .map(|t| t.footprint_bytes)
+            })
             .unwrap_or_else(|| {
                 std::fs::read_to_string(ent.path())
                     .ok()
@@ -1169,11 +1222,8 @@ fn scan_residents_prio(skip_pid: u32) -> Vec<(u32, u8, u64)> {
         if pid == skip_pid {
             continue;
         }
-        // Skip an obviously-dead reservation (its flock is free).
-        if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
-            if f.try_lock().is_ok() {
-                continue;
-            }
+        if !resident_is_live(pid, &path) {
+            continue;
         }
         if let Some(e) = std::fs::read(&path)
             .ok()
@@ -1323,6 +1373,22 @@ mod tests {
         assert_eq!(pick_front_that_fits(&prio_mix, 0, budget, avail, min_free, Normal), Some((0, 9, 60)));
     }
 
+    #[test]
+    fn queue_scan_reads_every_live_locked_ticket_footprint() {
+        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let dir = residency_env(u64::MAX);
+        let first = enqueue_waiter(10_001, 5 * GB, PRIO_INTERACTIVE).expect("first ticket");
+        let second = enqueue_waiter(10_002, 9 * GB, PRIO_BATCH).expect("second ticket");
+
+        let scanned = scan_waiters(Some(&first));
+        assert!(scanned.contains(&(first.prio, first.seq, first.pid, 5 * GB)));
+        assert!(scanned.contains(&(second.prio, second.seq, second.pid, 9 * GB)));
+
+        drop(second);
+        drop(first);
+        residency_env_clear(&dir);
+    }
+
     fn sample() -> ActiveGateway {
         ActiveGateway {
             model: "mlx-community/Qwen3-30B-A3B-Instruct-4bit".into(),
@@ -1434,21 +1500,18 @@ mod tests {
     }
 
     /// A stand-in for another live resident gateway: writes `residents/<pid>` and
-    /// holds its flock (returned File kept alive ⇒ the scan sees it as alive). `pid`
-    /// is just the filename — liveness is purely flock-based, no real process needed.
+    /// holds its sidecar lock (returned File kept alive ⇒ the scan sees it as alive).
+    /// `pid` is just the filename — liveness is lock-based, no real process needed.
     fn fake_resident(pid: u32, model: &str, footprint: u64) -> std::fs::File {
-        use std::io::Write as _;
         let _ = std::fs::create_dir_all(residents_dir());
-        let mut f = std::fs::OpenOptions::new()
+        let f = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
-            .truncate(true)
-            .open(resident_path(pid))
+            .open(resident_lock_path(pid))
             .unwrap();
         f.try_lock().unwrap();
-        write!(f, "{{\"model\":\"{model}\",\"footprint_bytes\":{footprint}}}").unwrap();
-        f.flush().unwrap();
+        write_resident_entry(&resident_path(pid), model, footprint).unwrap();
         f
     }
 
@@ -1490,7 +1553,9 @@ mod tests {
         // models come/go (residency-unify U1). A reader from another pid's view must see
         // the live updated value — grow AND shrink — and 0 after release.
         let g = acquire_residency("m", 3 * GB).expect("ok").expect("guard");
+        let mypid = std::process::id();
         let other = std::process::id().wrapping_add(1);
+        assert!(resident_lock_path(mypid).exists(), "lifetime sidecar published");
         assert_eq!(committed_by_others_bytes(other), 3 * GB, "initial reservation visible");
         g.update_footprint("m+warm", 9 * GB);
         assert_eq!(committed_by_others_bytes(other), 9 * GB, "grow republished");
@@ -1498,6 +1563,8 @@ mod tests {
         assert_eq!(committed_by_others_bytes(other), 1 * GB, "shrink republished");
         drop(g);
         assert_eq!(committed_by_others_bytes(other), 0, "released on drop");
+        assert!(!resident_path(mypid).exists(), "metadata removed on drop");
+        assert!(!resident_lock_path(mypid).exists(), "sidecar removed on drop");
         residency_env_clear(&dir);
     }
 
