@@ -815,7 +815,7 @@ pub fn acquire_residency(
                 let my_turn = match ticket.as_ref() {
                     Some(t) => {
                         pick_front_that_fits(
-                            &scan_waiters(mypid),
+                            &scan_waiters(ticket.as_ref()),
                             in_use,
                             budget,
                             available,
@@ -990,6 +990,7 @@ struct WaiterTicket {
     prio: u8,
     seq: u64,
     pid: u32,
+    footprint_bytes: u64,
     path: PathBuf,
     _lock: std::fs::File,
 }
@@ -1027,13 +1028,16 @@ fn enqueue_waiter(pid: u32, footprint_bytes: u64, prio: u8) -> Option<WaiterTick
     file.try_lock().ok()?;
     let _ = write!(file, "{footprint_bytes}");
     let _ = file.flush();
-    Some(WaiterTicket { prio, seq, pid, path, _lock: file })
+    Some(WaiterTicket { prio, seq, pid, footprint_bytes, path, _lock: file })
 }
 
 /// Scan the queue: parse `(prio, seq, pid, footprint)` per live ticket, reaping any whose owner died
-/// (its flock is free → `try_lock` succeeds). Never reaps `mypid` (our own ticket's flock would block).
-fn scan_waiters(mypid: u32) -> Vec<(u8, u64, u32, u64)> {
+/// (its flock is free → `try_lock` succeeds). The caller supplies its own held ticket because Windows
+/// locks prevent reopening and reading the locked file; Unix flock permits that read, which hid the
+/// portability bug. Never reaps the caller's pid.
+fn scan_waiters(own: Option<&WaiterTicket>) -> Vec<(u8, u64, u32, u64)> {
     let mut out = Vec::new();
+    let mypid = own.map(|t| t.pid);
     let Ok(entries) = std::fs::read_dir(waiters_dir()) else {
         return out;
     };
@@ -1052,7 +1056,7 @@ fn scan_waiters(mypid: u32) -> Vec<(u8, u64, u32, u64)> {
             continue;
         };
         // Reap a dead waiter (not ourselves): if we can flock it, its owner is gone.
-        if pid != mypid {
+        if Some(pid) != mypid {
             if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(ent.path()) {
                 if f.try_lock().is_ok() {
                     let _ = std::fs::remove_file(ent.path());
@@ -1060,10 +1064,15 @@ fn scan_waiters(mypid: u32) -> Vec<(u8, u64, u32, u64)> {
                 }
             }
         }
-        let footprint = std::fs::read_to_string(ent.path())
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(u64::MAX); // unreadable → treat as huge so it never wrongly "fits"
+        let footprint = own
+            .filter(|t| (t.prio, t.seq, t.pid) == (prio, seq, pid))
+            .map(|t| t.footprint_bytes)
+            .unwrap_or_else(|| {
+                std::fs::read_to_string(ent.path())
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .unwrap_or(u64::MAX) // unreadable → huge so it never wrongly "fits"
+            });
         out.push((prio, seq, pid, footprint));
     }
     out
