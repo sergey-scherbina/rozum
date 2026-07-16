@@ -40,28 +40,32 @@ concern by writing an impl); one is a tangle slated for extraction; one is
 deliberately not a plugin axis. Find the seam for any concern here in one hop.
 Full map + the staged extraction plan: `docs/specs/architecture-spi.md`.
 
-- **Models / engines → `ChatBackend` SPI** (`src/backend.rs`). Async chat with
+- **Models / engines → `ChatBackend` SPI** (`crates/rozum-core/src/backend.rs`). Async chat with
   tool-use / streaming / cancel; engine leaves (native MLX, GGUF, mistralrs,
   remote HTTP) and decorators (`BackendOrchestrator` cascade, `AdmittingBackend`
   admission). Selection via `BackendRegistry` / `BackendConfig` / `BackendPolicy`.
-- **Tools → `ToolSource` SPI** (`src/agent.rs`). `tools()` + `dispatch()`;
+- **Tools → `ToolSource` SPI** (`crates/rozum-agent/src/agent.rs`). `tools()` + `dispatch()`;
   in-process `CallbackToolSource` today, an MCP-client adapter planned so external
   and in-process tools share one seam.
 - **Agent dialect + model tool-format → to be extracted** (`WireProtocol` and
   `ToolDialect`). The agent wire format (OpenAI Chat / Anthropic Messages / OpenAI
   Responses) and the per-model tool emission/parse/constraint
   (Qwen-XML / Harmony / GLM `name\njson`) are two orthogonal seams currently
-  hand-branched across `gateway.rs` / `serving.rs` / `mlx_native_backend.rs`. They
+  implemented across `crates/rozum-gateway` / `crates/rozum-core/src/serving.rs` /
+  `crates/rozum-mlx/src/mlx_native_backend.rs`. They
   vary independently (any agent × any model); extraction is staged and
   behaviour-preserving. Cross-cutting robustness (loop-breaker, read-repair) stays
   an orchestration policy over both seams, owned by neither.
-- **Services → subcommands, not plugins** (`Command` in `src/main.rs`). `gateway`,
-  `web`, `meetings`, `mcp`, bridges. Deliberately not a plugin axis: a process /
-  registry model adds indirection with no payoff for a single local binary.
+- **Services → subcommands, not plugins.** The user-facing `rozum` dispatcher
+  (`crates/rozum-cli`) routes engine work to `rozum-gateway` and meeting MCP work
+  to `rozum-meet`; `rozum-web` and `rozum-tui` are thin frontend binaries.
+  Deliberately not a plugin axis: process boundaries already isolate services.
 
 ## Runtime Contract
 
-- The project exposes a Rust library crate and a binary with the same package name, `rozum`.
+- Package `rozum` exposes the compatibility library and the engine-bearing
+  `rozum-gateway` binary. Package `rozum-cli` exposes the thin user-facing
+  `rozum` dispatcher, which resolves sibling binaries first and then `PATH`.
 - Bare `rozum` attaches a TUI client to a daemon-hosted meeting room (a room
   picker when launched without project context); the TUI itself does not run
   model inference.
@@ -111,7 +115,7 @@ Full map + the staged extraction plan: `docs/specs/architecture-spi.md`.
 - `rozum gateway` exposes the active `ChatBackend` as a local HTTP server speaking OpenAI Chat Completions and Anthropic Messages dialects on `127.0.0.1`. Spec: `docs/specs/api-gateway.md`.
 - `rozum launch <program>` starts a gateway, sets `ANTHROPIC_*` and `OPENAI_*` env vars on the child, and runs the agent CLI (Claude Code, Codex, aider) already connected to a local model — without touching the user's OAuth credentials. Spec: `docs/specs/launch-wrapper.md`.
 - The model-serving gateway is a **shared, single-instance, detached process**: multiple `rozum launch` clients discover and reuse one resident model (single-owner election via TCP-port bind + advisory lock, transparent failover on the same stable port, idle shutdown via client leases). Each launch runs a small model-free local proxy in the request path that absorbs daemon restarts — replaying a request when the daemon dies before the first streamed token, refusing crash-looping "poison" prompts, and retrying with backoff that honors backpressure. This makes the resident model/backend swappable transparently (`rozum gateway switch` / `reload` / `unload`: in-place drain → unload → load, no second model resident). `--model` is optional — omitted reuses a running gateway or shows an interactive picker (cached models first); `--dedicated` opts out into a private gateway. `rozum models rm` deletes a cached model. Spec: `docs/specs/shared-gateway.md`.
-- Default model resolution chain for `rozum gateway` / `rozum launch` (highest first): **in-process native MLX** (`--features mlx-native`, on by default — the primary in-process backend, covering the Qwen3 / Qwen3.6 / Qwen2(.5) / Llama families with a full native MLX forward, no Python; auto-downloads an MLX snapshot from HuggingFace or ModelScope when not cached), **in-process GGUF** (`--features gguf`, **now in the default build** — the GGUF/llama.cpp fallback for local `.gguf` files, `lmstudio:<repo>`, and `ollama:<name>[:<tag>]` cached blobs), in-process MLX via `mistralrs` (`--features mistralrs`, opt-in broader-catalog candle fallback), LM Studio HTTP, then (opt-in) the Python `mlx_lm.server` HTTP backend — only when `ROZUM_MLX_HTTP` is set (default port 8080) — and finally `ROZUM_BACKEND_URL` env. The `mlx_lm.server` step is off the default path (superseded by the native runtime) but available: set `ROZUM_MLX_HTTP`, or force it with `--backend mlx-server`. Note: an Ollama model now requires an explicit `ollama:` prefix (`ollama:qwen3:8b`); a bare `name:tag` is no longer auto-interpreted as Ollama. If none reachable, both subcommands exit with code 1 rather than serving a placeholder.
+- Default model resolution chain for `rozum gateway` / `rozum launch` (highest first): **in-process native MLX** (`mlx-native` plus `all-models`, both on by default — the primary Apple-Silicon backend; auto-downloads an MLX snapshot from HuggingFace or ModelScope when not cached), **opt-in in-process GGUF** (`--features gguf` for local `.gguf` files, `lmstudio:<repo>`, and `ollama:<name>[:<tag>]` cached blobs), opt-in MLX via `mistralrs`, LM Studio HTTP, opt-in Python `mlx_lm.server` when `ROZUM_MLX_HTTP` is set, and finally `ROZUM_BACKEND_URL`. The default Cargo feature set is exactly `mlx-native + all-models`; GGUF is deliberately excluded to avoid the llama.cpp/CMake build unless requested. An Ollama model requires an explicit `ollama:` prefix (`ollama:qwen3:8b`); a bare `name:tag` is not auto-interpreted as Ollama. If none is reachable, both subcommands exit with code 1 rather than serving a placeholder.
 - `rozum launch --backend-url <URL>` (CLI equivalent of `ROZUM_BACKEND_URL`) points the agent at an external OpenAI-compatible server — e.g. Ollama (`http://localhost:11434/v1`), vLLM, any `/v1` endpoint. It **forces** that backend (skips the local GGUF/MLX chain) and runs a lightweight in-process gateway (no shared daemon, no model load); the upstream model name comes from `--model` (e.g. `--model qwen3:8b`).
 - The native MLX runtime is pure Rust on the vendored `mlx-lm` fork (`.vendor/mlx-lm`): MLX `Array`s are `!Send`, so the model is owned for life by a dedicated worker thread; greedy output is validated byte-for-byte against Python `mlx_lm`. Spec: `docs/specs/mlx-native-runtime.md`.
 - The in-process `mistralrs` backend serves requests under an adaptive concurrency policy: engine capacity is budgeted from the model footprint vs available unified memory, and a rozum-side admission scheduler adds shortest-job-first ordering, a reserved fast lane for short interactive requests, and bounded-queue backpressure. Defaults must stay safe on the 24–36 GB target band and are never required for the default (no-`mistralrs`) build. Spec: `docs/specs/mistralrs-concurrency-scheduling.md`.

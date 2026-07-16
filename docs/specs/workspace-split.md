@@ -2,12 +2,13 @@
 
 ## Overview
 
-`rozum` is today a single ~47K-LOC crate (78 `.rs` files, one `Cargo.toml` with
-feature flags). This spec decomposes it into a **Cargo workspace of ~7–8 crates**
+`rozum` began as a single ~47K-LOC crate (78 `.rs` files, one `Cargo.toml` with
+feature flags). This spec decomposed it into a **Cargo workspace of library and frontend crates**
 along the dependency layers the code *already* has, so each concern (the SPI, the
 per-hardware engines, model sourcing, the agent/cascade, the gateway, the meeting
-room) is its own crate with an enforced boundary — not a convention. The binary
-`rozum` keeps owning the CLI / `launch` orchestration and wires the crates together.
+room) is its own crate with an enforced boundary — not a convention. Package `rozum`
+owns the engine-bearing `rozum-gateway`; the `rozum-cli` package owns the thin `rozum`
+dispatcher that preserves the CLI surface.
 
 This is the crate-level continuation of `architecture-spi.md` (which made the
 *seams* legible at the module level) and realizes the North Star (`SPEC.md`): the
@@ -38,19 +39,19 @@ L0  rozum-core         backend (SPI), concurrency, obs, engine, serving,
                        sampler, constrain, harmony, config(base)
 ```
 
-Crate-name prefix `rozum-`; the bin stays `rozum`. Feature flags
+Crate-name prefix `rozum-`; the engine bin is `rozum-gateway` and the dispatcher is `rozum`. Feature flags
 (`mlx-native`, `gguf`, `mistralrs`, `x86-native`) move to the workspace root and
 forward to the engine crates as optional `dep:` — `cargo build` and
 `--no-default-features` produce the **same** artifacts as today.
 
 ## Behavior
-- [ ] `cargo build` (default features) produces a byte-equivalent `rozum` binary; CLI surface unchanged.
-- [ ] `cargo build --no-default-features` (the `linux-core` CI seam) builds `rozum-core` + portable crates with no Metal toolchain.
-- [ ] Each feature flag (`mlx-native`/`gguf`/`mistralrs`/`x86-native`) toggles exactly its engine crate; matrix unchanged.
-- [ ] No crate-boundary dependency cycle (`cargo` enforces this — a cycle fails to resolve).
-- [ ] `rozum-meeting` builds and tests **without** any engine crate in its dep tree (proves the daemon↔runtime separation).
-- [ ] Every phase leaves `cargo check` + `cargo test` green; no phase requires a behaviour change to land.
-- [ ] Lib test count is preserved across each move (tests travel with their module).
+- [x] Default-feature builds produce `rozum-gateway`; the thin `rozum` dispatcher preserves the CLI surface.
+- [x] `cargo build --no-default-features` (the `linux-core` seam) builds the portable graph with no Metal toolchain.
+- [x] Each feature flag (`mlx-native`/`gguf`/`mistralrs`/`x86-native`) forwards to its engine crate.
+- [x] No crate-boundary dependency cycle (`cargo` enforces this — a cycle fails to resolve).
+- [x] `rozum-meeting` builds and tests **without** any engine crate in its dep tree.
+- [x] Every extraction phase landed with local build/test evidence.
+- [x] Lib tests moved with their modules; CI coverage of all workspace test targets is specified separately in `ci-green-baseline.md`.
 
 ## Out of scope
 - **Separate repositories** — this is ONE repo, ONE workspace (see Decisions).
@@ -208,7 +209,7 @@ tests lock it cross-crate — made it an always-present `pub static`. Verified: 
 default (mlx on) + `--no-default-features` green; **118/118** rozum-agent + **71/71** rozum-gateway
 tests; all test targets (incl `tests/mlx_evals.rs` under mlx-native) compile.
 
-**End state: a 9-crate workspace** — `rozum-core` (SPI+share), `rozum-models`, `rozum-agent`,
+**End state: a multi-crate workspace** — `rozum-core` (SPI+share), `rozum-models`, `rozum-agent`,
 `rozum-gateway`, `rozum-meeting`, the four engines (`rozum-mlx`/`-gguf`/`-mistralrs`/`-x86`), and
-the `rozum` binary (just the launch/CLI layer: main/config/doctor/proxy/sandbox/service). Only
+the engine-bearing `rozum-gateway`, and the thin frontend/dispatcher packages. Only
 Phase 4 (`rozum-hardware`, new design work) remains.

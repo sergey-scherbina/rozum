@@ -1,8 +1,7 @@
 # Binary split — heavy backend binaries vs thin frontends
 
-Status: implemented on `feature/binary-split-dispatcher` (awaiting operator merge). Thin frontends
-`rozum-meet` / `rozum-web` / `rozum-tui` are on master; the dispatcher (`rozum`) + the renamed
-engine binary (`rozum-gateway`) are on the branch. Continuation of the workspace split
+Status: implemented on `master`. Thin frontends `rozum-meet` / `rozum-web` / `rozum-tui`, the
+dispatcher (`rozum`), and the engine binary (`rozum-gateway`) are all shipped. Continuation of the workspace split
 (`docs/specs/workspace-split.md`, which split the *crates*); this splits the *binaries*.
 
 ## Install & usage (after the split)
@@ -22,9 +21,10 @@ them.
 
 ## Why
 
-The single `rozum` binary links everything. Its default features `["mlx-native", "gguf"]` pull
-`mlx-sys` (MLX C++) and `llama-cpp-2` (llama.cpp via cmake + Xcode) — a clean build is tens of
-minutes. Two concrete costs:
+The former single `rozum` binary linked everything. Its engine features pulled MLX C++ and,
+when GGUF was selected, llama.cpp via CMake/Xcode — a clean build could take tens of minutes.
+The current shipped defaults are `mlx-native + all-models`; GGUF is opt-in. Two concrete costs
+motivated the split:
 
 1. **A frontend fix pays backend build cost.** BUG-004 was a ~130-line change in `rozum-meeting`
    (the MCP bridge), yet shipping it meant rebuilding the monolith. Incremental reuse kept it to

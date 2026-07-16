@@ -120,15 +120,14 @@ Nothing above the seam (gateway, agent runtime, cascade, concurrency, config) ch
 
 The abstraction exists; a few sharp edges keep it from being clean portability:
 
-1. **Platform-aware build (Linux *and* Windows).** `default = ["mlx-native", "gguf"]`
+1. **Platform-aware build (Linux *and* Windows).** `default = ["mlx-native", "all-models"]`
    assumes macOS — a bare `cargo build` on Linux/Windows tries to compile MLX (Apple
    toolchain) and fails.
-   - **Done (2026-06-15): the durable core is portable + CI-enforced.** `cargo build
-     --no-default-features` builds + tests the whole non-backend layer (SPI, gateway w/ HTTP
-     backends, agent, cascade, concurrency, config, meeting room) with no native toolchain — and a
-     CI `linux-core` job (`ubuntu-latest`) runs exactly that on every push, so a Linux regression in
-     the durable layer fails CI rather than being folklore. A **`windows-core` job
-     (`windows-latest`)** is the matching gate and should run alongside it.
+   - **Required CI contract:** macOS builds shipped defaults and tests every workspace library;
+     Linux builds/tests the whole workspace library graph with `--no-default-features`; Windows
+     gates an explicit allow-list of packages that do not own the Unix-only seams below. The exact
+     commands and promotion rule live in [`ci-green-baseline.md`](ci-green-baseline.md). A package
+     joins the Windows list only when it compiles and tests on the real runner.
    - **Remaining — bare build per OS (needs the matching box):** make *bare* `cargo build`
      first-class off-Mac — the native backends are Apple-Metal-bound (mlx-sys;
      `llama-cpp-2 { features = ["metal"] }`), so this means a target-conditional default (MLX only on
