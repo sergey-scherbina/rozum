@@ -464,6 +464,24 @@ curl -sf --max-time 4 http://127.0.0.1:8411/ -o /dev/null -w "spa+api        :84
 curl -sf --max-time 4 http://127.0.0.1:8411/control/auth/status -o /dev/null -w "auth/status    :8411 -> %{http_code}\n"
 curl -s  --max-time 4 http://127.0.0.1:8411/control/status -o /dev/null -w "status (expect 401 unauthed) :8411 -> %{http_code}\n"
 
+# 5b) The always-available chat model — install/refresh com.rozum.gateway: a durable shared gateway
+#     holding Qwen3.5-4B resident on :8089 so the phone chat (/chat.html -> coder/launch -> `rozum
+#     launch`) reuses it instead of cold-loading per message. Auto-sleeps after 20 min idle (unloads
+#     the model, keeps the daemon) — the operator's RAM policy. Template + rationale:
+#     clients/control/launchd/com.rozum.gateway.plist. Reboot-safe: startup admission WAITS for RAM
+#     headroom before loading (never overcommits a jetsam-pressure host, BUG-003).
+gw_plist="$HOME/Library/LaunchAgents/com.rozum.gateway.plist"
+cp "$HERE/launchd/com.rozum.gateway.plist" "$gw_plist"
+launchctl bootout "gui/$UID_/com.rozum.gateway" 2>/dev/null || true
+sleep 1
+if ! launchctl bootstrap "gui/$UID_" "$gw_plist"; then
+  echo ">> gateway bootstrap failed, retrying once ..." >&2
+  sleep 1
+  launchctl bootstrap "gui/$UID_" "$gw_plist"
+fi
+# The model load is async (cold-loads Qwen ~30s); the daemon answers `gateway status` once resident.
+echo ">> com.rozum.gateway installed (Qwen3.5-4B on :8089, idle-unload 20m) — warming in background"
+
 # Browser smoke gate — the 2026-07-07 bug classes (blank init, dead navigation, click-eater,
 # empty formBody, missing status column) checked against the LIVE page in headless Chrome.
 # Soft-skips when node/Chrome/token/puppeteer-core are absent; a real CHECK failure fails

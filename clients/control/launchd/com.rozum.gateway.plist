@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The always-available chat model: a durable shared gateway holding the phone-chat
+  model (Qwen3.5-4B) resident on :8089, so the UCC chat (/chat.html -> coder/launch ->
+  `rozum launch`) reuses it instead of cold-loading a fresh gateway per message.
+
+  Auto-sleep on idle (the operator's chosen RAM policy): ROZUM_GATEWAY_UNLOAD_IDLE_SECS
+  =1200 makes the watchdog UNLOAD the model after 20 min idle — freeing ~7 GiB — while
+  KEEPING the daemon alive; the next chat message lazily reloads it. It is a MANUAL
+  gateway (ROZUM_GATEWAY_LAUNCH_MANAGED deliberately NOT set), so it survives the
+  lease gaps between one-shot `claude -p` agents instead of self-exiting on
+  "clients_gone" — only idle-unload and preemption move it.
+
+  Reboot-safe: at boot `acquire_residency` WAITS (ROZUM_GATEWAY_RESIDENCY_WAIT_SECS,
+  default 240s) for host RAM/pressure to clear before loading, so it never forces a
+  load into a jetsam-pressure host (the no-reboot invariant, BUG-003). If the wait
+  times out it exits and KeepAlive retries — self-healing, never a crash-loop that
+  overcommits.
+
+  Binary: ~/.rozum/bin/rozum-gateway (the deploy-managed stable copy, kept fresh by
+  clients/control/deploy-ucc-web.sh with rm-before-cp). Install: see that script's
+  gateway-service block, or `launchctl bootstrap gui/$UID <this>` after copying it to
+  ~/Library/LaunchAgents/.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.rozum.gateway</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sergiy/.rozum/bin/rozum-gateway</string>
+    <string>gateway</string>
+    <string>--model</string>
+    <string>mlx-community:Qwen3.5-4B-MLX-4bit</string>
+    <string>--n-ctx</string>
+    <string>32768</string>
+    <string>--port</string>
+    <string>8089</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/Users/sergiy</string>
+    <key>PATH</key><string>/Users/sergiy/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>ROZUM_GATEWAY_UNLOAD_IDLE_SECS</key><string>1200</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/sergiy/work/my/rozum</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/sergiy/.rozum-gateway.log</string>
+  <key>StandardErrorPath</key><string>/Users/sergiy/.rozum-gateway.log</string>
+</dict>
+</plist>
