@@ -78,9 +78,18 @@ function getJSON(u){ return fetch(u,{headers:{}}).then(on401).then(function(r){r
 function postJSON(u,b){ return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(on401).then(function(r){return r.json();}); }
 function esc(s){return String(s).replace(/[&<>]/g,function(m){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[m];});}
 
-/* strip rozum-launch / claude-banner / sandbox / warning noise → the agent's real answer */
-var DROP=[/^rozum launch:/,/^context window:/,/^\s*→ /,/^⚠ /,/Claude Code v/,/dangerously-load-development-channels/,/^\s*Channels are not/,/^\s*▐|^\s*▝|^\s*▘|^\s*▎/,/mcp-proxy/,/^\s*\[rozum launch exited/];
-function cleanLog(t){ if(!t)return ''; return t.split('\n').filter(function(l){return !DROP.some(function(re){return re.test(l);});}).join('\n').replace(/^\s+|\s+$/g,''); }
+/* The agent's REAL answer begins AFTER the launch banner + the echoed prompt (the `→ running: claude
+   -p <prompt>` line spills the multi-line prompt — FRAME, "Earlier in this conversation:", "User: …" —
+   into the log; only its first line starts with `→ `, so the rest used to leak into the bubble). Find
+   the LAST banner-boundary line and keep only what follows; then drop any stray banner lines. Falls
+   back to a plain filter when no banner is present. */
+var DROP=[/^rozum launch:/,/^context window:/,/^\s*→ /,/^⚠ /,/Claude Code v/,/dangerously-load-development-channels/,/^\s*Channels are not/,/^\s*▐|^\s*▝|^\s*▘|^\s*▎/,/mcp-proxy/,/^Earlier in this conversation:/,/^(User|You): /,/^Request: /,/^\s*\[rozum launch exited/];
+var BOUNDARY=[/claude\.ai connectors/,/→ sandboxed/,/dangerously-load-development-channels/];
+function cleanLog(t){ if(!t)return '';
+  var lines=t.split('\n'), last=-1;
+  for(var i=0;i<lines.length;i++){ if(BOUNDARY.some(function(re){return re.test(lines[i]);})) last=i; }
+  var body=(last>=0?lines.slice(last+1):lines);
+  return body.filter(function(l){return !DROP.some(function(re){return re.test(l);});}).join('\n').replace(/^\s+|\s+$/g,''); }
 /* phase from the RAW log: gateway warming vs agent running */
 function phaseOf(raw){ if(/→ running:/.test(raw))return _lt('thinking…'); if(/starting shared gateway|loading|admission/i.test(raw))return _lt('loading model…'); return _lt('working…'); }
 
@@ -152,16 +161,31 @@ function doSend(){
     })
     .catch(function(e){ if(e!==0){ bot.streaming=false; bot.text='⚠ '+_lt('⚠ launch failed'); setBusy(false); renderThread(); saveMsgs(); } });
 }
+/* Robust completion. The coder path has NO exit marker, so liveness rides on the launcher pid — which
+   is UNRELIABLE two ways: it is 0 during the "starting…" window (agent not spawned yet) so the old
+   poll saw alive:false and quit with "(no answer)" BEFORE the agent even ran (the phone bug); and a
+   dead pid can be REUSED by the OS so alive stays true forever. So: never treat "not started yet" as
+   done (wait until `→ running:` appears), then finish when the launcher is gone (2 reads) OR the
+   output has been unchanged for ~10s (pid-reuse safety net). A generous tick cap covers a cold
+   model load without hanging forever on a silent launch failure. */
 function pollRun(id,bot){
-  var dead=0;
+  var started=false, deadReads=0, prevRaw='', stable=0, ticks=0;
+  var finish=function(){ bot.streaming=false; setBusy(false); renderThread(); saveMsgs(); };
   var tick=function(){
+    ticks++;
     getJSON('/control/coder/log?id='+encodeURIComponent(id)+'&tail=600')
       .then(function(j){
-        var raw=j.log||''; bot.text=cleanLog(raw); bot.phase=phaseOf(raw); renderThread();
-        if(j.alive){ dead=0; setTimeout(tick,1200); }
-        else { dead++; if(dead<2){ setTimeout(tick,1200); } else { bot.streaming=false; setBusy(false); renderThread(); saveMsgs(); } }
+        var raw=j.log||'';
+        if(/→ running:/.test(raw)) started=true;
+        bot.text=cleanLog(raw); bot.phase=phaseOf(raw); renderThread();
+        var answered=bot.text.length>0;
+        if(raw===prevRaw){ stable++; } else { stable=0; prevRaw=raw; }
+        deadReads = (started && !j.alive) ? deadReads+1 : 0;
+        if(deadReads>=2 || (answered && stable>=8)){ finish(); return; }
+        if(ticks>=140){ if(!bot.text) bot.text='⚠ '+_lt('⚠ launch failed'); finish(); return; }
+        setTimeout(tick,1200);
       })
-      .catch(function(e){ if(e!==0){ bot.streaming=false; setBusy(false); renderThread(); saveMsgs(); } });
+      .catch(function(e){ if(e!==0){ finish(); } });
   };
   setTimeout(tick,700);
 }
