@@ -33,6 +33,10 @@ val bodyCss = "html,body{margin:0;height:100%;background:radial-gradient(130% 95
 val css = "#app{display:flex;flex-direction:column;height:100dvh}" +
   "#bar{display:flex;gap:10px;align-items:center;padding:10px max(12px,env(safe-area-inset-right)) 10px max(12px,env(safe-area-inset-left));background:#151a23;border-bottom:1px solid #232a36;flex:0 0 auto}" +
   "#bar a,#bar .ic{color:#7ab8ff;text-decoration:none;cursor:pointer;font-size:15px;flex:0 0 auto}#bar .meta{min-width:0;line-height:1.15;flex:1 1 auto}#bar .meta b{display:block;font-size:13px;color:#e6edf6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#bar .meta small{font-size:11px;color:#8a93a0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}#st{font-size:12px;color:#8a93a0;flex:0 0 auto}" +
+  "#sysbar{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:5px max(12px,env(safe-area-inset-right)) 6px max(12px,env(safe-area-inset-left));background:#0d1219;border-bottom:1px solid #1c2330;font-size:11px;color:#8a93a0;flex:0 0 auto;line-height:1}" +
+  "#sysbar .seg{display:flex;align-items:center;gap:4px;white-space:nowrap}#sysbar b{color:#c9d4e3;font-weight:600}" +
+  "#sysbar .dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}#sysbar .warm{background:#2ea043;box-shadow:0 0 5px #2ea04388}#sysbar .sleep{background:#6e7681}" +
+  "#sysbar .bar{width:46px;height:5px;border-radius:3px;background:#1c2330;overflow:hidden;flex:0 0 auto}#sysbar .bar>i{display:block;height:100%;background:linear-gradient(90deg,#2ea043,#e5a53b)}" +
   ".hidden{display:none!important}" +
   "#start{flex:1 1 auto;overflow-y:auto;padding:18px max(14px,env(safe-area-inset-right)) 18px max(14px,env(safe-area-inset-left));max-width:640px;margin:0 auto;width:100%;box-sizing:border-box}" +
   "#start h2{font-size:17px;margin:2px 0 6px;color:#e6edf6;font-weight:650}#start .sub{font-size:12.5px;color:#8a93a0;margin:0 0 16px}" +
@@ -53,7 +57,7 @@ val langCss = "#rozum-lang{position:fixed;top:9px;right:12px;display:flex;gap:1p
 
 val js = """
 var _LG=localStorage.getItem('rozum_lang')||navigator.language.split('-')[0]||'en';
-var _LT={'ru':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат с твоим проектом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Выбери агента и проект. Каждое сообщение запускает агента на локальной модели в этом проекте.','Agent':'Агент','Model':'Модель','Project':'Проект','▶ Start chatting':'▶ Начать','message…':'сообщение…','send':'отпр.','working…':'работает…','loading model…':'гружу модель…','thinking…':'думаю…','Ask the agent to do something in the project.':'Попроси агента что-нибудь сделать в проекте.','⚠ launch failed':'⚠ не удалось запустить','(no answer)':'(нет ответа)','Companion':'Собеседник','Mode':'Режим','conversation':'диалог','Companion talks to the model directly; Agent runs a coding agent in a project.':'«Собеседник» говорит с моделью напрямую; «Агент» запускает кодинг-агента в проекте.'},'uk':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат з твоїм проєктом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Обери агента і проєкт. Кожне повідомлення запускає агента на локальній моделі в цьому проєкті.','Agent':'Агент','Model':'Модель','Project':'Проєкт','▶ Start chatting':'▶ Почати','message…':'повідомлення…','send':'надісл.','working…':'працює…','loading model…':'вантажу модель…','thinking…':'думаю…','Ask the agent to do something in the project.':'Попроси агента щось зробити в проєкті.','⚠ launch failed':'⚠ не вдалося запустити','(no answer)':'(немає відповіді)','Companion':'Співрозмовник','Mode':'Режим','conversation':'діалог','Companion talks to the model directly; Agent runs a coding agent in a project.':'«Співрозмовник» говорить з моделлю напряму; «Агент» запускає кодинг-агента в проєкті.'}};
+var _LT={'ru':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат с твоим проектом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Выбери агента и проект. Каждое сообщение запускает агента на локальной модели в этом проекте.','Agent':'Агент','Model':'Модель','Project':'Проект','▶ Start chatting':'▶ Начать','message…':'сообщение…','send':'отпр.','working…':'работает…','loading model…':'гружу модель…','thinking…':'думаю…','Ask the agent to do something in the project.':'Попроси агента что-нибудь сделать в проекте.','⚠ launch failed':'⚠ не удалось запустить','(no answer)':'(нет ответа)','Companion':'Собеседник','Mode':'Режим','conversation':'диалог','Companion talks to the model directly; Agent runs a coding agent in a project.':'«Собеседник» говорит с моделью напрямую; «Агент» запускает кодинг-агента в проекте.','warm':'тёплая','sleeping':'спит','free':'своб.','m':'м','h':'ч'},'uk':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат з твоїм проєктом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Обери агента і проєкт. Кожне повідомлення запускає агента на локальній моделі в цьому проєкті.','Agent':'Агент','Model':'Модель','Project':'Проєкт','▶ Start chatting':'▶ Почати','message…':'повідомлення…','send':'надісл.','working…':'працює…','loading model…':'вантажу модель…','thinking…':'думаю…','Ask the agent to do something in the project.':'Попроси агента щось зробити в проєкті.','⚠ launch failed':'⚠ не вдалося запустити','(no answer)':'(немає відповіді)','Companion':'Співрозмовник','Mode':'Режим','conversation':'діалог','Companion talks to the model directly; Agent runs a coding agent in a project.':'«Співрозмовник» говорить з моделлю напряму; «Агент» запускає кодинг-агента в проєкті.','warm':'тепла','sleeping':'спить','free':'вільно','m':'хв','h':'год'}};
 function _lt(s){var m=_LT[_LG];return(m&&m[s])||s;}
 document.documentElement.lang=_LG;
 if(_LT[_LG]&&_LT[_LG]['rozum · chat'])document.title=_LT[_LG]['rozum · chat'];
@@ -120,6 +124,26 @@ function renderStart(models,projects){
   };
 }
 function boot(){ getJSON('/control/status').then(function(s){renderStart(s.installed||s.models||[],s.projects||[]);}).catch(function(e){if(e!==0)renderStart([],[]);}); }
+
+/* ---------- system toolbar (model · state · memory), polled from /control/status ---------- */
+function shortModel(s){ s=String(s||''); var c=s.indexOf(':'); if(c>=0)s=s.slice(c+1); return s.replace(/-MLX.*$/i,'').replace(/-4bit$/i,'')||s; }
+function gib(b){ return (Number(b||0)/1073741824).toFixed(1); }
+function refreshSys(){
+  var el=$('sysbar'); if(!el)return;
+  getJSON('/control/status').then(function(d){
+    var g=d.gateway, r=d.residency||{}, warm=!!(g&&g.healthy);
+    var model=shortModel((g&&g.model)||cfg.model);
+    var up=(g&&g.uptime_secs)?(g.uptime_secs<3600?Math.floor(g.uptime_secs/60)+_lt('m'):Math.floor(g.uptime_secs/3600)+_lt('h')):'';
+    var used=r.committed_bytes, budget=r.host_budget_bytes, free=r.available_bytes;
+    var pct=(budget?Math.min(100,Math.round(100*(used||0)/budget)):0);
+    var cl=(g&&typeof g.clients==='number'&&g.clients>0)?(' · '+g.clients+'👤'):'';
+    el.innerHTML=
+      '<span class="seg"><span class="dot '+(warm?'warm':'sleep')+'"></span><b>'+esc(model)+'</b></span>'+
+      '<span class="seg">'+(warm?(_lt('warm')+(up?' '+up:'')+cl):_lt('sleeping'))+'</span>'+
+      '<span class="seg">💾 <span class="bar"><i style="width:'+pct+'%"></i></span> <b>'+gib(used)+'</b>/'+gib(budget)+' GiB</span>'+
+      '<span class="seg">'+gib(free)+' '+_lt('free')+'</span>';
+  }).catch(function(){});
+}
 
 /* ---------- chat ---------- */
 function setMeta(){ var who=cfg.mode==='agent'?('🤖 '+esc(cfg.agent)):('💬 '+_lt('Companion')); var sub=cfg.mode==='agent'?esc(String(cfg.project).split('/').pop()):_lt('conversation'); metaEl.innerHTML='<b>'+who+' · '+esc(String(cfg.model).split('/').pop())+'</b><small>'+sub+'</small>'; }
@@ -239,6 +263,7 @@ $('cfgbtn').onclick=function(){ if(confirm('Очистить этот диало
 
 /* boot */
 if(configured){ showChat(); } else { showStart(); }
+refreshSys(); setInterval(refreshSys,5000);
 """
 
 val html = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">" +
@@ -247,6 +272,7 @@ val html = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">" +
   "<title>rozum · chat</title><style>" + bodyCss + css + langCss + "</style></head><body>" +
   "<div id=\"app\">" +
     "<div id=\"bar\"><a href=\"/\">← UCC</a><div class=\"meta\" id=\"meta\"></div><span class=\"ic\" id=\"cfgbtn\">⚙</span><span id=\"st\"></span></div>" +
+    "<div id=\"sysbar\"></div>" +
     "<div id=\"start\"></div>" +
     "<div id=\"thread\" class=\"hidden\"></div>" +
     "<div id=\"composer\" class=\"hidden\"><textarea id=\"inp\" rows=\"1\" autocomplete=\"off\" autocapitalize=\"sentences\"></textarea><button id=\"send\" type=\"button\">send</button></div>" +
