@@ -53,7 +53,7 @@ val langCss = "#rozum-lang{position:fixed;top:9px;right:12px;display:flex;gap:1p
 
 val js = """
 var _LG=localStorage.getItem('rozum_lang')||navigator.language.split('-')[0]||'en';
-var _LT={'ru':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат с твоим проектом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Выбери агента и проект. Каждое сообщение запускает агента на локальной модели в этом проекте.','Agent':'Агент','Model':'Модель','Project':'Проект','▶ Start chatting':'▶ Начать','message…':'сообщение…','send':'отпр.','working…':'работает…','loading model…':'гружу модель…','thinking…':'думаю…','Ask the agent to do something in the project.':'Попроси агента что-нибудь сделать в проекте.','⚠ launch failed':'⚠ не удалось запустить','(no answer)':'(нет ответа)'},'uk':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат з твоїм проєктом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Обери агента і проєкт. Кожне повідомлення запускає агента на локальній моделі в цьому проєкті.','Agent':'Агент','Model':'Модель','Project':'Проєкт','▶ Start chatting':'▶ Почати','message…':'повідомлення…','send':'надісл.','working…':'працює…','loading model…':'вантажу модель…','thinking…':'думаю…','Ask the agent to do something in the project.':'Попроси агента щось зробити в проєкті.','⚠ launch failed':'⚠ не вдалося запустити','(no answer)':'(немає відповіді)'}};
+var _LT={'ru':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат с твоим проектом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Выбери агента и проект. Каждое сообщение запускает агента на локальной модели в этом проекте.','Agent':'Агент','Model':'Модель','Project':'Проект','▶ Start chatting':'▶ Начать','message…':'сообщение…','send':'отпр.','working…':'работает…','loading model…':'гружу модель…','thinking…':'думаю…','Ask the agent to do something in the project.':'Попроси агента что-нибудь сделать в проекте.','⚠ launch failed':'⚠ не удалось запустить','(no answer)':'(нет ответа)','Companion':'Собеседник','Mode':'Режим','conversation':'диалог','Companion talks to the model directly; Agent runs a coding agent in a project.':'«Собеседник» говорит с моделью напрямую; «Агент» запускает кодинг-агента в проекте.'},'uk':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат з твоїм проєктом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Обери агента і проєкт. Кожне повідомлення запускає агента на локальній моделі в цьому проєкті.','Agent':'Агент','Model':'Модель','Project':'Проєкт','▶ Start chatting':'▶ Почати','message…':'повідомлення…','send':'надісл.','working…':'працює…','loading model…':'вантажу модель…','thinking…':'думаю…','Ask the agent to do something in the project.':'Попроси агента щось зробити в проєкті.','⚠ launch failed':'⚠ не вдалося запустити','(no answer)':'(немає відповіді)','Companion':'Співрозмовник','Mode':'Режим','conversation':'діалог','Companion talks to the model directly; Agent runs a coding agent in a project.':'«Співрозмовник» говорить з моделлю напряму; «Агент» запускає кодинг-агента в проєкті.'}};
 function _lt(s){var m=_LT[_LG];return(m&&m[s])||s;}
 document.documentElement.lang=_LG;
 if(_LT[_LG]&&_LT[_LG]['rozum · chat'])document.title=_LT[_LG]['rozum · chat'];
@@ -62,7 +62,7 @@ if(_LT[_LG]&&_LT[_LG]['rozum · chat'])document.title=_LT[_LG]['rozum · chat'];
 var DEF_MODEL='mlx-community:Qwen3.5-4B-MLX-4bit';
 var DEF_PROJECT='/Users/sergiy/work/my/rozum';
 var AGENTS=['claude','codex','opencode'];
-var cfg={agent:localStorage.getItem('rozum_chat_agent')||'claude',model:localStorage.getItem('rozum_chat_model')||DEF_MODEL,project:localStorage.getItem('rozum_chat_project')||DEF_PROJECT};
+var cfg={mode:localStorage.getItem('rozum_chat_mode')||'chat',agent:localStorage.getItem('rozum_chat_agent')||'claude',model:localStorage.getItem('rozum_chat_model')||DEF_MODEL,project:localStorage.getItem('rozum_chat_project')||DEF_PROJECT};
 var configured=localStorage.getItem('rozum_chat_ready')==='1';
 var msgs=loadMsgs();   // {role:'user'|'bot', text, phase?}
 var busy=false;
@@ -95,20 +95,26 @@ function phaseOf(raw){ if(/→ running:/.test(raw))return _lt('thinking…'); if
 
 /* ---------- start / config ---------- */
 function renderStart(models,projects){
+  var modeChips='<span class="chip'+(cfg.mode==='chat'?' on':'')+'" data-mode="chat">💬 '+_lt('Companion')+'</span>'+
+                '<span class="chip'+(cfg.mode==='agent'?' on':'')+'" data-mode="agent">🤖 '+_lt('Agent')+'</span>';
   var agentChips=AGENTS.map(function(a){return '<span class="chip'+(cfg.agent===a?' on':'')+'" data-agent="'+a+'">'+a+'</span>';}).join('');
   var modelOpts=(models&&models.length?models:[{spec:DEF_MODEL}]).map(function(m){var s=m.spec||m.id||m;return '<option value="'+esc(s)+'"'+(s===cfg.model?' selected':'')+'>'+esc(String(s).split('/').pop())+'</option>';}).join('');
   var projOpts=(projects&&projects.length?projects:[{name:'rozum',path:DEF_PROJECT}]).map(function(p){var pa=p.path||p;return '<option value="'+esc(pa)+'"'+(pa===cfg.project?' selected':'')+'>'+esc(p.name||String(pa).split('/').pop())+'</option>';}).join('');
   startEl.innerHTML=
-    '<h2>'+_lt('Chat with your project')+'</h2><div class="sub">'+_lt('Pick an agent + project. Every message runs the agent on the local model, in that project.')+'</div>'+
-    '<div class="grp"><div class="lbl">'+_lt('Agent')+'</div><div class="chips" id="agents">'+agentChips+'</div></div>'+
+    '<h2>'+_lt('rozum · chat')+'</h2><div class="sub">'+_lt('Companion talks to the model directly; Agent runs a coding agent in a project.')+'</div>'+
+    '<div class="grp"><div class="lbl">'+_lt('Mode')+'</div><div class="chips" id="modes">'+modeChips+'</div></div>'+
     '<div class="grp"><div class="lbl">'+_lt('Model')+'</div><select class="sel" id="mdl">'+modelOpts+'</select></div>'+
-    '<div class="grp"><div class="lbl">'+_lt('Project')+'</div><select class="sel" id="prj">'+projOpts+'</select></div>'+
+    '<div class="grp agentonly"><div class="lbl">'+_lt('Agent')+'</div><div class="chips" id="agents">'+agentChips+'</div></div>'+
+    '<div class="grp agentonly"><div class="lbl">'+_lt('Project')+'</div><select class="sel" id="prj">'+projOpts+'</select></div>'+
     '<button id="go">'+_lt('▶ Start chatting')+'</button>';
+  var applyMode=function(){ Array.prototype.forEach.call(document.querySelectorAll('.agentonly'),function(x){x.style.display=(cfg.mode==='agent'?'':'none');}); };
+  applyMode();
+  $('modes').onclick=function(e){var c=e.target.closest('[data-mode]');if(!c)return;cfg.mode=c.dataset.mode;Array.prototype.forEach.call($('modes').children,function(x){x.classList.toggle('on',x.dataset.mode===cfg.mode);});applyMode();};
   $('agents').onclick=function(e){var c=e.target.closest('[data-agent]');if(!c)return;cfg.agent=c.dataset.agent;Array.prototype.forEach.call($('agents').children,function(x){x.classList.toggle('on',x.dataset.agent===cfg.agent);});};
   $('mdl').onchange=function(e){cfg.model=e.target.value;};
   $('prj').onchange=function(e){cfg.project=e.target.value;};
   $('go').onclick=function(){
-    localStorage.setItem('rozum_chat_agent',cfg.agent);localStorage.setItem('rozum_chat_model',cfg.model);
+    localStorage.setItem('rozum_chat_mode',cfg.mode);localStorage.setItem('rozum_chat_agent',cfg.agent);localStorage.setItem('rozum_chat_model',cfg.model);
     localStorage.setItem('rozum_chat_project',cfg.project);localStorage.setItem('rozum_chat_ready','1');
     configured=true; showChat(); inp.focus();
   };
@@ -116,7 +122,7 @@ function renderStart(models,projects){
 function boot(){ getJSON('/control/status').then(function(s){renderStart(s.installed||s.models||[],s.projects||[]);}).catch(function(e){if(e!==0)renderStart([],[]);}); }
 
 /* ---------- chat ---------- */
-function setMeta(){ metaEl.innerHTML='<b>'+esc(cfg.agent)+' · '+esc(String(cfg.model).split('/').pop())+'</b><small>'+esc(String(cfg.project).split('/').pop())+'</small>'; }
+function setMeta(){ var who=cfg.mode==='agent'?('🤖 '+esc(cfg.agent)):('💬 '+_lt('Companion')); var sub=cfg.mode==='agent'?esc(String(cfg.project).split('/').pop()):_lt('conversation'); metaEl.innerHTML='<b>'+who+' · '+esc(String(cfg.model).split('/').pop())+'</b><small>'+sub+'</small>'; }
 function showStart(){ startEl.classList.remove('hidden'); threadEl.classList.add('hidden'); compEl.classList.add('hidden'); metaEl.innerHTML=''; boot(); }
 function showChat(){ startEl.classList.add('hidden'); threadEl.classList.remove('hidden'); compEl.classList.remove('hidden'); setMeta(); inp.placeholder=_lt('message…'); send.textContent=_lt('send'); renderThread(); }
 function renderThread(){
@@ -150,16 +156,52 @@ function buildPrompt(v){
 
 function doSend(){
   var v=inp.value.trim(); if(!v||busy)return;
-  var prompt=buildPrompt(v);
   msgs.push({role:'user',text:v});
   var bot={role:'bot',text:'',phase:_lt('working…'),streaming:true}; msgs.push(bot);
   inp.value=''; inp.style.height='auto'; renderThread(); saveMsgs(); setBusy(true);
+  if(cfg.mode==='agent'){ sendAgent(v,bot); } else { sendChat(bot); }
+}
+/* AGENT mode: run a headless coding agent (claude/codex/opencode) in the project — it can explore,
+   edit files, run commands. Slow + can hang on a weak model, so it is opt-in. */
+function sendAgent(v,bot){
+  var prompt=buildPrompt(v);
   postJSON('/control/coder/launch',{agent:cfg.agent,model:cfg.model,workdir:cfg.project,prompt:prompt,verify:false})
     .then(function(j){
       if(!j||!j.id){ bot.streaming=false; bot.text='⚠ '+_lt('⚠ launch failed'); setBusy(false); renderThread(); saveMsgs(); return; }
       pollRun(j.id,bot);
     })
     .catch(function(e){ if(e!==0){ bot.streaming=false; bot.text='⚠ '+_lt('⚠ launch failed'); setBusy(false); renderThread(); saveMsgs(); } });
+}
+/* COMPANION mode (default): talk to the resident model DIRECTLY over a streamed
+   /control/chat/stream (OpenAI SSE piped from the gateway). Token-by-token, instant, never hangs —
+   no agent, no repo exploration. Builds the real multi-turn message array from the visible history. */
+function sendChat(bot){
+  var conv=[], prior=msgs.slice(0,-1);   // all except the just-pushed empty bot placeholder
+  for(var i=0;i<prior.length;i++){ var m=prior[i]; if(m.role==='user')conv.push({role:'user',content:m.text}); else if(m.text)conv.push({role:'assistant',content:m.text}); }
+  conv=conv.slice(-16);
+  bot.phase=_lt('thinking…'); renderThread();
+  fetch('/control/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:cfg.model,messages:conv})})
+    .then(on401)
+    .then(function(r){
+      if(!r.ok||!r.body){ bot.streaming=false; bot.text='⚠ '+_lt('⚠ launch failed'); setBusy(false); renderThread(); saveMsgs(); return; }
+      var reader=r.body.getReader(), dec=new TextDecoder(), buf='';
+      var done=function(){ bot.streaming=false; setBusy(false); renderThread(); saveMsgs(); };
+      var pump=function(){
+        reader.read().then(function(res){
+          if(res.done){ done(); return; }
+          buf+=dec.decode(res.value,{stream:true});
+          var parts=buf.split('\n'); buf=parts.pop();
+          parts.forEach(function(line){
+            line=line.replace(/\r$/,''); if(line.indexOf('data:')!==0)return;
+            var data=line.slice(5).replace(/^\s+/,''); if(!data||data==='[DONE]')return;
+            try{ var j=JSON.parse(data); var c=j.choices&&j.choices[0], d=c&&c.delta&&c.delta.content; if(d){ bot.text+=d; bot.phase=''; renderThread(); } }catch(e){}
+          });
+          pump();
+        }).catch(function(e){ if(e!==0){ done(); } });
+      };
+      pump();
+    })
+    .catch(function(e){ if(e!==0){ bot.streaming=false; if(!bot.text)bot.text='⚠ '+_lt('⚠ launch failed'); setBusy(false); renderThread(); saveMsgs(); } });
 }
 /* Robust completion. The coder path has NO exit marker, so liveness rides on the launcher pid — which
    is UNRELIABLE two ways: it is 0 during the "starting…" window (agent not spawned yet) so the old

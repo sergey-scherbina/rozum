@@ -78,6 +78,10 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         .route_layer(axum::middleware::from_fn(require_perm_read));
     let chat = Router::new()
         .route("/chat/post", post(chat_post_route))
+        // Conversational chat: talk to the resident model DIRECTLY (streamed), no agent, no repo
+        // exploration — the phone chat's default "Собеседник" mode. The agentic path stays
+        // `/control/coder/launch` (the "Агент" toggle). See docs/specs/unified-control-center.md.
+        .route("/control/chat/stream", post(chat_stream_route))
         .route_layer(axum::middleware::from_fn(require_perm_chat));
     // Everything that can launch/drive an agent, coder, or interactive shell — gated by `agents`
     // (readonly/no-role users could previously reach these once merely authenticated).
@@ -229,6 +233,87 @@ async fn chat_post_route(
         Ok(r) if r.status().is_success() => StatusCode::OK.into_response(),
         Ok(r) => (StatusCode::BAD_GATEWAY, r.status().as_str().to_string()).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
+}
+
+/// System prompt for the conversational "Собеседник" mode: tells the local model who it is and what
+/// rozum is, so a plain question ("О чём проект?") gets a good answer from context WITHOUT the agentic
+/// repo exploration. Kept short — a 4B follows a crisp instruction; a heavy blob degrades it.
+const ROZUM_CHAT_SYSTEM: &str = "Ты — ассистент rozum, работающий ЛОКАЛЬНО на Mac пользователя: ты \
+модель (Qwen), которую обслуживает локальный гейтвей rozum, и пользователь пишет тебе с телефона. \
+rozum — это local-first система, чтобы запускать LLM и ИИ-агентов на своём железе (Apple Silicon / \
+MLX): локальный OpenAI/Anthropic-совместимый гейтвей для MLX и GGUF моделей; комнаты-встречи, где \
+ИИ-агенты и люди координируются; телефонный контрол-центр (UCC) с этим чатом; безопасная резидентность \
+нескольких моделей (контроль допуска, чтобы модели не переполняли память). Отвечай в диалоге, кратко и \
+по делу, на языке пользователя. Ты сейчас именно БЕСЕДУЕШЬ, а не выполняешь задачи в проекте — если \
+просят что-то СДЕЛАТЬ в проекте (править файлы, запускать команды), скажи переключиться в режим «Агент».";
+
+#[derive(Deserialize)]
+struct ChatMsgIn {
+    role: String,
+    content: String,
+}
+#[derive(Deserialize)]
+struct ChatStreamReq {
+    model: String,
+    messages: Vec<ChatMsgIn>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+}
+
+/// Conversational chat: forward the phone's message history to the resident model's
+/// `/v1/chat/completions` with `stream:true` and pipe the SSE straight back — token-by-token, no
+/// agent, no repo exploration, so it can never hang the way a 40-turn `claude -p` can. Prepends
+/// [`ROZUM_CHAT_SYSTEM`] so the model knows what rozum is.
+async fn chat_stream_route(body: String) -> axum::response::Response {
+    let req: ChatStreamReq = match parse_action_json(&body) {
+        Ok(r) => r,
+        Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
+    };
+    if req.model.trim().is_empty() || req.messages.is_empty() {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "model + messages required");
+    }
+    let port = match ensure_gateway(&req.model).await {
+        Ok(p) => p,
+        Err(e) => return json_err(axum::http::StatusCode::SERVICE_UNAVAILABLE, &e),
+    };
+    let mut messages = vec![serde_json::json!({"role": "system", "content": ROZUM_CHAT_SYSTEM})];
+    for m in &req.messages {
+        // Only user/assistant turns pass through; ignore any stray roles from the client.
+        let role = if m.role == "user" { "user" } else { "assistant" };
+        messages.push(serde_json::json!({"role": role, "content": m.content}));
+    }
+    let upstream = serde_json::json!({
+        "model": req.model,
+        "messages": messages,
+        "stream": true,
+        "max_tokens": req.max_tokens.unwrap_or(1024),
+    });
+    let resp = match reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&upstream)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return json_err(axum::http::StatusCode::BAD_GATEWAY, &format!("gateway: {e}")),
+    };
+    if !resp.status().is_success() {
+        let s = resp.status();
+        let t = resp.text().await.unwrap_or_default();
+        return json_err(
+            axum::http::StatusCode::BAD_GATEWAY,
+            &format!("gateway {s}: {}", t.chars().take(200).collect::<String>()),
+        );
+    }
+    // Pipe the upstream OpenAI SSE bytes straight through to the phone.
+    match axum::response::Response::builder()
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-store")
+        .body(axum::body::Body::from_stream(resp.bytes_stream()))
+    {
+        Ok(r) => r,
+        Err(e) => json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
