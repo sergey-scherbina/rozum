@@ -75,6 +75,11 @@ Full map + the staged extraction plan: `docs/specs/architecture-spi.md`.
   per-day transcript logs). The meeting daemon is the single writer; local
   clients read transcripts directly from disk. Spec:
   `docs/specs/agent-meetings-daemon.md`.
+- Telegram and Discord are engine-free clients of that same daemon: each
+  selects an existing named room through `meeting.sock`, reads newly appended
+  turns from the canonical disk store, and submits allowed external text through
+  the daemon. They never depend on the legacy per-room socket or introduce
+  turn-taking. Spec: `docs/specs/messenger-bridges-daemon.md`.
 - There is no turn-taking and no moderator. Any participant may submit at any
   time; messages are posted immediately, in arrival order. There is no
   round-robin, no turn expiry, no speaker scheduling, and no manual or

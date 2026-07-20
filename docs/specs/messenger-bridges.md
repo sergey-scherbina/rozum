@@ -1,5 +1,10 @@
 # Messenger Bridges
 
+> The original document below describes the legacy per-room bridge prototype.
+> The active Telegram/Discord daemon contract, security policy, and migration
+> are normative in `docs/specs/messenger-bridges-daemon.md`. The legacy
+> round-robin/`skip` design is retained here only as design history.
+
 ## Overview
 
 Each messenger bridge is a standalone `rozum <messenger>` subcommand (or

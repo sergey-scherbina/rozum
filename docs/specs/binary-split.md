@@ -15,7 +15,7 @@ The root install uses shipped native-MLX defaults on macOS; Linux/WSL uses
 frontends it must route to alongside the root binary.
 
 `rozum <cmd>` keeps working: the dispatcher forwards to `rozum-meet` for
-`mcp-proxy`/`mcp-http` and `rozum-gateway` for everything else (`exec` on Unix; spawn/wait with
+`mcp-proxy`/`mcp-http`/`telegram`/`discord` and `rozum-gateway` for everything else (`exec` on Unix; spawn/wait with
 the child exit code on Windows). Targets use the platform executable suffix and are resolved next
 to the dispatcher binary first, then `PATH`, so an uninstalled `target/release/rozum` finds its
 just-built siblings.
@@ -53,14 +53,17 @@ a re-architecture.
 
 **Thin frontends (link `rozum-core` / `rozum-meeting` / `rozum-agent`; NO engines, no C++):**
 
-- `rozum-meet` — MCP bridges: `mcp-proxy` (stdio) + `mcp-http` (HTTP). **Done (PoC).**
+- `rozum-meet` — meeting bridges: `mcp-proxy` (stdio), `mcp-http` (HTTP), and
+  daemon-backed Telegram/Discord messenger clients. **Done (PoC; messenger
+  migration specified in `messenger-bridges-daemon.md`).**
 - `rozum-tui` — the ratatui meeting client.
 - `rozum-web` — the axum web bridge.
 - `rozum-cli` — control / launch / admin; talks to the gateway over HTTP, does not link it.
 
 **Umbrella (UX continuity):**
 
-- `rozum` — a thin dispatcher. `rozum mcp-proxy` → `rozum-meet mcp-proxy`, `rozum gateway` →
+- `rozum` — a thin dispatcher. `rozum mcp-proxy` → `rozum-meet mcp-proxy`,
+  `rozum telegram|discord` → `rozum-meet`, `rozum gateway` →
   `rozum-gateway`, etc. Preserves existing muscle memory AND the installed MCP config
   (`command: rozum, args: [mcp-proxy]`) while the heavy code lives only in `rozum-gateway`.
   Alternative: keep the fat `rozum` during migration and slim it last.

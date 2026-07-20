@@ -1,5 +1,10 @@
 # Telegram Bridge
 
+> Superseded for the active runtime by
+> `docs/specs/messenger-bridges-daemon.md`. This file records the original
+> legacy per-room prototype; its round-robin and `room_socket` behavior is not
+> the current daemon contract.
+
 ## Overview
 
 A `rozum telegram` subcommand that bridges a Telegram Bot chat to a rozum
