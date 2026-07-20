@@ -1,0 +1,53 @@
+#!/usr/bin/env ssc
+---
+name: rozum-meeting-message-list
+version: 0.1.0
+description: Read-only rozum meeting messages — one Tk source for React and ratatui.
+frontend: tui
+---
+# rozum meeting messages
+
+The first Unified Control Center proof: one framework-neutral Tk view, one
+managed fetch, and one refresh event rendered by either React or ratatui.
+
+[env](std/os.ssc)
+[signal, fetchUrlSignal, incSignal, fieldColumn](std/ui/primitives.ssc)
+[lower](std/ui/lower.ssc)
+[defaultTheme](std/ui/theme.ssc)
+[vstack, hstack](std/ui/layout.ssc)
+[heading, text](std/ui/typography.ssc)
+[actionButton](std/ui/input.ssc)
+[remoteTable](std/ui/data.ssc)
+
+```scalascript
+val apiBase = env("ROZUM_UCC_BASE").getOrElse("http://127.0.0.1:8410")
+val refresh = signal("meetingMessageRefresh", 0)
+val messages = fetchUrlSignal(
+  "meetingMessages",
+  apiBase + "/chat/messages?room=rozum",
+  refresh
+)
+
+val messageTable = remoteTable(
+  messages,
+  [
+    fieldColumn("Time", "time"),
+    fieldColumn("Author", "author"),
+    fieldColumn("Message", "content")
+  ],
+  "",
+  [],
+  "ts"
+)
+
+val controls = vstack(gap = 1)(
+  heading(1, "rozum meeting messages"),
+  text("room: rozum · read only"),
+  actionButton(incSignal(refresh), "refresh")
+)
+
+def view() = lower(
+  hstack(gap = 2)(controls, messageTable),
+  defaultTheme
+)
+```
