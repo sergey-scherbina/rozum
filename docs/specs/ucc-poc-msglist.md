@@ -17,11 +17,16 @@ the same `View`, `FetchUrlSignal`, table columns, and refresh event.
 
 ## Data contract
 
-The app reads the existing local UCC endpoint:
+By default the app reads the existing local UCC endpoint:
 
 ```text
 GET http://127.0.0.1:8410/chat/messages?room=rozum
 ```
+
+`ROZUM_UCC_BASE` may replace the origin at build/emission time. This is a data
+configuration seam, not a target branch: both frontends receive the same
+resolved URL. The deterministic smoke uses it to point both artifacts at an
+isolated fixture; an empty value produces the same-origin browser path.
 
 The response is a root JSON array. Each row has:
 
@@ -56,14 +61,14 @@ A repository smoke script shall exercise both artifacts from the same source:
 - web: emit React SPA output and assert the artifact is non-empty and contains
   the meeting title/table contract;
 - TUI: emit the ratatui crate, run `cargo build`, and execute the headless
-  `SSC_TUI_SNAPSHOT=1` path against the local endpoint;
+  `SSC_TUI_SNAPSHOT=1` path against an isolated local fixture;
 - fail loudly when the ScalaScript toolchain, Cargo, endpoint, generated files,
   or expected rendered content are missing.
 
-The script must use temporary output and clean it on exit. It must not stop,
-restart, or reuse the operator's gateway on `127.0.0.1:8089`. Starting an
-isolated fixture or the existing UCC message API is permitted only when its port
-is free; an already-owned service is never killed.
+The script must use temporary output, bind its fixture to an OS-assigned port,
+and clean up only processes it started. It must not stop, restart, or reuse the
+operator's gateway on `127.0.0.1:8089`, UCC on `8410`, or any other already-owned
+service.
 
 Cross-repo conformance for refresh itself lives in ScalaScript's
 `specs/frontend-tui-fetch-refresh.md`: a deterministic local HTTP test proves
