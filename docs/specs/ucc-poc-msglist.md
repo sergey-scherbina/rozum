@@ -1,7 +1,7 @@
 # UCC read-only meeting message list — one source, web + TUI
 
-Status: implementation-ready (2026-07-20)  
-Owner: `ucc-poc-msglist`  
+Status: complete (2026-07-20)
+Owner: `ucc-poc-msglist`
 Parent: [`unified-control-center.md`](unified-control-center.md)
 
 ## Goal
@@ -94,3 +94,15 @@ backend contract from the real `.ssc` application.
 - replacing the deployed UCC or hand-written meeting TUI in this slice;
 - background polling without an explicit refresh event;
 - production networking/auth redesign.
+
+## Result
+
+Implemented as `clients/control/meeting-message-list.ssc`, with an isolated
+fixture and `clients/control/test/ucc-msglist-dual-target.sh`. The exact staged
+ScalaScript toolchain emits a non-empty React artifact, emits a ratatui Cargo
+crate whose source retains `meetingMessageRefresh`, builds it, and renders the
+fixture's `smoke-agent` / `smoke-message` row headlessly. ScalaScript's generated
+Cargo regression separately proves successful tick refresh, unchanged-tick
+no-op behavior, and last-good retention after HTTP 500 (`frontendTui/test`
+36/36). The smoke binds only an OS-assigned fixture port and leaves `:8089`,
+`:8410`, and all operator services untouched.

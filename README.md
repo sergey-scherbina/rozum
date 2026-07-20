@@ -124,7 +124,7 @@ crates/
 ├── rozum-agent/            reference agent runtime and tool loop
 ├── rozum-{mlx,gguf,...}/   optional in-process engine adapters
 └── rozum-{tui,web}/        operator frontends
-clients/                    UCC and other browser clients
+clients/                    UCC clients, including the one-source React/ratatui message-list proof
 scripts/                    smoke, benchmark, deployment, and release helpers
 ```
 

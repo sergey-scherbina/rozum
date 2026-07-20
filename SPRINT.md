@@ -2396,9 +2396,9 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
 `vue`/`swing`/`javafx`/`swiftui`/`electron`/…) + SSR (`Ssr.renderToHtml`) behind one SPI
 (`FrontendFrameworkSpi.emit`). So most of the vision EXISTS; the real gap is a **TUI (ratatui) backend**
 + rewriting rozum's UI in Tk. Operator chose: hybrid SSR+islands × meetings-first.
-- [ ] **ucc-tui-backend** — new `scalascript/frontend/tui` implementing `FrontendFrameworkSpi.emit` →
-  Rust ratatui + crossterm, lowering the `View` AST (signals→state, handlers→key events, vstack/hstack
-  →Layout/Constraint), modeled on `frontend/react`+`frontend/swing`. Co-own w/ plucky-fox (compiler). *(scalascript)*
+- [x] **ucc-tui-backend** — DONE in ScalaScript. `frontend/tui` emits native ratatui+crossterm crates with
+  layout, signals, focus/events, remote tables, routing, styling, and managed fetch refresh. The final refresh
+  parity fix is `6c6fcf21b`; `frontendTui/test` 36/36. *(scalascript)*
 - [x] **ucc-control-serve** — DONE. Always-up control HTTP (`rozum gateway control-serve --port 8411`):
   `GET /control/status` serves the live snapshot from disk (NO gateway needed) + permissive CORS. Live-
   verified (shows the running matrix gateway + residency + catalog). The data layer for the UCC web is now
@@ -2414,8 +2414,9 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   frontmatter (not a build flag); entrypoints `serve(view, port)` / `emit(view, dir)`; run via `bin/ssc app.ssc`.
   Data is static placeholder — next: bind live via the control-API (`/control/status` + meetings `rest_read`) with
   `std/ui/fetch-json`. The SAME `.ssc` compiles to TUI once `frontend/tui` lands.
-- [ ] **ucc-poc-msglist** — read-only meeting message-list as a Tk component built to BOTH targets
-  (new tui backend + web island); success = identical render + live update from one `.ssc` source.
+- [x] **ucc-poc-msglist** — DONE 2026-07-20. `clients/control/meeting-message-list.ssc` is one Tk source for
+  React + ratatui, using one remote table and refresh tick. Isolated dual-target smoke emits web, builds the
+  Cargo crate, asserts generated refresh wiring, and renders fetched fixture rows without touching services.
 - [ ] **ucc-meetings-in-tk** — rewrite the meeting client in `std/ui` Tk (composer + switcher + unread),
   reach parity with the 1389-line hand-written Rust TUI, then retire it.
 - [x] **ucc-control-api** — DONE: write actions fully wired. Meetings side DONE

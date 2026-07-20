@@ -1,5 +1,23 @@
 # Changelog
 
+## feat(ucc): one live meeting-message source renders as React and ratatui
+
+Completed: 2026-07-20 · `ucc-poc-msglist`
+
+The first Unified Control Center cross-target slice is now concrete:
+`clients/control/meeting-message-list.ssc` defines one framework-neutral Tk view with a read-only
+`rozum` message table and refresh button. `--frontend react` emits the browser artifact; the source's
+native `frontend: tui` selection emits a self-contained ratatui Cargo crate. There are no platform
+branches or duplicate views, and `ROZUM_UCC_BASE` is only a build-time data-origin override.
+
+`clients/control/test/ucc-msglist-dual-target.sh` starts an isolated fixture on an OS-assigned port,
+checks the React artifact and shared fetch binding, verifies generated Rust retained the refresh tick
+and `refresh_fetches` loop call, builds the crate, and requires the fetched author/message in a headless
+terminal snapshot. It cleans only its own process/output and never touches the durable gateway on
+`:8089`, UCC on `:8410`, or any operator service. The staged ScalaScript toolchain passes this smoke;
+its local-HTTP generated-Cargo gate passes `frontendTui/test` 36/36 and proves tick refresh plus
+last-good retention after HTTP 500.
+
 ## ci: truthful workspace gates on macOS, Linux, and Windows
 Completed: 2026-07-16 · `9506811`, `06de22c`, `645f5e7`, `5b675ea`, `a3595c6`
 

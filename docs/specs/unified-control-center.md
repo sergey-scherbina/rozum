@@ -1,6 +1,6 @@
 # Unified control center — one `.ssc` UI for TUI + web/PWA (and beyond)
 
-Status: design (sunny-civet, 2026-06-23). Spec-dev; no code yet. Cross-repo (rozum + `scalascript`).
+Status: active; read-only dual-target PoC complete (2026-07-20). Cross-repo (rozum + `scalascript`).
 
 ## Vision (operator)
 
@@ -8,6 +8,16 @@ The rozum control surface — TUI, web, `.ssc`, PWA — should be **one app, one
 compiled twice (once to TUI, once to web/React/PWA), covering **everything important in rozum**: not
 just meetings, but models, gateway/residency, and whatever else matters. The ssc toolkit on Rust must
 be able to compile to TUI.
+
+## PoC step 1 — complete (2026-07-20)
+
+`clients/control/meeting-message-list.ssc` is the first literal one-source proof. It defines one Tk
+view, one `FetchUrlSignal`, one `DataTable.Remote`, and one incrementing refresh event. React emission
+and native ratatui emission both consume that source; the deterministic smoke builds both and renders
+a fetched row in a headless terminal frame. ScalaScript commit `6c6fcf21b` closes the last semantic gap:
+the static TUI emitter now observes `FetchUrlSignal.tickId`, re-fetches before the next frame, and
+retains last-good data on failure. Detailed contract and commands:
+[`ucc-poc-msglist.md`](ucc-poc-msglist.md).
 
 ## Key finding (recon, 2026-06-23) — this is mostly a SOLVED problem in ssc
 
@@ -174,20 +184,17 @@ own form. tui's `emit()` throws — only `emitNative(Platform.Terminal)` → a r
 `fetchUrlSignal` (tui slice 5 → ureq). NOT portable: model-DSL (`fetchJsonSignal`/`ModelView`/`ForModel`)
 = react-only (renders empty in react client-mode; `def view()` not auto-discovered there).
 
-**Two gaps blocking "one `.ssc` → web + tui" — DELEGATED to scalascript (room, 2026-06-23):**
+**Former blockers — resolved in ScalaScript:**
 
-- **[A] Portable dynamic table from a NESTED JSON field.** `dataTable(sig, cols)` needs a `FetchUrlSignal`
-  whose value is a *list of row-maps* — works only when the array is at the response ROOT (local-first
-  `dataTable(fetchUrlSignal("notes","/api/notes",tick), cols)`). Rendering a table from a nested field
-  (`status.installed`) of a single fetch fails: `dataTable(computedSignal(()=>jsonStringify(st().get("installed"))), cols)`
-  yields one EMPTY row (value is a JSON *string*, not row-maps). Need a nested-field source working in BOTH
-  backends (e.g. `jsonTable(sig, path, cols)` or a normalizing computedSignal) + a tui DataTable-from-fetched-JSON
-  test. (= scalascript's flagged "typed-model dynamic tables from fetched JSON, needs serde_json".)
-- **[B] Common entrypoint.** Web = `serve(lower(view,theme),port)` (web-specific); tui = `emitNative`
-  (no port); `--frontend tui` is NOT in `validFrontendNames` and there is NO native-emit CLI command
-  (emit-* = `build-rust`/`emit-js`/`emit-rust`/`emit-spa`/`emit-scala`/`emit-spark` — none emit a
-  terminal crate). Need one render-trigger (proposed `def view()` + runner dispatches serve-vs-emitNative
-  by `frontend:`) + wire `--frontend tui`. Empirically confirmed on toolchain `8eea211f8` (tui slices 0-5).
+- **[A] Portable remote tables:** `remoteTable(fetch, columns, rowsPath, actions, rowKeyPath)` now lowers
+  to both browser tables and ratatui tables; the terminal runtime parses root arrays or dotted JSON envelopes
+  with `serde_json` and enforces stable row identity.
+- **[B] Common entrypoint:** an explicitly selected native frontend plus zero-argument `def view()` auto-runs
+  `emit(view(), "tui-out")`; web selection emits/serves the same view. The app changes target via frontend
+  selection, not source edits.
+- **[C] Live TUI refresh:** ScalaScript `frontend-tui-fetch-refresh` preserves `tickId`, conditionally repeats
+  the GET before redraw, and preserves last-good data after failures. The rozum smoke rejects generated Rust
+  that drops either the tick dependency or `refresh_fetches` call.
 
 ## Registry
 
