@@ -816,10 +816,13 @@ Remaining:
   obeys `mention`/`always`/`manual` reply policy, supports persona text/files and peer
   loop guards, and submits replies through the daemon like any other client. Spec/results:
   `docs/specs/demo-conference.md`.
-- [ ] meetings-bridges-on-daemon — daemon-backed human web is DONE as `rozum meetings web`
-  (`src/meeting/web.rs`). Remaining bridge cleanup: port the legacy `src/web` escape hatch and
-  the telegram/discord bridges (`src/telegram`, `src/discord`) off the legacy per-room socket
-  onto `meeting.sock` (`rooms.join`), so the legacy in-process room can eventually be retired.
+- [~] meetings-bridges-on-daemon — daemon-backed human web is DONE as `rozum meetings web`
+  (`src/meeting/web.rs`). **Telegram/Discord DONE 2026-07-20:** the public thin commands now
+  join existing rooms through `meeting.sock` as bridge clients, tail the canonical store without
+  replaying history, suppress self-echo, validate external targets, enforce sender allowlists,
+  and keep tokens process-scoped (`docs/specs/messenger-bridges-daemon.md`). Remaining cleanup:
+  port the separate legacy `rozum web` escape hatch off the per-room socket so the old
+  in-process room can eventually be retired.
 
 ### Portability / hardware-agnostic core (keep the durable layer durable)
 

@@ -201,29 +201,82 @@ The room process itself also writes a transcript log at
 
 ## Telegram bridge
 
+The bridge is a client of the meeting daemon. The daemon starts automatically,
+but the named room must already exist (check with `rozum list`); a typo does not
+create a room.
+
 ```bash
-export TELEGRAM_BOT_TOKEN=...
-export TELEGRAM_CHAT_ID=...           # numeric chat ID (negative for groups)
+# Inject TELEGRAM_BOT_TOKEN from a secret manager or hidden prompt.
+export TELEGRAM_CHAT_ID=...                 # numeric; normally negative for groups
+# Required for groups; optional in a private chat:
+export TELEGRAM_ALLOWED_USER_IDS=123456789  # comma-separated IDs, or explicit "*"
 rozum telegram --room bright-finch --name telegram
 ```
 
-Messages sent in the configured Telegram chat appear in the room as
-`telegram` (or whatever `--name` is). Messages from the room are sent back
-to the chat.
+Startup validates the token with `getMe`, requires `getWebhookInfo` to report no
+active webhook, and validates the target with `getChat` before joining the room.
+For a group or supergroup it also requires privacy mode to be disabled through
+BotFather or the bot to be an administrator, so ordinary allowed messages can
+actually reach `getUpdates`. In a private chat, omitting
+`TELEGRAM_ALLOWED_USER_IDS` permits only that peer. Groups and supergroups
+require an explicit allowlist; `*` deliberately trusts every sender in the
+configured chat.
 
-To obtain the chat ID, start a bot conversation and visit
-`https://api.telegram.org/bot<TOKEN>/getUpdates` after sending any message.
+Allowed text appears in the room under the bridge participant (`telegram`, or
+the chosen `--name`) with a stable sender ID in its body, for example
+`[Alice #123456789]: hello`. Media, edits, and channel posts are ignored.
+
+Telegram exposes one global `getUpdates` stream per bot, so use one dedicated
+bot for each bridge. On the bot's first attachment, pending updates are skipped.
+Later restarts resume the durable per-bot cursor at
+`$XDG_STATE_HOME/rozum/messenger-cursors/telegram/<bot-user-id>.offset`. The
+cursor is bound to the configured chat ID and committed only after the room
+append succeeds: changing targets attaches from now instead of reusing another
+chat's acknowledgement, while a crash in the narrow append-before-cursor window
+can duplicate a message but cannot acknowledge an unappended message.
+
+To obtain the chat ID, start a bot conversation and call Telegram's
+`getUpdates` Bot API method after sending a message. Do not paste the
+token into logs, chat, or a committed file, and remove any webhook before
+starting the bridge.
 
 ## Discord bridge
 
 ```bash
-export DISCORD_BOT_TOKEN=...
+# Inject DISCORD_BOT_TOKEN from a secret manager or hidden prompt.
 export DISCORD_CHANNEL_ID=...
+export DISCORD_ALLOWED_USER_IDS=123456789012345678  # required; CSV or explicit "*"
 rozum discord --room bright-finch --name discord
 ```
 
-Same semantics as the Telegram bridge. The bot needs read + send
-permissions in the channel.
+The named room must already exist. Startup validates the bot identity, target
+channel, and Gateway endpoint before joining it. Enable the privileged
+**Message Content** intent for the application, and grant the bot
+`VIEW_CHANNEL` plus `SEND_MESSAGES` (`SEND_MESSAGES_IN_THREADS` for a thread).
+Use the bot token, not the application client secret.
+The allowlist is always required; `*` explicitly trusts every non-bot sender in
+the configured channel.
+
+Only non-empty `MESSAGE_CREATE` text from the selected channel and allowed
+human senders is accepted. Bot and webhook authors are ignored, and outbound
+messages disable all Discord mention parsing. Gateway reconnects use a fresh
+identify and wait at least five seconds; non-reconnectable authentication,
+sharding, API-version, and intent close codes stop the bridge with an actionable
+error instead of reconnecting forever.
+
+Both messenger bridges export only room turns appended after they join, never
+the room's existing history, and suppress their own room messages to avoid an
+echo. If Telegram and Discord are both attached to one room, each bridge sees
+the other's submissions as new room text, so allowed external messages are
+mirrored between the two services. Long outbound text is split on UTF-8-safe
+boundaries; HTTP rate limits honor `retry_after`. Transport errors are sanitized
+so bot tokens are not included. Treat either bridge as an explicit trust
+boundary: it exports new room text to an external service and lets allowed
+external senders submit to the room.
+
+Keep credentials in the bridge process environment only. Do not put tokens in
+the repository, shell startup files, service definitions, or command-line
+arguments; unset them after a manual run or inject them from a secret manager.
 
 ---
 
@@ -238,6 +291,9 @@ permissions in the channel.
   bridge; used to satisfy `GET /transcript` after the in-memory window
   rolls over.
 - **Disable** either with `--no-persist` on the matching subcommand.
+- **Telegram receive cursor**:
+  `$XDG_STATE_HOME/rozum/messenger-cursors/telegram/<bot-user-id>.offset`.
+  This is an update offset, not a transcript or credential.
 - `$XDG_STATE_HOME` defaults to `~/.local/state` if unset.
 
 ---
@@ -338,8 +394,10 @@ everything the script started.
 | `RUST_LOG`              | tracing                  | Log filter (default `warn`)                   |
 | `TELEGRAM_BOT_TOKEN`    | `rozum telegram`         | Bot token                                     |
 | `TELEGRAM_CHAT_ID`      | `rozum telegram`         | Numeric chat ID                               |
+| `TELEGRAM_ALLOWED_USER_IDS` | `rozum telegram`     | Sender IDs; required for groups, private peer by default |
 | `DISCORD_BOT_TOKEN`     | `rozum discord`          | Bot token                                     |
 | `DISCORD_CHANNEL_ID`    | `rozum discord`          | Numeric channel ID                            |
+| `DISCORD_ALLOWED_USER_IDS` | `rozum discord`       | Required sender IDs; comma-separated or `*`   |
 | `ROZUM_SANDBOX`         | `rozum launch`           | Agent jail: on (default) / `0` off / a path = workspace |
 | `ROZUM_SANDBOX_BACKEND` | `rozum launch`           | `seatbelt` (macOS, default) or `docker`       |
 

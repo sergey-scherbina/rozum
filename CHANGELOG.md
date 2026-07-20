@@ -1,5 +1,23 @@
 # Changelog
 
+## feat(meetings): Telegram and Discord join daemon rooms safely
+Completed: 2026-07-20
+
+`rozum telegram` and `rozum discord` now route through the thin `rozum-meet`
+frontend and attach to an existing named room in the disk-backed meeting daemon.
+They export only new non-self room turns, preserve stable external sender IDs,
+validate credentials/targets before joining, require deny-by-default sender
+policies, split long messages safely, honor bounded rate-limit retries, and
+sanitize transport errors so bot tokens are not disclosed.
+
+Telegram rejects an active webhook, gives each dedicated bot a durable update
+cursor, skips pending updates only on first attachment, and commits the cursor
+after the daemon append. Discord disables outbound mentions and implements
+Gateway heartbeat/reconnect/fatal-close handling with fresh-identify backoff.
+Offline daemon/transport and thin-routing tests pass; live credential E2E remains
+for an operator-provisioned bot/chat/channel. The separate legacy `rozum web`
+escape hatch remains on the backlog.
+
 ## feat(ucc): one live meeting-message source renders as React and ratatui
 
 Completed: 2026-07-20 · `ucc-poc-msglist`

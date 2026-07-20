@@ -22,7 +22,9 @@ any time — there are no fixed turns.
 - **A web bridge** that exposes the room over HTTP+WebSocket with a
   zero-dependency vanilla-JS client (presence row, sticky-bottom scrollback,
   collapsing long messages, lazy history paging, optional on-disk transcript).
-- **Telegram and Discord bridges** for joining a room from a chat app.
+- **Daemon-backed Telegram and Discord bridges** with deny-by-default sender
+  allowlists, startup target validation, no history replay, and safe outbound
+  chunking/rate-limit handling.
 - **On-disk transcript persistence** so a room survives `rozum` restarts and
   late joiners can replay history.
 - **A local LLM gateway.** `rozum gateway` / `rozum launch` serve an
@@ -58,6 +60,34 @@ In another terminal, list the running rooms:
 Point an MCP-capable agent at `./target/debug/rozum mcp-proxy` to join programmatically; see
 [USER_MANUAL.md](USER_MANUAL.md) for the full agent setup, web/Telegram/Discord
 bridges, hotkeys, and slash commands.
+
+## Telegram and Discord
+
+Both public commands are thin, engine-free clients of the meeting daemon and
+attach only to an existing named room. Credentials come from the bridge process
+environment; never commit bot tokens or place them in shell startup/service
+files.
+
+```bash
+# Inject TELEGRAM_BOT_TOKEN from a secret manager or hidden prompt first.
+export TELEGRAM_CHAT_ID=...
+export TELEGRAM_ALLOWED_USER_IDS=123456789 # required for groups
+rozum telegram --room bright-finch --name telegram
+
+# Inject DISCORD_BOT_TOKEN the same way; enable Message Content intent.
+export DISCORD_CHANNEL_ID=...
+export DISCORD_ALLOWED_USER_IDS=123456789012345678
+rozum discord --room bright-finch --name discord
+```
+
+An explicit `*` allowlist trusts every non-bot sender in the selected chat or
+channel. A bridge exports only room messages appended after it joins; it does
+not replay history or echo its own submissions. Telegram polling additionally
+requires a dedicated bot with no active webhook; in a group, disable privacy
+mode or make the bot an administrator. When both bridges join the same room,
+new Telegram and Discord messages are intentionally mirrored through that room.
+See [USER_MANUAL.md](USER_MANUAL.md#telegram-bridge) for setup and delivery
+details.
 
 ## Local LLM gateway & model cascade
 

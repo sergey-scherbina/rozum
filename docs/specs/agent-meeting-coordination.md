@@ -35,8 +35,9 @@ Forward-looking (design for it now, don't fully build yet, per the user):
   session (ported into the default daemon proxy, 2026-06-18).
 - **Identity today**: opaque `ParticipantId` + per-project `handle` + a `session_token`
   reconnect key, persisted in `roster.json`. **One token = one participant.**
-- **Human/other clients today**: the TUI (`rozum` / `rozum meetings attach`); legacy
-  Telegram/Discord/web bridges (built against the *legacy* in-process room, not the daemon).
+- **Human/other clients today**: the TUI (`rozum` / `rozum meetings attach`), daemon web
+  client (`rozum meetings web`), and daemon-backed Telegram/Discord bridges. The separate
+  legacy `rozum web` escape hatch still uses the in-process room.
 
 ## The gaps this spec closes
 
@@ -120,8 +121,8 @@ The daemon is the single source of truth; every client is equal:
 |---|---|---|---|
 | MCP proxy (agents) | disk tail + `wait_my_turn` | `meeting.submit` | shipped |
 | TUI (`rozum`) | disk tail | `meeting.submit` | shipped (build now: multi-room overview) |
-| Web | (daemon read API) | (daemon submit) | rebuild on daemon (P3) |
-| Telegram / Discord | daemon read | daemon submit | rebuild on daemon (P3) |
+| Web (`rozum meetings web`) | daemon read API | daemon submit | shipped; legacy `rozum web` remains |
+| Telegram / Discord | disk tail + `wait_my_turn` | `meeting.submit` | shipped as bridge Principals |
 | Remote | day-scoped REST + authed submit | authed submit | P4 |
 
 Each presents a `Principal` (its human's, or the agent's). The **client contract** =
@@ -149,8 +150,9 @@ turn/presence }`. New clients implement this; nothing privileged.
     `Principal` type + resolver, roster binding, **no auth yet**.
 - **P2 — `Principal` unifies one human across clients.** Session→Principal binding for the
   TUI + a configured local key, so the same human on multiple local clients is one identity.
-- **P3 — web/Telegram/Discord as equal daemon clients.** Rebuild the bridges on the daemon
-  (not the legacy room), each presenting a Principal; the deferred daemon read/submit API.
+- **P3 — web/Telegram/Discord as equal daemon clients.** Daemon web and the Telegram/Discord
+  transports are built. Remaining: migrate the separate legacy `rozum web` escape hatch and
+  resolve messenger sessions to the operator's Human Principal instead of a bridge Principal.
 - **P4 — remote + multi-user.** Authenticated network transport (Principal `AuthRef`
   resolver), day-scoped REST read + authed submit; multiple remote humans.
 
@@ -174,8 +176,9 @@ turn/presence }`. New clients implement this; nothing privileged.
 
 - Turn-taking / moderation (SPEC.md: anyone posts any time, no moderator).
 - Full multi-user auth / remote transport (P4 — only the `Principal`/`AuthRef` seam now).
-- Replacing the legacy bridges before P3 (they keep working against the legacy room until
-  rebuilt on the daemon).
+- Mapping Telegram/Discord accounts to the operator's Human Principal; the daemon-backed
+  transports currently preserve the stable external sender ID in message content and use a
+  bridge Principal.
 
 ## Open questions
 
@@ -184,7 +187,7 @@ turn/presence }`. New clients implement this; nothing privileged.
 - Unifying the human across web/Telegram/remote: the `Principal` `AuthRef` resolver (P3/P4) —
   shape it from real multi-client use.
 
-## Status (build progress, 2026-06-18)
+## Status (build progress, 2026-07-20)
 
 - **P1.1** post transport (`rozum meetings post`) + author shown in the transcript — DONE.
 - **P1.2** shared room via `ROZUM_MEETING_ROOM` (proxy + post honor it) — DONE; true
@@ -197,5 +200,8 @@ turn/presence }`. New clients implement this; nothing privileged.
   — DONE (local-default `Principal`).
 - **P1.5** multi-room TUI dashboard — the enriched room picker covers visibility; a dedicated
   overview is interactive-shaped polish.
-- **P2–P4** (cross-client Principal unification, web/Telegram/Discord on the daemon, auth +
-  remote multi-user) — shaped by dogfooding.
+- **P3 transport** — daemon web and Telegram/Discord are DONE. Messenger bridges use thin,
+  engine-free commands, join existing daemon rooms as `kind=bridge`, export no startup
+  history, and enforce sender allowlists. The legacy `rozum web` escape hatch remains.
+- **P2/P3 identity + P4** — cross-client Human Principal unification, auth, and remote
+  multi-user remain shaped by dogfooding.

@@ -39,9 +39,17 @@ daemon room; a typo is an error and never creates a new room implicitly.
 | `TELEGRAM_CHAT_ID` | yes | Numeric private-chat, group, or supergroup ID. |
 | `TELEGRAM_ALLOWED_USER_IDS` | for groups | Comma-separated numeric sender IDs, or `*` to explicitly trust every sender in the target chat. In a private chat, omission restricts input to that chat's user ID. |
 
-Startup calls Telegram `getMe` and `getChat`; invalid credentials, an invalid
-chat ID, or a group without an explicit allowlist fail before the bridge joins
-the room. Bot tokens must never appear in returned/logged transport errors.
+Startup calls Telegram `getMe`, verifies through `getWebhookInfo` that no
+webhook is active, and calls `getChat`; for a group it also verifies through
+`getChatMember` that privacy mode is disabled or the bot is an administrator.
+Invalid credentials, an invalid chat ID, an active webhook, a bot unable to
+receive ordinary group text, or a group without an explicit allowlist fail
+before the bridge joins the room. Bot tokens must never appear in
+returned/logged transport errors.
+
+The Bot API update stream is global to a bot, not scoped to a chat. Each bridge
+therefore assumes an operator-provisioned dedicated bot identity and rejects
+webhook mode rather than racing another `getUpdates` consumer.
 
 ### Discord configuration
 
@@ -62,7 +70,8 @@ intent and grant the bot `VIEW_CHANNEL` and `SEND_MESSAGES` (plus
   `rooms.join(kind="bridge")` using one stable session token for its action and
   poll connections.
 - Incoming allowed text is submitted immediately as
-  `[<messenger display name>]: <text>`; there is no turn, queue-drain, or skip
+  `[<messenger display name> #<stable user ID>]: <text>`; the stable ID keeps
+  same-name senders distinguishable. There is no turn, queue-drain, or skip
   phase.
 - A dedicated second daemon connection holds `meeting.wait_my_turn`; content is
   then read through the canonical store API. Incoming submit is never blocked
@@ -72,6 +81,10 @@ intent and grant the bot `VIEW_CHANNEL` and `SEND_MESSAGES` (plus
   exported.
 - Stored turns authored by the bridge's own participant ID are not sent back to
   the messenger.
+- A turn authored by another independently attached bridge is ordinary new room
+  text and is relayed. Connecting Telegram and Discord to the same room therefore
+  intentionally mirrors allowed inbound text between them; each platform's
+  sender allowlist remains its own injection boundary.
 - A daemon disconnect ends the bridge with a non-zero result so a supervisor can
   restart it. Platform receive loops reconnect with bounded exponential backoff.
 
@@ -81,6 +94,17 @@ intent and grant the bot `VIEW_CHANNEL` and `SEND_MESSAGES` (plus
   are ignored.
 - Telegram accepts updates only from `TELEGRAM_CHAT_ID` and the resolved sender
   allowlist.
+- On first attachment, Telegram advances past all pending updates instead of
+  importing a pre-start backlog. Later restarts resume a durable per-bot offset
+  from
+  `$XDG_STATE_HOME/rozum/messenger-cursors/telegram/<bot-user-id>.offset`.
+  Cursor state records the target chat ID as well as the next update offset; a
+  target change is treated as a first attachment and never reuses another
+  chat's acknowledgement cursor.
+  The bridge persists the next offset only after the daemon append is
+  acknowledged. A crash in the narrow append-before-cursor window may duplicate
+  a message, but cannot acknowledge and lose an unappended turn; the contract is
+  therefore at-least-once rather than distributed exactly-once.
 - Discord accepts `MESSAGE_CREATE` only from `DISCORD_CHANNEL_ID` and the
   resolved sender allowlist. Bot-authored and webhook-authored messages are
   always ignored, preventing REST-send echo loops.
@@ -95,28 +119,40 @@ intent and grant the bot `VIEW_CHANNEL` and `SEND_MESSAGES` (plus
 - Discord Gateway heartbeats carry the latest dispatch sequence, server
   heartbeat requests are answered immediately, missing ACKs reconnect, and
   `RECONNECT`/`INVALID_SESSION` leave the current session for a fresh identify.
+  Reconnects wait at least five seconds before a fresh identify, continue
+  exponential backoff across short `READY`/disconnect loops, and reset only
+  after a sustained healthy session.
+  Non-reconnectable authentication, sharding, API-version, and intent close
+  codes are fatal instead of being retried forever.
 
 ## Behavior
 
-- [ ] Both public commands use `rozum-meet`, auto-start the daemon, join an
+- [x] Both public commands use `rozum-meet`, auto-start the daemon, join an
       existing named room as `kind=bridge`, and do not require model features.
-- [ ] Existing room history is not exported on bridge startup; a newly appended
+- [x] Existing room history is not exported on bridge startup; a newly appended
       non-self turn is exported exactly once.
-- [ ] An allowed Telegram/Discord text message lands in the daemon room exactly
-      once without waiting for the room poll.
-- [ ] Wrong chat/channel, unauthorized sender, bot/webhook author, empty text,
+- [ ] During a continuous bridge run, an allowed Telegram/Discord text message
+      lands in the daemon room once without waiting for the room poll (live
+      credential E2E; Telegram's documented crash window remains at-least-once).
+- [x] Wrong chat/channel, unauthorized sender, bot/webhook author, empty text,
       and malformed platform payloads are ignored.
-- [ ] Missing/invalid credentials, IDs, allowlists, targets, or Discord intent
-      setup fail with actionable errors that contain no bot token.
-- [ ] Long outbound messages are split without invalid UTF-8; Discord mentions
+- [x] Offline startup and policy fixtures reject an active Telegram webhook,
+      group privacy misconfiguration, malformed IDs, and unsafe/missing
+      allowlists, and sanitize bot tokens from errors.
+- [ ] Real invalid credentials, inaccessible targets, and a disabled Discord
+      Message Content intent fail as specified (live credential E2E).
+- [x] Long outbound messages are split without invalid UTF-8; Discord mentions
       remain disabled; rate-limit retry is bounded.
 - [ ] Discord uses the latest sequence in heartbeats, acknowledges server
       heartbeat requests, and reconnects on a missing ACK or reconnect opcode.
 - [ ] Platform receive errors back off; a daemon/store error exits non-zero for
       supervisor recovery.
-- [ ] Unit/integration tests cover the shared daemon adapter, replay/self
-      suppression, allowlists/parsers, chunking, sanitized errors, Discord
-      Gateway actions, and thin CLI routing without live credentials.
+- [x] Telegram's durable cursor state round-trips and rejects corrupt or
+      overflowing offsets.
+- [x] Unit/integration tests cover the shared daemon adapter, replay/self
+      suppression, allowlists/parsers, chunking, rate-limit bounds, sanitized
+      errors, startup REST validation, and thin CLI routing without live
+      credentials.
 
 ## Out of scope
 
@@ -131,7 +167,8 @@ intent and grant the bot `VIEW_CHANNEL` and `SEND_MESSAGES` (plus
   phase the bridge is the daemon Principal and preserves the external sender in
   message content.
 - History synchronization, attachments, edits, reactions, threads/topics,
-  slash commands, rich embeds, or messenger-to-messenger fan-out.
+  slash commands, rich embeds, or one bridge process fan-out to multiple
+  external targets. Independently attached bridges do share new room turns.
 - Migrating the separate legacy `rozum web` bridge.
 
 ## Design
@@ -144,8 +181,10 @@ single-writer/direct-read invariant stay in one implementation.
 
 Each platform receive task produces normalized `IncomingMessage` values over an
 `mpsc` channel. The platform bridge's main task owns the action client and
-selects between that inbox and the daemon poll stream. This removes the legacy
-`Arc<Mutex<RoomConnection>>` held across a 35-second room long-poll.
+selects between that inbox and the daemon poll stream. Telegram attaches a
+one-shot acknowledgement to each incoming update so its polling task advances
+the durable offset only after the daemon accepts the message. This removes the
+legacy `Arc<Mutex<RoomConnection>>` held across a 35-second room long-poll.
 
 Platform protocol code remains small and dependency-light (`reqwest` plus the
 existing `tokio-tungstenite`), with pure parsers/actions extracted for offline
@@ -170,4 +209,16 @@ tests. No framework SDK is added.
 
 ## Results
 
-To be filled after verification.
+Offline verification on 2026-07-20 passed:
+
+- `cargo test -p rozum-meeting --lib --no-default-features`: 138 passed, 0
+  failed. This includes the daemon bridge integration, cursor persistence,
+  trust policies/parsers, mocked Telegram/Discord startup REST, token
+  sanitization, UTF-safe chunking, rate-limit bounds, and mention suppression.
+- `cargo test -p rozum-cli -p rozum-meet`: 7 passed, covering thin routing and
+  the messenger command surface.
+
+Live Telegram and Discord E2E remains unchecked because no process-scoped bot
+tokens, target chat/channel IDs, or allowed user IDs were available during
+verification. Those credentials are intentionally not persisted in the
+repository or service configuration.
