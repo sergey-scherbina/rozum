@@ -1,6 +1,0 @@
-feature/messenger-bridges-daemon 2026-07-20T02:22:44Z
-agent: codex
-heartbeat: 2026-07-20T03:15:57Z
-status: in-progress
-done-so-far: implementation and docs complete; 138 meeting + 7 thin CLI tests and workspace check pass; final security/correctness review fixes applied
-next: commit feature/docs, rebase and retest, merge to master, release claim, then request process-scoped live credentials
