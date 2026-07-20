@@ -1,6 +1,6 @@
 feature/ucc-poc-msglist 2026-07-20T02:22:44Z
 agent: codex-clear-lynx
-heartbeat: 2026-07-20T02:23:01Z
+heartbeat: 2026-07-20T02:41:21Z
 status: in-progress
-done-so-far: worktree created; audited prerequisites; frontend/tui already exists in ScalaScript
-next: write and commit the dual-target message-list spec
+done-so-far: spec + one-source app + isolated dual-target smoke committed; React emit and ratatui fetched-row snapshot pass on fixed ScalaScript CLI
+next: update docs/bookkeeping, run repository gates, land and release claim
