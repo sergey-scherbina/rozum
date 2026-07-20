@@ -1,0 +1,91 @@
+# UCC read-only meeting message list — one source, web + TUI
+
+Status: implementation-ready (2026-07-20)  
+Owner: `ucc-poc-msglist`  
+Parent: [`unified-control-center.md`](unified-control-center.md)
+
+## Goal
+
+Prove the first Unified Control Center slice with one framework-neutral Tk
+source: a read-only list of messages from the `rozum` meeting room that builds
+and renders as both a React web app and a native ratatui terminal app, including
+a user-triggered live refresh.
+
+The deliverable is one `.ssc` application under `clients/control/`. It contains
+no target checks and no duplicated target-specific view. Both outputs consume
+the same `View`, `FetchUrlSignal`, table columns, and refresh event.
+
+## Data contract
+
+The app reads the existing local UCC endpoint:
+
+```text
+GET http://127.0.0.1:8410/chat/messages?room=rozum
+```
+
+The response is a root JSON array. Each row has:
+
+- `time`: display timestamp;
+- `author`: meeting identity;
+- `content`: message text;
+- `ts`: stable integral timestamp used as `DataTable.rowKeyPath`.
+
+The source uses `FetchUrlSignal` and `DataTable.Remote`/the portable
+`remoteTable` builder. A `ReactiveSignal[Int]` is the binding's refresh tick; a
+visible refresh button increments it. Fetching once on mount and again after
+that event is part of the feature, not test-only behavior.
+
+## View contract
+
+The shared view contains:
+
+1. a title identifying the `rozum` meeting room;
+2. a compact read-only table with Time, Author, and Message columns;
+3. a refresh control bound to the fetch tick;
+4. no composer, room mutation, model action, or platform-specific branch.
+
+The default frontend in source is `tui`, allowing the ordinary v1 interpreter
+entrypoint to emit a native crate through `emit(view(), "tui-out")`. The web
+artifact is selected externally with `emit-spa --frontend react`; changing the
+target must not require editing the source.
+
+## Build and smoke contract
+
+A repository smoke script shall exercise both artifacts from the same source:
+
+- web: emit React SPA output and assert the artifact is non-empty and contains
+  the meeting title/table contract;
+- TUI: emit the ratatui crate, run `cargo build`, and execute the headless
+  `SSC_TUI_SNAPSHOT=1` path against the local endpoint;
+- fail loudly when the ScalaScript toolchain, Cargo, endpoint, generated files,
+  or expected rendered content are missing.
+
+The script must use temporary output and clean it on exit. It must not stop,
+restart, or reuse the operator's gateway on `127.0.0.1:8089`. Starting an
+isolated fixture or the existing UCC message API is permitted only when its port
+is free; an already-owned service is never killed.
+
+Cross-repo conformance for refresh itself lives in ScalaScript's
+`specs/frontend-tui-fetch-refresh.md`: a deterministic local HTTP test proves
+that incrementing the shared tick replaces an initial table payload with a
+second payload in generated Rust. Rozum's smoke proves consumption of that
+backend contract from the real `.ssc` application.
+
+## Done when
+
+- exactly one `.ssc` source defines the message list;
+- React emission succeeds and includes the shared view/data binding;
+- native TUI emission produces a Cargo crate that builds;
+- a headless TUI snapshot contains rows returned by the meeting endpoint;
+- changing the refresh tick causes a second GET in the ScalaScript integration
+  gate and both targets use that same tick binding;
+- existing rozum tests and repository checks remain green;
+- the sprint and changelog identify the exact commands and results.
+
+## Non-goals
+
+- message composition or posting;
+- room selection, unread state, or full meeting-TUI parity;
+- replacing the deployed UCC or hand-written meeting TUI in this slice;
+- background polling without an explicit refresh event;
+- production networking/auth redesign.
