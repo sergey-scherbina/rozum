@@ -1,50 +1,259 @@
 #!/usr/bin/env ssc
 ---
 name: rozum-ucc-chat
-version: 2.1.0
-description: rozum UCC — chat app that drives a coding agent on the local model. Compiled to chat.html.
+version: 3.0.0
+description: rozum UCC — reactive ScalaScript toolkit chat app (Companion streaming + Agent). Built via emit-spa.
+frontend: react
 ---
-# rozum — chat (agent + model)
+# rozum — chat (Companion + Agent)
 
-A phone-first CHAT app that drives a coding agent (claude/codex/opencode) on the LOCAL model over a
-project. Each message runs the agent HEADLESS and non-interactively — `claude -p "<message>"` etc. via
-`/control/coder/launch` — the reliable path the matrix scores 18/18 with (v1's interactive-tmux-REPL
-wedged: Claude Code treats a send-keys Enter as a newline, so messages piled up unsent — the "echo
-camera" bug; headless has no REPL/PTY to wedge).
+A phone-first CHAT app, rewritten as a **reactive ScalaScript toolkit app** (like `center.ssc`) and
+built with `emit-spa --frontend react`. Two modes over the same shared local model on control-serve
+(:8411, Face-ID-gated):
 
-v2.1 improvements:
-- CLEAN bubbles — strips rozum-launch / claude-banner / sandbox / warning noise; shows the answer.
-- MEMORY — threads a compact history of the last turns into the prompt so the agent keeps context
-  (prompts stay lean — a heavy system prompt degrades a 4B, see the codex-lean lesson).
-- STATUS phases — "loading model…" while the shared gateway warms, "thinking…" while the agent runs.
-- PERSISTENCE — the conversation survives a reload (localStorage).
+- **💬 Companion** (default) — talks to the resident model DIRECTLY, token-by-token, over a streamed
+  `POST /control/chat/stream` (OpenAI SSE piped from the gateway). Never hangs.
+- **🤖 Agent** — runs a headless coding agent (claude/codex/opencode) in a project via
+  `POST /control/coder/launch` + polls `GET /control/coder/log`.
 
-Backend contract (same-origin, control-serve :8411, Face-ID-gated):
-- `POST /control/coder/launch  {agent, model, workdir, prompt, verify:false}` → `{id, …}`
-- `GET  /control/coder/log?id=&tail=` → `{id, alive, log}`
-- `GET  /control/status` → `{installed:[{spec}], projects:[{name,path}], …}`
+## What is reactive-toolkit vs. the JS orchestration fence
 
-Compiled via: ssc run chat.ssc → chat.html  (see deploy-ucc-web.sh)
+The toolkit owns ALL the reactive plumbing; a single `javascript` fence owns the imperative turn glue.
+
+- **Toolkit (declarative, this `scalascript` block):**
+  - state — `persistedSignal` (mode/agent/model/project/ready/turns) + `signal` (draft/streaming/sendTick)
+  - streaming transport — `fetchStreamSignal("/control/chat/stream", body, sendTick)`; the request `body`
+    is a `computedSignal` assembled from the committed `turns` (so it is bridge-tracked → never stale)
+  - status polling — `intervalTick(5000)` + `fetchUrlSignal("/control/status")` (the sysbar's data source)
+  - config screen — `remoteTable` model/project pickers + `signalLabelButton` mode/agent chips +
+    `showWhen` for the agent-only block and for config-vs-chat switching (`ready`)
+  - i18n — `localeSignal` + `localeText` (reactive, no reload)
+- **JS fence (imperative, the `javascript` block):** reads/writes those toolkit signals by name. It
+  parses the accumulated SSE, commits finished turns into the persisted `turns`, drives the agent
+  poll loop, and PAINTS the styled chat surfaces (sysbar row + bubble thread + composer) whose exact
+  dark CSS and left/right bubble layout the toolkit's text/table widgets cannot express. The stream is
+  carried by `fetchStreamSignal` (NOT a raw fetch); the fence only re-triggers it (bump `sendTick`,
+  force a bridge sync) and reads the growing `streamRaw` signal.
+
+### emit-spa gotchas honored here (all verified empirically)
+- A `javascript` fence is spliced VERBATIM at module scope **twice** (once before the `const`s, once
+  after). So the fence contains ONLY function definitions + a deferred `setTimeout(boot)`; NO top-level
+  statement touches a toolkit `const` (a temporal-dead-zone reference blanks the whole page).
+- Any signal referenced ONLY inside the fence is **tree-shaken away**. Every fence-touched signal is
+  also referenced in the `scalascript` view (the hidden `_sink` computed anchors the fence-only ones).
+- `fetchStreamSignal`'s `body` must be a `computedSignal` (auto-subscribed → its `_sv` bridge value
+  stays fresh); a plain unrendered signal stays at its mount seed and the POST 400s on empty messages.
+- Re-triggering a stream from the fence: bump the tick signal, then `dispatchEvent(new Event('hashchange'))`
+  to force the bridge sync that fires the stream's tick subscription.
+
+## Setup
+[signal, computedSignal, serve, fetchStreamSignal, intervalTick, fetchUrlSignal, fieldColumn, stackedColumn, itemField](std/ui/primitives.ssc)
+[persistedSignal](std/ui/offline.ssc)
+[jsonValue, jStr](std/json.ssc)
+[lower](std/ui/lower.ssc)
+[darkTheme](std/ui/theme.ssc)
+[vstack, hstack](std/ui/layout.ssc)
+[heading, text](std/ui/typography.ssc)
+[TkNode](std/ui/nodes.ssc)
+[signalText_, showWhen, rawHtml, forJson](std/ui/reactive.ssc)
+[textField, signalLabelButton](std/ui/input.ssc)
+[remoteTable, rowLink](std/ui/data.ssc)
+[localeSignal, localeText](std/ui/i18n.ssc)
+[translateIn](std/i18n.ssc)
 
 ## Page
 ```scalascript
+val DEF_MODEL   = "mlx-community:Qwen3.5-4B-MLX-4bit"
+val DEF_PROJECT = "/Users/sergiy/work/my/rozum"
+
+// ── Reactive state (all toolkit signals) ────────────────────────────────────
+val mode      = persistedSignal("rozum_chat_mode",    "chat")
+val agent     = persistedSignal("rozum_chat_agent",   "claude")
+val model     = persistedSignal("rozum_chat_model",   DEF_MODEL)
+val project   = persistedSignal("rozum_chat_project", DEF_PROJECT)
+val ready     = persistedSignal("rozum_chat_ready",   "0")
+val turns     = persistedSignal("rozum_chat_msgs",    "[]")
+val draft     = signal("draft",     "")
+val streaming = signal("streaming", "0")
+val sendTick  = signal("sendTick",  0)
+// The single in-flight answer, as a 0-or-1-element JSON array the fence rewrites as tokens
+// arrive (kept SEPARATE from the committed `turns` so a token never re-parses the whole thread).
+val liveJson  = signal("liveJson",  "[]")
+
+// Config-vs-chat switch + agent-only block, as truthy String signals for showWhen.
+val readyBool = computedSignal(() => if ready() == "1" then "1" else "")
+val agentBool = computedSignal(() => if mode() == "agent" then "1" else "")
+
+// ── i18n catalog (reactive; base = English) ─────────────────────────────────
+val CAT = Map(
+  "ru" -> Map(
+    "Companion" -> "Собеседник", "Agent" -> "Агент", "Mode" -> "Режим",
+    "Model" -> "Модель", "Project" -> "Проект", "Start chatting" -> "Начать",
+    "Say something to your model." -> "Напиши что-нибудь своей модели.",
+    "Ask the agent to do something in the project." -> "Попроси агента что-нибудь сделать в проекте.",
+    "Companion talks to the model directly; Agent runs a coding agent in a project." ->
+      "«Собеседник» говорит с моделью напрямую; «Агент» запускает кодинг-агента в проекте."),
+  "uk" -> Map(
+    "Companion" -> "Співрозмовник", "Agent" -> "Агент", "Mode" -> "Режим",
+    "Model" -> "Модель", "Project" -> "Проєкт", "Start chatting" -> "Почати",
+    "Say something to your model." -> "Напиши щось своїй моделі.",
+    "Ask the agent to do something in the project." -> "Попроси агента щось зробити в проєкті.",
+    "Companion talks to the model directly; Agent runs a coding agent in a project." ->
+      "«Співрозмовник» говорить з моделлю напряму; «Агент» запускає кодинг-агента в проєкті."))
+
+def tr(key: String): String = translateIn(CAT, localeSignal(), key, key)
+
+// ── Streaming transport (toolkit): computed body → fetchStreamSignal ─────────
+// body is a computedSignal so it is bridge-tracked (its _sv value tracks the live turns).
+// GUARD: fetchStreamSignal fires its POST once at MOUNT (unconditionally). With the live
+// conversation in the body that would auto-run an inference on every page load of a saved
+// chat. So we only put the messages in the body while a send is in flight (streaming == "1");
+// at rest the body carries empty messages, so the mount fire is a harmless no-op 400.
+val body = computedSignal(() => {
+  val msgs =
+    if streaming() != "1" then ""
+    else jsonValue(turns()).asList.map(m => {
+      val role = if m.get("role").asString == "user" then "user" else "assistant"
+      "{\"role\":\"" + role + "\",\"content\":" + jStr(m.get("text").asString) + "}"
+    }).mkString(",")
+  "{\"model\":" + jStr(model()) + ",\"messages\":[" + msgs + "]}"
+})
+val streamRaw = fetchStreamSignal("streamRaw", "/control/chat/stream", body, sendTick)
+
+// ── Status polling (toolkit): intervalTick + fetchUrlSignal ─────────────────
+val statusTick = intervalTick("statusTick", 5000)
+val statusSig  = fetchUrlSignal("status", "/control/status", statusTick)
+
+// Hidden anchor: keeps the fence-only signals from being tree-shaken AND collects them (incl. the
+// computed `body`, whose bridge `_sv` value must track the live turns) into the mounted signal set.
+val sink = computedSignal(() => {
+  val _a = streamRaw(); val _b = streaming(); val _c = draft(); val _d = sendTick(); val _e = body()
+  val _f = liveJson()
+  ""
+})
+
+// ── Config screen (toolkit widgets, center.ssc-style) ───────────────────────
+val companionLbl = computedSignal(() => (if mode()  == "chat"  then "✓ " else "") + "💬 " + tr("Companion"))
+val agentModeLbl  = computedSignal(() => (if mode()  == "agent" then "✓ " else "") + "🤖 " + tr("Agent"))
+val claudeLbl     = computedSignal(() => (if agent() == "claude"   then "✓ " else "") + "claude")
+val codexLbl      = computedSignal(() => (if agent() == "codex"    then "✓ " else "") + "codex")
+val opencodeLbl   = computedSignal(() => (if agent() == "opencode" then "✓ " else "") + "opencode")
+val startLbl      = computedSignal(() => "▶ " + tr("Start chatting"))
+val modeLbl       = computedSignal(() => tr("Mode"))
+val modelLbl      = computedSignal(() => tr("Model"))
+val agentLbl      = computedSignal(() => tr("Agent"))
+val projectLbl    = computedSignal(() => tr("Project"))
+
+val modelPicker = remoteTable(statusSig, [fieldColumn("Model", "spec")], "installed",
+  [rowLink("select", model, "spec")], "spec")
+val projectPicker = remoteTable(statusSig, [fieldColumn("Project", "name")], "projects",
+  [rowLink("select", project, "path")], "path")
+
+val agentBlock = vstack(gap = 12)(
+  vstack(gap = 6)(signalText_(agentLbl),
+    hstack(gap = 8)(
+      signalLabelButton(agent, "claude",   claudeLbl),
+      signalLabelButton(agent, "codex",    codexLbl),
+      signalLabelButton(agent, "opencode", opencodeLbl))),
+  vstack(gap = 6)(signalText_(projectLbl), projectPicker))
+
+val configScreen = vstack(gap = 16)(
+  rawHtml("<div class='cfg-hd'></div>"),
+  heading(2, "rozum · chat"),
+  localeText(CAT, "Companion talks to the model directly; Agent runs a coding agent in a project.",
+                  "Companion talks to the model directly; Agent runs a coding agent in a project."),
+  vstack(gap = 6)(signalText_(modeLbl),
+    hstack(gap = 8)(
+      signalLabelButton(mode, "chat",  companionLbl),
+      signalLabelButton(mode, "agent", agentModeLbl))),
+  vstack(gap = 6)(signalText_(modelLbl), modelPicker),
+  showWhen(agentBool, agentBlock, rawHtml("")),
+  signalLabelButton(ready, "1", startLbl))
+
+// ── Message thread (DECLARATIVE — the toolkit's forJson primitive) ──────────
+// Three keyed lists share the same styled `.msg`/`.bubble`/`.who` CSS the fence used to
+// hand-paint: the committed `turns`, the single in-flight `liveJson`, and a one-shot
+// empty-state. `itemField` returns the RAW field value, so `esc` HTML-escapes it before it
+// is spliced into rawHtml (the fence no longer touches the thread DOM).
+// NB: use `.replace` (literal, all-occurrences → JS replaceAll) not `.replaceAll` (regex; the
+// toolkit's JS dispatch has no case for it → a swallowed "Method not found" would blank the row).
+def esc(s: String): String =
+  s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+// A committed bubble from a parsed {id, role, text, who, mono} item.
+def bubbleNode(m: Any): TkNode =
+  val role = if itemField(m, "role") == "user" then "user" else "bot"
+  val mono = if role == "bot" && itemField(m, "mono") == "1" then " mono" else ""
+  val who  = if role == "bot" then "<div class='who'>" + esc(itemField(m, "who")) + "</div>" else ""
+  rawHtml("<div class='msg " + role + "'>" + who +
+          "<div class='bubble" + mono + "'>" + esc(itemField(m, "text")) + "</div></div>")
+
+// The in-flight bubble: a growing answer (with a blinking cursor) or a phase placeholder.
+def liveNode(m: Any): TkNode =
+  val text  = itemField(m, "text")
+  val mono  = if text != "" && itemField(m, "mono") == "1" then " mono" else ""
+  val inner = if text != "" then esc(text) + "<span class='cur'></span>"
+              else "<span class='phase'>" + esc(itemField(m, "phase")) + "</span><span class='cur'></span>"
+  rawHtml("<div class='msg bot'><div class='who'>" + esc(itemField(m, "who")) + "</div>" +
+          "<div class='bubble" + mono + "'>" + inner + "</div></div>")
+
+// The empty-state hint (0 or 1 element), reactive to mode + locale.
+def emptyNode(m: Any): TkNode =
+  rawHtml("<div class='empty'><div class='big'>" + itemField(m, "emoji") + "</div><div>" +
+          esc(itemField(m, "hint")) + "</div></div>")
+
+val emptyArr = computedSignal(() => {
+  val hasMsgs = turns()    != "[]" && turns()    != ""
+  val hasLive = liveJson() != "[]" && liveJson() != ""
+  if hasMsgs || hasLive then "[]"
+  else {
+    val agentMode = mode() == "agent"
+    val emoji = if agentMode then "🤖" else "💬"
+    val hint  = if agentMode then tr("Ask the agent to do something in the project.")
+                else tr("Say something to your model.")
+    "[{\"id\":\"empty\",\"emoji\":" + jStr(emoji) + ",\"hint\":" + jStr(hint) + "}]"
+  }
+})
+
+// The scrollable thread region (its `#thread` box CSS is targeted via the forJson container).
+val threadArea = vstack(gap = 12)(
+  forJson(emptyArr, "id")((m: Any) => emptyNode(m)),
+  forJson(turns,    "id")((m: Any) => bubbleNode(m)),
+  forJson(liveJson, "id")((m: Any) => liveNode(m)))
+
+// ── Chat screen (sysbar + composer stay fence-painted; thread is forJson) ────
+val chatScreen = vstack(gap = 0)(
+  rawHtml("<div id='sysbar'></div>"),
+  threadArea,
+  rawHtml("<div id='composer'><textarea id='inp' rows='1' autocomplete='off' " +
+          "oninput='window.__chat&amp;&amp;window.__chat.draft(this)' " +
+          "onkeydown='window.__chat&amp;&amp;window.__chat.keydown(event)'></textarea>" +
+          "<button id='send' type='button' onclick='window.__chat&amp;&amp;window.__chat.send()'>send</button></div>"))
+
+// ── Compose + serve ─────────────────────────────────────────────────────────
+val view = vstack(gap = 0)(
+  rawHtml("<div id='rozum-lang'>" +
+    "<button class='rl-btn' data-lang='en' onclick=\"window.__chat&amp;&amp;window.__chat.lang('en')\">EN</button>" +
+    "<button class='rl-btn' data-lang='ru' onclick=\"window.__chat&amp;&amp;window.__chat.lang('ru')\">RU</button>" +
+    "<button class='rl-btn' data-lang='uk' onclick=\"window.__chat&amp;&amp;window.__chat.lang('uk')\">UK</button></div>"),
+  rawHtml("<div id='bar'><a href='/'>← UCC</a><div class='meta' id='meta'></div>" +
+          "<span class='ic' id='cfgbtn' onclick='window.__chat&amp;&amp;window.__chat.reset()'>⚙</span>" +
+          "<span id='st'></span></div>"),
+  showWhen(readyBool, chatScreen, configScreen),
+  signalText_(sink))
+
 val bodyCss = "html,body{margin:0;height:100%;background:radial-gradient(130% 95% at 50% 36%,transparent 50%,rgba(2,3,7,.62) 100%),radial-gradient(135% 85% at 50% -12%,#163a50 0%,#0b1d2c 32%,#06090f 68%,#05070c 100%),radial-gradient(58% 48% at 16% 6%,rgba(44,84,120,.34),transparent 62%),radial-gradient(52% 44% at 88% 20%,rgba(74,46,104,.26),transparent 60%) fixed;color:#e6e6e6;font:15px -apple-system,system-ui,sans-serif}"
 
-val css = "#app{display:flex;flex-direction:column;height:100dvh}" +
+val pageCss =
+  ".ssc-page{max-width:640px;width:100%;margin:0 auto;padding:0;height:100dvh;display:flex;flex-direction:column;font:15px -apple-system,system-ui,sans-serif;color:#e6e6e6}" +
+  ".ssc-page>div{min-height:0}" +
   "#bar{display:flex;gap:10px;align-items:center;padding:10px max(12px,env(safe-area-inset-right)) 10px max(12px,env(safe-area-inset-left));background:#151a23;border-bottom:1px solid #232a36;flex:0 0 auto}" +
   "#bar a,#bar .ic{color:#7ab8ff;text-decoration:none;cursor:pointer;font-size:15px;flex:0 0 auto}#bar .meta{min-width:0;line-height:1.15;flex:1 1 auto}#bar .meta b{display:block;font-size:13px;color:#e6edf6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#bar .meta small{font-size:11px;color:#8a93a0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}#st{font-size:12px;color:#8a93a0;flex:0 0 auto}" +
   "#sysbar{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:5px max(12px,env(safe-area-inset-right)) 6px max(12px,env(safe-area-inset-left));background:#0d1219;border-bottom:1px solid #1c2330;font-size:11px;color:#8a93a0;flex:0 0 auto;line-height:1}" +
   "#sysbar .seg{display:flex;align-items:center;gap:4px;white-space:nowrap}#sysbar b{color:#c9d4e3;font-weight:600}" +
   "#sysbar .dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}#sysbar .warm{background:#2ea043;box-shadow:0 0 5px #2ea04388}#sysbar .sleep{background:#6e7681}" +
   "#sysbar .bar{width:46px;height:5px;border-radius:3px;background:#1c2330;overflow:hidden;flex:0 0 auto}#sysbar .bar>i{display:block;height:100%;background:linear-gradient(90deg,#2ea043,#e5a53b)}" +
-  ".hidden{display:none!important}" +
-  "#start{flex:1 1 auto;overflow-y:auto;padding:18px max(14px,env(safe-area-inset-right)) 18px max(14px,env(safe-area-inset-left));max-width:640px;margin:0 auto;width:100%;box-sizing:border-box}" +
-  "#start h2{font-size:17px;margin:2px 0 6px;color:#e6edf6;font-weight:650}#start .sub{font-size:12.5px;color:#8a93a0;margin:0 0 16px}" +
-  ".grp{margin:0 0 16px}.grp .lbl{font-size:12px;color:#8a93a0;margin:0 0 6px;text-transform:uppercase;letter-spacing:.04em}" +
-  ".chips{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:9px 14px;background:#1c2330;color:#c9d4e3;border:1px solid #2c3648;border-radius:10px;font-size:14px;cursor:pointer}.chip.on{background:#1f3a28;border-color:#2ea043;color:#7ee29a}" +
-  ".sel{width:100%;box-sizing:border-box;padding:11px 12px;background:#0b0e14;color:#e6e6e6;border:1px solid #2c3648;border-radius:10px;font-size:16px;font-family:inherit}" +
-  "#go{width:100%;margin-top:6px;padding:14px;background:#1f3a28;color:#7ee29a;border:1px solid #2ea043;border-radius:12px;font-size:16px;font-weight:650;cursor:pointer}#go:active{background:#2a4d34}" +
-  "#thread{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px max(10px,env(safe-area-inset-right)) 10px max(10px,env(safe-area-inset-left));display:flex;flex-direction:column;gap:12px}" +
+  ".ssc-page div:has(>span[data-ssc-forjson]){flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px max(10px,env(safe-area-inset-right)) 10px max(10px,env(safe-area-inset-left));display:flex;flex-direction:column;gap:12px}" +
   ".msg{display:flex;flex-direction:column;gap:3px;max-width:100%}.msg .who{font-size:10.5px;color:#8a93a0;padding:0 3px}.bubble{padding:10px 13px;border-radius:15px;max-width:92%;overflow-wrap:anywhere;word-break:break-word}" +
   ".msg.user{align-items:flex-end}.msg.user .bubble{background:#1f6feb;color:#fff;border-bottom-right-radius:5px;white-space:pre-wrap}" +
   ".msg.bot{align-items:flex-start}.msg.bot .bubble{background:#10141c;border:1px solid #232a36;border-bottom-left-radius:5px;white-space:pre-wrap;font:13px/1.5 -apple-system,system-ui,sans-serif;color:#e2e8f2;max-width:100%}" +
@@ -53,231 +262,236 @@ val css = "#app{display:flex;flex-direction:column;height:100dvh}" +
   ".empty{color:#8a93a0;text-align:center;margin:16vh auto 0;max-width:300px;font-size:14px}.empty .big{font-size:38px;margin-bottom:8px}" +
   "#composer{display:flex;gap:8px;padding:8px max(10px,env(safe-area-inset-right)) max(8px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left));background:#10141c;border-top:1px solid #232a36;flex:0 0 auto}#inp{flex:1 1 auto;min-width:0;padding:11px 13px;background:#0b0e14;color:#e6e6e6;border:1px solid #2c3648;border-radius:11px;font-size:16px;font-family:-apple-system,system-ui,sans-serif;resize:none;max-height:38vh}#send{flex:0 0 auto;padding:0 17px;background:#1f3a28;color:#56d364;border:1px solid #2ea043;border-radius:11px;font-size:15px;font-weight:600;cursor:pointer}#send:active{background:#2a4d34}#send.busy{background:#3a2a1a;color:#e5a53b;border-color:#8a5a2a}"
 
+val cfgCss =
+  ".ssc-page[data-cfg] h2,.ssc-page h2{font-size:17px;margin:2px 0 2px;color:#e6edf6;font-weight:650}" +
+  ".ssc-page{overflow-y:auto}" +
+  ".cfg-hd{height:8px}"
+
 val langCss = "#rozum-lang{position:fixed;top:9px;right:12px;display:flex;gap:1px;z-index:999}.rl-btn{background:#21262d;color:#6e7681;border:1px solid #30363d;padding:3px 7px;cursor:pointer;font-size:10px;font-weight:600;letter-spacing:.03em}.rl-btn:first-child{border-radius:5px 0 0 5px}.rl-btn:last-child{border-radius:0 5px 5px 0}.rl-btn.active{background:#1f3a28;border-color:#2ea043;color:#56d364}"
 
-val js = """
-var _LG=localStorage.getItem('rozum_lang')||navigator.language.split('-')[0]||'en';
-var _LT={'ru':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат с твоим проектом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Выбери агента и проект. Каждое сообщение запускает агента на локальной модели в этом проекте.','Agent':'Агент','Model':'Модель','Project':'Проект','▶ Start chatting':'▶ Начать','message…':'сообщение…','send':'отпр.','working…':'работает…','loading model…':'гружу модель…','thinking…':'думаю…','Ask the agent to do something in the project.':'Попроси агента что-нибудь сделать в проекте.','⚠ launch failed':'⚠ не удалось запустить','(no answer)':'(нет ответа)','Companion':'Собеседник','Mode':'Режим','conversation':'диалог','Companion talks to the model directly; Agent runs a coding agent in a project.':'«Собеседник» говорит с моделью напрямую; «Агент» запускает кодинг-агента в проекте.','warm':'тёплая','sleeping':'спит','free':'своб.','m':'м','h':'ч'},'uk':{'← UCC':'← UCC','rozum · chat':'rozum · чат','Chat with your project':'Чат з твоїм проєктом','Pick an agent + project. Every message runs the agent on the local model, in that project.':'Обери агента і проєкт. Кожне повідомлення запускає агента на локальній моделі в цьому проєкті.','Agent':'Агент','Model':'Модель','Project':'Проєкт','▶ Start chatting':'▶ Почати','message…':'повідомлення…','send':'надісл.','working…':'працює…','loading model…':'вантажу модель…','thinking…':'думаю…','Ask the agent to do something in the project.':'Попроси агента щось зробити в проєкті.','⚠ launch failed':'⚠ не вдалося запустити','(no answer)':'(немає відповіді)','Companion':'Співрозмовник','Mode':'Режим','conversation':'діалог','Companion talks to the model directly; Agent runs a coding agent in a project.':'«Співрозмовник» говорить з моделлю напряму; «Агент» запускає кодинг-агента в проєкті.','warm':'тепла','sleeping':'спить','free':'вільно','m':'хв','h':'год'}};
-function _lt(s){var m=_LT[_LG];return(m&&m[s])||s;}
-document.documentElement.lang=_LG;
-if(_LT[_LG]&&_LT[_LG]['rozum · chat'])document.title=_LT[_LG]['rozum · chat'];
-(function(){var d=document.createElement('div');d.id='rozum-lang';['en','ru','uk'].forEach(function(l){var b=document.createElement('button');b.className='rl-btn';b.textContent=l.toUpperCase();b.dataset.lang=l;b.onclick=function(){localStorage.setItem('rozum_lang',l);location.reload();};if(l===_LG)b.classList.add('active');d.appendChild(b);});document.body.appendChild(d);})();
+serve(lower(view, darkTheme), 8410, bodyCss + pageCss + cfgCss + langCss)
+```
 
-var DEF_MODEL='mlx-community:Qwen3.5-4B-MLX-4bit';
-var DEF_PROJECT='/Users/sergiy/work/my/rozum';
-var AGENTS=['claude','codex','opencode'];
-var cfg={mode:localStorage.getItem('rozum_chat_mode')||'chat',agent:localStorage.getItem('rozum_chat_agent')||'claude',model:localStorage.getItem('rozum_chat_model')||DEF_MODEL,project:localStorage.getItem('rozum_chat_project')||DEF_PROJECT};
-var configured=localStorage.getItem('rozum_chat_ready')==='1';
-var msgs=loadMsgs();   // {role:'user'|'bot', text, phase?}
-var busy=false;
+## Orchestration (imperative JS fence — reads/writes the toolkit signals)
+```javascript
+// NOTE (emit-spa): this block is spliced verbatim at module scope TWICE. So it defines only
+// functions + one deferred setTimeout(boot); nothing at top level touches a toolkit const.
+var _LT = {
+  "ru": {"← UCC":"← UCC","rozum · chat":"rozum · чат","warm":"тёплая","sleeping":"спит","free":"своб.","m":"м","h":"ч",
+    "message…":"сообщение…","send":"отпр.","working…":"работает…","loading model…":"гружу модель…","thinking…":"думаю…",
+    "conversation":"диалог","Companion":"Собеседник","(no answer)":"(нет ответа)","⚠ launch failed":"⚠ не удалось запустить",
+    "Ask the agent to do something in the project.":"Попроси агента что-нибудь сделать в проекте.",
+    "Say something to your model.":"Напиши что-нибудь своей модели.","Clear this conversation and change settings?":"Очистить этот диалог и сменить настройки?"},
+  "uk": {"← UCC":"← UCC","rozum · chat":"rozum · чат","warm":"тепла","sleeping":"спить","free":"вільно","m":"хв","h":"год",
+    "message…":"повідомлення…","send":"надісл.","working…":"працює…","loading model…":"вантажу модель…","thinking…":"думаю…",
+    "conversation":"діалог","Companion":"Співрозмовник","(no answer)":"(немає відповіді)","⚠ launch failed":"⚠ не вдалося запустити",
+    "Ask the agent to do something in the project.":"Попроси агента щось зробити в проєкті.",
+    "Say something to your model.":"Напиши щось своїй моделі.","Clear this conversation and change settings?":"Очистити цей діалог і змінити налаштування?"}};
+function _lg(){ return localStorage.getItem('rozum_lang') || (navigator.language||'en').split('-')[0] || 'en'; }
+function _lt(s){ var m = _LT[_lg()]; return (m && m[s]) || s; }
+function _esc(s){ return String(s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];}); }
+function _gib(b){ return (Number(b||0)/1073741824).toFixed(1); }
+function _shortModel(s){ s=String(s||''); var c=s.indexOf(':'); if(c>=0)s=s.slice(c+1); return s.replace(/-MLX.*$/i,'').replace(/-4bit$/i,'')||s; }
+function _byId(id){ return document.getElementById(id); }
 
-var $=function(s){return document.getElementById(s);};
-var startEl=$('start'), threadEl=$('thread'), compEl=$('composer'), stEl=$('st'), metaEl=$('meta'), inp=$('inp'), send=$('send');
+function _turns(){ try{ var a=JSON.parse(turns.get()); return (a&&a.length)?a:[]; }catch(e){ return []; } }
+function _setTurns(a){ turns.set(JSON.stringify(a.slice(-40))); }
 
-function loadMsgs(){ try{var a=JSON.parse(localStorage.getItem('rozum_chat_msgs'));if(a&&a.length){a.forEach(function(m){m.streaming=false;});return a;}}catch(e){} return []; }
-function saveMsgs(){ try{localStorage.setItem('rozum_chat_msgs',JSON.stringify(msgs.slice(-40)));}catch(e){} }
+// ---- SSE parse (accumulated raw → concatenated delta.content) ----
+function _parseSSE(raw){
+  var out='';
+  (raw||'').split('\n').forEach(function(line){
+    line=line.replace(/\r$/,''); if(line.indexOf('data:')!==0) return;
+    var d=line.slice(5).replace(/^\s+/,''); if(!d||d==='[DONE]') return;
+    try{ var j=JSON.parse(d); var c=j.choices&&j.choices[0]; var t=c&&c.delta&&c.delta.content; if(t) out+=t; }catch(e){}
+  });
+  return out;
+}
 
-function on401(r){ if(r.status===401){ location.href='/login.html'; throw 0; } return r; }
-function getJSON(u){ return fetch(u,{headers:{}}).then(on401).then(function(r){return r.json();}); }
-function postJSON(u,b){ return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(on401).then(function(r){return r.json();}); }
-function esc(s){return String(s).replace(/[&<>]/g,function(m){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[m];});}
-
-/* The agent's REAL answer begins AFTER the launch banner + the echoed prompt (the `→ running: claude
-   -p <prompt>` line spills the multi-line prompt — FRAME, "Earlier in this conversation:", "User: …" —
-   into the log; only its first line starts with `→ `, so the rest used to leak into the bubble). Find
-   the LAST banner-boundary line and keep only what follows; then drop any stray banner lines. Falls
-   back to a plain filter when no banner is present. */
-var DROP=[/^rozum launch:/,/^context window:/,/^\s*→ /,/^⚠ /,/Claude Code v/,/dangerously-load-development-channels/,/^\s*Channels are not/,/^\s*▐|^\s*▝|^\s*▘|^\s*▎/,/mcp-proxy/,/^Earlier in this conversation:/,/^(User|You): /,/^Request: /,/^\s*\[rozum launch exited/];
-var BOUNDARY=[/claude\.ai connectors/,/→ sandboxed/,/dangerously-load-development-channels/];
-function cleanLog(t){ if(!t)return '';
+// ---- Agent-mode log cleaning (keep the answer after the launch banner) ----
+var _DROP=[/^rozum launch:/,/^context window:/,/^\s*→ /,/^⚠ /,/Claude Code v/,/dangerously-load-development-channels/,/^\s*Channels are not/,/mcp-proxy/,/^Earlier in this conversation:/,/^(User|You): /,/^Request: /,/^\s*\[rozum launch exited/];
+var _BOUND=[/claude\.ai connectors/,/→ sandboxed/,/dangerously-load-development-channels/];
+function _cleanLog(t){ if(!t) return '';
   var lines=t.split('\n'), last=-1;
-  for(var i=0;i<lines.length;i++){ if(BOUNDARY.some(function(re){return re.test(lines[i]);})) last=i; }
-  var body=(last>=0?lines.slice(last+1):lines);
-  return body.filter(function(l){return !DROP.some(function(re){return re.test(l);});}).join('\n').replace(/^\s+|\s+$/g,''); }
-/* phase from the RAW log: gateway warming vs agent running */
-function phaseOf(raw){ if(/→ running:/.test(raw))return _lt('thinking…'); if(/starting shared gateway|loading|admission/i.test(raw))return _lt('loading model…'); return _lt('working…'); }
-
-/* ---------- start / config ---------- */
-function renderStart(models,projects){
-  var modeChips='<span class="chip'+(cfg.mode==='chat'?' on':'')+'" data-mode="chat">💬 '+_lt('Companion')+'</span>'+
-                '<span class="chip'+(cfg.mode==='agent'?' on':'')+'" data-mode="agent">🤖 '+_lt('Agent')+'</span>';
-  var agentChips=AGENTS.map(function(a){return '<span class="chip'+(cfg.agent===a?' on':'')+'" data-agent="'+a+'">'+a+'</span>';}).join('');
-  var modelOpts=(models&&models.length?models:[{spec:DEF_MODEL}]).map(function(m){var s=m.spec||m.id||m;return '<option value="'+esc(s)+'"'+(s===cfg.model?' selected':'')+'>'+esc(String(s).split('/').pop())+'</option>';}).join('');
-  var projOpts=(projects&&projects.length?projects:[{name:'rozum',path:DEF_PROJECT}]).map(function(p){var pa=p.path||p;return '<option value="'+esc(pa)+'"'+(pa===cfg.project?' selected':'')+'>'+esc(p.name||String(pa).split('/').pop())+'</option>';}).join('');
-  startEl.innerHTML=
-    '<h2>'+_lt('rozum · chat')+'</h2><div class="sub">'+_lt('Companion talks to the model directly; Agent runs a coding agent in a project.')+'</div>'+
-    '<div class="grp"><div class="lbl">'+_lt('Mode')+'</div><div class="chips" id="modes">'+modeChips+'</div></div>'+
-    '<div class="grp"><div class="lbl">'+_lt('Model')+'</div><select class="sel" id="mdl">'+modelOpts+'</select></div>'+
-    '<div class="grp agentonly"><div class="lbl">'+_lt('Agent')+'</div><div class="chips" id="agents">'+agentChips+'</div></div>'+
-    '<div class="grp agentonly"><div class="lbl">'+_lt('Project')+'</div><select class="sel" id="prj">'+projOpts+'</select></div>'+
-    '<button id="go">'+_lt('▶ Start chatting')+'</button>';
-  var applyMode=function(){ Array.prototype.forEach.call(document.querySelectorAll('.agentonly'),function(x){x.style.display=(cfg.mode==='agent'?'':'none');}); };
-  applyMode();
-  $('modes').onclick=function(e){var c=e.target.closest('[data-mode]');if(!c)return;cfg.mode=c.dataset.mode;Array.prototype.forEach.call($('modes').children,function(x){x.classList.toggle('on',x.dataset.mode===cfg.mode);});applyMode();};
-  $('agents').onclick=function(e){var c=e.target.closest('[data-agent]');if(!c)return;cfg.agent=c.dataset.agent;Array.prototype.forEach.call($('agents').children,function(x){x.classList.toggle('on',x.dataset.agent===cfg.agent);});};
-  $('mdl').onchange=function(e){cfg.model=e.target.value;};
-  $('prj').onchange=function(e){cfg.project=e.target.value;};
-  $('go').onclick=function(){
-    localStorage.setItem('rozum_chat_mode',cfg.mode);localStorage.setItem('rozum_chat_agent',cfg.agent);localStorage.setItem('rozum_chat_model',cfg.model);
-    localStorage.setItem('rozum_chat_project',cfg.project);localStorage.setItem('rozum_chat_ready','1');
-    configured=true; showChat(); inp.focus();
-  };
+  for(var i=0;i<lines.length;i++){ if(_BOUND.some(function(re){return re.test(lines[i]);})) last=i; }
+  var b=(last>=0?lines.slice(last+1):lines);
+  return b.filter(function(l){return !_DROP.some(function(re){return re.test(l);});}).join('\n').replace(/^\s+|\s+$/g,'');
 }
-function boot(){ getJSON('/control/status').then(function(s){renderStart(s.installed||s.models||[],s.projects||[]);}).catch(function(e){if(e!==0)renderStart([],[]);}); }
+function _phaseOf(raw){ if(/→ running:/.test(raw)) return _lt('thinking…'); if(/starting shared gateway|loading|admission/i.test(raw)) return _lt('loading model…'); return _lt('working…'); }
 
-/* ---------- system toolbar (model · state · memory), polled from /control/status ---------- */
-function shortModel(s){ s=String(s||''); var c=s.indexOf(':'); if(c>=0)s=s.slice(c+1); return s.replace(/-MLX.*$/i,'').replace(/-4bit$/i,'')||s; }
-function gib(b){ return (Number(b||0)/1073741824).toFixed(1); }
-function refreshSys(){
-  var el=$('sysbar'); if(!el)return;
-  getJSON('/control/status').then(function(d){
-    var g=d.gateway, r=d.residency||{}, warm=!!(g&&g.healthy);
-    var model=shortModel((g&&g.model)||cfg.model);
-    var up=(g&&g.uptime_secs)?(g.uptime_secs<3600?Math.floor(g.uptime_secs/60)+_lt('m'):Math.floor(g.uptime_secs/3600)+_lt('h')):'';
-    var used=r.committed_bytes, budget=r.host_budget_bytes, free=r.available_bytes;
-    var pct=(budget?Math.min(100,Math.round(100*(used||0)/budget)):0);
-    var cl=(g&&typeof g.clients==='number'&&g.clients>0)?(' · '+g.clients+'👤'):'';
-    el.innerHTML=
-      '<span class="seg"><span class="dot '+(warm?'warm':'sleep')+'"></span><b>'+esc(model)+'</b></span>'+
-      '<span class="seg">'+(warm?(_lt('warm')+(up?' '+up:'')+cl):_lt('sleeping'))+'</span>'+
-      '<span class="seg">💾 <span class="bar"><i style="width:'+pct+'%"></i></span> <b>'+gib(used)+'</b>/'+gib(budget)+' GiB</span>'+
-      '<span class="seg">'+gib(free)+' '+_lt('free')+'</span>';
-  }).catch(function(){});
+// ---- Declarative thread glue: write the toolkit signals; forJson paints the DOM ----
+// The fence no longer builds the thread DOM. It appends the just-sent user turn + finished
+// answers to `turns` (persisted, keyed by id) and rewrites the single in-flight `liveJson`
+// bubble as tokens arrive; a `hashchange` flushes those signals into the forJson reconcile.
+var _uidN=0;
+function _uid(){ _uidN++; return 't'+Date.now().toString(36)+'-'+_uidN; }
+function _who(){ return mode.get()==='agent' ? agent.get() : _lt('Companion'); }
+function _mono(){ return mode.get()==='agent' ? '1' : ''; }
+function _scrollThread(){ try{ var s=document.querySelector('span[data-ssc-forjson]'); var el=s&&s.parentElement; if(el) el.scrollTop=el.scrollHeight; }catch(e){} }
+
+// In-flight bubble as a 0-or-1-element array. A new id only when the content changes → forJson
+// re-creates the row exactly on new tokens and keeps it otherwise (no whole-thread reparse).
+var _liveN=0, _liveSig=null;
+function _setLive(text, phase){
+  var t=text||'', ph=t?'':(phase||'');
+  var sg=t+''+ph; if(sg===_liveSig) return; _liveSig=sg; _liveN++;
+  liveJson.set(JSON.stringify([{id:'l'+_liveN, role:'bot', text:t, phase:ph, who:_who(), mono:_mono()}]));
+  window.dispatchEvent(new Event('hashchange')); _scrollThread();
+}
+function _clearLive(){ _liveSig=null; if(liveJson.get()!=='[]'){ liveJson.set('[]'); window.dispatchEvent(new Event('hashchange')); } }
+
+// Commit a finished bot answer into the persisted `turns`; clear the in-flight bubble.
+function _commit(text){
+  var arr=_turns(); arr.push({id:_uid(), role:'bot', text:text, who:_who(), mono:_mono()}); _setTurns(arr);
+  _clearLive(); window.dispatchEvent(new Event('hashchange')); _scrollThread();
 }
 
-/* ---------- chat ---------- */
-function setMeta(){ var who=cfg.mode==='agent'?('🤖 '+esc(cfg.agent)):('💬 '+_lt('Companion')); var sub=cfg.mode==='agent'?esc(String(cfg.project).split('/').pop()):_lt('conversation'); metaEl.innerHTML='<b>'+who+' · '+esc(String(cfg.model).split('/').pop())+'</b><small>'+sub+'</small>'; }
-function showStart(){ startEl.classList.remove('hidden'); threadEl.classList.add('hidden'); compEl.classList.add('hidden'); metaEl.innerHTML=''; boot(); }
-function showChat(){ startEl.classList.add('hidden'); threadEl.classList.remove('hidden'); compEl.classList.remove('hidden'); setMeta(); inp.placeholder=_lt('message…'); send.textContent=_lt('send'); renderThread(); }
-function renderThread(){
-  if(!msgs.length){ threadEl.innerHTML='<div class="empty"><div class="big">🤖</div><div>'+_lt('Ask the agent to do something in the project.')+'</div></div>'; return; }
-  threadEl.innerHTML=msgs.map(function(m){
-    if(m.role==='user') return '<div class="msg user"><div class="bubble">'+esc(m.text)+'</div></div>';
-    var inner;
-    if(m.text){ inner=esc(m.text)+(m.streaming?'<span class="cur"></span>':''); }
-    else if(m.streaming){ inner='<span class="phase">'+esc(m.phase||_lt('working…'))+'</span><span class="cur"></span>'; }
-    else { inner='<span style="color:#6b7280">'+_lt('(no answer)')+'</span>'; }
-    return '<div class="msg bot"><div class="who">'+esc(cfg.agent)+'</div><div class="bubble'+(m.text?' mono':'')+'">'+inner+'</div></div>';
-  }).join('');
-  threadEl.scrollTop=threadEl.scrollHeight;
+// ---- Sysbar: format the reactive /control/status (polled by fetchUrlSignal+intervalTick) ----
+function _renderSysbar(){
+  var el=_byId('sysbar'); if(!el) return;
+  var d={}; try{ d=JSON.parse(statusSig.get())||{}; }catch(e){}
+  var g=d.gateway||{}, r=d.residency||{}, warm=!!g.healthy;
+  var mdl=_shortModel(g.model||model.get());
+  var up = g.uptime_secs ? (g.uptime_secs<3600 ? Math.floor(g.uptime_secs/60)+_lt('m') : Math.floor(g.uptime_secs/3600)+_lt('h')) : '';
+  var used=r.committed_bytes, budget=r.host_budget_bytes, free=r.available_bytes;
+  var pct = budget ? Math.min(100, Math.round(100*(used||0)/budget)) : 0;
+  var cl = (typeof g.clients==='number' && g.clients>0) ? (' · '+g.clients+'👤') : '';
+  el.innerHTML =
+    '<span class="seg"><span class="dot '+(warm?'warm':'sleep')+'"></span><b>'+_esc(mdl)+'</b></span>'+
+    '<span class="seg">'+(warm?(_lt('warm')+(up?' '+up:'')+cl):_lt('sleeping'))+'</span>'+
+    '<span class="seg">💾 <span class="bar"><i style="width:'+pct+'%"></i></span> <b>'+_gib(used)+'</b>/'+_gib(budget)+' GiB</span>'+
+    '<span class="seg">'+_gib(free)+' '+_lt('free')+'</span>';
 }
-function setBusy(b){ busy=b; send.classList.toggle('busy',b); send.textContent=b?_lt('working…'):_lt('send'); }
 
-/* Drive the agent the way the matrix does: an EXPLORE-then-answer frame so the model looks at the
-   project before replying (proven: greedy + this frame makes the 4B read the repo and summarise it
-   accurately) + a compact history for context. Kept short — a 4B follows a crisp instruction, but a
-   heavy system-prompt blob degrades it (the codex-lean lesson). */
-var FRAME='You are an assistant working INSIDE this project (the current directory), with tools to list/read/edit files and run commands. Before you answer, quickly EXPLORE what is relevant — list the files, read the README/AGENTS and the files the request is about — THEN respond concretely and concisely, grounded in what you actually saw. If the request is a task, do it. Do not answer from assumptions.';
-function buildPrompt(v){
-  var prior=msgs.filter(function(m){return m.text;});   // exclude the just-added empty bot placeholder
-  var pairs=[]; for(var i=0;i<prior.length;i++){ var m=prior[i]; if(m.role==='user')pairs.push('User: '+m.text); else pairs.push('You: '+m.text.slice(0,400)); }
-  pairs=pairs.slice(-8);   // ~4 exchanges
-  var parts=[FRAME];
+function _renderMeta(){
+  var el=_byId('meta'); if(!el) return;
+  var who = mode.get()==='agent' ? ('🤖 '+_esc(agent.get())) : ('💬 '+_esc(_lt('Companion')));
+  var sub = mode.get()==='agent' ? _esc(String(project.get()).split('/').pop()) : _esc(_lt('conversation'));
+  el.innerHTML='<b>'+who+' · '+_esc(String(model.get()).split('/').pop())+'</b><small>'+sub+'</small>';
+}
+
+function _setBusy(b){
+  streaming.set(b?'1':'0');
+  var s=_byId('send'); if(s){ s.className=b?'busy':''; s.textContent=b?_lt('working…'):_lt('send'); }
+  var inp=_byId('inp'); if(inp) inp.placeholder=_lt('message…');
+}
+
+// ---- Composer input ----
+function _onDraft(el){ draft.set(el.value); el.style.height='auto'; el.style.height=Math.min(el.scrollHeight, window.innerHeight*0.38)+'px'; }
+function _onKeydown(e){ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); _send(); } }
+
+// ---- Send ----
+function _send(){
+  if(streaming.get()==='1') return;
+  var v=(draft.get()||'').trim(); if(!v) return;
+  var arr=_turns(); arr.push({id:_uid(), role:'user', text:v}); _setTurns(arr);
+  draft.set(''); var inp=_byId('inp'); if(inp){ inp.value=''; inp.style.height='auto'; }
+  window.dispatchEvent(new Event('hashchange')); _scrollThread();   // paint the user bubble
+  _setBusy(true);
+  if(mode.get()==='agent'){ _setLive('', _lt('working…')); _sendAgent(v); }
+  else { _sendChat(); }
+}
+
+// COMPANION: bump the fetchStreamSignal tick (2-phase so the computed body syncs into the bridge
+// before doStream reads it), then watch streamRaw grow and commit on [DONE].
+function _sendChat(){
+  try{ streamRaw.set(''); }catch(e){}                     // drop the previous turn's accumulator (incl. its [DONE])
+  _setLive('', _lt('thinking…'));
+  window.dispatchEvent(new Event('hashchange'));          // phase 1: bridge the fresh body into _sv
+  setTimeout(function(){
+    sendTick.set((sendTick.get()|0)+1);
+    window.dispatchEvent(new Event('hashchange'));         // phase 2: fire the stream's tick sub
+  }, 0);
+}
+
+// COMPANION completion + live paint (driven by the shared watch loop).
+function _tickChat(){
+  var raw=streamRaw.get()||'';
+  var live=_parseSSE(raw);
+  _setLive(live, live?'':_lt('thinking…'));
+  if(raw.indexOf('[DONE]')>=0){
+    _commit(live || ('⚠ '+_lt('(no answer)')));
+    _setBusy(false);
+  }
+}
+
+// AGENT: launch a headless coder, poll its log (not a stream → a plain fetch loop is fine here).
+function _post(url, b){ return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){ if(r.status===401){location.href='/login.html';throw 0;} return r.json(); }); }
+function _get(url){ return fetch(url).then(function(r){ if(r.status===401){location.href='/login.html';throw 0;} return r.json(); }); }
+var _AFRAME='You are an assistant working INSIDE this project (the current directory), with tools to list/read/edit files and run commands. Before you answer, quickly EXPLORE what is relevant — list the files, read the README/AGENTS and the files the request is about — THEN respond concretely and concisely, grounded in what you actually saw. If the request is a task, do it. Do not answer from assumptions.';
+function _buildPrompt(v){
+  var prior=_turns(); var pairs=[];
+  for(var i=0;i<prior.length-1;i++){ var m=prior[i]; if(m.text){ pairs.push((m.role==='user'?'User: ':'You: ')+String(m.text).slice(0,400)); } }
+  pairs=pairs.slice(-8);
+  var parts=[_AFRAME];
   if(pairs.length) parts.push('Earlier in this conversation:\n'+pairs.join('\n'));
   parts.push('Request: '+v);
   return parts.join('\n\n');
 }
-
-function doSend(){
-  var v=inp.value.trim(); if(!v||busy)return;
-  msgs.push({role:'user',text:v});
-  var bot={role:'bot',text:'',phase:_lt('working…'),streaming:true}; msgs.push(bot);
-  inp.value=''; inp.style.height='auto'; renderThread(); saveMsgs(); setBusy(true);
-  if(cfg.mode==='agent'){ sendAgent(v,bot); } else { sendChat(bot); }
+function _sendAgent(v){
+  _post('/control/coder/launch',{agent:agent.get(),model:model.get(),workdir:project.get(),prompt:_buildPrompt(v),verify:false})
+    .then(function(j){ if(!j||!j.id){ _agentFail(); return; } _pollRun(j.id); })
+    .catch(function(e){ if(e!==0) _agentFail(); });
 }
-/* AGENT mode: run a headless coding agent (claude/codex/opencode) in the project — it can explore,
-   edit files, run commands. Slow + can hang on a weak model, so it is opt-in. */
-function sendAgent(v,bot){
-  var prompt=buildPrompt(v);
-  postJSON('/control/coder/launch',{agent:cfg.agent,model:cfg.model,workdir:cfg.project,prompt:prompt,verify:false})
-    .then(function(j){
-      if(!j||!j.id){ bot.streaming=false; bot.text='⚠ '+_lt('⚠ launch failed'); setBusy(false); renderThread(); saveMsgs(); return; }
-      pollRun(j.id,bot);
-    })
-    .catch(function(e){ if(e!==0){ bot.streaming=false; bot.text='⚠ '+_lt('⚠ launch failed'); setBusy(false); renderThread(); saveMsgs(); } });
-}
-/* COMPANION mode (default): talk to the resident model DIRECTLY over a streamed
-   /control/chat/stream (OpenAI SSE piped from the gateway). Token-by-token, instant, never hangs —
-   no agent, no repo exploration. Builds the real multi-turn message array from the visible history. */
-function sendChat(bot){
-  var conv=[], prior=msgs.slice(0,-1);   // all except the just-pushed empty bot placeholder
-  for(var i=0;i<prior.length;i++){ var m=prior[i]; if(m.role==='user')conv.push({role:'user',content:m.text}); else if(m.text)conv.push({role:'assistant',content:m.text}); }
-  conv=conv.slice(-16);
-  bot.phase=_lt('thinking…'); renderThread();
-  fetch('/control/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:cfg.model,messages:conv})})
-    .then(on401)
-    .then(function(r){
-      if(!r.ok||!r.body){ bot.streaming=false; bot.text='⚠ '+_lt('⚠ launch failed'); setBusy(false); renderThread(); saveMsgs(); return; }
-      var reader=r.body.getReader(), dec=new TextDecoder(), buf='';
-      var done=function(){ bot.streaming=false; setBusy(false); renderThread(); saveMsgs(); };
-      var pump=function(){
-        reader.read().then(function(res){
-          if(res.done){ done(); return; }
-          buf+=dec.decode(res.value,{stream:true});
-          var parts=buf.split('\n'); buf=parts.pop();
-          parts.forEach(function(line){
-            line=line.replace(/\r$/,''); if(line.indexOf('data:')!==0)return;
-            var data=line.slice(5).replace(/^\s+/,''); if(!data||data==='[DONE]')return;
-            try{ var j=JSON.parse(data); var c=j.choices&&j.choices[0], d=c&&c.delta&&c.delta.content; if(d){ bot.text+=d; bot.phase=''; renderThread(); } }catch(e){}
-          });
-          pump();
-        }).catch(function(e){ if(e!==0){ done(); } });
-      };
-      pump();
-    })
-    .catch(function(e){ if(e!==0){ bot.streaming=false; if(!bot.text)bot.text='⚠ '+_lt('⚠ launch failed'); setBusy(false); renderThread(); saveMsgs(); } });
-}
-/* Robust completion. The coder path has NO exit marker, so liveness rides on the launcher pid — which
-   is UNRELIABLE two ways: it is 0 during the "starting…" window (agent not spawned yet) so the old
-   poll saw alive:false and quit with "(no answer)" BEFORE the agent even ran (the phone bug); and a
-   dead pid can be REUSED by the OS so alive stays true forever. So: never treat "not started yet" as
-   done (wait until `→ running:` appears), then finish when the launcher is gone (2 reads) OR the
-   output has been unchanged for ~10s (pid-reuse safety net). A generous tick cap covers a cold
-   model load without hanging forever on a silent launch failure. */
-function pollRun(id,bot){
+function _agentFail(){ _commit('⚠ '+_lt('⚠ launch failed')); _setBusy(false); }
+function _pollRun(id){
   var started=false, deadReads=0, prevRaw='', stable=0, ticks=0;
-  var finish=function(){ bot.streaming=false; setBusy(false); renderThread(); saveMsgs(); };
-  var tick=function(){
+  var finish=function(txt){ if(txt!=null){ _commit(txt||('⚠ '+_lt('(no answer)'))); } else { _clearLive(); } _setBusy(false); };
+  var step=function(){
     ticks++;
-    getJSON('/control/coder/log?id='+encodeURIComponent(id)+'&tail=600')
+    _get('/control/coder/log?id='+encodeURIComponent(id)+'&tail=600')
       .then(function(j){
         var raw=j.log||'';
         if(/→ running:/.test(raw)) started=true;
-        bot.text=cleanLog(raw); bot.phase=phaseOf(raw); renderThread();
-        var answered=bot.text.length>0;
+        var body=_cleanLog(raw);
+        _setLive(body, body?'':_phaseOf(raw));
         if(raw===prevRaw){ stable++; } else { stable=0; prevRaw=raw; }
         deadReads = (started && !j.alive) ? deadReads+1 : 0;
-        if(deadReads>=2 || (answered && stable>=8)){ finish(); return; }
-        if(ticks>=140){ if(!bot.text) bot.text='⚠ '+_lt('⚠ launch failed'); finish(); return; }
-        setTimeout(tick,1200);
+        if(deadReads>=2 || (body && stable>=8)){ finish(body); return; }
+        if(ticks>=140){ finish(body || ('⚠ '+_lt('⚠ launch failed'))); return; }
+        setTimeout(step, 1200);
       })
-      .catch(function(e){ if(e!==0){ finish(); } });
+      .catch(function(e){ if(e!==0){ finish(_lt('(no answer)')); } });
   };
-  setTimeout(tick,700);
+  setTimeout(step, 700);
 }
 
-send.addEventListener('click',doSend);
-inp.addEventListener('keydown',function(e){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); doSend(); } });
-inp.addEventListener('input',function(){ inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,window.innerHeight*0.38)+'px'; });
-$('cfgbtn').onclick=function(){ if(confirm('Очистить этот диалог и сменить настройки?')){ msgs=[]; saveMsgs(); } configured=false; localStorage.setItem('rozum_chat_ready','0'); showStart(); };
+// ---- Lang / reset ----
+function _setLang(l){
+  localStorage.setItem('rozum_lang', l);
+  try{ localeSignal.set(l); }catch(e){}
+  document.documentElement.lang=l;
+  Array.prototype.forEach.call(document.querySelectorAll('#rozum-lang .rl-btn'), function(b){ b.classList.toggle('active', b.getAttribute('data-lang')===l); });
+  _renderMeta(); _renderSysbar();
+  window.dispatchEvent(new Event('hashchange'));   // re-localizes the empty-state hint (emptyArr recomputes)
+}
+function _reset(){
+  if(!window.confirm(_lt('Clear this conversation and change settings?'))) return;
+  _setTurns([]); _clearLive(); ready.set('0');
+  window.dispatchEvent(new Event('hashchange'));
+}
 
-/* boot */
-if(configured){ showChat(); } else { showStart(); }
-refreshSys(); setInterval(refreshSys,5000);
-"""
+// ---- Shared watch loop: repaint sysbar, drive the in-flight companion turn ----
+function _watch(){
+  if(window.__chatWatching) return; window.__chatWatching=true;
+  setInterval(function(){
+    _renderSysbar();
+    if(ready.get()==='1' && streaming.get()==='1' && mode.get()!=='agent') _tickChat();
+  }, 250);
+}
 
-val html = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">" +
-  "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover\">" +
-  "<meta name=\"apple-mobile-web-app-capable\" content=\"yes\"><meta name=\"apple-mobile-web-app-status-bar-style\" content=\"black-translucent\">" +
-  "<title>rozum · chat</title><style>" + bodyCss + css + langCss + "</style></head><body>" +
-  "<div id=\"app\">" +
-    "<div id=\"bar\"><a href=\"/\">← UCC</a><div class=\"meta\" id=\"meta\"></div><span class=\"ic\" id=\"cfgbtn\">⚙</span><span id=\"st\"></span></div>" +
-    "<div id=\"sysbar\"></div>" +
-    "<div id=\"start\"></div>" +
-    "<div id=\"thread\" class=\"hidden\"></div>" +
-    "<div id=\"composer\" class=\"hidden\"><textarea id=\"inp\" rows=\"1\" autocomplete=\"off\" autocapitalize=\"sentences\"></textarea><button id=\"send\" type=\"button\">send</button></div>" +
-  "</div><script>" + js + "</script></body></html>"
-
-// Static page: printed to stdout for the deploy to capture (control-serve serves the file).
-println(html)
+// ---- Boot (deferred so all toolkit consts + the mounted DOM exist) ----
+function _chatBoot(){
+  if(window.__chatBooted) return; window.__chatBooted=true;
+  window.__chat = { send:_send, draft:_onDraft, keydown:_onKeydown, lang:_setLang, reset:_reset };
+  var l=_lg(); document.documentElement.lang=l;
+  try{ localeSignal.set(l); }catch(e){}
+  Array.prototype.forEach.call(document.querySelectorAll('#rozum-lang .rl-btn'), function(b){ b.classList.toggle('active', b.getAttribute('data-lang')===l); });
+  _renderMeta(); _renderSysbar();
+  _setBusy(streaming.get()==='1');
+  _watch();
+  window.dispatchEvent(new Event('hashchange'));   // forJson paints the persisted turns
+  setTimeout(_scrollThread, 0);
+}
+setTimeout(_chatBoot, 0);
 ```

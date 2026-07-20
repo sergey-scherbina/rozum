@@ -430,11 +430,26 @@ check_js_runtime "$SITE/index.html"
 emit_html "$HERE/login.ssc"    8421 "$SITE/login.html"
 emit_html "$HERE/terminal.ssc" 8422 "$SITE/terminal.html"
 emit_html "$HERE/session.ssc"  8423 "$SITE/session.html"
-emit_html "$HERE/chat.ssc"     8424 "$SITE/chat.html"
 check_js_syntax "$SITE/login.html"
 check_js_syntax "$SITE/terminal.html"
 check_js_syntax "$SITE/session.html"
-check_js_syntax "$SITE/chat.html"
+
+# chat.ssc is now a REACTIVE emit-spa app (fetchStreamSignal/forJson toolkit primitives), NOT the old
+# `ssc run` static page — so it emits via `ssc-tools emit-spa`, like center.ssc. FAIL-SAFE: if the
+# canonical toolchain lacks those primitives (the scalascript `feature/ui-stream-chat` branch not yet
+# merged to main + its bin/lib re-staged), emit-spa produces nothing — keep the EXISTING chat.html
+# (the live vanilla chat keeps working) instead of aborting the whole deploy. Once the primitives are
+# in the canonical toolchain, the next deploy auto-ships the reactive chat.
+echo ">> emitting chat.html (reactive SPA, via $(basename "$EMIT_SSC")) ..."
+"$EMIT_SSC" emit-spa --frontend react "$HERE/chat.ssc" > "$SITE/chat.html.new" 2>/dev/null || true
+if [ -s "$SITE/chat.html.new" ] && grep -qi '<!doctype html' "$SITE/chat.html.new"; then
+  mv "$SITE/chat.html.new" "$SITE/chat.html"
+  echo ">> chat.html: $(wc -c < "$SITE/chat.html") bytes (reactive)"
+  check_js_syntax "$SITE/chat.html"
+else
+  rm -f "$SITE/chat.html.new"
+  echo "  ✗ chat.ssc emit-spa produced nothing — canonical toolchain missing fetchStreamSignal/forJson?  Kept the existing chat.html (live chat unchanged)." >&2
+fi
 
 # 4) Copy PWA assets.
 for f in manifest.webmanifest icon.svg icon-180.png sw.js; do
