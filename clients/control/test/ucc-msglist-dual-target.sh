@@ -80,6 +80,15 @@ mkdir -p "$NATIVE_WORK"
 )
 MANIFEST="$NATIVE_WORK/tui-out/Cargo.toml"
 [[ -f "$MANIFEST" ]] || { echo "FAIL: TUI emission did not create $MANIFEST" >&2; exit 1; }
+RUST_SOURCE="$NATIVE_WORK/tui-out/src/main.rs"
+grep -Fq 'sig_int(signals, "meetingMessageRefresh")' "$RUST_SOURCE" || {
+  echo "FAIL: emitted TUI dropped the shared refresh-tick dependency" >&2
+  exit 1
+}
+grep -Fq 'refresh_fetches(&mut signals, &mut observed_fetch_ticks);' "$RUST_SOURCE" || {
+  echo "FAIL: emitted TUI does not re-fetch before interactive redraws" >&2
+  exit 1
+}
 
 export CARGO_TARGET_DIR="$TMP/cargo-target"
 cargo build --quiet --manifest-path "$MANIFEST"
