@@ -106,8 +106,8 @@ struct Cli {
     #[arg(long)]
     per_turn_budget: Option<usize>,
 
-    /// Use the legacy in-process single-room runtime (with web/telegram/discord
-    /// bridges + model-as-participant sampling) instead of attaching a TUI to
+    /// Use the legacy in-process single-room runtime (with the legacy web
+    /// bridge + model-as-participant sampling) instead of attaching a TUI to
     /// the meeting daemon. `--web-port` implies this.
     #[arg(long)]
     legacy_room: bool,
@@ -994,8 +994,8 @@ async fn main() {
     match cli.command {
         None => {
             // Default: attach a TUI to the meeting daemon. The legacy in-process
-            // room (with web/telegram/discord bridges + model-as-participant
-            // sampling) is the escape hatch: `--legacy-room`, or implicitly when
+            // room (with the legacy web bridge + model-as-participant sampling)
+            // is the escape hatch: `--legacy-room`, or implicitly when
             // `--web-port` is set (the web bridge needs the in-process room).
             if cli.legacy_room || cli.web_port.is_some() {
                 run_room(
@@ -1060,15 +1060,7 @@ async fn main() {
             }
         }
         Some(Command::Discord { room, name }) => {
-            let token = std::env::var("DISCORD_BOT_TOKEN").unwrap_or_else(|_| {
-                eprintln!("error: DISCORD_BOT_TOKEN not set");
-                std::process::exit(1);
-            });
-            let channel_id = std::env::var("DISCORD_CHANNEL_ID").unwrap_or_else(|_| {
-                eprintln!("error: DISCORD_CHANNEL_ID not set");
-                std::process::exit(1);
-            });
-            if let Err(e) = rozum::discord::run_bridge(&room, &name, token, channel_id).await {
+            if let Err(e) = rozum::discord::run_from_env(&room, &name).await {
                 eprintln!("discord bridge error: {e}");
                 std::process::exit(1);
             }
@@ -1287,21 +1279,7 @@ async fn main() {
             RoomsAction::Prune => run_rooms_prune(),
         },
         Some(Command::Telegram { room, name }) => {
-            let token = std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_else(|_| {
-                eprintln!("error: TELEGRAM_BOT_TOKEN not set");
-                std::process::exit(1);
-            });
-            let chat_id: i64 = std::env::var("TELEGRAM_CHAT_ID")
-                .unwrap_or_else(|_| {
-                    eprintln!("error: TELEGRAM_CHAT_ID not set");
-                    std::process::exit(1);
-                })
-                .parse()
-                .unwrap_or_else(|_| {
-                    eprintln!("error: TELEGRAM_CHAT_ID must be a numeric chat ID");
-                    std::process::exit(1);
-                });
-            if let Err(e) = rozum::telegram::run_bridge(&room, &name, token, chat_id).await {
+            if let Err(e) = rozum::telegram::run_from_env(&room, &name).await {
                 eprintln!("telegram bridge error: {e}");
                 std::process::exit(1);
             }
@@ -2890,6 +2868,7 @@ async fn run_meetings_start(foreground: bool) {
 }
 
 fn spawn_detached_meetings() -> std::io::Result<std::process::Child> {
+    use rozum::meeting::daemon_proxy::scrub_messenger_bridge_env;
     use rozum::meeting::store::rozum_state_dir;
     use std::process::{Command as StdCommand, Stdio};
     let exe = std::env::current_exe()?;
@@ -2907,6 +2886,7 @@ fn spawn_detached_meetings() -> std::io::Result<std::process::Child> {
         .stdin(Stdio::null())
         .stdout(log_file.try_clone()?)
         .stderr(log_file);
+    scrub_messenger_bridge_env(&mut cmd);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

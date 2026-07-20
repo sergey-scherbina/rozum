@@ -69,6 +69,9 @@ pub struct RoomsNewParams {
     pub client_info_name: Option<String>,
     #[serde(default)]
     pub session_token: Option<String>,
+    /// `"human"` (default, for backward compatibility) or `"bridge"`.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -247,10 +250,11 @@ impl MeetingServer {
         kind: &str,
         session_token: Option<&str>,
         project: Option<&str>,
-    ) -> (ParticipantId, String) {
-        let (id, handle) = {
+    ) -> (ParticipantId, String, super::store::HighWater) {
+        let (id, handle, high_water) = {
             let mut r = room.lock().await;
-            r.join(session_token, client_name, kind, project)
+            let (id, handle) = r.join(session_token, client_name, kind, project);
+            (id, handle, r.high_water())
         };
         let mut s = self.session.lock().await;
         s.room = Some(room);
@@ -259,7 +263,7 @@ impl MeetingServer {
         s.session_token = session_token.map(str::to_owned);
         s.project = project.map(str::to_owned);
         s.client_name = client_name.to_owned();
-        (id, handle)
+        (id, handle, high_water)
     }
 }
 
@@ -325,7 +329,7 @@ impl MeetingServer {
             _ => "mcp",
         };
         let root = room.lock().await.root().to_path_buf();
-        let (id, handle) = self
+        let (id, handle, high_water) = self
             .enter_room(
                 room,
                 name.clone(),
@@ -337,7 +341,13 @@ impl MeetingServer {
             .await;
         register_peer(&self.peer_slot, &self.session, &id).await;
         text_result(
-            &serde_json::json!({ "room": name, "participant_id": id.0, "handle": handle, "root": root })
+            &serde_json::json!({
+                "room": name,
+                "participant_id": id.0,
+                "handle": handle,
+                "root": root,
+                "high_water": high_water_json(&high_water),
+            })
                 .to_string(),
         )
         })
@@ -367,12 +377,24 @@ impl MeetingServer {
             };
             let client_name = p.client_info_name.unwrap_or(sess_name);
             let token = p.session_token.or(sess_token);
-            let (id, handle) = self
-                .enter_room(room, name.clone(), &client_name, "human", token.as_deref(), None)
+            let kind = match p.kind.as_deref() {
+                Some("bridge") => "bridge",
+                Some("mcp") => "mcp",
+                Some("human") => "human",
+                _ => "human",
+            };
+            let (id, handle, high_water) = self
+                .enter_room(room, name.clone(), &client_name, kind, token.as_deref(), None)
                 .await;
             register_peer(&self.peer_slot, &self.session, &id).await;
             text_result(
-                &serde_json::json!({ "room": name, "root": root, "participant_id": id.0, "handle": handle })
+                &serde_json::json!({
+                    "room": name,
+                    "root": root,
+                    "participant_id": id.0,
+                    "handle": handle,
+                    "high_water": high_water_json(&high_water),
+                })
                     .to_string(),
             )
         })
@@ -405,7 +427,7 @@ impl MeetingServer {
                 Some("human") => "human",
                 _ => "mcp",
             };
-            let (id, handle) = self
+            let (id, handle, high_water) = self
                 .enter_room(
                     room,
                     name.clone(),
@@ -422,6 +444,7 @@ impl MeetingServer {
                     "handle": handle,
                     "room": name,
                     "root": root,
+                    "high_water": high_water_json(&high_water),
                 })
                 .to_string(),
             )
@@ -1361,6 +1384,7 @@ mod tests {
         let join = tool_result_text_json(&join).unwrap();
         assert_eq!(join["room"], project_room_name(&project));
         assert!(join["handle"].as_str().unwrap().contains('-'));
+        assert_eq!(join["high_water"]["n"], 0);
         // The room's disk location is returned so the client can read content.
         let root = std::path::PathBuf::from(join["root"].as_str().unwrap());
 

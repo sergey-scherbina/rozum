@@ -7,7 +7,8 @@
 //! engine code lives only in `rozum-gateway`, so a frontend fix never triggers the MLX rebuild.
 //!
 //! Routing:
-//! - `mcp-proxy` / `mpc-proxy` / `mcp-http` → `rozum-meet` (engine-free meeting MCP bridges)
+//! - `mcp-proxy` / `mpc-proxy` / `mcp-http` / `telegram` / `discord` → `rozum-meet`
+//!   (engine-free meeting bridges)
 //! - everything else (incl. no subcommand → TUI, `--topic …`, etc.) → `rozum-gateway` (full CLI)
 //!
 //! Each target is resolved next to this dispatcher first (so an uninstalled `target/…/rozum`
@@ -20,23 +21,25 @@ use std::process::Command;
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let sub = args.get(1).map(String::as_str);
+    let (target, fwd) = route(&args);
+    let bin = resolve(target);
+    dispatch(&bin, target, &fwd)
+}
 
-    let (target, fwd): (&str, Vec<String>) = match sub {
+/// Select the sibling binary without spawning it. Kept pure so command routing is testable offline.
+fn route(args: &[String]) -> (&'static str, Vec<String>) {
+    match args.get(1).map(String::as_str) {
         // `mpc-proxy` is a long-standing typo'd alias clap accepted on the monolith; normalize it.
         Some("mcp-proxy") | Some("mpc-proxy") => {
             let mut v = vec!["mcp-proxy".to_string()];
             v.extend(args[2..].iter().cloned());
             ("rozum-meet", v)
         }
-        Some("mcp-http") => ("rozum-meet", args[1..].to_vec()),
+        Some("mcp-http") | Some("telegram") | Some("discord") => ("rozum-meet", args[1..].to_vec()),
         // Everything else — gateway, launch, meetings, service, web, tui (bare), list, control,
-        // telegram, discord, mcp install … — goes to the full engine-linking binary unchanged.
+        // mcp install … — goes to the full engine-linking binary unchanged.
         _ => ("rozum-gateway", args[1..].to_vec()),
-    };
-
-    let bin = resolve(target);
-    dispatch(&bin, target, &fwd)
+    }
 }
 
 #[cfg(unix)]
@@ -72,4 +75,42 @@ fn resolve(name: &str) -> PathBuf {
         }
     }
     PathBuf::from(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        std::iter::once("rozum".to_owned())
+            .chain(values.iter().map(|value| (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn messenger_commands_route_to_thin_meeting_binary_unchanged() {
+        for command in ["telegram", "discord"] {
+            let input = args(&[command, "--room", "ops", "--name", "relay"]);
+            let (target, forwarded) = route(&input);
+            assert_eq!(target, "rozum-meet");
+            assert_eq!(forwarded, input[1..]);
+        }
+    }
+
+    #[test]
+    fn typoed_proxy_alias_is_still_normalized() {
+        let input = args(&["mpc-proxy", "--flag"]);
+        let (target, forwarded) = route(&input);
+        assert_eq!(target, "rozum-meet");
+        assert_eq!(forwarded, ["mcp-proxy", "--flag"]);
+    }
+
+    #[test]
+    fn engine_and_legacy_commands_still_route_to_gateway() {
+        for input in [args(&[]), args(&["gateway"]), args(&["meetings", "status"])] {
+            let (target, forwarded) = route(&input);
+            assert_eq!(target, "rozum-gateway");
+            assert_eq!(forwarded, input[1..]);
+        }
+    }
 }

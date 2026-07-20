@@ -339,6 +339,13 @@ pub struct Index {
     pub days: BTreeMap<String, DayStat>,
 }
 
+/// Load the canonical day-count index and surface missing/corrupt data. Live
+/// external clients use this to prove a disk delta reaches the daemon cursor.
+pub fn read_index_checked(root: &Path) -> std::io::Result<Index> {
+    let bytes = std::fs::read(root.join("index.json"))?;
+    serde_json::from_slice(&bytes).map_err(std::io::Error::other)
+}
+
 /// Room role (P3): a plain chat (today), a support intake queue, or a room scoped to one incident.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -960,17 +967,36 @@ impl TranscriptReader {
 /// day-scoped rendering / scrollback.
 pub fn day_dates(root: &Path) -> Vec<String> {
     let mut dates = vec![];
-    if let Ok(rd) = std::fs::read_dir(root) {
-        for ent in rd.flatten() {
-            if let Some(name) = ent.file_name().to_str() {
-                if let Some(date) = name.strip_suffix(".jsonl") {
-                    dates.push(date.to_owned());
-                }
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && let Some(date) = name.strip_suffix(".jsonl")
+            {
+                dates.push(date.to_owned());
             }
         }
     }
     dates.sort();
     dates
+}
+
+fn day_dates_checked(root: &Path) -> std::io::Result<Vec<String>> {
+    let mut dates = vec![];
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(dates),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if let Some(name) = entry.file_name().to_str()
+            && let Some(date) = name.strip_suffix(".jsonl")
+        {
+            dates.push(date.to_owned());
+        }
+    }
+    dates.sort();
+    Ok(dates)
 }
 
 /// Best-effort reconstruction of the thread map from the message log ALONE — the last-resort recovery
@@ -1380,6 +1406,26 @@ pub fn read_since(root: &Path, since_date: Option<&str>, since_n: u64) -> Vec<St
     out
 }
 
+/// Strict direct-read variant for live clients. Unlike [`read_since`], an I/O
+/// failure is surfaced so a bridge cannot advance its cursor past an unread
+/// batch. Best-effort analytical/recovery callers keep using `read_since`.
+pub fn read_since_checked(
+    root: &Path,
+    since_date: Option<&str>,
+    since_n: u64,
+) -> std::io::Result<Vec<StoredTurn>> {
+    let mut out = vec![];
+    for date in day_dates_checked(root)? {
+        let from = match since_date {
+            Some(sd) if date.as_str() < sd => continue,
+            Some(sd) if date.as_str() == sd => since_n,
+            _ => 0,
+        };
+        out.extend(read_day_required(root, &date, from, None)?);
+    }
+    Ok(out)
+}
+
 /// Read one whole day file, optionally slicing by `n` (`from`, `count`). Used by
 /// scrollback and the future REST read.
 pub fn read_day(
@@ -1400,6 +1446,22 @@ pub fn read_day(
         turns.truncate(c as usize);
     }
     apply_redactions(root, &mut turns);
+    Ok(turns)
+}
+
+fn read_day_required(
+    root: &Path,
+    date: &str,
+    from: u64,
+    count: Option<u64>,
+) -> std::io::Result<Vec<StoredTurn>> {
+    let bytes = std::fs::read(root.join(format!("{date}.jsonl")))?;
+    let mut turns = parse_lines(&bytes);
+    turns.retain(|turn| turn.n >= from);
+    if let Some(count) = count {
+        turns.truncate(count as usize);
+    }
+    apply_redactions_checked(root, &mut turns)?;
     Ok(turns)
 }
 
@@ -1425,6 +1487,17 @@ pub fn load_redactions(root: &Path) -> BTreeMap<String, Redaction> {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
+}
+
+fn load_redactions_checked(root: &Path) -> std::io::Result<BTreeMap<String, Redaction>> {
+    let bytes = match std::fs::read(redactions_path(root)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeMap::new());
+        }
+        Err(error) => return Err(error),
+    };
+    serde_json::from_slice(&bytes).map_err(std::io::Error::other)
 }
 
 /// Redact (`redact=true`) or un-redact a message id. Persisted durably. Returns the new set size.
@@ -1465,6 +1538,23 @@ fn apply_redactions(root: &Path, turns: &mut [StoredTurn]) {
             };
         }
     }
+}
+
+fn apply_redactions_checked(root: &Path, turns: &mut [StoredTurn]) -> std::io::Result<()> {
+    if turns.is_empty() {
+        return Ok(());
+    }
+    let redactions = load_redactions_checked(root)?;
+    for turn in turns.iter_mut() {
+        if let Some(redaction) = redactions.get(&turn.id()) {
+            turn.content = if redaction.reason.is_empty() {
+                "[redacted]".to_owned()
+            } else {
+                format!("[redacted: {}]", redaction.reason)
+            };
+        }
+    }
+    Ok(())
 }
 
 // ── Reactions (`reactions.json`) ──────────────────────────────────────────────
@@ -2074,7 +2164,15 @@ mod tests {
         set_redacted(&root, &secret.id(), true, "alice", "secret", 1_718_000_100).unwrap();
         let turns = read_day(&root, &date, 0, None).unwrap();
         assert_eq!(turns[0].content, "[redacted: secret]");
-        assert_eq!(turns[1].content, "normal message", "only the redacted message changes");
+        assert_eq!(
+            turns[1].content, "normal message",
+            "only the redacted message changes"
+        );
+        assert_eq!(
+            read_since_checked(&root, None, 0).unwrap()[0].content,
+            "[redacted: secret]",
+            "live bridge reads must apply the same tombstone"
+        );
         // read_since (search/context path) honors it too.
         assert!(read_since(&root, None, 0).iter().all(|t| t.content != "password is hunter2"));
         // The original bytes are still on disk (append-only; redaction is read-time).
@@ -2083,6 +2181,24 @@ mod tests {
         // Un-redact restores it.
         set_redacted(&root, &secret.id(), false, "alice", "", 1_718_000_200).unwrap();
         assert_eq!(read_day(&root, &date, 0, None).unwrap()[0].content, "password is hunter2");
+    }
+
+    #[test]
+    fn strict_read_fails_closed_when_redactions_are_corrupt() {
+        let dir = tempdir().unwrap();
+        let paths = RoomPaths::ad_hoc_in(dir.path(), "ops");
+        let root = paths.root.clone();
+        let mut writer =
+            TranscriptWriter::new(paths, "ops", "topic", None, dir.path().to_path_buf());
+        writer
+            .append("p", "A", "must not escape through a bridge", 1_718_000_000)
+            .unwrap();
+        std::fs::write(root.join("redactions.json"), "{broken").unwrap();
+
+        assert!(
+            read_since_checked(&root, None, 0).is_err(),
+            "a bridge must stop instead of exporting possibly redacted source text"
+        );
     }
 
     #[test]

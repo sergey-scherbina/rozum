@@ -750,12 +750,57 @@ fn meetings_binary() -> PathBuf {
     PathBuf::from("rozum-gateway")
 }
 
+const MESSENGER_BRIDGE_ENV_VARS: &[&str] = &[
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "TELEGRAM_ALLOWED_USER_IDS",
+    "DISCORD_BOT_TOKEN",
+    "DISCORD_CHANNEL_ID",
+    "DISCORD_ALLOWED_USER_IDS",
+];
+
+fn is_messenger_bridge_env_key(key: &std::ffi::OsStr) -> bool {
+    key.to_str().is_some_and(|key| {
+        key.starts_with("TELEGRAM_")
+            || key.starts_with("DISCORD_")
+            || key.starts_with("ROZUM_TELEGRAM_")
+            || key.starts_with("ROZUM_DISCORD_")
+    })
+}
+
+/// Prevent a shared, long-lived meeting daemon from retaining bridge credentials.
+///
+/// This mutates only a child command's environment; the Telegram or Discord bridge process that
+/// requested the daemon keeps its own configuration. The explicit names keep today's contract
+/// covered even when a variable is absent from the parent, while the prefix pass also catches
+/// future messenger-specific settings.
+pub fn scrub_messenger_bridge_env(command: &mut std::process::Command) {
+    let mut keys: Vec<std::ffi::OsString> = MESSENGER_BRIDGE_ENV_VARS
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+    keys.extend(
+        std::env::vars_os()
+            .map(|(key, _)| key)
+            .filter(|key| is_messenger_bridge_env_key(key)),
+    );
+    keys.extend(
+        command
+            .get_envs()
+            .map(|(key, _)| key.to_os_string())
+            .filter(|key| is_messenger_bridge_env_key(key)),
+    );
+    for key in keys {
+        command.env_remove(key);
+    }
+}
+
 pub async fn spawn_daemon() {
     // `meetings start` spawns the detached daemon and waits for its socket.
-    let _ = tokio::process::Command::new(meetings_binary())
-        .args(["meetings", "start"])
-        .status()
-        .await;
+    let mut command = tokio::process::Command::new(meetings_binary());
+    command.args(["meetings", "start"]);
+    scrub_messenger_bridge_env(command.as_std_mut());
+    let _ = command.status().await;
 }
 
 fn value_to_call_result(v: &Value) -> CallToolResult {
@@ -993,6 +1038,38 @@ mod tests {
         assert!(
             name == "rozum-gateway" || name == "rozum",
             "must resolve to a meetings-capable binary, got {name:?}"
+        );
+    }
+
+    #[test]
+    fn daemon_child_env_excludes_messenger_configuration() {
+        let mut command = std::process::Command::new("unused-test-command");
+        command
+            .env("TELEGRAM_BOT_TOKEN", "telegram-secret")
+            .env("DISCORD_CHANNEL_ID", "123")
+            .env("ROZUM_TELEGRAM_FUTURE_SETTING", "future-secret")
+            .env("UNRELATED_SETTING", "preserved");
+
+        scrub_messenger_bridge_env(&mut command);
+
+        let envs: std::collections::HashMap<_, _> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(std::ffi::OsStr::to_os_string)))
+            .collect();
+        for key in MESSENGER_BRIDGE_ENV_VARS {
+            assert_eq!(
+                envs.get(std::ffi::OsStr::new(key)),
+                Some(&None),
+                "{key} must be removed from the daemon child"
+            );
+        }
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("ROZUM_TELEGRAM_FUTURE_SETTING")),
+            Some(&None)
+        );
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("UNRELATED_SETTING")),
+            Some(&Some(std::ffi::OsString::from("preserved")))
         );
     }
 

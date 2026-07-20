@@ -16,7 +16,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::room_client::{RoomConnection, tool_result_text_json};
-use super::store::{RoomPaths, StoredTurn, day_dates, read_day, read_since};
+use super::store::{
+    Index, RoomPaths, StoredTurn, day_dates, read_day, read_index_checked, read_since_checked,
+};
 
 const T: Duration = Duration::from_secs(5);
 const WAIT_T: Duration = Duration::from_secs(30);
@@ -41,11 +43,38 @@ enum JoinSpec {
     Named(String),
 }
 
+/// How this local daemon client appears in the room roster. The public
+/// constructors deliberately default to `Human`; transports use
+/// [`MeetingClient::connect_bridge_as`] so a messenger relay is never
+/// misrepresented as the operator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientKind {
+    Human,
+    Bridge,
+}
+
+impl ClientKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Bridge => "bridge",
+        }
+    }
+}
+
+struct PollSession {
+    token: String,
+    name: String,
+    kind: ClientKind,
+}
+
 pub struct MeetingClient {
     conn: RoomConnection,
     sock: PathBuf,
     display_name: String,
     session_token: String,
+    kind: ClientKind,
+    participant_id: Option<String>,
     room_name: Option<String>,
     room_root: Option<PathBuf>,
     join_spec: Option<JoinSpec>,
@@ -60,23 +89,47 @@ pub struct MeetingClient {
 impl MeetingClient {
     /// Connect to the daemon as `display_name` (a fresh, ephemeral session token).
     pub async fn connect(sock: &Path, display_name: &str) -> ClientResult<Self> {
-        Self::connect_with(sock, display_name, uuid::Uuid::new_v4().simple().to_string()).await
+        Self::connect_with(
+            sock,
+            display_name,
+            uuid::Uuid::new_v4().simple().to_string(),
+            ClientKind::Human,
+        )
+        .await
     }
 
     /// Connect with a **stable** session token — the local human's persisted identity
     /// ([`super::local_identity`]), so all this machine's human clients map to one participant
     /// (handle) across launches instead of a fresh random one.
     pub async fn connect_as(sock: &Path, display_name: &str, token: &str) -> ClientResult<Self> {
-        Self::connect_with(sock, display_name, token.to_owned()).await
+        Self::connect_with(sock, display_name, token.to_owned(), ClientKind::Human).await
     }
 
-    async fn connect_with(sock: &Path, display_name: &str, token: String) -> ClientResult<Self> {
+    /// Connect a transport bridge with a stable token. The same token is reused
+    /// by the dedicated poll connection, so both sockets bind to one roster
+    /// participant and self-authored messages can be suppressed reliably.
+    pub(crate) async fn connect_bridge_as(
+        sock: &Path,
+        display_name: &str,
+        token: &str,
+    ) -> ClientResult<Self> {
+        Self::connect_with(sock, display_name, token.to_owned(), ClientKind::Bridge).await
+    }
+
+    async fn connect_with(
+        sock: &Path,
+        display_name: &str,
+        token: String,
+        kind: ClientKind,
+    ) -> ClientResult<Self> {
         let conn = RoomConnection::connect(sock, display_name, T).await?;
         Ok(Self {
             conn,
             sock: sock.to_path_buf(),
             display_name: display_name.to_owned(),
             session_token: token,
+            kind,
+            participant_id: None,
             room_name: None,
             room_root: None,
             join_spec: None,
@@ -88,6 +141,9 @@ impl MeetingClient {
 
     pub fn room_name(&self) -> Option<&str> {
         self.room_name.as_deref()
+    }
+    pub fn participant_id(&self) -> Option<&str> {
+        self.participant_id.as_deref()
     }
     /// The joined room's on-disk dir — content is read directly from here (the daemon's
     /// single-writer/direct-read contract). Used by the web client to tail the transcript.
@@ -150,7 +206,7 @@ impl MeetingClient {
                     "client_info_name": self.display_name,
                     "project": project,
                     "session_token": self.session_token,
-                    "kind": "human",
+                    "kind": self.kind.as_str(),
                 }),
                 T,
             )
@@ -161,31 +217,41 @@ impl MeetingClient {
             .and_then(Value::as_str)
             .ok_or("no room in result")?
             .to_owned();
+        self.participant_id = v
+            .get("participant_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         self.room_name = Some(room.clone());
         self.room_root = Some(RoomPaths::for_project(Path::new(project)).root);
         self.join_spec = Some(JoinSpec::Project(project.to_owned()));
-        self.reload_current_day();
+        self.initialize_after_join(&v)?;
         Ok(room)
     }
 
     /// Enter a room chosen from the picker.
     pub async fn enter_named(&mut self, info: &RoomInfo) -> ClientResult<()> {
-        self.conn
+        let r = self
+            .conn
             .call_tool(
                 "rooms.join",
                 json!({
                     "name": info.name,
                     "client_info_name": self.display_name,
                     "session_token": self.session_token,
-                    "kind": "human",
+                    "kind": self.kind.as_str(),
                 }),
                 T,
             )
             .await?;
+        let v = tool_result_text_json(&r).ok_or("bad rooms.join")?;
+        self.participant_id = v
+            .get("participant_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         self.room_name = Some(info.name.clone());
         self.room_root = Some(info.root.clone());
         self.join_spec = Some(JoinSpec::Named(info.name.clone()));
-        self.reload_current_day();
+        self.initialize_after_join(&v)?;
         Ok(())
     }
 
@@ -194,6 +260,7 @@ impl MeetingClient {
         let mut args = json!({
             "client_info_name": self.display_name,
             "session_token": self.session_token,
+            "kind": self.kind.as_str(),
         });
         if let Some(t) = topic {
             args["topic"] = json!(t);
@@ -205,6 +272,10 @@ impl MeetingClient {
             .and_then(Value::as_str)
             .ok_or("no room in result")?
             .to_owned();
+        self.participant_id = v
+            .get("participant_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let root = v
             .get("root")
             .and_then(Value::as_str)
@@ -213,7 +284,7 @@ impl MeetingClient {
         self.room_name = Some(name.clone());
         self.room_root = Some(root);
         self.join_spec = Some(JoinSpec::Named(name.clone()));
-        self.reload_current_day();
+        self.initialize_after_join(&v)?;
         Ok(name)
     }
 
@@ -229,12 +300,21 @@ impl MeetingClient {
                     "name": name,
                     "client_info_name": self.display_name,
                     "session_token": self.session_token,
+                    "kind": self.kind.as_str(),
                 }),
                 T,
             )
             .await?;
         let v = tool_result_text_json(&r).ok_or("bad rooms.new")?;
-        let room = v.get("room").and_then(Value::as_str).ok_or("no room in result")?.to_owned();
+        let room = v
+            .get("room")
+            .and_then(Value::as_str)
+            .ok_or("no room in result")?
+            .to_owned();
+        self.participant_id = v
+            .get("participant_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let root = v
             .get("root")
             .and_then(Value::as_str)
@@ -243,7 +323,7 @@ impl MeetingClient {
         self.room_name = Some(room.clone());
         self.room_root = Some(root);
         self.join_spec = Some(JoinSpec::Named(room.clone()));
-        self.reload_current_day();
+        self.initialize_after_join(&v)?;
         Ok(room)
     }
 
@@ -259,10 +339,13 @@ impl MeetingClient {
             return (rx, tokio::spawn(async {}));
         };
         let sock = self.sock.clone();
-        let token = self.session_token.clone();
-        let name = self.display_name.clone();
+        let session = PollSession {
+            token: self.session_token.clone(),
+            name: self.display_name.clone(),
+            kind: self.kind,
+        };
         let cursor = self.cursor.clone();
-        let handle = tokio::spawn(poll_loop(sock, spec, token, name, root, cursor, tx));
+        let handle = tokio::spawn(poll_loop(sock, spec, session, root, cursor, tx));
         (rx, handle)
     }
 
@@ -313,25 +396,24 @@ impl MeetingClient {
             .get("still_waiting")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        if let Some(hw) = v.get("high_water") {
-            if let (Some(d), Some(n)) = (
-                hw.get("date").and_then(Value::as_str),
-                hw.get("n").and_then(Value::as_u64),
-            ) {
-                self.cursor = Some((d.to_owned(), n));
-            }
-        }
+        let next_cursor = cursor_from_result(&v).ok_or("meeting wait omitted high_water")?;
         // New messages: read the content straight from the room's day files.
         let mut new = vec![];
         if !still_waiting {
-            if let Some(root) = &self.room_root {
-                let (sd, sn) = match &since_cursor {
-                    Some((d, n)) => (Some(d.as_str()), *n),
-                    None => (None, 0),
-                };
-                new = read_since(root, sd, sn);
+            let root = self
+                .room_root
+                .as_ref()
+                .ok_or("joined room has no store root")?;
+            let (sd, sn) = match &since_cursor {
+                Some((d, n)) => (Some(d.as_str()), *n),
+                None => (None, 0),
+            };
+            new = read_delta_to(root, sd, sn, &next_cursor)?;
+            if !delta_is_contiguous(&new, since_cursor.as_ref(), &next_cursor) {
+                return Err("meeting store delta did not reach daemon high-water".into());
             }
         }
+        self.cursor = Some(next_cursor);
         self.transcript.extend(new.iter().cloned());
         Ok(new)
     }
@@ -367,6 +449,19 @@ impl MeetingClient {
             self.transcript = turns;
         }
     }
+
+    fn initialize_after_join(&mut self, result: &Value) -> ClientResult<()> {
+        if self.kind == ClientKind::Bridge {
+            self.transcript.clear();
+            self.oldest_loaded_date = None;
+            self.cursor = Some(cursor_from_result(result).ok_or(
+                "meeting daemon join omitted high_water; restart the daemon with the current binary",
+            )?);
+        } else {
+            self.reload_current_day();
+        }
+        Ok(())
+    }
 }
 
 /// Dedicated poll loop on its own connection (the TUI's second connection):
@@ -376,13 +471,12 @@ impl MeetingClient {
 async fn poll_loop(
     sock: PathBuf,
     spec: JoinSpec,
-    token: String,
-    name: String,
+    session: PollSession,
     root: PathBuf,
     mut cursor: Option<(String, u64)>,
     tx: mpsc::Sender<Vec<StoredTurn>>,
 ) {
-    let Ok(mut conn) = RoomConnection::connect(&sock, &name, T).await else {
+    let Ok(mut conn) = RoomConnection::connect(&sock, &session.name, T).await else {
         return;
     };
     // Rejoin with the same session_token → the same participant identity.
@@ -390,7 +484,7 @@ async fn poll_loop(
         JoinSpec::Project(p) => {
             conn.call_tool(
                 "_join_internal",
-                json!({ "client_info_name": name, "project": p, "session_token": token, "kind": "human" }),
+                json!({ "client_info_name": session.name, "project": p, "session_token": session.token, "kind": session.kind.as_str() }),
                 T,
             )
             .await
@@ -398,13 +492,16 @@ async fn poll_loop(
         JoinSpec::Named(n) => {
             conn.call_tool(
                 "rooms.join",
-                json!({ "name": n, "client_info_name": name, "session_token": token, "kind": "human" }),
+                json!({ "name": n, "client_info_name": session.name, "session_token": session.token, "kind": session.kind.as_str() }),
                 T,
             )
             .await
         }
     };
-    if join.is_err() {
+    let Ok(join) = join else {
+        return;
+    };
+    if join.get("isError").and_then(Value::as_bool) == Some(true) {
         return;
     }
 
@@ -417,8 +514,11 @@ async fn poll_loop(
         let Ok(r) = conn.call_tool("meeting.wait_my_turn", since, WAIT_T).await else {
             return; // socket died → end the stream (UI can respawn)
         };
+        if r.get("isError").and_then(Value::as_bool) == Some(true) {
+            return;
+        }
         let Some(v) = tool_result_text_json(&r) else {
-            continue;
+            return;
         };
         if v.get("ended").and_then(Value::as_bool) == Some(true) {
             return;
@@ -427,25 +527,142 @@ async fn poll_loop(
             .get("still_waiting")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        if let Some(hw) = v.get("high_water") {
-            if let (Some(d), Some(n)) = (
-                hw.get("date").and_then(Value::as_str),
-                hw.get("n").and_then(Value::as_u64),
-            ) {
-                cursor = Some((d.to_owned(), n));
-            }
-        }
+        let Some(next_cursor) = cursor_from_result(&v) else {
+            return;
+        };
         if !still_waiting {
             let (sd, sn) = match &prev {
                 Some((d, n)) => (Some(d.as_str()), *n),
                 None => (None, 0),
             };
-            let turns = read_since(&root, sd, sn);
+            let Ok(turns) = read_delta_to(&root, sd, sn, &next_cursor) else {
+                return;
+            };
+            if !delta_is_contiguous(&turns, prev.as_ref(), &next_cursor) {
+                return;
+            }
             if !turns.is_empty() && tx.send(turns).await.is_err() {
                 return; // UI gone
             }
         }
+        cursor = Some(next_cursor);
     }
+}
+
+fn cursor_from_result(value: &Value) -> Option<(String, u64)> {
+    let high_water = value.get("high_water")?;
+    Some((
+        high_water.get("date")?.as_str()?.to_owned(),
+        high_water.get("n")?.as_u64()?,
+    ))
+}
+
+fn read_delta_to(
+    root: &Path,
+    since_date: Option<&str>,
+    since_n: u64,
+    high_water: &(String, u64),
+) -> std::io::Result<Vec<StoredTurn>> {
+    let index = read_index_checked(root)?;
+    let expected = expected_delta_len(&index, since_date.map(|date| (date, since_n)), high_water)?;
+    let mut turns = read_since_checked(root, since_date, since_n)?;
+    turns.retain(|turn| (turn.date.as_str(), turn.n) < (high_water.0.as_str(), high_water.1));
+    if u64::try_from(turns.len()).ok() != Some(expected) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "meeting store delta count does not reach daemon high-water",
+        ));
+    }
+    Ok(turns)
+}
+
+fn expected_delta_len(
+    index: &Index,
+    previous: Option<(&str, u64)>,
+    high_water: &(String, u64),
+) -> std::io::Result<u64> {
+    let invalid =
+        |message: &'static str| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
+    let high_stat = index
+        .days
+        .get(&high_water.0)
+        .ok_or_else(|| invalid("meeting store index omits daemon high-water day"))?;
+    if high_water.1 > high_stat.count {
+        return Err(invalid("meeting store index is behind daemon high-water"));
+    }
+
+    let mut expected = 0_u64;
+    let lower_date = match previous {
+        Some((date, _)) if date > high_water.0.as_str() => {
+            return Err(invalid("meeting cursor is after daemon high-water"));
+        }
+        Some((date, n)) if date == high_water.0 => {
+            return high_water
+                .1
+                .checked_sub(n)
+                .ok_or_else(|| invalid("meeting cursor is after daemon high-water"));
+        }
+        Some((date, n)) => {
+            let previous_stat = index
+                .days
+                .get(date)
+                .ok_or_else(|| invalid("meeting store index omits cursor day"))?;
+            expected = previous_stat
+                .count
+                .checked_sub(n)
+                .ok_or_else(|| invalid("meeting cursor exceeds indexed day"))?;
+            Some(date)
+        }
+        None => None,
+    };
+
+    for (date, stat) in &index.days {
+        if date.as_str() >= high_water.0.as_str()
+            || lower_date.is_some_and(|lower| date.as_str() <= lower)
+        {
+            continue;
+        }
+        expected = expected
+            .checked_add(stat.count)
+            .ok_or_else(|| invalid("meeting store delta count overflow"))?;
+    }
+    expected
+        .checked_add(high_water.1)
+        .ok_or_else(|| invalid("meeting store delta count overflow"))
+}
+
+fn delta_is_contiguous(
+    turns: &[StoredTurn],
+    previous: Option<&(String, u64)>,
+    next: &(String, u64),
+) -> bool {
+    if previous == Some(next) {
+        return turns.is_empty();
+    }
+    let Some(first) = turns.first() else {
+        return false;
+    };
+    let expected_first_n = previous
+        .filter(|(date, _)| date == &first.date)
+        .map(|(_, n)| *n)
+        .unwrap_or(0);
+    if first.n != expected_first_n {
+        return false;
+    }
+    if turns.windows(2).any(|pair| {
+        let left = &pair[0];
+        let right = &pair[1];
+        if left.date == right.date {
+            right.n != left.n + 1
+        } else {
+            right.date <= left.date || right.n != 0
+        }
+    }) {
+        return false;
+    }
+    turns
+        .last()
+        .is_some_and(|last| last.date == next.0 && last.n + 1 == next.1)
 }
 
 /// The day immediately before `oldest` in `root`, with its messages.
@@ -560,7 +777,7 @@ mod tests {
     use super::*;
     use crate::meeting::daemon::serve_daemon;
     use crate::meeting::registry::RoomRegistry;
-    use crate::meeting::store::TranscriptWriter;
+    use crate::meeting::store::{DayStat, TranscriptWriter};
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -572,6 +789,74 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("socket never appeared");
+    }
+
+    fn turn(date: &str, n: u64) -> StoredTurn {
+        StoredTurn {
+            date: date.to_owned(),
+            n,
+            ..StoredTurn::default()
+        }
+    }
+
+    #[test]
+    fn store_delta_must_be_contiguous_through_daemon_high_water() {
+        let previous = ("2026-07-20".to_owned(), 2);
+        let next = ("2026-07-20".to_owned(), 4);
+        assert!(delta_is_contiguous(
+            &[turn("2026-07-20", 2), turn("2026-07-20", 3)],
+            Some(&previous),
+            &next,
+        ));
+        assert!(!delta_is_contiguous(
+            &[turn("2026-07-20", 3)],
+            Some(&previous),
+            &next,
+        ));
+        assert!(!delta_is_contiguous(&[], Some(&previous), &next));
+    }
+
+    #[test]
+    fn indexed_delta_count_proves_rollover_tail() {
+        let mut index = Index::default();
+        index
+            .days
+            .insert("2026-07-20".to_owned(), DayStat { count: 4, bytes: 0 });
+        index
+            .days
+            .insert("2026-07-21".to_owned(), DayStat { count: 3, bytes: 0 });
+        index
+            .days
+            .insert("2026-07-22".to_owned(), DayStat { count: 2, bytes: 0 });
+
+        assert_eq!(
+            expected_delta_len(
+                &index,
+                Some(("2026-07-20", 2)),
+                &("2026-07-22".to_owned(), 1),
+            )
+            .unwrap(),
+            6,
+            "old-day tail + complete middle day + high-water prefix"
+        );
+        assert_eq!(
+            expected_delta_len(
+                &index,
+                Some(("2026-07-22", 0)),
+                &("2026-07-22".to_owned(), 2),
+            )
+            .unwrap(),
+            2
+        );
+        assert!(
+            expected_delta_len(
+                &index,
+                Some(("2026-07-19", 0)),
+                &("2026-07-22".to_owned(), 1),
+            )
+            .is_err(),
+            "an omitted cursor day cannot silently lose its rollover tail"
+        );
     }
 
     #[tokio::test]
