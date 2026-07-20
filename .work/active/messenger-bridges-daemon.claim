@@ -1,6 +1,6 @@
 feature/messenger-bridges-daemon 2026-07-20T02:22:44Z
 agent: codex
-heartbeat: 2026-07-20T02:39:04Z
+heartbeat: 2026-07-20T02:56:40Z
 status: in-progress
-done-so-far: spec gate committed; daemon adapter, Telegram integration, Discord integration, and thin CLI routing drafted
-next: compile, fix integration issues, run offline verification, and update docs/backlog
+done-so-far: daemon adapter and both platform integrations compile; 127 meeting tests pass; trust/replay/rate-limit/reconnect hardening complete
+next: finish docs, run workspace checks, commit feature, rebase/merge, and request process-scoped live credentials
