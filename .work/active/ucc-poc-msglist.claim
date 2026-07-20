@@ -1,0 +1,6 @@
+feature/ucc-poc-msglist 2026-07-20T02:22:44Z
+agent: codex-clear-lynx
+heartbeat: 2026-07-20T02:22:44Z
+status: not-started
+done-so-far: audited prerequisites; frontend/tui already exists in ScalaScript
+next: create worktree and write the dual-target message-list spec
