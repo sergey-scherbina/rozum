@@ -1,6 +1,6 @@
 feature/messenger-bridges-daemon 2026-07-20T02:22:44Z
 agent: codex
-heartbeat: 2026-07-20T02:23:10Z
+heartbeat: 2026-07-20T02:39:04Z
 status: in-progress
-done-so-far: worktree created; legacy per-room socket mismatch confirmed
-next: update and commit the Telegram/Discord daemon-client spec before implementation
+done-so-far: spec gate committed; daemon adapter, Telegram integration, Discord integration, and thin CLI routing drafted
+next: compile, fix integration issues, run offline verification, and update docs/backlog
