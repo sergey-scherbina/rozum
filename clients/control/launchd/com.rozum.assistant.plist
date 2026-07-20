@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The Qwen participant for the "assistant" room: a local model that answers in the
+  room, so messenger bridges (Telegram/Discord) relay a real chat with Qwen. Points
+  at the resident gateway on :8089 (reuses the loaded model — no second load); if the
+  gateway idle-unloaded, the first message lazily reloads it. reply-policy=always so it
+  answers every relayed message. Pairs with com.rozum.telegram (+ a future
+  com.rozum.discord) which bridge the same room. Needs com.rozum.meeting-daemon up.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.rozum.assistant</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sergiy/.cargo/bin/rozum-gateway</string>
+    <string>meetings</string>
+    <string>participant</string>
+    <string>--model</string>
+    <string>mlx-community:Qwen3.5-4B-MLX-4bit</string>
+    <string>--room</string>
+    <string>assistant</string>
+    <string>--as</string>
+    <string>qwen</string>
+    <string>--reply-policy</string>
+    <string>always</string>
+    <string>--gateway-url</string>
+    <string>http://127.0.0.1:8089/v1</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/Users/sergiy</string>
+    <key>PATH</key><string>/Users/sergiy/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/sergiy/work/my/rozum</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/sergiy/.rozum-assistant.log</string>
+  <key>StandardErrorPath</key><string>/Users/sergiy/.rozum-assistant.log</string>
+</dict>
+</plist>

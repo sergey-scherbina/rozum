@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Durable Telegram bridge: relays the Telegram bot chat <-> the meeting-daemon room
+  "assistant" (where the Qwen participant, com.rozum.assistant, answers). Runs the
+  wrapper ~/.rozum/bin/rozum-telegram-bridge.sh which reads the bot token + chat id
+  from ~/.rozum/secrets/{telegram-token,telegram-chat-id} (mode 600) — the secrets
+  are NEVER in this plist or the git repo. Needs com.rozum.meeting-daemon + the room's
+  participant up; KeepAlive retries if the room isn't ready yet at boot. Only ONE
+  process may long-poll Telegram getUpdates at a time, so keep a single instance.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.rozum.telegram</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sergiy/.rozum/bin/rozum-telegram-bridge.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/Users/sergiy</string>
+    <key>PATH</key><string>/Users/sergiy/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/sergiy/work/my/rozum</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/sergiy/.rozum-telegram.log</string>
+  <key>StandardErrorPath</key><string>/Users/sergiy/.rozum-telegram.log</string>
+</dict>
+</plist>
