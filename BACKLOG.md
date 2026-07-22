@@ -10,6 +10,31 @@
   for `.exe` dispatch, PID liveness, and locked residency queue/ledger metadata; those paths now have
   hosted behavioral coverage instead of a cross-compile-only claim. Spec: `docs/specs/ci-green-baseline.md`.
 
+## Land the reactive-chat primitives in canonical scalascript (deferred "потом", 2026-07-22)
+
+- [ ] **chat-primitives-canonical** — get scalascript's `fetchStreamSignal` + `intervalTick` + `forJson`
+  toolkit primitives into canonical `main` so `deploy-ucc-web.sh` rebuilds `chat.html` FROM SOURCE
+  (`chat.ssc`) and the fail-safe is retired. Operator explicitly wants this finished later.
+  - **Why it's blocked today:** the primitives live ONLY on `origin/feature/ui-stream-chat` = exactly 2
+    commits (`44d378ef8` fetchStreamSignal+intervalTick, `3814f4c08` forJson). The canonical `bin/ssc-tools`
+    emit-spa lacks them → `deploy-ucc-web.sh` (lines ~437-452) emits nothing for chat.ssc and KEEPS the live
+    (locally-emitted) `chat.html`. Live reactive chat works; it just isn't rebuilt from source.
+  - **Why it's a cherry-pick, NOT a merge:** `feature/ui-stream-chat` is badly stale — `git diff main
+    origin/feature/ui-stream-chat` = ~460 files / ~21k lines main-ahead. Merging would revert huge swaths of
+    main. Must **cherry-pick the 2 commits** onto current `main` and resolve (they're additive: new `std/ui`
+    defs in primitives.ssc/reactive.ssc + JS runtime `signals.mjs` + emit-spa/FrontendBridge lowering + tests).
+  - **Steps:** scalascript is at `../scalascript` (REPOS.md), branch `main`. Follow the contribution flow
+    (claim in `.work/active` → `scripts/new-worktree` → cherry-pick → conformance [emit-spa lanes are INT+JS,
+    JVM lane fails pre-existing in fresh worktrees] → `sbt cli/assembly && installBin` → push branch:main →
+    `sbt installBin` in the MAIN checkout to refresh `bin/lib`). THEN a rozum `deploy-ucc-web.sh` auto-ships
+    the reactive chat (the fail-safe branch is skipped once emit-spa yields a valid `<!doctype>` chat.html).
+  - **Bake in the mount-fire fix at the source** while porting `fetchStreamSignal`: make it NOT POST at mount
+    (fire only when the trigger tick increments past its seed). That eliminates the empty `/control/chat/stream`
+    request entirely — complementing the server-side no-op already shipped (rozum `c95235e`), which currently
+    turns the mount-fire into a harmless 200.
+  - **Caveat:** coordination-sensitive — dozens of scalascript agents depend on the shared `bin/lib`; announce
+    in the room and land cleanly. Effort: medium, cross-repo. Ref: memory `project-chat-baseline-config`.
+
 ## UCC backend on .ssc→Rust (strategic, 2026-07-07)
 
 - [ ] **ucc-ssc-backend** — express the UCC server half in ScalaScript, like the meeting web
