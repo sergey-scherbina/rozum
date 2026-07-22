@@ -698,11 +698,18 @@ enum MeetingsAction {
         /// Read the persona from a file (takes precedence over `--persona`). Handy for a long one.
         #[arg(long = "persona-file")]
         persona_file: Option<std::path::PathBuf>,
-        /// Give the model file tools (list/read/write/run_command) confined to this directory.
-        /// Omitted → chat only, no filesystem access. TRUST: driven by the messenger allowlist —
-        /// `run_command` is a shell and is not jailed to the dir (see docs/specs/assistant-sandbox-tools.md).
+        /// Give the model file tools (list/read/write) confined to this directory. Omitted →
+        /// chat only, no filesystem access. Spec: docs/specs/assistant-sandbox-tools.md.
         #[arg(long = "sandbox")]
         sandbox: Option<std::path::PathBuf>,
+        /// Also offer the `run_command` shell tool (confined to the sandbox via seatbelt). Off by
+        /// default: file access does NOT imply shell access. Per-user shell grants still apply via --acl.
+        #[arg(long = "shell", default_value_t = false)]
+        shell: bool,
+        /// Gate file/shell tools per messenger user by this ACL file (managed live from Telegram).
+        /// Omitted → the sandbox's read+write (and --shell) apply to everyone the bridge admits.
+        #[arg(long = "acl")]
+        acl: Option<std::path::PathBuf>,
     },
 
     /// Drive the incident lifecycle from the shell — the human/script twin of the agent-native MCP
@@ -1254,6 +1261,8 @@ async fn main() {
                 persona,
                 persona_file,
                 sandbox,
+                shell,
+                acl,
             } => {
                 run_meetings_participant(
                     model,
@@ -1265,6 +1274,8 @@ async fn main() {
                     persona,
                     persona_file,
                     sandbox,
+                    shell,
+                    acl,
                 )
                 .await
             }
@@ -3623,6 +3634,8 @@ async fn run_meetings_participant(
     persona: Option<String>,
     persona_file: Option<std::path::PathBuf>,
     sandbox: Option<std::path::PathBuf>,
+    shell: bool,
+    acl: Option<std::path::PathBuf>,
 ) {
     use rozum::meeting::model_participant::{ReplyPolicy, derive_handle, run};
     let policy: ReplyPolicy = match reply_policy.parse() {
@@ -3646,7 +3659,9 @@ async fn run_meetings_participant(
         },
         None => persona,
     };
-    if let Err(e) = run(model, room, handle, policy, gateway_url, peers, persona, sandbox).await {
+    if let Err(e) =
+        run(model, room, handle, policy, gateway_url, peers, persona, sandbox, shell, acl).await
+    {
         eprintln!("meetings participant: {e}");
         std::process::exit(1);
     }

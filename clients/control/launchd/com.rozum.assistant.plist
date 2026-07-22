@@ -8,12 +8,13 @@
   answers every relayed message. Pairs with com.rozum.telegram (+ a future
   com.rozum.discord) which bridge the same room. Needs com.rozum.meeting-daemon up.
 
-  --sandbox /Users/sergiy/rozum-sandbox gives the model real file tools (list/read/
-  write/run_command) confined to that directory. Spec: docs/specs/assistant-sandbox-tools.md.
-  SECURITY: the only gate on who can drive these tools is the Telegram sender allowlist —
-  a private-chat bridge (TELEGRAM_CHAT_ID) already restricts input to you alone; grant
-  others only by adding their IDs to TELEGRAM_ALLOWED_USER_IDS. run_command is a real
-  shell (not jailed to the dir), so it is exactly as trusted as that allowlist.
+  --sandbox /Users/sergiy/rozum-sandbox gives the model file tools (list/read/write)
+  confined to that directory. --shell additionally offers run_command, which is CONFINED
+  to the sandbox via macOS seatbelt (no writes/deletes outside it, no network). --acl points
+  at the per-user capability file the operator edits live from Telegram (/grant, /revoke,
+  /members): each user's chat/read/write/shell grant gates what the model does on their
+  behalf. The owner (TELEGRAM_OWNER_ID or the private-chat peer) has all of them.
+  Specs: docs/specs/assistant-sandbox-tools.md, docs/specs/messenger-access-control.md.
 -->
 <plist version="1.0">
 <dict>
@@ -35,6 +36,9 @@
     <string>http://127.0.0.1:8089/v1</string>
     <string>--sandbox</string>
     <string>/Users/sergiy/rozum-sandbox</string>
+    <string>--shell</string>
+    <string>--acl</string>
+    <string>/Users/sergiy/.local/state/rozum/messenger-acl/telegram.json</string>
     <string>--persona</string>
     <string>Ты — ассистент rozum, работающий ЛОКАЛЬНО на Mac пользователя: ты модель (Qwen), которую обслуживает локальный гейтвей rozum, и пользователь пишет тебе из мессенджера (Telegram). rozum — это local-first система, чтобы запускать LLM и ИИ-агентов на своём железе (Apple Silicon / MLX): локальный OpenAI/Anthropic-совместимый гейтвей для MLX и GGUF моделей; комнаты-встречи, где ИИ-агенты и люди координируются; телефонный контрол-центр (UCC) с чатом; безопасная резидентность нескольких моделей (контроль допуска, чтобы модели не переполняли память). Отвечай кратко и по делу, на языке пользователя. У тебя есть рабочая папка и файловые инструменты — если просят что-то сделать с файлами, используй их, а не отвечай, что доступа нет.</string>
   </array>

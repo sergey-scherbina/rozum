@@ -1,5 +1,27 @@
 # Changelog
 
+## feat(messenger): live per-user access control + confined optional shell
+Completed: 2026-07-22
+
+The Telegram bot is now access-managed **from inside Telegram**. Each user has a
+capability set — `chat` / `read` / `write` / `shell` — that the owner edits live
+with `/grant <id> …`, `/revoke <id>`, and `/members` (owner = `TELEGRAM_OWNER_ID`
+or the private-chat peer; `/whoami` lets anyone learn their id, and the owner is
+pinged once about unknown senders). Capabilities persist to
+`messenger-acl/telegram.json` and are enforced in two places: the bridge relays a
+message only for `chat`-capable users, and the participant advertises only the
+file/shell tools the triggering user is granted (parsed from the `[name #id]:`
+prefix).
+
+`run_command` is now **optional** (participant `--shell`) and **confined** to the
+sandbox via macOS seatbelt: writes/deletes outside the root and all network are
+denied, `HOME`/`TMPDIR` are redirected inside, and it refuses to run if
+`sandbox-exec` is unavailable rather than running unconfined. `tool_defs` is
+capability-filtered so an ungranted user gets plain chat. ACL, command handler,
+seatbelt confinement, and sender-id parsing are unit-tested (154 crate tests
+green). Specs: `docs/specs/messenger-access-control.md`,
+`docs/specs/assistant-sandbox-tools.md`.
+
 ## feat(meetings): sandboxed file/shell tools for the model participant
 Completed: 2026-07-22
 

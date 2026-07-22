@@ -17,24 +17,31 @@ Spec of the surrounding bridge and its trust model:
 ### CLI
 
 ```text
-rozum meetings participant --model <m> --room <r> [--sandbox <dir>] …
+rozum meetings participant --model <m> --room <r> [--sandbox <dir>] [--shell] [--acl <file>] …
 ```
 
 `<dir>` is created if absent and canonicalized at startup. If it cannot be
 opened, the participant logs the error and runs chat-only (the room stays live).
+`--shell` additionally offers `run_command`; without it the shell tool is never
+advertised (file access does not imply shell access). `--acl <file>` gates the
+tools per messenger user (see `messenger-access-control.md`).
 
 ### Tools advertised to the model
 
-| Tool | Arguments | Effect |
-|---|---|---|
-| `list_files` | `path` (optional, default `.`) | List entries (name, kind, size) under a sandbox-relative directory. |
-| `read_file` | `path` | Return the file's text (output capped, truncation noted). |
-| `write_file` | `path`, `content` | Create/overwrite a file; missing parent dirs are created inside the sandbox. |
-| `run_command` | `command` | Run `sh -c <command>` with cwd = sandbox root; combined stdout/stderr returned. |
+| Tool | Capability | Arguments | Effect |
+|---|---|---|---|
+| `list_files` | read | `path` (optional, default `.`) | List entries (name, kind, size) under a sandbox-relative directory. |
+| `read_file` | read | `path` | Return the file's text (output capped, truncation noted). |
+| `write_file` | write | `path`, `content` | Create/overwrite a file; missing parent dirs are created inside the sandbox. |
+| `run_command` | shell | `command` | Run a shell command confined to the sandbox (see below); combined stdout/stderr returned. |
+
+Which tools are advertised for a given reply is `read`/`write`/`shell` filtered
+by (a) the `--shell` flag for the shell tool and (b) the triggering user's ACL
+capabilities. When none apply the model runs as plain chat (no tools).
 
 The reply loop runs at most `MAX_TOOL_ROUNDS` (6) tool rounds per message, then
 returns the model's text. Tool errors are returned to the model as text, never
-crashing the room. `max_tokens` is raised in sandbox mode so the model can emit
+crashing the room. `max_tokens` is raised in tool mode so the model can emit
 file contents.
 
 ### System prompt
@@ -54,10 +61,18 @@ who can reach these tools.
   root: caller paths must be relative, may not contain `..`, and the resolved
   path (deepest existing ancestor canonicalized) must stay under the root — a
   symlink inside the sandbox pointing outward is rejected.
-- `run_command` runs with cwd = root but **cannot be confined to it**: a shell
-  inherits the daemon user's full rights. It is bounded only by a timeout and an
-  output cap; its real safety boundary is the sender allowlist. Enable
-  `--sandbox` on the `assistant` participant only when that allowlist is trusted.
+- `run_command` runs under a macOS **seatbelt** profile (`sandbox-exec`): it may
+  read the system (needed to load/run binaries) and read+write inside the root,
+  but every write, delete, or rename **outside** the root and all **network**
+  access are denied. `HOME` and `TMPDIR` are redirected into the sandbox so tool
+  dotfiles/tempfiles stay inside. Reads outside the root are **not** blocked —
+  restricting them aborts dyld's shared-cache mapping on modern macOS, so it is
+  deliberately out of scope; the shell can read but not modify the wider system.
+  If `sandbox-exec` is missing, `run_command` refuses rather than running
+  unconfined. Bounded by a timeout and an output cap.
+- Who may trigger each tool is gated per messenger user by the ACL
+  (`messenger-access-control.md`): `shell` is off unless both `--shell` is set
+  and the user holds the `shell` capability.
 
 ## Decisions
 

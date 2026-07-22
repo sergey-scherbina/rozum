@@ -81,11 +81,14 @@ Full map + the staged extraction plan: `docs/specs/architecture-spi.md`.
   the daemon. They never depend on the legacy per-room socket or introduce
   turn-taking. Spec: `docs/specs/messenger-bridges-daemon.md`.
 - A room's local-model participant can be given real file access, opt-in via
-  `rozum meetings participant --sandbox <dir>`: the model gets list/read/write/
-  run_command tools confined to that directory and its tool-calls run in the
-  reply loop. Off by default (unchanged chat). The messenger sender allowlist is
-  the only gate on who drives the tools. Spec:
+  `rozum meetings participant --sandbox <dir>`: the model gets list/read/write
+  tools (and, with `--shell`, a `run_command` shell confined to the dir via macOS
+  seatbelt) that run in the reply loop. Off by default (unchanged chat). Spec:
   `docs/specs/assistant-sandbox-tools.md`.
+- Who may use the Telegram bot, and what each user may do (chat / read / write /
+  shell), is a per-user capability set the operator edits live from inside
+  Telegram (`/grant`, `/revoke`, `/members`), enforced by the bridge (chat) and
+  the participant (tools). Spec: `docs/specs/messenger-access-control.md`.
 - There is no turn-taking and no moderator. Any participant may submit at any
   time; messages are posted immediately, in arrival order. There is no
   round-robin, no turn expiry, no speaker scheduling, and no manual or

@@ -11,6 +11,7 @@ use bot::{IncomingMessage, TelegramBot};
 
 use crate::meeting::store::rozum_state_dir;
 use crate::messenger::{BridgeResult, DaemonBridge, SenderPolicy};
+use crate::messenger_acl::{Acl, Caps};
 
 /// Public CLI entry shared by the compatibility gateway command and the thin
 /// `rozum-meet telegram` frontend.
@@ -49,9 +50,29 @@ async fn run_bridge_with_allowlist(
 ) -> BridgeResult<()> {
     let bot = Arc::new(TelegramBot::new(token, chat_id));
     let target = bot.validate().await?;
+
+    // Access control the operator edits LIVE from inside Telegram. The owner is
+    // TELEGRAM_OWNER_ID if set, else the private-chat peer (so a personal bot needs
+    // no config). The owner has every capability and is the only id that may manage
+    // access; members are added via `/grant`.
+    let acl_path = Acl::path("telegram");
+    let mut acl = Acl::load(&acl_path);
+    let owner = std::env::var("TELEGRAM_OWNER_ID")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .or(target.private_user_id);
+    if let Some(o) = owner {
+        if acl.ensure_owner(o) {
+            let _ = acl.save(&acl_path);
+        }
+    }
+
+    // The env allowlist stays as an additional accept path; the owner is its fallback so a
+    // group bridge with TELEGRAM_OWNER_ID set (and no allowlist) starts with just the owner,
+    // who then grants others. Chat access = owner OR ACL `chat` OR env allowlist.
     let policy = SenderPolicy::resolve(
         configured_allowlist,
-        target.private_user_id.map(|id| id.to_string()),
+        owner.map(|id| id.to_string()),
         "TELEGRAM_ALLOWED_USER_IDS",
     )?;
 
@@ -59,21 +80,24 @@ async fn run_bridge_with_allowlist(
     let mut room_bridge =
         DaemonBridge::connect(room, display_name, "telegram", &chat_id.to_string()).await?;
     eprintln!(
-        "[telegram-bridge] bot {} joined daemon room '{}' as '{}' (chat {}, {:?})",
+        "[telegram-bridge] bot {} joined daemon room '{}' as '{}' (chat {}, {:?}); owner {:?}, acl {}",
         target.bot_user_id,
         room,
         room_bridge.participant_id(),
         target.chat_id,
-        target.kind
+        target.kind,
+        acl.owner,
+        acl_path.display(),
     );
 
     let (incoming_tx, mut incoming_rx) = mpsc::channel::<PendingIncoming>(64);
     let poller_bot = Arc::clone(&bot);
     let bot_user_id = target.bot_user_id;
     let mut poller =
-        tokio::spawn(
-            async move { telegram_poller(poller_bot, bot_user_id, policy, incoming_tx).await },
-        );
+        tokio::spawn(async move { telegram_poller(poller_bot, bot_user_id, incoming_tx).await });
+
+    // Owner is pinged once per unknown sender so they can /grant that id.
+    let mut notified: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
     let result = loop {
         tokio::select! {
@@ -81,13 +105,38 @@ async fn run_bridge_with_allowlist(
                 let Some(incoming) = incoming else {
                     break Err("Telegram receive loop ended".into());
                 };
-                let submit = room_bridge
-                    .submit(
-                        &incoming.message.sender_name,
-                        &incoming.message.sender_id.to_string(),
-                        &incoming.message.text,
-                    )
-                    .await;
+                let id = incoming.message.sender_id;
+                let name = incoming.message.sender_name.clone();
+                let text = incoming.message.text.trim().to_string();
+
+                // Management/utility commands are handled here and NEVER relayed to the room.
+                if text.starts_with('/') {
+                    let reply = handle_command(&text, id, &name, &mut acl, &acl_path);
+                    if let Err(error) = bot.send_message(&reply).await {
+                        eprintln!("[telegram-bridge] sendMessage (command) error: {error}");
+                    }
+                    let _ = incoming.committed.send(Ok(()));
+                    continue;
+                }
+
+                // Chat authorization: owner, an ACL member with `chat`, or the env allowlist.
+                let allowed =
+                    acl.is_owner(id) || acl.caps_for(id).chat || policy.allows(id.to_string());
+                if !allowed {
+                    if notified.insert(id) {
+                        let hint = format!(
+                            "🔒 {name} (id {id}) написал(а) боту, но доступа нет. Добавить: \
+                             /grant {id} chat  (можно + read write shell)."
+                        );
+                        if let Err(error) = bot.send_message(&hint).await {
+                            eprintln!("[telegram-bridge] sendMessage (notify) error: {error}");
+                        }
+                    }
+                    let _ = incoming.committed.send(Ok(()));
+                    continue;
+                }
+
+                let submit = room_bridge.submit(&name, &id.to_string(), &text).await;
                 let acknowledgement = submit
                     .as_ref()
                     .map(|_| ())
@@ -134,7 +183,6 @@ struct PendingIncoming {
 async fn telegram_poller(
     bot: Arc<TelegramBot>,
     bot_user_id: i64,
-    policy: SenderPolicy,
     incoming_tx: mpsc::Sender<PendingIncoming>,
 ) -> BridgeResult<()> {
     const MIN_POLL_ERROR_SECS: u64 = 2;
@@ -176,10 +224,11 @@ async fn telegram_poller(
                 poll_error_delay_secs = MIN_POLL_ERROR_SECS;
                 for update in &updates {
                     let next_offset = next_update_offset(update.update_id)?;
+                    // Accept every non-bot text message from the target chat; authorization,
+                    // command handling, and per-user gating happen in the bridge's main loop
+                    // (which owns the mutable ACL and can reply to the sender).
                     let Some(message) =
-                        TelegramBot::extract_message(update, bot.chat_id, |sender_id| {
-                            policy.allows(sender_id.to_string())
-                        })
+                        TelegramBot::extract_message(update, bot.chat_id, |_| true)
                     else {
                         save_telegram_offset(&cursor_path, bot.chat_id, next_offset)?;
                         offset = next_offset;
@@ -290,6 +339,114 @@ fn next_update_offset(update_id: i64) -> BridgeResult<i64> {
         .ok_or_else(|| "Telegram update ID overflow".into())
 }
 
+const HELP_TEXT: &str = "Команды бота:\n\
+/whoami — показать твой Telegram id\n\
+/members — кто имеет доступ (только владелец)\n\
+/grant <id> [chat read write shell | all] — дать/изменить доступ (владелец)\n\
+/revoke <id> — убрать доступ (владелец)\n\
+/help — эта справка\n\n\
+Права: chat=писать в чате, read=читать файлы, write=писать файлы, shell=команды в песочнице.";
+
+const NOT_OWNER: &str = "Управлять доступом может только владелец бота.";
+
+/// Handle a `/command` from a Telegram user. Utility commands (`/help`, `/whoami`)
+/// are open to everyone; management commands (`/members`, `/grant`, `/revoke`) are
+/// owner-only. Mutates + persists the ACL on grant/revoke. Returns the reply text.
+fn handle_command(text: &str, sender_id: i64, sender_name: &str, acl: &mut Acl, acl_path: &Path) -> String {
+    let mut parts = text.split_whitespace();
+    // Telegram group commands may carry a `@BotName` suffix — strip it.
+    let cmd = parts
+        .next()
+        .unwrap_or("")
+        .split('@')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let is_owner = acl.is_owner(sender_id);
+
+    match cmd.as_str() {
+        "/help" | "/start" => HELP_TEXT.to_string(),
+        "/whoami" | "/id" => format!("Твой Telegram id: {sender_id}\nИмя: {sender_name}"),
+        "/members" | "/who" => {
+            if !is_owner {
+                return NOT_OWNER.to_string();
+            }
+            render_members(acl)
+        }
+        "/grant" | "/add" => {
+            if !is_owner {
+                return NOT_OWNER.to_string();
+            }
+            let Some(id_str) = parts.next() else {
+                return "Использование: /grant <id> [chat read write shell | all]".to_string();
+            };
+            let Ok(id) = id_str.parse::<i64>() else {
+                return format!("id должен быть числом, а не '{id_str}'.");
+            };
+            if acl.is_owner(id) {
+                return "Это владелец — у него уже все права.".to_string();
+            }
+            let tokens: Vec<&str> = parts.collect();
+            let caps = if tokens.is_empty() {
+                Caps { chat: true, ..Default::default() }
+            } else {
+                match Caps::parse_tokens(tokens) {
+                    Ok(c) => c,
+                    Err(e) => return e,
+                }
+            };
+            acl.grant(id, "", caps);
+            if let Err(e) = acl.save(acl_path) {
+                return format!("Не удалось сохранить ACL: {e}");
+            }
+            format!("✅ Доступ обновлён: id {id} → {}", caps.summary())
+        }
+        "/revoke" | "/remove" | "/kick" => {
+            if !is_owner {
+                return NOT_OWNER.to_string();
+            }
+            let Some(id_str) = parts.next() else {
+                return "Использование: /revoke <id>".to_string();
+            };
+            let Ok(id) = id_str.parse::<i64>() else {
+                return format!("id должен быть числом, а не '{id_str}'.");
+            };
+            if acl.revoke(id) {
+                if let Err(e) = acl.save(acl_path) {
+                    return format!("Не удалось сохранить ACL: {e}");
+                }
+                format!("🚫 Доступ удалён: id {id}")
+            } else {
+                format!("id {id} не найден среди добавленных.")
+            }
+        }
+        _ => "Неизвестная команда. /help — список команд.".to_string(),
+    }
+}
+
+fn render_members(acl: &Acl) -> String {
+    let mut lines = vec!["👥 Доступ к боту:".to_string()];
+    match acl.owner {
+        Some(o) => lines.push(format!("• владелец: id {o} — все права")),
+        None => lines.push("• владелец не задан".to_string()),
+    }
+    if acl.members.is_empty() {
+        lines.push("• собеседников пока нет".to_string());
+    } else {
+        for (id, m) in &acl.members {
+            let name = if m.name.trim().is_empty() {
+                "(без имени)".to_string()
+            } else {
+                m.name.clone()
+            };
+            lines.push(format!("• {name} — id {id} — {}", m.caps.summary()));
+        }
+    }
+    lines.push(String::new());
+    lines.push("Команды: /grant <id> chat read write shell · /revoke <id> · /whoami".to_string());
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +473,43 @@ mod tests {
     fn update_offset_is_checked() {
         assert_eq!(next_update_offset(7).unwrap(), 8);
         assert!(next_update_offset(i64::MAX).is_err());
+    }
+
+    #[test]
+    fn owner_can_grant_revoke_and_list_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("telegram.json");
+        let mut acl = Acl::default();
+        acl.ensure_owner(1);
+
+        // whoami is open to anyone
+        assert!(handle_command("/whoami", 999, "Guest", &mut acl, &path).contains("999"));
+
+        // a non-owner cannot manage
+        assert_eq!(handle_command("/grant 5 chat", 999, "Guest", &mut acl, &path), NOT_OWNER);
+        assert!(acl.members.is_empty());
+
+        // owner grants with explicit caps, persisted
+        let reply = handle_command("/grant 5 chat read write", 1, "Owner", &mut acl, &path);
+        assert!(reply.contains("chat+read+write"), "got: {reply}");
+        let reloaded = Acl::load(&path);
+        let caps = reloaded.caps_for(5);
+        assert!(caps.chat && caps.read && caps.write && !caps.shell);
+
+        // default caps when none given = chat only
+        handle_command("/grant 6", 1, "Owner", &mut acl, &path);
+        assert!(acl.caps_for(6).chat && !acl.caps_for(6).read);
+
+        // /members lists them (owner only)
+        let members = handle_command("/members", 1, "Owner", &mut acl, &path);
+        assert!(members.contains("id 5") && members.contains("id 6"));
+        assert_eq!(handle_command("/members", 999, "Guest", &mut acl, &path), NOT_OWNER);
+
+        // revoke
+        assert!(handle_command("/revoke 5", 1, "Owner", &mut acl, &path).contains("удалён"));
+        assert_eq!(Acl::load(&path).caps_for(5), Caps::default());
+
+        // bad caps token is reported, group-suffixed command still parses
+        assert!(handle_command("/grant@MyBot 7 bogus", 1, "Owner", &mut acl, &path).contains("bogus"));
     }
 }

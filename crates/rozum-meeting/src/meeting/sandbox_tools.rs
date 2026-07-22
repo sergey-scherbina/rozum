@@ -20,6 +20,34 @@ use serde_json::{Value, json};
 const MAX_OUTPUT_BYTES: usize = 8 * 1024;
 /// Wall-clock limit for one `run_command`.
 const CMD_TIMEOUT: Duration = Duration::from_secs(30);
+/// macOS seatbelt wrapper used to confine `run_command`'s filesystem writes.
+const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+
+/// Build the seatbelt profile confining a shell to `root`: it may read the system
+/// (needed to load and run binaries) and read/write inside `root` (which contains
+/// `tmp`), but any write, delete, or rename outside `root` and all network access
+/// are denied. Verified against write/delete/network escape attempts on macOS.
+fn seatbelt_profile(root: &Path, _tmp: &Path) -> String {
+    // Canonical paths under the home dir contain no quotes; guard anyway so a weird
+    // path can never break out of the string literal (falls back to a bare root).
+    let r = root.to_string_lossy();
+    let r = if r.contains('"') || r.contains('\n') { "/var/empty" } else { r.as_ref() };
+    format!(
+        "(version 1)\n\
+         (deny default)\n\
+         (allow process-fork)\n\
+         (allow process-exec*)\n\
+         (allow signal (target self))\n\
+         (allow sysctl-read)\n\
+         (allow mach-lookup)\n\
+         (allow ipc-posix-shm*)\n\
+         (allow file-read*)\n\
+         (allow file-write* (subpath \"{r}\"))\n\
+         (allow file-write-data (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (literal \"/dev/stdout\") (literal \"/dev/stderr\"))\n\
+         (allow file-ioctl (literal \"/dev/tty\") (literal \"/dev/dtracehelper\"))\n\
+         (deny network*)\n"
+    )
+}
 
 /// A directory the model may read, write, and run commands in. Cloneable so the
 /// reply loop can hand it to each tool call cheaply.
@@ -41,10 +69,13 @@ impl Sandbox {
         &self.root
     }
 
-    /// The OpenAI tool definitions advertised to the model.
-    pub fn tool_defs() -> Value {
-        json!([
-            {
+    /// The OpenAI tool definitions advertised to the model, filtered by capability:
+    /// `read` → list_files + read_file, `write` → write_file, `shell` → run_command.
+    /// Returns an empty array when nothing is granted (→ plain chat, no tools).
+    pub fn tool_defs(read: bool, write: bool, shell: bool) -> Value {
+        let mut tools = Vec::new();
+        if read {
+            tools.push(json!({
                 "type": "function",
                 "function": {
                     "name": "list_files",
@@ -59,8 +90,8 @@ impl Sandbox {
                         }
                     }
                 }
-            },
-            {
+            }));
+            tools.push(json!({
                 "type": "function",
                 "function": {
                     "name": "read_file",
@@ -76,8 +107,10 @@ impl Sandbox {
                         "required": ["path"]
                     }
                 }
-            },
-            {
+            }));
+        }
+        if write {
+            tools.push(json!({
                 "type": "function",
                 "function": {
                     "name": "write_file",
@@ -94,12 +127,14 @@ impl Sandbox {
                         "required": ["path", "content"]
                     }
                 }
-            },
-            {
+            }));
+        }
+        if shell {
+            tools.push(json!({
                 "type": "function",
                 "function": {
                     "name": "run_command",
-                    "description": "Run a shell command in your working directory and return its output.",
+                    "description": "Run a shell command in your working directory (confined to it) and return its output.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -108,8 +143,9 @@ impl Sandbox {
                         "required": ["command"]
                     }
                 }
-            }
-        ])
+            }));
+        }
+        Value::Array(tools)
     }
 
     /// Execute one tool call, returning the string result fed back as the tool
@@ -231,10 +267,27 @@ impl Sandbox {
 
     async fn run_command(&self, command: &str) -> String {
         use tokio::process::Command;
-        let child = Command::new("sh")
+        // Confine the shell to the sandbox via macOS seatbelt: it cannot write or
+        // delete anything outside the root, and cannot use the network. Reads stay
+        // open (restricting them aborts dyld's shared-cache mapping). HOME + TMPDIR
+        // are redirected into the sandbox so tool dotfiles/tempfiles stay inside.
+        if !Path::new(SANDBOX_EXEC).exists() {
+            return format!("error: shell confinement unavailable ({SANDBOX_EXEC} missing)");
+        }
+        let tmp = self.root.join(".tmp");
+        if let Err(e) = std::fs::create_dir_all(&tmp) {
+            return format!("error: cannot prepare shell tempdir: {e}");
+        }
+        let profile = seatbelt_profile(&self.root, &tmp);
+        let child = Command::new(SANDBOX_EXEC)
+            .arg("-p")
+            .arg(&profile)
+            .arg("/bin/sh")
             .arg("-c")
             .arg(command)
             .current_dir(&self.root)
+            .env("HOME", &self.root)
+            .env("TMPDIR", &tmp)
             .output();
         let output = match tokio::time::timeout(CMD_TIMEOUT, child).await {
             Ok(Ok(o)) => o,
@@ -347,6 +400,22 @@ mod tests {
         sb.write_file("marker.txt", "x");
         let out = sb.run_command("ls").await;
         assert!(out.contains("marker.txt"), "cwd should be the sandbox: {out}");
+    }
+
+    #[tokio::test]
+    async fn run_command_cannot_write_outside_sandbox() {
+        if !std::path::Path::new(SANDBOX_EXEC).exists() {
+            return; // seatbelt only on macOS
+        }
+        let (sb, dir) = sandbox();
+        // A sibling path just outside the sandbox root.
+        let escape = dir.path().parent().unwrap().join("escape-should-not-exist.txt");
+        let cmd = format!("echo pwned > '{}'", escape.display());
+        let out = sb.run_command(&cmd).await;
+        assert!(!escape.exists(), "seatbelt must block writes outside the sandbox: {out}");
+        // But a write INSIDE the sandbox still works.
+        let ok = sb.run_command("echo hi > inside.txt && cat inside.txt").await;
+        assert!(ok.contains("hi"), "in-sandbox write should succeed: {ok}");
     }
 
     #[test]

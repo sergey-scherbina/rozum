@@ -64,6 +64,17 @@ pub fn base_handle(display: &str) -> &str {
     display.split('·').next().map(str::trim).unwrap_or(display)
 }
 
+/// Parse the numeric messenger sender id from a bridge-submitted turn. Bridges
+/// submit `[<display> #<id>]: <text>`; extract `<id>` so the participant can look
+/// up that user's capabilities. Returns None for non-bridge turns (no prefix).
+fn sender_id_from_content(content: &str) -> Option<i64> {
+    let content = content.trim_start();
+    let close = content.strip_prefix('[')?.find(']')?;
+    let head = &content[1..=close]; // "<display> #<id>"
+    let hash = head.rfind('#')?;
+    head[hash + 1..].trim_end_matches(']').trim().parse::<i64>().ok()
+}
+
 /// Should the model reply to `turn`? `handle` is its own base handle (callers have
 /// already excluded its own turns). `peers` are other model handles in the room, so
 /// `Always` never triggers a model↔model runaway.
@@ -94,6 +105,8 @@ pub async fn run(
     peers: Vec<String>,
     persona: Option<String>,
     sandbox: Option<std::path::PathBuf>,
+    shell: bool,
+    acl_path: Option<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use super::daemon::daemon_alive;
     use super::daemon_proxy::spawn_daemon;
@@ -113,6 +126,13 @@ pub async fn run(
             None
         }
     });
+    if let Some(path) = &acl_path {
+        eprintln!(
+            "[participant] per-user capabilities from ACL {} (shell {})",
+            path.display(),
+            if shell { "enabled" } else { "disabled" }
+        );
+    }
 
     let sock = meeting_sock();
     if !daemon_alive(&sock).await {
@@ -154,8 +174,33 @@ pub async fn run(
                 continue;
             }
             eprintln!("[participant] replying to {} …", base_handle(&turn.display_name));
-            match generate(&gateway_url, &model, &history, &handle, persona.as_deref(), sandbox.as_ref())
-                .await
+            // Per-user tool capabilities: when an ACL is configured, the file/shell tools
+            // offered for THIS reply are gated by the triggering messenger user's grants
+            // (parsed from the `[name #id]:` prefix the bridge submits). Without an ACL,
+            // the sandbox defaults to read+write (+shell only if --shell).
+            let (can_read, can_write, can_shell) = match &acl_path {
+                Some(path) => match sender_id_from_content(&turn.content) {
+                    Some(id) => {
+                        let caps = super::super::messenger_acl::Acl::load(path).caps_for(id);
+                        (caps.read, caps.write, caps.shell && shell)
+                    }
+                    // No parseable messenger sender (e.g. a local TUI turn) → no tools.
+                    None => (false, false, false),
+                },
+                None => (true, true, shell),
+            };
+            match generate(
+                &gateway_url,
+                &model,
+                &history,
+                &handle,
+                persona.as_deref(),
+                sandbox.as_ref(),
+                can_read,
+                can_write,
+                can_shell,
+            )
+            .await
             {
                 Ok(text) if !text.trim().is_empty() => {
                     if let Err(e) = client.submit(text.trim()).await {
@@ -178,6 +223,7 @@ const MAX_TOOL_ROUNDS: usize = 6;
 /// using the recent transcript (oldest→newest) as conversation context. When
 /// `sandbox` is set the model is given file/shell tools confined to that dir and
 /// its tool-calls are executed and fed back until it produces a text answer.
+#[allow(clippy::too_many_arguments)]
 async fn generate(
     gateway_url: &str,
     model: &str,
@@ -185,7 +231,18 @@ async fn generate(
     handle: &str,
     persona: Option<&str>,
     sandbox: Option<&super::sandbox_tools::Sandbox>,
+    can_read: bool,
+    can_write: bool,
+    can_shell: bool,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // File/shell tools are offered only when a sandbox exists AND this user was granted the
+    // capability. When nothing is granted the model runs as plain chat (no tools).
+    let (read, write, shell) = match sandbox {
+        Some(_) => (can_read, can_write, can_shell),
+        None => (false, false, false),
+    };
+    let tools_on = read || write || shell;
+
     // Chat mechanics are always present; an operator-supplied `--persona` prepends WHO the model
     // is + any domain context (e.g. about rozum/busi) so it answers on-topic instead of generically.
     let mechanics = "Reply briefly and directly to the most recent message — actually answer the \
@@ -196,15 +253,25 @@ async fn generate(
         Some(p) if !p.trim().is_empty() => format!("{}\n\n{mechanics}", p.trim()),
         _ => format!("You are {handle}, an AI participant in a multi-person group chat. {mechanics}"),
     };
-    // With tools available, tell the model so it USES them instead of claiming it has no filesystem.
-    if sandbox.is_some() {
-        system.push_str(
-            "\n\nYou have a working directory on this machine, reachable through these tools: \
-             list_files, read_file, write_file (paths are relative to that directory), and \
-             run_command (runs a shell command there). When a request needs the filesystem — \
-             inspecting, creating, or changing files — call the tools instead of saying you have \
-             no access.",
-        );
+    // With tools available, tell the model which ones so it USES them instead of claiming it has
+    // no filesystem access. Only advertise the capabilities this user actually has.
+    if tools_on {
+        let mut names = Vec::new();
+        if read {
+            names.push("list_files, read_file");
+        }
+        if write {
+            names.push("write_file");
+        }
+        if shell {
+            names.push("run_command (runs a shell command there)");
+        }
+        system.push_str(&format!(
+            "\n\nYou have a working directory on this machine, reachable through these tools: {}. \
+             Paths are relative to that directory. When a request needs the filesystem — inspecting, \
+             creating, or changing files — call the tools instead of saying you have no access.",
+            names.join(", ")
+        ));
     }
     let mut messages = vec![serde_json::json!({ "role": "system", "content": system })];
     let start = transcript.len().saturating_sub(24);
@@ -233,10 +300,14 @@ async fn generate(
 
     let url = format!("{}/chat/completions", gateway_url.trim_end_matches('/'));
     let http = reqwest::Client::new();
-    let tools = sandbox.map(|_| super::sandbox_tools::Sandbox::tool_defs());
-    // Sandbox mode may need to emit file contents (tool arguments count as output) — give it more
+    let tools = if tools_on {
+        Some(super::sandbox_tools::Sandbox::tool_defs(read, write, shell))
+    } else {
+        None
+    };
+    // Tool mode may need to emit file contents (tool arguments count as output) — give it more
     // room than a chat one-liner.
-    let max_tokens = if sandbox.is_some() { 2048 } else { 400 };
+    let max_tokens = if tools_on { 2048 } else { 400 };
 
     for _round in 0..MAX_TOOL_ROUNDS {
         let mut body = serde_json::json!({
@@ -351,6 +422,15 @@ mod tests {
             "gpt-oss",
             &["gpt-oss".into()]
         ));
+    }
+
+    #[test]
+    fn parses_messenger_sender_id_from_turn() {
+        assert_eq!(sender_id_from_content("[Bob #42]: привет"), Some(42));
+        assert_eq!(sender_id_from_content("[Сергій #1711036782]: hi"), Some(1711036782));
+        // no bridge prefix → no id (local TUI turn)
+        assert_eq!(sender_id_from_content("just a plain message"), None);
+        assert_eq!(sender_id_from_content("[no id here]: x"), None);
     }
 
     #[test]
