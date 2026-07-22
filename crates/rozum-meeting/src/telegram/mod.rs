@@ -90,6 +90,11 @@ async fn run_bridge_with_allowlist(
         acl_path.display(),
     );
 
+    // Register the command menu (Menu button / `/` list). Non-fatal: text commands work regardless.
+    if let Err(e) = bot.set_my_commands(BOT_COMMANDS).await {
+        eprintln!("[telegram-bridge] setMyCommands failed (menu unavailable): {e}");
+    }
+
     let (incoming_tx, mut incoming_rx) = mpsc::channel::<PendingIncoming>(64);
     let poller_bot = Arc::clone(&bot);
     let bot_user_id = target.bot_user_id;
@@ -338,6 +343,17 @@ fn next_update_offset(update_id: i64) -> BridgeResult<i64> {
         .checked_add(1)
         .ok_or_else(|| "Telegram update ID overflow".into())
 }
+
+/// The bot's Telegram command menu (name, description) — registered at startup via
+/// `setMyCommands`, so they appear behind the Menu button and the `/` list. Mirrors
+/// the commands `handle_command` accepts.
+const BOT_COMMANDS: &[(&str, &str)] = &[
+    ("help", "Справка и список команд"),
+    ("whoami", "Показать мой Telegram id"),
+    ("members", "Кто имеет доступ (для владельца)"),
+    ("grant", "Дать доступ: /grant <id> chat read write shell"),
+    ("revoke", "Убрать доступ: /revoke <id>"),
+];
 
 const HELP_TEXT: &str = "Команды бота:\n\
 /whoami — показать твой Telegram id\n\

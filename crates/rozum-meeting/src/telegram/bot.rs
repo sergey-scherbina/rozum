@@ -218,6 +218,24 @@ impl TelegramBot {
     /// Deliver text in conservative Telegram-sized chunks. A rate-limited
     /// chunk is retried at most twice, after exactly the server's `retry_after`
     /// delay when that delay is within the safety bound.
+    /// Register the bot's command menu — the list shown behind the Menu button and the
+    /// `/` autocomplete. Called once at startup; a failure is non-fatal (the bridge and
+    /// its text commands work without a menu). `commands` are `(name, description)` pairs.
+    pub async fn set_my_commands(&self, commands: &[(&str, &str)]) -> BotResult<()> {
+        let cmds: Vec<serde_json::Value> = commands
+            .iter()
+            .map(|(c, d)| serde_json::json!({ "command": c, "description": d }))
+            .collect();
+        let _: bool = self
+            .post_api(
+                "setMyCommands",
+                &serde_json::json!({ "commands": cmds }),
+                STARTUP_REQUEST_TIMEOUT,
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn send_message(&self, text: &str) -> BotResult<()> {
         for chunk in crate::messenger::split_text(text, TELEGRAM_MAX_MESSAGE_UTF16) {
             let _: serde_json::Value = self

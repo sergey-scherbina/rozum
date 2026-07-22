@@ -1,5 +1,13 @@
 # Changelog
 
+## feat(telegram): register the bot command menu at startup
+Completed: 2026-07-22
+
+The Telegram bridge calls `setMyCommands` on startup, so the Menu button and the
+`/` autocomplete list the access commands (`/help`, `/whoami`, `/members`,
+`/grant`, `/revoke`) with descriptions — a real in-chat menu. Non-fatal if the API
+call fails; the text commands work regardless.
+
 ## feat(assistant): configurable shell network, allowed by default
 Completed: 2026-07-22
 

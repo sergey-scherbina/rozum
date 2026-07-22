@@ -44,7 +44,8 @@ each reply, so grants/revocations take effect on the next message.
 ## In-Telegram commands
 
 Typed as normal chat messages; never relayed to the room. A trailing `@BotName`
-(group form) is accepted.
+(group form) is accepted. On startup the bridge registers these via `setMyCommands`,
+so they appear behind the Telegram Menu button and the `/` autocomplete.
 
 | Command | Who | Effect |
 |---|---|---|
