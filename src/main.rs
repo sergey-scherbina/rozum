@@ -698,6 +698,11 @@ enum MeetingsAction {
         /// Read the persona from a file (takes precedence over `--persona`). Handy for a long one.
         #[arg(long = "persona-file")]
         persona_file: Option<std::path::PathBuf>,
+        /// Give the model file tools (list/read/write/run_command) confined to this directory.
+        /// Omitted → chat only, no filesystem access. TRUST: driven by the messenger allowlist —
+        /// `run_command` is a shell and is not jailed to the dir (see docs/specs/assistant-sandbox-tools.md).
+        #[arg(long = "sandbox")]
+        sandbox: Option<std::path::PathBuf>,
     },
 
     /// Drive the incident lifecycle from the shell — the human/script twin of the agent-native MCP
@@ -1248,6 +1253,7 @@ async fn main() {
                 peers,
                 persona,
                 persona_file,
+                sandbox,
             } => {
                 run_meetings_participant(
                     model,
@@ -1258,6 +1264,7 @@ async fn main() {
                     peers,
                     persona,
                     persona_file,
+                    sandbox,
                 )
                 .await
             }
@@ -3615,6 +3622,7 @@ async fn run_meetings_participant(
     peers: Vec<String>,
     persona: Option<String>,
     persona_file: Option<std::path::PathBuf>,
+    sandbox: Option<std::path::PathBuf>,
 ) {
     use rozum::meeting::model_participant::{ReplyPolicy, derive_handle, run};
     let policy: ReplyPolicy = match reply_policy.parse() {
@@ -3638,7 +3646,7 @@ async fn run_meetings_participant(
         },
         None => persona,
     };
-    if let Err(e) = run(model, room, handle, policy, gateway_url, peers, persona).await {
+    if let Err(e) = run(model, room, handle, policy, gateway_url, peers, persona, sandbox).await {
         eprintln!("meetings participant: {e}");
         std::process::exit(1);
     }

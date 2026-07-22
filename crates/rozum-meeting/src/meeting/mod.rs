@@ -19,6 +19,7 @@ pub mod rest_read;
 pub mod room;
 pub(crate) mod room_client;
 pub mod room_path;
+pub mod sandbox_tools;
 pub mod state;
 pub mod store;
 pub mod tui_client;

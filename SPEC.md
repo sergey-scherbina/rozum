@@ -80,6 +80,12 @@ Full map + the staged extraction plan: `docs/specs/architecture-spi.md`.
   turns from the canonical disk store, and submits allowed external text through
   the daemon. They never depend on the legacy per-room socket or introduce
   turn-taking. Spec: `docs/specs/messenger-bridges-daemon.md`.
+- A room's local-model participant can be given real file access, opt-in via
+  `rozum meetings participant --sandbox <dir>`: the model gets list/read/write/
+  run_command tools confined to that directory and its tool-calls run in the
+  reply loop. Off by default (unchanged chat). The messenger sender allowlist is
+  the only gate on who drives the tools. Spec:
+  `docs/specs/assistant-sandbox-tools.md`.
 - There is no turn-taking and no moderator. Any participant may submit at any
   time; messages are posted immediately, in arrival order. There is no
   round-robin, no turn expiry, no speaker scheduling, and no manual or

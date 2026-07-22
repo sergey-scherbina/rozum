@@ -93,9 +93,26 @@ pub async fn run(
     gateway_url: String,
     peers: Vec<String>,
     persona: Option<String>,
+    sandbox: Option<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use super::daemon::daemon_alive;
     use super::daemon_proxy::spawn_daemon;
+
+    // Optional file/shell tools confined to one directory (opt-in via --sandbox). A failure to
+    // open the directory degrades to chat-only rather than crashing the room.
+    let sandbox = sandbox.and_then(|p| match super::sandbox_tools::Sandbox::open(&p) {
+        Ok(sb) => {
+            eprintln!("[participant] sandbox: file tools enabled at {}", sb.root().display());
+            Some(sb)
+        }
+        Err(e) => {
+            eprintln!(
+                "[participant] sandbox {}: {e} — running chat-only (no file tools)",
+                p.display()
+            );
+            None
+        }
+    });
 
     let sock = meeting_sock();
     if !daemon_alive(&sock).await {
@@ -137,7 +154,9 @@ pub async fn run(
                 continue;
             }
             eprintln!("[participant] replying to {} …", base_handle(&turn.display_name));
-            match generate(&gateway_url, &model, &history, &handle, persona.as_deref()).await {
+            match generate(&gateway_url, &model, &history, &handle, persona.as_deref(), sandbox.as_ref())
+                .await
+            {
                 Ok(text) if !text.trim().is_empty() => {
                     if let Err(e) = client.submit(text.trim()).await {
                         eprintln!("[participant] submit failed: {e}");
@@ -151,14 +170,21 @@ pub async fn run(
     Ok(())
 }
 
+/// Max model→tool→model rounds per reply before we stop and return text. Bounds a
+/// model that keeps calling tools without ever answering (weak-model loop guard).
+const MAX_TOOL_ROUNDS: usize = 6;
+
 /// Generate a reply from the local model via the gateway's OpenAI chat endpoint,
-/// using the recent transcript (oldest→newest) as conversation context.
+/// using the recent transcript (oldest→newest) as conversation context. When
+/// `sandbox` is set the model is given file/shell tools confined to that dir and
+/// its tool-calls are executed and fed back until it produces a text answer.
 async fn generate(
     gateway_url: &str,
     model: &str,
     transcript: &[StoredTurn],
     handle: &str,
     persona: Option<&str>,
+    sandbox: Option<&super::sandbox_tools::Sandbox>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // Chat mechanics are always present; an operator-supplied `--persona` prepends WHO the model
     // is + any domain context (e.g. about rozum/busi) so it answers on-topic instead of generically.
@@ -166,10 +192,20 @@ async fn generate(
         question or contribute something substantive; do NOT deflect with 'how can I help' or 'what \
         would you like to explore'. Messages from others are prefixed with their name; your own are \
         not. Do NOT prefix your reply with your name.";
-    let system = match persona {
+    let mut system = match persona {
         Some(p) if !p.trim().is_empty() => format!("{}\n\n{mechanics}", p.trim()),
         _ => format!("You are {handle}, an AI participant in a multi-person group chat. {mechanics}"),
     };
+    // With tools available, tell the model so it USES them instead of claiming it has no filesystem.
+    if sandbox.is_some() {
+        system.push_str(
+            "\n\nYou have a working directory on this machine, reachable through these tools: \
+             list_files, read_file, write_file (paths are relative to that directory), and \
+             run_command (runs a shell command there). When a request needs the filesystem — \
+             inspecting, creating, or changing files — call the tools instead of saying you have \
+             no access.",
+        );
+    }
     let mut messages = vec![serde_json::json!({ "role": "system", "content": system })];
     let start = transcript.len().saturating_sub(24);
     for t in &transcript[start..] {
@@ -194,25 +230,68 @@ async fn generate(
     if !messages.iter().any(|m| m["role"] == "user") {
         return Ok(String::new());
     }
-    let body = serde_json::json!({
-        "model": model, "messages": messages, "max_tokens": 400, "stream": false,
-    });
+
     let url = format!("{}/chat/completions", gateway_url.trim_end_matches('/'));
-    let resp = reqwest::Client::new()
-        .post(&url)
-        .json(&body)
-        .timeout(Duration::from_secs(180))
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        return Err(format!("gateway {status}: {}", resp.text().await.unwrap_or_default()).into());
+    let http = reqwest::Client::new();
+    let tools = sandbox.map(|_| super::sandbox_tools::Sandbox::tool_defs());
+    // Sandbox mode may need to emit file contents (tool arguments count as output) — give it more
+    // room than a chat one-liner.
+    let max_tokens = if sandbox.is_some() { 2048 } else { 400 };
+
+    for _round in 0..MAX_TOOL_ROUNDS {
+        let mut body = serde_json::json!({
+            "model": model, "messages": messages, "max_tokens": max_tokens, "stream": false,
+        });
+        if let Some(t) = &tools {
+            body["tools"] = t.clone();
+        }
+        let resp = http
+            .post(&url)
+            .json(&body)
+            .timeout(Duration::from_secs(180))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(
+                format!("gateway {status}: {}", resp.text().await.unwrap_or_default()).into(),
+            );
+        }
+        let json: serde_json::Value = resp.json().await?;
+        let msg = &json["choices"][0]["message"];
+        let content = msg["content"].as_str().unwrap_or("").to_string();
+        let calls = msg["tool_calls"].as_array().filter(|c| !c.is_empty());
+
+        // No sandbox, or the model answered instead of calling a tool → return its text.
+        let (Some(sb), Some(calls)) = (sandbox, calls) else {
+            return Ok(content);
+        };
+
+        // Echo the assistant's tool-call turn, then run each call in the sandbox and feed the
+        // result back as a `tool` message so the next round sees it.
+        messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": content,
+            "tool_calls": calls.clone(),
+        }));
+        for call in calls {
+            let id = call["id"].as_str().unwrap_or("");
+            let name = call["function"]["name"].as_str().unwrap_or("");
+            let args: serde_json::Value = call["function"]["arguments"]
+                .as_str()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            let result = sb.dispatch(name, &args).await;
+            eprintln!("[participant] tool {name} → {} bytes", result.len());
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": id,
+                "content": result,
+            }));
+        }
     }
-    let json: serde_json::Value = resp.json().await?;
-    Ok(json["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .to_string())
+    // Exhausted the tool budget without a final text answer.
+    Ok("(stopped after several tool steps without finishing — try narrowing the request.)".into())
 }
 
 #[cfg(test)]

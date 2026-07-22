@@ -1,5 +1,23 @@
 # Changelog
 
+## feat(meetings): sandboxed file/shell tools for the model participant
+Completed: 2026-07-22
+
+`rozum meetings participant --sandbox <dir>` gives the room's local model real
+file access confined to one directory: it advertises `list_files`, `read_file`,
+`write_file`, and `run_command` (OpenAI tools) and runs the model's tool-calls in
+the reply loop, feeding results back until it answers. Without `--sandbox`
+behavior is unchanged (plain chat, no tools). This lets the Telegram/Discord
+`assistant` bot actually read, create, and edit files instead of only talking.
+
+`list_files`/`read_file`/`write_file` are hard-confined to the sandbox root
+(relative paths only; `..`, absolute, and symlink escapes rejected). `run_command`
+runs a shell with cwd = root but is NOT jailed to it — its real boundary is the
+messenger sender allowlist, which (for a private-chat Telegram bridge) already
+restricts input to the operator alone. The tool loop is bounded to 6 rounds and
+each result is byte-capped. Path confinement, round-trip, and command capture are
+unit-tested. Spec: `docs/specs/assistant-sandbox-tools.md`.
+
 ## feat(meetings): Telegram and Discord join daemon rooms safely
 Completed: 2026-07-20
 
