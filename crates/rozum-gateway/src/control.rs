@@ -270,8 +270,22 @@ async fn chat_stream_route(body: String) -> axum::response::Response {
         Ok(r) => r,
         Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
     };
-    if req.model.trim().is_empty() || req.messages.is_empty() {
-        return json_err(axum::http::StatusCode::BAD_REQUEST, "model + messages required");
+    if req.model.trim().is_empty() {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, "model required");
+    }
+    // The reactive client's stream primitive fires one POST at page mount with an empty
+    // `messages` (the body only carries the conversation while a send is in flight). Treat that
+    // as a graceful no-op — an immediately-terminated SSE stream — rather than a 400, so the
+    // mount-fire leaves no error in the log and never reaches the model.
+    if req.messages.is_empty() {
+        return match axum::response::Response::builder()
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-store")
+            .body(axum::body::Body::from("data: [DONE]\n\n"))
+        {
+            Ok(r) => r,
+            Err(e) => json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        };
     }
     let port = match ensure_gateway(&req.model).await {
         Ok(p) => p,
@@ -3802,6 +3816,27 @@ mod tests {
         assert!(json.contains("\"installed\""));
         // residents in the ledger each have a non-empty model name.
         assert!(s.residency.residents.iter().all(|r| !r.model.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn chat_stream_empty_messages_is_a_noop_stream_not_400() {
+        // The reactive chat client fires one `/control/chat/stream` POST at page mount with an
+        // empty `messages` (the stream primitive fires unconditionally at mount). That must be a
+        // graceful empty SSE, not a 400 — the empty-messages branch returns before ensure_gateway,
+        // so this asserts the no-op path without a live model.
+        let resp = chat_stream_route(r#"{"model":"m","messages":[]}"#.to_string()).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").and_then(|v| v.to_str().ok()),
+            Some("text/event-stream")
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_missing_model_is_still_400() {
+        // An empty model is a real client error and must keep returning 400.
+        let resp = chat_stream_route(r#"{"model":"","messages":[]}"#.to_string()).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[test]
