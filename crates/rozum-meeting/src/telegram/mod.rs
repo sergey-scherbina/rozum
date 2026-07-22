@@ -282,6 +282,8 @@ async fn multi_poller(
         }
     };
     poll_error_delay_secs = MIN_POLL_ERROR_SECS;
+    // Log each not-yet-served chat once — this is how the operator discovers a new group's id.
+    let mut logged_unknown: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
     'poll: loop {
         match bot.get_updates(offset, 30).await {
@@ -289,11 +291,19 @@ async fn multi_poller(
                 poll_error_delay_secs = MIN_POLL_ERROR_SECS;
                 for update in &updates {
                     let next_offset = next_update_offset(update.update_id)?;
-                    // Parse chat-agnostically, then route to that chat's room task. A message from
-                    // a chat we don't serve (or a non-text/bot update) is consumed and skipped.
-                    let route = TelegramBot::extract_any(update)
-                        .and_then(|(chat_id, message)| routes.get(&chat_id).map(|tx| (tx, message)));
-                    let Some((tx, message)) = route else {
+                    // Parse chat-agnostically, then route to that chat's room task. A non-text/bot
+                    // update, or a message from a chat we don't serve, is consumed and skipped.
+                    let Some((chat_id, message)) = TelegramBot::extract_any(update) else {
+                        save_telegram_offset(&cursor_path, bot.chat_id, next_offset)?;
+                        offset = next_offset;
+                        continue;
+                    };
+                    let Some(tx) = routes.get(&chat_id) else {
+                        if logged_unknown.insert(chat_id) {
+                            eprintln!(
+                                "[telegram-bridge] update from chat {chat_id} (not served); to route it set TELEGRAM_EXTRA_CHATS={chat_id}=<room>"
+                            );
+                        }
                         save_telegram_offset(&cursor_path, bot.chat_id, next_offset)?;
                         offset = next_offset;
                         continue;
