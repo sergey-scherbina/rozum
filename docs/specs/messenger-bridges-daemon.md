@@ -31,6 +31,13 @@ engines.
 The meeting daemon is auto-started when absent. `--room` names an existing
 daemon room; a typo is an error and never creates a new room implicitly.
 
+One Telegram bot can serve several chats over its single `getUpdates` stream:
+`--room`/`TELEGRAM_CHAT_ID` is the primary chat→room, and
+`TELEGRAM_EXTRA_CHATS="<chat_id>=<room>[,<chat_id>=<room>…]"` adds more. A single
+poller routes each update to its chat's room; a shared ACL gates all chats
+(`docs/specs/messenger-access-control.md`). This is how a personal private chat and
+a group run on one bot without a second bot or a second `getUpdates` consumer.
+
 ### Telegram configuration
 
 | Environment variable | Required | Meaning |

@@ -128,12 +128,22 @@ impl TelegramBot {
     /// Validate the bot credential and target before the bridge joins a room.
     /// Errors are deliberately rebuilt without reqwest's URL-bearing display
     /// text because Telegram embeds the bot token in every API URL.
+    /// Single-chat validation wrapper (delegates to `validate_multi`). Retained as the
+    /// one-chat API surface + validation-test entry; the bridge itself uses `validate_multi`.
+    #[allow(dead_code)]
     pub async fn validate(&self) -> BotResult<ValidatedChat> {
+        let (_, mut chats) = self.validate_multi(&[self.chat_id]).await?;
+        Ok(chats.remove(0))
+    }
+
+    /// Validate the bot once (getMe + no active webhook) and then each target chat.
+    /// Returns the bot user id and one `ValidatedChat` per input, in order. Used by
+    /// the multi-chat bridge (one bot serving several chats over a single getUpdates).
+    pub async fn validate_multi(&self, chat_ids: &[i64]) -> BotResult<(i64, Vec<ValidatedChat>)> {
         let me: TgUser = self.get_api("getMe", &[], STARTUP_REQUEST_TIMEOUT).await?;
         if !me.is_bot || me.id <= 0 {
             return Err("Telegram getMe returned a non-bot identity".into());
         }
-
         let webhook: WebhookInfo = self
             .get_api("getWebhookInfo", &[], STARTUP_REQUEST_TIMEOUT)
             .await?;
@@ -143,15 +153,22 @@ impl TelegramBot {
                     .into(),
             );
         }
+        let mut out = Vec::with_capacity(chat_ids.len());
+        for &cid in chat_ids {
+            out.push(self.validate_chat(cid, &me).await?);
+        }
+        Ok((me.id, out))
+    }
 
+    async fn validate_chat(&self, chat_id: i64, me: &TgUser) -> BotResult<ValidatedChat> {
         let chat: TgChat = self
             .get_api(
                 "getChat",
-                &[("chat_id", self.chat_id.to_string())],
+                &[("chat_id", chat_id.to_string())],
                 STARTUP_REQUEST_TIMEOUT,
             )
             .await?;
-        if chat.id != self.chat_id {
+        if chat.id != chat_id {
             return Err("Telegram getChat returned a different target chat".into());
         }
 
@@ -169,7 +186,7 @@ impl TelegramBot {
                 .get_api(
                     "getChatMember",
                     &[
-                        ("chat_id", self.chat_id.to_string()),
+                        ("chat_id", chat_id.to_string()),
                         ("user_id", me.id.to_string()),
                     ],
                     STARTUP_REQUEST_TIMEOUT,
@@ -236,13 +253,22 @@ impl TelegramBot {
         Ok(())
     }
 
+    /// Send to the bot's primary chat. The multi-chat bridge uses `send_message_to`;
+    /// retained as the single-chat convenience + chunking-test entry.
+    #[allow(dead_code)]
     pub async fn send_message(&self, text: &str) -> BotResult<()> {
+        self.send_message_to(self.chat_id, text).await
+    }
+
+    /// Send text to a SPECIFIC chat (the multi-chat bridge routes each room's turns
+    /// back to its own chat). Chunked the same way as `send_message`.
+    pub async fn send_message_to(&self, chat_id: i64, text: &str) -> BotResult<()> {
         for chunk in crate::messenger::split_text(text, TELEGRAM_MAX_MESSAGE_UTF16) {
             let _: serde_json::Value = self
                 .post_api(
                     "sendMessage",
                     &serde_json::json!({
-                        "chat_id": self.chat_id,
+                        "chat_id": chat_id,
                         "text": chunk,
                     }),
                     STARTUP_REQUEST_TIMEOUT,
@@ -392,6 +418,7 @@ impl TelegramBot {
     /// Extract a text message only when both the target chat and caller-supplied
     /// sender policy accept it. Keeping authorization in this pure parser makes
     /// malformed/wrong-chat/unauthorized payload behavior offline-testable.
+    #[allow(dead_code)] // superseded by `extract_any`; kept for its single-chat filter tests
     pub fn extract_message<F>(
         update: &TgUpdate,
         target_chat_id: i64,
@@ -422,6 +449,35 @@ impl TelegramBot {
             sender_name,
             text: text.to_owned(),
         })
+    }
+
+    /// Chat-agnostic parse for the multi-chat bridge: return `(chat_id, message)` for
+    /// any non-bot, non-empty text message. The caller decides whether that chat is one
+    /// it serves and applies per-chat authorization (unlike `extract_message`, which
+    /// filters to a single target chat and a sender-allow closure).
+    pub fn extract_any(update: &TgUpdate) -> Option<(i64, IncomingMessage)> {
+        let msg = update.message.as_ref()?;
+        let from = msg.from.as_ref()?;
+        if from.is_bot {
+            return None;
+        }
+        let text = msg.text.as_deref()?.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let sender_name = if from.first_name.is_empty() {
+            from.username.as_deref().unwrap_or("user").to_owned()
+        } else {
+            from.first_name.clone()
+        };
+        Some((
+            msg.chat.id,
+            IncomingMessage {
+                sender_id: from.id,
+                sender_name,
+                text: text.to_owned(),
+            },
+        ))
     }
 }
 
@@ -821,6 +877,32 @@ mod tests {
         }))
         .unwrap();
         assert!(TelegramBot::extract_message(&empty, TEST_CHAT_ID, |_| true).is_none());
+    }
+
+    #[test]
+    fn extract_any_returns_chat_id_and_message_for_any_human_text() {
+        let update: TgUpdate = serde_json::from_value(json!({
+            "update_id": 10,
+            "message": {
+                "chat": { "id": -1002003004, "type": "supergroup" },
+                "from": { "id": 77, "first_name": "Bob" },
+                "text": "  hi group  "
+            }
+        }))
+        .unwrap();
+        let (chat_id, msg) = TelegramBot::extract_any(&update).unwrap();
+        assert_eq!(chat_id, -1002003004);
+        assert_eq!(msg.sender_id, 77);
+        assert_eq!(msg.text, "hi group");
+
+        // bot-authored and empty text are still rejected (no chat routing for them)
+        let bot: TgUpdate = serde_json::from_value(json!({
+            "update_id": 11,
+            "message": { "chat": {"id": 1, "type": "private"},
+                         "from": {"id": 9, "is_bot": true, "first_name": "R"}, "text": "x" }
+        }))
+        .unwrap();
+        assert!(TelegramBot::extract_any(&bot).is_none());
     }
 
     #[tokio::test]

@@ -1,11 +1,12 @@
 mod bot;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use bot::{IncomingMessage, TelegramBot};
 
@@ -14,101 +15,167 @@ use crate::messenger::{BridgeResult, DaemonBridge, SenderPolicy};
 use crate::messenger_acl::{Acl, Caps};
 
 /// Public CLI entry shared by the compatibility gateway command and the thin
-/// `rozum-meet telegram` frontend.
+/// `rozum-meet telegram` frontend. One bot can serve several chats (its `getUpdates`
+/// stream is global): `--room`/`TELEGRAM_CHAT_ID` is the primary chat→room; extra
+/// chats are `TELEGRAM_EXTRA_CHATS="<chat_id>=<room>[,<chat_id>=<room>…]"`.
 pub async fn run_from_env(room: &str, display_name: &str) -> BridgeResult<()> {
     let token = std::env::var("TELEGRAM_BOT_TOKEN").map_err(|_| "TELEGRAM_BOT_TOKEN is not set")?;
     let chat_id = std::env::var("TELEGRAM_CHAT_ID")
         .map_err(|_| "TELEGRAM_CHAT_ID is not set")?
         .parse::<i64>()
         .map_err(|_| "TELEGRAM_CHAT_ID must be a numeric chat ID")?;
-    run_bridge(room, display_name, token, chat_id).await
+    let mut channels = vec![(chat_id, room.to_string())];
+    if let Ok(extra) = std::env::var("TELEGRAM_EXTRA_CHATS") {
+        channels.extend(parse_extra_chats(&extra)?);
+    }
+    let allowlist = std::env::var("TELEGRAM_ALLOWED_USER_IDS").ok();
+    run_bridge_multi(display_name, token, channels, allowlist.as_deref()).await
 }
 
+/// Single-chat entry retained for direct callers. Delegates to the multi-chat runner.
 pub async fn run_bridge(
     room: &str,
     display_name: &str,
     token: String,
     chat_id: i64,
 ) -> BridgeResult<()> {
-    let configured_allowlist = std::env::var("TELEGRAM_ALLOWED_USER_IDS").ok();
-    run_bridge_with_allowlist(
-        room,
+    let allowlist = std::env::var("TELEGRAM_ALLOWED_USER_IDS").ok();
+    run_bridge_multi(
         display_name,
         token,
-        chat_id,
-        configured_allowlist.as_deref(),
+        vec![(chat_id, room.to_string())],
+        allowlist.as_deref(),
     )
     .await
 }
 
-async fn run_bridge_with_allowlist(
-    room: &str,
+/// Parse `TELEGRAM_EXTRA_CHATS` = `<chat_id>=<room>[,<chat_id>=<room>…]` into pairs.
+fn parse_extra_chats(raw: &str) -> BridgeResult<Vec<(i64, String)>> {
+    let mut out = Vec::new();
+    for item in raw.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let (id_s, room) = item.split_once('=').ok_or_else(|| {
+            format!("TELEGRAM_EXTRA_CHATS entry '{item}' must be <chat_id>=<room>")
+        })?;
+        let id: i64 = id_s
+            .trim()
+            .parse()
+            .map_err(|_| format!("TELEGRAM_EXTRA_CHATS chat id '{id_s}' is not numeric"))?;
+        let room = room.trim();
+        if room.is_empty() {
+            return Err(format!("TELEGRAM_EXTRA_CHATS entry '{item}' has an empty room").into());
+        }
+        out.push((id, room.to_string()));
+    }
+    Ok(out)
+}
+
+/// Run one bot over `channels` (each `(chat_id, room)`), sharing a single `getUpdates`
+/// poller that routes each update to the matching chat's room task. All chats share one
+/// ACL (capabilities are per user id, independent of which chat they speak in).
+async fn run_bridge_multi(
     display_name: &str,
     token: String,
-    chat_id: i64,
+    channels: Vec<(i64, String)>,
     configured_allowlist: Option<&str>,
 ) -> BridgeResult<()> {
-    let bot = Arc::new(TelegramBot::new(token, chat_id));
-    let target = bot.validate().await?;
+    if channels.is_empty() {
+        return Err("no Telegram chats configured".into());
+    }
+    let primary_chat = channels[0].0;
+    let bot = Arc::new(TelegramBot::new(token, primary_chat));
+    let chat_ids: Vec<i64> = channels.iter().map(|(c, _)| *c).collect();
+    let (bot_user_id, validated) = bot.validate_multi(&chat_ids).await?;
 
-    // Access control the operator edits LIVE from inside Telegram. The owner is
-    // TELEGRAM_OWNER_ID if set, else the private-chat peer (so a personal bot needs
-    // no config). The owner has every capability and is the only id that may manage
-    // access; members are added via `/grant`.
+    // Owner = TELEGRAM_OWNER_ID, else the private-chat peer among the chats (personal bot
+    // needs no config). Shared ACL across all chats; the owner has every capability.
     let acl_path = Acl::path("telegram");
-    let mut acl = Acl::load(&acl_path);
+    let mut acl0 = Acl::load(&acl_path);
     let owner = std::env::var("TELEGRAM_OWNER_ID")
         .ok()
         .and_then(|s| s.trim().parse::<i64>().ok())
-        .or(target.private_user_id);
+        .or_else(|| validated.iter().find_map(|v| v.private_user_id));
     if let Some(o) = owner {
-        if acl.ensure_owner(o) {
-            let _ = acl.save(&acl_path);
+        if acl0.ensure_owner(o) {
+            let _ = acl0.save(&acl_path);
         }
     }
+    let acl = Arc::new(Mutex::new(acl0));
 
-    // The env allowlist stays as an additional accept path; the owner is its fallback so a
-    // group bridge with TELEGRAM_OWNER_ID set (and no allowlist) starts with just the owner,
-    // who then grants others. Chat access = owner OR ACL `chat` OR env allowlist.
+    // Env allowlist stays as an additional accept path; owner is its fallback so a group-only
+    // bot (no private chat) still starts with the owner authorized.
     let policy = SenderPolicy::resolve(
         configured_allowlist,
         owner.map(|id| id.to_string()),
         "TELEGRAM_ALLOWED_USER_IDS",
     )?;
 
-    // Validate the external trust boundary before joining the internal room.
-    let mut room_bridge =
-        DaemonBridge::connect(room, display_name, "telegram", &chat_id.to_string()).await?;
-    eprintln!(
-        "[telegram-bridge] bot {} joined daemon room '{}' as '{}' (chat {}, {:?}); owner {:?}, acl {}",
-        target.bot_user_id,
-        room,
-        room_bridge.participant_id(),
-        target.chat_id,
-        target.kind,
-        acl.owner,
-        acl_path.display(),
-    );
-
-    // Register the command menu (Menu button / `/` list). Non-fatal: text commands work regardless.
+    // Register the command menu once (non-fatal).
     if let Err(e) = bot.set_my_commands(BOT_COMMANDS).await {
         eprintln!("[telegram-bridge] setMyCommands failed (menu unavailable): {e}");
     }
 
-    let (incoming_tx, mut incoming_rx) = mpsc::channel::<PendingIncoming>(64);
+    // Connect one room task per chat; the poller routes updates to them by chat_id.
+    let mut routes: HashMap<i64, mpsc::Sender<PendingIncoming>> = HashMap::new();
+    let mut tasks: Vec<tokio::task::JoinHandle<BridgeResult<()>>> = Vec::new();
+    for (chat_id, room) in &channels {
+        let room_bridge =
+            DaemonBridge::connect(room, display_name, "telegram", &chat_id.to_string()).await?;
+        eprintln!(
+            "[telegram-bridge] bot {bot_user_id} chat {chat_id} <-> room '{room}' as '{}'; owner {owner:?}",
+            room_bridge.participant_id(),
+        );
+        let (tx, rx) = mpsc::channel::<PendingIncoming>(64);
+        routes.insert(*chat_id, tx);
+        let bot_c = Arc::clone(&bot);
+        let acl_c = Arc::clone(&acl);
+        let acl_path_c = acl_path.clone();
+        let policy_c = policy.clone();
+        let chat = *chat_id;
+        tasks.push(tokio::spawn(async move {
+            run_channel(chat, room_bridge, rx, bot_c, acl_c, acl_path_c, policy_c).await
+        }));
+    }
+
+    // One shared poller.
     let poller_bot = Arc::clone(&bot);
-    let bot_user_id = target.bot_user_id;
-    let mut poller =
-        tokio::spawn(async move { telegram_poller(poller_bot, bot_user_id, incoming_tx).await });
+    tasks.push(tokio::spawn(async move {
+        multi_poller(poller_bot, bot_user_id, routes).await
+    }));
 
-    // Owner is pinged once per unknown sender so they can /grant that id.
+    // First task to finish (error, or an ended stream) tears the bridge down so the
+    // supervisor restarts it.
+    let (res, _idx, remaining) = futures::future::select_all(tasks).await;
+    for h in remaining {
+        h.abort();
+    }
+    match res {
+        Ok(inner) => inner,
+        Err(join) => Err(format!("Telegram bridge task failed: {join}").into()),
+    }
+}
+
+/// One chat's room task: submit that chat's incoming messages (authorized, non-command) to
+/// its room, run owner commands, and relay the room's new turns back to that chat.
+#[allow(clippy::too_many_arguments)]
+async fn run_channel(
+    chat_id: i64,
+    mut room_bridge: DaemonBridge,
+    mut incoming_rx: mpsc::Receiver<PendingIncoming>,
+    bot: Arc<TelegramBot>,
+    acl: Arc<Mutex<Acl>>,
+    acl_path: PathBuf,
+    policy: SenderPolicy,
+) -> BridgeResult<()> {
     let mut notified: std::collections::HashSet<i64> = std::collections::HashSet::new();
-
-    let result = loop {
+    loop {
         tokio::select! {
             incoming = incoming_rx.recv() => {
                 let Some(incoming) = incoming else {
-                    break Err("Telegram receive loop ended".into());
+                    return Ok(()); // poller gone → this chat ends
                 };
                 let id = incoming.message.sender_id;
                 let name = incoming.message.sender_name.clone();
@@ -116,8 +183,11 @@ async fn run_bridge_with_allowlist(
 
                 // Management/utility commands are handled here and NEVER relayed to the room.
                 if text.starts_with('/') {
-                    let reply = handle_command(&text, id, &name, &mut acl, &acl_path);
-                    if let Err(error) = bot.send_message(&reply).await {
+                    let reply = {
+                        let mut a = acl.lock().await;
+                        handle_command(&text, id, &name, &mut a, &acl_path)
+                    };
+                    if let Err(error) = bot.send_message_to(chat_id, &reply).await {
                         eprintln!("[telegram-bridge] sendMessage (command) error: {error}");
                     }
                     let _ = incoming.committed.send(Ok(()));
@@ -125,15 +195,17 @@ async fn run_bridge_with_allowlist(
                 }
 
                 // Chat authorization: owner, an ACL member with `chat`, or the env allowlist.
-                let allowed =
-                    acl.is_owner(id) || acl.caps_for(id).chat || policy.allows(id.to_string());
+                let allowed = {
+                    let a = acl.lock().await;
+                    a.is_owner(id) || a.caps_for(id).chat
+                } || policy.allows(id.to_string());
                 if !allowed {
                     if notified.insert(id) {
                         let hint = format!(
                             "🔒 {name} (id {id}) написал(а) боту, но доступа нет. Добавить: \
                              /grant {id} chat  (можно + read write shell)."
                         );
-                        if let Err(error) = bot.send_message(&hint).await {
+                        if let Err(error) = bot.send_message_to(chat_id, &hint).await {
                             eprintln!("[telegram-bridge] sendMessage (notify) error: {error}");
                         }
                     }
@@ -142,40 +214,25 @@ async fn run_bridge_with_allowlist(
                 }
 
                 let submit = room_bridge.submit(&name, &id.to_string(), &text).await;
-                let acknowledgement = submit
-                    .as_ref()
-                    .map(|_| ())
-                    .map_err(|error| error.to_string());
+                let acknowledgement = submit.as_ref().map(|_| ()).map_err(|error| error.to_string());
                 let _ = incoming.committed.send(acknowledgement);
                 if let Err(error) = submit {
-                    break Err(error);
+                    return Err(error);
                 }
             }
             outbound = room_bridge.next_outbound() => {
                 let messages = match outbound {
                     Ok(messages) => messages,
-                    Err(error) => break Err(error),
+                    Err(error) => return Err(error),
                 };
                 for message in messages {
-                    if let Err(error) = bot.send_message(&message).await {
-                        // TelegramBot rebuilds transport errors without the URL,
-                        // so this cannot print the token embedded in that URL.
+                    if let Err(error) = bot.send_message_to(chat_id, &message).await {
                         eprintln!("[telegram-bridge] sendMessage error: {error}");
                     }
                 }
             }
-            finished = &mut poller => {
-                break match finished {
-                    Ok(Ok(())) => Err("Telegram receive loop ended".into()),
-                    Ok(Err(error)) => Err(error),
-                    Err(error) => Err(format!("Telegram receive task failed: {error}").into()),
-                };
-            }
         }
-    };
-
-    poller.abort();
-    result
+    }
 }
 
 struct PendingIncoming {
@@ -185,10 +242,13 @@ struct PendingIncoming {
     committed: oneshot::Sender<Result<(), String>>,
 }
 
-async fn telegram_poller(
+/// The single `getUpdates` poller for the bot. Each update is routed to the room task
+/// of its chat (`routes`); updates from chats we don't serve are consumed and skipped.
+/// The durable per-bot cursor advances only after the routed room append is acknowledged.
+async fn multi_poller(
     bot: Arc<TelegramBot>,
     bot_user_id: i64,
-    incoming_tx: mpsc::Sender<PendingIncoming>,
+    routes: HashMap<i64, mpsc::Sender<PendingIncoming>>,
 ) -> BridgeResult<()> {
     const MIN_POLL_ERROR_SECS: u64 = 2;
     const MAX_POLL_ERROR_SECS: u64 = 60;
@@ -229,22 +289,17 @@ async fn telegram_poller(
                 poll_error_delay_secs = MIN_POLL_ERROR_SECS;
                 for update in &updates {
                     let next_offset = next_update_offset(update.update_id)?;
-                    // Accept every non-bot text message from the target chat; authorization,
-                    // command handling, and per-user gating happen in the bridge's main loop
-                    // (which owns the mutable ACL and can reply to the sender).
-                    let Some(message) =
-                        TelegramBot::extract_message(update, bot.chat_id, |_| true)
-                    else {
+                    // Parse chat-agnostically, then route to that chat's room task. A message from
+                    // a chat we don't serve (or a non-text/bot update) is consumed and skipped.
+                    let route = TelegramBot::extract_any(update)
+                        .and_then(|(chat_id, message)| routes.get(&chat_id).map(|tx| (tx, message)));
+                    let Some((tx, message)) = route else {
                         save_telegram_offset(&cursor_path, bot.chat_id, next_offset)?;
                         offset = next_offset;
                         continue;
                     };
                     let (committed, confirmation) = oneshot::channel();
-                    if incoming_tx
-                        .send(PendingIncoming { message, committed })
-                        .await
-                        .is_err()
-                    {
+                    if tx.send(PendingIncoming { message, committed }).await.is_err() {
                         return Ok(());
                     }
                     match confirmation.await {
@@ -489,6 +544,19 @@ mod tests {
     fn update_offset_is_checked() {
         assert_eq!(next_update_offset(7).unwrap(), 8);
         assert!(next_update_offset(i64::MAX).is_err());
+    }
+
+    #[test]
+    fn parse_extra_chats_parses_pairs_and_rejects_garbage() {
+        let ok = parse_extra_chats("-1002003=assistant-group, 555=team").unwrap();
+        assert_eq!(
+            ok,
+            vec![(-1002003, "assistant-group".to_string()), (555, "team".to_string())]
+        );
+        assert!(parse_extra_chats("  ").unwrap().is_empty());
+        assert!(parse_extra_chats("noequals").is_err(), "missing '='");
+        assert!(parse_extra_chats("abc=room").is_err(), "non-numeric id");
+        assert!(parse_extra_chats("123=").is_err(), "empty room");
     }
 
     #[test]

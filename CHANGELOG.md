@@ -1,5 +1,17 @@
 # Changelog
 
+## feat(telegram): one bot serves multiple chats (each → its own room)
+Completed: 2026-07-22
+
+The Telegram bridge can now route one bot across several chats over its single
+`getUpdates` stream. The primary chat is `TELEGRAM_CHAT_ID`→`--room`; add more with
+`TELEGRAM_EXTRA_CHATS="<chat_id>=<room>[,…]"`. A single poller routes each update to
+that chat's room task (own `DaemonBridge`, replies via `send_message_to`); a shared
+ACL gates all chats (caps are per user id). Lets a personal private chat and a group
+run on one bot without a second bot or a getUpdates race. `run_from_env` with no
+extras is byte-for-byte the old single-chat behavior. New `validate_multi`,
+`extract_any`, `send_message_to`, `parse_extra_chats` — unit-tested (159 crate tests).
+
 ## feat(telegram): register the bot command menu at startup
 Completed: 2026-07-22
 
