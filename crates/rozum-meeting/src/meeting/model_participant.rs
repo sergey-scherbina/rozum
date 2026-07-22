@@ -264,12 +264,17 @@ async fn generate(
             names.push("write_file");
         }
         if shell {
-            names.push("run_command (runs a shell command there)");
+            names.push("run_command");
         }
+        // Discriminate strictly: a weak model otherwise reflexively calls a tool for every message
+        // (and loops). Tools ONLY for actual file/command actions; questions get a text answer.
         system.push_str(&format!(
-            "\n\nYou have a working directory on this machine, reachable through these tools: {}. \
-             Paths are relative to that directory. When a request needs the filesystem — inspecting, \
-             creating, or changing files — call the tools instead of saying you have no access.",
+            "\n\nYou have a working directory with these tools: {}. Paths are relative to it. \
+             Call a tool ONLY when the user asks to DO something with files or run a command \
+             (create/read/change/list a file, run a command). For ordinary questions — including \
+             about the project, yourself, or general chat — answer with TEXT and do NOT call any \
+             tool. After a tool returns, give a short text answer; never call the same tool twice \
+             in a row.",
             names.join(", ")
         ));
     }
@@ -309,6 +314,9 @@ async fn generate(
     // room than a chat one-liner.
     let max_tokens = if tools_on { 2048 } else { 400 };
 
+    // Signature of the previous round's tool calls — if a round repeats it verbatim, the weak model
+    // is stuck; stop and force a plain text answer instead of spinning into the loop-breaker.
+    let mut last_sig: Option<String> = None;
     for _round in 0..MAX_TOOL_ROUNDS {
         let mut body = serde_json::json!({
             "model": model, "messages": messages, "max_tokens": max_tokens, "stream": false,
@@ -338,6 +346,23 @@ async fn generate(
             return Ok(content);
         };
 
+        // Repeat guard: identical tool call(s) to the previous round → no progress, stop looping.
+        let sig = calls
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}:{}",
+                    c["function"]["name"].as_str().unwrap_or(""),
+                    c["function"]["arguments"].as_str().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        if last_sig.as_deref() == Some(sig.as_str()) {
+            break;
+        }
+        last_sig = Some(sig);
+
         // Echo the assistant's tool-call turn, then run each call in the sandbox and feed the
         // result back as a `tool` message so the next round sees it.
         messages.push(serde_json::json!({
@@ -361,8 +386,28 @@ async fn generate(
             }));
         }
     }
-    // Exhausted the tool budget without a final text answer.
-    Ok("(stopped after several tool steps without finishing — try narrowing the request.)".into())
+
+    // The tool budget ran out (or the model got stuck): make ONE final tool-less call so the user
+    // gets a clean text answer from the results gathered so far, not a loop-breaker artifact.
+    messages.push(serde_json::json!({
+        "role": "user",
+        "content": "Ответь пользователю кратким текстом по результатам инструментов выше. \
+                    Не вызывай инструменты.",
+    }));
+    let body = serde_json::json!({
+        "model": model, "messages": messages, "max_tokens": max_tokens, "stream": false,
+    });
+    let resp = http
+        .post(&url)
+        .json(&body)
+        .timeout(Duration::from_secs(180))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Ok(String::new());
+    }
+    let json: serde_json::Value = resp.json().await?;
+    Ok(json["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string())
 }
 
 #[cfg(test)]
