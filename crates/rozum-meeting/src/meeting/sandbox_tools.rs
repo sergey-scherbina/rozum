@@ -25,13 +25,15 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 /// Build the seatbelt profile confining a shell to `root`: it may read the system
 /// (needed to load and run binaries) and read/write inside `root` (which contains
-/// `tmp`), but any write, delete, or rename outside `root` and all network access
-/// are denied. Verified against write/delete/network escape attempts on macOS.
-fn seatbelt_profile(root: &Path, _tmp: &Path) -> String {
+/// its tempdir), but any write, delete, or rename outside `root` is denied. Network
+/// is allowed when `allow_network` is set (the default) and denied otherwise; write
+/// confinement holds either way. Verified against write/delete/network attempts on macOS.
+fn seatbelt_profile(root: &Path, allow_network: bool) -> String {
     // Canonical paths under the home dir contain no quotes; guard anyway so a weird
     // path can never break out of the string literal (falls back to a bare root).
     let r = root.to_string_lossy();
     let r = if r.contains('"') || r.contains('\n') { "/var/empty" } else { r.as_ref() };
+    let network = if allow_network { "(allow network*)" } else { "(deny network*)" };
     format!(
         "(version 1)\n\
          (deny default)\n\
@@ -45,7 +47,7 @@ fn seatbelt_profile(root: &Path, _tmp: &Path) -> String {
          (allow file-write* (subpath \"{r}\"))\n\
          (allow file-write-data (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (literal \"/dev/stdout\") (literal \"/dev/stderr\"))\n\
          (allow file-ioctl (literal \"/dev/tty\") (literal \"/dev/dtracehelper\"))\n\
-         (deny network*)\n"
+         {network}\n"
     )
 }
 
@@ -54,15 +56,25 @@ fn seatbelt_profile(root: &Path, _tmp: &Path) -> String {
 #[derive(Clone, Debug)]
 pub struct Sandbox {
     root: PathBuf,
+    /// Whether `run_command` may use the network (default: yes). Writes outside the
+    /// root are always denied regardless.
+    allow_network: bool,
 }
 
 impl Sandbox {
     /// Open (creating if needed) the sandbox root, canonicalized so later
-    /// confinement checks compare against a real absolute prefix.
+    /// confinement checks compare against a real absolute prefix. Network access
+    /// for `run_command` defaults to allowed; override with [`Sandbox::with_network`].
     pub fn open(root: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(root)?;
         let root = root.canonicalize()?;
-        Ok(Self { root })
+        Ok(Self { root, allow_network: true })
+    }
+
+    /// Allow (default) or deny network access from `run_command`.
+    pub fn with_network(mut self, allow: bool) -> Self {
+        self.allow_network = allow;
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -278,7 +290,7 @@ impl Sandbox {
         if let Err(e) = std::fs::create_dir_all(&tmp) {
             return format!("error: cannot prepare shell tempdir: {e}");
         }
-        let profile = seatbelt_profile(&self.root, &tmp);
+        let profile = seatbelt_profile(&self.root, self.allow_network);
         let child = Command::new(SANDBOX_EXEC)
             .arg("-p")
             .arg(&profile)
@@ -416,6 +428,28 @@ mod tests {
         // But a write INSIDE the sandbox still works.
         let ok = sb.run_command("echo hi > inside.txt && cat inside.txt").await;
         assert!(ok.contains("hi"), "in-sandbox write should succeed: {ok}");
+    }
+
+    #[test]
+    fn seatbelt_profile_network_is_toggleable_but_writes_stay_confined() {
+        let root = std::path::Path::new("/private/tmp/sbx");
+        let on = seatbelt_profile(root, true);
+        let off = seatbelt_profile(root, false);
+        assert!(on.contains("(allow network*)"), "network on: {on}");
+        assert!(off.contains("(deny network*)"), "network off: {off}");
+        // write confinement is present regardless of the network setting
+        for p in [&on, &off] {
+            assert!(p.contains("(deny default)"));
+            assert!(p.contains("file-write* (subpath \"/private/tmp/sbx\")"));
+        }
+    }
+
+    #[tokio::test]
+    async fn run_command_default_allows_network_field() {
+        let (sb, _d) = sandbox();
+        assert!(sb.allow_network, "network defaults to allowed");
+        let sb2 = sb.with_network(false);
+        assert!(!sb2.allow_network);
     }
 
     #[test]

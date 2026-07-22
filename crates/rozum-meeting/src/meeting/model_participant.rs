@@ -137,6 +137,7 @@ pub async fn run(
     persona: Option<String>,
     sandbox: Option<std::path::PathBuf>,
     shell: bool,
+    shell_network: bool,
     acl_path: Option<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use super::daemon::daemon_alive;
@@ -146,7 +147,12 @@ pub async fn run(
     // open the directory degrades to chat-only rather than crashing the room.
     let sandbox = sandbox.and_then(|p| match super::sandbox_tools::Sandbox::open(&p) {
         Ok(sb) => {
-            eprintln!("[participant] sandbox: file tools enabled at {}", sb.root().display());
+            let sb = sb.with_network(shell_network);
+            eprintln!(
+                "[participant] sandbox: file tools enabled at {} (shell network {})",
+                sb.root().display(),
+                if shell_network { "allowed" } else { "denied" }
+            );
             Some(sb)
         }
         Err(e) => {

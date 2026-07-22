@@ -1,5 +1,14 @@
 # Changelog
 
+## feat(assistant): configurable shell network, allowed by default
+Completed: 2026-07-22
+
+The sandboxed `run_command` shell now permits network access by default (useful
+for fetches, installs, API calls); the seatbelt profile emits `(allow network*)`.
+Deny it per participant with `--shell-no-network`. Write/delete confinement to the
+sandbox root holds either way. Verified: `curl` returns 200 under the profile
+while writes to `~`/`/tmp` stay blocked. Toggle unit-tested.
+
 ## feat(messenger): live per-user access control + confined optional shell
 Completed: 2026-07-22
 

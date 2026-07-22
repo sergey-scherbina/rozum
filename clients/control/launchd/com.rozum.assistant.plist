@@ -10,7 +10,8 @@
 
   --sandbox /Users/sergiy/rozum-sandbox gives the model file tools (list/read/write)
   confined to that directory. --shell additionally offers run_command, which is CONFINED
-  to the sandbox via macOS seatbelt (no writes/deletes outside it, no network). --acl points
+  to the sandbox via macOS seatbelt (no writes/deletes outside it; network allowed by default,
+  deny with --shell-no-network). --acl points
   at the per-user capability file the operator edits live from Telegram (/grant, /revoke,
   /members): each user's chat/read/write/shell grant gates what the model does on their
   behalf. The owner (TELEGRAM_OWNER_ID or the private-chat peer) has all of them.

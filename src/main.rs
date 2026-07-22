@@ -706,6 +706,10 @@ enum MeetingsAction {
         /// default: file access does NOT imply shell access. Per-user shell grants still apply via --acl.
         #[arg(long = "shell", default_value_t = false)]
         shell: bool,
+        /// Deny network access to `run_command` (default: network allowed). Write confinement to the
+        /// sandbox holds regardless of this flag.
+        #[arg(long = "shell-no-network", default_value_t = false)]
+        shell_no_network: bool,
         /// Gate file/shell tools per messenger user by this ACL file (managed live from Telegram).
         /// Omitted → the sandbox's read+write (and --shell) apply to everyone the bridge admits.
         #[arg(long = "acl")]
@@ -1262,6 +1266,7 @@ async fn main() {
                 persona_file,
                 sandbox,
                 shell,
+                shell_no_network,
                 acl,
             } => {
                 run_meetings_participant(
@@ -1275,6 +1280,7 @@ async fn main() {
                     persona_file,
                     sandbox,
                     shell,
+                    shell_no_network,
                     acl,
                 )
                 .await
@@ -3635,6 +3641,7 @@ async fn run_meetings_participant(
     persona_file: Option<std::path::PathBuf>,
     sandbox: Option<std::path::PathBuf>,
     shell: bool,
+    shell_no_network: bool,
     acl: Option<std::path::PathBuf>,
 ) {
     use rozum::meeting::model_participant::{ReplyPolicy, derive_handle, run};
@@ -3659,8 +3666,11 @@ async fn run_meetings_participant(
         },
         None => persona,
     };
-    if let Err(e) =
-        run(model, room, handle, policy, gateway_url, peers, persona, sandbox, shell, acl).await
+    if let Err(e) = run(
+        model, room, handle, policy, gateway_url, peers, persona, sandbox, shell,
+        !shell_no_network, acl,
+    )
+    .await
     {
         eprintln!("meetings participant: {e}");
         std::process::exit(1);

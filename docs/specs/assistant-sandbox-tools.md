@@ -63,13 +63,16 @@ who can reach these tools.
   symlink inside the sandbox pointing outward is rejected.
 - `run_command` runs under a macOS **seatbelt** profile (`sandbox-exec`): it may
   read the system (needed to load/run binaries) and read+write inside the root,
-  but every write, delete, or rename **outside** the root and all **network**
-  access are denied. `HOME` and `TMPDIR` are redirected into the sandbox so tool
-  dotfiles/tempfiles stay inside. Reads outside the root are **not** blocked —
-  restricting them aborts dyld's shared-cache mapping on modern macOS, so it is
-  deliberately out of scope; the shell can read but not modify the wider system.
-  If `sandbox-exec` is missing, `run_command` refuses rather than running
-  unconfined. Bounded by a timeout and an output cap.
+  but every write, delete, or rename **outside** the root is denied. `HOME` and
+  `TMPDIR` are redirected into the sandbox so tool dotfiles/tempfiles stay inside.
+  Reads outside the root are **not** blocked — restricting them aborts dyld's
+  shared-cache mapping on modern macOS, so it is deliberately out of scope; the
+  shell can read but not modify the wider system. If `sandbox-exec` is missing,
+  `run_command` refuses rather than running unconfined. Bounded by a timeout and
+  an output cap.
+- **Network** access from `run_command` is **allowed by default** and can be
+  denied per participant with `--shell-no-network`. Write confinement to the
+  sandbox holds either way.
 - Who may trigger each tool is gated per messenger user by the ACL
   (`messenger-access-control.md`): `shell` is off unless both `--shell` is set
   and the user holds the `shell` capability.
