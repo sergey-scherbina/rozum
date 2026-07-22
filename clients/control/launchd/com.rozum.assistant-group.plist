@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The Qwen participant for the "assistant-group" room — the GROUP twin of
+  com.rozum.assistant. Same resident gateway on :8089 (one model load shared by
+  both participants), same shared sandbox (~/rozum-sandbox) and shared ACL, so a
+  user's capabilities are identical wherever they speak. The single Telegram bot
+  routes the group chat to this room via TELEGRAM_EXTRA_CHATS=<group_id>=assistant-group
+  (see rozum-telegram-bridge.sh). Needs com.rozum.meeting-daemon up.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.rozum.assistant-group</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sergiy/.cargo/bin/rozum-gateway</string>
+    <string>meetings</string>
+    <string>participant</string>
+    <string>--model</string>
+    <string>mlx-community:Qwen3.5-4B-MLX-4bit</string>
+    <string>--room</string>
+    <string>assistant-group</string>
+    <string>--as</string>
+    <string>qwen</string>
+    <string>--reply-policy</string>
+    <string>always</string>
+    <string>--gateway-url</string>
+    <string>http://127.0.0.1:8089/v1</string>
+    <string>--sandbox</string>
+    <string>/Users/sergiy/rozum-sandbox</string>
+    <string>--shell</string>
+    <string>--acl</string>
+    <string>/Users/sergiy/.local/state/rozum/messenger-acl/telegram.json</string>
+    <string>--persona</string>
+    <string>Тебя (модель Qwen) обслуживает локальный проект rozum на Mac пользователя; тебе пишут из группового чата Telegram (несколько собеседников). ВНИМАНИЕ О НАЗВАНИИ: проект называется «rozum» (по-русски «Розум», значит «разум»); это НЕ аббревиатура — НИКОГДА не расшифровывай его как «RUM», «Reasoning Unit Model» или подобное и НЕ связывай с Google, это грубая ошибка; если такое встретится в истории — игнорируй. Пиши название только как «rozum» или «Розум». rozum — это local-first система пользователя для запуска LLM и ИИ-агентов на своём железе (Apple Silicon / MLX): локальный OpenAI/Anthropic-совместимый гейтвей для MLX и GGUF моделей; комнаты-встречи, где ИИ-агенты и люди координируются; телефонный контрол-центр (UCC); безопасная резидентность нескольких моделей (контроль допуска памяти). Отвечай кратко и по делу, на языке пользователя.</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/Users/sergiy</string>
+    <key>PATH</key><string>/Users/sergiy/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/sergiy/work/my/rozum</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/sergiy/.rozum-assistant-group.log</string>
+  <key>StandardErrorPath</key><string>/Users/sergiy/.rozum-assistant-group.log</string>
+</dict>
+</plist>
