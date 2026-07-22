@@ -64,6 +64,37 @@ pub fn base_handle(display: &str) -> &str {
     display.split('·').next().map(str::trim).unwrap_or(display)
 }
 
+/// Build the chat-completion message list from the recent transcript: the system prompt, then the
+/// last ~24 turns (oldest→newest) as user/assistant messages. Drops roster presence lines and
+/// redaction placeholders, and dedupes our OWN repeated assistant outputs — ≥4 identical assistant
+/// turns would otherwise trip the gateway's stuck-loop detector, which then emits the same "stuck"
+/// text and poisons the model into repeating it.
+fn build_context(system: String, transcript: &[StoredTurn], handle: &str) -> Vec<serde_json::Value> {
+    let mut messages = vec![serde_json::json!({ "role": "system", "content": system })];
+    let start = transcript.len().saturating_sub(24);
+    let mut seen_assistant: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for t in &transcript[start..] {
+        let c = t.content.trim_start();
+        if c.starts_with("joined:") || c.starts_with("left:") || c.starts_with("[redacted") {
+            continue;
+        }
+        let who = base_handle(&t.display_name);
+        if who.eq_ignore_ascii_case(handle) {
+            let key = t.content.trim().to_string();
+            if key.is_empty() || !seen_assistant.insert(key) {
+                continue; // skip empty and already-seen (duplicate) assistant turns
+            }
+            messages.push(serde_json::json!({ "role": "assistant", "content": t.content }));
+        } else {
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": format!("{}: {}", who, t.content),
+            }));
+        }
+    }
+    messages
+}
+
 /// Parse the numeric messenger sender id from a bridge-submitted turn. Bridges
 /// submit `[<display> #<id>]: <text>`; extract `<id>` so the participant can look
 /// up that user's capabilities. Returns None for non-bridge turns (no prefix).
@@ -278,30 +309,13 @@ async fn generate(
             names.join(", ")
         ));
     }
-    let mut messages = vec![serde_json::json!({ "role": "system", "content": system })];
-    let start = transcript.len().saturating_sub(24);
-    for t in &transcript[start..] {
-        // Presence lines (`joined:`/`left:`) are roster noise — the model's own join announcement
-        // in its context primes a terse social reply; drop them so it sees only real conversation.
-        let c = t.content.trim_start();
-        if c.starts_with("joined:") || c.starts_with("left:") {
-            continue;
-        }
-        let who = base_handle(&t.display_name);
-        if who.eq_ignore_ascii_case(handle) {
-            messages.push(serde_json::json!({ "role": "assistant", "content": t.content }));
-        } else {
-            messages.push(serde_json::json!({
-                "role": "user",
-                "content": format!("{}: {}", who, t.content),
-            }));
-        }
-    }
+    let messages = build_context(system, transcript, handle);
     // A strict chat template (e.g. Qwen3.6) errors without a user message — if the context held
     // only presence/own turns, there's nothing to answer; stay silent rather than send a bad call.
     if !messages.iter().any(|m| m["role"] == "user") {
         return Ok(String::new());
     }
+    let mut messages = messages;
 
     let url = format!("{}/chat/completions", gateway_url.trim_end_matches('/'));
     let http = reqwest::Client::new();
@@ -467,6 +481,29 @@ mod tests {
             "gpt-oss",
             &["gpt-oss".into()]
         ));
+    }
+
+    #[test]
+    fn build_context_dedupes_own_turns_and_drops_noise() {
+        let transcript = vec![
+            turn("qwen", "joined: I'm qwen"),
+            turn("Sergiy", "вопрос 1"),
+            turn("qwen", "STUCK LOOP TEXT"),
+            turn("qwen", "STUCK LOOP TEXT"),
+            turn("qwen", "STUCK LOOP TEXT"),
+            turn("qwen", "STUCK LOOP TEXT"),
+            turn("qwen", "[redacted: old]"),
+            turn("Sergiy", "вопрос 2"),
+        ];
+        let msgs = build_context("SYS".into(), &transcript, "qwen");
+        let asst_stuck = msgs
+            .iter()
+            .filter(|m| m["role"] == "assistant" && m["content"] == "STUCK LOOP TEXT")
+            .count();
+        assert_eq!(asst_stuck, 1, "4 identical assistant turns collapse to one");
+        assert!(!msgs.iter().any(|m| m["content"].as_str().unwrap_or("").contains("joined:")));
+        assert!(!msgs.iter().any(|m| m["content"].as_str().unwrap_or("").contains("[redacted")));
+        assert_eq!(msgs.iter().filter(|m| m["role"] == "user").count(), 2);
     }
 
     #[test]
