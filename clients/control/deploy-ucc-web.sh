@@ -59,6 +59,13 @@ LAUNCHER
   chmod +x "$SSC"
 fi
 
+# SPA-only fast path: re-emit index.html (+ inject) WITHOUT rebuilding the Rust binaries or bouncing
+# the model gateway. For UI-only changes (center.ssc / the injected CSS+i18n) this keeps the
+# operator's resident model on :8089 untouched — index.html is served statically from disk, so a
+# file swap takes effect with no restart. UCC_SPA_ONLY=1 skips the build + restart + gateway stages.
+if [ "${UCC_SPA_ONLY:-0}" = "1" ]; then
+  echo ">> UCC_SPA_ONLY=1 — skipping Rust binary builds (index/SPA-only redeploy)"
+else
 # 1) Build the thin dispatcher used by launchd. It execs rozum-gateway for control-serve.
 echo ">> building rozum dispatcher ..."
 ( cd "$REPO" && cargo build -p rozum-cli --bin rozum )
@@ -78,6 +85,7 @@ echo ">> building rozum-gateway (the engine binary control-serve actually runs) 
 # hit live 2026-07-07. A fresh inode sidesteps it.
 rm -f "$BINDIR/rozum-gateway"
 cp "$REPO/target/release/rozum-gateway" "$BINDIR/rozum-gateway"
+fi
 
 # Helper: compile a server-side .ssc file, serve briefly, capture HTML, shut down.
 # Falls back to the pre-built site/<basename> if SSC compilation fails (e.g. when the
@@ -267,6 +275,9 @@ TR_RU = {
     # nav
     '🤖 Agents':'🤖 Агенты','💻 Coders':'💻 Кодеры','🖥 Sessions':'🖥 Сессии',
     '📊 Matrix':'📊 Матрица','🔐 Login':'🔐 Вход',
+    # chat front door
+    '💬 Chat':'💬 Чат','Open chat →':'Открыть чат →',
+    'Talk to your local model, or drive a coding agent.':'Поговори с локальной моделью или запусти кодинг-агента.',
     # dashboard cards
     'Memory':'Память',
     'free:':'свободно:','limit:':'лимит:','used:':'занято:',
@@ -304,6 +315,8 @@ TR_RU = {
 TR_UK = {
     '🤖 Agents':'🤖 Агенти','💻 Coders':'💻 Кодери','🖥 Sessions':'🖥 Сесії',
     '📊 Matrix':'📊 Матриця','🔐 Login':'🔐 Вхід',
+    '💬 Chat':'💬 Чат','Open chat →':'Відкрити чат →',
+    'Talk to your local model, or drive a coding agent.':'Поговори з локальною моделлю або запусти кодинг-агента.',
     'Memory':"Пам'ять",
     'free:':'вільно:','limit:':'ліміт:','used:':'зайнято:',
     '↻ refresh':'↻ оновити','Models':'Моделі','Model':'Модель','Driver':'Драйвер','load':'завантажити','unload':'вивантажити','downloading…':'завантаження…','loading…':'завантаження…',
@@ -426,6 +439,9 @@ PYEOF
 check_js_syntax "$SITE/index.html"
 check_js_runtime "$SITE/index.html"
 
+if [ "${UCC_SPA_ONLY:-0}" = "1" ]; then
+  echo ">> UCC_SPA_ONLY=1 — skipping other-page emits, service restart, and gateway bounce (resident model untouched)"
+else
 # 3) Compile login.ssc → login.html, terminal.ssc → terminal.html, session.ssc → session.html.
 emit_html "$HERE/login.ssc"    8421 "$SITE/login.html"
 emit_html "$HERE/terminal.ssc" 8422 "$SITE/terminal.html"
@@ -496,6 +512,7 @@ if ! launchctl bootstrap "gui/$UID_" "$gw_plist"; then
 fi
 # The model load is async (cold-loads Qwen ~30s); the daemon answers `gateway status` once resident.
 echo ">> com.rozum.gateway installed (Qwen3.5-4B on :8089, idle-unload 20m) — warming in background"
+fi
 
 # Browser smoke gate — the 2026-07-07 bug classes (blank init, dead navigation, click-eater,
 # empty formBody, missing status column) checked against the LIVE page in headless Chrome.

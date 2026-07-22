@@ -88,9 +88,20 @@ val modelsPanel = cardWithHeader(heading(2, "Models"))(
   ], "spec")
 )
 
+// The chat is the control center's front door: a prominent card + the first nav entry, linking the
+// standalone /chat.html (an absolute-path full-page link, NOT the #/chat meeting-room route).
+val chatCard = cardWithHeader(heading(2, "💬 Chat"))(
+  vstack(gap = 8)(
+    text("Talk to your local model, or drive a coding agent."),
+    link("/chat.html", "Open chat →")
+  )
+)
+
 val dashboard = vstack(gap = 16)(
   heading(1, "rozum — control center"),
-  hstack(gap = 10)(link("#/agents", "🤖 Agents"), link("#/coders", "💻 Coders"), link("#/sessions", "🖥 Sessions"), link("/matrix.html", "📊 Matrix"), link("/login.html", "🔐 Login")),
+  hstack(gap = 10)(link("/chat.html", "💬 Chat"), link("#/agents", "🤖 Agents"), link("#/coders", "💻 Coders"), link("#/sessions", "🖥 Sessions"), link("/matrix.html", "📊 Matrix"), link("/login.html", "🔐 Login")),
+  divider(),
+  chatCard,
   divider(),
   meetingsCard,
   divider(),
