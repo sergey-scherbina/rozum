@@ -12,7 +12,21 @@
 
 ## Land the reactive-chat primitives in canonical scalascript (deferred "потом", 2026-07-22)
 
-- [ ] **chat-primitives-canonical** — get scalascript's `fetchStreamSignal` + `intervalTick` + `forJson`
+- [x] **chat-primitives-canonical — DONE 2026-07-23.** rozum deploy now rebuilds `chat.html` from
+  `chat.ssc`. The SOURCE turned out to be already on scalascript `main` (`bade13ed5` fetchStreamSignal/
+  intervalTick, `221c940f2` forJson — re-applied by another agent, so my cherry-pick came up empty). The
+  real missing piece was STAGING: `bin/lib`'s bundled `signals.mjs` was the Jul-19 copy WITHOUT the
+  fetchStream/forJson runtime, so `ssc-tools emit-spa` silently dropped the streaming wiring
+  (`_mountFetchStream`/`data-ssc-fetch-stream-url` = 0). Patched the current `signals.mjs` into the staged
+  `scalascript-backend-js` jar (bin/lib is gitignored/local) → canonical emit now reproduces the live
+  working `chat.html` **byte-for-byte** (447071 B; JS clean; chat renders + `__chat` wired). rozum deploy
+  `c8d0374` moves the `chat.ssc` emit into the always-run region so `UCC_SPA_ONLY` rebuilds it too;
+  e2e 16/16 (3 env fails = sole resident model). scalascript claim released (`7849f33ef`).
+  FOLLOW-UP (scalascript team, not blocking rozum): a full `installBin` from `main` properly re-stages all
+  of `bin/lib` (broadly stale, ~689 commits) and recompiles the Scala for the JVM/interpreter path of these
+  primitives — emit-spa (what rozum uses) didn't need it. Original plan kept below for that pass.
+
+- [ ] ~~get scalascript's `fetchStreamSignal` + `intervalTick` + `forJson`~~
   toolkit primitives into canonical `main` so `deploy-ucc-web.sh` rebuilds `chat.html` FROM SOURCE
   (`chat.ssc`) and the fail-safe is retired. Operator explicitly wants this finished later.
   - **Why it's blocked today:** the primitives live ONLY on `origin/feature/ui-stream-chat` = exactly 2
