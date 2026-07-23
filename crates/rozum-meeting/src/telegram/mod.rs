@@ -25,17 +25,24 @@ pub async fn run_from_env(room: &str, display_name: &str) -> BridgeResult<()> {
         .map_err(|_| "TELEGRAM_CHAT_ID is not set")?
         .parse::<i64>()
         .map_err(|_| "TELEGRAM_CHAT_ID must be a numeric chat ID")?;
+    // A second bot serving different chats uses its OWN group registry so the two don't clash.
+    // `TELEGRAM_REGISTRY` names it (default `telegram`).
+    let registry_name = std::env::var("TELEGRAM_REGISTRY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "telegram".to_string());
     let mut channels = vec![(chat_id, room.to_string())];
     if let Ok(extra) = std::env::var("TELEGRAM_EXTRA_CHATS") {
         channels.extend(parse_extra_chats(&extra)?);
     }
     // Dynamic groups the operator connected from inside the bot (`/addgroup`).
-    channels.extend(Registry::load(&Registry::path("telegram")).routes());
+    channels.extend(Registry::load(&Registry::path(&registry_name)).routes());
     // Dedup by chat_id — primary wins, then env extras, then the registry.
     let mut seen = std::collections::HashSet::new();
     channels.retain(|(id, _)| seen.insert(*id));
     let allowlist = std::env::var("TELEGRAM_ALLOWED_USER_IDS").ok();
-    run_bridge_multi(display_name, token, channels, allowlist.as_deref()).await
+    run_bridge_multi(display_name, token, channels, allowlist.as_deref(), &registry_name).await
 }
 
 /// Single-chat entry retained for direct callers. Delegates to the multi-chat runner.
@@ -51,6 +58,7 @@ pub async fn run_bridge(
         token,
         vec![(chat_id, room.to_string())],
         allowlist.as_deref(),
+        "telegram",
     )
     .await
 }
@@ -87,6 +95,7 @@ async fn run_bridge_multi(
     token: String,
     channels: Vec<(i64, String)>,
     configured_allowlist: Option<&str>,
+    registry_name: &str,
 ) -> BridgeResult<()> {
     if channels.is_empty() {
         return Err("no Telegram chats configured".into());
@@ -182,7 +191,7 @@ async fn run_bridge_multi(
 
     // One shared poller — also handles the owner-only group-topology commands.
     let poller_bot = Arc::clone(&bot);
-    let registry_path = Registry::path("telegram");
+    let registry_path = Registry::path(registry_name);
     tasks.push(tokio::spawn(async move {
         multi_poller(poller_bot, bot_user_id, routes, owner, primary_chat, registry_path, progress)
             .await

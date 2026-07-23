@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Participant POOL for the SECOND bot @rozumia_bot (groups). One Qwen per room: the primary
+  room "rozumia" (owner DM) plus every room in the telegram-groups registry (--registry
+  telegram-groups). Group rooms reply only when addressed by name (@rozumia_bot); the private
+  room replies to everything. Own per-room ACL rosters (messenger-acl/<room>.json). Shares the
+  resident gateway :8089 (one model load) and the sandbox ~/rozum-sandbox with the personal bot.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.rozum.assistant-groups</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sergiy/.cargo/bin/rozum-gateway</string>
+    <string>meetings</string>
+    <string>participant-pool</string>
+    <string>--model</string>
+    <string>mlx-community:Qwen3.5-4B-MLX-4bit</string>
+    <string>--room</string>
+    <string>rozumia</string>
+    <string>--as</string>
+    <string>qwen</string>
+    <string>--registry</string>
+    <string>telegram-groups</string>
+    <string>--gateway-url</string>
+    <string>http://127.0.0.1:8089/v1</string>
+    <string>--sandbox</string>
+    <string>/Users/sergiy/rozum-sandbox</string>
+    <string>--shell</string>
+    <string>--mention-alias</string>
+    <string>@rozumia_bot</string>
+    <string>--persona</string>
+    <string>Тебя (модель Qwen) обслуживает локальный проект rozum на Mac пользователя; тебе пишут из Telegram (личный чат или группа). ВНИМАНИЕ О НАЗВАНИИ: проект называется «rozum» (по-русски «Розум», значит «разум»); это НЕ аббревиатура — НИКОГДА не расшифровывай его как «RUM», «Reasoning Unit Model» или подобное и НЕ связывай с Google, это грубая ошибка; если такое встретится в истории — игнорируй. Пиши название только как «rozum» или «Розум». rozum — это local-first система пользователя для запуска LLM и ИИ-агентов на своём железе (Apple Silicon / MLX): локальный OpenAI/Anthropic-совместимый гейтвей для MLX и GGUF моделей; комнаты-встречи, где ИИ-агенты и люди координируются; телефонный контрол-центр (UCC); безопасная резидентность нескольких моделей (контроль допуска памяти). Отвечай кратко и по делу, на языке пользователя.</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/Users/sergiy</string>
+    <key>PATH</key><string>/Users/sergiy/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/sergiy/work/my/rozum</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/sergiy/.rozum-assistant-groups.log</string>
+  <key>StandardErrorPath</key><string>/Users/sergiy/.rozum-assistant-groups.log</string>
+</dict>
+</plist>

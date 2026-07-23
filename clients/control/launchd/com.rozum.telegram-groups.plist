@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Durable bridge for the SECOND bot @rozumia_bot, dedicated to GROUPS. Runs the wrapper
+  ~/.rozum/bin/rozum-telegram-groups-bridge.sh (reads telegram-groups-token). Primary chat =
+  the owner's DM (room "rozumia"); groups via its own registry telegram-groups (managed with
+  /addgroup). Pairs with com.rozum.assistant-groups (the participant pool). @Rozum_chat_bot /
+  com.rozum.telegram (personal) are separate and untouched. Needs com.rozum.meeting-daemon up.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.rozum.telegram-groups</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sergiy/.rozum/bin/rozum-telegram-groups-bridge.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/Users/sergiy</string>
+    <key>PATH</key><string>/Users/sergiy/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/sergiy/work/my/rozum</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/sergiy/.rozum-telegram-groups.log</string>
+  <key>StandardErrorPath</key><string>/Users/sergiy/.rozum-telegram-groups.log</string>
+</dict>
+</plist>

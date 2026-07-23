@@ -757,6 +757,9 @@ enum MeetingsAction {
         /// The bot's @username (e.g. `@Rozum_chat_bot`) for mention detection + stripping.
         #[arg(long = "mention-alias")]
         mention_alias: Option<String>,
+        /// Group-registry namespace to follow (default `telegram`); a second bot uses its own.
+        #[arg(long = "registry", default_value = "telegram")]
+        registry: String,
     },
 
     /// Drive the incident lifecycle from the shell — the human/script twin of the agent-native MCP
@@ -1344,6 +1347,7 @@ async fn main() {
                 shell,
                 shell_no_network,
                 mention_alias,
+                registry,
             } => {
                 run_meetings_participant_pool(
                     model,
@@ -1359,6 +1363,7 @@ async fn main() {
                     shell,
                     shell_no_network,
                     mention_alias,
+                    registry,
                 )
                 .await
             }
@@ -3774,6 +3779,7 @@ async fn run_meetings_participant_pool(
     shell: bool,
     shell_no_network: bool,
     mention_alias: Option<String>,
+    registry: String,
 ) {
     use rozum::messenger_acl::Acl;
     use rozum::messenger_groups::Registry;
@@ -3790,7 +3796,7 @@ async fn run_meetings_participant_pool(
         None => persona,
     };
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("rozum-gateway"));
-    let registry_path = Registry::path("telegram");
+    let registry_path = Registry::path(&registry);
     let mut children: HashMap<String, tokio::process::Child> = HashMap::new();
     // Stop children on SIGTERM/SIGINT (launchd stop) so a restart never leaves orphaned
     // participants double-replying in a room.
