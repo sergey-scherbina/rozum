@@ -136,7 +136,7 @@ fn serve_site_file(name: &str) -> axum::response::Response {
     use axum::{http::{header, HeaderValue, StatusCode}, response::IntoResponse};
     let path = ucc_site_dir().join(name);
     match std::fs::read(&path) {
-        Ok(mut bytes) => {
+        Ok(bytes) => {
             let ext = path.extension().and_then(|e| e.to_str());
             let mime = match ext {
                 Some("html") => "text/html; charset=utf-8",
@@ -148,14 +148,11 @@ fn serve_site_file(name: &str) -> axum::response::Response {
                 Some("webmanifest") => "application/manifest+json",
                 _ => "application/octet-stream",
             };
-            if ext == Some("html") {
-                // Inject service-worker registration before </body> so PWA auto-updates
-                // without requiring a manual hard-refresh.
-                const SW_REG: &[u8] = b"<script>if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js')}</script>";
-                if let Some(pos) = std::str::from_utf8(&bytes).ok().and_then(|s| s.rfind("</body>")) {
-                    bytes.splice(pos..pos, SW_REG.iter().copied());
-                }
-            }
+            // Intentionally NO service-worker registration injection. The former network-only
+            // sw.js gave no caching/offline benefit and could leave iOS standalone PWAs blank once
+            // its registration claimed the client — both index.html and chat.html went white on the
+            // phone while Chrome was fine, with byte-identical page content. sw.js is now a
+            // self-destruct that unregisters any lingering worker; not re-registering keeps it gone.
             let mut resp = ([(header::CONTENT_TYPE, mime)], bytes).into_response();
             if ext == Some("html") {
                 resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
