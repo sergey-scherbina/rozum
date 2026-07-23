@@ -22,9 +22,11 @@
   working `chat.html` **byte-for-byte** (447071 B; JS clean; chat renders + `__chat` wired). rozum deploy
   `c8d0374` moves the `chat.ssc` emit into the always-run region so `UCC_SPA_ONLY` rebuilds it too;
   e2e 16/16 (3 env fails = sole resident model). scalascript claim released (`7849f33ef`).
-  FOLLOW-UP (scalascript team, not blocking rozum): a full `installBin` from `main` properly re-stages all
-  of `bin/lib` (broadly stale, ~689 commits) and recompiles the Scala for the JVM/interpreter path of these
-  primitives — emit-spa (what rozum uses) didn't need it. Original plan kept below for that pass.
+  FOLLOW-UP — DONE 2026-07-23: ran a full `installBin` from `main` (`7849f33ef`) → bin/lib fully re-staged
+  (ssc.jar + 129 runtime jars + compiler/native-front/providers, `[success]` 11s), replacing the signals.mjs
+  hand-patch with the from-source runtime and fixing the JVM/interpreter path too. Re-verified: canonical
+  emit of chat.ssc == live chat.html byte-for-byte; re-deployed index+chat, byte-identical (no regression);
+  sbt server shut down after. Original plan kept below for reference.
 
 - [ ] ~~get scalascript's `fetchStreamSignal` + `intervalTick` + `forJson`~~
   toolkit primitives into canonical `main` so `deploy-ucc-web.sh` rebuilds `chat.html` FROM SOURCE
