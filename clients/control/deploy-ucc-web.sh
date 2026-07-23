@@ -439,23 +439,11 @@ PYEOF
 check_js_syntax "$SITE/index.html"
 check_js_runtime "$SITE/index.html"
 
-if [ "${UCC_SPA_ONLY:-0}" = "1" ]; then
-  echo ">> UCC_SPA_ONLY=1 — skipping other-page emits, service restart, and gateway bounce (resident model untouched)"
-else
-# 3) Compile login.ssc → login.html, terminal.ssc → terminal.html, session.ssc → session.html.
-emit_html "$HERE/login.ssc"    8421 "$SITE/login.html"
-emit_html "$HERE/terminal.ssc" 8422 "$SITE/terminal.html"
-emit_html "$HERE/session.ssc"  8423 "$SITE/session.html"
-check_js_syntax "$SITE/login.html"
-check_js_syntax "$SITE/terminal.html"
-check_js_syntax "$SITE/session.html"
-
-# chat.ssc is now a REACTIVE emit-spa app (fetchStreamSignal/forJson toolkit primitives), NOT the old
-# `ssc run` static page — so it emits via `ssc-tools emit-spa`, like center.ssc. FAIL-SAFE: if the
-# canonical toolchain lacks those primitives (the scalascript `feature/ui-stream-chat` branch not yet
-# merged to main + its bin/lib re-staged), emit-spa produces nothing — keep the EXISTING chat.html
-# (the live vanilla chat keeps working) instead of aborting the whole deploy. Once the primitives are
-# in the canonical toolchain, the next deploy auto-ships the reactive chat.
+# 2b) Compile the reactive chat SPA (chat.ssc → chat.html). It's a pure emit-spa page like
+# index.html, so it rebuilds in an SPA-only redeploy too. Its fetchStreamSignal/intervalTick/forJson
+# toolkit primitives are now in the canonical toolchain (scalascript main + staged bin/lib), so
+# emit-spa reproduces the full reactive chat from source. FAIL-SAFE retained: if a toolchain
+# regression makes the emit produce nothing, keep the live chat.html rather than aborting the deploy.
 echo ">> emitting chat.html (reactive SPA, via $(basename "$EMIT_SSC")) ..."
 "$EMIT_SSC" emit-spa --frontend react "$HERE/chat.ssc" > "$SITE/chat.html.new" 2>/dev/null || true
 if [ -s "$SITE/chat.html.new" ] && grep -qi '<!doctype html' "$SITE/chat.html.new"; then
@@ -466,6 +454,17 @@ else
   rm -f "$SITE/chat.html.new"
   echo "  ✗ chat.ssc emit-spa produced nothing — canonical toolchain missing fetchStreamSignal/forJson?  Kept the existing chat.html (live chat unchanged)." >&2
 fi
+
+if [ "${UCC_SPA_ONLY:-0}" = "1" ]; then
+  echo ">> UCC_SPA_ONLY=1 — skipping other-page emits, service restart, and gateway bounce (resident model untouched)"
+else
+# 3) Compile login.ssc → login.html, terminal.ssc → terminal.html, session.ssc → session.html.
+emit_html "$HERE/login.ssc"    8421 "$SITE/login.html"
+emit_html "$HERE/terminal.ssc" 8422 "$SITE/terminal.html"
+emit_html "$HERE/session.ssc"  8423 "$SITE/session.html"
+check_js_syntax "$SITE/login.html"
+check_js_syntax "$SITE/terminal.html"
+check_js_syntax "$SITE/session.html"
 
 # 4) Copy PWA assets.
 for f in manifest.webmanifest icon.svg icon-180.png sw.js; do
