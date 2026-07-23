@@ -123,6 +123,12 @@ val streamRaw = fetchStreamSignal("streamRaw", "/control/chat/stream", body, sen
 // ── Status polling (toolkit): intervalTick + fetchUrlSignal ─────────────────
 val statusTick = intervalTick("statusTick", 5000)
 val statusSig  = fetchUrlSignal("status", "/control/status", statusTick)
+// The config pickers read a ONE-TIME status snapshot (cfgTick never bumps → fetch only at mount),
+// NOT the 5 s poll: a poll re-render was re-drawing the picker tables and wiping the row-selection ✓
+// a second after tapping "select" (the model value persisted in the signal, only the visual reset).
+// Installed models + projects don't change mid-config, so a single snapshot is the right grain here.
+val cfgTick = signal("cfgTick", 0)
+val cfgSig  = fetchUrlSignal("cfgStatus", "/control/status", cfgTick)
 
 // Hidden anchor: keeps the fence-only signals from being tree-shaken AND collects them (incl. the
 // computed `body`, whose bridge `_sv` value must track the live turns) into the mounted signal set.
@@ -144,9 +150,9 @@ val modelLbl      = computedSignal(() => tr("Model"))
 val agentLbl      = computedSignal(() => tr("Agent"))
 val projectLbl    = computedSignal(() => tr("Project"))
 
-val modelPicker = remoteTable(statusSig, [fieldColumn("Model", "spec")], "installed",
+val modelPicker = remoteTable(cfgSig, [fieldColumn("Model", "spec")], "installed",
   [rowLink("select", model, "spec")], "spec")
-val projectPicker = remoteTable(statusSig, [fieldColumn("Project", "name")], "projects",
+val projectPicker = remoteTable(cfgSig, [fieldColumn("Project", "name")], "projects",
   [rowLink("select", project, "path")], "path")
 
 val agentBlock = vstack(gap = 12)(
