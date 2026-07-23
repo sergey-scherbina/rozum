@@ -109,6 +109,17 @@ impl Acl {
         rozum_state_dir().join("messenger-acl").join(format!("{platform}.json"))
     }
 
+    /// Per-room ACL path — each chat/room has its OWN roster, so a grant in one group
+    /// does not apply in another or in the private chat. `messenger-acl/<room>.json`
+    /// (the room name is sanitized to a safe filename).
+    pub fn path_for(room: &str) -> PathBuf {
+        let safe: String = room
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        rozum_state_dir().join("messenger-acl").join(format!("{safe}.json"))
+    }
+
     /// Load the ACL, or a fresh empty one if the file is missing or unreadable.
     /// A corrupt file is treated as empty rather than crashing the bridge — the
     /// operator can re-grant; access defaults to deny.

@@ -27,9 +27,28 @@ management commands. The owner is `TELEGRAM_OWNER_ID` if set, otherwise the
 private-chat peer id (so a personal bot needs no configuration). In a group,
 set `TELEGRAM_OWNER_ID` to your id.
 
+## Per-room rosters and group management
+
+Each chat/room has its **own** roster (`messenger-acl/<room>.json`) — a grant in one
+group does not apply in another or in the private chat. The owner is global
+(bootstrapped into every room's roster). The set of connected groups is a registry
+(`messenger-groups/telegram.json`) the operator edits LIVE from the bot (owner-only):
+
+| Command | Effect |
+|---|---|
+| `/groups` | List connected groups (chat id → room). |
+| `/addgroup` | Sent IN a group → connect it to room `group-<id>` with a fresh roster. |
+| `/removegroup [id]` | Disconnect a group (default = the current chat). |
+
+The bridge routes primary + registry chats over one `getUpdates`; on a topology change
+it re-execs to apply (the durable cursor means no message loss). A
+`meetings participant-pool` supervisor runs one model per registered room and reaps
+those removed. Extra/group chats validate leniently — a group where the bot is neither
+admin nor privacy-off is skipped with a warning, never taking the private chat down.
+
 ## Storage
 
-`$XDG_STATE_HOME/rozum/messenger-acl/telegram.json` (fallback
+`$XDG_STATE_HOME/rozum/messenger-acl/<room>.json` per room (fallback
 `~/.local/state/rozum/...`), written atomically (temp + rename). Shape:
 
 ```json

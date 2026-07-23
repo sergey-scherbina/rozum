@@ -13,6 +13,7 @@ use bot::{IncomingMessage, TelegramBot};
 use crate::meeting::store::rozum_state_dir;
 use crate::messenger::{BridgeResult, DaemonBridge, SenderPolicy};
 use crate::messenger_acl::{Acl, Caps};
+use crate::messenger_groups::{Registry, default_room};
 
 /// Public CLI entry shared by the compatibility gateway command and the thin
 /// `rozum-meet telegram` frontend. One bot can serve several chats (its `getUpdates`
@@ -28,6 +29,11 @@ pub async fn run_from_env(room: &str, display_name: &str) -> BridgeResult<()> {
     if let Ok(extra) = std::env::var("TELEGRAM_EXTRA_CHATS") {
         channels.extend(parse_extra_chats(&extra)?);
     }
+    // Dynamic groups the operator connected from inside the bot (`/addgroup`).
+    channels.extend(Registry::load(&Registry::path("telegram")).routes());
+    // Dedup by chat_id — primary wins, then env extras, then the registry.
+    let mut seen = std::collections::HashSet::new();
+    channels.retain(|(id, _)| seen.insert(*id));
     let allowlist = std::env::var("TELEGRAM_ALLOWED_USER_IDS").ok();
     run_bridge_multi(display_name, token, channels, allowlist.as_deref()).await
 }
@@ -87,23 +93,27 @@ async fn run_bridge_multi(
     }
     let primary_chat = channels[0].0;
     let bot = Arc::new(TelegramBot::new(token, primary_chat));
-    let chat_ids: Vec<i64> = channels.iter().map(|(c, _)| *c).collect();
-    let (bot_user_id, validated) = bot.validate_multi(&chat_ids).await?;
 
-    // Owner = TELEGRAM_OWNER_ID, else the private-chat peer among the chats (personal bot
-    // needs no config). Shared ACL across all chats; the owner has every capability.
-    let acl_path = Acl::path("telegram");
-    let mut acl0 = Acl::load(&acl_path);
+    // Validate the PRIMARY chat fatally (its failure means the bot itself is misconfigured).
+    // Extra/group chats validate LENIENTLY: a group where the bot isn't admin is skipped with a
+    // warning — a bad group must never take the whole bridge (and the private chat) down.
+    let (bot_user_id, primary_validated) = bot.validate_multi(&[primary_chat]).await?;
+    let mut good: Vec<(i64, String)> = vec![channels[0].clone()];
+    for (chat_id, room) in &channels[1..] {
+        match bot.validate_multi(&[*chat_id]).await {
+            Ok(_) => good.push((*chat_id, room.clone())),
+            Err(e) => eprintln!(
+                "[telegram-bridge] skipping chat {chat_id} (room '{room}'): {e}"
+            ),
+        }
+    }
+    let channels = good;
+
+    // Global owner: TELEGRAM_OWNER_ID, else the primary (private) chat's peer.
     let owner = std::env::var("TELEGRAM_OWNER_ID")
         .ok()
         .and_then(|s| s.trim().parse::<i64>().ok())
-        .or_else(|| validated.iter().find_map(|v| v.private_user_id));
-    if let Some(o) = owner {
-        if acl0.ensure_owner(o) {
-            let _ = acl0.save(&acl_path);
-        }
-    }
-    let acl = Arc::new(Mutex::new(acl0));
+        .or_else(|| primary_validated.first().and_then(|v| v.private_user_id));
 
     // Env allowlist stays as an additional accept path; owner is its fallback so a group-only
     // bot (no private chat) still starts with the owner authorized.
@@ -118,32 +128,41 @@ async fn run_bridge_multi(
         eprintln!("[telegram-bridge] setMyCommands failed (menu unavailable): {e}");
     }
 
-    // Connect one room task per chat; the poller routes updates to them by chat_id.
+    // One room task per chat, each with its OWN per-room ACL roster (a grant in one chat does not
+    // apply in another). The owner is bootstrapped into every room's roster.
     let mut routes: HashMap<i64, mpsc::Sender<PendingIncoming>> = HashMap::new();
     let mut tasks: Vec<tokio::task::JoinHandle<BridgeResult<()>>> = Vec::new();
     for (chat_id, room) in &channels {
         let room_bridge =
             DaemonBridge::connect(room, display_name, "telegram", &chat_id.to_string()).await?;
+        let acl_path = Acl::path_for(room);
+        let mut acl0 = Acl::load(&acl_path);
+        if let Some(o) = owner {
+            if acl0.ensure_owner(o) {
+                let _ = acl0.save(&acl_path);
+            }
+        }
         eprintln!(
-            "[telegram-bridge] bot {bot_user_id} chat {chat_id} <-> room '{room}' as '{}'; owner {owner:?}",
+            "[telegram-bridge] bot {bot_user_id} chat {chat_id} <-> room '{room}' as '{}'; owner {owner:?}, acl {}",
             room_bridge.participant_id(),
+            acl_path.display(),
         );
         let (tx, rx) = mpsc::channel::<PendingIncoming>(64);
         routes.insert(*chat_id, tx);
         let bot_c = Arc::clone(&bot);
-        let acl_c = Arc::clone(&acl);
-        let acl_path_c = acl_path.clone();
+        let acl = Arc::new(Mutex::new(acl0));
         let policy_c = policy.clone();
         let chat = *chat_id;
         tasks.push(tokio::spawn(async move {
-            run_channel(chat, room_bridge, rx, bot_c, acl_c, acl_path_c, policy_c).await
+            run_channel(chat, room_bridge, rx, bot_c, acl, acl_path, policy_c).await
         }));
     }
 
-    // One shared poller.
+    // One shared poller — also handles the owner-only group-topology commands.
     let poller_bot = Arc::clone(&bot);
+    let registry_path = Registry::path("telegram");
     tasks.push(tokio::spawn(async move {
-        multi_poller(poller_bot, bot_user_id, routes).await
+        multi_poller(poller_bot, bot_user_id, routes, owner, primary_chat, registry_path).await
     }));
 
     // First task to finish (error, or an ended stream) tears the bridge down so the
@@ -249,6 +268,9 @@ async fn multi_poller(
     bot: Arc<TelegramBot>,
     bot_user_id: i64,
     routes: HashMap<i64, mpsc::Sender<PendingIncoming>>,
+    owner: Option<i64>,
+    primary_chat: i64,
+    registry_path: PathBuf,
 ) -> BridgeResult<()> {
     const MIN_POLL_ERROR_SECS: u64 = 2;
     const MAX_POLL_ERROR_SECS: u64 = 60;
@@ -298,6 +320,24 @@ async fn multi_poller(
                         offset = next_offset;
                         continue;
                     };
+                    // Owner-only group-topology commands change routing itself, so they are handled
+                    // here — this works even from a not-yet-served group. add/remove re-exec the bridge.
+                    if owner == Some(message.sender_id) {
+                        if let Some(action) = parse_topology_command(&message.text) {
+                            let restart =
+                                handle_topology(action, chat_id, primary_chat, &registry_path, &bot)
+                                    .await;
+                            save_telegram_offset(&cursor_path, bot.chat_id, next_offset)?;
+                            offset = next_offset;
+                            if restart {
+                                eprintln!(
+                                    "[telegram-bridge] group topology changed — restarting to apply"
+                                );
+                                return Ok(());
+                            }
+                            continue;
+                        }
+                    }
                     let Some(tx) = routes.get(&chat_id) else {
                         if logged_unknown.insert(chat_id) {
                             eprintln!(
@@ -418,15 +458,22 @@ const BOT_COMMANDS: &[(&str, &str)] = &[
     ("members", "Кто имеет доступ (для владельца)"),
     ("grant", "Дать доступ: /grant <id> chat read write shell"),
     ("revoke", "Убрать доступ: /revoke <id>"),
+    ("groups", "Список подключённых групп (владелец)"),
+    ("addgroup", "Подключить эту группу (владелец)"),
+    ("removegroup", "Отключить группу: /removegroup <id> (владелец)"),
 ];
 
 const HELP_TEXT: &str = "Команды бота:\n\
 /whoami — показать твой Telegram id\n\
-/members — кто имеет доступ (только владелец)\n\
+/members — кто имеет доступ в этом чате (владелец)\n\
 /grant <id> [chat read write shell | all] — дать/изменить доступ (владелец)\n\
 /revoke <id> — убрать доступ (владелец)\n\
+/groups — список подключённых групп (владелец)\n\
+/addgroup — подключить эту группу, свой ростер прав (владелец, в группе)\n\
+/removegroup <id> — отключить группу (владелец)\n\
 /help — эта справка\n\n\
-Права: chat=писать в чате, read=читать файлы, write=писать файлы, shell=команды в песочнице.";
+Права: chat=писать в чате, read=читать файлы, write=писать файлы, shell=команды в песочнице. \
+Ростер прав СВОЙ у каждого чата/группы.";
 
 const NOT_OWNER: &str = "Управлять доступом может только владелец бота.";
 
@@ -528,6 +575,96 @@ fn render_members(acl: &Acl) -> String {
     lines.join("\n")
 }
 
+/// Owner-only commands that change WHICH chats the bot serves (routing topology).
+enum TopologyCmd {
+    List,
+    AddCurrent,
+    Remove(Option<i64>),
+}
+
+/// Parse a group-topology command (`/groups`, `/addgroup`, `/removegroup [id]`), tolerating a
+/// `@BotName` suffix. Returns None for anything else (handled per-room as a normal command).
+fn parse_topology_command(text: &str) -> Option<TopologyCmd> {
+    let mut parts = text.split_whitespace();
+    let cmd = parts.next()?.split('@').next()?.to_ascii_lowercase();
+    match cmd.as_str() {
+        "/groups" | "/listgroups" => Some(TopologyCmd::List),
+        "/addgroup" | "/connect" => Some(TopologyCmd::AddCurrent),
+        "/removegroup" | "/disconnect" | "/leavegroup" => {
+            Some(TopologyCmd::Remove(parts.next().and_then(|s| s.parse::<i64>().ok())))
+        }
+        _ => None,
+    }
+}
+
+/// Apply a topology command against the registry and reply to `chat_id`. Returns true when the
+/// bridge must restart to apply a route change (add/remove); false for a pure query (list).
+async fn handle_topology(
+    action: TopologyCmd,
+    chat_id: i64,
+    primary_chat: i64,
+    registry_path: &Path,
+    bot: &TelegramBot,
+) -> bool {
+    let mut reg = Registry::load(registry_path);
+    let (reply, restart) = match action {
+        TopologyCmd::List => (render_groups(&reg), false),
+        TopologyCmd::AddCurrent => {
+            if chat_id == primary_chat {
+                ("«/addgroup» отправь В ГРУППЕ (не в личном чате), чтобы её подключить.".to_string(), false)
+            } else if let Some(room) = reg.room_for(chat_id) {
+                (format!("Эта группа уже подключена (комната «{room}»)."), false)
+            } else {
+                let room = default_room(chat_id);
+                reg.add(chat_id, &room, "");
+                match reg.save(registry_path) {
+                    Ok(()) => (
+                        format!("✅ Группа подключена → комната «{room}», свой отдельный ростер прав. Применяю…"),
+                        true,
+                    ),
+                    Err(e) => (format!("Не удалось сохранить реестр групп: {e}"), false),
+                }
+            }
+        }
+        TopologyCmd::Remove(id) => {
+            let target = id.unwrap_or(chat_id);
+            if target == primary_chat {
+                ("Личный чат нельзя отключить.".to_string(), false)
+            } else {
+                match reg.remove(target) {
+                    Some(g) => match reg.save(registry_path) {
+                        Ok(()) => (format!("🚫 Группа {target} отключена (комната «{}»). Применяю…", g.room), true),
+                        Err(e) => (format!("Не удалось сохранить реестр групп: {e}"), false),
+                    },
+                    None => (format!("Группа {target} не найдена среди подключённых. /groups — список."), false),
+                }
+            }
+        }
+    };
+    if let Err(e) = bot.send_message_to(chat_id, &reply).await {
+        eprintln!("[telegram-bridge] sendMessage (topology) error: {e}");
+    }
+    restart
+}
+
+fn render_groups(reg: &Registry) -> String {
+    if reg.groups.is_empty() {
+        return "Подключённых групп нет. Отправь /addgroup В ГРУППЕ, чтобы её подключить.".to_string();
+    }
+    let mut lines = vec!["👥 Подключённые группы:".to_string()];
+    for g in &reg.groups {
+        let title = if g.title.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" «{}»", g.title)
+        };
+        lines.push(format!("• id {}{} → комната «{}»", g.chat_id, title, g.room));
+    }
+    lines.push(String::new());
+    lines.push("/addgroup (в группе) · /removegroup <id> · /groups".to_string());
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,6 +704,20 @@ mod tests {
         assert!(parse_extra_chats("noequals").is_err(), "missing '='");
         assert!(parse_extra_chats("abc=room").is_err(), "non-numeric id");
         assert!(parse_extra_chats("123=").is_err(), "empty room");
+    }
+
+    #[test]
+    fn parse_topology_command_recognizes_group_verbs() {
+        assert!(matches!(parse_topology_command("/groups"), Some(TopologyCmd::List)));
+        assert!(matches!(parse_topology_command("/addgroup@MyBot"), Some(TopologyCmd::AddCurrent)));
+        assert!(matches!(
+            parse_topology_command("/removegroup -100"),
+            Some(TopologyCmd::Remove(Some(-100)))
+        ));
+        assert!(matches!(parse_topology_command("/removegroup"), Some(TopologyCmd::Remove(None))));
+        // per-user + non-commands are NOT topology commands
+        assert!(parse_topology_command("/grant 5 chat").is_none());
+        assert!(parse_topology_command("hello").is_none());
     }
 
     #[test]

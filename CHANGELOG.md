@@ -1,5 +1,21 @@
 # Changelog
 
+## feat(telegram): manage groups from the bot + per-room permission rosters
+Completed: 2026-07-23
+
+Groups are now connected/disconnected LIVE from inside the bot (owner-only):
+`/addgroup` (in a group) connects it to its own room, `/removegroup <id>`
+disconnects, `/groups` lists them. The set persists to a registry
+(`messenger-groups/telegram.json`); the bridge reads it (and re-execs to apply a
+topology change — the durable cursor means no message loss), and a new
+`meetings participant-pool` supervisor spawns/reaps one Qwen per registered room
+and respawns crashed children. Each chat/room now has its OWN ACL roster
+(`messenger-acl/<room>.json`) — a grant in one group does not apply in another or
+in the private chat. Extra/group chats validate leniently (a group where the bot
+isn't admin is skipped with a warning, never taking the private chat down). The
+pool service replaces the per-room participant services. `Registry`,
+`Acl::path_for`, and the topology-command parser are unit-tested (164 crate tests).
+
 ## feat(telegram): one bot serves multiple chats (each → its own room)
 Completed: 2026-07-22
 

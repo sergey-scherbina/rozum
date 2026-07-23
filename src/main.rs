@@ -716,6 +716,33 @@ enum MeetingsAction {
         acl: Option<std::path::PathBuf>,
     },
 
+    /// Supervise one participant per room: the primary `--room` plus every room in the Telegram
+    /// group registry, each with its OWN per-room ACL. Reconciles as groups are connected/
+    /// disconnected from the bot (`/addgroup` / `/removegroup`) and respawns crashed children.
+    ParticipantPool {
+        #[arg(long)]
+        model: String,
+        /// The primary room (e.g. the private-chat room `assistant`); groups add more.
+        #[arg(long)]
+        room: String,
+        #[arg(long = "reply-policy", default_value = "always")]
+        reply_policy: String,
+        #[arg(long = "gateway-url", default_value = "http://127.0.0.1:8080/v1")]
+        gateway_url: String,
+        #[arg(long = "peer")]
+        peers: Vec<String>,
+        #[arg(long)]
+        persona: Option<String>,
+        #[arg(long = "persona-file")]
+        persona_file: Option<std::path::PathBuf>,
+        #[arg(long = "sandbox")]
+        sandbox: Option<std::path::PathBuf>,
+        #[arg(long = "shell", default_value_t = false)]
+        shell: bool,
+        #[arg(long = "shell-no-network", default_value_t = false)]
+        shell_no_network: bool,
+    },
+
     /// Drive the incident lifecycle from the shell — the human/script twin of the agent-native MCP
     /// thread verbs (open / escalate / resolve / list / show / metrics). Makes the support console
     /// (`mtg-frontend`) populate without an agent, and gives operators a no-UI lever.
@@ -1282,6 +1309,32 @@ async fn main() {
                     shell,
                     shell_no_network,
                     acl,
+                )
+                .await
+            }
+            MeetingsAction::ParticipantPool {
+                model,
+                room,
+                reply_policy,
+                gateway_url,
+                peers,
+                persona,
+                persona_file,
+                sandbox,
+                shell,
+                shell_no_network,
+            } => {
+                run_meetings_participant_pool(
+                    model,
+                    room,
+                    gateway_url,
+                    reply_policy,
+                    peers,
+                    persona,
+                    persona_file,
+                    sandbox,
+                    shell,
+                    shell_no_network,
                 )
                 .await
             }
@@ -3674,6 +3727,109 @@ async fn run_meetings_participant(
     {
         eprintln!("meetings participant: {e}");
         std::process::exit(1);
+    }
+}
+
+/// `rozum meetings participant-pool` — supervise one `meetings participant` child per room:
+/// the primary room plus every room in the group registry, each with its OWN per-room ACL.
+/// Reconciles every few seconds so children spawn/reap as groups are connected/disconnected
+/// from inside the bot, and respawns any that crash.
+#[allow(clippy::too_many_arguments)]
+async fn run_meetings_participant_pool(
+    model: String,
+    primary_room: String,
+    gateway_url: String,
+    reply_policy: String,
+    peers: Vec<String>,
+    persona: Option<String>,
+    persona_file: Option<std::path::PathBuf>,
+    sandbox: Option<std::path::PathBuf>,
+    shell: bool,
+    shell_no_network: bool,
+) {
+    use rozum::messenger_acl::Acl;
+    use rozum::messenger_groups::Registry;
+    use std::collections::HashMap;
+
+    let persona = match persona_file {
+        Some(path) => match std::fs::read_to_string(&path) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("participant-pool: --persona-file {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        },
+        None => persona,
+    };
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("rozum-gateway"));
+    let registry_path = Registry::path("telegram");
+    let mut children: HashMap<String, tokio::process::Child> = HashMap::new();
+    eprintln!(
+        "[participant-pool] primary room '{primary_room}', registry {}",
+        registry_path.display()
+    );
+
+    loop {
+        // Desired rooms = primary + registry group rooms (dedup, order preserved).
+        let mut rooms = vec![primary_room.clone()];
+        for r in Registry::load(&registry_path).rooms() {
+            if !rooms.contains(&r) {
+                rooms.push(r);
+            }
+        }
+        // (Re)spawn any missing or exited child.
+        for room in &rooms {
+            let alive = matches!(children.get_mut(room).map(|c| c.try_wait()), Some(Ok(None)));
+            if alive {
+                continue;
+            }
+            children.remove(room);
+            let acl = Acl::path_for(room);
+            let mut cmd = tokio::process::Command::new(&exe);
+            cmd.arg("meetings")
+                .arg("participant")
+                .arg("--model")
+                .arg(&model)
+                .arg("--room")
+                .arg(room)
+                .arg("--reply-policy")
+                .arg(&reply_policy)
+                .arg("--gateway-url")
+                .arg(&gateway_url)
+                .arg("--acl")
+                .arg(&acl);
+            if let Some(s) = &sandbox {
+                cmd.arg("--sandbox").arg(s);
+            }
+            if shell {
+                cmd.arg("--shell");
+            }
+            if shell_no_network {
+                cmd.arg("--shell-no-network");
+            }
+            if let Some(p) = &persona {
+                cmd.arg("--persona").arg(p);
+            }
+            for peer in &peers {
+                cmd.arg("--peer").arg(peer);
+            }
+            match cmd.spawn() {
+                Ok(child) => {
+                    eprintln!("[participant-pool] spawned participant for room '{room}' (acl {})", acl.display());
+                    children.insert(room.clone(), child);
+                }
+                Err(e) => eprintln!("[participant-pool] failed to spawn participant for '{room}': {e}"),
+            }
+        }
+        // Stop children whose room left the registry.
+        let stale: Vec<String> = children.keys().filter(|r| !rooms.contains(r)).cloned().collect();
+        for room in stale {
+            if let Some(mut c) = children.remove(&room) {
+                eprintln!("[participant-pool] stopping participant for removed room '{room}'");
+                let _ = c.start_kill();
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }
 

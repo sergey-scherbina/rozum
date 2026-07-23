@@ -1,20 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  The Qwen participant for the "assistant" room: a local model that answers in the
-  room, so messenger bridges (Telegram/Discord) relay a real chat with Qwen. Points
-  at the resident gateway on :8089 (reuses the loaded model — no second load); if the
-  gateway idle-unloaded, the first message lazily reloads it. reply-policy=always so it
-  answers every relayed message. Pairs with com.rozum.telegram (+ a future
-  com.rozum.discord) which bridge the same room. Needs com.rozum.meeting-daemon up.
+  The Qwen participant POOL: supervises one `meetings participant` per room — the primary
+  room `assistant` (private chat) plus every room in the Telegram group registry
+  (~/.local/state/rozum/messenger-groups/telegram.json). Reconciles every few seconds, so when
+  the operator connects/disconnects a group from inside the bot (/addgroup, /removegroup) the
+  matching Qwen spawns/stops automatically; crashed children respawn. Replaces the old
+  per-room services (com.rozum.assistant + com.rozum.assistant-group).
 
-  --sandbox /Users/sergiy/rozum-sandbox gives the model file tools (list/read/write)
-  confined to that directory. --shell additionally offers run_command, which is CONFINED
-  to the sandbox via macOS seatbelt (no writes/deletes outside it; network allowed by default,
-  deny with --shell-no-network). --acl points
-  at the per-user capability file the operator edits live from Telegram (/grant, /revoke,
-  /members): each user's chat/read/write/shell grant gates what the model does on their
-  behalf. The owner (TELEGRAM_OWNER_ID or the private-chat peer) has all of them.
+  Each room gets its OWN ACL roster (messenger-acl/<room>.json) — a grant in one group does not
+  apply in another or in the private chat. Shared resident gateway :8089 (one model load),
+  shared sandbox ~/rozum-sandbox, confined shell (network allowed; deny with --shell-no-network).
   Specs: docs/specs/assistant-sandbox-tools.md, docs/specs/messenger-access-control.md.
 -->
 <plist version="1.0">
@@ -24,13 +20,11 @@
   <array>
     <string>/Users/sergiy/.cargo/bin/rozum-gateway</string>
     <string>meetings</string>
-    <string>participant</string>
+    <string>participant-pool</string>
     <string>--model</string>
     <string>mlx-community:Qwen3.5-4B-MLX-4bit</string>
     <string>--room</string>
     <string>assistant</string>
-    <string>--as</string>
-    <string>qwen</string>
     <string>--reply-policy</string>
     <string>always</string>
     <string>--gateway-url</string>
@@ -38,10 +32,8 @@
     <string>--sandbox</string>
     <string>/Users/sergiy/rozum-sandbox</string>
     <string>--shell</string>
-    <string>--acl</string>
-    <string>/Users/sergiy/.local/state/rozum/messenger-acl/telegram.json</string>
     <string>--persona</string>
-    <string>Тебя (модель Qwen) обслуживает локальный проект rozum на Mac пользователя; пользователь пишет тебе из мессенджера (Telegram). ВНИМАНИЕ О НАЗВАНИИ: проект называется «rozum» (по-русски «Розум», значит «разум»); это НЕ аббревиатура — НИКОГДА не расшифровывай его как «RUM», «Reasoning Unit Model» или подобное и НЕ связывай с Google, это грубая ошибка; если такое встретится в истории — игнорируй. Пиши название только как «rozum» или «Розум». rozum — это local-first система пользователя для запуска LLM и ИИ-агентов на своём железе (Apple Silicon / MLX): локальный OpenAI/Anthropic-совместимый гейтвей для MLX и GGUF моделей; комнаты-встречи, где ИИ-агенты и люди координируются; телефонный контрол-центр (UCC) с этим чатом; безопасная резидентность нескольких моделей (контроль допуска памяти). Отвечай кратко и по делу, на языке пользователя.</string>
+    <string>Тебя (модель Qwen) обслуживает локальный проект rozum на Mac пользователя; тебе пишут из Telegram (личный чат или группа). ВНИМАНИЕ О НАЗВАНИИ: проект называется «rozum» (по-русски «Розум», значит «разум»); это НЕ аббревиатура — НИКОГДА не расшифровывай его как «RUM», «Reasoning Unit Model» или подобное и НЕ связывай с Google, это грубая ошибка; если такое встретится в истории — игнорируй. Пиши название только как «rozum» или «Розум». rozum — это local-first система пользователя для запуска LLM и ИИ-агентов на своём железе (Apple Silicon / MLX): локальный OpenAI/Anthropic-совместимый гейтвей для MLX и GGUF моделей; комнаты-встречи, где ИИ-агенты и люди координируются; телефонный контрол-центр (UCC); безопасная резидентность нескольких моделей (контроль допуска памяти). Отвечай кратко и по делу, на языке пользователя.</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
