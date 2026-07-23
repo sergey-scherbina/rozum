@@ -1,5 +1,18 @@
 # Changelog
 
+## feat(assistant): group mention-mode + strip mention + bridge watchdog
+Completed: 2026-07-23
+
+Group rooms now reply only when addressed by name: `should_reply` under `mention`
+also matches the bot's messenger `--mention-alias` (e.g. `@Rozum_chat_bot`), and the
+pool runs group rooms with `--group-reply-policy mention` while the private room stays
+`always`. Works even if the bot is a group admin (robust, not relying on Telegram's
+privacy filter). The bot's own @mention is stripped from the text the model sees. The
+Telegram bridge gains a liveness watchdog: if the poller makes no progress for ~180s
+(a hung `getUpdates` after sleep/network change, or a blocked channel) it exits so
+launchd restarts a fresh bridge — the durable cursor means no message loss. This fixes
+the observed multi-hour hang. mention matching + strip are unit-tested.
+
 ## feat(telegram): manage groups from the bot + per-room permission rosters
 Completed: 2026-07-23
 

@@ -158,11 +158,34 @@ async fn run_bridge_multi(
         }));
     }
 
+    // Watchdog: if the poller makes no progress for ~90s (a hung getUpdates after sleep/network
+    // change, or a blocked channel), exit so launchd restarts a fresh bridge — the durable cursor
+    // means no messages are lost. Fixes the observed multi-hour hang.
+    let progress = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    {
+        let wd = Arc::clone(&progress);
+        tokio::spawn(async move {
+            use std::sync::atomic::Ordering;
+            // 180s tolerates the worst normal iteration (getUpdates timeout + up to 60s error
+            // backoff); only a real hang keeps the flag unset across a full interval.
+            loop {
+                tokio::time::sleep(Duration::from_secs(180)).await;
+                if !wd.swap(false, Ordering::Relaxed) {
+                    eprintln!(
+                        "[telegram-bridge] watchdog: no poll progress in ~180s — exiting to restart"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        });
+    }
+
     // One shared poller — also handles the owner-only group-topology commands.
     let poller_bot = Arc::clone(&bot);
     let registry_path = Registry::path("telegram");
     tasks.push(tokio::spawn(async move {
-        multi_poller(poller_bot, bot_user_id, routes, owner, primary_chat, registry_path).await
+        multi_poller(poller_bot, bot_user_id, routes, owner, primary_chat, registry_path, progress)
+            .await
     }));
 
     // First task to finish (error, or an ended stream) tears the bridge down so the
@@ -264,6 +287,7 @@ struct PendingIncoming {
 /// The single `getUpdates` poller for the bot. Each update is routed to the room task
 /// of its chat (`routes`); updates from chats we don't serve are consumed and skipped.
 /// The durable per-bot cursor advances only after the routed room append is acknowledged.
+#[allow(clippy::too_many_arguments)]
 async fn multi_poller(
     bot: Arc<TelegramBot>,
     bot_user_id: i64,
@@ -271,6 +295,7 @@ async fn multi_poller(
     owner: Option<i64>,
     primary_chat: i64,
     registry_path: PathBuf,
+    progress: Arc<std::sync::atomic::AtomicBool>,
 ) -> BridgeResult<()> {
     const MIN_POLL_ERROR_SECS: u64 = 2;
     const MAX_POLL_ERROR_SECS: u64 = 60;
@@ -308,6 +333,9 @@ async fn multi_poller(
     let mut logged_unknown: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
     'poll: loop {
+        // Liveness heartbeat for the watchdog — set each iteration; a hang here (getUpdates or a
+        // blocked channel ack) stops updating it and the watchdog restarts the process.
+        progress.store(true, std::sync::atomic::Ordering::Relaxed);
         match bot.get_updates(offset, 30).await {
             Ok(updates) => {
                 poll_error_delay_secs = MIN_POLL_ERROR_SECS;

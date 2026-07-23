@@ -69,7 +69,12 @@ pub fn base_handle(display: &str) -> &str {
 /// redaction placeholders, and dedupes our OWN repeated assistant outputs — ≥4 identical assistant
 /// turns would otherwise trip the gateway's stuck-loop detector, which then emits the same "stuck"
 /// text and poisons the model into repeating it.
-fn build_context(system: String, transcript: &[StoredTurn], handle: &str) -> Vec<serde_json::Value> {
+fn build_context(
+    system: String,
+    transcript: &[StoredTurn],
+    handle: &str,
+    mention_alias: Option<&str>,
+) -> Vec<serde_json::Value> {
     let mut messages = vec![serde_json::json!({ "role": "system", "content": system })];
     let start = transcript.len().saturating_sub(24);
     let mut seen_assistant: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -86,9 +91,11 @@ fn build_context(system: String, transcript: &[StoredTurn], handle: &str) -> Vec
             }
             messages.push(serde_json::json!({ "role": "assistant", "content": t.content }));
         } else {
+            // Strip the bot's own @mention so the model sees a clean question, not "@Rozum_chat_bot …".
+            let content = strip_mention(&t.content, mention_alias);
             messages.push(serde_json::json!({
                 "role": "user",
-                "content": format!("{}: {}", who, t.content),
+                "content": format!("{}: {}", who, content),
             }));
         }
     }
@@ -108,19 +115,52 @@ fn sender_id_from_content(content: &str) -> Option<i64> {
 
 /// Should the model reply to `turn`? `handle` is its own base handle (callers have
 /// already excluded its own turns). `peers` are other model handles in the room, so
-/// `Always` never triggers a model↔model runaway.
-pub fn should_reply(policy: ReplyPolicy, turn: &StoredTurn, handle: &str, peers: &[String]) -> bool {
+/// `Always` never triggers a model↔model runaway. Under `Mention`, the model replies
+/// when the message @mentions its own handle OR `mention_alias` (the bot's messenger
+/// username, e.g. `@Rozum_chat_bot`) — so a group can address it by name.
+pub fn should_reply(
+    policy: ReplyPolicy,
+    turn: &StoredTurn,
+    handle: &str,
+    peers: &[String],
+    mention_alias: Option<&str>,
+) -> bool {
     match policy {
         ReplyPolicy::Manual => false,
-        ReplyPolicy::Mention => turn
-            .content
-            .to_ascii_lowercase()
-            .contains(&format!("@{}", handle.to_ascii_lowercase())),
+        ReplyPolicy::Mention => {
+            let c = turn.content.to_ascii_lowercase();
+            c.contains(&format!("@{}", handle.to_ascii_lowercase()))
+                || mention_alias
+                    .map(|a| a.trim().to_ascii_lowercase())
+                    .is_some_and(|a| !a.is_empty() && c.contains(&a))
+        }
         ReplyPolicy::Always => {
             let from = base_handle(&turn.display_name);
             !peers.iter().any(|p| p.eq_ignore_ascii_case(from))
         }
     }
+}
+
+/// Remove the bot's own @mention (`mention_alias`, e.g. `@Rozum_chat_bot`) from a message so
+/// the model sees a clean question. Case-insensitive; collapses the leftover spaces.
+fn strip_mention(text: &str, mention_alias: Option<&str>) -> String {
+    let Some(alias) = mention_alias.map(str::trim).filter(|a| !a.is_empty()) else {
+        return text.to_string();
+    };
+    let lower = text.to_ascii_lowercase();
+    let alias_lower = alias.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if lower[i..].starts_with(&alias_lower) {
+            i += alias.len();
+        } else {
+            let ch = text[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Run the bridge: join `room` as `handle`, then reply via the gateway per `policy`
@@ -139,6 +179,7 @@ pub async fn run(
     shell: bool,
     shell_network: bool,
     acl_path: Option<std::path::PathBuf>,
+    mention_alias: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use super::daemon::daemon_alive;
     use super::daemon_proxy::spawn_daemon;
@@ -207,7 +248,7 @@ pub async fn run(
             if base_handle(&turn.display_name).eq_ignore_ascii_case(&handle) {
                 continue; // never reply to itself (display carries a session suffix)
             }
-            if !should_reply(policy, &turn, &handle, &peers) {
+            if !should_reply(policy, &turn, &handle, &peers, mention_alias.as_deref()) {
                 continue;
             }
             eprintln!("[participant] replying to {} …", base_handle(&turn.display_name));
@@ -236,6 +277,7 @@ pub async fn run(
                 can_read,
                 can_write,
                 can_shell,
+                mention_alias.as_deref(),
             )
             .await
             {
@@ -271,6 +313,7 @@ async fn generate(
     can_read: bool,
     can_write: bool,
     can_shell: bool,
+    mention_alias: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // File/shell tools are offered only when a sandbox exists AND this user was granted the
     // capability. When nothing is granted the model runs as plain chat (no tools).
@@ -315,7 +358,7 @@ async fn generate(
             names.join(", ")
         ));
     }
-    let messages = build_context(system, transcript, handle);
+    let messages = build_context(system, transcript, handle, mention_alias);
     // A strict chat template (e.g. Qwen3.6) errors without a user message — if the context held
     // only presence/own turns, there's nothing to answer; stay silent rather than send a bad call.
     if !messages.iter().any(|m| m["role"] == "user") {
@@ -452,27 +495,51 @@ mod tests {
             ReplyPolicy::Mention,
             &turn("Alice", "hey @gpt-oss what do you think?"),
             "gpt-oss",
-            &[]
+            &[],
+            None
         ));
         assert!(!should_reply(
             ReplyPolicy::Mention,
             &turn("Alice", "just chatting"),
             "gpt-oss",
-            &[]
+            &[],
+            None
         ));
     }
 
     #[test]
     fn always_skips_peer_models_no_loop() {
         let peers = vec!["qwen3.6".to_string()];
-        assert!(should_reply(ReplyPolicy::Always, &turn("Alice", "hi"), "gpt-oss", &peers));
+        assert!(should_reply(ReplyPolicy::Always, &turn("Alice", "hi"), "gpt-oss", &peers, None));
         // a peer model's message must NOT trigger a reply (no model↔model loop)
-        assert!(!should_reply(ReplyPolicy::Always, &turn("qwen3.6", "hi back"), "gpt-oss", &peers));
+        assert!(!should_reply(
+            ReplyPolicy::Always,
+            &turn("qwen3.6", "hi back"),
+            "gpt-oss",
+            &peers,
+            None
+        ));
+        // Mention policy matches the bot's messenger alias, not just the handle.
+        assert!(should_reply(
+            ReplyPolicy::Mention,
+            &turn("Alice", "hey @Rozum_chat_bot help"),
+            "qwen",
+            &[],
+            Some("@Rozum_chat_bot")
+        ));
+        assert!(!should_reply(
+            ReplyPolicy::Mention,
+            &turn("Alice", "just chatting"),
+            "qwen",
+            &[],
+            Some("@Rozum_chat_bot")
+        ));
+        assert_eq!(strip_mention("@Rozum_chat_bot что такое rozum?", Some("@Rozum_chat_bot")), "что такое rozum?");
     }
 
     #[test]
     fn manual_never_replies() {
-        assert!(!should_reply(ReplyPolicy::Manual, &turn("Alice", "@gpt-oss hi"), "gpt-oss", &[]));
+        assert!(!should_reply(ReplyPolicy::Manual, &turn("Alice", "@gpt-oss hi"), "gpt-oss", &[], None));
     }
 
     #[test]
@@ -485,7 +552,8 @@ mod tests {
             ReplyPolicy::Always,
             &turn("gpt-oss · jolly-marten", "hi"),
             "gpt-oss",
-            &["gpt-oss".into()]
+            &["gpt-oss".into()],
+            None
         ));
     }
 
@@ -501,7 +569,7 @@ mod tests {
             turn("qwen", "[redacted: old]"),
             turn("Sergiy", "вопрос 2"),
         ];
-        let msgs = build_context("SYS".into(), &transcript, "qwen");
+        let msgs = build_context("SYS".into(), &transcript, "qwen", None);
         let asst_stuck = msgs
             .iter()
             .filter(|m| m["role"] == "assistant" && m["content"] == "STUCK LOOP TEXT")

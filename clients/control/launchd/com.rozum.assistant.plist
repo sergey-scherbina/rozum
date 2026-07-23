@@ -9,8 +9,10 @@
   per-room services (com.rozum.assistant + com.rozum.assistant-group).
 
   Each room gets its OWN ACL roster (messenger-acl/<room>.json) — a grant in one group does not
-  apply in another or in the private chat. Shared resident gateway :8089 (one model load),
-  shared sandbox ~/rozum-sandbox, confined shell (network allowed; deny with --shell-no-network).
+  apply in another or in the private chat. The PRIVATE room replies to everything (reply-policy
+  always); GROUP rooms reply only when addressed by name (group-reply-policy mention +
+  --mention-alias @Rozum_chat_bot), and that mention is stripped from what the model sees. Shared
+  resident gateway :8089 (one model load), shared sandbox ~/rozum-sandbox, confined shell.
   Specs: docs/specs/assistant-sandbox-tools.md, docs/specs/messenger-access-control.md.
 -->
 <plist version="1.0">
@@ -34,6 +36,8 @@
     <string>--sandbox</string>
     <string>/Users/sergiy/rozum-sandbox</string>
     <string>--shell</string>
+    <string>--mention-alias</string>
+    <string>@Rozum_chat_bot</string>
     <string>--persona</string>
     <string>Тебя (модель Qwen) обслуживает локальный проект rozum на Mac пользователя; тебе пишут из Telegram (личный чат или группа). ВНИМАНИЕ О НАЗВАНИИ: проект называется «rozum» (по-русски «Розум», значит «разум»); это НЕ аббревиатура — НИКОГДА не расшифровывай его как «RUM», «Reasoning Unit Model» или подобное и НЕ связывай с Google, это грубая ошибка; если такое встретится в истории — игнорируй. Пиши название только как «rozum» или «Розум». rozum — это local-first система пользователя для запуска LLM и ИИ-агентов на своём железе (Apple Silicon / MLX): локальный OpenAI/Anthropic-совместимый гейтвей для MLX и GGUF моделей; комнаты-встречи, где ИИ-агенты и люди координируются; телефонный контрол-центр (UCC); безопасная резидентность нескольких моделей (контроль допуска памяти). Отвечай кратко и по делу, на языке пользователя.</string>
   </array>

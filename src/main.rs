@@ -714,6 +714,11 @@ enum MeetingsAction {
         /// Omitted → the sandbox's read+write (and --shell) apply to everyone the bridge admits.
         #[arg(long = "acl")]
         acl: Option<std::path::PathBuf>,
+        /// The bot's messenger @username (e.g. `@Rozum_chat_bot`). Under `--reply-policy mention`
+        /// the model also replies when a message @mentions this; the mention is stripped from the
+        /// text the model sees.
+        #[arg(long = "mention-alias")]
+        mention_alias: Option<String>,
     },
 
     /// Supervise one participant per room: the primary `--room` plus every room in the Telegram
@@ -728,8 +733,13 @@ enum MeetingsAction {
         /// Roster handle for every child participant (default derived from the model).
         #[arg(long = "as")]
         as_handle: Option<String>,
+        /// Reply policy for the PRIMARY room (private chat) — usually `always`.
         #[arg(long = "reply-policy", default_value = "always")]
         reply_policy: String,
+        /// Reply policy for GROUP rooms — usually `mention` so the bot answers only when addressed
+        /// by name (with `--mention-alias`), not to every message.
+        #[arg(long = "group-reply-policy", default_value = "mention")]
+        group_reply_policy: String,
         #[arg(long = "gateway-url", default_value = "http://127.0.0.1:8080/v1")]
         gateway_url: String,
         #[arg(long = "peer")]
@@ -744,6 +754,9 @@ enum MeetingsAction {
         shell: bool,
         #[arg(long = "shell-no-network", default_value_t = false)]
         shell_no_network: bool,
+        /// The bot's @username (e.g. `@Rozum_chat_bot`) for mention detection + stripping.
+        #[arg(long = "mention-alias")]
+        mention_alias: Option<String>,
     },
 
     /// Drive the incident lifecycle from the shell — the human/script twin of the agent-native MCP
@@ -1298,6 +1311,7 @@ async fn main() {
                 shell,
                 shell_no_network,
                 acl,
+                mention_alias,
             } => {
                 run_meetings_participant(
                     model,
@@ -1312,6 +1326,7 @@ async fn main() {
                     shell,
                     shell_no_network,
                     acl,
+                    mention_alias,
                 )
                 .await
             }
@@ -1320,6 +1335,7 @@ async fn main() {
                 room,
                 as_handle,
                 reply_policy,
+                group_reply_policy,
                 gateway_url,
                 peers,
                 persona,
@@ -1327,6 +1343,7 @@ async fn main() {
                 sandbox,
                 shell,
                 shell_no_network,
+                mention_alias,
             } => {
                 run_meetings_participant_pool(
                     model,
@@ -1334,12 +1351,14 @@ async fn main() {
                     as_handle,
                     gateway_url,
                     reply_policy,
+                    group_reply_policy,
                     peers,
                     persona,
                     persona_file,
                     sandbox,
                     shell,
                     shell_no_network,
+                    mention_alias,
                 )
                 .await
             }
@@ -3701,6 +3720,7 @@ async fn run_meetings_participant(
     shell: bool,
     shell_no_network: bool,
     acl: Option<std::path::PathBuf>,
+    mention_alias: Option<String>,
 ) {
     use rozum::meeting::model_participant::{ReplyPolicy, derive_handle, run};
     let policy: ReplyPolicy = match reply_policy.parse() {
@@ -3726,7 +3746,7 @@ async fn run_meetings_participant(
     };
     if let Err(e) = run(
         model, room, handle, policy, gateway_url, peers, persona, sandbox, shell,
-        !shell_no_network, acl,
+        !shell_no_network, acl, mention_alias,
     )
     .await
     {
@@ -3746,12 +3766,14 @@ async fn run_meetings_participant_pool(
     as_handle: Option<String>,
     gateway_url: String,
     reply_policy: String,
+    group_reply_policy: String,
     peers: Vec<String>,
     persona: Option<String>,
     persona_file: Option<std::path::PathBuf>,
     sandbox: Option<std::path::PathBuf>,
     shell: bool,
     shell_no_network: bool,
+    mention_alias: Option<String>,
 ) {
     use rozum::messenger_acl::Acl;
     use rozum::messenger_groups::Registry;
@@ -3794,6 +3816,9 @@ async fn run_meetings_participant_pool(
             }
             children.remove(room);
             let acl = Acl::path_for(room);
+            // Primary room (private chat) uses `reply_policy` (usually always); group rooms use
+            // `group_reply_policy` (usually mention) so the bot answers only when addressed by name.
+            let policy = if room == &primary_room { &reply_policy } else { &group_reply_policy };
             let mut cmd = tokio::process::Command::new(&exe);
             cmd.kill_on_drop(true);
             cmd.arg("meetings")
@@ -3803,13 +3828,16 @@ async fn run_meetings_participant_pool(
                 .arg("--room")
                 .arg(room)
                 .arg("--reply-policy")
-                .arg(&reply_policy)
+                .arg(policy)
                 .arg("--gateway-url")
                 .arg(&gateway_url)
                 .arg("--acl")
                 .arg(&acl);
             if let Some(h) = &as_handle {
                 cmd.arg("--as").arg(h);
+            }
+            if let Some(a) = &mention_alias {
+                cmd.arg("--mention-alias").arg(a);
             }
             if let Some(s) = &sandbox {
                 cmd.arg("--sandbox").arg(s);
