@@ -25,6 +25,8 @@
     <string>mlx-community:Qwen3.5-4B-MLX-4bit</string>
     <string>--room</string>
     <string>assistant</string>
+    <string>--as</string>
+    <string>qwen</string>
     <string>--reply-policy</string>
     <string>always</string>
     <string>--gateway-url</string>

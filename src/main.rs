@@ -725,6 +725,9 @@ enum MeetingsAction {
         /// The primary room (e.g. the private-chat room `assistant`); groups add more.
         #[arg(long)]
         room: String,
+        /// Roster handle for every child participant (default derived from the model).
+        #[arg(long = "as")]
+        as_handle: Option<String>,
         #[arg(long = "reply-policy", default_value = "always")]
         reply_policy: String,
         #[arg(long = "gateway-url", default_value = "http://127.0.0.1:8080/v1")]
@@ -1315,6 +1318,7 @@ async fn main() {
             MeetingsAction::ParticipantPool {
                 model,
                 room,
+                as_handle,
                 reply_policy,
                 gateway_url,
                 peers,
@@ -1327,6 +1331,7 @@ async fn main() {
                 run_meetings_participant_pool(
                     model,
                     room,
+                    as_handle,
                     gateway_url,
                     reply_policy,
                     peers,
@@ -3738,6 +3743,7 @@ async fn run_meetings_participant(
 async fn run_meetings_participant_pool(
     model: String,
     primary_room: String,
+    as_handle: Option<String>,
     gateway_url: String,
     reply_policy: String,
     peers: Vec<String>,
@@ -3802,6 +3808,9 @@ async fn run_meetings_participant_pool(
                 .arg(&gateway_url)
                 .arg("--acl")
                 .arg(&acl);
+            if let Some(h) = &as_handle {
+                cmd.arg("--as").arg(h);
+            }
             if let Some(s) = &sandbox {
                 cmd.arg("--sandbox").arg(s);
             }
