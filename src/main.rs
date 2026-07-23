@@ -3764,6 +3764,9 @@ async fn run_meetings_participant_pool(
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("rozum-gateway"));
     let registry_path = Registry::path("telegram");
     let mut children: HashMap<String, tokio::process::Child> = HashMap::new();
+    // Stop children on SIGTERM/SIGINT (launchd stop) so a restart never leaves orphaned
+    // participants double-replying in a room.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
     eprintln!(
         "[participant-pool] primary room '{primary_room}', registry {}",
         registry_path.display()
@@ -3786,6 +3789,7 @@ async fn run_meetings_participant_pool(
             children.remove(room);
             let acl = Acl::path_for(room);
             let mut cmd = tokio::process::Command::new(&exe);
+            cmd.kill_on_drop(true);
             cmd.arg("meetings")
                 .arg("participant")
                 .arg("--model")
@@ -3829,7 +3833,25 @@ async fn run_meetings_participant_pool(
                 let _ = c.start_kill();
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        // Reconcile every 5s, or stop promptly on SIGTERM/SIGINT (killing children first).
+        let stop = async {
+            match &mut sigterm {
+                Some(s) => {
+                    s.recv().await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+            _ = stop => {
+                eprintln!("[participant-pool] signal received — stopping {} participant(s)", children.len());
+                for (_room, mut c) in children.drain() {
+                    let _ = c.start_kill();
+                }
+                return;
+            }
+        }
     }
 }
 
