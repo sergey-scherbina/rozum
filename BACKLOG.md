@@ -1,5 +1,22 @@
 # Backlog
 
+## Service liveness — we ship daemons with no health signal (found 2026-07-27, BUG-013)
+
+- [ ] **service-liveness-watch** — BUG-013 was a 4-day outage of the flagship feature (the messenger
+  assistant) that NO green surface we look at could have caught: `cargo test` is green, CI is green,
+  `launchctl list` shows the job with a bare exit code nobody reads, and the failing job wrote nothing
+  to its own log because it died before it could. It was found by accident. The deploy-side gate added
+  with the fix only covers the moment of deploy — it says nothing about the following four days.
+  What is actually missing is a periodic check of the things we run: for each `com.rozum.*` job, is it
+  running, and does its ENDPOINT answer (`:8089` a completion, `:8411` `/control/auth/status`, `:8401`,
+  `:8405`, `:8779`) — plus, for the assistant specifically, "has the bridge made progress recently".
+  Levers, cheapest first: (a) `rozum doctor --services` that prints the roster + endpoint probes
+  (useful immediately, manual); (b) a launchd `StartInterval` job that runs it and posts a line into
+  the rozum room on transition-to-bad, so the operator and the agents see it where they already look;
+  (c) surface the same roster in the UCC dashboard, since that is the phone-facing front door.
+  Note the general shape of the failure, not just the instance: **a KeepAlive job that can never exec
+  is indistinguishable from a healthy one unless you probe what it is supposed to serve.**
+
 ## CI: extend the portable-core gate to the whole workspace (2026-07-15)
 
 - [x] **ci-workspace-portable-core — DONE 2026-07-16.** CI now builds every real workspace binary

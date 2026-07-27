@@ -5,6 +5,54 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-013 — `com.rozum.gateway` crash-looped for 4 days, silently taking the messenger assistant down
+
+- **Status:** fixed live 2026-07-27 (service reloaded, verified end-to-end); deploy-side guard added
+  this commit so a recurrence fails the deploy instead of going unnoticed.
+- **Source:** found while answering "what is the state of the project" — NOT reported. Nothing
+  surfaced it: no alert, no log line, no failing test. That is the actual severity here.
+- **Severity:** P1 — the flagship feature (the Telegram assistant, the whole 20-23 July arc) was
+  dead in the field for 4 days and the only symptom was "the bot doesn't answer".
+
+**Symptom.** `launchctl print gui/501/com.rozum.gateway` → `state = spawn scheduled`,
+`runs = 36301`, `last exit code = 78: EX_CONFIG`. Nothing listening on :8089. `~/.rozum-gateway.log`
+untouched since 2026-07-23 05:22 — i.e. **36k respawns produced zero output**, the process died
+before it could write a line. Meanwhile `~/.rozum/bin/rozum-gateway` was replaced at 06:17 that
+same morning.
+
+**Blast radius.** Every messenger participant is launched with
+`--gateway-url http://127.0.0.1:8089/v1` (`com.rozum.assistant` pool, both the private room and
+the group room). With :8089 dead they stayed alive, joined their rooms, and answered nothing.
+`com.rozum.telegram` also stayed up and kept polling, so from the outside the bridge looked
+healthy. Last real exchange in room `assistant`: 06:04 on 23 July, minutes before the binary swap.
+
+**Diagnosis.** Running the job's EXACT command by hand works and serves normally (model loads,
+`ready (context 32768)`, completions return) — so it is not the binary, the args, the model, RAM,
+or the port. The job itself was the broken part: a stale launchd registration against a binary
+that had been replaced underneath it (`properties = … needs LWCR update`), which launchd refuses
+to exec and reports as EX_CONFIG with no output. `launchctl bootout` + `bootstrap` fixed it
+instantly: `runs = 1`, `state = running`, `:8089` LISTEN in ~5s.
+
+**Verified after the fix.** `curl /v1/chat/completions` on :8089 → `content: 'OK'`,
+`finish_reason: stop`. Assistant pool restarted (`kickstart -k`) so both children are fresh; a
+ping posted into room `assistant` was answered by `qwen` within seconds. Swept every other rozum
+service — `assistant`, `telegram`, `meeting-daemon`, `mcp-http`, `ucc-control`, `meeting-ssc` all
+`state = running`, `runs = 1..2`: the gateway was the only affected job.
+
+**Why it hid for 4 days (the part worth fixing).** `deploy-ucc-web.sh` bootstraps the gateway and
+then prints `warming in background` — it never checks that anything came up, and a KeepAlive job
+that can never exec looks exactly like one that is still warming. FIX: step 5c polls :8089 for up
+to 90s after the bootstrap; still not listening → read the job state back, WARN if launchd says
+`running` (slow cold load), and hard-`exit 1` with the bootout/bootstrap recipe if it is not.
+
+**Note on the exact trigger.** The proximate cause (stale registration vs a replaced binary) is
+established by the fix working; WHICH deploy path left it that way on 23 July is not provable from
+the artifacts 4 days later — the script's own ordering (`rm`+`cp` the binary at line 86-87, bounce
+the job at 505-511) is correct, and `UCC_SPA_ONLY=1` consistently skips both. Do not over-read it;
+the guard above is what makes the question stop mattering.
+
+---
+
 ## BUG-012 — UCC launch registries: concurrency races + terminal reconnect loop (audit sweep)
 
 - **Status:** fixed on `a1c073c`, deployed 2026-07-08; live-verified (concurrent launch, stop-during-start).

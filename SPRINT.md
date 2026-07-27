@@ -1,5 +1,36 @@
 # Sprint
 
+### ▶ Live-service triage (operator 2026-07-27: "Какое состояние проекта … что нужно дальше делать?" → "Берись")
+
+- [x] **gateway-launchd-crashloop — FIXED LIVE 2026-07-27.** The shared gateway on :8089 had been in a
+  KeepAlive crash-loop since 23 July (`runs = 36301`, `last exit code = 78 EX_CONFIG`, zero log output),
+  so **the messenger assistant — the entire 20-23 July arc — had no model backend for 4 days** and nothing
+  reported it. Fixed by `launchctl bootout` + `bootstrap` (stale job registration vs the replaced binary);
+  verified `:8089` LISTEN + a real completion + a live reply from `qwen` in room `assistant`. Every other
+  rozum service was healthy. Added a readiness gate to `deploy-ucc-web.sh` (step 5c) so this fails the
+  deploy loudly instead of silently. Full write-up: **BUGS.md BUG-013** — read that, not this summary.
+  **LESSON (generalizes past this bug):** we have no liveness signal for the daemons we ship. Every
+  green surface we look at — tests, CI, `launchctl list`'s bare exit column — stayed green through a
+  4-day outage of the flagship feature. See the `service-liveness-watch` backlog item.
+
+- [x] **second-bot-groups deployed (@rozumia_bot)** — the tail of `f89bcfd`. `com.rozum.assistant-groups`
+  (participant pool, registry `telegram-groups`, primary room `rozumia`) is **loaded and running**: the
+  pool spawned its participant, which joined `rozumia` against the restored :8089. Token verified
+  (`getMe` → `@rozumia_bot`, id 8873553843, can_join_groups). `com.rozum.telegram-groups` (the bridge)
+  is **installed but deliberately NOT loaded** — see the blocked item below.
+
+- [ ] **second-bot-groups-start** (BLOCKED ON THE OPERATOR, 1 minute of their time) — the bridge dies at
+  startup with `telegram bridge error: Telegram getChat failed (code 400): Bad Request: chat not found`.
+  NOT a bug: its primary chat is the owner's DM with `@rozumia_bot` (`TELEGRAM_CHAT_ID` = the owner's
+  user id 1711036782), and **that DM does not exist until the owner presses Start** — `getUpdates` for
+  the new bot returns 0 updates, i.e. it has never been messaged. I unloaded the bridge rather than let
+  it hammer `getChat` every 10s under KeepAlive. UNBLOCK: open `@rozumia_bot` in Telegram, send `/start`,
+  then `launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.rozum.telegram-groups.plist`. THEN verify
+  the actual point of the second bot end-to-end: add it to a group, `/addgroup`, confirm a namespaced
+  entry lands in `messenger-groups/telegram-groups.json`, that the pool spawns a participant for that
+  room, that it answers ONLY when addressed as `@rozumia_bot`, and that the personal bot's
+  `messenger-groups/telegram.json` + rooms are untouched (the whole point of `f89bcfd`).
+
 - [x] **ci-green-baseline — DONE 2026-07-16 (`9506811`, `06de22c`, `645f5e7`,
   `5b675ea`, `a3595c6`).** Restored CI after the workspace/binary split: macOS gates shipped defaults
   plus every workspace library, Linux gates the whole no-default workspace, and Windows gates the thin

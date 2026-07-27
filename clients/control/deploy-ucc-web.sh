@@ -511,6 +511,35 @@ if ! launchctl bootstrap "gui/$UID_" "$gw_plist"; then
 fi
 # The model load is async (cold-loads Qwen ~30s); the daemon answers `gateway status` once resident.
 echo ">> com.rozum.gateway installed (Qwen3.5-4B on :8089, idle-unload 20m) — warming in background"
+
+# 5c) VERIFY the gateway actually came up. Without this, a job that can never exec is
+#     indistinguishable from one that is still warming: launchd's KeepAlive respawns it forever,
+#     the failure never reaches the job's own log (it dies before writing a line), and the ONLY
+#     symptom is that everything pointing at :8089 (the phone chat, the messenger assistant
+#     participants) silently stops answering. Hit live 2026-07-23 -> 2026-07-27: 36k respawns at
+#     `last exit code = 78 (EX_CONFIG)` over 4 days while the same command by hand served fine —
+#     a stale job registration against a replaced binary; bootout+bootstrap cleared it instantly.
+#     See BUGS.md BUG-013.
+gw_up=0
+for _ in $(seq 1 45); do
+  if lsof -nP -iTCP:8089 -sTCP:LISTEN >/dev/null 2>&1; then gw_up=1; break; fi
+  sleep 2
+done
+if [ "$gw_up" = "1" ]; then
+  echo "gateway        :8089 -> LISTEN"
+else
+  gw_state=$(launchctl print "gui/$UID_/com.rozum.gateway" 2>/dev/null | awk -F'= ' '/^\tstate = /{print $2; exit}')
+  gw_exit=$(launchctl print "gui/$UID_/com.rozum.gateway" 2>/dev/null | awk -F'= ' '/last exit code/{print $2; exit}')
+  if [ "$gw_state" = "running" ]; then
+    echo ">> WARNING: com.rozum.gateway is running but :8089 is not listening after 90s (slow cold load?)" >&2
+  else
+    echo ">> ERROR: com.rozum.gateway is NOT running (state=$gw_state, last exit code=$gw_exit)." >&2
+    echo "   It is respawning under KeepAlive and will never serve :8089. Check ~/.rozum-gateway.log;" >&2
+    echo "   if it is empty, the job cannot exec its binary at all — re-run:" >&2
+    echo "     launchctl bootout gui/$UID_/com.rozum.gateway && launchctl bootstrap gui/$UID_ $gw_plist" >&2
+    exit 1
+  fi
+fi
 fi
 
 # Browser smoke gate — the 2026-07-07 bug classes (blank init, dead navigation, click-eater,
