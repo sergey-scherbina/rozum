@@ -120,16 +120,33 @@ The operator accepted the token-through-browser trade-off; these mitigations are
   writing a file or a plist, so a typo can't leave a crash-looping service behind.
 - **The UI clears the field** on success, so the token does not sit in the page.
 
-## Verification
+## Verification — what was actually done (2026-07-27)
 
-- Unit tests on `messenger_admin` operations (add/remove idempotence, registry namespacing, caps
-  parse/round-trip, plist generation, path safety) and on the bridge's registry-change detection.
-- `cargo test --workspace` — the whole suite, not `cargo check`, per the lesson from
+DONE:
+
+- **Unit tests**: 9 on `messenger_admin` (bot-name path/label safety, seeding only claiming bots
+  whose secret exists, upsert/round-trip, `launchctl print` parsing incl. the BUG-013 crash-loop
+  shape, service-action parsing, and — the important one — *generated plists and wrapper never
+  contain the token*, plus XML and shell escaping of interpolated values), 1 on the bridge's
+  registry-change predicate covering absent→present, modified, and present→absent.
+- **`cargo test --workspace`: 736 passed, 0 failed** — the whole suite, not `cargo check`, per
   `gw-test-suite-not-compiling` (`cargo check` does not build `#[cfg(test)]`).
-- E2E through `clients/control/test/ucc-e2e.mjs`: the new screen renders, lists the real bots, and a
-  group add/remove round-trips through the REST layer.
-- Live: a group add via CLI must be picked up by the bridge WITHOUT a manual restart — that is the
-  point of the watch, and it's the one thing a unit test can't prove.
+- **CLI against the real deployment**: both bots resolve through `getMe`, launchd states read
+  correctly, group add/remove round-trips and is idempotent in both directions.
+- **SPA**: `ssc-tools emit-spa` compiles the page (540 KB, 0 JS syntax errors, all wiring present).
+- **REST**: every new route answers `401` unauthenticated while an unknown path under the same
+  prefix answers `405` — real registration behind real auth, not a blanket.
+
+NOT YET DONE — needs a deploy of this branch, so it is deliberately not claimed:
+
+- **The live watch proof**: a CLI group-add picked up by the RUNNING bridge with no manual restart.
+  The bridge on the machine is the Jul-23 binary, which predates the watch. The predicate is
+  unit-tested; the integration is not, and a unit test can't stand in for it.
+- **`ucc-e2e.mjs`** against the new screen (it drives the live authenticated origin).
+
+A bug that only running the code could find, worth recording: **Telegram group ids are always
+negative, and clap parsed `-1004378341901` as a flag** — so the single most common invocation of
+`groups add` failed outright. Fixed with `allow_negative_numbers`.
 
 ## Notes
 
