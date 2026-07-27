@@ -35,13 +35,29 @@
   `assistant-group`, untouched), and `telegram-groups.json` does not exist yet because the second bot
   has no groups. Per-room ACL likewise got its own fresh `messenger-acl/rozumia.json`.
 
+- [x] **stale-group-registry-cleanup — DONE 2026-07-27.** The operator accidentally LEFT the test
+  supergroup `-1004378341901` "Rozum Group" and cannot get back in. Established via Bot API, not guessed:
+  the group still exists but is **orphaned** — `getChatAdministrators` returns EMPTY (the owner left with
+  him), member count 2 = the two bots, both plain `member`, and it is private with no `username`.
+  There is no way back from our side and it is not a rozum limitation: **the Bot API has no method to add
+  a user to a chat at all**, and `createChatInviteLink`/`exportChatInviteLink` both require admin rights
+  that no one can now grant. Treat the group as lost. CLEANED UP: dropped the entry from
+  `messenger-groups/telegram.json` (now `{"groups":[]}`) — the pool reconciles every 5s and reaped the
+  orphan child (`stopping participant for removed room 'assistant-group'`), and `com.rozum.telegram` was
+  restarted (it reads the registry only at startup) so it routes just `chat 1711036782 <-> room
+  'assistant'`. Live participants are now exactly the two DM rooms, `assistant` + `rozumia`.
+  NOTE for next time: the DESIGNED path is `/removegroup <id>` in the owner's DM with the bot — it edits
+  the registry AND re-execs the bridge in one message. Direct file edit works (the pool polls) but needs
+  the manual bridge restart. There is no CLI for the registry; if that keeps coming up, add one.
+
 - [ ] **second-bot-groups-verify** (NEEDS THE OPERATOR — the group half is untestable from a shell) —
-  the actual point of `f89bcfd` is still unproven: add `@rozumia_bot` to a group and send `/addgroup`
-  there. THEN check, in this order: a namespaced entry lands in `messenger-groups/telegram-groups.json`
-  (and NOT in `telegram.json`); `com.rozum.assistant-groups` reconciles and spawns a participant for
-  that room; it answers ONLY when addressed as `@rozumia_bot` and stays silent otherwise; the personal
-  bot's registry, rooms and ACL rosters are untouched. Note the bot must be a group admin (or privacy
-  off) to see messages at all — the known gotcha.
+  the actual point of `f89bcfd` is still unproven, and the group it was going to be proven in is now
+  lost (above), so it needs a FRESH group: create one, add `@rozumia_bot`, **make it an admin** (or
+  privacy off — otherwise it sees no messages, the known gotcha), send `/addgroup` there. THEN check, in
+  this order: a namespaced entry lands in `messenger-groups/telegram-groups.json` (and NOT in
+  `telegram.json`); `com.rozum.assistant-groups` reconciles and spawns a participant for that room; it
+  answers ONLY when addressed as `@rozumia_bot` and stays silent otherwise; the personal bot's registry,
+  rooms and ACL rosters are untouched.
 
 - [x] **ci-green-baseline — DONE 2026-07-16 (`9506811`, `06de22c`, `645f5e7`,
   `5b675ea`, `a3595c6`).** Restored CI after the workspace/binary split: macOS gates shipped defaults
