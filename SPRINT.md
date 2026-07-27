@@ -20,12 +20,28 @@ two scope decisions and the security constraints they imply).
 - [x] **msgadmin-rest — DONE** (`60bea2a`). `/control/messenger/*` behind `require_auth` +
   `require_admin`. Token to the child on STDIN, never argv.
 - [x] **msgadmin-ucc — DONE** (`60bea2a`). `#/messenger`, three sections, one status signal.
-- [ ] **msgadmin-verify** — DONE: workspace **736 passed / 0 failed**; CLI exercised against the
-  real deployment; `emit-spa` compiles the page (0 JS errors); every new route 401s unauthenticated
-  while an unknown sibling path 405s (real registration behind real auth).
-  **REMAINING, both need this branch DEPLOYED — not claimed until then:** (1) a CLI group-add
-  picked up by the RUNNING bridge with no manual restart, which is the whole point of the watch;
-  (2) `ucc-e2e.mjs` against the new screen.
+- [x] **msgadmin-verify — DONE + DEPLOYED 2026-07-27** (merged `7458363`, deploy fix `b474eea`).
+  Workspace **736 passed / 0 failed**; `emit-spa` compiles the page (0 JS errors); every route 401s
+  unauthenticated while an unknown sibling path 405s. **Live after deploy:** a CLI `groups add` was
+  picked up by the RUNNING bridge with no manual restart (`group registry changed on disk —
+  restarting to apply`, runs 1→2), the pool spawned a participant for the new room with its own
+  roster, the bogus chat was skipped leniently while the private chat stayed served, and `remove`
+  reversed all of it (runs→3, participant reaped, registry empty). **`ucc-e2e.mjs` 25 cases, 22
+  pass** — all 6 new messenger cases green incl. a real `@…bot` row from the admin-gated route; the
+  3 failures are the pre-existing env ones (sole model already resident → no load button).
+  All six services `runs=1` after the deploy, `:8089` + `:8411` listening.
+
+- [x] **deploy-async-bootout — FIXED 2026-07-27** (`b474eea`). Found BY deploying the above:
+  `launchctl bootout` returns before the job's slot is free, the gateway's slot drains slowly
+  (4B model), so the script's `sleep 1` + one retry BOTH lost the race and left the gateway GONE —
+  a second silent :8089 outage, one day after BUG-013. The readiness gate from this morning is the
+  only reason it surfaced during the deploy instead of days later. Fixed at the root: a bounded
+  retry loop (10 × 2s) shared by ucc-control and the gateway, last attempt unsilenced so a genuine
+  failure still shows its reason. **Note for anyone touching launchd here: `bootout` + immediate
+  `bootstrap` is ALWAYS a race; never paper over it with a sleep.** Also staged
+  `~/.cargo/bin/rozum-gateway` (what the messenger services exec — the deploy only ever refreshed
+  `~/.rozum/bin`, which is how the assistant sat on a 4-day-old binary) and re-registered the four
+  messenger jobs with bootout+bootstrap, not kickstart, per BUG-013.
 
 SECURITY (operator chose the deeper option knowing the trade-off — see the spec): the bot token is
 write-only. Accepted on `bot/add`, `getMe`-validated BEFORE anything is written, stored 600 in

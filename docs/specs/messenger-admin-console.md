@@ -137,12 +137,25 @@ DONE:
 - **REST**: every new route answers `401` unauthenticated while an unknown path under the same
   prefix answers `405` — real registration behind real auth, not a blanket.
 
-NOT YET DONE — needs a deploy of this branch, so it is deliberately not claimed:
+DONE AFTER THE DEPLOY (2026-07-27, merged `7458363`):
 
-- **The live watch proof**: a CLI group-add picked up by the RUNNING bridge with no manual restart.
-  The bridge on the machine is the Jul-23 binary, which predates the watch. The predicate is
-  unit-tested; the integration is not, and a unit test can't stand in for it.
-- **`ucc-e2e.mjs`** against the new screen (it drives the live authenticated origin).
+- **The live watch proof.** `messenger groups add -1009999999999 --registry telegram-groups` with
+  nothing else touched → the bridge logged `group registry changed on disk … — restarting to apply`,
+  launchd took it from `runs=1` to `runs=2`, and the pool spawned a participant for the new room
+  with its OWN roster (`messenger-acl/group-1009999999999.json`, policy `mention`). The bogus chat
+  was skipped leniently (`skipping chat -1009999999999: chat not found`) while the private chat
+  stayed served — the failure mode that must never take the personal chat down. `groups remove`
+  reversed all of it: bridge `runs=3`, `stopping participant for removed room …`, registry empty.
+- **`ucc-e2e.mjs`: 25 cases, 22 passing.** Six new messenger cases all green, including
+  `msg-bot-row` (a real `@…bot` row rendered from the admin-gated status route — proof the data
+  path works end to end, not just that a heading appeared) and `msg-token-field` (present, empty).
+  The 3 failures are the pre-existing environmental ones (`models-*`: the sole installed model is
+  already resident, so there is no load button to tap) — identical before and after this change.
+
+A second bug the deploy itself surfaced: **`launchctl bootout` is async**, and the gateway's slot
+drains slowly because it holds a 4B model, so the script's fixed `sleep 1` + one retry both lost
+the race and left the service GONE. Caught by the readiness gate added the same day (BUG-013), and
+fixed at the root with a bounded retry loop.
 
 A bug that only running the code could find, worth recording: **Telegram group ids are always
 negative, and clap parsed `-1004378341901` as a flag** — so the single most common invocation of
