@@ -1,5 +1,35 @@
 # Sprint
 
+### ▶ Messenger admin console (operator 2026-07-27: "CLI для реестра … заведи. И в контрол центре тоже сделай отдельный экран и инструмент для управления ботами и группами в телеграме")
+
+Branch `feature/messenger-admin-console`, worktree `.worktrees/messenger-admin`.
+Spec: `docs/specs/messenger-admin-console.md` (written first — read it, it carries the operator's
+two scope decisions and the security constraints they imply).
+
+- [ ] **msgadmin-core** — `crates/rozum-meeting/src/messenger_admin.rs`: ONE implementation of the
+  operations (bot roster, group add/remove, ACL show/grant/revoke, service control, bot install),
+  called by the CLI, the REST layer and (unchanged) the in-chat commands. Logic must NOT live in
+  route handlers or the `.ssc` — that is what keeps the CLI and the screen from drifting.
+- [ ] **msgadmin-cli** — `rozum-gateway messenger {bots,groups,acl} …`. NEW top-level group; the
+  existing `telegram --room … --name …` (the bridge the launchd wrappers invoke) stays untouched.
+- [ ] **msgadmin-bridge-watch** — the bridge watches its own registry file (mtime at startup,
+  re-checked each poll iteration) and returns through the existing "topology changed" path on
+  change. Fixes the real footgun: today the POOL reconciles every 5s but the BRIDGE reads the
+  registry only at startup, so a CLI/UCC/hand edit applies to half the system silently.
+- [ ] **msgadmin-rest** — `/control/messenger/*` behind `require_auth` + `require_admin`. One
+  `status` route the screen renders from (bots + getMe + launchd state + groups + ACL rooms).
+- [ ] **msgadmin-ucc** — `#/messenger` screen: Боты (start/stop/restart + add), Группы (add/remove
+  per registry), Права (roster per room, grant/revoke). Remember the recurring UCC trap: the build
+  goes through deploy `emit-spa` = the `ssc-tools` tier, NOT plain `ssc`.
+- [ ] **msgadmin-verify** — `cargo test --workspace` (NOT `cargo check` — it does not build
+  `#[cfg(test)]`, see `gw-test-suite-not-compiling`), `ucc-e2e.mjs`, and the one thing no unit test
+  can prove: a CLI group-add is picked up by the running bridge with NO manual restart.
+
+SECURITY (operator chose the deeper option knowing the trade-off — see the spec): the bot token is
+write-only. Accepted on `bot/add`, `getMe`-validated BEFORE anything is written, stored 600 in
+`~/.rozum/secrets/`, never returned by `status`, never rendered, never logged, and stripped from any
+URL that could reach an error message.
+
 ### ▶ Live-service triage (operator 2026-07-27: "Какое состояние проекта … что нужно дальше делать?" → "Берись")
 
 - [x] **gateway-launchd-crashloop — FIXED LIVE 2026-07-27.** The shared gateway on :8089 had been in a
