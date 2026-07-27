@@ -55,7 +55,7 @@ async function testNav(browser) {
   });
   (/control center/i.test(home.h1) && home.hasNav) ? ok('nav-home', `h1="${home.h1}"`) : bad('nav-home', `h1="${home.h1}" nav=${home.hasNav}`);
 
-  for (const [route, rx] of [['#/agents', /Agents|Агенты/], ['#/coders', /Coders|Кодеры/], ['#/sessions', /Sessions|Сессии/]]) {
+  for (const [route, rx] of [['#/agents', /Agents|Агенты/], ['#/coders', /Coders|Кодеры/], ['#/sessions', /Sessions|Сессии/], ['#/messenger', /Мессенджер|Messenger/]]) {
     await page.goto(BASE + '/' + route, { waitUntil: 'networkidle2', timeout: 30000 });
     await settle(1200);
     const info = await page.evaluate(() => ({ hash: location.hash, heads: [...document.querySelectorAll('h1,h2')].map(h => h.textContent).join('|') }));
@@ -212,6 +212,49 @@ async function testPickers(browser) {
   await page.close();
 }
 
+// ── MESSENGER CONSOLE ──────────────────────────────────────────────────────────
+// The screen exists to answer "is the bot alive, and which groups is it serving?" — so the test
+// asserts REAL data reached it, not just that a heading rendered. A screen that renders an empty
+// table looks identical to a working one until you need it. Spec: docs/specs/messenger-admin-console.md.
+async function testMessenger(browser) {
+  const page = await newPage(browser);
+  let statusHit = 0;
+  page.on('request', r => { if (r.url().includes('/control/messenger/status')) statusHit++; });
+  await page.goto(BASE + '/#/messenger', { waitUntil: 'networkidle2', timeout: 30000 });
+  await settle(1800);
+
+  statusHit > 0 ? ok('msg-fetch', `${statusHit} status call(s)`) : bad('msg-fetch', 'screen never called /control/messenger/status');
+
+  const view = await page.evaluate(() => {
+    const heads = [...document.querySelectorAll('h1,h2')].map(h => h.textContent);
+    const body = document.body.textContent || '';
+    const tables = document.querySelectorAll('[data-ssc-datatable]').length;
+    // A bot row is proof the admin-gated status route answered AND the table bound to it.
+    const bot = /@[A-Za-z0-9_]*[Bb]ot/.test(body);
+    const inputs = [...document.querySelectorAll('input')].map(i => i.getAttribute('placeholder') || '');
+    return { heads: heads.join('|'), tables, bot, inputs: inputs.join('|'), body: body.slice(0, 0) };
+  });
+
+  /Боты/.test(view.heads) && /Группы/.test(view.heads) && /Права/.test(view.heads)
+    ? ok('msg-sections', 'Боты + Группы + Права')
+    : bad('msg-sections', `heads="${view.heads}"`);
+
+  view.bot ? ok('msg-bot-row', 'a @…bot row rendered from live status')
+           : bad('msg-bot-row', 'no bot row — status returned nothing, or the table did not bind');
+
+  view.tables >= 3 ? ok('msg-tables', `${view.tables} tables`) : bad('msg-tables', `only ${view.tables} tables`);
+
+  // The token field must exist (adding a bot is the operator's chosen flow) and must start empty.
+  const tok = await page.evaluate(() => {
+    const el = [...document.querySelectorAll('input')].find(i => /токен/i.test(i.getAttribute('placeholder') || ''));
+    return el ? { present: true, value: el.value } : { present: false };
+  });
+  tok.present && tok.value === '' ? ok('msg-token-field', 'present and empty')
+    : bad('msg-token-field', tok.present ? `pre-filled with ${tok.value.length} chars` : 'no token field');
+
+  await page.close();
+}
+
 // ── API ────────────────────────────────────────────────────────────────────────
 async function testApi() {
   const s = await api('GET', '/control/status');
@@ -252,6 +295,7 @@ async function testApi() {
     await testModelsError(browser);
     await testChat(browser);
     await testPickers(browser);
+    await testMessenger(browser);
     await testApi();
   } finally { await browser.close(); }
 

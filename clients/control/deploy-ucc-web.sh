@@ -479,14 +479,30 @@ done
 
 # 5) (Re)load only com.rozum.ucc-control (no more ucc-web Python service).
 UID_=$(id -u)
+
+# bootout is ASYNC: launchctl returns before the job's slot is actually free, and bootstrapping
+# into a slot that is still draining fails with "Bootstrap failed: 5: Input/output error". A fixed
+# `sleep 1` is not enough when the job holds a multi-GB model — hit live 2026-07-27 deploying this
+# very change: the gateway was booted out, both bootstrap attempts lost the race, and the service
+# ended up GONE (nothing on :8089) until it was bootstrapped by hand, which then worked first try.
+# Retry with a real budget instead of guessing a sleep.
+rebootstrap() {
+  local label="$1" plist="$2" i
+  launchctl bootout "gui/$UID_/$label" 2>/dev/null || true
+  for i in $(seq 1 10); do
+    if launchctl bootstrap "gui/$UID_" "$plist" 2>/dev/null; then
+      [ "$i" -gt 1 ] && echo ">> $label: bootstrap succeeded on attempt $i (slot was still draining)"
+      return 0
+    fi
+    sleep 2
+  done
+  echo ">> ERROR: $label could not be bootstrapped after 20s" >&2
+  launchctl bootstrap "gui/$UID_" "$plist" >&2   # once more, unsilenced, so the reason is visible
+  return 1
+}
+
 plist="$HOME/Library/LaunchAgents/com.rozum.ucc-control.plist"
-launchctl bootout "gui/$UID_/com.rozum.ucc-control" 2>/dev/null || true
-sleep 1  # bootout is async; bootstrapping immediately after can race and fail with "Input/output error"
-if ! launchctl bootstrap "gui/$UID_" "$plist"; then
-  echo ">> bootstrap failed, retrying once ..." >&2
-  sleep 1
-  launchctl bootstrap "gui/$UID_" "$plist"
-fi
+rebootstrap com.rozum.ucc-control "$plist" || exit 1
 sleep 2
 curl -sf --max-time 4 http://127.0.0.1:8411/ -o /dev/null -w "spa+api        :8411 -> %{http_code}\n"
 # /control/status now requires auth (401 without a session is CORRECT, not a failure — see
@@ -502,13 +518,8 @@ curl -s  --max-time 4 http://127.0.0.1:8411/control/status -o /dev/null -w "stat
 #     headroom before loading (never overcommits a jetsam-pressure host, BUG-003).
 gw_plist="$HOME/Library/LaunchAgents/com.rozum.gateway.plist"
 cp "$HERE/launchd/com.rozum.gateway.plist" "$gw_plist"
-launchctl bootout "gui/$UID_/com.rozum.gateway" 2>/dev/null || true
-sleep 1
-if ! launchctl bootstrap "gui/$UID_" "$gw_plist"; then
-  echo ">> gateway bootstrap failed, retrying once ..." >&2
-  sleep 1
-  launchctl bootstrap "gui/$UID_" "$gw_plist"
-fi
+# This is the one that actually loses the race — it holds a 4B model, so its slot drains slowly.
+rebootstrap com.rozum.gateway "$gw_plist" || exit 1
 # The model load is async (cold-loads Qwen ~30s); the daemon answers `gateway status` once resident.
 echo ">> com.rozum.gateway installed (Qwen3.5-4B on :8089, idle-unload 20m) — warming in background"
 
