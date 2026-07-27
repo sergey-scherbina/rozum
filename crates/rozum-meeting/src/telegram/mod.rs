@@ -750,6 +750,35 @@ mod tests {
     }
 
     #[test]
+    fn registry_mtime_is_the_signal_the_poller_restarts_on() {
+        // The poll loop restarts the bridge when this value MOVES. Three transitions matter, and
+        // all three are things an external editor (CLI, console, hand edit) actually does.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("telegram.json");
+
+        // (1) absent is a legitimate steady state — a bot with no groups — not an error.
+        assert!(registry_mtime(&path).is_none());
+
+        // (2) absent -> present: the FIRST group connected from outside. Missed today.
+        std::fs::write(&path, r#"{"groups":[]}"#).unwrap();
+        let first = registry_mtime(&path);
+        assert!(first.is_some());
+        assert_ne!(first, None, "appearing must read as a change");
+
+        // (3) present -> modified. Filesystem mtime can be coarse, so assert on the CONTENT
+        // transition via an explicitly newer timestamp rather than racing the clock.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::open(&path)
+            .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(later)))
+            .unwrap();
+        assert_ne!(registry_mtime(&path), first, "a rewrite must read as a change");
+
+        // (4) present -> absent (a registry deleted wholesale) is a change too.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(registry_mtime(&path), None);
+    }
+
+    #[test]
     fn update_offset_is_checked() {
         assert_eq!(next_update_offset(7).unwrap(), 8);
         assert!(next_update_offset(i64::MAX).is_err());

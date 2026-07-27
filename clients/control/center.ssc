@@ -12,7 +12,7 @@ One std/ui app: a dashboard (live `/control/status`) AND a native chat view per 
 stays inside the standalone PWA. Hash routing (`#/chat/<room>`) switches the view in place.
 
 ## Setup
-[signal, emit, serve, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, fetchActionWith, formBody, onBumpTick, incSignal, computedSignal, fieldColumn, stackedColumn, hashSignal, onOpenJson](std/ui/primitives.ssc)
+[signal, emit, serve, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, fetchActionWith, formBody, onBumpTick, onSetSignal, incSignal, computedSignal, fieldColumn, stackedColumn, hashSignal, onOpenJson](std/ui/primitives.ssc)
 [jsonValue](std/json.ssc)
 [lower](std/ui/lower.ssc)
 [darkTheme](std/ui/theme.ssc)
@@ -36,7 +36,7 @@ val room = computedSignal(() => {
   val h = hash()
   if h.contains("/chat/") then h.split("/chat/").last else ""
 })
-val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else if hash().contains("/coders") then "coders" else if hash().contains("/sessions") then "sessions" else "home")
+val mode = computedSignal(() => if hash().contains("/chat/") then "chat" else if hash().contains("/agents") then "agents" else if hash().contains("/coders") then "coders" else if hash().contains("/sessions") then "sessions" else if hash().contains("/messenger") then "messenger" else "home")
 val isDetailOpen = computedSignal(() => hash().contains("/detail/"))
 
 val detailSpec = computedSignal(() => { val h = hash(); if h.contains("/detail/") then h.split("/detail/").last else "" })
@@ -99,7 +99,7 @@ val chatCard = cardWithHeader(heading(2, "💬 Chat"))(
 
 val dashboard = vstack(gap = 16)(
   heading(1, "rozum — control center"),
-  hstack(gap = 10)(link("/chat.html", "💬 Chat"), link("#/agents", "🤖 Agents"), link("#/coders", "💻 Coders"), link("#/sessions", "🖥 Sessions"), link("/matrix.html", "📊 Matrix"), link("/login.html", "🔐 Login")),
+  hstack(gap = 10)(link("/chat.html", "💬 Chat"), link("#/agents", "🤖 Agents"), link("#/coders", "💻 Coders"), link("#/sessions", "🖥 Sessions"), link("#/messenger", "📨 Боты"), link("/matrix.html", "📊 Matrix"), link("/login.html", "🔐 Login")),
   divider(),
   chatCard,
   divider(),
@@ -288,6 +288,125 @@ val sessionsBody = vstack(gap = 16)(
 )
 ```
 
+## Messenger — bots, groups, rosters
+```scalascript
+// Everything on this screen renders from ONE signal, and every mutation goes to
+// /control/messenger/* which runs `rozum-gateway messenger … --json` — the same code path as
+// the CLI and the in-chat commands, so the console can't drift from the shell.
+// Spec: docs/specs/messenger-admin-console.md.
+val msgTick = signal("msgTick", 0)
+val msg     = fetchUrlSignal("messenger", "/control/messenger/status", msgTick)
+
+// Bots. The server sets exactly one of stop_body / start_body (the other ""), and the table
+// skips a row action with an empty body — so a live bot offers "стоп", a dead one "старт".
+val botsPanel = cardWithHeader(hstack(gap = 10)(heading(2, "Боты"), actionButton(incSignal(msgTick), "↻")))(
+  remoteTable(msg, [
+    stackedColumn("Бот", "username", "state_line"),
+    stackedColumn("Комната", "room", "groups_line")
+  ], "bots", [
+    rowPostAction("↻",     "POST", "/control/messenger/bot/service", "restart_body", msgTick),
+    rowPostAction("■ стоп", "POST", "/control/messenger/bot/service", "stop_body",    msgTick),
+    rowPostAction("▶ старт","POST", "/control/messenger/bot/service", "start_body",   msgTick)
+  ], "name")
+)
+
+val newBotName  = signal("newBotName", "")
+val newBotToken = signal("newBotToken", "")
+val newBotRoom  = signal("newBotRoom", "")
+val newBotAlias = signal("newBotAlias", "")
+// The token is cleared from the page on success (onSetSignal) — it is write-only: the server
+// stores it 600 and никогда не отдаёт обратно, so nothing on this screen can ever display one.
+val addBotCard = cardWithHeader(heading(2, "Добавить бота"))(
+  vstack(gap = 8)(
+    text("Токен от @BotFather. Он проверяется через getMe ДО записи на диск и больше никогда не покидает машину."),
+    textField(newBotName,  "имя (латиница, напр. groups)…"),
+    textField(newBotToken, "токен…"),
+    textField(newBotRoom,  "комната личного чата (по умолчанию = имя)…"),
+    textField(newBotAlias, "как звать в группах, напр. @my_bot…"),
+    actionButton(fetchActionWith("POST", "/control/messenger/bot/add",
+      formBody([("name", "newBotName"), ("token", "newBotToken"), ("room", "newBotRoom"), ("mention_alias", "newBotAlias")]),
+      [onBumpTick(msgTick), onSetSignal(newBotToken, "")]), "＋ добавить бота"),
+    text("После установки откройте бота в Telegram и нажмите Start — до этого личного чата не существует и мост его не провалидирует.")
+  )
+)
+
+// Groups: one flat list across every registry, each row carrying its own remove body.
+val newGroupRegistry = signal("newGroupRegistry", "telegram")
+val newGroupChatId   = signal("newGroupChatId", "")
+val newGroupRoom     = signal("newGroupRoom", "")
+val newGroupTitle    = signal("newGroupTitle", "")
+
+val groupsPanel = cardWithHeader(heading(2, "Группы"))(
+  remoteTable(msg, [
+    stackedColumn("Чат", "chat_id", "title"),
+    stackedColumn("Куда", "where_line", "registry")
+  ], "groups", [
+    rowPostAction("✕ отключить", "POST", "/control/messenger/group/remove", "remove_body", msgTick)
+  ], "chat_id")
+)
+
+val addGroupCard = cardWithHeader(heading(2, "Подключить группу"))(
+  vstack(gap = 8)(
+    text("id группы — отрицательное число. Бот должен быть в группе администратором, иначе он не увидит сообщений."),
+    textField(newGroupRegistry, "реестр (telegram | telegram-groups)…"),
+    textField(newGroupChatId,   "id чата, напр. -1004378341901…"),
+    textField(newGroupRoom,     "комната (пусто = group-<id>)…"),
+    textField(newGroupTitle,    "название…"),
+    actionButton(fetchActionWith("POST", "/control/messenger/group/add",
+      formBody([("registry", "newGroupRegistry"), ("chat_id", "newGroupChatId"), ("room", "newGroupRoom"), ("title", "newGroupTitle")]),
+      [onBumpTick(msgTick), onSetSignal(newGroupChatId, "")]), "＋ подключить"),
+    text("Мост подхватит изменение сам — он следит за своим реестром и перезапускается.")
+  )
+)
+
+// Rosters. Pick a room, see who may do what, grant/revoke — the /grant, /revoke, /members
+// commands, for the case where the chat is exactly what you can't reach.
+val aclRoom   = signal("aclRoom", "")
+val aclTick   = signal("aclTick", 0)
+val aclUrl    = computedSignal(() => "/control/messenger/acl?room=" + aclRoom())
+val aclData   = fetchUrlSignalTo("messengerAcl", aclUrl, aclTick)
+val aclUserId = signal("aclUserId", "")
+val aclName   = signal("aclName", "")
+val aclCaps   = signal("aclCaps", "chat")
+
+val aclRoomsPanel = cardWithHeader(heading(2, "Комнаты"))(
+  remoteTable(msg, [fieldColumn("Комната", "room")], "acl_rooms", [rowLink("выбрать", aclRoom, "room")], "room")
+)
+
+val aclPanel = cardWithHeader(hstack(gap = 10)(heading(2, "Права"), signalText_(aclRoom), actionButton(incSignal(aclTick), "↻")))(
+  vstack(gap = 8)(
+    remoteTable(aclData, [
+      stackedColumn("Кто", "user_id", "name"),
+      fieldColumn("Права", "caps")
+    ], "members", [], "user_id"),
+    textField(aclUserId, "telegram user id…"),
+    textField(aclName,   "имя (необязательно)…"),
+    textField(aclCaps,   "права: chat read write shell | all | none"),
+    hstack(gap = 8)(
+      actionButton(fetchActionWith("POST", "/control/messenger/acl/grant",
+        formBody([("room", "aclRoom"), ("user_id", "aclUserId"), ("name", "aclName"), ("caps", "aclCaps")]),
+        [onBumpTick(aclTick)]), "✓ выдать"),
+      actionButton(fetchActionWith("POST", "/control/messenger/acl/revoke",
+        formBody([("room", "aclRoom"), ("user_id", "aclUserId")]),
+        [onBumpTick(aclTick)]), "✕ отозвать")
+    )
+  )
+)
+
+val messengerBody = vstack(gap = 16)(
+  hstack(gap = 10)(link("#/", "← back"), heading(1, "Мессенджер"), actionButton(incSignal(msgTick), "↻")),
+  divider(),
+  botsPanel,
+  addBotCard,
+  divider(),
+  groupsPanel,
+  addGroupCard,
+  divider(),
+  aclRoomsPanel,
+  aclPanel
+)
+```
+
 ## Model detail
 ```scalascript
 val detailDisplayName = computedSignal(() => jsonValue(detailData()).get("display_name").asString)
@@ -338,7 +457,8 @@ val view = vstack(gap = 0)(
     route("chat",     [chatBody]),
     route("agents",   [agentsBody]),
     route("coders",   [codersBody]),
-    route("sessions", [sessionsBody])
+    route("sessions", [sessionsBody]),
+    route("messenger", [messengerBody])
   ]),
   detailModal
 )

@@ -1603,6 +1603,9 @@ async fn bot_view(bot: &rozum::messenger_admin::Bot) -> serde_json::Value {
     };
     let bridge = adm::service_state(&bot.bridge_label);
     let pool = adm::service_state(&bot.pool_label);
+    // Flat fields alongside the nested ones: the UCC tables read a field by name and cannot walk
+    // into a nested object, and per-row action bodies are precomputed here (the same idiom the
+    // models panel uses for load/unload) so the screen never has to build a request itself.
     serde_json::json!({
         "name": bot.name,
         "platform": bot.platform,
@@ -1615,6 +1618,19 @@ async fn bot_view(bot: &rozum::messenger_admin::Bot) -> serde_json::Value {
         "groups": groups.groups.len(),
         // NOTE: `secret` is the FILE NAME, never its contents. The token has no path to a caller.
         "secret_file": bot.secret,
+        "username": identity["username"].as_str().map(|u| format!("@{u}")).unwrap_or_else(|| "—".into()),
+        "state_line": format!(
+            "мост {} · пул {}",
+            bridge.state,
+            pool.state
+        ),
+        "groups_line": format!("{} групп · реестр {}", groups.groups.len(), bot.registry),
+        "restart_body": format!("bot={}&action=restart", bot.name),
+        // Exactly ONE of stop/start is non-empty — the UCC tables skip a row action whose body is
+        // empty, so the row shows "стоп" for a live bot and "старт" for a dead one, never both.
+        // Same idiom as the models panel's load/unload pair.
+        "stop_body": if bridge.state == "running" { format!("bot={}&action=stop", bot.name) } else { String::new() },
+        "start_body": if bridge.state == "running" { String::new() } else { format!("bot={}&action=start", bot.name) },
     })
 }
 
@@ -1650,35 +1666,46 @@ async fn run_messenger(action: MessengerAction) {
         MessengerAction::Status { json } => {
             let bots = adm::Bots::load_default();
             let mut views = Vec::new();
-            let mut registries = serde_json::Map::new();
+            // ONE flat group list across every registry, each row carrying its registry and a
+            // ready-made remove body. A per-registry map would force the screen to know the
+            // registry names up front — which is exactly what changes when a bot is added.
+            let mut groups = Vec::new();
             for b in &bots.bots {
                 views.push(bot_view(b).await);
-                let reg = adm::groups_list(&b.registry);
-                registries.insert(
-                    b.registry.clone(),
-                    serde_json::to_value(&reg.groups).unwrap_or(serde_json::Value::Null),
-                );
+                for g in adm::groups_list(&b.registry).groups {
+                    groups.push(serde_json::json!({
+                        "registry": b.registry,
+                        "bot": b.name,
+                        "chat_id": g.chat_id,
+                        "room": g.room,
+                        "title": g.title,
+                        "where_line": format!("{} · бот {}", g.room, b.name),
+                        "remove_body": format!("registry={}&chat_id={}", b.registry, g.chat_id),
+                    }));
+                }
             }
-            let rooms = adm::acl_rooms();
+            let rooms: Vec<serde_json::Value> =
+                adm::acl_rooms().into_iter().map(|r| serde_json::json!({ "room": r })).collect();
             let payload = serde_json::json!({
-                "ok": true, "bots": views, "registries": registries, "acl_rooms": rooms,
+                "ok": true, "bots": views, "groups": groups, "acl_rooms": rooms,
             });
             emit(json, payload.clone(), || {
                 println!("боты: {}", views.len());
-                for (reg, groups) in &registries {
-                    let n = groups.as_array().map(|a| a.len()).unwrap_or(0);
-                    println!("реестр {reg}: {n} групп");
-                    if let Some(arr) = groups.as_array() {
-                        for g in arr {
-                            println!(
-                                "  {} → {} ({})",
-                                g["chat_id"], g["room"].as_str().unwrap_or(""),
-                                g["title"].as_str().unwrap_or("")
-                            );
-                        }
-                    }
+                for g in &groups {
+                    println!(
+                        "  {} → {} (реестр {}, {})",
+                        g["chat_id"],
+                        g["room"].as_str().unwrap_or(""),
+                        g["registry"].as_str().unwrap_or(""),
+                        g["title"].as_str().unwrap_or("")
+                    );
                 }
-                println!("комнаты с ростером: {}", rooms.join(", "));
+                if groups.is_empty() {
+                    println!("  групп нет ни в одном реестре");
+                }
+                let names: Vec<&str> =
+                    rooms.iter().filter_map(|r| r["room"].as_str()).collect();
+                println!("комнаты с ростером: {}", names.join(", "));
             });
         }
 
