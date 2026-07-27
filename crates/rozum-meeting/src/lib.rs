@@ -7,6 +7,7 @@ pub mod discord;
 pub mod meeting;
 pub mod messenger;
 pub mod messenger_acl;
+pub mod messenger_admin;
 pub mod messenger_groups;
 pub mod telegram;
 pub mod tui;

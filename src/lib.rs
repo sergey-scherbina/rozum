@@ -26,7 +26,9 @@ pub use rozum_gateway::{anthropic_http, control, gateway, openai_http};
 // (Phase 1 of the workspace split). Re-export its modules under their original
 // paths so `crate::meeting::…` / `crate::tui::…` (and `rozum::meeting::…` from the
 // binary) keep resolving unchanged.
-pub use rozum_meeting::{discord, meeting, messenger_acl, messenger_groups, telegram, tui, web};
+pub use rozum_meeting::{
+    discord, meeting, messenger_acl, messenger_admin, messenger_groups, telegram, tui, web,
+};
 
 // Model catalog / sourcing / residency now live in the `rozum-models` crate
 // (Phase 2). Re-export under their original paths so `crate::model_source::…`

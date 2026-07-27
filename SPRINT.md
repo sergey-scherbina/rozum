@@ -1,5 +1,37 @@
 # Sprint
 
+### ▶ Messenger admin console (operator 2026-07-27: "CLI для реестра … заведи. И в контрол центре тоже сделай отдельный экран и инструмент для управления ботами и группами в телеграме")
+
+Branch `feature/messenger-admin-console`, worktree `.worktrees/messenger-admin`.
+Spec: `docs/specs/messenger-admin-console.md` (written first — read it, it carries the operator's
+two scope decisions and the security constraints they imply).
+
+- [x] **msgadmin-core — DONE** (`d038adb`). `crates/rozum-meeting/src/messenger_admin.rs`: ONE
+  implementation the CLI, the REST layer and the in-chat commands all go through. Bot roster
+  (seeded from the shipped deployments when their token file exists, so the console shows the truth
+  on first run instead of demanding the operator re-register bots that already work), group
+  add/remove, per-room ACL, launchd state + control, generation of a new bot's wrapper + plists.
+- [x] **msgadmin-cli — DONE** (`d038adb`). `rozum-gateway messenger {bots,status,groups,acl,service,
+  bot-add,bot-remove}`. `telegram --room … --name …` untouched. **Running it found a bug no unit
+  test would have: Telegram group ids are always negative and clap read `-1004378341901` as a flag**,
+  so the commonest invocation failed — `allow_negative_numbers`.
+- [x] **msgadmin-bridge-watch — DONE** (`d038adb`), predicate unit-tested, integration NOT yet
+  proven live (the machine still runs the Jul-23 bridge — see msgadmin-verify).
+- [x] **msgadmin-rest — DONE** (`60bea2a`). `/control/messenger/*` behind `require_auth` +
+  `require_admin`. Token to the child on STDIN, never argv.
+- [x] **msgadmin-ucc — DONE** (`60bea2a`). `#/messenger`, three sections, one status signal.
+- [ ] **msgadmin-verify** — DONE: workspace **736 passed / 0 failed**; CLI exercised against the
+  real deployment; `emit-spa` compiles the page (0 JS errors); every new route 401s unauthenticated
+  while an unknown sibling path 405s (real registration behind real auth).
+  **REMAINING, both need this branch DEPLOYED — not claimed until then:** (1) a CLI group-add
+  picked up by the RUNNING bridge with no manual restart, which is the whole point of the watch;
+  (2) `ucc-e2e.mjs` against the new screen.
+
+SECURITY (operator chose the deeper option knowing the trade-off — see the spec): the bot token is
+write-only. Accepted on `bot/add`, `getMe`-validated BEFORE anything is written, stored 600 in
+`~/.rozum/secrets/`, never returned by `status`, never rendered, never logged, and stripped from any
+URL that could reach an error message.
+
 ### ▶ Live-service triage (operator 2026-07-27: "Какое состояние проекта … что нужно дальше делать?" → "Берись")
 
 - [x] **gateway-launchd-crashloop — FIXED LIVE 2026-07-27.** The shared gateway on :8089 had been in a

@@ -1,5 +1,9 @@
 mod bot;
 
+// The admin console (CLI + UCC) needs to ask a token "who are you?" without owning a bridge,
+// so the bot handle and its `getMe` result are part of this module's public surface.
+pub use bot::{BotIdentity, TelegramBot as Bot};
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -293,6 +297,14 @@ struct PendingIncoming {
     committed: oneshot::Sender<Result<(), String>>,
 }
 
+/// Modification stamp of the group registry, or `None` when it does not exist yet. `None` is a
+/// legitimate state (a bot with no groups), and the transition `None -> Some` is exactly the
+/// "first group connected from outside" case we must notice, so absence is compared like any
+/// other value rather than treated as an error.
+fn registry_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
+
 /// The single `getUpdates` poller for the bot. Each update is routed to the room task
 /// of its chat (`routes`); updates from chats we don't serve are consumed and skipped.
 /// The durable per-bot cursor advances only after the routed room append is acknowledged.
@@ -340,11 +352,24 @@ async fn multi_poller(
     poll_error_delay_secs = MIN_POLL_ERROR_SECS;
     // Log each not-yet-served chat once — this is how the operator discovers a new group's id.
     let mut logged_unknown: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    // Routing topology can also change from OUTSIDE this process — `rozum-gateway messenger
+    // groups add/remove`, the UCC console, or a hand edit. The participant pool already
+    // reconciles the registry every 5s; the bridge used to read it only at startup, so such an
+    // edit applied to half the system and nothing said so. Watch the file and take the same
+    // restart path an in-chat `/addgroup` takes.
+    let registry_stamp = registry_mtime(&registry_path);
 
     'poll: loop {
         // Liveness heartbeat for the watchdog — set each iteration; a hang here (getUpdates or a
         // blocked channel ack) stops updating it and the watchdog restarts the process.
         progress.store(true, std::sync::atomic::Ordering::Relaxed);
+        if registry_mtime(&registry_path) != registry_stamp {
+            eprintln!(
+                "[telegram-bridge] group registry changed on disk ({}) — restarting to apply",
+                registry_path.display()
+            );
+            return Ok(());
+        }
         match bot.get_updates(offset, 30).await {
             Ok(updates) => {
                 poll_error_delay_secs = MIN_POLL_ERROR_SECS;
@@ -722,6 +747,35 @@ mod tests {
 
         std::fs::write(&cursor, "not-an-offset\n").unwrap();
         assert!(load_telegram_offset(&cursor, -100).is_err());
+    }
+
+    #[test]
+    fn registry_mtime_is_the_signal_the_poller_restarts_on() {
+        // The poll loop restarts the bridge when this value MOVES. Three transitions matter, and
+        // all three are things an external editor (CLI, console, hand edit) actually does.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("telegram.json");
+
+        // (1) absent is a legitimate steady state — a bot with no groups — not an error.
+        assert!(registry_mtime(&path).is_none());
+
+        // (2) absent -> present: the FIRST group connected from outside. Missed today.
+        std::fs::write(&path, r#"{"groups":[]}"#).unwrap();
+        let first = registry_mtime(&path);
+        assert!(first.is_some());
+        assert_ne!(first, None, "appearing must read as a change");
+
+        // (3) present -> modified. Filesystem mtime can be coarse, so assert on the CONTENT
+        // transition via an explicitly newer timestamp rather than racing the clock.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::open(&path)
+            .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(later)))
+            .unwrap();
+        assert_ne!(registry_mtime(&path), first, "a rewrite must read as a change");
+
+        // (4) present -> absent (a registry deleted wholesale) is a change too.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(registry_mtime(&path), None);
     }
 
     #[test]

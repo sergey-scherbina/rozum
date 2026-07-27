@@ -413,6 +413,160 @@ enum Command {
         #[command(subcommand)]
         action: RoomsAction,
     },
+
+    /// Administer the messenger assistant: bots, their group registries, and per-room rosters.
+    ///
+    /// The same operations the bot exposes in-chat (`/addgroup`, `/grant`, …), available from a
+    /// shell — which matters when the chat is exactly what you can't reach (a group you left, a
+    /// bridge that won't start). The UCC console drives these same commands, so all three
+    /// interfaces are one implementation. Spec: `docs/specs/messenger-admin-console.md`.
+    Messenger {
+        #[command(subcommand)]
+        action: MessengerAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum MessengerAction {
+    /// List the known bots with their live service state, rooms and group counts.
+    Bots {
+        /// Machine-readable output (what the UCC console parses).
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Everything at once — bots, groups per registry, and rooms with a roster.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Connected group chats.
+    Groups {
+        #[command(subcommand)]
+        action: GroupsAction,
+    },
+
+    /// Per-room permission rosters (who may chat, read, write, run commands).
+    Acl {
+        #[command(subcommand)]
+        action: AclAction,
+    },
+
+    /// Start / stop / restart a bot's services (bridge + participant pool).
+    Service {
+        /// Bot name, as listed by `messenger bots`.
+        bot: String,
+        /// start | stop | restart
+        action: String,
+    },
+
+    /// Install a NEW bot: validate the token, store it 600, generate its services, start them.
+    ///
+    /// The token is read from STDIN, never from an argument — arguments are visible in `ps` to
+    /// every process on the machine.
+    BotAdd {
+        /// Short name; becomes the registry namespace, secret file and service labels.
+        name: String,
+        /// Room the bot's owner DM maps to (defaults to the bot name).
+        #[arg(long)]
+        room: Option<String>,
+        /// Alias the bot answers to in groups, e.g. `@my_bot`.
+        #[arg(long, default_value = "")]
+        mention_alias: String,
+        #[arg(long, default_value = rozum::messenger_admin::DEFAULT_MODEL)]
+        model: String,
+        #[arg(long, default_value = rozum::messenger_admin::DEFAULT_GATEWAY_URL)]
+        gateway_url: String,
+        /// Sandbox root the model's file tools are confined to.
+        #[arg(long)]
+        sandbox: Option<String>,
+        /// Generate the files but do not start the services.
+        #[arg(long)]
+        no_start: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove a bot: stop its services and forget it. Its token secret is deleted too.
+    BotRemove {
+        name: String,
+        /// Keep the token secret on disk (default is to delete it with the bot).
+        #[arg(long)]
+        keep_secret: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GroupsAction {
+    /// List the groups of one registry.
+    List {
+        #[arg(long, default_value = "telegram")]
+        registry: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Connect a group chat to a room. Idempotent — re-adding keeps the existing room.
+    // Telegram group ids are ALWAYS negative, so without this every real invocation would die
+    // with "unexpected argument '-1' found" — caught by actually running the command.
+    #[command(allow_negative_numbers = true)]
+    Add {
+        /// Telegram chat id (negative for groups/supergroups).
+        chat_id: i64,
+        #[arg(long, default_value = "telegram")]
+        registry: String,
+        /// Room to map it to (defaults to `group-<|chat_id|>`, so re-adding reuses the roster).
+        #[arg(long)]
+        room: Option<String>,
+        #[arg(long, default_value = "")]
+        title: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Disconnect a group chat.
+    #[command(allow_negative_numbers = true)]
+    Remove {
+        chat_id: i64,
+        #[arg(long, default_value = "telegram")]
+        registry: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AclAction {
+    /// Show one room's roster.
+    Show {
+        room: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the rooms that have a roster.
+    Rooms {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Grant capabilities in ONE room: chat | read | write | shell | all | none.
+    Grant {
+        room: String,
+        user_id: i64,
+        #[arg(required = true)]
+        caps: Vec<String>,
+        #[arg(long, default_value = "")]
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke a member from ONE room.
+    Revoke {
+        room: String,
+        user_id: i64,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1389,6 +1543,381 @@ async fn main() {
                 eprintln!("telegram bridge error: {e}");
                 std::process::exit(1);
             }
+        }
+        Some(Command::Messenger { action }) => run_messenger(action).await,
+    }
+}
+
+// --- messenger admin CLI (spec: docs/specs/messenger-admin-console.md) --------------------
+
+/// Print either JSON or a human table, and exit non-zero on error. Every branch goes through
+/// here so `--json` behaves identically everywhere — the UCC console parses this output.
+fn emit(json: bool, value: serde_json::Value, human: impl FnOnce()) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into()));
+    } else {
+        human();
+    }
+}
+
+fn fail(json: bool, msg: &str) -> ! {
+    if json {
+        println!("{}", serde_json::json!({ "ok": false, "error": msg }));
+    } else {
+        eprintln!("ошибка: {msg}");
+    }
+    std::process::exit(1);
+}
+
+/// Read the bot token from stdin. NEVER an argument: arguments are world-visible in `ps`.
+fn read_token_stdin() -> Result<String, String> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf).map_err(|e| format!("не удалось прочитать токен из stdin: {e}"))?;
+    let token = buf.trim().to_string();
+    if token.is_empty() {
+        return Err("пустой токен на stdin (передайте его так: `... bot-add NAME < token.txt`)".into());
+    }
+    Ok(token)
+}
+
+/// A bot's live picture: identity from `getMe` (when its secret is readable), the state of both
+/// launchd jobs, and how many groups its registry holds.
+async fn bot_view(bot: &rozum::messenger_admin::Bot) -> serde_json::Value {
+    use rozum::messenger_admin as adm;
+    let groups = adm::groups_list(&bot.registry);
+    let identity = match std::fs::read_to_string(adm::secret_path(&bot.secret)) {
+        Ok(token) => {
+            let handle = rozum::telegram::Bot::new(token.trim().to_string(), 0);
+            match handle.get_me().await {
+                Ok(me) => serde_json::json!({
+                    "id": me.id,
+                    "username": me.username,
+                    "can_join_groups": me.can_join_groups,
+                    "reachable": true,
+                }),
+                Err(e) => serde_json::json!({ "reachable": false, "error": e }),
+            }
+        }
+        Err(e) => serde_json::json!({ "reachable": false, "error": format!("нет секрета: {e}") }),
+    };
+    let bridge = adm::service_state(&bot.bridge_label);
+    let pool = adm::service_state(&bot.pool_label);
+    // Flat fields alongside the nested ones: the UCC tables read a field by name and cannot walk
+    // into a nested object, and per-row action bodies are precomputed here (the same idiom the
+    // models panel uses for load/unload) so the screen never has to build a request itself.
+    serde_json::json!({
+        "name": bot.name,
+        "platform": bot.platform,
+        "registry": bot.registry,
+        "room": bot.room,
+        "mention_alias": bot.mention_alias,
+        "identity": identity,
+        "bridge": bridge,
+        "pool": pool,
+        "groups": groups.groups.len(),
+        // NOTE: `secret` is the FILE NAME, never its contents. The token has no path to a caller.
+        "secret_file": bot.secret,
+        "username": identity["username"].as_str().map(|u| format!("@{u}")).unwrap_or_else(|| "—".into()),
+        "state_line": format!(
+            "мост {} · пул {}",
+            bridge.state,
+            pool.state
+        ),
+        "groups_line": format!("{} групп · реестр {}", groups.groups.len(), bot.registry),
+        "restart_body": format!("bot={}&action=restart", bot.name),
+        // Exactly ONE of stop/start is non-empty — the UCC tables skip a row action whose body is
+        // empty, so the row shows "стоп" for a live bot and "старт" for a dead one, never both.
+        // Same idiom as the models panel's load/unload pair.
+        "stop_body": if bridge.state == "running" { format!("bot={}&action=stop", bot.name) } else { String::new() },
+        "start_body": if bridge.state == "running" { String::new() } else { format!("bot={}&action=start", bot.name) },
+    })
+}
+
+async fn run_messenger(action: MessengerAction) {
+    use rozum::messenger_admin as adm;
+    match action {
+        MessengerAction::Bots { json } => {
+            let bots = adm::Bots::load_default();
+            let mut views = Vec::new();
+            for b in &bots.bots {
+                views.push(bot_view(b).await);
+            }
+            let payload = serde_json::json!({ "ok": true, "bots": views });
+            emit(json, payload.clone(), || {
+                if views.is_empty() {
+                    println!("боты не найдены (нет ни одного токена в ~/.rozum/secrets)");
+                    return;
+                }
+                println!("{:<16} {:<18} {:<12} {:<12} {:>6}", "БОТ", "@USERNAME", "МОСТ", "ПУЛ", "ГРУПП");
+                for v in &views {
+                    println!(
+                        "{:<16} {:<18} {:<12} {:<12} {:>6}",
+                        v["name"].as_str().unwrap_or("?"),
+                        v["identity"]["username"].as_str().map(|u| format!("@{u}")).unwrap_or_else(|| "—".into()),
+                        v["bridge"]["state"].as_str().unwrap_or("?"),
+                        v["pool"]["state"].as_str().unwrap_or("?"),
+                        v["groups"].as_u64().unwrap_or(0),
+                    );
+                }
+            });
+        }
+
+        MessengerAction::Status { json } => {
+            let bots = adm::Bots::load_default();
+            let mut views = Vec::new();
+            // ONE flat group list across every registry, each row carrying its registry and a
+            // ready-made remove body. A per-registry map would force the screen to know the
+            // registry names up front — which is exactly what changes when a bot is added.
+            let mut groups = Vec::new();
+            for b in &bots.bots {
+                views.push(bot_view(b).await);
+                for g in adm::groups_list(&b.registry).groups {
+                    groups.push(serde_json::json!({
+                        "registry": b.registry,
+                        "bot": b.name,
+                        "chat_id": g.chat_id,
+                        "room": g.room,
+                        "title": g.title,
+                        "where_line": format!("{} · бот {}", g.room, b.name),
+                        "remove_body": format!("registry={}&chat_id={}", b.registry, g.chat_id),
+                    }));
+                }
+            }
+            let rooms: Vec<serde_json::Value> =
+                adm::acl_rooms().into_iter().map(|r| serde_json::json!({ "room": r })).collect();
+            let payload = serde_json::json!({
+                "ok": true, "bots": views, "groups": groups, "acl_rooms": rooms,
+            });
+            emit(json, payload.clone(), || {
+                println!("боты: {}", views.len());
+                for g in &groups {
+                    println!(
+                        "  {} → {} (реестр {}, {})",
+                        g["chat_id"],
+                        g["room"].as_str().unwrap_or(""),
+                        g["registry"].as_str().unwrap_or(""),
+                        g["title"].as_str().unwrap_or("")
+                    );
+                }
+                if groups.is_empty() {
+                    println!("  групп нет ни в одном реестре");
+                }
+                let names: Vec<&str> =
+                    rooms.iter().filter_map(|r| r["room"].as_str()).collect();
+                println!("комнаты с ростером: {}", names.join(", "));
+            });
+        }
+
+        MessengerAction::Groups { action } => match action {
+            GroupsAction::List { registry, json } => {
+                let reg = adm::groups_list(&registry);
+                let payload = serde_json::json!({ "ok": true, "registry": registry, "groups": reg.groups });
+                emit(json, payload, || {
+                    if reg.groups.is_empty() {
+                        println!("реестр '{registry}': групп нет");
+                    }
+                    for g in &reg.groups {
+                        println!("{:>16}  {:<24} {}", g.chat_id, g.room, g.title);
+                    }
+                });
+            }
+            GroupsAction::Add { chat_id, registry, room, title, json } => {
+                match adm::group_add(&registry, chat_id, room.as_deref(), &title) {
+                    Ok(ch) => {
+                        let payload = serde_json::json!({ "ok": true, "change": ch });
+                        emit(json, payload, || {
+                            if ch.changed {
+                                println!("подключена {chat_id} → комната '{}' (реестр {registry})", ch.room);
+                                println!("мост перезапустится сам и подхватит изменение");
+                            } else {
+                                println!("{chat_id} уже подключена к '{}' — ничего не изменилось", ch.room);
+                            }
+                        });
+                    }
+                    Err(e) => fail(json, &format!("не удалось сохранить реестр: {e}")),
+                }
+            }
+            GroupsAction::Remove { chat_id, registry, json } => {
+                match adm::group_remove(&registry, chat_id) {
+                    Ok(ch) => {
+                        let payload = serde_json::json!({ "ok": true, "change": ch });
+                        emit(json, payload, || {
+                            if ch.changed {
+                                println!("отключена {chat_id} (была комната '{}')", ch.room);
+                            } else {
+                                println!("{chat_id} не была подключена к реестру '{registry}'");
+                            }
+                        });
+                    }
+                    Err(e) => fail(json, &format!("не удалось сохранить реестр: {e}")),
+                }
+            }
+        },
+
+        MessengerAction::Acl { action } => match action {
+            AclAction::Rooms { json } => {
+                let rooms = adm::acl_rooms();
+                emit(json, serde_json::json!({ "ok": true, "rooms": rooms }), || {
+                    for r in &rooms {
+                        println!("{r}");
+                    }
+                });
+            }
+            AclAction::Show { room, json } => {
+                let members = adm::acl_show(&room);
+                emit(json, serde_json::json!({ "ok": true, "room": room, "members": members }), || {
+                    if members.is_empty() {
+                        println!("у комнаты '{room}' пока нет ростера");
+                    }
+                    for m in &members {
+                        println!("{:>14}  {:<22} {}", m.user_id, m.caps, m.name);
+                    }
+                });
+            }
+            AclAction::Grant { room, user_id, caps, name, json } => {
+                match adm::acl_grant(&room, user_id, &name, &caps) {
+                    Ok(c) => emit(
+                        json,
+                        serde_json::json!({ "ok": true, "room": room, "user_id": user_id, "caps": c.summary() }),
+                        || println!("выдано {user_id} в '{room}': {}", c.summary()),
+                    ),
+                    Err(e) => fail(json, &e),
+                }
+            }
+            AclAction::Revoke { room, user_id, json } => match adm::acl_revoke(&room, user_id) {
+                Ok(had) => emit(
+                    json,
+                    serde_json::json!({ "ok": true, "room": room, "user_id": user_id, "removed": had }),
+                    || {
+                        if had {
+                            println!("{user_id} убран из '{room}'");
+                        } else {
+                            println!("{user_id} не было в ростере '{room}'");
+                        }
+                    },
+                ),
+                Err(e) => fail(json, &e),
+            },
+        },
+
+        MessengerAction::Service { bot, action } => {
+            let bots = adm::Bots::load_default();
+            let Some(b) = bots.get(&bot) else {
+                fail(false, &format!("нет такого бота: '{bot}' (см. `messenger bots`)"));
+            };
+            let act = match adm::ServiceAction::parse(&action) {
+                Ok(a) => a,
+                Err(e) => fail(false, &e),
+            };
+            // Bridge and pool are one unit from the operator's point of view: a bot that polls
+            // but has no model is as broken as one that neither polls nor answers.
+            for label in [&b.bridge_label, &b.pool_label] {
+                match adm::service_control(label, act) {
+                    Ok(msg) => println!("{msg}"),
+                    Err(e) => eprintln!("{label}: {e}"),
+                }
+            }
+        }
+
+        MessengerAction::BotAdd { name, room, mention_alias, model, gateway_url, sandbox, no_start, json } => {
+            let token = match read_token_stdin() {
+                Ok(t) => t,
+                Err(e) => fail(json, &e),
+            };
+            let bot = match adm::bot_from_name(&name, room.as_deref(), &mention_alias) {
+                Ok(b) => b,
+                Err(e) => fail(json, &e),
+            };
+            let mut bots = adm::Bots::load_default();
+            if bots.get(&name).is_some() {
+                fail(json, &format!("бот '{name}' уже есть — сначала `messenger bot-remove {name}`"));
+            }
+            // Validate BEFORE writing anything: a typo must not leave a crash-looping service
+            // and a secret file behind. This is also the only place the token is ever used.
+            let handle = rozum::telegram::Bot::new(token.clone(), 0);
+            let me = match handle.get_me().await {
+                Ok(me) => me,
+                Err(e) => fail(json, &format!("токен отклонён Telegram: {e}")),
+            };
+            if let Err(e) = adm::write_token_secret(&bot.secret, &token) {
+                fail(json, &format!("не удалось сохранить секрет: {e}"));
+            }
+            let sandbox = sandbox.unwrap_or_else(|| {
+                std::env::var("HOME").unwrap_or_default() + "/rozum-sandbox"
+            });
+            let written = match adm::write_bot_services(&bot, &model, &gateway_url, &sandbox) {
+                Ok(w) => w,
+                Err(e) => fail(json, &format!("не удалось записать сервисы: {e}")),
+            };
+            bots.upsert(bot.clone());
+            if let Err(e) = bots.save(&adm::Bots::path()) {
+                fail(json, &format!("не удалось сохранить список ботов: {e}"));
+            }
+            let mut started = Vec::new();
+            if !no_start {
+                for label in [&bot.bridge_label, &bot.pool_label] {
+                    match adm::service_control(label, adm::ServiceAction::Start) {
+                        Ok(m) => started.push(m),
+                        Err(e) => started.push(format!("{label}: НЕ запущен — {e}")),
+                    }
+                }
+            }
+            let payload = serde_json::json!({
+                "ok": true,
+                "bot": bot.name,
+                "username": me.username,
+                "id": me.id,
+                "files": written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                "started": started,
+            });
+            emit(json, payload, || {
+                println!("бот '{}' установлен: @{} (id {})", bot.name, me.username, me.id);
+                for p in &written {
+                    println!("  {}", p.display());
+                }
+                for s in &started {
+                    println!("  {s}");
+                }
+                println!(
+                    "ВАЖНО: откройте @{} в Telegram и нажмите Start — до этого у бота нет личного чата,\n\
+                     и мост не сможет его провалидировать (getChat 400 'chat not found').",
+                    me.username
+                );
+            });
+        }
+
+        MessengerAction::BotRemove { name, keep_secret, json } => {
+            let mut bots = adm::Bots::load_default();
+            let Some(bot) = bots.remove(&name) else {
+                fail(json, &format!("нет такого бота: '{name}'"));
+            };
+            let mut notes = Vec::new();
+            for label in [&bot.bridge_label, &bot.pool_label] {
+                match adm::service_control(label, adm::ServiceAction::Stop) {
+                    Ok(m) => notes.push(m),
+                    Err(e) => notes.push(format!("{label}: {e}")),
+                }
+            }
+            if !keep_secret {
+                let p = adm::secret_path(&bot.secret);
+                match std::fs::remove_file(&p) {
+                    Ok(()) => notes.push(format!("удалён секрет {}", p.display())),
+                    Err(e) => notes.push(format!("секрет {} не удалён: {e}", p.display())),
+                }
+            }
+            if let Err(e) = bots.save(&adm::Bots::path()) {
+                fail(json, &format!("не удалось сохранить список ботов: {e}"));
+            }
+            emit(json, serde_json::json!({ "ok": true, "bot": name, "notes": notes }), || {
+                println!("бот '{name}' удалён");
+                for n in &notes {
+                    println!("  {n}");
+                }
+                println!("plist'ы оставлены на диске — удалите вручную, если они больше не нужны:");
+                println!("  {}", adm::launchd_plist_path(&bot.bridge_label).display());
+                println!("  {}", adm::launchd_plist_path(&bot.pool_label).display());
+            });
         }
     }
 }

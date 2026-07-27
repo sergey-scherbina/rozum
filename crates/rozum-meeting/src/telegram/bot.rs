@@ -107,9 +107,41 @@ pub struct IncomingMessage {
     pub text: String,
 }
 
+/// The bot's own public identity (`getMe`) — what the admin console shows so the operator can
+/// tell which bot a service actually belongs to. Deliberately carries NO token: Telegram embeds
+/// the token in every API URL, so anything derived from a request has to be built by hand.
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+pub struct BotIdentity {
+    pub id: i64,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub first_name: String,
+    #[serde(default)]
+    pub is_bot: bool,
+    #[serde(default)]
+    pub can_join_groups: bool,
+    #[serde(default)]
+    pub can_read_all_group_messages: bool,
+}
+
 impl TelegramBot {
     pub fn new(token: String, chat_id: i64) -> Self {
         Self::with_api_base(token, chat_id, TELEGRAM_API_BASE)
+    }
+
+    /// `getMe`, for the admin console and for validating a token BEFORE anything is written to
+    /// disk. The error is the API's own description with the token scrubbed — `get_api` already
+    /// redacts it, and this must never regress, since the URL contains the secret verbatim.
+    pub async fn get_me(&self) -> Result<BotIdentity, String> {
+        let me: BotIdentity = self
+            .get_api("getMe", &[], STARTUP_REQUEST_TIMEOUT)
+            .await
+            .map_err(|e| e.to_string())?;
+        if !me.is_bot || me.id <= 0 {
+            return Err("Telegram getMe вернул не-бота".into());
+        }
+        Ok(me)
     }
 
     fn with_api_base(token: String, chat_id: i64, api_base: &str) -> Self {
