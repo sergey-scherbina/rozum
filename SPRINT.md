@@ -19,17 +19,29 @@
   (`getMe` → `@rozumia_bot`, id 8873553843, can_join_groups). `com.rozum.telegram-groups` (the bridge)
   is **installed but deliberately NOT loaded** — see the blocked item below.
 
-- [ ] **second-bot-groups-start** (BLOCKED ON THE OPERATOR, 1 minute of their time) — the bridge dies at
-  startup with `telegram bridge error: Telegram getChat failed (code 400): Bad Request: chat not found`.
-  NOT a bug: its primary chat is the owner's DM with `@rozumia_bot` (`TELEGRAM_CHAT_ID` = the owner's
-  user id 1711036782), and **that DM does not exist until the owner presses Start** — `getUpdates` for
-  the new bot returns 0 updates, i.e. it has never been messaged. I unloaded the bridge rather than let
-  it hammer `getChat` every 10s under KeepAlive. UNBLOCK: open `@rozumia_bot` in Telegram, send `/start`,
-  then `launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.rozum.telegram-groups.plist`. THEN verify
-  the actual point of the second bot end-to-end: add it to a group, `/addgroup`, confirm a namespaced
-  entry lands in `messenger-groups/telegram-groups.json`, that the pool spawns a participant for that
-  room, that it answers ONLY when addressed as `@rozumia_bot`, and that the personal bot's
-  `messenger-groups/telegram.json` + rooms are untouched (the whole point of `f89bcfd`).
+- [x] **second-bot-groups-start — DONE 2026-07-27, private half LIVE.** The bridge had been dying at
+  startup with `getChat failed (400): Bad Request: chat not found` — NOT a bug: its primary chat is the
+  owner's DM with `@rozumia_bot` (`TELEGRAM_CHAT_ID` = the owner's user id 1711036782), and **that DM
+  does not exist until the owner presses Start** (`getUpdates` returned 0 updates — the bot had never
+  been messaged). Operator pressed Start; `getChat` then returns `type=private id=1711036782`, and
+  `com.rozum.telegram-groups` bootstraps clean: `state = running`, `runs = 1`, log
+  `bot 8873553843 chat 1711036782 <-> room 'rozumia'`. E2E PROVEN: a ping posted into room `rozumia`
+  was answered by `qwen` ("Подключён.") — the second bot's private half works end to end on the shared
+  :8089. All five services steady afterwards (`telegram-groups`/`assistant-groups` runs=1). The one
+  gateway restart in that window is BY DESIGN (idle-unload, `last exit code = 0`, KeepAlive re-ran it,
+  still LISTEN) — not a relapse of BUG-013.
+  ISOLATION verified so far, structurally: the group registries are genuinely namespaced —
+  `messenger-groups/telegram.json` still holds only the personal bot's one group (`-1004378341901` →
+  `assistant-group`, untouched), and `telegram-groups.json` does not exist yet because the second bot
+  has no groups. Per-room ACL likewise got its own fresh `messenger-acl/rozumia.json`.
+
+- [ ] **second-bot-groups-verify** (NEEDS THE OPERATOR — the group half is untestable from a shell) —
+  the actual point of `f89bcfd` is still unproven: add `@rozumia_bot` to a group and send `/addgroup`
+  there. THEN check, in this order: a namespaced entry lands in `messenger-groups/telegram-groups.json`
+  (and NOT in `telegram.json`); `com.rozum.assistant-groups` reconciles and spawns a participant for
+  that room; it answers ONLY when addressed as `@rozumia_bot` and stays silent otherwise; the personal
+  bot's registry, rooms and ACL rosters are untouched. Note the bot must be a group admin (or privacy
+  off) to see messages at all — the known gotcha.
 
 - [x] **ci-green-baseline — DONE 2026-07-16 (`9506811`, `06de22c`, `645f5e7`,
   `5b675ea`, `a3595c6`).** Restored CI after the workspace/binary split: macOS gates shipped defaults
