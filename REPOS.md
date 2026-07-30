@@ -34,3 +34,15 @@ branch: main
 # working checkout (sibling dir), not a fresh `.vendor/` clone. Candidate to
 # author the rozum meeting web UI: the JS backend is mature (frontend);
 # the Rust backend is early ("R.1 hello-world subset"). See repos/scalascript.md.
+
+## nadia
+url: git@github.com:sergey-scherbina/nadia.git
+path: ../nadia
+branch: master
+# An LLM coding agent in ScalaScript over `std.agent`, driving a local model
+# through this gateway. Batch CLI (a drop-in row in scripts/bench/agentic.sh
+# next to claude/codex/opencode) + interactive REPL; later subagents-as-actors
+# and a Telegram front-end. It is the app leaf of the split specified in
+# docs/specs/integration.md — rozum stays the stateless model service, and
+# per-family tool rendering/parsing stays HERE, never on the agent side.
+# See repos/nadia.md.
