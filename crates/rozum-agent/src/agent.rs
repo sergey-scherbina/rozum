@@ -362,10 +362,29 @@ pub async fn run_agent_escalating(
     budget: &Budget,
     policy: &ExecFeedbackPolicy,
 ) -> AgentOutcome {
-    assert!(!tiers.is_empty(), "run_agent_escalating needs at least one backend");
+    let messages = vec![Message::system(system), Message::user(user)];
+    run_agent_conversation(tiers, messages, tools, budget, policy).await
+}
+
+/// The same loop, resumed over an **existing** conversation instead of a fresh
+/// `[system, user]` pair — what a multi-turn chat front-end needs. Feed back the
+/// [`AgentOutcome::transcript`] of the previous turn with the new user message
+/// appended, and the model keeps its context (and the gateway keeps its KV prefix,
+/// which is what makes turn N+1 cheap).
+///
+/// [`run_agent`] / [`run_agent_escalating`] are the one-shot entry points and delegate
+/// here. `messages` must be non-empty and should start with a system message.
+pub async fn run_agent_conversation(
+    tiers: &[&dyn ChatBackend],
+    messages: Vec<Message>,
+    tools: &dyn ToolSource,
+    budget: &Budget,
+    policy: &ExecFeedbackPolicy,
+) -> AgentOutcome {
+    assert!(!tiers.is_empty(), "run_agent_conversation needs at least one backend");
     let start = Instant::now();
     let tool_defs = tools.tools();
-    let mut messages = vec![Message::system(system), Message::user(user)];
+    let mut messages = messages;
     let mut operations: Vec<ToolInvocation> = Vec::new();
     let mut steps = 0usize;
     // The active cost-tier and how many consecutive all-errored steps it has produced.
