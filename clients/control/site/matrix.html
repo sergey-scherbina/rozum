@@ -428,7 +428,10 @@ function applyI18n() {
   document.querySelectorAll('.lang-btn').forEach(b => b.classList.toggle('active', b.dataset.lang === _lang));
 }
 
-const AGENTS_DEFAULT = ['claude', 'codex', 'opencode'];
+// Keep in sync with the server-side default in `control.rs` (`agents_vec`): when every
+// chip is selected the request omits `agents` entirely and the server fills it in, so a
+// list that differs there runs a different set than the one shown here.
+const AGENTS_DEFAULT = ['claude', 'codex', 'opencode', 'nadia'];
 const TASKS_DEFAULT  = ['greet', 'build', 'fix', 'test', 'debug', 'rpn'];
 
 // ── Chip toggles ───────────────────────────────────────────────────────────────
@@ -725,7 +728,11 @@ async function enqueue() {
     const reps = parseInt(document.getElementById('reps-select')?.value || '1', 10);
     const body = {};
     if (models.length && document.querySelectorAll('#model-chips .chip').length !== models.length) body.models = models;
-    if (agents.length && agents.length !== AGENTS_DEFAULT.length) body.agents = agents;
+    // Always send the agents explicitly, even when every chip is on. Omitting them makes
+    // the run depend on the server's own default list, which lives in the gateway binary —
+    // so adding an agent here would silently do nothing until the gateway was rebuilt and
+    // restarted, and "all agents" would mean whatever that older binary thought.
+    if (agents.length) body.agents = agents;
     if (tasks.length  && tasks.length  !== TASKS_DEFAULT.length)  body.tasks  = tasks;
     if (reps > 1) body.reps = reps;
     const r = await fetch('/control/matrix/run', {

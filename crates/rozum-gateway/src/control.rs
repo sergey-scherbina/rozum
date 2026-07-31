@@ -2213,7 +2213,11 @@ async fn run_matrix_job(job_id: &str) {
 
     let all_models: Vec<String> = rozum_models::models::scan_all_installed().into_iter().map(|m| m.spec).collect();
     let models_vec = models.unwrap_or(all_models);
-    let agents_vec = agents.unwrap_or_else(|| vec!["claude".into(), "codex".into(), "opencode".into()]);
+    // The fallback for API callers that omit `agents`. The UCC no longer relies on it —
+    // it sends the list explicitly precisely so that adding an agent to the matrix does
+    // not require rebuilding and restarting the gateway to take effect.
+    let agents_vec = agents
+        .unwrap_or_else(|| vec!["claude".into(), "codex".into(), "opencode".into(), "nadia".into()]);
     let tasks_vec  = tasks.unwrap_or_else(|| vec!["greet".into(), "build".into(), "fix".into(), "test".into(), "debug".into(), "rpn".into()]);
     let total_cells = models_vec.len() * agents_vec.len() * tasks_vec.len() * reps as usize;
     let models_str = models_vec.join(" ");
