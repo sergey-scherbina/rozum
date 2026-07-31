@@ -5,11 +5,15 @@ path: ../nadia   (sibling of rozum, like scalascript)
 
 ## Overview
 
-An LLM coding agent written in ScalaScript, driving a local model through the
-rozum gateway. Two front-ends over one loop: a headless **batch CLI** — built to
-be a drop-in row in `scripts/bench/agentic.sh` next to `claude` / `codex` /
-`opencode` — and an interactive **REPL**. Later: subagents as actors, and a
-Telegram front-end.
+An LLM coding agent in Scala and ScalaScript, driving a local model through the
+rozum gateway. Two front-ends over one loop: a headless **batch CLI** — a drop-in
+row in `scripts/bench/agentic.sh` next to `claude` / `codex` / `opencode` — and an
+interactive **REPL**.
+
+The repo holds two of the three implementations: **Scala 3** (`scala/`, over its
+own 323-line SDK) and **ScalaScript** (`src/`, over `std.agent`). The third is
+Rust, and it lives here in `crates/nadia` — the reference, and the one carrying
+subagents, the HTTP control surface and the Telegram front-end.
 
 Spec: `nadia:SPEC.md`.
 
@@ -17,7 +21,7 @@ Spec: `nadia:SPEC.md`.
 
 It is the app leaf of the split this repo already specified in
 `docs/specs/integration.md`: rozum is the stateless model service (Contract 1),
-the scalascript side implements the agent (Contracts 2–3), and
+the agent side implements Contracts 2–3, and
 `crates/rozum-agent` is the executable Rust twin of that algorithm.
 
 nadia consumes `scalascript:runtime/std/agent.ssc` (loop, streaming, retry,

@@ -39,7 +39,7 @@ branch: main
 url: git@github.com:sergey-scherbina/nadia.git
 path: ../nadia
 branch: master
-# An LLM coding agent in ScalaScript over `std.agent`, driving a local model
+# An LLM coding agent in Scala and ScalaScript, driving a local model
 # through this gateway. Batch CLI (a drop-in row in scripts/bench/agentic.sh
 # next to claude/codex/opencode) + interactive REPL; later subagents-as-actors
 # and a Telegram front-end. It is the app leaf of the split specified in
