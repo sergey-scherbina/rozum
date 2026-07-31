@@ -6,15 +6,15 @@
 //! rc=2 as infrastructure failure rather than a model failure, and conflating the two is
 //! how a dead gateway gets recorded as a bad model.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nadia::approval::{ApprovalGate, Mode, Policy, TerminalApprover};
+use nadia::approval::{describe, ApprovalGate, Mode, Policy, TerminalApprover};
 use nadia::sandbox::Sandbox;
 use nadia::session::{default_budget, system_prompt, LoopBreaker, Session};
 use nadia::tools::tool_source;
-use rozum_agent::agent::{AgentStop, ToolSource};
+use rozum_agent::agent::{AgentObserver, AgentStop, ToolSource};
 use rozum_gateway::openai_http::OpenAiHttpBackend;
 
 const USAGE: &str = "\
@@ -222,11 +222,36 @@ fn result_json(o: &rozum_agent::agent::AgentOutcome) -> String {
     .to_string()
 }
 
+/// Renders the run as it happens.
+///
+/// Without this the REPL says nothing for the length of a turn — 45 seconds on the
+/// slowest benchmark task — and an agent that prints nothing is indistinguishable from an
+/// agent that has hung. The text is streamed as the model produces it, and each tool call
+/// is announced before it runs, so the last line on screen is always what is happening now.
+struct Live;
+
+impl AgentObserver for Live {
+    fn on_text(&self, delta: &str) {
+        print!("{delta}");
+        let _ = std::io::stdout().flush();
+    }
+
+    fn on_tool_call(&self, name: &str, input: &serde_json::Value) {
+        println!("\n  ⏺ {name} {}", one_line(&describe(name, input)));
+    }
+
+    fn on_tool_result(&self, _name: &str, error: Option<&str>) {
+        if let Some(e) = error {
+            println!("    ✗ {}", one_line(e));
+        }
+    }
+}
+
 /// The interactive front-end. Line-based on purpose: it works over ssh, in a pipe, and
 /// inside `tmux` without a terminal-control layer, and the thing a coding agent's UI
 /// actually has to get right is showing *what it did* — one line per tool call — not
-/// drawing panes. Token streaming is P1 (`SPEC.md`); the loop entry point used here
-/// returns per turn.
+/// drawing panes. Text streams token by token and
+/// each tool call is announced by [`Live`] as it happens.
 async fn repl(
     backend: &OpenAiHttpBackend,
     tools: &impl ToolSource,
@@ -255,6 +280,11 @@ async fn repl(
             }
         }
         let line = line.trim();
+        // Under a pipe there is no typed echo, so the prompt and the first line of output
+        // collide on one line and the transcript becomes unreadable. Echo it ourselves.
+        if !std::io::stdin().is_terminal() {
+            println!("{line}");
+        }
         if line.is_empty() {
             continue;
         }
@@ -291,17 +321,10 @@ async fn repl(
             continue;
         }
 
-        let outcome = session.turn(line).await;
-        for op in &outcome.operations {
-            let summary = match &op.output {
-                Ok(v) => one_line(&v.to_string()),
-                Err(e) => format!("error: {}", one_line(e)),
-            };
-            println!("  ⏺ {:<11} {}", op.name, summary);
-        }
-        if !outcome.text.is_empty() {
-            println!("\n{}", outcome.text);
-        }
+        let outcome = session.turn_observed(line, &Live).await;
+        // The text already streamed through the observer; all that is left is to close
+        // the line it ended on, and to say why the loop stopped if it was not "done".
+        println!();
         match outcome.stop {
             AgentStop::Done => {}
             AgentStop::BudgetSteps => println!("\n[stopped: step budget after {} steps]", outcome.steps),

@@ -116,36 +116,82 @@ pub struct TerminalApprover;
 
 impl Approver for TerminalApprover {
     fn ask(&self, tool: &str, args: &Value) -> Decision {
-        println!("\n  {tool} {}", preview(tool, args));
-        print!("  allow? [y]es / [n]o / [a]lways: ");
+        println!("\n  {tool} {}", describe(tool, args));
+        if tool == "edit_file" {
+            print!("{}", edit_diff(args));
+        }
+        print!("  allow? [y]es / [N]o / [a]lways: ");
         let _ = std::io::stdout().flush();
         let mut line = String::new();
-        if std::io::stdin().lock().read_line(&mut line).is_err() {
-            return Decision::Deny;
-        }
-        match line.trim().to_ascii_lowercase().as_str() {
-            "y" | "yes" | "" => Decision::Allow,
-            "a" | "always" => Decision::AllowAlways,
-            _ => Decision::Deny,
+        match std::io::stdin().lock().read_line(&mut line) {
+            Ok(0) | Err(_) => decide(None),
+            Ok(_) => decide(Some(&line)),
         }
     }
 }
 
-/// What the operator is actually being asked to approve. A raw JSON blob is not a
-/// decision aid — the command, or the file and the size of the change, is.
-fn preview(tool: &str, args: &Value) -> String {
+/// Turn what the operator typed into a decision. `None` is end-of-input.
+///
+/// **Anything that is not an explicit yes is a refusal**, and that includes both EOF and a
+/// bare Enter. Measured the hard way: the first version read `""` as *allow*, on the
+/// reasoning that Enter means "go ahead" — and `read_line` also returns an empty string at
+/// EOF, so as soon as stdin was exhausted (a pipe, a closed terminal, a script) **every
+/// subsequent write and command was approved automatically**. A gate whose failure mode is
+/// "allow" is not a gate. The prompt spells the default as `[N]o` so this is visible
+/// rather than surprising.
+fn decide(input: Option<&str>) -> Decision {
+    match input.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("y") | Some("yes") => Decision::Allow,
+        Some("a") | Some("always") => Decision::AllowAlways,
+        _ => Decision::Deny,
+    }
+}
+
+/// What a call actually does, in one line. A raw JSON blob is not a decision aid — the
+/// command, or the file and the size of the change, is. Shared with the live renderer so
+/// a tool call reads the same whether it is being approved or merely reported.
+pub fn describe(tool: &str, args: &Value) -> String {
     let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("");
     match tool {
         "bash" => s("command").to_string(),
         "write_file" => format!("{} ({} bytes)", s("path"), s("content").len()),
-        "edit_file" => {
-            let old = s("old_string");
-            let first = old.lines().next().unwrap_or("");
-            format!("{} — replace `{}`", s("path"), truncate(first, 48))
-        }
+        "edit_file" => format!("{} — {}", s("path"), summarize_edit(s("old_string"), s("new_string"))),
+        "read_file" | "list_dir" => s("path").to_string(),
+        "grep" => s("pattern").to_string(),
         _ => args.to_string(),
     }
 }
+
+/// One line naming the shape of an edit, for the reported (non-approval) case.
+fn summarize_edit(old: &str, new: &str) -> String {
+    let (o, n) = (old.lines().count(), new.lines().count());
+    match n as i64 - o as i64 {
+        0 => format!("{o} line(s) rewritten"),
+        d if d > 0 => format!("{o} line(s) -> {n} (+{d})"),
+        d => format!("{o} line(s) -> {n} ({d})"),
+    }
+}
+
+/// The before/after an approval decision actually needs. One line of context is not
+/// enough to answer "should this run": what matters is which text is leaving the file and
+/// which is replacing it, and a first-line summary hides exactly that.
+fn edit_diff(args: &Value) -> String {
+    let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("");
+    let mut out = String::new();
+    for (marker, body) in [("-", s("old_string")), ("+", s("new_string"))] {
+        let lines: Vec<&str> = body.lines().collect();
+        for l in lines.iter().take(DIFF_LINES) {
+            out.push_str(&format!("      {marker} {}\n", truncate(l, 72)));
+        }
+        if lines.len() > DIFF_LINES {
+            out.push_str(&format!("      {marker} … {} more line(s)\n", lines.len() - DIFF_LINES));
+        }
+    }
+    out
+}
+
+/// How much of each side of an edit to show before it stops being readable at a prompt.
+const DIFF_LINES: usize = 6;
 
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
@@ -236,10 +282,44 @@ mod tests {
     }
 
     #[test]
-    fn preview_shows_the_decision_relevant_part() {
-        assert_eq!(preview("bash", &json!({"command": "cargo test"})), "cargo test");
-        assert_eq!(preview("write_file", &json!({"path": "a.rs", "content": "abc"})), "a.rs (3 bytes)");
-        assert!(preview("edit_file", &json!({"path": "a.rs", "old_string": "fn main() {\nx"}))
-            .contains("fn main()"));
+    fn describe_shows_the_decision_relevant_part() {
+        assert_eq!(describe("bash", &json!({"command": "cargo test"})), "cargo test");
+        assert_eq!(describe("write_file", &json!({"path": "a.rs", "content": "abc"})), "a.rs (3 bytes)");
+        assert!(describe("edit_file", &json!({"path": "a.rs", "old_string": "a\nb", "new_string": "c"}))
+            .contains("a.rs"));
+    }
+
+    #[test]
+    fn nothing_but_an_explicit_yes_allows() {
+        assert_eq!(decide(Some("y")), Decision::Allow);
+        assert_eq!(decide(Some("YES\n")), Decision::Allow);
+        assert_eq!(decide(Some("a")), Decision::AllowAlways);
+        assert_eq!(decide(Some("n")), Decision::Deny);
+        assert_eq!(decide(Some("wat")), Decision::Deny);
+    }
+
+    #[test]
+    fn eof_and_a_bare_enter_refuse() {
+        // The bug this pins: `""` used to mean allow, and read_line yields `""` at EOF —
+        // so a piped or closed stdin auto-approved every write and every command.
+        assert_eq!(decide(None), Decision::Deny, "EOF must fail closed");
+        assert_eq!(decide(Some("")), Decision::Deny, "a bare Enter must not approve");
+        assert_eq!(decide(Some("\n")), Decision::Deny);
+    }
+
+    #[test]
+    fn an_edit_prompt_shows_both_sides() {
+        // The decision is "is this the right replacement", which a first-line summary
+        // cannot answer: both the outgoing and the incoming text have to be visible.
+        let d = edit_diff(&json!({"old_string": "let x = 1;", "new_string": "let x = 2;"}));
+        assert!(d.contains("- let x = 1;"), "{d}");
+        assert!(d.contains("+ let x = 2;"), "{d}");
+    }
+
+    #[test]
+    fn a_long_edit_is_bounded_and_says_so() {
+        let long = (0..40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let d = edit_diff(&json!({"old_string": long, "new_string": "x"}));
+        assert!(d.contains("more line(s)"), "a 40-line edit must not flood the prompt: {d}");
     }
 }

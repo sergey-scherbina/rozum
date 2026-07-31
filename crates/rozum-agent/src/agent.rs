@@ -366,6 +366,26 @@ pub async fn run_agent_escalating(
     run_agent_conversation(tiers, messages, tools, budget, policy).await
 }
 
+/// Watches a run as it happens. The loop returns only when a turn is complete, which is
+/// correct for a batch caller and wrong for an interactive one: a chat front-end that can
+/// say nothing for 45 seconds looks hung, and the user's only signal that anything is
+/// happening is the text the model is already producing.
+///
+/// Every method has a default no-op body, so an implementor opts into the events it wants
+/// and adding an event later is not a breaking change.
+pub trait AgentObserver: Send + Sync {
+    /// A fragment of assistant text, as it arrives off the wire.
+    fn on_text(&self, _delta: &str) {}
+    /// The model has finished asking for a tool call; the call has not run yet.
+    fn on_tool_call(&self, _name: &str, _input: &Value) {}
+    /// A tool call finished. `error` carries the message when it failed.
+    fn on_tool_result(&self, _name: &str, _error: Option<&str>) {}
+}
+
+/// The observer used when a caller does not supply one — every method a no-op.
+struct Silent;
+impl AgentObserver for Silent {}
+
 /// The same loop, resumed over an **existing** conversation instead of a fresh
 /// `[system, user]` pair — what a multi-turn chat front-end needs. Feed back the
 /// [`AgentOutcome::transcript`] of the previous turn with the new user message
@@ -380,6 +400,19 @@ pub async fn run_agent_conversation(
     tools: &dyn ToolSource,
     budget: &Budget,
     policy: &ExecFeedbackPolicy,
+) -> AgentOutcome {
+    run_agent_observed(tiers, messages, tools, budget, policy, &Silent).await
+}
+
+/// [`run_agent_conversation`] with a live view of the run — the entry point an interactive
+/// front-end wants, since the buffered one cannot say anything until the turn is over.
+pub async fn run_agent_observed(
+    tiers: &[&dyn ChatBackend],
+    messages: Vec<Message>,
+    tools: &dyn ToolSource,
+    budget: &Budget,
+    policy: &ExecFeedbackPolicy,
+    observer: &dyn AgentObserver,
 ) -> AgentOutcome {
     assert!(!tiers.is_empty(), "run_agent_conversation needs at least one backend");
     let start = Instant::now();
@@ -412,7 +445,7 @@ pub async fn run_agent_conversation(
             session_id: None,
         };
 
-        let turn = match collect_turn(tiers[tier], req).await {
+        let turn = match collect_turn(tiers[tier], req, observer).await {
             Ok(t) => t,
             Err(e) => {
                 return outcome(String::new(), AgentStop::Error(e), steps, operations, messages, tier)
@@ -437,6 +470,7 @@ pub async fn run_agent_conversation(
             assistant.push(ContentBlock::Text { text: turn.text });
         }
         for (id, name, args) in &turn.tool_calls {
+            observer.on_tool_call(name, &parse_args(args));
             assistant.push(ContentBlock::ToolUse {
                 id: id.clone(),
                 name: name.clone(),
@@ -454,6 +488,7 @@ pub async fn run_agent_conversation(
                 Ok(v) => (value_to_tool_content(v), false),
                 Err(e) => (e.0.clone(), true),
             };
+            observer.on_tool_result(&name, result.as_ref().err().map(|e| e.0.as_str()));
             step_calls += 1;
             if is_error {
                 step_errors += 1;
@@ -500,7 +535,11 @@ struct Turn {
 
 /// Drive one `ChatBackend::chat` to completion, collecting text + tool calls. The
 /// SPI-level analogue of the gateway's `oai_collect`.
-async fn collect_turn(backend: &dyn ChatBackend, req: ChatRequest) -> Result<Turn, String> {
+async fn collect_turn(
+    backend: &dyn ChatBackend,
+    req: ChatRequest,
+    observer: &dyn AgentObserver,
+) -> Result<Turn, String> {
     let mut stream = backend.chat(req).await.map_err(|e| e.to_string())?;
     let mut text = String::new();
     let mut calls: Vec<(String, String, String)> = Vec::new();
@@ -509,7 +548,10 @@ async fn collect_turn(backend: &dyn ChatBackend, req: ChatRequest) -> Result<Tur
 
     while let Some(ev) = stream.next().await {
         match ev.map_err(|e| e.to_string())? {
-            ChatEvent::TextDelta { text: t } => text.push_str(&t),
+            ChatEvent::TextDelta { text: t } => {
+                observer.on_text(&t);
+                text.push_str(&t);
+            }
             ChatEvent::ToolUseStart { id, name } => current = Some((id, name, String::new())),
             ChatEvent::ToolUseDelta { input_json_delta, .. } => {
                 if let Some((_, _, args)) = &mut current {

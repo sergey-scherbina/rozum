@@ -3827,6 +3827,7 @@ name = "nadia"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "regex",
  "rozum-agent",
  "rozum-core",
  "rozum-gateway",

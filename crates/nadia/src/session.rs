@@ -6,7 +6,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use rozum_agent::agent::{
-    run_agent_conversation, AgentOutcome, Budget, ExecFeedbackPolicy, ToolError, ToolSource,
+    run_agent_observed, AgentObserver, AgentOutcome, Budget, ExecFeedbackPolicy, ToolError,
+    ToolSource,
 };
 use rozum_core::backend::{ChatBackend, Message, ToolDef};
 use serde_json::Value;
@@ -101,6 +102,10 @@ impl<T: ToolSource> ToolSource for LoopBreaker<T> {
     }
 }
 
+/// The observer a batch run uses: nothing to show, nobody watching.
+struct Silent;
+impl AgentObserver for Silent {}
+
 /// A live conversation. Batch mode runs one turn and exits; the REPL keeps the session
 /// and calls [`Session::turn`] per user message, so context (and the gateway's KV prefix)
 /// survives across turns.
@@ -124,14 +129,25 @@ impl<'a> Session<'a> {
     /// Run one user message to a final answer, then keep the resulting transcript as the
     /// context for the next turn.
     pub async fn turn(&mut self, user: &str) -> AgentOutcome {
+        self.turn_observed(user, &Silent).await
+    }
+
+    /// [`Session::turn`] with a live view of the run. The interactive front-end uses this;
+    /// batch does not, because nobody is watching a headless run and the buffered result
+    /// is the whole output.
+    pub async fn turn_observed(&mut self, user: &str, observer: &dyn AgentObserver) -> AgentOutcome {
         let mut messages = std::mem::take(&mut self.messages);
         messages.push(Message::user(user));
-        let outcome = run_agent_conversation(
+        let outcome = run_agent_observed(
             &[self.backend],
             messages,
             self.tools,
             &self.budget,
+            // One backend, so there is no stronger tier to escalate to; disable the
+            // exec-feedback policy rather than let it count toward a promotion that
+            // cannot happen.
             &ExecFeedbackPolicy { escalate_after_error_steps: usize::MAX },
+            observer,
         )
         .await;
         self.messages = outcome.transcript.clone();

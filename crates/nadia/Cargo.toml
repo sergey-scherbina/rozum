@@ -27,6 +27,7 @@ rozum-gateway = { path = "../rozum-gateway" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 serde_json = { version = "1", features = ["preserve_order"] }
+regex = "1"
 tracing = "0.1"
 
 [dev-dependencies]

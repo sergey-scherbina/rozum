@@ -206,10 +206,10 @@ pub fn tool_source(sandbox: Arc<Sandbox>) -> impl ToolSource {
         .with_tool(
             def(
                 "grep",
-                "Search the workspace for a literal substring. Returns `path:line:text` for \
+                "Search the workspace with a regular expression. Returns `path:line:text` for \
                  each match. Use it to find where something is defined before reading a file.",
                 json!({
-                    "pattern": {"type": "string", "description": "Literal text to search for (not a regular expression)."},
+                    "pattern": {"type": "string", "description": "Regular expression, e.g. `fn \\w+_handler` or `TODO`."},
                     "path": {"type": "string", "description": "File or directory to search. Defaults to the whole workspace."},
                 }),
                 &["pattern"],
@@ -218,6 +218,12 @@ pub fn tool_source(sandbox: Arc<Sandbox>) -> impl ToolSource {
                 let sb = sb.clone();
                 move |args: Value| {
                     let pattern = str_arg(&args, "pattern")?;
+                    // A bad pattern is the model's to fix, so the regex error goes back
+                    // verbatim rather than being flattened into "no matches" — which is
+                    // what a literal-substring fallback would silently look like.
+                    let re = regex::Regex::new(&pattern).map_err(|e| {
+                        ToolError::new(format!("`{pattern}` is not a valid regular expression: {e}"))
+                    })?;
                     let path = args.get("path").and_then(Value::as_str).unwrap_or(".").to_string();
                     let root = sb.resolve(&path).map_err(ToolError::new)?;
                     let mut out = String::new();
@@ -238,7 +244,7 @@ pub fn tool_source(sandbox: Arc<Sandbox>) -> impl ToolSource {
                         let Ok(text) = std::fs::read_to_string(&p) else { continue };
                         let rel = p.strip_prefix(sb.root()).unwrap_or(&p).display().to_string();
                         for (i, line) in text.lines().enumerate() {
-                            if line.contains(&pattern) {
+                            if re.is_match(line) {
                                 out.push_str(&format!("{rel}:{}:{}\n", i + 1, line.trim_end()));
                             }
                         }
