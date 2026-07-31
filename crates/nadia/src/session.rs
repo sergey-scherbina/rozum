@@ -26,8 +26,10 @@ pub fn system_prompt(root: &Path) -> String {
          needs a file changed, change it; do not print the file and stop.\n\
          \n\
          Before you claim a task is finished, verify it: run the build, the test, or the \
-         program with `bash` and read the output. If the command failed, the task is not \
-         finished — fix it and run it again. Never report success you have not observed.\n\
+         program with `bash` and READ the output. Exiting 0 proves nothing on its own — \
+         compare what it printed against what the task asked for, value by value and in \
+         the right order. If they differ, the task is NOT finished: fix the code and run \
+         it again. Never report success you have not observed.\n\
          \n\
          Read a file before editing it, and quote `old_string` exactly as it appears. \
          Make the smallest change that satisfies the task; do not restructure code that \
