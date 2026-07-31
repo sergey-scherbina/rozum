@@ -533,11 +533,13 @@ const HELP_TEXT: &str = "Команды бота:\n\
 /groups — список подключённых групп (владелец)\n\
 /addgroup — подключить эту группу, свой ростер прав (владелец, в группе)\n\
 /removegroup <id> — отключить группу (владелец)\n\
-/help — эта справка\n\n\
+/help — эта справка\n\
 Права: chat=писать в чате, read=читать файлы, write=писать файлы, shell=команды в песочнице. \
 Ростер прав СВОЙ у каждого чата/группы.";
 
 const NOT_OWNER: &str = "Управлять доступом может только владелец бота.";
+
+pub mod nadia;
 
 /// Handle a `/command` from a Telegram user. Utility commands (`/help`, `/whoami`)
 /// are open to everyone; management commands (`/members`, `/grant`, `/revoke`) are
@@ -555,7 +557,7 @@ fn handle_command(text: &str, sender_id: i64, sender_name: &str, acl: &mut Acl, 
     let is_owner = acl.is_owner(sender_id);
 
     match cmd.as_str() {
-        "/help" | "/start" => HELP_TEXT.to_string(),
+        "/help" | "/start" => format!("{HELP_TEXT}{}", nadia::HELP),
         "/whoami" | "/id" => format!("Твой Telegram id: {sender_id}\nИмя: {sender_name}"),
         "/members" | "/who" => {
             if !is_owner {
@@ -610,7 +612,14 @@ fn handle_command(text: &str, sender_id: i64, sender_name: &str, acl: &mut Acl, 
                 format!("id {id} не найден среди добавленных.")
             }
         }
-        _ => "Неизвестная команда. /help — список команд.".to_string(),
+        // Subagent control lives behind the SAME roster as the assistant's sandbox:
+        // `nadia::handle` re-checks caps_for(sender) itself. Placed in the fallback so a
+        // nadia verb can never shadow a command the bot already answers.
+        _ => match nadia::parse(text) {
+            Some(Ok(c)) => nadia::handle(c, acl.caps_for(sender_id)),
+            Some(Err(usage)) => usage,
+            None => "Неизвестная команда. /help — список команд.".to_string(),
+        },
     }
 }
 
