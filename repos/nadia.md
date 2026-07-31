@@ -15,6 +15,11 @@ own 323-line SDK) and **ScalaScript** (`src/`, over `std.agent`). The third is
 Rust, and it lives here in `crates/nadia` — the reference, and the one carrying
 subagents, the HTTP control surface and the Telegram front-end.
 
+It also ships deployable: a container image, Kubernetes/ECS/Cloud Run manifests,
+and `--provider local|openai|bedrock|vertex` so the model can come from a gateway
+you run, from Bedrock or from Vertex. `local` — this gateway, no credential —
+stays the default. See `nadia:docs/deployment.md`.
+
 Spec: `nadia:SPEC.md`.
 
 ## Why it exists here
@@ -47,10 +52,14 @@ already parameterized by `AGENTS=` and resolves each agent as a CLI on `PATH`.
 
 ## Dependencies
 
-`scalascript` (the `ssc` toolchain and `std.*`), and a running rozum gateway
-with a tool-capable model. Two upstream gaps are currently blocking P0 —
-`std.process.exec` unbound on the standard lane and no stdin primitive; both are
-tracked in `nadia:BACKLOG.md` (NAD-1, NAD-2).
+Per implementation, which is the point of having three. The **Rust** one depends
+on this workspace (`rozum-agent`, `rozum-gateway`) and nothing else; **Scala 3**
+on a JDK and upickle; **ScalaScript** on the `ssc` toolchain and `std.*`. All
+three want a gateway with a tool-capable model — or, since the deployment work,
+any OpenAI-compatible endpoint including Bedrock and Vertex.
+
+The two upstream scalascript gaps that once blocked P0 are resolved or retracted;
+what remains is tracked in `nadia:BACKLOG.md`.
 
 ## Agents / coordination
 

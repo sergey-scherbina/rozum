@@ -42,7 +42,10 @@ branch: master
 # An LLM coding agent in Scala and ScalaScript, driving a local model
 # through this gateway. Batch CLI (a drop-in row in scripts/bench/agentic.sh
 # next to claude/codex/opencode) + interactive REPL; later subagents-as-actors
-# and a Telegram front-end. It is the app leaf of the split specified in
+# and a Telegram front-end. Also deployable: a container image, k8s/ECS/Cloud
+# Run manifests, and --provider local|openai|bedrock|vertex — `local`, meaning
+# this gateway with no credential, stays the default (nadia:docs/deployment.md).
+# It is the app leaf of the split specified in
 # docs/specs/integration.md — rozum stays the stateless model service, and
 # per-family tool rendering/parsing stays HERE, never on the agent side.
 # See repos/nadia.md.

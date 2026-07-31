@@ -34,11 +34,34 @@ fn clip(s: &str) -> (String, bool) {
     (s[..end].to_string(), true)
 }
 
+/// A required string argument, accepting any JSON scalar in its place.
+///
+/// A number, or a boolean, has exactly one obvious textual form, and a model that answers
+/// `{"content": 4}` when asked to write the number four has not made a mistake worth failing
+/// a task over. Refusing it was not strictness: the message claimed the argument was
+/// *missing* when it had been supplied, so the model re-sent the identical call until the
+/// repetition guard ended the run — on a task it had already solved. Observed against
+/// Qwen3.5-4B; the twin implementation in the `nadia` repo carries the same fix and the
+/// reasoning in full (`docs/tools.md`).
+///
+/// Objects and arrays are still refused. There is no single right way to render those as
+/// text, and guessing one would put invented content into a file. `null` counts as missing
+/// rather than as empty, so a lost value cannot quietly truncate a file.
 fn str_arg(v: &Value, key: &str) -> Result<String, ToolError> {
-    v.get(key)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| ToolError::new(format!("missing required string argument `{key}`")))
+    match v.get(key) {
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(Value::Number(n)) => Ok(n.to_string()),
+        Some(Value::Bool(b)) => Ok(b.to_string()),
+        None | Some(Value::Null) => Err(ToolError::new(format!(
+            "missing required string argument `{key}`"
+        ))),
+        Some(Value::Object(_)) => Err(ToolError::new(format!(
+            "argument `{key}` must be a string, but a JSON object was sent — pass the value as text"
+        ))),
+        Some(Value::Array(_)) => Err(ToolError::new(format!(
+            "argument `{key}` must be a string, but a JSON array was sent — pass the value as text"
+        ))),
+    }
 }
 
 fn opt_usize(v: &Value, key: &str) -> Option<usize> {
@@ -360,7 +383,37 @@ mod tests {
     #[tokio::test]
     async fn missing_argument_names_the_argument() {
         let (_d, sb) = fixture();
-        let err = call(&tool_source(sb), "read_file", json!({})).await.unwrap_err();
+        let src = tool_source(sb);
+        let err = call(&src, "read_file", json!({})).await.unwrap_err();
         assert!(err.contains("`path`"), "the model must be told which argument: {err}");
+        // `null` is missing, not empty. Reading it as "" writes an empty file over a real one.
+        let err = call(&src, "write_file", json!({"path": "n.txt", "content": null}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("`content`"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_number_where_a_string_was_asked_for_is_accepted() {
+        // Observed against Qwen3.5-4B: asked to write a line count into a file, it sent
+        // {"content": 4}. Answering "missing required string argument `content`" is false —
+        // it was supplied — so the model re-sent the identical call until the repetition
+        // guard killed a task it had already solved.
+        let (d, sb) = fixture();
+        let src = tool_source(sb);
+        call(&src, "write_file", json!({"path": "count.txt", "content": 4}))
+            .await
+            .expect("a JSON number has one obvious textual form");
+        assert_eq!(std::fs::read_to_string(d.path().join("count.txt")).unwrap(), "4");
+
+        // An object has no single right rendering, and guessing would put invented content
+        // into a file. Refused, and told what was actually sent.
+        let err = call(&src, "write_file", json!({"path": "c.txt", "content": {"a": 1}}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("must be a string") && err.contains("JSON object"),
+            "{err}"
+        );
     }
 }
