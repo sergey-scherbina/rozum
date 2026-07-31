@@ -55,16 +55,23 @@ pub fn default_budget() -> Budget {
 /// Wraps a [`ToolSource`] and refuses a call that is going in circles.
 ///
 /// Budgets bound the damage; they do not stop the specific failure a small model actually
-/// exhibits, which is re-issuing an identical call after an identical result — most often
-/// an `edit_file` whose `old_string` is not in the file, read as "try again" rather than
-/// "the premise is wrong". The threshold (same name+arguments 4 times within the last 12
-/// calls) is the signature measured in this project's loop-breaker work.
+/// exhibits, which is re-issuing an identical call **after an identical result** — most
+/// often an `edit_file` whose `old_string` is not in the file, read as "try again" rather
+/// than "the premise is wrong".
+///
+/// Both halves of that sentence matter, and the first version only implemented the first.
+/// Matching on the call alone fired on `multibug`, where the model ran `cargo test` four
+/// times — which is not a loop, it is the verify step of fix → test → fix, and the same
+/// command returns something different each time because the files changed underneath it.
+/// A repeat only counts when the result did not change either.
 ///
 /// The intervention is an error the model reads, not a silent halt: it names the
 /// repetition and asks for a different approach, which is recoverable. A halt is not.
 pub struct LoopBreaker<T: ToolSource> {
     inner: T,
-    history: Mutex<Vec<String>>,
+    /// `(call, result)` per dispatch, newest last. The result half is what keeps a
+    /// verification loop from looking like churn.
+    history: Mutex<Vec<(String, String)>>,
 }
 
 const WINDOW: usize = 12;
@@ -84,21 +91,36 @@ impl<T: ToolSource> ToolSource for LoopBreaker<T> {
 
     async fn dispatch(&self, name: &str, args: Value) -> Result<Value, ToolError> {
         let key = format!("{name}:{args}");
-        let repeats = {
-            let mut h = self.history.lock().unwrap();
-            h.push(key.clone());
+        // Look at what this exact call produced the last few times. Identical call AND
+        // identical result, repeatedly, is a stuck model; identical call with a changing
+        // result is a verify loop doing its job.
+        let stuck = {
+            let h = self.history.lock().unwrap();
             let start = h.len().saturating_sub(WINDOW);
-            h[start..].iter().filter(|k| **k == key).count()
+            let mut results = h[start..].iter().filter(|(k, _)| *k == key).map(|(_, r)| r);
+            match results.next() {
+                Some(first) => {
+                    let same = 1 + results.filter(|r| *r == first).count();
+                    same >= REPEATS - 1 && h[start..].iter().filter(|(k, _)| *k == key).count() == same
+                }
+                None => false,
+            }
         };
-        if repeats >= REPEATS {
+        if stuck {
             return Err(ToolError::new(format!(
-                "You have called `{name}` with these exact arguments {repeats} times and the \
-                 result has not changed. Repeating it will not help. Re-read the current state \
+                "You have called `{name}` with these exact arguments several times and got the \
+                 same result every time. Repeating it will not help. Re-read the current state \
                  of the file or the command output, and either take a different approach or \
                  stop and report what is blocking you."
             )));
         }
-        self.inner.dispatch(name, args).await
+        let result = self.inner.dispatch(name, args).await;
+        let fingerprint = match &result {
+            Ok(v) => v.to_string(),
+            Err(e) => format!("err:{}", e.0),
+        };
+        self.history.lock().unwrap().push((key, fingerprint));
+        result
     }
 }
 
@@ -168,6 +190,7 @@ impl<'a> Session<'a> {
 mod tests {
     use super::*;
     use rozum_agent::agent::CallbackToolSource;
+    use std::sync::Arc;
     use serde_json::json;
 
     fn counting_source() -> impl ToolSource {
@@ -182,7 +205,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn breaks_an_identical_repeated_call() {
+    async fn breaks_an_identical_call_with_an_identical_result() {
         let lb = LoopBreaker::new(counting_source());
         let args = json!({"a": 1});
         for i in 0..3 {
@@ -190,6 +213,31 @@ mod tests {
         }
         let err = lb.dispatch("noop", args).await.unwrap_err();
         assert!(err.0.contains("Repeating it will not help"), "{}", err.0);
+    }
+
+    /// The regression this pins: `multibug` failed because re-running `cargo test` four
+    /// times was read as a loop. It is the verify half of fix -> test -> fix, and the
+    /// result changes as the files do.
+    #[tokio::test]
+    async fn a_repeated_call_whose_result_keeps_changing_is_not_a_loop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let n = Arc::new(AtomicUsize::new(0));
+        let counter = n.clone();
+        let src = CallbackToolSource::new().with_tool(
+            ToolDef {
+                name: "verify".into(),
+                description: "re-runs a check".into(),
+                input_schema: json!({"type": "object", "properties": {}}),
+            },
+            move |_| Ok(json!({"failures": counter.fetch_add(1, Ordering::SeqCst)})),
+        );
+        let lb = LoopBreaker::new(src);
+        for i in 0..8 {
+            assert!(
+                lb.dispatch("verify", json!({"cmd": "cargo test"})).await.is_ok(),
+                "call {i} must not be mistaken for a loop — the result changed every time"
+            );
+        }
     }
 
     #[tokio::test]
