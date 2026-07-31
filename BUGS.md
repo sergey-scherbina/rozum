@@ -5,6 +5,56 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-014 — the loop breaker cut agents off mid-repair: signature 4 matched the call but not the result
+
+- **Status:** fixed this commit (`loopbreak.rs`, signature 4 now keys on the result too), with
+  tests pinning both directions.
+- **Source:** found while reading a matrix run, NOT reported — the intervention is invisible from
+  the score, because most of the cells it cut still passed.
+- **Severity:** P2 — it did not change the 2026-07-31 result, but it fired on 11 of nadia's 16
+  cells and 6 of codex's while leaving claude's untouched, so any comparison between agents was
+  being made under an intervention that was not applied evenly.
+
+**Symptom.** Cells ended with the agent stopped mid-task and this in `agent.log`:
+
+```
+The `bash` tool was called 4 times with identical arguments in the last 12 tool calls —
+the agent is repeating the same action without making progress …
+```
+
+Measured over the kept workdirs of `scripts/bench/results/agentic-20260731-075158`
+(Qwen3.5-4B, 8 tasks x 2 reps x 4 agents):
+
+| agent | cells cut |
+|---|---|
+| nadia | 11 of 16 |
+| codex | 6 of 16 |
+| claude | 0 |
+| opencode | 0 |
+
+**Diagnosis.** Signature 4 counted a repeat by `(name, input)` alone. That is the signature of a
+spin *and* of the verify half of fix → test → fix: an agent whose prompt tells it to check its
+work re-runs `cargo test` on purpose, byte-identically, and the output differs every time because
+the files changed underneath it. The skew across agents is the tell — it is not that nadia and
+codex loop and claude does not, it is that their prompts ask them to verify in a way this
+signature reads as churn.
+
+**Fix.** A repeat counts only when the **result did not change either**. The true positive is
+untouched (identical call *and* identical output is a spin — `stuck_loop_fires_on_repeated_bash_
+verification` still fires, since its helper returns fixed content), and the false positive is
+gone. `ContentBlock::ToolResult` already carried `content`; the collector was discarding it with
+`..`.
+
+**Prior art, same defect, same week.** nadia's own loop breaker
+(`crates/nadia/src/session.rs`) shipped with exactly this bug and was fixed the same way on
+2026-07-31 — there it cut `multibug` mid-repair, and adding the result comparison turned that
+cell from FAIL to PASS. That is the evidence the fix does not cost the true positive.
+
+**Not verified by a re-run yet.** The matrix that produced the measurement above ran against the
+old binary; a clean comparison needs another pass. Left open deliberately rather than claimed.
+
+---
+
 ## BUG-013 — `com.rozum.gateway` crash-looped for 4 days, silently taking the messenger assistant down
 
 - **Status:** fixed live 2026-07-27 (service reloaded, verified end-to-end); deploy-side guard added

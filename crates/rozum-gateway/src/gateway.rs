@@ -2586,6 +2586,51 @@ mod tests {
     fn asst(block: ContentBlock) -> Message {
         Message { role: Role::Assistant, content: vec![block] }
     }
+    /// A successful tool result with specific output — signature 4 reads the output, not
+    /// just the error flag, so a test about it cannot use the fixed-content helper.
+    fn tool_out(id: &str, content: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.into(),
+                content: content.into(),
+                is_error: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_verify_loop_whose_output_keeps_changing_is_not_a_loop() {
+        // Measured 2026-07-31 on the Qwen3.5-4B matrix: matching on (name, input) alone cut
+        // 11 of nadia's 16 cells and 6 of codex's, because an agent told to VERIFY re-runs
+        // the same `cargo test` on purpose. Identical command, different output — the files
+        // changed underneath it. That is fix -> test -> fix, not a spin.
+        let args = json!({ "command": "cargo test" });
+        let mut msgs = vec![Message::user("fix both bugs")];
+        for i in 0..6 {
+            let id = format!("v{i}");
+            msgs.push(asst(tool_use(&id, "Bash", args.clone())));
+            msgs.push(tool_out(&id, &format!("{} failed", 6 - i)));
+        }
+        assert!(
+            detect_stuck_loop(&msgs).is_none(),
+            "re-running one command while its result changes is progress, not a loop"
+        );
+    }
+
+    #[test]
+    fn an_identical_call_with_an_identical_result_still_trips() {
+        // The true positive the signature exists for: nothing moves, at all.
+        let args = json!({ "command": "cargo test" });
+        let mut msgs = vec![Message::user("fix it")];
+        for i in 0..5 {
+            let id = format!("s{i}");
+            msgs.push(asst(tool_use(&id, "Bash", args.clone())));
+            msgs.push(tool_out(&id, "2 failed"));
+        }
+        let reason = detect_stuck_loop(&msgs).expect("identical call AND identical result is a spin");
+        assert!(reason.contains("same result"), "{reason}");
+    }
 
     #[test]
     fn stuck_loop_fires_on_three_identical_errored_calls() {

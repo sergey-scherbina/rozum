@@ -125,27 +125,30 @@ pub(crate) fn edit_target_and_lines(input: &Value) -> Option<(String, Vec<String
 pub(crate) fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
     use std::collections::HashMap;
     // ── Signature 1: identical, consecutively-failing structured tool calls ──
-    let mut errored: HashMap<&str, bool> = HashMap::new();
+    // Keep the result CONTENT, not just the error flag: signature 4 needs to tell a spin
+    // apart from a verify loop, and that difference lives entirely in whether the output
+    // changed between two identical calls.
+    let mut results: HashMap<&str, (bool, &str)> = HashMap::new();
     for m in messages {
         for b in &m.content {
-            if let ContentBlock::ToolResult { tool_use_id, is_error, .. } = b {
-                errored.insert(tool_use_id.as_str(), *is_error);
+            if let ContentBlock::ToolResult { tool_use_id, is_error, content } = b {
+                results.insert(tool_use_id.as_str(), (*is_error, content.as_str()));
             }
         }
     }
-    let mut calls: Vec<(&str, &Value, bool)> = Vec::new();
+    let mut calls: Vec<(&str, &Value, bool, &str)> = Vec::new();
     for m in messages {
         for b in &m.content {
             if let ContentBlock::ToolUse { id, name, input } = b {
-                let err = errored.get(id.as_str()).copied().unwrap_or(false);
-                calls.push((name.as_str(), input, err));
+                let (err, out) = results.get(id.as_str()).copied().unwrap_or((false, ""));
+                calls.push((name.as_str(), input, err, out));
             }
         }
     }
     if calls.len() >= STUCK_LOOP_THRESHOLD {
         let tail = &calls[calls.len() - STUCK_LOOP_THRESHOLD..];
-        let (name0, input0, _) = tail[0];
-        if tail.iter().all(|(n, i, e)| *e && *n == name0 && *i == input0) {
+        let (name0, input0, _, _) = tail[0];
+        if tail.iter().all(|(n, i, e, _)| *e && *n == name0 && *i == input0) {
             return Some(format!(
                 "The `{name0}` tool was called {STUCK_LOOP_THRESHOLD} times in a row with identical \
                  arguments and every call returned an error — the change has most likely already \
@@ -236,26 +239,32 @@ pub(crate) fn detect_stuck_loop(messages: &[Message]) -> Option<String> {
     // after turn. The repeats aren't strictly consecutive and don't error (sig 1 misses), the
     // prose around them varies each turn (sig 2 misses), and the dominant repeated calls are
     // Bash/Read "verification" calls, not an edit-patch on one file (sig 3, edits-only, misses).
-    // Fire when one byte-identical (name+input) call recurs `TOOL_REPEAT_THRESHOLD` times within
-    // the recent window. The threshold is 4 — one higher than the text/structured signatures —
-    // so the healthy "build a few times while fixing a compile error, then it passes" rhythm and
-    // the existing "3 identical successful calls are not a loop" contract don't trip it; 4
-    // byte-identical calls in a 12-call window is a spin, not convergence.
+    // Fire when one byte-identical call recurs `TOOL_REPEAT_THRESHOLD` times within the recent
+    // window AND ITS RESULT NEVER CHANGED. The threshold is 4 — one higher than the text/
+    // structured signatures — so the healthy "build a few times while fixing a compile error,
+    // then it passes" rhythm and the existing "3 identical successful calls are not a loop"
+    // contract don't trip it.
+    //
+    // The result half is load-bearing, and matching without it was a measured defect. On the
+    // 2026-07-31 matrix (Qwen3.5-4B) this signature cut 11 of nadia's 16 cells and 6 of codex's,
+    // and claude's none — because an agent whose prompt tells it to VERIFY re-runs the same
+    // `cargo test` on purpose. That is the verify half of fix -> test -> fix, not a spin: the
+    // command is identical and the output is not, because the files changed underneath it. Only
+    // when the output is identical too has nothing moved.
     const TOOL_WINDOW: usize = 12;
     const TOOL_REPEAT_THRESHOLD: usize = 4;
     {
         let win = &calls[calls.len().saturating_sub(TOOL_WINDOW)..];
-        let mut tool_counts: HashMap<(&str, String), usize> = HashMap::new();
-        for &(name, input, _) in win {
-            let c = tool_counts.entry((name, input.to_string())).or_default();
+        let mut tool_counts: HashMap<(&str, String, &str), usize> = HashMap::new();
+        for &(name, input, _, out) in win {
+            let c = tool_counts.entry((name, input.to_string(), out)).or_default();
             *c += 1;
             if *c >= TOOL_REPEAT_THRESHOLD {
                 return Some(format!(
                     "The `{name}` tool was called {TOOL_REPEAT_THRESHOLD} times with identical \
-                     arguments in the last {TOOL_WINDOW} tool calls — the agent is repeating the \
-                     same action without making progress (commonly re-verifying a change that has \
-                     already been applied). Stopping to avoid an infinite loop; verify the current \
-                     result and report it in one short line."
+                     arguments in the last {TOOL_WINDOW} tool calls AND returned the same result \
+                     every time — nothing is changing, so repeating it will not help. Stopping to \
+                     avoid an infinite loop; report the current result in one short line."
                 ));
             }
         }
