@@ -5,6 +5,42 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-015 — the warm cache loaded a second copy of the resident model, because one model has two spellings
+
+- **Status:** fixed this commit (`gateway.rs`: `enter` compares with `same_model`, and the warm
+  map is looked up by equivalence rather than by exact key), with two tests.
+- **Source:** found while making nadia accept a Hugging Face repository id. Not reported by
+  anyone — nothing fails visibly, it just costs twice the RAM.
+- **Severity:** P2, but sharp on a small machine. One 4B model is ~5 GB; two of them on a 36 GB
+  Mac already competes with the admission gate this project built to avoid jetsam
+  (`docs/specs/`, residency work). On a bigger model it is the difference between fitting and
+  swapping.
+
+**What happens.** `Switchboard::enter` routed by `model != self.model_id()` — a string
+comparison. rozum launches with `mlx-community:Qwen3.5-4B-MLX-4bit`; the Hub writes the same
+repository as `mlx-community/Qwen3.5-4B-MLX-4bit`, and that is what anyone copying an id off a
+model page sends. The two spellings compared unequal, so the request took the multislot path
+and `ensure_warm` built a **second resident copy of the primary's own weights**.
+
+Reproduced live against the running gateway — a chat request with the slash form, and the log
+answers for itself:
+
+```
+{"event":"warm_built","model":"mlx-community/Qwen3.5-4B-MLX-4bit"}   ← primary is …:Qwen3.5-4B-MLX-4bit
+```
+
+**Why it survived.** `same_model` already existed, in `rozum-models::model_source`, written for
+exactly this and used by `WarmConfig::new` two hundred lines away — the footprint lookup got it
+right while the routing decision above it did not. The warm map had the same shape of bug one
+level down: keyed by whatever string the first requester used, so an exact-key lookup misses its
+own entry when the second caller spells it differently.
+
+The test stub was complicit and is fixed too: `warm_cfg` matched model specs by exact key, so it
+was *stricter* than production and could not have shown this. A stub that is stricter than the
+real thing hides the whole class.
+
+---
+
 ## BUG-014 — the loop breaker cut agents off mid-repair: signature 4 matched the call but not the result
 
 - **Status:** fixed this commit (`loopbreak.rs`, signature 4 now keys on the result too), with

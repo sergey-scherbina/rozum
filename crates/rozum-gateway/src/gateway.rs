@@ -204,6 +204,23 @@ fn multislot_enabled() -> bool {
     !matches!(std::env::var("ROZUM_MULTISLOT").ok().as_deref(), Some("0" | "false" | "off"))
 }
 
+/// Find a warm resident for `model` under **any** valid spelling of the same weights.
+///
+/// The map is keyed by whatever string the first requester used, and one model has several
+/// valid specs (`org:repo`, `org/repo`, `hf:org/repo`). An exact-key lookup therefore misses
+/// its own entry when the second caller spells it differently, and builds a duplicate. The
+/// scan is over a handful of entries and only runs when the exact key misses.
+fn warm_lookup<'a>(
+    warm: &'a std::collections::HashMap<String, WarmEntry>,
+    model: &str,
+) -> Option<&'a WarmEntry> {
+    warm.get(model).or_else(|| {
+        warm.iter()
+            .find(|(k, _)| rozum_models::model_source::same_model(k, model))
+            .map(|(_, e)| e)
+    })
+}
+
 /// A secondary resident model kept warm alongside the primary (avoids thrashing).
 struct WarmEntry {
     backend: Arc<dyn ChatBackend>,
@@ -379,7 +396,14 @@ impl Switchboard {
         }
         if multislot_enabled() {
             if let Some(model) = requested.map(str::trim).filter(|m| !m.is_empty()) {
-                if model != self.model_id() {
+                // Compared by IDENTITY, not by spelling. One model has several valid specs —
+                // `mlx-community:Qwen3.5-4B-MLX-4bit` and `mlx-community/Qwen3.5-4B-MLX-4bit`
+                // are the same weights, and the second is what anyone copying the id off the
+                // Hub will send. A `!=` here read them as two models and warmed a SECOND
+                // resident copy of the one already loaded: double the RAM for one model, and
+                // on a machine sized for one of them, an admission refusal or a swap. Observed
+                // as a `warm_built` for the primary's own weights.
+                if !rozum_models::model_source::same_model(model, &self.model_id()) {
                     if let Some((backend, handle)) = self.ensure_warm(model).await {
                         handle.inflight.fetch_add(1, Ordering::SeqCst);
                         handle.last_used.store(crate::share::now_unix(), Ordering::SeqCst);
@@ -445,7 +469,7 @@ impl Switchboard {
         // Fast path: already warm.
         {
             let warm = self.warm.lock().await;
-            if let Some(e) = warm.get(model) {
+            if let Some(e) = warm_lookup(&warm, model) {
                 self.usage.record(model, e.weight_bytes, now);
                 return Some((e.backend.clone(), e.handle.clone()));
             }
@@ -456,7 +480,7 @@ impl Switchboard {
 
         // Hold the warm lock for the decision + build (serializes warm builds — rare; fine for v1).
         let mut warm = self.warm.lock().await;
-        if let Some(e) = warm.get(model) {
+        if let Some(e) = warm_lookup(&warm, model) {
             // A racing request already built it.
             self.usage.record(model, e.weight_bytes, now);
             return Some((e.backend.clone(), e.handle.clone()));
@@ -3970,7 +3994,15 @@ mod tests {
         let map: std::collections::HashMap<String, u64> =
             weights.iter().map(|(m, gb)| ((*m).to_string(), gb * GB)).collect();
         WarmConfig {
-            weight: Arc::new(move |spec: &str| map.get(spec).copied()),
+            // Matched with `same_model`, as `WarmConfig::new` does in production — otherwise a
+            // stub that is stricter than the real thing hides exactly the spelling bugs these
+            // tests exist to catch. Ids with neither a slash nor a colon (`model-old`, `big`)
+            // are not HF specs, so this stays an exact match for every other test here.
+            weight: Arc::new(move |spec: &str| {
+                map.iter()
+                    .find(|(k, _)| rozum_models::model_source::same_model(k, spec))
+                    .map(|(_, w)| *w)
+            }),
             budget: Arc::new(move || budget_gb * GB),
             // These stubs model raw weights (no reserve baked in) ⇒ reserve-less world. The
             // shared-reserve accounting itself is unit-tested in `resident::tests`.
@@ -4020,6 +4052,56 @@ mod tests {
         assert_eq!(lease.model_id, "model-old", "a too-big model falls back to the primary");
         assert_eq!(sb.generating.load(Ordering::SeqCst), 1, "the primary lease holds a token");
         assert!(sb.warm.lock().await.is_empty());
+    }
+
+    /// Point a test switchboard's primary at a real-shaped HF spec.
+    fn with_primary(sb: &Arc<Switchboard>, spec: &str) {
+        sb.spec.lock().unwrap().model_id = spec.to_string();
+    }
+
+    #[tokio::test]
+    async fn an_equivalent_spelling_of_the_primary_is_the_primary() {
+        // One model, several valid specs. `mlx-community/Qwen3.5-4B-MLX-4bit` is what anyone
+        // copying the id off the Hub sends; `mlx-community:Qwen3.5-4B-MLX-4bit` is what rozum
+        // launched with. Comparing them as strings made the gateway warm a SECOND resident
+        // copy of the weights it already had — observed live as a `warm_built` naming the
+        // primary's own model.
+        let colon = "mlx-community:Qwen3.5-4B-MLX-4bit";
+        let slash = "mlx-community/Qwen3.5-4B-MLX-4bit";
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(16, &[(
+            "mlx-community:Qwen3.5-4B-MLX-4bit",
+            2,
+        )]));
+        with_primary(&sb, colon);
+
+        let lease = sb.enter(Some(slash)).await.expect("served");
+        assert_eq!(lease.model_id, colon, "the other spelling must resolve to the resident model");
+        assert!(
+            sb.warm.lock().await.is_empty(),
+            "no second copy of the primary's own weights"
+        );
+        assert_eq!(sb.generating.load(Ordering::SeqCst), 1, "it took the primary path");
+    }
+
+    #[tokio::test]
+    async fn a_warm_secondary_is_found_under_either_spelling() {
+        // Same defect one level down: the warm map is keyed by whatever string the first
+        // requester used, so an exact-key lookup misses its own entry and builds a duplicate.
+        let sb = test_sb_cfg(Some(ok_builder()), true, warm_cfg(16, &[
+            ("model-old", 2),
+            ("mlx-community:Qwen3-4B-4bit", 2),
+        ]));
+        let first = sb.enter(Some("mlx-community:Qwen3-4B-4bit")).await.expect("warmed");
+        assert_eq!(first.model_id, "mlx-community:Qwen3-4B-4bit");
+        drop(first);
+
+        let second = sb.enter(Some("mlx-community/Qwen3-4B-4bit")).await.expect("served");
+        assert_eq!(second.model_id, "mlx-community/Qwen3-4B-4bit", "the lease echoes what was asked");
+        assert_eq!(
+            sb.warm.lock().await.len(),
+            1,
+            "the same weights must not be warmed twice under two spellings"
+        );
     }
 
     #[tokio::test]
