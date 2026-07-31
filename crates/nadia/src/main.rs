@@ -10,6 +10,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use nadia::approval::{ApprovalGate, Mode, Policy, TerminalApprover};
 use nadia::sandbox::Sandbox;
 use nadia::session::{default_budget, system_prompt, LoopBreaker, Session};
 use nadia::tools::tool_source;
@@ -152,7 +153,14 @@ async fn main() {
         );
     }
     let backend = OpenAiHttpBackend::new(opts.gateway.clone(), opts.model.clone());
-    let tools = LoopBreaker::new(tool_source(sandbox));
+    // Batch runs unattended, so asking would deadlock on a stdin nobody is at; the
+    // sandbox is the containment there. Chat has a person present, so the default flips.
+    let policy = Policy::new(if mode == "run" { Mode::Auto } else { Mode::Ask });
+    let tools = ApprovalGate::new(
+        LoopBreaker::new(tool_source(sandbox)),
+        policy.clone(),
+        Box::new(TerminalApprover),
+    );
     let mut budget = default_budget();
     budget.max_steps = opts.max_steps;
 
@@ -181,7 +189,7 @@ async fn main() {
                 }
             });
         }
-        "chat" => repl(&backend, &tools, &root, budget, &opts).await,
+        "chat" => repl(&backend, &tools, &root, budget, &opts, policy).await,
         other => {
             eprintln!("unknown mode `{other}`\n\n{USAGE}");
             std::process::exit(2);
@@ -225,6 +233,7 @@ async fn repl(
     root: &std::path::Path,
     budget: rozum_agent::agent::Budget,
     opts: &Opts,
+    policy: std::sync::Arc<Policy>,
 ) {
     let mut session = Session::new(backend, tools, &system_prompt(root), budget);
     println!("nadia · {} · {}", opts.model, root.display());
@@ -253,8 +262,11 @@ async fn repl(
             match line {
                 "/quit" | "/exit" => break,
                 "/help" => println!(
-                    "/tools  list the tools\n/clear  forget the conversation\n\
-                     /context  message count\n/quit  exit"
+                    "/tools           list the tools\n\
+                     /approve ask|auto  ask before writes and commands, or don't\n\
+                     /clear           forget the conversation\n\
+                     /context         message count\n\
+                     /quit            exit"
                 ),
                 "/tools" => {
                     for t in tools.tools() {
@@ -266,6 +278,14 @@ async fn repl(
                     println!("context cleared");
                 }
                 "/context" => println!("{} messages", session.message_count()),
+                "/approve auto" => {
+                    policy.set_mode(Mode::Auto);
+                    println!("approval: auto — writes and commands run without asking");
+                }
+                "/approve ask" => {
+                    policy.set_mode(Mode::Ask);
+                    println!("approval: ask");
+                }
                 other => println!("unknown command {other} — /help"),
             }
             continue;

@@ -16,6 +16,7 @@
 //! Twin of the ScalaScript implementation in the `nadia` repo (see `REPOS.md`): same
 //! spec, same six tools, same safety model. This one is the executable reference.
 
+pub mod approval;
 pub mod sandbox;
 pub mod session;
 pub mod tools;

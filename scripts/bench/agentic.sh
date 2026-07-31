@@ -837,6 +837,13 @@ for spec in "${MODELS[@]}"; do
         elif [ "$agent" = codex ]; then
           aargs=(codex exec "$prompt" --dangerously-bypass-approvals-and-sandbox)
           runner=("$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}")
+        elif [ "$agent" = nadia ]; then
+          # nadia headless = `nadia run <prompt>`. No provider flags and no tool_hint: it
+          # reads OPENAI_BASE_URL / ROZUM_GATEWAY_URL, which `rozum launch` already exports
+          # to every agent, and its own system prompt covers "call tools, don't write prose".
+          # Its workspace defaults to cwd, which `rozum launch` has already jailed.
+          aargs=(nadia run "$prompt")
+          runner=("$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}")
         else  # opencode — `rozum launch` wires the gateway provider + -m rozum/local
           aargs=(opencode run "$prompt")
           runner=("$BIN" launch --no-channel-wakeup --no-piggyback "${aargs[@]}")
