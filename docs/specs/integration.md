@@ -8,7 +8,9 @@ fault-tolerance), with an in-process embedded mode kept as an option for small m
 
 Companion reading: `portability-and-the-backend-spi.md` (the SPI is rozum's durable
 boundary; this sits above it), `training-and-lora-exploration.md` (the optional
-fine-tune), `mlx-native-runtime.md` (local model serving below).
+fine-tune), `mlx-native-runtime.md` (local model serving below), and `../nadia.md`
+— the same split already shipped and running, with a coding agent as the app leaf
+instead of busi.
 
 ## The architectural decision: busi is the agent; rozum is a stateless model service
 

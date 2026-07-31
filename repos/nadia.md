@@ -1,7 +1,10 @@
 # nadia
 
 url: git@github.com:sergey-scherbina/nadia.git
+web: https://github.com/sergey-scherbina/nadia
 path: ../nadia   (sibling of rozum, like scalascript)
+
+Reference for both halves, from this side: `docs/nadia.md`.
 
 ## Overview
 
@@ -16,9 +19,13 @@ Rust, and it lives here in `crates/nadia` — the reference, and the one carryin
 subagents, the HTTP control surface and the Telegram front-end.
 
 It also ships deployable: a container image, Kubernetes/ECS/Cloud Run manifests,
-and `--provider local|openai|bedrock|vertex` so the model can come from a gateway
-you run, from Bedrock or from Vertex. `local` — this gateway, no credential —
-stays the default. See `nadia:docs/deployment.md`.
+and `--provider local|huggingface|openai|bedrock|vertex` so the model can come
+from a gateway you run, from the Hub, from Bedrock or from Vertex. `local` —
+this gateway, no credential — stays the default. `huggingface` routes on the
+repository id, because an id alone does not say whether the Hub is serving it
+(partner-hosted, needs a token) or only storing the weights
+(`mlx-community/…` — fetched and served by your own gateway, no token).
+See `nadia:docs/deployment.md`.
 
 Spec: `nadia:SPEC.md`.
 
@@ -43,12 +50,15 @@ A second parser on the agent side would be a second source of truth, and the
 failure mode is a gateway defect that reads as a model defect — which this
 project has already paid for twice (`docs/specs/`, gateway patch-revert work).
 
-## What rozum owes it
+## What rozum owes it — settled
 
-One branch in `rozum launch` (`nadia`: gateway base URL + model id), the same
-shape as the existing `claude` / `codex` / `opencode` branches. Then
-`AGENTS=nadia scripts/bench/agentic.sh` needs no harness change — the matrix is
-already parameterized by `AGENTS=` and resolves each agent as a CLI on `PATH`.
+Nothing, as it turned out: no `rozum launch` branch was needed. nadia reads
+`OPENAI_BASE_URL` / `ROZUM_GATEWAY_URL`, which launch already exports to every
+child, and its workspace defaults to the cwd launch has already jailed — so the
+matrix row is `rozum launch … nadia run "$prompt"` with no provider flags at
+all, against `claude`'s injected env and `opencode`'s written config. That is
+the whole benefit of being wired by the plain env contract rather than by a
+per-agent special case.
 
 ## Dependencies
 

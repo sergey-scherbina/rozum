@@ -1,5 +1,22 @@
 # Changelog
 
+## docs(nadia): the agent documented from this side — both halves
+Completed: 2026-07-31
+
+`docs/nadia.md` covers the coding agent as it actually exists: the Rust one in
+`crates/nadia` (build, CLI, exit codes, the six tools, the three containment
+mechanisms, budgets and the repetition guard, subagents, the `nadia serve` HTTP
+protocol, the Telegram commands and their grants, the matrix row, a file map)
+and the ScalaScript/Scala 3 ones in the separate repo, with a table of which
+side owns what. Until now the crate was documented only in its own source
+comments — nothing in `README.md`, the manual or the registry told a reader it
+existed. Deliberately **not** a `docs/specs/nadia*.md`: the contract is
+`nadia:SPEC.md`, all three implementations are reviewed against it, and a second
+spec here would be a second source of truth. Linked from `README.md` (what it
+is · documentation · project layout) and `USER_MANUAL.md`. The two registry
+entries are corrected while there: subagents and Telegram shipped rather than
+"later", and `--provider` gained `huggingface` after they were last written.
+
 ## feat(assistant): group mention-mode + strip mention + bridge watchdog
 Completed: 2026-07-23
 

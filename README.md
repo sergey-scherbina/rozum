@@ -35,6 +35,11 @@ any time — there are no fixed turns.
 - **A structural sandbox.** Every `rozum launch <agent>` runs the agent in a
   Seatbelt jail (macOS) — writes confined to its workspace, secrets denied, only
   the local gateway reachable off-box. On by default; `--no-sandbox` opts out.
+- **A coding agent of its own.** `nadia` (`crates/nadia`) reads and edits files,
+  runs commands and verifies its own work on a local model — headless
+  (`nadia run <task>`), interactive (`nadia`), or as supervised subagents over
+  HTTP (`nadia serve`) drivable from the Telegram bot. See
+  [docs/nadia.md](docs/nadia.md).
 - **A local-model conference.** Local models can join a meeting room as **live
   participants** alongside humans: `rozum meetings participant --model <spec>
   --room <name>` joins a model that reads the room and replies like anyone else,
@@ -136,6 +141,9 @@ Named cascades can also live in `rozum.toml` (`[cascade.<name>]`). See
 - **[USER_MANUAL.md](USER_MANUAL.md)** — running rooms, TUI controls, MCP
   proxy setup, bridges, persistence, environment variables.
 - **[SPEC.md](SPEC.md)** — global project spec (runtime contract, invariants).
+- **[docs/nadia.md](docs/nadia.md)** — the nadia coding agent: the Rust one in
+  `crates/nadia` (tools, sandbox, subagents, HTTP, Telegram, the matrix row) and
+  the ScalaScript/Scala 3 ones in [its own repo](https://github.com/sergey-scherbina/nadia).
 - **`docs/specs/`** — per-feature specs.
 - **[CHANGELOG.md](CHANGELOG.md)** — completed work, newest first.
 
@@ -152,6 +160,7 @@ crates/
 ├── rozum-core/             backend SPI, serving, admission, shared residency
 ├── rozum-models/           model catalog and Hugging Face integration
 ├── rozum-agent/            reference agent runtime and tool loop
+├── nadia/                  the `nadia` coding agent (docs/nadia.md)
 ├── rozum-{mlx,gguf,...}/   optional in-process engine adapters
 └── rozum-{tui,web}/        operator frontends
 clients/                    UCC clients, including the one-source React/ratatui message-list proof

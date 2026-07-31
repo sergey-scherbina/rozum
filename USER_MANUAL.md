@@ -343,6 +343,28 @@ ROZUM_SANDBOX=/path/to/ws rozum launch …      # jail to an explicit workspace
 ROZUM_SANDBOX_BACKEND=docker rozum launch …   # container backend (any OS)
 ```
 
+### nadia — the coding agent that ships here
+
+The agents above are third-party CLIs pointed at the gateway. `nadia`
+(`crates/nadia`, `cargo install --path crates/nadia`) is one this repo owns: six
+tools, a jailed workspace, and a model that has to *run* the build before it may
+claim the task is done.
+
+```bash
+nadia run "add a --json flag to the CLI and a test for it"   # headless, in cwd
+nadia                                                        # interactive
+nadia serve                                                  # subagents over HTTP :8790
+```
+
+It reads `OPENAI_BASE_URL` / `ROZUM_GATEWAY_URL`, so `rozum launch nadia run …`
+wires it up with no flags. Writes and commands ask first in interactive mode
+(`/approve auto` to stop asking); `bash` runs confined with the network denied
+unless `--allow-net`. Subagents are spawned and steered from the REPL
+(`/spawn`, `/agents`, `/status`, `/tell`, `/stop`, `/kill`) or from the Telegram
+bot with the same commands, gated by the chat's `write` + `shell` grants.
+
+Full reference: [docs/nadia.md](docs/nadia.md).
+
 ---
 
 ## Local models in a room: the conference
