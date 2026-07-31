@@ -13,6 +13,7 @@ use std::sync::Arc;
 use nadia::approval::{describe, ApprovalGate, Mode, Policy, TerminalApprover};
 use nadia::sandbox::Sandbox;
 use nadia::session::{default_budget, system_prompt, LoopBreaker, Session};
+use nadia::supervisor::{Spec, Supervisor};
 use nadia::tools::tool_source;
 use rozum_agent::agent::{AgentObserver, AgentStop, ToolSource};
 use rozum_gateway::openai_http::OpenAiHttpBackend;
@@ -261,6 +262,7 @@ async fn repl(
     policy: std::sync::Arc<Policy>,
 ) {
     let mut session = Session::new(backend, tools, &system_prompt(root), budget);
+    let sup = Supervisor::new();
     println!("nadia · {} · {}", opts.model, root.display());
     println!("{} tools · /help for commands · ctrl-d to exit", tools.tools().len());
     if !opts.allow_net {
@@ -292,11 +294,20 @@ async fn repl(
             match line {
                 "/quit" | "/exit" => break,
                 "/help" => println!(
-                    "/tools           list the tools\n\
+                    "/tools             list the tools\n\
                      /approve ask|auto  ask before writes and commands, or don't\n\
-                     /clear           forget the conversation\n\
-                     /context         message count\n\
-                     /quit            exit"
+                     /clear             forget the conversation\n\
+                     /context           message count\n\
+                     /quit              exit\n\
+                     \n\
+                     subagents:\n\
+                     /spawn <task>      start one on this workspace\n\
+                     /agents            what they are all doing\n\
+                     /status <id>       one of them, with its result when done\n\
+                     /tell <id> <msg>   give it something for its next turn\n\
+                     /pause|/resume <id>\n\
+                     /stop <id>         finish the current tool, then wrap up\n\
+                     /kill <id>         abort now and free the slot"
                 ),
                 "/tools" => {
                     for t in tools.tools() {
@@ -308,6 +319,23 @@ async fn repl(
                     println!("context cleared");
                 }
                 "/context" => println!("{} messages", session.message_count()),
+                "/agents" => {
+                    let all = sup.list();
+                    if all.is_empty() {
+                        println!("no subagents");
+                    }
+                    for a in all {
+                        println!(
+                            "  #{:<3} {:<9} {:>3} calls  {:>4}s  {}{}",
+                            a.id,
+                            a.phase.label(),
+                            a.tool_calls,
+                            a.elapsed.as_secs(),
+                            one_line(&a.task),
+                            a.last_tool.map(|t| format!("  [{t}]")).unwrap_or_default()
+                        );
+                    }
+                }
                 "/approve auto" => {
                     policy.set_mode(Mode::Auto);
                     println!("approval: auto — writes and commands run without asking");
@@ -316,7 +344,65 @@ async fn repl(
                     policy.set_mode(Mode::Ask);
                     println!("approval: ask");
                 }
-                other => println!("unknown command {other} — /help"),
+                other => {
+                    let (cmd, rest) = match other.split_once(' ') {
+                        Some((c, r)) => (c, r.trim()),
+                        None => (other, ""),
+                    };
+                    // Subagent control. Ids are small integers on purpose: these get typed
+                    // by a human under time pressure, and from a phone.
+                    let id = || -> Result<u64, String> {
+                        rest.parse::<u64>().map_err(|_| format!("{cmd} needs an agent id"))
+                    };
+                    let outcome: Result<String, String> = match cmd {
+                        "/spawn" if !rest.is_empty() => sup
+                            .spawn(Spec {
+                                task: rest.to_string(),
+                                // The child shares the parent's workspace: a subagent that
+                                // cannot see the repo cannot help with it. Two agents editing
+                                // one tree can still collide — that is the operator's call,
+                                // and why /agents shows what each one is touching.
+                                workspace: root.to_path_buf(),
+                                gateway: opts.gateway.clone(),
+                                model: opts.model.clone(),
+                                budget: default_budget(),
+                                parent: None,
+                                allow_net: opts.allow_net,
+                                confine: opts.confine,
+                            })
+                            .map(|id| format!("spawned #{id}")),
+                        "/status" => id().and_then(|i| sup.status(i)).map(|a| {
+                            format!(
+                                "#{} {} · {} calls · {}s · {}{}",
+                                a.id,
+                                a.phase.label(),
+                                a.tool_calls,
+                                a.elapsed.as_secs(),
+                                one_line(&a.task),
+                                a.result.map(|r| format!("\n{r}")).unwrap_or_default()
+                            )
+                        }),
+                        "/pause" => id().and_then(|i| sup.pause(i)).map(|_| "paused".into()),
+                        "/resume" => id().and_then(|i| sup.resume(i)).map(|_| "resumed".into()),
+                        "/stop" => id()
+                            .and_then(|i| sup.stop(i))
+                            .map(|_| "stopping at the next tool call".into()),
+                        "/kill" => id().and_then(|i| sup.kill(i)).map(|_| "killed".into()),
+                        "/tell" => match rest.split_once(' ') {
+                            Some((i, msg)) => i
+                                .parse::<u64>()
+                                .map_err(|_| "/tell needs an agent id then a message".to_string())
+                                .and_then(|i| sup.tell(i, msg))
+                                .map(|_| "queued for its next turn".into()),
+                            None => Err("/tell <id> <message>".into()),
+                        },
+                        _ => Err(format!("unknown command {other} — /help")),
+                    };
+                    match outcome {
+                        Ok(msg) => println!("{msg}"),
+                        Err(e) => println!("{e}"),
+                    }
+                }
             }
             continue;
         }

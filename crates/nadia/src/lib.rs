@@ -19,4 +19,5 @@
 pub mod approval;
 pub mod sandbox;
 pub mod session;
+pub mod supervisor;
 pub mod tools;
