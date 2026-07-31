@@ -13,6 +13,7 @@ use std::sync::Arc;
 use nadia::approval::{describe, ApprovalGate, Mode, Policy, TerminalApprover};
 use nadia::sandbox::Sandbox;
 use nadia::session::{default_budget, system_prompt, LoopBreaker, Session};
+use nadia::serve::{serve, Config};
 use nadia::supervisor::{Spec, Supervisor};
 use nadia::tools::tool_source;
 use rozum_agent::agent::{AgentObserver, AgentStop, ToolSource};
@@ -24,6 +25,7 @@ nadia — a coding agent on a local model
 USAGE:
     nadia run <task>      run one task headlessly in the current directory
     nadia chat            interactive session (default when no arguments)
+    nadia serve           expose the subagent protocol over HTTP
 
 OPTIONS:
     --workspace <DIR>     where the agent may act        [default: current directory]
@@ -33,6 +35,9 @@ OPTIONS:
     --allow-net           let `bash` reach the network   [default: denied]
     --no-confine          do not wrap `bash` in sandbox-exec
     --json                batch: print the full result as JSON
+    --port <N>            serve: listen here                  [default: 8790]
+    --token <T>           serve: required in x-nadia-token; mandatory off loopback
+    --bind <ADDR>         serve: address to bind              [default: 127.0.0.1]
     -h, --help            this text
 
 EXIT CODES (batch):
@@ -75,6 +80,9 @@ struct Opts {
     allow_net: bool,
     confine: bool,
     json: bool,
+    port: u16,
+    token: String,
+    bind: String,
 }
 
 fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
@@ -88,6 +96,9 @@ fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
         allow_net: false,
         confine: true,
         json: false,
+        port: 8790,
+        token: std::env::var("NADIA_TOKEN").unwrap_or_default(),
+        bind: "127.0.0.1".into(),
     };
     let mut i = 0;
     while i < args.len() {
@@ -97,12 +108,16 @@ fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
             "--allow-net" => o.allow_net = true,
             "--no-confine" => o.confine = false,
             "--json" => o.json = true,
-            "--workspace" | "--gateway" | "--model" | "--max-steps" => {
+            "--workspace" | "--gateway" | "--model" | "--max-steps" | "--port" | "--token"
+            | "--bind" => {
                 let v = args.get(i + 1).ok_or_else(|| format!("{a} needs a value"))?;
                 match a {
                     "--workspace" => o.workspace = PathBuf::from(v),
                     "--gateway" => o.gateway = with_v1(v),
                     "--model" => o.model = v.clone(),
+                    "--token" => o.token = v.clone(),
+                    "--bind" => o.bind = v.clone(),
+                    "--port" => o.port = v.parse().map_err(|_| format!("--port {v}: not a number"))?,
                     _ => o.max_steps = v.parse().map_err(|_| format!("--max-steps {v}: not a number"))?,
                 }
                 i += 1;
@@ -191,6 +206,32 @@ async fn main() {
             });
         }
         "chat" => repl(&backend, &tools, &root, budget, &opts, policy).await,
+        "serve" => {
+            let addr: std::net::SocketAddr = match format!("{}:{}", opts.bind, opts.port).parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("nadia: --bind/--port: {e}");
+                    std::process::exit(2);
+                }
+            };
+            let cfg = Config {
+                workspace: root.clone(),
+                gateway: opts.gateway.clone(),
+                model: opts.model.clone(),
+                budget,
+                allow_net: opts.allow_net,
+                confine: opts.confine,
+                token: opts.token.clone(),
+            };
+            println!("nadia serve · {addr} · {} · {}", opts.model, root.display());
+            if cfg.token.is_empty() {
+                println!("no token: loopback only");
+            }
+            if let Err(e) = serve(Supervisor::new(), cfg, addr).await {
+                eprintln!("nadia: {e}");
+                std::process::exit(2);
+            }
+        }
         other => {
             eprintln!("unknown mode `{other}`\n\n{USAGE}");
             std::process::exit(2);
