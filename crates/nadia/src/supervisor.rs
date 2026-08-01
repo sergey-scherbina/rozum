@@ -75,6 +75,8 @@ pub struct Status {
     pub elapsed: Duration,
     /// The final answer, once there is one.
     pub result: Option<String>,
+    /// Files this agent wrote or edited, in the order it first touched them.
+    pub touched: Vec<String>,
 }
 
 struct Meta {
@@ -89,6 +91,7 @@ struct Meta {
     /// duration stops being "how long ago did it start" the moment it is over.
     finished: Option<Instant>,
     result: Option<String>,
+    touched: std::collections::BTreeSet<String>,
 }
 
 /// The flags the gate reads. Separate from [`Meta`] because the gate touches them on every
@@ -145,7 +148,20 @@ impl<T: ToolSource> ToolSource for ControlGate<T> {
             m.tool_calls += 1;
             m.last_tool = Some(name.to_string());
         }
-        self.inner.dispatch(name, args).await
+        // Which files a run actually touched is the question every operator asks next, and
+        // the answer is here rather than in the model's summary on purpose: a model that
+        // has lost the thread reports files it never wrote. Recorded AFTER the call, so a
+        // refused write (the jail, or a declined approval) never appears as a change.
+        let touched = matches!(name, "write_file" | "edit_file")
+            .then(|| args.get("path").and_then(Value::as_str).map(str::to_owned))
+            .flatten();
+        let out = self.inner.dispatch(name, args).await;
+        if out.is_ok() {
+            if let Some(path) = touched {
+                self.meta.lock().unwrap().touched.insert(path);
+            }
+        }
+        out
     }
 }
 
@@ -205,6 +221,7 @@ impl Supervisor {
             started: Instant::now(),
             finished: None,
             result: None,
+            touched: Default::default(),
         }));
         let inbox: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -371,6 +388,7 @@ fn snapshot(id: AgentId, meta: &Arc<Mutex<Meta>>) -> Status {
         last_tool: m.last_tool.clone(),
         elapsed: m.finished.map_or_else(|| m.started.elapsed(), |f| f - m.started),
         result: m.result.clone(),
+        touched: m.touched.iter().cloned().collect(),
     }
 }
 
@@ -400,6 +418,7 @@ mod tests {
             started: Instant::now(),
             finished: None,
             result: None,
+            touched: Default::default(),
         }));
         (ControlGate { inner: src, ctl: ctl.clone(), meta: meta.clone() }, ctl, meta)
     }

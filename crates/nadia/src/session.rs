@@ -35,10 +35,20 @@ pub fn system_prompt(root: &Path) -> String {
          Make the smallest change that satisfies the task; do not restructure code that \
          already works.\n\
          \n\
+         Every path you pass to a tool is RELATIVE to that directory: write `src/main.rs`, \
+         never `{root}/src/main.rs` and never `{no_slash}/src/main.rs`. Repeating the \
+         workspace path builds a copy of it INSIDE itself and the file lands where nobody \
+         is looking — the run then reports success for work the person who asked cannot \
+         find.\n\
+         \n\
          When the task is genuinely done, reply with a short plain-text summary of what \
          you changed and what you ran to check it. That final message ends the task, so \
          do not send it while work remains.",
-        root = root.display()
+        root = root.display(),
+        // The exact shape the model actually produced: the workspace path with its leading
+        // slash dropped, which is a legal RELATIVE path and so is not refused by the jail
+        // (BUG-016). Naming it verbatim is the cheapest fix there is.
+        no_slash = root.display().to_string().trim_start_matches('/').to_string()
     )
 }
 

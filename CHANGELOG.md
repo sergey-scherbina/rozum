@@ -1,5 +1,37 @@
 # Changelog
 
+## fix(nadia): the files were real, the chat just never said where
+Completed: 2026-08-01
+
+Reported from the phone: "ничего на самом деле не создавалось никаких файлов я
+проверил". The files existed. `~/.rozum/nadia/hello-rpn` held a complete Rust
+project — `Cargo.toml`, `src/main.rs`, a built binary that runs and evaluates
+`3 4 + 2 *` — written by an agent whose entire report in Telegram had been
+"🤖 агент #3 пошёл работать". An agent that writes files somewhere the operator is
+not looking has, from their side, done nothing.
+
+**Say where, and say what.** The spawn line now names the workspace, and when the
+chat has not chosen a project it says in as many words that this is nadia's own
+sandbox and how to point it at a repository. The finished report adds the
+workspace and the list of files the agent actually wrote — and, when it wrote
+none, says so ("файлы не менялись — это был ответ, а не работа") rather than
+leaving someone to search a directory for files that were never created.
+
+That list comes from the dispatch path, not from the model's summary: `ControlGate`
+records the `path` of every `write_file`/`edit_file` **that succeeded**, so a
+refused write never appears as a change and a model that has lost the thread
+cannot report files it did not touch. Exposed as `touched` on the `nadia serve`
+status, which the UCC can use next.
+
+**BUG-016 fixed while it was visible.** With `touched` in the report the mirror-tree
+defect stopped being folklore: one run wrote `scratchpad/proj-check/src/main.rs` —
+the workspace path minus its leading slash, a legal relative path the jail is right
+to accept. Fixed by the cheapest candidate on record, an anchor in the system
+prompt naming both wrong shapes verbatim and what they cost. Measured on the same
+task: `touched` went from `["scratchpad/proj-check/src/main.rs"]` in a mirror tree
+to `["rpn.rs"]` in the workspace root. The jail was not touched — candidate 2 stays
+unspent, in the order the entry set.
+
 ## fix(telegram): the agent was pointed at a port nothing listens on, and said nothing about it
 Completed: 2026-08-01
 

@@ -327,7 +327,7 @@ pub fn handle(cmd: Cmd, caps: Caps, chat_id: i64) -> String {
                     });
                 }
             }
-            render(&cmd, &body)
+            render(&cmd, &body, chat_id)
         }
         Err(e) => format!("nadia: {e}"),
     }
@@ -589,16 +589,28 @@ fn curl_json(method: &str, url: &str, body: Option<serde_json::Value>) -> Result
 }
 
 /// Turn a JSON reply into something worth reading on a phone.
-fn render(cmd: &Cmd, body: &serde_json::Value) -> String {
+fn render(cmd: &Cmd, body: &serde_json::Value, chat_id: i64) -> String {
     if let Some(e) = body.get("error").and_then(|v| v.as_str()) {
         return format!("nadia: {e}");
     }
     match cmd {
-        Cmd::Spawn(task) => format!(
-            "🤖 агент #{} пошёл работать\n{}",
-            body.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
-            clip(task, 120)
-        ),
+        // Say WHERE, always. An agent that writes files somewhere the operator is not
+        // looking has, from their side, done nothing — which is exactly how this read from a
+        // phone: a whole working Rust project built in nadia's own sandbox while the answer
+        // in the chat said only "агент #3 пошёл работать" (seen live 2026-08-01).
+        Cmd::Spawn(task) => {
+            let id = body.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let mut s = format!("🤖 агент #{id} пошёл работать\n{}", clip(task, 120));
+            match chat_state(chat_id).project {
+                Some(p) => s.push_str(&format!("\n📁 {p}")),
+                None => s.push_str(&format!(
+                    "\n📁 {} — это личная песочница nadia, а не твой репозиторий.\n\
+                     /projects · /project <имя> — работать в проекте",
+                    default_workspace().display()
+                )),
+            }
+            s
+        }
         Cmd::List => {
             let agents = body.get("agents").and_then(|v| v.as_array()).cloned().unwrap_or_default();
             if agents.is_empty() {
@@ -789,6 +801,20 @@ fn render_finished(id: u64, phase: &str, a: &serde_json::Value) -> String {
         num("elapsed_secs"),
         clip(get("task"), 200)
     );
+    // Where it worked and what it wrote. Both come from the dispatch path, not from the
+    // model's summary: a model that has lost the thread reports files it never touched, and
+    // an operator who cannot find the files concludes nothing happened at all.
+    let workspace = get("workspace");
+    if !workspace.is_empty() {
+        s.push_str(&format!("\n📁 {workspace}"));
+    }
+    let touched: Vec<&str> =
+        a.get("touched").and_then(|v| v.as_array()).map(|v| v.iter().filter_map(|f| f.as_str()).collect()).unwrap_or_default();
+    if !touched.is_empty() {
+        s.push_str(&format!("\n✍️ {}", touched.join(" · ")));
+    } else if phase == "done" {
+        s.push_str("\n✍️ файлы не менялись — это был ответ, а не работа");
+    }
     let result = get("result");
     if !result.is_empty() {
         s.push_str(&format!("\n\n{}", clip(result, 2500)));
@@ -926,6 +952,30 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_report_says_where_it_worked_and_what_it_wrote() {
+        let a = serde_json::json!({
+            "id": 3, "phase": "done", "task": "напиши калькулятор RPN",
+            "tool_calls": 9, "elapsed_secs": 120, "result": "готово",
+            "workspace": "/Users/x/.rozum/nadia",
+            "touched": ["Cargo.toml", "src/main.rs"]
+        });
+        let text = render_finished(3, "done", &a);
+        // The two facts an operator needs before they can go and look at the work.
+        assert!(text.contains("/Users/x/.rozum/nadia"), "must say WHERE: {text}");
+        assert!(text.contains("Cargo.toml") && text.contains("src/main.rs"), "must list what: {text}");
+
+        // A run that only talked says so, rather than leaving the operator to search a
+        // directory for files that were never written — which is exactly what happened.
+        let b = serde_json::json!({
+            "id": 4, "phase": "done", "task": "какие у тебя тулы?",
+            "tool_calls": 0, "elapsed_secs": 3, "result": "вот список",
+            "workspace": "/Users/x/.rozum/nadia", "touched": []
+        });
+        let text = render_finished(4, "done", &b);
+        assert!(text.contains("файлы не менялись"), "{text}");
+    }
+
+    #[test]
     fn a_failure_with_no_reason_says_where_to_look() {
         let a = serde_json::json!({
             "id": 2, "phase": "failed", "task": "привет", "tool_calls": 0, "elapsed_secs": 1,
@@ -946,7 +996,7 @@ mod tests {
     #[test]
     fn an_error_body_is_shown_rather_than_a_success_line() {
         let body = serde_json::json!({"error": "no agent 7"});
-        assert!(render(&Cmd::Status(7), &body).contains("no agent 7"));
+        assert!(render(&Cmd::Status(7), &body, 42).contains("no agent 7"));
     }
 
     #[test]
@@ -955,7 +1005,7 @@ mod tests {
             {"id": 1, "phase": "running", "tool_calls": 4, "elapsed_secs": 12,
              "last_tool": "bash", "task": "fix the flaky test"}
         ]});
-        let s = render(&Cmd::List, &body);
+        let s = render(&Cmd::List, &body, 42);
         assert!(s.contains("#1 running"), "{s}");
         assert!(s.contains("[bash]"), "{s}");
         assert!(s.contains("fix the flaky test"), "{s}");

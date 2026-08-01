@@ -7,7 +7,13 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ## BUG-016 — nadia × Qwen3.5-4B: a path written without its leading slash lands a file in a mirror tree, and the run reports success
 
-- **Status:** open. NOT a nadia code defect — `Sandbox::resolve` handles an absolute path
+- **Status:** FIXED 2026-08-01 by candidate 1 below — the system prompt now names both wrong
+  shapes verbatim (`{root}/src/main.rs` and `{root-without-leading-slash}/src/main.rs`) and says
+  what happens if you use them. Measured on the same task: before, `touched` was
+  `["scratchpad/proj-check/src/main.rs"]` and the file sat in a mirror tree; after, `["rpn.rs"]`
+  in the workspace root. The jail was never changed — candidate 2 stays unspent, as ordered.
+  Reachable again the moment a different model does it, which is why the entry stays.
+- **Status (original):** open. NOT a nadia code defect — `Sandbox::resolve` handles an absolute path
   correctly (`is_absolute` → used as given, never re-rooted). This is the model emitting the
   workspace's absolute path with the leading `/` stripped, which is then a legal RELATIVE path.
 - **Source:** found while verifying the UCC coder path, 2026-08-01. One run in four.

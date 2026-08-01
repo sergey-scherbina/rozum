@@ -106,6 +106,9 @@ fn as_json(s: &Status) -> Value {
         "last_tool": s.last_tool,
         "elapsed_secs": s.elapsed.as_secs(),
         "result": s.result,
+        // Which files it actually wrote — the question every front-end asks next, and the
+        // one a model's own summary is not a reliable answer to.
+        "touched": s.touched,
     })
 }
 
