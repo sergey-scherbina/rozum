@@ -11,8 +11,13 @@
 //! subagents live inside that process, so `/status` and `/pause` only mean anything while
 //! it is up, and a service that restarts under them would silently lose their work.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
 
 use crate::messenger_acl::Caps;
 
@@ -66,12 +71,22 @@ pub enum Cmd {
     Resume(u64),
     Stop(u64),
     Kill(u64),
+    /// The projects this machine knows, with the one this chat is working in marked.
+    Projects,
+    /// Work here from now on. `None` prints what is set instead of changing it.
+    Project(Option<String>),
+    /// Plain text goes to nadia instead of to the chat model. `None` reports the setting.
+    Dialog(Option<bool>),
 }
 
 impl Cmd {
     pub fn need(&self) -> Need {
         match self {
-            Cmd::List | Cmd::Status(_) => Need::Look,
+            Cmd::List | Cmd::Status(_) | Cmd::Projects | Cmd::Project(None) | Cmd::Dialog(None) => {
+                Need::Look
+            }
+            // Choosing the workspace and routing your typing into an agent both decide where
+            // writes land, so they need the same grant as starting one.
             _ => Need::Drive,
         }
     }
@@ -102,6 +117,14 @@ pub fn parse(text: &str) -> Option<Result<Cmd, String>> {
             }
         }
         "/agents" => Ok(Cmd::List),
+        "/projects" => Ok(Cmd::Projects),
+        "/project" => Ok(Cmd::Project((!rest.is_empty()).then_some(rest))),
+        "/nadia" => match rest.to_ascii_lowercase().as_str() {
+            "" => Ok(Cmd::Dialog(None)),
+            "on" | "вкл" | "1" => Ok(Cmd::Dialog(Some(true))),
+            "off" | "выкл" | "0" => Ok(Cmd::Dialog(Some(false))),
+            other => Err(format!("Не понял `{other}`. Использование: /nadia on | off")),
+        },
         "/status" => id(&rest).map(Cmd::Status),
         "/pause" => id(&rest).map(Cmd::Pause),
         "/resume" => id(&rest).map(Cmd::Resume),
@@ -120,19 +143,311 @@ pub fn parse(text: &str) -> Option<Result<Cmd, String>> {
     })
 }
 
+// ── Per-chat state ──────────────────────────────────────────────────────────────────────
+//
+// Two things have to outlive one message: WHERE this chat's agents work, and WHICH chat is
+// waiting for a given agent's result. Both live in one small file rather than in memory,
+// because the bridge re-execs whenever the group topology changes — and an agent whose
+// result was posted to nobody because its bridge restarted is exactly the failure that makes
+// a phone workflow useless.
+
+/// What one chat has chosen.
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct ChatState {
+    /// Absolute path the agents of this chat work in. Unset → nadia's own scratch workspace.
+    #[serde(default)]
+    project: Option<String>,
+    /// Plain text goes to nadia rather than to the chat model.
+    #[serde(default)]
+    dialog: bool,
+}
+
+/// One agent someone is waiting on. `task` is kept to detect an id reused by a restarted
+/// `nadia serve`: ids are small integers and start again at 1, so an id alone could deliver
+/// one chat's result to another.
+#[derive(Clone, Serialize, Deserialize)]
+struct Watch {
+    chat: i64,
+    task: String,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct State {
+    #[serde(default)]
+    chats: BTreeMap<String, ChatState>,
+    #[serde(default)]
+    watch: BTreeMap<String, Watch>,
+}
+
+fn state_path() -> PathBuf {
+    crate::meeting::rozum_state_dir().join("nadia-telegram.json")
+}
+
+/// Serializes the read-modify-write of the state file. The command handler and the watcher
+/// run in the same process on different tasks; a lost write here is a lost notification.
+fn state_lock() -> &'static Mutex<()> {
+    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn load_state() -> State {
+    std::fs::read(state_path())
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_state(s: &State) {
+    let path = state_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(text) = serde_json::to_vec_pretty(s) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &text).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
+fn with_state<T>(f: impl FnOnce(&mut State) -> T) -> T {
+    let _g = state_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = load_state();
+    let out = f(&mut s);
+    save_state(&s);
+    out
+}
+
+fn chat_state(chat_id: i64) -> ChatState {
+    load_state().chats.get(&chat_id.to_string()).cloned().unwrap_or_default()
+}
+
+/// Is this chat routing plain text to nadia? Read by the bridge before it hands a message to
+/// the room, so the check has to be cheap and to fail closed (a missing file = off).
+pub fn dialog_on(chat_id: i64) -> bool {
+    chat_state(chat_id).dialog
+}
+
+// ── Projects ────────────────────────────────────────────────────────────────────────────
+
+/// The projects this machine knows: the meeting daemon's registered rooms plus whatever the
+/// UCC's "create" button added. The same two sources the UCC's project picker reads, so the
+/// phone and the web console offer the same list — read here rather than asked for over
+/// HTTP, because that endpoint needs a session cookie this process does not have.
+fn known_projects() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for room in crate::meeting::list_registered(&crate::meeting::rozum_state_dir()) {
+        let Some(project) = room.project else { continue };
+        let path = project.to_string_lossy().to_string();
+        if path.is_empty() || path.contains("/tmp/") || path.contains("/.worktrees/") {
+            continue;
+        }
+        if !out.iter().any(|(_, p)| p == &path) {
+            out.push((room.name, path));
+        }
+    }
+    let extras = dirs_home().join(".rozum/ucc/projects.json");
+    if let Ok(bytes) = std::fs::read(extras) {
+        if let Ok(list) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) {
+            for e in &list {
+                let (Some(name), Some(path)) = (
+                    e.get("name").and_then(|v| v.as_str()),
+                    e.get("path").and_then(|v| v.as_str()),
+                ) else {
+                    continue;
+                };
+                if !out.iter().any(|(_, p)| p == path) {
+                    out.push((name.to_string(), path.to_string()));
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Resolve what the operator typed: a project name, or a path. A path is accepted as typed
+/// (`~` expanded) so a project that was never registered is still reachable from the phone.
+fn resolve_project(arg: &str) -> Result<(String, String), String> {
+    let arg = arg.trim();
+    let projects = known_projects();
+    if let Some((n, p)) = projects.iter().find(|(n, _)| n.eq_ignore_ascii_case(arg)) {
+        return Ok((n.clone(), p.clone()));
+    }
+    let expanded = if let Some(rest) = arg.strip_prefix("~/") {
+        dirs_home().join(rest).to_string_lossy().to_string()
+    } else {
+        arg.to_string()
+    };
+    if std::path::Path::new(&expanded).is_dir() {
+        let name = std::path::Path::new(&expanded)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| expanded.clone());
+        return Ok((name, expanded));
+    }
+    let names: Vec<&str> = projects.iter().map(|(n, _)| n.as_str()).collect();
+    Err(if names.is_empty() {
+        format!("Не нашёл проект `{arg}` — и зарегистрированных проектов нет. Укажи путь.")
+    } else {
+        format!("Не нашёл проект `{arg}`. Есть: {}", names.join(", "))
+    })
+}
+
 /// Run a parsed command, having checked the caller may. Returns the reply text.
-pub fn handle(cmd: Cmd, caps: Caps) -> String {
+pub fn handle(cmd: Cmd, caps: Caps, chat_id: i64) -> String {
     let need = cmd.need();
     if !need.satisfied_by(caps) {
         return need.refusal().to_string();
     }
+    // Answered from disk: these three never need the agent process, and starting it to answer
+    // "where am I working" would be a surprising cost.
+    match &cmd {
+        Cmd::Projects => return render_projects(chat_id),
+        Cmd::Project(None) => return render_project(chat_id),
+        Cmd::Project(Some(arg)) => return set_project(chat_id, arg),
+        Cmd::Dialog(v) => return set_dialog(chat_id, *v),
+        _ => {}
+    }
     if let Err(e) = ensure_running() {
         return format!("Не смог поднять nadia: {e}");
     }
-    match request(&cmd) {
-        Ok(body) => render(&cmd, &body),
+    match request(&cmd, chat_id) {
+        Ok(body) => {
+            // Remember who is waiting for this one, so its result can be delivered instead of
+            // polled for. Recorded here — where the id and the chat are both known — rather
+            // than in the watcher, which only ever sees ids.
+            if let Cmd::Spawn(task) = &cmd {
+                if let Some(id) = body.get("id").and_then(|v| v.as_u64()) {
+                    with_state(|s| {
+                        s.watch.insert(
+                            id.to_string(),
+                            Watch { chat: chat_id, task: task.clone() },
+                        );
+                    });
+                }
+            }
+            render(&cmd, &body)
+        }
         Err(e) => format!("nadia: {e}"),
     }
+}
+
+fn render_projects(chat_id: i64) -> String {
+    let current = chat_state(chat_id).project;
+    let projects = known_projects();
+    if projects.is_empty() {
+        return format!(
+            "Проектов не зарегистрировано. Можно указать путь: /project ~/work/my/rozum\n\
+             Сейчас: {}",
+            current.unwrap_or_else(|| default_workspace().to_string_lossy().into_owned())
+        );
+    }
+    let mut lines = vec!["📁 Проекты (/project <имя>):".to_string()];
+    for (name, path) in projects {
+        let mark = if current.as_deref() == Some(path.as_str()) { "→ " } else { "  " };
+        lines.push(format!("{mark}{name} — {path}"));
+    }
+    lines.join("\n")
+}
+
+fn render_project(chat_id: i64) -> String {
+    match chat_state(chat_id).project {
+        Some(p) => format!("Агенты этого чата работают в {p}"),
+        None => format!(
+            "Проект не выбран — агенты работают в {} (личная песочница nadia).\n\
+             /projects — список, /project <имя> — выбрать.",
+            default_workspace().display()
+        ),
+    }
+}
+
+fn set_project(chat_id: i64, arg: &str) -> String {
+    match resolve_project(arg) {
+        Ok((name, path)) => {
+            with_state(|s| {
+                s.chats.entry(chat_id.to_string()).or_default().project = Some(path.clone());
+            });
+            format!(
+                "📁 {name} — агенты этого чата теперь работают в {path}\n\
+                 Уже запущенные остаются там, где начали."
+            )
+        }
+        Err(e) => e,
+    }
+}
+
+fn set_dialog(chat_id: i64, v: Option<bool>) -> String {
+    let Some(on) = v else {
+        return if dialog_on(chat_id) {
+            "Режим nadia включён: обычный текст идёт агенту. /nadia off — обратно к ассистенту."
+                .to_string()
+        } else {
+            "Режим nadia выключен: обычный текст идёт ассистенту. /nadia on — переключить."
+                .to_string()
+        };
+    };
+    with_state(|s| s.chats.entry(chat_id.to_string()).or_default().dialog = on);
+    if on {
+        let where_ = chat_state(chat_id)
+            .project
+            .unwrap_or_else(|| default_workspace().to_string_lossy().into_owned());
+        format!(
+            "🤖 Режим nadia включён — пиши задачу обычным текстом.\n\
+             Работает в {where_}. Пока агент занят, следующее сообщение уйдёт ЕМУ \
+             (как /tell), а не запустит второго.\n\
+             /nadia off — вернуть обычный чат с ассистентом."
+        )
+    } else {
+        "Режим nadia выключен — обычный текст снова идёт ассистенту.".to_string()
+    }
+}
+
+/// Plain text in dialog mode: steer the agent that is already working, or start one.
+///
+/// Continuing beats starting a second agent on the same workspace: two agents editing one
+/// tree collide, and on a phone the second one is almost always a follow-up to the first,
+/// not a new job. `/spawn` stays the way to say "no, a separate one".
+pub fn handle_text(chat_id: i64, text: &str, caps: Caps) -> String {
+    if !Need::Drive.satisfied_by(caps) {
+        return Need::Drive.refusal().to_string();
+    }
+    if let Err(e) = ensure_running() {
+        return format!("Не смог поднять nadia: {e}");
+    }
+    match running_agents(chat_id).as_slice() {
+        [] => handle(Cmd::Spawn(text.to_string()), caps, chat_id),
+        [id] => handle(Cmd::Tell(*id, text.to_string()), caps, chat_id),
+        // Two agents are working and this text could be for either. Guessing would hand a
+        // steering message to the wrong one, which is worse than one extra tap.
+        many => format!(
+            "Работают {} агентов ({}). Кому это? /tell <id> <текст>, \
+             или /spawn <задача> для нового.",
+            many.len(),
+            many.iter().map(|i| format!("#{i}")).collect::<Vec<_>>().join(" ")
+        ),
+    }
+}
+
+/// This chat's agents that are still working — running or parked.
+fn running_agents(chat_id: i64) -> Vec<u64> {
+    let watched = load_state().watch;
+    let Ok(body) = curl_json("GET", &format!("{}/agents", base()), None) else {
+        return Vec::new();
+    };
+    let Some(agents) = body.get("agents").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    agents
+        .iter()
+        .filter(|a| {
+            let phase = a.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+            let id = a.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let mine = watched.get(&id.to_string()).is_some_and(|w| w.chat == chat_id);
+            mine && matches!(phase, "running" | "paused")
+        })
+        .filter_map(|a| a.get("id").and_then(|v| v.as_u64()))
+        .collect()
 }
 
 /// Bring `nadia serve` up if it is not answering, and wait until it is.
@@ -189,12 +504,20 @@ fn health() -> Result<(), String> {
     curl_json("GET", &format!("{}/health", base()), None).map(|_| ())
 }
 
-fn request(cmd: &Cmd) -> Result<serde_json::Value, String> {
+fn request(cmd: &Cmd, chat_id: i64) -> Result<serde_json::Value, String> {
     let b = base();
     match cmd {
         Cmd::Spawn(task) => {
-            curl_json("POST", &format!("{b}/agents"), Some(serde_json::json!({"task": task})))
+            // The chat's project, when it has chosen one: an agent started from a phone is
+            // almost always meant for a repo, not for nadia's own scratch directory.
+            let mut body = serde_json::json!({ "task": task });
+            if let Some(p) = chat_state(chat_id).project {
+                body["workspace"] = serde_json::json!(p);
+            }
+            curl_json("POST", &format!("{b}/agents"), Some(body))
         }
+        // Handled before any request is made.
+        Cmd::Projects | Cmd::Project(_) | Cmd::Dialog(_) => Ok(serde_json::json!({})),
         Cmd::List => curl_json("GET", &format!("{b}/agents"), None),
         Cmd::Status(i) => curl_json("GET", &format!("{b}/agents/{i}"), None),
         Cmd::Tell(i, m) => curl_json(
@@ -252,6 +575,7 @@ fn render(cmd: &Cmd, body: &serde_json::Value) -> String {
             }
             s
         }
+        Cmd::Projects | Cmd::Project(_) | Cmd::Dialog(_) => String::new(), // answered earlier
         Cmd::Tell(i, _) => format!("сказал агенту #{i} — возьмёт следующим ходом"),
         Cmd::Pause(i) => format!("агент #{i} на паузе"),
         Cmd::Resume(i) => format!("агент #{i} продолжает"),
@@ -288,14 +612,149 @@ fn clip(s: &str, n: usize) -> String {
 
 /// The lines to add to the bot's `/help`.
 pub const HELP: &str = "\n\
-Агенты (нужны права write+shell):\n\
+Агенты nadia (нужны права write+shell):\n\
+/nadia on — писать задачи обычным текстом (off — обратно к ассистенту)\n\
+/projects · /project <имя> — где агенты работают\n\
 /spawn <задача> — запустить агента\n\
 /agents — кто чем занят\n\
 /status <id> — один агент и его результат\n\
 /tell <id> <текст> — дать ему следующий ход\n\
 /pause <id> · /resume <id>\n\
 /stop <id> — доделать текущий вызов и подвести итог\n\
-/kill <id> — убить сейчас и освободить ресурсы";
+/kill <id> — убить сейчас и освободить ресурсы\n\
+Итог агента приходит сам, как только он закончит — /status спрашивать не нужно.";
+
+/// The nadia entries for the bot's command menu (`setMyCommands`), so they are offered when
+/// you type `/` instead of living only in `/help` — which is the difference between a
+/// feature an operator uses from a phone and one they have to remember exists.
+pub const MENU: &[(&str, &str)] = &[
+    ("nadia", "Режим агента: /nadia on | off"),
+    ("spawn", "Запустить агента: /spawn <задача>"),
+    ("agents", "Кто чем занят"),
+    ("status", "Агент и его результат: /status <id>"),
+    ("tell", "Дать агенту ход: /tell <id> <текст>"),
+    ("stop", "Доделать и подвести итог: /stop <id>"),
+    ("projects", "Проекты, где могут работать агенты"),
+    ("project", "Выбрать проект: /project <имя>"),
+];
+
+// ── Delivering results ──────────────────────────────────────────────────────────────────
+
+/// Watch the agents this bot started and post each one's result into the chat that started
+/// it, once, when it reaches a terminal phase.
+///
+/// This is what makes the bot usable from a phone. Without it the protocol is complete but
+/// the workflow is not: you would start an agent and then poll `/status 3` until it changed,
+/// which is a job for a machine and is exactly the machine you are talking to.
+///
+/// Runs while the bridge runs. Everything about it is best-effort: a poll that fails is
+/// retried on the next tick, and a chat that cannot be posted to is logged, not retried
+/// forever.
+pub async fn watch_results(bot: std::sync::Arc<super::bot::TelegramBot>) {
+    // Slow enough to be free (one loopback GET), fast enough that a finished agent does not
+    // sit unreported while you look at the screen.
+    const EVERY: Duration = Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(EVERY).await;
+        // Nothing to watch → do not even touch the socket. An operator who never spawns an
+        // agent must not pay for `nadia serve` being probed every five seconds.
+        if load_state().watch.is_empty() {
+            continue;
+        }
+        let finished = match tokio::task::spawn_blocking(collect_finished).await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        for (chat, text) in finished {
+            if let Err(e) = bot.send_message_to(chat, &text).await {
+                eprintln!("[telegram-bridge] nadia result to chat {chat} failed: {e}");
+            }
+        }
+    }
+}
+
+/// One poll: everything watched that has finished, rendered, and dropped from the watch list
+/// so it is reported exactly once. Blocking (curl); called from `spawn_blocking`.
+fn collect_finished() -> Vec<(i64, String)> {
+    let Ok(body) = curl_json("GET", &format!("{}/agents", base()), None) else {
+        return Vec::new();
+    };
+    let agents = body.get("agents").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let mut out = Vec::new();
+    with_state(|s| {
+        for a in &agents {
+            let Some(id) = a.get("id").and_then(|v| v.as_u64()) else { continue };
+            let key = id.to_string();
+            let Some(w) = s.watch.get(&key).cloned() else { continue };
+            match report_for(&w, a) {
+                Report::NotYet => {}
+                Report::Reused => {
+                    s.watch.remove(&key);
+                }
+                Report::Ready(text) => {
+                    s.watch.remove(&key);
+                    out.push((w.chat, text));
+                }
+            }
+        }
+        // An agent that vanished entirely (serve restarted, or it was killed and reaped)
+        // cannot be reported and must not be watched forever.
+        let live: std::collections::HashSet<String> = agents
+            .iter()
+            .filter_map(|a| a.get("id").and_then(|v| v.as_u64()))
+            .map(|i| i.to_string())
+            .collect();
+        s.watch.retain(|k, _| live.contains(k));
+    });
+    out
+}
+
+/// What the watcher should do about one watched agent this tick.
+#[derive(Debug, PartialEq, Eq)]
+enum Report {
+    /// Still working (or parked) — leave it on the list.
+    NotYet,
+    /// This id is not the agent we were watching: `nadia serve` restarted and handed the same
+    /// small integer to different work. Drop it silently. Reporting one chat's result into
+    /// another chat is worse than reporting none, and a wrong result reads as a real one.
+    Reused,
+    /// Finished — post this and stop watching.
+    Ready(String),
+}
+
+fn report_for(w: &Watch, a: &serde_json::Value) -> Report {
+    let phase = a.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+    if !matches!(phase, "done" | "failed" | "killed") {
+        return Report::NotYet;
+    }
+    let task = a.get("task").and_then(|v| v.as_str()).unwrap_or("");
+    if !task.is_empty() && !w.task.is_empty() && task != w.task {
+        return Report::Reused;
+    }
+    let id = a.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+    Report::Ready(render_finished(id, phase, a))
+}
+
+fn render_finished(id: u64, phase: &str, a: &serde_json::Value) -> String {
+    let mark = match phase {
+        "done" => "✅",
+        "failed" => "❌",
+        _ => "⛔",
+    };
+    let get = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let num = |k: &str| a.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    let mut s = format!(
+        "{mark} агент #{id} {phase} · {} вызовов · {}с\n{}",
+        num("tool_calls"),
+        num("elapsed_secs"),
+        clip(get("task"), 200)
+    );
+    let result = get("result");
+    if !result.is_empty() {
+        s.push_str(&format!("\n\n{}", clip(result, 2500)));
+    }
+    s
+}
 
 #[cfg(test)]
 mod tests {
@@ -350,9 +809,58 @@ mod tests {
 
     #[test]
     fn a_refused_command_says_which_grant_is_missing() {
-        let reply = handle(Cmd::Spawn("x".into()), caps(true, true, false, false));
+        let reply = handle(Cmd::Spawn("x".into()), caps(true, true, false, false), 42);
         assert!(reply.contains("/grant"), "a refusal must be actionable: {reply}");
         assert!(reply.contains("write shell"));
+    }
+
+    #[test]
+    fn the_new_verbs_parse_and_ask_for_the_right_grant() {
+        assert_eq!(parse("/projects").unwrap(), Ok(Cmd::Projects));
+        assert_eq!(parse("/project").unwrap(), Ok(Cmd::Project(None)));
+        assert_eq!(parse("/project rozum").unwrap(), Ok(Cmd::Project(Some("rozum".into()))));
+        assert_eq!(parse("/nadia").unwrap(), Ok(Cmd::Dialog(None)));
+        assert_eq!(parse("/nadia on").unwrap(), Ok(Cmd::Dialog(Some(true))));
+        assert_eq!(parse("/nadia@my_bot off").unwrap(), Ok(Cmd::Dialog(Some(false))));
+        assert!(parse("/nadia maybe").unwrap().is_err());
+
+        // Looking is open; anything that decides WHERE writes land needs write+shell — the
+        // same grant as starting an agent, because that is what it is choosing.
+        assert_eq!(Cmd::Projects.need(), Need::Look);
+        assert_eq!(Cmd::Project(None).need(), Need::Look);
+        assert_eq!(Cmd::Dialog(None).need(), Need::Look);
+        assert_eq!(Cmd::Project(Some("x".into())).need(), Need::Drive);
+        assert_eq!(Cmd::Dialog(Some(true)).need(), Need::Drive);
+    }
+
+    #[test]
+    fn a_finished_agent_is_reported_once_and_never_the_wrong_one() {
+        let w = Watch { chat: 7, task: "fix the test".into() };
+        let agent = |phase: &str, task: &str| {
+            serde_json::json!({
+                "id": 3, "phase": phase, "task": task,
+                "tool_calls": 5, "elapsed_secs": 12, "result": "done, cargo test passes"
+            })
+        };
+        // Still working → nothing is said and it stays watched.
+        assert_eq!(report_for(&w, &agent("running", "fix the test")), Report::NotYet);
+        assert_eq!(report_for(&w, &agent("paused", "fix the test")), Report::NotYet);
+
+        // Finished → the report carries the outcome, the counts and the result text.
+        let Report::Ready(text) = report_for(&w, &agent("done", "fix the test")) else {
+            panic!("a finished agent must be reported");
+        };
+        assert!(text.contains("#3") && text.contains("done"), "{text}");
+        assert!(text.contains("cargo test passes"), "the result must reach the chat: {text}");
+        assert!(text.contains("fix the test"), "say WHICH task finished: {text}");
+
+        // A failure is reported too — silence would read as "still working".
+        assert!(matches!(report_for(&w, &agent("failed", "fix the test")), Report::Ready(_)));
+        assert!(matches!(report_for(&w, &agent("killed", "fix the test")), Report::Ready(_)));
+
+        // Same id, different work: `nadia serve` restarted and reused the number. Dropped,
+        // never delivered — a result posted to the wrong chat reads as a real one.
+        assert_eq!(report_for(&w, &agent("done", "something else entirely")), Report::Reused);
     }
 
     #[test]

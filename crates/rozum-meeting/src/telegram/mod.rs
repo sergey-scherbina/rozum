@@ -136,10 +136,18 @@ async fn run_bridge_multi(
         "TELEGRAM_ALLOWED_USER_IDS",
     )?;
 
-    // Register the command menu once (non-fatal).
-    if let Err(e) = bot.set_my_commands(BOT_COMMANDS).await {
+    // Register the command menu once (non-fatal). nadia's verbs are appended rather than
+    // written out again here: one list, in the module that implements them.
+    let menu: Vec<(&str, &str)> =
+        BOT_COMMANDS.iter().copied().chain(nadia::MENU.iter().copied()).collect();
+    if let Err(e) = bot.set_my_commands(&menu).await {
         eprintln!("[telegram-bridge] setMyCommands failed (menu unavailable): {e}");
     }
+
+    // Deliver finished agents' results to the chat that started them, instead of making the
+    // operator poll `/status` from a phone. One task for the whole bridge: the watch list is
+    // on disk and keyed by agent id, so it does not care which chat task is running.
+    tokio::spawn(nadia::watch_results(Arc::clone(&bot)));
 
     // One room task per chat, each with its OWN per-room ACL roster (a grant in one chat does not
     // apply in another). The owner is bootstrapped into every room's roster.
@@ -240,7 +248,7 @@ async fn run_channel(
                 if text.starts_with('/') {
                     let reply = {
                         let mut a = acl.lock().await;
-                        handle_command(&text, id, &name, &mut a, &acl_path)
+                        handle_command(&text, id, &name, &mut a, &acl_path, chat_id)
                     };
                     if let Err(error) = bot.send_message_to(chat_id, &reply).await {
                         eprintln!("[telegram-bridge] sendMessage (command) error: {error}");
@@ -263,6 +271,26 @@ async fn run_channel(
                         if let Err(error) = bot.send_message_to(chat_id, &hint).await {
                             eprintln!("[telegram-bridge] sendMessage (notify) error: {error}");
                         }
+                    }
+                    let _ = incoming.committed.send(Ok(()));
+                    continue;
+                }
+
+                // Dialog mode (`/nadia on`): plain text drives the coding agent instead of the
+                // chat model. Intercepted BEFORE the room, so the message is not also answered
+                // by the assistant — two replies to one message is worse than either alone.
+                // The grant is re-checked inside (`handle_text`): `chat` gets you the assistant,
+                // and driving an agent needs write+shell.
+                if nadia::dialog_on(chat_id) {
+                    let caps = { acl.lock().await.caps_for(id) };
+                    let text_c = text.clone();
+                    let reply = tokio::task::spawn_blocking(move || {
+                        nadia::handle_text(chat_id, &text_c, caps)
+                    })
+                    .await
+                    .unwrap_or_else(|e| format!("nadia: {e}"));
+                    if let Err(error) = bot.send_message_to(chat_id, &reply).await {
+                        eprintln!("[telegram-bridge] sendMessage (nadia) error: {error}");
                     }
                     let _ = incoming.committed.send(Ok(()));
                     continue;
@@ -544,7 +572,14 @@ pub mod nadia;
 /// Handle a `/command` from a Telegram user. Utility commands (`/help`, `/whoami`)
 /// are open to everyone; management commands (`/members`, `/grant`, `/revoke`) are
 /// owner-only. Mutates + persists the ACL on grant/revoke. Returns the reply text.
-fn handle_command(text: &str, sender_id: i64, sender_name: &str, acl: &mut Acl, acl_path: &Path) -> String {
+fn handle_command(
+    text: &str,
+    sender_id: i64,
+    sender_name: &str,
+    acl: &mut Acl,
+    acl_path: &Path,
+    chat_id: i64,
+) -> String {
     let mut parts = text.split_whitespace();
     // Telegram group commands may carry a `@BotName` suffix — strip it.
     let cmd = parts
@@ -616,7 +651,7 @@ fn handle_command(text: &str, sender_id: i64, sender_name: &str, acl: &mut Acl, 
         // `nadia::handle` re-checks caps_for(sender) itself. Placed in the fallback so a
         // nadia verb can never shadow a command the bot already answers.
         _ => match nadia::parse(text) {
-            Some(Ok(c)) => nadia::handle(c, acl.caps_for(sender_id)),
+            Some(Ok(c)) => nadia::handle(c, acl.caps_for(sender_id), chat_id),
             Some(Err(usage)) => usage,
             None => "Неизвестная команда. /help — список команд.".to_string(),
         },
@@ -828,33 +863,33 @@ mod tests {
         acl.ensure_owner(1);
 
         // whoami is open to anyone
-        assert!(handle_command("/whoami", 999, "Guest", &mut acl, &path).contains("999"));
+        assert!(handle_command("/whoami", 999, "Guest", &mut acl, &path, 42).contains("999"));
 
         // a non-owner cannot manage
-        assert_eq!(handle_command("/grant 5 chat", 999, "Guest", &mut acl, &path), NOT_OWNER);
+        assert_eq!(handle_command("/grant 5 chat", 999, "Guest", &mut acl, &path, 42), NOT_OWNER);
         assert!(acl.members.is_empty());
 
         // owner grants with explicit caps, persisted
-        let reply = handle_command("/grant 5 chat read write", 1, "Owner", &mut acl, &path);
+        let reply = handle_command("/grant 5 chat read write", 1, "Owner", &mut acl, &path, 42);
         assert!(reply.contains("chat+read+write"), "got: {reply}");
         let reloaded = Acl::load(&path);
         let caps = reloaded.caps_for(5);
         assert!(caps.chat && caps.read && caps.write && !caps.shell);
 
         // default caps when none given = chat only
-        handle_command("/grant 6", 1, "Owner", &mut acl, &path);
+        handle_command("/grant 6", 1, "Owner", &mut acl, &path, 42);
         assert!(acl.caps_for(6).chat && !acl.caps_for(6).read);
 
         // /members lists them (owner only)
-        let members = handle_command("/members", 1, "Owner", &mut acl, &path);
+        let members = handle_command("/members", 1, "Owner", &mut acl, &path, 42);
         assert!(members.contains("id 5") && members.contains("id 6"));
-        assert_eq!(handle_command("/members", 999, "Guest", &mut acl, &path), NOT_OWNER);
+        assert_eq!(handle_command("/members", 999, "Guest", &mut acl, &path, 42), NOT_OWNER);
 
         // revoke
-        assert!(handle_command("/revoke 5", 1, "Owner", &mut acl, &path).contains("удалён"));
+        assert!(handle_command("/revoke 5", 1, "Owner", &mut acl, &path, 42).contains("удалён"));
         assert_eq!(Acl::load(&path).caps_for(5), Caps::default());
 
         // bad caps token is reported, group-suffixed command still parses
-        assert!(handle_command("/grant@MyBot 7 bogus", 1, "Owner", &mut acl, &path).contains("bogus"));
+        assert!(handle_command("/grant@MyBot 7 bogus", 1, "Owner", &mut acl, &path, 42).contains("bogus"));
     }
 }

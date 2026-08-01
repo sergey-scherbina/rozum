@@ -1,5 +1,52 @@
 # Changelog
 
+## feat(telegram): nadia is something you can actually work with from a phone
+Completed: 2026-08-01
+
+The protocol was already there (`064b9aa`): `/spawn`, `/agents`, `/status`,
+`/tell`, `/pause`, `/resume`, `/stop`, `/kill`, behind the same per-room roster
+that governs the assistant. What was missing was everything that turns a protocol
+into a workflow.
+
+**The result comes to you.** A watcher in the bridge posts each agent's outcome
+into the chat that started it — once, when it reaches `done`/`failed`/`killed`,
+with the counts and the summary. Before this you started an agent and then polled
+`/status 3` until it changed, which is a job for a machine and is exactly the
+machine you are talking to. The watch list lives on disk (`nadia-telegram.json`
+in the state dir) rather than in memory, because the bridge re-execs on every
+group topology change and an agent whose result was posted to nobody is the
+failure that makes the whole thing useless. An id reused by a restarted `nadia
+serve` — they are small integers and restart at 1 — is caught by comparing the
+task text and dropped rather than delivered: a result posted into the wrong chat
+reads as a real one.
+
+**Where it works is yours to choose.** `/projects` lists what this machine knows
+— the meeting daemon's registered rooms plus the UCC's own additions, the same
+two sources the UCC project picker reads — and `/project <name>` sets it per
+chat, which `/spawn` then passes as the agent's workspace. It reads those files
+directly instead of asking the gateway's REST endpoint, which needs a session
+cookie this process does not have. Unset still means nadia's scratch dir.
+
+**`/nadia on` — plain text is the task.** Ordinary messages drive the agent
+instead of the chat model: the one already working gets it (as `/tell`), and
+otherwise a new one starts. Two live agents and it asks which rather than
+guessing — a steering message handed to the wrong agent is worse than one extra
+tap. Interception happens before the room, so a message is never answered twice,
+and the grant is re-checked there: `chat` gets you the assistant, driving an
+agent still needs `write` + `shell`.
+
+**The verbs are in the bot menu** (`setMyCommands`), appended from
+`nadia::MENU` rather than written out a second time in the bridge. They lived
+only in `/help` before, which is the difference between a feature an operator
+uses from a phone and one they have to remember exists.
+
+Verified live end to end: an agent spawned through `nadia serve` with a
+project workspace ran to `done` on the resident Qwen3.5-4B, and the bridge
+delivered its result into the operator's chat — the watch entry cleared itself
+and nothing was logged, which is what success looks like on that path. Unit tests
+cover the new verbs, the grants they need, and the reported/not-yet/reused
+decision; 26 telegram tests green.
+
 ## feat(nadia): MCP servers as tools, and `help` / `?` that answer properly
 Completed: 2026-08-01
 

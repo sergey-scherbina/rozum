@@ -241,7 +241,31 @@ is missing (`/grant <id> write shell`).
 
 The first command that needs it brings `nadia serve` up on loopback :8790 and every later
 one reuses it, so an operator who never spawns an agent never pays for the process. It
-requires `nadia` on `PATH`; the workspace is `$NADIA_WORKSPACE`, default `~/.rozum/nadia`.
+requires `nadia` on `PATH` — which the UCC deploy now installs.
+
+Three things turn that protocol into something usable from a phone:
+
+- **The result comes to you.** A watcher in the bridge posts each agent's outcome into the
+  chat that started it, once, when it finishes — done, failed or killed, with the summary.
+  Without it the protocol was complete and the workflow was not: you would start an agent
+  and then poll `/status 3` until it changed, which is a job for a machine and is exactly
+  the machine you are talking to. The watch list is on disk (`nadia-telegram.json` in the
+  state dir), so a bridge that re-execs — it does, on every group topology change — still
+  delivers. An id reused by a restarted `nadia serve` is detected by comparing the task and
+  dropped rather than delivered: a result posted into the wrong chat reads as a real one.
+- **Where it works is yours to choose.** `/projects` lists what this machine knows (the
+  meeting daemon's registered rooms plus the UCC's own additions — the same two sources the
+  UCC project picker reads), `/project <name>` sets it per chat, and `/spawn` passes it as
+  the agent's workspace. Unset still means nadia's scratch dir, `$NADIA_WORKSPACE` or
+  `~/.rozum/nadia`.
+- **`/nadia on` — plain text is the task.** Ordinary messages go to the agent instead of to
+  the chat model: to the one already working (as `/tell`) if there is one, else starting a
+  new one. Two live agents and it asks which, rather than guessing — a steering message
+  handed to the wrong agent is worse than one extra tap. `/nadia off` gives the chat back to
+  the assistant. Interception happens before the room, so a message is never answered twice.
+
+Every verb is also in the bot's command menu, so typing `/` offers them instead of requiring
+you to remember they exist.
 
 ### In the matrix and in the UCC
 
