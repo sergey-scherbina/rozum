@@ -17,6 +17,8 @@
 //! spec, same six tools, same safety model. This one is the executable reference.
 
 pub mod approval;
+pub mod commands;
+pub mod mcp;
 pub mod sandbox;
 pub mod serve;
 pub mod session;

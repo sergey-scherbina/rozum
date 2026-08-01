@@ -1,5 +1,69 @@
 # Changelog
 
+## feat(nadia): MCP servers as tools, and `help` / `?` that answer properly
+Completed: 2026-08-01
+
+Both halves of the agent, in all three implementations — the Rust one here, the
+ScalaScript and Scala 3 ones in `../nadia` (`0f9fad0`). The contract went in
+first, as `nadia:SPEC.md` §2.1 and §4.2; this entry covers what landed on this
+side.
+
+**MCP — the seventh tool is not built, it is connected.** The bar for a seventh
+built-in tool is untouched (six tools, and a seventh must enable a task class the
+six make *impossible*). What changes is that a run can borrow tools nadia does
+not define and is not responsible for: `--mcp <name>` / `--mcp-all` against the
+ecosystem's `mcpServers` config, so a file the operator already has works
+unchanged, plus `nadia mcp list [--probe]`.
+
+The transport was already here — `rozum-agent`'s `McpToolSource` (rmcp,
+`docs/specs/mcp-toolsource.md`), written for the embedded loop and unused by
+nadia until now. `crates/nadia/src/mcp.rs` adds only what an application owns:
+where the config is, which servers are connected, what the tools are called, and
+what happens when one is broken. Each of those is a decision with a reason:
+
+- **Opt-in per run.** A config that merely exists adds nothing. Six tools cost
+  ~1.5–2k schema tokens per request and one server can add a dozen more — the
+  same tax `rozum launch --lean` exists to undo, and for a 4B model every extra
+  schema dilutes selection. The operator decides when to pay, not the filesystem.
+- **`mcp__<server>__<tool>`**, so the six can never be shadowed and two servers
+  exporting the same name stay apart.
+- **Gated exactly like `bash`** (`is_guarded` now asks `is_mcp_tool` too). An MCP
+  server is an arbitrary program; treating its tools as safer because they have
+  tidy names would be backwards. The approval line shows server · tool · clipped
+  arguments rather than a wall of unknown-schema JSON.
+- **Outside the workspace jail, and said out loud** at every connect. The path
+  jail and the seatbelt confine nadia, not a separate process it started; silence
+  would leave the operator with a model of the safety that is quietly false.
+- **A named server that will not start ends the run**, before the loop, with its
+  name — a run that silently lost half its tools produces a confidently wrong
+  answer. A `url` entry is refused **by name** rather than skipped, for the same
+  reason: no error reads as "connected".
+
+**`help` and `?`.** The REPL takes `help`, `?`, `/help`, `/?` — bare, or with a
+command name. Bare lists every command with its **format** (`/tell <id>
+<message>`; the arguments are what a user does not know at that moment) and one
+line; `help tell` adds the paragraph that says what is load-bearing about it
+(what `/stop` costs that `/kill` does not, that `/approve auto` is for the
+session). An unknown name gets the names, not the page. `nadia help` from the
+shell prints the same usage as `-h`.
+
+A person who types `help` at a prompt is asking the program; answering with a
+model turn spends seconds and a few thousand tokens to say what nadia already
+knows. The match is on the whole line, so `help me refactor this` is still a
+message for the model. It renders from a command table
+(`crates/nadia/src/commands.rs`), not a string literal beside the dispatcher —
+two lists that must agree and therefore eventually don't.
+
+Verified live on the resident Qwen3.5-4B: `nadia run … --mcp rozum` connected the
+real `rozum mcp-proxy`, listed its seven tools under the prefix, and the model
+called `mcp__rozum__meeting.submit` — the message arrived in the meeting room. 51
+tests here (11 new), and the same end-to-end run passes from the other two
+implementations.
+
+This is also the other half of the room work below: `launch_bridge` carries
+presence for an agent that has **no** MCP, and an operator who connects
+`rozum mcp-proxy` now gets the half the bridge cannot give — nadia can answer.
+
 ## feat(launch): rozum carries the meeting room for an agent that has no MCP
 Completed: 2026-08-01
 

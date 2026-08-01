@@ -57,6 +57,8 @@ rozum gateway --model mlx-community:Qwen3.5-4B-MLX-4bit --port 8080
 nadia run "add a --json flag to the CLI and a test for it"   # one task, headless, in cwd
 nadia                                                        # or sit in it (chat is the default)
 nadia serve                                                  # subagents over HTTP
+nadia mcp list --probe                                       # MCP servers, and what they serve
+nadia help                                                   # the same text as -h
 ```
 
 ### CLI
@@ -70,6 +72,7 @@ nadia serve                                                  # subagents over HT
 | `--allow-net` | off | Lets `bash` reach the network. |
 | `--no-confine` | off | Skips `sandbox-exec` (macOS). |
 | `--json` | off | Batch: the full result, including every tool call, as JSON. |
+| `--mcp <NAME>` | none | Connect this MCP server's tools for the run; repeatable. `--mcp-all` takes every server in the config, `--mcp-config <PATH>` says where it is. |
 | `--port` / `--bind` / `--token` | `8790` / `127.0.0.1` / `$NADIA_TOKEN` | `serve` only. |
 
 `NADIA_DEBUG=1` prints the gateway, model and workspace a run actually used — the first
@@ -99,6 +102,44 @@ Two behaviours are worth knowing because they are load-bearing rather than incid
 - A tool error is not an exception — it is the next prompt. Every message is written as an
   instruction the model can act on, and output is clipped to 8 KB with the truncation
   *announced*, because silent truncation makes a model confidently wrong about what it saw.
+
+### The seventh tool is not built, it is connected — MCP
+
+The bar above is why nadia grows no tools. It borrows them instead: `--mcp <name>` connects
+an **MCP server** for the run, from the ecosystem's `mcpServers` config (`--mcp-config`, else
+`<workspace>/.mcp.json`, else `~/.config/nadia/mcp.json`), and `nadia mcp list --probe` shows
+what each one serves. Contract: `nadia:SPEC.md` §2.1, identical in all three implementations.
+
+```bash
+nadia run "…" --mcp rozum        # {"mcpServers":{"rozum":{"command":"rozum","args":["mcp-proxy"]}}}
+```
+
+The rules that matter from this side:
+
+- **Opt-in per run** — a config that merely exists adds nothing. One server can add a dozen
+  tools to the six, which is the same schema-token tax `rozum launch --lean` exists to undo.
+- **`mcp__<server>__<tool>`**, so the six can never be shadowed.
+- **Gated exactly like `bash`**, and **outside the workspace jail** — a server is a separate
+  process with its own access to the machine, and every connect says so.
+- **A named server that will not start ends the run**, with its name; one that dies mid-run
+  turns its tools into tool errors the model can act on instead of killing the run.
+
+The Rust implementation gets the transport from `rozum-agent`'s `McpToolSource` (rmcp,
+`docs/specs/mcp-toolsource.md`) and owns only the policy: config, selection, naming, gating.
+What this buys the room, concretely: nadia connected to `rozum mcp-proxy` can *post* — the
+launch-side bridge below carries presence for a nadia that has no MCP, and this is the other
+half, where it answers.
+
+### Commands: `help` and `?`
+
+The REPL takes `help`, `?`, `/help` and `/?`, bare or with a command name — `help` lists
+every command with its **format** (`/tell <id> <message>`; the arguments are what a user does
+not know at that moment) and one line, `help tell` adds the paragraph. An unknown name gets
+the names, not the page. `nadia help` from the shell prints the same usage as `-h`.
+
+It is rendered from a command table (`crates/nadia/src/commands.rs`) rather than a string
+literal beside the dispatcher, because those are two lists that must agree and therefore
+eventually don't.
 
 ### Containment
 
@@ -259,6 +300,8 @@ run; not re-measured since.
 |---|---|
 | `src/main.rs` | argument parsing, batch, the REPL, the live renderer |
 | `src/tools.rs` | the six tools |
+| `src/mcp.rs` | MCP config, server selection, tool naming, the refusals |
+| `src/commands.rs` | the REPL command table the help is rendered from |
 | `src/sandbox.rs` | path jail, exec confinement, the seatbelt profile |
 | `src/approval.rs` | the gate, the decision, the diff shown at the prompt |
 | `src/session.rs` | system prompt, budgets, the repetition guard, the transcript |

@@ -26,6 +26,14 @@ use serde_json::Value;
 /// prompt for the one call that mattered gets waved through too.
 const GUARDED: &[&str] = &["write_file", "edit_file", "bash"];
 
+/// Does this call need asking about? The six are decided by name; every MCP tool is guarded
+/// whatever it is called (`nadia:SPEC.md` §2.1). An MCP server is an arbitrary program with its
+/// own access to the machine — the path jail and the seatbelt confine nadia, not it — so treating
+/// its tools as safer than `bash` because they have tidy names would be exactly backwards.
+fn is_guarded(name: &str) -> bool {
+    GUARDED.contains(&name) || crate::mcp::is_mcp_tool(name)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     /// Execute guarded tools without asking (batch runs, and `/approve auto`).
@@ -88,7 +96,7 @@ impl<T: ToolSource> ToolSource for ApprovalGate<T> {
     }
 
     async fn dispatch(&self, name: &str, args: Value) -> Result<Value, ToolError> {
-        let gated = GUARDED.contains(&name)
+        let gated = is_guarded(name)
             && self.policy.mode() == Mode::Ask
             && !self.policy.always.lock().unwrap().contains(name);
         if gated {
@@ -158,8 +166,25 @@ pub fn describe(tool: &str, args: &Value) -> String {
         "edit_file" => format!("{} — {}", s("path"), summarize_edit(s("old_string"), s("new_string"))),
         "read_file" | "list_dir" => s("path").to_string(),
         "grep" => s("pattern").to_string(),
+        // An MCP call: which server, which of its tools, and the arguments clipped. The raw JSON
+        // of an unknown schema is all we have, but a wall of it is not something anyone reads
+        // before typing `y` — and that is the decision this line exists to inform.
+        t if crate::mcp::is_mcp_tool(t) => {
+            let rest = t.trim_start_matches("mcp__");
+            let (server, tool) = rest.split_once("__").unwrap_or((rest, ""));
+            format!("{server} · {tool} {}", clip(&args.to_string(), 120))
+        }
         _ => args.to_string(),
     }
+}
+
+/// Clip to `max` chars, saying that it was clipped — silent truncation makes a reader
+/// confidently wrong about what they approved.
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    format!("{}…", s.chars().take(max).collect::<String>())
 }
 
 /// One line naming the shape of an edit, for the reported (non-approval) case.

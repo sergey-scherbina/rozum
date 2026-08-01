@@ -11,12 +11,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use nadia::approval::{describe, ApprovalGate, Mode, Policy, TerminalApprover};
+use nadia::commands;
 use nadia::sandbox::Sandbox;
 use nadia::session::{default_budget, system_prompt, LoopBreaker, Session};
 use nadia::serve::{serve, Config};
 use nadia::supervisor::{Spec, Supervisor};
 use nadia::tools::tool_source;
-use rozum_agent::agent::{AgentObserver, AgentStop, ToolSource};
+use rozum_agent::agent::{AgentObserver, AgentStop, MultiToolSource, ToolSource};
 use rozum_gateway::openai_http::OpenAiHttpBackend;
 
 const USAGE: &str = "\
@@ -26,6 +27,8 @@ USAGE:
     nadia run <task>      run one task headlessly in the current directory
     nadia chat            interactive session (default when no arguments)
     nadia serve           expose the subagent protocol over HTTP
+    nadia mcp list        the configured MCP servers (--probe also lists their tools)
+    nadia help            this text
 
 OPTIONS:
     --workspace <DIR>     where the agent may act        [default: current directory]
@@ -35,10 +38,17 @@ OPTIONS:
     --allow-net           let `bash` reach the network   [default: denied]
     --no-confine          do not wrap `bash` in sandbox-exec
     --json                batch: print the full result as JSON
+    --mcp <NAME>          connect this MCP server's tools (repeatable)
+    --mcp-all             connect every server in the config
+    --mcp-config <PATH>   [default: <workspace>/.mcp.json, else ~/.config/nadia/mcp.json]
     --port <N>            serve: listen here                  [default: 8790]
     --token <T>           serve: required in x-nadia-token; mandatory off loopback
     --bind <ADDR>         serve: address to bind              [default: 127.0.0.1]
     -h, --help            this text
+
+MCP servers are opt-in per run: a config file that merely exists adds no tools, because
+every tool costs schema tokens in every request. Their tools are named
+mcp__<server>__<tool>, are gated like `bash`, and run OUTSIDE the workspace jail.
 
 EXIT CODES (batch):
     0  finished          1  budget exhausted          2  gateway/transport failure
@@ -83,6 +93,13 @@ struct Opts {
     port: u16,
     token: String,
     bind: String,
+    /// MCP servers to connect, by name in the config. Opt-in per run (`nadia:SPEC.md` §2.1):
+    /// an empty list connects nothing, however many servers the config holds.
+    mcp: Vec<String>,
+    mcp_all: bool,
+    mcp_config: Option<PathBuf>,
+    /// `mcp list --probe`: connect each server and list what it actually serves.
+    probe: bool,
 }
 
 fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
@@ -99,6 +116,10 @@ fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
         port: 8790,
         token: std::env::var("NADIA_TOKEN").unwrap_or_default(),
         bind: "127.0.0.1".into(),
+        mcp: Vec::new(),
+        mcp_all: false,
+        mcp_config: None,
+        probe: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -108,8 +129,10 @@ fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
             "--allow-net" => o.allow_net = true,
             "--no-confine" => o.confine = false,
             "--json" => o.json = true,
+            "--mcp-all" => o.mcp_all = true,
+            "--probe" => o.probe = true,
             "--workspace" | "--gateway" | "--model" | "--max-steps" | "--port" | "--token"
-            | "--bind" => {
+            | "--bind" | "--mcp" | "--mcp-config" => {
                 let v = args.get(i + 1).ok_or_else(|| format!("{a} needs a value"))?;
                 match a {
                     "--workspace" => o.workspace = PathBuf::from(v),
@@ -118,6 +141,9 @@ fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
                     "--token" => o.token = v.clone(),
                     "--bind" => o.bind = v.clone(),
                     "--port" => o.port = v.parse().map_err(|_| format!("--port {v}: not a number"))?,
+                    // Repeatable: `--mcp a --mcp b` connects both, in the order given.
+                    "--mcp" => o.mcp.push(v.clone()),
+                    "--mcp-config" => o.mcp_config = Some(PathBuf::from(v)),
                     _ => o.max_steps = v.parse().map_err(|_| format!("--max-steps {v}: not a number"))?,
                 }
                 i += 1;
@@ -135,6 +161,110 @@ fn parse(args: &[String]) -> Result<(String, String, Opts), String> {
     Ok((mode, task, o))
 }
 
+/// Is this line a request for help, and for which command? `Some(None)` = the whole list,
+/// `Some(Some(name))` = one command in detail, `None` = not a help request at all.
+///
+/// Accepts the four spellings a person actually types (`help`, `?`, `/help`, `/?`) and only as
+/// the whole line: `help me refactor this` is a message for the model, not a command. The
+/// argument may carry a slash or not — `help tell` and `? /tell` are the same question.
+fn help_request(line: &str) -> Option<Option<&str>> {
+    let line = line.trim();
+    let (head, rest) = match line.split_once(char::is_whitespace) {
+        Some((h, r)) => (h, r.trim()),
+        None => (line, ""),
+    };
+    let is_help = matches!(head.to_ascii_lowercase().as_str(), "help" | "?" | "/help" | "/?");
+    if !is_help {
+        return None;
+    }
+    Some((!rest.is_empty()).then_some(rest))
+}
+
+/// Connect the MCP servers this run asked for, or exit 2 saying which one could not be reached.
+/// Nothing asked for → nothing connected, whatever the config holds: the tools cost schema tokens
+/// on every request of every step, so paying is the operator's decision (`nadia:SPEC.md` §2.1).
+async fn connect_mcp(opts: &Opts, workspace: &std::path::Path) -> Vec<nadia::mcp::McpServer> {
+    if opts.mcp.is_empty() && !opts.mcp_all {
+        return Vec::new();
+    }
+    match load_selected(opts, workspace).await {
+        Ok(servers) => servers,
+        Err(e) => {
+            eprintln!("nadia: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// The fallible half of [`connect_mcp`], so every failure is one `?` and one exit site.
+async fn load_selected(
+    opts: &Opts,
+    workspace: &std::path::Path,
+) -> Result<Vec<nadia::mcp::McpServer>, String> {
+    let path = nadia::mcp::config_path(opts.mcp_config.as_deref(), workspace).ok_or_else(|| {
+        "no MCP config found — looked for <workspace>/.mcp.json and ~/.config/nadia/mcp.json \
+         (or pass --mcp-config)"
+            .to_string()
+    })?;
+    let cfg = nadia::mcp::load_config(&path)?;
+    let mut out = Vec::new();
+    for (name, spec) in nadia::mcp::select(&cfg, &opts.mcp, opts.mcp_all)? {
+        out.push(nadia::mcp::McpServer::connect(&name, spec).await?);
+    }
+    Ok(out)
+}
+
+/// `nadia mcp list [--probe]` — what is configured, and with `--probe` what each server actually
+/// serves. Listed, never guessed: the prefix a tool will carry is shown, because that is the name
+/// the model will use and the one that shows up in the approval prompt.
+async fn run_mcp_list(opts: &Opts, workspace: &std::path::Path) -> i32 {
+    let Some(path) = nadia::mcp::config_path(opts.mcp_config.as_deref(), workspace) else {
+        println!(
+            "no MCP config — looked for {}/.mcp.json and ~/.config/nadia/mcp.json",
+            workspace.display()
+        );
+        return 0;
+    };
+    let cfg = match nadia::mcp::load_config(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("nadia: {e}");
+            return 2;
+        }
+    };
+    println!("{}", path.display());
+    if cfg.servers.is_empty() {
+        println!("  (no servers configured)");
+        return 0;
+    }
+    let mut rc = 0;
+    for (name, spec) in &cfg.servers {
+        match spec.stdio_command(name) {
+            Ok(cmd) => println!("  {name}  {cmd} {}", spec.args.join(" ")),
+            Err(e) => {
+                println!("  {name}  ✗ {e}");
+                rc = 2;
+                continue;
+            }
+        }
+        if !opts.probe {
+            continue;
+        }
+        match nadia::mcp::McpServer::connect(name, spec).await {
+            Ok(s) => {
+                for t in s.tool_names() {
+                    println!("      {t}");
+                }
+            }
+            Err(e) => {
+                println!("      ✗ {e}");
+                rc = 2;
+            }
+        }
+    }
+    rc
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -145,6 +275,12 @@ async fn main() {
             std::process::exit(if msg.starts_with("nadia —") { 0 } else { 2 });
         }
     };
+    // `nadia help` is the same answer as `-h`, on stdout and exit 0. A user who guesses the word
+    // everybody guesses should not be told that their guess is an unknown mode.
+    if mode.eq_ignore_ascii_case("help") || mode == "?" {
+        println!("{USAGE}");
+        std::process::exit(0);
+    }
 
     let mut sb = match Sandbox::new(&opts.workspace) {
         Ok(s) => s,
@@ -172,8 +308,17 @@ async fn main() {
     // Batch runs unattended, so asking would deadlock on a stdin nobody is at; the
     // sandbox is the containment there. Chat has a person present, so the default flips.
     let policy = Policy::new(if mode == "run" { Mode::Auto } else { Mode::Ask });
+    // MCP servers, if any were asked for. Connected BEFORE the loop starts and never per step:
+    // a server that will not start ends the run here, with its name — a run that silently lost
+    // half its tools produces a confidently wrong answer (`nadia:SPEC.md` §2.1).
+    let servers = connect_mcp(&opts, &root).await;
+    let mut sources = MultiToolSource::new().with(tool_source(sandbox));
+    for s in servers {
+        println!("{}", nadia::mcp::connected_line(&s));
+        sources = sources.with(s);
+    }
     let tools = ApprovalGate::new(
-        LoopBreaker::new(tool_source(sandbox)),
+        LoopBreaker::new(sources),
         policy.clone(),
         Box::new(TerminalApprover),
     );
@@ -231,6 +376,15 @@ async fn main() {
                 eprintln!("nadia: {e}");
                 std::process::exit(2);
             }
+        }
+        // `nadia mcp list [--probe]`. `list` is the only verb, and it is required rather than
+        // implied: a bare `nadia mcp` is more likely a half-typed command than a request.
+        "mcp" => {
+            if task != "list" {
+                eprintln!("nadia mcp list [--probe]\n\n{USAGE}");
+                std::process::exit(2);
+            }
+            std::process::exit(run_mcp_list(&opts, &root).await);
         }
         other => {
             eprintln!("unknown mode `{other}`\n\n{USAGE}");
@@ -331,25 +485,42 @@ async fn repl(
         if line.is_empty() {
             continue;
         }
+        // `help`, `?` and `/?` are the same command as `/help`, with or without an argument:
+        // at a prompt they are a question for the program, and spending a model turn to answer
+        // what nadia already knows is seconds on a local model (`nadia:SPEC.md` §4.2). The match
+        // is on the whole line — `help me refactor this` is a message, and goes to the model.
+        if let Some(rest) = help_request(line) {
+            match rest {
+                None => println!("{}", commands::help_all()),
+                Some(name) => match commands::help_one(name) {
+                    Some(text) => println!("{text}"),
+                    None => println!("{}", commands::unknown_command(name)),
+                },
+            }
+            continue;
+        }
         if line.starts_with('/') {
             match line {
                 "/quit" | "/exit" => break,
-                "/help" => println!(
-                    "/tools             list the tools\n\
-                     /approve ask|auto  ask before writes and commands, or don't\n\
-                     /clear             forget the conversation\n\
-                     /context           message count\n\
-                     /quit              exit\n\
-                     \n\
-                     subagents:\n\
-                     /spawn <task>      start one on this workspace\n\
-                     /agents            what they are all doing\n\
-                     /status <id>       one of them, with its result when done\n\
-                     /tell <id> <msg>   give it something for its next turn\n\
-                     /pause|/resume <id>\n\
-                     /stop <id>         finish the current tool, then wrap up\n\
-                     /kill <id>         abort now and free the slot"
-                ),
+                "/mcp" => {
+                    let names: Vec<String> = tools
+                        .tools()
+                        .into_iter()
+                        .map(|t| t.name)
+                        .filter(|n| nadia::mcp::is_mcp_tool(n))
+                        .collect();
+                    if names.is_empty() {
+                        println!(
+                            "no MCP server connected — start nadia with --mcp <name> \
+                             (`nadia mcp list` shows what is configured)"
+                        );
+                    } else {
+                        println!("{} MCP tool(s), OUTSIDE the workspace jail:", names.len());
+                        for n in names {
+                            println!("  {n}");
+                        }
+                    }
+                }
                 "/tools" => {
                     for t in tools.tools() {
                         println!("  {:<11} {}", t.name, t.description.lines().next().unwrap_or(""));
@@ -437,7 +608,7 @@ async fn repl(
                                 .map(|_| "queued for its next turn".into()),
                             None => Err("/tell <id> <message>".into()),
                         },
-                        _ => Err(format!("unknown command {other} — /help")),
+                        _ => Err(commands::unknown_command(cmd)),
                     };
                     match outcome {
                         Ok(msg) => println!("{msg}"),
@@ -501,6 +672,55 @@ mod tests {
 
         assert!(parse(&["--nope".to_string()]).is_err());
         assert!(parse(&["run".into(), "t".into(), "--max-steps".into()]).is_err());
+    }
+
+    #[test]
+    fn mcp_servers_are_opt_in_and_repeatable() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Nothing asked for → nothing connected, whatever a config might hold.
+        let (_, _, o) = parse(&v(&["run", "t"])).unwrap();
+        assert!(o.mcp.is_empty() && !o.mcp_all);
+        // Repeatable, in the order given.
+        let (_, _, o) = parse(&v(&["run", "t", "--mcp", "rozum", "--mcp", "fs"])).unwrap();
+        assert_eq!(o.mcp, vec!["rozum".to_string(), "fs".to_string()]);
+        let (_, _, o) = parse(&v(&["run", "t", "--mcp-all", "--mcp-config", "/tmp/x.json"])).unwrap();
+        assert!(o.mcp_all);
+        assert_eq!(o.mcp_config.as_deref(), Some(std::path::Path::new("/tmp/x.json")));
+        // A flag that eats the next argument must still refuse to eat nothing.
+        assert!(parse(&v(&["run", "t", "--mcp"])).is_err());
+    }
+
+    #[test]
+    fn help_is_a_command_only_when_it_is_the_whole_line() {
+        // The four spellings, bare.
+        for line in ["help", "?", "/help", "/?", "  HELP  "] {
+            assert_eq!(help_request(line), Some(None), "bare help: {line:?}");
+        }
+        // With a command name, slash optional.
+        assert_eq!(help_request("help tell"), Some(Some("tell")));
+        assert_eq!(help_request("? /tell"), Some(Some("/tell")));
+        assert_eq!(help_request("/help  spawn "), Some(Some("spawn")));
+        // A sentence that merely starts with the word is a message for the model. This is the
+        // whole reason the match is on the head token and not on `contains`.
+        assert_eq!(help_request("help me refactor this"), Some(Some("me refactor this")));
+        assert_eq!(help_request("please help"), None);
+        assert_eq!(help_request("/tools"), None);
+        assert_eq!(help_request("what does ? mean"), None);
+    }
+
+    #[test]
+    fn nadia_help_is_the_same_text_as_dash_h() {
+        // `nadia help` prints USAGE and exits 0; `-h` returns it as the Err payload that main
+        // prints with exit 0. Same text either way — a guessed word must not be a worse answer.
+        let (mode, _, _) = parse(&["help".to_string()]).unwrap();
+        assert_eq!(mode, "help");
+        let usage = match parse(&["-h".to_string()]) {
+            Err(u) => u,
+            Ok(_) => panic!("-h must not parse as a mode"),
+        };
+        assert!(usage.starts_with("nadia —"), "-h must yield the usage text");
+        assert!(usage.contains("nadia help"), "usage must document the word it accepts");
+        assert!(usage.contains("--mcp <NAME>"), "usage must document the MCP flags");
     }
 }
 
