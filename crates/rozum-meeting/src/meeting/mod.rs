@@ -6,6 +6,7 @@ pub mod daemon_proxy;
 #[cfg(feature = "mcp-http")]
 pub mod http_proxy;
 pub mod identity;
+pub mod launch_bridge;
 pub mod list;
 pub mod local_identity;
 pub mod mcp_server;

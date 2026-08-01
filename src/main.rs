@@ -308,6 +308,15 @@ enum Command {
         #[arg(long)]
         no_piggyback: bool,
 
+        /// Don't carry meeting-room presence for an agent that has no MCP client of
+        /// its own (nadia): no `working:`/`done:` line in the project's room, and no
+        /// room activity appended where the launch-local proxy would inject it. The
+        /// bridge is auto-on only for such agents and only while Tier-3 piggyback is
+        /// live (so a `--no-piggyback` benchmark run is silent); force it on for any
+        /// agent with `ROZUM_ROOM_BRIDGE=1`. Spec: `docs/specs/rozum-native-channels.md`.
+        #[arg(long)]
+        no_room_bridge: bool,
+
         /// Point the agent at an external OpenAI-compatible server instead of a
         /// local model — e.g. Ollama (`http://localhost:11434/v1`), vLLM, or any
         /// `/v1` endpoint. The CLI equivalent of `ROZUM_BACKEND_URL`. Forces that
@@ -1356,6 +1365,7 @@ async fn main() {
             no_channel_wakeup,
             channel_mcp_name,
             no_piggyback,
+            no_room_bridge,
             backend_url,
             lean,
             no_sandbox,
@@ -1390,7 +1400,7 @@ async fn main() {
             // Resolve both wakeup tiers once (Tier-1 flags are probed here, not
             // twice). Piggyback (Tier 3) is the fallback — auto-off when channels
             // (Tier 1) are active, unless forced by `--no-piggyback`/`ROZUM_PIGGYBACK`.
-            let wakeup = WakeupPolicy::resolve(&channels, no_piggyback, &program[0]);
+            let wakeup = WakeupPolicy::resolve(&channels, no_piggyback, no_room_bridge, &program[0]);
             // B3: capability is RELATIONAL (model × driver) — surface a known driver↔model mismatch so
             // the operator can pick the right driver. Warn only; never block or auto-switch.
             if std::env::var_os("ROZUM_NO_MATCH_WARN").is_none() {
@@ -2632,6 +2642,7 @@ fn reorder_launch_args(mut args: Vec<String>) -> Vec<String> {
         "--dedicated",
         "--no-channel-wakeup",
         "--no-piggyback",
+        "--no-room-bridge",
         "--lean",
         "--no-sandbox",
     ];
@@ -2724,22 +2735,76 @@ struct ChannelWakeup {
 struct WakeupPolicy {
     channel_flags: Option<Vec<String>>,
     piggyback: bool,
+    room_bridge: bool,
 }
 
 impl WakeupPolicy {
     /// Resolve the launch-time wakeup policy for `program` (the agent argv[0]).
-    fn resolve(channels: &ChannelWakeup, no_piggyback: bool, program: &str) -> Self {
+    fn resolve(
+        channels: &ChannelWakeup,
+        no_piggyback: bool,
+        no_room_bridge: bool,
+        program: &str,
+    ) -> Self {
         let channel_flags = channels.flags_for(program);
         let piggyback = resolve_piggyback(
             no_piggyback,
             rozum::meeting::piggyback::env_override(),
             channel_flags.is_some(),
         );
+        let agent = std::path::Path::new(program)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(program);
+        let room_bridge = resolve_room_bridge(
+            no_room_bridge,
+            room_bridge_env_override(),
+            agent,
+            piggyback,
+        );
         WakeupPolicy {
             channel_flags,
             piggyback,
+            room_bridge,
         }
     }
+}
+
+/// Agents that cannot join a room by themselves under ANY tier: no MCP client, so no `mcp add` to
+/// register (`MCP_AGENTS`), no `wait_my_turn` to hold open, and nothing to write the Tier-3 drops.
+/// For these — and ONLY these — `rozum launch` carries the room presence itself; for an agent that
+/// speaks MCP the bridge would be a second participant under the same handle. Keep this list
+/// honest: an agent belongs here when it has no path of its own, not when its path is inconvenient.
+const ROOM_BRIDGE_AGENTS: &[&str] = &["nadia"];
+
+/// The explicit `ROZUM_ROOM_BRIDGE` setting, or `None` when unset/unrecognized so the caller
+/// applies its own default. Same vocabulary as `ROZUM_PIGGYBACK`.
+fn room_bridge_env_override() -> Option<bool> {
+    match std::env::var("ROZUM_ROOM_BRIDGE").ok().as_deref() {
+        Some("0" | "false" | "off" | "no") => Some(false),
+        Some("1" | "true" | "on" | "yes") => Some(true),
+        _ => None,
+    }
+}
+
+/// Decide whether `rozum launch` carries room presence for the agent. Precedence:
+/// `--no-room-bridge` (force off) > `ROZUM_ROOM_BRIDGE` > auto.
+///
+/// Auto is on iff the agent is one that has no room path of its own AND Tier-3 injection is live.
+/// The piggyback condition is what keeps a MEASUREMENT honest: `scripts/bench/agentic.sh` passes
+/// `--no-piggyback`, so a matrix cell neither posts into the room nor can have room chatter folded
+/// into the context it is being scored on. An operator who wants presence there anyway says so with
+/// `ROZUM_ROOM_BRIDGE=1`.
+fn resolve_room_bridge(
+    no_room_bridge: bool,
+    env_override: Option<bool>,
+    agent: &str,
+    piggyback: bool,
+) -> bool {
+    if no_room_bridge {
+        return false;
+    }
+    env_override.unwrap_or(ROOM_BRIDGE_AGENTS.contains(&agent) && piggyback)
 }
 
 /// Decide whether Tier-3 piggyback runs, given the `--no-piggyback` flag, the
@@ -2892,6 +2957,30 @@ mod wakeup_tests {
             "ROZUM_PIGGYBACK=0 forces off"
         );
     }
+
+    use super::resolve_room_bridge;
+
+    #[test]
+    fn room_bridge_carries_only_agents_with_no_room_path_of_their_own() {
+        // Auto: nadia has no MCP client → launch carries the presence.
+        assert!(resolve_room_bridge(false, None, "nadia", true));
+        // An agent that CAN join by itself must not get a second participant under the same handle.
+        for agent in ["claude", "codex", "opencode"] {
+            assert!(
+                !resolve_room_bridge(false, None, agent, true),
+                "{agent} joins via its own mcp-proxy — the bridge would double it"
+            );
+        }
+        // A benchmark cell (`--no-piggyback`) is silent: no post, no injection, nothing that could
+        // move the number being measured.
+        assert!(!resolve_room_bridge(false, None, "nadia", false));
+        // `--no-room-bridge` wins over everything, including the env override.
+        assert!(!resolve_room_bridge(true, None, "nadia", true));
+        assert!(!resolve_room_bridge(true, Some(true), "nadia", true));
+        // The env override beats the auto rule in both directions.
+        assert!(resolve_room_bridge(false, Some(true), "codex", false));
+        assert!(!resolve_room_bridge(false, Some(false), "nadia", true));
+    }
 }
 
 impl ChannelWakeup {
@@ -2960,6 +3049,7 @@ async fn run_launch(
     let WakeupPolicy {
         channel_flags,
         piggyback,
+        room_bridge,
     } = wakeup;
     let model_spec = match resolve_launch_target(model, no_model).await {
         // No target and none resolvable (non-TTY without --model, or cancelled).
@@ -2980,6 +3070,7 @@ async fn run_launch(
         let wakeup = WakeupPolicy {
             channel_flags,
             piggyback,
+            room_bridge,
         };
         run_launch_dedicated(model_spec, port, n_ctx, wakeup, program).await;
         return; // unreachable: the dedicated path execs + exits
@@ -3019,6 +3110,7 @@ async fn run_launch(
         agent_port,
         channel_flags,
         piggyback,
+        room_bridge,
     )
     .await
 }
@@ -3262,6 +3354,7 @@ async fn run_launch_url(
     let WakeupPolicy {
         channel_flags,
         piggyback,
+        room_bridge,
     } = wakeup;
     let _ = n_ctx; // informational for a remote backend; the upstream owns its KV
     let port = port.unwrap_or_else(|| {
@@ -3293,7 +3386,7 @@ async fn run_launch_url(
             eprintln!("gateway error: {e}");
         }
     });
-    exec_agent(program, &model_spec, port, channel_flags, piggyback).await
+    exec_agent(program, &model_spec, port, channel_flags, piggyback, room_bridge).await
 }
 
 /// Pre-sharing behaviour: load a private model in-process for just this launch.
@@ -3307,6 +3400,7 @@ async fn run_launch_dedicated(
     let WakeupPolicy {
         channel_flags,
         piggyback,
+        room_bridge,
     } = wakeup;
     let port = port.unwrap_or_else(|| {
         std::net::TcpListener::bind("127.0.0.1:0")
@@ -3351,7 +3445,7 @@ async fn run_launch_dedicated(
         }
     });
     // The in-process gateway dies with this process on exec_agent's exit.
-    exec_agent(program, &model_spec, port, channel_flags, piggyback).await
+    exec_agent(program, &model_spec, port, channel_flags, piggyback, room_bridge).await
 }
 
 /// Reuse a healthy running shared gateway, else spawn a detached `rozum gateway`
@@ -6128,6 +6222,7 @@ async fn exec_agent(
     port: u16,
     channel_flags: Option<Vec<String>>,
     piggyback: bool,
+    room_bridge: bool,
 ) -> ! {
     // channel-wakeup-launch-flag: append the `--dangerously-load-development-channels`
     // flag for a capable `claude` (resolved once at launch), so a launched agent
@@ -6185,11 +6280,28 @@ async fn exec_agent(
 
     let program_name = program[0].clone();
 
+    // Room presence for an agent with no MCP client of its own (nadia): `rozum launch` joins the
+    // project's room on its behalf, posts `working:` now and the outcome at the end, and appends
+    // room activity where the launch-local proxy injects it. Started BEFORE the branch below so an
+    // interactive session — the case where a human most wants to see and steer the run — gets it
+    // too. Spec: `docs/specs/rozum-native-channels.md`.
+    let bridge = if room_bridge {
+        let task = agent_prompt_index(&program).map(|i| program[i].clone());
+        let agent = program_name.rsplit('/').next().unwrap_or(&program_name).to_owned();
+        let b = rozum::meeting::launch_bridge::start(&agent, task.as_deref(), piggyback).await;
+        if let Some(b) = &b {
+            eprintln!("rozum launch: 🏠 room '{}' — posting as {}", b.room(), b.handle());
+        }
+        b
+    } else {
+        None
+    };
+
     // No rewritable task-prompt (interactive session / unknown agent) → no deterministic repair is
     // possible → run the agent once, exactly as before.
     let Some(pidx) = agent_prompt_index(&program) else {
         eprintln!("  → running: {} {}", program_name, program[1..].join(" "));
-        spawn_agent_and_exit(build(&program), &program_name).await
+        spawn_agent_and_exit(build(&program), &program_name, bridge).await
     };
 
     // ── The deterministic verify-repair gate (the "soul"): the agent DRIVES; after it stops, rozum
@@ -6482,6 +6594,12 @@ async fn exec_agent(
         }
     }
     rozum::share::remove_lease(std::process::id());
+    // One closing line for every way the chain can end — the three exits below all pass through
+    // here, so the room never sees a run that started and never finished.
+    if let Some(b) = bridge {
+        let line = rozum::meeting::launch_bridge::outcome_line(b.handle(), verified, last_code);
+        b.finish(&line).await;
+    }
     match verified {
         Some(true) => {
             eprintln!("rozum launch: ✅ verify passed");
@@ -6616,7 +6734,9 @@ async fn exec_agent_anthropic(mut program: Vec<String>, channel_flags: Option<Ve
     let mut cmd = sandboxed_command(program_name);
     cmd.args(args);
     apply_rozum_agent_env(&mut cmd);
-    spawn_agent_and_exit(cmd, program_name).await
+    // No room bridge on the upstream-Anthropic path: it runs no gateway and no launch-local proxy,
+    // so there is nothing to inject INTO — presence without steering would be half a feature.
+    spawn_agent_and_exit(cmd, program_name, None).await
 }
 
 /// Non-coding tools `--lean` strips from a launched `claude` via `--disallowedTools`.
@@ -7053,7 +7173,11 @@ fn apply_rozum_agent_env(cmd: &mut std::process::Command) {
 }
 
 /// Run the prepared agent command to completion and exit with its status code.
-async fn spawn_agent_and_exit(mut cmd: std::process::Command, program_name: &str) -> ! {
+async fn spawn_agent_and_exit(
+    mut cmd: std::process::Command,
+    program_name: &str,
+    bridge: Option<rozum::meeting::launch_bridge::RoomBridge>,
+) -> ! {
     let name = program_name.to_owned();
     let status = tokio::task::spawn_blocking(move || cmd.status())
         .await
@@ -7066,6 +7190,12 @@ async fn spawn_agent_and_exit(mut cmd: std::process::Command, program_name: &str
             127
         }
     };
+    // This path has no verify-gate (nothing to rewrite for a repair round), so the room hears the
+    // exit code and nothing more — `None` is the honest verdict, not `false`.
+    if let Some(b) = bridge {
+        let line = rozum::meeting::launch_bridge::outcome_line(b.handle(), None, code);
+        b.finish(&line).await;
+    }
     // Drop our lease immediately on exit so the shared daemon shuts down right
     // away when we were the last client, instead of waiting for the lease to go
     // stale (LEASE_FRESH_SECS) or for the idle timeout.

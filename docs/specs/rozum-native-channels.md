@@ -123,6 +123,44 @@ keyed by **project + agent name**. Module: `src/meeting/piggyback.rs`.
 - **Reach:** any harness using our gateway (Codex/aider/opencode/older Claude).
   Not a true idle wake — lands at the agent's next inference call.
 
+### Tier 3 for an agent with NO MCP client — the launch-side writer — IMPLEMENTED
+
+The rungs above all assume the agent speaks MCP: Tier 2 *is* an MCP tool, and the
+Tier-3 *writer* is the mcp-proxy's channel pusher. An agent with no MCP client at
+all (`nadia`) therefore fell off the bottom of the ladder — not because Tier 3
+does not fit it (the reader is our own launch-local proxy, which needs nothing
+from the client) but because nothing was there to write the drops.
+`rozum launch` writes them itself: it is already alive for the whole run, it
+outlives every repair round, and it knows how the run ended.
+
+- **Module:** `crates/rozum-meeting/src/meeting/launch_bridge.rs`. Joins the cwd
+  project's room over the ordinary daemon client (`MeetingClient`), holds a
+  `spawn_poll` long-poll, and appends every turn from *someone else* to the same
+  drop file the mcp-proxy writer uses — same rendering, same `‹for you›` mention
+  prefix, so the model context cannot tell which writer produced a note.
+- **Outward, too.** It posts the two lines `AGENTS.md` asks of any agent:
+  `working: <handle> — <task>` at the start and `done:`/`blocked:` at the end,
+  the latter carrying the verify-gate verdict when there was one. This is the
+  half MCP never provided for free: the human sees a phone-launched run start
+  and finish instead of silence.
+- **Self-suppression:** the poll connection reuses the client's session token, so
+  both sockets bind to one roster participant and the bridge's own lines are
+  dropped by participant id — never echoed back into the context.
+- **Activation (`resolve_room_bridge`):** `--no-room-bridge` (force off) >
+  `ROZUM_ROOM_BRIDGE=1|0` > auto. Auto is on iff the agent is one that has **no
+  room path of its own** (`ROOM_BRIDGE_AGENTS`, today `nadia`) **and** Tier-3
+  piggyback is live. Both conditions matter: an MCP-speaking agent would get a
+  second participant under the same handle, and the piggyback condition is what
+  keeps measurement honest — `scripts/bench/agentic.sh` passes `--no-piggyback`,
+  so a matrix cell neither posts into the room nor can have room chatter folded
+  into the context it is being scored on. The UCC's chat turns opt out
+  explicitly (`--no-room-bridge`): a conversational message is not a task.
+- **What it is not:** a way for the agent to answer. nadia has six tools and none
+  of them is a room, so the human gets presence and steering, not a conversation.
+- **Failure policy:** every step is best-effort and silent. No project, no daemon,
+  refused connect → no bridge. An agent run must never fail because a meeting
+  daemon was down.
+
 ## Relationship to existing specs
 
 - Complements `channel-wakeup.md` (Tier 1) — does not replace it.
@@ -154,6 +192,11 @@ keyed by **project + agent name**. Module: `src/meeting/piggyback.rs`.
    Anthropic/OpenAI chat requests. Fallback rung — auto-off when Tier-1 channels
    are active, on otherwise; `--no-piggyback` forces off, `ROZUM_PIGGYBACK=1`
    forces on.
+3. **DONE** — Tier 3 for an agent with no MCP client (`launch_bridge`): `rozum
+   launch` joins the project's room itself, writes the drops the mcp-proxy would
+   have written, and posts the `working:` / `done:` presence lines. Auto-on for
+   `ROOM_BRIDGE_AGENTS` (today `nadia`) while piggyback is live;
+   `--no-room-bridge` forces off, `ROZUM_ROOM_BRIDGE=1` forces on for any agent.
 
 ## Out of scope
 

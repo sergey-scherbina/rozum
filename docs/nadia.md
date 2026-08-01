@@ -213,7 +213,28 @@ The UCC offers it wherever it offers an agent: the matrix chips, **Coders**, **S
 and the phone chat's Agent mode. Coders and chat spawn the headless form (`nadia run
 <task>` — the `run` verb matters: a bare `nadia <prompt>` reads the prompt as the *mode*
 and exits 2); a Session runs bare `nadia` in tmux, which is the REPL with its approval
-gate, so the operator approves each write from the phone.
+gate, so the operator approves each write from the phone. A launch is refused up front if
+`nadia` is not on PATH, rather than dying as a 127 inside a log file — `deploy-ucc-web.sh`
+builds and installs it so the chip and the machine cannot disagree.
+
+### In a meeting room
+
+nadia has no MCP client, so it cannot join a room the way `claude` and `codex` do —
+`rozum mcp add` has nothing to register, and there is no `wait_my_turn` for it to hold
+open. `rozum launch` carries the presence instead
+(`crates/rozum-meeting/src/meeting/launch_bridge.rs`, spec
+[`rozum-native-channels.md`](specs/rozum-native-channels.md)): it joins the project's room,
+posts `working: nadia — <task>` when the run starts and `done:`/`blocked:` with the
+verify-gate verdict when it ends, and appends everything said by someone else to the
+piggyback drop file the launch-local proxy folds into nadia's next request — `‹for you›`
+first when the line addresses it. So the human gets **presence and steering**, not a
+conversation: nadia can be told something mid-run, but it has no tool to answer with.
+
+On by default for nadia and nothing else (`ROOM_BRIDGE_AGENTS`), and only while Tier-3
+piggyback is live — which is what keeps `scripts/bench/agentic.sh` (it passes
+`--no-piggyback`) from either spamming the room or having room chatter injected into a cell
+it is scoring. `--no-room-bridge` forces it off, `ROZUM_ROOM_BRIDGE=1` forces it on for any
+agent, and `$ROZUM_MEETING_AS` names the handle when the default `nadia` would be ambiguous.
 
 On the 2026-07-31 run — 8 tasks × 2 reps, same resident Qwen3.5-4B for everyone:
 

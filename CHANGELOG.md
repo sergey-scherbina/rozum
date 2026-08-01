@@ -1,5 +1,58 @@
 # Changelog
 
+## feat(launch): rozum carries the meeting room for an agent that has no MCP
+Completed: 2026-08-01
+
+Two gaps left over from putting nadia in the control center, both of the shape
+"the UI offers it, the machine doesn't deliver".
+
+**The room.** The whole wakeup ladder (`docs/specs/rozum-native-channels.md`)
+assumes the agent speaks MCP: Tier 2 *is* an MCP tool, and the Tier-3 *writer* is
+the mcp-proxy's channel pusher. nadia has no MCP client, so it fell off the
+bottom — not because Tier 3 doesn't fit it (the reader is our own launch-local
+proxy, which needs nothing from the client) but because nothing was there to
+WRITE the drops. Registering `rozum mcp-proxy` for it, the obvious "fix", would
+have been a config entry nothing reads.
+
+`rozum launch` writes them itself now — it is already alive for the whole run,
+outlives every repair round, and knows how the run ended. New module
+`crates/rozum-meeting/src/meeting/launch_bridge.rs`: joins the cwd project's
+room, appends every turn from someone ELSE to the same drop file with the same
+rendering and the same `‹for you›` mention prefix the mcp-proxy writer produces
+(the model context must not be able to tell which writer produced a note), and
+posts the two lines `AGENTS.md` asks of every agent — `working: <handle> —
+<task>` at the start, `done:`/`blocked:` with the verify-gate verdict at the end.
+Its own lines are suppressed by participant id, not by display name: the poll
+connection reuses the client's session token, so both sockets bind to one roster
+participant. What this is NOT is a way for nadia to answer — it has six tools and
+none of them is a room. Presence and steering, not a conversation; saying so here
+is cheaper than an operator discovering it by waiting for a reply.
+
+Auto-on only for agents with no room path of their own (`ROOM_BRIDGE_AGENTS` =
+`nadia`) and only while Tier-3 piggyback is live. Both halves of that rule earn
+their keep: an MCP-speaking agent would appear twice under one handle, and the
+piggyback condition is what keeps measurement honest — `agentic.sh` passes
+`--no-piggyback`, so a matrix cell neither posts into the room nor can have room
+chatter folded into the context it is being scored on. `--no-room-bridge` forces
+it off (the UCC's chat turns pass it: a conversational message is not a task, and
+two room lines per message is noise), `ROZUM_ROOM_BRIDGE=1` forces it on for any
+agent.
+
+**The binary.** An agent chip in the UCC is a promise the machine can run it.
+`coder/launch` and `session/launch` now refuse an agent that is not on the
+service's PATH, naming the fix (`cargo install --path crates/nadia`) — before
+this, a missing CLI was found deep inside the spawned `rozum launch`, which exits
+127 into a log file, so the row read "exited", which is what a run that FINISHED
+also reads. And the deploy builds + installs nadia into `~/.cargo/bin` (where
+`cargo install` puts it and where every launchd PATH already points — not
+`~/.rozum/bin`, which would be a second copy free to drift).
+
+Verified live, both directions: a `rozum launch … nadia run …` posted `working:
+nadia — create a file named hi.txt…`, a message posted into that room mid-run
+landed in the drop file as `‹for you› operator-check: …` and was gone by the end
+(drained into a model request, not stranded), the run closed with `done: nadia —
+finished (rc=0)`, and the file it was asked for was there.
+
 ## feat(ucc): nadia is an agent in the control center, not just on the matrix
 Completed: 2026-08-01
 

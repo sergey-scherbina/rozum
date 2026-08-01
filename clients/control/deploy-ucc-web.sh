@@ -85,6 +85,21 @@ echo ">> building rozum-gateway (the engine binary control-serve actually runs) 
 # hit live 2026-07-07. A fresh inode sidesteps it.
 rm -f "$BINDIR/rozum-gateway"
 cp "$REPO/target/release/rozum-gateway" "$BINDIR/rozum-gateway"
+
+# 1c) nadia — an agent chip in the UCC is a promise the machine can run it, and the coder/session
+# routes now REFUSE a launch whose agent is not on PATH rather than let it die as a 127 inside a
+# log file. claude/codex/opencode are third-party CLIs the operator installs; nadia is ours, built
+# from this tree, so the deploy owes it the same freshness as the gateway. It goes to ~/.cargo/bin —
+# where `cargo install --path crates/nadia` puts it and where every launchd service's PATH already
+# points — deliberately NOT to ~/.rozum/bin, which would create a second copy that drifts.
+# It links no model engine (rozum-agent/core/gateway only), so this costs seconds.
+echo ">> building + installing nadia (the agent chip in Coders/Sessions/chat) ..."
+( cd "$REPO" && cargo build -p nadia --release )
+NADIA_BIN="${NADIA_BIN:-$HOME/.cargo/bin/nadia}"
+mkdir -p "$(dirname "$NADIA_BIN")"
+rm -f "$NADIA_BIN"   # fresh inode — same code-signature-cache reason as above
+cp "$REPO/target/release/nadia" "$NADIA_BIN"
+echo ">> nadia -> $NADIA_BIN"
 fi
 
 # Helper: compile a server-side .ssc file, serve briefly, capture HTML, shut down.

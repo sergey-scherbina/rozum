@@ -1352,6 +1352,40 @@ fn agent_invocation(agent: &str, prompt: &str) -> Vec<String> {
     }
 }
 
+/// Is `agent` actually runnable — an executable of that name on THIS process's PATH? The UCC offers
+/// a fixed set of agent chips, but which of them are installed is a property of the machine, and
+/// launchd's PATH is not the operator's shell PATH. Without this check a missing CLI is discovered
+/// deep inside the spawned `rozum launch`, which exits 127 into a log file — so the row reports
+/// "exited", which is indistinguishable from a run that finished.
+fn agent_on_path(agent: &str) -> bool {
+    let p = std::path::Path::new(agent);
+    if p.components().count() > 1 {
+        return is_executable_file(p);
+    }
+    let Some(path) = std::env::var_os("PATH") else { return false };
+    std::env::split_paths(&path).any(|dir| is_executable_file(&dir.join(agent)))
+}
+
+fn is_executable_file(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// The refusal for an agent the machine cannot run, naming the fix rather than the symptom.
+/// `None` when the agent is installed.
+fn agent_missing_reason(agent: &str) -> Option<String> {
+    if agent_on_path(agent) {
+        return None;
+    }
+    let how = match agent {
+        "nadia" => "build + install it: `cargo install --path crates/nadia`",
+        _ => "install its CLI and make sure it is on the service's PATH",
+    };
+    Some(format!("agent `{agent}` is not on PATH — {how}"))
+}
+
 /// Spawn `rozum launch --model <m> <agent invocation>` DETACHED in `workdir`, output → a log file.
 /// Returns (pid, log_path).
 fn spawn_coder(agent: &str, model: &str, workdir: &str, prompt: &str, verify: bool) -> std::io::Result<(u32, PathBuf)> {
@@ -1373,6 +1407,12 @@ fn spawn_coder(agent: &str, model: &str, workdir: &str, prompt: &str, verify: bo
     if !verify {
         args.push("--n-ctx".into());
         args.push("32768".into());
+        // …and no room presence. `rozum launch` carries the meeting room for an agent that has no
+        // MCP client (nadia), which is right for a Coders run — a task the operator started and
+        // wants to see land. A chat turn is not a task: every message would post a `working:` and a
+        // `done:` into the project's room, and room chatter would be folded into a conversational
+        // turn that never asked for it. The Coders path (verify:true) keeps the presence.
+        args.push("--no-room-bridge".into());
     }
     args.extend(agent_invocation(agent, prompt));
     let mut cmd = Command::new(&exe);
@@ -1422,6 +1462,9 @@ async fn coder_launch_route(body: String) -> axum::response::Response {
     }
     if !std::path::Path::new(&workdir).is_dir() {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "workdir is not a directory");
+    }
+    if let Some(why) = agent_missing_reason(&agent) {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, &why);
     }
     // Record NOW ("starting…"), do the slow model load + spawn in the background — the phone's
     // fetch returns instantly and errors land in the row's status (same pattern as sessions).
@@ -1618,6 +1661,11 @@ async fn session_launch_route(body: String) -> axum::response::Response {
     }
     if !std::path::Path::new(&workdir).is_dir() {
         return json_err(axum::http::StatusCode::BAD_REQUEST, "workdir is not a directory");
+    }
+    // Same preflight as the coder path: a tmux session whose only content is "command not found"
+    // still counts as `tmux_alive`, so it would sit in the list as a live session forever.
+    if let Some(why) = agent_missing_reason(&agent) {
+        return json_err(axum::http::StatusCode::BAD_REQUEST, &why);
     }
     // Create the tmux session RIGHT AWAY and run `rozum launch` inside it: the CLI handles the
     // gateway cold-start itself (admission gate included) and PRINTS its progress, so the terminal
@@ -4114,6 +4162,22 @@ mod tests {
         // Without the `run` verb nadia reads the prompt as the MODE and exits 2 — the fallback
         // arm below is right only for a CLI that takes a bare prompt.
         assert_eq!(agent_invocation("nadia", "do X"), ["nadia", "run", "do X"]);
+    }
+
+    #[test]
+    fn missing_agent_is_refused_by_name_with_the_fix() {
+        // `sh` is on every PATH this can run on; the refusal must name the agent AND how to get it.
+        assert!(agent_on_path("sh"));
+        assert!(agent_missing_reason("sh").is_none());
+        assert!(!agent_on_path("rozum-no-such-agent-xyz"));
+        let why = agent_missing_reason("nadia-not-installed-xyz").expect("must refuse");
+        assert!(why.contains("nadia-not-installed-xyz") && why.contains("PATH"), "got: {why}");
+        assert!(agent_missing_reason("nadia").is_none() || agent_missing_reason("nadia").unwrap().contains("cargo install"));
+        // A path (not a bare name) is checked as given, not searched for on PATH.
+        assert!(agent_on_path("/bin/sh"));
+        assert!(!agent_on_path("/bin/definitely-not-here-xyz"));
+        // A directory is not a runnable agent.
+        assert!(!agent_on_path("/bin"));
     }
 
     #[test]
