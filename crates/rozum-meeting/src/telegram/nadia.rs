@@ -463,18 +463,24 @@ fn ensure_running() -> Result<(), String> {
         .unwrap_or_else(|_| default_workspace().to_string_lossy().into_owned());
     std::fs::create_dir_all(&workspace).map_err(|e| format!("workspace {workspace}: {e}"))?;
 
+    let gateway = resolve_gateway().ok_or_else(|| {
+        format!(
+            "не нашёл живой гейтвей (пробовал {}). Модель не поднята — запусти её \
+             (`rozum gateway --model …` или сервис com.rozum.gateway) и повтори.",
+            gateway_candidates().join(", ")
+        )
+    })?;
     let mut cmd = Command::new("nadia");
     cmd.arg("serve")
         .arg("--port")
         .arg(PORT.to_string())
         .arg("--workspace")
         .arg(&workspace)
+        .arg("--gateway")
+        .arg(&gateway)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Ok(gw) = std::env::var("ROZUM_GATEWAY_URL") {
-        cmd.arg("--gateway").arg(gw);
-    }
     if let Ok(model) = std::env::var("NADIA_MODEL") {
         cmd.arg("--model").arg(model);
     }
@@ -494,6 +500,40 @@ fn ensure_running() -> Result<(), String> {
 
 fn default_workspace() -> std::path::PathBuf {
     dirs_home().join(".rozum").join("nadia")
+}
+
+/// Where the model might be, in the order worth trying.
+///
+/// nadia's own default is :8080, and this machine's durable gateway is on :8089 — so a
+/// `nadia serve` started without `--gateway` talked to a port nothing listens on. Every
+/// agent then died in about a second with `Phase::Failed`, no tool calls and (before the
+/// fix in `supervisor.rs`) an empty reason, which read from a phone as "the agent is
+/// broken". It was a wrong port. Seen live 2026-08-01: three agents, three failures, one
+/// missing environment variable in a launchd plist.
+fn gateway_candidates() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(v) = std::env::var("ROZUM_GATEWAY_URL") {
+        let v = v.trim().trim_end_matches('/').trim_end_matches("/v1").to_string();
+        if !v.is_empty() {
+            out.push(v);
+        }
+    }
+    // The durable resident gateway (`com.rozum.gateway`), then nadia's own default.
+    for p in ["http://127.0.0.1:8089", "http://127.0.0.1:8080"] {
+        if !out.iter().any(|u| u == p) {
+            out.push(p.to_string());
+        }
+    }
+    out
+}
+
+/// The first candidate that actually answers. Checked BEFORE starting the agent process,
+/// because an agent pointed at a dead port fails a second later with nothing useful to say,
+/// and the operator is then debugging the agent instead of the gateway.
+fn resolve_gateway() -> Option<String> {
+    gateway_candidates()
+        .into_iter()
+        .find(|base| curl_json("GET", &format!("{base}/v1/models"), None).is_ok())
 }
 
 fn dirs_home() -> std::path::PathBuf {
@@ -752,6 +792,13 @@ fn render_finished(id: u64, phase: &str, a: &serde_json::Value) -> String {
     let result = get("result");
     if !result.is_empty() {
         s.push_str(&format!("\n\n{}", clip(result, 2500)));
+    } else if phase == "failed" {
+        // A failure with nothing to say is the worst message this bot can send: it names the
+        // agent and blames nobody. Say where to look instead of leaving a bare ❌.
+        s.push_str(
+            "\n\n(причина не записана — посмотри `nadia serve` и жив ли гейтвей: \
+             /status покажет то же самое)",
+        );
     }
     s
 }
@@ -861,6 +908,39 @@ mod tests {
         // Same id, different work: `nadia serve` restarted and reused the number. Dropped,
         // never delivered — a result posted to the wrong chat reads as a real one.
         assert_eq!(report_for(&w, &agent("done", "something else entirely")), Report::Reused);
+    }
+
+    #[test]
+    fn the_gateway_is_looked_for_where_this_machine_actually_runs_one() {
+        // The durable resident gateway comes before nadia's own default, which is the port
+        // nothing listens on here — the bug that made three agents fail in one second each.
+        let c = gateway_candidates();
+        let pos = |u: &str| c.iter().position(|x| x == u);
+        assert!(pos("http://127.0.0.1:8089").is_some(), "{c:?}");
+        assert!(pos("http://127.0.0.1:8089") < pos("http://127.0.0.1:8080"), "{c:?}");
+        // No duplicates, whatever the environment says.
+        let mut sorted = c.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), c.len(), "duplicate candidates: {c:?}");
+    }
+
+    #[test]
+    fn a_failure_with_no_reason_says_where_to_look() {
+        let a = serde_json::json!({
+            "id": 2, "phase": "failed", "task": "привет", "tool_calls": 0, "elapsed_secs": 1,
+            "result": ""
+        });
+        let text = render_finished(2, "failed", &a);
+        assert!(text.contains("причина не записана"), "{text}");
+        // With a reason, the reason is what is shown — no boilerplate on top of it.
+        let b = serde_json::json!({
+            "id": 2, "phase": "failed", "task": "привет", "tool_calls": 0, "elapsed_secs": 1,
+            "result": "gateway transport failed: Connection refused"
+        });
+        let text = render_finished(2, "failed", &b);
+        assert!(text.contains("Connection refused"), "{text}");
+        assert!(!text.contains("причина не записана"), "{text}");
     }
 
     #[test]

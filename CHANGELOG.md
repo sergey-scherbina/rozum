@@ -1,5 +1,43 @@
 # Changelog
 
+## fix(telegram): the agent was pointed at a port nothing listens on, and said nothing about it
+Completed: 2026-08-01
+
+Reported from the phone, with a screenshot: `/nadia on`, three messages, three
+agents started, and `❌ агент #2 failed · 0 вызовов · 1с` with no reason. The
+routing, the roster, the spawn and the delivery all worked. The agent had nowhere
+to send its first request.
+
+**The port.** `nadia serve`'s own default gateway is `:8080`; this machine's
+durable gateway is `:8089`. The bridge passed `--gateway` only when
+`ROZUM_GATEWAY_URL` was set, and the launchd plist sets `HOME` and `PATH` and
+nothing else — so every agent started from Telegram connected to a port nothing
+listens on and died about a second later. Two fixes, because either alone leaves
+a way back in: the bridge now PROBES `$ROZUM_GATEWAY_URL` → `:8089` → `:8080` and
+starts the agent process against whichever answers — refusing, with the list it
+tried, when none does — and both bridge wrappers export `ROZUM_GATEWAY_URL`.
+Checking before the spawn matters: an agent pointed at a dead port fails a second
+later with nothing useful to say, and the operator is then debugging the agent
+instead of the gateway.
+
+**The silence.** `AgentStop::Error(e)` set `Phase::Failed` and stored
+`outcome.text`, which is empty when the loop never got an answer — so a failed
+agent's `result` was `""` and the chat could only say "failed". The error is the
+result now. Where nothing was recorded at all, the bot says where to look rather
+than sending a bare ❌: a failure that names the agent and blames nobody is the
+worst message this bot can send.
+
+**The clock.** `elapsed` was measured from `started` on every read, so a run that
+failed in one second reported half an hour when someone asked half an hour later
+(`/agents` showed `1810s` for the same agent Telegram had correctly called `1с`).
+It stops at the terminal phase now.
+
+Verified with the operator's own question — "Ты знаешь какие tools у тебя есть?"
+— which had failed in 1s and now answers in 3s, listing the six tools. Three new
+unit tests: the candidate order (`:8089` before nadia's `:8080`, no duplicates),
+a reasonless failure pointing somewhere, and a failure with a reason showing the
+reason and nothing else.
+
 ## feat(telegram): nadia is something you can actually work with from a phone
 Completed: 2026-08-01
 

@@ -85,6 +85,9 @@ struct Meta {
     tool_calls: usize,
     last_tool: Option<String>,
     started: Instant,
+    /// When it reached a terminal phase. `elapsed` is measured to here once set, so a run's
+    /// duration stops being "how long ago did it start" the moment it is over.
+    finished: Option<Instant>,
     result: Option<String>,
 }
 
@@ -200,6 +203,7 @@ impl Supervisor {
             tool_calls: 0,
             last_tool: None,
             started: Instant::now(),
+            finished: None,
             result: None,
         }));
         let inbox: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -225,15 +229,28 @@ impl Supervisor {
             loop {
                 let Some(message) = next.take() else { break };
                 let outcome = session.turn(&message).await;
-                let phase = match &outcome.stop {
-                    AgentStop::Done => Phase::Done,
-                    AgentStop::Error(_) => Phase::Failed,
-                    _ => Phase::Done, // budget exhausted: finished, just not by choice
+                // A failed run must carry WHY. `outcome.text` is empty when the loop never got
+                // an answer — a refused connection to the gateway, say — and a `failed` agent
+                // with an empty result tells whoever asks absolutely nothing, which is how a
+                // misconfigured port reads as "the agent is broken". Measured from a phone:
+                // three agents failed in one second each and the chat said only "failed".
+                let (phase, result) = match &outcome.stop {
+                    AgentStop::Done => (Phase::Done, outcome.text.clone()),
+                    AgentStop::Error(e) if outcome.text.is_empty() => (Phase::Failed, e.clone()),
+                    AgentStop::Error(e) => (Phase::Failed, format!("{}\n\n{e}", outcome.text)),
+                    // Budget exhausted: finished, just not by choice.
+                    _ => (Phase::Done, outcome.text.clone()),
                 };
                 {
                     let mut m = meta_t.lock().unwrap();
-                    m.result = Some(outcome.text.clone());
+                    m.result = Some(result);
                     m.phase = phase;
+                    if phase.is_terminal() {
+                        // Stop the clock. `elapsed` is measured from `started` on every read,
+                        // so without this a run that failed in one second reports half an hour
+                        // when someone asks about it half an hour later.
+                        m.finished = Some(std::time::Instant::now());
+                    }
                 }
                 if ctl_t.stopping.load(Ordering::SeqCst) {
                     break;
@@ -352,7 +369,7 @@ fn snapshot(id: AgentId, meta: &Arc<Mutex<Meta>>) -> Status {
         phase: m.phase,
         tool_calls: m.tool_calls,
         last_tool: m.last_tool.clone(),
-        elapsed: m.started.elapsed(),
+        elapsed: m.finished.map_or_else(|| m.started.elapsed(), |f| f - m.started),
         result: m.result.clone(),
     }
 }
@@ -381,6 +398,7 @@ mod tests {
             tool_calls: 0,
             last_tool: None,
             started: Instant::now(),
+            finished: None,
             result: None,
         }));
         (ControlGate { inner: src, ctl: ctl.clone(), meta: meta.clone() }, ctl, meta)
