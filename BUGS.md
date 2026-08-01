@@ -5,6 +5,44 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-016 — nadia × Qwen3.5-4B: a path written without its leading slash lands a file in a mirror tree, and the run reports success
+
+- **Status:** open. NOT a nadia code defect — `Sandbox::resolve` handles an absolute path
+  correctly (`is_absolute` → used as given, never re-rooted). This is the model emitting the
+  workspace's absolute path with the leading `/` stripped, which is then a legal RELATIVE path.
+- **Source:** found while verifying the UCC coder path, 2026-08-01. One run in four.
+- **Severity:** P2. Nothing crashes; the answer is confidently wrong, which is worse.
+
+**What happens.** Task: *create a file named `ucc.txt` whose only content is the word ok*, in
+workspace `/private/tmp/…/uccbridge`. The model called `write_file` with
+`private/tmp/…/uccbridge/ucc.txt` — the workspace path minus its leading slash. That is a
+perfectly ordinary relative path, so the jail accepted it and created the whole mirror tree:
+
+```
+uccbridge/private/tmp/claude-501/…/scratchpad/uccbridge/ucc.txt
+```
+
+nadia then answered *"The file has been created successfully with the content ok. The task is
+complete."* and exited 0. Both statements are true about the file it made; neither is true about
+the file that was asked for.
+
+**Why nothing caught it.** The workspace had no cargo project, so `rozum launch`'s verify-gate had
+nothing deterministic to run (`verified = None`) — the documented behaviour, and precisely the
+hole a false success falls through. The same task in the same shape succeeded in three other runs
+(`hi.txt`, `live.txt`, `ok.txt` all landed at the root), so it is stochastic, not systematic.
+
+**Candidate fixes, cheapest first.**
+1. Tell the model, in the system prompt, that paths are relative to the workspace root and that it
+   must not restate the workspace path — the same class of anchoring fix as R4's `tool_hint`
+   (`project-matrix-hygiene-testcell`), which cured absolute-path anchoring for opencode.
+2. Refuse (not clamp) a relative path whose leading components reproduce the workspace's own path —
+   a jail that creates `<root>/private/tmp/…/<root>` is answering a question nobody asked.
+3. A non-cargo verify floor: when the task names a file, check that file exists at the root.
+
+Do 1 before 2: a refusal the model does not understand becomes a loop.
+
+---
+
 ## BUG-015 — the warm cache loaded a second copy of the resident model, because one model has two spellings
 
 - **Status:** fixed this commit (`gateway.rs`: `enter` compares with `same_model`, and the warm
