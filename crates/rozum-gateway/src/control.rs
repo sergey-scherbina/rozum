@@ -1344,6 +1344,10 @@ fn agent_invocation(agent: &str, prompt: &str) -> Vec<String> {
         ],
         "codex" => vec!["codex".into(), "exec".into(), prompt.into()],
         "opencode" => vec!["opencode".into(), "run".into(), prompt.into()],
+        // nadia headless = `nadia run <task>`. No autonomy flag: its batch mode already starts in
+        // auto-approve (asking would deadlock on a stdin nobody is at) and the sandbox is the
+        // containment there. A bare `nadia <prompt>` would read the prompt as the MODE and die.
+        "nadia" => vec!["nadia".into(), "run".into(), prompt.into()],
         other => vec![other.into(), prompt.into()],
     }
 }
@@ -4100,6 +4104,16 @@ mod tests {
         assert!(!shell_safe("codex\nrm -rf /"));
         assert!(!shell_safe("has space"));
         assert!(!shell_safe(""));
+    }
+
+    #[test]
+    fn agent_invocations_carry_each_cli_headless_verb() {
+        assert_eq!(agent_invocation("claude", "do X")[..3], ["claude", "-p", "do X"]);
+        assert_eq!(agent_invocation("codex", "do X"), ["codex", "exec", "do X"]);
+        assert_eq!(agent_invocation("opencode", "do X"), ["opencode", "run", "do X"]);
+        // Without the `run` verb nadia reads the prompt as the MODE and exits 2 — the fallback
+        // arm below is right only for a CLI that takes a bare prompt.
+        assert_eq!(agent_invocation("nadia", "do X"), ["nadia", "run", "do X"]);
     }
 
     #[test]

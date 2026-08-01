@@ -5324,8 +5324,9 @@ fn sandboxed_command(program_name: &str) -> std::process::Command {
 /// Build the agent child command (env wiring) and exec it, exiting with its code.
 /// `model_for_alias` is the model the gateway is actually serving.
 /// Index in `program` of the agent's task-prompt arg (the thing rewritten for a repair round):
-/// claude `-p/--print <prompt>`, codex `exec <prompt>`, opencode `run <prompt>`. `None` for
-/// interactive/unknown invocations → the verify-gate stays off (it needs a prompt to repair).
+/// claude `-p/--print <prompt>`, codex `exec <prompt>`, opencode `run <prompt>`, nadia
+/// `run <prompt>`. `None` for interactive/unknown invocations → the verify-gate stays off (it
+/// needs a prompt to repair).
 fn agent_prompt_index(program: &[String]) -> Option<usize> {
     let name = program.first().map(|s| s.rsplit('/').next().unwrap_or(s)).unwrap_or("");
     let verb_at = |verbs: &[&str]| program.iter().position(|a| verbs.contains(&a.as_str()));
@@ -5333,7 +5334,7 @@ fn agent_prompt_index(program: &[String]) -> Option<usize> {
     match name {
         "claude" => verb_at(&["-p", "--print"]).and_then(after),
         "codex" => verb_at(&["exec"]).and_then(after),
-        "opencode" => verb_at(&["run"]).and_then(after),
+        "opencode" | "nadia" => verb_at(&["run"]).and_then(after),
         _ => None,
     }
 }
@@ -8868,7 +8869,9 @@ mod chain_tests {
         );
         assert_eq!(agent_prompt_index(&["codex".into(), "exec".into(), "do X".into()]), Some(2));
         assert_eq!(agent_prompt_index(&["opencode".into(), "run".into(), "do X".into()]), Some(2));
+        assert_eq!(agent_prompt_index(&["nadia".into(), "run".into(), "do X".into()]), Some(2));
         assert_eq!(agent_prompt_index(&["claude".into()]), None); // interactive → no gate
+        assert_eq!(agent_prompt_index(&["nadia".into()]), None); // bare nadia = REPL → no gate
     }
 
     #[test]

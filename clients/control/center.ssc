@@ -197,6 +197,7 @@ val cdLogText = computedSignal(() => jsonValue(cdLog()).get("log").asString)
 val cdAgentClaudeLbl   = computedSignal(() => if cdAgent() == "claude"   then "✓ claude"   else "claude")
 val cdAgentCodexLbl    = computedSignal(() => if cdAgent() == "codex"    then "✓ codex"    else "codex")
 val cdAgentOpencodeLbl = computedSignal(() => if cdAgent() == "opencode" then "✓ opencode" else "opencode")
+val cdAgentNadiaLbl    = computedSignal(() => if cdAgent() == "nadia"    then "✓ nadia"    else "nadia")
 
 val coderModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", cdModel, "spec")], "spec")
 val coderWorkdirList = remoteTable(st, [fieldColumn("project", "name")], "projects", [rowLink("select", cdWorkdir, "path")], "path")
@@ -204,7 +205,7 @@ val coderForm = vstack(gap = 8)(
   hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
   vstack(gap = 4)(
     hstack(gap = 8)(text("agent:"), signalText_(cdAgent)),
-    hstack(gap = 8)(signalLabelButton(cdAgent, "claude", cdAgentClaudeLbl), signalLabelButton(cdAgent, "codex", cdAgentCodexLbl), signalLabelButton(cdAgent, "opencode", cdAgentOpencodeLbl))
+    hstack(gap = 8)(signalLabelButton(cdAgent, "claude", cdAgentClaudeLbl), signalLabelButton(cdAgent, "codex", cdAgentCodexLbl), signalLabelButton(cdAgent, "opencode", cdAgentOpencodeLbl), signalLabelButton(cdAgent, "nadia", cdAgentNadiaLbl))
   ),
   hstack(gap = 8)(text("model:"), signalText_(cdModel)),
   coderModelList,
@@ -251,6 +252,7 @@ val sePrompt  = signal("sePrompt", "")
 val seAgentClaudeLbl   = computedSignal(() => if seAgent() == "claude"   then "✓ claude"   else "claude")
 val seAgentCodexLbl    = computedSignal(() => if seAgent() == "codex"    then "✓ codex"    else "codex")
 val seAgentOpencodeLbl = computedSignal(() => if seAgent() == "opencode" then "✓ opencode" else "opencode")
+val seAgentNadiaLbl    = computedSignal(() => if seAgent() == "nadia"    then "✓ nadia"    else "nadia")
 
 val sessionModelList = remoteTable(st, modelSelectCols, "installed", [rowLink("select", seModel, "spec")], "spec")
 val sessionWorkdirList = remoteTable(st, [fieldColumn("project", "name")], "projects", [rowLink("select", seWorkdir, "path")], "path")
@@ -258,7 +260,7 @@ val sessionForm = vstack(gap = 8)(
   hstack(gap = 8)(text("free RAM:"), signalText_(availTxt)),
   vstack(gap = 4)(
     hstack(gap = 8)(text("agent:"), signalText_(seAgent)),
-    hstack(gap = 8)(signalLabelButton(seAgent, "claude", seAgentClaudeLbl), signalLabelButton(seAgent, "codex", seAgentCodexLbl), signalLabelButton(seAgent, "opencode", seAgentOpencodeLbl))
+    hstack(gap = 8)(signalLabelButton(seAgent, "claude", seAgentClaudeLbl), signalLabelButton(seAgent, "codex", seAgentCodexLbl), signalLabelButton(seAgent, "opencode", seAgentOpencodeLbl), signalLabelButton(seAgent, "nadia", seAgentNadiaLbl))
   ),
   hstack(gap = 8)(text("model:"), signalText_(seModel)),
   sessionModelList,

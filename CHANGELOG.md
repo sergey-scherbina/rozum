@@ -1,5 +1,33 @@
 # Changelog
 
+## feat(ucc): nadia is an agent in the control center, not just on the matrix
+Completed: 2026-08-01
+
+nadia was already a chip on the matrix screen, but the screens that actually
+START work — **Coders**, **Sessions** and the phone chat's Agent mode — still
+offered only claude / codex / opencode. It is now on all three.
+
+Three label chips, and one arm in `agent_invocation` that is the load-bearing
+half: the fallback ran an unknown agent as `<name> <prompt>`, and nadia reads its
+first positional argument as the MODE, so a coder launched that way would have
+died with `unknown mode …` and rc=2 — which the bench contract reads as
+*infrastructure failure*, the worst way for this to be wrong. Coders and chat now
+spawn `nadia run <task>`, the headless form whose approval gate already starts in
+auto (asking would deadlock on a stdin nobody is at, and the sandbox is the
+containment there). A Session runs bare `nadia` under tmux — the REPL with its
+gate ON, so each write is approved from the phone.
+
+`rozum launch`'s verify-gate learned nadia's prompt position too (`run <prompt>`,
+alongside opencode's). Without it the gate silently stays off: it needs to know
+which argv element to rewrite for a repair round, and a Coders launch runs with
+verify ON by default.
+
+Verified against the live control-serve rather than by exit code: `POST
+/control/coder/launch` with `agent=nadia` wrote the file it was asked for
+(`ok.txt` = "done") on the resident Qwen3.5-4B, reusing the shared gateway on
+:8089 instead of loading a second copy. Deployed with `deploy-ucc-web.sh`;
+`ucc-smoke` and the puppeteer e2e both green.
+
 ## docs(nadia): the agent documented from this side — both halves
 Completed: 2026-07-31
 

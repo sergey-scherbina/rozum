@@ -13,7 +13,7 @@ built with `emit-spa --frontend react`. Two modes over the same shared local mod
 
 - **💬 Companion** (default) — talks to the resident model DIRECTLY, token-by-token, over a streamed
   `POST /control/chat/stream` (OpenAI SSE piped from the gateway). Never hangs.
-- **🤖 Agent** — runs a headless coding agent (claude/codex/opencode) in a project via
+- **🤖 Agent** — runs a headless coding agent (claude/codex/opencode/nadia) in a project via
   `POST /control/coder/launch` + polls `GET /control/coder/log`.
 
 ## What is reactive-toolkit vs. the JS orchestration fence
@@ -144,6 +144,7 @@ val agentModeLbl  = computedSignal(() => (if mode()  == "agent" then "✓ " else
 val claudeLbl     = computedSignal(() => (if agent() == "claude"   then "✓ " else "") + "claude")
 val codexLbl      = computedSignal(() => (if agent() == "codex"    then "✓ " else "") + "codex")
 val opencodeLbl   = computedSignal(() => (if agent() == "opencode" then "✓ " else "") + "opencode")
+val nadiaLbl      = computedSignal(() => (if agent() == "nadia"    then "✓ " else "") + "nadia")
 val startLbl      = computedSignal(() => "▶ " + tr("Start chatting"))
 val modeLbl       = computedSignal(() => tr("Mode"))
 val modelLbl      = computedSignal(() => tr("Model"))
@@ -160,7 +161,8 @@ val agentBlock = vstack(gap = 12)(
     hstack(gap = 8)(
       signalLabelButton(agent, "claude",   claudeLbl),
       signalLabelButton(agent, "codex",    codexLbl),
-      signalLabelButton(agent, "opencode", opencodeLbl))),
+      signalLabelButton(agent, "opencode", opencodeLbl),
+      signalLabelButton(agent, "nadia",    nadiaLbl))),
   vstack(gap = 6)(signalText_(projectLbl), projectPicker))
 
 val configScreen = vstack(gap = 16)(

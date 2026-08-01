@@ -207,8 +207,13 @@ requires `nadia` on `PATH`; the workspace is `$NADIA_WORKSPACE`, default `~/.roz
 `AGENTS=nadia scripts/bench/agentic.sh` needs no harness change. The row is
 `rozum launch … nadia run "$prompt"` with no provider flags and no `tool_hint`: nadia
 reads `OPENAI_BASE_URL` / `ROZUM_GATEWAY_URL`, which `rozum launch` already exports to
-every child, and its workspace defaults to the cwd that launch has already jailed. The
-UCC lists it alongside `claude` / `codex` / `opencode`.
+every child, and its workspace defaults to the cwd that launch has already jailed.
+
+The UCC offers it wherever it offers an agent: the matrix chips, **Coders**, **Sessions**
+and the phone chat's Agent mode. Coders and chat spawn the headless form (`nadia run
+<task>` — the `run` verb matters: a bare `nadia <prompt>` reads the prompt as the *mode*
+and exits 2); a Session runs bare `nadia` in tmux, which is the REPL with its approval
+gate, so the operator approves each write from the phone.
 
 On the 2026-07-31 run — 8 tasks × 2 reps, same resident Qwen3.5-4B for everyone:
 
