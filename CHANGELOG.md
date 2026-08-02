@@ -1,5 +1,22 @@
 # Changelog
 
+## chore(nadia): the sandbox is `~/.nadia`, its own directory
+Completed: 2026-08-02
+
+nadia's scratch workspace — where a Telegram agent works when the chat has not
+chosen a project — moves from `~/.rozum/nadia` to `~/.nadia`, and the projects
+already there moved with it (`hello-rpn`, which still builds and runs from the
+new path).
+
+It is a small change with one real reason: what collects in that directory is the
+**operator's work** — whole projects an agent wrote — and `~/.rozum` is rozum's
+runtime, holding `bin/`, `secrets/` and `ucc/`, the kind of directory one deletes
+to start clean. Work that took a model ten minutes to produce should not be one
+`rm -rf ~/.rozum` away from gone.
+
+One definition (`telegram/nadia.rs::default_workspace`), so nothing else had to
+change; `$NADIA_WORKSPACE` still overrides it.
+
 ## fix(nadia): the files were real, the chat just never said where
 Completed: 2026-08-01
 

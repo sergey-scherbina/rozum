@@ -256,8 +256,9 @@ Three things turn that protocol into something usable from a phone:
 - **Where it works is yours to choose.** `/projects` lists what this machine knows (the
   meeting daemon's registered rooms plus the UCC's own additions — the same two sources the
   UCC project picker reads), `/project <name>` sets it per chat, and `/spawn` passes it as
-  the agent's workspace. Unset still means nadia's scratch dir, `$NADIA_WORKSPACE` or
-  `~/.rozum/nadia`.
+  the agent's workspace. Unset still means nadia's own scratch dir, `$NADIA_WORKSPACE` or
+  `~/.nadia` — its own directory rather than a corner of `~/.rozum`, because what collects
+  there is the operator's work and not rozum's runtime.
 - **`/nadia on` — plain text is the task.** Ordinary messages go to the agent instead of to
   the chat model: to the one already working (as `/tell`) if there is one, else starting a
   new one. Two live agents and it asks which, rather than guessing — a steering message

@@ -498,8 +498,14 @@ fn ensure_running() -> Result<(), String> {
     Err("не отвечает после запуска".into())
 }
 
+/// nadia's own scratch workspace when the chat has not chosen a project: `~/.nadia`.
+///
+/// Its own directory, not a corner of `~/.rozum`. What accumulates here is the operator's
+/// work — whole projects an agent wrote — and it does not belong under a directory whose
+/// other contents (`bin/`, `secrets/`, `ucc/`) are rozum's runtime and get treated as
+/// disposable. `$NADIA_WORKSPACE` still overrides it.
 fn default_workspace() -> std::path::PathBuf {
-    dirs_home().join(".rozum").join("nadia")
+    dirs_home().join(".nadia")
 }
 
 /// Where the model might be, in the order worth trying.
@@ -956,12 +962,12 @@ mod tests {
         let a = serde_json::json!({
             "id": 3, "phase": "done", "task": "напиши калькулятор RPN",
             "tool_calls": 9, "elapsed_secs": 120, "result": "готово",
-            "workspace": "/Users/x/.rozum/nadia",
+            "workspace": "/Users/x/.nadia",
             "touched": ["Cargo.toml", "src/main.rs"]
         });
         let text = render_finished(3, "done", &a);
         // The two facts an operator needs before they can go and look at the work.
-        assert!(text.contains("/Users/x/.rozum/nadia"), "must say WHERE: {text}");
+        assert!(text.contains("/Users/x/.nadia"), "must say WHERE: {text}");
         assert!(text.contains("Cargo.toml") && text.contains("src/main.rs"), "must list what: {text}");
 
         // A run that only talked says so, rather than leaving the operator to search a
@@ -969,7 +975,7 @@ mod tests {
         let b = serde_json::json!({
             "id": 4, "phase": "done", "task": "какие у тебя тулы?",
             "tool_calls": 0, "elapsed_secs": 3, "result": "вот список",
-            "workspace": "/Users/x/.rozum/nadia", "touched": []
+            "workspace": "/Users/x/.nadia", "touched": []
         });
         let text = render_finished(4, "done", &b);
         assert!(text.contains("файлы не менялись"), "{text}");
