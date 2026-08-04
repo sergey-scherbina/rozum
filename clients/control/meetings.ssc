@@ -24,12 +24,23 @@ generated client cannot format a unix epoch or re-implement the incident-badge r
 tried, there would be two implementations to drift apart — which is exactly what generating the
 client is supposed to end.
 
-**Auth is configuration, not a target branch.** `ROZUM_MEETING_AUTH` carries a complete
-`Authorization` header value (the meeting daemon takes HTTP Basic with an issued operator token as
-the password: `rozum meetings token issue <handle> --role observer`). The web target honours the
-header signal. **The terminal target silently drops it today** — reported upstream as
-`tui-fetch-headers` — so the emitted terminal binary can read an unauthenticated fixture but not the
-live daemon. That is a known, filed gap, not a defect of this source.
+**Auth is configuration, not a target branch.** `ROZUM_MEETING_TOKEN` is an issued operator token
+(`rozum meetings token issue <handle> --role observer`), sent as `Authorization: Bearer …`. The
+daemon grew Bearer support for exactly this client: Basic needs base64 of `":" + token` and a view
+has no base64, which previously forced this source to accept a pre-built header instead of a token.
+
+**Two caveats, both real, neither a defect of this file.**
+
+1. The terminal target silently drops the header signal today (`ureq::get(url).call()`, no headers)
+   — filed upstream as `tui-fetch-headers` — so the emitted terminal binary reads an
+   unauthenticated fixture, not the live daemon.
+2. ⚠️ **Do not set `ROZUM_MEETING_TOKEN` when emitting the terminal target.** `ssc run --v1`
+   executes this program in the emitting process, so `env(...)` is read at BUILD time and anything
+   derived from it is folded into the generated Rust as a literal — a token set here would be
+   compiled into the binary. Today the header is dropped so nothing leaks; the moment headers are
+   honoured naively, it would. The durable fix is a credential the target's RUNTIME resolves,
+   proposed upstream as `ui-fetch-credentials`. Until then: emit without the token, supply it to the
+   running client.
 
 [env](std/os.ssc)
 [signal, fetchUrlSignal, incSignal, fieldColumn](std/ui/primitives.ssc)
@@ -44,10 +55,10 @@ live daemon. That is a known, filed gap, not a defect of this source.
 val apiBase = env("ROZUM_MEETING_BASE").getOrElse("http://127.0.0.1:8401")
 val room    = env("ROZUM_MEETING_ROOM").getOrElse("rozum")
 val day     = env("ROZUM_MEETING_DATE").getOrElse("today")
-val auth    = env("ROZUM_MEETING_AUTH").getOrElse("")
+val token   = env("ROZUM_MEETING_TOKEN").getOrElse("")
 
 val refresh = signal("meetingsRefresh", 0)
-val headers = signal("meetingsHeaders", "{\"Authorization\":\"" + auth + "\"}")
+val headers = signal("meetingsHeaders", "{\"Authorization\":\"Bearer " + token + "\"}")
 
 val transcript = fetchUrlSignal(
   "meetingsTranscript",

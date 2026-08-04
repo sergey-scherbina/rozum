@@ -470,7 +470,13 @@ async fn auth_layer(
     let unauth = || -> Response {
         (
             StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Basic realm=\"rozum meeting\"")],
+            // Advertise both, Bearer first. Browsers do not act on a Bearer challenge, so this
+            // does not change what a browser does — it tells a MACHINE client that the scheme it
+            // can actually construct is available.
+            [(
+                header::WWW_AUTHENTICATE,
+                "Bearer realm=\"rozum meeting\", Basic realm=\"rozum meeting\"",
+            )],
             "401 Unauthorized\n",
         )
             .into_response()
@@ -482,19 +488,34 @@ async fn auth_layer(
     else {
         return unauth();
     };
-    let Some(b64) = h
+    // Two accepted schemes, resolving to the same `(user, pass)` the logic below already expects.
+    //
+    // `Bearer <token>` is the one to prefer and exists because of the GENERATED clients
+    // (`ucc-meetings-in-tk`): Basic requires base64 of `":" + token`, and a `.ssc` view has no
+    // base64 — so every generated client would otherwise have to be handed a pre-built header
+    // through its environment, which is both awkward and the shape that leaks secrets into
+    // artifacts. Bearer also says what is actually happening: the username field was always empty
+    // here and the token always travelled in the password.
+    //
+    // `Basic` stays, unchanged, because the CLI, the console and the existing tests use it.
+    let (user, pass) = if let Some(tok) = h
+        .strip_prefix("Bearer ")
+        .or_else(|| h.strip_prefix("bearer "))
+    {
+        (String::new(), tok.trim().to_owned())
+    } else if let Some(b64) = h
         .strip_prefix("Basic ")
         .or_else(|| h.strip_prefix("basic "))
-    else {
+    {
+        let Ok(dec) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
+            return unauth();
+        };
+        match std::str::from_utf8(&dec).ok().and_then(|c| c.split_once(':')) {
+            Some((u, p)) => (u.to_owned(), p.to_owned()),
+            None => return unauth(),
+        }
+    } else {
         return unauth();
-    };
-    let Ok(dec) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
-        return unauth();
-    };
-    let creds = std::str::from_utf8(&dec).ok().and_then(|c| c.split_once(':'));
-    let (user, pass) = match creds {
-        Some((u, p)) => (u.to_owned(), p.to_owned()),
-        None => return unauth(),
     };
     // The password is EITHER an issued token (→ a trusted handle + role) OR the shared secret (→ admin,
     // back-compat). A token's handle is authoritative (ignore the self-asserted X-Rozum-Actor); the
@@ -882,6 +903,84 @@ mod tests {
         assert_eq!(page["messages"][0]["display_name"], "P");
         assert_eq!(page["messages"][0]["date"], date);
         assert!(page["messages"][0]["ts"].is_u64());
+    }
+
+    /// `Authorization: Bearer <token>` is accepted alongside Basic, and resolves to the SAME
+    /// handle and role.
+    ///
+    /// It exists for the generated clients: Basic needs base64 of `":" + token`, and a `.ssc` view
+    /// has no base64, so a generated client would have to be handed a pre-built header through its
+    /// environment — awkward, and the shape that ends with secrets baked into artifacts. The
+    /// assertions below deliberately compare Bearer against Basic rather than against expected
+    /// literals: the property that matters is that the two schemes are the same door, not that
+    /// either one returns some particular string.
+    #[tokio::test]
+    async fn bearer_is_accepted_alongside_basic() {
+        use store::Role;
+        let dir = tempdir().unwrap();
+        seed_room(dir.path(), "alpha", &["one"]);
+        let obs = store::issue_token(dir.path(), "obs", Role::Observer, 0, 0).unwrap();
+        let (addr, _s) = start(dir.path().to_path_buf(), "sekret").await;
+        let c = reqwest::Client::new();
+
+        // Same token, both schemes → same identity.
+        let via_bearer: Value = c
+            .get(format!("http://{addr}/whoami"))
+            .bearer_auth(&obs)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let via_basic: Value = c
+            .get(format!("http://{addr}/whoami"))
+            .basic_auth("x", Some(&obs))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(via_bearer, via_basic);
+        assert_eq!(via_bearer["handle"], "obs");
+
+        // RBAC is unchanged by the scheme: an observer still cannot write.
+        let write = c
+            .post(format!("http://{addr}/rooms/alpha/messages"))
+            .bearer_auth(&obs)
+            .json(&json!({"content": "x"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(write.status(), StatusCode::FORBIDDEN);
+
+        // The shared secret works as a bearer too (admin, same back-compat as Basic).
+        let secret = c
+            .get(format!("http://{addr}/rooms/alpha/days"))
+            .bearer_auth("sekret")
+            .send()
+            .await
+            .unwrap();
+        assert!(secret.status().is_success());
+
+        // A bad bearer is 401, and the challenge offers Bearer FIRST so a machine client is told
+        // about the scheme it can actually build.
+        let bad = c
+            .get(format!("http://{addr}/rooms/alpha/days"))
+            .bearer_auth("bogus")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+        let challenge = bad
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        assert!(challenge.starts_with("Bearer "), "got {challenge:?}");
+        assert!(challenge.contains("Basic"), "got {challenge:?}");
     }
 
     /// A turn with no timestamp renders no clock rather than 1970 — the client prints the string
