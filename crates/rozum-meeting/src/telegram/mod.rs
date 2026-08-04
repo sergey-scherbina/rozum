@@ -30,12 +30,7 @@ pub async fn run_from_env(room: &str, display_name: &str) -> BridgeResult<()> {
         .parse::<i64>()
         .map_err(|_| "TELEGRAM_CHAT_ID must be a numeric chat ID")?;
     // A second bot serving different chats uses its OWN group registry so the two don't clash.
-    // `TELEGRAM_REGISTRY` names it (default `telegram`).
-    let registry_name = std::env::var("TELEGRAM_REGISTRY")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "telegram".to_string());
+    let registry_name = registry_name();
     let mut channels = vec![(chat_id, room.to_string())];
     if let Ok(extra) = std::env::var("TELEGRAM_EXTRA_CHATS") {
         channels.extend(parse_extra_chats(&extra)?);
@@ -329,6 +324,22 @@ struct PendingIncoming {
 /// legitimate state (a bot with no groups), and the transition `None -> Some` is exactly the
 /// "first group connected from outside" case we must notice, so absence is compared like any
 /// other value rather than treated as an error.
+/// Which bot this bridge IS — `TELEGRAM_REGISTRY`, default `telegram`.
+///
+/// It names the bot, not the chat, and that distinction is the whole reason this is a function
+/// rather than a local. Two bridges (`com.rozum.telegram`, `com.rozum.telegram-groups`) run this
+/// same binary against ONE state file, and in a private chat the chat id is the operator's user
+/// id — which both bots can post to. Anything stored per chat and read by both therefore has to
+/// say which bot it belongs to, or the operator gets their answer from the bot they did not
+/// write to (reported live 2026-08-04, BUG-020).
+pub fn registry_name() -> String {
+    std::env::var("TELEGRAM_REGISTRY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "telegram".to_string())
+}
+
 fn registry_mtime(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }

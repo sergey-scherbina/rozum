@@ -5,6 +5,39 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-020 — the other bot answered
+
+- **Status:** FIXED 2026-08-04 (`crates/rozum-meeting/src/telegram/{mod,nadia}.rs`), test
+  `the_bot_that_took_the_command_is_the_bot_that_answers`.
+- **Found by:** the operator, on the phone, in the one place no test looks.
+
+They sent `/spawn` to **Rozum.Chat** (`@Rozum_chat_bot`), got "агент пошёл работать" from it — and
+the RESULT arrived from **Rozum IA** (`@rozumia_bot`), a different bot in a different conversation.
+
+Both bridges are the same binary and both run `nadia::watch_results` against ONE global
+`~/.local/state/rozum/nadia-telegram.json`. `Watch` recorded `{chat, task}` — which chat, never
+which bot — so delivery was a race between two five-second pollers: whichever won removed the entry
+and sent it with its own token. In a private chat the chat id IS the operator's user id, and both
+bots can post to it, so the wrong bot's message looks perfectly delivered.
+
+The comment already on `Watch` reasons one level short of the bug: it explains that an agent id
+alone could deliver one chat's result into another chat, and stops at the chat. `ChatState` had the
+same shape one field over — `dialog` and `project` keyed by chat id alone, so `/nadia on` in one bot
+turned the *other* bot's plain messages into agent tasks for the same person.
+
+Fixed by giving both the owner they were missing: `Watch` carries the registry that took the
+command (`TELEGRAM_REGISTRY`, `telegram` / `telegram-groups`) and a bridge delivers only its own —
+and does not drop anyone else's, because the bridge that took the command is the one that owes the
+answer. Chat state is keyed `<bot>:<chat>`. Entries written before the field belong to `telegram`,
+the only bridge that could have written them; migrated on read so an upgrade does not lose a mode
+the operator had set.
+
+**The general shape, worth remembering: two processes, one state file, and a key that identifies
+the conversation but not the participant.** Same class as the global `rooms.json`. Anything stored
+per chat and read by two bots has to say which bot it belongs to.
+
+---
+
 ## BUG-019 — the run with the most doubt got the least verification
 
 - **Status:** FIXED 2026-08-04 (`crates/nadia/src/main.rs`, `crates/nadia/src/supervisor.rs`),

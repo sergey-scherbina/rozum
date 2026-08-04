@@ -26,12 +26,13 @@ could deliver one chat's result to another chat, and stops there. `ChatState` ha
 bug one field over — `dialog` and `project` are keyed by chat id alone, so `/nadia on` in one bot
 silently turns the other bot's plain text into agent tasks for the same person.
 
-- [ ] **tgown-watch** — the owning registry (`TELEGRAM_REGISTRY`, `telegram` / `telegram-groups`)
+- [x] **tgown-watch — DONE.** — the owning registry (`TELEGRAM_REGISTRY`, `telegram` / `telegram-groups`)
   goes into `Watch`, and a bridge reports only what it started. Legacy entries with no owner
   belong to `telegram`, which is where they can only have come from.
-- [ ] **tgown-chatstate** — same for `ChatState`, with migration of bare chat keys, so a mode
+- [x] **tgown-chatstate — DONE.** — same for `ChatState`, with migration of bare chat keys, so a mode
   chosen in one bot does not change what the other bot does with a plain message.
-- [ ] **tgown-verify** — unit tests for both, then LIVE: rebuild, restart both bridges, and one
+- [x] **tgown-verify — tests DONE** (832 workspace tests green); LIVE re-check pending one
+  `/spawn` per bot from the operator. Was: unit tests for both, then LIVE: rebuild, restart both bridges, and one
   `/spawn` in each bot must be answered by that bot and no other.
 
 ### ▶ The two non-Rust gates, end to end (operator 2026-08-04: "делай эти. Работай")

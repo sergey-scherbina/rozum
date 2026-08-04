@@ -169,6 +169,17 @@ struct ChatState {
 struct Watch {
     chat: i64,
     task: String,
+    /// WHICH BOT started it. Two bridges share this file, and in a private chat the chat id is
+    /// the operator's user id — which both bots can post to. Without this the delivery is a race
+    /// between two pollers, and the operator is answered by the bot they did not write to
+    /// (reported live 2026-08-04, BUG-020). Entries written before this field belong to
+    /// `telegram`: that is the only bridge that could have written them.
+    #[serde(default = "legacy_owner")]
+    bot: String,
+}
+
+fn legacy_owner() -> String {
+    "telegram".to_string()
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -191,10 +202,25 @@ fn state_lock() -> &'static Mutex<()> {
 }
 
 fn load_state() -> State {
-    std::fs::read(state_path())
+    let mut s: State = std::fs::read(state_path())
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    migrate(&mut s);
+    s
+}
+
+/// Chat entries written before the key carried a bot belong to `telegram` — the only bridge that
+/// existed when they were written. Done on read so an upgrade does not silently lose an
+/// operator's `/nadia on`, and so the migration is exercised by every single test that loads.
+fn migrate(s: &mut State) {
+    let bare: Vec<String> =
+        s.chats.keys().filter(|k| !k.contains(':')).cloned().collect();
+    for k in bare {
+        if let Some(v) = s.chats.remove(&k) {
+            s.chats.entry(format!("telegram:{k}")).or_insert(v);
+        }
+    }
 }
 
 fn save_state(s: &State) {
@@ -218,8 +244,15 @@ fn with_state<T>(f: impl FnOnce(&mut State) -> T) -> T {
     out
 }
 
+/// The key a chat's choices are stored under. Per BOT, for the same reason `Watch` carries one:
+/// `/nadia on` in one bot must not turn the other bot's plain messages into agent tasks for the
+/// same person, and `/project` in one must not silently move the other's workspace.
+fn chat_key(chat_id: i64) -> String {
+    format!("{}:{}", super::registry_name(), chat_id)
+}
+
 fn chat_state(chat_id: i64) -> ChatState {
-    load_state().chats.get(&chat_id.to_string()).cloned().unwrap_or_default()
+    load_state().chats.get(&chat_key(chat_id)).cloned().unwrap_or_default()
 }
 
 /// Is this chat routing plain text to nadia? Read by the bridge before it hands a message to
@@ -322,7 +355,11 @@ pub fn handle(cmd: Cmd, caps: Caps, chat_id: i64) -> String {
                     with_state(|s| {
                         s.watch.insert(
                             id.to_string(),
-                            Watch { chat: chat_id, task: task.clone() },
+                            Watch {
+                                chat: chat_id,
+                                task: task.clone(),
+                                bot: super::registry_name(),
+                            },
                         );
                     });
                 }
@@ -366,7 +403,7 @@ fn set_project(chat_id: i64, arg: &str) -> String {
     match resolve_project(arg) {
         Ok((name, path)) => {
             with_state(|s| {
-                s.chats.entry(chat_id.to_string()).or_default().project = Some(path.clone());
+                s.chats.entry(chat_key(chat_id)).or_default().project = Some(path.clone());
             });
             format!(
                 "📁 {name} — агенты этого чата теперь работают в {path}\n\
@@ -387,7 +424,7 @@ fn set_dialog(chat_id: i64, v: Option<bool>) -> String {
                 .to_string()
         };
     };
-    with_state(|s| s.chats.entry(chat_id.to_string()).or_default().dialog = on);
+    with_state(|s| s.chats.entry(chat_key(chat_id)).or_default().dialog = on);
     if on {
         let where_ = chat_state(chat_id)
             .project
@@ -732,6 +769,9 @@ pub const MENU: &[(&str, &str)] = &[
 /// retried on the next tick, and a chat that cannot be posted to is logged, not retried
 /// forever.
 pub async fn watch_results(bot: std::sync::Arc<super::bot::TelegramBot>) {
+    // Which bot this bridge is. Read once: the answer cannot change under a running process, and
+    // the whole point of the field is that the OTHER bridge's watches are not ours to deliver.
+    let me = super::registry_name();
     // Slow enough to be free (one loopback GET), fast enough that a finished agent does not
     // sit unreported while you look at the screen.
     const EVERY: Duration = Duration::from_secs(5);
@@ -739,10 +779,11 @@ pub async fn watch_results(bot: std::sync::Arc<super::bot::TelegramBot>) {
         tokio::time::sleep(EVERY).await;
         // Nothing to watch → do not even touch the socket. An operator who never spawns an
         // agent must not pay for `nadia serve` being probed every five seconds.
-        if load_state().watch.is_empty() {
+        if !load_state().watch.values().any(|w| w.bot == me) {
             continue;
         }
-        let finished = match tokio::task::spawn_blocking(collect_finished).await {
+        let mine = me.clone();
+        let finished = match tokio::task::spawn_blocking(move || collect_finished(&mine)).await {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -756,7 +797,7 @@ pub async fn watch_results(bot: std::sync::Arc<super::bot::TelegramBot>) {
 
 /// One poll: everything watched that has finished, rendered, and dropped from the watch list
 /// so it is reported exactly once. Blocking (curl); called from `spawn_blocking`.
-fn collect_finished() -> Vec<(i64, String)> {
+fn collect_finished(me: &str) -> Vec<(i64, String)> {
     let Ok(body) = curl_json("GET", &format!("{}/agents", base()), None) else {
         return Vec::new();
     };
@@ -767,6 +808,12 @@ fn collect_finished() -> Vec<(i64, String)> {
             let Some(id) = a.get("id").and_then(|v| v.as_u64()) else { continue };
             let key = id.to_string();
             let Some(w) = s.watch.get(&key).cloned() else { continue };
+            // Someone else's watch. Not ours to deliver AND not ours to drop: the bridge that
+            // took the command is the one that owes the answer, and removing the entry here
+            // would silently swallow it.
+            if w.bot != me {
+                continue;
+            }
             match report_for(&w, a) {
                 Report::NotYet => {}
                 Report::Reused => {
@@ -785,7 +832,9 @@ fn collect_finished() -> Vec<(i64, String)> {
             .filter_map(|a| a.get("id").and_then(|v| v.as_u64()))
             .map(|i| i.to_string())
             .collect();
-        s.watch.retain(|k, _| live.contains(k));
+        // Only our own: another bridge's entry is its business, and dropping it would leave its
+        // operator waiting for a message nobody will now send.
+        s.watch.retain(|k, w| w.bot != me || live.contains(k));
     });
     out
 }
@@ -870,6 +919,74 @@ mod tests {
         Caps { chat, read, write, shell }
     }
 
+    /// The bug the operator hit: they wrote to one bot and were answered by the other.
+    ///
+    /// Both bridges are this same binary against ONE state file, and in a private chat the chat
+    /// id is the operator's user id — so the wrong bot CAN post there, and it looks delivered.
+    /// One test, not two, because both halves read the same process-wide environment: as
+    /// separate `#[test]`s they run on different threads and race on `TELEGRAM_REGISTRY`.
+    #[test]
+    fn the_bot_that_took_the_command_is_the_bot_that_answers() {
+        let d = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_STATE_HOME", d.path()) };
+
+        // Two watches for the SAME private chat, one per bot — exactly the live situation.
+        unsafe { std::env::set_var("TELEGRAM_REGISTRY", "telegram") };
+        with_state(|s| {
+            s.watch.insert(
+                "1".into(),
+                Watch { chat: 1711036782, task: "t1".into(), bot: super::super::registry_name() },
+            );
+        });
+        unsafe { std::env::set_var("TELEGRAM_REGISTRY", "telegram-groups") };
+        with_state(|s| {
+            s.watch.insert(
+                "2".into(),
+                Watch { chat: 1711036782, task: "t2".into(), bot: super::super::registry_name() },
+            );
+        });
+
+        let st = load_state();
+        assert_eq!(st.watch["1"].bot, "telegram");
+        assert_eq!(st.watch["2"].bot, "telegram-groups");
+        // Each bridge sees exactly one thing to deliver, and it is its own.
+        for (me, mine) in [("telegram", "1"), ("telegram-groups", "2")] {
+            let owned: Vec<&String> = st
+                .watch
+                .iter()
+                .filter(|(_, w)| w.bot == me)
+                .map(|(k, _)| k)
+                .collect();
+            assert_eq!(owned, vec![mine], "{me} would have answered for the other bot");
+        }
+
+        // A chat's MODE is per bot too: `/nadia on` in one must not turn the other bot's plain
+        // messages into agent tasks for the same person.
+        unsafe { std::env::set_var("TELEGRAM_REGISTRY", "telegram") };
+        set_dialog(1711036782, Some(true));
+        assert!(dialog_on(1711036782));
+        unsafe { std::env::set_var("TELEGRAM_REGISTRY", "telegram-groups") };
+        assert!(!dialog_on(1711036782), "the other bot inherited a mode nobody set in it");
+
+        // An entry written before the field existed can only have come from the first bridge,
+        // so it belongs to it — an upgrade must not lose a running operator's answer.
+        std::fs::write(
+            state_path(),
+            br#"{"chats":{"1711036782":{"project":null,"dialog":true}},
+                 "watch":{"7":{"chat":1711036782,"task":"old"}}}"#,
+        )
+        .unwrap();
+        let legacy = load_state();
+        assert_eq!(legacy.watch["7"].bot, "telegram");
+        unsafe { std::env::set_var("TELEGRAM_REGISTRY", "telegram") };
+        assert!(dialog_on(1711036782), "the migration lost a mode the operator had set");
+        unsafe { std::env::set_var("TELEGRAM_REGISTRY", "telegram-groups") };
+        assert!(!dialog_on(1711036782));
+
+        unsafe { std::env::remove_var("TELEGRAM_REGISTRY") };
+        unsafe { std::env::remove_var("XDG_STATE_HOME") };
+    }
+
     #[test]
     fn only_nadia_commands_are_claimed() {
         assert!(parse("/help").is_none(), "must not swallow the bot's own commands");
@@ -941,7 +1058,7 @@ mod tests {
 
     #[test]
     fn a_finished_agent_is_reported_once_and_never_the_wrong_one() {
-        let w = Watch { chat: 7, task: "fix the test".into() };
+        let w = Watch { chat: 7, task: "fix the test".into(), bot: legacy_owner() };
         let agent = |phase: &str, task: &str| {
             serde_json::json!({
                 "id": 3, "phase": phase, "task": task,

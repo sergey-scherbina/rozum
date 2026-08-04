@@ -1,5 +1,21 @@
 # Changelog
 
+## nadia-tg-bot-ownership — you wrote to one bot and the other answered
+Completed: 2026-08-04
+
+Reported live by the operator while verifying the gate on the phone: `/spawn` went to Rozum.Chat,
+which acknowledged it, and the result came back from Rozum IA. Both bridges are the same binary
+polling ONE state file every five seconds, and `Watch` recorded which chat but not which bot — so
+delivery was a race, and in a private chat (where the chat id is the operator's user id) the losing
+bot could post there just as convincingly.
+
+`Watch` now carries the registry that took the command and a bridge delivers only its own, without
+dropping anyone else's — the bridge that took the command owes the answer. Chat state is keyed
+`<bot>:<chat>` for the same reason one field over: `/nadia on` in one bot had been turning the
+other bot's plain messages into agent tasks for the same person. Legacy entries belong to
+`telegram`, the only bridge that could have written them, migrated on read so an upgrade does not
+lose a mode the operator set. BUG-020.
+
 ## gate-e2e — the first live run of the ported gates found the gate failing correct work
 Completed: 2026-08-04
 
