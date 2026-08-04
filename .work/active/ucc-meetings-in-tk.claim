@@ -1,0 +1,6 @@
+feature/ucc-meetings-in-tk 2026-08-04T10:51:01Z
+agent: claude-opus-5-housekeeping
+heartbeat: 2026-08-04T10:51:01Z
+status: not-started
+done-so-far:
+next: write docs/specs/ucc-meetings-in-tk.md (parity list is attach.rs), then the sprint plan
