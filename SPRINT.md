@@ -2574,6 +2574,23 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   **CAVEAT on the green:** every emission was measured with `bin/ssc-tools` built from `ec70eb062`
   against a scalascript at `bb22c9d4b` (the CLI prints `STALE BUILD` each run). Re-confirm after
   `install.sh --dev` — I did not rebuild a staged toolchain other agents are using mid-flight.
+  **AUTH REVISITED (operator asked whether Basic was really the answer — it was not).** The daemon
+  now accepts `Authorization: Bearer <token>` alongside Basic (`150740c`, additive, both schemes
+  resolve to the same handle/role, 401 advertises Bearer first). Basic meant base64 of `":" + token`
+  and a `.ssc` view has no base64, so the client was being handed a PRE-BUILT header through its
+  environment — the app doing the runtime's job with the least safe tool. Bearer also just names
+  what already happened: the username field was always empty and the token always rode in the
+  password.
+  A **fourth upstream item** came out of the same question — `ui-fetch-credentials`, a design
+  proposal rather than a defect: outbound credentials should be a DECLARED binding each target's
+  runtime resolves, not a header string built in the view. The argument is one observation with
+  teeth — `ssc run --v1` evaluates `env()` in the emitting process and the fetch URL is emitted as a
+  Rust literal, so an app following the documented `{"Authorization": …}` pattern **compiles its
+  token into the binary**. Nothing leaks today only because the terminal target drops headers; a
+  naive `tui-fetch-headers` fix would cement the leak — hence the one request attached to it:
+  resolve the header at FETCH time, not emit time. `clients/control/meetings.ssc` carries the
+  warning meanwhile. `std.auth` does not cover this and should not: it is the vocabulary of BEING an
+  auth server, with no notion of PRESENTING a credential outbound.
   NEXT: nothing in rozum is unblocked until upstream moves. Either wait on
   `tui-fetch-headers` → `tui-fetch-url-signal` → `tui-fetch-post`, or take one of them in
   scalascript directly (their POLICY.md claim protocol, `scripts/new-worktree`).
