@@ -2748,7 +2748,26 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   through an action list is never seeded and starts empty, and nothing but a running gate shows it.
   Both are fixed upstream; the lesson is that **a signal no View node renders is a signal nobody
   seeded**.
-  **What rozum needs before Stage C part two can start:** their branch merged, and `bin/ssc-tools` rebuilt
+  **STAGE C PART TWO DONE (`837eca1`) — the picker works.** `GET /rooms` ships an additive
+  `entries` array: name, `last`, `mentions`, and a **ready-made absolute** transcript url built from
+  the request's own origin (a `127.0.0.1` url would be useless behind the Tailscale proxy). The
+  client binds it as a selectable table whose chosen row writes that url into the signal the
+  transcript follows. Rendered proof is in the smoke.
+  **"Unread" is `mentions`, and that is deliberate.** A raw unread count needs a per-viewer read
+  marker for every message and none exists; a per-handle cursor over messages that ADDRESS you does
+  (`inbox` uses it). So the column is `@you` and means "addressed to you, unseen" — the number the
+  server can actually stand behind, and the more useful one in a busy room.
+  **A SIXTH upstream defect fell out of building it and is fixed** (`tui-remote-table-height`,
+  scalascript `e4fd5922e`): a vertical column gave a remote table `Length(1)`, so a fetched list
+  rendered its header and no rows while the fetch worked and the data sat in the store. Carry the
+  lesson, not the fix: **an unknowable quantity must not be answered with a fixed number.**
+  **`attach.rs` STILL CANNOT GO, and the spec now carries a measured parity ledger saying why.**
+  Five of eight behaviours are there. The one that decides it: `IntervalTick` is in the core model
+  and the tui emitter has ZERO references to it, so the generated client refreshes on a keypress
+  while `attach.rs` holds a long-poll and shows a message the moment it lands. A meeting client that
+  only updates when you press a key is not a replacement. Ranked next: live arrival → `PgUp` day
+  paging → slash commands → the rich transcript (React-only; may never come).
+  **What rozum needs before `attach.rs` can be retired:** their branch merged, and `bin/ssc-tools` rebuilt
   (`install.sh --dev`) — it is still built from `ec70eb062`, so we cannot consume any of this yet.
   Then: flip our fixture to `--require-auth` (already supported) and the existing Stage A smoke
   becomes the authenticated proof; then switcher + composer + unread; then delete `attach.rs`.
