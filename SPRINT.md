@@ -2700,6 +2700,20 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   generated client and rozum's own REST in one process. Every piece is proven separately; joining
   them needs the heavy binary, and the live daemon runs a deployed build without Bearer. Do not
   disturb the operator's services for it.
+  **THE FIFTH CAPABILITY LANDED TOO — `scalascript@08bfb5045`, implemented by us under their
+  protocol.** A terminal `DataTable` with a `RowActionDef.RowLink` is now one focusable with a row
+  cursor: arrows move the cursor while the table is focused, Tab still moves focus, and Enter writes
+  the chosen row's field into the bound signal. Their gate proves the REQUIREMENT rather than the
+  mechanism — after activating, the dependent fetch reads the other endpoint. smoke-ci 60/60,
+  frontendTui/test 52/52.
+  **So nothing upstream blocks the switcher any more**, and the shape is settled: `/rooms` should
+  ship a ready-made per-room URL, exactly as it already ships `badge` and `time`, so the client
+  never composes a string (it cannot — there is no `computedSignal` on that target). The picker then
+  writes that URL into the transcript's URL signal and the transcript follows.
+  Worth carrying: the row-cursor work hit the SAME hole the composer did — a signal reachable only
+  through an action list is never seeded and starts empty, and nothing but a running gate shows it.
+  Both are fixed upstream; the lesson is that **a signal no View node renders is a signal nobody
+  seeded**.
   **What rozum needs before Stage C part two can start:** their branch merged, and `bin/ssc-tools` rebuilt
   (`install.sh --dev`) — it is still built from `ec70eb062`, so we cannot consume any of this yet.
   Then: flip our fixture to `--require-auth` (already supported) and the existing Stage A smoke
