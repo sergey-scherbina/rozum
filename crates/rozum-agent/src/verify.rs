@@ -72,11 +72,36 @@ fn shquote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Strip one symmetric pair of delimiting quotes.
+///
+/// A task writes `cargo run -- "3 4 + 2 *"`, and the model returns the argument the way the task
+/// spelled it — quotes and all. The check then demands a program that accepts a quoted argument,
+/// which nobody asked for and no correct implementation provides; measured 2026-08-04, it cost a
+/// run both of its repair rounds. The quotes are how the task DELIMITED the value, not part of it.
+///
+/// Exactly one pair, and only when it is symmetric: `"a"` → `a`, but `"a` stays `"a` (unbalanced,
+/// so probably real), and `he said "hi"` stays whole (the quotes are inside, not around).
+/// `""` → `` — an empty expectation is a legitimate thing to check for.
+fn unquote(s: &str) -> &str {
+    let t = s.trim();
+    for q in ['"', '\''] {
+        if t.len() >= 2 && t.starts_with(q) && t.ends_with(q) {
+            let inner = &t[1..t.len() - 1];
+            // Only if the pair really wraps: an inner copy of the same quote means the string is
+            // something like `"a" + "b"`, where stripping the ends would corrupt it.
+            if !inner.contains(q) {
+                return inner;
+            }
+        }
+    }
+    t
+}
+
 /// A `cargo run` check that SAYS what it saw. A bare `[ "$(cargo run …)" = … ]` fails silently,
 /// which leaves the repair round with an empty "real error" on exactly the mismatches that
 /// matter most — the ones where the program runs and prints the wrong thing.
 pub fn cargo_run_fragment(arg: &str, expect: &str) -> String {
-    let (arg_q, exp_q) = (shquote(arg), shquote(expect));
+    let (arg_q, exp_q) = (shquote(unquote(arg)), shquote(unquote(expect)));
     format!(
         "{{ out=$(cargo run -q -- {arg_q}) && [ \"$out\" = {exp_q} ] || \
          {{ printf 'cargo run -- %s printed <%s>; expected <%s>\\n' {arg_q} \"$out\" {exp_q} >&2; exit 1; }}; }}"
@@ -123,6 +148,8 @@ pub async fn derive_check(backend: &dyn ChatBackend, task: &str) -> Option<Strin
          - \"run\": one entry per concrete example the task states as `cargo run -- X` printing `Y`.\n\
            `arg` is JUST the argument value X — e.g. for \"cargo run -- hello prints olleh\", arg is \
            \"hello\" (NOT \"cargo run -- hello\"); `expect` is JUST Y, e.g. \"olleh\". Omit if no example.\n\
+         - Quotes that DELIMIT a value in the task are not part of it: for `cargo run -- \"3 4 + 2 *\"` \
+         printing 14, arg is `3 4 + 2 *` and expect is `14` — no surrounding quotes in either.\n\
          - cargo_test=true ONLY if the task explicitly requires a unit test to pass.\n\
          - checkable=false if the task has no machine-checkable build/run/test criterion. In particular, \
          if the task is NOT about a Rust program — it only asks for a chat reply, an explanation, or \
@@ -229,6 +256,36 @@ pub fn parse_verdict(text: &str) -> Verdict {
     }
 }
 
+/// Where the cargo project actually is, when it is not where the check runs.
+///
+/// `cargo new <name>` creates a SUBDIRECTORY, and a check that runs `cargo` at the workspace root
+/// then cannot pass however good the code is. Measured 2026-08-04: both repair rounds of a run
+/// went on rediscovering that instead of fixing the task.
+///
+/// Returns the name of the single immediate child holding a `Cargo.toml`, when the root holds
+/// none. Ambiguity (several children with manifests) returns `None` — a hint that names the wrong
+/// directory is worse than no hint.
+///
+/// This is a DIAGNOSTIC, deliberately not a relocation: the check is not moved into the
+/// subdirectory, because that would turn work delivered somewhere nobody asked for into a passing
+/// run — the exact failure the gate exists to remove (`docs/specs/verify-gate.md` §B).
+pub fn misplaced_project(cwd: &Path) -> Option<String> {
+    if cwd.join("Cargo.toml").is_file() {
+        return None;
+    }
+    let mut found: Option<String> = None;
+    for entry in std::fs::read_dir(cwd).ok()?.flatten() {
+        if !entry.path().join("Cargo.toml").is_file() {
+            continue;
+        }
+        if found.is_some() {
+            return None; // two candidates: say nothing rather than the wrong thing
+        }
+        found = Some(entry.file_name().to_string_lossy().into_owned());
+    }
+    found
+}
+
 /// The message a failed check sends back into the conversation. It carries the command and what
 /// it actually printed, because "it failed" is not something a model can act on and the output
 /// is — this is the whole difference between a repair round and another guess.
@@ -239,6 +296,22 @@ pub fn repair_prompt(check: &str, output: &str) -> String {
          Fix the cause and make the check pass. Do not explain the failure instead of fixing it, \
          and do not report success until you have run the check yourself and read what it printed."
     )
+}
+
+/// [`repair_prompt`] plus, when it applies, the one diagnosis a model cannot reach by reading the
+/// error: the check runs at the workspace root and the project is one level down.
+pub fn repair_prompt_in(check: &str, output: &str, cwd: &Path) -> String {
+    let base = repair_prompt(check, output);
+    match misplaced_project(cwd) {
+        Some(dir) => format!(
+            "{base}\n\n\
+             NOTE: the check runs in the workspace ROOT, and there is no Cargo.toml there — the \
+             project is in `{dir}/`. `cargo new {dir}` created a subdirectory; the project has to \
+             be in the root itself. Move it up (`mv {dir}/* {dir}/.* . 2>/dev/null; rmdir {dir}`) \
+             or recreate it with `cargo init` in the root, then run the check again."
+        ),
+        None => base,
+    }
 }
 
 #[cfg(test)]
@@ -252,9 +325,51 @@ mod tests {
         assert!(frag.contains("'3 4 + 2 *'") && frag.contains("'14'"), "{frag}");
         // And on a mismatch it PRINTS both, which is what the repair round reads.
         assert!(frag.contains("printed") && frag.contains("expected"), "{frag}");
-        // A quote in the model's string stays inert.
-        let nasty = cargo_run_fragment("'; rm -rf /; echo '", "x");
-        assert!(!nasty.contains("; rm -rf /;") || nasty.contains("'\\''"), "{nasty}");
+    }
+
+    #[tokio::test]
+    async fn a_model_supplied_string_cannot_execute_anything() {
+        // Proven by RUNNING it, not by looking at it. The previous version of this test asserted
+        // on the shape of the escaping — which meant it started failing the moment the quoting
+        // changed, while the fragment was still perfectly inert. A test that watches for the
+        // effect survives the implementation changing under it.
+        let d = tempfile::tempdir().unwrap();
+        let sentinel = d.path().join("pwned");
+        for payload in [
+            "'; touch pwned; echo '",
+            "\"; touch pwned; echo \"",
+            "$(touch pwned)",
+            "`touch pwned`",
+            "x'; touch pwned; #",
+        ] {
+            let frag = cargo_run_fragment(payload, "expected");
+            // The fragment runs `cargo run` in a directory with no project: it fails, which is
+            // fine — what matters is that nothing else ran.
+            let _ = run_check(&frag, d.path()).await;
+            assert!(!sentinel.exists(), "payload executed: {payload}\n{frag}");
+        }
+    }
+
+    #[test]
+    fn a_delimiting_quote_is_not_part_of_the_argument() {
+        // The measured case: the task wrote `cargo run -- "3 4 + 2 *"`, the model returned the
+        // argument the way the task spelled it, and the check then demanded a program that
+        // accepts a quoted argument. One symmetric pair is delimiting and comes off.
+        let frag = cargo_run_fragment("\"3 4 + 2 *\"", "\"14\"");
+        assert!(frag.contains("'3 4 + 2 *'"), "the quotes were the task's, not the value's: {frag}");
+        assert!(frag.contains("'14'"), "{frag}");
+        assert!(!frag.contains("\\\""), "no doubled quoting should survive: {frag}");
+
+        // What must NOT be stripped, because there the quotes are data.
+        assert_eq!(unquote("hello"), "hello");
+        assert_eq!(unquote("\"unbalanced"), "\"unbalanced");
+        assert_eq!(unquote("he said \"hi\""), "he said \"hi\"");
+        assert_eq!(unquote("\"a\" + \"b\""), "\"a\" + \"b\"");
+        // Exactly one pair, not all of them: a doubly-quoted value keeps its inner pair.
+        assert_eq!(unquote("'\"x\"'"), "\"x\"");
+        // Both quote characters, and an empty expectation is a real thing to check for.
+        assert_eq!(unquote("'y'"), "y");
+        assert_eq!(unquote("\"\""), "");
     }
 
     #[test]
@@ -303,6 +418,33 @@ mod tests {
         assert!(out.contains("hello"), "the repair round needs the real output: {out}");
         let (ok, _) = run_check("true", d.path()).await;
         assert!(ok);
+    }
+
+    #[test]
+    fn a_project_one_level_down_is_named_rather_than_accommodated() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        // Nothing there yet: no diagnosis to offer.
+        assert_eq!(misplaced_project(root), None);
+
+        // `cargo new rpn` — the measured case.
+        std::fs::create_dir(root.join("rpn")).unwrap();
+        std::fs::write(root.join("rpn/Cargo.toml"), "[package]").unwrap();
+        assert_eq!(misplaced_project(root).as_deref(), Some("rpn"));
+        let p = repair_prompt_in("cargo build -q", "error: could not find Cargo.toml", root);
+        assert!(p.contains("`rpn/`"), "the hint must NAME the directory: {p}");
+        assert!(p.contains("cargo init"), "and say how to fix it: {p}");
+
+        // Two candidates: a hint that names the wrong one is worse than none.
+        std::fs::create_dir(root.join("other")).unwrap();
+        std::fs::write(root.join("other/Cargo.toml"), "[package]").unwrap();
+        assert_eq!(misplaced_project(root), None);
+
+        // A project IN the root is not misplaced, whatever else is lying around.
+        std::fs::write(root.join("Cargo.toml"), "[package]").unwrap();
+        assert_eq!(misplaced_project(root), None);
+        let p = repair_prompt_in("cargo build -q", "error[E0308]", root);
+        assert!(!p.contains("NOTE:"), "no hint when the project is where it belongs: {p}");
     }
 
     #[test]

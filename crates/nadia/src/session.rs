@@ -35,6 +35,9 @@ pub fn system_prompt(root: &Path) -> String {
          Make the smallest change that satisfies the task; do not restructure code that \
          already works.\n\
          \n\
+         Create a project IN that directory, not under it: `cargo init` in the workspace root, \
+         never `cargo new <name>`, which makes a subdirectory the acceptance check cannot see.\n\
+         \n\
          Every path you pass to a tool is RELATIVE to that directory: write `src/main.rs`, \
          never `{root}/src/main.rs` and never `{no_slash}/src/main.rs`. Repeating the \
          workspace path builds a copy of it INSIDE itself and the file lands where nobody \

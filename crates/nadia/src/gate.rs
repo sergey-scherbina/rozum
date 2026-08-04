@@ -136,7 +136,10 @@ pub async fn check(
         detail: if passed { String::new() } else { output.clone() },
         rounds: 0,
     };
-    let repair = (!passed).then(|| verify::repair_prompt(cmd, &output));
+    // `_in` rather than the bare prompt: when the check failed because the project is one level
+    // down, that is the one diagnosis the model cannot reach by reading the error, and without it
+    // the repair rounds go on rediscovering it (measured — both rounds of one run).
+    let repair = (!passed).then(|| verify::repair_prompt_in(cmd, &output, workspace));
     (report, repair)
 }
 
