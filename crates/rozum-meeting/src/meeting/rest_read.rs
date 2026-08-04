@@ -387,11 +387,33 @@ async fn roster() -> Response {
     Json(json!({ "agents": super::client::roster() })).into_response()
 }
 
-async fn days(State(state): State<RestState>, AxumPath(name): AxumPath<String>) -> Response {
+async fn days(
+    State(state): State<RestState>,
+    AxumPath(name): AxumPath<String>,
+    req_headers: header::HeaderMap,
+) -> Response {
     let Some(root) = room_root(&state.registry, &name) else {
         return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
     };
-    Json(json!({ "room": name, "days": day_listing(&root) })).into_response()
+    // Each day carries its own ready-made transcript url, for the same reason `/rooms` does: the
+    // generated client cannot build one. That turns day-paging into the SAME interaction as room
+    // switching — pick a row, the transcript follows — instead of a bespoke PgUp that would need
+    // date arithmetic the terminal target cannot express. Newest first: a reader opening the list
+    // wants today, not the first day the room ever had.
+    let base = request_origin(&req_headers);
+    let mut days = day_listing(&root);
+    days.reverse();
+    let entries: Vec<Value> = days
+        .iter()
+        .map(|d| {
+            json!({
+                "date": d.date,
+                "count": d.count,
+                "url": format!("{base}/rooms/{name}/messages/{}", d.date),
+            })
+        })
+        .collect();
+    Json(json!({ "room": name, "days": days, "entries": entries })).into_response()
 }
 
 async fn messages(

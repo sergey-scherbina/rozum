@@ -112,9 +112,23 @@ val transcriptTable = remoteTable(
 val draft = signal("meetingsDraft", "")
 val send = fetchActionClear("POST", apiBase + "/rooms/" + room + "/messages", draft, refresh, headers)
 
+// Day paging is the SAME interaction as room switching — pick a row, the transcript follows —
+// rather than a bespoke PgUp, which would need date arithmetic the terminal target cannot do.
+// Newest first, because a reader opening the list wants today.
+val dayList = fetchUrlSignal("meetingsDays", apiBase + "/rooms/" + room + "/days", refresh, headers)
+
+val dayTable = remoteTable(
+  dayList,
+  [fieldColumn("Day", "date"), fieldColumn("#", "count")],
+  "entries",
+  [rowLinkAction("open", here, "url")],
+  "date"
+)
+
 val sidebar = vstack(gap = 1)(
   heading(1, "rozum"),
   roomTable,
+  dayTable,
   textField(draft, "message"),
   actionButton(send, "send"),
   actionButton(incSignal(refresh), "refresh")

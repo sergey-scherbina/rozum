@@ -284,20 +284,27 @@ count is genuinely unknown at emit time, and `1` was a guess dressed as a measur
 | 1 | header naming the room | ✅ |
 | 2 | transcript, newest last | ✅ (table) |
 | 2a | `── date ──` dividers, bold author, coloured badge | ❌ **React only** — a fetch can bind to a table or to text on this target, nothing else. The badge survives as a column. |
-| 3 | `PgUp` → previous day | ❌ nothing writes the day into the url signal yet |
+| 3 | `PgUp` → previous day | ✅ **as a day picker, not a PgUp** — `/rooms/{n}/days` ships a ready-made url per day (newest first) and the client binds it as a second selectable table. Same interaction as room switching; a literal PgUp would need date arithmetic the target cannot express. |
 | 4 | live arrival without a keypress | ✅ **fixed upstream by us** (`tui-interval-tick`, scalascript `a81ef559f`). One tick drives everything that re-reads: a 3 s clock, the refresh button, and a successful post. `attach.rs` long-polls, so it is still the more responsive of the two — but the generated client no longer needs a keypress. |
 | 5 | composer, `Enter` submits | ✅ |
-| 6 | slash commands `/quit` `/rooms` `/new` | ❌ |
+| 6 | slash commands `/quit` `/rooms` `/new` | ⚠️ two of three: `/quit` is `Esc`, `/rooms` is the picker. **`/new` — creating an ad-hoc room — is the ONE functional gap left**, and there is no CLI equivalent (`rozum rooms` only prunes), so retiring `attach.rs` today would remove the only way to make one interactively. |
 | 7 | room switcher | ✅ **now** — picker with a ready-made url + a `@you` column |
 | 8 | quit | ✅ (`Esc`) |
 
-**Verdict (updated after #4 landed): two gaps left, and BOTH are ours to close — no upstream work.**
-#3 day paging and #6 room creation both reduce to the trick this task has used four times now: the
-client cannot compute a value, so **the server ships the finished one**. The messages envelope can
-carry `prev_url`/`next_url` exactly as `/rooms` carries a per-room url; a "new room" button is a
-POST, and POST works. Neither needs anything from scalascript.
-#2a (dividers, bold author, coloured badge) stays React-only and is the one that may never come —
-and probably should not gate retirement, since the badge already survives as a column.
+**Verdict (2026-08-04, after day paging landed): ONE functional gap left — room creation.**
+Everything else a person does in `attach.rs` now works in the generated client, and nothing further
+is needed from scalascript. `/new` is the exception and it is not a papercut: `rozum rooms` only
+prunes, so `attach.rs` is currently the only way to create an ad-hoc room interactively. Deleting it
+first would remove a capability.
+
+**How to close it** (deliberately NOT done in the same pass as everything above — it is a different
+shape and deserves its own): room creation is the MCP tool `rooms.new`, which `MeetingClient::new_room`
+calls. Every other write here proxies through `console_call(room, user, tool, args)`, and `rooms.new`
+has no room yet — so it needs a route that proxies a ROOMLESS tool, plus a decision about which role
+may create rooms. Then the client is a text field plus a button, both of which already work.
+
+#2a (dividers, bold author, coloured badge) stays React-only, and should NOT gate retirement: the
+badge survives as a column, and the terminal target cannot bind a fetch to per-row rendering at all.
 
 ### What is proven, and what is not
 

@@ -82,6 +82,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == f"/rooms/{ROOM}/days":
+            if self.require_auth and not self.headers.get("Authorization"):
+                self.send_response(401); self.send_header("Content-Length", "0"); self.end_headers()
+                return
+            origin = "http://" + self.headers.get("Host", "127.0.0.1")
+            body = json.dumps({"room": ROOM, "days": [], "entries": [
+                {"date": DATE, "count": 2, "url": f"{origin}/rooms/{ROOM}/messages/{DATE}"},
+                {"date": "2026-08-03", "count": 7, "url": f"{origin}/rooms/{ROOM}/messages/2026-08-03"},
+            ]}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if parsed.path == "/rooms":
             if self.require_auth and not self.headers.get("Authorization"):
                 self.send_response(401); self.send_header("Content-Length", "0"); self.end_headers()
