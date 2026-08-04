@@ -125,12 +125,20 @@ val dayTable = remoteTable(
   "date"
 )
 
+// The last thing attach.rs could do that this could not. The response carries the new room's url,
+// but a generated client has nowhere to read a response — it does not need to: creating bumps the
+// shared tick, the room list re-reads, and the new room appears in the picker to be chosen.
+val newRoom = signal("meetingsNewRoom", "")
+val create = fetchActionClear("POST", apiBase + "/rooms", newRoom, refresh, headers)
+
 val sidebar = vstack(gap = 1)(
   heading(1, "rozum"),
   roomTable,
   dayTable,
   textField(draft, "message"),
   actionButton(send, "send"),
+  textField(newRoom, "new room topic"),
+  actionButton(create, "create room"),
   actionButton(incSignal(refresh), "refresh")
 )
 

@@ -168,5 +168,16 @@ grep -Fq '"meetingsRefresh".to_string()' "$RUST_SOURCE" || {
   echo "FAIL: the refresh tick is not the one the clock advances" >&2
   exit 1
 }
-echo "PASS: authenticated read + composer + room picker + a clock that refreshes unattended"
+# Room creation — the last thing attach.rs could do that this could not. It posts the topic to
+# /rooms; the response is ignored on purpose (a generated client has nowhere to read one), and the
+# shared tick makes the new room appear in the picker.
+grep -Fq '"meetingsNewRoom"' "$RUST_SOURCE" || {
+  echo "FAIL: the new-room field was not seeded into the emitted store" >&2
+  exit 1
+}
+grep -Fq "$BASE/rooms\", \"meetingsNewRoom\"" "$RUST_SOURCE" || {
+  echo "FAIL: the create button does not post the topic to /rooms" >&2
+  exit 1
+}
+echo "PASS: authenticated read + composer + room+day pickers + clock + room creation"
 echo "PASS: ucc-meetings-in-tk Stage A dual-target smoke"

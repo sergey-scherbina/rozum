@@ -127,6 +127,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if self.require_auth and not self.headers.get("Authorization"):
+            self.send_response(401); self.send_header("Content-Length", "0"); self.end_headers()
+            return
+        # Both writes the client can make: post a message, and create a room.
+        if parsed.path not in (f"/rooms/{ROOM}/messages", "/rooms"):
+            self.send_error(404)
+            return
+        sent = self.rfile.read(int(self.headers.get("Content-Length", "0") or 0)).decode("utf-8")
+        body = json.dumps({"ok": True, "echo": sent}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *_args):
         pass
 

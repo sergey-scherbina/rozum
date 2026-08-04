@@ -287,24 +287,32 @@ count is genuinely unknown at emit time, and `1` was a guess dressed as a measur
 | 3 | `PgUp` → previous day | ✅ **as a day picker, not a PgUp** — `/rooms/{n}/days` ships a ready-made url per day (newest first) and the client binds it as a second selectable table. Same interaction as room switching; a literal PgUp would need date arithmetic the target cannot express. |
 | 4 | live arrival without a keypress | ✅ **fixed upstream by us** (`tui-interval-tick`, scalascript `a81ef559f`). One tick drives everything that re-reads: a 3 s clock, the refresh button, and a successful post. `attach.rs` long-polls, so it is still the more responsive of the two — but the generated client no longer needs a keypress. |
 | 5 | composer, `Enter` submits | ✅ |
-| 6 | slash commands `/quit` `/rooms` `/new` | ⚠️ two of three: `/quit` is `Esc`, `/rooms` is the picker. **`/new` — creating an ad-hoc room — is the ONE functional gap left**, and there is no CLI equivalent (`rozum rooms` only prunes), so retiring `attach.rs` today would remove the only way to make one interactively. |
+| 6 | slash commands `/quit` `/rooms` `/new` | ✅ all three, as controls rather than commands: `Esc`, the room picker, and a topic field + "create room" posting to `POST /rooms`. |
 | 7 | room switcher | ✅ **now** — picker with a ready-made url + a `@you` column |
 | 8 | quit | ✅ (`Esc`) |
 
-**Verdict (2026-08-04, after day paging landed): ONE functional gap left — room creation.**
-Everything else a person does in `attach.rs` now works in the generated client, and nothing further
-is needed from scalascript. `/new` is the exception and it is not a papercut: `rozum rooms` only
-prunes, so `attach.rs` is currently the only way to create an ad-hoc room interactively. Deleting it
-first would remove a capability.
+**Verdict (2026-08-04, final for capability): every behaviour a person uses in `attach.rs` now
+works in the generated client.** `POST /rooms` creates an ad-hoc room through
+`MeetingClient::new_room` — the same call the TUI's own picker makes, so creation still goes through
+the daemon's single-writer and identity machinery rather than around it. It is the one write that
+does not use `console_call`, because that joins a room first and there is no room yet. RBAC needed
+no special case: it is a POST, so `required_role` already demands `Responder`.
 
-**How to close it** (deliberately NOT done in the same pass as everything above — it is a different
-shape and deserves its own): room creation is the MCP tool `rooms.new`, which `MeetingClient::new_room`
-calls. Every other write here proxies through `console_call(room, user, tool, args)`, and `rooms.new`
-has no room yet — so it needs a route that proxies a ROOMLESS tool, plus a decision about which role
-may create rooms. Then the client is a text field plus a button, both of which already work.
+The only behaviour that stays behind is **#2a**, the rich transcript, and it should not gate
+retirement: the badge survives as a column, and the terminal target cannot bind a fetch to per-row
+rendering at all.
 
-#2a (dividers, bold author, coloured badge) stays React-only, and should NOT gate retirement: the
-badge survives as a column, and the terminal target cannot bind a fetch to per-row rendering at all.
+**What retirement now needs is PACKAGING, not capability.** Today the generated client is emitted
+into a temp directory by a smoke script. Deleting `attach.rs` means `rozum` / `rozum meetings attach`
+must dispatch to a binary that is actually built and installed — emit + `cargo build` + install, in
+the deploy path, with a decision about whether the generated crate is vendored or emitted at build
+time. That is a build-system question and deliberately not answered here.
+
+⚠️ **A lesson paid for during this work, worth more than the feature:** the first version of the
+create-room test asserted `502` for an authorised `POST /rooms`, assuming no daemon was listening.
+The operator's daemon WAS, and the test created two live ad-hoc rooms in it (`neat-kite`,
+`rapid-reed`, both removed). **A test that reaches a socket is not a unit test — it is a client of
+whatever happens to be listening.** The success path is covered against an isolated fixture instead.
 
 ### What is proven, and what is not
 

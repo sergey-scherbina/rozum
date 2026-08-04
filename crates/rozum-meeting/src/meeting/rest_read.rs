@@ -130,7 +130,7 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
     let state_dir = registry.state_dir().clone();
     Router::new()
         .route("/", get(console))
-        .route("/rooms", get(rooms))
+        .route("/rooms", get(rooms).post(create_room))
         .route("/rooms/{name}/days", get(days))
         .route("/rooms/{name}/messages/{date}", get(messages))
         .route("/rooms/{name}/inbox/{handle}", get(inbox))
@@ -230,6 +230,62 @@ fn request_origin(h: &header::HeaderMap) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("http");
     format!("{scheme}://{host}")
+}
+
+/// `POST /rooms` — create an ad-hoc room and return it, with a ready-made transcript url.
+///
+/// The last thing `rozum meetings attach` could do that the generated client could not. Rooms are
+/// otherwise only born by joining a project (automatic) — `rozum rooms` prunes and nothing else —
+/// so without this, retiring the hand-written TUI would REMOVE the only interactive way to make one.
+///
+/// Unlike every other write here it does not go through `console_call`: that joins a room first, and
+/// there is no room yet. `MeetingClient::new_room` is the same call the TUI's picker makes, so
+/// creation still goes through the daemon's single-writer and identity machinery rather than around
+/// it. RBAC needs no special case — it is a POST, so `required_role` already demands `Responder`.
+///
+/// The body is the topic, plain text or `{"topic": "..."}`, for the same reason `submit` takes both:
+/// a generated client cannot compose JSON.
+/// The topic of a `POST /rooms` body: an object's `topic`, a bare JSON string, or the raw text.
+///
+/// Split out from the handler so it is testable without a daemon — the handler proxies through
+/// `MeetingClient`, which needs one, while the interesting behaviour is entirely here. Blank is
+/// `None` rather than `Some("")`: an unnamed room is a real thing, an empty-string-named one is not.
+fn create_topic(body: &str) -> Option<String> {
+    match serde_json::from_str::<Value>(body) {
+        Ok(Value::Object(o)) => o.get("topic").and_then(Value::as_str).map(str::to_owned),
+        Ok(Value::String(t)) => Some(t),
+        _ => Some(body.to_owned()),
+    }
+    .map(|t| t.trim().to_owned())
+    .filter(|t| !t.is_empty())
+}
+
+async fn create_room(
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    req_headers: header::HeaderMap,
+    body: String,
+) -> Response {
+    use super::room_path::meeting_sock;
+    use super::tui_client::MeetingClient;
+
+    let topic = create_topic(&body);
+
+    let mut client = match MeetingClient::connect(&meeting_sock(), &user).await {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("rooms.new: {e}\n")).into_response(),
+    };
+    match client.new_room(topic.as_deref()).await {
+        Ok(name) => {
+            let base = request_origin(&req_headers);
+            let date = store::date_of_ts(now_secs());
+            Json(json!({
+                "room": name,
+                "url": format!("{base}/rooms/{name}/messages/{date}"),
+            }))
+            .into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("rooms.new: {e}\n")).into_response(),
+    }
 }
 
 /// `GET /rooms/{name}/threads` — the incident/topic threads + a metrics summary,
@@ -1155,6 +1211,46 @@ mod tests {
         // Mentions are per-handle and unseen-only: `picker` is addressed once in alpha, never in beta.
         assert_eq!(alpha["mentions"], 1);
         assert_eq!(beta["mentions"], 0);
+    }
+
+    /// `POST /rooms` is gated like every other write.
+    ///
+    /// ⚠️ It deliberately does NOT exercise the success path, and the reason is worth keeping: the
+    /// handler proxies to `meeting_sock()`, which resolves to whatever daemon is running on the
+    /// machine. An earlier version of this test asserted `502 Bad Gateway` for an authorised POST
+    /// on the assumption that no daemon would be there — the operator's daemon WAS, so the test
+    /// created two live ad-hoc rooms in it before anyone noticed. A test that reaches a socket is
+    /// not a unit test; it is a client of whatever happens to be listening. The creation path is
+    /// covered by the dual-target smoke against an isolated fixture instead.
+    #[tokio::test]
+    async fn create_room_is_gated_like_every_other_write() {
+        let dir = tempdir().unwrap();
+        let obs = store::issue_token(dir.path(), "watcher", store::Role::Observer, 0, 0).unwrap();
+        let (addr, _s) = start(dir.path().to_path_buf(), "sekret").await;
+        let c = reqwest::Client::new();
+        let url = format!("http://{addr}/rooms");
+
+        assert_eq!(
+            c.post(&url).body("topic".to_string()).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // An observer may READ the room list and may not create — the same rule as every write.
+        assert_eq!(
+            c.post(&url).bearer_auth(&obs).body("topic".to_string()).send().await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(c.get(&url).bearer_auth(&obs).send().await.unwrap().status().is_success());
+    }
+
+    #[test]
+    fn create_topic_takes_text_or_the_structured_form() {
+        assert_eq!(create_topic("planning the release").as_deref(), Some("planning the release"));
+        assert_eq!(create_topic("\"quoted topic\"").as_deref(), Some("quoted topic"));
+        assert_eq!(create_topic("{\"topic\":\"structured\"}").as_deref(), Some("structured"));
+        // An unnamed room is a real thing; a room named "" is not.
+        assert_eq!(create_topic(""), None);
+        assert_eq!(create_topic("   "), None);
+        assert_eq!(create_topic("{\"topic\":\"  \"}"), None);
     }
 
     /// A turn with no timestamp renders no clock rather than 1970 — the client prints the string
