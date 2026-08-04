@@ -1,6 +1,0 @@
-feature/gate-e2e 2026-08-04T15:12:20Z
-agent: claude-code
-heartbeat: 2026-08-04T15:19:00Z
-status: in-progress
-done-so-far: both ports run e2e; found+fixed a contract bug (arity), fix green in all three
-next: rebuild the ssc toolchain, re-run ge-ssc, record
