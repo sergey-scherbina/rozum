@@ -1,6 +1,6 @@
-feature/verify-gate-ports 2026-08-04T11:22:12Z
+feature/verify-gate-ports 2026-08-04T11:0*
 agent: claude-opus-5
-heartbeat: 2026-08-04T11:22:12Z
+heartbeat: 2026-08-04T11:30:43Z
 status: in-progress
-done-so-far: worktree in the nadia repo (cross-repo task)
-next: vgp-scala3 — sdk/Verify.scala against SPEC 3.1
+done-so-far: scala3 (43f064e) + ssc (2649bbd) + spec/docs/changelog in the nadia repo; 9 twin tests scala, 15 contract rules ssc
+next: vgp-parity — two live runs in flight, then merge both repos and close
