@@ -9,6 +9,34 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
+### ▶ An agent's record must outlive the process that ran it (operator 2026-08-05: "Да, делай" → "Второе целиком")
+
+Branch `feature/nadia-serve-lifetime`, worktree `.worktrees/feature/nadia-serve-lifetime`.
+Spec: `docs/specs/nadia-serve-lifetime.md` (written first).
+
+**Found by looking at one empty directory the operator asked about.** `~/.nadia/tasks/2026-08-05-002343-`
+was created by a plain-text `/spawn` in dialog mode and holds nothing. What happened in it cannot
+be established from evidence, because agents live only in `nadia serve`'s memory, `nadia serve` is
+a plain child of the bridge, and **my own deploy restarted the bridge and killed it** — twice that
+evening. nadia's own docs already say a `serve` that restarted under its agents "would silently
+lose their work"; nothing stopped the bridge from being exactly that.
+
+Two consequences beyond the lost record: agent ids restart at 1 after every deploy (which the
+Telegram watcher has a whole `Reused` branch to survive), and a result that was in flight is never
+delivered to anyone.
+
+- [ ] **nsl-slug** — a task with no ASCII leaves a directory named `…-002343-`. Transliterate,
+  trim the dangling dash, fall back to `task`. A directory name is for finding the work again.
+- [ ] **nsl-records** — `nadia serve` writes one record per agent and loads them at startup;
+  anything non-terminal at load is `interrupted`, not silently gone. Ids continue past the highest
+  loaded one, which also retires the id-reuse hazard.
+- [ ] **nsl-detach** — the bridge starts `serve` in its OWN process group so a `launchctl bootout`
+  of the bridge does not take it down. The new hazard this creates — an orphan serve running a
+  pre-deploy binary — is answered by `/health` reporting the running build, with the bridge
+  restarting it when it is stale AND idle, never under working agents.
+- [ ] **nsl-verify** — unit tests, then LIVE: spawn, restart the bridge mid-run, and confirm the
+  agent survives; then a deploy with an idle serve must pick up the new binary.
+
 ### ▶ A green check on work nobody did (operator 2026-08-05, live)
 
 Branch `feature/nadia-task-workspace`, worktree `.worktrees/feature/nadia-task-workspace`.

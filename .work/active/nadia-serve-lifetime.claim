@@ -1,0 +1,6 @@
+feature/nadia-serve-lifetime 2026-08-04T22:57:37Z
+agent: claude-code
+heartbeat: 2026-08-04T22:57:37Z
+status: in-progress
+done-so-far: cause established — serve dies with the bridge, agents live only in its memory
+next: spec, then records on disk, then detach
