@@ -1,6 +1,6 @@
 feature/ucc-meetings-in-tk 2026-08-04T10:51:01Z
 agent: claude-opus-5-housekeeping
-heartbeat: 2026-08-04T22:25:33Z
-status: BLOCKED on ONE LINE upstream — capability complete here (branch e2238dc, rozum-meeting 198/198)
-done-so-far: one .ssc emits both clients — transcript+badge+time, authenticated read, composer, room picker (@you), day picker, 3s clock, room creation. Upstream: EIGHT capabilities landed, six by us — the newest is tui-credential-resolution (scalascript d4180b88b), which resolves a declared credential ON THE TARGET so nothing is baked
-next: the credential PARAMETER on fetchUrlSignal in scalascript primitives.ssc — held by their ui-fetch-credentials claim, asked in their room. Until it lands the vocabulary and the resolution are built and NOT connected, so an .ssc app still cannot declare one. Then: vendor the crate + byte-identical regeneration gate, dispatch `rozum meetings attach` at the built binary, delete attach.rs.
+heartbeat: 2026-08-04T23:47:52Z
+status: UNBLOCKED — the token is out of the binary. Capability complete AND shareable; only PACKAGING remains
+done-so-far: one .ssc emits both clients (transcript+badge+time, authenticated read, composer, room picker with @you, day picker, 3s clock, room creation) and the token is DECLARED not baked — gate proves absence by exporting a known value and failing if it appears in the emitted source. Upstream: NINE capabilities landed, seven by us, the last being the whole credential chain (scalascript ce17dfa8b)
+next: PACKAGING, now genuinely possible. Vendor the generated crate (checked in, plain cargo build, a gate proving a fresh emission is byte-identical), point `rozum meetings attach` at the built binary, delete attach.rs. Nothing upstream is needed.
