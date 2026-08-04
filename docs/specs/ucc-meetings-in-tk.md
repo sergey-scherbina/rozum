@@ -302,11 +302,29 @@ The only behaviour that stays behind is **#2a**, the rich transcript, and it sho
 retirement: the badge survives as a column, and the terminal target cannot bind a fetch to per-row
 rendering at all.
 
-**What retirement now needs is PACKAGING, not capability.** Today the generated client is emitted
-into a temp directory by a smoke script. Deleting `attach.rs` means `rozum` / `rozum meetings attach`
-must dispatch to a binary that is actually built and installed — emit + `cargo build` + install, in
-the deploy path, with a decision about whether the generated crate is vendored or emitted at build
-time. That is a build-system question and deliberately not answered here.
+**What retirement needs is PACKAGING — and packaging is BLOCKED, for a reason worth reading.**
+
+The plan was to vendor the generated crate (checked in, plain `cargo build`, a gate proving a fresh
+emission is byte-identical) so rozum never needs the ScalaScript toolchain to build. That plan does
+not work yet, and the proof is one line of the emitted binary:
+
+```rust
+m.insert("meetingsHeaders".to_string(), Value::S("{\"Authorization\":\"Bearer tok\"}".to_string()));
+```
+
+**The token is compiled in.** `env()` on the terminal target resolves in the EMITTING process, and
+the emitted crate reads `std::env` exactly once, for the snapshot flag. So a vendored binary carries
+whichever token was set when it was built: wrong for every other operator, and a secret shipped in
+an artifact. There is no rozum-side workaround — the signal store is fixed at compile time.
+
+This is precisely the hazard we filed upstream as `ui-fetch-credentials`, and it is being fixed:
+scalascript's `std/credential.ssc` (S1) has landed — a `Credential` names WHERE a secret comes from
+and carries none, so an emitter has nothing to bake. **S2, the emitter-side resolution, is what
+unblocks packaging.** What this client needs from it is one form: `credentialEnv("ROZUM_MEETING_TOKEN")`,
+read on the target at call time.
+
+So the order is: S2 upstream → vendor the crate + a regeneration gate → dispatch `rozum meetings
+attach` at the built binary → delete `attach.rs`. Not before.
 
 ⚠️ **A lesson paid for during this work, worth more than the feature:** the first version of the
 create-room test asserted `502` for an authorised `POST /rooms`, assuming no daemon was listening.
