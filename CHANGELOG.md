@@ -1,5 +1,42 @@
 # Changelog
 
+## verify-gate-accuracy — the check now describes the task, not how it was spelled
+Completed: 2026-08-04
+
+Two defects out of one measured run: the gate correctly failed a task and both
+repair rounds went on fighting the *check* rather than the task. Spec first
+(`docs/specs/verify-gate.md`), then both fixes, then the same run again.
+
+**A. A delimiting quote is not part of the argument.** From `cargo run -- "3 4 +
+2 *"` the model returned the argument the way the task spelled it — quotes and
+all — so the check demanded a program that accepts a quoted argument, which
+nobody asked for. `unquote` strips exactly one SYMMETRIC pair; one-sided and
+internal quotes are data and stay (`"unbalanced`, `he said "hi"`, `"a" + "b"`).
+The prompt says the same thing: a prompt rule that only usually holds needs a
+floor under it.
+
+**B. A project belongs in the workspace root.** `cargo new <name>` makes a
+subdirectory a root-level check cannot see. The system prompt now says `cargo
+init` in the root, and a failed check whose root has no manifest while exactly
+one child has one NAMES that child in the repair prompt. Two candidates → it says
+nothing, because a hint that names the wrong directory is worse than none.
+Relocating the check into the subdirectory was considered and rejected in the
+spec: it would turn work delivered where nobody asked into a passing run, which
+is the failure this gate exists to remove.
+
+**Measured, same task and model:** before — `✘ проверка НЕ прошла`, rc=1, both
+repair rounds burnt. After — rc=0, `✔ проверка прошла`, **zero repair rounds**,
+project at the workspace root, and the binary answers `3 4 + 2 *` → 14 and
+`5 1 2 + 4 * + 3 -` → 14 by hand.
+
+**The injection test was rewritten while here, and that is the more transferable
+change.** It asserted on the *shape of the escaping*, so it failed the moment the
+quoting changed while the fragment stayed perfectly inert. It now runs five
+payloads (`'; touch pwned; echo '`, `$(touch pwned)`, backticks, an unbalanced
+quote) through the real fragment and watches for a sentinel file. A test that
+watches for the effect survives the implementation changing under it; a test that
+watches the spelling does not.
+
 ## fix(nadia): the jail let the agent delete its own workspace — BUG-017
 Completed: 2026-08-04
 
