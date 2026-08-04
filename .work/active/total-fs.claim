@@ -1,6 +1,0 @@
-feature/total-fs 2026-08-04T12:58:40Z
-agent: claude-opus-5
-heartbeat: 2026-08-04T12:58:40Z
-status: in-progress
-done-so-far: queued
-next: spec, then src/fsx.ssc

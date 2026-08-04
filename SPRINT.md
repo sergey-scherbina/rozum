@@ -24,17 +24,31 @@ a guard that is remembered is a guard that is forgotten once. It was forgotten o
 (`misplacedProject`, reached only when a check already failed, where the workspace may be gone —
 BUG-017), which is the least-tested code there is.
 
-- [ ] **tfs-module** — `nadia:src/fsx.ssc`: total variants over the partial std primitives, each
+- [x] **tfs-module — DONE** (`nadia:82c1c1d`). `nadia:src/fsx.ssc`: total variants over the partial std primitives, each
   carrying the failure contract std does not state. Not a total-by-default replacement: totality
   hides a typo, so the caller picks, and the pick is visible at the call site.
-- [ ] **tfs-migrate** — every fs call in the ssc implementation goes through it; the guard becomes
+- [x] **tfs-migrate — DONE** (`nadia:82c1c1d`). every fs call in the ssc implementation goes through it; the guard becomes
   structural rather than remembered.
-- [ ] **tfs-check** — the contract runs (`src/fsx-check.ssc`), including the missing-path cases that
+- [x] **tfs-check — DONE.** 16 + 12 cases, green. the contract runs (`src/fsx-check.ssc`), including the missing-path cases that
   raise today. This side has no test harness (`nadia:BACKLOG.md` ssc-test-harness).
-- [ ] **tfs-upstream** — the proposal to scalascript BY ITS PROCEDURE: `scripts/inbox-add` with the
-  evidence and the measured case, plus a room post, stating what happens if nobody answers (P-5.4).
-  Proposal only — no code in their tree, and no `lane:`/`area:` guessed (P-3.11 keeps that authority
-  with their triager).
+- [x] **tfs-upstream — DONE** (`scalascript:ccd7a5e4d`). `INBOX.md` `std-fs-failure-contract` via
+  `scripts/inbox-add`, room post with the no-answer default, no `lane:`/`area:` guessed. Their
+  `pre-commit` refused my first attempt (main is coordination-only — their rule, correctly enforced)
+  and I went through `scripts/new-worktree`.
+
+**And I turned their gate red on `main` for a few minutes.** The body I attached used `##`
+headings; `inbox-gate` parses `^## ` inside the queue region as the start of an ENTRY, so one
+report became five malformed ones. Rewritten at `###`, gate green (`ccd7a5e4d`), note left in the
+body for their triager: `inbox-add --body-file` accepted that body without complaint, so the tool
+and the gate disagree about what a body may contain — theirs to decide where the rule lives.
+**The process lesson is mine:** I ran their gate in the same command chain as the push instead of
+before it. Run the gate, read it, THEN push.
+
+**What the work actually found** (the module was the means): `read_file`/`edit_file` guarded with
+`exists`, which is TRUE for a directory — so a model asking to read a directory killed the agent
+instead of getting an error it could act on, violating `nadia:SPEC.md` §2. The Rust and Scala 3
+twins answer with a tool error there; only the ScalaScript one raised. Fixed, with an error that
+says which mistake it was.
 
 ### ▶ Verify gate in the other two nadias (operator 2026-08-04: "Продолжай работу")
 

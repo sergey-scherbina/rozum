@@ -1,5 +1,46 @@
 # Changelog
 
+## total-fs — a failure contract for `std.fs`, and the tool-surface defect it uncovered
+Completed: 2026-08-04
+
+Cross-repo: the module is `nadia:src/fsx.ssc` (`nadia:09097ea`), the upstream half
+is a report filed to `scalascript` by its own procedure
+(`scalascript:ccd7a5e4d`).
+
+The finding is upstream's: `std.fs`'s failure behaviour is undocumented and
+differs per backend — `specs/std-fs-os.md` maps `listDir` to `Files.list` /
+`fs.readdirSync` / `fs::read_dir`, of which two raise on a missing path and one
+returns a `Result`. The contract a caller programs against is "whatever the host
+does", so every call site must remember to guard. That convention held 12 of 13
+times in nadia, and the miss sat on a *failure path* — a diagnostic reached only
+after a check has already failed, where one cause is the workspace being gone
+(BUG-017). Partial operations get used as if total in exactly the code that runs
+when things are already wrong, which is the least-tested code there is.
+
+**The result that matters is not the module.** Migrating the call sites found
+`read_file` and `edit_file` guarding with `exists` — true for a directory — so a
+model asking to read a directory killed the agent with `Is a directory` instead
+of receiving a sentence it could act on. `nadia:SPEC.md` §2 says a tool error is
+the next prompt, never an exception. The Rust and Scala 3 implementations of the
+same spec answer with a tool error there, because their fs calls are total by
+construction; only the ScalaScript one raised. Fixed, and the error now
+distinguishes `is a directory, not a file` from `no such file`.
+
+Filed upstream as a proposal, not a patch: state the failure behaviour per
+function and per backend (a documentation change with a cross-backend correctness
+consequence and no runtime cost), and consider total variants alongside the
+partial ones — which asks only that `fs` get the principle `std.json` and
+`resolveWithin` already have. Explicitly not asking for total-by-default: that
+hides a typo, and the caller should choose visibly.
+
+**Two process failures of mine, both in their repo, both fixed within minutes.**
+Their `pre-commit` refused my commit on `main` (coordination-only — their rule,
+correctly enforced), so I went through `scripts/new-worktree`. Then the body I
+attached used `##` headings, and their `inbox-gate` reads `^## ` inside the queue
+as a new entry: one report became five malformed ones and the gate went red on
+`main`. Rewritten at `###`. The lesson is the ordering, not the markup — I ran
+their gate in the same command chain as the push instead of before it.
+
 ## verify-gate-ports — the gate is in all three nadias
 Completed: 2026-08-04
 
