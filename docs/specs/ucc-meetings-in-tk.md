@@ -277,6 +277,25 @@ and not one row — while the fetch worked and the rows sat in the store. The le
 this task: **an unknowable quantity must not be answered with a fixed number.** A remote table's row
 count is genuinely unknown at emit time, and `1` was a guess dressed as a measurement.
 
+### Parity ledger against `attach.rs` — measured 2026-08-04, after the picker landed
+
+| # | `attach.rs` behaviour | generated client |
+|---|---|---|
+| 1 | header naming the room | ✅ |
+| 2 | transcript, newest last | ✅ (table) |
+| 2a | `── date ──` dividers, bold author, coloured badge | ❌ **React only** — a fetch can bind to a table or to text on this target, nothing else. The badge survives as a column. |
+| 3 | `PgUp` → previous day | ❌ nothing writes the day into the url signal yet |
+| 4 | live arrival without a keypress | ❌ **`IntervalTick` is in the model and absent from the emitter** — the generated client refreshes on a button, or after a successful post. `attach.rs` holds a dedicated long-poll connection. |
+| 5 | composer, `Enter` submits | ✅ |
+| 6 | slash commands `/quit` `/rooms` `/new` | ❌ |
+| 7 | room switcher | ✅ **now** — picker with a ready-made url + a `@you` column |
+| 8 | quit | ✅ (`Esc`) |
+
+**Verdict: `attach.rs` STILL cannot be deleted, and #4 is why.** A meeting client that only updates
+when you press a key is not a replacement for one that shows a message the moment it lands — the
+others are papercuts beside it. Ranked by what retirement actually needs: #4, then #3, then #6,
+then #2a (which may never come, and may not need to).
+
 ### What is proven, and what is not
 
 | Claim | Evidence |
