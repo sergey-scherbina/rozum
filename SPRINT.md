@@ -22,12 +22,12 @@ Rust program … Verified: cargo run -- 3 4 outputs 7", the gate reported `✔`,
 prevent, arriving through the one door nobody had closed: a shared directory reused across tasks.
 It also loses work — task N+1 overwrites task N's `src/main.rs` in place.
 
-- [ ] **ntw-fresh** — a bare `/spawn` (no `/project` chosen) gets its own directory under the
+- [x] **ntw-fresh — DONE.** — a bare `/spawn` (no `/project` chosen) gets its own directory under the
   sandbox, named for the day and the task, created before the agent starts. `/project` keeps
   meaning "work in this existing tree", which is the case where reuse is the point.
-- [ ] **ntw-say** — the chat says where it is working, and the "личная песочница" hint stops
+- [x] **ntw-say — DONE.** — the chat says where it is working, and the "личная песочница" hint stops
   implying one shared heap.
-- [ ] **ntw-verify** — unit tests, then LIVE: two identical `/spawn`s must produce two
+- [x] **ntw-verify — tests DONE** (833 green) + the premise proven live (same task, fresh dir: 123 s, `touched: [src/main.rs]`, ✔ on its own work vs 36 s and `touched: []` in the shared root); one `/spawn` from the phone still owed. Was: unit tests, then LIVE: two identical `/spawn`s must produce two
   directories, and the second must show `✍️` files of its own rather than passing on the first's.
 
 ### ▶ Two bots, one state file (operator 2026-08-04, live: "А в Rozum IA пришло вот это сообщение")

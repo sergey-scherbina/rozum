@@ -5,6 +5,36 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-021 — a green check on work nobody did
+
+- **Status:** FIXED 2026-08-05 (`crates/rozum-meeting/src/telegram/nadia.rs`), test
+  `every_task_gets_its_own_directory`.
+- **Found by:** the operator, sending the same `/spawn` twice from the phone.
+
+Agent #2 reported *"Created a Rust program … Verified: cargo run -- 3 4 outputs 7"*, the gate
+reported `✔ проверка прошла`, and `touched` was **empty** — it wrote nothing. The first task's
+program was already in the sandbox root, `cargo run -- 3 4` printed 7 the moment it was asked, and
+every signal we have said success. 36 s, no files.
+
+**The check verified the directory, not the run.** That is the same false pass the gate was built
+to prevent, entering through the one door nobody had closed: every task from the phone shared one
+workspace. The quieter cost is that task N+1 overwrote task N's `src/main.rs` in place — the
+hello-rpn next to it survived only because it lives in a subdirectory.
+
+Fixed: a `/spawn` with no `/project` chosen gets `~/.nadia/tasks/<date-time>-<slug>/`, created by
+the bridge before the agent starts (an agent that has to make its own workspace spends a tool call
+on it and sometimes puts the project one level down, which the gate then reports as a failure). A
+chosen project still means "work in this tree", because there reuse is the entire point.
+
+Proven by running the same task in a fresh directory: 123 s, 7 tool calls, `touched:
+["src/main.rs"]`, check passed — on work that run actually did.
+
+**The general shape: a verifier is only as honest as the state it runs against.** Ours ran against
+a directory that a previous run had already satisfied, so it reported on the directory. Any check
+that can pass without the work happening needs to start from a state where it cannot.
+
+---
+
 ## BUG-020 — the other bot answered
 
 - **Status:** FIXED 2026-08-04 (`crates/rozum-meeting/src/telegram/{mod,nadia}.rs`), test

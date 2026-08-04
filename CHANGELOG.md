@@ -1,5 +1,18 @@
 # Changelog
 
+## nadia-task-workspace — every task gets its own directory
+Completed: 2026-08-05
+
+The operator sent the same `/spawn` twice. The second agent reported "Created a Rust program …
+Verified", the gate reported ✔, and it had written nothing: the first task's program was still in
+the shared sandbox root, so the derived check passed on somebody else's work in 36 seconds. The
+check was verifying the directory, not the run — the same false pass the gate exists to prevent,
+through the one door left open. It also meant each task overwrote the last one's `src/main.rs`.
+
+A bare `/spawn` now works in `~/.nadia/tasks/<date-time>-<slug>/`, created before the agent starts;
+`/project` still means "work in this tree". Proven with the same task in a fresh directory: 123 s,
+7 tool calls, `touched: ["src/main.rs"]`, ✔ on work that run did. BUG-021.
+
 ## nadia-tg-bot-ownership — you wrote to one bot and the other answered
 Completed: 2026-08-04
 

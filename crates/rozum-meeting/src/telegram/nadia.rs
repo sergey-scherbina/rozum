@@ -392,7 +392,8 @@ fn render_project(chat_id: i64) -> String {
     match chat_state(chat_id).project {
         Some(p) => format!("Агенты этого чата работают в {p}"),
         None => format!(
-            "Проект не выбран — агенты работают в {} (личная песочница nadia).\n\
+            "Проект не выбран — каждая задача получает свой каталог в {}/tasks/ \
+             (личная песочница nadia).\n\
              /projects — список, /project <имя> — выбрать.",
             default_workspace().display()
         ),
@@ -541,6 +542,47 @@ fn ensure_running() -> Result<(), String> {
 /// work — whole projects an agent wrote — and it does not belong under a directory whose
 /// other contents (`bin/`, `secrets/`, `ucc/`) are rozum's runtime and get treated as
 /// disposable. `$NADIA_WORKSPACE` still overrides it.
+/// Where a bare `/spawn` works: a FRESH directory per task, under the sandbox.
+///
+/// Measured live 2026-08-05, two identical `/spawn`s in a row. The second agent reported
+/// "Created a Rust program … Verified: cargo run -- 3 4 outputs 7", the gate reported `✔`, and it
+/// had written **nothing** — `touched` was empty. The first task's program was already in the
+/// sandbox root, so the derived check passed the instant it was asked. **A check run in a
+/// directory somebody else already satisfied verifies the DIRECTORY, not the run**, which is the
+/// same false pass the gate exists to prevent, arriving through the one door left open. The
+/// second cost is quieter: task N+1 overwrites task N's `src/main.rs` in place.
+///
+/// A chat that has chosen a project keeps working in it — there, reuse is the entire point.
+fn task_workspace(task: &str) -> std::path::PathBuf {
+    default_workspace().join("tasks").join(format!(
+        "{}-{}",
+        chrono::Local::now().format("%Y-%m-%d-%H%M%S"),
+        slug(task)
+    ))
+}
+
+/// A short, filesystem-safe hint of what the task was. ASCII letters and digits only — the tasks
+/// arrive in Russian as often as not, and a directory name is for finding the work again, not for
+/// reproducing the sentence. Empty when the task has nothing transliterable, and then the
+/// timestamp alone names it.
+fn slug(task: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = true;
+    for c in task.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.extend(c.to_lowercase());
+            last_dash = false;
+        } else if !last_dash && out.len() < 24 {
+            out.push('-');
+            last_dash = true;
+        }
+        if out.len() >= 24 {
+            break;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
 fn default_workspace() -> std::path::PathBuf {
     dirs_home().join(".nadia")
 }
@@ -594,9 +636,23 @@ fn request(cmd: &Cmd, chat_id: i64) -> Result<serde_json::Value, String> {
             // The chat's project, when it has chosen one: an agent started from a phone is
             // almost always meant for a repo, not for nadia's own scratch directory.
             let mut body = serde_json::json!({ "task": task });
-            if let Some(p) = chat_state(chat_id).project {
-                body["workspace"] = serde_json::json!(p);
-            }
+            // A chosen project means "work in this tree". Without one, a fresh directory: the
+            // sandbox root is shared by every task ever run from this phone, and a check that
+            // passes on the previous task's artifact is not a check (see `task_workspace`).
+            let ws = match chat_state(chat_id).project {
+                Some(p) => std::path::PathBuf::from(p),
+                None => {
+                    let w = task_workspace(task);
+                    // Created here rather than left to the agent: an agent that has to `mkdir`
+                    // its own workspace spends a tool call on it and sometimes puts the project
+                    // one level down instead, which the gate then reports as a failure.
+                    if let Err(e) = std::fs::create_dir_all(&w) {
+                        return Err(format!("не смог создать каталог задачи {}: {e}", w.display()));
+                    }
+                    w
+                }
+            };
+            body["workspace"] = serde_json::json!(ws.to_string_lossy());
             curl_json("POST", &format!("{b}/agents"), Some(body))
         }
         // Handled before any request is made.
@@ -644,8 +700,16 @@ fn render(cmd: &Cmd, body: &serde_json::Value, chat_id: i64) -> String {
         Cmd::Spawn(task) => {
             let id = body.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
             let mut s = format!("🤖 агент #{id} пошёл работать\n{}", clip(task, 120));
+            // The workspace comes from the ANSWER, not from what we asked for: the two differ
+            // whenever the server has its own idea, and the operator needs the path that exists.
+            let ws = body.get("workspace").and_then(|v| v.as_str()).unwrap_or_default();
             match chat_state(chat_id).project {
                 Some(p) => s.push_str(&format!("\n📁 {p}")),
+                None if !ws.is_empty() => s.push_str(&format!(
+                    "\n📁 {ws}\n\
+                     свежий каталог под эту задачу — прошлые работы рядом, не поверх.\n\
+                     /projects · /project <имя> — работать в своём проекте",
+                )),
                 None => s.push_str(&format!(
                     "\n📁 {} — это личная песочница nadia, а не твой репозиторий.\n\
                      /projects · /project <имя> — работать в проекте",
@@ -985,6 +1049,31 @@ mod tests {
 
         unsafe { std::env::remove_var("TELEGRAM_REGISTRY") };
         unsafe { std::env::remove_var("XDG_STATE_HOME") };
+    }
+
+    /// Two tasks must not land in one directory.
+    ///
+    /// The live failure this prevents (2026-08-05): agent #2 reported "Created a Rust program …
+    /// Verified", the gate reported ✔, and it wrote nothing at all — the previous task's program
+    /// was already in the shared root, so the check passed on somebody else's work. A green check
+    /// that is about the directory rather than the run is worse than no check.
+    #[test]
+    fn every_task_gets_its_own_directory() {
+        let a = task_workspace("напиши на Rust программу: cargo run -- 3 4 печатает 7");
+        let b = task_workspace("совсем другая задача");
+        assert_ne!(a, b, "two tasks would have shared a workspace");
+        assert!(a.starts_with(default_workspace().join("tasks")), "{}", a.display());
+
+        // The name carries the day and whatever of the task is filesystem-safe. Russian tasks
+        // leave only the timestamp, which is the point: a directory name is for finding the work
+        // again, not for reproducing the sentence.
+        let cyrillic = task_workspace("сделай что-нибудь");
+        let name = cyrillic.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.chars().all(|c| c.is_ascii()), "{name}");
+        assert_eq!(slug("add a --json flag"), "add-a-json-flag");
+        assert_eq!(slug("напиши"), "");
+        // Long tasks are cut, not carried whole into a path.
+        assert!(slug(&"word ".repeat(40)).len() <= 24);
     }
 
     #[test]
