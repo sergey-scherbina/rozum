@@ -2591,9 +2591,24 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   resolve the header at FETCH time, not emit time. `clients/control/meetings.ssc` carries the
   warning meanwhile. `std.auth` does not cover this and should not: it is the vocabulary of BEING an
   auth server, with no notion of PRESENTING a credential outbound.
-  NEXT: nothing in rozum is unblocked until upstream moves. Either wait on
-  `tui-fetch-headers` → `tui-fetch-url-signal` → `tui-fetch-post`, or take one of them in
-  scalascript directly (their POLICY.md claim protocol, `scripts/new-worktree`).
+  **UPSTREAM IS NO LONGER THE BLOCKER (2026-08-04, same day).** All three capabilities now exist:
+  - `tui-fetch-headers` — **they shipped it**, off our INBOX entry, with a test that cites it, and
+    they took the fetch-time request, so a token cannot be folded into the binary.
+  - `tui-fetch-url-signal` — **we implemented it** in scalascript under their claim protocol
+    (`feature/tui-fetch-url-signal`). It was not emitter-only: the static path could not express a
+    signal URL at all, so it needed `urlId` on `FetchUrlSignal` and a `fetchUrlSignalTo` site in
+    `FetchIntrinsics` as well. The subtle part is change detection — the loop remembered the TICK,
+    and a signal URL is a second trigger, so what is remembered is now the pair.
+  - `tui-fetch-post` — **we implemented it**, same branch. Emitter-only. `send_action` mutates the
+    store ONLY after a 2xx: an early tick bump refreshes a list nothing was written to, and clearing
+    the composer on a failed send eats the user's message.
+  `frontendTui/test` 47/47. Their side still owes: merging that branch, triaging our two auth
+  entries (`feature/inbox-rozum-auth-concept`), and the cargo integration tests, which are blocked
+  because every one of them lives in a file another agent's claim holds.
+  **What rozum needs before Stage C can start:** their branch merged, and `bin/ssc-tools` rebuilt
+  (`install.sh --dev`) — it is still built from `ec70eb062`, so we cannot consume any of this yet.
+  Then: flip our fixture to `--require-auth` (already supported) and the existing Stage A smoke
+  becomes the authenticated proof; then switcher + composer + unread; then delete `attach.rs`.
 - [x] **ucc-control-api** — DONE: write actions fully wired. Meetings side DONE
   (`rozum-meeting::client` + `rest_read` HTTP). Models/gateway: `GET /control/status`
   (snapshot: residency + residents + installed catalog) + `POST /control/gateway/load`
