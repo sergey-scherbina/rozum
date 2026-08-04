@@ -1,6 +1,6 @@
-feature/verify-gate-ports 2026-08-04T11:0*
+feature/verify-gate-ports 2026-08-04T11:05:00Z
 agent: claude-opus-5
-heartbeat: 2026-08-04T11:30:43Z
+heartbeat: 2026-08-04T11:35:30Z
 status: in-progress
-done-so-far: scala3 (43f064e) + ssc (2649bbd) + spec/docs/changelog in the nadia repo; 9 twin tests scala, 15 contract rules ssc
-next: vgp-parity — two live runs in flight, then merge both repos and close
+done-so-far: both ports written+committed in the nadia repo; parity proven (9+9 unit tests, 18 ssc contract rules); ssc live run re-queued after a concurrent-run gateway timeout (rc=2, infrastructure)
+next: read both live runs, then merge nadia branch, close claim, remove worktrees
