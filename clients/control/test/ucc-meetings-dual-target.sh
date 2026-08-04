@@ -158,5 +158,15 @@ for needle in 'fn is_table(' 'fn move_row(' 'row_field(' '"meetingsUrl"'; do
   }
 done
 echo "PASS: ratatui crate built and rendered the transcript — badge column included"
-echo "PASS: authenticated read + composer write path + room picker with selection"
+# Live arrival: without a clock the client only updates when a key is pressed, which is the one
+# gap that kept attach.rs alive. A no-op bump helper means the interval was silently dropped.
+grep -Fq 'fn bump_interval_ticks(signals:' "$RUST_SOURCE" || {
+  echo "FAIL: emitted TUI has no clock — it would only refresh on a keypress" >&2
+  exit 1
+}
+grep -Fq '"meetingsRefresh".to_string()' "$RUST_SOURCE" || {
+  echo "FAIL: the refresh tick is not the one the clock advances" >&2
+  exit 1
+}
+echo "PASS: authenticated read + composer + room picker + a clock that refreshes unattended"
 echo "PASS: ucc-meetings-in-tk Stage A dual-target smoke"

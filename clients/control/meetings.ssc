@@ -43,7 +43,7 @@ has no base64, which previously forced this source to accept a pre-built header 
    running client.
 
 [env](std/os.ssc)
-[signal, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, incSignal, fieldColumn, rowLinkAction](std/ui/primitives.ssc)
+[signal, intervalTick, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, incSignal, fieldColumn, rowLinkAction](std/ui/primitives.ssc)
 [lower](std/ui/lower.ssc)
 [defaultTheme](std/ui/theme.ssc)
 [vstack, hstack](std/ui/layout.ssc)
@@ -57,7 +57,11 @@ val room    = env("ROZUM_MEETING_ROOM").getOrElse("rozum")
 val day     = env("ROZUM_MEETING_DATE").getOrElse("today")
 val token   = env("ROZUM_MEETING_TOKEN").getOrElse("")
 
-val refresh = signal("meetingsRefresh", 0)
+// ONE tick drives everything that re-reads: the clock advances it every 3 s, the refresh button
+// bumps it, and a successful post bumps it. A meeting client that only updated on a keypress would
+// not be a replacement for `rozum meetings attach`, which shows a message the moment it lands.
+// The terminal loop polls with a 100 ms timeout, so 3 s is a floor rather than a guarantee.
+val refresh = intervalTick("meetingsRefresh", 3000)
 val headers = signal("meetingsHeaders", "{\"Authorization\":\"Bearer " + token + "\"}")
 
 // The room picker writes a READY-MADE url into `here`, and the transcript follows it. The client
