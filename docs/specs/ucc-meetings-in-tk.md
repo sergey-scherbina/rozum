@@ -98,22 +98,66 @@ they reach the network:
    the transcript fetch, and `PgUp` cannot fetch another day.**
 
 Both are ScalaScript work, in a repo this project already treats as part of its virtual monorepo
-(`REPOS.md` → `../scalascript`). They must be filed and done there.
+(`REPOS.md` → `../scalascript`). **Filed 2026-08-04** via their own `scripts/inbox-add` as
+`tui-fetch-post` and `tui-fetch-url-signal` (branch `feature/inbox-rozum-tui-gaps`, their
+`inbox-gate.sh` green; their triager routes lane/area — we do not).
+
+### A third limit, found while scoping Stage A: rich rows cannot be fetch-bound on the TUI target
+
+`collectFetches` registers a managed GET **only** when the fetch signal is reached through
+`View.SignalText`, `View.DataTable(Remote(…))` or `View.ModelView`. Notably `View.For(items, render)`
+recurses into the rendered children but **does not `record(items)`** — and `forJsonView` (the
+primitive behind per-row custom rendering) is what a transcript with date dividers, a coloured
+severity badge and a bold author would need.
+
+Consequence: **on the terminal target, fetched data can be rendered as a table or as text, and
+nothing else.** The date dividers, per-row badge colours and bold-author styling in the parity list
+are reachable on the React target only. This is not a reason to branch on target — the whole point is
+one source — so **Stage A lives in the intersection of the two targets**, and the rich transcript
+becomes a *third* upstream ask if the product decides the terminal must have it. It is deliberately
+NOT filed yet: two blocking reports are already open, and this one is cosmetic next to a composer
+that cannot submit.
+
+### And the data plane is authenticated — which settles the identity question
+
+`GET http://127.0.0.1:8401/rooms` answers **`401 Unauthorized`**. `rest_read.rs` puts an
+`auth_layer` in front of every route and injects a `ConsoleUser`; tokens are per-operator with an
+RBAC role (`rozum meetings token issue <handle> --role observer|responder|admin`). So a token is
+needed to **read**, not just to post — Stage A needs one too.
+
+That reframes the Stage C identity choice, and improves it. The daemon already models exactly what
+was feared missing: a token *carries a handle*. So option (b) — the generated client holds an
+operator token — is no longer a compromise that fakes the human's identity; it preserves
+who-said-what **provided the token is issued to the human's own handle** (the same handle
+`meeting::local_identity` uses), and `--role responder` is the least privilege that can post.
+**Decision (revisit only with evidence): (b), with the handle-matching requirement as a hard
+condition.** Option (a) — teaching REST to accept a local-identity token — stays the "right" answer
+if the handles ever diverge.
 
 ## Plan — three stages, because stage B is in another repo
 
 ### Stage A — everything the emitter can already do (rozum, unblocked)
 
-Extend the PoC from a 3-column table to the real transcript, from one source:
-`clients/control/meetings.ssc` (new; `meeting-message-list.ssc` is the PoC and stays until A lands).
+**Rescoped after the two limits above.** The original wording here promised date dividers and
+coloured badges; the terminal target cannot fetch-bind that rendering, so promising it would have
+meant either a target branch (against the whole point) or a stage that could not close.
 
-- Header, date dividers, severity-coloured badges, bold author, content.
+What Stage A is: `clients/control/meetings.ssc` (new; the PoC `meeting-message-list.ssc` stays until
+A lands), pointed at the **real** meeting daemon instead of the PoC's `:8410/chat/messages`:
+
+- `GET :8401/rooms/{room}/messages/{date}` behind a `remoteTable` — the one fetch binding the
+  terminal target registers — with the transcript's real columns: time, author, severity/kind badge
+  as its own column, content.
+- An operator token, per the decision above; the source takes it from the environment the same way it
+  takes `ROZUM_UCC_BASE`, so it is configuration, not a target branch.
 - Live refresh on the existing tick binding (the PoC's proven mechanism).
-- Emits both targets: `emit-spa --frontend react` for UCC, `emit(view(), "tui-out")` for ratatui.
+- Both targets from the one source: `emit-spa --frontend react`, and `emit(view(), "tui-out")`.
 
-**Done when:** both artifacts build from the one source; the headless
-`SSC_TUI_SNAPSHOT=1` run shows a fixture transcript with a date divider and a badge; the web artifact
-shows the same; no target-specific branch in the source.
+**Done when:** both artifacts build from the one source; the headless `SSC_TUI_SNAPSHOT=1` run shows
+real transcript rows *including the badge column* from an isolated fixture; the React artifact shows
+the same columns; no target check anywhere in the source; the existing PoC smoke
+(`clients/control/test/ucc-msglist-dual-target.sh`) still passes, and the new one does not touch
+`:8089`, `:8401`, `:8411` or any operator service.
 
 ### Stage B — the two capabilities (scalascript, blocking C)
 
