@@ -375,16 +375,43 @@ async fn messages(
         turns.truncate(count as usize);
     }
     let next_from = turns.last().map(|t| t.n + 1).unwrap_or(from);
+    let count = turns.len();
+    let messages: Vec<Value> = turns.iter().map(message_json).collect();
     Json(json!({
         "room": name,
         "date": date,
         "from": from,
-        "count": turns.len(),
+        "count": count,
         "next_from": next_from,
         "has_more": has_more,
-        "messages": turns,
+        "messages": messages,
     }))
     .into_response()
+}
+
+/// A stored turn as the read API returns it: every stored field, plus the two DERIVED display
+/// strings a client cannot compute for itself.
+///
+/// `badge` and `time` are additive — existing consumers keep seeing exactly the keys they saw
+/// before. They exist because of `ucc-meetings-in-tk`: the generated meeting client binds a fetch
+/// to a table, so it has no place to run `StoredTurn::badge()` or format a unix epoch. Sending the
+/// computed strings keeps ONE implementation of the incident badge (this crate's) instead of a
+/// second one in `.ssc` that would drift from it — which is the entire point of generating the
+/// client rather than hand-writing it a second time.
+///
+/// `badge` is `""` rather than absent when a message carries no incident metadata: a table column
+/// bound to a sometimes-missing key is a client-side edge case, and an always-present string is
+/// the least surprising thing for a deliberately dumb client.
+fn message_json(turn: &store::StoredTurn) -> Value {
+    let mut v = serde_json::to_value(turn).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "badge".into(),
+            Value::String(turn.badge().unwrap_or_default()),
+        );
+        obj.insert("time".into(), Value::String(turn.time_hm()));
+    }
+    v
 }
 
 fn room_root(registry: &RoomRegistry, name: &str) -> Option<PathBuf> {
@@ -789,6 +816,81 @@ mod tests {
             .unwrap();
         assert_eq!(missing["messages"].as_array().unwrap().len(), 0);
         assert!(root.join("index.json").exists(), "seed wrote the index");
+    }
+
+    /// The read API carries the two DERIVED display strings the generated meeting client cannot
+    /// compute for itself (`ucc-meetings-in-tk`): the incident badge and a local `HH:MM`.
+    ///
+    /// The badge assertion is the load-bearing one. It compares against `StoredTurn::badge()`
+    /// rather than against a hand-written `"[ALERT CRIT #db]"`, because the point of sending the
+    /// badge at all is that there stays exactly ONE implementation of it — a literal here would
+    /// pass while the two drifted, which is precisely the failure this endpoint change exists to
+    /// prevent.
+    #[tokio::test]
+    async fn messages_carry_derived_badge_and_time() {
+        let dir = tempdir().unwrap();
+        let paths = store::RoomPaths::ad_hoc_in(dir.path(), "alpha");
+        let mut writer =
+            store::TranscriptWriter::new(paths, "alpha", "topic", None, dir.path().to_path_buf());
+        let plain = writer.append("p", "P", "just a note", 1_718_000_000).unwrap();
+        let flagged = writer
+            .append_with_meta(
+                "p",
+                "P",
+                "the db is down",
+                1_718_000_060,
+                store::PostMeta {
+                    kind: store::MsgKind::Alert,
+                    meta: store::MsgMeta {
+                        severity: Some(store::Severity::Critical),
+                        tags: vec!["db".into()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let date = plain.date.clone();
+
+        let (addr, _shutdown) = start(dir.path().to_path_buf(), "sekret").await;
+        let page: Value = reqwest::Client::new()
+            .get(format!("http://{addr}/rooms/alpha/messages/{date}"))
+            .basic_auth("", Some("sekret"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        // A plain note: badge present but EMPTY — the column always binds, never a missing key.
+        assert_eq!(page["messages"][0]["content"], "just a note");
+        assert_eq!(page["messages"][0]["badge"], "");
+        // A flagged one: byte-identical to what the Rust side renders.
+        let expected = flagged.badge().expect("an alert with severity has a badge");
+        assert!(!expected.is_empty());
+        assert_eq!(page["messages"][1]["badge"], expected);
+
+        // Time is the local clock, and it is a string the client can print as-is.
+        let t = page["messages"][0]["time"].as_str().unwrap();
+        assert_eq!(t.len(), 5, "HH:MM, got {t:?}");
+        assert_eq!(t.as_bytes()[2], b':', "HH:MM, got {t:?}");
+        assert_eq!(page["messages"][0]["time"], plain.time_hm());
+
+        // Additive: every stored field a client already relied on is still there.
+        assert_eq!(page["messages"][0]["n"], 0);
+        assert_eq!(page["messages"][0]["display_name"], "P");
+        assert_eq!(page["messages"][0]["date"], date);
+        assert!(page["messages"][0]["ts"].is_u64());
+    }
+
+    /// A turn with no timestamp renders no clock rather than 1970 — the client prints the string
+    /// verbatim, so an empty one is the only honest "unknown".
+    #[test]
+    fn time_hm_is_empty_without_a_timestamp() {
+        let turn = store::StoredTurn::default();
+        assert_eq!(turn.ts, 0);
+        assert_eq!(turn.time_hm(), "");
     }
 
     #[tokio::test]

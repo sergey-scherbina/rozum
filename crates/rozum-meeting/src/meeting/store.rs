@@ -232,6 +232,28 @@ impl StoredTurn {
             Some(format!("[{}]", parts.join(" ")))
         }
     }
+
+    /// Local `HH:MM` for this turn's timestamp — empty when there is no timestamp.
+    ///
+    /// Lives here, next to [`StoredTurn::badge`], for the same reason: a generated client cannot
+    /// format a unix epoch (the terminal target can bind a fetch to a table or to text and nothing
+    /// else), so the *display* string has to be produced once, on this side, and handed to every
+    /// surface. The day is already carried by `date`, so this is deliberately just the clock —
+    /// the adaptive today/this-year/older form belongs to the legacy in-process TUI and dies
+    /// with it.
+    pub fn time_hm(&self) -> String {
+        use chrono::{DateTime, Local, TimeZone};
+        if self.ts == 0 {
+            return String::new();
+        }
+        match Local.timestamp_opt(self.ts as i64, 0) {
+            chrono::LocalResult::Single(dt) => {
+                let dt: DateTime<Local> = dt;
+                dt.format("%H:%M").to_string()
+            }
+            _ => String::new(),
+        }
+    }
 }
 
 /// Support metadata supplied when posting a message (P1b write API). `Default` = a plain message.
