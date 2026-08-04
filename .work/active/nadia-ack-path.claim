@@ -1,0 +1,6 @@
+feature/nadia-ack-path 2026-08-04T22:21:27Z
+agent: claude-code
+heartbeat: 2026-08-04T22:21:27Z
+status: in-progress
+done-so-far: cause known — POST /agents returns only {id}, the ACK read workspace from it
+next: return the chosen workspace from request(), test the ACK against the real response shape
