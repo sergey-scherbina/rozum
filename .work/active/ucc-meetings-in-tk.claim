@@ -1,6 +1,6 @@
 feature/ucc-meetings-in-tk 2026-08-04T10:51:01Z
 agent: claude-opus-5-housekeeping
-heartbeat: 2026-08-04T11:38:59Z
-status: in-progress
-done-so-far: spec (5af7afb, 2896e7b, 4c8b0f2) + STAGE A SHIPPED on the branch (3e62b99) — one .ssc source emits both the React and the ratatui meeting client with the derived badge column; daemon gained additive badge/time; rozum-meeting 193/193, new dual-target smoke green, PoC smoke still green. THREE blocking upstream reports filed in scalascript: tui-fetch-headers (blocks earliest — terminal target sends no headers, daemon needs Basic), tui-fetch-url-signal, tui-fetch-post
-next: BLOCKED on upstream. Either wait for tui-fetch-headers, or take it in scalascript directly under their POLICY.md claim protocol. Also open: re-run the Stage A smoke after scalascript install.sh --dev (measured on a STALE toolchain ec70eb062 vs repo bb22c9d4b)
+heartbeat: 2026-08-04T14:05:35Z
+status: in-progress — Stage A + Stage C part one shipped on the branch (0fa884c); Stage C part two BLOCKED upstream
+done-so-far: one .ssc emits both clients (transcript+badge+time), daemon gained badge/time/Bearer/plain-text-submit, composer works, authenticated read gated by a --require-auth fixture. Upstream: 3 capabilities landed (headers by them, url-signal+post by us, scalascript@77bc1dc84), 5th filed (tui-table-selection)
+next: BLOCKED on scalascript tui-table-selection — a DataTable has no row selection, so the room switcher cannot be built and attach.rs cannot be retired. Unblocked meanwhile: nothing in this task; see the spec evidence table for the one NOT RUN verification

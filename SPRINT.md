@@ -2659,7 +2659,24 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   Also learned about that repo: their `main` moves faster than anyone re-stages the toolchain — the
   digest changed twice during a single smoke run — so freshness must be checked before measuring,
   every time.
-  **What rozum needs before Stage C can start:** their branch merged, and `bin/ssc-tools` rebuilt
+  **STAGE C PART ONE SHIPPED (`0fa884c`), PART TWO BLOCKED ON A FIFTH CAPABILITY.** The composer
+  works end to end and reads are authenticated: the smoke's fixture now runs `--require-auth` and
+  refuses a header-less GET, so losing the headers support turns the gate red instead of quietly
+  emptying the transcript. The daemon gained `submit_payload` — the message text may be posted on
+  its own, because a terminal target cannot compose strings and the composer physically cannot wrap
+  what was typed in JSON.
+  **The switcher cannot be built:** `View.DataTable` carries an `actions` list the terminal emitter
+  discards and a table has no selection, so a room list renders and nothing can be picked from it.
+  Filed upstream as `tui-table-selection`. Rejected alternatives are in the spec so nobody
+  re-derives them — notably that `computedSignal` has no static-model equivalent, so composing a URL
+  from a room-name signal is not available either. **Therefore `attach.rs` stays: its picker is the
+  one remaining gap, which is the whole difference between a second client to maintain and deleting
+  the hand-written one.**
+  The spec now carries an evidence table with one honest **NOT RUN** — the seam between the
+  generated client and rozum's own REST in one process. Every piece is proven separately; joining
+  them needs the heavy binary, and the live daemon runs a deployed build without Bearer. Do not
+  disturb the operator's services for it.
+  **What rozum needs before Stage C part two can start:** their branch merged, and `bin/ssc-tools` rebuilt
   (`install.sh --dev`) — it is still built from `ec70eb062`, so we cannot consume any of this yet.
   Then: flip our fixture to `--require-auth` (already supported) and the existing Stage A smoke
   becomes the authenticated proof; then switcher + composer + unread; then delete `attach.rs`.
