@@ -9,6 +9,32 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
+### ▶ Verify-gate accuracy (operator 2026-08-04: "Начинать с (1) и (2)" → "продолжай, начинай и продолжай")
+
+Branch `feature/verify-gate-accuracy`, worktree `.worktrees/feature/verify-gate-accuracy`.
+Spec: `docs/specs/verify-gate.md` (written first). Contract for the agent side is
+`nadia:SPEC.md` §3.1 — this spec covers the shared primitives in `rozum-agent::verify`
+that both `rozum launch` and nadia's gate run on.
+
+Both items came out of ONE measured run, not from review: the gate correctly failed a task
+(`✘ проверка НЕ прошла`, rc=1 — which is the gate working) but both repair rounds were spent
+fighting the check rather than the task.
+
+- [ ] **vga-arg-quotes** — `derive_check` keeps the quotes the task wrote around the argument.
+  From `cargo run -- "3 4 + 2 *"` it derived `arg = '"3 4 + 2 *"'`, so the check demands a
+  program that accepts a quoted argument, which nobody asked for. Strip a symmetric pair of
+  surrounding quotes from `arg`/`expect` when building the fragment, and say so in the prompt.
+  Affects `rozum launch` identically — one definition, two consumers.
+- [ ] **vga-project-root** — a model that runs `cargo new <name>` puts the project in a
+  SUBDIRECTORY, so a check that runs `cargo` at the workspace root cannot pass however good the
+  code is. Two halves: the system prompt says to create the project in the workspace root, and a
+  failed check whose root has no manifest while exactly one child does SAYS that in the repair
+  prompt instead of leaving the model to guess. Do not silently `cd` into the subdirectory —
+  that hides a real mistake behind a passing check.
+- [ ] **vga-verify** — re-run the same task end to end and record what the rounds were spent on.
+  Success criterion is not "it passes" (a 4B may still fail the task) but "no round is spent on
+  the check being wrong about where the project is or how the argument is spelled".
+
 ### ▶ Messenger admin console (operator 2026-07-27: "CLI для реестра … заведи. И в контрол центре тоже сделай отдельный экран и инструмент для управления ботами и группами в телеграме")
 
 Branch `feature/messenger-admin-console`, worktree `.worktrees/messenger-admin`.
