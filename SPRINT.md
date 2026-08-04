@@ -2778,6 +2778,20 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   goes through `console_call(room, …)`, which assumes a room exists) plus a decision on which role
   may create rooms — a different shape from the rest, left for its own pass rather than tacked on.
   Nothing further is needed from scalascript.
+  **CAPABILITY COMPLETE (2026-08-04, branch `aa27a2a`).** Room creation landed — `POST /rooms`
+  through `MeetingClient::new_room`, the same call the TUI's own picker makes, so creation still goes
+  through the daemon's single-writer and identity machinery. Every behaviour a person uses in
+  `attach.rs` now works in the generated client; only the rich transcript stays React-only, and it
+  should not gate retirement.
+  **What is left is PACKAGING, not features.** The generated client is emitted into a temp dir by a
+  smoke script; retiring `attach.rs` means `rozum meetings attach` must dispatch to a binary that is
+  actually built and installed — emit + `cargo build` + install in the deploy path, plus a decision
+  on whether the generated crate is vendored or emitted at build time. Deliberately unanswered: it
+  is a build-system question, not a continuation of this one.
+  ⚠️ **Lesson paid for here, and it generalises past this task:** the create-room test asserted 502
+  for an authorised POST assuming no daemon was listening. The operator's daemon WAS, and the test
+  created two live ad-hoc rooms in it (`neat-kite`, `rapid-reed` — removed, registry pruned). **A
+  test that reaches a socket is not a unit test; it is a client of whatever happens to be listening.**
   **What rozum needs before `attach.rs` can be retired:** their branch merged, and `bin/ssc-tools` rebuilt
   (`install.sh --dev`) — it is still built from `ec70eb062`, so we cannot consume any of this yet.
   Then: flip our fixture to `--require-auth` (already supported) and the existing Stage A smoke

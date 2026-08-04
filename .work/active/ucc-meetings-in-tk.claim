@@ -1,6 +1,7 @@
 feature/ucc-meetings-in-tk 2026-08-04T10:51:01Z
 agent: claude-opus-5-housekeeping
-heartbeat: 2026-08-04T18:43:35Z
-status: in-progress — ONE functional gap from retiring attach.rs (branch 0d4c095, rozum-meeting 196/196)
-done-so-far: one .ssc emits both clients with transcript+badge+time, authenticated read, composer, room picker (@you mentions), day picker, and a 3s clock that refreshes unattended. Daemon: badge/time, Bearer, plain-text submit, ready-made urls in /rooms and /days. Upstream: SEVEN capabilities landed (headers by them; url-signal, post, table-selection, remote-table-height, interval-tick by us)
-next: the only gap is creating an ad-hoc room (/new). rooms.new is an MCP tool and every other write proxies through console_call(room, ...) which assumes a room exists — needs a ROOMLESS proxy route plus a decision on which role may create rooms. Client side is then a text field + a button, both already working. After that attach.rs can go.
+heartbeat: 2026-08-04T21:42:13Z
+status: in-progress — CAPABILITY COMPLETE on branch aa27a2a (rozum-meeting 198/198, dual-target smoke green). Retirement now needs PACKAGING, not features
+done-so-far: one .ssc emits both clients with transcript+badge+time, authenticated read, composer, room picker (@you), day picker, 3s clock, and room creation. Daemon: badge/time, Bearer, plain-text submit, ready-made urls in /rooms and /days, POST /rooms. Upstream: seven capabilities landed, five by us
+next: PACKAGING — the generated client is emitted into a temp dir by a smoke script; retiring attach.rs means rozum meetings attach must dispatch to a binary that is built and installed (emit + cargo build + install in the deploy path, and a decision on vendored-vs-emitted-at-build-time). Build-system question, deliberately unanswered.
+lesson: a test that reaches a socket is not a unit test — the create-room test assumed no daemon was listening, the operator one WAS, and it created two live rooms (removed).
