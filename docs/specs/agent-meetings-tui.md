@@ -1,9 +1,15 @@
 # Agent Meetings — TUI
 
-> **Partly superseded (2026-06-17).** The TUI is now a client of the dedicated
-> meeting daemon (`agent-meetings-daemon.md`) with a room picker (`[o]rooms`) and
-> day-scoped rendering. **Turn/moderator controls (`/next`, `/mode`, `[r]`/`[m]`,
-> turn timeouts) are removed** — free-form submit only. Kept for history.
+> **⚠️ HISTORICAL — do NOT read this as a description of the TUI, and never as a parity list.**
+> Superseded 2026-06-17: the TUI became a client of the dedicated meeting daemon
+> (`agent-meetings-daemon.md`) with a room picker (`Ctrl-O` / `/rooms`) and day-scoped rendering.
+> **Everything below about moderator modes, turn timeouts, interject, the participants panel and the
+> budget panel was REMOVED** — the current client does free-form submit only.
+>
+> The live behaviour is defined by `crates/rozum-meeting/src/tui/attach.rs` (~312 lines); read that.
+> This warning is this strong because the file already misled once: `ucc-meetings-in-tk` was scoped
+> against it in 2026-08 and would have rebuilt controls that no longer exist
+> (`docs/specs/ucc-meetings-in-tk.md` records the correction).
 
 ## Layout
 

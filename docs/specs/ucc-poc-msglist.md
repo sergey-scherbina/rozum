@@ -87,6 +87,20 @@ backend contract from the real `.ssc` application.
 - existing rozum tests and repository checks remain green;
 - the sprint and changelog identify the exact commands and results.
 
+## What this proof did NOT cover (added 2026-08-04, by its successor)
+
+The dual-target mechanism is real and still green. But everything it proved, it proved **against an
+isolated fixture with no authentication** — as did ScalaScript's own
+`specs/frontend-tui-fetch-refresh.md`. The real data plane requires HTTP Basic on every route, and
+the terminal target turns out to send **no headers at all** (`ureq::get(url).call()`, and the
+`headers` signal never reaches the emitter's fetch record). So a generated terminal client can read
+a fixture and cannot read the live daemon.
+
+That is not a defect of this PoC — it was a stated non-goal to touch production networking. It is
+recorded here because the *shape* is worth carrying: **a capability proven against a fixture is
+proven only for fixtures.** Filed upstream as `tui-fetch-headers`; the successor spec is
+`ucc-meetings-in-tk.md`.
+
 ## Non-goals
 
 - message composition or posting;
