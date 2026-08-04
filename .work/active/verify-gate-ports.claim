@@ -1,6 +1,0 @@
-feature/verify-gate-ports 2026-08-04T11:05:00Z
-agent: claude-opus-5
-heartbeat: 2026-08-04T11:35:30Z
-status: in-progress
-done-so-far: both ports written+committed in the nadia repo; parity proven (9+9 unit tests, 18 ssc contract rules); ssc live run re-queued after a concurrent-run gateway timeout (rc=2, infrastructure)
-next: read both live runs, then merge nadia branch, close claim, remove worktrees

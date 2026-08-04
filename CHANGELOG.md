@@ -1,5 +1,60 @@
 # Changelog
 
+## verify-gate-ports — the gate is in all three nadias
+Completed: 2026-08-04
+
+`nadia:SPEC.md` §3.1 was written when only the Rust implementation had the verify
+gate, and it named that a gap rather than an option. Closed
+(`nadia:cebd78d`): Scala 3 has `sdk/Verify.scala` + `rozum/Gate.scala`,
+ScalaScript has `src/gate.ssc`, and the section no longer carries the caveat.
+
+**Parity is proven per implementation, not by reading.** Rust: 9 unit tests.
+Scala 3: nine deliberate twins — where they disagree, one of them is a bug; its
+scripted-`ModelClient` test drives the whole derivation (prose-wrapped JSON,
+`checkable:false`, an unreachable model) with no model at all. ScalaScript has no
+test harness in that repository, so `src/gate-check.ssc` runs 18 rules and exits
+non-zero when one changes; the missing harness is recorded in `nadia:BACKLOG.md`
+rather than papered over.
+
+**Writing the checks paid for itself three times**, each a defect no review would
+have caught:
+
+- `listDir` raises on a missing directory — and `misplacedProject` runs on
+  exactly the failure path where the workspace may be gone (BUG-017).
+- `runCheck` called `exec` with the wrong arity while all fifteen *pure* rules
+  passed: the defect was in the two functions that actually shell out, and only a
+  live run reached them. `gate-check.ssc` now exercises those too.
+- Neither prompt rule had reached the other two implementations. A live Scala 3
+  run produced both artifacts the Rust prompt was hardened against — a project in
+  `rpn-calculator/` and a `scratchpad/` mirror of the workspace path (BUG-016).
+  The `cargo init` edit had gone to `Nadia.scala` while the prompt lives in
+  `Prompt.scala`, and a string replace that matches nothing changes nothing
+  silently. Second no-op edit this session; the fix is the same — assert the
+  anchor was found.
+
+**Measured cost of the contract** (now in `nadia:SPEC.md` §3.1): 456+197 lines in
+Rust — a shared library with two consumers, carrying their tests — 244+86 in
+Scala 3 with only the JDK underneath, and 179 in ScalaScript with no generic half
+at all, because `std.agent` and `std.process` supply the model call and the
+process exec. The same finding §0 records for the loop: the framework is the
+smaller part.
+
+**Live runs, reported as they stand.** Scala 3: the check was derived, it failed,
+the repair round fired, and the misplaced-project hint did its job — the agent
+moved the project to the workspace root. The run then hit the harness's own 900 s
+timeout, so there is no end-to-end verdict, and it predates the prompt fix above.
+The ScalaScript run is still in flight; an earlier attempt returned rc=2 —
+correctly, as a gateway timeout while two agents competed for one resident 4B,
+which is infrastructure and not the gate.
+
+**Cost recorded because it was mine:** the ScalaScript front-end works in cwd by
+design; I ran it from inside its own worktree, the agent did as asked and
+`cargo init`-ed the repository, and `git add -A` committed `Cargo.toml` and
+`src/main.rs` next to `nadia.ssc`. Removed with the reasoning in
+`nadia:`. The two rules that prevent it were already written down: never give an
+agent a repository as its workspace, and never `git add -A` a tree an agent has
+touched.
+
 ## verify-gate-accuracy — the check now describes the task, not how it was spelled
 Completed: 2026-08-04
 
