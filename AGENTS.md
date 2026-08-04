@@ -9,13 +9,26 @@ SPEC: SPEC.md
 
 ## Skills
 
-Read `vendor/agent-plugins/multi-agent/commands/multi-agent.md` for the multi-agent coordination protocol. The sprint/work queue lives in `SPRINT.md`.
+Skills live in the `vendor/agent-plugins/` submodule. **Read `vendor/agent-plugins/AGENTS.md` —
+the index — and load any listed skill's `commands/<name>.md` on demand when its *When to use*
+matches.** The index is the source of truth, not this file: any subdirectory with a
+`commands/<name>.md` is a skill, so skills added to the submodule appear automatically with no edit
+here. Update them all with `git submodule update --remote vendor/agent-plugins`.
 
-Read `vendor/agent-plugins/multi-repo/commands/multi-repo.md` for the multi-repo workspace protocol. The registry lives in `REPOS.md`; this repo plus the vendored `mistral.rs` fork are treated as a virtual monorepo.
+> **Why this is a pointer and not a list.** It used to name four skills by hand, and the four it did
+> not name (`bugs`, `scrumban`, `isolate`, and later `performance` + `policy`) were invisible to
+> every agent that read only this file — while `BUGS.md` quietly pointed at the `bugs` skill on its
+> own. A hand-kept list drifts silently; the index cannot. **Do not re-expand this into a list.**
 
-Read `vendor/agent-plugins/spec-dev/commands/spec-dev.md` for the spec-driven development workflow.
+Two of them are load-bearing here and are worth naming for their project bindings, not to shorten
+the index: **`multi-agent`** — the claim/heartbeat/worktree protocol; the work queue is `SPRINT.md`
+and claims live in `.work/active/<slug>.claim`. **`multi-repo`** — the registry is `REPOS.md`; this
+repo plus the vendored `mistral.rs` fork are one virtual monorepo.
 
-Read `vendor/agent-plugins/rozum/commands/rozum.md` whenever you join a `rozum` meeting room. It covers polling cadence, submit etiquette, co-agent coordination, and the `working:` / `done:` convention.
+**Keep the submodule current.** A stale pin is not a cosmetic problem: on 2026-08-04 the pin was 7
+commits behind, and one of those commits raised the `multi-agent` claim-staleness threshold from 20
+to 45 minutes *to match the enforcing code*. An agent following the stale copy would have declared a
+live claim stale and taken work another agent was doing.
 
 ## Meeting-room coordination (use it)
 
