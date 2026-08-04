@@ -232,6 +232,42 @@ Filed on scalascript's board, not this one:
 - Delete `attach.rs`; point `rozum` / `rozum meetings attach` at the emitted binary; drop the
   now-unused ratatui/crossterm deps from `rozum-meeting` if nothing else uses them.
 
+**STAGE C SPLIT IN TWO, 2026-08-04 — and the second half is blocked on a FIFTH capability.**
+
+*Part one — DONE (`fb09bf4`).* The composer works: a text field bound to a draft signal, a send
+button whose `fetchActionClear` POSTs it, clears the field on success and bumps the transcript's own
+fetch tick, so the list re-reads with no extra wiring. Reads are authenticated end to end — the
+smoke's fixture now runs with `--require-auth` and refuses a header-less GET, so a regression in the
+headers support turns the gate red instead of quietly emptying the transcript. The daemon also
+accepts the message text on its own (`submit_payload`), because a terminal target cannot compose
+strings and so the composer physically cannot wrap what was typed in JSON.
+
+*Part two — BLOCKED on `tui-table-selection` (filed upstream 2026-08-04).* `View.DataTable` carries
+an `actions` list that the terminal emitter discards, and a table has no selection — so a room list
+renders and nothing can be picked from it. Everything else for a switcher now exists: the list is a
+remote table, `fetchUrlSignalTo` retargets the transcript, and the daemon can ship a ready-made URL
+per row so the client never composes a string (the same trick as `badge`/`time`). Only the last hop
+is missing. Rejected alternatives, so nobody re-derives them: a `TextInput` bound to the URL signal
+(the user types a URL — works, is not a product); one `SetSignalLiteral` button per room (needs the
+rooms known at emit time; they are not); composing from a room-name signal (`computedSignal` has no
+static-model equivalent at all).
+
+**Therefore `attach.rs` CANNOT be deleted yet, and this task is not done.** Its room picker is the
+one remaining gap, which is exactly the difference between "a second client we maintain" and
+"delete the hand-written one".
+
+### What is proven, and what is not
+
+| Claim | Evidence |
+|---|---|
+| badge/time are computed once, server-side | `messages_carry_derived_badge_and_time` — compares against `StoredTurn::badge()`, not a literal |
+| Bearer works and equals Basic | `bearer_is_accepted_alongside_basic` — compares the two schemes against each other |
+| the message text may be posted on its own | `submit_payload_takes_text_or_the_structured_form` — including the quoted-string case |
+| the terminal client reads an AUTHENTICATED endpoint | dual-target smoke, fixture `--require-auth`, refuses header-less |
+| the emitted client can actually POST | scalascript `TuiFetchCargoTest` — compiles the crate, posts to a real local server, asserts the SERVER saw the body |
+| a signal URL retargets the GET | same file — retarget with the tick untouched |
+| **generated client ↔ rozum's own REST, one process** | **NOT RUN.** The daemon lives in the heavy `rozum` binary (MLX); standing one up for this is out of proportion, and the operator's live daemon runs the deployed build without Bearer. Each piece above is proven separately; the seam between them is not. Worth doing when that binary is being built anyway — do NOT disturb the operator's services for it. |
+
 **Done when:** every numbered item in the parity list is demonstrated in the *generated* terminal
 client; `attach.rs` is deleted and the tree builds; `rozum meetings attach` still opens a room,
 switches rooms, and posts as the human's own handle.
