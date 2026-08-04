@@ -168,6 +168,17 @@ grep -Fq '"meetingsRefresh".to_string()' "$RUST_SOURCE" || {
   echo "FAIL: the refresh tick is not the one the clock advances" >&2
   exit 1
 }
+# THE assertion this client exists to satisfy: the token must not be IN the binary. The value is
+# exported above and would have been folded into initial_signals as a literal before credentials —
+# which is exactly why the client could not be installed or shared.
+if grep -Fq "$TOKEN" "$RUST_SOURCE"; then
+  echo "FAIL: the token was compiled into the emitted source — it must be resolved on the target" >&2
+  exit 1
+fi
+grep -Fq 'resolve_credential("env", "ROZUM_MEETING_TOKEN", "Bearer")' "$RUST_SOURCE" || {
+  echo "FAIL: the client does not declare its credential — nothing will authenticate" >&2
+  exit 1
+}
 # Room creation — the last thing attach.rs could do that this could not. It posts the topic to
 # /rooms; the response is ignored on purpose (a generated client has nowhere to read one), and the
 # shared tick makes the new room appear in the picker.
@@ -179,5 +190,6 @@ grep -Fq "$BASE/rooms\", \"meetingsNewRoom\"" "$RUST_SOURCE" || {
   echo "FAIL: the create button does not post the topic to /rooms" >&2
   exit 1
 }
-echo "PASS: authenticated read + composer + room+day pickers + clock + room creation"
+echo "PASS: authenticated read + composer + pickers + clock + room creation"
+echo "PASS: the token is DECLARED, not compiled in — the binary is shareable"
 echo "PASS: ucc-meetings-in-tk Stage A dual-target smoke"

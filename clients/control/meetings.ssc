@@ -29,21 +29,19 @@ client is supposed to end.
 daemon grew Bearer support for exactly this client: Basic needs base64 of `":" + token` and a view
 has no base64, which previously forced this source to accept a pre-built header instead of a token.
 
-**Two caveats, both real, neither a defect of this file.**
+**The token is DECLARED, never held.** `credentialEnv("ROZUM_MEETING_TOKEN")` names the variable
+and carries no value, so the emitter has nothing to bake and the running binary reads it at call
+time. Before this, the token was compiled into `initial_signals` as a literal — which is why the
+client could not be installed or shared, and is the reason the upstream `Credential` work exists.
+Every fetch AND every write declares it: a client that authenticates its reads by declaration and
+its writes by a baked header still ships the token.
 
-1. The terminal target silently drops the header signal today (`ureq::get(url).call()`, no headers)
-   — filed upstream as `tui-fetch-headers` — so the emitted terminal binary reads an
-   unauthenticated fixture, not the live daemon.
-2. ⚠️ **Do not set `ROZUM_MEETING_TOKEN` when emitting the terminal target.** `ssc run --v1`
-   executes this program in the emitting process, so `env(...)` is read at BUILD time and anything
-   derived from it is folded into the generated Rust as a literal — a token set here would be
-   compiled into the binary. Today the header is dropped so nothing leaks; the moment headers are
-   honoured naively, it would. The durable fix is a credential the target's RUNTIME resolves,
-   proposed upstream as `ui-fetch-credentials`. Until then: emit without the token, supply it to the
-   running client.
+The gate proves the absence, not the presence: it exports a known token, emits, and fails if that
+string appears anywhere in the generated source.
 
 [env](std/os.ssc)
-[signal, intervalTick, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, incSignal, fieldColumn, rowLinkAction](std/ui/primitives.ssc)
+[signal, intervalTick, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, incSignal, fieldColumn, rowLinkAction, emptyHeaders](std/ui/primitives.ssc)
+[credentialEnv](std/credential.ssc)
 [lower](std/ui/lower.ssc)
 [defaultTheme](std/ui/theme.ssc)
 [vstack, hstack](std/ui/layout.ssc)
@@ -55,23 +53,25 @@ has no base64, which previously forced this source to accept a pre-built header 
 val apiBase = env("ROZUM_MEETING_BASE").getOrElse("http://127.0.0.1:8401")
 val room    = env("ROZUM_MEETING_ROOM").getOrElse("rozum")
 val day     = env("ROZUM_MEETING_DATE").getOrElse("today")
-val token   = env("ROZUM_MEETING_TOKEN").getOrElse("")
+// The token is DECLARED, not read: `credentialEnv` names the variable and carries no value, so the
+// emitter has nothing to bake and the running binary reads it at call time. Before this, the token
+// was compiled into initial_signals — which is why the client could not be installed or shared.
 
 // ONE tick drives everything that re-reads: the clock advances it every 3 s, the refresh button
 // bumps it, and a successful post bumps it. A meeting client that only updated on a keypress would
 // not be a replacement for `rozum meetings attach`, which shows a message the moment it lands.
 // The terminal loop polls with a 100 ms timeout, so 3 s is a floor rather than a guarantee.
 val refresh = intervalTick("meetingsRefresh", 3000)
-val headers = signal("meetingsHeaders", "{\"Authorization\":\"Bearer " + token + "\"}")
+val creds = credentialEnv("ROZUM_MEETING_TOKEN")
 
 // The room picker writes a READY-MADE url into `here`, and the transcript follows it. The client
 // never composes an address — it cannot, there is no string composition on the terminal target —
 // so `/rooms` ships the finished url per row, exactly as it ships `badge` and `time`.
 val here = signal("meetingsUrl", apiBase + "/rooms/" + room + "/messages/" + day)
 
-val transcript = fetchUrlSignalTo("meetingsTranscript", here, refresh, headers)
+val transcript = fetchUrlSignalTo("meetingsTranscript", here, refresh, emptyHeaders, creds)
 
-val roomList = fetchUrlSignal("meetingsRooms", apiBase + "/rooms", refresh, headers)
+val roomList = fetchUrlSignal("meetingsRooms", apiBase + "/rooms", refresh, emptyHeaders, creds)
 
 // `mentions` is what this daemon can honestly count as unread: messages ADDRESSING you that you
 // have not seen. A raw unread number would need a per-viewer read marker that does not exist.
@@ -110,12 +110,12 @@ val transcriptTable = remoteTable(
 // in the static model), so it cannot wrap the text in JSON. The daemon accepts the plain-text form
 // for exactly this reason — same call as `badge` and `time`, put the work where it can be done once.
 val draft = signal("meetingsDraft", "")
-val send = fetchActionClear("POST", apiBase + "/rooms/" + room + "/messages", draft, refresh, headers)
+val send = fetchActionClear("POST", apiBase + "/rooms/" + room + "/messages", draft, refresh, emptyHeaders, creds)
 
 // Day paging is the SAME interaction as room switching — pick a row, the transcript follows —
 // rather than a bespoke PgUp, which would need date arithmetic the terminal target cannot do.
 // Newest first, because a reader opening the list wants today.
-val dayList = fetchUrlSignal("meetingsDays", apiBase + "/rooms/" + room + "/days", refresh, headers)
+val dayList = fetchUrlSignal("meetingsDays", apiBase + "/rooms/" + room + "/days", refresh, emptyHeaders, creds)
 
 val dayTable = remoteTable(
   dayList,
@@ -129,7 +129,7 @@ val dayTable = remoteTable(
 // but a generated client has nowhere to read a response — it does not need to: creating bumps the
 // shared tick, the room list re-reads, and the new room appears in the picker to be chosen.
 val newRoom = signal("meetingsNewRoom", "")
-val create = fetchActionClear("POST", apiBase + "/rooms", newRoom, refresh, headers)
+val create = fetchActionClear("POST", apiBase + "/rooms", newRoom, refresh, emptyHeaders, creds)
 
 val sidebar = vstack(gap = 1)(
   heading(1, "rozum"),
