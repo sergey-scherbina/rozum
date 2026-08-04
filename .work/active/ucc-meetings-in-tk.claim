@@ -1,7 +1,7 @@
 feature/ucc-meetings-in-tk 2026-08-04T10:51:01Z
 agent: claude-opus-5-housekeeping
-heartbeat: 2026-08-04T21:42:13Z
-status: in-progress — CAPABILITY COMPLETE on branch aa27a2a (rozum-meeting 198/198, dual-target smoke green). Retirement now needs PACKAGING, not features
-done-so-far: one .ssc emits both clients with transcript+badge+time, authenticated read, composer, room picker (@you), day picker, 3s clock, and room creation. Daemon: badge/time, Bearer, plain-text submit, ready-made urls in /rooms and /days, POST /rooms. Upstream: seven capabilities landed, five by us
-next: PACKAGING — the generated client is emitted into a temp dir by a smoke script; retiring attach.rs means rozum meetings attach must dispatch to a binary that is built and installed (emit + cargo build + install in the deploy path, and a decision on vendored-vs-emitted-at-build-time). Build-system question, deliberately unanswered.
-lesson: a test that reaches a socket is not a unit test — the create-room test assumed no daemon was listening, the operator one WAS, and it created two live rooms (removed).
+heartbeat: 2026-08-04T21:52:39Z
+status: BLOCKED on upstream — capability complete (branch e2238dc, rozum-meeting 198/198), packaging cannot start until scalascript ui-fetch-credentials S2 lands
+done-so-far: one .ssc emits both clients — transcript+badge+time, authenticated read, composer, room picker (@you), day picker, 3s clock, room creation. Daemon: badge/time, Bearer, plain-text submit, ready-made urls in /rooms and /days, POST /rooms. Upstream: seven capabilities landed, five by us
+next: WAIT for scalascript S2 (emitter-side credential resolution). PROOF it is required: the emitted crate has the token compiled into initial_signals and reads std::env once, for the snapshot flag only — so a vendored binary carries the build-time token, wrong for every operator and a secret in an artifact. We need one form, credentialEnv("ROZUM_MEETING_TOKEN"). Then: vendor the crate + a byte-identical regeneration gate, dispatch `rozum meetings attach` at the built binary, delete attach.rs. Not before.
+note: told scalascript in their room that TuiEmitter.scala is free — their S2 claim was waiting on a claim of mine released hours earlier.

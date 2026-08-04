@@ -2817,6 +2817,18 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   for an authorised POST assuming no daemon was listening. The operator's daemon WAS, and the test
   created two live ad-hoc rooms in it (`neat-kite`, `rapid-reed` — removed, registry pruned). **A
   test that reaches a socket is not a unit test; it is a client of whatever happens to be listening.**
+  **PACKAGING IS BLOCKED, and the blocker is the hazard we ourselves filed.** The emitted crate has
+  the token compiled into `initial_signals` — `env()` on the terminal target resolves in the emitting
+  process, and the generated Rust reads `std::env` once, for the snapshot flag. So a vendored binary
+  would carry the build-time token: wrong for every other operator, and a secret shipped inside an
+  artifact. There is no rozum-side workaround; the signal store is fixed at compile time.
+  Upstream is on it: scalascript's `std/credential.ssc` (S1) has landed — a `Credential` names WHERE
+  a secret comes from and carries none — and **S2, the emitter-side resolution, is what unblocks us.**
+  We need exactly one form: `credentialEnv("ROZUM_MEETING_TOKEN")`. Their S2 claim was waiting on
+  `TuiEmitter.scala`, which one of our own claims had already released hours earlier — told them in
+  their room, so that wait is over.
+  ORDER, so nobody starts at the wrong end: S2 upstream → vendor the crate + a byte-identical
+  regeneration gate → dispatch `rozum meetings attach` at the built binary → delete `attach.rs`.
   **What rozum needs before `attach.rs` can be retired:** their branch merged, and `bin/ssc-tools` rebuilt
   (`install.sh --dev`) — it is still built from `ec70eb062`, so we cannot consume any of this yet.
   Then: flip our fixture to `--require-auth` (already supported) and the existing Stage A smoke
