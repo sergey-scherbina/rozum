@@ -1,6 +1,6 @@
 feature/ucc-meetings-in-tk 2026-08-04T10:51:01Z
 agent: claude-opus-5-housekeeping
-heartbeat: 2026-08-04T16:15:48Z
-status: in-progress — Stage A + C part one + C part two (picker) on the branch (837eca1); attach.rs NOT retirable yet
-done-so-far: one .ssc emits both clients: transcript+badge+time, authenticated read, composer, room picker with a ready-made url and a @you mentions column. Daemon: badge/time, Bearer, plain-text submit, /rooms entries. Upstream: SIX capabilities landed (headers by them; url-signal, post, table-selection, remote-table-height by us)
-next: parity ledger in the spec ranks what retirement needs — (1) live arrival: IntervalTick is in the model and ABSENT from the tui emitter, so the client only refreshes on a keypress; (2) PgUp day paging; (3) slash commands; (4) rich transcript (React-only, may never come)
+heartbeat: 2026-08-04T18:43:35Z
+status: in-progress — ONE functional gap from retiring attach.rs (branch 0d4c095, rozum-meeting 196/196)
+done-so-far: one .ssc emits both clients with transcript+badge+time, authenticated read, composer, room picker (@you mentions), day picker, and a 3s clock that refreshes unattended. Daemon: badge/time, Bearer, plain-text submit, ready-made urls in /rooms and /days. Upstream: SEVEN capabilities landed (headers by them; url-signal, post, table-selection, remote-table-height, interval-tick by us)
+next: the only gap is creating an ad-hoc room (/new). rooms.new is an MCP tool and every other write proxies through console_call(room, ...) which assumes a room exists — needs a ROOMLESS proxy route plus a decision on which role may create rooms. Client side is then a text field + a button, both already working. After that attach.rs can go.

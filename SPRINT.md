@@ -2767,6 +2767,17 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   while `attach.rs` holds a long-poll and shows a message the moment it lands. A meeting client that
   only updates when you press a key is not a replacement. Ranked next: live arrival → `PgUp` day
   paging → slash commands → the rich transcript (React-only; may never come).
+  **ONE FUNCTIONAL GAP LEFT (2026-08-04, branch `0d4c095`).** The client now also refreshes itself
+  (a 3 s `intervalTick`, after we landed `tui-interval-tick` upstream — one tick drives the clock,
+  the refresh button and a successful post) and pages days through a second picker: `/rooms/{n}/days`
+  ships a ready-made url per day, newest first, so paging is the same interaction as switching rooms
+  instead of a PgUp needing date arithmetic the target cannot do.
+  **Everything a person does in `attach.rs` now works EXCEPT creating an ad-hoc room**, and that one
+  is not a papercut: `rozum rooms` only prunes, so `attach.rs` is currently the only interactive way
+  to make one. Closing it needs a ROOMLESS proxy route (`rooms.new` is an MCP tool; every other write
+  goes through `console_call(room, …)`, which assumes a room exists) plus a decision on which role
+  may create rooms — a different shape from the rest, left for its own pass rather than tacked on.
+  Nothing further is needed from scalascript.
   **What rozum needs before `attach.rs` can be retired:** their branch merged, and `bin/ssc-tools` rebuilt
   (`install.sh --dev`) — it is still built from `ec70eb062`, so we cannot consume any of this yet.
   Then: flip our fixture to `--require-auth` (already supported) and the existing Stage A smoke
