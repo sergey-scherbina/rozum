@@ -17,13 +17,26 @@ worktree `nadia:.worktrees/feature/verify-gate-ports`. The contract already exis
 spec, not new design. **It is a debt I created**: §3.1 says "the ScalaScript and Scala 3 ones do
 not have it yet. That is a gap in them, not an option."
 
-- [ ] **vgp-scala3** — `scala/sdk/Verify.scala` (generic: ModelClient in, nothing about rozum or
-  nadia) + the policy in `nadia.rozum`. Mirrors the Rust split rozum-agent::verify / nadia::gate.
-- [ ] **vgp-ssc** — `src/gate.ssc` over `std.agent`, same rules, same wording.
-- [ ] **vgp-parity** — the three implementations must agree on the parts that are contract, not
-  taste: `checkable:false` is an answer, an invented cargo check is dropped, a delimiting quote is
-  not part of the argument, a failed check means not done. Prove it per implementation rather than
-  by reading.
+- [x] **vgp-scala3 — DONE** (`nadia:43f064e`). `scala/sdk/Verify.scala` (generic) +
+  `scala/rozum/Gate.scala` (policy), 9 tests deliberately twinned with the Rust ones. The
+  scripted-ModelClient test exercises the whole derivation — prose-wrapped JSON, checkable=false,
+  an unreachable model — with no model at all; that is what the interface is for.
+- [x] **vgp-ssc — DONE** (`nadia:2649bbd`, fix `nadia:` exec arity). ~150 lines against Scala 3's
+  ~230 for the identical contract — the difference is exactly what `std.agent` and `std.process`
+  already provide, the same finding SPEC §0 records for the loop.
+- [x] **vgp-parity — DONE.** Rust 9 tests, Scala 3 nine twins, and — since the ScalaScript side has
+  no test harness in that repo — `src/gate-check.ssc`, 18 rules that exit non-zero when one changes.
+  It earned its keep twice on the first run: `listDir` raises on a missing directory (and
+  `misplacedProject` runs on exactly the failure path where the workspace may be gone), and
+  `runCheck` was calling `exec` with the wrong arity while all fifteen PURE rules passed. The
+  missing harness is recorded in `nadia:BACKLOG.md` rather than papered over.
+
+**Cost recorded, because it was mine:** the ScalaScript front-end works in cwd by design, I ran it
+from inside its own worktree to test the gate live, and the agent did as asked — `cargo init` in
+the workspace it was given, which was the repository. `git add -A` then committed `Cargo.toml` and
+`src/main.rs` next to `nadia.ssc`. Removed in `nadia:` with the reasoning; the two rules that would
+have prevented it are already written down: never give an agent a repository as its workspace, and
+never `git add -A` a tree an agent has touched.
 
 ### ▶ Verify-gate accuracy (operator 2026-08-04: "Начинать с (1) и (2)" → "продолжай, начинай и продолжай")
 
