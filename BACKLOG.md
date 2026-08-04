@@ -1634,3 +1634,223 @@ Stretch items deliberately out of scope of the initial A→B+C→D delivery. See
 - [x] docs-bootstrap - **DONE 2026-06-15** (`README.md`). Refreshed the README with the LLM gateway /
   `rozum launch` / model-cascade quickstart (it was meeting-room only). Clone/submodule/build + first
   room + MCP proxy were already covered.
+
+## Deprioritised 2026-08-04 — the model is frozen on Qwen3.5-4B
+
+The operator settled on a single model: **`mlx-community:Qwen3.5-4B-MLX-4bit`**, the one model
+actually on disk (every other tier — gpt-oss, GLM, Devstral, Qwen3-Coder, 35B — is no longer in
+`~/.cache/huggingface`). Everything below was moved out of `SPRINT.md` on 2026-08-04 because it
+only pays off for a model, a driver, or a hardware target that is not in use. Each entry is kept
+VERBATIM so it can be promoted back unchanged; the **Parked because** line says what would
+revive it.
+
+**Parked because:** Operator froze the model on Qwen3.5-4B (2026-08-04): there is no routing decision left to make, and the other tiers are not even on disk any more (only Qwen3.5-4B-MLX-4bit is cached). Revive only if a second model is adopted.
+
+- [ ] **B2 (original) — one authoritative full matrix** (the real baseline + the data for routing) — now all 3
+  drivers work + all fixes in: `claude+codex+opencode × curated-tier × all tasks`, `RUN_TIMEOUT=900`,
+  REPS≥1, capture on. Produces (a) the authoritative honest number, (b) the `model × driver` capability
+  table that B3 needs. Slot-gated, ~2h — run in background.
+
+**Parked because:** gpt-oss under codex/opencode. Neither the model (not cached) nor the driver is in use — the live setup is Qwen3.5-4B under the `claude` harness. Detailed root-cause notes kept below; the BACKLOG entry of the same slug holds the rest.
+
+- [ ] **codex-opencode-create-delivery (original notes)** — see BACKLOG
+  `codex-opencode-create-delivery` for the full evidence. ROOT CAUSE PINNED: gpt-oss (via codex) emits
+  `apply_patch -patches '[{"content":"*** Begin Patch\n*** Add File: …*** End Patch"}]'` (patch wrapped in
+  a JSON array under `-patches`, body JSON-escaped `\n`/`\"`). `rewrite_apply_patch_command`
+  (crates/rozum-gateway/src/gateway.rs ~2232) only undoes SHELL double-quote escaping, not JSON, so the
+  block keeps literal `\n`, `apply_patch_block_to_fuzz` can't parse the `*** Add File:` directives, the
+  rewrite returns None, the original runs against the real shim → `apply_patch accepts exactly one
+  argument` → no files → codex loop-breaker → rc11. On the ucc run this is `deliver 12` (codex) + `deliver
+  13` (opencode) of the curated-tier failures.
+  EXACT STEPS: (1) in `rewrite_apply_patch_command`, before the shell-unescape, detect the JSON-wrapped
+  form — an `apply_patch` arg that is (or contains) a JSON array/object with a `content` field; when so,
+  `serde_json`-decode each object's `content` into a real-newline V4A patch string and run each through the
+  existing `apply_patch_block_to_fuzz` (which already yields `synth_create_command` `cat > <path>` heredocs
+  for `*** Add File:`), concatenating the results. Keep the existing raw/heredoc path for the non-JSON form.
+  (2) Also capture codex×Devstral×build's rc11 emission shape (kept workdir `/tmp/rozum-agentic-Rf1YJM`
+  showed nothing on the first grep — re-inspect) and cover it if different. (3) `cargo build -p rozum`
+  (builds the gateway bin — NOT target/release/rozum; see [[reference-rozum-binary-split]]).
+  VERIFY (GPU-gated, slot must be free): `AGENTIC_MODELS="mlx-community:gpt-oss-20b-MXFP4-Q4" AGENTS=codex
+  TASKS=build REPS=3 REPAIR=1 KEEP=1 BENCH_BIN=./target/release/rozum-gateway bash scripts/bench/agentic.sh`
+  — expect build to go from 0/3 → passing, and inspect a kept workdir to confirm Cargo.toml + src/main.rs
+  actually land (no "accepts exactly one argument"). Do it on a `feature/codex-create-delivery` worktree
+  off origin/master; do not push until verified.
+
+**Parked because:** Qwen3-Coder-30B — a DIFFERENT model from the frozen Qwen3.5-4B, and not on disk. Parts (a) and (b) already shipped; only the GPU-gated live verify remains, and it cannot run without the model.
+
+- [ ] **qwen-coder-edit-toolarg-decode** (HIGH; board updated 2026-07-08 — the entry was stale) —
+  Qwen3-Coder edit-path (fix/test) corruption: XML-entity escaping in `<parameter>` values.
+  (a) DONE `3005e3f` (R2.1, 2026-07-05): html-entity decode (`&quot;` `&lt;` `&gt;` `&apos;` `&amp;`)
+  in the `<parameter>` string fallback, unit-tested. The board previously said "no decoding exists" —
+  that predated R2.1.
+  (b) newline loss: hypothesis — same escaping mode encodes line breaks NUMERICALLY (`&#10;`), so a
+  multiline file arrives as one line. DONE (this commit): `&#10;`/`&#13;`/`&#9;` decode + unit test
+  reproducing the exact one-line-doc-comment failure shape. Additive/safe: numeric whitespace
+  entities never legitimately appear in intended file content.
+  REMAINING (GPU-gated, queued in the RAM window behind the B2-GLM matrix): live verify
+  `AGENTIC_MODELS=Qwen3-Coder-30B AGENTS=claude TASKS="fix test" REPS=3 REPAIR=1 KEEP=1
+  ROZUM_RAW_DUMP=1` → expect fix/test pass + a kept workdir with real multiline src/main.rs; RAW_DUMP
+  settles the hypothesis if cells still fail (then the collapse is model-side and needs a different
+  lever). Original kept workdirs are gone (/tmp cleaned) — RAW_DUMP recaptures evidence.
+
+**Parked because:** GLM-4-32B under codex/opencode — model not cached, driver not in use.
+
+- [ ] **glm32b-codex-timeout** (MED, cheap wall-clock) — GLM-4-32B under codex/opencode times out (rc124)
+  on ~7 curated cells; dense 32B fits resident, so cost is per-turn reload/slowness, not OOM. Lever: keep
+  GLM-4-32B resident (EAGER) for the run, or a driver-specific higher RUN_TIMEOUT. See BACKLOG.
+
+**Parked because:** Bench-harness polish whose failing cell is Devstral (not cached). With the full matrix parked this has no reader.
+
+- [ ] **test-cell-repair-failfast** (LOW) — repair Edit-before-Read churn burns the full RUN_TIMEOUT
+  (rc124) without converging; grant ONE bonus repair attempt AFTER `repair_tool_protocol_hint` first fires,
+  and/or detect the churn live and fail-fast. Model-side assertion bug (Devstral writes `reverse("")`) is a
+  known weak cell — do NOT chase to green. See BACKLOG `test-cell-repair-failfast`.
+
+**Parked because:** GLM-4 MoE native port. The only family member that fits 36 GiB (GLM-4.7-Flash) needs an MLA attention we do not have; with the model frozen on Qwen3.5-4B this buys nothing now.
+
+- [ ] **mlx-glm4-moe** — port GLM-4 MoE to native MLX. **REPRIORITIZED → bigger than thought**
+  (checkpoint inspection 2026-06-27, spec `docs/specs/glm4-moe-native.md`): the family splits by
+  attention and it's adversarial — `glm4_moe` (GLM-4.5-Air/4.6) is easy GQA but **too big for 36 GiB**;
+  `glm4_moe_lite` (**GLM-4.7-Flash**, 16.9 GB, the only one that FITS) uses **MLA** (DeepSeek-V2-style
+  latent attention: q_a/q_b + kv_a, q_lora 768 / kv_lora 512 / qk_nope 192 / qk_rope 64 / v 256) —
+  a NEW attention we don't have → **HIGH effort, same work as `mlx-port-deepseek-v2` (do together)**.
+  The "reuse glm4.rs attention" plan was WRONG (verified before writing code — discipline paid off).
+  MoE side IS adaptable (sigmoid + correction-bias + flat top-k(4, n_group=1) + shared expert +
+  routed_scaling 1.8; naming `mlp.switch_mlp.*`/`mlp.shared_experts.*`/`mlp.gate.e_score_correction_bias`;
+  first_k_dense_layers=1 ⇒ mixed dense/MoE, which the fork doesn't yet handle). **Decision: defer the
+  MLA port; the matrix win is `matrix-add-coders` (Qwen3-Coder, zero port) — run that first.** Fork
+  scaffold parked: `feature/glm4-moe` (`.vendor/mlx-lm/.../models/glm4_moe.rs`, NOT in mod.rs).
+
+**Parked because:** A cascade needs at least two models; there is one. Revive together with any second-model decision.
+
+- [ ] **gptoss-codex-cascade** (stretch, now ALSO the GLM lever) — gpt-oss/GLM for speed, auto-fall-back
+  to 35B on a failed cell (the `CascadeBackend` exists). Best-of-both: fast when the small model succeeds,
+  35B-reliable when it doesn't. The matrix proved 35B is the agentic driver (14/15) and GLM is not (4/15,
+  multi-layered tool-use non-robustness per `glm-shell-delivery-fix` above) → cascade is the highest-
+  leverage RELIABILITY lever for the weaker models, without fighting their nature.
+
+**Parked because:** Its own TRIAGE already says it needs an operator decision first and rewrites the matrix-critical request/SSE path — highest risk, no payoff for the single frozen model.
+
+- [ ] **plugin-wireprotocol** — make the agent wire layer a real `WireProtocol` trait
+  (Chat / Messages / Responses impls). Supersedes the arch-spi "map, not trait" call —
+  full plugin-ization is the goal. **(See TRIAGE above — re-scope + re-decide before starting.)**
+
+**Parked because:** Its own TRIAGE already decided this out-of-scope pending an operator override.
+
+- [ ] **plugin-services** — services (gateway / web / meetings / bridges) behind a plugin
+  registry instead of `Command` match arms. **(See TRIAGE — decided out-of-scope; needs override.)**
+
+**Parked because:** Remaining work is Vulkan kernels and needs x86 hardware that is not here.
+
+- [ ] **plugin-x86-engine** — the reserved `rozum-x86` engine slot → a real engine plugin
+  behind `LocalEngine` / `ChatBackend` (the North-Star multi-device frontier).
+  (Already plugin-ized: `ChatBackend`, `ToolSource` + MCP client, `ToolDialect`.)
+  **(See TRIAGE — already structurally a plugin; remaining work is Vulkan kernels → needs x86 HW.)**
+
+**Parked because:** Device detect + placement for other hardware (North Star). Nothing to place while one model runs on one Mac.
+
+- [ ] **Phase 4 — `rozum-hardware`** (device detect + placement; North Star). Separate spec —
+  reserved as a crate slot here, designed later (it is new work, not a move).
+
+**Parked because:** Explicitly the ARCHITECTURE PREREQUISITE of `x86-native-runtime`; phases A1/A2a already landed. The rest pays off only when a second engine/hardware target exists.
+
+- [ ] native-engine-spi - **ARCHITECTURE FIRST (prerequisite of `x86-native-runtime`).**
+  Draw the internal seam every in-process engine shares so a new engine is "implement
+  a tiny trait + its kernels", not "re-implement the leaf". Lift the engine-agnostic
+  decode/serving logic UP into one shared `drive` loop behind a `LocalEngine` trait;
+  push hardware/kernels DOWN into small isolated components. The decode-control loop
+  is currently copy-pasted (MLX `stream_generation`, GGUF's own loop) — x86 would be
+  a third. Hardware-independent; validated on MLX+GGUF on a Mac. Phases: **A1 [x]**
+  define the seam (`src/engine.rs`: `LocalEngine`/`EngineMeta`/`drive`) → **A2a [x]**
+  extract the engine-agnostic consumption loop `consume_tokens` (detok→`ChatEvent`,
+  harmony + `<tool_call>` parse, EOS/max-tokens/runaway-guard, finalize) +
+  `is_runaway_loop`/`next_tool_call_id`, unit-tested hardware-free → **A2b [x]** rewire
+  the MLX leaf: `stream_generation` now only PRODUCES token ids (`PipelinedIds`, keeps
+  the `async_eval` pipelining; lazy serial fetch so hybrid prefix-reuse stays in sync)
+  and delegates to `consume_tokens` (the ~200-line copy deleted). Validated: 314 lib
+  tests; gpt-oss chat+tool+~90 tok/s; Qwen3.6-27B hybrid multi-turn prefix-reuse. (A
+  formal `impl LocalEngine` wrapping load/meta/generate is the remaining tidy-up.) →
+  helpers consolidated to one source. **Core done — the shared layer the x86 leaf
+  needs is ready** (`consume_tokens`, `sampler`, `serving`/`harmony`, model-reference).
+  **A3 [IN PROGRESS — user-authorized full hardware-independent push, 2026-06-18]**
+  (branch `feature/native-engine-spi-a2-a3`). Step 1 DONE: **`portability-shared-
+  model-source` extracted** — `spec_to_hf_repo`/`resolve_model_dir`/
+  `config_model_type`/`ensure_model_dir` lifted out of the MLX leaf into a new
+  engine-agnostic `src/model_source.rs`, with the per-engine "can I load this
+  `model_type`?" decision passed in as a **`gate` callback** (so mistralrs / a
+  future leaf reuse one fetch/cache/resolve path); the MLX leaf keeps its catalog
+  (`supported_model_type`/`model_type_gate`) and re-exports for zero caller churn.
+  Verified: feature-free build green, `model_source` unit tests pass, `mlx-native
+  --tests` compiles. Step 2 DONE: **`drive` implemented** (was `unimplemented!()`) —
+  runs `LocalEngine::generate` over a rendered prompt → `consume_tokens`, render/detok
+  stay caller-side (engine tokenizer is borrowed separately from its forward graph);
+  unit-tested end-to-end via a minimal in-memory `FakeEngine`. **FINDING (blocks the
+  formal MLX `impl LocalEngine`):** the MLX **hybrid** arches (Qwen3.6) reclaim the
+  generator's internal KV/conv cache *after* a run (`into_cache_and_snapshot`, for
+  prefix reuse), which a `generate()->Box<dyn Iterator>` return ERASES — so routing
+  hybrid MLX through `drive` would break shipped prefix reuse. The trait needs a
+  cache-reclaim seam, deferred to be shaped against the real x86 engine (dense MLX +
+  the x86 leaf have no such reclaim and can adopt `drive` directly). NEXT: A3 GGUF
+  adoption (caveat retained: don't downgrade GGUF's *streaming* tool parser;
+  render/preflight lift) — also best shaped by the x86 consumer.
+  Token-level seam,
+  NOT a per-op tensor abstraction (avoids the `mistralrs-mlx-direct` perf dead-end).
+  Spec: `docs/specs/native-engine-spi.md`.
+  - [x] **engine-spi-a3-gguf — DONE 2026-06-20** (branch `feature/gguf-consume-tokens`). GGUF's
+        `generate_blocking` now drives `crate::engine::consume_tokens` via a token iterator
+        (`std::iter::from_fn` over llama.cpp sample→advance) + a per-token detok closure; deleted GGUF's
+        private ~150-line decode loop + the streaming `ToolUseParser`/`ToolParseEvent`. SPI now proven by
+        **two real engines** (MLX + GGUF). `consume_tokens` has no `Send` bound, so the `!Send`
+        `LlamaContext` works on the blocking thread (couldn't use `drive()`). The "streaming→finalize"
+        tool-call change is cosmetic (clients coalesce). **Surfaced + fixed a pre-existing GGUF bug:**
+        `get_logits_ith(n_cur-1)` used the absolute position, but it indexes the last decoded batch
+        (1-token decode batch → index 0) → after the first token it read garbage → an end token →
+        generation stopped after ~1 token. GGUF was effectively broken in rozum. Fixed (track the right
+        index). **Validated e2e** on `ollama:qwen2.5-coder:7b`: before — count→`"1"`, tool→`{"`; after —
+        full `"1 2 … 20"` + correct `get_weather` tool_call with a cross-turn-safe id. (Step 1, the
+        `next_tool_call_id` fix on `feature/gguf-toolcall-id`, was superseded here — `consume_tokens`
+        already uses it.)
+  - [x] **engine-spi-dense-mlx-drive — DONE 2026-06-21** (branch `feature/dense-mlx-drive`). Two parts:
+        (1) **Send-relaxation** (prereq) — dropped `Send` from `LocalEngine` + `generate()`'s return; a
+        feasibility map proved this (not the reclaim seam) was the real blocker, since the MLX engine
+        state is irreducibly `!Send`. `drive` runs the engine synchronously on its own thread, so `Send`
+        was unneeded. Proven by `drive_accepts_a_not_send_engine` (Rc-holding `!Send` engine — would not
+        compile before). (2) **The adoption** — a `DenseMlxEngine` (`impl LocalEngine`) whose `generate`
+        dispatches per dense arch (Qwen3/Qwen3Moe/GptOss/Llama/Qwen2/Gemma3), built from the prepared
+        prefill + borrowed model+cache (split-borrow); `run_job` now routes the 6 dense arches through
+        `engine::drive`, while the 2 hybrid arms stay on `stream_generation` (they reclaim via
+        `into_cache_and_snapshot`, which `Box<dyn Iterator>` would erase). `drive` now has its first
+        production caller; the SPI is exercised by a real engine. **Validation:** (a) byte-identical by
+        construction — same per-arch generator + same `consume_tokens` with identical
+        meta/prompt_len/seed/repeat_guard/decode/emit; (b) functional — the branch produced correct
+        coherent greedy output on cached gpt-oss-20b (analysis-channel prime list `2, 3, 5, 7, 11, …`);
+        (c) engine unit tests green. The empirical master-vs-branch raw A/B was attempted but blocked by
+        RAM-starvation from accumulated 11 GB model loads (an environment limit, not the code; and
+        risky to force given the GPU-memory history) — the by-construction proof + functional run stand.
+        Dense path is byte-identical; no runtime change (the value is the SPI proof / x86 de-risking).
+  - [~] **engine-spi-reclaim-seam — DRAFT DONE 2026-06-21** (branch `feature/engine-spi-reclaim-draft`).
+        The hybrid cache-reclaim seam is now sketched + compile/FakeHybrid-validated in `src/engine.rs`:
+        a `ReclaimStream` trait (`Iterator<Item=Result<u32,String>>` + `type State` +
+        `into_state(self: Box<Self>) -> State`, mirroring MLX's `generator.into_cache_and_snapshot()`)
+        and `drive_reclaiming(...) -> (StopReason, State)` that drains the stream through the SAME shared
+        `consume_tokens` (borrowed so it survives) then reclaims its state. Two tests: `FakeHybridStream`
+        round-trips a pretend KV cache through the loop (`drive_reclaiming_returns_post_run_state`) and
+        through a `Box<dyn ReclaimStream>` (`..._works_through_a_trait_object`). **Deliberately unwired**
+        — not used by MLX; the FINAL shape (fold into `LocalEngine`? exact `State` bounds? engine-side
+        production) is to be decided against the real x86 engine. No MLX hybrid rewire until x86 is in
+        play. The Send-relaxation half is DONE (above). Spec: `docs/specs/native-engine-spi.md`.
+
+**Parked because:** Needs an Intel Xe/Arc and an AMD APU to run at all.
+
+- [ ] x86-native-p0-probe - **P0 of `x86-native-runtime`** (after `native-engine-spi`) (the MLX recipe — iGPU +
+  unified memory + zero-copy `mmap` — on commodity x86 via cross-vendor Vulkan).
+  Stand up a Vulkan compute device from Rust (`ash`/`vulkano`); on BOTH an Intel
+  Xe/Arc and an AMD APU confirm a `HOST_VISIBLE | DEVICE_LOCAL` heap and
+  `VK_EXT_external_memory_host`, then `mmap` a safetensors file → import the host
+  pointer as device memory → read a tensor back GPU-side (zero-copy). Decide the
+  Rust Vulkan binding and whether to lean on a kernel lib for plumbing. Acceptance:
+  zero-copy import demonstrated on both vendors + a short decision record appended
+  to the spec. **Needs an x86 iGPU box** (can't be validated from macOS). Spec:
+  `docs/specs/x86-native-runtime.md`; epic + phases P1–P5 in `BACKLOG.md`
+  (`x86-native-runtime`).
+
