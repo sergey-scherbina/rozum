@@ -185,6 +185,14 @@ impl Sandbox {
     /// allowing it hands the agent a channel out of the workspace for free — and on
     /// macOS `/tmp` is a symlink to `/private/tmp`, so allowing either allows both.
     /// The toolchain does not need it: `$TMPDIR` is a private `/var/folders/…` path.
+    ///
+    /// **The root itself cannot be unlinked.** `(subpath root)` covers the directory node
+    /// as well as its contents, so `rm -rf <root>` from inside the jail SUCCEEDED — measured
+    /// 2026-08-04, a run that deleted its own workspace and then reported
+    /// `verify command failed to run`, because there was no longer a directory to run it in.
+    /// Deleting files inside is ordinary work and stays allowed; deleting the workspace is
+    /// not work, and everything downstream of it — the check, the file list, the report —
+    /// becomes meaningless the moment it happens.
     fn seatbelt_profile(&self) -> String {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".into());
         let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
@@ -199,6 +207,7 @@ impl Sandbox {
                                 (subpath \"{tmp}\") (subpath \"/private/var/folders\") \
                                 (literal \"/dev/null\") (literal \"/dev/stdout\") \
                                 (literal \"/dev/stderr\"))\
+             (deny file-write-unlink (literal \"{root}\"))\
              {net}",
             root = self.root.display(),
         )
@@ -271,6 +280,26 @@ mod tests {
         let outside = s.exec("echo nope > /tmp/nadia-should-not-exist.txt", None).unwrap();
         assert_ne!(outside.exit_code, 0, "a write to /tmp escaped the sandbox");
         assert!(!std::path::Path::new("/tmp/nadia-should-not-exist.txt").exists());
+    }
+
+    #[test]
+    fn the_agent_cannot_delete_its_own_workspace() {
+        // Measured 2026-08-04: `(subpath root)` covers the directory node itself, so an agent
+        // told to reorganize a project ran `rm -rf` over its own root and succeeded. Everything
+        // after that is nonsense — the acceptance check reports "verify command failed to run"
+        // because there is no directory to run it in, and the work is simply gone.
+        let (d, s) = sb();
+        let root = d.path().to_path_buf();
+        std::fs::write(root.join("keep.txt"), "x").unwrap();
+
+        let r = s.exec(&format!("cd / && rm -rf {}", root.display()), None).unwrap();
+        assert_ne!(r.exit_code, 0, "deleting the workspace root must be refused: {r:?}", r = r.stderr);
+        assert!(root.is_dir(), "the workspace root must survive its own agent");
+
+        // Ordinary work inside is untouched — deleting files it created is the job.
+        let ok = s.exec("mkdir -p sub && echo y > sub/a.txt && rm -rf sub && echo done", None).unwrap();
+        assert_eq!(ok.exit_code, 0, "stderr: {}", ok.stderr);
+        assert!(!root.join("sub").exists());
     }
 
     #[test]

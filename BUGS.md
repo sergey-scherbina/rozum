@@ -5,6 +5,41 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-017 — the jail let the agent delete its own workspace
+
+- **Status:** FIXED 2026-08-04 (`crates/nadia/src/sandbox.rs`: one `(deny file-write-unlink
+  (literal "<root>"))` next to the existing subpath allow), with a test that runs the real
+  `rm -rf` under the real profile.
+- **Source:** found while demonstrating the new verify gate — not reported, and it would not have
+  been: the symptom looks like the gate misbehaving.
+- **Severity:** P1 for anyone who points `/project` at a real repository. The jail is the whole
+  containment story for `bash`, and this was a hole in the middle of it.
+
+**What happens.** The seatbelt profile allows `(subpath "<root>")`, and on macOS that covers the
+directory NODE as well as its contents — so `rm -rf <root>` from inside the jail succeeds. The
+agent then keeps running with no working directory:
+
+```
+nadia: check failed — repair round 1
+nadia: check failed — repair round 2
+nadia: ✘ проверка НЕ прошла: …
+verify command failed to run          ← there is no directory to run it in
+```
+
+Reproduced deterministically outside nadia, with a hand-written profile of the same shape: `rm -rf`
+of the root returns 0 and the directory is gone. With the deny added, the same command is refused
+and the root survives, while writing, `mkdir`, and deleting files and subdirectories INSIDE keep
+working — deleting what it created is ordinary work and must stay allowed.
+
+**Why it matters more than one lost scratch directory.** With a project selected
+(`/project rozum`), the workspace is a real repository. And the failure is silent in the worst way:
+what the operator sees is `✘ проверка НЕ прошла`, which reads as "the agent could not do the task",
+not as "the agent deleted the task".
+
+**Not covered by this fix, deliberately.** An agent can still `rm -rf *` inside its workspace. That
+is legitimate work and cannot be distinguished from vandalism by a profile — the answer there is
+version control, not the sandbox.
+
 ## BUG-016 — nadia × Qwen3.5-4B: a path written without its leading slash lands a file in a mirror tree, and the run reports success
 
 - **Status:** FIXED 2026-08-01 by candidate 1 below — the system prompt now names both wrong

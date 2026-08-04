@@ -1,5 +1,30 @@
 # Changelog
 
+## fix(nadia): the jail let the agent delete its own workspace — BUG-017
+Completed: 2026-08-04
+
+Found while demonstrating the verify gate, which is the only reason it was found
+at all: the symptom reads as the gate misbehaving. A run ended
+`✘ проверка НЕ прошла` followed by `verify command failed to run` — because there
+was no longer a directory to run the check in. The agent had deleted its own
+workspace.
+
+`(allow file-write* (subpath "<root>"))` covers the directory node as well as its
+contents, so `rm -rf <root>` from inside the jail succeeded. One line fixes it —
+`(deny file-write-unlink (literal "<root>"))` — and the test that proves it runs
+the real `rm -rf` under the real profile rather than asserting on the profile
+text.
+
+Writing, `mkdir`, and deleting files and subdirectories inside the workspace keep
+working: deleting what it created is the job. An agent can still `rm -rf *` its
+own contents, and that stays allowed on purpose — a profile cannot tell
+legitimate cleanup from vandalism, and the answer there is version control.
+
+P1 rather than a curiosity because `/project <name>` points the workspace at a
+real repository, and because of how it reads from a phone: `✘ проверка НЕ прошла`
+looks like "the agent could not do the task", not like "the agent deleted the
+task".
+
 ## feat(nadia): the verify gate, ported — success is not the model's to declare
 Completed: 2026-08-04
 
