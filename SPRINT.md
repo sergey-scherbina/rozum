@@ -9,6 +9,22 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
+### ▶ Verify gate in the other two nadias (operator 2026-08-04: "Продолжай работу")
+
+Cross-repo (`REPOS.md`): the code is in `../nadia`, branch `feature/verify-gate-ports`,
+worktree `nadia:.worktrees/feature/verify-gate-ports`. The contract already exists —
+`nadia:SPEC.md` §3.1, written when the Rust one landed — so this is implementation against a
+spec, not new design. **It is a debt I created**: §3.1 says "the ScalaScript and Scala 3 ones do
+not have it yet. That is a gap in them, not an option."
+
+- [ ] **vgp-scala3** — `scala/sdk/Verify.scala` (generic: ModelClient in, nothing about rozum or
+  nadia) + the policy in `nadia.rozum`. Mirrors the Rust split rozum-agent::verify / nadia::gate.
+- [ ] **vgp-ssc** — `src/gate.ssc` over `std.agent`, same rules, same wording.
+- [ ] **vgp-parity** — the three implementations must agree on the parts that are contract, not
+  taste: `checkable:false` is an answer, an invented cargo check is dropped, a delimiting quote is
+  not part of the argument, a failed check means not done. Prove it per implementation rather than
+  by reading.
+
 ### ▶ Verify-gate accuracy (operator 2026-08-04: "Начинать с (1) и (2)" → "продолжай, начинай и продолжай")
 
 Branch `feature/verify-gate-accuracy`, worktree `.worktrees/feature/verify-gate-accuracy`.
