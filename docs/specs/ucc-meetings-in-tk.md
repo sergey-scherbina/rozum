@@ -256,6 +256,27 @@ static-model equivalent at all).
 one remaining gap, which is exactly the difference between "a second client we maintain" and
 "delete the hand-written one".
 
+**STAGE C PART TWO — the picker is built (2026-08-04).** `GET /rooms` gained an additive
+`entries` array: per room a `name`, a `last` date, a `mentions` count, and a **ready-made absolute
+transcript url** derived from the request's own origin. The url is the load-bearing field — the
+client cannot compose an address, and a url hard-coded to `127.0.0.1` would be useless to anything
+reaching the daemon through a proxy. The client binds that list as a selectable table
+(`rowLinkAction`) whose chosen row writes the url into the signal the transcript follows
+(`fetchUrlSignalTo`).
+
+**On "unread".** The parity list asked for it; the daemon cannot honestly produce it. A raw unread
+count needs a per-viewer read marker for every message and none exists. What does exist is a
+per-handle cursor over messages that ADDRESS you, which is what `inbox` already uses — so the column
+is `mentions`, labelled `@you`, and it means "addressed to you, unseen". In a busy room that is the
+more useful number anyway, and it is one the server can actually stand behind. Recorded rather than
+faked.
+
+**A sixth upstream defect fell out of building it**, fixed by us as `tui-remote-table-height`: a
+vertical column gave a remote table `Constraint::Length(1)`, so a fetched list rendered its header
+and not one row — while the fetch worked and the rows sat in the store. The lesson generalises past
+this task: **an unknowable quantity must not be answered with a fixed number.** A remote table's row
+count is genuinely unknown at emit time, and `1` was a guess dressed as a measurement.
+
 ### What is proven, and what is not
 
 | Claim | Evidence |

@@ -104,7 +104,7 @@ export ROZUM_MEETING_TOKEN="$TOKEN"
 WEB_OUT="$TMP/index.html"
 "$SSC_TOOLS" emit-spa --frontend react "$APP" >"$WEB_OUT"
 [[ -s "$WEB_OUT" ]] || { echo "FAIL: React emission is empty" >&2; exit 1; }
-for needle in 'rozum · ' '/rooms/' '/messages/' 'meetingsTranscript' 'badge'; do
+for needle in '/rooms/' '/messages/' 'meetingsTranscript' 'meetingsRooms' 'badge' 'mentions'; do
   grep -Fq "$needle" "$WEB_OUT" || {
     echo "FAIL: React artifact lost the shared view/binding fragment: $needle" >&2
     exit 1
@@ -132,7 +132,7 @@ export CARGO_TARGET_DIR="$TMP/cargo-target"
 cargo build --quiet --manifest-path "$MANIFEST"
 SNAPSHOT="$(SSC_TUI_SNAPSHOT=1 cargo run --quiet --manifest-path "$MANIFEST")"
 # Reaching these rows AT ALL is the authenticated-read proof: the fixture refuses without a header.
-for needle in "rozum · $ROOM" 'agent' 'hello' 'db down' '[ALERT]' '12:34'; do
+for needle in 'agent' 'hello' 'db down' '[ALERT]' '12:34' "$ROOM" 'other-room'; do
   grep -Fq "$needle" <<<"$SNAPSHOT" || {
     echo "FAIL: TUI snapshot is missing $needle" >&2
     printf '%s\n' "$SNAPSHOT" >&2
@@ -149,6 +149,14 @@ grep -Fq '"meetingsDraft"' "$RUST_SOURCE" || {
   echo "FAIL: the composer's draft signal was not seeded into the emitted store" >&2
   exit 1
 }
+# The picker: a selectable room table whose chosen row writes the ready-made url into the signal
+# the transcript follows. Without the selection machinery the list renders and nothing happens.
+for needle in 'fn is_table(' 'fn move_row(' 'row_field(' '"meetingsUrl"'; do
+  grep -Fq "$needle" "$RUST_SOURCE" || {
+    echo "FAIL: emitted TUI has no room picker — missing $needle" >&2
+    exit 1
+  }
+done
 echo "PASS: ratatui crate built and rendered the transcript — badge column included"
-echo "PASS: authenticated read (fixture refuses without a header) + composer write path present"
+echo "PASS: authenticated read + composer write path + room picker with selection"
 echo "PASS: ucc-meetings-in-tk Stage A dual-target smoke"

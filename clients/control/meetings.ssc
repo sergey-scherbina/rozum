@@ -43,7 +43,7 @@ has no base64, which previously forced this source to accept a pre-built header 
    running client.
 
 [env](std/os.ssc)
-[signal, fetchUrlSignal, fetchActionClear, incSignal, fieldColumn](std/ui/primitives.ssc)
+[signal, fetchUrlSignal, fetchUrlSignalTo, fetchActionClear, incSignal, fieldColumn, rowLinkAction](std/ui/primitives.ssc)
 [lower](std/ui/lower.ssc)
 [defaultTheme](std/ui/theme.ssc)
 [vstack, hstack](std/ui/layout.ssc)
@@ -60,11 +60,27 @@ val token   = env("ROZUM_MEETING_TOKEN").getOrElse("")
 val refresh = signal("meetingsRefresh", 0)
 val headers = signal("meetingsHeaders", "{\"Authorization\":\"Bearer " + token + "\"}")
 
-val transcript = fetchUrlSignal(
-  "meetingsTranscript",
-  apiBase + "/rooms/" + room + "/messages/" + day,
-  refresh,
-  headers
+// The room picker writes a READY-MADE url into `here`, and the transcript follows it. The client
+// never composes an address — it cannot, there is no string composition on the terminal target —
+// so `/rooms` ships the finished url per row, exactly as it ships `badge` and `time`.
+val here = signal("meetingsUrl", apiBase + "/rooms/" + room + "/messages/" + day)
+
+val transcript = fetchUrlSignalTo("meetingsTranscript", here, refresh, headers)
+
+val roomList = fetchUrlSignal("meetingsRooms", apiBase + "/rooms", refresh, headers)
+
+// `mentions` is what this daemon can honestly count as unread: messages ADDRESSING you that you
+// have not seen. A raw unread number would need a per-viewer read marker that does not exist.
+val roomTable = remoteTable(
+  roomList,
+  [
+    fieldColumn("Room", "name"),
+    fieldColumn("Last", "last"),
+    fieldColumn("@you", "mentions")
+  ],
+  "entries",
+  [rowLinkAction("open", here, "url")],
+  "name"
 )
 
 // rowsPath "messages" drills the daemon's envelope {room,date,from,count,…,messages:[…]};
@@ -93,8 +109,8 @@ val draft = signal("meetingsDraft", "")
 val send = fetchActionClear("POST", apiBase + "/rooms/" + room + "/messages", draft, refresh, headers)
 
 val sidebar = vstack(gap = 1)(
-  heading(1, "rozum · " + room),
-  text(day),
+  heading(1, "rozum"),
+  roomTable,
   textField(draft, "message"),
   actionButton(send, "send"),
   actionButton(incSignal(refresh), "refresh")

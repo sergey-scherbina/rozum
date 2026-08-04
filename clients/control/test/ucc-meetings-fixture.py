@@ -65,11 +65,35 @@ ENVELOPE = {
 }
 
 
+# The room list the picker reads. Each entry carries a READY-MADE url, because the generated
+# client cannot compose one — that is the whole reason the daemon ships it (see rest_read::rooms).
+def rooms_envelope(origin):
+    return {
+        "rooms": [ROOM, "other-room"],
+        "entries": [
+            {"name": ROOM, "url": f"{origin}/rooms/{ROOM}/messages/{DATE}", "last": DATE, "mentions": 2},
+            {"name": "other-room", "url": f"{origin}/rooms/other-room/messages/{DATE}", "last": DATE, "mentions": 0},
+        ],
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     require_auth = False
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/rooms":
+            if self.require_auth and not self.headers.get("Authorization"):
+                self.send_response(401); self.send_header("Content-Length", "0"); self.end_headers()
+                return
+            origin = "http://" + self.headers.get("Host", "127.0.0.1")
+            body = json.dumps(rooms_envelope(origin)).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if parsed.path != f"/rooms/{ROOM}/messages/{DATE}":
             self.send_error(404)
             return

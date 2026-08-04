@@ -177,14 +177,59 @@ async fn console() -> Html<&'static str> {
 }
 
 /// `GET /rooms` — the registered rooms (so the console can offer a picker).
-async fn rooms(State(state): State<RestState>) -> Response {
-    let names: Vec<String> = state
-        .registry
-        .list()
-        .into_iter()
-        .map(|loc| loc.name)
+async fn rooms(
+    State(state): State<RestState>,
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    req_headers: header::HeaderMap,
+) -> Response {
+    let locs = state.registry.list();
+    let names: Vec<String> = locs.iter().map(|loc| loc.name.clone()).collect();
+
+    // `entries` is ADDITIVE — `rooms` keeps its shape for anything already reading it.
+    //
+    // Each entry carries a READY-MADE transcript url, because the generated meeting client cannot
+    // build one: string composition is not expressible on the terminal target. Same call as `badge`
+    // and `time` — the client is deliberately dumb, and the server is the one place that can be
+    // clever once. The url is absolute and derived from the REQUEST, so a client reaching this
+    // daemon through a proxy gets a url on the origin it actually used, not on `127.0.0.1`.
+    let base = request_origin(&req_headers);
+    let today = store::date_of_ts(now_secs());
+    let entries: Vec<Value> = locs
+        .iter()
+        .map(|loc| {
+            let last = day_listing(&loc.root).last().map(|d| d.date.clone());
+            // "Unread" here means what this daemon can honestly say: messages ADDRESSING you that
+            // you have not seen, counted against the same per-handle cursor `inbox` uses. A raw
+            // unread count would need a per-viewer read marker for every message, which does not
+            // exist — and in a busy room "what wants me" is the more useful number anyway.
+            let mentions = super::client::inbox(&loc.root, &user, false).len();
+            let date = last.clone().unwrap_or_else(|| today.clone());
+            json!({
+                "name": loc.name,
+                "url": format!("{base}/rooms/{}/messages/{date}", loc.name),
+                "last": last.unwrap_or_default(),
+                "mentions": mentions,
+            })
+        })
         .collect();
-    Json(json!({ "rooms": names })).into_response()
+    Json(json!({ "rooms": names, "entries": entries })).into_response()
+}
+
+/// The origin a client actually reached us on — `X-Forwarded-Proto`/`Host` when a proxy is in
+/// front, else the `Host` header, else the loopback default. Used to hand out absolute urls that
+/// work from wherever the request came from.
+fn request_origin(h: &header::HeaderMap) -> String {
+    let host = h
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_BIND);
+    let scheme = h
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("http");
+    format!("{scheme}://{host}")
 }
 
 /// `GET /rooms/{name}/threads` — the incident/topic threads + a metrics summary,
@@ -1032,6 +1077,62 @@ mod tests {
         assert_eq!(submit_payload("{not json")["content"], "{not json");
         // An empty body is an empty message, not a crash.
         assert_eq!(submit_payload("")["content"], "");
+    }
+
+    /// `GET /rooms` carries a ready-made transcript url per room, and a mentions count for the
+    /// authenticated handle.
+    ///
+    /// The url is the load-bearing part: the generated meeting client cannot build one (no string
+    /// composition on the terminal target), so a picker can only work if the row already holds the
+    /// address it should switch to. It is absolute and taken from the REQUEST, so a client that
+    /// reached the daemon through a proxy is not handed a `127.0.0.1` url it cannot use.
+    #[tokio::test]
+    async fn rooms_carry_a_ready_made_url_and_a_mentions_count() {
+        let dir = tempdir().unwrap();
+        seed_room(dir.path(), "alpha", &["-> picker hello", "unrelated chatter"]);
+        seed_room(dir.path(), "beta", &["nothing for anyone"]);
+        let tok = store::issue_token(dir.path(), "picker", store::Role::Observer, 0, 0).unwrap();
+        let (addr, _s) = start(dir.path().to_path_buf(), "sekret").await;
+
+        let body: Value = reqwest::Client::new()
+            .get(format!("http://{addr}/rooms"))
+            .bearer_auth(&tok)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        // The old shape is untouched — anything already reading `rooms` keeps working.
+        let names: Vec<&str> = body["rooms"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(names.contains(&"alpha") && names.contains(&"beta"), "{names:?}");
+
+        let entries = body["entries"].as_array().unwrap();
+        let alpha = entries.iter().find(|e| e["name"] == "alpha").expect("alpha entry");
+        let beta = entries.iter().find(|e| e["name"] == "beta").expect("beta entry");
+
+        // Absolute, on the origin the request actually used, and pointing at a real day.
+        let url = alpha["url"].as_str().unwrap();
+        assert!(url.starts_with(&format!("http://{addr}/rooms/alpha/messages/")), "{url}");
+        assert_eq!(url.rsplit('/').next().unwrap(), alpha["last"].as_str().unwrap());
+
+        // The url a picker writes must be one the transcript endpoint actually answers.
+        let page: Value = reqwest::Client::new()
+            .get(url)
+            .bearer_auth(&tok)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(page["room"], "alpha");
+        assert!(page["messages"].as_array().unwrap().len() >= 2);
+
+        // Mentions are per-handle and unseen-only: `picker` is addressed once in alpha, never in beta.
+        assert_eq!(alpha["mentions"], 1);
+        assert_eq!(beta["mentions"], 0);
     }
 
     /// A turn with no timestamp renders no clock rather than 1970 — the client prints the string
