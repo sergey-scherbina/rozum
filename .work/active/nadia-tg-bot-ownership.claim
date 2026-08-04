@@ -1,0 +1,6 @@
+feature/nadia-tg-bot-ownership 2026-08-04T21:47:36Z
+agent: claude-code
+heartbeat: 2026-08-04T21:47:36Z
+status: in-progress
+done-so-far: root cause found live — Watch has no owner, both bridges poll one global state file
+next: add the owning registry to Watch and to ChatState, with migration

@@ -9,6 +9,31 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
+### ▶ Two bots, one state file (operator 2026-08-04, live: "А в Rozum IA пришло вот это сообщение")
+
+Branch `feature/nadia-tg-bot-ownership`, worktree `.worktrees/feature/nadia-tg-bot-ownership`.
+
+**Found by the operator, in the one place no test looks: the phone.** They sent `/spawn` to
+`@Rozum_chat_bot` (Rozum.Chat), got "агент пошёл работать" from it — and the RESULT arrived from
+`@rozumia_bot` (Rozum IA), the other bot entirely. Both bridges are the same binary, both run
+`nadia::watch_results` against ONE global `~/.local/state/rozum/nadia-telegram.json`, and `Watch`
+records `{chat, task}` — which chat, never which bot. Whichever bridge polls first wins the race,
+removes the entry and sends with its own token; in a private chat the chat id is the operator's
+user id, so the wrong bot can post there and it looks delivered.
+
+The existing comment on `Watch` reasons one level short of this: it explains that an agent id alone
+could deliver one chat's result to another chat, and stops there. `ChatState` has the same shape of
+bug one field over — `dialog` and `project` are keyed by chat id alone, so `/nadia on` in one bot
+silently turns the other bot's plain text into agent tasks for the same person.
+
+- [ ] **tgown-watch** — the owning registry (`TELEGRAM_REGISTRY`, `telegram` / `telegram-groups`)
+  goes into `Watch`, and a bridge reports only what it started. Legacy entries with no owner
+  belong to `telegram`, which is where they can only have come from.
+- [ ] **tgown-chatstate** — same for `ChatState`, with migration of bare chat keys, so a mode
+  chosen in one bot does not change what the other bot does with a plain message.
+- [ ] **tgown-verify** — unit tests for both, then LIVE: rebuild, restart both bridges, and one
+  `/spawn` in each bot must be answered by that bot and no other.
+
 ### ▶ The two non-Rust gates, end to end (operator 2026-08-04: "делай эти. Работай")
 
 Cross-repo: code in `../nadia`, branch `feature/gate-e2e`, worktree `nadia:.worktrees/feature/gate-e2e`.
