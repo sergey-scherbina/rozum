@@ -2489,8 +2489,39 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
 - [x] **ucc-poc-msglist** — DONE 2026-07-20. `clients/control/meeting-message-list.ssc` is one Tk source for
   React + ratatui, using one remote table and refresh tick. Isolated dual-target smoke emits web, builds the
   Cargo crate, asserts generated refresh wiring, and renders fetched fixture rows without touching services.
-- [ ] **ucc-meetings-in-tk** — rewrite the meeting client in `std/ui` Tk (composer + switcher + unread),
-  reach parity with the 1389-line hand-written Rust TUI, then retire it.
+- [~] **ucc-meetings-in-tk** — ONE `.ssc` source emitting both the UCC web meeting client and the
+  native terminal one, so `rozum meetings attach` stops being hand-written Rust and the two cannot
+  drift. Claimed 2026-08-04 (`.work/active/ucc-meetings-in-tk.claim`), branch
+  `feature/ucc-meetings-in-tk`, worktree `.worktrees/feature/ucc-meetings-in-tk`.
+  **Spec written first: `docs/specs/ucc-meetings-in-tk.md` — read it, it carries the corrections
+  below and the identity decision Stage C cannot start without.**
+  **CORRECTION — this entry used to say "parity with the 1389-line hand-written Rust TUI"; that is
+  wrong by ~4× and would size the task badly.** Three different programs were conflated:
+  `tui/attach.rs` (312 lines) is the current daemon TUI and **the only thing that retires**;
+  `meeting/tui_client.rs` (1010) is the daemon CLIENT MODEL that `post_once`, the coordination hooks
+  and the messenger bridges depend on and it **stays**; `tui/mod.rs`+`app.rs` (1091) are the LEGACY
+  in-process room behind `--legacy-room` (`src/main.rs:1226`) — a separate task, not this one.
+  Read the parity list off `attach.rs`, NOT off `docs/specs/agent-meetings-tui.md`, which still
+  describes moderator modes/turn timeouts/interject/budget — all removed when the TUI became a
+  daemon client.
+  **BLOCKER, found while specing (this is the schedule):** ScalaScript's TUI frontend
+  (`../scalascript/frontend/tui/.../TuiEmitter.scala`) emits only a *managed GET* whose URL is a
+  literal fixed at emit time — `collectFetches` keeps `FetchInfo(fetchUrl, tickId)`, and
+  `grep -rE 'fetchAction|"POST"|Method::Post' frontend/tui/src/main/` is empty. So **the composer
+  cannot submit and the switcher cannot re-target the transcript fetch** — two of the three named
+  features. The widgets themselves are fine (`TextInput`/`Button`/`Toggle` + focus ring + Enter).
+  STAGES — **A** (rozum, unblocked, in progress): `clients/control/meetings.ssc`, the real transcript
+  from one source — header, `── date ──` dividers, severity-coloured incident badges, bold author —
+  emitting both react and ratatui; done when both build from the one source and a headless
+  `SSC_TUI_SNAPSHOT=1` run shows a divider + a badge. **B** (scalascript, CRITICAL PATH, filed
+  there): `tui-fetch-post` and `tui-fetch-url-signal`, each gated by a deterministic local-HTTP test
+  like `specs/frontend-tui-fetch-refresh.md` did for GET. **C** (rozum, after B): switcher +
+  composer + slash commands + unread → delete `attach.rs`, point `rozum meetings attach` at the
+  emitted binary. C must FIRST settle identity: REST submit authenticates as a `ConsoleUser`, while
+  `attach.rs` posts under the human's local identity — posting over REST as-is silently changes
+  who-said-what.
+  Data plane needs NO new daemon endpoints for reading: `:8401` already serves `/rooms`,
+  `/rooms/{n}/messages/{date}`, `/rooms/{n}/days`, `/rooms/{n}/events` (SSE), `/whoami`, `/roster`.
 - [x] **ucc-control-api** — DONE: write actions fully wired. Meetings side DONE
   (`rozum-meeting::client` + `rest_read` HTTP). Models/gateway: `GET /control/status`
   (snapshot: residency + residents + installed catalog) + `POST /control/gateway/load`
