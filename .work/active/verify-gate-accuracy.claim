@@ -1,6 +1,6 @@
 feature/verify-gate-accuracy 2026-08-04T10:47:41Z
 agent: claude-opus-5
-heartbeat: 2026-08-04T10:47:41Z
-status: not-started
-done-so-far:
-next: write docs/specs/verify-gate.md, then vga-arg-quotes
+heartbeat: 2026-08-04T10:53:32Z
+status: in-progress
+done-so-far: spec written (96c2dab); vga-arg-quotes + vga-project-root implemented (f1c2b7d), 9 verify tests + 48 nadia + 45 launch green
+next: vga-verify — re-run the same task end to end and record what the rounds were spent on
