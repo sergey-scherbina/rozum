@@ -693,13 +693,38 @@ async fn redact(
 }
 
 /// `POST /rooms/{name}/messages` — post a message with optional support metadata. Body:
-/// `{ "content": "...", "kind": "alert", "severity": "high", "thread_id": "...", "tags": [...] }`.
+/// `{ "content": "...", "kind": "alert", "severity": "high", "thread_id": "...", "tags": [...] }`
+/// — **or just the message text**, which is the same thing said the short way.
+///
+/// The plain-text form exists for the generated meeting client (`ucc-meetings-in-tk`). Its composer
+/// sends whatever is in the input signal verbatim, and it has no way to wrap that in JSON: string
+/// composition is not expressible on the terminal target (there is no `computedSignal` in the
+/// static model). Making the SERVER accept the short form is the same call already made for `badge`
+/// and `time` — put the work where it can be done once, and keep the generated client deliberately
+/// dumb, rather than bending the client into shapes the target cannot express.
+///
+/// Ambiguity is resolved in favour of the existing contract: a body that parses as a JSON OBJECT is
+/// treated as the structured form exactly as before. Everything else — including a bare JSON string
+/// — is the message text.
 async fn submit(
     Extension(ConsoleUser(user)): Extension<ConsoleUser>,
     AxumPath(name): AxumPath<String>,
-    Json(body): Json<Value>,
+    body: String,
 ) -> Response {
-    console_call(&name, &user, "meeting.submit", body).await
+    console_call(&name, &user, "meeting.submit", submit_payload(&body)).await
+}
+
+/// The body of `POST /rooms/{name}/messages` as the daemon wants it.
+///
+/// Split out from the handler so it is testable on its own: the handler proxies through
+/// `console_call`, which needs a live daemon, and the interesting behaviour is entirely here.
+fn submit_payload(body: &str) -> Value {
+    match serde_json::from_str::<Value>(body) {
+        Ok(v @ Value::Object(_)) => v,
+        // A bare JSON string is TEXT that happens to be quoted — store the words, not the quotes.
+        Ok(Value::String(s)) => json!({ "content": s }),
+        _ => json!({ "content": body }),
+    }
 }
 
 #[cfg(test)]
@@ -981,6 +1006,32 @@ mod tests {
             .to_owned();
         assert!(challenge.starts_with("Bearer "), "got {challenge:?}");
         assert!(challenge.contains("Basic"), "got {challenge:?}");
+    }
+
+    /// The submit body takes the message text on its own, not only the structured object — the
+    /// short form the generated composer can actually produce (a terminal target cannot compose
+    /// strings, so it cannot wrap what was typed in JSON).
+    ///
+    /// The middle case is the one worth having: a bare JSON string is the only input that is BOTH
+    /// valid JSON and not the structured form, so it is exactly where a naive "parse, else wrap"
+    /// implementation posts the quotes along with the words.
+    #[test]
+    fn submit_payload_takes_text_or_the_structured_form() {
+        assert_eq!(submit_payload("just the words")["content"], "just the words");
+        assert_eq!(submit_payload("\"quoted words\"")["content"], "quoted words");
+        assert_eq!(
+            submit_payload("{\"content\":\"structured\",\"kind\":\"alert\"}")["content"],
+            "structured"
+        );
+        // The structured form keeps ALL of its fields — this is the existing contract, unchanged.
+        assert_eq!(
+            submit_payload("{\"content\":\"structured\",\"kind\":\"alert\"}")["kind"],
+            "alert"
+        );
+        // Text that merely looks structured is still text.
+        assert_eq!(submit_payload("{not json")["content"], "{not json");
+        // An empty body is an empty message, not a crash.
+        assert_eq!(submit_payload("")["content"], "");
     }
 
     /// A turn with no timestamp renders no clock rather than 1970 — the client prints the string

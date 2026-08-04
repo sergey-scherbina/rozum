@@ -43,12 +43,12 @@ has no base64, which previously forced this source to accept a pre-built header 
    running client.
 
 [env](std/os.ssc)
-[signal, fetchUrlSignal, incSignal, fieldColumn](std/ui/primitives.ssc)
+[signal, fetchUrlSignal, fetchActionClear, incSignal, fieldColumn](std/ui/primitives.ssc)
 [lower](std/ui/lower.ssc)
 [defaultTheme](std/ui/theme.ssc)
 [vstack, hstack](std/ui/layout.ssc)
 [heading, text](std/ui/typography.ssc)
-[actionButton](std/ui/input.ssc)
+[actionButton, textField](std/ui/input.ssc)
 [remoteTable](std/ui/data.ssc)
 
 ```scalascript
@@ -83,9 +83,20 @@ val transcriptTable = remoteTable(
   "ts"
 )
 
+// The composer. `draft` is what the user types; `send` posts it and, on success, bumps `refresh` —
+// which is the transcript's fetch tick, so the list re-reads with no extra wiring.
+//
+// The body is sent VERBATIM: a terminal target cannot compose strings (there is no computedSignal
+// in the static model), so it cannot wrap the text in JSON. The daemon accepts the plain-text form
+// for exactly this reason — same call as `badge` and `time`, put the work where it can be done once.
+val draft = signal("meetingsDraft", "")
+val send = fetchActionClear("POST", apiBase + "/rooms/" + room + "/messages", draft, refresh, headers)
+
 val sidebar = vstack(gap = 1)(
   heading(1, "rozum · " + room),
   text(day),
+  textField(draft, "message"),
+  actionButton(send, "send"),
   actionButton(incSignal(refresh), "refresh")
 )
 

@@ -5,10 +5,13 @@
 # including the derived `badge` column, which is the thing this stage adds over the read-only PoC.
 #
 # Deliberately runs against an isolated fixture on an OS-assigned port and touches no operator
-# service (:8089, :8401, :8411 are never contacted). That is not only hygiene: the terminal target
-# CANNOT talk to the real daemon yet, because it drops the `headers` signal and every daemon route
-# requires HTTP Basic (reported upstream as `tui-fetch-headers`). When that lands, flip the fixture
-# to --require-auth and this same script proves the authenticated path.
+# service (:8089, :8401, :8411 are never contacted).
+#
+# The fixture now runs with --require-auth, and that flag is the whole point of this gate. Until
+# scalascript honoured the headers signal on the terminal target, an emitted binary sent a bare GET
+# and every daemon route answers 401 — so a client could look correct and read nothing. The fixture
+# answers 401 without an Authorization header, which means a regression there turns this gate red
+# instead of quietly emptying the transcript.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,7 +50,7 @@ cleanup() {
 trap cleanup EXIT
 
 FIXTURE_LOG="$TMP/fixture.log"
-python3 -u "$FIXTURE" --port 0 >"$FIXTURE_LOG" 2>&1 &
+python3 -u "$FIXTURE" --port 0 --require-auth >"$FIXTURE_LOG" 2>&1 &
 FIXTURE_PID=$!
 
 PORT=""
@@ -66,7 +69,14 @@ ROOM="$(sed -n 's/^ROOM=//p' "$FIXTURE_LOG" | head -1)"
 DATE="$(sed -n 's/^DATE=//p' "$FIXTURE_LOG" | head -1)"
 
 BASE="http://127.0.0.1:$PORT"
-FEED="$(curl --fail --silent --show-error "$BASE/rooms/$ROOM/messages/$DATE")"
+TOKEN="smoke-token"
+
+# The fixture must actually refuse an unauthenticated read — otherwise the auth assertion below
+# proves nothing, and this gate would pass with the headers support ripped out again.
+UNAUTH_CODE="$(curl --silent --output /dev/null --write-out '%{http_code}' "$BASE/rooms/$ROOM/messages/$DATE")"
+[[ "$UNAUTH_CODE" == "401" ]] || { echo "FAIL: fixture answered $UNAUTH_CODE unauthenticated, expected 401" >&2; exit 1; }
+
+FEED="$(curl --fail --silent --show-error -H "Authorization: Bearer $TOKEN" "$BASE/rooms/$ROOM/messages/$DATE")"
 for needle in 'hello' '"badge"' '[ALERT]' '"messages"'; do
   grep -Fq "$needle" <<<"$FEED" || {
     echo "FAIL: fixture body is missing $needle: $FEED" >&2
@@ -75,6 +85,11 @@ for needle in 'hello' '"badge"' '[ALERT]' '"messages"'; do
 done
 
 export ROZUM_MEETING_BASE="$BASE" ROZUM_MEETING_ROOM="$ROOM" ROZUM_MEETING_DATE="$DATE"
+# NOTE: setting the token at EMIT time is exactly what the client's own warning says not to do in
+# production — ssc run --v1 folds env() into the generated Rust as a literal. It is correct HERE
+# because the value is a throwaway fixture token and baking it is what lets the emitted binary
+# authenticate without a runtime config. See `ui-fetch-credentials` upstream for the durable fix.
+export ROZUM_MEETING_TOKEN="$TOKEN"
 
 # ── web ───────────────────────────────────────────────────────────────────────
 #
@@ -116,6 +131,7 @@ grep -Fq 'refresh_fetches(&mut signals, &mut observed_fetch_ticks);' "$RUST_SOUR
 export CARGO_TARGET_DIR="$TMP/cargo-target"
 cargo build --quiet --manifest-path "$MANIFEST"
 SNAPSHOT="$(SSC_TUI_SNAPSHOT=1 cargo run --quiet --manifest-path "$MANIFEST")"
+# Reaching these rows AT ALL is the authenticated-read proof: the fixture refuses without a header.
 for needle in "rozum · $ROOM" 'agent' 'hello' 'db down' '[ALERT]' '12:34'; do
   grep -Fq "$needle" <<<"$SNAPSHOT" || {
     echo "FAIL: TUI snapshot is missing $needle" >&2
@@ -123,5 +139,16 @@ for needle in "rozum · $ROOM" 'agent' 'hello' 'db down' '[ALERT]' '12:34'; do
     exit 1
   }
 done
+# The composer must be wired on the terminal target too — a TextInput that cannot submit is the
+# exact failure tui-fetch-post fixed, and it is invisible in a snapshot.
+grep -Fq 'fn send_action(' "$RUST_SOURCE" || {
+  echo "FAIL: emitted TUI has no write path — the composer cannot submit" >&2
+  exit 1
+}
+grep -Fq '"meetingsDraft"' "$RUST_SOURCE" || {
+  echo "FAIL: the composer's draft signal was not seeded into the emitted store" >&2
+  exit 1
+}
 echo "PASS: ratatui crate built and rendered the transcript — badge column included"
+echo "PASS: authenticated read (fixture refuses without a header) + composer write path present"
 echo "PASS: ucc-meetings-in-tk Stage A dual-target smoke"
