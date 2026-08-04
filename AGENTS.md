@@ -1,9 +1,14 @@
 # Agent Instructions
 
 **This file is the source of truth for how work is organized here. Read it at the start of every
-task and again after any context rotation — it changes, and a stale copy in your head is how a rule
-gets skipped.** In the autonomous loop, re-read it from `origin/master` at the top of every
-iteration and apply whatever changed. `CLAUDE.md` exists only to send you here.
+task and again after any context rotation, and read it from `origin/master` — not your own
+checkout, which is only as fresh as your last fetch.** In the autonomous loop that means re-reading
+it at the top of every iteration and applying whatever changed. `CLAUDE.md` exists only to send you
+here.
+
+This is rule zero of the `multi-agent` skill; the reasoning lives there
+(`vendor/agent-plugins/multi-agent/commands/multi-agent.md`) and is not repeated here. It is
+restated at all only because you read this file before you load any skill.
 
 SPRINT: SPRINT.md
 BACKLOG: BACKLOG.md
