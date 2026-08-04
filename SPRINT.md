@@ -2553,6 +2553,30 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   who-said-what.
   Data plane needs NO new daemon endpoints for reading: `:8401` already serves `/rooms`,
   `/rooms/{n}/messages/{date}`, `/rooms/{n}/days`, `/rooms/{n}/events` (SSE), `/whoami`, `/roster`.
+  **STAGE A DONE 2026-08-04 (`3e62b99` on the branch).** `clients/control/meetings.ssc` renders the
+  transcript as BOTH the React client and a native ratatui binary, badge column included;
+  `clients/control/test/ucc-meetings-dual-target.sh` + its fixture gate it. Daemon side gained two
+  ADDITIVE derived fields, `badge` and `time` (`StoredTurn::time_hm()`, `rest_read::message_json`) —
+  a generated client has nowhere to run `badge()` or format an epoch, and computing them client-side
+  would create a second implementation to drift from the Rust one. rozum-meeting 193/193, new smoke
+  green, PoC smoke still green.
+  **Building it found the gap that blocks EARLIEST — a THIRD upstream report, `tui-fetch-headers`:**
+  the terminal target emits `ureq::get(url).call()` and drops the `headers` signal entirely, while
+  every daemon route requires HTTP Basic → **the generated terminal client cannot read the live room
+  at all**, never mind post. Why it hid: the upstream refresh gate AND our PoC both ran against
+  fixtures with no auth — *a capability proven against a fixture is proven only for fixtures*. Our
+  new fixture takes `--require-auth`, so when headers land, one flag turns the same script into the
+  authenticated proof.
+  Also learned, harmless once known: **`env()` resolves at emit time on the terminal target** (URL
+  baked in as a Rust literal) **and at RUNTIME in the browser** — so the web client must take
+  base/room from the page, and a web-side smoke can only assert the binding's presence; the
+  behavioural assertion belongs to the terminal half.
+  **CAVEAT on the green:** every emission was measured with `bin/ssc-tools` built from `ec70eb062`
+  against a scalascript at `bb22c9d4b` (the CLI prints `STALE BUILD` each run). Re-confirm after
+  `install.sh --dev` — I did not rebuild a staged toolchain other agents are using mid-flight.
+  NEXT: nothing in rozum is unblocked until upstream moves. Either wait on
+  `tui-fetch-headers` → `tui-fetch-url-signal` → `tui-fetch-post`, or take one of them in
+  scalascript directly (their POLICY.md claim protocol, `scripts/new-worktree`).
 - [x] **ucc-control-api** — DONE: write actions fully wired. Meetings side DONE
   (`rozum-meeting::client` + `rest_read` HTTP). Models/gateway: `GET /control/status`
   (snapshot: residency + residents + installed catalog) + `POST /control/gateway/load`

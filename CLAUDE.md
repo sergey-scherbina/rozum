@@ -17,17 +17,16 @@ truth for how work is organized in this repo. Do not work from memory:
 ## Skills
 
 This repo drives its workflow through the `agent-plugins` skills vendored at
-`vendor/agent-plugins/`. `AGENTS.md` links each one; use them — don't reinvent
-the protocols by hand:
+`vendor/agent-plugins/`. **Read `vendor/agent-plugins/AGENTS.md` — the index —
+and load any listed skill's `commands/<name>.md` on demand when its *When to
+use* matches.** Use them; don't reinvent the protocols by hand.
 
-- **multi-agent** — coordination for parallel feature-branch work: claims,
-  heartbeats, triage, worktrees, the autonomous loop.
-  `/multi-agent` · `vendor/agent-plugins/multi-agent/commands/multi-agent.md`
-- **spec-dev** — write the spec before the code, keep them in sync.
-  `/spec-dev` · `vendor/agent-plugins/spec-dev/commands/spec-dev.md`
-- **multi-repo** — manage `REPOS.md` as a virtual monorepo. Active here: this
-  repo plus the vendored `mistral.rs` fork (`.vendor/mistral-rs`).
-  `/multi-repo` · `vendor/agent-plugins/multi-repo/commands/multi-repo.md`
-
-The **rozum** meeting-room etiquette skill applies whenever you join a room —
-see `AGENTS.md` and `vendor/agent-plugins/rozum/commands/rozum.md`.
+**This used to be a list of three skills, and that is why it is not one now.**
+A hand-kept list here and in `AGENTS.md` left `bugs`, `scrumban`, `isolate`,
+`performance` and `policy` unnamed — vendored, working, and invisible to any
+agent that read only these two files. The index cannot drift that way: any
+subdirectory with a `commands/<name>.md` is a skill, and new ones appear with no
+edit here. **Do not re-expand this into a list.** Keep the submodule current
+(`git submodule update --remote vendor/agent-plugins`) — a stale pin once had
+`multi-agent`'s claim-staleness threshold at 20 minutes when the enforcing code
+said 45, which is how a live claim gets taken from the agent holding it.
