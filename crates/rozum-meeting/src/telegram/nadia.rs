@@ -345,7 +345,16 @@ pub fn handle(cmd: Cmd, caps: Caps, chat_id: i64) -> String {
     if let Err(e) = ensure_running() {
         return format!("Не смог поднять nadia: {e}");
     }
-    match request(&cmd, chat_id) {
+    // Chosen ONCE and used twice — by the request that starts the agent and by the message that
+    // tells the operator where it is working. The first version let the two find out separately:
+    // the request knew the directory, the message read it back out of a response that does not
+    // carry one, and the operator was told the work was in the sandbox root while it was really
+    // in its own directory. Two sources for one fact is the bug; this is the fix.
+    let workspace = match spawn_workspace(&cmd, chat_id) {
+        Ok(w) => w,
+        Err(e) => return e,
+    };
+    match request(&cmd, chat_id, workspace.as_deref()) {
         Ok(body) => {
             // Remember who is waiting for this one, so its result can be delivered instead of
             // polled for. Recorded here — where the id and the chat are both known — rather
@@ -364,7 +373,7 @@ pub fn handle(cmd: Cmd, caps: Caps, chat_id: i64) -> String {
                     });
                 }
             }
-            render(&cmd, &body, chat_id)
+            render(&cmd, &body, chat_id, workspace.as_deref())
         }
         Err(e) => format!("nadia: {e}"),
     }
@@ -629,30 +638,37 @@ fn health() -> Result<(), String> {
     curl_json("GET", &format!("{}/health", base()), None).map(|_| ())
 }
 
-fn request(cmd: &Cmd, chat_id: i64) -> Result<serde_json::Value, String> {
+/// Where THIS command's agent will work, decided before anything is started.
+///
+/// `None` for every command that does not start an agent. A chat with a project chosen works in
+/// it; without one, a fresh directory per task (`task_workspace`), created here so the agent does
+/// not spend a tool call making it — and sometimes put the project one level down, which the gate
+/// then reports as a failure.
+fn spawn_workspace(cmd: &Cmd, chat_id: i64) -> Result<Option<std::path::PathBuf>, String> {
+    let Cmd::Spawn(task) = cmd else { return Ok(None) };
+    if let Some(p) = chat_state(chat_id).project {
+        return Ok(Some(std::path::PathBuf::from(p)));
+    }
+    let w = task_workspace(task);
+    std::fs::create_dir_all(&w)
+        .map_err(|e| format!("не смог создать каталог задачи {}: {e}", w.display()))?;
+    Ok(Some(w))
+}
+
+fn request(
+    cmd: &Cmd,
+    chat_id: i64,
+    workspace: Option<&std::path::Path>,
+) -> Result<serde_json::Value, String> {
     let b = base();
     match cmd {
         Cmd::Spawn(task) => {
             // The chat's project, when it has chosen one: an agent started from a phone is
             // almost always meant for a repo, not for nadia's own scratch directory.
             let mut body = serde_json::json!({ "task": task });
-            // A chosen project means "work in this tree". Without one, a fresh directory: the
-            // sandbox root is shared by every task ever run from this phone, and a check that
-            // passes on the previous task's artifact is not a check (see `task_workspace`).
-            let ws = match chat_state(chat_id).project {
-                Some(p) => std::path::PathBuf::from(p),
-                None => {
-                    let w = task_workspace(task);
-                    // Created here rather than left to the agent: an agent that has to `mkdir`
-                    // its own workspace spends a tool call on it and sometimes puts the project
-                    // one level down instead, which the gate then reports as a failure.
-                    if let Err(e) = std::fs::create_dir_all(&w) {
-                        return Err(format!("не смог создать каталог задачи {}: {e}", w.display()));
-                    }
-                    w
-                }
-            };
-            body["workspace"] = serde_json::json!(ws.to_string_lossy());
+            if let Some(w) = workspace {
+                body["workspace"] = serde_json::json!(w.to_string_lossy());
+            }
             curl_json("POST", &format!("{b}/agents"), Some(body))
         }
         // Handled before any request is made.
@@ -688,7 +704,12 @@ fn curl_json(method: &str, url: &str, body: Option<serde_json::Value>) -> Result
 }
 
 /// Turn a JSON reply into something worth reading on a phone.
-fn render(cmd: &Cmd, body: &serde_json::Value, chat_id: i64) -> String {
+fn render(
+    cmd: &Cmd,
+    body: &serde_json::Value,
+    chat_id: i64,
+    workspace: Option<&std::path::Path>,
+) -> String {
     if let Some(e) = body.get("error").and_then(|v| v.as_str()) {
         return format!("nadia: {e}");
     }
@@ -700,18 +721,18 @@ fn render(cmd: &Cmd, body: &serde_json::Value, chat_id: i64) -> String {
         Cmd::Spawn(task) => {
             let id = body.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
             let mut s = format!("🤖 агент #{id} пошёл работать\n{}", clip(task, 120));
-            // The workspace comes from the ANSWER, not from what we asked for: the two differ
-            // whenever the server has its own idea, and the operator needs the path that exists.
-            let ws = body.get("workspace").and_then(|v| v.as_str()).unwrap_or_default();
-            match chat_state(chat_id).project {
-                Some(p) => s.push_str(&format!("\n📁 {p}")),
-                None if !ws.is_empty() => s.push_str(&format!(
-                    "\n📁 {ws}\n\
+            // The SAME path the agent was started with — passed in, not read back out of a
+            // response that does not carry one.
+            match (chat_state(chat_id).project, workspace) {
+                (Some(p), _) => s.push_str(&format!("\n📁 {p}")),
+                (None, Some(w)) => s.push_str(&format!(
+                    "\n📁 {}\n\
                      свежий каталог под эту задачу — прошлые работы рядом, не поверх.\n\
                      /projects · /project <имя> — работать в своём проекте",
+                    w.display()
                 )),
-                None => s.push_str(&format!(
-                    "\n📁 {} — это личная песочница nadia, а не твой репозиторий.\n\
+                (None, None) => s.push_str(&format!(
+                    "\n📁 {} — личная песочница nadia, а не твой репозиторий.\n\
                      /projects · /project <имя> — работать в проекте",
                     default_workspace().display()
                 )),
@@ -979,6 +1000,17 @@ fn render_finished(id: u64, phase: &str, a: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
+    /// Tests that redirect `HOME` / `XDG_STATE_HOME` / `TELEGRAM_REGISTRY` take this first.
+    ///
+    /// Those are process-wide, and cargo runs tests on threads: without it, one test's `remove_var`
+    /// lands in the middle of another's read. This file already learned that once — the two halves
+    /// of the ownership test were merged into one for exactly this reason — and a second test that
+    /// needed the same environment is the moment to name the rule instead of merging again.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        static M: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+        M.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn caps(chat: bool, read: bool, write: bool, shell: bool) -> Caps {
         Caps { chat, read, write, shell }
     }
@@ -991,6 +1023,7 @@ mod tests {
     /// separate `#[test]`s they run on different threads and race on `TELEGRAM_REGISTRY`.
     #[test]
     fn the_bot_that_took_the_command_is_the_bot_that_answers() {
+        let _g = env_guard();
         let d = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("XDG_STATE_HOME", d.path()) };
 
@@ -1057,8 +1090,54 @@ mod tests {
     /// Verified", the gate reported ✔, and it wrote nothing at all — the previous task's program
     /// was already in the shared root, so the check passed on somebody else's work. A green check
     /// that is about the directory rather than the run is worse than no check.
+    /// The ACK has to name the directory the work is actually in.
+    ///
+    /// The first version of this feature read the workspace out of the POST response — which is
+    /// `{"id": N}` and carries no workspace — so the message fell through to the old branch and
+    /// told the operator the work was in the sandbox root while it was really in its own
+    /// directory. The unit test then in place asserted the directory NAME and never the message,
+    /// which is why a live report was needed to see it. This renders the real response shape.
+    #[test]
+    fn the_ack_names_the_directory_the_work_is_in() {
+        let _g = env_guard();
+        let d = tempfile::tempdir().unwrap();
+        // HOME too: `default_workspace()` is `$HOME/.nadia`, and a test must not create task
+        // directories in the operator's real sandbox.
+        let home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("XDG_STATE_HOME", d.path()) };
+        unsafe { std::env::set_var("HOME", d.path()) };
+        let cmd = Cmd::Spawn("напиши программу".into());
+
+        // The chooser and the message, exactly as dispatch wires them — and `body` is what the
+        // server really answers: `{"id": N}`, no workspace in it. The first version of this
+        // feature read the path back out of that body, found nothing, and told the operator the
+        // work was in the sandbox root while the agent was correctly in its own directory. A test
+        // that hand-built a body with the field would have passed through that bug, which is why
+        // this one starts where dispatch starts.
+        let ws = spawn_workspace(&cmd, 1711036782).unwrap();
+        let text = render(&cmd, &serde_json::json!({ "id": 4 }), 1711036782, ws.as_deref());
+
+        let dir = ws.unwrap();
+        assert!(dir.starts_with(default_workspace().join("tasks")), "{}", dir.display());
+        assert!(dir.is_dir(), "the directory was not created before the agent started");
+        assert!(
+            text.contains(&dir.display().to_string()),
+            "the ACK did not name the task directory:\n{text}"
+        );
+        assert!(
+            !text.contains("личная песочница nadia, а не твой репозиторий"),
+            "the ACK fell through to the shared-root hint:\n{text}"
+        );
+        unsafe { std::env::remove_var("XDG_STATE_HOME") };
+        match home {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
     #[test]
     fn every_task_gets_its_own_directory() {
+        let _g = env_guard();
         let a = task_workspace("напиши на Rust программу: cargo run -- 3 4 печатает 7");
         let b = task_workspace("совсем другая задача");
         assert_ne!(a, b, "two tasks would have shared a workspace");
@@ -1266,7 +1345,7 @@ mod tests {
     #[test]
     fn an_error_body_is_shown_rather_than_a_success_line() {
         let body = serde_json::json!({"error": "no agent 7"});
-        assert!(render(&Cmd::Status(7), &body, 42).contains("no agent 7"));
+        assert!(render(&Cmd::Status(7), &body, 42, None).contains("no agent 7"));
     }
 
     #[test]
@@ -1275,7 +1354,7 @@ mod tests {
             {"id": 1, "phase": "running", "tool_calls": 4, "elapsed_secs": 12,
              "last_tool": "bash", "task": "fix the flaky test"}
         ]});
-        let s = render(&Cmd::List, &body, 42);
+        let s = render(&Cmd::List, &body, 42, None);
         assert!(s.contains("#1 running"), "{s}");
         assert!(s.contains("[bash]"), "{s}");
         assert!(s.contains("fix the flaky test"), "{s}");

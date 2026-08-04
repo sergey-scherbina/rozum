@@ -5,6 +5,32 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-022 — the message named the sandbox root while the work was elsewhere
+
+- **Status:** FIXED 2026-08-05 (`crates/rozum-meeting/src/telegram/nadia.rs`), test
+  `the_ack_names_the_directory_the_work_is_in`, proven to fail against the old behaviour.
+- **Found by:** the operator, one deploy after BUG-021: "ответ всегда один и тот же".
+
+The per-task directories from BUG-021 worked — four `/spawn`s produced four directories, each with
+its own `touched: ["src/main.rs"]`. The **message** still said
+`📁 /Users/sergiy/.nadia — это личная песочница nadia`.
+
+The ACK read the workspace out of the POST response, and `POST /agents` answers `{"id": N}` and
+nothing else. The field was always absent, the rendering fell through to the old shared-root hint,
+and from the phone the fix looked like it had not shipped at all.
+
+**Two sources for one fact.** The request knew the directory because it chose it; the message went
+looking for it somewhere else. Fixed by choosing once in `spawn_workspace` and passing that value
+to both the request and the rendering, so they cannot disagree.
+
+**The test I wrote first would not have caught it** — it hand-built a response containing
+`workspace` and asserted the rendering, which was never the broken half. The one that ships starts
+where dispatch starts: it calls the chooser, renders with the real response shape (`{"id": 4}`),
+and was confirmed to FAIL against the old code before being kept. A test written from the fix
+tests the fix; a test written from the failure tests the failure.
+
+---
+
 ## BUG-021 — a green check on work nobody did
 
 - **Status:** FIXED 2026-08-05 (`crates/rozum-meeting/src/telegram/nadia.rs`), test

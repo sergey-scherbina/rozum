@@ -1,5 +1,17 @@
 # Changelog
 
+## nadia-ack-path — one fact, one source
+Completed: 2026-08-05
+
+The per-task directories shipped and worked; the message kept naming the sandbox root, so from the
+phone nothing had changed. The ACK was reading the workspace out of the POST response, which is
+`{"id": N}` and carries none — while the request that started the agent had chosen the directory
+itself. Two sources for one fact.
+
+`spawn_workspace` now decides once and the value goes to both the request and the message. The
+regression test starts where dispatch starts and was checked against the old code first: it fails
+there with "the ACK did not name the task directory". BUG-022.
+
 ## nadia-task-workspace — every task gets its own directory
 Completed: 2026-08-05
 
