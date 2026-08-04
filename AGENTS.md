@@ -1,5 +1,10 @@
 # Agent Instructions
 
+**This file is the source of truth for how work is organized here. Read it at the start of every
+task and again after any context rotation — it changes, and a stale copy in your head is how a rule
+gets skipped.** In the autonomous loop, re-read it from `origin/master` at the top of every
+iteration and apply whatever changed. `CLAUDE.md` exists only to send you here.
+
 SPRINT: SPRINT.md
 BACKLOG: BACKLOG.md
 CHANGELOG: CHANGELOG.md
