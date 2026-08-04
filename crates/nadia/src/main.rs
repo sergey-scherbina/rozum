@@ -334,8 +334,12 @@ async fn main() {
             let mut session = Session::new(&backend, &tools, &system_prompt(&root), budget);
             // What "done" means, decided before the run (`gate.rs`). NADIA_VERIFY=0 turns it off.
             let check = nadia::gate::derive(&backend, &task, &root).await;
-            if let Some(c) = &check {
-                eprintln!("nadia: acceptance check — {c}");
+            match (&check, nadia::gate::owner()) {
+                (Some(c), _) => eprintln!("nadia: acceptance check — {c}"),
+                // Say which gate owns the run rather than looking ungated: an operator reading
+                // "no check" would otherwise conclude nothing verifies this.
+                (None, Some(o)) => eprintln!("nadia: verification is {o}'s for this run"),
+                (None, None) => {}
             }
             let mut outcome = session.turn(&task).await;
             let mut report = nadia::gate::Report::default();

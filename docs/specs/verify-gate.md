@@ -88,6 +88,24 @@ mistake — work delivered somewhere the operator did not ask for — into a pas
 the class of failure this whole gate exists to remove. The check tells the truth about the
 workspace it was given; moving the work is the agent's job.
 
+## One owner per run
+
+`rozum launch` carries this gate for the child it starts; nadia carries it for a run that has no
+launcher (`nadia serve`, the Telegram path). **Both at once is a defect**, and it was live: the
+matrix and the UCC coder both invoke `rozum launch … nadia run "$prompt"`, and launch's loop
+started applying to nadia the moment `agent_prompt_index` learned its prompt position. Two derive
+calls, two repair budgets stacked on one task.
+
+The rule: **the launcher marks the run** (`ROZUM_GATE_OWNER=rozum-launch`, set on the child's
+environment next to `ROZUM_PIGGYBACK`), and an agent that carries its own gate stands down when it
+sees the mark — and SAYS which gate owns the run, so an operator reading "no check" does not
+conclude that nothing verifies it. `NADIA_VERIFY=1` does not override the mark: the question is
+not whether the operator wants a gate, it is which one already has the run.
+
+Found while designing the A/B for "what does the gate buy", not by review — the arms would have
+compared *one* gate against *two* while wearing the label "gate vs none". That is the more useful
+half of the finding: a measurement plan is a way of reading code that nothing else replaces.
+
 ## Non-goals
 
 - **Judging code quality.** The gate answers "does it do what was asked", not "is it good".

@@ -63,12 +63,28 @@ fn clip(s: &str, n: usize) -> String {
     }
 }
 
-/// Is the gate on? Off only when the operator says so — see the module note on opt-out.
+/// Is the gate on? Off when the operator says so, and off when something above us already owns
+/// the gate for this run.
+///
+/// `rozum launch` sets `ROZUM_GATE_OWNER` whenever its own verify-repair loop is live, which is
+/// every matrix cell and every UCC coder launch. Running both means two derive calls and two
+/// repair budgets stacked on one task — and it silently changes what an A/B on `NADIA_VERIFY`
+/// measures, which is how it was found. One owner per run; the launcher is the outer one, so it
+/// wins. `nadia serve` (the Telegram path) has no launcher above it and is unaffected — that is
+/// the case this gate exists for.
 pub fn enabled() -> bool {
+    if std::env::var_os("ROZUM_GATE_OWNER").is_some() {
+        return false;
+    }
     !matches!(
         std::env::var("NADIA_VERIFY").ok().as_deref(),
         Some("0" | "off" | "false" | "no")
     )
+}
+
+/// Who is gating this run, for the one line a batch run prints about it.
+pub fn owner() -> Option<String> {
+    std::env::var("ROZUM_GATE_OWNER").ok().filter(|s| !s.trim().is_empty())
 }
 
 /// Repair rounds after the first attempt. Two by default, the same budget `rozum launch` uses:
@@ -177,18 +193,34 @@ mod tests {
         assert!(judged.summary().contains("судья"), "{}", judged.summary());
     }
 
+    /// One test, not two, and that is the point: both read the same process-wide environment,
+    /// and as separate `#[test]`s they ran on different threads and raced — the second one's
+    /// `ROZUM_GATE_OWNER` made the first one's `enabled()` false. A test that fails depending on
+    /// thread scheduling teaches nothing.
     #[test]
-    fn the_gate_is_on_unless_switched_off() {
-        // Serial with the env var, like the other env-reading tests in this crate.
+    fn who_owns_the_gate_for_this_run() {
         unsafe { std::env::remove_var("NADIA_VERIFY") };
-        assert!(enabled(), "the failure it prevents is silent, so the default must be ON");
+        unsafe { std::env::remove_var("ROZUM_GATE_OWNER") };
+        unsafe { std::env::remove_var("NADIA_VERIFY_ROUNDS") };
+
+        // No outer gate: on by default, because the failure it prevents is silent.
+        assert!(enabled(), "the default must be ON — an unverified run looks like a verified one");
         unsafe { std::env::set_var("NADIA_VERIFY", "0") };
         assert!(!enabled());
         unsafe { std::env::set_var("NADIA_VERIFY", "1") };
         assert!(enabled());
-        unsafe { std::env::remove_var("NADIA_VERIFY") };
 
-        unsafe { std::env::remove_var("NADIA_VERIFY_ROUNDS") };
+        // An outer gate wins, and an explicit NADIA_VERIFY=1 does not override it: the question
+        // is not whether the operator wants a gate, it is which one already owns the run.
+        unsafe { std::env::set_var("ROZUM_GATE_OWNER", "rozum-launch") };
+        assert!(!enabled(), "two gates on one run is two derive calls and two repair budgets");
+        assert_eq!(owner().as_deref(), Some("rozum-launch"), "and the run should be able to SAY so");
+        unsafe { std::env::remove_var("ROZUM_GATE_OWNER") };
+        assert!(enabled());
+        unsafe { std::env::remove_var("NADIA_VERIFY") };
+        assert!(owner().is_none());
+
+        // Rounds: two by default, the same budget rozum launch uses.
         assert_eq!(rounds(), 2);
         unsafe { std::env::set_var("NADIA_VERIFY_ROUNDS", "5") };
         assert_eq!(rounds(), 5);

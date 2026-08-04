@@ -6168,6 +6168,14 @@ async fn exec_agent(
         cmd.env("ANTHROPIC_AUTH_TOKEN", "rozum-local");
         cmd.env_remove("ANTHROPIC_API_KEY");
         cmd.env("ROZUM_PIGGYBACK", if piggyback { "1" } else { "0" });
+        // ONE OWNER PER RUN. An agent that carries its own verify-repair gate (nadia) must not
+        // run it inside a launch that is already gating: two gates mean two derive calls, two
+        // repair budgets stacked, and — measured while planning the A/B — a comparison of "one
+        // gate" against "two" wearing the label "gate vs none". The launcher gates whenever it
+        // has a prompt to rewrite, which is exactly when this env is set; the agent's own gate
+        // reads it and stands down. The Telegram path (`nadia serve`, no launcher) never sees
+        // it, which is the case that gate was built for.
+        cmd.env("ROZUM_GATE_OWNER", "rozum-launch");
         cmd.env("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
         cmd.env("ANTHROPIC_MODEL", &claude_alias);
         cmd.env("ANTHROPIC_DEFAULT_OPUS_MODEL", &claude_alias);
