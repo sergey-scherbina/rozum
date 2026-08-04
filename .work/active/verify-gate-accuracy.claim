@@ -1,0 +1,6 @@
+feature/verify-gate-accuracy 2026-08-04T10:47:41Z
+agent: claude-opus-5
+heartbeat: 2026-08-04T10:47:41Z
+status: not-started
+done-so-far:
+next: write docs/specs/verify-gate.md, then vga-arg-quotes
