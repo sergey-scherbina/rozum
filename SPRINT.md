@@ -2851,6 +2851,15 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   their room, so that wait is over.
   ORDER, so nobody starts at the wrong end: S2 upstream → vendor the crate + a byte-identical
   regeneration gate → dispatch `rozum meetings attach` at the built binary → delete `attach.rs`.
+  **THE BLOCKER IS NOW ONE LINE, AND WE BUILT THE REST OF IT.** `tui-credential-resolution`
+  (scalascript `d4180b88b`, ours) makes the terminal target resolve a declared credential ON THE
+  TARGET — env var, file, or literal — at fetch time, so nothing is compiled in. Its gate greps the
+  emitted source and asserts the secret is ABSENT, which is the assertion the design exists for; a
+  missing source sends NO `Authorization` rather than an empty one.
+  What is still missing is the `credential` PARAMETER on `fetchUrlSignal` itself — one line in
+  scalascript's `primitives.ssc`, which their `ui-fetch-credentials` claim holds. Until it lands the
+  vocabulary (their S1) and the resolution (our S2) are both built and NOT connected, so an `.ssc`
+  app cannot declare a credential at all. Asked in their room; not working inside their claim.
   **What rozum needs before `attach.rs` can be retired:** their branch merged, and `bin/ssc-tools` rebuilt
   (`install.sh --dev`) — it is still built from `ec70eb062`, so we cannot consume any of this yet.
   Then: flip our fixture to `--require-auth` (already supported) and the existing Stage A smoke

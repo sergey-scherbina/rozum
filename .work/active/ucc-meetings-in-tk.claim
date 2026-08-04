@@ -1,7 +1,6 @@
 feature/ucc-meetings-in-tk 2026-08-04T10:51:01Z
 agent: claude-opus-5-housekeeping
-heartbeat: 2026-08-04T21:52:39Z
-status: BLOCKED on upstream — capability complete (branch e2238dc, rozum-meeting 198/198), packaging cannot start until scalascript ui-fetch-credentials S2 lands
-done-so-far: one .ssc emits both clients — transcript+badge+time, authenticated read, composer, room picker (@you), day picker, 3s clock, room creation. Daemon: badge/time, Bearer, plain-text submit, ready-made urls in /rooms and /days, POST /rooms. Upstream: seven capabilities landed, five by us
-next: WAIT for scalascript S2 (emitter-side credential resolution). PROOF it is required: the emitted crate has the token compiled into initial_signals and reads std::env once, for the snapshot flag only — so a vendored binary carries the build-time token, wrong for every operator and a secret in an artifact. We need one form, credentialEnv("ROZUM_MEETING_TOKEN"). Then: vendor the crate + a byte-identical regeneration gate, dispatch `rozum meetings attach` at the built binary, delete attach.rs. Not before.
-note: told scalascript in their room that TuiEmitter.scala is free — their S2 claim was waiting on a claim of mine released hours earlier.
+heartbeat: 2026-08-04T22:25:33Z
+status: BLOCKED on ONE LINE upstream — capability complete here (branch e2238dc, rozum-meeting 198/198)
+done-so-far: one .ssc emits both clients — transcript+badge+time, authenticated read, composer, room picker (@you), day picker, 3s clock, room creation. Upstream: EIGHT capabilities landed, six by us — the newest is tui-credential-resolution (scalascript d4180b88b), which resolves a declared credential ON THE TARGET so nothing is baked
+next: the credential PARAMETER on fetchUrlSignal in scalascript primitives.ssc — held by their ui-fetch-credentials claim, asked in their room. Until it lands the vocabulary and the resolution are built and NOT connected, so an .ssc app still cannot declare one. Then: vendor the crate + byte-identical regeneration gate, dispatch `rozum meetings attach` at the built binary, delete attach.rs.
