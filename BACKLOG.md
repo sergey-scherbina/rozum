@@ -1,5 +1,35 @@
 # Backlog
 
+## Parked worktree work — two patches rescued from worktrees that were about to be deleted (2026-08-04)
+
+- [ ] **parked-patches-decide** — during the 2026-08-04 worktree cleanup, two branches turned out to
+  carry UNCOMMITTED work that would have died with their directories. Both were committed to their own
+  branches and exported as patch files so they survive even a branch delete:
+  `~/.rozum/attic/parked-patches/` (`0001-wip-gateway-the-codex-create-steer-*.patch`,
+  `0001-wip-meeting-the-viewport-probe-*.patch`). **Decide what happens to each — that decision is the
+  task; neither is in master.**
+  1. **`feature/codex-gptoss-steer` `a1141f7` — codex create-steer** (78 lines in
+     `src/gateway.rs`): `CODEX_CREATE_RECIPE` (append the `mkdir -p … && cat > PATH <<'EOF'` primitive
+     to codex's prompt so a small model has ONE trivial file-creation shape instead of V4A, default-on
+     via `ROZUM_CODEX_CREATE_STEER`) plus `CODEX_LEAN_PROMPT` (replace codex's ~21 KB `instructions`
+     wholesale with a compact coding prompt, opt-in via `ROZUM_CODEX_LEAN_PROMPT`). Written against
+     gpt-oss under codex — **both of which are now out of scope** (model not on disk, driver not in
+     use), so the honest default is: leave it parked, and reconsider only if codex/opencode or a second
+     model comes back. Counter-argument worth one read: the *lean-prompt* half is a general claim about
+     prompt load collapsing small-model format adherence, and Qwen3.5-4B is a small model — if that
+     generalizes, a lean prompt could help the model we DO run. Cheap check before deciding: does the
+     claude path already send a small prompt? If yes, there is nothing to win and this closes.
+  2. **`feature/ucc-web-live` `2b97edb` — the iOS viewport probe** (1 line in
+     `clients/meeting/meeting.ssc`): `syncH()` overwrites the composer's placeholder with live
+     `innerHeight`/`visualViewport`/`offsetTop`/keyboard numbers. **Not shippable as-is** — it eats the
+     placeholder — and it is diagnostic scaffolding for the iOS keyboard-layout question, not a fix.
+     Decide: either that question is settled (delete the branch, keep the patch in the attic as the
+     record of how it was measured) or it is not (promote a real task that uses the probe, then removes
+     it). Do NOT merge it as-is.
+  **Done when:** each of the two has an explicit verdict recorded here — promoted to SPRINT with a
+  scope, or dropped with the reason — and any branch whose verdict is "dropped" is deleted (the patch
+  in the attic is the durable copy).
+
 ## Service liveness — we ship daemons with no health signal (found 2026-07-27, BUG-013)
 
 - [ ] **service-liveness-watch** — BUG-013 was a 4-day outage of the flagship feature (the messenger
