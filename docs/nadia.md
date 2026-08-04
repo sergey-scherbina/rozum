@@ -167,7 +167,8 @@ it can answer; a killed turn is not.
 
 ### The verify gate — success is not the model's to declare
 
-Contract: `nadia:SPEC.md` §3.1. Before a task runs, the model is asked to formalize it into a
+Contract: `nadia:SPEC.md` §3.1; the shared primitives are specified in
+[`specs/verify-gate.md`](specs/verify-gate.md). Before a task runs, the model is asked to formalize it into a
 check (`{"checkable","cargo_test","run":[{"arg","expect"}]}`) and *rozum* builds the shell
 command from that structure — so the model supplies values, never shell. After the agent stops,
 the command runs in the workspace and its exit status decides. A failure comes back as the next
@@ -186,6 +187,11 @@ The guards matter as much as the check:
 - **Unverified is reported as unverified**, never as a pass. In Telegram that is the
   `⚠ не проверено` line next to `✔ проверка прошла: <command>`.
 - **A failed check means not done**, whatever the model says: `nadia run` exits 1.
+- **The check describes the task, not how the task was spelled.** A quote that delimited the
+  argument in the prompt is not part of the argument (`cargo run -- "3 4 + 2 *"` checks the value
+  `3 4 + 2 *`), and a project the model put in a subdirectory is NAMED in the repair prompt rather
+  than accommodated by moving the check into it — both measured, both having cost a run its whole
+  repair budget.
 
 The primitives are `rozum-agent`'s `verify` module and `rozum launch` uses the same ones — the
 derive prompt, the shell builder, the hallucination guard and the judge parser exist once. That
