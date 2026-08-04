@@ -118,6 +118,35 @@ becomes a *third* upstream ask if the product decides the terminal must have it.
 NOT filed yet: two blocking reports are already open, and this one is cosmetic next to a composer
 that cannot submit.
 
+### A fourth limit, and it blocks earliest of all: the TUI target sends no headers
+
+`fetchUrlSignal` takes a `headers: Signal[String]` (a JSON object, documented with an
+`Authorization` example) and the React target honours it. The terminal target does not — the emitted
+helper is `fn fetch_text(url) { ureq::get(url).call() … }`, with no header plumbing at all, and
+`FetchInfo` never carried the header signal in the first place.
+
+Combined with the next section — every daemon route requires HTTP Basic — **the generated terminal
+client cannot read the live room at all.** Not the composer, not the switcher: the plain read.
+Filed upstream as **`tui-fetch-headers`** (2026-08-04, same branch), and it is ahead of the other
+two in the queue.
+
+Why nobody hit this before: `specs/frontend-tui-fetch-refresh.md` and rozum's own PoC smoke both
+run against **fixtures with no auth**. The dual-target proof was real, but it had never been pointed
+at a production endpoint. Worth remembering as a shape — *a capability proven against a fixture is
+proven only for fixtures.*
+
+### And a fifth thing, harmless once known: `env()` resolves at different times per target
+
+On the terminal target `ssc run --v1` executes the program at emit time, so `env(...)` is read in
+the emitting process and the resolved URL is baked into the Rust as a string literal. The React
+emission keeps the program — the artifact still contains `_arith('+', "rozum · ", room)` — so the
+same `env(...)` is a *runtime* read in the browser, where those variables do not exist.
+
+Consequences, both already handled in Stage A: the web client must take its base/room from the page
+(origin, route) rather than from the environment; and a smoke can only assert *presence* of the
+shared view/binding in the web artifact, because the room name never appears literally in it. The
+behavioural assertion belongs to the terminal half.
+
 ### And the data plane is authenticated — which settles the identity question
 
 `GET http://127.0.0.1:8401/rooms` answers **`401 Unauthorized`**. `rest_read.rs` puts an
@@ -158,6 +187,24 @@ real transcript rows *including the badge column* from an isolated fixture; the 
 the same columns; no target check anywhere in the source; the existing PoC smoke
 (`clients/control/test/ucc-msglist-dual-target.sh`) still passes, and the new one does not touch
 `:8089`, `:8401`, `:8411` or any operator service.
+
+**DONE 2026-08-04 (`3e62b99`).** `clients/control/meetings.ssc` +
+`clients/control/test/ucc-meetings-dual-target.sh` + `ucc-meetings-fixture.py`; the daemon side
+gained `StoredTurn::time_hm()` and `rest_read::message_json` (additive `badge`/`time`), covered by
+`messages_carry_derived_badge_and_time`, which asserts against `StoredTurn::badge()` rather than a
+literal so the two cannot drift while the test stays green. rozum-meeting 193/193; the new smoke
+green on both targets; the PoC smoke still green.
+
+**One open caveat, deliberately not resolved by me:** every emission above was measured with
+`bin/ssc-tools` built from `ec70eb062` while scalascript is at `bb22c9d4b` — the CLI prints
+`STALE BUILD` on each run. The result needs re-confirming after `install.sh --dev`. I did not
+rebuild a staged toolchain that other agents are using mid-flight; that is the operator's call or a
+quiet moment's.
+
+**What Stage A does NOT prove, and cannot until `tui-fetch-headers` lands:** that the terminal
+client reads the *live* daemon. It reads an unauthenticated fixture. The fixture already accepts
+`--require-auth`, so the day headers work, flipping that flag turns this same script into the
+authenticated proof — no new fixture needed.
 
 ### Stage B — the two capabilities (scalascript, blocking C)
 
