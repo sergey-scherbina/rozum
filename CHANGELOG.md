@@ -1,5 +1,51 @@
 # Changelog
 
+## gate-matrix — the gate measured, and two defects the measuring found
+Completed: 2026-08-04
+
+**The measurement.** 8 tasks × 2 arms, alternating per task, one agent at a time:
+arm A no gate, arm B nadia's gate alone. 6/8 → 7/8 — which would read as a win if
+it stopped there. It did not: the harness discards the agent log without `KEEP=1`,
+so "the gate repaired that cell" was an inference from 24 s → 108 s. Re-running
+the cell gated with the log kept, it passed again in 102 s with **zero repair
+rounds** — the gate derived `cargo build && cargo test`, ran it, green first try.
+
+So: **no demonstrated effect on the pass rate**, which is the null result the
+prediction — written into `scripts/bench/HISTORY.md` before the run — named as the
+most useful outcome. It means what it was predicted to mean: the gate is
+insurance, not a score. On the matrix the harness already verifies every cell; the
+gate's value is where nothing else does, which is the phone, where the alternative
+is the model's own word. Cost: +2.3 s on a task with no checkable criterion, and
+no total wall-clock penalty (495 s vs 514 s).
+
+The prediction was right about the size (0–2 cells) and about `greet` (the gate
+correctly did nothing) and **wrong about which task** — I named `wordcount`, which
+failed in both arms with a different compile error each time.
+
+**Two defects, both found by preparing to measure rather than by review:**
+
+- **A marker that lied.** `ROZUM_GATE_OWNER` — added the same day to stop nadia's
+  gate stacking on top of `rozum launch`'s — was set for *every* child, not only
+  for a launch that would actually gate. `ROZUM_VERIFY=0` therefore still told
+  nadia to stand down, and both arms of the A/B would have run ungated while
+  carrying the labels. Fixed: set only when the launcher has a prompt to rewrite
+  and its gate is not switched off.
+- **A judge that could only see Rust.** `source_snapshot` looked for `Cargo.toml`
+  and `src/*.rs`; anything else got `(no source found)` — and a judge shown
+  nothing rules against you. Measured: a task whose whole result was `x.txt`
+  containing `hi` got "not accomplished", two repair rounds and a reported
+  failure, with the correct file on disk throughout. That breaks the gate's own
+  rule (unverified must not read as failed) for every non-cargo task, and `greet`
+  would have hit it in every cell of the arm about to be measured.
+  `artifact_snapshot` now shows the workspace and its small text files when there
+  is no Rust, the judge also sees **what the agent replied** — the only evidence a
+  reply-shaped task has — and nothing-at-all is `Unknown`, reported as "not
+  checked".
+
+Also fixed while here: the double gate itself (`a88fbea`), where the matrix and
+the UCC coder both ran nadia under two gates — two derive calls and two repair
+budgets on one task — since `agent_prompt_index` learned nadia's prompt position.
+
 ## total-fs — a failure contract for `std.fs`, and the tool-surface defect it uncovered
 Completed: 2026-08-04
 

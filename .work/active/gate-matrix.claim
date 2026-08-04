@@ -1,6 +1,0 @@
-feature/gate-matrix 2026-08-04T16:10:00Z
-agent: claude-opus-5
-heartbeat: 2026-08-04T14:41:48Z
-status: in-progress
-done-so-far: gm-defer done (a88fbea) + two defects the measurement prep exposed (4da4665: a lying gate marker, a judge that could only see Rust)
-next: gm-measure — A/B running, 16 cells alternating

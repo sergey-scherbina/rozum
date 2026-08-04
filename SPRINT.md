@@ -22,15 +22,19 @@ position (first task of this session) launch's verify-repair loop applies to it 
 nadia's own. Two derive calls per cell, two repair budgets stacked, and an A/B on `NADIA_VERIFY`
 would have compared "one gate" against "two", not against none.
 
-- [ ] **gm-defer** — one owner per run: `rozum launch` marks a run it is gating, nadia's gate
+- [x] **gm-defer — DONE** (`a88fbea`, marker fixed in `4da4665`). one owner per run: `rozum launch` marks a run it is gating, nadia's gate
   stands down when it sees the mark and says so once. The Telegram path (`nadia serve`, no
   launcher) is unaffected — that is the case nadia's gate was built for.
-- [ ] **gm-measure** — 8 tasks × 2 arms, ALTERNATING, one agent at a time (a concurrent run
+- [x] **gm-measure — DONE** (`0298fcf`). 6/8 → 7/8 at one rep, and checking the mechanism unmoved
+  it: the cell that moved passed again gated with ZERO repair rounds, so variance is the likelier
+  cause. **No demonstrated effect on the pass rate** — the null result the prediction called the
+  most useful one. Cost: +2.3 s on a task with no criterion, no total wall-clock penalty. Old text: 8 tasks × 2 arms, ALTERNATING, one agent at a time (a concurrent run
   already cost a gateway timeout, rc=2): arm A `ROZUM_VERIFY=0 NADIA_VERIFY=0` (no gate at all),
   arm B `ROZUM_VERIFY=0 NADIA_VERIFY=1` (nadia's gate alone — the phone path). What is being
   answered: does the gate change the pass rate, and what does it cost in wall-clock and model
   calls.
-- [ ] **gm-record** — the run goes into a history file with its conditions, not into a sentence
+- [x] **gm-record — DONE.** `scripts/bench/HISTORY.md`, prediction written BEFORE the run and
+  scored against the result (right about the size and about greet, wrong about which task). the run goes into a history file with its conditions, not into a sentence
   in a commit. A number without the machine state next to it is not comparable to the next one.
 
 ### ▶ Total-fs wrappers + the std.fs failure contract (operator 2026-08-04: "Делай. Заведи.")
