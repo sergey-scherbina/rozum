@@ -1,6 +1,6 @@
 feature/ucc-meetings-in-tk 2026-08-04T10:51:01Z
 agent: claude-opus-5-housekeeping
-heartbeat: 2026-08-04T10:51:01Z
-status: not-started
-done-so-far:
-next: write docs/specs/ucc-meetings-in-tk.md (parity list is attach.rs), then the sprint plan
+heartbeat: 2026-08-04T10:59:24Z
+status: in-progress
+done-so-far: spec written + committed on the branch (5af7afb, 2896e7b); sprint plan on master (c2aab2a); the two BLOCKING upstream gaps filed in scalascript via their scripts/inbox-add (tui-fetch-post, tui-fetch-url-signal, branch feature/inbox-rozum-tui-gaps, their inbox-gate green)
+next: Stage A implementation — clients/control/meetings.ssc as a remoteTable over :8401/rooms/{room}/messages/{date} with an operator token from env; then emit both targets and a dual-target smoke
