@@ -1,0 +1,6 @@
+feature/nadia-task-workspace 2026-08-04T22:07:38Z
+agent: claude-code
+heartbeat: 2026-08-04T22:07:38Z
+status: in-progress
+done-so-far: found live — a second task passed the gate having written NOTHING, on the first task artifact
+next: fresh workspace per task under the sandbox

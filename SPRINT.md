@@ -9,6 +9,27 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
+### ▶ A green check on work nobody did (operator 2026-08-05, live)
+
+Branch `feature/nadia-task-workspace`, worktree `.worktrees/feature/nadia-task-workspace`.
+
+**Measured on the phone, two `/spawn`s in a row with the same task.** Agent #2 reported "Created a
+Rust program … Verified: cargo run -- 3 4 outputs 7", the gate reported `✔`, and `touched` was
+**empty** — it wrote nothing. The first task's program was already sitting in the sandbox ROOT, so
+`cargo run -- 3 4` printed 7 the moment it was asked, and every signal we have said success.
+
+**The check verifies the WORKSPACE, not the run.** That is the same false pass the gate exists to
+prevent, arriving through the one door nobody had closed: a shared directory reused across tasks.
+It also loses work — task N+1 overwrites task N's `src/main.rs` in place.
+
+- [ ] **ntw-fresh** — a bare `/spawn` (no `/project` chosen) gets its own directory under the
+  sandbox, named for the day and the task, created before the agent starts. `/project` keeps
+  meaning "work in this existing tree", which is the case where reuse is the point.
+- [ ] **ntw-say** — the chat says where it is working, and the "личная песочница" hint stops
+  implying one shared heap.
+- [ ] **ntw-verify** — unit tests, then LIVE: two identical `/spawn`s must produce two
+  directories, and the second must show `✍️` files of its own rather than passing on the first's.
+
 ### ▶ Two bots, one state file (operator 2026-08-04, live: "А в Rozum IA пришло вот это сообщение")
 
 Branch `feature/nadia-tg-bot-ownership`, worktree `.worktrees/feature/nadia-tg-bot-ownership`.
