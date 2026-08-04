@@ -109,6 +109,13 @@ fn as_json(s: &Status) -> Value {
         // Which files it actually wrote — the question every front-end asks next, and the
         // one a model's own summary is not a reliable answer to.
         "touched": s.touched,
+        // What the verify gate concluded — the ground truth about this run, as opposed to the
+        // model's own summary of it. `checked: null` means nothing was checkable, said out loud
+        // rather than left to look like a pass.
+        "check": s.report.check,
+        "checked": s.report.passed,
+        "check_detail": s.report.detail,
+        "repairs": s.report.rounds,
     })
 }
 

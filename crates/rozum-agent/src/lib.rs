@@ -13,6 +13,7 @@ pub mod mcp_tool_source;
 pub mod memory_store;
 pub mod rag_lite;
 pub mod router;
+pub mod verify;
 
 pub(crate) use rozum_core::{backend, constrain, share};
 pub(crate) use rozum_core::backend::*;

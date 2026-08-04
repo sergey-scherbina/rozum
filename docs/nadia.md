@@ -165,6 +165,33 @@ what is *wanted*, and they are not the same question.
 A denial reaches the model as a tool error, not a halt. "The user declined" is something
 it can answer; a killed turn is not.
 
+### The verify gate — success is not the model's to declare
+
+Contract: `nadia:SPEC.md` §3.1. Before a task runs, the model is asked to formalize it into a
+check (`{"checkable","cargo_test","run":[{"arg","expect"}]}`) and *rozum* builds the shell
+command from that structure — so the model supplies values, never shell. After the agent stops,
+the command runs in the workspace and its exit status decides. A failure comes back as the next
+turn carrying the command and **what it actually printed**; bounded at
+`NADIA_VERIFY_ROUNDS` (default 2). `NADIA_VERIFY=0` turns the gate off.
+
+Why it exists, concretely: the RPN calculator an agent wrote from Telegram builds, runs, and
+prints `4 + 4 = 7`. The model had verified what its prompt asks for — that the program builds and
+runs — and nobody had written down what the right answer was. A derived check is that missing
+sentence.
+
+The guards matter as much as the check:
+
+- **`checkable: false` is an answer.** A task with no machine-checkable criterion gets no
+  invented one — "reply with the word pong" once became `cargo run -- pong == gnop`.
+- **Unverified is reported as unverified**, never as a pass. In Telegram that is the
+  `⚠ не проверено` line next to `✔ проверка прошла: <command>`.
+- **A failed check means not done**, whatever the model says: `nadia run` exits 1.
+
+The primitives are `rozum-agent`'s `verify` module and `rozum launch` uses the same ones — the
+derive prompt, the shell builder, the hallucination guard and the judge parser exist once. That
+prompt took measurement to word; two copies of it would drift, and the failure mode of a drifted
+verifier is a run that reports success nobody checked.
+
 ### Budgets and the repetition guard
 
 24 steps, 4096 tokens, 15 minutes, temperature 0. The step budget is the safety net rather

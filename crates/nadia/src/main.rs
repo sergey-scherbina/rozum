@@ -332,11 +332,35 @@ async fn main() {
                 std::process::exit(2);
             }
             let mut session = Session::new(&backend, &tools, &system_prompt(&root), budget);
-            let outcome = session.turn(&task).await;
+            // What "done" means, decided before the run (`gate.rs`). NADIA_VERIFY=0 turns it off.
+            let check = nadia::gate::derive(&backend, &task, &root).await;
+            if let Some(c) = &check {
+                eprintln!("nadia: acceptance check — {c}");
+            }
+            let mut outcome = session.turn(&task).await;
+            let mut report = nadia::gate::Report::default();
+            for round in 0..nadia::gate::rounds() {
+                if !matches!(outcome.stop, AgentStop::Done) {
+                    break;
+                }
+                let (r, repair) =
+                    nadia::gate::check(&backend, &task, &root, check.as_deref(), &outcome).await;
+                report = nadia::gate::Report { rounds: round, ..r };
+                let Some(prompt) = repair else { break };
+                eprintln!("nadia: check failed — repair round {}", round + 1);
+                outcome = session.turn(&prompt).await;
+            }
+            eprintln!("nadia: {}", report.summary());
             if opts.json {
                 println!("{}", result_json(&outcome));
             } else {
                 println!("{}", outcome.text);
+            }
+            // A run whose check FAILED did not finish, whatever the model says about it. Exit 1
+            // (the "gave up" code the harness reads) rather than 0: the whole point of the gate
+            // is that success is not the model's to declare.
+            if report.passed == Some(false) {
+                std::process::exit(1);
             }
             std::process::exit(match outcome.stop {
                 AgentStop::Done => 0,

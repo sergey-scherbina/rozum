@@ -642,6 +642,29 @@ fn render(cmd: &Cmd, body: &serde_json::Value, chat_id: i64) -> String {
     }
 }
 
+/// The gate's verdict for a finished agent, in one line.
+fn verdict_line(a: &serde_json::Value) -> String {
+    let check = a.get("check").and_then(|v| v.as_str()).unwrap_or("");
+    let repairs = a.get("repairs").and_then(|v| v.as_u64()).unwrap_or(0);
+    match a.get("checked").and_then(|v| v.as_bool()) {
+        Some(true) if check.is_empty() => "✔ судья-модель подтвердила результат".to_string(),
+        Some(true) => {
+            let extra = if repairs > 0 { format!(" (после {repairs} раунд(ов) починки)") } else { String::new() };
+            format!("✔ проверка прошла: {}{extra}", clip(check, 200))
+        }
+        Some(false) => {
+            let detail = a.get("check_detail").and_then(|v| v.as_str()).unwrap_or("");
+            let head = if check.is_empty() {
+                "✘ судья-модель отклонила результат".to_string()
+            } else {
+                format!("✘ проверка НЕ прошла: {}", clip(check, 200))
+            };
+            if detail.is_empty() { head } else { format!("{head}\n{}", clip(detail, 700)) }
+        }
+        None => "⚠ не проверено — у задачи не было машинно-проверяемого критерия".to_string(),
+    }
+}
+
 fn one_line(a: &serde_json::Value) -> String {
     let get = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("");
     let num = |k: &str| a.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
@@ -821,6 +844,10 @@ fn render_finished(id: u64, phase: &str, a: &serde_json::Value) -> String {
     } else if phase == "done" {
         s.push_str("\n✍️ файлы не менялись — это был ответ, а не работа");
     }
+    // The verdict of the verify gate. This is the line that separates "the agent says it is
+    // done" from "a command that either passes or does not says it is done" — and a run that
+    // could not be checked SAYS so rather than looking like a pass.
+    s.push_str(&format!("\n{}", verdict_line(a)));
     let result = get("result");
     if !result.is_empty() {
         s.push_str(&format!("\n\n{}", clip(result, 2500)));
@@ -979,6 +1006,37 @@ mod tests {
         });
         let text = render_finished(4, "done", &b);
         assert!(text.contains("файлы не менялись"), "{text}");
+    }
+
+    #[test]
+    fn the_verdict_distinguishes_checked_from_merely_finished() {
+        let with = |checked: serde_json::Value, check: &str, detail: &str, repairs: u64| {
+            serde_json::json!({
+                "id": 1, "phase": "done", "task": "t", "tool_calls": 3, "elapsed_secs": 9,
+                "result": "ok", "workspace": "/w", "touched": ["src/main.rs"],
+                "check": check, "checked": checked, "check_detail": detail, "repairs": repairs
+            })
+        };
+        // Passed: the command itself is the evidence, and repairs are named when there were any.
+        let t = render_finished(1, "done", &with(true.into(), "cargo test -q", "", 0));
+        assert!(t.contains("✔ проверка прошла: cargo test -q"), "{t}");
+        assert!(!t.contains("раунд"), "{t}");
+        let t = render_finished(1, "done", &with(true.into(), "cargo test -q", "", 2));
+        assert!(t.contains("2 раунд"), "{t}");
+
+        // Failed: what failed AND what it printed, because that is what a person acts on.
+        let t = render_finished(1, "done", &with(false.into(), "cargo test -q", "4 + 4 = 7", 2));
+        assert!(t.contains("✘ проверка НЕ прошла") && t.contains("4 + 4 = 7"), "{t}");
+
+        // Nothing checkable must never read as a pass — the whole point of the line.
+        let t = render_finished(1, "done", &with(serde_json::Value::Null, "", "", 0));
+        assert!(t.contains("не проверено"), "{t}");
+
+        // The judge's verdicts are distinguishable from a deterministic check.
+        let t = render_finished(1, "done", &with(true.into(), "", "", 0));
+        assert!(t.contains("судья-модель подтвердила"), "{t}");
+        let t = render_finished(1, "done", &with(false.into(), "", "не реализовано", 0));
+        assert!(t.contains("судья-модель отклонила") && t.contains("не реализовано"), "{t}");
     }
 
     #[test]

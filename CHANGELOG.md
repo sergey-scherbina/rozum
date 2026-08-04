@@ -1,5 +1,50 @@
 # Changelog
 
+## feat(nadia): the verify gate, ported — success is not the model's to declare
+Completed: 2026-08-04
+
+`rozum launch` has carried a verify-repair gate since the matrix work; an agent
+started from Telegram had none. The difference had a face: an RPN calculator
+written from a phone that builds, runs, and prints `4 + 4 = 7`, reported as
+finished. The model had verified exactly what its prompt asks for — that the
+program builds and runs — and nobody had ever written down what the right answer
+was.
+
+**Shared primitives, one definition.** `crates/rozum-agent/src/verify.rs` now
+holds the derive prompt, the shell builder, the hallucination guard, the check
+runner, the judge and its parser. `rozum launch` delegates to them (its copies
+are gone — `run_verify`, `cargo_run_check_fragment`, `shquote`, `derive_target`'s
+prompt, `task_mentions_cargo`), and nadia uses the same ones through
+`crates/nadia/src/gate.rs`, which owns only the policy: rounds, wording, what the
+operator is shown. That prompt took measurement to word; two copies of it drift,
+and a drifted verifier reports success nobody checked.
+
+**How it runs.** Before the task: ask the model to formalize it into
+`{"checkable","cargo_test","run":[{"arg","expect"}]}` and BUILD the command from
+that structure — the model supplies values, never shell. After the agent stops:
+run it in the workspace, and let its exit status decide. On failure: the next
+turn carries the command and *what it actually printed*, because "it failed" is
+not something a model can act on. Bounded at `NADIA_VERIFY_ROUNDS` (default 2);
+`NADIA_VERIFY=0` turns it off, and it is opt-OUT because the failure it prevents
+is silent.
+
+**Honest by construction.** `checkable: false` is a valid answer — a task with no
+machine-checkable criterion gets no invented one, and a cargo check for a
+workspace with no manifest and a task that never mentioned Rust is dropped
+("reply with the word pong" once became `cargo run -- pong == gnop`). Where
+nothing was checked, the run SAYS so rather than reading as a pass. Where the
+check failed, the task is not done whatever the model claims: `nadia run` exits 1
+and Telegram shows the command and its output.
+
+**What it looks like from the phone.** Every finished agent now ends with one of
+`✔ проверка прошла: <command>` (with the repair-round count when there was one),
+`✘ проверка НЕ прошла: <command>` plus what it printed, `✔/✘ судья-модель …`, or
+`⚠ не проверено — у задачи не было машинно-проверяемого критерия`.
+
+Contract in `nadia:SPEC.md` §3.1, with the divergence stated: the ScalaScript and
+Scala 3 implementations do not have it yet, and that is a gap in them rather than
+an option.
+
 ## chore(nadia): the sandbox is `~/.nadia`, its own directory
 Completed: 2026-08-02
 

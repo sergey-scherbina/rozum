@@ -77,6 +77,8 @@ pub struct Status {
     pub result: Option<String>,
     /// Files this agent wrote or edited, in the order it first touched them.
     pub touched: Vec<String>,
+    /// What the verify gate concluded — the ground truth, as opposed to the model's summary.
+    pub report: crate::gate::Report,
 }
 
 struct Meta {
@@ -92,6 +94,10 @@ struct Meta {
     finished: Option<Instant>,
     result: Option<String>,
     touched: std::collections::BTreeSet<String>,
+    /// The acceptance check derived for this task, if any.
+    check: Option<String>,
+    /// What the gate concluded. Default = nothing checked, which the report says out loud.
+    report: crate::gate::Report,
 }
 
 /// The flags the gate reads. Separate from [`Meta`] because the gate touches them on every
@@ -222,6 +228,8 @@ impl Supervisor {
             finished: None,
             result: None,
             touched: Default::default(),
+            check: None,
+            report: Default::default(),
         }));
         let inbox: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -241,6 +249,17 @@ impl Supervisor {
                 &crate::session::system_prompt(&root),
                 spec.budget,
             );
+
+            // What "done" means for this task, decided BEFORE the run so the run cannot
+            // influence it (`gate.rs`). One model call; `None` when the task has no
+            // machine-checkable criterion, which is an answer rather than a failure.
+            let task_text = spec.task.clone();
+            let check = crate::gate::derive(&backend, &task_text, &root).await;
+            if let Some(c) = &check {
+                meta_t.lock().unwrap().check = Some(c.clone());
+            }
+            let max_repairs = crate::gate::rounds();
+            let mut repairs = 0usize;
 
             let mut next: Option<String> = Some(spec.task);
             loop {
@@ -271,6 +290,26 @@ impl Supervisor {
                 }
                 if ctl_t.stopping.load(Ordering::SeqCst) {
                     break;
+                }
+                // THE GATE. The agent has said it is finished; now the check says whether it
+                // is. A failure comes back as the next turn carrying the command and what it
+                // actually printed — that is a repair round, not another guess. Skipped once
+                // the budget is spent: an agent that ran out of steps has a better explanation
+                // than a check result, and repairing it would spend rounds it does not have.
+                if matches!(outcome.stop, AgentStop::Done) && repairs < max_repairs {
+                    let (report, repair) =
+                        crate::gate::check(&backend, &task_text, &root, check.as_deref(), &outcome)
+                            .await;
+                    {
+                        let mut m = meta_t.lock().unwrap();
+                        m.report = crate::gate::Report { rounds: repairs, ..report };
+                    }
+                    if let Some(prompt) = repair {
+                        repairs += 1;
+                        meta_t.lock().unwrap().phase = Phase::Running;
+                        next = Some(prompt);
+                        continue;
+                    }
                 }
                 // Anything the operator sent while that turn ran becomes the next one.
                 let queued: Vec<String> = std::mem::take(&mut *inbox_t.lock().unwrap());
@@ -389,6 +428,7 @@ fn snapshot(id: AgentId, meta: &Arc<Mutex<Meta>>) -> Status {
         elapsed: m.finished.map_or_else(|| m.started.elapsed(), |f| f - m.started),
         result: m.result.clone(),
         touched: m.touched.iter().cloned().collect(),
+        report: m.report.clone(),
     }
 }
 
@@ -419,6 +459,8 @@ mod tests {
             finished: None,
             result: None,
             touched: Default::default(),
+            check: None,
+            report: Default::default(),
         }));
         (ControlGate { inner: src, ctl: ctl.clone(), meta: meta.clone() }, ctl, meta)
     }

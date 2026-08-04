@@ -18,6 +18,7 @@
 
 pub mod approval;
 pub mod commands;
+pub mod gate;
 pub mod mcp;
 pub mod sandbox;
 pub mod serve;

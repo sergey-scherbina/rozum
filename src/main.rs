@@ -5460,117 +5460,40 @@ fn resolve_verify_cmd() -> Option<String> {
 }
 
 /// Run the verify command in `cwd`. Returns `(passed, tail-of-the-real-output)` for the repair prompt.
+/// One definition, in `rozum_agent::verify`, shared with nadia's own gate — this filtering (drop
+/// cargo's progress lines, keep the diagnosis) is exactly what a repair round reads, and two copies
+/// of it drift.
 async fn run_verify(cmd: &str, cwd: &std::path::Path) -> (bool, String) {
-    let (cmd, cwd) = (cmd.to_string(), cwd.to_path_buf());
-    let out = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("sh").arg("-c").arg(&cmd).current_dir(&cwd).output()
-    })
-    .await
-    .ok()
-    .and_then(|r| r.ok());
-    match out {
-        Some(o) => {
-            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
-            s.push_str(&String::from_utf8_lossy(&o.stderr));
-            let lines: Vec<&str> = s
-                .lines()
-                .filter(|l| {
-                    let t = l.trim_start();
-                    !t.starts_with("Compiling") && !t.starts_with("Finished") && !t.starts_with("Running")
-                })
-                .collect();
-            let tail = lines[lines.len().saturating_sub(40)..].join("\n");
-            (o.status.success(), tail)
-        }
-        None => (false, "verify command failed to run".to_string()),
-    }
+    rozum_agent::verify::run_check(cmd, cwd).await
 }
 
-/// Shell-quote a model-provided string so it is safe inside the derived check command (no injection).
-fn shquote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// Build a diagnostic cargo-run check fragment. A plain `[ "$(cargo run ...)" = ... ]` fails
-/// silently, which leaves the repair round with an empty "real error" on stdout mismatches.
+/// Build a diagnostic cargo-run check fragment (shared: `rozum_agent::verify`).
 fn cargo_run_check_fragment(arg: &str, exp: &str) -> String {
-    let arg_q = shquote(arg);
-    let exp_q = shquote(exp);
-    format!(
-        "{{ out=$(cargo run -q -- {arg_q}) && [ \"$out\" = {exp_q} ] || {{ printf 'cargo run -- %s printed <%s>; expected <%s>\\n' {arg_q} \"$out\" {exp_q} >&2; exit 1; }}; }}"
-    )
+    rozum_agent::verify::cargo_run_fragment(arg, exp)
 }
 
-/// "Understand the goal": ask the loaded model to FORMALIZE the task into a deterministic check, as
-/// STRUCTURED data — `{"checkable":bool,"cargo_test":bool,"run":[{"arg":..,"expect":..}]}`. We BUILD
-/// the shell command ourselves (shell-quoting the model's strings), so a model can't inject arbitrary
-/// shell. Returns the `cargo …`-only command, or `None` (→ the gate falls back to auto-detect / floor).
-/// Best-effort, short timeout; only meaningful for a project whose check is a build/run/test.
+/// "Understand the goal": FORMALIZE the task into a deterministic check.
+///
+/// The prompt, the structured shape it asks for and the shell-building live in
+/// `rozum_agent::verify` — shared with nadia's gate, because this prompt is the part that took
+/// measurement to word (it once invented `cargo run -- pong == gnop` for a chat task) and a second
+/// copy of it is a second thing to get wrong. Here we only supply the backend: the launch-local
+/// proxy, which is the same endpoint the agent itself talks to.
 async fn derive_target(base: &str, task: &str) -> Option<String> {
-    let prompt = format!(
-        "Set up the acceptance CHECK for this coding task. Reply with ONLY a JSON object, no prose:\n\
-         {{\"checkable\": <true|false>, \"cargo_test\": <true|false>, \"run\": [{{\"arg\": \"<argument VALUE only>\", \"expect\": \"<exact stdout>\"}}]}}\n\
-         - \"run\": one entry per concrete example the task states as `cargo run -- X` printing `Y`.\n\
-           `arg` is JUST the argument value X — e.g. for \"cargo run -- hello prints olleh\", arg is \
-           \"hello\" (NOT \"cargo run -- hello\"); `expect` is JUST Y, e.g. \"olleh\". Omit if no example.\n\
-         - cargo_test=true ONLY if the task explicitly requires a unit test to pass.\n\
-         - checkable=false if the task has no machine-checkable build/run/test criterion. In particular, \
-         if the task is NOT about a Rust program — it only asks for a chat reply, an explanation, or \
-         plain text (e.g. \"reply with the word pong\") — return checkable=false. The acceptance is the \
-         reply itself, which is NOT a build/run/test; do NOT invent a `cargo run` or an argument for it.\n\n\
-         Task:\n{task}"
-    );
-    let body = serde_json::json!({
-        "model": "x", "temperature": 0.0, "max_tokens": 300,
-        "messages": [{"role": "user", "content": prompt}],
-    });
-    let resp = reqwest::Client::new()
-        .post(format!("{base}/v1/chat/completions"))
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(180))
-        .send()
-        .await
-        .ok()?;
-    let v: serde_json::Value = resp.json().await.ok()?;
-    let text = v["choices"][0]["message"]["content"].as_str()?;
-    // Tolerant: pull the first {...} object out of the reply.
-    let j: serde_json::Value = serde_json::from_str(&text[text.find('{')?..=text.rfind('}')?]).ok()?;
-    if !j["checkable"].as_bool().unwrap_or(false) {
-        return None;
-    }
-    let mut parts = vec!["cargo build -q".to_string()];
-    if j["cargo_test"].as_bool().unwrap_or(false) {
-        parts.push("cargo test -q".to_string());
-    }
-    if let Some(runs) = j["run"].as_array() {
-        for r in runs {
-            if let (Some(arg), Some(exp)) = (r["arg"].as_str(), r["expect"].as_str()) {
-                parts.push(cargo_run_check_fragment(arg, exp));
-            }
-        }
-    }
-    // Only worth it if it checks more than a bare build (else the floor already does).
-    (parts.len() > 1).then(|| parts.join(" && "))
+    let backend = rozum_gateway::openai_http::OpenAiHttpBackend::new(format!("{base}/v1"), "x");
+    rozum_agent::verify::derive_check(&backend, task).await
 }
 
-/// True if the task actually asks for a Rust/cargo project, so a cargo-based verify is legitimate even
-/// before the project exists (create-from-scratch). Guards against `derive_target` hallucinating a cargo
-/// check for a non-code task (a chat "reply with pong" must NOT be gated on `cargo run`).
-fn task_mentions_cargo(prompt: &str) -> bool {
-    let p = prompt.to_ascii_lowercase();
-    ["cargo", "rust", "crate", "src/main.rs", "src/lib.rs", ".rs"].iter().any(|k| p.contains(k))
-}
-
+/// Whether a derived cargo check is one the model invented for a task that is not about code
+/// (shared guard: `rozum_agent::verify`). `explicit_verify` keeps an operator's own ROZUM_VERIFY
+/// out of it — if they asked for that command, they get that command.
 fn should_skip_hallucinated_cargo_verify(
     verify_cmd: &str,
     cwd: &std::path::Path,
     prompt: &str,
     explicit_verify: bool,
 ) -> bool {
-    !explicit_verify
-        && verify_cmd.contains("cargo")
-        && !cwd.join("Cargo.toml").exists()
-        && !task_mentions_cargo(prompt)
+    !explicit_verify && rozum_agent::verify::is_hallucinated_cargo_check(verify_cmd, cwd, prompt)
 }
 
 /// Semantic PASS/FAIL/UNKNOWN judge for a task with NO deterministic acceptance check — `derive_target` ruled
@@ -9113,12 +9036,12 @@ mod chain_tests {
     #[test]
     fn task_mentions_cargo_gates_only_code_tasks() {
         // Chat tasks → false (a hallucinated `cargo run -- pong` check must NOT gate them).
-        assert!(!task_mentions_cargo("Reply with exactly the single word: pong"));
-        assert!(!task_mentions_cargo("Summarize this paragraph in one sentence."));
+        assert!(!rozum_agent::verify::task_mentions_cargo("Reply with exactly the single word: pong"));
+        assert!(!rozum_agent::verify::task_mentions_cargo("Summarize this paragraph in one sentence."));
         // Real code tasks (create + edit) → true.
-        assert!(task_mentions_cargo("create a minimal Rust binary project with a Cargo.toml"));
-        assert!(task_mentions_cargo("Fix the bug in src/main.rs so cargo run prints olleh"));
-        assert!(task_mentions_cargo("cargo test fails because of a bug in src/lib.rs"));
+        assert!(rozum_agent::verify::task_mentions_cargo("create a minimal Rust binary project with a Cargo.toml"));
+        assert!(rozum_agent::verify::task_mentions_cargo("Fix the bug in src/main.rs so cargo run prints olleh"));
+        assert!(rozum_agent::verify::task_mentions_cargo("cargo test fails because of a bug in src/lib.rs"));
     }
 
     #[test]
