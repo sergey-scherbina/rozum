@@ -2632,6 +2632,19 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   `frontendTui/test` 47/47. Their side still owes: merging that branch, triaging our two auth
   entries (`feature/inbox-rozum-auth-concept`), and the cargo integration tests, which are blocked
   because every one of them lives in a file another agent's claim holds.
+  **MERGED UPSTREAM 2026-08-04 — `scalascript@77bc1dc84`.** Both of ours landed on their `main`
+  via their `coord-release` (level 2: `smoke-ci` 58/58 locally — the same script their `smoke.yml`
+  runs — plus `frontendTui/test` 49/49 with two new cargo gates). The staged toolchain was rebuilt,
+  so Stage A's earlier "measured on a stale toolchain" caveat is retired: the dual-target smoke was
+  re-run green afterwards. **All three capabilities are now real and consumable.**
+  One thing the cargo gates caught that no string assertion could, worth carrying: a composer's
+  body/tick/headers signals are reachable ONLY through the `EventHandler`, so they were never seeded
+  into the emitted signal store — the POST left with an EMPTY body while reporting success, tick
+  bumped, composer cleared, message gone. Every emitter test stayed green throughout. **When we wire
+  our own composer, assert the SERVER saw the body, not that the client thinks it sent one.**
+  Also learned about that repo: their `main` moves faster than anyone re-stages the toolchain — the
+  digest changed twice during a single smoke run — so freshness must be checked before measuring,
+  every time.
   **What rozum needs before Stage C can start:** their branch merged, and `bin/ssc-tools` rebuilt
   (`install.sh --dev`) — it is still built from `ec70eb062`, so we cannot consume any of this yet.
   Then: flip our fixture to `--require-auth` (already supported) and the existing Stage A smoke
