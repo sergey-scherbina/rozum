@@ -9,6 +9,33 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
+### ▶ Total-fs wrappers + the std.fs failure contract (operator 2026-08-04: "Делай. Заведи.")
+
+Cross-repo. Code in `../nadia` (branch `feature/total-fs`, worktree
+`nadia:.worktrees/feature/total-fs`); the upstream half is a REPORT to `../scalascript` by its own
+procedure (`POLICY.md` P-3.10 `scripts/inbox-add`, P-5.1 the room for a shared-contract change).
+Spec: `nadia:docs/specs/total-fs.md`.
+
+The finding: `std.fs`'s failure behaviour is **undocumented and backend-dependent** —
+`specs/std-fs-os.md` maps each function to `Files.list` / `fs.readdirSync` / `fs::read_dir` and says
+nothing about what happens when the path is missing. JVM and Node raise; Rust returns a Result. Every
+call site in nadia guards by convention (12 of 12 checked) — which is exactly why one of mine did not:
+a guard that is remembered is a guard that is forgotten once. It was forgotten on a FAILURE path
+(`misplacedProject`, reached only when a check already failed, where the workspace may be gone —
+BUG-017), which is the least-tested code there is.
+
+- [ ] **tfs-module** — `nadia:src/fsx.ssc`: total variants over the partial std primitives, each
+  carrying the failure contract std does not state. Not a total-by-default replacement: totality
+  hides a typo, so the caller picks, and the pick is visible at the call site.
+- [ ] **tfs-migrate** — every fs call in the ssc implementation goes through it; the guard becomes
+  structural rather than remembered.
+- [ ] **tfs-check** — the contract runs (`src/fsx-check.ssc`), including the missing-path cases that
+  raise today. This side has no test harness (`nadia:BACKLOG.md` ssc-test-harness).
+- [ ] **tfs-upstream** — the proposal to scalascript BY ITS PROCEDURE: `scripts/inbox-add` with the
+  evidence and the measured case, plus a room post, stating what happens if nobody answers (P-5.4).
+  Proposal only — no code in their tree, and no `lane:`/`area:` guessed (P-3.11 keeps that authority
+  with their triager).
+
 ### ▶ Verify gate in the other two nadias (operator 2026-08-04: "Продолжай работу")
 
 Cross-repo (`REPOS.md`): the code is in `../nadia`, branch `feature/verify-gate-ports`,
