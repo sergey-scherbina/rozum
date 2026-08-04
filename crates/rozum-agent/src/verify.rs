@@ -202,7 +202,48 @@ pub async fn run_check(cmd: &str, cwd: &Path) -> (bool, String) {
     }
 }
 
-/// The workspace's own source, for a reader that cannot run anything.
+/// What the agent actually produced, for a reader that cannot run anything.
+///
+/// Rust sources first, because that is the common case — then, when there are none, whatever
+/// small text files the workspace holds, and finally its listing. **A judge shown nothing rules
+/// against you**: measured 2026-08-04, a task whose whole result was `x.txt` containing `hi` got
+/// `(no source found)`, a verdict of "not accomplished", two repair rounds and a reported failure
+/// — while the file sat on disk, correct. The gate's own rule is that unverified must not read as
+/// failed, and the first version of this function broke it for every task that is not a cargo
+/// project.
+pub fn artifact_snapshot(cwd: &Path, max_bytes: usize) -> Option<String> {
+    if let Some(rust) = source_snapshot(cwd, max_bytes) {
+        return Some(rust);
+    }
+    // No Rust sources. Show the small text files instead — a task whose result is a text file, a
+    // config or a script is not less checkable, it is just not Rust.
+    let mut sections: Vec<String> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut entries: Vec<_> = std::fs::read_dir(cwd).ok()?.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        names.push(name.clone());
+        if sections.len() >= 5 || !entry.path().is_file() {
+            continue;
+        }
+        if let Ok(body) = std::fs::read_to_string(entry.path()) {
+            if body.len() <= max_bytes {
+                sections.push(format!("--- {name} ---\n{body}"));
+            }
+        }
+    }
+    if names.is_empty() {
+        return None; // genuinely empty: nothing to judge, and Unknown is the honest verdict
+    }
+    let listing = format!("--- files in the workspace ---\n{}", names.join("\n"));
+    Some(if sections.is_empty() { listing } else { format!("{listing}\n\n{}", sections.join("\n\n")) })
+}
+
+/// The workspace's own Rust source, for a reader that cannot run anything.
 pub fn source_snapshot(cwd: &Path, max_bytes: usize) -> Option<String> {
     let mut rels = vec!["Cargo.toml".to_string(), "src/main.rs".to_string(), "src/lib.rs".to_string()];
     if let Ok(rd) = std::fs::read_dir(cwd.join("tests")) {
@@ -228,14 +269,27 @@ pub fn source_snapshot(cwd: &Path, max_bytes: usize) -> Option<String> {
 
 /// Semantic judgement for a task with no deterministic check. Only ever consulted when the
 /// alternative is a bare build floor that cannot see whether the task was done at all.
-pub async fn judge(backend: &dyn ChatBackend, task: &str, cwd: &Path) -> Verdict {
-    let code = source_snapshot(cwd, 8192).unwrap_or_else(|| "(no source found)".to_string());
+pub async fn judge(backend: &dyn ChatBackend, task: &str, cwd: &Path, answer: &str) -> Verdict {
+    let artifacts = artifact_snapshot(cwd, 8192);
+    // Nothing on disk AND nothing said: there is no evidence either way, and a judge asked to
+    // rule on nothing rules against you. Unknown is the honest verdict — the caller reports "not
+    // checked", which is what actually happened.
+    if artifacts.is_none() && answer.trim().is_empty() {
+        return Verdict::Unknown("nothing to judge: no files and no answer".to_string());
+    }
+    let evidence = match artifacts {
+        Some(a) => format!("WHAT IS IN THE WORKSPACE:\n{a}"),
+        None => "WHAT IS IN THE WORKSPACE:\n(nothing — the task may not have been about files)".to_string(),
+    };
+    // The answer is evidence too, and for a task whose result IS the answer ("reply with the
+    // word pong") it is the only evidence there is.
     let prompt = format!(
-        "You are a strict code reviewer judging whether the CODE accomplishes the TASK. Reply with ONLY \
+        "You are a strict reviewer judging whether the WORK accomplishes the TASK. Reply with ONLY \
          a JSON object, no prose: {{\"pass\": <true|false>, \"reason\": \"<one short sentence>\"}}.\n\
-         Rule pass=false ONLY if the code clearly fails a STATED requirement of the task; if it plausibly \
-         satisfies the task, pass=true. Do not invent requirements the task did not state.\n\n\
-         TASK:\n{task}\n\nCODE:\n{code}"
+         Rule pass=false ONLY if the work clearly fails a STATED requirement of the task; if it \
+         plausibly satisfies the task, pass=true. Do not invent requirements the task did not state. \
+         If the task asked for a reply rather than for files, judge the reply.\n\n\
+         TASK:\n{task}\n\n{evidence}\n\nWHAT THE AGENT REPLIED:\n{answer}"
     );
     match ask(backend, &prompt, 200).await {
         Some(text) => parse_verdict(&text),
@@ -398,6 +452,31 @@ mod tests {
         std::fs::create_dir_all(d.path().join("src")).unwrap();
         std::fs::write(d.path().join("src/lib.rs"), "#[test]\nfn t() {}").unwrap();
         assert_eq!(cargo_floor(d.path()).as_deref(), Some("cargo build -q && cargo test -q"));
+    }
+
+    #[test]
+    fn the_judge_is_shown_what_was_actually_produced() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        // The measured case: a task whose entire result is one text file. The first version
+        // looked only for Cargo.toml/src/*.rs, showed the judge "(no source found)", and got a
+        // verdict of NOT accomplished — for work that was sitting on disk, correct.
+        std::fs::write(root.join("x.txt"), "hi").unwrap();
+        let snap = artifact_snapshot(root, 8192).expect("a workspace with a file is not empty");
+        assert!(snap.contains("x.txt"), "the file must be visible to the judge: {snap}");
+        assert!(snap.contains("hi"), "and so must its content: {snap}");
+
+        // Rust still wins when it is there — that is the common case and the richer evidence.
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+        let snap = artifact_snapshot(root, 8192).unwrap();
+        assert!(snap.contains("src/main.rs"), "{snap}");
+
+        // A genuinely empty workspace is None — which is what lets `judge` answer Unknown
+        // instead of asking a model to rule on nothing.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(artifact_snapshot(empty.path(), 8192).is_none());
     }
 
     #[test]

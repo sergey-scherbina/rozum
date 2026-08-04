@@ -6157,6 +6157,17 @@ async fn exec_agent(
     // Gateway host: the host loopback normally, `host.docker.internal` under an active Docker jail.
     let base = format!("http://{}:{port}", sandbox_gateway_host());
 
+    // Whether THIS launch will actually gate: it needs a prompt to rewrite for a repair round,
+    // and it needs a check to run. `ROZUM_VERIFY=0` is the operator turning the gate off, and
+    // then the launcher is NOT the owner — an inner gate should run instead of standing down for
+    // a gate that will not happen. Computed before the child command is built, because a marker
+    // that lies is worse than no marker: set unconditionally (as it was for one commit), it made
+    // both arms of the gate A/B ungated while claiming to compare gated against ungated.
+    let launch_verify_off = std::env::var("ROZUM_VERIFY")
+        .map(|v| matches!(v.trim(), "0" | "off" | "false" | ""))
+        .unwrap_or(false);
+    let gate_is_live = agent_prompt_index(&program).is_some() && !launch_verify_off;
+
     // Build the agent command from a (possibly repair-rewritten) program. A closure so the
     // verify-gate can rebuild it each repair round; one-shot launches build it exactly once.
     let build = |program: &[String]| -> std::process::Command {
@@ -6175,7 +6186,9 @@ async fn exec_agent(
         // has a prompt to rewrite, which is exactly when this env is set; the agent's own gate
         // reads it and stands down. The Telegram path (`nadia serve`, no launcher) never sees
         // it, which is the case that gate was built for.
-        cmd.env("ROZUM_GATE_OWNER", "rozum-launch");
+        if gate_is_live {
+            cmd.env("ROZUM_GATE_OWNER", "rozum-launch");
+        }
         cmd.env("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
         cmd.env("ANTHROPIC_MODEL", &claude_alias);
         cmd.env("ANTHROPIC_DEFAULT_OPUS_MODEL", &claude_alias);

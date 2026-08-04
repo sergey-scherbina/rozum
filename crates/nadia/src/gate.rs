@@ -131,7 +131,7 @@ pub async fn check(
         if !enabled() || !matches!(outcome.stop, rozum_agent::agent::AgentStop::Done) {
             return (Report::default(), None);
         }
-        return match verify::judge(backend, task, workspace).await {
+        return match verify::judge(backend, task, workspace, &outcome.text).await {
             Verdict::Pass => (
                 Report { passed: Some(true), ..Default::default() },
                 None,
