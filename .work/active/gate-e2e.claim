@@ -1,0 +1,6 @@
+feature/gate-e2e 2026-08-04T15:12:20Z
+agent: claude-code
+heartbeat: 2026-08-04T15:12:20Z
+status: not-started
+done-so-far:
+next: run the Scala 3 gate end-to-end against the resident model

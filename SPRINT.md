@@ -9,6 +9,31 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
+### ▶ The two non-Rust gates, end to end (operator 2026-08-04: "делай эти. Работай")
+
+Cross-repo: code in `../nadia`, branch `feature/gate-e2e`, worktree `nadia:.worktrees/feature/gate-e2e`.
+Contract: `nadia:SPEC.md` §3.1 — unchanged; this proves the two ports obey it against a real model.
+
+**Why it is owed.** `vgp-scala3` and `vgp-ssc` were closed on unit tests (9 twins) and 18 pure
+contract rules. Neither has been through a full run against the resident model — derive, agent,
+check, and the exit code — and the ScalaScript gate's ONE live attempt this session is exactly
+where `runCheck` was found calling `exec` with the wrong arity **while all fifteen pure rules
+passed**. A gate that has never run against a model is a gate whose only unverified part is the
+part that touches reality.
+
+**Conditions** (both were violated in the attempt that produced no verdict): a budget over 900 s —
+the 4B model needs 40–150 s per task and the gate adds a derive call plus up to two repair rounds —
+and **one agent at a time**, since two concurrent runs on one gateway already cost a `rc=2` timeout
+that read as a code failure. Workspace is a scratch directory, never a repository: giving the ssc
+agent its own worktree let `cargo init` land in the repo (recorded under `vgp-parity`).
+
+- [ ] **ge-scala3** — one full run, task with a deterministic criterion. Verdict is the four
+  lines the contract promises: derived check, its output, which of the four endings, exit code.
+- [ ] **ge-ssc** — the same task, same model, same workspace shape.
+- [ ] **ge-record** — what each one actually did into `nadia:SPEC.md` §3.1 / `docs/operations.md`,
+  and any defect found into `nadia:BUGS.md` before it is fixed. A port that fails here is the
+  finding, not a setback — it is the reason the item exists.
+
 ### ▶ Gate measurement, and the double gate it exposed (operator 2026-08-04: "делай эти. Работай")
 
 Branch `feature/gate-matrix`, worktree `.worktrees/feature/gate-matrix`.
