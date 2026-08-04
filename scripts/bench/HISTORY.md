@@ -48,4 +48,47 @@ why the arms alternate.
   matrix, that says it is insurance for the phone path rather than a scoring improvement, and it
   should be described that way instead of as a win.
 
-**Result:** _(appended when the run finishes)_
+**Result** (`/tmp/gate-ab-20260804-164051`, 16 cells, alternating, one agent at a time):
+
+| task | A: no gate | B: nadia's gate |
+|---|---|---|
+| greet | 1.1 s **pass** | 3.4 s **pass** |
+| build | 40.0 s **pass** | 43.1 s **pass** |
+| fix | 44.2 s **pass** | 36.3 s **pass** |
+| test | 57.0 s **pass** | 58.6 s **pass** |
+| debug | 38.3 s **pass** | 23.4 s **pass** |
+| rpn | 148.6 s **pass** | 57.7 s **pass** |
+| wordcount | 49.0 s fail | 55.8 s fail |
+| multibug | 24.3 s fail | 108.5 s **pass** |
+| **pass rate** | **6 / 8** | **7 / 8** |
+| **wall clock** | 514 s | 495 s |
+
+**What the prediction got right, and wrong.** Size right (I said 0–2 cells; one moved). `greet`
+right: the gate correctly did nothing, `checkable:false`, and cost 2.3 s for asking. `wordcount`
+**wrong** — I named it as the likely gain and it failed in both arms, with a different compile
+error each time (`E0308`, `E0425`): this model cannot do that task, and the gate does not make it
+able to. The cell that moved was `multibug`, which I had listed as genuinely uncertain.
+
+**Then I checked the mechanism, and it changed the conclusion.** The harness discards the agent
+log without `KEEP=1`, so "the gate repaired it" was an inference from 24 s → 108 s, not evidence.
+Re-running that cell gated with the log kept: **it passed again (102.3 s) with ZERO repair
+rounds** — the gate derived `cargo build -q && cargo test -q`, ran it, and it was green first try.
+So the gate's repair machinery is not what made that cell pass; the most likely explanation is
+model variance between a 24 s run that stopped early and a 100 s run that did the work.
+
+**Conclusion, stated as the evidence supports it: no demonstrated effect on the pass rate.** One
+cell of 8 moved at one repetition, and a follow-up of that cell showed the gate passing without
+needing to repair anything. That is the null result I said before the run would be the most useful
+outcome, and it means what I said it would mean: **the gate is insurance, not a score** — it tells
+you whether the work is right, and on the matrix the harness was already doing that. Its value is
+where nothing else checks: the phone, where the alternative to the gate is a model's own word.
+
+Costs measured: +2.3 s on a task with no checkable criterion (the derivation is asked for and
+declined), and no total wall-clock penalty across the eight (495 s vs 514 s — inside the noise of
+a desktop running four other services).
+
+**What would answer it properly:** ≥3 repetitions per arm, alternating, ~1.5–2 h of machine time,
+and `KEEP=1` so every cell's gate lines survive. One repetition is a hypothesis; this row is a
+hypothesis with its mechanism checked, which is why the conclusion is "not demonstrated" rather
+than "no effect".
+
