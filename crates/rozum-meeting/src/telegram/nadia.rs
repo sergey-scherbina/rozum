@@ -531,6 +531,16 @@ fn ensure_running() -> Result<(), String> {
     if let Ok(model) = std::env::var("NADIA_MODEL") {
         cmd.arg("--model").arg(model);
     }
+    // Its OWN process group, so `launchctl bootout` of THIS bridge does not take the agents
+    // with it. A deploy of the bridge used to kill `nadia serve` — it happened twice in one
+    // evening, unnoticed, because the only symptom is that the next agent comes back as #1.
+    // `health()` above means a restarted bridge reattaches to the running one instead of
+    // starting a second (docs/specs/nadia-serve-lifetime.md).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd.spawn().map_err(|e| format!("`nadia serve` не запустился ({e}); установлен ли бинарник?"))?;
 
     // Poll rather than sleep a fixed amount: the process is up in well under a second on
@@ -570,14 +580,15 @@ fn task_workspace(task: &str) -> std::path::PathBuf {
     ))
 }
 
-/// A short, filesystem-safe hint of what the task was. ASCII letters and digits only — the tasks
-/// arrive in Russian as often as not, and a directory name is for finding the work again, not for
-/// reproducing the sentence. Empty when the task has nothing transliterable, and then the
-/// timestamp alone names it.
+/// A short, filesystem-safe hint of what the task was.
+///
+/// Cyrillic is transliterated rather than dropped: the tasks arrive in Russian as often as not,
+/// and dropping left `~/.nadia/tasks/2026-08-05-002343-` — a directory the operator asked about
+/// precisely because its name said nothing. A directory name is for finding the work again.
 fn slug(task: &str) -> String {
     let mut out = String::new();
     let mut last_dash = true;
-    for c in task.chars() {
+    for c in task.chars().flat_map(translit) {
         if c.is_ascii_alphanumeric() {
             out.extend(c.to_lowercase());
             last_dash = false;
@@ -589,7 +600,29 @@ fn slug(task: &str) -> String {
             break;
         }
     }
-    out.trim_matches('-').to_string()
+    let out = out.trim_matches('-').to_string();
+    // Never a bare trailing dash, and never nothing: a name that is only a timestamp is fine,
+    // a name that ENDS in the separator looks like a bug and was one.
+    if out.is_empty() { "task".to_string() } else { out }
+}
+
+/// One Cyrillic character as ASCII. Deliberately plain — this feeds a directory name, not a
+/// transliteration standard, so `ж → zh` and `щ → sch` are close enough and reversibility is
+/// not a goal. Anything else passes through and the caller decides what is safe.
+fn translit(c: char) -> impl Iterator<Item = char> {
+    const MAP: [(char, &str); 33] = [
+        ('а', "a"), ('б', "b"), ('в', "v"), ('г', "g"), ('д', "d"), ('е', "e"), ('ё', "e"),
+        ('ж', "zh"), ('з', "z"), ('и', "i"), ('й', "y"), ('к', "k"), ('л', "l"), ('м', "m"),
+        ('н', "n"), ('о', "o"), ('п', "p"), ('р', "r"), ('с', "s"), ('т', "t"), ('у', "u"),
+        ('ф', "f"), ('х', "h"), ('ц', "c"), ('ч', "ch"), ('ш', "sh"), ('щ', "sch"), ('ъ', ""),
+        ('ы', "y"), ('ь', ""), ('э', "e"), ('ю', "yu"), ('я', "ya"),
+    ];
+    let lower = c.to_lowercase().next().unwrap_or(c);
+    let mapped = MAP.iter().find(|(k, _)| *k == lower).map(|(_, v)| *v);
+    match mapped {
+        Some(v) => v.chars().collect::<Vec<_>>().into_iter(),
+        None => vec![c].into_iter(),
+    }
 }
 
 fn default_workspace() -> std::path::PathBuf {
@@ -632,6 +665,62 @@ fn resolve_gateway() -> Option<String> {
 
 fn dirs_home() -> std::path::PathBuf {
     std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| "/tmp".into())
+}
+
+/// A `serve` that outlived a deploy is serving the old code. Restart it — but only when nobody
+/// is working in it.
+///
+/// This is the hazard detaching creates, and the ordering is the point: **the operator's work
+/// outranks our convenience about versions.** A stale `serve` with agents running is left alone
+/// and said out loud once; the next idle moment picks the new binary up. Returns what it did, for
+/// the log.
+pub fn refresh_if_stale() -> Option<String> {
+    let h = curl_json("GET", &format!("{}/health", base()), None).ok()?;
+    let build = h.get("build")?;
+    let (exe, mtime, pid) = (
+        build.get("exe")?.as_str()?,
+        build.get("mtime")?.as_u64()?,
+        build.get("pid")?.as_u64()?,
+    );
+    let installed = std::fs::metadata(exe)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if installed <= mtime {
+        return None;
+    }
+    let busy = running_any();
+    if busy {
+        return Some(format!(
+            "nadia serve (pid {pid}) runs a pre-deploy build of {exe}; agents are working, so it              stays until they finish"
+        ));
+    }
+    // SIGTERM: `serve` has nothing to flush — every record is already on disk, written at the
+    // moments that change it — so there is nothing to lose and nothing to wait for. Sent with
+    // `kill(1)` rather than by linking libc for one call, the same way this module already
+    // reaches HTTP with `curl`.
+    let _ = Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
+    Some(format!("nadia serve (pid {pid}) ran a pre-deploy build; restarted for {exe}"))
+}
+
+/// Is any agent working right now? A failed probe answers "yes" on purpose: not knowing is not a
+/// licence to kill the process.
+fn running_any() -> bool {
+    let Ok(body) = curl_json("GET", &format!("{}/agents", base()), None) else { return true };
+    body.get("agents")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter().any(|x| {
+                !matches!(
+                    x.get("phase").and_then(|p| p.as_str()).unwrap_or(""),
+                    "done" | "failed" | "killed" | "interrupted"
+                )
+            })
+        })
+        .unwrap_or(true)
 }
 
 fn health() -> Result<(), String> {
@@ -1150,7 +1239,13 @@ mod tests {
         let name = cyrillic.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.chars().all(|c| c.is_ascii()), "{name}");
         assert_eq!(slug("add a --json flag"), "add-a-json-flag");
-        assert_eq!(slug("напиши"), "");
+        // Transliterated, not dropped: dropping is what produced `2026-08-05-002343-`, a
+        // directory whose name said nothing about what had been asked of it.
+        assert_eq!(slug("напиши"), "napishi");
+        assert_eq!(slug("Ещё Задача"), "esche-zadacha");
+        // And never a name that is only a separator.
+        assert_eq!(slug("!!! ???"), "task");
+        assert!(!slug("привет мир").ends_with('-'));
         // Long tasks are cut, not carried whole into a path.
         assert!(slug(&"word ".repeat(40)).len() <= 24);
     }

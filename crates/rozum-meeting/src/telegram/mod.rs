@@ -142,6 +142,13 @@ async fn run_bridge_multi(
     // Deliver finished agents' results to the chat that started them, instead of making the
     // operator poll `/status` from a phone. One task for the whole bridge: the watch list is
     // on disk and keyed by agent id, so it does not care which chat task is running.
+    // A `nadia serve` from before this deploy is still running (that is deliberate — it keeps
+    // the agents alive across a bridge restart), but it serves the old code. Say so, or restart
+    // it when nobody is working in it.
+    if let Some(note) = nadia::refresh_if_stale() {
+        eprintln!("[telegram-bridge] {note}");
+    }
+
     tokio::spawn(nadia::watch_results(Arc::clone(&bot)));
 
     // One room task per chat, each with its OWN per-room ACL roster (a grant in one chat does not

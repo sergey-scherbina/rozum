@@ -41,11 +41,29 @@ pub enum Phase {
     Done,
     Failed,
     Killed,
+    /// Loaded from a record that was still running when its process ended. Not `done` (nothing
+    /// says it finished), not `failed` (nothing says it failed), and above all not absent —
+    /// the same rule the verify gate lives by, one layer out.
+    Interrupted,
 }
 
 impl Phase {
+    /// Parse a label back — records on disk carry the label, not the discriminant.
+    pub fn from_label(s: &str) -> Option<Phase> {
+        Some(match s {
+            "running" => Phase::Running,
+            "paused" => Phase::Paused,
+            "stopping" => Phase::Stopping,
+            "done" => Phase::Done,
+            "failed" => Phase::Failed,
+            "killed" => Phase::Killed,
+            "interrupted" => Phase::Interrupted,
+            _ => return None,
+        })
+    }
+
     pub fn is_terminal(self) -> bool {
-        matches!(self, Phase::Done | Phase::Failed | Phase::Killed)
+        matches!(self, Phase::Done | Phase::Failed | Phase::Killed | Phase::Interrupted)
     }
 
     pub fn label(self) -> &'static str {
@@ -56,6 +74,7 @@ impl Phase {
             Phase::Done => "done",
             Phase::Failed => "failed",
             Phase::Killed => "killed",
+            Phase::Interrupted => "interrupted",
         }
     }
 }
@@ -188,6 +207,10 @@ struct Handle {
 pub struct Supervisor {
     next_id: AtomicU64,
     agents: Mutex<HashMap<AgentId, Handle>>,
+    /// Agents this process did not run, read back from disk at startup. Kept apart from `agents`
+    /// rather than faked into it: a record has no handle, and code that could `tell` or `kill`
+    /// one would be lying about what it can do.
+    history: Mutex<Vec<Status>>,
 }
 
 /// Everything one agent needs to run, so [`Supervisor::spawn`] can hand it to a task that
@@ -206,6 +229,21 @@ pub struct Spec {
 impl Supervisor {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// The constructor a server uses: memory plus everything earlier processes left on disk.
+    ///
+    /// Ids continue past the highest record rather than restarting at 1. That is not tidiness —
+    /// a front-end that remembers "agent #3 is mine" and meets a restarted `serve` handing #3 to
+    /// different work delivers one operator's result into another's chat.
+    pub fn restore() -> Arc<Self> {
+        let history = crate::records::load_all();
+        let next = history.iter().map(|s| s.id).max().unwrap_or(0);
+        Arc::new(Self {
+            next_id: AtomicU64::new(next),
+            agents: Mutex::new(HashMap::new()),
+            history: Mutex::new(history),
+        })
     }
 
     /// Start an agent. Returns immediately with its id — the work happens in its own task.
@@ -316,6 +354,13 @@ impl Supervisor {
                         continue;
                     }
                 }
+                // On disk, now: the phase and the gate's verdict are what an outside reader is
+                // told, and this is the moment they changed. Written here rather than on every
+                // tool call — that would be a write a second per agent for a field nobody reads
+                // afterwards — and rather than only at the end, because "the end" is exactly what
+                // a killed process never reaches.
+                crate::records::save(&snapshot(id, &meta_t));
+
                 // Anything the operator sent while that turn ran becomes the next one.
                 let queued: Vec<String> = std::mem::take(&mut *inbox_t.lock().unwrap());
                 if !queued.is_empty() {
@@ -325,7 +370,11 @@ impl Supervisor {
             }
         });
 
-        self.agents.lock().unwrap().insert(id, Handle { ctl, meta, join, inbox });
+        self.agents.lock().unwrap().insert(id, Handle { ctl, meta: meta.clone(), join, inbox });
+        // Before it has done anything: an agent killed during its first turn otherwise leaves
+        // nothing at all, which is precisely the case that started this work — one empty
+        // directory and no way to say what had been asked of it.
+        crate::records::save(&snapshot(id, &meta));
         Ok(id)
     }
 
@@ -385,14 +434,30 @@ impl Supervisor {
     }
 
     pub fn status(&self, id: AgentId) -> Result<Status, String> {
-        let agents = self.agents.lock().unwrap();
-        let h = agents.get(&id).ok_or_else(|| format!("no agent {id}"))?;
-        Ok(snapshot(id, &h.meta))
+        if let Some(h) = self.agents.lock().unwrap().get(&id) {
+            return Ok(snapshot(id, &h.meta));
+        }
+        // Then what an earlier process left behind. Asking about an agent that finished before a
+        // restart is the commonest question there is, and "no agent 7" is the wrong answer to it.
+        self.history
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+            .ok_or_else(|| format!("no agent {id}"))
     }
 
     pub fn list(&self) -> Vec<Status> {
-        let agents = self.agents.lock().unwrap();
-        let mut v: Vec<Status> = agents.iter().map(|(id, h)| snapshot(*id, &h.meta)).collect();
+        let live: Vec<Status> = {
+            let agents = self.agents.lock().unwrap();
+            agents.iter().map(|(id, h)| snapshot(*id, &h.meta)).collect()
+        };
+        let ids: std::collections::HashSet<AgentId> = live.iter().map(|s| s.id).collect();
+        let mut v = live;
+        // Live wins: a record is a snapshot of the past, and this process knows better about
+        // anything it is running now.
+        v.extend(self.history.lock().unwrap().iter().filter(|s| !ids.contains(&s.id)).cloned());
         v.sort_by_key(|s| s.id);
         v
     }

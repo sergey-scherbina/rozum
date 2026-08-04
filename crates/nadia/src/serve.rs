@@ -67,7 +67,11 @@ pub fn router(sup: Arc<Supervisor>, cfg: Config) -> Router {
         .route("/agents/{id}/pause", post(pause))
         .route("/agents/{id}/resume", post(resume))
         .route("/agents/{id}/stop", post(stop))
-        .route("/health", get(|| async { Json(json!({"ok": true})) }))
+        // `/health` also says WHICH BUILD is answering. A `serve` that outlives the front-end
+        // that started it (which is the point — see docs/specs/nadia-serve-lifetime.md) would
+        // otherwise keep serving pre-deploy code invisibly, and a fix that shipped and did
+        // nothing is worse than one that never shipped.
+        .route("/health", get(|| async { Json(json!({"ok": true, "build": build_id()})) }))
         .with_state(App { sup, cfg })
 }
 
@@ -93,6 +97,24 @@ fn authorized(cfg: &Config, headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .map(|v| v == cfg.token)
         .unwrap_or(false)
+}
+
+/// Identity of the running binary: its path and when it was built, as the filesystem sees it.
+/// Enough for a caller to notice "this is not the binary I have installed", which is the only
+/// question being asked.
+fn build_id() -> Value {
+    let exe = std::env::current_exe().ok();
+    let mtime = exe
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    json!({
+        "exe": exe.map(|p| p.to_string_lossy().into_owned()),
+        "mtime": mtime,
+        "pid": std::process::id(),
+    })
 }
 
 fn as_json(s: &Status) -> Value {

@@ -1,5 +1,35 @@
 # Changelog
 
+## nadia-serve-lifetime — an agent's record outlives the process that ran it
+Completed: 2026-08-05
+Spec: `docs/specs/nadia-serve-lifetime.md`
+
+Came out of one empty directory the operator asked about. The honest answer was that it could not
+be established: agents lived only in `nadia serve`'s memory, `serve` was a plain child of the
+Telegram bridge, and a deploy that restarted the bridge killed it — twice that evening, by my own
+hand, both times invisible except that the next agent came back as `#1`. nadia's own documentation
+already stated the rule ("a serve that restarted under them would silently lose their work");
+nothing enforced it against the process that starts it.
+
+Three changes, and the ordering between them is the point:
+
+- **Records on disk.** One file per agent under `~/.nadia/.agents/`, written when it starts, when
+  the gate reports and when it stops, loaded back at startup. A record that was not terminal when
+  its process died is `interrupted` — a phase of its own, not `done` and not `failed`, because
+  nothing says which. Ids continue past the highest record, which retires the id-reuse hazard the
+  Telegram watcher carries a whole branch to survive.
+- **`serve` survives the bridge.** Started in its own process group, so `launchctl bootout` of the
+  bridge no longer reaches it; `ensure_running` already reattached to a live one.
+- **An orphan must not outlive its binary.** `/health` reports the running build, and the bridge
+  restarts a stale `serve` — but only when no agent is working. The operator's work outranks our
+  convenience about versions.
+
+Also: a task with no ASCII left a directory named `2026-08-05-002343-`. Cyrillic is transliterated
+now, and a name is never only a separator.
+
+Proven live: an agent killed mid-run came back as `interrupted` with its task and workspace intact,
+and the next spawn got id **2**.
+
 ## nadia-ack-path — one fact, one source
 Completed: 2026-08-05
 

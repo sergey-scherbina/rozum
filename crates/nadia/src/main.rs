@@ -418,7 +418,9 @@ async fn main() {
             if cfg.token.is_empty() {
                 println!("no token: loopback only");
             }
-            if let Err(e) = serve(Supervisor::new(), cfg, addr).await {
+            // `restore`, not `new`: the agents of every earlier `serve` on this machine are
+            // still answerable for, and their ids must not be handed out again.
+            if let Err(e) = serve(Supervisor::restore(), cfg, addr).await {
                 eprintln!("nadia: {e}");
                 std::process::exit(2);
             }

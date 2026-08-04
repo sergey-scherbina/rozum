@@ -25,16 +25,16 @@ Two consequences beyond the lost record: agent ids restart at 1 after every depl
 Telegram watcher has a whole `Reused` branch to survive), and a result that was in flight is never
 delivered to anyone.
 
-- [ ] **nsl-slug** — a task with no ASCII leaves a directory named `…-002343-`. Transliterate,
+- [x] **nsl-slug — DONE.** — a task with no ASCII leaves a directory named `…-002343-`. Transliterate,
   trim the dangling dash, fall back to `task`. A directory name is for finding the work again.
-- [ ] **nsl-records** — `nadia serve` writes one record per agent and loads them at startup;
+- [x] **nsl-records — DONE.** — `nadia serve` writes one record per agent and loads them at startup;
   anything non-terminal at load is `interrupted`, not silently gone. Ids continue past the highest
   loaded one, which also retires the id-reuse hazard.
-- [ ] **nsl-detach** — the bridge starts `serve` in its OWN process group so a `launchctl bootout`
+- [x] **nsl-detach — DONE.** — the bridge starts `serve` in its OWN process group so a `launchctl bootout`
   of the bridge does not take it down. The new hazard this creates — an orphan serve running a
   pre-deploy binary — is answered by `/health` reporting the running build, with the bridge
   restarting it when it is stale AND idle, never under working agents.
-- [ ] **nsl-verify** — unit tests, then LIVE: spawn, restart the bridge mid-run, and confirm the
+- [x] **nsl-verify — tests DONE** (835 green) + persistence proven live: agent killed mid-run came back as `interrupted` with its task and workspace, and the next id was **2**, not 1. The detach half needs one `/spawn` from the operator to be proven end-to-end (the bridge starts `serve` only when a command arrives). Was: unit tests, then LIVE: spawn, restart the bridge mid-run, and confirm the
   agent survives; then a deploy with an idle serve must pick up the new binary.
 
 ### ▶ A green check on work nobody did (operator 2026-08-05, live)
