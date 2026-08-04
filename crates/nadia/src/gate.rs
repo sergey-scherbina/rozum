@@ -163,6 +163,45 @@ pub async fn check(
 mod tests {
     use super::*;
 
+    /// A run that stopped WITHOUT finishing still gets its deterministic check.
+    ///
+    /// Measured 2026-08-04: an RPN attempt exhausted its steps, the front-end skipped the check
+    /// it had already derived, and the operator was told `⚠ не проверено` about a program that
+    /// printed nothing for the argument the task named. The run with the most doubt was getting
+    /// the least verification. The judge still stands down for a non-finished run — a model's
+    /// opinion about an interrupted attempt is worth less than the shell command we already have.
+    #[tokio::test]
+    async fn a_budget_exhausted_run_is_still_checked() {
+        // The backend PANICS if it is called: a deterministic check must not cost a model call,
+        // and an interrupted run must not be handed to the judge.
+        struct NoModel;
+        #[async_trait::async_trait]
+        impl rozum_core::backend::ChatBackend for NoModel {
+            async fn chat(
+                &self,
+                _: rozum_core::backend::ChatRequest,
+            ) -> rozum_core::backend::ModelResult<rozum_core::backend::ChatStream> {
+                panic!("the gate asked a model about a check it could run itself")
+            }
+            fn context_window(&self) -> u32 {
+                8192
+            }
+        }
+
+        let d = tempfile::tempdir().unwrap();
+        let outcome = AgentOutcome {
+            text: String::new(),
+            stop: rozum_agent::agent::AgentStop::BudgetSteps,
+            steps: 2,
+            operations: Vec::new(),
+            transcript: Vec::new(),
+            final_tier: 0,
+        };
+        let (report, repair) = check(&NoModel, "task", d.path(), Some("exit 3"), &outcome).await;
+        assert_eq!(report.passed, Some(false), "the check did not run: {report:?}");
+        assert!(repair.is_some(), "a failed check still produces the repair the caller may skip");
+    }
+
     #[test]
     fn a_report_never_implies_a_pass_it_does_not_have() {
         let unchecked = Report::default();

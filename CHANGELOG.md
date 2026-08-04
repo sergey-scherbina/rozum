@@ -1,5 +1,38 @@
 # Changelog
 
+## gate-e2e — the first live run of the ported gates found the gate failing correct work
+Completed: 2026-08-04
+
+Two ports closed on tests met a model for the first time, and both defects that fell out are
+contract-level — they were in the Rust reference too, shipped, and had been passing 27 tests.
+
+**BUG-018 — a false negative on correct work.** For "cargo run -- 3 4 must print 7" the derived
+check ran `cargo run -q -- '3 4'` — both numbers as one argument — and reported FAILED after
+spending both repair rounds. `cargo run -- 3 4` printed `7` by hand in that same workspace. The
+schema had one string per example and could not express arity; stripping the task's delimiting
+quotes (right on its own, `vga-arg-quotes`) had removed the only signal telling
+`cargo run -- "3 4 + 2 *"` from `cargo run -- 3 4`. Asking the model for a LIST mirrored the bug —
+measured on the RPN task, it split the quoted argument into five. Arity now comes from the task:
+`shell_lex` + `task_argv_for` read the list out of the task's own punctuation. The model keeps
+*which* example and *what output*; it is no longer asked to shell-lex, which it gets wrong in both
+directions.
+
+**BUG-019 — the run with the most doubt got the least verification.** A run that stopped without
+finishing skipped the check it had already derived, printed and paid a model call for, and reported
+`⚠ не проверено`. Measured: an RPN attempt exhausted its steps and left a program that printed
+nothing for the invocation the task named. The check now runs whatever the stop reason was; the
+judge still stands down for an interrupted run, and no repair round is spent on an agent with no
+budget to repair with. The exit code follows in both directions — a run that satisfied the criterion
+and then ran out of steps exits 0 and says so, because "the check decides" cannot hold one way only.
+
+Both ports were already right about BUG-019; only the Rust reference had the early break.
+Implementing a contract twice is a way of reading it that review is not.
+
+Verdicts (all hand-checked afterwards): Rust `sum` ✔ 9 s, `rpn` ✔ 62 s; Scala 3 `sum` ✔ 12 s, was
+59 s and a false FAILED; ScalaScript `sum` ✔ 13 s on a rebuilt toolchain. The budget-exhausted path
+was proven directly in both halves: wrong artifact → `✘` naming what it printed, rc=1; right
+artifact → `✔`, rc=0.
+
 ## gate-matrix — the gate measured, and two defects the measuring found
 Completed: 2026-08-04
 

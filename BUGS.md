@@ -5,6 +5,73 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-019 — the run with the most doubt got the least verification
+
+- **Status:** FIXED 2026-08-04 (`crates/nadia/src/main.rs`, `crates/nadia/src/supervisor.rs`),
+  regression test `a_budget_exhausted_run_is_still_checked` in `crates/nadia/src/gate.rs`.
+- **Found by:** running the two ported gates end-to-end (`gate-e2e`), not by review.
+
+An agent that stopped for any reason other than "I am finished" had its gate loop `break` before
+the check ran — so a check that had already been derived, printed to the operator, and cost a model
+call was discarded unrun. The report then read `⚠ не проверено — у задачи нет
+машинно-проверяемого критерия`, which is false twice over: there WAS a criterion, and it was never
+applied.
+
+Measured: an RPN attempt exhausted its 24 steps; the program it left on disk printed nothing for
+`cargo run -- "3 4 + 2 *"`, the exact invocation the task named. The operator was told the task had
+no machine-checkable criterion.
+
+The reasoning that produced it was sound for the JUDGE and wrong for the check: a model's opinion
+about an interrupted attempt really is worth less than an explanation, but a deterministic check
+costs one shell command and answers the question the operator actually has — *is what is on disk
+right?* A budget-exhausted run is where that question matters most.
+
+Fixed so the deterministic check runs whatever the stop reason was, while the judge still stands
+down for a non-finished run and no repair round is spent on an agent with no budget to repair with.
+The exit code follows the same rule in both directions: a run that exhausted its steps *after*
+satisfying the criterion now exits 0 and says so, because the check decides — that is the whole
+premise, and it cannot hold in one direction only.
+
+**Interesting detail: the two ports were already right.** Scala 3 and ScalaScript ran the check
+regardless of the stop reason; only the Rust reference had the early `break`. Porting a contract
+into a second and third implementation is a way of reading it that review is not.
+
+---
+
+## BUG-018 — the gate failed correct work because it lexed the arguments wrong
+
+- **Status:** FIXED 2026-08-04 (`crates/rozum-agent/src/verify.rs` + both ports), tests
+  `arity_comes_from_the_task_not_from_the_model`, `the_lexer_groups_what_the_quotes_group`,
+  and twins in `nadia:scala/sdk/Verify.test.scala` / `nadia:src/gate-check.ssc`.
+- **Found by:** the first end-to-end run of the Scala 3 gate (`gate-e2e`).
+
+For the task *"cargo run -- 3 4 must print 7"* the derived check was
+`cargo run -q -- '3 4'` — both numbers in ONE argument. The program the model wrote was correct;
+`cargo run -- 3 4` printed `7` by hand, in the same workspace, at the same moment. The gate spent
+both repair rounds and reported `✘ проверка НЕ прошла`, exit 1.
+
+**A false negative is the expensive kind of gate defect**: the operator is told correct work is
+broken, and the model is sent to break it.
+
+The cause was a schema that could not express arity — `run: [{"arg": "<value>", …}]`, one string,
+quoted into one shell literal. `arg` had also just been taught (BUG-016 era, `vga-arg-quotes`) to
+strip the task's delimiting quotes, which is right for `cargo run -- "3 4 + 2 *"` and destroys the
+only signal that distinguishes it from `cargo run -- 3 4`.
+
+The first fix — asking the model for a LIST — traded one false negative for its mirror image, and
+the run that proved it was the RPN task: asked for a list, the model split the task's single quoted
+argument into five, `'3' '4' '+' '2' '*'`. A program that accepts exactly what the task asked for
+would now fail. Measured, not predicted; it passed only because the model then wrote a program that
+accepts both shapes.
+
+So the real fix moves the question away from the model: **arity is syntax, and the task already
+wrote it.** `task_argv_for` lexes what follows `cargo run --` in the task with shell rules and
+takes the shortest prefix whose words are the value the model reported — the model still says
+*which* example and *what output*, which is what a model is good at. Both directions verified
+end-to-end afterwards, in all three implementations, artifacts checked by hand.
+
+---
+
 ## BUG-017 — the jail let the agent delete its own workspace
 
 - **Status:** FIXED 2026-08-04 (`crates/nadia/src/sandbox.rs`: one `(deny file-write-unlink

@@ -344,12 +344,18 @@ async fn main() {
             let mut outcome = session.turn(&task).await;
             let mut report = nadia::gate::Report::default();
             for round in 0..nadia::gate::rounds() {
-                if !matches!(outcome.stop, AgentStop::Done) {
-                    break;
-                }
                 let (r, repair) =
                     nadia::gate::check(&backend, &task, &root, check.as_deref(), &outcome).await;
                 report = nadia::gate::Report { rounds: round, ..r };
+                // A run that stopped WITHOUT finishing still gets its deterministic check — the
+                // artifact is on disk either way, and that run is the one the operator has most
+                // doubt about. Measured 2026-08-04: an RPN attempt exhausted its steps, the
+                // derived check was discarded unrun, and the report read `⚠ not checked` while
+                // the program on disk printed nothing for the argument the task named. What it
+                // does NOT get is a repair round: there is no budget left to repair with.
+                if !matches!(outcome.stop, AgentStop::Done) {
+                    break;
+                }
                 let Some(prompt) = repair else { break };
                 eprintln!("nadia: check failed — repair round {}", round + 1);
                 outcome = session.turn(&prompt).await;
@@ -369,8 +375,20 @@ async fn main() {
             std::process::exit(match outcome.stop {
                 AgentStop::Done => 0,
                 AgentStop::BudgetSteps | AgentStop::BudgetTime => {
-                    eprintln!("nadia: budget exhausted after {} steps", outcome.steps);
-                    1
+                    if report.passed == Some(true) {
+                        // The check decides in BOTH directions. An agent that satisfied the
+                        // acceptance criterion and then ran out of steps has done the task;
+                        // reporting that as a failure would be the same mistake as trusting a
+                        // model that says it finished.
+                        eprintln!(
+                            "nadia: budget exhausted after {} steps — but the check passed",
+                            outcome.steps
+                        );
+                        0
+                    } else {
+                        eprintln!("nadia: budget exhausted after {} steps", outcome.steps);
+                        1
+                    }
                 }
                 AgentStop::Error(e) => {
                     eprintln!("nadia: {e}");

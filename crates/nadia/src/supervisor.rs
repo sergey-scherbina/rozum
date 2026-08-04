@@ -293,10 +293,15 @@ impl Supervisor {
                 }
                 // THE GATE. The agent has said it is finished; now the check says whether it
                 // is. A failure comes back as the next turn carrying the command and what it
-                // actually printed — that is a repair round, not another guess. Skipped once
-                // the budget is spent: an agent that ran out of steps has a better explanation
-                // than a check result, and repairing it would spend rounds it does not have.
-                if matches!(outcome.stop, AgentStop::Done) && repairs < max_repairs {
+                // actually printed — that is a repair round, not another guess.
+                //
+                // The CHECK runs whatever the stop reason was: the artifact is on disk either
+                // way, and a run that ran out of steps is the one an operator has most doubt
+                // about (measured 2026-08-04 — the derived check was discarded unrun and the
+                // report read "not checked" for a program that printed nothing). What a
+                // non-finished run does not get is a REPAIR round: there is no budget to repair
+                // with, and gate::check itself declines to ask the judge without a Done.
+                if repairs < max_repairs {
                     let (report, repair) =
                         crate::gate::check(&backend, &task_text, &root, check.as_deref(), &outcome)
                             .await;
@@ -304,7 +309,7 @@ impl Supervisor {
                         let mut m = meta_t.lock().unwrap();
                         m.report = crate::gate::Report { rounds: repairs, ..report };
                     }
-                    if let Some(prompt) = repair {
+                    if let Some(prompt) = repair.filter(|_| matches!(outcome.stop, AgentStop::Done)) {
                         repairs += 1;
                         meta_t.lock().unwrap().phase = Phase::Running;
                         next = Some(prompt);

@@ -8,7 +8,7 @@
 //! Two tiers, because tasks come in two kinds:
 //!
 //! 1. **Deterministic.** [`derive_check`] asks the model to FORMALIZE the task into structured
-//!    data (`{"checkable":bool,"cargo_test":bool,"run":[{"arg","expect"}]}`), and *we* build the
+//!    data (`{"checkable":bool,"cargo_test":bool,"run":[{"args":[..],"expect"}]}`), and *we* build the
 //!    shell command from it — the model never writes shell, so it cannot inject any. When the
 //!    task states an example, this becomes exactly the check that would have caught the wrong
 //!    printout.
@@ -97,14 +97,91 @@ fn unquote(s: &str) -> &str {
     t
 }
 
+/// Split a command line the way a shell does — whitespace separates, quotes group.
+///
+/// Deliberately small: no escapes, no expansion. It reads the argument list a TASK wrote, and a
+/// task that needs `\$` in an example is past the point where a derived one-line check helps.
+pub fn shell_lex(s: &str) -> Vec<String> {
+    let (mut out, mut cur, mut quote, mut has) = (Vec::new(), String::new(), None::<char>, false);
+    for c in s.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => cur.push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                has = true;
+            }
+            None if c.is_whitespace() => {
+                if has || !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                    has = false;
+                }
+            }
+            None => cur.push(c),
+        }
+    }
+    if has || !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// The arity of an example, taken from the TASK rather than from the model.
+///
+/// The model is good at "what should this print" and bad at shell lexing, and lexing is the one
+/// part we can do exactly — the task already wrote the argument list, with its quotes. Measured
+/// 2026-08-04, both directions in one afternoon: asked for a single string it merged
+/// `cargo run -- 3 4` into one argument, and asked for a list it split `cargo run -- "3 4 + 2 *"`
+/// into five. Each answer is a false negative against a program that does exactly what was asked.
+///
+/// So: lex what follows `cargo run --` in the task, and find the shortest prefix whose words are
+/// the value the model reported. That prefix IS the argument list, quotes and all; the prose that
+/// follows the example ("must print 14") never matches and never enters. `None` when the task
+/// states no such example — then the model's own list stands, which is all we had before.
+pub fn task_argv_for(task: &str, joined: &str) -> Option<Vec<String>> {
+    let want: Vec<&str> = joined.split_whitespace().collect();
+    if want.is_empty() {
+        return None;
+    }
+    for (i, _) in task.match_indices("cargo run --") {
+        let tail = &task[i + "cargo run --".len()..];
+        let tail = tail.lines().next().unwrap_or(tail);
+        let lexed = shell_lex(tail);
+        for n in 1..=lexed.len() {
+            let prefix = &lexed[..n];
+            let flat: Vec<&str> = prefix.iter().flat_map(|w| w.split_whitespace()).collect();
+            if flat == want {
+                return Some(prefix.to_vec());
+            }
+        }
+    }
+    None
+}
+
 /// A `cargo run` check that SAYS what it saw. A bare `[ "$(cargo run …)" = … ]` fails silently,
 /// which leaves the repair round with an empty "real error" on exactly the mismatches that
 /// matter most — the ones where the program runs and prints the wrong thing.
 pub fn cargo_run_fragment(arg: &str, expect: &str) -> String {
-    let (arg_q, exp_q) = (shquote(unquote(arg)), shquote(unquote(expect)));
+    cargo_run_fragment_args(&[arg.to_string()], expect)
+}
+
+/// The same check for a program invoked with SEVERAL arguments.
+///
+/// Arity is part of the criterion, and the single-string form could not express it. Measured
+/// 2026-08-04 end-to-end: for "cargo run -- 3 4 must print 7" the model returned `arg = "3 4"`,
+/// which quotes into ONE literal, so the check ran `cargo run -q -- '3 4'` against a program that
+/// correctly takes two arguments — it exited 1, the gate spent both repair rounds and reported
+/// FAILED on work that was right. `cargo run -- 3 4` prints `7`, by hand, in the same workspace.
+///
+/// A false negative is the expensive kind of gate defect: the operator is told correct work is
+/// broken, and the model is sent to break it.
+pub fn cargo_run_fragment_args(args: &[String], expect: &str) -> String {
+    let quoted: Vec<String> = args.iter().map(|a| shquote(unquote(a))).collect();
+    let (argv, exp_q) = (quoted.join(" "), shquote(unquote(expect)));
     format!(
-        "{{ out=$(cargo run -q -- {arg_q}) && [ \"$out\" = {exp_q} ] || \
-         {{ printf 'cargo run -- %s printed <%s>; expected <%s>\\n' {arg_q} \"$out\" {exp_q} >&2; exit 1; }}; }}"
+        "{{ out=$(cargo run -q -- {argv}) && [ \"$out\" = {exp_q} ] || \
+         {{ printf 'cargo run -- %s printed <%s>; expected <%s>\\n' {argv_msg} \"$out\" {exp_q} >&2; exit 1; }}; }}",
+        argv_msg = shquote(&args.iter().map(|a| unquote(a)).collect::<Vec<_>>().join(" "))
     )
 }
 
@@ -144,12 +221,14 @@ pub fn cargo_floor(cwd: &Path) -> Option<String> {
 pub async fn derive_check(backend: &dyn ChatBackend, task: &str) -> Option<String> {
     let prompt = format!(
         "Set up the acceptance CHECK for this coding task. Reply with ONLY a JSON object, no prose:\n\
-         {{\"checkable\": <true|false>, \"cargo_test\": <true|false>, \"run\": [{{\"arg\": \"<argument VALUE only>\", \"expect\": \"<exact stdout>\"}}]}}\n\
+         {{\"checkable\": <true|false>, \"cargo_test\": <true|false>, \"run\": [{{\"args\": [\"<one entry PER command-line argument>\"], \"expect\": \"<exact stdout>\"}}]}}\n\
          - \"run\": one entry per concrete example the task states as `cargo run -- X` printing `Y`.\n\
-           `arg` is JUST the argument value X — e.g. for \"cargo run -- hello prints olleh\", arg is \
-           \"hello\" (NOT \"cargo run -- hello\"); `expect` is JUST Y, e.g. \"olleh\". Omit if no example.\n\
-         - Quotes that DELIMIT a value in the task are not part of it: for `cargo run -- \"3 4 + 2 *\"` \
-         printing 14, arg is `3 4 + 2 *` and expect is `14` — no surrounding quotes in either.\n\
+           `args` is the argument LIST X, one entry per argument — for \"cargo run -- hello prints \
+           olleh\", args is [\"hello\"] (NOT [\"cargo run -- hello\"]); `expect` is JUST Y, e.g. \"olleh\".\n\
+         - HOW MANY entries is decided by the task's spacing and quotes, and it matters: \
+         `cargo run -- 3 4` printing 7 is TWO arguments, args [\"3\", \"4\"] — while \
+         `cargo run -- \"3 4 + 2 *\"` printing 14 is ONE argument, args [\"3 4 + 2 *\"]. Quotes that \
+         DELIMIT a value are not part of it: no surrounding quotes inside the entries or in expect.\n\
          - cargo_test=true ONLY if the task explicitly requires a unit test to pass.\n\
          - checkable=false if the task has no machine-checkable build/run/test criterion. In particular, \
          if the task is NOT about a Rust program — it only asks for a chat reply, an explanation, or \
@@ -166,9 +245,21 @@ pub async fn derive_check(backend: &dyn ChatBackend, task: &str) -> Option<Strin
         parts.push("cargo test -q".to_string());
     }
     for r in j["run"].as_array().into_iter().flatten() {
-        if let (Some(arg), Some(exp)) = (r["arg"].as_str(), r["expect"].as_str()) {
-            parts.push(cargo_run_fragment(arg, exp));
+        let Some(exp) = r["expect"].as_str() else { continue };
+        // `args` carries the arity the single string could not; `arg` stays valid as one argument.
+        let argv: Vec<String> = match (r["args"].as_array(), r["arg"].as_str()) {
+            (Some(a), _) => a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+            (None, Some(one)) => vec![one.to_string()],
+            (None, None) => continue,
+        };
+        if argv.is_empty() {
+            continue;
         }
+        // Arity comes from the task's own punctuation when the task states the example; the
+        // model's grouping is only the fallback for a task that describes one in prose.
+        let joined = argv.iter().map(|a| unquote(a)).collect::<Vec<_>>().join(" ");
+        let argv = task_argv_for(task, &joined).unwrap_or(argv);
+        parts.push(cargo_run_fragment_args(&argv, exp));
     }
     Some(parts.join(" && "))
 }
@@ -371,6 +462,67 @@ pub fn repair_prompt_in(check: &str, output: &str, cwd: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arity_comes_from_the_task_not_from_the_model() {
+        // Both directions, both measured end-to-end on 2026-08-04 with the same 4B model.
+        // Asked for one string it merged two arguments; asked for a list it split a quoted one
+        // into five. The task said which it was, in both cases, in its own punctuation.
+        let two = "print the sum of two arguments: cargo run -- 3 4 must print 7";
+        assert_eq!(task_argv_for(two, "3 4"), Some(vec!["3".to_string(), "4".to_string()]));
+
+        let one = r#"an RPN calculator: cargo run -- "3 4 + 2 *" must print 14"#;
+        assert_eq!(task_argv_for(one, "3 4 + 2 *"), Some(vec!["3 4 + 2 *".to_string()]));
+        // Even when the model reports it pre-split, which is exactly what it did.
+        assert_eq!(task_argv_for(one, "3 4 + 2 *"), Some(vec!["3 4 + 2 *".to_string()]));
+
+        // The prose after the example is not swept in: the match stops at the reported value,
+        // so the check runs `3 4` and not the rest of the sentence.
+        assert_eq!(task_argv_for(two, "3 4").unwrap().len(), 2);
+        // A value the task never states leaves the model's grouping alone rather than inventing.
+        assert_eq!(task_argv_for(two, "5 6"), None);
+        // A task that states no example leaves the model's grouping alone.
+        assert_eq!(task_argv_for("make the greeting friendlier", "hello"), None);
+    }
+
+    #[test]
+    fn the_lexer_groups_what_the_quotes_group() {
+        assert_eq!(shell_lex(r#" "3 4 + 2 *" must print 14"#), vec!["3 4 + 2 *", "must", "print", "14"]);
+        assert_eq!(shell_lex("3 4 must print 7"), vec!["3", "4", "must", "print", "7"]);
+        // An empty argument is a real one — `cargo run -- ""` is a thing a task can ask for.
+        assert_eq!(shell_lex(r#"a "" b"#), vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn two_arguments_stay_two_arguments() {
+        // The end-to-end finding (2026-08-04, Scala 3 gate, task "cargo run -- 3 4 must print 7"):
+        // the single-string form quoted BOTH numbers into one literal, the check ran
+        // `cargo run -q -- '3 4'` against a correct two-argument program, and the gate reported
+        // FAILED after spending both repair rounds. `cargo run -- 3 4` printed `7` by hand.
+        let frag = cargo_run_fragment_args(&["3".into(), "4".into()], "7");
+        assert!(frag.contains("cargo run -q -- '3' '4'"), "{frag}");
+        // The command that RUNS must not merge them; the message may spell them as a command line.
+        let cmd = frag.split("||").next().unwrap();
+        assert!(!cmd.contains("'3 4'"), "the two arguments were merged again: {frag}");
+    }
+
+    #[test]
+    fn one_argument_with_spaces_stays_one_argument() {
+        // The other half of the same rule, and the reason arity cannot be guessed from whitespace:
+        // this task really does pass a single argument that contains spaces.
+        let frag = cargo_run_fragment_args(&["3 4 + 2 *".into()], "14");
+        assert!(frag.contains("cargo run -q -- '3 4 + 2 *'"), "{frag}");
+    }
+
+    #[test]
+    fn a_multi_argument_mismatch_says_the_whole_command_line() {
+        // What the repair round reads. Printing only the first argument would describe a command
+        // nobody ran.
+        let frag = cargo_run_fragment_args(&["3".into(), "4".into()], "7");
+        let msg = frag.split("printf").nth(1).unwrap();
+        assert!(msg.contains("'3 4'"), "the message named only part of the command line: {frag}");
+        assert!(frag.contains("printed") && frag.contains("expected"), "{frag}");
+    }
 
     #[test]
     fn a_derived_run_check_reports_what_it_saw() {

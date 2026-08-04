@@ -27,12 +27,17 @@ and **one agent at a time**, since two concurrent runs on one gateway already co
 that read as a code failure. Workspace is a scratch directory, never a repository: giving the ssc
 agent its own worktree let `cargo init` land in the repo (recorded under `vgp-parity`).
 
-- [ ] **ge-scala3** — one full run, task with a deterministic criterion. Verdict is the four
-  lines the contract promises: derived check, its output, which of the four endings, exit code.
-- [ ] **ge-ssc** — the same task, same model, same workspace shape.
-- [ ] **ge-record** — what each one actually did into `nadia:SPEC.md` §3.1 / `docs/operations.md`,
-  and any defect found into `nadia:BUGS.md` before it is fixed. A port that fails here is the
-  finding, not a setback — it is the reason the item exists.
+- [x] **ge-scala3 — DONE.** First run: `✘ FAILED`, rc=1, both repair rounds spent — on a program
+  that was CORRECT (`cargo run -- 3 4` printed 7 by hand). That is BUG-018, and it was worth the
+  whole item. After the fix: `✔` in 12 s, zero repair rounds, artifact hand-checked.
+- [x] **ge-ssc — DONE.** `✔`, rc=0, 13 s, hand-checked — re-run on a freshly rebuilt toolchain
+  because the first attempt printed the STALE BUILD warning, and this project has already paid
+  once for reporting a measurement made with a stale one.
+- [x] **ge-record — DONE.** BUG-018 and BUG-019 in `BUGS.md`, the two new rules in
+  `nadia:SPEC.md` §3.1 (arity comes from the task; the check runs whatever the stop reason was),
+  `nadia:docs/operations.md`, and `nadia:CHANGELOG.md`. Both defects are contract-level, so the fix
+  landed in all three implementations with twinned tests — 831 workspace tests, 11 Scala 3 Verify
+  tests, 22 ssc contract rules, all green.
 
 ### ▶ Gate measurement, and the double gate it exposed (operator 2026-08-04: "делай эти. Работай")
 
