@@ -1,0 +1,6 @@
+feature/gate-matrix 2026-08-04T14:20:17Z
+agent: claude-opus-5
+heartbeat: 2026-08-04T14:20:17Z
+status: in-progress
+done-so-far: queued
+next: gm-defer — one owner per run

@@ -9,6 +9,30 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
+### ▶ Gate measurement, and the double gate it exposed (operator 2026-08-04: "делай эти. Работай")
+
+Branch `feature/gate-matrix`, worktree `.worktrees/feature/gate-matrix`.
+Measurement discipline: the `performance` skill — alternating A/B, never a before-block and an
+after-block, and one measurement is a hypothesis.
+
+Found while planning the measurement, not by review: **nadia now runs under two gates in the
+matrix and in the UCC.** `scripts/bench/agentic.sh` and `spawn_coder` both invoke
+`rozum launch … nadia run "$prompt"`, and since `agent_prompt_index` learned nadia's prompt
+position (first task of this session) launch's verify-repair loop applies to it — on top of
+nadia's own. Two derive calls per cell, two repair budgets stacked, and an A/B on `NADIA_VERIFY`
+would have compared "one gate" against "two", not against none.
+
+- [ ] **gm-defer** — one owner per run: `rozum launch` marks a run it is gating, nadia's gate
+  stands down when it sees the mark and says so once. The Telegram path (`nadia serve`, no
+  launcher) is unaffected — that is the case nadia's gate was built for.
+- [ ] **gm-measure** — 8 tasks × 2 arms, ALTERNATING, one agent at a time (a concurrent run
+  already cost a gateway timeout, rc=2): arm A `ROZUM_VERIFY=0 NADIA_VERIFY=0` (no gate at all),
+  arm B `ROZUM_VERIFY=0 NADIA_VERIFY=1` (nadia's gate alone — the phone path). What is being
+  answered: does the gate change the pass rate, and what does it cost in wall-clock and model
+  calls.
+- [ ] **gm-record** — the run goes into a history file with its conditions, not into a sentence
+  in a commit. A number without the machine state next to it is not comparable to the next one.
+
 ### ▶ Total-fs wrappers + the std.fs failure contract (operator 2026-08-04: "Делай. Заведи.")
 
 Cross-repo. Code in `../nadia` (branch `feature/total-fs`, worktree
