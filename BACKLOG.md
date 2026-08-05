@@ -1,14 +1,14 @@
 # Backlog
 
-## The meeting daemon has two owners (found 2026-08-05 by `doctor --services`)
+## The meeting daemon has two owners — SEE `BUGS.md` BUG-025
 
-- [ ] **meeting-daemon-ownership** — `com.rozum.meeting-daemon` is a launchd job, AND every bridge
-  calls `spawn_daemon()` on demand (that is how a bridge survives a daemon restart). Whoever grabs
-  the socket first wins, and today the winner was a bridge child: the launchd job is down, `:8401`
-  answers, and nothing will restart the daemon if that child dies. Decide which one owns it — either
-  the job is the only starter (and bridges wait/retry instead of spawning), or the job goes and the
-  on-demand spawn is the contract. `doctor --services` reports the split state as `warn` in the
-  meantime.
+- [ ] **meeting-daemon-ownership** — filed here from `doctor --services` (launchd's copy down while
+  `:8401` answered, because a bridge spawns its own on demand and wins the socket) about ninety
+  minutes before a sibling agent filed the same thing, from the other end, as **BUG-025** (the job
+  respawns every ~9 s forever because the daemon detaches, and two daemons can share one socket
+  path). One problem, two symptoms: **BUG-025 is the record; this line is a pointer, not a second
+  copy.** What this side adds is that `doctor --services` already reports the split state as `warn`
+  with the reason, so whoever fixes it has a way to see it fixed.
 
 ## rozum-core::share tests read the real machine (found 2026-08-05)
 
