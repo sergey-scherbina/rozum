@@ -9,6 +9,33 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
+### ▶ A bridge that dies when the daemon blinks (operator 2026-08-05: "Запиши в спринт и берись сейчас")
+
+Branch `feature/bridge-daemon-reconnect`, worktree `.worktrees/feature/bridge-daemon-reconnect`.
+
+Noticed while verifying `nadia-serve-lifetime`: `com.rozum.telegram-groups` was showing exit code
+1, and both bridge logs carry three `telegram bridge error: meeting daemon poll ended` exits each.
+`DaemonBridge::next_outbound` turns an ended poll stream into a fatal error **on purpose** — the
+comment says "so a process supervisor can restart the bridge after a daemon restart" — and launchd
+`KeepAlive` does restart it. It is self-healing, and the price is paid by everything else in the
+process: every chat the bridge serves, the group registry watcher, and nadia's result watcher all
+go down because ONE poll stream ended.
+
+Until this morning it also killed `nadia serve` and every agent with it (fixed in
+`nadia-serve-lifetime` — that is how this got noticed at all).
+
+Narrow but real残: `collect_finished` removes a watch entry from disk and then sends the message.
+A process that dies in that window loses that result for good; every other pending result survives,
+because the watch list is on disk and the next process re-reads it.
+
+- [ ] **bdr-reconnect** — an ended poll stream reconnects with bounded backoff instead of ending
+  the process. A daemon restart is an ordinary event on this machine (`spawn_daemon` exists for
+  exactly that reason); it must not read as a bridge failure.
+- [ ] **bdr-loud** — a reconnect says so once, and a reconnect that keeps failing still ends the
+  process. Retrying forever in silence is how a dead dependency looks healthy.
+- [ ] **bdr-verify** — unit test with a stream that ends once, then LIVE: restart the meeting
+  daemon under both bridges and watch them stay up and keep delivering.
+
 ### ▶ An agent's record must outlive the process that ran it (operator 2026-08-05: "Да, делай" → "Второе целиком")
 
 Branch `feature/nadia-serve-lifetime`, worktree `.worktrees/feature/nadia-serve-lifetime`.

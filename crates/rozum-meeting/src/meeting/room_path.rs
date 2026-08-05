@@ -27,6 +27,11 @@ pub fn ensure_rooms_dir() -> std::io::Result<()> {
     std::fs::create_dir_all(rooms_dir())
 }
 
+/// `$HOME`, for callers outside this module that need the same base (the REST secret file).
+pub fn dirs_home_public() -> PathBuf {
+    dirs_home()
+}
+
 fn dirs_home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)

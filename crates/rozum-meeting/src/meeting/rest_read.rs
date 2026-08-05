@@ -76,11 +76,17 @@ struct DayJson {
 /// Spawn the REST read listener when configured. A bind failure is logged but
 /// does not abort the meeting daemon; the unix-socket MCP path is primary.
 pub fn maybe_spawn_from_env(registry: Arc<RoomRegistry>, shutdown: watch::Receiver<bool>) {
-    let Some(secret) = std::env::var("ROZUM_WEB_SECRET")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(secret) = web_secret() else {
+        // LOUD on purpose (BUG-017). Without a secret this daemon serves the socket and nothing on
+        // :8401 — rooms keep working, every process looks healthy, and the console, the web client
+        // and the generated terminal client all go quiet. Whoever is reading a log when that
+        // happens deserves to be told, rather than left with the silence this used to return.
+        tracing::warn!(
+            "meeting REST read NOT started: no ROZUM_WEB_SECRET in the environment and no {} on \
+             disk. Rooms work over the socket; :8401 does not. If this daemon was started by a \
+             client rather than by its service, that is BUG-017.",
+            web_secret_path().display()
+        );
         return;
     };
     let bind = std::env::var("ROZUM_MEETINGS_REST_BIND")
@@ -103,6 +109,36 @@ pub fn maybe_spawn_from_env(registry: Arc<RoomRegistry>, shutdown: watch::Receiv
             tracing::warn!(error = ?e, "meeting REST read stopped with error");
         }
     });
+}
+
+/// The REST secret: the environment first, then `~/.rozum/secrets/web-secret`.
+///
+/// The file matters because of BUG-017. `daemon_proxy::spawn_daemon` resurrects this daemon with
+/// the CALLER's environment — an agent's MCP proxy, a bare CLI run — which carries no
+/// `ROZUM_WEB_SECRET`. Reading it from the same place regardless of who started the process makes
+/// `:8401` a property of the INSTALLATION rather than of the accident of who won the socket.
+///
+/// The env still wins, so a deliberately-configured service keeps overriding the file.
+fn web_secret() -> Option<String> {
+    resolve_web_secret(std::env::var("ROZUM_WEB_SECRET").ok(), &web_secret_path())
+}
+
+/// The precedence itself, separated from the process so it can be tested without mutating global
+/// environment state — which in a parallel test run is a race, not a fixture.
+fn resolve_web_secret(from_env: Option<String>, path: &Path) -> Option<String> {
+    let clean = |s: String| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Some(v) = from_env.and_then(clean) {
+        return Some(v);
+    }
+    std::fs::read_to_string(path).ok().and_then(clean)
+}
+
+/// `~/.rozum/secrets/web-secret` — the same directory, ownership and 600 the messenger tokens use.
+fn web_secret_path() -> PathBuf {
+    super::room_path::dirs_home_public()
+        .join(".rozum")
+        .join("secrets")
+        .join("web-secret")
 }
 
 pub async fn serve(
@@ -1284,6 +1320,35 @@ mod tests {
         if by_alias["date"] == by_date["date"] {
             assert_eq!(by_alias["messages"], by_date["messages"]);
         }
+    }
+
+    /// The REST secret is a property of the INSTALLATION, not of who started the daemon (BUG-017).
+    ///
+    /// `daemon_proxy::spawn_daemon` resurrects the daemon with the caller's environment, which
+    /// carries no `ROZUM_WEB_SECRET`; before the file fallback that daemon served the socket and
+    /// nothing on `:8401`, with every surface still looking healthy.
+    #[test]
+    fn the_web_secret_falls_back_to_disk_but_the_environment_still_wins() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("web-secret");
+
+        // Neither source: None, and the caller warns rather than starting a half-daemon quietly.
+        assert_eq!(resolve_web_secret(None, &file), None);
+
+        // File only — the autostart case this exists for.
+        std::fs::write(&file, "  from-disk\n").unwrap();
+        assert_eq!(resolve_web_secret(None, &file).as_deref(), Some("from-disk"));
+
+        // Environment wins, so a deliberately-configured service still overrides the file.
+        assert_eq!(
+            resolve_web_secret(Some("from-env".into()), &file).as_deref(),
+            Some("from-env")
+        );
+
+        // An empty or blank value is not a secret — it must not silently authenticate everything.
+        assert_eq!(resolve_web_secret(Some("   ".into()), &file).as_deref(), Some("from-disk"));
+        std::fs::write(&file, "\n\n").unwrap();
+        assert_eq!(resolve_web_secret(Some("".into()), &file), None);
     }
 
     /// A turn with no timestamp renders no clock rather than 1970 — the client prints the string
