@@ -3614,8 +3614,28 @@ async fn run_meetings_start(foreground: bool) {
 
     // Foreground: this process IS the daemon.
     if daemon_alive(&sock).await {
-        eprintln!("meeting daemon already running ({})", sock.display());
-        return;
+        // BUG-025. Exiting here is fatal under a supervisor: `exit(0)` says "my work is done" and
+        // `KeepAlive = true` says "you are never done", so launchd starts another copy to step
+        // aside again — one process every ~9 s, forever, while everything looks healthy from
+        // outside. Hold the slot instead and take over when the incumbent goes; that is what makes
+        // the job the real owner of the service rather than a bystander.
+        if supervised_by_launchd(std::env::var("XPC_SERVICE_NAME").ok()) {
+            eprintln!(
+                "meeting daemon already running ({}); supervised — waiting to take over",
+                sock.display()
+            );
+            while daemon_alive(&sock).await {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            eprintln!("meeting daemon gone; taking over");
+        } else {
+            // NOT politeness: `spawn_detached_meetings` starts its child with this same flag, and
+            // two clients can both find no daemon and both spawn one. Waiting unconditionally would
+            // leave the loser of every race as a permanent idle standby — a process leak traded for
+            // a respawn loop.
+            eprintln!("meeting daemon already running ({})", sock.display());
+            return;
+        }
     }
     let state_dir = rozum_state_dir();
     let _ = std::fs::create_dir_all(&state_dir);
@@ -3633,6 +3653,42 @@ async fn run_meetings_start(foreground: bool) {
         eprintln!("meeting daemon error: {e}");
     }
     let _ = std::fs::remove_file(&pid_path);
+}
+
+/// Is this process running under launchd's supervision? (BUG-025)
+///
+/// launchd sets `XPC_SERVICE_NAME` to the job label in everything it starts; an interactive shell
+/// and a client-spawned child carry none. An explicit `--supervise` flag would have been the
+/// obvious alternative and was rejected: the plists are ALREADY INSTALLED on every host, so a flag
+/// only takes effect after a service reinstall — the fix would ship and quietly not apply. This
+/// marker fixes every existing installation the moment the binary is replaced.
+///
+/// `getppid() == 1` cannot be used: a detached client-spawned daemon is reparented to pid 1 too,
+/// so it answers the wrong question.
+fn supervised_by_launchd(xpc_service_name: Option<String>) -> bool {
+    xpc_service_name.is_some_and(|v| !v.trim().is_empty())
+}
+
+#[cfg(test)]
+mod supervise_tests {
+    use super::supervised_by_launchd;
+
+    /// Deliberately a pure decision with no socket and no processes. An earlier test in this repo
+    /// that reached the meeting socket assumed no daemon was listening, and created two live rooms
+    /// in the operator's running daemon.
+    #[test]
+    fn only_a_real_launchd_job_waits_for_the_incumbent() {
+        assert!(supervised_by_launchd(Some(
+            "com.rozum.meeting-daemon".to_string()
+        )));
+        // No marker: an interactive run, or the child of `spawn_detached_meetings` that lost the
+        // race. It must exit, or every lost race leaves an idle standby forever.
+        assert!(!supervised_by_launchd(None));
+        // A set-but-empty value is not a supervisor. Same reasoning as the REST secret in
+        // BUG-024, where a blank value had to be treated as absent rather than as a secret.
+        assert!(!supervised_by_launchd(Some(String::new())));
+        assert!(!supervised_by_launchd(Some("   ".to_string())));
+    }
 }
 
 fn spawn_detached_meetings() -> std::io::Result<std::process::Child> {

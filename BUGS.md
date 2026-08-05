@@ -7,9 +7,15 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ## BUG-025 — the meeting daemon detaches, so its launchd job can never own it: a permanent respawn loop and duplicate daemons on one socket
 
-- **Status:** open, found 2026-08-05 while checking the machine after an authorised bench run. NOT
-  fixed — I stopped the loop by hand on this host, and every attempt to clean it up by killing
-  processes produced a NEW daemon within seconds, which is the finding rather than an accident.
+- **Status:** HALF FIXED 2026-08-05 — the respawn loop is fixed (`src/main.rs`, spec
+  `docs/specs/meeting-daemon-supervise.md`): under launchd the foreground start now WAITS for the
+  incumbent and takes over instead of exiting 0. The socket-ownership half below is still OPEN: a
+  second binder unlinks a live listener's socket file rather than refusing, which is what lets two
+  daemons share one path. Kept open deliberately — a change that also rewrites socket ownership is
+  not reviewable as one unit.
+- **Also filed independently, ninety minutes earlier, from the other end:** `doctor --services`
+  reported the split ownership as `warn` (BACKLOG `meeting-daemon-ownership`, now a pointer here).
+  Two agents, two symptoms, one problem — and that check is the way to see the fix land.
 - **Found by:** noticing `com.rozum.meeting-daemon` had `runs = 78` and a log that was 525 lines of
   the same sentence. Nothing was broken from the outside — rooms answered, `:8401` answered.
 - **Severity:** P2. Nothing is lost today, but it burns a process spawn every ~9 seconds forever,
