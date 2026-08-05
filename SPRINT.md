@@ -21,6 +21,24 @@ launchd's copy loses the race and stays down. Reported as `warn` with that sente
 `fail` the operator cannot clear is the same cry-wolf this whole item exists to remove. Who should
 own that daemon is a design question, filed rather than decided at the end of a long session.
 
+### ▶ `doctor --services` reports the job, not the server (handed over inside BUG-025, 2026-08-05)
+
+Branch `feature/doctor-socket-owner`.
+
+A sibling closed BUG-025 and left the consequence for whoever owns this check — me, from three
+hours earlier. With their ownership fix in place, the launchd job can be alive and merely WAITING
+while a client-spawned daemon holds the lock and serves the socket. My line then reads
+`svc:meeting-daemon running (pid 42206), :8401 answers 200`: both halves true, and together they
+say something false, because 42206 serves nothing.
+
+Confirmed on the host before touching anything: job `42206`, while `lsof` shows `42132` holding
+both `meeting.sock.lock` and the listener.
+
+- [ ] **dso-owner** — where a service has an identifiable owner (the lock beside the socket), the
+  line names WHO serves, and says so when that is not the job.
+- [ ] **dso-verify** — live: the current split state must produce a `warn` naming both pids, and
+  after the two are the same process it must go back to `ok`.
+
 ### ▶ wordcount was ours, not the model's (operator 2026-08-05: "Надия теперь способна решать задачи в матрице?" → "продолжай")
 
 Branch `feature/wordcount-regression`.

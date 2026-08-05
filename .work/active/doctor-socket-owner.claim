@@ -1,0 +1,6 @@
+feature/doctor-socket-owner 2026-08-05T14:06:30Z
+agent: claude-code
+heartbeat: 2026-08-05T14:06:30Z
+status: in-progress
+done-so-far: confirmed live — job pid 42206 waits while 42132 holds the lock and the socket
+next: report the owner, not just the job
