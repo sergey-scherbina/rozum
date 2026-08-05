@@ -1114,13 +1114,28 @@ pub fn acquire_socket_ownership(socket_path: &Path) -> std::io::Result<std::fs::
         .truncate(false)
         .open(&path)?;
     file.try_lock().map_err(|_| {
+        // If the owner holds the lock but its socket FILE is gone, nothing can serve: this process
+        // must not steal (that is the bug), and the owner will not rebind. Say so, because the
+        // symptom an operator sees is rooms going quiet with every process looking healthy, and
+        // without this sentence the refusal reads like the daemon is fine.
+        let wedged = !socket_path.exists();
         std::io::Error::new(
             std::io::ErrorKind::AddrInUse,
-            format!(
-                "another meeting daemon owns {} (lock {}); refusing to take its socket",
-                socket_path.display(),
-                path.display()
-            ),
+            if wedged {
+                format!(
+                    "another meeting daemon holds {} but {} is MISSING — that owner is wedged and \
+                     nothing is serving. Stop it (its lock is released on death) and the service \
+                     comes back; this process will not take a socket it does not own.",
+                    path.display(),
+                    socket_path.display()
+                )
+            } else {
+                format!(
+                    "another meeting daemon owns {} (lock {}); refusing to take its socket",
+                    socket_path.display(),
+                    path.display()
+                )
+            },
         )
     })?;
     Ok(file)
@@ -1402,6 +1417,36 @@ mod tests {
 
         // A dead owner leaves nothing to reap — the kernel drops the lock with the process, which
         // is the whole reason this is a lock and not a pidfile. Dropping the handle stands in.
+        drop(first);
+        acquire_socket_ownership(&sock).expect("the successor takes over with no cleanup step");
+    }
+
+    /// The refusal has to say WHICH failure this is. A live owner serving its socket is normal; an
+    /// owner holding the lock while the socket file is gone means nothing is serving at all, and
+    /// the operator sees only rooms going quiet. Found by wedging it on the host by hand.
+    #[test]
+    fn a_refusal_names_the_wedged_case_because_nothing_is_serving_then() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("meeting.sock");
+        let _owner = acquire_socket_ownership(&sock).unwrap();
+
+        // No socket file beside the lock: the owner cannot serve and a successor must not steal.
+        let wedged = acquire_socket_ownership(&sock).expect_err("must refuse");
+        assert!(wedged.to_string().contains("MISSING"), "{wedged}");
+        assert!(wedged.to_string().contains("wedged"), "{wedged}");
+
+        // With the socket present it is the ordinary "someone else is serving" refusal.
+        std::fs::write(&sock, b"").unwrap();
+        let ordinary = acquire_socket_ownership(&sock).expect_err("must refuse");
+        assert!(!ordinary.to_string().contains("wedged"), "{ordinary}");
+        assert!(ordinary.to_string().contains("refusing to take"), "{ordinary}");
+    }
+
+    #[test]
+    fn a_dead_owner_frees_the_socket_with_no_cleanup_step() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("meeting.sock");
+        let first = acquire_socket_ownership(&sock).unwrap();
         drop(first);
         acquire_socket_ownership(&sock).expect("the successor takes over with no cleanup step");
     }

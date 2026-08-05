@@ -3666,8 +3666,14 @@ async fn run_meetings_start(foreground: bool) {
             // is a lost round, not a failure: go back to waiting. Anywhere else it is the correct
             // end of a process that was never meant to be the second daemon.
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && supervised => {
-                eprintln!("{e}; back to waiting");
+                // SLEEP FIRST. Without it this is a hot loop and it was measured as one: when the
+                // owner's socket FILE is missing, `daemon_alive` says "nothing there", so the wait
+                // above returns instantly, the bind is refused instantly, and the retry burns CPU
+                // for as long as the owner lives. A supervisor retrying forever is correct; doing
+                // it as fast as the scheduler allows is not.
+                eprintln!("{e}; retrying in 1s");
                 let _ = std::fs::remove_file(&pid_path);
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 continue;
             }
             Err(e) => eprintln!("meeting daemon error: {e}"),
