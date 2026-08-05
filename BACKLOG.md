@@ -26,9 +26,18 @@
      Decide: either that question is settled (delete the branch, keep the patch in the attic as the
      record of how it was measured) or it is not (promote a real task that uses the probe, then removes
      it). Do NOT merge it as-is.
-  **Done when:** each of the two has an explicit verdict recorded here — promoted to SPRINT with a
-  scope, or dropped with the reason — and any branch whose verdict is "dropped" is deleted (the patch
-  in the attic is the durable copy).
+  **DECIDED 2026-08-05 — both DROPPED, branches deleted, patches kept in the attic.**
+  1. **codex create-steer — dropped, and the interesting half turned out to be already shipped.**
+     The create-recipe half is for gpt-oss under codex: neither the model nor the driver is in use.
+     The lean-prompt half made a GENERAL claim worth checking — that prompt load collapses
+     format-adherence in small models, and Qwen3.5-4B is small. Checked, and the lever already
+     exists on the path we actually run: `rozum launch --lean` cuts the claude request from ~4.9K
+     schema tokens to ~0.8K via `--disallowedTools` (`src/main.rs:332`). So there is nothing left
+     to win here — the idea was right and was implemented before this patch existed.
+  2. **iOS viewport probe — dropped.** Diagnostic scaffolding that overwrote the composer's
+     placeholder with live viewport numbers. Nobody is chasing the iOS keyboard question, and it was
+     never shippable. The patch in the attic is the record of how it was measured.
+  Both patches remain at `~/.rozum/attic/parked-patches/` and apply cleanly; nothing is lost.
 
 ## Service liveness — we ship daemons with no health signal (found 2026-07-27, BUG-013)
 
