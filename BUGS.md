@@ -5,6 +5,39 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-026 — the gate invented the answer, then failed correct work for not matching it
+
+- **Status:** FIXED 2026-08-05 (`crates/rozum-agent/src/verify.rs`), test
+  `an_expectation_the_task_never_states_is_not_checked`.
+- **Found by:** asking why `wordcount` was 0/3 in the matrix when the docs record 4/4.
+
+The `wordcount` task says what the program must DO — read a file, count words case-insensitively,
+print the top 3 as `word count` — and never says what it prints, because that depends on a data
+file. Asked to formalize it, the model answered with an expectation it made up: `a 3 / c 2 / d 2`,
+three lines that appear nowhere in the task and match no input. The gate then demanded them.
+
+**A correct program cannot pass that check**, and both repair rounds went into fighting it instead
+of the compile errors that were actually in the way. Same false negative as BUG-018, arriving
+through the schema's other field.
+
+`checkable: false` is what the prompt asks for here and the model does not always give it, so the
+guard is deterministic now, exactly like `task_argv_for`: an `expect` the task does not state is
+dropped, and the check falls back to what can be established — `cargo build -q`.
+
+Measured, same task, same model, same machine:
+
+| | before | after |
+|---|---|---|
+| runs passing | **0 / 4** | **3 / 3** |
+| output by hand | 4 different compile errors | `apple 3 / banana 3 / cherry 2` in all three |
+
+The interesting part is what this corrects about YESTERDAY'S conclusion: the matrix had `wordcount`
+down as the model's ceiling ("a 4B model cannot write this"), and it was our check making it
+unwinnable. The evidence for the ceiling was four failures whose *causes* were four different
+compile errors — that variety should have been the clue, and instead it read as capability.
+
+---
+
 ## BUG-025 — the meeting daemon detaches, so its launchd job can never own it: a permanent respawn loop and duplicate daemons on one socket
 
 - **Status:** HALF FIXED 2026-08-05 — the respawn loop is fixed (`src/main.rs`, spec

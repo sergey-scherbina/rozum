@@ -1,5 +1,20 @@
 # Changelog
 
+## wordcount-regression — the check was unwinnable, not the task
+Completed: 2026-08-05
+
+`wordcount` was the one matrix cell nadia lost, and I had just reported it as the model's ceiling.
+The docs recorded 4/4 on that task, which is the disagreement that made it worth looking at.
+
+The task says what the program must do and never what it prints — the answer depends on a data
+file. The model, asked to formalize it, invented `a 3 / c 2 / d 2`; the gate demanded exactly that,
+so no correct program could pass, and both repair rounds went into fighting the check instead of
+the compile errors in the way.
+
+An expectation the task does not state is now dropped deterministically — the same shape as taking
+arity from the task (BUG-018) — and the check falls back to `cargo build -q`. Same task, same
+model, same machine: 0/4 → 3/3, all three printing `apple 3 / banana 3 / cherry 2`. BUG-026.
+
 ## fix(meetings): the launchd job waits for the incumbent instead of stepping aside — BUG-025 half
 
 `exit(0)` under `KeepAlive = true` is a supervisor asking for a restart, so the meeting daemon's

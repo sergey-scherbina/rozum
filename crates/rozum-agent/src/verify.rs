@@ -126,6 +126,18 @@ pub fn shell_lex(s: &str) -> Vec<String> {
     out
 }
 
+/// Does the task actually state this expected output?
+///
+/// Whitespace-insensitive on purpose: a task writes `prints `olleh`` and a model may answer
+/// `olleh\n`, and a multi-line expectation may be reflowed. What it will not do is accept an
+/// expectation the task never mentions — which is the whole point.
+pub fn task_states(task: &str, expect: &str) -> bool {
+    let squeeze = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let (t, e) = (squeeze(task), squeeze(expect));
+    // An empty expectation is a real thing to check for ("prints nothing") and cannot be looked up.
+    !e.is_empty() && t.contains(&e)
+}
+
 /// The arity of an example, taken from the TASK rather than from the model.
 ///
 /// The model is good at "what should this print" and bad at shell lexing, and lexing is the one
@@ -253,6 +265,17 @@ pub async fn derive_check(backend: &dyn ChatBackend, task: &str) -> Option<Strin
             (None, None) => continue,
         };
         if argv.is_empty() {
+            continue;
+        }
+        // The EXPECTATION has to come from the task too. A task that says what the program does
+        // ("print the top 3 words") without saying what it prints has no run-check in it, and a
+        // model asked for one invents it: measured 2026-08-05 on `wordcount`, where the task
+        // states no output and the derived check demanded `a 3 / c 2 / d 2` — three lines that
+        // appear nowhere, for an input file the model never read. A correct program fails that
+        // check, which is the same false negative as BUG-018 arriving through the schema's other
+        // field. `checkable: false` was the right answer and the prompt already asks for it; this
+        // is the deterministic half, because the model does not always give it.
+        if !task_states(task, exp) {
             continue;
         }
         // Arity comes from the task's own punctuation when the task states the example; the
@@ -462,6 +485,25 @@ pub fn repair_prompt_in(check: &str, output: &str, cwd: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_expectation_the_task_never_states_is_not_checked() {
+        // The measured case: `wordcount` says what the program must DO and never what it prints,
+        // and the derived check demanded three lines the task does not contain — for a data file
+        // the model never opened. A correct program fails that check forever.
+        let wordcount = "create a Rust binary that reads a text file, counts words \
+                         case-insensitively and prints the top 3 as `word count`. \
+                         Verify with `cargo run -- input.txt`.";
+        assert!(!task_states(wordcount, "a 3\nc 2\nd 2"));
+
+        // What the task DOES state is checkable, whitespace and case aside.
+        let reverse = "fix the bug: `cargo run -- hello` must print exactly `olleh`";
+        assert!(task_states(reverse, "olleh"));
+        assert!(task_states(reverse, " OLLEH "));
+        assert!(!task_states(reverse, "hello world"));
+        // An empty expectation cannot be looked up, so it is not accepted by this route.
+        assert!(!task_states(reverse, ""));
+    }
 
     #[test]
     fn arity_comes_from_the_task_not_from_the_model() {

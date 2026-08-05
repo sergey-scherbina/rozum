@@ -21,6 +21,25 @@ launchd's copy loses the race and stays down. Reported as `warn` with that sente
 `fail` the operator cannot clear is the same cry-wolf this whole item exists to remove. Who should
 own that daemon is a design question, filed rather than decided at the end of a long session.
 
+### ▶ wordcount was ours, not the model's (operator 2026-08-05: "Надия теперь способна решать задачи в матрице?" → "продолжай")
+
+Branch `feature/wordcount-regression`.
+
+The fresh matrix (7/8) left `wordcount` failing, and I reported it as the 4B model's ceiling —
+"different compile error every time". `nadia:docs/operations.md` records 4/4 on that task after the
+verification-prompt fix, so the ceiling story and the record disagreed, which is the reason to look
+rather than conclude.
+
+**The gate had invented the expected output.** The task never states what the program prints (it
+depends on a data file); the model answered `a 3 / c 2 / d 2`, and the derived check demanded it.
+No correct program can pass that, and both repair rounds went to it instead of the compile errors.
+
+- [x] **wcr-guard — DONE.** An `expect` the task does not state is dropped, deterministically, the
+  same way `task_argv_for` takes arity from the task. The check falls back to the floor.
+- [x] **wcr-measure — DONE.** 0/4 → **3/3**, all three printing `apple 3 / banana 3 / cherry 2`.
+- [x] **wcr-correct-the-record — DONE.** BUG-026 says plainly that yesterday's "model ceiling" was
+  our check, and that four DIFFERENT compile errors should have been the clue.
+
 ### ▶ Nothing tells us when a daemon dies (operator 2026-08-05: "продолжай"; promoted from BACKLOG)
 
 Branch `feature/service-liveness-watch`. Spec: `docs/specs/service-liveness.md`.
