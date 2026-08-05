@@ -5,6 +5,41 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-023 — one ended poll stream took the whole bridge down
+
+- **Status:** FIXED 2026-08-05 (`crates/rozum-meeting/src/messenger.rs`), test
+  `a_daemon_restart_is_survived_not_reported_as_failure`, checked against the old behaviour first.
+- **Found by:** reading `launchctl list` while verifying something else — `com.rozum.telegram-groups`
+  sat at exit code 1, and both bridge logs carry three `meeting daemon poll ended` exits each.
+
+`DaemonBridge::next_outbound` turned an ended poll stream into a fatal error **on purpose**: "so a
+process supervisor can restart the bridge after a daemon restart". launchd `KeepAlive` did restart
+it, so the system looked self-healing — and the price was paid by everything else in that process.
+One stream ending took down every chat the bridge serves, the group-registry watcher and nadia's
+result watcher; until that same morning it also killed `nadia serve` and every running agent
+(BUG-019's sibling, fixed in `nadia-serve-lifetime`).
+
+Now the bridge reconnects with bounded backoff (~50 s of trying), says so once, and still gives up
+if the daemon stays gone — a dependency that never comes back must not look healthy.
+
+**Two things the test found that review had not:**
+
+- **The reconnect replayed what had already been delivered.** Carrying the poll cursor across the
+  reconnect is not enough: the delta is not exclusive at both ends, and the last message before the
+  outage arrived a second time. The bridge now filters by the high-water it has actually handed to
+  the messenger, so "a daemon blink does not repeat what I already read" is a property of the
+  bridge rather than of cursor arithmetic.
+- **Setting that cursor on a FIRST connection replayed the whole room.** `enter_named` leaves the
+  cursor at the room's head, which is exactly what a new connection wants; overwriting it with
+  `None` made the poll start at the beginning of the day file. Caught by the neighbouring test that
+  exists for that rule — the one place review had already thought about.
+
+Latency worth knowing: a daemon that dies without closing its sockets is noticed only when the
+long poll times out (30 s). Nothing is lost — the gap is delivered late, because the resumed poll
+starts from the bridge's own high-water — but it is not instant.
+
+---
+
 ## BUG-022 — the message named the sandbox root while the work was elsewhere
 
 - **Status:** FIXED 2026-08-05 (`crates/rozum-meeting/src/telegram/nadia.rs`), test

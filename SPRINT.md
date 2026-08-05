@@ -24,16 +24,16 @@ go down because ONE poll stream ended.
 Until this morning it also killed `nadia serve` and every agent with it (fixed in
 `nadia-serve-lifetime` — that is how this got noticed at all).
 
-Narrow but real残: `collect_finished` removes a watch entry from disk and then sends the message.
+Narrow but real: `collect_finished` removes a watch entry from disk and then sends the message.
 A process that dies in that window loses that result for good; every other pending result survives,
 because the watch list is on disk and the next process re-reads it.
 
-- [ ] **bdr-reconnect** — an ended poll stream reconnects with bounded backoff instead of ending
+- [x] **bdr-reconnect — DONE.** — an ended poll stream reconnects with bounded backoff instead of ending
   the process. A daemon restart is an ordinary event on this machine (`spawn_daemon` exists for
   exactly that reason); it must not read as a bridge failure.
-- [ ] **bdr-loud** — a reconnect says so once, and a reconnect that keeps failing still ends the
+- [x] **bdr-loud — DONE.** — a reconnect says so once, and a reconnect that keeps failing still ends the
   process. Retrying forever in silence is how a dead dependency looks healthy.
-- [ ] **bdr-verify** — unit test with a stream that ends once, then LIVE: restart the meeting
+- [x] **bdr-verify — tests DONE** (the test kills a daemon under a connected bridge and was checked against the old fatal behaviour first — it fails there with "an ended poll must not be reported as a bridge failure"). LIVE check pending. Was: unit test with a stream that ends once, then LIVE: restart the meeting
   daemon under both bridges and watch them stay up and keep delivering.
 
 ### ▶ An agent's record must outlive the process that ran it (operator 2026-08-05: "Да, делай" → "Второе целиком")

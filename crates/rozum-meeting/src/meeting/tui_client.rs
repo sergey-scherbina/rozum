@@ -21,7 +21,19 @@ use super::store::{
 };
 
 const T: Duration = Duration::from_secs(5);
-const WAIT_T: Duration = Duration::from_secs(30);
+/// How long one `wait_my_turn` may hang before the client gives up on it.
+///
+/// This is also how long a bridge can stay deaf after the daemon dies: the poll notices only when
+/// its request fails. A real process death closes the socket and is noticed at once; a daemon that
+/// stops answering without closing is noticed here. `ROZUM_MEETING_WAIT_SECS` exists so a test can
+/// shorten the window — production never sets it, and 30 s is the value it has always had.
+fn wait_timeout() -> Duration {
+    std::env::var("ROZUM_MEETING_WAIT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30))
+}
 
 type ClientResult<U> = Result<U, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -331,6 +343,15 @@ impl MeetingClient {
     /// and streams new messages — so the UI loop never has to cancel an
     /// in-flight `wait_my_turn` (which would leak a daemon long-poll). Returns the
     /// receiver of new-message batches + the task handle (abort it on switch/quit).
+    /// Start the next poll from a known high-water instead of from "now".
+    ///
+    /// A reconnecting caller has already delivered turns up to some `(date, n)`; without this the
+    /// fresh poll begins at the room's current head and everything said during the outage is
+    /// skipped. The files are on disk either way — this is what lets the delta cover the gap.
+    pub fn set_cursor(&mut self, cursor: Option<(String, u64)>) {
+        self.cursor = cursor;
+    }
+
     pub fn spawn_poll(&self) -> (mpsc::Receiver<Vec<StoredTurn>>, JoinHandle<()>) {
         let (tx, rx) = mpsc::channel::<Vec<StoredTurn>>(64);
         let (Some(spec), Some(root)) = (self.join_spec.clone(), self.room_root.clone()) else {
@@ -389,7 +410,7 @@ impl MeetingClient {
         };
         let r = self
             .conn
-            .call_tool("meeting.wait_my_turn", since, WAIT_T)
+            .call_tool("meeting.wait_my_turn", since, wait_timeout())
             .await?;
         let v = tool_result_text_json(&r).ok_or("bad wait result")?;
         let still_waiting = v
@@ -511,7 +532,7 @@ async fn poll_loop(
             Some((d, n)) => json!({ "since_date": d, "since_n": n }),
             None => json!({}),
         };
-        let Ok(r) = conn.call_tool("meeting.wait_my_turn", since, WAIT_T).await else {
+        let Ok(r) = conn.call_tool("meeting.wait_my_turn", since, wait_timeout()).await else {
             return; // socket died → end the stream (UI can respawn)
         };
         if r.get("isError").and_then(Value::as_bool) == Some(true) {

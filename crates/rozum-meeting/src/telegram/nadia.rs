@@ -354,7 +354,7 @@ pub fn handle(cmd: Cmd, caps: Caps, chat_id: i64) -> String {
         Ok(w) => w,
         Err(e) => return e,
     };
-    match request(&cmd, chat_id, workspace.as_deref()) {
+    match request(&cmd, workspace.as_deref()) {
         Ok(body) => {
             // Remember who is waiting for this one, so its result can be delivered instead of
             // polled for. Recorded here — where the id and the chat are both known — rather
@@ -744,16 +744,16 @@ fn spawn_workspace(cmd: &Cmd, chat_id: i64) -> Result<Option<std::path::PathBuf>
     Ok(Some(w))
 }
 
+/// Send one command to `nadia serve`. The workspace is decided by [`spawn_workspace`] and passed
+/// in — this function does not ask the chat again, because two lookups of one fact is how the ACK
+/// came to name a different directory than the agent was started in (BUG-022).
 fn request(
     cmd: &Cmd,
-    chat_id: i64,
     workspace: Option<&std::path::Path>,
 ) -> Result<serde_json::Value, String> {
     let b = base();
     match cmd {
         Cmd::Spawn(task) => {
-            // The chat's project, when it has chosen one: an agent started from a phone is
-            // almost always meant for a repo, not for nadia's own scratch directory.
             let mut body = serde_json::json!({ "task": task });
             if let Some(w) = workspace {
                 body["workspace"] = serde_json::json!(w.to_string_lossy());

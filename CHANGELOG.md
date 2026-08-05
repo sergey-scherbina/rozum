@@ -1,5 +1,19 @@
 # Changelog
 
+## bridge-daemon-reconnect — a blinking daemon is not a bridge failure
+Completed: 2026-08-05
+
+Both Telegram bridges had been exiting with code 1 whenever the meeting daemon's poll stream ended
+— by design, so that launchd would restart them. The design was self-healing and expensive: one
+ended stream took down every chat that bridge serves, the group-registry watcher and nadia's result
+watcher, and (until this morning) `nadia serve` with every running agent.
+
+The bridge now reconnects with bounded backoff, resumes from the high-water it has actually
+delivered, and gives up only if the daemon stays gone. Two defects the test found on the way: the
+reconnect replayed the last message (fixed by filtering on the delivered high-water rather than
+trusting cursor arithmetic), and setting that cursor on a first connection replayed the entire room
+(caught by the neighbouring test that exists for exactly that rule). BUG-023.
+
 ## nadia-serve-lifetime — an agent's record outlives the process that ran it
 Completed: 2026-08-05
 Spec: `docs/specs/nadia-serve-lifetime.md`
