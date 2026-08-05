@@ -3677,18 +3677,26 @@ async fn run_meetings_start(foreground: bool) {
     }
 }
 
-/// Is this process running under launchd's supervision? (BUG-025)
+/// The launchd job that owns the meeting daemon. Must match the plist `Label`; `doctor.rs` probes
+/// the same string.
+const MEETING_DAEMON_JOB: &str = "com.rozum.meeting-daemon";
+
+/// Is this process THE meeting daemon's launchd job? (BUG-025)
 ///
-/// launchd sets `XPC_SERVICE_NAME` to the job label in everything it starts; an interactive shell
-/// and a client-spawned child carry none. An explicit `--supervise` flag would have been the
-/// obvious alternative and was rejected: the plists are ALREADY INSTALLED on every host, so a flag
-/// only takes effect after a service reinstall — the fix would ship and quietly not apply. This
-/// marker fixes every existing installation the moment the binary is replaced.
+/// launchd sets `XPC_SERVICE_NAME` to the job label. The test must be for THAT label and nothing
+/// else, and the first version of this function got it wrong in a way worth keeping written down:
+/// it accepted any non-empty value.
 ///
-/// `getppid() == 1` cannot be used: a detached client-spawned daemon is reparented to pid 1 too,
-/// so it answers the wrong question.
+/// Two things break that. macOS sets `XPC_SERVICE_NAME=0` — the string "0", not empty — on ordinary
+/// processes, so every interactive `meetings start --foreground` decided it was supervised and
+/// waited forever instead of exiting. And the variable is INHERITED, so a client started by some
+/// OTHER rozum job carries `com.rozum.gateway` and would have made the same wrong call — which is
+/// exactly the process leak the conditional exists to prevent.
+///
+/// `getppid() == 1` cannot be used instead: a detached client-spawned daemon is reparented to pid 1
+/// too, so it answers a different question.
 fn supervised_by_launchd(xpc_service_name: Option<String>) -> bool {
-    xpc_service_name.is_some_and(|v| !v.trim().is_empty())
+    xpc_service_name.as_deref().map(str::trim) == Some(MEETING_DAEMON_JOB)
 }
 
 #[cfg(test)]
@@ -3706,10 +3714,18 @@ mod supervise_tests {
         // No marker: an interactive run, or the child of `spawn_detached_meetings` that lost the
         // race. It must exit, or every lost race leaves an idle standby forever.
         assert!(!supervised_by_launchd(None));
-        // A set-but-empty value is not a supervisor. Same reasoning as the REST secret in
-        // BUG-024, where a blank value had to be treated as absent rather than as a secret.
         assert!(!supervised_by_launchd(Some(String::new())));
         assert!(!supervised_by_launchd(Some("   ".to_string())));
+
+        // THE TWO THAT THE FIRST VERSION GOT WRONG, and it shipped. This test used to assert
+        // "non-empty means supervised", which is a rule, not a fact — and it was the wrong rule,
+        // so the test passed while an interactive run hung forever against a live daemon.
+        //
+        // macOS sets this to the literal string "0" on an ordinary process:
+        assert!(!supervised_by_launchd(Some("0".to_string())));
+        // ...and the variable is inherited, so a client started under a DIFFERENT rozum job
+        // carries that job's label. It is not this daemon's supervisor and must not wait:
+        assert!(!supervised_by_launchd(Some("com.rozum.gateway".to_string())));
     }
 }
 
