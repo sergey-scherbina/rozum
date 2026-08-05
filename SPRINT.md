@@ -9,6 +9,35 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
+### ▶ Nothing tells us when a daemon dies (operator 2026-08-05: "продолжай"; promoted from BACKLOG)
+
+Branch `feature/service-liveness-watch`. Spec: `docs/specs/service-liveness.md`.
+
+Promoted because **today produced three more instances of the same failure shape**, all invisible:
+
+1. Both bridges sat dead at `launchctl` exit `-9` after a deploy. Nothing said so — I found it by
+   reading `launchctl list` for an unrelated reason, and the operator would have found it by
+   writing to a bot that never answered.
+2. Both bridges had been exiting on every meeting-daemon blip (three each in their logs) and being
+   restarted by `KeepAlive`. Self-healing, invisible, and until this morning it took `nadia serve`
+   and every running agent with it.
+3. `nadia serve` died on every bridge restart, losing every agent's record. The only symptom was
+   that the next agent came back as `#1`.
+
+The original entry's own words still hold: **a KeepAlive job that can never exec is
+indistinguishable from a healthy one unless you probe what it is supposed to serve.**
+
+- [ ] **slw-doctor** — `rozum doctor --services`: the `com.rozum.*` roster, whether each job is
+  loaded AND running, its last exit, and — where the service serves something — whether the
+  ENDPOINT answers. `rozum doctor` already exists with a Check/report model; this is a section in
+  it, not a new command.
+- [ ] **slw-report-not-restart** — it reports; it does not restart anything. Tonight's other
+  lesson: a watchdog that acts on a service kills the operator's work in flight. The one place it
+  may act is the deploy, which already knows what it just stopped.
+- [ ] **slw-periodic** — a `StartInterval` job that runs it and posts to the rozum room ON
+  TRANSITION to bad, so it lands where the operator and the agents already look. Every tick would
+  be noise; a transition is news.
+
 ### ▶ Two red tests on master, in generated code (operator 2026-08-05: "Да почини")
 
 Branch `feature/meeting-tui-red-tests`. Cross-repo: the CAUSE is in `../scalascript`
