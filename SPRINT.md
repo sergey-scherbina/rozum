@@ -2900,7 +2900,7 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   fresh binary was installed the same way the deploy script builds it. Backups of both binaries are
   in `~/.rozum/attic/`.
   Eleven upstream capabilities/fixes landed in scalascript along the way, nine written here.
-- [ ] **ucc-meetings-in-tk (superseded entry below, kept for its findings)** — ONE `.ssc` source emitting both the UCC web meeting client and the
+- [x] **ucc-meetings-in-tk (superseded entry below, kept for its findings)** — DONE (`713b268`); this box was never ticked when the work landed. — ONE `.ssc` source emitting both the UCC web meeting client and the
   native terminal one, so `rozum meetings attach` stops being hand-written Rust and the two cannot
   drift. Claimed 2026-08-04 (`.work/active/ucc-meetings-in-tk.claim`), branch
   `feature/ucc-meetings-in-tk`, worktree `.worktrees/feature/ucc-meetings-in-tk`.

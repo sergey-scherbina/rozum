@@ -1901,7 +1901,7 @@ revive it.
   `docs/specs/x86-native-runtime.md`; epic + phases P1–P5 in `BACKLOG.md`
   (`x86-native-runtime`).
 
-- [ ] **bugs-ledger-id-gate** — nothing checks that a bug id is unique, and it already bit.
+- [x] **bugs-ledger-id-gate** — DONE 2026-08-05, `crates/rozum-core/src/bug_ledger.rs`. It is a LIB test, not a script: CI runs `cargo test --workspace --lib`, and a guard that does not run reads as coverage while providing none. Checks uniqueness, contiguity, newest-first order read from the FILE (not a sorted copy), and heading shape; the duplicate case is pinned in the exact shape it happened. While wiring it up: CI ran no BINARY tests at all — 64 of them, including the whole gateway bin suite — so `cargo test --workspace --bins` was added after verifying it green. Original entry:
   **Why:** two different bugs were both filed as `BUG-017` (nadia's jail, 2026-08-04; the meeting
   daemon's REST secret, 2026-08-05). Renumbering after the fact is the expensive kind of fix: the
   wrong number had already reached commit messages, a spec, the room and my own notes, and every one

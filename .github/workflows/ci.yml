@@ -45,6 +45,13 @@ jobs:
         run: cargo build --workspace --bins
       - name: Test every workspace library (shipped default features)
         run: cargo test --workspace --lib
+      # `--bins` is the same lesson one level up. `--lib` builds and runs library suites only, so
+      # every `#[cfg(test)]` inside a BINARY was invisible here — 64 tests across the workspace's
+      # bins, including the whole `rozum-gateway` bin suite, ran on nobody's machine but the author's.
+      # Verified green across the workspace before this line was added, so it fails on a regression
+      # rather than on a backlog.
+      - name: Test every workspace binary (shipped default features)
+        run: cargo test --workspace --bins
 
   linux-core:
     name: linux — portable core (no native backends)
