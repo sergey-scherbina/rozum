@@ -1,0 +1,6 @@
+feature/wordcount-regression 2026-08-05T10:51:02Z
+agent: claude-code
+heartbeat: 2026-08-05T10:51:02Z
+status: in-progress
+done-so-far: 0/3 today; docs record 4/4 after the verification-prompt fix — so this is a regression, not a model limit
+next: isolate — same task, same model, look before guessing
