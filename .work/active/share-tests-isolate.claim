@@ -1,0 +1,6 @@
+feature/share-tests-isolate 2026-08-05T09:24:01Z
+agent: claude-code
+heartbeat: 2026-08-05T09:24:01Z
+status: in-progress
+done-so-far: measured — 7 failures single-threaded, 8/7/10 across parallel runs, on master, unrelated to any branch
+next: find what real state they read
