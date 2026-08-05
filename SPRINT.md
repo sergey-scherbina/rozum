@@ -770,7 +770,29 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   well-tested WORKING delivery code whose only gain is organizational; the corpus + the module grouping
   already capture the value. Revisit only if a new malformed form needs a structurally different handler.
 
-- [~] **gw-monolith-decompose** — the CLEANLY-SEPARABLE (zero-back-reference) leaf clusters are extracted;
+- [~] **gw-monolith-decompose** — **2026-08-05: one more leaf came out, and it was the biggest.**
+  `gateway.rs` **4386 → 3525 (−20%)**, 114/114 gateway tests green, no warnings, in two steps:
+  `errors.rs` (36 lines — `error_json` + `chat_error_response`, already used by FOUR modules, so a
+  shared utility that could only be reached by importing the largest file in the crate; this is the
+  error-response module this entry asked for) and `switchboard.rs` (873 lines — the resident-model
+  manager: primary swap cell, warm map, drain, admission). `switchboard.rs` references
+  `crate::gateway` **zero** times; its one dependency is `errors`, which is why that step came first.
+  **The entry said the remaining clusters were not leaves. For this one that was wrong** — measured
+  before touching anything: no references to `GatewayState`/`ServeConfig`/`SwitchReq`/`Activity`, and
+  nothing outside `gateway.rs` naming `Switchboard`.
+  **What the measurement got wrong, and it is the reusable part:** I checked the names I had guessed.
+  The block also held `ChatLease` — imported by three OTHER modules — and free functions
+  (`unload_idle_secs`, `published_reservation`) the compiler found for me. A leaf test that greps a
+  hand-written list of names is a test of the list.
+  **What the extraction made visible:** the server builds three of these structs by literal and calls
+  18 of the component's 31 methods. That coupling existed before and was invisible; the `pub(crate)`
+  markers now ARE the interface. Narrowing it (a constructor instead of a 22-field literal) is the
+  natural follow-up and was deliberately NOT folded in — an extraction that also redesigns what it
+  moves is reviewable as neither.
+  **Remaining** (unchanged, still architectural): request-mapping needs gateway-local wire DTOs,
+  auto-context calls into streaming types, the async handlers are coupled to `GatewayState`, and
+  `control.rs` (4309) is untouched.
+  Previously: the CLEANLY-SEPARABLE (zero-back-reference) leaf clusters are extracted;
   the rest is an architectural refactor, not a mechanical peel. `gateway.rs` was **6841 lines**; now **5688**
   (−17%) across 3 modules, **all 106 gateway tests green** at every step (behaviour-preserving):
   `codex_patch.rs` (~780 lines — the apply_patch/tool-arg rewriters), `loopbreak.rs` (~265 — the stuck-loop
