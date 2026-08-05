@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Periodic service liveness (docs/specs/service-liveness.md).
+
+  Runs `rozum doctor --services` every 5 minutes and posts to the rozum room ONLY when a service
+  changes verdict. Silence means nothing changed; a line every tick would be a line nobody reads,
+  which is the same failure as no line at all.
+
+  It REPORTS. It does not restart anything — a watchdog that acts on a service does it while
+  somebody is mid-task, and on 2026-08-05 that cost two agents' work in flight.
+
+  Install:
+    cp clients/control/launchd/com.rozum.doctor.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.rozum.doctor.plist
+  Remove:
+    launchctl bootout gui/$UID/com.rozum.doctor
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.rozum.doctor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sergiy/.cargo/bin/rozum-gateway</string>
+    <string>doctor</string>
+    <string>--services</string>
+    <string>--post-room</string>
+    <string>rozum</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/sergiy/.rozum-doctor.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/sergiy/.rozum-doctor.log</string>
+</dict>
+</plist>

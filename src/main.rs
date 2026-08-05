@@ -415,6 +415,15 @@ enum Command {
         /// Treat warnings as a failing preflight.
         #[arg(long)]
         strict: bool,
+        /// Also report every `com.rozum.*` launchd job and whether the endpoint it exists to serve
+        /// answers. A job that cannot exec looks identical to a healthy one until you ask
+        /// (`docs/specs/service-liveness.md`).
+        #[arg(long)]
+        services: bool,
+        /// Post to this room ONLY when a service changes verdict — for the periodic job. Silence
+        /// means nothing changed; every tick would be noise.
+        #[arg(long, requires = "services")]
+        post_room: Option<String>,
     },
 
     /// Manage the global room registry (~/.local/state/rozum/rooms.json).
@@ -1544,7 +1553,9 @@ async fn main() {
             IdentityAction::Whoami => run_identity_whoami(),
             IdentityAction::SetName { name } => run_identity_set_name(&name),
         },
-        Some(Command::Doctor { web_url, strict }) => run_doctor(web_url, strict).await,
+        Some(Command::Doctor { web_url, strict, services, post_room }) => {
+            run_doctor(web_url, strict, services, post_room).await
+        }
         Some(Command::Rooms { action }) => match action {
             RoomsAction::Prune => run_rooms_prune(),
         },
@@ -1932,8 +1943,36 @@ async fn run_messenger(action: MessengerAction) {
     }
 }
 
-async fn run_doctor(web_url: Option<String>, strict: bool) {
-    let report = rozum::doctor::run(rozum::doctor::DoctorOptions { web_url, strict }).await;
+async fn run_doctor(
+    web_url: Option<String>,
+    strict: bool,
+    services: bool,
+    post_room: Option<String>,
+) {
+    let report = rozum::doctor::run(rozum::doctor::DoctorOptions {
+        web_url,
+        strict,
+        services,
+        post_room: post_room.clone(),
+    })
+    .await;
+    // On transition only. The posting is a plain `meetings post`, so this adds no new way into a
+    // room and inherits whatever identity that path already uses.
+    if let Some(room) = post_room {
+        for line in rozum::doctor::transitions(&report) {
+            let out = std::process::Command::new(std::env::current_exe().unwrap_or_default())
+                .args(["meetings", "post", "--room", &room, "--as", "doctor", &line])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => eprintln!("doctor: posted to {room}: {line}"),
+                Ok(o) => eprintln!(
+                    "doctor: could not post to {room}: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ),
+                Err(e) => eprintln!("doctor: could not post to {room}: {e}"),
+            }
+        }
+    }
     print!("{}", report.render());
     if report.should_fail(strict) {
         std::process::exit(1);

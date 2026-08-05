@@ -1,5 +1,26 @@
 # Changelog
 
+## service-liveness-watch — asking a service whether it is doing its job
+Completed: 2026-08-05
+Spec: `docs/specs/service-liveness.md`
+
+Promoted from the backlog because today produced three more instances of the shape BUG-013 named:
+both bridges sat dead at exit `-9` after a deploy, both had been exiting on every meeting-daemon
+blip, and `nadia serve` died on every bridge restart. None of it was visible anywhere.
+
+`rozum doctor --services` reports every `com.rozum.*` job — loaded, running, last exit — and then
+asks the endpoint it exists to serve. A `KeepAlive` job that can never exec is indistinguishable
+from a healthy one until you ask. Services with nothing to ask (the bridges talk outward, the pools
+hold a socket) are `skip`, not green: a probe that cannot fail is not evidence.
+
+It reports and does not restart. `--post-room` posts to a room only when a service CHANGES verdict,
+for a `StartInterval` job; the plist is in the tree, deliberately not installed.
+
+The first live runs found two defects in the check itself — `mcp-http` was probed with a GET the MCP
+proxy answers 404 to (it speaks MCP now), and transition lines quoted the wrong check's detail
+because the service rows shared names with the demo-path rows (`svc:*` now) — and one on the machine:
+launchd's meeting daemon is down while a bridge-spawned one serves, filed as `meeting-daemon-ownership`.
+
 ## meeting-tui-red-tests — a generated test whose premise nobody checked
 Completed: 2026-08-05
 

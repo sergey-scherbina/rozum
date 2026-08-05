@@ -72,6 +72,12 @@ impl Check {
 pub struct DoctorOptions {
     pub web_url: Option<String>,
     pub strict: bool,
+    /// Also report on the `com.rozum.*` launchd jobs and the endpoints they serve
+    /// (`docs/specs/service-liveness.md`).
+    pub services: bool,
+    /// Post a line to this room when a service CHANGES verdict, and stay silent otherwise. For the
+    /// periodic job: every tick would be noise, a transition is news.
+    pub post_room: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -136,6 +142,9 @@ pub async fn run(options: DoctorOptions) -> DoctorReport {
     checks.push(check_meeting_daemon().await);
     checks.push(check_gateway().await);
     checks.extend(check_sandbox());
+    if options.services {
+        checks.extend(check_services().await);
+    }
     match options.web_url.as_deref() {
         Some(url) if !url.trim().is_empty() => checks.extend(check_web_url(url).await),
         _ => checks.push(Check::skip(
@@ -144,6 +153,249 @@ pub async fn run(options: DoctorOptions) -> DoctorReport {
         )),
     }
     DoctorReport { checks }
+}
+
+/// Remember the last verdict per service, and return only what CHANGED.
+///
+/// A line every five minutes is a line nobody reads, which is the same failure as no line at all
+/// arrived at from the other side. State lives next to the rest of rozum's state; a missing file
+/// means "first run", and a first run announces nothing — it would otherwise shout the whole
+/// roster at whoever installs the job.
+pub fn transitions(report: &DoctorReport) -> Vec<String> {
+    let path = crate::meeting::rozum_state_dir().join("service-liveness.json");
+    let previous: std::collections::HashMap<String, String> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let now: std::collections::HashMap<String, String> = report
+        .checks
+        .iter()
+        .filter(|c| SERVICES.iter().any(|(_, n, _, _)| *n == c.name))
+        .map(|c| (c.name.to_string(), c.status.label().to_string()))
+        .collect();
+
+    let mut lines = Vec::new();
+    if !previous.is_empty() {
+        let mut names: Vec<&String> = now.keys().collect();
+        names.sort();
+        for name in names {
+            let before = previous.get(name).map(String::as_str).unwrap_or("unknown");
+            let after = now[name].as_str();
+            if before == after {
+                continue;
+            }
+            let detail = report
+                .checks
+                .iter()
+                .find(|c| c.name == name)
+                .map(|c| c.detail.as_str())
+                .unwrap_or("");
+            lines.push(match (before, after) {
+                (_, "ok") => format!("✅ {name}: back ({before} → ok) — {detail}"),
+                _ => format!("⚠️ {name}: {before} → {after} — {detail}"),
+            });
+        }
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(text) = serde_json::to_vec_pretty(&now) {
+        let _ = std::fs::write(&path, text);
+    }
+    lines
+}
+
+/// What this machine runs, and what each of those is supposed to answer.
+///
+/// `endpoint: None` is deliberate and is reported as `skip`: the bridges talk outward to Telegram
+/// and the participant pools talk to the daemon over a socket they hold open, so there is nothing
+/// here to ask. Inventing a probe that cannot fail would be worse than saying "not probed" — see
+/// `docs/specs/service-liveness.md`.
+/// How to ask a service whether it is doing its job.
+#[derive(Clone, Copy)]
+enum Probe {
+    /// A plain GET whose status is the answer.
+    Get(&'static str),
+    /// An MCP `initialize` over HTTP. The proxy answers 404 to every path but `/mcp` and 406 to a
+    /// GET without the streaming `Accept`, so a "does the port respond" probe reports a healthy
+    /// server as broken — measured on the first live run of this check. Speaking its protocol is
+    /// the only probe that means anything.
+    McpInitialize(&'static str),
+    /// Nothing to ask: the bridges talk outward to Telegram, the pools hold a socket to the
+    /// daemon. Reported as `skip`, because inventing a probe that cannot fail is worse than
+    /// admitting there is none (`docs/specs/service-liveness.md`).
+    None,
+}
+
+/// `(launchd label, row name, probe, what it serves)`.
+///
+/// The row name is `svc:*` and not the bare service name ON PURPOSE: `rozum doctor` already has
+/// checks called `gateway` and `meeting-daemon` (the demo-path section), and sharing a name made
+/// the transition line quote the wrong check's detail — measured on the first live post, where a
+/// service transition was reported with the demo check's text. Two rows with one name are two
+/// facts a lookup cannot tell apart.
+const SERVICES: &[(&str, &str, Probe, &str)] = &[
+    ("com.rozum.gateway", "svc:gateway", Probe::Get("http://127.0.0.1:8089/v1/models"), "the resident model"),
+    ("com.rozum.ucc-control", "svc:ucc-control", Probe::Get("http://127.0.0.1:8411/control/auth/status"), "the control plane"),
+    ("com.rozum.meeting-daemon", "svc:meeting-daemon", Probe::Get("http://127.0.0.1:8401/rooms"), "meeting rooms over REST"),
+    ("com.rozum.meeting-ssc", "svc:meeting-ssc", Probe::Get("http://127.0.0.1:8405/"), "the meeting PWA"),
+    ("com.rozum.mcp-http", "svc:mcp-http", Probe::McpInitialize("http://127.0.0.1:8779/mcp"), "MCP over HTTP"),
+    ("com.rozum.telegram", "svc:telegram", Probe::None, "the Telegram bridge (private)"),
+    ("com.rozum.telegram-groups", "svc:telegram-groups", Probe::None, "the Telegram bridge (groups)"),
+    ("com.rozum.assistant", "svc:assistant", Probe::None, "the participant pool"),
+    ("com.rozum.assistant-groups", "svc:assistant-groups", Probe::None, "the participant pool (groups)"),
+];
+
+/// One line per service: is the job running, and does the thing it serves answer.
+///
+/// The four-day outage this exists for (BUG-013) had a job that was LOADED, was being restarted by
+/// `KeepAlive` 36,000 times, and served nothing. `launchctl` alone cannot tell that from health;
+/// only asking the endpoint can.
+async fn check_services() -> Vec<Check> {
+    let jobs = launchctl_jobs();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let mut out = Vec::new();
+    for (label, name, probe, what) in SERVICES {
+        out.push(check_service(&jobs, label, name, *probe, what, &client).await);
+    }
+    out
+}
+
+/// `label -> (pid, last exit status)`. `pid` is `None` when the job is loaded but not running,
+/// which is exactly the state two bridges sat in for several minutes today while everything else
+/// looked fine.
+fn launchctl_jobs() -> std::collections::HashMap<String, (Option<i64>, i64)> {
+    let Ok(out) = Command::new("launchctl").arg("list").stderr(Stdio::null()).output() else {
+        return std::collections::HashMap::new();
+    };
+    parse_launchctl(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Split out from the process call so the shape can be tested: `-` in the PID column is the state
+/// that matters (loaded, not running) and it is the one a bare exit code hides.
+fn parse_launchctl(text: &str) -> std::collections::HashMap<String, (Option<i64>, i64)> {
+    let mut map = std::collections::HashMap::new();
+    for line in text.lines().skip(1) {
+        let mut f = line.split_whitespace();
+        let (Some(pid), Some(status), Some(label)) = (f.next(), f.next(), f.next()) else {
+            continue;
+        };
+        if !label.starts_with("com.rozum.") {
+            continue;
+        }
+        map.insert(
+            label.to_string(),
+            (pid.parse::<i64>().ok(), status.parse::<i64>().unwrap_or(0)),
+        );
+    }
+    map
+}
+
+
+async fn check_service(
+    jobs: &std::collections::HashMap<String, (Option<i64>, i64)>,
+    label: &'static str,
+    name: &'static str,
+    probe: Probe,
+    what: &str,
+    client: &reqwest::Client,
+) -> Check {
+    let Some((pid, last_exit)) = jobs.get(label).copied() else {
+        return Check::skip(name, format!("not installed on this machine ({label})"));
+    };
+    let Some(pid) = pid else {
+        // The job is down — but something else may be serving in its place. Measured the first day
+        // this check existed: `com.rozum.meeting-daemon` was not running while `:8401` answered,
+        // because a bridge had spawned its own daemon on demand and won the socket. Calling that
+        // `fail` would be a red the operator cannot clear; calling it `ok` would hide that nothing
+        // will restart it. It is its own state, and it says which.
+        let served = match probe {
+            Probe::None => None,
+            Probe::Get(u) => client.get(u).send().await.ok().map(|r| r.status().as_u16()),
+            Probe::McpInitialize(u) => mcp_initialize(client, u).await.ok().map(|_| 200),
+        };
+        return match served {
+            Some(code) => Check::warn(
+                name,
+                format!(
+                    "launchd's copy is NOT running (last exit {last_exit}), yet {what} answers \
+                     ({code}) — something unmanaged is serving it"
+                ),
+                format!(
+                    "find it (pgrep -f {name}) and decide who owns it: while launchd's copy is \
+                     down, nothing restarts this if the unmanaged one dies"
+                ),
+            ),
+            None => Check::fail(
+                name,
+                format!("loaded but NOT running (last exit {last_exit}) — {what} is down"),
+                format!("launchctl bootout gui/$UID/{label}; launchctl bootstrap gui/$UID ~/Library/LaunchAgents/{label}.plist"),
+            ),
+        };
+    };
+    let url = match probe {
+        // No endpoint to ask. Say what IS known and do not dress it up as health.
+        Probe::None => {
+            return Check::skip(name, format!("running (pid {pid}), no endpoint to probe — {what}"))
+        }
+        Probe::Get(u) | Probe::McpInitialize(u) => u,
+    };
+    let answered = match probe {
+        Probe::Get(u) => match client.get(u).send().await {
+            // 401 is an answer: the control plane demanding a session is proof it is alive.
+            Ok(r) if r.status().is_success() || r.status().as_u16() == 401 => {
+                Ok(format!("answers {}", r.status().as_u16()))
+            }
+            Ok(r) => Err(format!("answered {}", r.status().as_u16())),
+            Err(e) => Err(format!("did not answer ({e})")),
+        },
+        Probe::McpInitialize(u) => mcp_initialize(client, u).await,
+        Probe::None => unreachable!("handled above"),
+    };
+    match answered {
+        Ok(detail) => Check::ok(name, format!("running (pid {pid}), {url} {detail}")),
+        // The BUG-013 shape exactly: the process table says yes, the service says nothing.
+        Err(why) => Check::fail(
+            name,
+            format!("running (pid {pid}) but {url} {why} — {what} is not being served"),
+            format!("a job that cannot serve is indistinguishable from a healthy one here — read its log, then bootout+bootstrap {label}"),
+        ),
+    }
+}
+
+/// Speak MCP at it: an `initialize` whose reply carries a `serverInfo` is the service doing its
+/// actual job, which is what this check is for.
+async fn mcp_initialize(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "rozum-doctor", "version": "1"}
+        }
+    });
+    let resp = client
+        .post(url)
+        .header("accept", "application/json, text/event-stream")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("did not answer ({e})"))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    if text.contains("serverInfo") {
+        let name = text
+            .split("\"name\":\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("mcp");
+        Ok(format!("speaks MCP ({name})"))
+    } else {
+        Err(format!("answered {status} but not with an MCP initialize result"))
+    }
 }
 
 async fn check_meeting_daemon() -> Check {
@@ -458,6 +710,54 @@ fn join_url(base: &str, path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two states `launchctl list` prints that this check exists to tell apart.
+    #[test]
+    fn a_loaded_job_that_is_not_running_is_not_a_running_one() {
+        // Real output, including the shapes that bit us: `-` for a job that is loaded and dead,
+        // and a negative last-exit for one launchd had to SIGKILL.
+        let jobs = parse_launchctl(
+            "PID\tStatus\tLabel\n             83185\t0\tcom.rozum.gateway\n             -\t0\tcom.rozum.meeting-daemon\n             -\t-9\tcom.rozum.telegram\n             1234\t0\tcom.apple.something\n",
+        );
+        assert_eq!(jobs.get("com.rozum.gateway"), Some(&(Some(83185), 0)));
+        // Loaded, exit code 0, and DOWN. A reader who only looks at the status column sees a zero
+        // and moves on — that is how a four-day outage stayed invisible (BUG-013).
+        assert_eq!(jobs.get("com.rozum.meeting-daemon"), Some(&(None, 0)));
+        // Killed by launchd, which is what both bridges looked like after a bad install today.
+        assert_eq!(jobs.get("com.rozum.telegram"), Some(&(None, -9)));
+        // Not ours, not our business.
+        assert!(!jobs.contains_key("com.apple.something"));
+    }
+
+    /// Every service either has a probe or says out loud that it has none.
+    #[test]
+    fn no_service_is_reported_healthy_on_the_process_table_alone() {
+        for (label, name, probe, what) in SERVICES {
+            assert!(label.starts_with("com.rozum."), "{label}");
+            assert!(name.starts_with("svc:"), "{name} must not collide with a demo-path check");
+            assert!(!what.is_empty(), "{label} must say what it serves");
+            if let Probe::Get(u) | Probe::McpInitialize(u) = probe {
+                assert!(u.starts_with("http://127.0.0.1:"), "{label} probes off-machine: {u}");
+            }
+        }
+        // And the ones with no probe are exactly the ones that serve nothing locally: a bridge
+        // talks outward to Telegram, a pool holds a socket to the daemon. If this list grows, the
+        // new entry needs a probe or a reason.
+        let unprobed: Vec<&str> = SERVICES
+            .iter()
+            .filter(|(_, _, p, _)| matches!(p, Probe::None))
+            .map(|(l, _, _, _)| *l)
+            .collect();
+        assert_eq!(
+            unprobed,
+            vec![
+                "com.rozum.telegram",
+                "com.rozum.telegram-groups",
+                "com.rozum.assistant",
+                "com.rozum.assistant-groups"
+            ]
+        );
+    }
 
     #[test]
     fn strict_mode_fails_on_warning() {

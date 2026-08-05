@@ -9,6 +9,18 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
+**Two defects the first live runs found, both in the check itself:** `mcp-http` was probed with a
+GET that the MCP proxy answers 404 to — a red on a healthy service, so the probe now speaks MCP and
+reports `speaks MCP (rozum-mcp-proxy)`. And the transition line quoted the WRONG check's detail,
+because `rozum doctor` already had rows named `gateway` and `meeting-daemon`; the service rows are
+`svc:*` now. Two rows with one name are two facts a lookup cannot tell apart.
+
+**Found by running it, not by looking for it:** `com.rozum.meeting-daemon` is loaded and NOT
+running while `:8401` answers — a bridge spawns its own daemon on demand and wins the socket, so
+launchd's copy loses the race and stays down. Reported as `warn` with that sentence, because a
+`fail` the operator cannot clear is the same cry-wolf this whole item exists to remove. Who should
+own that daemon is a design question, filed rather than decided at the end of a long session.
+
 ### ▶ Nothing tells us when a daemon dies (operator 2026-08-05: "продолжай"; promoted from BACKLOG)
 
 Branch `feature/service-liveness-watch`. Spec: `docs/specs/service-liveness.md`.
@@ -27,14 +39,14 @@ Promoted because **today produced three more instances of the same failure shape
 The original entry's own words still hold: **a KeepAlive job that can never exec is
 indistinguishable from a healthy one unless you probe what it is supposed to serve.**
 
-- [ ] **slw-doctor** — `rozum doctor --services`: the `com.rozum.*` roster, whether each job is
+- [x] **slw-doctor — DONE.** — `rozum doctor --services`: the `com.rozum.*` roster, whether each job is
   loaded AND running, its last exit, and — where the service serves something — whether the
   ENDPOINT answers. `rozum doctor` already exists with a Check/report model; this is a section in
   it, not a new command.
-- [ ] **slw-report-not-restart** — it reports; it does not restart anything. Tonight's other
+- [x] **slw-report-not-restart — DONE.** Nothing in this path stops, starts or kickstarts a job. — it reports; it does not restart anything. Tonight's other
   lesson: a watchdog that acts on a service kills the operator's work in flight. The one place it
   may act is the deploy, which already knows what it just stopped.
-- [ ] **slw-periodic** — a `StartInterval` job that runs it and posts to the rozum room ON
+- [x] **slw-periodic — DONE** (`--post-room`, plist shipped, NOT installed — installing a job that posts into the operator's room is theirs to say). Verified: silent on first run and on no change; on a forced transition it posted `✅ svc:gateway: back (fail → ok) — running (pid 83185), …answers 200` into a scratch room. — a `StartInterval` job that runs it and posts to the rozum room ON
   TRANSITION to bad, so it lands where the operator and the agents already look. Every tick would
   be noise; a transition is news.
 

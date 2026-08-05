@@ -1,5 +1,24 @@
 # Backlog
 
+## The meeting daemon has two owners (found 2026-08-05 by `doctor --services`)
+
+- [ ] **meeting-daemon-ownership** — `com.rozum.meeting-daemon` is a launchd job, AND every bridge
+  calls `spawn_daemon()` on demand (that is how a bridge survives a daemon restart). Whoever grabs
+  the socket first wins, and today the winner was a bridge child: the launchd job is down, `:8401`
+  answers, and nothing will restart the daemon if that child dies. Decide which one owns it — either
+  the job is the only starter (and bridges wait/retry instead of spawning), or the job goes and the
+  on-demand spawn is the contract. `doctor --services` reports the split state as `warn` in the
+  meantime.
+
+## rozum-core::share tests read the real machine (found 2026-08-05)
+
+- [ ] **share-tests-isolate** — `cargo test -p rozum-core share::` fails on master right now: 7
+  failures single-threaded, 8/7/10 across three parallel runs. The failure text shows the tests
+  seeing a live ledger and an absurd "actual free RAM ~1099511627776 MB", i.e. they read process-wide
+  state instead of a fixture. The same workspace was 850/0 twice earlier today, so the suite's colour
+  depends on what the machine happens to be doing — which is the definition of a red nobody can act
+  on. Point them at a temp state dir the way the other suites do.
+
 ## Parked worktree work — two patches rescued from worktrees that were about to be deleted (2026-08-04)
 
 - [ ] **parked-patches-decide** — during the 2026-08-04 worktree cleanup, two branches turned out to
