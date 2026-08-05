@@ -77,14 +77,14 @@ struct DayJson {
 /// does not abort the meeting daemon; the unix-socket MCP path is primary.
 pub fn maybe_spawn_from_env(registry: Arc<RoomRegistry>, shutdown: watch::Receiver<bool>) {
     let Some(secret) = web_secret() else {
-        // LOUD on purpose (BUG-017). Without a secret this daemon serves the socket and nothing on
+        // LOUD on purpose (BUG-024). Without a secret this daemon serves the socket and nothing on
         // :8401 — rooms keep working, every process looks healthy, and the console, the web client
         // and the generated terminal client all go quiet. Whoever is reading a log when that
         // happens deserves to be told, rather than left with the silence this used to return.
         tracing::warn!(
             "meeting REST read NOT started: no ROZUM_WEB_SECRET in the environment and no {} on \
              disk. Rooms work over the socket; :8401 does not. If this daemon was started by a \
-             client rather than by its service, that is BUG-017.",
+             client rather than by its service, that is BUG-024.",
             web_secret_path().display()
         );
         return;
@@ -113,7 +113,7 @@ pub fn maybe_spawn_from_env(registry: Arc<RoomRegistry>, shutdown: watch::Receiv
 
 /// The REST secret: the environment first, then `~/.rozum/secrets/web-secret`.
 ///
-/// The file matters because of BUG-017. `daemon_proxy::spawn_daemon` resurrects this daemon with
+/// The file matters because of BUG-024. `daemon_proxy::spawn_daemon` resurrects this daemon with
 /// the CALLER's environment — an agent's MCP proxy, a bare CLI run — which carries no
 /// `ROZUM_WEB_SECRET`. Reading it from the same place regardless of who started the process makes
 /// `:8401` a property of the INSTALLATION rather than of the accident of who won the socket.
@@ -1322,7 +1322,7 @@ mod tests {
         }
     }
 
-    /// The REST secret is a property of the INSTALLATION, not of who started the daemon (BUG-017).
+    /// The REST secret is a property of the INSTALLATION, not of who started the daemon (BUG-024).
     ///
     /// `daemon_proxy::spawn_daemon` resurrects the daemon with the caller's environment, which
     /// carries no `ROZUM_WEB_SECRET`; before the file fallback that daemon served the socket and

@@ -5,6 +5,56 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-024 — a client-triggered auto-start brings the meeting daemon up WITHOUT its REST secret, and then holds the socket
+
+- **Status:** DONE 2026-08-05. Filed first as a duplicate `BUG-017` — that number was already
+  nadia's jail bug, so it moved here; anything you read quoting BUG-017 for the meeting daemon
+  means this entry.
+- **Symptom.** `:8401` stops answering while `launchctl list` shows the service, a daemon process
+  exists, the socket is present and every room still works over MCP. Nothing looks wrong. The
+  support console, the web console and the generated meeting client all go quiet.
+- **Mechanism.** `daemon_proxy::spawn_daemon` runs `meetings start` when a client cannot reach the
+  daemon (`crates/rozum-meeting/src/meeting/daemon_proxy.rs:798`). The child inherits the CALLER's
+  environment — an agent's MCP proxy, a CLI invocation — which has no `ROZUM_WEB_SECRET`. The REST
+  listener is spawned only when that variable is set (`rest_read::maybe_spawn_from_env`), so the
+  resurrected daemon serves the unix socket and nothing on `:8401`. It then holds the socket, so the
+  launchd job — which DOES carry the secret — cannot take over even when it restarts.
+- **Repro.** Kill the daemon, then touch any room from an MCP client before launchd's restart wins:
+  the daemon comes back, rooms work, `curl :8401/rooms` answers nothing.
+- **I MISDIAGNOSED THIS FIRST**, and the wrong version reached the room: I said the "already
+  running" guard tests a file rather than a process. It does not — `daemon_alive` opens a real
+  connection. That guard is fine; the environment is the defect.
+- **FIXED 2026-08-05** — the REST secret is now read from `~/.rozum/secrets/web-secret` when the
+  environment has none, so `:8401` is a property of the INSTALLATION rather than of who won the
+  socket; the env still wins, so a configured service keeps overriding the file. And the absence of
+  any secret is now a loud `warn!` instead of a silent `return` — the silence is what made this cost
+  hours. Covered by `the_web_secret_falls_back_to_disk_but_the_environment_still_wins`, which also
+  pins that a blank value is NOT a secret. The secret was written to that path on this host at 600.
+  ⚠️ The code landed inside another agent's claim commit `beace56` by accident: I edited it in the
+  SHARED main checkout instead of my worktree, and their `claim:` commit swept it. Told them in the
+  room; history on a shared branch is not worth rewriting for this. `AGENTS.md` says worktree first,
+  and that rule exists for exactly this.
+- **The stronger fix was considered and DECIDED AGAINST 2026-08-05, by the operator, on my
+  recommendation — and I had recommended the opposite before, so the reversal is the point.**
+  Making `spawn_daemon` refuse the socket whenever REST cannot start reads well in the abstract, but
+  the file fallback already removed the failure that actually happened. What would remain is the case
+  where no secret exists anywhere — a host where the web console was never configured — and there
+  starting without REST is CORRECT. The strong fix would trade a rare degraded mode for a common hard
+  failure, on machines whose owners never asked for REST at all. A daemon that cannot serve its whole
+  contract should not claim the socket *when that contract was asked for*; here it was not.
+  If a future host does want it strict, the honest shape is to refuse only when REST was EXPECTED —
+  a secret exists but binding failed — which is a different bug from this one.
+- **Fix candidates considered:** have `spawn_daemon` refuse when the secret is absent and tell the
+  caller to start the service instead; or have the daemon read the secret from the same place the
+  service does rather than from its environment; or make an autostarted daemon step aside for the
+  managed one. I argued for the first at the time; see the decision above for why that argument does
+  not survive the second option having been implemented — reading the secret from where the service
+  reads it makes the refusal moot in every case where anyone wanted REST.
+- **Why it matters beyond this bug.** It is BUG-013's family: a service that is running and not
+  serving, with every green surface still green.
+
+---
+
 ## BUG-023 — one ended poll stream took the whole bridge down
 
 - **Status:** FIXED 2026-08-05 (`crates/rozum-meeting/src/messenger.rs`), test
@@ -231,46 +281,6 @@ not as "the agent deleted the task".
 is legitimate work and cannot be distinguished from vandalism by a profile — the answer there is
 version control, not the sandbox.
 
-## BUG-017 — a client-triggered auto-start brings the meeting daemon up WITHOUT its REST secret, and then holds the socket
-
-- **Status:** open, found 2026-08-05 while deploying `ucc-meetings-in-tk`. Not yet fixed.
-- **Symptom.** `:8401` stops answering while `launchctl list` shows the service, a daemon process
-  exists, the socket is present and every room still works over MCP. Nothing looks wrong. The
-  support console, the web console and the generated meeting client all go quiet.
-- **Mechanism.** `daemon_proxy::spawn_daemon` runs `meetings start` when a client cannot reach the
-  daemon (`crates/rozum-meeting/src/meeting/daemon_proxy.rs:798`). The child inherits the CALLER's
-  environment — an agent's MCP proxy, a CLI invocation — which has no `ROZUM_WEB_SECRET`. The REST
-  listener is spawned only when that variable is set (`rest_read::maybe_spawn_from_env`), so the
-  resurrected daemon serves the unix socket and nothing on `:8401`. It then holds the socket, so the
-  launchd job — which DOES carry the secret — cannot take over even when it restarts.
-- **Repro.** Kill the daemon, then touch any room from an MCP client before launchd's restart wins:
-  the daemon comes back, rooms work, `curl :8401/rooms` answers nothing.
-- **I MISDIAGNOSED THIS FIRST**, and the wrong version reached the room: I said the "already
-  running" guard tests a file rather than a process. It does not — `daemon_alive` opens a real
-  connection. That guard is fine; the environment is the defect.
-- **FIXED 2026-08-05** — the REST secret is now read from `~/.rozum/secrets/web-secret` when the
-  environment has none, so `:8401` is a property of the INSTALLATION rather than of who won the
-  socket; the env still wins, so a configured service keeps overriding the file. And the absence of
-  any secret is now a loud `warn!` instead of a silent `return` — the silence is what made this cost
-  hours. Covered by `the_web_secret_falls_back_to_disk_but_the_environment_still_wins`, which also
-  pins that a blank value is NOT a secret. The secret was written to that path on this host at 600.
-  ⚠️ The code landed inside another agent's claim commit `beace56` by accident: I edited it in the
-  SHARED main checkout instead of my worktree, and their `claim:` commit swept it. Told them in the
-  room; history on a shared branch is not worth rewriting for this. `AGENTS.md` says worktree first,
-  and that rule exists for exactly this.
-- **Remaining, deliberately not done:** `spawn_daemon` still starts a daemon that may be unable to
-  serve its whole contract. The file fallback removes the common case; refusing to claim the socket
-  at all when REST cannot start is the stronger fix and is an architectural call, not mine to make
-  alone.
-- **Fix candidates considered:** have `spawn_daemon` refuse when the secret is absent and tell the
-  caller to start the service instead; or have the daemon read the secret from the same place the
-  service does rather than from its environment; or make an autostarted daemon step aside for the
-  managed one. The first is smallest and the most honest — a daemon that cannot serve its whole
-  contract should not claim the socket.
-- **Why it matters beyond this bug.** It is BUG-013's family: a service that is running and not
-  serving, with every green surface still green.
-
----
 
 ## BUG-016 — nadia × Qwen3.5-4B: a path written without its leading slash lands a file in a mirror tree, and the run reports success
 

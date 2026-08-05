@@ -1881,3 +1881,18 @@ revive it.
   `docs/specs/x86-native-runtime.md`; epic + phases P1–P5 in `BACKLOG.md`
   (`x86-native-runtime`).
 
+- [ ] **bugs-ledger-id-gate** — nothing checks that a bug id is unique, and it already bit.
+  **Why:** two different bugs were both filed as `BUG-017` (nadia's jail, 2026-08-04; the meeting
+  daemon's REST secret, 2026-08-05). Renumbering after the fact is the expensive kind of fix: the
+  wrong number had already reached commit messages, a spec, the room and my own notes, and every one
+  of those now points at somebody else's bug. `scripts/` has no doc gate and this checkout has no
+  hooks configured (`core.hooksPath` unset), so the check has no home yet — that is the first thing
+  to decide.
+  **How:** a few lines over `BUGS.md` — ids unique, contiguous from 001, newest-first ordering
+  intact, and every `## BUG-NNN` heading matching the expected shape. Cheapest home is the pre-push
+  guard the worktrees install; the alternative is a `scripts/doc-gate.sh` called from `smoke-ci`,
+  which also runs for people who never made a worktree.
+  **Gotcha:** the ordering check must read the FILE order, not sort the ids — the whole convention is
+  newest-first, so a sorted check would pass a file that was silently reordered.
+  **Done when:** the gate fails on a deliberately duplicated id in a scratch copy, passes on `master`,
+  and is wired somewhere that runs without being asked.
