@@ -1,0 +1,6 @@
+feature/meeting-tui-red-tests 2026-08-05T08:31:43Z
+agent: claude-code
+heartbeat: 2026-08-05T08:31:43Z
+status: in-progress
+done-so-far: root cause is in the scalascript TUI emitter (generated tests assert premises the emitter never checked); fixed there, claim tui-selftest-premises
+next: re-emit the vendored crate once their toolchain is built

@@ -9,6 +9,33 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
+### ▶ Two red tests on master, in generated code (operator 2026-08-05: "Да почини")
+
+Branch `feature/meeting-tui-red-tests`. Cross-repo: the CAUSE is in `../scalascript`
+(claim `tui-selftest-premises`, their procedure), this side only re-emits.
+
+`crates/rozum-meeting-tui` arrived with a sibling's work (`1b0d62d`, `a4f14fd`) and two of its
+tests fail on master — `event_handlers_run` and `reactive_rerender`. Confirmed red on a clean
+`master` with no branch of mine, and the crate did not exist before `1b0d62d`.
+
+**They are not this repo's tests to fix: the whole crate is generated** from
+`clients/control/meetings.ssc`, and a gate proves a fresh emission is byte-identical to the
+committed copy — editing the vendored file would be reverted by the next emit and would fail that
+gate. The defect is in the ScalaScript TUI emitter, which emitted two self-tests whose premise it
+had never checked:
+
+- `reactive_rerender` picked the first TEXT signal and asserted the value appears ON SCREEN. This
+  app's first text signal holds the fetch URL a row-pick retargets, and nothing draws it.
+- `event_handlers_run` picked the first focusable with any activation and asserted the store
+  changed. This app's first activation is a row-pick over a table that is empty until a fetch
+  lands, so `activate` correctly did nothing.
+
+- [ ] **mtrt-emitter** — fixed upstream: emit each self-test only where its premise holds, and
+  nothing where no candidate qualifies. Both new emitter tests were checked against the old logic
+  first and fail there.
+- [ ] **mtrt-reemit** — re-emit the vendored crate with the fixed toolchain; the dual-target gate
+  must stay byte-identical and `cargo test -p rozum-meeting-tui` must go green.
+
 ### ▶ `cp` over a running binary (2026-08-05, caused live while deploying the fix above)
 
 Branch `feature/deploy-atomic-install`, worktree `.worktrees/feature/deploy-atomic-install`.
