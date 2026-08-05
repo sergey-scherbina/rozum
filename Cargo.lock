@@ -5365,6 +5365,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rozum-meeting-tui"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "rozum-mistralrs"
 version = "0.1.0"
 dependencies = [
