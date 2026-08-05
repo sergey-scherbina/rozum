@@ -1090,6 +1090,42 @@ impl ServerHandler for MeetingServer {
 /// Serve the daemon on `socket_path` until SIGINT/SIGTERM. On shutdown, pending
 /// `wait_my_turn` long-polls return `{ended:"server-shutdown"}` and the socket is
 /// removed after a short drain.
+/// The lock that says "this process owns the meeting socket", held for the daemon's whole life.
+///
+/// A sibling file rather than the socket itself: locking the socket inode would be undone by the
+/// very `remove_file`/`bind` the lock exists to guard, since binding replaces the inode.
+pub fn socket_ownership_path(socket_path: &Path) -> std::path::PathBuf {
+    let mut name = socket_path.as_os_str().to_os_string();
+    name.push(".lock");
+    std::path::PathBuf::from(name)
+}
+
+/// Take exclusive ownership of a socket path, or fail with `AddrInUse` because another daemon has
+/// it. The returned handle must be kept alive: dropping it releases the claim.
+///
+/// `AddrInUse` is deliberate — it is what `bind` would have said if stealing were not possible, so
+/// callers that already handle a busy socket need no new error kind.
+pub fn acquire_socket_ownership(socket_path: &Path) -> std::io::Result<std::fs::File> {
+    let path = socket_ownership_path(socket_path);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    file.try_lock().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!(
+                "another meeting daemon owns {} (lock {}); refusing to take its socket",
+                socket_path.display(),
+                path.display()
+            ),
+        )
+    })?;
+    Ok(file)
+}
+
 pub async fn serve_daemon(socket_path: &Path, registry: Arc<RoomRegistry>) -> std::io::Result<()> {
     let (tx, rx) = watch::channel(false);
     // Translate OS signals into the shutdown flag, then keep `tx` alive until one
@@ -1121,6 +1157,14 @@ async fn serve_daemon_until(
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // BUG-025. `remove_file` below cannot tell a socket left by a CRASHED daemon (which must be
+    // cleared, or `bind` fails with EADDRINUSE forever) from one a LIVE daemon is serving on. So it
+    // used to unlink a running daemon's socket and bind over it, leaving two live processes — one
+    // answering, one holding a listener on an inode nobody can reach. Take ownership first, and
+    // hold it for the whole life of the daemon: whoever has the lock may clear the socket, and
+    // whoever does not, refuses. The kernel drops the lock when the process dies, so a crashed
+    // owner leaves nothing to reap — the reason this is a lock and not a pidfile.
+    let _ownership = acquire_socket_ownership(socket_path)?;
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
     tracing::info!("meeting daemon listening on {}", socket_path.display());
@@ -1339,6 +1383,38 @@ mod tests {
     use crate::meeting::room_client::{RoomConnection, tool_result_text_json};
     use std::time::Duration;
     use tempfile::tempdir;
+
+    /// BUG-025. Deliberately pure filesystem — a temp dir, no socket, no daemon, no processes.
+    /// The standing lesson here is that a test which reaches the meeting socket is not a unit test:
+    /// one that did created two live rooms in the operator's running daemon.
+    #[test]
+    fn a_second_daemon_cannot_take_a_live_socket_and_a_dead_one_frees_it() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("meeting.sock");
+
+        let first = acquire_socket_ownership(&sock).expect("nobody owns it yet");
+
+        let refused = acquire_socket_ownership(&sock).expect_err("a second daemon must be refused");
+        assert_eq!(refused.kind(), std::io::ErrorKind::AddrInUse);
+        // The message has to name the socket: this error reaches an operator reading a daemon log
+        // while wondering why rooms went quiet.
+        assert!(refused.to_string().contains("meeting.sock"), "{refused}");
+
+        // A dead owner leaves nothing to reap — the kernel drops the lock with the process, which
+        // is the whole reason this is a lock and not a pidfile. Dropping the handle stands in.
+        drop(first);
+        acquire_socket_ownership(&sock).expect("the successor takes over with no cleanup step");
+    }
+
+    /// The lock must NOT be the socket inode: binding replaces that inode, so a lock taken on it
+    /// would be dropped by the very bind it guards.
+    #[test]
+    fn ownership_is_a_sibling_file_not_the_socket_itself() {
+        let sock = Path::new("/tmp/rozum-test/meeting.sock");
+        let lock = socket_ownership_path(sock);
+        assert_ne!(lock, sock.to_path_buf());
+        assert_eq!(lock, Path::new("/tmp/rozum-test/meeting.sock.lock"));
+    }
 
     async fn wait_for_socket(path: &Path) {
         for _ in 0..100 {

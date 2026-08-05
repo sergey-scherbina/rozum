@@ -3612,53 +3612,69 @@ async fn run_meetings_start(foreground: bool) {
         return;
     }
 
-    // Foreground: this process IS the daemon.
-    if daemon_alive(&sock).await {
+    // Foreground: this process IS the daemon. Under supervision this is a LOOP: losing the
+    // ownership lock to a client that spawned in the same instant must send us back to waiting,
+    // not cost launchd its process — that would rebuild the respawn loop by another road.
+    let supervised = supervised_by_launchd(std::env::var("XPC_SERVICE_NAME").ok());
+    loop {
+        if daemon_alive(&sock).await {
         // BUG-025. Exiting here is fatal under a supervisor: `exit(0)` says "my work is done" and
         // `KeepAlive = true` says "you are never done", so launchd starts another copy to step
         // aside again — one process every ~9 s, forever, while everything looks healthy from
         // outside. Hold the slot instead and take over when the incumbent goes; that is what makes
         // the job the real owner of the service rather than a bystander.
-        if supervised_by_launchd(std::env::var("XPC_SERVICE_NAME").ok()) {
-            eprintln!(
-                "meeting daemon already running ({}); supervised — waiting to take over",
-                sock.display()
-            );
-            // The poll interval is a RACE WINDOW, not a politeness knob, and it was measured: at
-            // 2 s the incumbent died and a client-spawned daemon had taken the socket before this
-            // process woke up — every time, because a client spawns the instant a connect fails
-            // while this one was asleep. 200 ms narrows it to something a client rarely beats; it
-            // does NOT close it. Closing it needs the socket-ownership lock that BUG-025 still
-            // holds open, and no interval here substitutes for that.
-            while daemon_alive(&sock).await {
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if supervised {
+                eprintln!(
+                    "meeting daemon already running ({}); supervised — waiting to take over",
+                    sock.display()
+                );
+                // The poll interval is a RACE WINDOW, not a politeness knob, and it was
+                // measured: at 2 s the incumbent died and a client-spawned daemon had taken the
+                // socket before this process woke up — every time, because a client spawns the
+                // instant a connect fails while this one was asleep. 200 ms narrows it. What
+                // CLOSES it is the ownership lock in `serve_daemon`: losing this poll is now only
+                // a lost round of this loop, because the winner is decided by the lock rather than
+                // by who unlinks the socket last.
+                while daemon_alive(&sock).await {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                eprintln!("meeting daemon gone; taking over");
+            } else {
+                // NOT politeness: `spawn_detached_meetings` starts its child with this same flag,
+                // and two clients can both find no daemon and both spawn one. Waiting
+                // unconditionally would leave the loser of every race as a permanent idle standby
+                // — a process leak traded for a respawn loop.
+                eprintln!("meeting daemon already running ({})", sock.display());
+                return;
             }
-            eprintln!("meeting daemon gone; taking over");
-        } else {
-            // NOT politeness: `spawn_detached_meetings` starts its child with this same flag, and
-            // two clients can both find no daemon and both spawn one. Waiting unconditionally would
-            // leave the loser of every race as a permanent idle standby — a process leak traded for
-            // a respawn loop.
-            eprintln!("meeting daemon already running ({})", sock.display());
-            return;
         }
-    }
-    let state_dir = rozum_state_dir();
-    let _ = std::fs::create_dir_all(&state_dir);
-    let pid_path = state_dir.join("meetings.pid");
-    let _ = std::fs::write(&pid_path, std::process::id().to_string());
+        let state_dir = rozum_state_dir();
+        let _ = std::fs::create_dir_all(&state_dir);
+        let pid_path = state_dir.join("meetings.pid");
+        let _ = std::fs::write(&pid_path, std::process::id().to_string());
 
-    if let Ok(removed) = rozum::meeting::prune_registered(&state_dir) {
-        for name in &removed {
-            eprintln!("meetings: pruned stale room '{name}'");
+        if let Ok(removed) = rozum::meeting::prune_registered(&state_dir) {
+            for name in &removed {
+                eprintln!("meetings: pruned stale room '{name}'");
+            }
         }
-    }
 
-    let registry = std::sync::Arc::new(RoomRegistry::new(state_dir));
-    if let Err(e) = serve_daemon(&sock, registry).await {
-        eprintln!("meeting daemon error: {e}");
+        let registry = std::sync::Arc::new(RoomRegistry::new(state_dir));
+        match serve_daemon(&sock, registry).await {
+            Ok(()) => {}
+            // Another daemon took ownership between our check and our bind. Under supervision that
+            // is a lost round, not a failure: go back to waiting. Anywhere else it is the correct
+            // end of a process that was never meant to be the second daemon.
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && supervised => {
+                eprintln!("{e}; back to waiting");
+                let _ = std::fs::remove_file(&pid_path);
+                continue;
+            }
+            Err(e) => eprintln!("meeting daemon error: {e}"),
+        }
+        let _ = std::fs::remove_file(&pid_path);
+        return;
     }
-    let _ = std::fs::remove_file(&pid_path);
 }
 
 /// Is this process running under launchd's supervision? (BUG-025)
