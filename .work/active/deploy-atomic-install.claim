@@ -1,0 +1,6 @@
+feature/deploy-atomic-install 2026-08-05T08:13:13Z
+agent: claude-code
+heartbeat: 2026-08-05T08:13:13Z
+status: in-progress
+done-so-far: caused a live outage by cp-ing over a running binary; deploy script does the same in 3 places
+next: atomic install helper

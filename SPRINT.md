@@ -9,6 +9,24 @@
 > **Before adding a new item here, ask what it buys the one model that actually runs** — if the answer
 > is "it helps when we adopt model X", it belongs in BACKLOG, not SPRINT.
 
+### ▶ `cp` over a running binary (2026-08-05, caused live while deploying the fix above)
+
+Branch `feature/deploy-atomic-install`, worktree `.worktrees/feature/deploy-atomic-install`.
+
+**I took both Telegram bridges down for several minutes doing exactly this.** Copying a new
+`rozum-gateway` over `~/.cargo/bin/rozum-gateway` while the old one was running left the file's
+signature inconsistent with the mapped image; macOS answered with SIGKILL — `launchctl list` showed
+`-9`, every start attempt died with rc=137, and the log was empty because nothing got far enough to
+write to it. `cp` to a sibling name plus `mv -f` fixed it instantly: rename is atomic, running
+processes keep the old inode, and the next exec gets a whole file.
+
+`clients/control/deploy-ucc-web.sh` installs three binaries the same unsafe way (lines 73, 87,
+101), and it is the machine's actual deploy path.
+
+- [ ] **dai-helper** — one `install_bin` used by all three, temp-then-rename, with the reason
+  written where the next person will read it.
+- [ ] **dai-verify** — deploy with a service running and watch it stay up.
+
 ### ▶ A bridge that dies when the daemon blinks (operator 2026-08-05: "Запиши в спринт и берись сейчас")
 
 Branch `feature/bridge-daemon-reconnect`, worktree `.worktrees/feature/bridge-daemon-reconnect`.
