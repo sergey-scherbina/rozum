@@ -1,6 +1,0 @@
-feature/bug013-root-cause 2026-08-05T14:33:36Z
-agent: claude-code
-heartbeat: 2026-08-05T14:33:36Z
-status: in-progress
-done-so-far: BUG-013 left the exact trigger unproven; today reproduced in-place-cp exec poisoning by hand (rc=137)
-next: reproduce it UNDER launchd on a scratch job, expect EX_CONFIG 78 + needs LWCR update
