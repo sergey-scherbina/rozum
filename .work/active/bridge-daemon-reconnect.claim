@@ -1,6 +1,0 @@
-feature/bridge-daemon-reconnect 2026-08-05T07:47:55Z
-agent: claude-code
-heartbeat: 2026-08-05T07:47:55Z
-status: in-progress
-done-so-far: observed live — 3 exits per bridge log, "meeting daemon poll ended" is fatal by design
-next: reconnect in DaemonBridge instead of dying
