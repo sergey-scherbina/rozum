@@ -1936,3 +1936,20 @@ revive it.
   `models list` shows one. Kept as a line so the name resolves: the sprint entry holds the findings,
   and the five gateway delivery bugs it drove out are shipped and independent of it. Reopen only if
   gpt-oss is downloaded again, and re-measure rather than trusting the old numbers.
+
+- [ ] **gateway-log-has-no-clock** — `~/.rozum-gateway.log` carries no timestamps, so a restart RATE
+  cannot be read from it.
+  **Why:** the log holds 1203 gateway starts and `launchctl` reports `runs = 3152`, and there is no
+  way to tell from either whether that accumulated over a month or over an afternoon. Restart rate is
+  precisely the signal that separates a healthy service from BUG-013, where `com.rozum.gateway`
+  crash-looped for four days and silently took the messenger assistant down, and from BUG-025, where
+  the meeting daemon respawned every ~9 s while every surface stayed green. Both were found by
+  someone happening to look at a counter, which is not a mechanism.
+  **Checked 2026-08-05:** not looping now — `runs` was stable at 3152 across 45 s, and `:8089`
+  answers 200. So this is instrumentation, not an incident.
+  **How:** the daemon log lines already go through `tracing` in places (a `WARN` in the meeting
+  daemon's log carries a full ISO timestamp), so the gap is that the gateway's startup banner and
+  its plain `println!`/`eprintln!` lines do not. Simplest is to give the launchd-run gateway a
+  timestamped log format rather than to retrofit every call site.
+  **Done when:** two consecutive starts in that log can be dated, and `doctor --services` can say
+  "restarted N times in the last hour" instead of a lifetime counter nobody can interpret.
