@@ -30,10 +30,10 @@ had never checked:
   changed. This app's first activation is a row-pick over a table that is empty until a fetch
   lands, so `activate` correctly did nothing.
 
-- [ ] **mtrt-emitter** — fixed upstream: emit each self-test only where its premise holds, and
+- [x] **mtrt-emitter — DONE** (`scalascript:d4580a978`, released level 3). — fixed upstream: emit each self-test only where its premise holds, and
   nothing where no candidate qualifies. Both new emitter tests were checked against the old logic
   first and fail there.
-- [ ] **mtrt-reemit** — re-emit the vendored crate with the fixed toolchain; the dual-target gate
+- [x] **mtrt-reemit — DONE.** Two lines changed in the generated file; `cargo test -p rozum-meeting-tui` 5/5, dual-target gate PASS byte-identical, workspace **850 passed / 0 failed** — green for the first time today. — re-emit the vendored crate with the fixed toolchain; the dual-target gate
   must stay byte-identical and `cargo test -p rozum-meeting-tui` must go green.
 
 ### ▶ `cp` over a running binary (2026-08-05, caused live while deploying the fix above)

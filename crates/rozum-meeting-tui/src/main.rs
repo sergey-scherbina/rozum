@@ -394,7 +394,7 @@ mod tests {
     fn reactive_rerender() {
         let mut signals = initial_signals();
         let before = render_to_string(80, 24, &signals, 0);
-        signals.insert("meetingsUrl".to_string(), Value::S("SSC_RERENDER_SENTINEL".to_string()));
+        signals.insert("meetingsDraft".to_string(), Value::S("SSC_RERENDER_SENTINEL".to_string()));
         let after = render_to_string(80, 24, &signals, 0);
         assert_ne!(before, after, "signal change did not re-render");
         assert!(after.contains("SSC_RERENDER_SENTINEL"), "new value not rendered");
@@ -403,7 +403,7 @@ mod tests {
     fn event_handlers_run() {
         let mut signals = initial_signals();
         let before = signals.clone();
-        activate(0, &mut signals);
+        activate(6, &mut signals);
         assert_ne!(before, signals, "activate did not mutate the store");
     }
     #[test]

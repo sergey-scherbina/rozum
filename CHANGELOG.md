@@ -1,5 +1,21 @@
 # Changelog
 
+## meeting-tui-red-tests — a generated test whose premise nobody checked
+Completed: 2026-08-05
+
+Two tests in `crates/rozum-meeting-tui` were red on master, from a sibling's work. They were not
+this repo's to fix: the crate is generated from `clients/control/meetings.ssc`, and a gate proves a
+fresh emission is byte-identical to the committed copy — an edit here would be reverted by the next
+emit and would fail that gate.
+
+The ScalaScript TUI emitter was emitting two self-tests that assert more than it had checked:
+`reactive_rerender` picked the first TEXT signal and asserted the value appears on screen (this
+app's first text signal holds a fetch URL nothing draws), and `event_handlers_run` picked the first
+focusable with any activation and asserted the store changed (this app's first activation is a
+row-pick over a table that is empty until a fetch lands). Fixed upstream — each test is emitted only
+where its premise holds, and nothing where no candidate qualifies — then re-emitted here: two lines
+changed, 5/5 green, gate byte-identical, workspace 850/0.
+
 ## deploy-atomic-install — the deploy installs binaries by rename
 Completed: 2026-08-05
 
