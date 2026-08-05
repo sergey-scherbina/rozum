@@ -37,6 +37,15 @@ Where a service has no endpoint (the bridges talk outward to Telegram; the parti
 the daemon), say so rather than invent a probe: the check reports what it could establish, and
 `skip` is an honest verdict. **A probe that cannot fail is not evidence.**
 
+### 1b. It names WHO serves, not who is loaded
+
+A launchd job can be alive and merely waiting while another process holds the socket and serves —
+that is the state `BUG-025`'s ownership fix makes normal rather than exceptional. `running (pid X)`
+plus `the endpoint answers` are then two true halves that together say something false. Where an
+owner can be established independently (the lock beside the meeting socket), the line names the
+serving pid and says when it is not the job's — because "it works, but the job cannot restart what
+it does not own" is exactly the kind of thing this check exists to surface.
+
 ### 2. It reports; it does not restart
 
 Nothing here stops, starts or kickstarts a job. Today's other lesson cost the operator two agents'

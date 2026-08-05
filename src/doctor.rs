@@ -170,7 +170,7 @@ pub fn transitions(report: &DoctorReport) -> Vec<String> {
     let now: std::collections::HashMap<String, String> = report
         .checks
         .iter()
-        .filter(|c| SERVICES.iter().any(|(_, n, _, _)| *n == c.name))
+        .filter(|c| SERVICES.iter().any(|(_, n, _, _, _)| *n == c.name))
         .map(|c| (c.name.to_string(), c.status.label().to_string()))
         .collect();
 
@@ -227,24 +227,53 @@ enum Probe {
     None,
 }
 
-/// `(launchd label, row name, probe, what it serves)`.
+/// Who actually serves, when that can be established independently of the job.
+#[derive(Clone, Copy)]
+enum Owner {
+    /// The holder of the lock beside the unix socket (`docs/specs/meeting-socket-ownership.md`).
+    /// A launchd job can be alive and WAITING while a client-spawned daemon holds this and serves —
+    /// observed on the host 2026-08-05: job pid 42206, lock and listener on 42132.
+    SocketLock,
+    /// Nothing to ask: the job's own process is the server, or there is no server.
+    JobItself,
+}
+
+/// `(launchd label, row name, probe, owner, what it serves)`.
 ///
 /// The row name is `svc:*` and not the bare service name ON PURPOSE: `rozum doctor` already has
 /// checks called `gateway` and `meeting-daemon` (the demo-path section), and sharing a name made
 /// the transition line quote the wrong check's detail — measured on the first live post, where a
 /// service transition was reported with the demo check's text. Two rows with one name are two
 /// facts a lookup cannot tell apart.
-const SERVICES: &[(&str, &str, Probe, &str)] = &[
-    ("com.rozum.gateway", "svc:gateway", Probe::Get("http://127.0.0.1:8089/v1/models"), "the resident model"),
-    ("com.rozum.ucc-control", "svc:ucc-control", Probe::Get("http://127.0.0.1:8411/control/auth/status"), "the control plane"),
-    ("com.rozum.meeting-daemon", "svc:meeting-daemon", Probe::Get("http://127.0.0.1:8401/rooms"), "meeting rooms over REST"),
-    ("com.rozum.meeting-ssc", "svc:meeting-ssc", Probe::Get("http://127.0.0.1:8405/"), "the meeting PWA"),
-    ("com.rozum.mcp-http", "svc:mcp-http", Probe::McpInitialize("http://127.0.0.1:8779/mcp"), "MCP over HTTP"),
-    ("com.rozum.telegram", "svc:telegram", Probe::None, "the Telegram bridge (private)"),
-    ("com.rozum.telegram-groups", "svc:telegram-groups", Probe::None, "the Telegram bridge (groups)"),
-    ("com.rozum.assistant", "svc:assistant", Probe::None, "the participant pool"),
-    ("com.rozum.assistant-groups", "svc:assistant-groups", Probe::None, "the participant pool (groups)"),
+const SERVICES: &[(&str, &str, Probe, Owner, &str)] = &[
+    ("com.rozum.gateway", "svc:gateway", Probe::Get("http://127.0.0.1:8089/v1/models"), Owner::JobItself, "the resident model"),
+    ("com.rozum.ucc-control", "svc:ucc-control", Probe::Get("http://127.0.0.1:8411/control/auth/status"), Owner::JobItself, "the control plane"),
+    ("com.rozum.meeting-daemon", "svc:meeting-daemon", Probe::Get("http://127.0.0.1:8401/rooms"), Owner::SocketLock, "meeting rooms over REST"),
+    ("com.rozum.meeting-ssc", "svc:meeting-ssc", Probe::Get("http://127.0.0.1:8405/"), Owner::JobItself, "the meeting PWA"),
+    ("com.rozum.mcp-http", "svc:mcp-http", Probe::McpInitialize("http://127.0.0.1:8779/mcp"), Owner::JobItself, "MCP over HTTP"),
+    ("com.rozum.telegram", "svc:telegram", Probe::None, Owner::JobItself, "the Telegram bridge (private)"),
+    ("com.rozum.telegram-groups", "svc:telegram-groups", Probe::None, Owner::JobItself, "the Telegram bridge (groups)"),
+    ("com.rozum.assistant", "svc:assistant", Probe::None, Owner::JobItself, "the participant pool"),
+    ("com.rozum.assistant-groups", "svc:assistant-groups", Probe::None, Owner::JobItself, "the participant pool (groups)"),
 ];
+
+/// The pid holding the lock beside the meeting socket, i.e. the process that is actually serving
+/// (`docs/specs/meeting-socket-ownership.md`). `None` when nothing holds it or `lsof` is absent —
+/// unknown is reported as unknown, never as agreement.
+/// `…/meeting.sock` → `…/meeting.sock.lock`. Appended, not substituted: `with_extension` alone
+/// would turn `meeting.sock` into `meeting.lock` and silently look at a file nobody writes, which
+/// would make this check answer "unknown" forever without ever saying so.
+fn socket_lock_path(sock: &Path) -> std::path::PathBuf {
+    let mut p = sock.as_os_str().to_os_string();
+    p.push(".lock");
+    std::path::PathBuf::from(p)
+}
+
+fn socket_owner_pid() -> Option<i64> {
+    let lock = socket_lock_path(&meeting_sock());
+    let out = Command::new("lsof").arg("-t").arg(&lock).stderr(Stdio::null()).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).lines().next()?.trim().parse::<i64>().ok()
+}
 
 /// One line per service: is the job running, and does the thing it serves answer.
 ///
@@ -258,8 +287,8 @@ async fn check_services() -> Vec<Check> {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let mut out = Vec::new();
-    for (label, name, probe, what) in SERVICES {
-        out.push(check_service(&jobs, label, name, *probe, what, &client).await);
+    for (label, name, probe, owner, what) in SERVICES {
+        out.push(check_service(&jobs, label, name, *probe, *owner, what, &client).await);
     }
     out
 }
@@ -300,6 +329,7 @@ async fn check_service(
     label: &'static str,
     name: &'static str,
     probe: Probe,
+    owner: Owner,
     what: &str,
     client: &reqwest::Client,
 ) -> Check {
@@ -322,7 +352,13 @@ async fn check_service(
                 name,
                 format!(
                     "launchd's copy is NOT running (last exit {last_exit}), yet {what} answers \
-                     ({code}) — something unmanaged is serving it"
+                     ({code}) — served by {}",
+                    match owner {
+                        Owner::SocketLock => socket_owner_pid()
+                            .map(|p| format!("pid {p}, which holds the socket"))
+                            .unwrap_or_else(|| "something unmanaged".into()),
+                        Owner::JobItself => "something unmanaged".to_string(),
+                    }
                 ),
                 format!(
                     "find it (pgrep -f {name}) and decide who owns it: while launchd's copy is \
@@ -355,8 +391,30 @@ async fn check_service(
         Probe::McpInitialize(u) => mcp_initialize(client, u).await,
         Probe::None => unreachable!("handled above"),
     };
+    // WHO serves. With the socket-ownership fix (BUG-025) the job can be alive and merely waiting
+    // while a client-spawned daemon holds the lock and the listener — observed on the host, job pid
+    // 42206 against owner 42132. "running (pid 42206), :8401 answers 200" is then two true halves
+    // that together say something false, which is the failure this whole check exists to remove.
+    let served_by = match owner {
+        Owner::JobItself => None,
+        Owner::SocketLock => socket_owner_pid(),
+    };
     match answered {
-        Ok(detail) => Check::ok(name, format!("running (pid {pid}), {url} {detail}")),
+        Ok(detail) => match served_by {
+            Some(other) if other != pid as i64 => Check::warn(
+                name,
+                format!(
+                    "job pid {pid} is alive but serves nothing — {url} {detail}, served by pid \
+                     {other}, which holds the socket"
+                ),
+                format!(
+                    "that is a client-spawned daemon, not launchd's: it works, but the job cannot \
+                     restart what it does not own (BUGS.md BUG-025)"
+                ),
+            ),
+            Some(_) => Check::ok(name, format!("running (pid {pid}) and owns the socket, {url} {detail}")),
+            None => Check::ok(name, format!("running (pid {pid}), {url} {detail}")),
+        },
         // The BUG-013 shape exactly: the process table says yes, the service says nothing.
         Err(why) => Check::fail(
             name,
@@ -711,6 +769,17 @@ fn join_url(base: &str, path: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_lock_sits_beside_the_socket_not_instead_of_it() {
+        // `with_extension` would produce `meeting.lock` — a path nothing writes, so the owner would
+        // read as unknown forever and the check would go back to reporting the job as the server.
+        assert_eq!(
+            socket_lock_path(Path::new("/run/rozum/meeting.sock")),
+            Path::new("/run/rozum/meeting.sock.lock")
+        );
+        assert_eq!(socket_lock_path(Path::new("/x/sock")), Path::new("/x/sock.lock"));
+    }
+
     /// The two states `launchctl list` prints that this check exists to tell apart.
     #[test]
     fn a_loaded_job_that_is_not_running_is_not_a_running_one() {
@@ -732,7 +801,7 @@ mod tests {
     /// Every service either has a probe or says out loud that it has none.
     #[test]
     fn no_service_is_reported_healthy_on_the_process_table_alone() {
-        for (label, name, probe, what) in SERVICES {
+        for (label, name, probe, _owner, what) in SERVICES {
             assert!(label.starts_with("com.rozum."), "{label}");
             assert!(name.starts_with("svc:"), "{name} must not collide with a demo-path check");
             assert!(!what.is_empty(), "{label} must say what it serves");
@@ -745,8 +814,8 @@ mod tests {
         // new entry needs a probe or a reason.
         let unprobed: Vec<&str> = SERVICES
             .iter()
-            .filter(|(_, _, p, _)| matches!(p, Probe::None))
-            .map(|(l, _, _, _)| *l)
+            .filter(|(_, _, p, _, _)| matches!(p, Probe::None))
+            .map(|(l, _, _, _, _)| *l)
             .collect();
         assert_eq!(
             unprobed,

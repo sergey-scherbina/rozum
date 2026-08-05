@@ -34,9 +34,9 @@ say something false, because 42206 serves nothing.
 Confirmed on the host before touching anything: job `42206`, while `lsof` shows `42132` holding
 both `meeting.sock.lock` and the listener.
 
-- [ ] **dso-owner** — where a service has an identifiable owner (the lock beside the socket), the
+- [x] **dso-owner — DONE.** — where a service has an identifiable owner (the lock beside the socket), the
   line names WHO serves, and says so when that is not the job.
-- [ ] **dso-verify** — live: the current split state must produce a `warn` naming both pids, and
+- [x] **dso-verify — DONE**, both directions on the host: the split state printed `job pid 42206 is alive but serves nothing — …served by pid 42132, which holds the socket`, and after 42132 exited the job took the lock and the line became `running (pid 42206) and owns the socket`. Machine went to **10 ok, 0 warn, 0 fail** — fully green for the first time. Was: live: the current split state must produce a `warn` naming both pids, and
   after the two are the same process it must go back to `ok`.
 
 ### ▶ wordcount was ours, not the model's (operator 2026-08-05: "Надия теперь способна решать задачи в матрице?" → "продолжай")

@@ -1,5 +1,18 @@
 # Changelog
 
+## doctor-socket-owner — the line named the job, not the server
+Completed: 2026-08-05
+
+Handed over inside BUG-025 by the sibling who closed it: with socket ownership enforced, the
+launchd job can be alive and waiting while a client-spawned daemon holds the lock and serves. The
+liveness line then read `svc:meeting-daemon running (pid 42206), :8401 answers 200` — both halves
+true, and together false, since 42206 served nothing.
+
+Where an owner can be established independently, the check now names the serving pid and says when
+it is not the job's. Verified both directions on the host: the split state produced the warning
+naming 42206 and 42132, and once 42132 exited the job took the lock and the line became `running
+(pid 42206) and owns the socket`. The machine reads 10 ok / 0 warn / 0 fail.
+
 ## fix(meetings): one daemon owns the socket — BUG-025 closed
 
 `serve_daemon` unlinked whatever socket file was there before binding, which is right for a socket
