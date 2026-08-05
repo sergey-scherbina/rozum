@@ -1090,6 +1090,20 @@ impl ServerHandler for MeetingServer {
 /// Serve the daemon on `socket_path` until SIGINT/SIGTERM. On shutdown, pending
 /// `wait_my_turn` long-polls return `{ended:"server-shutdown"}` and the socket is
 /// removed after a short drain.
+/// The inode the socket path pointed at when we bound it. `None` means "no file there".
+///
+/// Identity, not existence: a successor that binds its own socket at the same path leaves the path
+/// existing and pointing somewhere else, and that is exactly the case we must notice.
+fn socket_inode(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.ino())
+}
+
+/// Is the socket we bound still the one clients would reach?
+fn socket_is_still_ours(path: &Path, ours: Option<u64>) -> bool {
+    ours.is_some() && socket_inode(path) == ours
+}
+
 /// The lock that says "this process owns the meeting socket", held for the daemon's whole life.
 ///
 /// A sibling file rather than the socket itself: locking the socket inode would be undone by the
@@ -1182,6 +1196,12 @@ async fn serve_daemon_until(
     let _ownership = acquire_socket_ownership(socket_path)?;
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
+    // Remember WHICH socket we are. If this path stops pointing at it, nobody can reach us: we hold
+    // the lock, so no successor may take over, and the service would stay dead until a human killed
+    // us. Getting out of the way is the only self-healing move a wedged owner has — and before the
+    // ownership lock existed, that healing came from a successor STEALING the socket, which is the
+    // very thing this change forbids. Forbidding it without this leaves the system worse than found.
+    let our_socket = socket_inode(socket_path);
     tracing::info!("meeting daemon listening on {}", socket_path.display());
     super::rest_read::maybe_spawn_from_env(Arc::clone(&registry), shutdown.clone());
 
@@ -1231,11 +1251,25 @@ async fn serve_daemon_until(
         });
     }
 
+    let mut reachable = tokio::time::interval(std::time::Duration::from_secs(5));
+    reachable.tick().await; // the first tick completes immediately
     loop {
         tokio::select! {
             accept = listener.accept() => {
                 let (stream, _) = accept?;
                 serve_conn(stream, Arc::clone(&registry), shutdown.clone());
+            }
+            _ = reachable.tick() => {
+                if !socket_is_still_ours(socket_path, our_socket) {
+                    tracing::warn!(
+                        socket = %socket_path.display(),
+                        "meeting daemon is unreachable — {} no longer points at the socket this \
+                         process bound. Exiting so the ownership lock is released and a successor \
+                         can serve; staying would keep the service dead.",
+                        socket_path.display()
+                    );
+                    break;
+                }
             }
             _ = shutdown.changed() => break,
         }
@@ -1245,7 +1279,12 @@ async fn serve_daemon_until(
     }
     // Give in-flight long-polls a moment to observe the flag and return `{ended}`.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let _ = std::fs::remove_file(socket_path);
+    // Only clear the socket if it is still OURS. An unconditional remove here is the same theft the
+    // bind path was fixed for, one step later: a successor that already rebound this path would
+    // have its socket deleted by our shutdown.
+    if socket_is_still_ours(socket_path, our_socket) {
+        let _ = std::fs::remove_file(socket_path);
+    }
     Ok(())
 }
 
@@ -1398,6 +1437,30 @@ mod tests {
     use crate::meeting::room_client::{RoomConnection, tool_result_text_json};
     use std::time::Duration;
     use tempfile::tempdir;
+
+    /// A wedged owner must be able to notice it is wedged: identity, not existence. Pure
+    /// filesystem — the socket here is an ordinary file, which is all `inode` needs.
+    #[test]
+    fn a_rebound_path_is_not_our_socket_any_more() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("meeting.sock");
+        std::fs::write(&sock, b"").unwrap();
+        let ours = socket_inode(&sock);
+        assert!(socket_is_still_ours(&sock, ours));
+
+        // Removed: nobody can reach us.
+        std::fs::remove_file(&sock).unwrap();
+        assert!(!socket_is_still_ours(&sock, ours));
+
+        // Replaced by a successor's socket: the path EXISTS and is not ours, which existence
+        // checking alone would miss — the reason this compares inodes.
+        std::fs::write(&sock, b"").unwrap();
+        assert!(!socket_is_still_ours(&sock, ours));
+        assert_ne!(socket_inode(&sock), ours);
+
+        // And a daemon that never bound must not claim the path is its own.
+        assert!(!socket_is_still_ours(&sock, None));
+    }
 
     /// BUG-025. Deliberately pure filesystem — a temp dir, no socket, no daemon, no processes.
     /// The standing lesson here is that a test which reaches the meeting socket is not a unit test:
