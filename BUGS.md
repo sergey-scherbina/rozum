@@ -213,7 +213,21 @@ version control, not the sandbox.
 - **I MISDIAGNOSED THIS FIRST**, and the wrong version reached the room: I said the "already
   running" guard tests a file rather than a process. It does not — `daemon_alive` opens a real
   connection. That guard is fine; the environment is the defect.
-- **Fix candidates**, none applied: have `spawn_daemon` refuse when the secret is absent and tell the
+- **FIXED 2026-08-05** — the REST secret is now read from `~/.rozum/secrets/web-secret` when the
+  environment has none, so `:8401` is a property of the INSTALLATION rather than of who won the
+  socket; the env still wins, so a configured service keeps overriding the file. And the absence of
+  any secret is now a loud `warn!` instead of a silent `return` — the silence is what made this cost
+  hours. Covered by `the_web_secret_falls_back_to_disk_but_the_environment_still_wins`, which also
+  pins that a blank value is NOT a secret. The secret was written to that path on this host at 600.
+  ⚠️ The code landed inside another agent's claim commit `beace56` by accident: I edited it in the
+  SHARED main checkout instead of my worktree, and their `claim:` commit swept it. Told them in the
+  room; history on a shared branch is not worth rewriting for this. `AGENTS.md` says worktree first,
+  and that rule exists for exactly this.
+- **Remaining, deliberately not done:** `spawn_daemon` still starts a daemon that may be unable to
+  serve its whole contract. The file fallback removes the common case; refusing to claim the socket
+  at all when REST cannot start is the stronger fix and is an architectural call, not mine to make
+  alone.
+- **Fix candidates considered:** have `spawn_daemon` refuse when the secret is absent and tell the
   caller to start the service instead; or have the daemon read the secret from the same place the
   service does rather than from its environment; or make an autostarted daemon step aside for the
   managed one. The first is smallest and the most honest — a daemon that cannot serve its whole
