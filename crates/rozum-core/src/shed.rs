@@ -37,7 +37,31 @@ impl PressureLevel {
 /// (`1` normal, `2` warn, `4` critical — the value jetsam acts on). Shells `sysctl`
 /// for consistency with [`crate::concurrency::total_ram_bytes`] (no `libc` dep).
 /// `Normal` on non-macOS or any failure.
+/// Parse a pinned pressure level. The numeric spellings are the `sysctl` values, so an operator
+/// can paste what they read. Anything else is `None` — an unreadable pin falls through to the real
+/// measurement rather than silently claiming the host is fine.
+fn parse_pressure(v: &str) -> Option<PressureLevel> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "normal" | "0" => Some(PressureLevel::Normal),
+        "warn" | "2" => Some(PressureLevel::Warn),
+        "critical" | "4" => Some(PressureLevel::Critical),
+        _ => None,
+    }
+}
+
 pub fn read_host_pressure() -> PressureLevel {
+    // `ROZUM_HOST_PRESSURE` pins the level, the same way `ROZUM_GATEWAY_AVAILABLE_RAM_BYTES` pins
+    // free RAM: an operator can hold a shared host at a conservative figure, and a test can isolate
+    // this lever from what the machine happens to be doing.
+    //
+    // The admission tests already pinned free RAM and the ledger, and still read the REAL pressure
+    // — so they failed whenever the machine was busy, which on 2026-08-05 meant 7 failures
+    // single-threaded and 8/7/10 across three parallel runs while a release build and a resident
+    // model were running, and 0 failures twenty minutes later. A suite whose colour depends on
+    // what else is happening is a suite people learn to re-run instead of read.
+    if let Some(pinned) = std::env::var("ROZUM_HOST_PRESSURE").ok().as_deref().and_then(parse_pressure) {
+        return pinned;
+    }
     #[cfg(target_os = "macos")]
     {
         if let Ok(out) = std::process::Command::new("sysctl")
@@ -121,6 +145,27 @@ pub fn should_shed(i: &ShedInputs, p: &ShedPolicy) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pin exists so a lever can be held still — by an operator on a shared host, and by a
+    /// test that is about something else. Without it this crate's admission suite read the real
+    /// machine and changed colour with the machine's load (measured 2026-08-05).
+    ///
+    /// Tested on the PARSER, not through the environment: a test that sets a process-wide variable
+    /// races every other test that reads it, which is the very defect being fixed here.
+    #[test]
+    fn a_pinned_pressure_is_read_and_nonsense_is_not() {
+        assert_eq!(parse_pressure("warn"), Some(PressureLevel::Warn));
+        assert_eq!(parse_pressure(" Critical "), Some(PressureLevel::Critical));
+        assert_eq!(parse_pressure("normal"), Some(PressureLevel::Normal));
+        // The sysctl spellings, so an operator can paste what they read.
+        assert_eq!(parse_pressure("4"), Some(PressureLevel::Critical));
+        assert_eq!(parse_pressure("2"), Some(PressureLevel::Warn));
+        assert_eq!(parse_pressure("0"), Some(PressureLevel::Normal));
+        // Unreadable → not pinned → the real machine answers. Silently reporting "fine" for a
+        // typo would be the worst of the three outcomes.
+        assert_eq!(parse_pressure("sideways"), None);
+        assert_eq!(parse_pressure(""), None);
+    }
 
     fn inputs(pressure: PressureLevel, inflight: u64, idle_secs: u64) -> ShedInputs {
         ShedInputs { pressure, inflight, idle_secs }

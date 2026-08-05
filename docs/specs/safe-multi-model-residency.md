@@ -408,6 +408,11 @@ physical overcommit → the OS jetsam-kills a victim (possibly A mid-work) or th
 
 Knobs: `ROZUM_GATEWAY_MIN_FREE_RAM_BYTES` (keep-free headroom after a load, default **3 GiB**);
 `ROZUM_GATEWAY_AVAILABLE_RAM_BYTES` (pin the available figure — conservative on a shared host, or
+`ROZUM_HOST_PRESSURE` pins the third lever the same way (`normal`/`warn`/`critical`). Pinning
+two of three is why this crate's admission suite changed colour with the machine's load: measured
+2026-08-05, 7 failures single-threaded and 8/7/10 across parallel runs while a release build and a
+resident model were up, 0 failures twenty minutes later, and reproduced deterministically with
+`ROZUM_HOST_PRESSURE=warn`.
 test isolation); `ROZUM_ALLOW_CONCURRENT_RESIDENT=1` (full bypass). Each lever fail-opens if its
 input can't be measured (the other still gates). Pure unit tests: `admits_requires_both_ledger_and_
 actual_free_ram`, `admits_fail_open_per_lever_when_unmeasurable`; integration:

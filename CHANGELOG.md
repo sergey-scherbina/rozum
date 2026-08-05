@@ -1,5 +1,22 @@
 # Changelog
 
+## share-tests-isolate — a suite whose colour depended on the machine
+Completed: 2026-08-05
+
+`cargo test -p rozum-core share::` was red on master: 7 failures single-threaded, 8/7/10 across
+three parallel runs — and green twenty minutes later. The admission tests pinned two of the three
+levers (the ledger and available RAM, which is why the failure text quoted an absurd
+"~1099511627776 MB") and read the third, host memory pressure, from the real machine. So they
+failed whenever something else was busy — a release build and a resident model, in this case.
+
+Reproduced deterministically before fixing: `ROZUM_HOST_PRESSURE=warn` turns the mystery into 9
+failures on demand. That variable is the fix's other half — the same kind of pin
+`ROZUM_GATEWAY_AVAILABLE_RAM_BYTES` already was, useful to an operator on a shared host and to a
+test that is about something else. The residency harness now pins all three, and the suite is green
+with the host simulated at `critical`.
+
+The knob is tested on its parser rather than through the environment: a test that sets a
+process-wide variable races every test that reads it, which is the defect being fixed.
 ## chore(bench): bench-test-gateway-500 closed — the failure died with its model
 
 `test` × Qwen3.5-4B × claude, 3/3 green (27.7 / 160.3 / 215.0 s, rc=0, no timeouts). The gateway

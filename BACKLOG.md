@@ -12,7 +12,8 @@
 
 ## rozum-core::share tests read the real machine (found 2026-08-05)
 
-- [ ] **share-tests-isolate** — `cargo test -p rozum-core share::` fails on master right now: 7
+- [x] **share-tests-isolate — DONE 2026-08-05** (moved to SPRINT and finished the same day).
+- [ ] ~~**share-tests-isolate**~~ — `cargo test -p rozum-core share::` fails on master right now: 7
   failures single-threaded, 8/7/10 across three parallel runs. The failure text shows the tests
   seeing a live ledger and an absurd "actual free RAM ~1099511627776 MB", i.e. they read process-wide
   state instead of a fixture. The same workspace was 850/0 twice earlier today, so the suite's colour

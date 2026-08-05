@@ -319,6 +319,7 @@ flag still works via `--set` / env / config `[options]`.
 | `ROZUM_GATEWAY_ADAPTIVE_LOAD` | on | auto-shrink n_ctx/cache to the best fit instead of refusing |
 | `ROZUM_GATEWAY_MIN_FREE_RAM_BYTES` | 3 GiB | RAM kept free after a load (the no-overcommit headroom) |
 | `ROZUM_GATEWAY_AVAILABLE_RAM_BYTES` | (measured) | pin available RAM (be conservative on a shared host) |
+| `ROZUM_HOST_PRESSURE` | (measured) | pin host memory pressure: `normal` / `warn` / `critical`, or the sysctl numbers `0` / `2` / `4`. Same purpose as pinning available RAM — a conservative figure on a shared host, and a lever a test can hold still. An unreadable value is ignored rather than treated as `normal` |
 | `ROZUM_GATEWAY_RAM_BUDGET_FRAC` | 0.75 | reserved-footprint budget = total × this |
 | `ROZUM_GATEWAY_RAM_BUDGET_BYTES` | — | absolute reserved-footprint budget override |
 | `ROZUM_MLX_CACHE_GB` | 4 | MLX buffer-cache cap (also the per-process reserve) |

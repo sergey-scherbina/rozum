@@ -1489,6 +1489,13 @@ mod tests {
             // separate free-RAM lever never interferes (it has its own pure tests). Override cleared by
             // `residency_env_clear`.
             std::env::set_var("ROZUM_GATEWAY_AVAILABLE_RAM_BYTES", (1u64 << 60).to_string());
+            // And pin the THIRD lever, host memory pressure, for the same reason. Pinning two of
+            // three is what made this suite's colour depend on what else the machine was doing:
+            // measured 2026-08-05, 7 failures single-threaded and 8/7/10 across parallel runs
+            // while a release build and a resident model were up, then 0 twenty minutes later.
+            // Reproduced deterministically with `ROZUM_HOST_PRESSURE=warn` (9 failures) before
+            // this line existed.
+            std::env::set_var("ROZUM_HOST_PRESSURE", "normal");
         }
         dir
     }
@@ -1497,6 +1504,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
         // SAFETY: single-threaded test holding the shared env lock.
         unsafe {
+            std::env::remove_var("ROZUM_HOST_PRESSURE");
             std::env::remove_var("XDG_STATE_HOME");
             std::env::remove_var("ROZUM_GATEWAY_RESIDENCY_WAIT_SECS");
             std::env::remove_var("ROZUM_GATEWAY_RAM_BUDGET_BYTES");
