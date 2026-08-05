@@ -1916,3 +1916,23 @@ revive it.
   newest-first, so a sorted check would pass a file that was silently reordered.
   **Done when:** the gate fails on a deliberately duplicated id in a scratch copy, passes on `master`,
   and is wired somewhere that runs without being asked.
+
+- [ ] **codex-create-delivery-on-qwen** — does the `apply_patch` bridge land codex's CREATE forms
+  when the driver is the frozen model?
+  **Why:** `codex-opencode-create-delivery` shipped `rewrite_json_wrapped_apply_patch`
+  (`crates/rozum-gateway/src/codex_patch.rs:104`) and proved it on codex × gpt-oss: build delivery
+  went 0/3-land → 3/3-land. One residual never closed — `rpn` still threw a single rc11, a create
+  form the bridge does not fully land. That evidence path is gone (gpt-oss is off disk), but codex
+  is still installed and still a driver for Qwen3.5-4B, so the question survives its evidence.
+  **How:** `TASKS=rpn REPS=3 AGENTS=codex BENCH_PORT_BASE=8320 NCTX=32768
+  ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0 scripts/bench/agentic.sh`. rc11 = patch delivery (ours), rc10 =
+  the model wrote wrong code (not ours) — the distinction is the whole point of running it.
+  **Cost:** a GPU window that evicts the operator's resident model; ask first.
+  **Gotcha:** the bench opens with `gateway stop --force`; launchd brings `com.rozum.gateway` back.
+  **Done when:** either an rc11 is captured with its `-patches` shape (then it is a real bridge gap
+  and becomes a BUGS entry), or three reps come back clean and this closes as gpt-oss-specific.
+
+- [ ] **gpt-oss-20b (closed on the sprint 2026-08-05 — pointer only)** — the model is not on disk and
+  `models list` shows one. Kept as a line so the name resolves: the sprint entry holds the findings,
+  and the five gateway delivery bugs it drove out are shipped and independent of it. Reopen only if
+  gpt-oss is downloaded again, and re-measure rather than trusting the old numbers.

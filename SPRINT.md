@@ -1060,7 +1060,14 @@ Ordered by value. #1 is the active queue; do it the moment the GPU slot is free.
   rollup, and confirm the slot torn down clean (`pgrep -f 'gateway --model'`). It holds the GPU slot → do
   NOT start any other model run until it exits.
 
-- [~] **codex-opencode-create-delivery** — FIX IMPLEMENTED + VERIFIED on `feature/codex-create-delivery`
+- [x] **codex-opencode-create-delivery** — **LANDED; the entry was stale.** `3d03a35` is on `master`
+  and the code is at `crates/rozum-gateway/src/codex_patch.rs:104`; the branch is gone. Reconciled
+  2026-08-05. Of the two residuals below: the rc10 half (gpt-oss writes wrong code) **dies with its
+  model** — gpt-oss is not on disk and `models list` shows exactly one model. The rc11 half is still
+  a live question but about a DIFFERENT subject: whether the bridge lands codex's create forms when
+  the driver is Qwen3.5-4B. Moved to BACKLOG as `codex-create-delivery-on-qwen` rather than left
+  here reading as gpt-oss work. Original text kept below for its evidence.
+  FIX IMPLEMENTED + VERIFIED on `feature/codex-create-delivery`
   (`3d03a35`). `rewrite_json_wrapped_apply_patch` decodes the gpt-oss `-patches '[{"content":…}]'` JSON
   form before `apply_patch_block_to_fuzz`. Unit test green (7/7 apply_patch). E2E codex×gpt-oss×build:
   the `apply_patch-bridge` fired 8× and **build delivery went 0/3-land → 3/3-land (0 rc11; baseline was
@@ -3252,7 +3259,11 @@ Consolidated from the agentic matrix (`scripts/bench/agentic.sh`, sandbox on). R
 `verify_task` scores by **final file state**, not rc. Gold standard: **Qwen3.6-35B-A3B = 15/15**
 (claude/codex/opencode), the agentic pick; **Qwen3-30B-A3B** close behind. Per-model issues:
 
-- [~] **gpt-oss-20b** — claude **5/5**; codex/opencode the residual.
+- [x] **gpt-oss-20b** — **CLOSED 2026-08-05: the model is not on disk.** `models list` shows one
+  model, Qwen3.5-4B. Everything below is about a model nobody can run here, so it stops being sprint
+  work by the same rule that cleared the rest of the multi-model queue. Findings kept in place — the
+  five gateway delivery bugs it drove out are real and already shipped. Pointer in BACKLOG.
+  Original: claude **5/5**; codex/opencode the residual.
   - `fix`/`debug` (edit-existing): RESOLVED — five gateway delivery bugs (revert, churn, `\uXXXX`
     decode, read-repair-off, whitespace-`.rej` fallback), see the `codex×gpt-oss gateway reliability`
     entry above. codex×gpt-oss×fix ~1-2/5 → 5/6.
@@ -3773,11 +3784,16 @@ swap later). Spec: `docs/specs/agent-meeting-coordination.md`. Phased P1–P4.
   blocked, post `done:`/`blocked:` on finish, human messages are priority — on the agent's own
   judgement. Strengthened AGENTS.md "Meeting-room coordination" (join paths, the etiquette, the
   one-shot `rozum meetings post`).
-- [~] **P1.5 — TUI multi-room visibility.** The room picker (Ctrl-O / `/rooms`) already lists
+- [x] **P1.5 — TUI multi-room visibility. DONE 2026-08-05 by `ucc-meetings-in-tk`.** The room picker (Ctrl-O / `/rooms`) already lists
   every room enriched with participants + last-activity day, so the human can see + switch across
-  all rooms — the core multi-room visibility. A dedicated always-on overview *dashboard* (all rooms'
-  unread at a glance) is **interactive-shaped polish** — best built once the operator has used the
-  current TUI and says what the overview should show (can't be render-verified without a TTY).
+  all rooms — the core multi-room visibility. The always-on overview this entry was waiting for now
+  exists: the generated terminal client (`crates/rozum-meeting-tui`, one `.ssc` source shared with
+  the web client) shows the room picker as a permanent pane with a `@you` column beside every room —
+  verified live at 17 for `rozum` and 169 for `scalascript`, counted from the same cursor `inbox`
+  uses, so the number means the same thing in both places.
+  **Scope it honestly:** that column is unread MENTIONS, not unread messages. "All rooms' unread at a
+  glance" is delivered for the case that made the entry — being addressed and not noticing — and a
+  total-unread column is a small addition to the same table if the operator wants it.
 - [x] **P1.6 — local-default `Principal`: stable local identity (DONE 2026-06-18).**
   `src/meeting/local_identity.rs` persists a stable `{token, display}` in
   `~/.config/rozum/identity.json`; the TUI (`MeetingClient::connect_as`) + `rozum meetings post`
