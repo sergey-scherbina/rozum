@@ -9,7 +9,16 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 - **Status:** HALF FIXED 2026-08-05 — the respawn loop is fixed (`src/main.rs`, spec
   `docs/specs/meeting-daemon-supervise.md`): under launchd the foreground start now WAITS for the
-  incumbent and takes over instead of exiting 0. The socket-ownership half below is still OPEN: a
+  incumbent and takes over instead of exiting 0. **Verified on the host by rebuilding the exact
+  condition** — job booted out, daemon started by the CLIENT path, job bootstrapped back: `runs`
+  1 → 1 over 75 s where it used to climb every ~9 s, and the log stopped growing. Then the incumbent
+  was killed and the job's process took over (`meeting daemon gone; taking over`), leaving ONE daemon
+  that launchd owns and that holds both the socket and `:8401`. `doctor --services` now reports
+  `svc:meeting-daemon` as `ok` where it reported the split as `warn`.
+  **One measured limit, worth more than the fix:** the takeover is a RACE. At a 2 s poll the
+  supervised process lost it every time — a client spawns the instant a connect fails, a poller
+  wakes on its own schedule. 200 ms wins in practice (measured: takeover on the second check) but
+  the race is real, and only the ownership lock below removes it. The socket-ownership half below is still OPEN: a
   second binder unlinks a live listener's socket file rather than refusing, which is what lets two
   daemons share one path. Kept open deliberately — a change that also rewrites socket ownership is
   not reviewable as one unit.
