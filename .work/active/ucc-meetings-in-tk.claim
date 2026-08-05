@@ -1,6 +1,6 @@
 feature/ucc-meetings-in-tk 2026-08-04T10:51:01Z
 agent: claude-opus-5-housekeeping
-heartbeat: 2026-08-05T07:13:50Z
-status: attach.rs IS DELETED — the terminal client is generated, vendored and dispatched. Remaining: DEPLOY (operator's services)
-done-so-far: hand-written ratatui shell removed; both entry points exec the generated client; crate vendored at crates/rozum-meeting-tui so rozum builds with cargo alone; gate proves a fresh emission is byte-identical AND that the token never appears in it. Daemon gained badge/time, Bearer, plain-text submit, ready-made urls, POST /rooms, `today` alias. Upstream: ELEVEN capabilities/fixes landed, nine by us.
-next: DEPLOYMENT ONLY, and it touches the operator's running services — the live com.rozum.meeting-daemon is a deployed build WITHOUT Bearer and WITHOUT the `today` alias, so the shipped client cannot authenticate against it yet. Rebuild + restart that service, then a live end-to-end. NOT done without explicit permission.
+heartbeat: 2026-08-05T07:30:06Z
+status: DONE — merged to master (713b268), deployed, verified against the live daemon
+done-so-far: attach.rs deleted; generated client vendored and dispatched; daemon rebuilt+restarted; live end-to-end confirmed with the token supplied at RUNTIME
+next: release this claim

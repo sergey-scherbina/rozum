@@ -2694,7 +2694,20 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
 - [x] **ucc-poc-msglist** — DONE 2026-07-20. `clients/control/meeting-message-list.ssc` is one Tk source for
   React + ratatui, using one remote table and refresh tick. Isolated dual-target smoke emits web, builds the
   Cargo crate, asserts generated refresh wiring, and renders fetched fixture rows without touching services.
-- [~] **ucc-meetings-in-tk** — ONE `.ssc` source emitting both the UCC web meeting client and the
+- [x] **ucc-meetings-in-tk — DONE 2026-08-05, deployed and verified live (master `713b268`).**
+  `attach.rs` is deleted; `rozum meetings attach` and `rozum-tui` both exec the generated client,
+  vendored at `crates/rozum-meeting-tui` so rozum builds with cargo alone. The daemon was rebuilt
+  and restarted; the installed binary reads real rooms, real days and a real transcript from the
+  live daemon with its token taken from the ENVIRONMENT — the binary contains no secret, and the
+  gate proves it by exporting a known token and failing if it appears in the emitted source.
+  Deployment notes worth keeping: `kickstart -k` left an orphaned socket and the daemon then
+  refused to start ("already running") — the liveness check tests a FILE, not a process, and that
+  is worth its own fix. And rebuilding `target/release` invalidated the build artifacts the
+  deployed `~/.rozum/bin/rozum-gateway` pointed at, taking `:8089` down with exit 255 until the
+  fresh binary was installed the same way the deploy script builds it. Backups of both binaries are
+  in `~/.rozum/attic/`.
+  Eleven upstream capabilities/fixes landed in scalascript along the way, nine written here.
+- [ ] **ucc-meetings-in-tk (superseded entry below, kept for its findings)** — ONE `.ssc` source emitting both the UCC web meeting client and the
   native terminal one, so `rozum meetings attach` stops being hand-written Rust and the two cannot
   drift. Claimed 2026-08-04 (`.work/active/ucc-meetings-in-tk.claim`), branch
   `feature/ucc-meetings-in-tk`, worktree `.worktrees/feature/ucc-meetings-in-tk`.
