@@ -67,10 +67,31 @@ if [ "${UCC_SPA_ONLY:-0}" = "1" ]; then
   echo ">> UCC_SPA_ONLY=1 — skipping Rust binary builds (index/SPA-only redeploy)"
 else
 # 1) Build the thin dispatcher used by launchd. It execs rozum-gateway for control-serve.
+# Install a binary where something may be executing the old one.
+#
+# Writing a Mach-O in place poisons the NEXT exec of that inode: macOS kills it with SIGKILL, so
+# `launchctl list` shows -9, every start dies with rc=137, and the log is empty because nothing
+# gets far enough to write to it. Caused live on 2026-08-05 by one hand-typed `cp`, and measured
+# afterwards rather than assumed — the first three explanations were wrong:
+#
+#   cp over the file, then exec it   -> rc=137
+#   cp to a sibling, mv -f, exec it  -> rc=0
+#
+# The RUNNING process survives either way (also measured), which is why this looks harmless right
+# up until the service is restarted. `rm -f` before `cp` — what this script already did, for the
+# same cache, 2026-07-07 — gets a fresh inode and is enough; rename is that plus atomicity, so a
+# deploy has no window where the path is missing or half-written.
+install_bin() {
+  local src="$1" dst="$2"
+  mkdir -p "$(dirname "$dst")"
+  cp "$src" "$dst.new.$$"
+  chmod +x "$dst.new.$$"
+  mv -f "$dst.new.$$" "$dst"
+}
+
 echo ">> building rozum dispatcher ..."
 ( cd "$REPO" && cargo build -p rozum-cli --bin rozum )
-rm -f "$BIN"
-cp "$REPO/target/debug/rozum" "$BIN"
+install_bin "$REPO/target/debug/rozum" "$BIN"
 
 # 1b) Build the ACTUAL engine binary the dispatcher execs for every subcommand incl. control-serve
 # (`rozum-cli` is a pure-std shim with no dependency on `rozum-gateway` — rebuilding just the
@@ -83,8 +104,7 @@ echo ">> building rozum-gateway (the engine binary control-serve actually runs) 
 # rm BEFORE cp: overwriting a running Mach-O in place poisons the kernel's per-inode
 # code-signature cache and every subsequent exec dies with SIGKILL (rc=137, no output) —
 # hit live 2026-07-07. A fresh inode sidesteps it.
-rm -f "$BINDIR/rozum-gateway"
-cp "$REPO/target/release/rozum-gateway" "$BINDIR/rozum-gateway"
+install_bin "$REPO/target/release/rozum-gateway" "$BINDIR/rozum-gateway"
 
 # 1c) nadia — an agent chip in the UCC is a promise the machine can run it, and the coder/session
 # routes now REFUSE a launch whose agent is not on PATH rather than let it die as a 127 inside a
@@ -96,9 +116,7 @@ cp "$REPO/target/release/rozum-gateway" "$BINDIR/rozum-gateway"
 echo ">> building + installing nadia (the agent chip in Coders/Sessions/chat) ..."
 ( cd "$REPO" && cargo build -p nadia --release )
 NADIA_BIN="${NADIA_BIN:-$HOME/.cargo/bin/nadia}"
-mkdir -p "$(dirname "$NADIA_BIN")"
-rm -f "$NADIA_BIN"   # fresh inode — same code-signature-cache reason as above
-cp "$REPO/target/release/nadia" "$NADIA_BIN"
+install_bin "$REPO/target/release/nadia" "$NADIA_BIN"
 echo ">> nadia -> $NADIA_BIN"
 fi
 

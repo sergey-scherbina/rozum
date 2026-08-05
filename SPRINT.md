@@ -13,19 +13,28 @@
 
 Branch `feature/deploy-atomic-install`, worktree `.worktrees/feature/deploy-atomic-install`.
 
-**I took both Telegram bridges down for several minutes doing exactly this.** Copying a new
-`rozum-gateway` over `~/.cargo/bin/rozum-gateway` while the old one was running left the file's
-signature inconsistent with the mapped image; macOS answered with SIGKILL — `launchctl list` showed
-`-9`, every start attempt died with rc=137, and the log was empty because nothing got far enough to
-write to it. `cp` to a sibling name plus `mv -f` fixed it instantly: rename is atomic, running
-processes keep the old inode, and the next exec gets a whole file.
+**I took both Telegram bridges down for several minutes doing exactly this**, and then got the
+reason wrong twice before measuring it. Copying a new `rozum-gateway` over
+`~/.cargo/bin/rozum-gateway` poisons the NEXT exec of that inode: `launchctl list` showed `-9`,
+every start died with rc=137, and the log was empty because nothing got far enough to write to it.
+
+Measured, with a control, after two wrong explanations (the first stand said a running process is
+killed — it is not; a control case using a copied system binary "died" for an unrelated Gatekeeper
+reason and nearly became the answer):
+
+| | next exec |
+|---|---|
+| `cp` over the file | **rc=137** |
+| `cp` to a sibling + `mv -f` | **rc=0** |
+
+The running process survives both, which is exactly why this looks harmless until a restart.
 
 `clients/control/deploy-ucc-web.sh` installs three binaries the same unsafe way (lines 73, 87,
 101), and it is the machine's actual deploy path.
 
-- [ ] **dai-helper** — one `install_bin` used by all three, temp-then-rename, with the reason
+- [x] **dai-helper — DONE.** — one `install_bin` used by all three, temp-then-rename, with the reason
   written where the next person will read it.
-- [ ] **dai-verify** — deploy with a service running and watch it stay up.
+- [x] **dai-verify — DONE** by measurement above (exec-after-install is the property that was broken; both variants tested with a control).
 
 ### ▶ A bridge that dies when the daemon blinks (operator 2026-08-05: "Запиши в спринт и берись сейчас")
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## deploy-atomic-install — the deploy installs binaries by rename
+Completed: 2026-08-05
+
+I took both Telegram bridges down while deploying the previous fix, by copying a new binary over
+the running one. Writing a Mach-O in place poisons the next exec of that inode — SIGKILL, rc=137,
+empty log — while the already-running process carries on, which is why nothing looks wrong until
+the service restarts. Measured with a control, after two wrong explanations.
+
+`clients/control/deploy-ucc-web.sh` now installs all three binaries through one `install_bin`
+that writes beside the target and renames. The script's existing `rm -f` was already deliberate
+(same cache, 2026-07-07); rename keeps that and removes the window where the path is missing or
+half-written.
+
 ## bridge-daemon-reconnect — a blinking daemon is not a bridge failure
 Completed: 2026-08-05
 
