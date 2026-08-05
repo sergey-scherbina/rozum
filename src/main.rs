@@ -3624,8 +3624,14 @@ async fn run_meetings_start(foreground: bool) {
                 "meeting daemon already running ({}); supervised — waiting to take over",
                 sock.display()
             );
+            // The poll interval is a RACE WINDOW, not a politeness knob, and it was measured: at
+            // 2 s the incumbent died and a client-spawned daemon had taken the socket before this
+            // process woke up — every time, because a client spawns the instant a connect fails
+            // while this one was asleep. 200 ms narrows it to something a client rarely beats; it
+            // does NOT close it. Closing it needs the socket-ownership lock that BUG-025 still
+            // holds open, and no interval here substitutes for that.
             while daemon_alive(&sock).await {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
             eprintln!("meeting daemon gone; taking over");
         } else {

@@ -42,8 +42,16 @@ unknown length of time. It is BUG-013's family again: running, and not serving w
 When `meetings start --foreground` finds a daemon already alive:
 
 - **Under a supervisor** — wait for the incumbent to disappear, then become the daemon. The job
-  holds its slot, so there is no respawn loop, and the service self-heals the moment a
-  client-spawned daemon dies, which is exactly what a supervised service is for.
+  holds its slot, so there is no respawn loop.
+
+  **Measured on the host, and it corrects the sentence I first wrote here.** I claimed this also
+  makes the job the real owner and lets the service self-heal. It does not, and the experiment says
+  so plainly: when the incumbent was killed, a client-spawned daemon had the socket ~2 s later and
+  the supervised process was still waiting. A client spawns the instant a connect fails; a poller
+  wakes on its own schedule and loses. Tightening the interval to 200 ms narrows the window enough
+  that a client rarely beats it, but the race is real and only the socket-ownership lock closes it.
+  What this change delivers for certain is the end of the respawn loop; ownership is the other half
+  of BUG-025 and is still open.
 - **Anywhere else** — keep today's behaviour: say so and exit 0.
 
 That second half is not politeness, it is required. `spawn_detached_meetings` starts its child with
@@ -74,11 +82,19 @@ to pid 1 too, so it cannot tell the two cases apart, which is the whole question
 - On the host, after deploying: `launchctl print gui/501/com.rozum.meeting-daemon | grep 'runs ='`
   twice a minute apart with a client-spawned daemon alive. The counter must not move, and
   `launchctl list` must show a pid rather than `-`.
+  **Done 2026-08-05, and this is the result:** the job was booted out, a daemon was started by the
+  CLIENT path, the job was bootstrapped back — `state = running`, `runs` 1 → 1 over 75 s, and the
+  log stopped growing at 544 lines. The log holds both messages back to back, the old binary's
+  `already running` and the new `supervised — waiting to take over`.
+- **You cannot simulate this locally, and the next person will try.** Setting `XPC_SERVICE_NAME` by
+  hand makes macOS kill the process with `SIGTRAP` before `main` — `XPC_SERVICE_NAME=x /bin/echo ok`
+  exits 133 with no output. Reading the variable is fine; only setting it is punished. The
+  supervised branch can therefore only be exercised by a real launchd job.
 
 ## Out of scope, deliberately
 
 Two daemons can still share one socket path: a second binder unlinks the first one's socket file
-rather than refusing. This change removes the loop and gives the job real ownership, but the
-duplicate-daemon class needs a lock file so a second binder refuses — bigger, separate, and still
+rather than refusing. This change removes the loop; it does NOT give the job real ownership, as the
+measurement above shows. The duplicate-daemon class needs a lock file so a second binder refuses — bigger, separate, and still
 open under BUG-025. Left there rather than folded in here, because a fix that also rewrites socket
 ownership is one nobody can review as a unit.
