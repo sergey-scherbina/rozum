@@ -1,6 +1,0 @@
-feature/ucc-meetings-in-tk 2026-08-04T10:51:01Z
-agent: claude-opus-5-housekeeping
-heartbeat: 2026-08-05T07:30:06Z
-status: DONE — merged to master (713b268), deployed, verified against the live daemon
-done-so-far: attach.rs deleted; generated client vendored and dispatched; daemon rebuilt+restarted; live end-to-end confirmed with the token supplied at RUNTIME
-next: release this claim
