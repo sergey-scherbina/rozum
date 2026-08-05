@@ -1,5 +1,19 @@
 # Changelog
 
+## chore(bench): bench-test-gateway-500 closed — the failure died with its model
+
+`test` × Qwen3.5-4B × claude, 3/3 green (27.7 / 160.3 / 215.0 s, rc=0, no timeouts). The gateway
+500 that Devstral hit after its first tool result cannot be reproduced on the only model still on
+disk. Worth recording HOW it was closed: the gateway log has no request statuses in it, so the
+absence of a 500 there is not evidence — what settles it is three completed multi-turn tool
+conversations and a deterministic verifier that found both files, which is exactly the state
+Devstral never reached.
+
+Two things surfaced while checking the machine afterwards. BUG-024's disk fallback was confirmed in
+production — a client-spawned daemon with no secret in its environment served `:8401` from disk.
+And BUG-025 was filed: the daemon detaches, so its `KeepAlive` job can never own it and respawns
+every ~9 seconds forever, which also lets two daemons share one socket path.
+
 ## service-liveness-watch — asking a service whether it is doing its job
 Completed: 2026-08-05
 Spec: `docs/specs/service-liveness.md`

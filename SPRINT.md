@@ -1196,7 +1196,7 @@ Ordered by value. #1 is the active queue; do it the moment the GPU slot is free.
     results: `scripts/bench/results/agentic-20260703-145343/per-run.csv`
   - Remaining: rerun 35B-DWQ + Coder-30B after freeing RAM (close Chrome + spare CC windows).
 
-- [~] **bench-test-gateway-500** — BUG (found 2026-07-03 Devstral matrix run). The `test` task
+- [x] **bench-test-gateway-500** — BUG (found 2026-07-03 Devstral matrix run). The `test` task
   (create Cargo.toml + src/main.rs with fn reverse + #[cfg(test)] + run cargo test + cargo run)
   consistently fails with rc=1 for Devstral-Small-2507-4bit (REPS=3, all 3 reps, 0/3 pass).
   Root cause: gateway returns HTTP 500 after the Write Cargo.toml tool result, when the model
@@ -1223,6 +1223,16 @@ Ordered by value. #1 is the active queue; do it the moment the GPU slot is free.
   The 500 fired after the FIRST tool result, a couple of thousand tokens in, nowhere near any context
   limit, so the smaller window cannot hide it. Log:
   `…/scratchpad/bench-500.log`, results under `…/scratchpad/bench-500/`.
+  **CLOSED 2026-08-05 — does not reproduce; the bug died with its model.** `test` passed 3/3 on
+  Qwen3.5-4B, rc=0 every rep, no timeouts, 27.7 s / 160.3 s / 215.0 s; footprint 6397 MB, MLX peak
+  4290 MB, so RAM was never near the edge. **The evidence is the runs, not the log.** The gateway log
+  is 34 lines and records no request statuses at all, so "no 500 in the log" would have proved
+  nothing — I checked and it does not. What proves it is that every rep completed a MULTI-TURN tool
+  conversation (turns 3/6/6, tool uses 2/4/4) and the deterministic verifier found both files: the
+  500 fired precisely after the first tool result, so a run that goes on to write `src/main.rs`,
+  compile it and run it never met the failure. Devstral is not on disk and is not coming back;
+  re-downloading it to chase a gateway 500 that no surviving model can trigger is not worth the GPU
+  time. If a 500 mid-conversation ever appears again, the debug angle above still stands.
   Note the bench begins with `gateway stop --force`, so the operator's resident gateway is evicted;
   launchd `KeepAlive` brings `com.rozum.gateway` back on its own.
 

@@ -5,6 +5,57 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-025 — the meeting daemon detaches, so its launchd job can never own it: a permanent respawn loop and duplicate daemons on one socket
+
+- **Status:** open, found 2026-08-05 while checking the machine after an authorised bench run. NOT
+  fixed — I stopped the loop by hand on this host, and every attempt to clean it up by killing
+  processes produced a NEW daemon within seconds, which is the finding rather than an accident.
+- **Found by:** noticing `com.rozum.meeting-daemon` had `runs = 78` and a log that was 525 lines of
+  the same sentence. Nothing was broken from the outside — rooms answered, `:8401` answered.
+- **Severity:** P2. Nothing is lost today, but it burns a process spawn every ~9 seconds forever,
+  grows a log without bound, and can put the unix socket and `:8401` in DIFFERENT processes.
+
+**The loop.** The plist is `KeepAlive = true` and runs `meetings start --foreground`. When any
+daemon already holds the socket, that command prints `meeting daemon already running` and exits 0 —
+so launchd immediately starts another, which sees the same thing. Measured: `runs` climbed 78 → 90
+in about four minutes, roughly one spawn every nine seconds, indefinitely, with one log line each.
+
+**Why the job cannot win.** The running daemon has `ppid 1` — it detaches. launchd can therefore
+only own it when the job's OWN process becomes the daemon, which happens only if no other daemon
+exists at spawn time. Once a client has autostarted one (BUG-024's `spawn_daemon`), the managed job
+is locked out of ownership permanently, and `launchctl list` shows `-` where a pid should be.
+
+**Killing does not fix it, and this is the part to keep.** Terminate the daemon and a replacement
+appears within seconds, spawned by whichever client next touches the socket — observed three times
+in a row on this host (pids 66346, 76781, and one during the bootstrap window). A daemon that exits
+also takes the socket FILE with it, so the next client sees no socket, spawns its own, and binds a
+fresh one — while the previous listener may still be alive on the unlinked inode. That is how two
+daemons end up on one path.
+
+**The split that results.** Observed directly: `:8401` was held by pid 70945 (the launchd-owned
+instance) while the unix socket's accepted connections were on pid 76781 (a client-spawned one) —
+nine connection fds on the second against one listener fd on the first. Both read the same room
+files on disk, so this is not visible as wrong answers today; it is the same shape as the messenger
+pool's orphan double-reply, and it is BUG-013's family: running, and not serving what you think.
+
+**How it was left on this host.** launchd owns pid 70945, `runs` has been stable for minutes, the
+socket answers `meetings status`, and `:8401` answers 200. One extra daemon may still appear; it is
+harmless in the way described above.
+
+**Fix directions, none implemented, smallest first.**
+1. Make `meetings start --foreground` SUPERVISE rather than exit when a daemon exists — then the
+   launchd job always owns a process and `KeepAlive` means what it says.
+2. Make socket ownership authoritative with a lock file, so a second binder refuses instead of
+   unlinking a live listener's socket. This is the one that removes the duplicate-daemon class.
+3. Have `spawn_daemon` hand off to launchd where a job exists, rather than creating a peer it will
+   then have to compete with. Related to BUG-024, which was closed on the narrower question.
+
+**Repro.** `launchctl print gui/501/com.rozum.meeting-daemon | grep 'runs ='` twice a minute apart
+while any client-spawned daemon is alive; the counter climbs. `ps -o ppid= -p $(pgrep -f 'meetings
+start')` shows `1`.
+
+---
+
 ## BUG-024 — a client-triggered auto-start brings the meeting daemon up WITHOUT its REST secret, and then holds the socket
 
 - **Status:** DONE 2026-08-05. Filed first as a duplicate `BUG-017` — that number was already
@@ -30,6 +81,12 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
   any secret is now a loud `warn!` instead of a silent `return` — the silence is what made this cost
   hours. Covered by `the_web_secret_falls_back_to_disk_but_the_environment_still_wins`, which also
   pins that a blank value is NOT a secret. The secret was written to that path on this host at 600.
+  **CONFIRMED IN PRODUCTION 2026-08-05, by accident.** While cleaning up BUG-025 a daemon spawned by
+  a CLIENT — parent `launchd` after detaching, no `ROZUM_WEB_SECRET` anywhere in its environment
+  (checked with `ps eww`, which does show other processes' environments on this host: `PATH` and
+  `HOME` were visible and the secret genuinely was not) — served `:8401` correctly. Before this fix
+  that daemon would have served the socket and nothing else, which is the whole bug. The unit test
+  said the fallback works; this says it works where it matters.
   ⚠️ The code landed inside another agent's claim commit `beace56` by accident: I edited it in the
   SHARED main checkout instead of my worktree, and their `claim:` commit swept it. Told them in the
   room; history on a shared branch is not worth rewriting for this. `AGENTS.md` says worktree first,
