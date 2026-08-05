@@ -192,4 +192,25 @@ grep -Fq "$BASE/rooms\", \"meetingsNewRoom\"" "$RUST_SOURCE" || {
 }
 echo "PASS: authenticated read + composer + pickers + clock + room creation"
 echo "PASS: the token is DECLARED, not compiled in — the binary is shareable"
+# The VENDORED crate must match a fresh emission byte for byte, or the checked-in client is a
+# copy of something that no longer exists. This is what lets rozum build without a ScalaScript
+# toolchain while keeping the source of truth in the .ssc.
+VENDORED="$ROOT/crates/rozum-meeting-tui/src/main.rs"
+if [[ -f "$VENDORED" ]]; then
+  FRESH="$TMP/vendor-check"
+  SSC_TOOLS="$SSC_TOOLS" bash "$CONTROL_DIR/emit-meetings-tui.sh" "$FRESH" >/dev/null
+  if ! diff -q "$FRESH/src/main.rs" "$VENDORED" >/dev/null; then
+    echo "FAIL: crates/rozum-meeting-tui is stale — re-run clients/control/emit-meetings-tui.sh" >&2
+    diff "$VENDORED" "$FRESH/src/main.rs" | head -20 >&2
+    exit 1
+  fi
+  # And the hand-written manifest must still declare every crate the emission reaches for.
+  for dep in $(grep -oE '^[a-z_0-9]+ = ' "$FRESH/Cargo.toml.emitted" | tr -d ' ='); do
+    grep -qE "^$dep = " "$ROOT/crates/rozum-meeting-tui/Cargo.toml" || {
+      echo "FAIL: the emission needs '$dep' and the vendored Cargo.toml does not declare it" >&2
+      exit 1
+    }
+  done
+  echo "PASS: the vendored crate is byte-identical to a fresh emission, deps declared"
+fi
 echo "PASS: ucc-meetings-in-tk Stage A dual-target smoke"

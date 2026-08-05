@@ -2,7 +2,65 @@
 // (room/app orchestration) live here with the ratatui rendering below; they talk to the
 // daemon via the shared `crate::meeting::` client libs.
 pub mod app;
-pub mod attach;
+
+use std::path::PathBuf;
+
+/// Run the GENERATED terminal meeting client (`crates/rozum-meeting-tui`, emitted from
+/// `clients/control/meetings.ssc`) — the replacement for the hand-written ratatui shell that used
+/// to live in `attach.rs`.
+///
+/// Both entry points come here (`rozum meetings attach` and the standalone `rozum-tui`), so there
+/// is one answer to "which client runs" rather than two that can drift.
+///
+/// `room` is accepted and NOT forwarded, deliberately. The generated client picks its room from a
+/// live list at runtime; its own configuration is resolved when it is emitted, so there is nothing
+/// to hand it on the command line. Saying so beats dropping the argument silently.
+pub fn launch_generated(room: Option<String>) -> Result<(), String> {
+    if let Some(name) = room {
+        eprintln!(
+            "rozum: --room {name} is not forwarded — pick the room in the client's list (it shows \
+             unseen mentions per room). This client is generated; see docs/specs/ucc-meetings-in-tk.md."
+        );
+    }
+    let bin = resolve_generated("rozum-meeting-tui");
+    let err = exec_replacing(&bin);
+    Err(format!(
+        "could not run {} ({err}). It is built from the workspace: cargo build -p rozum-meeting-tui",
+        bin.display()
+    ))
+}
+
+/// Next to the running binary first — so a freshly built `target/debug/rozum` finds its sibling
+/// without an install — else bare, letting the OS search `PATH`. Mirrors `rozum-cli`'s `resolve`.
+fn resolve_generated(name: &str) -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let cand = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            if cand.is_file() {
+                return cand;
+            }
+        }
+    }
+    PathBuf::from(name)
+}
+
+/// Replace this process with the client. A terminal UI wants the tty and the exit code to be its
+/// own; spawning and waiting would put this process between the user and their terminal for no
+/// reason. Returns only on failure.
+fn exec_replacing(bin: &std::path::Path) -> std::io::Error {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        std::process::Command::new(bin).exec()
+    }
+    #[cfg(not(unix))]
+    {
+        match std::process::Command::new(bin).status() {
+            Ok(st) => std::process::exit(st.code().unwrap_or(1)),
+            Err(e) => e,
+        }
+    }
+}
 
 pub use app::{RoomConfig, run_room};
 

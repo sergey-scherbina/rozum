@@ -1233,7 +1233,7 @@ async fn main() {
                     cli.per_turn_budget,
                 )
                 .await;
-            } else if let Err(e) = rozum::tui::attach::run_attach(cli.room).await {
+            } else if let Err(e) = rozum::tui::launch_generated(cli.room) {
                 eprintln!("rozum: {e}");
                 std::process::exit(1);
             }
@@ -1437,7 +1437,7 @@ async fn main() {
             MeetingsAction::Stop => run_meetings_stop(),
             MeetingsAction::Status => run_meetings_status().await,
             MeetingsAction::Attach { room } => {
-                if let Err(e) = rozum::tui::attach::run_attach(room).await {
+                if let Err(e) = rozum::tui::launch_generated(room) {
                     eprintln!("attach error: {e}");
                     std::process::exit(1);
                 }

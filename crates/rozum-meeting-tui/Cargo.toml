@@ -1,0 +1,25 @@
+# The terminal meeting client — GENERATED from clients/control/meetings.ssc.
+#
+# `src/main.rs` is vendored verbatim so that building rozum needs cargo and nothing else: no
+# ScalaScript toolchain, on any platform, in CI. Regenerate with clients/control/emit-meetings-tui.sh;
+# clients/control/test/ucc-meetings-dual-target.sh proves a fresh emission is byte-identical to what
+# is committed, so the copy cannot drift from its source.
+#
+# This manifest is HAND-WRITTEN rather than vendored: the emitter names its crate `app`, which is no
+# use in a workspace. The emitted manifest is kept beside it as `Cargo.toml.emitted` and the gate
+# compares their dependency lists — so a future emission that reaches for a new crate cannot end up
+# missing here, which would fail as a confusing compile error a long way from its cause.
+[package]
+name = "rozum-meeting-tui"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "rozum-meeting-tui"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+ureq = "2"
+serde_json = "1"

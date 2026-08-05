@@ -480,6 +480,11 @@ async fn messages(
     let Some(root) = room_root(&state.registry, &name) else {
         return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
     };
+    // `today` is a symbolic date, and it exists because a generated client cannot compute one:
+    // `env()` on the terminal target resolves at EMIT time, so a shipped binary would carry
+    // whatever day it was built on. The server is the only side that knows what today is — the
+    // same call as the ready-made urls and the derived badge.
+    let date = if date == "today" { store::date_of_ts(now_secs()) } else { date };
     let from = q.from.unwrap_or(0);
     let count = q.count.unwrap_or(DEFAULT_COUNT).min(MAX_COUNT);
     let probe = count.saturating_add(1);
@@ -1251,6 +1256,34 @@ mod tests {
         assert_eq!(create_topic(""), None);
         assert_eq!(create_topic("   "), None);
         assert_eq!(create_topic("{\"topic\":\"  \"}"), None);
+    }
+
+    /// `messages/today` means the current day.
+    ///
+    /// A generated client cannot compute a date — `env()` resolves in the emitting process, so a
+    /// shipped binary would carry the day it was BUILT on and read an empty transcript forever
+    /// after. The alias moves that knowledge to the only side that has it.
+    #[tokio::test]
+    async fn messages_today_resolves_to_the_current_day() {
+        let dir = tempdir().unwrap();
+        let (date, _root) = seed_room(dir.path(), "alpha", &["hello"]);
+        let (addr, _s) = start(dir.path().to_path_buf(), "sekret").await;
+        let c = reqwest::Client::new();
+
+        let by_alias: Value = c.get(format!("http://{addr}/rooms/alpha/messages/today"))
+            .bearer_auth("sekret").send().await.unwrap().json().await.unwrap();
+        let by_date: Value = c.get(format!("http://{addr}/rooms/alpha/messages/{date}"))
+            .bearer_auth("sekret").send().await.unwrap().json().await.unwrap();
+
+        // The seeded turn is written at a FIXED timestamp, so `date` is that day and today may not
+        // be — what must hold is that the alias resolves to a real day and answers, and that when
+        // they are the same day the two reads agree.
+        assert_eq!(by_alias["room"], "alpha");
+        assert_ne!(by_alias["date"], "today", "the alias was passed through unresolved");
+        assert_eq!(by_alias["date"], store::date_of_ts(now_secs()));
+        if by_alias["date"] == by_date["date"] {
+            assert_eq!(by_alias["messages"], by_date["messages"]);
+        }
     }
 
     /// A turn with no timestamp renders no clock rather than 1970 — the client prints the string

@@ -1,10 +1,11 @@
-//! `rozum-tui` — thin meeting-room TUI frontend. Attaches a ratatui client to the meeting daemon.
+//! `rozum-tui` — thin meeting-room TUI frontend. Execs the GENERATED client
+//! (`crates/rozum-meeting-tui`, emitted from `clients/control/meetings.ssc`).
 //! Links only `rozum-meeting` (no model engines), so it builds in seconds. The legacy in-process
 //! room (model-as-participant sampling, web/telegram/discord bridges) stays in the umbrella
 //! `rozum` binary. Part of the binary split (`docs/specs/binary-split.md`).
 
 use clap::Parser;
-use rozum_meeting::tui::attach::run_attach;
+use rozum_meeting::tui::launch_generated;
 
 #[derive(Parser)]
 #[command(
@@ -17,10 +18,11 @@ struct Cli {
     room: Option<String>,
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
-    if let Err(e) = run_attach(cli.room).await {
+    // No async runtime any more: this binary's whole job is to hand the terminal to the generated
+    // client, which it does by replacing itself.
+    if let Err(e) = launch_generated(cli.room) {
         eprintln!("rozum-tui: {e}");
         std::process::exit(1);
     }
