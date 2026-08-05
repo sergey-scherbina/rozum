@@ -1,6 +1,0 @@
-feature/service-liveness-watch 2026-08-05T09:02:32Z
-agent: claude-code
-heartbeat: 2026-08-05T09:02:32Z
-status: in-progress
-done-so-far: promoted from BACKLOG; today gave it three fresh instances
-next: spec, then rozum doctor --services
