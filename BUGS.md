@@ -7,9 +7,24 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ## BUG-025 — the meeting daemon detaches, so its launchd job can never own it: a permanent respawn loop and duplicate daemons on one socket
 
-- **Status:** open, found 2026-08-05 while checking the machine after an authorised bench run. NOT
-  fixed — I stopped the loop by hand on this host, and every attempt to clean it up by killing
-  processes produced a NEW daemon within seconds, which is the finding rather than an accident.
+- **Status:** HALF FIXED 2026-08-05 — the respawn loop is fixed (`src/main.rs`, spec
+  `docs/specs/meeting-daemon-supervise.md`): under launchd the foreground start now WAITS for the
+  incumbent and takes over instead of exiting 0. **Verified on the host by rebuilding the exact
+  condition** — job booted out, daemon started by the CLIENT path, job bootstrapped back: `runs`
+  1 → 1 over 75 s where it used to climb every ~9 s, and the log stopped growing. Then the incumbent
+  was killed and the job's process took over (`meeting daemon gone; taking over`), leaving ONE daemon
+  that launchd owns and that holds both the socket and `:8401`. `doctor --services` now reports
+  `svc:meeting-daemon` as `ok` where it reported the split as `warn`.
+  **One measured limit, worth more than the fix:** the takeover is a RACE. At a 2 s poll the
+  supervised process lost it every time — a client spawns the instant a connect fails, a poller
+  wakes on its own schedule. 200 ms wins in practice (measured: takeover on the second check) but
+  the race is real, and only the ownership lock below removes it. The socket-ownership half below is still OPEN: a
+  second binder unlinks a live listener's socket file rather than refusing, which is what lets two
+  daemons share one path. Kept open deliberately — a change that also rewrites socket ownership is
+  not reviewable as one unit.
+- **Also filed independently, ninety minutes earlier, from the other end:** `doctor --services`
+  reported the split ownership as `warn` (BACKLOG `meeting-daemon-ownership`, now a pointer here).
+  Two agents, two symptoms, one problem — and that check is the way to see the fix land.
 - **Found by:** noticing `com.rozum.meeting-daemon` had `runs = 78` and a log that was 525 lines of
   the same sentence. Nothing was broken from the outside — rooms answered, `:8401` answered.
 - **Severity:** P2. Nothing is lost today, but it burns a process spawn every ~9 seconds forever,

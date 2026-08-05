@@ -1,5 +1,19 @@
 # Changelog
 
+## fix(meetings): the launchd job waits for the incumbent instead of stepping aside — BUG-025 half
+
+`exit(0)` under `KeepAlive = true` is a supervisor asking for a restart, so the meeting daemon's
+job spawned a copy every ~9 seconds forever while everything looked healthy from outside. Under
+supervision the foreground start now waits and takes over; anywhere else it still exits, because
+`spawn_detached_meetings` uses the same flag and an unconditional wait would leave the loser of
+every spawn race as a permanent standby.
+
+Two things the measurement changed. The takeover is a race, and at a 2 s poll it was lost every
+time to a client autostart — 200 ms wins in practice without closing it. And the claim that this
+gives launchd real ownership was wrong as written; ownership needs the socket lock that BUG-025
+still holds open. Verified on the host by rebuilding the condition rather than by reasoning:
+`runs` 1 → 1 over 75 s, then a clean takeover to a single launchd-owned daemon.
+
 ## share-tests-isolate — a suite whose colour depended on the machine
 Completed: 2026-08-05
 
