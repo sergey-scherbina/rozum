@@ -40,7 +40,33 @@ compile errors — that variety should have been the clue, and instead it read a
 
 ## BUG-025 — the meeting daemon detaches, so its launchd job can never own it: a permanent respawn loop and duplicate daemons on one socket
 
-- **Status:** HALF FIXED 2026-08-05 — the respawn loop is fixed (`src/main.rs`, spec
+- **Status:** FIXED 2026-08-05, both halves. The ownership half landed second
+  (`docs/specs/meeting-socket-ownership.md`): a daemon takes an `flock` beside the socket before it
+  touches the socket file, and a daemon that cannot take it REFUSES rather than unlinking a live
+  listener's socket. Verified on the host — a challenger against a live owner printed the refusal
+  and the owner was untouched, where before it would have bound over it.
+  **Three things the host found that the unit tests could not, all now fixed:**
+  1. `supervised_by_launchd` accepted any non-empty `XPC_SERVICE_NAME`. macOS sets that variable to
+     the string `0` on ordinary processes, so an interactive start against a live daemon waited
+     forever. It also INHERITS, so a client under `com.rozum.gateway` would have made the same call.
+     It now tests for this job's exact label. **The unit test passed throughout, because it asserted
+     the rule the code implemented rather than the behaviour the system needed.**
+  2. The supervised retry had no sleep. With the owner's socket file missing, `daemon_alive` returns
+     instantly and the bind is refused instantly, so the retry burned CPU — measured at 3–4% per
+     process. Now 1 s between attempts (measured after: 0.03 s of CPU over 10 s).
+  3. **Forbidding theft removed the system's only self-healing move.** An owner whose socket path no
+     longer points at its socket is unreachable, holds the lock, and no successor may take over — so
+     the service stayed dead until a human killed it, which is WORSE than the bug. The owner now
+     watches its own reachability by inode every 5 s and exits when it is no longer the socket
+     clients reach; the kernel drops its lock and the next start serves. Measured on the host:
+     removing the socket file, service back in ~2 s with no human. The shutdown path had the same
+     theft one step later — it removed the socket path unconditionally — and now removes it only
+     while it is still ours.
+- **A blind spot this opens in `doctor --services`, for whoever owns that check:** it reports the
+  launchd job's pid and probes the endpoint, and both pass when the job's process is merely WAITING
+  while a client-spawned daemon serves. Observed exactly that: `svc:meeting-daemon running (pid
+  42206)` while 42132 held the lock and the socket. Healthy, but not what the line says.
+- **Previously:** HALF FIXED — the respawn loop was fixed (`src/main.rs`, spec
   `docs/specs/meeting-daemon-supervise.md`): under launchd the foreground start now WAITS for the
   incumbent and takes over instead of exiting 0. **Verified on the host by rebuilding the exact
   condition** — job booted out, daemon started by the CLIENT path, job bootstrapped back: `runs`

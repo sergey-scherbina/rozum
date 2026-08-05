@@ -1,5 +1,20 @@
 # Changelog
 
+## fix(meetings): one daemon owns the socket — BUG-025 closed
+
+`serve_daemon` unlinked whatever socket file was there before binding, which is right for a socket
+left by a crashed daemon and catastrophic for one a live daemon is serving on: two processes stayed
+alive, one answering and one holding a listener nobody could reach. An `flock` beside the socket now
+decides the winner before anyone touches the file, and the loser refuses.
+
+The host found three things the tests could not, and the third is the one worth remembering:
+forbidding theft removed the system's only self-healing move, so a daemon that became unreachable
+wedged the service until a human intervened — worse than the bug. The owner now watches its own
+reachability by inode and steps aside when it is no longer the socket clients reach. Also: the
+supervised marker accepted `XPC_SERVICE_NAME=0` (macOS sets that on ordinary processes) and hung
+interactive runs; the retry had no sleep and burned CPU; and the shutdown path stole a successor's
+socket the same way the bind path used to.
+
 ## wordcount-regression — the check was unwinnable, not the task
 Completed: 2026-08-05
 

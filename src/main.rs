@@ -3612,67 +3612,97 @@ async fn run_meetings_start(foreground: bool) {
         return;
     }
 
-    // Foreground: this process IS the daemon.
-    if daemon_alive(&sock).await {
+    // Foreground: this process IS the daemon. Under supervision this is a LOOP: losing the
+    // ownership lock to a client that spawned in the same instant must send us back to waiting,
+    // not cost launchd its process — that would rebuild the respawn loop by another road.
+    let supervised = supervised_by_launchd(std::env::var("XPC_SERVICE_NAME").ok());
+    loop {
+        if daemon_alive(&sock).await {
         // BUG-025. Exiting here is fatal under a supervisor: `exit(0)` says "my work is done" and
         // `KeepAlive = true` says "you are never done", so launchd starts another copy to step
         // aside again — one process every ~9 s, forever, while everything looks healthy from
         // outside. Hold the slot instead and take over when the incumbent goes; that is what makes
         // the job the real owner of the service rather than a bystander.
-        if supervised_by_launchd(std::env::var("XPC_SERVICE_NAME").ok()) {
-            eprintln!(
-                "meeting daemon already running ({}); supervised — waiting to take over",
-                sock.display()
-            );
-            // The poll interval is a RACE WINDOW, not a politeness knob, and it was measured: at
-            // 2 s the incumbent died and a client-spawned daemon had taken the socket before this
-            // process woke up — every time, because a client spawns the instant a connect fails
-            // while this one was asleep. 200 ms narrows it to something a client rarely beats; it
-            // does NOT close it. Closing it needs the socket-ownership lock that BUG-025 still
-            // holds open, and no interval here substitutes for that.
-            while daemon_alive(&sock).await {
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if supervised {
+                eprintln!(
+                    "meeting daemon already running ({}); supervised — waiting to take over",
+                    sock.display()
+                );
+                // The poll interval is a RACE WINDOW, not a politeness knob, and it was
+                // measured: at 2 s the incumbent died and a client-spawned daemon had taken the
+                // socket before this process woke up — every time, because a client spawns the
+                // instant a connect fails while this one was asleep. 200 ms narrows it. What
+                // CLOSES it is the ownership lock in `serve_daemon`: losing this poll is now only
+                // a lost round of this loop, because the winner is decided by the lock rather than
+                // by who unlinks the socket last.
+                while daemon_alive(&sock).await {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                eprintln!("meeting daemon gone; taking over");
+            } else {
+                // NOT politeness: `spawn_detached_meetings` starts its child with this same flag,
+                // and two clients can both find no daemon and both spawn one. Waiting
+                // unconditionally would leave the loser of every race as a permanent idle standby
+                // — a process leak traded for a respawn loop.
+                eprintln!("meeting daemon already running ({})", sock.display());
+                return;
             }
-            eprintln!("meeting daemon gone; taking over");
-        } else {
-            // NOT politeness: `spawn_detached_meetings` starts its child with this same flag, and
-            // two clients can both find no daemon and both spawn one. Waiting unconditionally would
-            // leave the loser of every race as a permanent idle standby — a process leak traded for
-            // a respawn loop.
-            eprintln!("meeting daemon already running ({})", sock.display());
-            return;
         }
-    }
-    let state_dir = rozum_state_dir();
-    let _ = std::fs::create_dir_all(&state_dir);
-    let pid_path = state_dir.join("meetings.pid");
-    let _ = std::fs::write(&pid_path, std::process::id().to_string());
+        let state_dir = rozum_state_dir();
+        let _ = std::fs::create_dir_all(&state_dir);
+        let pid_path = state_dir.join("meetings.pid");
+        let _ = std::fs::write(&pid_path, std::process::id().to_string());
 
-    if let Ok(removed) = rozum::meeting::prune_registered(&state_dir) {
-        for name in &removed {
-            eprintln!("meetings: pruned stale room '{name}'");
+        if let Ok(removed) = rozum::meeting::prune_registered(&state_dir) {
+            for name in &removed {
+                eprintln!("meetings: pruned stale room '{name}'");
+            }
         }
-    }
 
-    let registry = std::sync::Arc::new(RoomRegistry::new(state_dir));
-    if let Err(e) = serve_daemon(&sock, registry).await {
-        eprintln!("meeting daemon error: {e}");
+        let registry = std::sync::Arc::new(RoomRegistry::new(state_dir));
+        match serve_daemon(&sock, registry).await {
+            Ok(()) => {}
+            // Another daemon took ownership between our check and our bind. Under supervision that
+            // is a lost round, not a failure: go back to waiting. Anywhere else it is the correct
+            // end of a process that was never meant to be the second daemon.
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && supervised => {
+                // SLEEP FIRST. Without it this is a hot loop and it was measured as one: when the
+                // owner's socket FILE is missing, `daemon_alive` says "nothing there", so the wait
+                // above returns instantly, the bind is refused instantly, and the retry burns CPU
+                // for as long as the owner lives. A supervisor retrying forever is correct; doing
+                // it as fast as the scheduler allows is not.
+                eprintln!("{e}; retrying in 1s");
+                let _ = std::fs::remove_file(&pid_path);
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+            Err(e) => eprintln!("meeting daemon error: {e}"),
+        }
+        let _ = std::fs::remove_file(&pid_path);
+        return;
     }
-    let _ = std::fs::remove_file(&pid_path);
 }
 
-/// Is this process running under launchd's supervision? (BUG-025)
+/// The launchd job that owns the meeting daemon. Must match the plist `Label`; `doctor.rs` probes
+/// the same string.
+const MEETING_DAEMON_JOB: &str = "com.rozum.meeting-daemon";
+
+/// Is this process THE meeting daemon's launchd job? (BUG-025)
 ///
-/// launchd sets `XPC_SERVICE_NAME` to the job label in everything it starts; an interactive shell
-/// and a client-spawned child carry none. An explicit `--supervise` flag would have been the
-/// obvious alternative and was rejected: the plists are ALREADY INSTALLED on every host, so a flag
-/// only takes effect after a service reinstall — the fix would ship and quietly not apply. This
-/// marker fixes every existing installation the moment the binary is replaced.
+/// launchd sets `XPC_SERVICE_NAME` to the job label. The test must be for THAT label and nothing
+/// else, and the first version of this function got it wrong in a way worth keeping written down:
+/// it accepted any non-empty value.
 ///
-/// `getppid() == 1` cannot be used: a detached client-spawned daemon is reparented to pid 1 too,
-/// so it answers the wrong question.
+/// Two things break that. macOS sets `XPC_SERVICE_NAME=0` — the string "0", not empty — on ordinary
+/// processes, so every interactive `meetings start --foreground` decided it was supervised and
+/// waited forever instead of exiting. And the variable is INHERITED, so a client started by some
+/// OTHER rozum job carries `com.rozum.gateway` and would have made the same wrong call — which is
+/// exactly the process leak the conditional exists to prevent.
+///
+/// `getppid() == 1` cannot be used instead: a detached client-spawned daemon is reparented to pid 1
+/// too, so it answers a different question.
 fn supervised_by_launchd(xpc_service_name: Option<String>) -> bool {
-    xpc_service_name.is_some_and(|v| !v.trim().is_empty())
+    xpc_service_name.as_deref().map(str::trim) == Some(MEETING_DAEMON_JOB)
 }
 
 #[cfg(test)]
@@ -3690,10 +3720,18 @@ mod supervise_tests {
         // No marker: an interactive run, or the child of `spawn_detached_meetings` that lost the
         // race. It must exit, or every lost race leaves an idle standby forever.
         assert!(!supervised_by_launchd(None));
-        // A set-but-empty value is not a supervisor. Same reasoning as the REST secret in
-        // BUG-024, where a blank value had to be treated as absent rather than as a secret.
         assert!(!supervised_by_launchd(Some(String::new())));
         assert!(!supervised_by_launchd(Some("   ".to_string())));
+
+        // THE TWO THAT THE FIRST VERSION GOT WRONG, and it shipped. This test used to assert
+        // "non-empty means supervised", which is a rule, not a fact — and it was the wrong rule,
+        // so the test passed while an interactive run hung forever against a live daemon.
+        //
+        // macOS sets this to the literal string "0" on an ordinary process:
+        assert!(!supervised_by_launchd(Some("0".to_string())));
+        // ...and the variable is inherited, so a client started under a DIFFERENT rozum job
+        // carries that job's label. It is not this daemon's supervisor and must not wait:
+        assert!(!supervised_by_launchd(Some("com.rozum.gateway".to_string())));
     }
 }
 

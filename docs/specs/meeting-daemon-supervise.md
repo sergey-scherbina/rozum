@@ -61,9 +61,22 @@ process — trading a respawn loop for a process leak.
 
 ## How "under a supervisor" is decided
 
-launchd sets `XPC_SERVICE_NAME` in every job it starts; it is absent from an ordinary shell and from
-a client-spawned child. Verified on this host: the launchd-owned daemon carries
-`XPC_SERVICE_NAME=com.rozum.meeting-daemon`, an interactive shell carries none.
+launchd sets `XPC_SERVICE_NAME` to the JOB LABEL in every job it starts, and the test must be for
+that exact label.
+
+**The first version tested for "non-empty" and it shipped broken.** Two facts kill that rule, both
+measured on this host afterwards, by running the deployed binary against a live daemon:
+
+- macOS sets `XPC_SERVICE_NAME=0` — the string `0`, not empty — on an ordinary process. So an
+  interactive `meetings start --foreground` decided it was supervised and waited forever instead of
+  printing `already running` and exiting. The old binary from the attic, run side by side, exited
+  immediately: that comparison is what turned "something is odd" into "this is my regression".
+- The variable is INHERITED. A client started under a different rozum job carries
+  `com.rozum.gateway`, so it would have made the same wrong call — and that client is precisely
+  `spawn_detached_meetings`'s child, whose leaking forever is what the conditional exists to prevent.
+
+The unit test passed throughout, because it asserted the rule the code implemented rather than the
+behaviour the system needed. It now pins `0` and a foreign job label explicitly.
 
 The alternative was an explicit `--supervise` flag written into the plist. Rejected because the
 plists are **already installed** on every host that runs this: a flag only takes effect after a
