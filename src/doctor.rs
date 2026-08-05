@@ -227,6 +227,27 @@ enum Probe {
     None,
 }
 
+/// What a launchd exit code MEANS, for the two that this project has actually been bitten by.
+///
+/// `78` is the one that cost four days (BUG-013): launchd itself refuses to exec the program and
+/// reports `EX_CONFIG`. **Our binaries never exit 78** — they use 0/1/2 — so seeing it means the
+/// process never ran at all, which is also why the job's log stays empty while `KeepAlive`
+/// respawns it tens of thousands of times. A reader who does not know that sees a number and moves
+/// on; naming it is the difference between a four-day silence and a sentence.
+///
+/// `-9` is the other: launchd had to SIGKILL it, which is what both Telegram bridges looked like
+/// after a bad install on 2026-08-05.
+fn exit_meaning(code: i64) -> Option<&'static str> {
+    match code {
+        78 => Some(
+            "EX_CONFIG — launchd REFUSED to exec it, so the program never ran and its log is \
+             empty however many times it respawned (BUGS.md BUG-013)",
+        ),
+        -9 => Some("SIGKILL — launchd had to kill it; a fresh install that cannot start looks like this"),
+        _ => None,
+    }
+}
+
 /// Who actually serves, when that can be established independently of the job.
 #[derive(Clone, Copy)]
 enum Owner {
@@ -367,7 +388,10 @@ async fn check_service(
             ),
             None => Check::fail(
                 name,
-                format!("loaded but NOT running (last exit {last_exit}) — {what} is down"),
+                format!(
+                    "loaded but NOT running (last exit {last_exit}{}) — {what} is down",
+                    exit_meaning(last_exit).map(|m| format!(", {m}")).unwrap_or_default()
+                ),
                 format!("launchctl bootout gui/$UID/{label}; launchctl bootstrap gui/$UID ~/Library/LaunchAgents/{label}.plist"),
             ),
         };
@@ -778,6 +802,18 @@ mod tests {
             Path::new("/run/rozum/meeting.sock.lock")
         );
         assert_eq!(socket_lock_path(Path::new("/x/sock")), Path::new("/x/sock.lock"));
+    }
+
+    #[test]
+    fn the_exit_code_that_cost_four_days_is_named() {
+        // 78 is not ours: this project's binaries exit 0/1/2, so EX_CONFIG means launchd never got
+        // the program started — which is why 36,301 respawns wrote nothing to the log.
+        assert!(exit_meaning(78).unwrap().contains("REFUSED"));
+        assert!(exit_meaning(-9).unwrap().contains("SIGKILL"));
+        // Ordinary codes get no invented meaning.
+        assert_eq!(exit_meaning(0), None);
+        assert_eq!(exit_meaning(1), None);
+        assert_eq!(exit_meaning(2), None);
     }
 
     /// The two states `launchctl list` prints that this check exists to tell apart.

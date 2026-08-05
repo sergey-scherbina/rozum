@@ -1,5 +1,21 @@
 # Changelog
 
+## bug013-root-cause — a negative result, and a guard where the cause would have been caught
+Completed: 2026-08-05
+
+Asked to fix the cause of the four-day gateway outage rather than detect it better. The obvious
+candidate — an in-place binary overwrite poisoning the exec, which is what this morning's own
+outage looked like — was tested on a scratch launchd job and **does not reproduce**: the running
+process survived the overwrite and the respawn exec'd the new binary cleanly. BUG-013 now records
+that as ruled out instead of carrying a plausible story.
+
+What the day did establish: exit 78 is not ours (every binary here exits 0/1/2), so launchd refused
+to exec, which is why 36,301 respawns wrote nothing. `doctor --services` says that in words now.
+
+And the guard that makes the unreproducible question matter less: the deploy execs a freshly built
+binary before publishing it and refuses to install one that will not start, leaving the running
+service on the old one.
+
 ## doctor-socket-owner — the line named the job, not the server
 Completed: 2026-08-05
 

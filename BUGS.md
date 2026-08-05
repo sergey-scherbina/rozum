@@ -583,6 +583,25 @@ that can never exec looks exactly like one that is still warming. FIX: step 5c p
 to 90s after the bootstrap; still not listening → read the job state back, WARN if launchd says
 `running` (slow cold load), and hard-`exit 1` with the bootout/bootstrap recipe if it is not.
 
+**Update 2026-08-05 — one candidate trigger RULED OUT, by experiment.** After taking both bridges
+down with a hand-typed `cp` over a running binary (see `deploy-atomic-install`), the obvious story
+was "in-place overwrite poisons the exec, launchd reports EX_CONFIG". It does not. A scratch
+`KeepAlive` job was pointed at a copied binary, the binary was overwritten IN PLACE while its
+long-lived process was running, and the process survived; killing it produced a clean respawn on
+the new binary (`runs = 3`, exit 2 = "no such subcommand"). So that explanation is wrong, and the
+record says so rather than carrying a plausible one.
+
+What the same day DID establish: **78 is not ours.** Every binary here exits 0, 1 or 2 —
+`grep process::exit` — so `EX_CONFIG` comes from launchd refusing to exec, which is also why 36,301
+respawns wrote nothing. `doctor --services` now says that in words next to the code, instead of
+printing a number the reader has to know.
+
+And the cheap guard that makes the whole question matter less: `install_bin` in the deploy now
+**execs a freshly built binary before publishing it**, and refuses to install one that will not
+start — the running service keeps the old binary, which is the point. Whatever produced an
+unexecutable file on 23 July, that is where it would have been caught, in one second instead of
+four days.
+
 **Note on the exact trigger.** The proximate cause (stale registration vs a replaced binary) is
 established by the fix working; WHICH deploy path left it that way on 23 July is not provable from
 the artifacts 4 days later — the script's own ordering (`rm`+`cp` the binary at line 86-87, bounce

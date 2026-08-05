@@ -86,6 +86,22 @@ install_bin() {
   mkdir -p "$(dirname "$dst")"
   cp "$src" "$dst.new.$$"
   chmod +x "$dst.new.$$"
+  # EXEC IT BEFORE PUBLISHING IT. A binary that cannot start is the failure mode behind BUG-013 —
+  # launchd refused to exec the installed gateway, answered EX_CONFIG (78), wrote NOTHING because
+  # the process never ran, and KeepAlive respawned it 36,301 times over four days while the
+  # flagship feature was dead. Our own code never exits 78; that number comes from launchd.
+  #
+  # The exact trigger was never reproducible (a scratch KeepAlive job with a binary replaced in
+  # place does NOT reproduce it — measured 2026-08-05, so the obvious explanation is wrong). What
+  # IS reproducible is the consequence, and this is where it is cheap to catch: one exec, here,
+  # before anything is bounced, instead of four silent days.
+  if ! "$dst.new.$$" --help >/dev/null 2>&1; then
+    local rc=$?
+    rm -f "$dst.new.$$"
+    echo "FAIL: freshly built $(basename "$dst") will not exec (rc=$rc) — NOT installing." >&2
+    echo "      The running service keeps the old binary, which is the point of checking here." >&2
+    exit 1
+  fi
   mv -f "$dst.new.$$" "$dst"
 }
 

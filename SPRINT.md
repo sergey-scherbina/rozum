@@ -21,6 +21,29 @@ launchd's copy loses the race and stays down. Reported as `warn` with that sente
 `fail` the operator cannot clear is the same cry-wolf this whole item exists to remove. Who should
 own that daemon is a design question, filed rather than decided at the end of a long session.
 
+### ▶ BUG-013's cause, and what to do when a cause will not reproduce (operator 2026-08-05: "нужно исправить причину")
+
+Branch `feature/bug013-root-cause`.
+
+The operator asked the right question about the four-day gateway outage: fix the cause, not the
+detector. Two results, one negative and one useful:
+
+- **The obvious explanation is wrong.** A scratch `KeepAlive` job, binary overwritten IN PLACE
+  while its long-lived process ran: the process survived, and the respawn exec'd the new binary
+  cleanly (`runs = 3`). So "in-place `cp` poisons the exec, hence EX_CONFIG" — which is what this
+  morning's own outage suggested — does NOT reproduce. Recorded in BUG-013 as ruled out; a bug
+  record carrying a plausible-but-wrong cause is worse than one that says "not established".
+- **78 is not ours.** Every binary in this repo exits 0/1/2, so `EX_CONFIG` came from launchd
+  refusing to exec. That is also why 36,301 respawns produced an empty log.
+
+- [x] **b13-guard — DONE.** `install_bin` execs a freshly built binary BEFORE publishing it and
+  refuses to install one that will not start; the running service keeps the old one. Whatever made
+  an unexecutable file on 23 July, this is where it gets caught — one second instead of four days.
+  Verified all three installed binaries answer `--help` with rc=0, so the guard does not fire on
+  a good build.
+- [x] **b13-name-it — DONE.** `doctor --services` explains exit 78 (and -9) in words next to the
+  number, because "last exit code = 78" is a fact nobody can act on.
+
 ### ▶ `doctor --services` reports the job, not the server (handed over inside BUG-025, 2026-08-05)
 
 Branch `feature/doctor-socket-owner`.
