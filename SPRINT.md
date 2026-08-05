@@ -1196,7 +1196,7 @@ Ordered by value. #1 is the active queue; do it the moment the GPU slot is free.
     results: `scripts/bench/results/agentic-20260703-145343/per-run.csv`
   - Remaining: rerun 35B-DWQ + Coder-30B after freeing RAM (close Chrome + spare CC windows).
 
-- [ ] **bench-test-gateway-500** — BUG (found 2026-07-03 Devstral matrix run). The `test` task
+- [~] **bench-test-gateway-500** — BUG (found 2026-07-03 Devstral matrix run). The `test` task
   (create Cargo.toml + src/main.rs with fn reverse + #[cfg(test)] + run cargo test + cargo run)
   consistently fails with rc=1 for Devstral-Small-2507-4bit (REPS=3, all 3 reps, 0/3 pass).
   Root cause: gateway returns HTTP 500 after the Write Cargo.toml tool result, when the model
@@ -1214,6 +1214,17 @@ Ordered by value. #1 is the active queue; do it the moment the GPU slot is free.
   model and watch gateway stderr for a 500 after the first tool result. If it does NOT reproduce,
   close it as "died with its model" and say so here — do not re-download Devstral to chase it. If it
   DOES, the original debug angle above still applies and it becomes a real BUGS.md entry.
+  **RUNNING 2026-08-05** (operator authorised the GPU window). Command as re-scoped, with three
+  deliberate deviations, none of which touch the reproduction: `BENCH_PORT_BASE=8320` (the 8300
+  default has collided with a sibling before), `ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0` (the shared gateway
+  otherwise self-exits `clients_gone` BETWEEN tasks and reports rc=2 that looks like OOM), and
+  `NCTX=32768` instead of auto-max — a sibling's build holds ~10 GiB and auto-max would ask admission
+  for roughly double the KV, so a refusal would have produced a red that says nothing about the bug.
+  The 500 fired after the FIRST tool result, a couple of thousand tokens in, nowhere near any context
+  limit, so the smaller window cannot hide it. Log:
+  `…/scratchpad/bench-500.log`, results under `…/scratchpad/bench-500/`.
+  Note the bench begins with `gateway stop --force`, so the operator's resident gateway is evicted;
+  launchd `KeepAlive` brings `com.rozum.gateway` back on its own.
 
 ### ▶ deploy-ucc-web.sh gateway-binary gap (found 2026-07-03 while verifying the security fix below)
 
