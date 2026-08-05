@@ -1,6 +1,6 @@
 feature/ucc-meetings-in-tk 2026-08-04T10:51:01Z
 agent: claude-opus-5-housekeeping
-heartbeat: 2026-08-04T23:47:52Z
-status: UNBLOCKED — the token is out of the binary. Capability complete AND shareable; only PACKAGING remains
-done-so-far: one .ssc emits both clients (transcript+badge+time, authenticated read, composer, room picker with @you, day picker, 3s clock, room creation) and the token is DECLARED not baked — gate proves absence by exporting a known value and failing if it appears in the emitted source. Upstream: NINE capabilities landed, seven by us, the last being the whole credential chain (scalascript ce17dfa8b)
-next: PACKAGING, now genuinely possible. Vendor the generated crate (checked in, plain cargo build, a gate proving a fresh emission is byte-identical), point `rozum meetings attach` at the built binary, delete attach.rs. Nothing upstream is needed.
+heartbeat: 2026-08-05T07:13:50Z
+status: attach.rs IS DELETED — the terminal client is generated, vendored and dispatched. Remaining: DEPLOY (operator's services)
+done-so-far: hand-written ratatui shell removed; both entry points exec the generated client; crate vendored at crates/rozum-meeting-tui so rozum builds with cargo alone; gate proves a fresh emission is byte-identical AND that the token never appears in it. Daemon gained badge/time, Bearer, plain-text submit, ready-made urls, POST /rooms, `today` alias. Upstream: ELEVEN capabilities/fixes landed, nine by us.
+next: DEPLOYMENT ONLY, and it touches the operator's running services — the live com.rozum.meeting-daemon is a deployed build WITHOUT Bearer and WITHOUT the `today` alias, so the shipped client cannot authenticate against it yet. Rebuild + restart that service, then a live end-to-end. NOT done without explicit permission.
