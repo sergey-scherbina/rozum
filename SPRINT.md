@@ -2700,9 +2700,15 @@ mature framework-agnostic reactive UI (`std/ui`) with **11 tested render backend
   and restarted; the installed binary reads real rooms, real days and a real transcript from the
   live daemon with its token taken from the ENVIRONMENT — the binary contains no secret, and the
   gate proves it by exporting a known token and failing if it appears in the emitted source.
-  Deployment notes worth keeping: `kickstart -k` left an orphaned socket and the daemon then
-  refused to start ("already running") — the liveness check tests a FILE, not a process, and that
-  is worth its own fix. And rebuilding `target/release` invalidated the build artifacts the
+  Deployment notes worth keeping — the first was MISDIAGNOSED and the correction is the useful part.
+  I reported that the daemon's "already running" guard tests a FILE rather than a process. It does
+  not: `daemon_alive` opens a real connection. The actual mechanism is worse and is recorded in
+  BUGS.md as `meeting-daemon-autostart-without-rest-secret` — any MCP client can resurrect the
+  daemon through `daemon_proxy::spawn_daemon`, which runs `meetings start` inheriting the CALLER's
+  environment. That environment has no `ROZUM_WEB_SECRET`, so the resurrected daemon serves the
+  socket and NOT `:8401`, and because it holds the socket the correctly-configured launchd instance
+  cannot take over. The room, the console and the generated client all go quiet with every process
+  looking healthy. And rebuilding `target/release` invalidated the build artifacts the
   deployed `~/.rozum/bin/rozum-gateway` pointed at, taking `:8089` down with exit 255 until the
   fresh binary was installed the same way the deploy script builds it. Backups of both binaries are
   in `~/.rozum/attic/`.

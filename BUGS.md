@@ -196,6 +196,33 @@ not as "the agent deleted the task".
 is legitimate work and cannot be distinguished from vandalism by a profile — the answer there is
 version control, not the sandbox.
 
+## BUG-017 — a client-triggered auto-start brings the meeting daemon up WITHOUT its REST secret, and then holds the socket
+
+- **Status:** open, found 2026-08-05 while deploying `ucc-meetings-in-tk`. Not yet fixed.
+- **Symptom.** `:8401` stops answering while `launchctl list` shows the service, a daemon process
+  exists, the socket is present and every room still works over MCP. Nothing looks wrong. The
+  support console, the web console and the generated meeting client all go quiet.
+- **Mechanism.** `daemon_proxy::spawn_daemon` runs `meetings start` when a client cannot reach the
+  daemon (`crates/rozum-meeting/src/meeting/daemon_proxy.rs:798`). The child inherits the CALLER's
+  environment — an agent's MCP proxy, a CLI invocation — which has no `ROZUM_WEB_SECRET`. The REST
+  listener is spawned only when that variable is set (`rest_read::maybe_spawn_from_env`), so the
+  resurrected daemon serves the unix socket and nothing on `:8401`. It then holds the socket, so the
+  launchd job — which DOES carry the secret — cannot take over even when it restarts.
+- **Repro.** Kill the daemon, then touch any room from an MCP client before launchd's restart wins:
+  the daemon comes back, rooms work, `curl :8401/rooms` answers nothing.
+- **I MISDIAGNOSED THIS FIRST**, and the wrong version reached the room: I said the "already
+  running" guard tests a file rather than a process. It does not — `daemon_alive` opens a real
+  connection. That guard is fine; the environment is the defect.
+- **Fix candidates**, none applied: have `spawn_daemon` refuse when the secret is absent and tell the
+  caller to start the service instead; or have the daemon read the secret from the same place the
+  service does rather than from its environment; or make an autostarted daemon step aside for the
+  managed one. The first is smallest and the most honest — a daemon that cannot serve its whole
+  contract should not claim the socket.
+- **Why it matters beyond this bug.** It is BUG-013's family: a service that is running and not
+  serving, with every green surface still green.
+
+---
+
 ## BUG-016 — nadia × Qwen3.5-4B: a path written without its leading slash lands a file in a mirror tree, and the run reports success
 
 - **Status:** FIXED 2026-08-01 by candidate 1 below — the system prompt now names both wrong
