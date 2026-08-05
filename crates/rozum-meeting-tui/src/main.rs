@@ -128,6 +128,25 @@ fn bump_interval_ticks(signals: &mut HashMap<String, Value>, last: &mut HashMap<
     let now = std::time::Instant::now();
     { let __e = last.entry("meetingsRefresh".to_string()).or_insert(now); if now.duration_since(*__e).as_millis() >= 3000u128 { *__e = now; let __c = match signals.get("meetingsRefresh") { Some(Value::I(n)) => *n, _ => 0 }; signals.insert("meetingsRefresh".to_string(), Value::I(__c + 1)); } }
 }
+thread_local! {
+    // The last rows each remote table parsed successfully. A fetch already retains its
+    // last-good BODY on failure; a table needs the same for the case where the body
+    // arrived and was not what a table can read — a 401, a 500, an error page.
+    static LAST_ROWS: std::cell::RefCell<HashMap<String, Vec<Vec<String>>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+/// Rows for one remote table: remember a good parse, and on a bad one keep showing the
+/// last good rows rather than panicking. `expect` here used to kill the process on any
+/// non-JSON body, which is every ordinary way a server says no.
+fn table_rows(id: &str, parsed: Result<Vec<Vec<String>>, String>) -> Vec<Vec<String>> {
+    match parsed {
+        Ok(rows) => {
+            LAST_ROWS.with(|c| c.borrow_mut().insert(id.to_string(), rows.clone()));
+            rows
+        }
+        Err(_) => LAST_ROWS.with(|c| c.borrow().get(id).cloned().unwrap_or_default()),
+    }
+}
 fn json_field(row: &serde_json::Value, path: &str) -> String {
     let mut cur = row;
     for part in path.split('.') { cur = match cur.get(part) { Some(x) => x, None => return String::new() }; }
@@ -278,8 +297,8 @@ fn render_root(frame: &mut Frame, area: Rect, signals: &HashMap<String, Value>, 
     let chunks0 = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).split(area);
     let chunks1 = Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Min(3), Constraint::Length(2), Constraint::Length(1), Constraint::Length(2), Constraint::Length(1), Constraint::Length(1)]).split(chunks0[0]);
     frame.render_widget(Paragraph::new("rozum"), chunks1[0]);
-    { let __json = sig(signals, "meetingsRooms"); let __rows = fetch_rows(&__json, "entries", "name", &["name", "last", "mentions"]).expect("invalid DataTable row identity"); let __trows: Vec<Row> = __rows.iter().map(|r| Row::new(r.iter().cloned().collect::<Vec<String>>())).collect(); let __t = Table::new(__trows, [Constraint::Ratio(1, 3), Constraint::Ratio(1, 3), Constraint::Ratio(1, 3)]).header(Row::new(vec!["Room", "Last", "@you"])).row_highlight_style(Style::default().add_modifier(Modifier::REVERSED)); let __sel = if __rows.is_empty() { 0usize } else { (match signals.get("meetingsRooms__row") { Some(Value::I(n)) => *n, _ => 0 }).clamp(0, __rows.len() as i64 - 1) as usize }; let mut __st = ratatui::widgets::TableState::default(); if !__rows.is_empty() && focus == 0 { __st.select(Some(__sel)); } frame.render_stateful_widget(__t, chunks1[1], &mut __st); }
-    { let __json = sig(signals, "meetingsDays"); let __rows = fetch_rows(&__json, "entries", "date", &["date", "count"]).expect("invalid DataTable row identity"); let __trows: Vec<Row> = __rows.iter().map(|r| Row::new(r.iter().cloned().collect::<Vec<String>>())).collect(); let __t = Table::new(__trows, [Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).header(Row::new(vec!["Day", "#"])).row_highlight_style(Style::default().add_modifier(Modifier::REVERSED)); let __sel = if __rows.is_empty() { 0usize } else { (match signals.get("meetingsDays__row") { Some(Value::I(n)) => *n, _ => 0 }).clamp(0, __rows.len() as i64 - 1) as usize }; let mut __st = ratatui::widgets::TableState::default(); if !__rows.is_empty() && focus == 1 { __st.select(Some(__sel)); } frame.render_stateful_widget(__t, chunks1[2], &mut __st); }
+    { let __json = sig(signals, "meetingsRooms"); let __rows = table_rows("meetingsRooms", fetch_rows(&__json, "entries", "name", &["name", "last", "mentions"])); let __trows: Vec<Row> = __rows.iter().map(|r| Row::new(r.iter().cloned().collect::<Vec<String>>())).collect(); let __t = Table::new(__trows, [Constraint::Ratio(1, 3), Constraint::Ratio(1, 3), Constraint::Ratio(1, 3)]).header(Row::new(vec!["Room", "Last", "@you"])).row_highlight_style(Style::default().add_modifier(Modifier::REVERSED)); let __sel = if __rows.is_empty() { 0usize } else { (match signals.get("meetingsRooms__row") { Some(Value::I(n)) => *n, _ => 0 }).clamp(0, __rows.len() as i64 - 1) as usize }; let mut __st = ratatui::widgets::TableState::default(); if !__rows.is_empty() && focus == 0 { __st.select(Some(__sel)); } frame.render_stateful_widget(__t, chunks1[1], &mut __st); }
+    { let __json = sig(signals, "meetingsDays"); let __rows = table_rows("meetingsDays", fetch_rows(&__json, "entries", "date", &["date", "count"])); let __trows: Vec<Row> = __rows.iter().map(|r| Row::new(r.iter().cloned().collect::<Vec<String>>())).collect(); let __t = Table::new(__trows, [Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).header(Row::new(vec!["Day", "#"])).row_highlight_style(Style::default().add_modifier(Modifier::REVERSED)); let __sel = if __rows.is_empty() { 0usize } else { (match signals.get("meetingsDays__row") { Some(Value::I(n)) => *n, _ => 0 }).clamp(0, __rows.len() as i64 - 1) as usize }; let mut __st = ratatui::widgets::TableState::default(); if !__rows.is_empty() && focus == 1 { __st.select(Some(__sel)); } frame.render_stateful_widget(__t, chunks1[2], &mut __st); }
     let chunks2 = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks1[3]);
     frame.render_widget(Paragraph::new("message"), chunks2[0]);
     frame.render_widget(Paragraph::new(format!("{}{}", focus_mark(focus, 2), text_input_display(signals, "meetingsDraft", "message", false))).style(if focus == 2 { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() }), chunks2[1]);
@@ -289,7 +308,7 @@ fn render_root(frame: &mut Frame, area: Rect, signals: &HashMap<String, Value>, 
     frame.render_widget(Paragraph::new(format!("{}{}", focus_mark(focus, 4), text_input_display(signals, "meetingsNewRoom", "new room topic", false))).style(if focus == 4 { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() }), chunks3[1]);
     frame.render_widget(Paragraph::new(format!("{}[{}]", focus_mark(focus, 5), "create room")).style(if focus == 5 { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() }), chunks1[6]);
     frame.render_widget(Paragraph::new(format!("{}[{}]", focus_mark(focus, 6), "refresh")).style(if focus == 6 { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() }), chunks1[7]);
-    { let __json = sig(signals, "meetingsTranscript"); let __rows = fetch_rows(&__json, "messages", "ts", &["time", "display_name", "badge", "content"]).expect("invalid DataTable row identity"); let __trows: Vec<Row> = __rows.iter().map(|r| Row::new(r.iter().cloned().collect::<Vec<String>>())).collect(); let __t = Table::new(__trows, [Constraint::Ratio(1, 4), Constraint::Ratio(1, 4), Constraint::Ratio(1, 4), Constraint::Ratio(1, 4)]).header(Row::new(vec!["Time", "Who", "", "Message"])); frame.render_widget(__t, chunks0[1]); }
+    { let __json = sig(signals, "meetingsTranscript"); let __rows = table_rows("meetingsTranscript", fetch_rows(&__json, "messages", "ts", &["time", "display_name", "badge", "content"])); let __trows: Vec<Row> = __rows.iter().map(|r| Row::new(r.iter().cloned().collect::<Vec<String>>())).collect(); let __t = Table::new(__trows, [Constraint::Ratio(1, 4), Constraint::Ratio(1, 4), Constraint::Ratio(1, 4), Constraint::Ratio(1, 4)]).header(Row::new(vec!["Time", "Who", "", "Message"])); frame.render_widget(__t, chunks0[1]); }
 }
 
 fn buffer_to_lines(buf: &Buffer) -> String {
