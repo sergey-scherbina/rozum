@@ -881,7 +881,17 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   three; a regex over a subject's vocabulary is only ever as complete as the vocabulary you thought of.
   Five tests moved to `spawn_support.rs` with the code they exercise — found because the LIB built
   clean while the TEST build did not, which is the `cargo check` lesson one more time.
-  **Running total across the six slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
+  **2026-08-06 — seventh slice: `control.rs` 1641 → 1458.** `messenger.rs` (182 lines): nine admin
+  routes for bots, their group registries and the per-room ACL rosters, plus `parse_flat_body`
+  moving to `wire_body` first. Small, and it reads as what it is — the console is a THIRD caller of
+  one ops module alongside the CLI and the in-chat commands, which was hard to see while the routes
+  were scattered through a 1600-line file.
+  **A protocol failure found by finally reading `multi-agent` instead of remembering it:** my first
+  six claims were free-form and carried NO `heartbeat:` and NO `status:` field. The protocol reads a
+  missing heartbeat as "likely dead session", so a sibling running triage would have been within the
+  rules to take any of those tasks out from under me — and I would have deserved it. Claims from
+  this slice on use the specified format, with a `claim-update` when the worktree is created.
+  **Running total across the seven slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
   so the crate's two monoliths went 8695 → 5170 lines (−41%) into FOURTEEN focused modules —
   switchboard, matrix, sessions, agents, coders, auth, gateway_control, view_tokens, spawn_support,
   wire_body, private_store, paths, errors, defaults — with 114/114 green at every step, no warnings,
