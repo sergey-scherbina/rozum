@@ -1,6 +1,0 @@
-feature/repair-prompt-ab 2026-08-06T09:22:21Z
-agent: claude-code
-heartbeat: 2026-08-06T09:22:21Z
-status: in-progress
-done-so-far: both measured wordcount failures ended in the loop-breaker; the repair prompt itself says "run the check yourself"
-next: A/B the wording on a fixture with the real E0277
