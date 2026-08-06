@@ -93,7 +93,10 @@ def _report(path, pattern=None):
     lines = set()
     for a, b, _ in got:
         lines |= set(range(a, b + 1))
-    inside = "\n".join(src[i] for i in sorted(lines))
+    # Comments are not code: `status` inside "errors land in the row's status" was reported as a
+    # dependency twice, on two different families, before this line existed. Strip line comments
+    # before looking for calls.
+    inside = "\n".join(re.sub(r'//.*$', '', src[i]) for i in sorted(lines))
     fam = {n for _, _, n in got}
     # CALLS, not bare names: a bare-name match reports every identifier that merely appears,
     # which made `status` and `serve` look like dependencies of a family that never calls them.
