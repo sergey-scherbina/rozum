@@ -215,3 +215,17 @@ pub(crate) fn agent_invocation(agent: &str, prompt: &str) -> Vec<String> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ucc_form_body_json_parses_defaulted_agent_launch() {
+        let req: AgentLaunchReq =
+            parse_action_json(r#"{"model":"m","room":"rozum","persona":"brief"}"#).unwrap();
+        assert_eq!(req.model, "m");
+        assert_eq!(req.room, "rozum");
+        assert_eq!(req.policy, "mention");
+        assert_eq!(req.persona, "brief");
+    }
+}

@@ -401,3 +401,19 @@ pub(crate) async fn session_ws_bridge(mut socket: axum::extract::ws::WebSocket, 
     let _ = child.kill(); // end the `tmux attach` (NOT the session — it stays detached for reconnect)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ucc_form_body_json_parses_session_launch_without_content_type() {
+        let req: SessionLaunchReq = parse_action_json(
+            r#"{"agent":"claude","model":"mlx-community:Qwen3.6-35B-A3B-4bit","workdir":"/tmp","prompt":""}"#,
+        )
+        .unwrap();
+        assert_eq!(req.agent, "claude");
+        assert_eq!(req.model, "mlx-community:Qwen3.6-35B-A3B-4bit");
+        assert_eq!(req.workdir, "/tmp");
+        assert_eq!(req.prompt, "");
+    }
+}

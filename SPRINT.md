@@ -891,12 +891,21 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   missing heartbeat as "likely dead session", so a sibling running triage would have been within the
   rules to take any of those tasks out from under me — and I would have deserved it. Claims from
   this slice on use the specified format, with a `claim-update` when the worktree is created.
-  **Running total across the seven slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
-  so the crate's two monoliths went 8695 → 5170 lines (−41%) into FOURTEEN focused modules —
-  switchboard, matrix, sessions, agents, coders, auth, gateway_control, view_tokens, spawn_support,
-  wire_body, private_store, paths, errors, defaults — with 114/114 green at every step, no warnings,
-  and no behaviour change. Every one of the fourteen imports nothing from `control.rs`/`gateway.rs`,
-  which is checked with one grep rather than believed.
+  **2026-08-06 — eighth slice: `control.rs` 1458 → 1095.** `projects.rs` (147) and `chat.rs` (230).
+  Both closed only once the helpers came along: `ucc_config_path` with projects, and with chat the
+  room-name guard plus the two readers that go straight to the room files — nothing else calls them,
+  which is what makes chat a subject rather than a scattering of routes.
+  **Four tests went to three different modules, not to one.** They exercise the body parsers THROUGH
+  concrete request types (`SessionLaunchReq`, `AgentLaunchReq`, the project add body), so filing them
+  under `wire_body` made that module's tests depend on three others. A test belongs with the subject
+  it names, and here the subject was the DTO, not the parser.
+  **Running total across the eight slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
+  so the crate's two monoliths went 8695 → 4624 lines (−47%) into SEVENTEEN focused modules —
+  switchboard, matrix, sessions, agents, coders, auth, chat, projects, messenger, gateway_control,
+  view_tokens, spawn_support, wire_body, private_store, paths, errors, defaults — with 114/114 green
+  at every step, no warnings, and no behaviour change. Every one of the seventeen imports nothing
+  from `control.rs`/`gateway.rs`, checked with one grep rather than believed. What is left in
+  `control.rs` is the router and the status snapshot, which is what should be left.
   **Remaining** (unchanged, still architectural): request-mapping needs gateway-local wire DTOs,
   auto-context calls into streaming types, the async handlers are coupled to `GatewayState`, and
   `control.rs` (4309) is untouched.
