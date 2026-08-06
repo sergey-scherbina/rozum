@@ -2,7 +2,7 @@
 
 ## The meeting daemon has two owners — SEE `BUGS.md` BUG-025
 
-- [ ] **meeting-daemon-ownership** — filed here from `doctor --services` (launchd's copy down while
+- [x] **meeting-daemon-ownership — RESOLVED 2026-08-06.** BUG-025 is fixed in both halves (respawn loop `5ff78e7`, socket ownership `3bf39cd`); `doctor --services` reports `svc:meeting-daemon` as `ok` where it reported the split as `warn`. Left here as a pointer because the ninety-minutes-apart double filing is worth remembering. Original: filed here from `doctor --services` (launchd's copy down while
   `:8401` answered, because a bridge spawns its own on demand and wins the socket) about ninety
   minutes before a sibling agent filed the same thing, from the other end, as **BUG-025** (the job
   respawns every ~9 s forever because the daemon detaches, and two daemons can share one socket
@@ -22,7 +22,7 @@
 
 ## Parked worktree work — two patches rescued from worktrees that were about to be deleted (2026-08-04)
 
-- [ ] **parked-patches-decide** — during the 2026-08-04 worktree cleanup, two branches turned out to
+- [x] **parked-patches-decide — DECIDED 2026-08-05, both dropped** (see the verdict below; the checkbox was never ticked when it was). Original: during the 2026-08-04 worktree cleanup, two branches turned out to
   carry UNCOMMITTED work that would have died with their directories. Both were committed to their own
   branches and exported as patch files so they survive even a branch delete:
   `~/.rozum/attic/parked-patches/` (`0001-wip-gateway-the-codex-create-steer-*.patch`,
@@ -155,7 +155,7 @@ shows this + fail-mode rollup). The two big NON-model levers, ranked:
   `/tmp/rozum-agentic-*` from the verify-codex-create run) and cover the form the bridge misses (likely an
   `*** Update File:` against an absent file, or a non-`content` JSON key). Remaining build reds are rc10 =
   gpt-oss wrong CODE (model capability, separate from delivery). Original evidence:
-- [ ] **codex-opencode-create-delivery (original evidence)** — a THIRD+ of
+- [x] **codex-opencode-create-delivery (original evidence) — SHIPPED**, `3d03a35`, `crates/rozum-gateway/src/codex_patch.rs:104`. The live question that survived it is `codex-create-delivery-on-qwen` below; this entry is the evidence, kept. — a THIRD+ of
   codex/opencode curated-tier failures are `deliver` (rc11 = wrote NO project files) on create-from-scratch
   (`build`/`test`), NOT wrong code. Kept-workdir evidence: codex emits an `apply_patch` *Add File* that
   never lands in the jail (the file isn't created), codex then re-verifies a "change already applied",
