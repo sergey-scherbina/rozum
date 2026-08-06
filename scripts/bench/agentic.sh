@@ -763,7 +763,12 @@ echo "  run timeout  : ${RUN_TIMEOUT}s   gen timeout: ${GEN_TIMEOUT}s   ctx: ${N
 echo "  out          : $OUT"
 echo
 
-"$BIN" gateway stop --force >/dev/null 2>&1 || true
+# Stop whatever gateway is resident — EXCEPT when we were told to share one. Without this guard
+# the shared mode kills the very gateway it means to borrow: measured 2026-08-06, the operator's
+# :8089 went down here and `rozum launch` then reported "no gateway running" for every cell.
+# launchd's KeepAlive brought it back, which is the only reason that was seconds and not an
+# outage — do not lean on it.
+[ -n "${BENCH_GATEWAY_URL:-}" ] || "$BIN" gateway stop --force >/dev/null 2>&1 || true
 idx=0
 for spec in "${MODELS[@]}"; do
   port=$((PORT_BASE + idx)); idx=$((idx + 1)); base="http://127.0.0.1:$port"
@@ -791,20 +796,43 @@ for spec in "${MODELS[@]}"; do
   # undermines every reading (proven: docs/specs/matrix-nondeterminism.md). Default-pin so
   # the matrix is reproducible (every red is reproducible+debuggable); override to any <u64>,
   # or set ROZUM_SAMPLING_SEED= (empty) to restore free entropy sampling.
+  # BENCH_GATEWAY_URL: run against a gateway that is ALREADY serving this model instead of
+  # loading a second copy.
+  #
+  # Two agents CAN share one resident model — `rozum launch` reuses a healthy gateway whose model
+  # matches, and the gateway admits 2 concurrent requests. What cannot coexist is two GATEWAYS
+  # each holding ~12 GB of the same weights, which is why this harness (which deliberately loads
+  # its own, to measure RSS and time in isolation) waits in the admission queue while somebody
+  # else has the model resident.
+  #
+  # So this knob buys a matrix that can run beside a colleague, and it costs the thing the private
+  # gateway was for: **timings become contended and the per-model memory figures are not this
+  # run's**. Use it for pass/fail; do not read seconds or footprint from a shared run, and the
+  # summary says so out loud rather than trusting whoever reads the CSV later to remember.
+  if [ -n "${BENCH_GATEWAY_URL:-}" ]; then
+    base="$BENCH_GATEWAY_URL"
+    echo "  sharing an existing gateway at $base — pass/fail only, timings are contended"
+    if ! curl -s -m5 "$base/v1/models" >/dev/null 2>&1; then
+      echo "  ! $base does not answer — nothing to share" >&2; exit 1
+    fi
+    TIME_PID=""; GW_PID=""; SHARED_GW=1
+  else
+  SHARED_GW=0
   ROZUM_GATEWAY_IDLE_SECS=0 ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0 ROZUM_GEN_TIMEOUT_SECS="$GEN_TIMEOUT" \
     ROZUM_SAMPLING_SEED="${ROZUM_SAMPLING_SEED-1234}" /usr/bin/time -l \
     "$BIN" gateway --model "$spec" --port "$port" --offline "${NCTX_OPT[@]}" \
     >"$glog" 2>&1 &
   TIME_PID=$!
   GW_PID=""; for _ in $(seq 1 40); do GW_PID="$(pgrep -P "$TIME_PID" 2>/dev/null | head -1)"; [ -n "$GW_PID" ] && break; sleep 0.25; done
+  fi
   ok=0
   # GW_READY_SECS: how long to wait for the gateway to answer. Default 240 covers a plain
   # load; raise it (with ROZUM_GATEWAY_RESIDENCY_WAIT_SECS) when the gateway may sit in the
   # host-wide admission QUEUE behind other RAM users (e.g. a sibling's sbt test) — the queue
   # is the coordination mechanism, the bench just has to be patient enough to use it.
   for _ in $(seq 1 "${GW_READY_SECS:-240}"); do curl -s -m2 "$base/v1/models" >/dev/null 2>&1 && { ok=1; break; }
-    kill -0 "$TIME_PID" 2>/dev/null || break; sleep 1; done
-  if [ "$ok" != 1 ]; then echo "  ! gateway not ready (see $glog)"; kill -INT "$GW_PID" 2>/dev/null; wait "$TIME_PID" 2>/dev/null; continue; fi
+    [ "$SHARED_GW" = 1 ] || kill -0 "$TIME_PID" 2>/dev/null || break; sleep 1; done
+  if [ "$ok" != 1 ]; then echo "  ! gateway not ready (see $glog)"; [ "$SHARED_GW" = 1 ] || { kill -INT "$GW_PID" 2>/dev/null; wait "$TIME_PID" 2>/dev/null; }; continue; fi
   echo "  model loaded once; running ${#TASK_LIST[@]} tasks × ${#AGENT_RUN[@]} agent(s)"
 
   for agent in "${AGENT_RUN[@]}"; do
@@ -859,7 +887,7 @@ for spec in "${MODELS[@]}"; do
         # Agent-tree RSS + (agent + gateway) CPU; the model's RAM is the gateway footprint.
         ( while kill -0 "$LP" 2>/dev/null; do
             read ar ac < <(tree_sample "$LP")
-            gc=$(ps -o pcpu= -p "$GW_PID" 2>/dev/null | tr -d ' '); gc=${gc:-0}
+            gc=$([ -n "$GW_PID" ] && ps -o pcpu= -p "$GW_PID" 2>/dev/null | tr -d ' '); gc=${gc:-0}
             awk -v ar="${ar:-0}" -v ac="${ac:-0}" -v gc="$gc" 'BEGIN{printf "%d %.1f\n", ar, ac+gc}' >>"$sfile"
             sleep 2
           done ) & SAMP=$!
@@ -977,6 +1005,11 @@ for spec in "${MODELS[@]}"; do
   # a few seconds; the long window is insurance against a wedged eval. /usr/bin/time only flushes
   # the peak-footprint line on a CLEAN exit — another reason to avoid SIGKILL.
   TEARDOWN_GRACE="${TEARDOWN_GRACE:-180}"; GPU_SETTLE="${GPU_SETTLE:-8}"
+  # Never tear down a gateway we did not start: on a shared run it is somebody else's resident
+  # model, and killing it would take their work with it.
+  if [ "$SHARED_GW" = 1 ]; then
+    echo "  shared gateway left running (not ours to stop)"
+  else
   kill -INT "$GW_PID" 2>/dev/null
   gone=0
   for _ in $(seq 1 "$TEARDOWN_GRACE"); do kill -0 "$TIME_PID" 2>/dev/null || { gone=1; break; }; sleep 1; done
@@ -986,11 +1019,14 @@ for spec in "${MODELS[@]}"; do
     kill -KILL "$TIME_PID" 2>/dev/null
   fi
   wait "$TIME_PID" 2>/dev/null
+  fi
   # Let the kernel finish async IOGPU reclamation of the just-exited process's GPU buffers
   # before the next gateway allocates ~15-28 GB on the same Metal device (the cross-process
   # remove_memory_object race).
   sleep "$GPU_SETTLE"
-  foot=$(grep -m1 'peak memory footprint' "$glog" | awk '{printf "%.0f", $1/1048576}')
+  # A shared gateway is not under our `/usr/bin/time -l`, so there is no footprint to back-fill —
+  # and inventing one from somebody else's process would be worse than an empty column.
+  foot=$([ "$SHARED_GW" = 1 ] && echo "" || grep -m1 'peak memory footprint' "$glog" | awk '{printf "%.0f", $1/1048576}')
   awk -F, -v m="$spec_csv" -v f="${foot:-}" 'BEGIN{OFS=","} NR==1{print;next} $2==m{$13=f} {print}' "$CSV" > "$CSV.tmp" && mv "$CSV.tmp" "$CSV"
   echo "  model footprint: ${foot:-n/a}MB"
   echo
