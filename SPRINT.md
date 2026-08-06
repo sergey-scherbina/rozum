@@ -789,6 +789,25 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   markers now ARE the interface. Narrowing it (a constructor instead of a 22-field literal) is the
   natural follow-up and was deliberately NOT folded in — an extraction that also redesigns what it
   moves is reviewable as neither.
+  **2026-08-06 — second slice, this time `control.rs`: 4309 → 3643 (−15%).** It is not one component
+  but ~260 small route handlers sharing helpers, so it splits by SUBJECT, not by leaf. First subject
+  out: `matrix.rs` (704 lines — job queue + worker, the live panel persisted across restarts, the CSV
+  reader, the public read-only views), preceded by `paths.rs` (`safe_path_seg` + `state_dir`, 17 and
+  19 call sites) and `json_err` joining `error_json` in `errors.rs`. 114/114 green, no warnings.
+  **Two named references back to the parent remain, on purpose:** `check_view_token` (the public
+  matrix routes are token-gated, and that check belongs to a view-token family which itself calls the
+  RBAC storage helpers — pulling it drags two layers) and `default_tail` (a log-tail default shared
+  with the coder-log route, which must not drift to a different number). Leaving the public routes
+  behind instead would split one subject across two files, which is the confusion this work exists to
+  remove. **The next slice is `view_tokens` + the RBAC storage helpers**, and it deletes the first of
+  those two lines.
+  **Method notes, because both bit today.** (1) My leaf measurement matched bare NAMES, so `status`
+  and `serve` looked like dependencies when the family never calls them, while `check_view_token`
+  never showed up at all. Match CALLS, and expect the compiler to find the rest. (2) The span finder
+  closed an item when brace depth returned to zero, which is true on the FIRST line of
+  `async fn f(\n arg,\n) -> R {` — so it cut a signature and orphaned its body — and never true for a
+  one-line `enum E { A, B }`, so that item's span swallowed its neighbour. Track "a brace was opened"
+  separately from depth. Tool: `scratchpad/extract.py`.
   **Remaining** (unchanged, still architectural): request-mapping needs gateway-local wire DTOs,
   auto-context calls into streaming types, the async handlers are coupled to `GatewayState`, and
   `control.rs` (4309) is untouched.
