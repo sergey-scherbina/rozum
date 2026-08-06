@@ -5,6 +5,49 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-027 — the repair round after a loop-break was spent echoing the loop-break
+
+- **Status:** FIXED 2026-08-06 (`crates/nadia/src/{session,approval,main}.rs`).
+- **Found by:** digging into the one matrix cell that stayed unstable, with the agent's own JSON
+  trace — not by review, and not from the harness log, which does not carry tool calls.
+
+Reproduced first, in the matrix's exact configuration (`rozum launch`, `ROZUM_VERIFY=0` so nadia's
+own gate owns the run, seatbelt on): **1 of 6 runs left code that compiles**, and the loop-breaker
+fired in every one. The same task run directly, without the launcher, passed 8 of 8 — which is why
+this had looked like model variance for two days.
+
+The trace says exactly what happened. The final repair turn:
+
+```json
+{"text":"The `bash` tool was called 4 times with identical arguments…","stop":"Done","steps":1,"operations":[]}
+```
+
+**One step, zero tool calls, and the whole answer is the breaker's own sentence quoted back.** The
+break leaves its message as the last thing in the conversation and a 4B model reads that as the
+answer. `rozum launch` never had the problem because its repair is a fresh PROCESS; nadia's was a
+turn in the same poisoned session.
+
+Fixed: when the breaker fired during a turn, the repair runs in a FRESH session (task + check
+output, which is all the next attempt needs) and the breaker's window is cleared — a repair must
+not begin three strikes into the window that ended the previous turn.
+
+**And a second defect the fix exposed: the last repair was never checked.** The loop ran
+`check → repair → check → repair` and stopped, so the final attempt's work was never judged —
+three runs in six reported `✘ проверка НЕ прошла` on code that builds. Now it is `rounds` repairs
+and `rounds + 1` checks: "the check decides" cannot be true while the last attempt goes unchecked.
+
+Measured over six runs each, same config:
+
+| | code compiles | verdict matched reality |
+|---|---|---|
+| before | **1/6** | 4/6 |
+| fresh session only | 6/6 | 3/6 |
+| **both fixes** | **5/6** | **6/6** |
+
+The sixth is an honest failure: the model did not finish and the gate said so.
+
+---
+
 ## BUG-026 — the gate invented the answer, then failed correct work for not matching it
 
 - **Status:** FIXED 2026-08-05 (`crates/rozum-agent/src/verify.rs`), test

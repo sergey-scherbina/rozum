@@ -331,7 +331,7 @@ async fn main() {
                 eprintln!("nadia run needs a task\n\n{USAGE}");
                 std::process::exit(2);
             }
-            let mut session = Session::new(&backend, &tools, &system_prompt(&root), budget);
+            let mut session = Session::new(&backend, &tools, &system_prompt(&root), budget.clone());
             // What "done" means, decided before the run (`gate.rs`). NADIA_VERIFY=0 turns it off.
             let check = nadia::gate::derive(&backend, &task, &root).await;
             match (&check, nadia::gate::owner()) {
@@ -343,10 +343,21 @@ async fn main() {
             }
             let mut outcome = session.turn(&task).await;
             let mut report = nadia::gate::Report::default();
-            for round in 0..nadia::gate::rounds() {
+            // `rounds` REPAIRS, and one check more than that. The old shape ran a check before
+            // each repair and then stopped, so the LAST repair's work was never judged: measured
+            // 2026-08-06, three runs in six reported `✘ проверка НЕ прошла` on code that builds,
+            // because the fix landed in the turn after the final check. "The check decides" cannot
+            // be true if the last attempt is never checked.
+            let max_rounds = nadia::gate::rounds();
+            let mut round = 0usize;
+            loop {
                 let (r, repair) =
                     nadia::gate::check(&backend, &task, &root, check.as_deref(), &outcome).await;
                 report = nadia::gate::Report { rounds: round, ..r };
+                // Out of repair budget: this check is the verdict.
+                if round >= max_rounds {
+                    break;
+                }
                 // A run that stopped WITHOUT finishing still gets its deterministic check — the
                 // artifact is on disk either way, and that run is the one the operator has most
                 // doubt about. Measured 2026-08-04: an RPN attempt exhausted its steps, the
@@ -357,8 +368,26 @@ async fn main() {
                     break;
                 }
                 let Some(prompt) = repair else { break };
-                eprintln!("nadia: check failed — repair round {}", round + 1);
-                outcome = session.turn(&prompt).await;
+                round += 1;
+                eprintln!("nadia: check failed — repair round {round}");
+                // A turn that ended in the loop-breaker leaves the breaker's own sentence as the
+                // last thing in the conversation, and a small model answers the next turn by
+                // quoting it: measured 2026-08-06 on `wordcount`, the repair turn made ONE step,
+                // zero tool calls, and its whole reply was that sentence. The round was spent
+                // before it began.
+                //
+                // `rozum launch` does not hit this because its repair is a fresh PROCESS. So when
+                // the breaker fired, this repairs in a fresh SESSION for the same reason: the
+                // task and the check output are all the next attempt needs, and the poisoned
+                // history is exactly what it does not.
+                if tools.inner().take_tripped() {
+                    eprintln!("nadia: …the last turn was cut for repetition — restarting clean");
+                    tools.inner().forget();
+                    session = Session::new(&backend, &tools, &system_prompt(&root), budget.clone());
+                    outcome = session.turn(&format!("{task}\n\n{prompt}")).await;
+                } else {
+                    outcome = session.turn(&prompt).await;
+                }
             }
             eprintln!("nadia: {}", report.summary());
             if opts.json {

@@ -84,6 +84,13 @@ pub struct ApprovalGate<T: ToolSource> {
 }
 
 impl<T: ToolSource> ApprovalGate<T> {
+    /// What this gate wraps. The gate is the outermost layer, so a caller that needs the
+    /// [`crate::session::LoopBreaker`] underneath — to ask whether it fired — has to come through
+    /// here.
+    pub fn inner(&self) -> &T {
+        &self.inner
+    }
+
     pub fn new(inner: T, policy: Arc<Policy>, approver: Box<dyn Approver>) -> Self {
         Self { inner, policy, approver }
     }

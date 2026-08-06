@@ -87,6 +87,10 @@ pub struct LoopBreaker<T: ToolSource> {
     /// `(call, result)` per dispatch, newest last. The result half is what keeps a
     /// verification loop from looking like churn.
     history: Mutex<Vec<(String, String)>>,
+    /// Did it fire since the last [`LoopBreaker::take_tripped`]? A caller that intervenes after a
+    /// break needs to know it happened: the break leaves its own message in the conversation, and
+    /// a small model reads that message as the answer (measured — see `take_tripped`).
+    tripped: std::sync::atomic::AtomicBool,
 }
 
 const WINDOW: usize = 12;
@@ -94,7 +98,25 @@ const REPEATS: usize = 4;
 
 impl<T: ToolSource> LoopBreaker<T> {
     pub fn new(inner: T) -> Self {
-        Self { inner, history: Mutex::new(Vec::new()) }
+        Self { inner, history: Mutex::new(Vec::new()), tripped: Default::default() }
+    }
+
+    /// Whether the breaker fired since this was last called, clearing the flag.
+    ///
+    /// Measured 2026-08-06, `wordcount` under `rozum launch`: after a break, the gate's repair
+    /// turn made **1 step, zero tool calls**, and its whole answer was the breaker's own sentence
+    /// quoted back. The model latches onto the last thing in its context instead of working, so
+    /// the repair round is spent before it starts. `rozum launch` does not have this problem
+    /// because its repair is a fresh PROCESS; nadia's is a turn in the same session, and that is
+    /// the difference this flag lets the caller act on.
+    pub fn take_tripped(&self) -> bool {
+        self.tripped.swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Forget what has been called. A repair turn is a new attempt with new information, and it
+    /// must not begin already three strikes into the window that ended the previous one.
+    pub fn forget(&self) {
+        self.history.lock().unwrap().clear();
     }
 }
 
@@ -122,6 +144,7 @@ impl<T: ToolSource> ToolSource for LoopBreaker<T> {
             }
         };
         if stuck {
+            self.tripped.store(true, std::sync::atomic::Ordering::SeqCst);
             return Err(ToolError::new(format!(
                 "You have called `{name}` with these exact arguments several times and got the \
                  same result every time. Repeating it will not help. Re-read the current state \
