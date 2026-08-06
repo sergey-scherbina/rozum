@@ -1,5 +1,19 @@
 # Changelog
 
+## gate-defer-line — a deferred run said the task had no criterion
+Completed: 2026-08-06
+
+Found while digging into why the model sometimes re-runs a command instead of editing: under
+`rozum launch` the agent prints two lines together, and the second contradicts the first.
+
+    nadia: verification is rozum-launch's for this run
+    nadia: ⚠ не проверено — у задачи нет машинно-проверяемого критерия
+
+There IS a criterion — `cargo build -q`, derived and applied by the launcher. Nothing was checked
+*by this gate*, which is a different fact, and the empty report printed the wrong one of the two.
+Same rule as everywhere else in §3.1: unverified must not read as failed, and deferred must not
+read as uncheckable.
+
 ## install-bins-script — one way to put a binary on this machine
 Completed: 2026-08-06
 

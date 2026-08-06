@@ -50,7 +50,18 @@ impl Report {
             (Some(false), Some(c)) => format!("✘ проверка НЕ прошла: {c}\n{}", clip(&self.detail, 600)),
             (Some(true), None) => "✔ судья-модель подтвердила результат".to_string(),
             (Some(false), None) => format!("✘ судья-модель отклонила: {}", clip(&self.detail, 400)),
-            (None, _) => "⚠ не проверено — у задачи нет машинно-проверяемого критерия".to_string(),
+            // Nothing was checked HERE. Which of the two reasons it is matters: a task with no
+            // criterion is one thing, and a run whose criterion belongs to an outer gate is quite
+            // another. Measured 2026-08-06 under `rozum launch`, the two lines printed together:
+            //     nadia: verification is rozum-launch's for this run
+            //     nadia: ⚠ не проверено — у задачи нет машинно-проверяемого критерия
+            // The second contradicts the first — there IS a criterion, it is simply not ours —
+            // and "unverified must not read as failed" (SPEC §3.1) cuts the same way here: a
+            // deferred run must not read as uncheckable.
+            (None, _) => match owner() {
+                Some(o) => format!("⤳ проверку выполняет {o}, не этот прогон"),
+                None => "⚠ не проверено — у задачи нет машинно-проверяемого критерия".to_string(),
+            },
         }
     }
 }
@@ -254,10 +265,21 @@ mod tests {
         unsafe { std::env::set_var("ROZUM_GATE_OWNER", "rozum-launch") };
         assert!(!enabled(), "two gates on one run is two derive calls and two repair budgets");
         assert_eq!(owner().as_deref(), Some("rozum-launch"), "and the run should be able to SAY so");
+        // …and the REPORT must say it too. "Nothing checked here" has two reasons and they are not
+        // interchangeable: measured 2026-08-06 under `rozum launch`, this line printed
+        // "⚠ не проверено — у задачи нет машинно-проверяемого критерия" directly under
+        // main.rs's "verification is rozum-launch's for this run". There IS a criterion; it is not
+        // ours. Asserted HERE rather than in a test of its own because both read the same
+        // process-wide variable — the reason the rest of this test is one test and not four.
+        let deferred = Report::default().summary();
+        assert!(deferred.contains("rozum-launch"), "{deferred}");
+        assert!(!deferred.contains("нет машинно-проверяемого критерия"), "{deferred}");
         unsafe { std::env::remove_var("ROZUM_GATE_OWNER") };
         assert!(enabled());
         unsafe { std::env::remove_var("NADIA_VERIFY") };
         assert!(owner().is_none());
+        // With no outer gate, the same empty report means the other thing.
+        assert!(Report::default().summary().contains("нет машинно-проверяемого критерия"));
 
         // Rounds: two by default, the same budget rozum launch uses.
         assert_eq!(rounds(), 2);
