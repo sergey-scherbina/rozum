@@ -899,11 +899,23 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   concrete request types (`SessionLaunchReq`, `AgentLaunchReq`, the project add body), so filing them
   under `wire_body` made that module's tests depend on three others. A test belongs with the subject
   it names, and here the subject was the DTO, not the parser.
-  **Running total across the eight slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
-  so the crate's two monoliths went 8695 → 4624 lines (−47%) into SEVENTEEN focused modules —
-  switchboard, matrix, sessions, agents, coders, auth, chat, projects, messenger, gateway_control,
+  **2026-08-06 — ninth slice, and it moves to `gateway.rs`: 3530 → 3228.** `auto_context.rs` (344
+  lines with its two tests): estimate what a request costs in tokens, drop the oldest turns while
+  keeping the system prompt and the recent ones, and optionally summarise what was dropped so the
+  model is told rather than silently amnesiac.
+  **The entry called this one architectural and it was not.** It listed auto-context as blocked on
+  `error_json` and the streaming types; the error module came out in the first slice, and measured
+  today the family calls nothing outside itself once `estimate_prompt_tokens`, `message_text` and
+  `extractive_note` come along. Second time a "not a leaf" verdict has been overturned by measuring
+  instead of remembering — the first was the Switchboard.
+  **Worth noting for the remaining `gateway.rs` work: 1930 of its 3530 lines were TESTS.** The
+  production part was already ~1600, so the file is much less of a monolith than its line count
+  says, and the remaining subjects there are smaller than they look.
+  **Running total across the nine slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
+  so the crate's two monoliths went 8695 → 4322 lines (−50%) into EIGHTEEN focused modules —
+  switchboard, auto_context, matrix, sessions, agents, coders, auth, chat, projects, messenger, gateway_control,
   view_tokens, spawn_support, wire_body, private_store, paths, errors, defaults — with 114/114 green
-  at every step, no warnings, and no behaviour change. Every one of the seventeen imports nothing
+  at every step, no warnings, and no behaviour change. Every one of the eighteen imports nothing
   from `control.rs`/`gateway.rs`, checked with one grep rather than believed. What is left in
   `control.rs` is the router and the status snapshot, which is what should be left.
   **Remaining** (unchanged, still architectural): request-mapping needs gateway-local wire DTOs,

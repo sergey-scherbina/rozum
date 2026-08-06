@@ -10,6 +10,7 @@ pub(crate) mod codex_patch;
 pub mod control;
 pub mod agents;
 pub mod auth;
+pub mod auto_context;
 pub mod chat;
 pub mod coders;
 pub mod defaults;
