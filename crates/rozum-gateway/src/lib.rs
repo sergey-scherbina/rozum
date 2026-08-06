@@ -9,6 +9,8 @@ pub mod anthropic_http;
 pub(crate) mod codex_patch;
 pub mod control;
 pub mod errors;
+pub mod paths;
+pub mod matrix;
 pub mod switchboard;
 pub mod gateway;
 pub(crate) mod codex_lean;

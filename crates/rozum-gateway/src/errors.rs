@@ -34,3 +34,8 @@ pub(crate) fn chat_error_response(e: &ModelError, fallback_type: &str) -> Respon
         ),
     }
 }
+
+pub(crate) fn json_err(code: axum::http::StatusCode, msg: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (code, axum::Json(serde_json::json!({ "ok": false, "error": msg }))).into_response()
+}
