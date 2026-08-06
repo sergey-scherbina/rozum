@@ -911,11 +911,19 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   **Worth noting for the remaining `gateway.rs` work: 1930 of its 3530 lines were TESTS.** The
   production part was already ~1600, so the file is much less of a monolith than its line count
   says, and the remaining subjects there are smaller than they look.
-  **Running total across the nine slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
-  so the crate's two monoliths went 8695 → 4322 lines (−50%) into EIGHTEEN focused modules —
-  switchboard, auto_context, matrix, sessions, agents, coders, auth, chat, projects, messenger, gateway_control,
+  **2026-08-06 — tenth slice: `gateway.rs` 3228 → 3035.** `serving.rs` (242 lines): the twelve
+  things all three wire protocols do with a request once it is parsed — normalise tool-choice and
+  response-format, apply the determinism environment, run generation through the loop-breaker, bound
+  it with an inactivity timeout, note elision, cancel cleanly on disconnect.
+  **This is the module that makes the file's own "three thin handlers" claim true instead of
+  aspirational.** Measured first: the OpenAI, Anthropic and Responses handlers each call SIX of these
+  in the same order. The shared middle was always there — spelled out three times by proximity
+  rather than once by name.
+  **Running total across the ten slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
+  so the crate's two monoliths went 8695 → 4130 lines (−52%) into NINETEEN focused modules —
+  switchboard, serving, auto_context, matrix, sessions, agents, coders, auth, chat, projects, messenger, gateway_control,
   view_tokens, spawn_support, wire_body, private_store, paths, errors, defaults — with 114/114 green
-  at every step, no warnings, and no behaviour change. Every one of the eighteen imports nothing
+  at every step, no warnings, and no behaviour change. Every one of the nineteen imports nothing
   from `control.rs`/`gateway.rs`, checked with one grep rather than believed. What is left in
   `control.rs` is the router and the status snapshot, which is what should be left.
   **Remaining** (unchanged, still architectural): request-mapping needs gateway-local wire DTOs,

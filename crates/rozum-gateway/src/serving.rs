@@ -1,0 +1,242 @@
+//! What every dialect does with a request once it has been parsed.
+//!
+//! Extracted from `gateway.rs` (`gw-monolith-decompose`). Twelve items the three wire protocols all
+//! call in the same order: normalise tool-choice and response-format, apply the determinism
+//! environment, run the generation through the loop-breaker, bound it with an inactivity timeout,
+//! note any elision, and cancel cleanly when the client disconnects.
+//!
+//! **This is the module that makes the "three thin handlers" claim in `gateway.rs` true rather than
+//! aspirational.** Measured before moving: the OpenAI, Anthropic and Responses handlers call SIX of
+//! these each, in the same sequence — the shared middle was always there, spelled out three times
+//! by proximity instead of once by name.
+
+
+use std::sync::Arc;
+
+use std::time::Duration;
+
+use axum::http::StatusCode;
+use axum::response::{Response};
+use futures::{StreamExt as _};
+use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
+
+use crate::backend::{
+    ChatBackend, ChatRequest, ChatStream, Message, ModelError, ModelResult,
+    Role, SamplingParams, ToolDef,
+};
+use axum::middleware::Next;
+
+use crate::auto_context::{auto_context_summarize_enabled, extractive_note, summarize_dropped};
+use crate::errors::error_json;
+use crate::oai_api::ToolChoice;
+use crate::switchboard::ChatLease;
+use crate::loopbreak::*;
+
+/// Insert an elision note (extractive by default; abstractive LLM summary when opted in) after the real
+/// system messages, when turns were dropped. No-op when nothing was dropped (the common/no-overflow case).
+pub(crate) async fn with_elision_note(
+    mut messages: Vec<Message>,
+    dropped: Vec<Message>,
+    ctx_win: u32,
+    backend: &Arc<dyn ChatBackend>,
+) -> Vec<Message> {
+    if dropped.is_empty() {
+        return messages;
+    }
+    let note = if auto_context_summarize_enabled() {
+        summarize_dropped(&dropped, backend).await.unwrap_or_else(|| extractive_note(&dropped, ctx_win))
+    } else {
+        extractive_note(&dropped, ctx_win)
+    };
+    let pos = messages.iter().position(|m| !matches!(m.role, Role::System)).unwrap_or(messages.len());
+    messages.insert(pos, note);
+    messages
+}
+
+/// Wraps a `ChatStream` and cancels the token when dropped.
+/// When the axum Sse sink drops this stream (client disconnect), the backend
+/// stops generating on the next token check.
+pub(crate) struct CancelOnDrop {
+    pub(crate) stream: ChatStream,
+    pub(crate) cancel: CancellationToken,
+    /// Kept alive for the whole stream so a `switch` waits for streaming to
+    /// finish (the lease counts against `generating`) before swapping the model.
+    pub(crate) _lease: Option<ChatLease>,
+}
+
+/// Inactivity ceiling between two backend events. `ROZUM_GEN_TIMEOUT_SECS`
+/// (default 300; `0` disables). Must exceed the worst legitimate gap — a cold
+/// hybrid/MoE first token (Metal kernel JIT + weight page-in) ran ~33s, and a big
+/// quantized model under memory pressure can stall longer, so keep headroom.
+pub(crate) fn gen_inactivity_timeout() -> Duration {
+    std::env::var("ROZUM_GEN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(300))
+}
+
+/// Wrap a backend stream so a stalled generation can't hang the client forever.
+/// If no event arrives within `gen_inactivity_timeout()`, cancel the job and end
+/// the stream with `ModelError::Timeout` (HTTP 504). This is the backstop the
+/// per-token cancel check can't provide: a Metal eval wedged under memory
+/// pressure blocks inside one FFI call, so the decode loop's `is_cancelled()`
+/// check never runs until it returns. Cancelling here lets the worker abandon the
+/// job the moment it unblocks; the client gets an error instead of hanging.
+pub(crate) fn with_gen_timeout(mut stream: ChatStream, cancel: CancellationToken, dur: Duration) -> ChatStream {
+    if dur.is_zero() {
+        return stream;
+    }
+    Box::pin(async_stream::stream! {
+        loop {
+            match tokio::time::timeout(dur, stream.next()).await {
+                Ok(Some(item)) => yield item,
+                Ok(None) => break,
+                Err(_) => {
+                    cancel.cancel();
+                    crate::obs::log_event(json!({
+                        "event": "generation_timeout", "inactivity_secs": dur.as_secs(),
+                    }));
+                    yield Err(ModelError::Timeout(format!(
+                        "no output for {}s; generation aborted",
+                        dur.as_secs()
+                    )));
+                    break;
+                }
+            }
+        }
+    })
+}
+
+/// `backend.chat`, but first break a detected agentic stuck-loop with a synthetic stop.
+pub(crate) async fn chat_or_loopbreak(
+    backend: &Arc<dyn ChatBackend>,
+    req: ChatRequest,
+) -> ModelResult<ChatStream> {
+    if let Some(reason) = detect_stuck_loop(&req.messages) {
+        crate::obs::log_event(json!({ "event": "stuck_loop_broken", "detail": reason }));
+        return Ok(synthetic_stop_stream(reason));
+    }
+    backend.chat(req).await
+}
+
+/// Parse the Anthropic `tool_choice` object (`{"type":"auto"|"any"|"none"|"tool","name":…}`).
+pub(crate) fn parse_anthropic_tool_choice(v: &Value) -> ToolChoice {
+    match v.get("type").and_then(Value::as_str) {
+        Some("none") => ToolChoice::None,
+        Some("any") => ToolChoice::Required,
+        Some("tool") => match v.get("name").and_then(Value::as_str) {
+            Some(n) => ToolChoice::Named(n.to_string()),
+            None => ToolChoice::Auto,
+        },
+        _ => ToolChoice::Auto,
+    }
+}
+
+/// Parse OpenAI `response_format` into the JSON Schema to constrain the response to (or
+/// `None` for free text). `{"type":"json_object"}` → any JSON object; `{"type":"json_schema",
+/// "json_schema":{"schema":{…}}}` → that schema; `{"type":"text"}` / absent → `None`.
+pub(crate) fn parse_response_format(v: &Value) -> Option<Value> {
+    match v.get("type").and_then(Value::as_str) {
+        Some("json_object") => Some(json!({ "type": "object" })),
+        Some("json_schema") => v
+            .get("json_schema")
+            .and_then(|js| js.get("schema"))
+            .cloned()
+            .or_else(|| Some(json!({ "type": "object" }))),
+        _ => None,
+    }
+}
+
+/// Apply a [`ToolChoice`] to the resolved tool set: `None` → empty, `Named` → only that tool
+/// (empty if the client named a tool it didn't define), `Auto`/`Required` → unchanged.
+pub(crate) fn apply_tool_choice(tools: Vec<ToolDef>, choice: &ToolChoice) -> Vec<ToolDef> {
+    match choice {
+        ToolChoice::Auto | ToolChoice::Required => tools,
+        ToolChoice::None => Vec::new(),
+        ToolChoice::Named(name) => tools.into_iter().filter(|t| &t.name == name).collect(),
+    }
+}
+
+/// Reproducibility instrument for the agentic matrix (and any caller wanting a
+/// deterministic local model). The gateway passes the client's sampling params through
+/// verbatim and leaves `seed` unset, so the sampler + MLX RNG seed from entropy: a
+/// `temperature > 0` request (Claude Code's main loop sends 1.0) produces a DIFFERENT
+/// token stream every run → a matrix cell flips pass↔fail on a byte-identical config,
+/// which undermines every other matrix reading. These env knobs pin a run WITHOUT
+/// changing the wire protocol. Both default OFF → behaviour is byte-for-byte unchanged
+/// unless explicitly set (so it is purely a benchmark/diagnosis instrument here):
+///   `ROZUM_SAMPLING_SEED=<u64>`   pin the RNG seed (only fills it when the client sent none)
+///   `ROZUM_FORCE_GREEDY=1|true|on` force temperature 0 (argmax — removes the RNG entirely)
+pub(crate) fn apply_determinism_env(s: SamplingParams) -> SamplingParams {
+    let force_greedy = matches!(
+        std::env::var("ROZUM_FORCE_GREEDY").ok().as_deref(),
+        Some("1" | "true" | "on")
+    );
+    let seed = std::env::var("ROZUM_SAMPLING_SEED")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    apply_determinism(s, force_greedy, seed)
+}
+
+/// Pure core of [`apply_determinism_env`] (env read split out so it is race-free to test).
+/// `force_greedy` wins over the client's temperature; `seed` only fills an unset seed so a
+/// caller that genuinely sent its own seed keeps it.
+pub(crate) fn apply_determinism(mut s: SamplingParams, force_greedy: bool, seed: Option<u64>) -> SamplingParams {
+    if force_greedy {
+        s.temperature = Some(0.0);
+        s.top_p = None;
+        s.top_k = None;
+    }
+    if s.seed.is_none() {
+        if let Some(sd) = seed {
+            s.seed = Some(sd);
+        }
+    }
+    s
+}
+
+pub(crate) fn poison_ttl_secs() -> u64 {
+    std::env::var("ROZUM_POISON_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(crate::share::POISON_TTL_SECS)
+}
+
+/// Daemon-side defense-in-depth: a freshly (re)spawned daemon loads the shared
+/// poison set and refuses a confirmed crasher *before running the model*, so a
+/// poison prompt that survived the crash it caused can't immediately kill the
+/// daemon again — even reaching it directly (no proxy). Only POST bodies are
+/// fingerprinted (raw bytes, matching what the proxy hashes); the body is
+/// re-attached for the downstream handler. Fail-open on any read hiccup.
+pub(crate) async fn poison_layer(req: axum::extract::Request, next: Next) -> Response {
+    // Only chat POSTs carry prompts worth fingerprinting; control-plane POSTs
+    // (switch/unload/reload) pass through untouched.
+    if req.method() != axum::http::Method::POST || req.uri().path().starts_with("/control/") {
+        return next.run(req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, 64 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => {
+            // Couldn't buffer — fail open; the handler reports the body error.
+            let req = axum::extract::Request::from_parts(parts, axum::body::Body::empty());
+            return next.run(req).await;
+        }
+    };
+    let fp = crate::share::fingerprint(&bytes);
+    if crate::share::is_poisoned(fp, poison_ttl_secs()) {
+        crate::obs::log_event(json!({
+            "event": "poison_refused", "fingerprint": format!("{fp:016x}"),
+        }));
+        return error_json(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "request previously crashed this model; refused for now — retry later (advisory, expires)",
+            "poison_refused",
+        );
+    }
+    let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
+    next.run(req).await
+}
+
