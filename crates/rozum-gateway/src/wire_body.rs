@@ -65,3 +65,21 @@ pub(crate) fn parse_flat_body(body: &str) -> std::collections::HashMap<String, S
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+
+
+    #[test]
+    fn ucc_stop_id_accepts_json_form_and_legacy_plain_body() {
+        assert_eq!(parse_id_body(r#"{"id":"claude-123"}"#).unwrap(), "claude-123");
+        assert_eq!(parse_id_body("id=claude-123").unwrap(), "claude-123");
+        assert_eq!(parse_id_body("claude-123").unwrap(), "claude-123");
+        assert!(parse_id_body(r#"{"missing":"id"}"#).is_err());
+        assert!(parse_id_body("").is_err());
+    }
+
+}

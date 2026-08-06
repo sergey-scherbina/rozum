@@ -8,13 +8,14 @@ pub(crate) use crate::auth::*;
 pub(crate) use crate::agents::*;
 pub(crate) use crate::coders::*;
 pub(crate) use crate::gateway_control::*;
+pub(crate) use crate::chat::*;
+pub(crate) use crate::projects::*;
 pub(crate) use crate::messenger::*;
 pub(crate) use crate::matrix::*;
 use crate::errors::json_err;
 pub(crate) use crate::view_tokens::*;
 pub(crate) use crate::sessions::*;
-use crate::wire_body::*;
-use crate::paths::{state_dir, ucc_site_dir};
+use crate::paths::ucc_site_dir;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -202,218 +203,19 @@ async fn spa_static_route(
 
 // ── Chat read/write endpoints (replaces ucc-web-server.py proxy logic) ───────────────────────────
 
-#[derive(serde::Deserialize)]
-struct RoomQuery { room: String }
 
-async fn chat_messages_route(
-    axum::extract::Query(q): axum::extract::Query<RoomQuery>,
-) -> axum::response::Response {
-    use axum::{http::StatusCode, response::IntoResponse};
-    if !valid_room_name(&q.room) { return StatusCode::BAD_REQUEST.into_response(); }
-    axum::Json(read_room_messages(&q.room, 80)).into_response()
-}
 
-async fn chat_incidents_route(
-    axum::extract::Query(q): axum::extract::Query<RoomQuery>,
-) -> axum::response::Response {
-    use axum::{http::StatusCode, response::IntoResponse};
-    if !valid_room_name(&q.room) { return StatusCode::BAD_REQUEST.into_response(); }
-    axum::Json(read_room_incidents(&q.room)).into_response()
-}
 
-async fn chat_post_route(
-    headers: axum::http::HeaderMap,
-    body: axum::body::Bytes,
-) -> axum::response::Response {
-    use axum::{http::StatusCode, response::IntoResponse};
-    let room = headers
-        .get("X-Room")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    if !valid_room_name(&room) { return StatusCode::BAD_REQUEST.into_response(); }
-    // Proxy to the meeting daemon at :8405/p.
-    let client = reqwest::Client::new();
-    match client
-        .post("http://127.0.0.1:8405/p")
-        .header("X-Room", &room)
-        .header("Content-Type", "text/plain")
-        .body(body.to_vec())
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => StatusCode::OK.into_response(),
-        Ok(r) => (StatusCode::BAD_GATEWAY, r.status().as_str().to_string()).into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
-    }
-}
 
-/// System prompt for the conversational "Собеседник" mode: tells the local model who it is and what
-/// rozum is, so a plain question ("О чём проект?") gets a good answer from context WITHOUT the agentic
-/// repo exploration. Kept short — a 4B follows a crisp instruction; a heavy blob degrades it.
-const ROZUM_CHAT_SYSTEM: &str = "Ты — ассистент rozum, работающий ЛОКАЛЬНО на Mac пользователя: ты \
-модель (Qwen), которую обслуживает локальный гейтвей rozum, и пользователь пишет тебе с телефона. \
-rozum — это local-first система, чтобы запускать LLM и ИИ-агентов на своём железе (Apple Silicon / \
-MLX): локальный OpenAI/Anthropic-совместимый гейтвей для MLX и GGUF моделей; комнаты-встречи, где \
-ИИ-агенты и люди координируются; телефонный контрол-центр (UCC) с этим чатом; безопасная резидентность \
-нескольких моделей (контроль допуска, чтобы модели не переполняли память). Отвечай в диалоге, кратко и \
-по делу, на языке пользователя. Ты сейчас именно БЕСЕДУЕШЬ, а не выполняешь задачи в проекте — если \
-просят что-то СДЕЛАТЬ в проекте (править файлы, запускать команды), скажи переключиться в режим «Агент».";
 
-#[derive(Deserialize)]
-struct ChatMsgIn {
-    role: String,
-    content: String,
-}
-#[derive(Deserialize)]
-struct ChatStreamReq {
-    model: String,
-    messages: Vec<ChatMsgIn>,
-    #[serde(default)]
-    max_tokens: Option<u32>,
-}
 
-/// Conversational chat: forward the phone's message history to the resident model's
-/// `/v1/chat/completions` with `stream:true` and pipe the SSE straight back — token-by-token, no
-/// agent, no repo exploration, so it can never hang the way a 40-turn `claude -p` can. Prepends
-/// [`ROZUM_CHAT_SYSTEM`] so the model knows what rozum is.
-async fn chat_stream_route(body: String) -> axum::response::Response {
-    let req: ChatStreamReq = match parse_action_json(&body) {
-        Ok(r) => r,
-        Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
-    };
-    if req.model.trim().is_empty() {
-        return json_err(axum::http::StatusCode::BAD_REQUEST, "model required");
-    }
-    // The reactive client's stream primitive fires one POST at page mount with an empty
-    // `messages` (the body only carries the conversation while a send is in flight). Treat that
-    // as a graceful no-op — an immediately-terminated SSE stream — rather than a 400, so the
-    // mount-fire leaves no error in the log and never reaches the model.
-    if req.messages.is_empty() {
-        return match axum::response::Response::builder()
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-store")
-            .body(axum::body::Body::from("data: [DONE]\n\n"))
-        {
-            Ok(r) => r,
-            Err(e) => json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-        };
-    }
-    let port = match ensure_gateway(&req.model).await {
-        Ok(p) => p,
-        Err(e) => return json_err(axum::http::StatusCode::SERVICE_UNAVAILABLE, &e),
-    };
-    let mut messages = vec![serde_json::json!({"role": "system", "content": ROZUM_CHAT_SYSTEM})];
-    for m in &req.messages {
-        // Only user/assistant turns pass through; ignore any stray roles from the client.
-        let role = if m.role == "user" { "user" } else { "assistant" };
-        messages.push(serde_json::json!({"role": role, "content": m.content}));
-    }
-    let upstream = serde_json::json!({
-        "model": req.model,
-        "messages": messages,
-        "stream": true,
-        "max_tokens": req.max_tokens.unwrap_or(1024),
-    });
-    let resp = match reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-        .json(&upstream)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => return json_err(axum::http::StatusCode::BAD_GATEWAY, &format!("gateway: {e}")),
-    };
-    if !resp.status().is_success() {
-        let s = resp.status();
-        let t = resp.text().await.unwrap_or_default();
-        return json_err(
-            axum::http::StatusCode::BAD_GATEWAY,
-            &format!("gateway {s}: {}", t.chars().take(200).collect::<String>()),
-        );
-    }
-    // Pipe the upstream OpenAI SSE bytes straight through to the phone.
-    match axum::response::Response::builder()
-        .header("content-type", "text/event-stream")
-        .header("cache-control", "no-store")
-        .body(axum::body::Body::from_stream(resp.bytes_stream()))
-    {
-        Ok(r) => r,
-        Err(e) => json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
-}
 
-fn valid_room_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 128 && !name.chars().any(|c| matches!(c, '\r' | '\n' | '\0' | '/'))
-}
 
-fn rooms_json_path() -> Option<PathBuf> {
-    state_dir().map(|d| d.join("rooms.json"))
-}
 
-fn room_root(name: &str) -> Option<PathBuf> {
-    let path = rooms_json_path()?;
-    let val: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
-    let rooms = match &val {
-        serde_json::Value::Array(a) => a.clone(),
-        serde_json::Value::Object(o) => o.get("rooms").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
-        _ => return None,
-    };
-    for r in &rooms {
-        if r.get("name").and_then(|v| v.as_str()) == Some(name) {
-            return r.get("root").and_then(|v| v.as_str()).map(PathBuf::from);
-        }
-    }
-    None
-}
 
-#[derive(serde::Serialize)]
-struct ChatMessage { time: String, author: String, content: String }
 
-fn read_room_messages(room: &str, limit: usize) -> Vec<ChatMessage> {
-    let Some(root) = room_root(room) else { return vec![]; };
-    if !root.is_dir() { return vec![]; }
-    let mut files: Vec<_> = std::fs::read_dir(&root)
-        .into_iter().flatten().filter_map(|e| e.ok()).map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
-        .collect();
-    files.sort();
-    let mut out = vec![];
-    for fp in &files {
-        let Ok(text) = std::fs::read_to_string(fp) else { continue; };
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() { continue; }
-            let Ok(m) = serde_json::from_str::<serde_json::Value>(line) else { continue; };
-            let Some(content) = m.get("content").and_then(|v| v.as_str()) else { continue; };
-            let author = m.get("display_name")
-                .or_else(|| m.get("author"))
-                .and_then(|v| v.as_str()).unwrap_or("?");
-            let ts = m.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
-            let time = { let h = (ts / 3600) % 24; let min = (ts / 60) % 60; format!("{h:02}:{min:02}") };
-            out.push(ChatMessage { time, author: author.to_string(), content: content.to_string() });
-        }
-    }
-    if out.len() > limit { out.drain(..out.len() - limit); }
-    out
-}
 
-#[derive(serde::Serialize)]
-struct Incident { severity: String, state: String, title: String, owner: String }
 
-fn read_room_incidents(room: &str) -> Vec<Incident> {
-    let Some(root) = room_root(room) else { return vec![]; };
-    let Ok(bytes) = std::fs::read(root.join("threads.json")) else { return vec![]; };
-    let Ok(serde_json::Value::Array(arr)) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return vec![]; };
-    arr.iter().filter_map(|t| {
-        Some(Incident {
-            title:    t.get("title")?.as_str()?.to_string(),
-            state:    t.get("state").and_then(|v| v.as_str()).unwrap_or("open").to_string(),
-            severity: t.get("severity").and_then(|v| v.as_str()).unwrap_or("low").to_string(),
-            owner:    t.get("owner").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        })
-    }).collect()
-}
 
 // ── Agent registry + actions (write side of the control API) ─────────────────────────────────────
 //
@@ -657,23 +459,6 @@ async fn task_route(axum::Json(req): axum::Json<TaskReq>) -> axum::response::Res
 
 
 
-fn parse_project_add_body(body: &str) -> Result<ProjectAddRequest, String> {
-    let body = body.trim();
-    if body.is_empty() {
-        return Err("name required".into());
-    }
-    if body.starts_with('{') || body.starts_with('[') {
-        let req: ProjectAddRequest =
-            serde_json::from_str(body).map_err(|e| format!("invalid JSON body: {e}"))?;
-        return Ok(req);
-    }
-    for (k, v) in url::form_urlencoded::parse(body.as_bytes()) {
-        if k == "name" {
-            return Ok(ProjectAddRequest { name: v.into_owned() });
-        }
-    }
-    Ok(ProjectAddRequest { name: body.to_string() })
-}
 
 // ── Phase 2: coding-agents (`rozum launch`) — detached supervisor + log ─────────────────────────────
 //
@@ -1026,11 +811,6 @@ pub struct MeetingBrief {
     pub room: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ProjectBrief {
-    pub name: String,
-    pub path: String,
-}
 
 /// List the meeting rooms from the daemon's on-disk registry (`$XDG_STATE_HOME|~/.local/state` →
 /// `rozum/rooms.json`). Read-only, best-effort: a missing/garbled file yields an empty list. Test and
@@ -1060,32 +840,8 @@ fn list_meetings() -> Vec<MeetingBrief> {
         .collect()
 }
 
-/// List known project directories from `rooms.json` for the workdir picker. Rooms without a
-/// project path, and test/worktree paths, are excluded.
-fn ucc_config_path() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default()
-        .join(".rozum/ucc/config.json")
-}
 
-fn read_projects_dir() -> String {
-    std::fs::read(ucc_config_path()).ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| v.get("projects_dir").and_then(|d| d.as_str()).map(|s| s.to_string()))
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| std::path::PathBuf::from(h).join("work").to_string_lossy().to_string())
-                .unwrap_or_else(|| "/tmp/projects".to_string())
-        })
-}
 
-fn projects_extra_path() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default()
-        .join(".rozum/ucc/projects.json")
-}
 
 async fn config_route() -> axum::response::Response {
     use axum::response::IntoResponse;
@@ -1099,91 +855,8 @@ async fn config_route() -> axum::response::Response {
     axum::Json(serde_json::json!({ "projects_dir": shown })).into_response()
 }
 
-fn list_projects() -> Vec<ProjectBrief> {
-    let mut out: Vec<ProjectBrief> = Vec::new();
 
-    // 1) rooms.json — project rooms from the meeting daemon
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state")));
-    if let Some(path) = base.map(|b| b.join("rozum/rooms.json")) {
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(rooms) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) {
-                for r in &rooms {
-                    let Some(name) = r.get("name").and_then(|v| v.as_str()) else { continue };
-                    let Some(project) = r.get("project").and_then(|v| v.as_str()) else { continue };
-                    if project.is_empty() || project.contains("/tmp/") || project.contains("/.worktrees/") {
-                        continue;
-                    }
-                    if !out.iter().any(|p| p.path == project) {
-                        out.push(ProjectBrief { name: name.to_string(), path: project.to_string() });
-                    }
-                }
-            }
-        }
-    }
 
-    // 2) ~/.rozum/ucc/projects.json — user-added projects via the UCC "создать" button
-    if let Ok(bytes) = std::fs::read(projects_extra_path()) {
-        if let Ok(extras) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) {
-            for r in &extras {
-                let Some(name) = r.get("name").and_then(|v| v.as_str()) else { continue };
-                let Some(path) = r.get("path").and_then(|v| v.as_str()) else { continue };
-                if !out.iter().any(|p| p.path == path) {
-                    out.push(ProjectBrief { name: name.to_string(), path: path.to_string() });
-                }
-            }
-        }
-    }
-
-    out
-}
-
-#[derive(serde::Deserialize)]
-struct ProjectAddRequest {
-    name: String,
-}
-
-async fn project_add_route(body: String) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    let req = match parse_project_add_body(&body) {
-        Ok(req) => req,
-        Err(e) => return json_err(axum::http::StatusCode::BAD_REQUEST, &e),
-    };
-    let name = req.name.trim().to_string();
-    if name.is_empty() {
-        return json_err(axum::http::StatusCode::BAD_REQUEST, "name required");
-    }
-    if name.contains('/') || name.contains("..") {
-        return json_err(axum::http::StatusCode::BAD_REQUEST, "name must not contain path separators");
-    }
-    let base = read_projects_dir();
-    let path = format!("{}/{}", base.trim_end_matches('/'), name);
-    let p = std::path::Path::new(&path);
-    if !p.exists() {
-        if let Err(e) = std::fs::create_dir_all(p) {
-            return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("mkdir: {e}"));
-        }
-    } else if !p.is_dir() {
-        return json_err(axum::http::StatusCode::BAD_REQUEST, "path exists but is not a directory");
-    }
-    let extra = projects_extra_path();
-    let mut projects: Vec<serde_json::Value> = if extra.exists() {
-        std::fs::read(&extra).ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    if !projects.iter().any(|e| e.get("path").and_then(|v| v.as_str()) == Some(path.as_str())) {
-        projects.push(serde_json::json!({"name": name, "path": path}));
-        if let Some(parent) = extra.parent() { let _ = std::fs::create_dir_all(parent); }
-        if let Err(e) = std::fs::write(&extra, serde_json::to_vec(&projects).unwrap_or_default()) {
-            return json_err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("write: {e}"));
-        }
-    }
-    axum::Json(serde_json::json!({"ok": true})).into_response()
-}
 
 /// Format a byte count as a one-decimal GiB string (e.g. `"25.1 GiB"`).
 fn fmt_gib(bytes: u64) -> String {
@@ -1390,45 +1063,9 @@ mod tests {
 
 
 
-    #[test]
-    fn ucc_form_body_json_parses_session_launch_without_content_type() {
-        let req: SessionLaunchReq = parse_action_json(
-            r#"{"agent":"claude","model":"mlx-community:Qwen3.6-35B-A3B-4bit","workdir":"/tmp","prompt":""}"#,
-        )
-        .unwrap();
-        assert_eq!(req.agent, "claude");
-        assert_eq!(req.model, "mlx-community:Qwen3.6-35B-A3B-4bit");
-        assert_eq!(req.workdir, "/tmp");
-        assert_eq!(req.prompt, "");
-    }
 
-    #[test]
-    fn ucc_form_body_json_parses_defaulted_agent_launch() {
-        let req: AgentLaunchReq =
-            parse_action_json(r#"{"model":"m","room":"rozum","persona":"brief"}"#).unwrap();
-        assert_eq!(req.model, "m");
-        assert_eq!(req.room, "rozum");
-        assert_eq!(req.policy, "mention");
-        assert_eq!(req.persona, "brief");
-    }
 
-    #[test]
-    fn ucc_stop_id_accepts_json_form_and_legacy_plain_body() {
-        assert_eq!(parse_id_body(r#"{"id":"claude-123"}"#).unwrap(), "claude-123");
-        assert_eq!(parse_id_body("id=claude-123").unwrap(), "claude-123");
-        assert_eq!(parse_id_body("claude-123").unwrap(), "claude-123");
-        assert!(parse_id_body(r#"{"missing":"id"}"#).is_err());
-        assert!(parse_id_body("").is_err());
-    }
 
-    #[test]
-    fn ucc_project_add_accepts_json_form_and_plain_body() {
-        assert_eq!(parse_project_add_body(r#"{"name":"demo"}"#).unwrap().name, "demo");
-        assert_eq!(parse_project_add_body("name=demo").unwrap().name, "demo");
-        assert_eq!(parse_project_add_body("demo").unwrap().name, "demo");
-        assert!(parse_project_add_body(r#"{"missing":"name"}"#).is_err());
-        assert!(parse_project_add_body("").is_err());
-    }
 
     #[test]
     fn busi_sso_gets_operator_perms_not_admin() {
