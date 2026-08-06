@@ -1,0 +1,6 @@
+feature/gw-decompose-autocontext 2026-08-06T10:26:56Z
+agent: claude-opus-5
+heartbeat: 2026-08-06T10:26:56Z
+status: not-started
+done-so-far: measured: auto-context = 6 items / 168 lines, closed once estimate_prompt_tokens and message_text come along
+next: worktree off origin/master, extract auto_context.rs with its tests
