@@ -32,9 +32,9 @@ nadias derive their own checks from the same schema and still accept a fabricate
 contract; the same debt was written down for the gate itself in `vgp-*` and is not allowed to
 recur silently.
 
-- [ ] **b26-scala3** — `taskStates` in `sdk/Verify.scala`, wired into `deriveCheck`, twinned test.
-- [ ] **b26-ssc** — the same in `src/gate.ssc`, rule added to `src/gate-check.ssc`.
-- [ ] **b26-spec** — §3.1 states the rule once, where all three read it.
+- [x] **b26-scala3 — DONE.** — `taskStates` in `sdk/Verify.scala`, wired into `deriveCheck`, twinned test.
+- [x] **b26-ssc — DONE.** — the same in `src/gate.ssc`, rule added to `src/gate-check.ssc`.
+- [x] **b26-spec — DONE.** — §3.1 states the rule once, where all three read it.
 
 ### ▶ BUG-013's cause, and what to do when a cause will not reproduce (operator 2026-08-05: "нужно исправить причину")
 
