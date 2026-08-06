@@ -4,6 +4,8 @@
 //! served over the gateway's HTTP surface for the web/UCC target. See
 //! `docs/specs/services-and-clients.md`.
 
+use crate::errors::json_err;
+use crate::paths::{safe_path_seg, state_dir};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -449,12 +451,6 @@ pub struct AgentBrief {
     pub status: String,
 }
 
-fn state_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .map(|b| b.join("rozum"))
-}
 
 /// Serializes every read-modify-write of the ucc-{sessions,agents,coders}.json registries. The
 /// launch/stop routes and the status-poll prune paths all load→mutate→save the same small JSON
@@ -795,12 +791,6 @@ fn shell_safe(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@' | '+'))
 }
 
-/// True if `s` is safe to use as a SINGLE filesystem path segment (matrix `stamp`/`agent`/`task` etc.)
-/// — non-empty, not `.`/`..`, and containing no path separator or NUL. Rejects rather than mangles, so a
-/// crafted `../../etc` walk cannot escape the results dir the segment is joined onto (path-traversal fix).
-fn safe_path_seg(s: &str) -> bool {
-    !s.is_empty() && s != "." && s != ".." && !s.chars().any(|c| matches!(c, '/' | '\\' | '\0'))
-}
 
 /// CSRF guard for state-changing GET routes (the SPA drives gateway load/stop via same-origin `<a>`
 /// anchors). Browsers send `Sec-Fetch-Site: same-origin` for the SPA's own links, `none` for a typed
@@ -1167,10 +1157,6 @@ fn derive_handle(model: &str) -> String {
     base.to_lowercase()
 }
 
-fn json_err(code: axum::http::StatusCode, msg: &str) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    (code, axum::Json(serde_json::json!({ "ok": false, "error": msg }))).into_response()
-}
 
 fn parse_action_json<T: DeserializeOwned>(body: &str) -> Result<T, String> {
     serde_json::from_str::<T>(body.trim()).map_err(|e| format!("invalid JSON body: {e}"))
@@ -4277,22 +4263,6 @@ mod tests {
         assert!(!bootstrap_token_matches(None, None));
     }
 
-    #[test]
-    fn safe_path_seg_rejects_traversal() {
-        // Regression guard for the matrix-cell path-traversal fix: a single path segment must carry no
-        // separator, `..`, `.`, or NUL, so a crafted stamp/agent/task can't walk outside the bench
-        // results dir (arbitrary file read + a dir-existence oracle otherwise).
-        assert!(safe_path_seg("1783166880"));
-        assert!(safe_path_seg("claude"));
-        assert!(safe_path_seg("task-01"));
-        assert!(!safe_path_seg(".."));
-        assert!(!safe_path_seg("."));
-        assert!(!safe_path_seg(""));
-        assert!(!safe_path_seg("../../etc"));
-        assert!(!safe_path_seg("a/b"));
-        assert!(!safe_path_seg("a\\b"));
-        assert!(!safe_path_seg("a\0b"));
-    }
 
     #[test]
     fn same_site_get_rejects_only_cross_site() {
