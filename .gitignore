@@ -9,3 +9,7 @@ node_modules
 
 .scala-build/
 clients/control/test/DEFECTS.md
+
+# Python bytecode cache — created by importing scripts/*.py, never source
+__pycache__/
+*.pyc
