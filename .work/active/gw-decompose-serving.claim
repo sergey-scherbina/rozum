@@ -1,0 +1,6 @@
+feature/gw-decompose-serving 2026-08-06T10:34:37Z
+agent: claude-opus-5
+heartbeat: 2026-08-06T10:34:37Z
+status: not-started
+done-so-far: measured: the three dialect handlers all call ONE shared layer — 12 items / 195 lines, closed
+next: worktree off origin/master, extract serving.rs, then re-measure the handlers
