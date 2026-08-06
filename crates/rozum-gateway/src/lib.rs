@@ -12,6 +12,7 @@ pub mod defaults;
 pub mod errors;
 pub mod paths;
 pub mod private_store;
+pub mod sessions;
 pub mod spawn_support;
 pub mod wire_body;
 pub mod view_tokens;

@@ -11,6 +11,11 @@
 
 use std::process::{Command, Stdio};
 
+/// A `starting…` row whose in-process launch task died (control-serve restart / redeploy mid-launch)
+/// is never transitioned by anything, so the row would show `starting…` forever. Prune such rows
+/// once they're older than this. Also bounds a genuinely stuck cold-start.
+pub(crate) const STARTING_TTL_SECS: u64 = 900;
+
 /// Serializes every read-modify-write of the ucc-{sessions,agents,coders}.json registries. The
 /// launch/stop routes and the status-poll prune paths all load→mutate→save the same small JSON
 /// files; without this a poll's save can clobber a concurrent launch (lost update → orphan process

@@ -837,9 +837,26 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   are now in `scripts/rust-item-spans.py` (committed, with a working command line — the first copy
   printed nothing while documenting one): match calls not names; track "a brace was opened" apart
   from depth; allow same-line attributes.
-  **Running total across the three slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
-  so the crate's two monoliths went 8695 → 7060 lines (−19%) into seven focused modules, 114/114
-  green at every step with no warnings and no behaviour change.
+  **2026-08-06 — fourth slice: `control.rs` 3531 → 3072 (−13%).** `spawn_support.rs` (the shared
+  launch machinery every agent/coder/session route needs: registry lock, launch counter, shell
+  quoting, tmux naming and liveness, the is-that-agent-installed check, and the starting-row TTL),
+  `wire_body.rs` (the JSON-or-form body readers), then `sessions.rs` (17 items — terminal sessions:
+  record, registry, live view, launch/stop/send/output/attach). After the shared layers came out the
+  session family called NOTHING outside itself, so it moved in one piece. Ten modules, all still
+  importing zero from `control.rs`/`gateway.rs`.
+  **The trap this slice was queued with, and it fired exactly as written:** "session" means two
+  things here — a tmux TERMINAL session and an auth LOGIN session (`ucc-auth-sessions.json`). The
+  family selected by the WORD was 22 items across both meanings; selected by MEANING it is 17, and
+  the six auth items stayed with the auth code. A regex over names is not a subject.
+  **Fourth tool bug, same failure mode as the others — a plausible wrong answer.** `braces()` knew
+  string literals but not CHAR literals, so `body.starts_with('{')` opened a brace that never
+  closed: one span swallowed 2388 lines and the tool reported a tidy "6 items, 68% of file". A
+  lifetime (`&'a str`) is not a literal and must not be skipped, so the quote only counts when it
+  closes. Fixed in `scripts/rust-item-spans.py`, along with clamping a span that runs off the end.
+  **Running total across the four slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
+  so the crate's two monoliths went 8695 → 6601 lines (−24%) into ten focused modules — switchboard,
+  matrix, sessions, view_tokens, spawn_support, wire_body, private_store, paths, errors, defaults —
+  114/114 green at every step with no warnings and no behaviour change.
   **Remaining** (unchanged, still architectural): request-mapping needs gateway-local wire DTOs,
   auto-context calls into streaming types, the async handlers are coupled to `GatewayState`, and
   `control.rs` (4309) is untouched.
