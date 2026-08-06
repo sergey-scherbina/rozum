@@ -26,6 +26,15 @@ def braces(line):
             break
         if ch == '"':
             q = not q
+        elif not q and ch == "'":
+            # A CHAR LITERAL, not a lifetime: `'{'` in `body.starts_with('{')` is a brace to the
+            # naive counter, so the span never closed and swallowed 2388 lines. `'a` in `&'a str`
+            # is not a literal and must not be skipped, so only skip when the quote closes.
+            j = i + 1
+            if j < n and line[j] == '\\':
+                j += 1
+            if j + 1 < n and line[j + 1] == "'":
+                i = j + 1
         elif not q:
             if ch == '{':
                 out += 1; opens += 1
@@ -56,7 +65,10 @@ def spans(src, want):
             k = i
             while k > 0 and (src[k-1].lstrip().startswith("//") or src[k-1].lstrip().startswith("#[")):
                 k -= 1
-            found.append((k, j, m.group(2)))
+            # An item that never closes — the last one in a file, or a mis-parse — leaves `j` one
+            # past the end, and the caller indexes with it. Clamp rather than emit an impossible
+            # span: an out-of-range crash on a bigger pattern is how this was found.
+            found.append((k, min(j, len(src) - 1), m.group(2)))
             i = j + 1
         else:
             i += 1
