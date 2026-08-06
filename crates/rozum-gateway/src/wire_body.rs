@@ -41,3 +41,27 @@ pub(crate) fn parse_id_body(body: &str) -> Result<String, String> {
 pub(crate) fn parse_action_json<T: DeserializeOwned>(body: &str) -> Result<T, String> {
     serde_json::from_str::<T>(body.trim()).map_err(|e| format!("invalid JSON body: {e}"))
 }
+
+/// Parse a request body that may be JSON or form-urlencoded (the `.ssc` `formBody` posts the
+/// latter) into flat string fields. JSON numbers/bools are stringified so `chat_id` works either
+/// way — the SPA sends `"-1004378341901"`, a curl user sends `-1004378341901`.
+pub(crate) fn parse_flat_body(body: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let body = body.trim();
+    if body.starts_with('{') {
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(body) {
+            for (k, v) in map {
+                let s = match v {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
+                };
+                out.insert(k, s);
+            }
+            return out;
+        }
+    }
+    for (k, v) in url::form_urlencoded::parse(body.as_bytes()) {
+        out.insert(k.into_owned(), v.into_owned());
+    }
+    out
+}

@@ -21,6 +21,7 @@ pub mod wire_body;
 pub mod view_tokens;
 pub mod gateway_control;
 pub mod matrix;
+pub mod messenger;
 pub mod switchboard;
 pub mod gateway;
 pub(crate) mod codex_lean;
