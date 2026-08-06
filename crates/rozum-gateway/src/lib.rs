@@ -25,6 +25,7 @@ pub mod view_tokens;
 pub mod gateway_control;
 pub mod matrix;
 pub mod messenger;
+pub mod serving;
 pub mod switchboard;
 pub mod gateway;
 pub(crate) mod codex_lean;
