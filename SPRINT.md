@@ -823,6 +823,22 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   `async fn f(\n arg,\n) -> R {` — so it cut a signature and orphaned its body — and never true for a
   one-line `enum E { A, B }`, so that item's span swallowed its neighbour. Track "a brace was opened"
   separately from depth. Tool: `scratchpad/extract.py`.
+  **2026-08-06 — third slice: `control.rs` 3643 → 3531, and the dependency graph now runs one way.**
+  `private_store.rs` (the 0600 JSON store for users/roles/invites/view-tokens: atomic write, load,
+  save, mint), `view_tokens.rs` (10 items — record, store, check, page route, three admin routes),
+  `defaults.rs` (four `#[serde(default)]` one-liners). **Every extracted module now imports zero
+  things from `control.rs` or `gateway.rs`** — measured, not assumed: the `check_view_token` and
+  `default_tail` references that the last slice left in `matrix.rs` are both gone, which is exactly
+  what this slice was queued to do. `default_roles` stayed behind on purpose (it returns
+  `Vec<UccRole>`, so it belongs to the RBAC types).
+  **A third parser lesson, same family as the first two:** an attribute may sit on the SAME line as
+  its item — `#[derive(Deserialize)] struct ViewTokenCreateReq { … }` — and a pattern anchored at the
+  item keyword skips it silently. It was found by the compiler, not by the tool. All three lessons
+  are now in `scratchpad/extract.py`: match calls not names; track "a brace was opened" apart from
+  depth; allow same-line attributes.
+  **Running total across the three slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
+  so the crate's two monoliths went 8695 → 7060 lines (−19%) into seven focused modules, 114/114
+  green at every step with no warnings and no behaviour change.
   **Remaining** (unchanged, still architectural): request-mapping needs gateway-local wire DTOs,
   auto-context calls into streaming types, the async handlers are coupled to `GatewayState`, and
   `control.rs` (4309) is untouched.

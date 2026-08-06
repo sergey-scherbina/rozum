@@ -20,6 +20,13 @@ pub(crate) fn state_dir() -> Option<PathBuf> {
         .map(|b| b.join("rozum"))
 }
 
+pub(crate) fn ucc_site_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".rozum/ucc/site")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
