@@ -1,6 +1,0 @@
-feature/gw-decompose-messenger 2026-08-06T10:13:36Z
-agent: claude-opus-5
-heartbeat: 2026-08-06T10:13:36Z
-status: in-progress
-done-so-far: worktree created
-next: move parse_flat_body into wire_body, then extract messenger.rs
