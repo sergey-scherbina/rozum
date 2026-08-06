@@ -6,7 +6,8 @@
 
 pub(crate) use crate::matrix::*;
 use crate::errors::json_err;
-use crate::paths::{safe_path_seg, state_dir};
+use crate::private_store::{atomic_write_private, json_load, json_save_rbac, rand_token};
+use crate::paths::{safe_path_seg, state_dir, ucc_site_dir};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -140,12 +141,6 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
 
 // ── Static SPA file serving (replaces ucc-web-server.py) ─────────────────────────────────────────
 
-fn ucc_site_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".rozum/ucc/site")
-}
 
 fn serve_site_file(name: &str) -> axum::response::Response {
     use axum::{http::{header, HeaderValue, StatusCode}, response::IntoResponse};
@@ -804,28 +799,6 @@ fn same_site_get(headers: &axum::http::HeaderMap) -> bool {
     }
 }
 
-/// Atomically write `bytes` to `path` (tmp + rename) with 0600 perms so on-disk secrets (session
-/// tokens, WebAuthn credentials, RBAC state, view tokens) are not world-readable. Best-effort like the
-/// callers it replaces.
-fn atomic_write_private(path: &std::path::Path, bytes: &[u8]) {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-        }
-    }
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, bytes).is_ok() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
-        let _ = std::fs::rename(&tmp, path);
-    }
-}
 
 /// On startup, tighten perms on any pre-existing secret files (some may have been written 0644 before
 /// this hardening) and the state dir, so a redeploy remediates them without waiting for the next write.
@@ -2104,15 +2077,6 @@ fn save_users(v: &[UccUser])     { json_save_rbac(users_path(),   v); }
 fn save_roles(v: &[UccRole])     { json_save_rbac(roles_path(),   v); }
 fn save_invites(v: &[UccInvite]) { json_save_rbac(invites_path(), v); }
 
-fn json_load<T: serde::de::DeserializeOwned>(path: Option<PathBuf>) -> Vec<T> {
-    path.and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
-}
-fn json_save_rbac<T: Serialize + ?Sized>(path: Option<PathBuf>, val: &T) {
-    let Some(p) = path else { return };
-    if let Ok(b) = serde_json::to_vec_pretty(val) {
-        atomic_write_private(&p, &b); // 0600 — users/roles/invites/view-tokens are sensitive
-    }
-}
 
 fn default_roles() -> Vec<UccRole> {
     vec![
@@ -2184,9 +2148,6 @@ fn consume_invite(token: &str) {
     save_invites(&invites);
 }
 
-fn rand_token() -> String {
-    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
-}
 
 fn bootstrap_token_path() -> Option<PathBuf> { state_dir().map(|d| d.join("ucc-bootstrap-token.txt")) }
 

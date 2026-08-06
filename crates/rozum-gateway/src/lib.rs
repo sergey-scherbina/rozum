@@ -10,6 +10,7 @@ pub(crate) mod codex_patch;
 pub mod control;
 pub mod errors;
 pub mod paths;
+pub mod private_store;
 pub mod matrix;
 pub mod switchboard;
 pub mod gateway;
