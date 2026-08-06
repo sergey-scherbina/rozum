@@ -21,6 +21,21 @@ launchd's copy loses the race and stays down. Reported as `warn` with that sente
 `fail` the operator cannot clear is the same cry-wolf this whole item exists to remove. Who should
 own that daemon is a design question, filed rather than decided at the end of a long session.
 
+### ▶ BUG-026 landed in one implementation of three (2026-08-06, self-caught)
+
+Cross-repo: code in `../nadia`, branch `feature/bug026-ports`.
+
+Yesterday's fix — an `expect` the task never states is not a criterion — went into
+`rozum-agent::verify`, which is the Rust nadia and `rozum launch`. **The Scala 3 and ScalaScript
+nadias derive their own checks from the same schema and still accept a fabricated expectation.**
+`nadia:SPEC.md` §3.1 is a contract for all three, and a contract kept in one of three is not a
+contract; the same debt was written down for the gate itself in `vgp-*` and is not allowed to
+recur silently.
+
+- [ ] **b26-scala3** — `taskStates` in `sdk/Verify.scala`, wired into `deriveCheck`, twinned test.
+- [ ] **b26-ssc** — the same in `src/gate.ssc`, rule added to `src/gate-check.ssc`.
+- [ ] **b26-spec** — §3.1 states the rule once, where all three read it.
+
 ### ▶ BUG-013's cause, and what to do when a cause will not reproduce (operator 2026-08-05: "нужно исправить причину")
 
 Branch `feature/bug013-root-cause`.
