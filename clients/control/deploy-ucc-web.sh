@@ -95,8 +95,12 @@ install_bin() {
   # place does NOT reproduce it — measured 2026-08-05, so the obvious explanation is wrong). What
   # IS reproducible is the consequence, and this is where it is cheap to catch: one exec, here,
   # before anything is bounced, instead of four silent days.
-  if ! "$dst.new.$$" --help >/dev/null 2>&1; then
-    local rc=$?
+  # `$?` after `if ! cmd` is the NEGATION's status, i.e. always 0 — the first version of this
+  # guard reported "will not exec (rc=0)", which is the least useful thing to read at the moment a
+  # deploy stops. Capture the real code first.
+  local rc=0
+  "$dst.new.$$" --help >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
     rm -f "$dst.new.$$"
     echo "FAIL: freshly built $(basename "$dst") will not exec (rc=$rc) — NOT installing." >&2
     echo "      The running service keeps the old binary, which is the point of checking here." >&2
