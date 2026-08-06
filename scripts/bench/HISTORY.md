@@ -1,5 +1,30 @@
 # Benchmark history
 
+## The repair prompt does NOT cause the re-run loop (2026-08-06) — null result, nothing shipped
+
+Both measured `wordcount` failures ended with the loop-breaker: `bash` called four times with
+identical arguments, i.e. the model re-running the build instead of editing. The repair prompt we
+send at that moment ends with *"do not report success until you have run the check yourself"* —
+which for a 4B model is the easiest instruction in it to obey. Hypothesis: our own wording feeds
+the loop.
+
+Controlled A/B on a fixture — the real workspace from a failed cell, with its actual
+`E0277: Vec<(String, usize)> cannot be built from an iterator over (&String, &usize)`. Same broken
+code, same task, alternating arms, five each. Only the wording differs:
+
+| arm | wording | fixed the code | loop-breaker fired | mean |
+|---|---|---|---|---|
+| A | today's ("…run the check yourself") | **5/5** | 0 | **44 s** |
+| B | "EDIT THE FILES … running it again without changing anything cannot change the result" | **5/5** | 0 | **121 s** |
+
+**Refuted, and the alternative is 2.7× slower for no gain, so nothing was changed.**
+
+What it does explain: the loops we saw were the symptom of an IMPOSSIBLE check, not of the wording.
+Those runs were fighting the fabricated expectation of BUG-026 — no edit could ever satisfy it, so
+the model kept re-running until the loop-breaker stopped it. Give the same model a check it *can*
+satisfy and it edits, every time, under either wording.
+
+
 ## nadia × Qwen3.5-4B, 8 tasks × 3 reps (2026-08-06)
 
 **23 / 24.** Seven tasks 3/3; `wordcount` 2/3.
