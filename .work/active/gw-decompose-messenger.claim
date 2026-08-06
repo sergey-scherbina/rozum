@@ -1,0 +1,6 @@
+feature/gw-decompose-messenger 2026-08-06T10:13:23Z
+agent: claude-opus-5
+heartbeat: 2026-08-06T10:13:23Z
+status: not-started
+done-so-far: measured: messenger = 10 items / 161 lines, one out-call (parse_flat_body)
+next: worktree off origin/master, then move parse_flat_body to wire_body first
