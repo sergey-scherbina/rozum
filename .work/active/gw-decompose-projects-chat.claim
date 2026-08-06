@@ -1,0 +1,6 @@
+feature/gw-decompose-projects-chat 2026-08-06T10:18:25Z
+agent: claude-opus-5
+heartbeat: 2026-08-06T10:18:25Z
+status: not-started
+done-so-far: measured: projects = 8 items/128 lines (out: ucc_config_path), chat = 8/130 (out: three meeting-room readers)
+next: worktree off origin/master; move ucc_config_path and the room readers down first
