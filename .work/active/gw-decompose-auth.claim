@@ -1,0 +1,12 @@
+slug: gw-decompose-auth
+agent: claude (opus)
+started: 2026-08-06
+branch: feature/gw-decompose-auth
+worktree: .worktrees/feature/gw-decompose-auth
+scope: control.rs (extraction only); auth.rs (new), lib.rs; SPRINT.md
+why: gw-monolith-decompose, sixth slice. The RBAC/auth family is 61 items / 548 lines = 23% of
+     what is left, and it is the security-sensitive subject that most deserves to be readable in
+     one place. Its 8 "outside" calls are all auth itself under names my regex missed
+     (bootstrap_token_*, mint_session, sess_path, reg_inflight, rp_id, rp_origin).
+rule: EVERY file I touch under this claim gets edited here, tools included — the miss that let a
+      sibling's commit -a sweep my scripts/ change twice today.
