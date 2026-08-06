@@ -1,9 +1,0 @@
-slug: gw-decompose-agents
-agent: claude (opus)
-started: 2026-08-06
-branch: feature/gw-decompose-agents
-worktree: .worktrees/feature/gw-decompose-agents
-scope: control.rs (extraction only); spawn_support.rs, agents.rs, coders.rs, lib.rs; SPRINT.md
-why: gw-monolith-decompose, fifth slice. agents = 12 items/199 lines, coders = 13/253. Shared
-     out-calls join spawn_support first. require_perm_agents stays with its five siblings.
-edge: coders will import agent_invocation from agents — SIDEWAYS, not back at the parent.
