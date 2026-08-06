@@ -23,16 +23,13 @@ use std::sync::Mutex;
 
 use crate::errors::json_err;
 use crate::paths::{safe_path_seg, state_dir};
-// THE ONE THING THIS MODULE STILL TAKES FROM ITS PARENT, named rather than hidden behind a glob.
-// The three `public_matrix_*` routes are gated on a view token, and that check belongs to the
-// view-token family (9 items, 70 lines) which in turn calls the RBAC storage helpers — so pulling
-// it here would drag two more layers along. Leaving the public routes behind instead would split
-// one subject across two files, which is the confusion this refactor exists to remove. The slice
-// that removes this line is `view_tokens` + the RBAC storage helpers, not this one.
-use crate::control::check_view_token;
-// ...and `default_tail`, the shared log-tail default: control's coder-log route and this module's
-// matrix-log route are the same kind of endpoint and must not drift to different numbers.
-use crate::control::default_tail;
+// The public matrix routes are gated on a view token. That check used to come from `control.rs`,
+// which made this module point back at its parent; the `view_tokens` slice moved it to a module of
+// its own, so the dependency now runs downward.
+use crate::view_tokens::check_view_token;
+// The shared log-tail default: this module's matrix-log route and control's coder-log route are
+// the same kind of endpoint and must not drift to different numbers.
+use crate::defaults::default_tail;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
