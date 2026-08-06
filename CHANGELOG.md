@@ -1,5 +1,18 @@
 # Changelog
 
+## refactor(gateway): gw-monolith-decompose done — two monoliths, ten slices, nineteen modules
+
+`gateway.rs` 4386 → 3040 and `control.rs` 4309 → 1095: 8695 lines down to 4135 (−52%), into
+switchboard, serving, auto_context, matrix, sessions, agents, coders, auth, chat, projects,
+messenger, gateway_control, view_tokens, spawn_support, wire_body, private_store, paths, errors and
+defaults. Every one of the nineteen imports nothing from either parent — checked with a grep, not
+believed. 114/114 green at every step, no warnings, no behaviour change.
+
+Each slice put its shared dependencies out first, so no module ever pointed back at the file it came
+from. Three "this is not a leaf" verdicts in the original entry were overturned by measuring rather
+than remembering, and the last of them was closed the other way: the three dialect handlers stay
+together on purpose, because being readable side by side is the property they were designed for.
+
 ## gate-defer-line — a deferred run said the task had no criterion
 Completed: 2026-08-06
 

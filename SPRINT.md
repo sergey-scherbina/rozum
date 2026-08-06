@@ -785,7 +785,21 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   well-tested WORKING delivery code whose only gain is organizational; the corpus + the module grouping
   already capture the value. Revisit only if a new malformed form needs a structurally different handler.
 
-- [~] **gw-monolith-decompose** — **2026-08-05: one more leaf came out, and it was the biggest.**
+- [x] **gw-monolith-decompose — DONE 2026-08-06 after ten slices.** The mechanical work is finished
+  and the remainder was CLOSED ON MEASUREMENT, not left undone. What the entry called the
+  architectural pass — "the async handlers are coupled to `GatewayState`" — is two fields:
+  `GatewayState` has four (`sb`, `observer`, `auth_token`, `activity`) and all four handlers use
+  exactly `sb` and `observer`; `auth_token` is touched once and `activity` twice, both outside the
+  handlers. There is no knot to untie.
+  And the one remaining split would make things WORSE: the three dialect handlers are deliberately
+  parallel — this file's own docs say "to add an agent dialect, copy the triple" — and their value
+  is that a reader can compare them side by side. Their shared middle is already out in `serving.rs`,
+  so the duplication is gone while the parallelism is kept. Splitting them across three files would
+  trade the one property they were designed for against a smaller line count.
+  **Three "not a leaf" verdicts were overturned by measuring instead of remembering** (Switchboard,
+  auto-context, and this): the honest lesson of the whole task is that an architectural judgement
+  made once and written down ages exactly as badly as a stale comment.
+  Original: **2026-08-05: one more leaf came out, and it was the biggest.**
   `gateway.rs` **4386 → 3525 (−20%)**, 114/114 gateway tests green, no warnings, in two steps:
   `errors.rs` (36 lines — `error_json` + `chat_error_response`, already used by FOUR modules, so a
   shared utility that could only be reached by importing the largest file in the crate; this is the
