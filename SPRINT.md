@@ -869,11 +869,23 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   `083bdaa`, a claim about something else. Second time today (the first was `beace56`). Their commit
   was unpushed, so it cost nothing but a room message — the rule is that "worktree first" covers
   EVERY file touched during a claim, not only the ones the claim names.
-  **Running total across the five slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
-  so the crate's two monoliths went 8695 → 5855 lines (−33%) into THIRTEEN focused modules —
-  switchboard, matrix, sessions, agents, coders, gateway_control, view_tokens, spawn_support,
+  **2026-08-06 — sixth slice: `control.rs` 2326 → 1641 (−29%), and it is the security one.**
+  `auth.rs` (733 lines, 76 items): passkey registration and login, the session cookie, users, roles
+  and permissions, invites, the first-run bootstrap token, and **all six `require_perm_*`
+  middlewares**. Those six are why this slice was worth waiting for — the matrix and agent slices
+  each left one behind rather than split a family of six across module boundaries, and now the whole
+  of authorisation is in one file instead of spread across two.
+  Closure was measured, but only after adding the names the first regex missed (`bootstrap_token_*`,
+  `mint_session`, `sess_path`, `rp_id`, `rp_origin`, `SESSION_TTL_SECS`, `RegInflight`,
+  `RegisterBeginReq`): with those, it calls nothing outside itself. The compiler found the last
+  three; a regex over a subject's vocabulary is only ever as complete as the vocabulary you thought of.
+  Five tests moved to `spawn_support.rs` with the code they exercise — found because the LIB built
+  clean while the TEST build did not, which is the `cargo check` lesson one more time.
+  **Running total across the six slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
+  so the crate's two monoliths went 8695 → 5170 lines (−41%) into FOURTEEN focused modules —
+  switchboard, matrix, sessions, agents, coders, auth, gateway_control, view_tokens, spawn_support,
   wire_body, private_store, paths, errors, defaults — with 114/114 green at every step, no warnings,
-  and no behaviour change. Every one of the thirteen imports nothing from `control.rs`/`gateway.rs`,
+  and no behaviour change. Every one of the fourteen imports nothing from `control.rs`/`gateway.rs`,
   which is checked with one grep rather than believed.
   **Remaining** (unchanged, still architectural): request-mapping needs gateway-local wire DTOs,
   auto-context calls into streaming types, the async handlers are coupled to `GatewayState`, and
