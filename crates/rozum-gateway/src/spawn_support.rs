@@ -9,7 +9,11 @@
 //! an auth LOGIN session (a cookie in `ucc-auth-sessions.json`). `sess_path` is the second one and
 //! stayed with the auth code; grouping by the word would have merged two unrelated subjects.
 
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+
+use crate::gateway_control::ensure_gateway;
+use crate::paths::state_dir;
 
 /// A `starting…` row whose in-process launch task died (control-serve restart / redeploy mid-launch)
 /// is never transitioned by anything, so the row would show `starting…` forever. Prune such rows
@@ -86,4 +90,74 @@ pub(crate) fn agent_missing_reason(agent: &str) -> Option<String> {
         _ => "install its CLI and make sure it is on the service's PATH",
     };
     Some(format!("agent `{agent}` is not on PATH — {how}"))
+}
+
+/// Is `pid` still alive? `kill(pid, 0)` returns 0 for a live process we can signal.
+/// pid 0 is the "not spawned yet" placeholder on starting records — never alive (and never
+/// passed to kill: `kill(0, sig)` would signal our own whole process group).
+pub(crate) fn pid_alive(pid: u32) -> bool {
+    pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+/// Derive the roster handle the participant uses, mirroring `model_participant::derive_handle` (the
+/// short family name after the last `:` / `/`, before the first `-`), so the UI can @mention it.
+pub(crate) fn derive_handle(model: &str) -> String {
+    let tail = model.rsplit(['/', ':']).next().unwrap_or(model);
+    let base = tail.split('-').next().unwrap_or(tail);
+    base.to_lowercase()
+}
+
+/// Spawn `rozum meetings participant …` DETACHED (own process group, output → a per-agent log), so it
+/// survives a control-serve restart. Returns the child pid.
+pub(crate) fn spawn_participant(model: &str, room: &str, policy: &str, persona: &str, gw_port: u16) -> std::io::Result<u32> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
+    let gw_url = format!("http://127.0.0.1:{gw_port}/v1");
+    let log_path = state_dir()
+        .map(|d| d.join("logs"))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let _ = std::fs::create_dir_all(&log_path);
+    let log = std::fs::OpenOptions::new()
+        .create(true).append(true)
+        .open(log_path.join(format!("agent-{}-{}.log", sanitize(room), sanitize(model))))?;
+    let log2 = log.try_clone()?;
+    let mut cmd = Command::new(&exe);
+    cmd.args(["meetings", "participant", "--model", model, "--room", room, "--reply-policy", policy]);
+    if !persona.is_empty() {
+        cmd.args(["--persona", persona]);
+    }
+    cmd.args(["--gateway-url", &gw_url]);
+    cmd.stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(log2));
+    cmd.process_group(0); // detach from control-serve's group so it survives a service restart
+    Ok(cmd.spawn()?.id())
+}
+
+/// The async-launch skeleton shared by the session/agent/coder launch routes. The route validates,
+/// records the job as "starting…" and returns instantly; this runs the slow half in the background:
+/// load the model via the shared gateway, re-check the record wasn't closed while it loaded, then
+/// run the job-specific spawn (which owns its success status). A gateway failure lands in the
+/// record's status as "failed: …" (truncated — statuses are phone-visible table cells).
+pub(crate) fn spawn_launch_task<Fut>(
+    model: String,
+    task_id: String,
+    still_wanted: impl Fn(&str) -> bool + Send + 'static,
+    set_failed: impl Fn(&str, String) + Send + 'static,
+    do_spawn: impl FnOnce(String, u16) -> Fut + Send + 'static,
+) where
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let port = match ensure_gateway(&model).await {
+            Ok(p) => p,
+            Err(e) => {
+                let msg: String = e.chars().take(120).collect();
+                set_failed(&task_id, format!("failed: {msg}"));
+                return;
+            }
+        };
+        if !still_wanted(&task_id) {
+            return;
+        }
+        do_spawn(task_id, port).await;
+    });
 }

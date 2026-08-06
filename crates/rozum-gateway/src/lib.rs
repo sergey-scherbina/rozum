@@ -8,6 +8,8 @@
 pub mod anthropic_http;
 pub(crate) mod codex_patch;
 pub mod control;
+pub mod agents;
+pub mod coders;
 pub mod defaults;
 pub mod errors;
 pub mod paths;
