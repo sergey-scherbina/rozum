@@ -336,7 +336,7 @@ single-writer daemon). Each item below is its own spec+build later — listed to
 - [ ] **mtg-threads** — group related messages into a **thread = an incident/topic**: a thread id, a
   parent message, reply-chains, thread-level state (open/triaging/escalated/resolved/closed) + SLA/owner.
   This is what turns a stream into trackable incidents. Needs thread storage + a thread-aware reader/TUI.
-- [~] **mtg-message-ops** — **working with messages**. **SEARCH DONE + LIVE-PROVEN (`c422764`):**
+- [x] **mtg-message-ops** — **working with messages**. **SEARCH DONE + LIVE-PROVEN (`c422764`):**
   `store::search_messages` (AND filter: text substring · kind · MIN severity · tag · thread · since;
   `Severity::rank` for `>=`) over a room's whole history, surfaced three ways — REST
   `GET /rooms/{n}/search?q=&kind=&severity=&tag=&thread=&since=&limit=` (bad kind/severity → 400), CLI
@@ -350,9 +350,17 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   console 'Assign' button. **PIN DONE (`21f0b1a`):** `Thread.pinned` + `store::set_pinned`;
   `meeting.thread_pin`, CLI `incident pin|unpin` + `show` pinned-first, REST `/threads/{id}/pin`, console 📌
   toggle. **SLA/STALENESS DONE (`57caa56`):** per-severity windows + `needs_attention` metric + ⚠ on stale
-  cards/list; `open_thread` inherits the anchor alert's severity. **REMAINING:** link/reference
-  (retroactively attach a message to a thread — append-only store, so a reference record, not a mutation),
-  react, edit/redact. Resolve/close already shipped. Search scans day files; index only if rooms get large.
+  cards/list; `open_thread` inherits the anchor alert's severity.
+  **DONE 2026-08-06 — the three that were listed as remaining are all shipped, on all three
+  surfaces, and nobody ticked the box.** `meeting.thread_link` / `meeting.react` / `meeting.redact`
+  in the daemon; `meetings incident link`, `meetings react`, `meetings redact` in the CLI; and
+  `POST /rooms/{n}/threads/{id}/link`, `POST /rooms/{n}/react`, `GET /rooms/{n}/reactions`,
+  `POST /rooms/{n}/redact` in REST. Verified by reading the routers, not the notes.
+  **"Edit" is deliberately absent and should stay absent:** the store is an append-only log
+  (`store.rs`), so redaction writes a TOMBSTONE that replaces the content rather than mutating the
+  line. An edit that rewrote history in place would break the one property the log is for. If
+  someone wants "fix a typo", that is a new message referencing the old one, not an edit.
+  Search scans day files; index only if rooms get large.
 - [ ] **mtg-escalation** — **escalation**: route/escalate an incident by severity/tier/on-call (to a
   specific agent, a stronger model, or a human), with an escalation policy + an audit trail of who/when.
   Ties into the model-chain (escalate to a stronger model) + identity-roster (who's on-call). The
