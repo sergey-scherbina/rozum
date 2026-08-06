@@ -8,9 +8,10 @@ pub(crate) use crate::matrix::*;
 use crate::defaults::{default_policy, default_scrollback, default_tail, default_true};
 use crate::errors::json_err;
 pub(crate) use crate::view_tokens::*;
+use crate::spawn_support::*;
+use crate::wire_body::*;
 use crate::private_store::{atomic_write_private, json_load, json_save_rbac, rand_token};
 use crate::paths::{safe_path_seg, state_dir, ucc_site_dir};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -450,22 +451,7 @@ pub struct AgentBrief {
 }
 
 
-/// Serializes every read-modify-write of the ucc-{sessions,agents,coders}.json registries. The
-/// launch/stop routes and the status-poll prune paths all load→mutate→save the same small JSON
-/// files; without this a poll's save can clobber a concurrent launch (lost update → orphan process
-/// / row stuck at "starting…"). Held only around fast in-memory + file ops, so contention is nil.
-fn registry_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
 
-/// Monotonic per-process suffix so two launches of the same agent/room/model within one wall-clock
-/// second get distinct ids (and distinct tmux names). `now_unix()` alone is second-granularity —
-/// two `/session/launch` in the same second would collide on the tmux session name.
-fn next_launch_seq() -> u64 {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
 
 /// A `starting…` row whose in-process launch task died (control-serve restart / redeploy mid-launch)
 /// is never transitioned by anything, so the row would show `starting…` forever. Prune such rows
@@ -777,17 +763,7 @@ fn spawn_participant(model: &str, room: &str, policy: &str, persona: &str, gw_po
     Ok(cmd.spawn()?.id())
 }
 
-fn sanitize(s: &str) -> String {
-    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
-}
 
-/// True if `s` cannot contain shell metacharacters — unlike `sanitize` (which mangles a string into a
-/// safe one), this REJECTS instead of mutating, for values that get interpolated into a shell-command
-/// string rather than passed as a plain argv element (`session_launch_route`'s tmux `inner` string).
-/// Permits the charset real model/agent identifiers use (HF-style `org/repo:tag`, dots, plus signs).
-fn shell_safe(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@' | '+'))
-}
 
 
 /// CSRF guard for state-changing GET routes (the SPA drives gateway load/stop via same-origin `<a>`
@@ -1133,40 +1109,8 @@ fn derive_handle(model: &str) -> String {
 }
 
 
-fn parse_action_json<T: DeserializeOwned>(body: &str) -> Result<T, String> {
-    serde_json::from_str::<T>(body.trim()).map_err(|e| format!("invalid JSON body: {e}"))
-}
 
-#[derive(Deserialize)]
-struct IdBody {
-    id: String,
-}
 
-fn parse_id_body(body: &str) -> Result<String, String> {
-    let body = body.trim();
-    if body.is_empty() {
-        return Err("id required".into());
-    }
-    if body.starts_with('{') || body.starts_with('[') {
-        let req: IdBody =
-            serde_json::from_str(body).map_err(|e| format!("invalid JSON body: {e}"))?;
-        let id = req.id.trim().to_string();
-        if id.is_empty() {
-            return Err("id required".into());
-        }
-        return Ok(id);
-    }
-    for (k, v) in url::form_urlencoded::parse(body.as_bytes()) {
-        if k == "id" {
-            let id = v.trim().to_string();
-            if id.is_empty() {
-                return Err("id required".into());
-            }
-            return Ok(id);
-        }
-    }
-    Ok(body.to_string())
-}
 
 fn parse_project_add_body(body: &str) -> Result<ProjectAddRequest, String> {
     let body = body.trim();
@@ -1313,39 +1257,8 @@ fn agent_invocation(agent: &str, prompt: &str) -> Vec<String> {
     }
 }
 
-/// Is `agent` actually runnable — an executable of that name on THIS process's PATH? The UCC offers
-/// a fixed set of agent chips, but which of them are installed is a property of the machine, and
-/// launchd's PATH is not the operator's shell PATH. Without this check a missing CLI is discovered
-/// deep inside the spawned `rozum launch`, which exits 127 into a log file — so the row reports
-/// "exited", which is indistinguishable from a run that finished.
-fn agent_on_path(agent: &str) -> bool {
-    let p = std::path::Path::new(agent);
-    if p.components().count() > 1 {
-        return is_executable_file(p);
-    }
-    let Some(path) = std::env::var_os("PATH") else { return false };
-    std::env::split_paths(&path).any(|dir| is_executable_file(&dir.join(agent)))
-}
 
-fn is_executable_file(p: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
 
-/// The refusal for an agent the machine cannot run, naming the fix rather than the symptom.
-/// `None` when the agent is installed.
-fn agent_missing_reason(agent: &str) -> Option<String> {
-    if agent_on_path(agent) {
-        return None;
-    }
-    let how = match agent {
-        "nadia" => "build + install it: `cargo install --path crates/nadia`",
-        _ => "install its CLI and make sure it is on the service's PATH",
-    };
-    Some(format!("agent `{agent}` is not on PATH — {how}"))
-}
 
 /// Spawn `rozum launch --model <m> <agent invocation>` DETACHED in `workdir`, output → a log file.
 /// Returns (pid, log_path).
@@ -1560,14 +1473,7 @@ fn save_sessions(s: &[SessionRecord]) {
         }
     }
 }
-fn tmux_name(id: &str) -> String { format!("rozum-{id}") }
 
-/// Does the tmux session exist? (`tmux has-session` exit 0). The liveness source of truth.
-fn tmux_alive(id: &str) -> bool {
-    Command::new("tmux").args(["has-session", "-t", &tmux_name(id)])
-        .stdout(Stdio::null()).stderr(Stdio::null())
-        .status().map(|s| s.success()).unwrap_or(false)
-}
 
 /// Sessions for the UCC table: live tmux sessions plus in-flight ("starting…") and failed launches.
 /// Only records whose launch COMPLETED ("running"/legacy-empty) are pruned when their tmux is gone —
