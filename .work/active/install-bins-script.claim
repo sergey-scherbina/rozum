@@ -1,0 +1,6 @@
+feature/install-bins-script 2026-08-06T09:03:18Z
+agent: claude-code
+heartbeat: 2026-08-06T09:03:18Z
+status: in-progress
+done-so-far: installed a 2-day-old nadia by hand with `cp || build`; every matrix run today used it
+next: one guarded install path, so a hand install cannot be stale
