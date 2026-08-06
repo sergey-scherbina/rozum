@@ -17,6 +17,30 @@ REPOS: REPOS.md
 specs: docs/specs
 SPEC: SPEC.md
 
+## The shared checkout belongs to nobody
+
+Two agents lost work in it on 2026-08-06, in opposite directions, and neither mistake was exotic:
+
+- One committed a tool fix straight into the shared checkout (`scripts/rust-item-spans.py`), where
+  it sat unpushed while a sibling rebased the branch under it and its hash changed.
+- The sibling ran `git add -A` there to commit a claim file, swept that same edit into a
+  coordination commit, and **pushed it** — publishing someone else's work in progress and
+  splitting it across two histories.
+
+So, concretely, in the shared checkout:
+
+- **Never `git add -A` / `git add .`** — name the path: `git add .work/active/<slug>.claim`. Every
+  coordination commit touches files you can list; if you cannot list them, you are in the wrong
+  tree.
+- **Never leave feature work there.** Not a one-line tool fix, not a script tweak. `git worktree
+  add .worktrees/feature/<slug>` costs a second and cannot be swept up by anyone.
+- **Check before you commit**: `git status --short` in the shared checkout should show only what
+  you are about to commit. Anything else is a sibling's, and rebasing on top of it rewrites their
+  hashes.
+
+The shared checkout is for reading state, coordination commits (claims, releases, board), and
+fast-forwarding a finished branch. That is the whole list.
+
 ## Skills
 
 Skills live in the `vendor/agent-plugins/` submodule. **Read `vendor/agent-plugins/AGENTS.md` —
