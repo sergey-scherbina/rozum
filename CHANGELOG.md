@@ -1,5 +1,21 @@
 # Changelog
 
+## install-bins-script — one way to put a binary on this machine
+Completed: 2026-08-06
+
+A fix landed, was measured working in a worktree, and then went onto the machine as
+`cp target/release/nadia … || cargo build …`. The `cp` succeeded — on a binary built two days
+earlier — so the `||` never ran, every matrix run that day used a binary without the fix, and the
+measurement that followed was read as confirming it. It could not have.
+
+The mistake is not the typo; it is that installing was something done by hand, differently each
+time. `scripts/install-bins.sh` is now the one path: it builds first (never installs whatever is
+lying in `target/`), execs the fresh binary before publishing it, publishes by rename, and prints
+what it replaced and with what — both times a stale binary hid on this machine, the install said
+only "installed".
+
+It restarts nothing. Bouncing a job belongs to the deploy, which knows the order.
+
 ## bug013-root-cause — a negative result, and a guard where the cause would have been caught
 Completed: 2026-08-05
 
