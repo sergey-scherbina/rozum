@@ -1,6 +1,0 @@
-feature/gw-decompose-serving 2026-08-06T10:34:39Z
-agent: claude-opus-5
-heartbeat: 2026-08-06T10:34:39Z
-status: in-progress
-done-so-far: worktree created
-next: extract the 12-item serving layer
