@@ -1,6 +1,0 @@
-feature/gw-decompose-projects-chat 2026-08-06T10:18:33Z
-agent: claude-opus-5
-heartbeat: 2026-08-06T10:18:33Z
-status: in-progress
-done-so-far: worktree created
-next: measure both families with the shared helpers resolved, extract projects then chat
