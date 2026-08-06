@@ -8,6 +8,8 @@
 pub mod anthropic_http;
 pub(crate) mod codex_patch;
 pub mod control;
+pub mod agents;
+pub mod coders;
 pub mod defaults;
 pub mod errors;
 pub mod paths;
@@ -16,6 +18,7 @@ pub mod sessions;
 pub mod spawn_support;
 pub mod wire_body;
 pub mod view_tokens;
+pub mod gateway_control;
 pub mod matrix;
 pub mod switchboard;
 pub mod gateway;

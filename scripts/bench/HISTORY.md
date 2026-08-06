@@ -1,5 +1,40 @@
 # Benchmark history
 
+## nadia × Qwen3.5-4B, 8 tasks × 3 reps (2026-08-06)
+
+**23 / 24.** Seven tasks 3/3; `wordcount` 2/3.
+
+| task | | task | |
+|---|---|---|---|
+| greet | 3/3 · 6 s | debug | 3/3 · 66 s |
+| build | 3/3 · 82 s | rpn | 3/3 · 83 s |
+| fix | 3/3 · 44 s | **wordcount** | **2/3** · 94 s |
+| test | 3/3 · 84 s | multibug | 3/3 · 103 s |
+
+**This run used a two-day-old `nadia`**, and that is the finding, not a footnote. The BUG-026 fix
+(an `expect` the task never states is not a criterion) had been installed by hand as
+`cp target/release/nadia … || cargo build …`; the `cp` succeeded on a stale binary, so the `||`
+never ran. Every cell above therefore measured the OLD gate, which still derived
+`a 3 / c 2 / d 2` for `wordcount` and spent both repair rounds fighting it.
+
+**And the single-rep 8/8 the day before did not prove the fix either** — for a second reason worth
+keeping: the harness's verdict is INDEPENDENT of the agent's gate. It runs its own verifier, so a
+cell passes when the code ends up correct even if the agent's own check failed. A green matrix cell
+says nothing about the gate; only the gate's own lines do.
+
+Measured properly afterwards, same task, same model, on the binary that actually carries the fix —
+and reading the derived check, not just the verdict:
+
+| | derived check | passing |
+|---|---|---|
+| old binary (bench ×5) | `cargo build && … 'a 3\nc 2\nd 2'` (invented) | 3 / 5 |
+| fixed binary (direct ×7) | `cargo build -q` | **7 / 7**, all printing `apple 3 / banana 3 / cherry 2` |
+
+**Method note, twice earned:** `KEEP=1` or the failing cell's log is gone, and the whole reason
+this took three passes is that the first two threw the evidence away. The rule was already written
+in this file yesterday, by me, and not followed today.
+
+
 **Append, never rewrite.** A history corrected in place cannot show a regression that was
 introduced and then hidden. One run is a hypothesis (`performance` skill §1.1); a row here is
 only comparable to another row that states the same conditions.

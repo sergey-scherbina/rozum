@@ -853,10 +853,28 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   closed: one span swallowed 2388 lines and the tool reported a tidy "6 items, 68% of file". A
   lifetime (`&'a str`) is not a literal and must not be skipped, so the quote only counts when it
   closes. Fixed in `scripts/rust-item-spans.py`, along with clamping a span that runs off the end.
-  **Running total across the four slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
-  so the crate's two monoliths went 8695 → 6601 lines (−24%) into ten focused modules — switchboard,
-  matrix, sessions, view_tokens, spawn_support, wire_body, private_store, paths, errors, defaults —
-  114/114 green at every step with no warnings and no behaviour change.
+  **2026-08-06 — fifth slice: `control.rs` 3072 → 2326 (−24%).** Three modules, dependencies first
+  as always: `gateway_control.rs` (13 items — reuse a healthy gateway, switch it when it holds a
+  different model, cold-start one when the registry record is stale, track a download in progress so
+  the console shows it instead of hanging), then four shared launch helpers into `spawn_support.rs`
+  (`pid_alive`, `derive_handle`, `spawn_participant`, `spawn_launch_task`), then `agents.rs` (11) and
+  `coders.rs` (13). `coders` imports `agent_invocation` from `agents` — SIDEWAYS, not back at the
+  parent, and it is the honest shape: a coder IS an agent invocation with a workspace and a log.
+  `require_perm_agents` stayed with its five siblings, the same call as `require_perm_matrix`.
+  **Sixth tool bug, same failure mode:** it matched calls inside COMMENTS, so `status` looked like a
+  dependency of two different families because a comment says "errors land in the row's status" —
+  which would have dragged an unrelated 117-line function into modules that never call it.
+  **Process failure worth more than the slice.** I edited `scripts/rust-item-spans.py` in the SHARED
+  checkout instead of my worktree and left it uncommitted; a sibling's `commit -a` swept it into
+  `083bdaa`, a claim about something else. Second time today (the first was `beace56`). Their commit
+  was unpushed, so it cost nothing but a room message — the rule is that "worktree first" covers
+  EVERY file touched during a claim, not only the ones the claim names.
+  **Running total across the five slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
+  so the crate's two monoliths went 8695 → 5855 lines (−33%) into THIRTEEN focused modules —
+  switchboard, matrix, sessions, agents, coders, gateway_control, view_tokens, spawn_support,
+  wire_body, private_store, paths, errors, defaults — with 114/114 green at every step, no warnings,
+  and no behaviour change. Every one of the thirteen imports nothing from `control.rs`/`gateway.rs`,
+  which is checked with one grep rather than believed.
   **Remaining** (unchanged, still architectural): request-mapping needs gateway-local wire DTOs,
   auto-context calls into streaming types, the async handlers are coupled to `GatewayState`, and
   `control.rs` (4309) is untouched.
