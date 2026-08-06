@@ -834,8 +834,9 @@ Grounded in what this session's matrix work exposed + the gateway architecture. 
   **A third parser lesson, same family as the first two:** an attribute may sit on the SAME line as
   its item — `#[derive(Deserialize)] struct ViewTokenCreateReq { … }` — and a pattern anchored at the
   item keyword skips it silently. It was found by the compiler, not by the tool. All three lessons
-  are now in `scratchpad/extract.py`: match calls not names; track "a brace was opened" apart from
-  depth; allow same-line attributes.
+  are now in `scripts/rust-item-spans.py` (committed, with a working command line — the first copy
+  printed nothing while documenting one): match calls not names; track "a brace was opened" apart
+  from depth; allow same-line attributes.
   **Running total across the three slices:** `gateway.rs` 4386 → 3529 and `control.rs` 4309 → 3531,
   so the crate's two monoliths went 8695 → 7060 lines (−19%) into seven focused modules, 114/114
   green at every step with no warnings and no behaviour change.
