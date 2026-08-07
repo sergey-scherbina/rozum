@@ -1229,6 +1229,75 @@ pub fn thread_is_stale(t: &Thread, now: u64) -> bool {
     !t.state.is_terminal() && now.saturating_sub(t.updated_ts) > sla_secs(t.severity)
 }
 
+/// One row of a room's queue: an open thread, with the SLA arithmetic already done.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueItem {
+    pub id: String,
+    pub title: String,
+    pub kind: ThreadKind,
+    pub state: ThreadState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
+    /// The assignee's room handle, or `None` for unclaimed work — which is what a queue is for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    pub created_ts: u64,
+    pub updated_ts: u64,
+    /// Past its severity's SLA window.
+    pub stale: bool,
+    /// How far past, in seconds; `0` while still inside the window. Carried so a reader can sort or
+    /// colour by "how late" without re-deriving the window it was measured against.
+    pub overdue_secs: u64,
+}
+
+/// A room's queue: its OPEN threads, worst first.
+///
+/// This is a read model over `threads.json` and nothing else — no new storage, and deliberately no
+/// second opinion about staleness: it calls `thread_is_stale`/`sla_secs`, the same functions the
+/// incident views use. A queue that computed its own SLA would be the third place in this subsystem
+/// to hold one piece of state, and the first two were deleted this week for exactly that.
+///
+/// Order is severity (worst first), then LEAST-RECENTLY-UPDATED first. The second key is the point:
+/// within one severity the item nobody has touched in longest is the one rotting, and sorting by
+/// newest would put it at the bottom where a queue is never read.
+///
+/// `now` is a parameter rather than a clock read inside, so the ordering is testable without
+/// waiting for time to pass.
+pub fn room_queue(root: &Path, now: u64) -> Vec<QueueItem> {
+    let mut rows: Vec<QueueItem> = read_threads(root)
+        .into_values()
+        // A queue of finished work is not a queue.
+        .filter(|t| !t.state.is_terminal())
+        .map(|t| {
+            let window = sla_secs(t.severity);
+            let idle = now.saturating_sub(t.updated_ts);
+            QueueItem {
+                stale: thread_is_stale(&t, now),
+                overdue_secs: idle.saturating_sub(window),
+                id: t.id,
+                title: t.title,
+                kind: t.kind,
+                state: t.state,
+                severity: t.severity,
+                owner: t.owner,
+                created_ts: t.created_ts,
+                updated_ts: t.updated_ts,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        let sev = b
+            .severity
+            .map(|s| s.rank())
+            .unwrap_or(0)
+            .cmp(&a.severity.map(|s| s.rank()).unwrap_or(0));
+        // Ties broken by id so the order is stable across calls — a queue that reshuffles equal
+        // rows between refreshes is one a reader stops trusting.
+        sev.then(a.updated_ts.cmp(&b.updated_ts)).then(a.id.cmp(&b.id))
+    });
+    rows
+}
+
 /// Resolving metrics over a room's threads: totals, a per-state histogram, and the
 /// mean time-to-resolve (created→updated) across terminal (resolved/closed) threads.
 pub fn thread_metrics(root: &Path) -> serde_json::Value {
@@ -2313,6 +2382,83 @@ mod tests {
     /// written by a build that HAD those fields must still load. Serde ignores unknown fields, so
     /// this is a property of the format rather than of a migration step — but "obvious" is exactly
     /// what nobody re-checks after a removal.
+    /// The queue is a VIEW: open threads only, worst first, and the SLA arithmetic already done.
+    #[test]
+    fn the_queue_ranks_by_severity_then_by_who_has_been_ignored_longest() {
+        let dir = tempdir().unwrap();
+        let now = ts_for(0) + 10 * 3600;
+        {
+            let mut w = writer_in(dir.path());
+            for (id, title, sev, updated) in [
+                ("2026-08-07/1", "low but ancient", Severity::Low, now - 9 * 3600),
+                ("2026-08-07/2", "critical, fresh", Severity::Critical, now - 60),
+                ("2026-08-07/3", "critical, ignored", Severity::Critical, now - 3 * 3600),
+                ("2026-08-07/4", "no severity", Severity::Info, now - 60),
+            ] {
+                w.open_thread(id, title, ThreadKind::Incident, ts_for(0)).unwrap();
+                w.set_thread_owner_severity(id, None, Some(sev), updated).unwrap();
+            }
+            // A resolved thread must not appear: a queue of finished work is not a queue.
+            w.open_thread("2026-08-07/5", "done", ThreadKind::Incident, ts_for(0)).unwrap();
+            w.set_thread_state("2026-08-07/5", ThreadState::Resolved, now).unwrap();
+        }
+        let root = RoomPaths::for_project(dir.path()).root;
+        let q = room_queue(&root, now);
+        let titles: Vec<&str> = q.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["critical, ignored", "critical, fresh", "low but ancient", "no severity"],
+            "worst first, and within a severity the one nobody has touched in longest"
+        );
+        assert!(!q.iter().any(|i| i.title == "done"));
+    }
+
+    /// Staleness comes from `thread_is_stale`, not from a second rule invented here — and
+    /// `overdue_secs` measures against the same window it was judged by.
+    #[test]
+    fn overdue_is_measured_against_the_severitys_own_window() {
+        let dir = tempdir().unwrap();
+        let now = ts_for(0) + 10 * 3600;
+        {
+            let mut w = writer_in(dir.path());
+            // critical: a 15-minute window, last touched an hour ago → 45 minutes overdue.
+            w.open_thread("2026-08-07/1", "crit", ThreadKind::Incident, ts_for(0)).unwrap();
+            w.set_thread_owner_severity("2026-08-07/1", None, Some(Severity::Critical), now - 3600)
+                .unwrap();
+            // low: an 8-hour window, last touched an hour ago → not stale at all.
+            w.open_thread("2026-08-07/2", "low", ThreadKind::Incident, ts_for(0)).unwrap();
+            w.set_thread_owner_severity("2026-08-07/2", None, Some(Severity::Low), now - 3600)
+                .unwrap();
+        }
+        let root = RoomPaths::for_project(dir.path()).root;
+        let q = room_queue(&root, now);
+        let crit = q.iter().find(|i| i.title == "crit").unwrap();
+        let low = q.iter().find(|i| i.title == "low").unwrap();
+        assert!(crit.stale);
+        assert_eq!(crit.overdue_secs, 3600 - sla_secs(Some(Severity::Critical)));
+        assert!(!low.stale);
+        assert_eq!(low.overdue_secs, 0, "inside the window is 0, not a negative dressed as huge");
+    }
+
+    /// An empty queue must mean "nothing open", not "nothing found". The first version of this test
+    /// read the PROJECT directory instead of the room root (`<project>/.rozum/room`) and passed
+    /// vacuously — it would have passed with `room_queue` returning `Vec::new()` unconditionally.
+    #[test]
+    fn an_empty_queue_means_nothing_open_not_nothing_found() {
+        let dir = tempdir().unwrap();
+        let root = RoomPaths::for_project(dir.path()).root;
+        let now = ts_for(0) + 3600;
+        {
+            let mut w = writer_in(dir.path());
+            w.open_thread("2026-08-07/1", "handled", ThreadKind::Incident, ts_for(0)).unwrap();
+            // Prove the room is readable and the thread IS there before asserting the queue is empty.
+            assert_eq!(read_threads(&root).len(), 1);
+            w.set_thread_state("2026-08-07/1", ThreadState::Closed, now).unwrap();
+        }
+        assert_eq!(read_threads(&root).len(), 1, "the thread is still on disk");
+        assert!(room_queue(&root, now).is_empty(), "but it is closed, so it is not queued");
+    }
+
     #[test]
     fn a_meta_carrying_the_removed_p3_fields_still_loads() {
         let with_p3 = r#"{

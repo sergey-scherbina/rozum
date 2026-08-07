@@ -184,6 +184,7 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
         .route("/rooms/{name}/react", post(react))
         .route("/rooms/{name}/roles", get(roles).post(set_role))
         .route("/rooms/{name}/phase", post(set_phase))
+        .route("/rooms/{name}/queue", get(queue))
         .route("/rooms/{name}/metrics", get(metrics))
         .route("/rooms/{name}/events", get(events))
         .route("/rooms/{name}/search", get(search))
@@ -838,6 +839,15 @@ async fn reactions(State(state): State<RestState>, AxumPath(name): AxumPath<Stri
         return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
     };
     Json(json!({ "room": name, "reactions": store::load_reactions(&root) })).into_response()
+}
+
+/// `GET /rooms/{name}/queue` — the room's open threads, worst first, SLA arithmetic already done.
+async fn queue(State(state): State<RestState>, AxumPath(name): AxumPath<String>) -> Response {
+    let Some(root) = room_root(&state.registry, &name) else {
+        return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
+    };
+    let rows = store::room_queue(&root, crate::meeting::state::unix_ts());
+    Json(json!({ "room": name, "queue": rows })).into_response()
 }
 
 /// `POST /rooms/{name}/phase` — body `{ "phase": "active" | "paused" | "ended" }`.

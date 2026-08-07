@@ -726,6 +726,13 @@ enum MeetingsAction {
         action: TokenAction,
     },
 
+    /// Show a room's queue: its open threads, worst first (severity, then longest ignored).
+    Queue {
+        /// Room name; default = the cwd project's room.
+        #[arg(long)]
+        room: Option<String>,
+    },
+
     /// Set a room's lifecycle phase: active | paused | ended (persisted, survives a restart).
     Phase {
         /// active | paused | ended.
@@ -1481,6 +1488,7 @@ async fn main() {
             }
             MeetingsAction::Read { room, count } => run_meetings_read(room, count).await,
             MeetingsAction::RepairThreads { room } => run_meetings_repair_threads(room).await,
+            MeetingsAction::Queue { room } => run_meetings_queue(room).await,
             MeetingsAction::Phase { phase, room } => run_meetings_phase(phase, room).await,
             MeetingsAction::Role { handle, role, room, revoke } => {
                 run_meetings_role(handle, role, room, revoke).await
@@ -4257,6 +4265,31 @@ fn run_meetings_token(action: TokenAction) {
 }
 
 /// `rozum meetings react` — toggle an emoji reaction on a message (direct disk).
+/// `rozum meetings queue` — the room's open threads, worst first. Reads the room files directly:
+/// it is a pure read model, so going through the daemon would add a hop and a failure mode for
+/// nothing.
+async fn run_meetings_queue(room: Option<String>) {
+    use rozum::meeting::store;
+    let root = resolve_room_or_exit(room, "queue").await;
+    let rows = store::room_queue(&root, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+    if rows.is_empty() {
+        println!("queue is empty — nothing open in this room");
+        return;
+    }
+    for i in &rows {
+        let sev = i.severity.map(|s| s.label()).unwrap_or("-");
+        let owner = i.owner.as_deref().unwrap_or("unclaimed");
+        // The overdue column is the reason to read this list at all, so it goes first among the
+        // flags rather than at the end of a wide line.
+        let late = if i.stale {
+            format!("OVERDUE {}", fmt_secs(i.overdue_secs))
+        } else {
+            String::new()
+        };
+        println!("{:<9} {:<8} {:<22} {:<10} {}", sev, i.state.as_str(), i.title, owner, late);
+    }
+}
+
 /// `rozum meetings phase` — set the room's lifecycle phase, persisted to `meta.json`.
 ///
 /// Goes through the DAEMON rather than writing the file directly, unlike `role`: a live room holds
