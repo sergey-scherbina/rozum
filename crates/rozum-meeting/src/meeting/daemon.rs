@@ -198,6 +198,12 @@ pub struct RoleParams {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PhaseParams {
+    /// active | paused | ended.
+    pub phase: String,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WaitParams {
     /// Day of the last message seen (`YYYY-MM-DD`). Omit to receive all.
     #[serde(default)]
@@ -651,6 +657,40 @@ impl MeetingServer {
 
     /// Assign a thread/incident owner WITHOUT changing its state (assignment is orthogonal to the
     /// lifecycle — use thread_set_state / escalate / resolve for state). Posts an event note.
+
+
+    #[tool(
+        name = "meeting.room_phase",
+        description = "Set this room's lifecycle phase: active | paused | ended. A paused room stays readable and refuses new messages; ending is final. The phase is persisted, so it survives a daemon restart."
+    )]
+    pub async fn room_phase(&self, params: Parameters<PhaseParams>) -> CallToolResult {
+        guard("meeting.room_phase", async move {
+            let (room, _caller) = self.session_room().await;
+            let Some(room) = room else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let want = params.0.phase.trim().to_ascii_lowercase();
+            let mut r = room.lock().await;
+            let outcome = match want.as_str() {
+                "active" => r.resume(),
+                "paused" => r.pause(),
+                "ended" => {
+                    r.end();
+                    Ok(())
+                }
+                other => {
+                    return err_result(&format!(
+                        "unknown phase '{other}'; expected active, paused or ended"
+                    ));
+                }
+            };
+            match outcome {
+                Err(e) => err_result(&e),
+                Ok(()) => text_result(&format!("room is {}", r.phase().as_str())),
+            }
+        })
+        .await
+    }
 
     #[tool(
         name = "meeting.role",

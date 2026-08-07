@@ -183,6 +183,7 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
         .route("/rooms/{name}/reactions", get(reactions))
         .route("/rooms/{name}/react", post(react))
         .route("/rooms/{name}/roles", get(roles).post(set_role))
+        .route("/rooms/{name}/phase", post(set_phase))
         .route("/rooms/{name}/metrics", get(metrics))
         .route("/rooms/{name}/events", get(events))
         .route("/rooms/{name}/search", get(search))
@@ -837,6 +838,15 @@ async fn reactions(State(state): State<RestState>, AxumPath(name): AxumPath<Stri
         return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
     };
     Json(json!({ "room": name, "reactions": store::load_reactions(&root) })).into_response()
+}
+
+/// `POST /rooms/{name}/phase` — body `{ "phase": "active" | "paused" | "ended" }`.
+async fn set_phase(
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    console_call(&name, &user, "meeting.room_phase", body).await
 }
 
 /// `GET /rooms/{name}/roles` — who holds which role, for a console that wants to show it without

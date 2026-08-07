@@ -726,6 +726,15 @@ enum MeetingsAction {
         action: TokenAction,
     },
 
+    /// Set a room's lifecycle phase: active | paused | ended (persisted, survives a restart).
+    Phase {
+        /// active | paused | ended.
+        phase: String,
+        /// Room name; default = the cwd project's room.
+        #[arg(long)]
+        room: Option<String>,
+    },
+
     /// Grant or revoke a participant's role in a room (reporter|assignee|on_call|observer|admin).
     Role {
         /// The participant's room handle, as shown by `rozum meetings who`.
@@ -1472,6 +1481,7 @@ async fn main() {
             }
             MeetingsAction::Read { room, count } => run_meetings_read(room, count).await,
             MeetingsAction::RepairThreads { room } => run_meetings_repair_threads(room).await,
+            MeetingsAction::Phase { phase, room } => run_meetings_phase(phase, room).await,
             MeetingsAction::Role { handle, role, room, revoke } => {
                 run_meetings_role(handle, role, room, revoke).await
             }
@@ -4247,6 +4257,49 @@ fn run_meetings_token(action: TokenAction) {
 }
 
 /// `rozum meetings react` — toggle an emoji reaction on a message (direct disk).
+/// `rozum meetings phase` — set the room's lifecycle phase, persisted to `meta.json`.
+///
+/// Goes through the DAEMON rather than writing the file directly, unlike `role`: a live room holds
+/// its phase in memory too, and writing only the file would leave the running daemon serving the
+/// old one until it restarted — the mirror image of the bug this feature exists to fix.
+async fn run_meetings_phase(phase: String, room: Option<String>) {
+    use rozum::meeting::daemon_proxy::detect_project;
+    use rozum::meeting::tui_client::{PostTarget, call_once};
+    let want = phase.trim().to_ascii_lowercase();
+    if !matches!(want.as_str(), "active" | "paused" | "ended") {
+        eprintln!("meetings phase: unknown phase '{phase}'; expected active, paused or ended");
+        std::process::exit(2);
+    }
+    let sock = rozum::meeting::room_path::meeting_sock();
+    let (display, token) = rozum::meeting::client::post_identity(None);
+    let target = match room {
+        Some(name) => PostTarget::Named(name),
+        None => match detect_project() {
+            Some(p) => PostTarget::Project(p),
+            None => {
+                eprintln!("meetings phase: no project detected — run inside a repo, or pass --room");
+                std::process::exit(1);
+            }
+        },
+    };
+    match call_once(
+        &sock,
+        target,
+        &display,
+        token.as_deref(),
+        "meeting.room_phase",
+        serde_json::json!({ "phase": want }),
+    )
+    .await
+    {
+        Ok(v) => println!("{}", v.as_str().unwrap_or(&v.to_string()).trim().to_string()),
+        Err(e) => {
+            eprintln!("meetings phase: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// `rozum meetings role` — grant or revoke a participant's role (direct disk, like react/redact).
 async fn run_meetings_role(handle: String, role: String, room: Option<String>, revoke: bool) {
     use rozum::meeting::identity::{Role, Roster};

@@ -862,6 +862,25 @@ impl TranscriptWriter {
     }
 
     /// The room's root dir (for reading messages back — incident-context gather).
+    /// Persist the room's lifecycle phase to `meta.json`.
+    ///
+    /// It was a `String` on disk with no setter, so `DaemonRoom::end()` only ever changed memory and
+    /// an ended room came back ACTIVE after a restart. Kept a string rather than promoted to an enum
+    /// here: the writer has no opinion about which phases exist, and an unknown value must reach the
+    /// reader — which decides what to do with it — instead of failing to parse at this layer.
+    pub fn set_phase(&mut self, phase: &str, ts: u64) -> std::io::Result<()> {
+        if !self.materialized {
+            self.materialize(ts)?;
+        }
+        self.phase = phase.to_owned();
+        self.persist_meta_index()
+    }
+
+    /// The phase as it is on disk. `"Active"` for a room that never set one.
+    pub fn phase(&self) -> &str {
+        &self.phase
+    }
+
     pub fn root(&self) -> &Path {
         self.paths.root.as_path()
     }
