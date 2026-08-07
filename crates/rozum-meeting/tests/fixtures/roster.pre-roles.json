@@ -1,0 +1,28 @@
+{
+  "participants": [
+    {
+      "id": "00000000000000000000000000000001",
+      "handle": "plucky-fox",
+      "base_name": "Sergiy",
+      "kind": "human",
+      "project": "/home/example/project",
+      "session_token": "0000000000000000000000000000f000"
+    },
+    {
+      "id": "00000000000000000000000000000002",
+      "handle": "jolly-raven",
+      "base_name": "claude-code",
+      "kind": "mcp",
+      "project": "/home/example/project",
+      "session_token": "0000000000000000000000000000f001"
+    },
+    {
+      "id": "00000000000000000000000000000003",
+      "handle": "mellow-marten",
+      "base_name": "telegram",
+      "kind": "bridge",
+      "project": "/home/example/project",
+      "session_token": "0000000000000000000000000000f002"
+    }
+  ]
+}

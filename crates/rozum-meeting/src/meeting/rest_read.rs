@@ -182,6 +182,7 @@ fn router(registry: Arc<RoomRegistry>, secret: String) -> Router {
         .route("/rooms/{name}/redact", post(redact))
         .route("/rooms/{name}/reactions", get(reactions))
         .route("/rooms/{name}/react", post(react))
+        .route("/rooms/{name}/roles", get(roles).post(set_role))
         .route("/rooms/{name}/metrics", get(metrics))
         .route("/rooms/{name}/events", get(events))
         .route("/rooms/{name}/search", get(search))
@@ -836,6 +837,31 @@ async fn reactions(State(state): State<RestState>, AxumPath(name): AxumPath<Stri
         return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
     };
     Json(json!({ "room": name, "reactions": store::load_reactions(&root) })).into_response()
+}
+
+/// `GET /rooms/{name}/roles` — who holds which role, for a console that wants to show it without
+/// re-deriving it from the roster file.
+async fn roles(State(state): State<RestState>, AxumPath(name): AxumPath<String>) -> Response {
+    let Some(root) = room_root(&state.registry, &name) else {
+        return (StatusCode::NOT_FOUND, "unknown room\n").into_response();
+    };
+    let roster = crate::meeting::identity::Roster::load(&root.join("roster.json"));
+    let who: Vec<Value> = roster
+        .participants
+        .iter()
+        .filter(|e| !e.roles.is_empty())
+        .map(|e| json!({ "handle": e.handle, "roles": e.roles }))
+        .collect();
+    Json(json!({ "room": name, "participants": who })).into_response()
+}
+
+/// `POST /rooms/{name}/roles` — body `{ "handle": "eager-otter", "role": "on_call", "grant": true }`.
+async fn set_role(
+    Extension(ConsoleUser(user)): Extension<ConsoleUser>,
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    console_call(&name, &user, "meeting.role", body).await
 }
 
 /// `POST /rooms/{name}/react` — body `{ "msg_id": "<date>/<n>", "emoji": "👍", "add": true|false }`.

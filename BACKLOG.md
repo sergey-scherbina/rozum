@@ -324,7 +324,22 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   <id> <emoji> [--off]` + REST GET `/reactions`/POST `/react` + console emoji-count chips. mtg-message-ops
   is now FULLY complete (link + redact + react).
 
-- [ ] **mtg-rich-rooms** — a richer room model beyond the daily-file chat: rooms with a **lifecycle**
+- [~] **mtg-rich-rooms** (spec: `docs/specs/mtg-rich-rooms.md`) — **R1 (roles) DONE 2026-08-07.**
+  The spec's finding is the useful part: the entry's premise ("today: one flat daily room per
+  project") undersold what exists — rooms already had a lifecycle field, durable participant
+  identity, and threads carrying id/kind/five-state machine/assignee/pinning/links/SLA. So the
+  recommendation, accepted by the operator, is **NOT to store a room kind**: a queue is a VIEW over
+  open threads, and a stored room type would be a second, weaker copy of a working concept with two
+  places to set state.
+  **R1 shipped:** `RosterEntry.roles: Vec<Role>` (reporter|assignee|on_call|observer|admin) —
+  a vector because on-call AND assignee is a normal simultaneous state; `Roster::grant/revoke/
+  with_role`; `DaemonRoom::grant_role/revoke_role`; `meeting.role`, `rozum meetings role`,
+  `GET/POST /rooms/{n}/roles`. Migration proven BOTH directions against fixtures captured from the
+  live daemon before the change (`crates/rozum-meeting/tests/fixtures/`, redacted — a real
+  RosterEntry carries a reconnect token and the rozum room holds 418 of them).
+  **REMAINING: R2** (Phase → Active|Paused|Resolved|Archived, with `Ended` as an alias) and **R3**
+  (the queue view over open threads). Both described in the spec; neither touches a day file.
+  Original: a richer room model beyond the daily-file chat: rooms with a **lifecycle**
   (a support queue / a per-product channel / a per-incident room), durable identity, membership/roles
   (reporter, assignee, on-call, observer), and a room **kind** (chat | queue | incident). Today: one
   flat daily room per project. Needs a room registry with typed metadata + a migration from the daily

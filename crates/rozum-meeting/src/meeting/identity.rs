@@ -20,6 +20,60 @@ use uuid::Uuid;
 
 use super::participant::ParticipantId;
 
+/// What a participant is here to DO, as opposed to what kind of client they are.
+///
+/// `RosterEntry.kind` is `mcp | human | bridge` — a transport fact. It cannot answer "who is
+/// on-call", which is exactly what escalation needs to route an incident, so roles are a separate
+/// axis rather than a widening of `kind`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    /// Files incidents; the default stance of a human in a support room.
+    Reporter,
+    /// Carries work assigned to them.
+    Assignee,
+    /// The routing target when an incident escalates and no assignee is named.
+    OnCall,
+    /// Present and reading; never routed to.
+    Observer,
+    /// May change other participants' roles.
+    Admin,
+}
+
+impl Role {
+    /// Parse the wire spelling. Returns `None` rather than defaulting, because a typo silently
+    /// becoming `Observer` is how someone stops being paged without anyone noticing.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "reporter" => Some(Self::Reporter),
+            "assignee" => Some(Self::Assignee),
+            "on_call" | "on-call" | "oncall" => Some(Self::OnCall),
+            "observer" => Some(Self::Observer),
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reporter => "reporter",
+            Self::Assignee => "assignee",
+            Self::OnCall => "on_call",
+            Self::Observer => "observer",
+            Self::Admin => "admin",
+        }
+    }
+
+    /// Every spelling the CLI and REST surfaces accept, for help text and error messages.
+    pub const ALL: [Role; 5] = [
+        Role::Reporter,
+        Role::Assignee,
+        Role::OnCall,
+        Role::Observer,
+        Role::Admin,
+    ];
+}
+
 /// A participant's durable record within a room's roster.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RosterEntry {
@@ -35,6 +89,15 @@ pub struct RosterEntry {
     /// The proxy's session token; `None` for the human/operator. The reconnect
     /// key.
     pub session_token: Option<String>,
+    /// What this participant is here to do. A VECTOR because the states overlap in practice: the
+    /// operator is on-call and the assignee of two incidents at the same time, and a single-valued
+    /// field forces a lie the first time that happens.
+    ///
+    /// `default` is load-bearing — every `roster.json` written before this field existed must keep
+    /// loading, and it reads as "no declared role", which is the status quo, rather than as a
+    /// wrong one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<Role>,
 }
 
 /// A room's participant roster, persisted as `roster.json`.
@@ -68,6 +131,48 @@ impl Roster {
     }
 
     /// Look up an entry by its session token.
+    /// Give `handle` a role. Idempotent: granting a role twice is not an error, because the
+    /// caller is usually a human typing the same command again after a restart.
+    ///
+    /// Returns `false` when no such handle is in the room — a silent no-op here would let a typo
+    /// look like a successful grant, and nobody checks a roster they believe they just changed.
+    pub fn grant(&mut self, handle: &str, role: Role) -> bool {
+        match self.participants.iter_mut().find(|e| e.handle == handle) {
+            Some(e) => {
+                if !e.roles.contains(&role) {
+                    e.roles.push(role);
+                    e.roles.sort();
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Take a role away. Also idempotent, and also `false` for an unknown handle.
+    pub fn revoke(&mut self, handle: &str, role: Role) -> bool {
+        match self.participants.iter_mut().find(|e| e.handle == handle) {
+            Some(e) => {
+                e.roles.retain(|r| *r != role);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Everyone holding `role`, in roster order.
+    ///
+    /// This is what escalation needs: `meeting.escalate` takes a free-text `to` today and cannot
+    /// answer "who is on-call". Returning a LIST rather than one participant is deliberate — a room
+    /// with two people on call is a normal state, and picking one of them silently is a policy
+    /// decision that belongs to the escalation code, not to the roster.
+    pub fn with_role(&self, role: Role) -> Vec<&RosterEntry> {
+        self.participants
+            .iter()
+            .filter(|e| e.roles.contains(&role))
+            .collect()
+    }
+
     pub fn by_token(&self, token: &str) -> Option<&RosterEntry> {
         self.participants
             .iter()
@@ -98,6 +203,9 @@ impl Roster {
             kind: kind.to_owned(),
             project: project.map(|p| p.to_owned()),
             session_token: session_token.map(|t| t.to_owned()),
+            // A new participant declares no role. Anything else would be guessing on their behalf,
+            // and guessing `Observer` is how someone silently stops being paged.
+            roles: Vec::new(),
         });
         (ParticipantId::new(id), handle, true)
     }
@@ -234,5 +342,103 @@ mod tests {
         let (id2, _, new2) = r.resolve_or_mint(None, "operator", "human", None);
         assert!(new1 && new2);
         assert_ne!(id1, id2);
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+
+    const PRE_ROLES_ROSTER: &str = include_str!("../../tests/fixtures/roster.pre-roles.json");
+    const PRE_ROLES_META: &str = include_str!("../../tests/fixtures/meta.pre-roles.json");
+
+    /// THE migration assertion, and the reason the fixtures exist: a binary that knows about roles
+    /// must still read a roster written by one that did not. The bytes are the shape the operator's
+    /// live daemon was writing, redacted — see `tests/fixtures/README.md`.
+    #[test]
+    fn a_roster_written_before_roles_existed_still_loads() {
+        let roster: Roster = serde_json::from_str(PRE_ROLES_ROSTER).expect("pre-roles roster loads");
+        assert_eq!(roster.participants.len(), 3);
+        for e in &roster.participants {
+            // Absent means "no declared role" — the status quo — never a guessed one.
+            assert!(e.roles.is_empty(), "{} got a role from nowhere", e.handle);
+        }
+        // And the fields that were there before must survive the round trip unchanged.
+        let human = &roster.participants[0];
+        assert_eq!(human.kind, "human");
+        assert!(human.session_token.is_some());
+    }
+
+    /// The other direction: an OLD binary reading what a new one writes. `skip_serializing_if`
+    /// means a role-less entry serialises byte-identically to before, so the common case cannot
+    /// break a reader that has never heard of the field.
+    #[test]
+    fn a_role_less_entry_serialises_without_the_field() {
+        let roster: Roster = serde_json::from_str(PRE_ROLES_ROSTER).unwrap();
+        let out = serde_json::to_string(&roster).unwrap();
+        assert!(!out.contains("roles"), "{out}");
+    }
+
+    /// `meta.json` is untouched by this change; the fixture is here so that if someone later edits
+    /// `Phase` (R2 in the spec) the failure lands in a test rather than on the operator's daemon.
+    #[test]
+    fn the_pre_change_room_meta_still_parses() {
+        let v: serde_json::Value = serde_json::from_str(PRE_ROLES_META).unwrap();
+        assert_eq!(v["phase"], "Active");
+        assert!(v["created_at"].is_number());
+    }
+
+    #[test]
+    fn granting_is_idempotent_and_an_unknown_handle_is_reported() {
+        let mut roster: Roster = serde_json::from_str(PRE_ROLES_ROSTER).unwrap();
+        let who = roster.participants[0].handle.clone();
+
+        assert!(roster.grant(&who, Role::OnCall));
+        assert!(roster.grant(&who, Role::OnCall), "a repeat grant is not an error");
+        assert_eq!(roster.participants[0].roles, vec![Role::OnCall]);
+
+        // A typo must NOT read as success: nobody re-checks a roster they believe they just changed.
+        assert!(!roster.grant("no-such-handle", Role::OnCall));
+        assert!(!roster.revoke("no-such-handle", Role::OnCall));
+    }
+
+    /// The case that made `roles` a vector: on-call AND assignee at once.
+    #[test]
+    fn a_participant_holds_several_roles_at_once() {
+        let mut roster: Roster = serde_json::from_str(PRE_ROLES_ROSTER).unwrap();
+        let who = roster.participants[0].handle.clone();
+        roster.grant(&who, Role::OnCall);
+        roster.grant(&who, Role::Assignee);
+
+        assert_eq!(roster.with_role(Role::OnCall).len(), 1);
+        assert_eq!(roster.with_role(Role::Assignee).len(), 1);
+
+        roster.revoke(&who, Role::OnCall);
+        assert!(roster.with_role(Role::OnCall).is_empty());
+        assert_eq!(roster.with_role(Role::Assignee).len(), 1, "revoke took the wrong one");
+    }
+
+    /// Two people on call is a normal state, and the roster must not pick one.
+    #[test]
+    fn with_role_returns_everyone_not_a_winner() {
+        let mut roster: Roster = serde_json::from_str(PRE_ROLES_ROSTER).unwrap();
+        let (a, b) = (roster.participants[0].handle.clone(), roster.participants[1].handle.clone());
+        roster.grant(&a, Role::OnCall);
+        roster.grant(&b, Role::OnCall);
+        assert_eq!(roster.with_role(Role::OnCall).len(), 2);
+    }
+
+    /// A typo must not become a role. `Observer` is the dangerous default: it looks harmless and
+    /// silently stops someone being paged.
+    #[test]
+    fn an_unknown_spelling_is_rejected_rather_than_defaulted() {
+        assert_eq!(Role::parse("on-call"), Some(Role::OnCall));
+        assert_eq!(Role::parse("  OnCall "), Some(Role::OnCall));
+        assert_eq!(Role::parse("on_call"), Some(Role::OnCall));
+        assert_eq!(Role::parse("observor"), None);
+        assert_eq!(Role::parse(""), None);
+        for r in Role::ALL {
+            assert_eq!(Role::parse(r.as_str()), Some(r), "{} does not round-trip", r.as_str());
+        }
     }
 }

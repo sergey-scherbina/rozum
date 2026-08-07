@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use tokio::sync::{Notify, broadcast};
 
-use super::identity::Roster;
+use super::identity::{Role, Roster};
 use super::participant::ParticipantId;
 use super::state::{POLLING_STALE_SECS, RESPONDING_STALE_SECS, unix_ts};
 use super::store::{
@@ -166,6 +166,28 @@ impl DaemonRoom {
     }
 
     // ── Membership ────────────────────────────────────────────────────────────
+
+    /// Give a participant a role, persisting the roster. `Ok(false)` means the handle is not in
+    /// this room — reported rather than swallowed, so a typo cannot read as a successful grant.
+    pub fn grant_role(&mut self, handle: &str, role: Role) -> std::io::Result<bool> {
+        self.touch();
+        if !self.roster.grant(handle, role) {
+            return Ok(false);
+        }
+        self.roster.save(&self.writer.paths().roster_path())?;
+        Ok(true)
+    }
+
+    /// Take a role away, persisting the roster. Same `Ok(false)` contract.
+    pub fn revoke_role(&mut self, handle: &str, role: Role) -> std::io::Result<bool> {
+        self.touch();
+        if !self.roster.revoke(handle, role) {
+            return Ok(false);
+        }
+        self.roster.save(&self.writer.paths().roster_path())?;
+        Ok(true)
+    }
+
 
     /// Join (or rebind, on a known `session_token`) a participant. Persists the
     /// roster and emits `ParticipantJoined` only for a genuinely new identity.
