@@ -1,6 +1,0 @@
-feature/residency-unify-close 2026-08-07T21:25:29Z
-agent: claude-opus-5
-heartbeat: 2026-08-07T21:25:29Z
-status: not-started
-done-so-far: the decision was made by the operator and shipped as bench-share-gateway
-next: find anything else still assuming a process per model, then close the entry
