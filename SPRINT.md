@@ -2275,6 +2275,45 @@ multi-agent skill.)
 
 Current sprint focus: (1) make Rozum a reliable local meeting room for live agents and a human operator; (2) make Rozum a local LLM provider for Claude Code and Codex via an outward OpenAI/Anthropic-compatible gateway backed by an in-process MLX / GGUF engine on Apple Silicon Metal.
 
+
+### ▶ Meetings + memory: the plan the operator approved 2026-08-07
+
+Recorded because it was agreed in conversation, and a plan that lives only there is a plan that
+survives exactly one context rotation. Order is mine to change; scope and the reasoning are not.
+
+- [x] **bench-share-gateway — DONE 2026-08-07.** The matrix borrows a running gateway by default
+  instead of loading a second copy of the same weights. **The operator overruled my recommendation
+  and was right:** I argued for keeping per-model processes (footprint attribution, blast radius),
+  but on a host that fits ONE model the private gateway loads a duplicate that cannot fit, waits in
+  the admission queue, and — via `gateway stop --force` — evicts the operator's gateway first to make
+  room for a copy of what it was already serving. Borrow on an exact model match only; switching a
+  shared gateway's model would BE the behaviour being removed. `BENCH_DEDICATED=1` keeps the old
+  path for when the numbers are the point, which is the operator's own condition.
+
+- [ ] **mtg-threads** — MEASURE FIRST. Threads already carry id, kind, a five-state machine, owner,
+  severity, pinning, links, SLA and reply-chains (`in_reply_to`), so this entry is very likely
+  mostly done — four backlog entries in this subsystem turned out that way on 2026-08-06/07. Do not
+  build from the entry's text; run `scripts/rust-item-spans.py` over `store.rs`/`room.rs`, read the
+  daemon's tool table, and reconcile the entry to what exists before writing a line.
+
+- [ ] **mtg-message-metadata** — a versioned message schema. `MsgMeta`/`PostMeta` already carry
+  kind, severity, tags, thread_id, in_reply_to; the open part is VERSIONING and back-compat with the
+  plain lines. Same rule: measure what `StoredTurn` already round-trips before designing a schema.
+  **The append-only log is the constraint** — a version field can be added, a past line cannot be
+  rewritten, so migration is read-side or it does not happen.
+
+- [ ] **residency-unify-in-process** — the remaining decision is now DECIDED by the operator: the
+  matrix shares the resident model (done above). What is left of the entry is to close it, and to
+  check whether anything else still assumes a process-per-model (`rozum launch --dedicated`, the
+  residency ledger's per-model view). Small.
+
+- [ ] **ucc-ssc-backend** — LARGE, weeks, cross-repo; do it as staged slices with a spec, never as
+  one pass. The toolkit is missing WebAuthn, PTY↔WebSocket, process spawn/kill + registry
+  primitives, and a launchd story; the path in the entry is read-only status routes first, action
+  routes once spawn/registry primitives exist, terminal and auth staying Rust longest. First slice
+  should be a spec that states which of those gaps is actually on the critical path — measured
+  against `clients/control`, not assumed.
+
 ## Sprint
 
 ### ★ Active program (user priority — do strictly in this order)
