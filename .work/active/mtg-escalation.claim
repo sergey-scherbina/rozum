@@ -1,0 +1,6 @@
+feature/mtg-escalation 2026-08-07T15:01:13Z
+agent: claude-opus-5
+heartbeat: 2026-08-07T15:01:13Z
+status: not-started
+done-so-far: roles shipped yesterday exist FOR this: meeting.escalate still takes a free-text 'to' and cannot resolve on-call
+next: read the current escalate path end to end before designing anything
