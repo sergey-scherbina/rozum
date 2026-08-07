@@ -87,3 +87,45 @@ Two+ models co-reside in ONE gateway process within one host budget that ALSO ac
 external gateway; the governor sheds the least-useful idle model first under real pressure; single-
 model behaviour unchanged; matrix green. Folds in the program's "co-residency = N processes",
 "cross-process eviction", and (via U1) tightens the footprint accounting.
+
+## The remaining decision, measured (2026-08-07)
+
+The entry says U3 leaves "the architecture call — make the in-process Switchboard the *primary*
+multi-model path over the N-process flock (affects the matrix harness → team decision, not solo)".
+Measured before asking anything:
+
+**1. For SERVING, the in-process path is already primary.** Multislot is ON by default
+(`switchboard.rs:136`; `ROZUM_MULTISLOT=0` opts out), warm admission is host-aware (U1), the
+governor sheds warm secondaries first (U2), and `ROZUM_WARM_MODELS` preloads a set (U3). Nothing is
+pending there.
+
+**2. The only remaining N-process user is the BENCH HARNESS**, plus `rozum launch --dedicated`.
+`scripts/bench/agentic.sh` starts one gateway per model spec (`PORT_BASE + idx`) and measures **that
+model's RAM as the gateway PROCESS footprint**, under `/usr/bin/time -l`.
+
+So the "architecture call" is really: **should the matrix stop spawning a process per model?** That
+is a measurement and blast-radius decision, not a serving one. The five things that have to be
+answered before it can be:
+
+| # | Question | What measuring already says |
+|---|---|---|
+| Q1 | Is "primary" about serving or about the harness? | Serving is done. Only the harness is left, so the item is much smaller than it reads. |
+| Q2 | If the harness goes in-process, how is a model's footprint attributed? | Today it is the process's peak RSS — one number per model, trivially trustworthy. In one process the only source is MLX's own `get_active_memory`/peak deltas, which are per-PROCESS too and would have to be sampled around each load. Weaker evidence for the number the whole matrix is judged on. |
+| Q3 | Blast radius. | One process means one model's Metal fault takes every co-resident down. This repo has BUG-001 (matrix kernel panic on teardown) and BUG-003 (3×gateway → jetsam → reboot); per-model processes are what bounds that today. |
+| Q4 | Per-model memory caps in one process? | **Not possible.** `set_memory_limit`/`set_cache_limit` are process-global (`mlx_native_backend.rs::cap_mlx_memory`, "Process-global, idempotent"), so with N residents a model's share can only be enforced by ADMISSION, never by the runtime. |
+| Q5 | Does the ledger still mean anything? | With the harness in-process there is one `residents/<pid>` entry covering N models. `committed_by_others` stays correct for EXTERNAL gateways, which is the case it exists for — but the ledger stops being a per-model view, and anything reading it that way would need to change. |
+
+### Recommendation
+
+**Close the item by scoping it, rather than by doing it.** Make the in-process Switchboard primary
+for SERVING — which it already is — and keep the N-process shape for the MATRIX, on purpose:
+per-model footprint attribution and blast-radius isolation are the two things the harness exists to
+provide, and both are lost by merging the processes. The ledger stays the cross-process floor, which
+is what the spec's own migration section already says.
+
+What would change my mind: a matrix run whose wall-clock is dominated by process startup rather
+than by generation (measure before believing it), or a per-model footprint source in-process that is
+as trustworthy as peak RSS.
+
+**This is a recommendation, not a decision** — the operator asked for the questions to be written
+down and the choice made deliberately.
