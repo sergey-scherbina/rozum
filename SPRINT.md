@@ -2422,7 +2422,16 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
   OS lever to convert a breach into a recoverable process-kill. **The practical containment IS the `shed`
   governor** (react to the OS jetsam pressure level + unload BEFORE the kernel panics) — already shipped.
   No separate OS-containment to build; don't pursue RLIMIT.
-- [~] **residency-unify-in-process** (design: `docs/specs/residency-unify.md`) — fold co-residency into one
+- [~] **residency-unify-in-process** (design: `docs/specs/residency-unify.md`) — **2026-08-07: the
+  remaining "architecture call" is written up and MEASURED at the end of that spec; it is much
+  smaller than the entry reads.** For SERVING the in-process path is already primary (multislot on by
+  default, host-aware warm admission, precise shedding, `ROZUM_WARM_MODELS`). The only N-process user
+  left is the BENCH HARNESS, which starts one gateway per model and reads that model's RAM as the
+  process's peak RSS. So the question is "should the matrix stop spawning a process per model", and
+  it is a measurement/blast-radius decision, not a serving one. Five questions recorded (footprint
+  attribution, blast radius, per-model caps — impossible, MLX limits are process-global — and what
+  the ledger still means). **Recommendation: close by scoping — keep N processes for the matrix on
+  purpose.** Awaiting the operator's decision; no code until then. — fold co-residency into one
   in-process Switchboard; flock ledger stays the cross-process backstop. **U1 + U2 DONE (`nimble-raven`,
   `ee30c92`+`fb58d7f`):** U1 = warm admission is now footprint-accurate (`runtime_footprint_bytes`, not raw
   weights) + host-aware (`host_ram_budget_bytes − committed_by_others`) → closed a latent overcommit path
