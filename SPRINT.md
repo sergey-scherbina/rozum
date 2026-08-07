@@ -2461,7 +2461,21 @@ safety is estimate-based (open-loop admission); the GUARANTEE needs measured clo
   OS lever to convert a breach into a recoverable process-kill. **The practical containment IS the `shed`
   governor** (react to the OS jetsam pressure level + unload BEFORE the kernel panics) — already shipped.
   No separate OS-containment to build; don't pursue RLIMIT.
-- [~] **residency-unify-in-process** (design: `docs/specs/residency-unify.md`) — **2026-08-07: the
+- [x] **residency-unify-in-process — DONE 2026-08-07.** The remaining "architecture call" was decided
+  by the operator on a better argument than my recommendation: with one model and scarce RAM a
+  private gateway loads a duplicate that cannot fit, so the matrix now borrows the resident one
+  (`bench-share-gateway`), and the per-process path stays as an explicit opt-in.
+  **Swept the rest of the assumption 2026-08-07** and it is deliberately NOT a blanket conversion.
+  `solve.sh` shares too (it is an agent loop, same as `agentic.sh`) — but only when no phase will
+  switch models, because switching a BORROWED gateway is the same eviction dressed as cooperation.
+  `contention.sh`, `smmrd-measure.sh`, `pipeline-swap-repro.sh` and `gateway-smoke.sh` keep their own
+  processes ON PURPOSE: the first three MEASURE residency, contention and prefill peaks, and a shared
+  gateway destroys the experiment rather than speeding it up; the smoke wants determinism, not
+  whatever happens to be resident. `rozum launch --dedicated` stays for the same reason.
+  Two bugs caught while wiring `solve.sh`: `BASE` was computed once from the old port, and
+  `wait_ready`'s liveness guard tests a pid we do not own when borrowing — it would have reported
+  "gateway did not load" about a gateway that was already answering.
+  Previously: **2026-08-07: the
   remaining "architecture call" is written up and MEASURED at the end of that spec; it is much
   smaller than the entry reads.** For SERVING the in-process path is already primary (multislot on by
   default, host-aware warm admission, precise shedding, `ROZUM_WARM_MODELS`). The only N-process user
