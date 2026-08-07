@@ -1,0 +1,6 @@
+feature/residency-unify-questions 2026-08-07T15:11:50Z
+agent: claude-opus-5
+heartbeat: 2026-08-07T15:11:50Z
+status: not-started
+done-so-far: operator asked to write the open questions down before any code
+next: record the five measured questions in the spec and the sprint entry; no code
