@@ -726,6 +726,20 @@ enum MeetingsAction {
         action: TokenAction,
     },
 
+    /// Grant or revoke a participant's role in a room (reporter|assignee|on_call|observer|admin).
+    Role {
+        /// The participant's room handle, as shown by `rozum meetings who`.
+        handle: String,
+        /// reporter | assignee | on_call | observer | admin.
+        role: String,
+        /// Room name; default = the cwd project's room.
+        #[arg(long)]
+        room: Option<String>,
+        /// Take the role away instead of granting it.
+        #[arg(long)]
+        revoke: bool,
+    },
+
     /// React to a message with an emoji (toggle).
     React {
         /// The message id (`<date>/<n>`).
@@ -1458,6 +1472,9 @@ async fn main() {
             }
             MeetingsAction::Read { room, count } => run_meetings_read(room, count).await,
             MeetingsAction::RepairThreads { room } => run_meetings_repair_threads(room).await,
+            MeetingsAction::Role { handle, role, room, revoke } => {
+                run_meetings_role(handle, role, room, revoke).await
+            }
             MeetingsAction::React { msg_id, emoji, room, off } => {
                 run_meetings_react(msg_id, emoji, room, off).await
             }
@@ -4230,6 +4247,38 @@ fn run_meetings_token(action: TokenAction) {
 }
 
 /// `rozum meetings react` — toggle an emoji reaction on a message (direct disk).
+/// `rozum meetings role` — grant or revoke a participant's role (direct disk, like react/redact).
+async fn run_meetings_role(handle: String, role: String, room: Option<String>, revoke: bool) {
+    use rozum::meeting::identity::{Role, Roster};
+    let root = resolve_room_or_exit(room, "role").await;
+    if !root.exists() {
+        eprintln!("meetings role: no such room ({})", root.display());
+        std::process::exit(1);
+    }
+    // Refuse a misspelling instead of defaulting — a typo that quietly becomes `observer` takes
+    // somebody off the pager and says nothing.
+    let Some(parsed) = Role::parse(&role) else {
+        let all: Vec<&str> = Role::ALL.iter().map(|r| r.as_str()).collect();
+        eprintln!("meetings role: unknown role '{role}'; expected one of {}", all.join(", "));
+        std::process::exit(2);
+    };
+    // `roster.json` beside the day files — the same layout `RoomPaths::roster_path` builds; this
+    // path takes a room ROOT that was already resolved, so it does not need the paths type.
+    let path = root.join("roster.json");
+    let mut roster = Roster::load(&path);
+    let changed = if revoke { roster.revoke(&handle, parsed) } else { roster.grant(&handle, parsed) };
+    if !changed {
+        eprintln!("meetings role: no participant '{handle}' in this room");
+        std::process::exit(1);
+    }
+    if let Err(e) = roster.save(&path) {
+        eprintln!("meetings role: could not write the roster: {e}");
+        std::process::exit(1);
+    }
+    let verb = if revoke { "no longer" } else { "now" };
+    println!("{handle} is {verb} {}", parsed.as_str());
+}
+
 async fn run_meetings_react(msg_id: String, emoji: String, room: Option<String>, off: bool) {
     use rozum::meeting::store;
     let root = resolve_room_or_exit(room, "react").await;

@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, watch};
 
-use super::identity::Roster;
+use super::identity::{Role, Roster};
 use super::participant::ParticipantId;
 use super::registry::{RoomHandle, RoomRegistry};
 use super::room::Phase;
@@ -184,6 +184,17 @@ pub struct RedactParams {
     /// Optional reason shown in place of the content (e.g. "PII", "secret").
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RoleParams {
+    /// The participant's room handle (e.g. `eager-otter`), as shown by `meeting.status`.
+    pub handle: String,
+    /// reporter | assignee | on_call | observer | admin.
+    pub role: String,
+    /// Grant (true, default) or revoke (false).
+    #[serde(default)]
+    pub grant: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -640,6 +651,43 @@ impl MeetingServer {
 
     /// Assign a thread/incident owner WITHOUT changing its state (assignment is orthogonal to the
     /// lifecycle — use thread_set_state / escalate / resolve for state). Posts an event note.
+
+    #[tool(
+        name = "meeting.role",
+        description = "Grant or revoke a participant's role in this room: reporter|assignee|on_call|observer|admin. Roles say what someone is here to DO; they are separate from the mcp/human/bridge client kind."
+    )]
+    pub async fn role(&self, params: Parameters<RoleParams>) -> CallToolResult {
+        guard("meeting.role", async move {
+            let (room, _caller) = self.session_room().await;
+            let Some(room) = room else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let p = &params.0;
+            // A misspelled role is refused, never defaulted: silently becoming `observer` is how
+            // somebody stops being paged without anyone noticing.
+            let Some(role) = Role::parse(&p.role) else {
+                let all: Vec<&str> = Role::ALL.iter().map(|r| r.as_str()).collect();
+                return err_result(&format!("unknown role '{}'; expected one of {}", p.role, all.join(", ")));
+            };
+            let grant = p.grant.unwrap_or(true);
+            let mut r = room.lock().await;
+            let changed = if grant {
+                r.grant_role(&p.handle, role)
+            } else {
+                r.revoke_role(&p.handle, role)
+            };
+            match changed {
+                Err(e) => err_result(&format!("could not persist the roster: {e}")),
+                Ok(false) => err_result(&format!("no participant '{}' in this room", p.handle)),
+                Ok(true) => {
+                    let verb = if grant { "now" } else { "no longer" };
+                    text_result(&format!("{} is {} {}", p.handle, verb, role.as_str()))
+                }
+            }
+        })
+        .await
+    }
+
     #[tool(
         name = "meeting.thread_assign",
         description = "Assign a thread/incident owner (to) without changing state; posts an event note."
