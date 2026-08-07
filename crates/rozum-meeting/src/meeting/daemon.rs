@@ -621,15 +621,27 @@ impl MeetingServer {
                 Err(e) => return err_result(&e),
                 Ok(Some(_)) => {}
             }
-            if let Some(to) = &p.to {
+            // An explicit target always wins: whoever named it knows something the roster does not.
+            // Otherwise resolve on-call from the roster — this used to put the literal string
+            // "on-call" in the audit message and assign NOBODY, so the room recorded a page that
+            // never went out.
+            let resolved = match &p.to {
+                Some(to) => Some(to.clone()),
+                None => r.on_call_pick(),
+            };
+            if let Some(to) = &resolved {
                 let _ = r.set_thread_owner(&p.id, Some(to.clone()), None);
             }
-            let to = p.to.clone().unwrap_or_else(|| "on-call".into());
             let note = p.note.clone().unwrap_or_default();
-            let content = if note.is_empty() {
-                format!("escalated to {to}")
-            } else {
-                format!("escalated to {to}: {note}")
+            let content = match (&resolved, note.is_empty()) {
+                (Some(to), true) => format!("escalated to {to}"),
+                (Some(to), false) => format!("escalated to {to}: {note}"),
+                // Still escalated — the state change IS the signal — but say plainly that nobody
+                // picked it up, instead of implying somebody did.
+                (None, true) => "escalated, but nobody is on call in this room".to_string(),
+                (None, false) => {
+                    format!("escalated, but nobody is on call in this room: {note}")
+                }
             };
             let pm = store::PostMeta {
                 kind: store::MsgKind::Event,
@@ -637,7 +649,9 @@ impl MeetingServer {
                 meta: store::MsgMeta {
                     thread_op: Some(store::ThreadOp {
                         state: Some(store::ThreadState::Escalated),
-                        owner: p.to.clone(),
+                        // The RESOLVED owner, not the requested one: the trail has to record what
+                        // happened, not what was asked for.
+                        owner: resolved.clone(),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -646,8 +660,13 @@ impl MeetingServer {
             };
             match r.submit_with_meta(&caller, &content, pm) {
                 Ok(turn) => text_result(
-                    &serde_json::json!({ "thread": p.id, "state": "escalated", "to": to, "msg_id": turn.id() })
-                        .to_string(),
+                    &serde_json::json!({
+                        "thread": p.id,
+                        "state": "escalated",
+                        "to": resolved,
+                        "msg_id": turn.id(),
+                    })
+                    .to_string(),
                 ),
                 Err(e) => err_result(&e),
             }
