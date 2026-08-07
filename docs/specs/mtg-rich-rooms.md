@@ -42,7 +42,17 @@ incident threads already behaves like an incident room. So "room kind" risks bei
 copy of a concept that already works — and the failure mode is specific and familiar: two places to
 set state, which drift, and a reader who cannot tell which one is authoritative.
 
-**Recommendation: do NOT add `kind: chat | queue | incident` as a stored room field.** Instead:
+**CORRECTION, 2026-08-07 — this section was written without noticing that the field already
+existed.** `store.rs` carried `RoomKind { Chat, Queue, Incident }` and `Member { handle, role }`
+from an earlier phase (marked "P3"), with working setters that **nothing ever called** — no daemon
+tool, no CLI, no REST — so no room ever had either field (0 of the operator's 14 `meta.json` files).
+The argument below is unchanged and still holds; what changes is that it is an argument for
+REMOVING something built, not for declining to build it. Both were removed on the operator's call,
+and the second one matters more: R1 had already added roles to `RosterEntry`, so the codebase
+briefly had TWO role mechanisms — exactly the drift this spec warns about, introduced by this spec's
+own author.
+
+**Recommendation: do NOT keep `kind: chat | queue | incident` as a stored room field.** Instead:
 
 - A **queue** is a VIEW: "open threads in this room, ordered by severity then age, with the stale
   ones flagged". Every input already exists — `thread_metrics` computes staleness today. This is a
