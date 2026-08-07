@@ -106,11 +106,27 @@ fix rather than a feature.** What measuring found:
 there is no consumer for either. Building them would repeat exactly what was removed from this
 codebase earlier the same day: a persisted concept with no surface that reaches it.
 
-### R3 — the queue view
+### R3 — the queue view — DONE 2026-08-07
 
-`store::room_queue(root) -> Vec<QueueItem>`: open threads, severity-then-age ordered, staleness
-flagged, assignee resolved through the roster. Surfaced the same three ways every feature in this
-subsystem is: daemon tool, CLI, REST. No new storage.
+`store::room_queue(root, now) -> Vec<QueueItem>`: open threads, severity-then-least-recently-updated,
+`stale` and `overdue_secs` already computed. Daemon tool `meeting.queue`, `rozum meetings queue`,
+`GET /rooms/{n}/queue`. No new storage.
+
+Two decisions worth keeping:
+
+- **It calls `thread_is_stale`/`sla_secs` rather than computing its own SLA.** A third place holding
+  one piece of state is what this task spent the day deleting.
+- **`now` is a parameter, not a clock read inside**, so the ordering is testable without waiting for
+  time to pass.
+
+The assignee is left as the handle rather than resolved through the roster: in a room, the handle IS
+the identity, and a second copy of the participant record inside a queue row would go stale the
+first time somebody is renamed.
+
+**Honest limit on the verification:** no room on this host has a single thread — the incident
+machinery exists and has never been used with real data — so the queue could only be exercised
+against a `threads.json` written for the purpose. Unit tests cover the ordering, the SLA arithmetic
+and the "closed is not queued" filter; nothing has yet proven it against organically created data.
 
 ## Migration, stated plainly
 

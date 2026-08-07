@@ -324,7 +324,16 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   <id> <emoji> [--off]` + REST GET `/reactions`/POST `/react` + console emoji-count chips. mtg-message-ops
   is now FULLY complete (link + redact + react).
 
-- [~] **mtg-rich-rooms** (spec: `docs/specs/mtg-rich-rooms.md`) — **R1 (roles) DONE 2026-08-07.**
+- [x] **mtg-rich-rooms — DONE 2026-08-07** (spec: `docs/specs/mtg-rich-rooms.md`). R1 roles, R2 a
+  persisted lifecycle with `Paused`, R3 the queue view — each on the daemon/CLI/REST trio.
+  **The task shrank twice on measurement, and both shrinkings are the value.** (1) Room kind was
+  already built and unreachable (P3 `RoomKind`/`Member`), so the question stopped being "how do we
+  add it" and became "why keep it" — removed on the operator's call, along with the duplicate role
+  mechanism I had just introduced by not checking first. (2) R2 turned out to be a BUG rather than a
+  feature: a room's phase was never persisted, so `end()` was forgotten across a daemon restart.
+  **Honest limit:** no room on this host has a single thread, so the queue is unit-tested and was
+  exercised against a hand-written `threads.json`, never against organically created data.
+  Original: **R1 (roles) DONE 2026-08-07.**
   The spec's finding is the useful part: the entry's premise ("today: one flat daily room per
   project") undersold what exists — rooms already had a lifecycle field, durable participant
   identity, and threads carrying id/kind/five-state machine/assignee/pinning/links/SLA. So the

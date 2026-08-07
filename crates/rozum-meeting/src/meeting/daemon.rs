@@ -659,6 +659,24 @@ impl MeetingServer {
     /// lifecycle — use thread_set_state / escalate / resolve for state). Posts an event note.
 
 
+
+    #[tool(
+        name = "meeting.queue",
+        description = "This room's queue: its OPEN threads, worst first — severity, then whoever has been ignored longest. A read model over threads.json; nothing to set."
+    )]
+    pub async fn queue(&self) -> CallToolResult {
+        guard("meeting.queue", async move {
+            let (room, _caller) = self.session_room().await;
+            let Some(room) = room else {
+                return err_result("not-joined: call _join_internal first");
+            };
+            let r = room.lock().await;
+            let rows = super::store::room_queue(r.root(), super::state::unix_ts());
+            text_result(&serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()))
+        })
+        .await
+    }
+
     #[tool(
         name = "meeting.room_phase",
         description = "Set this room's lifecycle phase: active | paused | ended. A paused room stays readable and refuses new messages; ending is final. The phase is persisted, so it survives a daemon restart."
