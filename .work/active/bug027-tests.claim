@@ -1,6 +1,0 @@
-feature/bug027-tests 2026-08-07T14:59:59Z
-agent: claude-code
-heartbeat: 2026-08-07T14:59:59Z
-status: in-progress
-done-so-far: BUG-027 rests on measurements only; the matrix cannot see it (0 repair rounds in 24 cells)
-next: make both halves testable and test them
