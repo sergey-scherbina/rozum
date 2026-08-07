@@ -72,6 +72,9 @@ fn bootstrap(signals: &mut HashMap<String, Value>) {
         let mut __h: Vec<(String, String)> = Vec::new(); if let Some(__a) = resolve_credential("env", "ROZUM_MEETING_TOKEN", "Bearer") { __h.push(("Authorization".to_string(), __a)); } load_fetch(signals, "meetingsDays", "http://127.0.0.1:8401/rooms/rozum/days", &__h);
     }
     {
+        let mut __h: Vec<(String, String)> = Vec::new(); if let Some(__a) = resolve_credential("env", "ROZUM_MEETING_TOKEN", "Bearer") { __h.push(("Authorization".to_string(), __a)); } load_fetch(signals, "meetingsQueue", "http://127.0.0.1:8401/rooms/rozum/queue", &__h);
+    }
+    {
         let mut __h: Vec<(String, String)> = Vec::new(); if let Some(__a) = resolve_credential("env", "ROZUM_MEETING_TOKEN", "Bearer") { __h.push(("Authorization".to_string(), __a)); } load_fetch(signals, "meetingsTranscript", &sig(signals, "meetingsUrl"), &__h);
     }
 }
@@ -79,6 +82,7 @@ fn initial_fetch_ticks(signals: &HashMap<String, Value>) -> HashMap<String, Stri
     let mut observed = HashMap::new();
     observed.insert("meetingsRooms".to_string(), format!("{}", sig_int(signals, "meetingsRefresh")));
     observed.insert("meetingsDays".to_string(), format!("{}", sig_int(signals, "meetingsRefresh")));
+    observed.insert("meetingsQueue".to_string(), format!("{}", sig_int(signals, "meetingsRefresh")));
     observed.insert("meetingsTranscript".to_string(), format!("{} {}", sig_int(signals, "meetingsRefresh"), sig(signals, "meetingsUrl")));
     observed
 }
@@ -99,6 +103,15 @@ fn refresh_fetches(signals: &mut HashMap<String, Value>, observed: &mut HashMap<
                 let mut __h: Vec<(String, String)> = Vec::new(); if let Some(__a) = resolve_credential("env", "ROZUM_MEETING_TOKEN", "Bearer") { __h.push(("Authorization".to_string(), __a)); } load_fetch(signals, "meetingsDays", "http://127.0.0.1:8401/rooms/rozum/days", &__h);
             }
             observed.insert("meetingsDays".to_string(), current);
+        }
+    }
+    {
+        let current = format!("{}", sig_int(signals, "meetingsRefresh"));
+        if observed.get("meetingsQueue") != Some(&current) {
+            {
+                let mut __h: Vec<(String, String)> = Vec::new(); if let Some(__a) = resolve_credential("env", "ROZUM_MEETING_TOKEN", "Bearer") { __h.push(("Authorization".to_string(), __a)); } load_fetch(signals, "meetingsQueue", "http://127.0.0.1:8401/rooms/rozum/queue", &__h);
+            }
+            observed.insert("meetingsQueue".to_string(), current);
         }
     }
     {
@@ -295,19 +308,20 @@ fn handle_key(code: KeyCode, signals: &mut HashMap<String, Value>, focus: &mut u
 
 fn render_root(frame: &mut Frame, area: Rect, signals: &HashMap<String, Value>, focus: usize) {
     let chunks0 = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).split(area);
-    let chunks1 = Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Min(3), Constraint::Length(2), Constraint::Length(1), Constraint::Length(2), Constraint::Length(1), Constraint::Length(1)]).split(chunks0[0]);
+    let chunks1 = Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Min(3), Constraint::Min(3), Constraint::Length(2), Constraint::Length(1), Constraint::Length(2), Constraint::Length(1), Constraint::Length(1)]).split(chunks0[0]);
     frame.render_widget(Paragraph::new("rozum"), chunks1[0]);
     { let __json = sig(signals, "meetingsRooms"); let __rows = table_rows("meetingsRooms", fetch_rows(&__json, "entries", "name", &["name", "last", "mentions"])); let __trows: Vec<Row> = __rows.iter().map(|r| Row::new(r.iter().cloned().collect::<Vec<String>>())).collect(); let __t = Table::new(__trows, [Constraint::Ratio(1, 3), Constraint::Ratio(1, 3), Constraint::Ratio(1, 3)]).header(Row::new(vec!["Room", "Last", "@you"])).row_highlight_style(Style::default().add_modifier(Modifier::REVERSED)); let __sel = if __rows.is_empty() { 0usize } else { (match signals.get("meetingsRooms__row") { Some(Value::I(n)) => *n, _ => 0 }).clamp(0, __rows.len() as i64 - 1) as usize }; let mut __st = ratatui::widgets::TableState::default(); if !__rows.is_empty() && focus == 0 { __st.select(Some(__sel)); } frame.render_stateful_widget(__t, chunks1[1], &mut __st); }
     { let __json = sig(signals, "meetingsDays"); let __rows = table_rows("meetingsDays", fetch_rows(&__json, "entries", "date", &["date", "count"])); let __trows: Vec<Row> = __rows.iter().map(|r| Row::new(r.iter().cloned().collect::<Vec<String>>())).collect(); let __t = Table::new(__trows, [Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).header(Row::new(vec!["Day", "#"])).row_highlight_style(Style::default().add_modifier(Modifier::REVERSED)); let __sel = if __rows.is_empty() { 0usize } else { (match signals.get("meetingsDays__row") { Some(Value::I(n)) => *n, _ => 0 }).clamp(0, __rows.len() as i64 - 1) as usize }; let mut __st = ratatui::widgets::TableState::default(); if !__rows.is_empty() && focus == 1 { __st.select(Some(__sel)); } frame.render_stateful_widget(__t, chunks1[2], &mut __st); }
-    let chunks2 = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks1[3]);
+    { let __json = sig(signals, "meetingsQueue"); let __rows = table_rows("meetingsQueue", fetch_rows(&__json, "queue", "id", &["severity", "state", "title", "owner"])); let __trows: Vec<Row> = __rows.iter().map(|r| Row::new(r.iter().cloned().collect::<Vec<String>>())).collect(); let __t = Table::new(__trows, [Constraint::Ratio(1, 4), Constraint::Ratio(1, 4), Constraint::Ratio(1, 4), Constraint::Ratio(1, 4)]).header(Row::new(vec!["Sev", "State", "Incident", "Owner"])); frame.render_widget(__t, chunks1[3]); }
+    let chunks2 = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks1[4]);
     frame.render_widget(Paragraph::new("message"), chunks2[0]);
     frame.render_widget(Paragraph::new(format!("{}{}", focus_mark(focus, 2), text_input_display(signals, "meetingsDraft", "message", false))).style(if focus == 2 { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() }), chunks2[1]);
-    frame.render_widget(Paragraph::new(format!("{}[{}]", focus_mark(focus, 3), "send")).style(if focus == 3 { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() }), chunks1[4]);
-    let chunks3 = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks1[5]);
+    frame.render_widget(Paragraph::new(format!("{}[{}]", focus_mark(focus, 3), "send")).style(if focus == 3 { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() }), chunks1[5]);
+    let chunks3 = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks1[6]);
     frame.render_widget(Paragraph::new("new room topic"), chunks3[0]);
     frame.render_widget(Paragraph::new(format!("{}{}", focus_mark(focus, 4), text_input_display(signals, "meetingsNewRoom", "new room topic", false))).style(if focus == 4 { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() }), chunks3[1]);
-    frame.render_widget(Paragraph::new(format!("{}[{}]", focus_mark(focus, 5), "create room")).style(if focus == 5 { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() }), chunks1[6]);
-    frame.render_widget(Paragraph::new(format!("{}[{}]", focus_mark(focus, 6), "refresh")).style(if focus == 6 { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() }), chunks1[7]);
+    frame.render_widget(Paragraph::new(format!("{}[{}]", focus_mark(focus, 5), "create room")).style(if focus == 5 { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() }), chunks1[7]);
+    frame.render_widget(Paragraph::new(format!("{}[{}]", focus_mark(focus, 6), "refresh")).style(if focus == 6 { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() }), chunks1[8]);
     { let __json = sig(signals, "meetingsTranscript"); let __rows = table_rows("meetingsTranscript", fetch_rows(&__json, "messages", "ts", &["time", "display_name", "badge", "content"])); let __trows: Vec<Row> = __rows.iter().map(|r| Row::new(r.iter().cloned().collect::<Vec<String>>())).collect(); let __t = Table::new(__trows, [Constraint::Ratio(1, 4), Constraint::Ratio(1, 4), Constraint::Ratio(1, 4), Constraint::Ratio(1, 4)]).header(Row::new(vec!["Time", "Who", "", "Message"])); frame.render_widget(__t, chunks0[1]); }
 }
 
