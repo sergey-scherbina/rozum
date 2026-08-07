@@ -1,5 +1,17 @@
 # Changelog
 
+## feat(meetings): mtg-rich-rooms — roles, a lifecycle that survives a restart, and a queue
+
+Participants get roles (`reporter|assignee|on_call|observer|admin`, a vector because on-call AND
+assignee is a normal simultaneous state); a room's phase is finally persisted and can be `Paused`;
+and a room's open threads can be read as a queue, worst first, with the SLA arithmetic done.
+
+The task shrank twice, and that is the useful part. Room kind and member roles already existed from
+an earlier phase, built and unreachable — so the question became why keep them, and they went, along
+with the second role mechanism this work had just added by not checking what was there. And R2 was
+not a feature at all: `end()` only ever set the phase in memory, so an ended room came back active
+after a daemon restart, silently, and had done since the field appeared.
+
 ## refactor(gateway): gw-monolith-decompose done — two monoliths, ten slices, nineteen modules
 
 `gateway.rs` 4386 → 3040 and `control.rs` 4309 → 1095: 8695 lines down to 4135 (−52%), into
