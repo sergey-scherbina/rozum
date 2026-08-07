@@ -1,5 +1,33 @@
 # Benchmark history
 
+## nadia × Qwen3.5-4B — 24 / 24 (2026-08-06, three reps, every fix in place)
+
+The first numbers measured on a binary carrying BUG-026 *and* both halves of BUG-027, on a gateway
+shared with the operator's own work (`BENCH_GATEWAY_URL`, so no second copy of the weights).
+
+| task | | task | |
+|---|---|---|---|
+| greet | 3/3 · 3 s | debug | 3/3 · 40 s |
+| build | 3/3 · 54 s | rpn | 3/3 · 350 s |
+| fix | 3/3 · 29 s | wordcount | 3/3 · 61 s |
+| test | 3/3 · 58 s | multibug | 3/3 · 105 s |
+
+**Zero repair rounds in all 24 cells.** Every task was finished on the first attempt, so nothing
+here exercises the repair path — the repair fixes are what stopped it being *needed* on `wordcount`,
+not what carried these cells.
+
+Progression on this suite, same model, same tasks, three reps each:
+
+| | result | what changed |
+|---|---|---|
+| 2026-08-06 morning | 23/24 | measured on a two-day-old binary (stale install) |
+| 2026-08-06 evening | **24/24** | BUG-026 (invented expectation) + BUG-027 (repair after a break, and the unchecked last repair) |
+
+Timings are contended by construction and must not be compared with a private-gateway run — `rpn`
+at 350 s against 83 s in the morning's private run is the shared model, not a regression. Read the
+column as pass/fail, which is what the shared mode is for.
+
+
 ## The repair prompt does NOT cause the re-run loop (2026-08-06) — null result, nothing shipped
 
 Both measured `wordcount` failures ended with the loop-breaker: `bash` called four times with
