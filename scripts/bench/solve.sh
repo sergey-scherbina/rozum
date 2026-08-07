@@ -70,7 +70,10 @@ stop_gw(){
   for _ in $(seq 1 60); do pgrep -f 'release/rozum-gateway gateway --model' >/dev/null 2>&1 || break; sleep 1; done
 }
 trap stop_gw EXIT
-wait_ready(){ for _ in $(seq 1 240); do curl -s -m2 "$BASE/v1/models" >/dev/null 2>&1 && return 0; kill -0 "$GWPID" 2>/dev/null||return 1; sleep 1; done; return 1; }
+# The liveness guard is "did OUR gateway die", so it only applies when we started one. With a
+# borrowed gateway `$GWPID` is empty and `kill -0 ""` fails, which would report "did not load"
+# about a gateway that is already answering.
+wait_ready(){ for _ in $(seq 1 240); do curl -s -m2 "$BASE/v1/models" >/dev/null 2>&1 && return 0; [ -n "$GWPID" ] && { kill -0 "$GWPID" 2>/dev/null||return 1; }; sleep 1; done; return 1; }
 
 # Switch the single gateway to $1 in-process — ONLY if it isn't already that model (so same-model
 # phases cost nothing). Uses the fixed /control/switch swap path.
@@ -114,8 +117,28 @@ diag(){ grep -vE '^\s*(Compiling|Finished|Updating|Blocking|Downloaded|Running)'
 files_dump(){ ( cd "$WORK" && for f in Cargo.toml src/*.rs; do [ -f "$f" ] && { echo "=== $f ==="; cat "$f"; }; done ) 2>/dev/null | head -120; }
 
 # ── 0. load the planner (first model) ────────────────────────────────────────
-ROZUM_GATEWAY_IDLE_SECS=0 ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0 \
-  "$BIN" gateway --model "$PLANNER" --port "$PORT" --n-ctx "$NCTX" --offline >"$WORK/gw.log" 2>&1 & GWPID=$!
+# Share a gateway that already serves the planner, for the same reason `agentic.sh` does: on a host
+# that fits one model a private gateway loads a duplicate that cannot fit, waits in the admission
+# queue, and takes the operator's resident model down with it. `SOLVE_DEDICATED=1` forces its own —
+# which is what a cascade run wants when it will SWITCH models mid-run, because switching a borrowed
+# gateway would evict what somebody else is using.
+GWPID=""; BORROWED=0
+# Borrow ONLY when no phase will switch the model. This script drives the gateway through
+# /control/switch, and switching a BORROWED gateway would change the model out from under whoever
+# owns it — the exact eviction that sharing exists to avoid, dressed up as cooperation.
+if [ "${SOLVE_DEDICATED:-0}" != 1 ] && [ "$PLANNER" = "$EXECUTOR" ] && [ "$PLANNER" = "$CRITIC" ]; then
+  _j="$("$BIN" gateway status --json 2>/dev/null | tr -d '\n ' || true)"
+  _m="$(printf '%s' "$_j" | sed -n 's/.*"model":"\([^"]*\)".*/\1/p')"
+  _p="$(printf '%s' "$_j" | sed -n 's/.*"port":\([0-9]*\).*/\1/p')"
+  if [ -n "$_p" ] && [ "$_m" = "$PLANNER" ]; then
+    PORT="$_p"; BASE="http://127.0.0.1:$PORT"; BORROWED=1
+    echo "sharing the running gateway on :$PORT (already serving $PLANNER)"
+  fi
+fi
+if [ "$BORROWED" = 0 ]; then
+  ROZUM_GATEWAY_IDLE_SECS=0 ROZUM_GATEWAY_UNLOAD_IDLE_SECS=0 \
+    "$BIN" gateway --model "$PLANNER" --port "$PORT" --n-ctx "$NCTX" --offline >"$WORK/gw.log" 2>&1 & GWPID=$!
+fi
 current="$PLANNER"
 wait_ready || { echo "!! gateway did not load"; grep -iE 'refus|overcommit|not ready' "$WORK/gw.log"|tail -3; exit 1; }
 
