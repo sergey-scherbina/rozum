@@ -1,0 +1,6 @@
+feature/mtg-threads 2026-08-07T16:42:10Z
+agent: claude-opus-5
+heartbeat: 2026-08-07T16:42:10Z
+status: not-started
+done-so-far: plan says MEASURE FIRST — four entries in this subsystem were already done
+next: compare the entry's asks against the daemon tool table, the CLI, REST and the readers
