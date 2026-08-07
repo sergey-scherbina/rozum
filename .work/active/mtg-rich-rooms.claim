@@ -1,6 +1,6 @@
-feature/mtg-rich-rooms 2026-08-07T03:50:08Z
+feature/mtg-rich-rooms 2026-08-07T04:27:02Z
 agent: claude-opus-5
-heartbeat: 2026-08-07T03:50:08Z
-status: not-started
-done-so-far: operator picked this over ucc-ssc-backend; it is the hinge mtg-threads and mtg-escalation hang on
-next: read the CURRENT room model (registry + store) first, then spec; NO storage change before the operator sees the plan
+heartbeat: 2026-08-07T04:27:02Z
+status: in-progress
+done-so-far: R1 (roles) shipped on all three surfaces; migration proven both directions against redacted live fixtures
+next: R2 (Phase → Active|Paused|Resolved|Archived with an Ended alias), then R3 (queue view)
