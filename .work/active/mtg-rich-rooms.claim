@@ -1,0 +1,6 @@
+feature/mtg-rich-rooms 2026-08-07T03:50:08Z
+agent: claude-opus-5
+heartbeat: 2026-08-07T03:50:08Z
+status: not-started
+done-so-far: operator picked this over ucc-ssc-backend; it is the hinge mtg-threads and mtg-escalation hang on
+next: read the CURRENT room model (registry + store) first, then spec; NO storage change before the operator sees the plan
