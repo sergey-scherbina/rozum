@@ -357,7 +357,15 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   alert | resolution), severity, status, assignee, tags, links to artifacts/logs, and a stable message
   id. Today a message is handle+text+timestamp. Needs a versioned message schema (back-compat with the
   plain lines) + write/read paths that preserve it.
-- [ ] **mtg-threads** — group related messages into a **thread = an incident/topic**: a thread id, a
+- [x] **mtg-threads — DONE 2026-08-07.** Measured first, and almost all of it already existed:
+  thread storage, the id, the anchor, reply-chains (`in_reply_to`), the five-state machine, owner,
+  severity, SLA, pinning and links — across 8 daemon tools, 12 CLI incident verbs and 22 REST
+  references. **The only real gap was the entry's last clause, "a thread-aware reader":** zero
+  mentions of a thread in the TUI module, zero in the generated client. Threads were fully trackable
+  and completely invisible to whoever was meant to track them.
+  Closed by adding a queue pane to `clients/control/meetings.ssc` — the reader `rozum meetings
+  attach` actually execs — over the `/rooms/{n}/queue` endpoint from `mtg-rich-rooms` R3.
+  Original: group related messages into a **thread = an incident/topic**: a thread id, a
   parent message, reply-chains, thread-level state (open/triaging/escalated/resolved/closed) + SLA/owner.
   This is what turns a stream into trackable incidents. Needs thread storage + a thread-aware reader/TUI.
 - [x] **mtg-message-ops** — **working with messages**. **SEARCH DONE + LIVE-PROVEN (`c422764`):**

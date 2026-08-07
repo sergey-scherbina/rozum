@@ -109,6 +109,29 @@ val transcriptTable = remoteTable(
 // The body is sent VERBATIM: a terminal target cannot compose strings (there is no computedSignal
 // in the static model), so it cannot wrap the text in JSON. The daemon accepts the plain-text form
 // for exactly this reason — same call as `badge` and `time`, put the work where it can be done once.
+// The room's QUEUE: its open threads, worst first. The daemon does the SLA arithmetic
+// (`store::room_queue`) and ships `stale`/`overdue_secs` ready-made, for the same reason `badge` and
+// `time` are computed there — a generated client cannot re-implement a severity window, and if it
+// tried there would be two rules to drift apart.
+//
+// This is `mtg-threads`' last missing piece: the storage, the daemon tools, the CLI and REST have
+// carried threads for weeks, and no READER showed them. Measured 2026-08-07: zero mentions of a
+// thread in the TUI and zero in this source.
+val queueList = fetchUrlSignal("meetingsQueue", apiBase + "/rooms/" + room + "/queue", refresh, emptyHeaders, creds)
+
+val queueTable = remoteTable(
+  queueList,
+  [
+    fieldColumn("Sev", "severity"),
+    fieldColumn("State", "state"),
+    fieldColumn("Incident", "title"),
+    fieldColumn("Owner", "owner")
+  ],
+  "queue",
+  [],
+  "id"
+)
+
 val draft = signal("meetingsDraft", "")
 val send = fetchActionClear("POST", apiBase + "/rooms/" + room + "/messages", draft, refresh, emptyHeaders, creds)
 
@@ -135,6 +158,9 @@ val sidebar = vstack(gap = 1)(
   heading(1, "rozum"),
   roomTable,
   dayTable,
+  // Under the pickers and above the composer: the queue is what you act on, the transcript is what
+  // you read, and an empty queue is a one-line pane rather than a missing one.
+  queueTable,
   textField(draft, "message"),
   actionButton(send, "send"),
   textField(newRoom, "new room topic"),
