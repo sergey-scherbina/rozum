@@ -1,5 +1,21 @@
 # Changelog
 
+## bug027-tests — the fix stops resting on a measurement
+Completed: 2026-08-07
+
+BUG-027's two fixes were defended by six runs before and six after, and by nothing else. That is
+the wrong kind of safety for a defect the matrix cannot see: the 24-cell run that followed used
+**zero repair rounds**, so a regression here would show up as nothing at all until somebody's task
+failed on a phone.
+
+The loop-breaker now reports that it fired and can be told to forget (tested), and the gate loop's
+policy moved out of `main.rs` into `gate::next_step` — the three rules stated once and tested: the
+check at the last round is the verdict, a run that did not finish gets no repair, and a repair
+after a break starts fresh.
+
+Re-measured after the refactor: 6/6 compile. The sixth run also priced the fix — a fresh restart is
+a whole new turn, and that one hit the 420 s ceiling mid-restart.
+
 ## feat(meetings): mtg-rich-rooms — roles, a lifecycle that survives a restart, and a queue
 
 Participants get roles (`reporter|assignee|on_call|observer|admin`, a vector because on-call AND

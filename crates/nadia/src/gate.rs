@@ -124,6 +124,37 @@ pub async fn derive(backend: &dyn ChatBackend, task: &str, workspace: &Path) -> 
     verify::cargo_floor(workspace)
 }
 
+/// What the gate loop does after a check. The policy in one place, so it can be read and tested
+/// instead of inferred from a `for` loop (both halves of BUG-027 lived in that inference).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    /// The verdict stands; stop.
+    Stop,
+    /// Repair. `fresh` asks for a NEW session rather than another turn in this one.
+    Repair { fresh: bool },
+}
+
+/// `round` is how many repairs have already happened; `max_rounds` the budget; `repair` whether
+/// the check produced something to send; `done` whether the agent stopped of its own accord; and
+/// `tripped` whether the repetition breaker fired during the turn just checked.
+///
+/// Three rules, each paid for:
+///
+/// 1. **The check at `round == max_rounds` is the verdict.** The old loop checked only BEFORE each
+///    repair and stopped, leaving the last attempt unjudged — three runs in six then reported
+///    `✘ проверка НЕ прошла` about code that builds.
+/// 2. **A run that did not finish gets no repair.** There is no budget to repair with, and the
+///    check has already been taken (it runs whatever the stop reason was — BUG-019).
+/// 3. **A repair after a break starts fresh.** The break leaves its own refusal as the last thing
+///    in the conversation and a small model answers by quoting it: measured, one step, zero tool
+///    calls, the refusal as the whole reply.
+pub fn next_step(round: usize, max_rounds: usize, repair: bool, done: bool, tripped: bool) -> Next {
+    if round >= max_rounds || !repair || !done {
+        return Next::Stop;
+    }
+    Next::Repair { fresh: tripped }
+}
+
 /// Check a finished attempt. Returns the report and, when a repair is warranted, the message to
 /// send the agent for its next round.
 ///
@@ -241,6 +272,28 @@ mod tests {
         // The judge's two outcomes are distinguishable from a deterministic pass.
         let judged = Report { passed: Some(true), ..Default::default() };
         assert!(judged.summary().contains("судья"), "{}", judged.summary());
+    }
+
+    /// The loop's policy, which used to be inferable only by reading a `for` loop — and was wrong
+    /// twice there (BUG-027).
+    #[test]
+    fn the_last_attempt_is_judged_and_a_broken_turn_restarts_clean() {
+        use Next::*;
+        // Budget of 2: repair, repair, and the third check is the verdict.
+        assert_eq!(next_step(0, 2, true, true, false), Repair { fresh: false });
+        assert_eq!(next_step(1, 2, true, true, false), Repair { fresh: false });
+        assert_eq!(next_step(2, 2, true, true, false), Stop, "the last repair must still be judged");
+
+        // A turn cut for repetition is repaired in a FRESH session.
+        assert_eq!(next_step(0, 2, true, true, true), Repair { fresh: true });
+
+        // Nothing to send, or an agent that did not finish: no repair either way.
+        assert_eq!(next_step(0, 2, false, true, false), Stop);
+        assert_eq!(next_step(0, 2, true, false, false), Stop);
+        assert_eq!(next_step(0, 2, true, false, true), Stop, "a broken budget is not a repair case");
+
+        // A budget of zero is "check once, never repair" — and it must still check.
+        assert_eq!(next_step(0, 0, true, true, false), Stop);
     }
 
     /// One test, not two, and that is the point: both read the same process-wide environment,

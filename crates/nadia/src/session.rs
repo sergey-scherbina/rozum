@@ -253,6 +253,34 @@ mod tests {
         assert!(err.0.contains("Repeating it will not help"), "{}", err.0);
     }
 
+    /// The flag a caller acts on after a break (BUG-027).
+    ///
+    /// Without it the gate cannot tell a turn that ended normally from one the breaker cut, and it
+    /// repaired inside the cut session — where the model answers by quoting the refusal. Measured:
+    /// 1 of 6 runs left compiling code; 5 of 6 after the caller could see this.
+    #[tokio::test]
+    async fn the_breaker_reports_that_it_fired_and_forgets_on_request() {
+        let lb = LoopBreaker::new(counting_source());
+        let args = json!({"a": 1});
+        assert!(!lb.take_tripped(), "nothing has happened yet");
+
+        for _ in 0..3 {
+            let _ = lb.dispatch("noop", args.clone()).await;
+        }
+        assert!(lb.dispatch("noop", args.clone()).await.is_err(), "the fourth must be refused");
+        assert!(lb.take_tripped(), "it fired and did not say so");
+        assert!(!lb.take_tripped(), "taking it clears it — one intervention per break");
+
+        // `forget` is the other half: a repair must not begin already three strikes into the
+        // window that ended the previous turn.
+        lb.forget();
+        assert!(
+            lb.dispatch("noop", args).await.is_ok(),
+            "after forgetting, the same call is allowed again — the window is the point"
+        );
+        assert!(!lb.take_tripped());
+    }
+
     /// The regression this pins: `multibug` failed because re-running `cargo test` four
     /// times was read as a loop. It is the verify half of fix -> test -> fix, and the
     /// result changes as the files do.

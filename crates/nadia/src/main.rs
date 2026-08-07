@@ -354,19 +354,24 @@ async fn main() {
                 let (r, repair) =
                     nadia::gate::check(&backend, &task, &root, check.as_deref(), &outcome).await;
                 report = nadia::gate::Report { rounds: round, ..r };
-                // Out of repair budget: this check is the verdict.
-                if round >= max_rounds {
-                    break;
-                }
                 // A run that stopped WITHOUT finishing still gets its deterministic check — the
                 // artifact is on disk either way, and that run is the one the operator has most
                 // doubt about. Measured 2026-08-04: an RPN attempt exhausted its steps, the
                 // derived check was discarded unrun, and the report read `⚠ not checked` while
                 // the program on disk printed nothing for the argument the task named. What it
                 // does NOT get is a repair round: there is no budget left to repair with.
-                if !matches!(outcome.stop, AgentStop::Done) {
-                    break;
-                }
+                // The policy lives in `gate::next_step`, tested there. Inlining it here is how
+                // both halves of BUG-027 got in: a `for` loop that stopped one check short, and a
+                // repair that reused a session the breaker had just cut.
+                let tripped = tools.inner().take_tripped();
+                let step = nadia::gate::next_step(
+                    round,
+                    max_rounds,
+                    repair.is_some(),
+                    matches!(outcome.stop, AgentStop::Done),
+                    tripped,
+                );
+                let nadia::gate::Next::Repair { fresh } = step else { break };
                 let Some(prompt) = repair else { break };
                 round += 1;
                 eprintln!("nadia: check failed — repair round {round}");
@@ -380,7 +385,7 @@ async fn main() {
                 // the breaker fired, this repairs in a fresh SESSION for the same reason: the
                 // task and the check output are all the next attempt needs, and the poisoned
                 // history is exactly what it does not.
-                if tools.inner().take_tripped() {
+                if fresh {
                     eprintln!("nadia: …the last turn was cut for repetition — restarting clean");
                     tools.inner().forget();
                     session = Session::new(&backend, &tools, &system_prompt(&root), budget.clone());

@@ -46,6 +46,16 @@ Measured over six runs each, same config:
 
 The sixth is an honest failure: the model did not finish and the gate said so.
 
+**The policy is now one tested function, not a shape inferred from a loop.** Both halves of this
+bug lived in that inference — a `for` loop that stopped one check short, and a repair that reused
+the session the breaker had just cut — so `gate::next_step` states the three rules and
+`crates/nadia/src/main.rs` calls it. Re-measured after the refactor, same six-run protocol: **6/6
+compile**, five verdicts printed.
+
+**And the sixth names the cost:** a fresh restart is a whole new turn, and that run hit the 420 s
+ceiling in the middle of it. Resuming a session is cheaper than restarting one; the restart is
+worth it only where the session is poisoned, which is exactly when it is used.
+
 ---
 
 ## BUG-026 — the gate invented the answer, then failed correct work for not matching it
