@@ -205,6 +205,33 @@ impl DaemonRoom {
 
     // ── Membership ────────────────────────────────────────────────────────────
 
+    /// Who should take an escalation, when the caller did not name anyone.
+    ///
+    /// `Roster::with_role` returns EVERYONE on call, deliberately — choosing is policy, and this is
+    /// where the policy lives. The rule: the on-call participant carrying the fewest open threads in
+    /// this room, ties broken by handle so the answer is stable across calls.
+    ///
+    /// `None` means nobody holds `OnCall` here. The caller must say so rather than pretend, which is
+    /// the bug this whole slice exists to fix.
+    pub fn on_call_pick(&self) -> Option<String> {
+        let candidates: Vec<String> = self
+            .roster
+            .with_role(Role::OnCall)
+            .into_iter()
+            .map(|e| e.handle.clone())
+            .collect();
+        if candidates.len() <= 1 {
+            return candidates.into_iter().next();
+        }
+        // Load = open threads already owned. `room_queue` is the same read model the queue view
+        // uses, so "least loaded" cannot disagree with what an operator sees in `meetings queue`.
+        let queue = super::store::room_queue(self.writer.root(), unix_ts());
+        let load = |h: &str| queue.iter().filter(|i| i.owner.as_deref() == Some(h)).count();
+        candidates
+            .into_iter()
+            .min_by(|a, b| load(a).cmp(&load(b)).then_with(|| a.cmp(b)))
+    }
+
     /// Give a participant a role, persisting the roster. `Ok(false)` means the handle is not in
     /// this room — reported rather than swallowed, so a typo cannot read as a successful grant.
     pub fn grant_role(&mut self, handle: &str, role: Role) -> std::io::Result<bool> {
@@ -702,5 +729,78 @@ mod phase_tests {
         for p in [Phase::Active, Phase::Paused, Phase::Ended] {
             assert_eq!(Phase::parse(p.as_str()), p, "{} does not round-trip", p.as_str());
         }
+    }
+}
+
+#[cfg(test)]
+mod on_call_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn room_at(dir: &std::path::Path) -> DaemonRoom {
+        DaemonRoom::open(
+            super::super::store::RoomPaths::for_project(dir),
+            dir.join("state"),
+        )
+        .unwrap()
+    }
+
+    fn join(r: &mut DaemonRoom, name: &str) -> String {
+        let (_id, handle) = r.join(Some(name), name, "human", None);
+        handle
+    }
+
+    /// Nobody on call must be reported, not papered over. The bug this replaces put the literal
+    /// string "on-call" in the audit message and assigned no one.
+    #[test]
+    fn nobody_on_call_yields_none_rather_than_a_pretend_target() {
+        let dir = tempdir().unwrap();
+        let mut r = room_at(dir.path());
+        join(&mut r, "alice");
+        assert_eq!(r.on_call_pick(), None);
+    }
+
+    #[test]
+    fn one_on_call_is_the_answer() {
+        let dir = tempdir().unwrap();
+        let mut r = room_at(dir.path());
+        let a = join(&mut r, "alice");
+        join(&mut r, "bob");
+        r.grant_role(&a, Role::OnCall).unwrap();
+        assert_eq!(r.on_call_pick(), Some(a));
+    }
+
+    /// The policy decision: several on call → the one carrying the fewest OPEN threads. Load is
+    /// read through `room_queue`, so this cannot disagree with what `meetings queue` shows.
+    #[test]
+    fn several_on_call_go_to_whoever_carries_least() {
+        let dir = tempdir().unwrap();
+        let mut r = room_at(dir.path());
+        let (a, b) = (join(&mut r, "alice"), join(&mut r, "bob"));
+        r.grant_role(&a, Role::OnCall).unwrap();
+        r.grant_role(&b, Role::OnCall).unwrap();
+
+        // Give alice two open threads and bob one.
+        let (id, _h) = r.join(Some("alice"), "alice", "human", None);
+        for (n, owner) in [("t1", &a), ("t2", &a), ("t3", &b)] {
+            let turn = r.submit(&id, n).unwrap();
+            r.open_thread(&turn.id(), n, super::super::store::ThreadKind::Incident).unwrap();
+            r.set_thread_owner(&turn.id(), Some(owner.clone()), None).unwrap();
+        }
+        assert_eq!(r.on_call_pick(), Some(b), "the lighter load takes it");
+    }
+
+    /// Equal load must be stable across calls — a rota that reshuffles is one nobody can predict
+    /// or audit.
+    #[test]
+    fn an_equal_load_breaks_on_handle_and_stays_put() {
+        let dir = tempdir().unwrap();
+        let mut r = room_at(dir.path());
+        let (a, b) = (join(&mut r, "alice"), join(&mut r, "bob"));
+        r.grant_role(&a, Role::OnCall).unwrap();
+        r.grant_role(&b, Role::OnCall).unwrap();
+        let first = r.on_call_pick();
+        assert_eq!(first, r.on_call_pick());
+        assert_eq!(first, Some(a.min(b)));
     }
 }
