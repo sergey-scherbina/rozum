@@ -768,6 +768,32 @@ echo
 # :8089 went down here and `rozum launch` then reported "no gateway running" for every cell.
 # launchd's KeepAlive brought it back, which is the only reason that was seconds and not an
 # outage — do not lean on it.
+# SHARE BY DEFAULT (2026-08-07, operator's call). On a host that fits ONE model, a private gateway
+# per spec loads a SECOND copy of the same weights — which does not fit, so it waits in the
+# admission queue behind the resident one, and the `stop --force` below evicts the operator's
+# gateway to make room for a duplicate of what it was already serving. Borrow instead.
+#
+# `BENCH_GATEWAY_URL` still forces a specific endpoint. `BENCH_DEDICATED=1` forces the old
+# per-model process, which is what you want when the numbers are the point: only a gateway this
+# harness started can be measured with `/usr/bin/time -l`, and only separate processes bound the
+# blast radius of a Metal fault (BUG-001, BUG-003).
+if [ -z "${BENCH_GATEWAY_URL:-}" ] && [ "${BENCH_DEDICATED:-0}" != 1 ]; then
+  # Flatten first, then match once. Matching line-by-line was fragile enough to extract the model
+  # and silently miss the port in the same run — and a half-parsed status reads as "no gateway",
+  # which would quietly restore the very behaviour this block removes.
+  _gw_json="$("$BIN" gateway status --json 2>/dev/null | tr -d '\n ' || true)"
+  _gw_model="$(printf '%s' "$_gw_json" | sed -n 's/.*"model":"\([^"]*\)".*/\1/p')"
+  _gw_port="$(printf '%s' "$_gw_json" | sed -n 's/.*"port":\([0-9]*\).*/\1/p')"
+  # Borrow ONLY when it already serves the spec under test. Switching a shared gateway's model
+  # would evict whatever the operator is using, which is the behaviour this change exists to stop.
+  if [ -n "$_gw_port" ] && [ "$_gw_model" = "${MODELS[0]}" ] && [ "${#MODELS[@]}" = 1 ]; then
+    BENCH_GATEWAY_URL="http://127.0.0.1:$_gw_port"
+    echo "sharing the running gateway on :$_gw_port (already serving $_gw_model)"
+    echo "  → pass/fail is valid; SECONDS and FOOTPRINT are not this run's. BENCH_DEDICATED=1 for those."
+  elif [ -n "$_gw_port" ]; then
+    echo "a gateway is running on :$_gw_port with '$_gw_model'; this run wants ${MODELS[*]} — starting its own"
+  fi
+fi
 [ -n "${BENCH_GATEWAY_URL:-}" ] || "$BIN" gateway stop --force >/dev/null 2>&1 || true
 idx=0
 for spec in "${MODELS[@]}"; do
