@@ -1,0 +1,6 @@
+feature/bench-share-gateway 2026-08-07T16:33:59Z
+agent: claude-opus-5
+heartbeat: 2026-08-07T16:33:59Z
+status: not-started
+done-so-far: operator overruled my recommendation with a better argument: with one model and scarce RAM a second gateway loads the SAME model and evicts theirs
+next: make borrowing a running gateway the DEFAULT in agentic.sh; keep the per-model process path as an explicit opt-in
