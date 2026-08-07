@@ -1,6 +1,0 @@
-feature/mtg-rich-rooms 2026-08-07T06:51:33Z
-agent: claude-opus-5
-heartbeat: 2026-08-07T06:51:33Z
-status: in-progress
-done-so-far: R1 roles + R2 persisted phase/pause shipped; the dead P3 RoomKind/Member removed on the operator's call
-next: R3 — the queue view over open threads (read model, no new storage)
