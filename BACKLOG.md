@@ -385,7 +385,16 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   line. An edit that rewrote history in place would break the one property the log is for. If
   someone wants "fix a typo", that is a new message referencing the old one, not an edit.
   Search scans day files; index only if rooms get large.
-- [ ] **mtg-escalation** — **escalation**: route/escalate an incident by severity/tier/on-call (to a
+- [x] **mtg-escalation — DONE 2026-08-07** (spec `docs/specs/mtg-escalation.md`). The headline was a
+  BUG, not a feature: with no explicit target, `escalate` wrote the literal string "on-call" into the
+  audit message and never assigned anyone, so the room recorded a page that never went out. On-call
+  is now resolved from the roster (`DaemonRoom::on_call_pick`), the policy for several on call is
+  least-open-work with ties by handle — read through `room_queue`, so it cannot disagree with what
+  `meetings queue` shows — and with nobody on call it still escalates but says so plainly.
+  The audit event records the RESOLVED owner rather than the requested one.
+  **NOT built, deliberately:** "escalate to a stronger model" (needs the model-chain, and this host is
+  frozen on one model), severity tiers (no consumer), and notification delivery (the messenger's job).
+  Original: route/escalate an incident by severity/tier/on-call (to a
   specific agent, a stronger model, or a human), with an escalation policy + an audit trail of who/when.
   Ties into the model-chain (escalate to a stronger model) + identity-roster (who's on-call). The
   "P" of PagerDuty.
