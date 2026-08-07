@@ -62,7 +62,42 @@ pub enum RoomEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Active,
+    /// Readable, and refusing new messages. Ending a room is the only stop that existed before, and
+    /// it reads as destruction — so nobody used it, and a room that should have been quiet stayed
+    /// noisy instead.
+    Paused,
     Ended,
+}
+
+impl Phase {
+    /// The spelling persisted in `meta.json`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::Paused => "Paused",
+            Self::Ended => "Ended",
+        }
+    }
+
+    /// Read a phase back off disk.
+    ///
+    /// An unrecognised value becomes `Active` and says so, deliberately. The two ways to be wrong
+    /// are not symmetric: treating an unknown phase as active leaves a room working and visible,
+    /// while treating it as ended silently stops a room with nothing to show why.
+    pub fn parse(s: &str) -> Self {
+        match s.trim() {
+            "Active" => Self::Active,
+            "Paused" => Self::Paused,
+            "Ended" => Self::Ended,
+            other => {
+                tracing::warn!(
+                    phase = other,
+                    "unknown room phase in meta.json; treating the room as Active"
+                );
+                Self::Active
+            }
+        }
+    }
 }
 
 /// One daemon-hosted room.
@@ -107,10 +142,13 @@ impl DaemonRoom {
 
     fn wrap(writer: TranscriptWriter, roster: Roster) -> Self {
         let (events, _) = broadcast::channel(256);
+        // Read the phase back rather than assuming Active: that assumption is what made `end()`
+        // amnesiac across a daemon restart.
+        let phase = Phase::parse(writer.phase());
         Self {
             writer,
             roster,
-            phase: Phase::Active,
+            phase,
             responding: HashMap::new(),
             polling: HashMap::new(),
             max_total_chars: None,
@@ -277,8 +315,10 @@ impl DaemonRoom {
         content: &str,
         pm: PostMeta,
     ) -> Result<StoredTurn, String> {
-        if self.phase == Phase::Ended {
-            return Err("meeting-ended".into());
+        match self.phase {
+            Phase::Ended => return Err("meeting-ended".into()),
+            Phase::Paused => return Err("meeting-paused".into()),
+            Phase::Active => {}
         }
         if !self.is_member(id) {
             return Err("not-joined".into());
@@ -360,9 +400,46 @@ impl DaemonRoom {
 
     pub fn end(&mut self) {
         if self.phase != Phase::Ended {
-            self.phase = Phase::Ended;
+            self.set_phase(Phase::Ended);
             let _ = self.events.send(RoomEvent::PhaseChanged { ended: true });
             self.notify.notify_waiters();
+        }
+    }
+
+    /// Stop accepting messages while staying readable. Idempotent; refuses to reopen an ENDED room,
+    /// because "paused" would understate what happened to it.
+    pub fn pause(&mut self) -> Result<(), String> {
+        match self.phase {
+            Phase::Ended => Err("meeting-ended".into()),
+            Phase::Paused => Ok(()),
+            Phase::Active => {
+                self.set_phase(Phase::Paused);
+                self.notify.notify_waiters();
+                Ok(())
+            }
+        }
+    }
+
+    /// Accept messages again. Same refusal for an ended room.
+    pub fn resume(&mut self) -> Result<(), String> {
+        match self.phase {
+            Phase::Ended => Err("meeting-ended".into()),
+            Phase::Active => Ok(()),
+            Phase::Paused => {
+                self.set_phase(Phase::Active);
+                self.notify.notify_waiters();
+                Ok(())
+            }
+        }
+    }
+
+    /// Set and PERSIST. A failed write is logged rather than propagated: the in-memory phase is
+    /// already correct and refusing the pause because the disk hiccuped would be the worse answer —
+    /// but it must not pass silently, since the symptom would be amnesia after a restart.
+    fn set_phase(&mut self, phase: Phase) {
+        self.phase = phase;
+        if let Err(e) = self.writer.set_phase(phase.as_str(), unix_ts()) {
+            tracing::warn!(error = %e, phase = phase.as_str(), "could not persist the room phase");
         }
     }
 
@@ -549,5 +626,81 @@ mod tests {
         let (id, _) = room.join(Some("t"), "claude", "mcp", None);
         room.submit(&id, "abcd").unwrap(); // 4 >= 3 → ends
         assert_eq!(room.phase(), Phase::Ended);
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn room_at(dir: &std::path::Path) -> DaemonRoom {
+        DaemonRoom::open(
+            super::super::store::RoomPaths::for_project(dir),
+            dir.join("state"),
+        )
+        .unwrap()
+    }
+
+    /// THE defect this slice fixes. `end()` used to set the phase in memory only, so a daemon
+    /// restart brought an ended room back ACTIVE with nothing to show it had ever stopped.
+    #[test]
+    fn an_ended_room_stays_ended_across_a_reopen() {
+        let dir = tempdir().unwrap();
+        {
+            let mut r = room_at(dir.path());
+            let (id, _h) = r.join(Some("tok"), "tester", "human", None);
+            r.submit(&id, "before").unwrap();
+            r.end();
+            assert_eq!(r.phase(), Phase::Ended);
+        }
+        let r = room_at(dir.path());
+        assert_eq!(r.phase(), Phase::Ended, "the room forgot it had ended");
+    }
+
+    #[test]
+    fn a_paused_room_survives_a_reopen_and_refuses_messages() {
+        let dir = tempdir().unwrap();
+        let id = {
+            let mut r = room_at(dir.path());
+            let (id, _h) = r.join(Some("tok"), "tester", "human", None);
+            r.pause().unwrap();
+            assert_eq!(r.submit(&id, "while paused").unwrap_err(), "meeting-paused");
+            id
+        };
+        let mut r = room_at(dir.path());
+        assert_eq!(r.phase(), Phase::Paused);
+        assert_eq!(r.submit(&id, "still paused").unwrap_err(), "meeting-paused");
+        r.resume().unwrap();
+        assert!(r.submit(&id, "after resume").is_ok());
+    }
+
+    /// Pausing twice is not an error — the caller is usually a human repeating a command — but an
+    /// ENDED room refuses, because calling it "paused" would understate what happened to it.
+    #[test]
+    fn pause_is_idempotent_and_an_ended_room_cannot_be_paused() {
+        let dir = tempdir().unwrap();
+        let mut r = room_at(dir.path());
+        r.pause().unwrap();
+        r.pause().unwrap();
+        r.resume().unwrap();
+        r.resume().unwrap();
+        r.end();
+        assert_eq!(r.pause().unwrap_err(), "meeting-ended");
+        assert_eq!(r.resume().unwrap_err(), "meeting-ended");
+    }
+
+    /// An unknown value on disk must leave the room WORKING. The two errors are not symmetric:
+    /// wrongly active is visible and recoverable, wrongly ended is a silent stop.
+    #[test]
+    fn an_unknown_phase_on_disk_reads_as_active() {
+        assert_eq!(Phase::parse("Active"), Phase::Active);
+        assert_eq!(Phase::parse(" Paused "), Phase::Paused);
+        assert_eq!(Phase::parse("Ended"), Phase::Ended);
+        assert_eq!(Phase::parse("Archived"), Phase::Active);
+        assert_eq!(Phase::parse(""), Phase::Active);
+        for p in [Phase::Active, Phase::Paused, Phase::Ended] {
+            assert_eq!(Phase::parse(p.as_str()), p, "{} does not round-trip", p.as_str());
+        }
     }
 }

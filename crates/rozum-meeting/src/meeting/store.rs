@@ -368,38 +368,17 @@ pub fn read_index_checked(root: &Path) -> std::io::Result<Index> {
     serde_json::from_slice(&bytes).map_err(std::io::Error::other)
 }
 
-/// Room role (P3): a plain chat (today), a support intake queue, or a room scoped to one incident.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RoomKind {
-    #[default]
-    Chat,
-    Queue,
-    Incident,
-}
-impl RoomKind {
-    fn is_chat(&self) -> bool {
-        matches!(self, RoomKind::Chat)
-    }
-}
-
-/// A room member's role.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MemberRole {
-    #[default]
-    Observer,
-    Reporter,
-    Assignee,
-    Oncall,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Member {
-    pub handle: String,
-    #[serde(default)]
-    pub role: MemberRole,
-}
+// `RoomKind` and `Member`/`MemberRole` used to live here (P3). Removed 2026-08-07: they were
+// written, could persist, and NOTHING ever called their setters — no daemon tool, no CLI, no REST —
+// so no room ever carried either field (checked: 0 of the operator's 14 `meta.json` files).
+//
+// Roles live on `identity::RosterEntry.roles` instead, which is the record that already holds a
+// participant's durable identity; a second list of bare handles in `meta.json` would have had to be
+// kept in step with the roster by hand, and that is the drift this removal prevents.
+//
+// Room KIND is deliberately not replaced. A thread already carries `topic | incident`, a state
+// machine and an SLA; a room-level copy would be a second, weaker place to say the same thing. A
+// queue is a VIEW over open threads — see `docs/specs/mtg-rich-rooms.md`.
 
 /// `meta.json` — small room metadata. `budget_chars` is the running total so a
 /// reopen restores the budget without re-reading every day file.
@@ -411,11 +390,6 @@ pub struct Meta {
     pub phase: String,
     pub created_at: u64,
     pub budget_chars: u64,
-    // P3 room kind + members (serde-default + skip → plain `chat` rooms' meta.json is unchanged).
-    #[serde(default, skip_serializing_if = "RoomKind::is_chat")]
-    pub kind: RoomKind,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub members: Vec<Member>,
 }
 
 /// What the writer publishes on each append; clients read up to `end_offset`.
@@ -518,8 +492,6 @@ pub struct TranscriptWriter {
     end_offset: u64,
     index: Index,
     threads: BTreeMap<String, Thread>,
-    room_kind: RoomKind,
-    members: Vec<Member>,
     budget_chars: u64,
     materialized: bool,
     name: String,
@@ -549,8 +521,6 @@ impl TranscriptWriter {
             end_offset: 0,
             index: Index::default(),
             threads: BTreeMap::new(),
-            room_kind: RoomKind::default(),
-            members: Vec::new(),
             budget_chars: 0,
             materialized: false,
             name: name.into(),
@@ -586,8 +556,6 @@ impl TranscriptWriter {
             topic: meta.as_ref().map(|m| m.topic.clone()).unwrap_or_default(),
             project: meta.as_ref().and_then(|m| m.project.clone()),
             created_at: meta.as_ref().map(|m| m.created_at).unwrap_or(0),
-            room_kind: meta.as_ref().map(|m| m.kind).unwrap_or_default(),
-            members: meta.as_ref().map(|m| m.members.clone()).unwrap_or_default(),
             phase: meta.map(|m| m.phase).unwrap_or_else(|| "Active".into()),
             index,
             threads: load_threads_map(&paths.threads_path()),
@@ -736,8 +704,6 @@ impl TranscriptWriter {
             phase: self.phase.clone(),
             created_at: self.created_at,
             budget_chars: self.budget_chars,
-            kind: self.room_kind,
-            members: self.members.clone(),
         };
         write_json_atomic(&self.paths.meta_path(), &meta)?;
         write_json_atomic(&self.paths.index_path(), &self.index)?;
@@ -896,36 +862,29 @@ impl TranscriptWriter {
     }
 
     /// The room's root dir (for reading messages back — incident-context gather).
+    /// Persist the room's lifecycle phase to `meta.json`.
+    ///
+    /// It was a `String` on disk with no setter, so `DaemonRoom::end()` only ever changed memory and
+    /// an ended room came back ACTIVE after a restart. Kept a string rather than promoted to an enum
+    /// here: the writer has no opinion about which phases exist, and an unknown value must reach the
+    /// reader — which decides what to do with it — instead of failing to parse at this layer.
+    pub fn set_phase(&mut self, phase: &str, ts: u64) -> std::io::Result<()> {
+        if !self.materialized {
+            self.materialize(ts)?;
+        }
+        self.phase = phase.to_owned();
+        self.persist_meta_index()
+    }
+
+    /// The phase as it is on disk. `"Active"` for a room that never set one.
+    pub fn phase(&self) -> &str {
+        &self.phase
+    }
+
     pub fn root(&self) -> &Path {
         self.paths.root.as_path()
     }
 
-    // ── P3: room kind + members ────────────────────────────────────────────────────────────────
-    /// Set the room kind (chat|queue|incident); persisted to meta.json.
-    pub fn set_room_kind(&mut self, kind: RoomKind, ts: u64) -> std::io::Result<()> {
-        if !self.materialized {
-            self.materialize(ts)?;
-        }
-        self.room_kind = kind;
-        self.persist_meta_index()
-    }
-
-    /// Replace the room members; persisted to meta.json.
-    pub fn set_members(&mut self, members: Vec<Member>, ts: u64) -> std::io::Result<()> {
-        if !self.materialized {
-            self.materialize(ts)?;
-        }
-        self.members = members;
-        self.persist_meta_index()
-    }
-
-    pub fn room_kind(&self) -> RoomKind {
-        self.room_kind
-    }
-
-    pub fn members(&self) -> &[Member] {
-        &self.members
-    }
 }
 
 // ── Reader ───────────────────────────────────────────────────────────────────
@@ -2349,25 +2308,27 @@ mod tests {
         assert_eq!(th.title, "DB outage");
     }
 
-    // P3: room kind + members persist to meta.json across a reopen; plain rooms stay `chat`.
+    /// `RoomKind`/`Member` were removed after the operator's call (2026-08-07); this replaces the
+    /// test that covered them, and it covers the thing that actually matters now: a `meta.json`
+    /// written by a build that HAD those fields must still load. Serde ignores unknown fields, so
+    /// this is a property of the format rather than of a migration step — but "obvious" is exactly
+    /// what nobody re-checks after a removal.
     #[test]
-    fn room_kind_and_members_persist() {
-        let dir = tempdir().unwrap();
-        {
-            let mut w = writer_in(dir.path());
-            w.set_room_kind(RoomKind::Incident, ts_for(0)).unwrap();
-            w.set_members(
-                vec![Member { handle: "alice".into(), role: MemberRole::Assignee }],
-                ts_for(0),
-            )
-            .unwrap();
-        }
-        let w =
-            TranscriptWriter::open(RoomPaths::for_project(dir.path()), dir.path().join("state")).unwrap();
-        assert_eq!(w.room_kind(), RoomKind::Incident);
-        assert_eq!(w.members().len(), 1);
-        assert_eq!(w.members()[0].handle, "alice");
-        assert_eq!(w.members()[0].role, MemberRole::Assignee);
+    fn a_meta_carrying_the_removed_p3_fields_still_loads() {
+        let with_p3 = r#"{
+            "name": "rozum",
+            "topic": "",
+            "project": null,
+            "phase": "Active",
+            "created_at": 1781813093,
+            "budget_chars": 512243,
+            "kind": "incident",
+            "members": [{"handle": "alice", "role": "assignee"}]
+        }"#;
+        let meta: Meta = serde_json::from_str(with_p3).expect("unknown fields are ignored");
+        assert_eq!(meta.name, "rozum");
+        assert_eq!(meta.budget_chars, 512243);
+        assert_eq!(meta.phase, "Active");
     }
 
     #[test]

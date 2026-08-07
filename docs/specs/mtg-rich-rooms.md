@@ -42,7 +42,17 @@ incident threads already behaves like an incident room. So "room kind" risks bei
 copy of a concept that already works — and the failure mode is specific and familiar: two places to
 set state, which drift, and a reader who cannot tell which one is authoritative.
 
-**Recommendation: do NOT add `kind: chat | queue | incident` as a stored room field.** Instead:
+**CORRECTION, 2026-08-07 — this section was written without noticing that the field already
+existed.** `store.rs` carried `RoomKind { Chat, Queue, Incident }` and `Member { handle, role }`
+from an earlier phase (marked "P3"), with working setters that **nothing ever called** — no daemon
+tool, no CLI, no REST — so no room ever had either field (0 of the operator's 14 `meta.json` files).
+The argument below is unchanged and still holds; what changes is that it is an argument for
+REMOVING something built, not for declining to build it. Both were removed on the operator's call,
+and the second one matters more: R1 had already added roles to `RosterEntry`, so the codebase
+briefly had TWO role mechanisms — exactly the drift this spec warns about, introduced by this spec's
+own author.
+
+**Recommendation: do NOT keep `kind: chat | queue | incident` as a stored room field.** Instead:
 
 - A **queue** is a VIEW: "open threads in this room, ordered by severity then age, with the stale
   ones flagged". Every input already exists — `thread_metrics` computes staleness today. This is a
@@ -69,16 +79,32 @@ Add `roles: Vec<Role>` to `RosterEntry`, defaulting to empty. `Role` is
   resolve "on-call" to a participant, which is the whole point of `mtg-escalation` and the reason
   this entry is called the hinge.
 
-### R2 — lifecycle states that a queue can actually be in
+### R2 — make the room's lifecycle survive a restart, and add `Paused`
 
-Extend `Phase` to `Active | Paused | Resolved | Archived`, keeping `Ended` as a deserialisation
-alias for `Archived` so existing `meta.json` files load.
+**REWRITTEN 2026-08-07. The version above was wrong in its premise, and what replaces it is a bug
+fix rather than a feature.** What measuring found:
 
-- `Paused` — the room exists, is readable, and accepts no new messages. Today the only way to stop
-  a room is to end it, which is destructive-feeling and nobody does it.
-- `Resolved` vs `Archived` — resolved keeps it in listings (it is recent and referenced), archived
-  drops out of the default list.
-- **The migration is a rename with an alias, not a rewrite.** No day file is touched.
+- **A room's phase is not persisted at all.** `DaemonRoom::end()` sets `Phase::Ended` in memory and
+  emits an event; `meta.json` carries `phase` as a plain **String**, initialised `"Active"`, with no
+  setter anywhere. So an ended room comes back ACTIVE after a daemon restart, silently.
+- **There are two `Phase` enums.** `state.rs` has `Active | Paused | Ended` with working
+  pause/resume — for the TUI's in-memory session — and `room.rs` has `Active | Ended` for the
+  daemon-hosted room. `Paused` already exists; it just does not exist where rooms live, and is not
+  saved either.
+- So the migration described above — "a serde alias on the enum" — **cannot apply**: nothing
+  deserialises that field into an enum. It is a string, and the work is to start reading it.
+
+**What R2 is, then:**
+
+1. Persist the daemon room's phase through the writer, fixing the restart amnesia.
+2. Give `room.rs::Phase` a `Paused` variant, reaching the model that rooms actually use.
+3. Parse the on-disk string back into the enum with a deliberately SAFE fallback: an unrecognised
+   value logs a warning and reads as `Active`. Erring towards "the room works" is recoverable;
+   erring towards `Ended` silently stops a room nobody can see is stopped.
+
+**`Resolved` and `Archived` are dropped.** I invented them for hypothetical listing behaviour and
+there is no consumer for either. Building them would repeat exactly what was removed from this
+codebase earlier the same day: a persisted concept with no surface that reaches it.
 
 ### R3 — the queue view
 
