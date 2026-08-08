@@ -540,12 +540,74 @@ impl MeetingServer {
                         };
                         let _ = r.submit_with_meta(&caller, &format!("opened incident: {}", t.title), pm);
                     }
-                    text_result(&serde_json::to_string(&t).unwrap_or_default())
+                    let reply = text_result(&serde_json::to_string(&t).unwrap_or_default());
+                    // …and, for an INCIDENT, what the machine was doing when it opened. Logs can be
+                    // sliced afterwards because they are history; the state of the machine cannot —
+                    // by the time anyone reads the incident the services have restarted and the
+                    // binaries have been replaced. A MESSAGE, not a side file: it lands in the
+                    // transcript, belongs to the thread by construction, and `repair-threads`
+                    // rebuilds it with everything else (docs/specs/incident-evidence.md).
+                    //
+                    // The room lock is DROPPED first. The snapshot probes services, and a probe is
+                    // slowest exactly when the machine is sick — which is when incidents get opened.
+                    // Holding the lock across it would freeze every other room operation right then.
+                    if is_new && kind == store::ThreadKind::Incident {
+                        drop(r);
+                        let snap = Self::machine_snapshot().await;
+                        let pm = store::PostMeta {
+                            kind: store::MsgKind::Event,
+                            thread_id: Some(p.anchor_id.clone()),
+                            ..Default::default()
+                        };
+                        let _ = room.lock().await.submit_with_meta(&caller, &snap, pm);
+                    }
+                    reply
                 }
                 Err(e) => err_result(&e),
             }
         })
         .await
+    }
+
+    /// How long an incident may wait for its machine snapshot before being filed without one.
+    const SNAPSHOT_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+    /// What the services were doing, as one block of text for the incident's timeline.
+    ///
+    /// Best-effort AND honest about it: a snapshot that could not be taken says so, because a
+    /// missing snapshot and a healthy machine look identical in an empty bundle. Runs THIS
+    /// binary's own `doctor --services-only` — the same program already serving this daemon.
+    ///
+    /// Bounded: doctor probes each service with its own timeout, so a machine with several hung
+    /// services could spend a minute here. An incident that waits a minute to be filed is worse
+    /// than one filed with a partial snapshot, so the budget is [`Self::SNAPSHOT_BUDGET`] and running
+    /// out of it is reported as a finding, not hidden.
+    async fn machine_snapshot() -> String {
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => return format!("machine snapshot unavailable: current_exe failed ({e})"),
+        };
+        let run = tokio::process::Command::new(&exe)
+            .args(["doctor", "--services-only"])
+            .kill_on_drop(true)
+            .output();
+        match tokio::time::timeout(Self::SNAPSHOT_BUDGET, run).await {
+            Err(_) => format!(
+                "machine snapshot timed out after {}s — probes were still running \
+                 (that itself says the machine was busy or a service was hung)",
+                Self::SNAPSHOT_BUDGET.as_secs()
+            ),
+            Ok(Ok(o)) => {
+                let body = String::from_utf8_lossy(&o.stdout);
+                let body = body.trim();
+                if body.is_empty() {
+                    format!("machine snapshot empty (rc={:?}) — {}", o.status.code(), exe.display())
+                } else {
+                    format!("machine snapshot at open:\n{body}")
+                }
+            }
+            Ok(Err(e)) => format!("machine snapshot unavailable: {} ({e})", exe.display()),
+        }
     }
 
     /// Move a thread/incident through the resolving state machine.

@@ -4099,6 +4099,23 @@ fn print_incident(v: &serde_json::Value) {
             line(m);
         }
     }
+    // Evidence from outside the room: the gateway log over this incident's own window. Only the
+    // tail is printed — the bundle's own `matched`/`shown` counts say how much was left out, and
+    // the path says where to go for the rest (docs/specs/incident-evidence.md).
+    let slice = &v["log_slice"];
+    if let Some(lines) = slice["lines"].as_array() {
+        let (matched, shown) = (slice["matched"].as_u64().unwrap_or(0), lines.len());
+        let path = slice["path"].as_str().unwrap_or("?");
+        println!("  — gateway log over this window: {matched} lines ({path}) —");
+        for l in lines.iter().rev().take(8).rev().filter_map(|l| l.as_str()) {
+            println!("     {l}");
+        }
+        if matched > shown as u64 {
+            println!("     … {matched} matched, {shown} in the bundle — read the file for the rest");
+        } else if shown > 8 {
+            println!("     … {shown} in the bundle, last 8 shown");
+        }
+    }
 }
 
 /// `rozum meetings read` — print a room's most-recent messages (a direct transcript read).

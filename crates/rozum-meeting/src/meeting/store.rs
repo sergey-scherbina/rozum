@@ -1216,6 +1216,22 @@ pub fn thread_context(root: &Path, thread_id: &str) -> serde_json::Value {
         .iter()
         .filter_map(|id| all.iter().find(|m| &m.id() == id))
         .collect();
+    // Evidence from OUTSIDE the room: the gateway log over the incident's own timespan. Everything
+    // above is what the room knows; this is the question a responder actually opens an incident
+    // with — what was the machine doing at the time — and answering it used to mean leaving the
+    // room for `launchctl` and a log with no clock (docs/specs/incident-evidence.md).
+    let from = thread.as_ref().map(|t| t.created_ts).or_else(|| msgs.first().map(|m| m.ts));
+    let to = thread
+        .as_ref()
+        .and_then(|t| t.resolved_ts)
+        .or_else(|| msgs.last().map(|m| m.ts))
+        .map(|t| t + 1);
+    // Backwards from the moment it was FILED, not from it: an incident is always opened after its
+    // symptom, so a window starting at `created_ts` is a window that begins just after the thing a
+    // responder is looking for. A minute-old incident would otherwise carry a one-second slice.
+    let log_slice = from
+        .map(|f| gateway_log_slice(f.saturating_sub(LOG_LEAD_IN_SECS), to))
+        .unwrap_or(serde_json::Value::Null);
     serde_json::json!({
         "thread": thread,
         "message_count": msgs.len(),
@@ -1225,7 +1241,55 @@ pub fn thread_context(root: &Path, thread_id: &str) -> serde_json::Value {
         "messages": msgs,
         "related": related,
         "linked": linked,
+        "log_slice": log_slice,
     })
+}
+
+/// How far before the incident was filed the log window opens. Five minutes: long enough to hold
+/// the restart storm that made someone file it, short enough that the cap is not spent on quiet.
+const LOG_LEAD_IN_SECS: u64 = 300;
+
+/// How many log lines a bundle carries. A slice that silently truncates misleads; this one reports
+/// `matched` next to `shown`, so a responder who sees 200 of 4812 knows to go and look.
+const LOG_SLICE_CAP: usize = 200;
+
+/// Gateway log lines whose timestamp falls inside `[from, to)`, oldest first.
+///
+/// Only possible since the gateway dates its lines (`docs/specs/service-liveness.md`) — before that
+/// a slice by time had nothing to slice on. `null` when there is no log to read, which is different
+/// from an empty slice and is said differently: an empty slice means the window was quiet.
+pub fn gateway_log_slice(from: u64, to: Option<u64>) -> serde_json::Value {
+    let Some(home) = std::env::var_os("HOME") else {
+        return serde_json::Value::Null;
+    };
+    let path = std::path::Path::new(&home).join(".rozum-gateway.log");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return serde_json::Value::Null;
+    };
+    let hits: Vec<&str> = text
+        .lines()
+        .filter(|l| match line_ts(l) {
+            Some(ts) => ts >= from && to.is_none_or(|t| ts < t),
+            None => false,
+        })
+        .collect();
+    let shown: Vec<&str> = hits.iter().rev().take(LOG_SLICE_CAP).rev().copied().collect();
+    serde_json::json!({
+        "path": path.to_string_lossy(),
+        "from_ts": from,
+        "to_ts": to,
+        "matched": hits.len(),
+        "shown": shown.len(),
+        "lines": shown,
+    })
+}
+
+/// The unix seconds in a log line that carries an RFC3339 stamp, else `None`.
+fn line_ts(line: &str) -> Option<u64> {
+    let start = line.find(|c: char| c.is_ascii_digit())?;
+    let rest = &line[start..];
+    let end = rest.find(' ').unwrap_or(rest.len());
+    chrono::DateTime::parse_from_rfc3339(&rest[..end]).ok().map(|t| t.timestamp() as u64)
 }
 
 /// Auto-gather context related to an incident anchor that isn't formally in the thread: the lead-up
@@ -2049,6 +2113,54 @@ mod tests {
             Some(dir.to_path_buf()),
             dir.join("state"),
         )
+    }
+
+    /// The evidence a responder used to leave the room for.
+    ///
+    /// Sliceable only because the gateway dates its lines — before that, a log with 1203 starts and
+    /// no clock could not be cut by an incident's timespan at all.
+    #[test]
+    fn the_log_slice_is_cut_by_time_and_says_what_it_left_out() {
+        // One lock for every test here that redirects HOME. rozum-core is not a dependency of this
+        // crate, so the lock is local — but the rule is the one that crate learned the hard way: a
+        // test that sets a process-wide variable races every test that reads it.
+        static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let d = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", d.path()) };
+
+        let at = |secs: i64| {
+            chrono::DateTime::from_timestamp(1_700_000_000 + secs, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .to_rfc3339()
+        };
+        let mut log = format!("rozum gateway: START {} pid 1\n", at(-60)); // before the window
+        for i in 0..300 {
+            log.push_str(&format!("rozum gateway: START {} pid {i}\n", at(i)));
+        }
+        log.push_str(&format!("rozum gateway: START {} pid 999\n", at(10_000))); // after it
+        log.push_str("a line with no timestamp at all\n");
+        std::fs::write(d.path().join(".rozum-gateway.log"), log).unwrap();
+
+        let v = gateway_log_slice(1_700_000_000, Some(1_700_000_000 + 300));
+        assert_eq!(v["matched"], serde_json::json!(300), "the window, and only the window");
+        assert_eq!(v["shown"], serde_json::json!(LOG_SLICE_CAP), "capped");
+        // The cap is stated, not silent: a bundle showing 200 of 300 sends a reader to the file;
+        // one showing 200 lines tells them the incident was quiet.
+        assert!(v["matched"].as_u64() > v["shown"].as_u64());
+        let lines = v["lines"].as_array().unwrap();
+        assert!(lines.first().unwrap().as_str().unwrap().contains("pid 100"), "oldest-first tail");
+
+        // No log at all is NOT an empty slice: one means "nothing to read", the other "it was quiet".
+        std::fs::remove_file(d.path().join(".rozum-gateway.log")).unwrap();
+        assert!(gateway_log_slice(0, None).is_null());
+
+        match prev {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
     }
 
     /// Time-to-resolve must not grow while nothing happens.

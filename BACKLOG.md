@@ -67,11 +67,17 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   `resolved_ts`, plus `reopened`/`escalations` counters and an escalation RATE (the histogram only
   ever showed what is escalated right now). Spec: `docs/specs/incident-resolving.md`.
 
-- [ ] **mtg-incident-context** — **per-incident context collection**: a thread auto-accretes the relevant
-  context — attach logs/gateway.jsonl slices, link related messages/threads, capture the workdir/repro,
-  snapshot the model/agent state — so an agent (or human) picking up an incident has the full picture in
-  one place. The "gather everything about this incident" primitive; the highest agent-leverage piece
-  (an agent can assemble the context bundle automatically). Builds on obs + the meeting store.
+- [x] **mtg-incident-context — DONE 2026-08-08.** Most of it turned out to be built: `thread_context`
+  already assembled the thread record, its messages, participants, timespan, operator-linked messages
+  and auto-gathered related context. What was missing was the evidence from OUTSIDE the room — added
+  as a gateway-log slice over the incident's own window (with a five-minute lead-in, capped, and
+  reporting `matched` next to `shown`) and a machine snapshot written INTO the thread as a message at
+  open time. Spec: `docs/specs/incident-evidence.md`.
+
+- [ ] **mtg-incident-repro** — capture the workdir/repro alongside an incident. Split out of
+  `mtg-incident-context` deliberately: copying files out of a working tree needs a policy about what
+  may leave it (secrets, size, .gitignored state), and inventing one inside an incident feature is how
+  a support tool grows a data-export problem. Wants a spec of its own before any code.
 
 ## Model chain (verification-gated, `--model A,B,C`)
 

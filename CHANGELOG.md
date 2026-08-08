@@ -1,5 +1,38 @@
 # Changelog
 
+## mtg-incident-context — the part of an incident that is not in the room
+Completed: 2026-08-08
+Spec: `docs/specs/incident-evidence.md`
+
+Read the code before believing the backlog again: `thread_context` already gathered everything the
+ROOM knows — the thread record, every message in it, participants, timespan, operator-linked
+messages, and the auto-gathered lead-up. That was most of this entry, and it shipped with the
+threads work.
+
+What it could not answer is the question a responder actually opens an incident with: **what was the
+machine doing at the time?** Answering it meant leaving the room for `launchctl`, a probe, and
+`~/.rozum-gateway.log` — every one of those a step in each of the five incidents recorded in August.
+
+**The log slice** comes from the incident's own timespan, and starts five minutes BEFORE it was
+filed: an incident is always reported after its symptom, so a window opening at `created_ts` begins
+just after the thing being looked for — a fresh incident carried a one-second slice until this. It
+is capped at 200 lines and says `matched` next to `shown`, because a slice that truncates silently
+is a slice that misleads. Sliceable at all only because the gateway now dates its start lines
+(`service-liveness`); before that a log with 1203 starts and no clock could not be cut by time.
+
+**The machine snapshot** is taken when the incident is OPENED, because logs are history and can be
+sliced later, while the state of the machine cannot: by the time anyone reads the incident, the
+services have restarted and the binaries have been replaced. It is written as an `event` MESSAGE, so
+it belongs to the thread by construction, `repair-threads` rebuilds it with everything else, and
+every surface that shows a timeline already shows it. The room lock is dropped before it runs and it
+runs under a 20s budget — a probe is slowest exactly when the machine is sick, which is when
+incidents get opened. A snapshot that fails says what failed instead of being skipped: a missing
+snapshot and a healthy machine look identical in an empty bundle.
+
+`rozum meetings incident show` prints the slice's tail with the counts, so the shell twin sees what
+the console and the agents see. Workdir/repro capture was NOT built — it needs a policy about what
+may be copied out of a working tree; recorded as `mtg-incident-repro` rather than half-done.
+
 ## mtg-resolving — the metric that grew while nothing happened
 Completed: 2026-08-08
 Spec: `docs/specs/incident-resolving.md`
