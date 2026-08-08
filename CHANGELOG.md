@@ -1,5 +1,21 @@
 # Changelog
 
+## doctor-confirm — the watcher's first finding was about the watcher
+Completed: 2026-08-08
+
+Installed in the morning, by evening it had posted seven `svc:meeting-ssc` failures into the room.
+The service was fine: every one landed while the host was compiling, and direct probes answered 200
+in milliseconds before and after. A small single-threaded server missing a 3 s probe under load is
+not an outage — and a watcher that calls it one is the cry-wolf this whole check exists to remove.
+
+Two changes: the probe waits 10 s, and a change is posted only after the same disagreement has been
+seen on two consecutive ticks. Recovery is confirmed the same way, so a single good tick cannot
+un-say a failure either.
+
+Exercising it found a third thing: the first run had been treating "no state yet" as a
+disagreement, so the SECOND tick would have announced the entire roster at once. A baseline records
+what is and says nothing.
+
 ## ssc-under-deploy — the last un-updated binary, and why it is un-updatable
 Completed: 2026-08-08
 

@@ -66,7 +66,16 @@ WHEN IT LAST RAN instead, from the state file it writes on every run, and `fail`
 more than two intervals: one missed tick is a busy machine, two in a row is a watcher that is not
 watching.
 
-### 4. News, not noise
+### 4. News, not noise — and confirmed before it is said
+
+The periodic job posts on a change of verdict, and **only after the same disagreement has been seen
+twice running**. The first day proved why: seven `meeting-ssc` failures in one afternoon, every one
+of them while the host was compiling, while direct probes returned 200 in milliseconds. A small
+single-threaded server missing a probe under load is not a service going down, and a watcher that
+says it is teaches people to ignore it — the exact failure this check exists to remove. The probe
+timeout went from 3 s to 10 s for the same reason.
+
+Recovery is confirmed too: one good tick after a failure does not un-say it.
 
 The periodic job posts to the rozum room **on transition** — when a service that was answering stops
 answering, or comes back. A line every five minutes is a line nobody reads, which is the same

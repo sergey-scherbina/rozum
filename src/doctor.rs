@@ -173,10 +173,23 @@ pub async fn run(options: DoctorOptions) -> DoctorReport {
 /// roster at whoever installs the job.
 pub fn transitions(report: &DoctorReport) -> Vec<String> {
     let path = crate::meeting::rozum_state_dir().join("service-liveness.json");
-    let previous: std::collections::HashMap<String, String> = std::fs::read(&path)
+    // `{name: "<posted status>|<pending status>|<streak>"}` — the status the room was last TOLD,
+    // plus how many consecutive ticks have disagreed with it. One tick is not news: measured
+    // 2026-08-08, seven "fail" transitions for a service that answered every direct probe, each
+    // one landing while the host was compiling. Two in a row is news.
+    let raw: std::collections::HashMap<String, String> = std::fs::read(&path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
+    let parse = |v: &String| -> (String, String, u32) {
+        let mut it = v.split('|');
+        let posted = it.next().unwrap_or("").to_string();
+        let pending = it.next().unwrap_or(&posted).to_string();
+        let streak = it.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        (posted, pending, streak)
+    };
+    let previous: std::collections::HashMap<String, String> =
+        raw.iter().map(|(k, v)| (k.clone(), parse(v).0)).collect();
     let now: std::collections::HashMap<String, String> = report
         .checks
         .iter()
@@ -185,15 +198,36 @@ pub fn transitions(report: &DoctorReport) -> Vec<String> {
         .collect();
 
     let mut lines = Vec::new();
-    if !previous.is_empty() {
+    let mut next_state: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let first_run = raw.is_empty();
+    {
         let mut names: Vec<&String> = now.keys().collect();
         names.sort();
         for name in names {
-            let before = previous.get(name).map(String::as_str).unwrap_or("unknown");
-            let after = now[name].as_str();
-            if before == after {
+            // A first run has nothing to compare against: record what IS as the baseline and say
+            // nothing. Treating it as a disagreement made the SECOND tick announce the whole
+            // roster — caught by exercising it rather than reading it.
+            if first_run {
+                next_state.insert(name.clone(), format!("{}|{}|0", now[name], now[name]));
                 continue;
             }
+            let (posted, pending, streak) = raw.get(name).map(&parse).unwrap_or_default();
+            let before = if posted.is_empty() { "unknown" } else { posted.as_str() };
+            let after = now[name].as_str();
+
+            // Agrees with what the room was told: nothing to say, streak resets.
+            if before == after {
+                next_state.insert(name.clone(), format!("{after}|{after}|0"));
+                continue;
+            }
+            // Disagrees. Count it, and stay quiet until it has disagreed CONFIRM times running —
+            // a single missed probe on a loaded machine is not a service going down.
+            let streak = if pending == after { streak + 1 } else { 1 };
+            if streak < CONFIRM {
+                next_state.insert(name.clone(), format!("{before}|{after}|{streak}"));
+                continue;
+            }
+            next_state.insert(name.clone(), format!("{after}|{after}|0"));
             let detail = report
                 .checks
                 .iter()
@@ -209,11 +243,14 @@ pub fn transitions(report: &DoctorReport) -> Vec<String> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(text) = serde_json::to_vec_pretty(&now) {
+    if let Ok(text) = serde_json::to_vec_pretty(&next_state) {
         let _ = std::fs::write(&path, text);
     }
     lines
 }
+
+/// How many consecutive disagreeing ticks before the room hears about it.
+const CONFIRM: u32 = 2;
 
 /// What this machine runs, and what each of those is supposed to answer.
 ///
@@ -362,7 +399,11 @@ fn socket_owner_pid() -> Option<i64> {
 async fn check_services() -> Vec<Check> {
     let jobs = launchctl_jobs();
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        // 10 s, not 3. Measured 2026-08-08: the `:8405` PWA answered every probe in milliseconds
+        // on an idle machine and missed SEVEN of them while the host was compiling — a small
+        // single-threaded server starved of CPU, not a broken service. A watcher that reports a
+        // failure every time somebody builds is the cry-wolf this check exists to remove.
+        .timeout(Duration::from_secs(10))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let mut out = Vec::new();
@@ -865,6 +906,44 @@ mod tests {
             Path::new("/run/rozum/meeting.sock.lock")
         );
         assert_eq!(socket_lock_path(Path::new("/x/sock")), Path::new("/x/sock.lock"));
+    }
+
+    /// One tick is not news; two in a row is.
+    ///
+    /// The rule exists because the watcher's first day produced SEVEN `meeting-ssc` failures, every
+    /// one of them while the machine was compiling — a small single-threaded server missing a 3 s
+    /// probe, not a service going down. Direct probes were 200 throughout.
+    #[test]
+    fn a_single_missed_tick_is_not_reported_but_a_confirmed_change_is() {
+        let d = tempfile::tempdir().unwrap();
+        // SAFETY: no other test in this crate reads XDG_STATE_HOME.
+        unsafe { std::env::set_var("XDG_STATE_HOME", d.path()) };
+
+        let report = |status: CheckStatus| DoctorReport {
+            checks: vec![Check {
+                name: "svc:gateway",
+                status,
+                detail: "probe".into(),
+                hint: None,
+            }],
+        };
+
+        // First run: record what IS, say nothing. (Announcing the roster to whoever installs the
+        // job is how a watcher trains people to ignore it.)
+        assert!(transitions(&report(CheckStatus::Ok)).is_empty(), "a baseline must be silent");
+        // One disagreeing tick: still silent.
+        assert!(transitions(&report(CheckStatus::Fail)).is_empty(), "one missed probe is not news");
+        // The same disagreement again: now it is news.
+        let posted = transitions(&report(CheckStatus::Fail));
+        assert_eq!(posted.len(), 1, "{posted:?}");
+        assert!(posted[0].contains("svc:gateway"), "{}", posted[0]);
+        // Steady state: silent again.
+        assert!(transitions(&report(CheckStatus::Fail)).is_empty());
+        // And a single GOOD tick after a failure does not un-say it either.
+        assert!(transitions(&report(CheckStatus::Ok)).is_empty(), "recovery is confirmed too");
+        assert_eq!(transitions(&report(CheckStatus::Ok)).len(), 1, "…on the second good tick");
+
+        unsafe { std::env::remove_var("XDG_STATE_HOME") };
     }
 
     #[test]
