@@ -1,6 +1,0 @@
-feature/doctor-periodic-install 2026-08-08T07:35:25Z
-agent: claude-code
-heartbeat: 2026-08-08T07:35:25Z
-status: in-progress
-done-so-far: operator said install the periodic doctor
-next: teach the check about periodic jobs, then install and watch it
