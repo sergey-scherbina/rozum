@@ -29,6 +29,26 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# NEVER install a binary built in a worktree.
+#
+# `mlx-sys` bakes the ABSOLUTE path of its build directory into the binary — that is where
+# `mlx.metallib` lives — so a gateway built in `.worktrees/feature/x` keeps working exactly until
+# that worktree is removed, and then dies at RUNTIME with "Failed to load the default metallib".
+# Not at install: `--help` never touches Metal, so the exec-check passes happily.
+#
+# Measured 2026-08-08, and it took the operator's assistant down: installed from a worktree,
+# removed the worktree an hour later, then restarted the gateway — which could no longer load the
+# model at all. The main checkout's target/ is stable, so build there.
+case "$ROOT" in
+  */.worktrees/*)
+    echo "REFUSING: $ROOT is a worktree." >&2
+    echo "  mlx-sys bakes this directory's absolute path into the binary (mlx.metallib lives" >&2
+    echo "  there), so removing the worktree later breaks the installed binary at runtime —" >&2
+    echo "  and the exec-check cannot see it, because --help never loads Metal." >&2
+    echo "  Build and install from the main checkout instead." >&2
+    exit 1 ;;
+esac
+
 CARGO_BIN="${DEST:-$HOME/.cargo/bin}"
 
 # name → (cargo package, cargo bin, profile, destination dir)

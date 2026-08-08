@@ -5,6 +5,40 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-028 — a binary built in a worktree dies when the worktree is removed
+
+- **Status:** FIXED 2026-08-08 (`scripts/install-bins.sh` refuses to install from a worktree).
+- **Severity:** P1 while it lasted — it took the operator's assistant off the air, and the symptom
+  named nothing useful.
+
+`mlx-sys` bakes the ABSOLUTE path of its build directory into the binary, because that is where
+`mlx.metallib` lives. A gateway built in `.worktrees/feature/x` therefore works exactly until that
+worktree is removed — and then fails at RUNTIME with `MLX error: Failed to load the default
+metallib. library not found`, which says nothing about worktrees.
+
+**It cannot be caught at install.** `install-bins.sh` execs the fresh binary before publishing it,
+and `--help` never touches Metal, so the check passed. The binary was good; its build directory was
+about to be deleted.
+
+Sequence, all mine, within two hours: built and installed `rozum-gateway` from
+`.worktrees/feature/install-all-copies` → removed that worktree when the branch landed → later
+bounced `com.rozum.gateway` to point it at the canonical path → the model could not load at all.
+
+Two ways I made it worse before making it better:
+
+- **I read my own readiness loop wrong.** `for i in $(seq 1 120); do curl … && break; sleep 2; done`
+  exits after 240 s whether or not anything answered, and I reported "поднялся" from the fact that
+  the loop ended. The service was down. A loop that ends for two different reasons must SAY which.
+- **I blamed RAM.** Free memory was genuinely low (a sibling agent's three JVMs), the admission gate
+  was refusing, and that was true and irrelevant — the metallib line was two lines further down the
+  same log.
+
+Fixed by refusing at the source: `install-bins.sh` stops if it is running from a `.worktrees/`
+checkout and says why. Verified both directions — refusal from a worktree, normal install from the
+main checkout.
+
+---
+
 ## BUG-027 — the repair round after a loop-break was spent echoing the loop-break
 
 - **Status:** FIXED 2026-08-06 (`crates/nadia/src/{session,approval,main}.rs`).

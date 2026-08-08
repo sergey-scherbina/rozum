@@ -1,5 +1,21 @@
 # Changelog
 
+## gateway-one-copy — one engine on this machine, and the mine it uncovered
+Completed: 2026-08-08
+
+`com.rozum.gateway` execs `~/.cargo/bin/rozum-gateway` now — the same file every other job uses —
+and the second copy at `~/.rozum/bin/rozum-gateway` is gone. The shipped plist carries the reason:
+two files that must be identical are two files that will not be, which is how that copy came to be
+three days behind while nothing said so.
+
+Doing it set off BUG-028: the binary I had installed was built in a worktree, `mlx-sys` bakes that
+directory's absolute path in (it holds `mlx.metallib`), and I had removed the worktree. The gateway
+came back up unable to load the model at all. `install-bins.sh` now refuses to install from a
+worktree, because the exec-check cannot catch this — `--help` never touches Metal.
+
+Restored and verified end to end: `:8089` answers, the model replies (`finish: stop`), the job is
+`exit 0` from the canonical path.
+
 ## binary-layout — one publish path, and the copy I broke while tidying
 Completed: 2026-08-08
 
