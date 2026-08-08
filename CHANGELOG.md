@@ -1,5 +1,24 @@
 # Changelog
 
+## ctrl-canonical — the dispatcher gets its siblings back
+Completed: 2026-08-08
+
+Answering "what does rozum-ctrl actually do" turned up a mine I had just laid. It is the `rozum`
+dispatcher (116 lines, links nothing): it reads the first argument and `exec`s the right backend —
+`rozum-meet` for the bridges, `rozum-gateway` for everything else — so a frontend fix never triggers
+an MLX rebuild and stdio/exit codes/signals pass through untouched.
+
+It resolves that backend **next to itself first**, and only then through `PATH`. Deleting the
+duplicate `~/.rozum/bin/rozum-gateway` an hour earlier took away the sibling of the copy at
+`~/.rozum/bin/rozum-ctrl`, so that copy was resolving the engine purely through the PATH its plist
+happens to export. Measured: under a plain PATH it failed with `failed to exec rozum-gateway: No
+such file or directory`.
+
+`com.rozum.ucc-control` execs `~/.cargo/bin/rozum` now, where the siblings live, and the last
+duplicate binary on the machine is gone. Verified with an EMPTY environment — `PATH=/usr/bin:/bin`,
+no cargo bin — and it still serves: adjacency, not luck. The service came back in 1 s and `:8411`
+answers.
+
 ## gateway-one-copy — one engine on this machine, and the mine it uncovered
 Completed: 2026-08-08
 

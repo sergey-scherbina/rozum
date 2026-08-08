@@ -5,7 +5,7 @@
   <key>Label</key><string>com.rozum.ucc-control</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/sergiy/.rozum/bin/rozum-ctrl</string>
+    <string>/Users/sergiy/.cargo/bin/rozum</string>
     <string>gateway</string>
     <string>control-serve</string>
     <string>--port</string>

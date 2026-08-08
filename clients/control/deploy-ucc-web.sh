@@ -2,7 +2,7 @@
 # Build + (re)deploy the UCC web control-center as a durable launchd service.
 #
 # Architecture (all ScalaScript sources, no Python proxy):
-#   com.rozum.ucc-control  ->  ~/.rozum/bin/rozum-ctrl gateway control-serve --port 8411
+#   com.rozum.ucc-control  ->  ~/.cargo/bin/rozum gateway control-serve --port 8411
 #                              serves SPA + API + chat — single port, same origin
 # Tailscale expose (run once manually if not already set):
 #   tailscale serve --bg --https=8448 http://127.0.0.1:8411
@@ -20,7 +20,14 @@ SSC="${SSC:-/tmp/ssc-tk/bin/ssc}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SITE="$HOME/.rozum/ucc/site"
 BINDIR="$HOME/.rozum/bin"
-BIN="$BINDIR/rozum-ctrl"
+# The dispatcher, at the canonical path — NOT a second copy called `rozum-ctrl`.
+#
+# It resolves its target (`rozum-gateway`, `rozum-meet`) NEXT TO ITSELF first and only then via
+# PATH, so a copy in a directory without those siblings works solely because a plist happens to
+# export the right PATH. Measured 2026-08-08: with the sibling gone, `rozum-ctrl gateway
+# control-serve` failed with "failed to exec rozum-gateway: No such file or directory" under a
+# plain PATH, and survived only on the job's own env. Adjacency is the contract; keep them together.
+BIN="$HOME/.cargo/bin/rozum"
 REPO="$(cd "$HERE/../.." && pwd)"
 
 mkdir -p "$SITE" "$BINDIR"
