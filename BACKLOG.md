@@ -353,7 +353,22 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   (reporter, assignee, on-call, observer), and a room **kind** (chat | queue | incident). Today: one
   flat daily room per project. Needs a room registry with typed metadata + a migration from the daily
   files. The hinge the rest hangs on.
-- [ ] **mtg-message-metadata** — messages carry **structured metadata**: type (note | question | event |
+- [x] **mtg-message-metadata — DONE 2026-08-08. Nothing was built; everything asked for already
+  existed, including the test that guards it.** The five kinds are exactly the five named
+  (note|question|event|alert|resolution), plus severity, status, assignee, tags, links, thread_id,
+  in_reply_to and `thread_op`; the id is derived `<date>/<n>`; and
+  `stored_turn_metadata_is_backward_compatible` pins the property the whole design rests on — a
+  plain message serialises byte-identically to the v1 line, and a v1 line reads back with defaults.
+  **The one unaddressed word is "versioned", and a version field is deliberately NOT added.** The
+  format is already compatible in both directions BY CONSTRUCTION: absent fields default on read,
+  empty fields are omitted on write, unknown fields are ignored. A version number nothing branches on
+  is decoration, and the log is APPEND-ONLY, so a version-keyed migration cannot exist — a past line
+  can never be rewritten, only read with defaults, which is what happens today.
+  **What would earn one:** a field whose MEANING changes rather than a field being added. Defaults
+  cannot rescue that, and a reader needs to know which meaning applies. Add it then, stamped from
+  that day forward, with absent read as v1 — the same defaulting that works now. Adding it earlier
+  just records "1" on every line forever.
+  Original: messages carry **structured metadata**: type (note | question | event |
   alert | resolution), severity, status, assignee, tags, links to artifacts/logs, and a stable message
   id. Today a message is handle+text+timestamp. Needs a versioned message schema (back-compat with the
   plain lines) + write/read paths that preserve it.
