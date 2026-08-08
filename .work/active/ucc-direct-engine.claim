@@ -1,6 +1,0 @@
-feature/ucc-direct-engine 2026-08-08T13:18:46Z
-agent: claude-code
-heartbeat: 2026-08-08T13:18:46Z
-status: in-progress
-done-so-far: the dispatcher execs itself away; for a service it is one lookup and no runtime benefit
-next: name the engine directly in the ucc-control plist
