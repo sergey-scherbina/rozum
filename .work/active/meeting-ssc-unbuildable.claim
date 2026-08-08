@@ -1,0 +1,6 @@
+feature/meeting-ssc-unbuildable 2026-08-08T19:10:51Z
+agent: claude-code
+heartbeat: 2026-08-08T19:10:51Z
+status: not-started
+done-so-far:
+next: strip the std imports that pull ::/Cons, rebuild, prove :8405 unchanged before publishing
