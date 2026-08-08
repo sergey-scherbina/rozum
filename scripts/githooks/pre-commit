@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+#
+# Refuse feature work in the SHARED main checkout. `AGENTS.md` says worktree first; nothing enforced
+# it, and the rule was broken three times in one session by the agent who had just written it up
+# twice — once a tool fix and once a `rest_read.rs` change were swept into siblings' coordination
+# commits and published. The failure is mechanical, so the fix is too.
+#
+# Modelled on scalascript's, which caught the same class of mistake on the first attempt.
+#
+# WHAT THIS MUST NOT BREAK, because the shared checkout is where they happen:
+#   * merges — `git merge --no-ff feature/x` stages the whole branch here, every time;
+#   * rebases, cherry-picks, reverts — same shape, machine-generated commits;
+#   * a worktree's own commits — `core.hooksPath` applies to them too, so this hook runs there and
+#     must stay out of the way.
+# Each has a test in `scripts/githooks/test-pre-commit.sh`. If you change this file, run it.
+
+set -euo pipefail
+
+# A worktree's `.git` is a FILE pointing at the real dir; the shared checkout's is a DIRECTORY.
+# This is the same test `AGENTS.md` and the multi-agent skill already use.
+git_common="$(git rev-parse --git-common-dir)"
+git_dir="$(git rev-parse --git-dir)"
+if [ "$git_dir" != "$git_common" ]; then
+  exit 0   # in a worktree — this hook has nothing to say
+fi
+
+# Machine-made commits: a merge, a rebase step, a cherry-pick, a conflicted revert. Their content is
+# not a human deciding to edit a file here, and refusing them would break the one workflow the
+# shared checkout exists for.
+#
+# KNOWN LIMIT, tested rather than hidden: a CLEAN `git revert` leaves no marker at all — git only
+# writes REVERT_HEAD when the revert conflicts — and `pre-commit` receives no arguments and no
+# GIT_REFLOG_ACTION to tell it apart from a hand edit. So a clean revert here is refused and needs
+# `--no-verify`. Weakening the rule to admit it would admit every hand edit too, which is the whole
+# thing this guards.
+for marker in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply sequencer; do
+  [ -e "$git_common/$marker" ] && exit 0
+done
+
+# Coordination is what this checkout IS for: claims and the boards.
+allowed_re='^(\.work/|SPRINT\.md$|BACKLOG\.md$|BUGS\.md$|CHANGELOG\.md$|REPOS\.md$)'
+
+staged="$(git diff --cached --name-only --diff-filter=ACMRT)"
+[ -z "$staged" ] && exit 0
+
+offending="$(printf '%s\n' "$staged" | grep -Ev "$allowed_re" || true)"
+[ -z "$offending" ] && exit 0
+
+name="$(printf '%s' "${offending%%$'\n'*}" | tr -c 'a-zA-Z0-9' '-' | cut -c1-24)"
+cat >&2 <<EOF
+
+✋ pre-commit: this is the SHARED checkout — feature work belongs in a worktree.
+
+Why: an edit left here gets swept into whichever sibling commits next, and published under their
+name. That happened three times on 2026-08-06..08 before this hook existed.
+
+Staged paths that are not coordination:
+$(printf '%s\n' "$offending" | sed 's/^/  /')
+
+Move it:
+  git worktree add .worktrees/feature/<name> -b feature/<name> origin/master
+  # then re-apply there; `git diff > /tmp/x.patch` before `git checkout --` if it is already edited
+
+Coordination commits ARE allowed here: .work/**, SPRINT.md, BACKLOG.md, BUGS.md, CHANGELOG.md,
+REPOS.md. So are merges, rebases and cherry-picks — they are what this checkout is for.
+
+Doing a clean \`git revert\` on master? That one IS refused, and it is the hook's known limit: git
+writes no marker for a revert that applies cleanly, so this cannot tell it from a hand edit. Use
+--no-verify; you are not the case this is guarding against.
+
+Override (rarely correct): git commit --no-verify
+EOF
+exit 1

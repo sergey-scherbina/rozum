@@ -19,6 +19,16 @@ SPEC: SPEC.md
 
 ## The shared checkout belongs to nobody
 
+**Enforced since 2026-08-08.** `bash scripts/githooks/install.sh` once per clone points git at the
+tracked hooks; `pre-commit` then refuses any staged path outside `.work/**` and the boards
+(`SPRINT.md`, `BACKLOG.md`, `BUGS.md`, `CHANGELOG.md`, `REPOS.md`) **in the shared checkout only** —
+worktrees are untouched, and merges, rebases and cherry-picks pass, because that is what this
+checkout is for. Known limit, tested and named in the message: a CLEAN `git revert` is also refused,
+because git leaves no marker a hook can read for one. Use `--no-verify` there.
+`scripts/githooks/test-pre-commit.sh` proves all nine cases against a throwaway repo.
+
+
+
 Two agents lost work in it on 2026-08-06, in opposite directions, and neither mistake was exotic:
 
 - One committed a tool fix straight into the shared checkout (`scripts/rust-item-spans.py`), where
