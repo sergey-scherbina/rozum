@@ -1,0 +1,6 @@
+feature/backlog-dedupe 2026-08-08T16:12:31Z
+agent: claude-code
+heartbeat: 2026-08-08T16:12:31Z
+status: in-progress
+done-so-far: my own triage carried two duplicate entries through, and left a GLM item in LIVE
+next: merge each duplicate into one, place by nature not by section
