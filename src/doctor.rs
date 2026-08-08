@@ -968,8 +968,13 @@ mod tests {
     /// probe, not a service going down. Direct probes were 200 throughout.
     #[test]
     fn a_single_missed_tick_is_not_reported_but_a_confirmed_change_is() {
+        // This crate ALREADY has a lock for exactly this — `proxy.rs` takes it before redirecting
+        // XDG_STATE_HOME, "so we never race another test". I wrote "no other test in this crate
+        // reads XDG_STATE_HOME" instead of checking, and shipped a suite that passed alone, passed
+        // among the doctor tests, and failed in the full workspace run.
+        let _env = rozum_core::share::POISON_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let d = tempfile::tempdir().unwrap();
-        // SAFETY: no other test in this crate reads XDG_STATE_HOME.
+        // SAFETY: held under that lock; no other thread reads XDG_STATE_HOME now.
         unsafe { std::env::set_var("XDG_STATE_HOME", d.path()) };
 
         let report = |status: CheckStatus| DoctorReport {
