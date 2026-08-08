@@ -1,0 +1,6 @@
+feature/ssc-under-deploy 2026-08-08T13:59:12Z
+agent: claude-code
+heartbeat: 2026-08-08T13:59:12Z
+status: in-progress
+done-so-far: rozum-meeting-ssc is the last binary nobody updates — Jun 29, outside every install path
+next: bring it under the deploy, with the same exec-check and rename
