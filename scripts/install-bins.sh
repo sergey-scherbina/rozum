@@ -92,6 +92,7 @@ publish() {
   fi
   mv -f "$dst.new.$$" "$dst"
   echo "    $dst  ($before  ->  $after)"
+  restart_owner "$dst"
 }
 
 # Publish an already-built binary at one more path (a second copy some job execs).
@@ -155,6 +156,7 @@ install_ssc() {
   mkdir -p "$(dirname "$dst")"
   mv -f "$tmp" "$dst"
   echo "    $dst  ($before  ->  $(date -r "$dst" '+%Y-%m-%d %H:%M'))"
+  restart_owner "$dst"
 }
 
 install_one() {
@@ -166,6 +168,58 @@ install_one() {
   cargo build $flag -p "$pkg" --bin "$bin" >/dev/null
 
   publish "target/$profile/$bin" "$dir/$name" "$name"
+}
+
+# Restart the launchd job that execs this path, and wait for it to come back.
+#
+# WHY THIS IS NOT OPTIONAL. `mv` is atomic for the FILESYSTEM, not free for the process already
+# running from that path: macOS kills a running process whose executable file is replaced, with
+# `last exit reason = OS_REASON_CODESIGNING` — which reads like the new binary is unsigned and is
+# not. Measured 2026-08-08: publishing `rozum-meeting-ssc` killed the live :8405 phone service, the
+# freshly built binary verified and ran fine by hand, and launchd's respawn throttle kept the port
+# dark for about a minute while the install script reported success and exited.
+#
+# So: publishing a binary a job execs IS a restart of that job. Do it deliberately and prove it came
+# back, rather than leaving an outage whose length is launchd's throttle and whose cause reads as a
+# signature problem.
+#
+# This is not free for `com.rozum.gateway`: restarting it drops the resident model, which then
+# reloads on the next request. That cost is REAL and it is also unavoidable — the replacement kills
+# the old process either way. What this buys is that the drop happens now, visibly, instead of at
+# whatever moment the operator next opens the phone.
+restart_owner() {
+  local dst="$1" plist label
+  for plist in "$HOME/Library/LaunchAgents"/com.rozum.*.plist; do
+    [ -f "$plist" ] || continue
+    [ "$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null)" = "$dst" ] || continue
+    label="$(basename "$plist" .plist)"
+    echo "    restarting $label (its binary was just replaced)"
+    launchctl kickstart -k "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+    # A pid is NOT proof. Measured on the very first run of this code: it reported "back (pid 6507)"
+    # while the OLD process still held :8405, so the new one panicked on bind, exited, and launchd
+    # respawned it — the service that answered a few seconds later was pid 6644. Wait for a pid that
+    # SURVIVES, which is the cheapest available stand-in for "it is serving"; `doctor --services`
+    # is what actually probes the endpoint, and it is one command away for whoever wants certainty.
+    local i pid="" prev="" stable=0
+    for i in $(seq 1 45); do
+      pid="$(launchctl print "gui/$(id -u)/$label" 2>/dev/null | awk -F'= ' '/^\tpid =/ {print $2; exit}')"
+      if [ -n "$pid" ] && [ "$pid" = "$prev" ]; then
+        stable=$((stable + 1))
+        [ "$stable" -ge 3 ] && break
+      else
+        stable=0
+      fi
+      prev="$pid"
+      sleep 1
+    done
+    if [ -n "$pid" ] && [ "$stable" -ge 3 ]; then
+      echo "    $label is back (pid $pid, held for 3s)"
+    else
+      # Loud, and non-fatal on purpose: the binary IS published, so silence would be the lie.
+      echo "FAIL: $label did not settle within 45s after replacing $dst — check: launchctl print gui/$(id -u)/$label" >&2
+      FAILED_RESTARTS=1
+    fi
+  done
 }
 
 # Every path launchd actually execs, read from the plists rather than assumed.
@@ -211,6 +265,8 @@ extra_paths_for() {
 # "rozum-gateway nadia rozum rozum-meet rozum-meeting-ssc" and died in `cargo` with "package name
 # cannot be empty". Every use so far had passed an explicit name, which is exactly why the plainest
 # invocation was the broken one.
+FAILED_RESTARTS=0
+
 [ $# -gt 0 ] || set -- rozum-gateway nadia rozum rozum-meet rozum-meeting-ssc
 
 for name in "$@"; do
@@ -222,3 +278,6 @@ for name in "$@"; do
     install_to "$name" "$p"
   done <<<"$(extra_paths_for "$name")"
 done
+
+# A publish that left a service down is not a success, whatever the rename did.
+[ "$FAILED_RESTARTS" = 0 ] || exit 1
