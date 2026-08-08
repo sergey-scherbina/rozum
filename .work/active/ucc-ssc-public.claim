@@ -1,0 +1,6 @@
+feature/ucc-ssc-public 2026-08-08T11:47:49Z
+agent: claude-opus-5
+heartbeat: 2026-08-08T11:47:49Z
+status: not-started
+done-so-far: slice 1 of ucc-ssc-backend: the four public view-token routes, no session involved
+next: read the four Rust handlers and the working rozum-meeting-ssc server as the model
