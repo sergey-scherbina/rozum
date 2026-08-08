@@ -50,8 +50,11 @@ def benchResultsDir(): String =
 
 // The Rust original: non-empty, not "." or "..", no path separator. It REJECTS rather than
 // sanitises, so a crafted `../../etc` cannot walk out of the directory it is joined onto.
+// Written without unary `!` on a call: `build-rust` refuses that form ("unsupported expression:
+// Term.ApplyUnary") while `run` accepts it, so `== false` is the spelling both paths take.
 def safePathSeg(s: String): Boolean =
-  s.length > 0 && s != "." && s != ".." && !s.contains("/") && !s.contains("\\")
+  s.length > 0 && s != "." && s != ".." &&
+    s.contains("/") == false && s.contains("\\") == false
 
 // The model spec carries characters that are legal in a spec and not in one path segment.
 def safeModel(m: String): String =
@@ -93,7 +96,7 @@ def badRequest(msg: String): String =
 // agent log (tailed) and the verifier output when they were kept.
 
 def csvRows(path: String): List[String] =
-  if !exists(path) then [] else readFile(path).split("\n").toList
+  if exists(path) then readFile(path).split("\n").toList else []
 
 def csvCell(header: List[String], row: List[String], name: String): String =
   val i = header.indexOf(name)
@@ -104,33 +107,37 @@ def rowMatches(header: List[String], row: List[String], agent: String, model: St
     csvCell(header, row, "model") == model &&
     csvCell(header, row, "task") == task
 
-// Built by hand rather than `header.zip(row).toMap`: `.toMap` on a zipped list is a STUB in this
-// runtime tier and returns `{"tag":"Stub","fields":["Cons.toMap"]}` instead of an object — found by
-// serving a real cell and reading what came back. Recorded in the spec as a toolkit gap.
+// Built by hand rather than `header.zip(row).toMap`, and joined with `mkString` rather than `join`.
+// `join` does not exist in the interpreter the .ssc `run` path uses — it works only when the source
+// is lowered by `build-rust`, because that maps onto Rust's own `[String]::join`. `mkString` is the
+// name both paths know, and it is the same behaviour. Reported upstream as
+// `join-works-under-build-rust-not-run`; before that report the missing method rendered as the text
+// `Stub` and SERIALISED, so this file once answered `{"cell":{Stub}}` with status 200.
 def rowToJson(header: List[String], row: List[String]): String =
   val pairs = header.zipWithIndex.map(hi =>
     jsonStringify(hi(0)) + ":" + jsonStringify(if hi(1) < row.length then row(hi(1)) else "")
   )
-  "{" + pairs.toList.join(",") + "}"
+  "{" + pairs.toList.mkString(",") + "}"
 
 def tailLines(text: String, n: Int): String =
   val ls = text.split("\n").toList
   val start = if ls.length > n then ls.length - n else 0
-  ls.drop(start).join("\n")
+  ls.drop(start).mkString("\n")
 
+// The token branch is written positive-first — `if ok then … else forbidden()` — rather than with
+// `if !viewTokenOk(t)`. `build-rust` rejects a unary `!` on a call ("unsupported expression:
+// Term.ApplyUnary") while `run` accepts it, so the negated form compiles on one path only. Second
+// instance of that seam found while writing this file; the first was `join`.
 def cellRoute(req: Request): String =
   val q = req.query
   val t = q.get("t").getOrElse("")
-  if !viewTokenOk(t) then forbidden()
-  else
+  if viewTokenOk(t) then
     val stamp = q.get("stamp").getOrElse("")
     val agent = q.get("agent").getOrElse("")
     val model = q.get("model").getOrElse("")
     val task  = q.get("task").getOrElse("")
     val sm    = safeModel(model)
-    if !(safePathSeg(stamp) && safePathSeg(agent) && safePathSeg(task) && safePathSeg(sm)) then
-      badRequest("invalid stamp/agent/model/task segment")
-    else
+    if safePathSeg(stamp) && safePathSeg(agent) && safePathSeg(task) && safePathSeg(sm) then
       val tail = q.get("tail").map(s => s.toInt).getOrElse(120)
       val capped = if tail > 3000 then 3000 else tail
       val rows = csvRows(benchResultsDir() + "/" + stamp + "/per-run.csv")
@@ -148,6 +155,8 @@ def cellRoute(req: Request): String =
         "{\"cell\":" + cellJson +
           ",\"agent_log\":" + jsonStringify(agentLog) +
           ",\"verify_out\":" + jsonStringify(verifyOut) + "}"
+    else badRequest("invalid stamp/agent/model/task segment")
+  else forbidden()
 
 // ── /view/{token} ──────────────────────────────────────────────────────────────────────────────
 // The read-only console page. The token is the LAST path segment, and it is checked before the file
@@ -162,10 +171,10 @@ def lastSegment(path: String): String =
 // `/view/<token>` answered 404 while `/view/` answered 200 — measured, not guessed.
 def viewRoute(path: String): String =
   val t = lastSegment(path)
-  if !viewTokenOk(t) then forbidden()
-  else
+  if viewTokenOk(t) then
     val page = uccSiteDir() + "/index.html"
     if exists(page) then readFile(page) else "<!doctype html><p>console not installed</p>"
+  else forbidden()
 
 def main(): Unit =
   route("GET", "/control/public/matrix/cell", req => cellRoute(req))

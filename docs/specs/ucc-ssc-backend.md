@@ -162,3 +162,31 @@ error; whether it also makes stubs fatal is the first thing to check.
 **State of the branch:** `feature/ucc-ssc-public` holds the working server with the guard, the token
 gate and the CSV lookup. The cell body is not yet assembled, because assembling it needs string
 joining. It is NOT merged — a route that can answer `{Stub}` should not be on master.
+
+## Slice 1 finished on the `run` path, blocked on `build-rust` — three divergences, measured (2026-08-08)
+
+**Working, proven against the operator's own data:** a real matrix cell returns its full row
+(`pass=1 seconds=3.1 verdict=pass`), an invalid token is refused, a traversal attempt with a VALID
+token is refused, a miss returns `"cell":null`. The upstream `Stub` fix landed and turned the silent
+corruption into a loud error naming `Cons.join`, which is what made the rest measurable.
+
+**The seam this slice actually found: `ssc run` and `ssc build-rust` are not the same language.**
+Three concrete divergences, one in each direction and one fatal:
+
+| construct | `run` | `build-rust` |
+|---|---|---|
+| `xs.join(",")` | dies — no such method | **works** (lowers to Rust's `[String]::join`) |
+| `!f(x)` (unary not on a call) | works | **refuses to lower** — "unsupported expression: Term.ApplyUnary" |
+| the whole file, after both are avoided | serves correctly | lowers, then the GENERATED RUST does not compile — 22 errors: 9 × E0308 mismatched types, 5 × E0282 annotations needed, and `no field zipWithIndex on Vec<String>` |
+
+The last row is the blocker: the emitted Rust is not type-correct for constructs the interpreter
+runs fine. That is not something this repo can work around by writing different .ssc — the same
+source has to lower correctly, or the shipping path is closed.
+
+**Consequence for the item.** `ucc-ssc-backend` is written against `run` and deployed via
+`build-rust`, so every future slice sits on this seam. Until the two agree — or until the gap is
+documented well enough to code against — porting more routes buys nothing but more instances of it.
+Reported upstream as `join-works-under-build-rust-not-run`, with the other two to follow.
+
+**State:** `feature/ucc-ssc-public` holds the server, unmerged. On the `run` path it is correct and
+complete; on the shipping path it does not build.
