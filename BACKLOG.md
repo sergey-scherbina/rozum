@@ -79,7 +79,15 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   may leave it (secrets, size, .gitignored state), and inventing one inside an incident feature is how
   a support tool grows a data-export problem. Wants a spec of its own before any code.
 
-- [ ] **rozum-json-surface** — `rozum models list` / `models info` have no `--json`, and they are
+- [x] **rozum-json-surface — DONE 2026-08-08.** `--json` on both, modelled on
+  `gateway status --json`. `list --json` carries `size_bytes` raw ALONGSIDE the formatted size, so a
+  caller that sorts or sums does not have to undo "3.06 GB". `info --json` answers about the LOCAL
+  disk only and never reaches HuggingFace, unlike the human form: a script asking "is this installed
+  and where" must not hang on a network call, and mixing the two would make the exit code depend on
+  the network for a question about a local disk. A missing model exits 0 with
+  `"installed": false` — the question was answered, and exiting non-zero would make `set -e`
+  scripts treat a valid answer as a failure. `--remote` keeps the human table; nothing consumes it.
+  Original: `rozum models list` / `models info` have no `--json`, and they are
   what `/control/model/info` needs to move to .ssc (`docs/specs/ucc-ssc-data-seam.md`). Small, and
   useful to every script on this machine, not only the port. `rozum gateway status --json` already
   exists and is the model to copy.
