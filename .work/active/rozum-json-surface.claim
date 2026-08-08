@@ -1,0 +1,6 @@
+feature/rozum-json-surface 2026-08-08T19:11:50Z
+agent: claude-opus-5
+heartbeat: 2026-08-08T19:11:50Z
+status: not-started
+done-so-far: small, useful to every script here, and independent of the blocked ssc seam
+next: add --json to models list and models info, copying gateway status --json
