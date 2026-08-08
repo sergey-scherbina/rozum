@@ -1,6 +1,0 @@
-feature/ucc-ssc-public 2026-08-08T13:28:24Z
-agent: claude-opus-5
-heartbeat: 2026-08-08T13:28:24Z
-status: not-started
-done-so-far: slice rescoped and its blocker (matrix-queue-persist) shipped; taking the two file-backed routes now
-next: read rozum-meeting-ssc as the model, then serve /control/public/matrix/cell and /view/{token} from .ssc
