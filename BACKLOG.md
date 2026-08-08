@@ -2031,7 +2031,19 @@ revive it.
   **Done when:** two consecutive starts in that log can be dated, and `doctor --services` can say
   "restarted N times in the last hour" instead of a lifetime counter nobody can interpret.
 
-- [ ] **matrix-queue-persist** — the matrix job queue lives ONLY in gateway memory.
+- [x] **matrix-queue-persist — DONE 2026-08-08.** The queue persists to `matrix-queue.json` beside
+  the live panel, atomically, and loads on startup.
+  **The decision, and it is the point of the change: a restart SETTLES unfinished jobs, it never
+  resumes them.** `Queued`/`Paused` become `Stopped`, `Running` becomes `Failed`, terminal states are
+  left as history. Restoring a queued job would start a matrix run nobody asked for, unattended,
+  minutes after a reboot — and the matrix has taken this host down twice (BUG-001, BUG-003). So what
+  persisting buys is that the panel stops lying after a restart, and that another process can read
+  the queue; resumption is a separate feature with a separate risk and should be asked for.
+  **Shape worth keeping:** mutation goes through `with_queue`, which takes the lock, mutates and
+  persists in one breath. There were six mutation sites and I missed one on the first pass — a
+  helper makes "mutate without saving" hard, where a convention only makes it discouraged.
+  The policy is split into `settle_after_restart(jobs, now)` so it is testable without a clock or a
+  file: a decision only exercised through I/O is one nobody re-checks.
   **Why:** `matrix_queue()` is a `OnceLock<Mutex<Vec<MatrixJob>>>` with no write path to disk
   (`crates/rozum-gateway/src/matrix.rs:170`), while its sibling `matrix_live()` IS file-backed
   (`persist_matrix_live` / `load_matrix_live_from_disk`). Two consequences, and the second is the
