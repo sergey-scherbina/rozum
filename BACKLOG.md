@@ -1,5 +1,17 @@
 # Backlog
 
+## The meeting PWA cannot be rebuilt from source (found 2026-08-08)
+
+- [ ] **meeting-ssc-unbuildable** — `~/.local/bin/rozum-meeting-ssc` serves `:8405` (phone, over
+  Tailscale) and dates from 2026-06-29, because `ssc-tools build-rust clients/meeting/meeting.ssc`
+  fails today inside the STANDARD LIBRARY: `jsonCoreRenderFields extracts Cons which is not a known
+  enum constructor`, `_normSegments uses unsupported infix operator ::`. **The running binary is the
+  only artifact** — a service whose source no longer compiles cannot be fixed when it breaks, and
+  that is the actual risk, not the staleness. Reported upstream by their procedure
+  (`scalascript:INBOX.md` `build-rust-std-json-cons`, room post). Nothing to do here until it lands;
+  `scripts/install-bins.sh` now tries, refuses loudly with the compiler's own words, and leaves the
+  working binary alone.
+
 ## The meeting daemon has two owners — SEE `BUGS.md` BUG-025
 
 - [x] **meeting-daemon-ownership — RESOLVED 2026-08-06.** BUG-025 is fixed in both halves (respawn loop `5ff78e7`, socket ownership `3bf39cd`); `doctor --services` reports `svc:meeting-daemon` as `ok` where it reported the split as `warn`. Left here as a pointer because the ninety-minutes-apart double filing is worth remembering. Original: filed here from `doctor --services` (launchd's copy down while

@@ -1,5 +1,23 @@
 # Changelog
 
+## ssc-under-deploy — the last un-updated binary, and why it is un-updatable
+Completed: 2026-08-08
+
+`rozum-meeting-ssc` was the one binary on this machine that no install path touched — 2026-06-29,
+outside cargo, invisible to `install-bins.sh`. Bringing it in found something worse than staleness:
+**it cannot be rebuilt at all.** `build-rust` now fails inside the ScalaScript standard library
+(`Cons` not a known enum constructor; unsupported infix `::`), so the running binary is the only
+artifact of a service the operator reaches from their phone.
+
+Two fixes and one report came out of it. `clients/meeting/build.sh` prefers `ssc-tools`, because
+`build-rust` moved to the optional tier exactly as `emit-spa` did to the UCC deploy in July — that
+was masking the real error behind a tooling one. `install-bins.sh` knows this binary now: it tries,
+and when the build fails it prints the compiler's own three lines and leaves the working file
+untouched, rather than "not available" (my first wording, wrong twice: the toolchain is present, and
+what it reports is a compiler regression). And the regression is filed upstream by their procedure —
+their gate rejected my first attempt for putting the word `lane` in a reporter field, which is their
+triager's decision to make, so it went in reworded.
+
 ## ucc-direct-engine — the service names the program it actually runs
 Completed: 2026-08-08
 

@@ -63,9 +63,8 @@ targets() {
     rozum-meet)    echo "rozum-meet rozum-meet release $CARGO_BIN" ;;
     # Emitted by the ScalaScript toolchain, not by cargo: `clients/control/deploy-ucc-web.sh` owns
     # it. Named here so that "this script does not update it" is a statement rather than a silence.
-    rozum-meeting-ssc)
-      echo "SKIP not-a-cargo-binary — built by the ssc toolchain; run clients/control/deploy-ucc-web.sh" >&2
-      return 1 ;;
+    # Built by the ScalaScript toolchain, not cargo — handled by `install_ssc`, not by `targets`.
+    rozum-meeting-ssc) echo "SSC" ;;
     *) echo "unknown binary: $1 (known: rozum-gateway nadia rozum rozum-meet)" >&2; return 1 ;;
   esac
 }
@@ -100,6 +99,62 @@ install_to() {
   local name="$1" dst="$2"
   read -r _pkg bin profile _dir <<<"$(targets "$name")"
   publish "target/$profile/$bin" "$dst" "$name"
+}
+
+# The meeting PWA: emitted from `clients/meeting/meeting.ssc` by the ScalaScript toolchain.
+#
+# It was the last binary on this machine that no install path touched — built 2026-06-29 and never
+# again, while every cargo binary was refreshed. That is the same rot that had three copies of the
+# engine at three different ages; being outside cargo is not a reason to be outside the update.
+#
+# Its exec-check cannot be `--help`: this program takes no flags, it goes straight to `serve(8405)`
+# and panics with "Address already in use" when the service is up. That panic is still PROOF THE
+# BINARY RUNS, which is all the check is for (BUG-013: launchd could not exec; BUG-028: the runtime
+# could not find its metallib). So: run it briefly and accept either "bound the port" or "the port
+# was taken" — reject only a binary that cannot start at all.
+install_ssc() {
+  local dst
+  dst="$(extra_paths_for rozum-meeting-ssc | head -1)"
+  dst="${dst:-$HOME/.local/bin/rozum-meeting-ssc}"
+
+  if [ ! -x "$ROOT/clients/meeting/build.sh" ]; then
+    echo "SKIP rozum-meeting-ssc: clients/meeting/build.sh missing" >&2; return 0
+  fi
+  echo "==> building rozum-meeting-ssc (ScalaScript → Rust)"
+  local tmp="$dst.new.$$"
+  local log="$tmp.log"
+  if ! "$ROOT/clients/meeting/build.sh" "$tmp" >"$log" 2>&1; then
+    rm -f "$tmp"
+    # SAY WHY. "not available" was my first wording and it was wrong twice over: the toolchain is
+    # there, and what it reports is a compiler regression on the Rust lane, not a missing tool.
+    # 2026-08-08 it fails inside the STD library — `jsonCoreRenderFields extracts Cons which is not
+    # a known enum constructor`, `_normSegments uses unsupported infix operator ::` — which means
+    # this PWA cannot currently be rebuilt from source at all. Reported to scalascript; until it
+    # lands, the running binary is the only artifact, so this leaves it alone rather than break it.
+    echo "SKIP rozum-meeting-ssc: the ssc build FAILED — $dst left as it is. Reason:" >&2
+    tail -3 "$log" | sed 's/^/      /' >&2
+    rm -f "$log"
+    return 0
+  fi
+  rm -f "$log"
+  chmod +x "$tmp"
+
+  local out rc=0
+  out="$("$tmp" 2>&1 & sleep 2; kill %1 2>/dev/null; wait 2>/dev/null)" || rc=$?
+  case "$out" in
+    *"Address already in use"*) : ;;   # reached its serve call — the service holds the port
+    *) if ! kill -0 %1 2>/dev/null && [ -z "$out" ] && [ "$rc" -ge 126 ]; then
+         rm -f "$tmp"
+         echo "FAIL: freshly built rozum-meeting-ssc will not exec (rc=$rc) — $dst untouched" >&2
+         exit 1
+       fi ;;
+  esac
+
+  local before="none"
+  [ -f "$dst" ] && before="$(date -r "$dst" '+%Y-%m-%d %H:%M')"
+  mkdir -p "$(dirname "$dst")"
+  mv -f "$tmp" "$dst"
+  echo "    $dst  ($before  ->  $(date -r "$dst" '+%Y-%m-%d %H:%M'))"
 }
 
 install_one() {
@@ -143,7 +198,7 @@ extra_paths_for() {
       # 2026-08-08 this list assumed the name meant the engine and published the 54 MB
       # `rozum-gateway` over it. Nothing broke only because `com.rozum.ucc-control` was still
       # running its old process. Keep this table next to `deploy-ucc-web.sh` lines 114/127/139.
-      rozum-gateway:rozum-gateway|nadia:nadia|rozum:rozum|rozum:rozum-ctrl|rozum-meet:rozum-meet) ;;
+      rozum-gateway:rozum-gateway|nadia:nadia|rozum:rozum|rozum:rozum-ctrl|rozum-meet:rozum-meet|rozum-meeting-ssc:rozum-meeting-ssc) ;;
       *) continue ;;
     esac
     [ "$prog" = "$CARGO_BIN/$name" ] && continue
@@ -152,7 +207,8 @@ extra_paths_for() {
   printf '%s\n' "${out[@]}" | sort -u | grep -v '^$' || true
 }
 
-for name in "${@:-rozum-gateway nadia rozum rozum-meet}"; do
+for name in "${@:-rozum-gateway nadia rozum rozum-meet rozum-meeting-ssc}"; do
+  if [ "$name" = rozum-meeting-ssc ]; then install_ssc; continue; fi
   install_one "$name"
   while read -r p; do
     [ -n "$p" ] || continue
