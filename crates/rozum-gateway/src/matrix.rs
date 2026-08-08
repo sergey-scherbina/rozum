@@ -170,7 +170,73 @@ pub(crate) struct MatrixJob {
 pub(crate) fn matrix_queue() -> &'static Mutex<Vec<MatrixJob>> {
     use std::sync::OnceLock;
     static Q: OnceLock<Mutex<Vec<MatrixJob>>> = OnceLock::new();
-    Q.get_or_init(|| Mutex::new(Vec::new()))
+    Q.get_or_init(|| Mutex::new(load_matrix_queue_from_disk()))
+}
+
+fn matrix_queue_path() -> Option<PathBuf> {
+    state_dir().map(|d| d.join("matrix-queue.json"))
+}
+
+/// Write the queue out. Atomic tmp+rename, like `persist_matrix_live` — a half-written queue read
+/// by another process is worse than no file.
+fn persist_matrix_queue(q: &[MatrixJob]) {
+    let Some(path) = matrix_queue_path() else { return };
+    if let Ok(bytes) = serde_json::to_vec(q) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
+/// Read the queue back, and **settle every unfinished job rather than resuming it.**
+///
+/// A `Queued` entry restored as-is would start a matrix run nobody asked for, minutes after a
+/// reboot, unattended — and on this host the matrix has taken the machine down twice (BUG-001
+/// kernel panic, BUG-003 jetsam). A `Running` entry cannot be resumed either: its process died with
+/// the gateway. So both become terminal with a reason, which makes the panel tell the truth about
+/// what happened instead of either lying or acting.
+///
+/// The value of persisting is therefore history and cross-process readability — NOT resumption.
+/// Resuming is a separate feature with a separate risk, and it should be asked for explicitly.
+fn load_matrix_queue_from_disk() -> Vec<MatrixJob> {
+    let Some(path) = matrix_queue_path() else { return Vec::new() };
+    let Ok(bytes) = std::fs::read(&path) else { return Vec::new() };
+    let Ok(jobs) = serde_json::from_slice::<Vec<MatrixJob>>(&bytes) else {
+        return Vec::new();
+    };
+    settle_after_restart(jobs, crate::share::now_unix())
+}
+
+/// Split out so the restart POLICY is testable without a clock or a file — it is the decision this
+/// change exists to make, and a decision only exercised through I/O is one nobody re-checks.
+fn settle_after_restart(mut jobs: Vec<MatrixJob>, now: u64) -> Vec<MatrixJob> {
+    for j in jobs.iter_mut() {
+        match j.status {
+            MatrixJobStatus::Queued | MatrixJobStatus::Paused => {
+                j.status = MatrixJobStatus::Stopped;
+                j.finished_at.get_or_insert(now);
+            }
+            MatrixJobStatus::Running => {
+                j.status = MatrixJobStatus::Failed;
+                j.finished_at.get_or_insert(now);
+            }
+            MatrixJobStatus::Done | MatrixJobStatus::Failed | MatrixJobStatus::Stopped => {}
+        }
+    }
+    jobs
+}
+
+/// Mutate the queue and persist it in the same breath.
+///
+/// Deliberately not "remember to call persist after each mutation": there are five mutation sites
+/// and adding a sixth without the call would leave the file quietly behind the truth, which is the
+/// failure this whole change exists to remove. Read-only callers keep the plain lock.
+pub(crate) fn with_queue<T>(f: impl FnOnce(&mut Vec<MatrixJob>) -> T) -> T {
+    let mut q = matrix_queue().lock().unwrap();
+    let out = f(&mut q);
+    persist_matrix_queue(&q);
+    out
 }
 
 pub(crate) fn matrix_notify() -> &'static tokio::sync::Notify {
@@ -269,7 +335,7 @@ pub(crate) async fn matrix_run_route(axum::Json(req): axum::Json<MatrixRunReq>) 
         queued_at: crate::share::now_unix(),
         started_at: None, finished_at: None, log_path: None, result_dir: None, exit_code: None,
     };
-    matrix_queue().lock().unwrap().push(job);
+    with_queue(|q| q.push(job));
     matrix_notify().notify_one();
     axum::Json(serde_json::json!({ "ok": true, "id": id })).into_response()
 }
@@ -297,15 +363,14 @@ pub(crate) async fn matrix_worker() {
     loop {
         matrix_notify().notified().await;
         loop {
-            let job_id = {
-                let mut q = matrix_queue().lock().unwrap();
+            let job_id = with_queue(|q| {
                 q.iter().position(|j| j.status == MatrixJobStatus::Queued)
                     .map(|i| {
                         q[i].status = MatrixJobStatus::Running;
                         q[i].started_at = Some(crate::share::now_unix());
                         q[i].id.clone()
                     })
-            };
+            });
             let Some(id) = job_id else { break };
             run_matrix_job(&id).await;
         }
@@ -327,13 +392,12 @@ pub(crate) async fn run_matrix_job(job_id: &str) {
     let result_dir = bench_results_dir().join(format!("agentic-ucc-{stamp}"));
     let _ = std::fs::create_dir_all(&result_dir);
 
-    {
-        let mut q = matrix_queue().lock().unwrap();
+    with_queue(|q| {
         if let Some(j) = q.iter_mut().find(|j| j.id == job_id) {
             j.log_path = Some(log_path.to_string_lossy().into_owned());
             j.result_dir = Some(result_dir.to_string_lossy().into_owned());
         }
-    }
+    });
 
     let log_out = match std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
         Ok(f) => f, Err(_) => { matrix_fail(job_id); return; }
@@ -416,12 +480,13 @@ pub(crate) async fn run_matrix_job(job_id: &str) {
     archive_matrix_cells(&result_dir);
 
     let status = if exit_code == 0 { MatrixJobStatus::Done } else { MatrixJobStatus::Failed };
-    let mut q = matrix_queue().lock().unwrap();
-    if let Some(j) = q.iter_mut().find(|j| j.id == job_id) {
-        j.status = status;
-        j.finished_at = Some(crate::share::now_unix());
-        j.exit_code = Some(exit_code);
-    }
+    with_queue(|q| {
+        if let Some(j) = q.iter_mut().find(|j| j.id == job_id) {
+            j.status = status;
+            j.finished_at = Some(crate::share::now_unix());
+            j.exit_code = Some(exit_code);
+        }
+    });
 }
 
 /// After a KEEP=1 run: scan /tmp/rozum-agentic-* for workdirs whose agentic.meta
@@ -556,11 +621,12 @@ pub(crate) async fn matrix_cell_route(axum::extract::Query(q): axum::extract::Qu
 }
 
 pub(crate) fn matrix_fail(job_id: &str) {
-    let mut q = matrix_queue().lock().unwrap();
-    if let Some(j) = q.iter_mut().find(|j| j.id == job_id) {
-        j.status = MatrixJobStatus::Failed;
-        j.finished_at = Some(crate::share::now_unix());
-    }
+    with_queue(|q| {
+        if let Some(j) = q.iter_mut().find(|j| j.id == job_id) {
+            j.status = MatrixJobStatus::Failed;
+            j.finished_at = Some(crate::share::now_unix());
+        }
+    });
 }
 
 pub(crate) fn signal_matrix(sig: libc::c_int) -> bool {
@@ -584,8 +650,9 @@ pub(crate) async fn matrix_pause_route() -> axum::response::Response {
             } else { String::new() }
         };
         if !id.is_empty() {
-            let mut q = matrix_queue().lock().unwrap();
-            if let Some(j) = q.iter_mut().find(|j| j.id == id) { j.status = MatrixJobStatus::Paused; }
+            with_queue(|q| {
+                if let Some(j) = q.iter_mut().find(|j| j.id == id) { j.status = MatrixJobStatus::Paused; }
+            });
         }
     }
     axum::Json(serde_json::json!({ "ok": ok })).into_response()
@@ -605,8 +672,9 @@ pub(crate) async fn matrix_resume_route() -> axum::response::Response {
             } else { String::new() }
         };
         if !id.is_empty() {
-            let mut q = matrix_queue().lock().unwrap();
-            if let Some(j) = q.iter_mut().find(|j| j.id == id) { j.status = MatrixJobStatus::Running; }
+            with_queue(|q| {
+                if let Some(j) = q.iter_mut().find(|j| j.id == id) { j.status = MatrixJobStatus::Running; }
+            });
         }
     }
     axum::Json(serde_json::json!({ "ok": ok })).into_response()
@@ -699,3 +767,76 @@ pub(crate) async fn public_matrix_cell_route(
     })).into_response()
 }
 
+
+#[cfg(test)]
+mod queue_persist_tests {
+    use super::*;
+
+    fn job(id: &str, status: MatrixJobStatus) -> MatrixJob {
+        MatrixJob {
+            id: id.into(),
+            models: None,
+            agents: None,
+            tasks: None,
+            reps: None,
+            status,
+            queued_at: 1,
+            started_at: None,
+            finished_at: None,
+            log_path: None,
+            result_dir: None,
+            exit_code: None,
+        }
+    }
+
+    /// The decision this change is really about: a restart must SETTLE unfinished jobs, never
+    /// resume them. A `Queued` entry restored as-is would start a matrix run nobody asked for,
+    /// unattended, minutes after a reboot — and the matrix has taken this host down twice
+    /// (BUG-001 kernel panic, BUG-003 jetsam).
+    #[test]
+    fn a_restart_settles_unfinished_jobs_instead_of_resuming_them() {
+        let raw = serde_json::to_vec(&vec![
+            job("a", MatrixJobStatus::Queued),
+            job("b", MatrixJobStatus::Running),
+            job("c", MatrixJobStatus::Paused),
+            job("d", MatrixJobStatus::Done),
+            job("e", MatrixJobStatus::Failed),
+        ])
+        .unwrap();
+        let jobs: Vec<MatrixJob> = serde_json::from_slice(&raw).unwrap();
+        let settled = settle_after_restart(jobs, 100);
+
+        let by = |id: &str| settled.iter().find(|j| j.id == id).unwrap().status.clone();
+        assert_eq!(by("a"), MatrixJobStatus::Stopped, "a queued job must not run itself");
+        assert_eq!(by("b"), MatrixJobStatus::Failed, "its process died with the gateway");
+        assert_eq!(by("c"), MatrixJobStatus::Stopped);
+        // Terminal states are history and must be left exactly as they were.
+        assert_eq!(by("d"), MatrixJobStatus::Done);
+        assert_eq!(by("e"), MatrixJobStatus::Failed);
+        // Everything settled carries a finish time, so the panel can show when it stopped rather
+        // than leaving a row that looks like it is still going.
+        for id in ["a", "b", "c"] {
+            assert_eq!(
+                settled.iter().find(|j| j.id == id).unwrap().finished_at,
+                Some(100)
+            );
+        }
+    }
+
+    /// A `finished_at` that was already recorded is not overwritten — the restart is not when that
+    /// job ended, and stamping "now" on it would rewrite history to the moment of the reboot.
+    #[test]
+    fn an_existing_finish_time_survives_the_restart() {
+        let mut j = job("a", MatrixJobStatus::Running);
+        j.finished_at = Some(7);
+        let settled = settle_after_restart(vec![j], 100);
+        assert_eq!(settled[0].finished_at, Some(7));
+    }
+
+    /// An unreadable or absent file is an empty queue, never a panic: this runs at first touch of a
+    /// static, so a failure here would take the gateway down at startup rather than lose a list.
+    #[test]
+    fn a_corrupt_queue_file_reads_as_empty() {
+        assert!(serde_json::from_slice::<Vec<MatrixJob>>(b"{not json").is_err());
+    }
+}
