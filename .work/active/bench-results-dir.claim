@@ -1,0 +1,6 @@
+feature/bench-results-dir 2026-08-08T17:19:39Z
+agent: claude-opus-5
+heartbeat: 2026-08-08T17:19:39Z
+status: not-started
+done-so-far: found while porting the route to .ssc: bench_results_dir() is CWD-relative, which is right for a repo run and wrong for a service
+next: make it explicit, keep the repo-relative fallback, and test both
