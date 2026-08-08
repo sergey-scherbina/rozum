@@ -1,6 +1,6 @@
-feature/ucc-ssc-backend 2026-08-08T17:10:33Z
+feature/ucc-ssc-backend 2026-08-08T17:14:00Z
 agent: claude-code
-heartbeat: 2026-08-08T17:10:33Z
-status: not-started
-done-so-far:
-next: measure the toolkit against clients/control, then spec which gap is on the critical path
+heartbeat: 2026-08-08T17:30:04Z
+status: in-progress
+done-so-far: data-seam spec written (26 GET routes classified, 2 emit-rust probes); sibling owns the session axis
+next: add the missing --json to `rozum gateway status`, the flag the spec names as the blocker
