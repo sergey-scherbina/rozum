@@ -1,0 +1,6 @@
+feature/binary-layout 2026-08-08T11:42:03Z
+agent: claude-code
+heartbeat: 2026-08-08T11:42:03Z
+status: in-progress
+done-so-far: rozum-meet on :8779 is three weeks old and no install path knew about it
+next: cover every cargo binary, name the ssc one as not-ours, and make the deploy use one publish path
