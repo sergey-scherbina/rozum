@@ -1,0 +1,6 @@
+feature/residency-unify-evidence 2026-08-08T13:34:50Z
+agent: claude-opus-5
+heartbeat: 2026-08-08T13:34:50Z
+status: in-progress
+done-so-far: operator asked for residency-unify first; it was closed by DECISION — verifying it on the live machine and recording the evidence
+next: record the census: one resident, everything else routes to it
