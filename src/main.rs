@@ -427,7 +427,10 @@ enum Command {
         services_only: bool,
         /// Post to this room ONLY when a service changes verdict — for the periodic job. Silence
         /// means nothing changed; every tick would be noise.
-        #[arg(long, requires = "services")]
+        /// Posting is ABOUT the services, so it turns that section on by itself. It used to
+        /// `requires = "services"`, which made the periodic job — which passes `--services-only` —
+        /// exit 2 on every tick: launchd showed `last exit = 2` and the job watched nothing.
+        #[arg(long)]
         post_room: Option<String>,
     },
 
@@ -1596,7 +1599,8 @@ async fn main() {
             IdentityAction::SetName { name } => run_identity_set_name(&name),
         },
         Some(Command::Doctor { web_url, strict, services, services_only, post_room }) => {
-            run_doctor(web_url, strict, services || services_only, services_only, post_room).await
+            let want_services = services || services_only || post_room.is_some();
+            run_doctor(web_url, strict, want_services, services_only, post_room).await
         }
         Some(Command::Rooms { action }) => match action {
             RoomsAction::Prune => run_rooms_prune(),
