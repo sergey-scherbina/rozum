@@ -1,6 +1,0 @@
-feature/doctor-confirm 2026-08-08T14:12:58Z
-agent: claude-code
-heartbeat: 2026-08-08T14:12:58Z
-status: in-progress
-done-so-far: doctor posted 7 meeting-ssc transitions, all during heavy compiles; direct probes are 200 when idle
-next: confirm before shouting — two consecutive probes, and a longer timeout
