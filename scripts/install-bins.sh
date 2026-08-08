@@ -207,7 +207,13 @@ extra_paths_for() {
   printf '%s\n' "${out[@]}" | sort -u | grep -v '^$' || true
 }
 
-for name in "${@:-rozum-gateway nadia rozum rozum-meet rozum-meeting-ssc}"; do
+# `"${@:-a b c}"` expands the default as ONE word, so a no-argument run asked for a binary called
+# "rozum-gateway nadia rozum rozum-meet rozum-meeting-ssc" and died in `cargo` with "package name
+# cannot be empty". Every use so far had passed an explicit name, which is exactly why the plainest
+# invocation was the broken one.
+[ $# -gt 0 ] || set -- rozum-gateway nadia rozum rozum-meet rozum-meeting-ssc
+
+for name in "$@"; do
   if [ "$name" = rozum-meeting-ssc ]; then install_ssc; continue; fi
   install_one "$name"
   while read -r p; do
