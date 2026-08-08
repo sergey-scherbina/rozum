@@ -58,13 +58,32 @@ through a CLI that prints JSON. The toolkit has both halves of that shape: `exec
 
 **So the portable boundary is not a new toolkit primitive. It is a rozum obligation:** a read route
 moves to .ssc when its data is available as JSON from something Rust owns — a CLI subcommand or an
-internal endpoint — and it does not move before that. `rozum gateway status` and `rozum models list`
-print for humans and have no `--json`; that missing flag, not WebAuthn, is what stands between
-`/control/status` and a .ssc implementation.
+internal endpoint — and it does not move before that.
+
+**And for the route that matters most, that obligation is already met — I claimed otherwise first.**
+The first draft of this spec said the blocker for `/control/status` was a missing `--json` flag. It
+is not missing. `rozum gateway status --json` prints the ENTIRE `/control/status` payload — the same
+`control::status()` the route serves, all ten keys. I had checked `rozum status --json`, which is
+not the subcommand, and wrote a conclusion on the error message.
+
+**Demonstrated, not argued** (2026-08-08): a .ssc program whose whole body is
+
+```
+def snapshot(): String =
+  exec("…/rozum", ["gateway", "status", "--json"], ProcessOptions(None, Map(), None, true)).stdout
+
+@main def run(): Unit =
+  route("GET", "/control/status", req => snapshot())
+  serve(8493)
+```
+
+emitted through `emit-rust`, compiled, and answered the operator's live machine state — 10 keys,
+`mlx-community:Qwen3.5-4B-MLX-4bit`, `healthy: true`, 1 resident. The richest read route in the
+console, served from ScalaScript, with the ledger still having exactly one reader.
 
 ## Evidence: the shipping path carries this shape (probes run 2026-08-08)
 
-Both probes emitted through `ssc-tools emit-rust` and were built and run as Rust binaries — the
+All probes emitted through `ssc-tools emit-rust` and were built and run as Rust binaries — the
 shipping path, not the interpreter. The toolchain binary was built from an older commit, but
 `v1/runtime/backend/rust` and `v1/runtime/std` are byte-identical between that commit and HEAD, so
 the measurement is of the current backend.
@@ -75,6 +94,21 @@ the measurement is of the current backend.
 2. **The BFF shape works.** One .ssc route that reads a file from disk *and* calls the operator's
    live gateway over HTTP returned `{"disk_len":213,"upstream":202}` — `httpGet` lowers to a `ureq`
    client. This is the shape category B and D need, and it compiles and runs today.
+3. **Importing a std module is what breaks lowering — not using its functions.** Measured one
+   import at a time, empty program each: `std/http.ssc` → **19** lowering errors, `std/fs.ssc` → 1,
+   `std/process.ssc` → **0**. Every one of the 20 is the same root cause: `::` / `Cons` / `Nil` in
+   the json-core and path-normalising code the modules pull in, which the Rust backend cannot
+   lower (reported upstream as `build-rust-std-json-cons`).
+
+   The same names work UNIMPORTED. `route`, `serve`, `readFile`, `httpGet` resolve to intrinsics
+   that lower straight to the emitted Rust runtime — that is what probes 1 and 2 used, and why they
+   built. **This is the explanation for `meeting-ssc-unbuildable`**: the live `:8405` server opens
+   with `[route, serve, requestCookie](std/http.ssc)` and `[readFile, listDir, isDir](std/fs.ssc)`,
+   so it cannot be rebuilt for Rust — not because of anything it does, but because of two import
+   lines.
+4. **`ProcessOptions(None, Map(), None)` does not lower** — the three-argument form the live
+   meeting server uses emits a Rust struct literal missing `inheritEnv`, because default parameters
+   are declared as a capability but not applied by the backend. Passing all four arguments works.
 
 That bounds — it does not contradict — the companion's blocker. Their file fails to lower with 22
 rustc errors on richer constructs (`zipWithIndex` on `Vec<String>`, inference holes). The shipping
@@ -89,9 +123,10 @@ The companion's order stands. This adds a precondition to its step 3:
 
 > **Read routes do not move as a block of 19.** They move in the order their data becomes available
 > as JSON from Rust. Nine can move now (A). Two more the moment the messenger pattern is pointed at
-> them (D). Eight wait on a `--json` surface for the ledger/catalog/footprint readers (B), which is
-> a small rozum change with its own value — `rozum gateway status --json` is useful to every script
-> on this machine. Seven cannot move until the state itself moves out of process memory (C), and
+> them (D). Of the eight in B, `/control/status` — the richest of them — can move
+> today and is demonstrated above; the rest are the RBAC store, which the companion already says
+> stays Rust, and `/control/model/info`, which wants the `--json` that `rozum models list/info`
+> genuinely does lack. Seven cannot move until the state itself moves out of process memory (C), and
 > two of those are the terminal, which the entry already says stays Rust.
 
 ## What this spec does not decide
