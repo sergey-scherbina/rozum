@@ -202,7 +202,7 @@ fn persist_matrix_queue(q: &[MatrixJob]) {
 fn load_matrix_queue_from_disk() -> Vec<MatrixJob> {
     let Some(path) = matrix_queue_path() else { return Vec::new() };
     let Ok(bytes) = std::fs::read(&path) else { return Vec::new() };
-    let Ok(mut jobs) = serde_json::from_slice::<Vec<MatrixJob>>(&bytes) else {
+    let Ok(jobs) = serde_json::from_slice::<Vec<MatrixJob>>(&bytes) else {
         return Vec::new();
     };
     settle_after_restart(jobs, crate::share::now_unix())
