@@ -58,9 +58,15 @@ on the existing meeting stack (`docs/specs/agent-meetings-daemon.md`, `meeting-i
 `meeting-mention-inbox.md`, `meetings-rest-read.md`; daily disk-backed rooms, session-token identity,
 single-writer daemon). Each item below is its own spec+build later — listed to set the trajectory.
 
-- [ ] **mtg-resolving** — **resolving**: an incident state machine (open → triaging → escalated →
-  resolved → closed), resolution records, reopen, and metrics (time-to-resolve, escalation rate). Turns
-  threads into accountable units of work.
+- [x] **mtg-resolving — DONE 2026-08-08, mostly by finding it already built.** The state machine
+  (open → triaging → escalated → resolved → closed), escalation with an assignee and a note, and
+  resolution records all existed and were tested; the entry had aged past its own subject. What was
+  missing was small, and one part of it was WRONG: time-to-resolve measured `updated_ts - created_ts`,
+  and `updated_ts` moves on any later message, pin or owner change — the same incident reported 4
+  minutes or 24.7 hours depending on whether somebody commented the next morning. Fixed with
+  `resolved_ts`, plus `reopened`/`escalations` counters and an escalation RATE (the histogram only
+  ever showed what is escalated right now). Spec: `docs/specs/incident-resolving.md`.
+
 - [ ] **mtg-incident-context** — **per-incident context collection**: a thread auto-accretes the relevant
   context — attach logs/gateway.jsonl slices, link related messages/threads, capture the workdir/repro,
   snapshot the model/agent state — so an agent (or human) picking up an incident has the full picture in

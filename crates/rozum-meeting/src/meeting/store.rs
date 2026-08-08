@@ -346,6 +346,25 @@ pub struct Thread {
     pub links: Vec<String>,
     pub created_ts: u64,
     pub updated_ts: u64,
+    /// When this thread REACHED a terminal state. `updated_ts` moves on any later change — a
+    /// message, a pin, an owner — so a thread resolved in four minutes and commented on the next
+    /// morning used to report a day-long time-to-resolve. A number that grows while nothing
+    /// happens is worse than none: it gets read as a trend (docs/specs/incident-resolving.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_ts: Option<u64>,
+    /// How many times it came back from a terminal state. "Solved first time" is what anyone
+    /// measuring resolution wants to know, and a thread reopened three times looked identical to
+    /// one that never was.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub reopened: u32,
+    /// How many times it entered `escalated` EVER — `by_state` only counts what is escalated now,
+    /// so a thread escalated and then resolved left no trace of it.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub escalations: u32,
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Per-day counts, the body of `index.json`.
@@ -757,6 +776,9 @@ impl TranscriptWriter {
                 links: vec![],
                 created_ts: ts,
                 updated_ts: ts,
+                resolved_ts: None,
+                reopened: 0,
+                escalations: 0,
             })
             .clone();
         self.persist_threads()?;
@@ -773,6 +795,20 @@ impl TranscriptWriter {
         let Some(t) = self.threads.get_mut(id) else {
             return Ok(None);
         };
+        // The transition is the fact worth recording (docs/specs/incident-resolving.md).
+        let was_terminal = t.state.is_terminal();
+        if state.is_terminal() && !was_terminal {
+            t.resolved_ts = Some(ts);
+        } else if was_terminal && !state.is_terminal() {
+            // Reopened: the clock restarts because the work restarted, but the eventual duration
+            // is still measured from the ORIGINAL creation — an incident that took three tries
+            // took as long as it took, and hiding that would flatter the number.
+            t.resolved_ts = None;
+            t.reopened = t.reopened.saturating_add(1);
+        }
+        if state == ThreadState::Escalated && t.state != ThreadState::Escalated {
+            t.escalations = t.escalations.saturating_add(1);
+        }
         t.state = state;
         t.updated_ts = ts;
         let updated = t.clone();
@@ -1010,12 +1046,26 @@ pub fn rebuild_threads(root: &Path) -> BTreeMap<String, Thread> {
         let severity = anchor.and_then(|a| a.meta.severity);
         let mut state = ThreadState::Open;
         let mut owner = None;
+        // Rebuild the transition COUNTS too, not just the final state — the log is where the
+        // transitions are recorded, so a rebuilt thread must not come back claiming it was never
+        // escalated and never reopened (docs/specs/incident-resolving.md).
+        let (mut resolved_ts, mut reopened, mut escalations) = (None, 0u32, 0u32);
         for m in &members {
             if m.kind == MsgKind::Resolution {
                 state = ThreadState::Resolved;
+                resolved_ts = Some(m.ts);
             }
             if m.kind == MsgKind::Event {
                 if let Some(rest) = m.content.strip_prefix("escalated to ") {
+                    if state.is_terminal() {
+                        // Work restarted after a resolution: that is a reopen, whatever the
+                        // message that restarted it.
+                        reopened += 1;
+                        resolved_ts = None;
+                    }
+                    if state != ThreadState::Escalated {
+                        escalations += 1;
+                    }
                     state = ThreadState::Escalated;
                     let who = rest.split([':', ' ']).next().unwrap_or("").to_string();
                     owner = Some(who).filter(|s| !s.is_empty());
@@ -1040,6 +1090,9 @@ pub fn rebuild_threads(root: &Path) -> BTreeMap<String, Thread> {
                 links: vec![],
                 created_ts: created,
                 updated_ts: updated,
+                resolved_ts,
+                reopened,
+                escalations,
             },
         );
     }
@@ -1059,6 +1112,9 @@ pub fn rebuild_threads(root: &Path) -> BTreeMap<String, Thread> {
             links: vec![],
             created_ts: m.ts,
             updated_ts: m.ts,
+            resolved_ts: None,
+            reopened: 0,
+            escalations: 0,
         });
         if op.opened == Some(true) {
             t.created_ts = m.ts;
@@ -1298,16 +1354,30 @@ pub fn room_queue(root: &Path, now: u64) -> Vec<QueueItem> {
     rows
 }
 
-/// Resolving metrics over a room's threads: totals, a per-state histogram, and the
-/// mean time-to-resolve (created→updated) across terminal (resolved/closed) threads.
+/// Resolving metrics over a room's threads: totals, a per-state histogram, the mean
+/// time-to-resolve (creation → the moment it reached a terminal state), how many threads EVER
+/// escalated, and how many were reopened. See `docs/specs/incident-resolving.md` for why the
+/// duration is measured to `resolved_ts` and not to `updated_ts`.
 pub fn thread_metrics(root: &Path) -> serde_json::Value {
     let threads = read_threads(root);
     let mut by_state: BTreeMap<String, u64> = BTreeMap::new();
     let mut resolve_secs: Vec<u64> = Vec::new();
+    let mut ever_escalated = 0u64;
+    let mut reopened_threads = 0u64;
     for t in threads.values() {
         *by_state.entry(t.state.as_str().to_string()).or_default() += 1;
+        if t.escalations > 0 {
+            ever_escalated += 1;
+        }
+        if t.reopened > 0 {
+            reopened_threads += 1;
+        }
         if t.state.is_terminal() {
-            resolve_secs.push(t.updated_ts.saturating_sub(t.created_ts));
+            // `resolved_ts` where there is one; `updated_ts` only for threads already terminal
+            // before that field existed — their duration is the old, inflatable one, which the
+            // spec states so a mixed history is not read as a change in behaviour.
+            let end = t.resolved_ts.unwrap_or(t.updated_ts);
+            resolve_secs.push(end.saturating_sub(t.created_ts));
         }
     }
     let resolved = resolve_secs.len() as u64;
@@ -1316,11 +1386,15 @@ pub fn thread_metrics(root: &Path) -> serde_json::Value {
     } else {
         Some(resolve_secs.iter().sum::<u64>() / resolved)
     };
+    let total = threads.len() as u64;
     serde_json::json!({
-        "total": threads.len(),
+        "total": total,
         "by_state": by_state,
         "resolved": resolved,
         "avg_time_to_resolve_secs": avg,
+        "escalated_ever": ever_escalated,
+        "escalation_rate": (total > 0).then(|| ever_escalated as f64 / total as f64),
+        "reopened_threads": reopened_threads,
     })
 }
 
@@ -1961,6 +2035,7 @@ fn fsync_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use tempfile::tempdir;
 
@@ -1974,6 +2049,46 @@ mod tests {
             Some(dir.to_path_buf()),
             dir.join("state"),
         )
+    }
+
+    /// Time-to-resolve must not grow while nothing happens.
+    ///
+    /// `updated_ts` moves on ANY later change — a message, a pin, an owner — so a thread resolved
+    /// in four minutes and commented on the next morning used to report a day. That number would
+    /// have been read as a trend and acted on.
+    #[test]
+    fn resolution_time_is_measured_to_the_resolution_and_a_reopen_is_a_fact() {
+        let d = tempfile::tempdir().unwrap();
+        let mut room = writer_in(d.path());
+        // The metrics read the ROOM's directory, not the project's — a thread lives under
+        // `<project>/.rozum/room/`, and pointing the check at the project silently finds nothing.
+        let root = room.paths().root.clone();
+        let root = root.as_path();
+        let m = room.append("p1", "alice", "the site is down", 1_000).unwrap();
+        let t = room.open_thread(m.id(), "site down", ThreadKind::Incident, 1_000).unwrap();
+
+        // Escalated, then resolved four minutes in.
+        room.set_thread_state(&t.id, ThreadState::Escalated, 1_060).unwrap();
+        let resolved = room.set_thread_state(&t.id, ThreadState::Resolved, 1_240).unwrap().unwrap();
+        assert_eq!(resolved.resolved_ts, Some(1_240));
+        assert_eq!(resolved.escalations, 1, "an escalation that ended must still be counted");
+
+        // A day later somebody adds a note: `updated_ts` moves, the resolution time must not.
+        room.set_thread_owner_severity(&t.id, Some("bob".into()), None, 90_000).unwrap();
+        let mm = thread_metrics(root);
+        assert_eq!(mm["avg_time_to_resolve_secs"], serde_json::json!(240));
+        assert_eq!(mm["escalated_ever"], serde_json::json!(1));
+        assert_eq!(mm["reopened_threads"], serde_json::json!(0));
+
+        // Reopened: the clock restarts, and the fact is recorded.
+        let re = room.set_thread_state(&t.id, ThreadState::Open, 91_000).unwrap().unwrap();
+        assert_eq!(re.reopened, 1);
+        assert_eq!(re.resolved_ts, None, "a reopened thread has no resolution time");
+        // …and the eventual duration is measured from the ORIGINAL creation, not from the reopen:
+        // an incident that took three tries took as long as it took.
+        room.set_thread_state(&t.id, ThreadState::Resolved, 92_000).unwrap();
+        assert_eq!(thread_metrics(root)["avg_time_to_resolve_secs"], serde_json::json!(91_000));
+        assert_eq!(thread_metrics(root)["reopened_threads"], serde_json::json!(1));
     }
 
     // 2026-06-16 12:00 and 2026-06-17 12:00 local-ish anchors. We pass explicit
@@ -2098,6 +2213,9 @@ mod tests {
                 links: vec![],
             created_ts: 0,
             updated_ts: updated,
+            resolved_ts: None,
+            reopened: 0,
+            escalations: 0,
         };
         let now = 100_000u64;
         // Critical SLA = 15m: updated 20m ago → stale; updated 10m ago → fresh.

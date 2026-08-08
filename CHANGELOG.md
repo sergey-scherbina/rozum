@@ -1,5 +1,30 @@
 # Changelog
 
+## mtg-resolving — the metric that grew while nothing happened
+Completed: 2026-08-08
+Spec: `docs/specs/incident-resolving.md`
+
+Took the backlog's biggest strategic item and read the code first. The incident state machine,
+escalation with an assignee and a note, and resolution records were all already built and tested —
+the entry had aged past its own subject. Three things were genuinely missing, and one of them was
+not missing but wrong:
+
+**Time-to-resolve was measured to `updated_ts`**, which moves on any later change: a message, a pin,
+an owner. The same incident reported **4 minutes** or **24.7 hours** depending on whether somebody
+commented the next morning — measured, by running the test against the old code. A number that grows
+while nothing happens is worse than no number, because it gets read as a trend. Threads record when
+they REACHED a terminal state, and the metric uses that.
+
+**Reopen is now a fact** (`reopened`), and reopening clears the resolution time — the work restarted,
+so the clock does. The eventual duration is still measured from the original creation: an incident
+that took three tries took as long as it took.
+
+**Escalation rate**, because `by_state` only ever counted what is escalated right now — a thread
+escalated and then resolved left no trace in it.
+
+The rebuild-from-log path (`repair-threads`) reconstructs all three, since the log is where the
+transitions are recorded.
+
 ## gateway-log-clock — a rate instead of a counter
 Completed: 2026-08-08
 
