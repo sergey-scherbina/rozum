@@ -1,0 +1,6 @@
+feature/mtg-message-metadata 2026-08-08T11:29:46Z
+agent: claude-opus-5
+heartbeat: 2026-08-08T11:29:46Z
+status: not-started
+done-so-far: plan says measure first; kind/severity/tags/thread/in_reply_to already exist — the open part is versioning
+next: read StoredTurn's round-trip and what a plain old line does today
