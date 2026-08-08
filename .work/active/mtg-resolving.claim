@@ -1,0 +1,6 @@
+feature/mtg-resolving 2026-08-08T16:16:01Z
+agent: claude-code
+heartbeat: 2026-08-08T16:16:01Z
+status: in-progress
+done-so-far: mtg-resolving is 80% built; what is left is escalation rate, reopen, and a time-to-resolve that any later message inflates
+next: spec the remainder, then implement
