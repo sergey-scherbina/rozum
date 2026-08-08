@@ -1,5 +1,19 @@
 # Changelog
 
+## ucc-direct-engine — the service names the program it actually runs
+Completed: 2026-08-08
+
+`com.rozum.ucc-control` execs `rozum-gateway` directly instead of going through the `rozum`
+dispatcher. The dispatcher `exec`s its target, replacing its own process — so it was never visible
+at runtime anyway (`ps` always showed `rozum-gateway gateway control-serve`); all it added here was
+one file lookup at startup and one more thing that has to be in the right place.
+
+It stays exactly where it earns its keep: as the command line people type, and as the thing that
+routes `mcp-proxy` / `telegram` / `discord` to `rozum-meet` while everything else goes to the
+engine, so a frontend fix never triggers an MLX rebuild.
+
+Service back in 1 s, `:8411` answers, SPA 200.
+
 ## ctrl-canonical — the dispatcher gets its siblings back
 Completed: 2026-08-08
 

@@ -2,7 +2,7 @@
 # Build + (re)deploy the UCC web control-center as a durable launchd service.
 #
 # Architecture (all ScalaScript sources, no Python proxy):
-#   com.rozum.ucc-control  ->  ~/.cargo/bin/rozum gateway control-serve --port 8411
+#   com.rozum.ucc-control  ->  ~/.cargo/bin/rozum-gateway gateway control-serve --port 8411
 #                              serves SPA + API + chat — single port, same origin
 # Tailscale expose (run once manually if not already set):
 #   tailscale serve --bg --https=8448 http://127.0.0.1:8411
