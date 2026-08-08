@@ -2673,6 +2673,13 @@ async fn run_gateway(port: u16, model_spec: String, n_ctx: Option<u32>, cfg: roz
     // size unblocks them as soon as we're loaded. No-op for an already-cached model (same
     // value) or when the gate was bypassed. Best-effort.
     rozum::share::update_my_reservation(&model_spec, estimate_model_footprint_bytes(&model_spec, n_ctx));
+    // A DATED start line. The log held 1203 starts and `launchctl` reported `runs = 3152` with no
+    // way to tell whether that accumulated over a month or over an afternoon — and restart RATE is
+    // exactly the signal that separates a healthy service from BUG-013 (four days of crash-looping
+    // that took the assistant down) and BUG-025 (a respawn every ~9 s while every surface stayed
+    // green). Both were found by someone happening to read a counter, which is not a mechanism.
+    // One line per start is enough to date them; `doctor --services` counts them per hour.
+    eprintln!("rozum gateway: START {} pid {}", chrono::Local::now().to_rfc3339(), std::process::id());
     eprintln!("rozum gateway  http://127.0.0.1:{port}");
     eprintln!("  model:              {model_spec}");
     eprintln!();

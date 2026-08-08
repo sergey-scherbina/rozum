@@ -307,6 +307,56 @@ fn periodic_check(name: &'static str, last_exit: i64, every_secs: u64, what: &st
     }
 }
 
+/// The restart rate as a phrase, or nothing at all. Silence when the job restarted once (that is
+/// every healthy service) or writes no dated start line — a check that appends noise to every OK
+/// line is a check people stop reading.
+fn restart_note(label: &str) -> String {
+    match restarts_last_hour(label) {
+        Some(n) if n > 1 => format!(" — restarted {n}× in the last hour"),
+        _ => String::new(),
+    }
+}
+
+/// How often a job has restarted in the last hour, read from its own log.
+///
+/// `launchctl` reports a LIFETIME counter — 3152 runs, over a month or over an afternoon, and the
+/// number cannot tell you which. That ambiguity is why BUG-013 (four days of crash-looping) and
+/// BUG-025 (a respawn every ~9 s) were both found by somebody happening to look, rather than by
+/// anything reporting them. A rate is the signal; a total is trivia.
+///
+/// Counts `START <rfc3339>` lines newer than an hour. `None` when the job writes no such line —
+/// said as "not instrumented" rather than guessed at, because a zero here would read as "healthy".
+fn restarts_last_hour(label: &str) -> Option<usize> {
+    let path = Command::new("plutil")
+        .args(["-extract", "StandardErrorPath", "raw", "-o", "-"])
+        .arg(format!("{}/Library/LaunchAgents/{label}.plist", std::env::var("HOME").ok()?))
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
+    count_recent_starts(std::path::Path::new(&path), chrono::Duration::hours(1))
+}
+
+/// Split from the plist lookup so the counting can be tested without a launchd job.
+fn count_recent_starts(path: &Path, window: chrono::Duration) -> Option<usize> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let cutoff = chrono::Local::now() - window;
+    let mut seen_any = false;
+    let mut recent = 0usize;
+    for line in text.lines().rev().take(20_000) {
+        let Some(rest) = line.split(" START ").nth(1) else { continue };
+        seen_any = true;
+        let Some(stamp) = rest.split_whitespace().next() else { continue };
+        match chrono::DateTime::parse_from_rfc3339(stamp) {
+            Ok(t) if t.with_timezone(&chrono::Local) >= cutoff => recent += 1,
+            Ok(_) => break, // the log is chronological; older than the window ends the scan
+            Err(_) => {}
+        }
+    }
+    seen_any.then_some(recent)
+}
+
 /// What a launchd exit code MEANS, for the two that this project has actually been bitten by.
 ///
 /// `78` is the one that cost four days (BUG-013): launchd itself refuses to exec the program and
@@ -540,8 +590,11 @@ async fn check_service(
                      restart what it does not own (BUGS.md BUG-025)"
                 ),
             ),
-            Some(_) => Check::ok(name, format!("running (pid {pid}) and owns the socket, {url} {detail}")),
-            None => Check::ok(name, format!("running (pid {pid}), {url} {detail}")),
+            Some(_) => Check::ok(
+                name,
+                format!("running (pid {pid}) and owns the socket, {url} {detail}{}", restart_note(label)),
+            ),
+            None => Check::ok(name, format!("running (pid {pid}), {url} {detail}{}", restart_note(label))),
         },
         // The BUG-013 shape exactly: the process table says yes, the service says nothing.
         Err(why) => Check::fail(
@@ -944,6 +997,33 @@ mod tests {
         assert_eq!(transitions(&report(CheckStatus::Ok)).len(), 1, "…on the second good tick");
 
         unsafe { std::env::remove_var("XDG_STATE_HOME") };
+    }
+
+    /// A rate needs a clock in the log, and silence when there is nothing to say.
+    #[test]
+    fn a_restart_rate_is_read_from_dated_start_lines() {
+        let d = tempfile::tempdir().unwrap();
+        let log = d.path().join("gw.log");
+        let now = chrono::Local::now();
+        let old = now - chrono::Duration::hours(5);
+        // Chronological, like the real file: two starts inside the window, one long before it.
+        std::fs::write(
+            &log,
+            format!(
+                "rozum gateway: START {} pid 1\nsome noise\nrozum gateway: START {} pid 2\n\
+                 rozum gateway: START {} pid 3\n",
+                old.to_rfc3339(),
+                (now - chrono::Duration::minutes(30)).to_rfc3339(),
+                (now - chrono::Duration::minutes(2)).to_rfc3339()
+            ),
+        )
+        .unwrap();
+        assert_eq!(count_recent_starts(&log, chrono::Duration::hours(1)), Some(2));
+
+        // A log with no dated start line is "not instrumented", NOT "zero restarts" — a zero here
+        // would read as healthy, which is the mistake this whole item is about.
+        std::fs::write(&log, "context window: 32768\nready\n").unwrap();
+        assert_eq!(count_recent_starts(&log, chrono::Duration::hours(1)), None);
     }
 
     #[test]

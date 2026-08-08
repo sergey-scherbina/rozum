@@ -1,5 +1,22 @@
 # Changelog
 
+## gateway-log-clock — a rate instead of a counter
+Completed: 2026-08-08
+
+`~/.rozum-gateway.log` held 1203 starts and `launchctl` reported `runs = 3152`, with nothing to say
+whether that accumulated over a month or over an afternoon. Restart RATE is exactly the signal that
+separates a healthy service from BUG-013 (four days of crash-looping that took the assistant down)
+and BUG-025 (a respawn every ~9 s while every surface stayed green) — and both were found by
+somebody happening to read a counter, which is not a mechanism.
+
+The gateway prints one dated line per start, and `doctor --services` counts them: `restarted 2× in
+the last hour`, appended only when there is something to say — a note on every healthy line is a
+note people stop reading. A log with no dated start reads as "not instrumented", never as "zero
+restarts", because a zero there would look like health.
+
+Verified on the machine: two kickstarts 27 s apart, both dated in the log, and the check reported
+the pair.
+
 ## doctor-confirm — the watcher's first finding was about the watcher
 Completed: 2026-08-08
 
