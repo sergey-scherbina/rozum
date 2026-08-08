@@ -1,0 +1,6 @@
+feature/install-all-copies 2026-08-08T11:31:12Z
+agent: claude-code
+heartbeat: 2026-08-08T11:31:12Z
+status: in-progress
+done-so-far: three copies of one binary, ages Aug 1 / Aug 5 / Aug 8; the resident gateway runs the Aug 5 one
+next: install to every path the launchd roster execs, derived from the plists
