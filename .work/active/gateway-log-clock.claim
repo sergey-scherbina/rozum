@@ -1,6 +1,0 @@
-feature/gateway-log-clock 2026-08-08T15:09:13Z
-agent: claude-code
-heartbeat: 2026-08-08T15:09:13Z
-status: in-progress
-done-so-far: the log has 1203 starts and no clock; restart RATE is the signal BUG-013 and BUG-025 both needed
-next: a dated START line, and doctor reporting restarts in the last hour
