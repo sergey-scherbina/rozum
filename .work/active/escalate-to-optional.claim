@@ -1,6 +1,0 @@
-feature/escalate-to-optional 2026-08-08T07:32:58Z
-agent: claude-opus-5
-heartbeat: 2026-08-08T07:32:58Z
-status: not-started
-done-so-far: found deploying: the CLI makes --to REQUIRED, so yesterday's on-call resolution is unreachable from a shell
-next: make --to optional and prove the on-call path end to end
