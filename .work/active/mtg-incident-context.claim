@@ -1,6 +1,0 @@
-feature/mtg-incident-context 2026-08-08T16:46:20Z
-agent: claude-code
-heartbeat: 2026-08-08T16:46:20Z
-status: in-progress
-done-so-far: thread_context already gathers in-room context; the gap is evidence from OUTSIDE the room
-next: spec the evidence bundle, then the log slice and the capture-time snapshot
