@@ -1,0 +1,6 @@
+feature/backlog-triage 2026-08-08T14:48:23Z
+agent: claude-code
+heartbeat: 2026-08-08T14:48:23Z
+status: in-progress
+done-so-far: 56 open items over 2072 lines; several already done or obsoleted by the model freeze
+next: verify each claim before moving it, archive the dead, mark what is blocked upstream
