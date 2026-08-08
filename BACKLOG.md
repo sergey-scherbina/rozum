@@ -226,6 +226,13 @@ the deferred follow-ups (operator-triaged 2026-06-24, none urgent):
   (`scalascript:INBOX.md` `build-rust-std-json-cons`, room post). Nothing to do here until it lands;
   `scripts/install-bins.sh` now tries, refuses loudly with the compiler's own words, and leaves the
   working binary alone.
+  **2026-08-08 — still true, and now linked to two more reports.** Re-checked after rebuilding their
+  toolchain twice today: the build still fails, and the FIRST error is
+  `Term.ApplyUnary (!jsonCoreIsLowSurrogate(low))` — the same unsupported unary `!` on a call that
+  blocked rozum's own `public-matrix.ssc` (`ucc-ssc-backend` slice 1). So this entry,
+  `join-works-under-build-rust-not-run` and the two divergences found writing that file are ONE
+  seam: `build-rust` does not lower real programs. Said so in their room rather than filing a fourth
+  report, so the three do not get routed to three modules as separate work.
 
 ## Land the reactive-chat primitives in canonical scalascript (deferred "потом", 2026-07-22)
 
