@@ -225,22 +225,12 @@ the deferred follow-ups (operator-triaged 2026-06-24, none urgent):
 
 ## The meeting PWA cannot be rebuilt from source (found 2026-08-08)
 
-- [ ] **meeting-ssc-unbuildable** — `~/.local/bin/rozum-meeting-ssc` serves `:8405` (phone, over
-  Tailscale) and dates from 2026-06-29, because `ssc-tools build-rust clients/meeting/meeting.ssc`
-  fails today inside the STANDARD LIBRARY: `jsonCoreRenderFields extracts Cons which is not a known
-  enum constructor`, `_normSegments uses unsupported infix operator ::`. **The running binary is the
-  only artifact** — a service whose source no longer compiles cannot be fixed when it breaks, and
-  that is the actual risk, not the staleness. Reported upstream by their procedure
-  (`scalascript:INBOX.md` `build-rust-std-json-cons`, room post). Nothing to do here until it lands;
-  `scripts/install-bins.sh` now tries, refuses loudly with the compiler's own words, and leaves the
-  working binary alone.
-  **2026-08-08 — still true, and now linked to two more reports.** Re-checked after rebuilding their
-  toolchain twice today: the build still fails, and the FIRST error is
-  `Term.ApplyUnary (!jsonCoreIsLowSurrogate(low))` — the same unsupported unary `!` on a call that
-  blocked rozum's own `public-matrix.ssc` (`ucc-ssc-backend` slice 1). So this entry,
-  `join-works-under-build-rust-not-run` and the two divergences found writing that file are ONE
-  seam: `build-rust` does not lower real programs. Said so in their room rather than filing a fourth
-  report, so the three do not get routed to three modules as separate work.
+- [x] **meeting-ssc-unbuildable — DONE 2026-08-08.** The blocker was two import lines. On the Rust
+  backend `route`/`serve`/`requestCookie`/`readFile`/`listDir`/`isDir` are intrinsics when used
+  UNIMPORTED; importing `std/http.ssc` (19 lowering errors) and `std/fs.ssc` (1) is what pulled in
+  the `::`/`Cons`/`Nil` code the backend cannot lower. Dropping them took the file from 20 errors to
+  0; spelling out `ProcessOptions(…, true)` at 23 call sites got the emitted Rust to compile. The
+  binary is rebuilt, published and serving :8405. Record: `CHANGELOG.md`.
 
 ## Land the reactive-chat primitives in canonical scalascript (deferred "потом", 2026-07-22)
 

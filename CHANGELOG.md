@@ -1,5 +1,34 @@
 # Changelog
 
+## meeting-ssc-unbuildable — a live service that could not be rebuilt, for two import lines
+Completed: 2026-08-08
+
+`~/.local/bin/rozum-meeting-ssc` had served the phone meeting web on :8405 since 2026-06-29 as the
+ONLY artifact of itself: the source stopped building inside the standard library, so the one thing
+that could not happen was a fix if it broke.
+
+The cause turned out to be far smaller than "the Rust backend has no List lowering". Measured one
+import at a time in an otherwise empty program: `std/http.ssc` → 19 lowering errors, `std/fs.ssc` →
+1, `std/process.ssc` → 0, `std/ui/primitives.ssc` → 0. The same names used UNIMPORTED resolve to
+intrinsics and lower straight to the emitted runtime. Deleting two import lines took this file from
+20 errors to 0. Then `ProcessOptions(None, Map(), None)` still refused to compile at all 23 call
+sites — default parameters are a declared capability the backend does not apply — so the fourth
+argument is spelled out. A header comment says all of this, because the imports look like an
+oversight and the next person to tidy them up would put the service back in its box.
+
+Verified by DIFF, not by exit code: a comparison build on :8406 alongside the live :8405 returned
+byte-identical pages except one link, `8447→8448`, which comes from `16ec79a` and is what
+`deploy-ucc-web.sh` has printed since — the live binary was stale, which was the point.
+
+**Publishing it then took the service down, and that is the more useful half of this entry.**
+`mv` is atomic for the filesystem, not free for the process running from that path: macOS kills a
+running process whose executable is replaced and calls it `OS_REASON_CODESIGNING`, which reads like
+a signature problem and is not. launchd's throttle held the port dark for about a minute while
+`install-bins.sh` reported success. Publishing a binary a job execs IS restarting that job, so it
+now does it deliberately and waits — and the first version of that wait accepted a pid, printed
+"back (pid 6507)" while the old process still held the port, and watched the real service arrive as
+pid 6644. It waits for a pid that survives three seconds now, and exits non-zero if none does.
+
 ## ucc-ssc-backend (measurement slice) — where a .ssc UCC server gets its data
 Completed: 2026-08-08
 Spec: `docs/specs/ucc-ssc-data-seam.md`
