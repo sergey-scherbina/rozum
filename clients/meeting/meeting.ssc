@@ -1,5 +1,19 @@
-[route, serve, requestCookie](std/http.ssc)
-[readFile, listDir, isDir](std/fs.ssc)
+<!--
+  DO NOT re-add `[route, serve, requestCookie](std/http.ssc)` or
+  `[readFile, listDir, isDir](std/fs.ssc)`. Those names are used below, deliberately UNIMPORTED:
+  on the Rust backend they resolve to intrinsics that lower straight to the emitted runtime.
+  Importing the std module instead pulls in code the Rust backend cannot lower (`::` / `Cons` /
+  `Nil` in json-core and `_normSegments`), and the count is not subtle: measured 2026-08-08, one
+  import at a time in an otherwise empty program, `std/http.ssc` gives 19 lowering errors and
+  `std/fs.ssc` gives 1. Those two lines are the whole reason this file could not be rebuilt for
+  six weeks while it served :8405 as the only artifact of itself.
+  `std/process.ssc` and `std/ui/primitives.ssc` lower with ZERO errors, so they stay imported —
+  and `ProcessOptions` is a type, which has no intrinsic form.
+  Reported upstream: scalascript INBOX `build-rust-std-imports-unlowerable`. When it lands, the
+  imports may come back; until then this is not a style choice.
+  Same for `ProcessOptions(None, Map(), None, true)` below — the fourth argument is spelled out
+  because the backend does not apply default parameters (`build-rust-default-params-not-applied`).
+-->
 [exec, ProcessOptions](std/process.ssc)
 [renderHtml, element, textNode](std/ui/primitives.ssc)
 ```scalascript
@@ -8,13 +22,13 @@ val delPy = "import json,os,sys,shutil\nbase=os.environ.get('XDG_STATE_HOME') or
 val cleanPy = "import json,os,sys,shutil,glob\nbase=os.environ.get('XDG_STATE_HOME') or os.path.join(os.path.expanduser('~'),'.local','state')\np=os.path.join(base,'rozum','rooms.json')\nif not os.path.exists(p): sys.exit(0)\nd=json.load(open(p))\nR=d if isinstance(d,list) else d.get('rooms',[])\ndef emp(r):\n root=r.get('root')\n if not root or not os.path.isdir(root): return True\n return not any(os.path.getsize(f)>0 for f in glob.glob(root+'/*.jsonl'))\n[shutil.rmtree(r['root'],ignore_errors=True) for r in R if (not r.get('project')) and emp(r) and r.get('root')]\nK=[r for r in R if r.get('project') or not emp(r)]\njson.dump(K if isinstance(d,list) else dict(d,rooms=K), open(p,'w'))"
 
 def stateRoot(): String =
-  exec("sh", ["-c", "printf '%s' \"${XDG_STATE_HOME:-$HOME/.local/state}/rozum\""], ProcessOptions(None, Map(), None)).stdout.trim
+  exec("sh", ["-c", "printf '%s' \"${XDG_STATE_HOME:-$HOME/.local/state}/rozum\""], ProcessOptions(None, Map(), None, true)).stdout.trim
 
 def roomsDir(): String =
   s"${stateRoot()}/rooms"
 
 def statusOut(): String =
-  exec("rozum", ["meetings", "status"], ProcessOptions(None, Map(), None)).stdout
+  exec("rozum", ["meetings", "status"], ProcessOptions(None, Map(), None, true)).stdout
 
 def roomLineName(l: String): String =
   val a = l.split("project:")
@@ -124,13 +138,13 @@ def sessionToken(): String =
   requestCookie("rozum_token").trim
 
 def strictTokenMode(): Boolean =
-  exec("sh", ["-c", "case \"${ROZUM_MEETING_REQUIRE_TOKEN:-0}\" in 1|true|TRUE|yes|YES|on|ON) printf 1;; *) printf 0;; esac"], ProcessOptions(None, Map(), None)).stdout.trim == "1"
+  exec("sh", ["-c", "case \"${ROZUM_MEETING_REQUIRE_TOKEN:-0}\" in 1|true|TRUE|yes|YES|on|ON) printf 1;; *) printf 0;; esac"], ProcessOptions(None, Map(), None, true)).stdout.trim == "1"
 
 // "handle\trole" for the current cookie scoped to `room`, or "" (no/invalid token).
 def whoLine(room: String): String =
   val tok = sessionToken()
   if tok == "" then ""
-  else exec("rozum", ["meetings", "token", "resolve", tok + "", "--room", room + ""], ProcessOptions(None, Map(), None)).stdout.trim
+  else exec("rozum", ["meetings", "token", "resolve", tok + "", "--room", room + ""], ProcessOptions(None, Map(), None, true)).stdout.trim
 
 def handleOfLine(l: String): String =
   val b = l.split("\t")
@@ -437,7 +451,7 @@ def doPost(body: String): String =
   else
     val h = handleOfLine(wl + "")
     val args = if (h + "") == "" then ["meetings", "post", "--room", room, content] else ["meetings", "post", "--as", h + "", "--room", room, content]
-    val r = exec("rozum", args, ProcessOptions(None, Map(), None))
+    val r = exec("rozum", args, ProcessOptions(None, Map(), None, true))
     "ok"
 
 def confirmForm(act: String, key: String, value: String, label: String, color: String, confirmMsg: String): View =
@@ -488,7 +502,7 @@ def section(title: String, body: View): View =
   ])
 
 def gwStatus(): String =
-  exec("rozum", ["gateway", "status"], ProcessOptions(None, Map(), None)).stdout
+  exec("rozum", ["gateway", "status"], ProcessOptions(None, Map(), None, true)).stdout
 
 def gwModel(o: String): String =
   val a = o.split("model:")
@@ -508,7 +522,7 @@ def gwView(canManage: Boolean): View =
   val o = gwStatus()
   val running = o.contains("running")
   val hd = if running then element("div", ["style" -> "margin-bottom:10px"], Map(), [textNode("активна: "), element("code", ["style" -> "font-family:ui-monospace,Menlo,monospace; font-size:0.9em; background:#23272e; padding:1px 5px; border-radius:5px"], Map(), [textNode(gwModel(o))])]) else element("div", ["style" -> "color:#5b626d; margin-bottom:10px"], Map(), [textNode("гейтвей не запущен")])
-  val mo = exec("rozum", ["models", "list"], ProcessOptions(None, Map(), None)).stdout
+  val mo = exec("rozum", ["models", "list"], ProcessOptions(None, Map(), None, true)).stdout
   val ml = mo.split("\n").filter(l => l.contains(":")).toList
   val rows = ml.map(l => loadBtn(l, canManage)).toList
   val ctl = if running && canManage then element("div", ["style" -> "display:flex; gap:8px; margin-top:12px"], Map(), [confirmForm("gwstop", "x", "1", "🛑 стоп", "#b3431f", "Остановить гейтвей?"), confirmForm("gwunload", "x", "1", "выгрузить", "#3a414d", "Выгрузить модель (демон останется)?")]) else element("span", Map(), Map(), [])
@@ -523,14 +537,14 @@ def modelSpec(l: String): String =
   if sp.length < 2 then "" else sp(1).trim
 
 def gwPort(): String =
-  val o = exec("rozum", ["gateway", "status"], ProcessOptions(None, Map(), None)).stdout
+  val o = exec("rozum", ["gateway", "status"], ProcessOptions(None, Map(), None, true)).stdout
   val a = o.split("port:")
   if a.length < 2 then "8080" else firstLine(a(1) + "")
 
 def mpStatusLine(room: String): String =
-  val pids = exec("pgrep", ["-f", s"meetings participant.*--room $room"], ProcessOptions(None, Map(), None)).stdout
+  val pids = exec("pgrep", ["-f", s"meetings participant.*--room $room"], ProcessOptions(None, Map(), None, true)).stdout
   if pids.trim == "" then ""
-  else exec("ps", ["-o", "command=", "-p", firstLine(pids + "")], ProcessOptions(None, Map(), None)).stdout
+  else exec("ps", ["-o", "command=", "-p", firstLine(pids + "")], ProcessOptions(None, Map(), None, true)).stdout
 
 def mpModelOf(line: String): String =
   val a = line.split("--model ")
@@ -546,7 +560,7 @@ def mpPage(room: String): String =
   val canManage = canActLine(whoLine(room + ""))
   val sl      = mpStatusLine(room)
   val running = sl.trim != ""
-  val mo      = exec("rozum", ["models", "list"], ProcessOptions(None, Map(), None)).stdout
+  val mo      = exec("rozum", ["models", "list"], ProcessOptions(None, Map(), None, true)).stdout
   val ml      = mo.split("\n").filter(l => l.contains(":")).toList
   val mopts   = ml.map(l => mpOption(l)).toList
   val popts   = ["mention", "always", "manual"].map(p => policyOption(p)).toList
@@ -586,7 +600,7 @@ def managePage(): String =
   val canManage = canActLine(whoLine(""))
   val rlines    = statusOut().split("\n").filter(l => l.contains("project:")).toList
   val roomList  = element("div", Map(), Map(), rlines.map(l => roomItem(l, canManage)).toList)
-  val modelsOut = exec("rozum", ["models", "list"], ProcessOptions(None, Map(), None)).stdout
+  val modelsOut = exec("rozum", ["models", "list"], ProcessOptions(None, Map(), None, true)).stdout
   val mlines    = modelsOut.split("\n").filter(l => l.contains(":")).toList
   val modelList = element("div", Map(), Map(), mlines.map(l => modelItem(l, canManage)).toList)
   val back  = element("a", ["href" -> "/", "style" -> "color:#7ab8ff; text-decoration:none"], Map(), [textNode("← чат")])
@@ -632,36 +646,36 @@ def doAction(body: String): String =
     if hasBad(name) then "<!doctype html><meta http-equiv='refresh' content='0;url=/manage'>ok"
     else
       val cmd = s"ROZUM_MEETING_ROOM=$name rozum meetings post 'комната создана'"
-      val r = exec("sh", ["-c", cmd], ProcessOptions(None, Map(), None))
+      val r = exec("sh", ["-c", cmd], ProcessOptions(None, Map(), None, true))
       s"<!doctype html><meta http-equiv='refresh' content='0;url=/r/$name'>ok"
   else if act == "delroom" && name != "" then
-    val r = exec("python3", ["-c", delPy, name], ProcessOptions(None, Map(), None))
+    val r = exec("python3", ["-c", delPy, name], ProcessOptions(None, Map(), None, true))
     "<!doctype html><meta http-equiv='refresh' content='0;url=/manage'>ok"
   else if act == "rmmodel" && spec != "" then
-    val r = exec("rozum", ["models", "rm", spec], ProcessOptions(None, Map(), None))
+    val r = exec("rozum", ["models", "rm", spec], ProcessOptions(None, Map(), None, true))
     "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url=/manage\">ok"
   else if act == "cleanempty" then
-    val r = exec("python3", ["-c", cleanPy], ProcessOptions(None, Map(), None))
+    val r = exec("python3", ["-c", cleanPy], ProcessOptions(None, Map(), None, true))
     "<!doctype html><meta http-equiv='refresh' content='0;url=/manage'>ok"
   else if act == "gwswitch" && spec != "" then
-    val r = exec("rozum", ["gateway", "switch", "--model", spec], ProcessOptions(None, Map(), None))
+    val r = exec("rozum", ["gateway", "switch", "--model", spec], ProcessOptions(None, Map(), None, true))
     "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url=/manage\">ok"
   else if act == "gwstop" then
-    val r = exec("rozum", ["gateway", "stop"], ProcessOptions(None, Map(), None))
+    val r = exec("rozum", ["gateway", "stop"], ProcessOptions(None, Map(), None, true))
     "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url=/manage\">ok"
   else if act == "gwunload" then
-    val r = exec("rozum", ["gateway", "unload"], ProcessOptions(None, Map(), None))
+    val r = exec("rozum", ["gateway", "unload"], ProcessOptions(None, Map(), None, true))
     "<!doctype html><meta http-equiv=\"refresh\" content=\"0;url=/manage\">ok"
   else if act == "mpstart" && room != "" && model != "" then
     val url = s"http://127.0.0.1:${gwPort()}/v1"
     if persona == "" then
-      val r = exec("sh", ["-c", "nohup \"$@\" >/tmp/rozum-mp.log 2>&1 &", "x", "rozum", "meetings", "participant", "--model", model, "--room", room + "", "--reply-policy", policy, "--gateway-url", url], ProcessOptions(None, Map(), None))
+      val r = exec("sh", ["-c", "nohup \"$@\" >/tmp/rozum-mp.log 2>&1 &", "x", "rozum", "meetings", "participant", "--model", model, "--room", room + "", "--reply-policy", policy, "--gateway-url", url], ProcessOptions(None, Map(), None, true))
       s"<!doctype html><meta http-equiv='refresh' content='1;url=/mp/$room'>ok"
     else
-      val r = exec("sh", ["-c", "nohup \"$@\" >/tmp/rozum-mp.log 2>&1 &", "x", "rozum", "meetings", "participant", "--model", model, "--room", room + "", "--reply-policy", policy, "--gateway-url", url, "--persona", persona], ProcessOptions(None, Map(), None))
+      val r = exec("sh", ["-c", "nohup \"$@\" >/tmp/rozum-mp.log 2>&1 &", "x", "rozum", "meetings", "participant", "--model", model, "--room", room + "", "--reply-policy", policy, "--gateway-url", url, "--persona", persona], ProcessOptions(None, Map(), None, true))
       s"<!doctype html><meta http-equiv='refresh' content='1;url=/mp/$room'>ok"
   else if act == "mpstop" && room != "" then
-    val r = exec("pkill", ["-f", s"meetings participant.*--room ${room + ""}"], ProcessOptions(None, Map(), None))
+    val r = exec("pkill", ["-f", s"meetings participant.*--room ${room + ""}"], ProcessOptions(None, Map(), None, true))
     s"<!doctype html><meta http-equiv='refresh' content='0;url=/mp/$room'>ok"
   else if act.startsWith("inc-") && incid != "" && room != "" then
     // RBAC: resolve the cookie once. Observer (or any token without act rights) is rejected here too,
@@ -680,7 +694,7 @@ def doAction(body: String): String =
         else []
       if verb.length < 1 then s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>ok"
       else
-        val r = exec("rozum", (pre ++ verb).toList, ProcessOptions(None, Map(), None))
+        val r = exec("rozum", (pre ++ verb).toList, ProcessOptions(None, Map(), None, true))
         s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>ok"
     else
       s"<!doctype html><meta http-equiv='refresh' content='0;url=/incidents/$room'>denied"
