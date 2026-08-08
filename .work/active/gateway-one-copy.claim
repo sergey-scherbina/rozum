@@ -1,6 +1,0 @@
-feature/gateway-one-copy 2026-08-08T11:51:32Z
-agent: claude-code
-heartbeat: 2026-08-08T11:51:32Z
-status: in-progress
-done-so-far: files are in sync; com.rozum.gateway still execs a second copy
-next: point the shipped plist at the canonical path, bounce the job, then remove the orphan
