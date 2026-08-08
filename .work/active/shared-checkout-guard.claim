@@ -1,0 +1,6 @@
+feature/shared-checkout-guard 2026-08-08T16:12:46Z
+agent: claude-opus-5
+heartbeat: 2026-08-08T16:12:46Z
+status: not-started
+done-so-far: operator approved with the condition that it must not make things worse — merges/rebases happen in the shared checkout and a naive hook would block them
+next: write it, then test refuse/allow in BOTH trees plus merge, rebase, amend, cherry-pick
