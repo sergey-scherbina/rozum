@@ -58,6 +58,14 @@ stopped and is watched by whoever ran it.
 `--services` alone is a report (exit 0). With `--strict`, a failing service fails the command, so a
 `StartInterval` job or a deploy step can gate on it without parsing the text.
 
+### 3b. The watcher is watched, and knows it is periodic
+
+`com.rozum.doctor` is in the roster like everything else, but a `StartInterval` job holds no pid
+between ticks — judged by the resident rule it would be permanently, wrongly red. It is judged by
+WHEN IT LAST RAN instead, from the state file it writes on every run, and `fail` means silence for
+more than two intervals: one missed tick is a busy machine, two in a row is a watcher that is not
+watching.
+
 ### 4. News, not noise
 
 The periodic job posts to the rozum room **on transition** — when a service that was answering stops

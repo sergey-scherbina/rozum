@@ -420,6 +420,11 @@ enum Command {
         /// (`docs/specs/service-liveness.md`).
         #[arg(long)]
         services: bool,
+        /// Only the service section — for the periodic job, which launchd starts in `/` with a
+        /// minimal PATH, where the demo-path checks report problems that are the environment's
+        /// and not the machine's.
+        #[arg(long)]
+        services_only: bool,
         /// Post to this room ONLY when a service changes verdict — for the periodic job. Silence
         /// means nothing changed; every tick would be noise.
         #[arg(long, requires = "services")]
@@ -1588,8 +1593,8 @@ async fn main() {
             IdentityAction::Whoami => run_identity_whoami(),
             IdentityAction::SetName { name } => run_identity_set_name(&name),
         },
-        Some(Command::Doctor { web_url, strict, services, post_room }) => {
-            run_doctor(web_url, strict, services, post_room).await
+        Some(Command::Doctor { web_url, strict, services, services_only, post_room }) => {
+            run_doctor(web_url, strict, services || services_only, services_only, post_room).await
         }
         Some(Command::Rooms { action }) => match action {
             RoomsAction::Prune => run_rooms_prune(),
@@ -1982,12 +1987,14 @@ async fn run_doctor(
     web_url: Option<String>,
     strict: bool,
     services: bool,
+    services_only: bool,
     post_room: Option<String>,
 ) {
     let report = rozum::doctor::run(rozum::doctor::DoctorOptions {
         web_url,
         strict,
         services,
+        services_only,
         post_room: post_room.clone(),
     })
     .await;

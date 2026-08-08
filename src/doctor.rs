@@ -75,6 +75,13 @@ pub struct DoctorOptions {
     /// Also report on the `com.rozum.*` launchd jobs and the endpoints they serve
     /// (`docs/specs/service-liveness.md`).
     pub services: bool,
+    /// ONLY the service section — no demo-path checks.
+    ///
+    /// The periodic job runs from launchd, which starts it in `/` with a minimal `PATH`, so the
+    /// demo checks report `scripts/demo-conference.sh is missing` and `tailscale unavailable`
+    /// every five minutes. Neither is true of the machine; both are true of that environment. A
+    /// watcher that cries wolf twice a tick is the failure this whole check exists to remove.
+    pub services_only: bool,
     /// Post a line to this room when a service CHANGES verdict, and stay silent otherwise. For the
     /// periodic job: every tick would be noise, a transition is news.
     pub post_room: Option<String>,
@@ -137,6 +144,9 @@ impl DoctorReport {
 
 pub async fn run(options: DoctorOptions) -> DoctorReport {
     let mut checks = Vec::new();
+    if options.services_only {
+        return DoctorReport { checks: check_services().await };
+    }
     checks.push(check_demo_launcher());
     checks.push(check_tailscale_cli());
     checks.push(check_meeting_daemon().await);
@@ -170,7 +180,7 @@ pub fn transitions(report: &DoctorReport) -> Vec<String> {
     let now: std::collections::HashMap<String, String> = report
         .checks
         .iter()
-        .filter(|c| SERVICES.iter().any(|(_, n, _, _, _)| *n == c.name))
+        .filter(|c| SERVICES.iter().any(|(_, n, _, _, _, _)| *n == c.name))
         .map(|c| (c.name.to_string(), c.status.label().to_string()))
         .collect();
 
@@ -227,6 +237,39 @@ enum Probe {
     None,
 }
 
+/// A `StartInterval` job is healthy when it ran recently, whatever the process table says.
+///
+/// "Recently" is two intervals: one tick can be missed to a busy machine without it meaning
+/// anything, two in a row means it is not running. The evidence is the state file the doctor
+/// writes on EVERY run — the log would do, but a log can be rotated or redirected, while that file
+/// is written by the work itself.
+fn periodic_check(name: &'static str, last_exit: i64, every_secs: u64, what: &str) -> Check {
+    let path = crate::meeting::rozum_state_dir().join("service-liveness.json");
+    let age = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs());
+    match age {
+        None => Check::warn(
+            name,
+            format!("installed, but it has never written its state — {what}"),
+            format!("run it once by hand: rozum-gateway doctor --services (writes {})", path.display()),
+        ),
+        Some(a) if a <= every_secs * 2 => {
+            Check::ok(name, format!("ran {a}s ago (every {every_secs}s), last exit {last_exit}"))
+        }
+        Some(a) => Check::fail(
+            name,
+            format!(
+                "silent for {a}s — more than two intervals of {every_secs}s, so {what} is NOT \
+                 watching anything"
+            ),
+            format!("launchctl kickstart -k gui/$UID/com.rozum.doctor, then read ~/.rozum-doctor.log"),
+        ),
+    }
+}
+
 /// What a launchd exit code MEANS, for the two that this project has actually been bitten by.
 ///
 /// `78` is the one that cost four days (BUG-013): launchd itself refuses to exec the program and
@@ -248,6 +291,18 @@ fn exit_meaning(code: i64) -> Option<&'static str> {
     }
 }
 
+/// How a job is expected to be found.
+#[derive(Clone, Copy, PartialEq)]
+enum Shape {
+    /// A service: it should be RUNNING. Not running is the failure this check exists for.
+    Resident,
+    /// A `StartInterval` job: between ticks it is correctly NOT running, and "no pid" says
+    /// nothing. What matters is that it RAN recently — measured by the state file it writes on
+    /// every run. Without this the watcher could not be watched: adding `com.rozum.doctor` to the
+    /// resident list would have made it permanently, wrongly red.
+    Periodic { every_secs: u64 },
+}
+
 /// Who actually serves, when that can be established independently of the job.
 #[derive(Clone, Copy)]
 enum Owner {
@@ -266,16 +321,19 @@ enum Owner {
 /// the transition line quote the wrong check's detail — measured on the first live post, where a
 /// service transition was reported with the demo check's text. Two rows with one name are two
 /// facts a lookup cannot tell apart.
-const SERVICES: &[(&str, &str, Probe, Owner, &str)] = &[
-    ("com.rozum.gateway", "svc:gateway", Probe::Get("http://127.0.0.1:8089/v1/models"), Owner::JobItself, "the resident model"),
-    ("com.rozum.ucc-control", "svc:ucc-control", Probe::Get("http://127.0.0.1:8411/control/auth/status"), Owner::JobItself, "the control plane"),
-    ("com.rozum.meeting-daemon", "svc:meeting-daemon", Probe::Get("http://127.0.0.1:8401/rooms"), Owner::SocketLock, "meeting rooms over REST"),
-    ("com.rozum.meeting-ssc", "svc:meeting-ssc", Probe::Get("http://127.0.0.1:8405/"), Owner::JobItself, "the meeting PWA"),
-    ("com.rozum.mcp-http", "svc:mcp-http", Probe::McpInitialize("http://127.0.0.1:8779/mcp"), Owner::JobItself, "MCP over HTTP"),
-    ("com.rozum.telegram", "svc:telegram", Probe::None, Owner::JobItself, "the Telegram bridge (private)"),
-    ("com.rozum.telegram-groups", "svc:telegram-groups", Probe::None, Owner::JobItself, "the Telegram bridge (groups)"),
-    ("com.rozum.assistant", "svc:assistant", Probe::None, Owner::JobItself, "the participant pool"),
-    ("com.rozum.assistant-groups", "svc:assistant-groups", Probe::None, Owner::JobItself, "the participant pool (groups)"),
+const SERVICES: &[(&str, &str, Probe, Owner, Shape, &str)] = &[
+    ("com.rozum.gateway", "svc:gateway", Probe::Get("http://127.0.0.1:8089/v1/models"), Owner::JobItself, Shape::Resident, "the resident model"),
+    ("com.rozum.ucc-control", "svc:ucc-control", Probe::Get("http://127.0.0.1:8411/control/auth/status"), Owner::JobItself, Shape::Resident, "the control plane"),
+    ("com.rozum.meeting-daemon", "svc:meeting-daemon", Probe::Get("http://127.0.0.1:8401/rooms"), Owner::SocketLock, Shape::Resident, "meeting rooms over REST"),
+    ("com.rozum.meeting-ssc", "svc:meeting-ssc", Probe::Get("http://127.0.0.1:8405/"), Owner::JobItself, Shape::Resident, "the meeting PWA"),
+    ("com.rozum.mcp-http", "svc:mcp-http", Probe::McpInitialize("http://127.0.0.1:8779/mcp"), Owner::JobItself, Shape::Resident, "MCP over HTTP"),
+    ("com.rozum.telegram", "svc:telegram", Probe::None, Owner::JobItself, Shape::Resident, "the Telegram bridge (private)"),
+    ("com.rozum.telegram-groups", "svc:telegram-groups", Probe::None, Owner::JobItself, Shape::Resident, "the Telegram bridge (groups)"),
+    ("com.rozum.assistant", "svc:assistant", Probe::None, Owner::JobItself, Shape::Resident, "the participant pool"),
+    ("com.rozum.assistant-groups", "svc:assistant-groups", Probe::None, Owner::JobItself, Shape::Resident, "the participant pool (groups)"),
+    // The watcher, watched by the same list it walks. It is a StartInterval job, so between ticks
+    // it is correctly not running; what would be wrong is silence for longer than its interval.
+    ("com.rozum.doctor", "svc:doctor", Probe::None, Owner::JobItself, Shape::Periodic { every_secs: 300 }, "this liveness check itself"),
 ];
 
 /// The pid holding the lock beside the meeting socket, i.e. the process that is actually serving
@@ -308,8 +366,8 @@ async fn check_services() -> Vec<Check> {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let mut out = Vec::new();
-    for (label, name, probe, owner, what) in SERVICES {
-        out.push(check_service(&jobs, label, name, *probe, *owner, what, &client).await);
+    for (label, name, probe, owner, shape, what) in SERVICES {
+        out.push(check_service(&jobs, label, name, *probe, *owner, *shape, what, &client).await);
     }
     out
 }
@@ -351,12 +409,17 @@ async fn check_service(
     name: &'static str,
     probe: Probe,
     owner: Owner,
+    shape: Shape,
     what: &str,
     client: &reqwest::Client,
 ) -> Check {
     let Some((pid, last_exit)) = jobs.get(label).copied() else {
         return Check::skip(name, format!("not installed on this machine ({label})"));
     };
+    // A periodic job is judged by WHEN IT LAST RAN, not by whether it holds a pid right now.
+    if let Shape::Periodic { every_secs } = shape {
+        return periodic_check(name, last_exit, every_secs, what);
+    }
     let Some(pid) = pid else {
         // The job is down — but something else may be serving in its place. Measured the first day
         // this check existed: `com.rozum.meeting-daemon` was not running while `:8401` answered,
@@ -837,7 +900,7 @@ mod tests {
     /// Every service either has a probe or says out loud that it has none.
     #[test]
     fn no_service_is_reported_healthy_on_the_process_table_alone() {
-        for (label, name, probe, _owner, what) in SERVICES {
+        for (label, name, probe, _owner, _shape, what) in SERVICES {
             assert!(label.starts_with("com.rozum."), "{label}");
             assert!(name.starts_with("svc:"), "{name} must not collide with a demo-path check");
             assert!(!what.is_empty(), "{label} must say what it serves");
@@ -850,8 +913,8 @@ mod tests {
         // new entry needs a probe or a reason.
         let unprobed: Vec<&str> = SERVICES
             .iter()
-            .filter(|(_, _, p, _, _)| matches!(p, Probe::None))
-            .map(|(l, _, _, _, _)| *l)
+            .filter(|(_, _, p, _, sh, _)| matches!(p, Probe::None) && *sh == Shape::Resident)
+            .map(|(l, _, _, _, _, _)| *l)
             .collect();
         assert_eq!(
             unprobed,

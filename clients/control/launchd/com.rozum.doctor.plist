@@ -2,9 +2,14 @@
 <!--
   Periodic service liveness (docs/specs/service-liveness.md).
 
-  Runs `rozum doctor --services` every 5 minutes and posts to the rozum room ONLY when a service
+  Runs `rozum doctor --services-only` every 5 minutes and posts to the rozum room ONLY when a service
   changes verdict. Silence means nothing changed; a line every tick would be a line nobody reads,
   which is the same failure as no line at all.
+
+  `--services-only` and not `--services`: launchd starts a job in `/` with a minimal PATH, where
+  the demo-path checks report `scripts/demo-conference.sh is missing` and `tailscale unavailable`
+  every five minutes. Neither is true of the machine; both are true of that environment, and a
+  watcher that cries wolf twice a tick is the failure this check exists to remove.
 
   It REPORTS. It does not restart anything — a watchdog that acts on a service does it while
   somebody is mid-task, and on 2026-08-05 that cost two agents' work in flight.
@@ -23,7 +28,7 @@
   <array>
     <string>/Users/sergiy/.cargo/bin/rozum-gateway</string>
     <string>doctor</string>
-    <string>--services</string>
+    <string>--services-only</string>
     <string>--post-room</string>
     <string>rozum</string>
   </array>
