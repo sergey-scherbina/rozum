@@ -1,6 +1,0 @@
-feature/ucc-ssc-backend-spec 2026-08-08T11:44:16Z
-agent: claude-opus-5
-heartbeat: 2026-08-08T11:44:16Z
-status: not-started
-done-so-far: first slice of a weeks-long cross-repo item: a spec that MEASURES which toolkit gap is on the critical path
-next: count control.rs routes by kind (read / action / terminal / auth) against clients/control
