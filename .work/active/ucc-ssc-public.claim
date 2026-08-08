@@ -1,6 +1,0 @@
-feature/ucc-ssc-public 2026-08-08T11:49:33Z
-agent: claude-opus-5
-heartbeat: 2026-08-08T11:49:33Z
-status: in-progress
-done-so-far: measured each route's data source; slice rescoped to the 2 file-backed ones and matrix-queue-persist filed
-next: port /control/public/matrix/cell + /view/{token} to a .ssc server modelled on rozum-meeting-ssc
