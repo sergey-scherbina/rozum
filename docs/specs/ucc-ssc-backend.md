@@ -100,3 +100,32 @@ only proves a file can be served.
 - **Treat "one language end to end" as the goal.** The goal is that the async-job pattern exists
   ONCE instead of twice (`std/ui/patterns.ssc jobPanel` on the client, `spawn_launch_task` on the
   server). If a slice does not reduce that duplication, it is motion.
+
+## Slice 1 implementation notes (measured 2026-08-08, before writing the port)
+
+**The primitives exist.** `clients/meeting/meeting.ssc` — the live `:8405` server — already imports
+`[route, serve, requestCookie](std/http.ssc)`, `[readFile, listDir, isDir](std/fs.ssc)` and
+`[exec, ProcessOptions](std/process.ssc)`, and `std/json.ssc` provides `jsonParse` / `jsonRead` /
+`jsonStringify`. Nothing new is needed from the toolkit for these two routes.
+
+**`/control/public/matrix/cell` is not "read a CSV".** Faithfully it must:
+
+1. Normalise `model` (`/`, `:`, space → `_`) and REJECT any of `stamp|agent|task|model` that is not a
+   safe single path segment. This is a path-traversal guard on segments joined onto the results
+   dir — a crafted `../..` must not walk out. **Port this first and test it first**; it is the only
+   security-relevant line in the slice.
+2. Parse `<results>/<stamp>/per-run.csv` and find the row matching agent+model+task.
+3. Tail `cells/<agent>/<safe_model>/<task>/agent.log` (bounded, default 120, cap 3000) and read
+   `verify.out` when present.
+4. Check the `t=` view token against the tokens file before any of the above.
+
+**`/view/{token}`** serves an HTML file from the UCC site dir after the same token check.
+
+**The deployment question is small here** and should not be confused with slice 2's session
+question: these routes must answer on the SAME ORIGIN as the console, so either the Rust gateway
+proxies the two paths to the .ssc server's port, or the .ssc server fronts both. A proxy of two
+paths is a deployment decision, reversible, and does not commit the session design.
+
+**Order that de-risks it:** write the .ssc program serving both routes on its OWN port and prove it
+against real results data (the traversal guard first), THEN decide the origin, THEN delete the Rust
+handlers. Deleting them earlier leaves the console broken between steps for no gain.
