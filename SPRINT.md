@@ -2290,27 +2290,17 @@ survives exactly one context rotation. Order is mine to change; scope and the re
   shared gateway's model would BE the behaviour being removed. `BENCH_DEDICATED=1` keeps the old
   path for when the numbers are the point, which is the operator's own condition.
 
-- [ ] **mtg-threads** — MEASURE FIRST. Threads already carry id, kind, a five-state machine, owner,
-  severity, pinning, links, SLA and reply-chains (`in_reply_to`), so this entry is very likely
-  mostly done — four backlog entries in this subsystem turned out that way on 2026-08-06/07. Do not
-  build from the entry's text; run `scripts/rust-item-spans.py` over `store.rs`/`room.rs`, read the
-  daemon's tool table, and reconcile the entry to what exists before writing a line.
+- [x] **mtg-threads — DONE 2026-08-07.** Record lives in `BACKLOG.md`; everything existed except a
+  reader, closed by the queue pane in `clients/control/meetings.ssc`.
 
-- [x] **mtg-message-metadata — DONE 2026-08-08, by measuring.** Nothing built: the five kinds, the
-  severity/status/assignee/tags/links, the derived id and the byte-identity test all existed. The
-  version field is deliberately NOT added — the format is compatible both ways by construction and
-  the log is append-only, so a version-keyed migration cannot exist. See BACKLOG for what would earn
-  one.
-  **This is the FIFTH entry in this subsystem closed by measurement rather than code** (after
-  `meeting-daemon-ownership`, `parked-patches-decide`, the codex delivery evidence, `mtg-message-ops`
-  and `mtg-threads`, whose only real gap was a reader). The pattern is worth more than any of them:
-  **an entry's text ages, the code does not.** Read the tool table, the CLI dispatch and the router
-  before believing a "remaining" list.
-- [ ] **residency-unify-in-process** — the remaining decision is now DECIDED by the operator: the
-  matrix shares the resident model (done above). What is left of the entry is to close it, and to
-  check whether anything else still assumes a process-per-model (`rozum launch --dedicated`, the
-  residency ledger's per-model view). Small.
+- [x] **residency-unify-in-process — DONE 2026-08-07.** Record lives in the entry above and in
+  `docs/specs/residency-unify.md`.
 
+  **A note on this plan block, because it rotted the way everything else did.** These lines carried
+  a SECOND copy of each item's status, and I left them unticked for two days while closing the real
+  entries elsewhere. Status belongs in one place; a plan is a pointer to it, not a duplicate of it.
+  That is the same defect this week has found in five backlog entries, authored this time by the
+  person writing them up.
 - [ ] **ucc-ssc-backend** — LARGE, weeks, cross-repo; do it as staged slices with a spec, never as
   one pass. The toolkit is missing WebAuthn, PTY↔WebSocket, process spawn/kill + registry
   primitives, and a launchd story; the path in the entry is read-only status routes first, action
