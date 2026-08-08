@@ -1,0 +1,175 @@
+#!/usr/bin/env ssc
+---
+name: rozum-public-matrix
+version: 0.1.0
+description: The UCC's public, view-token-gated read routes, served from ScalaScript.
+---
+# rozum public matrix
+
+Slice 1 of `docs/specs/ucc-ssc-backend.md`: the two routes of the UCC console that need **no
+session at all** — they carry a view token, which is a string checked against a file.
+
+**Why these two and not the other two public ones.** `/control/public/matrix` reads
+`matrix_queue()` and `/control/public/matrix/live` reads `matrix_live()`; both are process-global
+state inside the gateway, and no separate server can see it. Measured before writing this, which is
+why the slice is two routes rather than the four the spec first named.
+
+**What this proves, and what it does not.** It proves a .ssc server can stand beside the Rust one
+and answer real traffic from real files. It does not touch auth, spawn, PTY or launchd — those are
+later slices, and mixing them in would make this one unreviewable.
+
+**The guard came first.** `safePathSeg` is the only security-relevant line here: `stamp`, `agent`,
+`task` and the normalised `model` are joined onto the results directory, so a crafted `../..` must
+be REFUSED rather than sanitised. It was ported and tested on its own before a single route was
+written.
+
+```scalascript
+[route, serve, Request, Response](std/http.ssc)
+[readFile, exists](std/fs.ssc)
+[jsonParse, jsonStringify](std/json.ssc)
+[envOrElse](std/os.ssc)
+
+// `std/os.ssc` provides the env primitive. There is no `std/env.ssc` in this runtime tier — the
+// live meeting server shells out to `sh -c` for the same job, which is one reason to write this
+// down rather than copy that.
+def home(): String =
+  envOrElse("HOME", "/tmp")
+
+def stateRoot(): String =
+  envOrElse("XDG_STATE_HOME", home() + "/.local/state") + "/rozum"
+
+def viewTokensPath(): String = stateRoot() + "/ucc-view-tokens.json"
+def uccSiteDir(): String     = home() + "/.rozum/ucc/site"
+
+// `bench_results_dir()` in Rust is CWD-relative (`scripts/bench/results`), which is fine for a
+// process started in the repo and wrong for a service. Take it from the environment so this server
+// can be started from anywhere, and fall back to the same relative path so a repo-local run behaves
+// as the Rust one does.
+def benchResultsDir(): String =
+  envOrElse("ROZUM_BENCH_RESULTS", "scripts/bench/results")
+
+// The Rust original: non-empty, not "." or "..", no path separator. It REJECTS rather than
+// sanitises, so a crafted `../../etc` cannot walk out of the directory it is joined onto.
+def safePathSeg(s: String): Boolean =
+  s.length > 0 && s != "." && s != ".." && !s.contains("/") && !s.contains("\\")
+
+// The model spec carries characters that are legal in a spec and not in one path segment.
+def safeModel(m: String): String =
+  m.replace("/", "_").replace(":", "_").replace(" ", "_")
+
+// A token is valid when it is present in the file and not revoked. An unreadable or absent file
+// means NO token is valid — failing closed, because this is the only thing standing between the
+// open internet and the console's read routes.
+def viewTokenOk(t: String): Boolean =
+  if t.length == 0 then false
+  else
+    val raw = if exists(viewTokensPath()) then readFile(viewTokensPath()) else ""
+    if raw.length == 0 then false
+    else
+      val toks = jsonParse(raw)
+      tokenListHas(toks, t)
+
+def tokenListHas(toks: Any, t: String): Boolean =
+  toks match
+    case l: List[Any] => l.exists(e => tokenMatches(e, t))
+    case _            => false
+
+def tokenMatches(e: Any, t: String): Boolean =
+  e match
+    case m: Map[String, Any] =>
+      val tok = m.get("token").map(v => v.toString).getOrElse("")
+      val rev = m.get("revoked").map(v => v.toString).getOrElse("false")
+      tok == t && rev != "true"
+    case _ => false
+
+def forbidden(): String =
+  jsonStringify(Map("error" -> "invalid or revoked token"))
+
+def badRequest(msg: String): String =
+  jsonStringify(Map("error" -> msg))
+
+// ── /control/public/matrix/cell ────────────────────────────────────────────────────────────────
+// Find one cell in a matrix run: the per-run.csv row matching agent+model+task, plus the archived
+// agent log (tailed) and the verifier output when they were kept.
+
+def csvRows(path: String): List[String] =
+  if !exists(path) then [] else readFile(path).split("\n").toList
+
+def csvCell(header: List[String], row: List[String], name: String): String =
+  val i = header.indexOf(name)
+  if i < 0 || i >= row.length then "" else row(i)
+
+def rowMatches(header: List[String], row: List[String], agent: String, model: String, task: String): Boolean =
+  csvCell(header, row, "agent") == agent &&
+    csvCell(header, row, "model") == model &&
+    csvCell(header, row, "task") == task
+
+// Built by hand rather than `header.zip(row).toMap`: `.toMap` on a zipped list is a STUB in this
+// runtime tier and returns `{"tag":"Stub","fields":["Cons.toMap"]}` instead of an object — found by
+// serving a real cell and reading what came back. Recorded in the spec as a toolkit gap.
+def rowToJson(header: List[String], row: List[String]): String =
+  val pairs = header.zipWithIndex.map(hi =>
+    jsonStringify(hi(0)) + ":" + jsonStringify(if hi(1) < row.length then row(hi(1)) else "")
+  )
+  "{" + pairs.toList.join(",") + "}"
+
+def tailLines(text: String, n: Int): String =
+  val ls = text.split("\n").toList
+  val start = if ls.length > n then ls.length - n else 0
+  ls.drop(start).join("\n")
+
+def cellRoute(req: Request): String =
+  val q = req.query
+  val t = q.get("t").getOrElse("")
+  if !viewTokenOk(t) then forbidden()
+  else
+    val stamp = q.get("stamp").getOrElse("")
+    val agent = q.get("agent").getOrElse("")
+    val model = q.get("model").getOrElse("")
+    val task  = q.get("task").getOrElse("")
+    val sm    = safeModel(model)
+    if !(safePathSeg(stamp) && safePathSeg(agent) && safePathSeg(task) && safePathSeg(sm)) then
+      badRequest("invalid stamp/agent/model/task segment")
+    else
+      val tail = q.get("tail").map(s => s.toInt).getOrElse(120)
+      val capped = if tail > 3000 then 3000 else tail
+      val rows = csvRows(benchResultsDir() + "/" + stamp + "/per-run.csv")
+      if rows.length < 2 then jsonStringify(Map("cell" -> "", "agent_log" -> "", "verify_out" -> ""))
+      else
+        val header = rows(0).split(",").toList
+        val hit = rows.drop(1).filter(r => r.length > 0)
+          .find(r => rowMatches(header, r.split(",").toList, agent, model, task))
+        val cellDir = benchResultsDir() + "/" + stamp + "/cells/" + agent + "/" + sm + "/" + task
+        val logPath = cellDir + "/agent.log"
+        val verPath = cellDir + "/verify.out"
+        val agentLog = if exists(logPath) then tailLines(readFile(logPath), capped) else ""
+        val verifyOut = if exists(verPath) then readFile(verPath) else ""
+        val cellJson = hit.map(r => rowToJson(header, r.split(",").toList)).getOrElse("null")
+        "{\"cell\":" + cellJson +
+          ",\"agent_log\":" + jsonStringify(agentLog) +
+          ",\"verify_out\":" + jsonStringify(verifyOut) + "}"
+
+// ── /view/{token} ──────────────────────────────────────────────────────────────────────────────
+// The read-only console page. The token is the LAST path segment, and it is checked before the file
+// is read — an invalid token must not even reveal whether the page exists.
+
+def lastSegment(path: String): String =
+  val parts = path.split("/").toList
+  if parts.length == 0 then "" else parts(parts.length - 1)
+
+// The handler takes the PATH as a String, not a Request: that is the surface `route` binds to a
+// PREFIX. With a `Request => …` handler the same registration matches only the exact path, so
+// `/view/<token>` answered 404 while `/view/` answered 200 — measured, not guessed.
+def viewRoute(path: String): String =
+  val t = lastSegment(path)
+  if !viewTokenOk(t) then forbidden()
+  else
+    val page = uccSiteDir() + "/index.html"
+    if exists(page) then readFile(page) else "<!doctype html><p>console not installed</p>"
+
+def main(): Unit =
+  route("GET", "/control/public/matrix/cell", req => cellRoute(req))
+  route("GET", "/view/", p => viewRoute(p))
+  serve(8412)
+main()
+```

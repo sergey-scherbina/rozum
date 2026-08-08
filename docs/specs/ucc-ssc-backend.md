@@ -129,3 +129,36 @@ paths is a deployment decision, reversible, and does not commit the session desi
 **Order that de-risks it:** write the .ssc program serving both routes on its OWN port and prove it
 against real results data (the traversal guard first), THEN decide the origin, THEN delete the Rust
 handlers. Deleting them earlier leaves the console broken between steps for no gain.
+
+## Slice 1, first implementation pass — what works, and the finding that stops it (2026-08-08)
+
+`clients/control/public-matrix.ssc` exists and RUNS: a .ssc server on `:8412` answering real
+requests against real files. Proven live, in this order, deliberately:
+
+| | |
+|---|---|
+| the path-traversal guard | ported first and tested ALONE before a route existed — 9 cases, including `..`, `../etc/passwd`, bare and back slashes |
+| an invalid view token | refused, `{"error":"invalid or revoked token"}` |
+| a traversal attempt with a VALID token | refused, `{"error":"invalid stamp/agent/model/task segment"}` |
+| a real matrix cell | **found** in the operator's own `per-run.csv` |
+
+**What stops it, and it is a toolkit finding rather than a porting problem.**
+`List.join` behaves in two incompatible ways depending on the frontend:
+
+- **`--v1`**: `No method 'join' on ListV(...)` — a hard, loud error.
+- **default front**: silently yields a `Stub`, which SERIALISES INTO THE RESPONSE as
+  `{"cell":{Stub}}`. No error, no log line: **wrong data served to a user.**
+
+`map`, `filter` and `drop` all showed as `Stub` for the same reason — each was followed by `join`.
+`length`, `indexOf`, `zip`, `zipWithIndex` and `find` are real on both.
+
+**Why this matters beyond one route.** The whole `ucc-ssc-backend` item is "port real logic to
+.ssc". If a missing collection operation can reach production as plausible-looking JSON instead of
+a crash, then every future slice carries that risk, and the failure mode is the worst kind — silent
+and user-visible. **Before slice 2, this needs either a frontend that fails loudly by default, or a
+list of which operations are safe.** `SSC_FRONT_STRICT=1` exists and turns the fallback into an
+error; whether it also makes stubs fatal is the first thing to check.
+
+**State of the branch:** `feature/ucc-ssc-public` holds the working server with the guard, the token
+gate and the CSV lookup. The cell body is not yet assembled, because assembling it needs string
+joining. It is NOT merged — a route that can answer `{Stub}` should not be on master.
