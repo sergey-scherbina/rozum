@@ -117,7 +117,20 @@
 
 ## UCC backend on .ssc→Rust (strategic, 2026-07-07)
 
-- [ ] **ucc-ssc-backend** — express the UCC server half in ScalaScript, like the meeting web
+- [~] **ucc-ssc-backend** (spec: `docs/specs/ucc-ssc-backend.md`) — **slice 1 SPEC'd 2026-08-08, and
+  the measurement moved the whole plan.** 63 routes: 19 read, 23 action, 5 terminal, 16 auth; only
+  **4 are public** (`/view/{token}` + the three `/control/public/matrix*`), the other 59 sit behind
+  seven permission layers.
+  **The critical path is none of the gaps the entry lists.** "Can a .ssc program serve HTTP" is not
+  one — `rozum-meeting-ssc` has served `:8405` for weeks. WebAuthn is HALF present: 41 lines of
+  browser passkey actions in `std/ui/webauthn.ssc`, no server ceremony. What actually blocks
+  everything is: **how does a .ssc server participate in a session it does not own?** — and porting
+  read routes one at a time would discover that same question 19 times.
+  **Slice 1 is the four PUBLIC routes**, which need no session at all and answer the only question
+  worth answering first: can a .ssc server stand beside the Rust one and serve real traffic. Then
+  decide the session question as its own spec, then the 19 read routes, then the 23 action routes
+  (which do need the spawn/registry primitives). Terminal and auth stay Rust, as the entry says.
+  Original: express the UCC server half in ScalaScript, like the meeting web
   (`rozum-meeting-ssc` is already a pure .ssc→Rust server). Motivation: the async-job pattern now
   exists twice — `std/ui/patterns.ssc jobPanel` (client, toolkit expression) + `control.rs
   spawn_launch_task` (server, Rust) — a .ssc server would let the SERVER half be a scalascript
