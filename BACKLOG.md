@@ -79,6 +79,11 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   may leave it (secrets, size, .gitignored state), and inventing one inside an incident feature is how
   a support tool grows a data-export problem. Wants a spec of its own before any code.
 
+- [ ] **rozum-json-surface** — `rozum models list` / `models info` have no `--json`, and they are
+  what `/control/model/info` needs to move to .ssc (`docs/specs/ucc-ssc-data-seam.md`). Small, and
+  useful to every script on this machine, not only the port. `rozum gateway status --json` already
+  exists and is the model to copy.
+
 ## Model chain (verification-gated, `--model A,B,C`)
 
 The CORE chain shipped on master (spec `docs/specs/pipeline-cascade.md`, SPRINT top item): target

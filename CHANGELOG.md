@@ -1,5 +1,35 @@
 # Changelog
 
+## ucc-ssc-backend (measurement slice) — where a .ssc UCC server gets its data
+Completed: 2026-08-08
+Spec: `docs/specs/ucc-ssc-data-seam.md`
+
+The sibling's `ucc-ssc-backend.md` measured what GATES a route and named the session question as
+the critical path. This slice measured the second axis it left open: where a route's DATA lives.
+
+26 GET routes classified by hand — the grep pass was wrong and counted `share::now_unix`, a clock,
+as in-process state. The finding is that almost nothing in the console is truly in-process: rozum's
+state is file-backed by construction. That is the trap, not the relief — reading it from a second
+language means duplicating a private format and its locking discipline, and the residency ledger is
+a directory of reservation entries with lifetime-lock sidecars reaped under an admit lock, where a
+reader that skips the discipline sees dead reservations as live. **One format, one reader.**
+
+The portable boundary already exists in rozum and nobody planned it: the messenger console serves
+nine routes by shelling out to a CLI that prints JSON. **`/control/status` served from .ssc,
+demonstrated** — a program whose whole body execs `rozum gateway status --json` was emitted through
+`emit-rust`, built, and answered the operator's live machine state (10 keys, real model, 1
+resident). The richest read route in the console, from ScalaScript, ledger still single-reader.
+
+I got one thing wrong first and corrected it in the spec: I called `--json` the missing blocker
+after running `rozum status --json`, which is not the subcommand, and drew a conclusion from the
+error message.
+
+Two toolkit findings on the way, reported upstream (`scalascript@aa2deb83e`): **importing** a std
+module is what breaks Rust lowering, not using its functions — `std/http.ssc` 19 errors,
+`std/fs.ssc` 1, `std/process.ssc` 0, and the same names unimported are intrinsics that lower fine.
+That is why the live `:8405` meeting server cannot be rebuilt: two import lines. And
+`ProcessOptions(None, Map(), None)` emits a struct literal missing the defaulted field.
+
 ## mtg-incident-context — the part of an incident that is not in the room
 Completed: 2026-08-08
 Spec: `docs/specs/incident-evidence.md`
