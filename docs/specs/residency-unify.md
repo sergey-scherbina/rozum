@@ -129,3 +129,31 @@ as trustworthy as peak RSS.
 
 **This is a recommendation, not a decision** — the operator asked for the questions to be written
 down and the choice made deliberately.
+
+## Verified on the live host, 2026-08-08
+
+The entry was closed on a DECISION (the operator's, better than my recommendation). This is the
+evidence that the decision actually holds on the machine, because a closure argued rather than
+measured is the kind this week kept reopening.
+
+**One process holds the model. Everything else routes to it.**
+
+| | |
+|---|---|
+| Residency ledger (`~/.local/state/rozum/gateway/residents/`) | **one** entry — pid 21113, with its lifetime lock |
+| That pid | the launchd `com.rozum.gateway`, serving `Qwen3.5-4B-MLX-4bit` on `:8089` |
+| Two Telegram assistant participants | run with `--gateway-url`; RSS ~10 MB each — no weights |
+| Meeting daemon, UCC control server, bridges | no `--model`, no weights |
+| The matrix (`agentic.sh`) and `solve.sh` | borrow the running gateway since 2026-08-07 |
+| `rozum launch` with a spec | refuses to load a second copy and says so: *"gateway already running model X for N client(s); using it and ignoring Y"* |
+
+**What can still load its own, on purpose:** `rozum launch --dedicated`, `BENCH_DEDICATED=1`, and the
+four measurement scripts (`contention.sh`, `smmrd-measure.sh`, `pipeline-swap-repro.sh`,
+`gateway-smoke.sh`). Those exist to measure residency, contention and prefill peaks, or to be
+deterministic — sharing does not speed them up, it destroys what they measure.
+
+**A correction worth keeping:** the first pass of this census read `~/.rozum/gateway/residents/`
+and reported ZERO residents, which would have been an alarming finding about the ledger. The real
+path is `~/.local/state/rozum/gateway/` (`share::gateway_dir` honours `XDG_STATE_HOME`, falling back
+to `~/.local/state`). Checking the wrong path and believing the empty answer is the same failure as
+trusting a stale entry — just faster.
