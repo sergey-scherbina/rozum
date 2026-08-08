@@ -59,9 +59,26 @@ matrix views an operator actually opens on a phone, and they answer the question
 exists to answer — *can a .ssc server stand beside the Rust one and serve real traffic?* — without
 touching auth, spawn, PTY or launchd.
 
-**Done when:** the four routes are served from a .ssc program behind the same origin, the Rust
-handlers for them are deleted rather than left as a second implementation, and the existing
-view-token gate still refuses a revoked token.
+**CORRECTED 2026-08-08, before writing any code — the slice is TWO routes, not four.** Measured
+each one's data source:
+
+| Route | Reads | Movable? |
+|---|---|---|
+| `/control/public/matrix/cell` | CSV files under the bench results dir | **yes** — pure file read |
+| `/view/{token}` | an HTML file under the UCC site dir | **yes** — pure file read |
+| `/control/public/matrix/live` | `matrix_live()`, a Mutex that IS file-backed | no — a second process reads a copy that is stale between writes |
+| `/control/public/matrix` | `matrix_queue()`, a process-global `OnceLock<Mutex<Vec<MatrixJob>>>` **never written to disk** | **no** — the state exists only inside the gateway process |
+
+So "the four public routes need no session" was true and not sufficient: two of them need the
+gateway's *memory*, which no separate server can have. The queue in particular is not persisted at
+all — see `matrix-queue-persist` in BACKLOG, which would unblock them and is worth doing on its own
+merits (a queue that survives a gateway restart), but is not this slice.
+
+**Done when:** `/control/public/matrix/cell` and `/view/{token}` are served from a .ssc program
+behind the same origin, their Rust handlers are deleted rather than left as a second
+implementation, and the view-token gate still refuses a revoked token. `cell` is the one that
+proves anything — it parses a CSV and answers JSON, which is a real read route; `/view/{token}`
+only proves a file can be served.
 
 ## Slices after that, in dependency order
 

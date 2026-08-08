@@ -2030,3 +2030,19 @@ revive it.
   timestamped log format rather than to retrofit every call site.
   **Done when:** two consecutive starts in that log can be dated, and `doctor --services` can say
   "restarted N times in the last hour" instead of a lifetime counter nobody can interpret.
+
+- [ ] **matrix-queue-persist** — the matrix job queue lives ONLY in gateway memory.
+  **Why:** `matrix_queue()` is a `OnceLock<Mutex<Vec<MatrixJob>>>` with no write path to disk
+  (`crates/rozum-gateway/src/matrix.rs:170`), while its sibling `matrix_live()` IS file-backed
+  (`persist_matrix_live` / `load_matrix_live_from_disk`). Two consequences, and the second is the
+  one that bites: a gateway restart silently forgets every queued job, and no other process can
+  read the queue — which is what stopped `/control/public/matrix` from moving to the .ssc server in
+  `ucc-ssc-backend` slice 1.
+  **How:** the same shape as `matrix_live` — persist on mutation, load on startup, with a stale
+  guard. The live panel already carries `LIVE_STALE_SECS`, so the precedent for "ignore state older
+  than X on startup" exists in the same file.
+  **Gotcha:** a queued-but-never-run job resurrected after a restart would start a matrix run
+  nobody asked for. Persisting the queue means deciding what a restart does to `queued` entries —
+  probably drop them and keep only what was running, which is the conservative direction.
+  **Done when:** a gateway restart preserves the queue, a second process can read it, and a
+  deliberately stale queue file does not launch anything.
