@@ -1204,6 +1204,10 @@ enum ModelsAction {
         /// With `--remote`, also list the extended fallback catalog (older / niche models)
         #[arg(long)]
         all: bool,
+
+        /// Machine-readable output, like `rozum gateway status --json`.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show details for a model spec (works for installed and non-installed)
@@ -1212,6 +1216,10 @@ enum ModelsAction {
         /// `modelscope:<owner>/<repo>`, `ollama:<name>[:<tag>]`, `lmstudio:<repo>`,
         /// or an absolute path
         spec: String,
+
+        /// Machine-readable output, like `rozum gateway status --json`.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Delete a cached model (frees disk). Refused if it is the active gateway
@@ -7491,6 +7499,35 @@ async fn run_models(action: ModelsAction) {
     use rozum::models;
 
     match action {
+        ModelsAction::List { remote: false, json: true, .. } => {
+            // The same rows the table shows, as data. Every field is one a script would otherwise
+            // re-derive by parsing the columns — `size_bytes` raw as well as formatted, because a
+            // caller that wants to sort or sum should not have to undo "3.06 GB".
+            let installed = models::scan_all_installed();
+            let rows: Vec<serde_json::Value> = installed
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "spec": m.spec,
+                        "source": m.source.label(),
+                        "size_bytes": m.size_bytes,
+                        "size": models::format_size(m.size_bytes),
+                    })
+                })
+                .collect();
+            let total: u64 = installed.iter().map(|m| m.size_bytes).sum();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "models": rows,
+                    "count": installed.len(),
+                    "total_bytes": total,
+                    "total": models::format_size(total),
+                }))
+                .unwrap_or_else(|_| "{}".into())
+            );
+        }
+
         ModelsAction::List { remote: false, .. } => {
             let installed = models::scan_all_installed();
             if installed.is_empty() {
@@ -7525,7 +7562,7 @@ async fn run_models(action: ModelsAction) {
             );
         }
 
-        ModelsAction::List { remote: true, all } => {
+        ModelsAction::List { remote: true, all, json: _ } => {
             let print_row = |m: &models::RecommendedModel| {
                 println!(
                     "{:<55} {:>4.1} GB  {}",
@@ -7556,8 +7593,12 @@ async fn run_models(action: ModelsAction) {
             println!("Search more on HuggingFace: https://huggingface.co/mlx-community");
         }
 
-        ModelsAction::Info { spec } => {
-            run_info(&spec).await;
+        ModelsAction::Info { spec, json } => {
+            if json {
+                run_info_json(&spec).await;
+            } else {
+                run_info(&spec).await;
+            }
         }
 
         ModelsAction::Rm { spec, yes } => {
@@ -7696,6 +7737,33 @@ fn which(bin: &str) -> Option<std::path::PathBuf> {
     std::env::split_paths(&path)
         .map(|dir| dir.join(bin))
         .find(|p| p.is_file())
+}
+
+/// `rozum models info --json`.
+///
+/// Deliberately answers about the LOCAL model only and never reaches HuggingFace, unlike the human
+/// form. A script asking "is this installed and where" must not hang on a network call, and a
+/// caller that wants the remote metadata can ask HF directly — mixing the two would make the exit
+/// code depend on the network for a question about a local disk.
+async fn run_info_json(spec: &str) {
+    use rozum::models;
+    let installed = models::scan_all_installed();
+    let local = installed.iter().find(|m| rozum::model_source::same_model(&m.spec, spec));
+    let out = match local {
+        Some(m) => serde_json::json!({
+            "spec": spec,
+            "installed": true,
+            "resolved_spec": m.spec,
+            "source": m.source.label(),
+            "size_bytes": m.size_bytes,
+            "size": models::format_size(m.size_bytes),
+            "path": m.path.display().to_string(),
+        }),
+        None => serde_json::json!({ "spec": spec, "installed": false }),
+    };
+    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".into()));
+    // A question that was answered is a success, even when the answer is "no". Exiting non-zero for
+    // `installed: false` would make `set -e` scripts treat a valid answer as a failure.
 }
 
 async fn run_info(spec: &str) {
