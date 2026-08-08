@@ -67,51 +67,14 @@ if [ "${UCC_SPA_ONLY:-0}" = "1" ]; then
   echo ">> UCC_SPA_ONLY=1 — skipping Rust binary builds (index/SPA-only redeploy)"
 else
 # 1) Build the thin dispatcher used by launchd. It execs rozum-gateway for control-serve.
-# Install a binary where something may be executing the old one.
-#
-# Writing a Mach-O in place poisons the NEXT exec of that inode: macOS kills it with SIGKILL, so
-# `launchctl list` shows -9, every start dies with rc=137, and the log is empty because nothing
-# gets far enough to write to it. Caused live on 2026-08-05 by one hand-typed `cp`, and measured
-# afterwards rather than assumed — the first three explanations were wrong:
-#
-#   cp over the file, then exec it   -> rc=137
-#   cp to a sibling, mv -f, exec it  -> rc=0
-#
-# The RUNNING process survives either way (also measured), which is why this looks harmless right
-# up until the service is restarted. `rm -f` before `cp` — what this script already did, for the
-# same cache, 2026-07-07 — gets a fresh inode and is enough; rename is that plus atomicity, so a
-# deploy has no window where the path is missing or half-written.
-install_bin() {
-  local src="$1" dst="$2"
-  mkdir -p "$(dirname "$dst")"
-  cp "$src" "$dst.new.$$"
-  chmod +x "$dst.new.$$"
-  # EXEC IT BEFORE PUBLISHING IT. A binary that cannot start is the failure mode behind BUG-013 —
-  # launchd refused to exec the installed gateway, answered EX_CONFIG (78), wrote NOTHING because
-  # the process never ran, and KeepAlive respawned it 36,301 times over four days while the
-  # flagship feature was dead. Our own code never exits 78; that number comes from launchd.
-  #
-  # The exact trigger was never reproducible (a scratch KeepAlive job with a binary replaced in
-  # place does NOT reproduce it — measured 2026-08-05, so the obvious explanation is wrong). What
-  # IS reproducible is the consequence, and this is where it is cheap to catch: one exec, here,
-  # before anything is bounced, instead of four silent days.
-  # `$?` after `if ! cmd` is the NEGATION's status, i.e. always 0 — the first version of this
-  # guard reported "will not exec (rc=0)", which is the least useful thing to read at the moment a
-  # deploy stops. Capture the real code first.
-  local rc=0
-  "$dst.new.$$" --help >/dev/null 2>&1 || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    rm -f "$dst.new.$$"
-    echo "FAIL: freshly built $(basename "$dst") will not exec (rc=$rc) — NOT installing." >&2
-    echo "      The running service keeps the old binary, which is the point of checking here." >&2
-    exit 1
-  fi
-  mv -f "$dst.new.$$" "$dst"
-}
 
 echo ">> building rozum dispatcher ..."
 ( cd "$REPO" && cargo build -p rozum-cli --bin rozum )
-install_bin "$REPO/target/debug/rozum" "$BIN"
+# One publish path for every binary: `scripts/install-bins.sh` builds, execs the result, renames it
+# into place, ALSO publishes every other copy the launchd roster execs, and prints what it replaced.
+# This script used to keep its own copy of that logic; two implementations of one idea is how
+# `~/.cargo/bin` and `~/.rozum/bin` came to hold binaries three days and three weeks apart.
+"$REPO/scripts/install-bins.sh" rozum rozum-gateway rozum-meet
 
 # 1b) Build the ACTUAL engine binary the dispatcher execs for every subcommand incl. control-serve
 # (`rozum-cli` is a pure-std shim with no dependency on `rozum-gateway` — rebuilding just the
@@ -124,7 +87,7 @@ echo ">> building rozum-gateway (the engine binary control-serve actually runs) 
 # rm BEFORE cp: overwriting a running Mach-O in place poisons the kernel's per-inode
 # code-signature cache and every subsequent exec dies with SIGKILL (rc=137, no output) —
 # hit live 2026-07-07. A fresh inode sidesteps it.
-install_bin "$REPO/target/release/rozum-gateway" "$BINDIR/rozum-gateway"
+# (installed above by scripts/install-bins.sh, together with every other copy of it)
 
 # 1c) nadia — an agent chip in the UCC is a promise the machine can run it, and the coder/session
 # routes now REFUSE a launch whose agent is not on PATH rather than let it die as a 127 inside a
@@ -136,7 +99,7 @@ install_bin "$REPO/target/release/rozum-gateway" "$BINDIR/rozum-gateway"
 echo ">> building + installing nadia (the agent chip in Coders/Sessions/chat) ..."
 ( cd "$REPO" && cargo build -p nadia --release )
 NADIA_BIN="${NADIA_BIN:-$HOME/.cargo/bin/nadia}"
-install_bin "$REPO/target/release/nadia" "$NADIA_BIN"
+"$REPO/scripts/install-bins.sh" nadia
 echo ">> nadia -> $NADIA_BIN"
 fi
 

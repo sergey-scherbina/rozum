@@ -1,5 +1,31 @@
 # Changelog
 
+## binary-layout — one publish path, and the copy I broke while tidying
+Completed: 2026-08-08
+
+Cleaning up the binaries found two more stale ones and one mistake of my own.
+
+**`rozum-meet` was three weeks old, in both of its copies.** It serves MCP on `:8779`
+(`com.rozum.mcp-http`) and no install path knew it existed — the same shape as the gateway copy, one
+binary further out. `install-bins.sh` covers it now, and names `rozum-meeting-ssc` explicitly as
+NOT ours (the ssc toolchain emits it, the deploy owns it) so that "this does not update it" is a
+statement rather than a silence.
+
+**And I published the wrong program over `~/.rozum/bin/rozum-ctrl`.** That path is
+`deploy-ucc-web.sh`'s `$BIN` — the 627 KB dispatcher (`rozum-cli`) — and my roster walk assumed the
+name meant the engine, so it wrote the 54 MB `rozum-gateway` there. Nothing broke only because
+`com.rozum.ucc-control` was still running its old process. Restored, and verified by running the
+job's exact command on a spare port: `8412 -> 200`. The mapping in the script now carries a comment
+saying which program lives at which name is the DEPLOY's decision, not a guess from the filename.
+
+**The deploy no longer keeps its own copy of the publish logic.** Two implementations of one idea is
+how `~/.cargo/bin` and `~/.rozum/bin` ended up holding binaries three days and three weeks apart;
+`deploy-ucc-web.sh` calls `scripts/install-bins.sh` now, and its duplicate `install_bin` is gone.
+
+Still open, deliberately: `com.rozum.gateway` execs a SECOND copy at `~/.rozum/bin/rozum-gateway`
+rather than the canonical one. Collapsing that means editing the shipped plist and bouncing the
+resident model (~20 s without it), which is the operator's call on timing.
+
 ## install-all-copies — one program, three copies, three ages
 Completed: 2026-08-08
 

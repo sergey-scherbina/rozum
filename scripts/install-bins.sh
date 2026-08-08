@@ -37,7 +37,16 @@ targets() {
     rozum-gateway) echo "rozum rozum-gateway release $CARGO_BIN" ;;
     nadia)         echo "nadia nadia release $CARGO_BIN" ;;
     rozum)         echo "rozum-cli rozum debug $CARGO_BIN" ;;
-    *) echo "unknown binary: $1 (known: rozum-gateway nadia rozum)" >&2; return 1 ;;
+    # The MCP hot path (`com.rozum.mcp-http`, :8779). It was THREE WEEKS old on 2026-08-08 because
+    # no install path knew it existed — the whole reason this list is now checked against the
+    # launchd roster rather than remembered.
+    rozum-meet)    echo "rozum-meet rozum-meet release $CARGO_BIN" ;;
+    # Emitted by the ScalaScript toolchain, not by cargo: `clients/control/deploy-ucc-web.sh` owns
+    # it. Named here so that "this script does not update it" is a statement rather than a silence.
+    rozum-meeting-ssc)
+      echo "SKIP not-a-cargo-binary — built by the ssc toolchain; run clients/control/deploy-ucc-web.sh" >&2
+      return 1 ;;
+    *) echo "unknown binary: $1 (known: rozum-gateway nadia rozum rozum-meet)" >&2; return 1 ;;
   esac
 }
 
@@ -108,7 +117,13 @@ extra_paths_for() {
     esac
     # `rozum-ctrl` is the gateway binary under another name — same program, own copy.
     case "$name:$(basename "$prog")" in
-      rozum-gateway:rozum-gateway|rozum-gateway:rozum-ctrl|nadia:nadia|rozum:rozum) ;;
+      # WHICH program lives at which name is the DEPLOY's decision, not a guess from the
+      # filename — and guessing cost something: `~/.rozum/bin/rozum-ctrl` is
+      # `deploy-ucc-web.sh`'s `$BIN`, i.e. the 627 KB DISPATCHER (`rozum-cli`), and on
+      # 2026-08-08 this list assumed the name meant the engine and published the 54 MB
+      # `rozum-gateway` over it. Nothing broke only because `com.rozum.ucc-control` was still
+      # running its old process. Keep this table next to `deploy-ucc-web.sh` lines 114/127/139.
+      rozum-gateway:rozum-gateway|nadia:nadia|rozum:rozum|rozum:rozum-ctrl|rozum-meet:rozum-meet) ;;
       *) continue ;;
     esac
     [ "$prog" = "$CARGO_BIN/$name" ] && continue
@@ -117,7 +132,7 @@ extra_paths_for() {
   printf '%s\n' "${out[@]}" | sort -u | grep -v '^$' || true
 }
 
-for name in "${@:-rozum-gateway nadia rozum}"; do
+for name in "${@:-rozum-gateway nadia rozum rozum-meet}"; do
   install_one "$name"
   while read -r p; do
     [ -n "$p" ] || continue
