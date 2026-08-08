@@ -10,7 +10,10 @@ Closed items live in [`BACKLOG-ARCHIVE.md`](BACKLOG-ARCHIVE.md), not here. Keepi
 how this file reached 2072 lines with 80 of its 136 entries already done — a list that long is
 skimmed, not read, and the parked bucket had swallowed two items that depend on nothing (see LIVE
 → *Rescued from the parked bucket*). One more entry carried a `Parked because` line belonging to a
-different item entirely; both kinds of rot come from sorting by section instead of by item.
+different item entirely, and TWO entries existed twice over — 2026-08-04 copied them into the parked
+bucket instead of moving them, and the first pass of this triage moved both copies rather than
+noticing. All three kinds of rot come from sorting by section instead of by item, including the one
+committed while fixing the other two.
 
 # LIVE
 
@@ -29,15 +32,7 @@ is how that happens.
 
   *(was under: Matrix improvement levers (found 2026-07-05 during the matri)*
 
-- [ ] **test-cell-repair-failfast** (LOW) — repair Edit-before-Read churn burns the full RUN_TIMEOUT
-  (rc124) without converging; grant ONE bonus repair attempt AFTER `repair_tool_protocol_hint` first fires,
-  and/or detect the churn live and fail-fast. Model-side assertion bug (Devstral writes `reverse("")`) is a
-  known weak cell — do NOT chase to green. See BACKLOG `test-cell-repair-failfast`.
-
-**Parked because:** GLM-4 MoE native port. The only family member that fits 36 GiB (GLM-4.7-Flash) needs an MLA attention we do not have; with the model frozen on Qwen3.5-4B this buys nothing now.
-
-  *(was under: Deprioritised 2026-08-04 — the model is frozen on Qwen3.5-4B)*
-
+  *(this entry existed TWICE — in “Matrix improvement levers” and again in “Deprioritised”, because 2026-08-04 copied instead of moving. Merged 2026-08-08.)*
 ## rozum-core::share tests read the real machine (found 2026-08-05)
 
 - [ ] ~~**share-tests-isolate**~~ — `cargo test -p rozum-core share::` fails on master right now: 7
@@ -52,10 +47,6 @@ is how that happens.
 The honest read of the curated tier is claude 89% / codex 33% / opencode 47% (summarize_matrix.py now
 shows this + fail-mode rollup). The two big NON-model levers, ranked:
 
-- [ ] **glm32b-codex-timeout** (MED) — GLM-4-32B under codex/opencode times out (rc124) on ~7 curated
-  cells; it's a dense 32B that fits resident, so the cost is per-turn reload/slowness under those drivers,
-  not OOM. Lever: EAGER co-residency / keep-resident for GLM-4-32B alone, or a driver-specific higher
-  RUN_TIMEOUT. Cheap wall-clock win (each timeout burns the full ceiling).
 ## Meetings → product-support / incident platform (STRATEGIC — operator 2026-06-28)
 
 **Direction:** rozum meetings are not just agent chat — they are the substrate for **product support
@@ -721,6 +712,7 @@ revive it.
 
 **Parked because:** Bench-harness polish whose failing cell is Devstral (not cached). With the full matrix parked this has no reader.
 
+  *(also listed under “Matrix improvement levers” until 2026-08-08 — the same copy-not-move. It belongs HERE: it is a GLM-under-codex timeout and neither is on this machine.)*
 - [ ] **mlx-glm4-moe** — port GLM-4 MoE to native MLX. **REPRIORITIZED → bigger than thought**
   (checkpoint inspection 2026-06-27, spec `docs/specs/glm4-moe-native.md`): the family splits by
   attention and it's adversarial — `glm4_moe` (GLM-4.5-Air/4.6) is easy GQA but **too big for 36 GiB**;
