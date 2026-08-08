@@ -1056,9 +1056,11 @@ enum IncidentAction {
     Escalate {
         /// The incident/thread id.
         id: String,
-        /// Who to escalate to (a handle).
+        /// Who to escalate to (a handle). OMIT IT to route to whoever is on call — the daemon
+        /// resolves that from the room's roster, picking the least-loaded when several are.
+        /// Required until 2026-08-08, which made the on-call path unreachable from a shell.
         #[arg(long)]
-        to: String,
+        to: Option<String>,
         /// An optional note explaining why.
         #[arg(long)]
         note: Option<String>,
@@ -3936,6 +3938,8 @@ async fn run_meetings_incident(
         }
         IncidentAction::Escalate { id, to, note } => (
             "meeting.escalate",
+            // `to: null` is what the tool reads as "resolve on-call yourself"; sending an empty
+            // string instead would name a participant called "".
             serde_json::json!({ "id": id, "to": to, "note": note.unwrap_or_default() }),
             IncidentRender::Ok,
         ),
@@ -4332,7 +4336,7 @@ async fn run_meetings_phase(phase: String, room: Option<String>) {
     )
     .await
     {
-        Ok(v) => println!("{}", v.as_str().unwrap_or(&v.to_string()).trim().to_string()),
+        Ok(v) => println!("{}", tool_text(&v)),
         Err(e) => {
             eprintln!("meetings phase: {e}");
             std::process::exit(1);
@@ -4340,14 +4344,17 @@ async fn run_meetings_phase(phase: String, room: Option<String>) {
     }
 }
 
-/// `rozum meetings role` — grant or revoke a participant's role (direct disk, like react/redact).
+/// `rozum meetings role` — grant or revoke a participant's role.
+///
+/// Goes through the DAEMON, not the roster file. Writing the file directly (as `react`/`redact` do)
+/// looks equivalent and is not: those append to the log the daemon re-reads, while the roster is
+/// held in MEMORY by the live room. A direct write left the file correct and the running daemon
+/// unaware — so `incident escalate` kept answering `"to": null` with somebody plainly on call.
+/// Found on 2026-08-08 by running the whole path after deploying, which no unit test covered.
 async fn run_meetings_role(handle: String, role: String, room: Option<String>, revoke: bool) {
-    use rozum::meeting::identity::{Role, Roster};
-    let root = resolve_room_or_exit(room, "role").await;
-    if !root.exists() {
-        eprintln!("meetings role: no such room ({})", root.display());
-        std::process::exit(1);
-    }
+    use rozum::meeting::daemon_proxy::detect_project;
+    use rozum::meeting::identity::Role;
+    use rozum::meeting::tui_client::{PostTarget, call_once};
     // Refuse a misspelling instead of defaulting — a typo that quietly becomes `observer` takes
     // somebody off the pager and says nothing.
     let Some(parsed) = Role::parse(&role) else {
@@ -4355,21 +4362,45 @@ async fn run_meetings_role(handle: String, role: String, room: Option<String>, r
         eprintln!("meetings role: unknown role '{role}'; expected one of {}", all.join(", "));
         std::process::exit(2);
     };
-    // `roster.json` beside the day files — the same layout `RoomPaths::roster_path` builds; this
-    // path takes a room ROOT that was already resolved, so it does not need the paths type.
-    let path = root.join("roster.json");
-    let mut roster = Roster::load(&path);
-    let changed = if revoke { roster.revoke(&handle, parsed) } else { roster.grant(&handle, parsed) };
-    if !changed {
-        eprintln!("meetings role: no participant '{handle}' in this room");
-        std::process::exit(1);
+    let sock = rozum::meeting::room_path::meeting_sock();
+    let (display, token) = rozum::meeting::client::post_identity(None);
+    let target = match room {
+        Some(name) => PostTarget::Named(name),
+        None => match detect_project() {
+            Some(p) => PostTarget::Project(p),
+            None => {
+                eprintln!("meetings role: no project detected — run inside a repo, or pass --room");
+                std::process::exit(1);
+            }
+        },
+    };
+    match call_once(
+        &sock,
+        target,
+        &display,
+        token.as_deref(),
+        "meeting.role",
+        serde_json::json!({ "handle": handle, "role": parsed.as_str(), "grant": !revoke }),
+    )
+    .await
+    {
+        // The tool answers a CallToolResult envelope; print the text it carries, not the JSON
+        // around it — a shell user asked a question, not for a protocol frame.
+        Ok(v) => println!("{}", tool_text(&v)),
+        Err(e) => {
+            eprintln!("meetings role: {e}");
+            std::process::exit(1);
+        }
     }
-    if let Err(e) = roster.save(&path) {
-        eprintln!("meetings role: could not write the roster: {e}");
-        std::process::exit(1);
-    }
-    let verb = if revoke { "no longer" } else { "now" };
-    println!("{handle} is {verb} {}", parsed.as_str());
+}
+
+/// The human-readable text inside a tool reply envelope, or the compact JSON when there is none.
+fn tool_text(v: &serde_json::Value) -> String {
+    v.get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.iter().find_map(|x| x.get("text").and_then(|t| t.as_str())))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))
 }
 
 async fn run_meetings_react(msg_id: String, emoji: String, room: Option<String>, off: bool) {

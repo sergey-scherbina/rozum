@@ -755,7 +755,29 @@ impl MeetingServer {
             };
             match changed {
                 Err(e) => err_result(&format!("could not persist the roster: {e}")),
-                Ok(false) => err_result(&format!("no participant '{}' in this room", p.handle)),
+                Ok(false) => {
+                    // `meetings who` shows the AGENT principal while the roster keys on a handle it
+                    // minted, and nothing shows the operator that second name — so a plain refusal
+                    // here is a dead end. Name the candidates and still refuse: base names are not
+                    // unique (this host has 354 participants called "claude") and quietly choosing
+                    // one to put on call is not a thing to do silently.
+                    let same: Vec<&str> = r
+                        .roster()
+                        .participants
+                        .iter()
+                        .filter(|e| e.base_name == p.handle)
+                        .map(|e| e.handle.as_str())
+                        .collect();
+                    if same.is_empty() {
+                        err_result(&format!("no participant '{}' in this room", p.handle))
+                    } else {
+                        err_result(&format!(
+                            "'{}' is a display name here, not a room handle — did you mean {}?",
+                            p.handle,
+                            same.join(", ")
+                        ))
+                    }
+                }
                 Ok(true) => {
                     let verb = if grant { "now" } else { "no longer" };
                     text_result(&format!("{} is {} {}", p.handle, verb, role.as_str()))
