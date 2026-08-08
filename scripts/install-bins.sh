@@ -41,15 +41,9 @@ targets() {
   esac
 }
 
-install_one() {
-  local name="$1"
-  read -r pkg bin profile dir <<<"$(targets "$name")"
-  local flag=""; [ "$profile" = release ] && flag="--release"
-
-  echo "==> building $name ($pkg, $profile)"
-  cargo build $flag -p "$pkg" --bin "$bin" >/dev/null
-
-  local src="target/$profile/$bin" dst="$dir/$name"
+# Publish one built binary at one path: exec it first, rename it into place, say what changed.
+publish() {
+  local src="$1" dst="$2" what="$3"
   [ -x "$src" ] || { echo "FAIL: $src missing after a successful build" >&2; exit 1; }
 
   # What is being replaced, and by what. Both times a stale binary hid on this machine, the install
@@ -58,20 +52,76 @@ install_one() {
   [ -f "$dst" ] && before="$(date -r "$dst" '+%Y-%m-%d %H:%M')"
   local after; after="$(date -r "$src" '+%Y-%m-%d %H:%M')"
 
-  mkdir -p "$dir"
+  mkdir -p "$(dirname "$dst")"
   cp "$src" "$dst.new.$$"
   chmod +x "$dst.new.$$"
   local rc=0
   "$dst.new.$$" --help >/dev/null 2>&1 || rc=$?
   if [ "$rc" -ne 0 ]; then
     rm -f "$dst.new.$$"
-    echo "FAIL: freshly built $name will not exec (rc=$rc) — NOT installing; $dst untouched" >&2
+    echo "FAIL: freshly built $what will not exec (rc=$rc) — NOT installing; $dst untouched" >&2
     exit 1
   fi
   mv -f "$dst.new.$$" "$dst"
   echo "    $dst  ($before  ->  $after)"
 }
 
+# Publish an already-built binary at one more path (a second copy some job execs).
+install_to() {
+  local name="$1" dst="$2"
+  read -r _pkg bin profile _dir <<<"$(targets "$name")"
+  publish "target/$profile/$bin" "$dst" "$name"
+}
+
+install_one() {
+  local name="$1"
+  read -r pkg bin profile dir <<<"$(targets "$name")"
+  local flag=""; [ "$profile" = release ] && flag="--release"
+
+  echo "==> building $name ($pkg, $profile)"
+  cargo build $flag -p "$pkg" --bin "$bin" >/dev/null
+
+  publish "target/$profile/$bin" "$dir/$name" "$name"
+}
+
+# Every path launchd actually execs, read from the plists rather than assumed.
+#
+# This machine had THREE copies of one program, of three different ages:
+#   ~/.cargo/bin/rozum-gateway   Aug 8   (bridges, meeting daemon, doctor)
+#   ~/.rozum/bin/rozum-gateway   Aug 5   (com.rozum.gateway — the RESIDENT MODEL server)
+#   ~/.rozum/bin/rozum-ctrl      Aug 1   (com.rozum.ucc-control; same binary, another name)
+# Hand installs had been going to the first one only, so the most important service on the
+# machine ran three-day-old code and nothing said so. `~/.cargo/bin` vs `~/.rozum/bin` is a
+# divergence this project has been bitten by before; deriving the list from the roster is the
+# only version that cannot drift, because the roster is what the machine obeys.
+extra_paths_for() {
+  local name="$1" out=()
+  local plist
+  for plist in "$HOME/Library/LaunchAgents"/com.rozum.*.plist; do
+    [ -f "$plist" ] || continue
+    # `plutil -extract` reads the VALUE; parsing `plutil -p` text picked up the first `/Users/`
+    # it saw, which was an EnvironmentVariables key, and quietly matched nothing useful.
+    local prog
+    prog="$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null)"
+    case "$prog" in
+      *.sh|"") continue ;;
+    esac
+    # `rozum-ctrl` is the gateway binary under another name — same program, own copy.
+    case "$name:$(basename "$prog")" in
+      rozum-gateway:rozum-gateway|rozum-gateway:rozum-ctrl|nadia:nadia|rozum:rozum) ;;
+      *) continue ;;
+    esac
+    [ "$prog" = "$CARGO_BIN/$name" ] && continue
+    out+=("$prog")
+  done
+  printf '%s\n' "${out[@]}" | sort -u | grep -v '^$' || true
+}
+
 for name in "${@:-rozum-gateway nadia rozum}"; do
   install_one "$name"
+  while read -r p; do
+    [ -n "$p" ] || continue
+    echo "==> also $p (a launchd job execs this copy)"
+    install_to "$name" "$p"
+  done <<<"$(extra_paths_for "$name")"
 done

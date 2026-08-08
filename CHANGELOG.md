@@ -1,5 +1,25 @@
 # Changelog
 
+## install-all-copies — one program, three copies, three ages
+Completed: 2026-08-08
+
+Found by looking at what the launchd roster actually execs, after installing the periodic doctor:
+
+    ~/.cargo/bin/rozum-gateway   Aug 8   bridges, meeting daemon, doctor
+    ~/.rozum/bin/rozum-gateway   Aug 5   com.rozum.gateway — the RESIDENT MODEL server
+    ~/.rozum/bin/rozum-ctrl      Aug 1   com.rozum.ucc-control (same binary, another name)
+
+Every hand install this week went to the first path, so **the most important service on the machine
+had been running three-day-old code** and nothing said so. `~/.cargo/bin` vs `~/.rozum/bin` is a
+divergence this project has been bitten by before.
+
+`install-bins.sh` now derives the destinations from the roster — `plutil -extract ProgramArguments.0`
+on every `com.rozum.*` plist — so a copy some job execs cannot be missed by a list that drifted.
+Two mistakes on the way, both caught by running it: text-parsing `plutil -p` matched an
+`EnvironmentVariables` key instead of the program, and the publish step called a function that lives
+in the other script. The publish path is now one function used by every destination, so an extra
+copy gets the same exec-check and atomic rename as the first.
+
 ## bug027-tests — the fix stops resting on a measurement
 Completed: 2026-08-07
 
