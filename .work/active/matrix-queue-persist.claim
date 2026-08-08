@@ -1,6 +1,0 @@
-feature/matrix-queue-persist 2026-08-08T11:58:22Z
-agent: claude-opus-5
-heartbeat: 2026-08-08T11:58:22Z
-status: not-started
-done-so-far: found while rescoping ucc slice 1: the queue is a process-global Mutex never written to disk
-next: mirror matrix_live's persist/load, and decide what a restart does to queued-but-unstarted jobs
