@@ -913,4 +913,18 @@ revive it.
   already hardest to get wrong. `core.hooksPath` set at the repo level covers worktrees; a hook
   dropped into `.git/hooks` does not.
   **Done when:** a staged `src/**` change in the shared checkout is refused with the worktree
-  command, a claim/board commit still goes through, and a worktree commit is unaffected.
+  command, a claim/board commit still goes through, and a worktree commit is unaffected.\n
+- [ ] **doctor-deployment-drift** — `doctor --services` says every service is healthy while the
+  installed binary is three days behind master, and nothing says so.
+  **Why:** the deployed `~/.cargo/bin/rozum-gateway` fell behind `master` three times in two days
+  (2026-08-07..08). Each time it was caught by hand, and once it meant a feature was "shipped" for a
+  day while the running daemon had never heard of it. Every other kind of drift in this repo now has
+  a check; this one — the gap between what is merged and what is RUNNING — has none.
+  **How:** stamp the build (`git rev-parse HEAD` at compile time via a build script or an env var
+  baked in) and have `doctor --services` compare it against the checkout's `HEAD`, reporting
+  "deployed N commits behind" as a `warn`. `warn`, not `fail`: being behind is normal between a
+  merge and a deploy, and a red that is usually red gets ignored.
+  **Gotcha:** the check must compare against `origin/master`, not the local checkout, or a stale
+  local clone reports itself perfectly up to date.
+  **Done when:** a deliberately stale install is reported with its distance, a fresh one is silent,
+  and the report survives a checkout that is itself behind.
