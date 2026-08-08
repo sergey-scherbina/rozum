@@ -907,3 +907,25 @@ revive it.
   `models list` shows one. Kept as a line so the name resolves: the sprint entry holds the findings,
   and the five gateway delivery bugs it drove out are shipped and independent of it. Reopen only if
   gpt-oss is downloaded again, and re-measure rather than trusting the old numbers.
+
+- [ ] **shared-checkout-guard** — `AGENTS.md` forbids feature work in the shared checkout; nothing
+  enforces it, and I broke the rule three times in one session after writing it up twice.
+  **Evidence, all 2026-08-06..08:** (1) a `scripts/rust-item-spans.py` fix left uncommitted there was
+  swept into a sibling's `claim:` commit and published; (2) earlier the same happened to a
+  `rest_read.rs` change, which landed inside `beace56`; (3) a third time the cwd reset after a
+  `cd /tmp` and half a change landed in the shared tree while the other half was in the worktree.
+  Each time the rule was known, written down, and re-affirmed — the failure is mechanical, not a
+  matter of remembering harder.
+  **The precedent works and is next door.** scalascript's pre-commit refuses any staged path outside
+  `.work/` in the shared main checkout, names the offending paths, and prints the worktree command.
+  It stopped me the first time I tried to commit an `INBOX.md` entry there — the same class of
+  mistake, caught instead of published.
+  **How:** a `pre-commit` hook + `core.hooksPath` (this checkout has NONE configured today — that is
+  why nothing catches anything). Allow `.work/**` plus the board files this repo treats as
+  coordination — `SPRINT.md`, `BACKLOG.md`, `BUGS.md`, `CHANGELOG.md` — and refuse the rest with the
+  `git worktree add` line spelled out, as theirs does. `--no-verify` stays the escape hatch.
+  **Gotcha:** the hook must be installed for every worktree too, or it only guards the place that is
+  already hardest to get wrong. `core.hooksPath` set at the repo level covers worktrees; a hook
+  dropped into `.git/hooks` does not.
+  **Done when:** a staged `src/**` change in the shared checkout is refused with the worktree
+  command, a claim/board commit still goes through, and a worktree commit is unaffected.
