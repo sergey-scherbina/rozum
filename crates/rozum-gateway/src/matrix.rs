@@ -245,12 +245,33 @@ pub(crate) fn matrix_notify() -> &'static tokio::sync::Notify {
     N.get_or_init(tokio::sync::Notify::new)
 }
 
+/// Where the matrix harness and its results live.
+///
+/// Both were resolved against the CURRENT DIRECTORY, which is right for a gateway started inside
+/// the repo and wrong for a service: launchd starts it with whatever cwd it pleases, and the matrix
+/// routes then read a results dir that does not exist and answer "no runs" instead of "I am looking
+/// in the wrong place". Found while porting the same route to `.ssc`, where the bug had to be fixed
+/// to make the port work at all.
+///
+/// The env var is the explicit answer; the cwd-relative path stays as the fallback so a repo-local
+/// run behaves exactly as before. Changing the fallback to a repo-root search would have been a
+/// behaviour change for every existing caller, and this fix is not the place to make one.
+fn bench_path(env_key: &str, rel: &str) -> PathBuf {
+    if let Some(v) = std::env::var_os(env_key) {
+        let p = PathBuf::from(v);
+        if !p.as_os_str().is_empty() {
+            return p;
+        }
+    }
+    std::env::current_dir().unwrap_or_default().join(rel)
+}
+
 pub(crate) fn bench_script() -> PathBuf {
-    std::env::current_dir().unwrap_or_default().join("scripts/bench/agentic.sh")
+    bench_path("ROZUM_BENCH_SCRIPT", "scripts/bench/agentic.sh")
 }
 
 pub(crate) fn bench_results_dir() -> PathBuf {
-    std::env::current_dir().unwrap_or_default().join("scripts/bench/results")
+    bench_path("ROZUM_BENCH_RESULTS", "scripts/bench/results")
 }
 
 pub(crate) fn latest_matrix_result() -> Option<(String, PathBuf)> {
@@ -838,5 +859,39 @@ mod queue_persist_tests {
     #[test]
     fn a_corrupt_queue_file_reads_as_empty() {
         assert!(serde_json::from_slice::<Vec<MatrixJob>>(b"{not json").is_err());
+    }
+}
+
+#[cfg(test)]
+mod bench_path_tests {
+    use super::*;
+
+    /// The env var wins, and an EMPTY one does not — an unset-looking variable that is actually set
+    /// to "" would otherwise resolve every matrix path to the filesystem root, which is the kind of
+    /// wrong that deletes things rather than merely failing.
+    #[test]
+    fn the_env_var_wins_unless_it_is_empty() {
+        let key = "ROZUM_TEST_BENCH_PATH";
+        // SAFETY: single-threaded test, and the key is unique to this test.
+        unsafe { std::env::set_var(key, "/somewhere/results") };
+        assert_eq!(bench_path(key, "rel/path"), PathBuf::from("/somewhere/results"));
+
+        unsafe { std::env::set_var(key, "") };
+        let fallback = bench_path(key, "rel/path");
+        assert_ne!(fallback, PathBuf::from(""), "an empty var must not resolve to the root");
+        assert!(fallback.ends_with("rel/path"));
+
+        unsafe { std::env::remove_var(key) };
+        assert!(bench_path(key, "rel/path").ends_with("rel/path"));
+    }
+
+    /// The fallback stays cwd-relative on purpose: every existing caller runs inside the repo, and
+    /// changing that here would be a behaviour change smuggled into a path fix.
+    #[test]
+    fn the_fallback_is_still_relative_to_the_current_directory() {
+        let key = "ROZUM_TEST_BENCH_PATH_2";
+        unsafe { std::env::remove_var(key) };
+        let cwd = std::env::current_dir().unwrap_or_default();
+        assert_eq!(bench_path(key, "scripts/bench/results"), cwd.join("scripts/bench/results"));
     }
 }
