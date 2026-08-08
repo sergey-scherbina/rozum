@@ -1,6 +1,6 @@
-feature/ucc-ssc-public 2026-08-08T14:02:47Z
+feature/ucc-ssc-public 2026-08-08T17:13:53Z
 agent: claude-opus-5
-heartbeat: 2026-08-08T14:02:47Z
+heartbeat: 2026-08-08T17:13:53Z
 status: blocked
-done-so-far: server runs on :8412; guard + token gate + CSV lookup proven live. BLOCKED: List.join is a silent Stub on the default front and a hard error on --v1
-next: settle the stub question (SSC_FRONT_STRICT=1?) before assembling the cell body; branch feature/ucc-ssc-public holds the work, deliberately unmerged
+done-so-far: routes correct and proven on the run path; three run-vs-build-rust divergences measured, the third (generated Rust does not compile) closes the shipping path
+next: upstream: two follow-up reports pending their preferred shape; nothing to port here until run and build-rust agree
