@@ -1,0 +1,6 @@
+feature/shared-checkout-guard 2026-08-09T12:46:20Z
+agent: claude-code
+heartbeat: 2026-08-09T12:46:20Z
+status: not-started
+done-so-far:
+next: pre-commit hook + core.hooksPath, refusing non-coordination paths in the SHARED checkout only
