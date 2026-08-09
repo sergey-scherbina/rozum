@@ -1,0 +1,6 @@
+feature/meeting-daemon-ownership 2026-08-09T14:25:46Z
+agent: claude-code
+heartbeat: 2026-08-09T14:25:46Z
+status: not-started
+done-so-far:
+next: clients ask launchd first (fallback self-spawn); explicit handoff; one source for the web secret
