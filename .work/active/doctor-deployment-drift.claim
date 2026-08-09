@@ -1,6 +1,0 @@
-feature/doctor-deployment-drift 2026-08-09T12:47:48Z
-agent: claude-code
-heartbeat: 2026-08-09T12:47:48Z
-status: not-started
-done-so-far:
-next: stamp the build with its commit, have doctor --services compare it to origin/master
