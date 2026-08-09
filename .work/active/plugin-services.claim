@@ -1,6 +1,0 @@
-feature/plugin-services 2026-08-09T14:49:32Z
-agent: claude-code
-heartbeat: 2026-08-09T14:49:32Z
-status: not-started
-done-so-far:
-next: one service declaration; doctor and install-bins read it instead of三 copies
