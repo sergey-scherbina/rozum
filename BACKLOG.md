@@ -164,7 +164,11 @@ single-writer daemon). Each item below is its own spec+build later — listed to
     the entry names before scheduling the work — the line number moving is the cheap tell.
 ## MCP (deferred — decide the use, then build)
 
-- [ ] **mcp-use** — **REWRITTEN 2026-08-09 after reading the code: shape (A) already SHIPPED, so the
+- [x] **mcp-use — CLOSED 2026-08-09: nothing left to decide or build.** (A) shipped in nadia;
+  `mcp-toolsource-dedup` landed (`31df590`); (B) and (C) withdrawn with the measurement below. The
+  client SPI stays where it is, used by nadia. Reopen only under the revival condition stated in (B).
+  Full reasoning retained.
+  *(detail, NOT a queue item)* — **REWRITTEN 2026-08-09 after reading the code: shape (A) already SHIPPED, so the
   open decision is only (B) vs (C).** The path in the old text (`src/mcp_tool_source.rs`) is stale —
   the workspace split moved it to `crates/rozum-agent/src/mcp_tool_source.rs`.
   - **(A) an embedded agent loop that consumes MCP tools — DONE, in production.** `nadia` connects
@@ -209,7 +213,24 @@ single-writer daemon). Each item below is its own spec+build later — listed to
 
 ## Agentic-bench fix candidates (from matrix-failure-analysis)
 
-- [ ] codex-reliability — **Candidate fixes for the codex matrix reds (most of codex's 10/20).** Root
+- [x] **codex-reliability — CLOSED 2026-08-09: all four listed levers shipped, and today's run is the
+  A/B the entry asked for.** The entry lists them as "Levers to A/B (NOT yet concluded)"; each is in
+  the tree:
+  - *(edit) bridge unified-diff → codex apply_patch format* — `rewrite_unified_diff_to_apply_patch`
+    (`crates/rozum-gateway/src/codex_patch.rs:18`), the "most concrete lever", done.
+  - *(create) get the model onto structured write instead of `echo > file`* — `LEAN_CODING_PROMPT`
+    (`codex_lean.rs:32`) instructs it in so many words: "call the apply_patch TOOL (do NOT write files
+    with a shell heredoc — `cat <<EOF` mangles quotes/backslashes/newlines)".
+  - *trim codex's meta-tools (a codex analog of `--lean`)* — `codex_lean_keep` (`codex_lean.rs:14`).
+  - *speed / reasoning* — `codex_effective_reasoning` (`codex_lean.rs:98`) pins the level codex would
+    otherwise override per-request.
+  Its own UPDATE 2026-06-21 already recorded the edit reds as largely resolved (five gateway fixes,
+  matrix 22/30 → 27/30). **Validation on the model actually in use, today:** codex × Qwen3.5-4B ×
+  `rpn` (create-from-scratch), 3 reps → 2/3, **zero rc11 and zero `toolcall_parse_miss`** — neither
+  the patch-format mismatch nor the shell-echo corruption this entry is about. The one failure was a
+  `write_stdin` spin stopped by the loop-breaker. See `codex-create-delivery-on-qwen`.
+  Original text follows.
+  *(original, NOT a queue item)* — **Candidate fixes for the codex matrix reds (most of codex's 10/20).** Root
   cause is NOT a single bug (reproduced, `docs/matrix-failure-analysis.md` Findings 1a/1b): codex fails
   to land code two ways depending on the model — (1a) it stalls in the approval/meta-tool layer
   (`request_user_input`, gratuitous escalation rejected under `approval=never`) and falls back to
