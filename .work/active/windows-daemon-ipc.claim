@@ -1,0 +1,6 @@
+feature/windows-daemon-ipc 2026-08-09T16:49:09Z
+agent: claude-code
+heartbeat: 2026-08-09T16:49:09Z
+status: not-started
+done-so-far:
+next: put the daemon transport behind a seam; unix unchanged, windows named pipe
