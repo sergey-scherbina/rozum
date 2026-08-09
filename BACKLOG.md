@@ -368,7 +368,19 @@ nothing else, so each of these is a download away from being real work.
 **Revives when:** a GLM model is back on disk — this is a GLM-specific workaround, and a clean
 one already exists.
 
-- [ ] **glm-artifact-write-synth** (idea, NOT committed — clean workaround exists) — let GLM-4-32B
+- [x] **glm-artifact-write-synth — CLOSED 2026-08-09: shipped, DEFAULT-ON, and it outgrew the entry.**
+  The entry still reads *"idea, NOT committed"*; the code has been on by default since 2026-06-23.
+  `mlx_native_backend.rs:5161` `glm_artifact_synth_enabled()` is opt-**out** (`ROZUM_GLM_ARTIFACT_SYNTH=0`),
+  flipped on after a live A/B: **create 0/3 → 3/3, no regression on edit** (synth doesn't fire there),
+  chat false-writes guarded (`synth_skips_chat_and_ambiguous`). The spec the entry wanted exists:
+  `docs/specs/glm-artifact-write-synth.md`. The "why hard" worries — recovering the PATH from an
+  unstructured label — were solved, not dodged (`glm_kv_extract`, `match_tool_by_args`).
+  **It also generalised past its own premise**, which is the part worth carrying forward:
+  `artifact_synth_universal()` (`ROZUM_ARTIFACT_SYNTH=1`, default OFF) applies the same recovery to
+  ANY model, because the synth turned out to be model-agnostic — Mode-2 matches a bare tool-args
+  object against an offered tool's `input_schema`. See the new entry `artifact-synth-universal-measure`.
+  Original entry follows.
+  *(original entry, retained — NOT a queue item)* — let GLM-4-32B
   drive CREATE-from-scratch agentic flows by synthesizing a `Write` tool call when GLM emits a
   labeled file artifact instead of naming the tool. Today GLM names tools cleanly for edit/debug
   (logit-constraint `99c6081`) but on create-from-scratch shows `Cargo.toml`/`main.rs` content in
@@ -728,7 +740,14 @@ revive it.
 
 **Parked because:** gpt-oss under codex/opencode. Neither the model (not cached) nor the driver is in use — the live setup is Qwen3.5-4B under the `claude` harness. Detailed root-cause notes kept below; the BACKLOG entry of the same slug holds the rest.
 
-- [ ] **codex-opencode-create-delivery (original notes)** — see BACKLOG
+- [x] **codex-opencode-create-delivery — CLOSED 2026-08-09: the pinned root cause was fixed and the
+  fix is in the tree.** The entry is the ORIGINAL NOTES, kept as evidence, but it sat as an open
+  checkbox describing a live defect. `rewrite_json_wrapped_apply_patch`
+  (`crates/rozum-gateway/src/codex_patch.rs:104`) undoes the JSON wrapping this entry pinned, and
+  the sibling entry `codex-create-delivery-on-qwen` records the result: build delivery 0/3-land →
+  3/3-land on codex × gpt-oss. One residual (`rpn`) is tracked there — a question, not this defect.
+  Notes retained below.
+  *(original notes, NOT a queue item)* — see BACKLOG
   `codex-opencode-create-delivery` for the full evidence. ROOT CAUSE PINNED: gpt-oss (via codex) emits
   `apply_patch -patches '[{"content":"*** Begin Patch\n*** Add File: …*** End Patch"}]'` (patch wrapped in
   a JSON array under `-patches`, body JSON-escaped `\n`/`\"`). `rewrite_apply_patch_command`
@@ -777,7 +796,20 @@ revive it.
 **Parked because:** Bench-harness polish whose failing cell is Devstral (not cached). With the full matrix parked this has no reader.
 
   *(also listed under “Matrix improvement levers” until 2026-08-08 — the same copy-not-move. It belongs HERE: it is a GLM-under-codex timeout and neither is on this machine.)*
-- [ ] **mlx-glm4-moe** — port GLM-4 MoE to native MLX. **REPRIORITIZED → bigger than thought**
+- [x] **mlx-glm4-moe — CLOSED 2026-08-09: the half that fits this machine SHIPPED; the other half is
+  hardware-blocked, not effort-blocked.** `glm4_moe_lite` / GLM-4.7-Flash — the member this entry
+  calls "the only one that FITS" — was ported with absorbed-MLA (`e8c060a`) and is live:
+  `crates/rozum-gateway/src/control.rs:748` carries it as *"15/15 full matrix, in DEFAULT_MODELS"*,
+  and `mlx_native_backend.rs` routes the `glm4_moe_lite` model_type. So "a NEW attention we don't
+  have → HIGH effort" is spent, and the sibling entry `mlx-mla-attention` already records it.
+  What genuinely remains is `glm4_moe` (GLM-4.5-Air/4.6) — **easy GQA, no new attention, blocked
+  only by 36 GiB of RAM.** That is a hardware gate, so it is not backlog work here; it becomes a
+  half-day port the day rozum runs on a bigger box, which is exactly the North Star case. Kept
+  below verbatim for that day: the MoE-side shapes were measured against the checkpoint and are
+  still the load-bearing detail. Fork scaffold parked at `feature/glm4-moe`.
+  Original entry follows.
+  *(original entry, retained for the measured shapes — NOT a queue item)* — port GLM-4
+  MoE to native MLX. **REPRIORITIZED → bigger than thought**
   (checkpoint inspection 2026-06-27, spec `docs/specs/glm4-moe-native.md`): the family splits by
   attention and it's adversarial — `glm4_moe` (GLM-4.5-Air/4.6) is easy GQA but **too big for 36 GiB**;
   `glm4_moe_lite` (**GLM-4.7-Flash**, 16.9 GB, the only one that FITS) uses **MLA** (DeepSeek-V2-style
