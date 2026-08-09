@@ -244,6 +244,16 @@ the deferred follow-ups (operator-triaged 2026-06-24, none urgent):
   and they are also unnecessary; nobody should extend that pattern to new files.
   **The rule, and it has now cost two agents a build cycle each: quote the SHA from the BANNER.**
   `git log` describes the tree; the banner describes the binary that is actually measuring.
+  **What survives, measured 2026-08-09 on a current toolchain, and it is narrow.** `std/http` and
+  `std/fs` are fine. `std/json` is not — and the boundary is exact: it LOWERS cleanly (0 errors) and
+  its emitted Rust then fails to compile, **155 rustc errors from a SIX-LINE program**, mostly
+  `charAt` / `substring` emitted as `String` methods that do not exist. Filed with them as
+  `json-core-emitted-rust-does-not-compile` (landed in their INBOX), deliberately separate from
+  `build-rust-std-json-cons`, which is about lowering REFUSALS — this one gets past lowering.
+  **`ucc-ssc-backend` slice 1 waits on that, and waiting is the decision.** The only thing the slice
+  needs `std/json` for is checking a view token against a JSON file. Hand-rolling that with string
+  matching would buy a green build and a token check that says yes because the token appears
+  SOMEWHERE in the file — a worse outcome than a blocked port.
 
 ## Land the reactive-chat primitives in canonical scalascript (deferred "потом", 2026-07-22)
 
