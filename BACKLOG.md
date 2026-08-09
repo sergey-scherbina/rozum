@@ -57,7 +57,16 @@ is how that happens.
   *(this entry existed TWICE — in “Matrix improvement levers” and again in “Deprioritised”, because 2026-08-04 copied instead of moving. Merged 2026-08-08.)*
 ## rozum-core::share tests read the real machine (found 2026-08-05)
 
-- [ ] ~~**share-tests-isolate**~~ — `cargo test -p rozum-core share::` fails on master right now: 7
+- [x] **share-tests-isolate — DONE, verified 2026-08-09.** The strikethrough was right and the checkbox
+  was left open, so it still read as a live red on master. It is green: `cargo test -p rozum-core
+  share::` → **20 passed, 0 failed** (7.6s, default parallelism). And structurally fixed, which matters
+  more than one green run for a flake whose colour depended on the machine: the tests now point
+  `XDG_STATE_HOME` at a temp dir (`share.rs:1451,1483`), INJECT the readings they used to take from the
+  live host — `ROZUM_GATEWAY_AVAILABLE_RAM_BYTES`, `ROZUM_GATEWAY_RAM_BUDGET_BYTES`,
+  `ROZUM_HOST_PRESSURE` (`:1484-1498`) — and serialize the env-mutating ones behind a lock (`:269`).
+  The absurd "actual free RAM ~1099511627776 MB" in the original report was exactly that missing
+  injection. Original text follows.
+  *(original report, NOT a queue item)* — `cargo test -p rozum-core share::` failed on master: 7
   failures single-threaded, 8/7/10 across three parallel runs. The failure text shows the tests
   seeing a live ledger and an absurd "actual free RAM ~1099511627776 MB", i.e. they read process-wide
   state instead of a fixture. The same workspace was 850/0 twice earlier today, so the suite's colour
@@ -155,13 +164,30 @@ single-writer daemon). Each item below is its own spec+build later — listed to
     the entry names before scheduling the work — the line number moving is the cheap tell.
 ## MCP (deferred — decide the use, then build)
 
-- [ ] **mcp-use** — the MCP-client `ToolSource` (`McpToolSource`, `src/mcp_tool_source.rs`)
-  is built + tested (5/0, in-memory duplex). Deferred per the user: decide the *use* before
-  building more. Three shapes considered: **(A)** an embedded agent loop that consumes MCP
-  tools; **(B)** a gateway **MCP-federation** — rozum federates N MCP servers + its meeting
-  tools into one tool surface for external agents (claude/codex) — *my recommendation, most
-  "rozum-shaped"*; **(C)** gateway tool-augmentation (inject MCP tools into external-agent
-  requests). Pick the use, then spec + build. Spec so far: `docs/specs/mcp-toolsource.md`.
+- [ ] **mcp-use** — **REWRITTEN 2026-08-09 after reading the code: shape (A) already SHIPPED, so the
+  open decision is only (B) vs (C).** The path in the old text (`src/mcp_tool_source.rs`) is stale —
+  the workspace split moved it to `crates/rozum-agent/src/mcp_tool_source.rs`.
+  - **(A) an embedded agent loop that consumes MCP tools — DONE, in production.** `nadia` connects
+    operator-configured MCP servers as extra tools: `crates/nadia/src/mcp.rs` (config, selection,
+    naming, failure policy) over `rozum_agent::mcp_tool_source::McpToolSource` (transport, handshake,
+    call plumbing), wired at `crates/nadia/src/main.rs:186` `connect_mcp`. Its three rules are worth
+    reusing for whatever gets built next, because each is a decision, not a detail: **opt-in per run**
+    (a config file that merely exists adds nothing — six tools already cost ~1.5–2k schema tokens and
+    one server can add a dozen, which dilutes selection for a 4B model); **a named server that will
+    not start is a hard error before the loop begins** (a run that silently lost half its tools
+    produces a confidently wrong answer); **the jail does not extend to a server** (separate process,
+    own access to the machine — the seatbelt confines nadia, not it, and startup says so).
+  - **Still undecided: (B) federation** — rozum federates N MCP servers + its meeting tools into ONE
+    surface for external agents (claude/codex) — vs **(C) tool-augmentation** — inject MCP tools into
+    external-agent requests. Both are gateway-side. Note rozum already SERVES MCP over HTTP
+    (`com.rozum.mcp-http`, :8779, responds), so (B) is an extension of a live surface rather than new
+    ground — which is the argument for it over (C).
+  - **Cleanup first, whichever is picked — `mcp-toolsource-dedup`:** `McpToolSource` exists TWICE in
+    `rozum-agent`, both `pub`, both `impl ToolSource`, both with `connect_stdio`/`from_service` —
+    `mcp_tool_source.rs:40` (LIVE, nadia imports it, 4 tests) and `agent.rs:158` (no importer
+    anywhere). No compiler warning, because `pub` items are not dead-code-linted. Delete the
+    `agent.rs` copy before anyone builds (B) or (C) against the wrong one. ~10 minutes, zero risk.
+  - Spec so far: `docs/specs/mcp-toolsource.md`.
 
 ## Agentic-bench fix candidates (from matrix-failure-analysis)
 
