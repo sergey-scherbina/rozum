@@ -15,6 +15,7 @@ name = "rozum-meet"
 path = "src/main.rs"
 
 [dependencies]
+rozum-stamp = { path = "../rozum-stamp" }
 rozum-meeting = { path = "../rozum-meeting", features = ["mcp-http"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 clap = { version = "4", features = ["derive"] }

@@ -11,13 +11,33 @@ pub const MARK_PREFIX: &str = "ROZUM+BUILD+MARK=";
 
 /// The marker itself, baked in by `build.rs`.
 ///
-/// An EXPORTED symbol, not merely `#[used]`. The first version used `#[used]` and the test caught
-/// it immediately: `#[used]` stops the compiler from dropping a static, and the linker dropped it
-/// anyway — the scan found nothing in the very binary that declared it. A `no_mangle` static is an
-/// exported symbol, which the linker keeps, and keeping it is the entire point: nothing in a given
-/// binary CALLS this, the bytes just have to be present so a reader can find them in the file.
-#[unsafe(no_mangle)]
-pub static ROZUM_BUILD_MARK: &str = concat!("ROZUM+BUILD+MARK=", env!("ROZUM_BUILD_COMMIT"));
+/// A byte ARRAY, not a `&str`, and this took three attempts — each one shipped and then measured:
+///
+/// 1. `#[used] static … : &str` — the compiler kept the static, the LINKER dropped it, and the scan
+///    found nothing in the binary that declared it. Caught by the test below.
+/// 2. `#[unsafe(no_mangle)] static … : &str` — passed the test in DEBUG and failed in RELEASE, on
+///    the operator's machine, after being deployed. A `&str` static is a POINTER: `#[used]` and
+///    `no_mangle` keep the pointer, while the string bytes live in another section that
+///    `-dead_strip` is free to remove once nothing references them.
+/// 3. This: the text itself IS the static. `#[used]` on a data array marks it `no_dead_strip`, and
+///    there is no second object for the linker to separate from it.
+///
+/// The lesson is in the failure, not the fix: a stamp check that passes in debug and vanishes in
+/// release reports every deployed binary as unstamped, which is precisely the "unknown reported as
+/// silence" this module exists to remove.
+const MARK_TEXT: &str = concat!("ROZUM+BUILD+MARK=", env!("ROZUM_BUILD_COMMIT"));
+
+#[used]
+static BUILD_MARK: [u8; MARK_TEXT.len()] = {
+    let src = MARK_TEXT.as_bytes();
+    let mut out = [0u8; MARK_TEXT.len()];
+    let mut i = 0;
+    while i < out.len() {
+        out[i] = src[i];
+        i += 1;
+    }
+    out
+};
 
 /// The commit this binary was built from, or `"unknown"` when it was built outside a git checkout.
 pub fn commit() -> &'static str {
@@ -68,7 +88,8 @@ mod tests {
     /// is exactly what a linker is entitled to drop.
     #[test]
     fn this_binary_carries_its_own_marker() {
-        assert!(ROZUM_BUILD_MARK.starts_with(MARK_PREFIX));
+        assert!(MARK_TEXT.starts_with(MARK_PREFIX));
+        assert_eq!(BUILD_MARK.len(), MARK_TEXT.len());
         let exe = std::env::current_exe().expect("test binary path");
         let found = commit_of_file(&exe);
         // A test binary is built by the same cargo invocation, so it carries the same commit.

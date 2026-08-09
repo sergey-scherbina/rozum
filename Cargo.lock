@@ -5264,6 +5264,9 @@ dependencies = [
 [[package]]
 name = "rozum-cli"
 version = "0.1.0"
+dependencies = [
+ "rozum-stamp",
+]
 
 [[package]]
 name = "rozum-core"
@@ -5280,6 +5283,7 @@ dependencies = [
  "notify",
  "rand 0.8.6",
  "reqwest 0.12.28",
+ "rozum-stamp",
  "serde",
  "serde_json",
  "tokenizers 0.22.2",
@@ -5334,6 +5338,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "rozum-meeting",
+ "rozum-stamp",
  "tokio",
 ]
 
@@ -5416,6 +5421,10 @@ dependencies = [
  "tempfile",
  "tokio",
 ]
+
+[[package]]
+name = "rozum-stamp"
+version = "0.1.0"
 
 [[package]]
 name = "rozum-tui"

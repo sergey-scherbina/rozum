@@ -17,6 +17,7 @@ license = "Apache-2.0"
 local-models = ["dep:candle", "dep:candle-transformers", "dep:tokenizers"]
 
 [dependencies]
+rozum-stamp = { path = "../rozum-stamp" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 async-stream = "0.3"

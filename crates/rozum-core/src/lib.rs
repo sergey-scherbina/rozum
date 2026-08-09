@@ -7,7 +7,8 @@
 pub mod backend;
 // The bug-ledger guard lives in a LIB because CI only runs `cargo test --workspace --lib`; a guard
 // that does not run reads as coverage while providing none. See the module docs.
-pub mod build_stamp;
+/// Re-exported so callers say `rozum_core::build_stamp::…` regardless of which crate owns it.
+pub use rozum_stamp as build_stamp;
 pub mod bug_ledger;
 pub mod concurrency;
 pub mod constrain;

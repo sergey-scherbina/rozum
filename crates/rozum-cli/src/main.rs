@@ -114,3 +114,9 @@ mod tests {
         }
     }
 }
+
+/// Linked for its side effect: the build-stamp marker (`docs/specs/deployment-drift.md`). A crate
+/// nothing references is a crate the linker never pulls in, so the stamp would be absent from
+/// exactly the thin binaries that most need to say how old they are.
+#[used]
+static BUILD_STAMP: &str = rozum_stamp::MARK_PREFIX;

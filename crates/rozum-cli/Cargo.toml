@@ -13,3 +13,9 @@ license = "Apache-2.0"
 [[bin]]
 name = "rozum"
 path = "src/main.rs"
+
+# The ONE dependency, and it is dependency-free itself: the build stamp that lets
+# `doctor --services` say what is deployed (docs/specs/deployment-drift.md). Without it this
+# binary is permanently "age unknown", which is a warning nobody can clear.
+[dependencies]
+rozum-stamp = { path = "../rozum-stamp" }

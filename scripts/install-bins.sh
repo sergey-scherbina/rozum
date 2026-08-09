@@ -70,9 +70,24 @@ targets() {
 }
 
 # Publish one built binary at one path: exec it first, rename it into place, say what changed.
+# A cargo binary from this workspace must carry its build stamp, or `doctor --services` cannot tell
+# what is DEPLOYED from what is MERGED and reports it as "age unknown" forever.
+#
+# Checked HERE, on the real artifact, because the unit test could not: the first stamp survived a
+# debug build and was dead-stripped from release, so the suite was green while every deployed binary
+# went out unstamped. A property that only holds in the profile nobody ships is not a property.
+require_stamp() {
+  local file="$1" what="$2"
+  grep -q 'ROZUM+BUILD+MARK=[0-9a-f]' "$file" 2>/dev/null && return 0
+  echo "FAIL: $what carries no build stamp — refusing to publish it." >&2
+  echo "      (crates/rozum-stamp must be linked AND referenced; see docs/specs/deployment-drift.md)" >&2
+  exit 1
+}
+
 publish() {
   local src="$1" dst="$2" what="$3"
   [ -x "$src" ] || { echo "FAIL: $src missing after a successful build" >&2; exit 1; }
+  require_stamp "$src" "$what"
 
   # What is being replaced, and by what. Both times a stale binary hid on this machine, the install
   # said only "installed".
@@ -200,6 +215,14 @@ restart_owner() {
     # respawned it — the service that answered a few seconds later was pid 6644. Wait for a pid that
     # SURVIVES, which is the cheapest available stand-in for "it is serving"; `doctor --services`
     # is what actually probes the endpoint, and it is one command away for whoever wants certainty.
+    # A PERIODIC job holds no pid between ticks, so waiting for one is asking the wrong question —
+    # measured on the first real deploy: `com.rozum.doctor` (StartInterval 300) was reported as
+    # "did not settle" while being perfectly healthy, which is a false red on the very job whose
+    # purpose is to not cry wolf.
+    if plutil -extract StartInterval raw -o - "$plist" >/dev/null 2>&1; then
+      echo "    $label is periodic — it runs on its own schedule, nothing to wait for"
+      continue
+    fi
     local i pid="" prev="" stable=0
     for i in $(seq 1 45); do
       pid="$(launchctl print "gui/$(id -u)/$label" 2>/dev/null | awk -F'= ' '/^\tpid =/ {print $2; exit}')"

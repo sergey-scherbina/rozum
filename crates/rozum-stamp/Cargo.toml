@@ -1,0 +1,12 @@
+[package]
+name = "rozum-stamp"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# NO DEPENDENCIES, on purpose. Every binary in this workspace links this crate so that
+# `doctor --services` can tell what is DEPLOYED from what is MERGED, and two of them —
+# `rozum` (the 627 KB dispatcher) and `rozum-meet` — exist precisely BECAUSE they are thin.
+# Making them depend on rozum-core to carry a 57-byte marker would trade the thing they are for
+# the ability to describe it.
+[dependencies]
