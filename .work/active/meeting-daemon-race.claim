@@ -1,0 +1,6 @@
+feature/meeting-daemon-race 2026-08-09T15:07:26Z
+agent: claude-code
+heartbeat: 2026-08-09T15:07:26Z
+status: not-started
+done-so-far:
+next: where the job exists, never self-spawn — the fallback re-created the state it removed
