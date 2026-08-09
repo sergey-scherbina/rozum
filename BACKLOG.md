@@ -332,7 +332,18 @@ single-writer daemon). Each item below is its own spec+build later — listed to
 
 ## scalascript language gap: theme page-background never reaches `serve(view, port)` (found 2026-07-03, ucc-theme-bg)
 
-- [ ] **ssc-serve-extracss-or-theme-body** — `std/ui/primitives.ssc`'s `serve(tree: View, port: Int)`
+- [x] **ssc-serve-extracss-or-theme-body — CLOSED 2026-08-09: fixed UPSTREAM, first of the two options
+  the entry offered.** `scalascript` `origin/main`, `v1/runtime/std/ui/primitives.ssc:170`, now reads
+  `extern def serve(tree: View, port: Int, extraCss: String = ""): Unit` — the `.ssc` surface reaches
+  the third arg the JS runtime always accepted, with a default so existing call sites keep compiling.
+  Their comment (lines 165-167) says it is appended to the base template LAST so it wins over the
+  `body{margin:0;padding:0;background:#fff;…}` in `browserpatch.mjs:151` / `signals.mjs:1655` — which
+  is precisely the white-canvas-under-dark-cards failure this entry described.
+  **rozum action when someone next touches the UCC deploy:** drop the `sed`-on-emitted-HTML workaround
+  in `deploy-ucc-web.sh` and pass `extraCss` from the `.ssc` instead. Left in place for now because it
+  works and the deploy path is not otherwise being edited — noted so the workaround does not outlive
+  its reason. Original entry follows.
+  *(original entry, NOT a queue item)* — `std/ui/primitives.ssc`'s `serve(tree: View, port: Int)`
   extern def has no way to set the document/body background from `.ssc`, even though the JS-side
   `_ssc_ui_serve(tree, port, extraCss)` already accepts a third `extraCss` param — nothing in the
   `.ssc` language surface can reach it. `lower(view, theme)` correctly themes every widget it has a
