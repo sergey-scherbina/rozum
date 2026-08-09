@@ -177,11 +177,24 @@ single-writer daemon). Each item below is its own spec+build later — listed to
     not start is a hard error before the loop begins** (a run that silently lost half its tools
     produces a confidently wrong answer); **the jail does not extend to a server** (separate process,
     own access to the machine — the seatbelt confines nadia, not it, and startup says so).
-  - **Still undecided: (B) federation** — rozum federates N MCP servers + its meeting tools into ONE
-    surface for external agents (claude/codex) — vs **(C) tool-augmentation** — inject MCP tools into
-    external-agent requests. Both are gateway-side. Note rozum already SERVES MCP over HTTP
-    (`com.rozum.mcp-http`, :8779, responds), so (B) is an extension of a live surface rather than new
-    ground — which is the argument for it over (C).
+  - **(B) federation and (C) tool-augmentation — RECOMMENDATION WITHDRAWN 2026-08-09. Do not build
+    either without a named beneficiary; I could not find one.** I had called (B) "most rozum-shaped";
+    that was written before checking what this stack actually optimises for.
+    **The evidence against:** rozum's own shipped, default-on lever for local models is `--lean`
+    (`src/main.rs:329-338`), and what it does is *remove* MCP tools from the request — it strips the
+    meeting-room MCP surface because Claude Code otherwise ships **~33 tool schemas (~4.9K tokens)
+    every request**, and cutting to four (~0.8K) is what makes a small model work. With
+    channel-wakeup off it adds `--strict-mcp-config` so ALL ambient MCP servers are dropped. nadia's
+    MCP module says the same from the other side: six tools already cost ~1.5–2k schema tokens and
+    one server can add a dozen, each diluting selection for a 4B model.
+    Federation is a tool-MULTIPLIER aimed at a stack whose measured constraint is tool SCARCITY.
+    **Who would it serve?** Only someone whose model is big enough that 30+ schemas don't hurt (this
+    host is frozen on 4B), whose agent cannot configure its own MCP servers (claude and codex both
+    can), and who wants one config point for many agents (`rozum mcp install` already gives that).
+    None hold here. **Revive if** the host runs a model where tool-schema cost stops mattering, or a
+    consumer appears that speaks MCP to rozum and cannot bring its own servers.
+    The half worth keeping is the opposite one — CURATION, not aggregation — and `--lean` is already
+    that. See [[reference-cc-tool-schema-bloat]] in memory for the measurement.
   - **`mcp-toolsource-dedup` — DONE 2026-08-09 (`31df590`).** `McpToolSource` existed TWICE in
     `rozum-agent`, both `pub`, both `impl ToolSource` — `mcp_tool_source.rs:40` (LIVE, nadia imports
     it) and `agent.rs:158` (no importer). No compiler warning guarded it: `pub` items are not
