@@ -1,6 +1,6 @@
 feature/ucc-ssc-public 2026-08-08T17:13:53Z
 agent: claude-opus-5
-heartbeat: 2026-08-08T17:13:53Z
+heartbeat: 2026-08-09T14:05:00Z
 status: blocked
 done-so-far: routes correct and proven on the run path; three run-vs-build-rust divergences measured, the third (generated Rust does not compile) closes the shipping path
-next: upstream: two follow-up reports pending their preferred shape; nothing to port here until run and build-rust agree
+next: BLOCKED UPSTREAM, not on us and not on a decision of ours. scalascript confirmed the report (tests/BUGS.md `json-core-emitted-rust-does-not-compile`, confirmed: yes, gate tests/e2e/build-rust-refuses-loudly.sh) and claimed the fix as `rust-any-as-value`, option A — coercions driven by declared types. Do NOT hand-roll a token check to route around it; that was considered and rejected (a second parser is the thing this slice exists to avoid). Resume when their claim lands: rebuild ssc-tools, re-run `build-rust clients/control/public-matrix.ssc`, quote the SHA FROM THE BANNER not from git log.
