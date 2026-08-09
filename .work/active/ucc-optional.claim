@@ -1,6 +1,0 @@
-feature/ucc-optional 2026-08-09T17:24:01Z
-agent: claude-code
-heartbeat: 2026-08-09T17:24:01Z
-status: not-started
-done-so-far:
-next: ucc feature gates control-serve+auth+webauthn; status() stays always-compiled
