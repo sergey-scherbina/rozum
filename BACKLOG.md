@@ -339,10 +339,14 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   Their comment (lines 165-167) says it is appended to the base template LAST so it wins over the
   `body{margin:0;padding:0;background:#fff;…}` in `browserpatch.mjs:151` / `signals.mjs:1655` — which
   is precisely the white-canvas-under-dark-cards failure this entry described.
-  **rozum action when someone next touches the UCC deploy:** drop the `sed`-on-emitted-HTML workaround
-  in `deploy-ucc-web.sh` and pass `extraCss` from the `.ssc` instead. Left in place for now because it
-  works and the deploy path is not otherwise being edited — noted so the workaround does not outlive
-  its reason. Original entry follows.
+  **And rozum has already adopted it — nothing left to do.** `clients/control/deploy-ucc-web.sh:225-226`:
+  *"Page canvas background: now set at the language level via `serve(view, port, extraCss)`
+  (center.ssc passes `body{background:#111827}`), so the old post-emit sed of `body{#fff}` is gone."*
+  The workaround this entry complained about is out of the tree.
+  (My first draft of this closure told the next agent to go remove that `sed` — written from the
+  entry's text instead of the script, and wrong within the hour. Same trap this whole sweep is about;
+  corrected on re-reading the file. See [[feedback-verify-backlog-entry-against-code]] in memory.)
+  Original entry follows.
   *(original entry, NOT a queue item)* — `std/ui/primitives.ssc`'s `serve(tree: View, port: Int)`
   extern def has no way to set the document/body background from `.ssc`, even though the JS-side
   `_ssc_ui_serve(tree, port, extraCss)` already accepts a third `extraCss` param — nothing in the
