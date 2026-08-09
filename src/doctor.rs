@@ -347,7 +347,10 @@ fn deployment_drift(label: &str) -> Option<String> {
         return Some(format!("built from {} — not a commit this checkout knows", &built[..7.min(built.len())]));
     }
     let behind: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
-    (behind > 0).then(|| format!("deployed binary is {behind} commits behind origin/master ({})", &built[..7.min(built.len())]))
+    (behind > 0).then(|| {
+        let s = if behind == 1 { "commit" } else { "commits" };
+        format!("deployed binary is {behind} {s} behind origin/master ({})", &built[..7.min(built.len())])
+    })
 }
 
 /// `ProgramArguments[0]` for a job — the binary launchd actually execs, read from the plist rather
