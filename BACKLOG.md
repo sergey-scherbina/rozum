@@ -905,12 +905,14 @@ revive it.
 
 **Parked because:** Its own TRIAGE already decided this out-of-scope pending an operator override.
 
-- [ ] **plugin-services** — services (gateway / web / meetings / bridges) behind a plugin
-  registry instead of `Command` match arms. **(See TRIAGE — decided out-of-scope; needs override.)**
-
-**Parked because:** its own TRIAGE decided it out of scope pending an operator override — NOT for
-  the Vulkan/x86 reason that stood here until 2026-08-08, which belonged to a different item and was
-  copied onto this one.
+- [x] **plugin-services — DONE 2026-08-09, in the narrow form the operator approved: the DECLARATION
+  layer only.** `src/services.rs` declares each service once (label, binary, probe, owner, shape);
+  `doctor` reads it, `rozum-gateway services --json` exposes it, `install-bins.sh` consults it
+  instead of its own hardcoded map, and `service.rs` takes the gateway label from it. How services
+  START was deliberately NOT touched — that machinery has sharp edges (see the same day's
+  publish-restart and daemon-ownership work) and the payoff here is maintenance, not capability.
+  Two new findings fall out: an installed job nothing declares, and a plist running a binary other
+  than the declared one. `docs/specs/service-liveness.md` § Where the list lives.
 
 - [ ] **plugin-x86-engine** — the reserved `rozum-x86` engine slot → a real engine plugin
   behind `LocalEngine` / `ChatBackend` (the North-Star multi-device frontier).

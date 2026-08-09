@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 /// launchd label / systemd unit base name.
-pub const SERVICE_LABEL: &str = "com.rozum.gateway";
+pub const SERVICE_LABEL: &str = crate::services::GATEWAY_LABEL;
 pub const SYSTEMD_UNIT: &str = "rozum-gateway.service";
 
 fn home() -> PathBuf {

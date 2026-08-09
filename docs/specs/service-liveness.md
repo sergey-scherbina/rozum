@@ -86,3 +86,22 @@ failure as no line at all, arrived at from the other side.
 It does not watch anything the machine does not run (`launchctl` is the roster), it does not
 retain history beyond the previous verdict, and it draws no conclusion about *why* a service is
 down — that is what the logs and `BUGS.md` are for.
+
+## Where the list lives (2026-08-09)
+
+`src/services.rs` declares every service ONCE — label, the binary it should run, its probe, its
+owner model, whether it is resident or periodic. `doctor` reads it, `rozum-gateway services --json`
+prints it, and `scripts/install-bins.sh` asks that instead of keeping its own map of which binary
+belongs at which path. Before this the list existed in four places that had to agree by hand, and
+each of them was edited separately during 2026-08-08..09.
+
+**The registry is intent; the plists are what the machine obeys.** That distinction is kept on
+purpose: `install-bins.sh` still derives destination PATHS from the installed plists, because the
+roster is what launchd actually executes. Having both is what makes disagreement visible, and two
+disagreements are now findings rather than surprises:
+
+- a `com.rozum.*` job installed here that nothing declares — reported once, naming them all, since a
+  machine mid-migration should not turn the report into a list;
+- a declared service whose plist runs a different binary — the mismatch that once published the
+  54 MB engine over the 627 KB dispatcher because the name was guessed. `rozum-ctrl` is exempt by
+  name: it genuinely is the gateway binary under the deploy's own name.

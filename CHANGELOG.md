@@ -1,5 +1,37 @@
 # Changelog
 
+## plugin-services — one declaration instead of four copies
+Completed: 2026-08-09
+
+Taken in the narrow form the operator approved, after measuring what "plugin-ization" actually
+contained: two of its four entries are hardware-gated (nothing to place while one model runs on one
+Mac), one rewrites the matrix-critical request/SSE path for no payoff on a frozen model, and one —
+this — removes a list that existed in four places.
+
+Those four: `doctor`'s table of labels and probes, the launchd plists, `install-bins.sh`'s map of
+which binary belongs at which path, and `service.rs`'s label constant. Every one of them was edited
+separately during 2026-08-08..09 — the drift row, the restart-after-publish fix, the meeting-daemon
+ownership change — which is how three copies that must agree become two that do not.
+
+`src/services.rs` now declares each service once. `doctor` reads it, `rozum-gateway services --json`
+prints it for scripts, `install-bins.sh` asks it instead of hardcoding pairs, and `service.rs` takes
+the gateway label from it.
+
+**Intent and obedience stay separate.** `install-bins.sh` still derives destination PATHS from the
+installed plists, because the roster is what launchd actually executes. Keeping both is what lets
+them be compared, and two comparisons are now findings: a `com.rozum.*` job nothing declares, and a
+declared service whose plist runs a different binary — the mismatch that once published the 54 MB
+engine over the 627 KB dispatcher because the name was guessed.
+
+**What was deliberately not done:** how services START. That machinery has sharp edges — the same
+day, replacing a binary killed a live service and a handoff nearly signalled the wrong pid — and the
+payoff of this entry is maintenance, not capability. Refactoring the start path would have added risk
+to a change that buys none.
+
+Verified where it could bite: the new path list from `install-bins.sh` is byte-identical to the old
+one for all five binaries, and the two new checks have tests, because on this machine they are both
+correctly silent.
+
 ## meeting-daemon-ownership — the job with KeepAlive owned nothing
 Completed: 2026-08-09
 Spec: `docs/specs/meeting-daemon-ownership.md`

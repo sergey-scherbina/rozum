@@ -255,6 +255,31 @@ restart_owner() {
 # machine ran three-day-old code and nothing said so. `~/.cargo/bin` vs `~/.rozum/bin` is a
 # divergence this project has been bitten by before; deriving the list from the roster is the
 # only version that cannot drift, because the roster is what the machine obeys.
+# Is (binary, installed-program) a pair this build declares? Asks the registry when a built gateway
+# is available, and falls back to the historical list when there is none to ask — which is exactly
+# the first install on a fresh machine.
+declared_pair() {
+  local want="$1" have="$2"
+  local reg=""
+  for candidate in "$ROOT/target/release/rozum-gateway" "$ROOT/target/debug/rozum-gateway" "$(command -v rozum-gateway 2>/dev/null)"; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    reg="$("$candidate" services --json 2>/dev/null)" && [ -n "$reg" ] && break
+    reg=""
+  done
+  if [ -n "$reg" ]; then
+    # `rozum-ctrl` is the gateway binary under another name: the deploy's own decision, kept here
+    # because it is a fact about THIS machine's paths, not about what the product declares.
+    [ "$have" = rozum-ctrl ] && have=rozum-gateway
+    printf '%s' "$reg" | grep -q "\"program\": \"$have\"" || return 1
+    [ "$want" = "$have" ] || { [ "$want" = rozum ] && [ "$have" = rozum-gateway ]; } || return 1
+    return 0
+  fi
+  case "$want:$have" in
+    rozum-gateway:rozum-gateway|nadia:nadia|rozum:rozum|rozum:rozum-ctrl|rozum-meet:rozum-meet|rozum-meeting-ssc:rozum-meeting-ssc) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 extra_paths_for() {
   local name="$1" out=()
   local plist
@@ -267,17 +292,16 @@ extra_paths_for() {
     case "$prog" in
       *.sh|"") continue ;;
     esac
-    # `rozum-ctrl` is the gateway binary under another name — same program, own copy.
-    case "$name:$(basename "$prog")" in
-      # WHICH program lives at which name is the DEPLOY's decision, not a guess from the
-      # filename — and guessing cost something: `~/.rozum/bin/rozum-ctrl` is
-      # `deploy-ucc-web.sh`'s `$BIN`, i.e. the 627 KB DISPATCHER (`rozum-cli`), and on
-      # 2026-08-08 this list assumed the name meant the engine and published the 54 MB
-      # `rozum-gateway` over it. Nothing broke only because `com.rozum.ucc-control` was still
-      # running its old process. Keep this table next to `deploy-ucc-web.sh` lines 114/127/139.
-      rozum-gateway:rozum-gateway|nadia:nadia|rozum:rozum|rozum:rozum-ctrl|rozum-meet:rozum-meet|rozum-meeting-ssc:rozum-meeting-ssc) ;;
-      *) continue ;;
-    esac
+    # WHICH program lives at which name is the DEPLOY's decision, not a guess from the filename —
+    # and guessing cost something: `~/.rozum/bin/rozum-ctrl` is `deploy-ucc-web.sh`'s `$BIN`, i.e.
+    # the 627 KB DISPATCHER (`rozum-cli`), and on 2026-08-08 this list assumed the name meant the
+    # engine and published the 54 MB `rozum-gateway` over it. Nothing broke only because
+    # `com.rozum.ucc-control` was still running its old process.
+    #
+    # The pairs now come from `src/services.rs` via `rozum-gateway services --json`, so this file is
+    # no longer a second copy of that list. The fallback is the old hardcoded set, for the one case
+    # that matters: bootstrapping a machine where no gateway binary exists yet to ask.
+    if ! declared_pair "$name" "$(basename "$prog")"; then continue; fi
     [ "$prog" = "$CARGO_BIN/$name" ] && continue
     out+=("$prog")
   done

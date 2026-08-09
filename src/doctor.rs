@@ -1,6 +1,7 @@
 //! Lightweight read-only demo readiness checks.
 
 use std::ffi::OsStr;
+use crate::services::{Owner, Probe, Service, Shape};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -193,7 +194,7 @@ pub fn transitions(report: &DoctorReport) -> Vec<String> {
     let now: std::collections::HashMap<String, String> = report
         .checks
         .iter()
-        .filter(|c| SERVICES.iter().any(|(_, n, _, _, _, _)| *n == c.name))
+        .filter(|c| crate::services::ALL.iter().any(|s| s.row == c.name))
         .map(|c| (c.name.to_string(), c.status.label().to_string()))
         .collect();
 
@@ -258,22 +259,6 @@ const CONFIRM: u32 = 2;
 /// and the participant pools talk to the daemon over a socket they hold open, so there is nothing
 /// here to ask. Inventing a probe that cannot fail would be worse than saying "not probed" — see
 /// `docs/specs/service-liveness.md`.
-/// How to ask a service whether it is doing its job.
-#[derive(Clone, Copy)]
-enum Probe {
-    /// A plain GET whose status is the answer.
-    Get(&'static str),
-    /// An MCP `initialize` over HTTP. The proxy answers 404 to every path but `/mcp` and 406 to a
-    /// GET without the streaming `Accept`, so a "does the port respond" probe reports a healthy
-    /// server as broken — measured on the first live run of this check. Speaking its protocol is
-    /// the only probe that means anything.
-    McpInitialize(&'static str),
-    /// Nothing to ask: the bridges talk outward to Telegram, the pools hold a socket to the
-    /// daemon. Reported as `skip`, because inventing a probe that cannot fail is worse than
-    /// admitting there is none (`docs/specs/service-liveness.md`).
-    None,
-}
-
 /// A `StartInterval` job is healthy when it ran recently, whatever the process table says.
 ///
 /// "Recently" is two intervals: one tick can be missed to a busy machine without it meaning
@@ -520,50 +505,6 @@ fn exit_meaning(code: i64) -> Option<&'static str> {
     }
 }
 
-/// How a job is expected to be found.
-#[derive(Clone, Copy, PartialEq)]
-enum Shape {
-    /// A service: it should be RUNNING. Not running is the failure this check exists for.
-    Resident,
-    /// A `StartInterval` job: between ticks it is correctly NOT running, and "no pid" says
-    /// nothing. What matters is that it RAN recently — measured by the state file it writes on
-    /// every run. Without this the watcher could not be watched: adding `com.rozum.doctor` to the
-    /// resident list would have made it permanently, wrongly red.
-    Periodic { every_secs: u64 },
-}
-
-/// Who actually serves, when that can be established independently of the job.
-#[derive(Clone, Copy)]
-enum Owner {
-    /// The holder of the lock beside the unix socket (`docs/specs/meeting-socket-ownership.md`).
-    /// A launchd job can be alive and WAITING while a client-spawned daemon holds this and serves —
-    /// observed on the host 2026-08-05: job pid 42206, lock and listener on 42132.
-    SocketLock,
-    /// Nothing to ask: the job's own process is the server, or there is no server.
-    JobItself,
-}
-
-/// `(launchd label, row name, probe, owner, what it serves)`.
-///
-/// The row name is `svc:*` and not the bare service name ON PURPOSE: `rozum doctor` already has
-/// checks called `gateway` and `meeting-daemon` (the demo-path section), and sharing a name made
-/// the transition line quote the wrong check's detail — measured on the first live post, where a
-/// service transition was reported with the demo check's text. Two rows with one name are two
-/// facts a lookup cannot tell apart.
-const SERVICES: &[(&str, &str, Probe, Owner, Shape, &str)] = &[
-    ("com.rozum.gateway", "svc:gateway", Probe::Get("http://127.0.0.1:8089/v1/models"), Owner::JobItself, Shape::Resident, "the resident model"),
-    ("com.rozum.ucc-control", "svc:ucc-control", Probe::Get("http://127.0.0.1:8411/control/auth/status"), Owner::JobItself, Shape::Resident, "the control plane"),
-    ("com.rozum.meeting-daemon", "svc:meeting-daemon", Probe::Get("http://127.0.0.1:8401/rooms"), Owner::SocketLock, Shape::Resident, "meeting rooms over REST"),
-    ("com.rozum.meeting-ssc", "svc:meeting-ssc", Probe::Get("http://127.0.0.1:8405/"), Owner::JobItself, Shape::Resident, "the meeting PWA"),
-    ("com.rozum.mcp-http", "svc:mcp-http", Probe::McpInitialize("http://127.0.0.1:8779/mcp"), Owner::JobItself, Shape::Resident, "MCP over HTTP"),
-    ("com.rozum.telegram", "svc:telegram", Probe::None, Owner::JobItself, Shape::Resident, "the Telegram bridge (private)"),
-    ("com.rozum.telegram-groups", "svc:telegram-groups", Probe::None, Owner::JobItself, Shape::Resident, "the Telegram bridge (groups)"),
-    ("com.rozum.assistant", "svc:assistant", Probe::None, Owner::JobItself, Shape::Resident, "the participant pool"),
-    ("com.rozum.assistant-groups", "svc:assistant-groups", Probe::None, Owner::JobItself, Shape::Resident, "the participant pool (groups)"),
-    // The watcher, watched by the same list it walks. It is a StartInterval job, so between ticks
-    // it is correctly not running; what would be wrong is silence for longer than its interval.
-    ("com.rozum.doctor", "svc:doctor", Probe::None, Owner::JobItself, Shape::Periodic { every_secs: 300 }, "this liveness check itself"),
-];
 
 /// The pid holding the lock beside the meeting socket, i.e. the process that is actually serving
 /// (`docs/specs/meeting-socket-ownership.md`). `None` when nothing holds it or `lsof` is absent —
@@ -599,14 +540,24 @@ async fn check_services() -> Vec<Check> {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let mut out = Vec::new();
-    for (label, name, probe, owner, shape, what) in SERVICES {
-        let mut c = check_service(&jobs, label, name, *probe, *owner, *shape, what, &client).await;
+    // A job on this machine that NOTHING declares is invisible to every reader downstream: doctor
+    // will not probe it, install-bins will not publish its binary, and no spec mentions it. That is
+    // how `com.rozum.*` jobs have appeared and rotted before. Reported once, not per service.
+    out.extend(undeclared_jobs(&jobs));
+    for svc in crate::services::ALL {
+        let (label, name) = (svc.label, svc.row);
+        let mut c =
+            check_service(&jobs, label, name, svc.probe, svc.owner, svc.shape, svc.what, &client).await;
         // Freshness is a SEPARATE verdict, applied after the liveness one: a service that answers
         // from three-day-old code is healthy and wrong, and only the first half of that was ever
         // reported. `warn`, never `fail` — being behind between a merge and a deploy is normal, and
         // a red that is usually red gets ignored, which is how this check would become the noise it
         // exists to replace.
         if matches!(c.status, CheckStatus::Ok) {
+            // Declared-vs-installed, alongside declared-vs-merged: same class of question.
+            if let Some(m) = program_mismatch(svc) {
+                c = Check::warn(name, format!("{} — {m}", c.detail), "reconcile the plist with src/services.rs");
+            }
             match deployment_drift(label) {
                 // The FACT always shows; the VERDICT only when it means something. A row that is
                 // yellow after every merge trains its reader to skip it, and then it is not there
@@ -627,7 +578,48 @@ async fn check_services() -> Vec<Check> {
     out
 }
 
-/// `label -> (pid, last exit status)`. `pid` is `None` when the job is loaded but not running,
+/// `com.rozum.*` jobs installed here that `services::ALL` does not declare.
+///
+/// The registry is intent and the plists are what the machine obeys; the point of having both is
+/// that they can disagree, and a disagreement should be a finding rather than a surprise. One row,
+/// naming them all: a machine mid-migration should not turn the report into a list.
+fn undeclared_jobs(jobs: &std::collections::HashMap<String, (Option<i64>, i64)>) -> Vec<Check> {
+    let mut extra: Vec<&str> = jobs
+        .keys()
+        .map(String::as_str)
+        .filter(|l| crate::services::find(l).is_none())
+        .collect();
+    if extra.is_empty() {
+        return Vec::new();
+    }
+    extra.sort_unstable();
+    vec![Check::warn(
+        "svc:undeclared",
+        format!("installed here but declared nowhere: {}", extra.join(", ")),
+        "add it to src/services.rs (with a probe, or a stated reason there is none) or remove the job",
+    )]
+}
+
+/// A declared service whose plist runs a different binary than the registry expects.
+///
+/// The mismatch that cost something: `~/.rozum/bin/rozum-ctrl` is the thin dispatcher, and a guess
+/// from the filename published the 54 MB engine over it. Nothing broke only because the old process
+/// was still running.
+fn program_mismatch(svc: &crate::services::Service) -> Option<String> {
+    compare_program(&job_program(svc.label)?, svc.program)
+}
+
+/// The comparison itself, separated from launchd so the exception can be tested: this is a rule
+/// about names, and a rule that can only be exercised by editing a plist is one nobody re-checks.
+fn compare_program(installed_path: &str, declared: &str) -> Option<String> {
+    let actual = std::path::Path::new(installed_path).file_name()?.to_str()?;
+    // `rozum-ctrl` is the gateway binary under another name — the deploy's decision, recorded in
+    // `scripts/install-bins.sh`, not a mismatch.
+    let same = actual == declared || (actual == "rozum-ctrl" && declared == "rozum-gateway");
+    (!same).then(|| format!("runs {actual}, but this service is declared to run {declared}"))
+}
+
+/// `label -> (pid, last exit status)`./// `label -> (pid, last exit status)`. `pid` is `None` when the job is loaded but not running,
 /// which is exactly the state two bridges sat in for several minutes today while everything else
 /// looked fine.
 fn launchctl_jobs() -> std::collections::HashMap<String, (Option<i64>, i64)> {
@@ -1229,7 +1221,8 @@ mod tests {
     /// Every service either has a probe or says out loud that it has none.
     #[test]
     fn no_service_is_reported_healthy_on_the_process_table_alone() {
-        for (label, name, probe, _owner, _shape, what) in SERVICES {
+        for svc in crate::services::ALL {
+            let (label, name, probe, what) = (svc.label, svc.row, svc.probe, svc.what);
             assert!(label.starts_with("com.rozum."), "{label}");
             assert!(name.starts_with("svc:"), "{name} must not collide with a demo-path check");
             assert!(!what.is_empty(), "{label} must say what it serves");
@@ -1240,10 +1233,10 @@ mod tests {
         // And the ones with no probe are exactly the ones that serve nothing locally: a bridge
         // talks outward to Telegram, a pool holds a socket to the daemon. If this list grows, the
         // new entry needs a probe or a reason.
-        let unprobed: Vec<&str> = SERVICES
+        let unprobed: Vec<&str> = crate::services::ALL
             .iter()
-            .filter(|(_, _, p, _, sh, _)| matches!(p, Probe::None) && *sh == Shape::Resident)
-            .map(|(l, _, _, _, _, _)| *l)
+            .filter(|s| matches!(s.probe, Probe::None) && s.shape == Shape::Resident)
+            .map(|s| s.label)
             .collect();
         assert_eq!(
             unprobed,
@@ -1254,6 +1247,33 @@ mod tests {
                 "com.rozum.assistant-groups"
             ]
         );
+    }
+
+/// A job nobody declares is invisible to every reader downstream — doctor will not probe it,
+    /// install-bins will not publish its binary, no spec mentions it. It must be a finding.
+    #[test]
+    fn an_undeclared_job_is_reported_once_and_named() {
+        let mut jobs = std::collections::HashMap::new();
+        jobs.insert("com.rozum.gateway".to_string(), (Some(1), 0));
+        assert!(undeclared_jobs(&jobs).is_empty(), "a declared job is not news");
+        jobs.insert("com.rozum.mystery".to_string(), (Some(2), 0));
+        jobs.insert("com.rozum.another".to_string(), (None, 0));
+        let out = undeclared_jobs(&jobs);
+        assert_eq!(out.len(), 1, "one row, not one per job — a migration should not become a list");
+        assert!(out[0].detail.contains("com.rozum.another"), "{}", out[0].detail);
+        assert!(out[0].detail.contains("com.rozum.mystery"), "{}", out[0].detail);
+    }
+
+    /// The mismatch that cost something: a 54 MB engine published over the thin dispatcher because
+    /// the name was guessed. And the exception that must NOT fire, because `rozum-ctrl` genuinely is
+    /// the gateway binary under another name.
+    #[test]
+    fn a_plist_running_the_wrong_binary_is_a_finding_but_rozum_ctrl_is_not() {
+        assert_eq!(compare_program("/Users/x/.cargo/bin/rozum-gateway", "rozum-gateway"), None);
+        assert_eq!(compare_program("/Users/x/.rozum/bin/rozum-ctrl", "rozum-gateway"), None, "same program, deploy's own name");
+        let m = compare_program("/Users/x/.rozum/bin/rozum-meet", "rozum-gateway").expect("must report");
+        assert!(m.contains("runs rozum-meet"), "{m}");
+        assert!(m.contains("declared to run rozum-gateway"), "{m}");
     }
 
     #[test]

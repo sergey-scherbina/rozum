@@ -407,6 +407,15 @@ enum Command {
         action: IdentityAction,
     },
 
+    /// What services this build declares: labels, the binary each should run, how each is probed.
+    ///
+    /// The registry `doctor` reads and `scripts/install-bins.sh` consults, printed so a script does
+    /// not need a fourth copy of it (`src/services.rs`).
+    Services {
+        /// Machine-readable.
+        #[arg(long)]
+        json: bool,
+    },
     /// Read-only readiness report for the local demo path.
     Doctor {
         /// Probe an already-running meeting web/PWA endpoint.
@@ -1638,6 +1647,21 @@ async fn main() {
             IdentityAction::Whoami => run_identity_whoami(),
             IdentityAction::SetName { name } => run_identity_set_name(&name),
         },
+        Some(Command::Services { json }) => {
+            // One place declares them; this is how a shell script reads that place instead of
+            // keeping a fourth copy (`scripts/install-bins.sh` used to hardcode the name map).
+            if json {
+                let rows: Vec<serde_json::Value> = rozum::services::ALL
+                    .iter()
+                    .map(|s| serde_json::json!({ "label": s.label, "row": s.row, "program": s.program, "what": s.what }))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+            } else {
+                for s in rozum::services::ALL {
+                    println!("{:<26} {:<22} {}", s.label, s.program, s.what);
+                }
+            }
+        }
         Some(Command::Doctor { web_url, strict, services, services_only, post_room }) => {
             let want_services = services || services_only || post_room.is_some();
             run_doctor(web_url, strict, want_services, services_only, post_room).await

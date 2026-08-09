@@ -3,6 +3,7 @@ pub mod doctor;
 pub mod proxy;
 pub mod sandbox;
 pub mod service;
+pub mod services;
 
 // The durable SPI core (backend/concurrency/obs/engine/serving/sampler/constrain/
 // harmony) now lives in the `rozum-core` crate (Phase 0 of the workspace split).
