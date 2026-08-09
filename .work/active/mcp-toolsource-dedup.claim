@@ -1,0 +1,6 @@
+feature/mcp-toolsource-dedup 2026-08-09T16:55:00Z
+agent: claude-opus-5
+heartbeat: 2026-08-09T16:55:00Z
+status: in-progress
+done-so-far: verified the duplicate: McpToolSource exists twice in rozum-agent — mcp_tool_source.rs:40 (LIVE, imported by crates/nadia/src/mcp.rs:29, 4 tests) and agent.rs:158 (no importer; only its own test at :970). Module tests are a SUPERSET of the agent.rs test (same list+dispatch, plus unknown-tool, server-error and MultiToolSource-composition).
+next: delete the agent.rs copy (struct :158, impl :165, impl ToolSource :213, test mcp_tool_source_lists_and_dispatches + its AddServer helper + now-unused rmcp imports), then cargo test -p rozum-agent. No compiler warning guards this — both copies are `pub`, and pub items are not dead-code-linted.
