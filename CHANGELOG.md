@@ -1,5 +1,44 @@
 # Changelog
 
+## doctor-deployment-drift — healthy and three days old was one verdict
+Completed: 2026-08-08
+Spec: `docs/specs/deployment-drift.md`
+
+`doctor --services` could call every service healthy and be right while the binary serving it was
+days behind `master` — three times in two days, once leaving a feature "shipped" for a day while the
+daemon had never heard of it. Health and freshness are different questions; only the first was ever
+asked.
+
+Binaries now carry the commit they were built from, in a dependency-free `rozum-stamp` crate, and
+the check reads the FILE — a binary that cannot start is the case most worth reporting, and asking
+the resident-model gateway its version would cost a model load. Distance is counted against
+`origin/master`, because a stale clone comparing to its own `HEAD` pronounces itself current.
+Unstamped binaries are warned about rather than skipped: their age is unknown, and reporting unknown
+as silence is exactly the substitution being removed. Foreign binaries that can never carry a stamp
+(`rozum-meeting-ssc`) stay silent.
+
+**Four defects in my own mechanism, each found one step later than the last, which is the useful
+part of this entry:**
+
+1. `#[used]` on a `&str` — the compiler kept the static, the linker dropped it. Caught by its test.
+2. The scanner contains the string it scans for, so the first match was the `MARK_PREFIX` constant
+   and a stamped binary read as unstamped. Caught by its test.
+3. A `&str` static is a POINTER: `#[used]`/`no_mangle` keep the pointer while the bytes sit in a
+   section `-dead_strip` removes. Passed in DEBUG, vanished in RELEASE — a green suite while an
+   unstamped binary went to the operator's machine. The text is the static now, and the real gate
+   moved to the artifact: `install-bins.sh` refuses to publish a workspace binary with no stamp,
+   because a property that only holds in the profile nobody ships is not a property.
+4. The sha scan had no upper bound, and the linker had put `axum::rejection` right after the stamp —
+   a leading `a` is a hex digit, so it read a 41-character "commit" that git denied, and the check
+   reported a binary built from HEAD as built from nowhere. `rozum-meet` was silent through the same
+   bug because what followed ITS stamp was not hex; my own probe used a `{7,40}` regex and so could
+   not reproduce what the code did.
+
+Proven live in both directions: freshly deployed rows silent, `svc:mcp-http` reporting itself one
+commit behind while its binary lagged. `install-bins.sh` also stopped asking periodic jobs to hold a
+pid — the first deploy called `com.rozum.doctor` unsettled while it was healthy, a false red on the
+one job that exists to not cry wolf.
+
 ## shared-checkout-guard — closed by verifying, not by building
 Completed: 2026-08-08
 

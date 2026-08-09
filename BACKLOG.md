@@ -935,17 +935,9 @@ revive it.
   and gets the same refusal. Known limit, documented in the hook: a CLEAN `git revert` on master is
   refused because git writes no marker for one.
 
-- [ ] **doctor-deployment-drift** — `doctor --services` says every service is healthy while the
-  installed binary is three days behind master, and nothing says so.
-  **Why:** the deployed `~/.cargo/bin/rozum-gateway` fell behind `master` three times in two days
-  (2026-08-07..08). Each time it was caught by hand, and once it meant a feature was "shipped" for a
-  day while the running daemon had never heard of it. Every other kind of drift in this repo now has
-  a check; this one — the gap between what is merged and what is RUNNING — has none.
-  **How:** stamp the build (`git rev-parse HEAD` at compile time via a build script or an env var
-  baked in) and have `doctor --services` compare it against the checkout's `HEAD`, reporting
-  "deployed N commits behind" as a `warn`. `warn`, not `fail`: being behind is normal between a
-  merge and a deploy, and a red that is usually red gets ignored.
-  **Gotcha:** the check must compare against `origin/master`, not the local checkout, or a stale
-  local clone reports itself perfectly up to date.
-  **Done when:** a deliberately stale install is reported with its distance, a fresh one is silent,
-  and the report survives a checkout that is itself behind.
+- [x] **doctor-deployment-drift — DONE 2026-08-08.** Binaries carry the commit they were built from
+  (`crates/rozum-stamp`, read from the FILE, never by running the service); `doctor --services`
+  counts the distance to `origin/master` and warns. Unstamped is warned about too — its age is
+  unknown, and unknown reported as silence is the failure being fixed. Proven live in both
+  directions: freshly deployed rows silent, `svc:mcp-http` reporting itself 1 commit behind.
+  Spec: `docs/specs/deployment-drift.md`.
