@@ -130,10 +130,25 @@ the deferred follow-ups (operator-triaged 2026-06-24, none urgent):
 
 ## Host safety
 
-- [ ] **residency-gate-cap-mlx-sibling-aware** (v3 hardening, NOT urgent) — the ledger refuses at
-  *admission*; the per-process MLX cap (`crates/rozum-mlx/.../mlx_native_backend.rs:~363`) is still
-  flat `total−8`. Make it sibling-aware (`total−8−committed_by_others` from the ledger) so even an
-  escape-hatch / unknown-path 2nd MLX process can't claim near-total RAM. Secondary to the ledger.
+- [x] **residency-gate-cap-mlx-sibling-aware — CLOSED 2026-08-09, not done: the entry is stale in
+  both halves, and one half asks for something weaker than what shipped.** No code changed; this is
+  the reading that closes it.
+  - *"still flat `total−8`"* — it is not, and the named line (`~363`) has long since moved.
+    `select_mlx_mem_limit_bytes` (`crates/rozum-mlx/src/mlx_native_backend.rs:5117`) resolves
+    explicit `ROZUM_MLX_MEM_GB` → **the per-process residency share** → `total−8` only as the
+    *lone-gateway fallback*. `src/main.rs:9264` sets that share to `estimate_model_footprint_bytes`
+    — the SAME footprint the residency gate reserved — before the worker loads.
+  - The proposed formula is *looser* than what is already there. `total−8−committed_by_others`
+    still lets one process take everything no sibling has claimed; capping at the model's own
+    declared footprint ties it to its own share. Implementing the entry would be a regression.
+  - The stated purpose is unreachable by this lever at ANY value: `set_memory_limit` is **soft**
+    (evict/wait, then the allocation proceeds anyway — source-proven, memory
+    `reference-mlx-memory-cap-semantics`). An "escape-hatch / unknown-path 2nd MLX process" is by
+    definition one that never went through admission, so shrinking *our* hint does nothing to it.
+    Admission plus `set_cache_limit` are the structural levers, which is what the code's own doc
+    comments now say.
+  - Lesson, the sixth time this session: an entry's text ages, the code does not. Re-read the code
+    the entry names before scheduling the work — the line number moving is the cheap tell.
 ## MCP (deferred — decide the use, then build)
 
 - [ ] **mcp-use** — the MCP-client `ToolSource` (`McpToolSource`, `src/mcp_tool_source.rs`)
