@@ -1,5 +1,20 @@
 # Changelog
 
+## shared-checkout-guard — closed by verifying, not by building
+Completed: 2026-08-08
+
+The entry asked for a pre-commit hook because "nothing enforces" the worktree-first rule. The hook
+had landed the same day (`f0c6dd2`), and the entry had already outlived its subject — the exact rot
+this backlog was triaged for a day earlier.
+
+So the work was to check rather than to write: `scripts/githooks/test-pre-commit.sh` passes 9/9, and
+a real `src/doctor.rs` edit staged in the shared checkout is refused live, with the worktree command
+in the message. It is installed repo-level (`core.hooksPath`), which is what makes it apply inside
+worktrees too, and `AGENTS.md` names the one command a fresh clone needs.
+
+Recorded because "read the code before believing the board" is now the third entry this week whose
+remaining work was zero.
+
 ## meeting-ssc-unbuildable — a live service that could not be rebuilt, for two import lines
 Completed: 2026-08-08
 
