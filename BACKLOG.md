@@ -361,6 +361,24 @@ single-writer daemon). Each item below is its own spec+build later — listed to
 
 # PARKED — what would revive it
 
+## ONE GATE, several entries: the weights are not on disk (checked 2026-08-09)
+
+`rozum models list` returns **exactly one** model: `mlx-community:Qwen3.5-4B-MLX-4bit`, 3.06 GB.
+Every other model this board names — Qwen3-Coder-30B, GLM-4-32B, GLM-4.7-Flash, Devstral, gpt-oss —
+is absent. So the entries below that read "GPU-gated" or "slot-gated" are mis-labelled: they are
+**download-gated first**, and a GPU window is the second cost, not the first.
+
+Affected, and what each would need before it can even start:
+- `qwen-coder-edit-toolarg-decode` REMAINING (the live verify) — Qwen3-Coder-30B, ~17 GB.
+- `glm32b-codex-timeout` — GLM-4-32B, ~18 GB.
+- `B2 — one authoritative full matrix` — the whole curated tier, several models.
+- `gptoss-codex-cascade` — gpt-oss (gone from disk) plus a second model; a cascade needs two.
+
+This is one operator decision (disk + bandwidth + a GPU window), not four separate ones. Recorded
+here so it is made once. Note the contrast: `codex-create-delivery-on-qwen` was runnable TODAY with
+no download and no eviction precisely because it names the resident model — an entry that specifies
+a model already in use costs nothing to answer, which is worth copying when writing the next one.
+
 ## Native MLX model ports (matrix coverage, lower priority — operator 2026-06-27)
 
 **Revives when:** one of these models is on disk. `~/.cache/huggingface` holds Qwen3.5-4B and
