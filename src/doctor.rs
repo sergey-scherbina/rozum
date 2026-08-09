@@ -310,6 +310,76 @@ fn periodic_check(name: &'static str, last_exit: i64, every_secs: u64, what: &st
 /// The restart rate as a phrase, or nothing at all. Silence when the job restarted once (that is
 /// every healthy service) or writes no dated start line — a check that appends noise to every OK
 /// line is a check people stop reading.
+/// What the binary behind a job was built from, and how far that is behind `origin/master`.
+///
+/// The gap between what is MERGED and what is RUNNING had no check, and it opened three times in
+/// two days: once a feature was "shipped" for a day while the daemon serving it had never heard of
+/// it. Health and freshness are different questions, and `answers 200` was only ever the first.
+///
+/// Reads the binary as a FILE (`rozum_core::build_stamp`) rather than running it: a service whose
+/// binary cannot start is exactly the case worth reporting, and asking the resident-model gateway
+/// its version would cost a model load.
+fn deployment_drift(label: &str) -> Option<String> {
+    let prog = job_program(label)?;
+    let Some(built) = rozum_core::build_stamp::commit_of_file(std::path::Path::new(&prog)) else {
+        // NO STAMP IS NOT NO NEWS. An unstamped binary predates stamping or was built outside a
+        // checkout — either way its age is unknown, and reporting unknown as silence is the exact
+        // substitution this check exists to remove. Only OUR cargo binaries can carry one:
+        // `rozum-meeting-ssc` is emitted by ScalaScript and links none of these crates, so asking
+        // it for a stamp forever would be a warn nobody can clear.
+        let ours = matches!(
+            std::path::Path::new(&prog).file_name().and_then(|n| n.to_str()),
+            Some("rozum-gateway" | "rozum" | "rozum-ctrl" | "rozum-meet" | "nadia")
+        );
+        return ours.then(|| "deployed binary carries no build stamp — its age is unknown".to_string());
+    };
+    let repo = drift_repo()?;
+    // Against origin/master, NOT the local checkout: a stale clone would otherwise pronounce itself
+    // perfectly up to date, which is the failure mode wearing a green hat.
+    let out = Command::new("git")
+        .args(["-C", &repo, "rev-list", "--count", &format!("{built}..origin/master")])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        // The commit is not in this checkout — a binary built elsewhere, or from a branch that was
+        // pruned. Unknown, said as unknown.
+        return Some(format!("built from {} — not a commit this checkout knows", &built[..7.min(built.len())]));
+    }
+    let behind: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+    (behind > 0).then(|| format!("deployed binary is {behind} commits behind origin/master ({})", &built[..7.min(built.len())]))
+}
+
+/// `ProgramArguments[0]` for a job — the binary launchd actually execs, read from the plist rather
+/// than assumed. `scripts/install-bins.sh` derives its destinations the same way, for the same
+/// reason: this machine has had the same program installed at three paths with three ages.
+fn job_program(label: &str) -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let plist =
+        std::path::Path::new(&home).join("Library/LaunchAgents").join(format!("{label}.plist"));
+    let out = Command::new("plutil")
+        .args(["-extract", "ProgramArguments.0", "raw", "-o", "-"])
+        .arg(&plist)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+/// A checkout to measure distance in. This binary's build-time repo first — but a build in a
+/// worktree bakes the worktree's path, and worktrees are deleted when their branch lands, so a
+/// missing path must mean "cannot compare" and never "up to date". Falls back to the cwd's repo.
+fn drift_repo() -> Option<String> {
+    let baked = rozum_core::build_stamp::repo();
+    if !baked.is_empty() && std::path::Path::new(baked).join(".git").exists() {
+        return Some(baked.to_string());
+    }
+    let out = Command::new("git").args(["rev-parse", "--show-toplevel"]).stderr(Stdio::null()).output().ok()?;
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
 fn restart_note(label: &str) -> String {
     match restarts_last_hour(label) {
         Some(n) if n > 1 => format!(" — restarted {n}× in the last hour"),
@@ -458,7 +528,18 @@ async fn check_services() -> Vec<Check> {
         .unwrap_or_else(|_| reqwest::Client::new());
     let mut out = Vec::new();
     for (label, name, probe, owner, shape, what) in SERVICES {
-        out.push(check_service(&jobs, label, name, *probe, *owner, *shape, what, &client).await);
+        let mut c = check_service(&jobs, label, name, *probe, *owner, *shape, what, &client).await;
+        // Freshness is a SEPARATE verdict, applied after the liveness one: a service that answers
+        // from three-day-old code is healthy and wrong, and only the first half of that was ever
+        // reported. `warn`, never `fail` — being behind between a merge and a deploy is normal, and
+        // a red that is usually red gets ignored, which is how this check would become the noise it
+        // exists to replace.
+        if matches!(c.status, CheckStatus::Ok) {
+            if let Some(d) = deployment_drift(label) {
+                c = Check::warn(name, format!("{} — {d}", c.detail), "redeploy: scripts/install-bins.sh (it restarts the job and waits for it)");
+            }
+        }
+        out.push(c);
     }
     out
 }
@@ -1139,5 +1220,81 @@ mod tests {
             join_url("http://localhost:8400/", "/manifest.webmanifest"),
             "http://localhost:8400/manifest.webmanifest"
         );
+    }
+}
+
+#[cfg(test)]
+mod drift_tests {
+    use super::*;
+
+    fn sh(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = Command::new(args[0]).args(&args[1..]).current_dir(dir).output().expect("cmd");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// The distance must be measured against `origin/master`, not the local checkout — a stale
+    /// clone would otherwise pronounce itself perfectly up to date, which is this bug wearing a
+    /// green hat. Built as a real repo with a real remote because the whole claim is about which
+    /// ref the count uses.
+    #[test]
+    fn distance_is_measured_against_the_remote_not_the_local_head() {
+        let base = std::env::temp_dir().join(format!("rozum-drift-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let origin = base.join("origin");
+        let clone = base.join("clone");
+        std::fs::create_dir_all(&origin).unwrap();
+        sh(&origin, &["git", "init", "-q", "-b", "master", "."]);
+        sh(&origin, &["git", "config", "user.email", "t@t"]);
+        sh(&origin, &["git", "config", "user.name", "t"]);
+        std::fs::write(origin.join("a"), "1").unwrap();
+        sh(&origin, &["git", "add", "-A"]);
+        sh(&origin, &["git", "commit", "-qm", "one"]);
+        let first = sh(&origin, &["git", "rev-parse", "HEAD"]);
+        std::fs::write(origin.join("a"), "2").unwrap();
+        sh(&origin, &["git", "commit", "-qam", "two"]);
+        std::fs::write(origin.join("a"), "3").unwrap();
+        sh(&origin, &["git", "commit", "-qam", "three"]);
+
+        std::fs::create_dir_all(&clone).unwrap();
+        sh(&base, &["git", "clone", "-q", origin.to_str().unwrap(), clone.to_str().unwrap()]);
+        // The clone sits on the FIRST commit: local HEAD says "current", origin/master says 2 behind.
+        sh(&clone, &["git", "checkout", "-q", &first]);
+        let repo = clone.to_str().unwrap();
+        let count = |from: &str| -> String {
+            let out = Command::new("git")
+                .args(["-C", repo, "rev-list", "--count", &format!("{from}..origin/master")])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(count(&first), "2", "two commits landed after the deployed one");
+        let head = sh(&clone, &["git", "rev-parse", "HEAD"]);
+        assert_eq!(head, first, "the local checkout believes it is current");
+
+        // An unknown commit must not be silently read as zero.
+        let bogus = "0000000000000000000000000000000000000000";
+        let out = Command::new("git")
+            .args(["-C", repo, "rev-list", "--count", &format!("{bogus}..origin/master")])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "an unknown commit must FAIL, not count as up to date");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+
+    /// A binary that cannot carry a stamp must not be nagged about forever; one that can, must be.
+    #[test]
+    fn only_our_own_binaries_are_asked_for_a_stamp() {
+        let ours = |p: &str| {
+            matches!(
+                std::path::Path::new(p).file_name().and_then(|n| n.to_str()),
+                Some("rozum-gateway" | "rozum" | "rozum-ctrl" | "rozum-meet" | "nadia")
+            )
+        };
+        assert!(ours("/Users/x/.rozum/bin/rozum-gateway"));
+        assert!(ours("/Users/x/.cargo/bin/nadia"));
+        assert!(!ours("/Users/x/.local/bin/rozum-meeting-ssc"), "ScalaScript-emitted, links none of our crates");
+        assert!(!ours("/Users/x/.rozum/bin/rozum-telegram-bridge.sh"));
     }
 }
