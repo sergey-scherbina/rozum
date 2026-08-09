@@ -115,7 +115,7 @@ def rowMatches(header: List[String], row: List[String], agent: String, model: St
 // `Stub` and SERIALISED, so this file once answered `{"cell":{Stub}}` with status 200.
 def rowToJson(header: List[String], row: List[String]): String =
   val pairs = header.zipWithIndex.map(hi =>
-    jsonStringify(hi(0)) + ":" + jsonStringify(if hi(1) < row.length then row(hi(1)) else "")
+    jsonStringify(hi._1) + ":" + jsonStringify(if hi._2 < row.length then row(hi._2) else "")
   )
   "{" + pairs.toList.mkString(",") + "}"
 
