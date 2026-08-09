@@ -231,6 +231,19 @@ the deferred follow-ups (operator-triaged 2026-06-24, none urgent):
   the `::`/`Cons`/`Nil` code the backend cannot lower. Dropping them took the file from 20 errors to
   0; spelling out `ProcessOptions(…, true)` at 23 call sites got the emitted Rust to compile. The
   binary is rebuilt, published and serving :8405. Record: `CHANGELOG.md`.
+  **CORRECTION 2026-08-09, measured, and it matters because a workaround was written against it.**
+  The 20 errors were a STALE TOOLCHAIN, not the import lines. `bin/ssc-tools` here had been built
+  from `194f9c43d` while their tree was at `32f298e77`, and it says so in a `STALE BUILD` banner.
+  After `./install.sh --dev` (now `6d3fce2c7`): `[route, serve](std/http.ssc)` **with the functions
+  called** emits **0** lowering errors, `[readFile, exists](std/fs.ssc)` **0**, and the ORIGINAL
+  `clients/meeting/meeting.ssc` — imports intact — builds to a 1.7 MB binary with no errors at all.
+  Their triage of `build-rust-std-imports-unlowerable` reached the same numbers first by quoting the
+  SHA the BANNER names rather than the one `git log` shows, and asked us to check exactly that.
+  So the intrinsics-when-unimported workaround and the 23 hand-spelled `ProcessOptions(…, true)` are
+  changes made to route around a bug that does not exist on a current toolchain. They are harmless
+  and they are also unnecessary; nobody should extend that pattern to new files.
+  **The rule, and it has now cost two agents a build cycle each: quote the SHA from the BANNER.**
+  `git log` describes the tree; the banner describes the binary that is actually measuring.
 
 ## Land the reactive-chat primitives in canonical scalascript (deferred "потом", 2026-07-22)
 
