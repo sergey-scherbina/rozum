@@ -182,11 +182,16 @@ single-writer daemon). Each item below is its own spec+build later — listed to
     external-agent requests. Both are gateway-side. Note rozum already SERVES MCP over HTTP
     (`com.rozum.mcp-http`, :8779, responds), so (B) is an extension of a live surface rather than new
     ground — which is the argument for it over (C).
-  - **Cleanup first, whichever is picked — `mcp-toolsource-dedup`:** `McpToolSource` exists TWICE in
-    `rozum-agent`, both `pub`, both `impl ToolSource`, both with `connect_stdio`/`from_service` —
-    `mcp_tool_source.rs:40` (LIVE, nadia imports it, 4 tests) and `agent.rs:158` (no importer
-    anywhere). No compiler warning, because `pub` items are not dead-code-linted. Delete the
-    `agent.rs` copy before anyone builds (B) or (C) against the wrong one. ~10 minutes, zero risk.
+  - **`mcp-toolsource-dedup` — DONE 2026-08-09 (`31df590`).** `McpToolSource` existed TWICE in
+    `rozum-agent`, both `pub`, both `impl ToolSource` — `mcp_tool_source.rs:40` (LIVE, nadia imports
+    it) and `agent.rs:158` (no importer). No compiler warning guarded it: `pub` items are not
+    dead-code-linted. The agent.rs copy and its three tests are gone; the module's four tests are a
+    strict superset. 134 passed / 0 failed, workspace check clean.
+    **One capability was dropped deliberately** — the deleted `call_result_to_value` parsed a text
+    result as JSON when it could (`{"sum":9}` -> an object); the surviving `call_result_value` always
+    wraps text as a JSON string. No consumer depended on it, so nothing changed behaviourally, but
+    many MCP servers return JSON in a text block with no `structured_content` — so if (B) or (C) is
+    ever built, this is a two-line addition to `call_result_value`, not a rediscovery.
   - Spec so far: `docs/specs/mcp-toolsource.md`.
 
 ## Agentic-bench fix candidates (from matrix-failure-analysis)
