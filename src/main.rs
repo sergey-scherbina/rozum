@@ -673,6 +673,16 @@ enum MeetingsAction {
     },
     /// Stop the running meeting daemon (graceful).
     Stop,
+    /// Hand the daemon back to launchd, when an unmanaged copy won the socket.
+    ///
+    /// Deliberately a COMMAND and not something the machine does on its own: a working service is
+    /// being stopped, briefly, and that is an operator's decision (`docs/specs/
+    /// meeting-daemon-ownership.md`).
+    Handoff {
+        /// Say what would happen and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show the meeting daemon status and its rooms.
     Status,
     /// Attach a TUI to a room (defaults to the cwd project's room).
@@ -1513,6 +1523,7 @@ async fn main() {
         Some(Command::Meetings { action }) => match action {
             MeetingsAction::Start { foreground } => run_meetings_start(foreground).await,
             MeetingsAction::Stop => run_meetings_stop(),
+            MeetingsAction::Handoff { dry_run } => run_meetings_handoff(dry_run).await,
             MeetingsAction::Status => run_meetings_status().await,
             MeetingsAction::Attach { room } => {
                 if let Err(e) = rozum::tui::launch_generated(room) {
@@ -5095,6 +5106,144 @@ fn run_meetings_stop() {
         Ok(s) => eprintln!("kill {pid} exited with {s}"),
         Err(e) => eprintln!("failed to signal pid {pid}: {e}"),
     }
+}
+
+/// Move ownership of the socket from an unmanaged daemon to launchd's job.
+///
+/// The state this fixes: a client-spawned daemon holds the socket and serves perfectly, while the
+/// launchd job — the copy with `KeepAlive`, the one that would bring the service back at 4am — owns
+/// nothing. `doctor --services` reports it, and this is the command it points at.
+///
+/// Graceful and explicit: the unmanaged daemon is asked to stop (the same signal `meetings stop`
+/// sends), never killed, and nothing happens without the operator running this.
+async fn run_meetings_handoff(dry_run: bool) {
+    use rozum::meeting::daemon::daemon_alive;
+    use rozum::meeting::daemon_proxy::{DAEMON_JOB, launchd_job_exists};
+    use rozum::meeting::room_path::meeting_sock;
+
+    if !launchd_job_exists(DAEMON_JOB).await {
+        eprintln!(
+            "meetings handoff: {DAEMON_JOB} is not installed on this machine — there is no owner to \
+             hand anything to. On a machine without the job, a client-spawned daemon is the design, \
+             not a fault (docs/specs/meeting-daemon-ownership.md)."
+        );
+        std::process::exit(1);
+    }
+    let sock = meeting_sock();
+    let owner = socket_owner_pid(&sock);
+    let job = launchd_job_pid(DAEMON_JOB).await;
+    match handoff_plan(owner, job) {
+        HandoffPlan::AlreadyOwned(j) => {
+            println!("nothing to do: launchd's job (pid {j}) already holds the socket");
+            return;
+        }
+        HandoffPlan::JustStart => println!("nothing holds the socket — starting launchd's copy"),
+        HandoffPlan::StopThenStart(o) => {
+            println!("socket held by pid {o}, which launchd does not manage{}", match job {
+                Some(j) => format!(" (its job runs as pid {j} and owns nothing)"),
+                None => " (its job is not running)".to_string(),
+            });
+        }
+    }
+    if dry_run {
+        println!("--dry-run: would stop the unmanaged daemon, then `launchctl kickstart` {DAEMON_JOB}");
+        return;
+    }
+    if let HandoffPlan::StopThenStart(owner_pid) = handoff_plan(owner, job) {
+        // Signal the pid that actually HOLDS THE SOCKET, not the one in the pidfile. On this machine
+        // they happened to match; they need not. The pidfile is written by whoever started last, so
+        // a `meetings stop` here could have signalled launchd's idle copy and left the unmanaged
+        // daemon serving — a handoff that reports success and changes nothing.
+        //
+        // SIGTERM, the same graceful signal `meetings stop` sends, never SIGKILL. The service is
+        // down from here until launchd's copy answers, which is why this is a command and not a
+        // background repair.
+        let _ = std::process::Command::new("kill")
+            .arg(owner_pid.to_string())
+            .status();
+        for _ in 0..40 {
+            if !daemon_alive(&sock).await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+    let uid = std::process::Command::new("id").arg("-u").output().ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok());
+    let Some(uid) = uid else {
+        eprintln!("meetings handoff: cannot resolve the current uid");
+        std::process::exit(1);
+    };
+    let _ = std::process::Command::new("launchctl")
+        .args(["kickstart", &format!("gui/{uid}/{DAEMON_JOB}")])
+        .status();
+    for _ in 0..40 {
+        if daemon_alive(&sock).await {
+            let now = socket_owner_pid(&sock);
+            let job = launchd_job_pid(DAEMON_JOB).await;
+            match (now, job) {
+                (Some(n), Some(j)) if n == j => println!("launchd's job owns the socket now (pid {j})"),
+                (Some(n), _) => println!("the socket is served by pid {n} — check `rozum doctor --services`"),
+                _ => println!("the daemon answers again"),
+            }
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    eprintln!("meetings handoff: the daemon did not come back within 10s — check `rozum doctor --services`");
+    std::process::exit(1);
+}
+
+/// What a handoff has to do, decided from the two pids alone.
+///
+/// Separated from the process because the interesting case is a comparison, and a comparison that
+/// can only be exercised by stopping a live service is one nobody re-checks after changing it.
+#[derive(Debug, PartialEq)]
+enum HandoffPlan {
+    /// launchd's job already holds the socket.
+    AlreadyOwned(u32),
+    /// Nothing holds it — no one to stop, just start the owner.
+    JustStart,
+    /// An unmanaged daemon holds it: stop THAT pid, then start the job.
+    StopThenStart(u32),
+}
+
+fn handoff_plan(owner: Option<u32>, job: Option<u32>) -> HandoffPlan {
+    match (owner, job) {
+        (Some(o), Some(j)) if o == j => HandoffPlan::AlreadyOwned(j),
+        (None, _) => HandoffPlan::JustStart,
+        (Some(o), _) => HandoffPlan::StopThenStart(o),
+    }
+}
+
+/// The pid holding the lock beside the socket, i.e. what is actually serving.
+fn socket_owner_pid(sock: &std::path::Path) -> Option<u32> {
+    let mut p = sock.as_os_str().to_os_string();
+    p.push(".lock");
+    let out = std::process::Command::new("lsof")
+        .arg("-t")
+        .arg(std::path::PathBuf::from(p))
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).lines().next()?.trim().parse().ok()
+}
+
+async fn launchd_job_pid(label: &str) -> Option<u32> {
+    let uid: u32 = String::from_utf8_lossy(
+        &std::process::Command::new("id").arg("-u").output().ok()?.stdout,
+    )
+    .trim()
+    .parse()
+    .ok()?;
+    let out = tokio::process::Command::new("launchctl")
+        .args(["print", &format!("gui/{uid}/{label}")])
+        .output()
+        .await
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("pid = ")?.trim().parse().ok())
 }
 
 async fn run_meetings_status() {
@@ -9846,5 +9995,34 @@ mod tests {
         assert_eq!(blind_footprint_bytes(w, 32_768), (w as f64 * 1.4) as u64);
         assert!(blind_footprint_bytes(w, 4_096) < blind_footprint_bytes(w, 32_768));
         assert!(blind_footprint_bytes(w, 131_072) > blind_footprint_bytes(w, 32_768));
+    }
+}
+
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+
+    /// The whole point of the command is WHICH pid gets signalled. On the machine it was written
+    /// for, the pidfile happened to hold the socket owner — so a version that trusted the pidfile
+    /// would have passed every check and, on the next machine, stopped launchd's idle copy while
+    /// the unmanaged daemon kept serving: a handoff that reports success and changes nothing.
+    #[test]
+    fn the_plan_targets_the_socket_owner_not_the_job() {
+        assert_eq!(handoff_plan(Some(26050), Some(26050)), HandoffPlan::AlreadyOwned(26050));
+        assert_eq!(handoff_plan(Some(25774), Some(26050)), HandoffPlan::StopThenStart(25774));
+        assert_eq!(handoff_plan(None, Some(26050)), HandoffPlan::JustStart);
+        assert_eq!(handoff_plan(None, None), HandoffPlan::JustStart);
+        // A job that is not running at all, with an unmanaged daemon serving: still stop the owner.
+        assert_eq!(handoff_plan(Some(25774), None), HandoffPlan::StopThenStart(25774));
+    }
+
+    /// A socket nobody holds must read as "nobody", not as an error the caller might treat as a pid.
+    #[test]
+    fn an_unheld_socket_has_no_owner() {
+        let d = std::env::temp_dir().join(format!("rozum-handoff-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(socket_owner_pid(&d.join("nothing-here.sock")), None);
+        std::fs::remove_dir_all(&d).ok();
     }
 }

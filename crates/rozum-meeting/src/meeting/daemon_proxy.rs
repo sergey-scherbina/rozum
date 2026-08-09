@@ -795,12 +795,78 @@ pub fn scrub_messenger_bridge_env(command: &mut std::process::Command) {
     }
 }
 
+/// The launchd job that OWNS this daemon where one is installed.
+pub const DAEMON_JOB: &str = "com.rozum.meeting-daemon";
+
+/// Bring the daemon up — by asking its OWNER first, and only spawning our own where there is none.
+///
+/// **The ownership question this answers** (`docs/specs/meeting-daemon-ownership.md`). Every client
+/// used to start its own detached daemon; whoever won the `flock` beside the socket then served
+/// `:8401` and the MCP socket for everyone, and launchd's job — the copy with `KeepAlive`, the one
+/// thing that would restart the service at 4am — sat there owning nothing. It worked, which is why
+/// it survived: the service ran, and the guarantee behind it did not.
+///
+/// So on a machine where the job exists, ask launchd; the daemon that results is the one launchd
+/// can restart. Where it does not exist — another checkout, a CI box, a second machine — spawn our
+/// own exactly as before, because "works anywhere" is the property that made this convenient and
+/// removing it would trade one failure for another.
 pub async fn spawn_daemon() {
+    if launchd_job_exists(DAEMON_JOB).await && kickstart_and_wait(DAEMON_JOB).await {
+        return;
+    }
     // `meetings start` spawns the detached daemon and waits for its socket.
     let mut command = tokio::process::Command::new(meetings_binary());
     command.args(["meetings", "start"]);
     scrub_messenger_bridge_env(command.as_std_mut());
     let _ = command.status().await;
+}
+
+/// Is this label installed on this machine at all? `launchctl print` answers for a job that is
+/// loaded whether or not it is currently running, which is the question here — a periodic or
+/// crashed job is still the owner.
+pub async fn launchd_job_exists(label: &str) -> bool {
+    let Some(uid) = current_uid() else { return false };
+    tokio::process::Command::new("launchctl")
+        .args(["print", &format!("gui/{uid}/{label}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Ask launchd to run the job, then wait for the socket it exists to serve.
+///
+/// `kickstart` WITHOUT `-k`: a job already running must not be restarted just because a client
+/// wanted to talk to it. Returns false if the socket never appears, so the caller can fall back
+/// rather than leave the client with nothing.
+async fn kickstart_and_wait(label: &str) -> bool {
+    let Some(uid) = current_uid() else { return false };
+    let _ = tokio::process::Command::new("launchctl")
+        .args(["kickstart", &format!("gui/{uid}/{label}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+    let sock = crate::meeting::room_path::meeting_sock();
+    for _ in 0..40 {
+        if crate::meeting::daemon::daemon_alive(&sock).await {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    false
+}
+
+fn current_uid() -> Option<u32> {
+    // `id -u` rather than a libc call: this crate has no libc dependency and the answer is stable.
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
 }
 
 fn value_to_call_result(v: &Value) -> CallToolResult {

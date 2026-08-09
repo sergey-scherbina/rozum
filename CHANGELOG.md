@@ -1,5 +1,41 @@
 # Changelog
 
+## meeting-daemon-ownership — the job with KeepAlive owned nothing
+Completed: 2026-08-09
+Spec: `docs/specs/meeting-daemon-ownership.md`
+
+Every client — the Telegram bridge, the MCP proxy, a bare CLI call — started its own detached daemon
+when it found none, and whoever won the `flock` beside the socket then served `:8401` and the MCP
+socket for everyone. It worked, which is why it lasted a week as a `warn` nobody could clear: the
+service ran while the guarantee behind it did not. `com.rozum.meeting-daemon` — the copy with
+`KeepAlive`, the one thing that brings the service back at 4am — sat loaded and owning nothing.
+
+**The decision: where launchd's job exists, launchd owns the daemon; where it does not, whoever needs
+it starts it.** `spawn_daemon` asks first — `launchctl kickstart` (without `-k`: a running job must
+not be restarted because a client wanted to talk to it) and wait for the socket — and falls back to
+its own copy only where no job is installed, because "works anywhere with no install" is the property
+that made this usable and trading it away swaps one failure for another.
+
+**The handoff is a command, not a repair.** `rozum meetings handoff` stops the unmanaged daemon
+gracefully and kickstarts the job; `--dry-run` says what it would do. A working service is stopped
+for a second or two, and choosing when that happens is an operator's call — `doctor --services` now
+names the command instead of performing it, because a check that fixes things is a check nobody can
+trust to only look.
+
+**The defect its own test surfaced:** the first version stopped the pid in `meetings.pid`. On this
+machine that happened to BE the socket owner, so every check passed — but the pidfile is written by
+whoever started last, so on the next machine it would have signalled launchd's idle copy and left the
+unmanaged daemon serving: a handoff reporting success and changing nothing. It signals the pid that
+holds the socket now.
+
+Live: `svc:meeting-daemon` went from a week-old `warn` to `running (pid 26050) and owns the socket`,
+the machine reads **6 ok, 0 warn, 0 fail**, and a second run says "nothing to do".
+
+The environment half turned out to be already fixed and was re-checked rather than assumed: a
+client-spawned daemon carries no `ROZUM_WEB_SECRET`, and since BUG-024 the secret is read from
+`~/.rozum/secrets/web-secret` when the variable is absent, making `:8401` a property of the
+installation rather than of who won the socket.
+
 ## doctor-drift-noise — the fact always, the colour only when it means something
 Completed: 2026-08-09
 

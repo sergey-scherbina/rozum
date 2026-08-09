@@ -751,7 +751,8 @@ async fn check_service(
                 ),
                 format!(
                     "that is a client-spawned daemon, not launchd's: it works, but the job cannot \
-                     restart what it does not own (BUGS.md BUG-025)"
+                     restart what it does not own. Hand it over: `rozum meetings handoff` \
+                     (docs/specs/meeting-daemon-ownership.md)"
                 ),
             ),
             Some(_) => Check::ok(
