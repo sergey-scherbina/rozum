@@ -68,8 +68,17 @@ pub fn commit_of_file(path: &std::path::Path) -> Option<String> {
     let mut from = 0usize;
     while let Some(rel) = bytes[from..].windows(needle.len()).position(|w| w == needle) {
         let at = from + rel + needle.len();
+        // CAPPED AT 40. A sha is 40 hex digits and the bytes after it are whatever the linker put
+        // next — in the deployed gateway that was `axum::rejection…`, whose leading `a` is a hex
+        // digit, so an uncapped scan read a 41-character "commit" and git rightly said it had never
+        // heard of it. The check then reported a binary built from HEAD as built from nowhere.
+        // Measured on the machine, after deploying; a regex probe with `{7,40}` had hidden it.
         let rest = &bytes[at..];
-        let end = rest.iter().position(|b| !b.is_ascii_hexdigit()).unwrap_or(rest.len());
+        let end = rest
+            .iter()
+            .take(40)
+            .position(|b| !b.is_ascii_hexdigit())
+            .unwrap_or_else(|| rest.len().min(40));
         if end >= 7 {
             if let Ok(sha) = std::str::from_utf8(&rest[..end]) {
                 return Some(sha.to_string());
@@ -94,6 +103,21 @@ mod tests {
         let found = commit_of_file(&exe);
         // A test binary is built by the same cargo invocation, so it carries the same commit.
         assert_eq!(found.as_deref(), Some(commit()), "marker not findable in {}", exe.display());
+    }
+
+
+    /// The bytes after a stamp are whatever the linker put next, and in the real gateway binary
+    /// that was `axum::rejection…` — a leading `a` is a hex digit, so an uncapped scan read a
+    /// 41-character sha and the drift check reported HEAD as an unknown commit.
+    #[test]
+    fn a_sha_stops_at_forty_even_when_the_next_bytes_are_hex() {
+        let d = std::env::temp_dir().join(format!("rozum-stamp-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("bin");
+        let sha = "ad680e686ce34adc4ae11ba120d510184c9d415b";
+        std::fs::write(&f, format!("padding{MARK_PREFIX}{sha}axum::rejection").as_bytes()).unwrap();
+        assert_eq!(commit_of_file(&f).as_deref(), Some(sha), "must stop at 40, not eat the `a`");
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]
