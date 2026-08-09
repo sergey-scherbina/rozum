@@ -1,6 +1,0 @@
-feature/doctor-drift-noise 2026-08-09T14:04:29Z
-agent: claude-code
-heartbeat: 2026-08-09T14:04:29Z
-status: not-started
-done-so-far:
-next: split fact from verdict — distance always shown, warn only past a day old
