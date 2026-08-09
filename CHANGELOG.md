@@ -1,5 +1,23 @@
 # Changelog
 
+## doctor-drift-noise — the fact always, the colour only when it means something
+Completed: 2026-08-09
+
+Hours after the drift check landed, the machine read "1 ok, 5 warn": master had moved seven commits
+during one working session and every service was correctly, uselessly yellow. The spec for that
+check says a red that is usually red gets ignored. I wrote that sentence and then shipped the shape
+it forbids.
+
+The distance now always appears in the row's text; the VERDICT waits for staleness that means
+something — a deployed build a day old or more, or one whose age cannot be determined at all
+(unstamped, or a commit this checkout does not know). A day because that is the recorded failure: a
+feature "shipped" for a day while the daemon serving it had never heard of it. Being a few commits
+behind mid-session is not that. The age is read from the stamped sha with `git show -s --format=%ct`
+— the sha already knows when it was written.
+
+Live after the change: rows read "10 commits behind origin/master (f12dbcc), built 42m ago" and stay
+`ok`; the only warn left on the machine is the pre-existing socket-ownership one.
+
 ## mtg-incident-repro — what may leave a working tree, and on whose authority
 Completed: 2026-08-09
 Spec: `docs/specs/incident-repro.md`

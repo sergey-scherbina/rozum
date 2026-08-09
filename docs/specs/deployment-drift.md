@@ -42,13 +42,24 @@ the operator's machine, after being deployed:
 
 ## What is reported, and as what
 
-| State | Verdict |
-|---|---|
-| stamped, `origin/master` has nothing newer | silent — the row stays `ok` |
-| stamped, N commits behind | **`warn`**: "deployed binary is N commits behind origin/master (abc1234)" |
-| stamped with a commit this checkout does not know | `warn`, said as exactly that — a binary built elsewhere or from a pruned branch |
-| **no stamp, and it is one of our cargo binaries** | **`warn`**: its age is unknown |
-| no stamp, foreign binary (`rozum-meeting-ssc`, a shell script) | silent — it links none of our crates and never can carry one |
+**The fact and the verdict are separate**, and separating them was a correction: the day this landed,
+master moved seven commits in one session and every service went yellow — the cry-wolf shape this
+spec forbids, produced by the person who wrote the ban. The distance is now always in the row's text;
+only the COLOUR waits for staleness that means something.
+
+| State | Row text | Verdict |
+|---|---|---|
+| stamped, `origin/master` has nothing newer | nothing added | `ok` |
+| stamped, behind, built **less than a day ago** | "N commits behind origin/master (abc1234), built 3h ago" | `ok` |
+| stamped, behind, built **a day or more ago** | same, with the age | **`warn`** |
+| stamped with a commit this checkout does not know | said as exactly that | **`warn`** — unknown is not reassuring |
+| **no stamp, and it is one of our cargo binaries** | its age is unknown | **`warn`** |
+| no stamp, foreign binary (`rozum-meeting-ssc`, a shell script) | nothing added | `ok` — it links none of our crates and never can carry one |
+
+A day, because that is the failure this was built from: a feature "shipped" for a day while the
+daemon serving it had never heard of it. Being a few commits behind inside a working session is not
+that. The age comes from `git show -s --format=%ct` on the stamped sha — the sha already knows when
+it was written, so nothing extra is baked into the binary.
 
 **`warn`, never `fail`.** Being behind between a merge and a deploy is normal, and a red that is
 usually red gets ignored — which is how this check would become the noise it exists to replace.

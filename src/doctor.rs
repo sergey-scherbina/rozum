@@ -319,7 +319,34 @@ fn periodic_check(name: &'static str, last_exit: i64, every_secs: u64, what: &st
 /// Reads the binary as a FILE (`rozum_core::build_stamp`) rather than running it: a service whose
 /// binary cannot start is exactly the case worth reporting, and asking the resident-model gateway
 /// its version would cost a model load.
-fn deployment_drift(label: &str) -> Option<String> {
+/// How stale a deployment may get before the row's VERDICT changes, as opposed to its text.
+///
+/// A day, because that is the failure this check was built from: a feature "shipped" for a day while
+/// the daemon serving it had never heard of it. Being a few commits behind inside a working session
+/// is not that — and on the day this landed, master moved seven commits and every service went
+/// yellow, which is the cry-wolf shape the spec forbids, introduced by the person who wrote the ban.
+const DRIFT_GRACE_SECS: u64 = 24 * 60 * 60;
+
+/// What the binary behind a job was built from — the FACT, and separately whether it is bad enough
+/// to change the row's verdict.
+enum Drift {
+    /// Worth saying on the row, not worth a colour: behind, but recently built.
+    Note(String),
+    /// Worth a `warn`: old enough that "shipped" and "running" have had time to diverge, or of an
+    /// age nothing can determine.
+    Stale(String),
+}
+
+/// What the binary behind a job was built from, and how far that is behind `origin/master`.
+///
+/// The gap between what is MERGED and what is RUNNING had no check, and it opened three times in
+/// two days: once a feature was "shipped" for a day while the daemon serving it had never heard of
+/// it. Health and freshness are different questions, and `answers 200` was only ever the first.
+///
+/// Reads the binary as a FILE (`rozum_core::build_stamp`) rather than running it: a service whose
+/// binary cannot start is exactly the case worth reporting, and asking the resident-model gateway
+/// its version would cost a model load.
+fn deployment_drift(label: &str) -> Option<Drift> {
     let prog = job_program(label)?;
     let Some(built) = rozum_core::build_stamp::commit_of_file(std::path::Path::new(&prog)) else {
         // NO STAMP IS NOT NO NEWS. An unstamped binary predates stamping or was built outside a
@@ -331,9 +358,10 @@ fn deployment_drift(label: &str) -> Option<String> {
             std::path::Path::new(&prog).file_name().and_then(|n| n.to_str()),
             Some("rozum-gateway" | "rozum" | "rozum-ctrl" | "rozum-meet" | "nadia")
         );
-        return ours.then(|| "deployed binary carries no build stamp — its age is unknown".to_string());
+        return ours.then(|| Drift::Stale("deployed binary carries no build stamp — its age is unknown".to_string()));
     };
     let repo = drift_repo()?;
+    let short = &built[..7.min(built.len())];
     // Against origin/master, NOT the local checkout: a stale clone would otherwise pronounce itself
     // perfectly up to date, which is the failure mode wearing a green hat.
     let out = Command::new("git")
@@ -343,14 +371,55 @@ fn deployment_drift(label: &str) -> Option<String> {
         .ok()?;
     if !out.status.success() {
         // The commit is not in this checkout — a binary built elsewhere, or from a branch that was
-        // pruned. Unknown, said as unknown.
-        return Some(format!("built from {} — not a commit this checkout knows", &built[..7.min(built.len())]));
+        // pruned. Unknown, said as unknown, and unknown is not reassuring.
+        return Some(Drift::Stale(format!("built from {short} — not a commit this checkout knows")));
     }
     let behind: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
-    (behind > 0).then(|| {
-        let s = if behind == 1 { "commit" } else { "commits" };
-        format!("deployed binary is {behind} {s} behind origin/master ({})", &built[..7.min(built.len())])
+    if behind == 0 {
+        return None;
+    }
+    let plural = if behind == 1 { "commit" } else { "commits" };
+    let fact = format!("deployed binary is {behind} {plural} behind origin/master ({short})");
+    // Age of the DEPLOYED commit, read from git rather than baked in: the stamp is a sha, and the
+    // sha already knows when it was written.
+    let age = Command::new("git")
+        .args(["-C", &repo, "show", "-s", "--format=%ct", &built])
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+        .map(|built_at| rozum_core::share::now_unix().saturating_sub(built_at));
+    Some(match age {
+        Some(secs) => match age_verdict(secs) {
+            Verdict::Note => Drift::Note(format!("{fact}, built {}", human_age(secs))),
+            Verdict::Stale => Drift::Stale(format!("{fact}, built {}", human_age(secs))),
+        },
+        // Cannot date it ⇒ cannot excuse it.
+        None => Drift::Stale(fact),
     })
+}
+
+
+/// The threshold, split out so it can be tested without a repository or a launchd job.
+#[cfg_attr(not(test), allow(dead_code))]
+enum Verdict {
+    Note,
+    Stale,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn age_verdict(secs: u64) -> Verdict {
+    if secs < DRIFT_GRACE_SECS { Verdict::Note } else { Verdict::Stale }
+}
+
+/// "3h ago" / "2 days ago" — enough to judge, short enough for a row.
+fn human_age(secs: u64) -> String {
+    match secs {
+        s if s < 90 * 60 => format!("{}m ago", s / 60),
+        s if s < 36 * 3600 => format!("{}h ago", s / 3600),
+        s => format!("{} days ago", s / 86400),
+    }
 }
 
 /// `ProgramArguments[0]` for a job — the binary launchd actually execs, read from the plist rather
@@ -538,8 +607,19 @@ async fn check_services() -> Vec<Check> {
         // a red that is usually red gets ignored, which is how this check would become the noise it
         // exists to replace.
         if matches!(c.status, CheckStatus::Ok) {
-            if let Some(d) = deployment_drift(label) {
-                c = Check::warn(name, format!("{} — {d}", c.detail), "redeploy: scripts/install-bins.sh (it restarts the job and waits for it)");
+            match deployment_drift(label) {
+                // The FACT always shows; the VERDICT only when it means something. A row that is
+                // yellow after every merge trains its reader to skip it, and then it is not there
+                // for the day that matters.
+                Some(Drift::Note(d)) => c.detail = format!("{} — {d}", c.detail),
+                Some(Drift::Stale(d)) => {
+                    c = Check::warn(
+                        name,
+                        format!("{} — {d}", c.detail),
+                        "redeploy: scripts/install-bins.sh (it restarts the job and waits for it)",
+                    )
+                }
+                None => {}
             }
         }
         out.push(c);
@@ -1287,6 +1367,28 @@ mod drift_tests {
 
 
     /// A binary that cannot carry a stamp must not be nagged about forever; one that can, must be.
+    #[test]
+/// The check went from "5 ok, 1 warn" to "1 ok, 5 warn" the day it landed, because master had
+    /// moved seven commits during one working session. The distance was true and the verdict was
+    /// noise, and a row that is yellow after every merge is not there for the day that matters.
+    #[test]
+    fn a_fresh_deploy_that_is_merely_behind_does_not_change_the_verdict() {
+        assert!(DRIFT_GRACE_SECS >= 12 * 3600, "shorter than a working day defeats the purpose");
+        assert!(DRIFT_GRACE_SECS <= 48 * 3600, "longer than two days hides the failure it was built from");
+        // The boundary either side, since the whole behaviour is a threshold.
+        assert!(matches!(age_verdict(3 * 3600), Verdict::Note), "3h old, mid-session");
+        assert!(matches!(age_verdict(DRIFT_GRACE_SECS - 1), Verdict::Note));
+        assert!(matches!(age_verdict(DRIFT_GRACE_SECS), Verdict::Stale), "a day is the failure that was recorded");
+        assert!(matches!(age_verdict(5 * 86400), Verdict::Stale));
+    }
+
+    #[test]
+    fn ages_read_the_way_a_person_would_say_them() {
+        assert_eq!(human_age(60), "1m ago");
+        assert_eq!(human_age(3 * 3600), "3h ago");
+        assert_eq!(human_age(50 * 3600), "2 days ago");
+    }
+
     #[test]
     fn only_our_own_binaries_are_asked_for_a_stamp() {
         let ours = |p: &str| {
