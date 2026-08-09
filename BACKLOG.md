@@ -23,12 +23,34 @@ Both were moved into *Deprioritised — the model is frozen* on 2026-08-04, and 
 `Parked because` line, because neither depends on a model. Sorting by section rather than by item
 is how that happens.
 
-- [ ] **test-cell-repair-failfast** (LOW, from B) — when a repair attempt hits an Edit-before-Read churn
-  loop it burns the whole RUN_TIMEOUT (rc124) without converging; `repair_tool_protocol_hint` fires one
-  attempt too late (loop is in the FINAL attempt). Lever: detect the churn live and fail-fast, and/or grant
-  ONE bonus repair attempt AFTER the protocol hint is first triggered so the hint can actually apply.
-  Note: harness already feeds the whole-file `repair_benchmark_recipe` ("replace the file, don't use Edit")
-  on repair — Devstral ignores it, so this is bounded by model compliance, not just harness logic.
+- [x] **test-cell-repair-failfast — CLOSED 2026-08-09, not done: BOTH levers already shipped, and the
+  obvious way to "finish" the second one is a documented regression.** Entry written 2026-07-05,
+  before the loop-breaker existed. No code changed; the measurement is the deliverable.
+  - *Lever 2 (bonus attempt)* — shipped, and nobody closed the entry. `scripts/bench/agentic.sh:940-949`
+    (`bonus_used`, marked `R2.5`) grants exactly one extra attempt when `File has not been read yet`
+    first appears on the final attempt. Its code comment is this entry's text, near-verbatim.
+  - *Lever 1 (detect the churn live and fail-fast)* — shipped too, one layer DOWN, where it belongs:
+    the gateway breaks the loop at the source for every agent and every harness, not just the bench.
+    `chat_or_loopbreak` (`crates/rozum-gateway/src/serving.rs:117`) runs `detect_stuck_loop` on every
+    chat, unconditionally — no env gate, no default-off.
+  - **Live evidence, `~/.rozum/gateway.jsonl` (92,079 events): 879 `stuck_loop_broken`.** By signature:
+    478 windowed-identical (sig 4), **229 edit-churn (sig 3 — precisely this entry's family)**, 172
+    cycled-output (sig 1/2). The looping tools: bash 274, Write 64, exec_command 61, Edit 26, Read 10.
+    The run no longer burns RUN_TIMEOUT because the loop is stopped before the timeout can fire.
+  - **The trap, and the reason this is worth reading rather than just deleting.** The harness monitor
+    `no_progress_monitor` (agentic.sh:183) has a deliberately NARROW predicate: the last `NP_REPEAT=5`
+    tool signatures must be identical *consecutively*. The obvious "improvement" is to widen it to the
+    gateway's proven shape (`TOOL_WINDOW=12`, `TOOL_REPEAT_THRESHOLD=4`). **Do not** — not as a
+    straight port. The gateway's predicate has a second conjunct the bash monitor cannot see: *AND
+    the result never changed*. `loopbreak.rs:248-253` records that matching without the result half
+    was a MEASURED defect — on the 2026-07-31 matrix it cut 11 of nadia's 16 cells and 6 of codex's,
+    because an agent instructed to VERIFY re-runs the same `cargo test` on purpose. Identical command
+    with differing output is the healthy fix→test→fix rhythm; only identical output too means nothing
+    moved. The monitor reads `tool_use` blocks only, so it has the command and not the result.
+  - *Parked alternative, if this ever comes back:* teach the monitor to read `tool_result` blocks from
+    the stream-json `user` messages, THEN widen the window. That is the only version that is safe, and
+    it buys a second line of defence behind a source-level fix that already fires 879 times — which is
+    why it is parked and not queued.
 
   *(was under: Matrix improvement levers (found 2026-07-05 during the matri)*
 
