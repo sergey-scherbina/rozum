@@ -811,7 +811,18 @@ pub const DAEMON_JOB: &str = "com.rozum.meeting-daemon";
 /// own exactly as before, because "works anywhere" is the property that made this convenient and
 /// removing it would trade one failure for another.
 pub async fn spawn_daemon() {
-    if launchd_job_exists(DAEMON_JOB).await && kickstart_and_wait(DAEMON_JOB).await {
+    if matches!(start_plan(launchd_job_exists(DAEMON_JOB).await), Start::AskLaunchd) {
+        // WHERE THE JOB EXISTS, NEVER SPAWN OUR OWN — not even when the kickstart does not answer
+        // in time. The first version fell back, and the fallback re-created the exact state this
+        // was written to remove: measured within the hour, an install restarted the job, a client
+        // called this while launchd's copy was still binding, the 10-second wait expired, and the
+        // client's own daemon won the socket — two `meetings start --foreground` processes, both
+        // parented to launchd, with the unmanaged one serving.
+        //
+        // A job that exists and cannot serve is a fault to REPORT (`doctor --services` does), not
+        // one to paper over by starting a daemon nothing can restart. The fallback below is for
+        // machines with no job at all, which is the case it was added for.
+        kickstart_and_wait(DAEMON_JOB).await;
         return;
     }
     // `meetings start` spawns the detached daemon and waits for its socket.
@@ -821,7 +832,24 @@ pub async fn spawn_daemon() {
     let _ = command.status().await;
 }
 
-/// Is this label installed on this machine at all? `launchctl print` answers for a job that is
+/// Who is allowed to bring the daemon up here.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Start {
+    /// A job owns it: ask launchd, and accept whatever that produces — including nothing.
+    AskLaunchd,
+    /// No job on this machine: the caller starts its own, as it always did.
+    SpawnOwn,
+}
+
+/// The rule, in one place, because getting it wrong is what the fallback did: a machine WITH a job
+/// must never end up with a client-spawned daemon, however the kickstart went. There is no second
+/// argument on purpose — "the kickstart did not answer in time" is not a reason to create the state
+/// this exists to remove.
+pub(crate) fn start_plan(job_exists: bool) -> Start {
+    if job_exists { Start::AskLaunchd } else { Start::SpawnOwn }
+}
+
+/// Is this label installed on this machine at all?/// Is this label installed on this machine at all? `launchctl print` answers for a job that is
 /// loaded whether or not it is currently running, which is the question here — a periodic or
 /// crashed job is still the owner.
 pub async fn launchd_job_exists(label: &str) -> bool {
@@ -849,8 +877,10 @@ async fn kickstart_and_wait(label: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .await;
+    // 30s, not 10. A cold start while the machine is publishing binaries and restarting five other
+    // jobs is slow, not broken, and the previous window expired exactly there.
     let sock = crate::meeting::room_path::meeting_sock();
-    for _ in 0..40 {
+    for _ in 0..120 {
         if crate::meeting::daemon::daemon_alive(&sock).await {
             return true;
         }
@@ -937,6 +967,18 @@ fn transcript_head(root: &std::path::Path) -> Option<(String, u64)> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The defect this replaces, measured on the host within an hour of shipping the first version:
+    /// an install restarted the job, a client called `spawn_daemon` while launchd's copy was still
+    /// binding, the wait expired, the fallback fired, and the client's own daemon won the socket —
+    /// two `meetings start --foreground` processes and the unmanaged one serving. A slow kickstart
+    /// is not a licence to create what the job exists to own.
+    #[test]
+    fn a_machine_with_a_job_never_spawns_its_own_daemon() {
+        assert_eq!(start_plan(true), Start::AskLaunchd);
+        assert_eq!(start_plan(false), Start::SpawnOwn, "no job here — this is the case the fallback is for");
+    }
+
     use super::*;
     use crate::meeting::daemon::serve_daemon;
     use crate::meeting::registry::RoomRegistry;

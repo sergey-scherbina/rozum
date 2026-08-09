@@ -1,5 +1,23 @@
 # Changelog
 
+## meeting-daemon-race — the fallback re-created what the fix removed
+Completed: 2026-08-09
+
+An hour after `meeting-daemon-ownership` shipped, `doctor` reported the same warn it was built to
+clear. Cause, measured on the host: `install-bins.sh` restarted the job, a client called
+`spawn_daemon` while launchd's copy was still binding, the ten-second wait expired, the fallback
+fired, and the client's own daemon won the socket — two `meetings start --foreground` processes,
+both parented to launchd, the unmanaged one serving.
+
+The rule is now unconditional: **where the job exists, a client never spawns its own**, however the
+kickstart went. A job that exists and cannot serve is a fault to report — `doctor --services` does —
+not one to paper over by starting a daemon nothing can restart. The fallback remains exactly for the
+case it was added for: a machine with no job at all. The wait is 30s, because a cold start while the
+machine is publishing binaries and restarting five other jobs is slow rather than broken.
+
+The rule sits in one two-line function with a test, since the defect WAS the condition: "the
+kickstart did not answer in time" had been allowed to mean "so make one of our own".
+
 ## plugin-services — one declaration instead of four copies
 Completed: 2026-08-09
 

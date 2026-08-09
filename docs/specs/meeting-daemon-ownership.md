@@ -24,6 +24,15 @@ already running must not be restarted because a client wanted to talk to it) and
 Only where the job does not exist — another checkout, a CI box, a second machine — does a client
 start its own, exactly as before.
 
+**And where the job DOES exist, a client never starts one — not even when the kickstart is slow.**
+The first version fell back after a ten-second wait, and the fallback re-created the state this
+removed: measured on the host within the hour, an install restarted the job, a client called
+`spawn_daemon` while launchd's copy was still binding, the wait expired, and the client's own daemon
+won the socket — two `meetings start --foreground` processes parented to launchd, with the unmanaged
+one serving. A job that exists and cannot serve is a fault to REPORT, not one to paper over by
+starting a daemon nothing can restart; the window is 30s now, because a cold start while the machine
+is publishing binaries and restarting five other jobs is slow rather than broken.
+
 The rejected alternatives, and why:
 
 - **launchd only, clients never spawn.** One owner, always restartable, but a client on a machine
