@@ -990,7 +990,28 @@ revive it.
   `docs/specs/x86-native-runtime.md`; epic + phases P1–P5 in `BACKLOG.md`
   (`x86-native-runtime`).
 
-- [ ] **codex-create-delivery-on-qwen** — does the `apply_patch` bridge land codex's CREATE forms
+- [x] **codex-create-delivery-on-qwen — CLOSED 2026-08-09 by running it: the bridge lands. The
+  residual was gpt-oss-specific.** ANSWERED, not deferred.
+  Run: `TASKS=rpn REPS=3 AGENTS=codex BENCH_PORT_BASE=8320 NCTX=32768` against
+  `mlx-community:Qwen3.5-4B-MLX-4bit`, results in `scripts/bench/results/agentic-20260809-160333`.
+  **2/3 pass (524.2s ✓, 416.8s ✗, 320.1s ✓) — and ZERO rc11 in three reps**, which is the answer:
+  every rep delivered its files, so the create form the bridge could not land on gpt-oss does not
+  reproduce on the frozen model. Cross-checked in `~/.rozum/gateway.jsonl` for the run window
+  (16:03–16:29): **zero `toolcall_parse_miss`** — nothing was emitted-but-lost either.
+  The single failure was rc10 and is explained: at 16:19:16 the loop-breaker fired —
+  `write_stdin` called 4× with identical args and an identical result — inside that rep. The agent
+  spun on stdin, was stopped, and finished with `Cargo.toml` written but no `src/*.rs`. Model
+  behaviour, correctly classified, and the breaker saved ~180s of the 600s timeout.
+  **Two things worth keeping from the run:**
+  (1) The entry's cost line ("a GPU window that evicts the operator's resident model; ask first")
+  was stale — the harness borrowed the running gateway (`sharing the running gateway on :8089`),
+  resident pid unchanged, nothing evicted. An entry naming the RESIDENT model costs nothing to answer.
+  (2) **The rc10/rc11 discriminator is coarser than this entry assumed.** rc11 fires only when
+  `Cargo.toml` is absent, so a run that writes the manifest and loses the source reads as rc10
+  ("the model's fault") even if the source write had been lost by us. It wasn't, this time — the
+  obs log settled it. But do not treat rc10 alone as proof of a model-side failure; check
+  `toolcall_parse_miss` for the window. Recorded as `bench-rc-partial-delivery` below.
+  *(original question, retained)* — does the `apply_patch` bridge land codex's CREATE forms
   when the driver is the frozen model?
   **Why:** `codex-opencode-create-delivery` shipped `rewrite_json_wrapped_apply_patch`
   (`crates/rozum-gateway/src/codex_patch.rs:104`) and proved it on codex × gpt-oss: build delivery
@@ -1004,6 +1025,21 @@ revive it.
   **Gotcha:** the bench opens with `gateway stop --force`; launchd brings `com.rozum.gateway` back.
   **Done when:** either an rc11 is captured with its `-patches` shape (then it is a real bridge gap
   and becomes a BUGS entry), or three reps come back clean and this closes as gpt-oss-specific.
+
+- [ ] **bench-rc-partial-delivery** (small, found 2026-08-09 while closing `codex-create-delivery-on-qwen`)
+  — the harness's rc11 ("agent wrote no project files") is gated on `Cargo.toml` alone:
+  `[ "$task" != greet ] && [ ! -f "$work/Cargo.toml" ] && files_written=0` (`scripts/bench/agentic.sh`
+  ~line 974). A cell that writes the MANIFEST and loses the SOURCE therefore reports rc10, which every
+  entry on this board reads as "the model wrote wrong code (not ours)". That reading is unsafe for
+  exactly the delivery questions rc11 exists to answer.
+  **Repro from today:** rep 2 of the rpn run — verify said `FAIL no src/*.rs`, `Cargo.toml` present,
+  rc=10. It really was model-side (the obs log showed a `write_stdin` spin broken at 16:19:16 and zero
+  `toolcall_parse_miss`), but the rc alone could not tell me that; I had to cross-check the gateway log.
+  **Fix:** treat "manifest without any `src/*.rs`" as its own outcome — a third code, or fold it into
+  rc11 with a distinct label — so partial delivery stops being silently attributed to the model.
+  **Gotcha:** don't just widen rc11 to "no src/*.rs", `greet` writes no files at all by design.
+  **Done when:** a cell with `Cargo.toml` and no source reports distinguishably from a cell where the
+  model simply wrote a wrong program, and `docs/` records which rc means what.
 
 - [ ] **gpt-oss-20b (closed on the sprint 2026-08-05 — pointer only)** — the model is not on disk and
   `models list` shows one. Kept as a line so the name resolves: the sprint entry holds the findings,
