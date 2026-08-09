@@ -374,6 +374,14 @@ Affected, and what each would need before it can even start:
 - `B2 — one authoritative full matrix` — the whole curated tier, several models.
 - `gptoss-codex-cascade` — gpt-oss (gone from disk) plus a second model; a cascade needs two.
 
+**DECIDED 2026-08-09 — the operator has settled on the model already on disk and wants nothing else
+downloaded for now.** So all four are parked on that decision, not on anyone's time: do NOT re-propose
+them as "ready to run", and do not download weights to unblock one. They revive if and when the
+operator asks for a second model. Measured cost of the largest, so the decision can be revisited with
+a real number rather than a guess: `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` is **16.02 GB**
+across 4 safetensors shards (HF API, 17 files) — and at ~16 GB of weights it does not co-reside with
+the 4B on a 29 GB budget, so it also costs the resident model for the duration.
+
 This is one operator decision (disk + bandwidth + a GPU window), not four separate ones. Recorded
 here so it is made once. Note the contrast: `codex-create-delivery-on-qwen` was runnable TODAY with
 no download and no eviction precisely because it names the resident model — an entry that specifies
