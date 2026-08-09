@@ -10,6 +10,9 @@ license = "Apache-2.0"
 # rozum-core::obs (no dependency on any concrete engine). Phase 3 of the workspace
 # split (docs/specs/workspace-split.md).
 
+[features]
+ucc = ["dep:webauthn-rs"]
+
 [dependencies]
 base64 = "0.22"
 rozum-core = { path = "../rozum-core" }
@@ -27,6 +30,6 @@ uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 libc = "0.2"
 # Phase 4 — live terminal sessions + Face ID auth (UCC).
-webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"], optional = true }
 portable-pty = "0.8"
 url = "2"

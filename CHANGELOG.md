@@ -1,5 +1,31 @@
 # Changelog
 
+## ucc-optional — the console is a feature, not a fact of the binary
+Completed: 2026-08-09
+Spec: `docs/specs/ucc-optional.md`
+
+`rozum-gateway` depended on `webauthn-rs` unconditionally, for the browser console's Face ID.
+`webauthn-rs-core` depends on OpenSSL with no feature gate, so EVERY build of this binary needed a
+native OpenSSL — and on Windows that is the difference between `cargo build` and an afternoon of
+vcpkg. A machine that wants a model server had to build a passkey stack to get one.
+
+The snapshot moved out first: `status.rs` — active gateway, residency ledger, installed catalog,
+live agents and sessions — is pure reading and is what `gateway status --json` and `doctor` consume.
+It had lived in `control.rs` since the console was written, which is the only reason it looked like
+console code. `control` + `auth` are now behind `ucc` (default ON), and `control-serve` without the
+feature exits with a sentence naming it rather than a silent no-op.
+
+**Measured, not assumed:** with `--no-default-features`, `cargo tree -i openssl-sys` for the Windows
+target finds nothing at all. The check then reaches the NEXT layer — 26 errors, all `std::os::unix`
+in the process-spawn helpers — recorded as `windows-spawn-seams`, because removing one blocker is not
+removing the platform's.
+
+**And the answer to the other candidate, measured rather than guessed:** "webauthn on rustls" is not
+a switch. `webauthn-rs-core 0.5.5` depends on `openssl` and `openssl-sys` unconditionally, with its
+attestation and COSE verification built on them; replacing that is a fork of someone else's crate.
+`openssl/vendored` remains the escape hatch for anyone who wants the console on Windows — now a
+choice rather than a requirement.
+
 ## windows-daemon-ipc — the daemon's transport leaves unix (compiling, not running)
 Completed: 2026-08-09
 Spec: `docs/specs/windows-daemon-ipc.md`

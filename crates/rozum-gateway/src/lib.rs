@@ -7,8 +7,14 @@
 // It reads MLX telemetry through `crate::obs` (the rozum-core hook), never the engine.
 pub mod anthropic_http;
 pub(crate) mod codex_patch;
+/// The browser console: routes, RBAC and the passkey ceremonies. Behind `ucc` because it is the one
+/// consumer of `webauthn-rs` → OpenSSL, and a model server does not need a passkey stack to serve
+/// models (`docs/specs/ucc-optional.md`). The snapshot it serves lives in `status`, ungated.
+#[cfg(feature = "ucc")]
 pub mod control;
+pub mod status;
 pub mod agents;
+#[cfg(feature = "ucc")]
 pub mod auth;
 pub mod auto_context;
 pub mod chat;

@@ -37,10 +37,14 @@ path = "src/main.rs"
 #   cargo build --no-default-features --features mlx-native,rozum-mlx/model-glm4
 # (Folding all-models INTO mlx-native would make the lean build unreachable — mlx-native would drag
 # every family back in — and dropping mlx-native to get lean would compile the runtime itself out.)
-default = ["mlx-native", "all-models"]
+default = ["mlx-native", "all-models", "ucc"]
 local-models = ["rozum-core/local-models"]
 # Every ported architecture. Opt-OUT only: this changes nothing about what rozum ships by default.
 all-models = ["rozum-mlx/all-models"]
+# The browser console (Face ID, RBAC, the SPA routes). Default ON — this machine runs it — but a
+# model server does not need a passkey stack, and on Windows it is the difference between a build
+# and an OpenSSL hunt (`docs/specs/ucc-optional.md`).
+ucc = ["rozum-gateway/ucc"]
 gguf = ["rozum-gguf/gguf"]
 # The non-Mac GPU paths, forwarded so a CUDA/Vulkan/ROCm user never edits a Cargo.toml
 # (`docs/specs/gguf-portability.md`).

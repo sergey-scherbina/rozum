@@ -1435,6 +1435,17 @@ async fn main() {
             }
             Some(GatewayAction::Status { json }) => run_gateway_status(json).await,
             Some(GatewayAction::ControlServe { port }) => {
+                #[cfg(not(feature = "ucc"))]
+                {
+                    let _ = port;
+                    eprintln!(
+                        "rozum gateway control-serve: this binary was built without the `ucc` \
+                         feature, so it has no browser console (docs/specs/ucc-optional.md). \
+                         Rebuild with --features ucc, or use the model server on its own."
+                    );
+                    std::process::exit(1);
+                }
+                #[cfg(feature = "ucc")]
                 if let Err(e) = rozum::control::serve(port).await {
                     eprintln!("control serve: {e}");
                 }
@@ -5486,7 +5497,7 @@ async fn run_gateway_status(json: bool) {
     if json {
         // The full control snapshot (gateway + residency + installed catalog) — the dashboard/UCC
         // contract via the models/gateway control-API.
-        let snap = rozum::control::status().await;
+        let snap = rozum::status::status().await;
         println!("{}", serde_json::to_string_pretty(&snap).unwrap_or_else(|_| "{}".into()));
         return;
     }

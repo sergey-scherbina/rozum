@@ -767,7 +767,7 @@ async fn control_switch(
 /// `GET /control/status` — the models/gateway control snapshot (active gateway + host residency +
 /// installed catalog) as JSON, for a dashboard / the UCC web target. Read-only; no gateway state.
 async fn control_status_handler() -> Response {
-    axum::Json(crate::control::status().await).into_response()
+    axum::Json(crate::status::status().await).into_response()
 }
 
 async fn control_unload(State(state): State<GatewayState>) -> Response {

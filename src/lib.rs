@@ -21,7 +21,11 @@ pub use rozum_agent::{agent, builtin_tools, cascade, mcp_tool_source, memory_sto
 // The outward serving layer now lives in the `rozum-gateway` crate (Phase 3).
 // Re-export under their original paths so `rozum::gateway::…` / `rozum::openai_http::…`
 // / `rozum::anthropic_http::…` keep resolving from the binary.
-pub use rozum_gateway::{anthropic_http, control, gateway, openai_http};
+pub use rozum_gateway::{anthropic_http, gateway, openai_http, status};
+
+/// The browser console, only when this build has one (`docs/specs/ucc-optional.md`).
+#[cfg(feature = "ucc")]
+pub use rozum_gateway::control;
 
 // The meeting room + its client frontends now live in the `rozum-meeting` crate
 // (Phase 1 of the workspace split). Re-export its modules under their original

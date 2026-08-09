@@ -636,10 +636,16 @@ Remaining:
     a pipe carries an ACL and this endpoint speaks MCP as whoever joined). `rozum-meeting` went from
     11 Windows errors to 0, as did rozum-agent / rozum-meet / rozum-cli. The daemon prints an
     UNVERIFIED notice on Windows. Spec: `docs/specs/windows-daemon-ipc.md`.
-  - [ ] windows-openssl-webauthn — the remaining Windows blocker for the whole binary, found while
-    doing the above: `webauthn-rs` (UCC Face ID) pulls `openssl-sys`, whose build script needs a
-    Windows OpenSSL. Ways out: vendored OpenSSL, a rustls-based webauthn, or the control plane behind
-    a feature so a Windows GGUF user does not build it. Choosing wants a Windows box to test on.
+  - [x] windows-openssl-webauthn — **DONE 2026-08-09 by making the console optional.** `ucc` (default
+    ON) gates `control` + `auth` + `webauthn-rs`; the machine snapshot moved to `status.rs` and is
+    never gated. `--no-default-features` has no OpenSSL in the Windows dependency graph at all.
+    Measured: `webauthn-rs-core` depends on openssl unconditionally, so "webauthn on rustls" is a
+    fork of someone else's crate, not a switch — `openssl/vendored` remains the escape hatch for
+    anyone who wants the console on Windows. Spec: `docs/specs/ucc-optional.md`.
+  - [ ] windows-spawn-seams — the NEXT Windows blocker, found by removing the last one: with `ucc`
+    off, `cargo check --target x86_64-pc-windows-gnu` reaches 26 errors, all `std::os::unix` in the
+    process-spawn helpers (`coders.rs`, `spawn_support.rs`, `matrix.rs`). Same shape as
+    `windows-daemon-ipc`: put the platform bits behind a seam. Wants a Windows box to verify.
   - [ ] windows-service-install - Add a Windows arm to `src/service.rs` (today: launchd/systemd
     generation + `launchctl`/`systemctl`): install/uninstall a Windows Service (`sc.exe` / the
     `windows-service` crate) or a Task Scheduler entry. The module is already "pure generation +
