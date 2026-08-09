@@ -531,9 +531,15 @@ pub fn register_engine() {
                 return None;
             }
         };
+        let shown = model_path.display().to_string();
         match GgufBackend::new(model_path, GgufOptions::default()) {
             Ok(b) => Some(std::sync::Arc::new(b) as std::sync::Arc<dyn crate::backend::ChatBackend>),
             Err(e) => {
+                // eprintln AS WELL as the tracing warn: without a subscriber the warn goes nowhere,
+                // and the operator is left with the caller's bare "no backend found for <path>" —
+                // measured 2026-08-09, when a Metal load failed while another model held the GPU and
+                // the report named neither the loader nor the reason.
+                eprintln!("rozum gateway: GGUF load failed for '{shown}': {e}");
                 tracing::warn!(id = %config.id, error = %e, "gguf backend: load failed; using placeholder");
                 None
             }

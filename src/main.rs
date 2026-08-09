@@ -2219,10 +2219,34 @@ fn estimate_model_footprint_bytes(model: &str, n_ctx: u32) -> u64 {
                 conservative
             }
         }
-        // Unknown size (spec never matched the catalog) → the sentinel: admission replies with an
-        // honest "unsizeable spec" message instead of a garbage overcommit number.
-        None => rozum::share::UNSIZEABLE_FOOTPRINT_BYTES,
+        // Not in the HF/MLX catalog — but a GGUF is a FILE, and a file's size is not a mystery.
+        // Measured 2026-08-09 on the way to making this engine work off a Mac: every GGUF spec is a
+        // path (or an `lmstudio:`/`ollama:` name that resolves to one), so the catalog never matched
+        // and the admission gate refused EVERY GGUF load with "its size is UNKNOWN" — on a host with
+        // 237 GB free and a 138 MB model. On an x86 box, where GGUF is the whole point, that is not
+        // an edge case; it is the only case.
+        None => match local_model_file_bytes(model) {
+            Some(size) => {
+                let fp = rozum::model_source::runtime_footprint_bytes(model, n_ctx, size);
+                ((fp as f64) * inflate) as u64
+            }
+            // Genuinely unsizeable (a spec that is neither cached nor a file on disk) → the
+            // sentinel: admission replies with an honest "unsizeable spec" message instead of a
+            // garbage overcommit number.
+            None => rozum::share::UNSIZEABLE_FOOTPRINT_BYTES,
+        },
     }
+}
+
+/// The size of a model that is a FILE on this disk, if the spec resolves to one.
+///
+/// Uses the same resolver the GGUF engine loads through (`lmstudio:` / `ollama:` / a path), so the
+/// gate measures exactly the file the engine will open — a second, cleverer path here would be a
+/// second answer to "which file is this", which is how two truths start.
+fn local_model_file_bytes(model: &str) -> Option<u64> {
+    let path = rozum::gguf::resolve_model_path(model)?;
+    let len = std::fs::metadata(&path).ok()?.len();
+    (len > 0).then_some(len)
 }
 
 /// Whether admission tightens its estimate with a model's measured real peak (improvement A).
@@ -2241,6 +2265,11 @@ const UNKNOWN_FOOTPRINT_FLOOR: u64 = rozum::share::UNSIZEABLE_FOOTPRINT_FLOOR;
 
 /// Is this exact spec present in the local model cache? (`false` ⇒ size unknown ⇒ sentinel.)
 fn model_is_locally_cached(model: &str) -> bool {
+    // A file on this disk IS local, whatever the HF catalog thinks. Without this, `--offline` with a
+    // GGUF path refused to start and told the operator to download the file they had just pointed at.
+    if local_model_file_bytes(model).is_some() {
+        return true;
+    }
     rozum::models::scan_all_installed()
         .iter()
         .any(|m| rozum::model_source::same_model(&m.spec, model))

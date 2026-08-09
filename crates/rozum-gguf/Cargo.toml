@@ -12,7 +12,16 @@ license = "Apache-2.0"
 # `register_engine()` (inversion of control). Phase 2 of the workspace split.
 
 [features]
+# `gguf` alone = the portable build: llama.cpp on CPU, everywhere. A GPU backend is a SEPARATE
+# feature, because which one exists is a property of the machine, not of this crate.
 gguf = ["dep:llama-cpp-2"]
+# Non-Mac GPU paths, passed straight through to llama-cpp-2. Before these, `--features gguf`
+# hardcoded `metal` — so a Linux or Windows user asking for GGUF got an Apple-only build and had to
+# edit this file to get their own GPU. The point of the engine was that it runs on other people's
+# hardware; it could not.
+gguf-cuda = ["gguf", "llama-cpp-2/cuda"]
+gguf-vulkan = ["gguf", "llama-cpp-2/vulkan"]
+gguf-rocm = ["gguf", "llama-cpp-2/rocm"]
 
 [dependencies]
 rozum-core = { path = "../rozum-core" }
@@ -23,4 +32,11 @@ async-trait = "0.1"
 serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3"
 tracing = "0.1"
+llama-cpp-2 = { version = ">=0.1.100", optional = true }
+
+# Metal is added HERE rather than in the feature above, so it follows the TARGET instead of the
+# request: a Mac build still gets the GPU with a plain `--features gguf`, and the same command on
+# Linux no longer asks for an Apple backend. Cargo unions the features of both entries for the same
+# optional dependency, so this adds `metal` without a second dependency edge.
+[target.'cfg(target_os = "macos")'.dependencies]
 llama-cpp-2 = { version = ">=0.1.100", features = ["metal"], optional = true }

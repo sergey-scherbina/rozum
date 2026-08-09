@@ -42,6 +42,11 @@ local-models = ["rozum-core/local-models"]
 # Every ported architecture. Opt-OUT only: this changes nothing about what rozum ships by default.
 all-models = ["rozum-mlx/all-models"]
 gguf = ["rozum-gguf/gguf"]
+# The non-Mac GPU paths, forwarded so a CUDA/Vulkan/ROCm user never edits a Cargo.toml
+# (`docs/specs/gguf-portability.md`).
+gguf-cuda = ["rozum-gguf/gguf-cuda"]
+gguf-vulkan = ["rozum-gguf/gguf-vulkan"]
+gguf-rocm = ["rozum-gguf/gguf-rocm"]
 mistralrs = ["rozum-mistralrs/mistralrs"]
 # Native MLX runtime (no Python, no subprocess). Builds MLX C++ from source via
 # the vendored fork, so it needs the Metal toolchain. It is in the default feature

@@ -1,5 +1,42 @@
 # Changelog
 
+## portability-cuda-gguf — the engine that ran on other people's hardware, except it did not
+Completed: 2026-08-09
+Spec: `docs/specs/gguf-portability.md`
+
+`rozum-gguf` exists so rozum can run on machines that are not this Mac. Asked to bring it to a
+working state on x86, I found three things in the way, and every one of them was found by trying to
+run the engine rather than by reading it.
+
+**`metal` was welded to the feature.** `llama-cpp-2` was declared `features = ["metal"]`, so
+`--features gguf` asked for an Apple backend on Linux and Windows too. Metal now follows the TARGET,
+and `gguf-cuda` / `gguf-vulkan` / `gguf-rocm` are their own features — which GPU exists is a property
+of the machine, not of the request. Verified per target with `cargo tree --format {f}`: Metal on
+darwin, absent on the x86 targets, and each GPU feature reaching llama-cpp-2.
+
+**The admission gate refused every GGUF.** Footprint estimation only consulted the HF/MLX catalog, so
+a `.gguf` path — which is how every GGUF is named — never matched, and a 138 MB model was refused
+with "its size is UNKNOWN" on a host with 237 GB free. On an x86 box that is not an edge case, it is
+the only case. The gate now measures the file with the same resolver the engine loads through, so
+both open the same file; `--offline` had the same hole, and would tell an operator to download the
+file they had just pointed at.
+
+**The safety lever did not exist on the platform it protects.** Both RAM probes shelled out to
+macOS-only tools. On Linux they returned nothing, so the gate that prevents an OOM reboot measured
+NOTHING and failed open — on exactly the machines this engine is for. `/proc/meminfo` is read there
+now, with the kB unit parsed rather than assumed: dropping it under-counts RAM by 1024×, which as a
+budget means admitting everything. The parser has a test, because it is the part that can be checked
+without a Linux box.
+
+**Proven here:** the Mac build is unchanged, a 138 MB GGUF answered through the gateway's OpenAI
+endpoint with `offloaded 0/31 layers to GPU` — the CPU path an x86 build takes — and rozum-core,
+rozum-gguf, rozum-models and rozum-stamp compile for `x86_64-pc-windows-gnu` with zero errors.
+**Not proven, and it needs hardware:** that CUDA/Vulkan/ROCm compile and run. The plumbing is right
+and the code path is the one just exercised; "the features resolve" is not "it runs".
+
+Also fixed on the way: a load failure surfaced as a bare "no backend found for <path>" because its
+only report was a `tracing::warn` and nothing installs a subscriber.
+
 ## meeting-daemon-race — the fallback re-created what the fix removed
 Completed: 2026-08-09
 

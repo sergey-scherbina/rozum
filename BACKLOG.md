@@ -658,10 +658,13 @@ Remaining:
   (`src/hf_hub.rs`, `src/modelscope.rs`) were already separate modules; `model_source` is now
   the shared front door to them.
 
-- [ ] portability-cuda-gguf - Concrete non-Mac GPU path: expose `gguf-cuda` /
-  `gguf-vulkan` features that pass the matching `llama-cpp-2` backend feature
-  through, so a Linux/CUDA user gets GPU GGUF inference without editing Cargo.toml.
-  (Cheapest real "runs on someone else's non-Mac hardware" deliverable.)
+- [x] portability-cuda-gguf — **DONE 2026-08-09.** `gguf-cuda` / `gguf-vulkan` / `gguf-rocm` pass the
+  matching llama-cpp-2 backend through, and `metal` follows the TARGET instead of the request, so a
+  non-Mac user never edits a Cargo.toml. Two further blockers found by RUNNING it: the admission gate
+  refused every GGUF (a `.gguf` path never matched the HF catalog, so its size read as "UNKNOWN"),
+  and both RAM probes were macOS-only, so on Linux the OOM gate measured nothing and failed open.
+  Real inference verified on CPU through the gateway. CUDA/Vulkan/ROCm compilation itself still needs
+  the hardware. Spec: `docs/specs/gguf-portability.md`.
 
 - [ ] native-engine-spi - **Architecture: lift the reusable layer up, isolate hardware
   down (prerequisite of `x86-native-runtime`).** The decode-control loop is copy-pasted

@@ -676,13 +676,37 @@ fn latency_signal(
     }
 }
 
-/// Total physical RAM in bytes — constant, probed once (macOS `sysctl hw.memsize`).
+/// Total physical RAM in bytes — constant, probed once. macOS `sysctl hw.memsize`, Linux
+/// `/proc/meminfo` `MemTotal`.
+///
+/// Linux was added 2026-08-09 while making the GGUF engine usable off a Mac: both RAM probes here
+/// shelled out to macOS-only tools, so on the x86 machines this engine exists for, the admission
+/// gate that prevents an OOM reboot measured NOTHING and silently failed open. A safety lever that
+/// is absent on the platform it was written to protect is worse than one that refuses loudly.
 pub fn total_ram_bytes() -> Option<u64> {
     static TOTAL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     *TOTAL.get_or_init(|| {
+        if cfg!(target_os = "linux") {
+            return meminfo_field(&std::fs::read_to_string("/proc/meminfo").ok()?, "MemTotal:");
+        }
         let out = std::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output().ok()?;
         String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().ok()
     })
+}
+
+/// One `/proc/meminfo` field, in BYTES. The file reports kB — the unit is in the line and dropping
+/// it would under-count RAM by 1024×, which as an admission budget means admitting everything.
+pub(crate) fn meminfo_field(text: &str, label: &str) -> Option<u64> {
+    let rest = text.lines().find_map(|l| l.strip_prefix(label))?;
+    let mut it = rest.split_whitespace();
+    let n: u64 = it.next()?.parse().ok()?;
+    match it.next() {
+        Some(u) if u.eq_ignore_ascii_case("kb") => Some(n * 1024),
+        // No unit means bytes; anything else is a format this parser does not know, and guessing a
+        // unit for a memory budget is how a gate admits ten times what fits.
+        None => Some(n),
+        Some(_) => None,
+    }
 }
 
 /// RAM available right now — a macOS **MemAvailable**: everything the OS can hand to a new
@@ -728,6 +752,13 @@ fn available_ram_bytes_cached() -> Option<u64> {
 /// compressor) — wrong in both directions. Falls back to that older sum on a macOS that lacks
 /// the `Anonymous pages` / `Pages occupied by compressor` lines.
 fn probe_available_ram_bytes() -> Option<u64> {
+    // Linux: `MemAvailable` is the kernel's own answer to exactly this question — what a new
+    // allocation can get without swapping — so there is nothing to reconstruct from parts.
+    if cfg!(target_os = "linux") {
+        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+        return meminfo_field(&text, "MemAvailable:")
+            .or_else(|| meminfo_field(&text, "MemFree:"));
+    }
     let out = std::process::Command::new("vm_stat").output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
     let page_size = s
@@ -1090,6 +1121,21 @@ impl AdaptiveConcurrency {
 
 #[cfg(test)]
 mod tests {
+
+    /// The unit is in the line, and dropping it under-counts RAM by 1024× — which, as an admission
+    /// budget, means admitting everything. Sample taken from a real `/proc/meminfo`.
+    #[test]
+    fn meminfo_is_parsed_in_bytes_with_its_unit() {
+        let sample = "MemTotal:       32764412 kB\nMemFree:         1234567 kB\nMemAvailable:   20480000 kB\nBuffers:          123456 kB\n";
+        assert_eq!(meminfo_field(sample, "MemTotal:"), Some(32_764_412 * 1024));
+        assert_eq!(meminfo_field(sample, "MemAvailable:"), Some(20_480_000 * 1024));
+        assert_eq!(meminfo_field(sample, "SwapTotal:"), None, "a missing field is None, not zero");
+        // A unit this parser does not know must be None rather than a guess: a wrong unit in a
+        // memory budget is the difference between refusing a load and rebooting the host.
+        assert_eq!(meminfo_field("MemTotal:  100 MB\n", "MemTotal:"), None);
+        assert_eq!(meminfo_field("MemTotal:  100\n", "MemTotal:"), Some(100));
+    }
+
     use super::*;
     use std::time::Duration;
 
