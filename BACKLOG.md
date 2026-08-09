@@ -74,30 +74,12 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   reporting `matched` next to `shown`) and a machine snapshot written INTO the thread as a message at
   open time. Spec: `docs/specs/incident-evidence.md`.
 
-- [ ] **mtg-incident-repro** — capture the workdir/repro alongside an incident. Split out of
-  `mtg-incident-context` deliberately: copying files out of a working tree needs a policy about what
-  may leave it (secrets, size, .gitignored state), and inventing one inside an incident feature is how
-  a support tool grows a data-export problem. Wants a spec of its own before any code.
+- [x] **mtg-incident-repro — DONE 2026-08-09.** `rozum meetings incident repro <id>` attaches the
+  commit, the TRACKED diff, the failing command and named env vars as one event message in the
+  thread. Never untracked or ignored files; a secret in the diff refuses the whole capture (redaction
+  is read-time, so the bytes would stay on disk); capped at 256 KB and truncated loudly; manual, never
+  automatic — the operator's call. Spec: `docs/specs/incident-repro.md`.
 
-- [x] **rozum-json-surface — DONE 2026-08-08.** `--json` on both, modelled on
-  `gateway status --json`. `list --json` carries `size_bytes` raw ALONGSIDE the formatted size, so a
-  caller that sorts or sums does not have to undo "3.06 GB". `info --json` answers about the LOCAL
-  disk only and never reaches HuggingFace, unlike the human form: a script asking "is this installed
-  and where" must not hang on a network call, and mixing the two would make the exit code depend on
-  the network for a question about a local disk. A missing model exits 0 with
-  `"installed": false` — the question was answered, and exiting non-zero would make `set -e`
-  scripts treat a valid answer as a failure. `--remote` keeps the human table; nothing consumes it.
-  Original: `rozum models list` / `models info` have no `--json`, and they are
-  what `/control/model/info` needs to move to .ssc (`docs/specs/ucc-ssc-data-seam.md`). Small, and
-  useful to every script on this machine, not only the port. `rozum gateway status --json` already
-  exists and is the model to copy.
-
-## Model chain (verification-gated, `--model A,B,C`)
-
-The CORE chain shipped on master (spec `docs/specs/pipeline-cascade.md`, SPRINT top item): target
-derivation (single + multi-model), deterministic verify-gate + repair, escalation across links, role-aware
-quality stats + auto-exclude, cloud-last by ordering, backend planner/executor/verifier roles. These are
-the deferred follow-ups (operator-triaged 2026-06-24, none urgent):
 
 - [ ] **chain-per-model-executor-tools** (marginal, not urgent) — per-MODEL executor tool curation in the
   chain: a weaker link gets a smaller tool set than a strong one. Today the real levers are already pulled —

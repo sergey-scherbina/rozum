@@ -1068,6 +1068,27 @@ enum IncidentAction {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Attach a repro to an incident: the commit, the TRACKED diff, the command, named env vars.
+    ///
+    /// Never untracked or ignored files, and a secret in the diff refuses the whole capture —
+    /// `docs/specs/incident-repro.md` says why, and why redaction is not the answer.
+    Repro {
+        /// The incident/thread id.
+        id: String,
+        /// The working tree to capture from. Defaults to the current directory.
+        #[arg(long)]
+        workdir: Option<String>,
+        /// The command that failed, in the reporter's own words.
+        #[arg(long)]
+        cmd: Option<String>,
+        /// An environment variable to include, BY NAME. Repeatable. Name only what changes
+        /// behaviour; a credential is not part of a repro and is refused.
+        #[arg(long = "env")]
+        env: Vec<String>,
+        /// Assemble and print it without posting — the way to see what would leave the tree.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Resolve an incident (sets state=resolved + a resolution note).
     Resolve {
         /// The incident/thread id.
@@ -4004,6 +4025,36 @@ async fn run_meetings_incident(
             IncidentRender::Show,
         ),
         IncidentAction::Metrics => ("meeting.thread_metrics", serde_json::json!({}), IncidentRender::Json),
+        IncidentAction::Repro { id, workdir, cmd, env, dry_run } => {
+            // Assembled HERE, in the reporter's own shell, with the reporter's own permissions:
+            // the daemon must not reach into a working tree, and a capture that a person cannot
+            // preview before it becomes permanent is not one they consented to.
+            let dir = workdir
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let body = match rozum::meeting::repro::capture(&dir, cmd.as_deref(), &env) {
+                rozum::meeting::repro::Repro::Refused(why) => {
+                    eprintln!("{why}");
+                    std::process::exit(1);
+                }
+                rozum::meeting::repro::Repro::Bundle(b) => b,
+            };
+            // The scan is a heuristic and saying so is part of the contract: a clean scan is not a
+            // clean bill of health, and only the reporter knows what is in their diff.
+            eprintln!(
+                "note: the secret scan is heuristic — it stops the obvious cases and cannot promise \
+                 there is nothing else in the diff."
+            );
+            if dry_run {
+                println!("{body}");
+                return;
+            }
+            (
+                "meeting.submit",
+                serde_json::json!({ "content": body, "kind": "event", "thread_id": id }),
+                IncidentRender::Ok,
+            )
+        }
     };
 
     match call_once(&sock, target, &display, token.as_deref(), tool, args).await {

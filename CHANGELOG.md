@@ -1,5 +1,35 @@
 # Changelog
 
+## mtg-incident-repro — what may leave a working tree, and on whose authority
+Completed: 2026-08-09
+Spec: `docs/specs/incident-repro.md`
+
+The evidence an incident already carried — transcript, gateway log slice, machine snapshot — is
+rozum's data about itself. This is the first step that copies SOMEONE ELSE'S files into a store with
+a wider readership: a room is read by the support console, through busi SSO, and by whoever is in the
+Telegram bridge. So the questions got answered on purpose instead of by accident.
+
+**Inputs, not a copy of the tree.** The commit, the branch, the TRACKED diff (staged and unstaged),
+the failing command, and environment variables named one by one. `git diff HEAD` is the mechanism
+precisely because it cannot see an untracked or ignored file — which is where `.env`, tokens and
+dumps live. What was left behind is stated, so a bundle cannot read as a clean tree.
+
+**A secret REFUSES the capture.** Not scrubbed, not partially posted. `meeting redact` hides content
+at read time and the bytes stay in the room's log on disk, so a redacted secret is a leaked secret
+with a curtain in front of it; the only safe moment to stop is before the write. The scan is a
+heuristic and every run says so — a clean scan is not a clean bill of health, and only the reporter
+knows what is in their diff. Placeholders (`<your_key>`, `changeme`, `$VAR`, short values) do not
+trip it, because a guard that fires constantly is a guard that gets disabled.
+
+**Manual, never automatic** (the operator's decision): a program that copies a user's files into a
+shared room whenever something breaks is not the same as rozum describing itself.
+
+Verified live end to end, not by exit code: an untracked `.env` holding a bot token stayed out and
+was reported as not captured; the same token in a TRACKED file refused the capture and nothing
+reached the thread; a clean capture landed as an event message beside the machine snapshot. One test
+caught the token-shape scanner anchoring at the start of the line, which missed the exact shape this
+project has leaked before — `TELEGRAM="8412345678:AAH…"`.
+
 ## doctor-deployment-drift — healthy and three days old was one verdict
 Completed: 2026-08-08
 Spec: `docs/specs/deployment-drift.md`
