@@ -1,0 +1,6 @@
+feature/mtg-incident-repro 2026-08-09T13:46:43Z
+agent: claude-code
+heartbeat: 2026-08-09T13:46:43Z
+status: not-started
+done-so-far:
+next: spec the decisions, then build the manual tracked-diff path with a secret refusal
