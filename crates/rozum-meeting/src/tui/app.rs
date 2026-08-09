@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use rmcp::model::{CreateMessageRequestParams, SamplingMessage};
 use rmcp::{Peer, RoleServer};
-use tokio::net::UnixListener;
+use crate::meeting::ipc;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::meeting::budget::BudgetGuard;
@@ -81,7 +81,7 @@ pub async fn run_room(
     let meeting = Arc::new(Mutex::new(meeting));
     let peer_registry: PeerRegistry = Arc::new(Mutex::new(HashMap::new()));
 
-    let listener = UnixListener::bind(&socket_path)?;
+    let mut listener = ipc::Listener::bind(&socket_path)?;
     tracing::info!(
         "Room '{}' listening on {}",
         config.name,
@@ -96,7 +96,7 @@ pub async fn run_room(
 
     if headless {
         loop {
-            let (stream, _) = listener.accept().await?;
+            let stream = listener.accept().await?;
             spawn_connection(stream, Arc::clone(&meeting), Arc::clone(&peer_registry));
         }
     } else {
@@ -106,7 +106,7 @@ pub async fn run_room(
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
-                    Ok((stream, _)) => {
+                    Ok(stream) => {
                         spawn_connection(
                             stream,
                             Arc::clone(&meeting_for_mcp),
@@ -206,7 +206,7 @@ fn spawn_sampling_workers(
 /// Spawn one MCP connection handler. Each connection gets its own RoomServer
 /// instance. Auto-leaves the meeting when the connection drops.
 fn spawn_connection(
-    stream: tokio::net::UnixStream,
+    stream: ipc::Stream,
     meeting: Arc<Mutex<Meeting>>,
     peer_registry: PeerRegistry,
 ) {

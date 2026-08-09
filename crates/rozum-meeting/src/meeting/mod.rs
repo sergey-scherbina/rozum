@@ -17,6 +17,7 @@ pub mod piggyback;
 pub mod proxy;
 pub mod registry;
 pub mod rest_read;
+pub mod ipc;
 pub mod repro;
 pub mod room;
 pub(crate) mod room_client;

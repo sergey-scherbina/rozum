@@ -17,7 +17,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
-use tokio::net::UnixStream;
+use super::ipc;
 use tokio::sync::Mutex;
 
 use super::list::list_rooms;
@@ -142,7 +142,7 @@ impl ProxyServer {
             }
             let stream = match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                UnixStream::connect(&socket_path),
+                ipc::connect(&socket_path),
             )
             .await
             {
@@ -261,7 +261,7 @@ impl ProxyServer {
 
         let stream = match tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            UnixStream::connect(&socket_path),
+            ipc::connect(&socket_path),
         )
         .await
         {

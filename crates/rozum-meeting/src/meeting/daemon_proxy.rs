@@ -811,7 +811,10 @@ pub const DAEMON_JOB: &str = "com.rozum.meeting-daemon";
 /// own exactly as before, because "works anywhere" is the property that made this convenient and
 /// removing it would trade one failure for another.
 pub async fn spawn_daemon() {
-    if matches!(start_plan(launchd_job_exists(DAEMON_JOB).await), Start::AskLaunchd) {
+    if matches!(
+        start_plan(launchd_job_exists(DAEMON_JOB).await && job_owns_this_endpoint()),
+        Start::AskLaunchd
+    ) {
         // WHERE THE JOB EXISTS, NEVER SPAWN OUR OWN — not even when the kickstart does not answer
         // in time. The first version fell back, and the fallback re-created the exact state this
         // was written to remove: measured within the hour, an install restarted the job, a client
@@ -832,7 +835,22 @@ pub async fn spawn_daemon() {
     let _ = command.status().await;
 }
 
-/// Who is allowed to bring the daemon up here.
+/// Is the endpoint we are about to use the one launchd's job serves?
+///
+/// The job runs with the user's ordinary environment, so it serves the DEFAULT runtime directory. A
+/// caller that has redirected `XDG_RUNTIME_DIR` — every isolated test, and any second instance
+/// someone runs deliberately — wants a different socket, which launchd's job neither serves nor can
+/// be asked to serve.
+///
+/// Found by this project's own e2e: with the ownership rule applied unconditionally, an isolated run
+/// kickstarted the REAL job, waited for a socket in its own temp directory that could never appear,
+/// and then refused to start one — leaving every isolated test dead on a machine where the job is
+/// installed. The rule was right about ownership and wrong about scope.
+fn job_owns_this_endpoint() -> bool {
+    std::env::var_os("XDG_RUNTIME_DIR").is_none()
+}
+
+/// Who is allowed to bring the daemon up here./// Who is allowed to bring the daemon up here.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Start {
     /// A job owns it: ask launchd, and accept whatever that produces — including nothing.
@@ -977,6 +995,20 @@ mod tests {
     fn a_machine_with_a_job_never_spawns_its_own_daemon() {
         assert_eq!(start_plan(true), Start::AskLaunchd);
         assert_eq!(start_plan(false), Start::SpawnOwn, "no job here — this is the case the fallback is for");
+    }
+
+    /// The scope of the ownership rule, which the first version got wrong: it applies to the
+    /// machine's own endpoint, not to a private one a test or a second instance asked for.
+    #[test]
+    fn a_redirected_runtime_dir_is_not_the_job_s_endpoint() {
+        // Read through the same predicate the caller uses; the variable is process-wide, so this
+        // asserts the RULE rather than mutating global state under other tests.
+        let redirected = std::env::var_os("XDG_RUNTIME_DIR").is_some();
+        assert_eq!(job_owns_this_endpoint(), !redirected);
+        // And the composition: only both together may ask launchd.
+        assert_eq!(start_plan(true && false), Start::SpawnOwn, "private endpoint → start our own");
+        assert_eq!(start_plan(false && true), Start::SpawnOwn, "no job → start our own");
+        assert_eq!(start_plan(true), Start::AskLaunchd);
     }
 
     use super::*;

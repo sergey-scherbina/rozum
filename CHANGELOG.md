@@ -1,5 +1,36 @@
 # Changelog
 
+## windows-daemon-ipc — the daemon's transport leaves unix (compiling, not running)
+Completed: 2026-08-09
+Spec: `docs/specs/windows-daemon-ipc.md`
+
+`rozum-meeting` did not compile for Windows at all — 11 errors, every one a unix-domain socket. The
+daemon's design was never the problem; the bytes' road was. `meeting::ipc` is now the whole platform
+difference: unix socket as before, Windows named pipe, one `Stream`, one split, one shutdown signal,
+one endpoint derivation so the daemon and its clients cannot disagree about where it is.
+
+A named pipe rather than loopback TCP, deliberately: `127.0.0.1` is reachable by every account on the
+machine, while a pipe and a unix socket both carry an ACL — and this endpoint speaks MCP as whoever
+joined. The one real subtlety is that a named pipe has no listener object, so the server creates the
+NEXT instance before serving the current one; a client connecting in between would otherwise find
+nothing.
+
+**Proven:** 11 Windows errors → 0 (and 0 for rozum-agent, rozum-meet, rozum-cli); the unix path
+unchanged, the workspace suite green, and an isolated daemon opening and listing an incident over the
+socket through the new seam. **Not proven:** anything about its behaviour on Windows. Nothing here
+has run there, so the daemon prints that on startup and asks for a report, rather than letting the
+first user read a defect as their own fault.
+
+**A defect of my own, found by trying to verify this one.** The isolated e2e died: the previous day's
+ownership rule ("where launchd's job exists, never spawn our own") applied to EVERY endpoint, so a
+test with its own `XDG_RUNTIME_DIR` kickstarted the real job, waited for a socket in its temp
+directory that could never appear, and then refused to start one. The rule was right about ownership
+and wrong about scope — it now applies only to the machine's default endpoint, which is the one the
+job actually serves.
+
+The remaining Windows blocker is no longer this: `webauthn-rs` pulls `openssl-sys`, which needs a
+Windows OpenSSL to build. Recorded as `windows-openssl-webauthn` with the three ways out.
+
 ## portability-cuda-gguf — the engine that ran on other people's hardware, except it did not
 Completed: 2026-08-09
 Spec: `docs/specs/gguf-portability.md`

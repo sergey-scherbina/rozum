@@ -631,12 +631,15 @@ Remaining:
     `rozum-cli`'s real `rozum.exe` dispatcher and tests the declared portable packages
     (`rozum-core`, models, agent, and feature-off engine interfaces). Run `29533946535` is green.
     Full meeting/gateway host support remains the concrete Unix-seam work below.
-  - [ ] windows-daemon-ipc - Abstract the meeting daemon's client transport. Today it's a
-    Unix-domain socket (`meeting_sock()` / `UnixListener`), and `std::os::unix::net` does not
-    exist on Windows. Put it behind a small transport with a Windows impl — AF_UNIX (Win10
-    1803+) via a crate (`interprocess`), a named pipe, or a loopback-TCP fallback. The
-    single-writer + direct-read model and the `mcp-proxy` bridge stay; only the byte transport
-    changes.
+  - [x] windows-daemon-ipc — **DONE 2026-08-09 (compiles for Windows; never run there).** The
+    transport is behind `meeting::ipc`: unix socket unchanged, Windows named pipe (not loopback TCP —
+    a pipe carries an ACL and this endpoint speaks MCP as whoever joined). `rozum-meeting` went from
+    11 Windows errors to 0, as did rozum-agent / rozum-meet / rozum-cli. The daemon prints an
+    UNVERIFIED notice on Windows. Spec: `docs/specs/windows-daemon-ipc.md`.
+  - [ ] windows-openssl-webauthn — the remaining Windows blocker for the whole binary, found while
+    doing the above: `webauthn-rs` (UCC Face ID) pulls `openssl-sys`, whose build script needs a
+    Windows OpenSSL. Ways out: vendored OpenSSL, a rustls-based webauthn, or the control plane behind
+    a feature so a Windows GGUF user does not build it. Choosing wants a Windows box to test on.
   - [ ] windows-service-install - Add a Windows arm to `src/service.rs` (today: launchd/systemd
     generation + `launchctl`/`systemctl`): install/uninstall a Windows Service (`sc.exe` / the
     `windows-service` crate) or a Task Scheduler entry. The module is already "pure generation +

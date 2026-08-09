@@ -20,7 +20,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
-use tokio::net::UnixListener;
+use super::ipc;
 use tokio::sync::{Mutex, watch};
 
 use super::identity::{Role, Roster};
@@ -1304,8 +1304,7 @@ impl ServerHandler for MeetingServer {
 /// Identity, not existence: a successor that binds its own socket at the same path leaves the path
 /// existing and pointing somewhere else, and that is exactly the case we must notice.
 fn socket_inode(path: &Path) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).ok().map(|m| m.ino())
+    ipc::endpoint_identity(path)
 }
 
 /// Is the socket we bound still the one clients would reach?
@@ -1369,17 +1368,9 @@ pub async fn serve_daemon(socket_path: &Path, registry: Arc<RoomRegistry>) -> st
     // Translate OS signals into the shutdown flag, then keep `tx` alive until one
     // arrives (so subscribers' `changed()` never errors prematurely).
     tokio::spawn(async move {
-        let mut term =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = async {
-                match term.as_mut() {
-                    Some(t) => { t.recv().await; }
-                    None => std::future::pending::<()>().await,
-                }
-            } => {}
-        }
+        // SIGTERM (launchd's stop) and Ctrl-C on unix; Ctrl-C where SIGTERM does not exist. The
+        // difference is the platform's, so it lives in `ipc` with the rest of them.
+        ipc::shutdown_signal().await;
         let _ = tx.send(true);
     });
     serve_daemon_until(socket_path, registry, rx).await
@@ -1404,7 +1395,15 @@ async fn serve_daemon_until(
     // owner leaves nothing to reap — the reason this is a lock and not a pidfile.
     let _ownership = acquire_socket_ownership(socket_path)?;
     let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path)?;
+    // Say it where the person running it will see it. This transport compiles for Windows and has
+    // never run there; a user who is not told that will read the first odd behaviour as their own
+    // fault, and the project will hear nothing back (`docs/specs/windows-daemon-ipc.md`).
+    #[cfg(windows)]
+    eprintln!(
+        "rozum meetings: the Windows named-pipe transport is UNVERIFIED — it compiles and has never \
+         been run on Windows. Please report what happens: https://github.com/sergey-scherbina/rozum"
+    );
+    let mut listener = ipc::Listener::bind(socket_path)?;
     // Remember WHICH socket we are. If this path stops pointing at it, nobody can reach us: we hold
     // the lock, so no successor may take over, and the service would stay dead until a human killed
     // us. Getting out of the way is the only self-healing move a wedged owner has — and before the
@@ -1465,7 +1464,7 @@ async fn serve_daemon_until(
     loop {
         tokio::select! {
             accept = listener.accept() => {
-                let (stream, _) = accept?;
+                let stream = accept?;
                 serve_conn(stream, Arc::clone(&registry), shutdown.clone());
             }
             _ = reachable.tick() => {
@@ -1498,7 +1497,7 @@ async fn serve_daemon_until(
 }
 
 fn serve_conn(
-    stream: tokio::net::UnixStream,
+    stream: ipc::Stream,
     registry: Arc<RoomRegistry>,
     shutdown: watch::Receiver<bool>,
 ) {

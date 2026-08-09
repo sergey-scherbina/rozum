@@ -2,10 +2,7 @@ use std::{path::Path, time::Duration};
 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{
-    UnixStream,
-    unix::{OwnedReadHalf, OwnedWriteHalf},
-};
+use super::ipc::{ReadHalf, WriteHalf};
 
 type RoomClientResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -22,8 +19,8 @@ pub async fn call_room_tool(
 }
 
 pub struct RoomConnection {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    reader: BufReader<ReadHalf>,
+    writer: WriteHalf,
     next_id: u64,
 }
 
@@ -34,7 +31,7 @@ impl RoomConnection {
         timeout: Duration,
     ) -> RoomClientResult<Self> {
         let stream = connect_socket(socket_path).await?;
-        let (read_half, mut write_half) = stream.into_split();
+        let (read_half, mut write_half) = super::ipc::split(stream);
         let mut reader = BufReader::new(read_half);
 
         write_json(
@@ -110,8 +107,8 @@ impl RoomConnection {
     }
 }
 
-async fn connect_socket(socket_path: &Path) -> RoomClientResult<UnixStream> {
-    let stream = tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(socket_path))
+async fn connect_socket(socket_path: &Path) -> RoomClientResult<super::ipc::Stream> {
+    let stream = tokio::time::timeout(Duration::from_secs(5), super::ipc::connect(socket_path))
         .await
         .map_err(|_| "connection timeout")?
         .map_err(|e| format!("connect error: {e}"))?;
