@@ -1,0 +1,6 @@
+feature/portability-cuda-gguf 2026-08-09T16:13:23Z
+agent: claude-code
+heartbeat: 2026-08-09T16:13:23Z
+status: not-started
+done-so-far:
+next: unhardcode the metal feature; gguf-cuda/gguf-vulkan pass-through; prove the non-metal path runs
