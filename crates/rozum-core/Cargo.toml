@@ -29,7 +29,12 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tracing = "0.1"
 rand = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# rustls, NOT the default native-tls: on macOS native-tls is Security.framework and costs nothing,
+# but on Linux and Windows it is OpenSSL — a SYSTEM library that must be found, and the reason a
+# Linux `cargo check` of this workspace died in `openssl-sys`' build script before compiling a line
+# of our code. rustls is vendored Rust; the same command now needs nothing installed
+# (`docs/specs/linux-rustls.md`).
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "charset", "http2"] }
 notify = "6"  # cross-platform fs watch (kqueue/FSEvents/inotify) → event-driven admission-queue wake (P1b)
 libc = "0.2"  # pid-liveness (kill(pid,0)) for lease reaping — a dead client must not block gateway stop
 candle = { package = "candle-core", version = "0.10.2", optional = true }

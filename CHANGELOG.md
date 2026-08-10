@@ -1,5 +1,29 @@
 # Changelog
 
+## linux-rustls — the Linux build needed a system OpenSSL, and CI could not see it
+Completed: 2026-08-10
+
+Asked whether the workspace compiles on Linux, I checked rather than remembered, and `rozum-core` —
+which knows nothing about the browser console — died in `openssl-sys`' build script before a line of
+our code compiled. `reqwest`'s default TLS is `native-tls`: Security.framework on macOS, where it
+costs nothing, and **OpenSSL** on Linux and Windows, where it is a system library that must be
+found.
+
+A different blocker from the webauthn one fixed the day before, one layer lower: `ucc` gating took
+OpenSSL out of the console, this takes it out of everything else. Every crate here that makes HTTP
+calls now asks for `rustls-tls` with `default-features = false` — the second half is what actually
+drops native-tls — and names `charset` and `http2` explicitly, because they are in reqwest's default
+set and losing HTTP/2 to a TLS change is a regression nobody would connect to its cause.
+
+**CI did not catch it and would not have.** The Linux job passes because `ubuntu-latest` ships
+OpenSSL; a hosted runner with the library preinstalled is not a container and is not a user's box.
+
+Verified live rather than by graph alone: `models info` fetched HuggingFace metadata over HTTPS on
+the new backend, `cargo tree -i openssl-sys` finds no such package in the Linux graph, and the macOS
+suite is green. A Linux `cargo check` from this Mac now stops in `ring`, which compiles C for the
+target with a cross toolchain this laptop does not have — that is the laptop, not the code, and CI
+builds it natively on every push.
+
 ## ucc-optional — the console is a feature, not a fact of the binary
 Completed: 2026-08-09
 Spec: `docs/specs/ucc-optional.md`

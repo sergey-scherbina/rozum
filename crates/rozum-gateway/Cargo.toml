@@ -24,7 +24,12 @@ tokio-util = "0.7"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# rustls, NOT the default native-tls: on macOS native-tls is Security.framework and costs nothing,
+# but on Linux and Windows it is OpenSSL — a SYSTEM library that must be found, and the reason a
+# Linux `cargo check` of this workspace died in `openssl-sys`' build script before compiling a line
+# of our code. rustls is vendored Rust; the same command now needs nothing installed
+# (`docs/specs/linux-rustls.md`).
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "charset", "http2"] }
 axum = { version = "0.8", features = ["ws"] }
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
