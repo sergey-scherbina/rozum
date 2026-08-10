@@ -1,6 +1,0 @@
-feature/linux-rustls 2026-08-10T06:55:32Z
-agent: claude-code
-heartbeat: 2026-08-10T06:55:32Z
-status: not-started
-done-so-far:
-next: reqwest on rustls so a linux build needs no system OpenSSL
