@@ -1,6 +1,0 @@
-feature/meeting-start-ownership 2026-08-10T07:13:18Z
-agent: claude-code
-heartbeat: 2026-08-10T07:13:18Z
-status: not-started
-done-so-far:
-next: ownership rule belongs where the daemon is CREATED (meetings start), not only in spawn_daemon
