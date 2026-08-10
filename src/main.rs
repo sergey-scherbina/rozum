@@ -3751,6 +3751,28 @@ async fn run_meetings_start(foreground: bool) {
             println!("meeting daemon already running ({})", sock.display());
             return;
         }
+        // OWNERSHIP BELONGS WHERE THE DAEMON IS CREATED. The rule ("where launchd's job exists, it
+        // owns the daemon") was put in `daemon_proxy::spawn_daemon`, which is only one caller — and
+        // this is where a daemon actually gets made, reachable from the CLI and from anything that
+        // shells out to `meetings start`. Measured on the host the same day: after an install
+        // restarted the jobs, TWO `meetings start --foreground` processes existed in the same
+        // second, launchd's and a detached one, and the unmanaged one held the socket. A rule
+        // enforced in one caller is a rule with a back door.
+        if rozum::meeting::daemon_proxy::launchd_owns_default_endpoint().await {
+            println!(
+                "meeting daemon: launchd's job owns this endpoint — asking it instead of starting \
+                 a second copy (docs/specs/meeting-daemon-ownership.md)"
+            );
+            rozum::meeting::daemon_proxy::spawn_daemon().await;
+            if daemon_alive(&sock).await {
+                println!("meeting daemon started ({})", sock.display());
+            } else {
+                eprintln!(
+                    "meeting daemon: launchd's job did not come up — check `rozum doctor --services`"
+                );
+            }
+            return;
+        }
         match spawn_detached_meetings() {
             Ok(_) => {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

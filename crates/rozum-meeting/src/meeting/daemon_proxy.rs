@@ -811,10 +811,7 @@ pub const DAEMON_JOB: &str = "com.rozum.meeting-daemon";
 /// own exactly as before, because "works anywhere" is the property that made this convenient and
 /// removing it would trade one failure for another.
 pub async fn spawn_daemon() {
-    if matches!(
-        start_plan(launchd_job_exists(DAEMON_JOB).await && job_owns_this_endpoint()),
-        Start::AskLaunchd
-    ) {
+    if matches!(start_plan(launchd_owns_default_endpoint().await), Start::AskLaunchd) {
         // WHERE THE JOB EXISTS, NEVER SPAWN OUR OWN — not even when the kickstart does not answer
         // in time. The first version fell back, and the fallback re-created the exact state this
         // was written to remove: measured within the hour, an install restarted the job, a client
@@ -846,6 +843,10 @@ pub async fn spawn_daemon() {
 /// kickstarted the REAL job, waited for a socket in its own temp directory that could never appear,
 /// and then refused to start one — leaving every isolated test dead on a machine where the job is
 /// installed. The rule was right about ownership and wrong about scope.
+pub async fn launchd_owns_default_endpoint() -> bool {
+    launchd_job_exists(DAEMON_JOB).await && job_owns_this_endpoint()
+}
+
 fn job_owns_this_endpoint() -> bool {
     std::env::var_os("XDG_RUNTIME_DIR").is_none()
 }
