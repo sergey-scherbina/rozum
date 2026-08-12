@@ -113,9 +113,33 @@ def rowMatches(header: List[String], row: List[String], agent: String, model: St
 // name both paths know, and it is the same behaviour. Reported upstream as
 // `join-works-under-build-rust-not-run`; before that report the missing method rendered as the text
 // `Stub` and SERIALISED, so this file once answered `{"cell":{Stub}}` with status 200.
+// A CSV cell carries no types, and the console does: it SORTS on `seconds` and compares `pass`.
+// Quoting a number turns those into string comparisons, where 9 > 524.2 — which is why this
+// coerces rather than passing every field through as text. Measured against the Rust handler on
+// one real row: 14 of its fields are numeric and were arriving quoted.
+// Round-trip through `toInt` rather than classifying characters: `s.toInt.toString == s` is true
+// exactly for an integer. Two things this lane does NOT lower were tried first and are recorded so
+// the next reader does not repeat them: `.filter` over a String (needs into_iter on String) and
+// `toDouble` on a String (emits `String as f64`, a cast Rust has no such thing for). A decimal is
+// therefore checked as two integers around one dot, which uses only what works.
+def isInt(s: String): Boolean =
+  val a = s
+  val b = s
+  val printed = a.toInt.toString
+  printed == b
+
+def isNumeric(s: String): Boolean =
+  if isInt(s) then true
+  else
+    val parts = s.split(".").toList
+    parts.length == 2 && isInt(parts(0)) && isInt(parts(1))
+
+def jsonScalar(s: String): String =
+  if isNumeric(s) then s else jsonStringify(s)
+
 def rowToJson(header: List[String], row: List[String]): String =
   val pairs = header.zipWithIndex.map(hi =>
-    jsonStringify(hi._1) + ":" + jsonStringify(if hi._2 < row.length then row(hi._2) else "")
+    jsonStringify(hi._1) + ":" + jsonScalar(if hi._2 < row.length then row(hi._2) else "")
   )
   "{" + pairs.toList.mkString(",") + "}"
 
@@ -149,12 +173,22 @@ def cellRoute(req: Request): String =
         val cellDir = benchResultsDir() + "/" + stamp + "/cells/" + agent + "/" + sm + "/" + task
         val logPath = cellDir + "/agent.log"
         val verPath = cellDir + "/verify.out"
-        val agentLog = if exists(logPath) then tailLines(readFile(logPath), capped) else ""
-        val verifyOut = if exists(verPath) then readFile(verPath) else ""
+        // ABSENT is null, not "". The console distinguishes "this cell kept no logs" from "the log
+        // is empty", and the Rust handler it replaces returns null — measured on a real cell whose
+        // run did not keep its workdir.
+        val agentLog = if exists(logPath) then jsonStringify(tailLines(readFile(logPath), capped)) else "null"
+        val verifyOut = if exists(verPath) then jsonStringify(readFile(verPath)) else "null"
         val cellJson = hit.map(r => rowToJson(header, r.split(",").toList)).getOrElse("null")
+        // `triage_out` and `has_logs` are the Rust handler's, matched here because the console
+        // reads them. `task_info` is deliberately NOT here — see the note at the end of the file.
+        val triagePath = cellDir + "/triage.out"
+        val triageOut = if exists(triagePath) then jsonStringify(readFile(triagePath)) else "null"
+        val hasLogs = if exists(cellDir) then "true" else "false"
         "{\"cell\":" + cellJson +
-          ",\"agent_log\":" + jsonStringify(agentLog) +
-          ",\"verify_out\":" + jsonStringify(verifyOut) + "}"
+          ",\"agent_log\":" + agentLog +
+          ",\"verify_out\":" + verifyOut +
+          ",\"triage_out\":" + triageOut +
+          ",\"has_logs\":" + hasLogs + "}"
     else badRequest("invalid stamp/agent/model/task segment")
   else forbidden()
 
