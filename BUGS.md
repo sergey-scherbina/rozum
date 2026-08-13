@@ -7,9 +7,15 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ## matrix-task-info-is-a-stale-copy
 
-<!-- status: open
+<!-- status: fixed
      area: gateway
      gate: none -->
+
+**Fixed** by `feature/matrix-task-info-single-source`: the compiled table is gone and both the
+bench and the console read `scripts/bench/tasks.json`. The console had been showing prompts that
+five of six tasks were never given, and answering `null` for `wordcount` and `multibug` — 61 real
+cells. A test asserts every task the bench can run has a prompt and a difficulty, so the two
+cannot drift apart again silently.
 
 `matrix_task_info` (`crates/rozum-gateway/src/matrix.rs:546`) holds a prompt per task and the UCC
 console shows it when an operator opens a cell. The bench holds its own prompts in

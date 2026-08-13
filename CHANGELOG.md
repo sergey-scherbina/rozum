@@ -1,5 +1,18 @@
 # Changelog
 
+## matrix-task-info-single-source — one source for the bench task definitions, and a switch to serve the two public routes from .ssc
+Completed: 2026-08-13
+
+The console kept its own copy of the task prompts. Five of six had drifted from what the bench
+actually sends, and `wordcount`/`multibug` were missing outright — 61 real cells answering `null`.
+Both sides now read `scripts/bench/tasks.json`; a test asserts every task the bench can run has a
+prompt and a difficulty. Resolved BUGS.md `matrix-task-info-is-a-stale-copy`.
+
+Also lands `ROZUM_UCC_SSC_ORIGIN`, default OFF: when set, `/control/public/matrix/cell` and
+`/view/{token}` are served by the .ssc program instead of in-process. Verified identical on all
+1884 cells on disk in both positions, byte-for-byte through the proxy. An unreachable .ssc answers
+502 rather than falling back, so the switch cannot pass a test while serving the old code.
+
 ## linux-rustls — the Linux build needed a system OpenSSL, and CI could not see it
 Completed: 2026-08-10
 
