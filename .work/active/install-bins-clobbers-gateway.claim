@@ -1,0 +1,6 @@
+feature/install-bins-clobbers-gateway 2026-08-13T19:01:09Z
+agent: claude-opus-5
+heartbeat: 2026-08-13T19:01:09Z
+status: in-progress
+done-so-far: found by running install-bins.sh — it published the 634KB rozum CLI over the 56MB rozum-gateway that six launchd jobs exec. Restored the correct binary by hand already; the running processes never noticed because they hold the old inode.
+next: fix declared_pair so the rozum->rozum-gateway exception only applies to the rozum-ctrl rewrite it was written for, and add a post-publish exec guard.
