@@ -221,28 +221,35 @@ no_progress_monitor() { # $1=alog  $2=lp  $3=reasonfile
 # Clarifying it removed the refusal (Cargo.toml lands 3/3). See docs/matrix-failure-analysis.md Finding 5.
 prompt_for() {
   local task="$1" agent="${2:-}"
-  # For codex and opencode: the model may generate code in prose (markdown) rather than
-  # tool calls. Append a concise tool-use reminder so the first attempt actually writes files.
-  local tool_hint=""
-  if [ "$agent" = codex ] || [ "$agent" = opencode ]; then
-    # Two failure modes measured on weak models via codex/opencode (2026-07-14, matrix diag):
-    #   (1) they emit code as prose instead of calling a file tool → nothing lands;
-    #   (2) on CREATE-from-scratch they write to an ABSOLUTE path — `/Cargo.toml` (opencode
-    #       rejects a write to filesystem root → rc11) or `/tmp/<name>/…` (writes OUTSIDE the
-    #       workdir → verifier sees no files → rc11). The SAME model lands EDITs fine because it
-    #       reuses the relative path from `Read`. So pin new files to RELATIVE paths in the cwd.
-    tool_hint=' IMPORTANT: use the Write tool or a Bash heredoc to create/modify files — outputting code as text or markdown is not sufficient. Write every file using a path RELATIVE to the current directory (e.g. `Cargo.toml`, `src/main.rs`); NEVER use an absolute path such as `/Cargo.toml` or `/tmp/...` — the files must land in the current working directory.'
-  fi
-  case "$task" in
-    greet) echo 'Reply with exactly the single word: pong  (nothing else, no punctuation).' ;;
-    build) echo "In the CURRENT directory (put files here directly — do NOT wrap them in a new project folder via \`cargo new\`; the standard \`src/\` directory for \`src/main.rs\` is expected and fine), create a minimal Rust binary project: a Cargo.toml (package name \"reverse-cli\", version 0.1.0, edition 2021, no dependencies) and src/main.rs. The program reverses its first command-line argument (by characters) and prints the result. Then run \"cargo run -- hello\" and confirm it prints \"olleh\". Keep it minimal. The moment the program prints \"olleh\", you are DONE — reply with one short confirmation line and STOP; do not run it again.${tool_hint}" ;;
-    test)  echo "In the CURRENT directory (put files here directly — do NOT wrap them in a new project folder via \`cargo new\`; the standard \`src/\` directory for \`src/main.rs\` is expected and fine), create a minimal Rust BINARY project. You MUST create BOTH files before you stop: a Cargo.toml (package \"reverse-cli\", version 0.1.0, edition 2021, no dependencies) AND src/main.rs — do NOT stop after writing only the Cargo.toml; a manifest with no src/main.rs has no build target and fails. In src/main.rs implement \`fn reverse(s: &str) -> String\` that reverses by characters; main reads its first CLI argument and prints reverse(arg). ALSO add a \`#[cfg(test)]\` unit test asserting \`reverse(\"hello\") == \"olleh\"\`. Then run \"cargo test\" (must pass) and \"cargo run -- hello\" (must print olleh). Actually implement reverse; do not just scaffold. Keep it minimal. You are DONE only once BOTH \`cargo test\` passes AND \`cargo run -- hello\` prints \"olleh\" — then reply with one short confirmation line and STOP; do not run them again.${tool_hint}" ;;
-    fix)   echo "There is a Rust project in the current directory. Running \"cargo run -- hello\" should print \"olleh\" (the reverse of the argument) but it prints \"hello\". Find and fix the bug in src/main.rs, then run \"cargo run -- hello\" to confirm it prints \"olleh\". Make the minimal change; do not rewrite the whole file. Before editing, read the file and copy the exact current text for Edit.old_string. If Edit says \"String to replace not found\", re-read the file and use an exact current substring (or Write the tiny file); do not claim success until the command really prints \"olleh\". The moment it prints \"olleh\", you are DONE — reply with one short confirmation line and STOP.${tool_hint}" ;;
-    debug) echo "There is a Rust library in the current directory. \"cargo test\" fails because of a bug in src/lib.rs. Fix the bug so the test passes. Do NOT modify the test. Then run \"cargo test\" to confirm it passes. Make the minimal change. Before editing, read the file and copy the exact current text for Edit.old_string. If Edit says \"String to replace not found\", re-read the file and use an exact current substring (or Write the tiny file); do not claim success until the test command really passes. The moment the test passes, you are DONE — reply with one short confirmation line and STOP.${tool_hint}" ;;
-    rpn)   echo "In the CURRENT directory (put files here directly — do NOT wrap them in a new project folder via \`cargo new\`; the standard \`src/\` directory for \`src/main.rs\` is expected and fine), create a minimal Rust binary project: a Cargo.toml (package name \"rpn-calc\", version 0.1.0, edition 2021, no dependencies) and src/main.rs. The program evaluates a Reverse Polish Notation (postfix) expression passed as its first command-line argument: use \`std::env::args().nth(1)\` as the whole expression string. Tokens are space-separated integers and the binary operators + - * /, evaluated left-to-right with a stack using integer arithmetic. After evaluation, print ONLY the final integer result from the stack (no extra text). It must work for ANY valid RPN expression, not just one example. Verify BOTH: \`cargo run -- \"3 4 + 5 *\"\` must print 35, and \`cargo run -- \"5 1 2 + 4 * + 3 -\"\` must print 14. Keep it minimal. The moment both commands print the expected numbers, you are DONE — reply with one short confirmation line and STOP; do not run them again.${tool_hint}" ;;
-    wordcount) echo "In the CURRENT directory (put files directly here — do NOT \`cargo new\` a subfolder; the standard \`src/\` for \`src/main.rs\` is fine), create a minimal Rust binary project: a Cargo.toml (package name \"wordcount\", version 0.1.0, edition 2021, no dependencies) and src/main.rs. The program reads a text file whose path is its first CLI argument (\`std::env::args().nth(1)\`), splits it into words on ASCII whitespace, counts each word case-INSENSITIVELY (lowercase it before counting), and prints the TOP 3 words by DESCENDING count — ties broken by ASCENDING alphabetical order — one per line, each line in the EXACT format \`word count\` (the lowercased word, one space, the integer count, no extra text). It must be a GENERAL solution for any input, not hardcoded. The file \`input.txt\` already exists in the directory; verify with \`cargo run -- input.txt\`. Keep it minimal. The moment it prints the correct 3 lines, you are DONE — reply with one short confirmation line and STOP; do not run it again.${tool_hint}" ;;
-    multibug) echo "There is a Rust library in the current directory. \"cargo test\" FAILS: there are TWO separate bugs in src/lib.rs, in two DIFFERENT functions. Fix BOTH so every test passes. Do NOT modify the tests. Then run \"cargo test\" to confirm ALL tests pass. Make minimal changes; read the file first, and if an Edit's old_string is not found, re-read and use an exact current substring. Do not claim success until \"cargo test\" really reports all tests passing. The moment it passes, reply with one short confirmation line and STOP.${tool_hint}" ;;
-  esac
+  # The prompts live in scripts/bench/tasks.json, which the gateway ALSO reads to show them in the
+  # UCC console. They used to be here and copied there, and five of six had drifted apart — the
+  # console showed an older, shorter prompt than the model was given (BUGS.md
+  # matrix-task-info-is-a-stale-copy). One source, two readers.
+  #
+  # The codex/opencode tool reminder stays HERE and not in the file, because it is about the AGENT,
+  # not the task: two failure modes measured on weak models (2026-07-14, matrix diag) — they emit
+  # code as prose instead of calling a file tool, and on CREATE-from-scratch they write to an
+  # ABSOLUTE path, so nothing lands in the workdir. Which tasks take it IS in the file, because
+  # that is a property of the task (`greet` needs no tools at all) and it used to be encoded only
+  # in whether the arm was single- or double-quoted.
+  local tool_hint=' IMPORTANT: use the Write tool or a Bash heredoc to create/modify files — outputting code as text or markdown is not sufficient. Write every file using a path RELATIVE to the current directory (e.g. `Cargo.toml`, `src/main.rs`); NEVER use an absolute path such as `/Cargo.toml` or `/tmp/...` — the files must land in the current working directory.'
+  TASK="$task" AGENT="$agent" HINT="$tool_hint" TASKS_FILE="$(bench_tasks_file)" python3 -c '
+import json, os, sys
+doc = json.load(open(os.environ["TASKS_FILE"]))
+t = doc["tasks"].get(os.environ["TASK"])
+if t is None:
+    sys.exit(1)
+p = t["prompt"]
+if t.get("tool_hint") and os.environ["AGENT"] in ("codex", "opencode"):
+    p += os.environ["HINT"]
+sys.stdout.write(p + "\n")   # echo added this; the callers depend on it
+'
+}
+
+# Where the task definitions live. Same override shape as the other bench paths.
+bench_tasks_file() {
+  echo "${ROZUM_BENCH_TASKS:-$(dirname "${BASH_SOURCE[0]}")/tasks.json}"
+}
 }
 
 setup_task() { # $1=task  $2=workdir — pre-create files for fix/debug

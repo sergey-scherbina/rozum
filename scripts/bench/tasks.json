@@ -1,0 +1,61 @@
+{
+  "_": "THE task definitions. One source, two readers: scripts/bench/agentic.sh serves them to the model, and the gateway's matrix_task_info shows them in the UCC console. Before this file there were two copies and five of six prompts had drifted apart — the console showed an older, shorter prompt than the one the model was actually given, and wordcount/multibug had no entry at all. `expected` is null where the gateway never had one; it is prose for a reader, not something a gate parses. `tool_hint` says whether the codex/opencode tool reminder is appended; it was previously implied by whether the arm used single or double quotes, which is not a place to keep a rule.",
+  "tasks": {
+    "greet": {
+      "label": "Greet",
+      "difficulty": 1,
+      "prompt": "Reply with exactly the single word: pong  (nothing else, no punctuation).",
+      "expected": "output contains \"pong\"",
+      "tool_hint": false
+    },
+    "build": {
+      "label": "Build",
+      "difficulty": 2,
+      "prompt": "In the CURRENT directory (put files here directly — do NOT wrap them in a new project folder via `cargo new`; the standard `src/` directory for `src/main.rs` is expected and fine), create a minimal Rust binary project: a Cargo.toml (package name \"reverse-cli\", version 0.1.0, edition 2021, no dependencies) and src/main.rs. The program reverses its first command-line argument (by characters) and prints the result. Then run \"cargo run -- hello\" and confirm it prints \"olleh\". Keep it minimal. The moment the program prints \"olleh\", you are DONE — reply with one short confirmation line and STOP; do not run it again.",
+      "expected": "cargo run -- hello == olleh",
+      "tool_hint": true
+    },
+    "fix": {
+      "label": "Fix",
+      "difficulty": 3,
+      "prompt": "There is a Rust project in the current directory. Running \"cargo run -- hello\" should print \"olleh\" (the reverse of the argument) but it prints \"hello\". Find and fix the bug in src/main.rs, then run \"cargo run -- hello\" to confirm it prints \"olleh\". Make the minimal change; do not rewrite the whole file. Before editing, read the file and copy the exact current text for Edit.old_string. If Edit says \"String to replace not found\", re-read the file and use an exact current substring (or Write the tiny file); do not claim success until the command really prints \"olleh\". The moment it prints \"olleh\", you are DONE — reply with one short confirmation line and STOP.",
+      "expected": "cargo run -- hello == olleh",
+      "tool_hint": true
+    },
+    "test": {
+      "label": "Test",
+      "difficulty": 4,
+      "prompt": "In the CURRENT directory (put files here directly — do NOT wrap them in a new project folder via `cargo new`; the standard `src/` directory for `src/main.rs` is expected and fine), create a minimal Rust BINARY project. You MUST create BOTH files before you stop: a Cargo.toml (package \"reverse-cli\", version 0.1.0, edition 2021, no dependencies) AND src/main.rs — do NOT stop after writing only the Cargo.toml; a manifest with no src/main.rs has no build target and fails. In src/main.rs implement `fn reverse(s: &str) -> String` that reverses by characters; main reads its first CLI argument and prints reverse(arg). ALSO add a `#[cfg(test)]` unit test asserting `reverse(\"hello\") == \"olleh\"`. Then run \"cargo test\" (must pass) and \"cargo run -- hello\" (must print olleh). Actually implement reverse; do not just scaffold. Keep it minimal. You are DONE only once BOTH `cargo test` passes AND `cargo run -- hello` prints \"olleh\" — then reply with one short confirmation line and STOP; do not run them again.",
+      "expected": "cargo test green AND cargo run -- hello == olleh",
+      "tool_hint": true
+    },
+    "debug": {
+      "label": "Debug",
+      "difficulty": 5,
+      "prompt": "There is a Rust library in the current directory. \"cargo test\" fails because of a bug in src/lib.rs. Fix the bug so the test passes. Do NOT modify the test. Then run \"cargo test\" to confirm it passes. Make the minimal change. Before editing, read the file and copy the exact current text for Edit.old_string. If Edit says \"String to replace not found\", re-read the file and use an exact current substring (or Write the tiny file); do not claim success until the test command really passes. The moment the test passes, you are DONE — reply with one short confirmation line and STOP.",
+      "expected": "cargo test green",
+      "tool_hint": true
+    },
+    "rpn": {
+      "label": "RPN calc",
+      "difficulty": 6,
+      "prompt": "In the CURRENT directory (put files here directly — do NOT wrap them in a new project folder via `cargo new`; the standard `src/` directory for `src/main.rs` is expected and fine), create a minimal Rust binary project: a Cargo.toml (package name \"rpn-calc\", version 0.1.0, edition 2021, no dependencies) and src/main.rs. The program evaluates a Reverse Polish Notation (postfix) expression passed as its first command-line argument: use `std::env::args().nth(1)` as the whole expression string. Tokens are space-separated integers and the binary operators + - * /, evaluated left-to-right with a stack using integer arithmetic. After evaluation, print ONLY the final integer result from the stack (no extra text). It must work for ANY valid RPN expression, not just one example. Verify BOTH: `cargo run -- \"3 4 + 5 *\"` must print 35, and `cargo run -- \"5 1 2 + 4 * + 3 -\"` must print 14. Keep it minimal. The moment both commands print the expected numbers, you are DONE — reply with one short confirmation line and STOP; do not run them again.",
+      "expected": "both RPN expressions produce correct integer results",
+      "tool_hint": true
+    },
+    "wordcount": {
+      "label": "wordcount",
+      "difficulty": 7,
+      "prompt": "In the CURRENT directory (put files directly here — do NOT `cargo new` a subfolder; the standard `src/` for `src/main.rs` is fine), create a minimal Rust binary project: a Cargo.toml (package name \"wordcount\", version 0.1.0, edition 2021, no dependencies) and src/main.rs. The program reads a text file whose path is its first CLI argument (`std::env::args().nth(1)`), splits it into words on ASCII whitespace, counts each word case-INSENSITIVELY (lowercase it before counting), and prints the TOP 3 words by DESCENDING count — ties broken by ASCENDING alphabetical order — one per line, each line in the EXACT format `word count` (the lowercased word, one space, the integer count, no extra text). It must be a GENERAL solution for any input, not hardcoded. The file `input.txt` already exists in the directory; verify with `cargo run -- input.txt`. Keep it minimal. The moment it prints the correct 3 lines, you are DONE — reply with one short confirmation line and STOP; do not run it again.",
+      "expected": null,
+      "tool_hint": true
+    },
+    "multibug": {
+      "label": "multibug",
+      "difficulty": 8,
+      "prompt": "There is a Rust library in the current directory. \"cargo test\" FAILS: there are TWO separate bugs in src/lib.rs, in two DIFFERENT functions. Fix BOTH so every test passes. Do NOT modify the tests. Then run \"cargo test\" to confirm ALL tests pass. Make minimal changes; read the file first, and if an Edit's old_string is not found, re-read and use an exact current substring. Do not claim success until \"cargo test\" really reports all tests passing. The moment it passes, reply with one short confirmation line and STOP.",
+      "expected": null,
+      "tool_hint": true
+    }
+  }
+}

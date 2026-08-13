@@ -270,6 +270,15 @@ pub(crate) fn bench_script() -> PathBuf {
     bench_path("ROZUM_BENCH_SCRIPT", "scripts/bench/agentic.sh")
 }
 
+/// The task definitions. THE source is `scripts/bench/tasks.json`, read by the bench to build the
+/// prompt it hands the model and by this file to show it. It exists because the two used to be
+/// separate copies and five of six prompts had drifted: the console showed an older, shorter prompt
+/// than the model was given, and two of the eight tasks had no entry here at all. See
+/// `matrix-task-info-is-a-stale-copy` in BUGS.md.
+pub(crate) fn bench_tasks_path() -> PathBuf {
+    bench_path("ROZUM_BENCH_TASKS", "scripts/bench/tasks.json")
+}
+
 pub(crate) fn bench_results_dir() -> PathBuf {
     bench_path("ROZUM_BENCH_RESULTS", "scripts/bench/results")
 }
@@ -544,44 +553,18 @@ pub(crate) fn archive_matrix_cells(result_dir: &PathBuf) {
 
 /// Hardcoded task prompts and expected outputs matching agentic.sh's prompt_for().
 pub(crate) fn matrix_task_info(task: &str) -> serde_json::Value {
-    match task {
-        "greet" => serde_json::json!({
-            "label": "Greet",
-            "difficulty": 1,
-            "prompt": "Reply with exactly the single word: pong  (nothing else, no punctuation).",
-            "expected": "output contains \"pong\""
-        }),
-        "build" => serde_json::json!({
-            "label": "Build",
-            "difficulty": 2,
-            "prompt": "Create a minimal Rust binary project in the CURRENT directory: reverse-cli — reads its first CLI arg and prints it reversed. Then run `cargo run -- hello` and confirm it prints \"olleh\".",
-            "expected": "cargo run -- hello == olleh"
-        }),
-        "fix" => serde_json::json!({
-            "label": "Fix",
-            "difficulty": 3,
-            "prompt": "There is a Rust project in the current directory. `cargo run -- hello` prints \"hello\" instead of \"olleh\". Find and fix the one-line bug in src/main.rs, then confirm it prints \"olleh\".",
-            "expected": "cargo run -- hello == olleh"
-        }),
-        "test" => serde_json::json!({
-            "label": "Test",
-            "difficulty": 4,
-            "prompt": "Extend the reverse-cli project: implement a reverse() function and a #[test] that asserts reverse(\"hello\") == \"olleh\". Run `cargo test` (green) and `cargo run -- hello` (olleh).",
-            "expected": "cargo test green AND cargo run -- hello == olleh"
-        }),
-        "debug" => serde_json::json!({
-            "label": "Debug",
-            "difficulty": 5,
-            "prompt": "There is a Rust library in the current directory. `cargo test` fails due to a bug in src/lib.rs. Fix the bug (do NOT modify the test) so `cargo test` passes.",
-            "expected": "cargo test green"
-        }),
-        "rpn" => serde_json::json!({
-            "label": "RPN calc",
-            "difficulty": 6,
-            "prompt": "Create a Rust binary `rpn-calc` that evaluates a Reverse Polish Notation expression from its first CLI arg (space-separated tokens, integer arithmetic). Verify: `cargo run -- \"3 4 + 5 *\"` == 35 and `cargo run -- \"5 1 2 + 4 * + 3 -\"` == 14.",
-            "expected": "both RPN expressions produce correct integer results"
-        }),
-        _ => serde_json::json!({ "label": task, "difficulty": null, "prompt": null, "expected": null }),
+    // Read, not matched: the table this replaced was a copy of the bench's prompts and had gone
+    // stale in five of six entries. An unreadable file answers the same shape with nulls rather
+    // than a stale truth — a console that says "unknown" is better than one that says something
+    // the model never saw.
+    let unknown = || serde_json::json!({
+        "label": task, "difficulty": null, "prompt": null, "expected": null
+    });
+    let Ok(raw) = std::fs::read_to_string(bench_tasks_path()) else { return unknown() };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else { return unknown() };
+    match doc.get("tasks").and_then(|t| t.get(task)) {
+        Some(v) => v.clone(),
+        None    => unknown(),
     }
 }
 
@@ -893,5 +876,41 @@ mod bench_path_tests {
         unsafe { std::env::remove_var(key) };
         let cwd = std::env::current_dir().unwrap_or_default();
         assert_eq!(bench_path(key, "scripts/bench/results"), cwd.join("scripts/bench/results"));
+    }
+}
+
+#[cfg(test)]
+mod task_info_tests {
+    use super::*;
+
+    /// Every task the bench can run must have a prompt here, and it must be THE prompt — the file
+    /// this reads is the same one `prompt_for` serves to the model. The table this replaced was a
+    /// copy and had drifted in five of six entries, with two tasks missing outright; the console
+    /// showed an operator a task the model was never given. See BUGS.md
+    /// `matrix-task-info-is-a-stale-copy`.
+    #[test]
+    fn every_bench_task_has_a_prompt_and_a_difficulty() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap().parent().unwrap();
+        // SAFETY: single-threaded test process; the path is read once by matrix_task_info below.
+        unsafe { std::env::set_var("ROZUM_BENCH_TASKS", repo.join("scripts/bench/tasks.json")); }
+        // The eight the bench's own DIFF table names — wordcount and multibug are the two that
+        // used to answer `prompt: null`, which is what made this worth a test rather than a look.
+        for task in ["greet", "build", "fix", "test", "debug", "rpn", "wordcount", "multibug"] {
+            let info = matrix_task_info(task);
+            assert!(info["prompt"].is_string(), "{task}: prompt is {}", info["prompt"]);
+            assert!(!info["prompt"].as_str().unwrap().is_empty(), "{task}: empty prompt");
+            assert!(info["difficulty"].is_number(), "{task}: difficulty is {}", info["difficulty"]);
+        }
+    }
+
+    /// An unreadable file answers the shape with nulls rather than panicking or serving a stale
+    /// truth: a console saying "unknown" is better than one confidently showing the wrong task.
+    #[test]
+    fn a_missing_file_answers_nulls_not_a_panic() {
+        unsafe { std::env::set_var("ROZUM_BENCH_TASKS", "/nonexistent/tasks.json"); }
+        let info = matrix_task_info("rpn");
+        assert!(info["prompt"].is_null());
+        assert_eq!(info["label"], "rpn");
     }
 }
