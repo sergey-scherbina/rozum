@@ -1,9 +1,14 @@
 feature/ucc-ssc-public 2026-08-08T17:13:53Z
 agent: claude-opus-5
-heartbeat: 2026-08-13T18:29:54Z
+heartbeat: 2026-08-13T18:33:33Z
 status: in-progress
 done-so-far: slice 1 matches the Rust routes on ALL 1884 cells present on disk (status + every field), and /view matches byte-for-byte on a live and a revoked token, headers included. Commit 05e70a5 fixed four gaps in /view that status-parity had hidden: it served index.html instead of view.html (580KB vs 27KB, both 200), never injected window._VIEW_TOKEN (a 200 carrying a console that could not call anything), answered 200 instead of 404 for a missing file, and answered an expired link with raw JSON instead of the styled page. Also aligned Content-Type on every JSON answer (unstated, the runtime guessed text/plain for a JSON body) and put `ok: false` back in the 400 body.
 next: the switch lives in the gateway on branch feature/matrix-task-info-single-source (dc8b029): ROZUM_UCC_SSC_ORIGIN picks which implementation registers the two routes; unset = today's behaviour exactly, unreachable .ssc = 502 (never a silent fallback to Rust). Both branches are committed and unmerged, and NOTHING live has been switched — the deployment decisions (install the binary, set the variable, supervise the .ssc process) are the operator's.
 deploy-order: tasks.json MUST be in the deployed checkout BEFORE the new gateway binary. matrix_task_info resolves it against the process working directory (launchd sets /Users/sergiy/work/my/rozum), so a binary deployed first serves null prompts that look like data. It now says so once in the log instead of staying quiet.
 deviation: the .ssc runtime adds `Cache-Control: no-store` to every answer; the Rust routes send none on these two. Kept — harmless on an authorized read — but it is the ONE header that differs.
 debt: public-matrix.ssc carries workarounds for build-rust defects. isInt takes two local copies of its parameter (E0382) and isNumeric splits on the dot instead of using toDouble — both fixed by scalascript branch fix/string-numeric-conversions, so simplify them and DELETE the comments when it lands. viewRoute inserts via split + a hand-rolled join, and every concatenation joins exactly two operands, because build-rust lowers indexOf on a String to .iter().position(…) and a list-element + top-level-val concatenation to String + String. Repros minimised to four lines each; filed separately.
+blocker-before-any-switch: the .ssc server binds ALL interfaces (`*:8412`) while the Rust
+  console binds `127.0.0.1`. Reachable from the LAN only because the host firewall refuses
+  the connection today — that is not the protection to rely on. `serve(port)` must take a
+  bind address, or the process must be confined, BEFORE these routes move to it. Measured
+  with lsof: `pmL *:8412` against `rozum-gateway 127.0.0.1:8411`.
