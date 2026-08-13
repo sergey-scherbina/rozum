@@ -43,6 +43,37 @@ fix is not "move the table somewhere .ssc can read it" — it is to stop having 
 knows these prompts and should emit them, and both the gateway and the .ssc slice should read what
 it emits. That also unblocks deleting the Rust handler, which is slice 1's remaining "done when".
 
+## BUG-030 — the meeting PWA could not be rebuilt from source, on either lane
+
+- **Status:** UNBLOCKED 2026-08-13 upstream-pending. Builds against scalascript
+  `feature/ssc-toint-on-a-char` (pushed, reported); the shared toolchain still refuses until that is
+  in their main. The deployed binary was left alone throughout.
+- **Severity:** P2, and quiet. `clients/meeting/build.sh` had a `SKIP` branch, so every
+  `install-bins.sh` run reported success while the PWA stayed at its 2026-08-08 build. A service
+  whose only artifact is the copy already running is one bad restart from being gone.
+
+One line of ours needs something neither lane provides:
+
+```
+hashStr(s) = s.trim.toList.map(c => c.toInt).sum      # clients/meeting/meeting.ssc:257
+```
+
+- `build-rust` — no `SscToInt` arm for a character: `error[E0277]: the trait bound &char: SscToInt
+  is not satisfied`. `charAt` hits the same wall as `&SscChar`.
+- `run` — `String.toList` answers a closure, so `"ab".toList.length` prints `<closure>` and the
+  `.map` after it fails to dispatch.
+
+Both filed with rozum's name on them; the first has a branch that makes both lanes answer 97 / 57
+for `'a'` / `'9'` and builds the PWA again (1,708,272 bytes, runs, binds its port).
+
+**What this cost before it was looked at.** The installer's comment still described the 2026-08-08
+failure, which had been fixed upstream — a stale reason is worse than none, because it sends the
+reader after a bug that no longer exists. The comment now says what fails today and what unblocks
+it.
+
+**Do not "fix" this by rewriting `hashStr`.** The line is correct ScalaScript and the colours it
+produces are the ones every existing transcript was rendered with; changing the hash changes them.
+
 ## BUG-029 — install-bins.sh published the CLI dispatcher over the engine six jobs exec
 
 - **Status:** FIXED 2026-08-13 (`declared_pair` no longer treats `rozum` and `rozum-gateway` as

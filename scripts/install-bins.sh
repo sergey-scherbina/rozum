@@ -162,12 +162,20 @@ install_ssc() {
   local log="$tmp.log"
   if ! "$ROOT/clients/meeting/build.sh" "$tmp" >"$log" 2>&1; then
     rm -f "$tmp"
-    # SAY WHY. "not available" was my first wording and it was wrong twice over: the toolchain is
-    # there, and what it reports is a compiler regression on the Rust lane, not a missing tool.
-    # 2026-08-08 it fails inside the STD library — `jsonCoreRenderFields extracts Cons which is not
-    # a known enum constructor`, `_normSegments uses unsupported infix operator ::` — which means
-    # this PWA cannot currently be rebuilt from source at all. Reported to scalascript; until it
-    # lands, the running binary is the only artifact, so this leaves it alone rather than break it.
+    # SAY WHY, and say what it is TODAY — the reason has changed twice and a stale reason here is
+    # worse than none, because it sends the next reader looking for a bug that is already fixed.
+    #
+    # 2026-08-08: failed inside the STD library (`jsonCoreRenderFields extracts Cons which is not a
+    # known enum constructor`, `_normSegments uses unsupported infix operator ::`). Those are fixed.
+    # 2026-08-13: fails on ONE line of our own source — `hashStr` in `clients/meeting/meeting.ssc`
+    # does `s.trim.toList.map(c => c.toInt).sum`, and the Rust lane has no `toInt` for a character
+    # (`error[E0277]: the trait bound &char: SscToInt is not satisfied`). Reported to scalascript
+    # WITH a fix on `feature/ssc-toint-on-a-char`; built against that branch the PWA compiles again
+    # (1,708,272 bytes, runs, binds its port). Until it is in their main, the shared toolchain still
+    # refuses, so this leaves the running binary alone rather than break it.
+    #
+    # The same line cannot run on the `run` lane either, for a DIFFERENT reason (`String.toList`
+    # answers a closure there). Both are filed; neither is ours to fix.
     echo "SKIP rozum-meeting-ssc: the ssc build FAILED — $dst left as it is. Reason:" >&2
     tail -3 "$log" | sed 's/^/      /' >&2
     rm -f "$log"
