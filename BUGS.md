@@ -5,6 +5,38 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## matrix-task-info-is-a-stale-copy
+
+<!-- status: open
+     area: gateway
+     gate: none -->
+
+`matrix_task_info` (`crates/rozum-gateway/src/matrix.rs:546`) holds a prompt per task and the UCC
+console shows it when an operator opens a cell. The bench holds its own prompts in
+`scripts/bench/agentic.sh` `prompt_for()`. They are two copies, and five of the six have already
+drifted apart — measured 2026-08-13 with an extractor that handles the escaped quotes both files
+contain (a first pass without that read 59 chars where the file has 718, so the numbers below are
+from the checked version):
+
+    greet   identical      73  /   73
+    build   differs       185  /  635
+    fix     differs       183  /  678
+    test    differs       177  / 1035
+    debug   differs       157  /  593
+    rpn     differs       239  / 1068
+
+The gateway's copies are UNIFORMLY the shorter ones, so this is not two-way drift: the bench's
+prompts grew (the "put files here directly, do NOT wrap them in a new project folder" guidance, the
+tool hints added for codex/opencode) and the console's copy stayed at an older generation. An
+operator reading a failed cell is shown a task that is not the one the model was given — which is
+exactly the wrong moment to be misinformed, since the prompt is what they are trying to judge.
+
+**Found while doing `ucc-ssc-backend`.** The .ssc port deliberately does NOT carry `task_info`,
+because a second copy would drift; the measurement then showed the FIRST copy already had. So the
+fix is not "move the table somewhere .ssc can read it" — it is to stop having a table: the bench
+knows these prompts and should emit them, and both the gateway and the .ssc slice should read what
+it emits. That also unblocks deleting the Rust handler, which is slice 1's remaining "done when".
+
 ## BUG-028 — a binary built in a worktree dies when the worktree is removed
 
 - **Status:** FIXED 2026-08-08 (`scripts/install-bins.sh` refuses to install from a worktree).
