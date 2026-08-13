@@ -230,7 +230,40 @@ fn shutdown_grace_secs() -> u64 {
         .unwrap_or(3)
 }
 
-/// Completes on SIGTERM/SIGINT, after flipping the gateway to "not ready" and waiting a
+/// How long a drain may take before the process stops waiting for connections that will not close.
+///
+/// Longer than any handshake and shorter than an operator's patience. It is a ceiling on the
+/// SHUTDOWN, not on a request: a generation in flight suspends it entirely.
+const DRAIN_DEADLINE_SECS: u64 = 20;
+
+/// Completes when the drain has gone on too long AND nothing is generating.
+///
+/// Both halves matter. Without the deadline the process waits forever on an idle stream; without
+/// the generating check it could exit into a live Metal eval, which is how this machine was once
+/// rebooted (BUGS.md BUG-001). So it waits for the signal, gives the drain its deadline, and then
+/// waits as long as it must for the GPU to be quiet — announcing itself so a five-minute wait is
+/// legible in the log rather than a mystery.
+async fn drain_deadline(sb: Arc<Switchboard>) {
+    // Only starts counting once shutdown has actually begun.
+    while !sb.is_shutting_down() {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(DRAIN_DEADLINE_SECS)).await;
+    let mut waited = 0u64;
+    while sb.generating.load(Ordering::SeqCst) != 0 {
+        if waited % 30 == 0 {
+            eprintln!(
+                "rozum gateway: shutdown is waiting on a live generation ({}s) — not forcing an \
+                 exit mid-Metal-eval (BUGS.md BUG-001)",
+                DRAIN_DEADLINE_SECS + waited
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        waited += 1;
+    }
+}
+
+/// Completes on SIGTERM/SIGINT, after flipping the gateway to "not ready"/// Completes on SIGTERM/SIGINT, after flipping the gateway to "not ready" and waiting a
 /// short grace so the load balancer deregisters this instance before axum stops
 /// accepting connections and drains the in-flight streams. Wired into
 /// `axum::serve(...).with_graceful_shutdown(...)`.
@@ -1197,9 +1230,29 @@ pub async fn serve_on(
         .with_state(state.clone());
 
     tracing::info!(addr = ?listener.local_addr().ok(), "rozum gateway listening");
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(state.sb.clone()))
-        .await;
+    // BOUND THE DRAIN. `with_graceful_shutdown` waits for every in-flight connection, and a
+    // long-lived stream — the phone chat's SSE, an agent holding keep-alive — never ends on its
+    // own, so the wait is unbounded. Measured 2026-08-13: the resident gateway took a shutdown
+    // signal at 20:54:56 and the next one started at 20:59:56 — the port was dead for five minutes
+    // while launchd (KeepAlive) could do nothing, because the old process had not exited yet. Four
+    // bench tasks failed against that hole in zero seconds each.
+    //
+    // The bound NEVER fires mid-generation. A hard exit during a live Metal eval is what rebooted
+    // this host through an IOGPU double-free (BUGS.md BUG-001), so a generation that is still
+    // running keeps the process alive and says so every 30s. What the deadline collects is the
+    // opposite case, and the common one: nothing computing, one socket someone forgot to close.
+    let sb_drain = Arc::clone(&state.sb);
+    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal(state.sb.clone()));
+    let result = tokio::select! {
+        r = server => r,
+        _ = drain_deadline(sb_drain) => {
+            eprintln!(
+                "rozum gateway: drain deadline ({DRAIN_DEADLINE_SECS}s) reached with nothing \
+                 generating — closing the connections that outlived the shutdown and exiting"
+            );
+            Ok(())
+        }
+    };
     if let Some(pid) = registered_pid {
         crate::share::remove_active_if_mine(pid);
     }

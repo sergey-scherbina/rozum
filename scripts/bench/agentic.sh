@@ -250,7 +250,6 @@ sys.stdout.write(p + "\n")   # echo added this; the callers depend on it
 bench_tasks_file() {
   echo "${ROZUM_BENCH_TASKS:-$(dirname "${BASH_SOURCE[0]}")/tasks.json}"
 }
-}
 
 setup_task() { # $1=task  $2=workdir — pre-create files for fix/debug
   case "$1" in
@@ -870,6 +869,21 @@ for spec in "${MODELS[@]}"; do
 
   for agent in "${AGENT_RUN[@]}"; do
     for task in "${TASK_LIST[@]}"; do
+      # IS THE GATEWAY STILL THERE? The readiness check above runs ONCE, before the loop, and a
+      # gateway can go away mid-run: measured 2026-08-13, the shared one took a shutdown signal
+      # after the fourth task and the remaining four each "failed" in ZERO SECONDS against a dead
+      # port. Those rows are not measurements — `pass=0 rc=2 0.0s` reads afterwards as "the model
+      # could not do it", which is the one thing this harness must never say by accident.
+      gw_back=0
+      for _ in $(seq 1 "${GW_RECOVER_SECS:-120}"); do
+        curl -s -m2 "$base/v1/models" >/dev/null 2>&1 && { gw_back=1; break; }
+        sleep 1
+      done
+      if [ "$gw_back" != 1 ]; then
+        echo "  ! gateway at $base stopped answering — abandoning the remaining tasks rather than"
+        echo "    recording zero-second failures against a dead port (see $glog)"
+        break 2
+      fi
       diff=${DIFF[$task]:-0}
       eff_timeout="$(effective_run_timeout "$agent" "$spec")"   # QW1: per-cell ceiling (driver/model-aware)
       work="$(mktemp -d /tmp/rozum-agentic-XXXXXX)"

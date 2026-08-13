@@ -47,7 +47,7 @@ use std::path::PathBuf;
 use crate::agents::{AgentBrief, live_agents};
 use crate::gateway_control::loading_models;
 use crate::coders::{CoderBrief, live_coders};
-use crate::projects::{ProjectBrief, list_projects, read_projects_dir};
+use crate::projects::{ProjectBrief, list_projects};
 use crate::sessions::{SessionBrief, live_sessions};
 
 /// A coherent snapshot of the models/gateway service.
