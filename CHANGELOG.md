@@ -1,5 +1,13 @@
 # Changelog
 
+## install-bins-clobbers-gateway — the installer published the CLI dispatcher over the engine
+Completed: 2026-08-13
+
+BUG-029. `scripts/install-bins.sh` installed the 56 MB `rozum-gateway`, then five minutes later
+published the 634 KB `rozum` dispatcher over the same path, leaving a binary that execs itself at
+the path six launchd jobs run — including the resident model. Fixed the name-pairing rule, bounded
+both exec-checks, and made the published path prove itself before any service is restarted.
+
 ## matrix-task-info-single-source — one source for the bench task definitions, and a switch to serve the two public routes from .ssc
 Completed: 2026-08-13
 
