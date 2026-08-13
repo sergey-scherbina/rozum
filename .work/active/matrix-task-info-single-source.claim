@@ -1,0 +1,6 @@
+feature/matrix-task-info-single-source 2026-08-13T15:29:04Z
+agent: claude-opus-5
+heartbeat: 2026-08-13T15:29:04Z
+status: in-progress
+done-so-far: measured the drift (5 of 6 prompts stale, 2 of 8 tasks missing entirely); single source designed
+next: add scripts/bench/tasks.json as the ONE source; gateway reads it; bench reads it; verify the bench emits byte-identical prompts
