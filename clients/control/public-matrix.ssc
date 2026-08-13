@@ -117,14 +117,46 @@ def rowMatches(header: List[String], row: List[String], agent: String, model: St
 // Quoting a number turns those into string comparisons, where 9 > 524.2 — which is why this
 // coerces rather than passing every field through as text. Measured against the Rust handler on
 // one real row: 14 of its fields are numeric and were arriving quoted.
-// A CSV field is a number when it parses as one. `toDouble` covers both integers and decimals,
-// so one check suffices — it used to emit `String as f64` and could not be used at all, which is
-// why this was two `toInt` calls around a dot until scalascript 9f89edf74.
+// A CSV field is a number when it parses as one — checked by ROUND-TRIP through `toInt`, not by
+// `toDouble`. `toDouble` looks like the tidier check and is wrong here: Rust prints `8.0_f64` as
+// "8", so `"8.0".toDouble.toString == "8.0"` is false and the field stayed a quoted string. Caught
+// by comparing every cell of every bench run against the Rust handler, not by reading — one cell
+// happened to have no such value.
+def isInt(s: String): Boolean =
+  val a = s
+  val b = s
+  a.toInt.toString == b
+
 def isNumeric(s: String): Boolean =
-  s.length > 0 && (s.toInt.toString == s || s.toDouble.toString == s)
+  if s.length == 0 then false
+  else if isInt(s) then true
+  else
+    val parts = s.split(".").toList
+    parts.length == 2 && isInt(parts(0)) && isInt(parts(1))
 
 def jsonScalar(s: String): String =
   if isNumeric(s) then s else jsonStringify(s)
+
+// The task definitions, read from the file the bench serves to the model. An unreadable file or an
+// unknown task answers the same SHAPE with nulls — the gateway does the same, and a console saying
+// "unknown" beats one confidently showing a task the model never saw.
+def benchTasksPath(): String =
+  envOrElse("ROZUM_BENCH_TASKS", "scripts/bench/tasks.json")
+
+def taskInfoUnknown(task: String): String =
+  "{\"label\":" + jsonStringify(task) + ",\"difficulty\":null,\"prompt\":null,\"expected\":null}"
+
+def taskInfoJson(task: String): String =
+  val path = benchTasksPath()
+  if exists(path) then
+    val doc = jsonParse(readFile(path))
+    doc.get("tasks") match
+      case Some(tasks) =>
+        tasks.get(task) match
+          case Some(entry) => jsonStringify(entry)
+          case None        => taskInfoUnknown(task)
+      case None => taskInfoUnknown(task)
+  else taskInfoUnknown(task)
 
 def rowToJson(header: List[String], row: List[String]): String =
   val pairs = header.zipWithIndex.map(hi =>
@@ -132,8 +164,12 @@ def rowToJson(header: List[String], row: List[String]): String =
   )
   "{" + pairs.toList.mkString(",") + "}"
 
+// Matches Rust's `text.lines()`, which the handler this replaces uses: a trailing newline does NOT
+// produce a final empty line. `split("\n")` does, so this dropped one character more than the Rust
+// answer — 1243 against 1242 — and the two were not equal even though the text read the same.
 def tailLines(text: String, n: Int): String =
-  val ls = text.split("\n").toList
+  val raw = text.split("\n").toList
+  val ls = if raw.length > 0 && raw(raw.length - 1) == "" then raw.dropRight(1) else raw
   val start = if ls.length > n then ls.length - n else 0
   ls.drop(start).mkString("\n")
 
@@ -151,7 +187,11 @@ def cellRoute(req: Request): String =
     val task  = q.get("task").getOrElse("")
     val sm    = safeModel(model)
     if safePathSeg(stamp) && safePathSeg(agent) && safePathSeg(task) && safePathSeg(sm) then
-      val tail = q.get("tail").map(s => s.toInt).getOrElse(120)
+      // 200, not 120: the PUBLIC route defaults differently from the authenticated one, which uses
+      // `default_tail()`. Two defaults for one idea in the same file — matched here to the public
+      // handler this replaces, since that is the observable behaviour. Found by comparing whole
+      // logs across runs: a 123-line log came back entire from Rust and capped from here.
+      val tail = q.get("tail").map(s => s.toInt).getOrElse(200)
       val capped = if tail > 3000 then 3000 else tail
       val rows = csvRows(benchResultsDir() + "/" + stamp + "/per-run.csv")
       if rows.length < 2 then jsonStringify(Map("cell" -> "", "agent_log" -> "", "verify_out" -> ""))
@@ -168,8 +208,11 @@ def cellRoute(req: Request): String =
         val agentLog = if exists(logPath) then jsonStringify(tailLines(readFile(logPath), capped)) else "null"
         val verifyOut = if exists(verPath) then jsonStringify(readFile(verPath)) else "null"
         val cellJson = hit.map(r => rowToJson(header, r.split(",").toList)).getOrElse("null")
-        // `triage_out` and `has_logs` are the Rust handler's, matched here because the console
-        // reads them. `task_info` is deliberately NOT here — see the note at the end of the file.
+        // `triage_out`, `has_logs` and `task_info` are the Rust handler's, matched here because
+        // the console reads them. `task_info` used to be missing on purpose: the gateway kept the
+        // task definitions in a compiled table and a second copy here would have drifted from it.
+        // It no longer does — `scripts/bench/tasks.json` is the one source both read, so this
+        // reads the same file the bench serves to the model.
         val triagePath = cellDir + "/triage.out"
         val triageOut = if exists(triagePath) then jsonStringify(readFile(triagePath)) else "null"
         val hasLogs = if exists(cellDir) then "true" else "false"
@@ -177,6 +220,7 @@ def cellRoute(req: Request): String =
           ",\"agent_log\":" + agentLog +
           ",\"verify_out\":" + verifyOut +
           ",\"triage_out\":" + triageOut +
+          ",\"task_info\":" + taskInfoJson(task) +
           ",\"has_logs\":" + hasLogs + "}"
     else badRequest("invalid stamp/agent/model/task segment")
   else forbidden()
