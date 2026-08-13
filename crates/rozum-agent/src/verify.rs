@@ -111,7 +111,13 @@ pub fn shell_lex(s: &str) -> Vec<String> {
                 quote = Some(c);
                 has = true;
             }
-            None if c.is_whitespace() => {
+            // A task is MARKDOWN, and its backticks fence the example rather than belong to it.
+            // Measured 2026-08-13 by nadia's contract corpus, on the matrix's own rpn prompt:
+            // `` `cargo run -- "3 4 + 5 *"` `` lexed its last argument as `3 4 + 5 *\`` — matching
+            // nothing — so the arity rule was silently inactive on the very task it was written
+            // for, and the model's own (wrong) list stood. Never a shell-safety question: every
+            // string this produces is quoted into a literal downstream (nadia:SPEC.md §3.1).
+            None if c == '`' || c.is_whitespace() => {
                 if has || !cur.is_empty() {
                     out.push(std::mem::take(&mut cur));
                     has = false;
@@ -725,5 +731,55 @@ mod tests {
         let p = repair_prompt("cargo test -q", "assertion failed: 4 + 4 = 7");
         assert!(p.contains("cargo test -q") && p.contains("4 + 4 = 7"), "{p}");
         assert!(p.contains("Do not explain"), "it must ask for a fix, not an explanation: {p}");
+    }
+}
+
+/// The gate's pure rules, read from the corpus every implementation reads.
+///
+/// `nadia:contract/gate-cases.json` is the contract (nadia:SPEC.md §3.1). The unit tests above are
+/// this crate's own; these are the ones the Scala 3 and ScalaScript legs answer from the same file,
+/// so a rule added once is checked three times instead of ported by hand — which is how BUG-026
+/// landed in one implementation and needed two more passes.
+///
+/// SKIPPED, loudly, when the sibling repository is not checked out: rozum's CI has no nadia, and a
+/// test that silently passes on a missing corpus would be worse than no test. nadia's own CI is
+/// where its absence is a failure.
+#[cfg(test)]
+mod contract_corpus {
+    use super::*;
+
+    fn corpus() -> Option<serde_json::Value> {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = here.join("../../../nadia/contract/gate-cases.json");
+        let text = std::fs::read_to_string(path.canonicalize().ok()?).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
+    fn strs(v: &serde_json::Value) -> Vec<String> {
+        v.as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn the_three_implementations_answer_one_corpus() {
+        let Some(c) = corpus() else {
+            eprintln!(
+                "SKIP contract corpus: ../nadia/contract/gate-cases.json not found — this check \
+                 needs the sibling repo (REPOS.md); nadia's own CI is where its absence fails"
+            );
+            return;
+        };
+        for case in c["shell_lex"].as_array().unwrap() {
+            let got = shell_lex(case["in"].as_str().unwrap());
+            assert_eq!(got, strs(&case["out"]), "{}", case["why"].as_str().unwrap());
+        }
+        for case in c["task_states"].as_array().unwrap() {
+            let got = task_states(case["task"].as_str().unwrap(), case["expect"].as_str().unwrap());
+            assert_eq!(got, case["out"].as_bool().unwrap(), "{}", case["why"].as_str().unwrap());
+        }
+        for case in c["task_argv_for"].as_array().unwrap() {
+            let got = task_argv_for(case["task"].as_str().unwrap(), case["joined"].as_str().unwrap());
+            let want = if case["out"].is_null() { None } else { Some(strs(&case["out"])) };
+            assert_eq!(got, want, "{}", case["why"].as_str().unwrap());
+        }
     }
 }
