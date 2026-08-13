@@ -85,11 +85,18 @@ def tokenMatches(e: Any, t: String): Boolean =
       tok == t && rev != "true"
     case _ => false
 
-def forbidden(): String =
-  jsonStringify(Map("error" -> "invalid or revoked token"))
+// The statuses match the Rust handlers these replace, measured against them rather than chosen:
+// a bad token is 403 on the matrix route and 410 on /view. Answering 200 with an error body — which
+// is all this lane could do before `Response` carried a status — turns a refusal into an OK for
+// anything that reads the code rather than the body.
+def forbidden(): Response =
+  Response(403, Map(), jsonStringify(Map("error" -> "invalid or revoked token")))
 
-def badRequest(msg: String): String =
-  jsonStringify(Map("error" -> msg))
+def badRequest(msg: String): Response =
+  Response(400, Map(), jsonStringify(Map("error" -> msg)))
+
+def ok(body: String): Response =
+  Response(200, Map("Content-Type" -> "application/json; charset=utf-8"), body)
 
 // ── /control/public/matrix/cell ────────────────────────────────────────────────────────────────
 // Find one cell in a matrix run: the per-run.csv row matching agent+model+task, plus the archived
@@ -177,7 +184,7 @@ def tailLines(text: String, n: Int): String =
 // `if !viewTokenOk(t)`. `build-rust` rejects a unary `!` on a call ("unsupported expression:
 // Term.ApplyUnary") while `run` accepts it, so the negated form compiles on one path only. Second
 // instance of that seam found while writing this file; the first was `join`.
-def cellRoute(req: Request): String =
+def cellRoute(req: Request): Response =
   val q = req.query
   val t = q.get("t").getOrElse("")
   if viewTokenOk(t) then
@@ -194,7 +201,7 @@ def cellRoute(req: Request): String =
       val tail = q.get("tail").map(s => s.toInt).getOrElse(200)
       val capped = if tail > 3000 then 3000 else tail
       val rows = csvRows(benchResultsDir() + "/" + stamp + "/per-run.csv")
-      if rows.length < 2 then jsonStringify(Map("cell" -> "", "agent_log" -> "", "verify_out" -> ""))
+      if rows.length < 2 then ok(jsonStringify(Map("cell" -> "", "agent_log" -> "", "verify_out" -> "")))
       else
         val header = rows(0).split(",").toList
         val hit = rows.drop(1).filter(r => r.length > 0)
@@ -216,12 +223,12 @@ def cellRoute(req: Request): String =
         val triagePath = cellDir + "/triage.out"
         val triageOut = if exists(triagePath) then jsonStringify(readFile(triagePath)) else "null"
         val hasLogs = if exists(cellDir) then "true" else "false"
-        "{\"cell\":" + cellJson +
+        ok("{\"cell\":" + cellJson +
           ",\"agent_log\":" + agentLog +
           ",\"verify_out\":" + verifyOut +
           ",\"triage_out\":" + triageOut +
           ",\"task_info\":" + taskInfoJson(task) +
-          ",\"has_logs\":" + hasLogs + "}"
+          ",\"has_logs\":" + hasLogs + "}")
     else badRequest("invalid stamp/agent/model/task segment")
   else forbidden()
 
@@ -236,16 +243,20 @@ def lastSegment(path: String): String =
 // The handler takes the PATH as a String, not a Request: that is the surface `route` binds to a
 // PREFIX. With a `Request => …` handler the same registration matches only the exact path, so
 // `/view/<token>` answered 404 while `/view/` answered 200 — measured, not guessed.
-def viewRoute(path: String): String =
-  val t = lastSegment(path)
+def viewRoute(req: Request): Response =
+  val t = lastSegment(req.path)
   if viewTokenOk(t) then
     val page = uccSiteDir() + "/index.html"
-    if exists(page) then readFile(page) else "<!doctype html><p>console not installed</p>"
-  else forbidden()
+    val body = if exists(page) then readFile(page) else "<!doctype html><p>console not installed</p>"
+    Response(200, Map("Content-Type" -> "text/html; charset=utf-8"), body)
+  else
+    // 410, not 403: the Rust route answers Gone for a token that is absent or revoked, and the
+    // difference is deliberate there — a link that USED to work reads better as Gone.
+    Response(410, Map(), jsonStringify(Map("error" -> "invalid or revoked token")))
 
 def main(): Unit =
   route("GET", "/control/public/matrix/cell", req => cellRoute(req))
-  route("GET", "/view/", p => viewRoute(p))
+  route("GET", "/view/", r => viewRoute(r))
   serve(8412)
 main()
 ```
