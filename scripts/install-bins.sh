@@ -98,14 +98,35 @@ publish() {
   mkdir -p "$(dirname "$dst")"
   cp "$src" "$dst.new.$$"
   chmod +x "$dst.new.$$"
+  # Bounded, because "does not exec" includes "never returns" — an unbounded check turns a bad
+  # binary into an install that hangs forever instead of one that fails.
   local rc=0
-  "$dst.new.$$" --help >/dev/null 2>&1 || rc=$?
+  timeout 20 "$dst.new.$$" --help >/dev/null 2>&1 || rc=$?
   if [ "$rc" -ne 0 ]; then
     rm -f "$dst.new.$$"
-    echo "FAIL: freshly built $what will not exec (rc=$rc) — NOT installing; $dst untouched" >&2
+    echo "FAIL: freshly built $what will not exec (rc=$rc$([ "$rc" = 124 ] && echo ', it hung')) — NOT installing; $dst untouched" >&2
     exit 1
   fi
+  # Keep what is being replaced until the REPLACEMENT is proven, not just the candidate.
+  local backup=""
+  if [ -f "$dst" ]; then backup="$dst.prev.$$"; cp -p "$dst" "$backup"; fi
   mv -f "$dst.new.$$" "$dst"
+
+  # The check above ran while the OLD binary was still in place, and on 2026-08-13 that is exactly
+  # why it passed: the staged copy was the `rozum` dispatcher, whose `--help` execs `rozum-gateway`
+  # — which was still the engine. The self-exec loop cannot exist until after the `mv`, so the
+  # PUBLISHED path has to be exercised too, with a timeout, because the failure is a hang and not
+  # an error. `timeout` reports 124, which is the whole point.
+  local prc=0
+  timeout 20 "$dst" --help >/dev/null 2>&1 || prc=$?
+  if [ "$prc" -ne 0 ]; then
+    if [ -n "$backup" ]; then mv -f "$backup" "$dst"; fi
+    echo "FAIL: $what at $dst does not exec after publishing (rc=$prc)$([ "$prc" = 124 ] && echo ' — it hung, which is what a binary execing itself looks like')" >&2
+    echo "      the previous binary is back in place; nothing was restarted" >&2
+    exit 1
+  fi
+  [ -n "$backup" ] && rm -f "$backup"
+
   echo "    $dst  ($before  ->  $after)"
   restart_owner "$dst"
 }
@@ -269,9 +290,18 @@ declared_pair() {
   if [ -n "$reg" ]; then
     # `rozum-ctrl` is the gateway binary under another name: the deploy's own decision, kept here
     # because it is a fact about THIS machine's paths, not about what the product declares.
-    [ "$have" = rozum-ctrl ] && have=rozum-gateway
+    #
+    # The rewrite is REMEMBERED, and the `rozum` exception below applies only when it happened.
+    # Without that, the exception also matched a path genuinely named `rozum-gateway`, and on
+    # 2026-08-13 a plain `install-bins.sh` published the 634 KB `rozum` dispatcher over the 56 MB
+    # engine that SIX launchd jobs exec — including the resident model. Nothing fell over only
+    # because every one of them was holding the old inode; the next restart would have found a
+    # binary that execs itself. This is the same mistake as 2026-08-08 with the sides swapped, so
+    # the fix is to stop encoding "these two names are interchangeable" at all.
+    local rewritten=0
+    [ "$have" = rozum-ctrl ] && { have=rozum-gateway; rewritten=1; }
     printf '%s' "$reg" | grep -q "\"program\": \"$have\"" || return 1
-    [ "$want" = "$have" ] || { [ "$want" = rozum ] && [ "$have" = rozum-gateway ]; } || return 1
+    [ "$want" = "$have" ] || { [ "$want" = rozum ] && [ "$rewritten" = 1 ]; } || return 1
     return 0
   fi
   case "$want:$have" in

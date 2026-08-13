@@ -43,6 +43,44 @@ fix is not "move the table somewhere .ssc can read it" — it is to stop having 
 knows these prompts and should emit them, and both the gateway and the .ssc slice should read what
 it emits. That also unblocks deleting the Rust handler, which is slice 1's remaining "done when".
 
+## BUG-029 — install-bins.sh published the CLI dispatcher over the engine six jobs exec
+
+- **Status:** FIXED 2026-08-13 (`declared_pair` no longer treats `rozum` and `rozum-gateway` as
+  interchangeable names; both exec-checks are bounded and the published path is checked too).
+- **Severity:** P1. A plain `scripts/install-bins.sh` left `~/.cargo/bin/rozum-gateway` as a binary
+  that execs itself. Six launchd jobs run that path — `gateway` (the resident model), `ucc-control`,
+  `assistant`, `assistant-groups`, `doctor`, `meeting-daemon` — so the next restart of any of them
+  would have hung. Nothing fell over at the time only because every one was holding the old inode.
+
+The install did the right thing and then undid it, five minutes apart:
+
+```
+==> building rozum-gateway (rozum, release)
+    /Users/sergiy/.cargo/bin/rozum-gateway  (2026-08-10 09:24  ->  2026-08-13 20:49)   # 56 MB engine
+==> building rozum (rozum-cli, debug)
+    /Users/sergiy/.cargo/bin/rozum          (2026-08-09 15:22  ->  2026-08-13 20:54)
+==> also /Users/sergiy/.cargo/bin/rozum-gateway (a launchd job execs this copy)
+    /Users/sergiy/.cargo/bin/rozum-gateway  (2026-08-13 20:53  ->  2026-08-13 20:54)   # 634 KB CLI
+```
+
+**Root cause.** `declared_pair` allowed `want=rozum` with `have=rozum-gateway`. That exception was
+written for `~/.rozum/bin/rozum-ctrl`, which the line above rewrites to `rozum-gateway` — but it
+also matched a path genuinely NAMED `rozum-gateway`. The binary split made the two names different
+programs (`rozum` = the dispatcher from `rozum-cli`, `rozum-gateway` = the engine from `rozum`), and
+after that the exception meant "publish the dispatcher over the engine". This is BUG-028's
+neighbour with the sides swapped: the same file already carries a comment about publishing the
+54 MB engine over the 627 KB dispatcher on 2026-08-08.
+
+**Why the existing exec-check passed.** `publish` execs the staged copy before the `mv`, and the
+staged copy was the dispatcher — whose `--help` execs `rozum-gateway`, which at that moment was
+still the engine. The check could not fail: the loop does not exist until the replacement lands.
+The published path is now exercised too, and both checks have a `timeout`, because "does not exec"
+includes "never returns" — an unbounded check turns a bad binary into an install that hangs.
+On failure the previous binary is restored and no service is restarted.
+
+**Found by** running the installer, not by reading it. The tell was `ls`: `rozum` and
+`rozum-gateway` the same 634936 bytes, and `rozum-gateway --help` never returning.
+
 ## BUG-028 — a binary built in a worktree dies when the worktree is removed
 
 - **Status:** FIXED 2026-08-08 (`scripts/install-bins.sh` refuses to install from a worktree).
