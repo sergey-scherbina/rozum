@@ -89,14 +89,25 @@ def tokenMatches(e: Any, t: String): Boolean =
 // a bad token is 403 on the matrix route and 410 on /view. Answering 200 with an error body — which
 // is all this lane could do before `Response` carried a status — turns a refusal into an OK for
 // anything that reads the code rather than the body.
-def forbidden(): Response =
-  Response(403, Map(), jsonStringify(Map("error" -> "invalid or revoked token")))
+// The content type is stated on EVERY JSON answer, including the error ones. Left unstated the
+// runtime guesses from the path and guessed `text/plain` for a body that is JSON — measured against
+// the Rust route, which answers `application/json` on all three. `charset` is omitted for the same
+// reason: this is a drop-in replacement, so its headers match rather than improve on the original.
+val JSON_CT: Map[String, String] = Map("Content-Type" -> "application/json")
 
+def forbidden(): Response =
+  Response(403, JSON_CT, jsonStringify(Map("error" -> "invalid or revoked token")))
+
+// The 400 body carries `ok: false` and the 403 body does NOT — an inconsistency in the Rust routes,
+// reproduced rather than tidied. A drop-in replacement that "fixes" a payload shape breaks whatever
+// already reads it, and finding out which is not this slice's job. Built as a literal so the key
+// ORDER matches too; a Map would order by its own rules.
 def badRequest(msg: String): Response =
-  Response(400, Map(), jsonStringify(Map("error" -> msg)))
+  val body = "{\"ok\":false,\"error\":" + jsonStringify(msg) + "}"
+  Response(400, JSON_CT, body)
 
 def ok(body: String): Response =
-  Response(200, Map("Content-Type" -> "application/json; charset=utf-8"), body)
+  Response(200, JSON_CT, body)
 
 // ── /control/public/matrix/cell ────────────────────────────────────────────────────────────────
 // Find one cell in a matrix run: the per-run.csv row matching agent+model+task, plus the archived
@@ -240,19 +251,57 @@ def lastSegment(path: String): String =
   val parts = path.split("/").toList
   if parts.length == 0 then "" else parts(parts.length - 1)
 
-// The handler takes the PATH as a String, not a Request: that is the surface `route` binds to a
-// PREFIX. With a `Request => …` handler the same registration matches only the exact path, so
-// `/view/<token>` answered 404 while `/view/` answered 200 — measured, not guessed.
+// A prefix route still receives the whole Request — the route is chosen before the handler runs and
+// `path` carries every segment, so the token is readable from it.
+//
+// The page served here is `view.html`, NOT the console's `index.html`: they are different pages, and
+// serving the wrong one answers 200 with 580KB of the wrong thing. Status parity does not notice
+// that, which is how it survived a round of checking.
+val HEAD_END: String = "</head>"
+
+// `split` drops the separators, so putting the tail back means re-inserting them. Only the first
+// occurrence is a split point for us; every later one is content and must survive verbatim.
+// Every concatenation here joins exactly TWO operands. A chain of three String-typed operands is
+// lowered to `format!(..) + String`, and `String + String` does not compile in Rust; two operands
+// become a single `format!` and do. The shape is dictated by the backend, not by taste.
+def joinFrom(parts: List[String], sep: String, from: Int): String =
+  if from >= parts.length then ""
+  else
+    val here = sep + parts(from)
+    val rest = joinFrom(parts, sep, from + 1)
+    here + rest
+
+def expiredPage(): String =
+  "<!doctype html><html><head><meta charset=utf-8><title>rozum \u00b7 link expired</title></head>" +
+  "<body style='font:16px system-ui;text-align:center;padding:60px;background:#0f1117;color:#c9d1d9'>" +
+  "This link is invalid or has been revoked.</body></html>"
+
 def viewRoute(req: Request): Response =
   val t = lastSegment(req.path)
   if viewTokenOk(t) then
-    val page = uccSiteDir() + "/index.html"
-    val body = if exists(page) then readFile(page) else "<!doctype html><p>console not installed</p>"
-    Response(200, Map("Content-Type" -> "text/html; charset=utf-8"), body)
+    val page = uccSiteDir() + "/view.html"
+    if exists(page) then
+      // The page has no other way to learn its token: it is injected as a script variable before
+      // </head>. Serving the file unpatched is a 200 carrying a console that cannot call anything.
+      val html = readFile(page)
+      val inject = "<script>window._VIEW_TOKEN='" + t + "';</script>"
+      // Insert before the FIRST </head>, which is what the Rust route does. Written with `split`
+      // and a hand-rolled join rather than indexOf/substring: on a String receiver the backend
+      // lowers `indexOf` to `.iter().position(…)` (String has no `iter`) and lowers `a + b` on two
+      // computed Strings to `String + String`, neither of which compiles. Measured, not assumed.
+      val parts = html.split(HEAD_END).toList
+      val patched =
+        if parts.length <= 1 then inject + html
+        else
+          val head = parts(0) + inject
+          val rest = joinFrom(parts, HEAD_END, 1)
+          head + rest
+      Response(200, Map("Content-Type" -> "text/html; charset=utf-8", "Cache-Control" -> "no-store"), patched)
+    else Response(404, Map("Content-Type" -> "text/plain; charset=utf-8"), "view.html not found")
   else
-    // 410, not 403: the Rust route answers Gone for a token that is absent or revoked, and the
-    // difference is deliberate there — a link that USED to work reads better as Gone.
-    Response(410, Map(), jsonStringify(Map("error" -> "invalid or revoked token")))
+    // 410, not 403: a link that USED to work reads better as Gone. The body is the same styled page
+    // the Rust route serves — an expired link must not answer with raw JSON.
+    Response(410, Map("Content-Type" -> "text/html; charset=utf-8"), expiredPage())
 
 def main(): Unit =
   route("GET", "/control/public/matrix/cell", req => cellRoute(req))
