@@ -1,6 +1,0 @@
-feature/bounded-drain 2026-08-13T20:30:38Z
-agent: claude-code
-heartbeat: 2026-08-13T20:30:38Z
-status: not-started
-done-so-far:
-next: bound the drain; never force-exit mid-Metal-eval (BUG-001 kernel panic)
