@@ -553,6 +553,13 @@ pub(crate) fn archive_matrix_cells(result_dir: &PathBuf) {
 
 /// Hardcoded task prompts and expected outputs matching agentic.sh's prompt_for().
 pub(crate) fn matrix_task_info(task: &str) -> serde_json::Value {
+    matrix_task_info_at(&bench_tasks_path(), task)
+}
+
+/// Split out so the tests can name the file they mean. They used to point
+/// `ROZUM_BENCH_TASKS` at it instead — one process-global variable, two tests, and cargo
+/// runs them in parallel: the pair passed by luck until it did not.
+fn matrix_task_info_at(path: &std::path::Path, task: &str) -> serde_json::Value {
     // Read, not matched: the table this replaced was a copy of the bench's prompts and had gone
     // stale in five of six entries. An unreadable file answers the same shape with nulls rather
     // than a stale truth — a console that says "unknown" is better than one that says something
@@ -560,7 +567,17 @@ pub(crate) fn matrix_task_info(task: &str) -> serde_json::Value {
     let unknown = || serde_json::json!({
         "label": task, "difficulty": null, "prompt": null, "expected": null
     });
-    let Ok(raw) = std::fs::read_to_string(bench_tasks_path()) else { return unknown() };
+    let Ok(raw) = std::fs::read_to_string(path.to_path_buf()) else {
+        // Answer nulls, but SAY SO once. The file is resolved relative to the process's working
+        // directory, so a console started somewhere else — or deployed before the file lands in
+        // its checkout — would otherwise serve empty prompts that look like real data.
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| eprintln!(
+            "control server: task definitions not readable at {} — /control/public/matrix/cell will \
+             answer null prompts (set ROZUM_BENCH_TASKS or start from the repo root)",
+            path.to_path_buf().display()));
+        return unknown();
+    };
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else { return unknown() };
     match doc.get("tasks").and_then(|t| t.get(task)) {
         Some(v) => v.clone(),
@@ -892,12 +909,11 @@ mod task_info_tests {
     fn every_bench_task_has_a_prompt_and_a_difficulty() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent().unwrap().parent().unwrap();
-        // SAFETY: single-threaded test process; the path is read once by matrix_task_info below.
-        unsafe { std::env::set_var("ROZUM_BENCH_TASKS", repo.join("scripts/bench/tasks.json")); }
+        let tasks = repo.join("scripts/bench/tasks.json");
         // The eight the bench's own DIFF table names — wordcount and multibug are the two that
         // used to answer `prompt: null`, which is what made this worth a test rather than a look.
         for task in ["greet", "build", "fix", "test", "debug", "rpn", "wordcount", "multibug"] {
-            let info = matrix_task_info(task);
+            let info = matrix_task_info_at(&tasks, task);
             assert!(info["prompt"].is_string(), "{task}: prompt is {}", info["prompt"]);
             assert!(!info["prompt"].as_str().unwrap().is_empty(), "{task}: empty prompt");
             assert!(info["difficulty"].is_number(), "{task}: difficulty is {}", info["difficulty"]);
@@ -908,8 +924,7 @@ mod task_info_tests {
     /// truth: a console saying "unknown" is better than one confidently showing the wrong task.
     #[test]
     fn a_missing_file_answers_nulls_not_a_panic() {
-        unsafe { std::env::set_var("ROZUM_BENCH_TASKS", "/nonexistent/tasks.json"); }
-        let info = matrix_task_info("rpn");
+        let info = matrix_task_info_at(std::path::Path::new("/nonexistent/tasks.json"), "rpn");
         assert!(info["prompt"].is_null());
         assert_eq!(info["label"], "rpn");
     }

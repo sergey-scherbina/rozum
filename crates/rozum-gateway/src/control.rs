@@ -70,8 +70,28 @@ use axum::{response::IntoResponse, routing::{delete, get, post, put}, Router};
         .route("/control/invite/info", get(invite_info_route))
         .route("/control/public/matrix", get(public_matrix_route))
         .route("/control/public/matrix/live", get(public_matrix_live_route))
-        .route("/control/public/matrix/cell", get(public_matrix_cell_route))
-        .route("/view/{token}", get(view_token_page_route));
+        ;
+    // ucc-ssc-backend: these two routes are served EITHER in-process (as they always were) OR by
+    // the .ssc program, chosen once here by `ROZUM_UCC_SSC_ORIGIN`.
+    //
+    // A SWITCH rather than a replacement on purpose — moving a route to another process adds a
+    // failure mode this console did not have (that process being down), so turning it on and
+    // turning it back off must cost the same: one variable and a restart. Unset ⇒ byte-for-byte
+    // the old behaviour.
+    //
+    // Chosen BEFORE registration, not layered over it: `.route()` on a path this router already
+    // has panics at startup, and that panic is invisible to the compiler.
+    let public = match std::env::var("ROZUM_UCC_SSC_ORIGIN").ok().filter(|v| !v.is_empty()) {
+        None => public
+            .route("/control/public/matrix/cell", get(public_matrix_cell_route))
+            .route("/view/{token}", get(view_token_page_route)),
+        Some(origin) => {
+            eprintln!("control server: /control/public/matrix/cell and /view/{{token}} → {origin} (.ssc)");
+            public
+                .route("/control/public/matrix/cell", get(ucc_ssc_proxy))
+                .route("/view/{token}", get(ucc_ssc_proxy))
+        }
+    };
     // Admin sub-router (require_auth + require_admin both applied).
     let admin = Router::new()
         .route("/control/admin/users", get(admin_users_route))
@@ -212,6 +232,41 @@ async fn spa_static_route(
         return StatusCode::NOT_FOUND.into_response();
     }
     serve_site_file(&path)
+}
+
+/// Forward one public read route to the .ssc server. Status, body and Content-Type are passed
+/// through; hop-by-hop headers are not, since this is a fresh request on a fresh connection.
+///
+/// An unreachable .ssc server answers 502 rather than falling back to the Rust handler: a silent
+/// fallback would make the switch untestable — it would look like it worked while serving the
+/// implementation it was supposed to replace.
+async fn ucc_ssc_proxy(req: axum::extract::Request) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(origin) = std::env::var("ROZUM_UCC_SSC_ORIGIN").ok().filter(|v| !v.is_empty()) else {
+        return (axum::http::StatusCode::BAD_GATEWAY, "ucc-ssc origin not configured").into_response();
+    };
+    let path_and_query = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let url = format!("{}{}", origin.trim_end_matches('/'), path_and_query);
+    match reqwest::Client::new().get(&url).send().await {
+        Err(e) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("ucc-ssc unreachable at {origin}: {e}"),
+        ).into_response(),
+        Ok(resp) => {
+            let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
+                .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+            let ctype = resp.headers().get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()).unwrap_or("application/json; charset=utf-8")
+                .to_string();
+            let body = resp.bytes().await.unwrap_or_default();
+            axum::response::Response::builder()
+                .status(status)
+                .header("Content-Type", ctype)
+                .header("Cache-Control", "no-store")
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        }
+    }
 }
 
 // ── Chat read/write endpoints (replaces ucc-web-server.py proxy logic) ───────────────────────────
