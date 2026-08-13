@@ -250,11 +250,22 @@ async fn shutdown_signal(sb: Arc<Switchboard>) {
     #[cfg(not(unix))]
     let term = std::future::pending::<()>();
 
-    tokio::select! {
-        _ = ctrl_c => {}
-        _ = term => {}
-    }
-    crate::obs::log_event(json!({ "event": "gateway_shutdown_signal" }));
+    // WHICH signal, and who was around to send it. On 2026-08-13 the resident gateway took a
+    // shutdown signal mid-request during a bench that was explicitly SHARING it, and the record
+    // said only "gateway_shutdown_signal" — enough to know it was signalled, not enough to name
+    // the sender. Three candidates were checked and cleared by reading code (the bench skips its
+    // stop path when sharing; `rozum launch` was on its reuse path, not takeover; launchd's job
+    // reported a clean exit), which is exactly the position a one-word event leaves you in.
+    let signal = tokio::select! {
+        _ = ctrl_c => "SIGINT",
+        _ = term => "SIGTERM",
+    };
+    crate::obs::log_event(json!({
+        "event": "gateway_shutdown_signal",
+        "signal": signal,
+        "ppid": std::os::unix::process::parent_id(),
+        "pid": std::process::id(),
+    }));
     sb.mark_shutting_down();
     tokio::time::sleep(Duration::from_secs(shutdown_grace_secs())).await;
 }
