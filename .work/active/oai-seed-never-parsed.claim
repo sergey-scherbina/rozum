@@ -1,7 +1,0 @@
-feature/oai-seed-never-parsed 2026-08-14T16:30:03Z
-agent: nadia-ucc
-heartbeat: 2026-08-14T16:30:03Z
-status: not-started
-note: OPERATOR DECISION 2026-08-14 — fix it (the entry named two options; "почини" picks wiring the seed).
-done-so-far:
-next: first prove the bench is unaffected (greedy ignores the seed), then wire it

@@ -112,16 +112,16 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   automatic — the operator's call. Spec: `docs/specs/incident-repro.md`.
 
 
-- [ ] **oai-seed-never-parsed** (small, but decide the policy first) — `/v1/chat/completions` drops
-  the client's `seed`: OpenAI defines it, `SamplingParams` carries the field, and **no wire dialect
-  parses it**. Found beside BUG-031, same shape, deliberately NOT fixed with it. The reason it needs
-  a decision rather than four lines: `apply_determinism` fills the seed from `ROZUM_SAMPLING_SEED`
-  only when unset, so honouring a client seed would let any OpenAI-dialect client override the
-  bench's determinism control. Today that comment ("a caller that genuinely sent its own seed keeps
-  it") describes a branch no HTTP client can reach — the only caller that sets a seed is the
-  function's own unit test. Either wire it and let the client win (matching the documented intent),
-  or keep dropping it and say so in the comment. Pick one; both beat the current state, where the
-  code and its comment disagree.
+- [x] **oai-seed-never-parsed — DONE 2026-08-14 as BUG-032.** `/v1/chat/completions` dropped the
+  client's `seed`: OpenAI defines it, `SamplingParams` carries the field, and no wire dialect
+  parsed it — so `apply_determinism`'s comment ("a caller that genuinely sent its own seed keeps
+  it") described a branch no HTTP client could reach; the only caller that ever set one was that
+  function's own unit test. It was filed separately from BUG-031 because it needed a decision, not
+  four lines: honouring a client seed lets an OpenAI-dialect client override `ROZUM_SAMPLING_SEED`,
+  the bench's determinism control. **The operator chose to wire it**, and the risk turned out to be
+  none — checked rather than assumed: the matrix forces greedy, `temperature = 0` takes the argmax
+  branch, and that branch never touches the RNG, so the bench's determinism never depended on a
+  seed. The comment is now true. See BUG-032.
 
 - [ ] **chain-per-model-executor-tools** (marginal, not urgent) — per-MODEL executor tool curation in the
   chain: a weaker link gets a smaller tool set than a strong one. Today the real levers are already pulled —

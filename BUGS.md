@@ -5,6 +5,37 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-032 — the OpenAI `seed` was never parsed, so the code's own comment described a branch nothing could reach
+
+- **Status:** FIXED 2026-08-14 (`OaiChatReq` declares `seed`; `OaiWire::into_internal` passes it;
+  parse test + the wire golden, which now prints the field it was also blind to).
+- **Severity:** P3 alone — reproducible sampling is a nice-to-have, and `/v1/chat/completions` is
+  not the endpoint the agents drive. It is filed because of the second half.
+
+`SamplingParams` has carried a `seed` field all along. **No wire dialect ever filled it.** The only
+place in the entire crate that set one was `apply_determinism`'s own unit test, so this comment —
+
+> `seed` only fills an unset seed so a caller that genuinely sent its own seed keeps it
+
+— described behaviour no HTTP client could produce. Code and comment disagreed, and the comment was
+the one that read like a promise.
+
+**The decision, because there was one to make.** Honouring a client seed means it now overrides
+`ROZUM_SAMPLING_SEED`, the bench's determinism control — which is why this was filed rather than
+folded into BUG-031. Checked before doing it: the matrix runs `ROZUM_FORCE_GREEDY=1`,
+`apply_determinism` then forces `temperature = 0`, and `sampler::sample` takes the argmax branch
+without touching the RNG at all. **Greedy decode does not consume a seed**, so the bench's
+determinism never depended on it. The operator chose to wire it (2026-08-14); the comment is now
+true.
+
+**Not extended to `/v1/responses`:** the Responses API does not define `seed`. Adding it there would
+invent a parameter rather than honour one.
+
+**Found the same way as BUG-031** — by the golden written for `plugin-wireprotocol`. With one
+correction worth keeping: that gate printed every sampling knob EXCEPT `seed`, so it could not have
+caught this on its own. The omission in the test mirrored the omission in the code, written the same
+day by the same person. A golden only catches what it prints.
+
 ## BUG-031 — `/v1/messages` threw away `top_p` and `top_k`, and gave the client the opposite of what it asked for
 
 - **Status:** FIXED 2026-08-14 (`AnthropicReq` declares both; `AnthropicWire::into_internal` passes
