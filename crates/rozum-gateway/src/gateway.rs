@@ -606,6 +606,7 @@ impl WireDialect for OaiWire {
     }
 
     fn into_internal(&mut self, _lease: &ChatLease) -> WireRequest {
+        log_unhandled_fields(Self::ENDPOINT, &self.req.unknown);
         WireRequest {
             messages: oai_messages_to_internal(&self.req.messages),
             tools: apply_tool_choice(
@@ -688,6 +689,7 @@ impl WireDialect for RespWire {
     }
 
     fn into_internal(&mut self, lease: &ChatLease) -> WireRequest {
+        log_unhandled_fields(Self::ENDPOINT, &self.req.unknown);
         // Trim codex's ~21 KB instructions to a short focused prompt for load-sensitive models
         // (gpt-oss) — the bisection-proven dominant breaker of tool delivery. Verbatim for 35B et al.
         let effective_instructions =
@@ -868,6 +870,7 @@ impl WireDialect for AnthropicWire {
     }
 
     fn into_internal(&mut self, _lease: &ChatLease) -> WireRequest {
+        log_unhandled_fields(Self::ENDPOINT, &self.req.unknown);
         WireRequest {
             messages: anthropic_messages_to_internal(self.req.system.as_ref(), &self.req.messages),
             tools: apply_tool_choice(

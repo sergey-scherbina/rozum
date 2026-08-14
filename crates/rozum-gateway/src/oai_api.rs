@@ -60,6 +60,10 @@ pub(crate) struct OaiChatReq {
     /// to stop at a marker generated straight past it.
     #[serde(default)]
     pub(crate) stop: Value,
+    /// Everything this gateway did NOT match. Not to act on — to be able to SAY it was ignored
+    /// (BUG-038); the seven parameter defects before it were all invisible for want of this.
+    #[serde(flatten)]
+    pub(crate) unknown: serde_json::Map<String, Value>,
 }
 
 #[derive(Deserialize, Default)]

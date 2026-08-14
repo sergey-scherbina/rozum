@@ -42,6 +42,9 @@ pub(crate) struct AnthropicReq {
     pub(crate) stop_sequences: Value,
     #[serde(default)]
     pub(crate) stream: Option<bool>,
+    /// See `OaiChatReq::unknown` (BUG-038).
+    #[serde(flatten)]
+    pub(crate) unknown: serde_json::Map<String, Value>,
 }
 
 #[derive(Deserialize)]

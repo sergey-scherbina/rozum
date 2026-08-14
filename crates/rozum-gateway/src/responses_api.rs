@@ -62,6 +62,11 @@ pub(crate) struct RespReq {
     /// The same vLLM/TGI extension the Chat dialect accepts, and for the same reason `top_k` is
     /// already here (BUG-036). Costs batching — see `OaiChatReq::repetition_penalty`.
     pub(crate) repetition_penalty: Option<f32>,
+    /// See `OaiChatReq::unknown` (BUG-038). This dialect is the one with open questions attached —
+    /// whether codex sends `previous_response_id` was unanswerable by reading, and this answers it
+    /// from real traffic.
+    #[serde(flatten)]
+    pub(crate) unknown: serde_json::Map<String, Value>,
 }
 
 /// The `effort` out of an OpenAI Responses `reasoning` object, lower-cased + validated.
@@ -673,4 +678,41 @@ pub(crate) async fn responses_collect(
         output_tokens,
     );
     axum::Json(body).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_fields_this_dialect_does_not_handle_are_captured_by_name() {
+        // BUG-038. The two open questions from the wire sweep — does codex send
+        // `previous_response_id`, does anyone send `store`/`metadata` — were unanswerable by
+        // reading the code, because an undeclared field left no trace. Now it leaves one, and the
+        // known fields must still parse exactly as before.
+        let req: RespReq = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "instructions": "be brief",
+            "input": "hi",
+            "temperature": 0.5,
+            "previous_response_id": "resp-abc",
+            "store": false,
+            "metadata": {"run": "7"},
+        }))
+        .unwrap();
+        assert_eq!(req.model.as_deref(), Some("m"), "known fields are unaffected by the capture");
+        assert_eq!(req.temperature, Some(0.5));
+        let mut names: Vec<&str> = req.unknown.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["metadata", "previous_response_id", "store"]);
+    }
+
+    #[test]
+    fn a_request_this_dialect_fully_understands_reports_nothing() {
+        let req: RespReq = serde_json::from_value(serde_json::json!({
+            "model": "m", "input": "hi", "stream": true,
+        }))
+        .unwrap();
+        assert!(req.unknown.is_empty(), "no news is the common case and must stay silent");
+    }
 }

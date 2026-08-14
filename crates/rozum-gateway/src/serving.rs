@@ -173,6 +173,73 @@ pub(crate) fn parse_text_format(text: &Value) -> Option<Value> {
     text.get("format").and_then(parse_format_object)
 }
 
+/// Report the request fields this gateway did not act on — once per novel shape.
+///
+/// **Why this exists.** Seven defects were closed on 2026-08-14 (BUG-031 … BUG-037) and every one
+/// had the same mechanism: `serde` drops a field no struct declares, in silence. The client gets a
+/// 200, the parameter does nothing, and nothing anywhere says so — not an error, not a log line.
+/// Each was found by eye, one at a time. This makes the class visible instead: whatever a client
+/// sends and this gateway ignores is named, with the endpoint, in `gateway.jsonl`.
+///
+/// **Once per shape, not once per request.** An agent sends the same request shape thousands of
+/// times an hour; logging each would bury the signal it exists to raise. The key is the sorted
+/// field list, so a NEW unhandled parameter — a client upgrading, a spec growing — is one new line.
+///
+/// It deliberately does not warn, refuse, or 400. Ignoring an unknown field is correct HTTP
+/// behaviour and some clients send bookkeeping fields on purpose (`store`, `metadata`, `user`); the
+/// defect was never the ignoring, it was the silence.
+pub(crate) fn log_unhandled_fields(endpoint: &'static str, unknown: &serde_json::Map<String, Value>) {
+    if unknown.is_empty() {
+        return;
+    }
+    let mut names: Vec<&str> = unknown.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    let shape = format!("{endpoint} {}", names.join(","));
+
+    static SEEN: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+        std::sync::Mutex::new(None);
+    let novel = {
+        let mut guard = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        let seen = guard.get_or_insert_with(std::collections::HashSet::new);
+        is_novel_shape(seen, shape, SHAPE_MEMORY)
+    };
+    if !novel {
+        return;
+    }
+
+    crate::obs::log_event(json!({
+        "event": "wire_fields_ignored",
+        "endpoint": endpoint,
+        "fields": names,
+    }));
+}
+
+/// How many distinct ignored-field shapes are remembered before this stops recording new ones.
+///
+/// A bound, because the memory is keyed by what a CLIENT sends: a caller with random field names
+/// would otherwise grow it forever. Real clients produce a handful of shapes.
+pub(crate) const SHAPE_MEMORY: usize = 256;
+
+/// Should this shape be reported? True exactly once per shape, and never once the memory is full.
+///
+/// Split out from [`log_unhandled_fields`] so the decision is testable without a log file: the
+/// "once" is the whole point of the feature, and a dedupe that quietly reports every time would
+/// bury the signal it exists to raise.
+pub(crate) fn is_novel_shape(
+    seen: &mut std::collections::HashSet<String>,
+    shape: String,
+    cap: usize,
+) -> bool {
+    if seen.contains(&shape) {
+        return false;
+    }
+    if seen.len() >= cap {
+        return false;
+    }
+    seen.insert(shape);
+    true
+}
+
 /// How many stop strings one request may carry.
 ///
 /// A bound, not a preference: every generated token is scanned against every stop string, so an
@@ -302,6 +369,28 @@ pub(crate) async fn poison_layer(req: axum::extract::Request, next: Next) -> Res
 #[cfg(test)]
 mod format_tests {
     use super::*;
+
+    #[test]
+    fn an_ignored_field_shape_is_reported_once_and_the_memory_is_bounded() {
+        // "Once" is the feature: an agent sends the same shape thousands of times an hour, and a
+        // line per request would bury the one thing this exists to surface — a NEW parameter a
+        // client started sending (BUG-038).
+        let mut seen = std::collections::HashSet::new();
+        assert!(is_novel_shape(&mut seen, "/v1/messages metadata".into(), SHAPE_MEMORY));
+        assert!(!is_novel_shape(&mut seen, "/v1/messages metadata".into(), SHAPE_MEMORY));
+        // A different shape on the same endpoint is news again.
+        assert!(is_novel_shape(&mut seen, "/v1/messages metadata,thinking".into(), SHAPE_MEMORY));
+        // …and so is the same shape on a different endpoint: which dialect ignored it matters.
+        assert!(is_novel_shape(&mut seen, "/v1/responses metadata".into(), SHAPE_MEMORY));
+
+        // Bounded, because the key comes from what a CLIENT sends: random field names must not
+        // grow this without limit.
+        let mut small = std::collections::HashSet::new();
+        assert!(is_novel_shape(&mut small, "a".into(), 2));
+        assert!(is_novel_shape(&mut small, "b".into(), 2));
+        assert!(!is_novel_shape(&mut small, "c".into(), 2), "full memory stops recording");
+        assert!(!is_novel_shape(&mut small, "a".into(), 2), "and still says no to a known one");
+    }
 
     #[test]
     fn both_openai_dialects_yield_the_same_schema_from_their_own_nesting() {
