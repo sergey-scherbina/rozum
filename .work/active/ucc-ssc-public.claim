@@ -1,6 +1,6 @@
 feature/ucc-ssc-public 2026-08-08T17:13:53Z
 agent: claude-opus-5
-heartbeat: 2026-08-14T15:54:20Z
+heartbeat: 2026-08-14T21:38:22Z
 status: blocked
 done-so-far: slice 1 matches the Rust routes on ALL 1884 cells present on disk (status + every field), and /view matches byte-for-byte on a live and a revoked token, headers included. Commit 05e70a5 fixed four gaps in /view that status-parity had hidden: it served index.html instead of view.html (580KB vs 27KB, both 200), never injected window._VIEW_TOKEN (a 200 carrying a console that could not call anything), answered 200 instead of 404 for a missing file, and answered an expired link with raw JSON instead of the styled page. Also aligned Content-Type on every JSON answer (unstated, the runtime guessed text/plain for a JSON body) and put `ok: false` back in the 400 body.
 next: the switch lives in the gateway on branch feature/matrix-task-info-single-source (dc8b029): ROZUM_UCC_SSC_ORIGIN picks which implementation registers the two routes; unset = today's behaviour exactly, unreachable .ssc = 502 (never a silent fallback to Rust). Both branches are committed and unmerged, and NOTHING live has been switched — the deployment decisions (install the binary, set the variable, supervise the .ssc process) are the operator's.
@@ -50,6 +50,29 @@ FILED 2026-08-14: the build blocker had NEVER BEEN REPORTED. Their INBOX held fi
   `m=[mlx-community%3AQwen3.5-4B-MLX-4bit] q=[a+b%20c]`. A String-returning handler still compiles
   under the broken lowering, which is what made the measurement possible at all today.
   SO: three upstream blockers, not two. All three now visible to them.
+UPSTREAM 2026-08-14 — TWO OF THE THREE BLOCKERS ARE FIXED, and the slice now builds from their
+  UNMODIFIED main. Both reports filed this morning were routed to their BUGS.md and closed the
+  same day: `route-handler-lowered-to-string` (fixed-in b34f10931, from my pushed branch but
+  REVIEWED rather than merged on trust — they made it read the handler def's declared return type
+  and keep the String surface when it cannot prove otherwise) and
+  `query-not-percent-decoded-on-build-rust`. Both carry a new gate,
+  `tests/e2e/rust-http-lane-parity-gate.sh`. Three older ones are `fixed` too: indexof-on-string,
+  concat-list-element-with-toplevel-val, toint-on-a-non-integer.
+  MEASURED, not read off a status field, on a toolchain staged from their main (31df9f2bb225,
+  digest == tree, cache MISS so a real build):
+    - the repro that failed with E0308 now builds, exit 0
+    - the wire answer changed: m=[mlx-community:Qwen3.5-4B-MLX-4bit] q=[a b c]
+      (was m=[mlx-community%3AQwen3.5-4B-MLX-4bit] q=[a+b%20c])
+    - **clients/control/public-matrix.ssc itself builds, exit 0, 1,439,280 bytes**, and the binary
+      answers 403 to /control/public/matrix/cell?t=bogus — the status-carrying behaviour works on
+      the shipping lane for the first time.
+  THEY FILED ONE OF THEIR OWN off mine: `rust-inline-route-handler-is-typed-as-a-string-handler`
+  (open) — a lambda whose body CONSTRUCTS the Response inline is still typed as a String handler.
+  It does not touch this slice: both routes use the delegating form `req => cellRoute(req)`, which
+  is what the repro used and what now compiles.
+  DEBT NOW COLLECTABLE, because the defects it was written around are fixed: isInt's two local
+  copies can go, and viewRoute's split + hand-rolled join + strictly-two-operand concatenation can
+  become ordinary code again. Not done here — this was a status check, not a rewrite.
 blocker-before-any-switch: the .ssc server binds ALL interfaces (`*:8412`) while the Rust
   console binds `127.0.0.1`. Reachable from the LAN only because the host firewall refuses
   the connection today — that is not the protection to rely on. `serve(port)` must take a
