@@ -1,0 +1,6 @@
+feature/anthropic-sampling-knobs 2026-08-14T15:59:29Z
+agent: nadia-ucc
+heartbeat: 2026-08-14T15:59:29Z
+status: not-started
+done-so-far:
+next: BUG-031 — /v1/messages drops top_p/top_k; add the fields, wire them, regenerate the golden (a DELIBERATE diff this time)
