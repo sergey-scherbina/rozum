@@ -1,0 +1,6 @@
+feature/stop-sequences 2026-08-14T18:16:58Z
+agent: nadia-ucc
+heartbeat: 2026-08-14T18:16:58Z
+status: not-started
+done-so-far:
+next: BUG-037 — stop sequences absent from SamplingParams entirely; implement in the shared consume_tokens with hold-back, wire OAI stop + Anthropic stop_sequences
