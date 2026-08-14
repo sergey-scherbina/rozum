@@ -166,19 +166,16 @@ const KV_DTYPE_BYTES: u64 = 2;
 pub fn kv_bytes_per_position(cfg: &serde_json::Value) -> Option<u64> {
     let c = cfg.get("text_config").unwrap_or(cfg);
     let n_layers = c.get("num_hidden_layers")?.as_u64()?;
-    // Hybrid: every `full_attention_interval`-th layer is full attention.
-    // Dense models omit it -> all layers hold KV.
-    let interval = c
-        .get("full_attention_interval")
+    let full_attn_layers = full_attention_layers(c, n_layers);
+    // GQA models state their KV heads; a plain multi-head model omits the field, and there every
+    // attention head has its own KV. Without this fallback such a config yields no estimate at all
+    // and the caller drops to a coarse weights-based heuristic — the CLI's copy of this math had
+    // the fallback and the shared one did not, which is the sort of difference that only shows up
+    // as "the preflight said a different number than the gate".
+    let n_kv = c
+        .get("num_key_value_heads")
         .and_then(|v| v.as_u64())
-        .filter(|&i| i > 0)
-        .unwrap_or(1);
-    let full_attn_layers = if interval > 1 {
-        n_layers / interval
-    } else {
-        n_layers
-    };
-    let n_kv = c.get("num_key_value_heads")?.as_u64()?;
+        .or_else(|| c.get("num_attention_heads").and_then(|v| v.as_u64()))?;
     let head_dim = c
         .get("head_dim")
         .and_then(|v| v.as_u64())
@@ -188,6 +185,38 @@ pub fn kv_bytes_per_position(cfg: &serde_json::Value) -> Option<u64> {
             (heads > 0).then(|| hidden / heads)
         })?;
     Some(2 * full_attn_layers * n_kv * head_dim * KV_DTYPE_BYTES)
+}
+
+/// How many of a model's layers hold a context-sized KV cache.
+///
+/// Two spellings, and the ORDER matters. `layer_types` is the explicit list — one entry per layer,
+/// naming each — and it is where transformers is heading; `full_attention_interval` is the older
+/// shorthand ("every n-th layer"). A config carrying only the list read through the shorthand alone
+/// answers "every layer", which for Qwen3.5-4B would be 32 instead of 8: a **4× over-estimate of
+/// the KV cache**, and this number feeds the residency gate, so the gate would refuse a load that
+/// fits and the operator would be told the host is full when it is not.
+///
+/// Neither present ⇒ a dense model, where every layer attends.
+fn full_attention_layers(c: &serde_json::Value, n_layers: u64) -> u64 {
+    if let Some(types) = c.get("layer_types").and_then(|v| v.as_array()) {
+        // An empty list is not an answer, and neither is one that names no full-attention layer:
+        // a model with zero KV is not a thing, so fall through rather than return 0 bytes.
+        let full = types
+            .iter()
+            .filter(|v| v.as_str() == Some("full_attention"))
+            .count() as u64;
+        if full > 0 {
+            return full;
+        }
+    }
+    match c
+        .get("full_attention_interval")
+        .and_then(|v| v.as_u64())
+        .filter(|&i| i > 1)
+    {
+        Some(interval) => (n_layers / interval).max(1),
+        None => n_layers,
+    }
 }
 
 /// Activation + cache reserve added on top of weights + KV, tied to the **real bounds**
@@ -479,6 +508,50 @@ mod tests {
         assert_eq!(kv_bytes_per_position(&dense), Some(114_688));
         // Missing fields -> None.
         assert_eq!(kv_bytes_per_position(&serde_json::json!({})), None);
+        // Multi-head (no GQA): the field is absent and every attention head holds its own KV.
+        // 2*4*16*64*2 = 16384.
+        let mha = serde_json::json!({
+            "num_hidden_layers": 4, "num_attention_heads": 16, "head_dim": 64
+        });
+        assert_eq!(kv_bytes_per_position(&mha), Some(16_384));
+    }
+
+    #[test]
+    fn an_explicit_layer_type_list_is_read_and_beats_the_interval() {
+        // The shape of the model that actually runs here (Qwen3.5-4B): 32 layers, every 4th
+        // full attention, and the config carries BOTH spellings. Both must give 8 layers:
+        // 2*8*4*256*2 = 32768 bytes per position (≈8.6 GB of KV at the model's full 262k
+        // context, ≈1.1 GB at 32k — the numbers the admission gate reserves on).
+        let types: Vec<&str> = (0..32)
+            .map(|i| if i % 4 == 3 { "full_attention" } else { "linear_attention" })
+            .collect();
+        let both = serde_json::json!({
+            "text_config": {
+                "num_hidden_layers": 32, "full_attention_interval": 4, "layer_types": types,
+                "num_key_value_heads": 4, "head_dim": 256
+            }
+        });
+        assert_eq!(kv_bytes_per_position(&both), Some(32_768));
+
+        // A config with ONLY the list — where transformers is heading. Read through the
+        // interval alone this answers "all 32 layers": a 4× over-estimate of the KV cache,
+        // fed straight into the residency gate, which would then refuse a load that fits.
+        let list_only = serde_json::json!({
+            "text_config": {
+                "num_hidden_layers": 32, "layer_types": types,
+                "num_key_value_heads": 4, "head_dim": 256
+            }
+        });
+        assert_eq!(kv_bytes_per_position(&list_only), Some(32_768));
+
+        // A list naming no full-attention layer is not an answer — fall through to the
+        // interval (here absent ⇒ dense) rather than report a model with no KV at all.
+        let empty_list = serde_json::json!({
+            "num_hidden_layers": 4,
+            "layer_types": ["linear_attention", "linear_attention", "linear_attention", "linear_attention"],
+            "num_key_value_heads": 4, "head_dim": 256
+        });
+        assert_eq!(kv_bytes_per_position(&empty_list), Some(2 * 4 * 4 * 256 * 2));
     }
 
     #[test]

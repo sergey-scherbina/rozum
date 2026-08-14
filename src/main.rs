@@ -9247,28 +9247,21 @@ fn kv_cache_bytes(model_id: &str, n_ctx: u32) -> Option<u64> {
     kv_cache_bytes_from_config(&cached_config_json(model_id)?, n_ctx)
 }
 
-/// Pure KV-cache math, split out so it can be unit-tested without the HF cache.
+/// KV-cache bytes at `n_ctx`, from the shared per-position math.
+///
+/// This used to be a second implementation of that math, and the two had already diverged: only
+/// this copy read `layer_types`, so the copy the RESIDENCY GATE uses would have over-counted a
+/// config that carries the list without the interval. The arithmetic is a property of the model
+/// architecture, not of an engine, so there is one of it now
+/// (`rozum_models::model_source::kv_bytes_per_position`).
+///
+/// What is deliberately NOT shared is the surrounding footprint: `runtime_footprint_bytes` below
+/// adds ~5% for candle/Metal scratch, while the MLX-side estimate reserves the MLX buffer cache
+/// plus a prefill spike (~5.5 GiB, smmr-D-calibrated). Those numbers describe two different
+/// runtimes, and merging them would refuse loads that fit.
 #[cfg(feature = "mistralrs")]
 fn kv_cache_bytes_from_config(cfg: &serde_json::Value, n_ctx: u32) -> Option<u64> {
-    // Vision/omni checkpoints nest the LM under `text_config`; dense models are flat.
-    let t = cfg.get("text_config").unwrap_or(cfg);
-    let u = |k: &str| t.get(k).and_then(|v| v.as_u64());
-    let num_layers = u("num_hidden_layers")?;
-    let kv_heads = u("num_key_value_heads").or_else(|| u("num_attention_heads"))?;
-    let head_dim = u("head_dim").or_else(|| Some(u("hidden_size")? / u("num_attention_heads")?))?;
-    // How many layers keep a context-sized KV cache.
-    let full_layers = match t.get("layer_types").and_then(|v| v.as_array()) {
-        Some(types) => types
-            .iter()
-            .filter(|v| v.as_str() == Some("full_attention"))
-            .count() as u64,
-        None => match u("full_attention_interval") {
-            Some(interval) if interval > 0 => num_layers / interval,
-            _ => num_layers, // dense model: every layer attends
-        },
-    };
-    const KV_DTYPE_BYTES: u64 = 2; // bf16 keys + values
-    Some(2 * full_layers * kv_heads * head_dim * KV_DTYPE_BYTES * n_ctx as u64)
+    rozum::model_source::kv_bytes_per_position(cfg).map(|per| per.saturating_mul(n_ctx as u64))
 }
 
 /// Estimate resident RAM (bytes) to run `model_id` at `n_ctx`: weights + a
