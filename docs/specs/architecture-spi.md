@@ -33,7 +33,7 @@ doubles. Selection is project-owned via `BackendRegistry` / `BackendConfig` /
 servers and in-process tools share one seam. **Action: document; land the MCP
 adapter so "rozum's own tools" and "external tools" are one SPI.**
 
-### Agent dialect — wire protocols (MAPPED, no trait — see Decisions)
+### Agent dialect — wire protocols (mapped; the SPINE behind them is a seam — see Decisions)
 
 The agent-facing wire format: OpenAI Chat (`/v1/chat/completions`), OpenAI Responses
 (`/v1/responses`, Codex), Anthropic Messages (`/v1/messages`). **Investigated for a
@@ -158,7 +158,16 @@ by either — call it out explicitly so it doesn't silently re-tangle.
   tangles, only one was real: the model-tool-format dispatch *was* scattered (extracted
   Stage 2 → `ToolDialect`); the agent-dialect layer turned out *already factored* (Stage 3
   → mapped, not extracted). Rejected: a uniform plugin pass (redundant where SPIs exist).
-- **Agent dialect: a map, not a `WireProtocol` trait.** Investigated (Stage 3). The
+- **Agent dialect: a map, not a `WireProtocol` trait — PARTLY SUPERSEDED 2026-08-14** (operator
+  override; `docs/specs/wire-dialect-seam.md`). Two thirds of the reasoning below held up and are
+  still honoured: the typed extractors and the SSE sequences were NOT abstracted. What this
+  paragraph missed is what sits *between* parse and serialize — lease, auto-context, elision note,
+  token estimate, `ChatRequest`, loop-breaker, metering, generation timeout, stream/collect branch.
+  That spine was written three times and had already drifted (`/v1/messages` accepts no `top_p` or
+  `top_k`, both in its own API), so it is now `trait WireDialect` + `serve_wire`. Measured cost: +44
+  lines of code and one indirection; gate: a byte-level golden frozen before the move. The original
+  call, kept because its two live objections are why the seam stops where it does:
+- **(original, Stage 3)** Investigated. The
   gateway is already at a clean per-route boundary — named per-dialect `*_to_internal`
   parse fns + `*_sse_stream` serializers + thin handlers, all converging on
   `ChatRequest`/`ChatEvent`. A unifying trait would force uniformity over genuinely
@@ -195,7 +204,7 @@ by either — call it out explicitly so it doesn't silently re-tangle.
   union (`serving::parse_tool_calls`) — robust across dialects, not per-family; the dialect
   owns only render + the envelope flag (what actually varies). Adding a model family's tool
   format = one `ToolDialect` impl + one arm in `dialect_for`.
-- **Stage 3 (`WireProtocol`) — DONE as a map, trait rejected.** Investigated the gateway
+- **Stage 3 (`WireProtocol`) — DONE as a map, trait rejected; the SPINE extracted 2026-08-14 (`wire-dialect-seam.md`).** Investigated the gateway
   wire layer for a trait extraction; found it already factored at a clean per-route boundary
   (named per-dialect parse + serialize fns + thin handlers converging on
   `ChatRequest`/`ChatEvent`). The stale module doc claimed "two dialects" (there are three —

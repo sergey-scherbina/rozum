@@ -12,21 +12,26 @@
 //!
 //! | Dialect | Route | Request | Parse (wire→internal) | Serialize (internal→wire) | Handler |
 //! |---|---|---|---|---|---|
-//! | OpenAI Chat | `POST /v1/chat/completions` | `OaiChatReq` | `oai_messages_to_internal` / `oai_tools_to_internal` | `oai_sse_stream` / `oai_chunk` | `oai_chat_handler` |
-//! | OpenAI Responses (Codex) | `POST /v1/responses` | `Value` | `responses_input_to_internal` / `responses_tools_to_internal` (+ `codex_lean_keep` tool policy) | `responses_sse_stream` / `responses_collect` | `responses_handler` |
-//! | Anthropic Messages | `POST /v1/messages` | `AnthropicMsg` | `anthropic_messages_to_internal` / `anthropic_tools_to_internal` | `anthropic_sse_stream` | `anthropic_handler` |
+//! | OpenAI Chat | `POST /v1/chat/completions` | `OaiChatReq` | `oai_messages_to_internal` / `oai_tools_to_internal` | `oai_sse_stream` / `oai_chunk` | `OaiWire` |
+//! | OpenAI Responses (Codex) | `POST /v1/responses` | `RespReq` | `responses_input_to_internal` / `responses_tools_to_internal` (+ `codex_lean_keep` tool policy) | `responses_sse_stream` / `responses_collect` | `RespWire` |
+//! | Anthropic Messages | `POST /v1/messages` | `AnthropicReq` | `anthropic_messages_to_internal` / `anthropic_tools_to_internal` | `anthropic_sse_stream` | `AnthropicWire` |
 //!
 //! Cross-cutting, owned by neither dialect: `chat_or_loopbreak` / `detect_stuck_loop`
 //! (loop-breaker), `synthetic_stop_stream`, `parse_response_format` (structured output),
 //! `parse_*_tool_choice` (tool-choice normalization). `GET /v1/models`, `/health`, `/ready`,
 //! `/stats`, `/control/*` are non-chat endpoints.
 //!
-//! **Why a map and not a `WireProtocol` trait:** the layer is already at a clean per-route
-//! boundary — named per-dialect parse + serialize fns + thin handlers. A unifying trait would
-//! fight genuinely different typed extractors (`OaiChatReq` vs `Value` vs `AnthropicMsg`) and
-//! different SSE event sequences, forcing either looser request validation (a behaviour change)
-//! or a fat trait that adds indirection without removing complexity — net-negative on this
-//! matrix-critical path. The legibility win is this accurate map; see the spec's Decisions.
+//! **A map AND a seam, and where the line between them is** (`plugin-wireprotocol`, operator
+//! override 2026-08-14 of the Stage-3 "map, not trait" call). The two objections that rejected a
+//! trait still hold and are still honoured: each dialect keeps its OWN typed extractor, so request
+//! validation is untouched, and each keeps its own SSE sequence, so no dialect is bent into another
+//! one's shape. What the earlier investigation did not weigh is what sits BETWEEN parse and
+//! serialize — lease, auto-context fit, elision note, token estimate, `ChatRequest`, loop-breaker,
+//! metering, generation timeout, stream/collect branch. That spine was written three times, and it
+//! had already drifted: `/v1/messages` accepts no `top_p` or `top_k`, which its own API defines.
+//! `trait WireDialect` + `serve_wire` hold it once; the dialects hold what genuinely differs.
+//! Cost, measured: +44 lines of code and one indirection. Gate: `src/testdata/wire-golden.txt`,
+//! frozen before the move and byte-identical after.
 //!
 //! Bind address is always `127.0.0.1`. Auth is optional bearer token via
 //! `ROZUM_GATEWAY_TOKEN`. Cancel propagates from client disconnect.
@@ -71,7 +76,7 @@ use crate::anthropic_api::*;
 use crate::responses_api::*;
 
 use crate::backend::{
-    ChatBackend, ChatEvent, ChatRequest, 
+    ChatBackend, ChatEvent, ChatRequest, ChatStream, Message,
     ModelResult, SamplingParams, ToolDef,
 };
 
@@ -448,30 +453,80 @@ pub fn claude_model_alias(model_spec: &str) -> String {
 
 
 
-async fn oai_chat_handler(
-    State(state): State<GatewayState>,
-    axum::Json(req): axum::Json<OaiChatReq>,
-) -> Response {
-    tracing::debug!(
-        model = req.model.as_deref().unwrap_or("?"),
-        msgs = req.messages.len(),
-        tools = req.tools.len(),
-        stream = req.stream.unwrap_or(false),
-        "POST /v1/chat/completions"
-    );
+// ─── The wire seam ────────────────────────────────────────────────────────────
+
+/// What a dialect produces once its OWN extractor has parsed the body: the internal request, minus
+/// everything the gateway does to it afterwards.
+pub(crate) struct WireRequest {
+    pub(crate) messages: Vec<Message>,
+    pub(crate) tools: Vec<ToolDef>,
+    pub(crate) sampling: SamplingParams,
+}
+
+/// One agent-facing wire dialect — OpenAI Chat, OpenAI Responses, Anthropic Messages.
+///
+/// **What this is NOT.** It is not an abstraction over the request bodies: each dialect keeps its
+/// own typed extractor (`OaiChatReq` / `RespReq` / `AnthropicReq`), so axum's validation is
+/// unchanged, and it is not an abstraction over the SSE sequences — `respond` hands back a finished
+/// `Response` and each impl calls its own serializer, whose bytes differ per dialect by design.
+/// Both of those were the reason `architecture-spi.md` rejected a `WireProtocol` trait in Stage 3,
+/// and both objections still hold; this trait deliberately does not cross either line.
+///
+/// **What it removes** is the third copy of the orchestration between parse and serialize: acquire
+/// the lease, fit the prompt to the context window, attach the elision note, estimate tokens, build
+/// the `ChatRequest`, run the loop-breaker, meter, apply the generation timeout, branch on `stream`.
+/// That spine was written three times and had already drifted (`/v1/messages` accepts no `top_p` or
+/// `top_k`), and every cross-cutting change to it — auto-context, metering, the generation timeout —
+/// had to be made three times or be wrong in one place. Adding a dialect is now: one extractor, one
+/// impl, one route.
+trait WireDialect: Sized {
+    /// The route, as it appears in the error events and the request metrics.
+    const ENDPOINT: &'static str;
+    /// The `type` this dialect gives an error body. OpenAI says `backend_error`; Anthropic's own
+    /// error envelope says `api_error`, and a client that switches on it would notice the
+    /// difference — so it stays a property of the dialect.
+    const ERROR_KIND: &'static str;
+
+    /// The model this request asked for, if it named one.
+    fn model_hint(&self) -> Option<&str>;
+
+    /// Did the client ask for SSE? (Absent `stream` is non-streaming JSON in both specs.)
+    fn stream_mode(&self) -> bool;
+
+    /// Parse into the internal request. Takes the lease because two dialects need the RESOLVED
+    /// model id to decide what to send (codex-lean's instruction trim, its reasoning floor), and
+    /// takes `&mut self` because a dialect may derive state here that its serializer needs later
+    /// (the Responses `apply_patch` re-route).
+    fn into_internal(&mut self, lease: &ChatLease) -> WireRequest;
+
+    /// Serialize the answer — SSE or a single JSON body, this dialect's own shape.
+    ///
+    /// Returns a future rather than being `async fn` so the `+ Send` bound can be stated: axum
+    /// requires a `Send` handler future, and an `async fn` in a trait does not promise one.
+    fn respond(
+        self,
+        chat_stream: ChatStream,
+        cancel: CancellationToken,
+        model: String,
+        lease: ChatLease,
+    ) -> impl std::future::Future<Output = Response> + Send;
+}
+
+/// Everything that happens to a chat request between "parsed" and "serialized", once.
+async fn serve_wire<D: WireDialect>(state: GatewayState, mut dialect: D) -> Response {
     // Hold a lease for the whole request so a `switch` can't swap the model
     // mid-flight; parks here if a swap is draining, lazily reloads if unloaded.
-    let lease = match state.sb.enter(req.model.as_deref()).await {
+    let lease = match state.sb.enter(dialect.model_hint()).await {
         Ok(l) => l,
         Err(resp) => return resp,
     };
-    let messages = oai_messages_to_internal(&req.messages);
-    let tools = apply_tool_choice(
-        oai_tools_to_internal(&req.tools),
-        &parse_oai_tool_choice(&req.tool_choice),
-    );
 
-    // Approximate context overflow check
+    let WireRequest {
+        messages,
+        tools,
+        sampling,
+    } = dialect.into_internal(&lease);
+
     // gateway-auto-context: fit the prompt to the window (drop oldest turns, then compress tool
     // schemas) instead of erroring, then attach an elision note for the dropped turns.
     let ctx_win = lease.backend.context_window();
@@ -487,33 +542,26 @@ async fn oai_chat_handler(
     let chat_req = ChatRequest {
         messages,
         tools,
-        sampling: apply_determinism_env(SamplingParams {
-            temperature: req.temperature,
-            top_p: req.top_p,
-            max_tokens: req.max_tokens,
-            top_k: req.top_k,
-            response_schema: parse_response_format(&req.response_format),
-            ..Default::default()
-        }),
+        sampling: apply_determinism_env(sampling),
         cancel: cancel.clone(),
         session_id: None,
     };
 
-    let model = req.model.unwrap_or_else(|| lease.model_id.clone());
-    // OpenAI/Anthropic spec default for an absent `stream` is non-streaming JSON.
-    // (Streaming clients — CC, Codex — always send `stream:true` explicitly.)
-    let stream_mode = req.stream.unwrap_or(false);
+    let model = dialect
+        .model_hint()
+        .map(str::to_owned)
+        .unwrap_or_else(|| lease.model_id.clone());
 
     match chat_or_loopbreak(&lease.backend, chat_req).await {
         Err(e) => {
             crate::obs::log_event(json!({
-                "event": "request_error", "endpoint": "/v1/chat/completions", "error": e.to_string(),
+                "event": "request_error", "endpoint": D::ENDPOINT, "error": e.to_string(),
             }));
-            chat_error_response(&e, "backend_error")
+            chat_error_response(&e, D::ERROR_KIND)
         }
         Ok(chat_stream) => {
             let meta = crate::obs::ReqMeta {
-                endpoint: "/v1/chat/completions",
+                endpoint: D::ENDPOINT,
                 model: model.clone(),
                 n_messages,
                 n_tools,
@@ -521,11 +569,210 @@ async fn oai_chat_handler(
             };
             let chat_stream = crate::obs::meter(chat_stream, state.observer.clone(), meta);
             let chat_stream = with_gen_timeout(chat_stream, cancel.clone(), gen_inactivity_timeout());
-            if stream_mode {
-                Sse::new(oai_sse_stream(chat_stream, cancel, model, Some(lease))).into_response()
-            } else {
-                oai_collect(chat_stream, cancel, &model, Some(lease)).await
-            }
+            dialect.respond(chat_stream, cancel, model, lease).await
+        }
+    }
+}
+
+// ─── OpenAI Chat ──────────────────────────────────────────────────────────────
+
+struct OaiWire {
+    req: OaiChatReq,
+}
+
+impl WireDialect for OaiWire {
+    const ENDPOINT: &'static str = "/v1/chat/completions";
+    const ERROR_KIND: &'static str = "backend_error";
+
+    fn model_hint(&self) -> Option<&str> {
+        self.req.model.as_deref()
+    }
+
+    fn stream_mode(&self) -> bool {
+        // OpenAI/Anthropic spec default for an absent `stream` is non-streaming JSON.
+        // (Streaming clients — CC, Codex — always send `stream:true` explicitly.)
+        self.req.stream.unwrap_or(false)
+    }
+
+    fn into_internal(&mut self, _lease: &ChatLease) -> WireRequest {
+        WireRequest {
+            messages: oai_messages_to_internal(&self.req.messages),
+            tools: apply_tool_choice(
+                oai_tools_to_internal(&self.req.tools),
+                &parse_oai_tool_choice(&self.req.tool_choice),
+            ),
+            sampling: SamplingParams {
+                temperature: self.req.temperature,
+                top_p: self.req.top_p,
+                max_tokens: self.req.max_tokens,
+                top_k: self.req.top_k,
+                response_schema: parse_response_format(&self.req.response_format),
+                ..Default::default()
+            },
+        }
+    }
+
+    async fn respond(
+        self,
+        chat_stream: ChatStream,
+        cancel: CancellationToken,
+        model: String,
+        lease: ChatLease,
+    ) -> Response {
+        if self.stream_mode() {
+            Sse::new(oai_sse_stream(chat_stream, cancel, model, Some(lease))).into_response()
+        } else {
+            oai_collect(chat_stream, cancel, &model, Some(lease)).await
+        }
+    }
+}
+
+async fn oai_chat_handler(
+    State(state): State<GatewayState>,
+    axum::Json(req): axum::Json<OaiChatReq>,
+) -> Response {
+    tracing::debug!(
+        model = req.model.as_deref().unwrap_or("?"),
+        msgs = req.messages.len(),
+        tools = req.tools.len(),
+        stream = req.stream.unwrap_or(false),
+        "POST /v1/chat/completions"
+    );
+    serve_wire(state, OaiWire { req }).await
+}
+
+// ─── OpenAI Responses (Codex) ─────────────────────────────────────────────────
+
+struct RespWire {
+    req: RespReq,
+    /// Did codex offer `apply_patch` as a function tool for THIS request? Derived while parsing and
+    /// needed again while serializing — the reason `into_internal` takes `&mut self`.
+    apply_patch_is_tool: bool,
+}
+
+impl WireDialect for RespWire {
+    const ENDPOINT: &'static str = "/v1/responses";
+    const ERROR_KIND: &'static str = "backend_error";
+
+    fn model_hint(&self) -> Option<&str> {
+        self.req.model.as_deref()
+    }
+
+    fn stream_mode(&self) -> bool {
+        self.req.stream.unwrap_or(false)
+    }
+
+    fn into_internal(&mut self, lease: &ChatLease) -> WireRequest {
+        // Trim codex's ~21 KB instructions to a short focused prompt for load-sensitive models
+        // (gpt-oss) — the bisection-proven dominant breaker of tool delivery. Verbatim for 35B et al.
+        let effective_instructions =
+            codex_effective_instructions(&lease.model_id, self.req.instructions.as_deref());
+        if effective_instructions.as_deref() != self.req.instructions.as_deref() {
+            tracing::debug!(
+                model = %lease.model_id,
+                from_bytes = self.req.instructions.as_deref().map(str::len).unwrap_or(0),
+                to_bytes = effective_instructions.as_deref().map(str::len).unwrap_or(0),
+                "codex-lean: replaced instructions with the focused coding prompt"
+            );
+        }
+        let messages =
+            responses_input_to_internal(effective_instructions.as_deref(), &self.req.input);
+        // Did codex offer `apply_patch` as a function tool for this request? If not, a model that
+        // calls it as a function (gpt-oss) would hit "unsupported call: apply_patch" — so we
+        // re-route those to exec_command. When codex DID offer it as a tool, the call is legit and
+        // we leave it alone.
+        self.apply_patch_is_tool = self
+            .req
+            .tools
+            .iter()
+            .any(|t| t.name.as_deref() == Some("apply_patch"));
+        let mut tools = apply_tool_choice(
+            responses_tools_to_internal(&self.req.tools),
+            &parse_oai_tool_choice(&self.req.tool_choice),
+        );
+        // EXPERIMENT (ROZUM_CODEX_INJECT_APPLY_PATCH): gpt-oss is trained to call `apply_patch` as a
+        // function, but codex offers it only as a shell command for our config — so the model GUESSES
+        // the schema (keys begin_patch / cmd / update …) and we drop the guesses. Give it the tool it
+        // expects, with a CLEAR schema, so it stops guessing; its clean {patch:…} call is re-routed to
+        // exec_command by the Responses serializer (apply_patch_is_tool stays false → reroute fires).
+        let inject_ap = std::env::var("ROZUM_CODEX_INJECT_APPLY_PATCH")
+            .map(|v| v != "0")
+            .unwrap_or(false);
+        if inject_ap && !self.apply_patch_is_tool {
+            tools.push(ToolDef {
+                name: "apply_patch".into(),
+                description: "Apply a patch to a file in the working directory — the preferred way to \
+                    EDIT files (use this instead of shell `sed`/`cat` heredocs). The `patch` argument \
+                    is the full V4A patch: a `*** Begin Patch` line, then `*** Update File: <relative \
+                    path>`, then a hunk with context lines, `-` (remove) and `+` (add) lines, then a \
+                    `*** End Patch` line."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "patch": {
+                            "type": "string",
+                            "description": "The full patch, from `*** Begin Patch` to `*** End Patch`."
+                        }
+                    },
+                    "required": ["patch"]
+                }),
+            });
+        }
+        log_codex_tool_inventory(
+            self.req.model.as_deref(),
+            self.req.stream.unwrap_or(false),
+            &self.req.tools,
+            &tools,
+            self.apply_patch_is_tool,
+            inject_ap,
+        );
+
+        WireRequest {
+            messages,
+            tools,
+            sampling: SamplingParams {
+                temperature: self.req.temperature,
+                top_p: self.req.top_p,
+                max_tokens: self.req.max_output_tokens,
+                top_k: self.req.top_k,
+                // codex's `reasoning.effort` → gpt-oss harmony reasoning level — but a load-sensitive
+                // model on the lean path is forced to `low` (codex's `medium` otherwise times it out on
+                // multi-turn agentic tasks); ignored by other models.
+                reasoning_effort: codex_effective_reasoning(
+                    &lease.model_id,
+                    reasoning_effort_of(&self.req.reasoning),
+                ),
+                ..Default::default()
+            },
+        }
+    }
+
+    async fn respond(
+        self,
+        chat_stream: ChatStream,
+        cancel: CancellationToken,
+        model: String,
+        lease: ChatLease,
+    ) -> Response {
+        if self.stream_mode() {
+            Sse::new(responses_sse_stream(
+                chat_stream,
+                cancel,
+                model,
+                Some(lease),
+                self.apply_patch_is_tool,
+            ))
+            .into_response()
+        } else {
+            responses_collect(
+                chat_stream,
+                cancel,
+                &model,
+                Some(lease),
+                self.apply_patch_is_tool,
+            )
+            .await
         }
     }
 }
@@ -559,138 +806,71 @@ async fn responses_handler(
             eprintln!("─── instructions head ───\n{head}\n─── /instructions ───");
         }
     }
-    let lease = match state.sb.enter(req.model.as_deref()).await {
-        Ok(l) => l,
-        Err(resp) => return resp,
-    };
-    // Trim codex's ~21 KB instructions to a short focused prompt for load-sensitive models
-    // (gpt-oss) — the bisection-proven dominant breaker of tool delivery. Verbatim for 35B et al.
-    let effective_instructions = codex_effective_instructions(&lease.model_id, req.instructions.as_deref());
-    if effective_instructions.as_deref() != req.instructions.as_deref() {
-        tracing::debug!(
-            model = %lease.model_id,
-            from_bytes = req.instructions.as_deref().map(str::len).unwrap_or(0),
-            to_bytes = effective_instructions.as_deref().map(str::len).unwrap_or(0),
-            "codex-lean: replaced instructions with the focused coding prompt"
-        );
+    serve_wire(
+        state,
+        RespWire {
+            req,
+            apply_patch_is_tool: false,
+        },
+    )
+    .await
+}
+
+
+// ─── Anthropic Messages ───────────────────────────────────────────────────────
+
+struct AnthropicWire {
+    req: AnthropicReq,
+}
+
+impl WireDialect for AnthropicWire {
+    const ENDPOINT: &'static str = "/v1/messages";
+    /// Anthropic's error envelope, not OpenAI's `backend_error` — a client switching on the
+    /// field would see the difference.
+    const ERROR_KIND: &'static str = "api_error";
+
+    fn model_hint(&self) -> Option<&str> {
+        self.req.model.as_deref()
     }
-    let messages = responses_input_to_internal(effective_instructions.as_deref(), &req.input);
-    // Did codex offer `apply_patch` as a function tool for this request? If not, a model that calls
-    // it as a function (gpt-oss) would hit "unsupported call: apply_patch" — so we re-route those to
-    // exec_command. When codex DID offer it as a tool, the call is legit and we leave it alone.
-    let apply_patch_is_tool = req
-        .tools
-        .iter()
-        .any(|t| t.name.as_deref() == Some("apply_patch"));
-    let mut tools = apply_tool_choice(
-        responses_tools_to_internal(&req.tools),
-        &parse_oai_tool_choice(&req.tool_choice),
-    );
-    // EXPERIMENT (ROZUM_CODEX_INJECT_APPLY_PATCH): gpt-oss is trained to call `apply_patch` as a
-    // function, but codex offers it only as a shell command for our config — so the model GUESSES
-    // the schema (keys begin_patch / cmd / update …) and we drop the guesses. Give it the tool it
-    // expects, with a CLEAR schema, so it stops guessing; its clean {patch:…} call is re-routed to
-    // exec_command by the Responses handler (apply_patch_is_tool stays false → reroute fires).
-    let inject_ap = std::env::var("ROZUM_CODEX_INJECT_APPLY_PATCH")
-        .map(|v| v != "0")
-        .unwrap_or(false);
-    if inject_ap && !apply_patch_is_tool {
-        tools.push(ToolDef {
-            name: "apply_patch".into(),
-            description: "Apply a patch to a file in the working directory — the preferred way to \
-                EDIT files (use this instead of shell `sed`/`cat` heredocs). The `patch` argument \
-                is the full V4A patch: a `*** Begin Patch` line, then `*** Update File: <relative \
-                path>`, then a hunk with context lines, `-` (remove) and `+` (add) lines, then a \
-                `*** End Patch` line."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "patch": {
-                        "type": "string",
-                        "description": "The full patch, from `*** Begin Patch` to `*** End Patch`."
-                    }
-                },
-                "required": ["patch"]
-            }),
-        });
+
+    fn stream_mode(&self) -> bool {
+        self.req.stream.unwrap_or(false)
     }
-    log_codex_tool_inventory(
-        req.model.as_deref(),
-        req.stream.unwrap_or(false),
-        &req.tools,
-        &tools,
-        apply_patch_is_tool,
-        inject_ap,
-    );
 
-    // gateway-auto-context: fit the prompt to the window (drop oldest turns, then compress tool
-    // schemas) instead of erroring, then attach an elision note for the dropped turns.
-    let ctx_win = lease.backend.context_window();
-    let (messages, tools, dropped) = match fit_to_context(messages, tools, ctx_win) {
-        Ok(t) => t,
-        Err(resp) => return resp,
-    };
-    let messages = with_elision_note(messages, dropped, ctx_win, &lease.backend).await;
-    let est = estimate_prompt_tokens(&messages, &tools); // post-fit token estimate (for obs)
-
-    let (n_messages, n_tools) = (messages.len(), tools.len());
-    let cancel = CancellationToken::new();
-    let chat_req = ChatRequest {
-        messages,
-        tools,
-        sampling: apply_determinism_env(SamplingParams {
-            temperature: req.temperature,
-            top_p: req.top_p,
-            max_tokens: req.max_output_tokens,
-            top_k: req.top_k,
-            // codex's `reasoning.effort` → gpt-oss harmony reasoning level — but a load-sensitive
-            // model on the lean path is forced to `low` (codex's `medium` otherwise times it out on
-            // multi-turn agentic tasks); ignored by other models.
-            reasoning_effort: codex_effective_reasoning(&lease.model_id, reasoning_effort_of(&req.reasoning)),
-            ..Default::default()
-        }),
-        cancel: cancel.clone(),
-        session_id: None,
-    };
-
-    let model = req.model.unwrap_or_else(|| lease.model_id.clone());
-    let stream_mode = req.stream.unwrap_or(false);
-
-    match chat_or_loopbreak(&lease.backend, chat_req).await {
-        Err(e) => {
-            crate::obs::log_event(json!({
-                "event": "request_error", "endpoint": "/v1/responses", "error": e.to_string(),
-            }));
-            chat_error_response(&e, "backend_error")
+    fn into_internal(&mut self, _lease: &ChatLease) -> WireRequest {
+        WireRequest {
+            messages: anthropic_messages_to_internal(self.req.system.as_ref(), &self.req.messages),
+            tools: apply_tool_choice(
+                anthropic_tools_to_internal(&self.req.tools),
+                &parse_anthropic_tool_choice(&self.req.tool_choice),
+            ),
+            // Fewer knobs than the other two, and that is a GAP rather than a property of the
+            // dialect: Anthropic's Messages API defines `top_p` and `top_k`, `AnthropicReq`
+            // carries neither, so a client that sends them has them dropped in silence. Left
+            // exactly as it was — this change is behaviour-preserving by construction, and the
+            // gap is recorded in `src/testdata/wire-golden.txt` where it is visible as data.
+            sampling: SamplingParams {
+                temperature: self.req.temperature,
+                max_tokens: self.req.max_tokens,
+                ..Default::default()
+            },
         }
-        Ok(chat_stream) => {
-            let meta = crate::obs::ReqMeta {
-                endpoint: "/v1/responses",
-                model: model.clone(),
-                n_messages,
-                n_tools,
-                est_prompt_tokens: est,
-            };
-            let chat_stream = crate::obs::meter(chat_stream, state.observer.clone(), meta);
-            let chat_stream = with_gen_timeout(chat_stream, cancel.clone(), gen_inactivity_timeout());
-            if stream_mode {
-                Sse::new(responses_sse_stream(
-                    chat_stream,
-                    cancel,
-                    model,
-                    Some(lease),
-                    apply_patch_is_tool,
-                ))
-                .into_response()
-            } else {
-                responses_collect(chat_stream, cancel, &model, Some(lease), apply_patch_is_tool)
-                    .await
-            }
+    }
+
+    async fn respond(
+        self,
+        chat_stream: ChatStream,
+        cancel: CancellationToken,
+        model: String,
+        lease: ChatLease,
+    ) -> Response {
+        if self.stream_mode() {
+            Sse::new(anthropic_sse_stream(chat_stream, cancel, model, Some(lease))).into_response()
+        } else {
+            anthropic_collect(chat_stream, cancel, &model, Some(lease)).await
         }
     }
 }
-
 
 async fn anthropic_handler(
     State(state): State<GatewayState>,
@@ -703,76 +883,7 @@ async fn anthropic_handler(
         stream = req.stream.unwrap_or(false),
         "POST /v1/messages"
     );
-    let lease = match state.sb.enter(req.model.as_deref()).await {
-        Ok(l) => l,
-        Err(resp) => return resp,
-    };
-    let messages = anthropic_messages_to_internal(req.system.as_ref(), &req.messages);
-    let tools = apply_tool_choice(
-        anthropic_tools_to_internal(&req.tools),
-        &parse_anthropic_tool_choice(&req.tool_choice),
-    );
-
-    // Approximate context overflow check
-    // gateway-auto-context: fit the prompt to the window (drop oldest turns, then compress tool
-    // schemas) instead of erroring, then attach an elision note for the dropped turns.
-    let ctx_win = lease.backend.context_window();
-    let (messages, tools, dropped) = match fit_to_context(messages, tools, ctx_win) {
-        Ok(t) => t,
-        Err(resp) => return resp,
-    };
-    let messages = with_elision_note(messages, dropped, ctx_win, &lease.backend).await;
-    let est = estimate_prompt_tokens(&messages, &tools); // post-fit token estimate (for obs)
-
-    let (n_messages, n_tools) = (messages.len(), tools.len());
-    let cancel = CancellationToken::new();
-    let chat_req = ChatRequest {
-        messages,
-        tools,
-        sampling: apply_determinism_env(SamplingParams {
-            temperature: req.temperature,
-            max_tokens: req.max_tokens,
-            ..Default::default()
-        }),
-        cancel: cancel.clone(),
-        session_id: None,
-    };
-
-    let model = req.model.unwrap_or_else(|| lease.model_id.clone());
-    // OpenAI/Anthropic spec default for an absent `stream` is non-streaming JSON.
-    // (Streaming clients — CC, Codex — always send `stream:true` explicitly.)
-    let stream_mode = req.stream.unwrap_or(false);
-
-    match chat_or_loopbreak(&lease.backend, chat_req).await {
-        Err(e) => {
-            crate::obs::log_event(json!({
-                "event": "request_error", "endpoint": "/v1/messages", "error": e.to_string(),
-            }));
-            chat_error_response(&e, "api_error")
-        }
-        Ok(chat_stream) => {
-            let meta = crate::obs::ReqMeta {
-                endpoint: "/v1/messages",
-                model: model.clone(),
-                n_messages,
-                n_tools,
-                est_prompt_tokens: est,
-            };
-            let chat_stream = crate::obs::meter(chat_stream, state.observer.clone(), meta);
-            let chat_stream = with_gen_timeout(chat_stream, cancel.clone(), gen_inactivity_timeout());
-            if stream_mode {
-                Sse::new(anthropic_sse_stream(
-                    chat_stream,
-                    cancel,
-                    model,
-                    Some(lease),
-                ))
-                .into_response()
-            } else {
-                anthropic_collect(chat_stream, cancel, &model, Some(lease)).await
-            }
-        }
-    }
+    serve_wire(state, AnthropicWire { req }).await
 }
 
 // ─── Control plane (switch / unload / reload) ────────────────────────────────
