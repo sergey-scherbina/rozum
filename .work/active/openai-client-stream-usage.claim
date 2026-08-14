@@ -1,0 +1,11 @@
+feature/openai-client-stream-usage 2026-08-14T21:56:05Z
+agent: claude-opus-5
+heartbeat: 2026-08-14T21:56:05Z
+status: not-started
+done-so-far:
+next: BUG-033's CLIENT half, left open deliberately when the server half landed today. rozum acting
+  as a client of an upstream OpenAI parses `usage` out of a streamed chunk and pins it with a test
+  (`openai_http.rs` parse_done_finish) while never sending `stream_options` to ask for it, so those
+  counts are 0 against a spec-compliant upstream. The entry says it needs a probe against real
+  providers or an escape hatch. Read the client first and establish what it actually sends and to
+  whom before choosing — a strict server may 400 an unknown parameter rather than ignore it.
