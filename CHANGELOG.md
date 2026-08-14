@@ -1,5 +1,28 @@
 # Changelog
 
+## matrix-capability-rate — the headline counted cells that never measured the model
+Completed: 2026-08-15
+
+`NON_CAPABILITY_RC = {1, 2}` and a docstring promising those are "EXCLUDED from every rate" were
+already in `summarize_matrix.py`; `rate()` counted every row anyway, so the constant only decided
+whether a whole model was called broken and never removed a bad cell from a healthy one.
+
+Found by making the mistake on this repository's own data: reading `per-run.csv` by the `pass`
+column put the resident model at 73/88 with `fix` at 10/18 and produced the conclusion "weak at
+editing code". It is **51/52**. Fourteen of the fifteen failures were an agent error, an infra crash
+or a timeout, most against a model build deleted a month earlier; the one real miss is a single
+`wordcount` rep in a run archived as BUG-014 evidence, where the same agent passed the same task on
+another rep.
+
+The rate now applies the constant, and the headline always prints what it dropped — including zero,
+because an exclusion nobody can see is the same trap one line on. Passing cells are never excluded
+whatever their rc (13 of 105 rows in one historical file are `pass=1, rc=1` from before the codes
+existed; historical output verified unchanged), and delivery failures rc 11/12/13 stay in the
+denominator because they are a property of the model with its driver.
+
+Mirrored in the byte-identical `.ssc` twin, parity re-confirmed. `test-summarize-matrix.sh` in CI:
+9/9, and 6/9 with exit 1 when the fix is reverted.
+
 ## ucc-ssc-public — slice 1 of the .ssc console port, finished, and the six upstream defects it cost
 Completed: 2026-08-15
 
