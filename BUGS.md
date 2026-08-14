@@ -5,6 +5,44 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-031 — `/v1/messages` threw away `top_p` and `top_k`, and gave the client the opposite of what it asked for
+
+- **Status:** FIXED 2026-08-14 (`AnthropicReq` declares both; `AnthropicWire::into_internal` passes
+  them; parse test + the wire golden).
+- **Severity:** P2 — wrong output, no error, on the endpoint Claude Code uses. Not a crash, which is
+  why it survived: every layer behaved "correctly" on the way down.
+
+Both are documented Messages API parameters. Neither existed on `AnthropicReq`, and serde drops an
+undeclared field without a word, so the request parsed fine and the knobs were simply gone.
+
+What made it worse than a no-op is the downstream default:
+
+```rust
+top_k: p.top_k.unwrap_or(0)     // 0 = disabled
+top_p: p.top_p.unwrap_or(1.0)   // 1.0 = keep the whole distribution
+```
+
+A client asking to NARROW the tail (`top_p: 0.9`) therefore got the tail left wide open — not
+"ignored", but the opposite of the request, with a 200 and a plausible-looking answer.
+
+**How it was found, and why that matters more than the fix.** Not by reading the struct: by writing
+the byte-level golden for `plugin-wireprotocol` (`docs/specs/wire-dialect-seam.md`), which records
+the `ChatRequest` that reached the backend for each dialect side by side. Two dialects printed
+`top_p=Some(0.9) top_k=Some(40)`, the third printed `None None` from the same input. A gap you can
+only see next to its neighbours is invisible in the file where it lives.
+
+**The matrix numbers are unaffected**, and that is checked rather than assumed: the bench runs with
+`ROZUM_FORCE_GREEDY=1`, and `apply_determinism` clears `top_p`/`top_k` outright in that mode. This
+changes behaviour only for a client that actually sends them.
+
+**Its sibling, not fixed here:** `/v1/chat/completions` drops `seed` the same way — OpenAI defines
+it, `SamplingParams` has the field, no dialect parses it. So `apply_determinism`'s comment ("only
+fills an unset seed, so a caller that genuinely sent its own seed keeps it") describes a branch no
+HTTP client can reach; the only place a client seed exists is that function's own unit test. Left
+alone deliberately: honouring it would let a client's seed override the bench's
+`ROZUM_SAMPLING_SEED`, which is a determinism-control decision, not a typo. Filed as
+`oai-seed-never-parsed` in `BACKLOG.md`.
+
 ## matrix-task-info-is-a-stale-copy
 
 <!-- status: fixed

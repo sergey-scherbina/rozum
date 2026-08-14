@@ -112,6 +112,17 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   automatic — the operator's call. Spec: `docs/specs/incident-repro.md`.
 
 
+- [ ] **oai-seed-never-parsed** (small, but decide the policy first) — `/v1/chat/completions` drops
+  the client's `seed`: OpenAI defines it, `SamplingParams` carries the field, and **no wire dialect
+  parses it**. Found beside BUG-031, same shape, deliberately NOT fixed with it. The reason it needs
+  a decision rather than four lines: `apply_determinism` fills the seed from `ROZUM_SAMPLING_SEED`
+  only when unset, so honouring a client seed would let any OpenAI-dialect client override the
+  bench's determinism control. Today that comment ("a caller that genuinely sent its own seed keeps
+  it") describes a branch no HTTP client can reach — the only caller that sets a seed is the
+  function's own unit test. Either wire it and let the client win (matching the documented intent),
+  or keep dropping it and say so in the comment. Pick one; both beat the current state, where the
+  code and its comment disagree.
+
 - [ ] **chain-per-model-executor-tools** (marginal, not urgent) — per-MODEL executor tool curation in the
   chain: a weaker link gets a smaller tool set than a strong one. Today the real levers are already pulled —
   `--lean` cuts the executor surface 33→4 tools and backend planner/verifier tiers run `tools=[]`
