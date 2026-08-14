@@ -1,7 +1,7 @@
 feature/ucc-ssc-public 2026-08-08T17:13:53Z
 agent: claude-opus-5
-heartbeat: 2026-08-13T20:36:41Z
-status: in-progress
+heartbeat: 2026-08-14T07:31:44Z
+status: blocked
 done-so-far: slice 1 matches the Rust routes on ALL 1884 cells present on disk (status + every field), and /view matches byte-for-byte on a live and a revoked token, headers included. Commit 05e70a5 fixed four gaps in /view that status-parity had hidden: it served index.html instead of view.html (580KB vs 27KB, both 200), never injected window._VIEW_TOKEN (a 200 carrying a console that could not call anything), answered 200 instead of 404 for a missing file, and answered an expired link with raw JSON instead of the styled page. Also aligned Content-Type on every JSON answer (unstated, the runtime guessed text/plain for a JSON body) and put `ok: false` back in the 400 body.
 next: the switch lives in the gateway on branch feature/matrix-task-info-single-source (dc8b029): ROZUM_UCC_SSC_ORIGIN picks which implementation registers the two routes; unset = today's behaviour exactly, unreachable .ssc = 502 (never a silent fallback to Rust). Both branches are committed and unmerged, and NOTHING live has been switched — the deployment decisions (install the binary, set the variable, supervise the .ssc process) are the operator's.
 deploy-order: tasks.json MUST be in the deployed checkout BEFORE the new gateway binary. matrix_task_info resolves it against the process working directory (launchd sets /Users/sergiy/work/my/rozum), so a binary deployed first serves null prompts that look like data. It now says so once in the log instead of staying quiet.
@@ -21,6 +21,11 @@ debt (CORRECTED 2026-08-13 — the earlier note would have caused a regression):
   - the slice's isInt CANNOT run on the `run` lane against real data: `"8.0".toInt` ABORTS there
     (`String.toInt: invalid integer`) while build-rust answers 0. Filed. Exercise the slice on
     build-rust only until that is settled.
+upstream-recheck 2026-08-14: still all three outstanding. `SSC_HTTP_BIND` appears in their main
+  ONLY inside INBOX.md — my report — and not in the runtime; `ResponseParts` and `percent_decode`
+  are absent entirely. All five reports are still `triage: new`, including the char one they have
+  ALREADY merged (2315f2ecf), so their triage state is behind their own main and cannot be read as
+  a queue position. Nothing here can move until the bind address lands.
 blocker-before-any-switch: the .ssc server binds ALL interfaces (`*:8412`) while the Rust
   console binds `127.0.0.1`. Reachable from the LAN only because the host firewall refuses
   the connection today — that is not the protection to rely on. `serve(port)` must take a
