@@ -1,5 +1,41 @@
 # Changelog
 
+## extract-shared-serving-helpers — closed by measurement, and the one real item was a divergence in the number the residency gate trusts
+Completed: 2026-08-14
+
+The entry listed four things still to lift into the shared serving layer. **Three of them no longer
+existed** — and finding that out cost less than doing them would have.
+
+*UTF-8-safe incremental detokenize* and *multi-EOS stop* are already in
+`rozum_core::engine::consume_tokens`, lifted there by the `native-engine-spi` A2a work: it streams
+the decoded suffix with a `\u{FFFD}` trim and stops on `meta.eos.contains(&id)` — a set, which is
+the multi-EOS half. Both engines drive it.
+
+*Tool-history rendering* should not be lifted at all, and the entry's premise was wrong. The three
+functions named `message_text` are three different jobs: `auto_context`'s flattens Text+ToolResult
+with spaces for summarization; `mistralrs_backend`'s takes Text only, because tool calls go
+structurally through `message_tool_calls`; the MLX one re-renders `ToolUse` into Qwen `<tool_call>`
+markup plus image placeholders. Unifying them would either impose Qwen markup on mistralrs or strip
+it from MLX. Same name, three subjects — the trap `spawn_support` already carries a note about.
+
+*The KV/RAM preflight* was the real one, and it had already gone wrong quietly. `src/main.rs` held
+its own KV-cache math beside `model_source::kv_bytes_per_position`, and **only the `main.rs` copy
+read `layer_types`** — the explicit per-layer list that transformers is moving to. The shared copy
+is the one the **residency gate** reserves on, so a config carrying the list without
+`full_attention_interval` would have been counted as all-layers: for the shape of the model that
+actually runs here that is a **4× over-estimate of the KV cache**, which does not crash anything —
+it makes the gate refuse a load that fits and tell the operator the host is full when it is not.
+
+One implementation now, `layer_types` first, and it also picked up the multi-head fallback
+(`num_attention_heads` when a config states no KV heads) that only the other copy had. What is
+deliberately NOT shared is the footprint around it: candle's ~5% scratch and MLX's cache+prefill
+reserve (~5.5 GiB, smmr-D-calibrated) describe two different runtimes, and merging those would
+refuse loads that fit — the mirror image of the bug above.
+
+Three tests: the real Qwen3.5-4B shape carrying BOTH spellings, a list-only config (the case that
+was wrong), and a list naming no full-attention layer at all — which falls through rather than
+reporting a model with no KV.
+
 ## windows-fs-locks — one rule for where this user's files are, and the variable Windows does not set
 Completed: 2026-08-14
 

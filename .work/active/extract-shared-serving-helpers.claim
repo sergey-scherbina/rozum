@@ -1,6 +1,0 @@
-feature/extract-shared-serving-helpers 2026-08-14T09:11:08Z
-agent: nadia-ucc
-heartbeat: 2026-08-14T09:11:08Z
-status: not-started
-done-so-far:
-next: three of the four listed items are already done; the fourth (KV preflight) is genuinely duplicated and the shared copy misses layer_types

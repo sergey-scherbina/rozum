@@ -768,16 +768,36 @@ The taxonomy + rationale is in `docs/specs/portability-and-the-backend-spi.md`
 of the MLX leaf into a module that depends only on hardware, or only on the model,
 or on nothing — so any engine can reuse it.
 
-- [ ] extract-shared-serving-helpers - **L1. STARTED 2026-06-16** (`src/serving.rs`).
+- [x] extract-shared-serving-helpers - **L1. STARTED 2026-06-16** (`src/serving.rs`).
   Tool-call parsing is unified there: MLX's whole-text `parse_tool_calls` and GGUF's
   streaming `tool_name` both call it (the duplicated body-parsing is gone). It was also
   made **robust** — when a model emits no `<tool_call>` envelope (common for 4B–7B models
   driven by a foreign tool schema, which fall back to a bare or ```json-fenced
   `{name,arguments}`), the call is recovered via a string-aware balanced-brace scan with a
   strict `arguments`-is-object guard against false positives; native `<tool_call>` blocks
-  suppress the fallback. Validated end-to-end: Coder-7B's lost tool calls now execute. Still
-  to lift into `serving`: tool-history rendering (`message_text`), UTF-8-safe incremental
-  detokenize, multi-EOS stop logic, the KV/RAM preflight.
+  suppress the fallback. Validated end-to-end: Coder-7B's lost tool calls now execute.
+
+  **CLOSED 2026-08-14 — each of the four remaining items measured against the code first, and
+  three of them no longer existed.**
+  - *UTF-8-safe incremental detokenize* and *multi-EOS stop* — **already lifted**, into
+    `rozum_core::engine::consume_tokens` (`crates/rozum-core/src/engine.rs:277`) by the
+    `native-engine-spi` A2a work: it streams the decoded suffix with a `\u{FFFD}` trim and stops on
+    `meta.eos.contains(&id)` — a SET, which is the multi-EOS half. Both engines drive it.
+  - *KV/RAM preflight* — **was genuinely duplicated, and the two copies had diverged.**
+    `src/main.rs` had its own KV math beside `model_source::kv_bytes_per_position`, and only the
+    `main.rs` copy read `layer_types`. Since the shared one feeds the RESIDENCY GATE, a config
+    carrying the list without `full_attention_interval` would have been counted as all-layers —
+    for the shape of the model that runs here, a **4× over-estimate of the KV cache**, i.e. the
+    gate refusing a load that fits. Fixed: one implementation, `layer_types` first, plus the
+    multi-head (`num_attention_heads`) fallback the other copy had. The surrounding footprint is
+    deliberately NOT shared — candle's ~5% scratch and MLX's cache+prefill reserve (~5.5 GiB,
+    smmr-D) describe two runtimes, and merging them would refuse loads that fit.
+  - *tool-history rendering (`message_text`)* — **should not be lifted, and the entry's premise was
+    wrong.** The three functions of that name are three different jobs: `auto_context`'s flattens
+    Text+ToolResult with spaces for summarization; `mistralrs_backend`'s takes Text only because
+    tool calls go structurally through `message_tool_calls`; the MLX one re-renders `ToolUse` into
+    Qwen `<tool_call>` markup plus image placeholders. Unifying them would either impose Qwen
+    markup on mistralrs or strip it from MLX. Same name, three subjects.
 
 - [ ] mistral-system-fold — **WON'T DO (2026-06-16).** A restrictive chat template (Mistral-7B-v0.3:
   rejects the `system` role via `raise_exception` + needs strict user/assistant alternation) 500s on
