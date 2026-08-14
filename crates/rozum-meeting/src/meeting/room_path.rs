@@ -33,9 +33,7 @@ pub fn dirs_home_public() -> PathBuf {
 }
 
 fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+    rozum_paths::home_dir().unwrap_or_else(rozum_paths::temp_dir)
 }
 
 pub fn generate_room_name() -> String {

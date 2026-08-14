@@ -22,9 +22,11 @@ fn model_is_downloading(spec: &str) -> bool {
         return false;
     };
     let Some((org, name)) = rest.split_once('/') else { return false };
-    let Some(home) = std::env::var_os("HOME") else { return false };
-    let dir = PathBuf::from(home)
-        .join(".cache/huggingface/hub")
+    let Some(home) = rozum_paths::home_dir() else { return false };
+    let dir = home
+        .join(".cache")
+        .join("huggingface")
+        .join("hub")
         .join(format!("models--{org}--{name}"));
     fn has_incomplete(dir: &std::path::Path) -> bool {
         let Ok(rd) = std::fs::read_dir(dir) else { return false };
@@ -42,7 +44,6 @@ fn model_is_downloading(spec: &str) -> bool {
     has_incomplete(&dir)
 }
 
-use std::path::PathBuf;
 
 use crate::agents::{AgentBrief, live_agents};
 use crate::gateway_control::loading_models;
@@ -138,8 +139,8 @@ pub struct InstalledBrief {
 /// real coding tasks; greet + rc=2 excluded). Loaded once per status request; exact spec keys.
 pub(crate) fn load_live_ratings() -> std::collections::HashMap<String, u8> {
     let mut out = std::collections::HashMap::new();
-    let Some(home) = std::env::var_os("HOME") else { return out };
-    let path = PathBuf::from(home).join(".rozum/ucc/model-ratings.json");
+    let Some(home) = rozum_paths::home_dir() else { return out };
+    let path = home.join(".rozum").join("ucc").join("model-ratings.json");
     let Ok(body) = std::fs::read_to_string(path) else { return out };
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(&body) else { return out };
     if let Some(models) = doc.get("models").and_then(|m| m.as_object()) {
@@ -233,10 +234,7 @@ pub struct MeetingBrief {
 /// worktree rooms (project under `/tmp` or `/.worktrees/`) are filtered out so the dashboard lists the
 /// real rooms (global + project).
 fn list_meetings() -> Vec<MeetingBrief> {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state")));
-    let Some(path) = base.map(|b| b.join("rozum/rooms.json")) else {
+    let Some(path) = rozum_paths::state_dir().map(|d| d.join("rooms.json")) else {
         return Vec::new();
     };
     let Ok(bytes) = std::fs::read(&path) else { return Vec::new() };

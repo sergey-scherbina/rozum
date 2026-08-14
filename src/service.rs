@@ -11,9 +11,7 @@ pub const SERVICE_LABEL: &str = crate::services::GATEWAY_LABEL;
 pub const SYSTEMD_UNIT: &str = "rozum-gateway.service";
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    rozum_paths::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// `~/Library/LaunchAgents/com.rozum.gateway.plist`.

@@ -13,18 +13,18 @@ pub(crate) fn safe_path_seg(s: &str) -> bool {
     !s.is_empty() && s != "." && s != ".." && !s.chars().any(|c| matches!(c, '/' | '\\' | '\0'))
 }
 
+/// One resolution order for the whole workspace, in `rozum_core::userpaths`: `HOME` is not a
+/// Windows variable, and this had its own copy of the rule that assumed it was.
 pub(crate) fn state_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .map(|b| b.join("rozum"))
+    rozum_paths::state_dir()
 }
 
 pub(crate) fn ucc_site_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".rozum/ucc/site")
+    rozum_paths::home_dir()
+        .unwrap_or_else(rozum_paths::temp_dir)
+        .join(".rozum")
+        .join("ucc")
+        .join("site")
 }
 
 #[cfg(test)]

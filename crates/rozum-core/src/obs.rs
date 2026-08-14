@@ -26,8 +26,10 @@ fn log_path() -> Option<&'static PathBuf> {
             Ok(v) if v.is_empty() => return None,
             Ok(v) => PathBuf::from(v),
             Err(_) => {
-                let home = std::env::var("HOME").ok()?;
-                let dir = PathBuf::from(home).join(".rozum");
+                // Same rule as the reader: `meeting::store::gateway_log_slice` opens this file
+                // to cut an incident's evidence out of it, so writer and reader must resolve the
+                // same home or the evidence is silently empty (`rozum_paths`).
+                let dir = rozum_paths::home_dir()?.join(".rozum");
                 let _ = std::fs::create_dir_all(&dir);
                 dir.join("gateway.jsonl")
             }

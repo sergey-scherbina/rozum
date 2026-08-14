@@ -664,7 +664,7 @@ fn resolve_gateway() -> Option<String> {
 }
 
 fn dirs_home() -> std::path::PathBuf {
-    std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| "/tmp".into())
+    rozum_paths::home_dir().unwrap_or_else(rozum_paths::temp_dir)
 }
 
 /// A `serve` that outlived a deploy is serving the old code. Restart it — but only when nobody

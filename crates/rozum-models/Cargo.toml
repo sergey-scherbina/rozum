@@ -11,6 +11,8 @@ license = "Apache-2.0"
 # workspace split (docs/specs/workspace-split.md).
 
 [dependencies]
+# Where this user keeps files — one rule for the workspace (docs/specs/windows-user-paths.md).
+rozum-paths = { path = "../rozum-paths" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

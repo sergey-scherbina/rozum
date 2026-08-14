@@ -411,7 +411,9 @@ pub(crate) async fn run_matrix_job(job_id: &str) {
         (j.models.clone(), j.agents.clone(), j.tasks.clone(), j.reps.unwrap_or(1))
     };
 
-    let log_dir = state_dir().map(|d| d.join("matrix-logs")).unwrap_or_else(|| PathBuf::from("/tmp"));
+    let log_dir = state_dir()
+        .map(|d| d.join("matrix-logs"))
+        .unwrap_or_else(rozum_paths::temp_dir);
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join(format!("{job_id}.log"));
 
@@ -519,6 +521,10 @@ pub(crate) async fn run_matrix_job(job_id: &str) {
 /// matches this run, then copy them into $OUT/cells/<agent>/<model_safe>/<task>/.
 pub(crate) fn archive_matrix_cells(result_dir: &PathBuf) {
     let cells_root = result_dir.join("cells");
+    // A LITERAL `/tmp`, and it must stay one: `agentic.sh` creates these workdirs with
+    // `mktemp -d /tmp/rozum-agentic-XXXXXX`, so the scanner and the maker have to name the same
+    // directory. `std::env::temp_dir()` would read `$TMPDIR` — on macOS a per-user
+    // `/var/folders/…` — and this would then find nothing, silently, on every run.
     let tmp = PathBuf::from("/tmp");
     let entries = match std::fs::read_dir(&tmp) {
         Ok(e) => e, Err(_) => return,

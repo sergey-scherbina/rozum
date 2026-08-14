@@ -1259,10 +1259,10 @@ const LOG_SLICE_CAP: usize = 200;
 /// a slice by time had nothing to slice on. `null` when there is no log to read, which is different
 /// from an empty slice and is said differently: an empty slice means the window was quiet.
 pub fn gateway_log_slice(from: u64, to: Option<u64>) -> serde_json::Value {
-    let Some(home) = std::env::var_os("HOME") else {
+    let Some(home) = rozum_paths::home_dir() else {
         return serde_json::Value::Null;
     };
-    let path = std::path::Path::new(&home).join(".rozum-gateway.log");
+    let path = home.join(".rozum-gateway.log");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return serde_json::Value::Null;
     };
@@ -2007,17 +2007,14 @@ pub fn revoke_token(state_dir: &Path, token_or_handle: &str) -> std::io::Result<
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// `$XDG_STATE_HOME/rozum` (fallback `~/.local/state/rozum`).
+/// `$XDG_STATE_HOME/rozum` (fallback `~/.local/state/rozum`, or `%LOCALAPPDATA%\rozum`).
+///
+/// The rule is `rozum_paths`, shared with the gateway and the core: this used to be its own copy,
+/// resolving `HOME` — which Windows does not set — and falling back to a literal `/tmp`. The
+/// daemon's global `rooms.json` lives under here and the gateway console READS it, so the two must
+/// agree about where it is; they did by coincidence, in two separate copies of the same lines.
 pub fn rozum_state_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/tmp"));
-            home.join(".local").join("state")
-        });
-    base.join("rozum")
+    rozum_paths::state_dir().unwrap_or_else(|| rozum_paths::temp_dir().join("rozum"))
 }
 
 fn parse_lines(bytes: &[u8]) -> Vec<StoredTurn> {

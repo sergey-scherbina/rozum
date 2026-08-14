@@ -28,8 +28,10 @@ pub fn dir() -> PathBuf {
     if let Some(p) = std::env::var_os("NADIA_STATE") {
         return PathBuf::from(p);
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/tmp".into());
-    home.join(".nadia").join(".agents")
+    rozum_paths::home_dir()
+        .unwrap_or_else(rozum_paths::temp_dir)
+        .join(".nadia")
+        .join(".agents")
 }
 
 fn path_of(id: AgentId) -> PathBuf {

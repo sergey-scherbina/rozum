@@ -73,10 +73,10 @@ fn lmstudio_home() -> PathBuf {
     std::env::var_os("ROZUM_LMSTUDIO_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."));
-            home.join(".cache/lm-studio")
+            rozum_paths::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".cache")
+                .join("lm-studio")
         })
 }
 
@@ -84,10 +84,9 @@ fn ollama_home() -> PathBuf {
     std::env::var_os("ROZUM_OLLAMA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."));
-            home.join(".ollama")
+            rozum_paths::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".ollama")
         })
 }
 

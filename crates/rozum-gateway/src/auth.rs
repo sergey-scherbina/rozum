@@ -480,7 +480,7 @@ pub(crate) fn cookie(headers: &axum::http::HeaderMap, name: &str) -> Option<Stri
 pub(crate) fn busi_authed(headers: &axum::http::HeaderMap) -> bool {
     let Some(tok) = cookie(headers, "busi_device") else { return false };
     if tok.is_empty() { return false; }
-    let path = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".busi/tokens.txt"));
+    let path = rozum_paths::home_dir().map(|h| h.join(".busi").join("tokens.txt"));
     let Some(path) = path else { return false };
     let Ok(content) = std::fs::read_to_string(path) else { return false };
     content.lines().any(|l| l.trim() == tok)

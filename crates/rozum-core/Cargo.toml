@@ -17,6 +17,8 @@ license = "Apache-2.0"
 local-models = ["dep:candle", "dep:candle-transformers", "dep:tokenizers"]
 
 [dependencies]
+# Where this user keeps files — one rule for the workspace (docs/specs/windows-user-paths.md).
+rozum-paths = { path = "../rozum-paths" }
 rozum-stamp = { path = "../rozum-stamp" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

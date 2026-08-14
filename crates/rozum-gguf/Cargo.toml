@@ -24,6 +24,8 @@ gguf-vulkan = ["gguf", "llama-cpp-2/vulkan"]
 gguf-rocm = ["gguf", "llama-cpp-2/rocm"]
 
 [dependencies]
+# Where this user keeps files — one rule for the workspace (docs/specs/windows-user-paths.md).
+rozum-paths = { path = "../rozum-paths" }
 rozum-core = { path = "../rozum-core" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"

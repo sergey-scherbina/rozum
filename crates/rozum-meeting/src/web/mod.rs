@@ -154,14 +154,8 @@ pub async fn run_bridge_with(
 }
 
 fn transcript_path(room: &str) -> PathBuf {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".local/state"))
-                .unwrap_or_else(|| PathBuf::from(".local/state"))
-        });
-    base.join("rozum")
+    rozum_paths::state_dir()
+        .unwrap_or_else(|| PathBuf::from(".local").join("state").join("rozum"))
         .join("rooms")
         .join(room)
         .join("transcript.jsonl")

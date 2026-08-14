@@ -16,6 +16,9 @@ ucc = ["dep:webauthn-rs"]
 [dependencies]
 base64 = "0.22"
 rozum-core = { path = "../rozum-core" }
+# One resolution order for "where does this user keep files", shared with rozum-meeting (which
+# cannot depend on rozum-core) — docs/specs/windows-user-paths.md.
+rozum-paths = { path = "../rozum-paths" }
 rozum-models = { path = "../rozum-models" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

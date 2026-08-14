@@ -24,7 +24,7 @@ const MS_REVISION: &str = "master";
 pub fn model_cache_dir(owner: &str, name: &str) -> Option<PathBuf> {
     let root = std::env::var_os("MODELSCOPE_CACHE")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/modelscope")))?;
+        .or_else(|| rozum_paths::home_dir().map(|h| h.join(".cache").join("modelscope")))?;
     Some(root.join("hub").join(owner).join(name))
 }
 

@@ -36,10 +36,11 @@ pub(crate) fn wanted(file: &str) -> bool {
 
 /// HF hub cache dir for `<org>/<name>` (mirrors `resolve_model_dir`).
 fn model_cache_dir(org: &str, name: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
     Some(
-        PathBuf::from(home)
-            .join(".cache/huggingface/hub")
+        rozum_paths::home_dir()?
+            .join(".cache")
+            .join("huggingface")
+            .join("hub")
             .join(format!("models--{org}--{name}")),
     )
 }

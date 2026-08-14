@@ -411,9 +411,13 @@ fn human_age(secs: u64) -> String {
 /// than assumed. `scripts/install-bins.sh` derives its destinations the same way, for the same
 /// reason: this machine has had the same program installed at three paths with three ages.
 fn job_program(label: &str) -> Option<String> {
-    let home = std::env::var_os("HOME")?;
-    let plist =
-        std::path::Path::new(&home).join("Library/LaunchAgents").join(format!("{label}.plist"));
+    // `~/Library/LaunchAgents` stays spelled out: this path describes MACOS, not this user's
+    // filesystem conventions, and pretending otherwise would hide that the whole function is
+    // launchd's (`windows-service-install` is where a Windows arm goes).
+    let plist = rozum_paths::home_dir()?
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{label}.plist"));
     let out = Command::new("plutil")
         .args(["-extract", "ProgramArguments.0", "raw", "-o", "-"])
         .arg(&plist)

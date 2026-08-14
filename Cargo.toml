@@ -74,6 +74,8 @@ rozum-meeting = { path = "crates/rozum-meeting" }
 # harmony). Phase 0 of the workspace split; the `rozum` crate re-exports its
 # modules under their original paths in src/lib.rs. `local-models` forwards here.
 rozum-core = { path = "crates/rozum-core" }
+# Where this user keeps files — one rule for the workspace (docs/specs/windows-user-paths.md).
+rozum-paths = { path = "crates/rozum-paths" }
 # Model catalog / sourcing / residency (Phase 2). Pure leaf; re-exported under
 # its original module paths in src/lib.rs.
 rozum-models = { path = "crates/rozum-models" }

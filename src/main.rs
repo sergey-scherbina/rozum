@@ -5923,8 +5923,8 @@ fn resolve_workspace_token(tok: &str) -> std::path::PathBuf {
     if tok.is_empty() || tok == "." {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     } else if let Some(rest) = tok.strip_prefix("~/") {
-        std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join(rest))
+        rozum_paths::home_dir()
+            .map(|h| h.join(rest))
             .unwrap_or_else(|| PathBuf::from(tok))
     } else {
         PathBuf::from(tok)
@@ -9596,14 +9596,9 @@ async fn try_build_mlx_native_backend(
 /// truncated on each launch — useful for debugging the most recent run
 /// without accumulating noise across sessions.
 fn init_tui_logging() {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| std::path::PathBuf::from(h).join(".local/state"))
-                .unwrap_or_else(|| std::path::PathBuf::from(".local/state"))
-        });
-    let log_dir = base.join("rozum").join("log");
+    let log_dir = rozum_paths::state_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".local").join("state").join("rozum"))
+        .join("log");
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join("rozum.log");
     match std::fs::File::create(&log_path) {

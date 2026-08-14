@@ -23,6 +23,7 @@ path = "src/main.rs"
 [dependencies]
 rozum-agent = { path = "../rozum-agent" }
 rozum-core = { path = "../rozum-core" }
+rozum-paths = { path = "../rozum-paths" }
 rozum-gateway = { path = "../rozum-gateway" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

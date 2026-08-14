@@ -14,18 +14,17 @@ use serde::{Deserialize, Serialize};
 /// already-connected agents reconnect transparently.
 pub const DEFAULT_GATEWAY_PORT: u16 = 8089;
 
-fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-}
-
-/// `$XDG_STATE_HOME/rozum/gateway/` (or `~/.local/state/...`).
+/// `$XDG_STATE_HOME/rozum/gateway/` (or `~/.local/state/...`, or `%LOCALAPPDATA%\rozum\gateway`).
+///
+/// The fallback when the platform will not say where home is used to be a literal `/tmp`, which on
+/// Windows names `\tmp` on the current drive — a directory every account on the machine shares.
+/// This directory holds the residency ledger, whose whole job is to stop a second model load from
+/// exhausting host RAM (BUG-003, a kernel-watchdog reboot); a ledger two users share is not a
+/// ledger. `rozum_paths` explains the resolution order.
 pub fn gateway_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".local/state"));
-    base.join("rozum").join("gateway")
+    rozum_paths::state_dir()
+        .unwrap_or_else(|| rozum_paths::temp_dir().join("rozum"))
+        .join("gateway")
 }
 
 pub fn active_path() -> PathBuf {
@@ -1381,6 +1380,34 @@ mod tests {
         // (seq 1) when both fit — priority wins over arrival order.
         let prio_mix = vec![(PRIO_BATCH, 1u64, 50u32, 5 * GIB), (PRIO_INTERACTIVE, 9, 60, 5 * GIB)];
         assert_eq!(pick_front_that_fits(&prio_mix, 0, budget, avail, min_free, Normal), Some((0, 9, 60)));
+    }
+
+    #[test]
+    fn the_residency_ledger_did_not_move_on_the_machine_this_runs_on() {
+        // The whole point of routing these paths through `rozum_paths` was that `HOME` is not a
+        // Windows variable. The risk of that change is on the platform that IS running: if the
+        // ledger moves, a live gateway's reservations become invisible to the next one and the
+        // admission gate stops gating — the failure it exists to prevent is an OOM reboot
+        // (BUG-003). So this asserts the old layout, exactly.
+        let _env = POISON_ENV_LOCK.lock().unwrap();
+        let prev_state = std::env::var_os("XDG_STATE_HOME");
+        let prev_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::remove_var("XDG_STATE_HOME");
+            std::env::set_var("HOME", "/Users/somebody");
+        }
+        let dir = gateway_dir();
+        unsafe {
+            match prev_state {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        assert_eq!(dir, PathBuf::from("/Users/somebody/.local/state/rozum/gateway"));
     }
 
     #[test]

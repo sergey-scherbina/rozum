@@ -65,7 +65,9 @@ pub fn secret_path(secret: &str) -> PathBuf {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+    // The fallback stays the CURRENT DIRECTORY, not a temp dir: these are the operator's bot
+    // secrets, and a readable-by-anyone location is the wrong place to invent for them.
+    rozum_paths::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 impl Bots {

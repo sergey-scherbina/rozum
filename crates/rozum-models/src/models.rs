@@ -215,9 +215,7 @@ pub fn scan_all_installed() -> Vec<InstalledModel> {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    rozum_paths::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn dir_size(path: &Path) -> u64 {

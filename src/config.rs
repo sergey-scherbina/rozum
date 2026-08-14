@@ -284,10 +284,7 @@ impl RuntimeConfig {
         if cwd.is_file() {
             return Some(cwd);
         }
-        let xdg = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .map(|base| base.join("rozum").join("rozum.toml"));
+        let xdg = rozum_paths::config_dir().map(|base| base.join("rozum.toml"));
         match xdg {
             Some(p) if p.is_file() => Some(p),
             _ => None,

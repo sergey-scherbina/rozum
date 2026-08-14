@@ -86,8 +86,7 @@ pub fn config_path(explicit: Option<&Path>, workspace: &Path) -> Option<PathBuf>
     if workspace_cfg.is_file() {
         return Some(workspace_cfg);
     }
-    let user = std::env::var_os("HOME")
-        .map(PathBuf::from)?
+    let user = rozum_paths::home_dir()?
         .join(".config")
         .join("nadia")
         .join("mcp.json");

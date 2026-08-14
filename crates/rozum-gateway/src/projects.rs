@@ -35,10 +35,11 @@ pub struct ProjectBrief {
 /// List known project directories from `rooms.json` for the workdir picker. Rooms without a
 /// project path, and test/worktree paths, are excluded.
 pub(crate) fn ucc_config_path() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
+    rozum_paths::home_dir()
         .unwrap_or_default()
-        .join(".rozum/ucc/config.json")
+        .join(".rozum")
+        .join("ucc")
+        .join("config.json")
 }
 
 pub(crate) fn read_projects_dir() -> String {
@@ -46,27 +47,27 @@ pub(crate) fn read_projects_dir() -> String {
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
         .and_then(|v| v.get("projects_dir").and_then(|d| d.as_str()).map(|s| s.to_string()))
         .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| std::path::PathBuf::from(h).join("work").to_string_lossy().to_string())
-                .unwrap_or_else(|| "/tmp/projects".to_string())
+            rozum_paths::home_dir()
+                .map(|h| h.join("work"))
+                .unwrap_or_else(|| rozum_paths::temp_dir().join("projects"))
+                .to_string_lossy()
+                .to_string()
         })
 }
 
 pub(crate) fn projects_extra_path() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
+    rozum_paths::home_dir()
         .unwrap_or_default()
-        .join(".rozum/ucc/projects.json")
+        .join(".rozum")
+        .join("ucc")
+        .join("projects.json")
 }
 
 pub(crate) fn list_projects() -> Vec<ProjectBrief> {
     let mut out: Vec<ProjectBrief> = Vec::new();
 
     // 1) rooms.json — project rooms from the meeting daemon
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state")));
-    if let Some(path) = base.map(|b| b.join("rozum/rooms.json")) {
+    if let Some(path) = rozum_paths::state_dir().map(|d| d.join("rooms.json")) {
         if let Ok(bytes) = std::fs::read(&path) {
             if let Ok(rooms) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) {
                 for r in &rooms {

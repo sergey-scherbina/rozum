@@ -43,14 +43,8 @@ impl Default for RoomConfig {
 }
 
 fn room_transcript_path(name: &str) -> std::path::PathBuf {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| std::path::PathBuf::from(h).join(".local/state"))
-                .unwrap_or_else(|| std::path::PathBuf::from(".local/state"))
-        });
-    base.join("rozum")
+    rozum_paths::state_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".local").join("state").join("rozum"))
         .join("rooms")
         .join(name)
         .join("room-transcript.jsonl")

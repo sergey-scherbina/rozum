@@ -122,7 +122,9 @@ pub(crate) fn update_coder_record(id: &str, f: impl FnOnce(&mut CoderRecord)) ->
 /// Returns (pid, log_path).
 pub(crate) fn spawn_coder(agent: &str, model: &str, workdir: &str, prompt: &str, verify: bool) -> std::io::Result<(u32, PathBuf)> {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rozum"));
-    let log_dir = state_dir().map(|d| d.join("logs")).unwrap_or_else(|| PathBuf::from("/tmp"));
+    let log_dir = state_dir()
+        .map(|d| d.join("logs"))
+        .unwrap_or_else(rozum_paths::temp_dir);
     let _ = std::fs::create_dir_all(&log_dir);
     let stamp = crate::share::now_unix();
     let log_path = log_dir.join(format!("coder-{}-{}.log", sanitize(agent), stamp));

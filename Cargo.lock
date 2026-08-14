@@ -3816,6 +3816,7 @@ dependencies = [
  "rozum-agent",
  "rozum-core",
  "rozum-gateway",
+ "rozum-paths",
  "serde",
  "serde_json",
  "tempfile",
@@ -5206,6 +5207,7 @@ dependencies = [
  "rozum-mistralrs",
  "rozum-mlx",
  "rozum-models",
+ "rozum-paths",
  "rozum-x86",
  "schemars 1.2.1",
  "serde",
@@ -5264,6 +5266,7 @@ dependencies = [
  "notify",
  "rand 0.8.6",
  "reqwest 0.12.28",
+ "rozum-paths",
  "rozum-stamp",
  "serde",
  "serde_json",
@@ -5288,6 +5291,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rozum-core",
  "rozum-models",
+ "rozum-paths",
  "serde",
  "serde_json",
  "tokio",
@@ -5306,6 +5310,7 @@ dependencies = [
  "async-trait",
  "llama-cpp-2",
  "rozum-core",
+ "rozum-paths",
  "serde_json",
  "tempfile",
  "tokio",
@@ -5339,6 +5344,7 @@ dependencies = [
  "ratatui",
  "reqwest 0.12.28",
  "rmcp",
+ "rozum-paths",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -5398,11 +5404,16 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "reqwest 0.12.28",
+ "rozum-paths",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
 ]
+
+[[package]]
+name = "rozum-paths"
+version = "0.1.0"
 
 [[package]]
 name = "rozum-stamp"

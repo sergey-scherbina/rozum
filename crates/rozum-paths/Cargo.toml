@@ -1,0 +1,12 @@
+[package]
+name = "rozum-paths"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# NO DEPENDENCIES, on purpose — the same reason `rozum-stamp` has none. Four crates need to agree
+# on where this user's files are, and one of them is `rozum-meeting`, which deliberately does not
+# depend on `rozum-core` (the daemon is engine-free). A rule that cannot be shared gets copied, and
+# the copies drift: this crate exists because `rozum-gateway` alone had THREE copies of the state
+# directory, already differing in shape (`docs/specs/windows-user-paths.md`).
+[dependencies]

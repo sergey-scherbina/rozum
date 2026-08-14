@@ -19,14 +19,14 @@ pub struct LocalIdentity {
     pub display: String,
 }
 
-/// `$XDG_CONFIG_HOME/rozum` (or `~/.config/rozum`).
+/// `$XDG_CONFIG_HOME/rozum` (or `~/.config/rozum`, or `%APPDATA%\rozum`) — `rozum_paths`.
+///
+/// One difference kept from the copy this replaced: an EMPTY `XDG_CONFIG_HOME` used to fall
+/// through to the home-based path here and does not in the shared rule. Empty means "set to
+/// nothing", and honouring it as `/rozum` at the filesystem root is not what anyone meant — but
+/// this is the one caller that noticed, so it is worth saying that the behaviour moved.
 fn config_dir() -> Option<PathBuf> {
-    if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
-        if !x.is_empty() {
-            return Some(PathBuf::from(x).join("rozum"));
-        }
-    }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/rozum"))
+    rozum_paths::config_dir()
 }
 
 /// Path to `identity.json`.

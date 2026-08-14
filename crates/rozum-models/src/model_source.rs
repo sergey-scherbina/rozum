@@ -101,9 +101,10 @@ pub fn resolve_model_dir(spec: &str) -> Option<PathBuf> {
     };
     let (org, name) = repo.split_once('/')?;
 
-    let home = std::env::var_os("HOME")?;
-    let cache = PathBuf::from(home)
-        .join(".cache/huggingface/hub")
+    let cache = rozum_paths::home_dir()?
+        .join(".cache")
+        .join("huggingface")
+        .join("hub")
         .join(format!("models--{org}--{name}"))
         .join("snapshots");
     let snapshots = std::fs::read_dir(&cache).ok()?;

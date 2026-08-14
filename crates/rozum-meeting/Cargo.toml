@@ -21,6 +21,8 @@ mcp-http = [
 ]
 
 [dependencies]
+# Where this user keeps files — one rule for the workspace (docs/specs/windows-user-paths.md).
+rozum-paths = { path = "../rozum-paths" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 futures-util = "0.3"

@@ -110,7 +110,7 @@ pub(crate) fn spawn_participant(model: &str, room: &str, policy: &str, persona: 
     let gw_url = format!("http://127.0.0.1:{gw_port}/v1");
     let log_path = state_dir()
         .map(|d| d.join("logs"))
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
+        .unwrap_or_else(rozum_paths::temp_dir);
     let _ = std::fs::create_dir_all(&log_path);
     let log = std::fs::OpenOptions::new()
         .create(true).append(true)
