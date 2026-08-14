@@ -138,12 +138,16 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   - [x] **stop-sequence-which-one — DONE 2026-08-14 as BUG-041.** Losing `Copy` cost THREE compile
     errors, not the wide change the entry priced — and the field turned out to be absent from the
     non-streaming body altogether, not merely null.
-  - **`frequency_penalty` / `presence_penalty`** (OpenAI) — internally there is only
-    `repeat_penalty`, and it is a DIFFERENT function (HF convention: divide positive logits /
-    multiply negative ones, over a recent window) rather than OpenAI's additive-per-occurrence
-    penalties. Mapping one onto the other would be an approximation presented as a parameter.
-    Decide: implement them properly, or state in the API docs that they are unsupported. Do not
-    quietly alias them.
+  - **`frequency_penalty` / `presence_penalty`** — **DONE 2026-08-14 as BUG-042** for GGUF and x86,
+    implemented properly (additive, count-based, generated-tokens-only, clamped to [-2,2]) rather
+    than aliased onto `repeat_penalty`.
+  - [ ] **mlx-openai-penalties** — the remaining half of BUG-042, and it is cross-repo. The MLX
+    backend samples inside the vendored `mlx-lm` graph (`SamplerOpts { temp, top_p, top_k,
+    repeat_penalty }` in `sergey-scherbina/mlx-rs`), so honouring the pair there means two fields, a
+    count-based penalty beside `apply_repeat_penalty`, a fork push and a rev bump in
+    `Cargo.toml` — plus an MLX rebuild to verify. The fork already keeps the full token history
+    (`self.history`), so the counts are available. Until then the backend logs `sampling_unsupported`
+    once rather than ignoring the request in silence.
   - **`repeat_penalty` has the opposite problem** — **DONE 2026-08-14 as BUG-036**, wired as
     `repetition_penalty` on both OpenAI dialects. It went deeper than "unset": two of the three MLX
     batching-admission counters were reporting on paths no client could trigger.

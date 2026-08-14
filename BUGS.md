@@ -5,6 +5,40 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-042 — `frequency_penalty` / `presence_penalty` were accepted and did nothing
+
+- **Status:** FIXED for the engines that sample in our code (GGUF, x86) 2026-08-14, and **named
+  rather than silent** on the one that does not (MLX). The MLX half needs a change to the vendored
+  `mlx-lm` fork — filed as `mlx-openai-penalties`.
+- **Severity:** P3 by traffic — only `/v1/chat/completions` defines them, and neither Claude Code
+  (Anthropic) nor codex (Responses) sends them — but P2 by kind: accepted, documented, inert.
+
+**Implemented honestly, which is the whole point of the entry.** OpenAI's pair is additive and
+count-based: `logit -= frequency × count(token) + presence`. Our `repeat_penalty` is the llama.cpp
+convention — multiplicative, flat, over a recent window. **Aliasing one onto the other would have
+been the cheap fix and it would have presented an approximation as the parameter the client asked
+for**, which is a worse failure than not supporting it: the client cannot tell.
+
+Two decisions the specification leaves open, settled and written down:
+
+- **Counting scope: generated tokens only, not the prompt.** The prompt is the user's own text;
+  penalising it makes the model avoid the words the user just used, which is the opposite of what
+  someone asking for less repetition wants. (This is also what vLLM does.)
+- **Out-of-range values are clamped to [-2, 2].** Outside that range the effect is not "stronger",
+  it is "the distribution collapses" — a client that typed 100 would get gibberish with a 200.
+
+**The MLX gap is the honest part.** `rozum-core::sampler` is driven by GGUF and x86; the MLX
+backend samples inside the vendored mlx-lm graph, where the knobs live in the fork's `SamplerOpts`.
+So on the engine this machine actually runs, these two parameters are still not applied — and the
+backend now says so once (`sampling_unsupported`) instead of ignoring them, which is the exact
+silence this week's bugs were about. The fork keeps the full token history already, so the remaining
+work is two fields, a count-based penalty function, and a rev bump.
+
+**A second copy found on the way:** the GGUF path built `SamplerConfig` by hand instead of calling
+`from_params`, so it went stale the moment the struct grew. It only failed loudly because a struct
+literal must list every field. It now uses the shared mapping, with one deliberate override — GGUF's
+historic default temperature is 0.7 where the shared mapping's is greedy.
+
 ## BUG-041 — Anthropic's `stop_sequence` field was missing entirely, so a client with several could not tell which fired
 
 - **Status:** FIXED 2026-08-14 — `StopReason::StopSequence(String)`; both the streaming
