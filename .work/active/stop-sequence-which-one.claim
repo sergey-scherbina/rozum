@@ -1,0 +1,6 @@
+feature/stop-sequence-which-one 2026-08-14T21:34:26Z
+agent: nadia-ucc
+heartbeat: 2026-08-14T21:34:26Z
+status: not-started
+done-so-far:
+next: try StopReason::StopSequence(String) first and let the compiler price losing Copy, before falling back to a field on ChatEvent::Done (38 sites)
