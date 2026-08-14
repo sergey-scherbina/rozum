@@ -218,20 +218,38 @@ the switch cannot pass a test while quietly serving the old code.
 routes send none on these two. Harmless on an authorized read, and it is the only header that
 differs.
 
-**Why it still cannot ship, and it is not this repo's to fix.** The slice was developed against a
-toolchain carrying two fixes that are not in scalascript's `main`, and the commit timestamps say so
-plainly — each upstream fix lands twenty seconds before the slice commit it unblocked:
+## Slice 1 is finished and unblocked (2026-08-15)
 
-| upstream fix | what it unblocked here |
+It builds and runs on scalascript's **unmodified main**, and nothing upstream is outstanding.
+
+**Five defects had to be fixed upstream to get here, and none of them was known when the slice was
+written.** Each was found by porting a route, minimised, filed with both lanes measured on a
+toolchain whose `.build-digest` matched its tree, and re-measured here before the workaround came
+out — never closed off a status field:
+
+| upstream defect | what it cost here |
 |---|---|
-| `fix/query-percent-decoding` 18:33:04 | `84e5595` 18:33:25 — equal to the Rust handler on 200 real cells |
-| `fix/http-response-status` 19:38:02 | `d54cedb` 19:38:17 — refuses with a status, matches completely |
+| `route-handler-lowered-to-string` | the file did not compile: `route` is declared `Request => Response`, lowered to `-> String` |
+| `query-not-percent-decoded-on-build-rust` | a model spec arrived as `mlx-community%3A…` and matched no CSV row — wrong data, no error |
+| `build-rust-indexof-on-string` | `indexOf` lowered to `.iter().position(…)` on a String |
+| `build-rust-concat-list-element-with-toplevel-val` | a three-operand concatenation lowered to `String + String` |
+| `string-length-counts-bytes-not-characters` | `length` answered BYTES, `substring` characters — a PANIC mid-request that poisoned the server |
+| `serve-binds-all-interfaces` | no way to keep the server off the LAN; the console it replaces binds loopback |
 
-Without the first, a model spec arrives as `mlx-community%3AQwen3.5-4B-MLX-4bit` and matches no CSV
-row: the route answers "no such cell" where the Rust one answers with the row — wrong data, not an
-error. Without the second, the file does not compile at all: `route` is declared
-`handler: Request => Response` and lowered to a callback returning `String`.
+One of their fixes broke this file rather than helping it, which is worth recording: closing
+`toint-on-a-non-integer-diverges` by making BOTH lanes abort turned `isInt`'s `s.toInt.toString == s`
+into a landmine, because `isNumeric` runs on every CSV field and `seconds` is `3.1`. It BUILT and
+would have died on the first request. `isInt` is a digit walk now, and that is permanent — `toInt`
+is a partial function and this predicate must be total.
 
-Filed upstream 2026-08-14 as `route-handler-lowered-to-string`, with a 22-line repro and both lanes
-measured; the percent-decoding one has a pushed branch and **no report yet** — it has not been
-re-measured since, and a report written from memory is what their own INBOX doc warns against.
+**Verified against the running Rust console, after every workaround came out:** 1892/1892 cells
+identical in status and every field; `/view` byte-identical on a live, a bogus and an empty token;
+0 panics. The empty-token case was a divergence nobody had measured before — `/view/` bare answered
+410 here and 404 in Rust; both refuse, so it was never a hole, but an unmeasured difference is its
+own kind of debt.
+
+**Deployment is the operator's, and it is now only a decision, not a blocker.** `ROZUM_UCC_SSC_ORIGIN`
+unset is today's behaviour exactly; an unreachable origin answers 502 rather than falling back.
+`SSC_HTTP_BIND=127.0.0.1` keeps the .ssc server off the network — demonstrated: unset binds `*:8412`,
+set binds `127.0.0.1:8412` and the host's own LAN address refuses, the same answer `:8411` gives.
+The one remaining deviation is a header: the .ssc runtime adds `Cache-Control: no-store`.
