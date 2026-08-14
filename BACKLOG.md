@@ -141,7 +141,9 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   - **`frequency_penalty` / `presence_penalty`** — **DONE 2026-08-14 as BUG-042** for GGUF and x86,
     implemented properly (additive, count-based, generated-tokens-only, clamped to [-2,2]) rather
     than aliased onto `repeat_penalty`.
-  - [ ] **mlx-openai-penalties** — the remaining half of BUG-042, and it is cross-repo. The MLX
+  - [x] **mlx-openai-penalties — DONE 2026-08-15.** Fork `sergey-scherbina/mlx-rs` 54acd697 (two
+    fields, a count-based penalty, and `keeps_history()` replacing the inline predicate in eleven
+    generators), pins bumped, threaded through the dense/hybrid/constrained paths. The old entry: The MLX
     backend samples inside the vendored `mlx-lm` graph (`SamplerOpts { temp, top_p, top_k,
     repeat_penalty }` in `sergey-scherbina/mlx-rs`), so honouring the pair there means two fields, a
     count-based penalty beside `apply_repeat_penalty`, a fork push and a rev bump in

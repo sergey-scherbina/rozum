@@ -5,6 +5,52 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-044 — `nadia`'s sandbox test fails on Linux, and has since before 2026-08-14
+
+- **Status:** OPEN, filed 2026-08-15 while attributing a red CI. **Not caused by this week's work:**
+  it was already failing at run `da4cc295` (07:45 on 2026-08-14), before that day's first push.
+- **Severity:** P2 — it is one of only two things keeping the Linux job red, and a permanently red
+  job is one nobody reads, which is how the macOS and Windows breakages above went unnoticed.
+
+```
+test sandbox::tests::the_agent_cannot_delete_its_own_workspace ... FAILED
+crates/nadia/src/sandbox.rs:296: assertion `left != right` failed:
+    deleting the workspace root must be refused: ""
+```
+
+Passes on macOS, fails on Linux, so it is a platform difference in path handling rather than a
+logic error — the refusal it asserts compares a canonicalised path, and the empty string in the
+message says the comparison had nothing to compare. Needs a Linux box or a container to fix
+properly, and guessing at it from a mac is how the first version got platform-shaped.
+
+## BUG-043 — I broke CI twice in one day and did not notice, because I never looked at it
+
+- **Status:** FIXED 2026-08-15 (both breakages repaired in the same change that finished BUG-042).
+- **Severity:** P1 as a process defect. Every board entry today quoted "13 workspace suites green"
+  — true, and it was the wrong axis twice.
+
+**macOS, red from 21:49.** Two compile errors of mine, both behind `mlx-native`: `E0507` from
+BUG-041 (`StopReason` losing `Copy`, at a site in the MLX backend) and `E0433 cannot find obs` from
+BUG-042's "this engine cannot honour it" notice, which called `crate::obs` in a crate that does not
+re-export it. **The notice written to prevent silent failure did not compile.** Every check I ran
+and quoted was `--no-default-features`; neither error is reachable that way. This is precisely the
+lesson already in this repo as `cargo check hides test rot`, applied to features instead of tests.
+
+**Windows, red from 08:55.** `the_residency_ledger_did_not_move_on_the_machine_this_runs_on` — the
+test I wrote to prove the Windows path port moved nothing — asserted against a forward-slash
+LITERAL, which is not what `PathBuf` yields on Windows. A unix-shaped test guarding a Windows port.
+
+**Its neighbour was collateral, and the mechanism is worth keeping.** A test that fails while
+holding `POISON_ENV_LOCK` POISONS it, and every later test that `.unwrap()`s the lock dies of the
+poison instead of its own result — so one wrong assertion produced two red tests, one of which had
+nothing wrong with it. All 13 sites take the lock with `unwrap_or_else(|e| e.into_inner())` now, and
+the rule is written at the declaration. Same shape as BUG-035, one crate over.
+
+**What actually changes going forward:** a change is not verified by the suite I happen to run.
+`--no-default-features` is one axis of four here (default/`mlx-native`, `mistralrs`, `gguf`,
+feature-off), and three of them were never checked today. The fix is not "be careful" — it is to run
+the axes the CI runs, and to LOOK at CI after pushing, which I had not done once.
+
 ## BUG-042 — `frequency_penalty` / `presence_penalty` were accepted and did nothing
 
 - **Status:** FIXED for the engines that sample in our code (GGUF, x86) 2026-08-14, and **named

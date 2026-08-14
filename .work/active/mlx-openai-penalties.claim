@@ -1,7 +1,0 @@
-feature/mlx-openai-penalties 2026-08-14T21:50:46Z
-agent: nadia-ucc
-heartbeat: 2026-08-14T21:50:46Z
-status: not-started
-note: CROSS-REPO — .vendor/mlx-lm fork (sergey-scherbina/mlx-rs) then a rev bump here.
-done-so-far:
-next: fork branch off the pinned 2df597b7, add the pair to SamplerOpts + a count-based penalty, push, bump, rebuild MLX
