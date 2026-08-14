@@ -129,12 +129,13 @@ single-writer daemon). Each item below is its own spec+build later — listed to
   Measured against the three request structs, not from memory. The two that were pure wiring are
   already fixed (BUG-031 `top_p`/`top_k`, BUG-032 `seed`); the streaming-usage one is BUG-033. What
   is left is capability, and each needs a decision before code:
-  - **stop sequences** — `stop` (OpenAI) / `stop_sequences` (Anthropic). Neither struct declares
-    them and **`SamplingParams` has no field at all**, so this is not a dropped parameter but a
-    missing feature: a client asking to stop at a marker generates past it. The largest of the set —
-    it needs a field, backend support in both engines' decode loops (the shared
-    `consume_tokens` stop check is the natural home, beside the EOS test), and a test that a stop
-    string mid-token does the right thing.
+  - **stop sequences** — **DONE 2026-08-14 as BUG-037**, in the shared `consume_tokens` exactly as
+    this entry guessed, with the mid-token case as its own test. Empty stays a strict no-op.
+  - [ ] **stop-reason-sequence** — the label, split off from BUG-037. Anthropic reports
+    `stop_reason: "stop_sequence"` and which sequence matched; we return `end_turn`. It needs a new
+    `StopReason` variant, and that enum has **83 references across twelve files**, several in
+    matches that may not be exhaustive — mechanical, but on the decode path, so it deserves its own
+    pass rather than riding along with the behaviour change.
   - **`frequency_penalty` / `presence_penalty`** (OpenAI) — internally there is only
     `repeat_penalty`, and it is a DIFFERENT function (HF convention: divide positive logits /
     multiply negative ones, over a recent window) rather than OpenAI's additive-per-occurrence

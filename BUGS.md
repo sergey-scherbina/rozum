@@ -5,6 +5,44 @@ See `vendor/agent-plugins/bugs/commands/bugs.md`.
 
 ---
 
+## BUG-037 — stop sequences did not exist anywhere: a client asking to stop at a marker generated straight past it
+
+- **Status:** FIXED 2026-08-14 — `SamplingParams::stop`, parsed from OpenAI's `stop` and
+  Anthropic's `stop_sequences`, applied in the engine-agnostic `consume_tokens` so both engines
+  honour it identically.
+- **Severity:** P2. Unlike the rest of this week's set it was not a dropped field — there was no
+  field. `stop` is how a client running a chat-format prompt keeps the model from writing the
+  other side of the conversation, so "ignored" here means a plausible answer with someone else's
+  turn glued to the end of it.
+
+**Where the work actually was.** Not the parsing. Streaming text cannot be recalled, so the moment a
+token arrives that *might* be the start of a stop string, those bytes must be HELD until the next
+token decides. Models emit multi-byte tokens and a stop string lands mid-token routinely, so without
+hold-back the client sees `"\nHum"` on screen and the stop that was supposed to remove it arrives
+too late to matter.
+
+`stop_boundary(text, stops) -> (cut, completed)` answers both questions in one pass — cut here and
+end the turn, or cut here and wait — and is a pure function, so the hard part is tested without a
+model, a GPU or a gateway. Its cases: present, half-present, half-present-then-ordinary-text (the
+one that would silently truncate answers if the release were wrong), and a partial match that must
+not split a UTF-8 character.
+
+**Empty is a strict no-op**, and that is the property the whole change rests on: `stops.is_empty()`
+returns `(text.len(), false)`, so every request that asked for nothing is byte-identical. The wire
+golden shows it — the six pre-existing cases moved only by gaining a `stop=[]` field in the summary
+line.
+
+**Bounded on purpose:** `MAX_STOP_STRINGS = 16`. Every generated token is scanned against every stop
+string, so an unbounded list is an unbounded per-token cost on a server anyone on the tailnet can
+reach. OpenAI's own limit is 4, so no compliant client comes near it.
+
+**What is deliberately NOT done.** Anthropic reports `stop_reason: "stop_sequence"` (plus which one)
+where this returns `end_turn`. Distinguishing it means a new `StopReason` variant, and that enum has
+**83 references across twelve files** — a mechanical change with real risk of a wrong arm in a
+non-exhaustive match, on the decode path. The behaviour a client asked for (stop, and drop what
+follows) is delivered; the label is a separate change, filed as `stop-reason-sequence` in
+`BACKLOG.md`.
+
 ## BUG-036 — `repeat_penalty` was implemented all the way down to the Metal sampler, and no client could reach it
 
 - **Status:** FIXED 2026-08-14 — both OpenAI dialects accept `repetition_penalty` (the vLLM/TGI
