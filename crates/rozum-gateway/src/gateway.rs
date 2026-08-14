@@ -844,13 +844,14 @@ impl WireDialect for AnthropicWire {
                 anthropic_tools_to_internal(&self.req.tools),
                 &parse_anthropic_tool_choice(&self.req.tool_choice),
             ),
-            // Fewer knobs than the other two, and that is a GAP rather than a property of the
-            // dialect: Anthropic's Messages API defines `top_p` and `top_k`, `AnthropicReq`
-            // carries neither, so a client that sends them has them dropped in silence. Left
-            // exactly as it was — this change is behaviour-preserving by construction, and the
-            // gap is recorded in `src/testdata/wire-golden.txt` where it is visible as data.
+            // `top_p`/`top_k` are Messages API parameters and were silently dropped until
+            // BUG-031 — the gap this dialect's own golden line exposed. No `response_schema`
+            // and no `seed`: those two the Messages API genuinely does not define, so their
+            // absence here is the dialect, not an omission.
             sampling: SamplingParams {
                 temperature: self.req.temperature,
+                top_p: self.req.top_p,
+                top_k: self.req.top_k,
                 max_tokens: self.req.max_tokens,
                 ..Default::default()
             },

@@ -232,7 +232,9 @@ async fn render_all() -> String {
             "messages": [{"role": "user", "content": "hi"}],
             "tools": [{"name": "read_file", "description": "read it",
                        "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}}],
-            "temperature": 0.3, "max_tokens": 64,
+            // `top_p`/`top_k` are here because the golden's job is to show what a client asking
+            // for them actually gets: before BUG-031 this line read `top_p=None top_k=None`.
+            "temperature": 0.3, "top_p": 0.9, "top_k": 40, "max_tokens": 64,
             "stream": stream,
         }))
         .unwrap();

@@ -31,6 +31,12 @@ pub(crate) struct AnthropicReq {
     pub(crate) tool_choice: Value,
     pub(crate) max_tokens: Option<u32>,
     pub(crate) temperature: Option<f32>,
+    /// Both are documented Messages API parameters, and both were missing here until 2026-08-14
+    /// (BUG-031). serde drops an undeclared field without a word, so a client asking to narrow the
+    /// distribution got the opposite of what it asked for — `top_p.unwrap_or(1.0)` /
+    /// `top_k.unwrap_or(0)` downstream mean "no restriction at all" — and no error to notice.
+    pub(crate) top_p: Option<f32>,
+    pub(crate) top_k: Option<u32>,
     #[serde(default)]
     pub(crate) stream: Option<bool>,
 }
@@ -410,4 +416,40 @@ pub(crate) async fn anthropic_collect(
         "usage": { "input_tokens": in_tokens, "output_tokens": out_tokens }
     });
     axum::Json(body).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_messages_api_sampling_knobs_survive_parsing() {
+        // BUG-031. serde drops an undeclared field in silence, so the only way this endpoint could
+        // lose `top_p`/`top_k` was for nobody to look — and downstream `unwrap_or` turns the loss
+        // into "no restriction", the OPPOSITE of what the client asked for. A struct-level test
+        // because that is the layer where it went wrong: the mapping into `SamplingParams` is
+        // covered end-to-end by `src/testdata/wire-golden.txt`.
+        let req: AnthropicReq = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "top_k": 40,
+        }))
+        .expect("a documented Messages API body must parse");
+        assert_eq!(req.top_p, Some(0.9));
+        assert_eq!(req.top_k, Some(40));
+
+        // Absent stays absent — the fix must not invent values a client never sent, since
+        // `top_p: Some(1.0)` and `None` mean the same thing downstream only by accident.
+        let bare: AnthropicReq = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+        }))
+        .unwrap();
+        assert_eq!(bare.top_p, None);
+        assert_eq!(bare.top_k, None);
+    }
 }
