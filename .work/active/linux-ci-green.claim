@@ -1,0 +1,6 @@
+feature/linux-ci-green 2026-08-14T23:24:15Z
+agent: nadia-ucc
+heartbeat: 2026-08-14T23:24:15Z
+status: not-started
+done-so-far:
+next: three rozum-meeting failures the nadia fix un-masked (cargo stops at the first failing binary): socket inode reuse on Linux + two sandbox_tools
