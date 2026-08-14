@@ -59,6 +59,9 @@ pub(crate) struct RespReq {
     /// while the same capability worked on `/v1/chat/completions` via `response_format`.
     #[serde(default)]
     pub(crate) text: Value,
+    /// The same vLLM/TGI extension the Chat dialect accepts, and for the same reason `top_k` is
+    /// already here (BUG-036). Costs batching — see `OaiChatReq::repetition_penalty`.
+    pub(crate) repetition_penalty: Option<f32>,
 }
 
 /// The `effort` out of an OpenAI Responses `reasoning` object, lower-cased + validated.

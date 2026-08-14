@@ -622,6 +622,7 @@ impl WireDialect for OaiWire {
                 // function's comment has always claimed. Until BUG-032 no endpoint parsed one, so
                 // the branch was unreachable and the comment described nothing.
                 seed: self.req.seed,
+                repeat_penalty: self.req.repetition_penalty,
                 response_schema: parse_response_format(&self.req.response_format),
                 ..Default::default()
             },
@@ -769,6 +770,7 @@ impl WireDialect for RespWire {
                 // `text.format`, the Responses spelling of what Chat calls `response_format`
                 // (BUG-034). `{"type":"text"}` — which is what a client says when it wants plain
                 // prose — parses to `None`, so the default stays UNCONSTRAINED.
+                repeat_penalty: self.req.repetition_penalty,
                 response_schema: parse_text_format(&self.req.text),
                 ..Default::default()
             },

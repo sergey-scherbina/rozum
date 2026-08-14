@@ -47,6 +47,14 @@ pub(crate) struct OaiChatReq {
     /// streaming at all.
     #[serde(default)]
     pub(crate) stream_options: Option<StreamOptions>,
+    /// Not an OpenAI parameter — the vLLM/TGI extension, accepted for the same reason `top_k`
+    /// already is: it is what OpenAI-compatible local servers speak. Until BUG-036 `SamplingParams`
+    /// had the field and the MLX sampler honoured it, with no way for any client to ask.
+    ///
+    /// **It costs batching.** A job with a penalty is decoded on the serial path (the penalty is
+    /// per-sequence over recent tokens), so this is a real throughput trade the client is making,
+    /// not a free knob.
+    pub(crate) repetition_penalty: Option<f32>,
 }
 
 #[derive(Deserialize, Default)]

@@ -74,12 +74,13 @@ fn summarize(req: &ChatRequest) -> String {
     // printed every sampling knob except the single field no dialect was filling (BUG-032). A
     // golden can only catch what it prints.
     out.push_str(&format!(
-        "  sampling: temperature={:?} top_p={:?} top_k={:?} max_tokens={:?} seed={:?} schema={} reasoning={:?}\n",
+        "  sampling: temperature={:?} top_p={:?} top_k={:?} max_tokens={:?} seed={:?} repeat={:?} schema={} reasoning={:?}\n",
         s.temperature,
         s.top_p,
         s.top_k,
         s.max_tokens,
         s.seed,
+        s.repeat_penalty,
         s.response_schema.is_some(),
         s.reasoning_effort,
     ));
@@ -197,6 +198,7 @@ async fn render_all() -> String {
             // `seed` for the same reason `top_p`/`top_k` are on the Anthropic case: the golden's
             // job is to show what a client asking for a knob actually gets.
             "temperature": 0.3, "top_p": 0.9, "top_k": 40, "max_tokens": 64, "seed": 4242,
+            "repetition_penalty": 1.1,
             "stream": stream,
         }))
         .unwrap();
