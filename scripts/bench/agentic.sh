@@ -53,6 +53,73 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 cd "$repo"
 
+# ── classification, defined FIRST so it can be tested without a benchmark ─────────────────────
+#
+# Everything from `set -uo pipefail` to here is inert. `classify_rc` is defined next, and the
+# SOURCE GUARD below it stops a `source scripts/bench/agentic.sh` from going any further — the
+# configuration that follows exits when there is no rozum binary or no agent CLI on PATH, and the
+# run itself starts at the bottom of the file. `scripts/bench/test-classify-rc.sh` relies on this:
+# it sources this file and calls `classify_rc` against temp directories, so the rule is EXECUTED by
+# a test rather than asserted in a comment. It had been asserted for a year and never once run.
+
+# Structured exit codes (agentic-rc-structured):
+#   0   = verify PASS
+#   2   = infra failure (gateway crash / clients_gone — rc=2 from rozum launch)
+#   10  = verify FAIL — agent ran to completion but task not solved (capability miss)
+#   11  = verify SKIP — no project files written (delivery failure: agent never wrote code)
+#   12  = verify SKIP — manifest present, no `src/*.rs` (PARTIAL delivery: cargo has no target)
+#   124 = timeout (RUN_TIMEOUT fired)
+#   other = agent error (non-zero, non-infra: tool error, segfault, etc.)
+#
+# WHY 12 EXISTS. rc=11 asked one question — "is `Cargo.toml` there" — so a cell that wrote the
+# MANIFEST and lost the SOURCE fell through to rc=10, and every entry on the boards reads rc=10 as
+# "the model wrote wrong code, not our problem". That reading is unsafe for exactly the delivery
+# question rc=11 was added to answer: an agent that creates a manifest and stops has delivered
+# nothing to judge, and `cargo` says so in its own words ("no targets specified in the manifest").
+# Measured 2026-08-09 on rep 2 of the rpn run: verify said `FAIL no src/*.rs`, `Cargo.toml` present,
+# rc=10. It really was model-side that time, but the rc could not say so — the gateway log had to be
+# cross-checked to find out, which is the cost this removes.
+#
+# `agentic_triage.py` has always separated these two: `missing_cargo_toml` vs `missing_src_rs`, both
+# under `missing_project_files`. The rc is what collapsed them, so this is the exit code catching up
+# to a distinction the triage already makes — not a new theory about the runs.
+#
+# NOT a widening of rc=11 to "no src/*.rs": `greet` writes no files at all by design, and the seeded
+# tasks (`fix`, `debug`, `multibug`) START with both, so for them rc=12 means the agent DELETED the
+# source it was given — also worth seeing, and also not a capability miss.
+#
+# It also catches the WRONG-PLACE shape — `main.rs` at the workdir root with no `src/` — which the
+# triage calls `wrong_entrypoint` and which is delivery, not reasoning, by the same argument. The
+# test is deliberately "what cargo can build", not "did any bytes get written": source in a place
+# cargo does not look is not delivered.
+#
+# A FUNCTION, and not the inline block it used to be, so the classification can be tested without a
+# model and without a gateway: `scripts/bench/test-classify-rc.sh` drives all of it from temp dirs.
+# The rule this encodes had been asserted on the boards for a year and never once executed.
+classify_rc() { # $1=task $2=workdir $3=timed_out(0|1) $4=raw agent rc $5=verify pass(0|1)
+  local task="$1" work="$2" tmo="$3" raw_rc="$4" pass="$5"
+  local files_written=1 partial_delivery=0
+  # Call this AFTER verify_task: it hoists a single subdirectory project up into the workdir, and a
+  # correct-but-nested delivery read before that hoist counts as no delivery at all.
+  if [ "$task" != greet ]; then
+    if   [ ! -f "$work/Cargo.toml" ];           then files_written=0
+    elif ! ls "$work"/src/*.rs >/dev/null 2>&1; then partial_delivery=1
+    fi
+  fi
+  if   [ "$tmo"    = 1 ];            then echo 124
+  elif [ "$raw_rc" = 2 ];            then echo 2
+  elif [ "$pass"   = 1 ];            then echo 0
+  elif [ "$raw_rc" != 0 ];           then echo "$raw_rc"   # non-zero agent exit, not gateway crash
+  elif [ "$files_written" = 0 ];     then echo 11          # agent ran but wrote no project files
+  elif [ "$partial_delivery" = 1 ];  then echo 12          # manifest only — nothing for cargo to build
+  else                                    echo 10          # verify FAIL on a clean agent exit
+  fi
+}
+
+# Sourced rather than executed: helpers are defined, nothing runs. Must stay ABOVE the config
+# block, which calls `exit 1` when its preconditions are missing.
+(return 0 2>/dev/null) && return 0
+
 RUN_TIMEOUT="${RUN_TIMEOUT:-600}"
 # QW1: the codex/opencode drivers reload/parse more per turn than claude, and big/MoE/pipeline models
 # are slow to load+serve — so a slow-but-CORRECT cell reads as a rc124 false negative under a tight
@@ -342,6 +409,7 @@ write_agentic_meta() { # $1=workdir $2=agent $3=model $4=task $5=pass $6=timeout
     printf 'repairs=%s\n' "$8"
   } >"$1/agentic.meta"
 }
+
 
 verify_task() { # $1=task  $2=workdir  $3=agent_log — echoes detail, returns 0=pass
   local t="$1" w="$2" log="$3" fail=0
@@ -982,24 +1050,11 @@ for spec in "${MODELS[@]}"; do
         tools=$(grep -o '"type":"tool_use"' "$alog" 2>/dev/null | wc -l | tr -dc '0-9'); tools=${tools:-0}
       fi
 
-      # Structured exit codes (agentic-rc-structured):
-      #   0   = verify PASS
-      #   2   = infra failure (gateway crash / clients_gone — rc=2 from rozum launch)
-      #   10  = verify FAIL — agent ran to completion but task not solved (capability miss)
-      #   11  = verify SKIP — no project files written (delivery failure: agent never wrote code)
-      #   124 = timeout (RUN_TIMEOUT fired)
-      #   other = agent error (non-zero, non-infra: tool error, segfault, etc.)
+      # The classification lives in `classify_rc` (defined above, with the reasoning and the
+      # exit-code table). Called HERE, after the verify loop, because verify_task hoists a nested
+      # project up into the workdir and the codes are about what cargo can build afterwards.
       raw_rc=$rc
-      # rc=11 check: greet uses the agent log (no files needed); all other tasks require Cargo.toml
-      files_written=1
-      [ "$task" != greet ] && [ ! -f "$work/Cargo.toml" ] && files_written=0
-      if   [ "$tmo"    = 1 ]; then rc=124
-      elif [ "$raw_rc" = 2 ]; then rc=2
-      elif [ "$pass"   = 1 ]; then rc=0
-      elif [ "$raw_rc" != 0 ]; then rc=$raw_rc  # non-zero agent exit, not gateway crash
-      elif [ "$files_written" = 0 ]; then rc=11  # agent ran but wrote no project files
-      else                            rc=10       # verify FAIL on a clean agent exit
-      fi
+      rc="$(classify_rc "$task" "$work" "$tmo" "$raw_rc" "$pass")"
 
       [ "$tmo" = 1 ] && tflag=" (RUN_TIMEOUT)" || tflag=""
       rflag=""; [ "$repairs" -gt 0 ] && rflag=" repairs=$repairs"

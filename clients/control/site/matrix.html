@@ -317,7 +317,8 @@ STRINGS.en = {
   task_rpn_type:'Algorithm', task_rpn_desc:'Implement a reverse-polish notation calculator. An algorithmic task for precise code generation.',
   tab_metrics:'Results', tab_dialog:'Dialog', tab_log:'Raw log',
   rc_0:'0 (pass)', rc_2:'2 ⚡ infra (gateway crash)', rc_10:'10 ✗ task (capability miss)',
-  rc_11:'11 ∅ skip (no files written)', rc_124:'124 ⏱ timeout',
+  rc_11:'11 ∅ skip (no files written)', rc_12:'12 ◐ partial (manifest, no src)',
+  rc_124:'124 ⏱ timeout',
   no_prompt:'(prompt not available)', expected:'✓ expected:',
   no_log_missing:'Log directory exists but agent.log not found.',
   no_log_general:'Agent log not available — only UCC-triggered runs (with KEEP=1) save logs.',
@@ -360,7 +361,8 @@ STRINGS.ru = {
   task_rpn_type:'Алгоритм', task_rpn_desc:'Реализовать калькулятор с обратной польской нотацией. Алгоритмическая задача для точной кодогенерации.',
   tab_metrics:'Результаты', tab_dialog:'Диалог', tab_log:'Сырой лог',
   rc_2:'2 ⚡ инфра (падение шлюза)', rc_10:'10 ✗ задача (модель не справилась)',
-  rc_11:'11 ∅ skip (файлы не созданы)', rc_124:'124 ⏱ timeout',
+  rc_11:'11 ∅ skip (файлы не созданы)', rc_12:'12 ◐ частично (манифест без src)',
+  rc_124:'124 ⏱ timeout',
   no_prompt:'(подсказка недоступна)', expected:'✓ ожидается:',
   no_log_missing:'Директория логов есть, но agent.log не найден.',
   no_log_general:'Лог агента недоступен — только запуски через UCC (с KEEP=1) сохраняют логи.',
@@ -403,7 +405,7 @@ STRINGS.uk = {
   task_rpn_type:'Алгоритм', task_rpn_desc:'Реалізувати калькулятор з оберненим польським записом. Алгоритмічне завдання для точної кодогенерації.',
   tab_metrics:'Результати', tab_dialog:'Діалог', tab_log:'Сирий лог',
   rc_2:'2 ⚡ інфра (падіння шлюзу)', rc_10:'10 ✗ завдання (модель не впоралась)',
-  rc_11:'11 ∅ skip (файли не створені)',
+  rc_11:'11 ∅ skip (файли не створені)', rc_12:'12 ◐ частково (маніфест без src)',
   no_prompt:'(підказка недоступна)', expected:'✓ очікується:',
   no_log_missing:'Директорія логів є, але agent.log не знайдено.',
   no_log_general:'Лог агента недоступний — тільки запуски через UCC (з KEEP=1) зберігають логи.',
@@ -602,15 +604,20 @@ function renderResults(last) {
         if (!g) return '<td class="cell-empty">—</td>';
         const n = g.rows.length;
         const last = g.rows[n - 1];
-        // Structured rc codes (agentic-rc-structured): 0=pass, 2=infra, 10=capability miss, 124=timeout
+        // Structured rc codes (agentic-rc-structured): 0=pass, 2=infra, 10=capability miss,
+        // 11=nothing delivered, 12=manifest without src (partial delivery), 124=timeout.
+        // 12 gets its OWN glyph rather than falling through to ✗: ✗ is what a reader takes as "the
+        // model wrote wrong code", and a cell with no build target has no code to be wrong.
         const rcN = typeof last.rc === 'number' ? last.rc : parseInt(last.rc, 10);
         const isInfra = g.infraCount > 0 && g.passCount === 0;
         const isCap   = !isInfra && g.passCount === 0 && rcN === 10;
         const isSkip  = !isInfra && g.passCount === 0 && rcN === 11;
+        const isPartial = !isInfra && g.passCount === 0 && rcN === 12;
         const isTimeout = g.timeoutCount > 0 && g.passCount === 0;
         const icon = isTimeout ? '<span class="cell-timeout">⏱</span>'
                     : isInfra ? '<span class="cell-fail" title="infra failure (gateway)">⚡</span>'
                     : isSkip  ? '<span class="cell-fail" title="no files written" style="opacity:.6">∅</span>'
+                    : isPartial ? '<span class="cell-fail" title="manifest written but no src/*.rs — cargo has no build target" style="opacity:.6">◐</span>'
                     : g.passCount === n ? '<span class="cell-pass">✓</span>'
                     : g.passCount > 0 ? `<span class="cell-pass" style="opacity:.65">${g.passCount}/${n}</span>`
                     : '<span class="cell-fail">✗</span>';
@@ -618,6 +625,7 @@ function renderResults(last) {
         const rcLabel = isInfra ? `<div class="cell-rc" style="color:#f85149">${t('cell_infra')}</div>`
                       : isCap  ? `<div class="cell-rc" style="color:#8b949e">${t('cell_task')}</div>`
                       : isSkip  ? `<div class="cell-rc" style="color:#8b949e">skip</div>`
+                      : isPartial ? `<div class="cell-rc" style="color:#8b949e">partial</div>`
                       : n > 1 && g.passCount < n ? `<div class="cell-rc">${g.passCount}/${n}</div>` : '';
         const onclick = `onclick="openCell('${escHtml(last.stamp)}','${escHtml(agent)}','${escHtml(model)}','${escHtml(task)}')"`;
         return `<td ${onclick} style="cursor:pointer" title="click for details">${icon}${secs}${rcLabel}</td>`;
@@ -931,7 +939,7 @@ function renderMetrics(d) {
     { k: 'rc', v: (() => {
         const rcN = typeof c.rc === 'number' ? c.rc : parseInt(c.rc, 10);
         if (!rcN && rcN !== 0) return '—';
-        const rcLabels = { 0: t('rc_0'), 2: t('rc_2'), 10: t('rc_10'), 11: t('rc_11'), 124: t('rc_124') };
+        const rcLabels = { 0: t('rc_0'), 2: t('rc_2'), 10: t('rc_10'), 11: t('rc_11'), 12: t('rc_12'), 124: t('rc_124') };
         return rcLabels[rcN] ?? String(rcN);
       })() },
     { k: 'timeout',    v: c.timeout == 1 ? '⏱ yes' : (c.timeout !== undefined ? 'no' : '—') },

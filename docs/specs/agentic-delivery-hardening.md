@@ -18,6 +18,23 @@ the delivery-shaped cases.
   - `--json` writes a JSON array with one object per run.
   - `--csv` writes CSV with stable columns.
   - `--root <repo>` optionally sets the repo root for relative result paths.
+- `scripts/bench/agentic.sh` — **structured exit codes**, one per cell, written to `agentic.meta`
+  and the `rc` column of `per-run.csv`. This table is the contract; every reader below quotes it.
+
+  | rc | meaning | is it model-quality evidence? |
+  |---|---|---|
+  | `0` | verify PASS | yes |
+  | `2` | infra failure (gateway crash / `clients_gone`) | no |
+  | `10` | verify FAIL — the agent delivered a complete project and it is wrong | **yes** — capability miss |
+  | `11` | no project files written at all | no — delivery failure |
+  | `12` | manifest present, no `src/*.rs` — cargo has no build target | no — PARTIAL delivery |
+  | `124` | `RUN_TIMEOUT` fired | no |
+  | other | agent error (tool error, signal, …), passed through | no |
+
+  `11` and `12` are counted separately, never summed: "wrote nothing" and "wrote half" point at
+  different fixes. `greet` is exempt from the file checks — it writes no files by design. The codes
+  are decided by `classify_rc`, which is a function precisely so `scripts/bench/test-classify-rc.sh`
+  can execute the rule without a model, a gateway or ten minutes.
 - `scripts/bench/agentic.sh`
   - keeps its current benchmark contract.
   - writes `agentic.meta` and `verify.out` into each workdir so local failure triage has task/result
@@ -48,6 +65,18 @@ the delivery-shaped cases.
 - [x] A workdir that compiles but fails the task's verifier with wrong output is classified separately
       from source/setup delivery, so it remains model-quality evidence unless another delivery signal is
       present.
+- [x] The EXIT CODE makes the same distinction the triage does. A cell with `Cargo.toml` and no
+      `src/*.rs` reports `rc=12`, distinguishably from `rc=11` (nothing written) and from `rc=10`
+      (a complete project that is wrong) — the collapse that let partial delivery be read as a
+      capability miss on every board entry quoting rc=10. Root-level `.rs` with no `src/` counts as
+      partial too: source cargo cannot see is not delivered.
+- [x] The rule is EXECUTED, not asserted: `scripts/bench/test-classify-rc.sh` drives `classify_rc`
+      over fifteen workdir shapes — including each precedence pair (timeout over partial, infra over
+      pass, pass over partial) and both `greet` cases — in under a second, with no model and no
+      network.
+- [x] Every reader of the code agrees: `summarize_matrix.py` and its byte-identical ScalaScript twin
+      `summarize_matrix.ssc` both bucket `partial`, and the matrix console gives `12` its own glyph
+      (`◐`) and label in all three languages rather than letting it render as `✗`.
 - [x] `agentic_triage.py --json` and `--csv` produce stable machine-readable output.
 - [x] `agentic_triage.py --brief` produces a short human-readable summary suitable for failed bench
       cells.

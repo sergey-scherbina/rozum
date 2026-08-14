@@ -52,6 +52,12 @@ jobs:
       # rather than on a backlog.
       - name: Test every workspace binary (shipped default features)
         run: cargo test --workspace --bins
+      # The bench harness is shell, so no cargo gate ever saw it — and its structured exit codes are
+      # the vocabulary every board entry argues in ("0 rc11", "rc=10 so it is the model"). This runs
+      # the classification against real directories, and asserts that the console and both
+      # summarizers know every code it can emit. Under a second; needs no model and no gateway.
+      - name: Test the bench exit-code classification
+        run: bash scripts/bench/test-classify-rc.sh
 
   linux-core:
     name: linux — portable core (no native backends)
